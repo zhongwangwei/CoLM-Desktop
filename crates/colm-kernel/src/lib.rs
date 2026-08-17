@@ -21,3 +21,4 @@ pub mod overrides;
 pub mod run;
 
 pub use manifest::{sha256_hex, Kernel, Manifest, PROGRAMS};
+pub use overrides::{extract as extract_overrides, Kind, Override};
