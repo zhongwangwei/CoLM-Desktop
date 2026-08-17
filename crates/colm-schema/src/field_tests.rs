@@ -114,3 +114,105 @@ fn no_two_fields_differ_only_in_case() {
     }
     assert!(clashes.is_empty(), "names collide once folded: {clashes:?}");
 }
+
+#[test]
+fn the_single_point_section_is_in_the_table() {
+    // MOD_Namelist.F90 的 Part 3 用 SITE_ / USE_SITE_ 前缀，而生成器原先
+    // 按 `DEF_` 白名单收字段，于是把整个单点段滤掉了 —— 在一个专做单点的
+    // 项目里。这 21 个是那一段的全部。
+    let want = [
+        "SITE_fsitedata",
+        "SITE_lon_location",
+        "SITE_lat_location",
+        "SITE_landtype",
+        "USE_SITE_landtype",
+        "USE_SITE_pctpfts",
+        "USE_SITE_pctcrop",
+        "USE_SITE_htop",
+        "USE_SITE_LAI",
+        "USE_SITE_lakedepth",
+        "USE_SITE_soilreflectance",
+        "USE_SITE_soilparameters",
+        "USE_SITE_dbedrock",
+        "USE_SITE_topography",
+        "USE_SITE_urban_geometry",
+        "USE_SITE_urban_ecology",
+        "USE_SITE_urban_radiation",
+        "USE_SITE_urban_thermal",
+        "USE_SITE_urban_human",
+        "USE_SITE_HistWriteBack",
+        "USE_SITE_ForcingReadAhead",
+    ];
+    for n in want {
+        let f = find(n).unwrap_or_else(|| panic!("{n} missing from the schema"));
+        assert_eq!(f.group, Some("nl_colm"), "{n}");
+    }
+}
+
+#[test]
+fn the_three_aggregation_switches_are_in_the_table() {
+    // 与单点段一样，只因为不叫 DEF_ 就被滤掉了。
+    for n in [
+        "USE_srfdata_from_3D_gridded_data",
+        "USE_srfdata_from_larger_region",
+        "USE_zip_for_aggregation",
+    ] {
+        assert_eq!(find(n).and_then(|f| f.group), Some("nl_colm"), "{n}");
+    }
+}
+
+#[test]
+fn a_field_nobody_can_set_is_marked_as_such() {
+    // 这 6 个有声明、有默认值，但不在任何 namelist 组里。
+    // DEF_dir_history 更进一步：MOD_Namelist.F90:1406 用 DEF_dir_output 与
+    // DEF_CASE_NAME 无条件把它覆盖掉。GUI 给这种字段一个输入框就是在骗人。
+    for n in [
+        "DEF_dir_history",
+        "DEF_dir_landdata",
+        "DEF_dir_restart",
+        "DEF_USE_IGBP",
+        "DEF_USE_USGS",
+        "DEF_Wetland_finundation_scheme",
+    ] {
+        let f = find(n).unwrap_or_else(|| panic!("{n} should still be in the table"));
+        assert_eq!(f.group, None, "{n} is not settable from any namelist");
+    }
+}
+
+#[test]
+fn members_inherit_the_group_of_their_container() {
+    // 这条决定 GUI 把一个字段写进哪个文件：强迫场字段进 nl_colm_forcing，
+    // 输出变量开关进 nl_colm_history，其余进主 namelist。
+    assert_eq!(
+        find("DEF_forcing%dataset").unwrap().group,
+        Some("nl_colm_forcing")
+    );
+    assert_eq!(
+        find("DEF_hist_vars%xy_us").unwrap().group,
+        Some("nl_colm_history")
+    );
+    assert_eq!(
+        find("DEF_simulation_time%start_year").unwrap().group,
+        Some("nl_colm")
+    );
+    assert_eq!(find("DEF_domain%edges").unwrap().group, Some("nl_colm"));
+}
+
+#[test]
+fn the_macro_guarded_member_is_still_a_field() {
+    // DEF_file_GIEMS 在 namelist 语句里被 #if (defined TRACER) && (defined BGC)
+    // 包着。它是真字段，只是仅在那个预设下可设 —— 不能因为解析器看见
+    // 一行 `#if` 就把它丢掉。
+    assert_eq!(
+        find("DEF_file_GIEMS").and_then(|f| f.group),
+        Some("nl_colm")
+    );
+}
+
+#[test]
+fn a_use_statement_is_not_a_field() {
+    // `USE, intrinsic :: ieee_arithmetic` 会被声明扫描器当成一个声明。
+    // 原先靠 `DEF_` 白名单顺带挡住；改用 namelist 判据之后，它自然落选 ——
+    // 因为它不在任何 namelist 组里。这条守住那个「顺带」不再是巧合。
+    assert!(find("ieee_arithmetic").is_none());
+}

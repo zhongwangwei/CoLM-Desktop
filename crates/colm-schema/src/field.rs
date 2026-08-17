@@ -37,6 +37,19 @@ pub struct Field {
     pub arity: Option<usize>,
     /// 所属派生类型名；顶层字段为 `None`
     pub owner: Option<&'static str>,
+    /// 这个字段可以从**哪个 namelist 组**设置。
+    ///
+    /// `None` 意味着它在 `MOD_Namelist.F90` 里有声明、有默认值，但不出现在
+    /// 任何 `namelist /.../` 语句里 —— 也就是**用户改不了它**。实测 6 个：
+    /// `DEF_dir_history` / `DEF_dir_landdata` / `DEF_dir_restart` 由
+    /// `DEF_dir_output` 派生（`MOD_Namelist.F90:1406` 无条件覆盖），
+    /// `DEF_USE_IGBP` / `DEF_USE_USGS` / `DEF_Wetland_finundation_scheme` 由宏决定。
+    /// GUI 应当把它们显示成只读的派生值，而不是给一个改了没用的输入框。
+    ///
+    /// 派生类型成员继承容器所在的组，所以 `DEF_forcing%dataset` 是
+    /// `nl_colm_forcing`、`DEF_hist_vars%*` 是 `nl_colm_history`。
+    /// **这正是 GUI 需要知道的「这个字段该写进哪个文件」。**
+    pub group: Option<&'static str>,
     /// `MOD_Namelist.F90` 中的行号，便于回查
     pub line: u32,
 }
