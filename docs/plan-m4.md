@@ -1176,6 +1176,10 @@ fn parse_units_start(u: &str) -> Result<Stamp> {
         second: num(32, 33)?,
     })
 }
+
+#[cfg(test)]
+#[path = "met_tests.rs"]
+mod met_tests;
 ```
 
 - [ ] **Step 2: 写 `met_tests.rs`**
@@ -1222,7 +1226,11 @@ fn the_three_heights_are_read_separately() {
         "height_v was {}",
         m.height_v
     );
-    assert!((m.height_t - 1.5).abs() < 1e-4, "height_t was {}", m.height_t);
+    assert!(
+        (m.height_t - 1.5).abs() < 1e-4,
+        "height_t was {}",
+        m.height_t
+    );
     assert_eq!(m.height_t, m.height_q);
     assert_ne!(m.height_v, m.height_t);
 }
