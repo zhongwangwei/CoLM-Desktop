@@ -89,3 +89,36 @@ fn every_site_fills_and_lands_inside_the_usda_triangle() {
     );
     println!("texture classes across sites: {classes:?}");
 }
+
+#[test]
+fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
+    // 实测：90 个站点里 25 个一致。这条不是要求它们一致 —— 它们出自不同的
+    // 土壤产品，本来就不该一致 —— 而是钉住分歧的量级。若某天一致率跳到
+    // 90% 或掉到 5%，说明有一侧变了，那值得有人看一眼。
+    let raw = rawdata();
+    if !raw.join("soil/soiltexture_0cm-60cm_mean.nc").exists() {
+        panic!(
+            "texture raster missing at {}; set COLM_RAWDATA",
+            raw.display()
+        );
+    }
+    let dir = std::env::temp_dir().join("colm-srfdata-texture-agreement");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let mut agree = 0usize;
+    let mut total = 0usize;
+    for f in site_files() {
+        let name = f.file_stem().unwrap().to_string_lossy().to_string();
+        let out = dir.join(format!("{name}.nc"));
+        let r = fill(&f, &out, Some(&raw)).expect("fills");
+        total += 1;
+        if r.texture == r.classified_texture {
+            agree += 1;
+        }
+    }
+    println!("raster and classifier agree on {agree} of {total} sites");
+    assert!(
+        (15..=40).contains(&agree),
+        "agreement was {agree}/{total}; measured was 25/90, so something changed"
+    );
+}

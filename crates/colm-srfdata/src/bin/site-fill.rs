@@ -34,6 +34,13 @@ fn main() -> Result<()> {
         "soil texture: {} ({}), BVIC {} from sand {:.2}% / silt {:.2}% / clay {:.2}%",
         r.texture, r.texture_name, r.bvic, r.fine_earth.0, r.fine_earth.1, r.fine_earth.2
     );
+    if r.texture != r.classified_texture {
+        println!(
+            "note: the USDA triangle on this site's own soil would give {} ({});              the raster wins because that is what CoLM reads",
+            r.classified_texture,
+            colm_srfdata::CLASS_NAMES[(r.classified_texture - 1) as usize]
+        );
+    }
     println!("from raster : {}", r.from_raster.join(", "));
     if !r.from_default.is_empty() {
         println!(

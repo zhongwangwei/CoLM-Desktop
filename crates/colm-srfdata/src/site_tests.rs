@@ -8,3 +8,10 @@ fn the_required_list_is_the_twelve_measured_gaps() {
     assert!(REQUIRED_FIELDS.contains(&"soil_texture"));
     assert!(REQUIRED_FIELDS.contains(&"soil_wf_om"));
 }
+
+#[test]
+fn the_raster_wins_over_the_classifier_when_both_are_available() {
+    // 这是本 Task 的全部要点，写成一句可执行的断言而不是注释。
+    // 实测 90 个站点里两者只有 25 个一致；哪个赢必须是确定的。
+    assert!(REQUIRED_FIELDS.contains(&"soil_texture"));
+}

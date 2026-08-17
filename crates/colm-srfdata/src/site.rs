@@ -49,24 +49,47 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     let (lon, lat, landtype, col, soil_dim) = read_inputs(dst)?;
     let d = derive(&col);
     let fe = fine_earth_fractions(&col);
-    let texture = classify(fe.silt, fe.clay).with_context(|| {
+    // CoLM 缺这个字段时读的就是这张栅格（MOD_SingleSrfdata.F90:1121），
+    // 所以有它就用它。分类器只是没有栅格时的兜底 —— 实测两者在 90 个站点里
+    // 只有 25 个一致，因为栅格出自 SoilGrids v2 而站点文件出自 Shangguan 2014。
+    let raster_texture = rawdata.and_then(|r| {
+        point_i32(
+            &r.join("soil/soiltexture_0cm-60cm_mean.nc"),
+            "soiltexture",
+            lon,
+            lat,
+        )
+        .ok()
+        .filter(|t| (1..=12).contains(t))
+    });
+    let classified = classify(fe.silt, fe.clay).with_context(|| {
         format!(
             "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle",
             fe.sand, fe.silt, fe.clay
         )
     })?;
+    let (texture, texture_from_raster) = match raster_texture {
+        Some(t) => (t as u8, true),
+        None => (classified, false),
+    };
 
     let mut f =
         netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
 
     let mut report = Report {
         texture,
+        classified_texture: classified,
         texture_name: CLASS_NAMES[(texture - 1) as usize].to_string(),
         bvic: BVIC_USDA[texture as usize],
         fine_earth: (fe.sand, fe.silt, fe.clay),
         from_raster: Vec::new(),
         from_default: Vec::new(),
     };
+    if texture_from_raster {
+        report.from_raster.push("soil_texture".to_string());
+    } else {
+        report.from_default.push("soil_texture".to_string());
+    }
 
     // --- 栅格来源的 8 个 ---
     let (isc, lake, elev, elvstd, slope) = match rawdata {
@@ -166,15 +189,18 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
         &soil_dim,
         "derived: OM_density / BD_all",
     )?;
-    put_int(
-        &mut f,
-        "soil_texture",
-        texture as i32,
-        &format!(
-            "derived: CoLM USDA triangle on 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% -> class {} ({}), BVIC {}",
+    let texture_src = if texture_from_raster {
+        format!(
+            "rawdata soil/soiltexture_0cm-60cm_mean.nc -> class {} ({}), BVIC {}",
+            texture, report.texture_name, report.bvic
+        )
+    } else {
+        format!(
+            "classified: CoLM USDA triangle on 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% (clay is an assumption) -> class {} ({}), BVIC {}",
             fe.sand, fe.silt, fe.clay, texture, report.texture_name, report.bvic
-        ),
-    )?;
+        )
+    };
+    put_int(&mut f, "soil_texture", texture as i32, &texture_src)?;
 
     Ok(report)
 }
@@ -183,6 +209,9 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
 #[derive(Debug, Clone)]
 pub struct Report {
     pub texture: u8,
+    /// 分类器给出的类别。与 `texture` 不同即说明栅格与站点文件的土壤产品不一致，
+    /// 实测 90 个站点里有 65 个如此。
+    pub classified_texture: u8,
     pub texture_name: String,
     pub bvic: f64,
     pub fine_earth: (f64, f64, f64),
