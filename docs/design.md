@@ -804,6 +804,32 @@ GUI 场景下宁可炸也不要给出错的数。但它同样走 `CoLM_stop` →
 改动字段，返回重新校验后的规范化文本。Rust 拥有 schema，前端从不自行构造配置。
 `preserve_unexposed_project_fields`：打开旧配置再保存，不得静默丢掉当前 UI 无法渲染的字段。
 
+### 7.1 照抄 EarthMesh 的具体形态（实测其 `gui-tauri/`）
+
+**egui 已经被试过并被换掉了。** `gui-tauri/README.md` 开篇即写
+「This replaces the egui GUI, whose immediate-mode styling could not match the
+static redesign」—— 立即模式 GUI 做不出想要的排版。这是选 Tauri 的实证依据，
+不是偏好。
+
+实测到的配置，逐条照搬：
+
+| | EarthMesh 的做法 | 对 colm-desktop 的对应 |
+|---|---|---|
+| 依赖 | `tauri = "2"`（解析到 2.11.3）、`tauri-build = "2"`、`tauri-plugin-dialog = "2"`（2.7.1）、wry 0.55.1 | 同 |
+| workspace | `src-tauri/Cargo.toml` 里一个**空的 `[workspace]`**，把 GUI 挡在引擎 workspace 之外 | 同 —— `cargo test --workspace` 不该把 webkit2gtk 拖进来 |
+| 前端 | `dist/index.html` 单文件（290 KB）+ `dist/vendor/`，**无 `package.json`、无 `node_modules`、无打包器** | 同，vendor 里换成 uPlot |
+| IPC | `withGlobalTauri: true`，页面调 `window.__TAURI__.core.invoke(...)` | 同 |
+| 入口 | `main.rs` 6 行，只调 `lib::run()`；`crate-type = ["staticlib","cdylib","rlib"]` | 同 |
+| 后端组织 | `lib.rs` 88 行只做模块枢纽与 `generate_handler!`，命令按职责分 13 个模块（最大 784 行），测试在 `lib_tests.rs`（3214 行） | 同 —— 与本仓库 `#[path = "*_tests.rs"]` 的惯例一致 |
+| 权限 | `capabilities/default.json`。**自定义 `#[tauri::command]` 不需要声明权限，只有插件命令需要** | 同 |
+| 重活 | GUI 进程**不链接 netcdf/hdf5**，一律 shell out 给 sidecar CLI | 同 —— 我们的 sidecar 是 `kernels/*.x`，已由 `colm-kernel` 封装 |
+| 打包 sidecar | `bundle.externalBin` + 一个 release-only 的 `tauri.bundle.conf.json` 覆盖层 + 暂存脚本 | 同，但暂存脚本用 Rust 写（xtask），不引入 Node |
+| 运行 sidecar | 先拷成带 `$PID-$SOURCE_HASH` 的临时副本再跑 | 同 —— §6.6 那条「先暂存到临时副本」就出自这里 |
+
+两处刻意不照搬：EarthMesh 的 `make test-gui` 用 Node 解析内联 JS 做前端不变量
+检查，而本项目不引入 Node（打包与前端检查都改用 xtask）；地图那一整套
+（OpenLayers / MapLibre）与单点模型无关，我们只需要 uPlot 画时间序列。
+
 ---
 
 ## 8. 测试策略
