@@ -16,4 +16,5 @@ pub mod civil;
 pub mod met;
 pub mod render;
 
+pub use check::{check, MetSummary, REQUIRED_VARS};
 pub use civil::{civil_from_days, days_from_civil, Stamp};
