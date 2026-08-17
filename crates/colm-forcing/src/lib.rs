@@ -15,3 +15,5 @@ pub mod check;
 pub mod civil;
 pub mod met;
 pub mod render;
+
+pub use civil::{civil_from_days, days_from_civil, Stamp};
