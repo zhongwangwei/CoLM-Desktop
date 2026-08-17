@@ -16,3 +16,7 @@
 pub mod document;
 pub mod parse;
 pub mod value;
+
+pub use document::Document;
+pub use parse::parse;
+pub use value::{Path, Segment, Value};
