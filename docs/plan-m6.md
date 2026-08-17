@@ -80,38 +80,82 @@ if owner.is_none() && !decl.name.starts_with("DEF_") {
 
 | 闸门 | 位置 | waterheat 下的效果 |
 |---|---|---|
-| 1. 编译期宏 | `MOD_Hist.F90` 的 `#ifdef` | 466 个字面量 → **123** 个可写 |
-| 2. 运行时 `DEF_*` 条件 | 内联 `.and.` 2 处 + 外层 `IF (DEF_*) THEN` 21 处 | 123 → **119** |
+| 1. 编译期宏 | `MOD_Hist.F90` 的 `#ifdef` | 456 个写出点 → **123** 个可写 |
+| 2. 运行时 `DEF_*` 条件 | 内联 `.and.` + 外层 `IF (DEF_*) THEN` | 123 里有 **10** 个带条件；本次运行 6 真 4 假 |
 | 3. 变量自己的开关 | `DEF_hist_vars%X` | 默认全开，未再减 |
 
-闸门 2 拿掉的正好 4 个，逐个都对得上：
+**113（无条件）+ 6（条件成立）= 119**，与黄金文件逐个吻合。
 
-| 变量 | 运行时条件 |
-|---|---|
-| `dz_lake` | `.and. DEF_USE_Dynamic_Lake` |
-| `qcharge` | `.and. (.not. DEF_USE_VariablySaturatedFlow)` |
-| `t2m_wmo` | 外层 `IF (DEF_Output_2mWMO) THEN` |
-| `xy_hpbl` | 外层 `IF (DEF_USE_CBL_HEIGHT) THEN` |
+带运行时条件的 10 个，条件原文与本次运行的真假：
 
-`qcharge` 那条尤其值得记：CoLM 打印的 9 条覆盖消息里第一条就是
-**「`DEF_USE_VariablySaturatedFlow` 被自动设为 `.true.`」** —— 覆盖消息与
-缺失的那个变量是同一件事的两面。GUI 要能把这两头连起来说。
+| 变量 | 运行时条件 | 本次 |
+|---|---|---|
+| `qlayer` | `DEF_USE_VariablySaturatedFlow` | 真 |
+| `vegwp` | `DEF_USE_PLANTHYDRAULICS` | 真 |
+| `wetwat` | `DEF_USE_Dynamic_Wetland` | 真 |
+| `o3uptakesha` / `o3uptakesun` | `DEF_USE_OZONESTRESS` | 真 |
+| `lake_deficit` | `.not. DEF_USE_Dynamic_Lake` | 真 |
+| `dz_lake` | `DEF_USE_Dynamic_Lake` | 假 |
+| `qcharge` | `(.not.DEF_USE_VariablySaturatedFlow)` | 假 |
+| `t2m_wmo` | `DEF_Output_2mWMO` | 假 |
+| `xy_hpbl` | `DEF_USE_CBL_HEIGHT` | 假 |
 
-### 闸门 1 的静态提取已预跑，零漏报
+`qlayer` 与 `qcharge` 是同一个条件的两侧，恰好演示了这道闸门是双向的 ——
+不是「条件成立才加」，而是「条件决定写哪一个」。而那个条件正是 CoLM 打印的
+9 条覆盖消息里第一条说的事：**「`DEF_USE_VariablySaturatedFlow` 被自动设为
+`.true.`」**。覆盖消息与变量的有无是同一件事的两面，GUI 要能把这两头连起来说。
+
+### 456 而不是 466：有 10 个写出点是被注释掉的
+
+对 `MOD_Hist.F90` 直接 `grep "'f_...'"` 会得到 466 个字面量，但其中 **10 个
+整段被 `!` 注释掉**：`cwddecomp`、`cwdprod`、以及 8 个 `pd*`
+（`pdcorn` / `pdcotton` / `pdrice1` / `pdrice2` / `pdsoybean` / `pdsugarcane` /
+`pdswheat` / `pdwwheat`）。它们永远产不出来。
+
+所以提取器**必须在剥掉注释之后、并且只在 `CALL write_history_variable` 调用
+内部**取字面量。按行 grep 会让表多报 10 个变量，而多报在 GUI 里表现为
+「勾了却没有」，是最难查的一类。剥注释时要注意 `!` 可能出现在字符串里，
+判断得跳过引号内的。
+
+### 三道闸门一起提取已预跑，零漏报
 
 把 waterheat 的宏集合
 （`CoLMDEBUG,LULC_IGBP,RangeCheck,SinglePoint,extend_interception,vanGenuchten_Mualem_SOIL_MODEL`）
 作用于生成的映射：
 
 ```
-字面量总数 466, 该宏集合下预测可写 123, 实测写出 119
-预测有但没写出 (4): dz_lake qcharge t2m_wmo xy_hpbl
-写出了但没预测到 (0): []
+表 456 个；宏放行 123；其中无运行时条件 113
+
+带运行时条件的 10 个:
+  dz_lake        <- DEF_USE_Dynamic_Lake
+  lake_deficit   <- .not. DEF_USE_Dynamic_Lake
+  o3uptakesha    <- DEF_USE_OZONESTRESS
+  o3uptakesun    <- DEF_USE_OZONESTRESS
+  qcharge        <- (.not.DEF_USE_VariablySaturatedFlow)
+  qlayer         <- DEF_USE_VariablySaturatedFlow
+  t2m_wmo        <- DEF_Output_2mWMO
+  vegwp          <- DEF_USE_PLANTHYDRAULICS
+  wetwat         <- DEF_USE_Dynamic_Wetland
+  xy_hpbl        <- DEF_USE_CBL_HEIGHT
+
+无条件放行但没写出 (0): []
+写出了但无条件集里没有 (6): [lake_deficit, o3uptakesha, o3uptakesun, qlayer, vegwp, wetwat]
 ```
 
-**零漏报**是关键 —— 静态映射不会漏掉任何真实产出的变量，只会多报被运行时
-条件挡掉的。多报的方向是安全的（GUI 说「可能有」而实际没有，比反过来好），
-但那 4 个也已经定位清楚，闸门 2 一并做进去就能收敛到精确。
+最后一行不是漏报 —— 那 6 个恰是运行时条件**成立**的那些，113 + 6 = 119，
+与黄金文件逐个吻合。
+
+**零漏报**是关键：静态映射不会漏掉任何真实产出的变量。它只会在
+「宏放行但运行时条件不成立」时多报，而那 4 个已被逐一定位并连条件原文
+一起记进表里，所以 GUI 说得出「为什么没有」。
+
+其他宏集合的实测值（Task 3 的测试要断言它们）：
+
+| 宏集合 | 宏放行 | 其中无条件 |
+|---|---|---|
+| waterheat | 123 | 113 |
+| waterheat + `BGC` | 326 | 256 |
+| waterheat + `CatchLateralFlow` | 124 | 114 |
 
 ### 宏条件的文法只有 4 种
 
@@ -280,8 +324,14 @@ fn a_field_nobody_can_set_is_marked_as_such() {
 fn members_inherit_the_group_of_their_container() {
     // 这条决定 GUI 把一个字段写进哪个文件：强迫场字段进 nl_colm_forcing，
     // 输出变量开关进 nl_colm_history，其余进主 namelist。
-    assert_eq!(find("DEF_forcing%dataset").unwrap().group, Some("nl_colm_forcing"));
-    assert_eq!(find("DEF_hist_vars%xy_us").unwrap().group, Some("nl_colm_history"));
+    assert_eq!(
+        find("DEF_forcing%dataset").unwrap().group,
+        Some("nl_colm_forcing")
+    );
+    assert_eq!(
+        find("DEF_hist_vars%xy_us").unwrap().group,
+        Some("nl_colm_history")
+    );
     assert_eq!(
         find("DEF_simulation_time%start_year").unwrap().group,
         Some("nl_colm")
@@ -294,7 +344,10 @@ fn the_macro_guarded_member_is_still_a_field() {
     // DEF_file_GIEMS 在 namelist 语句里被 #if (defined TRACER) && (defined BGC)
     // 包着。它是真字段，只是仅在那个预设下可设 —— 不能因为解析器看见
     // 一行 `#if` 就把它丢掉。
-    assert_eq!(find("DEF_file_GIEMS").and_then(|f| f.group), Some("nl_colm"));
+    assert_eq!(
+        find("DEF_file_GIEMS").and_then(|f| f.group),
+        Some("nl_colm")
+    );
 }
 
 #[test]
@@ -368,7 +421,9 @@ pub fn groups(text: &str) -> BTreeMap<String, String> {
         let Some(rest) = low.strip_prefix("namelist /") else {
             continue;
         };
-        let Some(slash) = rest.find('/') else { continue };
+        let Some(slash) = rest.find('/') else {
+            continue;
+        };
         let group = rest[..slash].trim().to_string();
 
         let mut body = trimmed["namelist /".len() + slash + 1..].to_string();
@@ -580,16 +635,16 @@ workspace = true
 //! `history_var_type` 有 482 个开关、343 个默认为真，而 waterheat 预设的一次
 //! 真实运行只写出 119 个。差额不是 bug，是三道闸门：
 //!
-//! 1. **编译期宏** —— `MOD_Hist.F90` 里的 `#ifdef`。466 个字面量在 waterheat
+//! 1. **编译期宏** —— `MOD_Hist.F90` 里的 `#ifdef`。456 个写出点在 waterheat
 //!    下剩 123 个。这道闸门由本 crate 回答，输入是内核清单里的 `macros`。
-//! 2. **运行时 `DEF_*` 条件** —— 内联 `.and.` 2 处、外层 `IF (DEF_*) THEN` 21 处。
-//!    123 → 119。本 crate 把条件原样记下来，由调用方结合算例配置求值。
+//! 2. **运行时 `DEF_*` 条件** —— 内联 `.and.` 与外层 `IF (DEF_*) THEN`。123 个里
+//!    有 10 个带条件，本次运行 6 真 4 假，于是 113 + 6 = 119。本 crate 把条件
+//!    原样记下来，由调用方结合算例配置求值。
 //! 3. **变量自己的开关** `DEF_hist_vars%X` —— 在 `colm-schema` 里，默认全开。
 //!
-//! 闸门 2 拿掉的 4 个里，`qcharge` 需要 `.not. DEF_USE_VariablySaturatedFlow`,
-//! 而 CoLM 打印的第一条覆盖消息正是「`DEF_USE_VariablySaturatedFlow` 被自动
-//! 设为 `.true.`」—— **覆盖消息与缺失的变量是同一件事的两面**，GUI 该把它们
-//! 连起来说。
+//! `qlayer` 与 `qcharge` 挂在同一个条件的两侧：CoLM 打印的第一条覆盖消息正是
+//! 「`DEF_USE_VariablySaturatedFlow` 被自动设为 `.true.`」，于是有了 `qlayer`、
+//! 没了 `qcharge`。**覆盖消息与变量的有无是同一件事的两面**，GUI 该连起来说。
 //!
 //! 表是生成的（`cargo run -p xtask -- gen-histmap`），产物入库，
 //! `tests/drift.rs` 守住它不与上游脱节。
@@ -646,7 +701,9 @@ pub fn all() -> &'static [Var] {
 /// 给定宏集合，哪些变量**过得了第一道闸门**。
 ///
 /// 注意这是「可能产出」，不是「一定产出」：运行时条件（闸门 2）与变量开关
-/// （闸门 3）还会再减。实测 waterheat 下本函数返回 123，实际写出 119。
+/// （闸门 3）还会再减。实测 waterheat 下本函数返回 123，其中 10 个带运行时
+/// 条件（`unconditional` 给出剩下的 113 个），实际写出 119。
+///
 /// 多报的方向是安全的 —— GUI 说「这个内核可能产出 X」而实际没有，
 /// 比反过来漏掉一个真实产出要好。
 pub fn writable(macros: &BTreeSet<&str>) -> BTreeSet<&'static str> {
@@ -691,34 +748,66 @@ fn waterheat() -> BTreeSet<&'static str> {
 }
 
 #[test]
-fn the_table_covers_every_write_site() {
-    // MOD_Hist.F90 里 466 个不同的 'f_*' 字面量。
-    assert_eq!(all().len(), 466);
+fn the_table_covers_every_live_write_site() {
+    // 456，不是直接 grep 得到的 466 —— 后者含 10 个整段被注释掉的写出点
+    // （cwddecomp / cwdprod / 8 个 pd*）。它们永远产不出来，进表就是多报。
+    assert_eq!(all().len(), 456);
+    for dead in ["cwddecomp", "cwdprod", "pdcorn", "pdwwheat"] {
+        assert!(
+            all().iter().all(|v| v.name != dead),
+            "{dead} is commented out in MOD_Hist.F90 and must not be in the table"
+        );
+    }
 }
 
 #[test]
 fn the_waterheat_preset_can_write_one_hundred_and_twenty_three() {
-    // 第一道闸门（编译期宏）之后剩 123 个。实际写出 119，
-    // 差的 4 个卡在运行时条件上，见下一条测试。
+    // 第一道闸门（编译期宏）之后剩 123 个，其中 113 个没有运行时条件。
+    // 实际写出 119 = 113 + 那 10 个里条件成立的 6 个。
     assert_eq!(writable(&waterheat()).len(), 123);
+    assert_eq!(unconditional(&waterheat()).len(), 113);
 }
 
 #[test]
-fn the_four_runtime_gated_variables_are_named_and_explained() {
-    // 这 4 个过得了宏这一关却没被写出来。每一个的条件都记在表里，
+fn every_runtime_gated_variable_carries_its_condition() {
+    // 10 个过得了宏这一关但还挂着运行时条件。每个的条件原文都记在表里，
     // 所以 GUI 能说清「为什么你勾了它却没有」，而不是只说「没有」。
     let w = writable(&waterheat());
     let u = unconditional(&waterheat());
     let gated: Vec<&str> = w.difference(&u).cloned().collect();
-    assert_eq!(gated, ["dz_lake", "qcharge", "t2m_wmo", "xy_hpbl"]);
+    assert_eq!(
+        gated,
+        [
+            "dz_lake",
+            "lake_deficit",
+            "o3uptakesha",
+            "o3uptakesun",
+            "qcharge",
+            "qlayer",
+            "t2m_wmo",
+            "vegwp",
+            "wetwat",
+            "xy_hpbl",
+        ]
+    );
 
     let cond = |n: &str| all().iter().find(|v| v.name == n).unwrap().runtime.unwrap();
-    assert!(cond("dz_lake").contains("DEF_USE_Dynamic_Lake"));
-    // 这一条与 CoLM 的第一条覆盖消息是同一件事：
+    // qlayer 与 qcharge 挂在同一个条件的两侧 —— 这道闸门是双向的，
+    // 不是「条件成立才加」，而是「条件决定写哪一个」。
+    // 而那个条件正是 CoLM 打印的第一条覆盖消息说的事：
     // `DEF_USE_VariablySaturatedFlow is automaticlly set to .true.`
+    assert!(cond("qlayer").contains("DEF_USE_VariablySaturatedFlow"));
     assert!(cond("qcharge").contains("DEF_USE_VariablySaturatedFlow"));
+    assert!(cond("qcharge").contains(".not."));
+    assert!(cond("dz_lake").contains("DEF_USE_Dynamic_Lake"));
+    assert!(cond("lake_deficit").contains(".not."));
     assert!(cond("t2m_wmo").contains("DEF_Output_2mWMO"));
     assert!(cond("xy_hpbl").contains("DEF_USE_CBL_HEIGHT"));
+    assert!(cond("vegwp").contains("DEF_USE_PLANTHYDRAULICS"));
+    assert!(cond("wetwat").contains("DEF_USE_Dynamic_Wetland"));
+    for n in ["o3uptakesha", "o3uptakesun"] {
+        assert!(cond(n).contains("DEF_USE_OZONESTRESS"));
+    }
 }
 
 #[test]
@@ -731,7 +820,7 @@ fn turning_on_bgc_adds_variables_and_never_removes_any() {
     with_bgc.insert("BGC");
     let more = writable(&with_bgc);
     assert!(base.is_subset(&more));
-    assert_eq!(more.len(), 328); // 123 -> 328，BGC 那一块很大
+    assert_eq!(more.len(), 326); // 123 -> 326，BGC 那一块很大
 }
 
 #[test]
@@ -795,8 +884,9 @@ git commit -m "Add failing tests for which variables a preset can produce"
 
 - [ ] **Step 1: 写提取器**
 
-新建 `xtask/src/hist.rs`。宏栈与字面量提取**已预跑验证**（466 个字面量、
-waterheat 下 123 个、零漏报）；运行时条件那部分是本任务新增的。
+新建 `xtask/src/hist.rs`。**三道闸门一起提取已对真实源码预跑验证**
+（表 456、waterheat 下宏放行 123 / 无条件 113、零漏报），包括本步的
+`parse_cond` 与 Task 5 的运行时条件跟踪。
 
 ```rust
 //! `MOD_Hist.F90` -> 每个输出变量的三道闸门。
@@ -900,7 +990,7 @@ IF (DEF_USE_CBL_HEIGHT) THEN
 - 外层 `IF (…) THEN` 只在**条件里含 `DEF_`** 时才记，普通的 `IF (allocated(…))`
   之类不算；配对的 `ENDIF` 出栈；
 - 字面量取 `'f_…'`，且必须全为字母数字下划线。**不需要为拼接写出做任何
-  特殊处理**：实测 `MOD_Hist.F90` 的 466 个字面量里，以下划线结尾的
+  特殊处理**：实测 `MOD_Hist.F90` 的 456 个写出点里，以下划线结尾的
   （即 `'f_bedout_'//trim(x)` 那种前缀）**一个都没有** —— 拼接写出都在别的
   文件里，而那些文件本轮不扫（见「明确不做」）。若将来扫到了，
   以 `_` 结尾的名字要单独处理，因为它的真实变量名到运行时才成形。
@@ -912,7 +1002,7 @@ cargo run -p xtask -- gen-histmap
 cargo test -p colm-hist
 ```
 
-Expected: `wrote 466 variables`，5 条测试全绿。
+Expected: `wrote 456 variables`，5 条测试全绿。
 
 若 `the_waterheat_preset_can_write_one_hundred_and_twenty_three` 给出的不是
 123，**先查是不是新形态的宏条件被静默吞掉了**，而不是改断言迁就实现。
@@ -986,9 +1076,14 @@ fn the_fixture_still_matches_the_golden_file() {
     let f = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("golden/CN-Cng_hist_2008-01.nc");
     let nc = netcdf::open(&f).expect("golden file opens");
+    // v.name() 返回 String（不是 &str），所以先绑定再切前缀，
+    // 免得在链式调用里对临时值取借用。
     let actual: BTreeSet<String> = nc
         .variables()
-        .filter_map(|v| v.name().strip_prefix("f_").map(str::to_string))
+        .filter_map(|v| {
+            let n = v.name();
+            n.strip_prefix("f_").map(str::to_string)
+        })
         .collect();
     assert_eq!(actual, golden_vars());
     assert_eq!(actual.len(), 119);
@@ -1034,7 +1129,10 @@ fn the_second_window_agrees_with_the_first() {
         let nc = netcdf::open(&f).expect("golden file opens");
         sets.push(
             nc.variables()
-                .filter_map(|v| v.name().strip_prefix("f_").map(str::to_string))
+                .filter_map(|v| {
+                    let n = v.name();
+                    n.strip_prefix("f_").map(str::to_string)
+                })
                 .collect::<BTreeSet<String>>(),
         );
     }
