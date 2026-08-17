@@ -736,9 +736,23 @@ GUI 只渲染校验通过的预设（backend-owned UI vocabulary）。
    `CoLM Initialization Execution Completed` /
    `CoLM Execution Completed.`
 2. **输出产物硬校验** —— §6.2 的表。
-3. **错误标记扫描** —— `Netcdf error`、`ERROR in`、`***** ERROR`、
-   `Fortran runtime error`、`does not exist`、`nan`、水/能量平衡越界消息。
+3. **错误标记扫描** —— 实现里的十条，顺序即报告优先级（同一行命中多个时报第一个，
+   所以具体的排在笼统的前面）：
+
+   | 标记 | 来源 | CoLM 自己是否中止 |
+   |---|---|---|
+   | `Cannot match namelist object name` | namelist 里有未声明的变量 | 是 |
+   | `Memory allocation (malloc) failure` | 非法时间窗口等 | 是 |
+   | `Fortran runtime error` | gfortran 运行期，**只走 stderr** | 是 |
+   | `Error termination` | 同上 | 是 |
+   | `balance violation` | `CoLMMAIN.F90:1545/1620`，10 种文本 | **否，只警告**（见 §6.5） |
+   | ` with NAN` / ` Out of Range!` | `MOD_RangeCheck.F90:139/144` | 仅当定义了 `CoLMDEBUG` |
+   | `Netcdf error` / `***** ERROR` / `ERROR in` | 笼统兜底 | 视来源而定 |
+   | `does not exist` | `MOD_NetCDFSerial.F90:163` 缺输入文件 | 是，但走**无参数**的 `CoLM_stop()`，一句话都不再打印 |
+
    **注意排除已知的无害行**：`History namelist file: null does not exist.`
+   —— 没配 `DEF_HIST_vars_namelist` 时三段日志各出现一次。豁免是**整行精确匹配**，
+   所以指向一个不存在的真实路径不被豁免：那种情况 CoLM 会静默回落到默认变量集。
 
    本节原先写的是「stdout 扫描」，实现时改成 **stdout 与 stderr 都收**：
    gfortran 的运行期错误只走 stderr，所以 `Fortran runtime error` 与
@@ -771,7 +785,18 @@ GUI 只渲染校验通过的预设（backend-owned UI vocabulary）。
 ### 6.5 默认武装 `CoLMDEBUG`
 
 它武装 `CoLMMAIN.F90:1545` 的 `|errore| > 0.5` W/m² 与 `:1620` 的 `|errorw| > 1.e-3` mm。
-GUI 场景下宁可炸也不要给出错的数。但它同样走 `CoLM_stop` → 退出码 0，仍靠 §6.3 捕获。
+GUI 场景下宁可炸也不要给出错的数。
+
+**本节原先写「它同样走 `CoLM_stop` → 退出码 0，仍靠 §6.3 捕获」，那是错的。**
+实测源码：这两处是 `write(6,*) 'Warning: ... balance violation ...'`，
+**打印之后继续跑**，没有 `CoLM_stop`。所以一次能量不守恒的运行会跑到底、
+写出完整产物、打出成功标记 —— CoLM 自己不执行「宁可炸」这条政策，
+执行它的必须是 §6.3。十种消息文本共享 `balance violation` 一个子串。
+
+同一个宏还武装 `MOD_RangeCheck.F90`，但那边的行为不同：它在
+`len_trim(exception) > 0` 时确实调 `CoLM_stop(' ***** ERROR: ...')`。
+两者的差别意味着**不能拿「CoLMDEBUG 开着」当作一条统一的保险**，
+必须逐个检查各自的行为。
 
 ### 6.6 进程生命周期
 

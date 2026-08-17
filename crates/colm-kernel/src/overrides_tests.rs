@@ -74,8 +74,13 @@ fn a_long_log_does_not_change_the_answer() {
 
 #[test]
 fn none_of_the_real_messages_trips_a_failure_marker() {
-    // 抽覆盖与判成败必须互不干扰。实测这 9 条与 outcome.rs 的 7 个失败标记
-    // 零碰撞 —— 这条测试守住它，因为两边都会各自增长。
+    // **配置**类的覆盖消息与判成败必须互不干扰：实测这 9 条与 outcome.rs 的
+    // 失败标记零碰撞 —— 这条测试守住它，因为两边都会各自增长。
+    //
+    // 反过来不成立，而且是刻意的：`Warning: ... balance violation ...` 同时是
+    // 一条覆盖消息（以 `Warning:` 开头）和一个失败标记。抽取只认前缀、
+    // 原样上报，不去解释文本；判成败在 outcome.rs。两边说的是同一行，
+    // 只是一边在陈述，一边在裁决。
     use crate::outcome::{adjudicate, Outcome, Stage};
     let stdout = format!("{REAL}\n CoLM Execution Completed.\n");
     assert_eq!(

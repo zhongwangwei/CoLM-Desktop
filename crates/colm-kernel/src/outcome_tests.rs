@@ -196,3 +196,27 @@ fn the_healthy_history_namelist_line_is_still_benign() {
         Outcome::Failed(Failure::ErrorMarker { .. })
     ));
 }
+
+#[test]
+fn a_balance_violation_fails_the_run_because_colm_only_warns() {
+    // CoLMMAIN.F90:1545 / :1620 在 CoLMDEBUG 下打印这些然后继续跑 ——
+    // 没有 CoLM_stop。十种文本共享 `balance violation` 一个子串。
+    for line in [
+        " Warning: energy balance violation    1.2345678901234567      10",
+        " Warning: water balance violation in CoLMMAIN (soil)    0.1234567890123457",
+        " Warning: water balance violation after all soilwater calculation",
+        " Warning: water balance violation in vegetation PHS",
+    ] {
+        let stdout = format!("{line}\n CoLM Execution Completed.\n");
+        assert!(
+            matches!(
+                adjudicate(Stage::Colm, Some(0), &stdout, &[]),
+                Outcome::Failed(Failure::ErrorMarker {
+                    marker: "balance violation",
+                    ..
+                })
+            ),
+            "should have failed on: {line}"
+        );
+    }
+}
