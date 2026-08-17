@@ -1,10 +1,11 @@
-//! 代码生成：把 `MOD_Namelist.F90` 的声明变成 `colm-schema` 的字段表。
+//! 代码生成：把 CoLM 的 Fortran 源码变成入库的表。
 //!
-//! 用法: cargo run -p xtask -- gen-schema
+//! 用法:
+//!   cargo run -p xtask -- gen-schema    `MOD_Namelist.F90` -> `colm-schema` 的字段表
+//!   cargo run -p xtask -- gen-histmap   `MOD_Hist.F90`     -> `colm-hist` 的闸门表
 //!
-//! 产物 `crates/colm-schema/src/generated.rs` **入库**，由
-//! `crates/colm-schema/tests/drift.rs` 守住：重新生成必须逐字节一致。
-//! 入库而不是 build.rs 现生成，是为了让 schema 的变化出现在 code review 的
+//! 两个产物都**入库**，各由自己的 `tests/drift.rs` 守住：重新生成必须逐字节
+//! 一致。入库而不是 build.rs 现生成，是为了让表的变化出现在 code review 的
 //! diff 里 —— 上游加一个 DEF_ 或改一个默认值，应当是一次可见的改动，
 //! 而不是某次构建之后悄悄换掉的东西。
 
@@ -19,9 +20,14 @@ use anyhow::{bail, Context, Result};
 
 fn main() -> Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
-    if cmd != "gen-schema" {
-        bail!("usage: cargo run -p xtask -- gen-schema");
+    match cmd.as_str() {
+        "gen-schema" => gen_schema(),
+        "gen-histmap" => gen_histmap(),
+        _ => bail!("usage: cargo run -p xtask -- <gen-schema|gen-histmap>"),
     }
+}
+
+fn gen_schema() -> Result<()> {
     let root = repo_root()?;
     let src = root.join("vendor/CoLM202X/share/MOD_Namelist.F90");
     let text =
@@ -38,6 +44,19 @@ fn main() -> Result<()> {
     let dst = root.join("crates/colm-schema/src/generated.rs");
     std::fs::write(&dst, out)?;
     println!("wrote {} fields to {}", fields.len(), dst.display());
+    Ok(())
+}
+
+fn gen_histmap() -> Result<()> {
+    let root = repo_root()?;
+    let src = root.join("vendor/CoLM202X/main/MOD_Hist.F90");
+    let text =
+        std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
+    let vars = hist::extract(&text)?;
+    let out = hist::render(&vars);
+    let dst = root.join("crates/colm-hist/src/generated.rs");
+    std::fs::write(&dst, out)?;
+    println!("wrote {} variables to {}", vars.len(), dst.display());
     Ok(())
 }
 
