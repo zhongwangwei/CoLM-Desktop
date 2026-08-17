@@ -2137,9 +2137,14 @@ fn the_raster_wins_over_the_classifier_when_both_are_available() {
 ```rust
 #[test]
 fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
-    // 实测：90 个站点里 25 个一致。这条不是要求它们一致 —— 它们出自不同的
+    // 实测：90 个站点里 26 个一致。这条不是要求它们一致 —— 它们出自不同的
     // 土壤产品，本来就不该一致 —— 而是钉住分歧的量级。若某天一致率跳到
     // 90% 或掉到 5%，说明有一侧变了，那值得有人看一眼。
+    //
+    // 26 里有 1 个是「一致」得来的另一种方式：DK-Lva（12.083E 55.683N）在
+    // 质地栅格上读到 _FillValue(-1)，被 (1..=12) 过滤挡下、回落到分类器，
+    // 于是两者当然相同。那不是两个产品达成了一致，而是只有一个产品有话说 ——
+    // 正好也证明填充值兜底在真实数据上是通的。
     let raw = rawdata();
     if !raw.join("soil/soiltexture_0cm-60cm_mean.nc").exists() {
         panic!("texture raster missing at {}; set COLM_RAWDATA", raw.display());
