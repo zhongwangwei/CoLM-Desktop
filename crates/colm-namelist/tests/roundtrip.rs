@@ -112,3 +112,60 @@ fn first_difference(a: &str, b: &str) -> usize {
     }
     a.lines().count().min(b.lines().count()) + 1
 }
+
+#[test]
+fn every_field_in_every_file_is_findable_with_its_case_flipped() {
+    // Fortran 的 namelist 变量名大小写不敏感，而上游语料自己就混用两种拼法：
+    // 763 个不同的字段名里，DEF_hist_lat_res / DEF_hist_lon_res /
+    // DEF_hist_vars_namelist 这三个各有大小写两种写法，且两种写法的文件
+    // CoLM 都能跑。所以按大小写敏感查找的话，用户拿自己的文件进来，
+    // 一半字段会被判成「不存在」—— 这条测试守住这件事。
+    let mut misses = Vec::new();
+    for f in nml_files() {
+        let src = std::fs::read_to_string(&f).expect("readable file");
+        let doc = colm_namelist::parse(&src).expect("parses");
+        for p in doc.paths() {
+            for probe in [p.to_uppercase(), p.to_lowercase()] {
+                if doc.get(&probe).is_none() {
+                    misses.push(format!("{}: {p} not found as {probe}", f.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "{} field(s) were unreachable after changing case:\n{}",
+        misses.len(),
+        misses
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn setting_a_field_by_a_different_case_edits_the_line_that_is_there() {
+    // 最危险的形态不是找不到，而是「找不到于是追加一行」—— 那会写出一个
+    // 同名字段出现两次的文件，Fortran 取最后一个，用户看到的是第一个。
+    // set 在字段不存在时报错而不追加，这条测试同时钉住这两件事：
+    // 大小写不同也能命中，且命中的是原来那一行。
+    let f = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/CoLM202X/run/forcing/POINT.nml");
+    let src = std::fs::read_to_string(&f).expect("POINT.nml must exist");
+    let mut doc = colm_namelist::parse(&src).expect("parses");
+    doc.set(
+        "def_FORCING%DataSet",
+        colm_namelist::Value::Str("CHANGED".into()),
+    )
+    .expect("case-insensitive lookup must find DEF_forcing%dataset");
+    let out = doc.to_string();
+    assert_eq!(
+        src.lines().count(),
+        out.lines().count(),
+        "no line was added"
+    );
+    let differing = src.lines().zip(out.lines()).filter(|(a, b)| a != b).count();
+    assert_eq!(differing, 1, "expected exactly one edited line");
+}

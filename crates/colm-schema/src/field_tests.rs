@@ -81,3 +81,36 @@ fn the_history_type_contributes_the_bulk_of_the_table() {
         .count();
     assert_eq!(n, 482, "history_var_type member count changed");
 }
+
+#[test]
+fn lookup_ignores_case_the_way_fortran_does() {
+    // MOD_Namelist.F90 声明的是 DEF_HIST_vars_out_default，而 CoLM 自己入库的
+    // 算例文件多数写成 DEF_hist_vars_out_default —— 两种写法它都能跑。
+    let want = find("DEF_HIST_vars_out_default").expect("declared in MOD_Namelist.F90");
+    for probe in [
+        "DEF_hist_vars_out_default",
+        "def_hist_vars_out_default",
+        "DEF_HIST_VARS_OUT_DEFAULT",
+    ] {
+        assert_eq!(
+            find(probe).map(|f| f.name),
+            Some(want.name),
+            "{probe} should resolve to the same field"
+        );
+    }
+}
+
+#[test]
+fn no_two_fields_differ_only_in_case() {
+    // 大小写不敏感的查找只有在名字集合本身无歧义时才是对的。
+    // 这条守住那个前提：上游哪天加一个只差大小写的重名字段，
+    // find 会静默地只返回其中一个，而这里会先炸。
+    let mut seen = std::collections::HashMap::new();
+    let mut clashes = Vec::new();
+    for f in all() {
+        if let Some(prev) = seen.insert(f.name.to_ascii_lowercase(), f.name) {
+            clashes.push(format!("{prev} vs {}", f.name));
+        }
+    }
+    assert!(clashes.is_empty(), "names collide once folded: {clashes:?}");
+}

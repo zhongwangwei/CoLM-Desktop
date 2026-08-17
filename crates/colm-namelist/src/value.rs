@@ -9,7 +9,10 @@ use std::fmt;
 use anyhow::{bail, Result};
 
 /// 字段路径的一段。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 名字**原样保存**（`Display` 和 `Document::paths` 要还原用户写的大小写），
+/// 但**比较时忽略大小写** —— 见下面手写的 `PartialEq`。
+#[derive(Debug, Clone)]
 pub enum Segment {
     /// 顶层名字，如 `DEF_CASE_NAME`
     Field(String),
@@ -18,6 +21,33 @@ pub enum Segment {
     /// 下标，如 `(1)`。Fortran 下标从 1 起，这里原样保存不做换算。
     Index(usize),
 }
+
+/// Fortran 的 namelist 变量名**大小写不敏感**，所以路径比较也必须如此。
+///
+/// 这不是理论问题：CoLM 自己入库的 `.nml` 就混用两种写法 ——
+/// `DEF_hist_lon_res` / `DEF_HIST_lon_res`、`DEF_hist_lat_res` /
+/// `DEF_HIST_lat_res`、`DEF_hist_vars_namelist` / `DEF_HIST_vars_namelist`
+/// 各有两种拼法，而这些文件 CoLM 全都能跑。按大小写敏感比较的话，
+/// 用户拿自己的文件进来，一半字段会被判成「不存在」。
+///
+/// 用 `eq_ignore_ascii_case`：Fortran 标识符是 ASCII，且它不分配内存。
+///
+/// 已知的病态情形：同一个文件里出现两个只有大小写不同的同名字段。
+/// 那样的文件本身就有歧义（Fortran 取最后一个），本模块取第一个。
+/// 上游语料里不存在这种文件。
+impl PartialEq for Segment {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Segment::Field(a), Segment::Field(b)) | (Segment::Member(a), Segment::Member(b)) => {
+                a.eq_ignore_ascii_case(b)
+            }
+            (Segment::Index(a), Segment::Index(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Segment {}
 
 /// 一个字段的完整路径，如 `DEF_forcing%fprefix(1)`。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -22,6 +22,14 @@ pub fn all() -> &'static [Field] {
 }
 
 /// 按全名查找，例如 `"DEF_forcing%dataset"`。
+///
+/// **大小写不敏感**，与 Fortran 的 namelist 一致（`colm_namelist::Path` 同理）。
+/// 上游自己入库的 `.nml` 就混用两种拼法，而声明处只有一种：
+/// `MOD_Namelist.F90` 写的是 `DEF_HIST_vars_out_default`，而多数算例文件
+/// 写成 `DEF_hist_vars_out_default`。按大小写敏感查的话，GUI 会认定
+/// 用户文件里那一行是个不认识的字段。
 pub fn find(name: &str) -> Option<&'static Field> {
-    generated::FIELDS.iter().find(|f| f.name == name)
+    generated::FIELDS
+        .iter()
+        .find(|f| f.name.eq_ignore_ascii_case(name))
 }

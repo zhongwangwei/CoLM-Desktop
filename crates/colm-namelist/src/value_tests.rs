@@ -69,3 +69,36 @@ fn a_list_renders_space_separated_like_the_files_do() {
     let v = Value::List(vec![Value::Str("Tair".into()), Value::Str("Qair".into())]);
     assert_eq!(v.to_string(), "'Tair' 'Qair'");
 }
+
+#[test]
+fn paths_compare_without_regard_to_case() {
+    // Fortran 的 namelist 变量名大小写不敏感。上游自己入库的 .nml 就混用：
+    // DEF_hist_lon_res / DEF_HIST_lon_res 两种拼法都存在，且都能跑。
+    let a = Path::parse("DEF_HIST_lon_res").unwrap();
+    let b = Path::parse("def_hist_lon_res").unwrap();
+    assert_eq!(a, b);
+
+    // 派生类型成员与下标同样适用。
+    assert_eq!(
+        Path::parse("DEF_Forcing%FPrefix(1)").unwrap(),
+        Path::parse("def_forcing%fprefix(1)").unwrap()
+    );
+    // 但下标本身不是名字，仍然要严格相等。
+    assert_ne!(
+        Path::parse("DEF_forcing%fprefix(1)").unwrap(),
+        Path::parse("DEF_forcing%fprefix(2)").unwrap()
+    );
+}
+
+#[test]
+fn a_path_still_displays_the_case_it_was_written_in() {
+    // 比较忽略大小写，但显示不能 —— GUI 列字段时要还原用户写的样子，
+    // 而不是把所有人的文件都显示成同一种拼法。
+    for s in [
+        "DEF_HIST_lon_res",
+        "def_hist_lon_res",
+        "DEF_Forcing%dataset",
+    ] {
+        assert_eq!(Path::parse(s).unwrap().to_string(), s);
+    }
+}
