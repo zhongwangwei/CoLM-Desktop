@@ -67,7 +67,3 @@ fn fill_value(v: &netcdf::Variable) -> Option<f64> {
 pub fn point_i32(file: &Path, var: &str, lon: f64, lat: f64) -> Result<i32> {
     Ok(point_f64(file, var, lon, lat)?.round() as i32)
 }
-
-#[cfg(test)]
-#[path = "raster_tests.rs"]
-mod raster_tests;

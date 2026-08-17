@@ -1,6 +1,11 @@
+//! 读真实强迫场文件的测试。放在 tests/ 而不是 src/：
+//! 它们需要 PLUMBER2 数据，而每个 PR 的 rust 作业跑的是
+//! `cargo test --workspace --lib --bins`，托管 runner 上没有那些数据。
+//! 留在 src/ 里会让它们被 --lib 带进去，然后在没有数据的机器上全红。
+
 use std::path::PathBuf;
 
-use super::*;
+use colm_forcing::met::summarize;
 
 /// 强迫场数据的位置。缺失时测试**失败**而不是跳过 ——
 /// 跳过会被读成通过，这个仓库栽过一次。

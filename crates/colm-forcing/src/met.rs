@@ -91,7 +91,3 @@ fn parse_units_start(u: &str) -> Result<Stamp> {
         second: num(32, 33)?,
     })
 }
-
-#[cfg(test)]
-#[path = "met_tests.rs"]
-mod met_tests;

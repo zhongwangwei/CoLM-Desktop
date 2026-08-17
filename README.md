@@ -79,6 +79,37 @@ cargo run -p colm-srfdata --bin site-fill -- <站点文件> <输出> [rawdata �
 同一份土壤就自相矛盾了。两者在 90 个站点里只有 26 个一致（SoilGrids v2 与
 Shangguan 2014 是不同产品，本就不该一致），不同时命令行会把栅格的答案也打出来。
 
+## 强迫场
+
+`crates/colm-forcing` **不转换数据**。CoLM 直接读 PLUMBER2 的 Met 文件
+（`MOD_UserSpecifiedForcing.F90:683`，POINT 下 `metfilename = fprefix(1)`），
+所以这一层产出的是那份 `nl_colm_forcing` namelist，加一组开跑前的校验。
+
+```
+cargo run -p colm-forcing --bin forcing-nml -- <Met 文件> [输出]
+```
+
+生成的 namelist 是给人看的：为什么第 5 槽是 `NULL`（PLUMBER2 只有标量 `Wind`）、
+为什么三个 `HEIGHT_*` 会被 CoLM 用文件里的 `reference_height_*` 覆盖，都写在注释里。
+产物会被 `crates/colm-namelist` 解析回来做断言——验的是它**说了什么**，不是长什么样。
+
+校验拦的不是坏文件（90 个真实文件零 NaN、零填充值、步长均匀），而是几种
+**能跑完却给出错误结果**的配置。头一种是 CoLM 自己写在注释里的：
+
+```fortran
+! when reaching the END of forcing data, show a Warning but still try to run
+```
+
+模拟窗口跑过强迫场末端时它只警告不报错，产出一份完整而错误的 history，而
+`colm-kernel` 的失败标记里没有 `Warning:`——那样的运行会被判成功。
+
+**三个参考高度必须分别读**：实测 90 个站点里有 30 个三者互不相同（CA-SF1 是
+v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 个站点是，
+2 个是 3600 s，而算例里的 `DEF_simulation_time%timestep` 必须跟着走。
+
+黄金回归用的就是这个生成器（`oracle/cases/<算例>/met.txt` 指明用哪个强迫场文件），
+所以每次回归都在验它：生成的 namelist 若改变了语义，history 会先变。
+
 ## 两个窗口覆盖到什么、没覆盖到什么
 
 下表全部来自对两个黄金文件的实测，不是设计意图。

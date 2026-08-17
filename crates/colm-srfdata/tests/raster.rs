@@ -1,6 +1,10 @@
+//! 读真实栅格的测试。放在 tests/ 而不是 src/，理由同
+//! colm-forcing/tests/met.rs：`--lib --bins` 会把 src/ 里的
+//! `#[cfg(test)]` 模块带进每个 PR 的作业，而那里没有 rawdata。
+
 use std::path::PathBuf;
 
-use super::*;
+use colm_srfdata::raster::{point_f64, point_i32};
 
 /// rawdata 的位置。缺失时测试**失败**而不是跳过 ——
 /// 里程碑 1 的教训是「跳过会被读成通过」。CI 上这些测试只在

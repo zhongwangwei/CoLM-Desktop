@@ -1613,14 +1613,23 @@ git commit -m "Generate the golden case's forcing namelist instead of templating
 
 - [ ] **Step 1: CI**
 
-`colm-forcing` 的 `met_tests` 与 `tests/real_forcing.rs` 需要 PLUMBER2 数据，
-与里程碑 2/3 的同类测试一样只能在 `golden` 作业里跑。`rust` 作业的
-`cargo test --workspace --lib --bins` 会自动带上纯计算的那些（civil / check / render），
-**不需要额外改动** —— 但要确认 `met_tests` 是 `#[cfg(test)]` 在 `src/` 里的，
-那样它会被 `--lib` 带进去而在托管 runner 上失败。
+**实测结果：确实在 `--lib` 范围内，而且不只 `colm-forcing`。**
+`cargo test --workspace --lib --bins` 会跑到 **8 条需要真实数据的测试**——
+`colm-forcing` 的 `met_tests` 3 条，加上里程碑 3 留下的 `colm-srfdata`
+`raster_tests` 5 条。托管 runner 上没有 PLUMBER2 与 rawdata，这 8 条会全红
+（它们是断言失败而非跳过，那是有意的）。
 
-**执行时先确认这一点**：若 `met_tests` 在 `--lib` 范围内，把它移到
-`tests/met.rs` 作为集成测试，与 `real_forcing.rs` 一起归入 `golden` 作业。
+所以两处一起移出 `src/`：
+
+- `crates/colm-forcing/src/met_tests.rs` → `crates/colm-forcing/tests/met.rs`
+- `crates/colm-srfdata/src/raster_tests.rs` → `crates/colm-srfdata/tests/raster.rs`
+
+`use super::*` 改成走 crate 的公开路径（`colm_forcing::met::summarize`、
+`colm_srfdata::raster::{point_f64, point_i32}`），并把 `src/` 那两个文件末尾的
+`#[cfg(test)] #[path] mod ...;` 摘掉。移完 `--lib --bins` 对这两类零命中，
+而 `golden` 作业的 `cargo test --workspace` 照样带上它们。
+
+`rust` 作业的 yaml **不需要改动** —— 它跑的命令本来就对，是测试放错了地方。
 
 - [ ] **Step 2: README 补一节**
 
