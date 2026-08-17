@@ -19,6 +19,7 @@
 
 pub mod generated;
 pub mod metric;
+pub mod pair;
 pub mod time;
 
 use std::collections::BTreeSet;
