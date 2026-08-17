@@ -1395,7 +1395,12 @@ fn the_history_type_contributes_the_bulk_of_the_table() {
 - [ ] **Step 3: 运行确认失败**
 
 Run: `cargo test -p colm-schema`
-Expected: 编译失败，`generated::FIELDS` 不存在。这是 RED 状态。
+Expected: 编译失败。具体是 `use crate::{all, find, Default, FieldKind};` 四个名字
+都解析不了 —— Task 1 写的 `lib.rs` 只有 `pub mod` 声明，重导出与 `all()`/`find()`
+要到 Task 8 Step 4b 才加上，那时 `generated::FIELDS` 才存在。这是 RED 状态。
+
+**不要**为了让它编译而提前给 `lib.rs` 加导出：那两行属于 Task 8，
+且在字段表存在之前它们无处可指。
 
 - [ ] **Step 4: 提交**
 
