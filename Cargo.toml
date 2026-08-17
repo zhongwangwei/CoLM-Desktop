@@ -1,0 +1,54 @@
+[workspace]
+# resolver 3 是 MSRV 感知的。实测它不会硬失败 —— 无 MSRV 兼容版本时按
+# incompatible-rust-versions = "fallback" 回退并标注。启用它当场就暴露出
+# hdf5-metno-src 0.10.4 requires Rust 1.85.1，故下面的 MSRV 是 1.85.1 而非 1.85。
+resolver = "3"
+# oracle 在 Task 6 加入。此处只列已存在的 member，
+# 否则 Task 1 结束时 cargo 会因找不到 oracle/Cargo.toml 而失败。
+members = ["crates/colm-kernel"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# 用 MSRV 而不是 rustup 的工具链固定文件：本机 rust 由 Homebrew 安装，没有 rustup，
+# 那类文件会被静默忽略。rust-version 由 cargo 本体检查。
+#
+# 警告：[workspace.package] 与 [workspace.dependencies] 都只是模板，成员必须逐个写
+# `field.workspace = true` 才会继承。不写的话这些声明和它们要替换掉的那个 rustup
+# 文件一样完全无效 —— 实测：MSRV 写 1.99 而成员未 opt-in 时，1.97.1 上照样编译成功。
+# 本项目在同一轮里被这个机制咬了两次（rust-version，以及一个失效的 netcdf-sys 钉子）。
+rust-version = "1.85.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zhongwangwei/colm-desktop"
+# 这是研究模型的私有提取，永不上 crates.io。
+publish = false
+
+# 本项目没有任何需要 unsafe 的地方（netcdf crate 已封装 FFI）。
+# 注意 forbid 比 deny 强：局部 #[allow(unsafe_code)] 会被 E0453 拒绝。
+# 将来若某成员确实需要 FFI，出口在 workspace 层面（改 deny，或该成员不 opt-in），
+# 不是局部 allow。
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+# 不钉版本。曾经写过 `netcdf = "=0.12.0"` + `netcdf-sys = "=0.9.0"`，两点都错：
+#   1. 后者完全无效 —— 没有成员引用 netcdf-sys，模板条目不会被解析或钉住，
+#      它照样浮到 0.9.2（与上面 [workspace.package] 的坑同一类型）。
+#   2. 钉版本的动机基于一个被污染的实验。曾断言 netcdf 0.12 + static
+#      「无法解析、报 links 冲突」，实为复制目录时带过来的旧 Cargo.lock 把
+#      netcdf-src 钉在 0.5.0 所致。干净环境下最新组合解析正常。
+# 两个依赖图（netcdf-sys 0.9.0→HDF5 2.0.0，0.9.2→HDF5 2.2.0）都已静态构建并
+# 成功读取真实黄金文件（129/129 变量），所以不需要偏好任何一个。
+# 由入库的 Cargo.lock 冻结实际解析结果。
+#
+# default-features = false 是关掉 ndarray：判官只用 Vec<f64>。
+netcdf = { version = "0.12", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+sha2 = "0.10"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

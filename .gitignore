@@ -1,0 +1,10 @@
+# 不加前导斜杠：Plan 4 的 gui/ 是独立 workspace，会有自己的 gui/target/。
+# `/target` 只锚定仓库根，实测漏掉 gui/target/ 与 gui/src-tauri/target/ ——
+# 在一个以「提交黄金 NetCDF 文件」为产物的仓库里，误提交构建产物代价最高。
+target/
+**/*.rs.bk
+# 内核构建产物：可从 submodule 重建，不入库
+/kernels/
+# 黄金运行的工作目录
+/oracle/work/
+.DS_Store
