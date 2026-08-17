@@ -814,6 +814,21 @@ fn a_report_knows_whether_it_succeeded() {
     };
     assert!(r.succeeded());
 }
+
+#[test]
+fn the_stage_names_and_the_manifest_names_are_the_same_three() {
+    // 程序名有两个真相来源：`Stage::program()` 与 `manifest::PROGRAMS`。
+    // 二者必须一致 —— 改了一处没改另一处，`Kernel::open` 会去校验一个
+    // 不存在的文件，或 `run_stage` 会去跑一个没被校验过的文件，
+    // 而两边各自的测试仍然全绿。这条把它们拴在一起。
+    use crate::manifest::PROGRAMS;
+    let from_stages = [
+        Stage::MkSrfData.program(),
+        Stage::MkIniData.program(),
+        Stage::Colm.program(),
+    ];
+    assert_eq!(from_stages, PROGRAMS);
+}
 ```
 
 - [ ] **Step 3: 给 `lib.rs` 加重导出**
@@ -825,7 +840,7 @@ pub use run::{run_stage, StageReport};
 - [ ] **Step 4: 门禁**
 
 Run: `cargo test -p colm-kernel`
-Expected: `test result: ok. 26 passed; 0 failed`
+Expected: `test result: ok. 27 passed; 0 failed`
 
 Run: `cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
 
@@ -967,7 +982,7 @@ git diff --check
 
 ## 完成判据
 
-- [ ] `cargo test --workspace` 通过；`colm-kernel` 的 26 个单元测试全部执行
+- [ ] `cargo test --workspace` 通过；`colm-kernel` 的 27 个单元测试全部执行
 - [ ] 清单的嵌套 `sha256` 对象**读出的是值不是键名**（手写提取的那个 bug 有墓碑测试）
 - [ ] 「二进制不存在」与「二进制被替换」是两条不同的报错，各自说得出是哪个文件
 - [ ] 未知 `schema` 被拒绝，而不是按旧字段解释
