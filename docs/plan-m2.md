@@ -464,13 +464,10 @@ impl Path {
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, seg) in self.segments.iter().enumerate() {
+        for seg in &self.segments {
             match seg {
                 Segment::Field(n) => write!(f, "{n}")?,
-                Segment::Member(n) => {
-                    let _ = i;
-                    write!(f, "%{n}")?
-                }
+                Segment::Member(n) => write!(f, "%{n}")?,
                 Segment::Index(n) => write!(f, "({n})")?,
             }
         }
