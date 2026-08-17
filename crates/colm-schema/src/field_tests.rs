@@ -34,10 +34,12 @@ fn an_array_field_records_its_arity() {
 }
 
 #[test]
-fn defaults_that_differ_from_colm_are_visible_here() {
-    // 这两个默认值正是「GUI 的默认值必须与 CoLM 的默认值不同」的原因：
-    // 见 design.md §2.5。schema 必须如实记录 CoLM 的原值，
-    // 偏离由上层决定并解释，而不是在这里偷偷改掉。
+fn defaults_are_recorded_exactly_as_colm_declares_them() {
+    // 这两个默认值都假设 HPC 数据树存在（见 design.md §2.5）：臭氧要 2.8 GB
+    // 的全球场，Simple VIC 要站点文件里有 soil_texture。处置并不相同 ——
+    // 臭氧是本项目唯一必须显式关掉的，产流方案则沿用 CoLM 的 3 并补数据。
+    // 但那都是上层的决定：schema 只负责如实记录 CoLM 声明的原值，
+    // 不在这里偷偷改掉，否则「CoLM 的默认」与「我们建议的默认」就分不清了。
     assert_eq!(
         find("DEF_USE_OZONEDATA").map(|f| f.default),
         Some(Default::Logical(true))
