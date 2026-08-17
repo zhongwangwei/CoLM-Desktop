@@ -106,6 +106,20 @@ fn the_heights_come_from_the_file_and_say_so() {
 }
 
 #[test]
+fn an_integer_valued_height_still_looks_like_a_real() {
+    // Rust 的 Display 把 6.0 打成 "6"，写进 namelist 就会被读成整数。
+    // CoLM 那三个字段是 real(r8)，Fortran 读得进去，但逐字段比对时
+    // Int(6) 与 Real("6.0") 是两回事 —— 而这正是 Task 8 要做的比对。
+    // 实测不少站点的高度是整数值（AU-Lit 是 31 / 33 / 33）。
+    let mut s = spec();
+    s.met.height_v = 6.0;
+    s.met.height_t = 33.0;
+    let text = render(&s);
+    assert_eq!(field(&text, "DEF_forcing%HEIGHT_V"), "6.0");
+    assert_eq!(field(&text, "DEF_forcing%HEIGHT_T"), "33.0");
+}
+
+#[test]
 fn the_constants_colm_needs_are_present() {
     let text = render(&spec());
     assert_eq!(field(&text, "DEF_forcing%dataset"), "'POINT'");

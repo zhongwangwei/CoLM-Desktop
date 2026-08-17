@@ -54,9 +54,9 @@ pub fn render(s: &ForcingSpec) -> String {
          ! HEIGHT_* 取自强迫场文件的 reference_height_v/t/q。CoLM 在 POINT 下会用\n\
          ! 文件里的值 overwritten 掉这三行（MOD_Forcing.F90:294-310），所以它们是\n\
          ! 给人看的；写文件里的真值而不是常数，才不会误导下一个读它的人。\n\
-         \x20  DEF_forcing%HEIGHT_V         = {hv}\n\
-         \x20  DEF_forcing%HEIGHT_T         = {ht}\n\
-         \x20  DEF_forcing%HEIGHT_Q         = {hq}\n\
+         \x20  DEF_forcing%HEIGHT_V         = {hv:?}\n\
+         \x20  DEF_forcing%HEIGHT_T         = {ht:?}\n\
+         \x20  DEF_forcing%HEIGHT_Q         = {hq:?}\n\
          \n\
          \x20  DEF_forcing%NVAR             = 8\n\
          \x20  DEF_forcing%startyr          = {sy}\n\

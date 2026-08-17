@@ -915,6 +915,20 @@ fn the_heights_come_from_the_file_and_say_so() {
 }
 
 #[test]
+fn an_integer_valued_height_still_looks_like_a_real() {
+    // Rust 的 Display 把 6.0 打成 "6"，写进 namelist 就会被读成整数。
+    // CoLM 那三个字段是 real(r8)，Fortran 读得进去，但逐字段比对时
+    // Int(6) 与 Real("6.0") 是两回事 —— 而这正是 Task 8 要做的比对。
+    // 实测不少站点的高度是整数值（AU-Lit 是 31 / 33 / 33）。
+    let mut s = spec();
+    s.met.height_v = 6.0;
+    s.met.height_t = 33.0;
+    let text = render(&s);
+    assert_eq!(field(&text, "DEF_forcing%HEIGHT_V"), "6.0");
+    assert_eq!(field(&text, "DEF_forcing%HEIGHT_T"), "33.0");
+}
+
+#[test]
 fn the_constants_colm_needs_are_present() {
     let text = render(&spec());
     assert_eq!(field(&text, "DEF_forcing%dataset"), "'POINT'");
@@ -999,9 +1013,9 @@ pub fn render(s: &ForcingSpec) -> String {
          ! HEIGHT_* 取自强迫场文件的 reference_height_v/t/q。CoLM 在 POINT 下会用\n\
          ! 文件里的值 overwritten 掉这三行（MOD_Forcing.F90:294-310），所以它们是\n\
          ! 给人看的；写文件里的真值而不是常数，才不会误导下一个读它的人。\n\
-         \x20  DEF_forcing%HEIGHT_V         = {hv}\n\
-         \x20  DEF_forcing%HEIGHT_T         = {ht}\n\
-         \x20  DEF_forcing%HEIGHT_Q         = {hq}\n\
+         \x20  DEF_forcing%HEIGHT_V         = {hv:?}\n\
+         \x20  DEF_forcing%HEIGHT_T         = {ht:?}\n\
+         \x20  DEF_forcing%HEIGHT_Q         = {hq:?}\n\
          \n\
          \x20  DEF_forcing%NVAR             = 8\n\
          \x20  DEF_forcing%startyr          = {sy}\n\
@@ -1046,7 +1060,7 @@ pub use render::{render, ForcingSpec};
 - [ ] **Step 4: 测试通过**
 
 Run: `cargo test -p colm-forcing`
-Expected: `test result: ok. 20 passed; 0 failed`（5 civil + 8 check + 7 render）
+Expected: `test result: ok. 21 passed; 0 failed`（5 civil + 8 check + 8 render）
 
 - [ ] **Step 5: 格式与 lint，然后提交**
 
@@ -1236,7 +1250,7 @@ pub use met::summarize;
 - [ ] **Step 4: 测试通过**
 
 Run: `cargo test -p colm-forcing`
-Expected: `test result: ok. 23 passed; 0 failed`
+Expected: `test result: ok. 24 passed; 0 failed`
 
 文件名 `CA-SF1_2004-2006_FLUXNET2015_Met.nc` 与高度值 12.1 / 1.5 / 1.5 都是实测的。
 
@@ -1423,7 +1437,7 @@ fn the_three_heights_differ_at_about_a_third_of_sites() {
 - [ ] **Step 3: 跑**
 
 Run: `cargo test -p colm-forcing`
-Expected: 单元测试 23 个 + 集成测试 4 个全绿，并打出步长与高度的统计。
+Expected: 单元测试 24 个 + 集成测试 4 个全绿，并打出步长与高度的统计。
 
 Run: `cargo run -p colm-forcing --bin forcing-nml -- \
   "$PLUMBER2_ROOT/Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc"`
@@ -1570,7 +1584,7 @@ git commit -m "Document the forcing layer and wire it into CI"
 
 逐条可验证：
 
-- [ ] `cargo test --workspace` 通过；`colm-forcing` 的 23 个单元测试
+- [ ] `cargo test --workspace` 通过；`colm-forcing` 的 24 个单元测试
       + 4 个真实强迫场测试全部执行（不是跳过）
 - [ ] **90/90 个真实强迫场文件通过契约校验**
 - [ ] 90 份生成的 namelist 都能被 `colm-namelist` 解析回来，且 `fprefix(1)` 指向自己
