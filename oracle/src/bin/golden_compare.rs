@@ -72,8 +72,35 @@ fn main() -> Result<()> {
         let va = a.variable(name).unwrap();
         let vb = b.variable(name).unwrap();
 
-        if va.dimensions().len() != vb.dimensions().len() {
-            problems.push(format!("{name}: rank differs"));
+        // 逐变量比对**维度名与长度的有序列表**，而不只是秩。
+        //
+        // 只比秩是不够的：patch = 1，所以把 (time, patch, ...) 换成 (patch, time, ...)
+        // 之后扁平化的字节序完全不变，逐值比较会全部通过。实测：把 119 个变量的
+        // 前两个维度对调，判官报 identical。而 colm-hist 做时间轴还原与抽稀时是
+        // **按轴位置索引**的，那样的文件会让它静默读错轴。
+        let da: Vec<(String, usize)> = va
+            .dimensions()
+            .iter()
+            .map(|d| (d.name(), d.len()))
+            .collect();
+        let db: Vec<(String, usize)> = vb
+            .dimensions()
+            .iter()
+            .map(|d| (d.name(), d.len()))
+            .collect();
+        if da != db {
+            problems.push(format!("{name}: dimensions {da:?} vs {db:?}"));
+            continue;
+        }
+
+        // 存储类型也是契约的一部分：把 int 坐标变量改写成 double，值读出来一样，
+        // 但下游按整数索引的代码会变。
+        if va.vartype() != vb.vartype() {
+            problems.push(format!(
+                "{name}: type {:?} vs {:?}",
+                va.vartype(),
+                vb.vartype()
+            ));
             continue;
         }
 

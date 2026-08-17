@@ -1,6 +1,6 @@
 &nl_colm
 
-! 黄金回归算例：冬季窗口。见 docs/design.md §2.8
+! 黄金回归算例：湿季窗口。见 docs/design.md §2.8b
    DEF_CASE_NAME = 'CN-Cng-wet'
 
    SITE_fsitedata    = '@CASE_DIR@/../CN-Cng/site.nc'

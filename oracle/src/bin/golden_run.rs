@@ -62,9 +62,21 @@ fn main() -> Result<()> {
     let case_name = read_case_name(&work.join("case.nml"))?;
     let out = work.join("out").join(&case_name);
 
+    // mkinidata 的产物必须列到**文件**，不能只列 restart/const 目录：
+    // adjudicate 用的是 Path::exists，而目录在 mkinidata 写任何东西之前就已存在，
+    // 于是「跑完了但什么都没写」——正是产物校验这条腿存在的理由——恰好抓不到。
+    // 两个文件名见 design.md §6.2；block 后缀实测是 _w180_s90。
+    let lc = "lc2005";
+    let const_dir = out.join("restart/const");
     let stages = [
         (Stage::MkSrfData, vec![out.join("landdata/srfdata.nc")]),
-        (Stage::MkIniData, vec![out.join("restart/const")]),
+        (
+            Stage::MkIniData,
+            vec![
+                const_dir.join(format!("{case_name}_restart_const_{lc}_w180_s90.nc")),
+                const_dir.join(format!("{case_name}_restart_const_{lc}.nc")),
+            ],
+        ),
         (Stage::Colm, vec![]), // history 文件名含日期，单独发现
     ];
 
@@ -76,11 +88,20 @@ fn main() -> Result<()> {
             .output()
             .with_context(|| format!("failed to spawn {}", exe.display()))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        // stdout 与 stderr 都要收。gfortran 运行时的错误只走 stderr，
+        // 所以 FAILURE_MARKERS 里的 `Fortran runtime error` 与 `Error termination`
+        // 在只读 stdout 时**永远不可能命中**；实测 namelist 文件缺失时
+        // stdout 是 0 字节而 stderr 有 302 字节，日志会空得看不出原因。
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            text.push_str("\n--- stderr ---\n");
+            text.push_str(&stderr);
+        }
         let log = work.join(format!("{}.log", stage.program()));
-        fs::write(&log, stdout.as_bytes())?;
+        fs::write(&log, text.as_bytes())?;
 
-        let verdict = adjudicate(*stage, output.status.code(), &stdout, artifacts);
+        let verdict = adjudicate(*stage, output.status.code(), &text, artifacts);
         match verdict {
             Outcome::Succeeded => println!("  {:<10} ok", stage.program()),
             Outcome::Failed(f) => {

@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main]
 
 jobs:
   # 每个 PR 都跑：纯 Rust 侧
