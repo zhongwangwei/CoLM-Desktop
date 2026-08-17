@@ -65,19 +65,19 @@
 属 TRACER，本轮明确搁置。**解析器不区分 group 名**（它只认语法），但往返测试
 覆盖全部 55 个文件，包括范围外的那些——语法是共通的，多覆盖不花钱。
 
-### schema 侧：743 个声明，100% 可被单一正则解析
+### schema 侧：745 行声明，生成器收录其中 713 个字段
 
 | 项 | 数量 |
 |---|---|
-| 形如声明的行 | 743 |
-| 单一正则可解析 | **743（100%）** |
-| 顶层 `DEF_*` 标量 | 177，**全部带默认值** |
+| 全文件形如声明的行 | 745 |
+| 生成器实际收录 | **713**（声明区内，见下方陷阱） |
+| 顶层 `DEF_*` 标量 | 178，**全部带默认值** |
 | 派生类型 | 4 个，共 535 个成员 |
 | └ `history_var_type` | 482 |
 | └ `nl_forcing_type` | 34 |
 | └ `nl_simulation_time_type` | 15 |
 | └ `nl_domain_type` | 4 |
-| 带行尾注释（可作字段说明） | 161/743（22%） |
+| 带行尾注释（可作字段说明） | 108/713（15%） |
 
 **默认值的形态**（生成器要认全这些）：
 
@@ -90,6 +90,15 @@
 | 单行数组字面量 | 3 | `(/ 1, 2, 3 /)` |
 | **跨行数组字面量** | **4** | `(/ &` 换行续到 `/)` |
 | 双引号字符串 | 3 | `"H2_18O,HDO"` |
+
+**另一件已知但本轮不处理的事**：178 个顶层 `DEF_` 里有 2 个被 CPP 条件包着 ——
+`DEF_file_GIEMS` 与 `DEF_wetland_finundation_scheme`，守卫是
+`#if (defined TRACER) && (defined BGC)`（`MOD_Namelist.F90:445-449`）。生成器扫的是
+**文本**而不是预处理结果，所以它们照样进表。这在本里程碑无害（TRACER 本轮搁置，
+两个字段在我们构建的任何配置里都不存在），但 GUI 里程碑必须知道：把一个当前构建
+没声明的字段写进 namelist，CoLM 会以 `Cannot match namelist object name` 失败 ——
+那正是 `colm-kernel` 已登记的失败标记之一。届时的解法是给 `Field` 记一个可选的
+守卫表达式，而不是在这里提前造。
 
 **一个必须处理的陷阱**：全文件有 7 个声明不含 `=`，它们**不是 namelist 字段**，
 而是子程序内的局部变量与哑元：
@@ -1286,7 +1295,7 @@ pub struct Field {
     pub name: &'static str,
     pub kind: FieldKind,
     pub default: Default,
-    /// 声明处的行尾注释，可作为 GUI 的字段说明。161/743 个声明有。
+    /// 声明处 `=` 之后的行尾注释，可作为 GUI 的字段说明。713 个字段里 108 个有。
     pub doc: Option<&'static str>,
     /// 数组长度，如 `fprefix(8)` 是 `Some(8)`
     pub arity: Option<usize>,
@@ -1310,15 +1319,15 @@ use crate::{find, all, Default, FieldKind};
 
 #[test]
 fn the_table_has_the_measured_number_of_fields() {
-    // 实测：177 个顶层 DEF_ 标量 + 4 个派生类型共 535 个成员。
+    // 实测：178 个顶层 DEF_ 标量 + 4 个派生类型共 535 个成员，合计 713。
     // 若这个数变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
         (700..=760).contains(&total),
-        "expected roughly 712 fields, got {total}"
+        "expected roughly 713 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 177, "top-level DEF_ count changed");
+    assert_eq!(top, 178, "top-level DEF_ count changed");
 }
 
 #[test]
@@ -1910,7 +1919,7 @@ git commit -m "Document the configuration layer and wire it into CI"
 - [ ] 改一个字段后**恰好一行**发生变化，行数不变
 - [ ] 改不存在的字段**报错**而不是静默追加
 - [ ] 重复计数、数组切片、续行符、未闭合 group 各自**报错**而不是猜
-- [ ] schema 表含 177 个顶层 `DEF_*` 与 482 个 `history_var_type` 成员
+- [ ] schema 表含 178 个顶层 `DEF_*` 与 482 个 `history_var_type` 成员
 - [ ] 6 个子程序局部变量与哑元**没有**混进 schema
 - [ ] 篡改 `generated.rs` 后漂移测试失败，并自动还原工作树
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 无输出
