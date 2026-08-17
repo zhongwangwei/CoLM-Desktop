@@ -8,6 +8,7 @@
 //! diff 里 —— 上游加一个 DEF_ 或改一个默认值，应当是一次可见的改动，
 //! 而不是某次构建之后悄悄换掉的东西。
 
+mod hist;
 mod namelist;
 
 use std::collections::BTreeMap;
