@@ -18,6 +18,7 @@
 //! `tests/drift.rs` 守住它不与上游脱节。
 
 pub mod generated;
+pub mod time;
 
 use std::collections::BTreeSet;
 
