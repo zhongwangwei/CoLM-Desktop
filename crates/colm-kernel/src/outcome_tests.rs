@@ -142,3 +142,57 @@ fn stage_program_names_match_the_built_executables() {
     assert_eq!(Stage::MkIniData.program(), "mkinidata");
     assert_eq!(Stage::Colm.program(), "colm");
 }
+
+#[test]
+fn a_rangecheck_exception_is_a_failure_even_without_colmdebug() {
+    // RangeCheck 在 `CoLMDEBUG` 下会自己 CoLM_stop，那条走 `***** ERROR`。
+    // 这里模拟的是**没有** CoLMDEBUG 的预设：同样检出了 NaN，但不中止，
+    // 于是运行跑到底、产物齐全、成功标记也打了。少了这两条标记就判成功。
+    for line in [
+        " Check vector data:    t_soisno     [K]      is in (    0.1000000000E+00,    0.1000000000E+00) with NAN",
+        " Check vector data:    wliq_soisno  [kg/m2]  is in (   -0.1000000000E+03,    0.1000000000E+03) Out of Range!",
+    ] {
+        let stdout = format!("{line}\n CoLM Execution Completed.\n");
+        match adjudicate(Stage::Colm, Some(0), &stdout, &[]) {
+            Outcome::Failed(Failure::ErrorMarker { line: l, .. }) => {
+                assert!(l.contains("Check vector data"), "{l}");
+            }
+            other => panic!("expected an error marker, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_missing_input_file_is_named_rather_than_reported_as_a_missing_marker() {
+    // MOD_NetCDFSerial.F90:163 打印这一句后调无参数的 CoLM_stop() ——
+    // 不再打印任何东西，单点下退出码仍是 0。缺了 `does not exist` 标记的话，
+    // 这只会以「成功标记没出现」被抓到，而用户要看的是缺了哪个文件。
+    let stdout = " /data/CN-Cng_Met.nc does not exist.\n";
+    match adjudicate(Stage::Colm, Some(0), stdout, &[]) {
+        Outcome::Failed(Failure::ErrorMarker { line, .. }) => {
+            assert!(line.contains("CN-Cng_Met.nc"), "{line}");
+        }
+        other => panic!("expected the file to be named, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_healthy_history_namelist_line_is_still_benign() {
+    // 三段日志里各出现一次，实测原文带前导空格：
+    // ` History namelist file: null does not exist.`
+    // 它含新增的 `does not exist` 标记，全靠 BENIGN_LINES 的整行豁免救回来 ——
+    // 这条测试守住那条豁免与真实文本仍然逐字相同。
+    let stdout = " History namelist file: null does not exist.\n CoLM Execution Completed.\n";
+    assert_eq!(
+        adjudicate(Stage::Colm, Some(0), stdout, &[]),
+        Outcome::Succeeded
+    );
+
+    // 但指向一个真实存在过的路径就不豁免：CoLM 会静默回落到默认变量集。
+    let stdout =
+        " History namelist file: /x/hist.nml does not exist.\n CoLM Execution Completed.\n";
+    assert!(matches!(
+        adjudicate(Stage::Colm, Some(0), stdout, &[]),
+        Outcome::Failed(Failure::ErrorMarker { .. })
+    ));
+}

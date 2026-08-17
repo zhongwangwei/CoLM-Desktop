@@ -54,10 +54,30 @@ const FAILURE_MARKERS: &[&str] = &[
     "Memory allocation (malloc) failure",
     "Fortran runtime error",
     "Error termination",
+    // RangeCheck 判定状态量有 NaN 或越界时，往那一行行尾追加的两句话
+    // （`MOD_RangeCheck.F90:139,144`，六处 subroutine 各一份）。
+    //
+    // 定义了 `CoLMDEBUG` 时 RangeCheck 自己会 `CoLM_stop(' ***** ERROR: ...')`，
+    // 那条已被下面的 `***** ERROR` 抓住。这里再列一遍是为了**把检测与那个
+    // 编译期宏解耦**：预设若不带 `CoLMDEBUG`（§6.5 说它是「默认武装」，
+    // 也就是可改的），RangeCheck 仍然会打印这两句，但不再中止 ——
+    // 那样一次带 NaN 的运行会跑到底、写出产物、打出成功标记，被判成功。
+    // 实测健康运行的 39215 行 colm.log 里这两句零次出现，所以不花代价。
+    " with NAN",
+    " Out of Range!",
     // 笼统
     "Netcdf error",
     "***** ERROR",
     "ERROR in",
+    // `MOD_NetCDFSerial.F90:163`：输入文件不存在时打印这一句，然后
+    // **无参数**调 `CoLM_stop()` —— 不打印任何别的东西，单点下退出码还是 0。
+    // 少了这条标记，缺文件只会以「成功标记没出现」的形式被抓到，
+    // 而用户需要看见的是缺了哪个文件。
+    //
+    // 唯一的无害来源是没配 `DEF_HIST_vars_namelist` 时那一行，见 `BENIGN_LINES`。
+    // 注意豁免是整行精确匹配 `null` 那一版：用户若把它指向一个不存在的路径，
+    // CoLM 会静默回落到默认变量集 —— 那正该判失败。
+    "does not exist",
 ];
 
 /// 长得像失败但无害的整行。逐行**完全匹配去空白后**的文本，不做子串匹配，
