@@ -9,8 +9,10 @@ publish.workspace = true
 [dependencies]
 colm-forcing = { path = "../crates/colm-forcing" }
 colm-kernel = { path = "../crates/colm-kernel" }
+colm-namelist = { path = "../crates/colm-namelist" }
 anyhow.workspace = true
-sha2.workspace = true
+# 没有 sha2：输入校验借 colm-kernel 的 `sha256_hex`。三个 PLUMBER2 文件最大
+# 15 MB，整读进内存没有问题，而少一份摘要实现就少一处会悄悄分叉的地方。
 # static 是无条件的，不做成可选 feature。三个平台走同一条构建路径。
 # 实测依据（macOS ARM）：静态构建 45.5 秒，产物的动态依赖只剩 libiconv 与
 # libSystem 两个系统库，清空所有环境变量后能直接读黄金文件。
@@ -20,6 +22,7 @@ sha2.workspace = true
 netcdf = { workspace = true, features = ["static"] }
 toml.workspace = true
 serde = { workspace = true }
+serde_json.workspace = true
 
 [lints]
 workspace = true

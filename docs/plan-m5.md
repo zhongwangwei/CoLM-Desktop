@@ -874,11 +874,12 @@ git commit -m "Put the three-stage orchestration where other callers can reach i
 `read_case_name` 改用 `colm-namelist`：
 
 ```rust
+/// 算例名决定所有产物路径，所以取错了会一路错到「找不到 history」。
+/// 用真解析器而不是字符串查找：后者会被一行注释掉的 `DEF_CASE_NAME` 骗过去。
 fn read_case_name(nml: &Path) -> Result<String> {
-    let text = std::fs::read_to_string(nml)
-        .with_context(|| format!("cannot read {}", nml.display()))?;
-    let doc = colm_namelist::parse(&text)
-        .with_context(|| format!("cannot parse {}", nml.display()))?;
+    let text = fs::read_to_string(nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let doc =
+        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
     match doc.get("DEF_CASE_NAME") {
         Some(colm_namelist::Value::Str(s)) => Ok(s.clone()),
         Some(other) => bail!("DEF_CASE_NAME is {other:?}, not a string"),
@@ -887,21 +888,42 @@ fn read_case_name(nml: &Path) -> Result<String> {
 }
 ```
 
+`oracle/Cargo.toml` 因此多一个 `colm-namelist` 依赖。同时 `sha2` 可以删掉 ——
+`verify_inputs` 改借 `colm_kernel::sha256_hex`，三个 PLUMBER2 文件最大 15 MB，
+整读进内存没有问题，而少一份摘要实现就少一处会悄悄分叉的地方。
+换来的新依赖是 `serde_json`（下一步要用）。
+
 - [ ] **Step 2: 用新接口重写三段循环**
 
-```rust
-    let kernel = colm_kernel::Kernel::open(&repo.join(&kernel))?;
-    println!("  kernel: {} ({})", kernel.manifest.preset, kernel.manifest.colm_git_sha);
+命令行参数里的那个 `kernel` 要改名成 `kernel_dir`，好把 `kernel` 这个名字留给
+打开后的 `Kernel`。后面 `--write-golden` 拷 manifest 时用 `kernel.dir`，不再
+重新 `repo.join(...)`。
 
+```rust
+    let kernel = Kernel::open(&repo.join(&kernel_dir))?;
+    println!(
+        "  kernel: {} {} ({})",
+        kernel.manifest.preset, kernel.manifest.colm_git_sha, kernel.manifest.platform
+    );
+```
+
+```rust
     for (stage, artifacts) in &stages {
-        let r = colm_kernel::run_stage(&kernel, *stage, &work.join("case.nml"), &work, artifacts)?;
-        for o in &r.overrides {
-            println!("  {:<10} {:?}: {}", "", o.kind, o.text);
-        }
+        let r = colm_kernel::run_stage(&kernel, *stage, &nml, &work, artifacts)?;
+        // 先报这一段的结论，覆盖消息缩进列在它下面 —— 反过来的话，读的人
+        // 得先看完一屏消息才知道是哪一段说的。
+        // 整行原样打印：每行自带 `Note:`/`Warning:` 前缀，再报一次 kind 只是重复。
+        // 见 design.md §6.4。
         if r.succeeded() {
             println!("  {:<10} ok", stage.program());
         } else {
             eprintln!("  {:<10} FAILED: {:?}", stage.program(), r.outcome);
+        }
+        // 失败时也要列：CoLM 恰恰会先悄悄改掉配置，然后死在别处。
+        for o in &r.overrides {
+            println!("             {}", o.text);
+        }
+        if !r.succeeded() {
             eprintln!("  log: {}", r.log.display());
             bail!("stage {} failed", stage.program());
         }
@@ -925,7 +947,15 @@ fn read_case_name(nml: &Path) -> Result<String> {
 
 改动只有一处：把两个 `extract_json_*` 换成
 `serde_json::from_str::<colm_kernel::Manifest>(...)`，然后逐字段比对。
-函数留在 `oracle`，逻辑不变。
+函数留在 `oracle`，逻辑不变。签名从 `(repo, kernel_dir)` 变成
+`(repo, have: &Manifest)` —— 当前那份清单 `Kernel::open` 已经读过了，
+没必要再读一遍。
+
+有一处要当心：换成 `serde_json` 之后，**入库那份读不动就会变成 `Err`**，
+而旧的字符串查找在同样情形下所有键取回 `None`，走的是「全字段漂移 → 警告」。
+本函数的契约是**只警告不失败**，所以解析失败也必须走警告 —— 入库的那份是一条
+历史记录，不是门禁，不该让整场回归倒在它身上。顺带把 `schema` 也纳入比对：
+它本来就是「这些字段各自什么意思」的版本号，变了就该有人看见。
 
 顺带删掉那两个函数上方的注释 ——「刻意不引入 serde_json：manifest 是我们自己
 按固定格式生成的」。那句话在写下时是个合理的判断，现在有证据推翻它了

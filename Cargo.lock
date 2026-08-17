@@ -322,9 +322,10 @@ dependencies = [
  "anyhow",
  "colm-forcing",
  "colm-kernel",
+ "colm-namelist",
  "netcdf",
  "serde",
- "sha2",
+ "serde_json",
  "toml",
 ]
 

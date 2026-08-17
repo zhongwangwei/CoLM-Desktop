@@ -3,26 +3,30 @@
 //! 用法: golden-run <case-name> [--kernel <dir>] [--write-golden]
 //!
 //! 环境变量 PLUMBER2_ROOT 必须指向含 Forcing/ Sitedata/ Observation/ 的目录。
+//!
+//! 本程序不再自己认内核、自己拼命令、自己判成败 —— 那三件事住在 `colm-kernel`，
+//! 桌面端与这里共用同一份。留在本文件里的只有黄金回归特有的部分：
+//! 校验第三方输入、展开算例模板、发现 history 文件、以及比对**溯源**
+//! （见 `check_kernel_provenance`，它与 `Kernel::open` 验的不是同一件事）。
 
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use colm_kernel::outcome::{adjudicate, Outcome, Stage};
-use sha2::{Digest, Sha256};
+use colm_kernel::outcome::Stage;
+use colm_kernel::{sha256_hex, Kernel, Manifest};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let case = args
         .next()
         .context("usage: golden-run <case-name> [--kernel <dir>] [--write-golden]")?;
-    let mut kernel = PathBuf::from("kernels/waterheat");
+    let mut kernel_dir = PathBuf::from("kernels/waterheat");
     let mut write_golden = false;
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--kernel" => kernel = PathBuf::from(args.next().context("--kernel needs a path")?),
+            "--kernel" => kernel_dir = PathBuf::from(args.next().context("--kernel needs a path")?),
             "--write-golden" => write_golden = true,
             other => bail!("unknown argument: {other}"),
         }
@@ -33,8 +37,12 @@ fn main() -> Result<()> {
         PathBuf::from(std::env::var("PLUMBER2_ROOT").context("PLUMBER2_ROOT is not set")?);
 
     verify_inputs(&repo, &plumber2)?;
-    verify_kernel(&repo.join(&kernel))?;
-    check_kernel_provenance(&repo, &repo.join(&kernel))?;
+    let kernel = Kernel::open(&repo.join(&kernel_dir))?;
+    println!(
+        "  kernel: {} {} ({})",
+        kernel.manifest.preset, kernel.manifest.colm_git_sha, kernel.manifest.platform
+    );
+    check_kernel_provenance(&repo, &kernel.manifest)?;
 
     let case_dir = repo.join("oracle/cases").join(&case);
     if !case_dir.is_dir() {
@@ -80,7 +88,8 @@ fn main() -> Result<()> {
         }),
     )?;
 
-    let case_name = read_case_name(&work.join("case.nml"))?;
+    let nml = work.join("case.nml");
+    let case_name = read_case_name(&nml)?;
     let out = work.join("out").join(&case_name);
 
     // mkinidata 的产物必须列到**文件**，不能只列 restart/const 目录：
@@ -102,34 +111,23 @@ fn main() -> Result<()> {
     ];
 
     for (stage, artifacts) in &stages {
-        let exe = repo.join(&kernel).join(format!("{}.x", stage.program()));
-        let output = Command::new(&exe)
-            .arg(work.join("case.nml"))
-            .current_dir(&work)
-            .output()
-            .with_context(|| format!("failed to spawn {}", exe.display()))?;
-
-        // stdout 与 stderr 都要收。gfortran 运行时的错误只走 stderr，
-        // 所以 FAILURE_MARKERS 里的 `Fortran runtime error` 与 `Error termination`
-        // 在只读 stdout 时**永远不可能命中**；实测 namelist 文件缺失时
-        // stdout 是 0 字节而 stderr 有 302 字节，日志会空得看不出原因。
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            text.push_str("\n--- stderr ---\n");
-            text.push_str(&stderr);
+        let r = colm_kernel::run_stage(&kernel, *stage, &nml, &work, artifacts)?;
+        // 先报这一段的结论，覆盖消息缩进列在它下面 —— 反过来的话，读的人
+        // 得先看完一屏消息才知道是哪一段说的。
+        // 整行原样打印：每行自带 `Note:`/`Warning:` 前缀，再报一次 kind 只是重复。
+        // 见 design.md §6.4。
+        if r.succeeded() {
+            println!("  {:<10} ok", stage.program());
+        } else {
+            eprintln!("  {:<10} FAILED: {:?}", stage.program(), r.outcome);
         }
-        let log = work.join(format!("{}.log", stage.program()));
-        fs::write(&log, text.as_bytes())?;
-
-        let verdict = adjudicate(*stage, output.status.code(), &text, artifacts);
-        match verdict {
-            Outcome::Succeeded => println!("  {:<10} ok", stage.program()),
-            Outcome::Failed(f) => {
-                eprintln!("  {:<10} FAILED: {f:?}", stage.program());
-                eprintln!("  log: {}", log.display());
-                bail!("stage {} failed", stage.program());
-            }
+        // 失败时也要列：CoLM 恰恰会先悄悄改掉配置，然后死在别处。
+        for o in &r.overrides {
+            println!("             {}", o.text);
+        }
+        if !r.succeeded() {
+            eprintln!("  log: {}", r.log.display());
+            bail!("stage {} failed", stage.program());
         }
     }
 
@@ -165,7 +163,7 @@ fn main() -> Result<()> {
         // 所以「是什么工具链产出了这些字节」在仓库里本来没有任何记录。
         // 工具链一变（Homebrew 升 gcc、conda 升 netcdf），比对会在 129 个变量上
         // 全红，而没人分得清是物理改了还是编译器改了。把 manifest 一并入库。
-        let src = repo.join(&kernel).join("manifest.json");
+        let src = kernel.dir.join("manifest.json");
         let dst = repo.join("oracle/golden/kernel-manifest.json");
         fs::copy(&src, &dst)?;
         println!("  wrote provenance: {}", dst.display());
@@ -179,45 +177,60 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// 把当前内核的 manifest 与产出黄金文件时入库的那份对照。
+/// 把当前内核的清单与产出黄金文件时入库的那份对照。
 ///
-/// 只比**可复现**的字段。`sha256` 每次构建都不同（实测：同一路径连跑两次，
-/// 三个二进制的摘要全变），它认定的是完整性而非配置身份，所以不参与比较。
-/// 不匹配只警告不失败：工具链变了未必意味着结果错了，但必须让人看见，
-/// 否则一场 129 个变量全红的比对会被误读成物理回归。
-fn check_kernel_provenance(repo: &Path, kernel_dir: &Path) -> Result<()> {
+/// 这**不是** `Kernel::open` 的重复。`Kernel::open` 问的是「二进制和紧挨着它的
+/// 清单对得上吗」，只比 `sha256`，不符即失败；本函数问的是「当前内核和产出黄金
+/// 文件的那个是同一配置吗」，比的是可复现的字段，不符只警告。
+///
+/// 刻意不比 `sha256`：Fortran 构建不逐字节可复现（实测同一路径连跑两次，三个
+/// 二进制的摘要全变），拿它比配置身份只会永远告警。只警告不失败也是刻意的：
+/// 工具链变了未必意味着结果错了，但必须让人看见，否则一场 129 个变量全红的
+/// 比对会被误读成物理回归。
+fn check_kernel_provenance(repo: &Path, have: &Manifest) -> Result<()> {
     let recorded = repo.join("oracle/golden/kernel-manifest.json");
     if !recorded.exists() {
         return Ok(()); // 还没产出过黄金文件
     }
-    let want = fs::read_to_string(&recorded)?;
-    let have = fs::read_to_string(kernel_dir.join("manifest.json"))?;
+    let text = fs::read_to_string(&recorded)?;
+    // 读不动入库的那份不该让整场回归失败 —— 它是一条历史记录，不是门禁。
+    let want: Manifest = match serde_json::from_str(&text) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "  WARNING: cannot read the recorded kernel manifest at {}: {e}",
+                recorded.display()
+            );
+            eprintln!("    provenance was not checked");
+            return Ok(());
+        }
+    };
 
     let mut drift = Vec::new();
-    for key in [
-        "preset",
-        "platform",
-        "colm_git_sha",
-        "generator_args",
-        "built_with",
-        "netcdf_c",
-        "netcdf_fortran",
-        "hdf5",
-    ] {
-        let (a, b) = (
-            extract_json_string(&want, key),
-            extract_json_string(&have, key),
-        );
+    let mut cmp = |key: &str, a: &str, b: &str| {
         if a != b {
             drift.push(format!("{key}: recorded {a:?}, current {b:?}"));
         }
+    };
+    cmp("preset", &want.preset, &have.preset);
+    cmp("platform", &want.platform, &have.platform);
+    cmp("colm_git_sha", &want.colm_git_sha, &have.colm_git_sha);
+    cmp("generator_args", &want.generator_args, &have.generator_args);
+    cmp("built_with", &want.built_with, &have.built_with);
+    cmp("netcdf_c", &want.netcdf_c, &have.netcdf_c);
+    cmp("netcdf_fortran", &want.netcdf_fortran, &have.netcdf_fortran);
+    cmp("hdf5", &want.hdf5, &have.hdf5);
+    if want.schema != have.schema {
+        drift.push(format!(
+            "schema: recorded {}, current {}",
+            want.schema, have.schema
+        ));
     }
-    let (ma, mb) = (
-        extract_json_array(&want, "macros"),
-        extract_json_array(&have, "macros"),
-    );
-    if ma != mb {
-        drift.push(format!("macros: recorded {ma:?}, current {mb:?}"));
+    if want.macros != have.macros {
+        drift.push(format!(
+            "macros: recorded {:?}, current {:?}",
+            want.macros, have.macros
+        ));
     }
 
     if drift.is_empty() {
@@ -232,17 +245,6 @@ fn check_kernel_provenance(repo: &Path, kernel_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 从 manifest 里取 `"key": [ ... ]` 的原文。与 `extract_json_string` 一样，
-/// 刻意不引入 serde_json：manifest 是我们自己按固定格式生成的。
-fn extract_json_array(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":");
-    let start = text.find(&needle)? + needle.len();
-    let rest = &text[start..];
-    let open = rest.find('[')?;
-    let close = rest[open..].find(']')? + open;
-    Some(rest[open..=close].to_string())
-}
-
 fn repo_root() -> Result<PathBuf> {
     let out = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -253,32 +255,17 @@ fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(String::from_utf8(out.stdout)?.trim()))
 }
 
-/// `DEF_CASE_NAME = 'X'` -> `X`。够用即止：Plan 2 的 colm-namelist 会做完整解析。
+/// 算例名决定所有产物路径，所以取错了会一路错到「找不到 history」。
+/// 用真解析器而不是字符串查找：后者会被一行注释掉的 `DEF_CASE_NAME` 骗过去。
 fn read_case_name(nml: &Path) -> Result<String> {
-    let text = fs::read_to_string(nml)?;
-    for line in text.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("DEF_CASE_NAME") {
-            if let Some(v) = rest.split('=').nth(1) {
-                return Ok(v.trim().trim_matches('\'').trim_matches('"').to_string());
-            }
-        }
+    let text = fs::read_to_string(nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let doc =
+        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
+    match doc.get("DEF_CASE_NAME") {
+        Some(colm_namelist::Value::Str(s)) => Ok(s.clone()),
+        Some(other) => bail!("DEF_CASE_NAME is {other:?}, not a string"),
+        None => bail!("no DEF_CASE_NAME in {}", nml.display()),
     }
-    bail!("DEF_CASE_NAME not found in {}", nml.display())
-}
-
-fn sha256_file(p: &Path) -> Result<String> {
-    let mut f = fs::File::open(p).with_context(|| format!("cannot open {}", p.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// 校验外部 PLUMBER2 文件。换了份数据就该在这里炸，而不是等黄金文件对不上。
@@ -291,7 +278,9 @@ fn verify_inputs(repo: &Path, plumber2: &Path) -> Result<()> {
         }
         let (want, rel) = line.split_once("  ").context("malformed sha256 line")?;
         let path = plumber2.join(rel);
-        let got = sha256_file(&path)?;
+        let bytes = fs::read(&path)
+            .with_context(|| format!("cannot read {} to hash it", path.display()))?;
+        let got = sha256_hex(&bytes);
         if got != want {
             bail!(
                 "input checksum mismatch for {}\n  expected {want}\n  got      {got}",
@@ -301,44 +290,4 @@ fn verify_inputs(repo: &Path, plumber2: &Path) -> Result<()> {
     }
     println!("  inputs verified");
     Ok(())
-}
-
-/// 校验内核。「不存在」和「存在但不是我们构建的那个」是两种不同的情况。
-fn verify_kernel(dir: &Path) -> Result<()> {
-    let manifest_path = dir.join("manifest.json");
-    if !manifest_path.exists() {
-        bail!(
-            "no kernel manifest at {}\n  run: ./oracle/scripts/build_kernel.sh waterheat",
-            manifest_path.display()
-        );
-    }
-    let text = fs::read_to_string(&manifest_path)?;
-    for prog in ["mksrfdata", "mkinidata", "colm"] {
-        let exe = dir.join(format!("{prog}.x"));
-        if !exe.exists() {
-            bail!("kernel manifest present but {} is missing", exe.display());
-        }
-        let want = extract_json_string(&text, prog)
-            .with_context(|| format!("manifest has no sha256 for {prog}"))?;
-        let got = sha256_file(&exe)?;
-        if got != want {
-            bail!(
-                "kernel binary {} does not match its manifest\n  expected {want}\n  got      {got}\n  rebuild with: ./oracle/scripts/build_kernel.sh",
-                exe.display()
-            );
-        }
-    }
-    println!("  kernel verified ({})", dir.display());
-    Ok(())
-}
-
-/// 从 manifest.json 里取 `"key": "value"`。刻意不引入 serde_json：
-/// manifest 是我们自己按固定格式生成的，两行字符串查找足够，且少一个依赖。
-fn extract_json_string(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":");
-    let start = text.find(&needle)? + needle.len();
-    let rest = &text[start..];
-    let q1 = rest.find('"')? + 1;
-    let q2 = rest[q1..].find('"')? + q1;
-    Some(rest[q1..q2].to_string())
 }
