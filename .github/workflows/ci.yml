@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  # 每个 PR 都跑：纯 Rust 侧
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false      # 内核只在黄金作业里才需要
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # 缓存尤其重要：没有它每个作业都要重新从源码编译 HDF5 与 netcdf-c。
+      - uses: Swatinem/rust-cache@v2
+
+      # netcdf 是本方案最大的依赖风险点，所以三平台都编一次 —— 为的是让
+      # Windows 上的失败在第一天暴露，而不是等到里程碑 9。
+      #
+      # 三个平台走完全相同的一条命令：netcdf 静态链接是无条件的，
+      # 不装任何系统 netcdf，也不设 NETCDF_DIR / HDF5_DIR。
+      # 需要 cmake 与 C++ 编译器，三个 GitHub runner 都自带。
+      # 首次构建约多花 45 秒编译 HDF5 与 netcdf-c 源码；cargo 会缓存。
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # 下面两条只读已入库的黄金文件与 tolerances.toml，不需要 PLUMBER2 数据、
+      # 也不需要 Fortran 内核，所以能在每个 PR、三个平台上跑。
+      #
+      # tier-check 若只放在 golden 作业里，就会被 HAS_PLUMBER2 与自托管 runner
+      # 双重门控，实际上几乎永不运行 —— 而它要防的正是"有人加了 history 变量却
+      # 忘了给它定 tier"，那种改动在任何 PR 里都会发生。
+      - name: Tolerance classification is complete
+        run: cargo run -p oracle --bin tier-check -- oracle/golden/CN-Cng_hist_2008-01.nc oracle/golden/CN-Cng-wet_hist_2008-07.nc
+
+      # 判官自比对在这里的价值不是"证明两个相同文件相同"，而是证明**静态链接的
+      # netcdf 在这个平台上真的能读一个真实 CoLM 文件**，而不只是链接通过。
+      # Windows 是本方案的头号风险点，这条让它在第一天就被覆盖。
+      - name: Judge can read a real CoLM file on this platform
+        run: |
+          cargo run -p oracle --bin golden-compare -- oracle/golden/CN-Cng_hist_2008-01.nc oracle/golden/CN-Cng_hist_2008-01.nc
+          cargo run -p oracle --bin golden-compare -- oracle/golden/CN-Cng-wet_hist_2008-07.nc oracle/golden/CN-Cng-wet_hist_2008-07.nc
+
+  # 黄金回归：需要 PLUMBER2 数据与 Fortran 工具链，只在带该数据的 runner 上跑。
+  golden:
+    if: ${{ vars.HAS_PLUMBER2 == 'true' }}
+    runs-on: [self-hosted, plumber2]
+    steps:
+      # submodule 目前指向本机绝对路径（见 Task 5 Step 1），所以这一步只在
+      # 那个路径存在的自托管 runner 上成立，且同样需要放开 file 传输。
+      # 待 CoLM202X 有可用的远端后，把 .gitmodules 的 url 改成 GitHub 地址，
+      # 这两条限制会一起消失。
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init submodule from its local path
+        run: git -c protocol.file.allow=always submodule update --init --recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build kernel
+        run: ./oracle/scripts/build_kernel.sh waterheat
+
+      - name: Golden regression (both windows)
+        env:
+          PLUMBER2_ROOT: ${{ vars.PLUMBER2_ROOT }}
+        run: |
+          set -euo pipefail
+          for case in CN-Cng CN-Cng-wet; do
+            cargo run -p oracle --bin golden-run -- "$case"
+          done
+          cargo run -p oracle --bin golden-compare -- \
+            oracle/golden/CN-Cng_hist_2008-01.nc \
+            oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+          cargo run -p oracle --bin golden-compare -- \
+            oracle/golden/CN-Cng-wet_hist_2008-07.nc \
+            oracle/work/CN-Cng-wet/out/CN-Cng-wet/history/CN-Cng-wet_hist_2008-07.nc
+          cargo run -p oracle --bin tier-check -- oracle/golden/*.nc
+
+  # 让「黄金回归没跑」这件事在 PR 界面上可见，而不是静默缺席。
+  golden-status:
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - name: Report golden-regression coverage
+        run: |
+          if [ "${{ vars.HAS_PLUMBER2 }}" = "true" ]; then
+            echo "Golden regression ran on the self-hosted runner."
+          else
+            echo "::warning::Golden regression was NOT run: no PLUMBER2 data on this runner."
+            echo "::warning::Green CI here does not mean the numerics are unchanged."
+          fi

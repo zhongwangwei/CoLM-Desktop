@@ -19,8 +19,14 @@ const VOLATILE_ATTRIBUTES: &[&str] = &[
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let a_path = PathBuf::from(args.next().context("usage: golden-compare <golden> <produced>")?);
-    let b_path = PathBuf::from(args.next().context("usage: golden-compare <golden> <produced>")?);
+    let a_path = PathBuf::from(
+        args.next()
+            .context("usage: golden-compare <golden> <produced>")?,
+    );
+    let b_path = PathBuf::from(
+        args.next()
+            .context("usage: golden-compare <golden> <produced>")?,
+    );
 
     let a = netcdf::open(&a_path).with_context(|| format!("cannot open {}", a_path.display()))?;
     let b = netcdf::open(&b_path).with_context(|| format!("cannot open {}", b_path.display()))?;
@@ -28,10 +34,8 @@ fn main() -> Result<()> {
     let mut problems: Vec<String> = Vec::new();
 
     // --- 维度 ---
-    let dims_a: BTreeSet<(String, usize)> =
-        a.dimensions().map(|d| (d.name(), d.len())).collect();
-    let dims_b: BTreeSet<(String, usize)> =
-        b.dimensions().map(|d| (d.name(), d.len())).collect();
+    let dims_a: BTreeSet<(String, usize)> = a.dimensions().map(|d| (d.name(), d.len())).collect();
+    let dims_b: BTreeSet<(String, usize)> = b.dimensions().map(|d| (d.name(), d.len())).collect();
     for d in dims_a.difference(&dims_b) {
         problems.push(format!("dimension only in golden: {d:?}"));
     }
@@ -42,8 +46,12 @@ fn main() -> Result<()> {
     // --- 全局属性 ---
     compare_attrs(
         "global",
-        &a.attributes().map(|x| x.name().to_string()).collect::<Vec<_>>(),
-        &b.attributes().map(|x| x.name().to_string()).collect::<Vec<_>>(),
+        &a.attributes()
+            .map(|x| x.name().to_string())
+            .collect::<Vec<_>>(),
+        &b.attributes()
+            .map(|x| x.name().to_string())
+            .collect::<Vec<_>>(),
         |n| a.attribute(n).and_then(|x| x.value().ok()).map(fmt_attr),
         |n| b.attribute(n).and_then(|x| x.value().ok()).map(fmt_attr),
         &mut problems,
@@ -70,9 +78,11 @@ fn main() -> Result<()> {
         }
 
         // 全部按 f64 读出后逐位比较。NaN 视为相等（两边都 NaN 才算相等）。
-        let xa: Vec<f64> = va.get_values(netcdf::Extents::All)
+        let xa: Vec<f64> = va
+            .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read golden {name}"))?;
-        let xb: Vec<f64> = vb.get_values(netcdf::Extents::All)
+        let xb: Vec<f64> = vb
+            .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read produced {name}"))?;
         if xa.len() != xb.len() {
             problems.push(format!("{name}: length {} vs {}", xa.len(), xb.len()));
@@ -82,8 +92,12 @@ fn main() -> Result<()> {
         // 下游的评估与绘图都依赖它们；只比全局属性会让这类回归静默通过。
         compare_attrs(
             name,
-            &va.attributes().map(|x| x.name().to_string()).collect::<Vec<_>>(),
-            &vb.attributes().map(|x| x.name().to_string()).collect::<Vec<_>>(),
+            &va.attributes()
+                .map(|x| x.name().to_string())
+                .collect::<Vec<_>>(),
+            &vb.attributes()
+                .map(|x| x.name().to_string())
+                .collect::<Vec<_>>(),
             |n| va.attribute(n).and_then(|x| x.value().ok()).map(fmt_attr),
             |n| vb.attribute(n).and_then(|x| x.value().ok()).map(fmt_attr),
             &mut problems,

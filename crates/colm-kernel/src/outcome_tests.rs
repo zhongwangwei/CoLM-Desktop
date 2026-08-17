@@ -17,7 +17,11 @@ fn missing_path() -> PathBuf {
 #[test]
 fn test_helpers_are_sane() {
     // 若这条失败，说明下面所有「产物齐全」的用例都是假通过/假失败。
-    assert!(existing_path().exists(), "{} should exist", existing_path().display());
+    assert!(
+        existing_path().exists(),
+        "{} should exist",
+        existing_path().display()
+    );
     assert!(!missing_path().exists());
 }
 
@@ -38,9 +42,13 @@ fn unrecognised_namelist_variable_is_a_failure_despite_exit_zero() {
 #[test]
 fn missing_rawdata_is_a_failure_despite_exit_zero() {
     // 实测：站点文件缺 soil_vf_clay -> 回落到 rawdata -> 打不开 -> 退出码仍是 0
-    let stdout = "Netcdf error: No such file or directory /x/rawdata/soil/vf_clay_s.nc cannot open\n";
+    let stdout =
+        "Netcdf error: No such file or directory /x/rawdata/soil/vf_clay_s.nc cannot open\n";
     let got = adjudicate(Stage::MkSrfData, Some(0), stdout, &[existing_path()]);
-    assert!(matches!(got, Outcome::Failed(Failure::ErrorMarker { .. })), "got {got:?}");
+    assert!(
+        matches!(got, Outcome::Failed(Failure::ErrorMarker { .. })),
+        "got {got:?}"
+    );
 }
 
 #[test]
@@ -48,7 +56,10 @@ fn invalid_time_window_malloc_failure_is_a_failure_despite_exit_zero() {
     // 实测：结束时间早于开始时间 -> NetCDF malloc failure -> 退出码 0
     let stdout = "Netcdf error: NetCDF: Memory allocation (malloc) failure\n";
     let got = adjudicate(Stage::Colm, Some(0), stdout, &[existing_path()]);
-    assert!(matches!(got, Outcome::Failed(Failure::ErrorMarker { .. })), "got {got:?}");
+    assert!(
+        matches!(got, Outcome::Failed(Failure::ErrorMarker { .. })),
+        "got {got:?}"
+    );
 }
 
 #[test]
@@ -58,14 +69,21 @@ fn benign_null_history_namelist_line_is_not_a_failure() {
     let stdout = "History namelist file: null does not exist.\n\
                   Successful in surface data making.\n";
     let got = adjudicate(Stage::MkSrfData, Some(0), stdout, &[existing_path()]);
-    assert_eq!(got, Outcome::Succeeded, "benign line must not be treated as failure");
+    assert_eq!(
+        got,
+        Outcome::Succeeded,
+        "benign line must not be treated as failure"
+    );
 }
 
 #[test]
 fn missing_success_marker_is_a_failure() {
     let stdout = "Blocks : Set (360 longitude x 180 latitude) blocks for Single Point.\n";
     let got = adjudicate(Stage::MkSrfData, Some(0), stdout, &[existing_path()]);
-    assert_eq!(got, Outcome::Failed(Failure::MissingSuccessMarker(Stage::MkSrfData)));
+    assert_eq!(
+        got,
+        Outcome::Failed(Failure::MissingSuccessMarker(Stage::MkSrfData))
+    );
 }
 
 #[test]

@@ -55,12 +55,11 @@ fn main() -> Result<()> {
         }
     }
 
-    let unclassified: Vec<&String> =
-        present.iter().filter(|v| !assigned.contains_key(*v)).collect();
-    let stale: Vec<&String> = assigned
-        .keys()
-        .filter(|v| !present.contains(*v))
+    let unclassified: Vec<&String> = present
+        .iter()
+        .filter(|v| !assigned.contains_key(*v))
         .collect();
+    let stale: Vec<&String> = assigned.keys().filter(|v| !present.contains(*v)).collect();
 
     let mut bad = false;
     if !duplicates.is_empty() {
@@ -82,7 +81,10 @@ fn main() -> Result<()> {
         bad = true;
     }
     if !stale.is_empty() {
-        eprintln!("{} tier entry/entries name variables that no longer exist:", stale.len());
+        eprintln!(
+            "{} tier entry/entries name variables that no longer exist:",
+            stale.len()
+        );
         for v in &stale {
             eprintln!("  {v}");
         }

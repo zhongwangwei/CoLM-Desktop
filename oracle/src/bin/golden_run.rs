@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let case = args.next().context("usage: golden-run <case-name> [--kernel <dir>] [--write-golden]")?;
+    let case = args
+        .next()
+        .context("usage: golden-run <case-name> [--kernel <dir>] [--write-golden]")?;
     let mut kernel = PathBuf::from("kernels/waterheat");
     let mut write_golden = false;
     while let Some(a) = args.next() {
@@ -27,9 +29,8 @@ fn main() -> Result<()> {
     }
 
     let repo = repo_root()?;
-    let plumber2 = PathBuf::from(
-        std::env::var("PLUMBER2_ROOT").context("PLUMBER2_ROOT is not set")?,
-    );
+    let plumber2 =
+        PathBuf::from(std::env::var("PLUMBER2_ROOT").context("PLUMBER2_ROOT is not set")?);
 
     verify_inputs(&repo, &plumber2)?;
     verify_kernel(&repo.join(&kernel))?;
@@ -49,8 +50,14 @@ fn main() -> Result<()> {
             .replace("@CASE_DIR@", case_dir.to_str().unwrap())
             .replace("@WORK_DIR@", work.to_str().unwrap())
     };
-    fs::write(work.join("case.nml"), subst(&fs::read_to_string(case_dir.join("case.nml"))?))?;
-    fs::write(work.join("forcing.nml"), subst(&fs::read_to_string(case_dir.join("forcing.nml.in"))?))?;
+    fs::write(
+        work.join("case.nml"),
+        subst(&fs::read_to_string(case_dir.join("case.nml"))?),
+    )?;
+    fs::write(
+        work.join("forcing.nml"),
+        subst(&fs::read_to_string(case_dir.join("forcing.nml.in"))?),
+    )?;
 
     let case_name = read_case_name(&work.join("case.nml"))?;
     let out = work.join("out").join(&case_name);
@@ -97,7 +104,10 @@ fn main() -> Result<()> {
         .collect();
     hists.sort();
     if hists.len() != 1 {
-        bail!("expected exactly one history file, found {}: {hists:?}", hists.len());
+        bail!(
+            "expected exactly one history file, found {}: {hists:?}",
+            hists.len()
+        );
     }
     let produced = &hists[0];
     println!("  history: {}", produced.display());
@@ -110,13 +120,19 @@ fn main() -> Result<()> {
         fs::copy(produced, &golden)?;
         println!("  wrote golden: {}", golden.display());
     } else {
-        println!("  compare with: golden-compare {} {}", golden.display(), produced.display());
+        println!(
+            "  compare with: golden-compare {} {}",
+            golden.display(),
+            produced.display()
+        );
     }
     Ok(())
 }
 
 fn repo_root() -> Result<PathBuf> {
-    let out = Command::new("git").args(["rev-parse", "--show-toplevel"]).output()?;
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()?;
     if !out.status.success() {
         bail!("not inside a git repository");
     }
