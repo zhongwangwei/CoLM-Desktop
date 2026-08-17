@@ -17,7 +17,7 @@ edition = "2021"
 # 本项目在同一轮里被这个机制咬了两次（rust-version，以及一个失效的 netcdf-sys 钉子）。
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/zhongwangwei/colm-desktop"
+repository = "https://github.com/zhongwangwei/colm-rust"
 # 这是研究模型的私有提取，永不上 crates.io。
 publish = false
 
@@ -42,6 +42,7 @@ unsafe_code = "forbid"
 # default-features = false 是关掉 ndarray：判官只用 Vec<f64>。
 netcdf = { version = "0.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "1"
 sha2 = "0.10"
 anyhow = "1"

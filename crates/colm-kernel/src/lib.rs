@@ -15,4 +15,7 @@
 //! 是安全的上游修复。即便上游改了，本模块仍然必要 —— 产物硬校验能抓住
 //! 「跑完了但没写出该写的文件」，错误标记扫描能抓住部分失败。
 
+pub mod manifest;
 pub mod outcome;
+pub mod overrides;
+pub mod run;
