@@ -1,0 +1,63 @@
+&nl_colm
+
+! 黄金回归算例：冬季窗口。见 docs/design.md §2.8
+   DEF_CASE_NAME = 'CN-Cng-wet'
+
+   SITE_fsitedata    = '@CASE_DIR@/../CN-Cng/site.nc'
+   SITE_lon_location = 123.50920
+   SITE_lat_location = 44.59330
+   SITE_landtype     = 10
+
+! 全部地表参数取自站点文件；本仓库不携带全球 rawdata 树
+   USE_SITE_landtype         = .true.
+   USE_SITE_pctpfts          = .true.
+   USE_SITE_htop             = .true.
+   USE_SITE_LAI              = .true.
+   USE_SITE_lakedepth        = .true.
+   USE_SITE_soilreflectance  = .true.
+   USE_SITE_soilparameters   = .true.
+   USE_SITE_dbedrock         = .true.
+   USE_SITE_topography       = .true.
+
+! PLUMBER2 的时间轴是地方时。SinglePoint 是唯一允许非格林尼治时的配置
+! (MOD_TimeManager.F90:74-79 的强制覆盖在 #ifndef SinglePoint 内)
+   DEF_simulation_time%greenwich     = .FALSE.
+   DEF_simulation_time%start_year    = 2008
+   DEF_simulation_time%start_month   = 7
+   DEF_simulation_time%start_day     = 1
+   DEF_simulation_time%start_sec     = 0
+   DEF_simulation_time%end_year      = 2008
+   DEF_simulation_time%end_month     = 7
+   DEF_simulation_time%end_day       = 16
+   DEF_simulation_time%end_sec       = 86400
+   DEF_simulation_time%spinup_year   = 0
+   DEF_simulation_time%spinup_month  = 1
+   DEF_simulation_time%spinup_day    = 365
+   DEF_simulation_time%spinup_sec    = 86400
+   DEF_simulation_time%spinup_repeat = 0
+   DEF_simulation_time%timestep      = 1800.
+
+   DEF_dir_rawdata = '@WORK_DIR@/rawdata_unused/'
+   DEF_dir_runtime = '@WORK_DIR@/runtime_unused/'
+   DEF_dir_output  = '@WORK_DIR@/out/'
+
+   DEF_USE_SoilInit = .false.
+   DEF_USE_BEDROCK  = .false.
+
+   DEF_LAI_MONTHLY       = .true.
+   DEF_LAI_CHANGE_YEARLY = .true.
+
+! Simple VIC (CoLM 默认)。需要站点文件里有 soil_texture
+   DEF_Runoff_SCHEME = 3
+
+! CoLM 默认 .true.，会去 DEF_dir_runtime 读 Ozone/Global/OZONE-setgrid.nc。
+! 关闭后 MOD_Ozone.F90:83 用常数 forc_ozone = 100 ppbv，臭氧胁迫仍生效。
+   DEF_USE_OZONEDATA = .false.
+
+   DEF_forcing_namelist = '@WORK_DIR@/forcing.nml'
+
+   DEF_WRST_FREQ    = 'MONTHLY'
+   DEF_HIST_FREQ    = 'HOURLY'
+   DEF_HIST_groupby = 'MONTH'
+   DEF_hist_vars_out_default = .true.
+/

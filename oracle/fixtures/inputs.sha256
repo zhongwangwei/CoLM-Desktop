@@ -1,0 +1,5 @@
+# PLUMBER2 数据不入库（第三方数据集，15 MB + 2.1 MB）。
+# golden-run 在使用前校验这些文件，防止「换了份数据然后黄金文件对不上」。
+fef856bc4fde5025e32a6a5c69cb28ead33007c0e345bc0e66f1c3555849b02b  Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc
+506e4b285ced83cebbca04bd6400aaea942391ec6a1a67570ec29f304ee0dfc9  Observation/CN-Cng_2008-2009_FLUXNET2015_Flux.nc
+393a035c09e90cb52a34cff6c51abd14ae78cae20d3f8bf95646df8f42cfea53  Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc
