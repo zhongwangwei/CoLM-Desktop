@@ -715,6 +715,10 @@ git commit -m "Surface the configuration changes CoLM makes behind your back"
 单元测试，而是把行为完全交给已有的 `adjudicate`（11 条测试）与 `extract`
 （7 条测试）。**本模块自己只负责「跑」与「收」。**
 
+`StageReport` 只 derive `Debug`，不 derive `Clone`：`Outcome`/`Failure` 都没有
+`Clone`，而眼下没有任何调用方需要复制一份报告。等到真有人要了，再从
+`outcome.rs` 那一头补起。
+
 - [ ] **Step 1: 写实现**
 
 ```rust
@@ -738,7 +742,7 @@ use crate::outcome::{adjudicate, Outcome, Stage};
 use crate::overrides::{extract, Override};
 
 /// 一段跑完之后知道的一切。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StageReport {
     pub stage: Stage,
     pub outcome: Outcome,
