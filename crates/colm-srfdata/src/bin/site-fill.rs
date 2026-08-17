@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     if let Some(t) = r.raster_texture {
         if t != r.texture {
             println!(
-                "note: CoLM's own raster says {} ({}); this site's soil wins because it is the site's",
+                "note: CoLM's own raster says {} ({}); the site's own soil wins",
                 t,
                 colm_srfdata::CLASS_NAMES[(t - 1) as usize]
             );

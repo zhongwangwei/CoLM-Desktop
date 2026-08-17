@@ -3,7 +3,7 @@
 由 `cargo run -p colm-srfdata --bin site-fill` 从
 `$PLUMBER2_ROOT/Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc` 加
 `$COLM_RAWDATA` 的四张全球栅格生成。
-sha256: `6c9f29531254aeb368f426dd55ebf97e1cb7405f4250cb645195e542fda04b2c`
+sha256: `a2c69584566adfde113d7a49da638e989428592c6b24466218cd5d3779432423`
 
 该 sha256 是文档，不是门禁。CI 的检查是重新生成后用 `golden-compare` 做**逐变量
 结构比对**，而不是比哈希 —— 因为把同样的数据分多次追加进 NetCDF 会得到数据逐位
@@ -17,7 +17,9 @@ PLUMBER2 的站点文件不足以驱动 CoLM 单点：`MOD_SingleSrfdata` 对每
 都缺同样的 12 个字段。
 
 取值优先级是**站点自有 > 栅格 > 模块默认**。站点自己有数的地方不该被全球产品
-顶掉；栅格只在站点没有对应值时才上场。
+顶掉；栅格只在站点没有对应值时才上场。这条规则在 `site.rs` 里只写一次
+（`fn resolve`），12 个字段全从那里走 —— 12 个中站点自有 5 个、栅格 7 个，
+命令行会分三行列清楚。
 
 **每个字段在 NetCDF 里都带 `source` 属性，写明它走了哪一条路。**
 
