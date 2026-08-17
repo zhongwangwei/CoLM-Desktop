@@ -135,16 +135,21 @@ crates/colm-kernel/
 - Create: `crates/colm-kernel/src/{manifest,overrides,run}.rs`（占位）
 - Modify: 根 `Cargo.toml`（`[workspace.dependencies]` 加 serde / serde_json）
 
-- [ ] **Step 1: 根 `Cargo.toml` 加两个 workspace 依赖**
+- [ ] **Step 1: 根 `Cargo.toml` 加一个 workspace 依赖**
 
-在 `[workspace.dependencies]` 里加（保持字母序）：
+`serde` **已经在** `[workspace.dependencies]` 里（`oracle` 在用），只需加：
 
 ```toml
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ```
 
+顺带：`repository` 字段还写着 `.../colm-desktop`，而仓库已经是
+`https://github.com/zhongwangwei/colm-rust`。一起改掉。
+
 - [ ] **Step 2: `crates/colm-kernel/Cargo.toml` 的 `[dependencies]`**
+
+`colm-kernel` 现在的 `[dependencies]` 是**空的** —— `outcome.rs` 只用了
+`std::path`，连 `anyhow` 都没依赖。本轮四个依赖全是新加的：
 
 ```toml
 [dependencies]
@@ -155,7 +160,7 @@ serde_json.workspace = true
 sha2.workspace = true
 ```
 
-`sha2` 已在 `[workspace.dependencies]` 里（`oracle` 在用）。执行时确认一下。
+`sha2` 与 `serde` 已在 `[workspace.dependencies]` 里，`serde_json` 是 Step 1 加的。
 
 - [ ] **Step 3: `crates/colm-kernel/src/lib.rs`**
 
