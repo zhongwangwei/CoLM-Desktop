@@ -69,6 +69,10 @@ dependencies = [
 [[package]]
 name = "colm-hist"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "netcdf",
+]
 
 [[package]]
 name = "colm-kernel"

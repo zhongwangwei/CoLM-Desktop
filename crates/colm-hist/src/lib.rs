@@ -19,6 +19,8 @@
 
 pub mod generated;
 pub mod metric;
+#[cfg(feature = "io")]
+pub mod obs;
 pub mod pair;
 pub mod time;
 

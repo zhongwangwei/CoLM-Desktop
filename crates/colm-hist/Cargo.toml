@@ -6,9 +6,15 @@ rust-version.workspace = true   # 必须显式 opt-in
 license.workspace = true
 publish.workspace = true
 
-# 无依赖。本 crate 只是一张生成的表加一个求值器；
-# 与黄金文件的经验校验放在 oracle 里，netcdf 不进这里。
 [dependencies]
+# 闸门表那一半刻意无依赖 —— GUI 为了问一句「这个内核能产出什么」
+# 不该拖进整个 HDF5。读文件与算指标那一半才需要 netcdf，所以做成 feature。
+netcdf = { workspace = true, features = ["static"], optional = true }
+anyhow = { workspace = true, optional = true }
+
+[features]
+default = []
+io = ["dep:netcdf", "dep:anyhow"]
 
 [lints]
 workspace = true
