@@ -16,3 +16,5 @@ pub mod grid;
 pub mod raster;
 pub mod site;
 pub mod texture;
+
+pub use grid::{Grid, COLM_500M};
