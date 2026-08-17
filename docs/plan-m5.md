@@ -889,11 +889,28 @@ fn read_case_name(nml: &Path) -> Result<String> {
     }
 ```
 
-**注意**：现有的 `check_kernel_provenance` 除了 sha256 还比对了 `colm_git_sha`
-与入库的 `oracle/golden/kernel-manifest.json`。执行时先读那个文件，确认这层
-比对是否还需要 —— 若需要，它属于 `oracle`（黄金回归特有的「内核没换过」检查），
-不属于 `colm-kernel`（通用的「二进制没被替换」检查）。**两者不是一回事，
-不要合并。**
+**`check_kernel_provenance` 留在 `oracle`，但改用类型化的 `Manifest`。**
+
+读过之后可以确认：它与 `Kernel::open` 验的**不是同一件事**，不要合并。
+
+| | `Kernel::open`（colm-kernel） | `check_kernel_provenance`（oracle） |
+|---|---|---|
+| 验什么 | 二进制与紧挨着它的清单对得上 | 当前内核与**产出黄金文件的那个**是否同一配置 |
+| 比哪些字段 | 只比 `sha256` | 比 `preset`/`platform`/`colm_git_sha`/`generator_args`/`built_with`/`netcdf_c`/`netcdf_fortran`/`hdf5`/`macros`，**刻意不比 `sha256`** |
+| 不符时 | **失败** | **只警告** |
+
+后者不比 sha256 是对的：Fortran 构建不逐字节可复现，实测入库的
+`oracle/golden/kernel-manifest.json` 记的 `56f8b34e…` 与当前构建的 `053ba92b…`
+本就不同。而它只警告也是对的：工具链漂移未必是物理变化，但值得在比对失败时
+提醒一句「这可能是工具链，不是物理」。
+
+改动只有一处：把两个 `extract_json_*` 换成
+`serde_json::from_str::<colm_kernel::Manifest>(...)`，然后逐字段比对。
+函数留在 `oracle`，逻辑不变。
+
+顺带删掉那两个函数上方的注释 ——「刻意不引入 serde_json：manifest 是我们自己
+按固定格式生成的」。那句话在写下时是个合理的判断，现在有证据推翻它了
+（见本计划开头那个潜伏 bug）。
 
 - [ ] **Step 3: 重跑两个窗口**
 
