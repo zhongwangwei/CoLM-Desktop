@@ -1,4 +1,9 @@
-# 里程碑 6 实施计划：让 schema 说真话
+# 里程碑 5b 实施计划：让两张生成表说真话
+
+> **编号说明**：文件名里的 `m6` 是计划的写作顺序。它对应 `design.md` §10 的
+> **5b**，不是那张表的里程碑 6（那是 `colm-hist` 的时间轴、抽稀、指标与 QC，
+> 验收标准是复现 Rnet R²=0.986，本轮没做）。计划文件与 §10 的编号在 2–5 上
+> 恰好一致，从这里开始分叉 —— 因为 5b 是写完 §10 之后测量才发现需要的。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -1243,8 +1248,8 @@ fn golden_vars() -> BTreeSet<String> {
 fn the_fixture_still_matches_the_golden_file() {
     // fixture 是从黄金文件抄出来的，这条守住它没有跑偏。
     // 用 netcdf 直接读，而不是相信当初那次 ncdump。
-    let f = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("golden/CN-Cng_hist_2008-01.nc");
+    let f =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("golden/CN-Cng_hist_2008-01.nc");
     let nc = netcdf::open(&f).expect("golden file opens");
     // v.name() 返回 String（不是 &str），所以先绑定再切前缀，
     // 免得在链式调用里对临时值取借用。
@@ -1266,7 +1271,10 @@ fn the_static_map_never_misses_a_variable_that_was_actually_written() {
     // 而它其实产得出 —— 那是在用一张表去否定一次真实运行。
     let macros: BTreeSet<&str> = WATERHEAT.into_iter().collect();
     let predicted = colm_hist::writable(&macros);
-    let missed: Vec<&String> = golden_vars()
+    // 先绑定：直接 `golden_vars().iter()` 会借一个到语句末尾就被丢掉的临时值，
+    // 而 `missed` 要活到下一行的断言里。
+    let golden = golden_vars();
+    let missed: Vec<&String> = golden
         .iter()
         .filter(|v| !predicted.contains(v.as_str()))
         .collect();
