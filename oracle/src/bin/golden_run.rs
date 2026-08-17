@@ -34,6 +34,7 @@ fn main() -> Result<()> {
 
     verify_inputs(&repo, &plumber2)?;
     verify_kernel(&repo.join(&kernel))?;
+    check_kernel_provenance(&repo, &repo.join(&kernel))?;
 
     let case_dir = repo.join("oracle/cases").join(&case);
     if !case_dir.is_dir() {
@@ -140,6 +141,14 @@ fn main() -> Result<()> {
         fs::create_dir_all(golden.parent().unwrap())?;
         fs::copy(produced, &golden)?;
         println!("  wrote golden: {}", golden.display());
+        // 黄金文件的字节由 Fortran 侧写出，而 kernels/ 是 gitignore 的，
+        // 所以「是什么工具链产出了这些字节」在仓库里本来没有任何记录。
+        // 工具链一变（Homebrew 升 gcc、conda 升 netcdf），比对会在 129 个变量上
+        // 全红，而没人分得清是物理改了还是编译器改了。把 manifest 一并入库。
+        let src = repo.join(&kernel).join("manifest.json");
+        let dst = repo.join("oracle/golden/kernel-manifest.json");
+        fs::copy(&src, &dst)?;
+        println!("  wrote provenance: {}", dst.display());
     } else {
         println!(
             "  compare with: golden-compare {} {}",
@@ -148,6 +157,70 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// 把当前内核的 manifest 与产出黄金文件时入库的那份对照。
+///
+/// 只比**可复现**的字段。`sha256` 每次构建都不同（实测：同一路径连跑两次，
+/// 三个二进制的摘要全变），它认定的是完整性而非配置身份，所以不参与比较。
+/// 不匹配只警告不失败：工具链变了未必意味着结果错了，但必须让人看见，
+/// 否则一场 129 个变量全红的比对会被误读成物理回归。
+fn check_kernel_provenance(repo: &Path, kernel_dir: &Path) -> Result<()> {
+    let recorded = repo.join("oracle/golden/kernel-manifest.json");
+    if !recorded.exists() {
+        return Ok(()); // 还没产出过黄金文件
+    }
+    let want = fs::read_to_string(&recorded)?;
+    let have = fs::read_to_string(kernel_dir.join("manifest.json"))?;
+
+    let mut drift = Vec::new();
+    for key in [
+        "preset",
+        "platform",
+        "colm_git_sha",
+        "generator_args",
+        "built_with",
+        "netcdf_c",
+        "netcdf_fortran",
+        "hdf5",
+    ] {
+        let (a, b) = (
+            extract_json_string(&want, key),
+            extract_json_string(&have, key),
+        );
+        if a != b {
+            drift.push(format!("{key}: recorded {a:?}, current {b:?}"));
+        }
+    }
+    let (ma, mb) = (
+        extract_json_array(&want, "macros"),
+        extract_json_array(&have, "macros"),
+    );
+    if ma != mb {
+        drift.push(format!("macros: recorded {ma:?}, current {mb:?}"));
+    }
+
+    if drift.is_empty() {
+        println!("  provenance matches the recorded kernel");
+    } else {
+        eprintln!("  WARNING: kernel differs from the one that produced the golden files:");
+        for d in &drift {
+            eprintln!("    {d}");
+        }
+        eprintln!("    a comparison failure below may be toolchain drift, not a physics change");
+    }
+    Ok(())
+}
+
+/// 从 manifest 里取 `"key": [ ... ]` 的原文。与 `extract_json_string` 一样，
+/// 刻意不引入 serde_json：manifest 是我们自己按固定格式生成的。
+fn extract_json_array(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    let open = rest.find('[')?;
+    let close = rest[open..].find(']')? + open;
+    Some(rest[open..=close].to_string())
 }
 
 fn repo_root() -> Result<PathBuf> {

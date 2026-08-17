@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "preset": "waterheat",
+  "platform": "Darwin-arm64",
+  "colm_git_sha": "72dd76b9",
+  "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",
+  "macros": ["CoLMDEBUG","LULC_IGBP","RangeCheck","SinglePoint","extend_interception","vanGenuchten_Mualem_SOIL_MODEL"],
+  "built_with": "GNU Fortran (Homebrew GCC 16.1.0) 16.1.0",
+  "netcdf_c": "netCDF 4.9.3",
+  "netcdf_fortran": "4.6.3",
+  "hdf5": "1.14.6",
+  "sha256": {
+    "mksrfdata": "56f8b34e30d052e3258da69a1b35cbebaed101ee0a7bd786ed924f805d26fa9a",
+    "mkinidata": "4b12afd910a140abb9f664d821f4a9da2f183927dc12ed6472fbf4f11e42c2e2",
+    "colm":      "813cc48aec036b78d00026e5c4f247663b3a9d5e4bc6308acc0386423ff6ea0a"
+  }
+}
