@@ -819,7 +819,7 @@ mod texture_tests;
 
 - [ ] **Step 2: 给 `lib.rs` 加重导出**
 
-追加：
+加进 `pub use` 块，rustfmt 会把它排在 `grid` 之后：
 
 ```rust
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
@@ -976,7 +976,7 @@ mod albedo_tests;
 
 - [ ] **Step 3: 给 `lib.rs` 加重导出**
 
-追加：
+加进 `pub use` 块，rustfmt 会把它排到最前（`albedo` 字母序在先）：
 
 ```rust
 pub use albedo::{albedo, SoilAlbedo};
@@ -1324,7 +1324,9 @@ mod derive_tests;
 
 - [ ] **Step 3: 给 `lib.rs` 加重导出**
 
-追加：
+把这一行加进已有的 `pub use` 块。**位置由 rustfmt 决定，不是文件末尾**：
+它默认对连续的 `use` 项按字母序重排，而 `derive` 排在 `grid` 之前。
+写完跑一次 `cargo fmt --all` 让它落位，否则 Step 5 的 `--check` 会失败。
 
 ```rust
 pub use derive::{
