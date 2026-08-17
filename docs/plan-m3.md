@@ -1368,11 +1368,16 @@ git commit -m "Derive the soil fractions the site file leaves out"
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::grid::COLM_500M;
 
 /// 从 `colm_500m` 栅格里取站点像元，按 f64 读出。
+///
+/// 读到 `_FillValue` 时**报错**，不把它当成数据返回。三个栅格都带这个属性
+/// （`lake_depth` 是 -32767，`elevation` 与 `elvstd` 是 -9999），而海上或
+/// 无数据的像元就是这个值。90 个 PLUMBER2 站点都没踩到，但靠海的站点会 ——
+/// 把 -9999 当成高程写进站点文件，模型会照单全收地算下去。
 pub fn point_f64(file: &Path, var: &str, lon: f64, lat: f64) -> Result<f64> {
     let (ilon, ilat) = COLM_500M.index_of(lon, lat);
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
@@ -1381,14 +1386,38 @@ pub fn point_f64(file: &Path, var: &str, lon: f64, lat: f64) -> Result<f64> {
         .with_context(|| format!("{var} not in {}", file.display()))?;
     // netcdf crate 的下标是 0-based，而 grid 给的是 1-based（与 Fortran 一致）
     let vals: Vec<f64> = v
-        .get_values(netcdf::Extents::from(&[
-            (ilat - 1)..(ilat),
-            (ilon - 1)..(ilon),
-        ][..]))
+        .get_values(netcdf::Extents::from(
+            &[(ilat - 1)..(ilat), (ilon - 1)..(ilon)][..],
+        ))
         .with_context(|| format!("cannot read {var} at ({ilon},{ilat})"))?;
-    vals.first()
+    let x = vals
+        .first()
         .copied()
-        .with_context(|| format!("{var} returned no value at ({ilon},{ilat})"))
+        .with_context(|| format!("{var} returned no value at ({ilon},{ilat})"))?;
+    if let Some(fill) = fill_value(&v) {
+        if x == fill {
+            bail!("{var} is _FillValue ({fill}) at pixel ({ilon},{ilat}); this site has no data here");
+        }
+    }
+    Ok(x)
+}
+
+/// 变量的 `_FillValue`，按 f64 读出；没有该属性或它不是数值时返回 `None`。
+fn fill_value(v: &netcdf::Variable) -> Option<f64> {
+    use netcdf::AttributeValue as A;
+    match v.attribute("_FillValue")?.value().ok()? {
+        A::Uchar(x) => Some(x as f64),
+        A::Schar(x) => Some(x as f64),
+        A::Ushort(x) => Some(x as f64),
+        A::Short(x) => Some(x as f64),
+        A::Uint(x) => Some(x as f64),
+        A::Int(x) => Some(x as f64),
+        A::Ulonglong(x) => Some(x as f64),
+        A::Longlong(x) => Some(x as f64),
+        A::Float(x) => Some(x as f64),
+        A::Double(x) => Some(x),
+        _ => None,
+    }
 }
 
 /// 同上，按 i32 读出（`soil_brightness` 与 `soiltexture` 是整型）。
@@ -1460,6 +1489,17 @@ fn cn_cng_is_not_a_lake() {
     )
     .unwrap();
     assert_eq!(v, 0.0);
+}
+
+#[test]
+fn a_fill_value_pixel_is_an_error_not_an_elevation() {
+    // 南太平洋中部，远离任何陆地：topography 在那里是 _FillValue。
+    // 若这里返回 -9999 而不是报错，它就会被当成高程写进站点文件。
+    let e = point_f64(&rawdata().join("topography.nc"), "elevation", -140.0, -30.0);
+    match e {
+        Err(err) => assert!(format!("{err:#}").contains("_FillValue"), "{err:#}"),
+        Ok(v) => panic!("expected an error, got elevation {v}"),
+    }
 }
 
 #[test]
@@ -1581,24 +1621,37 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
         None => (None, None, None, None, None),
     };
 
-    let alb = isc.and_then(|i| albedo(i, landtype));
-    match alb {
-        Some(a) => {
-            let src = format!("rawdata soil_brightness.nc colour class {}", isc.unwrap());
-            for (name, v) in [
-                ("soil_s_v_alb", a.s_v),
-                ("soil_d_v_alb", a.d_v),
-                ("soil_s_n_alb", a.s_n),
-                ("soil_d_n_alb", a.d_n),
-            ] {
-                put_scalar(&mut f, name, v, &src)?;
-                report.from_raster.push(name.to_string());
-            }
+    // 有栅格就用栅格的颜色档；没有就退到标称档 10（1..=20 的中位），
+    // 并如实标注。先前的脚本正是把 10 写死了 —— 错的不是这个数，而是把它
+    // 当成实测值，且不管站点在哪都用它：实测 90 个站点里只有 1 个是 10。
+    const NOMINAL_ISC: i32 = 10;
+    let (use_isc, measured) = match isc {
+        Some(i) => (i, true),
+        None => (NOMINAL_ISC, false),
+    };
+    let a = albedo(use_isc, landtype).with_context(|| {
+        format!(
+            "no soil albedo for colour class {use_isc} and IGBP land type {landtype}; \
+             CoLM leaves these at spval for water and ice, which this crate will not write silently"
+        )
+    })?;
+    let src = if measured {
+        format!("rawdata soil_brightness.nc colour class {use_isc}")
+    } else {
+        format!("synthesized: nominal soil colour class {use_isc} (mid-range); no soil_brightness raster given")
+    };
+    for (name, v) in [
+        ("soil_s_v_alb", a.s_v),
+        ("soil_d_v_alb", a.d_v),
+        ("soil_s_n_alb", a.s_n),
+        ("soil_d_n_alb", a.d_n),
+    ] {
+        put_scalar(&mut f, name, v, &src)?;
+        if measured {
+            report.from_raster.push(name.to_string());
+        } else {
+            report.from_default.push(name.to_string());
         }
-        None => bail!(
-            "cannot determine soil albedo: no soil_brightness raster, or land type {landtype} is water/ice. \
-             CoLM would leave these at spval, which this crate will not write silently."
-        ),
     }
 
     for (name, got, default, note) in [
@@ -1867,7 +1920,7 @@ fn every_site_fills_and_lands_inside_the_usda_triangle() {
 - [ ] **Step 5: 全部通过**
 
 Run: `cargo test -p colm-srfdata`
-Expected: 单元测试 33 个 + 集成测试 2 个全绿。
+Expected: 单元测试 34 个 + 集成测试 2 个全绿。
 
 Run: `cargo run -p colm-srfdata --bin site-fill -- \
   ~/Desktop/colm-rust/PLUMBER2s/Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc \
@@ -2009,8 +2062,8 @@ git diff --check
 
 逐条可验证：
 
-- [ ] `cargo test --workspace` 通过；`colm-srfdata` 的 33 个单元测试
-      + 4 个栅格测试 + 2 个真实站点测试全部执行（不是跳过）
+- [ ] `cargo test --workspace` 通过；`colm-srfdata` 的 34 个单元测试
+      + 5 个栅格测试 + 2 个真实站点测试全部执行（不是跳过）
 - [ ] **90/90 个真实站点文件都能补齐**，且缺失字段数都恰好是 12
 - [ ] 90 个站点的质地类别**至少有 3 种不同值**（全同即分类器坏了）
 - [ ] CN-Cng 判为 **8（silty loam），BVIC 0.100**——不是 4/0.230
