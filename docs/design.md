@@ -275,10 +275,16 @@ Qh 的 KGE = −1.55 再次印证近零均值保护的必要（观测均值仅 9
 - `tintalgo = 'linear' 'linear' 'linear' 'nearest' 'NULL' 'linear' 'linear' 'linear'`。
 - 变量形状 `(time, y, x)`，Fortran 侧看即 `(1,1,time)`；维度名必须字面是 `time`。
 - 时间单位实测是 `"seconds since 2008-01-01 00:00:00"`。Fortran 在**硬编码字符偏移**
-  处解析：第 15:18 位取年、…、第 32:33 位取秒。
+  处解析（`MOD_Forcing.F90:1253-1255`）：第 15:18 位取年、…、第 32:33 位取秒。
   验算：`s e c o n d s _ s i n c e _ 2 0 0 8` → 第 15–18 位正是 `2008`。
-  **换成 `"hours since ..."` 会整体错位 2 个字符且不报错。** Rust 转换器必须只写
-  `"seconds since YYYY-MM-DD HH:MM:SS"`。
+  所以只有 `"seconds since YYYY-MM-DD HH:MM:SS"` 这一种写法可用。
+  **纠正**：先前这里写「换成 `hours since` 会错位且不报错」——**不对**。
+  照抄那段逻辑实测：`hours since` 与 `days since` 都让 `read` 返回 `iostat=5010`，
+  连不补零的 `"seconds since 2008-1-1 0:0:0"` 也是。而 CoLM 的调用没有 `iostat`，
+  于是直接以 Fortran 运行期错误终止 —— 失败是响亮的，且 `Fortran runtime error`
+  正在 `colm-kernel` 的失败标记里。脆是真脆，静默则不是。
+  实测 90 个 PLUMBER2 强迫场文件的单位全是 `seconds since`，且 `history` 属性显示
+  是有人用 `ncatted` 显式改成这样的 —— 这个语料被预处理过，不是天然如此。
 - 数据质量：35089 个半小时步、零 NaN、量级合理。
 - 总降水按 2/3 大尺度 + 1/3 对流拆分；POINT 唯一的预处理是对 q 做 `qsadv` 饱和钳制，
   而该钳制在 `#ifdef SinglePoint` 内 —— `dataset='POINT'` 但 SinglePoint 关闭时静默不生效。
