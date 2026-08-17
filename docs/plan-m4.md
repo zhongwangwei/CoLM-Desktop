@@ -225,8 +225,8 @@ pub mod render;
 
 - [ ] **Step 4: 加入 workspace**
 
-根 `Cargo.toml` 的 members 加 `"crates/colm-forcing"`，保持字母序
-（排在 `colm-designer` 之类不存在，实际是排在 `crates/colm-kernel` 之前）。
+根 `Cargo.toml` 的 members 加 `"crates/colm-forcing"`，保持字母序 ——
+它排在 `crates/colm-kernel` 之前，即列表的第一项。
 
 - [ ] **Step 5: 三道门禁**
 
