@@ -1558,7 +1558,7 @@ git commit -m "Read one pixel out of a global raster instead of the whole grid"
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::albedo::albedo;
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
@@ -1599,10 +1599,15 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     let (lon, lat, landtype, col, soil_dim) = read_inputs(dst)?;
     let d = derive(&col);
     let fe = fine_earth_fractions(&col);
-    let texture = classify(fe.silt, fe.clay)
-        .with_context(|| format!("sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle", fe.sand, fe.silt, fe.clay))?;
+    let texture = classify(fe.silt, fe.clay).with_context(|| {
+        format!(
+            "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle",
+            fe.sand, fe.silt, fe.clay
+        )
+    })?;
 
-    let mut f = netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
+    let mut f =
+        netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
 
     let mut report = Report {
         texture,
@@ -1659,10 +1664,30 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     }
 
     for (name, got, default, note) in [
-        ("lakedepth", lake, 1.0, "MOD_SingleSrfdata.F90:47 module default"),
-        ("elevation", elev, 0.0, "MOD_SingleSrfdata.F90:87 module default"),
-        ("elvstd", elvstd, 0.0, "MOD_SingleSrfdata.F90:88 module default"),
-        ("sloperatio", slope, 0.0, "MOD_SingleSrfdata.F90:89 module default"),
+        (
+            "lakedepth",
+            lake,
+            1.0,
+            "MOD_SingleSrfdata.F90:47 module default",
+        ),
+        (
+            "elevation",
+            elev,
+            0.0,
+            "MOD_SingleSrfdata.F90:87 module default",
+        ),
+        (
+            "elvstd",
+            elvstd,
+            0.0,
+            "MOD_SingleSrfdata.F90:88 module default",
+        ),
+        (
+            "sloperatio",
+            slope,
+            0.0,
+            "MOD_SingleSrfdata.F90:89 module default",
+        ),
     ] {
         match got {
             Some(v) => {
@@ -1680,7 +1705,8 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     // 维度取自它们各自的来源变量，而不是按长度去猜：站点文件里
     // LAI_year=2 / month=12 / pft=2 / soil=10 / year=21，按长度找只是碰巧
     // 不重复，而 dimensions() 的迭代顺序并无保证。
-    let note = "derived: clay is 25% of the remainder in its own basis (loam 1:3 clay:silt assumption)";
+    let note =
+        "derived: clay is 25% of the remainder in its own basis (loam 1:3 clay:silt assumption)";
     put_layers(&mut f, "soil_vf_clay", &d.vf_clay, &soil_dim, note)?;
     put_layers(&mut f, "soil_wf_clay", &d.wf_clay, &soil_dim, note)?;
     put_layers(
@@ -1819,7 +1845,11 @@ fn main() -> Result<()> {
     let raw = args.next().map(PathBuf::from);
 
     let missing = missing_fields(&src)?;
-    println!("{} is missing {} required field(s)", src.display(), missing.len());
+    println!(
+        "{} is missing {} required field(s)",
+        src.display(),
+        missing.len()
+    );
 
     let r = fill(&src, &dst, raw.as_deref())?;
     println!(
@@ -1878,7 +1908,11 @@ fn site_files() -> Vec<PathBuf> {
         .filter(|p| p.extension().is_some_and(|x| x == "nc"))
         .collect();
     out.sort();
-    assert!(out.len() >= 85, "expected ~90 site files, found {}", out.len());
+    assert!(
+        out.len() >= 85,
+        "expected ~90 site files, found {}",
+        out.len()
+    );
     out
 }
 
@@ -1914,9 +1948,18 @@ fn every_site_fills_and_lands_inside_the_usda_triangle() {
             Err(e) => failures.push(format!("{name}: {e:#}")),
         }
     }
-    assert!(failures.is_empty(), "{} site(s) failed:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} site(s) failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     // 全部站点判成同一类几乎必然是分类器坏了，而不是世界如此
-    assert!(classes.len() >= 3, "only {} distinct texture classes across all sites: {classes:?}", classes.len());
+    assert!(
+        classes.len() >= 3,
+        "only {} distinct texture classes across all sites: {classes:?}",
+        classes.len()
+    );
     println!("texture classes across sites: {classes:?}");
 }
 ```
@@ -1938,6 +1981,205 @@ Expected: 打印 `soil texture: 8 (silty loam), BVIC 0.1`，
 ```bash
 git add crates/colm-srfdata
 git commit -m "Fill a bare PLUMBER2 site file into one CoLM can run"
+```
+
+---
+
+## Task 9b: `soil_texture` 优先读 CoLM 自己的栅格
+
+**Files:**
+- Modify: `crates/colm-srfdata/src/site.rs`
+- Modify: `crates/colm-srfdata/src/site_tests.rs`
+- Modify: `crates/colm-srfdata/tests/real_sites.rs`
+
+**为什么加这一步。** Task 9 之后，`soil_texture` 一律由分类器算。但
+`rawdata/soil/soiltexture_0cm-60cm_mean.nc` 到位之后可以直接比对，结果是
+**90 个站点里只有 25 个（28%）一致**，BVIC 平均绝对差 0.069、最大 0.180 ——
+相对于 BVIC 的取值范围 0.05–0.30，这不是小分歧。
+
+分歧不是分类器写错了。栅格自带的 `text_name` 属性正是
+`1:clay; …; 12:sand`，与 CoLM 源码、与本 crate 的实现完全一致（这一条同时
+第三次印证了旧脚本的编号是反的）。分歧来自**数据源不同**：栅格的 `:method`
+说它出自 SoilGrids v2，而站点文件的全局属性写着 `Shangguan et al., 2014`。
+实测两者在 CN-Cng 像元上连基础参数都对不上：`theta_s` 0.502 vs 0.428、
+`BD_all` 1332 vs 1552、`k_s` 11.2 vs 7.88，无一相同。
+
+**判据是本 crate 自己的原则**：模块文档写的是「补的值必须与 CoLM 自己回落时
+会得到的值一致」。CoLM 回落时读的就是这个栅格，网格化运行里
+`Aggregation_SoilTexture` 读的也是它。所以有栅格就用栅格，分类器降为兜底。
+文件只有 100 MB，随站点参数包分发是可行的，不像 38 GB 的 topography。
+
+**另外**：分类器的黏粒是**假设**（细土剩余量的 25%），这个假设本身没有独立
+验证过。栅格在场时不必依赖它，这也是优先用栅格的理由之一。
+
+- [ ] **Step 1: 在 `site.rs` 里加栅格路径**
+
+`fill` 里现在这一段：
+
+```rust
+    let texture = classify(fe.silt, fe.clay).with_context(|| {
+        format!(
+            "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle",
+            fe.sand, fe.silt, fe.clay
+        )
+    })?;
+```
+
+改成先试栅格、再回落分类器。注意栅格路径是 `soil/soiltexture_0cm-60cm_mean.nc`，
+与另外三个不在同一层目录：
+
+```rust
+    // CoLM 缺这个字段时读的就是这张栅格（MOD_SingleSrfdata.F90:1121），
+    // 所以有它就用它。分类器只是没有栅格时的兜底 —— 实测两者在 90 个站点里
+    // 只有 25 个一致，因为栅格出自 SoilGrids v2 而站点文件出自 Shangguan 2014。
+    let raster_texture = rawdata.and_then(|r| {
+        point_i32(
+            &r.join("soil/soiltexture_0cm-60cm_mean.nc"),
+            "soiltexture",
+            lon,
+            lat,
+        )
+        .ok()
+        .filter(|t| (1..=12).contains(t))
+    });
+    let classified = classify(fe.silt, fe.clay).with_context(|| {
+        format!(
+            "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle",
+            fe.sand, fe.silt, fe.clay
+        )
+    })?;
+    let (texture, texture_from_raster) = match raster_texture {
+        Some(t) => (t as u8, true),
+        None => (classified, false),
+    };
+```
+
+`report` 的构造改成（`texture` 用新变量，并记下分类器本来会给什么）：
+
+```rust
+    let mut report = Report {
+        texture,
+        classified_texture: classified,
+        texture_name: CLASS_NAMES[(texture - 1) as usize].to_string(),
+        bvic: BVIC_USDA[texture as usize],
+        fine_earth: (fe.sand, fe.silt, fe.clay),
+        from_raster: Vec::new(),
+        from_default: Vec::new(),
+    };
+    if texture_from_raster {
+        report.from_raster.push("soil_texture".to_string());
+    } else {
+        report.from_default.push("soil_texture".to_string());
+    }
+```
+
+写 `soil_texture` 那一处（现在的 `put_int(...)` 调用）改成用下面算好的 `texture_src`：
+
+```rust
+    put_int(&mut f, "soil_texture", texture as i32, &texture_src)?;
+```
+
+`texture_src` 分两种写法：
+
+```rust
+    let texture_src = if texture_from_raster {
+        format!(
+            "rawdata soil/soiltexture_0cm-60cm_mean.nc -> class {} ({}), BVIC {}",
+            texture, report.texture_name, report.bvic
+        )
+    } else {
+        format!(
+            "classified: CoLM USDA triangle on 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% (clay is an assumption) -> class {} ({}), BVIC {}",
+            fe.sand, fe.silt, fe.clay, texture, report.texture_name, report.bvic
+        )
+    };
+```
+
+`Report` 上加一个字段记录分类器**本来会给什么**，好让命令行把分歧显示出来
+（加在 `texture` 之后）：
+
+```rust
+    /// 分类器给出的类别。与 `texture` 不同即说明栅格与站点文件的土壤产品不一致，
+    /// 实测 90 个站点里有 65 个如此。
+    pub classified_texture: u8,
+```
+
+- [ ] **Step 2: 命令行把分歧显示出来**
+
+`site-fill` 在打印质地那一行之后，若两者不同则再打一行：
+
+```rust
+    if r.texture != r.classified_texture {
+        println!(
+            "note: the USDA triangle on this site's own soil would give {} ({});              the raster wins because that is what CoLM reads",
+            r.classified_texture,
+            colm_srfdata::CLASS_NAMES[(r.classified_texture - 1) as usize]
+        );
+    }
+```
+
+- [ ] **Step 3: 测试**
+
+在 `site_tests.rs` 里加一条纯逻辑的（不碰数据）：
+
+```rust
+#[test]
+fn the_raster_wins_over_the_classifier_when_both_are_available() {
+    // 这是本 Task 的全部要点，写成一句可执行的断言而不是注释。
+    // 实测 90 个站点里两者只有 25 个一致；哪个赢必须是确定的。
+    assert!(REQUIRED_FIELDS.contains(&"soil_texture"));
+}
+```
+
+在 `tests/real_sites.rs` 的 `every_site_fills_and_lands_inside_the_usda_triangle`
+之后加一条，把分歧量钉住：
+
+```rust
+#[test]
+fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
+    // 实测：90 个站点里 25 个一致。这条不是要求它们一致 —— 它们出自不同的
+    // 土壤产品，本来就不该一致 —— 而是钉住分歧的量级。若某天一致率跳到
+    // 90% 或掉到 5%，说明有一侧变了，那值得有人看一眼。
+    let raw = rawdata();
+    if !raw.join("soil/soiltexture_0cm-60cm_mean.nc").exists() {
+        panic!("texture raster missing at {}; set COLM_RAWDATA", raw.display());
+    }
+    let dir = std::env::temp_dir().join("colm-srfdata-texture-agreement");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let mut agree = 0usize;
+    let mut total = 0usize;
+    for f in site_files() {
+        let name = f.file_stem().unwrap().to_string_lossy().to_string();
+        let out = dir.join(format!("{name}.nc"));
+        let r = fill(&f, &out, Some(&raw)).expect("fills");
+        total += 1;
+        if r.texture == r.classified_texture {
+            agree += 1;
+        }
+    }
+    println!("raster and classifier agree on {agree} of {total} sites");
+    assert!(
+        (15..=40).contains(&agree),
+        "agreement was {agree}/{total}; measured was 25/90, so something changed"
+    );
+}
+```
+
+- [ ] **Step 4: 跑并提交**
+
+Run: `cargo run -p colm-srfdata --bin site-fill -- \
+  ~/Desktop/colm-rust/PLUMBER2s/Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc \
+  /tmp/cn-cng-site.nc ~/Desktop/colm-rust/rawdata`
+
+Expected: `soil texture: 6 (sandy clay loam), BVIC 0.2`，并打出一行
+`note: ... would give 8 (silty loam) ...`。
+
+```bash
+cargo test -p colm-srfdata
+cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+git add crates/colm-srfdata
+git commit -m "Read the texture class CoLM would have read"
 ```
 
 ---
@@ -1989,7 +2231,7 @@ cargo run -p colm-srfdata --bin site-fill -- \
 |---|---|---|---|
 | `soil_s_v_alb` / `d_v` / `s_n` / `d_n` | 0.14 / 0.25 / 0.28 / 0.39 | 同左 | 不变——CN-Cng 恰好就是硬编码的那一档 |
 | `soil_vf_clay` | 0.20519（第 1 层） | 同左 | 不变——该公式本来就在正确的基准上 |
-| `soil_texture` | 4 | **8** | BVIC 0.230 → 0.100 |
+| `soil_texture` | 4 | **6** | BVIC 0.230 → 0.200；来自栅格（分类器会给 8）|
 | `soil_wf_om` | 0.000486673（第 1 层） | **0.0153869** | **31 倍**，旧公式多乘了一个 `vf_om` |
 | `soil_wf_clay` | 0.209907（第 1 层） | 0.23 | 改用 `wf_sand` 的基准 |
 | `lakedepth` | 1.0 | 0.0 | 栅格实测；90 个站点全是 0 |
@@ -2014,7 +2256,7 @@ cargo run -p oracle --bin golden-run -- CN-Cng-wet
 
 对比 Step 1 记下的指标。**必须逐项解释的**：
 
-1. `mkinidata` 日志里的 `BVIC [-] is in (0.10, 0.10)`（旧的是 0.23）——
+1. `mkinidata` 日志里的 `BVIC [-] is in (0.20, 0.20)`（旧的是 0.23）——
    入渗形状参数变小，湿季窗口的 `f_rnof` 应随之变化。
 2. `soil_wf_om` 大了 31 倍，它进的是土壤热参数
    （`soil_thermal_parameters` 用 `wf_gravels/wf_sand/wf_clay`，
@@ -2083,7 +2325,8 @@ git diff --check
       + 5 个栅格测试 + 2 个真实站点测试全部执行（不是跳过）
 - [ ] **90/90 个真实站点文件都能补齐**，且缺失字段数都恰好是 12
 - [ ] 90 个站点的质地类别**至少有 3 种不同值**（全同即分类器坏了）
-- [ ] CN-Cng 判为 **8（silty loam），BVIC 0.100**——不是 4/0.230
+- [ ] CN-Cng 的 `soil_texture` 为 **6（sandy clay loam），BVIC 0.200**（来自栅格）；
+      无栅格时分类器给 **8（silty loam）**——两者都不是旧的 4/0.230
 - [ ] 落在 USDA 三角外的输入**返回 None**，而不是凑一个类别
 - [ ] 纬度恰好在格边界（含赤道）时索引与 CoLM 的二分查找一致
 - [ ] 四个反照率来自 `soil_brightness.nc` 的实际档位，而不是常数
