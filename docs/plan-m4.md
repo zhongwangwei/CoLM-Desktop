@@ -1432,9 +1432,9 @@ git commit -m "Generate a namelist for every real forcing file"
 黄金算例现在用手写的 `forcing.nml.in` 模板。换成生成的，并要求 history 逐位不变。
 
 **Files:**
-- Modify: `oracle/cases/CN-Cng/forcing.nml.in`（或删除，见下）
-- Modify: `oracle/src/bin/golden_run.rs`
-- Modify: `.github/workflows/ci.yml`
+- Create: `oracle/cases/CN-Cng/met.txt`、`oracle/cases/CN-Cng-wet/met.txt`
+- Delete: `oracle/cases/CN-Cng/forcing.nml.in`、`oracle/cases/CN-Cng-wet/forcing.nml.in`
+- Modify: `oracle/Cargo.toml`、`oracle/src/bin/golden_run.rs`
 
 - [ ] **Step 1: 先确认生成的与手写的等价**
 
@@ -1455,9 +1455,27 @@ cargo run -p colm-forcing --bin forcing-nml -- \
 
 - [ ] **Step 2: 让 `golden-run` 用生成的 namelist**
 
-`golden_run.rs` 现在把 `forcing.nml.in` 里的 `@PLUMBER2_ROOT@` 替换掉。改成调用
-`colm_forcing::{summarize, render}` 现生成。这样黄金回归就同时成了 `colm-forcing`
-的验收：**生成的 namelist 必须让两个窗口的 history 逐位不变。**
+`golden_run.rs:59-60` 现在读 `forcing.nml.in` 并把 `@PLUMBER2_ROOT@` 替换掉。
+改成调用 `colm_forcing::{summarize, render}` 现生成。这样黄金回归就同时成了
+`colm-forcing` 的验收：**生成的 namelist 必须让两个窗口的 history 逐位不变。**
+
+两处要先解决：
+
+**一、`oracle` 要依赖 `colm-forcing`。** 在 `oracle/Cargo.toml` 加
+`colm-forcing = { path = "../crates/colm-forcing" }`。
+
+**二、生成器要知道用哪个 Met 文件。** 文件名现在藏在模板的 `fprefix(1)` 里，
+而两个算例共用同一个 Met 文件、案例名却不同（`CN-Cng` 与 `CN-Cng-wet`）——
+从案例名推不出来，靠通配符去猜更糟。所以每个算例目录放一个单行文件
+`met.txt`，内容就是 Met 文件的基名：
+
+```
+CN-Cng_2008-2009_FLUXNET2015_Met.nc
+```
+
+`CN-Cng` 与 `CN-Cng-wet` 各放一份，内容相同。`golden_run.rs` 读它，
+拼上 `$PLUMBER2_ROOT/Forcing/`，交给 `summarize` 与 `render`。
+一行文件换掉一份 30 行模板，且哪个算例用哪份强迫场变成显式的。
 
 - [ ] **Step 3: 重跑两个窗口并比对**
 
