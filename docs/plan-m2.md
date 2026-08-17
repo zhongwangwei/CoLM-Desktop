@@ -2614,6 +2614,14 @@ GitHub 托管 runner 上取不到。只要它还是本机路径，这两个测�
 待 `.gitmodules` 的 url 改成远端后，这三处一起回退成 `rust` 作业里的
 `cargo test --workspace` 加一步 submodule checkout。
 
+> **已完成（里程碑 4 之后）。** `.gitmodules` 现在指向
+> `https://github.com/zhongwangwei/CoLM202X.git`，钉住的 `72dd76b9` 是
+> `origin/master` 的祖先（干净克隆验证过），托管 runner 取得到。
+> `roundtrip` 与 `drift` 已搬回 `rust` 作业，在三个平台上跑。
+> 仍留在 `golden` 作业的只有真正需要 PLUMBER2（5.5 GB）与 rawdata（38 GB）
+> 的 15 条：`colm-srfdata` 的 raster/real_sites、`colm-forcing` 的
+> met/real_forcing。`rust` 作业现覆盖 109/124。
+
 - [ ] **Step 2: README 补一节**
 
 在「跑黄金回归」之后插入：

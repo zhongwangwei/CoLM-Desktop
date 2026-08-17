@@ -14,9 +14,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # submodule 现在指向 GitHub 上的 CoLM202X fork，托管 runner 取得到。
+      # 它是 colm-namelist 的往返测试与 colm-schema 的漂移测试的输入，
+      # 那两条因此得以在每个 PR、三个平台上跑，而不再只在自托管作业里。
       - uses: actions/checkout@v4
         with:
-          submodules: false      # 内核只在黄金作业里才需要
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,14 +38,20 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
-      # 不需要 vendor/CoLM202X 的全部测试。roundtrip 与 drift 要读 CoLM 源码，
-      # 而 .gitmodules 还指向本机路径，托管 runner 上取不到 —— 它们在 golden
-      # 作业里跑。oracle 的 judge 是集成测试但只读已入库的黄金文件，所以显式
-      # 点名跑它，否则 --lib --bins 会把三平台上最有价值的那条覆盖丢掉。
+      # 除了需要 PLUMBER2 与 rawdata 的那几个之外，全部在这里跑。
+      #
+      # --lib --bins 拿到纯计算的部分；随后三条集成测试各自点名：
+      # judge 只读已入库的黄金文件，roundtrip 与 drift 只读 submodule 里的
+      # CoLM 源码 —— 三者都不需要第三方数据。
+      #
+      # 剩下的（colm-srfdata 的 raster/real_sites、colm-forcing 的 met/real_forcing）
+      # 要 5.5 GB 的 PLUMBER2 与 38 GB 的 rawdata，只能在 golden 作业里跑。
       - name: Test
         run: |
           cargo test --workspace --lib --bins
           cargo test -p oracle --test judge
+          cargo test -p colm-namelist --test roundtrip
+          cargo test -p colm-schema --test drift
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -72,15 +81,9 @@ jobs:
     if: ${{ vars.HAS_PLUMBER2 == 'true' }}
     runs-on: [self-hosted, plumber2]
     steps:
-      # submodule 目前指向本机绝对路径（见 Task 5 Step 1），所以这一步只在
-      # 那个路径存在的自托管 runner 上成立，且同样需要放开 file 传输。
-      # 待 CoLM202X 有可用的远端后，把 .gitmodules 的 url 改成 GitHub 地址，
-      # 这两条限制会一起消失。
       - uses: actions/checkout@v4
         with:
-          submodules: false
-      - name: Init submodule from its local path
-        run: git -c protocol.file.allow=always submodule update --init --recursive
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -130,5 +133,4 @@ jobs:
           else
             echo "::warning::Golden regression was NOT run: no PLUMBER2 data on this runner."
             echo "::warning::Green CI here does not mean the numerics are unchanged."
-            echo "::warning::The namelist round-trip and schema drift checks did NOT run either."
           fi

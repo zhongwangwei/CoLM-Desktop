@@ -5,6 +5,21 @@
 **当前状态**：里程碑 0–1。仓库骨架 + 成败判定 + 黄金输出回归基准。
 还没有 GUI，也还没有编排层。
 
+## 仓库与依赖
+
+`vendor/CoLM202X` 是 submodule，指向 `https://github.com/zhongwangwei/CoLM202X.git`，
+钉在一个具体 commit 上。克隆本仓库后先取它：
+
+```
+git submodule update --init
+```
+
+CI 分两层。每个 PR 在 ubuntu / macOS / Windows 三平台跑 **109/124** 条测试 ——
+纯计算、判官、namelist 往返、schema 漂移，这些只需要源码与已入库的黄金文件。
+其余 15 条要 5.5 GB 的 PLUMBER2 与 38 GB 的 rawdata，只能在带那些数据的
+自托管 runner 上跑；「它们没跑」这件事会在 PR 界面上以警告形式出现，
+而不是静默缺席。
+
 ## 为什么有 `crates/colm-kernel/src/outcome.rs`
 
 CoLM 在单点模式下，**成功与失败都以退出码 0 结束，但走的是两条不同的路**：
