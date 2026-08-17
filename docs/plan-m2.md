@@ -1861,11 +1861,44 @@ git commit -m "Fail the build when the committed schema drifts from its source"
         run: git -c protocol.file.allow=always submodule update --init vendor/CoLM202X
 ```
 
-**注意**：`.gitmodules` 目前记的是本机绝对路径，所以这一步在 GitHub 托管
-runner 上会失败。在 submodule 指向远端之前，把这一步与依赖它的两个测试
-（`colm-namelist` 的 roundtrip、`colm-schema` 的 drift）一起放进 `golden`
-作业，而不是 `rust` 作业。**执行本任务时先确认 `.gitmodules` 的 url 是什么，
-再决定放哪个作业** —— 放错了会让每个 PR 都红，而原因与改动无关。
+**先确认 `.gitmodules` 的 url**（`cat .gitmodules`）。写这个计划时它是
+`/Users/zhongwangwei/Desktop/colm-rust/CoLM202X` —— 一个**本机绝对路径**，
+GitHub 托管 runner 上不存在。只要它还是本机路径，上面这一步就必须放进
+`golden` 作业（自托管，路径存在），而不是 `rust` 作业。
+
+但只挪 yaml 里的这一步**不够**：`rust` 作业跑的是 `cargo test --workspace`，
+它照样会执行 roundtrip 与 drift，然后在 `canonicalize` 上炸掉。所以 `rust`
+作业的 Test 步骤要改成只跑不需要 submodule 的部分：
+
+```yaml
+      # 不需要 vendor/CoLM202X 的全部测试。roundtrip 与 drift 要读 CoLM 源码，
+      # 而 .gitmodules 还指向本机路径，托管 runner 上取不到 —— 它们在 golden
+      # 作业里跑。oracle 的 judge 是集成测试但只读已入库的黄金文件，所以显式
+      # 点名跑它，否则 --lib --bins 会把三平台上最有价值的那条覆盖丢掉。
+      - name: Test
+        run: |
+          cargo test --workspace --lib --bins
+          cargo test -p oracle --test judge
+```
+
+`golden` 作业里在既有步骤之后加一条跑完整套：
+
+```yaml
+      - name: Tests that need the CoLM source
+        run: cargo test --workspace
+```
+
+并把 `golden-status` 的告警文案补上这两条，让「没跑」在 PR 界面上可见：
+
+```yaml
+            echo "::warning::The namelist round-trip and schema drift checks did NOT run either."
+```
+
+**不要**用 `#[ignore]` 达成同样效果。那会让本机开发者的 `cargo test` 也跳过
+本 crate 的验收测试，而他们的 submodule 是好的 —— 代价落在了错误的人身上。
+
+待 `.gitmodules` 的 url 改成远端后，这三处一起回退成 `rust` 作业里的
+`cargo test --workspace` 加一步 submodule checkout。
 
 - [ ] **Step 2: README 补一节**
 
