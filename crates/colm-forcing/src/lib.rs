@@ -18,3 +18,4 @@ pub mod render;
 
 pub use check::{check, MetSummary, REQUIRED_VARS};
 pub use civil::{civil_from_days, days_from_civil, Stamp};
+pub use render::{render, ForcingSpec};
