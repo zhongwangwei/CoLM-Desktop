@@ -1491,7 +1491,7 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     std::fs::copy(src, dst)
         .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
 
-    let (lon, lat, landtype, col) = read_inputs(dst)?;
+    let (lon, lat, landtype, col, soil_dim) = read_inputs(dst)?;
     let d = derive(&col);
     let fe = fine_earth_fractions(&col, &d);
     let texture = classify(fe.silt, fe.clay)
@@ -1559,10 +1559,19 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     }
 
     // --- 推导的 4 个 ---
+    // 维度取自它们各自的来源变量，而不是按长度去猜：站点文件里
+    // LAI_year=2 / month=12 / pft=2 / soil=10 / year=21，按长度找只是碰巧
+    // 不重复，而 dimensions() 的迭代顺序并无保证。
     let note = "derived: clay is 25% of the non-sand/gravel/OM remainder (loam 1:3 clay:silt assumption)";
-    put_layers(&mut f, "soil_vf_clay", &d.vf_clay, note)?;
-    put_layers(&mut f, "soil_wf_clay", &d.wf_clay, note)?;
-    put_layers(&mut f, "soil_wf_om", &d.wf_om, "derived: vf_om * OM_density / BD_all")?;
+    put_layers(&mut f, "soil_vf_clay", &d.vf_clay, &soil_dim, note)?;
+    put_layers(&mut f, "soil_wf_clay", &d.wf_clay, &soil_dim, note)?;
+    put_layers(
+        &mut f,
+        "soil_wf_om",
+        &d.wf_om,
+        &soil_dim,
+        "derived: vf_om * OM_density / BD_all",
+    )?;
     put_int(
         &mut f,
         "soil_texture",
@@ -1587,7 +1596,7 @@ pub struct Report {
     pub from_default: Vec<String>,
 }
 
-fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn)> {
+fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn, String)> {
     let f = netcdf::open(file)?;
     let scalar = |n: &str| -> Result<f64> {
         let v = f.variable(n).with_context(|| format!("{n} missing"))?;
@@ -1610,7 +1619,12 @@ fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn)> {
         om_density: layers("soil_OM_density")?,
         bd_all: layers("soil_BD_all")?,
     };
-    Ok((lon, lat, landtype, col))
+    // 推导出来的剖面变量要挂在与来源变量同一个维度上。
+    let soil_dim = f
+        .variable("soil_vf_sand")
+        .and_then(|v| v.dimensions().first().map(|d| d.name()))
+        .context("soil_vf_sand has no dimension to hang the derived layers on")?;
+    Ok((lon, lat, landtype, col, soil_dim))
 }
 
 fn put_scalar(f: &mut netcdf::FileMut, name: &str, value: f64, source: &str) -> Result<()> {
@@ -1627,25 +1641,17 @@ fn put_int(f: &mut netcdf::FileMut, name: &str, value: i32, source: &str) -> Res
     Ok(())
 }
 
-fn put_layers(f: &mut netcdf::FileMut, name: &str, values: &[f64], source: &str) -> Result<()> {
-    let dim = soil_dim_name(f, values.len())?;
-    let mut v = f.add_variable::<f64>(name, &[&dim])?;
+fn put_layers(
+    f: &mut netcdf::FileMut,
+    name: &str,
+    values: &[f64],
+    dim: &str,
+    source: &str,
+) -> Result<()> {
+    let mut v = f.add_variable::<f64>(name, &[dim])?;
     v.put_values(values, netcdf::Extents::All)?;
     v.put_attribute("source", source)?;
     Ok(())
-}
-
-/// 找出站点文件里长度等于剖面层数的那个维度名。
-///
-/// 不硬编码 "soil"：不同来源的站点文件维度名可能不同，硬编码会在第一个
-/// 命名不同的文件上失败，而失败信息会指向一个完全无关的地方。
-fn soil_dim_name(f: &netcdf::FileMut, n: usize) -> Result<String> {
-    for d in f.dimensions() {
-        if d.len() == n {
-            return Ok(d.name());
-        }
-    }
-    bail!("no dimension of length {n} in the site file")
 }
 
 #[cfg(test)]
