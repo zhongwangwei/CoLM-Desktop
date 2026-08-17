@@ -1,9 +1,10 @@
 # 里程碑 5b 实施计划：让两张生成表说真话
 
-> **编号说明**：文件名里的 `m6` 是计划的写作顺序。它对应 `design.md` §10 的
-> **5b**，不是那张表的里程碑 6（那是 `colm-hist` 的时间轴、抽稀、指标与 QC，
-> 验收标准是复现 Rnet R²=0.986，本轮没做）。计划文件与 §10 的编号在 2–5 上
-> 恰好一致，从这里开始分叉 —— 因为 5b 是写完 §10 之后测量才发现需要的。
+> **编号说明**：本文件先前叫 `plan-m6.md`（按写作顺序编号），已改名对齐
+> `design.md` §10 的 **5b**。§10 的里程碑 6 是别的东西 —— `colm-hist` 的
+> 时间轴、抽稀、指标与 QC，验收标准是复现 Rnet R²=0.986，本轮没做。
+> 5b 是写完 §10 之后测量才发现需要的，所以当初不在那张表上。
+> **往后计划文件一律按 §10 编号**，写作顺序不再参与命名。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
