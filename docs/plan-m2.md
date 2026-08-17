@@ -1314,7 +1314,7 @@ mod field_tests;
 这些测试针对**生成出来的表**，所以它们同时是生成器的验收。
 
 ```rust
-use crate::{find, all, Default, FieldKind};
+use crate::{all, find, Default, FieldKind};
 
 #[test]
 fn the_table_has_the_measured_number_of_fields() {
@@ -1442,7 +1442,7 @@ workspace = true
 //! 而不是某次构建之后悄悄换掉的东西。
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
@@ -1453,8 +1453,8 @@ fn main() -> Result<()> {
     }
     let root = repo_root()?;
     let src = root.join("vendor/CoLM202X/share/MOD_Namelist.F90");
-    let text = std::fs::read_to_string(&src)
-        .with_context(|| format!("cannot read {}", src.display()))?;
+    let text =
+        std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let fields = extract(&text)?;
     let out = render(&fields);
     let dst = root.join("crates/colm-schema/src/generated.rs");
@@ -1514,7 +1514,11 @@ fn extract(text: &str) -> Result<Vec<Field>> {
         // 跨行数组字面量：实测 4 处，形如 `= (/ &` 续到 `/)`
         let mut default = decl.default.clone();
         if default.trim_end().ends_with('&') {
-            let mut acc = default.trim_end().trim_end_matches('&').trim_end().to_string();
+            let mut acc = default
+                .trim_end()
+                .trim_end_matches('&')
+                .trim_end()
+                .to_string();
             for (_, more) in lines.by_ref() {
                 let m = more.trim();
                 acc.push(' ');
@@ -1620,9 +1624,9 @@ fn render(fields: &[Field]) -> String {
             Some(o) => format!("Some({o:?})"),
             None => "None".to_string(),
         };
-        let _ = write!(
+        let _ = writeln!(
             s,
-            "    Field {{ name: {full:?}, kind: {}, default: {}, doc: {doc}, arity: {arity}, owner: {owner}, line: {} }},\n",
+            "    Field {{ name: {full:?}, kind: {}, default: {}, doc: {doc}, arity: {arity}, owner: {owner}, line: {} }},",
             f.kind,
             render_default(&f.kind, &f.default),
             f.line
@@ -1652,7 +1656,10 @@ fn render_default(kind: &str, raw: &str) -> String {
         return format!("Default::Array({t:?})");
     }
     if kind.starts_with("FieldKind::Logical") {
-        return format!("Default::Logical({})", t.to_ascii_lowercase().contains("true"));
+        return format!(
+            "Default::Logical({})",
+            t.to_ascii_lowercase().contains("true")
+        );
     }
     if kind.starts_with("FieldKind::Integer") {
         return match t.parse::<i64>() {
@@ -1676,9 +1683,6 @@ fn repo_root() -> Result<PathBuf> {
     }
     Ok(d)
 }
-
-#[allow(dead_code)]
-fn unused(_: &Path) {}
 ```
 
 - [ ] **Step 3: 把 xtask 加入 workspace 并生成**
