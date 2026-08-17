@@ -33,6 +33,26 @@ cargo run -p oracle --bin golden-compare -- \
   oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
 ```
 
+## 配置层
+
+`crates/colm-namelist` 读写 CoLM 的 namelist，**保留原文格式**：解析→修改→
+序列化后，未改动的行逐字节不变。验收是对 `vendor/CoLM202X` 里全部 55 个真实
+`.nml`（4167 行）做往返测试。理由是用户算例文件里的注释是他们自己的笔记。
+
+`crates/colm-schema` 描述每个 `DEF_*` 字段的类型、默认值与说明。这张表
+**由 `cargo run -p xtask -- gen-schema` 从 `MOD_Namelist.F90` 生成**，产物入库，
+`tests/drift.rs` 保证它不会与上游脱节。详见 `crates/colm-schema/build-notes.md`。
+
+注意 schema 记录的是 **CoLM 声明的**默认值，一字不改。这很重要，因为
+CoLM 的默认值假设 HPC 数据树存在：`DEF_USE_OZONEDATA` 默认 `.true.`，
+要读 2.8 GB 的 `Ozone/Global/OZONE-setgrid.nc`；`DEF_Runoff_SCHEME` 默认 `3`
+（Simple VIC），要求站点文件里有 `soil_texture`。
+
+这两条的处置并不相同：臭氧是**本项目唯一必须显式关掉**的默认开关，
+而产流方案沿用 CoLM 的 `3`，代价是站点文件缺 `soil_texture` 时要合成一个。
+哪个照搬、哪个偏离、偏离的理由，都由上层决定并解释，schema 不参与 ——
+见 `docs/design.md` §2.5 与 §2.7。
+
 ## 两个窗口覆盖到什么、没覆盖到什么
 
 下表全部来自对两个黄金文件的实测，不是设计意图。

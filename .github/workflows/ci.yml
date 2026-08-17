@@ -35,8 +35,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # 不需要 vendor/CoLM202X 的全部测试。roundtrip 与 drift 要读 CoLM 源码，
+      # 而 .gitmodules 还指向本机路径，托管 runner 上取不到 —— 它们在 golden
+      # 作业里跑。oracle 的 judge 是集成测试但只读已入库的黄金文件，所以显式
+      # 点名跑它，否则 --lib --bins 会把三平台上最有价值的那条覆盖丢掉。
       - name: Test
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace --lib --bins
+          cargo test -p oracle --test judge
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -97,6 +103,9 @@ jobs:
             oracle/work/CN-Cng-wet/out/CN-Cng-wet/history/CN-Cng-wet_hist_2008-07.nc
           cargo run -p oracle --bin tier-check -- oracle/golden/*.nc
 
+      - name: Tests that need the CoLM source
+        run: cargo test --workspace
+
   # 让「黄金回归没跑」这件事在 PR 界面上可见，而不是静默缺席。
   golden-status:
     runs-on: ubuntu-latest
@@ -109,4 +118,5 @@ jobs:
           else
             echo "::warning::Golden regression was NOT run: no PLUMBER2 data on this runner."
             echo "::warning::Green CI here does not mean the numerics are unchanged."
+            echo "::warning::The namelist round-trip and schema drift checks did NOT run either."
           fi
