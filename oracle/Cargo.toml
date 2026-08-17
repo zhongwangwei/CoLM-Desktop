@@ -8,6 +8,10 @@ publish.workspace = true
 
 [dependencies]
 colm-forcing = { path = "../crates/colm-forcing" }
+# 只被 tests/histmap.rs 用到：把生成的闸门表拿来跟入库的黄金文件对。
+# 依赖方向是 oracle → colm-hist，反过来不行 —— colm-hist 必须无依赖，
+# 否则 netcdf 会跟着那张表一起被拖进 GUI。
+colm-hist = { path = "../crates/colm-hist" }
 colm-kernel = { path = "../crates/colm-kernel" }
 colm-namelist = { path = "../crates/colm-namelist" }
 anyhow.workspace = true

@@ -40,9 +40,14 @@ jobs:
 
       # 除了需要 PLUMBER2 与 rawdata 的那几个之外，全部在这里跑。
       #
-      # --lib --bins 拿到纯计算的部分；随后三条集成测试各自点名：
-      # judge 只读已入库的黄金文件，roundtrip 与 drift 只读 submodule 里的
-      # CoLM 源码 —— 三者都不需要第三方数据。
+      # --lib --bins 拿到纯计算的部分；随后五条集成测试各自点名：
+      # judge 与 histmap 只读已入库的黄金文件，roundtrip 与两条 drift 只读
+      # submodule 里的 CoLM 源码 —— 五者都不需要第三方数据。
+      #
+      # histmap 与 colm-hist 的 drift 进这一档的理由与前三条相同：闸门表是
+      # 生成的，上游改了 MOD_Hist.F90 而没重新生成，只有 drift 会喊；而
+      # histmap 是那张表唯一的经验校验，落进只有自托管 runner 才跑的一档
+      # 就等于没有。
       #
       # 剩下的（colm-srfdata 的 raster/real_sites、colm-forcing 的 met/real_forcing）
       # 要 5.5 GB 的 PLUMBER2 与 38 GB 的 rawdata，只能在 golden 作业里跑。
@@ -52,6 +57,8 @@ jobs:
           cargo test -p oracle --test judge
           cargo test -p colm-namelist --test roundtrip
           cargo test -p colm-schema --test drift
+          cargo test -p oracle --test histmap
+          cargo test -p colm-hist --test drift
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

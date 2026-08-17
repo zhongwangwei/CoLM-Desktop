@@ -325,6 +325,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "colm-forcing",
+ "colm-hist",
  "colm-kernel",
  "colm-namelist",
  "netcdf",
