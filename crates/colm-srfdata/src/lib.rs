@@ -18,5 +18,8 @@ pub mod site;
 pub mod texture;
 
 pub use albedo::{albedo, SoilAlbedo};
+pub use derive::{
+    depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
+};
 pub use grid::{Grid, COLM_500M};
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
