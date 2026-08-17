@@ -36,3 +36,7 @@ path = "src/bin/golden_run.rs"
 [[bin]]
 name = "golden-compare"
 path = "src/bin/golden_compare.rs"
+
+[[bin]]
+name = "tier-check"
+path = "src/bin/tier_check.rs"

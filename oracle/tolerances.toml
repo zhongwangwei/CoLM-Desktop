@@ -1,0 +1,80 @@
+# CoLM history 变量的容差分级。见 docs/design.md §8.1。
+#
+# 里程碑 1 只做逐位比较，本文件此时不参与比较，只被 tier-check 校验完备性。
+# 计划 3 的 colm-hist 与 C 阶段的 Rust-vs-Fortran 对账会真正消费它。
+#
+# 禁止在测试里内联容差魔数 —— EarthMesh 就是在两个测试里对同一个网格
+# 用了 2.0e-6 和 2.0e-4。
+
+[tier0]
+description = "纯函数、无迭代、无收敛。任何差异都是 bug。"
+rule = "bitwise"
+variables = [
+  "time", "lat", "lon",
+  # 维度坐标：常量整数索引，不参与任何计算
+  "band", "lake", "rtyp", "soil", "soilinterface", "soilsnow", "vegnodes",
+  # 未启用的用户自定义诊断槽：两个黄金文件里全是 -1e36 的 missing_value
+  "f_sensors",
+  "f_lai", "f_sai", "f_green", "f_sigf", "f_z0m",
+  "f_xy_t", "f_xy_q", "f_xy_pbot", "f_xy_us", "f_xy_vs",
+  "f_xy_solarin", "f_xy_frl", "f_xy_prc", "f_xy_prl",
+  "f_xy_rain", "f_xy_snow",
+]
+
+[tier1]
+description = "确定性代数、无迭代物理。"
+rule = "relative"
+rtol = 1e-12
+variables = [
+  "f_solvd", "f_solvi", "f_solnd", "f_solni",
+  "f_solvdln", "f_solviln", "f_solndln", "f_solniln",
+  "f_srvd", "f_srvi", "f_srnd", "f_srni",
+  "f_srvdln", "f_srviln", "f_srndln", "f_srniln",
+  "f_sr", "f_alb", "f_sabg", "f_sabvsun", "f_sabvsha",
+  "f_olrg", "f_rnet", "f_emis", "f_trad",
+  "f_fm", "f_fh", "f_fq", "f_fm10m",
+  "f_snowdp", "f_fsno", "f_scv",
+]
+
+[tier2]
+description = """
+含迭代收敛的模块。容差不得紧于求解器自身的收敛容差。
+比较时必须同时报告迭代计数与回退次数（如 VSF implicit/explicit 计数）；
+回退次数变化即为红旗，即使数值落在容差内。
+"""
+rule = "absolute_and_relative"
+atol = 1e-7
+rtol = 1e-7
+solver_tolerance_floor = 8e-8   # MOD_Hydro_SoilWater 的 Newton 容差
+variables = [
+  "f_fsena", "f_fseng", "f_fsenl",
+  "f_lfevpa", "f_fevpa", "f_fevpg", "f_fevpl",
+  "f_etr", "f_etrsun", "f_etrsha",
+  "f_assim", "f_assimsun", "f_assimsha",
+  "f_gssun", "f_gssha", "f_rstfacsun", "f_rstfacsha",
+  "f_tleaf", "f_t_grnd", "f_tref", "f_qref",
+  "f_fgrnd", "f_taux", "f_tauy", "f_ustar", "f_ustar2",
+  "f_tstar", "f_qstar", "f_rib", "f_zol", "f_us10m", "f_vs10m",
+  "f_zwt", "f_wat", "f_wat_inst", "f_wa", "f_wa_inst",
+  # 多层状态量：全部来自隐式列求解或相变，逐层值依赖迭代细节
+  "f_h2osoi", "f_t_soisno", "f_wice_soisno", "f_wliq_soisno",
+  "f_qlayer", "f_rootr", "f_vegwp",
+  "f_t_lake", "f_lake_icefrac", "f_lake_deficit",
+  "f_rnof", "f_rsur", "f_rsub", "f_rsur_ie", "f_rsur_se",
+  "f_qinfl", "f_qdrip", "f_qintr", "f_ldew",
+  "f_frcsat", "f_rss", "f_respc",
+  "f_wdsrf", "f_wdsrf_inst", "f_wetwat", "f_wetwat_inst", "f_wetzwt",
+  "f_o3uptakesun", "f_o3uptakesha",
+  "f_laisun", "f_laisha",
+  "f_xerr", "f_zerr",
+]
+
+[tier3]
+description = "整场统计等价。判据挂在 design.md §2.8/§2.8b 的实测基线上。"
+rule = "statistical"
+variables = []          # 逐变量判据由 colm-hist 在计划 3 中定义
+
+[tier3.baselines]
+# 湿季窗口 CN-Cng-wet，剔除前 4 天预热，观测仅 qc==0
+rnet_r2_min = 0.999
+qle_r2_min  = 0.85
