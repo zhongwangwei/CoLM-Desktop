@@ -179,6 +179,44 @@ CN-Cng 实测：砂 14.3% / 粉 64.3% / 黏 21.4% → **第 4 类 Silt loam** �
 **更好的做法**：这些 rawdata 是全球网格（`colm_500m` = 86400×43200），单点只需 1 个像元。
 不要搬几百 GB —— 给每个站点做一次**站点参数包抽取**，每站几 KB。附录 B 是完整文件清单。
 
+### 2.7b 本机的 rawdata 校验过合成值，而里程碑 3 把真值烘了进去
+
+本机存在：
+
+```
+~/Desktop/colm-rust/rawdata/   38 GB   lake_depth.nc (49 MB) / soil_brightness.nc (28 MB)
+                                       / topography.nc (38 GB) / soil/ (26 个文件)
+~/Desktop/colm-rust/runtime/   2.8 GB  Ozone/Global/OZONE-setgrid.nc (2.8 GB)
+                                       / snicar/*.nc (468 KB) / nitrif/ (30 MB)
+```
+
+把 `USE_SITE_lakedepth` / `soilreflectance` / `topography` 置为 `.false.`、
+`DEF_dir_rawdata` 指向真实数据重跑 `mksrfdata`，让 CoLM 自己去抽点（而不是我们
+复现它的网格逻辑），得到的 `srfdata.nc` 与最初那版合成值**42 个变量里只有 4 个不同**：
+
+| 变量 | 最初合成值 | 真实 rawdata | 说明 |
+|---|---|---|---|
+| `elevation` | 138 | 144.14 | 合成用的是塔的高程（取自 Observation 文件），真实值是 500 m 格点均值 |
+| `elvstd` | 0 | 0.4963 | 次网格高程标准差 |
+| `lakedepth` | 1 | 0 | 对草地斑块（IGBP 10）无影响，该量只用于湖泊斑块 |
+| `sloperatio` | 0 | 0.003576 | 注意：`mksrfdata` 日志按 `F8.2` 打印为 `0.00`，看日志会误以为相同 |
+
+**四个土壤亮度反照率完全命中**（0.14 / 0.25 / 0.28 / 0.39）。
+
+**本节原先的决定（「黄金基准保持合成版」）已被里程碑 3 推翻。** 当时留了一句
+「正确做法不是让用户装 rawdata，而是把上表那 4 个真实值烘进入库的 `site.nc`」——
+`crates/colm-srfdata` 做的就是这件事，两个黄金文件已随之重新生成。`elevation`
+是唯一的例外：它保持 138，因为**站点自有的值优先于栅格**（塔的实测高程，见
+`oracle/fixtures/PROVENANCE.md`），144.14 是 500 m 格点均值而不是这个站点的高程。
+
+`elevation` 之外的三项与四个反照率现在都取自栅格，fixture 仍是自包含的
+37 KB，复现不需要那 38 GB。
+
+**runtime 的可携带性**：`snicar/` 只有 468 KB，若要开启雪粒径演化辐射
+（`DEF_USE_SNICAR`）可以随包分发；`Ozone/` 2.8 GB 不可能随包，所以
+`DEF_USE_OZONEDATA = .false.` 与常数 100 ppbv 的偏离（§2.7 的 runtime 表）
+继续成立，除非将来抽取单点臭氧时间序列。
+
 ### 2.8 端到端已跑通，且物理正确
 
 站点 CN-Cng（2008-01-01 → 01-11，1800 s 步长，逐小时输出）：
@@ -628,24 +666,40 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 
 ## 6. 运行时契约与失败处理
 
+> **实现状态**：§6.1–§6.4 已实现于 `crates/colm-kernel`（里程碑 5），
+> 分别在 `manifest.rs` / `run.rs` / `outcome.rs` / `overrides.rs`。
+> §6.5 是构建期开关，已默认打开。§6.6 进程生命周期属于 GUI 层，尚未实现。
+> 下文与实现不符的地方已就地改正，改正处标注了理由。
+
 ### 6.1 内核清单代替 `--version`
 
 `colm.x` / `mkinidata.x` / `mksrfdata.x` 均以 `getarg(1, nlfile)` 取 namelist 路径
 （`main/CoLM.F90:185`、`mkinidata/CoLMINI.F90:86`、`mksrfdata/MKSRFDATA.F90:124`），
 **不接受其他参数，没有 `--version`**。
 
-因此改用构建期生成的 `kernels/manifest.json`：
+因此改用构建期生成的清单。**它是每个预设目录一份，而不是一份全局文件**：
+本节原先写的是 `kernels/manifest.json` 里一个 `kernels` 数组，实现时改成了
+`kernels/<preset>/manifest.json`，理由见下一段的「同生同存」—— 清单认定的是
+紧挨着它的那三个二进制，一份全局清单会让它在预设之间失去这个含义。
+实测的 `kernels/waterheat/manifest.json`：
 
 ```json
-{ "schema": 1, "kernels": [{
-    "preset": "waterheat",
-    "platform": "aarch64-apple-darwin",
-    "sha256": { "colm": "…", "mkinidata": "…", "mksrfdata": "…" },
-    "colm_git_sha": "72dd76b9",
-    "macros": ["SinglePoint","LULC_IGBP","vanGenuchten_Mualem_SOIL_MODEL","extend_interception"],
-    "built_with": "GNU Fortran (Homebrew GCC 16.1.0) 16.1.0",
-    "netcdf_c": "netCDF 4.9.3", "netcdf_fortran": "4.6.3", "hdf5": "1.14.6" }]}
+{
+  "schema": 1,
+  "preset": "waterheat",
+  "platform": "Darwin-arm64",
+  "colm_git_sha": "72dd76b9",
+  "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",
+  "macros": ["CoLMDEBUG","LULC_IGBP","RangeCheck","SinglePoint","extend_interception","vanGenuchten_Mualem_SOIL_MODEL"],
+  "built_with": "GNU Fortran (Homebrew GCC 16.1.0) 16.1.0",
+  "netcdf_c": "netCDF 4.9.3",
+  "netcdf_fortran": "4.6.3",
+  "hdf5": "1.14.6",
+  "sha256": { "mksrfdata": "…", "mkinidata": "…", "colm": "…" }
+}
 ```
+
+`schema` 不匹配即拒绝读，而不是按旧字段含义解释一份新格式的清单。
 
 **为什么必须记 `netcdf_c` / `netcdf_fortran` / `hdf5`**：黄金文件的字节由
 **Fortran 侧**写出（`colm.x` 链接系统 netcdf-fortran），Rust 判官只负责读。
@@ -682,17 +736,37 @@ GUI 只渲染校验通过的预设（backend-owned UI vocabulary）。
    `CoLM Initialization Execution Completed` /
    `CoLM Execution Completed.`
 2. **输出产物硬校验** —— §6.2 的表。
-3. **stdout 错误标记扫描** —— `Netcdf error`、`ERROR in`、`***** ERROR`、
+3. **错误标记扫描** —— `Netcdf error`、`ERROR in`、`***** ERROR`、
    `Fortran runtime error`、`does not exist`、`nan`、水/能量平衡越界消息。
    **注意排除已知的无害行**：`History namelist file: null does not exist.`
+
+   本节原先写的是「stdout 扫描」，实现时改成 **stdout 与 stderr 都收**：
+   gfortran 的运行期错误只走 stderr，所以 `Fortran runtime error` 与
+   `Error termination` 这两个标记在只读 stdout 时**永远不可能命中**。
+   实测 namelist 文件缺失时 stdout 是 0 字节而 stderr 有 302 字节 ——
+   只收 stdout 的话，日志会空得看不出任何原因。
 
 任何一条不满足即判失败，并报出**是哪一条触发的**加最后 N 行日志。绝不静默成功。
 
 ### 6.4 静默覆盖必须回报
 
-解析 stdout 里 `Note:` / `Warning:` 开头的覆盖消息（§2.6），在 GUI 中以
+解析日志里 `Note:` / `Warning:` 开头的覆盖消息（§2.6），在 GUI 中以
 「你要求了 X，模型实际用了 Y」呈现。这是 EarthMesh 的
 「报告实际产出了什么，而不是你要求了什么」在配置层的应用。
+
+实现时实测出三件本节原先没写的事：
+
+1. **前缀不统一**。一次 CN-Cng 运行出现 9 种消息，其中最后一条是
+   `Warning :` —— 冒号前有个空格。按 `"Warning:"` 匹配会漏掉一整类消息，
+   而且毫无迹象。所以匹配的是「关键词 + 可选空白 + 冒号」。
+2. **只认前缀，不认文本**。CoLM 把 automatically 拼成了 `automaticlly`。
+   按消息文本匹配的代码会在上游改错字的那天静默失效，所以整行原样交给上层，
+   语义解析留给需要它的调用方。
+3. **抽覆盖与判成败必须零碰撞**。这 9 条消息里没有一条命中 §6.3 的 7 个
+   失败标记 —— 这不是自明的，两边都会各自增长，所以有一条测试守着它。
+
+三段各自都会打印这些消息（前两段各 8 条，`colm` 段 9 条），所以呈现时按段归属，
+不跨段去重。
 
 ### 6.5 默认武装 `CoLMDEBUG`
 
