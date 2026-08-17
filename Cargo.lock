@@ -67,6 +67,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-hist"
+version = "0.1.0"
+
+[[package]]
 name = "colm-kernel"
 version = "0.1.0"
 dependencies = [
