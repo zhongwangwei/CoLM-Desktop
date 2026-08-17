@@ -177,12 +177,12 @@ workspace = true
 //! 数组切片 `v(1:3)=`、续行符 `&` 在 66 个文件里出现 0 次，因此不支持，
 //! 遇到时明确报错而不是猜。
 
+//! 类型与函数的重导出在 Task 5（namelist）与 Task 8（schema）里加上，
+//! 那时它们指向的东西才存在。
+
 pub mod document;
 pub mod parse;
 pub mod value;
-
-pub use document::Document;
-pub use value::{Path, Segment, Value};
 ```
 
 - [ ] **Step 3: 写 `crates/colm-schema/Cargo.toml`**
@@ -216,23 +216,29 @@ workspace = true
 //! 不会报错，只会静默地少一项 —— 而 GUI 依赖这张表决定渲染什么，
 //! 少一项意味着用户永远看不到那个选项。
 
+//! `all()` / `find()` 与重导出在 Task 8 里加上，那时字段表才存在。
+
 pub mod field;
 pub mod generated;
-
-pub use field::{Default, Field, FieldKind};
-
-/// 全部字段，按声明顺序。
-pub fn all() -> &'static [Field] {
-    generated::FIELDS
-}
-
-/// 按全名查找，例如 `"DEF_forcing%dataset"`。
-pub fn find(name: &str) -> Option<&'static Field> {
-    generated::FIELDS.iter().find(|f| f.name == name)
-}
 ```
 
-- [ ] **Step 5: 把两个 crate 加入 workspace**
+- [ ] **Step 5: 建占位模块文件**
+
+`lib.rs` 声明了模块，文件就必须存在。这五个各写一行，内容会在后续 Task 被整体替换：
+
+`crates/colm-namelist/src/{value,parse,document}.rs`：
+
+```rust
+//! 占位，Task 2/3/4 实现。
+```
+
+`crates/colm-schema/src/{field,generated}.rs`：
+
+```rust
+//! 占位，Task 7/8 实现。
+```
+
+- [ ] **Step 6: 把两个 crate 加入 workspace**
 
 在根 `Cargo.toml` 把 members 改成：
 
@@ -240,27 +246,20 @@ pub fn find(name: &str) -> Option<&'static Field> {
 members = ["crates/colm-kernel", "crates/colm-namelist", "crates/colm-schema", "oracle"]
 ```
 
-- [ ] **Step 6: 确认编译失败于「模块不存在」**
+- [ ] **Step 7: 三道门禁都必须过**
 
-Run: `cargo build 2>&1 | head -20`
-Expected: 报 `file not found for module 'document'` 等。这是预期的——
-Task 2 起逐个补上。**不要**为了让它过而先建空文件；下一个 Task 就写它们。
+Run: `cargo build`
+Expected: 编译通过，无警告。
 
-- [ ] **Step 7: 先把 lib.rs 里声明的模块建成占位，使骨架可编译**
+Run: `cargo clippy --workspace --all-targets -- -D warnings`
+Expected: 无输出。
 
-`crates/colm-namelist/src/value.rs`、`parse.rs`、`document.rs` 各写一行：
+Run: `cargo fmt --all --check`
+Expected: 无输出。
 
-```rust
-//! 占位，Task 2/3/4 实现。
-```
-
-`crates/colm-schema/src/field.rs`、`generated.rs` 同样。
-
-然后把两个 `lib.rs` 里的 `pub use` 与 `pub fn` 暂时注释掉（它们引用尚不存在的类型），
-只留 `pub mod` 声明。Task 结束时 `cargo build` 必须通过。
-
-Run: `cargo build && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
-Expected: 三条都通过，无输出。
+Run: `cargo test --workspace 2>&1 | grep 'test result'`
+Expected: 里程碑 0–1 的 21 个测试仍全绿（11 个 colm-kernel + 10 个 oracle judge）。
+本 Task 不应触碰它们。
 
 - [ ] **Step 8: 提交**
 
@@ -967,13 +966,11 @@ fn parse_scalar(s: &str) -> Result<Value> {
 mod parse_tests;
 ```
 
-- [ ] **Step 3: 把 lib.rs 的导出恢复**
+- [ ] **Step 3: 给 `crates/colm-namelist/src/lib.rs` 加上重导出**
+
+在文件末尾追加（Task 1 只写了 `pub mod`）：
 
 ```rust
-pub mod document;
-pub mod parse;
-pub mod value;
-
 pub use document::Document;
 pub use parse::parse;
 pub use value::{Path, Segment, Value};
@@ -1597,6 +1594,24 @@ Expected: 7 条全部通过。
 若 `no_local_variable_leaked_into_the_schema` 失败，说明作用域截断没生效——
 检查 `extract` 是否在第一个 `SUBROUTINE` 处 `break`。**不要**改成按名字
 黑名单过滤那 6 个：黑名单挡不住下一个新增的局部变量。
+
+- [ ] **Step 4b: 给 `crates/colm-schema/src/lib.rs` 加上查询接口**
+
+Task 1 只写了 `pub mod`。现在字段表存在了，追加：
+
+```rust
+pub use field::{Default, Field, FieldKind};
+
+/// 全部字段，按声明顺序。
+pub fn all() -> &'static [Field] {
+    generated::FIELDS
+}
+
+/// 按全名查找，例如 `"DEF_forcing%dataset"`。
+pub fn find(name: &str) -> Option<&'static Field> {
+    generated::FIELDS.iter().find(|f| f.name == name)
+}
+```
 
 - [ ] **Step 5: 写 `build-notes.md`**
 
