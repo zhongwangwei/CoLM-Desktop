@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+colm-forcing = { path = "../crates/colm-forcing" }
 colm-kernel = { path = "../crates/colm-kernel" }
 anyhow.workspace = true
 sha2.workspace = true
