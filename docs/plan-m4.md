@@ -1513,6 +1513,46 @@ CN-Cng_2008-2009_FLUXNET2015_Met.nc
 拼上 `$PLUMBER2_ROOT/Forcing/`，交给 `summarize` 与 `render`。
 一行文件换掉一份 30 行模板，且哪个算例用哪份强迫场变成显式的。
 
+**具体改法。** `golden_run.rs:57-60` 现在是：
+
+```rust
+    fs::write(
+        work.join("forcing.nml"),
+        subst(&fs::read_to_string(case_dir.join("forcing.nml.in"))?),
+    )?;
+```
+
+换成：
+
+```rust
+    // 强迫场 namelist 现生成，而不是展开一份手写模板。让黄金回归用生成器，
+    // 等于每次回归都在验它 —— 生成的 namelist 若改变了语义，history 会先变。
+    let met_name = fs::read_to_string(case_dir.join("met.txt"))
+        .with_context(|| format!("no met.txt in {}", case_dir.display()))?
+        .trim()
+        .to_string();
+    let forcing_dir = plumber2.join("Forcing");
+    let met = forcing_dir.join(&met_name);
+    let summary = colm_forcing::summarize(&met)?;
+    let problems = colm_forcing::check(&summary, None);
+    if !problems.is_empty() {
+        for p in &problems {
+            eprintln!("  {p}");
+        }
+        bail!("{} problem(s) with {}", problems.len(), met.display());
+    }
+    fs::write(
+        work.join("forcing.nml"),
+        colm_forcing::render(&colm_forcing::ForcingSpec {
+            dir: forcing_dir.display().to_string(),
+            file: met_name,
+            met: summary,
+        }),
+    )?;
+```
+
+`subst` 仍然用于 `case.nml`，只是不再用于强迫场那一份。
+
 - [ ] **Step 3: 重跑两个窗口并比对**
 
 ```bash
