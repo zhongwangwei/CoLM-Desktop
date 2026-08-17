@@ -113,3 +113,14 @@ fn happy_path_succeeds() {
     let got = adjudicate(Stage::MkSrfData, Some(0), stdout, &[existing_path()]);
     assert_eq!(got, Outcome::Succeeded);
 }
+
+#[test]
+fn stage_program_names_match_the_built_executables() {
+    // build_kernel.sh 拷出的是 run/{mksrfdata,mkinidata,colm}.x，
+    // 而 golden-run 用 format!("{}.x", stage.program()) 拼路径。
+    // 这三个字符串是两者之间唯一的契约，错一个字母的表现是「内核找不到」，
+    // 而那要到 Task 6 才会暴露。
+    assert_eq!(Stage::MkSrfData.program(), "mksrfdata");
+    assert_eq!(Stage::MkIniData.program(), "mkinidata");
+    assert_eq!(Stage::Colm.program(), "colm");
+}
