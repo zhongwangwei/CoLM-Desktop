@@ -870,7 +870,8 @@ Expected: 5 条全红（表是空的）。
 - [ ] **Step 7: 提交红状态**
 
 ```bash
-git add crates/colm-hist Cargo.toml
+# Cargo.lock 是入库文件，加 workspace 成员会改写它 —— 不带上就会留一个脏工作区
+git add crates/colm-hist Cargo.toml Cargo.lock
 git commit -m "Add failing tests for which variables a preset can produce"
 ```
 
@@ -888,6 +889,11 @@ git commit -m "Add failing tests for which variables a preset can produce"
 （表 456、waterheat 下宏放行 123 / 无条件 113、零漏报），包括本步的
 `parse_cond` 与 Task 5 的运行时条件跟踪。
 
+本步只写到 `parse_cond`，`main.rs` 里只加 `mod hist;`。此时没有调用方，
+所以文件顶部要临时加 `#![allow(dead_code)]` 并注明「下一步接上」——
+Task 5 接上 `gen-histmap` 分发之后删掉。`gen-histmap` 的分发臂放在 Task 5，
+放在本步会得到一个无事可做的分支。
+
 ```rust
 //! `MOD_Hist.F90` -> 每个输出变量的三道闸门。
 //!
@@ -897,7 +903,8 @@ git commit -m "Add failing tests for which variables a preset can produce"
 //! 正确做法是整体读取一个 `CALL write_history_variable_*` 调用 ——
 //! 顺带也必须这么做，因为**闸门 2 的内联 `.and.` 就写在首参里**。
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use anyhow::{bail, Result};
 
@@ -937,7 +944,12 @@ fn parse_cond(line: &str) -> Result<Option<Cond>> {
                     .trim_matches(|c| c == '(' || c == ')')
                     .trim()
                     .strip_prefix("defined")
-                    .map(|n| n.trim().trim_matches(|c| c == '(' || c == ')').trim().to_string())
+                    .map(|n| {
+                        n.trim()
+                            .trim_matches(|c| c == '(' || c == ')')
+                            .trim()
+                            .to_string()
+                    })
             })
             .filter(|s| !s.is_empty())
             .collect();
@@ -1145,6 +1157,13 @@ fn literals(s: &str) -> Vec<String> {
 渲染成 `generated.rs` 的部分照 `colm-schema` 的 `render` 写：`Cond::AnyOf`
 的宏名列表要渲染成 `&[&str]` 静态切片，`runtime` 是 `Option<&str>`。
 **按 `name` 排序输出**，否则 `BTreeMap` 换成别的容器时 drift 测试会假红。
+
+**产物要带 `#[rustfmt::skip]`。** 一个变量一行是刻意的 —— 上游改一处，
+diff 就只有一行。但 rustfmt 会把每条拆成六行（456 条 → 近三千行），
+那样 code review 里根本看不出改了什么。`colm-schema` 的同类产物不用写这条，
+但那是**巧合不是设计**：它有一条 626 字符、断不开的数组默认值，
+rustfmt 因此整块放弃；`colm-hist` 最长行只有 149 字符，没有这个豁免。
+把这个理由写进生成的文件头，否则下一个人会以为这条属性是多余的。
 
 - [ ] **Step 2: 生成并核对**
 
