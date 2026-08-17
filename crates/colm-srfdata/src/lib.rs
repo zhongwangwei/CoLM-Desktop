@@ -17,5 +17,6 @@ pub mod raster;
 pub mod site;
 pub mod texture;
 
+pub use albedo::{albedo, SoilAlbedo};
 pub use grid::{Grid, COLM_500M};
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
