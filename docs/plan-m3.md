@@ -1005,20 +1005,61 @@ git commit -m "Look up soil albedo by colour class instead of hardcoding one"
 - Modify: `crates/colm-srfdata/src/derive.rs`
 - Modify: `crates/colm-srfdata/src/lib.rs`
 
+**先读这一段，否则下面的公式看起来会像是随便挑的。**
+
+CoLM 的三种土壤分数用了**三套不同的基准**，`preprocess/rawdata_soil_solids_fractions.F90`
+里写得很清楚：
+
+```
+wf_om_fine_earth = 1.724 * SOC / 100                     细土内的有机质质量分数
+wf_gravels_s     = vf_gravels_s * BD_gravels / BD_ave    全土的砾石质量分数
+wf_sand_s        = SAND/100 * (1 - wf_om_fine_earth) * (1 - wf_gravels_s)
+wf_om_s          = wf_om_fine_earth * (1 - wf_gravels_s)
+OM_density       = BD_ave * wf_om_s * 1000
+```
+
+到这里 `wf_sand + wf_clay + wf_silt + wf_om + wf_gravels = 1`，五者同基准。
+**但 `rd_soil_properties.F90:504` 在调用返回之后又覆盖了一次**：
+
+```fortran
+wf_sand_s = soil_sand_l / 100.0
+```
+
+于是**入库的 `wf_sand` 是细土基准，而 `wf_gravels` 与 `wf_om` 仍是全土基准**。
+这不是推测：US-NR1 的 `wf_sand = 0.82`、`wf_gravels = 0.5488`，两者相加已经
+超过 1，还没算有机质。按「同基准」去减，17/90 个站点会算出负的粉粒分数，
+最极端的到 −168046%——而错误信息会指向质地三角，与真正的原因毫无关系。
+
+由此得到三条公式，每一条都实测验证过：
+
+| 量 | 公式 | 基准 | 实测验证 |
+|---|---|---|---|
+| `wf_om` | `OM_density / BD_all` | 全土 | CoLM 恒等式 `OM_density = BD_ave*wf_om_s*1000`；90/90 站点 ≤ 1 |
+| `wf_clay` | `0.25 * (1 - wf_sand)` | 细土，与 `wf_sand` 一致 | 90/90 站点 `wf_sand ≤ 1` |
+| `vf_clay` | `0.25 * (1 - vf_sand - vf_gravels - vf_om)` | 固体内 | 90/90 站点三者之和 ≤ 1 |
+
+质地三角吃的是**细土**的砂/粉/黏，所以直接用 `wf_sand`，**不减砾石也不减有机质**。
+修正后 90/90 个站点全部落在三角内，共 5 种类别（loam 16 / silty loam 27 /
+sandy loam 33 / loamy sand 6 / sand 8），CN-Cng 为砂 12.4872 / 粉 65.6346 /
+黏 21.8782 → 第 8 类 silty loam，与用错误公式时的结论一致。
+
+「黏粒占细土剩余量的 25%」仍然是一个**假设**——站点文件不给黏粒，而 CoLM
+无条件要它。假设必须写进产物的 `source` 属性里。
+
 - [ ] **Step 1: 写测试**
 
 ```rust
 use super::*;
 
-/// CN-Cng 站点文件里的前 8 层实测值，用来把整条链钉在真实数据上。
-fn cn_cng() -> SoilColumn {
+/// 一个均匀剖面，8 层。三种基准各自独立，所以刻意取互不相干的数：
+/// 若某条公式误用了别的基准的量，结果会立刻偏离。
+fn uniform() -> SoilColumn {
     SoilColumn {
-        vf_sand: vec![0.1; 8],
-        vf_gravels: vec![0.05; 8],
+        vf_sand: vec![0.30; 8],
+        vf_gravels: vec![0.10; 8],
         vf_om: vec![0.02; 8],
-        wf_sand: vec![0.14; 8],
-        wf_gravels: vec![0.06; 8],
-        om_density: vec![130.0; 8],
+        wf_sand: vec![0.40; 8],
+        om_density: vec![26.0; 8],
         bd_all: vec![1300.0; 8],
     }
 }
@@ -1046,23 +1087,19 @@ fn only_the_top_sixty_centimetres_carry_weight() {
 }
 
 #[test]
-fn wf_om_comes_from_the_columns_own_numbers() {
-    // wf_om = vf_om * OM_density / BD_all
-    let c = cn_cng();
+fn wf_om_is_colms_own_identity_not_a_product_of_three_things() {
+    // OM_density = BD_ave * wf_om_s * 1000 且 BD_all = BD_ave * 1000
+    // （rawdata_soil_solids_fractions.F90），所以 wf_om = OM_density / BD_all。
+    // 一个看起来同样合理的写法 vf_om * OM_density / BD_all 会小两个数量级。
+    let c = uniform();
     let d = derive(&c);
-    let want = 0.02 * 130.0 / 1300.0;
-    assert!(
-        (d.wf_om[0] - want).abs() < 1e-15,
-        "{} vs {want}",
-        d.wf_om[0]
-    );
+    assert!((d.wf_om[0] - 26.0 / 1300.0).abs() < 1e-15, "{}", d.wf_om[0]);
 }
 
 #[test]
 fn a_zero_bulk_density_does_not_produce_infinity() {
     // 除以 0 会得到 inf，写进 netcdf 之后 CoLM 会拿它去算能量平衡。
-    // 宁可给 0 也不给 inf。
-    let mut c = cn_cng();
+    let mut c = uniform();
     c.bd_all[3] = 0.0;
     let d = derive(&c);
     assert!(d.wf_om[3].is_finite(), "got {}", d.wf_om[3]);
@@ -1070,22 +1107,33 @@ fn a_zero_bulk_density_does_not_produce_infinity() {
 }
 
 #[test]
-fn clay_is_a_quarter_of_what_is_left_after_sand_gravel_and_organics() {
-    // 壤土 1:3 的黏/粉比例假设。这是一个**假设**，不是实测值 ——
-    // 站点文件不给黏粒，而 CoLM 无条件要它。
-    let c = cn_cng();
+fn wf_clay_shares_wf_sands_basis_and_vf_clay_shares_the_volume_one() {
+    // 这两条基准不同，是本 Task 的全部要点。混用会在有机质丰富或多砾石的
+    // 站点上算出负的剩余量 —— 实测 17/90 个站点会因此失败。
+    let c = uniform();
     let d = derive(&c);
-    let rest = 1.0 - 0.1 - 0.05 - 0.02;
-    assert!((d.vf_clay[0] - 0.25 * rest).abs() < 1e-15);
+    assert!(
+        (d.wf_clay[0] - 0.25 * (1.0 - 0.40)).abs() < 1e-15,
+        "{}",
+        d.wf_clay[0]
+    );
+    assert!(
+        (d.vf_clay[0] - 0.25 * (1.0 - 0.30 - 0.10 - 0.02)).abs() < 1e-15,
+        "{}",
+        d.vf_clay[0]
+    );
 }
 
 #[test]
-fn fractions_never_leave_zero_to_one() {
-    // 真实数据里各项之和可能因为舍入略微超过 1，剩余量会变成负数。
-    let mut c = cn_cng();
-    c.vf_sand = vec![0.99; 8];
-    c.vf_gravels = vec![0.05; 8];
+fn a_gravelly_organic_soil_still_produces_usable_fractions() {
+    // US-NR1 的实测形态：wf_sand 0.82 与 wf_gravels 0.5488 并存，
+    // 因为两者基准不同。按同基准去减会得到负数。
+    let mut c = uniform();
+    c.wf_sand = vec![0.82; 8];
+    c.om_density = vec![1200.0; 8];
+    c.bd_all = vec![1300.0; 8];
     let d = derive(&c);
+    let f = fine_earth_fractions(&c);
     for v in d
         .vf_clay
         .iter()
@@ -1094,19 +1142,31 @@ fn fractions_never_leave_zero_to_one() {
     {
         assert!((0.0..=1.0).contains(v), "fraction out of range: {v}");
     }
+    assert!(f.sand >= 0.0 && f.silt >= 0.0 && f.clay >= 0.0, "{f:?}");
+    assert!((f.sand + f.silt + f.clay - 100.0).abs() < 1e-9);
+}
+
+#[test]
+fn the_triangle_gets_fine_earth_with_no_gravel_or_organics_subtracted() {
+    // 质地三角描述的是细土。wf_sand 已经是细土分数（rd_soil_properties.F90:504），
+    // 再去减砾石与有机质就是把两套基准混在一起。
+    let c = uniform();
+    let f = fine_earth_fractions(&c);
+    assert!((f.sand - 40.0).abs() < 1e-9, "sand {}", f.sand);
+    assert!((f.clay - 15.0).abs() < 1e-9, "clay {}", f.clay);
+    assert!((f.silt - 45.0).abs() < 1e-9, "silt {}", f.silt);
 }
 
 #[test]
 fn a_short_profile_does_not_run_off_the_end() {
     // 实测的站点文件是 10 层，深度权重是 8 个。层数更少的文件不该以
     // 数组越界 panic 收场 —— 那种报错指向的地方与真正的原因毫无关系。
-    let mut c = cn_cng();
+    let mut c = uniform();
     for v in [
         &mut c.vf_sand,
         &mut c.vf_gravels,
         &mut c.vf_om,
         &mut c.wf_sand,
-        &mut c.wf_gravels,
         &mut c.om_density,
         &mut c.bd_all,
     ] {
@@ -1114,22 +1174,8 @@ fn a_short_profile_does_not_run_off_the_end() {
     }
     let d = derive(&c);
     assert_eq!(d.vf_clay.len(), 3);
-    let f = fine_earth_fractions(&c, &d);
+    let f = fine_earth_fractions(&c);
     assert!((f.sand + f.silt + f.clay - 100.0).abs() < 1e-9);
-}
-
-#[test]
-fn cn_cng_weighs_out_to_the_measured_fractions() {
-    // 用真实站点文件的值做端到端检查见 tests/real_sites.rs；
-    // 这里只钉住加权本身：均匀剖面加权后应等于该层值。
-    let c = cn_cng();
-    let d = derive(&c);
-    let f = fine_earth_fractions(&c, &d);
-    assert!(
-        (f.sand + f.silt + f.clay - 100.0).abs() < 1e-9,
-        "must sum to 100"
-    );
-    assert!(f.sand > 0.0 && f.silt > 0.0 && f.clay > 0.0);
 }
 ```
 
@@ -1138,10 +1184,24 @@ fn cn_cng_weighs_out_to_the_measured_fractions() {
 ```rust
 //! 由站点文件已有量推导 CoLM 还要的三个土壤字段，以及 0–60 cm 深度加权。
 //!
-//! 三个字段里 `wf_om` 是**推导**（`vf_om * OM_density / BD_all`，量纲自洽），
-//! 而 `vf_clay` / `wf_clay` 是**假设**：站点文件不给黏粒，只给砂、砾、有机质，
-//! 于是把剩余量按壤土常见的 1:3 黏:粉比例劈开。这个假设必须显式写进
-//! 产物的 `source` 属性里 —— 用户有权知道哪些数是量出来的、哪些是猜的。
+//! **三种量用了三套基准**，混用会算出负的剩余量。见
+//! `preprocess/rawdata_soil_solids_fractions.F90` 与
+//! `preprocess/rd_soil_properties.F90:504`：
+//!
+//! - `wf_om` 与 `wf_gravels` 是**全土**质量分数；
+//! - `wf_sand` 入库前被 `wf_sand_s = soil_sand_l / 100.0` 覆盖过，是**细土**分数；
+//! - `vf_sand` / `vf_gravels` / `vf_om` 是**固体内**体积分数。
+//!
+//! 实测 US-NR1 的 `wf_sand = 0.82` 与 `wf_gravels = 0.5488` 并存，两者相加
+//! 已超过 1。把它们当同一套去减，17/90 个站点会算出负的粉粒分数。
+//!
+//! 于是：`wf_om = OM_density / BD_all`（CoLM 自己的恒等式，
+//! `OM_density = BD_ave * wf_om_s * 1000`）、`wf_clay` 取 `wf_sand` 的剩余量、
+//! `vf_clay` 取三个体积分数的剩余量。
+//!
+//! 剩余量按 1:3 的黏:粉劈开是一个**假设**：站点文件不给黏粒，而 CoLM 无条件
+//! 要它。这个假设必须显式写进产物的 `source` 属性里 —— 用户有权知道哪些数是
+//! 量出来的、哪些是猜的。
 //!
 //! 深度加权用于质地分类：CoLM 的回落栅格是
 //! `soil/soiltexture_0cm-60cm_mean.nc`，即 0–60 cm 的平均，所以这里也取 0–60 cm。
@@ -1154,15 +1214,20 @@ pub const DZ_SOIL: [f64; 8] = [
     0.0175, 0.0276, 0.0455, 0.0750, 0.1236, 0.2038, 0.3360, 0.5539,
 ];
 
-/// 站点文件里已有的土壤剖面量，各 8 层。
+/// 站点文件里已有的土壤剖面量。注意三组量的基准并不相同，见模块文档。
 #[derive(Debug, Clone)]
 pub struct SoilColumn {
+    /// 固体内体积分数
     pub vf_sand: Vec<f64>,
+    /// 固体内体积分数
     pub vf_gravels: Vec<f64>,
+    /// 固体内体积分数
     pub vf_om: Vec<f64>,
+    /// **细土**质量分数
     pub wf_sand: Vec<f64>,
-    pub wf_gravels: Vec<f64>,
+    /// kg/m^3
     pub om_density: Vec<f64>,
+    /// kg/m^3
     pub bd_all: Vec<f64>,
 }
 
@@ -1174,7 +1239,7 @@ pub struct Derived {
     pub wf_om: Vec<f64>,
 }
 
-/// 归一化到细土之后的砂/粉/黏百分数，喂给质地分类器。
+/// 细土的砂/粉/黏百分数，喂给质地分类器。
 #[derive(Debug, Clone, Copy)]
 pub struct FineEarth {
     pub sand: f64,
@@ -1194,24 +1259,24 @@ pub fn depth_weights(depth: f64) -> Vec<f64> {
     out
 }
 
-/// 推导 `vf_clay` / `wf_clay` / `wf_om`。
+/// 推导 `vf_clay` / `wf_clay` / `wf_om`。三者各自用自己基准里的剩余量。
 pub fn derive(c: &SoilColumn) -> Derived {
-    let n = c.vf_sand.len();
-    let mut wf_om = Vec::with_capacity(n);
-    for i in 0..n {
-        // BD_all 为 0 时不做除法：inf 写进文件之后会一路走到能量平衡里。
-        let v = if c.bd_all[i] > 0.0 {
-            c.vf_om[i] * c.om_density[i] / c.bd_all[i]
-        } else {
-            0.0
-        };
-        wf_om.push(v.clamp(0.0, 1.0));
-    }
-    let vf_clay = (0..n)
-        .map(|i| 0.25 * (1.0 - c.vf_sand[i] - c.vf_gravels[i] - c.vf_om[i]).clamp(0.0, 1.0))
+    let n = c.wf_sand.len();
+    let wf_om = (0..n)
+        .map(|i| {
+            // BD_all 为 0 时不做除法：inf 写进文件之后会一路走到能量平衡里。
+            if c.bd_all[i] > 0.0 {
+                (c.om_density[i] / c.bd_all[i]).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
         .collect();
     let wf_clay = (0..n)
-        .map(|i| 0.25 * (1.0 - c.wf_sand[i] - c.wf_gravels[i] - wf_om[i]).clamp(0.0, 1.0))
+        .map(|i| 0.25 * (1.0 - c.wf_sand[i]).clamp(0.0, 1.0))
+        .collect();
+    let vf_clay = (0..n)
+        .map(|i| 0.25 * (1.0 - c.vf_sand[i] - c.vf_gravels[i] - c.vf_om[i]).clamp(0.0, 1.0))
         .collect();
     Derived {
         vf_clay,
@@ -1221,11 +1286,11 @@ pub fn derive(c: &SoilColumn) -> Derived {
 }
 
 /// 0–60 cm 深度加权的细土砂/粉/黏百分数。
-pub fn fine_earth_fractions(c: &SoilColumn, d: &Derived) -> FineEarth {
+///
+/// `wf_sand` 已经是细土分数，所以这里**不减**砾石与有机质 —— 它们是别的基准。
+pub fn fine_earth_fractions(c: &SoilColumn) -> FineEarth {
     let w = depth_weights(0.60);
     let mut sand = 0.0;
-    let mut silt = 0.0;
-    let mut clay = 0.0;
     let mut wsum = 0.0;
     // 只走到剖面真正有的层数：实测 PLUMBER2 站点文件是 10 层，CoLM 只用前 8 层，
     // 但层数更少的文件不该以数组越界收场。
@@ -1233,15 +1298,7 @@ pub fn fine_earth_fractions(c: &SoilColumn, d: &Derived) -> FineEarth {
         if wi <= 0.0 {
             continue;
         }
-        // 细土 = 全土减去砾石与有机质；质地三角只描述细土部分。
-        let s = 1.0 - c.wf_sand[i] - d.wf_clay[i] - c.wf_gravels[i] - d.wf_om[i];
-        let tot = c.wf_sand[i] + s + d.wf_clay[i];
-        if tot <= 0.0 {
-            continue;
-        }
-        sand += wi * c.wf_sand[i] / tot;
-        silt += wi * s / tot;
-        clay += wi * d.wf_clay[i] / tot;
+        sand += wi * c.wf_sand[i];
         wsum += wi;
     }
     if wsum <= 0.0 {
@@ -1251,10 +1308,12 @@ pub fn fine_earth_fractions(c: &SoilColumn, d: &Derived) -> FineEarth {
             clay: 0.0,
         };
     }
+    let sand = (100.0 * sand / wsum).clamp(0.0, 100.0);
+    let rest = 100.0 - sand;
     FineEarth {
-        sand: 100.0 * sand / wsum,
-        silt: 100.0 * silt / wsum,
-        clay: 100.0 * clay / wsum,
+        sand,
+        silt: 0.75 * rest,
+        clay: 0.25 * rest,
     }
 }
 
@@ -1268,7 +1327,9 @@ mod derive_tests;
 追加：
 
 ```rust
-pub use derive::{derive, depth_weights, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL};
+pub use derive::{
+    depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
+};
 ```
 
 - [ ] **Step 4: 测试通过**
@@ -1493,7 +1554,7 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
 
     let (lon, lat, landtype, col, soil_dim) = read_inputs(dst)?;
     let d = derive(&col);
-    let fe = fine_earth_fractions(&col, &d);
+    let fe = fine_earth_fractions(&col);
     let texture = classify(fe.silt, fe.clay)
         .with_context(|| format!("sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle", fe.sand, fe.silt, fe.clay))?;
 
@@ -1562,7 +1623,7 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     // 维度取自它们各自的来源变量，而不是按长度去猜：站点文件里
     // LAI_year=2 / month=12 / pft=2 / soil=10 / year=21，按长度找只是碰巧
     // 不重复，而 dimensions() 的迭代顺序并无保证。
-    let note = "derived: clay is 25% of the non-sand/gravel/OM remainder (loam 1:3 clay:silt assumption)";
+    let note = "derived: clay is 25% of the remainder in its own basis (loam 1:3 clay:silt assumption)";
     put_layers(&mut f, "soil_vf_clay", &d.vf_clay, &soil_dim, note)?;
     put_layers(&mut f, "soil_wf_clay", &d.wf_clay, &soil_dim, note)?;
     put_layers(
@@ -1570,7 +1631,7 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
         "soil_wf_om",
         &d.wf_om,
         &soil_dim,
-        "derived: vf_om * OM_density / BD_all",
+        "derived: OM_density / BD_all",
     )?;
     put_int(
         &mut f,
@@ -1615,7 +1676,6 @@ fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn, String)> {
         vf_gravels: layers("soil_vf_gravels")?,
         vf_om: layers("soil_vf_om")?,
         wf_sand: layers("soil_wf_sand")?,
-        wf_gravels: layers("soil_wf_gravels")?,
         om_density: layers("soil_OM_density")?,
         bd_all: layers("soil_BD_all")?,
     };
