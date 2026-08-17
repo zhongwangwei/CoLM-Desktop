@@ -202,16 +202,16 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-netcdf.workspace = true
+netcdf = { workspace = true, features = ["static"] }
 
 [lints]
 workspace = true
 ```
 
-**注意**：`netcdf` 是否已在 `[workspace.dependencies]` 里，执行时先 `grep -n netcdf Cargo.toml`
-确认。里程碑 0 只有 `oracle` 用它，可能是直接写在 `oracle/Cargo.toml` 的。
-若不在 workspace 层，先把它提上去，`oracle` 改成 `netcdf.workspace = true`——
-两个 crate 各自钉版本迟早会漂。
+**`features = ["static"]` 不能省。** 根 `Cargo.toml` 里的
+`netcdf = { version = "0.12", default-features = false }` 只是模板，静态链接
+是各成员自己开的——`oracle/Cargo.toml:19` 就是这么写的。漏掉它会去找系统的
+`libnetcdf`，而本方案的前提是三个平台都不依赖系统 netcdf。
 
 - [ ] **Step 2: 写 `crates/colm-srfdata/src/lib.rs`**
 
