@@ -1095,8 +1095,15 @@ pub fn summarize(file: &Path) -> Result<MetSummary> {
         .attribute("units")
         .context("time has no units attribute")?
         .value()?;
+    // NC_CHAR 与 NC_STRING 是两个变体。实测 PLUMBER2 的文件用的是前者
+    // （HDF5 层面 |S33，正好是 "seconds since YYYY-MM-DD HH:MM:SS" 的长度），
+    // 但那个语料是被 ncatted 预处理过的，别人的文件未必如此 —— 两种都接。
     let time_units = match units {
         netcdf::AttributeValue::Str(s) => s,
+        netcdf::AttributeValue::Strs(v) => v
+            .into_iter()
+            .next()
+            .context("time units attribute is an empty string array")?,
         other => bail!("time units is not a string: {other:?}"),
     };
 
