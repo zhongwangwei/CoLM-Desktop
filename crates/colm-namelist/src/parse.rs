@@ -1,1 +1,5 @@
-//! 占位，Task 2/3/4 实现。
+//! 把 namelist 文本扫描成 `Document`。
+
+#[cfg(test)]
+#[path = "parse_tests.rs"]
+mod parse_tests;
