@@ -2561,24 +2561,17 @@ git commit -m "Fail the build when the committed schema drifts from its source"
 - Modify: `.github/workflows/ci.yml`
 - Modify: `README.md`
 
-- [ ] **Step 1: CI 加一步**
+- [ ] **Step 1: CI 分流两个需要 CoLM 源码的测试**
 
-`rust` 作业在 `Format` 之后插入：
-
-```yaml
-      # 漂移测试要跑 xtask，而 xtask 读 vendor/CoLM202X。默认 checkout 不带
-      # submodule，所以这一步必须自己拉 —— 否则测试会因为找不到源文件而失败，
-      # 看起来像 schema 坏了，实际是 CI 没有源可比。
-      - name: Fetch the CoLM source the schema is generated from
-        run: git -c protocol.file.allow=always submodule update --init vendor/CoLM202X
-```
+`colm-namelist` 的 roundtrip 与 `colm-schema` 的 drift 都要读 `vendor/CoLM202X`。
 
 **先确认 `.gitmodules` 的 url**（`cat .gitmodules`）。写这个计划时它是
 `/Users/zhongwangwei/Desktop/colm-rust/CoLM202X` —— 一个**本机绝对路径**，
-GitHub 托管 runner 上不存在。只要它还是本机路径，上面这一步就必须放进
-`golden` 作业（自托管，路径存在），而不是 `rust` 作业。
+GitHub 托管 runner 上取不到。只要它还是本机路径，这两个测试就只能在 `golden`
+作业（自托管，该路径存在）里跑。`golden` 已经有一步
+`Init submodule from its local path`，**不需要再加取 submodule 的步骤**。
 
-但只挪 yaml 里的这一步**不够**：`rust` 作业跑的是 `cargo test --workspace`，
+而且只在 yaml 里挪步骤**不够**：`rust` 作业跑的是 `cargo test --workspace`，
 它照样会执行 roundtrip 与 drift，然后在 `canonicalize` 上炸掉。所以 `rust`
 作业的 Test 步骤要改成只跑不需要 submodule 的部分：
 
