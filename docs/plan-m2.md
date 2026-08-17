@@ -28,28 +28,34 @@
 
 在 `vendor/CoLM202X` 上实测，不是估计。
 
-### namelist 侧：66 个文件 / 6740 行 / 最长 512 行
+### namelist 侧：55 个文件 / 4167 行 / 最长 354 行
+
+总体定义：`vendor/CoLM202X/run/**/*.nml`，即 submodule 里**被追踪**的那些。
+本机上 `run/aas_riverlake/` 还有 11 个 `.nml`，但 `.gitignore` 排除了整个目录
+（它们是 `gen_experiments.sh` 的生成物），别的机器上并不存在。早先的
+「66 个文件 / 6740 行」正是把它们算了进去 —— 重测时若又数到 66，先看
+`git ls-files '*.nml' | wc -l`。
 
 **必须支持的语法**：
 
 | 特性 | 出现 | 实例 |
 |---|---|---|
-| 派生类型成员 `x%y =` | 61/66 | `DEF_forcing%dataset = 'POINT'` |
-| 下标赋值 `v(1) =` | 24/66 | `DEF_forcing%fprefix(1) = '...'` |
-| 空格分隔多字符串 | 24/66 | `vname = 'Tair' 'Qair' 'Psurf'` |
-| 逗号分隔多值 | 6/66 | `= "wevap,winfilt,rivout"` |
-| 整行注释 | 65/66 | `! ----- forcing -----` |
-| 行尾注释 | 55/66 | `= 8        ! variable number` |
-| `/` 单独成行结束 group | 66/66 | |
+| 派生类型成员 `x%y =` | 50/55 | `DEF_forcing%dataset = 'POINT'` |
+| 下标赋值 `v(1) =` | 24/55 | `DEF_forcing%fprefix(1) = '...'` |
+| 空格分隔多字符串 | 26/55 | `vname = 'Tair' 'Qair' 'Psurf'` |
+| 逗号分隔多值 | 9/55 | `= "wevap,winfilt,rivout"` |
+| 整行注释 | 54/55 | `! ----- forcing -----` |
+| 行尾注释 | 54/55 | `= 8        ! variable number` |
+| `/` 单独成行结束 group | 55/55 | |
 
 **确认不存在，因而不必支持**（若日后出现，解析器应当明确报错而不是猜）：
 
 | 特性 | 出现 |
 |---|---|
-| 重复计数 `3*0.0` | 0/66 |
-| 数组切片 `v(1:3) =` | 0/66 |
-| 续行符 `&` | 0/66 |
-| 裸值续行 | 0/66 |
+| 重复计数 `3*0.0` | 0/55 |
+| 数组切片 `v(1:3) =` | 0/55 |
+| 续行符 `&` | 0/55 |
+| 裸值续行 | 0/55 |
 
 **group 名**共 17 种，但只有 3 种属于 CoLM 本体且在本里程碑范围内：
 `nl_colm`（29 个文件）、`nl_colm_forcing`（24）、`nl_colm_history`（3）。
@@ -57,7 +63,7 @@
 `NOUTPUT` `NDAMOUT` `NAMSED`）是 CaMa-Flood 的，SinglePoint 下 CaMa 被强制关闭；
 `nl_colm_tracer_*` / `nl_colm_methane_parameter` / `nl_colm_sediment_parameter`
 属 TRACER，本轮明确搁置。**解析器不区分 group 名**（它只认语法），但往返测试
-覆盖全部 66 个文件，包括范围外的那些——语法是共通的，多覆盖不花钱。
+覆盖全部 55 个文件，包括范围外的那些——语法是共通的，多覆盖不花钱。
 
 ### schema 侧：743 个声明，100% 可被单一正则解析
 
@@ -125,7 +131,7 @@ crates/
     ├── Cargo.toml
     └── src/main.rs         gen-schema 子命令：读 MOD_Namelist.F90 -> 写 generated.rs
 
-crates/colm-namelist/tests/roundtrip.rs   对 66 个真实 .nml 的往返测试
+crates/colm-namelist/tests/roundtrip.rs   对 55 个真实 .nml 的往返测试
 crates/colm-schema/tests/drift.rs         重新生成必须与入库产物一致
 ```
 
@@ -171,10 +177,10 @@ workspace = true
 //! 等号对齐都要保住。理由不是审美 —— 用户算例文件里的注释是他们自己的
 //! 研究笔记，一个工具没有权力在保存时把它们丢掉。
 //!
-//! 语法支持范围是**实测**出来的，不是照抄 Fortran 标准：对 66 个真实
-//! `.nml` 统计后，派生类型成员（61/66）、下标赋值（24/66）、空格分隔
-//! 多字符串（24/66）、行尾注释（55/66）必须支持；而重复计数 `3*0.0`、
-//! 数组切片 `v(1:3)=`、续行符 `&` 在 66 个文件里出现 0 次，因此不支持，
+//! 语法支持范围是**实测**出来的，不是照抄 Fortran 标准：对 55 个真实
+//! `.nml` 统计后，派生类型成员（50/55）、下标赋值（24/55）、空格分隔
+//! 多字符串（26/55）、行尾注释（54/55）必须支持；而重复计数 `3*0.0`、
+//! 数组切片 `v(1:3)=`、续行符 `&` 在 55 个文件里出现 0 次，因此不支持，
 //! 遇到时明确报错而不是猜。
 //!
 //! 类型与函数的重导出在 Task 5（namelist）与 Task 8（schema）里加上，
@@ -290,7 +296,7 @@ fn path_parses_a_plain_field() {
 
 #[test]
 fn path_parses_a_derived_type_member() {
-    // 61/66 个真实文件里有这种写法
+    // 50/55 个真实文件里有这种写法
     let p = Path::parse("DEF_forcing%dataset").unwrap();
     assert_eq!(
         p.segments,
@@ -304,7 +310,7 @@ fn path_parses_a_derived_type_member() {
 
 #[test]
 fn path_parses_a_subscript() {
-    // 24/66 个真实文件里有这种写法，且正是 forcing namelist 必需的
+    // 24/55 个真实文件里有这种写法，且正是 forcing namelist 必需的
     let p = Path::parse("DEF_forcing%fprefix(1)").unwrap();
     assert_eq!(
         p.segments,
@@ -319,7 +325,7 @@ fn path_parses_a_subscript() {
 
 #[test]
 fn path_rejects_a_slice_rather_than_guessing() {
-    // 数组切片在 66 个文件里出现 0 次。不支持，且必须明确报错 ——
+    // 数组切片在 55 个文件里出现 0 次。不支持，且必须明确报错 ——
     // 猜一个语义比拒绝更危险。
     let e = Path::parse("DEF_x(1:3)").unwrap_err();
     assert!(format!("{e:#}").contains("slice"), "{e:#}");
@@ -346,7 +352,7 @@ fn real_keeps_the_exact_text_it_was_read_from() {
 
 #[test]
 fn a_list_renders_space_separated_like_the_files_do() {
-    // 24/66 个文件用空格分隔多字符串：vname = 'Tair' 'Qair'
+    // 26/55 个文件用空格分隔多字符串：vname = 'Tair' 'Qair'
     let v = Value::List(vec![Value::Str("Tair".into()), Value::Str("Qair".into())]);
     assert_eq!(v.to_string(), "'Tair' 'Qair'");
 }
@@ -564,14 +570,14 @@ fn round_trips_a_minimal_group() {
 
 #[test]
 fn preserves_blank_lines_and_full_line_comments() {
-    // 65/66 个真实文件有整行注释，它们是用户的笔记
+    // 54/55 个真实文件有整行注释，它们是用户的笔记
     let src = "&nl_colm\n\n   ! ----- forcing -----\n   DEF_CASE_NAME = 'x'\n/\n";
     assert_eq!(doc(src).to_string(), src);
 }
 
 #[test]
 fn preserves_trailing_comments_and_their_column() {
-    // 55/66 个文件有行尾注释，且是对齐的
+    // 54/55 个文件有行尾注释，且是对齐的
     let src = "&nl_colm\n   DEF_forcing%NVAR              = 8        ! variable number\n/\n";
     assert_eq!(doc(src).to_string(), src);
 }
@@ -592,7 +598,7 @@ fn reads_a_subscripted_entry() {
 
 #[test]
 fn reads_space_separated_strings_as_a_list() {
-    // 24/66 个文件这样写 vname / tintalgo
+    // 26/55 个文件这样写 vname / tintalgo
     let d = doc("&nl_colm_forcing\n   DEF_forcing%vname = 'Tair' 'Qair' 'NULL'\n/\n");
     match d.get("DEF_forcing%vname").expect("field present") {
         Value::List(items) => {
@@ -646,7 +652,7 @@ fn setting_an_absent_field_is_an_error_not_a_silent_append() {
 
 #[test]
 fn rejects_repeat_count_rather_than_guessing() {
-    // 0/66 个文件用它。不支持，且必须报错。
+    // 0/55 个文件用它。不支持，且必须报错。
     let e = parse("&nl_colm\n   a = 3*0.0\n/\n").unwrap_err();
     // 注意用 {:#}：anyhow 的 Display 只给最外层 context，
     // 而 "repeat counts are not supported" 是被 with_context 包在里面的原因。
@@ -798,7 +804,7 @@ impl std::fmt::Display for Document {
 ```rust
 //! 把 namelist 文本扫描成 `Document`。
 //!
-//! 逐行扫描即可：实测 66 个真实文件里**续行符 `&` 出现 0 次**，
+//! 逐行扫描即可：实测 55 个真实文件里**续行符 `&` 出现 0 次**，
 //! 所以不需要处理跨行的赋值。若日后出现，本模块会在遇到行尾 `&` 时报错，
 //! 而不是悄悄把它当成普通字符。
 
@@ -995,7 +1001,7 @@ git commit -m "Parse namelists into a model that can be written back unchanged"
 
 ---
 
-## Task 6: 对 66 个真实文件的往返测试
+## Task 6: 对 55 个真实文件的往返测试
 
 这是本 crate 的真正验收：**能不能不动用户的文件**。
 
@@ -1005,10 +1011,10 @@ git commit -m "Parse namelists into a model that can be written back unchanged"
 - [ ] **Step 1: 写测试**
 
 ```rust
-//! 对 vendor/CoLM202X 里全部 66 个真实 .nml 做往返测试。
+//! 对 vendor/CoLM202X 里全部 55 个真实 .nml 做往返测试。
 //!
 //! 合成用例能证明语法被支持，只有真实文件能证明**用户的文件不会被改动**。
-//! 66 个文件共 6740 行，最长的 512 行；覆盖 17 种 group 名，
+//! 55 个文件共 4167 行，最长的 354 行；覆盖 17 种 group 名，
 //! 包括 CaMa-Flood 与 TRACER 那些本里程碑范围外的 —— 语法是共通的，
 //! 多覆盖不花钱，而少覆盖会让"范围外"的文件在将来某天被悄悄改坏。
 
@@ -1023,8 +1029,8 @@ fn nml_files() -> Vec<PathBuf> {
     collect(&root, &mut out);
     out.sort();
     assert!(
-        out.len() >= 60,
-        "expected ~66 namelists, found {}",
+        out.len() >= 50,
+        "expected ~55 namelists, found {}",
         out.len()
     );
     out
@@ -1136,7 +1142,7 @@ Expected: 全部通过，且 roundtrip 那三条都在列表里。
 
 ```bash
 git add crates/colm-namelist
-git commit -m "Round-trip all 66 real namelists byte for byte"
+git commit -m "Round-trip all 55 real namelists byte for byte"
 ```
 
 ---
@@ -1762,8 +1768,8 @@ runner 上会失败。在 submodule 指向远端之前，把这一步与依赖�
 ## 配置层
 
 `crates/colm-namelist` 读写 CoLM 的 namelist，**保留原文格式**：解析→修改→
-序列化后，未改动的行逐字节不变。验收是对 `vendor/CoLM202X` 里全部 66 个真实
-`.nml`（6740 行）做往返测试。理由是用户算例文件里的注释是他们自己的笔记。
+序列化后，未改动的行逐字节不变。验收是对 `vendor/CoLM202X` 里全部 55 个真实
+`.nml`（4167 行）做往返测试。理由是用户算例文件里的注释是他们自己的笔记。
 
 `crates/colm-schema` 描述每个 `DEF_*` 字段的类型、默认值与说明。这张表
 **由 `cargo run -p xtask -- gen-schema` 从 `MOD_Namelist.F90` 生成**，产物入库，
@@ -1803,7 +1809,7 @@ git commit -m "Document the configuration layer and wire it into CI"
 
 - [ ] `cargo test --workspace` 通过；`colm-namelist` 的 19 个单元测试 + 3 个往返测试、
       `colm-schema` 的 7 个字段测试 + 1 个漂移测试全部执行（不是跳过）
-- [ ] **66/66 个真实 `.nml` 逐字节往返**，没有任何文件被跳过
+- [ ] **55/55 个真实 `.nml` 逐字节往返**，没有任何文件被跳过
 - [ ] 改一个字段后**恰好一行**发生变化，行数不变
 - [ ] 改不存在的字段**报错**而不是静默追加
 - [ ] 重复计数、数组切片、续行符、未闭合 group 各自**报错**而不是猜

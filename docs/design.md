@@ -559,7 +559,7 @@ colm-desktop/
 
 | crate | 职责 | 为什么独立 |
 |---|---|---|
-| `colm-namelist` | Fortran namelist 读写，**保留注释与未识别字段** | 手写解析器。边界已验证有限：17 个 group 名、66 个文件、最长 317 行、无 slice / 无 repeat count / 无 sequence-to-subscripted 赋值。带注释往返是现有 crate 都不提供的 |
+| `colm-namelist` | Fortran namelist 读写，**保留注释与未识别字段** | 手写解析器。边界已验证有限：17 个 group 名、55 个文件、最长 354 行、无 slice / 无 repeat count / 无 sequence-to-subscripted 赋值。带注释往返是现有 crate 都不提供的 |
 | `colm-schema` | `DEF_*` 元数据（名、类型、默认值、范围、依赖、所属 group、静默覆盖规则） | **从 `vendor/CoLM202X/share/MOD_Namelist.F90` 离线代码生成**，产物入库，CI 校验漂移。CoLM 会持续演进，手写 schema 必然静默失配 |
 | `colm-forcing` | PLUMBER2/FLUXNET → CoLM POINT 强迫场 | 要精确复刻 §2.10 的全部怪癖 |
 | `colm-srfdata` | 站点地表数据读写 + **缺失字段合成** + **USDA 质地三角分类器** + 站点参数包抽取 | §2.7 是它存在的理由 |
@@ -820,7 +820,7 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
 |---|---|---|
 | 0 | 建仓、两个 workspace、CI 骨架、`vendor/CoLM202X` submodule | `cargo test` 通过；CI 跑起来 |
 | 1 | **固定黄金输出** —— 把 §2.8 的 CN-Cng 运行脚本化进 `oracle/`，纳入 CI。**必须有两个窗口**：冬季（现有）+ 一个含降水事件的湿季窗口，否则产流与入渗代码零覆盖（§2.8 约束 1） | 两个窗口重跑均逐位一致；`river_hist_compare.py` 报 0 差异；湿季窗口的 `f_rnof` 非零 |
-| 2 | `colm-namelist` + `colm-schema`（含 `MOD_Namelist.F90` 代码生成与漂移校验） | 66 个 `.nml` 全部带注释往返一致 |
+| 2 | `colm-namelist` + `colm-schema`（含 `MOD_Namelist.F90` 代码生成与漂移校验） | 55 个 `.nml` 全部带注释往返一致 |
 | 3 | `colm-srfdata`：缺失字段检测与合成、站点参数包抽取 | 能从裸 PLUMBER2 站点文件产出可运行的增广站点文件 |
 | 4 | `colm-forcing`：PLUMBER2 → POINT | 产出的强迫场使 CN-Cng 结果与里程碑 1 逐位一致 |
 | 5 | `colm-kernel`：清单握手 + 三段编排 + 成败三件套 | 失败注入测试全绿；配置错误必被判失败 |
