@@ -1851,7 +1851,14 @@ git status --short crates/colm-schema/src/generated.rs
 git checkout crates/colm-schema/src/generated.rs
 ```
 
-Expected: 测试失败并打印 `generated.rs is out of date`；还原后 `git status` 干净。
+Expected: 测试失败并打印 `generated.rs is out of date`。
+
+**注意还原语义**：测试还原的是它**读进来时**的内容。在真实的漂移场景里
+（入库产物是干净的、上游变了），那正是入库的版本，于是一次失败的测试不会
+把工作树弄脏 —— 这是它要防的。但在这个人为的篡改场景里，读进来的就是被
+篡改的版本，所以测试失败之后 `git status --short` **仍然显示该文件被修改**，
+这不是 bug。上面那条 `git checkout` 才是把它清掉的东西。
+
 **一个不能失败的漂移测试等于没有漂移测试。**
 
 - [ ] **Step 3: 全绿后提交**
@@ -1975,7 +1982,8 @@ git commit -m "Document the configuration layer and wire it into CI"
 - [ ] 重复计数、数组切片、续行符、未闭合 group 各自**报错**而不是猜
 - [ ] schema 表含 178 个顶层 `DEF_*` 与 482 个 `history_var_type` 成员
 - [ ] 7 个子程序局部变量与哑元**没有**混进 schema
-- [ ] 篡改 `generated.rs` 后漂移测试失败，并自动还原工作树
+- [ ] 篡改 `generated.rs` 后漂移测试失败并给出重新生成的提示（篡改场景下需 `git checkout` 清理；
+      真实漂移场景下测试自己会还原，不留脏树）
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 无输出
 - [ ] `git status --short` 为空
 
