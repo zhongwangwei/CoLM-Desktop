@@ -909,12 +909,11 @@ pub fn parse(src: &str) -> Result<Document> {
             items.push(Item::Verbatim(line.to_string()));
             continue;
         }
-        if let Some(name) = t.strip_prefix('&') {
+        if t.starts_with('&') {
             if in_group {
                 bail!("line {}: group opened inside a group", lineno + 1);
             }
             in_group = true;
-            let _ = name;
             items.push(Item::GroupStart(line.to_string()));
             continue;
         }
@@ -1528,13 +1527,7 @@ fn extract(text: &str) -> Result<Vec<Field>> {
         }
 
         out.push(Field {
-            name: match &owner {
-                Some(o) => {
-                    let _ = o;
-                    decl.name.clone()
-                }
-                None => decl.name.clone(),
-            },
+            name: decl.name.clone(),
             kind: decl.kind,
             default: default.trim().to_string(),
             doc: decl.doc,
