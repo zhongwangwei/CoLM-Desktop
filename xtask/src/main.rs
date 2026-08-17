@@ -8,6 +8,9 @@
 //! diff 里 —— 上游加一个 DEF_ 或改一个默认值，应当是一次可见的改动，
 //! 而不是某次构建之后悄悄换掉的东西。
 
+mod namelist;
+
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -22,8 +25,15 @@ fn main() -> Result<()> {
     let src = root.join("vendor/CoLM202X/share/MOD_Namelist.F90");
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
-    let fields = extract(&text)?;
-    let out = render(&fields);
+    let groups = namelist::groups(&text);
+    if groups.len() < 150 {
+        bail!(
+            "only {} namelist members found — the statement format must have changed",
+            groups.len()
+        );
+    }
+    let fields = extract(&text, &groups)?;
+    let out = render(&fields, &groups);
     let dst = root.join("crates/colm-schema/src/generated.rs");
     std::fs::write(&dst, out)?;
     println!("wrote {} fields to {}", fields.len(), dst.display());
@@ -38,6 +48,7 @@ struct Field {
     doc: Option<String>,
     arity: Option<usize>,
     owner: Option<String>,
+    group: Option<String>,
     line: u32,
 }
 
@@ -46,7 +57,7 @@ struct Field {
 /// 这条是必须的：文件里有 8 个不含 `=` 的声明（7 个不同名字：nlfile /
 /// fexists / ivar / ierr / iomesg / set_defaults / onoff），全部是子程序
 /// 局部变量与哑元。靠 `intent(...)` 属性过滤不够，因为其中 4 个没有 intent。
-fn extract(text: &str) -> Result<Vec<Field>> {
+fn extract(text: &str, groups: &BTreeMap<String, String>) -> Result<Vec<Field>> {
     let mut out = Vec::new();
     let mut owner: Option<String> = None;
     let mut lines = text.lines().enumerate().peekable();
@@ -73,10 +84,21 @@ fn extract(text: &str) -> Result<Vec<Field>> {
         let Some(decl) = parse_decl(line) else {
             continue;
         };
-        // 顶层只收 DEF_ 开头的；类型成员全收
-        if owner.is_none() && !decl.name.starts_with("DEF_") {
-            continue;
-        }
+        // 顶层字段的判据是「它出现在某个 namelist 语句里」，不是名字前缀。
+        // 前缀白名单会滤掉整个 SITE_ / USE_SITE_ 单点段（21 个），
+        // 也放不掉 6 个谁都设不了的字段。类型成员全收，组由容器继承。
+        //
+        // 大小写不敏感：Fortran 的 namelist 名字如此，且上游自己就混用
+        // （DEF_hist_lat_res / DEF_HIST_lat_res 两种拼法都在库里）。
+        let group = if owner.is_none() {
+            let g = lookup_ci(groups, &decl.name);
+            if g.is_none() && !decl.name.starts_with("DEF_") {
+                continue; // 既不在 namelist 里，也不是 DEF_ —— 不是字段
+            }
+            g
+        } else {
+            None // 成员的组在 render 时由容器补上
+        };
 
         // 跨行数组字面量：实测 4 处，形如 `= (/ &` 续到 `/)`
         let mut default = decl.default.clone();
@@ -104,6 +126,7 @@ fn extract(text: &str) -> Result<Vec<Field>> {
             doc: decl.doc,
             arity: decl.arity,
             owner: owner.clone(),
+            group,
             line: (i + 1) as u32,
         });
     }
@@ -112,6 +135,14 @@ fn extract(text: &str) -> Result<Vec<Field>> {
         bail!("extracted zero fields — the declaration format must have changed");
     }
     Ok(out)
+}
+
+/// 大小写不敏感地查组表。
+fn lookup_ci(groups: &BTreeMap<String, String>, name: &str) -> Option<String> {
+    groups
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.clone())
 }
 
 struct Decl {
@@ -164,7 +195,7 @@ fn parse_decl(line: &str) -> Option<Decl> {
     })
 }
 
-fn render(fields: &[Field]) -> String {
+fn render(fields: &[Field], groups: &BTreeMap<String, String>) -> String {
     let mut s = String::new();
     s.push_str(
         "//! 由 `cargo run -p xtask -- gen-schema` 生成。**不要手改。**\n\
@@ -191,9 +222,19 @@ fn render(fields: &[Field]) -> String {
             Some(o) => format!("Some({o:?})"),
             None => "None".to_string(),
         };
+        // 成员继承容器所在的组：DEF_forcing 在 nl_colm_forcing 里，
+        // 所以 DEF_forcing%dataset 也该写进那个文件。这正是 GUI 要的信息。
+        let group = match &f.owner {
+            Some(o) => lookup_ci(groups, owner_prefix(o)),
+            None => f.group.clone(),
+        };
+        let group = match &group {
+            Some(g) => format!("Some({g:?})"),
+            None => "None".to_string(),
+        };
         let _ = writeln!(
             s,
-            "    Field {{ name: {full:?}, kind: {}, default: {}, doc: {doc}, arity: {arity}, owner: {owner}, line: {} }},",
+            "    Field {{ name: {full:?}, kind: {}, default: {}, doc: {doc}, arity: {arity}, owner: {owner}, group: {group}, line: {} }},",
             f.kind,
             render_default(&f.kind, &f.default),
             f.line
