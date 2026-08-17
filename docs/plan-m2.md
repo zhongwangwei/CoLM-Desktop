@@ -737,6 +737,15 @@ fn rejects_repeat_count_rather_than_guessing() {
 }
 
 #[test]
+fn rejects_a_continuation_line_rather_than_joining_it() {
+    // 0/55 个文件用续行符。与重复计数、切片、未闭合 group 并列的第四道守卫：
+    // 不支持就必须报错，而不是把行尾的 & 当成普通字符吞掉 —— 那样值会悄悄
+    // 少掉后半截，而文件看起来解析成功了。
+    let e = parse("&nl_colm\n   a = 1 &\n   2\n/\n").unwrap_err();
+    assert!(format!("{e:#}").contains("continuation"), "{e:#}");
+}
+
+#[test]
 fn rejects_a_group_that_is_never_closed() {
     let e = parse("&nl_colm\n   a = 1\n").unwrap_err();
     assert!(format!("{e:#}").contains("unterminated"), "{e:#}");
@@ -1092,7 +1101,7 @@ pub use value::{Path, Segment, Value};
 - [ ] **Step 4: 测试通过**
 
 Run: `cargo test -p colm-namelist`
-Expected: `test result: ok. 25 passed; 0 failed`（7 个 value + 18 个 parse）
+Expected: `test result: ok. 26 passed; 0 failed`（7 个 value + 19 个 parse）
 
 - [ ] **Step 5: 格式与 lint**
 
@@ -2657,7 +2666,7 @@ git commit -m "Document the configuration layer and wire it into CI"
 
 逐条可验证：
 
-- [ ] `cargo test --workspace` 通过；`colm-namelist` 的 25 个单元测试 + 3 个往返测试、
+- [ ] `cargo test --workspace` 通过；`colm-namelist` 的 26 个单元测试 + 3 个往返测试、
       `colm-schema` 的 7 个字段测试 + 1 个漂移测试全部执行（不是跳过）
 - [ ] **55/55 个真实 `.nml` 逐字节往返**，没有任何文件被跳过
 - [ ] 改一个字段后**恰好一行**发生变化，行数不变
