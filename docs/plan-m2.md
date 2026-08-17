@@ -100,20 +100,26 @@
 那正是 `colm-kernel` 已登记的失败标记之一。届时的解法是给 `Field` 记一个可选的
 守卫表达式，而不是在这里提前造。
 
-**一个必须处理的陷阱**：全文件有 7 个声明不含 `=`，它们**不是 namelist 字段**，
-而是子程序内的局部变量与哑元：
+**一个必须处理的陷阱**：全文件有 8 个声明不含 `=`（7 个不同名字，
+`set_defaults` 出现两次），它们**不是 namelist 字段**，而是子程序内的
+局部变量与哑元：
 
 ```
-logical :: fexists          integer :: ivar         integer :: ierr
-character(len=256) :: iomesg
-logical, intent(in) :: set_defaults
-logical, intent(inout) :: onoff
-logical, intent(in)    :: set_defaults
+character(len=*), intent(in) :: nlfile        ! 1137
+logical :: fexists                            ! 1140
+integer :: ivar                               ! 1141
+integer :: ierr                               ! 1142
+character(len=256) :: iomesg                  ! 1143
+logical, intent(in) :: set_defaults           ! 2227
+logical, intent(inout) :: onoff               ! 2741
+logical, intent(in)    :: set_defaults        ! 2742
 ```
 
 **生成器必须只扫描模块的声明区与 `type ... end type` 块，遇到 `SUBROUTINE`
-就停止**。否则这 7 个会被当成配置字段混进 schema。带 `intent(...)` 属性是
-哑元的可靠特征，但 `fexists`/`ivar` 没有，所以靠属性过滤不够——必须靠作用域。
+就停止**。第一个 `SUBROUTINE` 在第 1132 行，上面这些全在它之后，而 178 个
+`DEF_` 声明全在它之前——实测它之后 `DEF_` 出现 0 次，所以这条截断是安全的。
+带 `intent(...)` 属性是哑元的可靠特征，但 `fexists`/`ivar`/`ierr`/`iomesg`
+没有，所以靠属性过滤不够——必须靠作用域。
 
 ---
 
@@ -1370,11 +1376,20 @@ fn defaults_that_differ_from_colm_are_visible_here() {
 
 #[test]
 fn no_local_variable_leaked_into_the_schema() {
-    // MOD_Namelist.F90 里有 7 个不含 '=' 的声明，它们是子程序局部变量与哑元
-    // （fexists / ivar / ierr / iomesg / set_defaults / onoff），不是配置字段。
-    // 生成器必须靠作用域排除它们 —— 靠 intent(...) 属性过滤是不够的，
-    // 因为 fexists 和 ivar 没有 intent。
-    for leaked in ["fexists", "ivar", "ierr", "iomesg", "set_defaults", "onoff"] {
+    // MOD_Namelist.F90 里有 8 个不含 '=' 的声明（7 个不同名字），
+    // 它们是子程序局部变量与哑元
+    // （nlfile / fexists / ivar / ierr / iomesg / set_defaults / onoff），
+    // 不是配置字段。生成器必须靠作用域排除它们 —— 靠 intent(...) 属性过滤
+    // 是不够的，因为 fexists / ivar / ierr / iomesg 都没有 intent。
+    for leaked in [
+        "nlfile",
+        "fexists",
+        "ivar",
+        "ierr",
+        "iomesg",
+        "set_defaults",
+        "onoff",
+    ] {
         assert!(
             find(leaked).is_none(),
             "{leaked} is a subroutine local, not a config field"
@@ -1485,9 +1500,9 @@ struct Field {
 
 /// 扫描模块的声明区与 type 块，**遇到 SUBROUTINE / FUNCTION 即停止**。
 ///
-/// 这条是必须的：文件里有 7 个不含 `=` 的声明（fexists / ivar / ierr /
-/// iomesg / set_defaults / onoff），全部是子程序局部变量与哑元。
-/// 靠 `intent(...)` 属性过滤不够，因为其中 4 个没有 intent。
+/// 这条是必须的：文件里有 8 个不含 `=` 的声明（7 个不同名字：nlfile /
+/// fexists / ivar / ierr / iomesg / set_defaults / onoff），全部是子程序
+/// 局部变量与哑元。靠 `intent(...)` 属性过滤不够，因为其中 4 个没有 intent。
 fn extract(text: &str) -> Result<Vec<Field>> {
     let mut out = Vec::new();
     let mut owner: Option<String> = None;
@@ -1756,8 +1771,8 @@ git add vendor/CoLM202X crates/colm-schema/src/generated.rs
 ## 生成器必须守住的两条
 
 1. **作用域截断**：只扫描模块声明区与 `type ... end type`，遇到第一个
-   `SUBROUTINE` 就停。文件里有 7 个不含 `=` 的声明是子程序局部变量与哑元
-   （`fexists` `ivar` `ierr` `iomesg` `set_defaults` `onoff`），
+   `SUBROUTINE`（第 1132 行）就停。它之后有 8 个不含 `=` 的声明是子程序局部
+   变量与哑元（`nlfile` `fexists` `ivar` `ierr` `iomesg` `set_defaults` `onoff`），
    靠 `intent(...)` 属性过滤不够，因为其中 4 个没有 intent。
 2. **派生类型名到实例名的映射**在 `owner_prefix` 里手工维护。
    Fortran 的类型定义与变量声明是分开的，而 namelist 文件里出现的是变量名。
@@ -1952,14 +1967,14 @@ git commit -m "Document the configuration layer and wire it into CI"
 
 逐条可验证：
 
-- [ ] `cargo test --workspace` 通过；`colm-namelist` 的 19 个单元测试 + 3 个往返测试、
+- [ ] `cargo test --workspace` 通过；`colm-namelist` 的 25 个单元测试 + 3 个往返测试、
       `colm-schema` 的 7 个字段测试 + 1 个漂移测试全部执行（不是跳过）
 - [ ] **55/55 个真实 `.nml` 逐字节往返**，没有任何文件被跳过
 - [ ] 改一个字段后**恰好一行**发生变化，行数不变
 - [ ] 改不存在的字段**报错**而不是静默追加
 - [ ] 重复计数、数组切片、续行符、未闭合 group 各自**报错**而不是猜
 - [ ] schema 表含 178 个顶层 `DEF_*` 与 482 个 `history_var_type` 成员
-- [ ] 6 个子程序局部变量与哑元**没有**混进 schema
+- [ ] 7 个子程序局部变量与哑元**没有**混进 schema
 - [ ] 篡改 `generated.rs` 后漂移测试失败，并自动还原工作树
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 无输出
 - [ ] `git status --short` 为空

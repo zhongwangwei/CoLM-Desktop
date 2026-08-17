@@ -50,11 +50,20 @@ fn defaults_that_differ_from_colm_are_visible_here() {
 
 #[test]
 fn no_local_variable_leaked_into_the_schema() {
-    // MOD_Namelist.F90 里有 7 个不含 '=' 的声明，它们是子程序局部变量与哑元
-    // （fexists / ivar / ierr / iomesg / set_defaults / onoff），不是配置字段。
-    // 生成器必须靠作用域排除它们 —— 靠 intent(...) 属性过滤是不够的，
-    // 因为 fexists 和 ivar 没有 intent。
-    for leaked in ["fexists", "ivar", "ierr", "iomesg", "set_defaults", "onoff"] {
+    // MOD_Namelist.F90 里有 8 个不含 '=' 的声明（7 个不同名字），
+    // 它们是子程序局部变量与哑元
+    // （nlfile / fexists / ivar / ierr / iomesg / set_defaults / onoff），
+    // 不是配置字段。生成器必须靠作用域排除它们 —— 靠 intent(...) 属性过滤
+    // 是不够的，因为 fexists / ivar / ierr / iomesg 都没有 intent。
+    for leaked in [
+        "nlfile",
+        "fexists",
+        "ivar",
+        "ierr",
+        "iomesg",
+        "set_defaults",
+        "onoff",
+    ] {
         assert!(
             find(leaked).is_none(),
             "{leaked} is a subroutine local, not a config field"
