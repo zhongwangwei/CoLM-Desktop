@@ -58,7 +58,7 @@
 | 裸值续行 | 0/55 |
 
 **group 名**共 17 种，但只有 3 种属于 CoLM 本体且在本里程碑范围内：
-`nl_colm`（29 个文件）、`nl_colm_forcing`（24）、`nl_colm_history`（3）。
+`nl_colm`（20 个文件）、`nl_colm_forcing`（24）、`nl_colm_history`（1）。
 其余 10 种（`NRUNVER` `NDIMTIME` `NPARAM` `NSIMTIME` `NMAP` `NRESTART` `NFORCE`
 `NOUTPUT` `NDAMOUT` `NAMSED`）是 CaMa-Flood 的，SinglePoint 下 CaMa 被强制关闭；
 `nl_colm_tracer_*` / `nl_colm_methane_parameter` / `nl_colm_sediment_parameter`
