@@ -2625,10 +2625,15 @@ GitHub 托管 runner 上不存在。只要它还是本机路径，上面这一�
 **由 `cargo run -p xtask -- gen-schema` 从 `MOD_Namelist.F90` 生成**，产物入库，
 `tests/drift.rs` 保证它不会与上游脱节。详见 `crates/colm-schema/build-notes.md`。
 
-注意 schema 记录的是 **CoLM 的**默认值，不是本项目建议用户使用的值。
-两者确实不同（`DEF_USE_OZONEDATA` 默认 `.true.` 但需要 2.8 GB 的臭氧数据；
-`DEF_Runoff_SCHEME` 默认 `3` 但需要站点文件里有 `soil_texture`），
-偏离由上层决定并解释，见 `docs/design.md` §2.5。
+注意 schema 记录的是 **CoLM 声明的**默认值，一字不改。这很重要，因为
+CoLM 的默认值假设 HPC 数据树存在：`DEF_USE_OZONEDATA` 默认 `.true.`，
+要读 2.8 GB 的 `Ozone/Global/OZONE-setgrid.nc`；`DEF_Runoff_SCHEME` 默认 `3`
+（Simple VIC），要求站点文件里有 `soil_texture`。
+
+这两条的处置并不相同：臭氧是**本项目唯一必须显式关掉**的默认开关，
+而产流方案沿用 CoLM 的 `3`，代价是站点文件缺 `soil_texture` 时要合成一个。
+哪个照搬、哪个偏离、偏离的理由，都由上层决定并解释，schema 不参与 ——
+见 `docs/design.md` §2.5 与 §2.7。
 ```
 
 - [ ] **Step 3: 全量验证**
