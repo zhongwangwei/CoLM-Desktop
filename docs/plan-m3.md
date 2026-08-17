@@ -1945,7 +1945,12 @@ git commit -m "Fill a bare PLUMBER2 site file into one CoLM can run"
 **Files:**
 - Modify: `oracle/cases/CN-Cng/site.nc`、`oracle/cases/CN-Cng-wet/`（若有独立站点文件）
 - Modify: `oracle/golden/*.nc`
-- Modify: `oracle/fixtures/inputs.sha256`、`oracle/fixtures/PROVENANCE.md`
+- Modify: `oracle/fixtures/PROVENANCE.md`
+
+**`oracle/fixtures/inputs.sha256` 不动**：它校验的是**原始** PLUMBER2 输入
+（Forcing / Observation / Sitedata 三个文件），那三个文件本轮没变。三个栅格
+也不需要加进去 —— Step 7 的 CI 检查是「重新生成是否与入库的一致」，栅格若
+换了，那一条自然会红。给 38 GB 的文件算校验和只会让每次 CI 多跑几分钟。
 - Delete: `oracle/scripts/make_site_nc.py`
 - Modify: `.github/workflows/ci.yml`、`README.md`
 
@@ -2025,8 +2030,16 @@ git rm oracle/scripts/make_site_nc.py
 ```
 
 在 `PROVENANCE.md` 里写明它被 `colm-srfdata` 取代，以及它错在哪
-（USDA 编号反了、颜色档写死为 10、lakedepth 写死为 1.0）。
-**留着一个已知错误的脚本比删掉更糟**——下一个人会拿它当参考。
+（USDA 编号反了、颜色档写死为 10、lakedepth 写死为 1.0、`wf_om` 多乘了
+一个 `vf_om`、三套基准混用）。**留着一个已知错误的脚本比删掉更糟**——
+下一个人会拿它当参考。
+
+同时更新 `PROVENANCE.md` 里记的 `site.nc` 的 sha256：换了生成器，字节必然不同。
+该文件里已有一条实测记录值得留意——**分多次追加进 NetCDF 会得到数据逐位相同、
+字节不同的文件**（HDF5 布局差异）。`colm-srfdata` 的 `fill` 在单个
+`netcdf::append` 会话里写完全部 12 个变量，符合这条；而 Step 7 的 CI 检查用的是
+判官（逐变量结构比对）而不是 sha256，所以即便布局有别也不会误报。
+`PROVENANCE.md` 里的 sha256 是文档，不是门禁。
 
 - [ ] **Step 7: CI**
 
