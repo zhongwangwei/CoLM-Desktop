@@ -32,3 +32,7 @@ workspace = true
 [[bin]]
 name = "golden-run"
 path = "src/bin/golden_run.rs"
+
+[[bin]]
+name = "golden-compare"
+path = "src/bin/golden_compare.rs"
