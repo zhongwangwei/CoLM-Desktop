@@ -1,0 +1,15 @@
+[package]
+name = "colm-forcing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+colm-namelist = { path = "../colm-namelist" }
+netcdf = { workspace = true, features = ["static"] }
+
+[lints]
+workspace = true
