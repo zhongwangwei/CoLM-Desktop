@@ -266,7 +266,12 @@ fn an_hourly_label_covers_the_two_half_hours_before_and_at_it() {
 - [ ] **Step 3: 跑，确认红**
 
 Run: `cargo test -p colm-hist --lib`
-Expected: 3 条新测试因 `time` 模块不存在而编译失败。
+Expected: `test result: ok. 5 passed` —— 也就是**新测试根本没跑**。
+
+**注意这里的「红」不是编译失败。** `time.rs` 与 `time_tests.rs` 已经写在磁盘上，
+但 `lib.rs` 里还没有 `pub mod time;`，Cargo 就完全不会去编它们 ——
+孤立的源文件不构成构建错误。所以本步要确认的是「测试数没变」，
+而不是「编不过」。这一点对下面两个 Task 同样成立。
 
 - [ ] **Step 4: 接上模块并转绿**
 
@@ -471,7 +476,19 @@ fn bias_is_model_minus_observation() {
 }
 ```
 
-- [ ] **Step 3: 跑并提交**
+- [ ] **Step 3: 接上模块**
+
+`lib.rs` 加 `pub mod metric;`，`metric.rs` 末尾加：
+
+```rust
+#[cfg(test)]
+#[path = "metric_tests.rs"]
+mod metric_tests;
+```
+
+不加这一段的话 `metric_tests.rs` 是个孤立文件，测试数不会变而且**不报错**。
+
+- [ ] **Step 4: 跑并提交**
 
 Run: `cargo test -p colm-hist --lib`
 Expected: `test result: ok. 14 passed`（8 + 新 6）
@@ -687,7 +704,17 @@ fn an_hour_with_no_matching_observation_is_dropped() {
 }
 ```
 
-- [ ] **Step 3: 跑并提交**
+- [ ] **Step 3: 接上模块**
+
+`lib.rs` 加 `pub mod pair;`，`pair.rs` 末尾加：
+
+```rust
+#[cfg(test)]
+#[path = "pair_tests.rs"]
+mod pair_tests;
+```
+
+- [ ] **Step 4: 跑并提交**
 
 Run: `cargo test -p colm-hist --lib`
 Expected: `test result: ok. 20 passed`（14 + 新 6）
