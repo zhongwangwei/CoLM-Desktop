@@ -3,9 +3,7 @@
 # incompatible-rust-versions = "fallback" 回退并标注。启用它当场就暴露出
 # hdf5-metno-src 0.10.4 requires Rust 1.85.1，故下面的 MSRV 是 1.85.1 而非 1.85。
 resolver = "3"
-# oracle 在 Task 6 加入。此处只列已存在的 member，
-# 否则 Task 1 结束时 cargo 会因找不到 oracle/Cargo.toml 而失败。
-members = ["crates/colm-kernel"]
+members = ["crates/colm-kernel", "oracle"]
 
 [workspace.package]
 version = "0.1.0"
