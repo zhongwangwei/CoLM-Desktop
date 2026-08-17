@@ -106,6 +106,18 @@ jobs:
       - name: Tests that need the CoLM source
         run: cargo test --workspace
 
+      # 站点文件也进回归：它是黄金输出的输入，改了它而不改黄金文件，
+      # 回归就在比两个不同前提下的结果。判官在这里预期退出 0。
+      - name: Site file regenerates identically
+        env:
+          PLUMBER2_ROOT: ${{ vars.PLUMBER2_ROOT }}
+          COLM_RAWDATA: ${{ vars.COLM_RAWDATA }}
+        run: |
+          cargo run -p colm-srfdata --bin site-fill -- \
+            "$PLUMBER2_ROOT/Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc" \
+            /tmp/site-check.nc "$COLM_RAWDATA"
+          cargo run -p oracle --bin golden-compare -- oracle/cases/CN-Cng/site.nc /tmp/site-check.nc
+
   # 让「黄金回归没跑」这件事在 PR 界面上可见，而不是静默缺席。
   golden-status:
     runs-on: ubuntu-latest

@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::albedo::albedo;
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
@@ -41,17 +41,31 @@ pub fn missing_fields(file: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// 补齐一个站点文件。`rawdata` 为 `None` 时用模块默认值，并在 `source` 里说明。
-pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
+/// 补齐一个站点文件。
+///
+/// 取值优先级是**站点自有 > 栅格 > 模块默认**。「站点自有」指站点文件本身的
+/// 土壤剖面，以及 `observation` 指向的同站 `*_Flux.nc` 里的站点元数据 ——
+/// 那里的 `elevation` 的 `long_name` 正是 "Site elevation"，90 个站点全都有。
+/// 栅格是全球产品；站点自己有数的地方不该被它顶掉。
+pub fn fill(
+    src: &Path,
+    dst: &Path,
+    rawdata: Option<&Path>,
+    observation: Option<&Path>,
+) -> Result<Report> {
     std::fs::copy(src, dst)
         .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
 
     let (lon, lat, landtype, col, soil_dim) = read_inputs(dst)?;
     let d = derive(&col);
     let fe = fine_earth_fractions(&col);
-    // CoLM 缺这个字段时读的就是这张栅格（MOD_SingleSrfdata.F90:1121），
-    // 所以有它就用它。分类器只是没有栅格时的兜底 —— 实测两者在 90 个站点里
-    // 只有 25 个一致，因为栅格出自 SoilGrids v2 而站点文件出自 Shangguan 2014。
+    // 质地类别由**站点文件自己的土壤剖面**定；CoLM 的栅格只是兜底。
+    //
+    // 两者实测只有 26/90 一致：栅格出自 SoilGrids v2，站点文件出自
+    // Shangguan et al. 2014，在 CN-Cng 像元上连 theta_s / BD_all / k_s 都对不上。
+    // 站点文件的其余土壤参数（theta_s、k_s、psi_s、csol…）会被 CoLM 原样采用，
+    // 质地再从另一个产品取，同一份土壤就自相矛盾了。
+    let classified = classify(fe.silt, fe.clay);
     let raster_texture = rawdata.and_then(|r| {
         point_i32(
             &r.join("soil/soiltexture_0cm-60cm_mean.nc"),
@@ -61,16 +75,17 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
         )
         .ok()
         .filter(|t| (1..=12).contains(t))
+        .map(|t| t as u8)
     });
-    let classified = classify(fe.silt, fe.clay).with_context(|| {
-        format!(
-            "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle",
-            fe.sand, fe.silt, fe.clay
-        )
-    })?;
-    let (texture, texture_from_raster) = match raster_texture {
-        Some(t) => (t as u8, true),
-        None => (classified, false),
+    let (texture, texture_from_raster) = match (classified, raster_texture) {
+        (Some(c), _) => (c, false),
+        (None, Some(r)) => (r, true),
+        (None, None) => bail!(
+            "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle and no texture raster is available",
+            fe.sand,
+            fe.silt,
+            fe.clay
+        ),
     };
 
     let mut f =
@@ -79,19 +94,24 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
     let mut report = Report {
         texture,
         classified_texture: classified,
+        raster_texture,
         texture_name: CLASS_NAMES[(texture - 1) as usize].to_string(),
         bvic: BVIC_USDA[texture as usize],
         fine_earth: (fe.sand, fe.silt, fe.clay),
+        from_site: Vec::new(),
         from_raster: Vec::new(),
         from_default: Vec::new(),
     };
     if texture_from_raster {
         report.from_raster.push("soil_texture".to_string());
     } else {
-        report.from_default.push("soil_texture".to_string());
+        report.from_site.push("soil_texture".to_string());
     }
 
-    // --- 栅格来源的 8 个 ---
+    // 站点自有的高程：Observation 文件的 "Site elevation"。它优先于地形栅格。
+    let site_elevation = observation.and_then(|o| read_site_elevation(o).ok());
+
+    // --- 栅格来源的其余几个 ---
     let (isc, lake, elev, elvstd, slope) = match rawdata {
         Some(r) => (
             point_i32(&r.join("soil_brightness.nc"), "soil_brightness", lon, lat).ok(),
@@ -136,18 +156,41 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
         }
     }
 
+    // 高程：站点自有的压过栅格。Observation 文件里的 "Site elevation" 是站点
+    // 元数据，而 topography.nc 是 500 m 全球格网 —— 站点有自己的数就不该被它顶掉。
+    match site_elevation {
+        Some(v) => {
+            put_scalar(
+                &mut f,
+                "elevation",
+                v,
+                "site: Site elevation from the Observation file",
+            )?;
+            report.from_site.push("elevation".to_string());
+        }
+        None => match elev {
+            Some(v) => {
+                put_scalar(&mut f, "elevation", v, "rawdata topography.nc")?;
+                report.from_raster.push("elevation".to_string());
+            }
+            None => {
+                put_scalar(
+                    &mut f,
+                    "elevation",
+                    0.0,
+                    "synthesized: MOD_SingleSrfdata.F90:87 module default",
+                )?;
+                report.from_default.push("elevation".to_string());
+            }
+        },
+    }
+
     for (name, got, default, note) in [
         (
             "lakedepth",
             lake,
             1.0,
             "MOD_SingleSrfdata.F90:47 module default",
-        ),
-        (
-            "elevation",
-            elev,
-            0.0,
-            "MOD_SingleSrfdata.F90:87 module default",
         ),
         (
             "elvstd",
@@ -189,15 +232,15 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
         &soil_dim,
         "derived: OM_density / BD_all",
     )?;
-    let texture_src = if texture_from_raster {
+    let texture_src = if !texture_from_raster {
         format!(
-            "rawdata soil/soiltexture_0cm-60cm_mean.nc -> class {} ({}), BVIC {}",
-            texture, report.texture_name, report.bvic
+            "site: CoLM USDA triangle on this site's own 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% (clay is an assumption) -> class {} ({}), BVIC {}",
+            fe.sand, fe.silt, fe.clay, texture, report.texture_name, report.bvic
         )
     } else {
         format!(
-            "classified: CoLM USDA triangle on 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% (clay is an assumption) -> class {} ({}), BVIC {}",
-            fe.sand, fe.silt, fe.clay, texture, report.texture_name, report.bvic
+            "rawdata soil/soiltexture_0cm-60cm_mean.nc -> class {} ({}), BVIC {}; the site's own soil fell outside the USDA triangle",
+            texture, report.texture_name, report.bvic
         )
     };
     put_int(&mut f, "soil_texture", texture as i32, &texture_src)?;
@@ -209,14 +252,40 @@ pub fn fill(src: &Path, dst: &Path, rawdata: Option<&Path>) -> Result<Report> {
 #[derive(Debug, Clone)]
 pub struct Report {
     pub texture: u8,
-    /// 分类器给出的类别。与 `texture` 不同即说明栅格与站点文件的土壤产品不一致，
-    /// 实测 90 个站点里有 65 个如此。
-    pub classified_texture: u8,
+    /// 分类器给出的类别；输入落到 USDA 三角外时为 `None`。
+    /// 分类器给出的类别 —— 由站点文件自己的土壤剖面算得。
+    /// 输入落到 USDA 三角外时为 `None`，那时才退到栅格。
+    pub classified_texture: Option<u8>,
+    /// CoLM 栅格给出的类别（若可读）。与 `texture` 不同是常态：
+    /// 实测 90 个站点里两者只有 26 个一致，因为出自不同的土壤产品。
+    pub raster_texture: Option<u8>,
     pub texture_name: String,
     pub bvic: f64,
     pub fine_earth: (f64, f64, f64),
+    /// 取自站点自有数据的字段。
+    pub from_site: Vec<String>,
     pub from_raster: Vec<String>,
     pub from_default: Vec<String>,
+}
+
+/// 同站 `*_Flux.nc` 里的 "Site elevation"。
+///
+/// 这是站点自己的元数据，不是全球产品插值 —— 90 个 PLUMBER2 站点全都带它，
+/// 所以站点有数时它应当压过地形栅格。
+fn read_site_elevation(obs: &Path) -> Result<f64> {
+    let f = netcdf::open(obs).with_context(|| format!("cannot open {}", obs.display()))?;
+    let v = f
+        .variable("elevation")
+        .with_context(|| format!("no elevation in {}", obs.display()))?;
+    let x: Vec<f64> = v.get_values(netcdf::Extents::All)?;
+    let e = x
+        .first()
+        .copied()
+        .with_context(|| format!("elevation is empty in {}", obs.display()))?;
+    if !e.is_finite() || e <= -9000.0 {
+        bail!("elevation in {} is a fill value ({e})", obs.display());
+    }
+    Ok(e)
 }
 
 fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn, String)> {

@@ -1985,12 +1985,20 @@ git commit -m "Fill a bare PLUMBER2 site file into one CoLM can run"
 
 ---
 
-## Task 9b: `soil_texture` 优先读 CoLM 自己的栅格
+## Task 9b: 取值优先级 —— 站点自有 > 栅格 > 模块默认
 
 **Files:**
 - Modify: `crates/colm-srfdata/src/site.rs`
 - Modify: `crates/colm-srfdata/src/site_tests.rs`
 - Modify: `crates/colm-srfdata/tests/real_sites.rs`
+
+> **执行时结论被推翻，本节保留原推理以存档。** 下面论证的是「栅格优先」，
+> 而最终采用的是**站点自有优先**：质地类别由站点文件自己的土壤剖面算得，
+> 高程取自同站 `Observation` 文件的 `Site elevation`，其余栅格字段不变。
+> 理由是**站点文件的内部一致性**：它的 `theta_s`/`k_s`/`psi_s`/`csol` 等
+> 都会被 CoLM 原样采用，质地再从另一个产品取，同一份土壤就自相矛盾。
+> 下面关于「两者只有 26/90 一致、且分歧源自不同土壤产品」的**测量全部有效**，
+> 变的只是据此做出的取舍。最终实现见 `oracle/fixtures/PROVENANCE.md`。
 
 **为什么加这一步。** Task 9 之后，`soil_texture` 一律由分类器算。但
 `rawdata/soil/soiltexture_0cm-60cm_mean.nc` 到位之后可以直接比对，结果是
@@ -2236,11 +2244,11 @@ cargo run -p colm-srfdata --bin site-fill -- \
 |---|---|---|---|
 | `soil_s_v_alb` / `d_v` / `s_n` / `d_n` | 0.14 / 0.25 / 0.28 / 0.39 | 同左 | 不变——CN-Cng 恰好就是硬编码的那一档 |
 | `soil_vf_clay` | 0.20519（第 1 层） | 同左 | 不变——该公式本来就在正确的基准上 |
-| `soil_texture` | 4 | **6** | BVIC 0.230 → 0.200；来自栅格（分类器会给 8）|
+| `soil_texture` | 4 | **8** | BVIC 0.230 → 0.100；来自站点自己的土壤（栅格会给 6）|
 | `soil_wf_om` | 0.000486673（第 1 层） | **0.0153869** | **31 倍**，旧公式多乘了一个 `vf_om` |
 | `soil_wf_clay` | 0.209907（第 1 层） | 0.23 | 改用 `wf_sand` 的基准 |
 | `lakedepth` | 1.0 | 0.0 | 栅格实测；90 个站点全是 0 |
-| `elevation` | 138.0 | 144.1444549560547 | 栅格实测，旧值取自 Observation 文件 |
+| `elevation` | 138.0 | 138.0 | **不变** —— 站点自有优先，仍取自 Observation 文件的 Site elevation |
 | `elvstd` | 0.0 | 0.49634310603141785 | 栅格实测 |
 | `sloperatio` | 0.0 | 0.003575807437300682 | 栅格实测 |
 
@@ -2261,13 +2269,32 @@ cargo run -p oracle --bin golden-run -- CN-Cng-wet
 
 对比 Step 1 记下的指标。**必须逐项解释的**：
 
-1. `mkinidata` 日志里的 `BVIC [-] is in (0.20, 0.20)`（旧的是 0.23）——
+1. `mkinidata` 日志里的 `BVIC [-] is in (0.10, 0.10)`（旧的是 0.23）——
    入渗形状参数变小，湿季窗口的 `f_rnof` 应随之变化。
-2. `soil_wf_om` 大了 31 倍，它进的是土壤热参数
-   （`soil_thermal_parameters` 用 `wf_gravels/wf_sand/wf_clay`，
-   而 `wf_om` 经 `OM_density` 进 `csol`/`tksatu` 一路）。地表温度与
-   土壤热通量会有可见变化，**这是预期的**，因为旧值本身是错的。
-3. `elvstd` 与 `sloperatio` 由 0 变成非零，会影响地形相关的参数化。
+2. `soil_wf_om` 大了 31 倍，但**对结果没有任何影响** —— 这一条是执行时
+   查实的，与本计划先前的预期相反。运行期 CoLM 只把 `wf_gravels` 与
+   `wf_sand` 传进热学链（`MOD_GroundTemperature.F90:208`、`MOD_Thermal.F90`、
+   `CoLMMAIN.F90`、`CoLMDRIVER.F90`），`wf_clay` 与 `wf_om` 在
+   `MOD_SoilParametersReadin.F90` 里读进来存下就再没人用。修它仍然值得 ——
+   它是会被用户与后续代码读到的存储值，而且本来就是错的 —— 但它不会动数值。
+3. `elvstd` 与 `sloperatio` 由 0 变成非零，同样**没有影响**：它们服务于
+   强迫场降尺度，而 `DEF_USE_Forcing_Downscaling` 默认关。
+
+**实际观测到的变化**（执行 Task 10 时实测，供后来者对照）：
+
+| | 冬季窗口 | 湿季窗口 |
+|---|---|---|
+| 逐位相同的变量 | **128/129** | 51/129 |
+| 变化的变量 | 仅 `f_frcsat`（相对 26%） | 78 个，**全在水文链上** |
+| `\|f_xerr\|max` | 9.442e-16 → 不变 | 3.701e-08 → 不变 |
+| `\|f_zerr\|max` | 2.609e-10 → 不变 | 2.724e-10 → 2.651e-10 |
+| 产流非零步 | 0/264 → 0/264 | 44/384 → 44/384 |
+| Rnet vs 观测 R² | 0.9642 → 0.9642 | 0.9721 → 0.9721 |
+
+湿季变化最大的是 `f_wdsrf`（地表积水）、`f_qinfl`（入渗）、`f_qlayer`、
+`f_frcsat`、`f_wetzwt`——**没有一个热学量在列**。也就是说 BVIC 0.230 → 0.200
+的影响精确落在它所参数化的入渗/饱和链上，一步不多。（BVIC 实际是 0.230 → 0.100。）这比「什么都没变」更有
+说服力：它说明改动生效了，且只在该生效的地方生效。
 
 平衡残差应仍在 1e-16..1e-8 量级——若变差了，说明改动引入了别的问题，
 而不是「新值不同」这件事本身。**残差变差不能用「值变了」搪塞过去。**
@@ -2330,8 +2357,8 @@ git diff --check
       + 5 个栅格测试 + 2 个真实站点测试全部执行（不是跳过）
 - [ ] **90/90 个真实站点文件都能补齐**，且缺失字段数都恰好是 12
 - [ ] 90 个站点的质地类别**至少有 3 种不同值**（全同即分类器坏了）
-- [ ] CN-Cng 的 `soil_texture` 为 **6（sandy clay loam），BVIC 0.200**（来自栅格）；
-      无栅格时分类器给 **8（silty loam）**——两者都不是旧的 4/0.230
+- [ ] CN-Cng 的 `soil_texture` 为 **8（silty loam），BVIC 0.100**（来自站点自己的土壤）；
+      CoLM 栅格会给 6，命令行会把它打出来——两者都不是旧的 4/0.230
 - [ ] 落在 USDA 三角外的输入**返回 None**，而不是凑一个类别
 - [ ] 纬度恰好在格边界（含赤道）时索引与 CoLM 的二分查找一致
 - [ ] 四个反照率来自 `soil_brightness.nc` 的实际档位，而不是常数

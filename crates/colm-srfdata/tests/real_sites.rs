@@ -64,7 +64,7 @@ fn every_site_fills_and_lands_inside_the_usda_triangle() {
     for f in site_files() {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
         let out = dir.join(format!("{name}.nc"));
-        match fill(&f, &out, raw.as_deref()) {
+        match fill(&f, &out, raw.as_deref(), None) {
             Ok(r) => {
                 *classes.entry(r.texture).or_insert(0usize) += 1;
                 let (s, si, c) = r.fine_earth;
@@ -115,9 +115,9 @@ fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
     for f in site_files() {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
         let out = dir.join(format!("{name}.nc"));
-        let r = fill(&f, &out, Some(&raw)).expect("fills");
+        let r = fill(&f, &out, Some(&raw), None).expect("fills");
         total += 1;
-        if r.texture == r.classified_texture {
+        if r.raster_texture == Some(r.texture) {
             agree += 1;
         }
     }
