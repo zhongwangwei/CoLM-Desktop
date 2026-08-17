@@ -13,3 +13,15 @@
 
 pub mod field;
 pub mod generated;
+
+pub use field::{Default, Field, FieldKind};
+
+/// 全部字段，按声明顺序。
+pub fn all() -> &'static [Field] {
+    generated::FIELDS
+}
+
+/// 按全名查找，例如 `"DEF_forcing%dataset"`。
+pub fn find(name: &str) -> Option<&'static Field> {
+    generated::FIELDS.iter().find(|f| f.name == name)
+}
