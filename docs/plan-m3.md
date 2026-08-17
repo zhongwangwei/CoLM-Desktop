@@ -1398,7 +1398,9 @@ pub fn point_f64(file: &Path, var: &str, lon: f64, lat: f64) -> Result<f64> {
         .with_context(|| format!("{var} returned no value at ({ilon},{ilat})"))?;
     if let Some(fill) = fill_value(&v) {
         if x == fill {
-            bail!("{var} is _FillValue ({fill}) at pixel ({ilon},{ilat}); this site has no data here");
+            bail!(
+                "{var} is _FillValue ({fill}) at pixel ({ilon},{ilat}); this site has no data here"
+            );
         }
     }
     Ok(x)
