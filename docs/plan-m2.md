@@ -608,6 +608,8 @@ fn reads_space_separated_strings_as_a_list() {
 
 #[test]
 fn reads_logicals_case_insensitively() {
+    // 只管**读**成什么；写回时保持原写法由
+    // keeps_the_case_a_logical_was_written_in 负责
     let d = doc("&nl_colm\n   a = .TRUE.\n   b = .false.\n/\n");
     assert_eq!(d.get("a"), Some(&Value::Bool(true)));
     assert_eq!(d.get("b"), Some(&Value::Bool(false)));
@@ -645,6 +647,69 @@ fn setting_an_absent_field_is_an_error_not_a_silent_append() {
     let mut d = doc("&nl_colm\n   a = 1\n/\n");
     let e = d.set("DEF_nope", Value::Int(1)).unwrap_err();
     assert!(format!("{e:#}").contains("DEF_nope"), "{e:#}");
+}
+
+#[test]
+fn keeps_the_case_a_logical_was_written_in() {
+    // 真实文件里 .TRUE. 大写形式有 198 处。若按 Value::Bool 重新渲染，
+    // 每一处都会变成 .true. —— 用户没改的行不该出现在 diff 里。
+    let src = "&nl_colm\n   a = .TRUE.\n   b = .false.\n/\n";
+    assert_eq!(doc(src).to_string(), src);
+}
+
+#[test]
+fn accepts_a_logical_written_without_its_trailing_dot() {
+    // cama_flood_10km.nml 与 cama_flood_US_30km.nml 里真的这么写，
+    // 而同目录的 cama_flood.nml 写的是 .FALSE. —— 两种都要能读，
+    // 且都要原样写回。
+    let src = "&NOUTPUT\n   LOUTVEC  = .FALSE\n/\n";
+    let d = doc(src);
+    assert_eq!(d.get("LOUTVEC"), Some(&Value::Bool(false)));
+    assert_eq!(d.to_string(), src);
+}
+
+#[test]
+fn keeps_the_double_quotes_the_file_used() {
+    // 156 处，集中在 CaMa 与 TRACER 的 namelist。Value::Str 只会写单引号。
+    let src = "&NMAP\n   CDIMINFO = \"../CaMa/map/glb.txt\"\n/\n";
+    let d = doc(src);
+    assert_eq!(
+        d.get("CDIMINFO"),
+        Some(&Value::Str("../CaMa/map/glb.txt".into()))
+    );
+    assert_eq!(d.to_string(), src);
+}
+
+#[test]
+fn keeps_comma_separators_in_a_list() {
+    // 15 处。Value::List 只会用空格连接。
+    let src = "&nl_colm\n   v = 'precip', 'vapor'\n/\n";
+    let d = doc(src);
+    match d.get("v").expect("field present") {
+        Value::List(items) => assert_eq!(items.len(), 2),
+        other => panic!("expected a list, got {other:?}"),
+    }
+    assert_eq!(d.to_string(), src);
+}
+
+#[test]
+fn keeps_tabs_between_the_value_and_its_comment() {
+    // 5 个 CaMa 文件用制表符对齐行尾注释
+    let src = "&NSIMTIME\n   EYEAR   = 2024   \t\t!  end year\n/\n";
+    assert_eq!(doc(src).to_string(), src);
+}
+
+#[test]
+fn only_the_changed_field_is_rewritten_in_canonical_form() {
+    // 这条画出分界：保留原文不等于不能改值。被 set 过的行按 Value 的
+    // 规范形式重写，没被 set 的同写法的行仍然一字不动。
+    let src = "&nl_colm\n   a = .TRUE.\n   b = .TRUE.\n/\n";
+    let mut d = doc(src);
+    d.set("a", Value::Bool(false)).unwrap();
+    assert_eq!(
+        d.to_string(),
+        "&nl_colm\n   a = .false.\n   b = .TRUE.\n/\n"
+    );
 }
 
 #[test]
@@ -712,6 +777,15 @@ git commit -m "Add failing tests for the format-preserving namelist parser"
 //!
 //! 这样做而不是「解析成结构再重新排版」，是因为重新排版必然改写用户
 //! 没有动过的行，让保存后的 diff 淹没在无关噪声里。
+//!
+//! 关键是 `Entry` 连**值本身的原文**也保留，而不只是缩进与注释。理由是
+//! 同一个值在 Fortran 里有多种等价写法，而 `Value` 只能渲染出其中一种。
+//! 实测 55 个真实文件里：`.TRUE.` 大写形式 198 处（`Value::Bool` 渲染成
+//! `.true.`）、双引号字符串 156 处（渲染成单引号）、逗号分隔多值 15 处
+//! （渲染成空格分隔）—— 合计约 369 行会在「读进来再写回去」时被改写。
+//!
+//! 于是分界是：**没被 `set` 过的行逐字节不动；被 `set` 过的行才按 `Value`
+//! 的规范形式重写。** 用户改了哪一行，diff 里就只出现哪一行。
 
 use anyhow::{bail, Result};
 
@@ -735,6 +809,9 @@ pub enum Item {
 pub struct Entry {
     pub path: Path,
     pub value: Value,
+    /// 值那一段的**原文**。`set` 会用新值的渲染结果覆盖它；
+    /// 没被改过就原样吐回，见模块文档。
+    pub text: String,
     /// 从行首到 `=` 之后的那一段原文（含缩进与对齐空格）
     pub prefix: String,
     /// 值之后到行尾的原文（含空格与行尾注释）
@@ -763,6 +840,7 @@ impl Document {
         for item in &mut self.items {
             if let Item::Entry(e) = item {
                 if e.path == want {
+                    e.text = value.to_string();
                     e.value = value;
                     return Ok(());
                 }
@@ -788,7 +866,7 @@ impl std::fmt::Display for Document {
         for item in &self.items {
             match item {
                 Item::Verbatim(s) | Item::GroupStart(s) | Item::GroupEnd(s) => writeln!(f, "{s}")?,
-                Item::Entry(e) => writeln!(f, "{}{}{}", e.prefix, e.value, e.suffix)?,
+                Item::Entry(e) => writeln!(f, "{}{}{}", e.prefix, e.text, e.suffix)?,
             }
         }
         Ok(())
@@ -850,17 +928,20 @@ pub fn parse(src: &str) -> Result<Document> {
         // 值与行尾注释：`!` 在引号外才是注释起点
         let rest = &line[eq + 1..];
         let cut = comment_start(rest).unwrap_or(rest.len());
-        let value_text = rest[..cut].trim_end();
-        let leading = rest.len() - rest.trim_start().len();
+        let head = &rest[..cut];
+        let lead = head.len() - head.trim_start().len();
+        let text = head.trim();
 
-        let value = parse_value(value_text.trim())
-            .with_context(|| format!("line {}: bad value: {}", lineno + 1, value_text.trim()))?;
+        let value =
+            parse_value(text).with_context(|| format!("line {}: bad value: {text}", lineno + 1))?;
 
+        // prefix + text + suffix 必须逐字节等于原行，这是往返的全部依据。
         items.push(Item::Entry(Entry {
             path,
             value,
-            prefix: format!("{}={}", &line[..eq], &rest[..leading]),
-            suffix: rest[value_text.len()..].to_string(),
+            text: text.to_string(),
+            prefix: format!("{}={}", &line[..eq], &rest[..lead]),
+            suffix: rest[lead + text.len()..].to_string(),
         }));
     }
 
@@ -936,14 +1017,29 @@ fn split_values(s: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Fortran 的逻辑值输入比 `.true.` 宽松：前导点与结尾点都可以省。
+///
+/// 这不是理论上的宽容 —— 实测 `LOUTVEC = .FALSE`（无结尾点）出现在
+/// cama_flood_10km.nml 与 cama_flood_US_30km.nml 里，而同目录的
+/// cama_flood.nml 写的是 `.FALSE.`。上游自己就不一致，gfortran 两种
+/// 都读成假，所以两种都得接受，否则这两个文件根本解析不了。
+///
+/// 但只放宽到这里：`.TRUEISH` 之类仍然拒绝，宁可报错也不猜。
+fn parse_logical(s: &str) -> Option<bool> {
+    let t = s.strip_prefix('.').unwrap_or(s);
+    let t = t.strip_suffix('.').unwrap_or(t);
+    match t.to_ascii_lowercase().as_str() {
+        "t" | "true" => Some(true),
+        "f" | "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_scalar(s: &str) -> Result<Value> {
+    if let Some(b) = parse_logical(s) {
+        return Ok(Value::Bool(b));
+    }
     let low = s.to_ascii_lowercase();
-    if low == ".true." || low == ".t." {
-        return Ok(Value::Bool(true));
-    }
-    if low == ".false." || low == ".f." {
-        return Ok(Value::Bool(false));
-    }
     if (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
         || (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
     {
@@ -982,7 +1078,7 @@ pub use value::{Path, Segment, Value};
 - [ ] **Step 4: 测试通过**
 
 Run: `cargo test -p colm-namelist`
-Expected: `test result: ok. 19 passed; 0 failed`（7 个 value + 12 个 parse）
+Expected: `test result: ok. 25 passed; 0 failed`（7 个 value + 18 个 parse）
 
 - [ ] **Step 5: 格式与 lint**
 
@@ -1106,7 +1202,11 @@ fn changing_one_field_changes_exactly_one_line() {
         .filter(|(_, (a, b))| a != b)
         .map(|(i, _)| i + 1)
         .collect();
-    assert_eq!(differing.len(), 1, "expected one changed line, got {differing:?}");
+    assert_eq!(
+        differing.len(),
+        1,
+        "expected one changed line, got {differing:?}"
+    );
     assert_eq!(src.lines().count(), out.lines().count());
 }
 
