@@ -1294,7 +1294,10 @@ use colm_forcing::{check, render, summarize, ForcingSpec};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let met = PathBuf::from(args.next().context("usage: forcing-nml <Met.nc> [out.nml]")?);
+    let met = PathBuf::from(
+        args.next()
+            .context("usage: forcing-nml <Met.nc> [out.nml]")?,
+    );
     let out = args.next().map(PathBuf::from);
 
     let summary = summarize(&met)?;
@@ -1323,8 +1326,7 @@ fn main() -> Result<()> {
 
     match out {
         Some(p) => {
-            std::fs::write(&p, &text)
-                .with_context(|| format!("cannot write {}", p.display()))?;
+            std::fs::write(&p, &text).with_context(|| format!("cannot write {}", p.display()))?;
             eprintln!(
                 "wrote {} covering {}-{:02} to {}-{:02}, step {} s",
                 p.display(),
@@ -1371,7 +1373,11 @@ fn met_files() -> Vec<PathBuf> {
         .filter(|p| p.to_string_lossy().ends_with("_Met.nc"))
         .collect();
     out.sort();
-    assert!(out.len() >= 85, "expected ~90 forcing files, found {}", out.len());
+    assert!(
+        out.len() >= 85,
+        "expected ~90 forcing files, found {}",
+        out.len()
+    );
     out
 }
 
@@ -1389,7 +1395,12 @@ fn every_forcing_file_passes_the_contract_check() {
             Err(e) => bad.push(format!("{}: {e:#}", f.display())),
         }
     }
-    assert!(bad.is_empty(), "{} file(s) failed:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} file(s) failed:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
 }
 
 #[test]
@@ -1449,7 +1460,14 @@ Expected: 单元测试 24 个 + 集成测试 4 个全绿，并打出步长与高
 
 Run: `cargo run -p colm-forcing --bin forcing-nml -- \
   "$PLUMBER2_ROOT/Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc"`
-Expected: 打出一份 namelist，`startyr = 2008`、`endyr = 2009`。
+Expected: 打出一份 namelist，`startyr = 2008`、**`endyr = 2010`、`endmo = 1`**。
+
+`endyr` 是 2010 而不是文件名里的 2009 —— 时间轴末值是 63158400 s，从 2008-01-01
+起正好 731 天，落在 2010-01-01 00:00 整。文件名只是命名约定，时间轴才是数据。
+另见 Task 8 的预期差异表。
+
+三个 `HEIGHT_*` 应当是 `6.0` 而不是 `6`：CN-Cng 的三个高度都是整数值，
+而 Rust 的 Display 会把 `6.0` 打成 `6`，那在 namelist 里会被读成整数。
 
 - [ ] **Step 4: 格式与 lint，然后提交**
 
