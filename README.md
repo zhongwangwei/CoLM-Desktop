@@ -64,6 +64,17 @@ colm-cli all --site <PLUMBER2>/Sitedata/CN-Cng_..._site.nc \
              --start 2008-01-01 --end 2008-01-11 --spinup 8
 ```
 
+城市站点由站点文件的形状自动认出（没有 `IGBP_classification` 就是城市），
+没有 `--urban` 开关；那时两个栅格目录必填：
+
+```bash
+colm-cli new --site <Urban-PLUMBER>/Sitedata/AU-Preston_site_v1.nc \
+             --out  ~/cases/AU-Preston \
+             --rawdata ~/rawdata --runtime ~/runtime \
+             --start 1993-01-01 --end 1993-01-11
+colm-cli run ~/cases/AU-Preston --kernel kernels/urban
+```
+
 `colm-cli` 是**唯一的编排可执行文件**（`design.md` §4.2：「GUI 只跟它说话」），
 所以它是唯一一处同时依赖全部五层的地方；各层之间仍然互不依赖。四个子命令：
 `new` 造算例、`run` 跑三段、`metrics` 出指标表、`all` 串起来。
@@ -379,7 +390,7 @@ v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 �
 |---|---|---|---|
 | `waterheat` | ✅ 38 s | ✅ 黄金基准 | —— |
 | `bgc` | ✅ 44 s | ✅ 三段跑通 | 需要两份 runtime 数据，见下 |
-| `urban` | ✅ 38 s | ❌ `mksrfdata` 就过不去 | 缺城市栅格 |
+| `urban` | ✅ 38 s | ✅ 三段跑通 | 必须给真实 rawdata/runtime，见下 |
 
 **BGC 需要两份 runtime 数据，而 `design.md` §10 只记了一份。**
 `nitrif/`（30 MB）是记过的；`ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc`
@@ -387,17 +398,41 @@ v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 �
 （`DEF_NDEP_FREQUENCY==1` 年际 / 否则月际）都在 `#ifdef BGC` 内，没有关闭分支，
 schema 里也只有频率没有开关。
 
-**URBAN 有一处站点文件补不了的缺口。** `MOD_Namelist.F90` 的 Part 3 有
-`USE_SITE_urban_geometry` / `_ecology` / `_radiation` / `_thermal` / `_human`
-五个开关，**唯独没有 `USE_SITE_urban_type`** —— 城市类型只能从
-`<rawdata>/urban_type/` 读（具体到 CN-Cng 是 `RG_45_120_40_125.URBTYP.nc`），
-另外还要 `<rawdata>/urban/NCAR_urban_properties.nc`。所以 `colm-srfdata`
-那套「把站点文件补到 CoLM 永不回落」的办法对 URBAN 不成立，这是里程碑 10
-必须正面解决的问题。
+**URBAN 是唯一必须带全球栅格跑的预设。** 水热与 BGC 算例的
+`DEF_dir_rawdata` 故意指向一个**不存在**的目录 —— `site::fill` 已经把该有的
+都写进了 `site.nc`，跑通了就证明一个字节都没读回去。城市算例做不到：
+`MOD_Namelist.F90` 的 Part 3 有 `USE_SITE_urban_geometry` / `_ecology` /
+`_radiation` / `_thermal` / `_human` 五个开关，**唯独没有
+`USE_SITE_urban_type`**；再加上 Urban-PLUMBER 的站点文件里 25 个变量全是形态学
+量，没有土壤剖面、没有湖深、没有土壤反照率。一次真实运行的来源清单里有 30 项
+写着 `from CoLM 2024 raw data`。所以 `colm-cli new` 认出城市站点文件之后，
+**`--rawdata` 与 `--runtime` 变成必填**，缺了就直接报错而不是跑到一半崩。
+
+城市算例与水热算例的三处配置差别，全部由 `colm-case` 自动写出：
+
+| 字段 | 值 | 为什么 |
+|---|---|---|
+| `SITE_landtype` / `USE_SITE_landtype` | `13` / `.true.` | URBAN 路径反正会强制成 13（`MOD_SingleSrfdata.F90:1548`），写出来是让配置文件说出实际会发生的事 |
+| `DEF_URBAN_type_scheme` | `2` | LCZ。默认的 `1`（NCAR 城市密度分类）在栅格给不出城市类别时越界 —— CoLM 自带的 `ex03_site_urban` 用的也是 2 |
+| `USE_SITE_lakedepth` / `_soilreflectance` / `_soilparameters` | `.false.` | 三项默认 `.true.`（「站点文件里有」），可城市站点文件里没有 |
+
+站点文件这边只补一样东西：`prepare_urban` 把 `ground_height`
+（`long_name = "Ground height above sea level"`）抄成 `elevation`，于是
+`USE_SITE_topography` 能留在默认的 `.true.`，CoLM 再也不需要那份 7 GB 的
+`elevation.nc`。除此之外原文件逐字节照抄 —— 实测 `ex03_site_urban` 用的就是
+未经处理的原件。
+
+验收（`AU-Preston`，1993-01-01 至 01-11，1800 s 步长）：三段全 `ok`，
+264 条小时记录，能量闭合残差 `f_xerr` 在 `1e-15` 量级，`f_tref` 峰值 312 K
+——墨尔本一月的夏季午后，量级对得上。
 
 附带一条：`DEF_URBAN_RUN` 默认 `.false.` —— **编译时开了 URBANON，城市模块
 默认也不跑**，但 `mksrfdata` 仍然会去读城市栅格。「编了 urban 预设」与
 「跑城市模拟」是两件事，而前者的数据门槛已经在那里。
+
+还有一条给下一个人的提醒：城市栅格要摆两份。`<rawdata>/urban/` 与
+`<runtime>/urban/` 都要有 LUCY 表 —— 前者给 `mksrfdata`，后者给 `mkinidata`，
+路径由两处不同的代码各拼各的。
 
 ### 闸门表在第二个预设上被独立验证
 

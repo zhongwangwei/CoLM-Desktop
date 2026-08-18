@@ -23,6 +23,7 @@ fn hourly_site() -> CaseSpec {
         },
         timestep_seconds: 3600.0,
         greenwich: false,
+        urban: false,
         dirs: Dirs {
             rawdata: "/w/rawdata_unused/".into(),
             runtime: "/w/runtime_unused/".into(),

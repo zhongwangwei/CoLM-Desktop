@@ -90,6 +90,8 @@ fn a_generated_case_reproduces_the_golden_history() {
         timestep_seconds: summary.step_seconds,
         // 由文件说了算，不写死 —— PLUMBER2 是地方时，Urban-PLUMBER 是 UTC
         greenwich: summary.is_greenwich(),
+        // CN-Cng 是 PLUMBER2 的草地站，不跑城市
+        urban: false,
         dirs: Dirs {
             rawdata: s(&work.join("rawdata_unused/")),
             runtime: s(&work.join("runtime_unused/")),

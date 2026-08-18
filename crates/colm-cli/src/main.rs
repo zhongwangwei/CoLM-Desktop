@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use colm_case::{fields, minimal::required, render, CaseSpec, Dirs, Layout, Window};
 use colm_kernel::outcome::Stage;
 use colm_kernel::Kernel;
@@ -25,6 +25,8 @@ use colm_kernel::Kernel;
 const USAGE: &str = "\
 usage:
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
+                   [--rawdata <dir>] [--runtime <dir>]
+                   # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
   colm-cli run     <case-dir> --kernel <dir>
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N]
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
@@ -204,7 +206,11 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 而 CoLM 的 URBAN 路径本来就直接读原件（实测示例算例用的就是未经处理的
     // 原文件，逐字节相同）。对它做补齐既没有依据，也没有必要。
     let obs = sibling(&site_raw, "Observation", 1);
+    // 城市站点文件不带 `IGBP_classification` —— 那正是它的标志。
     let looks_like_plumber2 = colm_srfdata::site::location(&site_raw)?.landtype.is_some();
+    // 没有 `--urban` 开关：拿一个草地站强行跑城市只会在 NCAR 属性表上越界，
+    // 而一个城市站不跑城市模块也没有意义。判据完全交给站点文件的形状。
+    let urban = !looks_like_plumber2;
     if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
@@ -221,11 +227,15 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             );
         }
     } else {
-        std::fs::copy(&site_raw, layout.site_nc())?;
-        println!(
-            "site: copied as-is — no IGBP_classification, so this is not a PLUMBER2-shaped file \
-             and there is nothing here to fill in from"
-        );
+        // 城市站点文件：只补一样东西，见 `prepare_urban`。
+        let rep = colm_srfdata::site::prepare_urban(&site_raw, &layout.site_nc())?;
+        match rep.elevation {
+            Some(h) => println!(
+                "site: urban-shaped; elevation {h} m taken from ground_height so CoLM never \
+                 needs the 7 GB elevation.nc"
+            ),
+            None => println!("site: urban-shaped; copied as-is"),
+        }
     }
 
     // 2. 强迫场 namelist —— 不转换数据，CoLM 直接读 PLUMBER2 的 Met 文件
@@ -267,6 +277,29 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             .to_string()
     });
 
+    // 全球栅格目录。水热与 BGC 算例一个字节都不读它 —— `site::fill` 已经把
+    // 该有的都写进 site.nc 了 —— 所以那里故意指向一个不存在的目录：跑通了就
+    // **证明**没读。城市算例做不到这一点：土壤剖面、湖深、土壤反照率、LCZ
+    // 分类、坡度都只能从栅格取（实测 mksrfdata 的来源清单里 30 项写着
+    // "from CoLM 2024 raw data"），所以那两个目录变成必填。
+    let dirs = if urban {
+        let raw = o.get("--rawdata").ok_or_else(|| {
+            anyhow!(
+                "an urban case needs --rawdata: the site file carries only morphology, \
+                 so soil, lake depth, albedo and the LCZ class all come from the global grid"
+            )
+        })?;
+        let run = o.get("--runtime").ok_or_else(|| {
+            anyhow!("an urban case needs --runtime: DEF_dir_runtime holds the urban LUCY tables")
+        })?;
+        (slash(Path::new(&raw)), slash(Path::new(&run)))
+    } else {
+        (
+            text(&out.join("rawdata_unused/")),
+            text(&out.join("runtime_unused/")),
+        )
+    };
+
     let spec = CaseSpec {
         name: name.clone(),
         site_file: text(&layout.site_nc()),
@@ -284,9 +317,10 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         timestep_seconds: summary.step_seconds,
         // 由文件说了算，不写死 —— PLUMBER2 是地方时，Urban-PLUMBER 是 UTC
         greenwich: summary.is_greenwich(),
+        urban,
         dirs: Dirs {
-            rawdata: text(&out.join("rawdata_unused/")),
-            runtime: text(&out.join("runtime_unused/")),
+            rawdata: dirs.0.clone(),
+            runtime: dirs.1.clone(),
             output: text(&layout.out()) + "/",
             forcing_namelist: text(&layout.forcing_nml()),
         },
@@ -314,6 +348,17 @@ fn parse_date(s: &str) -> Result<(i32, u32, u32)> {
 
 fn text(p: &Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+/// CoLM 把 `DEF_dir_rawdata` 与文件名直接拼接，中间不补分隔符
+/// （`trim(DEF_dir_rawdata)//'urban/...'`），所以尾斜杠不是修饰，是必需的。
+fn slash(p: &Path) -> String {
+    let s = text(p);
+    if s.ends_with('/') {
+        s
+    } else {
+        s + "/"
+    }
 }
 
 // ---------------------------------------------------------------- run

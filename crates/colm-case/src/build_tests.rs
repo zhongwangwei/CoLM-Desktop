@@ -17,6 +17,7 @@ fn cn_cng() -> CaseSpec {
         },
         timestep_seconds: 1800.0,
         greenwich: false,
+        urban: false,
         dirs: Dirs {
             rawdata: "/w/rawdata_unused/".into(),
             runtime: "/w/runtime_unused/".into(),
@@ -116,4 +117,33 @@ fn the_land_cover_fields_sit_right_after_the_coordinates() {
         .expect("present");
     assert_eq!(names[i - 1], "SITE_lat_location");
     assert_eq!(names[i + 1], "USE_SITE_landtype");
+}
+
+#[test]
+fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
+    // 城市站点文件都不带 IGBP_classification，而 URBAN 路径会把地类强制成 13
+    // （MOD_SingleSrfdata.F90:1548）。写出来是为了让配置文件说出实际会发生的事。
+    let mut s = cn_cng();
+    s.landtype = None;
+    s.urban = true;
+    let all = fields(&s);
+    let req = crate::minimal::required(&all);
+    let names: Vec<&str> = req.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(names.contains(&"SITE_landtype"));
+    assert!(names.contains(&"USE_SITE_landtype"));
+    assert!(names.contains(&"DEF_URBAN_type_scheme"));
+
+    let by = |n: &str| &req.iter().find(|(p, _)| p == n).unwrap().1;
+    assert_eq!(*by("SITE_landtype"), colm_namelist::Value::Int(13));
+    // 方案 2 = LCZ。默认是 1（NCAR），而实测那条路在栅格给不出城市类别时越界。
+    assert_eq!(*by("DEF_URBAN_type_scheme"), colm_namelist::Value::Int(2));
+}
+
+#[test]
+fn a_non_urban_case_says_nothing_about_urban() {
+    // 不跑城市就一个城市字段都不该出现 —— 写一个用不上的开关，
+    // 下一个读配置的人会以为它有意义。
+    let names: Vec<String> = fields(&cn_cng()).into_iter().map(|(p, _)| p).collect();
+    assert!(!names.iter().any(|n| n.contains("URBAN")));
+    assert!(!names.iter().any(|n| n.contains("urban")));
 }

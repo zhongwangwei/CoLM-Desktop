@@ -389,3 +389,66 @@ fn put_layers(
 #[cfg(test)]
 #[path = "site_tests.rs"]
 mod site_tests;
+
+/// 补齐一个**城市**站点文件（Urban-PLUMBER 形状）。
+///
+/// 与 `fill` 是两件事，所以是两个函数。`fill` 服务 PLUMBER2：那里的活是
+/// 补 12 个缺失字段，要土壤剖面、要 USDA 三角、要栅格。城市站点文件的
+/// 变量集完全不同（23 个城市形态学量，没有土壤剖面也没有
+/// `IGBP_classification`），而 CoLM 的 URBAN 路径本来就直接读原件 ——
+/// 实测那份跑成功过的示例算例用的就是未经处理的 Urban-PLUMBER 原文件，
+/// 与仓库里的原件逐字节相同。
+///
+/// 所以这里只做**一件**事：把 `ground_height` 也写成 `elevation`。
+///
+/// 为什么值得做：CoLM 的 URBAN 路径在站点文件没有 `elevation` 时回落到
+/// `<rawdata>/elevation.nc`，那是个 **7 GB** 的全球栅格，而桌面用户装不了。
+/// 同一段代码里 `elvstd` 与 `sloperatio` 却回落到 `topography.nc`
+/// （`MOD_SingleSrfdata.F90:2496-2527`）—— CoLM 自己的不一致，不是我们能改的。
+///
+/// 为什么这个改名有依据而不是猜：`ground_height` 的属性写着
+/// `long_name = "Ground height above sea level"`、`units = "m"`，
+/// 与 CoLM 的 `SITE_elevation` 是同一个量。
+pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
+    std::fs::copy(src, dst)
+        .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
+
+    let existing = {
+        let f = netcdf::open(dst)?;
+        (
+            f.variable("elevation").is_some(),
+            f.variable("ground_height").is_some(),
+        )
+    };
+    match existing {
+        // 已经有了就不动 —— 站点文件自己说的话优先。
+        (true, _) => Ok(UrbanReport { elevation: None }),
+        (false, false) => Ok(UrbanReport { elevation: None }),
+        (false, true) => {
+            let h = {
+                let f = netcdf::open(dst)?;
+                let v = f.variable("ground_height").expect("checked above");
+                v.get_values::<f64, _>(..)?
+                    .first()
+                    .copied()
+                    .context("ground_height is empty")?
+            };
+            let mut f = netcdf::append(dst)
+                .with_context(|| format!("cannot append to {}", dst.display()))?;
+            put_scalar(
+                &mut f,
+                "elevation",
+                h,
+                "Urban-PLUMBER ground_height (ground height above sea level)",
+            )?;
+            Ok(UrbanReport { elevation: Some(h) })
+        }
+    }
+}
+
+/// `prepare_urban` 做了什么。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UrbanReport {
+    /// 从 `ground_height` 补进去的高程；`None` 表示没补（本来就有，或者没得补）。
+    pub elevation: Option<f64>,
+}

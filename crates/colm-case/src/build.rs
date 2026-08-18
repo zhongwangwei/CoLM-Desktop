@@ -29,6 +29,13 @@ pub struct CaseSpec {
     /// 时区错 8 小时会把 Rnet 的 R² 从 0.986 打到 0.146 —— 跑得完，全错。
     /// 见 `colm_forcing::MetSummary::is_greenwich`。
     pub greenwich: bool,
+    /// 这个算例跑不跑城市模块。
+    ///
+    /// 不是"要不要加几个字段"那么简单：URBAN 预设会把地类**强制**成 13
+    /// （`MOD_SingleSrfdata.F90:1548`），所以它只能跑城市站点 —— 拿一个
+    /// 草地站去跑会在 NCAR 属性表上越界（那里没有 `utyp >= 1` 的守卫，
+    /// 崩溃只是因为构建开了 `-fcheck=all`）。
+    pub urban: bool,
     pub dirs: Dirs,
 }
 
@@ -118,12 +125,38 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
     ];
     // 地类只在站点文件说得出时才写。说不出就整条不写 —— 写一个猜的值
     // 比不写更糟，而 CoLM 有自己的回落路径（站点文件的分类变量，或栅格）。
-    if let Some(lt) = s.landtype {
+    //
+    // 城市算例是例外：地类由 URBAN 路径强制成 13，而城市站点文件都不带
+    // `IGBP_classification`，所以这里显式写出来 —— 让配置文件说出实际会发生
+    // 的事，而不是让人读源码才知道。
+    let landtype = if s.urban {
+        Some(URBAN_LANDTYPE)
+    } else {
+        s.landtype
+    };
+    if let Some(lt) = landtype {
         out.insert(4, ("SITE_landtype".into(), Value::Int(lt as i64)));
         out.insert(5, ("USE_SITE_landtype".into(), Value::Bool(true)));
     }
+    if s.urban {
+        // LCZ（局地气候区）方案，不是默认的 1（NCAR 城市密度分类）。
+        // 实测默认那条路在栅格给不出城市类别时会越界崩溃，而 LCZ 分类
+        // 的覆盖更完整。CoLM 自带的城市单点示例用的也是 2。
+        out.push(("DEF_URBAN_type_scheme".into(), Value::Int(2)));
+        // 这三项默认是 .true.（「站点文件里有，用它」），可城市站点文件里
+        // 没有 —— Urban-PLUMBER 的 25 个变量全是形态学量，一个土壤剖面、
+        // 一个湖深、一个土壤反照率都没有。留着默认值，CoLM 会去站点文件里
+        // 找不存在的变量。改成 .false. 之后它改从栅格取，这也是城市算例
+        // **必须**给出真实 rawdata 目录的原因（见 `Dirs::rawdata`）。
+        for n in ["lakedepth", "soilreflectance", "soilparameters"] {
+            out.push((format!("USE_SITE_{n}"), Value::Bool(false)));
+        }
+    }
     out
 }
+
+/// IGBP 的「城市与建成区」。URBAN 路径会把地类强制成它。
+pub const URBAN_LANDTYPE: i32 = 13;
 
 #[cfg(test)]
 #[path = "build_tests.rs"]
