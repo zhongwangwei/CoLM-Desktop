@@ -57,6 +57,33 @@ $('plot').onclick = async () => {
   finally { $('plot').disabled = false; }
 };
 
+
+// 建好的图表。**uPlot 的宽度是建图那一刻算死的** —— 容器变窄它不会跟着缩，
+// 超出的部分会把整页撑宽。CSS 那边用 `overflow: hidden` 兜住了不撑页，
+// 但裁掉一半的图仍然是坏的，所以这里让它真的跟着窗口变。
+const CHARTS = new Set();
+
+function track(u, host) {
+  CHARTS.add({ u, host });
+  // 图被 `while (box.children.length > 4)` 删掉时，它的 host 也就脱离了文档 ——
+  // 不清理的话这个集合会一直涨，而每次 resize 都要遍历它。
+  for (const c of [...CHARTS]) if (!c.host.isConnected) CHARTS.delete(c);
+  return u;
+}
+
+let resizeTimer;
+addEventListener('resize', () => {
+  // 拖窗口时 resize 每秒能触发几十次，而每次都重排一张 264 点的图不划算。
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    for (const c of [...CHARTS]) {
+      if (!c.host.isConnected) { CHARTS.delete(c); continue; }
+      const w = c.host.parentElement.clientWidth - 30;
+      if (w > 0) c.u.setSize({ width: w, height: 190 });
+    }
+  }, 120);
+});
+
 function draw(d, id, meta) {
   const host = document.createElement('div');
   host.className = 'chart';
@@ -66,7 +93,7 @@ function draw(d, id, meta) {
   // 自己的事件监听 —— 界面会越用越卡。
   while (box.children.length > 4) box.lastElementChild.remove();
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-  new uPlot({
+  track(new uPlot({
     width: host.parentElement.clientWidth - 30,
     height: 190,
     title: `${meta[1]}  ·  ${d.n} 点`,
@@ -79,7 +106,7 @@ function draw(d, id, meta) {
       { label: meta[2], stroke: dark ? '#8fd3a6' : '#1e6b3a', width: 1.25 },
     ],
     axes: [{}, { label: meta[2] }],
-  }, [d.time, d.vars[id]], host);
+  }, [d.time, d.vars[id]], host), host);
 }
 
 // ---------------------------------------------------------------- 评估
@@ -163,7 +190,7 @@ function drawComparison(r) {
   host.className = 'chart';
   box.prepend(host);
   while (box.children.length > 4) box.lastElementChild.remove();
-  new uPlot({
+  track(new uPlot({
     width: host.parentElement.clientWidth - 30,
     height: 190,
     title: `${r.name}  ·  模型 vs 观测  ·  n=${r.n}`,
@@ -176,7 +203,7 @@ function drawComparison(r) {
       { label: '观测', stroke: dark ? '#e0a45e' : '#a5610d', width: 1.25 },
     ],
     axes: [{}, {}],
-  }, [r.time, r.model, r.obs], host);
+  }, [r.time, r.model, r.obs], host), host);
 
   // 散点 + 1:1 线。一眼看偏差是系统性的还是散的 —— 那是 bias 与 R²
   // 两个数合起来才说得清的事，而图上一看就明白。
@@ -184,7 +211,7 @@ function drawComparison(r) {
   s.className = 'chart';
   box.prepend(s);
   const order = r.obs.map((o, i) => [o, r.model[i]]).sort((a, b) => a[0] - b[0]);
-  new uPlot({
+  track(new uPlot({
     width: s.parentElement.clientWidth - 30,
     height: 190,
     title: `${r.name}  ·  观测（横）对模型（纵）`,
@@ -197,7 +224,7 @@ function drawComparison(r) {
     ],
   // 第三条 series 是 1:1 线：横坐标就是纵坐标。按观测排过序，
   // 所以它画出来是一条直线而不是折线。
-  }, [order.map(p => p[0]), order.map(p => p[1]), order.map(p => p[0])], s);
+  }, [order.map(p => p[0]), order.map(p => p[1]), order.map(p => p[0])], s), s);
 }
 
 // ---------------------------------------------------------------- 批量汇总

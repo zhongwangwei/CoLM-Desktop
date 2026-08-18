@@ -1,32 +1,133 @@
-  :root { color-scheme: light dark; font: 13px/1.55 system-ui, -apple-system, sans-serif; }
-  * { box-sizing: border-box; }
-  body { margin: 0; height: 100vh; display: grid; grid-template-columns: 230px 1fr 420px; }
-  aside, main, .results { padding: 12px 14px; overflow: auto; min-width: 0; }
-  aside, main { border-right: 1px solid var(--rule); }
-  :root { --rule: color-mix(in oklab, currentColor 16%, transparent);
-          --soft: color-mix(in oklab, currentColor 7%, transparent); }
-  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; opacity: .55; margin: 0 0 9px; }
-  button { font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--rule);
-           background: var(--soft); cursor: pointer; }
-  button:disabled { opacity: .45; cursor: default; }
-  input, select { font: inherit; padding: 4px 7px; border-radius: 5px;
-                  border: 1px solid var(--rule); background: transparent; color: inherit; width: 100%; }
-  label { display: block; margin: 7px 0 2px; opacity: .65; font-size: 11px; }
-  .case { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
-  .case:hover { background: var(--soft); }
-  .case[aria-selected=true] { background: var(--soft); font-weight: 600; }
-  .case small { display: block; opacity: .5; font-weight: 400; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .bar { height: 4px; border-radius: 2px; background: var(--soft); overflow: hidden; margin: 8px 0; }
-  .bar > i { display: block; height: 100%; width: 0; background: currentColor; opacity: .55;
-             transition: width .12s linear; }
-  pre { margin: 0; font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap;
-        max-height: 34vh; overflow: auto; background: var(--soft); padding: 8px; border-radius: 6px; }
-  table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  td, th { text-align: left; padding: 2px 6px 2px 0; }
-  td.n { text-align: right; font-variant-numeric: tabular-nums; }
-  .warn { color: #b4690e; }
-  .muted { opacity: .55; }
-  .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
-  .tabs button[aria-pressed=true] { background: color-mix(in oklab, currentColor 14%, transparent); }
-  .chart { margin-bottom: 14px; }
+/* CoLM Desktop 的全部样式。无框架、无预处理器。
+ *
+ * 颜色一律走 `:root` 上的变量，深色模式**只覆盖变量**、不重复写规则。
+ * 两套规则各写一遍是最容易分叉的地方：改了浅色忘了深色，而写代码的人
+ * 十有八九只看着一种模式。 */
+
+:root {
+  color-scheme: light dark;
+  font: 13px/1.55 system-ui, -apple-system, sans-serif;
+
+  --rule: color-mix(in oklab, currentColor 16%, transparent);
+  --soft: color-mix(in oklab, currentColor 7%, transparent);
+  --press: color-mix(in oklab, currentColor 14%, transparent);
+  /* 警告色在深色底上要更亮才读得出来 —— 这正是「只覆盖变量」换来的：
+     一处定义，两种模式各给一个值。 */
+  --warn: #b4690e;
+  --pad: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --warn: #e0a45e; }
+}
+
+* { box-sizing: border-box; }
+
+/* 三栏 -> 两栏 -> 单栏。用命名区域而不是列数，
+   于是折叠时是「结果区换个位置」而不是「三列挤成一列」。 */
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr) 420px;
+  grid-template-areas: "side main results";
+}
+aside    { grid-area: side; }
+main     { grid-area: main; }
+.results { grid-area: results; }
+
+aside, main, .results { padding: var(--pad) 14px; overflow: auto; min-width: 0; }
+aside, main { border-right: 1px solid var(--rule); }
+
+/* 中等宽度：结果区移到主区下方，仍是两栏。
+   1400 这个数不是随手挑的：三栏要 230 + 420 = 650 给两侧，
+   中间那栏放得下参数表（字段名最长 34 字符 + 一个输入框）大约要 600。 */
+@media (max-width: 1400px) {
+  body {
+    grid-template-columns: 230px minmax(0, 1fr);
+    grid-template-areas: "side main" "side results";
+    grid-template-rows: auto auto;
+  }
+  .results { border-top: 1px solid var(--rule); }
+  main { border-right: none; }
+}
+
+/* 窄屏：单栏，三块依次排下来。侧栏不再是侧栏，边框改到底部。 */
+@media (max-width: 900px) {
+  body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "side" "main" "results";
+  }
+  aside, main {
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+  }
+  /* 窄屏上高度不再固定，各块按内容自然展开 —— 在一屏之内再切三个
+     可滚动区域，等于三个都滚不利索。 */
+  aside, main, .results { overflow: visible; }
+}
+
+h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  opacity: .55; margin: 0 0 9px;
+}
+
+button {
+  font: inherit; padding: 5px 11px; border-radius: 6px;
+  border: 1px solid var(--rule); background: var(--soft); cursor: pointer;
+}
+button:disabled { opacity: .45; cursor: default; }
+button[aria-pressed=true] { background: var(--press); }
+
+input, select {
+  font: inherit; padding: 4px 7px; border-radius: 5px;
+  border: 1px solid var(--rule); background: transparent; color: inherit;
+  width: 100%;
+  /* 没有这条，一个长路径会把它所在的 flex 行撑出容器，
+     整页跟着出现横向滚动条。`min-width: auto` 是 flex 子项的默认值。 */
+  min-width: 0;
+}
+input[type=checkbox] { width: auto; }
+
+label { display: block; margin: 7px 0 2px; opacity: .65; font-size: 11px; }
+
+.case { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.case:hover { background: var(--soft); }
+.case[aria-selected=true] { background: var(--soft); font-weight: 600; }
+.case small { display: block; opacity: .5; font-weight: 400; }
+
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.bar { height: 4px; border-radius: 2px; background: var(--soft); overflow: hidden; margin: 8px 0; }
+.bar > i {
+  display: block; height: 100%; width: 0; background: currentColor;
+  opacity: .55; transition: width .12s linear;
+}
+
+pre {
+  margin: 0; font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap;
+  max-height: 34vh; overflow: auto; background: var(--soft);
+  padding: 8px; border-radius: 6px;
+  /* 日志里全是长路径。不许它在任意处断的话，它会把整页撑宽 ——
+     而横向滚整页比横向滚一个日志窗糟得多。 */
+  overflow-wrap: anywhere;
+}
+
+/* 表格是最容易撑破布局的东西：字段名最长 34 字符，加上一个输入框，
+   在窄屏上必然超出。 */
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+td, th { text-align: left; padding: 2px 6px 2px 0; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+td:first-child { overflow-wrap: anywhere; }
+
+.warn { color: var(--warn); }
+.muted { opacity: .55; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
+
+.chart { margin-bottom: 14px; }
+/* uPlot 的画布宽度是建图时算死的。容器变窄时它不会跟着缩，
+   于是超出的部分把整页撑宽 —— 这里兜住。 */
+.chart, .chart .uplot { max-width: 100%; overflow: hidden; }
+
+#stages span { white-space: nowrap; }
