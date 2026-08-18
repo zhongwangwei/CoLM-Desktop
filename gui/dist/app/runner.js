@@ -5,6 +5,7 @@ import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderCases } from './sites.js';
 import { refreshVars } from './results.js';
+import { renderFields } from './params.js';
 
 // 「选个目录」而是「选一套物理」—— 让它列出来，而不是让人记住路径。
 export async function refreshKernels() {
@@ -24,8 +25,25 @@ export async function refreshKernels() {
     o.value = k.dir; o.textContent = k.preset;
     s.appendChild(o);
   }
-  s.onchange = showKernelMeta;
+  s.onchange = () => { showKernelMeta(); refreshRelevance(); };
   showKernelMeta();
+  await refreshRelevance();
+}
+
+/** 当前内核编不进去的字段。物理预设是编译期决定的，所以这份名单
+ *  只随内核变，不随算例变。 */
+async function refreshRelevance() {
+  const dir = $('kernel').value;
+  if (!dir) { state.irrelevant = new Set(); return; }
+  try {
+    state.irrelevant = new Set(await invoke('irrelevant_fields', { kernelDir: dir }));
+  } catch (e) {
+    // 内核校验不过时不该让整个界面失效 —— 那时「哪些字段有用」这个问题
+    // 本来也没有答案，全显示是安全的方向。
+    state.irrelevant = new Set();
+    status(e);
+  }
+  renderFields();
 }
 
 // 目录名不是身份，宏组合才是。把它显示出来，免得「我选的 urban 到底编没编

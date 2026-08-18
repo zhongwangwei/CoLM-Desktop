@@ -50,6 +50,28 @@ pub struct Field {
     /// `nl_colm_forcing`、`DEF_hist_vars%*` 是 `nl_colm_history`。
     /// **这正是 GUI 需要知道的「这个字段该写进哪个文件」。**
     pub group: Option<&'static str>,
+    /// 这个字段的**合法取值**，为空表示不是枚举型。
+    ///
+    /// 从 CoLM 自己的分支里扫出来：`SELECT CASE (trim(adjustl(DEF_x)))` 的
+    /// 各个 `CASE ('…')`，以及 `trim(DEF_x) == '…'`。实测 12 个字段有，
+    /// 其中 `DEF_HIST_mode` 两种写法都用到 —— **只扫一种会漏掉 7 个**。
+    ///
+    /// GUI 据此把文本框换成下拉框：这些字段拼错了要等 CoLM 读 namelist
+    /// 时才报错，而那时人已经在等一次运行了。
+    pub values: &'static [&'static str],
+    /// 这个字段要**编译期开了哪些宏**才有意义；为空表示任何配置下都可能用到。
+    ///
+    /// 两种来源，都从源码扫：字段的全部用法都在某个 `#ifdef` 之内（实测 63 个），
+    /// 或全部落在某个可选子系统的目录里（`main/TRACER/`、`*Urban*`、`main/BGC/`、
+    /// `*Catch*`、`CaMa/`、`main/DA/`，实测 56 个，与前者有重叠）。
+    ///
+    /// **两种都覆盖不到的还有一类**：字段本身没被守，守护在**调用点**。
+    /// `DEF_URBAN_type_scheme` 就是 —— 它的四处用法一处都不在
+    /// `#ifdef URBAN_MODEL` 里，真正的守护是 `MKSRFDATA.F90:393` 那个
+    /// 唯一调用者。那一类只能人工列，见 `curated.rs`，而且每条都要带出处。
+    ///
+    /// 判据落到界面上很便宜：内核的 `manifest.json` 已经记了它编进了哪些宏。
+    pub requires: &'static [&'static str],
     /// `MOD_Namelist.F90` 中的行号，便于回查
     pub line: u32,
 }

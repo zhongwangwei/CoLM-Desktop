@@ -13,6 +13,7 @@ mod gui;
 mod hist;
 mod namelist;
 mod sidecar;
+mod usage;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -44,7 +45,16 @@ fn gen_schema() -> Result<()> {
         );
     }
     let fields = extract(&text, &groups)?;
-    let out = render(&fields, &groups);
+    // 取值与宏依赖只能从**用到这些字段的地方**看出来，MOD_Namelist.F90 里
+    // 只有声明。所以另扫一遍整棵树，见 `usage.rs`。
+    let usage = usage::scan(&root.join("vendor/CoLM202X"))?;
+    if usage.values.len() < 8 {
+        bail!(
+            "only {} enumerated fields found — the branch syntax must have changed",
+            usage.values.len()
+        );
+    }
+    let out = render(&fields, &groups, &usage);
     let dst = root.join("crates/colm-schema/src/generated.rs");
     std::fs::write(&dst, out)?;
     println!("wrote {} fields to {}", fields.len(), dst.display());
@@ -219,7 +229,7 @@ fn parse_decl(line: &str) -> Option<Decl> {
     })
 }
 
-fn render(fields: &[Field], groups: &BTreeMap<String, String>) -> String {
+fn render(fields: &[Field], groups: &BTreeMap<String, String>, usage: &usage::Usage) -> String {
     let mut s = String::new();
     s.push_str(
         "//! 由 `cargo run -p xtask -- gen-schema` 生成。**不要手改。**\n\
@@ -256,9 +266,21 @@ fn render(fields: &[Field], groups: &BTreeMap<String, String>) -> String {
             Some(g) => format!("Some({g:?})"),
             None => "None".to_string(),
         };
+        let list = |v: Option<&Vec<String>>| match v {
+            Some(v) if !v.is_empty() => format!(
+                "&[{}]",
+                v.iter()
+                    .map(|x| format!("{x:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => "&[]".to_string(),
+        };
+        let values = list(usage.values.get(&full));
+        let requires = list(usage.requires.get(&full));
         let _ = writeln!(
             s,
-            "    Field {{ name: {full:?}, kind: {}, default: {}, doc: {doc}, arity: {arity}, owner: {owner}, group: {group}, line: {} }},",
+            "    Field {{ name: {full:?}, kind: {}, default: {}, doc: {doc}, arity: {arity}, owner: {owner}, group: {group}, values: {values}, requires: {requires}, line: {} }},",
             f.kind,
             render_default(&f.kind, &f.default),
             f.line

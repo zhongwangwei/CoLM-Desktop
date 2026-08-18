@@ -5,6 +5,7 @@
 //!
 //! EarthMesh 用 Node 做同类检查；这里不引入第二套工具链，纯 Rust 做。
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{bail, Result};
@@ -47,6 +48,12 @@ pub fn check(root: &Path) -> Result<()> {
             }
         }
     }
+    // 前端是多模块了，而 `import { X } from './y.js'` 里的 X 拼错、或者
+    // y.js 忘了写 `export`，浏览器只在**加载时**报一句
+    // 「does not provide an export named X」，页面整个不动。
+    // 实测踩过：一次编辑把 `renderFields` 的 `export` 吃掉了，check-gui 全绿。
+    problems.extend(unresolved_imports(&root.join("gui/dist/app"))?);
+
     if registered.is_empty() || called.is_empty() {
         bail!("parsed no commands at all — the check itself is broken, not the code");
     }
@@ -60,6 +67,78 @@ pub fn check(root: &Path) -> Result<()> {
         listened.len()
     );
     Ok(())
+}
+
+/// 每个 `import { a, b } from './x.js'` 里的名字，在 `x.js` 里都要有 `export`。
+fn unresolved_imports(dir: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    collect(dir, &["js"], &["vendor"], &mut files)?;
+    let mut exports: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for f in &files {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(f)?;
+        let mut set = BTreeSet::new();
+        for line in text.lines() {
+            let t = line.trim_start();
+            let Some(rest) = t.strip_prefix("export ") else {
+                continue;
+            };
+            let rest = rest
+                .trim_start_matches("async ")
+                .trim_start_matches("function ")
+                .trim_start_matches("const ")
+                .trim_start_matches("let ");
+            // JS 的标识符允许 `$` 与 `_`。漏掉 `$` 的话 `export const $ = …`
+            // 会被读成空名字，于是每个 import 它的模块都被报成「没导出」——
+            // 五条假警报，而代码完全没问题。
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            if !ident.is_empty() {
+                set.insert(ident);
+            }
+        }
+        exports.insert(name, set);
+    }
+
+    let mut problems = Vec::new();
+    for f in &files {
+        let from = f.file_name().unwrap().to_string_lossy().into_owned();
+        for line in std::fs::read_to_string(f)?.lines() {
+            let t = line.trim_start();
+            if !t.starts_with("import ") || !t.contains('{') {
+                continue;
+            }
+            let Some((names, tail)) = t.split_once('}') else {
+                continue;
+            };
+            let Some(names) = names.split_once('{').map(|(_, n)| n) else {
+                continue;
+            };
+            let Some(target) = tail.split('\'').nth(1).or_else(|| tail.split('"').nth(1)) else {
+                continue;
+            };
+            let target = target.rsplit('/').next().unwrap_or(target).to_string();
+            let Some(have) = exports.get(&target) else {
+                problems.push(format!(
+                    "{from} imports from {target}, which does not exist"
+                ));
+                continue;
+            };
+            for n in names.split(',') {
+                // `import { a as b }` —— 要找的是 `as` 之前那个
+                let n = n.trim().split(" as ").next().unwrap_or("").trim();
+                // 同样：被导入的名字也可能是 `$`
+                if !n.is_empty() && !have.contains(n) {
+                    problems.push(format!(
+                        "{from} imports {n:?} from {target}, which does not export it"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(problems)
 }
 
 /// 前端的全部源码，拼成一份。

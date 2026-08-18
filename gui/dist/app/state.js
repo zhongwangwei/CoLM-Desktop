@@ -19,4 +19,8 @@ export const state = {
   /** schema 全表，启动时取一次 */
   fields: [],
   group: 'nl_colm',
+  /** 当前内核下用不上的字段名（Set）。见 config::irrelevant_fields。 */
+  irrelevant: new Set(),
+  /** 专家模式：显示全部字段，含当前内核编不进去的那些。 */
+  expert: false,
 };

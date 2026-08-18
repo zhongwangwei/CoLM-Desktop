@@ -42,6 +42,11 @@ pub struct Field {
     /// 实测 6 个，其中 `DEF_dir_history` 在 `MOD_Namelist.F90:1406` 被无条件覆盖。
     /// 界面该把它们显示成只读的派生值：给一个改了没用的输入框比不显示更糟。
     pub derived: bool,
+    /// 合法取值，非空时界面给下拉框而不是文本框。实测 12 个字段有。
+    pub values: &'static [&'static str],
+    /// 需要哪些编译期宏。与所选内核 `manifest.json` 的 `macros` 求交，
+    /// 交不上就说明这个字段在当前内核下**根本没用**。实测 68 个字段有依赖。
+    pub requires: &'static [&'static str],
 }
 
 #[tauri::command]
@@ -55,8 +60,33 @@ pub fn describe_fields() -> Vec<Field> {
             doc: f.doc,
             group: f.group,
             derived: f.group.is_none(),
+            values: f.values,
+            requires: f.requires,
         })
         .collect()
+}
+
+/// 在给定内核下，哪些字段**用不上**。
+///
+/// 判据是内核 `manifest.json` 里的 `macros` —— 那是**构建期就写下的事实**，
+/// 不是运行时猜的。字段要求的宏有一个不在里面，它在这个内核下就没有意义：
+/// 用户设了不会有任何效果，而界面上摆着它只会让人以为设了有用。
+///
+/// 返回的是**用不上的**那一批，不是能用的。理由：能用的是绝大多数（737 里
+/// 有 68 个带依赖），传回小的那一半省事，也让「藏起来的是哪些」这个问题
+/// 在界面上答得出来 —— 专家模式要把它们折叠成一行可展开的，
+/// **藏起来不等于假装不存在**。
+#[tauri::command]
+pub fn irrelevant_fields(kernel_dir: String) -> Result<Vec<String>, String> {
+    let k = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|e| format!("{e:#}"))?;
+    let have: std::collections::BTreeSet<&str> =
+        k.manifest.macros.iter().map(String::as_str).collect();
+    Ok(colm_schema::all()
+        .iter()
+        .filter(|f| !f.requires.is_empty() && !f.requires.iter().all(|m| have.contains(m)))
+        .map(|f| f.name.to_string())
+        .collect())
 }
 
 /// 一份 namelist 文本里 `colm-schema` 不认识的字段。

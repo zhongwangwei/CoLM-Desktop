@@ -39,6 +39,7 @@ pub fn run() {
             series,
             write_text,
             unknown_fields,
+            irrelevant_fields,
         ])
         .run(tauri::generate_context!())
         .expect("error running CoLM Desktop");
