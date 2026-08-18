@@ -5,8 +5,9 @@
 //! `SWup` 各带一个 `<name>_qc`；`_FillValue = -9999`。
 //! `GPP` / `Resp` 只有 `_se` 没有 `_qc`，本模块不处理它们。
 //!
-//! **不用 `_cor` 能量闭合订正版本**：design.md §2.8 / §2.8b 的目标值是用
-//! 未订正版算的，用订正版复现不出来。
+//! **默认不用 `_cor` 能量闭合订正版本**：design.md §2.8 / §2.8b 的目标值是用
+//! 未订正版算的，用订正版复现不出来。但订正版能问答一个别的问题，见
+//! [`corrected`]。
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -19,6 +20,27 @@ pub const FLUX_PAIRS: [(&str, &str); 5] = [
     ("Qg", "f_fgrnd"),   // 地表热通量
     ("SWup", "f_sr"),    // 反射短波
 ];
+
+/// 这个观测量的能量闭合订正版本叫什么，没有就是 `None`。
+///
+/// 涡度相关的湍流通量普遍**关不上能量收支**：实测 AT-Neu 的
+/// `Qle_cor` 比 `Qle` 高 25.5 W/m²、`Qh_cor` 比 `Qh` 高 3.7 W/m²
+/// （qc==0 的 9 万个样本上）。拿未订正的观测去评一个能量守恒的模型，
+/// 模型会**看上去偏湿**，而偏差的大小恰好是那个缺口 —— 实测 AT-Neu 的
+/// KGE β 是 1.39，而 88.0/62.5 = 1.41。
+///
+/// 所以两者都要能算：未订正的对得上 design.md 的目标值，订正的才回答
+/// 「模型到底偏不偏」。默认仍是未订正 —— 换默认会让那些目标值集体失效。
+///
+/// 辐射量（`Rnet` / `SWup`）与地表热通量（`Qg`）没有订正版：闭合订正
+/// 是把可用能量的残差按 Bowen 比分给两个湍流通量，它改的只有那两个。
+pub fn corrected(o_name: &str) -> Option<&'static str> {
+    match o_name {
+        "Qle" => Some("Qle_cor"),
+        "Qh" => Some("Qh_cor"),
+        _ => None,
+    }
+}
 
 pub fn read_1d(path: &Path, name: &str) -> Result<Vec<f64>> {
     let f = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;

@@ -581,9 +581,14 @@ pub async fn new_case(
 /// **一次拿全**：指标表、双线图、散点图用的是同一批配对结果，
 /// 分三次跑等于把同一份文件读三遍，而且三者可能因参数不一致而对不上。
 #[tauri::command]
-pub async fn metrics(case: String, obs: String, spinup: usize) -> Result<String, String> {
-    capture(&[
-        "metrics".into(),
+pub async fn metrics(
+    case: String,
+    obs: String,
+    spinup: usize,
+    corrected: bool,
+) -> Result<String, String> {
+    let mut args = vec![
+        "metrics".to_string(),
         case,
         "--obs".into(),
         obs,
@@ -591,7 +596,15 @@ pub async fn metrics(case: String, obs: String, spinup: usize) -> Result<String,
         spinup.to_string(),
         "--json".into(),
         "1".into(),
-    ])
+    ];
+    // 能量闭合订正。**默认关**：design.md §2.8 的目标值是拿未订正的观测算的，
+    // 换默认会让那些数字集体失效。但订正版回答的是另一个问题 ——
+    // 实测 AT-Neu：未订正时 Qle 偏差 +19.8 W/m²，订正后是 -1.2。
+    if corrected {
+        args.push("--corrected".into());
+        args.push("1".into());
+    }
+    capture(&args)
 }
 
 /// 取绘图数据。

@@ -9,7 +9,7 @@
 //! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                  [--spinup-years N] [--spinup-repeat N]
 //! colm-cli run     <算例目录> --kernel <目录> [--stream 1]
-//! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N] [--json 1]
+//! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
 //! colm-cli series  <算例目录> --vars f_rnet,f_fsena [--out series.json]
 //! colm-cli all     --site ... --out ... --kernel ... [--obs ...]
 //! ```
@@ -38,7 +38,8 @@ usage:
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1]
                    # --force 忽略指纹，三段全部重跑
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
-  colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1]
+  colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
+                   --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
@@ -78,6 +79,7 @@ fn main() -> Result<()> {
                 &opts.need("--obs")?,
                 opts.spinup()?,
                 opts.get("--json").is_some(),
+                opts.get("--corrected").is_some(),
             )?;
         }
         "series" => {
@@ -99,7 +101,7 @@ fn main() -> Result<()> {
                 false,
             )?;
             match opts.get("--obs") {
-                Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?, false)?,
+                Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?, false, false)?,
                 None => println!("no --obs given; skipping the metrics table"),
             }
         }
@@ -718,8 +720,11 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool, force: bool) -> Result<
 /// 读三遍，而且三者可能因为参数不一致而对不上。
 #[derive(serde::Serialize)]
 struct VarMetrics {
-    /// 观测文件里的变量名（`Qh` / `Qle` / …）
+    /// 观测量的名字（`Qh` / `Qle` / …）
     name: String,
+    /// 实际读的那个观测变量。**与 `name` 可以不同** —— 开了闭合订正时
+    /// 读的是 `Qle_cor`。表里要写出来：拿哪一版观测比，决定了偏差的含义。
+    obs_var: String,
     /// 模型 history 里的对应变量
     model_var: String,
     n: usize,
@@ -740,42 +745,43 @@ struct VarMetrics {
     obs: Vec<f64>,
 }
 
-fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize, json: bool) -> Result<()> {
+fn cmd_metrics(
+    case: &Path,
+    obs_path: &Path,
+    spinup: usize,
+    json: bool,
+    corrected: bool,
+) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
-    let hist_dir = layout.out().join(&name).join("history");
-    let mut hists: Vec<PathBuf> = std::fs::read_dir(&hist_dir)
-        .with_context(|| format!("no history at {}", hist_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.contains("_hist_") && n.ends_with(".nc"))
-        })
-        .collect();
-    hists.sort();
-    let Some(hist) = hists.first() else {
-        bail!("no *_hist_*.nc under {}", hist_dir.display());
-    };
+    let hists = history_files(&layout.out().join(&name))?;
 
     let o_t = colm_hist::obs::read_1d(obs_path, "time")?;
-    let m_t = colm_hist::obs::read_1d(hist, "time")?;
+    let m_t = read_history(&hists, "time")?;
     // 观测的 time 原点是它自己记录的起始年；模型换算到同一原点
     let year = observation_year(obs_path)?;
     let m_sec = colm_hist::time::model_seconds(&m_t, year);
 
     if !json {
         println!(
-            "{:<6} {:>5} {:>8} {:>9} {:>7} {:>9}",
-            "var", "n", "RMSE", "bias", "R2", "KGE"
+            "{:<10} {:>7} {:>8} {:>9} {:>7} {:>9}",
+            "obs var", "n", "RMSE", "bias", "R2", "KGE"
         );
     }
     let mut rows: Vec<VarMetrics> = Vec::new();
     for (o_name, m_name) in colm_hist::obs::FLUX_PAIRS {
+        // 订正版没有自己的 qc 变量（文件里只有 `Qle_cor_uc_qc`，那是不确定度的），
+        // 所以质量控制一律用原始通量那一个：它说的是"这一步是实测还是插补"，
+        // 而订正只改数值不改这件事。
+        let o_var = corrected
+            .then(|| colm_hist::obs::corrected(o_name))
+            .flatten()
+            .filter(|c| colm_hist::obs::read_1d(obs_path, c).is_ok())
+            .unwrap_or(o_name);
         let (Ok(o_v), Ok(o_q), Ok(m_v)) = (
-            colm_hist::obs::read_1d(obs_path, o_name),
+            colm_hist::obs::read_1d(obs_path, o_var),
             colm_hist::obs::read_1d(obs_path, &format!("{o_name}_qc")),
-            colm_hist::obs::read_1d(hist, m_name),
+            read_history(&hists, m_name),
         ) else {
             continue; // 这一对里有一侧没有，跳过而不是报错
         };
@@ -800,6 +806,7 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize, json: bool) -> Resul
                 .collect();
             rows.push(VarMetrics {
                 name: o_name.to_string(),
+                obs_var: o_var.to_string(),
                 model_var: m_name.to_string(),
                 n: m.n,
                 rmse: m.rmse,
@@ -829,7 +836,7 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize, json: bool) -> Resul
             continue;
         }
         print!(
-            "{o_name:<6} {:>5} {:>8.1} {:>+9.2} {:>7.3} {:>+9.3}",
+            "{o_var:<10} {:>7} {:>8.1} {:>+9.2} {:>7.3} {:>+9.3}",
             m.n, m.rmse, m.bias, m.r2, m.kge
         );
         // KGE 的 β 在观测均值接近零或与模型均值反号时没有意义。
@@ -867,15 +874,17 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize, json: bool) -> Resul
 fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
-    let hist = newest_history(&layout.out().join(&name))?;
+    let hists = history_files(&layout.out().join(&name))?;
 
-    let t_min = colm_hist::obs::read_1d(&hist, "time")?;
+    let t_min = read_history(&hists, "time")?;
     // 换算住在 colm-hist::time —— 那个模块已经拥有「两种时间轴」这件事，
     // 而且它是 netcdf-free 的，GUI 后端将来也用得上。
     let unix = colm_hist::time::unix_seconds(&t_min);
 
     let mut body = String::from("{\n");
-    body.push_str(&format!("  \"file\": {:?},\n", hist.display().to_string()));
+    // 文件数而不是文件名：一条曲线现在跨着 132 个文件，报其中一个的名字
+    // 只会让人以为看到的就是那一个月。
+    body.push_str(&format!("  \"files\": {},\n", hists.len()));
     body.push_str(&format!("  \"n\": {},\n", unix.len()));
     body.push_str("  \"time\": [");
     body.push_str(
@@ -896,8 +905,7 @@ fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
     }
     let mut first = true;
     for v in &names {
-        let values = colm_hist::obs::read_1d(&hist, v)
-            .with_context(|| format!("{} has no variable {v}", hist.display()))?;
+        let values = read_history(&hists, v)?;
         if values.len() != unix.len() {
             // 剖面变量是 (time, patch, soil) 之类，长度是时间步的数倍。
             // 它们要另一种画法，本轮不做 —— 但要说清楚而不是画出一条乱线。
@@ -936,8 +944,17 @@ fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// 算例里那个唯一的 `*_hist_*.nc`。
-fn newest_history(out: &Path) -> Result<PathBuf> {
+/// 算例的**全部** history 文件，按名字排序。
+///
+/// 这里原来有两个各取一个文件的函数：`metrics` 取第一个、`series` 取最后
+/// 一个。**在只跑十天的黄金算例上永远只有一个文件**，所以两者从来没有
+/// 分歧过；而一个 11 年的站点会写出 132 个月度文件，于是指标算的是
+/// 2002 年 1 月、曲线画的是 2012 年 12 月，谁也不知道。
+///
+/// 实测 AT-Neu：只看 2002 年 1 月时 Rnet 的观测均值是 -32.6 W/m²
+/// （阿尔卑斯草地的隆冬，本来就是负的），Qh/Qle 的 R² 近 0 ——
+/// 看上去像模型烂掉了，其实是在拿一个雪被覆盖的月份评一个 11 年的模拟。
+fn history_files(out: &Path) -> Result<Vec<PathBuf>> {
     let dir = out.join("history");
     let mut h: Vec<PathBuf> = std::fs::read_dir(&dir)
         .with_context(|| format!("no history at {}", dir.display()))?
@@ -948,9 +965,52 @@ fn newest_history(out: &Path) -> Result<PathBuf> {
                 .is_some_and(|n| n.contains("_hist_") && n.ends_with(".nc"))
         })
         .collect();
+    // 文件名是 `NAME_hist_YYYY-MM.nc`，月份补零，所以字典序就是时间序。
+    // 但不假设它一定如此 —— `read_history` 会验证拼出来的时间轴单调递增。
     h.sort();
-    h.pop()
-        .with_context(|| format!("no *_hist_*.nc under {}", dir.display()))
+    if h.is_empty() {
+        bail!("no *_hist_*.nc under {}", dir.display());
+    }
+    Ok(h)
+}
+
+/// 跨全部 history 文件读一个变量，接成一条。
+///
+/// 各月度文件的 `time` 用同一个原点（`minutes since 1900-1-1`，实测
+/// 2002-01 与 2012-12 都是），所以直接首尾相接即可，不需要逐文件换算。
+///
+/// **要验证单调递增。** 文件名排序碰巧等于时间序，但那是约定不是保证；
+/// 顺序错了的结果是一条乱序的曲线和一批错配的指标 —— 两者都不会报错。
+fn read_history(files: &[PathBuf], var: &str) -> Result<Vec<f64>> {
+    let mut out = Vec::new();
+    for f in files {
+        let v = colm_hist::obs::read_1d(f, var)
+            .with_context(|| format!("{} has no variable {var}", f.display()))?;
+        out.extend(v);
+    }
+    if var == "time" {
+        check_increasing(&out).with_context(|| {
+            format!(
+                "the history files in {} do not concatenate into an increasing time axis; sorting by file name is not giving chronological order here",
+                files[0].parent().unwrap_or(Path::new(".")).display()
+            )
+        })?;
+    }
+    Ok(out)
+}
+
+/// 拼出来的时间轴必须严格递增。
+///
+/// **顺序错了不会报错**，只会给出一条乱序的曲线和一批错配的指标。
+/// 相等也不行：两个文件的时间重叠说明同一时刻被写了两次，
+/// 而配对会把其中一个悄悄丢掉。
+fn check_increasing(t: &[f64]) -> Result<()> {
+    for (i, w) in t.windows(2).enumerate() {
+        if w[1] <= w[0] {
+            bail!("time goes from {} to {} at index {}", w[0], w[1], i);
+        }
+    }
+    Ok(())
 }
 
 /// 观测文件 `time:units` 里的起始年。
@@ -964,3 +1024,7 @@ fn observation_year(p: &Path) -> Result<i32> {
         .with_context(|| format!("cannot read a start year out of {u:?}"))?;
     Ok(y)
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod history_tests;

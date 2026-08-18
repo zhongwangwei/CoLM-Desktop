@@ -99,3 +99,15 @@ fn the_spin_up_card_says_what_spin_up_costs() {
         "参数页没有时间与预热那一块"
     );
 }
+
+#[test]
+fn the_metrics_table_says_which_observation_it_used() {
+    // 拿未订正还是订正后的观测比，决定了偏差的含义 —— 实测 AT-Neu：
+    // 未订正时 Qle 偏差 +19.8 W/m²，订正后 -1.2。表里不写用了哪一版，
+    // 两个数字看起来都像是"模型的偏差"。
+    let t = js("results.js");
+    assert!(t.contains("r.obs_var"), "指标表没写用的是哪个观测变量");
+    assert!(t.contains("corrected"), "结果页没有闭合订正开关");
+    let html = std::fs::read_to_string(root().join("gui/dist/index.html")).expect("index.html");
+    assert!(html.contains(r#"id="corrected""#));
+}

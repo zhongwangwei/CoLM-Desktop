@@ -199,6 +199,8 @@
         <div class="pill-row" style="margin-top:10px">
           <label class="check" title="丢的是输出记录，单位是条。与第 3 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
             丢弃前 <input class="input" id="spinup" type="number" value="0" min="0" style="width:5.5em"> 条 ⓘ</label>
+          <label class="check" title="涡度相关的湍流通量普遍关不上能量收支，观测文件自带订正版 Qle_cor / Qh_cor。实测 AT-Neu：订正把观测 Qle 抬高 25.5 W/m²，而模型对未订正观测的偏差是 +19.8 —— 偏差的大小基本就是那个缺口。默认关，因为 design.md 的目标值是拿未订正版算的。">
+            <input type="checkbox" id="corrected"> 用能量闭合订正后的观测 ⓘ</label>
           <button class="btn-ghost" id="evaluate" disabled>评估</button>
           <button class="btn-ghost" id="eval-all" disabled>评估全部已跑算例</button>
         </div>

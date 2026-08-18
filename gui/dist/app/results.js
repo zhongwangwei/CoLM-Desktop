@@ -120,10 +120,18 @@ $('evaluate').onclick = async () => {
   try {
     const rows = JSON.parse(await invoke('metrics', {
       case: state.selected.dir, obs, spinup: Number($('spinup').value) || 0,
+      corrected: $('corrected').checked,
     }));
     renderMetrics(rows);
   } catch (e) { status(e); }
   finally { $('evaluate').disabled = false; }
+};
+
+// 勾选一变就重算。**不能只改勾选** —— 表里的数字与勾选状态对不上，
+// 比不给这个开关更糟：看的人会以为看到的是订正后的结果。
+$('corrected').onchange = () => {
+  if (!$('metrics').textContent.trim()) return;
+  $('evaluate').click();
 };
 
 function renderMetrics(rows) {
@@ -144,7 +152,7 @@ function renderMetrics(rows) {
   for (const r of rows) {
     const tr = document.createElement('tr');
     const cells = [
-      [r.name, ''],
+      [r.obs_var ?? r.name, ''],
       [r.n, 'n'], [r.rmse.toFixed(1), 'n'],
       [(r.bias >= 0 ? '+' : '') + r.bias.toFixed(2), 'n'],
       [r.r2.toFixed(3), 'n'],
@@ -252,7 +260,9 @@ $('eval-all').onclick = async () => {
       // 不说明少了谁的话，看的人会以为那几个站评估结果为零。
       if (!obs) { failed.push([c.name, '没有观测文件']); continue; }
       try {
-        const one = JSON.parse(await invoke('metrics', { case: c.dir, obs, spinup }));
+        const one = JSON.parse(await invoke('metrics', {
+          case: c.dir, obs, spinup, corrected: $('corrected').checked,
+        }));
         for (const r of one) rows.push({ site: c.name, ...r });
       } catch (e) { failed.push([c.name, String(e)]); }
     }
