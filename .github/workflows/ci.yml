@@ -14,6 +14,17 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # **必须在 checkout 之前**：GitHub 的 Windows runner 默认
+      # `core.autocrlf=true`，签出时把文本文件转成 CRLF，而本仓库有三条
+      # 逐字节保证（namelist 往返、两张生成表的 drift）全都假定 LF ——
+      # 实测三条在 windows-latest 上同时挂，ubuntu 与 macOS 全绿。
+      #
+      # 本仓库自己的文件由 `.gitattributes` 钉住，但那管不到 submodule：
+      # `vendor/CoLM202X` 有自己的工作树与属性，而往返测试读的 55 个 .nml
+      # 正在里面。所以这里还要在 git 全局层面关掉转换。
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
       # submodule 现在指向 GitHub 上的 CoLM202X fork，托管 runner 取得到。
       # 它是 colm-namelist 的往返测试与 colm-schema 的漂移测试的输入，
       # 那两条因此得以在每个 PR、三个平台上跑，而不再只在自托管作业里。
@@ -52,6 +63,11 @@ jobs:
       # 剩下的（colm-srfdata 的 raster/real_sites、colm-forcing 的 met/real_forcing）
       # 要 5.5 GB 的 PLUMBER2 与 38 GB 的 rawdata，只能在 golden 作业里跑。
       - name: Test
+        # 显式 bash：Windows 上默认是 PowerShell，多行 run 里前面命令的非零
+        # 退出**不会**中止后续，只有最后一条决定步骤成败。实测因此吞掉了
+        # 两个失败，只报出第三个 —— 照着那条报错去修会修错地方。
+        # GitHub 的 bash 带 `set -eo pipefail`。
+        shell: bash
         run: |
           cargo test --workspace --lib --bins
           cargo test -p oracle --test judge
@@ -83,6 +99,9 @@ jobs:
       # netcdf 在这个平台上真的能读一个真实 CoLM 文件**，而不只是链接通过。
       # Windows 是本方案的头号风险点，这条让它在第一天就被覆盖。
       - name: Judge can read a real CoLM file on this platform
+        # 同上：两条命令，Windows 的 PowerShell 只看最后一条的退出码，
+        # 第一条挂了会被吞掉。
+        shell: bash
         run: |
           cargo run -p oracle --bin golden-compare -- oracle/golden/CN-Cng_hist_2008-01.nc oracle/golden/CN-Cng_hist_2008-01.nc
           cargo run -p oracle --bin golden-compare -- oracle/golden/CN-Cng-wet_hist_2008-07.nc oracle/golden/CN-Cng-wet_hist_2008-07.nc

@@ -1,0 +1,21 @@
+# 这个仓库有三条**逐字节**保证，全都假定工作树里是 LF：
+#
+#   1. `colm-namelist` 的往返：55 个真实 .nml 解析后序列化必须逐字节相同
+#      （`every_real_namelist_round_trips_byte_for_byte`）；
+#   2. `colm-schema/src/generated.rs` 与 `colm-hist/src/generated.rs` 的 drift
+#      测试：重新生成必须与入库产物逐字节相同。
+#
+# Windows 的 `core.autocrlf` 默认会把签出的文件转成 CRLF，于是这三条同时挂 ——
+# 实测 GitHub 的 windows-latest 上正是如此，而 ubuntu 与 macOS 全绿。
+# 生成器本身对 CRLF 是免疫的（拿 CRLF 版的 MOD_Hist.F90 重跑，产物一字节不差），
+# 挂的是**比较的那一侧**：读进来的入库文件带了 \r，而生成的没有。
+#
+# 所以在这里把行尾钉死，而不是在每个测试里做规范化 —— 后者要在三处各写一遍，
+# 且下一个依赖逐字节比较的测试还会再踩。
+* text=auto eol=lf
+
+# 二进制：绝不可做任何行尾转换。
+# 黄金 NetCDF 是本项目的回归基准，被改一个字节就意味着基准失效而无人察觉。
+*.nc  binary
+*.png binary
+*.x   binary
