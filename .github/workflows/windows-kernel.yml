@@ -58,8 +58,15 @@ jobs:
         run: |
           ls -la kernels/waterheat/
           cat kernels/waterheat/manifest.json
-          # 三个可执行文件必须都在，且都能起来报出用法或停在缺 namelist 上 ——
-          # 「编出来了」与「能跑」是两件事，这里至少把前者钉死。
+          # 后缀是 `.x` 而不是 `.exe` —— CoLM 的 Makefile 在所有平台上都这么命名，
+          # Windows 也不例外。（第一版这里写的是 .exe，于是构建明明成功却报了失败：
+          # 检查错了，不是构建错了。）
+          #
+          # 「编出来了」与「能跑」是两件事，这里只钉死前者。
           for p in mksrfdata mkinidata colm; do
-            test -f "kernels/waterheat/$p.exe" || { echo "missing $p.exe"; exit 1; }
+            test -f "kernels/waterheat/$p.x" || { echo "missing $p.x"; exit 1; }
           done
+          # 直接跑一下：不给 namelist 时它应该停下来而不是崩。
+          # 只看它能不能被 Windows 加载起来 —— 一个链接到缺失 DLL 的二进制
+          # 在这里就会暴露，而那是 MSYS2 构建最典型的失败方式。
+          ./kernels/waterheat/colm.x 2>&1 | head -5 || true
