@@ -6,6 +6,7 @@ import { $, status } from './ui.js';
 import { renderTabs } from './params.js';
 import { refreshKernels, watchRun } from './runner.js';
 import { refreshPresets } from './presets.js';
+import { restoreRecent } from './recent.js';
 
 if (!hasBackend) {
   // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是渲染成一片空白。
@@ -21,6 +22,7 @@ async function boot() {
     renderTabs();
     await refreshKernels();
     await refreshPresets();
+    await restoreRecent();
   } catch (e) { status('后端出错：' + e); }
   await watchRun();
 }
