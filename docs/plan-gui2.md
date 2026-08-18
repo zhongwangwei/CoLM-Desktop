@@ -1008,14 +1008,47 @@ PLUMBER2 是地方时、模型按地方时推进，时间戳是「把地方时�
 
 ---
 
-### 任务 9：三阶段进度与阶段跳过
+### 任务 9：三阶段进度与阶段跳过（**已完成**）
 
 **文件：** 修改 `gui/src-tauri/src/sidecar.rs`、`crates/colm-cli/src/main.rs`、
 新建 `gui/dist/app/runner.js`
 
 见 §1.6。三步：
 
-- [ ] **步骤 1：`Progress` 加 `stage` 字段，三段都发事件**
+第一步在任务 4 就做了（`run://stage` 事件）。这里补的是跳过与指纹。
+
+**「每段依赖哪些字段」是反着列的。** 正着列要枚举两百个名字里的大部分，
+漏一个就是静默算错；反着列只需要说清楚「时间窗口与输出设置影响不到地表数据」，
+短得多也容易辩护：
+
+| 阶段 | 忽略什么 |
+|---|---|
+| `mksrfdata` | `DEF_HIST*` / `DEF_WRST*` / `DEF_dir_output` / **全部 `DEF_simulation_time*`** |
+| `mkinidata` | 同上，但**保留** `DEF_simulation_time%start*` |
+| `colm` | 什么都不忽略 |
+
+指纹还含**站点文件的 sha256**（算内容不算路径 —— 同一路径下换一份文件是最
+容易发生也最容易漏掉的变更）与**内核身份**（换预设就是换了一套编译期宏）。
+
+跳过要**两个条件同时成立**：指纹一致 **且** 产物真的都在。只看指纹的话，
+手动删掉输出目录之后会跳过一段本该重跑的。
+
+实测（CN-Cng，waterheat）：
+
+```
+第一次   mksrfdata ok / mkinidata ok / colm ok          3.31 s
+第二次   mksrfdata skipped / mkinidata skipped / colm ok  2.33 s
+改输出频率  前两段仍 skipped，只有 colm 重跑
+改 rawdata  mksrfdata 需要重跑：DEF_dir_rawdata：'…/rawdata_unused/' -> '/tmp/changed/'
+```
+
+**失败的那一段不记指纹** —— 否则下次会把一个没跑成的阶段当成「已完成且输入未变」
+而跳过。
+
+一条边界值得记：**黄金回归走的是 `colm_kernel::run_stage` 而不是 `colm-cli run`**，
+所以它永远不会误跳过一段。两个窗口在这次改动后仍逐字节相同。
+
+- [x] **步骤 1：`Progress` 加 `stage` 字段，三段都发事件**
 
 现在只有 `colm.x` 打 `TIMESTEP =`，所以前两段跑的时候进度条是死的。
 `colm-cli run` 在每段开始/结束时**自己打一行**标记（例如
@@ -1023,7 +1056,7 @@ PLUMBER2 是地方时、模型按地方时推进，时间戳是「把地方时�
 **标记由我们自己打，不要去认 CoLM 的输出措辞** —— CoLM 把 automatically
 拼成 automaticlly 这件事已经教过一次，上游随时会改措辞。
 
-- [ ] **步骤 2：`stages.json` 指纹**
+- [x] **步骤 2：`stages.json` 指纹**
 
 ```rust
 /// 一段完成时，它的输入是什么样子。
@@ -1044,7 +1077,7 @@ pub struct StageFingerprint {
 各段依赖的字段列表写成常量并注明依据；不确定的**宁可多列** ——
 多列一项只是多重跑一次，少列一项是静默算错。
 
-- [ ] **步骤 3：界面三段式 + 「强制全部重跑」**
+- [x] **步骤 3：界面三段式 + 「强制全部重跑」**
 
 ---
 

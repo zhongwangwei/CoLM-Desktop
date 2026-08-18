@@ -16,6 +16,8 @@
 //! `--start` / `--end` 不给就用强迫场覆盖的完整范围。经纬度与地类读自站点
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
+mod fingerprint;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -30,7 +32,8 @@ usage:
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
-  colm-cli run     <case-dir> --kernel <dir> [--stream 1]
+  colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1]
+                   # --force 忽略指纹，三段全部重跑
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1]
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
@@ -62,6 +65,7 @@ fn main() -> Result<()> {
                 &opts.positional_case()?,
                 &opts.need("--kernel")?,
                 opts.get("--stream").is_some(),
+                opts.get("--force").is_some(),
             )?;
         }
         "metrics" => {
@@ -87,6 +91,9 @@ fn main() -> Result<()> {
                 &case,
                 &opts.need("--kernel")?,
                 opts.get("--stream").is_some(),
+                // `all` 刚造完算例，三段都没跑过 —— 指纹本来就是空的，
+                // 这里传 false 与 true 等价，写 false 以免暗示它会跳过什么。
+                false,
             )?;
             match opts.get("--obs") {
                 Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?, false)?,
@@ -504,7 +511,7 @@ fn slash(p: &Path) -> String {
 /// `TIMESTEP = n | DATE = ...`，日志窗要的就是原始行，而这两样都只在
 /// 子进程的 stdout 里。同一个可执行文件同时服务两个诉求不同的调用方，
 /// 于是由调用方说要哪一种。
-fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
+fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool, force: bool) -> Result<()> {
     // **绝对化算例目录。** `run_stage` 用 `current_dir(work)` 启动子进程，
     // 于是一个相对的 namelist 路径会被相对 `work` 解析而不是相对调用方的当前
     // 目录 —— `colm-cli run oracle/work/CN-Cng` 会让 CoLM 去
@@ -536,7 +543,45 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
         ),
         (Stage::Colm, vec![]),
     ];
+    // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
+    // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
+    // 算新算例，且没有任何迹象。见 `fingerprint.rs`。
+    let kernel_id = format!(
+        "{}@{}",
+        kernel.manifest.preset, kernel.manifest.colm_git_sha
+    );
+    let mut marks = if force {
+        Default::default()
+    } else {
+        fingerprint::load(case)
+    };
+
     for (stage, artifacts) in &stages {
+        let sname = stage.program();
+        let want = fingerprint::compute(sname, &layout.case_nml(), &kernel_id)?;
+        // 两个条件都要满足才跳过：指纹一致，**且**产物真的都在。
+        // 只看指纹的话，手动删掉输出目录之后会跳过一段本该重跑的。
+        let have_all = !artifacts.is_empty() && artifacts.iter().all(|p| p.is_file());
+        let skip = have_all
+            && marks
+                .get(sname)
+                .is_some_and(|old| fingerprint::first_difference(old, &want).is_none());
+        if skip {
+            if stream {
+                println!("=== colm-stage {sname} skipped ===");
+            }
+            println!("  {sname:<10} skipped (产物齐全且输入未变)");
+            continue;
+        }
+        // 说出**为什么**要重跑。「又跑了一遍」而不知道原因，
+        // 会让人怀疑跳过功能根本没生效。
+        if let Some(old) = marks.get(sname) {
+            if have_all {
+                if let Some(why) = fingerprint::first_difference(old, &want) {
+                    println!("  {sname:<10} 需要重跑：{why}");
+                }
+            }
+        }
         // 阶段标记。**由我们自己打，不去认 CoLM 的输出措辞** —— CoLM 把
         // automatically 拼成 automaticlly 这件事已经教过一次，上游随时会改。
         // 只有 `colm.x` 打 `TIMESTEP =`，所以没有这个标记，界面在前两段
@@ -585,8 +630,14 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
         }
         if !r.succeeded() {
             eprintln!("  log: {}", r.log.display());
+            // 失败的那一段**不记指纹**，否则下次会把一个没跑成的阶段当成
+            // 「已完成且输入未变」而跳过。
+            marks.remove(sname);
+            let _ = fingerprint::save(case, &marks);
             bail!("stage {} failed", stage.program());
         }
+        marks.insert(sname.to_string(), want);
+        fingerprint::save(case, &marks)?;
     }
     Ok(())
 }

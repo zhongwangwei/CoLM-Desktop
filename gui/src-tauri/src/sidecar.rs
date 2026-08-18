@@ -273,6 +273,7 @@ pub async fn run_case(
     log: tauri::State<'_, RunLog>,
     case: String,
     kernel: String,
+    force: bool,
 ) -> Result<i32, String> {
     let cli = resolve_cli();
     let mut child = std::process::Command::new(&cli)
@@ -282,6 +283,11 @@ pub async fn run_case(
         // 进度条从 0 直接跳到 100，日志窗在运行期间一片空白。
         // 实测同一次城市算例：不加 39 行，加了 34180 行（含 528 条 TIMESTEP）。
         .args(["run", &case, "--kernel", &kernel, "--stream", "1"])
+        .args(if force {
+            &["--force", "1"][..]
+        } else {
+            &[][..]
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

@@ -43,8 +43,12 @@
   <div class="row">
     <select id="kernel" style="flex:1"></select>
     <button id="run" disabled>运行</button>
+    <label style="margin:0;white-space:nowrap" title="忽略指纹，三段全部重跑">
+      <input type="checkbox" id="force" style="width:auto;display:inline-block"> 强制全部重跑
+    </label>
   </div>
   <p id="kernelmeta" class="muted" style="font-size:11px">&nbsp;</p>
+  <div class="row" id="stages" style="gap:6px;margin-top:6px"></div>
   <div class="bar"><i id="prog"></i></div>
   <p id="progtext" class="muted" style="font-size:11px">&nbsp;</p>
   <pre id="log"></pre>

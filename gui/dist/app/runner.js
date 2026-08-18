@@ -62,7 +62,10 @@ $('run').onclick = async () => {
   $('prog').style.width = '0';
   $('progtext').textContent = '启动…';
   try {
-    await invoke('run_case', { case: state.selected.dir, kernel: $('kernel').value });
+    renderStages({});   // 三段都回到「待运行」
+    await invoke('run_case', {
+      case: state.selected.dir, kernel: $('kernel').value, force: $('force').checked,
+    });
   } catch (e) {
     // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点，
     // 不写的话进度文字会永远停在「启动…」。
@@ -79,6 +82,8 @@ export async function watchRun() {
       // 界面完全不知道进行到哪。标记由 colm-cli 自己打，不认 CoLM 的措辞。
       const { stage, state: st, case: dir } = e.payload;
       if (dir) { state.runState[dir] = '运行中'; renderCases(); }
+      state.stages = { ...state.stages, [stage]: st };
+      renderStages(state.stages);
       if (st === 'begin') {
         $('progtext').textContent = `${stage} 运行中…`;
         $('prog').style.width = ({ mksrfdata: 2, mkinidata: 4, colm: 6 })[stage] + '%';
@@ -141,3 +146,23 @@ $('runall').onclick = async () => {
   } catch (e) { status(e); }
   finally { $('runall').disabled = false; $('run').disabled = false; }
 };
+
+
+/** 三段各自的状态。**分开显示是必须的** —— 只有 colm.x 打 TIMESTEP，
+ *  前两段没有步进度可看，而城市算例里 mksrfdata 恰恰是最慢的那段。 */
+function renderStages(st) {
+  const box = $('stages');
+  box.textContent = '';
+  const LABEL = { begin: '运行中', ok: '成功', failed: '失败', skipped: '跳过' };
+  for (const s of ['mksrfdata', 'mkinidata', 'colm']) {
+    const d = document.createElement('span');
+    const state = st[s];
+    d.textContent = `${s}：${LABEL[state] ?? '待运行'}`;
+    d.style.cssText = 'font-size:11px;padding:2px 8px;border-radius:10px;background:var(--soft)';
+    if (state === 'failed') d.className = 'warn';
+    // 「跳过」要看得出来是**有意跳过**而不是没跑 —— 两者在界面上长得太像，
+    // 而误以为没跑会让人去按强制重跑，白等一次。
+    if (state === 'skipped') { d.className = 'muted'; d.title = '产物齐全且输入未变'; }
+    box.appendChild(d);
+  }
+}

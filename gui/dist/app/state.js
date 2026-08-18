@@ -12,6 +12,8 @@ export const state = {
   /** 算例目录 -> '待运行' | '运行中' | '已完成' | '失败'。
    *  批量跑时事件是全局广播的，靠 payload 里的 `case` 分发到这里。 */
   runState: {},
+  /** 本次运行里三段各自的状态，键是 mksrfdata/mkinidata/colm。 */
+  stages: {},
   kernels: [],
   selected: null,
   /** 当前算例 case.nml 的全文。改字段走后端往返，前端不自己拼。 */

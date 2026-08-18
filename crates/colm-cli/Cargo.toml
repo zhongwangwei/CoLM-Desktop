@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 # 唯一的编排可执行文件（design.md §4.2：「GUI 只跟它说话」），所以它是
 # 唯一一个同时依赖全部五层的地方。各层之间仍然互不依赖。
+# 指纹要读算例 namelist 的字段值（fingerprint.rs）。
+colm-namelist = { path = "../colm-namelist" }
 colm-case = { path = "../colm-case" }
 colm-forcing = { path = "../colm-forcing" }
 colm-hist = { path = "../colm-hist", features = ["io"] }
