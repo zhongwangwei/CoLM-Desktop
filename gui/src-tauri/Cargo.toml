@@ -30,6 +30,9 @@ colm-case = { path = "../../crates/colm-case" }
 # 校验内核目录（清单 + 三个二进制的 sha256）。它自己 0 个 netcdf 依赖，
 # 拖不进 HDF5 —— 上面那份依赖节点数清单里 colm-kernel 正是 0。
 colm-kernel = { path = "../../crates/colm-kernel" }
+# 闸门表：哪个输出变量在什么条件下才写得出来。**默认 features** ——
+# 那一半是 netcdf-free 的， feature 才拖 netcdf，这里不开。
+colm-hist = { path = "../../crates/colm-hist" }
 
 # **自己就是一个 workspace 根。** 这一行把 429 个 Tauri 依赖挡在引擎
 # workspace 之外 —— 引擎那边只有 70 个，`cargo test --workspace` 不该

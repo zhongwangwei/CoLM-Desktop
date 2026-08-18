@@ -30,4 +30,7 @@ export const state = {
    *  后者问「编没编进去」。压成一个的话，想看全部已设字段的人会被迫
    *  连 68 个用不上的一起看。 */
   showIrrelevant: false,
+  /** 输出变量页的搜索词与「只看已勾选」。 */
+  histFilter: '',
+  histOnlyOn: false,
 };

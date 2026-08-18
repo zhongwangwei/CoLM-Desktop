@@ -10,11 +10,13 @@
 //! 所以页面用 `window.__TAURI__.core.invoke(...)` 跟这里说话。
 
 mod config;
+mod histvars;
 mod project;
 mod sidecar;
 mod sites;
 
 use config::*;
+use histvars::*;
 use project::*;
 use sidecar::*;
 use sites::*;
@@ -40,6 +42,7 @@ pub fn run() {
             write_text,
             unknown_fields,
             irrelevant_fields,
+            hist_vars,
         ])
         .run(tauri::generate_context!())
         .expect("error running CoLM Desktop");

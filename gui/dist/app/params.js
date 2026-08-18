@@ -3,6 +3,7 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
+import { renderHistVars } from './histvars.js';
 
 export function renderTabs() {
   const groups = ['nl_colm', 'nl_colm_forcing', 'nl_colm_history'];
@@ -13,6 +14,8 @@ export function renderTabs() {
     b.textContent = { nl_colm: '算例', nl_colm_forcing: '强迫场', nl_colm_history: '输出变量' }[g];
     b.setAttribute('aria-pressed', String(state.group === g));
     b.onclick = () => { state.group = g; renderTabs(); renderFields(); };
+    // 输出变量那一组有 482 个开关，走自己的渲染（§1.1）—— 铺进字段表
+    // 会把这一页变成 482 行，而它们全是 logical，不需要各配一个输入框。
     t.appendChild(b);
   }
 }
@@ -119,6 +122,7 @@ export async function renderFields() {
                    derived: f.derived, unset: true }));
     entriesAll = entries.concat(extra);
   }
+  if (state.group === 'nl_colm_history') { await renderHistVars(box); return; }
   const inGroup = entriesAll.filter(e => (e.group ?? 'nl_colm') === state.group);
   // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));

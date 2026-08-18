@@ -335,6 +335,7 @@ name = "colm-desktop-gui"
 version = "0.1.0"
 dependencies = [
  "colm-case",
+ "colm-hist",
  "colm-kernel",
  "colm-namelist",
  "colm-schema",
@@ -343,6 +344,10 @@ dependencies = [
  "tauri",
  "tauri-build",
 ]
+
+[[package]]
+name = "colm-hist"
+version = "0.1.0"
 
 [[package]]
 name = "colm-kernel"
