@@ -34,3 +34,31 @@ export async function restoreRecent() {
     });
   }
 }
+
+/** 「选择…」按钮。**路径不该让人手打** —— 一个绝对路径打错一个字符，
+ *  报错会出现在完全无关的地方（CoLM 读不到某个 `.nc`），而那时人已经
+ *  等了一次运行。
+ *
+ *  输入框保留：命名不合约定的数据、或者从别处复制来的路径仍要能贴进去。
+ *  选择器是**更容易的那条路**，不是唯一的路。 */
+export function wirePickers() {
+  for (const b of document.querySelectorAll('button.pick')) {
+    const id = b.dataset.for;
+    b.onclick = async () => {
+      const el = $(id);
+      let picked = null;
+      try {
+        // **写成字面量，不用变量拼命令名。** check-gui 靠扫 invoke 后面那个
+        // 字符串字面量来核对前后端接口，拼出来的名字它看不见 —— 那时这两个
+        // 命令就成了守卫的盲区（实测：26 注册 / 23 调用）。
+        picked = b.dataset.file
+          ? await invoke('pick_file', { key: id, filter: b.dataset.file })
+          : await invoke('pick_folder', { key: id });
+      } catch { /* 选择器起不来就让人手打 */ }
+      // null 是**取消**，不是失败 —— 不该清空已有的值，也不该报错。
+      if (!picked) return;
+      el.value = picked;
+      el.dispatchEvent(new Event('change'));
+    };
+  }
+}

@@ -33,6 +33,11 @@ colm-kernel = { path = "../../crates/colm-kernel" }
 # 闸门表：哪个输出变量在什么条件下才写得出来。**默认 features** ——
 # 那一半是 netcdf-free 的， feature 才拖 netcdf，这里不开。
 colm-hist = { path = "../../crates/colm-hist" }
+# 原生的文件/文件夹选择器。**路径不该让人手打** —— 一个 Sitedata 目录
+# 的绝对路径打错一个字符，报错会出现在完全无关的地方。
+# 用 rfd 而不是 tauri-plugin-dialog：后者的 JS 侧要走 npm 包，
+# 而本项目的前端**无 npm**（design.md §4.2）。rfd 正是那个插件底下用的东西。
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
 # **自己就是一个 workspace 根。** 这一行把 429 个 Tauri 依赖挡在引擎
 # workspace 之外 —— 引擎那边只有 70 个，`cargo test --workspace` 不该

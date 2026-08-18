@@ -14,12 +14,14 @@ fn css() -> String {
 fn dark_mode_only_overrides_variables() {
     // 深色模式重复写一遍规则，是最容易分叉的地方：改了浅色忘了深色，
     // 而写代码的人十有八九只看着一种模式。所以那个块里只许出现 `--x: …`。
+    //
+    // 主题走 `[data-theme="dark"]` 而不是 `prefers-color-scheme` ——
+    // 用户要能在程序里自己切，跟随系统由 JS 启动时设一次属性来实现。
     let t = css();
     let at = t
-        .find("prefers-color-scheme: dark")
-        .expect("深色模式的媒体查询");
-    let open = t[at..].find('{').expect("媒体查询的开括号") + at;
-    // 找配平的收尾
+        .find("[data-theme=\"dark\"]")
+        .expect("深色主题的选择器");
+    let open = t[at..].find('{').expect("开括号") + at;
     let (mut depth, mut end) = (0i32, open);
     for (i, c) in t[open..].char_indices() {
         match c {
@@ -37,15 +39,12 @@ fn dark_mode_only_overrides_variables() {
     let block = &t[open + 1..end];
     for decl in block.split(';') {
         let d = decl.trim();
-        // 跳过选择器、括号与注释
         if d.is_empty() || !d.contains(':') || d.starts_with("/*") {
             continue;
         }
-        let prop = d.rsplit('{').next().unwrap_or(d).trim();
         assert!(
-            prop.starts_with("--"),
-            "深色块里出现了非变量声明 {prop:?} —— 颜色请定义成变量，\
-             深色只覆盖变量值"
+            d.starts_with("--"),
+            "深色块里出现了非变量声明 {d:?} —— 颜色请定义成变量，深色只覆盖变量值"
         );
     }
 }
@@ -55,11 +54,12 @@ fn the_layout_has_all_three_breakpoints() {
     // 三档：三栏 / 两栏 / 单栏。少一档就会在某个宽度上挤成一团，
     // 而那个宽度未必是开发机的宽度 —— 所以靠测试而不是靠看。
     let t = css();
-    assert!(t.contains("max-width: 1400px"), "缺中等宽度那一档");
+    assert!(t.contains("max-width: 1240px"), "缺中等宽度那一档");
     assert!(t.contains("max-width: 900px"), "缺窄屏那一档");
-    // 命名区域而不是列数：折叠时是「结果区换个位置」，不是「三列挤成一列」。
+    // 命名区域而不是列数：折叠时是「某一块换个位置」，不是「几列挤成一列」。
+    // `grid-template` 简写里区域字符串与行列一起写，所以数它。
     assert!(
-        t.matches("grid-template-areas").count() >= 3,
+        t.matches("grid-template:").count() >= 3,
         "三档都该给出自己的区域布局"
     );
 }

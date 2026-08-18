@@ -279,7 +279,15 @@ fn command_params(
             let Some((n, ty)) = a.split_once(':') else {
                 continue;
             };
-            let n = n.trim();
+            // 参数名是**最后一行**：前面可能有若干行注释，而按逗号切之后
+            // 它们会连在参数名前头。不去掉的话，一个带注释的参数会被读成
+            // 「注释文本 + 名字」，于是前端传的那个名字被报成不存在 ——
+            // 实测踩过，而报错指向的地方完全没问题。
+            let n = n.lines().last().unwrap_or("").trim();
+            // 整行都是注释的（多行注释块里的中间行）不是参数
+            if n.starts_with("//") {
+                continue;
+            }
             let ty = ty.trim();
             if n.is_empty() || ty.contains("AppHandle") || ty.contains("State<") {
                 continue;
@@ -428,6 +436,19 @@ mod tests {
         let src = concat_sources(&d, &["rs"], &[]).unwrap();
         assert!(quoted_after(&src, "emit(").contains("run://progress"));
         assert!(command_params(&src).contains_key("a"));
+    }
+
+    #[test]
+    fn a_parameter_with_a_comment_above_it_keeps_its_own_name() {
+        // 参数上方写注释是常事。按逗号切之后注释会连在名字前头，
+        // 不剥掉的话这个参数就被读成「注释 + 名字」，于是前端传的那个名字
+        // 被报成不存在 —— 一条假警报，而且指向的地方完全没问题。实测踩过。
+        let src = "#[tauri::command]\npub async fn new_case(\n    site: String,\n                       // 城市站点必须给这两个\n    // 站点文件里没有\n    rawdata: Option<String>,\n) {}";
+        let got = super::command_params(src);
+        let keys = got.get("new_case").expect("new_case");
+        assert!(keys.contains("rawdata"), "{keys:?}");
+        assert!(keys.contains("site"));
+        assert_eq!(keys.len(), 2, "注释不该被当成参数：{keys:?}");
     }
 
     #[test]

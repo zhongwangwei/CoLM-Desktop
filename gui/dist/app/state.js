@@ -6,6 +6,10 @@
 //! 那种故障比编译错误难查得多。
 
 export const state = {
+  /** 当前在第几步，见 shell.js 的 STEPS。 */
+  step: 'data',
+  /** 参数页的子页签：'fields' | 'hist'。 */
+  ptab: 'fields',
   cases: [],
   /** 站点库扫描结果，见 colm-cli scan */
   sites: [],

@@ -5,6 +5,7 @@ import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderCases } from './sites.js';
 import { refreshVars } from './results.js';
+import { setRunning, renderSteps } from './shell.js';
 import { renderFields } from './params.js';
 
 // 「选个目录」而是「选一套物理」—— 让它列出来，而不是让人记住路径。
@@ -25,7 +26,7 @@ export async function refreshKernels() {
     o.value = k.dir; o.textContent = k.preset;
     s.appendChild(o);
   }
-  s.onchange = () => { showKernelMeta(); refreshRelevance(); };
+  s.onchange = () => { showKernelMeta(); refreshRelevance(); renderSteps(); };
   showKernelMeta();
   await refreshRelevance();
 }
@@ -63,6 +64,7 @@ $('run').onclick = async () => {
   $('progtext').textContent = '启动…';
   try {
     renderStages({});   // 三段都回到「待运行」
+    setRunning('busy', '运行中');
     await invoke('run_case', {
       case: state.selected.dir, kernel: $('kernel').value, force: $('force').checked,
     });
@@ -113,6 +115,8 @@ export async function watchRun() {
     await listen('run://done', e => {
       const d = e.payload;
       if (d.case) { state.runState[d.case] = d.code === 0 ? '已完成' : '失败'; renderCases(); }
+      // 状态栏是切到别的步骤时**唯一还看得见运行结果**的地方。
+      setRunning(d.code === 0 ? 'ok' : 'fail', d.code === 0 ? '完成' : `失败（退出码 ${d.code}）`);
       $('prog').style.width = d.code === 0 ? '100%' : '0';
       $('progtext').textContent =
         `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）'} · ` +

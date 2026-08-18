@@ -6,6 +6,7 @@ import { $, status } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
+import { go, renderSteps, setStatus } from './shell.js';
 
 $('rescan').onclick = async () => {
   try {
@@ -38,6 +39,7 @@ export function renderCases() {
 
 async function selectCase(c) {
   state.selected = c;
+  renderSteps();
   renderCases();
   $('run').disabled = false;
   try {
@@ -75,6 +77,8 @@ $('create').onclick = async () => {
       site, out: root + '/' + name, name,
       start: $('w-start').value.trim() || null,
       end: $('w-end').value.trim() || null,
+      rawdata: $('rawdata').value.trim() || null,
+      runtime: $('runtime').value.trim() || null,
     });
     $('log').textContent = msg;
     state.cases = await invoke('list_cases', { root });
@@ -94,15 +98,37 @@ $('scan').onclick = async () => {
   try {
     // quick: 只读站点文件。实测 90 站 0.07 秒，而完整读要 0.35 秒 ——
     // 第一屏只要经纬度与地类，强迫场的时间范围等选中了再补。
-    state.sites = await invoke('scan_sites', { dir, quick: true });
-    renderSites();
+    const r = await invoke('scan_sites', { dir, quick: true });
+    state.sites = r.sites;
+    renderSites(r);
   } catch (e) { status(e); }
   finally { $('scan').disabled = false; }
 };
 
-function renderSites() {
+function renderSites(r = {}) {
   const box = $('sites');
   box.textContent = '';
+  // **空结果要自己解释。** 指错目录是第一次用最容易发生的事
+  // （比如指了 Forcing 而站点文件在 Sitedata），而一个空列表什么都没说。
+  if (r.hint) {
+    const p = document.createElement('p');
+    p.className = 'warn';
+    p.style.fontSize = '11px';
+    p.textContent = r.hint;
+    box.appendChild(p);
+    if (r.suggest) {
+      const b = document.createElement('button');
+      b.textContent = '改用它并重新扫描';
+      b.onclick = () => {
+        $('sitedir').value = r.suggest;
+        $('sitedir').dispatchEvent(new Event('change'));
+        $('scan').click();
+      };
+      box.appendChild(b);
+    }
+    $('sitesummary').textContent = '\u00a0';
+    return;
+  }
   const bad = state.sites.filter(s => s.problem).length;
   const noObs = state.sites.filter(s => !s.obs_file).length;
   const urban = state.sites.filter(s => s.urban).length;
@@ -130,7 +156,13 @@ function renderSites() {
     // 选中就把路径填进新建向导 —— 那是它唯一的去处，不必再让人复制粘贴。
     d.onclick = () => {
       $('w-site').value = s.site_file;
-      status(`已选 ${s.name}${s.met_file ? '' : '（没有强迫场，跑不了）'}`);
+      $('w-site').dispatchEvent(new Event('change'));
+      // 城市站点必须给两个栅格目录，那两个框平时藏着 —— 见 plan-gui2.md §1.6。
+      $('urbandirs').hidden = !s.urban;
+      state.pickedSite = s;
+      setStatus(`已选 ${s.name}${s.met_file ? '' : '（没有强迫场，跑不了）'}`);
+      // 选完站点就该去第 2 步。让人自己找「下一步在哪」，正是原来那版的毛病。
+      go('case');
     };
     box.appendChild(d);
   }

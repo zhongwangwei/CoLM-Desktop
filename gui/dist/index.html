@@ -3,84 +3,218 @@
 <title>CoLM Desktop</title>
 <link rel="stylesheet" href="vendor/uplot/uPlot.min.css">
 <link rel="stylesheet" href="app/style.css">
-<body>
+<body class="normal">
 
-<aside>
-  <h2>算例库</h2>
-  <div class="row"><input id="root" placeholder="算例目录"><button id="rescan">扫描</button>
-    <button id="runall" disabled>运行全部</button></div>
-  <div id="cases" style="margin-top:8px"></div>
-  <h2 style="margin-top:18px">站点库</h2>
-  <div class="row"><input id="sitedir" placeholder="Sitedata 目录"><button id="scan">扫描</button></div>
-  <p id="sitesummary" class="muted" style="font-size:11px">&nbsp;</p>
-  <div id="sites" style="max-height:26vh;overflow:auto"></div>
+<div class="app">
 
-  <h2 style="margin-top:18px">新建</h2>
-  <label>站点文件（在上面选，或直接填路径）</label><input id="w-site">
-  <label>算例名（留空则用站点代号）</label><input id="w-name">
-  <div class="row">
-    <div style="flex:1"><label>起（可选）</label><input id="w-start" placeholder="2008-01-01"></div>
-    <div style="flex:1"><label>止（可选）</label><input id="w-end" placeholder="2008-01-11"></div>
-  </div>
-  <p class="muted" style="font-size:11px">经纬度、地类、时间步长与默认窗口都从文件里读，不用填。</p>
-  <button id="create" style="margin-top:6px">新建算例</button>
-</aside>
+  <header class="top">
+    <div class="brand"><span class="glyph">◍</span><span>CoLM <span class="dim">Desktop</span></span></div>
+    <div class="sep"></div>
+    <input class="proj-name" id="casename" readonly value="还没有算例" title="当前算例">
+    <div class="grow"></div>
+    <div class="seg" id="modeSeg">
+      <button class="on" data-mode="normal">常规</button>
+      <button data-mode="expert">专家</button>
+    </div>
+    <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
+  </header>
 
-<main>
-  <h2>配置</h2>
-  <p id="status" class="muted">连接后端…</p>
-  <div id="unknown"></div>
-  <div class="tabs" id="tabs"></div>
-  <div class="row" style="margin-bottom:8px">
-    <select id="preset" style="flex:1"></select>
-    <button id="preset-apply" disabled>套用</button>
-    <button id="preset-save" disabled>存为预设…</button>
-    <button id="preset-del" disabled>删除</button>
-  </div>
-  <div id="fields"></div>
+  <!-- 左栏是一条流水线，不是几个并排的盒子：有数据 → 造算例 → 配参数 → 跑 → 看结果。 -->
+  <nav class="rail">
+    <h4>工作流</h4>
+    <div id="steps"></div>
+    <div class="est">
+      <div class="lab">已选站点</div>
+      <div class="big" id="estSite">—</div>
+      <div class="lab" style="margin-top:9px">内核</div>
+      <div class="big" id="estKernel" style="font-size:14px">—</div>
+    </div>
+  </nav>
 
-  <h2 style="margin-top:18px">运行</h2>
-  <div class="row">
-    <select id="kernel" style="flex:1"></select>
-    <button id="run" disabled>运行</button>
-    <label style="margin:0;white-space:nowrap" title="忽略指纹，三段全部重跑">
-      <input type="checkbox" id="force" style="width:auto;display:inline-block"> 强制全部重跑
-    </label>
-  </div>
-  <p id="kernelmeta" class="muted" style="font-size:11px">&nbsp;</p>
-  <div class="row" id="stages" style="gap:6px;margin-top:6px"></div>
-  <div class="bar"><i id="prog"></i></div>
-  <p id="progtext" class="muted" style="font-size:11px">&nbsp;</p>
-  <pre id="log"></pre>
-</main>
+  <main class="work" id="work">
 
-<div class="results">
-  <h2>结果</h2>
-  <div class="row">
-    <select id="var"></select><button id="plot" disabled>画图</button>
-  </div>
-  <div id="charts" style="margin-top:10px"></div>
+    <!-- ① 数据 -->
+    <section class="page" data-step="data">
+      <div class="work-head"><span class="kicker">第 1 步</span></div>
+      <h1>你有哪些站点的数据</h1>
+      <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
+        程序顺着命名约定把每个站点的强迫场与观测文件一并找出来 ——
+        <b>有没有观测，决定了跑完能不能自动评估</b>。</p>
 
-  <h2 style="margin-top:18px">评估</h2>
-  <div class="row">
-    <input id="obs" placeholder="观测文件（*_Flux.nc）" style="flex:1">
-    <label style="margin:0;white-space:nowrap"
-           title="丢的是输出记录，单位是条。与「时间」分类里的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
-      丢弃前
-      <input id="spinup" type="number" value="0" min="0" style="width:5em;display:inline-block">
-      条 ⓘ</label>
-    <button id="evaluate" disabled>评估</button>
-  </div>
-  <p class="muted" style="font-size:11px">
-    「丢弃前 N 条」丢的是<b>输出记录</b>（单位：条），与模型<b>预热</b>（spin-up）
-    不是一回事 —— 后者在「时间」分类里，单位是轮数，且预热期本来就不写 history，
-    不会被算进指标。
-  </p>
-  <div class="row" style="margin-top:6px">
-    <button id="eval-all" disabled>评估全部已跑算例</button>
-  </div>
-  <div id="metrics"></div>
-  <div id="summary"></div>
+      <div class="card">
+        <h3>站点目录</h3>
+        <div class="ch">找的是 <code>*_site.nc</code>（PLUMBER2）或 <code>*_site_v1.nc</code>（Urban-PLUMBER）。</div>
+        <div class="browse">
+          <input class="input" id="sitedir" placeholder="…/PLUMBER2s/Sitedata">
+          <button class="btn-ghost pick" data-for="sitedir">选择…</button>
+          <button class="btn-ghost" id="scan">扫描</button>
+        </div>
+        <p class="muted mini" id="sitesummary">&nbsp;</p>
+        <div id="sites" class="listbox"></div>
+      </div>
+    </section>
+
+    <!-- ② 算例 -->
+    <section class="page" data-step="case" hidden>
+      <div class="work-head"><span class="kicker">第 2 步</span></div>
+      <h1>造一个算例</h1>
+      <p class="sub">一个<b>算例</b>是一个目录，里面有 <code>case.nml</code>（配置）、
+        <code>site.nc</code>（补齐后的站点数据）和 <code>out/</code>（产物）。
+        经纬度、地类、时间步长与默认窗口都从文件里读，不用填。</p>
+
+      <div class="card">
+        <h3>新建</h3>
+        <div class="ch">从第 1 步选中的站点造。已经造过的在下面那张卡片里。</div>
+        <div class="field">
+          <label>站点文件 <span class="hint">在第 1 步点一个站点会自动填进来</span></label>
+          <div class="browse">
+            <input class="input" id="w-site">
+            <button class="btn-ghost pick" data-for="w-site" data-file="nc">选择…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>放在哪 <span class="hint">算例目录的父目录；每个算例占一个子目录</span></label>
+          <div class="browse">
+            <input class="input" id="root" placeholder="…/cases">
+            <button class="btn-ghost pick" data-for="root">选择…</button>
+            <button class="btn-ghost" id="rescan">扫描已有</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>算例名 <span class="hint">留空用站点代号</span></label>
+            <input class="input" id="w-name"></div>
+          <div class="field"><label>起 <span class="hint">可选</span></label>
+            <input class="input" id="w-start" placeholder="2008-01-01"></div>
+          <div class="field"><label>止 <span class="hint">可选</span></label>
+            <input class="input" id="w-end" placeholder="2008-01-11"></div>
+        </div>
+        <div id="urbandirs" hidden>
+          <div class="expert-note">
+            这是个<b>城市站点</b>。城市算例必须给全球栅格目录 ——
+            土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
+          </div>
+          <div class="row">
+            <div class="field"><label>rawdata 目录</label>
+              <div class="browse"><input class="input" id="rawdata">
+                <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
+            <div class="field"><label>runtime 目录</label>
+              <div class="browse"><input class="input" id="runtime">
+                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
+          </div>
+        </div>
+        <button class="btn-next" id="create">新建算例</button>
+      </div>
+
+      <div class="card">
+        <h3>已有算例</h3>
+        <div class="ch">点一个来配参数、运行、或看它的结果。</div>
+        <div id="cases" class="listbox"></div>
+        <div class="pill-row" style="margin-top:10px">
+          <button class="btn-ghost" id="runall" disabled>全部运行</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ③ 参数 -->
+    <section class="page" data-step="params" hidden>
+      <div class="work-head"><span class="kicker">第 3 步</span></div>
+      <h1>配参数</h1>
+      <p class="sub">按功能分类，不按 CoLM 的文件结构分。<b>常规模式只显示这份算例实际设了的字段</b>；
+        专家模式连没设过的一起显示，值是 CoLM 的默认值。</p>
+
+      <div class="card">
+        <div class="live-tabs" id="ptabs">
+          <button class="on" data-ptab="fields">参数</button>
+          <button data-ptab="hist">输出变量</button>
+        </div>
+        <div id="unknown"></div>
+        <div class="pill-row" style="margin:12px 0">
+          <select class="select" id="preset" style="max-width:220px"></select>
+          <button class="btn-ghost" id="preset-apply" disabled>套用</button>
+          <button class="btn-ghost" id="preset-save" disabled>存为预设…</button>
+          <button class="btn-ghost" id="preset-del" disabled>删除</button>
+          <span class="muted mini">预设 = 一套物理与输出设置，可跨算例复用（站点与路径不会被带走）</span>
+        </div>
+        <div id="fields"></div>
+      </div>
+    </section>
+
+    <!-- ④ 运行 -->
+    <section class="page" data-step="run" hidden>
+      <div class="work-head"><span class="kicker">第 4 步</span></div>
+      <h1>运行</h1>
+      <p class="sub">三个程序依次跑：<code>mksrfdata</code> 造地表数据、<code>mkinidata</code> 造初始场、
+        <code>colm</code> 跑模拟。<b>输入没变的那一段会跳过</b> —— 判据是输入指纹，不是文件在不在。</p>
+
+      <div class="card">
+        <h3>内核</h3>
+        <div class="ch">一个内核 = 一组编译期宏。选哪个决定了哪些参数有意义、哪些输出变量写得出来。</div>
+        <select class="select" id="kernel"></select>
+        <p class="muted mini" id="kernelmeta">&nbsp;</p>
+        <div class="pill-row" style="margin-top:14px">
+          <button class="run-btn" id="run" disabled>▶ 运行</button>
+          <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
+        </div>
+        <div class="stages" id="stages"></div>
+      </div>
+    </section>
+
+    <!-- ⑤ 结果 -->
+    <section class="page" data-step="result" hidden>
+      <div class="work-head"><span class="kicker">第 5 步</span></div>
+      <h1>结果</h1>
+      <p class="sub">画模型输出，或与观测配对算指标。<b>「丢弃前 N 条」丢的是输出记录</b>，
+        与第 3 步里的模型预热（spin-up）不是一回事。</p>
+
+      <div class="card">
+        <h3>曲线</h3>
+        <div class="pill-row">
+          <select class="select" id="var" style="max-width:260px"></select>
+          <button class="btn-ghost" id="plot" disabled>画图</button>
+        </div>
+        <div id="charts" style="margin-top:12px"></div>
+      </div>
+
+      <div class="card">
+        <h3>与观测比对</h3>
+        <div class="ch">观测文件按命名约定自动找；命名不合约定时可以自己指。</div>
+        <div class="browse">
+          <input class="input" id="obs" placeholder="…/Observation/*_Flux.nc">
+          <button class="btn-ghost pick" data-for="obs" data-file="nc">选择…</button>
+        </div>
+        <div class="pill-row" style="margin-top:10px">
+          <label class="check" title="丢的是输出记录，单位是条。与第 3 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
+            丢弃前 <input class="input" id="spinup" type="number" value="0" min="0" style="width:5.5em"> 条 ⓘ</label>
+          <button class="btn-ghost" id="evaluate" disabled>评估</button>
+          <button class="btn-ghost" id="eval-all" disabled>评估全部已跑算例</button>
+        </div>
+        <div id="metrics" style="margin-top:12px"></div>
+        <div id="summary"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 右栏跟着运行走：切到哪一步都看得见日志与进度。 -->
+  <aside class="live">
+    <div class="live-tabs" id="livetabs">
+      <button class="on" data-pane="log">日志</button>
+      <button data-pane="progress">进度</button>
+    </div>
+    <div class="live-body">
+      <div class="live-pane on" data-pane="log"><pre id="log"></pre></div>
+      <div class="live-pane" data-pane="progress">
+        <div class="progress"><i id="prog"></i></div>
+        <p class="muted mini" id="progtext">&nbsp;</p>
+        <div class="stages" id="stages2"></div>
+      </div>
+    </div>
+  </aside>
+
+  <footer class="status">
+    <span id="status" class="muted">连接后端…</span>
+    <div class="grow"></div>
+    <span class="rdot" id="rdot"></span><span id="rtext" class="muted">空闲</span>
+  </footer>
 </div>
 
 <script src="vendor/uplot/uPlot.iife.min.js"></script>

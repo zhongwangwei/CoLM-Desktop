@@ -1,133 +1,233 @@
-/* CoLM Desktop 的全部样式。无框架、无预处理器。
+/* CoLM Desktop 的全部样式。无框架、无预处理器、无 npm。
  *
- * 颜色一律走 `:root` 上的变量，深色模式**只覆盖变量**、不重复写规则。
- * 两套规则各写一遍是最容易分叉的地方：改了浅色忘了深色，而写代码的人
- * 十有八九只看着一种模式。 */
+ * 设计变量与外壳取自同一作者的 EarthMesh（`gui-tauri/dist/index.html`）——
+ * 同一个技术栈、同一套约定，两个程序摆在一起时长得像一家的。
+ * **只搬外壳，不搬内容**：那边的对象是网格与地图，这边是站点、算例、
+ * 参数与时间序列，面板本身不能复用。
+ *
+ * 主题走 `[data-theme]` 属性而不是 `prefers-color-scheme`：用户要能在程序里
+ * 自己切。跟随系统由 JS 在启动时设一次属性来实现。 */
 
 :root {
-  color-scheme: light dark;
-  font: 13px/1.55 system-ui, -apple-system, sans-serif;
-
-  --rule: color-mix(in oklab, currentColor 16%, transparent);
-  --soft: color-mix(in oklab, currentColor 7%, transparent);
-  --press: color-mix(in oklab, currentColor 14%, transparent);
-  /* 警告色在深色底上要更亮才读得出来 —— 这正是「只覆盖变量」换来的：
-     一处定义，两种模式各给一个值。 */
-  --warn: #b4690e;
-  --pad: 12px;
+  --bg:#ffffff; --surface:#f6f8fa; --surface-2:#eef1f4; --elevated:#ffffff;
+  --border:#d0d7de; --border-soft:#e4e8ec;
+  --text:#1f2328; --muted:#656d76; --faint:#8b949e;
+  --accent:#1f6feb; --accent-weak:#ddeaff; --accent-ink:#0a3d91;
+  --pass:#1a7f37; --pass-bg:#dafbe1; --warn:#9a6700; --warn-bg:#fff8c5;
+  --fail:#cf222e; --fail-bg:#ffebe9;
+  --shadow:0 1px 2px rgba(31,35,40,.08), 0 2px 8px rgba(31,35,40,.06);
+  --r-sm:6px; --r-md:10px;
+  --s-sm:4px; --s-md:8px; --s-lg:16px; --s-xl:24px;
+  --rail-w:250px; --live-w:360px; --top-h:52px; --status-h:34px;
+  --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
 }
-
-@media (prefers-color-scheme: dark) {
-  :root { --warn: #e0a45e; }
+[data-theme="dark"] {
+  --bg:#0d1117; --surface:#161b22; --surface-2:#1c2330; --elevated:#1b2230;
+  --border:#30363d; --border-soft:#262c34;
+  --text:#e6edf3; --muted:#8b949e; --faint:#6e7681;
+  --accent:#58a6ff; --accent-weak:#13243f; --accent-ink:#cae0ff;
+  --pass:#3fb950; --pass-bg:#10261a; --warn:#d29922; --warn-bg:#2b2410;
+  --fail:#f85149; --fail-bg:#2d1414;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 2px 10px rgba(0,0,0,.35);
 }
 
 * { box-sizing: border-box; }
-
-/* 三栏 -> 两栏 -> 单栏。用命名区域而不是列数，
-   于是折叠时是「结果区换个位置」而不是「三列挤成一列」。 */
+html, body { height: 100%; }
 body {
-  margin: 0;
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: 230px minmax(0, 1fr) 420px;
-  grid-template-areas: "side main results";
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--sans); font-size: 13.5px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
-aside    { grid-area: side; }
-main     { grid-area: main; }
-.results { grid-area: results; }
+button { font-family: inherit; font-size: inherit; color: inherit; cursor: pointer; }
+h1, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -.01em; }
+code { font-family: var(--mono); font-size: .92em; background: var(--surface-2);
+       padding: 1px 5px; border-radius: 4px; }
+.dim { color: var(--muted); font-weight: 500; }
+.muted { color: var(--muted); }
+.mini { font-size: 11.5px; }
+.grow { flex: 1; }
 
-aside, main, .results { padding: var(--pad) 14px; overflow: auto; min-width: 0; }
-aside, main { border-right: 1px solid var(--rule); }
-
-/* 中等宽度：结果区移到主区下方，仍是两栏。
-   1400 这个数不是随手挑的：三栏要 230 + 420 = 650 给两侧，
-   中间那栏放得下参数表（字段名最长 34 字符 + 一个输入框）大约要 600。 */
-@media (max-width: 1400px) {
-  body {
-    grid-template-columns: 230px minmax(0, 1fr);
-    grid-template-areas: "side main" "side results";
-    grid-template-rows: auto auto;
-  }
-  .results { border-top: 1px solid var(--rule); }
-  main { border-right: none; }
+.app {
+  display: grid; height: 100vh;
+  grid-template:
+    "top  top  top"    var(--top-h)
+    "rail work live"   1fr
+    "status status status" var(--status-h)
+    / var(--rail-w) minmax(0, 1fr) var(--live-w);
 }
 
-/* 窄屏：单栏，三块依次排下来。侧栏不再是侧栏，边框改到底部。 */
-@media (max-width: 900px) {
-  body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "side" "main" "results";
-  }
-  aside, main {
-    border-right: none;
-    border-bottom: 1px solid var(--rule);
-  }
-  /* 窄屏上高度不再固定，各块按内容自然展开 —— 在一屏之内再切三个
-     可滚动区域，等于三个都滚不利索。 */
-  aside, main, .results { overflow: visible; }
+/* ---------------- 顶栏 ---------------- */
+.top {
+  grid-area: top; display: flex; align-items: center; gap: var(--s-md);
+  padding: 0 var(--s-lg); background: var(--surface); border-bottom: 1px solid var(--border);
 }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 700;
+         letter-spacing: -.02em; font-size: 15px; white-space: nowrap; }
+.brand .glyph { width: 26px; height: 26px; border-radius: 7px; display: grid;
+                place-items: center; background: linear-gradient(135deg, #3c78c8, var(--accent));
+                color: #fff; box-shadow: var(--shadow); }
+.top .sep { width: 1px; height: 22px; background: var(--border); }
+.proj-name { padding: 5px 10px; border: 1px solid transparent; border-radius: var(--r-sm);
+             background: var(--bg); min-width: 200px; color: var(--muted);
+             font: inherit; font-weight: 600; cursor: default; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm);
+       overflow: hidden; background: var(--bg); }
+.seg button { padding: 5px 11px; border: 0; background: transparent; color: var(--muted); }
+.seg button.on { background: var(--accent); color: #fff; }
+.icon-btn { width: 32px; height: 30px; border: 1px solid var(--border);
+            border-radius: var(--r-sm); background: var(--elevated); display: grid; place-items: center; }
+.icon-btn:hover { border-color: var(--accent); }
 
-h2 {
-  font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
-  opacity: .55; margin: 0 0 9px;
-}
+/* ---------------- 左栏：步骤条 ---------------- */
+/* 编号 + 连线，把「站点库 / 新建 / 算例库」说成一条流水线而不是几个并排的盒子。
+   这正是原来那版最让人看不懂的地方。 */
+.rail { grid-area: rail; background: var(--surface); border-right: 1px solid var(--border);
+        padding: var(--s-lg) var(--s-md); overflow: auto; }
+.rail h4 { color: var(--faint); font-size: 10.5px; text-transform: uppercase;
+           letter-spacing: .09em; margin: 0 8px 10px; font-weight: 700; }
+.step { display: flex; gap: 11px; align-items: flex-start; padding: 9px 10px;
+        border-radius: var(--r-md); position: relative; cursor: pointer; margin-bottom: 1px; }
+.step:hover { background: var(--surface-2); }
+.step.active { background: var(--accent-weak); }
+.step .num { flex: none; width: 25px; height: 25px; border-radius: 50%; display: grid;
+             place-items: center; font-size: 12px; font-weight: 700;
+             border: 1.5px solid var(--border); color: var(--muted); background: var(--bg); z-index: 1; }
+.step.active .num { background: var(--accent); border-color: var(--accent); color: #fff; }
+.step.done .num { border-color: var(--pass); color: var(--pass); }
+.step .t { font-weight: 620; line-height: 1.35; }
+.step.active .t { color: var(--accent-ink); }
+.step .d { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+.step[aria-disabled=true] { opacity: .5; cursor: default; }
+.step:not(:last-child)::after { content: ""; position: absolute; left: 22px; top: 34px;
+                                bottom: -2px; width: 1.5px; background: var(--border); }
+.est { margin: 14px 8px 0; padding: 11px; border: 1px solid var(--border);
+       border-radius: var(--r-md); background: var(--bg); }
+.est .lab { color: var(--muted); font-size: 11px; }
+.est .big { font-size: 17px; font-weight: 750; letter-spacing: -.02em;
+            overflow-wrap: anywhere; }
 
-button {
-  font: inherit; padding: 5px 11px; border-radius: 6px;
-  border: 1px solid var(--rule); background: var(--soft); cursor: pointer;
-}
-button:disabled { opacity: .45; cursor: default; }
-button[aria-pressed=true] { background: var(--press); }
+/* ---------------- 中栏 ---------------- */
+.work { grid-area: work; overflow: auto; padding: var(--s-xl) calc(var(--s-xl) + 4px); }
+.work-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 3px; }
+.kicker { color: var(--accent); font-weight: 700; font-size: 12px; letter-spacing: .02em; }
+.work h1 { font-size: 23px; }
+.sub { color: var(--muted); margin: 4px 0 22px; max-width: 66ch; }
+.card { background: var(--elevated); border: 1px solid var(--border); border-radius: var(--r-md);
+        padding: var(--s-lg); box-shadow: var(--shadow); margin-bottom: var(--s-lg); }
+.card h3 { font-size: 14px; margin-bottom: 3px; }
+.card .ch { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+.field { margin-bottom: 13px; }
+.field:last-child { margin-bottom: 0; }
+.field label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 5px; }
+.field .hint { color: var(--faint); font-weight: 400; font-size: 11px; }
+.input, .select { width: 100%; padding: 7px 10px; border: 1px solid var(--border);
+                  border-radius: var(--r-sm); background: var(--bg); color: var(--text);
+                  font: inherit; min-width: 0; }
+.input:focus, .select:focus { outline: none; border-color: var(--accent); }
+.row { display: flex; gap: var(--s-md); } .row > * { flex: 1; }
+.browse { display: flex; gap: 6px; } .browse .input { flex: 1; }
+.btn-ghost { padding: 7px 11px; border: 1px solid var(--border); border-radius: var(--r-sm);
+             background: var(--bg); white-space: nowrap; }
+.btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-ghost:disabled, .run-btn:disabled, .btn-next:disabled { opacity: .45; cursor: default; }
+.btn-next { padding: 8px 18px; border: 0; border-radius: var(--r-sm);
+            background: var(--accent); color: #fff; font-weight: 650; }
+.run-btn { padding: 8px 20px; border: 0; border-radius: var(--r-sm); background: var(--pass);
+           color: #fff; font-weight: 650; box-shadow: var(--shadow); }
+.pill-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.check { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+         font-size: 12px; color: var(--muted); }
+.check input[type=checkbox] { width: auto; }
+.page[hidden] { display: none; }
 
-input, select {
-  font: inherit; padding: 4px 7px; border-radius: 5px;
-  border: 1px solid var(--rule); background: transparent; color: inherit;
-  width: 100%;
-  /* 没有这条，一个长路径会把它所在的 flex 行撑出容器，
-     整页跟着出现横向滚动条。`min-width: auto` 是 flex 子项的默认值。 */
-  min-width: 0;
-}
-input[type=checkbox] { width: auto; }
+/* 需要人特别注意的一段说明。虚线框是「这里跟别处不一样」的信号。 */
+.expert-note { border: 1.5px dashed var(--accent); border-radius: var(--r-md);
+               padding: 12px 14px; margin: 12px 0; font-size: 12px;
+               background: color-mix(in srgb, var(--accent) 6%, transparent); }
 
-label { display: block; margin: 7px 0 2px; opacity: .65; font-size: 11px; }
+/* ---------------- 列表（站点 / 算例） ---------------- */
+.listbox { max-height: 42vh; overflow: auto; border: 1px solid var(--border-soft);
+           border-radius: var(--r-sm); }
+.case { padding: 8px 11px; cursor: pointer; border-bottom: 1px solid var(--border-soft);
+        display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.case:last-child { border-bottom: 0; }
+.case:hover { background: var(--surface-2); }
+.case[aria-selected=true] { background: var(--accent-weak); font-weight: 650; }
+.case small { color: var(--muted); font-weight: 400; font-size: 11px;
+              white-space: nowrap; flex: none; }
+.case.warn small { color: var(--fail); }
 
-.case { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
-.case:hover { background: var(--soft); }
-.case[aria-selected=true] { background: var(--soft); font-weight: 600; }
-.case small { display: block; opacity: .5; font-weight: 400; }
-
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-
-.bar { height: 4px; border-radius: 2px; background: var(--soft); overflow: hidden; margin: 8px 0; }
-.bar > i {
-  display: block; height: 100%; width: 0; background: currentColor;
-  opacity: .55; transition: width .12s linear;
-}
-
-pre {
-  margin: 0; font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap;
-  max-height: 34vh; overflow: auto; background: var(--soft);
-  padding: 8px; border-radius: 6px;
-  /* 日志里全是长路径。不许它在任意处断的话，它会把整页撑宽 ——
-     而横向滚整页比横向滚一个日志窗糟得多。 */
-  overflow-wrap: anywhere;
-}
-
-/* 表格是最容易撑破布局的东西：字段名最长 34 字符，加上一个输入框，
-   在窄屏上必然超出。 */
-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-td, th { text-align: left; padding: 2px 6px 2px 0; }
+/* ---------------- 表格 ---------------- */
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px;
+     padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); }
+td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
 td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 td:first-child { overflow-wrap: anywhere; }
-
 .warn { color: var(--warn); }
-.muted { opacity: .55; }
+.fail { color: var(--fail); }
 
-.tabs { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
+/* ---------------- 右栏 ---------------- */
+.live { grid-area: live; background: var(--surface); border-left: 1px solid var(--border);
+        display: flex; flex-direction: column; min-height: 0; }
+.live-tabs { display: flex; gap: 2px; padding: 9px var(--s-md) 0;
+             border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.live-tabs button { padding: 8px 13px; border: 0; background: transparent; color: var(--muted);
+                    font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.live-tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+.live-body { flex: 1; overflow: hidden; padding: var(--s-md); min-height: 0; }
+.live-pane { display: none; height: 100%; min-height: 0; overflow: auto; }
+.live-pane.on { display: block; }
+#log { margin: 0; font-family: var(--mono); font-size: 11px; line-height: 1.65;
+       color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.progress { height: 8px; border-radius: 5px; background: var(--surface-2);
+            overflow: hidden; margin: 10px 0; }
+.progress > i { display: block; height: 100%; width: 0;
+                background: linear-gradient(90deg, var(--accent), #3c78c8);
+                transition: width .12s linear; }
+.stages { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.stages span { font-size: 11px; padding: 3px 9px; border-radius: 20px;
+               background: var(--surface-2); color: var(--muted); white-space: nowrap; font-weight: 600; }
+.stages span.on   { background: var(--accent-weak); color: var(--accent-ink); }
+.stages span.ok   { background: var(--pass-bg); color: var(--pass); }
+.stages span.fail { background: var(--fail-bg); color: var(--fail); }
 
-.chart { margin-bottom: 14px; }
-/* uPlot 的画布宽度是建图时算死的。容器变窄时它不会跟着缩，
-   于是超出的部分把整页撑宽 —— 这里兜住。 */
-.chart, .chart .uplot { max-width: 100%; overflow: hidden; }
+/* ---------------- 状态栏 ---------------- */
+.status { grid-area: status; display: flex; align-items: center; gap: 14px;
+          padding: 0 var(--s-lg); background: var(--surface);
+          border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
+.status .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.status .rdot.on { background: var(--pass); box-shadow: 0 0 0 3px var(--pass-bg); }
+.status .rdot.busy { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
 
-#stages span { white-space: nowrap; }
+.chart { margin-bottom: 14px; max-width: 100%; overflow: hidden; }
+
+/* ---------------- 窄屏 ---------------- */
+/* 两侧栏加起来 610，中栏放得下参数表约要 600 —— 1210 是三栏的下限，取整到 1240。 */
+@media (max-width: 1240px) {
+  .app { grid-template:
+    "top  top"   var(--top-h)
+    "rail work"  1fr
+    "rail live"  minmax(180px, 34vh)
+    "status status" var(--status-h)
+    / var(--rail-w) minmax(0, 1fr); }
+  .live { border-left: 0; border-top: 1px solid var(--border); }
+}
+@media (max-width: 900px) {
+  .app { grid-template:
+    "top"  var(--top-h)
+    "rail" auto
+    "work" 1fr
+    "live" minmax(160px, 30vh)
+    "status" var(--status-h)
+    / minmax(0, 1fr); }
+  .rail { border-right: 0; border-bottom: 1px solid var(--border); }
+  /* 窄屏上步骤条横过来，省掉一大块高度。连线在横排下没有意义，去掉。 */
+  #steps { display: flex; gap: 6px; overflow-x: auto; }
+  .step { flex: none; margin-bottom: 0; }
+  .step:not(:last-child)::after { display: none; }
+  .step .d, .est { display: none; }
+  .work { padding: var(--s-lg); }
+}

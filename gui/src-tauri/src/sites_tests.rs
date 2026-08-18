@@ -62,3 +62,46 @@ fn it_parses_what_the_real_cli_prints() {
         "PLUMBER2 一个都不该判成城市"
     );
 }
+
+/// 造一份 PLUMBER2 的目录形状：Sitedata / Forcing / Observation 三个同级。
+fn dataset(name: &str) -> std::path::PathBuf {
+    // **多套一层。** 直接放在系统临时目录下的话，「兄弟目录」就成了
+    // 整个 /tmp —— 别的测试留下的目录会被当成候选。实测踩过。
+    let d = std::env::temp_dir()
+        .join(format!("colm-suggest-{name}"))
+        .join("dataset");
+    let _ = std::fs::remove_dir_all(d.parent().unwrap());
+    for sub in ["Sitedata", "Forcing", "Observation"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    std::fs::write(d.join("Sitedata/AT-Neu_2002_x_site.nc"), b"x").unwrap();
+    std::fs::write(d.join("Forcing/AT-Neu_2002_x_Met.nc"), b"x").unwrap();
+    d
+}
+
+#[test]
+fn pointing_at_forcing_suggests_the_sibling_sitedata() {
+    // 这是第一次用最容易犯的错：Forcing 与 Sitedata 是兄弟目录，
+    // 名字都在数据集根下，而站点文件只在后者里。空列表什么都没说。
+    let d = dataset("sibling");
+    let s = suggest_nearby(&d.join("Forcing")).expect("该建议 Sitedata");
+    assert!(s.ends_with("Sitedata"), "{s}");
+}
+
+#[test]
+fn pointing_at_the_dataset_root_suggests_the_child_sitedata() {
+    // 另一种指错：选了数据集根目录，Sitedata 是它的子目录。
+    let d = dataset("child");
+    let s = suggest_nearby(&d).expect("该建议 Sitedata");
+    assert!(s.ends_with("Sitedata"), "{s}");
+}
+
+#[test]
+fn a_directory_with_nothing_nearby_gets_no_suggestion() {
+    // 建议要有依据。**猜一个不含站点文件的目录比不建议更糟** ——
+    // 用户会照做，然后得到第二个空列表。
+    let d = std::env::temp_dir().join("colm-suggest-empty").join("here");
+    let _ = std::fs::remove_dir_all(d.parent().unwrap());
+    std::fs::create_dir_all(d.join("a")).unwrap();
+    assert_eq!(suggest_nearby(&d), None);
+}

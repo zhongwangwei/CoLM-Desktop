@@ -5,20 +5,6 @@ import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderHistVars } from './histvars.js';
 
-export function renderTabs() {
-  const groups = ['nl_colm', 'nl_colm_forcing', 'nl_colm_history'];
-  const t = $('tabs');
-  t.textContent = '';
-  for (const g of groups) {
-    const b = document.createElement('button');
-    b.textContent = { nl_colm: '算例', nl_colm_forcing: '强迫场', nl_colm_history: '输出变量' }[g];
-    b.setAttribute('aria-pressed', String(state.group === g));
-    b.onclick = () => { state.group = g; renderTabs(); renderFields(); };
-    // 输出变量那一组有 482 个开关，走自己的渲染（§1.1）—— 铺进字段表
-    // 会把这一页变成 482 行，而它们全是 logical，不需要各配一个输入框。
-    t.appendChild(b);
-  }
-}
 
 
 // 九个功能分类。**判据是字段名前缀，不是主观的「重要性」** —— 前缀是 CoLM
@@ -133,7 +119,6 @@ export async function renderFields() {
     const have = new Set(entries.map(e => e.path));
     const extra = state.fields
       .filter(f => !have.has(f.name))
-      .filter(f => f.group === state.group)
       // 482 个 `DEF_hist_vars%*` 不在这里露面 —— 它们有自己的一页（§1.1）。
       // 铺进这张表的话，「输出变量」页签在专家模式下会变成 482 行。
       .filter(f => !f.name.startsWith('DEF_hist_vars%'))
@@ -141,8 +126,13 @@ export async function renderFields() {
                    derived: f.derived, unset: true }));
     entriesAll = entries.concat(extra);
   }
-  if (state.group === 'nl_colm_history') { await renderHistVars(box); return; }
-  const inGroup = entriesAll.filter(e => (e.group ?? 'nl_colm') === state.group);
+  // 子页签换成「参数 / 输出变量」—— 原来那三个页签是 CoLM 的 namelist
+  // 分组名（决定字段写进哪个文件），那是**程序的内部结构，不是用户要做的事**。
+  if (state.ptab === 'hist') { await renderHistVars(box); return; }
+  // 三个 namelist 组一起显示。`group` 仍然有用（决定写进哪个文件），
+  // 但它不再是导航轴 —— 分类由下面九个功能节承担。
+  // 482 个 DEF_hist_vars 例外：它们在「输出变量」子页签里。
+  const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
   // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
   const shown = state.showIrrelevant ? inGroup : inGroup.filter(e => !state.irrelevant.has(e.path));

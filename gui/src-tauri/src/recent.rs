@@ -54,3 +54,46 @@ pub fn save_recent(app: tauri::AppHandle, key: String, value: String) -> Result<
 #[cfg(test)]
 #[path = "recent_tests.rs"]
 mod recent_tests;
+
+/// 选一个文件夹。返回 `None` 表示用户取消 —— **取消不是错误**，
+/// 报成错误会让状态栏冒出一行红字，而用户只是改了主意。
+///
+/// 起始目录用上次记住的那个：选路径这件事十有八九是在同一棵树里换个位置。
+#[tauri::command]
+pub async fn pick_folder(app: tauri::AppHandle, key: String) -> Option<String> {
+    let start = load_recent(app).get(&key).cloned();
+    let mut d = rfd::AsyncFileDialog::new();
+    if let Some(s) = start.filter(|s| std::path::Path::new(s).is_dir()) {
+        d = d.set_directory(s);
+    }
+    d.pick_folder()
+        .await
+        .map(|h| h.path().display().to_string())
+}
+
+/// 选一个文件。`filter` 是后缀名，如 `nc`。
+#[tauri::command]
+pub async fn pick_file(
+    app: tauri::AppHandle,
+    key: String,
+    filter: Option<String>,
+) -> Option<String> {
+    // 起始目录取上次那个**值所在的目录** —— 记住的是文件路径时，
+    // 直接当目录用会打不开。
+    let start = load_recent(app).get(&key).cloned().and_then(|s| {
+        let p = std::path::PathBuf::from(&s);
+        if p.is_dir() {
+            Some(p)
+        } else {
+            p.parent().filter(|d| d.is_dir()).map(|d| d.to_path_buf())
+        }
+    });
+    let mut d = rfd::AsyncFileDialog::new();
+    if let Some(s) = start {
+        d = d.set_directory(s);
+    }
+    if let Some(f) = filter.as_deref() {
+        d = d.add_filter(f, &[f]);
+    }
+    d.pick_file().await.map(|h| h.path().display().to_string())
+}

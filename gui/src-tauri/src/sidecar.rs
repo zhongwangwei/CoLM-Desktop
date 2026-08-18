@@ -481,6 +481,10 @@ pub async fn new_case(
     name: Option<String>,
     start: Option<String>,
     end: Option<String>,
+    // 城市站点必须给这两个：土壤剖面、湖深、土壤反照率与 LCZ 分类
+    // 只能从全球栅格取，站点文件里没有。非城市站点传空即可。
+    rawdata: Option<String>,
+    runtime: Option<String>,
 ) -> Result<String, String> {
     let mut args = vec![
         "new".to_string(),
@@ -489,7 +493,13 @@ pub async fn new_case(
         "--out".into(),
         out,
     ];
-    for (flag, v) in [("--name", name), ("--start", start), ("--end", end)] {
+    for (flag, v) in [
+        ("--name", name),
+        ("--start", start),
+        ("--end", end),
+        ("--rawdata", rawdata),
+        ("--runtime", runtime),
+    ] {
         if let Some(v) = v {
             if !v.trim().is_empty() {
                 args.push(flag.into());

@@ -54,6 +54,8 @@ pub fn run() {
             delete_preset,
             load_recent,
             save_recent,
+            pick_folder,
+            pick_file,
         ])
         .run(tauri::generate_context!())
         .expect("error running CoLM Desktop");
