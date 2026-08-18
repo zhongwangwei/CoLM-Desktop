@@ -15,6 +15,11 @@ colm-hist = { path = "../colm-hist", features = ["io"] }
 colm-kernel = { path = "../colm-kernel" }
 colm-srfdata = { path = "../colm-srfdata" }
 anyhow.workspace = true
+# `scan` 要输出一个 90 元素、每元素 11 个字段的 JSON 数组给 GUI 解析。
+# 手写转义正是这种规模下最容易埋雷的地方（路径里一个反斜杠或一个控制字符
+# 就能让整份输出解析失败），而 `series` 那边手写是因为它只有几个固定键。
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 # 不引入 clap：四个子命令、十来个参数，手写解析比多一个依赖划算。
 # 等参数多到手写会出错时再说。

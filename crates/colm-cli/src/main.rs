@@ -5,6 +5,7 @@
 //! 答「能产出什么」的 `colm-hist` 闸门表不认识 netcdf。
 //!
 //! ```text
+//! colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
 //! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //! colm-cli run     <算例目录> --kernel <目录> [--stream 1]
 //! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N]
@@ -24,6 +25,8 @@ use colm_kernel::Kernel;
 
 const USAGE: &str = "\
 usage:
+  colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
+                   # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
@@ -43,6 +46,13 @@ fn main() -> Result<()> {
     };
     let opts = Opts::parse(&args[1..])?;
     match cmd.as_str() {
+        "scan" => {
+            cmd_scan(
+                &opts.need("--dir")?,
+                opts.get("--out").as_deref(),
+                opts.get("--quick").is_some(),
+            )?;
+        }
         "new" => {
             let case = cmd_new(&opts)?;
             println!("case ready: {}", case.display());
@@ -192,6 +202,116 @@ fn sibling(site: &Path, dir: &str, which: usize) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 一个站点在界面上要显示的一切。
+///
+/// **一次把该读的都读了。** 界面要经纬度、地类、时间范围与步长，
+/// 而这些分散在两个文件里；分两次扫等于把 90 个站点的文件各打开两遍。
+#[derive(serde::Serialize)]
+struct SiteInfo {
+    /// 站点代号，词干第一段（`AT-Neu_2002-2012_..._site.nc` -> `AT-Neu`）
+    name: String,
+    site_file: String,
+    /// 找不到就是 `None` —— 界面据此把「运行」置灰并说明原因，
+    /// 而不是等用户点下去才报错。
+    met_file: Option<String>,
+    /// 观测文件。没有就不能自动评估，这一条决定评估按钮的死活。
+    obs_file: Option<String>,
+    /// 城市形状：站点文件不带 `IGBP_classification`。城市算例必须给
+    /// `--rawdata` / `--runtime`，界面据此决定问不问。
+    urban: bool,
+    lon: f64,
+    lat: f64,
+    landtype: Option<i32>,
+    /// 以下三项要打开强迫场文件。`--quick` 时全为 `None`。
+    start: Option<String>,
+    end: Option<String>,
+    step_seconds: Option<f64>,
+    /// 读这个站点时出的问题，原样带出去。**不让一个坏文件毁掉整次扫描** ——
+    /// 90 个站点里有一个读不了，其余 89 个仍然要列出来。
+    problem: Option<String>,
+}
+
+fn cmd_scan(dir: &Path, out: Option<&str>, quick: bool) -> Result<()> {
+    let mut sites: Vec<SiteInfo> = Vec::new();
+    let rd = std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    files.sort(); // 顺序稳定：界面上的列表不该每次刷新都换一个次序
+
+    for p in files {
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // 站点文件的判据是命名约定，与 `sibling` 用的是同一张表。
+        let Some(stem) = LAYOUTS
+            .iter()
+            .find_map(|(suffix, _, _)| name.strip_suffix(suffix))
+        else {
+            continue;
+        };
+        let short = stem.split('_').next().unwrap_or(stem).to_string();
+        let met = sibling(&p, "Forcing", 0);
+        let obs = sibling(&p, "Observation", 1);
+
+        let (mut lon, mut lat, mut landtype, mut problem) = (f64::NAN, f64::NAN, None, None);
+        match colm_srfdata::site::location(&p) {
+            Ok(l) => {
+                lon = l.lon;
+                lat = l.lat;
+                landtype = l.landtype;
+            }
+            Err(e) => problem = Some(format!("{e:#}")),
+        }
+
+        let (mut start, mut end, mut step) = (None, None, None);
+        if !quick {
+            if let Some(m) = &met {
+                match colm_forcing::summarize(m) {
+                    Ok(s) => {
+                        let e = s.end();
+                        start = Some(format!(
+                            "{}-{:02}-{:02}",
+                            s.start.year, s.start.month, s.start.day
+                        ));
+                        end = Some(format!("{}-{:02}-{:02}", e.year, e.month, e.day));
+                        step = Some(s.step_seconds);
+                    }
+                    Err(e) => problem = Some(format!("{e:#}")),
+                }
+            }
+        }
+
+        sites.push(SiteInfo {
+            name: short,
+            site_file: text(&p),
+            met_file: met.as_deref().map(text),
+            obs_file: obs.as_deref().map(text),
+            // 地类读不出来时不当成城市 —— 那会让一个坏文件被送进 URBAN 路径。
+            urban: problem.is_none() && landtype.is_none(),
+            lon,
+            lat,
+            landtype,
+            start,
+            end,
+            step_seconds: step,
+            problem,
+        });
+    }
+
+    let json = serde_json::to_string_pretty(&sites)?;
+    match out {
+        Some(f) => {
+            std::fs::write(f, &json).with_context(|| format!("cannot write {f}"))?;
+            let with_obs = sites.iter().filter(|s| s.obs_file.is_some()).count();
+            println!(
+                "wrote {} site(s) to {f} ({with_obs} with observations)",
+                sites.len()
+            );
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
 }
 
 fn cmd_new(o: &Opts) -> Result<PathBuf> {
