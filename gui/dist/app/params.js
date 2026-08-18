@@ -50,6 +50,25 @@ const ALWAYS_SHOWN = [
   'DEF_HIST_FREQ', 'DEF_dir_output',
 ];
 
+
+// 少数几个字段光看名字会理解反，在这里补一句。
+//
+// **不是给每个字段配说明** —— schema 里 108 个字段已经带着 CoLM 自己的
+// 行尾注释（`meta.doc`），那些直接显示就够了。这张表只收「名字会误导人」
+// 的那几个，保持短。
+const HINTS = {
+  'DEF_simulation_time%spinup_repeat':
+    '预热轮数：起始日**之前**那段反复跑几遍，让土壤温湿等状态趋于平衡。\n' +
+    '预热期不写 history（MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），' +
+    '所以它不会污染输出，也不会被算进指标。\n' +
+    '与结果页的「丢弃前 N 条记录」不是一回事：那个丢的是输出记录，单位是条。',
+  'DEF_simulation_time%spinup_year':
+    '预热截止时刻。起始时刻早于它，中间那段就是预热期。四项（年月日秒）一起决定。',
+  'DEF_simulation_time%spinup_month': '预热截止时刻的月，见 spinup_repeat 的说明。',
+  'DEF_simulation_time%spinup_day': '预热截止时刻的日，见 spinup_repeat 的说明。',
+  'DEF_simulation_time%spinup_sec': '预热截止时刻的当天秒数，见 spinup_repeat 的说明。',
+};
+
 // 控件按 schema 的类型选，不一律给文本框。
 //
 // 顶层 202 个字段里 **99 个是 logical** —— 差不多一半的界面在让人手打
@@ -213,7 +232,17 @@ function table(shown) {
     } else {
       // schema 里 713 个字段有 108 个带 CoLM 自己的行尾注释。有就显示出来，
       // 顺带把声明的默认值也放上去 —— 用户最常问的就是「不改会怎样」。
-      if (meta) k.title = (meta.doc ? meta.doc + '\n' : '') + '默认 ' + meta.default;
+      const hint = HINTS[e.path];
+      if (hint) {
+        k.title = hint;
+        // 有说明的字段要看得出来有说明 —— 一个只在悬停时才出现的提示，
+        // 等于没有。
+        k.textContent = e.path + ' ⓘ';
+        k.style.cursor = 'help';
+      }
+      if (meta) {
+        k.title = (hint ? hint + '\n\n' : '') + (meta.doc ? meta.doc + '\n' : '') + '默认 ' + meta.default;
+      }
       if (state.irrelevant.has(e.path)) {
         k.className = 'muted';
         k.title = `本内核未编入（需要 ${meta?.requires?.join('、') ?? '某个宏'}），设了也没用\n` + (k.title ?? '');
