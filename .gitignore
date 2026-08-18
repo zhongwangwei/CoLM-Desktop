@@ -8,3 +8,8 @@ target/
 # 黄金运行的工作目录
 /oracle/work/
 .DS_Store
+# Tauri 的 tauri-build 在每次构建时生成 gen/schemas/。其中 macOS-schema.json
+# 是**平台专有**的，Linux 上会生成 linux-schema.json —— 三平台都入库就会互相
+# 覆盖出无意义的 diff。EarthMesh 入库了它们（含 macOS-schema.json），这里刻意
+# 不同：本项目要上三平台，而这些文件重建一次只要几秒。
+/gui/src-tauri/gen/

@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CoLM Desktop</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+  body { margin: 0; display: grid; grid-template-columns: 220px 1fr 360px; height: 100vh; }
+  section { padding: 12px 16px; overflow: auto; border-right: 1px solid color-mix(in oklab, currentColor 18%, transparent); }
+  section:last-child { border-right: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 0 0 10px; }
+  #status { padding: 8px 10px; border-radius: 6px; background: color-mix(in oklab, currentColor 8%, transparent); }
+  .muted { opacity: .6; }
+</style>
+<body>
+  <section><h2>算例库</h2><p class="muted">尚未实现</p></section>
+  <section>
+    <h2>配置</h2>
+    <p id="status">连接后端…</p>
+    <p id="fields" class="muted"></p>
+  </section>
+  <section><h2>结果</h2><p class="muted">尚未实现</p></section>
+
+<script>
+// withGlobalTauri: true，所以直接用 window.__TAURI__，不需要模块加载器。
+const invoke = window.__TAURI__?.core?.invoke;
+const status = document.getElementById('status');
+const fields = document.getElementById('fields');
+
+if (!invoke) {
+  // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是静默空白。
+  status.textContent = 'no IPC backend — this page is running outside Tauri';
+} else {
+  invoke('backend_ready')
+    .then(msg => { status.textContent = msg; return invoke('describe_fields'); })
+    .then(list => {
+      const derived = list.filter(f => f.derived).length;
+      const groups = new Set(list.map(f => f.group).filter(Boolean));
+      fields.textContent =
+        `${list.length} fields across ${groups.size} namelist groups; ` +
+        `${derived} are derived and cannot be set`;
+    })
+    .catch(e => { status.textContent = 'backend error: ' + e; });
+}
+</script>
+</body>

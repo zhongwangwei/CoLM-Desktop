@@ -1,0 +1,33 @@
+[package]
+name = "colm-desktop-gui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.1"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Tauri 的二进制链接的是这个 lib；main.rs 只是一层薄壳。
+[lib]
+name = "colm_desktop_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 只链接**不含 netcdf** 的那几层。实测各 crate 的 netcdf/hdf5 依赖节点数：
+# colm-namelist 0、colm-schema 0、colm-case 0、colm-kernel 0、colm-hist(默认) 0；
+# 而 colm-forcing 7、colm-srfdata 7、colm-cli 9。
+# 凡要读 NetCDF 的一律走 colm-cli sidecar —— 窗口进程不该为了画一条曲线
+# 把整个静态 HDF5 拖进来。
+colm-namelist = { path = "../../crates/colm-namelist" }
+colm-schema = { path = "../../crates/colm-schema" }
+
+# **自己就是一个 workspace 根。** 这一行把 429 个 Tauri 依赖挡在引擎
+# workspace 之外 —— 引擎那边只有 70 个，`cargo test --workspace` 不该
+# 每次面对 429 个 crate。见 design.md §4.1。
+[workspace]
