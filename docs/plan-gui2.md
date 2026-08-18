@@ -289,7 +289,7 @@ presets.rs    参数预设的读写（JSON，存在算例目录之外的用户�
 
 ---
 
-### 任务 1b：前端拆成模块
+### 任务 1b：前端拆成模块（**已完成**）
 
 **文件：**
 - 新建：`gui/dist/app/{main,ipc,ui}.js`、`gui/dist/app/style.css`
@@ -332,14 +332,53 @@ fn it_scans_every_js_module_not_just_index_html() {
 
 - [x] **步骤 4：跑通**，`cargo test -p xtask`
 
-- [ ] **步骤 5：拆前端**
+实际拆出来的样子（与 §2 略有出入，出入处已说明）：
+
+| 文件 | 行 | 装什么 |
+|---|---|---|
+| `index.html` | 51 | 只剩 DOM 骨架 + 两个 `<link>` + 两个 `<script>` |
+| `app/style.css` | 32 | 原 `<style>` 原样搬过去 |
+| `app/ipc.js` | 12 | `invoke` / `listen` / `hasBackend` |
+| `app/state.js` | 17 | 共享状态 |
+| `app/ui.js` | 8 | `$` 与 `status` |
+| `app/main.js` | 24 | 只做接线 |
+| `app/params.js` | 70 | 页签与字段表 |
+| `app/results.js` | 67 | 可画变量、取序列、画图 |
+| `app/runner.js` | 91 | 内核下拉框、运行、三个事件 |
+| `app/sites.js` | 81 | 算例库扫描、选中、新建 |
+
+**`state.js` 是 §2 没列的。** 加它是因为 `main.js` 要 import 其余模块、
+其余模块又要读状态 —— 状态放在 `main.js` 里就成了循环依赖。
+ES module 的循环依赖**不报错**，只是让某个 import 在运行时变成 `undefined`，
+那种故障比编译错误难查得多。
+
+拆完之后的等价性验证（与拆分前的实测值逐项对照，全部相同）：
+
+| | 拆分前 | 拆分后 |
+|---|---|---|
+| 状态栏 | 737 fields | 同 |
+| 页签 / 内核下拉框 | 3 / 3 | 同 |
+| 算例数 / 字段行数 | 9 / 24 | 同 |
+| 画布不透明像素 / 颜色数 | 26838 / 11 | **同** |
+| 运行链 | 63%→81%→100%，日志截回 40000 | 63%→83%→100%，同 |
+| `check-gui` | 13 / 12 / 3 | 同 |
+
+真 WKWebView 里也起来了 —— 这一条原本是个假设（Tauri 的 CSP
+`script-src 'self'` 允不允许同源 ES module），现在有实证：
+启动日志里 `backend_ready` 那行照常打出来。
+
+拆的过程里踩过一个坑，记下来：按行号切分时，`boot()` 的收尾 `}` 被一起切进了
+`watchRun`，结果是 `Unexpected token '}'`。**逐模块数花括号净差**能立刻定位，
+比读 stack trace 快 —— 拆分这种活值得先写那三行统计。
+
+- [x] **步骤 5：拆前端**
 
 `index.html` 只留 DOM 骨架与 `<link rel=stylesheet href="app/style.css">`、
 `<script type="module" src="app/main.js"></script>`。
 把现有 353 行里的 `<style>` 移进 `style.css`，脚本按 §2 拆开。
 **这一步不改任何行为** —— 拆完之后 Chromium 里走一遍，页面与拆之前一致。
 
-- [ ] **步骤 6：`ipc.js` 收口**
+- [x] **步骤 6：`ipc.js` 收口**
 
 ```js
 // 全部 IPC 只从这里出去。check-gui 靠扫这些字面量核对前后端接口，
@@ -351,7 +390,7 @@ export const listen = T?.event?.listen;
 export const hasBackend = !!invoke;
 ```
 
-- [ ] **步骤 7：验收 + 提交**
+- [x] **步骤 7：验收 + 提交**
 
 ```bash
 cargo run -p xtask -- check-gui      # 命令数与拆分前一致

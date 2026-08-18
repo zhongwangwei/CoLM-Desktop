@@ -1,0 +1,32 @@
+  :root { color-scheme: light dark; font: 13px/1.55 system-ui, -apple-system, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template-columns: 230px 1fr 420px; }
+  aside, main, .results { padding: 12px 14px; overflow: auto; min-width: 0; }
+  aside, main { border-right: 1px solid var(--rule); }
+  :root { --rule: color-mix(in oklab, currentColor 16%, transparent);
+          --soft: color-mix(in oklab, currentColor 7%, transparent); }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; opacity: .55; margin: 0 0 9px; }
+  button { font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--rule);
+           background: var(--soft); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  input, select { font: inherit; padding: 4px 7px; border-radius: 5px;
+                  border: 1px solid var(--rule); background: transparent; color: inherit; width: 100%; }
+  label { display: block; margin: 7px 0 2px; opacity: .65; font-size: 11px; }
+  .case { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  .case:hover { background: var(--soft); }
+  .case[aria-selected=true] { background: var(--soft); font-weight: 600; }
+  .case small { display: block; opacity: .5; font-weight: 400; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .bar { height: 4px; border-radius: 2px; background: var(--soft); overflow: hidden; margin: 8px 0; }
+  .bar > i { display: block; height: 100%; width: 0; background: currentColor; opacity: .55;
+             transition: width .12s linear; }
+  pre { margin: 0; font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap;
+        max-height: 34vh; overflow: auto; background: var(--soft); padding: 8px; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  td, th { text-align: left; padding: 2px 6px 2px 0; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { color: #b4690e; }
+  .muted { opacity: .55; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .tabs button[aria-pressed=true] { background: color-mix(in oklab, currentColor 14%, transparent); }
+  .chart { margin-bottom: 14px; }
