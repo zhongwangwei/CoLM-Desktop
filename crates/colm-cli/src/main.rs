@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
-//! colm-cli run     <算例目录> --kernel <目录>
+//! colm-cli run     <算例目录> --kernel <目录> [--stream 1]
 //! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N]
 //! colm-cli series  <算例目录> --vars f_rnet,f_fsena [--out series.json]
 //! colm-cli all     --site ... --out ... --kernel ... [--obs ...]
@@ -27,7 +27,8 @@ usage:
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
-  colm-cli run     <case-dir> --kernel <dir>
+  colm-cli run     <case-dir> --kernel <dir> [--stream 1]
+                   # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N]
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
@@ -47,7 +48,11 @@ fn main() -> Result<()> {
             println!("case ready: {}", case.display());
         }
         "run" => {
-            cmd_run(&opts.positional_case()?, &opts.need("--kernel")?)?;
+            cmd_run(
+                &opts.positional_case()?,
+                &opts.need("--kernel")?,
+                opts.get("--stream").is_some(),
+            )?;
         }
         "metrics" => {
             let case = opts.positional_case()?;
@@ -63,7 +68,11 @@ fn main() -> Result<()> {
         }
         "all" => {
             let case = cmd_new(&opts)?;
-            cmd_run(&case, &opts.need("--kernel")?)?;
+            cmd_run(
+                &case,
+                &opts.need("--kernel")?,
+                opts.get("--stream").is_some(),
+            )?;
             match opts.get("--obs") {
                 Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?)?,
                 None => println!("no --obs given; skipping the metrics table"),
@@ -363,7 +372,14 @@ fn slash(p: &Path) -> String {
 
 // ---------------------------------------------------------------- run
 
-fn cmd_run(case: &Path, kernel_dir: &Path) -> Result<()> {
+/// `stream` 打开时，子进程的每一行原样即时转发到本进程的 stdout。
+///
+/// 默认关着是有理由的：一次 528 步的运行，`colm.x` 打 5330 行，而人在终端
+/// 想看到的是那 39 行摘要。但 GUI 那边正相反 —— 它的进度条靠
+/// `TIMESTEP = n | DATE = ...`，日志窗要的就是原始行，而这两样都只在
+/// 子进程的 stdout 里。同一个可执行文件同时服务两个诉求不同的调用方，
+/// 于是由调用方说要哪一种。
+fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
     let kernel = Kernel::open(kernel_dir)?;
     println!(
         "kernel: {} {} ({})",
@@ -387,7 +403,25 @@ fn cmd_run(case: &Path, kernel_dir: &Path) -> Result<()> {
         (Stage::Colm, vec![]),
     ];
     for (stage, artifacts) in &stages {
-        let r = colm_kernel::run_stage(&kernel, *stage, &layout.case_nml(), case, artifacts)?;
+        // 转发时**每行都 flush**。默认的行缓冲只在 stdout 连着终端时才生效；
+        // GUI 拿到的是一根管道，那时缓冲变成块缓冲（8 KB），5330 行会攒成
+        // 几大块一起吐出来 —— 从界面上看跟完全不转发几乎没有区别。
+        let mut forward = |line: &str| {
+            if stream {
+                use std::io::Write as _;
+                let mut o = std::io::stdout().lock();
+                let _ = writeln!(o, "{line}");
+                let _ = o.flush();
+            }
+        };
+        let r = colm_kernel::run_stage_streaming(
+            &kernel,
+            *stage,
+            &layout.case_nml(),
+            case,
+            artifacts,
+            &mut forward,
+        )?;
         if r.succeeded() {
             println!("  {:<10} ok", stage.program());
         } else {

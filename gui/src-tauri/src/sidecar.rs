@@ -120,7 +120,12 @@ pub async fn run_case(
 ) -> Result<i32, String> {
     let cli = resolve_cli(&app);
     let mut child = std::process::Command::new(&cli)
-        .args(["run", &case, "--kernel", &kernel])
+        // `--stream` 不是可选的润色：不加的话 `colm-cli run` 只在每段跑完
+        // 之后打一句摘要，一次真实运行总共 39 行，而且全在结束时到达 ——
+        // 下面这整套「解析 TIMESTEP、限流、批量发送」就没有输入可处理，
+        // 进度条从 0 直接跳到 100，日志窗在运行期间一片空白。
+        // 实测同一次城市算例：不加 39 行，加了 34180 行（含 528 条 TIMESTEP）。
+        .args(["run", &case, "--kernel", &kernel, "--stream", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

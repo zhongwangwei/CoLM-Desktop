@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::*;
 
 /// 本机实测的清单，一字不改地当作固件。
-const SAMPLE: &str = r#"{
+pub const SAMPLE: &str = r#"{
   "schema": 1,
   "preset": "waterheat",
   "platform": "Darwin-arm64",

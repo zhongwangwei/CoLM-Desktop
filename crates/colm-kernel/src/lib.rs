@@ -22,4 +22,4 @@ pub mod run;
 
 pub use manifest::{sha256_hex, Kernel, Manifest, PROGRAMS};
 pub use overrides::{extract as extract_overrides, Kind, Override};
-pub use run::{run_stage, StageReport};
+pub use run::{run_stage, run_stage_streaming, StageReport};

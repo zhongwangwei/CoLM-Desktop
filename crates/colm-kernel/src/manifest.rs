@@ -123,4 +123,4 @@ fn sha256_file(p: &Path) -> Result<String> {
 
 #[cfg(test)]
 #[path = "manifest_tests.rs"]
-mod manifest_tests;
+pub mod manifest_tests;
