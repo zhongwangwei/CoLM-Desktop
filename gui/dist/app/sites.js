@@ -6,7 +6,7 @@ import { $, status } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
-import { renderSteps, setStatus } from './shell.js';
+import { go, renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
 
 $('rescan').onclick = async () => {
@@ -30,16 +30,18 @@ export function renderCases() {
     d.setAttribute('aria-selected', String(state.selected?.dir === c.dir));
     // 与站点列表同一套：**这个列表的勾选，驱动这个列表上的批量操作**。
     // 站点那边的勾选驱动批量建，这边的驱动批量运行与批量评估。
+    const lab = document.createElement('label');
+    lab.className = 'tickbox';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = state.pickedCases.has(c.dir);
-    cb.style.cssText = 'width:auto;margin-right:8px';
-    cb.onclick = e => {
-      e.stopPropagation();   // 勾选不等于「切到这一个算例」
+    cb.onchange = () => {
       if (cb.checked) state.pickedCases.add(c.dir); else state.pickedCases.delete(c.dir);
       updateCaseBatchButtons();
     };
-    d.appendChild(cb);
+    lab.appendChild(cb);
+    lab.onclick = e => e.stopPropagation();   // 勾选不等于「切到这一个算例」
+    d.appendChild(lab);
     const s = document.createElement('small');
     // 本次批次里的状态优先 —— 「已跑过」说的是历史，「运行中」说的是现在。
     s.textContent = state.runState[c.dir] ?? (c.has_history ? '已跑过' : '未跑');
@@ -86,13 +88,52 @@ async function selectCase(c) {
  *
  *  建在**第一次真要用它**的时候，不在点中的时候：点站点常常只是看看，
  *  而每建一个都要读站点文件与强迫场、写出补齐的 site.nc。 */
-export async function pickSite(s) {
+export function pickSite(s) {
+  // **只高亮，不动文件。** 原来这里顺手就把算例建了，于是误点一行
+  // 就是一次读站点文件、读强迫场、写 site.nc —— 而勾选框就在旁边，
+  // 误点是常事而不是意外。建算例挪到「确定」，那是一个人明确按下的地方。
   state.pickedSite = s;
-  $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.name)) && !s.urban;
   renderSites();
   setStatus(`已选 ${s.name}${s.met_file ? '' : '（没有强迫场，跑不了）'}`);
-  const c = await ensureCase(s);
-  if (c) { state.selected = c; renderSteps(); }
+}
+
+/** 「确定」：为选中的站点建算例，然后往下走。
+ *
+ *  勾了就用勾中的那些，一个没勾就用高亮的那一个 —— 与批量按钮同一条规则，
+ *  而按钮上的字说出它会做什么，不留隐藏模式。 */
+async function confirmSelection() {
+  const checked = state.sites.filter(s => state.picked.has(s.name));
+  const target = checked.length ? checked : (state.pickedSite ? [state.pickedSite] : []);
+  if (!target.length) { setStatus('先点一个站点，或勾选几个'); return; }
+  const btn = $('datafoot').querySelector('button');
+  if (btn) btn.disabled = true;
+  try {
+    const made = await ensureCases(target);
+    if (!made.length) return;
+    state.selected = made[0];
+    renderSteps();
+    go('params');
+  } finally { renderDataFoot(); }
+}
+
+/** 站点页自己的出口。**字要说出它会做什么** —— 它不只是翻页，
+ *  它会去建算例，而那是要读写文件的。 */
+export function renderDataFoot() {
+  const foot = $('datafoot');
+  if (!foot) return;
+  foot.textContent = '';
+  const n = state.picked.size;
+  const one = state.pickedSite;
+  const b = document.createElement('button');
+  b.className = 'btn-next';
+  if (n) b.textContent = `确定：为选中的 ${n} 个站点建算例并继续 →`;
+  else if (one) b.textContent = `确定：用 ${one.name} 继续 →`;
+  else b.textContent = '先点一个站点，或勾选几个';
+  b.disabled = !n && !one;
+  b.onclick = confirmSelection;
+  foot.appendChild(b);
+  const info = $('pickinfo');
+  if (info) info.textContent = n ? `已勾 ${n} 个` : (one ? `已选 ${one.name}` : '还没选');
 }
 
 /** 这个站点的算例，没有就建一个。返回 `null` 表示建不了（并已说明原因）。 */
@@ -172,6 +213,7 @@ function renderSites(r = {}) {
   }
   const bad = state.sites.filter(s => s.problem).length;
   const noObs = state.sites.filter(s => !s.obs_file).length;
+  renderDataFoot();
   const urban = state.sites.filter(s => s.urban).length;
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
@@ -187,15 +229,22 @@ function renderSites(r = {}) {
     d.setAttribute('aria-selected', String(state.pickedSite?.name === s.name));
     // 多选是批量的入口。**流水线作用于「一组」，选 1 个只是 N=1** ——
     // 批量另开一套界面的话，就有两条流水线要各自维护，而它们迟早会分叉。
+    //
+    // 勾选框套一个 <label>：**点击区从十几像素变成整个左格**。
+    // 一个小靶子紧挨着另一个可点区域，误点是必然而不是意外。
+    const lab = document.createElement('label');
+    lab.className = 'tickbox';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = state.picked.has(s.name);
-    cb.onclick = e => {
-      e.stopPropagation();   // 勾选不等于「选中这一个」
+    cb.onchange = () => {
       if (cb.checked) state.picked.add(s.name); else state.picked.delete(s.name);
-        };
-    cb.style.cssText = 'width:auto;margin-right:8px';
-    d.appendChild(cb);
+      renderDataFoot();
+      $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.name));
+    };
+    lab.appendChild(cb);
+    lab.onclick = e => e.stopPropagation();   // 勾选不等于「选中这一个」
+    d.appendChild(lab);
     d.appendChild(document.createTextNode(s.name));
     const small = document.createElement('small');
     const tags = [];
@@ -242,3 +291,7 @@ export async function ensureCases(sites) {
   return made;
 }
 
+
+
+$('pick-all').onclick = () => { for (const s of state.sites) state.picked.add(s.name); renderSites(); };
+$('pick-none').onclick = () => { state.picked.clear(); renderSites(); };

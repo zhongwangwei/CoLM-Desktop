@@ -63,7 +63,7 @@
     </section>
 
     <!-- ② 站点 -->
-    <section class="page" data-step="data" hidden>
+    <section class="page" data-step="data" data-own-foot hidden>
       <div class="work-head"><span class="kicker">第 2 步</span></div>
       <h1>有哪些站点可以跑</h1>
       <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
@@ -80,10 +80,17 @@
         </div>
         <p class="muted mini" id="sitesummary">&nbsp;</p>
         <div id="sites" class="listbox"></div>
-        <p class="muted mini" style="margin-top:10px">
-          点一个站点就能往下走。<b>算例是按需自动建的</b> ——
-          第一次要配参数或运行时才建，不用你按「新建」。</p>
+        <div class="pill-row" style="margin-top:12px">
+          <button class="btn-ghost" id="pick-all">全选</button>
+          <button class="btn-ghost" id="pick-none">全不选</button>
+          <span class="muted mini" id="pickinfo">还没选</span>
+        </div>
+        <p class="muted mini" style="margin-top:8px">
+          点行只是选中，<b>不会动任何文件</b>。按下面的「确定」才会为选中的站点建算例
+          —— 那一步要读站点文件与强迫场并写出补齐后的 <code>site.nc</code>。</p>
       </div>
+
+      <div class="foot" id="datafoot"></div>
 
       <div class="card">
         <h3>算例放哪</h3>

@@ -31,6 +31,9 @@ export function nextOf(id) {
 /** 给每一页底部装一个「下一步」。进不去时按钮说出原因，而不是只灰着。 */
 export function renderNextButtons() {
   for (const page of document.querySelectorAll('.page')) {
+    // 有自己出口的页不注入通用按钮：站点页的出口要先建算例再走，
+    // 两个长得差不多、行为不同的按钮摆在一起，比没有按钮更糟。
+    if (page.hasAttribute('data-own-foot')) continue;
     const next = nextOf(page.dataset.step);
     let foot = page.querySelector('.foot');
     if (!foot) {

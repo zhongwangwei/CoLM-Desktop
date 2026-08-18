@@ -235,3 +235,10 @@ td:first-child { overflow-wrap: anywhere; }
 /* 每一页底部的出口。**让人自己回左栏找下一步，等于把「现在该干嘛」推给用户。** */
 .foot { display: flex; justify-content: flex-end; margin-top: var(--s-lg);
         padding-top: var(--s-lg); border-top: 1px solid var(--border); }
+
+/* 勾选框的点击区。**一个十几像素的靶子紧挨着另一个可点区域，误点是必然。**
+   套一个 label 把可点范围撑到整个左格，勾选框本身也放大到 17px。 */
+.tickbox { display: flex; align-items: center; padding: 6px 10px 6px 2px;
+           margin: -6px 0 -6px -2px; cursor: pointer; flex: none; }
+.tickbox input { width: 17px; height: 17px; accent-color: var(--accent); }
+.tickbox:hover input { outline: 2px solid var(--accent-weak); outline-offset: 2px; }
