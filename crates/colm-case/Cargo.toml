@@ -1,0 +1,17 @@
+[package]
+name = "colm-case"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true   # 必须显式 opt-in
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 造文件与跑模型是两件事，所以这里**不依赖 colm-kernel** ——
+# 「只想看看会生成什么」不该先要一个能跑的内核。
+colm-namelist = { path = "../colm-namelist" }
+colm-schema = { path = "../colm-schema" }
+anyhow.workspace = true
+
+[lints]
+workspace = true

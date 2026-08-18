@@ -58,6 +58,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-case"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "colm-namelist",
+ "colm-schema",
+]
+
+[[package]]
 name = "colm-forcing"
 version = "0.1.0"
 dependencies = [
