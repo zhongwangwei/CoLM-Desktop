@@ -37,7 +37,7 @@ pub fn is_default(path: &str, v: &Value) -> Option<bool> {
 }
 
 /// 从一组字段里筛出**必须写**的那些，保持传入顺序。
-pub fn required<'a>(fields: &'a [(String, Value)]) -> Vec<&'a (String, Value)> {
+pub fn required(fields: &[(String, Value)]) -> Vec<&(String, Value)> {
     fields
         .iter()
         .filter(|(p, v)| is_default(p, v) != Some(true))
