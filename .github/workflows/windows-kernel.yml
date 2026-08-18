@@ -151,3 +151,11 @@ jobs:
             Write-Host "::error::带上 DLL 之后仍然是 STATUS_DLL_NOT_FOUND —— 清单不全"
             exit 1
           }
+          # **显式 exit 0。** 上面最后跑的原生命令是 colm.exe，它没拿到 namelist
+          # 就停下来、退出码 2 —— 那正是本步骤期待的结果。但 pwsh 步骤结束时会拿
+          # `$LASTEXITCODE` 当自己的退出码，于是"测出了预期结果"被记成"步骤失败"。
+          #
+          # 这是本仓库第三次踩同一个形状：被测程序的非零退出码泄漏成检查本身的
+          # 退出码。前两次分别是 macOS 上 `colm-cli | grep -q` 撞上 bash 的
+          # pipefail，以及这一步早先那版。**断言写完就把退出码钉死。**
+          exit 0
