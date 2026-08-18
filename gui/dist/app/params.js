@@ -17,6 +17,36 @@ export function renderTabs() {
   }
 }
 
+
+// 九个功能分类。**判据是字段名前缀，不是主观的「重要性」** —— 前缀是 CoLM
+// 自己的命名，会随上游一起演进；主观分类会在下一次上游加字段时立刻过时。
+//
+// 顺序即优先级，每个字段只进第一个匹配上的分类。`other` 是兜底且**必须在
+// 最后**：新字段进来不会消失，而是显眼地堆在「其他」里 —— 那正是提醒
+// 有人该给它归类的信号。
+export const GROUPS = [
+  { id: 'site',    label: '站点',     match: n => n.startsWith('SITE_') || n.startsWith('USE_SITE_') },
+  { id: 'time',    label: '时间',     match: n => n.startsWith('DEF_simulation_time') },
+  { id: 'dirs',    label: '路径',     match: n => n.startsWith('DEF_dir') || n === 'DEF_forcing_namelist' },
+  { id: 'urban',   label: '城市',     match: n => n.includes('URBAN') || n.includes('Urban') },
+  { id: 'soil',    label: '土壤',     match: n => /SOIL|Soil|soil/.test(n) },
+  { id: 'physics', label: '物理开关', match: n => n.startsWith('DEF_USE_') },
+  { id: 'forcing', label: '强迫场',   match: (n, f) => f?.group === 'nl_colm_forcing' },
+  { id: 'output',  label: '输出',     match: n => /^DEF_(HIST|hist|WRST)/.test(n) },
+  { id: 'other',   label: '其他',     match: () => true },
+];
+
+function groupOf(name, meta) {
+  return GROUPS.find(g => g.match(name, meta)) ?? GROUPS[GROUPS.length - 1];
+}
+
+// 「常改项」白名单：一个人跑一个新站点时几乎一定要看的东西。
+// **保持短** —— 长白名单等于没有普通模式。
+const ALWAYS_SHOWN = [
+  'DEF_simulation_time%start_year', 'DEF_simulation_time%end_year',
+  'DEF_HIST_FREQ', 'DEF_dir_output',
+];
+
 // 控件按 schema 的类型选，不一律给文本框。
 //
 // 顶层 202 个字段里 **99 个是 logical** —— 差不多一半的界面在让人手打
@@ -73,11 +103,98 @@ export async function renderFields() {
   try { entries = await invoke('read_case', { text: state.text }); }
   catch (e) { box.textContent = String(e); return; }
 
-  const inGroup = entries.filter(e => (e.group ?? 'nl_colm') === state.group);
+  // 专家模式：把这份配置**没设过**的字段也补进来，显示 schema 默认值并标灰。
+  // 判据用 `minimal::required` 已有的那条分界（设了的 vs 等于默认值的），
+  // 不另发明一套 —— 它可解释，而且和 .nml 文件里看到的一致。
+  let entriesAll = entries;
+  if (state.expert) {
+    const have = new Set(entries.map(e => e.path));
+    const extra = state.fields
+      .filter(f => !have.has(f.name))
+      .filter(f => f.group === state.group)
+      // 482 个 `DEF_hist_vars%*` 不在这里露面 —— 它们有自己的一页（§1.1）。
+      // 铺进这张表的话，「输出变量」页签在专家模式下会变成 482 行。
+      .filter(f => !f.name.startsWith('DEF_hist_vars%'))
+      .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
+                   derived: f.derived, unset: true }));
+    entriesAll = entries.concat(extra);
+  }
+  const inGroup = entriesAll.filter(e => (e.group ?? 'nl_colm') === state.group);
   // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
-  const shown = state.expert ? inGroup : inGroup.filter(e => !state.irrelevant.has(e.path));
+  const shown = state.showIrrelevant ? inGroup : inGroup.filter(e => !state.irrelevant.has(e.path));
   if (!shown.length) { box.innerHTML = '<p class="muted">这一组里这份配置没有设任何字段</p>'; return; }
+  renderToolbar(box, inGroup.length, shown.length);
+
+  // 按九分类分节。分节而不是分页签：`nl_colm` 那一组有 214 个字段，
+  // 而另外两组只有 35 与 482（后者另有专页），只有它需要再分。
+  // 页签仍按 namelist 组分 —— 那决定**写进哪个文件**，是另一回事。
+  const filter = state.fieldFilter?.trim().toLowerCase() ?? '';
+  const visible = filter ? shown.filter(e => e.path.toLowerCase().includes(filter)) : shown;
+  const buckets = new Map(GROUPS.map(g => [g.id, []]));
+  for (const e of visible) {
+    buckets.get(groupOf(e.path, state.fields.find(f => f.name === e.path)).id).push(e);
+  }
+
+  for (const g of GROUPS) {
+    const rows = buckets.get(g.id);
+    if (!rows.length) continue;
+    const h = document.createElement('h2');
+    h.textContent = `${g.label}（${rows.length}）`;
+    h.style.marginTop = '14px';
+    box.appendChild(h);
+    box.appendChild(table(rows));
+  }
+  if (!visible.length) {
+    box.insertAdjacentHTML('beforeend', `<p class="muted">没有名字含「${filter}」的字段</p>`);
+  }
+
+  // **藏起来不等于假装不存在。** 换个内核这些字段就该回来，
+  // 而看不见又找不到会让人以为程序坏了。
+  if (hidden.length && !state.showIrrelevant) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.style.cssText = 'font-size:11px;cursor:pointer';
+    p.textContent = `+ ${hidden.length} 个字段本内核未编入（${hidden.map(h => h.path).slice(0, 3).join('、')}${hidden.length > 3 ? ' 等' : ''}），点此展开`;
+    p.onclick = () => { state.showIrrelevant = true; renderFields(); };
+    box.appendChild(p);
+  } else if (state.showIrrelevant && hidden.length) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.style.cssText = 'font-size:11px;cursor:pointer';
+    p.textContent = `专家模式：正在显示 ${hidden.length} 个本内核未编入的字段，点此收起`;
+    p.onclick = () => { state.showIrrelevant = false; renderFields(); };
+    box.appendChild(p);
+  }
+}
+
+/** 顶部一行：普通/专家切换 + 过滤框。 */
+function renderToolbar(box, total, shown) {
+  const bar = document.createElement('div');
+  bar.className = 'row';
+  bar.style.marginBottom = '8px';
+  const b = document.createElement('button');
+  b.textContent = state.expert ? `专家模式（${shown} 项）` : `普通模式（${shown} 项）`;
+  b.title = state.expert
+    ? '正在显示全部字段，含这份配置没设过的（灰色，值是 CoLM 的默认值）'
+    : '只显示这份配置实际设了的字段。点击查看全部。';
+  b.setAttribute('aria-pressed', String(state.expert));
+  b.onclick = () => { state.expert = !state.expert; renderFields(); };
+  bar.appendChild(b);
+  const f = document.createElement('input');
+  f.placeholder = '过滤字段名';
+  f.value = state.fieldFilter ?? '';
+  f.style.flex = '1';
+  // input 而不是 change：202 个字段时边打边筛才有用。
+  f.oninput = () => { state.fieldFilter = f.value; renderFields(); };
+  bar.appendChild(f);
+  box.appendChild(bar);
+  // 过滤框重绘后会失焦，补回去 —— 否则打第二个字符就得再点一次。
+  if (state.fieldFilter) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
+}
+
+/** 一组字段渲染成一张表。分节之后每节各调一次。 */
+function table(shown) {
   const tbl = document.createElement('table');
   for (const e of shown) {
     const tr = document.createElement('tr');
@@ -106,6 +223,8 @@ export async function renderFields() {
       v.className = 'muted';
     } else {
       const inp = control(e, meta);
+      // 未设过的字段标灰：它显示的是 CoLM 的默认值，不是这份文件里的内容。
+      if (e.unset) { inp.style.opacity = '0.55'; v.title = '这份配置没设它，显示的是默认值'; }
       inp.onchange = async () => {
         try {
           state.text = await invoke('set_field',
@@ -122,23 +241,5 @@ export async function renderFields() {
     }
     tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
   }
-  box.appendChild(tbl);
-
-  // **藏起来不等于假装不存在。** 换个内核这些字段就该回来，
-  // 而看不见又找不到会让人以为程序坏了。
-  if (hidden.length && !state.expert) {
-    const p = document.createElement('p');
-    p.className = 'muted';
-    p.style.cssText = 'font-size:11px;cursor:pointer';
-    p.textContent = `+ ${hidden.length} 个字段本内核未编入（${hidden.map(h => h.path).slice(0, 3).join('、')}${hidden.length > 3 ? ' 等' : ''}），点此展开`;
-    p.onclick = () => { state.expert = true; renderFields(); };
-    box.appendChild(p);
-  } else if (state.expert && hidden.length) {
-    const p = document.createElement('p');
-    p.className = 'muted';
-    p.style.cssText = 'font-size:11px;cursor:pointer';
-    p.textContent = `专家模式：正在显示 ${hidden.length} 个本内核未编入的字段，点此收起`;
-    p.onclick = () => { state.expert = false; renderFields(); };
-    box.appendChild(p);
-  }
+  return tbl;
 }
