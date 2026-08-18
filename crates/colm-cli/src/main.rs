@@ -7,13 +7,15 @@
 //! ```text
 //! colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
 //! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
+//!                  [--spinup-years N] [--spinup-repeat N]
 //! colm-cli run     <算例目录> --kernel <目录> [--stream 1]
 //! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N] [--json 1]
 //! colm-cli series  <算例目录> --vars f_rnet,f_fsena [--out series.json]
 //! colm-cli all     --site ... --out ... --kernel ... [--obs ...]
 //! ```
 //!
-//! `--start` / `--end` 不给就用强迫场覆盖的完整范围。经纬度与地类读自站点
+//! `--start` / `--end` 不给就用强迫场覆盖的完整范围。预热默认重复头一年
+//! 10 遍，而预热期是从窗口头上扣的（输出因此少一年）。经纬度与地类读自站点
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod fingerprint;
@@ -21,7 +23,7 @@ mod fingerprint;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use colm_case::{fields, minimal::required, render, CaseSpec, Dirs, Layout, Window};
+use colm_case::{fields, minimal::required, render, CaseSpec, Dirs, Layout, Spinup, Window};
 use colm_kernel::outcome::Stage;
 use colm_kernel::Kernel;
 
@@ -30,6 +32,7 @@ usage:
   colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
+                   [--spinup-years N] [--spinup-repeat N]   (默认 1 年 x 10 遍)
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1]
@@ -159,6 +162,19 @@ impl Opts {
         match self.positional.first() {
             Some(p) => Ok(PathBuf::from(p)),
             None => bail!("a case directory is required\n{USAGE}"),
+        }
+    }
+
+    /// 一个带默认值的非负整数选项。
+    ///
+    /// 与 [`Opts::spinup`] 不同：那个的默认值 0 有语义（不剔除），
+    /// 这个的默认值由调用方给 —— 预热的两项默认都不是 0。
+    fn count(&self, name: &str, default: u32) -> Result<u32> {
+        match self.get(name) {
+            None => Ok(default),
+            Some(v) => v
+                .parse()
+                .with_context(|| format!("{name} {v:?} is not a count")),
         }
     }
 
@@ -430,6 +446,33 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             e.day
         );
     }
+    // 预热。默认重复第一年 10 遍 —— 陆面模式的土壤温湿与（开了 BGC 时的）
+    // 碳库是慢变量，直接从初始场跑出来的头一段并不代表这个站点的气候态。
+    //
+    // **代价是输出少一年**：CoLM 的预热期是从窗口头上扣的，不是加在前面的
+    // （`MOD_Hist.F90:235` 在预热期直接 RETURN）。所以周期只取一年，
+    // 而不是常见的"重复整段"—— PLUMBER2 里最短的站点只有两年多。
+    let spin_years = o.count("--spinup-years", 1)?;
+    let spin_repeat = o.count("--spinup-repeat", 10)?;
+    let mut spinup = Spinup {
+        years: spin_years,
+        repeat: spin_repeat,
+    };
+    // 预热周期盖过整个窗口时，输出会是空的 —— 而空输出与"跑失败了"在
+    // 界面上长得一样。宁可不预热，也不能交出一个没有 history 的算例。
+    if spinup.is_on() && (start.0 + spin_years as i32, start.1, start.2) >= end {
+        eprintln!(
+            "warning: spin-up would end at {}-{:02}-{:02}, at or past the window's end              {}-{:02}-{:02} — history is only written after spin-up, so this case would              produce nothing. Spin-up disabled; pass --spinup-years with a shorter period              to keep it.",
+            start.0 + spin_years as i32,
+            start.1,
+            start.2,
+            end.0,
+            end.1,
+            end.2
+        );
+        spinup = Spinup::OFF;
+    }
+
     let loc = colm_srfdata::site::location(&layout.site_nc())?;
     let name = o.get("--name").unwrap_or_else(|| {
         site_raw
@@ -482,6 +525,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         // 由文件说了算，不写死 —— PLUMBER2 是地方时，Urban-PLUMBER 是 UTC
         greenwich: summary.is_greenwich(),
         urban,
+        spinup,
         dirs: Dirs {
             rawdata: dirs.0.clone(),
             runtime: dirs.1.clone(),

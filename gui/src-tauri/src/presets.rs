@@ -125,6 +125,25 @@ pub fn apply_preset(app: tauri::AppHandle, name: String, text: String) -> Result
     Ok(out)
 }
 
+/// 把一个预设套到一批算例上。
+///
+/// **先全套完再落盘**，与 `set_field_batch` 同一条规则：半批套上了预设、
+/// 半批没有，在界面上与全批套上长得一样，而它们跑出来的东西不一样。
+#[tauri::command]
+pub fn apply_preset_batch(
+    app: tauri::AppHandle,
+    name: String,
+    dirs: Vec<String>,
+) -> Result<crate::config::BatchWrite, String> {
+    let mut done = Vec::with_capacity(dirs.len());
+    for d in &dirs {
+        let p = std::path::Path::new(d).join("case.nml");
+        let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        done.push((d.clone(), apply_preset(app.clone(), name.clone(), text)?));
+    }
+    crate::config::write_all(&done)
+}
+
 #[tauri::command]
 pub fn delete_preset(app: tauri::AppHandle, name: String) -> Result<(), String> {
     let path = dir(&app)?.join(format!("{name}.json"));

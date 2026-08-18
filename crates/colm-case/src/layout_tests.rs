@@ -25,6 +25,8 @@ fn hourly_site() -> CaseSpec {
         timestep_seconds: 3600.0,
         greenwich: false,
         urban: false,
+        // 预热单独有测试；这些用例关心的是别的东西。
+        spinup: crate::Spinup::OFF,
         dirs: Dirs {
             rawdata: "/w/rawdata_unused/".into(),
             runtime: "/w/runtime_unused/".into(),

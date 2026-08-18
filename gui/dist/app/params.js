@@ -4,6 +4,8 @@ import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderHistVars } from './histvars.js';
+import { renderTiming } from './timing.js';
+import { editTarget } from './batch.js';
 
 
 
@@ -103,13 +105,47 @@ function control(e, meta) {
   return inp;
 }
 
+/** 顶上一条横幅，说清楚"改一下会动几个文件"。
+ *
+ *  **不能只在状态栏事后说。** 状态栏是改完之后才出现的，而这里要回答的是
+ *  改之前那个问题：我现在改的是一个还是二十个。旁边给一个立刻缩回单个的
+ *  按钮 —— 想给某一个站点单独设个值时，不用退回上一步重来。 */
+function renderScope(box) {
+  const dirs = editTarget();
+  if (dirs.length < 2) return;
+  const bar = document.createElement('div');
+  bar.className = 'expert-note';
+  bar.style.marginBottom = '10px';
+  const names = dirs.map(d => d.split('/').pop());
+  bar.innerHTML = `下面的改动会写进 <b>${dirs.length} 个算例</b>：`
+    + names.slice(0, 6).join('、') + (names.length > 6 ? ` 等 ${names.length} 个` : '');
+  const b = document.createElement('button');
+  b.className = 'btn-ghost';
+  b.style.marginLeft = '10px';
+  b.textContent = `只改 ${state.selected?.name ?? names[0]}`;
+  b.onclick = () => {
+    state.batch = state.selected ? [state.selected.dir] : [dirs[0]];
+    renderFields();
+  };
+  bar.appendChild(b);
+  box.appendChild(bar);
+}
+
 export async function renderFields() {
   const box = $('fields');
   box.textContent = '';
+  // 时间与预热在页签**之上**，两个子页签下都看得见 —— 它不属于"参数"
+  // 或"输出变量"里的任何一个，而是这份算例跑多久、从哪天开始出结果。
+  await renderTiming();
   if (!state.text) { box.innerHTML = '<p class="muted">先在左边选一个算例</p>'; return; }
   let entries;
   try { entries = await invoke('read_case', { text: state.text }); }
   catch (e) { box.textContent = String(e); return; }
+  // 这一批里取值不一致的字段。**必须标出来** —— 一个显示着某个值的输入框
+  // 其实代表着 20 个不同的值，而改它会把另外 19 个悄悄抹平。
+  try {
+    state.varies = new Set(await invoke('varying_fields', { dirs: editTarget() }));
+  } catch (e) { state.varies = new Set(); status(e); }
 
   // 专家模式：把这份配置**没设过**的字段也补进来，显示 schema 默认值并标灰。
   // 判据用 `minimal::required` 已有的那条分界（设了的 vs 等于默认值的），
@@ -137,6 +173,7 @@ export async function renderFields() {
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
   const shown = state.showIrrelevant ? inGroup : inGroup.filter(e => !state.irrelevant.has(e.path));
   if (!shown.length) { box.innerHTML = '<p class="muted">这一组里这份配置没有设任何字段</p>'; return; }
+  renderScope(box);
   renderToolbar(box, inGroup.length, shown.length);
 
   // 按九分类分节。分节而不是分页签：`nl_colm` 那一组有 214 个字段，
@@ -238,6 +275,13 @@ function table(shown) {
         k.title = `本内核未编入（需要 ${meta?.requires?.join('、') ?? '某个宏'}），设了也没用\n` + (k.title ?? '');
       }
     }
+    if (state.varies.has(e.path)) {
+      // 这一行显示的是代表算例的值，别的算例不是这个值。改它会抹平全部。
+      k.textContent += ' ⚠';
+      k.className = 'warn';
+      k.title = (k.title ? k.title + '\n\n' : '')
+        + '这一批算例在这个字段上取值不同，显示的是第一个的值。改它会把全部改成同一个值。';
+    }
     const v = document.createElement('td');
     if (e.derived) {
       // 有声明有默认值，但不在任何 namelist 组里 —— 用户设了也没用。
@@ -250,10 +294,14 @@ function table(shown) {
       if (e.unset) { inp.style.opacity = '0.55'; v.title = '这份配置没设它，显示的是默认值'; }
       inp.onchange = async () => {
         try {
-          state.text = await invoke('set_field',
-            { text: state.text, path: e.path, value: inp.value });
-          await invoke('write_text', { path: state.selected.dir + '/case.nml', text: state.text });
-          status(`已保存 ${e.path}`);
+          // 后端读改写全部算例，成功后把**代表算例**的新内容带回来。
+          // 前端不再自己 write_text —— 那条路只写得动一个文件。
+          const r = await invoke('set_field_batch',
+            { dirs: editTarget(), path: e.path, value: inp.value });
+          state.text = r.text;
+          status(r.written > 1 ? `已写入 ${r.written} 个算例：${e.path}` : `已保存 ${e.path}`);
+          // 改过之后这个字段就一致了，标记要跟着消失。
+          if (state.varies.delete(e.path)) renderFields();
         } catch (err) {
           // 类型不对在后端就被拦下了，原样报出来 —— 它说得比我们编的具体
           status(err);

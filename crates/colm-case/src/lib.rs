@@ -10,6 +10,6 @@ pub mod build;
 pub mod layout;
 pub mod minimal;
 
-pub use build::{fields, CaseSpec, Dirs, Window};
+pub use build::{fields, spinup_fields, CaseSpec, Dirs, Spinup, Window};
 pub use layout::{case_name, render, Layout};
 pub use minimal::{is_default, required};

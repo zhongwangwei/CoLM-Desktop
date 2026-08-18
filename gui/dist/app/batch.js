@@ -11,6 +11,18 @@
 import { state } from './state.js';
 import { $ } from './ui.js';
 
+/** 参数改动作用于哪些算例目录。**默认是整批** —— 用户勾了 20 个站点是要配
+ *  "这一次运行"，不是配其中第一个。
+ *
+ *  放在这里而不是 `params.js`：`timing.js` 也要问同一个问题，而 `params.js`
+ *  已经 import 了 `timing.js` —— 反过来 import 就是一个环。
+ *  ES module 的环不报错，只让某个 import 在运行时变成 `undefined`。
+ *  实测：`check-gui` 当场抓到了这个环。 */
+export function editTarget() {
+  if (state.batch.length) return state.batch;
+  return state.selected ? [state.selected.dir] : [];
+}
+
 /** 批量操作作用于谁：勾了就是勾中的，一个没勾就是全部。 */
 export function batchTarget() {
   const picked = state.cases.filter(c => state.pickedCases.has(c.dir));

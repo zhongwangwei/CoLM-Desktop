@@ -7,6 +7,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
+import { editTarget } from './batch.js';
 import { $, status } from './ui.js';
 import { renderFields } from './params.js';
 
@@ -48,10 +49,11 @@ $('preset-apply').onclick = async () => {
   const name = $('preset').value;
   if (!name || !state.selected) return;
   try {
-    state.text = await invoke('apply_preset', { name, text: state.text });
-    await invoke('write_text', { path: state.selected.dir + '/case.nml', text: state.text });
+    const dirs = editTarget();
+    const r = await invoke('apply_preset_batch', { name, dirs });
+    state.text = r.text;
     await renderFields();
-    status(`已套用 ${name}`);
+    status(r.written > 1 ? `已把 ${name} 套到 ${r.written} 个算例上` : `已套用 ${name}`);
   } catch (e) { status(e); }
 };
 

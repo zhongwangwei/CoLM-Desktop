@@ -93,6 +93,8 @@ fn a_generated_case_reproduces_the_golden_history() {
         greenwich: summary.is_greenwich(),
         // CN-Cng 是 PLUMBER2 的草地站，不跑城市
         urban: false,
+        // 预热单独有测试；这些用例关心的是别的东西。
+        spinup: colm_case::Spinup::OFF,
         dirs: Dirs {
             rawdata: s(&work.join("rawdata_unused/")),
             runtime: s(&work.join("runtime_unused/")),
@@ -103,10 +105,13 @@ fn a_generated_case_reproduces_the_golden_history() {
 
     let all = fields(&spec);
     let req = required(&all);
+    // 19 而不是 21：预热关掉时截止时刻的年月日秒都落回 CoLM 的默认值而被剪掉。
+    // 这条钉的是「生成的算例只写该写的」，不是钉某个具体数字 ——
+    // 真正的判据是下面那句 history 与黄金文件逐变量相同。
     assert_eq!(
         req.len(),
-        21,
-        "expected 21 non-default fields, got {}",
+        19,
+        "expected 19 non-default fields, got {}",
         req.len()
     );
     std::fs::write(layout.case_nml(), render(&req)).expect("write case.nml");

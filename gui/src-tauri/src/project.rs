@@ -65,11 +65,10 @@ pub fn read_text(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
 }
 
-/// 写回一份文本文件。
-#[tauri::command]
-pub fn write_text(path: String, text: String) -> Result<(), String> {
-    std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))
-}
+// 这里原来有一个 `write_text` —— 前端拿它把改过的 case.nml 写回去。
+// 删掉了：参数改动一律由 `config::set_field_batch` / `presets::apply_preset_batch`
+// 在后端读改写，**前端不再持有落盘的能力**。留着一个通用的"写任意路径"
+// 命令，等于给"只改了第一个算例"那类 bug 留一条随时可走的路。
 
 #[cfg(test)]
 #[path = "project_tests.rs"]

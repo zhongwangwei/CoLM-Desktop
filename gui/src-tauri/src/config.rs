@@ -205,3 +205,239 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod config_tests;
+
+/// 设一个字段：在文件里就改，不在就插进它该在的 namelist 组。
+///
+/// **必须能插。** 专家模式让用户改这份配置没设过的字段，而预热更是必然
+/// 要插 —— 关掉预热时截止时刻那四项都不在文件里。只 `set` 的话，
+/// 打开预热会报一句 `no such field in this namelist`，而那不是用户的错。
+fn put(
+    doc: &mut colm_namelist::Document,
+    path: &str,
+    v: colm_namelist::Value,
+) -> Result<(), String> {
+    // 组名从 schema 来 —— 那是从 CoLM 自己的声明里扫出来的。
+    // schema 不认识的字段只能改不能插：不知道往哪个组插，而插错组等于没设。
+    match colm_schema::find(path).and_then(|f| f.group) {
+        Some(g) => doc.insert(path, v, g).map_err(|e| format!("{e:#}")),
+        None => doc.set(path, v).map_err(|e| format!("{e:#}")),
+    }
+}
+
+/// 读一批算例的 case.nml。
+///
+/// **一个读不了就整批失败。** 批量的坏处是"部分成功"——
+/// 90 个算例里 3 个没改到，界面上看不出来，而它们会照旧跑一遍旧配置。
+fn read_all(dirs: &[String]) -> Result<Vec<(String, String)>, String> {
+    dirs.iter()
+        .map(|d| {
+            let p = std::path::Path::new(d).join("case.nml");
+            std::fs::read_to_string(&p)
+                .map(|t| (d.clone(), t))
+                .map_err(|e| format!("{}: {e}", p.display()))
+        })
+        .collect()
+}
+
+/// 这一批算例里，哪些字段的取值不一致。
+///
+/// 界面据此在那些行上标出来 —— **不标的话，一个显示着某个值的输入框
+/// 其实代表着 90 个不同的值**，而改它会把另外 89 个悄悄抹平。
+#[tauri::command]
+pub fn varying_fields(dirs: Vec<String>) -> Result<Vec<String>, String> {
+    let all = read_all(&dirs)?;
+    if all.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let docs: Vec<_> = all
+        .iter()
+        .map(|(d, t)| {
+            colm_namelist::parse(t)
+                .map(|doc| (d.clone(), doc))
+                .map_err(|e| format!("{d}: {e:#}"))
+        })
+        .collect::<Result<_, _>>()?;
+    // 并集而不是交集：某个算例**没设**某字段，本身就是一种不一致 ——
+    // 它跑的是 CoLM 的默认值，而别的算例跑的是写出来的那个。
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (_, doc) in &docs {
+        names.extend(doc.paths());
+    }
+    let mut out = Vec::new();
+    for n in names {
+        let first = docs[0].1.get(&n).map(|v| v.to_string());
+        if docs
+            .iter()
+            .any(|(_, d)| d.get(&n).map(|v| v.to_string()) != first)
+        {
+            out.push(n);
+        }
+    }
+    Ok(out)
+}
+
+/// 一次批量写的结果。`text` 是**代表算例**（列表里第一个）改完之后的内容，
+/// 界面拿它继续显示 —— 不回传的话前端还得再读一次文件。
+#[derive(Debug, serde::Serialize)]
+pub struct BatchWrite {
+    pub written: usize,
+    pub text: String,
+}
+
+/// 把一个字段写进这一批算例的每一份 case.nml。
+///
+/// **先全改完再落盘。** 中途出错就一份都不写 —— 半批配置好的算例
+/// 与整批配置好的在界面上长得一样，而它们跑出来的东西不一样。
+#[tauri::command]
+pub fn set_field_batch(
+    dirs: Vec<String>,
+    path: String,
+    value: String,
+) -> Result<BatchWrite, String> {
+    let all = read_all(&dirs)?;
+    let mut done: Vec<(String, String)> = Vec::with_capacity(all.len());
+    for (d, text) in all {
+        let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
+        put(&mut doc, &path, typed(&path, &value)?).map_err(|e| format!("{d}: {e}"))?;
+        done.push((d, doc.to_string()));
+    }
+    write_all(&done)
+}
+
+pub(crate) fn write_all(done: &[(String, String)]) -> Result<BatchWrite, String> {
+    for (d, text) in done {
+        let p = std::path::Path::new(d).join("case.nml");
+        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(BatchWrite {
+        written: done.len(),
+        text: done.first().map(|(_, t)| t.clone()).unwrap_or_default(),
+    })
+}
+
+/// 一份配置里与「时间与预热」有关的东西，界面直接照着显示。
+///
+/// **算好了再交出去**，不让前端自己拼：预热截止时刻是起始年月日加上若干年，
+/// 而输出从截止时刻才开始 —— 这两条算错了没人会发现，输出会安安静静地
+/// 少一段。同一份算式在 `colm-case::spinup_fields` 里，两边共用它。
+#[derive(serde::Serialize)]
+pub struct Timing {
+    /// 这一批有几个算例。
+    pub count: usize,
+    /// 各算例的窗口是否一致。**多站点时通常不一致** —— 每个站点的窗口
+    /// 是它自己那份强迫场的完整覆盖范围，而各站点的记录长短本来就不同。
+    pub window_varies: bool,
+    pub start: String,
+    pub end: String,
+    pub spinup_years: u32,
+    pub spinup_repeat: u32,
+    /// 各算例的预热设置是否一致。
+    pub spinup_varies: bool,
+    /// history 从哪天开始。**不等于 start** —— 预热期不写 history
+    /// （`MOD_Hist.F90:235` 在 `itstamp <= ptstamp` 时直接 RETURN）。
+    pub output_start: String,
+}
+
+/// 读出时间窗与预热。
+///
+/// 取不到的项用 CoLM 的声明默认值，与 `read_case` 的口径一致 ——
+/// 一个没写进文件的字段不是"没有值"，而是"用默认值"。
+#[tauri::command]
+pub fn read_timing(dirs: Vec<String>) -> Result<Timing, String> {
+    let all = read_all(&dirs)?;
+    let mut each = Vec::with_capacity(all.len());
+    for (d, text) in &all {
+        let doc = colm_namelist::parse(text).map_err(|e| format!("{d}: {e:#}"))?;
+        each.push(one_timing(&doc));
+    }
+    let Some(first) = each.first().cloned() else {
+        return Err("没有算例".into());
+    };
+    Ok(Timing {
+        count: each.len(),
+        window_varies: each.iter().any(|t| t.0 != first.0 || t.1 != first.1),
+        start: first.0.clone(),
+        end: first.1.clone(),
+        spinup_years: first.2,
+        spinup_repeat: first.3,
+        spinup_varies: each.iter().any(|t| t.2 != first.2 || t.3 != first.3),
+        output_start: first.4,
+    })
+}
+
+/// 一份配置的 (start, end, 预热年数, 预热遍数, 输出起始日)。
+fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, String) {
+    let int = |p: &str| -> i64 {
+        match doc.get(p) {
+            Some(colm_namelist::Value::Int(v)) => *v,
+            _ => match colm_schema::find(p).map(|f| f.default) {
+                Some(colm_schema::Default::Integer(v)) => v,
+                _ => 0,
+            },
+        }
+    };
+    let (sy, sm, sd) = (
+        int("DEF_simulation_time%start_year"),
+        int("DEF_simulation_time%start_month"),
+        int("DEF_simulation_time%start_day"),
+    );
+    let repeat = int("DEF_simulation_time%spinup_repeat").max(0) as u32;
+    let py = int("DEF_simulation_time%spinup_year");
+    // 预热开着的判据与 CoLM 一样：截止时刻晚于起始时刻（`CoLM.F90:314`）。
+    // 光看 repeat 会把 `year = 0` 那种关法读成开着。
+    let on = py > sy && repeat > 1;
+    let ymd = |y: i64, m: i64, d: i64| format!("{y:04}-{m:02}-{d:02}");
+    (
+        ymd(sy, sm, sd),
+        ymd(
+            int("DEF_simulation_time%end_year"),
+            int("DEF_simulation_time%end_month"),
+            int("DEF_simulation_time%end_day"),
+        ),
+        if on { (py - sy) as u32 } else { 0 },
+        if on { repeat } else { 0 },
+        if on {
+            ymd(
+                py,
+                int("DEF_simulation_time%spinup_month"),
+                int("DEF_simulation_time%spinup_day"),
+            )
+        } else {
+            ymd(sy, sm, sd)
+        },
+    )
+}
+
+/// 改这一批算例的预热。
+///
+/// 五个字段一起写 —— 单改一个会得到一个自相矛盾的截止时刻。
+/// **每个算例按自己的起始年算截止年**：各站点的强迫场起点不同，
+/// 用同一个绝对年份会让一部分算例的预热落在窗口之外（等于没预热），
+/// 另一部分落得过深（等于把输出砍掉一大截）。
+#[tauri::command]
+pub fn set_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWrite, String> {
+    let all = read_all(&dirs)?;
+    let mut done = Vec::with_capacity(all.len());
+    for (d, text) in all {
+        let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
+        let int = |p: &str| -> i64 {
+            match doc.get(p) {
+                Some(colm_namelist::Value::Int(v)) => *v,
+                _ => match colm_schema::find(p).map(|f| f.default) {
+                    Some(colm_schema::Default::Integer(v)) => v,
+                    _ => 0,
+                },
+            }
+        };
+        let start = (
+            int("DEF_simulation_time%start_year") as i32,
+            int("DEF_simulation_time%start_month") as u32,
+            int("DEF_simulation_time%start_day") as u32,
+        );
+        for (path, v) in colm_case::spinup_fields(start, colm_case::Spinup { years, repeat }) {
+            put(&mut doc, &path, v).map_err(|e| format!("{d}: {e}"))?;
+        }
+        done.push((d, doc.to_string()));
+    }
+    write_all(&done)
+}

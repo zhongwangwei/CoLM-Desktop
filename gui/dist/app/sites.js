@@ -55,6 +55,9 @@ export function renderCases() {
 
 async function selectCase(c) {
   state.selected = c;
+  // 从算例列表点进来的是**单个**算例。不重置的话，上一次批量选中的
+  // 那 20 个还留在 state.batch 里，改一个字段会连带改掉它们。
+  if (!state.batch.includes(c.dir)) state.batch = [c.dir];
   renderSteps();
   renderCases();
   $('run').disabled = false;
@@ -102,7 +105,7 @@ export function pickSite(s) {
  *  勾了就用勾中的那些，一个没勾就用高亮的那一个 —— 与批量按钮同一条规则，
  *  而按钮上的字说出它会做什么，不留隐藏模式。 */
 async function confirmSelection() {
-  const checked = state.sites.filter(s => state.picked.has(s.name));
+  const checked = state.sites.filter(s => state.picked.has(s.site_file));
   const target = checked.length ? checked : (state.pickedSite ? [state.pickedSite] : []);
   if (!target.length) { setStatus('先点一个站点，或勾选几个'); return; }
   const btn = $('datafoot').querySelector('button');
@@ -110,6 +113,8 @@ async function confirmSelection() {
   try {
     const made = await ensureCases(target);
     if (!made.length) return;
+    // 整批都交给参数页。代表算例是第一个，但改动落到每一个上。
+    state.batch = [...new Set(made.map(c => c.dir))];
     // **走 selectCase，不要只设 state.selected。** 那里还要把 case.nml 读进来、
     // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，
     // 参数页会是空的，而空页面不会报错，只是什么都没有。实测踩过。
@@ -138,17 +143,39 @@ export function renderDataFoot() {
   if (info) info.textContent = n ? `已勾 ${n} 个` : (one ? `已选 ${one.name}` : '还没选');
 }
 
+/** 给每个站点定一个**唯一**的算例名。
+ *
+ *  站点名不唯一：`AU-Preston` 在 PLUMBER2 与 Urban-PLUMBER 里各有一个
+ *  （实测扫同一个目录能同时扫出两个）。两者要跑的东西完全不同 ——
+ *  一个是通量站，另一个必须走 URBAN 路径、地类强制 13、还要给栅格目录。
+ *
+ *  **不去重的后果不是显示错，是两个站点共用一个算例目录**：后建的那个
+ *  被 `ensureCase` 按名字认成"已经有了"，于是第二个站点根本没被建，
+ *  而界面上两行都显示成就绪。 */
+export function assignCaseNames(sites) {
+  const seen = new Map();
+  for (const s of sites) {
+    const n = (seen.get(s.name) ?? 0) + 1;
+    seen.set(s.name, n);
+    // 第一个用原名（绝大多数站点只有一个，路径不该无端变长）；
+    // 重名的那个带上能说明它是什么的后缀，而不是一个 -2。
+    s.caseName = n === 1 ? s.name : (s.urban ? `${s.name}-urban` : `${s.name}-${n}`);
+  }
+  return sites;
+}
+
 /** 这个站点的算例，没有就建一个。返回 `null` 表示建不了（并已说明原因）。 */
 export async function ensureCase(s) {
   const root = $('root').value.trim();
   if (!root) { setStatus('先指定算例放哪（第 1 步下面那张卡片）'); return null; }
-  const have = state.cases.find(c => c.name === s.name);
+  const cname = s.caseName ?? s.name;
+  const have = state.cases.find(c => c.name === cname);
   if (have) return have;
   if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
   setStatus(`正在为 ${s.name} 建算例…`);
   try {
     await invoke('new_case', {
-      site: s.site_file, out: root + '/' + s.name, name: s.name,
+      site: s.site_file, out: root + '/' + cname, name: cname,
       // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
       // 而缩短窗口是参数页「时间」分类里同一组字段的事。
       start: null, end: null,
@@ -159,7 +186,7 @@ export async function ensureCase(s) {
     renderCases();
     renderSteps();
     setStatus(`已为 ${s.name} 建好算例`);
-    return state.cases.find(c => c.name === s.name) ?? null;
+    return state.cases.find(c => c.name === cname) ?? null;
   } catch (e) { setStatus(`${s.name}：${e}`); return null; }
 }
 
@@ -182,7 +209,7 @@ $('scan').onclick = async () => {
       $('root').value = (parent || dir) + '/colm-cases';
       $('root').dispatchEvent(new Event('change'));
     }
-    state.sites = r.sites;
+    state.sites = assignCaseNames(r.sites);
     renderSites(r);
     renderSteps();
   } catch (e) { status(e); }
@@ -238,11 +265,11 @@ function renderSites(r = {}) {
     lab.className = 'tickbox';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = state.picked.has(s.name);
+    cb.checked = state.picked.has(s.site_file);
     cb.onchange = () => {
-      if (cb.checked) state.picked.add(s.name); else state.picked.delete(s.name);
+      if (cb.checked) state.picked.add(s.site_file); else state.picked.delete(s.site_file);
       renderDataFoot();
-      $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.name));
+      $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.site_file));
     };
     lab.appendChild(cb);
     lab.onclick = e => e.stopPropagation();   // 勾选不等于「选中这一个」
@@ -295,5 +322,5 @@ export async function ensureCases(sites) {
 
 
 
-$('pick-all').onclick = () => { for (const s of state.sites) state.picked.add(s.name); renderSites(); };
+$('pick-all').onclick = () => { for (const s of state.sites) state.picked.add(s.site_file); renderSites(); };
 $('pick-none').onclick = () => { state.picked.clear(); renderSites(); };

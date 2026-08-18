@@ -19,6 +19,8 @@ fn cn_cng() -> CaseSpec {
         timestep_seconds: 1800.0,
         greenwich: false,
         urban: false,
+        // 预热单独有测试；这些用例关心的是别的东西。
+        spinup: crate::Spinup::OFF,
         dirs: Dirs {
             rawdata: "/w/rawdata_unused/".into(),
             runtime: "/w/runtime_unused/".into(),
@@ -29,18 +31,74 @@ fn cn_cng() -> CaseSpec {
 }
 
 #[test]
-fn the_golden_case_needs_twenty_one_fields() {
+fn the_golden_case_needs_nineteen_fields() {
     // 实测：手写的 oracle/cases/CN-Cng/case.nml 设 43 个字段，其中 22 个
     // 等于 CoLM 的声明默认值。删掉那 22 行重跑，history 与黄金文件
     // identical: 129 variables。
+    //
+    // 21 -> 19：预热关掉时，截止时刻的年月日秒四项都落回 CoLM 的默认值
+    // 而被剪掉，只剩 `spinup_repeat = 0`。**模型行为没变** ——
+    // 决定开不开预热的是 `ststamp < ptstamp`，而 year=0 与原来那版
+    // （year 不写、同样是 0）一样让它为假。
     let all = fields(&cn_cng());
     let req = crate::minimal::required(&all);
     assert_eq!(
         req.len(),
-        21,
+        19,
         "{:#?}",
         req.iter().map(|f| &f.0).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn spin_up_is_taken_off_the_front_of_the_window() {
+    // 预热开着时，四项截止时刻必须一起写出去 —— 只写年的话，截止时刻会落在
+    // 1 月 1 日，而窗口未必从 1 月 1 日开始。
+    let mut s = cn_cng();
+    s.spinup = crate::Spinup {
+        years: 1,
+        repeat: 10,
+    };
+    let all = fields(&s);
+    let by = |n: &str| {
+        all.iter()
+            .find(|(p, _)| p == n)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        by("DEF_simulation_time%spinup_year"),
+        colm_namelist::Value::Int(s.window.start_year as i64 + 1)
+    );
+    assert_eq!(
+        by("DEF_simulation_time%spinup_month"),
+        colm_namelist::Value::Int(s.window.start_month as i64)
+    );
+    assert_eq!(
+        by("DEF_simulation_time%spinup_day"),
+        colm_namelist::Value::Int(s.window.start_day as i64)
+    );
+    assert_eq!(
+        by("DEF_simulation_time%spinup_repeat"),
+        colm_namelist::Value::Int(10)
+    );
+
+    // repeat = 1 是**不预热**：CoLM 的 max(n,1) 把 0 和 1 都变成跑一遍。
+    // 写成"预热一遍"会让人以为多跑了一轮，实际什么都没多跑。
+    for r in [0, 1] {
+        let mut off = cn_cng();
+        off.spinup = crate::Spinup {
+            years: 1,
+            repeat: r,
+        };
+        let all = fields(&off);
+        let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
+        assert_eq!(
+            by("DEF_simulation_time%spinup_year"),
+            Some(colm_namelist::Value::Int(0)),
+            "repeat={r} 时预热必须是关的"
+        );
+    }
 }
 
 #[test]

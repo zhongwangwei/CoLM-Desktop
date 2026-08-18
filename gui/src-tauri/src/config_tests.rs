@@ -104,3 +104,102 @@ fn setting_a_field_the_file_does_not_have_is_an_error_not_an_append() {
     let e = set_field(SAMPLE.into(), "DEF_HIST_FREQ".into(), "HOURLY".into()).unwrap_err();
     assert!(e.contains("no such field"), "{e}");
 }
+
+/// 造 n 个算例目录，每个一份 case.nml。`tag` 让各测试互不干扰 ——
+/// 本项目没有引入 tempfile，与 `sites_tests` 一样自己套一层。
+fn batch(tag: &str, texts: &[&str]) -> Vec<String> {
+    let tmp = std::env::temp_dir().join(format!("colm-batch-{tag}"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    batch_in(&tmp, texts)
+}
+
+fn batch_in(tmp: &std::path::Path, texts: &[&str]) -> Vec<String> {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let d = tmp.join(format!("case{i}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("case.nml"), t).unwrap();
+            d.display().to_string()
+        })
+        .collect()
+}
+
+const NML_A: &str = "&nl_colm\n   DEF_simulation_time%start_year = 2002\n   DEF_simulation_time%end_year = 2013\n   DEF_HIST_FREQ = 'HOURLY'\n/\n";
+const NML_B: &str = "&nl_colm\n   DEF_simulation_time%start_year = 2005\n   DEF_simulation_time%end_year = 2008\n   DEF_HIST_FREQ = 'DAILY'\n/\n";
+
+#[test]
+fn one_change_lands_in_every_case_of_the_batch() {
+    // 勾了 20 个站点是要配"这一次运行"，不是配其中第一个。只改第一个的话，
+    // 另外 19 个会带着未改的配置跑完，而界面上看不出任何异常。
+    let dirs = batch("every", &[NML_A, NML_B]);
+    let r = super::set_field_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
+    assert_eq!(r.written, 2);
+    for d in &dirs {
+        let t = std::fs::read_to_string(std::path::Path::new(d).join("case.nml")).unwrap();
+        assert!(t.contains("MONTHLY"), "{d} 没被改到：{t}");
+    }
+    // 回传的是代表算例（第一个）的新内容，前端拿它继续显示。
+    assert!(r.text.contains("MONTHLY"));
+    assert!(r.text.contains("2002"), "代表算例应当是第一个");
+}
+
+#[test]
+fn a_batch_write_that_cannot_finish_writes_nothing() {
+    // 半批配置好的算例与整批配置好的在界面上长得一样，而它们跑出来的
+    // 东西不一样 —— 所以宁可一份都不写。
+    let dirs = batch("nothing", &[NML_A, "&nl_colm\n   这不是 namelist"]);
+    let before = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    let e = super::set_field_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into())
+        .expect_err("坏文件必须让整批失败");
+    assert!(e.contains("case1"), "错误要说清是哪一个：{e}");
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap(),
+        before,
+        "第一个算例不该被动过"
+    );
+}
+
+#[test]
+fn fields_the_batch_disagrees_on_are_reported() {
+    let dirs = batch("varies", &[NML_A, NML_B]);
+    let v = super::varying_fields(dirs).unwrap();
+    assert!(v.iter().any(|p| p == "DEF_HIST_FREQ"), "{v:?}");
+    assert!(
+        v.iter().any(|p| p == "DEF_simulation_time%start_year"),
+        "{v:?}"
+    );
+
+    // 单个算例永远没有分歧 —— 而不是"每个字段都算分歧"。
+    assert!(super::varying_fields(batch("alone", &[NML_A]))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn spin_up_is_computed_per_case_not_shared() {
+    // 各站点的强迫场起点不同。用同一个绝对年份会让一部分算例的预热落在
+    // 窗口之外（等于没预热），另一部分落得过深（等于把输出砍掉一大截）。
+    let dirs = batch("spinup", &[NML_A, NML_B]);
+    super::set_spinup(dirs.clone(), 1, 10).unwrap();
+    let year = |d: &str| {
+        let t = std::fs::read_to_string(std::path::Path::new(d).join("case.nml")).unwrap();
+        t.lines()
+            .find(|l| l.contains("spinup_year"))
+            .map(|l| l.split('=').nth(1).unwrap().trim().to_string())
+            .expect("写了 spinup_year")
+    };
+    assert_eq!(year(&dirs[0]), "2003", "起点 2002 的算例预热到 2003");
+    assert_eq!(year(&dirs[1]), "2006", "起点 2005 的算例预热到 2006");
+
+    // 读回来：窗口不一致要报出来，预热设置一致则不报。
+    let t = super::read_timing(dirs.clone()).unwrap();
+    assert_eq!(t.count, 2);
+    assert!(t.window_varies, "两个算例的窗口本来就不同");
+    assert!(!t.spinup_varies);
+    assert_eq!(t.spinup_years, 1);
+    assert_eq!(t.spinup_repeat, 10);
+    // 输出从预热结束处才开始 —— 这是预热的代价，界面必须能说出来。
+    assert_eq!(t.output_start, "2003-01-01");
+}

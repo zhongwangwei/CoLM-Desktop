@@ -62,8 +62,9 @@ impl Document {
         })
     }
 
-    /// 就地改值。**字段不存在时报错，不追加** —— 静默追加会让调用方
-    /// 以为改动生效，而 CoLM 读到的是另一回事。
+    /// 就地改值。**字段不存在时报错，不追加** —— 追加要知道往哪个
+    /// namelist 组里加，而这个函数不知道。要新增字段用 [`Document::insert`]，
+    /// 它要求调用方把组名说出来：插错组的字段 CoLM 根本不读。
     pub fn set(&mut self, path: &str, value: Value) -> Result<()> {
         let want = Path::parse(path)?;
         for item in &mut self.items {
@@ -76,6 +77,50 @@ impl Document {
             }
         }
         bail!("no such field in this namelist: {path}")
+    }
+
+    /// 加一个这份文件里还没有的字段，插在指定 namelist 组的 `/` 之前。
+    ///
+    /// **组名必须由调用方给。** CoLM 按组读 namelist，插错组等于没设 ——
+    /// 而"没设"与"设了但值不对"在运行时长得完全不一样。组名的来源是
+    /// `colm_schema::Field::group`，那是从 CoLM 自己的声明里扫出来的。
+    ///
+    /// 组不在这份文件里就报错，不新建：一份 case.nml 少了整个组，
+    /// 通常说明它不是一份完整的算例配置，而那个问题不该被一次插入掩盖。
+    pub fn insert(&mut self, path: &str, value: Value, group: &str) -> Result<()> {
+        let want = Path::parse(path)?;
+        if self
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Entry(e) if e.path == want))
+        {
+            return self.set(path, value);
+        }
+        // 找那个组的 `/`。GroupStart 的原文形如 `&nl_colm`（可能带缩进）。
+        let mut inside = false;
+        for (i, item) in self.items.iter().enumerate() {
+            match item {
+                Item::GroupStart(s) => {
+                    inside = s.trim().trim_start_matches('&').eq_ignore_ascii_case(group);
+                }
+                Item::GroupEnd(_) if inside => {
+                    // 缩进跟着仓库风格（3 空格），与 `render` 写出来的一致。
+                    self.items.insert(
+                        i,
+                        Item::Entry(Entry {
+                            path: want,
+                            text: value.to_string(),
+                            value,
+                            prefix: format!("   {path} = "),
+                            suffix: String::new(),
+                        }),
+                    );
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        bail!("this namelist has no group &{group} to put {path} in")
     }
 
     /// 列出全部字段路径，按出现顺序。

@@ -36,7 +36,37 @@ pub struct CaseSpec {
     /// 草地站去跑会在 NCAR 属性表上越界（那里没有 `utyp >= 1` 的守卫，
     /// 崩溃只是因为构建开了 `-fcheck=all`）。
     pub urban: bool,
+    /// 预热。见 [`Spinup`]。
+    pub spinup: Spinup,
     pub dirs: Dirs,
+}
+
+/// 预热：把窗口开头那几年反复跑几遍，让土壤温湿等慢变量趋于平衡。
+///
+/// **预热是从输出里扣掉的，不是加在前面的。** CoLM 跑完最后一遍之后从
+/// 预热截止时刻接着往下跑到 end（`CoLM.F90:673`），而 `MOD_Hist.F90:235`
+/// 在 `itstamp <= ptstamp` 时直接 RETURN —— history 从预热截止时刻才开始。
+/// 预热一年，输出就少一年。这一条决定了默认值只敢取一年：
+/// PLUMBER2 里最短的站点只有两年多，再多就没有输出了。
+#[derive(Debug, Clone, Copy)]
+pub struct Spinup {
+    /// 预热周期的长度，单位年。截止时刻 = 起始时刻 + 这么多年。
+    pub years: u32,
+    /// 跑几遍。**0 与 1 都是不预热** —— CoLM 把 0 提成 1
+    /// （`CoLM.F90:313` 的 `max(n_spinupcycle,1)`），而跑一遍就是正常推进。
+    pub repeat: u32,
+}
+
+impl Spinup {
+    /// 不预热。
+    pub const OFF: Spinup = Spinup {
+        years: 0,
+        repeat: 0,
+    };
+
+    pub fn is_on(&self) -> bool {
+        self.years > 0 && self.repeat > 1
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +91,42 @@ pub struct Dirs {
     pub runtime: String,
     pub output: String,
     pub forcing_namelist: String,
+}
+
+/// 预热那五项，按写进 namelist 的顺序。
+///
+/// `start` 是模拟窗口的起始年月日 —— 预热截止时刻是**它加上若干年**，
+/// 月日照抄。只改年而让月日留在 CoLM 的默认值（1 月 1 日）上，
+/// 会让截止时刻落在窗口之外，而窗口未必从 1 月 1 日开始。
+pub fn spinup_fields(start: (i32, u32, u32), sp: Spinup) -> Vec<(String, Value)> {
+    // 关掉时写 year=0：`is_spinup = (ststamp < ptstamp)`（`CoLM.F90:314`），
+    // 0 年早于任何真实起始时刻，判据为假。**这比 repeat=0 更可靠** ——
+    // repeat 会被 `max(n,1)` 提成 1，真正决定开关的是那个比较。
+    let (y, m, d) = if sp.is_on() {
+        (start.0 + sp.years as i32, start.1, start.2)
+    } else {
+        (0, 1, 1)
+    };
+    vec![
+        (
+            "DEF_simulation_time%spinup_year".into(),
+            Value::Int(y as i64),
+        ),
+        (
+            "DEF_simulation_time%spinup_month".into(),
+            Value::Int(m as i64),
+        ),
+        (
+            "DEF_simulation_time%spinup_day".into(),
+            Value::Int(d as i64),
+        ),
+        // 起始秒固定 0（见 start_sec），预热截止也跟着 0。
+        ("DEF_simulation_time%spinup_sec".into(), Value::Int(0)),
+        (
+            "DEF_simulation_time%spinup_repeat".into(),
+            Value::Int(if sp.is_on() { sp.repeat as i64 } else { 0 }),
+        ),
+    ]
 }
 
 /// 造出字段集合。**不做过滤** —— 过滤是 `minimal::required` 的事，
@@ -113,10 +179,18 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
             Value::Int(s.window.end_sec as i64),
         ),
         ("DEF_simulation_time%timestep".into(), r(s.timestep_seconds)),
-        // spin-up 关掉：这三项的默认值不是「不做 spin-up」，必须显式写。
-        ("DEF_simulation_time%spinup_day".into(), Value::Int(365)),
-        ("DEF_simulation_time%spinup_sec".into(), Value::Int(86400)),
-        ("DEF_simulation_time%spinup_repeat".into(), Value::Int(0)),
+    ];
+    // 预热那五项。**单独一个函数**：界面上也要能改它，而分两处算的话，
+    // 「关掉预热」在两边的写法迟早会不一样 —— 而两种写法只有一种是对的。
+    out.extend(spinup_fields(
+        (
+            s.window.start_year,
+            s.window.start_month,
+            s.window.start_day,
+        ),
+        s.spinup,
+    ));
+    out.extend([
         // ---- 路径 ----
         ("DEF_dir_rawdata".into(), Value::Str(s.dirs.rawdata.clone())),
         ("DEF_dir_runtime".into(), Value::Str(s.dirs.runtime.clone())),
@@ -132,7 +206,7 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
         ("DEF_USE_OZONEDATA".into(), Value::Bool(false)),
         ("DEF_WRST_FREQ".into(), Value::Str("MONTHLY".into())),
         ("DEF_HIST_FREQ".into(), Value::Str("HOURLY".into())),
-    ];
+    ]);
     // 地类只在站点文件说得出时才写。说不出就整条不写 —— 写一个猜的值
     // 比不写更糟，而 CoLM 有自己的回落路径（站点文件的分类变量，或栅格）。
     //

@@ -29,6 +29,9 @@ use sites::*;
 pub fn run() {
     tauri::Builder::default()
         .manage(RunLog::default())
+        // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
+        // `apply_preset`）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，
+        // 因为"改一个字段"与"改这一批的一个字段"必须是同一件事。
         .invoke_handler(tauri::generate_handler![
             backend_ready,
             describe_fields,
@@ -38,19 +41,21 @@ pub fn run() {
             new_case,
             read_text,
             read_case,
-            set_field,
+            read_timing,
+            set_spinup,
+            set_field_batch,
+            varying_fields,
+            apply_preset_batch,
             run_case,
             run_batch,
             run_log_tail,
             series,
             metrics,
-            write_text,
             unknown_fields,
             irrelevant_fields,
             hist_vars,
             save_preset,
             list_presets,
-            apply_preset,
             delete_preset,
             load_recent,
             save_recent,
