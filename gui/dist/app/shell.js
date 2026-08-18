@@ -9,15 +9,16 @@ import { $ } from './ui.js';
 
 /** 五步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
 export const STEPS = [
-  { id: 'data',    t: '数据',   d: '有哪些站点', need: () => null },
-  { id: 'prep',    t: '前处理', d: '转成模型要的格式',
-    need: () => (state.sites.length ? null : '先在第 1 步扫一个站点目录') },
+  // 前处理在前：它产出的正是下一步要扫的东西。
+  // 第二步叫「站点」而不是「数据」—— 两步都关于数据，而它实际展示的是站点。
+  { id: 'prep',    t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
+  { id: 'data',    t: '站点',   d: '有哪些站点可以跑', need: () => null },
   { id: 'params',  t: '参数',   d: '物理与输出',
-    need: () => (state.selected ? null : '先选一个算例') },
+    need: () => (state.selected ? null : '先在第 2 步选一个站点') },
   { id: 'run',     t: '运行',   d: '三段依次跑',
-    need: () => (state.selected ? null : '先选一个算例') },
+    need: () => (state.selected ? null : '先在第 2 步选一个站点') },
   { id: 'result',  t: '结果',   d: '曲线与指标',
-    need: () => (state.selected ? null : '先选一个算例') },
+    need: () => (state.selected ? null : '先在第 2 步选一个站点') },
 ];
 
 /** 下一步是哪一步。**每一页都要有出口** —— 让人自己回左栏找下一步，

@@ -33,10 +33,39 @@
 
   <main class="work" id="work">
 
-    <!-- ① 数据 -->
-    <section class="page" data-step="data">
+    <!-- ① 前处理（未实现，形状先定下来） -->
+    <section class="page" data-step="prep">
       <div class="work-head"><span class="kicker">第 1 步</span></div>
-      <h1>你有哪些站点的数据</h1>
+      <h1>前处理</h1>
+      <p class="sub">把原始数据批量转成模型要的格式，<b>产出的就是下一步要扫的站点数据</b>。
+        已经转好的会跳过 ——
+        判据与第 4 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
+
+      <div class="card">
+        <h3>还没有实现</h3>
+        <div class="ch">这一页是预留的。下面是它打算做的事，写出来是为了它落地时不跑偏。</div>
+        <table>
+          <tr><th>要做的</th><th>为什么现在还不做</th></tr>
+          <tr><td>强迫场单位与变量名归一</td>
+              <td>目前 <code>colm-forcing</code> 直接认 PLUMBER2 与 Urban-PLUMBER 两套约定，还没遇到第三套</td></tr>
+          <tr><td>时间轴重采样（半小时 ↔ 小时）</td>
+              <td>两套数据集都是 1800 秒，<b>88/90 个站点如此</b>，另两个是 3600 且模型能直接跟</td></tr>
+          <tr><td>缺测填补与 QC 过滤</td>
+              <td>观测侧的 QC 已在配对时处理（至少一个半小时 qc==0 取平均）；强迫场侧还没量过有多少缺测</td></tr>
+          <tr><td>全球栅格裁到站点邻域</td>
+              <td>只有城市算例要读栅格，而它一次只读一格；裁剪的收益要先量</td></tr>
+        </table>
+        <div class="expert-note">
+          <b>落地时的两条约束</b>：转换产物要与源文件分开存放（原始数据永远不动），
+          且每一步都要能说出「这一项为什么跳过」—— 静默跳过与静默失败在界面上长得一样。
+        </div>
+      </div>
+    </section>
+
+    <!-- ② 站点 -->
+    <section class="page" data-step="data" hidden>
+      <div class="work-head"><span class="kicker">第 2 步</span></div>
+      <h1>有哪些站点可以跑</h1>
       <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
         程序顺着命名约定把每个站点的强迫场与观测文件一并找出来 ——
         <b>有没有观测，决定了跑完能不能自动评估</b>。</p>
@@ -77,34 +106,6 @@
               <div class="browse"><input class="input" id="runtime">
                 <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
           </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ② 前处理（未实现，形状先定下来） -->
-    <section class="page" data-step="prep" hidden>
-      <div class="work-head"><span class="kicker">第 2 步</span></div>
-      <h1>前处理</h1>
-      <p class="sub">把原始数据批量转成模型要的格式。<b>已经转好的会跳过</b> ——
-        判据与第 4 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
-
-      <div class="card">
-        <h3>还没有实现</h3>
-        <div class="ch">这一页是预留的。下面是它打算做的事，写出来是为了它落地时不跑偏。</div>
-        <table>
-          <tr><th>要做的</th><th>为什么现在还不做</th></tr>
-          <tr><td>强迫场单位与变量名归一</td>
-              <td>目前 <code>colm-forcing</code> 直接认 PLUMBER2 与 Urban-PLUMBER 两套约定，还没遇到第三套</td></tr>
-          <tr><td>时间轴重采样（半小时 ↔ 小时）</td>
-              <td>两套数据集都是 1800 秒，<b>88/90 个站点如此</b>，另两个是 3600 且模型能直接跟</td></tr>
-          <tr><td>缺测填补与 QC 过滤</td>
-              <td>观测侧的 QC 已在配对时处理（至少一个半小时 qc==0 取平均）；强迫场侧还没量过有多少缺测</td></tr>
-          <tr><td>全球栅格裁到站点邻域</td>
-              <td>只有城市算例要读栅格，而它一次只读一格；裁剪的收益要先量</td></tr>
-        </table>
-        <div class="expert-note">
-          <b>落地时的两条约束</b>：转换产物要与源文件分开存放（原始数据永远不动），
-          且每一步都要能说出「这一项为什么跳过」—— 静默跳过与静默失败在界面上长得一样。
         </div>
       </div>
     </section>

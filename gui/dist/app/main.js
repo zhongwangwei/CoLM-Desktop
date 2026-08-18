@@ -32,5 +32,5 @@ async function boot() {
   // 参数页的两个子页签（参数 / 输出变量）共用一块渲染区。
   addEventListener('colm:ptab', e => { state.ptab = e.detail; renderFields(); });
   addEventListener('colm:mode', () => { if (state.step === 'params') renderFields(); });
-  go('data');
+  go('prep');
 }
