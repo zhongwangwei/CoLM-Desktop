@@ -4,6 +4,7 @@ import { invoke, listen } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderCases } from './sites.js';
+import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
 import { setRunning, renderSteps } from './shell.js';
 import { renderFields } from './params.js';
@@ -136,7 +137,7 @@ export async function watchRun() {
 // ---------------------------------------------------------------- 批量
 
 $('runall').onclick = async () => {
-  const dirs = state.cases.map(c => c.dir);
+  const dirs = batchTarget().map(c => c.dir);
   if (!dirs.length) return;
   $('runall').disabled = true;
   $('run').disabled = true;
@@ -148,7 +149,7 @@ $('runall').onclick = async () => {
     const n = await invoke('run_batch', { cases: dirs, kernel: $('kernel').value });
     status(`批次结束：${n}/${dirs.length} 个算例跑完`);
   } catch (e) { status(e); }
-  finally { $('runall').disabled = false; $('run').disabled = false; }
+  finally { updateCaseBatchButtons(); $('run').disabled = false; }
 };
 
 

@@ -53,6 +53,10 @@ pub fn check(root: &Path) -> Result<()> {
     // 「does not provide an export named X」，页面整个不动。
     // 实测踩过：一次编辑把 `renderFields` 的 `export` 吃掉了，check-gui 全绿。
     problems.extend(unresolved_imports(&root.join("gui/dist/app"))?);
+    // ES module 的循环依赖**不报错** —— 它只让某个 import 在运行时变成
+    // `undefined`，而那种故障比编译错误难查得多。前端拆模块时为此单独
+    // 立过 `state.js`，后来 `sites ↔ results` 还是成了环。
+    problems.extend(import_cycles(&root.join("gui/dist/app"))?);
 
     if registered.is_empty() || called.is_empty() {
         bail!("parsed no commands at all — the check itself is broken, not the code");
@@ -67,6 +71,66 @@ pub fn check(root: &Path) -> Result<()> {
         listened.len()
     );
     Ok(())
+}
+
+/// 模块之间不许成环。
+///
+/// 深度优先找回边，报出第一条环的路径 —— 报全部环没有用，
+/// 破掉一条常常连带破掉几条，而一次给出十条路径没人读得完。
+fn import_cycles(dir: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    collect(dir, &["js"], &["vendor"], &mut files)?;
+    let mut graph: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for f in &files {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        let mut deps = Vec::new();
+        for line in std::fs::read_to_string(f)?.lines() {
+            let t = line.trim_start();
+            if !t.starts_with("import ") {
+                continue;
+            }
+            let Some(target) = t.split('\'').nth(1).or_else(|| t.split('"').nth(1)) else {
+                continue;
+            };
+            if let Some(n) = target.rsplit('/').next() {
+                deps.push(n.to_string());
+            }
+        }
+        graph.insert(name, deps);
+    }
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for start in graph.keys() {
+        let mut path = Vec::new();
+        if let Some(cycle) = walk_cycle(start, &graph, &mut path, &mut seen) {
+            return Ok(vec![format!("import cycle: {}", cycle.join(" -> "))]);
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn walk_cycle(
+    node: &str,
+    graph: &std::collections::BTreeMap<String, Vec<String>>,
+    path: &mut Vec<String>,
+    done: &mut BTreeSet<String>,
+) -> Option<Vec<String>> {
+    if let Some(at) = path.iter().position(|p| p == node) {
+        let mut c = path[at..].to_vec();
+        c.push(node.to_string());
+        return Some(c);
+    }
+    if done.contains(node) {
+        return None;
+    }
+    path.push(node.to_string());
+    for dep in graph.get(node).map(Vec::as_slice).unwrap_or(&[]) {
+        if let Some(c) = walk_cycle(dep, graph, path, done) {
+            return Some(c);
+        }
+    }
+    path.pop();
+    done.insert(node.to_string());
+    None
 }
 
 /// 每个 `import { a, b } from './x.js'` 里的名字，在 `x.js` 里都要有 `export`。

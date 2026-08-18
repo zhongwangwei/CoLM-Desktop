@@ -3,6 +3,7 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
+import { batchTarget, updateCaseBatchButtons } from './batch.js';
 
 // 能画的只有 (time, patch) 形状的那些 —— 119 个变量里 108 个是。
 // 其余 11 个是剖面（(time, patch, soil) 之类），需要另一种画法。
@@ -31,7 +32,7 @@ export function refreshVars() {
   $('obs').value = obs;
   $('evaluate').disabled = !(state.selected && state.selected.has_history && obs);
   // 批量评估只要有一个跑过的算例就能点 —— 观测按站点逐个找，缺的那几个跳过并记名。
-  $('eval-all').disabled = !state.cases.some(c => c.has_history);
+
 }
 
 /** 从站点库里找这个算例对应的观测文件。
@@ -237,7 +238,7 @@ function drawComparison(r) {
  */
 $('eval-all').onclick = async () => {
   const spinup = Number($('spinup').value) || 0;
-  const todo = state.cases.filter(c => c.has_history);
+  const todo = batchTarget().filter(c => c.has_history);
   if (!todo.length) return;
   $('eval-all').disabled = true;
   const rows = [];
@@ -257,7 +258,7 @@ $('eval-all').onclick = async () => {
     }
     renderSummary(rows, failed, todo.length);
     status(`批量评估完成：${todo.length} 个算例`);
-  } finally { $('eval-all').disabled = false; }
+  } finally { updateCaseBatchButtons(); }
 };
 
 function renderSummary(rows, failed, total) {

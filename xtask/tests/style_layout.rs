@@ -18,9 +18,7 @@ fn dark_mode_only_overrides_variables() {
     // 主题走 `[data-theme="dark"]` 而不是 `prefers-color-scheme` ——
     // 用户要能在程序里自己切，跟随系统由 JS 启动时设一次属性来实现。
     let t = css();
-    let at = t
-        .find("[data-theme=\"dark\"]")
-        .expect("深色主题的选择器");
+    let at = t.find("[data-theme=\"dark\"]").expect("深色主题的选择器");
     let open = t[at..].find('{').expect("开括号") + at;
     let (mut depth, mut end) = (0i32, open);
     for (i, c) in t[open..].char_indices() {

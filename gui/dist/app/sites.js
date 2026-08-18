@@ -7,6 +7,7 @@ import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
 import { go, renderSteps, setStatus } from './shell.js';
+import { updateCaseBatchButtons } from './batch.js';
 
 $('rescan').onclick = async () => {
   try {
@@ -18,7 +19,6 @@ $('rescan').onclick = async () => {
 
 export function renderCases() {
   const box = $('cases');
-  $('runall').disabled = !state.cases.length;
   box.textContent = '';
   if (!state.cases.length) {
     box.innerHTML = '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
@@ -28,14 +28,27 @@ export function renderCases() {
     const d = document.createElement('div');
     d.className = 'case';
     d.setAttribute('aria-selected', String(state.selected?.dir === c.dir));
+    // 与站点列表同一套：**这个列表的勾选，驱动这个列表上的批量操作**。
+    // 站点那边的勾选驱动批量建，这边的驱动批量运行与批量评估。
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = state.pickedCases.has(c.dir);
+    cb.style.cssText = 'width:auto;margin-right:8px';
+    cb.onclick = e => {
+      e.stopPropagation();   // 勾选不等于「切到这一个算例」
+      if (cb.checked) state.pickedCases.add(c.dir); else state.pickedCases.delete(c.dir);
+      updateCaseBatchButtons();
+    };
+    d.appendChild(cb);
     const s = document.createElement('small');
     // 本次批次里的状态优先 —— 「已跑过」说的是历史，「运行中」说的是现在。
     s.textContent = state.runState[c.dir] ?? (c.has_history ? '已跑过' : '未跑');
-    d.textContent = c.name;
+    d.appendChild(document.createTextNode(c.name));
     d.appendChild(s);
     d.onclick = () => selectCase(c);
     box.appendChild(d);
   }
+  updateCaseBatchButtons();
 }
 
 async function selectCase(c) {

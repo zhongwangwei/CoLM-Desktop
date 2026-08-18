@@ -15,6 +15,8 @@ export const state = {
   sites: [],
   /** 勾选的站点名。批量的作用对象。 */
   picked: new Set(),
+  /** 勾选的算例目录。批量运行与批量评估的作用对象。 */
+  pickedCases: new Set(),
   /** 算例目录 -> '待运行' | '运行中' | '已完成' | '失败'。
    *  批量跑时事件是全局广播的，靠 payload 里的 `case` 分发到这里。 */
   runState: {},
