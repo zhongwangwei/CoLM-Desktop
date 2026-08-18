@@ -1008,7 +1008,7 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
 | 7 | `colm-cli` 打通，命令行端到端可用（**已完成**） | 一条命令从 PLUMBER2 文件到指标表 —— **已实现**；生成的算例另有 `oracle/tests/generated_case.rs` 钉住它与黄金文件逐位相同 |
 | 8 | GUI：三栏工作台 + 新建向导，单站点闭环（**已写完，未验收**） | macOS + Linux 上双击可跑并出图 —— **尚未验证**：骨架、后端命令、前端与打包都已就位且编得过，接口有 `xtask check-gui` 静态守住，但没有人在真机上打开过窗口 |
 | 9 | **Windows 原生构建打通** | MSYS2 内核 + MSVC GUI，Windows 上跑通 CN-Cng。**实测进度**：Fortran 内核已在 CI 的 windows-latest 上编出来（`.github/workflows/windows-kernel.yml`），三个 `.x` 齐全、manifest 记 `MINGW64_NT-10.0-26100-x86_64` / gfortran 16.2.0 / netCDF 4.9.3 / netcdf-fortran 4.6.3 / HDF5 2.2.0，`colm.x` 能加载并在缺 namelist 时正确停下。**尚未在 Windows 上跑通 CN-Cng**（要 PLUMBER2 数据），GUI 侧也未验 |
-| 10 | 三个物理预设全部打包 | 三个预设在三个平台上各自跑通。**实测进度**：三个都编得过；`bgc` 已在 macOS 上三段跑通（除 `nitrif` 外**还需 `ndep`**，§10 原先只记了前者，且 `ndep` 在 `#ifdef BGC` 内无关闭分支）；`urban` 卡在 `mksrfdata`，缺 `<rawdata>/urban_type/` 与 `<rawdata>/urban/NCAR_urban_properties.nc`，而 Part 3 **没有 `USE_SITE_urban_type`**，站点文件补不了这一项 |
+| 10 | 三个物理预设全部打包 | 三个预设在三个平台上各自跑通。**实测进度**：三个都编得过，且都已在 macOS 上三段跑通。`bgc` 除 `nitrif` 外**还需 `ndep`**（§10 原先只记了前者，且 `ndep` 在 `#ifdef BGC` 内无关闭分支）。`urban` 在 `AU-Preston` 上跑通，代价是**它是唯一必须带真实全球栅格跑的预设** —— Part 3 有五个 `USE_SITE_urban_*` 却**没有 `USE_SITE_urban_type`**，加上 Urban-PLUMBER 站点文件的 25 个变量全是形态学量，一次真实运行的来源清单里有 30 项写着 `from CoLM 2024 raw data`。于是 `colm-cli new` 认出城市站点后把 `--rawdata`/`--runtime` 变成必填。站点文件这边只补一样：`ground_height` → `elevation`，免掉 7 GB 的 `elevation.nc`。另外城市栅格要摆两份，`<rawdata>/urban/` 与 `<runtime>/urban/` 由两处不同代码各拼各的路径 |
 | 11 | 批量 / 敏感性 / 算例管理 | 12 站批量 + 一个参数扫出汇总表 |
 | 12 | 打包分发（签名策略按 §9 决策） | 三平台安装包产出 |
 
