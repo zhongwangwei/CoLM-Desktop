@@ -65,3 +65,30 @@ fn a_time_axis_that_does_not_increase_is_refused() {
     super::check_increasing(&[]).unwrap();
     super::check_increasing(&[7.0]).unwrap();
 }
+
+#[test]
+fn rerunning_clears_the_previous_history_but_not_the_restart() {
+    // 实测踩过：一个 2002-2012 的算例先无预热跑一遍（132 个月度文件），
+    // 改成开预热后重跑 —— 预热期不写 history，新的一遍只覆盖 2003-2012，
+    // 而 2002 那 12 个文件留在原地。评估读到的是两次配置的拼接物，
+    // 而两次运行都"成功"了。
+    let d = tmp("clear");
+    let out = d.parent().unwrap().to_path_buf();
+    for m in ["2002-01", "2002-12", "2012-12"] {
+        std::fs::write(d.join(format!("AT-Neu_hist_{m}.nc")), "old").unwrap();
+    }
+    // restart 是 mkinidata 的产物，colm 要读它 —— 不能一起删。
+    let rst = out.join("restart");
+    std::fs::create_dir_all(&rst).unwrap();
+    std::fs::write(rst.join("AT-Neu_restart_2002-01.nc"), "keep").unwrap();
+
+    assert_eq!(super::clear_history(&out).unwrap(), 3);
+    assert!(super::history_files(&out).is_err(), "history 该空了");
+    assert!(
+        rst.join("AT-Neu_restart_2002-01.nc").is_file(),
+        "restart 不该被删"
+    );
+
+    // 第一次跑时目录还不存在 —— 那不是错误。
+    assert_eq!(super::clear_history(&out.join("nope")).unwrap(), 0);
+}

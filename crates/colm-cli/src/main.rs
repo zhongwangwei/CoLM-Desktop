@@ -651,6 +651,22 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool, force: bool) -> Result<
                 }
             }
         }
+        // `colm` 要重跑时，先把上一次的 history 清掉。
+        //
+        // **不清的后果是一份混了两次配置的输出。** 实测：一个 2002-2012 的
+        // 算例先无预热跑了一遍（132 个月度文件），改成开预热之后重跑 ——
+        // 预热期不写 history，所以新的一遍只覆盖 2003-2012，而 2002 那 12 个
+        // 文件原封不动留着。评估读到的是「2002 来自冷启动、2003 起来自预热」
+        // 的拼接物，逐年偏差表上那道台阶看起来像模型行为，其实是两次运行的
+        // 接缝。没有任何报错，两次运行都是成功的。
+        //
+        // 只删 `*_hist_*.nc`：restart 是 `mkinidata` 的产物，`colm` 要读它。
+        if matches!(stage, Stage::Colm) {
+            let removed = clear_history(&out)?;
+            if removed > 0 {
+                println!("  {sname:<10} 清掉上一次的 {removed} 个 history 文件");
+            }
+        }
         // 阶段标记。**由我们自己打，不去认 CoLM 的输出措辞** —— CoLM 把
         // automatically 拼成 automaticlly 这件事已经教过一次，上游随时会改。
         // 只有 `colm.x` 打 `TIMESTEP =`，所以没有这个标记，界面在前两段
@@ -942,6 +958,28 @@ fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
         None => print!("{body}"),
     }
     Ok(())
+}
+
+/// 删掉一个算例已有的 history 文件，返回删了几个。
+///
+/// 目录不存在（第一次跑）返回 0，不报错。
+fn clear_history(out: &Path) -> Result<usize> {
+    let dir = out.join("history");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.file_name()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.contains("_hist_") && x.ends_with(".nc"))
+        {
+            std::fs::remove_file(&p).with_context(|| format!("cannot remove {}", p.display()))?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// 算例的**全部** history 文件，按名字排序。
