@@ -145,7 +145,37 @@ mock 返回的载荷全部是**真后端导出的** —— `describe_fields`、`
 字符后被截回 40000（60000 上限规则生效），结束文案是「完成 · 子进程打了
 34180 行，丢弃 30802 行噪声」，`运行` 按钮恢复可点、`画图` 变可点。
 
-**仍没走到的**：打包出来的 `.app` 双击；Linux 与 Windows 上的窗口。
+**打包出来的 `.app` 双击也验过了 —— 过程中又抓到两个缺陷。** 见下节。
+`open "CoLM Desktop.app"` 之后窗口起来，`System Events` 报出标题
+`CoLM Desktop`、尺寸 1240×820，正是 `tauri.conf.json` 里声明的那组数。
+
+**仍没走到的**：Linux 与 Windows 上的窗口。
+
+### 打包路径从来没被跑过，于是躺着两个缺陷
+
+CI 只跑 `xtask check-gui`，**从不构建 GUI，更不打包**。所以：
+
+1. `tauri.bundle.conf.json` 的 `beforeBuildCommand` 写的是
+   `--manifest-path ../../xtask/Cargo.toml`，而 Tauri 执行它的工作目录是
+   `gui/`（不是 `gui/src-tauri/`）—— 打包第一步就报
+   `manifest path does not exist`。正确的是 `../xtask/Cargo.toml`。
+2. `resolve_cli` 在 `app.path().resource_dir()` 里找 sidecar，可 Tauri 把
+   `externalBin` 放在**主二进制旁边** —— macOS 是 `Contents/MacOS/colm-cli`，
+   而 `resource_dir()` 是 `Contents/Resources/`，那里只有图标。
+
+第 2 条尤其阴：`resolve_cli` 的第三条回落是「仓库的 `target/` 产物」，
+在开发机上**永远命中**，所以本地怎么试都对。要看见它，得先把
+`target/{debug,release}/colm-cli` 挪走 —— 那时打包版本报出
+`colm-cli resolved to colm-cli`，一路掉到 PATH。装到别人机器上，
+第一次点「运行」就是 `cannot start colm-cli`。
+
+于是 `backend_ready` 那行面包屑现在**连解析到的 CLI 路径一起报**。四条回落
+里有一条在开发机上必中，这种结构只能靠把结果打出来才看得见。修好之后同样
+条件下报的是
+`.../CoLM Desktop.app/Contents/MacOS/colm-cli`。
+
+CI 补了一个 `gui` 作业：三个平台构建 + clippy + fmt + 17 个后端测试，
+macOS 上另外 `cargo tauri build` 并断言 `Contents/MacOS/colm-cli` 存在且跑得动。
 
 ### 进度条曾经建在一个永远不会到达的输入上
 

@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
 /// 环形缓冲区的上限。够看清一次失败的来龙去脉，又不会把内存吃掉。
 const LOG_CAPACITY: usize = 4_000;
@@ -77,20 +77,34 @@ fn is_rangecheck_noise(line: &str) -> bool {
 }
 
 /// 找 `colm-cli`。顺序照 EarthMesh 的 `resolve_mkgrd`：
-/// 环境变量 → 应用自身目录（打包进去的 sidecar 在那儿）→ 仓库构建产物 → PATH。
-pub fn resolve_cli(app: &tauri::AppHandle) -> PathBuf {
+/// 环境变量 → 自己旁边（打包进去的 sidecar 在那儿）→ 仓库构建产物 → PATH。
+///
+/// **第二条必须是 `current_exe()` 的同级目录，不是 `resource_dir()`。**
+/// Tauri 把 `externalBin` 放在主二进制**旁边** —— macOS 的
+/// `Contents/MacOS/colm-cli`，而 `resource_dir()` 指的是
+/// `Contents/Resources/`，那里只有图标。实测打包出来的 `.app` 因此一路
+/// 回落到 PATH，解析成裸名 `colm-cli`：开发机上仓库产物那条兜住了，
+/// 装到别人机器上第一次点「运行」就是 `cannot start colm-cli`。
+///
+/// 不再需要 `AppHandle`：四条回落全部只看进程自身与环境，跟 Tauri 无关。
+pub fn resolve_cli() -> PathBuf {
     if let Ok(p) = std::env::var("COLM_CLI") {
         let p = PathBuf::from(p);
         if p.is_file() {
             return p;
         }
     }
-    if let Ok(dir) = app.path().resource_dir() {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+    {
         let p = dir.join(exe_name());
         if p.is_file() {
             return p;
         }
     }
+    // 开发构建走这条：`cargo tauri dev` 的可执行文件在
+    // `gui/src-tauri/target/debug/`，而 sidecar 还在 `binaries/` 里没搬过去。
     for rel in ["../../target/debug", "../../target/release"] {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(rel)
@@ -118,7 +132,7 @@ pub async fn run_case(
     case: String,
     kernel: String,
 ) -> Result<i32, String> {
-    let cli = resolve_cli(&app);
+    let cli = resolve_cli();
     let mut child = std::process::Command::new(&cli)
         // `--stream` 不是可选的润色：不加的话 `colm-cli run` 只在每段跑完
         // 之后打一句摘要，一次真实运行总共 39 行，而且全在结束时到达 ——
@@ -195,7 +209,6 @@ pub async fn run_case(
 /// 界面上只需要问「选哪个站」「叫什么名字」，以及可选的窗口收窄。
 #[tauri::command]
 pub async fn new_case(
-    app: tauri::AppHandle,
     site: String,
     out: String,
     name: Option<String>,
@@ -217,7 +230,7 @@ pub async fn new_case(
             }
         }
     }
-    capture(&app, &args)
+    capture(&args)
 }
 
 /// 取绘图数据。
@@ -225,15 +238,15 @@ pub async fn new_case(
 /// 走 sidecar 而不是在这里读 —— 窗口进程不链接 netcdf，
 /// 不该为了画一条曲线把整个静态 HDF5 拖进来。
 #[tauri::command]
-pub async fn series(app: tauri::AppHandle, case: String, vars: String) -> Result<String, String> {
-    capture(&app, &["series".to_string(), case, "--vars".into(), vars])
+pub async fn series(case: String, vars: String) -> Result<String, String> {
+    capture(&["series".to_string(), case, "--vars".into(), vars])
 }
 
 /// 跑一次 sidecar，把 stdout 整个收回来。
 ///
 /// 用于短命令（`new` / `series`）；跑模型那种长命令走 `run_case` 的流式路径。
-fn capture(app: &tauri::AppHandle, args: &[String]) -> Result<String, String> {
-    let cli = resolve_cli(app);
+fn capture(args: &[String]) -> Result<String, String> {
+    let cli = resolve_cli();
     let out = std::process::Command::new(&cli)
         .args(args)
         .output()

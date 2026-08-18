@@ -11,13 +11,21 @@ use serde::Serialize;
 /// 「窗口没开」与「窗口开了但页面是白的」—— 前者进程会退出，后者进程活着、
 /// 窗口标题也在，从外面看一模一样。这一行是唯一能从外面区分它们的证据，
 /// 因为只有 webview 真的加载并执行了 `index.html` 的 JS 才会调到这里。
+/// 同一行还报出它解析到的 `colm-cli` 路径。`resolve_cli` 有四条回落，
+/// 其中「仓库的 target/ 产物」那条在开发机上**永远命中**，于是打包版本
+/// 找错了 sidecar 也看不出来 —— 实测就发生过：Tauri 把 sidecar 放进
+/// `Contents/MacOS/`，而当时的代码找的是 `Contents/Resources/`。
 #[tauri::command]
 pub fn backend_ready() -> String {
     let msg = format!(
         "backend reachable — {} configuration fields known",
         colm_schema::all().len()
     );
-    eprintln!("colm-desktop: the page reached the backend; {msg}");
+    let cli = crate::sidecar::resolve_cli();
+    eprintln!(
+        "colm-desktop: the page reached the backend; {msg}; colm-cli resolved to {}",
+        cli.display()
+    );
     msg
 }
 

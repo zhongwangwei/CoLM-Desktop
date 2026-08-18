@@ -106,6 +106,66 @@ jobs:
           cargo run -p oracle --bin golden-compare -- oracle/golden/CN-Cng_hist_2008-01.nc oracle/golden/CN-Cng_hist_2008-01.nc
           cargo run -p oracle --bin golden-compare -- oracle/golden/CN-Cng-wet_hist_2008-07.nc oracle/golden/CN-Cng-wet_hist_2008-07.nc
 
+  # GUI 的窗口进程与打包路径。**必须单独一个作业**：GUI 是第二个 workspace
+  # （431 个 crate，engine 那边只有 72），塞进 rust 作业会把三个平台的
+  # 构建时间都拖上去，而它跟 engine 的测试互不依赖。
+  #
+  # 这条是补上的，不是从一开始就有的 —— 打包路径此前从未在任何地方跑过，
+  # 于是两个缺陷一直躺着：`beforeBuildCommand` 的相对路径写错（工作目录是
+  # `gui/`，不是 `gui/src-tauri/`），以及 sidecar 找的是 `resource_dir()`
+  # 而 Tauri 把它放在主二进制旁边。两个都只在 `cargo tauri build` 之后才现形。
+  gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+
+      # Tauri 在 Linux 上要系统的 webkit2gtk。macOS 用 WKWebView、
+      # Windows 用 WebView2，两者都随系统来，不用装。
+      - name: Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build, lint and test the window process
+        shell: bash
+        working-directory: gui/src-tauri
+        run: |
+          cargo test
+          cargo clippy --all-targets -- -D warnings
+          cargo fmt --all --check
+
+      # 打包只在 macOS 上做。三个平台各打一次要三份 runner 时间，而这一步
+      # 要防的两个缺陷都在**与平台无关**的那一段：beforeBuildCommand 的
+      # 相对路径，以及 sidecar 落在主二进制旁边这件事（三个平台一致）。
+      - name: Bundle, and check the app finds its own sidecar
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: gui/src-tauri
+        run: |
+          cargo install tauri-cli --version '^2' --locked
+          cargo tauri build --config tauri.bundle.conf.json
+          app='target/release/bundle/macos/CoLM Desktop.app'
+          test -x "$app/Contents/MacOS/colm-desktop-gui"
+          # 这一行是重点。sidecar 曾经被找去 Contents/Resources/，那里只有图标，
+          # 而开发机上仓库的 target/ 产物永远兜得住，所以本地跑不出问题。
+          test -x "$app/Contents/MacOS/colm-cli"
+          "$app/Contents/MacOS/colm-cli" 2>&1 | grep -q 'colm-cli new'
+
   # 黄金回归：需要 PLUMBER2 数据与 Fortran 工具链，只在带该数据的 runner 上跑。
   golden:
     if: ${{ vars.HAS_PLUMBER2 == 'true' }}

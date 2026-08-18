@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "cargo run -q -p xtask --manifest-path ../../xtask/Cargo.toml -- stage-sidecar"
+    "beforeBuildCommand": "cargo run -q -p xtask --manifest-path ../xtask/Cargo.toml -- stage-sidecar"
   },
   "bundle": {
     "active": true,
