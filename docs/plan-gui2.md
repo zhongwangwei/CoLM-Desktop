@@ -64,7 +64,7 @@
 
 ---
 
-## 1. 五个必须先定的设计决策
+## 1. 七个必须先定的设计决策
 
 这些不是可以边写边定的细节。**先按这里定的做**，要改先说。
 
@@ -132,6 +132,77 @@
 前端只做一件后端做不到的事：**在输入过程中**（`input` 事件）做一次同样规则的
 预判并高亮，但**保存与否仍由后端说了算**。前端那份预判如果和后端不一致，
 以后端为准 —— 所以它只能高亮，不能阻止提交。
+
+### 1.6 三个可执行文件在界面上必须分开，而且能分别跳过
+
+一次运行是三个程序串行，**职责与依赖各不相同**：
+
+| 阶段 | 产物 | 取决于 | 换了时间窗口还要重跑吗 |
+|---|---|---|---|
+| `mksrfdata.x` | `landdata/srfdata.nc` | 站点文件、rawdata、地表分类与土壤方案 | **不用** |
+| `mkinidata.x` | `restart/const/*.nc`、`restart/<起始日>/*.nc` | srfdata + 起始日期 | 要 |
+| `colm.x` | `history/*.nc` | 前两者 + 全部物理与输出配置 | 要 |
+
+**现在界面上看不出这三者。** 更实际的问题是：`run://progress` 只解析
+`TIMESTEP =`，而**只有 `colm.x` 打这一行** —— 前两段跑的时候进度条完全不动。
+城市算例里 `mksrfdata` 恰恰是慢的那个（它要读全球栅格）。
+
+**定：**
+
+1. 进度区改成三段式，每段自己的状态（待运行 / 运行中 / 成功 / 失败），
+   `colm.x` 那一段内部再显示步进度。`run://progress` 的 payload 加 `stage`
+   字段（与 §1.3 的 `case` 一起加，一次改完）。
+2. **允许跳过已完成的阶段。** `run_stage` 的 `artifacts` 参数已经精确列出了
+   每一段必须产出的文件，「产物齐全 → 可跳过」是现成可算的。
+3. **但不能只看文件在不在。** 改了 `SITE_fsitedata`、`DEF_dir_rawdata` 或
+   土壤/地表方案，srfdata 就失效了，而文件还在那儿。**定：在算例目录里写一份
+   `stages.json`，记下每段完成时其输入的指纹**（相关 namelist 字段的值 +
+   站点文件的 sha256）。指纹不一致就必须重跑，并在界面上说明是哪一项变了。
+   界面默认「自动」，另给「强制全部重跑」。
+
+**不要**把跳过做成一个用户随手勾的复选框而不校验指纹 —— 那等于把
+「结果是用旧地表数据算的」这种错误交给用户自己记住。
+
+### 1.7 两个都叫 spin-up 的东西，必须在界面上分开
+
+这是本项目最容易混的一对概念，**它们不是一回事**：
+
+| | 模型 spin-up | 评估丢弃 |
+|---|---|---|
+| 在哪 | `DEF_simulation_time%spinup_*`（CoLM 自己） | `colm-cli metrics --spinup N` |
+| 干什么 | 起始日之前的那段反复跑 N 遍，让土壤温湿等状态趋于平衡 | 算指标时丢掉**前 N 条输出记录** |
+| 单位 | 循环次数 | 记录条数 |
+| 影响输出吗 | **不影响** —— 见下 | 只影响指标，不改文件 |
+
+CoLM 的实现（本次读源码确认）：`ptstamp` 由 `spinup_year/month/day/sec`
+拼出，`is_spinup = (起始时刻 < ptstamp)`，循环 `spinup_repeat` 次
+（`n_spinupcycle = max(spinup_repeat, 1)`，所以 0 与 1 都是一遍）。
+关键一条：**`MOD_Hist.F90:235` 在 `itstamp <= ptstamp` 时直接 `RETURN`** ——
+spin-up 期间只累积、不写 history。所以模型 spin-up 不会污染输出，
+两个概念的作用域确实是分开的。
+
+**现状：两个都没进 GUI。**
+
+- 模型 spin-up：`colm-case` 显式把它关掉（写 `spinup_repeat = 0`），
+  界面上没有任何入口。
+- 评估丢弃：`colm-cli metrics --spinup N` 有，但 **GUI 里根本没有 metrics
+  这个命令**（`grep -c metrics gui/src-tauri/src/*.rs` 全是 0）——
+  整条评估链目前只有命令行能用。
+
+**还有一个已确认的缺陷。** spin-up 期间 CoLM 打的是另一种格式
+（`CoLM.F90:747`）：
+
+```
+TIMESTEP = 1 | DATE = 2008-01-01-00000 Spinup (cycle 1 of 3)
+```
+
+而 `parse_progress` 用 `strip_prefix("DATE =")` 之后整段尾巴都留在 `date` 里
+（本次实测：`date` 变成 `"2008-01-01-00000 Spinup (cycle 1 of 3)"`）。
+不崩，但界面分不出正在 spin-up，且进度条的步数会跨循环单调增长而看不出重来过。
+
+**定：**`parse_progress` 认这两种格式，`Progress` 加
+`spinup: Option<(u32, u32)>`（第几轮 / 共几轮）。界面在 spin-up 期间显示
+「预热 2/3 轮」而不是把它混进正常进度。
 
 ---
 
@@ -531,7 +602,10 @@ pub fn writable_vars(text: String) -> Result<Vec<String>, String>
 
 - [ ] **步骤 1：指标表**
 
-`colm-cli metrics` 已经能出 `Metrics`：
+`colm-cli metrics` 已经能出 `Metrics`，但**GUI 里还没有对应的命令**
+（实测 `grep -c metrics gui/src-tauri/src/*.rs` 全为 0），所以这一步要先加
+一个走 sidecar 的 `metrics` 命令，参数含 `--spinup N`（§1.7 的「评估丢弃」，
+不是模型 spin-up）。指标字段：
 `n / rmse / mae / bias / r2 / kge / obs_mean / obs_sd / beta / beta_warning`。
 表格直接呈现，**`beta_warning` 非空时必须显示** —— 它标记 β 项不可信的两种
 情形，藏起来等于给一个假指标。
@@ -573,7 +647,88 @@ PLUMBER2 是地方时、模型按地方时推进，时间戳是「把地方时�
 
 ---
 
-### 任务 9：界面重做与响应式
+### 任务 9：三阶段进度与阶段跳过
+
+**文件：** 修改 `gui/src-tauri/src/sidecar.rs`、`crates/colm-cli/src/main.rs`、
+新建 `gui/dist/app/runner.js`
+
+见 §1.6。三步：
+
+- [ ] **步骤 1：`Progress` 加 `stage` 字段，三段都发事件**
+
+现在只有 `colm.x` 打 `TIMESTEP =`，所以前两段跑的时候进度条是死的。
+`colm-cli run` 在每段开始/结束时**自己打一行**标记（例如
+`=== stage mksrfdata begin ===`），sidecar 认它并发 `run://progress`。
+**标记由我们自己打，不要去认 CoLM 的输出措辞** —— CoLM 把 automatically
+拼成 automaticlly 这件事已经教过一次，上游随时会改措辞。
+
+- [ ] **步骤 2：`stages.json` 指纹**
+
+```rust
+/// 一段完成时，它的输入是什么样子。
+///
+/// **只看产物在不在是不够的**：改了 `SITE_fsitedata` 或 `DEF_dir_rawdata`，
+/// srfdata 就失效了，而文件还好好躺在那儿。跳过它等于拿旧地表数据算新算例，
+/// 而且没有任何迹象。
+#[derive(Serialize, Deserialize)]
+pub struct StageFingerprint {
+    pub stage: String,
+    /// 这一段依赖的 namelist 字段及其值
+    pub inputs: BTreeMap<String, String>,
+    /// 站点文件的 sha256
+    pub site_sha256: String,
+}
+```
+
+各段依赖的字段列表写成常量并注明依据；不确定的**宁可多列** ——
+多列一项只是多重跑一次，少列一项是静默算错。
+
+- [ ] **步骤 3：界面三段式 + 「强制全部重跑」**
+
+---
+
+### 任务 10：两个 spin-up 都进界面
+
+见 §1.7。**先在 UI 文案上把它们分开命名**：模型侧叫「预热（spin-up）」，
+评估侧叫「丢弃前 N 条记录」。**不要**在两处都写「spinup」。
+
+- [ ] **步骤 1：`parse_progress` 认 spin-up 格式（写失败的测试先）**
+
+```rust
+#[test]
+fn it_tells_a_spinup_step_from_a_normal_one() {
+    // CoLM.F90:747 与 :749 是两种 format。只认后者的话，spin-up 行的整段尾巴
+    // 会留在 `date` 里 —— 实测变成 "2008-01-01-00000 Spinup (cycle 1 of 3)"。
+    // 不崩，但界面分不出正在预热，进度条还会跨循环单调增长。
+    let normal = parse_progress("TIMESTEP = 1 | DATE = 2008-01-01-00000").unwrap();
+    assert_eq!(normal.date, "2008-01-01-00000");
+    assert_eq!(normal.spinup, None);
+
+    let s = parse_progress("TIMESTEP = 1 | DATE = 2008-01-01-00000 Spinup (cycle 2 of 3)").unwrap();
+    assert_eq!(s.date, "2008-01-01-00000", "日期不该混进循环计数");
+    assert_eq!(s.spinup, Some((2, 3)));
+}
+```
+
+- [ ] **步骤 2：实现，跑通**
+
+- [ ] **步骤 3：模型 spin-up 的入口**
+
+时间分类下加一组：轮数（`spinup_repeat`）与预热截止日期
+（`spinup_year/month/day/sec`）。**旁边写一句它不写 history**
+（`MOD_Hist.F90:235` 在 `itstamp <= ptstamp` 时直接 RETURN），
+否则用户会以为预热期的输出被算进指标了。
+
+- [ ] **步骤 4：评估丢弃的入口**
+
+在结果页，紧挨指标表，改了立刻重算（纯计算，不重跑模型）。
+默认 0，并说明它的单位是**输出记录条数**，不是天数、不是循环次数。
+
+- [ ] **步骤 5：提交**
+
+---
+
+### 任务 11：界面重做与响应式
 
 **文件：** `gui/dist/index.html`、`gui/dist/app/style.css`
 
