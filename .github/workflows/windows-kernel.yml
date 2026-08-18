@@ -89,18 +89,6 @@ jobs:
       # 这一步只**测量**，不判成败：把依赖列出来，再从 PowerShell（没有
       # `/mingw64/bin`）跑一次，看它到底缺什么。有了这份清单才谈得上
       # 「随程序带哪些 DLL」还是「改成静态」。
-      # 到此为止证明的都是「shell 能不能执行它」。**程序自己走的是另一条路**：
-      # `colm-kernel` 用 `Command::new(绝对路径)`，也就是 `CreateProcessW`。
-      # 那条路此前从没在 Windows 上跑过，只有一句推断（"对显式路径不查 PATHEXT"）。
-      # 这一步让真代码去起真二进制，把推断变成实测。
-      #
-      # 路径给绝对的：`cargo test` 的当前目录是 crate 目录，不是仓库根。
-      - name: The Rust side can launch it too
-        shell: msys2 {0}
-        run: |
-          COLM_KERNEL_DIR="$(pwd)/kernels/waterheat" \
-            cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned -- --nocapture
-
       - name: Which MSYS2 DLLs does the kernel need
         shell: msys2 {0}
         run: |
@@ -120,6 +108,10 @@ jobs:
           mkdir -p probe-dlls
           xargs -a dlls.txt -I{} cp {} probe-dlls/
           ls probe-dlls | wc -l
+          # 顺便摆进内核目录本身 —— **`release.yml` 装包时就是这么做的**，
+          # 所以这一步同时验了那条路。拷 DLL 不改 `.exe` 的字节，
+          # `Kernel::open` 的 sha256 校验照样过。
+          cp probe-dlls/*.dll kernels/waterheat/
 
       # 两问两答，都在 PowerShell 里跑 —— 那里的 PATH 没有 mingw64\bin，
       # 正是用户机器的处境。
@@ -172,3 +164,20 @@ jobs:
           # 退出码。前两次分别是 macOS 上 `colm-cli | grep -q` 撞上 bash 的
           # pipefail，以及这一步早先那版。**断言写完就把退出码钉死。**
           exit 0
+
+      # 到此为止证明的都是「shell 能不能执行它」。**程序自己走的是另一条路**：
+      # `colm-kernel` 用 `Command::new(绝对路径)`，也就是 `CreateProcessW`。
+      # 那条路此前从没在 Windows 上跑过，只有一句推断（"对显式路径不查 PATHEXT"）。
+      #
+      # 用默认 shell 而不是 `msys2 {0}`：Rust 工具链装的是 MSVC 目标，
+      # **`cargo` 不在 MSYS2 的 PATH 上**（第一版这么写，报 `cargo: command not found`）。
+      # 而 DLL 上一步已经摆进 `kernels/waterheat/` 了，Windows 先在可执行文件
+      # 同目录找 DLL，所以这里不需要 MSYS2 的 PATH。
+      #
+      # 路径给绝对的：`cargo test` 的当前目录是 crate 目录，不是仓库根。
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The Rust side can launch it too
+        run: |
+          $env:COLM_KERNEL_DIR = "$PWD\kernels\waterheat"
+          cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned -- --nocapture
