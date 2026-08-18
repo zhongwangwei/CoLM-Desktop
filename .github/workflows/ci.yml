@@ -169,7 +169,11 @@ jobs:
           # 这一行是重点。sidecar 曾经被找去 Contents/Resources/，那里只有图标，
           # 而开发机上仓库的 target/ 产物永远兜得住，所以本地跑不出问题。
           test -x "$app/Contents/MacOS/colm-cli"
-          "$app/Contents/MacOS/colm-cli" 2>&1 | grep -q 'colm-cli new'
+          # 先收进变量再匹配。`colm-cli` 不带参数时**按设计退出 2**（打印用法），
+          # 而 GitHub 的 bash 带 `set -o pipefail` —— 直接 `| grep -q` 会把这个 2
+          # 传出来，于是打包明明成功、步骤却报失败。实测踩过。
+          usage=$("$app/Contents/MacOS/colm-cli" 2>&1 || true)
+          echo "$usage" | grep -q 'colm-cli new'
 
   # 黄金回归：需要 PLUMBER2 数据与 Fortran 工具链，只在带该数据的 runner 上跑。
   #

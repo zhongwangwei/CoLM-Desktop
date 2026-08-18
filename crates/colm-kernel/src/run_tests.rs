@@ -2,6 +2,11 @@ use super::*;
 
 /// 一个跑得起来的假内核：三个 `.x` 都是同一个 shell 脚本。
 ///
+/// `#[cfg(unix)]` 跟着两个使用者走 —— 它们都要 `#!/bin/sh` 与
+/// `set_permissions(0o755)`。不跟着标的话，Windows 上这个函数没人用，
+/// `clippy -D warnings` 会以 `never used` 报错（实测 CI 上就是这么挂的）。
+#[cfg(unix)]
+///
 /// 直接构造 `Kernel` 而不走 `Kernel::open` —— 这里要验的是 `run_stage*`，
 /// 二进制完整性另有 `manifest_tests` 管。
 fn fake_kernel(name: &str, script: &str) -> (Kernel, PathBuf) {
