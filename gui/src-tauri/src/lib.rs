@@ -22,6 +22,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backend_ready,
             describe_fields,
+            read_case,
+            set_field,
             run_case,
             run_log_tail,
             unknown_fields,

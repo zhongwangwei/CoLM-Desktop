@@ -59,3 +59,104 @@ pub fn unknown_fields(text: String) -> Result<Vec<String>, String> {
         .filter(|p| colm_schema::find(p).is_none())
         .collect())
 }
+
+/// 一份 namelist 里的一个字段，交给前端渲染。
+#[derive(Serialize)]
+pub struct Entry {
+    pub path: String,
+    /// 值的**原文**，与文件里一模一样
+    pub value: String,
+    /// `colm-schema` 认不认识它
+    pub known: bool,
+    pub kind: Option<String>,
+    pub group: Option<&'static str>,
+    pub derived: bool,
+}
+
+/// 读一份 namelist 文本，列出它设了哪些字段。
+#[tauri::command]
+pub fn read_case(text: String) -> Result<Vec<Entry>, String> {
+    let doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
+    Ok(doc
+        .paths()
+        .into_iter()
+        .map(|p| {
+            let f = colm_schema::find(&p);
+            Entry {
+                value: doc.get(&p).map(|v| v.to_string()).unwrap_or_default(),
+                known: f.is_some(),
+                kind: f.map(|f| format!("{:?}", f.kind)),
+                group: f.and_then(|f| f.group),
+                derived: f.is_some_and(|f| f.group.is_none()),
+                path: p,
+            }
+        })
+        .collect())
+}
+
+/// 改一个字段，返回**整份**文本。
+///
+/// 无状态往返：命令收整份文档加一个改动，返回重新校验过的整份文档。
+/// 前端不持有配置状态，也**从不自己构造带类型的值** —— 类型由
+/// `colm-schema` 决定，字符串怎么变成 `Value` 是这里的事。
+///
+/// 未被改动的行**逐字节不变**，这是 `colm-namelist` 的往返保证：
+/// 用户算例文件里的注释是他们自己的笔记，保存一次不该把它们冲掉。
+#[tauri::command]
+pub fn set_field(text: String, path: String, value: String) -> Result<String, String> {
+    let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
+    let v = typed(&path, &value)?;
+    doc.set(&path, v).map_err(|e| format!("{e:#}"))?;
+    Ok(doc.to_string())
+}
+
+/// 按 schema 声明的类型把字符串变成 `Value`。
+///
+/// schema 不认识的字段一律当字符串 —— 让它写出去，由 CoLM 去表态。
+/// 静默丢弃会让用户以为自己设了。
+fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
+    use colm_namelist::Value;
+    use colm_schema::FieldKind as K;
+    let s = raw.trim();
+    let Some(f) = colm_schema::find(path) else {
+        return Ok(Value::Str(s.to_string()));
+    };
+    match f.kind {
+        K::Logical => match s.to_ascii_lowercase().trim_matches('.') {
+            "true" | "t" => Ok(Value::Bool(true)),
+            "false" | "f" => Ok(Value::Bool(false)),
+            _ => Err(format!(
+                "{path} is logical; {raw:?} is neither .true. nor .false."
+            )),
+        },
+        K::Integer => s
+            .parse()
+            .map(Value::Int)
+            .map_err(|_| format!("{path} is an integer; {raw:?} is not")),
+        K::Real => {
+            // 存原文：1800. 与 1800.0 与 1.8e3 等价，往返要还原用户写的那种。
+            // 但先确认它确实是个数，否则会把一个打错的字悄悄写进文件。
+            s.replace(['d', 'D'], "e")
+                .parse::<f64>()
+                .map_err(|_| format!("{path} is a real; {raw:?} is not a number"))?;
+            Ok(Value::Real {
+                text: s.to_string(),
+            })
+        }
+        K::Character { len } => {
+            let bare = s.trim_matches(|c| c == '\'' || c == '"');
+            if bare.len() > len {
+                return Err(format!(
+                    "{path} holds character(len={len}); {:?} is {} characters",
+                    bare,
+                    bare.len()
+                ));
+            }
+            Ok(Value::Str(bare.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;
