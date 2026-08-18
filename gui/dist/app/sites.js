@@ -81,16 +81,15 @@ async function selectCase(c) {
 $('create').onclick = async () => {
   const site = $('w-site').value.trim();
   const root = $('root').value.trim();
-  if (!site || !root) { $('status').textContent = '要先填站点文件与算例目录'; return; }
-    // Windows 上的分隔符是反斜杠，两种都认
-  const stem = site.split(/[\\/]/).pop();
-  const name = $('w-name').value.trim() || stem.split('_')[0];
+  if (!site || !root) { setStatus('要先选站点文件与算例目录'); return; }
+  const name = caseNameFor(site);
   $('create').disabled = true;
   try {
     const msg = await invoke('new_case', {
       site, out: root + '/' + name, name,
-      start: $('w-start').value.trim() || null,
-      end: $('w-end').value.trim() || null,
+      // 不传时间窗口：`colm-cli new` 会用强迫场的完整范围，
+      // 而缩短窗口是第 4 步「时间」里同一组字段的事。
+      start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,
     });
@@ -202,6 +201,24 @@ function renderSites(r = {}) {
 $('root').addEventListener('input', updateBatchButtons);
 
 /** 勾了几个、能不能批量建。 */
+/** 算例名 = 站点代号；重名时加 `-2`、`-3`。
+ *
+ *  **不带时间戳。** 时间戳保证唯一，但 90 个
+ *  `AU-Preston_20260818-2213` 排在一起，一眼扫不出哪个是哪个 ——
+ *  而「一眼扫得出」正是批量场景下这张列表唯一的用处。
+ *  重名是少数情况，让少数情况带后缀，多数情况保持干净。 */
+function caseNameFor(sitePath) {
+  // Windows 上的分隔符是反斜杠，两种都认。
+  const stem = sitePath.split(/[\\/]/).pop();
+  return uniq(stem.split('_')[0]);
+}
+
+function uniq(base) {
+  const taken = new Set(state.cases.map(c => c.name));
+  if (!taken.has(base)) return base;
+  for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
+}
+
 export function updateBatchButtons() {
   const n = state.picked.size;
   const b = $('create-batch');
@@ -226,9 +243,8 @@ $('create-batch').onclick = async () => {
       setStatus(`建算例 ${i + 1}/${chosen.length}：${s.name}`);
       try {
         await invoke('new_case', {
-          site: s.site_file, out: root + '/' + s.name, name: s.name,
-          start: $('w-start').value.trim() || null,
-          end: $('w-end').value.trim() || null,
+          site: s.site_file, out: root + '/' + uniq(s.name), name: uniq(s.name),
+          start: null, end: null,
           rawdata: $('rawdata').value.trim() || null,
           runtime: $('runtime').value.trim() || null,
         });

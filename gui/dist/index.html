@@ -108,14 +108,9 @@
             <button class="btn-ghost" id="rescan">扫描已有</button>
           </div>
         </div>
-        <div class="row">
-          <div class="field"><label>算例名 <span class="hint">留空用站点代号</span></label>
-            <input class="input" id="w-name"></div>
-          <div class="field"><label>起 <span class="hint">可选</span></label>
-            <input class="input" id="w-start" placeholder="2008-01-01"></div>
-          <div class="field"><label>止 <span class="hint">可选</span></label>
-            <input class="input" id="w-end" placeholder="2008-01-11"></div>
-        </div>
+        <p class="muted mini">算例名取站点代号，重名时加 <code>-2</code>、<code>-3</code>。
+          时间窗口默认是强迫场的完整范围 —— 要缩短就去<b>第 4 步「时间」</b>改，
+          那里改的是同一组字段，不必在这里再问一遍。</p>
         <div id="urbandirs" hidden>
           <div class="expert-note">
             这是个<b>城市站点</b>。城市算例必须给全球栅格目录 ——
