@@ -3,12 +3,18 @@
 # §3 把它标成「中等难度：打通一次 MSYS2 netcdf-fortran」，而那句判断从未被验证过。
 # 本项目没有 Windows 机器，**CI 就是唯一能做这次验证的地方**。
 #
-# 刻意与 `ci` 分开、且只手动触发：这一步还在探索期，它的失败不该把每个 PR
-# 的流水线弄红。跑绿之后再并进 `ci` 并加上 push 触发。
+# 与 `ci` 分开是因为关注点不同：那边是 Rust，这边是 Fortran 工具链。
+# 探索期只手动触发，现在已跑绿，所以加上 push 与 PR —— Windows 内核一旦
+# 再次编不出来，应当在当次改动上就红，而不是等到某次手动触发。
+#
+# 约 3.5 分钟，其中大半是装 MSYS2 包。
 name: windows-kernel
 
 on:
   workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
 
 jobs:
   kernel:

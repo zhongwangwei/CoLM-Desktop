@@ -563,12 +563,28 @@ netCDF-C 4.9.3 / netcdf-fortran 4.6.3 / HDF5 1.14.6   （均来自 miniforge）
 
 | | 内容 | 交付物 | Windows 难度 | 物理移植 |
 |---|---|---|---|---|
-| **A** | GUI + Rust 编排 CLI + 预编译 Fortran 内核 | 能装能用的桌面程序 | 中（打通一次 MSYS2 netcdf-fortran） | 0 行 |
+| **A** | GUI + Rust 编排 CLI + 预编译 Fortran 内核 | 能装能用的桌面程序 | 中（**难点猜错了地方**，见下） | 0 行 |
 | **B** | shadow-compile 替换 Fortran 的 NetCDF 层 | Fortran 侧只剩 gfortran | 低 | 0 行，但要写 I/O shim |
 | **C** | 20 个移植单元逐组换 Rust | 100% Rust 交付物 | 最低 | ~44,400 有效行 |
 
 三者共用同一个 sidecar 边界，因此是同一条路上的三个里程碑，不是三选一。
 **GUI 在 B 和 C 阶段一行都不用改** —— 这正是 EarthMesh 的 GUI 能完整活过引擎重写的原因。
+
+**A 阶段的 Windows 难点原先写的是「打通一次 MSYS2 netcdf-fortran」，猜错了。**
+实测（`.github/workflows/windows-kernel.yml`）：netcdf-fortran 在 MSYS2 里
+`pacman` 装上就能用，`nf-config --flibs` 直接给出 `-L/mingw64/lib -lnetcdff -lnetcdf`，
+一点也不难。真正拦路的是两件当时没想到的事：
+
+1. **源码树里的符号链接。** `include/Makeoptions` 与 `run/scripts/batch.config`
+   是 tracked 符号链接，而 **Windows 上创建符号链接需要特权**，runner 没有。
+   `git worktree add` 在这两个上直接失败并 `Could not reset index file`，
+   一个源文件都还没编到。解法是 `-c core.symlinks=false` 让 git 写成普通文件，
+   并把脚本里的 `ln -sf` 换成拷贝（MSYS2 的 `ln -s` 行为取决于 `MSYS` 环境变量，
+   让构建结果依赖一个环境变量不值得）。
+2. **`include 'mpif.h'` 在守卫之外**，见 §11 第 0 条。
+
+结论对 A 阶段有用：Windows 的门槛不在科学库，而在**源码树对 POSIX 的隐含假设**。
+B、C 阶段把 Fortran 逐步换掉之后，这类问题会自然消失。
 
 每个阶段各自走一遍 spec → 实施计划 → 实施。本文档只覆盖 A 阶段。
 
@@ -991,7 +1007,7 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
 | 6 | `colm-hist`：时间轴、指标、QC 筛选（**已完成**；抽稀刻意未做，见 `plan-m6.md`） | 复现 §2.8 的 Rnet R²=0.986 —— **已复现**，且 §2.8b 三行一并复现 |
 | 7 | `colm-cli` 打通，命令行端到端可用（**已完成**） | 一条命令从 PLUMBER2 文件到指标表 —— **已实现**；生成的算例另有 `oracle/tests/generated_case.rs` 钉住它与黄金文件逐位相同 |
 | 8 | GUI：三栏工作台 + 新建向导，单站点闭环（**已写完，未验收**） | macOS + Linux 上双击可跑并出图 —— **尚未验证**：骨架、后端命令、前端与打包都已就位且编得过，接口有 `xtask check-gui` 静态守住，但没有人在真机上打开过窗口 |
-| 9 | **Windows 原生构建打通** | MSYS2 内核 + MSVC GUI，Windows 上跑通 CN-Cng |
+| 9 | **Windows 原生构建打通** | MSYS2 内核 + MSVC GUI，Windows 上跑通 CN-Cng。**实测进度**：Fortran 内核已在 CI 的 windows-latest 上编出来（`.github/workflows/windows-kernel.yml`），三个 `.x` 齐全、manifest 记 `MINGW64_NT-10.0-26100-x86_64` / gfortran 16.2.0 / netCDF 4.9.3 / netcdf-fortran 4.6.3 / HDF5 2.2.0，`colm.x` 能加载并在缺 namelist 时正确停下。**尚未在 Windows 上跑通 CN-Cng**（要 PLUMBER2 数据），GUI 侧也未验 |
 | 10 | 三个物理预设全部打包 | 三个预设在三个平台上各自跑通。**实测进度**：三个都编得过；`bgc` 已在 macOS 上三段跑通（除 `nitrif` 外**还需 `ndep`**，§10 原先只记了前者，且 `ndep` 在 `#ifdef BGC` 内无关闭分支）；`urban` 卡在 `mksrfdata`，缺 `<rawdata>/urban_type/` 与 `<rawdata>/urban/NCAR_urban_properties.nc`，而 Part 3 **没有 `USE_SITE_urban_type`**，站点文件补不了这一项 |
 | 11 | 批量 / 敏感性 / 算例管理 | 12 站批量 + 一个参数扫出汇总表 |
 | 12 | 打包分发（签名策略按 §9 决策） | 三平台安装包产出 |
@@ -1013,6 +1029,15 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
 ---
 
 ## 11. 未决问题
+
+0. **攒着的上游改动**。`vendor/CoLM202X` 钉在一个干净的上游 commit 上，
+   离开它是有代价的（submodule 要跟着 fork 走、CI 要拉得到、以后每次同步上游
+   都多一层）。所以下面这些**各自都不值得单独动手，攒够了一起改**：
+
+   | 改什么 | 为什么 | 现在怎么绕 |
+   |---|---|---|
+   | `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 挪进 `#ifdef USEMPI` | 它在守卫**之外**，于是 `#undef USEMPI` 的 SinglePoint 构建仍然要求 MPI 头文件。macOS 与 Linux 上恰好都装着 MPI，所以从没暴露过；Windows 是第一台没有的机器。注意是**挪不是删** —— `MPI_STATUS_SIZE` 用在第 97 行的 `#else` 分支里 | MSYS2 装 `mingw-w64-x86_64-msmpi`，它提供 21 KB 的 `mpif.h` |
+   | `CoLM_stop` 的裸 `STOP` 改成 `STOP 1`（§2.4） | 它是失败专用路径，却与成功共用退出码 0 | `colm-kernel` 的三条腿判定，即便上游改了也仍然需要 |
 
 1. **`LATERAL_FLOW` → `CatchLateralFlow` 是否修**（§2.15）。修正会让 91 个 CI 用例
    第一次真的编译侧向流路径，可能使 CI 失败。
