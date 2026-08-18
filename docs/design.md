@@ -895,7 +895,7 @@ static redesign」—— 立即模式 GUI 做不出想要的排版。这是选 T
 | 入口 | `main.rs` 6 行，只调 `lib::run()`；`crate-type = ["staticlib","cdylib","rlib"]` | 同 |
 | 后端组织 | `lib.rs` 88 行只做模块枢纽与 `generate_handler!`，命令按职责分 13 个模块（最大 784 行），测试在 `lib_tests.rs`（3214 行） | 同 —— 与本仓库 `#[path = "*_tests.rs"]` 的惯例一致 |
 | 权限 | `capabilities/default.json`。**自定义 `#[tauri::command]` 不需要声明权限，只有插件命令需要** | 同 |
-| 重活 | GUI 进程**不链接 netcdf/hdf5**，一律 shell out 给 sidecar CLI | 同 —— 我们的 sidecar 是 `kernels/*.x`，已由 `colm-kernel` 封装 |
+| 重活 | GUI 进程**默认不链接 netcdf/hdf5**，重活一律 shell out 给 sidecar CLI。**但这条已放宽**：窗口进程可以直接读 NetCDF 的元信息与序列（实测代价 +4.1 MB 二进制、首次构建约 60 秒），条件是独立成 `nc.rs` 一层、只读、走专用串行工作线程、且可摘除。计算仍全部走 sidecar。见 `plan-gui2.md` §1.5b | 同 —— 我们的 sidecar 是 `kernels/*.x`，已由 `colm-kernel` 封装 |
 | 打包 sidecar | `bundle.externalBin` + 一个 release-only 的 `tauri.bundle.conf.json` 覆盖层 + 暂存脚本 | 同，但暂存脚本用 Rust 写（xtask），不引入 Node |
 | 运行 sidecar | 先拷成带 `$PID-$SOURCE_HASH` 的临时副本再跑 | 同 —— §6.6 那条「先暂存到临时副本」就出自这里 |
 

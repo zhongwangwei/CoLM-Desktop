@@ -10,14 +10,9 @@ use std::path::Path;
 use anyhow::{bail, Result};
 
 pub fn check(root: &Path) -> Result<()> {
-    let html = std::fs::read_to_string(root.join("gui/dist/index.html"))?;
+    let html = frontend_sources(&root.join("gui/dist"))?;
     let lib = std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs"))?;
-    let mut backend = String::new();
-    for f in ["config.rs", "project.rs", "sidecar.rs"] {
-        backend.push_str(&std::fs::read_to_string(
-            root.join("gui/src-tauri/src").join(f),
-        )?);
-    }
+    let backend = concat_sources(&root.join("gui/src-tauri/src"), &["rs"], &[])?;
 
     let registered = registered_commands(&lib);
     let called = quoted_after(&html, "invoke(");
@@ -64,6 +59,66 @@ pub fn check(root: &Path) -> Result<()> {
         called.len(),
         listened.len()
     );
+    Ok(())
+}
+
+/// 前端的全部源码，拼成一份。
+///
+/// **必须扫整个目录，不能只读 `index.html`。** 前端拆成 ES module 之后，
+/// `invoke(...)` 散在 `app/*.js` 里；只读那一个文件的话，这个检查会把
+/// 「已被调用」的命令报成「没人调用」—— 而一条假警报比没有警报更糟，
+/// 它会训练人忽略这个检查。
+///
+/// 后端那半同理：原先写死 `["config.rs", "project.rs", "sidecar.rs"]`，
+/// 加一个 `sites.rs` 就会漏掉里面注册的命令，而检查照样是绿的。
+fn frontend_sources(dir: &Path) -> Result<String> {
+    // `vendor/` 排除在外：里面是压缩过的第三方 JS（uPlot 50 KB 一行），
+    // 扫它既慢又可能撞出假匹配，而我们从不在那里写 `invoke`。
+    concat_sources(dir, &["html", "js"], &["vendor"])
+}
+
+/// 递归收集 `dir` 下指定后缀的文件，拼成一份文本。
+///
+/// 文件之间用换行隔开。`quoted_after` 从 `invoke(` 往前只看 80 个字符，
+/// 所以拼接不会在文件边界上造出假匹配。
+fn concat_sources(dir: &Path, exts: &[&str], skip_dirs: &[&str]) -> Result<String> {
+    let mut files = Vec::new();
+    collect(dir, exts, skip_dirs, &mut files)?;
+    // 排序：拼接顺序随文件系统变的话，同一份代码在两台机器上会得到不同的
+    // 报错顺序，而这个检查的输出是要被人对比的。
+    files.sort();
+    let mut out = String::new();
+    for f in files {
+        out.push_str(&std::fs::read_to_string(&f)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn collect(
+    dir: &Path,
+    exts: &[&str],
+    skip_dirs: &[&str],
+    out: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Ok(()); // 目录不存在就当没有，交给调用方的「一个都没解析到」兜底
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if !skip_dirs.contains(&name.as_str()) {
+                collect(&p, exts, skip_dirs, out)?;
+            }
+        } else if p
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| exts.contains(&x))
+        {
+            out.push(p);
+        }
+    }
     Ok(())
 }
 
@@ -220,4 +275,85 @@ fn camel(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("check-gui-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        for (rel, body) in files {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn it_scans_every_js_module_not_just_index_html() {
+        // 前端拆成 ES module 之后，invoke 不再全在 index.html 里。只扫那一个
+        // 文件的话，检查会把「已被调用」的命令报成「没人调用」—— 那是这个
+        // 检查唯一的用处，报反了比不报更糟。
+        let d = tree(
+            "multifile",
+            &[
+                (
+                    "index.html",
+                    "<script type=module src=app/main.js></script>",
+                ),
+                ("app/main.js", "invoke('list_cases')"),
+                ("app/results.js", "invoke('series', { case: c, vars: v })"),
+            ],
+        );
+        let src = frontend_sources(&d).unwrap();
+        let called = quoted_after(&src, "invoke(");
+        assert!(called.contains("list_cases"), "漏了 app/main.js");
+        assert!(called.contains("series"), "漏了 app/results.js");
+    }
+
+    #[test]
+    fn it_leaves_vendored_javascript_alone() {
+        // uPlot 是压缩成一行的 50 KB 第三方代码。我们从不在那里写 invoke，
+        // 扫它只会撞出假匹配。
+        let d = tree(
+            "vendor",
+            &[
+                ("app/main.js", "invoke('list_cases')"),
+                ("vendor/uplot/uPlot.iife.min.js", "invoke('not_ours')"),
+            ],
+        );
+        let called = quoted_after(&frontend_sources(&d).unwrap(), "invoke(");
+        assert!(called.contains("list_cases"));
+        assert!(!called.contains("not_ours"), "vendor/ 不该被扫");
+    }
+
+    #[test]
+    fn a_new_backend_module_is_picked_up_without_editing_this_file() {
+        // 原先写死三个文件名。加一个 sites.rs 就会漏掉里面 emit 的事件，
+        // 而检查照样绿 —— 这正是「守卫自己需要被守」的那类问题。
+        let d = tree(
+            "backend",
+            &[
+                ("config.rs", "#[tauri::command]\npub fn a(x: String) {}"),
+                ("sites.rs", "app.emit(\"run://progress\", p);"),
+            ],
+        );
+        let src = concat_sources(&d, &["rs"], &[]).unwrap();
+        assert!(quoted_after(&src, "emit(").contains("run://progress"));
+        assert!(command_params(&src).contains_key("a"));
+    }
+
+    #[test]
+    fn concatenation_order_does_not_depend_on_the_filesystem() {
+        // read_dir 的顺序随平台变。不排序的话，同一份代码在两台机器上
+        // 报错顺序不同，而这个检查的输出是要被人对比的。
+        let d = tree("order", &[("b.js", "invoke('b')"), ("a.js", "invoke('a')")]);
+        let a = frontend_sources(&d).unwrap();
+        let b = frontend_sources(&d).unwrap();
+        assert_eq!(a, b);
+        assert!(a.find("invoke('a')").unwrap() < a.find("invoke('b')").unwrap());
+    }
 }
