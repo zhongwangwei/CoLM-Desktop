@@ -231,3 +231,7 @@ td:first-child { overflow-wrap: anywhere; }
   .step .d, .est { display: none; }
   .work { padding: var(--s-lg); }
 }
+
+/* 每一页底部的出口。**让人自己回左栏找下一步，等于把「现在该干嘛」推给用户。** */
+.foot { display: flex; justify-content: flex-end; margin-top: var(--s-lg);
+        padding-top: var(--s-lg); border-top: 1px solid var(--border); }

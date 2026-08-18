@@ -54,10 +54,38 @@
       </div>
     </section>
 
-    <!-- ② 算例 -->
-    <section class="page" data-step="case" hidden>
+    <!-- ② 前处理（未实现，形状先定下来） -->
+    <section class="page" data-step="prep" hidden>
       <div class="work-head"><span class="kicker">第 2 步</span></div>
-      <h1>造一个算例</h1>
+      <h1>前处理</h1>
+      <p class="sub">把原始数据批量转成模型要的格式。<b>已经转好的会跳过</b> ——
+        判据与第 5 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
+
+      <div class="card">
+        <h3>还没有实现</h3>
+        <div class="ch">这一页是预留的。下面是它打算做的事，写出来是为了它落地时不跑偏。</div>
+        <table>
+          <tr><th>要做的</th><th>为什么现在还不做</th></tr>
+          <tr><td>强迫场单位与变量名归一</td>
+              <td>目前 <code>colm-forcing</code> 直接认 PLUMBER2 与 Urban-PLUMBER 两套约定，还没遇到第三套</td></tr>
+          <tr><td>时间轴重采样（半小时 ↔ 小时）</td>
+              <td>两套数据集都是 1800 秒，<b>88/90 个站点如此</b>，另两个是 3600 且模型能直接跟</td></tr>
+          <tr><td>缺测填补与 QC 过滤</td>
+              <td>观测侧的 QC 已在配对时处理（至少一个半小时 qc==0 取平均）；强迫场侧还没量过有多少缺测</td></tr>
+          <tr><td>全球栅格裁到站点邻域</td>
+              <td>只有城市算例要读栅格，而它一次只读一格；裁剪的收益要先量</td></tr>
+        </table>
+        <div class="expert-note">
+          <b>落地时的两条约束</b>：转换产物要与源文件分开存放（原始数据永远不动），
+          且每一步都要能说出「这一项为什么跳过」—— 静默跳过与静默失败在界面上长得一样。
+        </div>
+      </div>
+    </section>
+
+    <!-- ③ 算例 -->
+    <section class="page" data-step="case" hidden>
+      <div class="work-head"><span class="kicker">第 3 步</span></div>
+      <h1>造算例</h1>
       <p class="sub">一个<b>算例</b>是一个目录，里面有 <code>case.nml</code>（配置）、
         <code>site.nc</code>（补齐后的站点数据）和 <code>out/</code>（产物）。
         经纬度、地类、时间步长与默认窗口都从文件里读，不用填。</p>
@@ -66,7 +94,7 @@
         <h3>新建</h3>
         <div class="ch">从第 1 步选中的站点造。已经造过的在下面那张卡片里。</div>
         <div class="field">
-          <label>站点文件 <span class="hint">在第 1 步点一个站点会自动填进来</span></label>
+          <label>站点文件 <span class="hint">在第 1 步点一个站点会自动填进来；多选时这里显示第一个</span></label>
           <div class="browse">
             <input class="input" id="w-site">
             <button class="btn-ghost pick" data-for="w-site" data-file="nc">选择…</button>
@@ -102,7 +130,10 @@
                 <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
           </div>
         </div>
-        <button class="btn-next" id="create">新建算例</button>
+        <div class="pill-row">
+          <button class="btn-next" id="create">新建算例</button>
+          <button class="btn-ghost" id="create-batch" disabled>为选中的站点各建一个</button>
+        </div>
       </div>
 
       <div class="card">
@@ -117,7 +148,7 @@
 
     <!-- ③ 参数 -->
     <section class="page" data-step="params" hidden>
-      <div class="work-head"><span class="kicker">第 3 步</span></div>
+      <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>配参数</h1>
       <p class="sub">按功能分类，不按 CoLM 的文件结构分。<b>常规模式只显示这份算例实际设了的字段</b>；
         专家模式连没设过的一起显示，值是 CoLM 的默认值。</p>
@@ -141,7 +172,7 @@
 
     <!-- ④ 运行 -->
     <section class="page" data-step="run" hidden>
-      <div class="work-head"><span class="kicker">第 4 步</span></div>
+      <div class="work-head"><span class="kicker">第 5 步</span></div>
       <h1>运行</h1>
       <p class="sub">三个程序依次跑：<code>mksrfdata</code> 造地表数据、<code>mkinidata</code> 造初始场、
         <code>colm</code> 跑模拟。<b>输入没变的那一段会跳过</b> —— 判据是输入指纹，不是文件在不在。</p>
@@ -161,10 +192,10 @@
 
     <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
-      <div class="work-head"><span class="kicker">第 5 步</span></div>
+      <div class="work-head"><span class="kicker">第 6 步</span></div>
       <h1>结果</h1>
       <p class="sub">画模型输出，或与观测配对算指标。<b>「丢弃前 N 条」丢的是输出记录</b>，
-        与第 3 步里的模型预热（spin-up）不是一回事。</p>
+        与第 4 步里的模型预热（spin-up）不是一回事。</p>
 
       <div class="card">
         <h3>曲线</h3>
@@ -183,7 +214,7 @@
           <button class="btn-ghost pick" data-for="obs" data-file="nc">选择…</button>
         </div>
         <div class="pill-row" style="margin-top:10px">
-          <label class="check" title="丢的是输出记录，单位是条。与第 3 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
+          <label class="check" title="丢的是输出记录，单位是条。与第 4 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
             丢弃前 <input class="input" id="spinup" type="number" value="0" min="0" style="width:5.5em"> 条 ⓘ</label>
           <button class="btn-ghost" id="evaluate" disabled>评估</button>
           <button class="btn-ghost" id="eval-all" disabled>评估全部已跑算例</button>

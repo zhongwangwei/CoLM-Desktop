@@ -9,16 +9,47 @@ import { $ } from './ui.js';
 
 /** 五步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
 export const STEPS = [
-  { id: 'data',   t: '数据',   d: '有哪些站点', need: () => null },
-  { id: 'case',   t: '算例',   d: '造一个 / 选一个',
+  { id: 'data',    t: '数据',   d: '有哪些站点', need: () => null },
+  { id: 'prep',    t: '前处理', d: '转成模型要的格式',
+    need: () => (state.sites.length ? null : '先在第 1 步扫一个站点目录') },
+  { id: 'case',    t: '算例',   d: '造一批 / 选一个',
     need: () => (state.sites.length || state.cases.length ? null : '先在第 1 步扫一个站点目录') },
-  { id: 'params', t: '参数',   d: '物理与输出',
+  { id: 'params',  t: '参数',   d: '物理与输出',
     need: () => (state.selected ? null : '先选一个算例') },
-  { id: 'run',    t: '运行',   d: '三段依次跑',
+  { id: 'run',     t: '运行',   d: '三段依次跑',
     need: () => (state.selected ? null : '先选一个算例') },
-  { id: 'result', t: '结果',   d: '曲线与指标',
+  { id: 'result',  t: '结果',   d: '曲线与指标',
     need: () => (state.selected ? null : '先选一个算例') },
 ];
+
+/** 下一步是哪一步。**每一页都要有出口** —— 让人自己回左栏找下一步，
+ *  等于把「现在该干嘛」这个问题推给用户，而那正是原来那版最大的毛病。 */
+export function nextOf(id) {
+  const i = STEPS.findIndex(s => s.id === id);
+  return STEPS[i + 1] ?? null;
+}
+
+/** 给每一页底部装一个「下一步」。进不去时按钮说出原因，而不是只灰着。 */
+export function renderNextButtons() {
+  for (const page of document.querySelectorAll('.page')) {
+    const next = nextOf(page.dataset.step);
+    let foot = page.querySelector('.foot');
+    if (!foot) {
+      foot = document.createElement('div');
+      foot.className = 'foot';
+      page.appendChild(foot);
+    }
+    foot.textContent = '';
+    if (!next) continue;
+    const why = next.need();
+    const b = document.createElement('button');
+    b.className = 'btn-next';
+    b.textContent = why ? why : `下一步：${next.t} →`;
+    b.disabled = !!why;
+    b.onclick = () => go(next.id);
+    foot.appendChild(b);
+  }
+}
 
 export function go(id) {
   const step = STEPS.find(s => s.id === id);
@@ -48,6 +79,9 @@ export function renderSteps() {
   const k = $('kernel');
   $('estKernel').textContent = k?.selectedIndex >= 0 ? k.options[k.selectedIndex].textContent : '—';
   $('casename').value = state.selected ? state.selected.dir : '还没有算例';
+  // 步骤条与「下一步」按钮是**同一份状态**推出来的，必须一起刷新。
+  // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
+  renderNextButtons();
 }
 
 export function setStatus(msg) { $('status').textContent = String(msg); }

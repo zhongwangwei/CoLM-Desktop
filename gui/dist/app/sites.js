@@ -12,6 +12,7 @@ $('rescan').onclick = async () => {
   try {
     state.cases = await invoke('list_cases', { root: $('root').value.trim() });
     renderCases();
+    renderSteps();
   } catch (e) { $('status').textContent = String(e); }
 };
 
@@ -101,6 +102,7 @@ $('scan').onclick = async () => {
     const r = await invoke('scan_sites', { dir, quick: true });
     state.sites = r.sites;
     renderSites(r);
+    renderSteps();
   } catch (e) { status(e); }
   finally { $('scan').disabled = false; }
 };
@@ -134,6 +136,7 @@ function renderSites(r = {}) {
   const urban = state.sites.filter(s => s.urban).length;
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
+  updateBatchButtons();
   $('sitesummary').textContent =
     `${state.sites.length} 个站点` +
     (urban ? ` · ${urban} 个城市` : '') +
@@ -143,7 +146,19 @@ function renderSites(r = {}) {
   for (const s of state.sites) {
     const d = document.createElement('div');
     d.className = 'case';
-    d.textContent = s.name;
+    // 多选是批量的入口。**流水线作用于「一组」，选 1 个只是 N=1** ——
+    // 批量另开一套界面的话，就有两条流水线要各自维护，而它们迟早会分叉。
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = state.picked.has(s.name);
+    cb.onclick = e => {
+      e.stopPropagation();   // 勾选不等于「选中这一个」
+      if (cb.checked) state.picked.add(s.name); else state.picked.delete(s.name);
+      updateBatchButtons();
+    };
+    cb.style.cssText = 'width:auto;margin-right:8px';
+    d.appendChild(cb);
+    d.appendChild(document.createTextNode(s.name));
     const small = document.createElement('small');
     const tags = [];
     if (s.urban) tags.push('城市');
@@ -167,3 +182,53 @@ function renderSites(r = {}) {
     box.appendChild(d);
   }
 }
+
+
+// 「勾了几个」在第 1 步、「放在哪」在第 3 步 —— 两边都影响这个按钮，
+// 所以两边都要触发刷新。
+$('root').addEventListener('input', updateBatchButtons);
+
+/** 勾了几个、能不能批量建。 */
+export function updateBatchButtons() {
+  const n = state.picked.size;
+  const b = $('create-batch');
+  if (!b) return;
+  b.disabled = !n || !$('root').value.trim();
+  b.textContent = n ? `为选中的 ${n} 个站点各建一个` : '为选中的站点各建一个';
+}
+
+/** 批量建算例：流水线最前面那一段，原来只能一个一个点。
+ *
+ *  **串行，不并发。** 每次 `new_case` 都要读站点文件与强迫场文件并写出
+ *  补齐后的 site.nc，瓶颈在磁盘；并发几个只是让它们互相抢。
+ *  一个失败不中止整批 —— 90 个里有一个站点文件坏了，其余 89 个仍要建出来。 */
+$('create-batch').onclick = async () => {
+  const root = $('root').value.trim();
+  const chosen = state.sites.filter(s => state.picked.has(s.name));
+  if (!root || !chosen.length) return;
+  $('create-batch').disabled = true;
+  const failed = [];
+  try {
+    for (const [i, s] of chosen.entries()) {
+      setStatus(`建算例 ${i + 1}/${chosen.length}：${s.name}`);
+      try {
+        await invoke('new_case', {
+          site: s.site_file, out: root + '/' + s.name, name: s.name,
+          start: $('w-start').value.trim() || null,
+          end: $('w-end').value.trim() || null,
+          rawdata: $('rawdata').value.trim() || null,
+          runtime: $('runtime').value.trim() || null,
+        });
+      } catch (e) { failed.push([s.name, String(e)]); }
+    }
+    state.cases = await invoke('list_cases', { root });
+    renderCases();
+    renderSteps();
+    // 失败的要**点名**。一批建完少了几个而不说是谁，
+    // 下一步跑的时候才发现，那时已经隔了一层。
+    setStatus(failed.length
+      ? `建好 ${chosen.length - failed.length}/${chosen.length} 个；失败：`
+        + failed.map(([n, why]) => `${n}（${why.slice(0, 60)}）`).join('、')
+      : `建好 ${chosen.length} 个算例`);
+  } finally { updateBatchButtons(); }
+};
