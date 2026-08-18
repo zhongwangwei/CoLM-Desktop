@@ -26,6 +26,7 @@ serde_json = "1"
 # 把整个静态 HDF5 拖进来。
 colm-namelist = { path = "../../crates/colm-namelist" }
 colm-schema = { path = "../../crates/colm-schema" }
+colm-case = { path = "../../crates/colm-case" }
 
 # **自己就是一个 workspace 根。** 这一行把 429 个 Tauri 依赖挡在引擎
 # workspace 之外 —— 引擎那边只有 70 个，`cargo test --workspace` 不该

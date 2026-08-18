@@ -9,6 +9,7 @@
 //! diff 里 —— 上游加一个 DEF_ 或改一个默认值，应当是一次可见的改动，
 //! 而不是某次构建之后悄悄换掉的东西。
 
+mod gui;
 mod hist;
 mod namelist;
 
@@ -23,7 +24,8 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "gen-schema" => gen_schema(),
         "gen-histmap" => gen_histmap(),
-        _ => bail!("usage: cargo run -p xtask -- <gen-schema|gen-histmap>"),
+        "check-gui" => gui::check(&repo_root()?),
+        _ => bail!("usage: cargo run -p xtask -- <gen-schema|gen-histmap|check-gui>"),
     }
 }
 

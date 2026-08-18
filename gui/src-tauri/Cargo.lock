@@ -322,9 +322,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-case"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "colm-namelist",
+ "colm-schema",
+]
+
+[[package]]
 name = "colm-desktop-gui"
 version = "0.1.0"
 dependencies = [
+ "colm-case",
  "colm-namelist",
  "colm-schema",
  "serde",

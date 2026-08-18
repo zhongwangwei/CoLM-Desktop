@@ -1,44 +1,328 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>CoLM Desktop</title>
+<link rel="stylesheet" href="vendor/uplot/uPlot.min.css">
 <style>
-  :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
-  body { margin: 0; display: grid; grid-template-columns: 220px 1fr 360px; height: 100vh; }
-  section { padding: 12px 16px; overflow: auto; border-right: 1px solid color-mix(in oklab, currentColor 18%, transparent); }
-  section:last-child { border-right: 0; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 0 0 10px; }
-  #status { padding: 8px 10px; border-radius: 6px; background: color-mix(in oklab, currentColor 8%, transparent); }
-  .muted { opacity: .6; }
+  :root { color-scheme: light dark; font: 13px/1.55 system-ui, -apple-system, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template-columns: 230px 1fr 420px; }
+  aside, main, .results { padding: 12px 14px; overflow: auto; min-width: 0; }
+  aside, main { border-right: 1px solid var(--rule); }
+  :root { --rule: color-mix(in oklab, currentColor 16%, transparent);
+          --soft: color-mix(in oklab, currentColor 7%, transparent); }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; opacity: .55; margin: 0 0 9px; }
+  button { font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--rule);
+           background: var(--soft); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  input, select { font: inherit; padding: 4px 7px; border-radius: 5px;
+                  border: 1px solid var(--rule); background: transparent; color: inherit; width: 100%; }
+  label { display: block; margin: 7px 0 2px; opacity: .65; font-size: 11px; }
+  .case { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+  .case:hover { background: var(--soft); }
+  .case[aria-selected=true] { background: var(--soft); font-weight: 600; }
+  .case small { display: block; opacity: .5; font-weight: 400; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .bar { height: 4px; border-radius: 2px; background: var(--soft); overflow: hidden; margin: 8px 0; }
+  .bar > i { display: block; height: 100%; width: 0; background: currentColor; opacity: .55;
+             transition: width .12s linear; }
+  pre { margin: 0; font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap;
+        max-height: 34vh; overflow: auto; background: var(--soft); padding: 8px; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  td, th { text-align: left; padding: 2px 6px 2px 0; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { color: #b4690e; }
+  .muted { opacity: .55; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .tabs button[aria-pressed=true] { background: color-mix(in oklab, currentColor 14%, transparent); }
+  .chart { margin-bottom: 14px; }
 </style>
 <body>
-  <section><h2>算例库</h2><p class="muted">尚未实现</p></section>
-  <section>
-    <h2>配置</h2>
-    <p id="status">连接后端…</p>
-    <p id="fields" class="muted"></p>
-  </section>
-  <section><h2>结果</h2><p class="muted">尚未实现</p></section>
 
+<aside>
+  <h2>算例库</h2>
+  <div class="row"><input id="root" placeholder="算例目录"><button id="rescan">扫描</button></div>
+  <div id="cases" style="margin-top:8px"></div>
+  <h2 style="margin-top:18px">新建</h2>
+  <label>站点文件（PLUMBER2 的 *_site.nc）</label><input id="w-site">
+  <label>算例名（留空则用站点代号）</label><input id="w-name">
+  <div class="row">
+    <div style="flex:1"><label>起（可选）</label><input id="w-start" placeholder="2008-01-01"></div>
+    <div style="flex:1"><label>止（可选）</label><input id="w-end" placeholder="2008-01-11"></div>
+  </div>
+  <p class="muted" style="font-size:11px">经纬度、地类、时间步长与默认窗口都从文件里读，不用填。</p>
+  <button id="create" style="margin-top:6px">新建算例</button>
+</aside>
+
+<main>
+  <h2>配置</h2>
+  <p id="status" class="muted">连接后端…</p>
+  <div id="unknown"></div>
+  <div class="tabs" id="tabs"></div>
+  <div id="fields"></div>
+
+  <h2 style="margin-top:18px">运行</h2>
+  <div class="row">
+    <input id="kernel" placeholder="内核目录（kernels/waterheat）" style="flex:1">
+    <button id="run" disabled>运行</button>
+  </div>
+  <div class="bar"><i id="prog"></i></div>
+  <p id="progtext" class="muted" style="font-size:11px">&nbsp;</p>
+  <pre id="log"></pre>
+</main>
+
+<div class="results">
+  <h2>结果</h2>
+  <div class="row">
+    <select id="var"></select><button id="plot" disabled>画图</button>
+  </div>
+  <div id="charts" style="margin-top:10px"></div>
+</div>
+
+<script src="vendor/uplot/uPlot.iife.min.js"></script>
 <script>
-// withGlobalTauri: true，所以直接用 window.__TAURI__，不需要模块加载器。
-const invoke = window.__TAURI__?.core?.invoke;
-const status = document.getElementById('status');
-const fields = document.getElementById('fields');
+const T = window.__TAURI__;
+const invoke = T?.core?.invoke;
+const listen = T?.event?.listen;
+const $ = id => document.getElementById(id);
+const state = { cases: [], selected: null, text: '', fields: [], group: 'nl_colm' };
 
 if (!invoke) {
-  // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是静默空白。
-  status.textContent = 'no IPC backend — this page is running outside Tauri';
+  // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是渲染成一片空白。
+  $('status').textContent = '没有 IPC 后端 —— 这个页面不在 Tauri 里运行';
 } else {
-  invoke('backend_ready')
-    .then(msg => { status.textContent = msg; return invoke('describe_fields'); })
-    .then(list => {
-      const derived = list.filter(f => f.derived).length;
-      const groups = new Set(list.map(f => f.group).filter(Boolean));
-      fields.textContent =
-        `${list.length} fields across ${groups.size} namelist groups; ` +
-        `${derived} are derived and cannot be set`;
-    })
-    .catch(e => { status.textContent = 'backend error: ' + e; });
+  boot();
+}
+
+async function boot() {
+  try {
+    $('status').textContent = await invoke('backend_ready');
+    state.fields = await invoke('describe_fields');
+    renderTabs();
+  } catch (e) { $('status').textContent = '后端出错：' + e; }
+
+  await listen('run://progress', e => {
+    // 进度只到「第几步、模型时间到哪天」为止。总步数要等算例配置解析出来才知道，
+    // 在那之前不假装知道百分比 —— 一条走到一半又跳回去的进度条比没有更糟。
+    $('progtext').textContent = `第 ${e.payload.step} 步 · ${e.payload.date}`;
+    const w = Math.min(96, 6 + Math.log10(e.payload.step + 1) * 30);
+    $('prog').style.width = w + '%';
+  });
+  await listen('run://lines', e => {
+    const el = $('log');
+    // 事件是**成批**到的（后端每 100 毫秒合并一次），所以这里一次追加一批。
+    el.textContent += e.payload.join('\n') + '\n';
+    if (el.textContent.length > 60000) el.textContent = el.textContent.slice(-40000);
+    el.scrollTop = el.scrollHeight;
+  });
+  await listen('run://done', e => {
+    const d = e.payload;
+    $('prog').style.width = d.code === 0 ? '100%' : '0';
+    $('progtext').textContent =
+      `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）'} · ` +
+      `子进程打了 ${d.total} 行，丢弃 ${d.dropped} 行噪声`;
+    $('run').disabled = false;
+    if (d.code === 0) refreshVars();
+  });
+}
+
+$('rescan').onclick = async () => {
+  try {
+    state.cases = await invoke('list_cases', { root: $('root').value.trim() });
+    renderCases();
+  } catch (e) { $('status').textContent = String(e); }
+};
+
+function renderCases() {
+  const box = $('cases');
+  box.textContent = '';
+  if (!state.cases.length) {
+    box.innerHTML = '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
+    return;
+  }
+  for (const c of state.cases) {
+    const d = document.createElement('div');
+    d.className = 'case';
+    d.setAttribute('aria-selected', String(state.selected?.dir === c.dir));
+    const s = document.createElement('small');
+    s.textContent = c.has_history ? '已跑过' : '未跑';
+    d.textContent = c.name;
+    d.appendChild(s);
+    d.onclick = () => selectCase(c);
+    box.appendChild(d);
+  }
+}
+
+async function selectCase(c) {
+  state.selected = c;
+  renderCases();
+  $('run').disabled = false;
+  try {
+    state.text = await invoke('read_text', { path: c.dir + '/case.nml' });
+    const unknown = await invoke('unknown_fields', { text: state.text });
+    const u = $('unknown');
+    u.textContent = '';
+    if (unknown.length) {
+      // 上游自己发布的单点示例就设了两个已删除的字段，CoLM 读到会
+      // `Cannot match namelist object name` 然后停。在开跑前说，别让人对着报错发呆。
+      const p = document.createElement('p');
+      p.className = 'warn';
+      p.style.fontSize = '12px';
+      p.textContent =
+        `这份配置有 ${unknown.length} 个 CoLM 已经不认识的字段，会让运行在读取时就停：` +
+        unknown.join('、');
+      u.appendChild(p);
+    }
+    renderFields();
+    refreshVars();
+  } catch (e) { $('status').textContent = String(e); }
+}
+
+function renderTabs() {
+  const groups = ['nl_colm', 'nl_colm_forcing', 'nl_colm_history'];
+  const t = $('tabs');
+  t.textContent = '';
+  for (const g of groups) {
+    const b = document.createElement('button');
+    b.textContent = { nl_colm: '算例', nl_colm_forcing: '强迫场', nl_colm_history: '输出变量' }[g];
+    b.setAttribute('aria-pressed', String(state.group === g));
+    b.onclick = () => { state.group = g; renderTabs(); renderFields(); };
+    t.appendChild(b);
+  }
+}
+
+async function renderFields() {
+  const box = $('fields');
+  box.textContent = '';
+  if (!state.text) { box.innerHTML = '<p class="muted">先在左边选一个算例</p>'; return; }
+  let entries;
+  try { entries = await invoke('read_case', { text: state.text }); }
+  catch (e) { box.textContent = String(e); return; }
+
+  const shown = entries.filter(e => (e.group ?? 'nl_colm') === state.group);
+  if (!shown.length) { box.innerHTML = '<p class="muted">这一组里这份配置没有设任何字段</p>'; return; }
+  const tbl = document.createElement('table');
+  for (const e of shown) {
+    const tr = document.createElement('tr');
+    const k = document.createElement('td');
+    k.textContent = e.path;
+    if (!e.known) { k.className = 'warn'; k.title = 'CoLM 不认识这个字段'; }
+    const v = document.createElement('td');
+    if (e.derived) {
+      // 有声明有默认值，但不在任何 namelist 组里 —— 用户设了也没用。
+      // 给一个改了没用的输入框比只读地显示更糟。
+      v.textContent = e.value + '（派生值，改不了）';
+      v.className = 'muted';
+    } else {
+      const inp = document.createElement('input');
+      inp.value = e.value.replace(/^'|'$/g, '');
+      inp.onchange = async () => {
+        try {
+          state.text = await invoke('set_field',
+            { text: state.text, path: e.path, value: inp.value });
+          await invoke('write_text', { path: state.selected.dir + '/case.nml', text: state.text });
+          $('status').textContent = `已保存 ${e.path}`;
+        } catch (err) {
+          // 类型不对在后端就被拦下了，原样报出来 —— 它说得比我们编的具体
+          $('status').textContent = String(err);
+          inp.value = e.value.replace(/^'|'$/g, '');
+        }
+      };
+      v.appendChild(inp);
+    }
+    tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
+  }
+  box.appendChild(tbl);
+}
+
+$('create').onclick = async () => {
+  const site = $('w-site').value.trim();
+  const root = $('root').value.trim();
+  if (!site || !root) { $('status').textContent = '要先填站点文件与算例目录'; return; }
+  const name = $('w-name').value.trim() || site.split('/').pop().split('_')[0];
+  $('create').disabled = true;
+  try {
+    const msg = await invoke('new_case', {
+      site, out: root + '/' + name, name,
+      start: $('w-start').value.trim() || null,
+      end: $('w-end').value.trim() || null,
+    });
+    $('log').textContent = msg;
+    state.cases = await invoke('list_cases', { root });
+    renderCases();
+    $('status').textContent = '算例已建好';
+  } catch (e) { $('status').textContent = String(e); }
+  finally { $('create').disabled = false; }
+};
+
+$('run').onclick = async () => {
+  if (!state.selected) return;
+  $('run').disabled = true;
+  $('log').textContent = '';
+  $('progtext').textContent = '启动…';
+  try {
+    await invoke('run_case', { case: state.selected.dir, kernel: $('kernel').value.trim() });
+  } catch (e) {
+    $('status').textContent = String(e);
+    $('run').disabled = false;
+  }
+};
+
+// 能画的只有 (time, patch) 形状的那些 —— 119 个变量里 108 个是。
+// 其余 11 个是剖面（(time, patch, soil) 之类），需要另一种画法。
+const PLOTTABLE = [
+  ['f_rnet', '净辐射 Rnet', 'W/m2'],
+  ['f_fsena', '感热 Qh', 'W/m2'],
+  ['f_lfevpa', '潜热 Qle', 'W/m2'],
+  ['f_fgrnd', '地表热通量 Qg', 'W/m2'],
+  ['f_sr', '反射短波 SWup', 'W/m2'],
+  ['f_xy_t', '参考高度气温', 'K'],
+  ['f_rnof', '总产流', 'mm/s'],
+  ['f_zwt', '地下水位', 'm'],
+];
+
+function refreshVars() {
+  const s = $('var');
+  s.textContent = '';
+  for (const [id, label, unit] of PLOTTABLE) {
+    const o = document.createElement('option');
+    o.value = id; o.textContent = `${label}  [${unit}]`;
+    s.appendChild(o);
+  }
+  $('plot').disabled = !(state.selected && state.selected.has_history);
+}
+
+$('plot').onclick = async () => {
+  if (!state.selected) return;
+  const id = $('var').value;
+  const meta = PLOTTABLE.find(p => p[0] === id);
+  $('plot').disabled = true;
+  try {
+    const json = await invoke('series', { case: state.selected.dir, vars: id });
+    const d = JSON.parse(json);
+    draw(d, id, meta);
+  } catch (e) { $('status').textContent = String(e); }
+  finally { $('plot').disabled = false; }
+};
+
+function draw(d, id, meta) {
+  const host = document.createElement('div');
+  host.className = 'chart';
+  $('charts').prepend(host);
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  new uPlot({
+    width: host.parentElement.clientWidth - 30,
+    height: 190,
+    title: `${meta[1]}  ·  ${d.n} 点`,
+    // **必须按 UTC 格式化。** PLUMBER2 是地方时、模型也按地方时推进，
+    // 时间戳是「把地方时当成 UTC」算出来的；按浏览器本地时区格式化
+    // 会把整条曲线平移一个时区。
+    tzDate: ts => uPlot.tzDate(new Date(ts * 1000), 'Etc/UTC'),
+    series: [
+      { label: '时间' },
+      { label: meta[2], stroke: dark ? '#8fd3a6' : '#1e6b3a', width: 1.25 },
+    ],
+    axes: [{}, { label: meta[2] }],
+  }, [d.time, d.vars[id]], host);
 }
 </script>
 </body>

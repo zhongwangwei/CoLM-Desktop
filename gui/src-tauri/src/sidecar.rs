@@ -184,6 +184,62 @@ pub async fn run_case(
     Ok(code)
 }
 
+/// 新建一个算例。sidecar 会补齐站点文件、生成强迫场与算例 namelist。
+///
+/// 经纬度、地类、时间步长、默认窗口都由 `colm-cli new` 从文件里读出来 ——
+/// 界面上只需要问「选哪个站」「叫什么名字」，以及可选的窗口收窄。
+#[tauri::command]
+pub async fn new_case(
+    app: tauri::AppHandle,
+    site: String,
+    out: String,
+    name: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+) -> Result<String, String> {
+    let mut args = vec![
+        "new".to_string(),
+        "--site".into(),
+        site,
+        "--out".into(),
+        out,
+    ];
+    for (flag, v) in [("--name", name), ("--start", start), ("--end", end)] {
+        if let Some(v) = v {
+            if !v.trim().is_empty() {
+                args.push(flag.into());
+                args.push(v);
+            }
+        }
+    }
+    capture(&app, &args)
+}
+
+/// 取绘图数据。
+///
+/// 走 sidecar 而不是在这里读 —— 窗口进程不链接 netcdf，
+/// 不该为了画一条曲线把整个静态 HDF5 拖进来。
+#[tauri::command]
+pub async fn series(app: tauri::AppHandle, case: String, vars: String) -> Result<String, String> {
+    capture(&app, &["series".to_string(), case, "--vars".into(), vars])
+}
+
+/// 跑一次 sidecar，把 stdout 整个收回来。
+///
+/// 用于短命令（`new` / `series`）；跑模型那种长命令走 `run_case` 的流式路径。
+fn capture(app: &tauri::AppHandle, args: &[String]) -> Result<String, String> {
+    let cli = resolve_cli(app);
+    let out = std::process::Command::new(&cli)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
+    if !out.status.success() {
+        // sidecar 的错误信息在 stderr，原样交给用户 —— 它比我们能编的更具体
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// 环形缓冲区里的最后 `n` 行。
 #[tauri::command]
 pub fn run_log_tail(log: tauri::State<'_, RunLog>, n: usize) -> Result<Vec<String>, String> {

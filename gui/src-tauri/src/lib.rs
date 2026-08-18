@@ -10,9 +10,11 @@
 //! 所以页面用 `window.__TAURI__.core.invoke(...)` 跟这里说话。
 
 mod config;
+mod project;
 mod sidecar;
 
 use config::*;
+use project::*;
 use sidecar::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -22,10 +24,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backend_ready,
             describe_fields,
+            list_cases,
+            new_case,
+            read_text,
             read_case,
             set_field,
             run_case,
             run_log_tail,
+            series,
+            write_text,
             unknown_fields,
         ])
         .run(tauri::generate_context!())
