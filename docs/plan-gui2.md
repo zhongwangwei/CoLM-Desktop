@@ -652,11 +652,33 @@ cargo test -p oracle --test scan     # 两条，没数据时跳过
 
 ---
 
-### 任务 4：事件加 `case` 字段，支持批量
+### 任务 4：事件加 `case` / `stage` 字段，支持批量（**已完成**）
 
 **文件：** 修改 `gui/src-tauri/src/sidecar.rs`
 
-- [ ] **步骤 1：写失败的测试**
+一次改完，把 §1.6 的 `stage` 与 §1.7 的 `spinup` 解析都并了进来 ——
+**payload 只改一遍**，那正是 §1.6 说「与 `case` 一起加」的理由。
+
+新增第四个事件 `run://stage`（`{case, stage, state}`，`state` 是
+`begin`/`ok`/`failed`）。标记由 `colm-cli run --stream` **自己打**：
+实测 CoLM 的 34180 行输出里没有一行以 `===` 开头、也没有一处出现
+`colm-stage`，所以不会撞；而去认 CoLM 的措辞会重蹈 `automaticlly` 的覆辙。
+
+`run://lines` 的 payload 从 `Vec<String>` 变成 `{case, lines}` —— 破坏性改动，
+前端同步改了。
+
+`pump()` 抽出来给单算例与批量共用。复制一份的话，「阶段标记要不要进日志窗」
+这类判断会在两处各写一次然后慢慢分叉，而差异只会以「批量跑时日志不对」
+这种最难查的形式暴露。
+
+**顺带修了一个真 bug：`colm-cli run` 不接受相对路径的算例目录。**
+`run_stage` 用 `current_dir(work)` 起子进程，于是相对的 namelist 路径被相对
+`work` 再解析一次，CoLM 去找 `<case>/<case>/case.nml` 然后
+`Cannot open file`。`Kernel::open` 早就为可执行文件绝对化过（那里的注释
+写着「一个已校验的内核本就该持有绝对路径」），算例目录当时漏了。
+测试用「给一个不存在的内核，两种写法都该在**内核**上失败」来钉住它。
+
+- [x] **步骤 1：写失败的测试**
 
 ```rust
 #[test]
@@ -674,9 +696,9 @@ fn every_run_event_carries_which_case_it_came_from() {
 `run://lines` 现在的 payload 是 `Vec<String>`，加字段就得改成结构体
 `{case, lines}`。**这是破坏性改动**，前端要同步改，且注释里写明为什么值得。
 
-- [ ] **步骤 2-3：实现并跑通**
+- [x] **步骤 2-3：实现并跑通**
 
-- [ ] **步骤 4：批量队列命令**
+- [x] **步骤 4：批量队列命令**
 
 ```rust
 /// 排队跑一批算例。返回后立刻结束，进度靠事件。
@@ -693,7 +715,7 @@ pub async fn run_batch(app: tauri::AppHandle, cases: Vec<String>, kernel: String
 
 每个算例结束时发 `run://done`（带 `case`），前端据此更新那一行的状态。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ---
 

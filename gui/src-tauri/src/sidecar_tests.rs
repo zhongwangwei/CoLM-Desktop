@@ -67,3 +67,81 @@ fn a_blank_line_carries_nothing_and_is_dropped() {
         assert!(parse_progress(l).is_none());
     }
 }
+
+#[test]
+fn it_tells_a_spinup_step_from_a_normal_one() {
+    // CoLM.F90:749 与 :747 是两条不同的 format 语句。只认前者的话，
+    // 预热行的整段尾巴会留在 `date` 里 —— 实测变成
+    // "2008-01-01-00000 Spinup (cycle 1 of 3)"。不崩，但界面分不出正在预热，
+    // 进度条还会跨轮次单调增长而看不出重来过。
+    let p = parse_progress("TIMESTEP = 1 | DATE = 2008-01-01-00000").unwrap();
+    assert_eq!(
+        (p.step, p.date.as_str(), p.spinup),
+        (1, "2008-01-01-00000", None)
+    );
+
+    let p = parse_progress("TIMESTEP = 7 | DATE = 2008-01-01-10800 Spinup (cycle 2 of 3)").unwrap();
+    assert_eq!(p.step, 7);
+    assert_eq!(p.date, "2008-01-01-10800", "日期不该混进轮次计数");
+    assert_eq!(p.spinup, Some((2, 3)));
+}
+
+#[test]
+fn the_stage_marker_is_ours_and_does_not_collide() {
+    // 标记由 colm-cli 自己打。实测 CoLM 的 34180 行输出里没有一行以 `===`
+    // 开头，也没有一处出现 `colm-stage` —— 所以不必去认 CoLM 的措辞，
+    // 而那正是要避免的：上游把 automatically 拼成 automaticlly 已经教过一次。
+    assert_eq!(
+        parse_stage("=== colm-stage mksrfdata begin ==="),
+        Some(("mksrfdata".into(), "begin".into()))
+    );
+    assert_eq!(
+        parse_stage("=== colm-stage colm failed ==="),
+        Some(("colm".into(), "failed".into()))
+    );
+    // CoLM 自己的输出一行都不该被认成标记
+    for l in [
+        "TIMESTEP = 1 | DATE = 2008-01-01-00000",
+        " Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.",
+        "=== something else ===",
+    ] {
+        assert_eq!(parse_stage(l), None, "{l:?} 不该被认成阶段标记");
+    }
+}
+
+#[test]
+fn every_run_event_says_which_case_it_came_from() {
+    // 批量跑 90 个站点时，事件是全局广播的 —— 没有这个字段，前端收到的是
+    // 一锅粥。加字段而不是改事件名：三个 listen 是 check-gui 守着的接口。
+    let p = Progress {
+        case: "/tmp/a".into(),
+        stage: "colm".into(),
+        step: 1,
+        date: "2008-01-01-00000".into(),
+        spinup: None,
+    };
+    assert!(serde_json::to_string(&p)
+        .unwrap()
+        .contains("\"case\":\"/tmp/a\""));
+    let d = Done {
+        case: "/tmp/a".into(),
+        code: 0,
+        total: 10,
+        dropped: 3,
+    };
+    assert!(serde_json::to_string(&d).unwrap().contains("\"case\""));
+    let l = Lines {
+        case: "/tmp/a".into(),
+        lines: vec!["x".into()],
+    };
+    let s = serde_json::to_string(&l).unwrap();
+    assert!(s.contains("\"case\"") && s.contains("\"lines\""), "{s}");
+    let m = StageMark {
+        case: "/tmp/a".into(),
+        stage: "colm".into(),
+        state: "ok".into(),
+    };
+    assert!(serde_json::to_string(&m)
+        .unwrap()
+        .contains("\"stage\":\"colm\""));
+}

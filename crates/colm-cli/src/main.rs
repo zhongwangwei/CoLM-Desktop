@@ -500,6 +500,15 @@ fn slash(p: &Path) -> String {
 /// 子进程的 stdout 里。同一个可执行文件同时服务两个诉求不同的调用方，
 /// 于是由调用方说要哪一种。
 fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
+    // **绝对化算例目录。** `run_stage` 用 `current_dir(work)` 启动子进程，
+    // 于是一个相对的 namelist 路径会被相对 `work` 解析而不是相对调用方的当前
+    // 目录 —— `colm-cli run oracle/work/CN-Cng` 会让 CoLM 去
+    // `oracle/work/CN-Cng/oracle/work/CN-Cng/case.nml` 找文件然后
+    // `Cannot open file`。`Kernel::open` 早就为可执行文件做了同样的事
+    // （见那里的注释），这一半当时漏了。
+    let case = &case
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", case.display()))?;
     let kernel = Kernel::open(kernel_dir)?;
     println!(
         "kernel: {} {} ({})",
@@ -523,6 +532,16 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
         (Stage::Colm, vec![]),
     ];
     for (stage, artifacts) in &stages {
+        // 阶段标记。**由我们自己打，不去认 CoLM 的输出措辞** —— CoLM 把
+        // automatically 拼成 automaticlly 这件事已经教过一次，上游随时会改。
+        // 只有 `colm.x` 打 `TIMESTEP =`，所以没有这个标记，界面在前两段
+        // 完全不知道进行到哪，进度条从 0 直接跳到 100。
+        //
+        // 前缀选得刻意难撞：CoLM 的输出里没有 `===` 开头的行（实测 34180 行
+        // 一条都没有），而 `colm-stage` 这个词组也不出现在上游源码里。
+        if stream {
+            println!("=== colm-stage {} begin ===", stage.program());
+        }
         // 转发时**每行都 flush**。默认的行缓冲只在 stdout 连着终端时才生效；
         // GUI 拿到的是一根管道，那时缓冲变成块缓冲（8 KB），5330 行会攒成
         // 几大块一起吐出来 —— 从界面上看跟完全不转发几乎没有区别。
@@ -542,6 +561,13 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
             artifacts,
             &mut forward,
         )?;
+        if stream {
+            println!(
+                "=== colm-stage {} {} ===",
+                stage.program(),
+                if r.succeeded() { "ok" } else { "failed" }
+            );
+        }
         if r.succeeded() {
             println!("  {:<10} ok", stage.program());
         } else {

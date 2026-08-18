@@ -56,22 +56,40 @@ $('run').onclick = async () => {
 
 /** 订阅三个运行事件。由 `main.js` 在启动时调一次。 */
 export async function watchRun() {
+    await listen('run://stage', e => {
+      // 三段串行，而**只有 colm.x 打 TIMESTEP** —— 没有这条，前两段跑的时候
+      // 界面完全不知道进行到哪。标记由 colm-cli 自己打，不认 CoLM 的措辞。
+      const { stage, state: st, case: dir } = e.payload;
+      if (dir) { state.runState[dir] = '运行中'; renderCases(); }
+      if (st === 'begin') {
+        $('progtext').textContent = `${stage} 运行中…`;
+        $('prog').style.width = ({ mksrfdata: 2, mkinidata: 4, colm: 6 })[stage] + '%';
+      }
+    });
     await listen('run://progress', e => {
       // 进度只到「第几步、模型时间到哪天」为止。总步数要等算例配置解析出来才知道，
       // 在那之前不假装知道百分比 —— 一条走到一半又跳回去的进度条比没有更糟。
-      $('progtext').textContent = `第 ${e.payload.step} 步 · ${e.payload.date}`;
-      const w = Math.min(96, 6 + Math.log10(e.payload.step + 1) * 30);
+      const p = e.payload;
+      // 预热与正常推进要分开说。CoLM 在预热期**不写 history**
+      // （MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），
+      // 混进正常进度会让人以为那段输出被算进了结果。
+      $('progtext').textContent = p.spinup
+        ? `预热 ${p.spinup[0]}/${p.spinup[1]} 轮 · 第 ${p.step} 步 · ${p.date}`
+        : `第 ${p.step} 步 · ${p.date}`;
+      const w = Math.min(96, 6 + Math.log10(p.step + 1) * 30);
       $('prog').style.width = w + '%';
     });
     await listen('run://lines', e => {
       const el = $('log');
       // 事件是**成批**到的（后端每 100 毫秒合并一次），所以这里一次追加一批。
-      el.textContent += e.payload.join('\n') + '\n';
+      // payload 从数组变成了 { case, lines } —— 批量跑时要分得清来源。
+      el.textContent += e.payload.lines.join('\n') + '\n';
       if (el.textContent.length > 60000) el.textContent = el.textContent.slice(-40000);
       el.scrollTop = el.scrollHeight;
     });
     await listen('run://done', e => {
       const d = e.payload;
+      if (d.case) { state.runState[d.case] = d.code === 0 ? '已完成' : '失败'; renderCases(); }
       $('prog').style.width = d.code === 0 ? '100%' : '0';
       $('progtext').textContent =
         `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）'} · ` +
@@ -87,3 +105,21 @@ export async function watchRun() {
       }
     });
 }
+
+// ---------------------------------------------------------------- 批量
+
+$('runall').onclick = async () => {
+  const dirs = state.cases.map(c => c.dir);
+  if (!dirs.length) return;
+  $('runall').disabled = true;
+  $('run').disabled = true;
+  // 先把所有算例标成「待运行」。不先标的话，还没轮到的那些在界面上
+  // 与「已完成」长得一样，用户看不出批次进行到哪。
+  for (const d of dirs) state.runState[d] = '待运行';
+  renderCases();
+  try {
+    const n = await invoke('run_batch', { cases: dirs, kernel: $('kernel').value });
+    status(`批次结束：${n}/${dirs.length} 个算例跑完`);
+  } catch (e) { status(e); }
+  finally { $('runall').disabled = false; $('run').disabled = false; }
+};

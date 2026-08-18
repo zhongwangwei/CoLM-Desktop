@@ -15,6 +15,7 @@ $('rescan').onclick = async () => {
 
 export function renderCases() {
   const box = $('cases');
+  $('runall').disabled = !state.cases.length;
   box.textContent = '';
   if (!state.cases.length) {
     box.innerHTML = '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
@@ -25,7 +26,8 @@ export function renderCases() {
     d.className = 'case';
     d.setAttribute('aria-selected', String(state.selected?.dir === c.dir));
     const s = document.createElement('small');
-    s.textContent = c.has_history ? '已跑过' : '未跑';
+    // 本次批次里的状态优先 —— 「已跑过」说的是历史，「运行中」说的是现在。
+    s.textContent = state.runState[c.dir] ?? (c.has_history ? '已跑过' : '未跑');
     d.textContent = c.name;
     d.appendChild(s);
     d.onclick = () => selectCase(c);

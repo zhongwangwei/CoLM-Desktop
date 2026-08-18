@@ -95,3 +95,40 @@ fn it_recognises_the_urban_naming_convention_too() {
         assert!(s["landtype"].is_null());
     }
 }
+
+#[test]
+fn a_relative_case_directory_works_the_same_as_an_absolute_one() {
+    // `run_stage` 用 `current_dir(work)` 起子进程，所以一个相对的 namelist
+    // 路径会被相对 `work` 再解析一次 —— CoLM 去找
+    // `<case>/<case>/case.nml` 然后 `Cannot open file`。
+    // `Kernel::open` 早就为可执行文件绝对化过，算例目录当时漏了。
+    //
+    // 这里不真跑模型（那要内核与数据），只验「路径被解析成了同一个地方」：
+    // 给一个不存在的内核，两种写法都该在**内核**上失败，而不是一个在
+    // namelist 上失败、另一个在内核上失败。
+    let repo = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.pop();
+        p
+    };
+    let case = repo.join("oracle/work/CN-Cng");
+    if !case.join("case.nml").is_file() {
+        return; // 没跑过黄金算例就跳过
+    }
+    let run = |dir: &str| {
+        let out = Command::new(cli())
+            .args(["run", dir, "--kernel", "no-such-kernel"])
+            .current_dir(&repo)
+            .output()
+            .expect("runs");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let abs = run(case.to_str().unwrap());
+    let rel = run("oracle/work/CN-Cng");
+    for (which, msg) in [("绝对", &abs), ("相对", &rel)] {
+        assert!(
+            msg.contains("no-such-kernel"),
+            "{which}路径的失败该出在内核上，实际是：{msg}"
+        );
+    }
+}

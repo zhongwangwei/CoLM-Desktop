@@ -34,6 +34,7 @@ pub fn run() {
             read_case,
             set_field,
             run_case,
+            run_batch,
             run_log_tail,
             series,
             write_text,

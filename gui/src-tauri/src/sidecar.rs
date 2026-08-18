@@ -42,15 +42,47 @@ pub struct RunLog {
     lines: Mutex<VecDeque<String>>,
 }
 
+/// 三个事件都带 `case`。**批量跑的时候这是唯一能分辨来源的东西** ——
+/// 事件是全局广播的，90 个站点同时在跑时前端收到的是一锅粥。
+///
+/// 加字段而不是改事件名：现有三个 `listen` 是 `xtask check-gui`
+/// 静态守着的接口，加字段不破坏它，改名会。
 #[derive(Serialize, Clone)]
 struct Progress {
+    /// 算例目录，唯一标识
+    case: String,
+    /// `mksrfdata` / `mkinidata` / `colm`。来自 `colm-cli` 自己打的阶段标记，
+    /// **不是**从 CoLM 的输出措辞里猜的。
+    stage: String,
     step: u64,
     /// CoLM 打印的 `YYYY-MM-DD-SSSSS`，原样传，不解释
     date: String,
+    /// 预热轮次 `(第几轮, 共几轮)`。正常推进时是 `None`。
+    ///
+    /// CoLM 在 spin-up 期间用另一种 format（`CoLM.F90:747`），行尾多一段
+    /// `Spinup (cycle 1 of 3)`。不单独认的话那段会整个留在 `date` 里，
+    /// 界面既分不出正在预热，进度条还会跨轮次单调增长而看不出重来过。
+    spinup: Option<(u32, u32)>,
+}
+
+/// 某一段开始或结束。批量运行时界面靠它画三段式进度。
+#[derive(Serialize, Clone)]
+struct StageMark {
+    case: String,
+    stage: String,
+    /// `begin` / `ok` / `failed`
+    state: String,
+}
+
+#[derive(Serialize, Clone)]
+struct Lines {
+    case: String,
+    lines: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
 struct Done {
+    case: String,
     code: i32,
     /// 子进程一共打了多少行
     total: usize,
@@ -58,14 +90,52 @@ struct Done {
     dropped: usize,
 }
 
-/// `TIMESTEP = 1 | DATE = 2008-01-01-00000` -> `(1, "2008-01-01-00000")`。
-fn parse_progress(line: &str) -> Option<Progress> {
+/// `TIMESTEP = 1 | DATE = 2008-01-01-00000` -> 步数与日期。
+///
+/// 预热期间 CoLM 用另一种 format，行尾多一段 `Spinup (cycle 1 of 3)`
+/// （`CoLM.F90:747` 与 `:749` 是两条不同的 format 语句）。两种都要认，
+/// 否则那段尾巴会整个留在 `date` 里 —— 不崩，但界面分不出正在预热。
+///
+/// `case` 与 `stage` 由调用方补：这个函数只认得一行文本。
+struct Step {
+    step: u64,
+    date: String,
+    spinup: Option<(u32, u32)>,
+}
+
+fn parse_progress(line: &str) -> Option<Step> {
     let rest = line.trim().strip_prefix("TIMESTEP =")?;
     let (step, date) = rest.split_once('|')?;
-    Some(Progress {
-        step: step.trim().parse().ok()?,
-        date: date.trim().strip_prefix("DATE =")?.trim().to_string(),
+    let step: u64 = step.trim().parse().ok()?;
+    let rest = date.trim().strip_prefix("DATE =")?.trim();
+    // 日期本身不含空格，所以第一个空格就是它的边界。
+    let (date, tail) = match rest.split_once(' ') {
+        Some((d, t)) => (d, t.trim()),
+        None => (rest, ""),
+    };
+    let spinup = tail
+        .strip_prefix("Spinup (cycle ")
+        .and_then(|s| s.strip_suffix(')'))
+        .and_then(|s| s.split_once(" of "))
+        .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)));
+    Some(Step {
+        step,
+        date: date.to_string(),
+        spinup,
     })
+}
+
+/// `=== colm-stage mksrfdata begin ===` -> `("mksrfdata", "begin")`。
+///
+/// 标记由 `colm-cli run --stream` 自己打。实测 CoLM 的 34180 行输出里
+/// 没有一行以 `===` 开头，也没有一处出现 `colm-stage`，所以不会撞。
+fn parse_stage(line: &str) -> Option<(String, String)> {
+    let s = line
+        .trim()
+        .strip_prefix("=== colm-stage ")?
+        .strip_suffix(" ===")?;
+    let (name, state) = s.rsplit_once(' ')?;
+    Some((name.trim().to_string(), state.trim().to_string()))
 }
 
 /// RangeCheck 的逐变量播报。占实测日志的 85%，且无信息 ——
@@ -219,15 +289,61 @@ pub async fn run_case(
     let out = child.stdout.take().ok_or("no stdout")?;
 
     log.lines.lock().map_err(|_| "log poisoned")?.clear();
+
+    let reader = pump(&app, &case, out);
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let (total, dropped, buf) = reader.join().map_err(|_| "reader thread panicked")?;
+    *log.lines.lock().map_err(|_| "log poisoned")? = buf;
+    let code = status.code().unwrap_or(-1);
+    let _ = app.emit(
+        "run://done",
+        Done {
+            case,
+            code,
+            total,
+            dropped,
+        },
+    );
+    Ok(code)
+}
+
+/// 读子进程的 stdout，边读边发事件，返回读完之后的统计与日志缓冲区。
+///
+/// **单算例与批量共用这一份。** 复制一份的话，「阶段标记要不要丢进日志窗」
+/// 这类判断会在两处各写一次，然后慢慢分叉 —— 而两处的差异只会在
+/// 「批量跑时日志不对」这种最难查的形式下暴露。
+fn pump(
+    app: &tauri::AppHandle,
+    case: &str,
+    out: std::process::ChildStdout,
+) -> std::thread::JoinHandle<(usize, usize, VecDeque<String>)> {
     let h = app.clone();
-    let reader = std::thread::spawn(move || {
+    let case_id = case.to_string();
+    std::thread::spawn(move || {
         let (mut total, mut dropped) = (0usize, 0usize);
         let mut last_progress = Instant::now() - EMIT_INTERVAL;
         let mut last_lines = Instant::now() - EMIT_INTERVAL;
         let mut buf: VecDeque<String> = VecDeque::with_capacity(LOG_CAPACITY);
         let mut pending: Vec<String> = Vec::new();
+        // 当前在哪一段。三段串行，所以一个变量就够。
+        let mut stage = String::from("mksrfdata");
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             total += 1;
+            // 阶段标记先认：它不进日志窗，也不该被当成噪声丢掉。
+            if let Some((name, state)) = parse_stage(&line) {
+                dropped += 1;
+                stage = name.clone();
+                let _ = h.emit(
+                    "run://stage",
+                    StageMark {
+                        case: case_id.clone(),
+                        stage: name,
+                        state,
+                    },
+                );
+                continue;
+            }
             if is_rangecheck_noise(&line) {
                 dropped += 1;
                 continue;
@@ -237,10 +353,19 @@ pub async fn run_case(
                 dropped += 1;
                 continue;
             }
-            if let Some(p) = parse_progress(&line) {
+            if let Some(s) = parse_progress(&line) {
                 if last_progress.elapsed() >= EMIT_INTERVAL {
                     last_progress = Instant::now();
-                    let _ = h.emit("run://progress", p);
+                    let _ = h.emit(
+                        "run://progress",
+                        Progress {
+                            case: case_id.clone(),
+                            stage: stage.clone(),
+                            step: s.step,
+                            date: s.date,
+                            spinup: s.spinup,
+                        },
+                    );
                 }
                 continue;
             }
@@ -251,25 +376,89 @@ pub async fn run_case(
             pending.push(line);
             if last_lines.elapsed() >= EMIT_INTERVAL {
                 last_lines = Instant::now();
-                let _ = h.emit("run://lines", std::mem::take(&mut pending));
+                let _ = h.emit(
+                    "run://lines",
+                    Lines {
+                        case: case_id.clone(),
+                        lines: std::mem::take(&mut pending),
+                    },
+                );
             }
         }
         if !pending.is_empty() {
-            let _ = h.emit("run://lines", pending);
+            let _ = h.emit(
+                "run://lines",
+                Lines {
+                    case: case_id.clone(),
+                    lines: pending,
+                },
+            );
         }
         (total, dropped, buf)
-    });
+    })
+}
 
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let (total, dropped, buf) = reader.join().map_err(|_| "reader thread panicked")?;
-    *log.lines.lock().map_err(|_| "log poisoned")? = buf;
-    let code = status.code().unwrap_or(-1);
+/// 同时最多跑几个算例。
+///
+/// **这个数没被测过。** 每个子进程都读同一份 rawdata、写各自的输出，
+/// 瓶颈大概率在磁盘而不是 CPU，但没量过。要调之前先量 ——
+/// 别把猜的数留成看起来经过调优的样子。
+const MAX_CONCURRENT: usize = 2;
+
+/// 排队跑一批算例。**返回时批次还没跑完** —— 进度全靠事件，
+/// 每条都带 `case`，前端据此更新对应那一行。
+///
+/// 一个算例失败**不中止整批**：90 个站点里有一个跑不通，其余 89 个仍要跑完。
+/// 失败信息随那个算例自己的 `run://done`（`code != 0`）到达。
+#[tauri::command]
+pub async fn run_batch(
+    app: tauri::AppHandle,
+    log: tauri::State<'_, RunLog>,
+    cases: Vec<String>,
+    kernel: String,
+) -> Result<usize, String> {
+    let mut done = 0usize;
+    for chunk in cases.chunks(MAX_CONCURRENT) {
+        let mut handles = Vec::new();
+        for case in chunk {
+            let (a, c, k) = (app.clone(), case.clone(), kernel.clone());
+            handles.push(std::thread::spawn(move || run_one(&a, &c, &k)));
+        }
+        for h in handles {
+            // 线程 panic 也不该让整批停下 —— 那正是「一个坏算例毁掉一批」。
+            if h.join().is_ok() {
+                done += 1;
+            }
+        }
+    }
+    let _ = log; // 环形缓冲区只服务单算例视图，批量时不共享
+    Ok(done)
+}
+
+/// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
+fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, String> {
+    let cli = resolve_cli();
+    let out = std::process::Command::new(&cli)
+        .args(["run", case, "--kernel", kernel, "--stream", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            let out = c.stdout.take().expect("piped");
+            let reader = pump(app, case, out);
+            let st = c.wait();
+            let _ = reader.join(); // 读完再走，否则最后一批日志会丢
+            st
+        })
+        .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
+    let code = out.code().unwrap_or(-1);
     let _ = app.emit(
         "run://done",
         Done {
+            case: case.to_string(),
             code,
-            total,
-            dropped,
+            total: 0,
+            dropped: 0,
         },
     );
     Ok(code)
