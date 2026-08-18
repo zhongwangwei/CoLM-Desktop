@@ -1,0 +1,41 @@
+# =======================================================
+# Windows / MSYS2 MINGW64 —— gfortran + netcdf-fortran
+#
+# 这份**由 colm-desktop 拥有**，不进 vendor/CoLM202X：给上游加一个只有本项目
+# 需要的平台预设，会让 submodule 无法保持在一个干净的上游 commit 上。
+# 构建脚本把它拷进临时 worktree，跑完即弃。
+#
+# 与 Makeoptions.github（Linux CI 那份）的**唯一实质差别**是不加
+# `-mcmodel=medium`。那一行在 Linux 上由 `uname -m` = x86_64 触发，
+# 而 MSYS2 的 uname 同样报 x86_64 —— 但 MinGW 的 gfortran 不支持这个选项，
+# 直接复用会在第一个源文件上就炸。
+
+  FF ?= gfortran -fopenmp
+
+  NF_CONFIG ?= nf-config
+  NC_CONFIG ?= nc-config
+  NETCDF_INC ?= $(shell $(NF_CONFIG) --includedir)
+  NETCDF_FLIBS ?= $(shell $(NF_CONFIG) --flibs) $(shell $(NC_CONFIG) --libs)
+
+  MOD_CMD = -J
+
+  FOPTS = -fdefault-real-8 -ffree-form -g -fcheck=all \
+          -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
+          -ffree-line-length-0 -fallow-argument-mismatch
+
+  INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
+  BLAS_LIBS ?= -llapack -lblas
+  LDFLAGS ?= $(NETCDF_FLIBS) $(BLAS_LIBS)
+
+#============================================================
+# CaMa-Flood Mkinclude —— 单点预设不开 CaMa，这里只是让 include 能解析
+
+RM = rm -f
+CP = cp
+DCDF=-DUseCDF -DUseCDF_CMF
+CFLAGS=$(DCDF)
+GFORTRAN ?= gfortran
+FCMP = $(GFORTRAN) -fopenmp
+FC   = $(GFORTRAN)
+LFLAGS =
+FFLAGS = -O3 -Wall -cpp -free -fimplicit-none -fbounds-check -fbacktrace

@@ -1,0 +1,59 @@
+# design.md §10 里程碑 9 最难的一环：Fortran 内核在 Windows 上原生构建。
+#
+# §3 把它标成「中等难度：打通一次 MSYS2 netcdf-fortran」，而那句判断从未被验证过。
+# 本项目没有 Windows 机器，**CI 就是唯一能做这次验证的地方**。
+#
+# 刻意与 `ci` 分开、且只手动触发：这一步还在探索期，它的失败不该把每个 PR
+# 的流水线弄红。跑绿之后再并进 `ci` 并加上 push 触发。
+name: windows-kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  kernel:
+    runs-on: windows-latest
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # MINGW64 而不是 UCRT64：netcdf-fortran 在 mingw64 仓库里更成熟，
+      # 而本轮只想回答「能不能编出来」，不想同时引入一个新的运行时。
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-gcc-fortran
+            mingw-w64-x86_64-netcdf-fortran
+            mingw-w64-x86_64-lapack
+
+      - name: What the toolchain actually is
+        shell: msys2 {0}
+        run: |
+          uname -s -m
+          gfortran --version | head -1
+          nf-config --version || echo "nf-config missing"
+          nf-config --flibs   || true
+          nc-config --libs    || true
+
+      - name: Build the waterheat kernel
+        shell: msys2 {0}
+        run: ./oracle/scripts/build_kernel.sh waterheat
+
+      - name: What came out
+        shell: msys2 {0}
+        run: |
+          ls -la kernels/waterheat/
+          cat kernels/waterheat/manifest.json
+          # 三个可执行文件必须都在，且都能起来报出用法或停在缺 namelist 上 ——
+          # 「编出来了」与「能跑」是两件事，这里至少把前者钉死。
+          for p in mksrfdata mkinidata colm; do
+            test -f "kernels/waterheat/$p.exe" || { echo "missing $p.exe"; exit 1; }
+          done

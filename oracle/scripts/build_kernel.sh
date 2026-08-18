@@ -18,9 +18,16 @@ case "$PRESET" in
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
+# MSYS2 的 uname 报 MINGW64_NT-10.0-…，且 uname -m 同样是 x86_64 ——
+# 后者会让 Makeoptions.github 加上 -mcmodel=medium，而 MinGW 的 gfortran
+# 不认这个选项。所以 Windows 用本仓库自带的那份，不复用上游的。
+OWN_MAKEOPTS=""
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) MAKEOPTS=Makeoptions.Mac-arm ;;
-  Linux-*)      MAKEOPTS=Makeoptions.github  ;;
+  Darwin-arm64)  MAKEOPTS=Makeoptions.Mac-arm ;;
+  Linux-*)       MAKEOPTS=Makeoptions.github  ;;
+  MINGW64_NT-*|MSYS_NT-*)
+                 MAKEOPTS=Makeoptions.msys2
+                 OWN_MAKEOPTS="$REPO_ROOT/oracle/scripts/makeoptions/Makeoptions.msys2" ;;
   *) echo "unsupported host; add a Makeoptions preset" >&2; exit 2 ;;
 esac
 
@@ -30,6 +37,11 @@ git -C "$SRC" worktree add --detach --force "$BUILD" HEAD >/dev/null
 trap 'git -C "$SRC" worktree remove --force "$BUILD" >/dev/null 2>&1 || true' EXIT
 
 cd "$BUILD"
+# 本仓库自带的预设直接拷进临时 worktree —— 它不在 submodule 里，
+# 所以不能用符号链接指过去（worktree 跑完就删）。
+if [ -n "$OWN_MAKEOPTS" ]; then
+  cp "$OWN_MAKEOPTS" "include/$MAKEOPTS"
+fi
 ln -sf "$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 
