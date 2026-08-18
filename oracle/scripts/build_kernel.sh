@@ -63,6 +63,23 @@ DEST="$REPO_ROOT/$OUTDIR/$PRESET"
 mkdir -p "$DEST"
 cp run/mksrfdata.x run/mkinidata.x run/colm.x "$DEST/"
 
+# Windows 上改成 `.exe`。CoLM 的 Makefile 在所有平台都写 `.x`，而 Windows 的
+# `PATHEXT` 不含它 —— 系统于是不把这个文件当可执行文件，PowerShell 拒绝执行
+# （实测 `Cannot run a document in the middle of a pipeline`），双击也没反应，
+# 安全软件对「带 PE 头却顶着陌生后缀」的文件也更不客气。
+#
+# 改名只动**拷进内核目录的那份**，不碰 `run/` 里 Makefile 的产物，
+# 于是 submodule 保持在一个干净的上游 commit 上。
+#
+# 名字的唯一真相在 `colm_kernel::program_file()`；这里必须与它一致，
+# 否则 `Kernel::open` 会去校验一个不存在的文件。
+case "$(uname -s)" in
+  MINGW*|MSYS*)
+    for p in mksrfdata mkinidata colm; do mv "$DEST/$p.x" "$DEST/$p.exe"; done
+    EXE=.exe ;;
+  *) EXE=.x ;;
+esac
+
 # 宏集合必须取**预处理后的生效集**，不能 grep define.h 的 #define 原文。
 # 实测：原文 grep 会把 USEMPI / GridRiverLakeFlow / LATERAL_FLOW 都报成已定义，
 # 而三者在 SinglePoint 下实际都是关闭的（前两个被 conflict 块 #undef，
@@ -99,9 +116,9 @@ cat > "$DEST/manifest.json" <<JSON
   "netcdf_fortran": "$(nf-config --version 2>/dev/null)",
   "hdf5": "$(H=$(nc-config --includedir 2>/dev/null)/H5public.h; [ -f "$H" ] && grep -hE '#define H5_VERS_(MAJOR|MINOR|RELEASE)' "$H" | awk '{printf "%s.", $3}' | sed 's/[.]$//')",
   "sha256": {
-    "mksrfdata": "$(sha "$DEST/mksrfdata.x")",
-    "mkinidata": "$(sha "$DEST/mkinidata.x")",
-    "colm":      "$(sha "$DEST/colm.x")"
+    "mksrfdata": "$(sha "$DEST/mksrfdata$EXE")",
+    "mkinidata": "$(sha "$DEST/mkinidata$EXE")",
+    "colm":      "$(sha "$DEST/colm$EXE")"
   }
 }
 JSON

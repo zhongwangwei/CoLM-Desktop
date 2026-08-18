@@ -33,7 +33,7 @@ fn fake_kernel(name: &str, bodies: &[(&str, &str)]) -> PathBuf {
     let d = workdir(name);
     let mut m = SAMPLE.to_string();
     for (prog, body) in bodies {
-        std::fs::write(d.join(format!("{prog}.x")), body).expect("write");
+        std::fs::write(d.join(program_file(prog)), body).expect("write");
         // 把清单里的占位 sha256 换成这个内容的真实值
         let want = sha256_hex(body.as_bytes());
         let old = match *prog {
@@ -94,14 +94,14 @@ fn a_missing_binary_and_a_wrong_one_are_different_errors() {
     let d = fake_kernel("missing", &ALL[..2]); // 少 colm.x
     let e = Kernel::open(&d).unwrap_err();
     let s = format!("{e:#}");
-    assert!(s.contains("colm.x"), "{s}");
+    assert!(s.contains(&program_file("colm")), "{s}");
     assert!(s.contains("missing"), "{s}");
 
     let d = fake_kernel("tampered", ALL);
-    std::fs::write(d.join("colm.x"), "tampered").expect("write");
+    std::fs::write(d.join(program_file("colm")), "tampered").expect("write");
     let e = Kernel::open(&d).unwrap_err();
     let s = format!("{e:#}");
-    assert!(s.contains("colm.x"), "{s}");
+    assert!(s.contains(&program_file("colm")), "{s}");
     assert!(s.contains("sha256"), "{s}");
     assert!(
         !s.contains("missing"),
@@ -113,7 +113,7 @@ fn a_missing_binary_and_a_wrong_one_are_different_errors() {
 fn an_unreadable_manifest_says_so_rather_than_blaming_a_binary() {
     let d = workdir("nomanifest");
     for (p, b) in ALL {
-        std::fs::write(d.join(format!("{p}.x")), b).expect("write");
+        std::fs::write(d.join(program_file(p)), b).expect("write");
     }
     let e = Kernel::open(&d).unwrap_err();
     assert!(format!("{e:#}").contains("manifest"), "{e:#}");

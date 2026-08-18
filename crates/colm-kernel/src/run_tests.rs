@@ -14,7 +14,7 @@ fn fake_kernel(name: &str, script: &str) -> (Kernel, PathBuf) {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("work")).expect("create workdir");
     for prog in crate::manifest::PROGRAMS {
-        let p = d.join(format!("{prog}.x"));
+        let p = d.join(crate::manifest::program_file(prog));
         std::fs::write(&p, script).expect("write script");
         #[cfg(unix)]
         {
@@ -126,4 +126,37 @@ fn the_stage_names_and_the_manifest_names_are_the_same_three() {
         Stage::Colm.program(),
     ];
     assert_eq!(from_stages, PROGRAMS);
+}
+
+#[test]
+fn a_real_kernel_can_actually_be_spawned() {
+    // 回答一个此前只靠推断的问题：**这个后缀的文件，操作系统真的肯启动吗？**
+    //
+    // Windows 的 `PATHEXT` 不含 `.x`，PowerShell 就因此拒绝执行它。我们赌的是
+    // `Command::new(绝对路径)` 走 `CreateProcessW`、对显式路径不查 `PATHEXT` ——
+    // 赌得对不对，只有真在 Windows 上起一次才知道。CI 的 windows-kernel 作业
+    // 会带着 `COLM_KERNEL_DIR` 跑这条。
+    //
+    // 判据是 `run_stage` 返回 `Ok`：它只在**起不来**的时候返回 `Err`。
+    // 进程起来了随后自己死掉（这里必然如此，因为 namelist 不存在）算 `Ok`，
+    // 只是 `Outcome` 是失败。也就是说这条测的正是「能不能启动」，
+    // 不掺杂模型跑得对不对。
+    // 路径要**绝对**：`cargo test` 的当前目录是 crate 目录而不是仓库根，
+    // 给相对路径会找不到（第一次就是这么挂的）。
+    let Ok(dir) = std::env::var("COLM_KERNEL_DIR") else {
+        return; // 没有真内核就不测 —— 大多数开发机上如此
+    };
+    let k = Kernel::open(Path::new(&dir)).expect("the kernel directory verifies");
+    let work = std::env::temp_dir().join("colm-kernel-spawn-probe");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("create workdir");
+
+    let r = run_stage(&k, Stage::Colm, Path::new("no-such.nml"), &work, &[])
+        .expect("the operating system launched the binary");
+    assert!(!r.succeeded(), "没给 namelist 却成功了，判成败那一段有问题");
+    // 顺带钉住实际用的文件名，免得将来后缀改了却没人发现。
+    let name = k.program("colm");
+    assert!(name
+        .to_string_lossy()
+        .ends_with(crate::manifest::EXE_SUFFIX));
 }

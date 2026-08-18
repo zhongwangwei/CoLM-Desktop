@@ -20,6 +20,6 @@ pub mod outcome;
 pub mod overrides;
 pub mod run;
 
-pub use manifest::{sha256_hex, Kernel, Manifest, PROGRAMS};
+pub use manifest::{program_file, sha256_hex, Kernel, Manifest, EXE_SUFFIX, PROGRAMS};
 pub use overrides::{extract as extract_overrides, Kind, Override};
 pub use run::{run_stage, run_stage_streaming, StageReport};

@@ -23,6 +23,27 @@ use sha2::{Digest, Sha256};
 /// CoLM 单点的三个可执行文件，按运行顺序。
 pub const PROGRAMS: [&str; 3] = ["mksrfdata", "mkinidata", "colm"];
 
+/// 可执行文件的后缀。**Windows 上是 `.exe`，其余是 CoLM 自己的 `.x`。**
+///
+/// CoLM 的 Makefile 在所有平台上都写 `.x`，`build_kernel.sh` 在 Windows 上
+/// 把拷进内核目录的那份改名。为什么值得改：Windows 的 `PATHEXT` 不含 `.x`，
+/// 于是这个文件在系统眼里不是「可执行文件」而是「文档」—— PowerShell 会拒绝
+/// `& .\colm.x | ...`（实测报 `Cannot run a document in the middle of a
+/// pipeline`），双击也不会执行，而安全软件对「带 PE 头却顶着陌生后缀」的文件
+/// 往往更不客气。
+///
+/// 严格说程序本身不依赖这个改动：`run_stage` 用 `Command::new(绝对路径)`，
+/// 走 `CreateProcessW`，对显式路径不查 `PATHEXT`。但那是推断，
+/// 而按平台惯例命名之后这个问题根本不用问 —— 并且
+/// `run_tests::a_real_kernel_can_actually_be_spawned` 现在把它验了。
+pub const EXE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { ".x" };
+
+/// 某个程序在内核目录里的文件名。**取名只有这一处**，
+/// 免得校验的时候找一个名字、启动的时候找另一个。
+pub fn program_file(name: &str) -> String {
+    format!("{name}{EXE_SUFFIX}")
+}
+
 /// 本 crate 认识的清单版本。
 pub const SCHEMA: u32 = 1;
 
@@ -69,10 +90,11 @@ impl Kernel {
         }
 
         for prog in PROGRAMS {
-            let exe = dir.join(format!("{prog}.x"));
+            let exe = dir.join(program_file(prog));
             if !exe.exists() {
                 bail!(
-                    "{prog}.x is missing from the kernel at {}; the preset has not been built",
+                    "{} is missing from the kernel at {}; the preset has not been built",
+                    program_file(prog),
                     dir.display()
                 );
             }
@@ -85,8 +107,9 @@ impl Kernel {
             let got = sha256_file(&exe)?;
             if &got != want {
                 bail!(
-                    "{prog}.x does not match its manifest sha256\n  expected {want}\n  actual   {got}\n\
-                     the binary has been replaced since the manifest was written; rebuild the preset"
+                    "{} does not match its manifest sha256\n  expected {want}\n  actual   {got}\n\
+                     the binary has been replaced since the manifest was written; rebuild the preset",
+                    program_file(prog)
                 );
             }
         }
@@ -104,7 +127,7 @@ impl Kernel {
 
     /// 某一段的可执行文件路径。
     pub fn program(&self, name: &str) -> PathBuf {
-        self.dir.join(format!("{name}.x"))
+        self.dir.join(program_file(name))
     }
 }
 

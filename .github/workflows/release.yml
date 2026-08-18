@@ -82,15 +82,19 @@ jobs:
         run: |
           for p in waterheat bgc urban; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
-          # 动态链接 netcdff/netcdf，所以 `.x` 要跟 MSYS2 的 DLL 一起走。
-          # 把 ldd 认出来的 /mingw64 依赖抄进每个预设目录 —— Windows 先在
-          # 可执行文件同目录找 DLL，这样装出来的程序不需要 MSYS2。
-          # （windows-kernel.yml 里有一步专门测量这份清单。）
+          # 动态链接 netcdff/netcdf，所以二进制要跟 MSYS2 的 DLL 一起走。
+          # 实测：不带 DLL 时退出码 -1073741515（STATUS_DLL_NOT_FOUND），
+          # 把 48 个 DLL 摆到旁边就能起来。Windows 先在可执行文件同目录找 DLL，
+          # 所以抄过去就够，装出来的程序不需要 MSYS2。
+          # （windows-kernel.yml 里有两步专门测量并断言这件事。）
+          #
+          # 这里是 `*.exe` 不是 `*.x`：`build_kernel.sh` 在 Windows 上把
+          # 拷进内核目录的那份改了名，因为 `PATHEXT` 不含 `.x`。
           for d in kernels/*/; do
-            for x in "$d"*.x; do
+            for x in "$d"*.exe; do
               ldd "$x" | grep -io '/mingw64/bin/[^ ]*\.dll'
             done | sort -u | while read -r dll; do cp -n "$dll" "$d"; done
-            ls "$d"*.dll | wc -l
+            echo "$d: $(ls "$d"*.dll | wc -l) DLLs"
           done
 
       - name: Bundle

@@ -551,6 +551,29 @@ macOS 与 Linux 上恰好都装着 MPI，所以这件事在 Windows 之前从没
 （改上游一行就能去掉，但那会让 submodule 离开一个干净的上游 commit，
 不值得；装一个只提供头文件的包更便宜。）
 
+### Windows 上二进制叫 `.exe`，不叫 `.x`
+
+CoLM 的 Makefile 在所有平台都产出 `.x`；`build_kernel.sh` 在 Windows 上把
+**拷进内核目录的那份**改名（不碰 `run/` 里 Makefile 的产物，submodule 因此
+保持在一个干净的上游 commit 上）。
+
+理由是 Windows 的 `PATHEXT` 不含 `.x`：系统不把这个文件当可执行文件，而是当
+「文档」。实测 PowerShell 直接拒绝 `& .\colm.x | ...`，报
+`Cannot run a document in the middle of a pipeline`；双击也没反应；安全软件
+对「带 PE 头却顶着陌生后缀」的文件通常更不客气。
+
+**严格说程序本身不依赖这个改名** —— `run_stage` 用 `Command::new(绝对路径)`，
+走 `CreateProcessW`，对显式路径不查 `PATHEXT`。但在改名之前那只是一句推断：
+CI 里唯一跑通过的那次，是**先把 `.x` 拷成 `.exe` 再跑的**。现在
+`run_tests::a_real_kernel_can_actually_be_spawned` 让 `colm-kernel` 自己去起
+一个真内核（`COLM_KERNEL_DIR` 指到内核目录，Windows CI 会带着它跑），
+判据是 `run_stage` 返回 `Ok` —— 它只在**起不来**时返回 `Err`，
+进程起来后自己死掉算 `Ok`。于是这条测的正是「操作系统肯不肯启动它」。
+
+文件名的唯一真相是 `colm_kernel::program_file()`；`build_kernel.sh` 与两个
+工作流都跟着它走。校验时找一个名字、启动时找另一个，是这类改动最容易留下的
+裂缝。
+
 ### 还没答的那半：分发时要不要带 DLL
 
 `nf-config --flibs` 在 CI 上返回 `-L/mingw64/lib -lnetcdff -lnetcdf` ——

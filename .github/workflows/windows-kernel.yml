@@ -64,13 +64,14 @@ jobs:
         run: |
           ls -la kernels/waterheat/
           cat kernels/waterheat/manifest.json
-          # 后缀是 `.x` 而不是 `.exe` —— CoLM 的 Makefile 在所有平台上都这么命名，
-          # Windows 也不例外。（第一版这里写的是 .exe，于是构建明明成功却报了失败：
-          # 检查错了，不是构建错了。）
+          # Makefile 在所有平台都产出 `.x`，`build_kernel.sh` 在 Windows 上把
+          # 拷进内核目录的那份改成 `.exe` —— 因为 `PATHEXT` 不含 `.x`，系统不把它
+          # 当可执行文件。（本文件早先在这里查 `.exe` 查错过一次：那时还没改名，
+          # 于是构建明明成功却报失败。现在两边都改了，查的就是实际产出的名字。）
           #
           # 「编出来了」与「能跑」是两件事，这里只钉死前者。
           for p in mksrfdata mkinidata colm; do
-            test -f "kernels/waterheat/$p.x" || { echo "missing $p.x"; exit 1; }
+            test -f "kernels/waterheat/$p.exe" || { echo "missing $p.exe"; exit 1; }
           done
           # 直接跑一下：不给 namelist 时它应该停下来而不是崩。
           # 只看它能不能被 Windows 加载起来 —— 一个链接到缺失 DLL 的二进制
@@ -78,7 +79,7 @@ jobs:
           #
           # **但这一句是在 MSYS2 shell 里跑的，`/mingw64/bin` 在 PATH 上。**
           # 它证明的是「在装了 MSYS2 的机器上能跑」，不是「能跑」。下一步才问后者。
-          ./kernels/waterheat/colm.x 2>&1 | head -5 || true
+          ./kernels/waterheat/colm.exe 2>&1 | head -5 || true
 
       # 内核要跟着桌面程序一起分发，所以真正的问题是：**用户机器上不装 MSYS2，
       # 它还跑不跑？** `nf-config --flibs` 返回的是 `-L/mingw64/lib -lnetcdff
@@ -88,16 +89,28 @@ jobs:
       # 这一步只**测量**，不判成败：把依赖列出来，再从 PowerShell（没有
       # `/mingw64/bin`）跑一次，看它到底缺什么。有了这份清单才谈得上
       # 「随程序带哪些 DLL」还是「改成静态」。
+      # 到此为止证明的都是「shell 能不能执行它」。**程序自己走的是另一条路**：
+      # `colm-kernel` 用 `Command::new(绝对路径)`，也就是 `CreateProcessW`。
+      # 那条路此前从没在 Windows 上跑过，只有一句推断（"对显式路径不查 PATHEXT"）。
+      # 这一步让真代码去起真二进制，把推断变成实测。
+      #
+      # 路径给绝对的：`cargo test` 的当前目录是 crate 目录，不是仓库根。
+      - name: The Rust side can launch it too
+        shell: msys2 {0}
+        run: |
+          COLM_KERNEL_DIR="$(pwd)/kernels/waterheat" \
+            cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned -- --nocapture
+
       - name: Which MSYS2 DLLs does the kernel need
         shell: msys2 {0}
         run: |
           for p in mksrfdata mkinidata colm; do
-            echo "=== $p.x ==="
-            ldd "kernels/waterheat/$p.x" | grep -i mingw64 || echo "  (none from /mingw64)"
+            echo "=== $p.exe ==="
+            ldd "kernels/waterheat/$p.exe" | grep -i mingw64 || echo "  (none from /mingw64)"
           done
           echo "=== 去重后的清单 ==="
           # 写进文件，下一步（PowerShell）要按它把 DLL 摆到二进制旁边。
-          for p in mksrfdata mkinidata colm; do ldd "kernels/waterheat/$p.x"; done \
+          for p in mksrfdata mkinidata colm; do ldd "kernels/waterheat/$p.exe"; done \
             | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u | tee dlls.txt
           echo "共 $(wc -l < dlls.txt) 个"
           # **在这里就把它们拷出来**，而不是让下一步（PowerShell）去翻译路径。
@@ -124,7 +137,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           New-Item -ItemType Directory -Force -Path probe | Out-Null
-          Copy-Item kernels\waterheat\colm.x probe\colm.exe
+          Copy-Item kernels\waterheat\colm.exe probe\colm.exe
 
           Write-Host "=== 1. 只有二进制，没有 DLL ==="
           & .\probe\colm.exe *> bare.txt
