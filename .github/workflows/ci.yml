@@ -172,8 +172,20 @@ jobs:
           "$app/Contents/MacOS/colm-cli" 2>&1 | grep -q 'colm-cli new'
 
   # 黄金回归：需要 PLUMBER2 数据与 Fortran 工具链，只在带该数据的 runner 上跑。
+  #
+  # **同仓库的 PR 才跑。** 本仓库是公开的，而这个作业落在**自托管** runner 上 ——
+  # 那是一台真机器，装着 5.5 GB PLUMBER2 与 38 GB rawdata。没有这条守卫的话，
+  # 任何人 fork 之后开一个 PR 就能在那台机器上执行任意代码：这是自托管 runner
+  # 在公开仓库里的经典失陷方式，而 `vars.HAS_PLUMBER2` 是仓库级变量，
+  # 对 fork 来的 PR 同样为真，拦不住。
+  #
+  # 写这条时 runner 注册数还是 0，也就是说风险是潜伏的、不是现成的。
+  # 正因如此才要现在写：接上 runner 的那天没有人会回头补它。
   golden:
-    if: ${{ vars.HAS_PLUMBER2 == 'true' }}
+    if: >-
+      ${{ vars.HAS_PLUMBER2 == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, plumber2]
     steps:
       - uses: actions/checkout@v4
