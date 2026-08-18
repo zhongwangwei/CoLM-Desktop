@@ -213,7 +213,14 @@
       <button data-pane="progress">进度</button>
     </div>
     <div class="live-body">
-      <div class="live-pane on" data-pane="log"><pre id="log"></pre></div>
+      <div class="live-pane on" data-pane="log">
+        <div class="pill-row" style="margin-bottom:8px">
+          <button class="btn-ghost" id="log-copy">复制</button>
+          <button class="btn-ghost" id="log-clear">清空</button>
+          <span class="muted mini" id="loginfo">&nbsp;</span>
+        </div>
+        <pre id="log"></pre>
+      </div>
       <div class="live-pane" data-pane="progress">
         <div class="progress"><i id="prog"></i></div>
         <p class="muted mini" id="progtext">&nbsp;</p>

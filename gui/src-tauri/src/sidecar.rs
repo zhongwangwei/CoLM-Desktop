@@ -88,6 +88,14 @@ struct Done {
     total: usize,
     /// 其中多少行被当作 RangeCheck 丢掉了
     dropped: usize,
+    /// 失败原因。**`colm-cli` 的错误走 stderr，而这里原来只读 stdout** ——
+    /// 于是界面上只剩一句「失败（退出码 1）」，用户要自己去磁盘上翻
+    /// `colm.log` 才知道是哪一段、为什么。实测踩过一次
+    /// （`Forcing does not cover simulation period!`）。
+    ///
+    /// 成功时是 `None`：stderr 上偶尔有无关紧要的东西，
+    /// 把它当成「原因」显示出来，比不显示更误导。
+    reason: Option<String>,
 }
 
 /// `TIMESTEP = 1 | DATE = 2008-01-01-00000` -> 步数与日期。
@@ -293,15 +301,30 @@ pub async fn run_case(
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
     let out = child.stdout.take().ok_or("no stdout")?;
+    let err = child.stderr.take().ok_or("no stderr")?;
 
     log.lines.lock().map_err(|_| "log poisoned")?.clear();
 
     let reader = pump(&app, &case, out);
+    let errs = drain_stderr(err);
 
     let status = child.wait().map_err(|e| e.to_string())?;
-    let (total, dropped, buf) = reader.join().map_err(|_| "reader thread panicked")?;
-    *log.lines.lock().map_err(|_| "log poisoned")? = buf;
+    let (total, dropped, mut buf) = reader.join().map_err(|_| "reader thread panicked")?;
+    let err = errs.join().map_err(|_| "stderr thread panicked")?;
     let code = status.code().unwrap_or(-1);
+    // stderr 也进日志窗。失败时它是**唯一**说清楚原因的东西，
+    // 而用户在界面上能拿到的就只有这一窗。
+    if !err.is_empty() {
+        let _ = app.emit(
+            "run://lines",
+            Lines {
+                case: case.clone(),
+                lines: err.clone(),
+            },
+        );
+        buf.extend(err.iter().cloned());
+    }
+    *log.lines.lock().map_err(|_| "log poisoned")? = buf;
     let _ = app.emit(
         "run://done",
         Done {
@@ -309,9 +332,38 @@ pub async fn run_case(
             code,
             total,
             dropped,
+            reason: (code != 0).then(|| failure_reason(&err)).flatten(),
         },
     );
     Ok(code)
+}
+
+/// 在自己的线程上读 stderr。
+///
+/// **必须另起一条线程。** 与 stdout 轮流读的话，一边的管道写满时子进程
+/// 会阻塞在那儿，而我们正卡在另一边等 —— 一个不报错的死锁。
+/// `colm-kernel::run` 里是同样的处理。
+///
+/// 收在内存里而不是边收边发：stderr 上的东西几乎只有最后那句致命错误，
+/// 与 stdout 交错发出去只会让日志窗的顺序变得不可复现。
+fn drain_stderr(err: std::process::ChildStderr) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        BufReader::new(err)
+            .lines()
+            .map_while(Result::ok)
+            .filter(|l| !l.trim().is_empty())
+            .collect()
+    })
+}
+
+/// stderr 里哪一段值得当作「失败原因」摆到状态栏上。
+///
+/// 取最后几行而不是第一行：anyhow 的链条是**由外向内**打的，
+/// 最里面那层才是真正的原因（「强迫场覆盖不到」而不是「阶段 colm 失败」）。
+fn failure_reason(err: &[String]) -> Option<String> {
+    let tail: Vec<&str> = err.iter().rev().take(4).map(String::as_str).rev().collect();
+    let s = tail.join(" / ");
+    (!s.trim().is_empty()).then_some(s)
 }
 
 /// 读子进程的 stdout，边读边发事件，返回读完之后的统计与日志缓冲区。
@@ -451,13 +503,25 @@ fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, Stri
         .spawn()
         .and_then(|mut c| {
             let out = c.stdout.take().expect("piped");
+            let err = c.stderr.take().expect("piped");
             let reader = pump(app, case, out);
+            let errs = drain_stderr(err);
             let st = c.wait();
             let _ = reader.join(); // 读完再走，否则最后一批日志会丢
-            st
+            Ok((st?, errs.join().unwrap_or_default()))
         })
         .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
-    let code = out.code().unwrap_or(-1);
+    let (status, err) = out;
+    let code = status.code().unwrap_or(-1);
+    if !err.is_empty() {
+        let _ = app.emit(
+            "run://lines",
+            Lines {
+                case: case.to_string(),
+                lines: err.clone(),
+            },
+        );
+    }
     let _ = app.emit(
         "run://done",
         Done {
@@ -465,6 +529,7 @@ fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, Stri
             code,
             total: 0,
             dropped: 0,
+            reason: (code != 0).then(|| failure_reason(&err)).flatten(),
         },
     );
     Ok(code)

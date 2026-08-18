@@ -128,6 +128,7 @@ fn every_run_event_says_which_case_it_came_from() {
         code: 0,
         total: 10,
         dropped: 3,
+        reason: None,
     };
     assert!(serde_json::to_string(&d).unwrap().contains("\"case\""));
     let l = Lines {
@@ -144,4 +145,23 @@ fn every_run_event_says_which_case_it_came_from() {
     assert!(serde_json::to_string(&m)
         .unwrap()
         .contains("\"stage\":\"colm\""));
+}
+
+#[test]
+fn a_failed_run_says_why_not_just_the_exit_code() {
+    // 退出码 1 对用户什么都没说。真正的原因在 `colm-cli` 的 stderr 上 ——
+    // 而那条管道原来是 `piped()` 了却从来没人读，于是原因被丢掉，
+    // 界面只剩「失败（退出码 1）」。实测踩过：真实原因是
+    // `Forcing does not cover simulation period!`。
+    let err = vec![
+        "Error: 阶段 colm 失败".to_string(),
+        "Caused by:".to_string(),
+        "    Forcing does not cover simulation period!".to_string(),
+    ];
+    let why = failure_reason(&err).expect("有 stderr 就该有原因");
+    assert!(why.contains("Forcing does not cover"), "{why}");
+
+    // 空 stderr 不能编出一个原因来 —— 那比不说更误导。
+    assert_eq!(failure_reason(&[]), None);
+    assert_eq!(failure_reason(&["   ".to_string()]), None);
 }

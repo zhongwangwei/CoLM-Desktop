@@ -6,7 +6,7 @@ import { $, status } from './ui.js';
 import { renderCases, ensureCases } from './sites.js';
 import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
-import { setRunning, renderSteps } from './shell.js';
+import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
 
 // 「选个目录」而是「选一套物理」—— 让它列出来，而不是让人记住路径。
@@ -112,15 +112,19 @@ export async function watchRun() {
       el.textContent += e.payload.lines.join('\n') + '\n';
       if (el.textContent.length > 60000) el.textContent = el.textContent.slice(-40000);
       el.scrollTop = el.scrollHeight;
+      updateLogInfo();
     });
     await listen('run://done', e => {
       const d = e.payload;
       if (d.case) { state.runState[d.case] = d.code === 0 ? '已完成' : '失败'; renderCases(); }
       // 状态栏是切到别的步骤时**唯一还看得见运行结果**的地方。
-      setRunning(d.code === 0 ? 'ok' : 'fail', d.code === 0 ? '完成' : `失败（退出码 ${d.code}）`);
+      // **退出码说明不了任何事。** 真正的原因在 stderr 上，后端现在把它
+      // 一并带过来了 —— 只报「失败（退出码 1）」会逼着人自己去磁盘上翻日志。
+      setRunning(d.code === 0 ? 'ok' : 'fail',
+        d.code === 0 ? '完成' : `失败：${d.reason ?? '退出码 ' + d.code}`);
       $('prog').style.width = d.code === 0 ? '100%' : '0';
       $('progtext').textContent =
-        `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）'} · ` +
+        `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）' + (d.reason ? '：' + d.reason : '')} · ` +
         `子进程打了 ${d.total} 行，丢弃 ${d.dropped} 行噪声`;
       $('run').disabled = false;
       if (d.code === 0 && state.selected) {
@@ -173,4 +177,38 @@ function renderStages(st) {
     if (state === 'skipped') { d.className = 'muted'; d.title = '产物齐全且输入未变'; }
     box.appendChild(d);
   }
+}
+
+// ---------------------------------------------------------------- 日志
+
+/** 复制整段日志。**出问题时人要做的第一件事就是把它发给别人**，
+ *  而在一个 pre 里手工选中几千行是不可能的 —— 它还在滚。
+ *
+ *  日志窗只留最后 40000 字符（见 run://lines 那段的截断），所以复制到的
+ *  也是那一段。完整的三段日志在算例目录里：`mksrfdata.log` / `mkinidata.log`
+ *  / `colm.log` —— 复制成功时把这句一并说出来，免得有人以为剪贴板里就是全部。 */
+$('log-copy').onclick = async () => {
+  const text = $('log').textContent;
+  if (!text.trim()) { setStatus('日志是空的'); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    const dir = state.selected?.dir;
+    setStatus(`已复制 ${text.length} 个字符`
+      + (dir ? `；完整日志在 ${dir}/{mksrfdata,mkinidata,colm}.log` : ''));
+  } catch (e) {
+    // 剪贴板可能被拒（无用户手势、无权限）。退回到「全选」，
+    // 让人自己按一次复制 —— 比只报一句错强。
+    const r = document.createRange();
+    r.selectNodeContents($('log'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    setStatus(`剪贴板不可用（${e}），已全选，请按 ⌘C`);
+  }
+};
+
+$('log-clear').onclick = () => { $('log').textContent = ''; updateLogInfo(); };
+
+export function updateLogInfo() {
+  const n = $('log').textContent.length;
+  $('loginfo').textContent = n ? `${n} 个字符` : ' ';
 }

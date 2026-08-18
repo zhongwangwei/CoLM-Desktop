@@ -20,6 +20,7 @@ fn hourly_site() -> CaseSpec {
             end_year: 2005,
             end_month: 6,
             end_day: 11,
+            end_sec: 86400,
         },
         timestep_seconds: 3600.0,
         greenwich: false,

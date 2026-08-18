@@ -75,7 +75,10 @@ dependencies = [
  "colm-forcing",
  "colm-hist",
  "colm-kernel",
+ "colm-namelist",
  "colm-srfdata",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -644,6 +647,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "colm-schema",
 ]
 
 [[package]]

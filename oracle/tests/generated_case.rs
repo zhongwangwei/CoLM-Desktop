@@ -86,6 +86,7 @@ fn a_generated_case_reproduces_the_golden_history() {
             end_year: 2008,
             end_month: 1,
             end_day: 11,
+            end_sec: 86400,
         },
         timestep_seconds: summary.step_seconds,
         // 由文件说了算，不写死 —— PLUMBER2 是地方时，Urban-PLUMBER 是 UTC

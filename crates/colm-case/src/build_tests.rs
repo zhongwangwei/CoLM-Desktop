@@ -14,6 +14,7 @@ fn cn_cng() -> CaseSpec {
             end_year: 2008,
             end_month: 1,
             end_day: 11,
+            end_sec: 86400,
         },
         timestep_seconds: 1800.0,
         greenwich: false,
@@ -146,4 +147,30 @@ fn a_non_urban_case_says_nothing_about_urban() {
     let names: Vec<String> = fields(&cn_cng()).into_iter().map(|(p, _)| p).collect();
     assert!(!names.iter().any(|n| n.contains("URBAN")));
     assert!(!names.iter().any(|n| n.contains("urban")));
+}
+
+#[test]
+fn the_last_day_stops_where_the_forcing_stops() {
+    // **写死 86400 会让模型跑过强迫场的末尾。** 实测 AT-Neu 的强迫场最后一条
+    // 是 2013-01-01 00:00:00（当天第 0 秒），而写死 86400 时 CoLM 在
+    // `colm` 段跑到一半才报 `Forcing does not cover simulation period!`
+    // —— 那时前两段已经白跑了。
+    let mut s = cn_cng();
+    s.window.end_sec = 0;
+    let all = fields(&s);
+    let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
+    assert_eq!(
+        by("DEF_simulation_time%end_sec"),
+        Some(colm_namelist::Value::Int(0))
+    );
+
+    // 给整天时仍然是 86400 —— 这条与上一条成对，
+    // 只验一个方向的话，「永远写 0」也能过。
+    s.window.end_sec = 86400;
+    let all = fields(&s);
+    let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
+    assert_eq!(
+        by("DEF_simulation_time%end_sec"),
+        Some(colm_namelist::Value::Int(86400))
+    );
 }

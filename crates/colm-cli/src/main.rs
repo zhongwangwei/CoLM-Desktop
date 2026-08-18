@@ -408,6 +408,28 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         Some(s) => parse_date(&s)?,
         None => (e.year, e.month, e.day),
     };
+    // **结束那天跑到第几秒，取决于强迫场最后一条记录落在哪。**
+    // 写死 86400 时，末尾不在当天最后一步的强迫场会让 CoLM 在最后一段
+    // 跑到一半时报 `Forcing does not cover simulation period!`
+    // ——实测 AT-Neu 的末尾是 `2013 001 1800`。
+    let forc_end_sec = e.hour * 3600 + e.minute * 60 + e.second;
+    let end_sec = if end == (e.year, e.month, e.day) {
+        forc_end_sec
+    } else {
+        86400
+    };
+    // 要的窗口超出强迫场覆盖范围时**当场说**，而不是让人等一次运行再看日志。
+    if (end.0, end.1, end.2) > (e.year, e.month, e.day) {
+        bail!(
+            "--end {}-{:02}-{:02} 超出强迫场的覆盖范围（到 {}-{:02}-{:02}）",
+            end.0,
+            end.1,
+            end.2,
+            e.year,
+            e.month,
+            e.day
+        );
+    }
     let loc = colm_srfdata::site::location(&layout.site_nc())?;
     let name = o.get("--name").unwrap_or_else(|| {
         site_raw
@@ -454,6 +476,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             end_year: end.0,
             end_month: end.1,
             end_day: end.2,
+            end_sec,
         },
         timestep_seconds: summary.step_seconds,
         // 由文件说了算，不写死 —— PLUMBER2 是地方时，Urban-PLUMBER 是 UTC

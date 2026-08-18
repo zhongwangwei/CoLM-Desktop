@@ -47,6 +47,13 @@ pub struct Window {
     pub end_year: i32,
     pub end_month: u32,
     pub end_day: u32,
+    /// 结束那一天跑到第几秒。
+    ///
+    /// **不能写死 86400。** 强迫场的最后一条记录未必落在当天最后一步上 ——
+    /// 实测 PLUMBER2 的 AT-Neu 末尾是 `2013 001 1800`，而写死 86400 会让
+    /// CoLM 在跑到那里时报 `Forcing does not cover simulation period!`
+    /// 并中止，而那已经是三段里最后一段跑了一半的时候。
+    pub end_sec: u32,
 }
 
 pub struct Dirs {
@@ -101,7 +108,10 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
             "DEF_simulation_time%end_day".into(),
             Value::Int(s.window.end_day as i64),
         ),
-        ("DEF_simulation_time%end_sec".into(), Value::Int(86400)),
+        (
+            "DEF_simulation_time%end_sec".into(),
+            Value::Int(s.window.end_sec as i64),
+        ),
         ("DEF_simulation_time%timestep".into(), r(s.timestep_seconds)),
         // spin-up 关掉：这三项的默认值不是「不做 spin-up」，必须显式写。
         ("DEF_simulation_time%spinup_day".into(), Value::Int(365)),
