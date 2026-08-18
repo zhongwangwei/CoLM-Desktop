@@ -33,6 +33,7 @@ jobs:
             mingw-w64-x86_64-gcc-fortran
             mingw-w64-x86_64-netcdf-fortran
             mingw-w64-x86_64-lapack
+            mingw-w64-x86_64-msmpi
 
       - name: What the toolchain actually is
         shell: msys2 {0}
@@ -42,6 +43,11 @@ jobs:
           nf-config --version || echo "nf-config missing"
           nf-config --flibs   || true
           nc-config --libs    || true
+          # SinglePoint 号称不需要 MPI，但 share/MOD_SPMD_Task.F90:34 的
+          # `include 'mpif.h'` 在 `#ifndef USEMPI` **之外** —— 所以头文件
+          # 必须存在，哪怕一个 MPI 符号都不会被用到。macOS 与 Linux 上
+          # 恰好都装着 MPI，所以这件事从没暴露过。
+          ls -la /mingw64/include/mpif.h || echo "no mpif.h — that is the blocker"
 
       - name: Build the waterheat kernel
         shell: msys2 {0}
