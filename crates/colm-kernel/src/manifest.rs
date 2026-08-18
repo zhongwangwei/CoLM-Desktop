@@ -91,10 +91,15 @@ impl Kernel {
             }
         }
 
-        Ok(Kernel {
-            dir: dir.to_path_buf(),
-            manifest,
-        })
+        // **绝对化**。`run_stage` 用 `current_dir(work)` 启动子进程，于是一个
+        // 相对的可执行文件路径会被相对 `work` 解析，而不是相对调用方的当前
+        // 目录 —— `Kernel::open("kernels/waterheat")` 成功，随后 spawn 报
+        // 「No such file or directory」。一个已校验的内核本就该持有绝对路径。
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("cannot resolve {}", dir.display()))?;
+
+        Ok(Kernel { dir, manifest })
     }
 
     /// 某一段的可执行文件路径。

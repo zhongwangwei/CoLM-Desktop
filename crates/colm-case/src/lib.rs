@@ -11,5 +11,5 @@ pub mod layout;
 pub mod minimal;
 
 pub use build::{fields, CaseSpec, Dirs, Window};
-pub use layout::{render, Layout};
+pub use layout::{case_name, render, Layout};
 pub use minimal::{is_default, required};

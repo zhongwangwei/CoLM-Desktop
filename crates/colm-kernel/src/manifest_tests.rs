@@ -81,7 +81,10 @@ fn a_matching_kernel_opens() {
     let d = fake_kernel("ok", ALL);
     let k = Kernel::open(&d).expect("opens");
     assert_eq!(k.manifest.preset, "waterheat");
-    assert_eq!(k.dir, d);
+    // 比 canonicalize 之后的：`open` 现在会绝对化，而 macOS 的 temp_dir
+    // 是 `/var/folders/...`，canonicalize 之后变成 `/private/var/folders/...`。
+    // 绝对化的理由见 `an_opened_kernel_holds_an_absolute_path`。
+    assert_eq!(k.dir, d.canonicalize().expect("canonicalize"));
 }
 
 #[test]
@@ -131,4 +134,28 @@ fn a_manifest_from_a_different_schema_is_refused() {
 #[test]
 fn the_three_programs_are_the_ones_colm_ships() {
     assert_eq!(PROGRAMS, ["mksrfdata", "mkinidata", "colm"]);
+}
+
+#[test]
+fn an_opened_kernel_holds_an_absolute_path() {
+    // `run_stage` 用 `current_dir(work)` 启动子进程。内核目录若是相对路径，
+    // 可执行文件就会被相对 `work` 去找 —— open 成功、spawn 报
+    // 「No such file or directory」，而报错里那个路径看着完全正常。
+    // 实测踩过：`colm-cli run --kernel kernels/waterheat` 正是这样炸的。
+    let d = fake_kernel(
+        "absolute",
+        &[("mksrfdata", "a"), ("mkinidata", "b"), ("colm", "c")],
+    );
+    // 造一条明确是相对的路径：从当前目录出发绕一圈回到那个临时目录。
+    let rel = PathBuf::from(".").join(&d);
+    assert!(!rel.is_absolute() || d.is_absolute());
+    let opened = Kernel::open(&rel).expect("opens");
+    assert!(opened.dir.is_absolute(), "{}", opened.dir.display());
+    for p in PROGRAMS {
+        assert!(
+            opened.program(p).is_absolute(),
+            "{} is not absolute",
+            opened.program(p).display()
+        );
+    }
 }

@@ -47,3 +47,20 @@ pub fn render(fields: &[&(String, colm_namelist::Value)]) -> String {
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
+
+/// 从一份 case.nml 里读出 `DEF_CASE_NAME`。
+///
+/// 算例名决定所有产物路径，所以取错了会一路错到「找不到 history」。
+/// 用真解析器而不是字符串查找：后者会被一行注释掉的 `DEF_CASE_NAME` 骗过去。
+pub fn case_name(nml: &Path) -> anyhow::Result<String> {
+    use anyhow::{bail, Context};
+    let text =
+        std::fs::read_to_string(nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let doc =
+        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
+    match doc.get("DEF_CASE_NAME") {
+        Some(colm_namelist::Value::Str(s)) => Ok(s.clone()),
+        Some(other) => bail!("DEF_CASE_NAME is {other:?}, not a string"),
+        None => bail!("no DEF_CASE_NAME in {}", nml.display()),
+    }
+}

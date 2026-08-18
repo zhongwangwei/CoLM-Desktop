@@ -1,0 +1,23 @@
+[package]
+name = "colm-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true   # 必须显式 opt-in
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 唯一的编排可执行文件（design.md §4.2：「GUI 只跟它说话」），所以它是
+# 唯一一个同时依赖全部五层的地方。各层之间仍然互不依赖。
+colm-case = { path = "../colm-case" }
+colm-forcing = { path = "../colm-forcing" }
+colm-hist = { path = "../colm-hist", features = ["io"] }
+colm-kernel = { path = "../colm-kernel" }
+colm-srfdata = { path = "../colm-srfdata" }
+anyhow.workspace = true
+
+# 不引入 clap：四个子命令、十来个参数，手写解析比多一个依赖划算。
+# 等参数多到手写会出错时再说。
+
+[lints]
+workspace = true

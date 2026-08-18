@@ -27,3 +27,21 @@ pub fn read_1d(path: &Path, name: &str) -> Result<Vec<f64>> {
         .with_context(|| format!("{} has no variable {name}", path.display()))?;
     Ok(v.get_values::<f64, _>(..)?)
 }
+
+/// 读 `time` 变量的 `units` 属性。
+///
+/// 观测文件的时间原点写在这里（实测 `"seconds since 2008-01-01 00:00:00"`），
+/// 而模型 history 的原点固定是 1900 —— 两边换算到同一原点才谈得上配对。
+pub fn time_units(path: &Path) -> Result<String> {
+    let f = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let v = f
+        .variable("time")
+        .with_context(|| format!("{} has no time variable", path.display()))?;
+    match v.attribute("units").and_then(|a| a.value().ok()) {
+        Some(netcdf::AttributeValue::Str(s)) => Ok(s),
+        other => anyhow::bail!(
+            "time:units in {} is {other:?}, not a string",
+            path.display()
+        ),
+    }
+}
