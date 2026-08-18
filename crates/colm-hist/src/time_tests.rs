@@ -34,3 +34,32 @@ fn an_hourly_label_covers_the_two_half_hours_before_and_at_it() {
     // 标签 01:30（5400 秒）覆盖 01:00–02:00。
     assert_eq!(observation_slots(5400.0), [3600.0, 5400.0]);
 }
+
+#[test]
+fn the_epoch_shift_lands_on_the_measured_first_record() {
+    // CN-Cng 冬季窗口 history 的首点是 56802270 分（since 1900-1-1），
+    // 也就是 2008-01-01 00:30 —— 标签在区间中点。
+    // 换成 Unix 秒实测是 1199147400，对应 2008-01-01T00:30:00Z。
+    assert_eq!(unix_seconds(&[56_802_270.0]), [1_199_147_400]);
+}
+
+#[test]
+fn the_day_count_between_1900_and_the_epoch_is_right() {
+    // 1900-01-01 到 1970-01-01 共 70 年，其中 17 个闰年
+    // （1904…1968；1900 不算，能被 100 整除而不能被 400 整除）。
+    // 数错一个就整体平移一天，曲线的日期标签全错。
+    let leaps = (1900..1970).filter(|&y| is_leap(y)).count();
+    assert_eq!(leaps, 17);
+    assert_eq!(DAYS_1900_TO_EPOCH, -((70 * 365 + 17) as i64));
+}
+
+#[test]
+fn an_hourly_series_stays_hourly_after_conversion() {
+    // 换算是仿射的，步长必须原样保留 —— 差一点点就会让 uPlot 的
+    // 等距假设失效，画出来的曲线在时间上是歪的。
+    let m: Vec<f64> = (0..5).map(|i| 56_802_270.0 + (i as f64) * 60.0).collect();
+    let u = unix_seconds(&m);
+    for w in u.windows(2) {
+        assert_eq!(w[1] - w[0], 3600);
+    }
+}

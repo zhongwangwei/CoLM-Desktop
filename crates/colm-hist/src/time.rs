@@ -46,3 +46,21 @@ pub fn observation_slots(label_seconds: f64) -> [f64; 2] {
 #[cfg(test)]
 #[path = "time_tests.rs"]
 mod time_tests;
+
+/// 从 1900-01-01 到 Unix 纪元（1970-01-01）的天数，负值。
+const DAYS_1900_TO_EPOCH: i64 = -25_567;
+
+/// 模型时间（分，since 1900）→ **Unix 秒**。
+///
+/// 画图用。uPlot 的 x 轴默认就是 Unix 秒，所以这一步省掉前端再换算一次。
+///
+/// **但这些秒数是「把地方时当成 UTC」算出来的。** PLUMBER2 的时间轴是地方时
+/// （算例里 `greenwich = .false.`），模型也按地方时推进，所以前端必须按 UTC
+/// 格式化才会显示成站点当地的钟点 —— 按浏览器本地时区格式化会整体平移一个时区。
+pub fn unix_seconds(minutes_since_1900: &[f64]) -> Vec<i64> {
+    let base = DAYS_1900_TO_EPOCH * 86_400;
+    minutes_since_1900
+        .iter()
+        .map(|m| base + (*m as i64) * 60)
+        .collect()
+}

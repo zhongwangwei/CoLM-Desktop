@@ -8,6 +8,7 @@
 //! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //! colm-cli run     <算例目录> --kernel <目录>
 //! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N]
+//! colm-cli series  <算例目录> --vars f_rnet,f_fsena [--out series.json]
 //! colm-cli all     --site ... --out ... --kernel ... [--obs ...]
 //! ```
 //!
@@ -26,6 +27,7 @@ usage:
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
   colm-cli run     <case-dir> --kernel <dir>
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N]
+  colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
 ";
@@ -48,6 +50,14 @@ fn main() -> Result<()> {
         "metrics" => {
             let case = opts.positional_case()?;
             cmd_metrics(&case, &opts.need("--obs")?, opts.spinup()?)?;
+        }
+        "series" => {
+            let case = opts.positional_case()?;
+            cmd_series(
+                &case,
+                &opts.need_str("--vars")?,
+                opts.get("--out").as_deref(),
+            )?;
         }
         "all" => {
             let case = cmd_new(&opts)?;
@@ -101,6 +111,13 @@ impl Opts {
     fn need(&self, name: &str) -> Result<PathBuf> {
         match self.get(name) {
             Some(v) => Ok(PathBuf::from(v)),
+            None => bail!("{name} is required\n{USAGE}"),
+        }
+    }
+
+    fn need_str(&self, name: &str) -> Result<String> {
+        match self.get(name) {
+            Some(v) => Ok(v),
             None => bail!("{name} is required\n{USAGE}"),
         }
     }
@@ -370,6 +387,106 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- series
+
+/// 把 history 里的若干条序列导出成 JSON，供 GUI 画图。
+///
+/// GUI 进程**不链接 netcdf** —— 让它去读 history 会把整个 HDF5 拖进窗口进程。
+/// 所以数值由这里（sidecar）读出来，以 JSON 过边界。
+///
+/// 时间轴给的是 **Unix 秒**，因为 uPlot 的 x 轴默认就是这个。但注意
+/// PLUMBER2 是**地方时**（算例里 `greenwich = .false.`），所以这些秒数是
+/// 「把地方时当成 UTC」算出来的 —— 前端必须按 UTC 格式化，才会显示成
+/// 站点当地的钟点。按本地时区格式化会平移一个时区。
+fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
+    let layout = Layout::new(case);
+    let name = colm_case::case_name(&layout.case_nml())?;
+    let hist = newest_history(&layout.out().join(&name))?;
+
+    let t_min = colm_hist::obs::read_1d(&hist, "time")?;
+    // 换算住在 colm-hist::time —— 那个模块已经拥有「两种时间轴」这件事，
+    // 而且它是 netcdf-free 的，GUI 后端将来也用得上。
+    let unix = colm_hist::time::unix_seconds(&t_min);
+
+    let mut body = String::from("{\n");
+    body.push_str(&format!("  \"file\": {:?},\n", hist.display().to_string()));
+    body.push_str(&format!("  \"n\": {},\n", unix.len()));
+    body.push_str("  \"time\": [");
+    body.push_str(
+        &unix
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    body.push_str("],\n  \"vars\": {\n");
+    let names: Vec<&str> = vars
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        bail!("--vars needs at least one variable name");
+    }
+    let mut first = true;
+    for v in &names {
+        let values = colm_hist::obs::read_1d(&hist, v)
+            .with_context(|| format!("{} has no variable {v}", hist.display()))?;
+        if values.len() != unix.len() {
+            // 剖面变量是 (time, patch, soil) 之类，长度是时间步的数倍。
+            // 它们要另一种画法，本轮不做 —— 但要说清楚而不是画出一条乱线。
+            bail!(
+                "{v} has {} values for {} time steps; it is not a (time, patch) series",
+                values.len(),
+                unix.len()
+            );
+        }
+        if !first {
+            body.push_str(",\n");
+        }
+        first = false;
+        body.push_str(&format!(
+            "    {v:?}: [{}]",
+            values
+                .iter()
+                .map(|x| format!("{x:?}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    body.push_str("\n  }\n}\n");
+
+    match out {
+        Some(p) => {
+            std::fs::write(p, &body)?;
+            println!(
+                "wrote {} series x {} points to {p}",
+                names.len(),
+                unix.len()
+            );
+        }
+        None => print!("{body}"),
+    }
+    Ok(())
+}
+
+/// 算例里那个唯一的 `*_hist_*.nc`。
+fn newest_history(out: &Path) -> Result<PathBuf> {
+    let dir = out.join("history");
+    let mut h: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| format!("no history at {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains("_hist_") && n.ends_with(".nc"))
+        })
+        .collect();
+    h.sort();
+    h.pop()
+        .with_context(|| format!("no *_hist_*.nc under {}", dir.display()))
 }
 
 /// 观测文件 `time:units` 里的起始年。
