@@ -127,3 +127,42 @@ fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
         "agreement was {agree}/{total}; measured was 25/90, so something changed"
     );
 }
+
+#[test]
+fn every_site_file_carries_its_own_location_and_landtype() {
+    // 新建算例时这三项不该问用户。实测 90 个站点文件全都自带。
+    let root = plumber2();
+    let dir = root.join("Sitedata");
+    let mut n = 0;
+    let mut classes = std::collections::BTreeSet::new();
+    for e in std::fs::read_dir(&dir).expect("Sitedata") {
+        let p = e.expect("entry").path();
+        if p.extension().and_then(|x| x.to_str()) != Some("nc") {
+            continue;
+        }
+        let l = colm_srfdata::site::location(&p).expect("location");
+        assert!((-180.0..=180.0).contains(&l.lon), "{p:?} lon {}", l.lon);
+        assert!((-90.0..=90.0).contains(&l.lat), "{p:?} lat {}", l.lat);
+        assert!((1..=17).contains(&l.landtype), "{p:?} IGBP {}", l.landtype);
+        classes.insert(l.landtype);
+        n += 1;
+    }
+    assert_eq!(n, 90);
+    // 90 个站点不该全是同一种地类 —— 那说明读错了字段。
+    assert!(
+        classes.len() > 3,
+        "only {} distinct IGBP classes",
+        classes.len()
+    );
+}
+
+#[test]
+fn the_golden_site_matches_the_hand_written_case() {
+    // 手写的 oracle/cases/CN-Cng/case.nml 里那三个数就是从这里来的。
+    let root = plumber2();
+    let p = root.join("Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc");
+    let l = colm_srfdata::site::location(&p).expect("location");
+    assert!((l.lon - 123.5092).abs() < 1e-4, "{}", l.lon);
+    assert!((l.lat - 44.5933).abs() < 1e-4, "{}", l.lat);
+    assert_eq!(l.landtype, 10);
+}

@@ -41,6 +41,35 @@ pub fn missing_fields(file: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// 站点的身份：位置与地类。
+///
+/// 这三项 PLUMBER2 的站点文件自带，实测 CN-Cng 给出
+/// `longitude = 123.5092` / `latitude = 44.5933` / `IGBP_classification = 10`，
+/// 与手写算例里的 `SITE_lon_location` / `SITE_lat_location` / `SITE_landtype`
+/// **逐位吻合**。所以新建算例时不该问用户要这三个数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Location {
+    pub lon: f64,
+    pub lat: f64,
+    /// IGBP 分类号，直接对应 `SITE_landtype`。
+    pub landtype: i32,
+}
+
+pub fn location(file: &Path) -> Result<Location> {
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let get = |name: &str| -> Result<f64> {
+        let v = f
+            .variable(name)
+            .with_context(|| format!("{} has no {name}", file.display()))?;
+        Ok(v.get_value::<f64, _>(())?)
+    };
+    Ok(Location {
+        lon: get("longitude")?,
+        lat: get("latitude")?,
+        landtype: get("IGBP_classification")? as i32,
+    })
+}
+
 /// 补齐一个站点文件。
 ///
 /// 取值优先级是**站点自有 > 栅格 > 模块默认**。「站点自有」指站点文件本身的
