@@ -33,7 +33,13 @@ esac
 
 BUILD="$REPO_ROOT/$OUTDIR/build-$PRESET"
 rm -rf "$BUILD"
-git -C "$SRC" worktree add --detach --force "$BUILD" HEAD >/dev/null
+# `-c core.symlinks=false`：CoLM 的源码树里有 tracked 符号链接
+# （include/Makeoptions 与 run/scripts/batch.config），而 **Windows 上创建
+# 符号链接需要特权**，默认没有。实测 MSYS2 里 worktree add 会在这两个上
+# 直接失败并 `Could not reset index file`。关掉之后 git 把它们写成普通文件，
+# 内容是链接目标的路径 —— 对本脚本没有影响，因为下面会把 include/Makeoptions
+# 整个换掉，而 batch.config 单点路径根本不读。
+git -C "$SRC" -c core.symlinks=false worktree add --detach --force "$BUILD" HEAD >/dev/null
 trap 'git -C "$SRC" worktree remove --force "$BUILD" >/dev/null 2>&1 || true' EXIT
 
 cd "$BUILD"
@@ -42,7 +48,11 @@ cd "$BUILD"
 if [ -n "$OWN_MAKEOPTS" ]; then
   cp "$OWN_MAKEOPTS" "include/$MAKEOPTS"
 fi
-ln -sf "$MAKEOPTS" include/Makeoptions
+# 用拷贝而不是 `ln -sf`：Windows 上建符号链接要特权，而 MSYS2 的 `ln -s`
+# 视 MSYS 环境变量而定，可能建链接也可能复制 —— 让构建结果取决于一个
+# 环境变量不值得。先删再拷，免得 cp 顺着旧的符号链接写回它自己的目标。
+rm -f include/Makeoptions
+cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 
 # FF=gfortran 而非 mpif90：SinglePoint 已 #undef USEMPI，用 mpif90 只会白链 4 个 MPI 库。
