@@ -100,6 +100,13 @@ jobs:
           for p in mksrfdata mkinidata colm; do ldd "kernels/waterheat/$p.x"; done \
             | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u | tee dlls.txt
           echo "共 $(wc -l < dlls.txt) 个"
+          # **在这里就把它们拷出来**，而不是让下一步（PowerShell）去翻译路径。
+          # `/mingw64/bin` 只在 MSYS2 里成立；它的 Windows 真实路径由
+          # setup-msys2 决定，不是 `C:\msys64`（第一版这么写，结果 copied 0 DLLs，
+          # 而 `Test-Path` 失败是静默的，于是错误伪装成"清单不全"）。
+          mkdir -p probe-dlls
+          xargs -a dlls.txt -I{} cp {} probe-dlls/
+          ls probe-dlls | wc -l
 
       # 两问两答，都在 PowerShell 里跑 —— 那里的 PATH 没有 mingw64\bin，
       # 正是用户机器的处境。
@@ -129,12 +136,12 @@ jobs:
           }
 
           Write-Host "=== 2. 把 DLL 摆到旁边再试 ==="
+          # 上一步（MSYS2 里）已经把它们拷进 probe-dlls/，这里只搬一次。
           # release.yml 就是这么做的：Windows 先在可执行文件同目录找 DLL。
-          Get-Content dlls.txt | ForEach-Object {
-            $p = $_ -replace '^/mingw64/bin/', 'C:\msys64\mingw64\bin\'
-            if (Test-Path $p) { Copy-Item $p probe\ -Force }
-          }
-          Write-Host "copied $((Get-ChildItem probe\*.dll).Count) DLLs"
+          Copy-Item probe-dlls\*.dll probe\ -Force
+          $n = (Get-ChildItem probe\*.dll).Count
+          Write-Host "copied $n DLLs"
+          if ($n -eq 0) { Write-Host "::error::一个 DLL 都没拷到"; exit 1 }
           & .\probe\colm.exe *> withdlls.txt
           $with = $LASTEXITCODE
           Get-Content withdlls.txt -TotalCount 5
