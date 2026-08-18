@@ -51,22 +51,32 @@ pub fn missing_fields(file: &Path) -> Result<Vec<String>> {
 pub struct Location {
     pub lon: f64,
     pub lat: f64,
-    /// IGBP 分类号，直接对应 `SITE_landtype`。
-    pub landtype: i32,
+    /// IGBP 分类号，直接对应 `SITE_landtype`。城市站点文件不带它，故为 `Option`。
+    pub landtype: Option<i32>,
 }
 
 pub fn location(file: &Path) -> Result<Location> {
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
-    let get = |name: &str| -> Result<f64> {
-        let v = f
-            .variable(name)
-            .with_context(|| format!("{} has no {name}", file.display()))?;
-        Ok(v.get_value::<f64, _>(())?)
+    // 取全部值再拿第一个，而不是按标量读：PLUMBER2 的 `longitude` 是 0 维标量，
+    // 而 Urban-PLUMBER 的是 `(y, x)`（各长 1）。按标量读后者会报
+    // 「requested dimension (0) is bigger than the dimension length (2)」。
+    // 两种形状都只描述一个站点，所以第一个值就是答案。
+    let first = |name: &str| -> Result<Option<f64>> {
+        let Some(v) = f.variable(name) else {
+            return Ok(None);
+        };
+        Ok(v.get_values::<f64, _>(..)?.first().copied())
+    };
+    let need = |name: &str| -> Result<f64> {
+        first(name)?.with_context(|| format!("{} has no {name}", file.display()))
     };
     Ok(Location {
-        lon: get("longitude")?,
-        lat: get("latitude")?,
-        landtype: get("IGBP_classification")? as i32,
+        lon: need("longitude")?,
+        lat: need("latitude")?,
+        // 城市站点文件不带这一项 —— Urban-PLUMBER 的 21 个站一个都没有，
+        // 而 CoLM 的 URBAN 路径反正会把地类强制成 13
+        // （`MOD_SingleSrfdata.F90:1548`）。所以缺了不是错，是「这份文件不说」。
+        landtype: first("IGBP_classification")?.map(|x| x as i32),
     })
 }
 

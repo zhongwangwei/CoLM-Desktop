@@ -18,15 +18,6 @@ pub struct ForcingSpec {
     pub met: MetSummary,
 }
 
-/// CoLM 的固定槽位：1=T 2=q 3=psrf 4=precip 5=u 6=v 7=SW 8=LW。
-/// PLUMBER2 只有标量 `Wind`，所以第 5 槽是 `NULL`。
-const VNAME: [&str; 8] = [
-    "Tair", "Qair", "Psurf", "Precip", "NULL", "Wind", "SWdown", "LWdown",
-];
-const TINTALGO: [&str; 8] = [
-    "linear", "linear", "linear", "nearest", "NULL", "linear", "linear", "linear",
-];
-
 /// 渲染成 namelist 文本。
 pub fn render(s: &ForcingSpec) -> String {
     let dir = if s.dir.ends_with('/') {
@@ -35,6 +26,11 @@ pub fn render(s: &ForcingSpec) -> String {
         format!("{}/", s.dir)
     };
     let end = s.met.end();
+    // 槽位按文件里实际有的变量填，不写死 —— PLUMBER2 是标量风（第 5 槽空），
+    // Urban-PLUMBER 是分量风（第 5 槽是东风分量）。见 `slots`。
+    let (slots, _missing) = crate::slots::resolve(&s.met.variables);
+    let vnames = slots.names();
+    let tints = slots.tintalgo();
     let quoted = |xs: &[&str]| {
         xs.iter()
             .map(|x| format!("'{x}'"))
@@ -68,8 +64,9 @@ pub fn render(s: &ForcingSpec) -> String {
          ! 其余 7 个槽从不使用。\n\
          \x20  DEF_forcing%fprefix(1)       = '{file}'\n\
          \n\
-         ! 槽位固定为 1=T 2=q 3=psrf 4=precip 5=u 6=v 7=SW 8=LW。\n\
-         ! PLUMBER2 只有标量 Wind，故第 5 槽为 'NULL'，Wind 进第 6 槽。\n\
+         ! 槽位固定为 1=T 2=q 3=psrf 4=precip 5=u 6=v 7=SW 8=LW，\n\
+         ! 名字则按这份文件里实际有的变量填。\n\
+         {windnote}\
          \x20  DEF_forcing%vname            = {vname}\n\
          \x20  DEF_forcing%tintalgo         = {tint}\n\
          /\n",
@@ -82,8 +79,13 @@ pub fn render(s: &ForcingSpec) -> String {
         ey = end.year,
         em = end.month,
         file = s.file,
-        vname = quoted(&VNAME),
-        tint = quoted(&TINTALGO),
+        vname = quoted(&vnames),
+        tint = quoted(&tints),
+        windnote = if slots.wind_is_vector() {
+            "! 这份数据是**分量风**：第 5 槽东风、第 6 槽北风。\n"
+        } else {
+            "! 这份数据只有**标量风**，故第 5 槽为 'NULL'，风进第 6 槽。\n"
+        },
     )
 }
 

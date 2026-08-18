@@ -6,7 +6,7 @@ fn cn_cng() -> CaseSpec {
         site_file: "/w/site.nc".into(),
         lon: 123.5092,
         lat: 44.5933,
-        landtype: 10,
+        landtype: Some(10),
         window: Window {
             start_year: 2008,
             start_month: 1,
@@ -16,6 +16,7 @@ fn cn_cng() -> CaseSpec {
             end_day: 11,
         },
         timestep_seconds: 1800.0,
+        greenwich: false,
         dirs: Dirs {
             rawdata: "/w/rawdata_unused/".into(),
             runtime: "/w/runtime_unused/".into(),
@@ -87,4 +88,32 @@ fn every_generated_field_is_settable_from_the_main_namelist() {
         let f = colm_schema::find(&p).unwrap();
         assert_eq!(f.group, Some("nl_colm"), "{p} belongs to {:?}", f.group);
     }
+}
+
+#[test]
+fn a_site_without_a_land_cover_class_writes_neither_landtype_field() {
+    // Urban-PLUMBER 的 21 个站点文件都不带 IGBP_classification，而 CoLM 的
+    // URBAN 路径会把地类强制成 13（MOD_SingleSrfdata.F90:1548）。
+    // 猜一个值写进去比不写更糟：CoLM 有自己的回落路径，而我们没有依据。
+    let mut s = cn_cng();
+    s.landtype = None;
+    let without = fields(&s);
+    let names: Vec<&str> = without.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(!names.contains(&"SITE_landtype"));
+    assert!(!names.contains(&"USE_SITE_landtype"));
+    // 其余字段一个不少
+    assert_eq!(fields(&cn_cng()).len() - without.len(), 2);
+}
+
+#[test]
+fn the_land_cover_fields_sit_right_after_the_coordinates() {
+    // 顺序稳定，否则每次重生成都是一个大 diff。
+    let all = fields(&cn_cng());
+    let names: Vec<&str> = all.iter().map(|(p, _)| p.as_str()).collect();
+    let i = names
+        .iter()
+        .position(|n| *n == "SITE_landtype")
+        .expect("present");
+    assert_eq!(names[i - 1], "SITE_lat_location");
+    assert_eq!(names[i + 1], "USE_SITE_landtype");
 }

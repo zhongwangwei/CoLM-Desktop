@@ -15,8 +15,10 @@ pub mod check;
 pub mod civil;
 pub mod met;
 pub mod render;
+pub mod slots;
 
 pub use check::{check, MetSummary, REQUIRED_VARS};
 pub use civil::{civil_from_days, days_from_civil, Stamp};
 pub use met::summarize;
 pub use render::{render, ForcingSpec};
+pub use slots::{resolve, Resolved, SLOTS};

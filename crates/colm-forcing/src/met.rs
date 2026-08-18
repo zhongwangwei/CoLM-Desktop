@@ -53,6 +53,13 @@ pub fn summarize(file: &Path) -> Result<MetSummary> {
 
     let variables: Vec<String> = f.variables().map(|v| v.name()).collect();
 
+    // 全局属性 `time_shown_in`。Urban-PLUMBER 写 "UTC"，PLUMBER2 没有这一项。
+    let time_shown_in = f.attribute("time_shown_in").and_then(|a| match a.value() {
+        Ok(netcdf::AttributeValue::Str(s)) => Some(s),
+        Ok(netcdf::AttributeValue::Strs(v)) => v.into_iter().next(),
+        _ => None,
+    });
+
     Ok(MetSummary {
         start: parse_units_start(&time_units)?,
         time_units,
@@ -63,6 +70,7 @@ pub fn summarize(file: &Path) -> Result<MetSummary> {
         height_t: scalar("reference_height_t").unwrap_or(f64::NAN),
         height_q: scalar("reference_height_q").unwrap_or(f64::NAN),
         variables,
+        time_shown_in,
     })
 }
 

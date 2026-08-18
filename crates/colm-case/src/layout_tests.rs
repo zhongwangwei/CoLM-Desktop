@@ -12,7 +12,7 @@ fn hourly_site() -> CaseSpec {
         site_file: "/w/case/site.nc".into(),
         lon: -86.4131,
         lat: 39.3232,
-        landtype: 4,
+        landtype: Some(4),
         window: Window {
             start_year: 2005,
             start_month: 6,
@@ -22,6 +22,7 @@ fn hourly_site() -> CaseSpec {
             end_day: 11,
         },
         timestep_seconds: 3600.0,
+        greenwich: false,
         dirs: Dirs {
             rawdata: "/w/rawdata_unused/".into(),
             runtime: "/w/runtime_unused/".into(),

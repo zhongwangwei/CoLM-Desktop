@@ -16,11 +16,19 @@ pub struct CaseSpec {
     pub site_file: String,
     pub lon: f64,
     pub lat: f64,
-    pub landtype: i32,
+    /// IGBP 地类。`None` 表示站点文件没说 —— 城市站点文件都不带它，
+    /// 而 URBAN 路径反正会强制成 13。那时两个 landtype 字段都不写，
+    /// 让 CoLM 自己从文件或栅格去定。
+    pub landtype: Option<i32>,
     pub window: Window,
     /// 强迫场文件的时间步长（秒）。实测 88/90 个站点是 1800，
     /// `US-Ne3` 与 `US-MMS` 是 3600 —— 它必须跟着走。
     pub timestep_seconds: f64,
+    /// 时间轴是不是格林尼治时。**必须由强迫场文件说了算**，不能写死：
+    /// PLUMBER2 是地方时、Urban-PLUMBER 是 UTC，而 design.md §2.8 量过
+    /// 时区错 8 小时会把 Rnet 的 R² 从 0.986 打到 0.146 —— 跑得完，全错。
+    /// 见 `colm_forcing::MetSummary::is_greenwich`。
+    pub greenwich: bool,
     pub dirs: Dirs,
 }
 
@@ -47,17 +55,19 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
     let r = |x: f64| Value::Real {
         text: format!("{x:?}"),
     };
-    vec![
+    let mut out = vec![
         ("DEF_CASE_NAME".into(), Value::Str(s.name.clone())),
         // ---- 站点身份 ----
         ("SITE_fsitedata".into(), Value::Str(s.site_file.clone())),
         ("SITE_lon_location".into(), r(s.lon)),
         ("SITE_lat_location".into(), r(s.lat)),
-        ("SITE_landtype".into(), Value::Int(s.landtype as i64)),
-        ("USE_SITE_landtype".into(), Value::Bool(true)),
-        // PLUMBER2 的时间轴是地方时。SinglePoint 是唯一允许非格林尼治时的
-        // 配置（MOD_TimeManager.F90:74-79 的强制覆盖在 #ifndef SinglePoint 内）。
-        ("DEF_simulation_time%greenwich".into(), Value::Bool(false)),
+        // SinglePoint 是唯一允许非格林尼治时的配置
+        // （MOD_TimeManager.F90:74-79 的强制覆盖在 #ifndef SinglePoint 内），
+        // 取值由强迫场文件决定，不写死。
+        (
+            "DEF_simulation_time%greenwich".into(),
+            Value::Bool(s.greenwich),
+        ),
         // ---- 时间窗口 ----
         (
             "DEF_simulation_time%start_year".into(),
@@ -105,7 +115,14 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
         ("DEF_USE_OZONEDATA".into(), Value::Bool(false)),
         ("DEF_WRST_FREQ".into(), Value::Str("MONTHLY".into())),
         ("DEF_HIST_FREQ".into(), Value::Str("HOURLY".into())),
-    ]
+    ];
+    // 地类只在站点文件说得出时才写。说不出就整条不写 —— 写一个猜的值
+    // 比不写更糟，而 CoLM 有自己的回落路径（站点文件的分类变量，或栅格）。
+    if let Some(lt) = s.landtype {
+        out.insert(4, ("SITE_landtype".into(), Value::Int(lt as i64)));
+        out.insert(5, ("USE_SITE_landtype".into(), Value::Bool(true)));
+    }
+    out
 }
 
 #[cfg(test)]

@@ -147,21 +147,46 @@ impl Opts {
 ///
 /// 实测 PLUMBER2 的三个目录用同一个词干，只差后缀
 /// （`_site.nc` / `_Met.nc` / `_Flux.nc`），所以用户只需要给一个文件。
-fn sibling(site: &Path, dir: &str, suffix: &str) -> Option<PathBuf> {
+/// 两套站点数据集的命名约定。各自的三个目录共用一个词干，只差后缀。
+///
+/// | | 站点 | 强迫场 | 观测 |
+/// |---|---|---|---|
+/// | PLUMBER2 | `<X>_site.nc` | `<X>_Met.nc` | `<X>_Flux.nc` |
+/// | Urban-PLUMBER | `<X>_site_v1.nc` | `<X>_metforcing_v1.nc` | `<X>_clean_observations_v1.nc` |
+const LAYOUTS: [(&str, &str, &str); 2] = [
+    ("_site.nc", "_Met.nc", "_Flux.nc"),
+    (
+        "_site_v1.nc",
+        "_metforcing_v1.nc",
+        "_clean_observations_v1.nc",
+    ),
+];
+
+/// 站点文件旁边的强迫场（`which = 0`）或观测（`which = 1`）文件。
+///
+/// 两套约定都试 —— 用户只给一个站点文件路径，其余两个推得出来。
+fn sibling(site: &Path, dir: &str, which: usize) -> Option<PathBuf> {
     let name = site.file_name()?.to_str()?;
-    let stem = name.strip_suffix("_site.nc")?;
-    let p = site
-        .parent()?
-        .parent()?
-        .join(dir)
-        .join(format!("{stem}{suffix}"));
-    p.exists().then_some(p)
+    for (site_suffix, met, flux) in LAYOUTS {
+        let Some(stem) = name.strip_suffix(site_suffix) else {
+            continue;
+        };
+        let p = site
+            .parent()?
+            .parent()?
+            .join(dir)
+            .join(format!("{stem}{}", if which == 0 { met } else { flux }));
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn cmd_new(o: &Opts) -> Result<PathBuf> {
     let site_raw = o.need("--site")?;
     let out = o.need("--out")?;
-    let met = sibling(&site_raw, "Forcing", "_Met.nc").with_context(|| {
+    let met = sibling(&site_raw, "Forcing", 0).with_context(|| {
         format!(
             "cannot find the forcing file next to {}; expected ../Forcing/<stem>_Met.nc",
             site_raw.display()
@@ -172,20 +197,34 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     let layout = Layout::new(&out);
     std::fs::create_dir_all(layout.out())?;
 
-    // 1. 补齐站点文件 —— CoLM 缺字段时会回落到几百 GB 的全球 rawdata
-    let obs = sibling(&site_raw, "Observation", "_Flux.nc");
-    let rep = colm_srfdata::site::fill(
-        &site_raw,
-        &layout.site_nc(),
-        o.get("--rawdata").as_deref().map(Path::new),
-        obs.as_deref(),
-    )?;
-    println!("site: texture {} ({})", rep.texture, rep.texture_name);
-    if !rep.from_default.is_empty() {
+    // 1. 补齐站点文件 —— CoLM 缺字段时会回落到几百 GB 的全球 rawdata。
+    //
+    // 但**只对 PLUMBER2 形状的文件做**。城市站点文件（Urban-PLUMBER）的变量集
+    // 完全不同：23 个城市形态学量，没有土壤剖面也没有 `IGBP_classification`，
+    // 而 CoLM 的 URBAN 路径本来就直接读原件（实测示例算例用的就是未经处理的
+    // 原文件，逐字节相同）。对它做补齐既没有依据，也没有必要。
+    let obs = sibling(&site_raw, "Observation", 1);
+    let looks_like_plumber2 = colm_srfdata::site::location(&site_raw)?.landtype.is_some();
+    if looks_like_plumber2 {
+        let rep = colm_srfdata::site::fill(
+            &site_raw,
+            &layout.site_nc(),
+            o.get("--rawdata").as_deref().map(Path::new),
+            obs.as_deref(),
+        )?;
+        println!("site: texture {} ({})", rep.texture, rep.texture_name);
+        if !rep.from_default.is_empty() {
+            println!(
+                "  {} field(s) fell back to module defaults: {}",
+                rep.from_default.len(),
+                rep.from_default.join(", ")
+            );
+        }
+    } else {
+        std::fs::copy(&site_raw, layout.site_nc())?;
         println!(
-            "  {} field(s) fell back to module defaults: {}",
-            rep.from_default.len(),
-            rep.from_default.join(", ")
+            "site: copied as-is — no IGBP_classification, so this is not a PLUMBER2-shaped file \
+             and there is nothing here to fill in from"
         );
     }
 
@@ -243,6 +282,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             end_day: end.2,
         },
         timestep_seconds: summary.step_seconds,
+        // 由文件说了算，不写死 —— PLUMBER2 是地方时，Urban-PLUMBER 是 UTC
+        greenwich: summary.is_greenwich(),
         dirs: Dirs {
             rawdata: text(&out.join("rawdata_unused/")),
             runtime: text(&out.join("runtime_unused/")),

@@ -24,6 +24,8 @@ fn ok_met() -> MetSummary {
         .iter()
         .map(|s| (*s).to_string())
         .collect(),
+        // PLUMBER2 的文件没有这个属性 —— 它的地方时是隐含约定
+        time_shown_in: None,
     }
 }
 
@@ -154,4 +156,25 @@ fn an_hourly_file_is_not_a_problem_by_itself() {
     m.step_seconds = 3600.0;
     assert!(check(&m, None).is_empty());
     assert_eq!(m.timestep_hint(), 3600);
+}
+
+#[test]
+fn only_a_file_that_says_utc_is_treated_as_greenwich() {
+    // Urban-PLUMBER 的强迫场写 `:time_shown_in = "UTC"`（还带
+    // `local_utc_offset_hours = 10.`）；PLUMBER2 的 90 个文件**一个都没有**
+    // 这个属性，而它们确实是地方时。所以判据是「有且是 UTC」。
+    // 搞反会把整个模拟平移一个时区 —— 而 design.md §2.8 已经量过，
+    // 时区错 8 小时能把 Rnet 的 R² 从 0.986 打到 0.146。
+    let mut m = ok_met();
+    assert!(!m.is_greenwich(), "no attribute means local time");
+
+    m.time_shown_in = Some("UTC".into());
+    assert!(m.is_greenwich());
+    m.time_shown_in = Some("  utc ".into());
+    assert!(m.is_greenwich(), "trimmed and case-insensitive");
+
+    m.time_shown_in = Some("local".into());
+    assert!(!m.is_greenwich());
+    m.time_shown_in = Some("local standard time".into());
+    assert!(!m.is_greenwich());
 }

@@ -10,8 +10,12 @@
 
 use crate::civil::Stamp;
 
-/// CoLM 单点必需的 7 个强迫变量。第 5 槽（u 风）在 PLUMBER2 下是 `NULL`，
-/// 标量 `Wind` 进第 6 槽，所以这里只有 7 个而不是 8 个。
+/// CoLM 单点必需的 7 个强迫变量（PLUMBER2 的拼法）。
+///
+/// **保留只为兼容**：必填性现在由 `slots::resolve` 判断，那里按槽位而不是
+/// 按名字，于是 `Rainf`（Urban-PLUMBER 的降水）与 `Psurf`/`PSurf` 两种拼法
+/// 都认得。按固定名字列表判断会把另一个数据集判成「缺变量」，而它其实只是
+/// 换了个名字。
 pub const REQUIRED_VARS: [&str; 7] = [
     "Tair", "Qair", "Psurf", "Precip", "Wind", "SWdown", "LWdown",
 ];
@@ -28,6 +32,13 @@ pub struct MetSummary {
     pub height_t: f64,
     pub height_q: f64,
     pub variables: Vec<String>,
+    /// 全局属性 `time_shown_in` 的原文。
+    ///
+    /// 决定算例里的 `DEF_simulation_time%greenwich`：Urban-PLUMBER 显式写
+    /// `"UTC"`，而 PLUMBER2 **没有这个属性** —— 它的地方时是隐含约定
+    /// （见 design.md §2.10）。所以「有且是 UTC」才是格林尼治时，
+    /// 其余一律按地方时。搞反会把整个模拟平移一个时区。
+    pub time_shown_in: Option<String>,
 }
 
 impl MetSummary {
@@ -40,6 +51,16 @@ impl MetSummary {
     /// 算例 namelist 里 `DEF_simulation_time%timestep` 该取的值。
     pub fn timestep_hint(&self) -> i64 {
         self.step_seconds as i64
+    }
+
+    /// 时间轴是不是格林尼治时。
+    ///
+    /// 只有文件**明说** UTC 才算。没说就是地方时 —— PLUMBER2 的 90 个文件
+    /// 全都没有这个属性，而它们确实是地方时。
+    pub fn is_greenwich(&self) -> bool {
+        self.time_shown_in
+            .as_deref()
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("UTC"))
     }
 }
 
@@ -56,11 +77,10 @@ pub fn check(m: &MetSummary, window: Option<(Stamp, Stamp)>) -> Vec<String> {
         ));
     }
 
-    for v in REQUIRED_VARS {
-        if !m.variables.iter().any(|x| x == v) {
-            p.push(format!("required forcing variable {v} is missing"));
-        }
-    }
+    // 按**槽位**判必填，不按名字：同一个量在不同数据集里叫法不同
+    // （Precip / Rainf、Psurf / PSurf），按名字列表判会把它们误报成缺失。
+    let (_, missing) = crate::slots::resolve(&m.variables);
+    p.extend(missing);
 
     if !m.step_uniform {
         p.push(

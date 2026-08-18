@@ -143,8 +143,13 @@ fn every_site_file_carries_its_own_location_and_landtype() {
         let l = colm_srfdata::site::location(&p).expect("location");
         assert!((-180.0..=180.0).contains(&l.lon), "{p:?} lon {}", l.lon);
         assert!((-90.0..=90.0).contains(&l.lat), "{p:?} lat {}", l.lat);
-        assert!((1..=17).contains(&l.landtype), "{p:?} IGBP {}", l.landtype);
-        classes.insert(l.landtype);
+        // PLUMBER2 的 90 个站全都带 IGBP_classification；城市站点文件不带，
+        // 那时是 None（见 Urban-PLUMBER）。这里断言这个语料里一个都不缺。
+        let lt = l
+            .landtype
+            .unwrap_or_else(|| panic!("{p:?} has no IGBP class"));
+        assert!((1..=17).contains(&lt), "{p:?} IGBP {lt}");
+        classes.insert(lt);
         n += 1;
     }
     assert_eq!(n, 90);
@@ -164,5 +169,5 @@ fn the_golden_site_matches_the_hand_written_case() {
     let l = colm_srfdata::site::location(&p).expect("location");
     assert!((l.lon - 123.5092).abs() < 1e-4, "{}", l.lon);
     assert!((l.lat - 44.5933).abs() < 1e-4, "{}", l.lat);
-    assert_eq!(l.landtype, 10);
+    assert_eq!(l.landtype, Some(10));
 }
