@@ -110,8 +110,10 @@ async function confirmSelection() {
   try {
     const made = await ensureCases(target);
     if (!made.length) return;
-    state.selected = made[0];
-    renderSteps();
+    // **走 selectCase，不要只设 state.selected。** 那里还要把 case.nml 读进来、
+    // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，
+    // 参数页会是空的，而空页面不会报错，只是什么都没有。实测踩过。
+    await selectCase(made[0]);
     go('params');
   } finally { renderDataFoot(); }
 }
