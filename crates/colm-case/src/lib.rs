@@ -6,6 +6,8 @@
 //!
 //! 本 crate **不依赖 `colm-kernel`**：造文件与跑模型是两件事。
 
+pub mod build;
 pub mod minimal;
 
+pub use build::{fields, CaseSpec, Dirs, Window};
 pub use minimal::{is_default, required};
