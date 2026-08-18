@@ -35,4 +35,7 @@ export const state = {
   /** 输出变量页的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,
+  /** 批量汇总表：看哪个变量、按哪一列排。 */
+  summaryVar: null,
+  summarySort: 'site',
 };
