@@ -8,6 +8,11 @@
 
 **Tech Stack:** Rust 1.85.1，复用已有的五个 crate，不引入新依赖。
 
+> **预跑纪律**：本计划的代码块抽出来跑过 `cargo test` 与 `cargo fmt --check`，
+> 但**第一版漏跑了 `cargo clippy -- -D warnings`** —— 于是 `required` 上一处
+> 多余的显式生命周期（`clippy::needless_lifetimes`）一路留到执行时才被门禁拦下。
+> 已按 clippy 的建议消除并同步回本文。往后预跑三条都要跑。
+
 ---
 
 ## 这条链路已经跑通过一次
@@ -201,7 +206,7 @@ pub fn is_default(path: &str, v: &Value) -> Option<bool> {
 }
 
 /// 从一组字段里筛出**必须写**的那些，保持传入顺序。
-pub fn required<'a>(fields: &'a [(String, Value)]) -> Vec<&'a (String, Value)> {
+pub fn required(fields: &[(String, Value)]) -> Vec<&(String, Value)> {
     fields
         .iter()
         .filter(|(p, v)| is_default(p, v) != Some(true))
