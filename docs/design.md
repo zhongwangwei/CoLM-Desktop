@@ -972,7 +972,18 @@ EarthMesh 就是在两个测试里对同一个网格用了 `2.0e-6` 和 `2.0e-4`
 因为 GNOME runtime 自带 4.1。
 
 **Windows**：GUI 与 `colm-cli` 用 MSVC 目标；Fortran 内核用 MSYS2 MinGW64 单独构建
-（`mingw-w64-x86_64-netcdf-fortran` + OpenBLAS），静态链接 gcc 运行时。
+（`mingw-w64-x86_64-netcdf-fortran` + LAPACK/BLAS）。
+
+「静态链接 gcc 运行时」原先写在这里，但**那是计划，不是现状**：实测 CI 上
+`nf-config --flibs` 返回 `-L/mingw64/lib -lnetcdff -lnetcdf`，即动态链接，
+于是产出的 `.x` 依赖一串 MSYS2 DLL。而工作流里那次冒烟测试是在 MSYS2 shell
+里跑的（`/mingw64/bin` 在 PATH 上），它证明的是「装了 MSYS2 的机器上能跑」。
+`windows-kernel.yml` 现在多两步专门测量这件事：列出 `ldd` 里的 `/mingw64`
+依赖，再从 PowerShell（没有那个 PATH）跑一次。有了那份清单才谈得上
+「随程序带哪些 DLL」还是「改成静态」。
+
+**这与打包 `.app` 时踩到的是同一类错误**：一条在开发环境里永远成立的前提，
+被当成了结论。
 `FF=gfortran` 已验证可去掉 MPI（§2.3）。
 
 **签名成本（需决策）**：Apple Developer Program **$99/年且公证强制**（免费账户无法公证）。

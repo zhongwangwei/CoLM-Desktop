@@ -75,4 +75,37 @@ jobs:
           # 直接跑一下：不给 namelist 时它应该停下来而不是崩。
           # 只看它能不能被 Windows 加载起来 —— 一个链接到缺失 DLL 的二进制
           # 在这里就会暴露，而那是 MSYS2 构建最典型的失败方式。
+          #
+          # **但这一句是在 MSYS2 shell 里跑的，`/mingw64/bin` 在 PATH 上。**
+          # 它证明的是「在装了 MSYS2 的机器上能跑」，不是「能跑」。下一步才问后者。
           ./kernels/waterheat/colm.x 2>&1 | head -5 || true
+
+      # 内核要跟着桌面程序一起分发，所以真正的问题是：**用户机器上不装 MSYS2，
+      # 它还跑不跑？** `nf-config --flibs` 返回的是 `-L/mingw64/lib -lnetcdff
+      # -lnetcdf`，动态链接 —— 也就是说 `.x` 依赖一串 MSYS2 的 DLL。
+      # design.md §9 写的是「静态链接 gcc 运行时」，那是计划，不是现状。
+      #
+      # 这一步只**测量**，不判成败：把依赖列出来，再从 PowerShell（没有
+      # `/mingw64/bin`）跑一次，看它到底缺什么。有了这份清单才谈得上
+      # 「随程序带哪些 DLL」还是「改成静态」。
+      - name: Which MSYS2 DLLs does the kernel need
+        shell: msys2 {0}
+        run: |
+          for p in mksrfdata mkinidata colm; do
+            echo "=== $p.x ==="
+            ldd "kernels/waterheat/$p.x" | grep -i mingw64 || echo "  (none from /mingw64)"
+          done
+          echo "=== 去重后的清单 ==="
+          for p in mksrfdata mkinidata colm; do ldd "kernels/waterheat/$p.x"; done \
+            | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u
+
+      - name: Does it run without MSYS2 on PATH
+        shell: pwsh
+        run: |
+          # PowerShell 的 PATH 里没有 C:\msys64\mingw64\bin。这正是用户机器的处境。
+          $ErrorActionPreference = 'Continue'
+          & .\kernels\waterheat\colm.x 2>&1 | Select-Object -First 5
+          Write-Host "exit code: $LASTEXITCODE"
+          if ($LASTEXITCODE -eq -1073741515) {
+            Write-Host "STATUS_DLL_NOT_FOUND — 内核必须带着上一步列出的 DLL 一起分发"
+          }

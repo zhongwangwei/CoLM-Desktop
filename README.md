@@ -480,6 +480,46 @@ v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 �
 覆盖面还受这些单一取值限制：一个站点、一种斑块类型（IGBP 10 草地）、
 一种产流方案（Simple VIC）、一种截留方案。黄金基准本身仍只用 `waterheat`。
 
+## Windows 上要装什么
+
+**用桌面程序的人：什么都不用装。** Fortran 内核是构建产物，随程序走，
+用户不需要编译器 —— 这正是 `kernels/<preset>/manifest.json` 这套东西的意义。
+
+**要自己编内核的人：只需要 MSYS2**，装一个 MINGW64 环境加五个包：
+
+```
+mingw-w64-x86_64-gcc-fortran      # gfortran，CI 上实测 16.2.0
+mingw-w64-x86_64-netcdf-fortran   # 4.6.3，会连带拖进 netcdf 4.9.3 与 hdf5 2.2.0
+mingw-w64-x86_64-lapack           # 连带 blas
+mingw-w64-x86_64-msmpi            # 只为了 mpif.h，见下
+make                              # 加 git
+```
+
+不需要 Visual Studio、不需要 Intel Fortran、不需要 WSL。`pacman` 一共装 98 个包
+（大多是依赖），CI 上整个作业约 3.5 分钟，其中大半花在装包上。
+
+**`msmpi` 那条是个意外。** SinglePoint 号称不用 MPI，`define.h` 也确实
+`#undef USEMPI`，但 `share/MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'`
+写在 `#ifndef USEMPI` **之外** —— 头文件必须存在，哪怕一个 MPI 符号都不会被用到。
+macOS 与 Linux 上恰好都装着 MPI，所以这件事在 Windows 之前从没暴露过。
+（改上游一行就能去掉，但那会让 submodule 离开一个干净的上游 commit，
+不值得；装一个只提供头文件的包更便宜。）
+
+### 还没答的那半：分发时要不要带 DLL
+
+`nf-config --flibs` 在 CI 上返回 `-L/mingw64/lib -lnetcdff -lnetcdf` ——
+**动态链接**。产出的 `.x` 因此依赖一串 MSYS2 的 DLL，而工作流里那次冒烟测试
+是在 MSYS2 shell 里跑的（`/mingw64/bin` 在 PATH 上），它证明的只是
+「装了 MSYS2 的机器上能跑」。`design.md` §9 原先写着「静态链接 gcc 运行时」，
+那是计划不是现状，已经改掉。
+
+`windows-kernel.yml` 现在多两步专门量这件事：`ldd` 列出 `/mingw64` 依赖，
+再从 PowerShell（没有那个 PATH）跑一次看它缺什么。有了那份清单才谈得上
+「随程序带哪些 DLL」还是「改成静态」。
+
+这跟打包 `.app` 时踩到的是同一类错误：**一条在开发环境里永远成立的前提，
+被当成了结论。**
+
 ## 三个物理预设的实际状态
 
 | 预设 | 构建 | 运行 | 卡在哪 |
