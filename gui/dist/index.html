@@ -121,7 +121,14 @@ async function boot() {
       `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）'} · ` +
       `子进程打了 ${d.total} 行，丢弃 ${d.dropped} 行噪声`;
     $('run').disabled = false;
-    if (d.code === 0) refreshVars();
+    if (d.code === 0 && state.selected) {
+      // list_cases 是运行**之前**扫的，这个标记那时还是 false ——
+      // 不在这里更新的话，跑完第一次「画图」仍然是灰的，
+      // 而用户完全看不出为什么。
+      state.selected.has_history = true;
+      renderCases();
+      refreshVars();
+    }
   });
 }
 
@@ -205,7 +212,15 @@ async function renderFields() {
     const tr = document.createElement('tr');
     const k = document.createElement('td');
     k.textContent = e.path;
-    if (!e.known) { k.className = 'warn'; k.title = 'CoLM 不认识这个字段'; }
+    if (!e.known) {
+      k.className = 'warn';
+      k.title = 'CoLM 不认识这个字段';
+    } else {
+      // schema 里 713 个字段有 108 个带 CoLM 自己的行尾注释。有就显示出来，
+      // 顺带把声明的默认值也放上去 —— 用户最常问的就是「不改会怎样」。
+      const meta = state.fields.find(f => f.name === e.path);
+      if (meta) k.title = (meta.doc ? meta.doc + '\n' : '') + '默认 ' + meta.default;
+    }
     const v = document.createElement('td');
     if (e.derived) {
       // 有声明有默认值，但不在任何 namelist 组里 —— 用户设了也没用。
@@ -238,7 +253,9 @@ $('create').onclick = async () => {
   const site = $('w-site').value.trim();
   const root = $('root').value.trim();
   if (!site || !root) { $('status').textContent = '要先填站点文件与算例目录'; return; }
-  const name = $('w-name').value.trim() || site.split('/').pop().split('_')[0];
+    // Windows 上的分隔符是反斜杠，两种都认
+  const stem = site.split(/[\\/]/).pop();
+  const name = $('w-name').value.trim() || stem.split('_')[0];
   $('create').disabled = true;
   try {
     const msg = await invoke('new_case', {
@@ -258,11 +275,15 @@ $('run').onclick = async () => {
   if (!state.selected) return;
   $('run').disabled = true;
   $('log').textContent = '';
+  $('prog').style.width = '0';
   $('progtext').textContent = '启动…';
   try {
     await invoke('run_case', { case: state.selected.dir, kernel: $('kernel').value.trim() });
   } catch (e) {
+    // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点，
+    // 不写的话进度文字会永远停在「启动…」。
     $('status').textContent = String(e);
+    $('progtext').textContent = '没能启动 —— ' + e;
     $('run').disabled = false;
   }
 };
@@ -307,7 +328,11 @@ $('plot').onclick = async () => {
 function draw(d, id, meta) {
   const host = document.createElement('div');
   host.className = 'chart';
-  $('charts').prepend(host);
+  const box = $('charts');
+  box.prepend(host);
+  // 不设上限的话，反复点「画图」会把几十张图堆在一起，每张都还挂着
+  // 自己的事件监听 —— 界面会越用越卡。
+  while (box.children.length > 4) box.lastElementChild.remove();
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
   new uPlot({
     width: host.parentElement.clientWidth - 30,
