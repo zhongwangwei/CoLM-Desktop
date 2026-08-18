@@ -13,3 +13,5 @@ target/
 # 覆盖出无意义的 diff。EarthMesh 入库了它们（含 macOS-schema.json），这里刻意
 # 不同：本项目要上三平台，而这些文件重建一次只要几秒。
 /gui/src-tauri/gen/
+# 打包时暂存进去的 sidecar 副本（由 `xtask stage-sidecar` 生成）
+/gui/src-tauri/binaries/

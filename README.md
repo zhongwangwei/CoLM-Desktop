@@ -3,7 +3,8 @@
 把 CoLM202X 的 SinglePoint 模式做成跨平台桌面程序。设计见 `docs/design.md`。
 
 **当前状态**：命令行端到端可用 —— 一条命令从原始 PLUMBER2 站点文件跑到
-指标表。还没有 GUI。
+指标表。GUI 的骨架、后端命令与前端已经写好并编得过，但**还没有人在真机上
+点开看过**，所以里程碑 8 的验收（「双击可跑并出图」）尚未达成。
 
 ## 仓库与依赖
 
@@ -90,6 +91,62 @@ colm-cli all --site <PLUMBER2>/Sitedata/CN-Cng_..._site.nc \
 
 这是本项目核心承诺的一次端到端验证 —— 桌面用户装不了几百 GB 的全球栅格。
 **但这是一个站点、一个窗口、一个预设的结论，不外推到另外 89 个站点。**
+
+## GUI（未验收）
+
+```bash
+cd gui/src-tauri && cargo tauri dev
+```
+
+三栏工作台：左边算例库、中间配置与日志、右边曲线。新建向导只问三件事 ——
+选哪个站、叫什么名字、（可选）窗口收窄。经纬度、地类、时间步长与默认窗口
+都从文件里读。
+
+**窗口进程不链接 netcdf/hdf5。** 实测各层的依赖节点数：`colm-namelist` /
+`colm-schema` / `colm-case` / `colm-kernel` / `colm-hist`（默认）全是 0，
+而 `colm-forcing` 7、`colm-srfdata` 7、`colm-cli` 9。所以后端只链接前几层，
+凡要读 NetCDF 的一律走 `colm-cli` sidecar —— 为了画一条曲线把整个静态 HDF5
+拖进窗口进程是不划算的。这个分界不是照搬来的，是已有分层里自然掉出来的。
+
+两个 workspace 刻意分离：引擎的 `Cargo.lock` 有 72 个 crate，GUI 自己的有 431 个。
+`cargo metadata` 列出引擎恰好 10 个成员，GUI 不在其中。
+
+### 日志必须在过 IPC 之前降速
+
+实测一次 528 步的运行写出 39215 行日志，其中 **33357 行（85%）是 RangeCheck
+的逐变量播报**；完整两年外推约 260 万行。处置是：RangeCheck 行丢弃（越界时
+它会在同一行追加 `with NAN` / `Out of Range!`，而那两句是 `colm-kernel` 的
+失败标记，运行会被判失败）、空行丢弃、进度行节流、**其余按批发送**。
+
+按批而不是按前缀筛选是刻意的：列举「哪些是逐步碎语」等于让日志面板依赖
+CoLM 的措辞，而它把 automatically 拼成 automaticlly 这件事已经教过一次。
+批量节流不判断任何一行的价值，只保证事件率有上界 —— 约 20 事件/秒，
+与日志量无关（逐行发送会是 595）。
+
+### 前端的接口有静态检查
+
+静态 JS 没有类型检查器，拼错的命令名要等到点下去才暴露。
+
+```bash
+cargo run -p xtask -- check-gui
+```
+
+它解析 `generate_handler!` 与前端的 `invoke` / `listen`，对不上就红，已接进 CI。
+
+### 打包
+
+```bash
+cargo run -p xtask -- stage-sidecar    # 把 colm-cli 拷成带目标三元组后缀的副本
+cd gui/src-tauri && cargo tauri build --config tauri.bundle.conf.json
+```
+
+暂存用 xtask 而不是 Node 脚本 —— 本项目一处都没有 Node，不该为一个拷贝动作
+引入第二套工具链。
+
+**没有做「先拷成临时副本再跑 sidecar」那个变通。** EarthMesh 需要它是因为
+它的静态 netcdf 二进制在源码树里运行会被 SIGKILL；本项目实测没有这个问题：
+`target/debug/colm-cli` 直接跑正常，动态依赖只剩 `libiconv` 与 `libSystem`
+两个系统库。复现不出来的问题不写变通。
 
 ## 跑黄金回归
 

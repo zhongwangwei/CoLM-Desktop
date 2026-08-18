@@ -12,6 +12,7 @@
 mod gui;
 mod hist;
 mod namelist;
+mod sidecar;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -25,7 +26,8 @@ fn main() -> Result<()> {
         "gen-schema" => gen_schema(),
         "gen-histmap" => gen_histmap(),
         "check-gui" => gui::check(&repo_root()?),
-        _ => bail!("usage: cargo run -p xtask -- <gen-schema|gen-histmap|check-gui>"),
+        "stage-sidecar" => sidecar::stage(&repo_root()?),
+        _ => bail!("usage: cargo run -p xtask -- <gen-schema|gen-histmap|check-gui|stage-sidecar>"),
     }
 }
 

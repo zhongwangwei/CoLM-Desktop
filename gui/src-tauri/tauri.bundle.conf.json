@@ -1,0 +1,10 @@
+{
+  "build": {
+    "beforeBuildCommand": "cargo run -q -p xtask --manifest-path ../../xtask/Cargo.toml -- stage-sidecar"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/colm-cli"]
+  }
+}
