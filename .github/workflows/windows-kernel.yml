@@ -96,16 +96,51 @@ jobs:
             ldd "kernels/waterheat/$p.x" | grep -i mingw64 || echo "  (none from /mingw64)"
           done
           echo "=== 去重后的清单 ==="
+          # 写进文件，下一步（PowerShell）要按它把 DLL 摆到二进制旁边。
           for p in mksrfdata mkinidata colm; do ldd "kernels/waterheat/$p.x"; done \
-            | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u
+            | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u | tee dlls.txt
+          echo "共 $(wc -l < dlls.txt) 个"
 
+      # 两问两答，都在 PowerShell 里跑 —— 那里的 PATH 没有 mingw64\bin，
+      # 正是用户机器的处境。
+      #
+      # 拷成 `.exe` 再跑，有两个原因。一是 Windows **不认 `.x` 是可执行扩展名**：
+      # PowerShell 会把它当"文档"，`& .\colm.x | ...` 直接报
+      # `Cannot run a document in the middle of a pipeline`（第一版就是这么挂的）。
+      # 二是这样才测得到 DLL 加载本身，而不是被扩展名挡在门外。
+      #
+      # 顺带说明为什么这不影响程序本身：`colm-kernel` 用 `Command::new(路径)`
+      # 起子进程，走的是 `CreateProcessW`，对显式路径不查 PATHEXT，
+      # 只要文件是合法 PE 就能起来。扩展名只在 shell 调用时碍事。
       - name: Does it run without MSYS2 on PATH
         shell: pwsh
         run: |
-          # PowerShell 的 PATH 里没有 C:\msys64\mingw64\bin。这正是用户机器的处境。
           $ErrorActionPreference = 'Continue'
-          & .\kernels\waterheat\colm.x 2>&1 | Select-Object -First 5
-          Write-Host "exit code: $LASTEXITCODE"
-          if ($LASTEXITCODE -eq -1073741515) {
-            Write-Host "STATUS_DLL_NOT_FOUND — 内核必须带着上一步列出的 DLL 一起分发"
+          New-Item -ItemType Directory -Force -Path probe | Out-Null
+          Copy-Item kernels\waterheat\colm.x probe\colm.exe
+
+          Write-Host "=== 1. 只有二进制，没有 DLL ==="
+          & .\probe\colm.exe *> bare.txt
+          $bare = $LASTEXITCODE
+          Get-Content bare.txt -TotalCount 5
+          Write-Host "exit code: $bare"
+          if ($bare -eq -1073741515) {
+            Write-Host "STATUS_DLL_NOT_FOUND —— 内核必须带着上一步列出的 DLL 一起分发"
+          }
+
+          Write-Host "=== 2. 把 DLL 摆到旁边再试 ==="
+          # release.yml 就是这么做的：Windows 先在可执行文件同目录找 DLL。
+          Get-Content dlls.txt | ForEach-Object {
+            $p = $_ -replace '^/mingw64/bin/', 'C:\msys64\mingw64\bin\'
+            if (Test-Path $p) { Copy-Item $p probe\ -Force }
+          }
+          Write-Host "copied $((Get-ChildItem probe\*.dll).Count) DLLs"
+          & .\probe\colm.exe *> withdlls.txt
+          $with = $LASTEXITCODE
+          Get-Content withdlls.txt -TotalCount 5
+          Write-Host "exit code: $with"
+          # 不给 namelist 时它应该自己停下来 —— 那说明 DLL 都加载上了。
+          if ($with -eq -1073741515) {
+            Write-Host "::error::带上 DLL 之后仍然是 STATUS_DLL_NOT_FOUND —— 清单不全"
+            exit 1
           }
