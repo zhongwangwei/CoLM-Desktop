@@ -3,8 +3,9 @@
 把 CoLM202X 的 SinglePoint 模式做成跨平台桌面程序。设计见 `docs/design.md`。
 
 **当前状态**：命令行端到端可用 —— 一条命令从原始 PLUMBER2 站点文件跑到
-指标表。GUI 的骨架、后端命令与前端已经写好并编得过，但**还没有人在真机上
-点开看过**，所以里程碑 8 的验收（「双击可跑并出图」）尚未达成。
+指标表，三个物理预设（waterheat / bgc / urban）都跑得通。GUI 在 macOS 上
+开得出窗口、页面加载、图画得出来（见下），但**没有人用鼠标真正用过它** ——
+里程碑 8 的验收词是「双击可跑并出图」，其中「双击」那一半仍是空的。
 
 ## 仓库与依赖
 
@@ -103,11 +104,43 @@ colm-cli run ~/cases/AU-Preston --kernel kernels/urban
 这是本项目核心承诺的一次端到端验证 —— 桌面用户装不了几百 GB 的全球栅格。
 **但这是一个站点、一个窗口、一个预设的结论，不外推到另外 89 个站点。**
 
-## GUI（未验收）
+## GUI（部分验收）
 
 ```bash
 cd gui/src-tauri && cargo tauri dev
 ```
+
+### 验收到哪一步了
+
+**窗口真的开得出来。** 启动之后 `System Events` 报出一个标题为
+`CoLM Desktop` 的窗口，进程不退。但这条只证明壳子起来了 —— 白窗口从外面看
+一模一样：进程活着、标题也在。所以 `backend_ready` 往 stderr 记一行；
+**只有 webview 真的加载并执行了 `index.html` 的 JS 才会调到它**。实测输出：
+
+```
+colm-desktop: the page reached the backend; backend reachable — 737 configuration fields known
+```
+
+**页面渲染与交互在 Chromium 里逐条走过。** 做法是把 `gui/dist/` 原样复制出去，
+**只在 uPlot 那行 `<script>` 之前插一段 mock**（其余逐字节相同，由脚本断言），
+mock 返回的载荷全部是**真后端导出的** —— `describe_fields`、`read_case`、
+`unknown_fields` 来自 GUI crate 自己的函数，`series` 来自 `colm-cli series`，
+`case.nml` 是真文件。走到的：
+
+| 走到的路径 | 实测结果 |
+|---|---|
+| 三栏骨架 + 三个页签 | 全部渲染，`算例` 页签 `aria-pressed=true` |
+| 扫描算例库 | 9 个算例，「已跑过 / 未跑」标记正确 |
+| 选中算例 → 配置表 | 城市算例 24 个字段全渲染，含 `DEF_URBAN_type_scheme = 2` |
+| 空分组 | 「这一组里这份配置没有设任何字段」 |
+| 上游示例 `SiteSYSUAtmos_IGBP_VG.nml` | 警告条点名 `USE_SITE_topostd`、`USE_SITE_BVIC`，表里两行同时标红 |
+| 画图 | uPlot 画布 724×380，**26838 个不透明像素、11 种颜色**，标题「净辐射 Rnet · 264 点」 |
+| 时区 | 浏览器时区 `Asia/Shanghai`，图上首点显示 `0:30` 而不是本地的 `8:30` —— `tzDate` 那条注释是对的，且这次是真验了 |
+| 反复画图 | 点 6 次之后仍是 4 张图，上限生效 |
+
+**没走到的**：`run_case` 那条链（`run://progress` / `lines` / `done` 三个事件、
+进度条、日志窗），因为 mock 不起子进程；打包出来的 `.app` 双击；Linux 与
+Windows 上的窗口。这三项仍是里程碑 8 与 9 的缺口。
 
 三栏工作台：左边算例库、中间配置与日志、右边曲线。新建向导只问三件事 ——
 选哪个站、叫什么名字、（可选）窗口收窄。经纬度、地类、时间步长与默认窗口

@@ -6,12 +6,19 @@
 use serde::Serialize;
 
 /// 页面加载时确认后端确实接上了。
+///
+/// 顺便往 stderr 记一行。这不是调试残留：GUI 出问题时最难分辨的两种情况是
+/// 「窗口没开」与「窗口开了但页面是白的」—— 前者进程会退出，后者进程活着、
+/// 窗口标题也在，从外面看一模一样。这一行是唯一能从外面区分它们的证据，
+/// 因为只有 webview 真的加载并执行了 `index.html` 的 JS 才会调到这里。
 #[tauri::command]
 pub fn backend_ready() -> String {
-    format!(
+    let msg = format!(
         "backend reachable — {} configuration fields known",
         colm_schema::all().len()
-    )
+    );
+    eprintln!("colm-desktop: the page reached the backend; {msg}");
+    msg
 }
 
 /// 一个配置字段，交给前端渲染。
