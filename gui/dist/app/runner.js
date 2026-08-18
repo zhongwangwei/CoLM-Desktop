@@ -3,7 +3,7 @@
 import { invoke, listen } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
-import { renderCases } from './sites.js';
+import { renderCases, ensureCases } from './sites.js';
 import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
 import { setRunning, renderSteps } from './shell.js';
@@ -137,6 +137,9 @@ export async function watchRun() {
 // ---------------------------------------------------------------- 批量
 
 $('runall').onclick = async () => {
+  // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。
+  const wanted = state.sites.filter(s => state.picked.has(s.name));
+  if (wanted.length) await ensureCases(wanted);
   const dirs = batchTarget().map(c => c.dir);
   if (!dirs.length) return;
   $('runall').disabled = true;

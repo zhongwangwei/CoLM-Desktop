@@ -51,6 +51,33 @@
         </div>
         <p class="muted mini" id="sitesummary">&nbsp;</p>
         <div id="sites" class="listbox"></div>
+        <p class="muted mini" style="margin-top:10px">
+          点一个站点就能往下走。<b>算例是按需自动建的</b> ——
+          第一次要配参数或运行时才建，不用你按「新建」。</p>
+      </div>
+
+      <div class="card">
+        <h3>算例放哪</h3>
+        <div class="ch">每个站点占一个子目录。默认放在站点数据旁边，可以改。</div>
+        <div class="browse">
+          <input class="input" id="root" placeholder="…/colm-cases">
+          <button class="btn-ghost pick" data-for="root">选择…</button>
+          <button class="btn-ghost" id="rescan">重新扫描已建的</button>
+        </div>
+        <div id="urbandirs" hidden>
+          <div class="expert-note">
+            选中的站点里有<b>城市站</b>。城市算例必须给全球栅格目录 ——
+            土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
+          </div>
+          <div class="row">
+            <div class="field"><label>rawdata 目录</label>
+              <div class="browse"><input class="input" id="rawdata">
+                <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
+            <div class="field"><label>runtime 目录</label>
+              <div class="browse"><input class="input" id="runtime">
+                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -59,7 +86,7 @@
       <div class="work-head"><span class="kicker">第 2 步</span></div>
       <h1>前处理</h1>
       <p class="sub">把原始数据批量转成模型要的格式。<b>已经转好的会跳过</b> ——
-        判据与第 5 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
+        判据与第 4 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
 
       <div class="card">
         <h3>还没有实现</h3>
@@ -82,68 +109,9 @@
       </div>
     </section>
 
-    <!-- ③ 算例 -->
-    <section class="page" data-step="case" hidden>
-      <div class="work-head"><span class="kicker">第 3 步</span></div>
-      <h1>造算例</h1>
-      <p class="sub">一个<b>算例</b>是一个目录，里面有 <code>case.nml</code>（配置）、
-        <code>site.nc</code>（补齐后的站点数据）和 <code>out/</code>（产物）。
-        经纬度、地类、时间步长与默认窗口都从文件里读，不用填。</p>
-
-      <div class="card">
-        <h3>新建</h3>
-        <div class="ch">从第 1 步选中的站点造。已经造过的在下面那张卡片里。</div>
-        <div class="field">
-          <label>站点文件 <span class="hint">在第 1 步点一个站点会自动填进来；多选时这里显示第一个</span></label>
-          <div class="browse">
-            <input class="input" id="w-site">
-            <button class="btn-ghost pick" data-for="w-site" data-file="nc">选择…</button>
-          </div>
-        </div>
-        <div class="field">
-          <label>放在哪 <span class="hint">算例目录的父目录；每个算例占一个子目录</span></label>
-          <div class="browse">
-            <input class="input" id="root" placeholder="…/cases">
-            <button class="btn-ghost pick" data-for="root">选择…</button>
-            <button class="btn-ghost" id="rescan">扫描已有</button>
-          </div>
-        </div>
-        <p class="muted mini">算例名取站点代号，重名时加 <code>-2</code>、<code>-3</code>。
-          时间窗口默认是强迫场的完整范围 —— 要缩短就去<b>第 4 步「时间」</b>改，
-          那里改的是同一组字段，不必在这里再问一遍。</p>
-        <div id="urbandirs" hidden>
-          <div class="expert-note">
-            这是个<b>城市站点</b>。城市算例必须给全球栅格目录 ——
-            土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
-          </div>
-          <div class="row">
-            <div class="field"><label>rawdata 目录</label>
-              <div class="browse"><input class="input" id="rawdata">
-                <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
-            <div class="field"><label>runtime 目录</label>
-              <div class="browse"><input class="input" id="runtime">
-                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
-          </div>
-        </div>
-        <div class="pill-row">
-          <button class="btn-next" id="create">新建算例</button>
-          <button class="btn-ghost" id="create-batch" disabled>为选中的站点各建一个</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>已有算例</h3>
-        <div class="ch">点一个来配参数、运行、或看它的结果。</div>
-        <div id="cases" class="listbox"></div>
-        <div class="pill-row" style="margin-top:10px">
-          <button class="btn-ghost" id="runall" disabled>全部运行</button>
-        </div>
-      </div>
-    </section>
-
     <!-- ③ 参数 -->
     <section class="page" data-step="params" hidden>
-      <div class="work-head"><span class="kicker">第 4 步</span></div>
+      <div class="work-head"><span class="kicker">第 3 步</span></div>
       <h1>配参数</h1>
       <p class="sub">按功能分类，不按 CoLM 的文件结构分。<b>常规模式只显示这份算例实际设了的字段</b>；
         专家模式连没设过的一起显示，值是 CoLM 的默认值。</p>
@@ -167,10 +135,20 @@
 
     <!-- ④ 运行 -->
     <section class="page" data-step="run" hidden>
-      <div class="work-head"><span class="kicker">第 5 步</span></div>
+      <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>运行</h1>
       <p class="sub">三个程序依次跑：<code>mksrfdata</code> 造地表数据、<code>mkinidata</code> 造初始场、
         <code>colm</code> 跑模拟。<b>输入没变的那一段会跳过</b> —— 判据是输入指纹，不是文件在不在。</p>
+
+      <div class="card">
+        <h3>跑哪些</h3>
+        <div class="ch">勾选决定「全部运行」作用于谁；一个没勾就是全部。
+          没建过的算例会在运行前自动建。</div>
+        <div id="cases" class="listbox"></div>
+        <div class="pill-row" style="margin-top:10px">
+          <button class="btn-ghost" id="runall" disabled>运行全部</button>
+        </div>
+      </div>
 
       <div class="card">
         <h3>内核</h3>
@@ -187,10 +165,10 @@
 
     <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
-      <div class="work-head"><span class="kicker">第 6 步</span></div>
+      <div class="work-head"><span class="kicker">第 5 步</span></div>
       <h1>结果</h1>
       <p class="sub">画模型输出，或与观测配对算指标。<b>「丢弃前 N 条」丢的是输出记录</b>，
-        与第 4 步里的模型预热（spin-up）不是一回事。</p>
+        与第 3 步里的模型预热（spin-up）不是一回事。</p>
 
       <div class="card">
         <h3>曲线</h3>
@@ -209,7 +187,7 @@
           <button class="btn-ghost pick" data-for="obs" data-file="nc">选择…</button>
         </div>
         <div class="pill-row" style="margin-top:10px">
-          <label class="check" title="丢的是输出记录，单位是条。与第 4 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
+          <label class="check" title="丢的是输出记录，单位是条。与第 3 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
             丢弃前 <input class="input" id="spinup" type="number" value="0" min="0" style="width:5.5em"> 条 ⓘ</label>
           <button class="btn-ghost" id="evaluate" disabled>评估</button>
           <button class="btn-ghost" id="eval-all" disabled>评估全部已跑算例</button>

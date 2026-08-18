@@ -12,8 +12,6 @@ export const STEPS = [
   { id: 'data',    t: '数据',   d: '有哪些站点', need: () => null },
   { id: 'prep',    t: '前处理', d: '转成模型要的格式',
     need: () => (state.sites.length ? null : '先在第 1 步扫一个站点目录') },
-  { id: 'case',    t: '算例',   d: '造一批 / 选一个',
-    need: () => (state.sites.length || state.cases.length ? null : '先在第 1 步扫一个站点目录') },
   { id: 'params',  t: '参数',   d: '物理与输出',
     need: () => (state.selected ? null : '先选一个算例') },
   { id: 'run',     t: '运行',   d: '三段依次跑',

@@ -6,7 +6,7 @@ import { $, status } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
-import { go, renderSteps, setStatus } from './shell.js';
+import { renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
 
 $('rescan').onclick = async () => {
@@ -78,28 +78,48 @@ async function selectCase(c) {
   } catch (e) { $('status').textContent = String(e); }
 }
 
-$('create').onclick = async () => {
-  const site = $('w-site').value.trim();
+/** 选一个站点：**算例按需建**。
+ *
+ *  原来这里要人先填表、按「新建算例」，而那张表问的东西要么推得出来
+ *  （名字取站点代号）、要么本来就能后改（时间窗口在参数页）。
+ *  一个只有一种填法的表单，就不该是一道关。
+ *
+ *  建在**第一次真要用它**的时候，不在点中的时候：点站点常常只是看看，
+ *  而每建一个都要读站点文件与强迫场、写出补齐的 site.nc。 */
+export async function pickSite(s) {
+  state.pickedSite = s;
+  $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.name)) && !s.urban;
+  renderSites();
+  setStatus(`已选 ${s.name}${s.met_file ? '' : '（没有强迫场，跑不了）'}`);
+  const c = await ensureCase(s);
+  if (c) { state.selected = c; renderSteps(); }
+}
+
+/** 这个站点的算例，没有就建一个。返回 `null` 表示建不了（并已说明原因）。 */
+export async function ensureCase(s) {
   const root = $('root').value.trim();
-  if (!site || !root) { setStatus('要先选站点文件与算例目录'); return; }
-  const name = caseNameFor(site);
-  $('create').disabled = true;
+  if (!root) { setStatus('先指定算例放哪（第 1 步下面那张卡片）'); return null; }
+  const have = state.cases.find(c => c.name === s.name);
+  if (have) return have;
+  if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
+  setStatus(`正在为 ${s.name} 建算例…`);
   try {
-    const msg = await invoke('new_case', {
-      site, out: root + '/' + name, name,
-      // 不传时间窗口：`colm-cli new` 会用强迫场的完整范围，
-      // 而缩短窗口是第 4 步「时间」里同一组字段的事。
+    await invoke('new_case', {
+      site: s.site_file, out: root + '/' + s.name, name: s.name,
+      // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
+      // 而缩短窗口是参数页「时间」分类里同一组字段的事。
       start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,
     });
-    $('log').textContent = msg;
     state.cases = await invoke('list_cases', { root });
     renderCases();
-    $('status').textContent = '算例已建好';
-  } catch (e) { $('status').textContent = String(e); }
-  finally { $('create').disabled = false; }
-};
+    renderSteps();
+    setStatus(`已为 ${s.name} 建好算例`);
+    return state.cases.find(c => c.name === s.name) ?? null;
+  } catch (e) { setStatus(`${s.name}：${e}`); return null; }
+}
+
 
 // ---------------------------------------------------------------- 站点库
 
@@ -112,6 +132,13 @@ $('scan').onclick = async () => {
     // quick: 只读站点文件。实测 90 站 0.07 秒，而完整读要 0.35 秒 ——
     // 第一屏只要经纬度与地类，强迫场的时间范围等选中了再补。
     const r = await invoke('scan_sites', { dir, quick: true });
+    // 算例目录也别问 —— 默认放在站点数据旁边。**显示出来且可改**，
+    // 不是偷偷决定：产物落在哪儿是用户该看得见的事。
+    if (!$('root').value.trim()) {
+      const parent = dir.replace(/[\\/][^\\/]*$/, '');
+      $('root').value = (parent || dir) + '/colm-cases';
+      $('root').dispatchEvent(new Event('change'));
+    }
     state.sites = r.sites;
     renderSites(r);
     renderSteps();
@@ -148,7 +175,6 @@ function renderSites(r = {}) {
   const urban = state.sites.filter(s => s.urban).length;
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
-  updateBatchButtons();
   $('sitesummary').textContent =
     `${state.sites.length} 个站点` +
     (urban ? ` · ${urban} 个城市` : '') +
@@ -158,6 +184,7 @@ function renderSites(r = {}) {
   for (const s of state.sites) {
     const d = document.createElement('div');
     d.className = 'case';
+    d.setAttribute('aria-selected', String(state.pickedSite?.name === s.name));
     // 多选是批量的入口。**流水线作用于「一组」，选 1 个只是 N=1** ——
     // 批量另开一套界面的话，就有两条流水线要各自维护，而它们迟早会分叉。
     const cb = document.createElement('input');
@@ -166,13 +193,16 @@ function renderSites(r = {}) {
     cb.onclick = e => {
       e.stopPropagation();   // 勾选不等于「选中这一个」
       if (cb.checked) state.picked.add(s.name); else state.picked.delete(s.name);
-      updateBatchButtons();
-    };
+        };
     cb.style.cssText = 'width:auto;margin-right:8px';
     d.appendChild(cb);
     d.appendChild(document.createTextNode(s.name));
     const small = document.createElement('small');
     const tags = [];
+    // 算例状态排在最前：它是**这一行现在处在流水线哪一段**，
+    // 比经纬度重要得多。原来这个信息藏在另一个列表里。
+    const c = state.cases.find(x => x.name === s.name);
+    if (c) tags.push(c.has_history ? '已跑过' : '已建算例');
     if (s.urban) tags.push('城市');
     if (!s.met_file) tags.push('无强迫场');
     if (!s.obs_file) tags.push('无观测');
@@ -181,83 +211,34 @@ function renderSites(r = {}) {
     if (s.problem) { d.className += ' warn'; d.title = s.problem; }
     d.appendChild(small);
     // 选中就把路径填进新建向导 —— 那是它唯一的去处，不必再让人复制粘贴。
-    d.onclick = () => {
-      $('w-site').value = s.site_file;
-      $('w-site').dispatchEvent(new Event('change'));
-      // 城市站点必须给两个栅格目录，那两个框平时藏着 —— 见 plan-gui2.md §1.6。
-      $('urbandirs').hidden = !s.urban;
-      state.pickedSite = s;
-      setStatus(`已选 ${s.name}${s.met_file ? '' : '（没有强迫场，跑不了）'}`);
-      // 选完站点就该去第 2 步。让人自己找「下一步在哪」，正是原来那版的毛病。
-      go('case');
-    };
+    d.onclick = () => pickSite(s);
     box.appendChild(d);
   }
 }
 
 
-// 「勾了几个」在第 1 步、「放在哪」在第 3 步 —— 两边都影响这个按钮，
-// 所以两边都要触发刷新。
-$('root').addEventListener('input', updateBatchButtons);
 
 /** 勾了几个、能不能批量建。 */
-/** 算例名 = 站点代号；重名时加 `-2`、`-3`。
- *
- *  **不带时间戳。** 时间戳保证唯一，但 90 个
- *  `AU-Preston_20260818-2213` 排在一起，一眼扫不出哪个是哪个 ——
- *  而「一眼扫得出」正是批量场景下这张列表唯一的用处。
- *  重名是少数情况，让少数情况带后缀，多数情况保持干净。 */
-function caseNameFor(sitePath) {
-  // Windows 上的分隔符是反斜杠，两种都认。
-  const stem = sitePath.split(/[\\/]/).pop();
-  return uniq(stem.split('_')[0]);
-}
-
-function uniq(base) {
-  const taken = new Set(state.cases.map(c => c.name));
-  if (!taken.has(base)) return base;
-  for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
-}
-
-export function updateBatchButtons() {
-  const n = state.picked.size;
-  const b = $('create-batch');
-  if (!b) return;
-  b.disabled = !n || !$('root').value.trim();
-  b.textContent = n ? `为选中的 ${n} 个站点各建一个` : '为选中的站点各建一个';
-}
 
 /** 批量建算例：流水线最前面那一段，原来只能一个一个点。
  *
  *  **串行，不并发。** 每次 `new_case` 都要读站点文件与强迫场文件并写出
  *  补齐后的 site.nc，瓶颈在磁盘；并发几个只是让它们互相抢。
  *  一个失败不中止整批 —— 90 个里有一个站点文件坏了，其余 89 个仍要建出来。 */
-$('create-batch').onclick = async () => {
-  const root = $('root').value.trim();
-  const chosen = state.sites.filter(s => state.picked.has(s.name));
-  if (!root || !chosen.length) return;
-  $('create-batch').disabled = true;
+/** 为一批站点确保算例存在。运行前调用 —— **建算例不再是一道要人按的关**。
+ *
+ *  串行：每次都要读站点文件与强迫场并写出 site.nc，瓶颈在磁盘，
+ *  并发只是让它们互相抢。一个失败不中止整批，失败的会点名 ——
+ *  一批悄悄少建几个，要到运行时才发现，那时已经隔了一层。 */
+export async function ensureCases(sites) {
+  const made = [];
   const failed = [];
-  try {
-    for (const [i, s] of chosen.entries()) {
-      setStatus(`建算例 ${i + 1}/${chosen.length}：${s.name}`);
-      try {
-        await invoke('new_case', {
-          site: s.site_file, out: root + '/' + uniq(s.name), name: uniq(s.name),
-          start: null, end: null,
-          rawdata: $('rawdata').value.trim() || null,
-          runtime: $('runtime').value.trim() || null,
-        });
-      } catch (e) { failed.push([s.name, String(e)]); }
-    }
-    state.cases = await invoke('list_cases', { root });
-    renderCases();
-    renderSteps();
-    // 失败的要**点名**。一批建完少了几个而不说是谁，
-    // 下一步跑的时候才发现，那时已经隔了一层。
-    setStatus(failed.length
-      ? `建好 ${chosen.length - failed.length}/${chosen.length} 个；失败：`
-        + failed.map(([n, why]) => `${n}（${why.slice(0, 60)}）`).join('、')
-      : `建好 ${chosen.length} 个算例`);
-  } finally { updateBatchButtons(); }
-};
+  for (const [i, s] of sites.entries()) {
+    setStatus(`准备算例 ${i + 1}/${sites.length}：${s.name}`);
+    const c = await ensureCase(s);
+    if (c) made.push(c); else failed.push(s.name);
+  }
+  if (failed.length) setStatus(`${made.length}/${sites.length} 个就绪；建不了：${failed.join('、')}`);
+  return made;
+}
+
