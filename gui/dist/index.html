@@ -62,9 +62,10 @@
 
   <h2 style="margin-top:18px">运行</h2>
   <div class="row">
-    <input id="kernel" placeholder="内核目录（kernels/waterheat）" style="flex:1">
+    <select id="kernel" style="flex:1"></select>
     <button id="run" disabled>运行</button>
   </div>
+  <p id="kernelmeta" class="muted" style="font-size:11px">&nbsp;</p>
   <div class="bar"><i id="prog"></i></div>
   <p id="progtext" class="muted" style="font-size:11px">&nbsp;</p>
   <pre id="log"></pre>
@@ -84,7 +85,7 @@ const T = window.__TAURI__;
 const invoke = T?.core?.invoke;
 const listen = T?.event?.listen;
 const $ = id => document.getElementById(id);
-const state = { cases: [], selected: null, text: '', fields: [], group: 'nl_colm' };
+const state = { cases: [], kernels: [], selected: null, text: '', fields: [], group: 'nl_colm' };
 
 if (!invoke) {
   // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是渲染成一片空白。
@@ -98,6 +99,7 @@ async function boot() {
     $('status').textContent = await invoke('backend_ready');
     state.fields = await invoke('describe_fields');
     renderTabs();
+    await refreshKernels();
   } catch (e) { $('status').textContent = '后端出错：' + e; }
 
   await listen('run://progress', e => {
@@ -130,6 +132,38 @@ async function boot() {
       refreshVars();
     }
   });
+}
+
+// 物理预设是**编译期**决定的，一个内核目录 = 一组 CPP 宏。所以这里不是
+// 「选个目录」而是「选一套物理」—— 让它列出来，而不是让人记住路径。
+async function refreshKernels() {
+  const s = $('kernel');
+  state.kernels = await invoke('list_kernels');
+  s.textContent = '';
+  if (!state.kernels.length) {
+    // 只在开发树里可能发生：装出来的程序自带三个预设。
+    const o = document.createElement('option');
+    o.textContent = '没有找到内核'; o.value = '';
+    s.appendChild(o);
+    showKernelMeta();
+    return;
+  }
+  for (const k of state.kernels) {
+    const o = document.createElement('option');
+    o.value = k.dir; o.textContent = k.preset;
+    s.appendChild(o);
+  }
+  s.onchange = showKernelMeta;
+  showKernelMeta();
+}
+
+// 目录名不是身份，宏组合才是。把它显示出来，免得「我选的 urban 到底编没编
+// URBAN」这种问题要靠读 manifest.json 才能答。
+function showKernelMeta() {
+  const k = state.kernels?.find(k => k.dir === $('kernel').value);
+  $('kernelmeta').textContent = k
+    ? `${k.generator_args}  ·  CoLM ${k.colm_git_sha}  ·  ${k.platform}`
+    : '\u00a0';
 }
 
 $('rescan').onclick = async () => {
@@ -278,7 +312,7 @@ $('run').onclick = async () => {
   $('prog').style.width = '0';
   $('progtext').textContent = '启动…';
   try {
-    await invoke('run_case', { case: state.selected.dir, kernel: $('kernel').value.trim() });
+    await invoke('run_case', { case: state.selected.dir, kernel: $('kernel').value });
   } catch (e) {
     // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点，
     // 不写的话进度文字会永远停在「启动…」。

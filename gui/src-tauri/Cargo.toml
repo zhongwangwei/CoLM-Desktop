@@ -27,6 +27,9 @@ serde_json = "1"
 colm-namelist = { path = "../../crates/colm-namelist" }
 colm-schema = { path = "../../crates/colm-schema" }
 colm-case = { path = "../../crates/colm-case" }
+# 校验内核目录（清单 + 三个二进制的 sha256）。它自己 0 个 netcdf 依赖，
+# 拖不进 HDF5 —— 上面那份依赖节点数清单里 colm-kernel 正是 0。
+colm-kernel = { path = "../../crates/colm-kernel" }
 
 # **自己就是一个 workspace 根。** 这一行把 429 个 Tauri 依赖挡在引擎
 # workspace 之外 —— 引擎那边只有 70 个，`cargo test --workspace` 不该

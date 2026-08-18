@@ -157,6 +157,11 @@ jobs:
         shell: bash
         working-directory: gui/src-tauri
         run: |
+          # `bundle.resources` 指向 `kernels/`，而这个作业不编 Fortran ——
+          # 那是 release.yml 的事，这里只验打包路径本身。**目录不存在会让
+          # 打包直接失败**（实测：`resource path '../../kernels' doesn't exist`），
+          # 空目录则正常通过。所以给它一个空的。
+          mkdir -p ../../kernels
           cargo install tauri-cli --version '^2' --locked
           cargo tauri build --config tauri.bundle.conf.json
           app='target/release/bundle/macos/CoLM Desktop.app'

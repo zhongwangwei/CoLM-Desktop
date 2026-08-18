@@ -480,10 +480,56 @@ v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 �
 覆盖面还受这些单一取值限制：一个站点、一种斑块类型（IGBP 10 草地）、
 一种产流方案（Simple VIC）、一种截留方案。黄金基准本身仍只用 `waterheat`。
 
+## 什么时候要自己编内核
+
+**大多数时候不用。** 物理预设是**编译期**的东西 —— 一个内核目录就是一组
+CPP 宏，装出来的程序自带三个：
+
+| 预设 | 宏组合 |
+|---|---|
+| `waterheat` | `SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
+| `bgc` | `SinglePoint LULC_IGBP_PFT URBANOFF vanGenu CaMaOFF BGCON CROPOFF TRACEROFF` |
+| `urban` | `SinglePoint LULC_IGBP URBANON vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
+
+要自己编，只有三种情况：**想要第四种宏组合**（开 CROP、开 TRACER、
+换 Campbell 土壤、开 CaMa-Flood…）、**改了 CoLM 的 Fortran 源码**、
+或者**要一个没发布的平台/架构**。
+
+界面上那个下拉框列的就是这三个，并且把宏组合原样显示出来 —— 目录名不是身份，
+`generator_args` 才是。「我选的 urban 到底编没编 URBAN」不该靠读
+`manifest.json` 来答。
+
+### GitHub 直接产出安装包
+
+`.github/workflows/release.yml`：打 `v*` tag 触发，三个平台各一个作业，
+每个作业**先编三个 Fortran 预设，再打包 GUI**，内核作为
+`bundle.resources` 进安装包。产物是 `.dmg` / `.deb` / `.rpm` / `.AppImage`
+/ `.msi` / `.exe`，汇总成一份 draft release 等人过目。
+
+实测（macOS ARM）：`.app` 76 MB、`.dmg` 17 MB，其中 58 MB 是三个预设的
+九个 Fortran 二进制。
+
+**「用户什么都不用装」是验过的，不是推的。** 把仓库的 `kernels/` 与
+`target/*/colm-cli` 都藏起来 —— 也就是一台没有源码树的机器 —— 再跑打包出来的
+`.app`，它自己报：
+
+```
+colm-cli resolved to .../CoLM Desktop.app/Contents/MacOS/colm-cli
+3 preset(s) from .../CoLM Desktop.app/Contents/Resources/kernels
+```
+
+那三个预设是走 `Kernel::open` 列出来的，也就是**连三个二进制的 sha256
+一起校验过**。顺带确认了打包不改字节：三个 `colm.x` 的 sha256 与
+`manifest.json` 里记的逐个相同。（真做代码签名时这条要重验 —— 签名会改
+Mach-O 的字节，而清单认的正是字节。）
+
+`resolve_cli` 用 `current_exe()` 的同级目录、`list_kernels` 用
+`resource_dir()`，两处不同是因为 Tauri 本来就把 `externalBin` 放在主二进制
+旁边、把 `bundle.resources` 放进 `Contents/Resources/`。
+
 ## Windows 上要装什么
 
-**用桌面程序的人：什么都不用装。** Fortran 内核是构建产物，随程序走，
-用户不需要编译器 —— 这正是 `kernels/<preset>/manifest.json` 这套东西的意义。
+**用桌面程序的人：什么都不用装**（同上）。
 
 **要自己编内核的人：只需要 MSYS2**，装一个 MINGW64 环境加五个包：
 

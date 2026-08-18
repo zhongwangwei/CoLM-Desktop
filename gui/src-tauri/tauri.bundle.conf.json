@@ -5,6 +5,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/colm-cli"]
+    "externalBin": [
+      "binaries/colm-cli"
+    ],
+    "resources": {
+      "../../kernels": "kernels"
+    }
   }
 }

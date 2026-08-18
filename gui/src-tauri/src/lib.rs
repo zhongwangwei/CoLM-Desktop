@@ -25,6 +25,7 @@ pub fn run() {
             backend_ready,
             describe_fields,
             list_cases,
+            list_kernels,
             new_case,
             read_text,
             read_case,

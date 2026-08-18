@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// 环形缓冲区的上限。够看清一次失败的来龙去脉，又不会把内存吃掉。
 const LOG_CAPACITY: usize = 4_000;
@@ -114,6 +114,78 @@ pub fn resolve_cli() -> PathBuf {
         }
     }
     PathBuf::from(exe_name()) // 交给 PATH
+}
+
+/// 一个可选的物理预设，交给前端做下拉框。
+#[derive(Serialize)]
+pub struct KernelEntry {
+    /// `manifest.json` 里的 preset 名 —— 不是目录名。两者一致时也以清单为准，
+    /// 因为跑起来认的是清单。
+    pub preset: String,
+    pub dir: String,
+    /// 编译期宏组合。**这才是预设的身份** —— 目录叫什么无所谓，
+    /// 「这个内核到底编进了什么物理」只有这一行说了算。
+    pub generator_args: String,
+    pub colm_git_sha: String,
+    pub platform: String,
+}
+
+/// 列出能用的物理预设。
+///
+/// 顺序：环境变量 → 随程序打包的那份 → 仓库构建产物。第二条是让
+/// 「用户什么都不用装」成立的那一条 —— Fortran 内核是构建产物，
+/// 用户不该为了跑一个站点去装 gfortran 与 netcdf-fortran。
+///
+/// 这里用 `resource_dir()` 是**对的**，与 `resolve_cli` 不同：Tauri 把
+/// `bundle.resources` 放进 `Contents/Resources/`，而把 `externalBin`
+/// 放在主二进制旁边。两个目录不同，两处各按各的来。
+#[tauri::command]
+pub fn list_kernels(app: tauri::AppHandle) -> Vec<KernelEntry> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("COLM_KERNELS") {
+        roots.push(PathBuf::from(p));
+    }
+    if let Ok(d) = app.path().resource_dir() {
+        roots.push(d.join("kernels"));
+    }
+    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../kernels"));
+
+    let mut out: Vec<KernelEntry> = Vec::new();
+    for root in roots {
+        let Ok(rd) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut found: Vec<KernelEntry> = rd
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                // 走 `Kernel::open` 而不是自己读 json：它会连三个二进制的
+                // sha256 一起校验。列出一个校验不过的内核，等于把
+                // 「构建过但被换了」推迟到用户点下运行的那一刻才暴露。
+                let k = colm_kernel::Kernel::open(&e.path()).ok()?;
+                Some(KernelEntry {
+                    preset: k.manifest.preset.clone(),
+                    dir: k.dir.to_string_lossy().into_owned(),
+                    generator_args: k.manifest.generator_args.clone(),
+                    colm_git_sha: k.manifest.colm_git_sha.clone(),
+                    platform: k.manifest.platform.clone(),
+                })
+            })
+            .collect();
+        found.sort_by(|a, b| a.preset.cmp(&b.preset));
+        if !found.is_empty() {
+            // 记一行。跟 `resolve_cli` 同一个道理：仓库那条回落在开发机上
+            // 永远命中，不把选中的那一层打出来，就分不清「装出来的程序自带
+            // 内核」与「它其实在读源码树」。下拉框是空的时候，这也是唯一线索。
+            eprintln!(
+                "colm-desktop: {} preset(s) from {}",
+                found.len(),
+                root.display()
+            );
+            return found; // 先命中的那一层赢，不混着列
+        }
+        out.append(&mut found);
+    }
+    out
 }
 
 fn exe_name() -> &'static str {

@@ -335,12 +335,24 @@ name = "colm-desktop-gui"
 version = "0.1.0"
 dependencies = [
  "colm-case",
+ "colm-kernel",
  "colm-namelist",
  "colm-schema",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+]
+
+[[package]]
+name = "colm-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "colm-namelist",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
