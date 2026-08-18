@@ -40,6 +40,24 @@ pub fn pair(
     obs: &Series<'_>,
     spinup: usize,
 ) -> Vec<Pair> {
+    pair_with_time(model_seconds, model_values, obs, spinup)
+        .into_iter()
+        .map(|(_, m, o)| (m, o))
+        .collect()
+}
+
+/// 同上，但把模型那一侧的时刻一起带出来。
+///
+/// 画「模型 vs 观测」两条曲线要横轴，而 `pair` 只给数值对。
+/// **`pair` 委托给这里**而不是各写一份匹配逻辑 —— 那条规则
+/// （至少一个半小时 qc==0，取好的那些的平均）是实测定下来的，
+/// 分成两份实现迟早会分叉，而分叉的表现是「图上的点跟指标对不上」。
+pub fn pair_with_time(
+    model_seconds: &[f64],
+    model_values: &[f64],
+    obs: &Series<'_>,
+    spinup: usize,
+) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::new();
     for k in spinup..model_seconds.len() {
         let mut acc = 0.0;
@@ -55,7 +73,7 @@ pub fn pair(
             }
         }
         if n >= 1 {
-            out.push((model_values[k], acc / n as f64));
+            out.push((model_seconds[k], model_values[k], acc / n as f64));
         }
     }
     out

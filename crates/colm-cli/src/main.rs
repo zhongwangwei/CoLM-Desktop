@@ -8,7 +8,7 @@
 //! colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
 //! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //! colm-cli run     <算例目录> --kernel <目录> [--stream 1]
-//! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N]
+//! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N] [--json 1]
 //! colm-cli series  <算例目录> --vars f_rnet,f_fsena [--out series.json]
 //! colm-cli all     --site ... --out ... --kernel ... [--obs ...]
 //! ```
@@ -32,7 +32,7 @@ usage:
                    # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
   colm-cli run     <case-dir> --kernel <dir> [--stream 1]
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
-  colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N]
+  colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1]
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
@@ -66,7 +66,12 @@ fn main() -> Result<()> {
         }
         "metrics" => {
             let case = opts.positional_case()?;
-            cmd_metrics(&case, &opts.need("--obs")?, opts.spinup()?)?;
+            cmd_metrics(
+                &case,
+                &opts.need("--obs")?,
+                opts.spinup()?,
+                opts.get("--json").is_some(),
+            )?;
         }
         "series" => {
             let case = opts.positional_case()?;
@@ -84,7 +89,7 @@ fn main() -> Result<()> {
                 opts.get("--stream").is_some(),
             )?;
             match opts.get("--obs") {
-                Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?)?,
+                Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?, false)?,
                 None => println!("no --obs given; skipping the metrics table"),
             }
         }
@@ -588,7 +593,36 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool) -> Result<()> {
 
 // ---------------------------------------------------------------- metrics
 
-fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize) -> Result<()> {
+/// 一个通量变量的评估结果，交给 GUI。
+///
+/// **连配对点一起给。** 界面要画三样东西：指标表、模型与观测的双线图、
+/// 散点图，而它们用的是同一批配对结果。分三次跑等于把同一份 NetCDF
+/// 读三遍，而且三者可能因为参数不一致而对不上。
+#[derive(serde::Serialize)]
+struct VarMetrics {
+    /// 观测文件里的变量名（`Qh` / `Qle` / …）
+    name: String,
+    /// 模型 history 里的对应变量
+    model_var: String,
+    n: usize,
+    rmse: f64,
+    mae: f64,
+    bias: f64,
+    r2: f64,
+    kge: f64,
+    obs_mean: f64,
+    obs_sd: f64,
+    beta: f64,
+    /// KGE 的 β 不可信时的原因。**非空一定要显示** ——
+    /// 藏起来等于给一个假指标。
+    beta_warning: Option<String>,
+    /// 配对之后的时刻（unix 秒），与下面两条等长
+    time: Vec<i64>,
+    model: Vec<f64>,
+    obs: Vec<f64>,
+}
+
+fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize, json: bool) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hist_dir = layout.out().join(&name).join("history");
@@ -612,10 +646,13 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize) -> Result<()> {
     let year = observation_year(obs_path)?;
     let m_sec = colm_hist::time::model_seconds(&m_t, year);
 
-    println!(
-        "{:<6} {:>5} {:>8} {:>9} {:>7} {:>9}",
-        "var", "n", "RMSE", "bias", "R2", "KGE"
-    );
+    if !json {
+        println!(
+            "{:<6} {:>5} {:>8} {:>9} {:>7} {:>9}",
+            "var", "n", "RMSE", "bias", "R2", "KGE"
+        );
+    }
+    let mut rows: Vec<VarMetrics> = Vec::new();
     for (o_name, m_name) in colm_hist::obs::FLUX_PAIRS {
         let (Ok(o_v), Ok(o_q), Ok(m_v)) = (
             colm_hist::obs::read_1d(obs_path, o_name),
@@ -629,10 +666,50 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize) -> Result<()> {
             values: &o_v,
             qc: &o_q,
         };
-        let Some(m) = colm_hist::metric::compute(&colm_hist::pair::pair(&m_sec, &m_v, &s, spinup))
-        else {
+        let with_time = colm_hist::pair::pair_with_time(&m_sec, &m_v, &s, spinup);
+        let pairs: Vec<(f64, f64)> = with_time.iter().map(|(_, a, b)| (*a, *b)).collect();
+        let Some(m) = colm_hist::metric::compute(&pairs) else {
             continue;
         };
+        if json {
+            // 模型时间轴换算成 unix 秒，与 `series` 那条一致 ——
+            // 界面把两者画在同一张图上，原点不同就对不齐。
+            let unix = colm_hist::time::unix_seconds(&m_t);
+            let by_sec: std::collections::BTreeMap<i64, i64> = m_sec
+                .iter()
+                .zip(unix.iter())
+                .map(|(s, u)| (*s as i64, *u))
+                .collect();
+            rows.push(VarMetrics {
+                name: o_name.to_string(),
+                model_var: m_name.to_string(),
+                n: m.n,
+                rmse: m.rmse,
+                mae: m.mae,
+                bias: m.bias,
+                r2: m.r2,
+                kge: m.kge,
+                obs_mean: m.obs_mean,
+                obs_sd: m.obs_sd,
+                beta: m.beta,
+                beta_warning: match m.beta_warning {
+                    Some(colm_hist::metric::BetaWarning::NearZeroMean) => {
+                        Some(format!("KGE 不可信：观测均值 {:.1} 接近零", m.obs_mean))
+                    }
+                    Some(colm_hist::metric::BetaWarning::OppositeSign) => {
+                        Some("KGE 不可信：模型与观测的均值反号".to_string())
+                    }
+                    None => None,
+                },
+                time: with_time
+                    .iter()
+                    .map(|(s, _, _)| by_sec.get(&(*s as i64)).copied().unwrap_or_default())
+                    .collect(),
+                model: with_time.iter().map(|(_, a, _)| *a).collect(),
+                obs: with_time.iter().map(|(_, _, b)| *b).collect(),
+            });
+            continue;
+        }
         print!(
             "{o_name:<6} {:>5} {:>8.1} {:>+9.2} {:>7.3} {:>+9.3}",
             m.n, m.rmse, m.bias, m.r2, m.kge
@@ -651,6 +728,9 @@ fn cmd_metrics(case: &Path, obs_path: &Path, spinup: usize) -> Result<()> {
             }
             None => println!(),
         }
+    }
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
     }
     Ok(())
 }

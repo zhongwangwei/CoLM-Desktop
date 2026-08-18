@@ -39,6 +39,7 @@ pub fn run() {
             run_batch,
             run_log_tail,
             series,
+            metrics,
             write_text,
             unknown_fields,
             irrelevant_fields,

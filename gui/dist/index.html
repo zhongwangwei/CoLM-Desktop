@@ -50,6 +50,20 @@
     <select id="var"></select><button id="plot" disabled>画图</button>
   </div>
   <div id="charts" style="margin-top:10px"></div>
+
+  <h2 style="margin-top:18px">评估</h2>
+  <div class="row">
+    <input id="obs" placeholder="观测文件（*_Flux.nc）" style="flex:1">
+    <label style="margin:0;white-space:nowrap">丢弃前
+      <input id="spinup" type="number" value="0" min="0" style="width:5em;display:inline-block">
+      条</label>
+    <button id="evaluate" disabled>评估</button>
+  </div>
+  <p class="muted" style="font-size:11px">
+    「丢弃前 N 条」丢的是<b>输出记录</b>，与模型预热（spin-up）不是一回事 ——
+    后者在时间分类里，且预热期本来就不写 history。
+  </p>
+  <div id="metrics"></div>
 </div>
 
 <script src="vendor/uplot/uPlot.iife.min.js"></script>

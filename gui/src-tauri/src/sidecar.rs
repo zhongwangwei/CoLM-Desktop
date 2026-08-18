@@ -494,6 +494,25 @@ pub async fn new_case(
     capture(&args)
 }
 
+/// 评估：把模型与观测配对，出指标与配对点。
+///
+/// 走 sidecar 而不是在这里算 —— 要读两个 NetCDF 文件。
+/// **一次拿全**：指标表、双线图、散点图用的是同一批配对结果，
+/// 分三次跑等于把同一份文件读三遍，而且三者可能因参数不一致而对不上。
+#[tauri::command]
+pub async fn metrics(case: String, obs: String, spinup: usize) -> Result<String, String> {
+    capture(&[
+        "metrics".into(),
+        case,
+        "--obs".into(),
+        obs,
+        "--spinup".into(),
+        spinup.to_string(),
+        "--json".into(),
+        "1".into(),
+    ])
+}
+
 /// 取绘图数据。
 ///
 /// 走 sidecar 而不是在这里读 —— 窗口进程不链接 netcdf，
