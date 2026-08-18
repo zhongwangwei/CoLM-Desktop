@@ -337,10 +337,12 @@ name = "oracle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "colm-case",
  "colm-forcing",
  "colm-hist",
  "colm-kernel",
  "colm-namelist",
+ "colm-srfdata",
  "netcdf",
  "serde",
  "serde_json",

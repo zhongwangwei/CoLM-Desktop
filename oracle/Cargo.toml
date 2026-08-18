@@ -7,6 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 只被 tests/generated_case.rs 用到：验证生成的算例与手写那份语义等价。
+colm-case = { path = "../crates/colm-case" }
 colm-forcing = { path = "../crates/colm-forcing" }
 # 两处用到：tests/histmap.rs 拿生成的闸门表跟入库的黄金文件对；
 # tests/metrics.rs 复现 design.md §2.8 / §2.8b 的六行指标表。
@@ -20,6 +22,8 @@ colm-forcing = { path = "../crates/colm-forcing" }
 colm-hist = { path = "../crates/colm-hist", features = ["io"] }
 colm-kernel = { path = "../crates/colm-kernel" }
 colm-namelist = { path = "../crates/colm-namelist" }
+# tests/generated_case.rs 用它读站点自带的经纬度与地类 —— 那三项不该抄。
+colm-srfdata = { path = "../crates/colm-srfdata" }
 anyhow.workspace = true
 # 没有 sha2：输入校验借 colm-kernel 的 `sha256_hex`。三个 PLUMBER2 文件最大
 # 15 MB，整读进内存没有问题，而少一份摘要实现就少一处会悄悄分叉的地方。
