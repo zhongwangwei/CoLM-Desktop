@@ -5,6 +5,7 @@ import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderTabs } from './params.js';
 import { refreshKernels, watchRun } from './runner.js';
+import { refreshPresets } from './presets.js';
 
 if (!hasBackend) {
   // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是渲染成一片空白。
@@ -19,6 +20,7 @@ async function boot() {
     state.fields = await invoke('describe_fields');
     renderTabs();
     await refreshKernels();
+    await refreshPresets();
   } catch (e) { status('后端出错：' + e); }
   await watchRun();
 }

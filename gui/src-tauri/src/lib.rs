@@ -11,12 +11,14 @@
 
 mod config;
 mod histvars;
+mod presets;
 mod project;
 mod sidecar;
 mod sites;
 
 use config::*;
 use histvars::*;
+use presets::*;
 use project::*;
 use sidecar::*;
 use sites::*;
@@ -44,6 +46,10 @@ pub fn run() {
             unknown_fields,
             irrelevant_fields,
             hist_vars,
+            save_preset,
+            list_presets,
+            apply_preset,
+            delete_preset,
         ])
         .run(tauri::generate_context!())
         .expect("error running CoLM Desktop");

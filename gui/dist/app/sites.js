@@ -5,6 +5,7 @@ import { state } from './state.js';
 import { $, status } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
+import { refreshPresets } from './presets.js';
 
 $('rescan').onclick = async () => {
   try {
@@ -57,6 +58,7 @@ async function selectCase(c) {
     }
     renderFields();
     refreshVars();
+    refreshPresets();
   } catch (e) { $('status').textContent = String(e); }
 }
 
