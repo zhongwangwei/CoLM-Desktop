@@ -12,10 +12,12 @@
 mod config;
 mod project;
 mod sidecar;
+mod sites;
 
 use config::*;
 use project::*;
 use sidecar::*;
+use sites::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -26,6 +28,7 @@ pub fn run() {
             describe_fields,
             list_cases,
             list_kernels,
+            scan_sites,
             new_case,
             read_text,
             read_case,

@@ -9,8 +9,13 @@
   <h2>算例库</h2>
   <div class="row"><input id="root" placeholder="算例目录"><button id="rescan">扫描</button></div>
   <div id="cases" style="margin-top:8px"></div>
+  <h2 style="margin-top:18px">站点库</h2>
+  <div class="row"><input id="sitedir" placeholder="Sitedata 目录"><button id="scan">扫描</button></div>
+  <p id="sitesummary" class="muted" style="font-size:11px">&nbsp;</p>
+  <div id="sites" style="max-height:26vh;overflow:auto"></div>
+
   <h2 style="margin-top:18px">新建</h2>
-  <label>站点文件（PLUMBER2 的 *_site.nc）</label><input id="w-site">
+  <label>站点文件（在上面选，或直接填路径）</label><input id="w-site">
   <label>算例名（留空则用站点代号）</label><input id="w-name">
   <div class="row">
     <div style="flex:1"><label>起（可选）</label><input id="w-start" placeholder="2008-01-01"></div>

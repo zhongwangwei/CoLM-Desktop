@@ -317,7 +317,7 @@ pub async fn series(case: String, vars: String) -> Result<String, String> {
 /// 跑一次 sidecar，把 stdout 整个收回来。
 ///
 /// 用于短命令（`new` / `series`）；跑模型那种长命令走 `run_case` 的流式路径。
-fn capture(args: &[String]) -> Result<String, String> {
+pub(crate) fn capture(args: &[String]) -> Result<String, String> {
     let cli = resolve_cli();
     let out = std::process::Command::new(&cli)
         .args(args)

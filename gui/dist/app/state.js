@@ -7,6 +7,8 @@
 
 export const state = {
   cases: [],
+  /** 站点库扫描结果，见 colm-cli scan */
+  sites: [],
   kernels: [],
   selected: null,
   /** 当前算例 case.nml 的全文。改字段走后端往返，前端不自己拼。 */

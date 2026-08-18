@@ -134,6 +134,11 @@ fn registered_commands(lib: &str) -> std::collections::BTreeSet<String> {
     rest[..end]
         .split(',')
         .map(|s| s.trim().trim_start_matches("generate_handler![").trim())
+        // `generate_handler![sites::scan_sites]` 也是合法写法，而命令名是
+        // **最后一段**。不取最后一段的话，带路径的那个会被下面的字符过滤
+        // 整条丢掉，于是检查报「前端调了一个没注册的命令」—— 命令其实注册了。
+        // 实测踩过：加 `sites::scan_sites` 时就是这么红的。
+        .map(|s| s.rsplit("::").next().unwrap_or(s).trim())
         .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
         .map(str::to_string)
         .collect()
@@ -344,6 +349,16 @@ mod tests {
         let src = concat_sources(&d, &["rs"], &[]).unwrap();
         assert!(quoted_after(&src, "emit(").contains("run://progress"));
         assert!(command_params(&src).contains_key("a"));
+    }
+
+    #[test]
+    fn a_command_registered_by_path_still_counts_as_registered() {
+        // `generate_handler![sites::scan_sites]` 是合法写法。不认它的话，
+        // 检查会报「前端调了一个没注册的命令」，而它注册了 —— 一条假警报，
+        // 而且指向的地方完全没问题。实测踩过。
+        let got = super::registered_commands("generate_handler![a, sites::scan_sites, b]");
+        assert!(got.contains("scan_sites"), "{got:?}");
+        assert!(got.contains("a") && got.contains("b"));
     }
 
     #[test]
