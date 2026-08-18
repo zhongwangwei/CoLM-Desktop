@@ -64,7 +64,7 @@
 
 ---
 
-## 1. 八个必须先定的设计决策
+## 1. 九个必须先定的设计决策
 
 这些不是可以边写边定的细节。**先按这里定的做**，要改先说。
 
@@ -162,6 +162,77 @@
 **保留 sidecar 那条路，不要删。** 两条路并存的分工：窗口进程读「小而立刻要看
 的」，sidecar 跑「大而可以等的」（`metrics`、`series` 的全量导出、批量）。
 `nc.rs` 是可摘除的 —— 删掉它 GUI 仍然能用，只是每次看变量列表要多一次进程启动。
+
+### 1.5c 控件类型与「这个字段现在有没有用」
+
+三条要求，前两条有现成数据，第三条要一套机制。
+
+**一、可枚举的字符串字段用下拉框。** 全仓库扫出 **12 个**（`select case` 6 个
+＋ `==` 比较 7 个，`DEF_HIST_mode` 两处都有）：
+
+| 字段 | 取值 |
+|---|---|
+| `DEF_HIST_FREQ` / `DEF_WRST_FREQ` | `TIMESTEP` `HOURLY` `DAILY` `MONTHLY` `YEARLY` |
+| `DEF_HIST_groupby` | `DAY` `MONTH` `YEAR` |
+| `DEF_HIST_mode` | `one` `block` |
+| `DEF_forcing%dataset` | `POINT` `CPL7` `QIAN` |
+| `DEF_forcing%groupby` | `day` `month` `year` |
+| `DEF_Forcing_Interp_Method` | `arealweight` `bilinear` |
+| `DEF_DS_precipitation_adjust_scheme` | `I` `II` `III` |
+| `DEF_precip_phase_discrimination_scheme` | `I` `II` `III` |
+| `DEF_TRACER_KINETIC_SCHEME` | `MERLIVAT1978` `CAPPA2003` |
+| `DEF_TRACER_OPEN_WATER_KINETIC` | `MJ79` `EXPONENT` |
+| `DEF_TRACER_SOIL_KINETIC` | `EXPONENT` `RESISTANCE` |
+
+**这张表要生成，不要手抄。** 扫 `SELECT CASE (trim(adjustl(DEF_x)))` 的
+`CASE ('…')`，以及 `trim(DEF_x) == '…'`，产物入库、由 drift 测试守住 ——
+与 `colm-schema`、`colm-hist` 闸门表同一套办法。
+
+**二、logical 用开关，不用文本框。** 顶层 202 个字段里 **99 个是 logical**
+（另有 character 54、integer 32、real 17）。近一半的字段现在要用户手打
+`.true.` / `.false.`，而拼错只能等 CoLM 读 namelist 时报错。
+
+**三、没用的字段不显示。** 这条最难，因为「有没有用」的真相在 CoLM 的
+预处理条件里。实测下来有三种，前两种可生成、第三种必须人工但能自检：
+
+| 判据 | 覆盖 | 怎么来的 |
+|---|---|---|
+| 字段的**全部用法都在某个 `#ifdef` 之内** | 63 个 | 静态扫 `#ifdef/#ifndef/#if defined` 嵌套 |
+| 字段的**全部用法都落在某个可选子系统的文件里**（`main/TRACER/`、`*Urban*`、`main/BGC/`、`*Catch*`、`CaMa/`、`main/DA/`） | 56 个（与上有重叠） | 按路径归属 |
+| **调用点被守，字段本身没被守** | 少数 | 只能人工，见下 |
+
+第三种正是 `DEF_URBAN_type_scheme`：它用在 `MOD_LandUrban.F90`、
+`Aggregation_Urban.F90`、`MOD_SingleSrfdata.F90`、`MOD_Vars_Global.F90`，
+**没有一处在 `#ifdef URBAN_MODEL` 里**；真正的守护在**调用点** ——
+`MKSRFDATA.F90:393` 的 `CALL landurban_build(lc_year)` 才是被
+`#ifdef URBAN_MODEL` 包着的。词法扫描看不到这个。
+
+**定：人工表的每一条都要带出处，并由测试验证出处还成立。**
+
+```rust
+/// 词法扫描看不出、但确实只在某个宏下才有意义的字段。
+///
+/// **每一条都必须写出为什么。** 手工表会烂掉，除非它自己能发现自己烂了 ——
+/// 下面的 `justification` 是 `文件:行`，测试会去读那一行，
+/// 确认它仍然包含所声明的守护。上游把那个 `#ifdef` 挪走时，测试红，
+/// 而不是界面悄悄多显示一个没用的字段。
+pub static CURATED_GATES: &[(&str, &str, &str)] = &[
+    // 字段, 需要的宏, 出处
+    ("DEF_URBAN_type_scheme", "URBAN_MODEL",
+     "mksrfdata/MKSRFDATA.F90:393"),  // 唯一的调用点 landurban_build 在 #ifdef 内
+];
+```
+
+判据落到界面上：**内核的 `manifest.json` 已经记了它编进了哪些宏**
+（`waterheat` 6 个、`urban` 多一个 `URBAN_MODEL`、`bgc` 多一个 `BGC`）。
+一个字段需要的宏不在当前选中内核的 `macros` 里，就**不显示**，
+并在「专家模式」下折叠成一行「本内核未编入的 N 个字段」可以展开查看 ——
+**藏起来不等于假装不存在**，用户换个内核就该看见它们。
+
+顺带一条实测教训：我一度想用 `cpp -P -traditional` 直接预处理来判断，
+结果拿到「2 行输出」并以为是「整个模块被排掉了」——
+那 2 行其实是 `cc: error: no such file or directory: 'c'`。
+**把 stderr 混进 stdout 再数行数，会把错误信息数成结果。**
 
 ### 1.6 三个可执行文件在界面上必须分开，而且能分别跳过
 
@@ -667,6 +738,35 @@ const ALWAYS_SHOWN = [
 
 专家模式显示全部 202 个顶层字段；未设的显示 schema 默认值、标灰，
 并在编辑时才真正写进文件。
+
+- [ ] **步骤 3b：控件按类型选，不要一律文本框**（见 §1.5c）
+
+| schema 的 `FieldKind` | 控件 | 顶层数量 |
+|---|---|---|
+| `Logical` | 开关（`<input type=checkbox>` 加标签），**不是**文本框 | 99 |
+| `Character` 且在枚举表里 | `<select>` | 12 |
+| `Character` 其余 | 文本框；路径类给一个「浏览…」按钮 | 42 |
+| `Integer` / `Real` | `<input type=number>`，`step` 按类型定 | 32 / 17 |
+
+**开关写回文件时仍是 `.true.` / `.false.`** —— `colm-namelist` 的往返保证
+不能因为界面换了控件就破掉。
+
+- [ ] **步骤 3c：按内核过滤字段**（见 §1.5c）
+
+需要一个新命令：
+
+```rust
+/// 在给定内核下，哪些字段是有意义的。
+///
+/// 判据是内核 `manifest.json` 里的 `macros` —— 那是**构建期就写下的事实**，
+/// 不是运行时猜的。
+#[tauri::command]
+pub fn relevant_fields(kernel_dir: String) -> Result<Vec<String>, String>
+```
+
+界面：不相关的字段默认不显示；专家模式下折叠成一行
+「本内核未编入的 N 个字段」，可展开。**藏起来不等于假装不存在** ——
+用户换个内核就该看见它们，而看不见又找不到会让人以为程序坏了。
 
 - [ ] **步骤 4：校验高亮**
 
