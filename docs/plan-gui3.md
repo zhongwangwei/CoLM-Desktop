@@ -31,6 +31,15 @@
 | `node --check <file>.js` | 语法错 | 语义 |
 | 跑起来用辅助功能树读 DOM | 页面真的渲染成什么样 | 需要人跑一次 |
 
+**改了 `gui/dist/` 必须 `cargo build` 才能在真机看到。** Tauri 的
+`frontendDist` 在没有 `devUrl` 时是**编译期嵌入**的（本项目无 npm、无热
+重载），所以重启已编译的旧二进制不够 —— 会看到改动「没生效」，而实际上
+二进制里还是上一版的 JS。实测踩过，白排查了一轮。
+
+```bash
+cd gui/src-tauri && cargo build && ./target/debug/colm-desktop-gui
+```
+
 **第三条不能省。** 这个项目吃过一次亏：进度条建在一个永远不会到达的输入上，
 静态检查全绿，而它从来不动（README「进度条曾经建在一个永远不会到达的输入上」）。
 DOM 结构改动尤其如此。
@@ -3451,9 +3460,10 @@ cargo run -p xtask -- check-gui
 cargo test --workspace 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -3
 cd gui/src-tauri && cargo test 2>&1 | tail -5 && cargo clippy --all-targets -- -D warnings 2>&1 | tail -3
+# 期望 44 passed —— 这是独立 workspace，上面那条 --workspace 跑不到它
 ```
 
-期望：全绿。GUI 后端 43 个测试全过。
+期望：全绿。主 workspace 265 passed，GUI 那个独立 workspace 44 passed。
 
 - [ ] **Step 2: 端到端走一遍六步**
 
