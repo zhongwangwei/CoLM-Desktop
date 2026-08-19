@@ -107,7 +107,7 @@
     </section>
 
     <!-- ② 站点 -->
-    <section class="page" data-step="sites" data-own-foot hidden>
+    <section class="page" data-step="sites" hidden>
       <div class="work-head"><span class="kicker">第 3 步</span></div>
       <h1>有哪些站点可以跑</h1>
       <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
@@ -133,14 +133,14 @@
           <button class="btn-ghost" id="pick-none">全不选</button>
           <span class="muted mini" id="pickinfo">还没选</span>
         </div>
+        <!-- 建算例的按钮。**它是卡片内的动作，不是页面出口** ——
+             页面出口是底部通用的「下一步：参数 →」。算例目录在第 2 步
+             已经定好了，所以这里按下去不会再有「产物放哪」的疑问。 -->
+        <div id="makecase" style="margin-top:12px"></div>
         <p class="muted mini" style="margin-top:8px">
-          点行只是选中，<b>不会动任何文件</b>。按下面的「确定」才会为选中的站点建算例
-          —— 那一步要读站点文件与强迫场并写出补齐后的 <code>site.nc</code>。</p>
+          点行只是选中，<b>不会动任何文件</b>。按「建算例」才会真的建 ——
+          那一步要读站点文件与强迫场并写出补齐后的 <code>site.nc</code>。</p>
       </div>
-
-      <!-- 出口在这里，不在站点列表下面：按下去会**在上面那个目录里**建算例，
-           摆在设定那个目录之前，等于让人先按确定再想产物放哪。 -->
-      <div class="foot" id="datafoot"></div>
     </section>
 
     <!-- ④ 参数 -->

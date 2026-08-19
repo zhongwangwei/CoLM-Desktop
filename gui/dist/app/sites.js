@@ -6,7 +6,7 @@ import { $, status, joinPath } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
-import { go, renderSteps, setStatus } from './shell.js';
+import { renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
 
 $('rescan').onclick = async () => {
@@ -108,7 +108,7 @@ async function confirmSelection() {
   const checked = state.sites.filter(s => state.picked.has(s.site_file));
   const target = checked.length ? checked : (state.pickedSite ? [state.pickedSite] : []);
   if (!target.length) { setStatus('先点一个站点，或勾选几个'); return; }
-  const btn = $('datafoot').querySelector('button');
+  const btn = $('makecase').querySelector('button');
   if (btn) btn.disabled = true;
   try {
     const made = await ensureCases(target);
@@ -119,22 +119,25 @@ async function confirmSelection() {
     // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，
     // 参数页会是空的，而空页面不会报错，只是什么都没有。实测踩过。
     await selectCase(made[0]);
-    go('params');
-  } finally { renderDataFoot(); }
+  } finally { renderMakeCase(); }
 }
 
-/** 站点页自己的出口。**字要说出它会做什么** —— 它不只是翻页，
- *  它会去建算例，而那是要读写文件的。 */
-export function renderDataFoot() {
-  const foot = $('datafoot');
+/** 站点卡片里的「建算例」按钮。**字要说出它会做什么** ——
+ *  它要读站点文件与强迫场并写出补齐后的 site.nc，那是真动文件。
+ *
+ *  **它不是页面出口。** 出口是底部通用的「下一步：参数 →」，
+ *  由 shell.js 的 renderNextButtons 注入。两个长得差不多、行为不同的
+ *  按钮不能摆在一起。 */
+export function renderMakeCase() {
+  const foot = $('makecase');
   if (!foot) return;
   foot.textContent = '';
   const n = state.picked.size;
   const one = state.pickedSite;
   const b = document.createElement('button');
   b.className = 'btn-next';
-  if (n) b.textContent = `确定：为选中的 ${n} 个站点建算例并继续 →`;
-  else if (one) b.textContent = `确定：用 ${one.name} 继续 →`;
+  if (n) b.textContent = `建算例：选中的 ${n} 个站点`;
+  else if (one) b.textContent = `建算例：${one.name}`;
   else b.textContent = '先点一个站点，或勾选几个';
   b.disabled = !n && !one;
   b.onclick = confirmSelection;
@@ -242,7 +245,7 @@ function renderSites(r = {}) {
   }
   const bad = state.sites.filter(s => s.problem).length;
   const noObs = state.sites.filter(s => !s.obs_file).length;
-  renderDataFoot();
+  renderMakeCase();
   const urban = state.sites.filter(s => s.urban).length;
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
@@ -268,7 +271,7 @@ function renderSites(r = {}) {
     cb.checked = state.picked.has(s.site_file);
     cb.onchange = () => {
       if (cb.checked) state.picked.add(s.site_file); else state.picked.delete(s.site_file);
-      renderDataFoot();
+      renderMakeCase();
       renderSteps();   // 勾选改变了「在配几个」，左栏要立刻跟上
     };
     lab.appendChild(cb);
