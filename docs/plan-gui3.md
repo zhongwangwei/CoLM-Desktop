@@ -45,6 +45,17 @@ DOM 结构改动尤其如此。
 | 前端模块 | 14 个 `.js` |
 | `index.html` | 261 行 |
 
+**改 Fortran 之后必须先提交再编译。** `oracle/scripts/build_kernel.sh:41` 用
+
+```
+git -C "$SRC" -c core.symlinks=false worktree add --detach --force "$BUILD" HEAD
+```
+
+从一个**钉在 `HEAD` 的 worktree** 构建 —— 工作树里未提交的改动对编译**不可见**。
+实测踩过：改完 Fortran 直接 `build_kernel.sh`，编出来的是没有修复的二进制，
+探针忠实复现了旧 bug，一度看起来像修复失败。判据是 `manifest.json` 的
+`colm_git_sha`：它等于 submodule 的 `HEAD`，不是你手上那份代码。
+
 那 6 个 derived 与它们的分节：
 
 | 分节 | 字段 |
@@ -3211,6 +3222,49 @@ bash $S/ax.sh | grep "个站点\|已勾"
 
 **不要真按下建算例** —— 那会串行建 90 个算例，每个都要读站点文件与强迫场
 并写出 `site.nc`。验完显示就够了。
+
+- [ ] **Step 2c: 重录黄金基准，消掉 provenance 噪音**
+
+修了两个 Fortran bug 之后 `kernels/` 是 `ad77af53`，而
+`oracle/golden/kernel-manifest.json` 仍记录 `72dd76b9`，于是**每次**
+`golden-run` 都打：
+
+```
+  WARNING: kernel differs from the one that produced the golden files:
+    colm_git_sha: recorded "72dd76b9", current "ad77af53"
+```
+
+它不阻断，但**持久的警告会让人对真正的 drift 麻木** —— 下次真出问题时
+这行字已经没人看了。
+
+前提是输出确实没变（已实测：`identical: 129 variables`）。**先比对，
+再重录，顺序不能反**：
+
+```bash
+export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -5
+cargo run -q -p oracle --bin golden-compare -- \
+  oracle/golden/CN-Cng_hist_2008-01.nc \
+  oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+```
+
+**必须先看到 `identical: 129 variables` 再往下。** 不 identical 就说明
+那两个 Fortran 改动动了自然站点的结果，那时重录等于把回归基准改坏 ——
+停下来报 BLOCKED。
+
+确认之后重录：
+
+```bash
+cargo run -p oracle --bin golden-run -- CN-Cng --write-golden
+git diff --stat oracle/golden/
+```
+
+期望：`kernel-manifest.json` 的 `colm_git_sha` 变成 `ad77af53`、三个
+sha256 跟着变；`CN-Cng_hist_2008-01.nc` **应该也会变**（`create_time`
+不同），那是正常的 —— 比对本来就 `ignoring ["create_time"]`。
+
+再跑一次 `golden-run`，确认 WARNING 消失、`provenance matches the
+recorded kernel` 出现。
 
 - [ ] **Step 3: 清掉 playwright 的运行垃圾并加进 `.gitignore`**
 
