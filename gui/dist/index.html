@@ -266,6 +266,16 @@
   </footer>
 </div>
 
+<!-- 进门那道分流。默认 hidden，由 domain.js 立起来 —— 直接写成可见的话，
+     JS 加载失败时它会永远挡在那里，而那种故障从外面看就是「程序打不开」。 -->
+<div id="domaingate" class="gate" hidden>
+  <div class="gate-panel">
+    <h2>这次要跑什么？</h2>
+    <p class="muted mini">现在只有站点能跑。区域与全球的步骤链还没有实现。</p>
+    <div class="domain-cards" id="domaincards"></div>
+  </div>
+</div>
+
 <script src="vendor/uplot/uPlot.iife.min.js"></script>
 <script type="module" src="app/main.js"></script>
 </body>

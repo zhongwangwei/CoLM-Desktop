@@ -242,3 +242,23 @@ td:first-child { overflow-wrap: anywhere; }
            margin: -6px 0 -6px -2px; cursor: pointer; flex: none; }
 .tickbox input { width: 17px; height: 17px; accent-color: var(--accent); }
 .tickbox:hover input { outline: 2px solid var(--accent-weak); outline-offset: 2px; }
+
+/* 进门那道分流。fixed 覆盖整个窗口 —— 它要挡住的是整个工作台，不是某一栏。 */
+.gate { position: fixed; inset: 0; z-index: 50; background: var(--bg);
+  display: flex; align-items: center; justify-content: center; }
+/* **这一条不能省。** `display:flex` 会盖掉 `[hidden]` 的默认
+   `display:none`，不补的话门隐藏不了 —— 点完站点界面仍然被挡着。 */
+.gate[hidden] { display: none; }
+.gate-panel { text-align: center; max-width: 720px; padding: var(--s-xl); }
+.gate-panel h2 { margin: 0 0 6px; font-size: 20px; }
+.domain-cards { display: flex; gap: var(--s-lg); margin-top: var(--s-xl);
+  justify-content: center; }
+.domain-card { display: flex; flex-direction: column; gap: 6px; width: 180px;
+  padding: var(--s-lg); background: var(--elevated); border: 1px solid var(--border);
+  border-radius: var(--r-md); box-shadow: var(--shadow); cursor: pointer;
+  font: inherit; color: var(--text); text-align: left; }
+.domain-card:hover:not(:disabled) { border-color: var(--accent); }
+.domain-card:disabled { opacity: .5; cursor: not-allowed; }
+.domain-card .dt { font-size: 16px; font-weight: 600; }
+.domain-card .dd { font-size: 12px; color: var(--muted); }
+.domain-card .dsoon { font-size: 11px; color: var(--warn); margin-top: 4px; }
