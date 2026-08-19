@@ -233,7 +233,9 @@ jobs:
             Write-Host "=== $s.log ==="
             if (Test-Path $log) {
               Write-Host ("  {0} 字节" -f (Get-Item $log).Length)
-              Get-Content $log -TotalCount 25
+              # **整份打出来。** 只打前 25 行时，SIGFPE 的回溯恰好在后面 ——
+              # 于是日志里只剩一句「收到信号」，指不出是哪一行。
+              Get-Content $log
             } else { Write-Host "  (没有这个日志)" }
           }
           if ($rc -ne 0) { Write-Host "::error::算例没跑完"; exit 1 }

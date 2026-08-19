@@ -2,7 +2,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
-import { $, status } from './ui.js';
+import { $, status, joinPath } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
@@ -175,7 +175,7 @@ export async function ensureCase(s) {
   setStatus(`正在为 ${s.name} 建算例…`);
   try {
     await invoke('new_case', {
-      site: s.site_file, out: root + '/' + cname, name: cname,
+      site: s.site_file, out: joinPath(root, cname), name: cname,
       // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
       // 而缩短窗口是参数页「时间」分类里同一组字段的事。
       start: null, end: null,

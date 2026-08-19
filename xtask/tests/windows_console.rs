@@ -68,3 +68,43 @@ fn every_spawned_process_is_told_not_to_open_a_window() {
         .collect();
     assert_eq!(flags, vec!["0x0800_0000"], "creation_flags 的取值不对");
 }
+
+#[test]
+fn the_frontend_does_not_assume_forward_slashes() {
+    // Windows 上算例目录是 `C:\Users\…\CN-Cng`。只按 `/` 切会原样返回整条
+    // 路径 —— 横幅上写的就不是「CN-Cng」而是一长串绝对路径。
+    // 这一条在 macOS 上永远看不出来。
+    for f in [
+        "params.js",
+        "sites.js",
+        "runner.js",
+        "results.js",
+        "timing.js",
+    ] {
+        let t = read(&format!("gui/dist/app/{f}"));
+        assert!(
+            !t.contains(".split('/')"),
+            "{f} 按 `/` 切路径 —— Windows 上切不开"
+        );
+        assert!(!t.contains("+ '/' +"), "{f} 用 `/` 拼路径 —— 该走 joinPath");
+    }
+    // 判断只写一份，在没有依赖的那一层。
+    let ui = read("gui/dist/app/ui.js");
+    assert!(ui.contains("export function baseName"));
+    assert!(ui.contains("export function joinPath"));
+}
+
+#[test]
+fn the_kernel_build_quotes_the_paths_it_hands_to_cmd() {
+    // cmd 在**未加引号**的参数里把 `/` 当开关前缀，而 CoLM 自己就会拼出
+    // `DEF_dir_output // '/' // …`（MOD_Namelist.F90:1403）—— 我们在
+    // namelist 里改不掉那一半，只能加引号。CI 的探针量过：
+    // 引号+正斜杠退出码 0，不加引号退出码 1 且目录没建。
+    let sh = read("oracle/scripts/build_kernel.sh");
+    assert!(
+        sh.contains("mkdir \\\"' //"),
+        "构建脚本没有给 mkdir 的路径加引号"
+    );
+    // 改不到任何一行就该停 —— 静默跳过会产出一个跑到一半才死的内核。
+    assert!(sh.contains("has upstream changed?"), "重写没有失败时的守卫");
+}

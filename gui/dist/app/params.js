@@ -2,7 +2,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
-import { $, status } from './ui.js';
+import { $, status, baseName } from './ui.js';
 import { renderHistVars } from './histvars.js';
 import { renderTiming } from './timing.js';
 import { editTarget } from './batch.js';
@@ -116,7 +116,7 @@ function renderScope(box) {
   const bar = document.createElement('div');
   bar.className = 'expert-note';
   bar.style.marginBottom = '10px';
-  const names = dirs.map(d => d.split('/').pop());
+  const names = dirs.map(baseName);
   bar.innerHTML = `下面的改动会写进 <b>${dirs.length} 个算例</b>：`
     + names.slice(0, 6).join('、') + (names.length > 6 ? ` 等 ${names.length} 个` : '');
   const b = document.createElement('button');
