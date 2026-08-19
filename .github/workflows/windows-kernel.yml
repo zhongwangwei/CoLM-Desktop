@@ -209,6 +209,14 @@ jobs:
       #
       # 用仓库自带的示例站点跑（`examples/`，随安装包分发的就是它），
       # 所以这一步验的正是用户点「运行」会走的那条路。
+      # colm-cli 每次重编要五六分钟（netcdf-sys 带着 HDF5 一起编），
+      # 而这个问题已经来回验了六次。缓存的是引擎那个 workspace，
+      # 与 release.yml 缓存 gui/src-tauri 的那份互不相干。
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
       - name: A real case, end to end
         shell: pwsh
         run: |
@@ -229,8 +237,11 @@ jobs:
           & $cli new --site $site --out $abs --name CN-Cng --end 2008-01-02 --spinup-repeat 0
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::colm-cli new 失败"; exit 1 }
 
+          # **必须开 `--stream`。** 不开的话三段的输出都攒到最后才吐，
+          # 而这一步真正要回答的问题是「卡在哪一段」—— 一次跑不完的运行
+          # 在日志上与一次跑得慢的运行长得一模一样。
           Write-Host ("run 开始 " + (Get-Date -Format o))
-          & $cli run $abs --kernel kernels\waterheat
+          & $cli run $abs --kernel kernels\waterheat --stream 1
           $rc = $LASTEXITCODE
           Write-Host ("run 结束 " + (Get-Date -Format o))
           Write-Host "run exit code: $rc"
