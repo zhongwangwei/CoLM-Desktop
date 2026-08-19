@@ -1788,13 +1788,199 @@ Tested: node --check; xtask check-gui 无成环; 摘要行读出当前内核"
 
 ---
 
+## Task 8c: 城市算例脱离全球栅格
+
+**这是整个计划里唯一改引擎行为的任务。** 前面所有任务都只动界面。
+
+城市算例现在必须给 `--rawdata` / `--runtime`，而那套栅格实测 698 GB。
+但**路径是现成的** —— CoLM 本来就先看 `site.nc` 再回落栅格：
+
+```fortran
+! MOD_SingleSrfdata.F90:1584
+u_site_utype = ncio_var_exist(fsrfdata,'LCZ_DOM')
+   CALL ncio_read_serial (fsrfdata, 'LCZ_DOM', SITE_urbtyp)      ! 先看 site.nc
+   ...
+   CALL read_point_5x5_var_2d_int32 (gridupatch, dir_5x5, ...)   ! 没有才去栅格
+```
+
+`LUCY_ID` 同样（1856–1864 行）。而 `site::fill` 对自然站点做的正是这件事：
+把 12 个字段按**站点文件 → 栅格 → 模块默认值**三级回落写进 `site.nc`，
+每个带一条 `source` 属性注明出处。
+
+**城市站没走这条路** —— `prepare_urban` 只把 `ground_height` 抄成
+`elevation` 就结束了，然后 `colm-case` 把三个 `USE_SITE_*` 设成 `.false.`
+把 CoLM 推去读栅格。
+
+**Files:**
+- Modify: `crates/colm-srfdata/src/site.rs`
+- Modify: `crates/colm-case/src/build.rs`
+- Modify: `crates/colm-cli/src/main.rs`
+
+- [ ] **Step 1: 先实测「不给栅格会缺什么」**
+
+**别照着推理改。** 先把三个 `USE_SITE_*` 手工改成 `.true.`、
+`DEF_dir_rawdata` 指向不存在的目录，跑一次 AU-Preston，看 CoLM 到底
+在哪一步停、报什么。
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
+T=/tmp/urban-probe && rm -rf $T
+./target/debug/colm-cli new --site "$U/Sitedata/AU-Preston_site_v1.nc" \
+  --out $T --name AU-Preston --rawdata /nonexistent --runtime /nonexistent
+sed -i '' 's/USE_SITE_lakedepth *= *\.false\./USE_SITE_lakedepth = .true./;
+           s/USE_SITE_soilreflectance *= *\.false\./USE_SITE_soilreflectance = .true./;
+           s/USE_SITE_soilparameters *= *\.false\./USE_SITE_soilparameters = .true./' $T/case.nml
+./target/debug/colm-cli run $T --kernel kernels/waterheat 2>&1 | tail -30
+```
+
+（用 `waterheat` 只是为了看 `mksrfdata` 在读栅格前后停在哪；真正跑城市
+要 urban 内核。若报「内核不匹配」之类，改用
+`./oracle/scripts/build_kernel.sh urban` 先编一个。）
+
+**把实际报错抄进报告。** 后面几步补哪些字段，以这次实测为准，
+不以下面的清单为准 —— 清单是按源码推的，可能不全。
+
+- [ ] **Step 2: `prepare_urban` 补齐缺的字段**
+
+`crates/colm-srfdata/src/site.rs` 里 `prepare_urban` 现在只补 `elevation`。
+让它复用 `fill` 已有的三级回落，补上 Step 1 实测缺的那些。至少包括：
+
+| 变量 | 回落来源 |
+|---|---|
+| `lakedepth` | `MOD_SingleSrfdata.F90:47` 模块默认值 |
+| `soil_s_v_alb` `soil_d_v_alb` `soil_s_n_alb` `soil_d_n_alb` | 同 `fill` 的土壤反照率回落 |
+| `soil_texture` `soil_vf_clay` `soil_wf_clay` `soil_wf_om` | 同 `fill` 的土壤参数回落 |
+| `elvstd` `sloperatio` | 只服务已关闭的降尺度，模块默认值即可 |
+| **`LCZ_DOM`** | **默认 6**，见下 |
+| `LUCY_ID` | Step 1 实测确认要不要；要的话默认值也在那一步定 |
+
+**`LCZ_DOM` 默认取 6（开阔低层建筑）的依据**，AU-Preston 实测形态学量：
+
+```
+building_mean_height      6.4 m     LCZ 6 定义 3–10 m        ✓
+canyon_height_width_ratio 0.42      LCZ 6 定义 0.3–0.75      ✓
+tree + grass              0.375     LCZ 6 透水面 30–60%      ✓
+roof_area_fraction        0.445
+```
+
+按 Stewart & Oke (2012)，这是墨尔本郊区住宅区的典型形态。
+**每个补进去的值都要带 `source` 属性说明它是量出来的还是假设的** ——
+这是 `site.rs` 模块注释里立的规矩。`LCZ_DOM` 的 source 写
+`"assumed: LCZ 6 open low-rise (Stewart & Oke 2012), from site morphology"`。
+
+- [ ] **Step 3: `colm-case` 不再把三项设成 `.false.`**
+
+`crates/colm-case/src/build.rs` 第 230–236 行那个循环删掉，
+并把上面那段注释改成说明新的事实：
+
+```rust
+        // 这三项保持默认的 .true.（「站点文件里有，用它」）—— `prepare_urban`
+        // 现在会把它们按**站点文件 → 栅格 → 模块默认值**三级回落写进
+        // site.nc，和自然站点走的是同一条路。
+        //
+        // 改成 .false. 会把 CoLM 推去读全球栅格，而那套数据实测 698 GB。
+        // 城市站点文件里确实没有这三样（25 个变量全是形态学量），
+        // 但「站点文件里没有」与「必须去栅格取」之间隔着 site::fill。
+```
+
+- [ ] **Step 4: `colm-cli new` 的两个目录改回可选**
+
+`crates/colm-cli/src/main.rs` 第 510–521 行那个 `if urban { ... }` 分支：
+给了 `--rawdata` 就用（栅格优先，三级回落的第二级），没给就和自然站点
+一样指向不存在的目录。把那段注释改成：
+
+```rust
+    // 全球栅格目录。**给了就用，没给就回落** —— `site::fill` /
+    // `prepare_urban` 已经把该有的都写进 site.nc 了，跑通了就证明没读栅格。
+    //
+    // 城市算例曾经必填这两个：站点文件里只有形态学量，土壤剖面、湖深、
+    // 反照率、LCZ 分类都得从别处来。但 CoLM 本来就先看 site.nc 再回落栅格
+    // （MOD_SingleSrfdata.F90:1584 的 LCZ_DOM、1856 的 LUCY_ID），
+    // 所以那些值写进 site.nc 就够了，698 GB 的栅格不再是门槛。
+```
+
+- [ ] **Step 5: 实测 AU-Preston 不给栅格跑完三段**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+./oracle/scripts/build_kernel.sh urban        # 还没编的话
+U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
+T=/tmp/urban-run && rm -rf $T
+cargo build -p colm-cli
+./target/debug/colm-cli new --site "$U/Sitedata/AU-Preston_site_v1.nc" \
+  --out $T --name AU-Preston --start 1993-01-01 --end 1993-01-11
+grep -E "USE_SITE_(lakedepth|soilreflectance|soilparameters)|DEF_dir_rawdata|DEF_URBAN" $T/case.nml
+./target/debug/colm-cli run $T --kernel kernels/urban 2>&1 | tail -20
+```
+
+期望：
+
+- `case.nml` 里三个 `USE_SITE_*` **不出现**（保持默认 `.true.`），
+  `DEF_dir_rawdata` 指向 `$T/rawdata_unused/`
+- 三段全 `ok`
+- 产出 history 文件
+
+README 里 URBAN 那一节的验收基准是「AU-Preston，1993-01-01 至 01-11，
+1800 s 步长，三段全 ok，264 条小时记录，`f_tref` 峰值 312 K」——
+**对照它**。跑出来的记录条数、量级对不上就报出来，不要含糊过去。
+
+- [ ] **Step 6: 自然站点不能被弄坏**
+
+改的是 `site.rs` 与 `build.rs` 的共享路径，必须确认 CN-Cng 没受影响：
+
+```bash
+export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+cargo test --workspace 2>&1 | tail -10
+cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -5
+cargo run -q -p oracle --bin golden-compare -- \
+  oracle/golden/CN-Cng_hist_2008-01.nc \
+  oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+```
+
+期望**逐字**：
+
+```
+identical: 129 variables, 10 dimensions (ignoring ["create_time"])
+```
+
+对不上就 **BLOCKED**。城市站能跑了但自然站点变了，是净亏损。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add crates/colm-srfdata/src/site.rs crates/colm-case/src/build.rs crates/colm-cli/src/main.rs
+git commit -m "城市算例脱离全球栅格
+
+CoLM 本来就先看 site.nc 再回落栅格（MOD_SingleSrfdata.F90:1584 的
+LCZ_DOM、1856 的 LUCY_ID），而 site::fill 对自然站点做的正是把值写进
+site.nc。城市站没走这条路 —— prepare_urban 只抄了 elevation，然后
+colm-case 把三个 USE_SITE_* 设成 .false. 把 CoLM 推去读那 698 GB 栅格。
+
+现在 prepare_urban 也走三级回落（站点文件 → 栅格 → 模块默认值），
+LCZ_DOM 默认 6（开阔低层建筑）—— AU-Preston 实测建筑高 6.4 m、
+H/W 0.42、透水面 37.5%，按 Stewart & Oke (2012) 正是这一类。
+
+Constraint: 每个补进去的值都带 source 属性说明是量出来的还是假设的
+Constraint: 自然站点的黄金比对必须仍然 identical
+Confidence: medium
+Scope-risk: broad
+Directive: 改引擎输入前先实测「不给栅格到底缺什么」，别照着源码推
+Tested: AU-Preston 不给栅格三段全 ok; CN-Cng 黄金比对 identical"
+```
+
+---
+
 ## Task 8b: 自带一个城市示例站点
 
 现在自带的示例只有 CN-Cng（自然站点）。选了 `urban` 内核的人手上没有任何
 能试的东西 —— 而 `examples/README.md` 当初的理由是「城市算例不能自带：
 栅格实测 698 GB」。
 
-**站点文件能自带，栅格不能。** 那就把站点文件发出去，把栅格门槛说在前面。
+**站点文件能自带，栅格不能** —— 但 Task 8c 之后城市算例已经不需要栅格了
+（值写进 `site.nc`，CoLM 先看那里）。所以这一步只管把站点文件发出去；
+下面那些「栅格门槛」的界面提示**以 Task 8c 的实测结果为准**：
+真的不需要栅格了就不要加那些提示，加了就是骗人。
 
 **实测的门槛**（本机跑过）：
 
