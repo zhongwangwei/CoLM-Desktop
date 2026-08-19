@@ -25,7 +25,7 @@ export async function renderTiming() {
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `
-    <h3>时间与预热</h3>
+    <h3>时间与预热（spin-up）</h3>
     <div class="ch">时间范围默认就是强迫场覆盖的<b>全部</b>范围，由文件说了算，不用填。</div>
     <table>
       <tr><th>模拟</th><td>${window_(t)}</td></tr>
@@ -33,13 +33,12 @@ export async function renderTiming() {
         : t.output_start + ' → ' + t.end}</td></tr>
     </table>
     <div class="pill-row" style="margin-top:12px">
-      <label class="check">重复开头
-        <input class="input" id="tm-years" type="number" min="0" step="1"
+      <span class="mini">spin-up：重复开头</span>
+      <label class="check"><input class="input" id="tm-years" type="number" min="0" step="1"
                value="${t.spinup_years}" style="width:4.5em"> 年</label>
-      <label class="check">×
-        <input class="input" id="tm-repeat" type="number" min="0" step="1"
+      <label class="check">×<input class="input" id="tm-repeat" type="number" min="0" step="1"
                value="${t.spinup_repeat}" style="width:4.5em"> 遍</label>
-      <button class="btn-ghost" id="tm-off">不预热</button>
+      <span class="muted mini">任一格填 0 就是不预热</span>
     </div>
     <p class="muted mini" id="tm-note" style="margin-top:8px"></p>`;
   box.appendChild(card);
@@ -61,11 +60,6 @@ export async function renderTiming() {
   };
   $('tm-years').onchange = apply;
   $('tm-repeat').onchange = apply;
-  $('tm-off').onclick = () => {
-    $('tm-years').value = '0';
-    $('tm-repeat').value = '0';
-    apply();
-  };
 }
 
 /** 模拟窗口那一格的字。

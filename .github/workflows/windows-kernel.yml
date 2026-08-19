@@ -180,12 +180,18 @@ jobs:
           $cli = ".\target\release\colm-cli.exe"
           $site = "examples\Sitedata\CN-Cng_2008-2009_FLUXNET2015_site.nc"
 
+          # **绝对路径**，因为界面传的就是绝对路径（`root + '/' + 站点名'`），
+          # 而这一步存在的意义是复现用户点「运行」时走的那条路。
+          # 相对路径另有一条，在下面 —— 两种都要过：第一版只试了相对的，
+          # 于是抓到的是「`--out` 没绝对化」，而用户报的根本不是那个。
+          $abs = Join-Path (Get-Location).Path 'probe-case'
+
           # 只跑一天：这一步问的是「跑不跑得起来」，不是「结果对不对」，
           # 后者由 macOS 上的黄金回归负责。
-          & $cli new --site $site --out probe-case --name CN-Cng --end 2008-01-02 --spinup-repeat 0
+          & $cli new --site $site --out $abs --name CN-Cng --end 2008-01-02 --spinup-repeat 0
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::colm-cli new 失败"; exit 1 }
 
-          & $cli run probe-case --kernel kernels\waterheat
+          & $cli run $abs --kernel kernels\waterheat
           $rc = $LASTEXITCODE
           Write-Host "run exit code: $rc"
           foreach ($s in 'mksrfdata','mkinidata','colm') {
@@ -201,6 +207,22 @@ jobs:
           $n = (Get-ChildItem probe-case\out\CN-Cng\history\*.nc -ErrorAction SilentlyContinue).Count
           Write-Host "history 文件 $n 个"
           if ($n -lt 1) { Write-Host "::error::没有 history 输出"; exit 1 }
+
+          # 相对路径再来一遍。**两种路径形式是两条不同的代码路径** ——
+          # 相对的那条要靠 `--out` 绝对化，而那一处曾经漏掉：写进 case.nml 的
+          # `probe-case\forcing.nml` 在算例目录里解析成
+          # `probe-case\probe-case\forcing.nml`，报的是「文件不存在」。
+          Write-Host "=== 同样的事，改用相对路径 ==="
+          & $cli new --site $site --out rel-case --name CN-Cng --end 2008-01-02 --spinup-repeat 0
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::相对路径的 new 失败"; exit 1 }
+          & $cli run rel-case --kernel kernels\waterheat
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content rel-case\mksrfdata.log -TotalCount 20
+            Write-Host "::error::相对路径的算例没跑完"; exit 1
+          }
+          $m = (Get-ChildItem rel-case\out\CN-Cng\history\*.nc -ErrorAction SilentlyContinue).Count
+          Write-Host "相对路径 history 文件 $m 个"
+          if ($m -lt 1) { Write-Host "::error::相对路径没有 history 输出"; exit 1 }
           exit 0
 
       # **把病因钉死。** 上一步跑通了不等于知道原来为什么不通 ——

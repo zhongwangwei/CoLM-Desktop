@@ -364,6 +364,15 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     })?;
 
     std::fs::create_dir_all(&out)?;
+    // **算例目录也要绝对化。** 四个路径（含 `DEF_forcing_namelist`）是照着
+    // 它拼出来写进 case.nml 的，而模型跑在算例目录里 —— 相对的 `--out`
+    // 会让 `probe-case\forcing.nml` 在那里解析成 `probe-case/probe-case/...`，
+    // 报的是 `No such file or directory`，看着像文件没生成。
+    //
+    // 先 `create_dir_all` 再解析：`canonicalize` 要求路径已经存在。
+    // 这是同一类问题的第四处（前三处是内核目录、`--site`、`cmd_run` 的算例目录）。
+    let out = colm_kernel::manifest::absolute(&out)
+        .with_context(|| format!("cannot resolve --out {}", out.display()))?;
     let layout = Layout::new(&out);
     std::fs::create_dir_all(layout.out())?;
 
