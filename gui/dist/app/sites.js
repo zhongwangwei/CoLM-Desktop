@@ -18,8 +18,13 @@ $('rescan').onclick = async () => {
   } catch (e) { $('status').textContent = String(e); }
 };
 
-export function renderCases() {
-  const box = $('cases');
+/** 算例列表渲染进一个容器。
+ *
+ *  **两页各一个。** 第 3 步问「建出来没有」，第 5 步问「跑哪些」，
+ *  两处都要看得见同一份列表，而一个 DOM 元素进不了两页。
+ *  勾选状态共享 `state.pickedCases`，两边贯通 —— 在第 3 步勾中的那几个，
+ *  翻到第 5 步仍然是勾着的。 */
+function renderCasesInto(box) {
   box.textContent = '';
   if (!state.cases.length) {
     box.innerHTML = '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
@@ -38,7 +43,9 @@ export function renderCases() {
     cb.checked = state.pickedCases.has(c.dir);
     cb.onchange = () => {
       if (cb.checked) state.pickedCases.add(c.dir); else state.pickedCases.delete(c.dir);
-      updateCaseBatchButtons();
+      // 两个容器都要跟着重画 —— 勾选状态是共享的，只重画一个的话
+      // 另一页会停在旧的勾选态上，而那是看不出异常的。
+      renderCases();
     };
     lab.appendChild(cb);
     lab.onclick = e => e.stopPropagation();   // 勾选不等于「切到这一个算例」
@@ -50,6 +57,14 @@ export function renderCases() {
     d.appendChild(s);
     d.onclick = () => selectCase(c);
     box.appendChild(d);
+  }
+}
+
+/** 把列表画进它该在的每一个容器。调用点不必知道有几个。 */
+export function renderCases() {
+  for (const id of ['cases-built', 'cases-run']) {
+    const box = $(id);
+    if (box) renderCasesInto(box);
   }
   updateCaseBatchButtons();
 }
