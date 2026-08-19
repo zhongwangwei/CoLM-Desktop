@@ -19,9 +19,9 @@
 
   MOD_CMD = -J
 
-  # 失败要立即留下现场；CI 再用 GDB 在运行时解析 ASLR 地址。
+  # HDF5 打开 netCDF 文件时会置 invalid；zero/overflow 仍由 CoLM 捕获。
   FOPTS = -fdefault-real-8 -ffree-form -g -fcheck=all \
-          -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
+          -ffpe-trap=zero,overflow -fbacktrace -cpp \
           -ffree-line-length-0 -fallow-argument-mismatch
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
