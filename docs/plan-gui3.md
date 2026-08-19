@@ -2744,6 +2744,209 @@ Tested: 3 个测试全过；删掉一个分类后确认它真的会红；cargo t
 
 ---
 
+## Task 11c: 修审查抓到的状态一致性问题（已派发）
+
+一轮审查在隔离副本里配假后端跑完完整六步，抓到 1 个 Critical + 7 个
+Important + 4 个 Minor，**每条都实测复现**。这一批修前五条：
+
+| # | 问题 | 表现 |
+|---|---|---|
+| Critical | `restoreRecent` 只写 `el.value` 不发 `change` | 第二次启动起城市栅格目录永远出不来，建出 `rawdata: null` 的城市算例而界面说它能跑 |
+| 2 | 建完算例站点列表不刷新 | 同一张卡片下半截列出新算例、上半截还说这些站点没建过 |
+| 3 | 左栏 `one` 与 `n` 不同源 | 写「US-Urb 等 2 个」，而那 2 个里没有 US-Urb |
+| 4 | 重扫不清 `picked`/`pickedSite` | 按钮写「建算例：选中的 90 个站点」，按下去落一句「先点一个站点」 |
+| 5 | `batch` 与 `pickedCases` 没有桥 | 第 4 步说改 2 个，第 5 步说跑 4 个 |
+
+第 4 条更阴的那一半：重扫后 `pickedSite` 仍指向**上一个目录**的站点对象，
+而一个没勾时 `confirmSelection` 正是拿它去建 —— 在新目录里建一个旧目录
+站点的算例，**界面上看不出异常**。
+
+**Critical 那条的教训值得单独记**：`#kernel` 的 `onchange` 是「内核变了」
+的唯一通路，而它管着三样东西（kernelmeta 文字、`#urbandirs` 显隐、站点行
+的内核匹配标记）。用代码设 DOM 值时**凡是有人监听 change 的控件都要补一次
+派发** —— 否则「内核」这个概念在界面上会分裂成两个：下拉框知道的那个，
+和其余三处以为的那个。
+
+---
+
+## Task 11d: 性能与重构（审查剩下的那批）
+
+**Files:**
+- Modify: `gui/dist/app/sites.js`
+- Modify: `gui/dist/app/runner.js`
+- Modify: `gui/dist/app/main.js`
+- Modify: `gui/dist/app/domain.js`
+
+- [ ] **Step 1（Important）: 批量建算例别每次都重扫**
+
+`ensureCase()` 每建一个就 `list_cases` 一次并 `renderCases()` 一次，而
+`renderCases()` 现在要画**两个**容器。实测 90 站「全选 + 建算例」：
+`new_case` 90 次、`list_cases` **也 90 次**、约 8000 个行节点（行数
+1…90 递增 × 2 个容器）。假后端 355 ms；真后端每次 `list_cases` 要遍历
+算例根目录并读每份 `case.nml`。
+
+**两容器是这轮加的，DOM 常数直接乘 2** —— 原来的 O(n²) 被放大了一倍。
+
+把 `ensureCase()` 里的 `list_cases` + `renderCases()` + `renderSteps()`
+拿掉（保留 `setStatus` 的进度报告），改由 `ensureCases()` 在循环结束后
+统一扫一次、渲染一次：
+
+```js
+/** 为一批站点确保算例存在。**扫一次，不是每建一个扫一次。**
+ *
+ *  实测 90 站：原来 new_case 90 次、list_cases 也 90 次，每次之后重画
+ *  两个容器（行数 1…90 递增），约 8000 个行节点。中途的进度靠
+ *  `setStatus` 报，不靠列表刷新。 */
+export async function ensureCases(sites) {
+  const made = [];
+  const failed = [];
+  for (const [i, s] of sites.entries()) {
+    setStatus(`准备算例 ${i + 1}/${sites.length}：${s.name}`);
+    const c = await ensureCase(s);
+    if (c) made.push(c); else failed.push(s.name);
+  }
+  // 循环结束后统一扫一次并渲染一次。
+  const root = $('root').value.trim();
+  if (root) {
+    try {
+      state.cases = await invoke('list_cases', { root });
+      renderCases();
+      renderSteps();
+    } catch (e) { setStatus(e); }
+  }
+  if (failed.length) setStatus(`${made.length}/${sites.length} 个就绪；建不了：${failed.join('、')}`);
+  return made;
+}
+```
+
+`ensureCase()` 里改成建完直接返回，不自己扫。**注意它的返回值现在要靠
+`list_cases` 才拿得到 `Case` 对象** —— 改成返回一个由站点名与目录拼出的
+最小对象，或者让 `ensureCases` 在统一扫描后按名字回填。**以实际代码为准，
+别把返回值弄丢了**，`confirmSelection` 要拿 `made[0]` 去 `selectCase`。
+
+- [ ] **Step 2（Important）: 勾算例不要重建自己所在的容器**
+
+`renderCasesInto()` 里勾选框的 `onchange` 直接调 `renderCases()`，
+把自己所在的容器整个重建了。实测：按一下复选框，`document.activeElement`
+变成 `<body>` —— 键盘操作每勾一个就要重新 Tab 回去。
+
+（站点列表没这个问题，它只 `renderMakeCase` + `renderSteps`，不重建自己。）
+
+改成只重画**另一个**容器：
+
+```js
+    cb.onchange = () => {
+      if (cb.checked) state.pickedCases.add(c.dir); else state.pickedCases.delete(c.dir);
+      // **只重画另一个容器，自己这个原地不动。** 重建自己所在的容器会
+      // 把焦点打到 body 上 —— 键盘操作每勾一个就要重新 Tab 回去。
+      // 勾选状态两页共享，另一页必须跟着变。
+      for (const id of ['cases-built', 'cases-run']) {
+        if (id === box.id) continue;
+        const other = $(id);
+        if (other) renderCasesInto(other);
+      }
+      updateCaseBatchButtons();
+    };
+```
+
+`renderCasesInto(box)` 要能知道自己画在哪个容器里 —— `box.id` 就是。
+
+- [ ] **Step 3（Important）: `showKernelMeta` 改名，并成为「内核变了」的唯一入口**
+
+它现在做三件事（写 meta 文字、切 `#urbandirs`、重画站点列表），三个调用点
+确实三件都要，所以不是多做了 —— **问题在名字只说了第一件**。也正因为它
+读起来像个纯显示函数，Task 11c 那个 Critical 才没人想到「恢复内核之后
+也得调它」。
+
+改名 `applyKernel()`，并把 `onchange` 里另外两个调用收进去：
+
+```js
+/** 内核变了：把随之而变的东西全部更新。
+ *
+ *  **这是「内核变了」的唯一入口。** 它管着四样：meta 文字、城市栅格目录
+ *  的显隐、站点行的内核匹配标记、当前内核编不进去的字段名单。
+ *  分散在调用点的话，总有一条路径会漏掉其中一样 —— 实测漏过：
+ *  `restoreRecent` 只写 `el.value` 不发 change，于是恢复出来的内核
+ *  只有下拉框自己知道，城市栅格目录永远出不来。
+ *
+ *  原名叫 `showKernelMeta`，只说了第一件事，而它读起来像个纯显示函数。 */
+async function applyKernel() { ... }
+```
+
+`onchange` 相应简化成 `s.onchange = applyKernel;`。
+
+**顺带消掉一次重复**：原来的 `onchange` 是
+`showKernelMeta(); refreshRelevance(); renderSteps();`，而
+`showKernelMeta → renderSites → renderSteps` 已经刷过一次 ——
+`renderSteps` 每次切内核跑两遍。
+
+- [ ] **Step 4（Minor）: 站点行的「已建算例」标记按 `caseName` 匹配**
+
+`renderSites()` 里 `state.cases.find(x => x.name === s.name)`，
+而 `ensureCase` 建的时候用的是 `s.caseName ?? s.name`。
+
+实测：为 urban 那个 `AU-Preston` 建好算例（目录 `AU-Preston-urban`）后，
+那一行**整表重画也永远**不显示「已建算例」；反过来只建了非 urban 那个时，
+两行都显示「已建算例」。
+
+```js
+    // 按 caseName 匹配，不是 name —— 重名站点（AU-Preston 在 PLUMBER2 与
+    // Urban-PLUMBER 里各有一个）建出来的目录带后缀，按 name 找会一个都
+    // 认不出、或者两行都认成同一个。
+    const c = state.cases.find(x => x.name === (s.caseName ?? s.name));
+```
+
+- [ ] **Step 5（Minor）: 启动时把已建的算例列出来**
+
+`boot()` 里没人调 `renderCases()`。实测：`root` 由 `load_recent` 恢复、
+磁盘上有算例时，第 3 步的 `#cases-built` 是个高 2px 的空盒子（连
+「这个目录下没有算例」都没有），`#runall` 显示 HTML 里的死字「运行全部」。
+
+在 `restoreRecent()` 之后补：
+
+```js
+    // 恢复出来的算例根目录里可能已经有算例 —— 不扫的话第 3 步是个空盒子，
+    // 而用户上次的工作就在那里。
+    const root = $('root').value.trim();
+    if (root) {
+      try {
+        state.cases = await invoke('list_cases', { root });
+        renderCases();
+      } catch (e) { /* 目录没了就算了，扫描按钮还在 */ }
+    }
+```
+
+- [ ] **Step 6（Minor）: 在 `domain.js` 里点明「落地时要改什么」**
+
+`state.domain` 目前零读取点，形状只留了一半：`pick()` 对三档都硬编码
+`go('prep')`，而 `STEPS` 是 `shell.js` 的模块级 const，被 `nextOf` /
+`go` / `renderSteps` 直接闭包引用。区域/全球落地时必须把它变成
+`STEPS[state.domain]` 或一个函数，`nextOf` 的签名和三个调用点都要跟着动。
+
+接得上的那半是 `renderNextButtons` 遍历 `.page`：未知 `data-step` 的页
+`nextOf` 返回 null、`.foot` 会被移掉，新域的页面加进来不会炸。
+
+在 `domain.js` 的模块注释末尾补一段：
+
+```js
+//! **区域/全球落地时要改的是 `shell.js` 的 `STEPS`。** 它现在是模块级
+//! 的 const，被 `nextOf` / `go` / `renderSteps` 直接闭包引用 —— 三档
+//! 各自一套步骤链的话，得把它变成 `STEPS[state.domain]` 或一个函数，
+//! 那三个调用点都要跟着动。`state.domain` 现在零读取点，别以为它已经接好了。
+//!
+//! 已经接好的那半：`renderNextButtons` 遍历 `.page`，未知 `data-step`
+//! 的页 `nextOf` 返回 null、`.foot` 会被移掉，新域的页面加进来不会炸。
+```
+
+- [ ] **Step 7: 验证与提交**
+
+每步之后 `node --check`；全部改完跑 `cargo run -p xtask -- check-gui`
+与真界面（重点验 Step 1 的 90 站批量建：`list_cases` 只应发一次）。
+
+分六个提交，一步一个。
+
+---
+
 ## Task 12: `waterheat` 更名 `default`
 
 这是整个计划里**唯一越出前端**的任务。它动脚本、Rust 测试与回归黄金基准。
