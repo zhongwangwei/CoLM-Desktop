@@ -192,7 +192,12 @@ export async function renderFields() {
 
   if (outputFields.length) {
     renderScope(output);
-    output.appendChild(table(outputFields));
+    // 与参数页各分节同一条规矩：可编辑的在前，只读派生项排到末尾。
+    // `DEF_dir_restart` 与 `DEF_dir_history` 归的是「输出与重启」——
+    // `config.rs` 里**显式列举**了这两个名字，早于 `DEF_DIR` 前缀规则，
+    // 所以它们落在这个分支，而不是上面那个 PARAM_SECTIONS 循环里。
+    output.appendChild(table(
+      outputFields.slice().sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0))));
   } else {
     output.innerHTML = '<p class="muted">当前内核没有可配置的输出参数。</p>';
   }

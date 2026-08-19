@@ -214,16 +214,21 @@ DEF_dir_history           DEF_wetland_finundation_scheme
 **为什么可编辑在前、只读在后：** 只读行混在中间会打断编辑节奏。
 按 `field_section()` 实际推导，这 6 个的分布是：
 
-| 分节 | derived 字段 | 判据 |
-|---|---|---|
-| 文件与目录 | `DEF_dir_landdata` `DEF_dir_restart` `DEF_dir_history` | `starts_with("DEF_DIR")` |
-| 地表数据 | `DEF_USE_USGS` `DEF_USE_IGBP` | 名单命中 |
-| 示踪剂 | `DEF_wetland_finundation_scheme` | 命中 `WETLAND_FINUNDATION` |
+| 分节 | derived 字段 | 判据 | 渲染到哪 |
+|---|---|---|---|
+| 文件与目录 | `DEF_dir_landdata` | `starts_with("DEF_DIR")` | 参数页字段表 |
+| 地表数据 | `DEF_USE_USGS` `DEF_USE_IGBP` | 名单命中 | 参数页字段表 |
+| 示踪剂 | `DEF_wetland_finundation_scheme` | 命中 `WETLAND_FINUNDATION` | 参数页字段表（TRACEROFF 时被内核过滤掉） |
+| 输出与重启 | `DEF_dir_restart` `DEF_dir_history` | **显式列举** `n == "DEF_DIR_RESTART"` / `"DEF_DIR_HISTORY"` | 运行页的输出卡片 |
 
-最多的一节也只有 3 行，不至于喧宾夺主。注意 `DEF_dir_restart` 与
-`DEF_dir_history` 归的是**文件与目录**而不是「输出与重启」——
-后者的判据是 `DEF_REST` / `DEF_HIST` 开头，而这两个是 `DEF_DIR` 开头，
-先被目录规则接走。
+**这两个是坑，值得写下来。** 光看前缀会以为 `DEF_dir_restart` 归「文件与目录」
+（`DEF_DIR` 开头），实际不是 —— `config.rs` 第 28–29 行**显式列举**了这两个
+名字，而那个 `if` 早于 `DEF_DIR` 前缀规则。判归属要读到显式列举那一段，
+不能只看前缀。
+
+后果是它们落在 `renderFields()` 的 `outputFields` 分支（运行页）而不是
+`PARAM_SECTIONS` 循环（参数页），所以**两个分支都要排序**，只改一个会让
+运行页的派生项混在中间。
 
 ---
 
