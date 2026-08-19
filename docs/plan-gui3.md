@@ -2346,7 +2346,24 @@ export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
 cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -8
 ```
 
-记下输出。若这一步本来就不过，**停下来报 BLOCKED** ——
+`golden-run` 自己**不比对**，它只跑三个阶段并提示下一条命令。判据要再跑一次：
+
+```bash
+cargo run -q -p oracle --bin golden-compare -- \
+  oracle/golden/CN-Cng_hist_2008-01.nc \
+  oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+```
+
+**基线已经实测过了**（改名前，`kernels/waterheat`），输出是：
+
+```
+identical: 129 variables, 10 dimensions (ignoring ["create_time"])
+```
+
+三个阶段 `mksrfdata ok / mkinidata ok / colm ok`。**这一行就是改名后要
+逐字复现的目标。**
+
+若这一步在你手上跑出别的结果，**停下来报 BLOCKED** ——
 在一个本来就红的基准上做改名，改完分不清是改名弄坏的还是本来就坏的。
 
 - [ ] **Step 2: 脚本与内核目录**
@@ -2435,8 +2452,21 @@ export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
 cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -8
 ```
 
-期望：与 Step 1 记下的基线**逐字相同的成功文案**。只改名字不该动到任何
-一个字节的输出。不一致就 **停下来报 BLOCKED**，不要试图「顺手修一下」——
+再跑一次比对：
+
+```bash
+cargo run -q -p oracle --bin golden-compare -- \
+  oracle/golden/CN-Cng_hist_2008-01.nc \
+  oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+```
+
+期望**逐字**是：
+
+```
+identical: 129 variables, 10 dimensions (ignoring ["create_time"])
+```
+
+只改名字不该动到任何一个字节的输出。不一致就 **停下来报 BLOCKED**，不要试图「顺手修一下」——
 改名改坏了黄金基准是必须当场查清的事。
 
 注意内核目录也改名了，`golden_run.rs` 的默认值 `kernels/waterheat` 已经
