@@ -187,6 +187,13 @@ fn emit(rows: &[Row]) {
     println!("];");
     println!();
 
+    // 数据表不参与 rustfmt —— 不写这个属性的话，下次重新生成又会让
+    // `cargo fmt --check` 变红，而把 4053 个数拆成几千行只会让 diff 没法读。
+    println!("// **这张表不参与 rustfmt。** 每行是一个站点一个变量的 8 层值，rustfmt 会把");
+    println!("// 超宽的数组拆成 8 行 —— 4053 个数拆完之后，重新抽一次数据的 diff 会从");
+    println!("// 「哪几个站点变了」变成几千行噪音。`colm-schema/src/generated.rs` 不需要");
+    println!("// 这条是因为它的长行 rustfmt 拆不动，会自己放弃。");
+    println!("#[rustfmt::skip]");
     println!("pub static SITES: &[UrbanSoil] = &[");
     for (name, lon, lat, profiles, texture) in rows {
         println!("    UrbanSoil {{");

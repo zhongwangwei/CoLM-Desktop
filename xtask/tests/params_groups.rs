@@ -27,8 +27,8 @@ fn repo() -> PathBuf {
 /// workspace**（把 429 个 Tauri 依赖挡在引擎外面，见 design.md §4.1），
 /// xtask 依赖不到它。`xtask/src/gui.rs` 的静态检查用的是同一手法。
 fn backend_sections() -> BTreeSet<String> {
-    let src = std::fs::read_to_string(repo().join("gui/src-tauri/src/config.rs"))
-        .expect("config.rs");
+    let src =
+        std::fs::read_to_string(repo().join("gui/src-tauri/src/config.rs")).expect("config.rs");
     let start = src
         .find("pub(crate) fn field_section")
         .expect("field_section 不见了");
@@ -62,7 +62,9 @@ fn backend_sections() -> BTreeSet<String> {
 /// 前端字段表按这个顺序分节显示。
 fn param_sections() -> BTreeSet<String> {
     let js = std::fs::read_to_string(repo().join("gui/dist/app/params.js")).expect("params.js");
-    let start = js.find("const PARAM_SECTIONS").expect("PARAM_SECTIONS 不见了");
+    let start = js
+        .find("const PARAM_SECTIONS")
+        .expect("PARAM_SECTIONS 不见了");
     let end = js[start..].find("];").expect("PARAM_SECTIONS 结尾") + start;
     js[start..end]
         .split('\'')

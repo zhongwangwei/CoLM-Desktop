@@ -79,6 +79,11 @@ pub static SITE_VARS: [(&str, &str); 25] = [
     ("texture", "soil_texture"),
 ];
 
+// **这张表不参与 rustfmt。** 每行是一个站点一个变量的 8 层值，rustfmt 会把
+// 超宽的数组拆成 8 行 —— 4053 个数拆完之后，重新抽一次数据的 diff 会从
+// 「哪几个站点变了」变成几千行噪音。 不需要
+// 这条是因为它的长行 rustfmt 拆不动，会自己放弃。
+#[rustfmt::skip]
 pub static SITES: &[UrbanSoil] = &[
     UrbanSoil {
         site: "AU-Preston",
