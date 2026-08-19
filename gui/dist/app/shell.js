@@ -114,9 +114,13 @@ export function renderSteps() {
   const n = onSites
     ? (state.picked.size || (state.pickedSite ? 1 : 0))
     : (state.batch.length || state.picked.size);
+  // **`one` 必须跟 `n` 同源。** 勾了两个、又点了第三个（没勾）的时候，
+  // `n` 数的是勾中的两个而 `pickedSite` 是第三个 —— 左栏会写出
+  // 「US-Urb 等 2 个」，而那 2 个里根本没有 US-Urb。实测踩过。
   const one = onSites
-    ? (state.pickedSite?.name
-       ?? state.sites.find(x => state.picked.has(x.site_file))?.name)
+    ? (state.picked.size
+       ? state.sites.find(x => state.picked.has(x.site_file))?.name
+       : state.pickedSite?.name)
     : (state.selected?.name ?? state.pickedSite?.name);
   $('estSite').textContent = n > 1 ? `${one ?? '—'} 等 ${n} 个` : (one ?? '—');
   const k = $('kernel');
