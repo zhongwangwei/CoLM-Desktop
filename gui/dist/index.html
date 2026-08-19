@@ -70,6 +70,15 @@
       <p class="sub">先定<b>用哪套物理</b>和<b>算例放哪</b>。
         内核是编译期决定的，它决定了下一步哪些站点跑得了 ——
         城市站必须走 <code>urban</code> 内核，还要额外给全球栅格目录。</p>
+
+      <div class="card">
+        <h3>内核</h3>
+        <div class="ch">一个内核 = 一组编译期宏。选哪个决定了哪些参数有意义、
+          哪些输出变量写得出来，<b>以及下一步哪些站点跑得了</b> ——
+          城市站必须走编进 <code>URBANON</code> 的那一套。</div>
+        <select class="select" id="kernel"></select>
+        <p class="muted mini" id="kernelmeta">&nbsp;</p>
+      </div>
     </section>
 
     <!-- ② 站点 -->
@@ -137,15 +146,9 @@
     <section class="page" data-step="params" hidden>
       <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>配参数</h1>
-      <p class="sub">选择编译内核，并按 CoLM 源码 namelist 的用途配置参数。
-        <b>列表会随 waterheat、urban、bgc 内核切换</b>；未设置项显示源码默认值，专家模式额外显示派生只读项。</p>
-
-      <div class="card">
-        <h3>内核</h3>
-        <div class="ch">一个内核 = 一组编译期宏。选哪个决定了哪些参数有意义、哪些输出变量写得出来。</div>
-        <select class="select" id="kernel"></select>
-        <p class="muted mini" id="kernelmeta">&nbsp;</p>
-      </div>
+      <p class="sub">按 CoLM 源码 namelist 的用途配置参数。
+        <b>列表随第 2 步选的内核变</b> —— 换 default、urban、bgc 时可配置项会一起换；
+        未设置项显示源码默认值，只读派生项排在各分节末尾。</p>
 
       <div class="card">
         <h3>namelist 参数</h3>
