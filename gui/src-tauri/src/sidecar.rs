@@ -287,7 +287,9 @@ pub async fn run_case(
     force: bool,
 ) -> Result<i32, String> {
     let cli = resolve_cli();
-    let mut child = std::process::Command::new(&cli)
+    let mut cmd = std::process::Command::new(&cli);
+    // Windows 上不给它开控制台窗口 —— 见 `colm_kernel::run::no_console`。
+    let mut child = colm_kernel::run::no_console(&mut cmd)
         // `--stream` 不是可选的润色：不加的话 `colm-cli run` 只在每段跑完
         // 之后打一句摘要，一次真实运行总共 39 行，而且全在结束时到达 ——
         // 下面这整套「解析 TIMESTEP、限流、批量发送」就没有输入可处理，
@@ -499,7 +501,8 @@ pub async fn run_batch(
 /// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
 fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, String> {
     let cli = resolve_cli();
-    let out = std::process::Command::new(&cli)
+    let mut cmd = std::process::Command::new(&cli);
+    let out = colm_kernel::run::no_console(&mut cmd)
         .args(["run", case, "--kernel", kernel, "--stream", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -624,7 +627,8 @@ pub async fn series(case: String, vars: String) -> Result<String, String> {
 /// 用于短命令（`new` / `series`）；跑模型那种长命令走 `run_case` 的流式路径。
 pub(crate) fn capture(args: &[String]) -> Result<String, String> {
     let cli = resolve_cli();
-    let out = std::process::Command::new(&cli)
+    let mut cmd = std::process::Command::new(&cli);
+    let out = colm_kernel::run::no_console(&mut cmd)
         .args(args)
         .output()
         .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;

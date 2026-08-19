@@ -67,6 +67,28 @@ pub fn run_stage(
 /// 而本进程正等着一个再也不会来的 stdout —— 双方各等各的。
 /// 代价是 stderr 不参与逐行回调，它整块在末尾追加。这是可以接受的：
 /// gfortran 的运行时错误意味着这一段已经结束了，没有「实时」可言。
+/// Windows 上不让子进程弹出自己的控制台窗口。
+///
+/// **一次运行会起四个进程**：界面起 `colm-cli`，它再依次起 `mksrfdata.x`、
+/// `mkinidata.x`、`colm.x`。四个都是控制台程序，而 Windows 默认给控制台
+/// 程序开一个新窗口 —— 于是点一次「运行」，屏幕上会闪出四个黑框，
+/// 其中跑模型那个还会停留几分钟，关掉它就把模型杀了。
+///
+/// `CREATE_NO_WINDOW` = 0x0800_0000。不用 `DETACHED_PROCESS`：
+/// 那个会让子进程脱离作业对象，界面退出时模型还在后台跑。
+///
+/// 非 Windows 平台是恒等函数 —— **判断放在这里而不是每个调用点**，
+/// 否则四处各写一遍 `#[cfg(windows)]`，漏掉一处就是一个只在 Windows 上
+/// 看得见的窗口，而开发机上永远复现不出来。
+pub fn no_console(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 /// RangeCheck 的逐变量播报里**不带异常标记**的那些行。
 ///
 /// 实测一次 11 年的 AT-Neu：2208 万行，占 `colm.log` 2.0 GB 的绝大部分。
@@ -101,7 +123,8 @@ pub fn run_stage_streaming(
     on_line: &mut dyn FnMut(&str),
 ) -> Result<StageReport> {
     let exe = kernel.program(stage.program());
-    let mut child = Command::new(&exe)
+    let mut cmd = Command::new(&exe);
+    let mut child = no_console(&mut cmd)
         .arg(namelist)
         .current_dir(work)
         .stdout(Stdio::piped())
