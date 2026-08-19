@@ -79,6 +79,31 @@
         <select class="select" id="kernel"></select>
         <p class="muted mini" id="kernelmeta">&nbsp;</p>
       </div>
+
+      <div class="card">
+        <h3>算例放哪</h3>
+        <div class="ch">每个站点占一个子目录。默认放在站点数据旁边，可以改。
+          下一步选中的每个站点都会在这里建一个。</div>
+        <div class="browse">
+          <input class="input" id="root" placeholder="…/colm-cases">
+          <button class="btn-ghost pick" data-for="root">选择…</button>
+          <button class="btn-ghost" id="rescan">重新扫描已建的</button>
+        </div>
+        <div id="urbandirs" hidden>
+          <div class="expert-note">
+            当前内核编进了 <b>URBAN</b>。城市算例必须给全球栅格目录 ——
+            土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
+          </div>
+          <div class="row">
+            <div class="field"><label>rawdata 目录</label>
+              <div class="browse"><input class="input" id="rawdata">
+                <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
+            <div class="field"><label>runtime 目录</label>
+              <div class="browse"><input class="input" id="runtime">
+                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ② 站点 -->
@@ -111,30 +136,6 @@
         <p class="muted mini" style="margin-top:8px">
           点行只是选中，<b>不会动任何文件</b>。按下面的「确定」才会为选中的站点建算例
           —— 那一步要读站点文件与强迫场并写出补齐后的 <code>site.nc</code>。</p>
-      </div>
-
-      <div class="card">
-        <h3>算例放哪</h3>
-        <div class="ch">每个站点占一个子目录。默认放在站点数据旁边，可以改。</div>
-        <div class="browse">
-          <input class="input" id="root" placeholder="…/colm-cases">
-          <button class="btn-ghost pick" data-for="root">选择…</button>
-          <button class="btn-ghost" id="rescan">重新扫描已建的</button>
-        </div>
-        <div id="urbandirs" hidden>
-          <div class="expert-note">
-            选中的站点里有<b>城市站</b>。城市算例必须给全球栅格目录 ——
-            土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
-          </div>
-          <div class="row">
-            <div class="field"><label>rawdata 目录</label>
-              <div class="browse"><input class="input" id="rawdata">
-                <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
-            <div class="field"><label>runtime 目录</label>
-              <div class="browse"><input class="input" id="runtime">
-                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
-          </div>
-        </div>
       </div>
 
       <!-- 出口在这里，不在站点列表下面：按下去会**在上面那个目录里**建算例，

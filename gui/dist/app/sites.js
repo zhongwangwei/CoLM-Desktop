@@ -270,7 +270,6 @@ function renderSites(r = {}) {
       if (cb.checked) state.picked.add(s.site_file); else state.picked.delete(s.site_file);
       renderDataFoot();
       renderSteps();   // 勾选改变了「在配几个」，左栏要立刻跟上
-      $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.site_file));
     };
     lab.appendChild(cb);
     lab.onclick = e => e.stopPropagation();   // 勾选不等于「选中这一个」

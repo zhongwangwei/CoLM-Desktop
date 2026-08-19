@@ -8,6 +8,7 @@ import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
+import { kernelIsUrban } from './kernel.js';
 
 // 「选个目录」而是「选一套物理」—— 让它列出来，而不是让人记住路径。
 export async function refreshKernels() {
@@ -55,6 +56,10 @@ function showKernelMeta() {
   $('kernelmeta').textContent = k
     ? `${k.generator_args}  ·  CoLM ${k.colm_git_sha}  ·  ${k.platform}`
     : '\u00a0';
+  // 城市栅格目录跟着内核走，不跟着站点走 —— 内核现在排在站点前面，
+  // 到选站点时这两个目录必须已经填好。
+  const ud = $('urbandirs');
+  if (ud) ud.hidden = !kernelIsUrban();
 }
 
 $('run').onclick = async () => {
