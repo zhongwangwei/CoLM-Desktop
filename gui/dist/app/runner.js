@@ -77,6 +77,15 @@ async function applyKernel() {
   // state.sites 为空、没走 renderSites 那条分支时，这里才是唯一一次
   // 刷新左栏的机会，所以只在那时补一次。
   if (!state.sites.length) renderSteps();
+  // 自带的示例现在有两个：CN-Cng（自然）与 AU-Preston（城市）。两个都会装，
+  // 但按钮说出**当前内核下哪个用得上** —— 选了 urban 却看到「CN-Cng」，
+  // 人会以为自带的这份跟自己没关系。
+  const ex = $('use-example');
+  if (ex) {
+    ex.textContent = kernelIsUrban()
+      ? '用自带的示例站点（城市站 AU-Preston）'
+      : '用自带的示例站点（CN-Cng）';
+  }
 }
 
 $('run').onclick = async () => {
