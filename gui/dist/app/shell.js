@@ -9,19 +9,18 @@ import { $ } from './ui.js';
 
 /** 六步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
 export const STEPS = [
-  // 前处理在前：它产出的正是下一步要扫的东西。
+  // 前处理在前：它产出的正是后面要扫的东西。
   { id: 'prep',   t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
-  // 第二步叫「站点」而不是「数据」—— 两步都关于数据，而它实际展示的是站点。
-  { id: 'sites',  t: '站点',   d: '扫目录、选站', need: () => null },
-  // 基本设定回答「在哪跑、用什么物理、跑多久」。三张卡片顺序不可换 ——
-  // 建算例必须在最前，因为内核与时间要写进它产出的 case.nml。
-  //
-  // 门槛认「选了站点**或者**已经有算例」：重启程序后 recent.json 恢复了
-  // 算例目录，那时没有 pickedSite 但算例是现成的，不该被拦在门外。
-  { id: 'basic',  t: '基本设定', d: '算例、内核、时间与预热',
-    need: () => (state.pickedSite || state.picked.size || state.cases.length
-      ? null : '先在第 2 步选站点（可以多选）') },
-  { id: 'params', t: '参数',   d: 'namelist 字段表',
+  // **内核排在站点前面，顺序由依赖链定。** 城市站必须走 URBANON 编进去的
+  // 内核，还要给全球栅格目录；default 内核跑不了城市站，要的数据和路径也
+  // 完全不同。反过来排的话，人挑完二十个城市站才发现手上是 default。
+  { id: 'basic',  t: '基本设定', d: '内核与算例目录', need: () => null },
+  // 门槛认「选了内核」而不是「有内核」：下拉框里没选中任何一项时
+  // $('kernel').value 是空串，那时建出来的算例没有物理可跑。
+  { id: 'sites',  t: '站点',   d: '扫目录、选站、建算例',
+    need: () => (document.getElementById('kernel')?.value
+      ? null : '先在第 2 步选一个内核') },
+  { id: 'params', t: '参数',   d: '时间与预热 · namelist 字段表',
     need: () => (state.selected ? null : '先在第 3 步建一个算例') },
   { id: 'run',    t: '运行',   d: '输出与运行',
     need: () => (state.selected ? null : '先在第 3 步建一个算例') },
@@ -32,7 +31,11 @@ export const STEPS = [
 /** 下一步是哪一步。**每一页都要有出口** —— 让人自己回左栏找下一步，
  *  等于把「现在该干嘛」这个问题推给用户，而那正是原来那版最大的毛病。 */
 export function nextOf(id) {
+  // `findIndex` 找不到时返回 -1，而 `STEPS[-1 + 1]` 正好是第一步 ——
+  // `?? null` 永远兜不住。表现是：改 step id 时漏改一处，页面不报错，
+  // 只是渲染出一个**指回第 1 步**的「下一步」。实测 nextOf('data') === prep。
   const i = STEPS.findIndex(s => s.id === id);
+  if (i < 0) return null;
   return STEPS[i + 1] ?? null;
 }
 
@@ -43,6 +46,10 @@ export function renderNextButtons() {
     // 两个长得差不多、行为不同的按钮摆在一起，比没有按钮更糟。
     if (page.hasAttribute('data-own-foot')) continue;
     const next = nextOf(page.dataset.step);
+    // 没有下一步的那一页（结果页）不该留一个空的 `.foot` —— 它带
+    // border-top 与 padding，实测在页面底部渲染出一条 33px 的、
+    // 下面什么都没有的横线。
+    if (!next) { page.querySelector('.foot')?.remove(); continue; }
     let foot = page.querySelector('.foot');
     if (!foot) {
       foot = document.createElement('div');
@@ -50,7 +57,6 @@ export function renderNextButtons() {
       page.appendChild(foot);
     }
     foot.textContent = '';
-    if (!next) continue;
     const why = next.need();
     const b = document.createElement('button');
     b.className = 'btn-next';
@@ -63,7 +69,11 @@ export function renderNextButtons() {
 
 export function go(id) {
   const step = STEPS.find(s => s.id === id);
-  const why = step?.need();
+  // 未知 id 时 `step?.need()` 是 undefined（假值），于是照常往下走，
+  // 把**所有**页都 hide 掉 —— 内容区整块空白，而且不报错。
+  // 实测 go('nope') 之后可见页数 0。改 id 的任务还有好几个，让它说出来。
+  if (!step) { setStatus(`没有这一步：${id}`); return; }
+  const why = step.need();
   if (why) { setStatus(why); return; }
   state.step = id;
   for (const p of document.querySelectorAll('.page')) p.hidden = p.dataset.step !== id;

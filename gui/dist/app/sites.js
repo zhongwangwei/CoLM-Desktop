@@ -269,6 +269,7 @@ function renderSites(r = {}) {
     cb.onchange = () => {
       if (cb.checked) state.picked.add(s.site_file); else state.picked.delete(s.site_file);
       renderDataFoot();
+      renderSteps();   // 勾选改变了「在配几个」，左栏要立刻跟上
       $('urbandirs').hidden = !state.sites.some(x => x.urban && state.picked.has(x.site_file));
     };
     lab.appendChild(cb);
@@ -292,6 +293,9 @@ function renderSites(r = {}) {
     d.onclick = () => pickSite(s);
     box.appendChild(d);
   }
+  // 左栏的「已选站点」现在会说出**在配几个**，而勾选正是改变那个数的动作。
+  // 不在这里刷一次的话，勾了 20 个左栏还写着上一次的数。
+  renderSteps();
 }
 
 

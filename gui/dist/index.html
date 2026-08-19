@@ -39,7 +39,7 @@
       <h1>前处理</h1>
       <p class="sub">把原始数据批量转成模型要的格式，<b>产出的就是下一步要扫的站点数据</b>。
         已经转好的会跳过 ——
-        判据与第 4 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
+        判据与第 5 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
 
       <div class="card">
         <h3>还没有实现</h3>
@@ -62,13 +62,23 @@
       </div>
     </section>
 
+    <!-- ③ 基本设定：跑一次模拟最少要定的三件事 —— 在哪跑、用什么物理、跑多久。
+         三张卡片顺序不可换：建算例产出 case.nml，后两张要写进它。 -->
+    <section class="page" data-step="basic" hidden>
+      <div class="work-head"><span class="kicker">第 2 步</span></div>
+      <h1>基本设定</h1>
+      <p class="sub">先定<b>用哪套物理</b>和<b>算例放哪</b>。
+        内核是编译期决定的，它决定了下一步哪些站点跑得了 ——
+        城市站必须走 <code>urban</code> 内核，还要额外给全球栅格目录。</p>
+    </section>
+
     <!-- ② 站点 -->
     <section class="page" data-step="sites" data-own-foot hidden>
-      <div class="work-head"><span class="kicker">第 2 步</span></div>
+      <div class="work-head"><span class="kicker">第 3 步</span></div>
       <h1>有哪些站点可以跑</h1>
       <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
         程序顺着命名约定把每个站点的强迫场与观测文件一并找出来 ——
-        <b>有没有观测，决定了跑完能不能自动评估</b>。</p>
+        <b>有没有观测，决定了跑完能不能自动评估</b>。选好之后在这一页建算例。</p>
 
       <div class="card">
         <h3>站点目录</h3>
@@ -121,16 +131,6 @@
       <!-- 出口在这里，不在站点列表下面：按下去会**在上面那个目录里**建算例，
            摆在设定那个目录之前，等于让人先按确定再想产物放哪。 -->
       <div class="foot" id="datafoot"></div>
-    </section>
-
-    <!-- ③ 基本设定：跑一次模拟最少要定的三件事 —— 在哪跑、用什么物理、跑多久。
-         三张卡片顺序不可换：建算例产出 case.nml，后两张要写进它。 -->
-    <section class="page" data-step="basic" hidden>
-      <div class="work-head"><span class="kicker">第 3 步</span></div>
-      <h1>基本设定</h1>
-      <p class="sub">为第 2 步选中的<b>每一个</b>站点建算例，再选一套编译内核与时间范围。
-        <b>这三样对整批生效</b> —— 勾了几个就配几个；取值不一致的字段会被标出来，
-        细调留给下一步的参数表。</p>
     </section>
 
     <!-- ④ 参数 -->
