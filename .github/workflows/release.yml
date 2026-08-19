@@ -41,15 +41,21 @@ jobs:
           workspaces: gui/src-tauri
 
       # ---- Fortran 工具链，三个平台三种装法 ----
+      # open-mpi 是**必须的，哪怕这三个预设都不用 MPI**：
+      # `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
+      # 而 `#ifndef USEMPI` 从下一行才开始 —— 所以 SinglePoint 把 USEMPI
+      # 关掉了，头文件照样要找得到。Windows 那步早就装了 msmpi，
+      # 两个 unix 步骤漏了，于是三平台构建在第二个 .o 上就停了。
       - name: Fortran toolchain (macOS)
         if: runner.os == 'macOS'
-        run: brew install gcc netcdf-fortran lapack
+        run: brew install gcc netcdf-fortran lapack open-mpi
 
       - name: Fortran toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y gfortran libnetcdff-dev liblapack-dev \
+            libopenmpi-dev \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       # Windows 的 Fortran 只能走 MSYS2。GUI 那半仍用 MSVC 目标 ——

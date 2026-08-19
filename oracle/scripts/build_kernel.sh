@@ -55,9 +55,24 @@ rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 
+# MPI 的**头文件路径**。三个预设一个都不用 MPI，编译却仍然要它：
+# `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
+# 而 `#ifndef USEMPI` 从下一行才开始 —— SinglePoint 把 USEMPI 关掉了，
+# 头文件照样要找得到。
+#
+# 路径不写死：macOS 的 Homebrew 放在 /opt/homebrew/include（Makeoptions 已经带上），
+# 而 Ubuntu 的 libopenmpi-dev 放在 /usr/lib/x86_64-linux-gnu/openmpi/include，
+# 不在默认搜索路径上。问 mpif90 自己要 —— 它正是为此存在的包装器。
+# `--showme:incdirs` 在 OpenMPI 5 上返回空（实测 5.0.9），所以解析 `-show`。
+MPI_INC=""
+if command -v mpif90 >/dev/null 2>&1; then
+  MPI_INC=$(mpif90 -show 2>/dev/null | tr ' ' '\n' | grep '^-I' | sort -u | tr '\n' ' ')
+fi
+
 # FF=gfortran 而非 mpif90：SinglePoint 已 #undef USEMPI，用 mpif90 只会白链 4 个 MPI 库。
 # 实测去掉后依赖只剩 netcdff/netcdf/LAPACK/BLAS/libgfortran/libgomp/libquadmath。
-make FF="gfortran -fopenmp" mksrfdata.x mkinidata.x colm.x
+# 只借它的 -I，不借它的 -l。
+make FF="gfortran -fopenmp $MPI_INC" mksrfdata.x mkinidata.x colm.x
 
 DEST="$REPO_ROOT/$OUTDIR/$PRESET"
 mkdir -p "$DEST"
