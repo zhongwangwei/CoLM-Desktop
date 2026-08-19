@@ -159,3 +159,33 @@ fn an_opened_kernel_holds_an_absolute_path() {
         );
     }
 }
+
+#[test]
+fn an_extended_length_prefix_is_stripped_but_a_unc_path_stays_a_unc_path() {
+    use std::path::PathBuf;
+    // 非 Windows 上 `plain` 是恒等函数 —— 这条在两个平台上都要成立，
+    // 所以只钉「不改坏」这一半。
+    let same = PathBuf::from("/Users/x/case");
+    assert_eq!(super::plain(same.clone()), same);
+
+    #[cfg(windows)]
+    {
+        // `canonicalize` 在 Windows 上返回的就是这种形式，而
+        // `CreateProcessW` 的当前目录不接受它。
+        assert_eq!(
+            super::plain(PathBuf::from(r"\\?\C:\Users\x\case")),
+            PathBuf::from(r"C:\Users\x\case")
+        );
+        // UNC 形式砍掉四个字符会得到 `UNC\server\share` —— 一个相对路径，
+        // 比原来更糟。要还原成 `\\server\share`。
+        assert_eq!(
+            super::plain(PathBuf::from(r"\\?\UNC\server\share\case")),
+            PathBuf::from(r"\\server\share\case")
+        );
+        // 没有前缀的原样返回。
+        assert_eq!(
+            super::plain(PathBuf::from(r"C:\already\plain")),
+            PathBuf::from(r"C:\already\plain")
+        );
+    }
+}

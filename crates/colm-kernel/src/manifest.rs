@@ -118,9 +118,9 @@ impl Kernel {
         // 相对的可执行文件路径会被相对 `work` 解析，而不是相对调用方的当前
         // 目录 —— `Kernel::open("kernels/waterheat")` 成功，随后 spawn 报
         // 「No such file or directory」。一个已校验的内核本就该持有绝对路径。
-        let dir = dir
-            .canonicalize()
-            .with_context(|| format!("cannot resolve {}", dir.display()))?;
+        // `absolute` 而不是 `canonicalize`：Windows 上后者返回 `\\?\C:\...`，
+        // 而 `CreateProcessW` 的当前目录不接受那种路径。见 `plain`。
+        let dir = absolute(dir).with_context(|| format!("cannot resolve {}", dir.display()))?;
 
         Ok(Kernel { dir, manifest })
     }
@@ -147,3 +147,42 @@ fn sha256_file(p: &Path) -> Result<String> {
 #[cfg(test)]
 #[path = "manifest_tests.rs"]
 pub mod manifest_tests;
+
+/// 去掉 Windows 的 `\\?\` 扩展长度前缀。
+///
+/// `std::fs::canonicalize` 在 Windows 上返回的**一律**是
+/// `\\?\C:\Users\...` 这种形式，而那种路径有两处用不了：
+///
+/// 1. **`CreateProcessW` 的当前目录不接受它。** `Command::current_dir`
+///    走的正是这个参数 —— 而 `run_stage` 要把工作目录设成算例目录。
+/// 2. gfortran 运行时的 `OPEN` 也未必认，而 namelist 路径是当参数传进去的。
+///
+/// 实测的表现：`mksrfdata` 一个字符都没打就以 `0xC0E90002` 结束，
+/// 日志里 `last_line: ""`。看上去像内核坏了，其实是路径形式。
+///
+/// UNC 形式是 `\\?\UNC\server\share`，去掉前缀之后要还原成
+/// `\\server\share` —— 直接砍掉四个字符会得到 `UNC\server\share`，
+/// 那是一个相对路径，比原来更糟。
+///
+/// 非 Windows 平台是恒等函数：那里的 `canonicalize` 不加前缀。
+pub fn plain(p: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::PathBuf;
+        if let Some(s) = p.to_str() {
+            if let Some(rest) = s.strip_prefix(r"\\?\") {
+                return match rest.strip_prefix("UNC\\") {
+                    Some(unc) => PathBuf::from(format!(r"\\{unc}")),
+                    None => PathBuf::from(rest),
+                };
+            }
+        }
+    }
+    p
+}
+
+/// `canonicalize` 之后再去掉 `\\?\`。**要绝对路径的地方一律用这个**，
+/// 不要直接 `canonicalize` —— 见 [`plain`]。
+pub fn absolute(p: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    p.canonicalize().map(plain)
+}

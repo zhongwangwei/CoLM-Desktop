@@ -165,6 +165,86 @@ jobs:
           # pipefail，以及这一步早先那版。**断言写完就把退出码钉死。**
           exit 0
 
+      # 到此为止证明的都是「能不能把它加载起来」。**真正要问的是能不能跑完一个算例**
+      # —— 而那一步此前从没在 Windows 上做过，于是第一个装了安装包的人替我们
+      # 发现了：`mksrfdata` 一个字符都没打就以 `0xC0E90002` 结束。
+      #
+      # 用仓库自带的示例站点跑（`examples/`，随安装包分发的就是它），
+      # 所以这一步验的正是用户点「运行」会走的那条路。
+      - name: A real case, end to end
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cargo build --release -p colm-cli
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::colm-cli 没编出来"; exit 1 }
+          $cli = ".\target\release\colm-cli.exe"
+          $site = "examples\Sitedata\CN-Cng_2008-2009_FLUXNET2015_site.nc"
+
+          # 只跑一天：这一步问的是「跑不跑得起来」，不是「结果对不对」，
+          # 后者由 macOS 上的黄金回归负责。
+          & $cli new --site $site --out probe-case --name CN-Cng --end 2008-01-02 --spinup-repeat 0
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::colm-cli new 失败"; exit 1 }
+
+          & $cli run probe-case --kernel kernels\waterheat
+          $rc = $LASTEXITCODE
+          Write-Host "run exit code: $rc"
+          foreach ($s in 'mksrfdata','mkinidata','colm') {
+            $log = "probe-case\$s.log"
+            Write-Host "=== $s.log ==="
+            if (Test-Path $log) {
+              Write-Host ("  {0} 字节" -f (Get-Item $log).Length)
+              Get-Content $log -TotalCount 25
+            } else { Write-Host "  (没有这个日志)" }
+          }
+          if ($rc -ne 0) { Write-Host "::error::算例没跑完"; exit 1 }
+          # 产物必须真的在 —— 退出码 0 加空目录是这个项目见过的失败方式。
+          $n = (Get-ChildItem probe-case\out\CN-Cng\history\*.nc -ErrorAction SilentlyContinue).Count
+          Write-Host "history 文件 $n 个"
+          if ($n -lt 1) { Write-Host "::error::没有 history 输出"; exit 1 }
+          exit 0
+
+      # **把病因钉死。** 上一步跑通了不等于知道原来为什么不通 ——
+      # 这里故意用 `\?\` 扩展长度路径再跑一次同一个内核。
+      #
+      # 只测量、不判成败：如果哪天 Windows 支持了这种路径，这一步会安静地
+      # 变成「两边都行」，而不是红给一个与用户无关的理由。
+      # **把病因钉死。** 上一步跑通了不等于知道原来为什么不通 ——
+      # 这里拿同一个内核、同一份 case.nml，只把工作目录换成 `\\?\` 扩展长度
+      # 形式（Rust 的 `canonicalize` 在 Windows 上返回的就是这种），
+      # 看它是不是就此崩掉。
+      #
+      # 注意 PowerShell 的 `Resolve-Path` **不带**这个前缀，所以要自己拼 ——
+      # 这也说明为什么这个坑只有 Rust 那一侧会踩到。
+      #
+      # 只测量、不判成败：哪天 Windows 支持了这种路径，这一步会安静地变成
+      # 「两边都行」，而不是红给一个与用户无关的理由。
+      - name: Why it failed before -- the extended-length prefix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $plain = (Resolve-Path probe-case).Path
+          $ext   = "\\?\" + $plain
+          $exe   = (Resolve-Path kernels\waterheat\mksrfdata.exe).Path
+          Write-Host "普通形式: $plain"
+          Write-Host "扩展形式: $ext"
+          foreach ($p in @($plain, $ext)) {
+            Write-Host "=== 工作目录 = $p ==="
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exe
+            $psi.Arguments = ('"' + $p + '\case.nml"')
+            $psi.WorkingDirectory = $p
+            $psi.UseShellExecute = $false
+            try {
+              $proc = [System.Diagnostics.Process]::Start($psi)
+              $proc.WaitForExit()
+              $code = $proc.ExitCode
+              Write-Host ("  退出码 {0} / 0x{1:X8}" -f $code, ($code -band 0xFFFFFFFF))
+            } catch {
+              Write-Host "  起不来: $($_.Exception.Message)"
+            }
+          }
+          exit 0
+
       # 到此为止证明的都是「shell 能不能执行它」。**程序自己走的是另一条路**：
       # `colm-kernel` 用 `Command::new(绝对路径)`，也就是 `CreateProcessW`。
       # 那条路此前从没在 Windows 上跑过，只有一句推断（"对显式路径不查 PATHEXT"）。

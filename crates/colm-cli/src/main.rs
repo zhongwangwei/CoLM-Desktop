@@ -352,8 +352,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 与 `Kernel::open` 和 `cmd_run` 的算例目录是同一类问题，第三次遇到。
     let site_raw = {
         let given = o.need("--site")?;
-        given
-            .canonicalize()
+        colm_kernel::manifest::absolute(&given)
             .with_context(|| format!("cannot resolve --site {}", given.display()))?
     };
     let out = o.need("--out")?;
@@ -597,8 +596,9 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool, force: bool) -> Result<
     // `oracle/work/CN-Cng/oracle/work/CN-Cng/case.nml` 找文件然后
     // `Cannot open file`。`Kernel::open` 早就为可执行文件做了同样的事
     // （见那里的注释），这一半当时漏了。
-    let case = &case
-        .canonicalize()
+    // `absolute` 而不是 `canonicalize`：Windows 上后者返回 `\\?\C:\...`，
+    // 而工作目录与 namelist 路径都要交给子进程 —— 那种形式两边都不认。
+    let case = &colm_kernel::manifest::absolute(case)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
     let kernel = Kernel::open(kernel_dir)?;
     println!(
