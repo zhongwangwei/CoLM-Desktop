@@ -160,3 +160,63 @@ fn a_real_kernel_can_actually_be_spawned() {
         .to_string_lossy()
         .ends_with(crate::manifest::EXE_SUFFIX));
 }
+
+#[test]
+fn only_the_rangecheck_lines_without_an_exception_are_muted() {
+    use super::is_benign_rangecheck as benign;
+    // 实测日志里的原样两行（`MOD_RangeCheck.F90:272` 的格式）。
+    assert!(benign(
+        "Check vector data:            o3uptakesun         is in (   -0.1000000000E+37,   -0.1000000000E+37)"
+    ));
+    // block 变体中间是两个空格（`MOD_RangeCheck.F90:148`）。
+    assert!(benign(
+        "Check block  data:      lai is in (   0.0000000000E+00,   0.5000000000E+01)"
+    ));
+
+    // 带标记的一律留下 —— 那是唯一的线索，而 CoLMDEBUG 下它还会终止运行。
+    for bad in [
+        "Check vector data:      wliq is in (   0.0000000000E+00,   0.5000000000E+01) Out of Range!",
+        "Check vector data:      wliq is in (   0.0000000000E+00,   0.5000000000E+01) with NAN",
+        "Check vector data:      wliq is in (   0.0000000000E+00,   0.5000000000E+01) with NAN Out of Range!",
+    ] {
+        assert!(!benign(bad), "这一行不该被丢：{bad}");
+    }
+
+    // 别的行一概不碰。
+    for keep in [
+        "TIMESTEP = 1 | DATE = 2002-01-01-00000",
+        "Error: Forcing does not cover simulation period!",
+        "",
+        "Check vector data: 这一行没有右括号收尾",
+    ] {
+        assert!(!benign(keep), "这一行不该被丢：{keep}");
+    }
+}
+
+#[test]
+fn a_muted_run_says_how_many_lines_it_dropped() {
+    // 静默地少掉 2200 万行，与「这一段根本没做范围检查」在日志上长得一样。
+    let noisy = (0..50)
+        .map(|i| {
+            format!(
+                "echo 'Check vector data:      v{i} is in (   0.1000000000E+01,   0.2000000000E+01)'"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let dir = std::env::temp_dir().join("colm-mute-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{noisy}; echo 'TIMESTEP = 1 | DATE = x'"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| !super::is_benign_rangecheck(l))
+        .collect();
+    assert_eq!(kept.len(), 1, "只该留下那一行 TIMESTEP：{kept:?}");
+    assert!(kept[0].contains("TIMESTEP"));
+}

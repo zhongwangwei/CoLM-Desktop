@@ -67,6 +67,31 @@ pub fn run_stage(
 /// 而本进程正等着一个再也不会来的 stdout —— 双方各等各的。
 /// 代价是 stderr 不参与逐行回调，它整块在末尾追加。这是可以接受的：
 /// gfortran 的运行时错误意味着这一段已经结束了，没有「实时」可言。
+/// RangeCheck 的逐变量播报里**不带异常标记**的那些行。
+///
+/// 实测一次 11 年的 AT-Neu：2208 万行，占 `colm.log` 2.0 GB 的绝大部分。
+/// 90 个站点就是 180 GB —— 而且这些字节先在内存里攒成一个 `String` 才落盘。
+///
+/// **丢掉它们是无损的。** `MOD_RangeCheck.F90:262-270` 在越界或出现 NAN 时
+/// 往同一行尾部追加 ` with NAN` / ` Out of Range!`，而带标记的行**不满足**
+/// 这里的判据、会原样留下；更何况内核编进了 `CoLMDEBUG`，
+/// 那时 `MOD_RangeCheck.F90:295` 会直接 `CoLM_stop` 把运行终止掉 ——
+/// 所以一次异常既进日志也让运行失败，两条路都不依赖这些播报行。
+///
+/// 判据取「以 `)` 收尾」而不是只看前缀：范围那一对括号是格式串的最后一项，
+/// 带标记的行一定在它后面还有字符。往**留下**的方向偏 ——
+/// 少删一行只是日志大一点，多删一行可能删掉唯一的线索。
+pub fn is_benign_rangecheck(line: &str) -> bool {
+    let t = line.trim_end();
+    let t = t.trim_start();
+    // 两种前缀：`MOD_RangeCheck.F90:148` 是 block（栅格），其余是 vector。
+    // block 那个中间是**两个空格**，照抄不改。
+    (t.starts_with("Check vector data:") || t.starts_with("Check block  data:"))
+        && t.ends_with(')')
+        && !t.contains("Out of Range")
+        && !t.contains("NAN")
+}
+
 pub fn run_stage_streaming(
     kernel: &Kernel,
     stage: Stage,
@@ -92,13 +117,23 @@ pub fn run_stage_streaming(
     });
 
     let mut text = String::new();
+    let mut muted = 0usize;
     {
         let out = child.stdout.take().context("no stdout pipe")?;
         let mut reader = BufReader::new(out);
         let mut raw = Vec::new();
         while reader.read_until(b'\n', &mut raw).unwrap_or(0) > 0 {
             let chunk = String::from_utf8_lossy(&raw);
-            on_line(chunk.trim_end_matches(['\n', '\r']));
+            let line = chunk.trim_end_matches(['\n', '\r']);
+            // 无异常标记的 RangeCheck 播报既不进日志也不进回调。
+            // **两处一起挡**：日志是 2 GB 的那一半，回调是把这 2 GB
+            // 逐行推过进程边界给界面、再由界面丢掉的那一半。
+            if is_benign_rangecheck(line) {
+                muted += 1;
+                raw.clear();
+                continue;
+            }
+            on_line(line);
             text.push_str(&chunk);
             raw.clear();
         }
@@ -112,6 +147,14 @@ pub fn run_stage_streaming(
     if !stderr.is_empty() {
         text.push_str("\n--- stderr ---\n");
         text.push_str(&stderr);
+    }
+
+    // 说出丢了多少。**静默地少掉 2200 万行，与「这一段没做范围检查」
+    // 在日志上长得一样** —— 而那两件事完全不同。
+    if muted > 0 {
+        text.push_str(&format!(
+            "\n--- {muted} 行无异常的 RangeCheck 播报未记入本日志。\n带 NAN / Out of Range 标记的行一律保留；\n内核编进了 CoLMDEBUG，那种行还会直接终止运行。---\n"
+        ));
     }
 
     let log = work.join(format!("{}.log", stage.program()));

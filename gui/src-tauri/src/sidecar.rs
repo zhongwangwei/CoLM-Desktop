@@ -146,12 +146,15 @@ fn parse_stage(line: &str) -> Option<(String, String)> {
     Some((name.trim().to_string(), state.trim().to_string()))
 }
 
-/// RangeCheck 的逐变量播报。占实测日志的 85%，且无信息 ——
-/// 真出问题时它会在同一行尾部追加 ` with NAN` 或 ` Out of Range!`，
-/// 而那两句是 `colm-kernel` 的失败标记，运行会被判失败。
+/// RangeCheck 的逐变量播报。**判据只有一份**，在 `colm-kernel` 里 ——
+/// 那边已经在源头挡掉了这些行（不进日志也不进回调），所以这里通常一行都
+/// 收不到。留着这一层是因为它们仍可能从别处来：用户手上更老的内核、
+/// 或者将来某个不走 `run_stage_streaming` 的路径。
+///
+/// 两处各写一份判据的话，「哪一行算噪声」迟早会分叉，
+/// 而分叉的表现是界面上冒出几百万行、或者反过来吞掉一条 Out of Range。
 fn is_rangecheck_noise(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("Check vector data:") && !t.contains("NAN") && !t.contains("Out of Range")
+    colm_kernel::run::is_benign_rangecheck(line)
 }
 
 /// 找 `colm-cli`。顺序照 EarthMesh 的 `resolve_mkgrd`：
