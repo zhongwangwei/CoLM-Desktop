@@ -31,9 +31,6 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
     {
         return Some("输出与重启");
     }
-    if n.starts_with("SITE_") || n.starts_with("USE_SITE_") {
-        return Some("站点");
-    }
     if group == Some("nl_colm_forcing")
         || has(&[
             "FORCING_INTERP",
@@ -47,6 +44,9 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
     }
     if has(&["URBAN", "CANYON_HWR"]) {
         return Some("城市");
+    }
+    if n.starts_with("SITE_") || n.starts_with("USE_SITE_") {
+        return Some("站点");
     }
     if has(&["TRACER", "GIEMS", "WETLAND_FINUNDATION"]) {
         return Some("示踪剂");
@@ -246,10 +246,8 @@ pub fn describe_fields() -> Vec<Field> {
 /// 不是运行时猜的。字段要求的宏有一个不在里面，它在这个内核下就没有意义：
 /// 用户设了不会有任何效果，而界面上摆着它只会让人以为设了有用。
 ///
-/// 返回的是**用不上的**那一批，不是能用的。理由：能用的是绝大多数（737 里
-/// 有 68 个带依赖），传回小的那一半省事，也让「藏起来的是哪些」这个问题
-/// 在界面上答得出来 —— 专家模式要把它们折叠成一行可展开的，
-/// **藏起来不等于假装不存在**。
+/// 返回的是**用不上的**那一批，不是能用的：前端拿同一份名单同时过滤
+/// 参数与输出变量，切换内核后重新读取即可。
 #[tauri::command]
 pub fn irrelevant_fields(kernel_dir: String) -> Result<Vec<String>, String> {
     let k = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
@@ -258,9 +256,29 @@ pub fn irrelevant_fields(kernel_dir: String) -> Result<Vec<String>, String> {
         k.manifest.macros.iter().map(String::as_str).collect();
     Ok(colm_schema::all()
         .iter()
-        .filter(|f| !f.requires.is_empty() && !f.requires.iter().all(|m| have.contains(m)))
+        .filter(|f| !field_is_relevant(f, &have))
         .map(|f| f.name.to_string())
         .collect())
+}
+
+/// 一个源码字段是否对这组内核宏有意义。
+fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeSet<&str>) -> bool {
+    // 这项在 MOD_Namelist.F90 里无条件派生 history/restart 路径；源码用法扫描
+    // 排除了该文件，所以会误把它只归给 CatchLateralFlow。
+    if field.name == "DEF_dir_output" {
+        return true;
+    }
+    if !field.requires.iter().all(|m| have.contains(m)) {
+        return false;
+    }
+    match field_section(field.name, field.group) {
+        // 这些开关有一部分在公共 namelist 代码里无守护地出现，但对应子系统
+        // 没编进内核时设置它们仍然不会产生任何效果。
+        Some("城市") => have.contains("URBAN_MODEL"),
+        Some("示踪剂") => have.contains("TRACER"),
+        Some("数据同化") => have.contains("DataAssimilation"),
+        _ => true,
+    }
 }
 
 /// 一份 namelist 文本里 `colm-schema` 不认识的字段。

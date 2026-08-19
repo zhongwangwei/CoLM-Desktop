@@ -38,15 +38,8 @@ export const state = {
   group: 'nl_colm',
   /** 当前内核下用不上的字段名（Set）。见 config::irrelevant_fields。 */
   irrelevant: new Set(),
-  /** 专家模式：连**这份配置没设过**的字段一起显示（约 202 个顶层字段），
-   *  未设的显示 schema 默认值并标灰。普通模式只显示实际设了的。 */
+  /** 专家模式额外显示当前内核下的源码派生只读项。 */
   expert: false,
-  /** 是否连**当前内核编不进去**的字段也显示。
-   *
-   *  与 `expert` 是**两个轴**，不能合成一个开关：前者问「设没设过」，
-   *  后者问「编没编进去」。压成一个的话，想看全部已设字段的人会被迫
-   *  连 68 个用不上的一起看。 */
-  showIrrelevant: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,

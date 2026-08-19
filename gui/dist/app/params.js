@@ -132,32 +132,31 @@ export async function renderFields() {
     state.varies = new Set(await invoke('varying_fields', { dirs: editTarget() }));
   } catch (e) { state.varies = new Set(); status(e); }
 
-  // 专家模式：把这份配置**没设过**的字段也补进来，显示 schema 默认值并标灰。
-  // 判据用 `minimal::required` 已有的那条分界（设了的 vs 等于默认值的），
-  // 不另发明一套 —— 它可解释，而且和 .nml 文件里看到的一致。
-  let entriesAll = entries;
-  if (state.expert) {
-    const have = new Set(entries.map(e => e.path));
-    const extra = state.fields
-      .filter(f => !have.has(f.name))
-      // 482 个 `DEF_hist_vars%*` 不在这里露面 —— 它们有自己的一页（§1.1）。
-      // 铺进这张表的话，「输出变量」页签在专家模式下会变成 482 行。
-      .filter(f => !f.name.startsWith('DEF_hist_vars%'))
-      .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
-                   derived: f.derived, unset: true }));
-    entriesAll = entries.concat(extra);
-  }
-  // 三个 namelist 组一起显示；`group` 只决定写进哪个文件。
+  // 列表来自源码 schema，而不是只列 case.nml 里已经写过的项；再按当前内核
+  // 的 manifest 宏过滤。这样换 waterheat / urban / bgc 时，可配置项会一起换。
+  const have = new Set(entries.map(e => e.path));
+  const extra = state.fields
+    .filter(f => !have.has(f.name))
+    // 这里只编辑 case.nml 的 nl_colm 组。forcing/history 是另外的 namelist；
+    // 派生项只在专家模式下作为只读说明出现。
+    .filter(f => f.group === 'nl_colm' || f.derived)
+    .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
+                 derived: f.derived, unset: true }));
+  const entriesAll = entries.concat(extra);
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
   // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
-  const shown = state.showIrrelevant ? inGroup : inGroup.filter(e => !state.irrelevant.has(e.path));
+  // 常规与专家都严格跟随所选内核；专家模式只额外显示源码派生的只读项。
+  const shown = inGroup
+    .filter(e => !state.irrelevant.has(e.path))
+    .filter(e => state.expert || !e.derived);
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const params = shown.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
+  const hiddenParams = hidden.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
 
   renderScope(box);
-  renderToolbar(box, params.length);
+  renderToolbar(box, params.length, hiddenParams.length);
   const filter = state.fieldFilter?.trim().toLowerCase() ?? '';
   const visible = filter ? params.filter(e => e.path.toLowerCase().includes(filter)) : params;
 
@@ -174,47 +173,25 @@ export async function renderFields() {
     box.insertAdjacentHTML('beforeend', `<p class="muted">没有名字含「${filter}」的字段</p>`);
   }
 
-  // **藏起来不等于假装不存在。** 换个内核这些字段就该回来，
-  // 而看不见又找不到会让人以为程序坏了。
-  const hiddenParams = hidden.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
-  if (hiddenParams.length && !state.showIrrelevant) {
-    const p = document.createElement('p');
-    p.className = 'muted';
-    p.style.cssText = 'font-size:11px;cursor:pointer';
-    p.textContent = `+ ${hiddenParams.length} 个字段本内核未编入（${hiddenParams.map(h => h.path).slice(0, 3).join('、')}${hiddenParams.length > 3 ? ' 等' : ''}），点此展开`;
-    p.onclick = () => { state.showIrrelevant = true; renderFields(); };
-    box.appendChild(p);
-  } else if (state.showIrrelevant && hiddenParams.length) {
-    const p = document.createElement('p');
-    p.className = 'muted';
-    p.style.cssText = 'font-size:11px;cursor:pointer';
-    p.textContent = `专家模式：正在显示 ${hiddenParams.length} 个本内核未编入的字段，点此收起`;
-    p.onclick = () => { state.showIrrelevant = false; renderFields(); };
-    box.appendChild(p);
-  }
-
   if (outputFields.length) {
     renderScope(output);
     output.appendChild(table(outputFields));
   } else {
-    output.innerHTML = '<p class="muted">这份配置没有设置输出参数；专家模式可查看源码默认值。</p>';
+    output.innerHTML = '<p class="muted">当前内核没有可配置的输出参数。</p>';
   }
   await renderHistVars(hist);
 }
 
-/** 顶部一行：普通/专家切换 + 过滤框。 */
-function renderToolbar(box, shown) {
+/** 顶部一行：当前内核统计 + 过滤框。 */
+function renderToolbar(box, shown, hidden) {
   const bar = document.createElement('div');
   bar.className = 'row';
   bar.style.marginBottom = '8px';
-  const b = document.createElement('button');
-  b.textContent = state.expert ? `专家模式（${shown} 项）` : `普通模式（${shown} 项）`;
-  b.title = state.expert
-    ? '正在显示全部字段，含这份配置没设过的（灰色，值是 CoLM 的默认值）'
-    : '只显示这份配置实际设了的字段。点击查看全部。';
-  b.setAttribute('aria-pressed', String(state.expert));
-  b.onclick = () => { state.expert = !state.expert; renderFields(); };
-  bar.appendChild(b);
+  const kernel = state.kernels.find(k => k.dir === $('kernel').value)?.preset ?? '当前';
+  const note = document.createElement('span');
+  note.className = 'muted mini';
+  note.textContent = `${kernel} 内核可用 ${shown} 项` + (hidden ? ` · 已隐藏 ${hidden} 项` : '');
+  bar.appendChild(note);
   const f = document.createElement('input');
   f.placeholder = '过滤字段名';
   f.value = state.fieldFilter ?? '';

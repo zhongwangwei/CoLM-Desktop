@@ -232,3 +232,21 @@ fn forcing_namelist_path_is_used_by_colm_and_stays_visible() {
         "CoLM 已不再用 DEF_forcing_namelist，重新评估是否从界面和算例里删掉"
     );
 }
+
+#[test]
+fn kernel_macros_decide_which_parameters_are_relevant() {
+    let waterheat = ["SinglePoint"].into_iter().collect();
+    let urban = ["SinglePoint", "URBAN_MODEL"].into_iter().collect();
+    let bgc = ["SinglePoint", "BGC"].into_iter().collect();
+
+    let relevant = |name, have| {
+        let f = colm_schema::find(name).expect(name);
+        super::field_is_relevant(f, have)
+    };
+    assert!(relevant("DEF_CASE_NAME", &waterheat));
+    assert!(relevant("DEF_dir_output", &waterheat));
+    assert!(!relevant("DEF_URBAN_RUN", &waterheat));
+    assert!(relevant("DEF_URBAN_RUN", &urban));
+    assert!(!relevant("DEF_USE_CN_INIT", &waterheat));
+    assert!(relevant("DEF_USE_CN_INIT", &bgc));
+}
