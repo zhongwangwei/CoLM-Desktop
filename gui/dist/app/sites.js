@@ -8,6 +8,7 @@ import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
 import { renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
+import { currentKernel, kernelIsUrban } from './kernel.js';
 
 $('rescan').onclick = async () => {
   try {
@@ -219,7 +220,7 @@ $('scan').onclick = async () => {
   finally { $('scan').disabled = false; }
 };
 
-function renderSites(r = {}) {
+export function renderSites(r = {}) {
   const box = $('sites');
   box.textContent = '';
   // **空结果要自己解释。** 指错目录是第一次用最容易发生的事
@@ -247,13 +248,21 @@ function renderSites(r = {}) {
   const noObs = state.sites.filter(s => !s.obs_file).length;
   renderMakeCase();
   const urban = state.sites.filter(s => s.urban).length;
+  const urbanKernel = kernelIsUrban();
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
+  //
+  // 内核也报在这里：它是第 2 步定的，而到了这一页它决定哪些行能用 ——
+  // 让人回上一步去看自己选了什么，等于把上下文丢了。
+  const mismatch = state.sites.filter(x => x.urban !== urbanKernel).length;
+  const kname = currentKernel()?.preset;
   $('sitesummary').textContent =
     `${state.sites.length} 个站点` +
     (urban ? ` · ${urban} 个城市` : '') +
     (noObs ? ` · ${noObs} 个无观测` : '') +
-    (bad ? ` · ${bad} 个读不了` : '');
+    (bad ? ` · ${bad} 个读不了` : '') +
+    (kname ? ` · 当前内核 ${kname}` : '') +
+    (mismatch ? `，其中 ${mismatch} 个跑不了` : '');
 
   for (const s of state.sites) {
     const d = document.createElement('div');
@@ -285,6 +294,11 @@ function renderSites(r = {}) {
     const c = state.cases.find(x => x.name === s.name);
     if (c) tags.push(c.has_history ? '已跑过' : '已建算例');
     if (s.urban) tags.push('城市');
+    // **内核决定这个站点跑不跑得了。** 城市站要 URBANON 编进去的那一套，
+    // 非城市站用 urban 内核跑出来的东西也不对。标出来而不是藏起来 ——
+    // 过滤掉会让人以为「扫出来就这么多」。
+    if (s.urban && !urbanKernel) tags.push('要 urban 内核');
+    if (!s.urban && urbanKernel) tags.push('要非 urban 内核');
     if (!s.met_file) tags.push('无强迫场');
     if (!s.obs_file) tags.push('无观测');
     if (s.problem) tags.push('读不了');

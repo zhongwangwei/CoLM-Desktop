@@ -3,7 +3,7 @@
 import { invoke, listen } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
-import { renderCases, ensureCases } from './sites.js';
+import { renderCases, ensureCases, renderSites } from './sites.js';
 import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
@@ -60,6 +60,9 @@ function showKernelMeta() {
   // 到选站点时这两个目录必须已经填好。
   const ud = $('urbandirs');
   if (ud) ud.hidden = !kernelIsUrban();
+  // 站点行上的「要 urban 内核」标记跟着内核变。不重画的话，切了内核
+  // 站点列表还标着上一个内核的判断，而那正是最容易看错的一处。
+  if (state.sites.length) renderSites();
 }
 
 $('run').onclick = async () => {
