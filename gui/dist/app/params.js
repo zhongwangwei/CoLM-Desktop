@@ -157,6 +157,18 @@ export async function renderFields() {
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
   const hiddenParams = hidden.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
 
+  // 专家模式这轮腾空了 —— 那 6 个只读派生项已经并入各分节。开关与
+  // body.expert 都留着等后续挂选项，但空着的时候要明说：一个点了没反应的
+  // 按钮比没有按钮更糟。
+  if (state.expert) {
+    const note = document.createElement('div');
+    note.className = 'expert-note';
+    note.style.marginBottom = '10px';
+    note.textContent =
+      '专家选项还在规划中。只读派生项已经并入下面各分节，不再单列 —— '
+      + '现在常规模式看到的就是全部。';
+    box.appendChild(note);
+  }
   renderScope(box);
   renderToolbar(box, params.length, hiddenParams.length);
   const filter = state.fieldFilter?.trim().toLowerCase() ?? '';
