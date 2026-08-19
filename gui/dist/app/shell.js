@@ -10,15 +10,23 @@ import { $ } from './ui.js';
 /** 五步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
 export const STEPS = [
   // 前处理在前：它产出的正是下一步要扫的东西。
+  { id: 'prep',   t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
   // 第二步叫「站点」而不是「数据」—— 两步都关于数据，而它实际展示的是站点。
-  { id: 'prep',    t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
-  { id: 'data',    t: '站点',   d: '有哪些站点可以跑', need: () => null },
-  { id: 'params',  t: '参数',   d: '内核与物理',
-    need: () => (state.selected ? null : '先在第 2 步选一个站点') },
-  { id: 'run',     t: '运行',   d: '时间、输出与运行',
-    need: () => (state.selected ? null : '先在第 2 步选一个站点') },
-  { id: 'result',  t: '结果',   d: '曲线与指标',
-    need: () => (state.selected ? null : '先在第 2 步选一个站点') },
+  { id: 'sites',  t: '站点',   d: '扫目录、选站', need: () => null },
+  // 基本设定回答「在哪跑、用什么物理、跑多久」。三张卡片顺序不可换 ——
+  // 建算例必须在最前，因为内核与时间要写进它产出的 case.nml。
+  //
+  // 门槛认「选了站点**或者**已经有算例」：重启程序后 recent.json 恢复了
+  // 算例目录，那时没有 pickedSite 但算例是现成的，不该被拦在门外。
+  { id: 'basic',  t: '基本设定', d: '算例、内核、时间与预热',
+    need: () => (state.pickedSite || state.picked.size || state.cases.length
+      ? null : '先在第 2 步选一个站点') },
+  { id: 'params', t: '参数',   d: 'namelist 字段表',
+    need: () => (state.selected ? null : '先在第 3 步建一个算例') },
+  { id: 'run',    t: '运行',   d: '输出与运行',
+    need: () => (state.selected ? null : '先在第 3 步建一个算例') },
+  { id: 'result', t: '结果',   d: '曲线与指标',
+    need: () => (state.selected ? null : '先在第 3 步建一个算例') },
 ];
 
 /** 下一步是哪一步。**每一页都要有出口** —— 让人自己回左栏找下一步，

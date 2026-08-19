@@ -7,7 +7,10 @@
 
 export const state = {
   /** 当前在第几步，见 shell.js 的 STEPS。 */
-  step: 'data',
+  step: 'prep',
+  /** 这次要跑什么。'site' | 'region' | 'global'，进门那道门设的。
+   *  区域与全球还没有步骤链，现在只可能是 'site'。 */
+  domain: null,
   cases: [],
   /** 站点库扫描结果，见 colm-cli scan */
   sites: [],
@@ -16,6 +19,9 @@ export const state = {
    *  不能用站点名：`AU-Preston` 在 PLUMBER2 与 Urban-PLUMBER 里各有一个，
    *  按名字存的话勾一个会连带勾中另一个 —— 而那两个要跑的东西完全不同。 */
   picked: new Set(),
+  /** 高亮（而不是勾选）的那一个站点。**只高亮不动文件** ——
+   *  建算例是第 3 步「确定」按下去的事。 */
+  pickedSite: null,
   /** 勾选的算例目录。批量运行与批量评估的作用对象。 */
   pickedCases: new Set(),
   /** 算例目录 -> '待运行' | '运行中' | '已完成' | '失败'。

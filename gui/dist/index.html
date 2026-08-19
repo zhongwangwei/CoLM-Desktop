@@ -63,7 +63,7 @@
     </section>
 
     <!-- ② 站点 -->
-    <section class="page" data-step="data" data-own-foot hidden>
+    <section class="page" data-step="sites" data-own-foot hidden>
       <div class="work-head"><span class="kicker">第 2 步</span></div>
       <h1>有哪些站点可以跑</h1>
       <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
@@ -123,9 +123,18 @@
       <div class="foot" id="datafoot"></div>
     </section>
 
-    <!-- ③ 参数 -->
-    <section class="page" data-step="params" hidden>
+    <!-- ③ 基本设定：跑一次模拟最少要定的三件事 —— 在哪跑、用什么物理、跑多久。
+         三张卡片顺序不可换：建算例产出 case.nml，后两张要写进它。 -->
+    <section class="page" data-step="basic" hidden>
       <div class="work-head"><span class="kicker">第 3 步</span></div>
+      <h1>基本设定</h1>
+      <p class="sub">先为选中的站点建算例，再选一套编译内核与时间范围。
+        <b>这三样决定了这次模拟是什么</b>；细调留给下一步的参数表。</p>
+    </section>
+
+    <!-- ④ 参数 -->
+    <section class="page" data-step="params" hidden>
+      <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>配参数</h1>
       <p class="sub">选择编译内核，并按 CoLM 源码 namelist 的用途配置参数。
         <b>列表会随 waterheat、urban、bgc 内核切换</b>；未设置项显示源码默认值，专家模式额外显示派生只读项。</p>
@@ -151,9 +160,9 @@
       </div>
     </section>
 
-    <!-- ④ 运行 -->
+    <!-- ⑤ 运行 -->
     <section class="page" data-step="run" hidden>
-      <div class="work-head"><span class="kicker">第 4 步</span></div>
+      <div class="work-head"><span class="kicker">第 5 步</span></div>
       <h1>运行</h1>
       <p class="sub">设置时间、预热与输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
         <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。</p>
@@ -188,9 +197,9 @@
       </div>
     </section>
 
-    <!-- ⑤ 结果 -->
+    <!-- ⑥ 结果 -->
     <section class="page" data-step="result" hidden>
-      <div class="work-head"><span class="kicker">第 5 步</span></div>
+      <div class="work-head"><span class="kicker">第 6 步</span></div>
       <h1>结果</h1>
       <p class="sub">画模型输出，或与观测配对算指标。<b>「丢弃前 N 条」丢的是输出记录</b>，
         与第 4 步里的模型预热（spin-up）不是一回事。</p>
