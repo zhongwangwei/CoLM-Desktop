@@ -131,6 +131,10 @@ async function confirmSelection() {
     if (!made.length) return;
     // 整批都交给参数页。代表算例是第一个，但改动落到每一个上。
     state.batch = [...new Set(made.map(c => c.dir))];
+    // **刚建的这批就是马上要跑的那批。** 不灌 pickedCases 的话，
+    // 第 4 步说「改动会写进 2 个算例」而第 5 步说「运行全部 4 个」——
+    // 那两步紧挨着，两个数打架。想跑全部，第 5 步取消勾选即可。
+    for (const c of made) state.pickedCases.add(c.dir);
     // **走 selectCase，不要只设 state.selected。** 那里还要把 case.nml 读进来、
     // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，
     // 参数页会是空的，而空页面不会报错，只是什么都没有。实测踩过。
