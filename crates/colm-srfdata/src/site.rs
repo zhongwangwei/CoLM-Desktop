@@ -14,6 +14,7 @@ use crate::albedo::albedo;
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
 use crate::raster::{point_f64, point_i32};
 use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
+use crate::urban_soil::{self, UrbanSoil};
 
 /// CoLM 无条件读取而 PLUMBER2 站点文件不提供的 12 个字段。
 pub const REQUIRED_FIELDS: [&str; 12] = [
@@ -393,62 +394,159 @@ mod site_tests;
 /// 补齐一个**城市**站点文件（Urban-PLUMBER 形状）。
 ///
 /// 与 `fill` 是两件事，所以是两个函数。`fill` 服务 PLUMBER2：那里的活是
-/// 补 12 个缺失字段，要土壤剖面、要 USDA 三角、要栅格。城市站点文件的
-/// 变量集完全不同（23 个城市形态学量，没有土壤剖面也没有
-/// `IGBP_classification`），而 CoLM 的 URBAN 路径本来就直接读原件 ——
-/// 实测那份跑成功过的示例算例用的就是未经处理的 Urban-PLUMBER 原文件，
-/// 与仓库里的原件逐字节相同。
+/// 补 12 个缺失字段，要 USDA 三角、要从站点自己的土壤剖面推导。城市站点文件
+/// 的变量集完全不同（23 个城市形态学量，没有土壤剖面也没有
+/// `IGBP_classification`），推导无从谈起 —— 这里补的两样东西都不靠推导。
 ///
-/// 所以这里只做**一件**事：把 `ground_height` 也写成 `elevation`。
+/// 做两件事：
 ///
-/// 为什么值得做：CoLM 的 URBAN 路径在站点文件没有 `elevation` 时回落到
-/// `<rawdata>/elevation.nc`，那是个 **7 GB** 的全球栅格，而桌面用户装不了。
-/// 同一段代码里 `elvstd` 与 `sloperatio` 却回落到 `topography.nc`
-/// （`MOD_SingleSrfdata.F90:2496-2527`）—— CoLM 自己的不一致，不是我们能改的。
+/// 1. 把 `ground_height` 抄成 `elevation`。CoLM 的 URBAN 路径在站点文件没有
+///    `elevation` 时回落到 `<rawdata>/elevation.nc`，那是个 **7 GB** 的全球
+///    栅格，而桌面用户装不了。改名有依据而不是猜：`ground_height` 的属性写着
+///    `long_name = "Ground height above sea level"`、`units = "m"`，
+///    与 CoLM 的 `SITE_elevation` 是同一个量。
 ///
-/// 为什么这个改名有依据而不是猜：`ground_height` 的属性写着
-/// `long_name = "Ground height above sea level"`、`units = "m"`，
-/// 与 CoLM 的 `SITE_elevation` 是同一个量。
+/// 2. 把 [`urban_soil`] 那张预抽表里这个站点的土壤剖面写进去 —— 24 个剖面量
+///    （各 8 层）加一个标量 `soil_texture`。它们省掉的是 `<rawdata>/soil/`
+///    下的 24 个全球栅格，**实测 122 GB**。层数是 8 不是 `nl_soil`（那是 10）：
+///    `MOD_SingleSrfdata.F90:2103-2415` 每个量都是 `DO nsl = 1, 8`。
+///    `soil_texture` 藏在 `IF (DEF_Runoff_SCHEME == 3)` 里，而 3 是 CoLM 的
+///    默认值，所以它一样要写。
+///
+/// **查不到就一个字都不写。** 表只覆盖 Urban-PLUMBER 那 21 个站；表外的站点
+/// 让 CoLM 照旧回落栅格。土壤剖面不像 `elvstd`/`sloperatio` 那样「模块默认值
+/// 恰好没代价」—— 编一个剖面出来，结果会错得看不出来。
+///
+/// 这两样都只在站点文件本身没有那个变量时才写：站点自己说的话优先。
 pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
     std::fs::copy(src, dst)
         .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
 
-    let existing = {
+    let loc = location(dst)?;
+    let soil = urban_soil::lookup(loc.lon, loc.lat);
+
+    let (has_elevation, ground_height) = {
         let f = netcdf::open(dst)?;
-        (
-            f.variable("elevation").is_some(),
-            f.variable("ground_height").is_some(),
-        )
+        let h = match f.variable("ground_height") {
+            Some(v) => v.get_values::<f64, _>(..)?.first().copied(),
+            None => None,
+        };
+        (f.variable("elevation").is_some(), h)
     };
-    match existing {
-        // 已经有了就不动 —— 站点文件自己说的话优先。
-        (true, _) => Ok(UrbanReport { elevation: None }),
-        (false, false) => Ok(UrbanReport { elevation: None }),
-        (false, true) => {
-            let h = {
-                let f = netcdf::open(dst)?;
-                let v = f.variable("ground_height").expect("checked above");
-                v.get_values::<f64, _>(..)?
-                    .first()
-                    .copied()
-                    .context("ground_height is empty")?
-            };
-            let mut f = netcdf::append(dst)
-                .with_context(|| format!("cannot append to {}", dst.display()))?;
-            put_scalar(
-                &mut f,
-                "elevation",
-                h,
-                "Urban-PLUMBER ground_height (ground height above sea level)",
-            )?;
-            Ok(UrbanReport { elevation: Some(h) })
-        }
+    let elevation = if has_elevation { None } else { ground_height };
+
+    let mut report = UrbanReport {
+        elevation: None,
+        soil_site: soil.map(|s| s.site),
+        soil_vars: Vec::new(),
+    };
+    // 没有东西要写就不开写句柄 —— `netcdf::append` 会重排文件头，而
+    // 「什么都没补」应当意味着输出与输入逐字节相同。
+    if elevation.is_none() && soil.is_none() {
+        return Ok(report);
     }
+
+    let mut f =
+        netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
+    if let Some(h) = elevation {
+        put_scalar(
+            &mut f,
+            "elevation",
+            h,
+            "Urban-PLUMBER ground_height (ground height above sea level)",
+        )?;
+        report.elevation = Some(h);
+    }
+    if let Some(s) = soil {
+        report.soil_vars = put_urban_soil(&mut f, s)?;
+    }
+    Ok(report)
+}
+
+/// 把预抽表里一个站点的土壤剖面写进 site.nc，返回写下的变量名。
+///
+/// 变量名不在这里推导，全部取自生成文件里的 [`urban_soil::SITE_VARS`] ——
+/// `k_s.nc` 对 `soil_k_s` 而 `BD_all_s.nc` 对 `soil_BD_all`，按规则推会错。
+/// 字段名对不上时**报错而不是跳过**：表重新生成后多出一个量，那是必须被
+/// 看见的事，静默漏写一层土壤参数不会有任何症状。
+fn put_urban_soil(f: &mut netcdf::FileMut, s: &UrbanSoil) -> Result<Vec<String>> {
+    // 「量出来的」。措辞要与 `fill` 里那些 `synthesized:` 明确分开 ——
+    // 这些数是 CoLM 2024 rawdata 在这个站点格点上的值，不是假设。
+    const SOURCE: &str = "extracted from CoLM 2024 rawdata soil/*.nc at this site";
+    // 8 层挂在自建的维度上：城市站点文件里没有任何土壤维度可借。
+    const DIM: &str = "soil";
+    // 8 层不是 `nl_soil`（那是 10）—— `MOD_SingleSrfdata.F90` 的城市段
+    // 每个土壤量都是 `DO nsl = 1, 8`，多写的层 CoLM 不会看。
+    const NLAYER: usize = 8;
+
+    if f.dimension(DIM).is_none() {
+        f.add_dimension(DIM, NLAYER)?;
+    }
+    let mut written = Vec::new();
+    for (field, var) in urban_soil::SITE_VARS {
+        // 站点文件自己有就不动它。
+        if f.variable(var).is_some() {
+            continue;
+        }
+        if field == "texture" {
+            // **照抄 `-1`**：21 个站里 16 个落在质地产品的空洞上，而 CoLM
+            // 拿到负值会 `WHERE (soiltext < 0) soiltext = 0` 再取
+            // `BVIC_USDA(0) = 1.0`。由砂黏比反推一个类别反而会改掉结果。
+            put_int(f, var, s.texture, SOURCE)?;
+        } else {
+            let xs = layers(s, field)
+                .with_context(|| format!("urban_soil::SITE_VARS names a field {field:?} that site.rs cannot read; the generated table and this writer have drifted apart"))?;
+            put_layers(f, var, xs, DIM, SOURCE)?;
+        }
+        written.push(var.to_string());
+    }
+    Ok(written)
+}
+
+/// 字段名 → 那 8 层值。
+///
+/// Rust 没有反射，所以这张表得写出来；但**名字的权威仍然是
+/// [`urban_soil::SITE_VARS`]** —— 这里只回答「这个字段的数在哪」，
+/// 不回答「它在 site.nc 里叫什么」。
+fn layers<'a>(s: &'a UrbanSoil, field: &str) -> Option<&'a [f64; 8]> {
+    Some(match field {
+        "vf_quartz_mineral" => &s.vf_quartz_mineral,
+        "vf_gravels" => &s.vf_gravels,
+        "vf_sand" => &s.vf_sand,
+        "vf_clay" => &s.vf_clay,
+        "vf_om" => &s.vf_om,
+        "wf_gravels" => &s.wf_gravels,
+        "wf_sand" => &s.wf_sand,
+        "wf_clay" => &s.wf_clay,
+        "wf_om" => &s.wf_om,
+        "om_density" => &s.om_density,
+        "bd_all" => &s.bd_all,
+        "theta_s" => &s.theta_s,
+        "k_s" => &s.k_s,
+        "csol" => &s.csol,
+        "tksatu" => &s.tksatu,
+        "tksatf" => &s.tksatf,
+        "tkdry" => &s.tkdry,
+        "k_solids" => &s.k_solids,
+        "psi_s" => &s.psi_s,
+        "lambda" => &s.lambda,
+        "theta_r" => &s.theta_r,
+        "alpha_vgm" => &s.alpha_vgm,
+        "l_vgm" => &s.l_vgm,
+        "n_vgm" => &s.n_vgm,
+        _ => return None,
+    })
 }
 
 /// `prepare_urban` 做了什么。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UrbanReport {
     /// 从 `ground_height` 补进去的高程；`None` 表示没补（本来就有，或者没得补）。
     pub elevation: Option<f64>,
+    /// 预抽表命中的站点名。**`None` 表示这个站点不在表里** —— 那时一个土壤
+    /// 变量都没写，CoLM 会去读 `<rawdata>/soil/` 的 24 个全球栅格（122 GB），
+    /// 所以那样的算例仍然需要 `--rawdata`。
+    pub soil_site: Option<&'static str>,
+    /// 写进 site.nc 的土壤变量名，按 `SITE_VARS` 的顺序。
+    pub soil_vars: Vec<String>,
 }

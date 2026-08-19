@@ -15,3 +15,113 @@ fn the_raster_wins_over_the_classifier_when_both_are_available() {
     // 实测 90 个站点里两者只有 25 个一致；哪个赢必须是确定的。
     assert!(REQUIRED_FIELDS.contains(&"soil_texture"));
 }
+
+// ---------------------------------------------------------------- 城市
+
+/// 造一个最小的 Urban-PLUMBER 形状站点文件：只有定位与地面高程。
+///
+/// 形状照抄真件 —— `longitude` / `latitude` 是 `(y, x)`（各长 1）而不是
+/// 0 维标量。`location` 正是为这个差别写的，测试里也不能把它抹平。
+fn urban_fixture(name: &str, lon: f64, lat: f64) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("colm-srfdata-prepare-urban");
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let p = dir.join(format!("{name}.nc"));
+    let _ = std::fs::remove_file(&p);
+    let mut f = netcdf::create(&p).expect("create");
+    f.add_dimension("y", 1).expect("y");
+    f.add_dimension("x", 1).expect("x");
+    for (n, v) in [
+        ("longitude", lon),
+        ("latitude", lat),
+        ("ground_height", 93.0),
+    ] {
+        let mut var = f.add_variable::<f64>(n, &["y", "x"]).expect("var");
+        var.put_values(&[v], netcdf::Extents::All).expect("put");
+    }
+    drop(f);
+    p
+}
+
+#[test]
+fn an_urban_site_in_the_table_gets_the_whole_soil_profile() {
+    // AU-Preston 的坐标。表按经纬度查而不是按名字 —— 名字在 PLUMBER2 与
+    // Urban-PLUMBER 两套数据集里会重。
+    let src = urban_fixture(
+        "in-table-src",
+        145.014_495_849_609_38,
+        -37.730_598_449_707_03,
+    );
+    let dst = src.with_file_name("in-table-dst.nc");
+    let r = prepare_urban(&src, &dst).expect("prepare");
+
+    assert_eq!(r.soil_site, Some("AU-Preston"));
+    // 24 个剖面量 + 一个标量 `soil_texture`。**不是 8 个** —— 城市段回落时
+    // 碰的是 24 个栅格，而 `soil_texture` 藏在 `DEF_Runoff_SCHEME == 3` 里，
+    // 那是 CoLM 的默认值。
+    assert_eq!(r.soil_vars.len(), 25);
+    assert_eq!(r.elevation, Some(93.0));
+
+    let f = netcdf::open(&dst).expect("open");
+    let sand = f.variable("soil_vf_sand").expect("soil_vf_sand");
+    let xs: Vec<f64> = sand.get_values(netcdf::Extents::All).expect("values");
+    assert_eq!(xs.len(), 8, "层数是 8，不是 nl_soil 的 10");
+    // 抽取当时的实测值，逐位钉住 —— 中间少一次转换都会在这里露出来。
+    assert_eq!(xs[0], 0.578_257_774_185_187_6);
+
+    let tex = f.variable("soil_texture").expect("soil_texture");
+    let t: Vec<i32> = tex.get_values(netcdf::Extents::All).expect("values");
+    // **照抄 `-1`**：质地产品在建成区没数据，而 CoLM 把负值夹到 0 再取
+    // `BVIC_USDA(0) = 1.0`。反推一个类别会改掉结果。
+    assert_eq!(t[0], -1);
+}
+
+#[test]
+fn the_soil_source_says_measured_not_assumed() {
+    // 这条规矩是本模块的模块注释立的：量出来的与假设的，措辞必须分开。
+    // 剖面来自栅格上的点值，所以它一个 "synthesized" / "assumed" 都不能沾。
+    let src = urban_fixture(
+        "wording-src",
+        145.014_495_849_609_38,
+        -37.730_598_449_707_03,
+    );
+    let dst = src.with_file_name("wording-dst.nc");
+    prepare_urban(&src, &dst).expect("prepare");
+
+    let f = netcdf::open(&dst).expect("open");
+    for n in ["soil_vf_sand", "soil_texture", "soil_n_vgm"] {
+        let v = f.variable(n).expect(n);
+        let a = v
+            .attribute("source")
+            .expect("source")
+            .value()
+            .expect("read");
+        let netcdf::AttributeValue::Str(s) = a else {
+            panic!("{n}: source is not a string")
+        };
+        assert!(
+            s.starts_with("extracted from CoLM 2024 rawdata"),
+            "{n}: {s}"
+        );
+        assert!(!s.contains("synthesized"), "{n}: {s}");
+        assert!(!s.contains("assumed"), "{n}: {s}");
+    }
+}
+
+#[test]
+fn an_urban_site_outside_the_table_gets_no_soil_at_all() {
+    // 大西洋中间。**一个土壤变量都不许写** —— 编一个剖面出来，CoLM 会跑完
+    // 并给出看不出错的结果，而回落栅格至少是对的。
+    let src = urban_fixture("off-table-src", -30.0, 0.0);
+    let dst = src.with_file_name("off-table-dst.nc");
+    let r = prepare_urban(&src, &dst).expect("prepare");
+
+    assert_eq!(r.soil_site, None);
+    assert!(r.soil_vars.is_empty());
+    // 高程照补 —— 那一样有依据（`ground_height` 就是同一个量）。
+    assert_eq!(r.elevation, Some(93.0));
+
+    let f = netcdf::open(&dst).expect("open");
+    for n in ["soil_vf_sand", "soil_texture", "soil_theta_s"] {
+        assert!(f.variable(n).is_none(), "{n} 不该被写出来");
+    }
+}
