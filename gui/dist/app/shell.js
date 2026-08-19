@@ -13,9 +13,9 @@ export const STEPS = [
   // 第二步叫「站点」而不是「数据」—— 两步都关于数据，而它实际展示的是站点。
   { id: 'prep',    t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
   { id: 'data',    t: '站点',   d: '有哪些站点可以跑', need: () => null },
-  { id: 'params',  t: '参数',   d: '物理与输出',
+  { id: 'params',  t: '参数',   d: '内核与物理',
     need: () => (state.selected ? null : '先在第 2 步选一个站点') },
-  { id: 'run',     t: '运行',   d: '三段依次跑',
+  { id: 'run',     t: '运行',   d: '时间、输出与运行',
     need: () => (state.selected ? null : '先在第 2 步选一个站点') },
   { id: 'result',  t: '结果',   d: '曲线与指标',
     need: () => (state.selected ? null : '先在第 2 步选一个站点') },
@@ -116,20 +116,13 @@ export function initShell() {
     };
   }
 
-  for (const tabs of ['livetabs', 'ptabs']) {
-    const el = $(tabs);
-    if (!el) continue;
-    for (const b of el.querySelectorAll('button')) {
-      b.onclick = () => {
-        for (const x of el.querySelectorAll('button')) x.classList.toggle('on', x === b);
-        if (tabs === 'livetabs') {
-          for (const p of document.querySelectorAll('.live-pane'))
-            p.classList.toggle('on', p.dataset.pane === b.dataset.pane);
-        } else {
-          window.dispatchEvent(new CustomEvent('colm:ptab', { detail: b.dataset.ptab }));
-        }
-      };
-    }
+  const tabs = $('livetabs');
+  for (const b of tabs.querySelectorAll('button')) {
+    b.onclick = () => {
+      for (const x of tabs.querySelectorAll('button')) x.classList.toggle('on', x === b);
+      for (const p of document.querySelectorAll('.live-pane'))
+        p.classList.toggle('on', p.dataset.pane === b.dataset.pane);
+    };
   }
   renderSteps();
 }

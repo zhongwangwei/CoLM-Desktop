@@ -123,6 +123,7 @@ $('evaluate').onclick = async () => {
       corrected: $('corrected').checked,
     }));
     renderMetrics(rows);
+    if (rows.length) drawComparison(rows[0]);
   } catch (e) { status(e); }
   finally { $('evaluate').disabled = false; }
 };
@@ -136,6 +137,7 @@ $('corrected').onchange = () => {
 
 function renderMetrics(rows) {
   const box = $('metrics');
+  $('evaluation-charts').textContent = '';
   box.textContent = '';
   if (!rows.length) { box.innerHTML = '<p class="muted">没有可配对的变量</p>'; return; }
 
@@ -179,7 +181,7 @@ function renderMetrics(rows) {
   const hint = document.createElement('p');
   hint.className = 'muted';
   hint.style.fontSize = '11px';
-  hint.textContent = '点一行看模型与观测的对比图';
+  hint.textContent = '已自动绘制第一项；点其他行可切换变量';
   box.appendChild(hint);
   const warned = rows.filter(r => r.beta_warning);
   for (const r of warned) {
@@ -193,12 +195,18 @@ function renderMetrics(rows) {
 
 /** 模型与观测的双线图 + 散点图。两张都从同一批配对点画。 */
 function drawComparison(r) {
-  const box = $('charts');
+  const box = $('evaluation-charts');
+  box.textContent = '';
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const summary = document.createElement('p');
+  summary.className = 'muted mini';
+  summary.textContent = `${r.name} · n=${r.n} · RMSE=${r.rmse.toFixed(2)}`
+    + ` · bias=${r.bias >= 0 ? '+' : ''}${r.bias.toFixed(2)}`
+    + ` · R²=${r.r2.toFixed(3)} · KGE=${r.kge >= 0 ? '+' : ''}${r.kge.toFixed(3)}`;
+  box.appendChild(summary);
   const host = document.createElement('div');
   host.className = 'chart';
-  box.prepend(host);
-  while (box.children.length > 4) box.lastElementChild.remove();
+  box.appendChild(host);
   track(new uPlot({
     width: host.parentElement.clientWidth - 30,
     height: 190,
@@ -218,7 +226,7 @@ function drawComparison(r) {
   // 两个数合起来才说得清的事，而图上一看就明白。
   const s = document.createElement('div');
   s.className = 'chart';
-  box.prepend(s);
+  box.appendChild(s);
   const order = r.obs.map((o, i) => [o, r.model[i]]).sort((a, b) => a[0] - b[0]);
   track(new uPlot({
     width: s.parentElement.clientWidth - 30,

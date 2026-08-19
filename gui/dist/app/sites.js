@@ -86,7 +86,7 @@ async function selectCase(c) {
 /** 选一个站点：**算例按需建**。
  *
  *  原来这里要人先填表、按「新建算例」，而那张表问的东西要么推得出来
- *  （名字取站点代号）、要么本来就能后改（时间窗口在参数页）。
+ *  （名字取站点代号）、要么本来就能后改（时间窗口在运行页）。
  *  一个只有一种填法的表单，就不该是一道关。
  *
  *  建在**第一次真要用它**的时候，不在点中的时候：点站点常常只是看看，
@@ -177,7 +177,7 @@ export async function ensureCase(s) {
     await invoke('new_case', {
       site: s.site_file, out: joinPath(root, cname), name: cname,
       // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
-      // 而缩短窗口是参数页「时间」分类里同一组字段的事。
+      // 而缩短窗口是运行页「时间与预热」里的事。
       start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,

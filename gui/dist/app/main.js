@@ -29,8 +29,6 @@ async function boot() {
     renderSteps();
   } catch (e) { setStatus('后端出错：' + e); }
   await watchRun();
-  // 参数页的两个子页签（参数 / 输出变量）共用一块渲染区。
-  addEventListener('colm:ptab', e => { state.ptab = e.detail; renderFields(); });
-  addEventListener('colm:mode', () => { if (state.step === 'params') renderFields(); });
+  addEventListener('colm:mode', () => { if (state.selected) renderFields(); });
   go('prep');
 }

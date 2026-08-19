@@ -203,3 +203,32 @@ fn spin_up_is_computed_per_case_not_shared() {
     // 输出从预热结束处才开始 —— 这是预热的代价，界面必须能说出来。
     assert_eq!(t.output_start, "2003-01-01");
 }
+
+#[test]
+fn every_source_namelist_field_has_a_named_ui_section() {
+    // 参数页不再用「其他」兜底。上游新增字段时应该在 CI 里
+    // 点名，迫使我们读它的 namelist 语义后再归类，而不是随手堆进杂物箱。
+    let missing: Vec<_> = colm_schema::all()
+        .iter()
+        .filter(|f| !f.name.starts_with("DEF_hist_vars%"))
+        .filter(|f| super::field_section(f.name, f.group).is_none())
+        .map(|f| f.name)
+        .collect();
+    assert!(missing.is_empty(), "还没归类的源码字段：{missing:?}");
+}
+
+#[test]
+fn forcing_namelist_path_is_used_by_colm_and_stays_visible() {
+    let f = colm_schema::find("DEF_forcing_namelist").expect("源码里还有这个字段");
+    assert_eq!(super::field_section(f.name, f.group), Some("文件与目录"));
+
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/CoLM202X/share/MOD_Namelist.F90");
+    let Ok(text) = std::fs::read_to_string(source) else {
+        return; // 未取 submodule 时由 schema drift 测试负责
+    };
+    assert!(
+        text.contains("file=trim(DEF_forcing_namelist)"),
+        "CoLM 已不再用 DEF_forcing_namelist，重新评估是否从界面和算例里删掉"
+    );
+}

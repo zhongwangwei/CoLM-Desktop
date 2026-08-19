@@ -7,35 +7,11 @@ import { renderHistVars } from './histvars.js';
 import { renderTiming } from './timing.js';
 import { editTarget } from './batch.js';
 
-
-
-// 九个功能分类。**判据是字段名前缀，不是主观的「重要性」** —— 前缀是 CoLM
-// 自己的命名，会随上游一起演进；主观分类会在下一次上游加字段时立刻过时。
-//
-// 顺序即优先级，每个字段只进第一个匹配上的分类。`other` 是兜底且**必须在
-// 最后**：新字段进来不会消失，而是显眼地堆在「其他」里 —— 那正是提醒
-// 有人该给它归类的信号。
-export const GROUPS = [
-  { id: 'site',    label: '站点',     match: n => n.startsWith('SITE_') || n.startsWith('USE_SITE_') },
-  { id: 'time',    label: '时间',     match: n => n.startsWith('DEF_simulation_time') },
-  { id: 'dirs',    label: '路径',     match: n => n.startsWith('DEF_dir') || n === 'DEF_forcing_namelist' },
-  { id: 'urban',   label: '城市',     match: n => n.includes('URBAN') || n.includes('Urban') },
-  { id: 'soil',    label: '土壤',     match: n => /SOIL|Soil|soil/.test(n) },
-  { id: 'physics', label: '物理开关', match: n => n.startsWith('DEF_USE_') },
-  { id: 'forcing', label: '强迫场',   match: (n, f) => f?.group === 'nl_colm_forcing' },
-  { id: 'output',  label: '输出',     match: n => /^DEF_(HIST|hist|WRST)/.test(n) },
-  { id: 'other',   label: '其他',     match: () => true },
-];
-
-function groupOf(name, meta) {
-  return GROUPS.find(g => g.match(name, meta)) ?? GROUPS[GROUPS.length - 1];
-}
-
-// 「常改项」白名单：一个人跑一个新站点时几乎一定要看的东西。
-// **保持短** —— 长白名单等于没有普通模式。
-const ALWAYS_SHOWN = [
-  'DEF_simulation_time%start_year', 'DEF_simulation_time%end_year',
-  'DEF_HIST_FREQ', 'DEF_dir_output',
+// 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
+// 新字段不能掉进「其他」。这里只规定页面顺序。
+const PARAM_SECTIONS = [
+  '算例', '站点', '文件与目录', '网格与并行', '地表数据', '初始场',
+  '城市', '水热过程', '生态与生地化', '河道与水库', '强迫场', '数据同化', '示踪剂',
 ];
 
 
@@ -45,6 +21,8 @@ const ALWAYS_SHOWN = [
 // 行尾注释（`meta.doc`），那些直接显示就够了。这张表只收「名字会误导人」
 // 的那几个，保持短。
 const HINTS = {
+  'DEF_forcing_namelist':
+    '强迫场 namelist 的路径。CoLM 会直接打开并读取这个文件（MOD_Namelist.F90:1392），不能删除。',
   'DEF_simulation_time%spinup_repeat':
     '预热轮数：起始日**之前**那段反复跑几遍，让土壤温湿等状态趋于平衡。\n' +
     '预热期不写 history（MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），' +
@@ -133,11 +111,18 @@ function renderScope(box) {
 
 export async function renderFields() {
   const box = $('fields');
+  const output = $('output-fields');
+  const hist = $('hist-fields');
   box.textContent = '';
-  // 时间与预热在页签**之上**，两个子页签下都看得见 —— 它不属于"参数"
-  // 或"输出变量"里的任何一个，而是这份算例跑多久、从哪天开始出结果。
+  output.textContent = '';
+  hist.textContent = '';
+  // 时间、输出都属于「怎么运行」，但仍写回同一份 case.nml。
   await renderTiming();
-  if (!state.text) { box.innerHTML = '<p class="muted">先在左边选一个算例</p>'; return; }
+  if (!state.text) {
+    box.innerHTML = '<p class="muted">先在左边选一个算例</p>';
+    output.innerHTML = '<p class="muted">先选一个算例</p>';
+    return;
+  }
   let entries;
   try { entries = await invoke('read_case', { text: state.text }); }
   catch (e) { box.textContent = String(e); return; }
@@ -162,35 +147,25 @@ export async function renderFields() {
                    derived: f.derived, unset: true }));
     entriesAll = entries.concat(extra);
   }
-  // 子页签换成「参数 / 输出变量」—— 原来那三个页签是 CoLM 的 namelist
-  // 分组名（决定字段写进哪个文件），那是**程序的内部结构，不是用户要做的事**。
-  if (state.ptab === 'hist') { await renderHistVars(box); return; }
-  // 三个 namelist 组一起显示。`group` 仍然有用（决定写进哪个文件），
-  // 但它不再是导航轴 —— 分类由下面九个功能节承担。
-  // 482 个 DEF_hist_vars 例外：它们在「输出变量」子页签里。
+  // 三个 namelist 组一起显示；`group` 只决定写进哪个文件。
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
   // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
   const shown = state.showIrrelevant ? inGroup : inGroup.filter(e => !state.irrelevant.has(e.path));
-  if (!shown.length) { box.innerHTML = '<p class="muted">这一组里这份配置没有设任何字段</p>'; return; }
+  const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
+  const params = shown.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
+  const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
+
   renderScope(box);
-  renderToolbar(box, inGroup.length, shown.length);
-
-  // 按九分类分节。分节而不是分页签：`nl_colm` 那一组有 214 个字段，
-  // 而另外两组只有 35 与 482（后者另有专页），只有它需要再分。
-  // 页签仍按 namelist 组分 —— 那决定**写进哪个文件**，是另一回事。
+  renderToolbar(box, params.length);
   const filter = state.fieldFilter?.trim().toLowerCase() ?? '';
-  const visible = filter ? shown.filter(e => e.path.toLowerCase().includes(filter)) : shown;
-  const buckets = new Map(GROUPS.map(g => [g.id, []]));
-  for (const e of visible) {
-    buckets.get(groupOf(e.path, state.fields.find(f => f.name === e.path)).id).push(e);
-  }
+  const visible = filter ? params.filter(e => e.path.toLowerCase().includes(filter)) : params;
 
-  for (const g of GROUPS) {
-    const rows = buckets.get(g.id);
+  for (const section of PARAM_SECTIONS) {
+    const rows = visible.filter(e => sectionOf(e) === section);
     if (!rows.length) continue;
     const h = document.createElement('h2');
-    h.textContent = `${g.label}（${rows.length}）`;
+    h.textContent = `${section}（${rows.length}）`;
     h.style.marginTop = '14px';
     box.appendChild(h);
     box.appendChild(table(rows));
@@ -201,25 +176,34 @@ export async function renderFields() {
 
   // **藏起来不等于假装不存在。** 换个内核这些字段就该回来，
   // 而看不见又找不到会让人以为程序坏了。
-  if (hidden.length && !state.showIrrelevant) {
+  const hiddenParams = hidden.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
+  if (hiddenParams.length && !state.showIrrelevant) {
     const p = document.createElement('p');
     p.className = 'muted';
     p.style.cssText = 'font-size:11px;cursor:pointer';
-    p.textContent = `+ ${hidden.length} 个字段本内核未编入（${hidden.map(h => h.path).slice(0, 3).join('、')}${hidden.length > 3 ? ' 等' : ''}），点此展开`;
+    p.textContent = `+ ${hiddenParams.length} 个字段本内核未编入（${hiddenParams.map(h => h.path).slice(0, 3).join('、')}${hiddenParams.length > 3 ? ' 等' : ''}），点此展开`;
     p.onclick = () => { state.showIrrelevant = true; renderFields(); };
     box.appendChild(p);
-  } else if (state.showIrrelevant && hidden.length) {
+  } else if (state.showIrrelevant && hiddenParams.length) {
     const p = document.createElement('p');
     p.className = 'muted';
     p.style.cssText = 'font-size:11px;cursor:pointer';
-    p.textContent = `专家模式：正在显示 ${hidden.length} 个本内核未编入的字段，点此收起`;
+    p.textContent = `专家模式：正在显示 ${hiddenParams.length} 个本内核未编入的字段，点此收起`;
     p.onclick = () => { state.showIrrelevant = false; renderFields(); };
     box.appendChild(p);
   }
+
+  if (outputFields.length) {
+    renderScope(output);
+    output.appendChild(table(outputFields));
+  } else {
+    output.innerHTML = '<p class="muted">这份配置没有设置输出参数；专家模式可查看源码默认值。</p>';
+  }
+  await renderHistVars(hist);
 }
 
 /** 顶部一行：普通/专家切换 + 过滤框。 */
-function renderToolbar(box, total, shown) {
+function renderToolbar(box, shown) {
   const bar = document.createElement('div');
   bar.className = 'row';
   bar.style.marginBottom = '8px';

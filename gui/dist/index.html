@@ -127,16 +127,18 @@
     <section class="page" data-step="params" hidden>
       <div class="work-head"><span class="kicker">第 3 步</span></div>
       <h1>配参数</h1>
-      <p class="sub">按功能分类，不按 CoLM 的文件结构分。<b>常规模式只显示这份算例实际设了的字段</b>；
-        专家模式连没设过的一起显示，值是 CoLM 的默认值。</p>
-
-      <div id="timing"></div>
+      <p class="sub">选择编译内核，并按 CoLM 源码 namelist 的用途配置参数。
+        <b>常规模式只显示这份算例实际设了的字段</b>；专家模式显示源码里的全部字段和默认值。</p>
 
       <div class="card">
-        <div class="live-tabs" id="ptabs">
-          <button class="on" data-ptab="fields">参数</button>
-          <button data-ptab="hist">输出变量</button>
-        </div>
+        <h3>内核</h3>
+        <div class="ch">一个内核 = 一组编译期宏。选哪个决定了哪些参数有意义、哪些输出变量写得出来。</div>
+        <select class="select" id="kernel"></select>
+        <p class="muted mini" id="kernelmeta">&nbsp;</p>
+      </div>
+
+      <div class="card">
+        <h3>namelist 参数</h3>
         <div id="unknown"></div>
         <div class="pill-row" style="margin:12px 0">
           <select class="select" id="preset" style="max-width:220px"></select>
@@ -153,8 +155,18 @@
     <section class="page" data-step="run" hidden>
       <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>运行</h1>
-      <p class="sub">三个程序依次跑：<code>mksrfdata</code> 造地表数据、<code>mkinidata</code> 造初始场、
-        <code>colm</code> 跑模拟。<b>输入没变的那一段会跳过</b> —— 判据是输入指纹，不是文件在不在。</p>
+      <p class="sub">设置时间、预热与输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
+        <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。</p>
+
+      <div id="timing"></div>
+
+      <div class="card">
+        <h3>输出</h3>
+        <div class="ch">这里设置输出频率、目录与重启，并选择需要写入 history 的变量。</div>
+        <div id="output-fields"></div>
+        <h4 style="margin-top:16px">输出变量</h4>
+        <div id="hist-fields"></div>
+      </div>
 
       <div class="card">
         <h3>跑哪些</h3>
@@ -167,10 +179,7 @@
       </div>
 
       <div class="card">
-        <h3>内核</h3>
-        <div class="ch">一个内核 = 一组编译期宏。选哪个决定了哪些参数有意义、哪些输出变量写得出来。</div>
-        <select class="select" id="kernel"></select>
-        <p class="muted mini" id="kernelmeta">&nbsp;</p>
+        <h3>开始运行</h3>
         <div class="pill-row" style="margin-top:14px">
           <button class="run-btn" id="run" disabled>▶ 运行</button>
           <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
@@ -184,7 +193,7 @@
       <div class="work-head"><span class="kicker">第 5 步</span></div>
       <h1>结果</h1>
       <p class="sub">画模型输出，或与观测配对算指标。<b>「丢弃前 N 条」丢的是输出记录</b>，
-        与第 3 步里的模型预热（spin-up）不是一回事。</p>
+        与第 4 步里的模型预热（spin-up）不是一回事。</p>
 
       <div class="card">
         <h3>曲线</h3>
@@ -203,7 +212,7 @@
           <button class="btn-ghost pick" data-for="obs" data-file="nc">选择…</button>
         </div>
         <div class="pill-row" style="margin-top:10px">
-          <label class="check" title="丢的是输出记录，单位是条。与第 3 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
+          <label class="check" title="丢的是输出记录，单位是条。与第 4 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
             丢弃前 <input class="input" id="spinup" type="number" value="0" min="0" style="width:5.5em"> 条 ⓘ</label>
           <label class="check" title="涡度相关的湍流通量普遍关不上能量收支，观测文件自带订正版 Qle_cor / Qh_cor。实测 AT-Neu：订正把观测 Qle 抬高 25.5 W/m²，而模型对未订正观测的偏差是 +19.8 —— 偏差的大小基本就是那个缺口。默认关，因为 design.md 的目标值是拿未订正版算的。">
             <input type="checkbox" id="corrected"> 用能量闭合订正后的观测 ⓘ</label>
@@ -211,6 +220,7 @@
           <button class="btn-ghost" id="eval-all" disabled>评估全部已跑算例</button>
         </div>
         <div id="metrics" style="margin-top:12px"></div>
+        <div id="evaluation-charts" style="margin-top:12px"></div>
         <div id="summary"></div>
       </div>
     </section>

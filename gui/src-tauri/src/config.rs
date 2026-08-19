@@ -5,6 +5,177 @@
 
 use serde::Serialize;
 
+/// 把源码 namelist 字段放进用户看得懂的功能分组。
+///
+/// 返回 `None` 不是「其他」：测试要求当前 CoLM 源码里一个都不能剩。
+/// 上游新增字段时 CI 会报出名字，要求读过它的用途后再归类。
+pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
+    let n = name.to_ascii_uppercase();
+    let has = |parts: &[&str]| parts.iter().any(|p| n.contains(p));
+
+    if n.starts_with("DEF_HIST_VARS%") {
+        return Some("输出变量");
+    }
+    if n.starts_with("DEF_SIMULATION_TIME%") {
+        return Some("时间与预热");
+    }
+    if n.starts_with("DEF_HIST")
+        || n.starts_with("DEF_WRST")
+        || n.starts_with("DEF_REST")
+        || n == "DEF_HISTORY_IN_VECTOR"
+        || n == "DEF_OUTPUT_2MWMO"
+        || n == "DEF_DIR_OUTPUT"
+        || n == "DEF_DIR_HISTORY"
+        || n == "DEF_DIR_RESTART"
+        || n == "USE_SITE_HISTWRITEBACK"
+    {
+        return Some("输出与重启");
+    }
+    if n.starts_with("SITE_") || n.starts_with("USE_SITE_") {
+        return Some("站点");
+    }
+    if group == Some("nl_colm_forcing")
+        || has(&[
+            "FORCING_INTERP",
+            "FORCING_DOWNSCALING",
+            "CLIMFORCING",
+            "DEF_DS_",
+            "CBL_HEIGHT",
+        ])
+    {
+        return Some("强迫场");
+    }
+    if has(&["URBAN", "CANYON_HWR"]) {
+        return Some("城市");
+    }
+    if has(&["TRACER", "GIEMS", "WETLAND_FINUNDATION"]) {
+        return Some("示踪剂");
+    }
+    if n.starts_with("DEF_DA_") || n == "DEF_OPTIMIZE_BASEFLOW" {
+        return Some("数据同化");
+    }
+    if has(&[
+        "CAMA",
+        "ELEMENTNEIGHBOUR",
+        "UNITCATCHMENT",
+        "RESERVOIR",
+        "ROUTING",
+        "RIVERDEPTH",
+        "LEVEE",
+        "BIFURCATION",
+    ]) {
+        return Some("河道与水库");
+    }
+    if has(&[
+        "SOILINIT",
+        "SNOWINIT",
+        "CN_INIT",
+        "WATERTABLEINIT",
+        "FILE_WATERTABLE",
+    ]) {
+        return Some("初始场");
+    }
+    if n == "DEF_CASE_NAME" {
+        return Some("算例");
+    }
+    if n.starts_with("DEF_DOMAIN%")
+        || has(&[
+            "BLOCKINFO",
+            "AVERAGEELEMENTSIZE",
+            "NX_BLOCKS",
+            "NY_BLOCKS",
+            "PIO_GROUPSIZE",
+            "NIO_EQ_NBLOCK",
+            "FILE_MESH",
+            "GRIDBASED_LON",
+            "GRIDBASED_LAT",
+            "CATCHMENTMESH",
+            "MESH_FILTER",
+        ])
+    {
+        return Some("网格与并行");
+    }
+    if has(&[
+        "SRFDATA",
+        "DEF_LC_YEAR",
+        "DEF_USE_USGS",
+        "DEF_USE_IGBP",
+        "DEF_USE_LCT",
+        "DEF_USE_PFT",
+        "DEF_USE_PC",
+        "DEF_SOLO_PFT",
+        "DEF_FAST_PC",
+        "PC_CROP_SPLIT",
+        "SUBGRID_SCHEME",
+        "LANDONLY",
+        "DOMINANT_PATCHTYPE",
+        "SOILPAR_UPS_FIT",
+        "SOIL_REFL_SCHEME",
+        "ZIP_FOR_AGGREGATION",
+        "DEF_LAI_",
+        "LAIFEEDBACK",
+        "HIGHRESSOIL",
+        "HIGHRESVEG",
+        "LULCC_SCHEME",
+    ]) {
+        return Some("地表数据");
+    }
+    if has(&[
+        "INTERCEPTION",
+        "MATSIRO",
+        "THERMAL_CONDUCTIVITY",
+        "SUPERCOOL",
+        "RSS_SCHEME",
+        "RUNOFF_SCHEME",
+        "VIC_",
+        "TOPMOD",
+        "SPLIT_SOILSNOW",
+        "VARIABLYSATURATEDFLOW",
+        "BEDROCK",
+        "PRECIP_PHASE",
+        "DYNAMIC_LAKE",
+        "DYNAMIC_WETLAND",
+    ]) {
+        return Some("水热过程");
+    }
+    if has(&[
+        "VEG_SNOW",
+        "OZONE",
+        "SNICAR",
+        "SNOWOPTICS",
+        "SNOWAGING",
+        "PROSPECT",
+        "AEROSOL",
+        "NDEP",
+        "DEF_SSP",
+        "IRRIGATION",
+        "NOSTRESSNITROGEN",
+        "DEF_RSTFAC",
+        "PLANTHYDRAULICS",
+        "MEDLYNST",
+        "WUEST",
+        "DEF_USE_SASU",
+        "DIAGMATRIX",
+        "DEF_USE_PN",
+        "DEF_USE_FERT",
+        "FERT_SOURCE",
+        "NITRIF",
+        "CNSOYFIXN",
+        "DEF_USE_FIRE",
+        "CHECKEQUILIBRIUM",
+    ]) {
+        return Some("生态与生地化");
+    }
+    if n.starts_with("DEF_DIR")
+        || n.starts_with("DEF_FILE")
+        || n.ends_with("_FILE")
+        || n.ends_with("_NAMELIST")
+    {
+        return Some("文件与目录");
+    }
+    None
+}
+
 /// 页面加载时确认后端确实接上了。
 ///
 /// 顺便往 stderr 记一行。这不是调试残留：GUI 出问题时最难分辨的两种情况是
@@ -47,6 +218,8 @@ pub struct Field {
     /// 需要哪些编译期宏。与所选内核 `manifest.json` 的 `macros` 求交，
     /// 交不上就说明这个字段在当前内核下**根本没用**。实测 68 个字段有依赖。
     pub requires: &'static [&'static str],
+    /// 从 CoLM 源码字段名与 namelist 组推导的功能分组。
+    pub section: &'static str,
 }
 
 #[tauri::command]
@@ -62,6 +235,7 @@ pub fn describe_fields() -> Vec<Field> {
             derived: f.group.is_none(),
             values: f.values,
             requires: f.requires,
+            section: field_section(f.name, f.group).unwrap_or("未分类（这应该被测试拦住）"),
         })
         .collect()
 }

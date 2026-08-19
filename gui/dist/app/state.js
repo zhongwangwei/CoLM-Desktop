@@ -8,8 +8,6 @@
 export const state = {
   /** 当前在第几步，见 shell.js 的 STEPS。 */
   step: 'data',
-  /** 参数页的子页签：'fields' | 'hist'。 */
-  ptab: 'fields',
   cases: [],
   /** 站点库扫描结果，见 colm-cli scan */
   sites: [],
@@ -49,7 +47,7 @@ export const state = {
    *  后者问「编没编进去」。压成一个的话，想看全部已设字段的人会被迫
    *  连 68 个用不上的一起看。 */
   showIrrelevant: false,
-  /** 输出变量页的搜索词与「只看已勾选」。 */
+  /** 运行页输出变量的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,
   /** 批量汇总表：看哪个变量、按哪一列排。 */
