@@ -58,3 +58,10 @@ path = "src/bin/golden_compare.rs"
 [[bin]]
 name = "tier-check"
 path = "src/bin/tier_check.rs"
+
+# 一次性的抽取工具：把 21 个 Urban-PLUMBER 站点的土壤剖面点值从全球栅格
+# 里抽成 crates/colm-srfdata/src/urban_soil.rs。产物入库，工具只在换
+# rawdata 时才需要再跑，所以它依赖真实栅格并不妨碍日常构建。
+[[bin]]
+name = "extract-urban-soil"
+path = "src/bin/extract_urban_soil.rs"
