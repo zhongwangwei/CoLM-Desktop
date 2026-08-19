@@ -7,7 +7,7 @@
 import { state } from './state.js';
 import { $ } from './ui.js';
 
-/** 五步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
+/** 六步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
 export const STEPS = [
   // 前处理在前：它产出的正是下一步要扫的东西。
   { id: 'prep',   t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
@@ -20,7 +20,7 @@ export const STEPS = [
   // 算例目录，那时没有 pickedSite 但算例是现成的，不该被拦在门外。
   { id: 'basic',  t: '基本设定', d: '算例、内核、时间与预热',
     need: () => (state.pickedSite || state.picked.size || state.cases.length
-      ? null : '先在第 2 步选一个站点') },
+      ? null : '先在第 2 步选站点（可以多选）') },
   { id: 'params', t: '参数',   d: 'namelist 字段表',
     need: () => (state.selected ? null : '先在第 3 步建一个算例') },
   { id: 'run',    t: '运行',   d: '输出与运行',
@@ -85,10 +85,23 @@ export function renderSteps() {
   }
   // 左下角那两行说的是「当前上下文」—— 切到任何一步都还看得见选了哪个站、
   // 用的哪个内核。那两样决定了另外几步的行为。
-  $('estSite').textContent = state.selected?.name ?? '—';
+  //
+  // **批量时必须说出是几个。** 勾了 20 个站点却只显示一个名字，界面看起来
+  // 像在配一个，而改一个字段会写进 20 份 case.nml —— 那是看不出异常的破坏。
+  // `params.js` 的 `renderScope()` 已经为此立过一次规矩（不能只在状态栏事后
+  // 说），左栏是同一个问题的另一半。
+  //
+  // 数取 batch 优先：建完算例之后它才是参数改动的**实际**作用对象；
+  // 还没建时退回勾中的站点数。
+  const n = state.batch.length || state.picked.size;
+  const one = state.selected?.name ?? state.pickedSite?.name
+    ?? state.sites.find(x => state.picked.has(x.site_file))?.name;
+  $('estSite').textContent = n > 1 ? `${one ?? '—'} 等 ${n} 个` : (one ?? '—');
   const k = $('kernel');
   $('estKernel').textContent = k?.selectedIndex >= 0 ? k.options[k.selectedIndex].textContent : '—';
-  $('casename').value = state.selected ? state.selected.dir : '还没有算例';
+  $('casename').value = state.batch.length > 1
+    ? `${state.batch.length} 个算例`
+    : (state.selected ? state.selected.dir : '还没有算例');
   // 步骤条与「下一步」按钮是**同一份状态**推出来的，必须一起刷新。
   // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
   renderNextButtons();
