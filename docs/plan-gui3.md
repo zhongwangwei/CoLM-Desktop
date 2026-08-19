@@ -2915,6 +2915,132 @@ cargo test --workspace 2>&1 | tail -5
 
 ---
 
+## Task 8c-3: 接通 —— 城市算例彻底不碰栅格
+
+8c-1 修掉两个 Fortran bug（省 130 MB），8c-2 把 21 个站的土壤剖面点值抽成
+一张入库的表（省 122 GB）。这一步把它接进 `prepare_urban`，并把
+`--rawdata` 从必填改回可选。
+
+**字段清单以 8c-2 的实测结果为准**，不以这里写的为准。
+
+**Files:**
+- Modify: `crates/colm-srfdata/src/site.rs`
+- Modify: `crates/colm-case/src/build.rs`
+- Modify: `crates/colm-cli/src/main.rs`
+
+- [ ] **Step 1: `prepare_urban` 写入土壤剖面**
+
+它现在只把 `ground_height` 抄成 `elevation`。让它同时：
+
+1. 按经纬度查 `urban_soil::lookup(lon, lat)`
+2. 查到就把各变量写进 `site.nc`，每个带 `source` 属性：
+   `"extracted from CoLM 2024 rawdata soil/*.nc at this site"`
+3. **查不到就什么都不写** —— 让 CoLM 回落栅格，并在返回的 `UrbanReport`
+   里说明「这个站点不在预抽表里，需要 rawdata」
+
+第 3 条很重要：表只覆盖 Urban-PLUMBER 那 21 个站。**别对表外的站点编默认值**
+—— 土壤剖面不像 `elvstd`/`sloperatio` 那样「模块默认值恰好没代价」，
+编一个会让结果错得看不出来。
+
+`LCZ_DOM` 与 `LUCY_ID` 也在这一步写（8c-2 已核对真值：AU-Preston 是
+LCZ 6、LUCY 12）。`LCZ_DOM` 若表里没有就用 6 并把 `source` 写成
+`"assumed: LCZ 6 open low-rise (Stewart & Oke 2012)"` —— 那是**假设**，
+措辞要与「量出来的」区分开。
+
+- [ ] **Step 2: `colm-case` 不再把三项设成 `.false.`**
+
+`crates/colm-case/src/build.rs` 里 `for n in ["lakedepth", "soilreflectance",
+"soilparameters"]` 那个循环删掉，注释换成：
+
+```rust
+        // 这三项保持默认的 .true.（「站点文件里有，用它」）—— `prepare_urban`
+        // 现在把土壤剖面、湖深、反照率都写进了 site.nc：剖面来自随仓库发的
+        // 预抽表（21 个 Urban-PLUMBER 站点，值是从 CoLM 2024 rawdata 该站
+        // 格点上量出来的），其余走模块默认值。
+        //
+        // 改成 .false. 会把 CoLM 推去读全球栅格，而那套数据实测 240 GB。
+        // 城市站点文件里确实没有这三样（23 个变量全是形态学量），
+        // 但「站点文件里没有」与「必须去栅格取」之间隔着 prepare_urban。
+```
+
+`DEF_URBAN_type_scheme = 2`（LCZ）那一句**保留**。
+
+- [ ] **Step 3: `colm-cli new` 的两个目录改回可选**
+
+给了就用（栅格优先），没给就和自然站点一样指向不存在的目录。注释：
+
+```rust
+    // 全球栅格目录。**给了就用，没给就回落** —— `site::fill` /
+    // `prepare_urban` 已经把该有的都写进 site.nc 了，跑通了就证明没读栅格。
+    //
+    // 城市算例曾经必填这两个。解开它花了三步：修掉两个让 site.nc 分支
+    // 不可达的 Fortran bug（lakedepth 的 readflag 取自未赋值的结果变量、
+    // TREE_LAI 命中分支不分配 SITE_LAI_year），再把 21 个站的土壤剖面
+    // 从栅格预抽成一张入库的表。城市算例一次只读一格，而那 21 格加起来
+    // 只有几十 KB。
+```
+
+**表外的城市站点仍然需要 rawdata** —— 那时 `prepare_urban` 不写土壤，
+CoLM 回落栅格，若目录不存在就报错。这是对的：不能对没量过的站点编数。
+错误信息要说清楚「这个站点不在预抽表里」。
+
+- [ ] **Step 4: 实测 AU-Preston 完全不给栅格跑完三段**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cargo build -p colm-cli
+U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
+T=/tmp/urban-final && rm -rf $T
+./target/debug/colm-cli new --site "$U/Sitedata/AU-Preston_site_v1.nc" \
+  --out $T --name AU-Preston --start 1993-01-01 --end 1993-01-11
+grep -E "USE_SITE_(lakedepth|soilreflectance|soilparameters)|DEF_dir_rawdata" $T/case.nml
+./target/debug/colm-cli run $T --kernel kernels/urban 2>&1 | tail -20
+```
+
+期望：三个 `USE_SITE_*` **不出现**（保持默认 `.true.`），
+`DEF_dir_rawdata` 指向 `$T/rawdata_unused/`，三段全 `ok`。
+
+**对照 README 的验收基准**：264 条小时记录、`f_tref` 峰值 312 K。
+8c-1 已用真实栅格复现过 264 条 / 311.96 K —— 这次不给栅格，
+**结果应当与那次一致**。对不上就如实报出来，那意味着预抽的值与栅格真值有出入。
+
+- [ ] **Step 5: 21 个站全跑一遍**
+
+一个站点跑通不代表表是对的。把 21 个都建出来（不必都跑完三段，
+`mksrfdata` 过了就说明土壤读到了）：
+
+```bash
+for f in "$U"/Sitedata/*_site_v1.nc; do
+  n=$(basename "$f" _site_v1.nc)
+  ./target/debug/colm-cli new --site "$f" --out /tmp/u21/$n --name $n \
+    --start 1993-01-01 --end 1993-01-03 2>&1 | tail -1
+done
+```
+
+然后挑 3–4 个跑 `mksrfdata`。**哪个站点失败就报出来**，那说明预抽表漏了它
+或者那个站点有别的特殊之处。
+
+- [ ] **Step 6: 自然站点不能被弄坏（硬门槛）**
+
+```bash
+export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+cargo test --workspace 2>&1 | tail -6
+cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -5
+cargo run -q -p oracle --bin golden-compare -- \
+  oracle/golden/CN-Cng_hist_2008-01.nc \
+  oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+```
+
+期望逐字 `identical: 129 variables, 10 dimensions (ignoring ["create_time"])`，
+`cargo test --workspace` 不少于 265 passed。对不上就 **BLOCKED**。
+
+- [ ] **Step 7: 提交，并更新 README**
+
+README「URBAN 是唯一必须带全球栅格跑的预设」那一节的结论变了。改成说明
+现在的状态：站点在预抽表里就不需要栅格，表外的仍然需要。
+
+---
+
 ## Task 11d: 性能与重构（审查剩下的那批）
 
 **Files:**
