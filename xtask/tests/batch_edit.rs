@@ -111,3 +111,44 @@ fn the_metrics_table_says_which_observation_it_used() {
     let html = std::fs::read_to_string(root().join("gui/dist/index.html")).expect("index.html");
     assert!(html.contains(r#"id="corrected""#));
 }
+
+#[test]
+fn the_installer_carries_a_runnable_example() {
+    // 一个刚装好程序的人手上没有任何数据。PLUMBER2 要注册、几十 GB ——
+    // 在拿到数据之前他连「这程序能不能用」都判断不了。
+    let conf = std::fs::read_to_string(root().join("gui/src-tauri/tauri.bundle.conf.json"))
+        .expect("tauri.bundle.conf.json");
+    assert!(conf.contains("examples"), "示例数据没进 bundle.resources");
+
+    // 三件套缺一不可：少了 Forcing 界面会说「没有强迫场，跑不了」，
+    // 少了 Observation 则是评估按钮一直灰着 —— 都不像是打包漏了。
+    let s = "CN-Cng_2008-2009_FLUXNET2015";
+    for (d, suf) in [
+        ("Sitedata", "site"),
+        ("Forcing", "Met"),
+        ("Observation", "Flux"),
+    ] {
+        let p = root()
+            .join("examples")
+            .join(d)
+            .join(format!("{s}_{suf}.nc"));
+        assert!(p.is_file(), "{} 不在", p.display());
+    }
+
+    // 目录形状就是 `colm-cli scan` 依赖的那个：它顺着命名约定从 Sitedata
+    // 找到 ../Forcing 与 ../Observation。压平了扫描仍列得出站点，
+    // 但强迫场找不到。
+    assert!(js("sites.js").contains("install_example"), "界面上没有入口");
+
+    // 示例要小到能塞进安装包。原始三件套 19 MB，deflate 之后 3.1 MB。
+    let bytes: u64 = ["Sitedata", "Forcing", "Observation"]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(root().join("examples").join(d)).unwrap())
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .sum();
+    assert!(
+        bytes < 8 * 1024 * 1024,
+        "示例数据 {} MB，太大了 —— 重新 nccopy -d 5 压一遍",
+        bytes / 1048576
+    );
+}

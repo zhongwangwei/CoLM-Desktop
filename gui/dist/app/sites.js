@@ -324,3 +324,26 @@ export async function ensureCases(sites) {
 
 $('pick-all').onclick = () => { for (const s of state.sites) state.picked.add(s.site_file); renderSites(); };
 $('pick-none').onclick = () => { state.picked.clear(); renderSites(); };
+
+
+/** 用自带的示例站点。
+ *
+ *  **一个刚装好程序的人手上没有任何数据**，而 PLUMBER2 要注册、几十 GB ——
+ *  在拿到数据之前他连"这程序能不能用"都判断不了。这个按钮把自带的那一个
+ *  站点放到可写位置，填好两个路径，直接扫出来。
+ *
+ *  安装目录本身是只读的（macOS 的 .app、Windows 的 Program Files），
+ *  所以要先复制出来 —— 否则建算例时会拿到一个权限错误，
+ *  而错误信息里看不出问题出在"那是安装目录"。 */
+$('use-example').onclick = async () => {
+  $('use-example').disabled = true;
+  try {
+    const e = await invoke('install_example');
+    $('sitedir').value = e.sitedir;
+    $('root').value = e.root;
+    for (const id of ['sitedir', 'root']) $(id).dispatchEvent(new Event('change'));
+    setStatus(e.already ? '示例数据已经在了' : '示例数据已放好');
+    $('scan').click();
+  } catch (err) { setStatus(err); }
+  finally { $('use-example').disabled = false; }
+};

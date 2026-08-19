@@ -9,7 +9,8 @@
       "binaries/colm-cli"
     ],
     "resources": {
-      "../../kernels": "kernels"
+      "../../kernels": "kernels",
+      "../../examples": "examples"
     }
   }
 }

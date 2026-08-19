@@ -123,6 +123,14 @@ jobs:
             test -f "$app/Contents/Resources/kernels/$p/manifest.json"
           done
           test -x "$app/Contents/MacOS/colm-cli"
+          # 示例站点也必须在里面：少了它，一个刚装好程序的人手上没有任何
+          # 数据，连「这程序能不能用」都判断不了。三件套缺一不可 ——
+          # 少了 Forcing 界面会说「这个站点没有强迫场，跑不了」，
+          # 少了 Observation 则是评估按钮一直灰着，两者都不像是打包漏了。
+          s=CN-Cng_2008-2009_FLUXNET2015
+          test -f "$app/Contents/Resources/examples/Sitedata/${s}_site.nc"
+          test -f "$app/Contents/Resources/examples/Forcing/${s}_Met.nc"
+          test -f "$app/Contents/Resources/examples/Observation/${s}_Flux.nc"
 
       - uses: actions/upload-artifact@v4
         with:

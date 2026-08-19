@@ -345,7 +345,17 @@ fn cmd_scan(dir: &Path, out: Option<&str>, quick: bool) -> Result<()> {
 }
 
 fn cmd_new(o: &Opts) -> Result<PathBuf> {
-    let site_raw = o.need("--site")?;
+    // **站点文件的路径要先绝对化。** 强迫场文件的路径是从它推出来的，
+    // 并原样写进 `forcing.nml`；而模型跑在算例目录里（`run_stage` 设了
+    // `current_dir(work)`），相对路径到那里就解析不到了 ——
+    // 报的还是 `<相对路径> does not exist`，看上去像文件缺失而不是路径问题。
+    // 与 `Kernel::open` 和 `cmd_run` 的算例目录是同一类问题，第三次遇到。
+    let site_raw = {
+        let given = o.need("--site")?;
+        given
+            .canonicalize()
+            .with_context(|| format!("cannot resolve --site {}", given.display()))?
+    };
     let out = o.need("--out")?;
     let met = sibling(&site_raw, "Forcing", 0).with_context(|| {
         format!(

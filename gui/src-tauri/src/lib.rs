@@ -10,6 +10,7 @@
 //! 所以页面用 `window.__TAURI__.core.invoke(...)` 跟这里说话。
 
 mod config;
+mod example;
 mod histvars;
 mod presets;
 mod project;
@@ -18,6 +19,7 @@ mod sidecar;
 mod sites;
 
 use config::*;
+use example::*;
 use histvars::*;
 use presets::*;
 use project::*;
@@ -37,6 +39,7 @@ pub fn run() {
             describe_fields,
             list_cases,
             list_kernels,
+            install_example,
             scan_sites,
             new_case,
             read_text,
