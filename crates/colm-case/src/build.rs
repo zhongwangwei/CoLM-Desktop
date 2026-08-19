@@ -227,14 +227,21 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
         // 实测默认那条路在栅格给不出城市类别时会越界崩溃，而 LCZ 分类
         // 的覆盖更完整。CoLM 自带的城市单点示例用的也是 2。
         out.push(("DEF_URBAN_type_scheme".into(), Value::Int(2)));
-        // 这三项默认是 .true.（「站点文件里有，用它」），可城市站点文件里
-        // 没有 —— Urban-PLUMBER 的 25 个变量全是形态学量，一个土壤剖面、
-        // 一个湖深、一个土壤反照率都没有。留着默认值，CoLM 会去站点文件里
-        // 找不存在的变量。改成 .false. 之后它改从栅格取，这也是城市算例
-        // **必须**给出真实 rawdata 目录的原因（见 `Dirs::rawdata`）。
-        for n in ["lakedepth", "soilreflectance", "soilparameters"] {
-            out.push((format!("USE_SITE_{n}"), Value::Bool(false)));
-        }
+        // `USE_SITE_lakedepth` / `USE_SITE_soilreflectance` /
+        // `USE_SITE_soilparameters` 三项**保持 CoLM 默认的 `.true.`**
+        // （「站点文件里有，就用它」），所以这里一个字都不写。
+        //
+        // **`USE_SITE_soilparameters` 尤其不能是 `.false.`** —— 城市段的
+        // readflag 直接就是它（`MOD_SingleSrfdata.F90:2103`），没有自然段
+        // 那个 `(.not. mksrfdata)` 逃生口。设成 `.false.`，site.nc 根本不会
+        // 被查，`prepare_urban` 写多少土壤进去都没用，CoLM 照样去开
+        // `<rawdata>/soil/` 下那 24 个全球栅格 —— 实测 122 GB。
+        //
+        // 另外两项写不写都一样，删掉只是因为「写一个与默认值相反的值」
+        // 需要理由，而这里没有：城市站点文件里确实没有 `lakedepth` 与四个
+        // `soil_*_alb`，`prepare_urban` 也不补它们（那两样的真值得量，
+        // 而预抽表里只有土壤剖面），于是 `ncio_var_exist` 为假、CoLM 照旧
+        // 回落到 `lake_depth.nc` 与 `soil_brightness.nc`。行为与先前逐位相同。
     }
     out
 }

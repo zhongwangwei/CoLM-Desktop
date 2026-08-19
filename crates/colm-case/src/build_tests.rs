@@ -199,6 +199,26 @@ fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
 }
 
 #[test]
+fn an_urban_case_leaves_the_three_use_site_switches_at_their_defaults() {
+    // **`USE_SITE_soilparameters` 是这一步的全部要害。** 城市段的 readflag
+    // 直接就是它（`MOD_SingleSrfdata.F90:2103`），没有自然段那个
+    // `(.not. mksrfdata)` 逃生口 —— 设成 `.false.`，`prepare_urban` 写进
+    // site.nc 的 25 个土壤变量一个都不会被查，CoLM 转头去开 122 GB 的
+    // `<rawdata>/soil/`。所以这三项一个都不许出现在算例里。
+    let mut s = cn_cng();
+    s.landtype = None;
+    s.urban = true;
+    let names: Vec<String> = fields(&s).into_iter().map(|(p, _)| p).collect();
+    for n in [
+        "USE_SITE_soilparameters",
+        "USE_SITE_lakedepth",
+        "USE_SITE_soilreflectance",
+    ] {
+        assert!(!names.iter().any(|x| x == n), "{n} 不该被写出来");
+    }
+}
+
+#[test]
 fn a_non_urban_case_says_nothing_about_urban() {
     // 不跑城市就一个城市字段都不该出现 —— 写一个用不上的开关，
     // 下一个读配置的人会以为它有意义。
