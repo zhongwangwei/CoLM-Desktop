@@ -324,9 +324,9 @@ jobs:
             $psi.UseShellExecute = $false
             try {
               $proc = [System.Diagnostics.Process]::Start($psi)
+              Write-Host "  启动成功：CreateProcessW 接受该工作目录"
+              if (-not $proc.HasExited) { $proc.Kill() }
               $proc.WaitForExit()
-              $code = $proc.ExitCode
-              Write-Host ("  退出码 {0} / 0x{1:X8}" -f $code, ($code -band 0xFFFFFFFF))
             } catch {
               Write-Host "  起不来: $($_.Exception.Message)"
             }
