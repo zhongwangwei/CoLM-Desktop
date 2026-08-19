@@ -138,7 +138,8 @@ export async function renderFields() {
   const extra = state.fields
     .filter(f => !have.has(f.name))
     // 这里只编辑 case.nml 的 nl_colm 组。forcing/history 是另外的 namelist；
-    // 派生项只在专家模式下作为只读说明出现。
+    // 派生项虽然不属于任何组，但仍要显示 —— 它们回答「这个值现在是多少」，
+    // 排在各分节末尾，只读。
     .filter(f => f.group === 'nl_colm' || f.derived)
     .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
                  derived: f.derived, unset: true }));
@@ -146,10 +147,11 @@ export async function renderFields() {
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
   // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
-  // 常规与专家都严格跟随所选内核；专家模式只额外显示源码派生的只读项。
-  const shown = inGroup
-    .filter(e => !state.irrelevant.has(e.path))
-    .filter(e => state.expert || !e.derived);
+  // 严格跟随所选内核。**只读派生项不再藏在专家模式后面** ——
+  // 全仓库只有 6 个（DEF_dir_landdata/restart/history、DEF_USE_USGS/IGBP、
+  // DEF_wetland_finundation_scheme），它们是「这个值现在是多少」的答案，
+  // 而那是个常规问题。
+  const shown = inGroup.filter(e => !state.irrelevant.has(e.path));
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const params = shown.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
@@ -161,7 +163,10 @@ export async function renderFields() {
   const visible = filter ? params.filter(e => e.path.toLowerCase().includes(filter)) : params;
 
   for (const section of PARAM_SECTIONS) {
-    const rows = visible.filter(e => sectionOf(e) === section);
+    // 可编辑的在前，只读派生项排到本节末尾 —— 只读行混在中间会打断编辑节奏。
+    // 按 field_section() 实际推导，最多的一节（文件与目录）也只有 3 个。
+    const rows = visible.filter(e => sectionOf(e) === section)
+      .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (!rows.length) continue;
     const h = document.createElement('h2');
     h.textContent = `${section}（${rows.length}）`;
