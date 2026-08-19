@@ -233,6 +233,15 @@ $('scan').onclick = async () => {
       $('root').value = (parent || dir) + '/colm-cases';
       $('root').dispatchEvent(new Event('change'));
     }
+    // **换了目录就清勾选。** 不清的话，#pickinfo 还写着上一批的数，
+    // 而按钮上的字与按下去的行为直接对着干（「建算例：选中的 90 个站点」
+    // 按下去落一句「先点一个站点」）。
+    //
+    // 更要紧的是 pickedSite：它是上一个目录里的**站点对象**，
+    // 而 confirmSelection 一个没勾时正是拿它去建 —— 会在新目录里建一个
+    // 旧目录站点的算例，界面上看不出异常。
+    state.picked.clear();
+    state.pickedSite = null;
     state.sites = assignCaseNames(r.sites);
     renderSites(r);
     renderSteps();
