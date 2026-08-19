@@ -3463,7 +3463,8 @@ cd gui/src-tauri && cargo test 2>&1 | tail -5 && cargo clippy --all-targets -- -
 # 期望 44 passed —— 这是独立 workspace，上面那条 --workspace 跑不到它
 ```
 
-期望：全绿。主 workspace 265 passed，GUI 那个独立 workspace 44 passed。
+期望：全绿。主 workspace **273 passed**（8c-2 加了 8 个测试），
+GUI 那个独立 workspace **44 passed**。`cargo fmt --all -- --check` 也要干净。
 
 - [ ] **Step 2: 端到端走一遍六步**
 
@@ -3569,7 +3570,31 @@ grep -q '^\.playwright-mcp/' .gitignore || echo '/.playwright-mcp/' >> .gitignor
 tail -3 .gitignore
 ```
 
-- [ ] **Step 4: 更新 README 的 GUI 一节**
+- [ ] **Step 3b: 验城市算例真的不用栅格了**
+
+这是这轮最有分量的成果，必须端到端验一次。
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
+T=/tmp/final-urban && rm -rf $T
+./target/debug/colm-cli new --site "$U/Sitedata/AU-Preston_site_v1.nc" \
+  --out $T --name AU-Preston --start 1993-01-01 --end 1993-01-11
+./target/debug/colm-cli run $T --kernel kernels/urban 2>&1 | tail -8
+```
+
+期望：三段全 `ok`，**完全没给 `--rawdata`**。对照基准 264 条小时记录、
+`f_tref` 峰值 312 K（8c-1 用真实栅格复现过 311.96 K）。
+
+再从界面走一遍：第 2 步选 urban 内核 → 第 3 步「用自带的示例站点」→
+选 AU-Preston → 建算例 → 跑。**装出来的程序里没有 240 GB 栅格，这一条
+走通才算「用户什么都不用装」对城市站也成立。**
+
+- [ ] **Step 4: 更新 README**
+
+README 有**两处**要改，第二处是这轮最实质的改动。
+
+**(a) GUI 那一节** —— 现在描述的是五步。
 
 README「GUI（部分验收）」那一节描述的是五步与旧的三栏骨架。
 在那一节的验收表格之前插入：
@@ -3606,6 +3631,34 @@ README「GUI（部分验收）」那一节描述的是五步与旧的三栏骨�
 常规/专家开关保留着等后续安排，空着的时候界面会明说。
 ```
 
+**(b) 「URBAN 是唯一必须带全球栅格跑的预设」那一节 —— 结论已经不成立了。**
+
+那一节现在写着「`colm-cli new` 认出城市站点文件之后，`--rawdata` 与
+`--runtime` 变成必填」。三步之后不是这样了：
+
+| 原来要栅格的东西 | 现在 |
+|---|---|
+| `lake_depth.nc`（49 MB） | 站点文件分支修好了，从 `site.nc` 读 |
+| `urban_lai_500m/`（81 MB） | 同上（原来走站点文件必然段错误） |
+| `soil/`（**122 GB**） | 21 个站的点值预抽成 91 KB 的入库表 |
+
+改写那一节时**必须说清楚三件事**：
+
+1. **省下的不是估算，是实测**：AU-Preston 用预抽表在一棵去掉 `soil/` 的
+   rawdata 上跑完三段，history 里 146 个变量与直接读 122 GB 的参照 run
+   **逐位相同**。
+2. **两个 Fortran bug 是上游的**，改在 `vendor/CoLM202X`（本地分支
+   `fix/urban-site-fallbacks`，**尚未 push**）。要写明它们是什么：
+   `lakedepth` 的 readflag 取自未赋值的结果变量（`.and.` 短路，连警告都不打）；
+   `TREE_LAI` 命中分支不分配 `SITE_LAI_year` 而写出时无条件 `size()`。
+3. **边界要诚实**：表只覆盖 Urban-PLUMBER 那 21 个站。**表外的城市站点
+   仍然需要 rawdata** —— 不能对没量过的站点编数。`soil_texture` 在 16 个
+   站是 `-1`（质地产品在建成区没数据），照抄栅格的 `_FillValue` 而不是
+   由砂黏比反推，因为 CoLM 自己有 `WHERE (soiltext < 0)` 的处理路径。
+
+`examples/README.md` 里「城市站的数据门槛」那一节同样要跟着改 ——
+它现在写的是「在那条链完成之前，AU-Preston 装完还不能直接跑」。
+
 - [ ] **Step 5: 提交并收尾**
 
 ```bash
@@ -3618,7 +3671,9 @@ Tested: 端到端走完六步，结果页画得出图"
 git log --oneline -12
 ```
 
-期望：十二个提交，从「把五步骨架换成六步」到「README 跟上六步与进门分流」。
+不要对提交数做断言 —— 这轮实际远多于最初规划的十二个（审查发现、
+城市算例那三步、修早就红的测试都是过程中加的）。`git log --oneline main..HEAD`
+通读一遍，确认每个提交的信息都说得出「改了什么」与「为什么」即可。
 
 ---
 
