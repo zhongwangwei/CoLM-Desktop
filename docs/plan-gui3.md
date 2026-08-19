@@ -1390,6 +1390,161 @@ Tested: node --check; grep 确认改名干净; xtask check-gui; 走通选站→�
 
 ---
 
+## Task 6b: 修掉审查抓到的两个真故障
+
+`0b97703` 的审查在隔离 worktree 里配假后端实跑，抓到一个 Critical、一个
+Important、一个 Minor。**都是真的**，且第一个会让新克隆的开发树整条流水线锁死。
+
+**Files:**
+- Modify: `gui/dist/app/shell.js`
+- Modify: `gui/dist/app/sites.js`
+
+- [ ] **Step 1（Critical）: 没有内核时不要把第 3 步锁死**
+
+`STEPS` 里 `sites` 的门槛现在读 `document.getElementById('kernel')?.value`。
+没有内核时 `runner.js` 往下拉框里放的占位 option **`value` 就是空串**，
+于是门槛关着；而第 2 步那一页此时也没得选 —— 文案叫人「去第 2 步选一个
+内核」，去了发现只有一句「没有找到内核」。**从此扫站点都进不去。**
+
+触发条件不是假想：`.gitignore` 第 7 行忽略 `/kernels/`，**新克隆的开发树
+默认没有这个目录**；打包版也可能空 —— `Kernel::open` 校验三个二进制的
+sha256，不过的会被静默丢掉。
+
+另外原注释里「下拉框里没选中任何一项时 `.value` 是空串」这个理由与实际
+行为对不上：单选 `<select>` 只要有 option 就必然选中一项，用户没有「不选」
+这个动作。门槛实际判的是**有没有可用的内核**。
+
+把那一项换成：
+
+```js
+  // 门槛判的是**有没有可用的内核**，不是「用户选了没有」—— 单选 select
+  // 只要有 option 就必然选中一项，用户没有「不选」这个动作。
+  //
+  // **文案必须指向真正的出路。** 说「去第 2 步选一个内核」是死路：
+  // 没有内核时那一页也只有一句「没有找到内核」，人照做过去、发现没得选、
+  // 于是卡在这里。.gitignore 忽略 /kernels/，新克隆的开发树默认就是这个状态。
+  { id: 'sites',  t: '站点',   d: '扫目录、选站、建算例',
+    need: () => (state.kernels.length
+      ? null
+      : '还没有可用的内核 —— 先构建 kernels/（见 README「什么时候要自己编内核」）') },
+```
+
+读 `state.kernels.length` 而不是查 DOM：`shell.js` 不该反查一个住在别的页
+上的 DOM id，而且那个数组正是 `list_kernels` 的直接结果。
+
+- [ ] **Step 2（Important）: 左栏的数字别被短路成旧批次**
+
+`renderSteps()` 里 `const n = state.batch.length || state.picked.size;`
+在建过算例之后会短路成旧数字。实测复现：勾 ST-000 → 建算例（`batch` 长度 1）
+→ 回站点页 → 全选 20 个，此刻同一屏上三个数字打架：
+
+| 位置 | 显示 |
+|---|---|
+| 页内 `#pickinfo` | 已勾 20 个 |
+| 建算例按钮 | 选中的 **20** 个站点 |
+| 左栏「已选站点」 | `ST-000`（一个数都没有） |
+
+这正是 `3d49d8b` 要修的那个毛病的翻版。而且勾选现在每次都真的重绘左栏，
+**固执地显示旧数字比干脆不刷新更像在骗人**。
+
+把 `renderSteps()` 里取 `n` 与 `one` 的那几行换成：
+
+```js
+  // **站在站点页时以勾选为准，往后以批次为准。** 这两个数在建过算例之后
+  // 会同时有值且不相等：勾了 20 个、而批次里还是上次建的那 1 个。
+  // 写成 `batch.length || picked.size` 的话短路会让左栏固执地显示旧数字,
+  // 而勾选现在每次都重绘左栏 —— 显示旧数字比干脆不刷新更像在骗人。实测踩过。
+  const onSites = state.step === 'sites';
+  const n = onSites
+    ? (state.picked.size || (state.pickedSite ? 1 : 0))
+    : (state.batch.length || state.picked.size);
+  const one = onSites
+    ? (state.pickedSite?.name
+       ?? state.sites.find(x => state.picked.has(x.site_file))?.name)
+    : (state.selected?.name ?? state.pickedSite?.name);
+  $('estSite').textContent = n > 1 ? `${one ?? '—'} 等 ${n} 个` : (one ?? '—');
+```
+
+- [ ] **Step 3（Minor）: 指错步骤的那句提示**
+
+`sites.js` 的 `ensureCase()` 里：
+
+```js
+  if (!root) { setStatus('先指定算例放哪（第 1 步下面那张卡片）'); return null; }
+```
+
+`#root` 卡片已经搬到基本设定页，那是**第 2 步**。改成：
+
+```js
+  if (!root) { setStatus('先指定算例放哪（第 2 步「算例放哪」那张卡片）'); return null; }
+```
+
+- [ ] **Step 4: 静态检查**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+node --check gui/dist/app/shell.js && node --check gui/dist/app/sites.js
+cargo run -p xtask -- check-gui
+```
+
+- [ ] **Step 5: 跑起来验两个场景**
+
+```bash
+cd gui/src-tauri && cargo build
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+./target/debug/colm-desktop-gui > /dev/null 2>&1 &
+sleep 4
+bash $S/click.sh "站点"; sleep 1
+bash $S/ax.sh | grep "站点\|先在第\|还没有可用的内核"
+pkill -f "target/debug/colm-desktop-gui"
+```
+
+期望（这台机器有内核）：第 3 步**不灰**，读不到「还没有可用的内核」。
+
+再验没有内核的那条路 —— **这是本任务的重点**，把内核目录临时藏起来：
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+mv kernels kernels-hidden
+cd gui/src-tauri
+./target/debug/colm-desktop-gui > /tmp/nokernel.log 2>&1 &
+sleep 4
+bash $S/click.sh "站点"; sleep 1
+bash $S/ax.sh | grep "还没有可用的内核\|没有找到内核"
+pkill -f "target/debug/colm-desktop-gui"
+mv kernels-hidden kernels
+```
+
+期望：第 3 步灰着并写「还没有可用的内核 —— 先构建 kernels/…」，
+**而不是**「先在第 2 步选一个内核」。
+
+**别忘了把 `kernels` 目录改回来。** 它是 gitignore 的构建产物，
+丢了要重编一次 Fortran。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add gui/dist/app/shell.js gui/dist/app/sites.js
+git commit -m "没有内核时别把第 3 步锁死
+
+门槛原来读 #kernel 的 value，而没有内核时那个占位 option 的 value 是空串,
+于是第 3 步灰着叫人「去第 2 步选一个内核」—— 去了只有一句「没有找到内核」。
+.gitignore 忽略 /kernels/，新克隆的开发树默认就是这个状态，整条流水线锁死。
+改判 state.kernels.length，文案指向真正的出路。
+
+左栏的数字也修了：batch.length || picked.size 在建过算例之后会短路成旧
+批次，勾 20 个而左栏显示上次建的那 1 个 —— 正是 3d49d8b 要修的那个毛病的
+翻版，且勾选现在每次都重绘左栏，显示旧数字比不刷新更像在骗人。
+
+Constraint: shell.js 不反查住在别的页上的 DOM id
+Confidence: high
+Scope-risk: narrow
+Directive: 门槛文案必须指向真正的出路，不能指向一个办不到这件事的页面
+Tested: node --check; xtask check-gui; 藏掉 kernels/ 实测新文案"
+```
+
+---
+
 ## Task 7: 时间与预热搬到参数页
 
 它读 `DEF_simulation_time%*`，而那份 `case.nml` 是建算例产出的 ——
