@@ -333,7 +333,10 @@ export function renderSites(r = {}) {
     const tags = [];
     // 算例状态排在最前：它是**这一行现在处在流水线哪一段**，
     // 比经纬度重要得多。原来这个信息藏在另一个列表里。
-    const c = state.cases.find(x => x.name === s.name);
+    // 按 caseName 匹配，不是 name —— 重名站点（AU-Preston 在 PLUMBER2 与
+    // Urban-PLUMBER 里各有一个）建出来的目录带后缀，按 name 找会一个都
+    // 认不出、或者两行都认成同一个。
+    const c = state.cases.find(x => x.name === (s.caseName ?? s.name));
     if (c) tags.push(c.has_history ? '已跑过' : '已建算例');
     if (s.urban) tags.push('城市');
     // **内核决定这个站点跑不跑得了。** 城市站要 URBANON 编进去的那一套，
