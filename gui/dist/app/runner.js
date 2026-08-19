@@ -20,7 +20,7 @@ export async function refreshKernels() {
     const o = document.createElement('option');
     o.textContent = '没有找到内核'; o.value = '';
     s.appendChild(o);
-    showKernelMeta();
+    await applyKernel();
     return;
   }
   for (const k of state.kernels) {
@@ -28,9 +28,8 @@ export async function refreshKernels() {
     o.value = k.dir; o.textContent = k.preset;
     s.appendChild(o);
   }
-  s.onchange = () => { showKernelMeta(); refreshRelevance(); renderSteps(); };
-  showKernelMeta();
-  await refreshRelevance();
+  s.onchange = () => applyKernel();
+  await applyKernel();
 }
 
 /** 当前内核编不进去的字段。物理预设是编译期决定的，所以这份名单
@@ -49,9 +48,18 @@ async function refreshRelevance() {
   renderFields();
 }
 
-// 目录名不是身份，宏组合才是。把它显示出来，免得「我选的 urban 到底编没编
-// URBAN」这种问题要靠读 manifest.json 才能答。
-function showKernelMeta() {
+/** 内核变了：把随之而变的东西全部更新。
+ *
+ *  **这是「内核变了」的唯一入口。** 它管着四样：meta 文字、城市栅格目录
+ *  的显隐、站点行的内核匹配标记、当前内核编不进去的字段名单。
+ *  分散在调用点的话，总有一条路径会漏掉其中一样 —— 实测漏过：
+ *  `restoreRecent` 只写 `el.value` 不发 change，于是恢复出来的内核只有
+ *  下拉框自己知道，城市栅格目录永远出不来。
+ *
+ *  原名叫 `showKernelMeta`，只说了第一件事，而它读起来像个纯显示函数。 */
+async function applyKernel() {
+  // 目录名不是身份，宏组合才是。把它显示出来，免得「我选的 urban 到底编没编
+  // URBAN」这种问题要靠读 manifest.json 才能答。
   const k = state.kernels?.find(k => k.dir === $('kernel').value);
   $('kernelmeta').textContent = k
     ? `${k.generator_args}  ·  CoLM ${k.colm_git_sha}  ·  ${k.platform}`
@@ -63,6 +71,12 @@ function showKernelMeta() {
   // 站点行上的「要 urban 内核」标记跟着内核变。不重画的话，切了内核
   // 站点列表还标着上一个内核的判断，而那正是最容易看错的一处。
   if (state.sites.length) renderSites();
+  await refreshRelevance();
+  // renderSites() 末尾已经调过一次 renderSteps —— 再调一次是纯重复
+  // （切内核会跑两遍，白白多刷一次左栏与「下一步」按钮）。只有
+  // state.sites 为空、没走 renderSites 那条分支时，这里才是唯一一次
+  // 刷新左栏的机会，所以只在那时补一次。
+  if (!state.sites.length) renderSteps();
 }
 
 $('run').onclick = async () => {
