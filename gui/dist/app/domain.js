@@ -12,6 +12,14 @@
 //!
 //! 依赖方向只出不进：`main.js` import 它，它不被任何业务模块 import ——
 //! `check-gui` 禁止模块成环，而 `sites ↔ results` 有前科。
+//!
+//! **区域/全球落地时要改的是 `shell.js` 的 `STEPS`。** 它现在是模块级的
+//! const，被 `nextOf` / `go` / `renderSteps` 直接闭包引用 —— 三档各自一套
+//! 步骤链的话，得把它变成 `STEPS[state.domain]` 或一个函数，那三个调用点
+//! 都要跟着动。`state.domain` 现在**零读取点**，别以为它已经接好了。
+//!
+//! 已经接好的那半：`renderNextButtons` 遍历 `.page`，未知 `data-step` 的页
+//! `nextOf` 返回 null、`.foot` 会被移掉，新域的页面加进来不会炸。
 
 import { state } from './state.js';
 import { $ } from './ui.js';
