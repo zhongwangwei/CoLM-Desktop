@@ -19,12 +19,21 @@
 
   MOD_CMD = -J
 
-  # `-ffpe-trap` 保留。**去掉过一次，结果更糟**：mksrfdata 不再崩，
-  # 而是跑了半小时也不结束（同一个 1 天的算例在 macOS 上是几秒）——
-  # 也就是说那个非法运算不是库里的无害噪声，它产生的 NaN 会让后面的
-  # 迭代不收敛。崩掉至少指得出位置，挂住什么都指不出。
+  # `-ffpe-trap` 在 Windows 上**只去掉 `invalid`**，保留 `zero,overflow`。
+  #
+  # 崩溃点定位到 `MOD_SingleSrfdata.F90:233-236`：banner 打完、
+  # `Latitude :` 还没打，中间只有 `ncio_var_exist` 与 `ncio_read_serial`
+  # 两个 netCDF 调用 —— 也就是 trap 落在 HDF5 的类型转换里，而那里置
+  # `invalid` 标志是常规且无害的。回溯的帧也全都解析不进 exe
+  # （地址还带 ASLR，两次运行完全不同）。
+  #
+  # 三个标志一起去掉试过一次，更糟：不崩了，改成跑半小时也不结束。
+  # 所以只摘掉库会踩的那一个 —— `zero` 与 `overflow` 才是 CoLM 自己
+  # 算出问题时的信号，它们留着。
+  #
+  # 别的平台三个都开着（上游的两份 Makeoptions 未改动）。
   FOPTS = -fdefault-real-8 -ffree-form -g -fcheck=all \
-          -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
+          -ffpe-trap=zero,overflow -fbacktrace -cpp \
           -ffree-line-length-0 -fallow-argument-mismatch
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
