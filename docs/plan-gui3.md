@@ -2080,6 +2080,225 @@ Tested: node --check; xtask check-gui; 切专家读出占位、切回常规消�
 
 ---
 
+## Task 11b: 修掉一个早就红了的测试
+
+**这不是本次改动引入的。** `xtask/tests/params_groups.rs` 的两个测试在 `main`
+上就是红的：
+
+```
+every_group_is_present_and_the_catch_all_is_last  → 「分类 site 不见了」
+the_always_shown_whitelist_names_real_fields      → 「白名单」
+```
+
+它验的是 `params.js` 里的九分类表（`id: 'site'` …）与 `const ALWAYS_SHOWN`
+白名单，而 `dfa0d1b`「让参数清单严格跟随所选内核」把这两样都换掉了 ——
+现在是 `PARAM_SECTIONS` 加后端 `field_section()` 推导。那个提交的
+`Tested:` 行写的是 `config tests; clippy; xtask check-gui; node --check`，
+**没跑 `cargo test --workspace`**，所以漏了。
+
+**它守的东西仍然有价值，只是判据变了。** 后端 `field_section()` 返回一个
+分类名，前端 `params.filter(e => PARAM_SECTIONS.includes(sectionOf(e)))`
+**把没列进来的分类静默丢掉** —— 上游新增一个分类而前端忘了加，那一整组
+字段就在界面上消失，而且不报错。这正是要守住的。
+
+实测的两侧集合：
+
+| 侧 | 集合 |
+|---|---|
+| 后端 `field_section()` | 16 个：算例 站点 文件与目录 网格与并行 地表数据 初始场 城市 水热过程 生态与生地化 河道与水库 强迫场 数据同化 示踪剂 **时间与预热 输出与重启 输出变量** |
+| 前端 `PARAM_SECTIONS` | 前 13 个 |
+| 差集 | 时间与预热 · 输出与重启 · 输出变量 —— 各有专门的卡片，不进字段表 |
+
+**Files:**
+- Modify: `xtask/tests/params_groups.rs`
+
+- [ ] **Step 1: 把整个测试文件换成验新的不变式**
+
+```rust
+//! 后端推导的分类，前端必须每一个都处理到。
+//!
+//! 分类在 Rust 侧由 `field_section()` 推导，显示顺序在 JS 侧的
+//! `PARAM_SECTIONS` 里，两边各自的测试都不会发现对方变了。
+//!
+//! **漏一个的后果是静默消失**：`params.js` 用
+//! `PARAM_SECTIONS.includes(sectionOf(e))` 过滤，没列进来的分类
+//! 那一整组字段在界面上不出现，且不报错。
+//!
+//! 这个文件原来验的是九分类表与 `ALWAYS_SHOWN` 白名单，那两样已经被
+//! 「让参数清单严格跟随所选内核」换掉了，于是测试红了很久没人发现 ——
+//! 那个提交没跑 `cargo test --workspace`。
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("repo root")
+}
+
+/// `field_section()` 可能返回的全部分类。
+///
+/// 扫源码而不是调函数：`field_section` 住在 `gui/src-tauri`，那是**另一个
+/// workspace**（把 429 个 Tauri 依赖挡在引擎外面，见 design.md §4.1），
+/// xtask 依赖不到它。`xtask/src/gui.rs` 的静态检查用的是同一手法。
+///
+/// **不要用 shell 的 `grep -o` 做这件事** —— 实测 macOS 的 grep 对这些
+/// 多字节字面量只抓得到一部分（17 个里只报 5 个）。
+fn backend_sections() -> BTreeSet<String> {
+    let src = std::fs::read_to_string(repo().join("gui/src-tauri/src/config.rs"))
+        .expect("config.rs");
+    let start = src
+        .find("pub(crate) fn field_section")
+        .expect("field_section 不见了");
+    let end = src[start..].find("\npub ").map(|i| start + i).unwrap_or(src.len());
+    let body = &src[start..end];
+
+    let mut out = BTreeSet::new();
+    let mut rest = body;
+    while let Some(i) = rest.find("Some(\"") {
+        rest = &rest[i + 6..];
+        let Some(j) = rest.find('"') else { break };
+        let name = &rest[..j];
+        // `field_section` 里也会拿 namelist 组名做判断，那不是分类。
+        if !name.starts_with("nl_") {
+            out.insert(name.to_string());
+        }
+        rest = &rest[j..];
+    }
+    assert!(
+        out.len() > 10,
+        "只扫出 {} 个分类，扫法多半坏了而不是代码变了",
+        out.len()
+    );
+    out
+}
+
+/// 前端字段表按这个顺序分节显示。
+fn param_sections() -> BTreeSet<String> {
+    let js = std::fs::read_to_string(repo().join("gui/dist/app/params.js")).expect("params.js");
+    let start = js.find("const PARAM_SECTIONS").expect("PARAM_SECTIONS 不见了");
+    let end = js[start..].find("];").expect("PARAM_SECTIONS 结尾") + start;
+    js[start..end]
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// 这三个分类**有意**不进字段表 —— 各自有专门的卡片。
+///
+/// 写死在这里而不是「凡是不认识的都放过」：新增一个分类时这个测试要红，
+/// 逼人做一次决定 —— 是进字段表，还是也给它一张卡片。
+const HANDLED_ELSEWHERE: &[&str] = &["时间与预热", "输出与重启", "输出变量"];
+
+#[test]
+fn every_backend_section_is_handled_by_the_frontend() {
+    let backend = backend_sections();
+    let front = param_sections();
+    let elsewhere: BTreeSet<String> =
+        HANDLED_ELSEWHERE.iter().map(|s| s.to_string()).collect();
+
+    let unhandled: Vec<&String> = backend
+        .iter()
+        .filter(|s| !front.contains(*s) && !elsewhere.contains(*s))
+        .collect();
+
+    assert!(
+        unhandled.is_empty(),
+        "后端会把字段分到这些类里，而前端一个都没处理 —— 它们会在界面上\n\
+         静默消失（params.js 按 PARAM_SECTIONS 过滤）：{unhandled:?}"
+    );
+}
+
+#[test]
+fn param_sections_names_no_section_the_backend_never_returns() {
+    let backend = backend_sections();
+    let front = param_sections();
+
+    let dead: Vec<&String> = front.iter().filter(|s| !backend.contains(*s)).collect();
+
+    assert!(
+        dead.is_empty(),
+        "PARAM_SECTIONS 里这几个分类后端从来不返回，是写错了名字还是留下的死条目：{dead:?}"
+    );
+}
+
+#[test]
+fn the_three_special_sections_really_exist() {
+    // 白名单写错一个字，对应那组字段就悄悄掉进「没人处理」里，
+    // 而上面那条测试**不会**报 —— 它只看有没有漏，不看白名单本身对不对。
+    let backend = backend_sections();
+    for s in HANDLED_ELSEWHERE {
+        assert!(
+            backend.contains(*s),
+            "HANDLED_ELSEWHERE 里的 {s:?} 后端根本不会返回，白名单写错了"
+        );
+    }
+}
+```
+
+- [ ] **Step 2: 跑**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cargo test -p xtask --test params_groups 2>&1 | tail -12
+```
+
+期望：3 个测试全过。
+
+- [ ] **Step 3: 确认它真的抓得住回归**
+
+**测试自己也要被测。** 临时把 `PARAM_SECTIONS` 里的 `'算例'` 删掉，
+再跑一次，必须**红**：
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cp gui/dist/app/params.js /tmp/params.js.bak
+sed -i '' "s/'算例', '站点'/'站点'/" gui/dist/app/params.js
+cargo test -p xtask --test params_groups 2>&1 | grep -E "算例|test result"
+cp /tmp/params.js.bak gui/dist/app/params.js
+git diff --stat gui/dist/app/params.js
+```
+
+期望：报出「后端会把字段分到这些类里，而前端一个都没处理…：["算例"]」，
+`test result: FAILED`。最后 `git diff --stat` 必须是**空的**（文件已还原）。
+
+**这一步不能省。** 一个永远绿的测试和没有测试是一回事。
+
+- [ ] **Step 4: 全量测试**
+
+```bash
+cargo test --workspace 2>&1 | tail -12
+```
+
+期望：全绿。需要 `PLUMBER2_ROOT` 的那几个会自己打印
+`PLUMBER2_ROOT not set — skipping`，那是跳过不是失败。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add xtask/tests/params_groups.rs
+git commit -m "修掉一个早就红了的分类测试
+
+它验的九分类表与 ALWAYS_SHOWN 白名单在「让参数清单严格跟随所选内核」
+那次就被换掉了，而那个提交没跑 cargo test --workspace，于是红到现在。
+
+守的东西仍然有价值，只是判据变了：后端 field_section 推导分类，前端
+按 PARAM_SECTIONS 过滤，**没列进来的分类会静默消失**。三个测试分别守
+「后端有前端没有」「前端有后端没有」「白名单本身没写错」。
+
+Constraint: 扫源码不调函数 —— gui/src-tauri 是另一个 workspace
+Directive: 别用 shell grep 提取这些中文字面量，macOS 的 grep 17 个只报 5 个
+Confidence: high
+Scope-risk: narrow
+Tested: 3 个测试全过；删掉一个分类后确认它真的会红；cargo test --workspace"
+```
+
+---
+
 ## Task 12: `waterheat` 更名 `default`
 
 这是整个计划里**唯一越出前端**的任务。它动脚本、Rust 测试与回归黄金基准。
@@ -2117,12 +2336,17 @@ Tested: node --check; xtask check-gui; 切专家读出占位、切回常规消�
 
 **这一步不能省。** 黄金文件是回归判据，改判据之前必须知道改之前它是过的。
 
+PLUMBER2 数据在本机 `/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s`，
+90 个站点，三个黄金输入的 sha256 与 `oracle/fixtures/inputs.sha256`
+**逐一核对过、完全一致**。
+
 ```bash
 cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
-cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -5
+export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -8
 ```
 
-记下输出。若这一步本来就不过（缺数据、缺内核），**停下来报 BLOCKED** ——
+记下输出。若这一步本来就不过，**停下来报 BLOCKED** ——
 在一个本来就红的基准上做改名，改完分不清是改名弄坏的还是本来就坏的。
 
 - [ ] **Step 2: 脚本与内核目录**
@@ -2207,12 +2431,17 @@ cargo run -p xtask -- check-gui
 **这是这次改名唯一的风险点。** 只改名字不该动到任何一个字节的输出。
 
 ```bash
-cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -5
+export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -8
 ```
 
-期望：与 Step 1 记下的基线**同样是过的**，`identical: 129 variables`
-（或该命令本来的成功文案）。不一致就 **停下来报 BLOCKED**，不要试图
-「顺手修一下」—— 改名改坏了黄金基准是必须当场查清的事。
+期望：与 Step 1 记下的基线**逐字相同的成功文案**。只改名字不该动到任何
+一个字节的输出。不一致就 **停下来报 BLOCKED**，不要试图「顺手修一下」——
+改名改坏了黄金基准是必须当场查清的事。
+
+注意内核目录也改名了，`golden_run.rs` 的默认值 `kernels/waterheat` 已经
+在 Step 3 里跟着变成 `kernels/default`；若这一步报「找不到内核」，
+说明那一处漏改了。
 
 - [ ] **Step 8: 提交**
 
@@ -2276,6 +2505,34 @@ pkill -f "target/debug/colm-desktop-gui"
 
 期望：六步全走得通，结果页画得出图；启动日志两行面包屑分别报出
 `colm-cli resolved to .../target/debug/colm-cli` 与 `1 preset(s) from .../kernels`。
+
+- [ ] **Step 2b: 用 90 个站点验多站点上下文**
+
+前面几个任务都因为「自带示例只有一个站点」跳过了这条。数据在
+`/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s/Sitedata`，90 个站点。
+
+走到第 3 步，把站点目录填成上面那个路径、点「扫描」，然后点「全选」：
+
+```bash
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+bash $S/ax.sh | grep -A2 "已选站点"
+bash $S/ax.sh | grep "个站点\|已勾"
+```
+
+期望：
+
+| 位置 | 应该显示 |
+|---|---|
+| 摘要行 | `90 个站点 · N 个无观测 · 当前内核 default` |
+| 左栏「已选站点」 | `AT-Neu 等 90 个`（**带**「等 N 个」后缀） |
+| `#pickinfo` | `已勾 90 个` |
+| 建算例按钮 | `建算例：选中的 90 个站点` |
+
+**四处的数必须一致。** 这正是「左栏说出在配几个站点」与「没有内核时别把
+第 3 步锁死」两个提交合起来要保证的事，此前一直没有数据能验。
+
+**不要真按下建算例** —— 那会串行建 90 个算例，每个都要读站点文件与强迫场
+并写出 `site.nc`。验完显示就够了。
 
 - [ ] **Step 3: 清掉 playwright 的运行垃圾并加进 `.gitignore`**
 
