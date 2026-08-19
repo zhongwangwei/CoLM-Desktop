@@ -43,9 +43,15 @@ function renderCasesInto(box) {
     cb.checked = state.pickedCases.has(c.dir);
     cb.onchange = () => {
       if (cb.checked) state.pickedCases.add(c.dir); else state.pickedCases.delete(c.dir);
-      // 两个容器都要跟着重画 —— 勾选状态是共享的，只重画一个的话
-      // 另一页会停在旧的勾选态上，而那是看不出异常的。
-      renderCases();
+      // **只重画另一个容器，自己这个原地不动。** 重建自己所在的容器会把
+      // 焦点打到 body 上 —— 键盘操作每勾一个就要重新 Tab 回去。
+      // 勾选状态两页共享，所以另一页必须跟着变。
+      for (const id of ['cases-built', 'cases-run']) {
+        if (id === box.id) continue;
+        const other = $(id);
+        if (other) renderCasesInto(other);
+      }
+      updateCaseBatchButtons();
     };
     lab.appendChild(cb);
     lab.onclick = e => e.stopPropagation();   // 勾选不等于「切到这一个算例」
