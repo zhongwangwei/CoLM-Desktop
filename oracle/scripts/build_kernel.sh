@@ -55,6 +55,32 @@ rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 
+# Windows 上把 `mkdir -p` 换成 cmd 认得的形式。
+#
+# CoLM 在 55 处用 `CALL system('mkdir -p ' // 路径)` 建目录。`system()` 在
+# MinGW 上走 `cmd.exe /c`，而 cmd 的**内建** mkdir 不认 `-p`（PATH 上有没有
+# coreutils 都一样，内建命令优先），于是 stderr 上出现三行
+# `The syntax of the command is incorrect.`，随后模型往不存在的目录里写文件。
+#
+# 好在开了命令扩展的 cmd，`mkdir a\b\c` 本来就会创建中间目录 ——
+# 也就是说去掉 `-p` 之后语义不变。目录已存在时它返回非零，而 CoLM
+# 从不看这个返回值，与 `mkdir -p` 的行为一致。
+#
+# **改的是构建出来的那一份源码，不是仓库里的。** `build_kernel.sh` 已经
+# 在改 `include/Makeoptions` 与 `include/define.h` 了，这一处同理；
+# 上游的写法在 Linux/macOS 上完全正确，不该为 Windows 去改它。
+if [ -n "$OWN_MAKEOPTS" ]; then
+  n=$(grep -rl "mkdir -p " --include='*.F90' . | wc -l | tr -d ' ')
+  grep -rl "mkdir -p " --include='*.F90' . | xargs sed -i "s/mkdir -p '/mkdir '/g"
+  echo "Windows: 把 $n 个文件里的 \`mkdir -p\` 改成 \`mkdir\`（cmd 的内建 mkdir 不认 -p）"
+  # 一个都没改到就是这个假设过期了 —— 静默跳过会让 Windows 再次
+  # 在运行到一半时死掉，而构建看上去一切正常。
+  if [ "$n" = "0" ]; then
+    echo "no 'mkdir -p' found in the Fortran sources -- has upstream changed?" >&2
+    exit 3
+  fi
+fi
+
 # MPI 的**头文件路径**。三个预设一个都不用 MPI，编译却仍然要它：
 # `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
 # 而 `#ifndef USEMPI` 从下一行才开始 —— SinglePoint 把 USEMPI 关掉了，

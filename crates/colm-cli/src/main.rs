@@ -549,7 +549,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         dirs: Dirs {
             rawdata: dirs.0.clone(),
             runtime: dirs.1.clone(),
-            output: text(&layout.out()) + "/",
+            output: format!("{}{}", text(&layout.out()), sep()),
             forcing_namelist: text(&layout.forcing_nml()),
         },
     };
@@ -579,13 +579,27 @@ fn text(p: &Path) -> String {
 }
 
 /// CoLM 把 `DEF_dir_rawdata` 与文件名直接拼接，中间不补分隔符
-/// （`trim(DEF_dir_rawdata)//'urban/...'`），所以尾斜杠不是修饰，是必需的。
+/// （`trim(DEF_dir_rawdata)//'urban/...'`），所以尾分隔符不是修饰，是必需的。
+///
+/// **Windows 上补的是反斜杠。** 这些路径会被原样交给 `cmd /c mkdir`
+/// （CoLM 用 `CALL system` 建目录），而 cmd 把 `/` 当作开关前缀 ——
+/// 一个以 `/` 结尾的路径会让它报 `The syntax of the command is incorrect.`。
+/// 路径本身已经是反斜杠形式（`Path::display` 在 Windows 上如此），
+/// 只有这个补上去的分隔符要跟着走。
+fn sep() -> char {
+    if cfg!(windows) {
+        '\\'
+    } else {
+        '/'
+    }
+}
+
 fn slash(p: &Path) -> String {
     let s = text(p);
-    if s.ends_with('/') {
+    if s.ends_with(sep()) {
         s
     } else {
-        s + "/"
+        format!("{s}{}", sep())
     }
 }
 

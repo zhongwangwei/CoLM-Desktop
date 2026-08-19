@@ -55,6 +55,37 @@ jobs:
           # 恰好都装着 MPI，所以这件事从没暴露过。
           ls -la /mingw64/include/mpif.h || echo "no mpif.h — that is the blocker"
 
+      # cmd 到底认哪种 mkdir —— **量出来，不要推**。
+      #
+      # CoLM 在 55 处用 `CALL system('mkdir -p ' // 路径)`，而 `system()` 在
+      # MinGW 上走 `cmd.exe /c`。实测 stderr 上出现三行
+      # `The syntax of the command is incorrect.`，但那句话不说明是 `-p`
+      # 的错还是路径形式的错 —— 我们写进 namelist 的目录以 `/` 结尾，
+      # 而 cmd 把 `/` 当开关前缀。两个嫌疑都要各自验一遍。
+      #
+      # 只测量、不判成败：这张表是给人看的，改动依据在它上面。
+      - name: What does cmd's mkdir actually accept
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $base = Join-Path $env:RUNNER_TEMP 'mkprobe'
+          Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
+          $cases = @(
+            @{ n = 'mkdir -p  嵌套 反斜杠';        c = "mkdir -p $base\a\b" ;  d = "$base\a\b"  },
+            @{ n = 'mkdir     嵌套 反斜杠';        c = "mkdir $base\c\d"    ;  d = "$base\c\d"  },
+            @{ n = 'mkdir     嵌套 尾反斜杠';      c = "mkdir $base\e\f\"   ;  d = "$base\e\f"  },
+            @{ n = 'mkdir     嵌套 尾正斜杠';      c = "mkdir $base\g\h/"   ;  d = "$base\g\h"  },
+            @{ n = 'mkdir     全正斜杠';           c = "mkdir $base/i/j"    ;  d = "$base/i/j"  },
+            @{ n = 'mkdir     引号 尾反斜杠';      c = "mkdir `"$base\k\l\`"" ; d = "$base\k\l" },
+            @{ n = 'mkdir     已存在的目录';       c = "mkdir $base\c\d"    ;  d = "$base\c\d"  }
+          )
+          foreach ($x in $cases) {
+            & cmd /c $x.c 2>&1 | Out-String | Set-Variable out
+            $ok = Test-Path $x.d
+            Write-Host ("{0,-28} 退出码 {1,-4} 目录在={2,-6} {3}" -f $x.n, $LASTEXITCODE, $ok, $out.Trim())
+          }
+          exit 0
+
       - name: Build the waterheat kernel
         shell: msys2 {0}
         run: ./oracle/scripts/build_kernel.sh waterheat
