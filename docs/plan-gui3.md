@@ -358,6 +358,142 @@ Tested: node --check; xtask check-gui; 辅助功能树读出六步"
 
 ---
 
+## Task 2b: 多站点是一等公民
+
+第 2 步可以勾任意多个站点，第 3 步的三张卡片全部对整批生效。
+**后端与状态层本来就是批量的**（`state.picked` 是 Set、`state.batch` 是目录数组、
+`read_timing` 收 `dirs`、`varying_fields` 专答「这批里哪些字段取值不同」）——
+要补的是界面：它现在把批量说成了单数。
+
+**Files:**
+- Modify: `gui/dist/app/shell.js`
+- Modify: `gui/dist/index.html`
+
+- [ ] **Step 1: `shell.js` 顶上那句注释改成六步**
+
+Task 2 只换了 `STEPS` 数组本身，这行注释还写着「五步」：
+
+```js
+/** 五步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
+```
+
+改成：
+
+```js
+/** 六步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
+```
+
+- [ ] **Step 2: `shell.js` 的门槛文案说清楚可以多选**
+
+`STEPS` 里 basic 那一项的 `need()`，把 `'先在第 2 步选一个站点'` 改成
+`'先在第 2 步选站点（可以多选）'`：
+
+```js
+  { id: 'basic',  t: '基本设定', d: '算例、内核、时间与预热',
+    need: () => (state.pickedSite || state.picked.size || state.cases.length
+      ? null : '先在第 2 步选站点（可以多选）') },
+```
+
+- [ ] **Step 3: `shell.js` 的左栏上下文说出是几个**
+
+`renderSteps()` 末尾这三行：
+
+```js
+  $('estSite').textContent = state.selected?.name ?? '—';
+  const k = $('kernel');
+  $('estKernel').textContent = k?.selectedIndex >= 0 ? k.options[k.selectedIndex].textContent : '—';
+  $('casename').value = state.selected ? state.selected.dir : '还没有算例';
+```
+
+替换成：
+
+```js
+  // **批量时必须说出是几个。** 勾了 20 个站点却只显示一个名字，界面看起来
+  // 像在配一个，而改一个字段会写进 20 份 case.nml —— 那是看不出异常的破坏。
+  // `params.js` 的 `renderScope()` 已经为此立过一次规矩（不能只在状态栏事后
+  // 说），左栏是同一个问题的另一半。
+  //
+  // 数取 batch 优先：建完算例之后它才是参数改动的**实际**作用对象；
+  // 还没建时退回勾中的站点数。
+  const n = state.batch.length || state.picked.size;
+  const one = state.selected?.name ?? state.pickedSite?.name
+    ?? state.sites.find(x => state.picked.has(x.site_file))?.name;
+  $('estSite').textContent = n > 1 ? `${one ?? '—'} 等 ${n} 个` : (one ?? '—');
+  const k = $('kernel');
+  $('estKernel').textContent = k?.selectedIndex >= 0 ? k.options[k.selectedIndex].textContent : '—';
+  $('casename').value = state.batch.length > 1
+    ? `${state.batch.length} 个算例`
+    : (state.selected ? state.selected.dir : '还没有算例');
+```
+
+循环里的 `s` 是步骤，这里的 `x` 是站点 —— **别把 `x` 写成 `s`**，
+虽然作用域不同不会报错，但读的人要停下来想一次。
+
+- [ ] **Step 4: `index.html` 基本设定页的引导语说清楚对整批生效**
+
+把 basic 页的 `<p class="sub">` 换成：
+
+```html
+      <p class="sub">为第 2 步选中的<b>每一个</b>站点建算例，再选一套编译内核与时间范围。
+        <b>这三样对整批生效</b> —— 勾了几个就配几个；取值不一致的字段会被标出来，
+        细调留给下一步的参数表。</p>
+```
+
+- [ ] **Step 5: 静态检查**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+node --check gui/dist/app/shell.js
+cargo run -p xtask -- check-gui
+```
+
+- [ ] **Step 6: 跑起来验单站与多站两种显示**
+
+```bash
+cd gui/src-tauri && cargo build && (./target/debug/colm-desktop-gui &) && sleep 4
+bash /tmp/ax.sh | grep "先在第 2 步选站点\|已选站点" -A2
+```
+
+期望：第 3 步灰着时写的是「先在第 2 步选站点（可以多选）」。
+
+再验多站显示：进门 → 第 2 步扫出站点 → 点「全选」→ 看左栏。
+
+```bash
+bash /tmp/click.sh "站点"; sleep 1
+bash /tmp/click.sh "用自带的示例站点"; sleep 3
+bash /tmp/click.sh "全选"; sleep 1
+bash /tmp/ax.sh | grep -A2 "已选站点"
+```
+
+期望：自带示例只有一个站点，所以显示的是 `CN-Cng` 而不是「等 1 个」——
+`n > 1` 才加后缀，**1 个的时候不该出现「等 1 个」**。
+
+若手边有 PLUMBER2 的 Sitedata 目录（90 个站点），扫它再全选，
+左栏应显示 `AT-Neu 等 90 个`。没有那份数据就跳过这一条，在报告里写明跳过了。
+
+```bash
+pkill -f "target/debug/colm-desktop-gui"
+```
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add gui/dist/app/shell.js gui/dist/index.html
+git commit -m "左栏说出在配几个站点
+
+勾了 20 个却只显示一个名字，界面看起来像在配一个，而改一个字段会写进
+20 份 case.nml —— 那是看不出异常的破坏。顺手把 STEPS 上面那句「五步」
+注释改成六步。
+
+Constraint: 1 个的时候不加「等 N 个」后缀
+Confidence: high
+Scope-risk: narrow
+Directive: 批量是常态不是特例，新增的上下文显示都要先回答「几个」
+Tested: node --check; xtask check-gui; 单站显示不带后缀"
+```
+
+---
+
 ## Task 3: 启动弹框
 
 **Files:**
@@ -648,7 +784,7 @@ export function renderDataFoot() {
   b.className = 'btn-next';
   if (n) b.textContent = `确定：为选中的 ${n} 个站点建算例`;
   else if (one) b.textContent = `确定：为 ${one.name} 建算例`;
-  else b.textContent = '先回第 2 步点一个站点，或勾选几个';
+  else b.textContent = '先回第 2 步选站点（可以多选）';
   b.disabled = !n && !one;
   b.onclick = confirmSelection;
   foot.appendChild(b);
@@ -1288,7 +1424,7 @@ rm -f /tmp/ax.sh /tmp/final.txt
 git log --oneline -9
 ```
 
-期望：九个提交，从「把五步骨架换成六步」到「README 跟上六步与进门分流」。
+期望：十个提交，从「把五步骨架换成六步」到「README 跟上六步与进门分流」。
 
 ---
 
