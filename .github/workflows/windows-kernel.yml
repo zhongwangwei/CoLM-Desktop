@@ -19,6 +19,9 @@ on:
 jobs:
   kernel:
     runs-on: windows-latest
+    # **挂住比失败更贵**：一次去掉 `-ffpe-trap` 的尝试让 mksrfdata 跑了
+    # 三十多分钟也不结束，而作业的默认上限是六小时。
+    timeout-minutes: 30
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
@@ -225,8 +228,10 @@ jobs:
           & $cli new --site $site --out $abs --name CN-Cng --end 2008-01-02 --spinup-repeat 0
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::colm-cli new 失败"; exit 1 }
 
+          Write-Host ("run 开始 " + (Get-Date -Format o))
           & $cli run $abs --kernel kernels\waterheat
           $rc = $LASTEXITCODE
+          Write-Host ("run 结束 " + (Get-Date -Format o))
           Write-Host "run exit code: $rc"
           foreach ($s in 'mksrfdata','mkinidata','colm') {
             $log = "probe-case\$s.log"
@@ -260,6 +265,32 @@ jobs:
           Write-Host "相对路径 history 文件 $m 个"
           if ($m -lt 1) { Write-Host "::error::相对路径没有 history 输出"; exit 1 }
           exit 0
+
+      # 回溯里只有地址，`addr2line` 才认得出源码行。**这一步决定了
+      # 「trap 在 CoLM 自己的代码里还是在库里」是结论还是猜测** ——
+      # 落在 exe 里的帧会解析出文件名与行号，落在 DLL 里的解析不出。
+      #
+      # 只在上一步失败之后跑，且自己不判成败。
+      - name: Resolve the backtrace addresses
+        if: failure()
+        shell: msys2 {0}
+        run: |
+          log=probe-case/mksrfdata.log
+          [ -f "$log" ] || { echo "没有 mksrfdata.log"; exit 0; }
+          addrs=$(grep -oE '^#[0-9]+ +0x[0-9a-f]+' "$log" | grep -oE '0x[0-9a-f]+' || true)
+          [ -n "$addrs" ] || { echo "日志里没有回溯地址"; exit 0; }
+          echo "=== exe 的地址范围内解析得出的帧 ==="
+          for a in $addrs; do
+            line=$(addr2line -f -C -e kernels/waterheat/mksrfdata.exe "$a" 2>/dev/null | paste -sd' ' -)
+            case "$line" in
+              *"??"*) ;;                       # 不在 exe 里，多半是某个 DLL
+              *) echo "  $a  $line" ;;
+            esac
+          done
+          echo "=== 全部帧（含解析不出的）==="
+          for a in $addrs; do
+            printf '  %s  %s\n' "$a" "$(addr2line -f -C -e kernels/waterheat/mksrfdata.exe "$a" 2>/dev/null | paste -sd' ' -)"
+          done
 
       # **把病因钉死。** 上一步跑通了不等于知道原来为什么不通 ——
       # 这里故意用 `\?\` 扩展长度路径再跑一次同一个内核。

@@ -19,18 +19,12 @@
 
   MOD_CMD = -J
 
-  # **Windows 上不开 `-ffpe-trap`。** 别的平台开着它（上游的
-  # Makeoptions.github 与 Makeoptions.Mac-arm 都有），这里去掉，理由是它
-  # 在这里由**库**而不是 CoLM 的代码触发：mksrfdata 打完 banner 就收到
-  # SIGFPE，而 gfortran 给出的回溯全落在几个 DLL 的基址区间里
-  # （0x35…/0x61…/0xa0…），不在 exe 自己的范围内 —— HDF5/netCDF 在做浮点
-  # 转换时置上 invalid 标志是常见且无害的，只有开了陷阱才会变成致命信号。
-  #
-  # 代价说清楚：Windows 上因此不再捕获 CoLM 自己的非法浮点运算。
-  # 那一层由 macOS 的黄金回归兜住 —— 它开着陷阱，且逐变量比对输出。
-  # `-fcheck=all` 与 `-fbacktrace` 保留，它们查的是另一类问题。
+  # `-ffpe-trap` 保留。**去掉过一次，结果更糟**：mksrfdata 不再崩，
+  # 而是跑了半小时也不结束（同一个 1 天的算例在 macOS 上是几秒）——
+  # 也就是说那个非法运算不是库里的无害噪声，它产生的 NaN 会让后面的
+  # 迭代不收敛。崩掉至少指得出位置，挂住什么都指不出。
   FOPTS = -fdefault-real-8 -ffree-form -g -fcheck=all \
-          -fbacktrace -cpp \
+          -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
           -ffree-line-length-0 -fallow-argument-mismatch
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
