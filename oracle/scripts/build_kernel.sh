@@ -83,7 +83,10 @@ cp "include/$MAKEOPTS" include/Makeoptions
 # 而 SinglePoint 在到达那里之前就 `CoLM_stop` 了（`MKSRFDATA.F90:149`）。
 # `postprocess/` 里的 `mv` 与文件列举也不在这三个二进制内。
 if [ -n "$OWN_MAKEOPTS" ]; then
-  files=$(grep -rl "mkdir -p " --include='*.F90' . | grep -vE '/preprocess/|/extends/CaMa/')
+  # `|| true` 不是保险，是必需：脚本开着 `set -euo pipefail`，而 grep
+  # 找不到东西时返回 1 —— 下面那次核对**恰恰期望找不到**（都改完了），
+  # 于是「改对了」会让构建以退出码 1 结束，且一个字都不打。实测踩过。
+  files=$(grep -rl "mkdir -p " --include='*.F90' . | grep -vE '/preprocess/|/extends/CaMa/' || true)
   n=$(echo "$files" | grep -c . || true)
   # 一处都没有就是这个假设过期了 —— 静默跳过会让 Windows 再次在运行到
   # 一半时死掉，而构建看上去一切正常。
@@ -92,7 +95,7 @@ if [ -n "$OWN_MAKEOPTS" ]; then
     exit 3
   fi
   echo "$files" | xargs sed -i -E "s|CALL system\('mkdir -p ' // (.*)\)[[:space:]]*\$|CALL system('mkdir \"' // \1 // '\"')|"
-  left=$(grep -r "mkdir -p " --include='*.F90' . | grep -vE '/preprocess/|/extends/CaMa/' | wc -l | tr -d ' ')
+  left=$(grep -r "mkdir -p " --include='*.F90' . 2>/dev/null | grep -vE '/preprocess/|/extends/CaMa/' | wc -l | tr -d ' ' || true)
   echo "Windows: $n 个文件里的 mkdir 路径已加引号，剩余未改 $left 处"
   if [ "$left" != "0" ]; then
     echo "some 'mkdir -p' lines did not match the rewrite -- they would fail at run time" >&2
