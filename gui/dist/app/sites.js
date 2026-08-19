@@ -192,29 +192,32 @@ export function assignCaseNames(sites) {
   return sites;
 }
 
-/** 这个站点的算例，没有就建一个。返回 `null` 表示建不了（并已说明原因）。 */
-export async function ensureCase(s) {
+/** 这个站点的算例，没有就建一个。返回**算例名**，建不了返回 `null`。
+ *
+ *  **不自己扫描。** 每建一个就 `list_cases` 一次的话，90 个站点要扫 90 次，
+ *  每次都遍历算例根目录并读每份 case.nml，还要重画两个容器（行数
+ *  1…90 递增，约 8000 个行节点）。扫描与渲染交给 `ensureCases` 收尾做一次，
+ *  中途的进度靠 `setStatus` 报。
+ *
+ *  返回名字而不是 `Case` 对象，是因为对象要等收尾那次扫描才拿得到。 */
+async function ensureCase(s) {
   const root = $('root').value.trim();
   if (!root) { setStatus('先指定算例放哪（第 2 步「算例放哪」那张卡片）'); return null; }
   const cname = s.caseName ?? s.name;
-  const have = state.cases.find(c => c.name === cname);
-  if (have) return have;
+  if (state.cases.some(c => c.name === cname)) return cname;
   if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
   setStatus(`正在为 ${s.name} 建算例…`);
   try {
     await invoke('new_case', {
       site: s.site_file, out: joinPath(root, cname), name: cname,
       // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
-      // 而缩短窗口是运行页「时间与预热」里的事。
+      // 而缩短窗口是参数页「时间与预热」里的事。
       start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,
     });
-    state.cases = await invoke('list_cases', { root });
-    renderCases();
-    renderSteps();
     setStatus(`已为 ${s.name} 建好算例`);
-    return state.cases.find(c => c.name === cname) ?? null;
+    return cname;
   } catch (e) { setStatus(`${s.name}：${e}`); return null; }
 }
 
@@ -362,15 +365,27 @@ export function renderSites(r = {}) {
  *  并发只是让它们互相抢。一个失败不中止整批，失败的会点名 ——
  *  一批悄悄少建几个，要到运行时才发现，那时已经隔了一层。 */
 export async function ensureCases(sites) {
-  const made = [];
+  const names = [];
   const failed = [];
   for (const [i, s] of sites.entries()) {
     setStatus(`准备算例 ${i + 1}/${sites.length}：${s.name}`);
-    const c = await ensureCase(s);
-    if (c) made.push(c); else failed.push(s.name);
+    const n = await ensureCase(s);
+    if (n) names.push(n); else failed.push(s.name);
   }
-  if (failed.length) setStatus(`${made.length}/${sites.length} 个就绪；建不了：${failed.join('、')}`);
-  return made;
+  // **扫一次，不是每建一个扫一次。** 见 ensureCase 的注释。
+  const root = $('root').value.trim();
+  if (root) {
+    try {
+      state.cases = await invoke('list_cases', { root });
+      renderCases();
+      renderSteps();
+    } catch (e) { setStatus(e); }
+  }
+  if (failed.length) setStatus(`${names.length}/${sites.length} 个就绪；建不了：${failed.join('、')}`);
+  // 对外仍然返回 Case 对象 —— confirmSelection 要拿 made[0] 去 selectCase、
+  // 拿 .dir 填 batch 与 pickedCases。
+  const byName = new Map(state.cases.map(c => [c.name, c]));
+  return names.map(n => byName.get(n)).filter(Boolean);
 }
 
 
