@@ -101,6 +101,22 @@ fn the_log_is_byte_identical_whether_or_not_anyone_is_watching() {
 }
 
 #[test]
+#[cfg(unix)]
+fn a_completed_mingw_stage_does_not_wait_for_broken_dll_cleanup() {
+    let (mut k, work) = fake_kernel(
+        "mingw-shutdown",
+        "#!/bin/sh\necho 'Successful in surface data making.'\nsleep 30\n",
+    );
+    k.manifest.platform = "MINGW64_NT-test-x86_64".into();
+
+    let started = std::time::Instant::now();
+    let r = run_stage(&k, Stage::MkSrfData, Path::new("case.nml"), &work, &[]).expect("runs");
+
+    assert!(r.succeeded());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
 fn a_report_knows_whether_it_succeeded() {
     // run_stage 本身要跑真二进制，由黄金回归验；这里只钉住这个小判据，
     // 免得它将来被改成「只要没崩就算成功」。

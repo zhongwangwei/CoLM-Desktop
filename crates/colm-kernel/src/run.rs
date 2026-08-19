@@ -141,6 +141,7 @@ pub fn run_stage_streaming(
 
     let mut text = String::new();
     let mut muted = 0usize;
+    let mut terminated_after_success = false;
     {
         let out = child.stdout.take().context("no stdout pipe")?;
         let mut reader = BufReader::new(out);
@@ -158,6 +159,24 @@ pub fn run_stage_streaming(
             }
             on_line(line);
             text.push_str(&chunk);
+
+            // MSYS2 的 netCDF DLL 会在 AWS SDK 的进程退出清理里永久等待。
+            // 成功标记是每个 CoLM 程序的最后一行，且文件都已关闭；此时终止
+            // 进程只跳过坏掉的 DLL 析构，后面的错误标记与产物检查仍会执行。
+            // ponytail: remove when MSYS2's netCDF no longer links the hanging AWS cleanup.
+            if kernel.manifest.platform.starts_with("MINGW")
+                && line.contains(stage.success_marker())
+                && child
+                    .try_wait()
+                    .context("cannot inspect the child")?
+                    .is_none()
+            {
+                child
+                    .kill()
+                    .context("cannot terminate the completed child")?;
+                terminated_after_success = true;
+                break;
+            }
             raw.clear();
         }
     }
@@ -186,7 +205,16 @@ pub fn run_stage_streaming(
 
     Ok(StageReport {
         stage,
-        outcome: adjudicate(stage, status.code(), &text, artifacts),
+        outcome: adjudicate(
+            stage,
+            if terminated_after_success {
+                Some(0)
+            } else {
+                status.code()
+            },
+            &text,
+            artifacts,
+        ),
         log,
         overrides: extract(&text),
     })
