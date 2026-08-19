@@ -3247,10 +3247,33 @@ async function applyKernel() { ... }
 | `docs/design.md` | 4 | 当前设计文档 |
 | `kernels/waterheat/` | 目录 | 本机构建产物（gitignore） |
 
+**重审后补上的三处**（原清单漏了，`grep -rln` 实测）：
+
+| 文件 | 处数 | 为什么容易漏 |
+|---|---|---|
+| `gui/src-tauri/src/histvars_tests.rs` | 9 | **另一个 workspace** |
+| `gui/src-tauri/src/config_tests.rs` | 5 | **另一个 workspace** |
+| `gui/dist/app/params.js` | 1 | 注释里 |
+| `docs/design-gui3.md` | 5 | 本轮新写的设计文档 |
+| `docs/plan-gui3.md` | 29 | 本文件 |
+
+**`gui/src-tauri` 是独立 workspace** —— 它把 429 个 Tauri 依赖挡在引擎外
+（`design.md` §4.1）。所以 **`cargo test --workspace` 跑不到它那 14 处**，
+漏改了不会在主测试里报出来。必须单独跑：
+
+```bash
+cd gui/src-tauri && cargo test
+```
+
 **不改**：`docs/plan-m*.md`、`docs/plan-gui1.md`、`docs/plan-gui2.md` ——
 它们是历史记录，里面的 `waterheat` 连着当时的实测输出，改了就对不上了。
-`docs/plan-gui3.md`（本文件）里的 `waterheat` 出现在验收命令与期望输出里，
-**改**。
+
+改完用这条确认只剩历史文档：
+
+```bash
+grep -rln waterheat --exclude-dir=.git --exclude-dir=target \
+  --exclude-dir=vendor --exclude-dir=work . | sort
+```
 
 - [ ] **Step 1: 先量基线 —— 改名前跑一次黄金比对**
 
