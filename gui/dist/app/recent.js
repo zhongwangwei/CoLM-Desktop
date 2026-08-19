@@ -19,7 +19,14 @@ export async function restoreRecent() {
     // 下拉框（内核）要那一项确实还在才恢复 —— 内核目录可能已经被删了，
     // 硬塞一个不存在的值会让「运行」失败在一个用户看不懂的地方。
     if (el.tagName === 'SELECT') {
-      if ([...el.options].some(o => o.value === all[id])) el.value = all[id];
+      if ([...el.options].some(o => o.value === all[id])) {
+        el.value = all[id];
+        // **必须补一次 change。** `#kernel` 的 onchange 是「内核变了」的唯一
+        // 通路 —— 它管着 kernelmeta、#urbandirs 的显隐、站点行的内核匹配标记。
+        // 只写 value 的话，恢复出来的内核在界面上只有下拉框自己知道，
+        // 而城市栅格目录那两个输入框永远出不来。实测：第二次启动起必现。
+        el.dispatchEvent(new Event('change'));
+      }
     } else if (!el.value) {
       el.value = all[id];
     }
