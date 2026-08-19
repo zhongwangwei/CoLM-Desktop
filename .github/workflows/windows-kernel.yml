@@ -77,6 +77,9 @@ jobs:
             @{ n = 'mkdir     嵌套 尾正斜杠';      c = "mkdir $base\g\h/"   ;  d = "$base\g\h"  },
             @{ n = 'mkdir     全正斜杠';           c = "mkdir $base/i/j"    ;  d = "$base/i/j"  },
             @{ n = 'mkdir     引号 尾反斜杠';      c = "mkdir `"$base\k\l\`"" ; d = "$base\k\l" },
+            @{ n = 'mkdir     引号 全正斜杠';       c = "mkdir `"$base/m/n`""  ;  d = "$base/m/n"  },
+            @{ n = 'mkdir     引号 混合斜杠';       c = "mkdir `"$base\o\p/q`"" ; d = "$base\o\p/q" },
+            @{ n = 'mkdir -p  引号 混合斜杠';       c = "mkdir -p `"$base\r/s`"" ; d = "$base\r/s" },
             @{ n = 'mkdir     已存在的目录';       c = "mkdir $base\c\d"    ;  d = "$base\c\d"  }
           )
           foreach ($x in $cases) {
