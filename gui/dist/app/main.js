@@ -9,6 +9,7 @@ import { refreshKernels, watchRun } from './runner.js';
 import { refreshPresets } from './presets.js';
 import { restoreRecent, wirePickers } from './recent.js';
 import { showDomainGate } from './domain.js';
+import { renderCases } from './sites.js';
 
 initShell();
 
@@ -31,6 +32,15 @@ async function boot() {
     await refreshKernels();
     await refreshPresets();
     await restoreRecent();
+    // 恢复出来的算例根目录里可能已经有算例 —— 不扫的话第 3 步是个空盒子，
+    // 而用户上次的工作就在那里。
+    const root = $('root').value.trim();
+    if (root) {
+      try {
+        state.cases = await invoke('list_cases', { root });
+        renderCases();
+      } catch (e) { /* 目录没了就算了，扫描按钮还在 */ }
+    }
     wirePickers();
     renderSteps();
   } catch (e) { setStatus('后端出错：' + e); }
