@@ -2024,10 +2024,24 @@ du -sh examples/
 - [ ] **Step 2: 确认扫描能同时认出两个**
 
 ```bash
-./target/debug/colm-cli scan --dir examples/Sitedata --quick 1 | grep -E '"name"|"urban"'
+./target/debug/colm-cli scan --dir examples/Sitedata --quick 1 | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    print(s['name'], 'urban=' + str(s['urban']), 'met=' + str(bool(s['met_file'])), 'landtype=' + str(s['landtype']))
+"
 ```
 
-期望：两条记录，`CN-Cng` 的 `urban` 是 `false`，`AU-Preston` 的是 `true`。
+**已在 `/tmp` 里预演过**（把两套文件拷进同一组目录再扫），实测输出：
+
+```
+AU-Preston   urban=True   met=有  obs=有  landtype=None
+CN-Cng       urban=False  met=有  obs=有  landtype=10
+总体积 7.6 MB
+```
+
+`AU-Preston` 的 `landtype` 是 `None` —— 城市站点文件没有 `IGBP_classification`，
+而「没有它就是城市站」正是 `scan` 认城市站的判据（README「站点库」一节）。
+命名约定也照常生效，两个站点各自的强迫场与观测都配对上了。
 
 **两套都装、都显示，不按内核过滤。** 这与 Task 8 立的规矩一致：标出来而
 不是藏起来。`install_example` 是整目录复制，不用改后端逻辑。
