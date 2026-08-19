@@ -84,7 +84,7 @@ fn a_matching_kernel_opens() {
     // 比 canonicalize 之后的：`open` 现在会绝对化，而 macOS 的 temp_dir
     // 是 `/var/folders/...`，canonicalize 之后变成 `/private/var/folders/...`。
     // 绝对化的理由见 `an_opened_kernel_holds_an_absolute_path`。
-    assert_eq!(k.dir, d.canonicalize().expect("canonicalize"));
+    assert_eq!(k.dir, plain(d.canonicalize().expect("canonicalize")));
 }
 
 #[test]

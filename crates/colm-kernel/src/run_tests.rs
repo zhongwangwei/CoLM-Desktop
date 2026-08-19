@@ -105,7 +105,7 @@ fn the_log_is_byte_identical_whether_or_not_anyone_is_watching() {
 fn a_completed_mingw_stage_does_not_wait_for_broken_dll_cleanup() {
     let (mut k, work) = fake_kernel(
         "mingw-shutdown",
-        "#!/bin/sh\necho 'Successful in surface data making.'\nsleep 30\n",
+        "#!/bin/sh\necho 'Successful in surface data making.'\nexec sleep 30\n",
     );
     k.manifest.platform = "MINGW64_NT-test-x86_64".into();
 
