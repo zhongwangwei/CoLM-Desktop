@@ -1788,6 +1788,251 @@ Tested: node --check; xtask check-gui 无成环; 摘要行读出当前内核"
 
 ---
 
+## Task 8b: 自带一个城市示例站点
+
+现在自带的示例只有 CN-Cng（自然站点）。选了 `urban` 内核的人手上没有任何
+能试的东西 —— 而 `examples/README.md` 当初的理由是「城市算例不能自带：
+栅格实测 698 GB」。
+
+**站点文件能自带，栅格不能。** 那就把站点文件发出去，把栅格门槛说在前面。
+
+**实测的门槛**（本机跑过）：
+
+```
+$ colm-cli new --site .../AU-Preston_site_v1.nc --out ... --name AU-Preston
+site: urban-shaped; elevation 93 m taken from ground_height so CoLM never needs the 7 GB elevation.nc
+Error: an urban case needs --rawdata: the site file carries only morphology,
+       so soil, lake depth, albedo and the LCZ class all come from the global grid
+```
+
+后端已经拦得很清楚。要做的是**在按下去之前就说**——等报错才知道，人已经
+以为自己走通了。
+
+**站点选 AU-Preston**：README「URBAN 是唯一必须带全球栅格跑的预设」那一节
+的验收就是拿它做的（1993-01-01 至 01-11，三段全 ok，264 条小时记录，
+`f_tref` 峰值 312 K 对得上墨尔本一月）。三件套 4.5 MB。
+
+**Files:**
+- Create: `examples/Sitedata/AU-Preston_site_v1.nc` 等三个文件
+- Modify: `examples/README.md`
+- Modify: `gui/src-tauri/src/example.rs`（模块注释）
+- Modify: `gui/dist/app/sites.js`
+- Modify: `gui/dist/app/runner.js`
+
+- [ ] **Step 1: 把三个文件复制进 `examples/`**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
+cp "$U/Sitedata/AU-Preston_site_v1.nc"   examples/Sitedata/
+cp "$U/Forcing/AU-Preston"*.nc           examples/Forcing/
+cp "$U/Observation/AU-Preston"*.nc       examples/Observation/
+ls -la examples/*/ | grep -i preston
+du -sh examples/
+```
+
+期望：三个目录各多一个 AU-Preston 文件，`examples/` 总计约 7.6 MB。
+
+`.gitattributes` 里 `*.nc  binary`，不走 LFS，直接入库。
+
+- [ ] **Step 2: 确认扫描能同时认出两个**
+
+```bash
+./target/debug/colm-cli scan --dir examples/Sitedata --quick 1 | grep -E '"name"|"urban"'
+```
+
+期望：两条记录，`CN-Cng` 的 `urban` 是 `false`，`AU-Preston` 的是 `true`。
+
+**两套都装、都显示，不按内核过滤。** 这与 Task 8 立的规矩一致：标出来而
+不是藏起来。`install_example` 是整目录复制，不用改后端逻辑。
+
+- [ ] **Step 3: 城市站行标出「需全球栅格」**
+
+`gui/dist/app/sites.js` 的 `renderSites()` 里，Task 8 加的那两行标记之后再加：
+
+```js
+    // 城市站还要全球栅格，而站点文件里只有形态学量 —— 土壤剖面、湖深、
+    // 反照率、LCZ 分类都得从栅格取。**在按下建算例之前说**：
+    // colm-cli new 会直接报错，但那时人已经以为自己走通了。
+    if (s.urban && !hasRaster()) tags.push('需全球栅格');
+```
+
+在文件里加一个小助手（放在 `renderSites` 之前）：
+
+```js
+/** 城市栅格的两个目录都填了吗。两个都要 —— `<rawdata>/urban/` 给
+ *  mksrfdata，`<runtime>/urban/` 给 mkinidata，路径由两处不同的代码各拼各的。 */
+function hasRaster() {
+  return !!($('rawdata').value.trim() && $('runtime').value.trim());
+}
+```
+
+- [ ] **Step 4: 建算例按钮在缺栅格时说清楚**
+
+`renderMakeCase()` 里，在 `b.disabled = !n && !one;` **之后**插入：
+
+```js
+  // 选中的里面有城市站而栅格目录没填 —— 按下去必然是
+  // 「an urban case needs --rawdata」。**在按下去之前说**，
+  // 并且指明去哪儿填（第 2 步），而不是让人对着一句英文报错发呆。
+  const target = n
+    ? state.sites.filter(x => state.picked.has(x.site_file))
+    : (one ? [one] : []);
+  if (target.some(x => x.urban) && !hasRaster()) {
+    b.textContent = '城市站还需要全球栅格目录 —— 去第 2 步填 rawdata 与 runtime';
+    b.disabled = true;
+  }
+```
+
+- [ ] **Step 5: 示例按钮的文案随内核变**
+
+`gui/dist/app/runner.js` 的 `showKernelMeta()` 末尾（Task 8 加的 `renderSites()`
+那一行之后）再加：
+
+```js
+  // 自带示例现在有两个：CN-Cng（自然）与 AU-Preston（城市）。两个都会装，
+  // 但按钮说出**当前内核下哪个用得上** —— 选了 urban 却看到「CN-Cng」，
+  // 人会以为自带的这份跟自己没关系。
+  const ex = $('use-example');
+  if (ex) {
+    ex.textContent = kernelIsUrban()
+      ? '用自带的示例站点（城市站 AU-Preston）'
+      : '用自带的示例站点（CN-Cng）';
+  }
+```
+
+`index.html` 里那句静态说明也要跟着改成两个都提：
+
+```html
+          <span class="muted mini">CN-Cng 内蒙古草地、AU-Preston 墨尔本城市站，
+            装在程序里不用另外下数据；<b>城市站还需要自备全球栅格</b></span>
+```
+
+- [ ] **Step 6: 更新 `examples/README.md`**
+
+那一节「为什么只有一个，而且是自然站点」的立场变了。整节换成：
+
+```markdown
+## 为什么是这两个站点
+
+CN-Cng 就是黄金回归用的那个站点（`oracle/cases/CN-Cng/`）。示例与测试覆盖
+的是同一份数据 —— 示例跑不通，回归测试会先一步红。
+
+AU-Preston 是 URBAN 预设验收用的那个（README「URBAN 是唯一必须带全球栅格
+跑的预设」一节）。选了 `urban` 内核的人手上得有个能试的东西。
+
+## 城市站自带的是站点文件，不是栅格
+
+**AU-Preston 装完不能直接跑。** 城市算例的土壤剖面、湖深、土壤反照率、
+LCZ 分类都只能从全球栅格取，而那套数据实测 698 GB —— 装不进任何安装包。
+站点文件里只有 25 个形态学量。
+
+所以 `colm-cli new` 认出城市站点文件之后，`--rawdata` 与 `--runtime`
+变成必填，缺了直接报错：
+
+```
+an urban case needs --rawdata: the site file carries only morphology,
+so soil, lake depth, albedo and the LCZ class all come from the global grid
+```
+
+界面在**按下建算例之前**就把这条说出来：站点行标「需全球栅格」，
+按钮变成「城市站还需要全球栅格目录 —— 去第 2 步填 rawdata 与 runtime」
+并置灰。**一个能点但必然失败的入口比一个灰着的更糟。**
+```
+
+- [ ] **Step 7: 更新 `example.rs` 的模块注释**
+
+开头那句「**只有一个，而且是自然站点。**」已经不成立。整个 `//!` 块换成：
+
+```rust
+//! 自带的示例站点。
+//!
+//! 一个刚装好程序的人手上**没有任何数据**。PLUMBER2 要注册才能下载、
+//! 几十 GB，而在拿到数据之前他连"这程序能不能用"都判断不了。
+//! 所以装两个站点进去：CN-Cng（内蒙古草地，2008–2009）与 AU-Preston
+//! （墨尔本城市站）—— 后者是给选了 `urban` 内核的人准备的。
+//!
+//! **城市那个自带的是站点文件，不是栅格。** 土壤剖面、湖深、土壤反照率、
+//! LCZ 分类都只能从全球栅格取，实测那套数据 698 GB，装不进任何安装包。
+//! 所以 AU-Preston 装完**不能直接跑**，界面会在按下建算例之前说明这一点。
+//! CN-Cng 则装完就能跑通建算例 → 三段运行 → 与观测比对的完整流程。
+```
+
+- [ ] **Step 8: 静态检查与跑一遍**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+node --check gui/dist/app/sites.js && node --check gui/dist/app/runner.js
+cargo run -p xtask -- check-gui
+cd gui/src-tauri && cargo test 2>&1 | tail -5
+```
+
+期望：无语法错；check-gui 全绿；GUI 后端测试全过（`example_tests.rs` 用的是
+自造的临时文件，不依赖 `examples/` 实际内容，加文件不会撞它）。
+
+跑起来（内核是非 urban 的 default）：
+
+```bash
+cd gui/src-tauri && cargo build
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+./target/debug/colm-desktop-gui > /dev/null 2>&1 &
+sleep 4
+bash $S/click.sh "站点"; sleep 1
+```
+
+走到第 3 步，点「用自带的示例站点」。**注意**：应用数据目录里可能已经有
+上次装的那份（只有 CN-Cng），`install_example` 见到 `Sitedata` 存在就不再
+复制。要验新文件得先清掉：
+
+```bash
+rm -rf ~/Library/Application\ Support/edu.sysu.colm.desktop/examples
+```
+
+然后重新点。期望：
+
+- 按钮文字是「用自带的示例站点（CN-Cng）」（当前内核非 urban）
+- 扫出 **2 个站点**
+- AU-Preston 那一行带「城市」「要 urban 内核」「需全球栅格」三个标记
+- 选中 AU-Preston 之后，建算例按钮变成
+  「城市站还需要全球栅格目录 —— 去第 2 步填 rawdata 与 runtime」且**灰着**
+- 选中 CN-Cng 则按钮正常，是「建算例：CN-Cng」
+
+```bash
+bash $S/ax.sh | grep "AU-Preston\|CN-Cng\|需全球栅格\|城市站还需要"
+pkill -f "target/debug/colm-desktop-gui"
+```
+
+urban 内核这台机器没编，按钮文案随内核变那条**跳过**，在报告里写明。
+（想验的话：`./oracle/scripts/build_kernel.sh urban`，几十秒。若编了，
+切到 urban 内核后按钮应变成「用自带的示例站点（城市站 AU-Preston）」。）
+
+- [ ] **Step 9: 提交**
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+git add examples/ gui/dist/app/sites.js gui/dist/app/runner.js gui/dist/index.html gui/src-tauri/src/example.rs
+git commit -m "自带一个城市示例站点，并把栅格门槛说在前面
+
+选了 urban 内核的人原来手上没有任何能试的东西。AU-Preston 是 URBAN 预设
+验收用的那个站点，三件套 4.5 MB。
+
+**自带的是站点文件，不是栅格。** 城市算例的土壤剖面、湖深、反照率与 LCZ
+分类只能从全球栅格取，那套数据 698 GB。所以 AU-Preston 装完不能直接跑 ——
+界面在按下建算例之前就说：站点行标「需全球栅格」，按钮置灰并指明去第 2 步
+填 rawdata 与 runtime。一个能点但必然失败的入口比一个灰着的更糟。
+
+两套都装、都显示、标出匹配，不按内核过滤 —— 藏起来会让人以为自带的就那
+一个。
+
+Constraint: examples/README.md 与 example.rs 里「只有一个自然站点」的立场
+已改，两处注释同步更新
+Confidence: high
+Scope-risk: moderate
+Tested: colm-cli new 实测缺栅格的报错原文; scan 扫出 2 个站点; check-gui"
+```
+
+---
+
 ## Task 9: 算例列表两页各一份
 
 第 3 步（站点）建完算例要看见「建出来没有」，第 5 步（运行）要「跑哪些」，
