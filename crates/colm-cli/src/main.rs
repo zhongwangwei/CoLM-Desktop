@@ -388,6 +388,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 没有 `--urban` 开关：拿一个草地站强行跑城市只会在 NCAR 属性表上越界，
     // 而一个城市站不跑城市模块也没有意义。判据完全交给站点文件的形状。
     let urban = !looks_like_plumber2;
+    // 这个城市站点的土壤剖面在不在预抽表里 —— 决定 `--rawdata` 缺席时该说什么。
+    let mut urban_soil_covered = false;
     if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
@@ -404,15 +406,29 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             );
         }
     } else {
-        // 城市站点文件：只补一样东西，见 `prepare_urban`。
+        // 城市站点文件：补高程与土壤剖面，见 `prepare_urban`。
         let rep = colm_srfdata::site::prepare_urban(&site_raw, &layout.site_nc())?;
         match rep.elevation {
             Some(h) => println!(
                 "site: urban-shaped; elevation {h} m taken from ground_height so CoLM never \
                  needs the 7 GB elevation.nc"
             ),
-            None => println!("site: urban-shaped; copied as-is"),
+            None => println!("site: urban-shaped; elevation left as the file has it"),
         }
+        match rep.soil_site {
+            Some(name) => println!(
+                "  soil: {} variable(s) written from the built-in {name} profile \
+                 (measured on the CoLM 2024 grid at this site) — the 122 GB soil/ rasters \
+                 are not read",
+                rep.soil_vars.len()
+            ),
+            // **不编数**：表外的站点一个土壤变量都不写，让 CoLM 回落栅格。
+            None => println!(
+                "  soil: this site is not in the pre-extracted table (21 Urban-PLUMBER sites); \
+                 nothing written, so CoLM reads the global soil/ rasters"
+            ),
+        }
+        urban_soil_covered = rep.soil_site.is_some();
     }
 
     // 2. 强迫场 namelist —— 不转换数据，CoLM 直接读 PLUMBER2 的 Met 文件
@@ -505,18 +521,41 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
 
     // 全球栅格目录。水热与 BGC 算例一个字节都不读它 —— `site::fill` 已经把
     // 该有的都写进 site.nc 了 —— 所以那里故意指向一个不存在的目录：跑通了就
-    // **证明**没读。城市算例做不到这一点：土壤剖面、湖深、土壤反照率、LCZ
-    // 分类、坡度都只能从栅格取（实测 mksrfdata 的来源清单里 30 项写着
-    // "from CoLM 2024 raw data"），所以那两个目录变成必填。
+    // **证明**没读。
+    //
+    // **城市算例还做不到。** 预抽表已经把最大的一块搬走了（`soil/` 的 24 个
+    // 栅格，实测 122 GB），但 mksrfdata 还有四处会去开栅格，而且**开不到就
+    // `CoLM_stop`，不是警告**（`nccheck` → `CoLM_stop`，`MOD_NetCDFSerial.F90:146`）：
+    //
+    //   * `urban_type/` 的 LCZ 分类 —— 实测 21 个站点分布在 1/2/3/5/6/8/12
+    //     七个类别上，assume 一个值会把 14 个站的城市形态整个换掉；
+    //   * `urban_lai_500m/` 的城市树 LAI/SAI —— 站点文件里没有，也没有预抽表；
+    //   * `lake_depth.nc`（49 MB）与 `soil_brightness.nc`（28 MB）；
+    //   * `topography.nc` 的 `elvstd` / `sloperatio`。
+    //
+    // 而 `DEF_dir_runtime` 下的 `urban/LUCY_rawdata.nc` 是 mkinidata 无条件要
+    // 的（`MOD_UrbanReadin.F90:193`），连回落分支都没有。
+    //
+    // 所以这两个目录对城市算例仍然必填。要解开，缺的是第二张「量出来的」表 ——
+    // 不是给没量过的站点编一个默认值。
     let dirs = if urban {
         let raw = o.get("--rawdata").ok_or_else(|| {
-            anyhow!(
-                "an urban case needs --rawdata: the site file carries only morphology, \
-                 so soil, lake depth, albedo and the LCZ class all come from the global grid"
-            )
+            let soil = if urban_soil_covered {
+                "this site's soil profile came from the built-in table, but the LCZ class, \
+                 urban tree LAI, lake depth, soil albedo and topography are still read from \
+                 the global grid"
+            } else {
+                "this site is not in the pre-extracted soil table (21 Urban-PLUMBER sites), \
+                 so the 122 GB soil/ rasters are needed on top of the LCZ class, urban tree \
+                 LAI, lake depth, soil albedo and topography"
+            };
+            anyhow!("an urban case needs --rawdata: {soil}")
         })?;
         let run = o.get("--runtime").ok_or_else(|| {
-            anyhow!("an urban case needs --runtime: DEF_dir_runtime holds the urban LUCY tables")
+            anyhow!(
+                "an urban case needs --runtime: mkinidata reads \
+                 <runtime>/urban/LUCY_rawdata.nc unconditionally (MOD_UrbanReadin.F90:193)"
+            )
         })?;
         (slash(Path::new(&raw)), slash(Path::new(&run)))
     } else {
