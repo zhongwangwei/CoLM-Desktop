@@ -2780,6 +2780,141 @@ Important + 4 个 Minor，**每条都实测复现**。这一批修前五条：
 
 ---
 
+## Task 8c-2: 预抽 21 个城市站的土壤剖面点值
+
+城市算例最后一道门槛。8c-1 修掉两个 Fortran bug 之后省了 130 MB，
+剩下的 **122 GB `soil/`** 要靠这一步。
+
+**关键事实**（已查证）：城市段**已经有**从 `site.nc` 读土壤的分支，
+而且那里的 `readflag` 写法是**对的**（不像 lakedepth 那处）：
+
+```fortran
+readflag = USE_SITE_soilparameters
+u_site_vf_sand = readflag .and. ncio_var_exist(fsrfdata,'soil_vf_sand',readflag)
+IF (u_site_vf_sand) THEN
+   CALL ncio_read_serial (fsrfdata, 'soil_vf_sand', SITE_soil_vf_sand)
+ELSE
+   ... 从 soil/vf_sand_s.nc 读 8 层
+```
+
+所以值写进 `site.nc` 就能喂进去，**不用再改 Fortran**。
+
+**为什么自然站点不需要这一步**：PLUMBER2 站点文件自带 23 个 `soil_*`
+变量，`fill()` 再推导补 4 个。Urban-PLUMBER 站点文件 23 个变量**全是
+形态学量，一个 `soil_*` 都没有**。
+
+**Files:**
+- Create: `oracle/src/bin/extract_urban_soil.rs`
+- Create: `crates/colm-srfdata/src/urban_soil.rs`（生成的产物，入库）
+- Modify: `crates/colm-srfdata/src/lib.rs`（挂上新模块）
+
+- [ ] **Step 1: 先实测「写进哪些就够了」——别照源码推清单**
+
+上一轮 8c 正是因为照源码推的清单不准而 BLOCKED。这次先量。
+
+城市段 `allocate` 的是这 8 个（各 8 层）：
+
+```
+soil_vf_clay  soil_vf_gravels  soil_vf_om  soil_vf_quartz_mineral
+soil_vf_sand  soil_wf_clay     soil_wf_gravels  soil_wf_sand
+```
+
+但 CoLM 从 `site.nc` 读的 `soil_*` 全集有 29 个
+（`grep -o "ncio_var_exist(fsrfdata,'soil_[^']*'"`）。**先写这 8 个，
+跑一次，看还去开哪些栅格文件**，再按报错逐轮补，直到不再碰 `soil/`。
+
+用 8c-1 那套办法：造一个真实 rawdata 的软链树，**减去 `soil/`**，
+跑通就直接证明依赖没了。
+
+```bash
+R=/Users/zhongwangwei/Desktop/colm-rust/rawdata
+M=/tmp/raw-no-soil && rm -rf $M && mkdir -p $M
+for f in $R/*; do [ "$(basename $f)" = soil ] || ln -s "$f" $M/; done
+ls $M
+```
+
+站点用 AU-Preston，内核 `kernels/urban`。写变量进 `site.nc` 用本机
+`/Users/zhongwangwei/miniforge3/bin/python`（有 netCDF4）。
+
+**每一轮的报错都记下来**，那是这个任务最有价值的产出。
+
+- [ ] **Step 2: 写抽取工具 `oracle/src/bin/extract_urban_soil.rs`**
+
+对每个城市站点，按经纬度从栅格读点值。
+
+栅格里每层是一个独立变量：`vf_sand_s.nc` 里是 `vf_sand_s_l1` …
+`vf_sand_s_l8`（已用 `ncdump` 确认）。**文件名到 `site.nc` 变量名的映射
+不规则**（`k_s.nc` → `soil_k_s` 而不是 `soil_k`；`psi_s.nc` → `soil_psi_s`），
+必须显式列表，不能用规则推。
+
+用法：
+
+```
+extract-urban-soil <Urban-PLUMBER/Sitedata> <rawdata> > crates/colm-srfdata/src/urban_soil.rs
+```
+
+**读点值的办法照抄 `crates/colm-srfdata/src/raster.rs` 的
+`point_f64` / `point_i32`** —— 它已经处理了经纬度定位与缺测。别自己写一份。
+
+- [ ] **Step 3: 产出 `crates/colm-srfdata/src/urban_soil.rs`**
+
+**生成 Rust 源码，不是 JSON** —— `colm-srfdata` 只依赖 `anyhow` 与
+`netcdf`，加一个 `serde_json` 只为读一张静态表不划算；而
+`colm-schema/src/generated.rs` 已经立了「生成的产物入库」这个先例。
+
+形状（具体字段按 Step 1 的实测清单定）：
+
+```rust
+//! 21 个 Urban-PLUMBER 站点的土壤剖面点值，从 CoLM 2024 rawdata 抽出。
+//!
+//! **生成的产物，不要手改。** 重生成：
+//! `cargo run -p oracle --bin extract-urban-soil -- <Sitedata> <rawdata> > 本文件`
+//!
+//! **为什么要它**：城市站点文件 23 个变量全是形态学量，一个土壤剖面量
+//! 都没有；而 CoLM 的城市路径缺了它们就只能去开 122 GB 的 `soil/`。
+//! 每个站点一次只读一格 —— 把那一格预先抽出来，门槛就从 122 GB 落到几十 KB。
+//!
+//! **这些值是量出来的，不是假设的**：来源是 CoLM 2024 rawdata 在该站点
+//! 经纬度上的格点值。写进 site.nc 时的 `source` 属性要说出这一点。
+
+/// 一个城市站点的土壤剖面。层数与 CoLM 的 `nl_soil` 对齐。
+pub struct UrbanSoil {
+    pub site: &'static str,
+    pub lon: f64,
+    pub lat: f64,
+    pub vf_sand: [f64; 8],
+    // … 其余按 Step 1 实测出来的清单
+}
+
+pub static SITES: &[UrbanSoil] = &[ /* 生成 */ ];
+
+/// 按经纬度找这个站点的剖面。**按经纬度不按名字** —— 名字在两套数据集里
+/// 会重（`AU-Preston` 在 PLUMBER2 与 Urban-PLUMBER 里各有一个），
+/// 而经纬度是抽取时用的键。
+pub fn lookup(lon: f64, lat: f64) -> Option<&'static UrbanSoil> {
+    SITES.iter().find(|s| (s.lon - lon).abs() < 1e-3 && (s.lat - lat).abs() < 1e-3)
+}
+```
+
+- [ ] **Step 4: 只做到这里，先停**
+
+`prepare_urban` 的接通是下一个任务（8c-3）。这一步的产出是
+**一张查得到的表** + **一份实测清单**，验收标准是：
+
+```bash
+cargo build -p colm-srfdata
+cargo test --workspace 2>&1 | tail -5
+```
+
+265 passed 不能变少。加一个小测试确认表能查到 AU-Preston 且层数对。
+
+- [ ] **Step 5: 提交**
+
+分两个提交：工具一个，生成的数据一个（数据那个的信息里写清楚是怎么生成的、
+用的哪份 rawdata）。
+
+---
+
 ## Task 11d: 性能与重构（审查剩下的那批）
 
 **Files:**
