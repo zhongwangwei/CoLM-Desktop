@@ -170,7 +170,7 @@ export function assignCaseNames(sites) {
 /** 这个站点的算例，没有就建一个。返回 `null` 表示建不了（并已说明原因）。 */
 export async function ensureCase(s) {
   const root = $('root').value.trim();
-  if (!root) { setStatus('先指定算例放哪（第 1 步下面那张卡片）'); return null; }
+  if (!root) { setStatus('先指定算例放哪（第 2 步「算例放哪」那张卡片）'); return null; }
   const cname = s.caseName ?? s.name;
   const have = state.cases.find(c => c.name === cname);
   if (have) return have;

@@ -15,11 +15,16 @@ export const STEPS = [
   // 内核，还要给全球栅格目录；default 内核跑不了城市站，要的数据和路径也
   // 完全不同。反过来排的话，人挑完二十个城市站才发现手上是 default。
   { id: 'basic',  t: '基本设定', d: '内核与算例目录', need: () => null },
-  // 门槛认「选了内核」而不是「有内核」：下拉框里没选中任何一项时
-  // $('kernel').value 是空串，那时建出来的算例没有物理可跑。
+  // 门槛判的是**有没有可用的内核**，不是「用户选了没有」—— 单选 select
+  // 只要有 option 就必然选中一项，用户没有「不选」这个动作。
+  //
+  // **文案必须指向真正的出路。** 说「去第 2 步选一个内核」是死路：
+  // 没有内核时那一页也只有一句「没有找到内核」，人照做过去、发现没得选、
+  // 于是卡在这里。.gitignore 忽略 /kernels/，新克隆的开发树默认就是这个状态。
   { id: 'sites',  t: '站点',   d: '扫目录、选站、建算例',
-    need: () => (document.getElementById('kernel')?.value
-      ? null : '先在第 2 步选一个内核') },
+    need: () => (state.kernels.length
+      ? null
+      : '还没有可用的内核 —— 先构建 kernels/（见 README「什么时候要自己编内核」）') },
   { id: 'params', t: '参数',   d: '时间与预热 · namelist 字段表',
     need: () => (state.selected ? null : '先在第 3 步建一个算例') },
   { id: 'run',    t: '运行',   d: '输出与运行',
@@ -101,11 +106,18 @@ export function renderSteps() {
   // `params.js` 的 `renderScope()` 已经为此立过一次规矩（不能只在状态栏事后
   // 说），左栏是同一个问题的另一半。
   //
-  // 数取 batch 优先：建完算例之后它才是参数改动的**实际**作用对象；
-  // 还没建时退回勾中的站点数。
-  const n = state.batch.length || state.picked.size;
-  const one = state.selected?.name ?? state.pickedSite?.name
-    ?? state.sites.find(x => state.picked.has(x.site_file))?.name;
+  // **站在站点页时以勾选为准，往后以批次为准。** 这两个数在建过算例之后
+  // 会同时有值且不相等：勾了 20 个、而批次里还是上次建的那 1 个。
+  // 写成 `batch.length || picked.size` 的话短路会让左栏固执地显示旧数字，
+  // 而勾选现在每次都重绘左栏 —— 显示旧数字比干脆不刷新更像在骗人。实测踩过。
+  const onSites = state.step === 'sites';
+  const n = onSites
+    ? (state.picked.size || (state.pickedSite ? 1 : 0))
+    : (state.batch.length || state.picked.size);
+  const one = onSites
+    ? (state.pickedSite?.name
+       ?? state.sites.find(x => state.picked.has(x.site_file))?.name)
+    : (state.selected?.name ?? state.pickedSite?.name);
   $('estSite').textContent = n > 1 ? `${one ?? '—'} 等 ${n} 个` : (one ?? '—');
   const k = $('kernel');
   $('estKernel').textContent = k?.selectedIndex >= 0 ? k.options[k.selectedIndex].textContent : '—';
