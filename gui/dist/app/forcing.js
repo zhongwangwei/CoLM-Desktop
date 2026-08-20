@@ -210,6 +210,18 @@ function slotRow(i) {
       o.textContent = v;
       extraSel.appendChild(o);
     }
+    // **主变量换成了原来那个额外变量时，额外变量要清掉。**
+    //
+    // 不清的话下面这行赋值会静默失败 —— 上面的循环已经把主变量从选项里
+    // 排除了，给 `<select>` 赋一个不存在的选项值，它会变成空串。于是
+    // **界面显示「（不加）」，而 `extras[i]` 里还留着那个名字**，
+    // 转换时发出去的是 `4=Snowf:kg/m2/s+Snowf`，后端把它加两次，
+    // 降水翻倍而模型照样跑完。
+    //
+    // 校验放在渲染这里而不是 `sel.onchange` 里：这一行守的是
+    // 「显示出来的必须等于将要发出去的」，而渲染是唯一能保证覆盖
+    // 所有改动路径的地方。
+    if (extras[i][0] === picks[i]) extras[i] = [];
     extraSel.value = extras[i][0] ?? '';
     extraSel.onchange = () => {
       extras[i] = extraSel.value ? [extraSel.value] : [];
