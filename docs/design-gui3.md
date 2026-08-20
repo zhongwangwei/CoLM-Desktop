@@ -178,9 +178,9 @@ DEF_dir_history           DEF_wetland_finundation_scheme
 **两个长得差不多、行为不同的按钮不能摆在一起** —— 这是 `shell.js` 里
 `data-own-foot` 那条注释立下的规矩，改造后仍然成立：页面出口只有一种。
 
-## 2.4 `waterheat` 更名 `default`
+## 2.4 `default` 更名 `default`
 
-`waterheat` 这个名字说的是它编进了什么（水热过程），但它实际的角色是
+`default` 这个名字说的是它编进了什么（水热过程），但它实际的角色是
 **默认预设** —— 三个里最常用、文档里到处拿它举例的那个。改名 `default`。
 
 范围：**除 `docs/plan-m*.md` 与 `docs/plan-gui[12].md` 之外全改**。那些是历史
@@ -189,11 +189,11 @@ DEF_dir_history           DEF_wetland_finundation_scheme
 | 位置 | 改什么 |
 |---|---|
 | `oracle/scripts/build_kernel.sh` | `case` 分支的 preset 名 |
-| `kernels/waterheat/` | 目录名 + `manifest.json` 的 `preset` 字段 |
+| `kernels/default/` | 目录名 + `manifest.json` 的 `preset` 字段 |
 | `crates/colm-kernel/`、`crates/colm-hist/`、`crates/colm-cli/` | 源码与测试里的字面量 |
 | `oracle/tests/`、`oracle/src/bin/golden_run.rs` | 同上 |
 | `oracle/golden/kernel-manifest.json` | **回归黄金基准** —— 改完必须重跑一次黄金比对 |
-| `.github/workflows/release.yml`、`windows-kernel.yml` | `for p in waterheat bgc urban` 与路径 |
+| `.github/workflows/release.yml`、`windows-kernel.yml` | `for p in default bgc urban` 与路径 |
 | `README.md` | 预设表与正文 |
 
 **黄金文件那一条是这次改名唯一有风险的地方。** 它是回归基准，改它等于
@@ -261,7 +261,7 @@ domain: null,   // 'site' | 'region' | 'global'
 - **不实现区域与全球的步骤链。** 只把入口摆出来
 - **不按内核过滤站点列表。** 只在行上标出「要 urban 内核」/「要 default 内核」——
   藏起来会让人以为「扫出来就这么多」
-- **不改 `docs/plan-m*.md` 与 `docs/plan-gui[12].md` 里的 `waterheat`。**
+- **不改 `docs/plan-m*.md` 与 `docs/plan-gui[12].md` 里的 `default`。**
   那些是历史记录，改了会让当时的实测输出对不上
 - **不给专家模式编内容。** 腾空等后续安排
 - **不动第 ⑥ 步结果页。** 它现在的形状是对的

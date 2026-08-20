@@ -5,7 +5,7 @@
 //! 等于 CoLM 默认值的字段删掉重跑，history 与黄金文件 `identical: 129 variables`。
 //! 所以生成版若对不上，只可能是生成错了。
 //!
-//! 需要 `PLUMBER2_ROOT` 与一个已构建的内核（`kernels/waterheat`），
+//! 需要 `PLUMBER2_ROOT` 与一个已构建的内核（`kernels/default`），
 //! 与 `golden-run` 同属自托管档。
 
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ fn a_generated_case_reproduces_the_golden_history() {
         return;
     };
     let repo = repo();
-    let kernel_dir = repo.join("kernels/waterheat");
+    let kernel_dir = repo.join("kernels/default");
     if !kernel_dir.join("manifest.json").exists() {
         eprintln!("no kernel at {} — skipping", kernel_dir.display());
         return;

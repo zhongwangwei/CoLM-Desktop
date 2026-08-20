@@ -5,14 +5,14 @@
 # 因此版本握手靠构建期生成的 manifest.json + sha256，而不是问二进制。
 set -euo pipefail
 
-PRESET="${1:?usage: build_kernel.sh <waterheat|bgc|urban> [outdir]}"
+PRESET="${1:?usage: build_kernel.sh <default|bgc|urban> [outdir]}"
 OUTDIR="${2:-kernels}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$REPO_ROOT/vendor/CoLM202X"
 
 case "$PRESET" in
-  waterheat) ARGS=(SinglePoint LULC_IGBP     URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
+  default) ARGS=(SinglePoint LULC_IGBP     URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
   bgc)       ARGS=(SinglePoint LULC_IGBP_PFT URBANOFF vanGenu CaMaOFF BGCON  CROPOFF TRACEROFF) ;;
   urban)     ARGS=(SinglePoint LULC_IGBP     URBANON  vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;

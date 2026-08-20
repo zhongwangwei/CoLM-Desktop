@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     let case = args
         .next()
         .context("usage: golden-run <case-name> [--kernel <dir>] [--write-golden]")?;
-    let mut kernel_dir = PathBuf::from("kernels/waterheat");
+    let mut kernel_dir = PathBuf::from("kernels/default");
     let mut write_golden = false;
     while let Some(a) = args.next() {
         match a.as_str() {

@@ -3,7 +3,7 @@
 把 CoLM202X 的 SinglePoint 模式做成跨平台桌面程序。设计见 `docs/design.md`。
 
 **当前状态**：命令行端到端可用 —— 一条命令从原始 PLUMBER2 站点文件跑到
-指标表，三个物理预设（waterheat / bgc / urban）都跑得通。GUI 已按
+指标表，三个物理预设（default / bgc / urban）都跑得通。GUI 已按
 `docs/plan-gui2.md` 重构完（11 个任务全部完成），能扫站点、按功能分类改参数、
 批量运行、自动配对观测并出评估图。安装包由 `release.yml` 三平台产出，
 内核随包走 —— **用桌面程序的人不需要装任何编译器**。
@@ -77,7 +77,7 @@ CoLM 把 automatically 拼成了 automaticlly，按文本匹配的代码会在�
 ```bash
 colm-cli all --site <PLUMBER2>/Sitedata/CN-Cng_..._site.nc \
              --out  ~/cases/CN-Cng \
-             --kernel kernels/waterheat \
+             --kernel kernels/default \
              --obs  <PLUMBER2>/Observation/CN-Cng_..._Flux.nc \
              --start 2008-01-01 --end 2008-01-11 --spinup 8
 ```
@@ -278,7 +278,7 @@ cd gui/src-tauri && cargo tauri build --config tauri.bundle.conf.json
 
 ```bash
 export PLUMBER2_ROOT=/path/to/PLUMBER2s
-./oracle/scripts/build_kernel.sh waterheat
+./oracle/scripts/build_kernel.sh default
 cargo run -p oracle --bin golden-run -- CN-Cng
 cargo run -p oracle --bin golden-compare -- \
   oracle/golden/CN-Cng_hist_2008-01.nc \
@@ -325,11 +325,11 @@ CoLM 的默认值假设 HPC 数据树存在：`DEF_USE_OZONEDATA` 默认 `.true.
 ## 输出变量
 
 「这个内核能产出哪些变量」必须在**开跑之前**答得出来 —— 否则勾选界面只能把 482 个
-`DEF_hist_vars%*` 开关一股脑铺出来，而 waterheat 预设的一次真实运行只写出 119 个。
+`DEF_hist_vars%*` 开关一股脑铺出来，而 default 预设的一次真实运行只写出 119 个。
 
 差额不是 bug，是三道闸门依次收窄：
 
-| 闸门 | 判据在哪 | waterheat 下 |
+| 闸门 | 判据在哪 | default 下 |
 |---|---|---|
 | 1. 编译期宏 | `MOD_Hist.F90` 里的 `#ifdef` / `#ifndef` | 456 个写出点 → **123** |
 | 2. 运行时 `DEF_*` 条件 | 同一文件里的内联 `.and.` 与外层 `IF (DEF_*) THEN` | 123 里 10 个带条件，本次 6 真 4 假 → **119** |
@@ -340,7 +340,7 @@ CoLM 的默认值假设 HPC 数据树存在：`DEF_USE_OZONEDATA` 默认 `.true.
 ```rust
 // 清单里的 macros 是 Vec<String>（它要能从 JSON 反序列化），闸门表要 &str
 let macros = manifest.macros.iter().map(String::as_str).collect();
-colm_hist::writable(&macros)   // -> BTreeSet<&'static str>，waterheat 下 123 个
+colm_hist::writable(&macros)   // -> BTreeSet<&'static str>，default 下 123 个
 ```
 
 闸门 2 的条件**原样记下来**而不求值 —— 求值需要一份具体的算例配置，那是调用方
@@ -495,7 +495,7 @@ v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 �
 最需要先补上的窗口。
 
 覆盖面还受这些单一取值限制：一个站点、一种斑块类型（IGBP 10 草地）、
-一种产流方案（Simple VIC）、一种截留方案。黄金基准本身仍只用 `waterheat`。
+一种产流方案（Simple VIC）、一种截留方案。黄金基准本身仍只用 `default`。
 
 ## 什么时候要自己编内核
 
@@ -504,7 +504,7 @@ CPP 宏，装出来的程序自带三个：
 
 | 预设 | 宏组合 |
 |---|---|
-| `waterheat` | `SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
+| `default` | `SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
 | `bgc` | `SinglePoint LULC_IGBP_PFT URBANOFF vanGenu CaMaOFF BGCON CROPOFF TRACEROFF` |
 | `urban` | `SinglePoint LULC_IGBP URBANON vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
 
@@ -610,7 +610,7 @@ CI 里唯一跑通过的那次，是**先把 `.x` 拷成 `.exe` 再跑的**。�
 
 | 预设 | 构建 | 运行 | 卡在哪 |
 |---|---|---|---|
-| `waterheat` | ✅ 38 s | ✅ 黄金基准 | —— |
+| `default` | ✅ 38 s | ✅ 黄金基准 | —— |
 | `bgc` | ✅ 44 s | ✅ 三段跑通 | 需要两份 runtime 数据，见下 |
 | `urban` | ✅ 38 s | ✅ 三段跑通 | 必须给真实 rawdata/runtime，见下 |
 
@@ -658,7 +658,7 @@ schema 里也只有频率没有开关。
 
 ### 闸门表在第二个预设上被独立验证
 
-`colm-hist` 的闸门表是拿 `waterheat` 的黄金文件建并验的。BGC 跑通之后拿它
+`colm-hist` 的闸门表是拿 `default` 的黄金文件建并验的。BGC 跑通之后拿它
 再验一次：预测可写 326、实际写出 261、**漏报 0**。多报的 65 个全是运行时条件
 为假的那些（256 无条件 + 5 个条件成立 = 261，自洽）。
 
@@ -671,7 +671,7 @@ schema 里也只有频率没有开关。
 
 | | Rnet R² | Qle R² | Qh R² |
 |---|---|---|---|
-| `waterheat` | 0.986 | 0.044 | 0.530 |
+| `default` | 0.986 | 0.044 | 0.530 |
 | `bgc` | 0.985 | **0.503** | 0.305 |
 
 潜热大幅改善（RMSE 32.2 → 12.7），感热变差，净辐射几乎不变 —— 能量分配变了

@@ -133,7 +133,7 @@ export async function renderFields() {
   } catch (e) { state.varies = new Set(); status(e); }
 
   // 列表来自源码 schema，而不是只列 case.nml 里已经写过的项；再按当前内核
-  // 的 manifest 宏过滤。这样换 waterheat / urban / bgc 时，可配置项会一起换。
+  // 的 manifest 宏过滤。这样换 default / urban / bgc 时，可配置项会一起换。
   const have = new Set(entries.map(e => e.path));
   const extra = state.fields
     .filter(f => !have.has(f.name))

@@ -1,7 +1,7 @@
 use super::*;
 
-/// waterheat 预设的宏集合，取自 `kernels/waterheat/manifest.json`。
-fn waterheat() -> BTreeSet<&'static str> {
+/// default 预设的宏集合，取自 `kernels/default/manifest.json`。
+fn default() -> BTreeSet<&'static str> {
     [
         "CoLMDEBUG",
         "LULC_IGBP",
@@ -28,19 +28,19 @@ fn the_table_covers_every_live_write_site() {
 }
 
 #[test]
-fn the_waterheat_preset_can_write_one_hundred_and_twenty_three() {
+fn the_default_preset_can_write_one_hundred_and_twenty_three() {
     // 第一道闸门（编译期宏）之后剩 123 个，其中 113 个没有运行时条件。
     // 实际写出 119 = 113 + 那 10 个里条件成立的 6 个。
-    assert_eq!(writable(&waterheat()).len(), 123);
-    assert_eq!(unconditional(&waterheat()).len(), 113);
+    assert_eq!(writable(&default()).len(), 123);
+    assert_eq!(unconditional(&default()).len(), 113);
 }
 
 #[test]
 fn every_runtime_gated_variable_carries_its_condition() {
     // 10 个过得了宏这一关但还挂着运行时条件。每个的条件原文都记在表里，
     // 所以 GUI 能说清「为什么你勾了它却没有」，而不是只说「没有」。
-    let w = writable(&waterheat());
-    let u = unconditional(&waterheat());
+    let w = writable(&default());
+    let u = unconditional(&default());
     let gated: Vec<&str> = w.difference(&u).cloned().collect();
     assert_eq!(
         gated,
@@ -82,8 +82,8 @@ fn turning_on_bgc_adds_variables_and_never_removes_any() {
     // 加一个宏不会让已有变量消失 —— 这个直觉只在该宏没有 #ifndef 侧时成立。
     // BGC 实测只有一处 `#ifdef BGC`、零处 `#ifndef BGC`，所以在它上面成立。
     // （CatchLateralFlow 两侧都有，就不成立 —— 见 ifndef_really_does_subtract。）
-    let base = writable(&waterheat());
-    let mut with_bgc = waterheat();
+    let base = writable(&default());
+    let mut with_bgc = default();
     with_bgc.insert("BGC");
     let more = writable(&with_bgc);
     assert!(base.is_subset(&more));
@@ -101,10 +101,10 @@ fn ifndef_really_does_subtract() {
     //
     // `#ifndef CatchLateralFlow` 则实实在在管着 f_rsur_ie 与 f_rsur_se ——
     // 两个都在黄金文件里（README 记着它们「两窗口恒为 0」）。
-    let base = writable(&waterheat());
+    let base = writable(&default());
     assert!(base.contains("rsur_ie") && base.contains("rsur_se"));
 
-    let mut with_catch = waterheat();
+    let mut with_catch = default();
     with_catch.insert("CatchLateralFlow");
     let after = writable(&with_catch);
     assert!(!after.contains("rsur_ie"), "#ifndef must subtract");

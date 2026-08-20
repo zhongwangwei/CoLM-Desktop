@@ -5,7 +5,7 @@ use super::*;
 /// 本机实测的清单，一字不改地当作固件。
 pub const SAMPLE: &str = r#"{
   "schema": 1,
-  "preset": "waterheat",
+  "preset": "default",
   "platform": "Darwin-arm64",
   "colm_git_sha": "72dd76b9",
   "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",
@@ -57,7 +57,7 @@ const ALL: &[(&str, &str)] = &[
 fn the_sample_manifest_parses_into_its_fields() {
     let m: Manifest = serde_json::from_str(SAMPLE).expect("parses");
     assert_eq!(m.schema, 1);
-    assert_eq!(m.preset, "waterheat");
+    assert_eq!(m.preset, "default");
     assert_eq!(m.colm_git_sha, "72dd76b9");
     assert_eq!(m.netcdf_fortran, "4.6.3");
     assert_eq!(m.macros.len(), 6);
@@ -80,7 +80,7 @@ fn the_nested_sha256_object_is_read_as_values_not_keys() {
 fn a_matching_kernel_opens() {
     let d = fake_kernel("ok", ALL);
     let k = Kernel::open(&d).expect("opens");
-    assert_eq!(k.manifest.preset, "waterheat");
+    assert_eq!(k.manifest.preset, "default");
     // 比 canonicalize 之后的：`open` 现在会绝对化，而 macOS 的 temp_dir
     // 是 `/var/folders/...`，canonicalize 之后变成 `/private/var/folders/...`。
     // 绝对化的理由见 `an_opened_kernel_holds_an_absolute_path`。
@@ -141,7 +141,7 @@ fn an_opened_kernel_holds_an_absolute_path() {
     // `run_stage` 用 `current_dir(work)` 启动子进程。内核目录若是相对路径，
     // 可执行文件就会被相对 `work` 去找 —— open 成功、spawn 报
     // 「No such file or directory」，而报错里那个路径看着完全正常。
-    // 实测踩过：`colm-cli run --kernel kernels/waterheat` 正是这样炸的。
+    // 实测踩过：`colm-cli run --kernel kernels/default` 正是这样炸的。
     let d = fake_kernel(
         "absolute",
         &[("mksrfdata", "a"), ("mkinidata", "b"), ("colm", "c")],

@@ -11,14 +11,14 @@ fn have_kernel(preset: &str) -> bool {
 }
 
 #[test]
-fn a_bgc_variable_is_unwritable_under_the_waterheat_kernel() {
+fn a_bgc_variable_is_unwritable_under_the_default_kernel() {
     // 勾了却没有输出是这个界面最该防的事。`ar` 的闸门是 `#ifdef BGC`，
-    // 而 waterheat 内核没编 BGC —— 界面必须说出来，而不是让人跑完
+    // 而 default 内核没编 BGC —— 界面必须说出来，而不是让人跑完
     // 一小时再去 history 文件里找一个不存在的变量。
-    if !have_kernel("waterheat") {
+    if !have_kernel("default") {
         return;
     }
-    let v = hist_vars("&nl_colm\n/\n".into(), kernel("waterheat")).expect("runs");
+    let v = hist_vars("&nl_colm\n/\n".into(), kernel("default")).expect("runs");
     let ar = v.iter().find(|x| x.name == "ar").expect("ar 在 schema 里");
     assert_eq!(ar.writable, Some(false));
     assert!(
@@ -45,17 +45,17 @@ fn a_runtime_switch_is_evaluated_against_this_case() {
     // 闸门表保留条件原文，求值要一份具体配置 —— 那正是这里的事。
     // `xerr` 的运行时条件是 DEF_USE_CBL_HEIGHT 之类；这里用一个确定的例子：
     // 把某个 DEF_USE_* 关掉，依赖它的变量就该报不可写。
-    if !have_kernel("waterheat") {
+    if !have_kernel("default") {
         return;
     }
     let with = hist_vars(
         "&nl_colm\n   DEF_USE_SNICAR = .true.\n/\n".into(),
-        kernel("waterheat"),
+        kernel("default"),
     )
     .expect("runs");
     let without = hist_vars(
         "&nl_colm\n   DEF_USE_SNICAR = .false.\n/\n".into(),
-        kernel("waterheat"),
+        kernel("default"),
     )
     .expect("runs");
     let pick = |v: &Vec<HistVar>| {
@@ -78,10 +78,10 @@ fn a_runtime_switch_is_evaluated_against_this_case() {
 fn a_switch_the_gate_table_does_not_know_says_so() {
     // 482 个开关里有 61 个在闸门表里没有对应条目（多为 DA_*）。
     // **不知道就说不知道** —— 当成能写会让人以为勾上就有输出。
-    if !have_kernel("waterheat") {
+    if !have_kernel("default") {
         return;
     }
-    let v = hist_vars("&nl_colm\n/\n".into(), kernel("waterheat")).expect("runs");
+    let v = hist_vars("&nl_colm\n/\n".into(), kernel("default")).expect("runs");
     let unknown: Vec<&HistVar> = v.iter().filter(|x| x.writable.is_none()).collect();
     assert!(!unknown.is_empty(), "一个未知都没有，判据大概失效了");
     assert!(

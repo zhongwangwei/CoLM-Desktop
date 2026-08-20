@@ -93,15 +93,15 @@ jobs:
           }
           exit 0
 
-      - name: Build the waterheat kernel
+      - name: Build the default kernel
         shell: msys2 {0}
-        run: ./oracle/scripts/build_kernel.sh waterheat
+        run: ./oracle/scripts/build_kernel.sh default
 
       - name: What came out
         shell: msys2 {0}
         run: |
-          ls -la kernels/waterheat/
-          cat kernels/waterheat/manifest.json
+          ls -la kernels/default/
+          cat kernels/default/manifest.json
           # Makefile 在所有平台都产出 `.x`，`build_kernel.sh` 在 Windows 上把
           # 拷进内核目录的那份改成 `.exe` —— 因为 `PATHEXT` 不含 `.x`，系统不把它
           # 当可执行文件。（本文件早先在这里查 `.exe` 查错过一次：那时还没改名，
@@ -109,7 +109,7 @@ jobs:
           #
           # 「编出来了」与「能跑」是两件事，这里只钉死前者。
           for p in mksrfdata mkinidata colm; do
-            test -f "kernels/waterheat/$p.exe" || { echo "missing $p.exe"; exit 1; }
+            test -f "kernels/default/$p.exe" || { echo "missing $p.exe"; exit 1; }
           done
           # 直接跑一下：不给 namelist 时它应该停下来而不是崩。
           # 只看它能不能被 Windows 加载起来 —— 一个链接到缺失 DLL 的二进制
@@ -117,7 +117,7 @@ jobs:
           #
           # **但这一句是在 MSYS2 shell 里跑的，`/mingw64/bin` 在 PATH 上。**
           # 它证明的是「在装了 MSYS2 的机器上能跑」，不是「能跑」。下一步才问后者。
-          ./kernels/waterheat/colm.exe 2>&1 | head -5 || true
+          ./kernels/default/colm.exe 2>&1 | head -5 || true
 
       # 内核要跟着桌面程序一起分发，所以真正的问题是：**用户机器上不装 MSYS2，
       # 它还跑不跑？** `nf-config --flibs` 返回的是 `-L/mingw64/lib -lnetcdff
@@ -132,11 +132,11 @@ jobs:
         run: |
           for p in mksrfdata mkinidata colm; do
             echo "=== $p.exe ==="
-            ldd "kernels/waterheat/$p.exe" | grep -i mingw64 || echo "  (none from /mingw64)"
+            ldd "kernels/default/$p.exe" | grep -i mingw64 || echo "  (none from /mingw64)"
           done
           echo "=== 去重后的清单 ==="
           # 写进文件，下一步（PowerShell）要按它把 DLL 摆到二进制旁边。
-          for p in mksrfdata mkinidata colm; do ldd "kernels/waterheat/$p.exe"; done \
+          for p in mksrfdata mkinidata colm; do ldd "kernels/default/$p.exe"; done \
             | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u | tee dlls.txt
           echo "共 $(wc -l < dlls.txt) 个"
           # **在这里就把它们拷出来**，而不是让下一步（PowerShell）去翻译路径。
@@ -149,7 +149,7 @@ jobs:
           # 顺便摆进内核目录本身 —— **`release.yml` 装包时就是这么做的**，
           # 所以这一步同时验了那条路。拷 DLL 不改 `.exe` 的字节，
           # `Kernel::open` 的 sha256 校验照样过。
-          cp probe-dlls/*.dll kernels/waterheat/
+          cp probe-dlls/*.dll kernels/default/
 
       # 两问两答，都在 PowerShell 里跑 —— 那里的 PATH 没有 mingw64\bin，
       # 正是用户机器的处境。
@@ -167,7 +167,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           New-Item -ItemType Directory -Force -Path probe | Out-Null
-          Copy-Item kernels\waterheat\colm.exe probe\colm.exe
+          Copy-Item kernels\default\colm.exe probe\colm.exe
 
           Write-Host "=== 1. 只有二进制，没有 DLL ==="
           & .\probe\colm.exe *> bare.txt
@@ -241,7 +241,7 @@ jobs:
           # 而这一步真正要回答的问题是「卡在哪一段」—— 一次跑不完的运行
           # 在日志上与一次跑得慢的运行长得一模一样。
           Write-Host ("run 开始 " + (Get-Date -Format o))
-          & $cli run $abs --kernel kernels\waterheat --stream 1
+          & $cli run $abs --kernel kernels\default --stream 1
           $rc = $LASTEXITCODE
           Write-Host ("run 结束 " + (Get-Date -Format o))
           Write-Host "run exit code: $rc"
@@ -268,7 +268,7 @@ jobs:
           Write-Host "=== 同样的事，改用相对路径 ==="
           & $cli new --site $site --out rel-case --name CN-Cng --end 2008-01-02 --spinup-repeat 0
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::相对路径的 new 失败"; exit 1 }
-          & $cli run rel-case --kernel kernels\waterheat
+          & $cli run rel-case --kernel kernels\default
           if ($LASTEXITCODE -ne 0) {
             Get-Content rel-case\mksrfdata.log -TotalCount 20
             Write-Host "::error::相对路径的算例没跑完"; exit 1
@@ -289,7 +289,7 @@ jobs:
             -ex 'handle SIGFPE stop print nopass' \
             -ex run \
             -ex 'thread apply all backtrace' \
-            --args ../kernels/waterheat/mksrfdata.exe "$(cygpath -w "$PWD/case.nml")" || true
+            --args ../kernels/default/mksrfdata.exe "$(cygpath -w "$PWD/case.nml")" || true
 
       # **把病因钉死。** 上一步跑通了不等于知道原来为什么不通 ——
       # 这里故意用 `\?\` 扩展长度路径再跑一次同一个内核。
@@ -312,7 +312,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $plain = (Resolve-Path probe-case).Path
           $ext   = "\\?\" + $plain
-          $exe   = (Resolve-Path kernels\waterheat\mksrfdata.exe).Path
+          $exe   = (Resolve-Path kernels\default\mksrfdata.exe).Path
           Write-Host "普通形式: $plain"
           Write-Host "扩展形式: $ext"
           foreach ($p in @($plain, $ext)) {
@@ -339,7 +339,7 @@ jobs:
       #
       # 用默认 shell 而不是 `msys2 {0}`：Rust 工具链装的是 MSVC 目标，
       # **`cargo` 不在 MSYS2 的 PATH 上**（第一版这么写，报 `cargo: command not found`）。
-      # 而 DLL 上一步已经摆进 `kernels/waterheat/` 了，Windows 先在可执行文件
+      # 而 DLL 上一步已经摆进 `kernels/default/` 了，Windows 先在可执行文件
       # 同目录找 DLL，所以这里不需要 MSYS2 的 PATH。
       #
       # 路径给绝对的：`cargo test` 的当前目录是 crate 目录，不是仓库根。
@@ -347,5 +347,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: The Rust side can launch it too
         run: |
-          $env:COLM_KERNEL_DIR = "$PWD\kernels\waterheat"
+          $env:COLM_KERNEL_DIR = "$PWD\kernels\default"
           cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned -- --nocapture

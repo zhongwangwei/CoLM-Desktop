@@ -235,7 +235,7 @@ fn forcing_namelist_path_is_used_by_colm_and_stays_visible() {
 
 #[test]
 fn kernel_macros_decide_which_parameters_are_relevant() {
-    let waterheat = ["SinglePoint"].into_iter().collect();
+    let default = ["SinglePoint"].into_iter().collect();
     let urban = ["SinglePoint", "URBAN_MODEL"].into_iter().collect();
     let bgc = ["SinglePoint", "BGC"].into_iter().collect();
 
@@ -243,10 +243,10 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
         let f = colm_schema::find(name).expect(name);
         super::field_is_relevant(f, have)
     };
-    assert!(relevant("DEF_CASE_NAME", &waterheat));
-    assert!(relevant("DEF_dir_output", &waterheat));
-    assert!(!relevant("DEF_URBAN_RUN", &waterheat));
+    assert!(relevant("DEF_CASE_NAME", &default));
+    assert!(relevant("DEF_dir_output", &default));
+    assert!(!relevant("DEF_URBAN_RUN", &default));
     assert!(relevant("DEF_URBAN_RUN", &urban));
-    assert!(!relevant("DEF_USE_CN_INIT", &waterheat));
+    assert!(!relevant("DEF_USE_CN_INIT", &default));
     assert!(relevant("DEF_USE_CN_INIT", &bgc));
 }

@@ -15,8 +15,8 @@ const WATERHEAT: [&str; 6] = [
 ];
 
 fn golden_vars() -> BTreeSet<String> {
-    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/waterheat_hist_vars.txt");
+    let p =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/default_hist_vars.txt");
     std::fs::read_to_string(&p)
         .expect("the fixture must exist")
         .lines()

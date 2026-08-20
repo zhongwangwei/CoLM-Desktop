@@ -683,10 +683,10 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 - 必须剔除 spin-up 时段（§2.9），且显示剔除了多少。
 
 **哪些变量会被写出来，由三道闸门依次决定，而不是由 `DEF_hist_vars` 一张表决定。**
-`history_var_type` 有 482 个开关、343 个默认为真，而 waterheat 预设的一次真实运行
+`history_var_type` 有 482 个开关、343 个默认为真，而 default 预设的一次真实运行
 只写出 119 个。差额全部落在前两道闸门上：
 
-| 闸门 | 判据在哪 | 谁回答 | waterheat 下 |
+| 闸门 | 判据在哪 | 谁回答 | default 下 |
 |---|---|---|---|
 | 1. 编译期宏 | `MOD_Hist.F90` 的 `#ifdef` / `#ifndef` | `colm-hist`，输入是内核清单的 `macros`（§6.1） | 456 个写出点 → **123** |
 | 2. 运行时 `DEF_*` 条件 | 同一文件的内联 `.and.` 与外层 `IF (DEF_*) THEN` | 记下条件原文，由调用方结合算例配置求值 | 10 个带条件，本次 6 真 4 假 → **119** |
@@ -725,12 +725,12 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 本节原先写的是 `kernels/manifest.json` 里一个 `kernels` 数组，实现时改成了
 `kernels/<preset>/manifest.json`，理由见下一段的「同生同存」—— 清单认定的是
 紧挨着它的那三个二进制，一份全局清单会让它在预设之间失去这个含义。
-实测的 `kernels/waterheat/manifest.json`：
+实测的 `kernels/default/manifest.json`：
 
 ```json
 {
   "schema": 1,
-  "preset": "waterheat",
+  "preset": "default",
   "platform": "Darwin-arm64",
   "colm_git_sha": "72dd76b9",
   "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",

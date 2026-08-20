@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "preset": "waterheat",
+  "preset": "default",
   "platform": "Darwin-arm64",
   "colm_git_sha": "72dd76b9",
   "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",

@@ -25,11 +25,11 @@ fn write(name: &str, text: &str) -> std::path::PathBuf {
 fn the_surface_stage_ignores_the_time_window() {
     // 地表数据描述的是这个点长什么样，不是跑哪一段。换个时间窗口重跑
     // mksrfdata 是纯浪费 —— 城市算例里它是最慢的一段（要读全球栅格）。
-    let a = compute("mksrfdata", &write("a", CASE), "waterheat@abc").unwrap();
+    let a = compute("mksrfdata", &write("a", CASE), "default@abc").unwrap();
     let b = compute(
         "mksrfdata",
         &write("b", &CASE.replace("end_year = 2008", "end_year = 2010")),
-        "waterheat@abc",
+        "default@abc",
     )
     .unwrap();
     assert_eq!(first_difference(&a, &b), None, "时间窗口不该让地表数据失效");
@@ -38,11 +38,11 @@ fn the_surface_stage_ignores_the_time_window() {
 #[test]
 fn the_surface_stage_notices_a_different_rawdata_directory() {
     // 这条正是「只看产物在不在」漏掉的那种：文件还在，内容却已经不对。
-    let a = compute("mksrfdata", &write("c", CASE), "waterheat@abc").unwrap();
+    let a = compute("mksrfdata", &write("c", CASE), "default@abc").unwrap();
     let b = compute(
         "mksrfdata",
         &write("d", &CASE.replace("/data/raw/", "/data/other/")),
-        "waterheat@abc",
+        "default@abc",
     )
     .unwrap();
     let d = first_difference(&a, &b).expect("必须发现");
@@ -52,7 +52,7 @@ fn the_surface_stage_notices_a_different_rawdata_directory() {
 #[test]
 fn a_different_kernel_invalidates_everything() {
     // 换个预设就是换了一套编译期宏，地表数据也跟着不同。
-    let a = compute("mksrfdata", &write("e", CASE), "waterheat@abc").unwrap();
+    let a = compute("mksrfdata", &write("e", CASE), "default@abc").unwrap();
     let b = compute("mksrfdata", &write("f", CASE), "urban@abc").unwrap();
     let d = first_difference(&a, &b).expect("必须发现");
     assert!(d.contains("内核换了"), "{d}");
