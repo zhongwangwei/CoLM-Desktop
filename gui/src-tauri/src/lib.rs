@@ -11,6 +11,7 @@
 
 mod config;
 mod example;
+mod forcing;
 mod histvars;
 mod presets;
 mod project;
@@ -20,6 +21,7 @@ mod sites;
 
 use config::*;
 use example::*;
+use forcing::*;
 use histvars::*;
 use presets::*;
 use project::*;
@@ -41,6 +43,8 @@ pub fn run() {
             list_kernels,
             install_example,
             scan_sites,
+            probe_forcing,
+            convert_forcing,
             new_case,
             read_text,
             read_case,
