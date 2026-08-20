@@ -647,10 +647,41 @@ cd gui/src-tauri && cargo build && ./target/debug/colm-desktop-gui > /tmp/gui.lo
 **Files:**
 - Create: `oracle/tests/forcing_prep.rs`
 
-- [ ] **Step 1: 拿转换产物建算例跑三段**
+- [ ] **Step 1: 走 `colm-cli` 全流程，不直接构造 `CaseSpec`**
 
-照 `oracle/tests/forcing_convert.rs` 的形状（它是 A1 的判据，
-已经有全套骨架）。
+A1 那条测试（`forcing_convert.rs`）是直接构造 `CaseSpec` 的 ——
+**这一条不要照抄那部分**。城市站要 `site::fill` 走预抽表（21 个站
+的土壤剖面/LCZ/湖深都在 `colm-srfdata` 的生成表里），直接构造
+`CaseSpec` 会绕过那一整套。
+
+改成起 `colm-cli` 子进程，走用户真实的路径：
+
+```
+① colm-cli forcing-convert <原始> <产物> --slot 4=Rainf:kg/m2/s+Snowf --height 48.05,48.05,48.05
+② colm-cli new --site <FI-Kumpula_site_v1.nc> --out <算例> --met <产物>
+③ colm-cli run <算例> --kernel kernels/urban
+```
+
+**`--met` 是这条链的关键**（`20e3bd1`）。不给它，`sibling()` 会推出
+**原始**强迫场并静默用它 —— 那样这条测试验的就不是转换产物，
+而是原始文件，**而且不会失败**。
+
+`oracle` 不依赖 `colm-cli`，用 `std::process::Command` 起它。
+二进制在 `target/debug/colm-cli`，不在就跳过（构建产物不一定有）。
+
+- [ ] **Step 1b: 判据 —— 三条，缺一条这测试就是空的**
+
+**不是「与黄金逐位相同」** —— 城市站没有对应的黄金文件，
+而且手填高度是人估的值，不是量出来的。
+
+| 判据 | 证明了什么 |
+|---|---|
+| 三段跑完，history 里有 `f_tref` 且在物理范围内 | 这条路能跑通 |
+| `forcing.nml` 里 `HEIGHT_T == 48.05`（**不是 `NaN`**） | 手填的高度真的传到了模型 |
+| 产物 `Precip` 总量 == 源 `Rainf` + `Snowf` | 降水合并真的生效了 |
+
+**后两条才是这条测试的价值所在。** 只验「跑通了」的话，
+用原始强迫场也跑得通 —— 那正是 `--met` 缺席时会发生的事。
 
 **这一条用 Urban-PLUMBER**，与 A1 那条（用 PLUMBER2 的 CN-Cng）
 互补：
