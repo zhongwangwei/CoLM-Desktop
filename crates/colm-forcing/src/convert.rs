@@ -162,19 +162,32 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         out.put_values(&vals, netcdf::Extents::All)?;
     }
 
-    // **源变量原样保留。** 转换可以增加信息，不能减少信息 ——
-    // 观测给的相态是实测事实，而 CoLM 判出来的是参数化推断，
-    // 合成之后把原变量丢掉等于用后者永久换掉前者。
-    let mut kept: Vec<String> = Vec::new();
-    for sp in &plan.slots {
-        if sp.also_add.is_empty() {
-            continue;
-        }
-        kept.push(sp.source_name.clone());
-        kept.extend(sp.also_add.iter().cloned());
-    }
-    for name in kept {
-        if fout.variable(&name).is_some() {
+    // **槽位没消费的变量原样搬过去。** 转换可以增加信息，不能减少信息。
+    //
+    // 两件事都靠这一条：
+    //
+    // 1. **CoLM 读的不止那八个槽位。** `reference_height_v/t/q` 是标量，
+    //    `met::summarize` 要读它们填 forcing.nml 的 `DEF_forcing%HEIGHT_*`。
+    //    丢了就回落成 NaN 写进 namelist，而 CoLMDEBUG 内核的 RangeCheck
+    //    会直接 SIGILL —— 报出来的是「内核编进了 CoLMDEBUG」，看不出问题
+    //    在强迫场少了三个标量。
+    //
+    // 2. **合成过的槽位要保留相态。** `Rainf`/`Snowf` 合并进第 4 槽之后
+    //    原样留在产物里：观测给的相态是实测事实，而 CoLM 判出来的是
+    //    参数化推断，丢掉原变量等于用后者永久换掉前者。
+    //
+    // **单源槽位的源变量不搬** —— 它已经以规范名落地了（`TA_F` → `Tair`），
+    // 再留一份原名只会让人分不清哪个是准的。合成的那些不在此列：它们的
+    // 源变量带的是槽位表达不了的信息。
+    let consumed: Vec<&str> = plan
+        .slots
+        .iter()
+        .filter(|sp| sp.also_add.is_empty())
+        .map(|sp| sp.source_name.as_str())
+        .collect();
+    let names: Vec<String> = fin.variables().map(|v| v.name()).collect();
+    for name in names {
+        if name == "time" || fout.variable(&name).is_some() || consumed.contains(&name.as_str()) {
             continue;
         }
         let Some(v) = fin.variable(&name) else {

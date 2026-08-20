@@ -221,3 +221,73 @@ fn a_kept_source_variable_does_not_lose_its_fill_value() {
         assert!(v.attribute("long_name").is_some(), "{n} 丢了 long_name");
     }
 }
+
+#[test]
+fn variables_the_slots_do_not_consume_are_carried_over() {
+    // **CoLM 读的不止那八个槽位。** `reference_height_v/t/q` 是标量，
+    // 不属于任何槽位，但 `met::summarize` 要读它们来填 forcing.nml 的
+    // `DEF_forcing%HEIGHT_*`。转换时丢掉，它们就回落成 NaN 写进 namelist，
+    // 而 CoLMDEBUG 内核的 RangeCheck 会直接 SIGILL —— 报出来的是
+    // 「内核编进了 CoLMDEBUG」，看不出问题在强迫场少了三个标量。
+    //
+    // 规矩还是那条：**转换可以增加信息，不能减少信息。**
+    let dir = std::env::temp_dir().join("colm-convert-carry");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("carry_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        f.add_dimension("x", 1).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        // 用户的名字，会被槽位消费掉
+        let mut v = f.add_variable::<f64>("TA_F", &["time"]).unwrap();
+        v.put_attribute("units", "K").unwrap();
+        v.put_values(&[273.15, 274.15], netcdf::Extents::All)
+            .unwrap();
+        // 标量：不属于任何槽位，必须原样过去
+        let mut h = f.add_variable::<f64>("reference_height_t", &[]).unwrap();
+        h.put_attribute("units", "m").unwrap();
+        h.put_values(&[6.0], netcdf::Extents::All).unwrap();
+        // 一维辅助变量，同样不该丢
+        let mut lat = f.add_variable::<f64>("latitude", &["x"]).unwrap();
+        lat.put_values(&[44.5933], netcdf::Extents::All).unwrap();
+    }
+
+    let dst = dir.join("out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 1,
+            source_name: "TA_F".into(),
+            source_units: "K".into(),
+            also_add: Vec::new(),
+        }],
+    };
+    super::convert(&p, &dst, &plan).expect("convert");
+
+    let f = netcdf::open(&dst).unwrap();
+    let h: Vec<f64> = f
+        .variable("reference_height_t")
+        .expect("标量 reference_height_t 必须搬过去")
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(h, vec![6.0]);
+    let lat: Vec<f64> = f
+        .variable("latitude")
+        .expect("latitude 必须搬过去")
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(lat, vec![44.5933]);
+
+    // **被槽位消费掉的不重复搬。** `TA_F` 已经变成规范名 `Tair` 了，
+    // 再留一份原名只会让人分不清哪个是准的。
+    assert!(f.variable("Tair").is_some(), "槽位落地用规范名");
+    assert!(
+        f.variable("TA_F").is_none(),
+        "TA_F 已经被槽位消费，不该再留一份"
+    );
+}
