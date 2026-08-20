@@ -46,3 +46,56 @@ fn an_identity_conversion_reproduces_every_value_bit_for_bit() {
         .unwrap();
     assert_eq!(got, vals, "恒等转换必须逐位复现，差一个 ULP 都算失败");
 }
+
+#[test]
+fn a_renamed_and_rescaled_variable_lands_in_the_slot_with_the_canonical_name() {
+    let dir = std::env::temp_dir().join("colm-convert-rename");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 用户的文件：变量叫 TA_F，单位是摄氏度
+    let p = dir.join("user_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        let mut v = f.add_variable::<f64>("TA_F", &["time"]).unwrap();
+        v.put_attribute("units", "degC").unwrap();
+        v.put_values(&[0.0, 25.0], netcdf::Extents::All).unwrap();
+    }
+
+    let dst = dir.join("out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 1,
+            source_name: "TA_F".into(),
+            source_units: "degC".into(),
+        }],
+    };
+    super::convert(&p, &dst, &plan).expect("convert");
+
+    let f = netcdf::open(&dst).unwrap();
+    // 落地时用的是**规范名**（槽位的第一个候选名），不是用户的名字
+    let got: Vec<f64> = f
+        .variable("Tair")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(got, vec![273.15, 298.15]);
+
+    // **换算过的要标出来** —— 否则读文件的人以为那就是源数据里的值
+    let note = f
+        .variable("Tair")
+        .unwrap()
+        .attribute("source")
+        .and_then(|a| a.value().ok());
+    let note = match note {
+        Some(netcdf::AttributeValue::Str(s)) => s,
+        other => panic!("Tair 应当带一条 source 属性，得到 {other:?}"),
+    };
+    assert!(note.contains("TA_F"), "要说出原变量名：{note}");
+    assert!(note.contains("degC"), "要说出原单位：{note}");
+}
