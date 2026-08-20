@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_ForcingInput
 
    ! ------------------------------------------------------------------
@@ -332,4 +331,3 @@ CONTAINS
    END SUBROUTINE tracer_forcing_input_final
 
 END MODULE MOD_Tracer_ForcingInput
-#endif

@@ -339,7 +339,7 @@ CONTAINS
                ! soil
                CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil')
 
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
                write(cyear,'(i4.4)') DEF_LC_YEAR
 
                file_in  = trim(dir_landdata_in)  // '/soil/' // trim(cyear) // '/lake_soilc_patches.nc'

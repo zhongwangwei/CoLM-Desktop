@@ -18,10 +18,8 @@ MODULE MOD_Hist
    USE MOD_Vars_1DAccFluxes
    USE MOD_Vars_Global, only: spval
    USE MOD_NetCDFSerial
-#ifdef TRACER
    USE MOD_Tracer_Vars, only: flush_Tracer_Acc
    USE MOD_Tracer_Hist, only: tracer_hist_out
-#endif
 
    USE MOD_HistGridded
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -48,15 +46,14 @@ MODULE MOD_Hist
    character(len=10) :: HistForm ! 'Gridded', 'Vector', 'Single'
 
    character(len=256) :: file_last = 'null'
-#ifdef TRACER
    character(len=256) :: file_last_tracer = 'null'
-#endif
 
 !--------------------------------------------------------------------------
 CONTAINS
 
    SUBROUTINE hist_init (dir_hist, lulcc_call)
 
+   USE MOD_Namelist, only: DEF_USE_TRACER
    IMPLICIT NONE
 
    character(len=*) , intent(in) :: dir_hist
@@ -71,9 +68,7 @@ CONTAINS
       flush_reactive = .false.
       IF (present(lulcc_call)) flush_reactive = lulcc_call
       CALL FLUSH_acc_fluxes (flush_reactive=flush_reactive)
-#ifdef TRACER
-      CALL flush_Tracer_Acc ()
-#endif
+      IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
 
       HistForm = 'Gridded'
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -181,10 +176,8 @@ CONTAINS
    logical :: lwrite
    character(len=256) :: file_hist
    integer :: itime_in_file
-#ifdef TRACER
    character(len=256) :: file_hist_tracer
    integer :: itime_in_file_tracer
-#endif
 #if (defined CaMa_Flood)
    character(len=256) :: file_hist_cama
    integer :: itime_in_file_cama
@@ -234,9 +227,7 @@ CONTAINS
 
       IF (itstamp <= ptstamp) THEN
          CALL FLUSH_acc_fluxes ()
-#ifdef TRACER
-         CALL flush_Tracer_Acc ()
-#endif
+         IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
          RETURN
       ELSE
          CALL accumulate_fluxes ()
@@ -304,10 +295,10 @@ CONTAINS
          file_hist = trim(dir_hist) // '/' // trim(casename) //'_hist_'//trim(cdate)//'.nc'
 
          CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
-#ifdef TRACER
-         file_hist_tracer = trim(dir_hist) // '/' // trim(casename) //'_hist_tracer_'//trim(cdate)//'.nc'
-         CALL hist_write_time (file_hist_tracer, file_last_tracer, 'time', idate, itime_in_file_tracer)
-#endif
+         IF (DEF_USE_TRACER) THEN
+            file_hist_tracer = trim(dir_hist) // '/' // trim(casename) //'_hist_tracer_'//trim(cdate)//'.nc'
+            CALL hist_write_time (file_hist_tracer, file_last_tracer, 'time', idate, itime_in_file_tracer)
+         ENDIF
 
          IF (p_is_worker) THEN
             IF (numpatch > 0) THEN
@@ -4805,10 +4796,10 @@ ENDIF
          IF (allocated(nac_one   )) deallocate (nac_one   )
 #endif
 
-#ifdef TRACER
-         CALL tracer_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
-            sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_pch)
-#endif
+         IF (DEF_USE_TRACER) THEN
+            CALL tracer_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
+               sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_pch)
+         ENDIF
 
          IF (allocated(filter    )) deallocate (filter    )
          IF (allocated(filter_dt )) deallocate (filter_dt )
@@ -4817,9 +4808,7 @@ ENDIF
 #endif
 
          CALL FLUSH_acc_fluxes ()
-#ifdef TRACER
-         CALL flush_Tracer_Acc ()
-#endif
+         IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
 
 #ifdef SinglePoint
          IF (USE_SITE_HistWriteBack .and. memory_to_disk) THEN
@@ -4828,9 +4817,7 @@ ENDIF
 #endif
 
          file_last = file_hist
-#ifdef TRACER
-         file_last_tracer = file_hist_tracer
-#endif
+         IF (DEF_USE_TRACER) file_last_tracer = file_hist_tracer
 
       ENDIF
 

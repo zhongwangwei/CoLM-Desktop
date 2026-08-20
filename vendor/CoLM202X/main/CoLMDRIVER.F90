@@ -23,15 +23,13 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Vars_1DFluxes
    USE MOD_LandPatch, only: numpatch,landpatch
    USE MOD_LandUrban, only: patch2urban
-   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN
+   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_TRACER
    USE MOD_Forcing, only: forcmask_pch
 
-#ifdef TRACER
    USE MOD_Tracer_LandPhase, only: tracer_resolve_step, tracer_lake_step, &
       tracer_wetland_decomp, tracer_soil_step, tracer_report
    USE MOD_Tracer_Defs, only: ntracers
    USE MOD_SPMD_Task, only: CoLM_stop
-#endif
 #ifdef HYPERSPECTRAL
   USE MOD_HighRes_Parameters
 #endif
@@ -56,15 +54,11 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    real(r8) :: deltim_phy
    integer  :: steps_in_one_deltim
    integer  :: i, m, u, k
-#ifdef TRACER
    integer  :: istep_local      ! resolved from optional istep_in
-#endif
 
 ! ======================================================================
 
-#ifdef TRACER
-      CALL tracer_resolve_step (istep_in, istep_local)
-#endif
+      IF (DEF_USE_TRACER) CALL tracer_resolve_step (istep_in, istep_local)
 
       DO i = 1, numpatch
 
@@ -82,8 +76,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 
          m = patchclass(i)
 
-#if (defined URBAN_MODEL) && (defined TRACER)
-         IF (DEF_URBAN_RUN .and. m.eq.URBAN .and. ntracers > 0) THEN
+#ifdef URBAN_MODEL
+         IF (DEF_USE_TRACER .and. DEF_URBAN_RUN .and. m.eq.URBAN .and. ntracers > 0) THEN
             CALL CoLM_stop ('TRACER does not yet support full urban patches: ' // &
                'CoLMMAIN_Urban has no tracer sub-surface state or runoff tracer update.')
          ENDIF
@@ -222,9 +216,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
                ustar(i),        qstar(i),        tstar(i),                         &
                fm(i),           fh(i),           fq(i)                             )
 
-#ifdef TRACER
-               CALL tracer_lake_step (istep_local, i, idate, deltim_phy, k, steps_in_one_deltim)
-#endif
+               IF (DEF_USE_TRACER) &
+                  CALL tracer_lake_step (istep_local, i, idate, deltim_phy, k, steps_in_one_deltim)
 
             ENDDO
          ENDIF
@@ -239,13 +232,9 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             CALL bgc_driver (i,idate(1:3),deltim, patchlatr(i)*180/PI,patchlonr(i)*180/PI)
          ENDIF
 
-#ifdef TRACER
-         CALL tracer_wetland_decomp (i, deltim)
-#endif
+         IF (DEF_USE_TRACER) CALL tracer_wetland_decomp (i, deltim)
 
-#ifdef TRACER
-         CALL tracer_soil_step (istep_local, i, idate, deltim)
-#endif
+         IF (DEF_USE_TRACER) CALL tracer_soil_step (istep_local, i, idate, deltim)
 #endif
 
 
@@ -390,9 +379,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
       ENDDO
 
       ! Surface tracer diagnostics are routed through the TRACER entry point.
-#ifdef TRACER
-      CALL tracer_report ()
-#endif
+      IF (DEF_USE_TRACER) CALL tracer_report ()
 
 END SUBROUTINE CoLMDRIVER
 ! ---------- EOP ------------

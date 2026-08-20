@@ -812,9 +812,22 @@ CONTAINS
          !----------------------------------------------------
          skip_balance_check              = .false.
 
-#if defined(TRACER) && defined(BGC)
-         IF (patchtype == 2) THEN
-            CALL CNDriverSummarizeNonvegetatedSoilStates(ipatch, nl_soil, dz_soi, ndecomp_pools)
+#ifdef BGC
+         ! CNDriverSummarizeNonvegetatedSoilStates (main/BGC/MOD_BGC_CNSummary.F90)
+         ! is a plain BGC routine, always compiled in with BGC -- but this
+         ! particular cold-start call for wetland (patchtype==2) patches only
+         ! exists to prime the soil-carbon summary state the methane
+         ! (TRACER+BGC) physics reads on its first step, so it must stay
+         ! gated on whether the tracer subsystem is actually enabled at
+         ! runtime, exactly as it used to be gated on "#if defined(TRACER)
+         ! && defined(BGC)" at compile time. Unlike the TRACER modules' own
+         ! internal DEF_USE_TRACER gating (via tracer_defs_init forcing
+         ! ntracers to 0), this call site is not reached through that
+         ! registry at all, so it needs its own explicit runtime check.
+         IF (DEF_USE_TRACER) THEN
+            IF (patchtype == 2) THEN
+               CALL CNDriverSummarizeNonvegetatedSoilStates(ipatch, nl_soil, dz_soi, ndecomp_pools)
+            ENDIF
          ENDIF
 #endif
 

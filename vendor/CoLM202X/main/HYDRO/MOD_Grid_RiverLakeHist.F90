@@ -12,12 +12,8 @@ MODULE MOD_Grid_RiverLakeHist
 
    USE MOD_Precision
    USE MOD_Grid_RiverLakeHistState
-#ifdef TRACER
    USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_route_write_history, tracer_lifecycle_route_flush_history
-#endif
-#ifdef TRACER
    USE MOD_Tracer_RiverLake, only: write_tracer_history, tracer_flush_acc
-#endif
 
    ! -- PUBLIC SUBROUTINEs --
    PUBLIC :: hist_grid_riverlake_init
@@ -600,14 +596,10 @@ CONTAINS
       IF (allocated (a_floodfrc_inpm)) deallocate (a_floodfrc_inpm)
       IF (allocated (acc_vec_grid   )) deallocate (acc_vec_grid   )
 
-#ifdef TRACER
-      CALL tracer_lifecycle_route_write_history (file_hist_ucat, itime_in_file_ucat)
-#endif
+      IF (DEF_USE_TRACER) CALL tracer_lifecycle_route_write_history (file_hist_ucat, itime_in_file_ucat)
 
       ! ----- tracer variables -----
-#ifdef TRACER
-         CALL write_tracer_history (file_hist_ucat, itime_in_file_ucat, acctime_ucat)
-#endif
+      IF (DEF_USE_TRACER) CALL write_tracer_history (file_hist_ucat, itime_in_file_ucat, acctime_ucat)
 
       ! ----- reservoir variables -----
       IF (DEF_Reservoir_Method > 0) THEN
@@ -708,13 +700,10 @@ CONTAINS
             a_qresv_out  (:) = 0.
          ENDIF
 
-#ifdef TRACER
+         IF (DEF_USE_TRACER) THEN
             CALL tracer_flush_acc()
-#endif
-
-#ifdef TRACER
             CALL tracer_lifecycle_route_flush_history()
-#endif
+         ENDIF
 
       ENDIF
 

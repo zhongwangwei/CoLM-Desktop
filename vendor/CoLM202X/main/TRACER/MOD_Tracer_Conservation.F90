@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Conservation
 
    USE MOD_Precision
@@ -945,4 +944,3 @@ CONTAINS
    END SUBROUTINE tracer_balance_report
 
 END MODULE MOD_Tracer_Conservation
-#endif

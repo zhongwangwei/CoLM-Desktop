@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_SpecialPatches
 
    USE MOD_Precision
@@ -556,4 +555,3 @@ CONTAINS
    END FUNCTION tracer_ratio_cap
 
 END MODULE MOD_Tracer_SpecialPatches
-#endif

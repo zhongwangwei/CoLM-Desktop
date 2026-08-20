@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_SoilWater
 
    USE, INTRINSIC :: IEEE_ARITHMETIC, only: ieee_is_finite
@@ -2472,4 +2471,3 @@ CONTAINS
 
 
 END MODULE MOD_Tracer_SoilWater
-#endif

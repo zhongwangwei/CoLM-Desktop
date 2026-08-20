@@ -186,7 +186,7 @@ MODULE MOD_Vars_TimeInvariants
 
    real(r8), allocatable :: lakedepth      (:)  !lake depth
    real(r8), allocatable :: dz_lake      (:,:)  !new lake scheme
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
    real(r8), allocatable :: lake_soilc_srf(:,:) !lake sediment organic carbon [gC/m3]
 #endif
 
@@ -328,7 +328,7 @@ CONTAINS
 
             allocate (lakedepth            (numpatch))
             allocate (dz_lake      (nl_lake,numpatch))
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
             allocate (lake_soilc_srf(nl_soil,numpatch))
             lake_soilc_srf(:,:) = 0._r8
 #endif
@@ -473,7 +473,7 @@ CONTAINS
 
       CALL ncio_read_vector (file_restart, 'lakedepth',    landpatch, lakedepth)           !
       CALL ncio_read_vector (file_restart, 'dz_lake' ,     nl_lake, landpatch, dz_lake)    !
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
       CALL ncio_read_vector (file_restart, 'lake_soilc_srf', nl_soil, landpatch, lake_soilc_srf, defval = 0._r8)
 #endif
 
@@ -692,7 +692,7 @@ CONTAINS
 
       CALL ncio_write_vector (file_restart, 'lakedepth' , 'patch', landpatch, lakedepth , compress)                  !
       CALL ncio_write_vector (file_restart, 'dz_lake'   ,  'lake', nl_lake, 'patch', landpatch, dz_lake, compress)   !
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
       CALL ncio_write_vector (file_restart, 'lake_soilc_srf', 'soil', nl_soil, 'patch', landpatch, lake_soilc_srf, compress)
 #endif
 
@@ -864,7 +864,7 @@ CONTAINS
 
             deallocate (lakedepth      )
             deallocate (dz_lake        )
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
             deallocate (lake_soilc_srf )
 #endif
 

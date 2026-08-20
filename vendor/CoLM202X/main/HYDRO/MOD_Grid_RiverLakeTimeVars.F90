@@ -11,9 +11,7 @@ MODULE MOD_Grid_RiverLakeTimeVars
 !-------------------------------------------------------------------------------------
 
    USE MOD_Precision
-#ifdef TRACER
    USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_route_write_restart
-#endif
    USE MOD_Grid_RiverLakeBifurcation, only: write_bifurcation_restart
    IMPLICIT NONE
 
@@ -666,7 +664,8 @@ CONTAINS
    SUBROUTINE WRITE_GridRiverLakeTimeVars (file_restart)
 
    USE MOD_SPMD_Task
-   USE MOD_Namelist,              only: DEF_Reservoir_Method, DEF_USE_LEVEE, DEF_USE_BIFURCATION
+   USE MOD_Namelist,              only: DEF_Reservoir_Method, DEF_USE_LEVEE, DEF_USE_BIFURCATION, &
+      DEF_USE_TRACER
    USE MOD_NetCDFSerial
    USE MOD_Vector_ReadWrite
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
@@ -739,9 +738,7 @@ CONTAINS
          CALL write_bifurcation_restart(file_restart)
       ENDIF
 
-#ifdef TRACER
-      CALL tracer_lifecycle_route_write_restart(file_restart)
-#endif
+      IF (DEF_USE_TRACER) CALL tracer_lifecycle_route_write_restart(file_restart)
 
    END SUBROUTINE WRITE_GridRiverLakeTimeVars
 

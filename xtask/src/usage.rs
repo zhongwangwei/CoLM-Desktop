@@ -14,11 +14,16 @@ use anyhow::Result;
 
 /// 可选子系统：目录或文件名归属 -> 需要的宏。
 ///
-/// 这是对「调用点被守」的一个近似 —— `main/TRACER/` 下的东西只有 TRACER
-/// 开着才编得进去。近似不完美（见 `curated`），但它一次覆盖 56 个字段，
-/// 而且随上游加文件自动跟上。
+/// 这是对「调用点被守」的一个近似——不完美（见 `curated`），但一次覆盖
+/// 一批字段，且随上游加文件自动跟上。
+///
+/// **没有 `main/TRACER/` 条目。** TRACER 曾经在这里（宏开着才编得进去），
+/// 但示踪物子系统改成运行时开关后，`main/TRACER/` 下的模块永远编译进去，
+/// 不再有对应的编译期宏——这个目录本身不再暗示任何 `requires`。
+/// `DEF_TRACER_*` 字段现在在每个内核下都可设，用户自己用运行时开关
+/// `DEF_USE_TRACER`（MOD_Namelist.F90）决定要不要用，那不是这张表管的事：
+/// 这张表只记录「编译期这个字段有没有意义」，不记录「运行时它生效吗」。
 const SUBSYSTEMS: &[(&str, &str)] = &[
-    ("main/TRACER/", "TRACER"),
     ("main/BGC/", "BGC"),
     ("main/DA/", "DataAssimilation"),
     ("CaMa/", "CaMa_Flood"),

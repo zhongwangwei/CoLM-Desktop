@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 SUBROUTINE register_all_tracer_providers ()
 !=======================================================================
 ! Single manifest for compiled species that attach lifecycle hooks.
@@ -18,4 +17,3 @@ SUBROUTINE register_all_tracer_providers ()
 #undef TRACER_LIFECYCLE_PROVIDER
 
 END SUBROUTINE register_all_tracer_providers
-#endif

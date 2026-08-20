@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Lifecycle
 !=======================================================================
 ! One lifecycle row per configured tracer. Provider names are resolved
@@ -878,4 +877,3 @@ CONTAINS
    END SUBROUTINE lifecycle_error
 
 END MODULE MOD_Tracer_Lifecycle
-#endif

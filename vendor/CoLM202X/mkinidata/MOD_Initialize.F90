@@ -108,7 +108,11 @@ CONTAINS
 
    ! ------------------------ local variables -----------------------------
    real(r8) :: rlon, rlat
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
+   ! wetland_tot_c/wetland_existing_c are computed and consumed only inside
+   ! the "#ifdef BGC" block further below, itself gated at runtime on
+   ! DEF_USE_TRACER (methane is one of TRACER's four families but needs BGC
+   ! at compile time; TRACER itself is a runtime switch now, MOD_Namelist.F90).
    real(r8) :: wetland_tot_c
    real(r8) :: wetland_existing_c
    real(r8), parameter :: wetland_cn_ratio = 15._r8
@@ -370,7 +374,16 @@ ENDIF
 
       CALL soil_parameters_readin (dir_landdata, lc_year)
 
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
+      ! lake_soilc_srf is populated whenever BGC is compiled in (see its
+      ! "#ifdef BGC" declaration/allocation, MOD_Vars_TimeInvariants.F90),
+      ! regardless of DEF_USE_TRACER: the SinglePoint branch derives it
+      ! straight from OM_density with no tracer-file dependency, and the
+      ! non-SinglePoint branch's ncio_read_vector has a defval=0 fallback
+      ! for the (BGC on, DEF_USE_TRACER off) case where mksrfdata never
+      ! produced lake_soilc_patches.nc. Only the lake-sediment CH4 pathway
+      ! that actually reads this array back out is gated on DEF_USE_TRACER
+      ! (methane provider registration, see MOD_Tracer_Defs.F90).
 #ifndef SinglePoint
       write(cyear,'(i4.4)') lc_year
       lndname = trim(dir_landdata)//'/soil/'//trim(cyear)//'/lake_soilc_patches.nc'
@@ -1032,11 +1045,11 @@ ENDIF
 
             IF (p_is_worker) THEN
                DO i = 1, numpatch
-#ifdef TRACER
-                  IF (patchtype(i) == 0 .or. patchtype(i) == 2)THEN
-#else
-                  IF (patchtype(i) == 0)THEN
-#endif
+                  ! Used to be "#ifdef TRACER: patchtype==0 .or. patchtype==2
+                  ! #else: patchtype==0"; DEF_USE_TRACER is loop-invariant so
+                  ! this single boolean expression is exactly equivalent to
+                  ! that compile-time branch, now chosen at runtime.
+                  IF (patchtype(i) == 0 .or. (DEF_USE_TRACER .and. patchtype(i) == 2)) THEN
                      ps = patch_pft_s(i)
                      pe = patch_pft_e(i)
                      DO nsl = 1, nl_soil
@@ -1060,7 +1073,7 @@ ENDIF
                      ENDDO
                   ENDIF
 
-#ifdef TRACER
+                  IF (DEF_USE_TRACER) THEN
                   IF (patchtype(i) == 2) THEN
                      DO nsl = 1, nl_soil
                         wetland_existing_c = 0._r8
@@ -1099,7 +1112,7 @@ ENDIF
                         ENDIF
                      ENDDO
                   ENDIF
-#endif
+                  ENDIF
                   IF (patchtype(i) == 0)THEN
                      DO m = ps, pe
                         ivt = pftclass(m)

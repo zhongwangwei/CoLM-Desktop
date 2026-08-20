@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Rest
 
    USE MOD_Precision
@@ -1257,4 +1256,3 @@ CONTAINS
    END SUBROUTINE write_tracer_restart_all
 
 END MODULE MOD_Tracer_Rest
-#endif

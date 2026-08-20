@@ -1,6 +1,13 @@
 #include <define.h>
 
-#if (defined TRACER) && (defined BGC)
+! Methane is one of TRACER's four families (isotope/solute/particle/gas).
+! TRACER itself is a runtime switch now (DEF_USE_TRACER, MOD_Namelist.F90);
+! this module still needs BGC at compile time (it hard-USEs BGC carbon/
+! nitrogen pools), so it stays behind an #ifdef and is only gated on
+! DEF_USE_TRACER at the provider-registration call site
+! (register_all_tracer_providers, via tracer_lifecycle_init <-
+! land_tracer_init, called from CoLM.F90).
+#ifdef BGC
 
 MODULE MOD_Tracer_Reactive_Methane_PHMapping
 

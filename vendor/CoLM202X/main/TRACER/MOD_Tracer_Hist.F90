@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Hist
 
    USE MOD_Precision
@@ -663,15 +662,12 @@ CONTAINS
 
 
 
-#ifdef TRACER
    SUBROUTINE write_history_tracer_ratio_2d ( is_hist, &
          tracer_mass_acc, water_acc, file_hist, varname, itime_in_file, &
          filter, longname, units)
 
    USE MOD_Block
    USE MOD_SPMD_Task, only: p_is_worker, p_is_io
-#ifdef TRACER
-#endif
    USE MOD_Namelist, only: DEF_HIST_CompressLevel
 
    IMPLICIT NONE
@@ -781,8 +777,6 @@ CONTAINS
    USE MOD_Block
    USE MOD_SPMD_Task, only: p_is_worker, p_is_io
    USE MOD_Vars_1DAccFluxes, only: nac
-#ifdef TRACER
-#endif
    USE MOD_Namelist, only: DEF_HIST_CompressLevel
 
    IMPLICIT NONE
@@ -908,8 +902,6 @@ CONTAINS
 
    USE MOD_Block
    USE MOD_SPMD_Task, only: p_is_worker, p_is_io
-#ifdef TRACER
-#endif
    USE MOD_Namelist, only: DEF_HIST_CompressLevel
 
    IMPLICIT NONE
@@ -1429,7 +1421,6 @@ CONTAINS
 #endif
    END SUBROUTINE write_history_tracer_ratio_vector_3d
 #endif
-#endif
 
    SUBROUTINE write_history_variable_2d ( is_hist, &
          acc_vec, file_hist, varname, itime_in_file, sumarea, filter, &
@@ -1629,4 +1620,3 @@ CONTAINS
    END SUBROUTINE write_history_variable_3d
 
 END MODULE MOD_Tracer_Hist
-#endif

@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Forcing
 
    USE MOD_Precision
@@ -1299,4 +1298,3 @@ CONTAINS
    END FUNCTION tracer_forcing_csv_int
 
 END MODULE MOD_Tracer_Forcing
-#endif

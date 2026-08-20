@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_SoilInit
 
    USE MOD_Precision
@@ -204,4 +203,3 @@ CONTAINS
    END FUNCTION tracer_soil_init_valid_delta
 
 END MODULE MOD_Tracer_SoilInit
-#endif

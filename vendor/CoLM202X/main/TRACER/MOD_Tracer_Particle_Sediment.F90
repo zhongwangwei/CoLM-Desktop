@@ -5,7 +5,13 @@
 ! is compiled in. Guarding on TRACER alone left a dangling USE when
 ! GridRiverLakeFlow was off (e.g. SinglePoint); the register manifest is guarded
 ! to match (see include/tracer_lifecycle_providers.inc).
-#if (defined TRACER) && (defined GridRiverLakeFlow)
+!
+! TRACER itself is a runtime switch now (DEF_USE_TRACER, MOD_Namelist.F90), so
+! it is dropped from this compile-time guard -- this module always compiles in
+! when GridRiverLakeFlow is compiled in, and is only gated on DEF_USE_TRACER at
+! the provider-registration call site (register_all_tracer_providers, via
+! tracer_lifecycle_init <- land_tracer_init, called from CoLM.F90).
+#ifdef GridRiverLakeFlow
 MODULE MOD_Tracer_Particle_Sediment
 !-------------------------------------------------------------------------------------
 ! DESCRIPTION:

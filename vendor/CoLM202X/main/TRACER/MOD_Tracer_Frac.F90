@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Frac
 
    USE MOD_Precision
@@ -998,4 +997,3 @@ CONTAINS
 
 
 END MODULE MOD_Tracer_Frac
-#endif

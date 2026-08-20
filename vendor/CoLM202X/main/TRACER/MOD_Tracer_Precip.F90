@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Precip
 
    USE MOD_Precision
@@ -397,4 +396,3 @@ CONTAINS
    END SUBROUTINE tracer_precip
 
 END MODULE MOD_Tracer_Precip
-#endif

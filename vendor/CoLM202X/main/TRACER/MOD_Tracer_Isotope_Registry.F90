@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Isotope_Registry
 
    USE MOD_Precision
@@ -269,4 +268,3 @@ CONTAINS
 
 
 END MODULE MOD_Tracer_Isotope_Registry
-#endif

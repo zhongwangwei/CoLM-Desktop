@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Snow
 
    USE MOD_Precision
@@ -196,4 +195,3 @@ CONTAINS
    ! MOD_SnowLayersCombineDivide's combine/divide routines.
 
 END MODULE MOD_Tracer_Snow
-#endif

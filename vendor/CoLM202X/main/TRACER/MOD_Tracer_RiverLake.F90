@@ -1,7 +1,6 @@
 #include <define.h>
 
 #ifdef GridRiverLakeFlow
-#ifdef TRACER
 MODULE MOD_Tracer_RiverLake
 !-------------------------------------------------------------------------------------
 ! DESCRIPTION:
@@ -2649,5 +2648,4 @@ CONTAINS
    END SUBROUTINE river_lake_tracer_final
 
 END MODULE MOD_Tracer_RiverLake
-#endif
 #endif

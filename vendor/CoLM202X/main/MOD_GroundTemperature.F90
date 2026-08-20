@@ -31,9 +31,7 @@ CONTAINS
                          frl,dlrad,sabg,sabg_soil,sabg_snow,sabg_snow_lyr,&
                          fseng,fseng_soil,fseng_snow,fevpg,fevpg_soil,fevpg_snow,cgrnd,htvp,emg,&
                          imelt,snofrz,sm,xmf,fact,pg_rain,pg_snow,t_precip &
-#ifdef TRACER
                         ,qphs_thaw_lay,qphs_frzc_lay &
-#endif
                          )
 
 !=======================================================================
@@ -158,10 +156,8 @@ CONTAINS
    ! Per-layer phase-change mass exports forwarded from meltf / meltf_snicar
    ! into the tracer subsystem. Zero on layers where imelt(j) == 0 or no
    ! mass actually transferred. See MOD_PhaseChange::meltf for semantics.
-#ifdef TRACER
    real(r8), intent(out), optional :: qphs_thaw_lay(lb:nl_soil)
    real(r8), intent(out), optional :: qphs_frzc_lay(lb:nl_soil)
-#endif
 
 !-------------------------- Local Variables ----------------------------
    real(r8) cv (lb:nl_soil)          !heat capacity [J/(m2 K)]
@@ -417,10 +413,8 @@ CONTAINS
                   theta_r,alpha_vgm,n_vgm,L_vgm,&
                   sc_vgm,fc_vgm,&
                   dz_soisno(1:nl_soil) &
-#ifdef TRACER
                  ,qphs_thaw_lay = qphs_thaw_lay, &
                   qphs_frzc_lay = qphs_frzc_lay &
-#endif
                   )
 
          ! layer freezing mass flux (positive):
@@ -439,10 +433,8 @@ CONTAINS
                   theta_r,alpha_vgm,n_vgm,L_vgm,&
                   sc_vgm,fc_vgm,&
                   dz_soisno(1:nl_soil) &
-#ifdef TRACER
                  ,qphs_thaw_lay = qphs_thaw_lay, &
                   qphs_frzc_lay = qphs_frzc_lay &
-#endif
                   )
       ENDIF
 

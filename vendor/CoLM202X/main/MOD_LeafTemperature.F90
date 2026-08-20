@@ -57,9 +57,7 @@ CONTAINS
               hpbl       ,&
               qintr_rain ,qintr_snow ,t_precip   ,hprl       ,dheatl     ,smp        ,&
               hk         ,hksati     ,rootflux                                        &
-#ifdef TRACER
              ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_trc_out               &
-#endif
               )
 
 !=======================================================================
@@ -270,11 +268,9 @@ CONTAINS
         gssha,      &! stomata conductance of shaded leaf
         rootflux(1:nl_soil)  ! root water uptake from different layers
 
-#ifdef TRACER
    real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow->rain mass [mm]
    real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy rain->snow mass [mm]
    real(r8), intent(out), optional :: raw_trc_out            ! reference-to-canopy moisture resistance [s/m]
-#endif
 
    real(r8), intent(inout) :: &
         assimsun,   &! sunlit leaf assimilation rate [umol co2 /m**2/ s] [+]
@@ -440,10 +436,8 @@ CONTAINS
       it     = 1    !counter for leaf temperature iteration
       del    = 0.0  !change in leaf temperature from previous iteration
       dele   = 0.0  !latent head flux from leaf for previous iteration
-#ifdef TRACER
       IF (present(canopy_smelt_mass_out)) canopy_smelt_mass_out = 0._r8
       IF (present(canopy_frzc_mass_out))  canopy_frzc_mass_out  = 0._r8
-#endif
 
       dtl(0) = 0.
       fevpl_bef = 0.
@@ -1230,9 +1224,7 @@ ENDIF
             qmelt = min(ldew_snow/deltim,(tl-tfrz)*cpice*ldew_snow/(deltim*hfus))
             ldew_snow = max(0.,ldew_snow - qmelt*deltim)
             ldew_rain = max(0.,ldew_rain + qmelt*deltim)
-#ifdef TRACER
             IF (present(canopy_smelt_mass_out)) canopy_smelt_mass_out = qmelt*deltim
-#endif
             !NOTE: There may be some problem, energy imbalance
             !      However, detailed treatment could be somewhat trivial
             tl = fwet_snow*tfrz + (1.-fwet_snow)*tl  !Niu et al., 2004
@@ -1242,9 +1234,7 @@ ENDIF
             qfrz  = min(ldew_rain/deltim,(tfrz-tl)*cpliq*ldew_rain/(deltim*hfus))
             ldew_rain = max(0.,ldew_rain - qfrz*deltim)
             ldew_snow = max(0.,ldew_snow + qfrz*deltim)
-#ifdef TRACER
             IF (present(canopy_frzc_mass_out)) canopy_frzc_mass_out = qfrz*deltim
-#endif
             !NOTE: There may be some problem, energy imbalance
             !      However, detailed treatment could be somewhat trivial
             tl = fwet_snow*tfrz + (1.-fwet_snow)*tl  !Niu et al., 2004
@@ -1256,9 +1246,7 @@ ENDIF
 !-----------------------------------------------------------------------
       tref = thm + vonkar/(fh-fht)*dth * (fh2m/vonkar - fh/vonkar)
       qref =  qm + vonkar/(fq-fqt)*dqh * (fq2m/vonkar - fq/vonkar)
-#ifdef TRACER
       IF (present(raw_trc_out)) raw_trc_out = max(raw, 0._r8)
-#endif
 
    END SUBROUTINE LeafTemperature
 !----------------------------------------------------------------------

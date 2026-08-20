@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Defs
 
    USE MOD_Precision
@@ -188,6 +187,7 @@ CONTAINS
 
    SUBROUTINE tracer_defs_init ()
       USE MOD_SPMD_Task, only: p_is_master, CoLM_stop
+      USE MOD_Namelist, only: DEF_USE_TRACER
       IMPLICIT NONE
       integer :: i
       character(len=32), allocatable :: tokens(:)
@@ -195,6 +195,21 @@ CONTAINS
       integer :: j, sfx_len, max_base, suffix_index
       character(len=32) :: sfx, base
       logical :: duplicate_name
+
+      ! Single point of control for the runtime switch: tracer_defs_init is
+      ! called from several independent places (MOD_Tracer_LandPhase's
+      ! land_tracer_init <- CoLM.F90, MOD_Tracer_RiverLake's routing init,
+      ! MOD_Tracer_Reactive_Methane_Preprocessing <- MKSRFDATA.F90). Forcing
+      ! ntracers to 0 here -- rather than requiring every call site to check
+      ! DEF_USE_TRACER before calling in -- makes every one of the existing
+      ! "IF (ntracers <= 0) / IF (.not. allocated(tracers)) RETURN" guards
+      ! already scattered through the tracer subsystem also double as the
+      ! DEF_USE_TRACER off-switch, with no risk of a missed call site leaving
+      ! the subsystem partially active.
+      IF (.not. DEF_USE_TRACER) THEN
+         ntracers = 0
+         RETURN
+      ENDIF
 
       ntracers = DEF_TRACER_NUM
       IF (ntracers < 0) THEN
@@ -1276,4 +1291,3 @@ CONTAINS
    END SUBROUTINE parse_csv_real
 
 END MODULE MOD_Tracer_Defs
-#endif

@@ -26,12 +26,9 @@ MODULE MOD_Grid_RiverLakeFlow
    USE MOD_Grid_RiverLakeBifurcation, only: bifurcation_init, bifurcation_calc, &
       read_bifurcation_restart, bifurcation_final, bifurcation_invalidate_static_dn, &
       bif_hflux_sum, bif_hflux_lev, bif_lev_hflux_sum, bif_path_active
-#ifdef TRACER
    USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_route_has_active, tracer_lifecycle_route_init, &
       tracer_lifecycle_route_calc, tracer_lifecycle_route_final, tracer_lifecycle_route_diag_accumulate, &
       tracer_lifecycle_route_forcing_put, tracer_lifecycle_route_read_restart
-#endif
-#ifdef TRACER
    USE MOD_Tracer_RiverLake, only: river_lake_tracer_init, tracer_init_from_water, &
       tracer_input_from_runoff, &
       tracer_substep, tracer_flush_acc, &
@@ -42,7 +39,6 @@ MODULE MOD_Grid_RiverLakeFlow
       USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_publish_levee_flood_patch, &
          tracer_lifecycle_publish_flood_patch, &
          tracer_lifecycle_has_levee_flood_publisher, tracer_lifecycle_has_flood_publisher
-#endif
    IMPLICIT NONE
 
    real(r8), parameter :: RIVERMIN  = RIVERLAKE_DRY_DEPTH
@@ -66,17 +62,13 @@ CONTAINS
    USE MOD_LandPatch,           only: numpatch
    USE MOD_Forcing,             only: forcmask_pch
    USE MOD_Vars_TimeInvariants, only: patchtype, patchmask
-#ifdef TRACER
    USE MOD_Tracer_Defs,          only: ntracers, tracer_uses_land_water_transport
-#endif
    IMPLICIT NONE
 
-#ifdef TRACER
       logical :: trc_restart_found
       logical, allocatable :: trc_missing(:)
       real(r8), allocatable :: wdsrf_safe(:), volresv_safe(:)
       integer,  allocatable :: ucat2resv_safe(:)
-#endif
       logical :: bif_restart_loaded
 
       acctime_rnof_max = DEF_GRIDBASED_ROUTING_MAX_DT
@@ -97,12 +89,10 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef TRACER
       CALL tracer_lifecycle_route_init()
       IF (len_trim(gridriver_restart_file) > 0) THEN
          CALL tracer_lifecycle_route_read_restart(gridriver_restart_file)
       ENDIF
-#endif
 
       ! Always call levee_init: when DEF_USE_LEVEE=.false. it allocates the
       ! levee arrays in inert state (has_levee=.false. everywhere), so guards
@@ -135,7 +125,6 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef TRACER
          trc_restart_found = .false.
          CALL river_lake_tracer_init()
          IF (ntracers > 0) THEN
@@ -171,7 +160,6 @@ CONTAINS
             ENDIF
             deallocate(trc_missing)
          ENDIF
-#endif
 
    END SUBROUTINE grid_riverlake_flow_init
 
@@ -186,15 +174,9 @@ CONTAINS
    USE MOD_Vars_Global,    only: spval
    USE MOD_WorkerPushData, only: worker_push_real8_field_type
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
-#ifdef TRACER
    USE MOD_Tracer_Defs,    only: ntracers, tracer_uses_land_water_transport
-#endif
-#ifdef TRACER
    USE MOD_Tracer_Vars,    only: trc_rnof_step
-#endif
-#ifdef TRACER
    USE MOD_Vars_1DForcing, only: forc_prc, forc_prl
-#endif
    IMPLICIT NONE
 
    integer,  intent(in) :: year
@@ -209,13 +191,11 @@ CONTAINS
    real(r8), allocatable :: trc_rnof_gd(:,:)
    real(r8), allocatable :: trc_rnof_uc(:,:)
 
-#ifdef TRACER
    real(r8), allocatable :: prcp_gd(:)
    real(r8), allocatable :: prcp_uc(:)
    real(r8), allocatable :: prcp_pch(:)
    real(r8), allocatable :: particle_floodarea(:)
    real(r8), allocatable :: particle_water_storage(:)
-#endif
 
    logical,  allocatable :: is_built_resv(:)
 
@@ -270,7 +250,6 @@ CONTAINS
    integer  :: itrc_dbg
 
       IF (DEF_USE_CoLMDEBUG) THEN
-#ifdef TRACER
       IF (ntracers > 0) THEN
          allocate (trc_mass_bef(ntracers), trc_mass_aft(ntracers), &
                    trc_mass_inp(ntracers), trc_mass_dis(ntracers), &
@@ -279,10 +258,6 @@ CONTAINS
          allocate (trc_mass_bef(0), trc_mass_aft(0), &
                    trc_mass_inp(0), trc_mass_dis(0), trc_mass_reactive(0))
       END IF
-#else
-      allocate (trc_mass_bef(0), trc_mass_aft(0), &
-                trc_mass_inp(0), trc_mass_dis(0), trc_mass_reactive(0))
-#endif
       trc_mass_bef = 0._r8
       trc_mass_aft = 0._r8
       trc_mass_inp = 0._r8
@@ -300,14 +275,12 @@ CONTAINS
       IF (p_is_worker) THEN
          allocate (rnof_gd (numinpm))
          allocate (rnof_uc (numucat))
-#ifdef TRACER
          IF (ntracers > 0) THEN
             allocate (trc_rnof_gd (ntracers, numinpm))
             allocate (trc_rnof_uc (ntracers, numucat))
             trc_rnof_gd = 0._r8
             trc_rnof_uc = 0._r8
          END IF
-#endif
 
          CALL worker_remap_data_pset2grid (remap_patch2inpm, rnof, rnof_gd, &
             fillvalue = 0., filter = filter_rnof)
@@ -321,7 +294,6 @@ CONTAINS
          CALL worker_push_data (push_inpm2ucat, rnof_gd, rnof_uc, &
             fillvalue = 0., mode = 'sum')
 
-#ifdef TRACER
          IF (ntracers > 0) THEN
             DO itrc = 1, ntracers
                IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
@@ -336,20 +308,17 @@ CONTAINS
                   fillvalue = 0._r8, mode = 'sum')
             ENDDO
          END IF
-#endif
 
          IF (numucat > 0) THEN
             acc_rnof_uc = acc_rnof_uc + rnof_uc*1.e-3*deltime
 
             ! Accumulate tracer input associated with this runoff increment
-#ifdef TRACER
                   IF (ntracers > 0) THEN
                      ! trc_rnof_uc is in R×mm (from land: rsur*ratio*dt, rsur in mm/s)
                      ! rnof_uc * 1.e-3 * deltime is in m (depth, not volume)
                      ! Need to convert trc_rnof_uc from mm to m to match water units
                      CALL tracer_input_from_runoff(rnof_uc*1.e-3*deltime, numucat, trc_rnof_uc*1.e-3)
                   ENDIF
-#endif
          ENDIF
 
          deallocate(rnof_gd)
@@ -357,7 +326,6 @@ CONTAINS
          IF (allocated(trc_rnof_gd)) deallocate(trc_rnof_gd)
          IF (allocated(trc_rnof_uc)) deallocate(trc_rnof_uc)
 
-#ifdef TRACER
          IF (tracer_lifecycle_route_has_active()) THEN
             ! Allocate zero-length arrays on empty workers to avoid passing unallocated
             ! arrays to assumed-shape dummy arguments in MPI communication routines.
@@ -405,7 +373,6 @@ CONTAINS
             deallocate(prcp_gd)
             deallocate(prcp_uc)
          ENDIF
-#endif
 
       ENDIF
 
@@ -508,7 +475,6 @@ CONTAINS
          ! Tracer conservation: snapshot old state and the queued input
          ! before merging that input into the pending pool below.
          IF (DEF_USE_CoLMDEBUG) THEN
-#ifdef TRACER
          IF (numucat > 0) THEN
             DO itrc = 1, ntracers
                IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
@@ -526,15 +492,8 @@ CONTAINS
             trc_mass_dis = 0._r8
             trc_mass_reactive = 0._r8
          ENDIF
-#else
-         trc_mass_bef = 0._r8
-         trc_mass_inp = 0._r8
-         trc_mass_dis = 0._r8
-         trc_mass_reactive = 0._r8
-#endif
          ENDIF
 
-#ifdef TRACER
          ! Water is added in full before adaptive routing. Merge its tracer
          ! counterpart exactly once at the same boundary. Positive pending
          ! mass is released by tracer_substep; signed debt remains queued.
@@ -545,7 +504,6 @@ CONTAINS
                acc_trc_inp(itrc, :) = 0._r8
             ENDDO
          ENDIF
-#endif
 
          totalrnof = sum(acc_rnof_uc)
          totalvol_bef = 0._r8
@@ -608,12 +566,10 @@ CONTAINS
                   CALL levee_repartition_storage(i, volwater, wdsrf_ucat(i), &
                      fldfrc_levee, vis_vol_bef_lv, levsto_bef_lv)
                   volwater_ucat(i) = volwater
-#ifdef TRACER
                   CALL levee_tracer_repartition(i, &
                      vis_vol_bef_lv, levsto_bef_lv, &
                      volwater_ucat(i), levsto(i), &
                      pending_trc_pool = trc_inp_buf(:, i))
-#endif
                ELSE
                   volwater_ucat(i) = volwater
                   wdsrf_ucat(i) = floodplain_curve(i)%depth (volwater)
@@ -1045,7 +1001,6 @@ CONTAINS
             ! Per-sub-step tracer transport: advance tracer in lockstep
             ! with water BEFORE the water state update so concentration
             ! is computed from the pre-update volume.
-#ifdef TRACER
             IF (allocated(volresv)) volresv_safe = volresv
             IF (DEF_USE_BIFURCATION) THEN
                CALL tracer_substep (acctime_rnof, dt_all, irivsys, hflux_fc, sum_hflux_riv, &
@@ -1055,7 +1010,6 @@ CONTAINS
                CALL tracer_substep (acctime_rnof, dt_all, irivsys, hflux_fc, sum_hflux_riv, &
                   wdsrf_ucat, ucatfilter, volresv_safe, ucat2resv_safe, is_built_resv)
             ENDIF
-#endif
 
             DO i = 1, numucat
 
@@ -1106,7 +1060,6 @@ CONTAINS
                      ! Update trc_flux_out so the unified discharge diagnostic
                      ! at line ~895 (ucat_next <= 0) picks up the correct value.
                      !
-#ifdef TRACER
                         IF (volwater > 1.e-6_r8) THEN
                               frac_remove = (volwater - topo_rivstomax(i)) / volwater
                               IF (allocated(volresv)) volresv_safe = volresv
@@ -1122,7 +1075,6 @@ CONTAINS
                            trc_conc_dep(itrc_dep, i) = trc_mass(itrc_dep, i) / vol_post
                         ENDDO
                      END IF
-#endif
                      volwater = topo_rivstomax(i)
                   ENDIF
                ENDIF
@@ -1137,11 +1089,9 @@ CONTAINS
                      fldfrc_levee, vis_vol_bef_lv2, levsto_bef_lv2)
                   volwater_ucat(i) = volwater
                   levee_floodarea(i) = fldfrc_levee * topo_area(i)
-#ifdef TRACER
                      CALL levee_tracer_repartition(i, &
                         vis_vol_bef_lv2, levsto_bef_lv2, &
                         volwater_ucat(i), levsto(i))
-#endif
                   ELSE
                      volwater_ucat(i) = volwater
                      wdsrf_ucat(i) = floodplain_curve(i)%depth (volwater)
@@ -1180,13 +1130,11 @@ CONTAINS
 
             ENDDO
 
-#ifdef TRACER
                   IF (p_is_worker .and. numucat > 0) THEN
                      IF (allocated(volresv)) volresv_safe = volresv
                      CALL tracer_diag_accumulate_substep (dt_all, irivsys, ucatfilter, wdsrf_ucat, &
                         volresv_safe, ucat2resv_safe)
                   END IF
-#endif
 
             DO i = 1, numucat
                IF (ucatfilter(i)) THEN
@@ -1195,7 +1143,6 @@ CONTAINS
                      totaldis = totaldis + hflux_fc(i)*dt_all(irivsys(i))
                      IF (DEF_USE_CoLMDEBUG) THEN
                      ! Accumulate tracer discharge at river mouth
-#ifdef TRACER
                      IF (ntracers > 0) THEN
                         DO itrc = 1, ntracers
                            IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
@@ -1203,7 +1150,6 @@ CONTAINS
                               + trc_flux_out(itrc,i)*dt_all(irivsys(i))
                         ENDDO
                      END IF
-#endif
                      ENDIF
                   ENDIF
 
@@ -1271,7 +1217,6 @@ CONTAINS
 
             dt_res = dt_res - dt_all
 
-#ifdef TRACER
             IF (tracer_lifecycle_route_has_active()) THEN
                IF (numucat > 0) THEN
                   allocate(particle_floodarea(numucat))
@@ -1307,7 +1252,6 @@ CONTAINS
                deallocate(particle_floodarea)
                deallocate(particle_water_storage)
             ENDIF
-#endif
 
             IF (DEF_USE_BIFURCATION) THEN
                ! sync_global_routing_dt derives this from the same global
@@ -1341,7 +1285,6 @@ CONTAINS
          ! Tracer conservation: compute total mass after routing.
          ! Include protected-side pool so the levee repartition
          ! stays internally closed in the before/after accounting.
-#ifdef TRACER
          IF (numucat > 0) THEN
             DO itrc = 1, ntracers
                IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
@@ -1352,9 +1295,6 @@ CONTAINS
          ELSE
             trc_mass_aft = 0._r8
          END IF
-#else
-         trc_mass_aft = 0._r8
-#endif
          ENDIF
       ENDIF
 
@@ -1392,7 +1332,6 @@ CONTAINS
       CALL mpi_allreduce (MPI_IN_PLACE, totalclip, 1, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
       CALL mpi_allreduce (MPI_IN_PLACE, bif_protected_clip_sum, 1, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
 #endif
-#ifdef TRACER
       IF (p_is_worker .and. numucat > 0) THEN
          DO itrc = 1, ntracers
             IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
@@ -1402,7 +1341,6 @@ CONTAINS
             ENDIF
          ENDDO
       END IF
-#endif
          IF (.not. p_is_worker) THEN
             bif_flux_sum_total = 0._r8
             bif_flux_sum_max   = 0._r8
@@ -1415,7 +1353,6 @@ CONTAINS
       ENDIF
          CALL mpi_allreduce (MPI_IN_PLACE, bif_flux_sum_total, 1, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
          CALL mpi_allreduce (MPI_IN_PLACE, bif_flux_sum_max,   1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
-#ifdef TRACER
       IF (ntracers > 0) THEN
          CALL mpi_allreduce (MPI_IN_PLACE, trc_mass_bef, ntracers, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
          CALL mpi_allreduce (MPI_IN_PLACE, trc_mass_aft, ntracers, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
@@ -1423,7 +1360,6 @@ CONTAINS
          CALL mpi_allreduce (MPI_IN_PLACE, trc_mass_dis, ntracers, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
          CALL mpi_allreduce (MPI_IN_PLACE, trc_mass_reactive, ntracers, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
       END IF
-#endif
       ENDIF
 
       IF (DEF_USE_CoLMDEBUG) THEN
@@ -1441,7 +1377,6 @@ CONTAINS
                write(*,'(A,ES10.2,A)') 'Bif global net flux (max/step)  : ', bif_flux_sum_max,   ' m^3/s (should be ~0)'
                write(*,'(A,ES10.2,A)') 'Bif protected-side limiter residual clip : ', bif_protected_clip_sum, ' m^3'
             ENDIF
-#ifdef TRACER
             DO itrc_dbg = 1, ntracers
                IF (.not. tracer_uses_land_water_transport(itrc_dbg)) CYCLE
                write(*,'(A,I0,A,ES12.4,A)') 'Tracer(', itrc_dbg, ') mass before  : ', &
@@ -1461,21 +1396,17 @@ CONTAINS
                   - trc_mass_inp(itrc_dbg) + trc_mass_dis(itrc_dbg) &
                   - trc_mass_reactive(itrc_dbg), ' R*m3 (should be ~0)'
             ENDDO
-#endif
       ENDIF  ! p_is_master
 
       ENDIF
 
-#ifdef TRACER
       IF (tracer_lifecycle_route_has_active() .and. p_is_worker) THEN
          ! All workers must participate (MPI point-to-point inside push_data).
          ! Particle tracers compute their own flood-exposure diagnostics from
          ! per-routing-period accumulators, not history-period averages.
          CALL tracer_lifecycle_route_calc(acctime_rnof)
       ENDIF
-#endif
 
-#ifdef TRACER
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
             acc_trc_inp = 0._r8
@@ -1483,7 +1414,6 @@ CONTAINS
             trc_dry_drain = 0._r8
          ENDIF
       END IF
-#endif
 
       acctime_rnof = 0.
 
@@ -1500,14 +1430,12 @@ CONTAINS
          !      Flow: ucat -> inpm grid (average) -> landpatch (remap).
          !      Inactive when GridRiverLakeFlow is undef (this whole file
          !      is gated by that macro).
-#ifdef TRACER
          IF (allocated(levee_floodarea)) THEN
             CALL publish_levee_fldfrc_to_patches (levee_floodarea)
          ENDIF
          IF (allocated(total_floodarea)) THEN
             CALL publish_fldfrc_to_patches (total_floodarea, total_flooddepth)
          ENDIF
-#endif
 
       IF (allocated(is_built_resv)) deallocate(is_built_resv)
       IF (allocated(wdsrf_next   )) deallocate(wdsrf_next   )
@@ -1540,7 +1468,6 @@ CONTAINS
 
    END SUBROUTINE grid_riverlake_flow
 
-#ifdef TRACER
       SUBROUTINE publish_levee_fldfrc_to_patches (levee_floodarea_in)
       !-------------------------------------------------------------------
       ! Push the per-ucat levee floodplain fraction through the inpm grid
@@ -1666,7 +1593,6 @@ CONTAINS
             fldfrc_patch, fldwat_patch, flddph_patch)
 
    END SUBROUTINE publish_fldfrc_to_patches
-#endif
 
 
    SUBROUTINE sync_global_routing_dt(dt_res, dt_all, next_loop_active)
@@ -1773,15 +1699,11 @@ CONTAINS
          CALL reservoir_final ()
       ENDIF
 
-#ifdef TRACER
       CALL tracer_lifecycle_route_final()
-#endif
 
          CALL levee_final()
       CALL bifurcation_final()
-#ifdef TRACER
       CALL river_lake_tracer_final()
-#endif
 
       ! acc_rnof_uc is owned by MOD_Grid_RiverLakeTimeVars and freed by
       ! deallocate_GridRiverLakeTimeVars; don't deallocate it here.

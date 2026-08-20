@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Isotope_Registrations
 
 #define TRACER_ISOTOPE_SPECIES(module_name, register_fn) USE module_name, only: register_fn
@@ -31,4 +30,3 @@ CONTAINS
    END SUBROUTINE register_all_isotope_physics
 
 END MODULE MOD_Tracer_Isotope_Registrations
-#endif

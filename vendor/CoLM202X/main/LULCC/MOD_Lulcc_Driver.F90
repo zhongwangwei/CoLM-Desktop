@@ -92,13 +92,11 @@ MODULE MOD_Lulcc_Driver
    USE MOD_Lulcc_TransferTraceReadin
    USE MOD_Lulcc_MassEnergyConserve
    USE MOD_Namelist
-#ifdef TRACER
    USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_land_save_lulcc_state, &
       tracer_lifecycle_land_remap_lulcc_state, tracer_lifecycle_land_reload_lulcc_inputs
    USE MOD_Tracer_Vars, only: save_land_tracer_lulcc_state, &
       remap_land_tracer_lulcc_state
    USE MOD_Tracer_Conservation, only: deallocate_tracer_conservation
-#endif
 
    IMPLICIT NONE
 
@@ -108,9 +106,7 @@ MODULE MOD_Lulcc_Driver
 
    logical, intent(in)    :: greenwich   !true: greenwich time, false: local time
    integer, intent(inout) :: jdate(3)    !year, julian day, seconds of the starting time
-#ifdef TRACER
    logical :: have_patch_area
-#endif
 !-----------------------------------------------------------------------
 
       ! allocate Lulcc memory
@@ -120,10 +116,10 @@ MODULE MOD_Lulcc_Driver
       ! SAVE variables
       CALL SAVE_LulccTimeInvariants
       CALL SAVE_LulccTimeVariables
-#ifdef TRACER
-      CALL save_land_tracer_lulcc_state ()
-      CALL tracer_lifecycle_land_save_lulcc_state ()
-#endif
+      IF (DEF_USE_TRACER) THEN
+         CALL save_land_tracer_lulcc_state ()
+         CALL tracer_lifecycle_land_save_lulcc_state ()
+      ENDIF
 
       ! =============================================================
       ! cold start for Lulcc
@@ -163,7 +159,7 @@ MODULE MOD_Lulcc_Driver
          CALL LulccMassEnergyConserve()
       ENDIF
 
-#ifdef TRACER
+      IF (DEF_USE_TRACER) THEN
       IF (p_is_worker .and. allocated(patchclass) .and. size(patchclass) > 0 .and. &
           .not. allocated(patchclass_)) THEN
          CALL CoLM_stop('TRACER LULCC cannot remap a worker from zero to nonzero patches')
@@ -198,7 +194,7 @@ MODULE MOD_Lulcc_Driver
       ! Pass the current LULCC year and landdata root so all spatial inputs are
       ! rebuilt from the same year-specific patch map.
       CALL tracer_lifecycle_land_reload_lulcc_inputs (jdate(1), dir_landdata)
-#endif
+      ENDIF
 
 
       ! deallocate Lulcc memory

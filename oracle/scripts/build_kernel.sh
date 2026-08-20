@@ -17,10 +17,16 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # default .false. i.e. vanGenuchten) -- both code paths are always
 # compiled in, so create_defineh.bash no longer takes that argument and
 # the presets below don't pass it either.
+#
+# Same story for TRACER (used to be a 7th positional argument,
+# TRACERON/TRACEROFF). It is a runtime namelist switch now (DEF_USE_TRACER,
+# MOD_Namelist.F90, default .false.) -- every main/TRACER module file is
+# always compiled in, so create_defineh.bash no longer takes that argument
+# either.
 case "$PRESET" in
-  default) ARGS=(SinglePoint LULC_IGBP     URBANOFF CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
-  bgc)       ARGS=(SinglePoint LULC_IGBP_PFT URBANOFF CaMaOFF BGCON  CROPOFF TRACEROFF) ;;
-  urban)     ARGS=(SinglePoint LULC_IGBP     URBANON  CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
+  default) ARGS=(SinglePoint LULC_IGBP     URBANOFF CaMaOFF BGCOFF CROPOFF) ;;
+  bgc)       ARGS=(SinglePoint LULC_IGBP_PFT URBANOFF CaMaOFF BGCON  CROPOFF) ;;
+  urban)     ARGS=(SinglePoint LULC_IGBP     URBANON  CaMaOFF BGCOFF CROPOFF) ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
@@ -105,6 +111,8 @@ is_effective() { printf '%s\n' "$EFFECTIVE" | grep -qxF "$1"; }
 #
 # 没有 Campbell/vanGenu 条目——土壤水力方案改成运行时开关之后，
 # create_defineh.bash 不再吃这个参数，两条物理路径始终一起编进去。
+# 也没有 TRACERON 条目——TRACER 同样改成运行时开关了（DEF_USE_TRACER），
+# create_defineh.bash 不再吃这个参数，main/TRACER/ 底下的模块始终编进去。
 macro_for_arg() {
   case "$1" in
     GRID) echo GRIDBASED ;;
@@ -119,7 +127,6 @@ macro_for_arg() {
     CaMaON) echo CaMa_Flood ;;
     BGCON) echo BGC ;;
     CROPON) echo CROP ;;
-    TRACERON) echo TRACER ;;
     *) : ;;
   esac
 }

@@ -11,9 +11,7 @@ MODULE MOD_Vars_1DAccFluxes
 #ifdef EXTERNAL_LAKE
    USE MOD_Lake_1DAccVars
 #endif
-#ifdef TRACER
    USE MOD_Tracer_LandPhase, only: tracer_flush_acc_fluxes, tracer_accumulate_fluxes
-#endif
 
    real(r8) :: nac ! number of accumulation
    real(r8), allocatable :: nac_ln      (:)
@@ -1485,6 +1483,7 @@ CONTAINS
       USE MOD_LandPatch, only: numpatch
       USE MOD_LandUrban, only: numurban
       USE MOD_Vars_Global, only: spval
+      USE MOD_Namelist, only: DEF_USE_TRACER
       IMPLICIT NONE
       logical, intent(in), optional :: flush_reactive
       logical :: flush_reactive_active
@@ -1974,9 +1973,9 @@ CONTAINS
       CALL Flush_LakeAccVars
 #endif
 
-#ifdef TRACER
-      IF (flush_reactive_active) CALL tracer_flush_acc_fluxes ()
-#endif
+      IF (DEF_USE_TRACER) THEN
+         IF (flush_reactive_active) CALL tracer_flush_acc_fluxes ()
+      ENDIF
 
    END SUBROUTINE FLUSH_acc_fluxes
 
@@ -2001,7 +2000,8 @@ CONTAINS
    USE MOD_Vars_1DForcing
    USE MOD_Vars_1DFluxes
    USE MOD_FrictionVelocity
-   USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF
+   USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF, &
+      DEF_USE_TRACER
    USE MOD_TurbulenceLEddy
    USE MOD_Vars_Global
 #ifdef CatchLateralFlow
@@ -2887,9 +2887,7 @@ CONTAINS
       CALL accumulate_LakeTimeVars
 #endif
 
-#ifdef TRACER
-      CALL tracer_accumulate_fluxes ()
-#endif
+      IF (DEF_USE_TRACER) CALL tracer_accumulate_fluxes ()
 
    END SUBROUTINE accumulate_fluxes
 

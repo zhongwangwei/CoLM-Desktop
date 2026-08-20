@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Evapo
 
    USE MOD_Precision
@@ -487,4 +486,3 @@ CONTAINS
    END SUBROUTINE tracer_evapo
 
 END MODULE MOD_Tracer_Evapo
-#endif

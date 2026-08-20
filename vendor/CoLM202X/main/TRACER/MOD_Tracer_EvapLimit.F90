@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_EvapLimit
 !=======================================================================
 ! Shared finite-pool evaporation/sublimation limiter for tracer losses.
@@ -220,4 +219,3 @@ CONTAINS
    END FUNCTION tracer_evaporative_tracer_loss
 
 END MODULE MOD_Tracer_EvapLimit
-#endif

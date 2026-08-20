@@ -256,18 +256,18 @@ CONTAINS
 
    real(r8) :: a, aa, xs1
 
-#ifdef TRACER
-   ! WATER_2014 exposes resolved soil/snow water-diagnostic outputs in TRACER
-   ! builds. Full urban TRACER is still intentionally unsupported (guarded in
-   ! CoLMDRIVER) and UrbanHydrology does not call tracer_soil_water; these local
-   ! buffers only satisfy WATER_2014's explicit interface while preserving the
-   ! existing urban water calculation.
+   ! WATER_2014's tracer soil/snow water-diagnostic outputs are mandatory,
+   ! always-present arguments now (TRACER is a runtime switch, DEF_USE_TRACER,
+   ! MOD_Namelist.F90; the arguments themselves are unconditional). Full urban
+   ! TRACER is still intentionally unsupported (guarded in CoLMDRIVER) and
+   ! UrbanHydrology does not call tracer_soil_water; these local buffers only
+   ! satisfy WATER_2014's explicit interface while preserving the existing
+   ! urban water calculation.
    real(r8) :: qlayer_urb(0:nl_soil)
    real(r8) :: etroot_trc_urb(1:nl_soil)
    real(r8) :: etroot_actual_trc_urb(1:nl_soil)
    real(r8) :: etroot_aquifer_trc_urb
    real(r8) :: snow_qout_layer_urb(min(lbp, 0):0)
-#endif
 
 !-----------------------------------------------------------------------
 
@@ -296,10 +296,8 @@ CONTAINS
              0.          ,& ! fsno, not active
              rsur_gper   ,rnof_gper   ,qinfl       ,pondmx      ,ssi         ,&
              wimp        ,smpmin      ,zwt         ,wdsrf       ,wa          ,qcharge     ,&
-#ifdef TRACER
              qlayer_urb  ,etroot_trc_urb ,etroot_actual_trc_urb ,&
              etroot_aquifer_trc_urb ,snow_qout_layer_urb                  ,&
-#endif
 #if (defined CaMa_Flood)
              flddepth    ,fldfrc      ,qinfl_fld                             ,&
 #endif

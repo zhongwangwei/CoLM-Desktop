@@ -1229,10 +1229,8 @@ ENDIF
                       frl,dlrad,sabg,sabg_soil,sabg_snow,sabg_snow_lyr,&
                       fseng,fseng_soil,fseng_snow,fevpg,fevpg_soil,fevpg_snow,cgrnd,htvp,emg,&
                       imelt,snofrz,sm,xmf,fact,pg_rain,pg_snow,t_precip &
-#ifdef TRACER
                      ,qphs_thaw_lay = qphs_thaw_lay_th, &
                       qphs_frzc_lay = qphs_frzc_lay_th &
-#endif
                       )
 
 !=======================================================================

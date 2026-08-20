@@ -3,8 +3,23 @@
 include include/Makeoptions
 LINK_FOPTS ?= ${FOPTS}
 HEADER = include/define.h
-TRACER_ENABLED := $(shell printf '\043include "include/define.h"\n\043ifdef TRACER\nYES\n\043else\nNO\n\043endif\n' | cpp -P -I. -Iinclude - | awk '/^(YES|NO)$$/{v=$$0} END{print v}')
-METHANE_ENABLED := $(shell printf '\043include "include/define.h"\n\043if defined(TRACER) && defined(BGC)\nYES\n\043else\nNO\n\043endif\n' | cpp -P -I. -Iinclude - | awk '/^(YES|NO)$$/{v=$$0} END{print v}')
+# TRACER used to be a compile-time macro: this probed include/define.h for
+# `#define TRACER` and the result gated whether the main/TRACER/ object set
+# was built at all (ifeq (${TRACER_ENABLED},YES) below), on top of the
+# Fortran-level `#ifdef TRACER` guards inside those files. TRACER is a
+# runtime namelist switch now (DEF_USE_TRACER, share/MOD_Namelist.F90,
+# default .false.) and the macro itself no longer exists in define.h, so the
+# object set always builds and DEF_USE_TRACER is checked at runtime instead
+# -- every `ifeq (${TRACER_ENABLED},YES)` block below is now permanently
+# taken (kept as-is, unflattened, to minimize the diff against upstream).
+TRACER_ENABLED := YES
+# Methane (main/TRACER/MOD_Tracer_Reactive_Methane*.F90 and
+# MOD_Tracer_Reactive_BgcShim.F90) is one of TRACER's four families
+# (isotope/solute/particle/gas) but still needs BGC at compile time -- it
+# hard-USEs BGC carbon/nitrogen pools, so unlike TRACER itself this one stays
+# a real compile-time gate (`#ifdef BGC` in those files now; TRACER dropped
+# out of the condition since it is no longer a macro).
+METHANE_ENABLED := $(shell printf '\043include "include/define.h"\n\043ifdef BGC\nYES\n\043else\nNO\n\043endif\n' | cpp -P -I. -Iinclude - | awk '/^(YES|NO)$$/{v=$$0} END{print v}')
 EXTENDED_INTERCEPTION_ENABLED := $(shell printf '\043include "include/define.h"\n\043ifdef extend_interception\nYES\n\043else\nNO\n\043endif\n' | cpp -P -I. -Iinclude - | awk '/^(YES|NO)$$/{v=$$0} END{print v}')
 
 INCLUDE_DIR = -Iinclude -I.bld/ -I${NETCDF_INC}

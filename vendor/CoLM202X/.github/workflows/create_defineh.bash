@@ -1,5 +1,5 @@
 #!/bin/bash
-#./create_defineh.bash GRID LULC_IGBP_PFT URBANON CaMaON BGCON CROPON TRACERON
+#./create_defineh.bash GRID LULC_IGBP_PFT URBANON CaMaON BGCON CROPON
 #
 # Soil hydraulic scheme (Campbell vs. vanGenuchten) used to be a 4th
 # positional argument here, picking between two compile-time macros. Both
@@ -7,7 +7,13 @@
 # namelist switch instead (DEF_USE_Campbell_SOIL_MODEL, MOD_Namelist.F90,
 # default .false. i.e. vanGenuchten) -- so that argument slot is gone and
 # every argument after it moved down by one.
-echo $1 $2 $3 $4 $5 $6 ${7:-TRACEROFF}
+#
+# The tracer subsystem (TRACER, formerly a 7th positional argument here:
+# TRACERON/TRACEROFF) went the same way. Both code paths (tracer on/off) are
+# always compiled in now and the choice is a runtime namelist switch
+# instead (DEF_USE_TRACER, MOD_Namelist.F90, default .false.) -- so that
+# argument slot is gone too.
+echo $1 $2 $3 $4 $5 $6
 
 if [ $1 = "GRID" ];then
    GRIDBASE="#define GRIDBASED"
@@ -125,17 +131,6 @@ else
    fi
 fi
 
-if [ "${7:-TRACEROFF}" = "TRACERON" ];then
-   TRACER="#define TRACER"
-else
-   if [ "${7:-TRACEROFF}" = "TRACEROFF" ];then
-      TRACER="#undef TRACER"
-   else
-      echo "Error in argument 7, try (TRACERON, TRACEROFF)"
-      exit
-   fi
-fi
-
 cat>include/define.h<<EOF
 ! 1. Spatial structure:
 !    Select one of the following options.
@@ -214,27 +209,43 @@ $CROP
 ! 12b. If defined, extended canopy interception schemes are enabled.
 #define extend_interception
 
-! 13. If defined, water tracer module is enabled.
-$TRACER
-! TRACER requires vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.) --
-! used to be a compile-time #error here on (TRACER && Campbell_SOIL_MODEL),
-! but Campbell/vanGenuchten is a runtime choice now, so that check moved
-! to MOD_Namelist.F90 (it runs whenever TRACER is compiled in, regardless
-! of which soil scheme is picked at runtime).
-! NOTE: TRACER as a whole does NOT require GridRiverLakeFlow. The tracer
-! subsystem has four families (isotope, solute, particle, gas) and only the
-! river-lake ones need a river network: MOD_Tracer_RiverLake.F90 and
-! MOD_Tracer_Particle_Sediment.F90 already guard themselves with
-! "#ifdef GridRiverLakeFlow", so they simply are not compiled without it.
-! The other 38 MOD_Tracer_*.F90 modules -- water isotopes, snow tracers,
-! forcing tracers -- are independent of the river network and are perfectly
-! meaningful for SinglePoint runs, where water-isotope observations are common.
+! 13. Water tracer module (isotope / solute / particle / gas families).
+!     TRACER used to live here as a compile-time macro (this script's old
+!     7th argument, TRACERON/TRACEROFF). Every main/TRACER module file is
+!     now always compiled in and the choice is a runtime namelist switch
+!     instead (DEF_USE_TRACER, share/MOD_Namelist.F90, default .false.) --
+!     so that argument slot is gone and this line no longer exists.
 !
-! A blanket #error here made TRACER impossible for every SinglePoint build,
-! because SinglePoint unconditionally undefines GridRiverLakeFlow above.
-#if (defined TRACER) && (defined BGC)
+!     TRACER requiring vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.)
+!     used to be a compile-time #error here on (TRACER && Campbell_SOIL_MODEL);
+!     Campbell/vanGenuchten became a runtime choice first (see above), so that
+!     check already moved to MOD_Namelist.F90 -- it now runs whenever
+!     DEF_USE_TRACER is .true., regardless of which soil scheme is picked.
+!
+!     NOTE: TRACER as a whole does NOT require GridRiverLakeFlow. The tracer
+!     subsystem has four families (isotope, solute, particle, gas) and only
+!     the river-lake ones need a river network: MOD_Tracer_RiverLake.F90 and
+!     MOD_Tracer_Particle_Sediment.F90 guard themselves with
+!     "#ifdef GridRiverLakeFlow", so they simply are not compiled without it.
+!     The other 38 MOD_Tracer_*.F90 modules -- water isotopes, snow tracers,
+!     forcing tracers -- are independent of the river network and are
+!     perfectly meaningful for SinglePoint runs, where water-isotope
+!     observations are common.
+!
+! 13.1 Methane (one of TRACER's four families: MOD_Tracer_Reactive_Methane*.F90
+!      and MOD_Tracer_Reactive_BgcLink.F90) still needs BGC at compile time --
+!      it hard-USEs BGC carbon/nitrogen pools -- so unlike TRACER itself this
+!      stays a real compile-time gate (Makefile's METHANE_ENABLED / these
+!      files' own "#ifdef BGC"; TRACER dropped out of the condition here since
+!      it is no longer a macro). The PFT/PC requirement below is therefore
+!      keyed on BGC alone now: whenever BGC survives the "Conflicts" #undef
+!      above (i.e. only when LULC_IGBP_PFT or LULC_IGBP_PC is defined), the
+!      condition below can never actually trigger -- it is retained as a
+!      documented invariant, not a live trap, exactly as before this file
+!      also required TRACER on this same combination.
+#ifdef BGC
 #if (!defined LULC_IGBP_PFT && !defined LULC_IGBP_PC)
-#error "Methane (TRACER+BGC) requires LULC_IGBP_PFT or LULC_IGBP_PC for pftfrac access."
+#error "Methane (BGC) requires LULC_IGBP_PFT or LULC_IGBP_PC for pftfrac access."
 #endif
 #endif
 EOF

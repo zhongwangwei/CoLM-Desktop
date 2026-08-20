@@ -385,6 +385,17 @@ MODULE MOD_Namelist
    logical  :: DEF_USE_BIFURCATION     = .false.
 
    ! ----- tracer module -----
+   ! Water tracer subsystem: isotope / solute / particle / gas families
+   ! (main/TRACER/*.F90, 42 modules). Used to be a compile-time macro
+   ! (TRACER, create_defineh.bash's old 7th argument, TRACERON/TRACEROFF).
+   ! Every TRACER module is now always compiled in and this flag picks
+   ! whether the subsystem actually runs at runtime instead. Default
+   ! .false. -- both shipped kernels currently build with the tracer
+   ! subsystem compiled in but inactive, and the golden regression baseline
+   ! has it off; flipping the default would silently change every existing
+   ! result (no tracers get registered/allocated/stepped when this is
+   ! .false., see MOD_Tracer_Defs.F90:tracer_defs_init).
+   logical  :: DEF_USE_TRACER = .false.
    logical  :: DEF_TRACER_USE_FRACTIONATION = .false.
    ! Air diffusivity ratios used by the kinetic (Craig-Gordon) term.
    ! MERLIVAT1978 (1.0285 / 1.0251) is the default so the shipped reference
@@ -485,7 +496,7 @@ MODULE MOD_Namelist
    ! Per-species files carry unit/capability metadata plus optional
    ! species-owned parameter groups; use NAME:path mappings where possible.
    character(len=512) :: DEF_TRACER_PARAM_FILES = 'null'
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
    ! ----- Generic BGC/reactive-tracer shared inputs -----
    character(len=256) :: DEF_file_GIEMS = 'null'
    integer :: DEF_wetland_finundation_scheme = 1
@@ -1320,6 +1331,7 @@ CONTAINS
 
       DEF_USE_LEVEE,                          &
       DEF_USE_BIFURCATION,                    &
+      DEF_USE_TRACER,                         &
       DEF_TRACER_USE_FRACTIONATION,           &
       DEF_TRACER_KINETIC_SCHEME,              &
       DEF_TRACER_ICE_SUPERSAT_SLOPE,          &
@@ -1348,7 +1360,7 @@ CONTAINS
       DEF_TRACER_SOIL_INIT_FILE,              &
       DEF_TRACER_SOIL_INIT_VARS,              &
       DEF_TRACER_PARAM_FILES,        &
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
       DEF_file_GIEMS,                         &
 #endif
 
@@ -1510,7 +1522,11 @@ CONTAINS
          write(*,*) 'when defined CatchLateralFlow. '
          DEF_USE_VariablySaturatedFlow = .true.
 #endif
-#ifdef TRACER
+         ! TRACER used to be a compile-time macro; this whole block used to
+         ! be "#ifdef TRACER". It is a runtime namelist switch now
+         ! (DEF_USE_TRACER, declared above, default .false.), so every check
+         ! below only applies once the switch is actually on.
+         IF (DEF_USE_TRACER) THEN
          ! TRACER used to be blocked from Campbell_SOIL_MODEL at compile
          ! time (create_defineh.bash used to #error on that combination,
          ! because the tracer soil-water physics is written against
@@ -1522,8 +1538,8 @@ CONTAINS
             write(*,*) 'Fatal ERROR: TRACER requires vanGenuchten_Mualem_SOIL_MODEL'
             write(*,*) '(DEF_USE_Campbell_SOIL_MODEL = .false.). The tracer soil-water'
             write(*,*) 'physics is written against the vanGenuchten variable set.'
-            write(*,*) 'Set DEF_USE_Campbell_SOIL_MODEL = .false., or rebuild without'
-            write(*,*) '#define TRACER.'
+            write(*,*) 'Set DEF_USE_Campbell_SOIL_MODEL = .false., or set'
+            write(*,*) 'DEF_USE_TRACER = .false..'
             CALL CoLM_stop ()
          ENDIF
          SELECT CASE (trim(adjustl(DEF_TRACER_KINETIC_SCHEME)))
@@ -1592,7 +1608,7 @@ CONTAINS
             write(*,*) '                  *****                  '
             write(*,*) 'Fatal ERROR: TRACER requires DEF_USE_VariablySaturatedFlow = .true.'
             write(*,*) 'Please enable VariablySaturatedFlow/vanGenuchten_Mualem soil hydrology'
-            write(*,*) 'or rebuild with #undef TRACER.'
+            write(*,*) 'or set DEF_USE_TRACER = .false..'
             CALL CoLM_stop ()
          ENDIF
          IF (DEF_USE_BIFURCATION .and. DEF_TRACER_NUM > 0) THEN
@@ -1601,10 +1617,10 @@ CONTAINS
             write(*,*) 'cannot be enabled together. River bifurcation forces a single global'
             write(*,*) 'routing sub-step shared by every river system; coupling that to tracer'
             write(*,*) 'transport is prohibitively slow. Disable DEF_USE_BIFURCATION, or set'
-            write(*,*) 'DEF_TRACER_NUM = 0 (or rebuild with #undef TRACER) for bifurcation runs.'
+            write(*,*) 'DEF_TRACER_NUM = 0 (or DEF_USE_TRACER = .false.) for bifurcation runs.'
             CALL CoLM_stop ()
          ENDIF
-#endif
+         ENDIF
 #ifdef SinglePoint
          IF (DEF_Runoff_SCHEME == 0) THEN
             write(*,*) 'Note: DEF_TOPMOD_method is set to 0 in SinglePoint.'
@@ -2108,6 +2124,7 @@ CONTAINS
 
       CALL mpi_bcast (DEF_USE_LEVEE                          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_BIFURCATION                    ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_USE_TRACER                         ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_USE_FRACTIONATION           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_KINETIC_SCHEME              ,16  ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_ICE_SUPERSAT_SLOPE          ,1   ,mpi_double_precision,p_address_master ,p_comm_glb ,p_err)
@@ -2136,7 +2153,7 @@ CONTAINS
       CALL mpi_bcast (DEF_TRACER_SOIL_INIT_FILE              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_SOIL_INIT_VARS              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_PARAM_FILES        ,512 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
       CALL mpi_bcast (DEF_file_GIEMS                         ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_wetland_finundation_scheme         ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
 #endif

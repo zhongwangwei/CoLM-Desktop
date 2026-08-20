@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Isotope_O18
 
    USE MOD_Precision
@@ -63,4 +62,3 @@ CONTAINS
    END FUNCTION o18_leaf_liquid_diffusivity
 
 END MODULE MOD_Tracer_Isotope_O18
-#endif

@@ -70,10 +70,8 @@ CONTAINS
                        tstar         ,fm            ,fh            ,fq            ,&
                        pg_rain       ,pg_snow       ,t_precip      ,qintr_rain    ,&
                        qintr_snow    ,snofrz        ,sabg_snow_lyr                 &
-#ifdef TRACER
                       ,canopy_smelt_mass_th, canopy_frzc_mass_th                  ,&
                        qphs_thaw_lay_th, qphs_frzc_lay_th, raw_trc_th             &
-#endif
                        )
 
 !=======================================================================
@@ -259,13 +257,11 @@ CONTAINS
    real(r8), intent(in) :: &
        sabg_snow_lyr(lb:1)        ! snow layer absorption
 
-#ifdef TRACER
    real(r8), intent(out), optional :: canopy_smelt_mass_th ! canopy snow->rain mass [mm]
    real(r8), intent(out), optional :: canopy_frzc_mass_th  ! canopy rain->snow mass [mm]
    real(r8), intent(out), optional :: qphs_thaw_lay_th(lb:nl_soil) ! ice->liquid mass [mm]
    real(r8), intent(out), optional :: qphs_frzc_lay_th(lb:nl_soil) ! liquid->ice mass [mm]
    real(r8), intent(out), optional :: raw_trc_th ! reference-to-canopy moisture resistance [s/m]
-#endif
 
        ! state variables (2)
    real(r8), intent(inout) :: &
@@ -479,10 +475,8 @@ CONTAINS
    real(r8), allocatable :: assimsha_p    (:)
    real(r8), allocatable :: etrsha_p      (:)
    real(r8), allocatable :: dheatl_p      (:)
-#ifdef TRACER
    real(r8) :: canopy_smelt_mass_local, canopy_frzc_mass_local, raw_trc_local, raw_trc_pc
    real(r8), allocatable :: canopy_smelt_mass_p_local(:), canopy_frzc_mass_p_local(:), raw_trc_p(:)
-#endif
 
 
 !=======================================================================
@@ -506,7 +500,6 @@ CONTAINS
       assim  = 0.;  respc  = 0.
       hprl   = 0.;  dheatl = 0.
 
-#ifdef TRACER
       canopy_smelt_mass_local = 0._r8
       canopy_frzc_mass_local  = 0._r8
       raw_trc_local           = 0._r8
@@ -516,7 +509,6 @@ CONTAINS
       IF (present(qphs_thaw_lay_th)) qphs_thaw_lay_th(:) = 0._r8
       IF (present(qphs_frzc_lay_th)) qphs_frzc_lay_th(:) = 0._r8
       IF (present(raw_trc_th)) raw_trc_th = 0._r8
-#endif
 
       emis   = 0.;  z0m    = 0.
       zol    = 0.;  rib    = 0.
@@ -720,11 +712,9 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
                  forc_hpbl   ,&
                  qintr_rain  ,qintr_snow  ,t_precip    ,hprl        ,dheatl      ,&
                  smp         ,hk(1:)      ,hksati(1:)  ,rootflux(1:)              &
-#ifdef TRACER
                 ,canopy_smelt_mass_out=canopy_smelt_mass_local, &
                  canopy_frzc_mass_out =canopy_frzc_mass_local, &
                  raw_trc_out=raw_trc_local                     &
-#endif
                  )
       ELSE
          tleaf         = forc_t
@@ -792,14 +782,12 @@ IF (patchtype == 0) THEN
       allocate ( assimsha_p       (ps:pe) )
       allocate ( etrsha_p         (ps:pe) )
       allocate ( dheatl_p         (ps:pe) )
-#ifdef TRACER
       allocate ( canopy_smelt_mass_p_local(ps:pe) )
       allocate ( canopy_frzc_mass_p_local (ps:pe) )
       allocate ( raw_trc_p(ps:pe) )
       canopy_smelt_mass_p_local(:) = 0._r8
       canopy_frzc_mass_p_local (:) = 0._r8
       raw_trc_p(:) = 0._r8
-#endif
 
       sabv_p(ps:pe) = sabvsun_p(ps:pe) + sabvsha_p(ps:pe)
       sabv = sabvsun + sabvsha
@@ -937,11 +925,9 @@ IF (patchtype == 0) THEN
                  forc_hpbl                                                                         ,&
                  qintr_rain_p(i) ,qintr_snow_p(i) ,t_precip        ,hprl_p(i)       ,dheatl_p(i)   ,&
                  smp             ,hk(1:)          ,hksati(1:)      ,rootflux_p(1:,i)                &
-#ifdef TRACER
                 ,canopy_smelt_mass_out=canopy_smelt_mass_p_local(i), &
                  canopy_frzc_mass_out =canopy_frzc_mass_p_local (i), &
                  raw_trc_out=raw_trc_p(i)                            &
-#endif
                  )
          ELSE
 
@@ -1052,11 +1038,9 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
          qintr_rain_p(ps:pe)  ,qintr_snow_p(ps:pe)  ,t_precip             ,hprl_p(:)            ,&
          dheatl_p(ps:pe)      ,smp                  ,hk(1:)               ,hksati(1:)           ,&
          rootflux_p(:,:)                                                                  &
-#ifdef TRACER
         ,canopy_smelt_mass_p_out=canopy_smelt_mass_p_local(ps:pe),&
          canopy_frzc_mass_p_out =canopy_frzc_mass_p_local (ps:pe),&
          raw_trc_out=raw_trc_pc                                  &
-#endif
          )
 
       dlrad_p      (ps:pe) = dlrad
@@ -1083,9 +1067,7 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
       fm_p         (ps:pe) = fm
       fh_p         (ps:pe) = fh
       fq_p         (ps:pe) = fq
-#ifdef TRACER
       raw_trc_p    (ps:pe) = raw_trc_pc
-#endif
 ENDIF
 
       pe = patch_pft_e(ipatch)
@@ -1141,11 +1123,9 @@ ENDIF
       etrsha_out    = sum( etrsha_p    (ps:pe)*pftfrac(ps:pe) )
       hprl          = sum( hprl_p      (ps:pe)*pftfrac(ps:pe) )
       dheatl        = sum( dheatl_p    (ps:pe)*pftfrac(ps:pe) )
-#ifdef TRACER
       canopy_smelt_mass_local = sum( canopy_smelt_mass_p_local(ps:pe)*pftfrac(ps:pe) )
       canopy_frzc_mass_local  = sum( canopy_frzc_mass_p_local (ps:pe)*pftfrac(ps:pe) )
       raw_trc_local           = sum( raw_trc_p(ps:pe)*pftfrac(ps:pe) )
-#endif
 IF (DEF_USE_OZONESTRESS)THEN
       o3uptakesun   = sum(o3uptakesun_p(ps:pe)*pftfrac(ps:pe) )
       o3uptakesha   = sum(o3uptakesha_p(ps:pe)*pftfrac(ps:pe) )
@@ -1204,20 +1184,16 @@ END IF
       deallocate ( assimsha_p  )
       deallocate ( etrsha_p    )
       deallocate ( dheatl_p    )
-#ifdef TRACER
       deallocate ( canopy_smelt_mass_p_local )
       deallocate ( canopy_frzc_mass_p_local  )
       deallocate ( raw_trc_p )
-#endif
 
 ENDIF
 #endif
 
-#ifdef TRACER
       IF (present(canopy_smelt_mass_th)) canopy_smelt_mass_th = canopy_smelt_mass_local
       IF (present(canopy_frzc_mass_th))  canopy_frzc_mass_th  = canopy_frzc_mass_local
       IF (present(raw_trc_th)) raw_trc_th = raw_trc_local
-#endif
 
 !=======================================================================
 ! [5] Ground temperature
@@ -1236,10 +1212,8 @@ ENDIF
                       frl,dlrad,sabg,sabg_soil,sabg_snow,sabg_snow_lyr,&
                       fseng,fseng_soil,fseng_snow,fevpg,fevpg_soil,fevpg_snow,cgrnd,htvp,emg,&
                       imelt,snofrz,sm,xmf,fact,pg_rain,pg_snow,t_precip &
-#ifdef TRACER
                      ,qphs_thaw_lay=qphs_thaw_lay_th, &
                       qphs_frzc_lay=qphs_frzc_lay_th &
-#endif
                       )
 
 !=======================================================================

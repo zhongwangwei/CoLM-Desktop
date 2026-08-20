@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_Vars
 
    USE MOD_Precision
@@ -1171,4 +1170,3 @@ CONTAINS
    END SUBROUTINE sync_tracer_patch_ratio
 
 END MODULE MOD_Tracer_Vars
-#endif

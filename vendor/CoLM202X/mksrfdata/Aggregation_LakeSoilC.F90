@@ -1,6 +1,6 @@
 #include <define.h>
 
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
 SUBROUTINE Aggregation_LakeSoilC ( &
       gland, dir_rawdata, dir_model_landdata, lc_year)
 

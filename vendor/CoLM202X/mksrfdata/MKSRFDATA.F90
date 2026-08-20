@@ -76,7 +76,7 @@ PROGRAM MKSRFDATA
    USE MOD_LandCrop
 #endif
    USE MOD_RegionClip
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
    USE MOD_Tracer_Reactive_Methane_Preprocessing, only: methane_preprocessing_requirements
 #endif
    USE MOD_SrfdataDiag, only: gdiag, srfdata_diag_init
@@ -106,7 +106,7 @@ PROGRAM MKSRFDATA
    character(len=4) :: cyear
    integer*8 :: start_time, end_time, c_per_sec, time_used
    logical   :: skip_rest
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
    logical   :: requires_lake_soilc, requires_spatial_ph
 #endif
 
@@ -464,7 +464,7 @@ IF (.not. (skip_rest)) THEN
 
       CALL Aggregation_SoilParameters  (grid_soil, dir_rawdata, dir_landdata, lc_year)
 
-#if (defined TRACER) && (defined BGC)
+#ifdef BGC
       CALL methane_preprocessing_requirements (requires_lake_soilc, requires_spatial_ph)
       IF (requires_lake_soilc) &
          CALL Aggregation_LakeSoilC    (grid_soil, dir_rawdata, dir_landdata, lc_year)

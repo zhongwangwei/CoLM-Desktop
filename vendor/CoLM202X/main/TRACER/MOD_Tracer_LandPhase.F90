@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef TRACER
 MODULE MOD_Tracer_LandPhase
 
    USE MOD_Precision
@@ -321,4 +320,3 @@ CONTAINS
    END SUBROUTINE land_tracer_final
 
 END MODULE MOD_Tracer_LandPhase
-#endif
