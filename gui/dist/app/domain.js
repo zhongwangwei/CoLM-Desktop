@@ -1,55 +1,68 @@
-//! 进门向导：这次要跑什么、从哪套配置开始。
+//! 进门向导：这次要跑什么、这次研究什么过程。
 //!
 //! **不是欢迎页，是分流点。** 完整设计有六页（docs/design-gate.md）——
-//! 空间结构、次网格方案、土壤水力、物理过程、调试，选定之后再进六步主
-//! 界面。这一步只做前两页 + 状态机骨架：后面几页依赖一场正在进行的
-//! CoLM 宏改造（把编译期宏变成运行时开关），那还没完成，现在的内核
-//! 只支持 LULC_IGBP + vanGenuchten 这一套。等宏改造完成，把第 2 页的
-//! 灰去掉、把状态机往后填三页就行 —— 这正是这一步的价值：机制先立起来。
+//! 空间结构、研究什么过程、次网格方案、土壤水力、其余物理开关、调试，
+//! 选定之后再进六步主界面。这一步只做前两页 + 状态机骨架：后面几页
+//! 依赖一场正在进行的 CoLM 宏改造（把编译期宏变成运行时开关），那还
+//! 没完成，现在的内核只支持 LULC_IGBP + vanGenuchten 这一套。等宏改造
+//! 完成，把第 2 页的灰去掉、把状态机往后填四页就行 —— 这正是这一步的
+//! 价值：机制先立起来。
 //!
 //! ## 两页
 //!
 //! 第 1 页：站点 / 区域 / 全球（原来那道一次性弹窗的内容，不变）。
-//! 第 2 页：默认 / 碳氮循环 / 城市 / 从零开始 —— 除「默认」外全部置灰，
+//! 第 2 页：默认 / 碳氮循环 / 城市 / 自定义 —— 除「默认」外全部置灰，
 //! 灰选项写两件事：需要什么、是什么造成的（design-gate.md §2b）。
 //!
+//! **「默认」只管物理过程，不绑定次网格方案。** 它现在的意思是「不开
+//! BGC/CROP/URBAN 这些附加过程」，不再声称自己用 IGBP 还是哪种土壤
+//! 水力方案 —— 次网格方案（第 3 页）与土壤水力（第 4 页）是独立选的。
+//!
+//! **这条收窄背后的道理**（design-gate.md「为什么『研究什么过程』在
+//! 『次网格方案』之前」一节）：约束是双向可用的——选了 IGBP 则 BGC
+//! 不可用，选了 BGC 则 IGBP 不可用，同一条约束从哪头问都能表达。
+//! 顺序该由「用户先想清楚哪个」决定，而用户先想清楚的是**要研究什么**
+//! （水热、碳收支、城市热岛），不是**用哪种次网格**——研究碳循环的人
+//! 知道自己要碳循环，未必立刻知道那需要 PFT 方案。所以「研究什么过程」
+//! 排在「次网格方案」之前，「默认」也就只能管物理过程这一层，不能替
+//! 用户预先决定次网格方案。
+//!
 //! **「默认」这个名字没问题，前提是预设的语义是「填好初值」而不是
-//! 「跳过后面几页」。** LULC_IGBP + vanGenuchten 不是科学上更优的选择，
-//! 但只要选完预设之后**仍然逐页走过第 3–6 页、每一层都能看能改**，
-//! 「默认」就不是「正确答案」而只是「不知道从哪开始时的起点」——
-//! 用户走完之后看到的是自己实际的配置，不是一个名字
+//! 「跳过后面几页」。** 选完预设之后**仍然逐页走过第 3–6 页、每一层
+//! 都能看能改**，「默认」就不是「正确答案」而只是「不知道从哪开始时
+//! 的起点」——用户走完之后看到的是自己实际的配置，不是一个名字
 //! （design-gate.md「预设是填好后面几页，不是跳过后面几页」一节）。
-//! 这也是为什么每档下面列出对应的技术选项（`IGBP · van Genuchten`）：
-//! 让懂的人一眼看出这一档等于什么。
+//! 这也是为什么每档下面列出它对应的那句说明：默认写「不开碳循环等
+//! 附加过程」，碳氮循环/城市写它们各自打开的开关（`BGC · CROP` /
+//! `URBAN`）。
 //!
 //! **第 3–6 页现在不存在**，所以选完预设、点下去，实际效果仍然是直接
 //! 进主界面 —— 但下面的数据结构已经按「预设展开成一组初值，供第
 //! 3–6 页落地后去读」的样子设计（见 `PRESET_VALUES` 与
-//! `state.wizard`），不是等页面真的存在了再回来重写。
+//! `state.wizard`），不是等页面真的存在了再回来重写。**这份初值只覆盖
+//! 物理过程开关**（`bgc`/`crop`/`urban`/`tracer`），不包含次网格方案
+//! 或土壤水力 —— 那两项是第 3、4 页各自的字段，预设不替它们做主。
 //!
 //! 两页都不预选任何一档 —— 必须显式点一下才能「下一步」。
 //!
-//! ## 「下一步」与「直接开始」
+//! ## 只有「上一步」与「下一步」
 //!
-//! 第 2 页除了逐页前进的「下一步」，还有一个「直接开始」——
-//! **接受当前已选的初值，跳过还没走的页，直接进主界面。** 想看一眼
-//! 配置的人逐页走，赶时间的人一键进去，**两条路结果完全一样**
-//! （design-gate.md「快速路径靠跳到最后」一节）。现在两个按钮做的事
-//! 相同（因为第 2 页恰好是最后一页），语义不同：「下一步」是「往后
-//! 翻一页」，「直接开始」是「跳到最后」；第 3–6 页落地后两者才会真正
-//! 分岔。
+//! **不给「直接开始」那种跳过剩余页的按钮。** 曾经加过，又去掉了：
+//! 两个按钮做同一件事（只有两页时它们完全等价）只会让人停下来想
+//! 「这两个有什么区别」，而**想清楚之后发现没区别** —— 纯粹的认知负担。
 //!
-//! ## 状态机
+//! 更要紧的是走完流程本身有价值：每一页都是一次「你要跑的是这个吗」
+//! 的确认。跳过去的人省下几次点击，代价是**不知道自己在跑什么配置** ——
+//! 而这个项目一路在防的正是这类「跑得完但不知道跑了什么」。
 //!
 //! `pageIdx` + 本模块私有的 `picked` 是整套状态机的全部数据。**`picked`
 //! 不进 `state`，也不进 `recent.js` 的 `REMEMBERED` 表** —— 关掉重开要
 //! 重新问，design-gate.md §5：「不做记住上次的选择——它是分流点，不是
-//! 一次性的欢迎页」。选择只有在按下「下一步」（最后一页）或「直接开始」
+//! 一次性的欢迎页」。选择只有在最后一页按下「进入主界面」
 //! 时才落到 `state.domain` / `state.profile` / `state.wizard`，半路退出
 //! （刷新页面重新起）不留痕迹。
 //!
 //! 下一步：保存本页选择，进下一页，没选时禁用。
-//! 直接开始：接受当前选择，跳过其余页，没选时禁用（跟下一步同一条件）。
 //! 上一步：回上一页，`picked` 原样保留，不清空。
 //! 取消：`pageIdx` 归零、`picked` 清空，回第 1 页重来。
 //!
@@ -82,59 +95,61 @@ const DOMAINS = [
   { id: 'global', t: '全球', d: '全球网格', ready: false },
 ];
 
-// 第 2 页：从哪套配置开始。除「默认」外全部置灰 —— 不是因为它们不对，
-// 是因为现在的内核只编进了 IGBP + vanGenuchten 这一套，别的组合选了会
-// 在跑到一半才炸，而不是灰着更糟。`tech` 是每档对应的技术选项，展示在
-// 用途描述下面一行；`need` 是灰选项要写的第一件事「需要什么」，第二件
-// 事「是什么造成的」三档共用同一句 `PROFILE_BLOCKED_BY`，因为现在挡住
-// 它们的是同一场宏改造，不像 design-gate.md 第 5 页那样各自指向前面
-// 某一页的某个选择——那要等第 3–5 页真的存在才有「回哪页改」这回事。
+// 第 2 页：这次研究什么过程。除「默认」外全部置灰 —— 不是因为它们不对，
+// 是因为现在的内核只编进了 IGBP + vanGenuchten 这一套，开 BGC/CROP/
+// URBAN 这些附加过程选了会在跑到一半才炸，而不是灰着更糟。
+//
+// `tech` 是每档下面那句说明：对「默认」它说的是「不开什么」，对
+// 「碳氮循环」「城市」它说的是「打开哪些开关」，对「自定义」它说的是
+// 「需要什么机制」——同一个位置，起的是 design-gate.md §2b「①需要
+// 什么」那件事的作用。②「是什么造成的」由三档共用同一句
+// `PROFILE_BLOCKED_BY`，因为现在挡住它们的是同一场宏改造，不像
+// design-gate.md 第 5 页那样各自指向前面某一页的某个选择——那要等
+// 第 3–6 页真的存在才有「回哪页改」这回事。
+//
+// **不含次网格方案或土壤水力**（没有 `IGBP · van Genuchten` 这类字样）
+// —— 那是第 3、4 页各自问的，「默认」不替用户预先决定。
 const PROFILES = [
   {
-    id: 'default', t: '默认', d: '地表能量与水分平衡', tech: 'IGBP · van Genuchten',
-    ready: true,
+    id: 'default', t: '默认', d: '地表能量与水分平衡',
+    tech: '不开碳循环等附加过程', ready: true,
   },
   {
-    id: 'carbon_nitrogen', t: '碳氮循环', d: '植被生长与碳收支', tech: 'PFT · BGC · CROP',
-    ready: false, need: '需要运行时的 LULC 开关',
+    id: 'carbon_nitrogen', t: '碳氮循环', d: '植被生长与碳收支',
+    tech: 'BGC · CROP', ready: false,
   },
   {
-    id: 'urban', t: '城市', d: '城市冠层与人为热', tech: 'IGBP · URBAN',
-    ready: false, need: '需要运行时的 URBAN 开关',
+    id: 'urban', t: '城市', d: '城市冠层与人为热',
+    tech: 'URBAN', ready: false,
   },
   {
-    // 从零开始没有固定的技术组合（那正是它存在的理由），没有 `tech`
-    // 这一行，`PRESET_VALUES` 里也没有它的条目。
-    id: 'custom', t: '从零开始', d: '每一项都自己选', ready: false,
-    need: '需要运行时开关支持逐项配置（次网格方案 · 土壤水力 · 物理过程）',
+    id: 'custom', t: '自定义', d: '每一项都自己选',
+    tech: '逐项配置次网格方案 · 土壤水力 · 物理过程', ready: false,
   },
 ];
 const PROFILE_BLOCKED_BY = 'CoLM 宏改造尚未完成';
 
 // 预设展开成的具体初值。**这是「预设 = 填好后面几页的初值」这件事的
-// 数据形状** —— 第 3–6 页落地后从这里读起始值去预填那几页的控件，
-// 用户在那几页看到的是这份值，不是「default」这个名字。字段名按
-// design-gate.md §1 的依赖表起：`lulc`（第 3 页，次网格方案）、
-// `soil`（第 4 页，土壤水力）、`bgc`/`crop`/`urban`/`tracer`
-// （第 5 页，物理过程开关，被 lulc 与 soil 约束）。
+// 数据形状** —— 第 5 页（其余物理开关）落地后从这里读起始值去预填
+// 那一页的控件。字段名按 design-gate.md §1 的依赖表起：`bgc`/`crop`/
+// `urban`/`tracer`，都是第 5 页要问的物理过程开关。
+//
+// **不含 `lulc`/`soil`**——次网格方案（第 3 页）与土壤水力（第 4 页）
+// 是独立选的，不属于「研究什么过程」这一层的预设范围，「默认」也不
+// 替它们做主。
 //
 // 现在只有 `default` 选得到，但表按将来的样子写全，免得第 3–6 页
-// 落地时要回头重新设计这份数据结构。`custom`（从零开始）没有条目——
+// 落地时要回头重新设计这份数据结构。`custom`（自定义）没有条目——
 // 它的意思就是没有初值，用户在那几页自己一项项填。
 const PRESET_VALUES = {
-  default: {
-    lulc: 'IGBP', soil: 'vanGenuchten',
-    bgc: false, crop: false, urban: false, tracer: false,
-  },
+  default: { bgc: false, crop: false, urban: false, tracer: false },
   carbon_nitrogen: {
-    // PFT 是 BGC 的前提（§1：BGC 要 PFT 或 PC），CROP 要先开 BGC。
-    lulc: 'PFT', soil: 'vanGenuchten',
+    // CROP 要先开 BGC（§1）。PFT/PC 那层次网格方案不在这里——
+    // 第 3 页会因为这一档打开了 BGC 而把 IGBP/USGS 灰掉，但那是第 3
+    // 页自己的约束重算，不是这张表要管的事。
     bgc: true, crop: true, urban: false, tracer: false,
   },
-  urban: {
-    lulc: 'IGBP', soil: 'vanGenuchten',
-    bgc: false, crop: false, urban: true, tracer: false,
-  },
+  urban: { bgc: false, crop: false, urban: true, tracer: false },
 };
 
 /** 向导页顺序。加第 3 页时在这里插入，`render()`/`renderFoot()` 不用改
@@ -155,16 +170,15 @@ export function showDomainGate() {
 
 function render() {
   const page = PAGES[pageIdx];
-  $('gatetitle').textContent = page === 'domain' ? '这次要跑什么？' : '从哪套配置开始？';
+  $('gatetitle').textContent = page === 'domain' ? '这次要跑什么？' : '这次研究什么过程？';
   $('gatesub').textContent = page === 'domain'
     ? '现在只有站点能跑。区域与全球的步骤链还没有实现。'
-    : '现在的内核只编进了「默认」这一套（IGBP · van Genuchten）—— '
+    : '现在的内核只支持「默认」这一套物理过程 —— '
       + '其余三档要等 CoLM 宏改造完成才能选。';
-  // 第 2 页专有的一句：定义「预设」是什么意思。第 3–6 页现在不存在，
-  // 这句话描述的是宏改造完成后的样子，不是这一刻的字面行为——但话要
-  // 现在就写上，晚填页的人才不会把预设做成「跳过」。
+  // 第 2 页专有的一句：说清楚次网格方案、土壤水力不在这一页问。
+  // 第 3–6 页现在不存在，这句话是给将来占位的，但要现在就写上。
   $('gateinfo').textContent = page === 'profile'
-    ? 'ⓘ 选哪个都会走完后面四页，只是初值不同，随时可以改'
+    ? 'ⓘ 次网格方案、土壤水力在后面几页选'
     : '';
   const box = $('gatecards');
   box.textContent = '';
@@ -190,9 +204,9 @@ function card(it, page, isSelected) {
   d.textContent = it.d;
   b.appendChild(d);
 
-  // 用途描述下面那一行技术选项：让懂的人一眼看出这一档等于哪几个
-  // 开关，不懂的人看上面那行用途描述就够。从零开始没有固定组合，
-  // 没有这一行（`it.tech` 未定义）。
+  // 用途描述下面那一行说明（design-gate.md §2b「①需要什么」）：
+  // 「默认」说不开什么，「碳氮循环」「城市」说打开哪些开关，「自定义」
+  // 说需要什么机制。所有卡片（不论是否置灰）都有这一行。
   if (it.tech) {
     const tech = document.createElement('span');
     tech.className = 'dtech';
@@ -213,15 +227,8 @@ function card(it, page, isSelected) {
     soon.textContent = '暂不支持';
     b.appendChild(soon);
   } else {
-    // 第 2 页灰选项写两件事（design-gate.md §2b）：① 需要什么 ② 是什么
-    // 造成的。只写①的话，用户知道「碳氮循环要 PFT」但不知道为什么现在
-    // 选不了；只写②的话，知道卡在宏改造但不知道等它做完之后这一档到底
-    // 是什么。
-    const need = document.createElement('span');
-    need.className = 'dneed';
-    need.textContent = it.need;
-    b.appendChild(need);
-
+    // 第 2 页灰选项的第二件事（design-gate.md §2b）：是什么造成的。
+    // 第一件事「需要什么」已经在上面的 `.dtech` 里写过了，不重复。
     const why = document.createElement('span');
     why.className = 'dwhy';
     why.textContent = PROFILE_BLOCKED_BY;
@@ -258,18 +265,6 @@ function renderFoot() {
   const sel = page === 'domain' ? picked.domain : picked.profile;
   const isLast = pageIdx === PAGES.length - 1;
 
-  // 「直接开始」只在第 2 页给 —— 第 1 页（域）还没有「初值」这回事
-  // 可接受：预设本身是第 2 页才出现的概念。跟「下一步」同一个启用
-  // 条件：没有选中项就没有「当前初值」可接受。
-  if (page === 'profile') {
-    const skip = document.createElement('button');
-    skip.className = 'btn-ghost';
-    skip.textContent = '直接开始 →';
-    skip.disabled = !sel;
-    skip.onclick = () => finish();
-    foot.appendChild(skip);
-  }
-
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = isLast ? '进入主界面 →' : '下一步 →';
@@ -283,7 +278,7 @@ function renderFoot() {
 function finish() {
   state.domain = picked.domain;
   state.profile = picked.profile;
-  // 预设展开成的初值——`custom`（从零开始）没有条目，落到 `null`，
+  // 预设展开成的初值——`custom`（自定义）没有条目，落到 `null`，
   // 意思是「没有初值，等第 3–6 页落地后自己填」。浅拷贝一份，免得
   // 将来第 3–6 页改动 `state.wizard` 时顺手改到了 `PRESET_VALUES`
   // 这张共享表。
