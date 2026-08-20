@@ -14,12 +14,12 @@
 
 | 组 | 宏 | 处数 | 文件 | 状态 |
 |---|---|---|---|---|
-| **① 试点** | `CoLMDEBUG` | 92 | 30 | 🔄 |
-| | `RangeCheck` | 121 | 39 | 🔄 |
-| | `SrfdataDiag` | 98 | 20 | 🔄 |
-| **② 两套物理方案共存** | `Campbell_SOIL_MODEL` | 63 | 19 | 待做 |
-| | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | 待做 |
-| | `extend_interception` | 4 | 1 | 待做 |
+| **① 试点** | `CoLMDEBUG` | 92 | 30 | ✅ `acc596a` |
+| | `RangeCheck` | 121 | 39 | ✅ 同上 |
+| | `SrfdataDiag` | 98 | 20 | ✅ 同上 |
+| **② 两套物理方案共存** | `Campbell_SOIL_MODEL` | 63 | 19 | 🔄 |
+| | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | 🔄 |
+| | `extend_interception` | 4 | 1 | 🔄 |
 | **③ 最大但独立** | `TRACER` | 342 | 69 | 待做 |
 | **④ 核心难点（必须一起）** | `LULC_IGBP` | 205 | 46 | 待做 |
 | | `LULC_IGBP_PC` | 159 | 40 | 待做 |
@@ -69,6 +69,51 @@ cargo test -p oracle --test forcing_convert -- --ignored
 
 **这条最容易被忽略。** 把 `#ifdef` 删掉、代码再也不执行，也能让
 ① ② 通过 —— 但功能没了。必须验证开关**双向**都work。
+
+## ① 试点的结果（`acc596a`）
+
+**三条判据全过**：
+
+```
+① 黄金回归    identical: 129 variables, 10 dimensions
+② 关掉        colm.log 2138 行，0 条 Check
+③ 打开        colm.log 37629 行，33357 条 Check vector/block data
+```
+
+**`macros` 字段直接印证了成果**：
+
+```
+改造前  [CoLMDEBUG, LULC_IGBP, RangeCheck, SinglePoint, extend_interception, vanGenu...]
+改造后  [           LULC_IGBP,             SinglePoint, extend_interception, vanGenu...]
+```
+
+两个调试宏**从编译期概念里消失了**。
+
+### 311 处的分类（后续几组照这个走）
+
+| 类 | 处数 | 怎么改 |
+|---|---|---|
+| 条件 `USE` | 44 | 去掉 `#ifdef`，模块总是编译 |
+| 条件 `CALL`/`IF` 块 | 235 | 包进 `IF (DEF_USE_XXX) THEN ... ENDIF` |
+| `#ifdef` 下的局部变量声明 | 16 | 总是声明 |
+| 整个 `SUBROUTINE`/模块被包 | 11 | 去掉包裹 |
+| 空块/死块 | 3 | 删指令 |
+| 手工 | 2 | `#ifdef/#else` 的真实/桩函数对 |
+
+### 试点踩过的坑（后续几组照着避开）
+
+1. **`PUBLIC :: xxx` 不能包进 `IF` 块** —— 模块的 specification part
+   里 `IF` 不合法。6 处踩过
+2. **纯声明块也不能包 `IF`** —— 3 处，特征是里面嵌着别的 `#ifdef`
+   把分类搞乱了
+3. **46 处调用点要补 `USE MOD_Namelist`** —— 多是
+   `USE MOD_Namelist, only: ...`，新符号不在 `only` 列表里
+4. **`gui/src-tauri` 不是 cargo workspace 成员** ——
+   `cargo test --workspace` 碰不到它，必须单独跑。试点靠单独跑
+   才抓到一个真失败
+5. **加 `DEF_USE_*` 就要动 schema** ——
+   `xtask gen-schema` 重新生成、`config.rs` 给 UI 分区、
+   `params.js` 的 `PARAM_SECTIONS` 对上（有测试强制两边一致）
 
 ## 已完成
 
