@@ -56,6 +56,73 @@
 
 ---
 
+## 「只给经纬度」的实际边界（Task 4 BLOCKED + Task 5 查证）
+
+**这是 B 最重要的一条结论，也是两次实测推翻我规格之后才清楚的。**
+
+从零建一个能跑的单点算例，`mksrfdata` 硬性需要的东西**超出**
+`REQUIRED_FIELDS` 那 12 个：
+
+| 字段 | 有没有依据可查 | 结论 |
+|---|---|---|
+| 12 个 `REQUIRED_FIELDS` | 有（三级回落） | ✅ `fill` 补 |
+| `canopy_height` | 有（`htop0_igbp` 查表，按地类） | ✅ `bd747b6` 补 |
+| `canopy_bottom_height` | **CoLM 根本不读它** | ❌ 不写 |
+| `SAI`（标量） | **CoLM 根本不读它** | ❌ 不写 |
+| **`LAI_monthly` + `SAI_monthly`** | **没有表，只能来自数据** | ❌ **必须外部提供** |
+
+### 我的规格错在哪
+
+我在 `MOD_Const_LC.F90` 看到 `hbot0_igbp` 与 `sai0_igbp` 两张表，
+就假设「有表 = CoLM 会读」。**错了**：
+
+- 那两张表在 `main/`（**模型初始化**用），读取在 `mksrfdata/`
+  （**建面数据**用）—— 两个不同阶段
+- `hbot` 从来不从文件读，`mkinidata/MOD_HtopReadin.F90:89` 是
+  `hbot(npatch) = htoplc(npatch)*hbot0(m)/htop0(m)` —— 从**已读的**
+  `htop` 缩放算出来。写进 `site.nc` 是惰性的
+- `SAI` 标量同理。`mksrfdata` 只读 `SAI_monthly`
+
+**「源码里有一张表」不等于「这条路会用它」。** 查表的存在只说明
+某个阶段需要那个量，不说明它从哪来。
+
+### LAI 与 SAI 是绑在一起的一对
+
+`MOD_SingleSrfdata.F90:505-506`：
+
+```fortran
+u_site_lai = readflag .and. ncio_var_exist(fsrfdata,'LAI_monthly',readflag) &
+                     .and. ncio_var_exist(fsrfdata,'SAI_monthly',readflag)
+```
+
+**`.and.` —— 缺一个，两个都不用**，一起回落到 `plant_15s/` 栅格。
+所以缺口是「LAI + SAI 月气候态」一对，不是「LAI 一个」。
+
+**而且变量名随 LULC 变**（与未决问题 8 那条线直接相关）：
+
+```fortran
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+   'LAI_pfts_monthly' / 'SAI_pfts_monthly'
+#else
+   'LAI_monthly' / 'SAI_monthly'
+#endif
+```
+
+### 所以 B 的承诺是
+
+```
+经纬度 + 地类  →  12 个必需字段 + canopy_height（都有依据）
+LAI/SAI 月气候态 →  必须来自外部：<rawdata>/plant_15s/，或站点文件自带
+```
+
+**不编造季节曲线。** CoLM 的设计里 LAI 从来只从遥感或实测数据读，
+伪造一条塞进 `site.nc` 是编造科学输入数据。
+
+这个组合对应一个真实场景：**通量站通常测 LAI，但很少有完整的
+土壤剖面**。用户有 LAI 观测、没有土壤数据，正是 B 该服务的人。
+
+---
+
 ## 0. 先读这一节：现有能力的边界（已核实，2026-08-20）
 
 ### `site::fill` 的三级回落，覆盖的只是那 12 个字段
