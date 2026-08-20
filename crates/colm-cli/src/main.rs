@@ -558,8 +558,21 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // （那正是 `prepare_urban` 存在的理由）。所以先看这一条更硬的证据——
     // 地类缺席只在文件确实还缺这 12 个字段时，才说明它是城市站点。
     let already_filled = colm_srfdata::site::missing_fields(&site_raw)?.is_empty();
-    let looks_like_plumber2 =
-        already_filled || colm_srfdata::site::location(&site_raw)?.landtype.is_some();
+    // **但「已补齐」不等于「不是城市站」。** 一个已经建过算例的城市
+    // `site.nc` 同样是 12/12 齐全的（`prepare_urban` 补的），把它重新喂回来
+    // 会被当成 PLUMBER2，于是 `SITE_landtype = 13` 与
+    // `DEF_URBAN_type_scheme = 2` 一个都不写 —— 站点文件里有城市数据、
+    // namelist 却不跑城市模块，**跑得完，结果全错**。
+    //
+    // 实测过：改判据之前那条路会撞 `NC_ENAMEINUSE` 而失败，加了
+    // `already_filled` 之后变成静默产出错误配置。**从报错退化成静默错误。**
+    //
+    // `LCZ_DOM`（局地气候区分类）只有城市路径写，拿它当第二条证据。
+    let has_urban_marker = netcdf::open(&site_raw)
+        .ok()
+        .is_some_and(|f| f.variable("LCZ_DOM").is_some());
+    let looks_like_plumber2 = !has_urban_marker
+        && (already_filled || colm_srfdata::site::location(&site_raw)?.landtype.is_some());
     // 没有 `--urban` 开关：拿一个草地站强行跑城市只会在 NCAR 属性表上越界，
     // 而一个城市站不跑城市模块也没有意义。判据完全交给站点文件的形状。
     let urban = !looks_like_plumber2;
@@ -577,6 +590,13 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             )
         })?;
         println!("site: already has all 12 required fields (from site-new or a prior fill); copied as-is");
+        // **已补齐的城市站点文件不必再查预抽表。** 那张表回答的是
+        // 「这个站点的城市数据能不能不靠 `--rawdata` 拿到」，而这份文件
+        // 里已经有了 —— `prepare_urban` 上一次建算例时就写进去了。
+        //
+        // 不置这一位的话，重新喂回来的城市 `site.nc` 会因为算例名不在
+        // 那 21 个站里而被要求 `--rawdata`，尽管它一个字节都不需要。
+        urban_covered = true;
     } else if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
