@@ -15,3 +15,4 @@ target/
 /gui/src-tauri/gen/
 # 打包时暂存进去的 sidecar 副本（由 `xtask stage-sidecar` 生成）
 /gui/src-tauri/binaries/
+/.playwright-mcp/
