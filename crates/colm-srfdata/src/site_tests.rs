@@ -330,6 +330,49 @@ fn the_site_files_own_lcz_class_is_not_overwritten() {
     );
 }
 
+// ---------------------------------------------------------- bare coordinates
+
+#[test]
+fn a_site_with_only_coordinates_can_still_be_filled() {
+    // **这是阶段 B 的地基。** 用户只给经纬度时，`read_inputs` 会在
+    // `soil_vf_sand missing` 上直接失败 —— 那六个 8 层数组是它的硬性
+    // 输入，而用户手边多半没有。
+    //
+    // 期望：那四个由剖面推导的字段（soil_texture / vf_clay / wf_clay /
+    // wf_om）走 rawdata 或模块默认值，与另外八个一样。
+    let dir = std::env::temp_dir().join(format!("colm-site-bare-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("bare_site.nc");
+    {
+        let mut f = netcdf::create(&src).unwrap();
+        let mut lon = f.add_variable::<f64>("longitude", &[]).unwrap();
+        lon.put_values(&[123.5092], netcdf::Extents::All).unwrap();
+        let mut lat = f.add_variable::<f64>("latitude", &[]).unwrap();
+        lat.put_values(&[44.5933], netcdf::Extents::All).unwrap();
+    }
+
+    let dst = dir.join("filled.nc");
+    let rep = super::fill(&src, &dst, None, None).expect("只有经纬度也该能补齐");
+
+    let missing = super::missing_fields(&dst).expect("readable");
+    assert!(missing.is_empty(), "12 个字段该齐全，缺：{missing:?}");
+
+    let total = rep.from_site.len() + rep.from_raster.len() + rep.from_default.len();
+    assert_eq!(
+        total, 12,
+        "每个字段都要归到某一级：site={:?} raster={:?} default={:?}",
+        rep.from_site, rep.from_raster, rep.from_default
+    );
+    // 只给了经纬度、也没给 rawdata，所以 12 个应当全在 default 里。
+    assert!(
+        rep.from_site.is_empty(),
+        "站点文件里什么都没有：{:?}",
+        rep.from_site
+    );
+}
+
 /// 第二批的 `source` 也必须说「量出来的」，不能沾 synthesized/assumed。
 #[test]
 fn the_extra_source_says_measured_not_assumed() {

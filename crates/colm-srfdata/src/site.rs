@@ -97,14 +97,24 @@ pub fn fill(
     std::fs::copy(src, dst)
         .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
 
-    let (lon, lat, landtype, col, soil_dim) = read_inputs(dst)?;
-    let d = derive(&col);
-    let fe = fine_earth_fractions(&col);
+    let Inputs {
+        lon,
+        lat,
+        landtype,
+        col,
+        soil_dim,
+    } = read_inputs(dst)?;
+    // 土壤剖面：站点文件没有它时 `col`/`soil_dim` 都是 `None`——那四个
+    // 由剖面推导的字段（texture 与下面的 vf_clay/wf_clay/wf_om）这时退到
+    // 栅格或本 crate 自己发明的标称假设，见下面两处。
+    let derived = col.as_ref().map(|c| (derive(c), fine_earth_fractions(c)));
 
     // --- 站点自己有的 ---
     // 质地类别由站点文件自己的土壤剖面算得（`classify` 在输入落到 USDA 三角外
     // 时返回 None）；高程取自同站 Observation 文件的 "Site elevation"。
-    let site_texture = classify(fe.silt, fe.clay);
+    let site_texture = derived
+        .as_ref()
+        .and_then(|(_, fe)| classify(fe.silt, fe.clay));
     let site_elevation = observation.and_then(|o| read_site_elevation(o).ok());
 
     // --- CoLM 的全球栅格 ---
@@ -136,12 +146,25 @@ pub fn fill(
         None => (None, None, None, None, None),
     };
 
-    let (texture, texture_src) = resolve(site_texture, raster_texture, None).with_context(|| {
-        format!(
-            "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle and no texture raster is available",
-            fe.sand, fe.silt, fe.clay
-        )
-    })?;
+    // 没有剖面时 texture 还能再退一级：一个标称假设（loam，USDA 三角里最
+    // 居中的一类）。**这不是 CoLM 的模块默认值**——`MOD_SingleSrfdata.F90`
+    // 对这四个推导量压根没有硬编码默认，缺剖面就必须读栅格（见下面
+    // `fill_clay_and_om_without_a_profile` 的文档）。写清楚是这个 crate
+    // 自己发明的兜底，用法与下面的 `NOMINAL_ISC` 一样。
+    // 有剖面但落在三角外、又没有栅格时**仍然报错，不猜**——那是站点自己的
+    // 数据有问题，与「压根没给剖面」是两回事。
+    const NOMINAL_TEXTURE: u8 = 7;
+    let texture_fallback = col.is_none().then_some(NOMINAL_TEXTURE);
+    let (texture, texture_src) =
+        resolve(site_texture, raster_texture, texture_fallback).with_context(|| {
+            let (_, fe) = derived
+                .as_ref()
+                .expect("texture resolution only fails when the site has its own soil profile");
+            format!(
+                "sand {:.2} silt {:.2} clay {:.2} is outside the USDA triangle and no texture raster is available",
+                fe.sand, fe.silt, fe.clay
+            )
+        })?;
 
     let mut f =
         netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
@@ -152,7 +175,11 @@ pub fn fill(
         raster_texture,
         texture_name: CLASS_NAMES[(texture - 1) as usize].to_string(),
         bvic: BVIC_USDA[texture as usize],
-        fine_earth: (fe.sand, fe.silt, fe.clay),
+        // 没有剖面时这三个数没有意义（没有细土可加权），写 (0,0,0)。
+        fine_earth: derived
+            .as_ref()
+            .map(|(_, fe)| (fe.sand, fe.silt, fe.clay))
+            .unwrap_or((0.0, 0.0, 0.0)),
         from_site: Vec::new(),
         from_raster: Vec::new(),
         from_default: Vec::new(),
@@ -163,9 +190,13 @@ pub fn fill(
     // 而是把它当成实测值且不管站点在哪都用它：实测 90 个站点里只有 1 个是 10。
     const NOMINAL_ISC: i32 = 10;
     let (use_isc, isc_src) = resolve(None, isc, Some(NOMINAL_ISC)).expect("has a fallback");
-    let a = albedo(use_isc, landtype).with_context(|| {
+    // 没有 IGBP 地类时（比如只给经纬度的站点文件）退到 grassland(10)——它
+    // 既不是水体也不是冰盖，保证反照率查得到；真实值优先，这只在缺失时顶上。
+    const NOMINAL_LANDTYPE: i32 = 10;
+    let use_landtype = landtype.unwrap_or(NOMINAL_LANDTYPE);
+    let a = albedo(use_isc, use_landtype).with_context(|| {
         format!(
-            "no soil albedo for colour class {use_isc} and IGBP land type {landtype}; \
+            "no soil albedo for colour class {use_isc} and IGBP land type {use_landtype}; \
              CoLM leaves these at spval for water and ice, which this crate will not write silently"
         )
     })?;
@@ -238,32 +269,52 @@ pub fn fill(
         report.record(name, src);
     }
 
-    // --- 由站点文件自己的土壤剖面推导的三个 ---
+    // --- 由站点文件自己的土壤剖面推导的三个，或者没有剖面时的回落 ---
     // 维度取自它们各自的来源变量，而不是按长度去猜：站点文件里
     // LAI_year=2 / month=12 / pft=2 / soil=10 / year=21，按长度找只是碰巧
     // 不重复，而 dimensions() 的迭代顺序并无保证。
-    let clay_note =
-        "site: clay is 25% of the remainder in its own basis (loam 1:3 clay:silt assumption)";
-    put_layers(&mut f, "soil_vf_clay", &d.vf_clay, &soil_dim, clay_note)?;
-    put_layers(&mut f, "soil_wf_clay", &d.wf_clay, &soil_dim, clay_note)?;
-    put_layers(
-        &mut f,
-        "soil_wf_om",
-        &d.wf_om,
-        &soil_dim,
-        "site: OM_density / BD_all",
-    )?;
-    for name in ["soil_vf_clay", "soil_wf_clay", "soil_wf_om"] {
-        report.record(name, Source::Site);
+    if let Some((d, _)) = &derived {
+        let dim = soil_dim
+            .as_deref()
+            .expect("derived is only Some when read_inputs found a profile, which always came with a dimension");
+        let clay_note =
+            "site: clay is 25% of the remainder in its own basis (loam 1:3 clay:silt assumption)";
+        put_layers(&mut f, "soil_vf_clay", &d.vf_clay, dim, clay_note)?;
+        put_layers(&mut f, "soil_wf_clay", &d.wf_clay, dim, clay_note)?;
+        put_layers(
+            &mut f,
+            "soil_wf_om",
+            &d.wf_om,
+            dim,
+            "site: OM_density / BD_all",
+        )?;
+        for name in ["soil_vf_clay", "soil_wf_clay", "soil_wf_om"] {
+            report.record(name, Source::Site);
+        }
+    } else {
+        fill_clay_and_om_without_a_profile(&mut f, rawdata, lon, lat, &mut report)?;
     }
 
     let texture_note = match texture_src {
-        Source::Site => format!(
-            "site: CoLM USDA triangle on this site's own 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% (clay is an assumption) -> class {} ({}), BVIC {}",
-            fe.sand, fe.silt, fe.clay, texture, report.texture_name, report.bvic
-        ),
-        _ => format!(
+        Source::Site => {
+            let (_, fe) = derived
+                .as_ref()
+                .expect("Source::Site for texture only happens when the site has its own soil profile");
+            format!(
+                "site: CoLM USDA triangle on this site's own 0-60cm depth-weighted sand {:.2}% / silt {:.2}% / clay {:.2}% (clay is an assumption) -> class {} ({}), BVIC {}",
+                fe.sand, fe.silt, fe.clay, texture, report.texture_name, report.bvic
+            )
+        }
+        Source::Raster if col.is_some() => format!(
             "rawdata soil/soiltexture_0cm-60cm_mean.nc -> class {} ({}), BVIC {}; the site's own soil fell outside the USDA triangle",
+            texture, report.texture_name, report.bvic
+        ),
+        Source::Raster => format!(
+            "rawdata soil/soiltexture_0cm-60cm_mean.nc -> class {} ({}), BVIC {}; no site soil profile was given",
+            texture, report.texture_name, report.bvic
+        ),
+        Source::Default => format!(
+            "synthesized: no site soil profile and no rawdata texture raster; nominal loam assumption -> class {} ({}), BVIC {}",
             texture, report.texture_name, report.bvic
         ),
     };
@@ -280,7 +331,10 @@ pub enum Source {
     Site,
     /// CoLM 的全球栅格。
     Raster,
-    /// CoLM 的模块默认值。站点与栅格都没有时才用。
+    /// 站点与栅格都没有时才用。多数字段是 CoLM 的模块默认值；`soil_texture`
+    /// 与 `soil_vf_clay`/`soil_wf_clay`/`soil_wf_om` 例外——CoLM 对这四个
+    /// 量根本没有硬编码默认（缺剖面就必须读栅格），落到这一级时用的是
+    /// 这个 crate 自己发明的标称假设，`source` 属性里会写 `synthesized:`。
     Default,
 }
 
@@ -308,6 +362,9 @@ pub struct Report {
     pub raster_texture: Option<u8>,
     pub texture_name: String,
     pub bvic: f64,
+    /// 0–60cm 深度加权的 sand/silt/clay 百分数。**站点没有土壤剖面时
+    /// （`col` 为 `None`，即用户只给了经纬度）这三个数没有意义，是
+    /// `(0.0, 0.0, 0.0)`。**
     pub fine_earth: (f64, f64, f64),
     /// 取自站点自有数据的字段。
     pub from_site: Vec<String>,
@@ -345,7 +402,29 @@ fn read_site_elevation(obs: &Path) -> Result<f64> {
     Ok(e)
 }
 
-fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn, String)> {
+/// `read_inputs` 读到的东西。**土壤剖面 (`col`) 与地类都可能是 `None`**——
+/// 经纬度是这里唯一硬性的两项，没有它连栅格都抽不了。
+struct Inputs {
+    lon: f64,
+    lat: f64,
+    landtype: Option<i32>,
+    col: Option<SoilColumn>,
+    /// `col` 的六个数组挂着的维度名；`col` 是 `None` 时这个也是 `None`。
+    soil_dim: Option<String>,
+}
+
+/// 站点文件里读得到什么就读什么。
+///
+/// **土壤剖面与地类都可能不在。** 用户只给经纬度是阶段 B 的主路径，而
+/// PLUMBER2 那种带完整剖面的文件是幸运情况，不是前提。城市站点文件也不带
+/// `IGBP_classification`——`Location` 的文档早就写明了这件事
+/// （「城市站点文件不带它，故为 `Option`」），这里只是让 `read_inputs`
+/// 跟上，好让 `fill` 也能直接吃一份只有经纬度的文件。
+///
+/// 六个 8 层数组要么全在要么当它整体不在：只有一部分时按 `derive.rs`
+/// 模块文档的说法混用会推出负的剩余量，那不是「缺一点点」，是「基准全乱
+/// 了」，不该假装能凑出一份剖面。
+fn read_inputs(file: &Path) -> Result<Inputs> {
     let f = netcdf::open(file)?;
     let scalar = |n: &str| -> Result<f64> {
         let v = f.variable(n).with_context(|| format!("{n} missing"))?;
@@ -356,23 +435,129 @@ fn read_inputs(file: &Path) -> Result<(f64, f64, i32, SoilColumn, String)> {
         let v = f.variable(n).with_context(|| format!("{n} missing"))?;
         Ok(v.get_values(netcdf::Extents::All)?)
     };
+
+    // 经纬度仍然是硬性的：没有它连栅格都抽不了。
     let lon = scalar("longitude")?;
     let lat = scalar("latitude")?;
-    let landtype = scalar("IGBP_classification")? as i32;
-    let col = SoilColumn {
-        vf_sand: layers("soil_vf_sand")?,
-        vf_gravels: layers("soil_vf_gravels")?,
-        vf_om: layers("soil_vf_om")?,
-        wf_sand: layers("soil_wf_sand")?,
-        om_density: layers("soil_OM_density")?,
-        bd_all: layers("soil_BD_all")?,
+
+    let landtype = match f.variable("IGBP_classification") {
+        Some(v) => {
+            let x: Vec<f64> = v.get_values(netcdf::Extents::All)?;
+            Some(x.first().copied().context("IGBP_classification is empty")? as i32)
+        }
+        None => None,
     };
-    // 推导出来的剖面变量要挂在与来源变量同一个维度上。
-    let soil_dim = f
-        .variable("soil_vf_sand")
-        .and_then(|v| v.dimensions().first().map(|d| d.name()))
-        .context("soil_vf_sand has no dimension to hang the derived layers on")?;
-    Ok((lon, lat, landtype, col, soil_dim))
+
+    const PROFILE_VARS: [&str; 6] = [
+        "soil_vf_sand",
+        "soil_vf_gravels",
+        "soil_vf_om",
+        "soil_wf_sand",
+        "soil_OM_density",
+        "soil_BD_all",
+    ];
+    let (col, soil_dim) = if PROFILE_VARS.iter().all(|n| f.variable(n).is_some()) {
+        let col = SoilColumn {
+            vf_sand: layers("soil_vf_sand")?,
+            vf_gravels: layers("soil_vf_gravels")?,
+            vf_om: layers("soil_vf_om")?,
+            wf_sand: layers("soil_wf_sand")?,
+            om_density: layers("soil_OM_density")?,
+            bd_all: layers("soil_BD_all")?,
+        };
+        // 推导出来的剖面变量要挂在与来源变量同一个维度上。
+        let dim = f
+            .variable("soil_vf_sand")
+            .and_then(|v| v.dimensions().first().map(|d| d.name()))
+            .context("soil_vf_sand has no dimension to hang the derived layers on")?;
+        (Some(col), Some(dim))
+    } else {
+        (None, None)
+    };
+
+    Ok(Inputs {
+        lon,
+        lat,
+        landtype,
+        col,
+        soil_dim,
+    })
+}
+
+/// 站点没有自己的土壤剖面时，`soil_vf_clay` / `soil_wf_clay` / `soil_wf_om`
+/// 退到的路径：栅格逐层抽取，再不行就是本 crate 自己发明的标称假设。
+///
+/// **CoLM 的 Fortran 对这三个量没有模块默认值**——
+/// `MOD_SingleSrfdata.F90:801-882` 缺剖面时无条件读
+/// `<rawdata>/soil/{vf_clay,wf_clay,wf_om}_s.nc` 的 8 个变量
+/// `..._s_l1`..`..._s_l8`，没有 rawdata 就没有第三级可退，直接在读栅格那步
+/// 报错。这里替它多做一级，因为「只给经纬度、也不给 rawdata」正是阶段 B
+/// 的主路径，用户手边多半也没有这三个栅格。
+fn fill_clay_and_om_without_a_profile(
+    f: &mut netcdf::FileMut,
+    rawdata: Option<&Path>,
+    lon: f64,
+    lat: f64,
+    report: &mut Report,
+) -> Result<()> {
+    // 兜底不是测出来的：取 loam 的居中黏粒占比（USDA 三角 class 7 的形心
+    // 大致是 sand 43% / silt 39% / clay 18%）与一个温和的有机质假设。
+    const NOMINAL_VF_CLAY: f64 = 0.18;
+    const NOMINAL_WF_CLAY: f64 = 0.18;
+    const NOMINAL_WF_OM: f64 = 0.02;
+    // 8 层挂在自建的维度上：没有剖面就没有任何土壤维度可借
+    // （`put_urban_soil` 对城市站点用的是同一个办法）。
+    const DIM: &str = "soil";
+    if f.dimension(DIM).is_none() {
+        f.add_dimension(DIM, 8)?;
+    }
+
+    for (name, prefix, fallback, fallback_note) in [
+        (
+            "soil_vf_clay",
+            "vf_clay",
+            NOMINAL_VF_CLAY,
+            "synthesized: no site soil profile and no rawdata raster; nominal loam clay fraction",
+        ),
+        (
+            "soil_wf_clay",
+            "wf_clay",
+            NOMINAL_WF_CLAY,
+            "synthesized: no site soil profile and no rawdata raster; nominal loam clay fraction",
+        ),
+        (
+            "soil_wf_om",
+            "wf_om",
+            NOMINAL_WF_OM,
+            "synthesized: no site soil profile and no rawdata raster; nominal organic-matter fraction",
+        ),
+    ] {
+        let raster = rawdata.and_then(|r| raster_layers(r, prefix, lon, lat));
+        let (values, src, note) = match raster {
+            Some(layers) => (
+                layers,
+                Source::Raster,
+                format!("rawdata soil/{prefix}_s.nc at this site"),
+            ),
+            None => ([fallback; 8], Source::Default, fallback_note.to_string()),
+        };
+        put_layers(f, name, &values, DIM, &note)?;
+        report.record(name, src);
+    }
+    Ok(())
+}
+
+/// 从 `<rawdata>/soil/<prefix>_s.nc` 的 8 个变量 `<prefix>_s_l1..l8`
+/// 按点逐层抽取。八层缺一层就整体放弃——混一层栅格一层假设不是三级回落
+/// 的本意。文件名与变量名都照抄 `MOD_SingleSrfdata.F90:801-882`。
+fn raster_layers(rawdata: &Path, prefix: &str, lon: f64, lat: f64) -> Option<[f64; 8]> {
+    let file = rawdata.join("soil").join(format!("{prefix}_s.nc"));
+    let mut out = [0.0; 8];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let var = format!("{prefix}_s_l{}", i + 1);
+        *slot = point_f64(&file, &var, lon, lat).ok()?;
+    }
+    Some(out)
 }
 
 fn put_scalar(f: &mut netcdf::FileMut, name: &str, value: f64, source: &str) -> Result<()> {
