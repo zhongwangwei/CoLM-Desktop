@@ -8,7 +8,11 @@ import { $ } from './ui.js';
 
 /** 会被记住的框。**只记目录与内核，不记算例名** ——
  *  那个每次都不一样，填回上次的反而误导。 */
-const REMEMBERED = ['sitedir', 'root', 'kernel', 'obs'];
+// **加新字段时要同时改这里。** `wirePickers()` 会把任何带 `data-for`
+// 的选择结果写进 `recent.json`，但**恢复只认这张表** —— 漏了的字段
+// 表现是「选过的东西下次打开没了」，而旁边的字段都还在，看着像随机失灵。
+// `fsrc`（前处理页的强迫场文件）就漏过一次，真机验收才发现。
+const REMEMBERED = ['sitedir', 'root', 'kernel', 'obs', 'fsrc'];
 
 export async function restoreRecent() {
   let all = {};
