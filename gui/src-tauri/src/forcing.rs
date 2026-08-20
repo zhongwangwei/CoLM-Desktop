@@ -41,6 +41,19 @@ pub struct Probe {
     pub height_v: Option<f64>,
     pub height_t: Option<f64>,
     pub height_q: Option<f64>,
+    /// 建议的产物目录，界面上预填。
+    ///
+    /// **不能留空让人手打。** 产物目录是转换的必填项，而路径打错一个
+    /// 字符，报错会出现在完全无关的地方（`rfd` 那条依赖的注释就是为这个
+    /// 加的）。这里给一个必定可写、必定不含空格、必定与源文件不同目录的
+    /// 位置 —— 三条都是硬要求：后端拒绝同目录，而 CoLM 的
+    /// `mkdir -p` 不加引号，路径含空格会建出影子目录树。
+    ///
+    /// 与 `~/CoLM-cases` 平行（见 `example.rs` 的 `cases_root`）。
+    /// `colm-cli forcing-probe` 不输出这个字段，所以要 `serde(default)`
+    /// —— 它是 GUI 侧补上的，不属于那份 JSON 契约。
+    #[serde(default)]
+    pub suggest_dst: String,
 }
 
 /// 探一份强迫场文件：变量列表、自动猜出来的槽位映射、时间轴、高度。
@@ -49,15 +62,34 @@ pub struct Probe {
 /// 变量名猜错的后果是「跑得完、结果全错」，而曲线照样是曲线，
 /// 界面上什么都看不出来。
 #[tauri::command]
-pub async fn probe_forcing(path: String) -> Result<Probe, String> {
+pub async fn probe_forcing(app: tauri::AppHandle, path: String) -> Result<Probe, String> {
     let json =
         crate::sidecar::capture(&["forcing-probe".into(), path, "--json".into(), "1".into()])?;
-    serde_json::from_str(&json).map_err(|e| {
+    let mut probe: Probe = serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是探测失败 —— 照 `scan_sites` 的措辞。
         // 两者的处置完全不同：前者是我们两边的结构体对不上了，
         // 后者是用户给的文件有问题。
         format!("colm-cli forcing-probe 的输出解析不了（两边的字段可能已经对不上）：{e}")
-    })
+    })?;
+    probe.suggest_dst = suggested_dst(&app);
+    Ok(probe)
+}
+
+/// 建议的产物目录：`~/CoLM-forcing`。
+///
+/// 与 `example.rs` 的 `cases_root` 同一套理由，不重复写 —— 简言之是
+/// **不含空格**（CoLM 的 `mkdir -p` 不加引号）、**不在 TCC 保护目录下**
+/// （`~/Documents` 会弹系统权限框）、**必定不与源文件同目录**
+/// （后端会拒绝同目录，原始数据永远不动）。
+///
+/// 拿不到主目录时返回空串，界面上就是个空框 —— 那时候让人自己填，
+/// 比塞一个猜的路径强。
+fn suggested_dst(app: &tauri::AppHandle) -> String {
+    use tauri::Manager;
+    app.path()
+        .home_dir()
+        .map(|h| h.join("CoLM-forcing").display().to_string())
+        .unwrap_or_default()
 }
 
 /// 用户对一个槽位的选择（或确认了猜测）。

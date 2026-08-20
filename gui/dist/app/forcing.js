@@ -60,6 +60,9 @@ $('fprobe').onclick = async () => {
     unitsInput = probe.slots.map(s => s.units ?? '');
     extras = probe.slots.map(() => []);
     heights = { v: probe.height_v, t: probe.height_t, q: probe.height_q };
+    // 产物目录只在还没填过时用后端建议的那个 —— 用户改过就别再动它，
+    // 换一份源文件重新探测不该把他填的路径冲掉。
+    if (!dstDir) dstDir = probe.suggest_dst ?? '';
     confirmed = false;
     lastResult = null;
     renderCards();
