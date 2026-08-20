@@ -17,6 +17,7 @@ mod presets;
 mod project;
 mod recent;
 mod sidecar;
+mod sitedata;
 mod sites;
 
 use config::*;
@@ -27,6 +28,7 @@ use presets::*;
 use project::*;
 use recent::*;
 use sidecar::*;
+use sitedata::*;
 use sites::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,6 +47,7 @@ pub fn run() {
             scan_sites,
             probe_forcing,
             convert_forcing,
+            make_site,
             new_case,
             read_text,
             read_case,

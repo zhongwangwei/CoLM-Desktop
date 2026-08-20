@@ -10,9 +10,11 @@ import { refreshPresets } from './presets.js';
 import { restoreRecent, wirePickers } from './recent.js';
 import { showDomainGate } from './domain.js';
 import { renderCases, checkRootSpace } from './sites.js';
-// 只为它顶层的 `$('fprobe').onclick = …` 接线而 import —— 前处理页的
-// 探测/映射/高度/确认状态整页都是内部状态，没有别的模块要用它的导出。
+// 只为它们顶层的 `$('fprobe').onclick = …` / `$('smake').onclick = …`
+// 接线而 import —— 前处理页两个子栏（强迫场、站点属性）的状态都是各自
+// 模块内部的闭包变量，没有别的模块要用它们的导出。
 import './forcing.js';
+import './sitedata.js';
 
 initShell();
 

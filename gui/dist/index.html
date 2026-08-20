@@ -33,8 +33,15 @@
 
   <main class="work" id="work">
 
-    <!-- ① 前处理：目前只有强迫场子栏（design-prep.md §2.1 阶段 A）。
-         站点属性、观测两个子栏还没做，见 docs/design-prep.md §2.2/§2.3。 -->
+    <!-- ① 前处理：强迫场、站点属性两个子栏（design-prep.md §2.1/§2.2，
+         阶段 A + B）。观测子栏还没做，见 docs/design-prep.md §2.3。
+
+         两个子栏同页顺序摆放，不做成可切换的标签页：右栏的运行日志已经
+         用了 `.live-tabs`/`.live-pane`（见 shell.js `initShell()` 里对
+         `#livetabs` 的接线），那份接线代码不在本次改动范围内，硬套一层
+         会在这里再造一遍事件绑定；而两个子栏各自要看的东西不冲突——
+         强迫场探完不会覆盖掉站点属性的卡片，堆叠展示不丢信息，只是
+         多滚一屏。等真加了观测子栏（第三个）再看要不要收成标签页。 -->
     <section class="page" data-step="prep">
       <div class="work-head"><span class="kicker">第 1 步</span></div>
       <h1>前处理</h1>
@@ -42,6 +49,7 @@
         已经转好的会跳过 ——
         判据与第 5 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
 
+      <h2 style="font-size:15px;font-weight:700;letter-spacing:-.01em;margin:0 0 12px">强迫场</h2>
       <div class="card">
         <h3>强迫场文件</h3>
         <div class="ch">选一份原始强迫场 <code>.nc</code>，探测里面有哪些变量、
@@ -57,6 +65,65 @@
            wirePickers() 是一次性绑定，不是事件委托，动态渲染出来的 pick
            按钮不会被接线，点了没反应也不报错。 -->
       <div id="forcing-cards"></div>
+
+      <h2 style="font-size:15px;font-weight:700;letter-spacing:-.01em;margin:28px 0 12px">站点属性</h2>
+      <p class="sub">只给一对经纬度就能建出一份能跑的 <code>site.nc</code> ——
+        CoLM 无条件要读的 12 个必需字段，由 rawdata 栅格或标称假设补齐，
+        <b>每个都带来自哪里的说明</b>（<code>docs/plan-prep-b.md</code>）。</p>
+
+      <div class="card">
+        <h3>① 位置</h3>
+        <div class="ch">经纬度是唯一必填的两项。</div>
+        <div class="row">
+          <div class="field">
+            <label>经度（度）</label>
+            <input class="input" id="slon" type="number" step="any" placeholder="例如 123.5092">
+          </div>
+          <div class="field">
+            <label>纬度（度）</label>
+            <input class="input" id="slat" type="number" step="any" placeholder="例如 44.5933">
+          </div>
+        </div>
+        <div class="field" style="margin-top:13px">
+          <label>地类 <span class="hint">（可选，IGBP 分类号）</span></label>
+          <input class="input" id="slandtype" type="number" step="1" placeholder="留空 = 不写">
+          <div class="muted mini" style="margin-top:5px">
+            不填就让 CoLM 按自己的规则回落 —— <b>写一个猜的值比不写更糟</b>。
+            只有确实知道这个站点的地类时才填这一项；城市站点不受这条影响，
+            CoLM 会把地类强制成 13。
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>② 产物</h3>
+        <div class="ch">写出一份新的 <code>site.nc</code>。给了 rawdata 目录，能抽到的字段
+          就从栅格抽；抽不到的（以及压根没给 rawdata 的全部）走标称假设 ——
+          文件依然能跑，只是这些数不是这个站点的实测值。</div>
+        <div class="browse">
+          <input class="input" id="soutdir" placeholder="…/CoLM-sites">
+          <button class="btn-ghost pick" data-for="soutdir">选择…</button>
+        </div>
+        <div class="field" style="margin-top:10px">
+          <label>文件名</label>
+          <input class="input" id="soutname" value="site.nc">
+        </div>
+        <div class="field" style="margin-top:13px">
+          <label>rawdata 目录 <span class="hint">（可选）</span></label>
+          <div class="browse">
+            <input class="input" id="srawdata" placeholder="（可选）…/rawdata">
+            <button class="btn-ghost pick" data-for="srawdata">选择…</button>
+          </div>
+        </div>
+        <div class="pill-row" style="margin-top:12px">
+          <button class="btn-ghost" id="smake">生成</button>
+        </div>
+        <p class="mini" id="smake-why"></p>
+      </div>
+
+      <!-- ③ 结果：生成之后才有内容，动态渲染 —— 与 #forcing-cards 同一条
+           约束，这里面不放 pick 按钮。 -->
+      <div id="site-result"></div>
     </section>
 
     <!-- ③ 基本设定：跑一次模拟最少要定的三件事 —— 在哪跑、用什么物理、跑多久。
