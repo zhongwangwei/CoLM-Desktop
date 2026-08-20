@@ -376,5 +376,37 @@
 </div>
 
 <script src="vendor/uplot/uPlot.iife.min.js"></script>
+<!-- 诊断通道。**必须是普通 script 且排在 module 之前** —— module 是 defer 的，
+     它自己加载/解析失败时抛的错，要有人已经在听才收得到。放在 main.js 后面
+     就晚了。捕获阶段（第三个参数 true）才收得到 <script> 元素上的失败。 -->
+<script>
+(function () {
+  var q = [];
+  function iv() {
+    return window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+  }
+  // 写成 `invoke('probe_log', …)` 这个形状是**故意的**：`xtask check-gui`
+  // 扫的是 `invoke(` 后面那个字符串字面量，写成 `f(...)` 就绕过了检查,
+  // 而绕过检查意味着把命令名拼错了也没人告诉你。诊断代码同样要受检。
+  function send(m) {
+    var invoke = iv();
+    if (invoke) { invoke('probe_log', { msg: m }); } else { q.push(m); }
+  }
+  window.__probe = send;
+  window.addEventListener('error', function (e) {
+    if (e.target && e.target.tagName === 'SCRIPT') send('SCRIPT-FAILED ' + (e.target.src || 'inline'));
+    else send('ERROR ' + e.message + ' @' + e.filename + ':' + e.lineno);
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    send('REJECT ' + ((e.reason && e.reason.message) || e.reason));
+  });
+  // __TAURI__ 可能比这段晚就绪，排空积压。
+  var t = setInterval(function () {
+    var invoke = iv();
+    if (invoke) { clearInterval(t); while (q.length) invoke('probe_log', { msg: q.shift() }); }
+  }, 50);
+  send('HTML-PARSED fp=A1');
+})();
+</script>
 <script type="module" src="app/main.js"></script>
 </body>
