@@ -18,6 +18,7 @@ use anyhow::{bail, Context, Result};
 /// 字节，证明不了「我们的读写路径不丢精度」，而后者才是要验的东西。
 pub fn identity(src: &Path, dst: &Path) -> Result<()> {
     let fin = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    ensure_parent(dst)?;
     let mut fout =
         netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
 
@@ -141,6 +142,7 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
     use crate::units::convert_units;
 
     let fin = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    ensure_parent(dst)?;
     let mut fout =
         netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
 
@@ -281,6 +283,28 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             out.put_attribute("source", "given by hand in the prep page")?;
             out.put_values(&[val], netcdf::Extents::All)?;
         }
+    }
+    Ok(())
+}
+
+/// 产物的父目录不存在就建出来。
+///
+/// `netcdf::create` 只建文件，父目录得自己管 —— 而界面给的默认产物目录
+/// （`~/CoLM-forcing`）第一次用必然不存在，于是「不用打字直接点转换」
+/// 那条路径撞的是 `No such file or directory`。**真机验收才发现的**：
+/// 单测一直往 `std::env::temp_dir()` 写，那个目录永远存在。
+///
+/// 与 `colm-cli new` 对 `--out` 的处置一致：用户给了一个目标路径，
+/// 意图显然是「写到那儿」，不是「先替我确认它存在」。
+///
+/// **抽成函数是因为 `identity` 与 `convert` 的开头长得一样**
+/// （都是 `netcdf::open` + `netcdf::create`）。修这个 bug 时我的
+/// 查找替换先命中了 `identity` 那一份，对着没改到的地方调试了几轮 ——
+/// 和上一次修 `_FillValue` 时踩的是同一个坑。
+fn ensure_parent(dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     Ok(())
 }

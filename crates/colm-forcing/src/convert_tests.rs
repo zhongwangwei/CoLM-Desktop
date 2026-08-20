@@ -454,3 +454,46 @@ fn a_malformed_height_spec_says_what_it_wanted() {
         "数量不对的报错要说清楚要三个数，得到：{e}"
     );
 }
+
+#[test]
+fn a_product_directory_that_does_not_exist_yet_is_created() {
+    // **产物目录不存在时建出来，而不是报错。**
+    //
+    // 界面给的默认产物目录是 `~/CoLM-forcing`，第一次用必然不存在 ——
+    // 而 `netcdf::create` 只建文件不建目录，于是「不用打字直接点转换」
+    // 这条路径直接撞 `No such file or directory`。
+    //
+    // 真机验收才发现的：单测一直往 `std::env::temp_dir()` 写，那个目录
+    // 永远存在。**测试用的路径太顺，就测不到路径本身的问题。**
+    let root = std::env::temp_dir().join("colm-convert-mkdir");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let p = root.join("src_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        let mut v = f.add_variable::<f64>("Tair", &["time"]).unwrap();
+        v.put_attribute("units", "K").unwrap();
+        v.put_values(&[273.15, 274.15], netcdf::Extents::All)
+            .unwrap();
+    }
+
+    // 两层都不存在 —— 用户可能填一个从没建过的路径。
+    let dst = root.join("never/made/out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 1,
+            source_name: "Tair".into(),
+            source_units: "K".into(),
+            also_add: Vec::new(),
+        }],
+        heights: None,
+    };
+    super::convert(&p, &dst, &plan).expect("产物目录该被建出来");
+    assert!(dst.exists(), "产物没写出来");
+}
