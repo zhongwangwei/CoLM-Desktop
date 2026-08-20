@@ -211,6 +211,16 @@ pub fn backend_ready() -> String {
     msg
 }
 
+/// 前端把话说到 stderr。**这是这台机器上 GUI 唯一可靠的观察通道** ——
+/// AX 树读取时灵时不灵、`screencapture` 没有屏幕录制权限，两条都实测不可用。
+///
+/// 不引 `tauri-plugin-log`：那个插件要在 webview 侧注入 console 钩子，而这里
+/// 恰恰要诊断「前端代码到底跑没跑」。诊断工具依赖被诊断的那一层，说明不了问题。
+#[tauri::command]
+pub fn probe_log(msg: String) {
+    eprintln!("colm-desktop[probe]: {msg}");
+}
+
 /// 一个配置字段，交给前端渲染。
 #[derive(Serialize)]
 pub struct Field {

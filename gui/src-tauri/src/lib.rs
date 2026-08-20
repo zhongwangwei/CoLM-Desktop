@@ -40,6 +40,7 @@ pub fn run() {
         // 因为"改一个字段"与"改这一批的一个字段"必须是同一件事。
         .invoke_handler(tauri::generate_handler![
             backend_ready,
+            probe_log,
             describe_fields,
             list_cases,
             list_kernels,
