@@ -77,6 +77,7 @@ dependencies = [
  "colm-kernel",
  "colm-namelist",
  "colm-srfdata",
+ "netcdf",
  "serde",
  "serde_json",
 ]

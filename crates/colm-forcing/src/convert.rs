@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 /// 原样复制一份强迫场文件。
 ///
@@ -43,6 +43,7 @@ pub fn identity(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// 一个槽位怎么从源文件取。
+#[derive(Debug, Clone)]
 pub struct SlotPlan {
     /// 1-based，与 `slots::SLOTS` 的 `index` 对齐。
     pub index: usize,
@@ -60,14 +61,64 @@ pub struct SlotPlan {
     pub also_add: Vec<String>,
 }
 
+/// 解析一条 `--slot N=name:units[+extra[+extra...]]`。
+///
+/// 独立 bin `forcing-convert` 与 `colm-cli forcing-convert` 都要这份
+/// 解析——抽出来共用，别抄两份。抄两份意味着两处要同步改：
+/// `copy_attributes`（本文件上面）就是同一段代码抄三遍、错也有三份的
+/// 前车之鉴。
+///
+/// **报错要给出正确的形状**（`N=name:units`），不能只说「格式错误」——
+/// 用户下一步要用的正是那个形状。
+pub fn parse_slot_spec(spec: &str) -> Result<SlotPlan> {
+    let (idx, rest) = spec
+        .split_once('=')
+        .with_context(|| format!("--slot {spec:?} is not N=name:units"))?;
+    let (name, units) = rest
+        .split_once(':')
+        .with_context(|| format!("--slot {spec:?} is not N=name:units (missing :units)"))?;
+    // `--slot 4=Rainf:kg/m2/s+Snowf` —— 加号后面是要合并进同一个槽位的
+    // 变量（合并降水相态，见 `SlotPlan::also_add` 上的说明）。
+    let (units, extra) = match units.split_once('+') {
+        Some((u, e)) => (u, e.split('+').map(str::to_string).collect()),
+        None => (units, Vec::new()),
+    };
+    let index: usize = idx.parse().with_context(|| {
+        format!("--slot {spec:?} is not N=name:units ({idx:?} is not a slot number)")
+    })?;
+    Ok(SlotPlan {
+        index,
+        source_name: name.to_string(),
+        source_units: units.to_string(),
+        also_add: extra,
+    })
+}
+
 /// 观测高度。源文件没有 `reference_height_*` 时由用户在界面上填。
 ///
 /// **三个分开而不是一个值**：CoLM 的 `DEF_forcing%HEIGHT_V/T/Q` 本来
 /// 就是三个，风的观测高度与温湿的常常不同（塔上不同层）。
+#[derive(Debug, Clone, Copy)]
 pub struct Heights {
     pub v: f64,
     pub t: f64,
     pub q: f64,
+}
+
+/// 解析一条 `--height V,T,Q`。
+pub fn parse_heights(spec: &str) -> Result<Heights> {
+    let n: Vec<f64> = spec
+        .split(',')
+        .map(|x| x.trim().parse::<f64>())
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("--height {spec:?} is not V,T,Q"))?;
+    let [v, t, q] = n[..] else {
+        bail!(
+            "--height {spec:?} needs exactly three numbers, got {}",
+            n.len()
+        );
+    };
+    Ok(Heights { v, t, q })
 }
 
 /// 整份转换方案。
@@ -267,7 +318,10 @@ fn copy_attributes(from: &netcdf::Variable, to: &mut netcdf::VariableMut) -> Res
 }
 
 /// CoLM 期望每个槽位用什么单位。
-fn canonical_units(index: usize) -> &'static str {
+///
+/// `pub`：`colm-cli forcing-probe` 的 `wants` 字段要报出同一份期望，
+/// 抄一份常量表意味着两处要同步改。
+pub fn canonical_units(index: usize) -> &'static str {
     match index {
         1 => "K",     // 气温
         2 => "kg/kg", // 比湿

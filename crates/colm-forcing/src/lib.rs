@@ -25,6 +25,7 @@ pub mod units;
 
 pub use check::{check, MetSummary, REQUIRED_VARS};
 pub use civil::{civil_from_days, days_from_civil, Stamp};
+pub use convert::{canonical_units, parse_heights, parse_slot_spec};
 pub use met::summarize;
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};

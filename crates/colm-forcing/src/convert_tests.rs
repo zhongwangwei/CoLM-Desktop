@@ -403,3 +403,54 @@ fn heights_already_in_the_source_are_not_overwritten() {
         .unwrap();
     assert_eq!(got, vec![6.0], "源文件量出来的高度不该被界面填的覆盖");
 }
+
+// parse_slot_spec / parse_heights 本来在 forcing-convert.rs 里各写一份。
+// colm-cli 的 forcing-convert 子命令要同一套解析，所以抽出来共用——
+// 放在这里而不是 slots_tests.rs：`SlotPlan`/`Heights` 是 convert.rs 里
+// 的类型，让 slots.rs 反过来 `use crate::convert::SlotPlan` 会让本来
+// 单向的依赖（convert -> slots）变成互相依赖，所以解析函数留在
+// convert.rs，测试跟着放这里。
+
+#[test]
+fn a_slot_spec_parses_into_a_plan_entry() {
+    let p = super::parse_slot_spec("4=Rainf:kg/m2/s+Snowf").expect("解析");
+    assert_eq!(p.index, 4);
+    assert_eq!(p.source_name, "Rainf");
+    assert_eq!(p.source_units, "kg/m2/s");
+    assert_eq!(p.also_add, vec!["Snowf".to_string()]);
+}
+
+#[test]
+fn a_slot_spec_without_a_plus_has_nothing_to_add() {
+    let p = super::parse_slot_spec("1=TA_F:degC").expect("解析");
+    assert_eq!(p.index, 1);
+    assert!(p.also_add.is_empty());
+}
+
+#[test]
+fn a_malformed_slot_spec_says_what_it_wanted() {
+    // **报错要说出正确的形状**，不能只说「格式错误」——
+    // 用户下一步要用的正是那个形状。
+    for bad in ["4", "4=Rainf", "x=Rainf:mm/s"] {
+        let e = super::parse_slot_spec(bad).unwrap_err().to_string();
+        assert!(
+            e.contains("N=name:units"),
+            "{bad:?} 的报错要给出形状，得到：{e}"
+        );
+    }
+}
+
+#[test]
+fn heights_parse_in_order() {
+    let h = super::parse_heights("48.05,48.05,48.05").expect("解析");
+    assert_eq!((h.v, h.t, h.q), (48.05, 48.05, 48.05));
+}
+
+#[test]
+fn a_malformed_height_spec_says_what_it_wanted() {
+    let e = super::parse_heights("1,2").unwrap_err().to_string();
+    assert!(
+        e.contains("three"),
+        "数量不对的报错要说清楚要三个数，得到：{e}"
+    );
+}

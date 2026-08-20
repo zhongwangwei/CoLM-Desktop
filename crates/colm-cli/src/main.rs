@@ -44,6 +44,13 @@ usage:
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
+  colm-cli forcing-probe   <met.nc> [--json 1]
+                           # 探测一份强迫场文件：八个槽位各猜到了什么变量，
+                           # 猜不到就是 null；三个观测高度缺失时也是 null，
+                           # 不是 NaN —— GUI 前处理页据此决定问不问用户
+  colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
+                           # 与独立 bin forcing-convert 同样的行为，供 GUI 走
+                           # sidecar 调用；没给 --slot 的槽位走自动匹配
 ";
 
 fn main() -> Result<()> {
@@ -106,6 +113,20 @@ fn main() -> Result<()> {
                 None => println!("no --obs given; skipping the metrics table"),
             }
         }
+        "forcing-probe" => {
+            cmd_forcing_probe(
+                &opts.positional_at(0, "a forcing file")?,
+                opts.get("--json").is_some(),
+            )?;
+        }
+        "forcing-convert" => {
+            cmd_forcing_convert(
+                &opts.positional_at(0, "a source forcing file")?,
+                &opts.positional_at(1, "a destination file")?,
+                &opts.get_all("--slot"),
+                opts.get("--height").as_deref(),
+            )?;
+        }
         other => {
             eprintln!("unknown command: {other}\n{USAGE}");
             std::process::exit(2);
@@ -147,6 +168,16 @@ impl Opts {
             .map(|(_, v)| v.clone())
     }
 
+    /// 同一个 flag 出现多次时的全部值，按出现顺序。`forcing-convert` 的
+    /// `--slot` 每个槽位一条，`get` 只会拿到第一条。
+    fn get_all(&self, name: &str) -> Vec<String> {
+        self.flags
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
     fn need(&self, name: &str) -> Result<PathBuf> {
         match self.get(name) {
             Some(v) => Ok(PathBuf::from(v)),
@@ -165,6 +196,16 @@ impl Opts {
         match self.positional.first() {
             Some(p) => Ok(PathBuf::from(p)),
             None => bail!("a case directory is required\n{USAGE}"),
+        }
+    }
+
+    /// 第 `i` 个位置参数（0-based）。`what` 是找不到时该说它是什么——
+    /// `forcing-probe`/`forcing-convert` 的位置参数是文件而不是算例目录，
+    /// `positional_case` 那句「a case directory is required」在这里会说错话。
+    fn positional_at(&self, i: usize, what: &str) -> Result<PathBuf> {
+        match self.positional.get(i) {
+            Some(p) => Ok(PathBuf::from(p)),
+            None => bail!("{what} is required\n{USAGE}"),
         }
     }
 
@@ -1095,6 +1136,224 @@ fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
             );
         }
         None => print!("{body}"),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- forcing
+//
+// GUI 要能探测和转换强迫场，但 `gui/src-tauri` 不依赖 `colm-forcing` ——
+// 加了会把静态 netcdf + HDF5 拖进 GUI 进程（见 `cmd_series` 上面那句
+// 「GUI 进程不链接 netcdf」，以及 `oracle/Cargo.toml` 里同样为此立的
+// 注释）。所以这两条子命令走 sidecar：GUI 起 colm-cli 子进程，解析它吐出
+// 的 JSON——和 `scan` 那条路一样。
+
+/// 变量的 `units` 属性原文，没有就是 `None`。
+///
+/// `forcing-probe`（猜到的槽位要报单位）与 `forcing-convert`（自动匹配的
+/// 槽位要读源单位）都要这个，两条子命令共用一份读法。
+fn variable_units(f: &netcdf::File, name: &str) -> Option<String> {
+    f.variable(name)
+        .and_then(|v| v.attribute_value("units"))
+        .and_then(|r| r.ok())
+        .and_then(|v| match v {
+            netcdf::AttributeValue::Str(s) => Some(s),
+            _ => None,
+        })
+}
+
+/// 一个槽位探测到的结果，交给 GUI 的前处理页。
+#[derive(serde::Serialize)]
+struct SlotProbe {
+    index: usize,
+    meaning: &'static str,
+    optional: bool,
+    /// 猜不到是 `None`——JSON 里是 `null`。
+    guessed: Option<&'static str>,
+    /// 猜到的变量在源文件里的单位，读不到也是 `None`。
+    units: Option<String>,
+    /// CoLM 期望的单位（`convert::canonical_units`），与 `units` 对照着看。
+    wants: &'static str,
+}
+
+/// 探测结果的整体，`forcing-probe --json 1` 吐出的就是这个形状。
+#[derive(serde::Serialize)]
+struct ForcingProbe {
+    variables: Vec<String>,
+    slots: Vec<SlotProbe>,
+    steps: usize,
+    step_seconds: f64,
+    step_uniform: bool,
+    time_units: String,
+    /// 三个观测高度。源文件没有 `reference_height_*` 时是 `None`
+    /// （JSON 里是 `null`），不是 `NaN`——`NaN` 不是合法的 JSON 数值。
+    /// 实测 Urban-PLUMBER 的 21 个站全都没有这三个标量，PLUMBER2 的
+    /// 90 个全有，两条路都要能经过这里而不炸。
+    height_v: Option<f64>,
+    height_t: Option<f64>,
+    height_q: Option<f64>,
+}
+
+/// `NaN` 不能进 JSON（`serde_json` 序列化会报错或写出不可靠的 `null`），
+/// 所以在这里显式转成 `Option`，交给 `serde` 序列化。
+fn present(x: f64) -> Option<f64> {
+    if x.is_nan() {
+        None
+    } else {
+        Some(x)
+    }
+}
+
+/// 探测一份强迫场文件：八个槽位各猜到了什么变量、单位是什么，
+/// 以及三个观测高度有没有。**只读元数据，不读场数据**——`colm_forcing::summarize`
+/// 已经保证了这一点。
+fn cmd_forcing_probe(file: &Path, json: bool) -> Result<()> {
+    let summary = colm_forcing::summarize(file)?;
+    let (resolved, _missing) = colm_forcing::resolve(&summary.variables);
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+
+    let slots: Vec<SlotProbe> = colm_forcing::SLOTS
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let guessed = resolved.vname[i];
+            SlotProbe {
+                index: s.index,
+                meaning: s.meaning,
+                optional: s.optional,
+                units: guessed.and_then(|name| variable_units(&f, name)),
+                guessed,
+                wants: colm_forcing::canonical_units(s.index),
+            }
+        })
+        .collect();
+
+    let probe = ForcingProbe {
+        variables: summary.variables.clone(),
+        slots,
+        steps: summary.steps,
+        step_seconds: summary.step_seconds,
+        step_uniform: summary.step_uniform,
+        time_units: summary.time_units.clone(),
+        height_v: present(summary.height_v),
+        height_t: present(summary.height_t),
+        height_q: present(summary.height_q),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&probe)?);
+    } else {
+        println!(
+            "{} variable(s): {}",
+            probe.variables.len(),
+            probe.variables.join(", ")
+        );
+        for s in &probe.slots {
+            let g = s.guessed.unwrap_or("(none)");
+            let u = s.units.as_deref().unwrap_or("?");
+            println!(
+                "  slot {} ({}){} <- {g} [{u}], wants {}",
+                s.index,
+                s.meaning,
+                if s.optional { ", optional" } else { "" },
+                s.wants
+            );
+        }
+        println!(
+            "steps={} step_seconds={} uniform={}",
+            probe.steps, probe.step_seconds, probe.step_uniform
+        );
+        println!(
+            "reference heights v/t/q = {:?}/{:?}/{:?}",
+            probe.height_v, probe.height_t, probe.height_q
+        );
+    }
+    Ok(())
+}
+
+/// 与独立 bin `forcing-convert` 同样的行为：没被 `--slot` 指定的槽位走
+/// 自动匹配，带缺测的变量拦在入口，再转换。**`--slot`/`--height` 的解析
+/// 调 `colm_forcing::parse_slot_spec`/`parse_heights`**——那份解析原来在
+/// `forcing-convert.rs` 里单独一份，抄第二遍意味着两处要同步改
+/// （`convert.rs` 的 `copy_attributes` 就是同一段代码抄三遍、错也有三份
+/// 的前车之鉴）。
+fn cmd_forcing_convert(
+    src: &Path,
+    dst: &Path,
+    slot_specs: &[String],
+    height_spec: Option<&str>,
+) -> Result<()> {
+    let mut given: Vec<colm_forcing::convert::SlotPlan> = slot_specs
+        .iter()
+        .map(|s| colm_forcing::parse_slot_spec(s))
+        .collect::<Result<_>>()?;
+    let heights = height_spec.map(colm_forcing::parse_heights).transpose()?;
+
+    let summary = colm_forcing::summarize(src)?;
+    let overrides: Vec<(usize, String)> = given
+        .iter()
+        .map(|s| (s.index, s.source_name.clone()))
+        .collect();
+    let (resolved, missing) = colm_forcing::resolve_with(&summary.variables, &overrides);
+    if !missing.is_empty() {
+        for m in &missing {
+            eprintln!("  {m}");
+        }
+        // 把文件里有什么列出来——只说「缺第 3 槽」用户无从下手。
+        eprintln!("  {} has: {}", src.display(), summary.variables.join(", "));
+        bail!("{} slot(s) unresolved", missing.len());
+    }
+
+    let f = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    for (i, slot) in colm_forcing::SLOTS.iter().enumerate() {
+        if given.iter().any(|s| s.index == slot.index) {
+            continue;
+        }
+        let Some(name) = resolved.vname[i] else {
+            continue;
+        };
+        given.push(colm_forcing::convert::SlotPlan {
+            index: slot.index,
+            source_name: name.to_string(),
+            source_units: variable_units(&f, name).unwrap_or_default(),
+            also_add: Vec::new(),
+        });
+    }
+
+    // 缺测拦在入口，不在转换里悄悄处理——道理与独立 bin 一致：fill value
+    // 换算完还是个数，模型不会因此报错，只会跑出一份看着正常的错误结果。
+    for sp in &given {
+        for name in std::iter::once(&sp.source_name).chain(sp.also_add.iter()) {
+            let Some(v) = f.variable(name) else { continue };
+            let fill = match v.attribute_value("_FillValue").and_then(|r| r.ok()) {
+                Some(netcdf::AttributeValue::Float(x)) => f64::from(x),
+                Some(netcdf::AttributeValue::Double(x)) => x,
+                _ => continue,
+            };
+            let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
+            let n = vals.iter().filter(|x| (**x - fill).abs() < 1e-6).count();
+            if n > 0 {
+                bail!(
+                    "{name} has {n} missing value(s) (_FillValue = {fill}); \
+                     fill them before converting — a fill value survives unit \
+                     conversion as a plausible-looking number and the model will \
+                     run to completion with it"
+                );
+            }
+        }
+    }
+
+    let plan = colm_forcing::convert::Plan {
+        slots: given,
+        heights,
+    };
+    colm_forcing::convert::convert(src, dst, &plan)?;
+    println!("wrote {}", dst.display());
+    for s in &plan.slots {
+        println!(
+            "  slot {} <- {} ({})",
+            s.index, s.source_name, s.source_units
+        );
     }
     Ok(())
 }

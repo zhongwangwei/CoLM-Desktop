@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use colm_forcing::convert::{convert, Heights, Plan, SlotPlan};
+use colm_forcing::convert::{convert, parse_heights, parse_slot_spec, Plan, SlotPlan};
 use colm_forcing::{resolve_with, summarize, SLOTS};
 
 fn main() -> Result<()> {
@@ -32,38 +32,11 @@ fn main() -> Result<()> {
         match a.as_str() {
             "--slot" => {
                 let spec = args.next().context("--slot needs N=name:units")?;
-                let (idx, rest) = spec
-                    .split_once('=')
-                    .with_context(|| format!("--slot {spec:?} is not N=name:units"))?;
-                let (name, units) = rest
-                    .split_once(':')
-                    .with_context(|| format!("--slot {spec:?} is missing :units"))?;
-                // `--slot 4=Rainf:kg/m2/s+Snowf` —— 加号后面是要合并进
-                // 同一个槽位的变量（见 Task 4b：不合并就丢掉全部降雪）。
-                let (units, extra) = match units.split_once('+') {
-                    Some((u, e)) => (u, e.split('+').map(str::to_string).collect()),
-                    None => (units, Vec::new()),
-                };
-                given.push(SlotPlan {
-                    index: idx
-                        .parse()
-                        .with_context(|| format!("{idx:?} is not a slot number"))?,
-                    source_name: name.to_string(),
-                    source_units: units.to_string(),
-                    also_add: extra,
-                });
+                given.push(parse_slot_spec(&spec)?);
             }
             "--height" => {
                 let spec = args.next().context("--height needs V,T,Q")?;
-                let n: Vec<f64> = spec
-                    .split(',')
-                    .map(|x| x.trim().parse::<f64>())
-                    .collect::<Result<_, _>>()
-                    .with_context(|| format!("--height {spec:?} is not V,T,Q"))?;
-                let [v, t, q] = n[..] else {
-                    bail!("--height needs exactly three numbers, got {}", n.len());
-                };
-                heights = Some(Heights { v, t, q });
+                heights = Some(parse_heights(&spec)?);
             }
             other => bail!("unknown argument: {other}"),
         }

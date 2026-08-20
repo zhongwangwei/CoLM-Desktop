@@ -17,6 +17,10 @@ colm-hist = { path = "../colm-hist", features = ["io"] }
 colm-kernel = { path = "../colm-kernel" }
 colm-srfdata = { path = "../colm-srfdata" }
 anyhow.workspace = true
+# forcing-probe 要读猜到的槽位变量各自的 `units` 属性——colm-forcing
+# 已经把 static netcdf + HDF5 拉进了这颗二进制（forcing-convert 那条路
+# 早就这样），这里只是直接用它，不会让依赖图变大。
+netcdf = { workspace = true, features = ["static"] }
 # `scan` 要输出一个 90 元素、每元素 11 个字段的 JSON 数组给 GUI 解析。
 # 手写转义正是这种规模下最容易埋雷的地方（路径里一个反斜杠或一个控制字符
 # 就能让整份输出解析失败），而 `series` 那边手写是因为它只有几个固定键。
