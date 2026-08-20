@@ -499,18 +499,12 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     } else {
         86400
     };
-    // 要的窗口超出强迫场覆盖范围时**当场说**，而不是让人等一次运行再看日志。
-    if (end.0, end.1, end.2) > (e.year, e.month, e.day) {
-        bail!(
-            "--end {}-{:02}-{:02} 超出强迫场的覆盖范围（到 {}-{:02}-{:02}）",
-            end.0,
-            end.1,
-            end.2,
-            e.year,
-            e.month,
-            e.day
-        );
-    }
+    check_window(
+        start,
+        end,
+        (summary.start.year, summary.start.month, summary.start.day),
+        (e.year, e.month, e.day),
+    )?;
     // 预热。默认重复第一年 10 遍 —— 陆面模式的土壤温湿与（开了 BGC 时的）
     // 碳库是慢变量，直接从初始场跑出来的头一段并不代表这个站点的气候态。
     //
@@ -639,6 +633,51 @@ fn parse_date(s: &str) -> Result<(i32, u32, u32)> {
         bail!("date {s:?} is not YYYY-MM-DD");
     }
     Ok((p[0].parse()?, p[1].parse()?, p[2].parse()?))
+}
+
+/// `(年, 月, 日)` 写成 `YYYY-MM-DD`，只给报错用。
+fn ymd((y, m, d): (i32, u32, u32)) -> String {
+    format!("{y}-{m:02}-{d:02}")
+}
+
+/// 要跑的窗口必须落在强迫场的覆盖范围之内。
+///
+/// **越界要当场说，不能让人等一次运行再看日志。** 越界时 CoLM 是跑到
+/// 一半才报 `Forcing does not cover simulation period!` —— 那时候已经
+/// 等了几分钟，而且那句话里看不出是哪个参数写错了。
+///
+/// 原先只校验 `--end`。起点没人管，于是 `--start` 早于强迫场就一路
+/// 放行到 CoLM 里去了 —— 同一个理由，漏了一半。
+fn check_window(
+    start: (i32, u32, u32),
+    end: (i32, u32, u32),
+    forcing_start: (i32, u32, u32),
+    forcing_end: (i32, u32, u32),
+) -> Result<()> {
+    // 这条与强迫场无关，纯粹是窗口本身不成立。不拦的话建出来的算例
+    // 窗口是空的，而空输出与「跑失败了」在界面上长得一样。
+    if start > end {
+        bail!(
+            "--start {} 晚于 --end {}：这个窗口是空的",
+            ymd(start),
+            ymd(end)
+        );
+    }
+    if start < forcing_start {
+        bail!(
+            "--start {} 早于强迫场的起点（{} 起）",
+            ymd(start),
+            ymd(forcing_start)
+        );
+    }
+    if end > forcing_end {
+        bail!(
+            "--end {} 超出强迫场的覆盖范围（到 {}）",
+            ymd(end),
+            ymd(forcing_end)
+        );
+    }
+    Ok(())
 }
 
 fn text(p: &Path) -> String {
@@ -1166,3 +1205,7 @@ fn observation_year(p: &Path) -> Result<i32> {
 #[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod window_tests;
