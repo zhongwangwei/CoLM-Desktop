@@ -3745,6 +3745,48 @@ cargo run -q -p oracle --bin golden-compare -- \
 
 ---
 
+## 附：收尾时踩出的两个真缺陷（**还挡在「装完就能跑」前面**）
+
+端到端走六步时撞到，两条都在 CLI 与 GUI 双侧复现过。**不是这轮引入的**，
+但这轮才暴露出来 —— 以前城市算例根本建不出来，撞不到第二条。
+
+### 一、算例目录不能有空格
+
+CoLM 有 **55 处**不加引号的 `CALL system('mkdir -p ' // trim(dir))`。
+路径一有空格就被 shell 拆成两个参数。
+
+**实测**：算例放在 `~/Library/Application Support/…` 下时，建出了
+`/Users/zhongwangwei/Library/Application` 和一棵相对于算例目录的
+`Support/…/landdata` 影子树，真正的 `landdata/` 从没建出来 ——
+而 netCDF 报的是 **`Permission denied`**，完全指不到真正的原因。
+
+**最要命的是 GUI 的默认路径正好踩中**：「用自带的示例站点」把算例根目录
+设成 `~/Library/Application Support/edu.sysu.colm.desktop/examples/cases`。
+换成无空格目录后 CN-Cng 六步全绿。
+
+两条修法，都没动，等定夺：
+- 上游给那 55 处加引号（`'mkdir -p "' // trim(dir) // '"'`）
+- 或 Rust 侧在调内核之前把目录先建好，让 `mkdir -p` 变成空操作
+
+**在修好之前，界面至少该拦一下**：算例根目录含空格时说清楚后果，
+而不是让人对着 `Permission denied` 发呆。
+
+### 二、默认时间窗口比强迫场早一天
+
+AU-Preston 不给 `--start` 时推出 `1992-12-31`，而强迫场第一条记录在
+`1992-12-31 23:30`：
+
+```
+Model start 1992 365 86400
+Forc  start 1992 366 84600
+```
+
+`colm` 段以 `Forcing does not cover simulation period!` 失败。
+**推导保留了日期却丢了当天的时刻。**
+
+那条 `identical: 146 variables` 的验收用的是显式 `--start 1993-01-01`，
+正好绕开了它 —— 所以它躲过了城市算例那一整轮验证。
+
 ## 附：并发提交踩过的两个坑
 
 这轮有多个会话同时在一个工作目录上干活，踩到两处，都值得记：
