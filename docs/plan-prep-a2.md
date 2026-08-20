@@ -397,6 +397,38 @@ cargo run -p xtask -- check-gui
 **`xtask check-gui` 不许模块成环。** 新模块要 import 什么，先想清楚
 方向。
 
+### 文件选择器的约定（已核实）
+
+HTML 里这样写就够了，`recent.js` 的 `wirePickers()` 会接线，
+选完自动写进那个 input，还会记进 `recent.json` 下次打开时恢复：
+
+```html
+<input class="input" id="fsrc">
+<button class="btn-ghost pick" data-for="fsrc" data-file="nc">选择…</button>
+```
+
+有 `data-file` 走 `pick_file`（filter 是扩展名），没有走 `pick_folder`。
+
+### **但 `wirePickers()` 是一次性绑定，不是事件委托**
+
+```js
+for (const b of document.querySelectorAll('button.pick'))   // boot() 里跑一次
+```
+
+**动态渲染出来的 `pick` 按钮不会被接线** —— 点了没反应，而且不报错。
+
+所以：**① 选文件那张卡片静态放在 `index.html` 里**，别动态渲染。
+后面三张（探测结果、时间轴与高度、转换）在探完之后才有内容，
+动态渲染没问题 —— 只要它们里面不含 `pick` 按钮。
+
+若某张动态卡片确实需要 `pick`，渲染完要再调一次 `wirePickers()`，
+**并在注释里写明为什么**。
+
+这与之前修过的两个 bug 是同一类：`restoreRecent` 赋值不派发 `change`
+（`main.js` 里补了一次显式调用）、`#kernel` 选了不触发 `onchange`
+（`recent.js` 里补了 `dispatchEvent`）。**「做了动作，但依赖它的那
+一半没跑」—— 这个形状在这个代码库里出现过三次了。**
+
 - [ ] **Step 2: 界面形状**
 
 四张卡片，顺序不可换（后一张依赖前一张的结果）：
