@@ -236,6 +236,7 @@ function renderFoot() {
     // 只回页，不碰 `picked` —— 保留已选的正是判据②要的行为。
     prev.onclick = () => { pageIdx -= 1; render(); };
     foot.appendChild(prev);
+  }
 
   const page = PAGES[pageIdx];
   const sel = page === 'domain' ? picked.domain : picked.subgrid;

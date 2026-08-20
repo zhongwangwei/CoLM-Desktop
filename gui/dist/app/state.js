@@ -11,24 +11,18 @@ export const state = {
   /** 这次要跑什么。'site' | 'region' | 'global'，进门向导第 1 页设的。
    *  区域与全球还没有步骤链，现在只可能是 'site'。 */
   domain: null,
-  // 次网格方案：IGBP / USGS / PFT / PC，进门第 2 页选。
-  // 与 `domain` 一样现在零读取点 —— 等宏改造完成后落到 case.nml。
+  /** 次网格怎么分。'IGBP' | 'USGS' | 'PFT' | 'PC'，进门向导第 2 页设的。
+   *
+   *  **没有「预设」那一层。** 曾经在第 2 页问过「从哪套配置开始」
+   *  （默认/碳氮循环/城市/自定义），后来去掉了 —— 那是个中间概念，
+   *  而用户真正要定的就是次网格方案本身。少一层转换，少一处对不上。
+   *
+   *  除 'IGBP' 外现在选不到：`LULC_USGS` 的数组尺寸由
+   *  `N_land_classification` 定死，仍是编译期宏（见
+   *  docs/plan-macro-runtime.md 的止损那节）；PFT/PC 要等宏改造完成。
+   *
+   *  跟 `domain` 一样零读取点 —— 落到 case.nml 是后面几页落地时的事。 */
   subgrid: null,
-  /** 这次研究什么过程。'default' | 'carbon_nitrogen' | 'urban' | 'custom'，
-   *  进门向导第 2 页设的。**只管物理过程（要不要 BGC/CROP/URBAN），
-   *  不绑定次网格方案或土壤水力**——那两项是第 3、4 页各自独立选的
-   *  （docs/design-gate.md「默认只管物理过程，不绑定 LULC」一节）。
-   *  「default」这个名字没问题——预设的语义是「填好第 5 页的初值，
-   *  逐页可见、随时能改」，不是「跳过后面几页」，所以它不是「正确
-   *  答案」，只是「不知道从哪开始时的起点」（docs/design-gate.md
-   *  「预设是填好后面几页，不是跳过后面几页」一节）。除 'default'
-   *  外现在选不到 —— CoLM 宏改造（docs/plan-macro-runtime.md）没
-   *  完成之前，内核只有这一套，别的档位在 domain.js 里置灰。跟
-   *  `domain` 一样零读取点：落到 case.nml 是宏改造完成后的事
-   *  （docs/design-gate.md §3），这一步只把状态机立起来。 */
-   *  第 5 页（其余物理开关）落地后从这里读起始值。形如
-   *  `{ bgc, crop, urban, tracer }`——**不含次网格方案或土壤水力**，
-   *  'custom' 时为 null（没有初值，等那几页落地后用户自己填）。跟
   cases: [],
   /** 站点库扫描结果，见 colm-cli scan */
   sites: [],
