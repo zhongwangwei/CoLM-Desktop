@@ -32,6 +32,9 @@ usage:
   colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
+                   [--met <Met.nc>]   # 前处理转出来的强迫场；不给就按命名约定
+                                      # 在 ../Forcing/ 下找，那两套约定只覆盖
+                                      # PLUMBER2 与 Urban-PLUMBER
                    [--spinup-years N] [--spinup-repeat N]   (默认 1 年 x 10 遍)
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
@@ -276,6 +279,35 @@ fn sibling(site: &Path, dir: &str, which: usize) -> Option<PathBuf> {
     None
 }
 
+/// 强迫场文件：显式给了就用它，没给才按命名约定推。
+///
+/// **显式优于约定。** `LAYOUTS` 那两套（`_Met.nc` / `_metforcing_v1.nc`）
+/// 是 PLUMBER2 与 Urban-PLUMBER 的**内部约定** —— 对内置数据集是合理的
+/// 默认，但拿自己数据的人没有理由把文件命名成那样。
+///
+/// 更要紧的是：不给显式路径时 `sibling()` 会推出**原始**强迫场并静默
+/// 用它。用户在前处理页转换过一份（合并了降雪、补了观测高度），
+/// 建算例时却跑的是原始文件 —— 不报错，模型跑得完，曲线照样是曲线。
+///
+/// 显式路径不存在时**报错并点名它**，不回落到约定：用户明确指了一个
+/// 文件，悄悄换成别的比直接失败糟得多。
+fn resolve_met(explicit: Option<&str>, site: &Path) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        let p = PathBuf::from(p);
+        if !p.exists() {
+            bail!("--met {} does not exist", p.display());
+        }
+        return Ok(p);
+    }
+    sibling(site, "Forcing", 0).with_context(|| {
+        format!(
+            "cannot find the forcing file next to {}; expected ../Forcing/<stem>_Met.nc \
+             (or pass --met <path> to name it directly)",
+            site.display()
+        )
+    })
+}
+
 /// 一个站点在界面上要显示的一切。
 ///
 /// **一次把该读的都读了。** 界面要经纬度、地类、时间范围与步长，
@@ -412,12 +444,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             out.display()
         );
     }
-    let met = sibling(&site_raw, "Forcing", 0).with_context(|| {
-        format!(
-            "cannot find the forcing file next to {}; expected ../Forcing/<stem>_Met.nc",
-            site_raw.display()
-        )
-    })?;
+    let met = resolve_met(o.get("--met").as_deref(), &site_raw)?;
 
     std::fs::create_dir_all(&out)?;
     // **算例目录也要绝对化。** 四个路径（含 `DEF_forcing_namelist`）是照着

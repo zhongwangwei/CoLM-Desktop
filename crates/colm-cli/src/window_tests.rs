@@ -44,3 +44,60 @@ fn a_start_after_the_end_is_refused() {
         "两个日期都要说：{m}"
     );
 }
+
+// ---- 强迫场文件的定位 ----------------------------------------------------
+
+use std::path::{Path, PathBuf};
+
+/// 造一个 `<root>/Sitedata/X_site.nc` + `<root>/Forcing/X_Met.nc` 的树。
+fn layout(root: &Path) -> PathBuf {
+    std::fs::create_dir_all(root.join("Sitedata")).unwrap();
+    std::fs::create_dir_all(root.join("Forcing")).unwrap();
+    let site = root.join("Sitedata/AA_site.nc");
+    std::fs::write(&site, b"x").unwrap();
+    std::fs::write(root.join("Forcing/AA_Met.nc"), b"x").unwrap();
+    site
+}
+
+#[test]
+fn without_an_explicit_path_the_naming_convention_is_used() {
+    let root = std::env::temp_dir().join(format!("colm-met-conv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let site = layout(&root);
+    let got = super::resolve_met(None, &site).expect("按约定找得到");
+    assert_eq!(got, root.join("Forcing/AA_Met.nc"));
+}
+
+#[test]
+fn an_explicit_path_wins_over_the_convention() {
+    // **这条是「用自己的数据」的关键。** 转换产物不在 `<root>/Forcing/`
+    // 下，也不叫 `<stem>_Met.nc` —— 那两套命名是 PLUMBER2 与
+    // Urban-PLUMBER 的内部约定，用户没有理由遵守。
+    //
+    // 不给显式路径时 `sibling()` 会推出**原始**强迫场并静默用它 ——
+    // 用户以为跑的是自己转换的数据，实际跑的是原始的。
+    let root = std::env::temp_dir().join(format!("colm-met-expl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let site = layout(&root);
+    let mine = root.join("my_converted.nc");
+    std::fs::write(&mine, b"x").unwrap();
+
+    let got = super::resolve_met(Some(mine.to_str().unwrap()), &site).expect("显式路径");
+    assert_eq!(got, mine, "给了 --met 就该用它，而不是按约定推");
+}
+
+#[test]
+fn an_explicit_path_that_does_not_exist_is_refused() {
+    // **点名那个路径。** 静默回落到约定会让人以为用了自己的文件，
+    // 而那正是这条参数要防的事。
+    let root = std::env::temp_dir().join(format!("colm-met-miss-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let site = layout(&root);
+    let e = super::resolve_met(Some("/nowhere/nope.nc"), &site).unwrap_err();
+    let m = e.to_string();
+    assert!(m.contains("/nowhere/nope.nc"), "要点名那个路径：{m}");
+    assert!(
+        !m.contains("Sitedata"),
+        "不该提约定那条路——用户明确给了路径，回落只会让人更糊涂：{m}"
+    );
+}
