@@ -1250,10 +1250,12 @@ fn a_converted_forcing_reproduces_the_golden_history() {
     let mut plan = Plan { slots: Vec::new() };
     for (i, slot) in SLOTS.iter().enumerate() {
         let Some(name) = resolved.vname[i] else { continue };
+        // 用 `attribute_value`：`attribute` 借用那个 `Variable`，而 `v`
+        // 是按值移进闭包的，闭包一结束就 drop，编译不过。
         let units = f
             .variable(name)
-            .and_then(|v| v.attribute("units"))
-            .and_then(|a| a.value().ok())
+            .and_then(|v| v.attribute_value("units"))
+            .and_then(|r| r.ok())
             .and_then(|v| match v {
                 netcdf::AttributeValue::Str(s) => Some(s),
                 _ => None,
@@ -1263,6 +1265,7 @@ fn a_converted_forcing_reproduces_the_golden_history() {
             index: slot.index,
             source_name: name.to_string(),
             source_units: units,
+            also_add: Vec::new(),
         });
     }
     drop(f);
@@ -1297,6 +1300,32 @@ fn a_converted_forcing_reproduces_the_golden_history() {
 但它要建算例、要几分钟；文件层面的比对能在秒级抓住绝大多数误差，
 先把它钉住。
 
+### 这条测试测得到什么、测不到什么
+
+**它走的是恒等路径。** CN-Cng 的单位本来就是 CoLM 的规范单位
+（`Tair` 是 K、`Precip` 是 kg/m2/s……），所以 `convert_units` 走
+`from == to` 的原样返回 —— 逐位相同是**必然**的，不是被验证出来的。
+
+那它还验什么？**验管道其余部分不动数**：维度复制、属性搬运、
+netCDF 读写往返、时间轴。那些才是真会出错的地方，而 Task 1 的
+`identity` 只覆盖了整份文件原样复制，没覆盖「按槽位挑选、改名、
+重写」这条路。
+
+**换算路径没法用同样的判据，而且不是能力问题。** `K → degC → K`
+往返**不可能**逐位复原：`273.15` 与 `233.15` 这两个十进制字面量
+各自独立舍入、方向可能相反（Task 2 实测过 `-40.0` 那个点差 1 ULP）。
+所以：
+
+| 路径 | 判据 |
+|---|---|
+| 单位已是规范单位（恒等） | **逐位相同**，可以拿黄金文件比 |
+| 单位需要换算 | **容差之内**，逐位比对不适用 |
+
+**别把这两条混起来。** 将来有人拿换算过的数据去比黄金、发现比不上，
+第一反应会是「管道坏了」——其实是判据用错了。真要给换算路径一条
+端到端判据，应当是「模型结果在物理上可接受的容差内」，那需要先定
+「多少算可接受」，是另一件事。
+
 - [ ] **Step 1b: 再加一条跑完三段的对照**
 
 文件层面相同不等于模型跑出来相同（比如属性丢了会让 CoLM 走别的分支）。
@@ -1321,7 +1350,7 @@ cargo test -p oracle --test forcing_convert -- --nocapture 2>&1 | tail -15
 - [ ] **Step 3: 全量测试与提交**
 
 ```bash
-cargo test --workspace 2>&1 | tail -6      # 基线 299 passed
+cargo test --workspace 2>&1 | tail -6      # 基线见上一个任务的报告
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -3
 cargo fmt --all -- --check && echo "fmt 干净"
 ```
