@@ -5,10 +5,10 @@
 
 **目标：** 进门先选站点/区域/全球；站点之后走六步，**内核排在站点前面**
 （内核决定站点跑不跑得了）；时间与预热跟着 `case.nml` 走到参数页；
-6 个只读派生项并入各分节，常规/专家开关腾空；`waterheat` 更名 `default`。
+6 个只读派生项并入各分节，常规/专家开关腾空；`default` 更名 `default`。
 
 **架构：** 界面改动全在 `gui/dist/`（纯静态前端）与 `gui/dist/index.html`，
-**不新增、不删改任何 Tauri 命令**。唯一越出前端的是 Task 12 的 `waterheat` →
+**不新增、不删改任何 Tauri 命令**。唯一越出前端的是 Task 12 的 `default` →
 `default` 改名，它动脚本、Rust 测试与黄金基准。设计见 `docs/design-gui3.md`。
 
 **修订记录：** Task 2 / 2b 落地时的顺序是「站点 → 基本设定」，
@@ -214,11 +214,11 @@ chmod +x /tmp/clicktext.sh
 
 ```bash
 cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
-ls target/debug/colm-cli kernels/waterheat/manifest.json
+ls target/debug/colm-cli kernels/default/manifest.json
 ```
 
 期望：两个路径都存在。缺 `colm-cli` 就 `cargo build -p colm-cli`，
-缺内核就 `./oracle/scripts/build_kernel.sh waterheat`。
+缺内核就 `./oracle/scripts/build_kernel.sh default`。
 
 - [ ] **Step 4: 跑起来量基线**
 
@@ -1054,7 +1054,7 @@ S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-
 sleep 4
 bash $S/click.sh "站点"      # 进门
 sleep 1
-bash $S/ax.sh | grep -B3 -A3 "waterheat"
+bash $S/ax.sh | grep -B3 -A3 "default"
 pkill -f "target/debug/colm-desktop-gui"
 ```
 
@@ -1780,7 +1780,7 @@ bash $S/ax.sh | grep "个站点\|当前内核\|要 urban"
 pkill -f "target/debug/colm-desktop-gui"
 ```
 
-期望：摘要行读出 `1 个站点 · 当前内核 waterheat`（Task 12 改名后是
+期望：摘要行读出 `1 个站点 · 当前内核 default`（Task 12 改名后是
 `default`）。CN-Cng 不是城市站、当前内核也不是 urban，所以**不该**出现
 「要 urban 内核」标记。
 
@@ -1851,10 +1851,10 @@ T=/tmp/urban-probe && rm -rf $T
 sed -i '' 's/USE_SITE_lakedepth *= *\.false\./USE_SITE_lakedepth = .true./;
            s/USE_SITE_soilreflectance *= *\.false\./USE_SITE_soilreflectance = .true./;
            s/USE_SITE_soilparameters *= *\.false\./USE_SITE_soilparameters = .true./' $T/case.nml
-./target/debug/colm-cli run $T --kernel kernels/waterheat 2>&1 | tail -30
+./target/debug/colm-cli run $T --kernel kernels/default 2>&1 | tail -30
 ```
 
-（用 `waterheat` 只是为了看 `mksrfdata` 在读栅格前后停在哪；真正跑城市
+（用 `default` 只是为了看 `mksrfdata` 在读栅格前后停在哪；真正跑城市
 要 urban 内核。若报「内核不匹配」之类，改用
 `./oracle/scripts/build_kernel.sh urban` 先编一个。）
 
@@ -3228,14 +3228,14 @@ async function applyKernel() { ... }
 
 ---
 
-## Task 12: `waterheat` 更名 `default`
+## Task 12: `default` 更名 `default`
 
 这是整个计划里**唯一越出前端**的任务。它动脚本、Rust 测试与回归黄金基准。
 
-`waterheat` 说的是它编进了什么（水热过程），但它实际的角色是**默认预设** ——
+`default` 说的是它编进了什么（水热过程），但它实际的角色是**默认预设** ——
 三个里最常用、文档里到处拿它举例的那个。
 
-**要改的**（`grep -rl waterheat` 去掉历史文档后的全集）：
+**要改的**（`grep -rl default` 去掉历史文档后的全集）：
 
 | 文件 | 处数 | 性质 |
 |---|---|---|
@@ -3254,7 +3254,7 @@ async function applyKernel() { ... }
 | `.github/workflows/windows-kernel.yml` | 14 | 含 PowerShell 反斜杠路径 |
 | `README.md` | 11 | 预设表与正文 |
 | `docs/design.md` | 4 | 当前设计文档 |
-| `kernels/waterheat/` | 目录 | 本机构建产物（gitignore） |
+| `kernels/default/` | 目录 | 本机构建产物（gitignore） |
 
 **重审后补上的三处**（原清单漏了，`grep -rln` 实测）：
 
@@ -3275,12 +3275,12 @@ cd gui/src-tauri && cargo test
 ```
 
 **不改**：`docs/plan-m*.md`、`docs/plan-gui1.md`、`docs/plan-gui2.md` ——
-它们是历史记录，里面的 `waterheat` 连着当时的实测输出，改了就对不上了。
+它们是历史记录，里面的 `default` 连着当时的实测输出，改了就对不上了。
 
 改完用这条确认只剩历史文档：
 
 ```bash
-grep -rln waterheat --exclude-dir=.git --exclude-dir=target \
+grep -rln default --exclude-dir=.git --exclude-dir=target \
   --exclude-dir=vendor --exclude-dir=work . | sort
 ```
 
@@ -3306,7 +3306,7 @@ cargo run -q -p oracle --bin golden-compare -- \
   oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
 ```
 
-**基线已经实测过了**（改名前，`kernels/waterheat`），输出是：
+**基线已经实测过了**（改名前，`kernels/default`），输出是：
 
 ```
 identical: 129 variables, 10 dimensions (ignoring ["create_time"])
@@ -3322,7 +3322,7 @@ identical: 129 variables, 10 dimensions (ignoring ["create_time"])
 
 ```bash
 cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
-sed -i '' 's/waterheat/default/g' oracle/scripts/build_kernel.sh
+sed -i '' 's/default/default/g' oracle/scripts/build_kernel.sh
 grep -n "default" oracle/scripts/build_kernel.sh
 ```
 
@@ -3332,7 +3332,7 @@ grep -n "default" oracle/scripts/build_kernel.sh
 `preset` 字段，少一处手误）：
 
 ```bash
-rm -rf kernels/waterheat
+rm -rf kernels/default
 ./oracle/scripts/build_kernel.sh default
 cat kernels/default/manifest.json | head -8
 ```
@@ -3353,9 +3353,9 @@ for f in \
   crates/colm-hist/src/lib.rs \
   crates/colm-hist/src/lib_tests.rs \
   crates/colm-cli/src/fingerprint_tests.rs ; do
-  sed -i '' 's/waterheat/default/g' "$f"
+  sed -i '' 's/default/default/g' "$f"
 done
-grep -rn "waterheat" crates/ oracle/ || echo "Rust 侧干净"
+grep -rn "default" crates/ oracle/ || echo "Rust 侧干净"
 ```
 
 期望：打印「Rust 侧干净」。
@@ -3364,21 +3364,21 @@ grep -rn "waterheat" crates/ oracle/ || echo "Rust 侧干净"
 
 ```bash
 for f in .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/windows-kernel.yml; do
-  sed -i '' 's/waterheat/default/g' "$f"
+  sed -i '' 's/default/default/g' "$f"
 done
-grep -rn "waterheat" .github/ || echo "CI 干净"
+grep -rn "default" .github/ || echo "CI 干净"
 ```
 
 期望：打印「CI 干净」。注意 `windows-kernel.yml` 里有 PowerShell 的反斜杠
-路径（`kernels\waterheat\colm.exe`），`sed` 一样能替换，替换后手工看一眼
+路径（`kernels\default\colm.exe`），`sed` 一样能替换，替换后手工看一眼
 那几行没被弄坏。
 
 - [ ] **Step 5: 文档**
 
 ```bash
-sed -i '' 's/waterheat/default/g' README.md docs/design.md docs/design-gui3.md docs/plan-gui3.md
-grep -rn "waterheat" README.md docs/design.md || echo "文档干净"
-grep -rln "waterheat" docs/
+sed -i '' 's/default/default/g' README.md docs/design.md docs/design-gui3.md docs/plan-gui3.md
+grep -rn "default" README.md docs/design.md || echo "文档干净"
+grep -rln "default" docs/
 ```
 
 期望：前一条打印「文档干净」；后一条**只**列出 `docs/plan-m*.md` 与
@@ -3421,7 +3421,7 @@ identical: 129 variables, 10 dimensions (ignoring ["create_time"])
 只改名字不该动到任何一个字节的输出。不一致就 **停下来报 BLOCKED**，不要试图「顺手修一下」——
 改名改坏了黄金基准是必须当场查清的事。
 
-注意内核目录也改名了，`golden_run.rs` 的默认值 `kernels/waterheat` 已经
+注意内核目录也改名了，`golden_run.rs` 的默认值 `kernels/default` 已经
 在 Step 3 里跟着变成 `kernels/default`；若这一步报「找不到内核」，
 说明那一处漏改了。
 
@@ -3429,12 +3429,12 @@ identical: 129 variables, 10 dimensions (ignoring ["create_time"])
 
 ```bash
 git add -A
-git commit -m "waterheat 更名 default
+git commit -m "default 更名 default
 
 它说的是编进了什么（水热过程），但实际角色是默认预设 —— 三个里最常用、
 文档里到处拿它举例的那个。
 
-docs/plan-m*.md 与 plan-gui[12].md 没动：那是历史记录，里面的 waterheat
+docs/plan-m*.md 与 plan-gui[12].md 没动：那是历史记录，里面的 default
 连着当时的实测输出，改了就对不上。
 
 Constraint: 黄金基准改了名，改后必须仍然 identical
@@ -3677,6 +3677,74 @@ git log --oneline -12
 
 ---
 
+## Task 14: 修 `site::fill` 的 `lakedepth` 少乘 0.1
+
+**这是既有 bug，不是本轮引入的。**
+
+CoLM 读湖深有两条路，**从栅格读时乘 0.1，从 `site.nc` 读时直接用**：
+
+```fortran
+! MOD_SingleSrfdata.F90:695（自然）与 :2046（城市），两处一样
+IF (u_site_lakedepth) THEN
+   CALL ncio_read_serial (fsrfdata, 'lakedepth', SITE_lakedepth)   ! 直接用
+ELSE
+   CALL read_point_var_2d_real8 (..., lakedepth)
+   SITE_lakedepth = lakedepth * 0.1                                ! 乘 0.1
+ENDIF
+```
+
+所以**写进 `site.nc` 的必须是乘过 0.1 的值**。城市路径（`prepare_urban`，
+Task 8c-4）做对了；`fill()`（自然站点）写的是**原始栅格值** —— 大十倍。
+
+**影响范围很窄**：只有**给了 `--rawdata` 的自然站点**才会踩到。
+黄金算例 CN-Cng 的 `DEF_dir_rawdata` 指向 `rawdata_unused/`，`lakedepth`
+走的是 fallback 分支（模块默认值 1.0），**不经过要乘 0.1 的那条路** ——
+所以修它**不该**动黄金基准。这一点要实测确认，不能假定。
+
+**Files:** `crates/colm-srfdata/src/site.rs`
+
+- [ ] **Step 1: 先确认现状**
+
+在 `fill()` 的标量字段表里，`lakedepth` 那一项的栅格值 `lake` 是直接用的。
+对照 `prepare_urban` 里 Task 8c-4 怎么处理的（那边乘了 0.1），确认两边不一致。
+
+- [ ] **Step 2: 改**
+
+让栅格来源的值乘 0.1，**fallback 的 1.0 不动**（那是模块默认值，CoLM 自己
+用的就是这个量纲）。注释要说清楚为什么只乘栅格那一路：
+
+```rust
+        // **栅格值要乘 0.1，模块默认值不乘。** CoLM 从栅格读时自己会乘
+        // （MOD_SingleSrfdata.F90:700 与 :2052 都是 `lakedepth * 0.1`），
+        // 而从 site.nc 读时直接用 —— 所以写进 site.nc 的必须是乘过的。
+        // 回落用的 1.0 是模块默认值（:47），它本来就是最终量纲，不能再乘。
+```
+
+- [ ] **Step 3: 加一条测试钉住**
+
+两个量纲混在一起是最容易回归的地方。测试要能说出「栅格 X 应当写成 0.1X，
+而缺栅格时写 1.0」。
+
+- [ ] **Step 4: 黄金基准必须不变**
+
+```bash
+export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -5
+cargo run -q -p oracle --bin golden-compare -- \
+  oracle/golden/CN-Cng_hist_2008-01.nc \
+  oracle/work/CN-Cng/out/CN-Cng/history/CN-Cng_hist_2008-01.nc
+```
+
+期望逐字 `identical: 129 variables`。**若变了，说明 CN-Cng 其实走了栅格
+那一路，那这个修复的影响面比预计的大** —— 停下来说明情况，别直接重录基准。
+
+- [ ] **Step 5: 实测一个真给 rawdata 的自然站点**
+
+找一个 PLUMBER2 站点，给 `--rawdata` 建算例，对比修前修后 `site.nc` 里的
+`lakedepth`：应当**差十倍**，且修后的值与 CoLM 直接读栅格时算出的一致。
+
+---
+
 ## 附：过程中发现、但**没有修**的既有问题
 
 这些不是本轮改动引入的，修它们会动到回归基准或超出范围，**记在这里而不是
@@ -3684,7 +3752,7 @@ git log --oneline -12
 
 | 问题 | 位置 | 为什么没修 |
 |---|---|---|
-| `site::fill` 的 `lakedepth` **少乘 0.1** | `crates/colm-srfdata/src/site.rs` | CoLM 两条路径（`MOD_SingleSrfdata.F90:700` 与 `:2052`）都是 `raster * 0.1`，而 `fill()` 写的是原始值。改它会动 CN-Cng 的黄金基准，得单独一轮 |
+| ~~`site::fill` 的 `lakedepth` 少乘 0.1~~ | `crates/colm-srfdata/src/site.rs` | **已列入 Task 14 修复**，见下 |
 | `colm-cli new` 只校验 `--end` 不校验 `--start` | `crates/colm-cli/src/main.rs` | 用 1993 建一个强迫场从 1995 起的算例能建出来，跑到 `colm` 段才报 `Forcing does not cover simulation period!` |
 | `colm-kernel` 少数测试对时序敏感 | `crates/colm-kernel/src/run_tests.rs` | 机器负载高时偶发失败（实测一次 38/39，重跑 39/39）。那几个要真 spawn 内核进程 |
 | `docs/plan-gui3.md` 两处引用旧的 `an urban case needs --rawdata` 文案 | 本文件 | 8c-4 之后已经不成立，但那是历史叙述的一部分 |
@@ -3699,5 +3767,5 @@ git log --oneline -12
 - 不动前处理页 —— 它仍是占位页
 - 不动结果页的功能 —— 它现在的形状是对的
 - 不按内核过滤站点列表 —— 只标出来
-- 不改 `docs/plan-m*.md` 与 `plan-gui[12].md` 里的 `waterheat` —— 那是历史记录
+- 不改 `docs/plan-m*.md` 与 `plan-gui[12].md` 里的 `default` —— 那是历史记录
 - 不引入前端框架、构建工具或 npm 依赖
