@@ -113,12 +113,24 @@ fn a_site_with_only_coordinates_can_still_be_filled() {
     let missing = super::missing_fields(&dst).expect("readable");
     assert!(missing.is_empty(), "12 个字段该齐全，缺：{missing:?}");
     // 每个值都要说得出来自哪里 —— 这是 site.rs 已经立下的规矩。
-    assert_eq!(rep.sources.len(), 12, "每个字段都要有 source：{:?}", rep.sources);
+    // `Report` 用三个列表记，不是一个 map（已核实）：
+    let total = rep.from_site.len() + rep.from_raster.len() + rep.from_default.len();
+    assert_eq!(
+        total, 12,
+        "每个字段都要归到某一级：site={:?} raster={:?} default={:?}",
+        rep.from_site, rep.from_raster, rep.from_default
+    );
+    // 只给了经纬度、也没给 rawdata，所以 12 个应当全在 default 里。
+    assert!(rep.from_site.is_empty(), "站点文件里什么都没有：{:?}", rep.from_site);
 }
 ```
 
-**`Report` 的实际字段名以代码为准**（可能不叫 `sources`）。
-先读 `pub struct Report`。
+`Report` 的字段（已核实，`site.rs`）：`texture` / `site_texture` /
+`raster_texture` / `texture_name` / `bvic` / `fine_earth` /
+**`from_site` / `from_raster` / `from_default`**。
+
+`Source` 枚举有三个值：`Site` / `Raster` / `Default`，
+写进产物的 `source` 属性措辞见 `site.rs:233`。
 
 - [ ] **Step 2: 跑，确认失败**
 
