@@ -55,6 +55,97 @@ rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 
+# 自检：ARGS 里「要求打开」的宏，预处理之后是不是真的打开了。
+#
+# define.h 里有静默的条件 #undef —— 比如 BGCON 只在 LULC 选了
+# LULC_IGBP_PFT 或 LULC_IGBP_PC 时才真的生效（"Conflicts" 注释写着
+# "only used when LULC_IGBP_PFT or LULC_IGBP_PC is defined"）。
+# **这份 Conflicts 逻辑来自 create_defineh.bash 自己生成的模板**——
+# 上一行已经把 include/define.h 整个覆盖掉了，此后再也不会读到
+# vendor/CoLM202X/include/define.h 里入库的那份，所以对不对以生成的
+# 这份为准。配错的话内核照样编得出、跑得完，只是悄悄少了它名字里说
+# 有的那部分物理，而且这个自检必须在 `make` 之前做——等编完了才发现，
+# 每次配错都要先陪一次全量 Fortran 编译。
+#
+# 取「预处理后的生效集」而不是 grep define.h 的 #define 原文：原文 grep
+# 会把 USEMPI / GridRiverLakeFlow / LATERAL_FLOW 都报成已定义，而它们在
+# SinglePoint 下实际都被下游的 conflict 块关掉了。下面算出来的 $EFFECTIVE
+# 后面 manifest.json 的 macros 字段直接复用，不重算第二遍——重算两遍还要
+# 保证两边算法一致，本身就是又一个出错点。
+printf '#include <define.h>\n' > "$BUILD/.macro_probe.F90"
+if ! MACRO_PROBE=$(gfortran -E -dM -cpp -ffree-form -I include "$BUILD/.macro_probe.F90" 2>&1); then
+  rm -f "$BUILD/.macro_probe.F90"
+  echo "cannot preprocess include/define.h to see which macros take effect:" >&2
+  echo "$MACRO_PROBE" >&2
+  exit 3
+fi
+rm -f "$BUILD/.macro_probe.F90"
+# LC_ALL=C 不是装饰：见下面 manifest.json 那节的说明——这里先排好序，
+# 后面直接复用，顺序不会因为 EFFECTIVE 复用的位置不同而变。
+EFFECTIVE=$(echo "$MACRO_PROBE" | awk '$1=="#define" && $2 !~ /^(_|__)/ && NF==2 {print $2}' | LC_ALL=C sort)
+
+is_effective() { printf '%s\n' "$EFFECTIVE" | grep -qxF "$1"; }
+
+# 预设参数值 -> 它应该打开的宏名。以 create_defineh.bash 的实际映射为准
+# （该脚本按位置取 $1..$8，每个位置各自 case 出一对 #define/#undef——
+# 去读那个脚本才知道，不能靠猜）。这里只列「要求打开」的取值，OFF 类
+# 取值（BGCOFF、CROPOFF……）不隐含任何宏，用不着查。
+macro_for_arg() {
+  case "$1" in
+    GRID) echo GRIDBASED ;;
+    CATCHMENT) echo CATCHMENT ;;
+    UNSTRUCTURED) echo UNSTRUCTURED ;;
+    SinglePoint) echo SinglePoint ;;
+    LULC_USGS) echo LULC_USGS ;;
+    LULC_IGBP) echo LULC_IGBP ;;
+    LULC_IGBP_PFT) echo LULC_IGBP_PFT ;;
+    LULC_IGBP_PC) echo LULC_IGBP_PC ;;
+    URBANON) echo URBAN_MODEL ;;
+    Campbell) echo Campbell_SOIL_MODEL ;;
+    vanGenu) echo vanGenuchten_Mualem_SOIL_MODEL ;;
+    CaMaON) echo CaMa_Flood ;;
+    BGCON) echo BGC ;;
+    CROPON) echo CROP ;;
+    TRACERON) echo TRACER ;;
+    *) : ;;
+  esac
+}
+
+for arg in "${ARGS[@]}"; do
+  want=$(macro_for_arg "$arg")
+  [ -z "$want" ] && continue
+  if ! is_effective "$want"; then
+    case "$want" in
+      BGC)
+        cat >&2 <<MSG
+$arg was requested but BGC is not in effect -- define.h turns it off
+unless LULC_IGBP_PFT or LULC_IGBP_PC is defined (see the "Conflicts"
+comment for BGC in create_defineh.bash, which is what generates the
+include/define.h actually compiled here). The kernel would build fine
+and run fine, and silently have no biogeochemistry.
+MSG
+        ;;
+      CROP)
+        cat >&2 <<MSG
+$arg was requested but CROP is not in effect -- define.h turns it off
+unless BGC is defined (see the "Conflicts" comment for CROP), and BGC
+itself turns off unless LULC_IGBP_PFT or LULC_IGBP_PC is defined. The
+kernel would build fine and run fine, and silently have no crop model.
+MSG
+        ;;
+      *)
+        echo "$arg was requested but $want is not in effect after" >&2
+        echo "define.h's conditional #undef blocks. Context from the" >&2
+        echo "generated include/define.h:" >&2
+        grep -n -B2 -A4 "$want\b" include/define.h >&2 || true
+        echo "The kernel would build fine and run fine while silently" >&2
+        echo "missing $want." >&2
+        ;;
+    esac
+    exit 3
+  fi
+done
+
 # Windows 上给 CoLM 建目录的路径**加引号**。
 #
 # CoLM 在 55 处用 `CALL system('mkdir -p ' // 路径)`。`system()` 在 MinGW 上
@@ -143,19 +234,16 @@ case "$(uname -s)" in
   *) EXE=.x ;;
 esac
 
-# 宏集合必须取**预处理后的生效集**，不能 grep define.h 的 #define 原文。
-# 实测：原文 grep 会把 USEMPI / GridRiverLakeFlow / LATERAL_FLOW 都报成已定义，
-# 而三者在 SinglePoint 下实际都是关闭的（前两个被 conflict 块 #undef，
-# 第三个是个源码里根本不存在的宏名）。manifest 的全部作用是记录构建配置供
-# Task 6 做版本握手，谎报 MPI 是开的会让这份记录反过来误导人。
-printf '#include <define.h>\n' > "$BUILD/.macro_probe.F90"
-# LC_ALL=C 不是装饰：裸 sort 用 locale 的字典序，en_US.UTF-8 下
-# extend_interception 会排在 CoLMDEBUG 与 LULC_IGBP 之间，而 C locale 用字节序
-# 把大写排在小写前。manifest 是版本握手的记录物，顺序随环境变意味着同一份构建
-# 在不同机器上产出的 manifest 字节不同，任何「这两个内核配置一样吗」的比较都会假报差异。
-MACROS=$(gfortran -E -dM -cpp -ffree-form -I include "$BUILD/.macro_probe.F90" 2>/dev/null \
-  | awk '$1=="#define" && $2 !~ /^(_|__)/ && NF==2 {print "\""$2"\""}' | LC_ALL=C sort | paste -sd, -)
-rm -f "$BUILD/.macro_probe.F90"
+# 宏集合已经在自检那步（create_defineh.bash 之后、编译之前）算过一次，
+# 存在 $EFFECTIVE 里——直接复用，不重新跑一次 gfortran 预处理。重算
+# 两遍还要保证两边算法一致，本身就是又一个出错点，而 include/define.h
+# 从自检那步到这里从未被改过。LC_ALL=C 不是装饰：裸 sort 用 locale 的
+# 字典序，en_US.UTF-8 下 extend_interception 会排在 CoLMDEBUG 与
+# LULC_IGBP 之间，而 C locale 用字节序把大写排在小写前——已经在自检
+# 那步排过一次序了，这里不用再排。manifest 是版本握手的记录物，顺序
+# 随环境变意味着同一份构建在不同机器上产出的 manifest 字节不同，任何
+# 「这两个内核配置一样吗」的比较都会假报差异。
+MACROS=$(printf '%s\n' "$EFFECTIVE" | awk 'NF{print "\""$0"\""}' | paste -sd, -)
 GIT_SHA=$(git -C "$SRC" rev-parse --short HEAD)
 # macOS 有 shasum 没 sha256sum，多数 Linux 反之。两者都不通用，所以先探测。
 if command -v shasum >/dev/null 2>&1; then

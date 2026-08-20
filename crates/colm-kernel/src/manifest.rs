@@ -10,6 +10,16 @@
 //! 二进制自其清单写出以来未被替换。后者要求清单与二进制同生同存，不能分开分发，
 //! 也不能拿一份入库的清单去校验重新构建的二进制。
 //!
+//! `generator_args` 与 `macros` 这两个「配置身份」字段回答的是不同的问题，
+//! 都要留着，缺一个都可能读错构建：`generator_args` 是**我们传给
+//! `create_defineh.bash` 的参数**（我们要什么）；`macros` 是 `build_kernel.sh`
+//! 把生成的 `include/define.h` 实际预处理之后，**真正生效**的宏集合（实际得到
+//! 了什么）。两者不总是一致 —— `include/define.h` 里有静默的条件 `#undef`
+//! （例如 `BGC` 只在 LULC 选了 `LULC_IGBP_PFT`/`LULC_IGBP_PC` 时才生效，配错的话
+//! `generator_args` 里会看到 `BGCON`，而 `macros` 里没有 `BGC`）。`build_kernel.sh`
+//! 在编译之前就用探针文件核对过这一致性，配错会直接构建失败；`macros` 字段把
+//! 那次核对的结果存下来，供之后追溯「这个内核当时到底是哪些宏在生效」。
+//!
 //! 「不存在」与「存在但对不上」是两种不同的失败，分开报 —— 用户对这两种的处置
 //! 完全不同：前者是没构建，后者是构建过但被换了。
 
@@ -55,6 +65,9 @@ pub struct Manifest {
     pub platform: String,
     pub colm_git_sha: String,
     pub generator_args: String,
+    /// **实际生效**的宏集合 —— `include/define.h` 生成之后经预处理器展开，
+    /// 而不是 `generator_args` 原样转述。两者的差异正是 `build_kernel.sh`
+    /// 的自检要抓的东西，见本文件顶部的模块文档。
     pub macros: Vec<String>,
     pub built_with: String,
     pub netcdf_c: String,
