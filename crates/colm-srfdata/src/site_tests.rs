@@ -478,3 +478,118 @@ fn a_skeleton_can_be_filled_straight_away() {
     );
     assert_eq!(rep.from_default.len(), 12, "没 rawdata 时应当全走标称/默认");
 }
+
+// ------------------------------------------------------------- canopy height
+//
+// 端到端验证 BLOCKED 在这上面：site-new 的产物跑 mksrfdata 会死在
+// `canopy_height not found`，然后去读 <rawdata>/plant_15s/ 全球栅格 ——
+// 那个字段不在 REQUIRED_FIELDS 的 12 个里，fill 完全不碰。
+//
+// **只补 `canopy_height` 这一个字段**，不是原计划设想的三个。逐条查过
+// `MOD_SingleSrfdata.F90` 全部 `ncio_var_exist` 调用（约 90 处）之后确认：
+// `canopy_bottom_height`（对应 Fortran 的 `hbot`）从来不是 mksrfdata 会去
+// site.nc 里找的字段——`hbot` 只在 `mkinidata/MOD_HtopReadin.F90` 里，
+// 用 `hbot0_igbp` 现算，缩放的是*已经读到*的 htop，跟 site.nc 无关。
+// 标量 `SAI` 同样不存在：mksrfdata 只读 `SAI_monthly`，且与
+// `LAI_monthly` 绑定读取（缺一个两个都作废，回落到 plant_15s 栅格），
+// 那是 LAI 的地盘，这个任务明确排除在外。详细依据见 `HTOP0_IGBP` 上的文档。
+
+#[test]
+fn a_filled_site_carries_canopy_height_when_the_landtype_is_known() {
+    let dir = std::env::temp_dir().join(format!("colm-canopy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let skel = dir.join("skel.nc");
+    // IGBP 10 = grassland，CN-Cng 的真实类别。
+    super::skeleton(&skel, 123.5092, 44.5933, Some(10)).unwrap();
+    let out = dir.join("site.nc");
+    let rep = super::fill(&skel, &out, None, None).expect("补得齐");
+
+    let f = netcdf::open(&out).unwrap();
+    let v = f
+        .variable("canopy_height")
+        .expect("canopy_height 该被写进去");
+    let x: Vec<f64> = v.get_values(netcdf::Extents::All).unwrap();
+    // htop0_igbp[9]（0-based，对应 IGBP 10），MOD_Const_LC.F90。
+    assert!((x[0] - 0.5).abs() < 1e-9, "got {}, want 0.5", x[0]);
+    // 每个值都要说得出来自哪里 —— site.rs 的规矩。
+    let a = v
+        .attribute("source")
+        .expect("要带 source 属性")
+        .value()
+        .expect("read");
+    let netcdf::AttributeValue::Str(s) = a else {
+        panic!("source 不是字符串")
+    };
+    assert!(s.contains("htop0_igbp"), "{s}");
+
+    assert!(rep.from_lookup.contains(&"canopy_height".to_string()));
+    // **不写这两个** —— CoLM 根本不从 site.nc 读它们，写了也是噪音。
+    assert!(
+        f.variable("canopy_bottom_height").is_none(),
+        "hbot 从不从 site.nc 读（mkinidata 现算），不该写"
+    );
+    assert!(
+        f.variable("SAI").is_none(),
+        "SAI 从不作为标量读（只有 SAI_monthly，且与 LAI_monthly 绑定），不该写"
+    );
+
+    // 12 个必需字段仍然齐全 —— canopy_height 不在那 12 个里，不该干扰计数。
+    assert!(super::missing_fields(&out).unwrap().is_empty());
+}
+
+#[test]
+fn without_a_landtype_there_is_nothing_to_look_up() {
+    // **地类不给就查不了表** —— HTOP0_IGBP 是按 IGBP 类别索引的。
+    // 这不是缺陷，是「说不出就不写」那条规矩的必然结果：没有地类，
+    // 冠层高度就没有依据，写一个猜的值比不写更糟。
+    //
+    // 这条链要看得见：不给地类 -> 没有冠层高度 -> mksrfdata 去读
+    // <rawdata>/plant_15s/ 全球栅格 -> 没有 rawdata 就跑不起来。
+    let dir = std::env::temp_dir().join(format!("colm-nocanopy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let skel = dir.join("skel.nc");
+    super::skeleton(&skel, 123.5092, 44.5933, None).unwrap();
+    let out = dir.join("site.nc");
+    let rep = super::fill(&skel, &out, None, None).expect("12 个字段仍该补齐");
+
+    let f = netcdf::open(&out).unwrap();
+    assert!(
+        f.variable("canopy_height").is_none(),
+        "没有地类就查不了表，不该猜一个写进去"
+    );
+    assert!(rep.from_lookup.is_empty());
+    // 12 个必需字段不受影响。
+    assert!(super::missing_fields(&out).unwrap().is_empty());
+}
+
+#[test]
+fn fill_never_overwrites_a_site_files_own_canopy_height() {
+    // 实测：90 个 PLUMBER2 站点文件本来就带 canopy_height（FLUXNET BADM
+    // 实测值）。查表补的是缺省，不是权威 —— 站点自己说的话必须赢，
+    // 与 elevation/lakedepth 等字段同一条规矩。
+    let dir = std::env::temp_dir().join(format!("colm-canopy-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let skel = dir.join("skel.nc");
+    super::skeleton(&skel, 123.5092, 44.5933, Some(10)).unwrap();
+    {
+        let mut f = netcdf::append(&skel).unwrap();
+        let mut v = f.add_variable::<f64>("canopy_height", &[]).unwrap();
+        v.put_values(&[12.34], netcdf::Extents::All).unwrap();
+        v.put_attribute("source", "FLUXNET BADM (https://fluxnet.org/)")
+            .unwrap();
+    }
+    let out = dir.join("site.nc");
+    let rep = super::fill(&skel, &out, None, None).expect("补得齐");
+
+    let f = netcdf::open(&out).unwrap();
+    let v = f.variable("canopy_height").unwrap();
+    let x: Vec<f64> = v.get_values(netcdf::Extents::All).unwrap();
+    assert_eq!(x[0], 12.34, "站点自己的值不该被查表结果覆盖");
+    assert!(!rep.from_lookup.contains(&"canopy_height".to_string()));
+}

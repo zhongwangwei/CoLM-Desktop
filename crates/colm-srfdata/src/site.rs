@@ -219,6 +219,7 @@ pub fn fill(
         from_site: Vec::new(),
         from_raster: Vec::new(),
         from_default: Vec::new(),
+        from_lookup: Vec::new(),
     };
 
     // --- 四个土壤反照率：站点侧没有对应值，所以只有栅格与标称档两级 ---
@@ -305,6 +306,33 @@ pub fn fill(
         report.record(name, src);
     }
 
+    // --- 冠层高度：不在 REQUIRED_FIELDS 里，但 mksrfdata 硬性要读 ---
+    // 端到端验证 BLOCKED 在这上面：site-new 的产物跑 mksrfdata 会死在
+    // `canopy_height not found`，然后去读 <rawdata>/plant_15s/ 全球栅格。
+    //
+    // 只在**这个字段本来不在文件里、且地类已知**时才写：实测 90 个
+    // PLUMBER2 站点文件本来就带 `canopy_height`（FLUXNET BADM 实测值），
+    // 站点自己说的话必须赢，与 elevation/lakedepth 是同一条规矩；没有
+    // 地类就查不了表（`HTOP0_IGBP` 按 IGBP 类别索引），那时不写比猜一个好。
+    if f.variable("canopy_height").is_none() {
+        if let Some(lt) = landtype.filter(|lt| (1..=17).contains(lt)) {
+            let h = HTOP0_IGBP[(lt - 1) as usize];
+            put_scalar(
+                &mut f,
+                "canopy_height",
+                h,
+                &format!(
+                    "synthesized: MOD_Const_LC.F90 htop0_igbp[{lt}] (IGBP class {lt}); \
+                     CoLM itself no longer consults this table once canopy_height is in \
+                     the file (it reads the value straight from site.nc), but the table is \
+                     still compiled in, same pattern as lakedepth's \
+                     MOD_SingleSrfdata.F90:47 module default"
+                ),
+            )?;
+            report.from_lookup.push("canopy_height".to_string());
+        }
+    }
+
     // --- 由站点文件自己的土壤剖面推导的三个，或者没有剖面时的回落 ---
     // 维度取自它们各自的来源变量，而不是按长度去猜：站点文件里
     // LAI_year=2 / month=12 / pft=2 / soil=10 / year=21，按长度找只是碰巧
@@ -360,6 +388,36 @@ pub fn fill(
     Ok(report)
 }
 
+/// CoLM 自己的 IGBP 冠层顶高查表（`MOD_Const_LC.F90:406-411`，`htop0_igbp`）。
+/// 索引是 0-based，对应 IGBP 类别 1..=17（`HTOP0_IGBP[(lt - 1) as usize]`）。
+///
+/// 那张表的注释写着「now read from input NetCDF file」——CoLM 自己不再用它：
+/// `canopy_height` 一旦在文件里，`MOD_SingleSrfdata.F90:442/456` 直接
+/// `ncio_read_serial` 读那个值，压根不碰这张表。但表里的值仍然编译在
+/// CoLM 里，可以当有依据的默认写进 site.nc——与 `lakedepth` 走
+/// `MOD_SingleSrfdata.F90:47 module default` 是同一个模式。
+///
+/// **只有这一张表被用上。** `MOD_Const_LC.F90` 紧挨着还有 `hbot0_igbp`
+/// （冠层底高）与 `sai0_igbp`（茎面积指数），逐条查过
+/// `MOD_SingleSrfdata.F90` 全部 `ncio_var_exist` 调用（约 90 处）之后确认：
+/// - **没有 `canopy_bottom_height` 这个字段。** `hbot` 从不从任何 netCDF
+///   文件读——`mkinidata/MOD_HtopReadin.F90:60-141` 在模型初始化时用
+///   `hbot0_igbp`/`htop0_igbp` 现算，拿的是*已经读到*的 `htop`
+///   （树种再按 `htoplc * hbot0(m) / htop0(m)` 缩放），跟 site.nc 里有
+///   什么完全无关。写一个 `canopy_bottom_height` 进 site.nc，CoLM 不会看。
+/// - **没有标量 `SAI` 这个字段。** mksrfdata 只读 `SAI_monthly`，而且与
+///   `LAI_monthly` 绑定读取（`MOD_SingleSrfdata.F90:505-506`：两个必须
+///   都在，缺一个另一个也作废，转而整体回落到 `<rawdata>/plant_15s/`）。
+///   `sai0_igbp` 那一个数不满足这个门槛，而凑 12 个月的假值正是这个任务
+///   为 LAI 划掉的那类「编造科学输入数据」。
+///
+/// 用 CN-Cng 那份参照跑出的 `srfdata.nc`
+/// （`oracle/work/generated/out/CN-Cng/landdata/srfdata.nc`）核对过：
+/// 里面只有 `canopy_height`，没有 `canopy_bottom_height`，也没有裸的 `SAI`。
+const HTOP0_IGBP: [f64; 17] = [
+    17.0, 35.0, 17.0, 20.0, 20.0, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5,
+];
+
 /// 一个字段的取值来源。**优先级就是这几个变体的顺序。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -406,6 +464,14 @@ pub struct Report {
     pub from_site: Vec<String>,
     pub from_raster: Vec<String>,
     pub from_default: Vec<String>,
+    /// 走 CoLM 自己的 IGBP 查表补上的字段（目前只有 `canopy_height`）。
+    ///
+    /// **单独一个列表，不并进 `from_default`。** 这些字段不在
+    /// `REQUIRED_FIELDS` 的 12 个里，`from_site`/`from_raster`/`from_default`
+    /// 三个列表的总数就该一直是 12——`a_skeleton_can_be_filled_straight_away`
+    /// 与 `a_site_with_only_coordinates_can_still_be_filled` 都断言了这件事。
+    /// 把查表结果塞进 `from_default` 会让计数变成 13，看着像哪里多算了一次。
+    pub from_lookup: Vec<String>,
 }
 
 impl Report {

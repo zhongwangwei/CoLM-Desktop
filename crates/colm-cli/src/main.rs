@@ -296,6 +296,21 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     let _ = std::fs::remove_file(&skel);
     let r = filled?;
 
+    // 冠层高度查得到（`r.from_lookup` 里有 `canopy_height`）就不用外部数据；
+    // 查不到（没给 `--landtype`，或给的不是有效 IGBP 类别）就还得靠
+    // `<rawdata>/plant_15s/`。LAI/SAI 这个 crate 从不合成 —— `site-new` 造出
+    // 来的文件里永远没有月气候态，所以它俩永远在这张单子上。
+    // `SAI_monthly` 与 `LAI_monthly` 是 mksrfdata 绑定读取的一对
+    // （`MOD_SingleSrfdata.F90:505-506`：缺一个另一个也作废），所以两个都要
+    // 列出来，不能只写 LAI。
+    let canopy_height_ready = r.from_lookup.iter().any(|n| n == "canopy_height");
+    let mut needs_external: Vec<&str> = Vec::new();
+    if !canopy_height_ready {
+        needs_external.push("canopy_height");
+    }
+    needs_external.push("LAI_monthly");
+    needs_external.push("SAI_monthly");
+
     // `--json 1` 给界面用：三个来源列表要能逐字段摆出来，而人读的那几行
     // 是拼给终端的。**别让界面去解析人读的文本** —— 那是 `scan` 与
     // `metrics` 早就立下的做法（两边各写各的结构体，靠一条拿真输出跑的
@@ -312,6 +327,10 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
             "from_site": r.from_site,
             "from_raster": r.from_raster,
             "from_default": r.from_default,
+            "from_lookup": r.from_lookup,
+            // 这份 site.nc 还需要哪些外部数据 mksrfdata 才能跑完 ——
+            // 见上面 `needs_external` 的注释。界面要把这个显示出来。
+            "needs_external": needs_external,
         });
         println!("{}", serde_json::to_string_pretty(&j)?);
         return Ok(out);
@@ -324,7 +343,17 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     if landtype.is_none() {
         println!(
             "note: no --landtype given; IGBP_classification is not written, so CoLM falls \
-             back on its own"
+             back on its own, and canopy height can't be looked up either (CoLM's IGBP \
+             lookup table is indexed by land type) -- mksrfdata will need \
+             <rawdata>/plant_15s/ for both canopy height and monthly LAI/SAI \
+             (LAI_monthly/SAI_monthly), which this crate never supplies"
+        );
+    } else if canopy_height_ready {
+        println!(
+            "note: canopy height filled from CoLM's IGBP lookup table \
+             (MOD_Const_LC.F90 htop0_igbp); monthly LAI (LAI_monthly/SAI_monthly) still \
+             has to come from --rawdata's plant_15s/ or be present in the site file -- \
+             mksrfdata will not finish without it"
         );
     }
     if !r.from_site.is_empty() {
@@ -337,6 +366,12 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
         println!(
             "from default: {}  <-- nominal values, not measured at this site",
             r.from_default.join(", ")
+        );
+    }
+    if !r.from_lookup.is_empty() {
+        println!(
+            "from lookup : {}  <-- CoLM's IGBP table, not measured at this site",
+            r.from_lookup.join(", ")
         );
     }
     println!("wrote {}", out.display());
