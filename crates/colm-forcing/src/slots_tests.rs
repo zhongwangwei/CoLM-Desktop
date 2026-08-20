@@ -97,3 +97,38 @@ fn only_the_eastward_wind_slot_may_be_empty() {
     assert_eq!(SLOTS.iter().filter(|s| s.optional).count(), 1);
     assert_eq!(SLOTS.iter().position(|s| s.optional), Some(4));
 }
+
+#[test]
+fn a_user_override_wins_over_the_built_in_candidates() {
+    // 文件里既有 PLUMBER2 的 `Tair`，用户又指定了别的 —— 以用户为准。
+    // 这不是假想：同一份文件里可能有 `Tair`（塔顶）与 `Tair_2m`（2 米），
+    // 而候选名表只认前者。
+    let vars: Vec<String> = [
+        "Tair", "Tair_2m", "Qair", "Psurf", "Precip", "Wind", "SWdown", "LWdown",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let overrides = [(1usize, "Tair_2m".to_string())];
+    let (r, missing) = super::resolve_with(&vars, &overrides);
+    assert!(missing.is_empty(), "不该缺槽位：{missing:?}");
+    assert_eq!(r.vname[0], Some("Tair_2m"), "第 1 槽应当用用户指定的名字");
+}
+
+#[test]
+fn an_override_naming_a_variable_the_file_does_not_have_is_refused() {
+    // **指定一个不存在的变量必须报错**，不能悄悄回落到自动匹配 ——
+    // 那样用户以为自己选了 A，实际跑的是 B。
+    let vars: Vec<String> = [
+        "Tair", "Qair", "Psurf", "Precip", "Wind", "SWdown", "LWdown",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let overrides = [(1usize, "does_not_exist".to_string())];
+    let (_, missing) = super::resolve_with(&vars, &overrides);
+    assert!(
+        missing.iter().any(|m| m.contains("does_not_exist")),
+        "报错要点名那个变量：{missing:?}"
+    );
+}

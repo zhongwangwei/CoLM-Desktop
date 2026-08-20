@@ -134,10 +134,39 @@ impl Resolved {
 /// `NULL`，而 CoLM 对必填槽是 `NULL` 会明确拒绝 —— 所以即便调用方忘了先
 /// `check`，也不会静默跑出错误结果。
 pub fn resolve(variables: &[String]) -> (Resolved, Vec<String>) {
+    resolve_with(variables, &[])
+}
+
+/// 与 `resolve` 相同，但允许用户为某些槽位**指定**变量名。
+///
+/// `overrides` 是 `(槽位序号 1-based, 变量名)`。指定的名字文件里没有时
+/// **报错而不是回落到自动匹配** —— 回落会让用户以为自己选了 A、
+/// 实际跑的是 B，而那是「跑得完却给出错误结果」的典型。
+///
+/// `resolve` 保留为 `resolve_with(vars, &[])` 的薄封装：现有调用点不动。
+pub fn resolve_with(
+    variables: &[String],
+    overrides: &[(usize, String)],
+) -> (Resolved, Vec<String>) {
     let has = |n: &str| variables.iter().any(|v| v == n);
     let mut vname = [None; 8];
     let mut missing = Vec::new();
+
     for (i, s) in SLOTS.iter().enumerate() {
+        // 用户指定优先。
+        if let Some((_, name)) = overrides.iter().find(|(idx, _)| *idx == s.index) {
+            if has(name) {
+                // 名字来自调用方而不是 'static 表，所以要 leak 成 'static。
+                // 这条路径每次运行只走 8 次，代价可以忽略。
+                vname[i] = Some(Box::leak(name.clone().into_boxed_str()) as &'static str);
+            } else {
+                missing.push(format!(
+                    "slot {} ({}) was told to use {:?}, which the file does not have",
+                    s.index, s.meaning, name
+                ));
+            }
+            continue;
+        }
         match s.candidates.iter().find(|c| has(c)) {
             Some(c) => vname[i] = Some(*c),
             None if s.optional => {}
