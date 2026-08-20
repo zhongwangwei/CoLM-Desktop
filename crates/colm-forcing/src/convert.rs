@@ -60,9 +60,22 @@ pub struct SlotPlan {
     pub also_add: Vec<String>,
 }
 
+/// 观测高度。源文件没有 `reference_height_*` 时由用户在界面上填。
+///
+/// **三个分开而不是一个值**：CoLM 的 `DEF_forcing%HEIGHT_V/T/Q` 本来
+/// 就是三个，风的观测高度与温湿的常常不同（塔上不同层）。
+pub struct Heights {
+    pub v: f64,
+    pub t: f64,
+    pub q: f64,
+}
+
 /// 整份转换方案。
 pub struct Plan {
     pub slots: Vec<SlotPlan>,
+    /// 源文件没有 `reference_height_*` 时用它兜底；源文件带着的不覆盖
+    /// （见 `convert` 末尾那段）。
+    pub heights: Option<Heights>,
 }
 
 /// 按方案把源文件转成 CoLM 认的约定。
@@ -199,6 +212,24 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let mut out = fout.add_variable::<f64>(&name, &dim_refs)?;
         copy_attributes(&v, &mut out)?;
         out.put_values(&vals, netcdf::Extents::All)?;
+    }
+
+    // **手填的高度只在源文件没有时写。** 源文件说了的是量出来的，
+    // 界面填的是人估的 —— 让后者覆盖前者是在拿估计换掉测量。
+    if let Some(h) = &plan.heights {
+        for (name, val) in [
+            ("reference_height_v", h.v),
+            ("reference_height_t", h.t),
+            ("reference_height_q", h.q),
+        ] {
+            if fout.variable(name).is_some() {
+                continue; // 源文件带着，已经搬过去了
+            }
+            let mut out = fout.add_variable::<f64>(name, &[])?;
+            out.put_attribute("units", "m")?;
+            out.put_attribute("source", "given by hand in the prep page")?;
+            out.put_values(&[val], netcdf::Extents::All)?;
+        }
     }
     Ok(())
 }

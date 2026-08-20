@@ -54,6 +54,7 @@ fn main() -> anyhow::Result<()> {
             source_units: "kg/m2/s".into(),
             also_add: vec!["Snowf".into()],
         }],
+        heights: None,
     };
     convert(&src, &dst, &plan)?;
 

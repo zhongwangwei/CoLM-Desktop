@@ -75,6 +75,7 @@ fn a_renamed_and_rescaled_variable_lands_in_the_slot_with_the_canonical_name() {
             source_units: "degC".into(),
             also_add: Vec::new(),
         }],
+        heights: None,
     };
     super::convert(&p, &dst, &plan).expect("convert");
 
@@ -131,6 +132,7 @@ fn two_sources_sum_into_one_slot_and_both_survive_in_the_output() {
             source_units: "kg/m2/s".into(),
             also_add: vec!["Snowf".into()],
         }],
+        heights: None,
     };
     super::convert(&p, &dst, &plan).expect("convert");
 
@@ -203,6 +205,7 @@ fn a_kept_source_variable_does_not_lose_its_fill_value() {
             source_units: "kg/m2/s".into(),
             also_add: vec!["Snowf".into()],
         }],
+        heights: None,
     };
     super::convert(&p, &dst, &plan).expect("convert");
 
@@ -266,6 +269,7 @@ fn variables_the_slots_do_not_consume_are_carried_over() {
             source_units: "K".into(),
             also_add: Vec::new(),
         }],
+        heights: None,
     };
     super::convert(&p, &dst, &plan).expect("convert");
 
@@ -290,4 +294,112 @@ fn variables_the_slots_do_not_consume_are_carried_over() {
         f.variable("TA_F").is_none(),
         "TA_F 已经被槽位消费，不该再留一份"
     );
+}
+
+#[test]
+fn heights_given_by_hand_land_in_the_product() {
+    // Urban-PLUMBER 的 21 个站都没有 reference_height_*，而 CoLM 要它们。
+    // 界面上让人填，填了就要写进产物 —— **产物必须自包含**，不能只写
+    // 进这一次的 forcing.nml，否则下次拿这份文件重建算例又是 NaN，
+    // 而 NaN 的下场是 SIGILL。
+    let dir = std::env::temp_dir().join("colm-convert-heights");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("noheight_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        let mut v = f.add_variable::<f64>("Tair", &["time"]).unwrap();
+        v.put_attribute("units", "K").unwrap();
+        v.put_values(&[273.15, 274.15], netcdf::Extents::All)
+            .unwrap();
+    }
+
+    let dst = dir.join("out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 1,
+            source_name: "Tair".into(),
+            source_units: "K".into(),
+            also_add: Vec::new(),
+        }],
+        heights: Some(super::Heights {
+            v: 48.05,
+            t: 48.05,
+            q: 48.05,
+        }),
+    };
+    super::convert(&p, &dst, &plan).expect("convert");
+
+    let f = netcdf::open(&dst).unwrap();
+    for (name, want) in [
+        ("reference_height_v", 48.05),
+        ("reference_height_t", 48.05),
+        ("reference_height_q", 48.05),
+    ] {
+        let got: Vec<f64> = f
+            .variable(name)
+            .unwrap_or_else(|| panic!("{name} 该被写进产物"))
+            .get_values(netcdf::Extents::All)
+            .unwrap();
+        assert_eq!(got, vec![want]);
+    }
+}
+
+#[test]
+fn heights_already_in_the_source_are_not_overwritten() {
+    // **源文件说了的，界面不该覆盖。** PLUMBER2 的 90 个站都带着这三个
+    // 标量，转换时原样搬（`191fea7` 那条规则），手填只在源文件没有时用。
+    // 反过来会让「量出来的」被「填进去的」悄悄换掉。
+    let dir = std::env::temp_dir().join("colm-convert-heights-keep");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("hasheight_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        let mut v = f.add_variable::<f64>("Tair", &["time"]).unwrap();
+        v.put_attribute("units", "K").unwrap();
+        v.put_values(&[273.15, 274.15], netcdf::Extents::All)
+            .unwrap();
+        // 源文件量出来的高度：6.0
+        let mut h = f.add_variable::<f64>("reference_height_t", &[]).unwrap();
+        h.put_attribute("units", "m").unwrap();
+        h.put_values(&[6.0], netcdf::Extents::All).unwrap();
+    }
+
+    let dst = dir.join("out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 1,
+            source_name: "Tair".into(),
+            source_units: "K".into(),
+            also_add: Vec::new(),
+        }],
+        // 界面填了 99，但源文件已经有 reference_height_t —— 不该被覆盖。
+        heights: Some(super::Heights {
+            v: 99.0,
+            t: 99.0,
+            q: 99.0,
+        }),
+    };
+    super::convert(&p, &dst, &plan).expect("convert");
+
+    let f = netcdf::open(&dst).unwrap();
+    let got: Vec<f64> = f
+        .variable("reference_height_t")
+        .expect("源文件带着的要保留")
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(got, vec![6.0], "源文件量出来的高度不该被界面填的覆盖");
 }

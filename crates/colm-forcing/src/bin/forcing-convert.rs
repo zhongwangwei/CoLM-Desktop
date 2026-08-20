@@ -1,14 +1,17 @@
 //! 把一份变量名/单位与 PLUMBER2 不同的强迫场，转成 CoLM 认的约定。
 //!
-//! 用法: forcing-convert <源文件> <产物> [--slot N=名字:单位 ...]
+//! 用法: forcing-convert <源文件> <产物> [--slot N=名字:单位 ...] [--height V,T,Q]
 //!
 //! 没给 `--slot` 的槽位走自动匹配。匹配不上就**列出文件里有哪些变量**
 //! 再退出 —— 那正是用户下一步要用的信息，只说「缺第 3 槽」帮不上忙。
+//!
+//! `--height V,T,Q` 给源文件里没有的 `reference_height_v/t/q` 兜底
+//! （Urban-PLUMBER 的站点都缺这三个标量）。源文件带着的不会被它覆盖。
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use colm_forcing::convert::{convert, Plan, SlotPlan};
+use colm_forcing::convert::{convert, Heights, Plan, SlotPlan};
 use colm_forcing::{resolve_with, summarize, SLOTS};
 
 fn main() -> Result<()> {
@@ -24,6 +27,7 @@ fn main() -> Result<()> {
 
     // --slot 1=TA_F:degC
     let mut given: Vec<SlotPlan> = Vec::new();
+    let mut heights = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--slot" => {
@@ -49,6 +53,18 @@ fn main() -> Result<()> {
                     also_add: extra,
                 });
             }
+            "--height" => {
+                let spec = args.next().context("--height needs V,T,Q")?;
+                let n: Vec<f64> = spec
+                    .split(',')
+                    .map(|x| x.trim().parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .with_context(|| format!("--height {spec:?} is not V,T,Q"))?;
+                let [v, t, q] = n[..] else {
+                    bail!("--height needs exactly three numbers, got {}", n.len());
+                };
+                heights = Some(Heights { v, t, q });
+            }
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -71,7 +87,10 @@ fn main() -> Result<()> {
     }
 
     // 自动匹配到的槽位，单位取文件自己的 `units` 属性。
-    let mut plan = Plan { slots: given };
+    let mut plan = Plan {
+        slots: given,
+        heights,
+    };
     let f = netcdf::open(&src)?;
     for (i, slot) in SLOTS.iter().enumerate() {
         if plan.slots.iter().any(|s| s.index == slot.index) {

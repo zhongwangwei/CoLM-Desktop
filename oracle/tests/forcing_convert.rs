@@ -54,7 +54,10 @@ fn identity_plan(src: &Path) -> Result<Plan> {
     anyhow::ensure!(missing.is_empty(), "CN-Cng 的槽位不该缺：{missing:?}");
 
     let f = netcdf::open(src)?;
-    let mut plan = Plan { slots: Vec::new() };
+    let mut plan = Plan {
+        slots: Vec::new(),
+        heights: None,
+    };
     for (i, slot) in SLOTS.iter().enumerate() {
         let Some(name) = resolved.vname[i] else {
             continue;
