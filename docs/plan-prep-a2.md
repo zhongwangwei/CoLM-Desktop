@@ -262,14 +262,37 @@ Tested: 两条新单测; FI-Kumpula 实测产物带上 48.05"
 - Create: `gui/src-tauri/src/forcing.rs`
 - Modify: `gui/src-tauri/src/lib.rs`（注册命令）
 
-- [ ] **Step 1: 先读现有命令的形状**
+- [ ] **Step 1: 命令的形状（已核实，2026-08-20）**
 
-**读 `gui/src-tauri/src/` 下任意一个已有的命令模块**（比如
-`example.rs` 或 `config.rs`），照它的形状写：错误类型是什么、
-怎么 `#[tauri::command]`、怎么在 `lib.rs` 里注册。
+不用再去翻了，形状是这样的：
 
-`xtask check-gui` 会检查命令名与参数名跟前端 `invoke` 的一致性，
-**写完必须跑它**。
+```rust
+// gui/src-tauri/src/forcing.rs
+#[derive(serde::Serialize)]      // 返回结构要这个
+pub struct Probe { ... }
+
+#[tauri::command]
+pub async fn probe_forcing(path: String) -> Result<Probe, String> { ... }
+```
+
+`lib.rs` 里两处：`mod forcing;` 与 `use forcing::*;`（照第 12–28 行
+现有那批的样子），再把命令名加进 `generate_handler![...]`（第 37 行起）。
+
+**参数名 snake_case，前后端一一对应。** 实测 `scan_sites(dir, quick)`
+对应前端 `invoke('scan_sites', { dir, quick: true })` —— 没有
+camelCase 转换。
+
+**两个命令都要 `async`。** `scan_sites` 就是 `pub async fn`，理由在
+`met.rs` 的模块注释里：
+
+> 时间轴要全读一遍，因为「步长是否均匀」只能这样确认
+
+FI-Kumpula 是 245469 步，同步读会卡住界面。`convert_forcing` 要写
+整个文件，更慢。
+
+`xtask check-gui` 检查五件事（`xtask/src/gui.rs`）：前端 `invoke` 的
+命令名必须已注册、`listen` 的事件必须有人 `emit`、参数名要对得上、
+import 要解析得了、**模块不许成环**。写完必须跑。
 
 - [ ] **Step 2: `probe_forcing`**
 
