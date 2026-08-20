@@ -5,7 +5,7 @@
 # 因此版本握手靠构建期生成的 manifest.json + sha256，而不是问二进制。
 set -euo pipefail
 
-PRESET="${1:?usage: build_kernel.sh <default|bgc|urban> [outdir]}"
+PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban> [outdir]}"
 OUTDIR="${2:-kernels}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -35,15 +35,11 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # script's header comment and docs/plan-macro-runtime.md for why), and the
 # URBANON/OFF and BGCON/OFF argument slots are gone entirely.
 #
-# The three presets below therefore now compile to the SAME define.h --
-# that is the point of this whole refactor ("一个二进制覆盖所有单点配置"):
-# what used to be three separate kernels is genuinely one binary, and
-# "bgc"/"urban" differ from "default" only in which case.nml a test points
-# them at (DEF_USE_BGC/DEF_USE_PFT/DEF_URBAN_RUN = .true.), not in what
-# gets compiled. The preset names are kept for the test scripts that
-# reference them by name.
+# default/bgc/urban 编成同一份 IGBP 产物；bgc/urban 只为旧测试名保留别名。
+# usgs 是唯一另外的编译组合，因为 N_land_classification 与查表数组尺寸不同。
 case "$PRESET" in
   default) ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
+  usgs)    ARGS=(SinglePoint LULC_USGS CaMaOFF CROPOFF) ;;
   bgc)     ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   urban)   ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
@@ -230,7 +226,7 @@ if [ -n "$OWN_MAKEOPTS" ]; then
   fi
 fi
 
-# MPI 的**头文件路径**。三个预设一个都不用 MPI，编译却仍然要它：
+# MPI 的**头文件路径**。SinglePoint 产物不用 MPI，编译却仍然要它：
 # `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
 # 而 `#ifndef USEMPI` 从下一行才开始 —— SinglePoint 把 USEMPI 关掉了，
 # 头文件照样要找得到。

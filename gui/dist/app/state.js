@@ -13,8 +13,7 @@ export const state = {
   domain: null,
   /** 次网格怎么分。'IGBP' | 'USGS' | 'PFT' | 'PC'，进门向导第 2 页设的。
    *
-   *  IGBP 与 PFT 已跑通；`LULC_USGS` 的数组尺寸仍由编译期参数
-   *  `N_land_classification` 定死，PC 则还没有端到端跑通的算例。
+   *  USGS 仍需要单独的编译产物，界面会自动匹配；PFT/PC 是运行时选择。
    *  新建算例时由 `domain.wizardFields()` 落到 case.nml。 */
   subgrid: null,
   /** 五页向导的实际选择；不进 recent，每次启动重新问。 */

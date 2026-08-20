@@ -2,7 +2,7 @@
 # Fortran 内核在这里编好，作为 `bundle.resources` 装进安装包，
 # 用户机器上不需要 gfortran、netcdf-fortran 或 MSYS2。
 #
-# 每个平台一个作业，各自：装 Fortran 工具链 → 编三个预设 → 打包 GUI。
+# 每个平台一个作业，各自：装 Fortran 工具链 → 编 IGBP/USGS → 打包 GUI。
 # 内核**不能跨平台复用**，所以三份都要各编各的。
 #
 # 打 tag 触发；也留了手动触发，用来在没有 tag 的情况下试这条流水线本身。
@@ -41,7 +41,7 @@ jobs:
           workspaces: gui/src-tauri
 
       # ---- Fortran 工具链，三个平台三种装法 ----
-      # open-mpi 是**必须的，哪怕这三个预设都不用 MPI**：
+      # open-mpi 是**必须的，哪怕 SinglePoint 产物不用 MPI**：
       # `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
       # 而 `#ifndef USEMPI` 从下一行才开始 —— 所以 SinglePoint 把 USEMPI
       # 关掉了，头文件照样要找得到。Windows 那步早就装了 msmpi，
@@ -72,21 +72,20 @@ jobs:
             mingw-w64-x86_64-lapack
             mingw-w64-x86_64-msmpi
 
-      # ---- 三个物理预设 ----
-      # 一个都不能少：GUI 的下拉框列的就是 kernels/ 下面能通过
-      # `Kernel::open` 校验的那些，少编一个用户就少一套物理。
-      - name: Build the three presets (unix)
+      # ---- 两种编译期地类 ----
+      # PFT/PC/BGC/URBAN 已是运行时选择；只有 IGBP/USGS 需要两份产物。
+      - name: Build the two land classifications (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          for p in default bgc urban; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
 
-      - name: Build the three presets (Windows)
+      - name: Build the two land classifications (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          for p in default bgc urban; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
           # 动态链接 netcdff/netcdf，所以二进制要跟 MSYS2 的 DLL 一起走。
           # 实测：不带 DLL 时退出码 -1073741515（STATUS_DLL_NOT_FOUND），
@@ -118,7 +117,7 @@ jobs:
         working-directory: gui/src-tauri
         run: |
           app='target/release/bundle/macos/CoLM Desktop.app'
-          for p in default bgc urban; do
+          for p in default usgs; do
             test -x "$app/Contents/Resources/kernels/$p/colm.x"
             test -f "$app/Contents/Resources/kernels/$p/manifest.json"
           done

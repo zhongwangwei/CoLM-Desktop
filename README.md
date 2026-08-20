@@ -3,7 +3,7 @@
 把 CoLM202X 的 SinglePoint 模式做成跨平台桌面程序。设计见 `docs/design.md`。
 
 **当前状态**：命令行端到端可用 —— 一条命令从原始 PLUMBER2 站点文件跑到
-指标表，三个物理预设（default / bgc / urban）都跑得通。GUI 已按
+指标表。PFT / PC / BGC / URBAN 已是运行时开关；IGBP / USGS 分别由两份编译产物覆盖。GUI 已按
 `docs/plan-gui2.md` 重构完（11 个任务全部完成），能扫站点、按功能分类改参数、
 批量运行、自动配对观测并出评估图。安装包由 `release.yml` 三平台产出，
 内核随包走 —— **用桌面程序的人不需要装任何编译器**。
@@ -26,21 +26,19 @@
 | | 步骤 | 要什么才能进 |
 |---|---|---|
 | ① | 前处理 | ——（这一页目前是预留的，把打算做的事写出来） |
-| ② | 基本设定 | ——；选内核与算例目录 |
-| ③ | 站点 | 要有可用的内核；扫目录、选站、建算例 |
+| ② | 基本设定 | ——；选算例目录 |
+| ③ | 站点 | 要有与向导匹配的运行产物；扫目录、选站、建算例 |
 | ④ | 参数 | 要先建过算例；时间与预热 · namelist 字段表 |
 | ⑤ | 运行 | 同上 |
 | ⑥ | 结果 | 同上 |
 
-**内核排在站点前面是有原因的。** 城市站必须走 `URBANON` 编进去的内核，
-`default` 内核跑不了它。反过来排的话，人挑完二十个城市站才发现手上是
-`default`。灰着的步骤会说出**为什么**进不去（「先在第 3 步建一个算例」），
-而不是只灰着。
+物理和次网格已在进门向导选完。GUI 后台按选择自动匹配 IGBP 或 USGS 产物，
+主界面不再给用户一个重复的“选内核”下拉框。
 
 | | |
 |---|---|
 | 站点库 | 扫 `Sitedata` 目录，两套命名约定都认；列出「城市 / 无观测 / 读不了」 |
-| 参数 | 737 个字段按九类分节；99 个 logical 是开关、12 个枚举是下拉框；**当前内核编不进去的默认不显示** |
+| 参数 | 737 个字段按九类分节；99 个 logical 是开关、12 个枚举是下拉框；**当前配置不可用的默认不显示** |
 | 输出变量 | 482 个开关独立成页，逐条说明「勾了到底写不写得出来」 |
 | 运行 | 三段各自状态；**输入没变就跳过**（指纹，不是只看文件在不在）；批量跑并逐算例显示状态 |
 | 评估 | 指标表（含 KGE 不可信的警告）、模型 vs 观测双线图、散点图、批量汇总表 |
@@ -112,7 +110,7 @@ colm-cli new --site <Urban-PLUMBER>/Sitedata/AU-Preston_site_v1.nc \
              --out  ~/cases/AU-Preston \
              --rawdata ~/rawdata --runtime ~/runtime \
              --start 1993-01-01 --end 1993-01-11
-colm-cli run ~/cases/AU-Preston --kernel kernels/urban
+colm-cli run ~/cases/AU-Preston --kernel kernels/default
 ```
 
 `colm-cli` 是**唯一的编排可执行文件**（`design.md` §4.2：「GUI 只跟它说话」），
@@ -144,7 +142,7 @@ colm-cli run ~/cases/AU-Preston --kernel kernels/urban
 **但这是一个站点、一个窗口、一个预设的结论，不外推到另外 89 个站点。**
 
 城市算例曾经是这条承诺唯一的例外（它要 240 GB），现在对 Urban-PLUMBER 那
-21 个站也不要了 —— 见「三个物理预设的实际状态」一节，那里有实测的
+21 个站也不要了 —— 见「运行时物理与地类产物的实际状态」一节，那里有实测的
 `identical: 146 variables` 与这张表的边界。
 
 ## GUI（部分验收）
@@ -544,19 +542,16 @@ CPP 宏，装出来的程序自带三个：
 换 Campbell 土壤、开 CaMa-Flood…）、**改了 CoLM 的 Fortran 源码**、
 或者**要一个没发布的平台/架构**。
 
-界面上那个下拉框列的就是这三个，并且把宏组合原样显示出来 —— 目录名不是身份，
-`generator_args` 才是。「我选的 urban 到底编没编 URBAN」不该靠读
-`manifest.json` 来答。
+桌面端不暴露这些目录；它按向导的 IGBP/USGS 选择匹配 `generator_args`。
 
 ### GitHub 直接产出安装包
 
 `.github/workflows/release.yml`：打 `v*` tag 触发，三个平台各一个作业，
-每个作业**先编三个 Fortran 预设，再打包 GUI**，内核作为
+每个作业**先编 IGBP/USGS 两份 Fortran 产物，再打包 GUI**，内核作为
 `bundle.resources` 进安装包。产物是 `.dmg` / `.deb` / `.rpm` / `.AppImage`
 / `.msi` / `.exe`，汇总成一份 draft release 等人过目。
 
-实测（macOS ARM）：`.app` 76 MB、`.dmg` 17 MB，其中 58 MB 是三个预设的
-九个 Fortran 二进制。
+发行包中携带 IGBP/USGS 两份通过完整性校验的 Fortran 产物。
 
 **「用户什么都不用装」是验过的，不是推的。** 把仓库的 `kernels/` 与
 `target/*/colm-cli` 都藏起来 —— 也就是一台没有源码树的机器 —— 再跑打包出来的
@@ -564,11 +559,11 @@ CPP 宏，装出来的程序自带三个：
 
 ```
 colm-cli resolved to .../CoLM Desktop.app/Contents/MacOS/colm-cli
-3 preset(s) from .../CoLM Desktop.app/Contents/Resources/kernels
+2 preset(s) from .../CoLM Desktop.app/Contents/Resources/kernels
 ```
 
-那三个预设是走 `Kernel::open` 列出来的，也就是**连三个二进制的 sha256
-一起校验过**。顺带确认了打包不改字节：三个 `colm.x` 的 sha256 与
+两份产物都走 `Kernel::open` 列出，也就是**连各自三个二进制的 sha256
+一起校验过**。顺带确认了打包不改字节：`colm.x` 的 sha256 与
 `manifest.json` 里记的逐个相同。（真做代码签名时这条要重验 —— 签名会改
 Mach-O 的字节，而清单认的正是字节。）
 
@@ -638,11 +633,13 @@ CI 里唯一跑通过的那次，是**先把 `.x` 拷成 `.exe` 再跑的**。�
 这跟打包 `.app` 时踩到的是同一类错误：**一条在开发环境里永远成立的前提，
 被当成了结论。**
 
-## 三个物理预设的实际状态
+## 运行时物理与地类产物的实际状态
 
-| 预设 | 构建 | 运行 | 卡在哪 |
+| 配置 | 构建 | 运行 | 备注 |
 |---|---|---|---|
 | `default` | ✅ 38 s | ✅ 黄金基准 | —— |
+| `PC` | 共用 IGBP | ✅ 三阶段 + 96 步 | 运行时 `DEF_USE_PC` |
+| `USGS` | ✅ 独立产物 | ✅ 三阶段 + 96 步 | 编译期地类数组不同 |
 | `bgc` | ✅ 44 s | ✅ 三段跑通 | 需要两份 runtime 数据，见下 |
 | `urban` | ✅ 38 s | ✅ 三段跑通，**不用给 rawdata/runtime** | 只对 Urban-PLUMBER 那 21 个站，见下 |
 

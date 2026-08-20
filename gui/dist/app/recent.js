@@ -6,14 +6,14 @@
 import { invoke } from './ipc.js';
 import { $ } from './ui.js';
 
-/** 会被记住的框。**只记目录与内核，不记算例名** ——
+/** 会被记住的框。**只记目录，不记算例名** ——
  *  那个每次都不一样，填回上次的反而误导。 */
 // **加新字段时要同时改这里。** `wirePickers()` 会把任何带 `data-for`
 // 的选择结果写进 `recent.json`，但**恢复只认这张表** —— 漏了的字段
 // 表现是「选过的东西下次打开没了」，而旁边的字段都还在，看着像随机失灵。
 // `fsrc`（前处理页的强迫场文件）就漏过一次，真机验收才发现。
 const REMEMBERED = [
-  'sitedir', 'root', 'kernel', 'obs',
+  'sitedir', 'root', 'obs',
   'fsrc', 'fmet',        // 前处理：强迫场的源文件与建算例时指定的产物
   'soutdir', 'srawdata', // 前处理：站点属性的产物目录与 rawdata
   // **经纬度不记。** 那是每个站点各不相同的东西，恢复上一个站点的坐标
@@ -28,20 +28,7 @@ export async function restoreRecent() {
   for (const id of REMEMBERED) {
     const el = $(id);
     if (!el || !all[id]) continue;
-    // 下拉框（内核）要那一项确实还在才恢复 —— 内核目录可能已经被删了，
-    // 硬塞一个不存在的值会让「运行」失败在一个用户看不懂的地方。
-    if (el.tagName === 'SELECT') {
-      if ([...el.options].some(o => o.value === all[id])) {
-        el.value = all[id];
-        // **必须补一次 change。** `#kernel` 的 onchange 是「内核变了」的唯一
-        // 通路 —— 它管着 kernelmeta、#urbandirs 的显隐、站点行的内核匹配标记。
-        // 只写 value 的话，恢复出来的内核在界面上只有下拉框自己知道，
-        // 而城市栅格目录那两个输入框永远出不来。实测：第二次启动起必现。
-        el.dispatchEvent(new Event('change'));
-      }
-    } else if (!el.value) {
-      el.value = all[id];
-    }
+    if (!el.value) el.value = all[id];
   }
   // 变了就记。用 change 而不是 input：每敲一个字符写一次文件太浪费，
   // 而这份东西丢了也不要紧。

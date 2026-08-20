@@ -28,7 +28,7 @@ class El {
 
 const ids = Object.fromEntries([
   'gatetitle', 'gatesub', 'gateinfo', 'gatecards', 'gatefoot', 'domaingate',
-  'steps', 'status', 'estSite', 'estKernel', 'casename', 'kernel',
+  'steps', 'status', 'estSite', 'casename', 'kernel',
 ].map(id => [id, new El()]));
 
 globalThis.document = {
@@ -44,6 +44,15 @@ await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 
 const { showDomainGate, wizardFields } = await import(join(temp, 'app', 'domain.js'));
 const { state } = await import(join(temp, 'app', 'state.js'));
+const { kernelForSubgrid } = await import(join(temp, 'app', 'kernel.js'));
+
+state.kernels = [
+  { preset: 'default', dir: '/igbp', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF' },
+  { preset: 'usgs', dir: '/usgs', generator_args: 'SinglePoint LULC_USGS CaMaOFF CROPOFF' },
+];
+if (kernelForSubgrid('PC')?.dir !== '/igbp' || kernelForSubgrid('USGS')?.dir !== '/usgs') {
+  throw new Error('subgrid did not resolve to its compiled land classification');
+}
 
 const cards = () => ids.gatecards.children;
 const card = label => cards().find(c => c.children[0]?.textContent === label);
@@ -65,7 +74,7 @@ if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('page
 if (cards().map(c => c.children[0].textContent).join('|') !== 'USGS|IGBP|PFT|PC') {
   throw new Error('page 2 must list USGS, IGBP, PFT, and PC in order');
 }
-if (!card('USGS').disabled || !card('PC').disabled || card('IGBP').disabled || card('PFT').disabled) {
+if (['USGS', 'IGBP', 'PFT', 'PC'].some(label => card(label).disabled)) {
   throw new Error('page 2 readiness does not match runtime support');
 }
 choose('IGBP');
@@ -100,6 +109,14 @@ for (const [path, value] of Object.entries({
   DEF_USE_RangeCheck: '.true.',
 })) {
   if (fields[path] !== value) throw new Error(`${path}: expected ${value}, got ${fields[path]}`);
+}
+const usgs = Object.fromEntries(wizardFields({ ...state.wizard, subgrid: 'USGS' }).map(x => [x.path, x.value]));
+if (usgs.DEF_USE_LCT !== '.true.' || usgs.DEF_USE_PFT !== '.false.' || usgs.DEF_USE_PC !== '.false.') {
+  throw new Error(`wrong USGS structure fields: ${JSON.stringify(usgs)}`);
+}
+const pc = Object.fromEntries(wizardFields({ ...state.wizard, subgrid: 'PC' }).map(x => [x.path, x.value]));
+if (pc.DEF_USE_LCT !== '.false.' || pc.DEF_USE_PFT !== '.false.' || pc.DEF_USE_PC !== '.true.') {
+  throw new Error(`wrong PC structure fields: ${JSON.stringify(pc)}`);
 }
 
 // 改第 2 页时，第 3/4 页的无关选择保留并重算约束。

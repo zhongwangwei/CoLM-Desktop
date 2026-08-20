@@ -133,8 +133,8 @@ export async function renderFields() {
     state.varies = new Set(await invoke('varying_fields', { dirs: editTarget() }));
   } catch (e) { state.varies = new Set(); status(e); }
 
-  // 列表来自源码 schema，而不是只列 case.nml 里已经写过的项；再按当前内核
-  // 的 manifest 宏过滤。这样换 default / urban / bgc 时，可配置项会一起换。
+  // 列表来自源码 schema，而不是只列 case.nml 里已经写过的项；
+  // 再按向导自动匹配的编译产物过滤。
   const have = new Set(entries.map(e => e.path));
   const extra = state.fields
     .filter(f => !have.has(f.name))
@@ -146,7 +146,7 @@ export async function renderFields() {
                  derived: f.derived, unset: true }));
   const entriesAll = entries.concat(extra);
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
-  // 当前内核编不进去的字段默认不显示 —— 用户设了不会有任何效果。
+  // 当前编译产物不包含的字段默认不显示。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
   // 严格跟随所选内核。**只读派生项不再藏在专家模式后面** ——
   // 全仓库只有 6 个（DEF_dir_landdata/restart/history、DEF_USE_USGS/IGBP、
@@ -200,20 +200,19 @@ export async function renderFields() {
     output.appendChild(table(
       outputFields.slice().sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0))));
   } else {
-    output.innerHTML = '<p class="muted">当前内核没有可配置的输出参数。</p>';
+    output.innerHTML = '<p class="muted">当前配置没有可配置的输出参数。</p>';
   }
   await renderHistVars(hist);
 }
 
-/** 顶部一行：当前内核统计 + 过滤框。 */
+/** 顶部一行：当前可用项统计 + 过滤框。 */
 function renderToolbar(box, shown, hidden) {
   const bar = document.createElement('div');
   bar.className = 'row';
   bar.style.marginBottom = '8px';
-  const kernel = state.kernels.find(k => k.dir === $('kernel').value)?.preset ?? '当前';
   const note = document.createElement('span');
   note.className = 'muted mini';
-  note.textContent = `${kernel} 内核可用 ${shown} 项` + (hidden ? ` · 已隐藏 ${hidden} 项` : '');
+  note.textContent = `当前配置可用 ${shown} 项` + (hidden ? ` · 已隐藏 ${hidden} 项` : '');
   bar.appendChild(note);
   const f = document.createElement('input');
   f.placeholder = '过滤字段名';

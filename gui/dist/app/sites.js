@@ -8,7 +8,7 @@ import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
 import { renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
-import { currentKernel, urbanEnabled } from './kernel.js';
+import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
 
 /** 算例根目录含空格，当场标出来。
@@ -316,16 +316,12 @@ export function renderSites(r = {}) {
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
   //
-  // 内核名与向导的 URBAN 选择都报在这里：到了站点页，它们共同决定
-  // 哪些站点符合本次配置。
   const mismatch = state.sites.filter(x => x.urban !== urbanRun).length;
-  const kname = currentKernel()?.preset;
   $('sitesummary').textContent =
     `${state.sites.length} 个站点` +
     (urban ? ` · ${urban} 个城市` : '') +
     (noObs ? ` · ${noObs} 个无观测` : '') +
     (bad ? ` · ${bad} 个读不了` : '') +
-    (kname ? ` · 当前内核 ${kname}` : '') +
     (mismatch ? `，其中 ${mismatch} 个跑不了` : '');
 
   for (const s of state.sites) {

@@ -1,12 +1,12 @@
 //! 进门向导。顺序按约束方向排：空间 → 次网格 → 土壤 → 物理 → 调试。
 //!
-//! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS、CROP
-//! 仍是编译期方案，PC 尚未端到端跑通，因此都
-//! 列出来但不可选，不能给一个点了之后必然失败的入口。
+//! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS 由向导
+//! 自动匹配专用编译产物；PC 已三阶段跑通。CROP 仍列出但不可选。
 
 import { state } from './state.js';
 import { $ } from './ui.js';
 import { go } from './shell.js';
+import { kernelForSubgrid } from './kernel.js';
 
 const DOMAINS = [
   { id: 'site', t: '站点', d: 'PLUMBER2 / Urban-PLUMBER 单点模拟', ready: true },
@@ -17,14 +17,10 @@ const DOMAINS = [
 const SUBGRIDS = [
   {
     id: 'USGS', t: 'USGS', d: '24 类地表覆盖（旧方案）', tech: '一个 patch 一个地类',
-    ready: false, need: '数组尺寸由 N_land_classification 编译期定死，需要 USGS 内核',
   },
   { id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖', tech: '一个 patch 一个地类', ready: true },
   { id: 'PFT', t: 'PFT', d: '植物功能型', tech: '一个 patch 拆成多个功能型', ready: true },
-  {
-    id: 'PC', t: 'PC', d: '植物群落', tech: '同 PFT，次网格组织方式不同',
-    ready: false, need: '运行时开关已有，但还没有端到端跑通的算例',
-  },
+  { id: 'PC', t: 'PC', d: '植物群落', tech: '同 PFT，次网格组织方式不同' },
 ];
 
 const SOILS = [
@@ -87,7 +83,7 @@ function render() {
   const box = $('gatecards');
   box.textContent = '';
   if (page === 'domain') renderCards(DOMAINS, picked.domain, chooseDomain);
-  if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid);
+  if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid, subgridBlock);
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
   if (page === 'debug') renderCards(DEBUG, picked.debug, toggleDebug, null, true);
@@ -190,6 +186,12 @@ function toggleDebug(id) {
   render();
 }
 
+function subgridBlock(item) {
+  if (kernelForSubgrid(item.id)) return null;
+  const classification = item.id === 'USGS' ? 'USGS' : 'IGBP';
+  return { need: state.kernels.length ? `当前安装缺少 ${classification} 内核` : '正在检查可用内核' };
+}
+
 function physicsBlock(item) {
   if (item.ready === false) return null;
   if (item.id === 'bgc' && picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
@@ -253,7 +255,7 @@ export function wizardFields(wizard = state.wizard) {
   const p = wizard.physics;
   const d = wizard.debug;
   return [
-    ['DEF_USE_LCT', wizard.subgrid === 'IGBP'],
+    ['DEF_USE_LCT', wizard.subgrid === 'IGBP' || wizard.subgrid === 'USGS'],
     ['DEF_USE_PFT', wizard.subgrid === 'PFT'],
     ['DEF_USE_PC', wizard.subgrid === 'PC'],
     ['DEF_USE_Campbell_SOIL_MODEL', wizard.soil === 'campbell'],
@@ -266,3 +268,7 @@ export function wizardFields(wizard = state.wizard) {
     ['DEF_USE_SrfdataDiag', d.srfdatadiag],
   ].map(([path, value]) => ({ path, value: logical(value) }));
 }
+
+globalThis.addEventListener?.('colm:kernels', () => {
+  if (!$('domaingate').hidden) render();
+});

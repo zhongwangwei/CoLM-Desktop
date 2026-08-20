@@ -12,7 +12,7 @@ import { $, status } from './ui.js';
 
 export async function renderHistVars(box) {
   const kernel = $('kernel').value;
-  if (!kernel) { box.innerHTML = '<p class="muted">先选一个内核 —— 写不写得出来取决于它编了哪些宏</p>'; return; }
+  if (!kernel) { box.innerHTML = '<p class="muted">当前安装缺少与向导配置匹配的运行产物</p>'; return; }
   let vars;
   try { vars = await invoke('hist_vars', { text: state.text, kernelDir: kernel }); }
   catch (e) { box.textContent = String(e); return; }
@@ -46,7 +46,7 @@ export async function renderHistVars(box) {
   // 「勾了 N 个」不是用户真正想知道的；「其中 M 个写不出来」才是。
   sum.textContent =
     `已勾选 ${n.on} 个` +
-    (n.blocked ? ` · ${n.blocked} 个在当前内核/配置下写不出来` : '') +
+    (n.blocked ? ` · ${n.blocked} 个在当前配置下写不出来` : '') +
     (n.unknown ? ` · ${n.unknown} 个未知` : '');
   box.appendChild(sum);
 

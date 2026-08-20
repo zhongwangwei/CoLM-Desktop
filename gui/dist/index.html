@@ -5,6 +5,9 @@
 <link rel="stylesheet" href="app/style.css">
 <body class="normal">
 
+<!-- 运行产物由进门向导自动匹配；保留这个隐藏值供后端运行命令使用。 -->
+<select id="kernel" hidden aria-hidden="true"></select>
+
 <div class="app">
 
   <header class="top">
@@ -26,8 +29,6 @@
     <div class="est">
       <div class="lab">已选站点</div>
       <div class="big" id="estSite">—</div>
-      <div class="lab" style="margin-top:9px">内核</div>
-      <div class="big" id="estKernel" style="font-size:14px">—</div>
     </div>
   </nav>
 
@@ -126,23 +127,11 @@
       <div id="site-result"></div>
     </section>
 
-    <!-- ③ 基本设定：跑一次模拟最少要定的三件事 —— 在哪跑、用什么物理、跑多久。
-         三张卡片顺序不可换：建算例产出 case.nml，后两张要写进它。 -->
+    <!-- ③ 基本设定：物理已在进门向导选完，这里只定算例目录。 -->
     <section class="page" data-step="basic" hidden>
       <div class="work-head"><span class="kicker">第 2 步</span></div>
       <h1>基本设定</h1>
-      <p class="sub">先定<b>用哪套物理</b>和<b>算例放哪</b>。
-        内核是编译期决定的，它决定了下一步哪些站点跑得了 ——
-        城市站必须走 <code>urban</code> 内核，还要额外给全球栅格目录。</p>
-
-      <div class="card">
-        <h3>内核</h3>
-        <div class="ch">一个内核 = 一组编译期宏。选哪个决定了哪些参数有意义、
-          哪些输出变量写得出来，<b>以及下一步哪些站点跑得了</b> ——
-          城市站必须走编进 <code>URBANON</code> 的那一套。</div>
-        <select class="select" id="kernel"></select>
-        <p class="muted mini" id="kernelmeta">&nbsp;</p>
-      </div>
+      <p class="sub">物理与次网格已在进门向导选完；这里只定<b>算例放哪</b>。</p>
 
       <div class="card">
         <h3>算例放哪</h3>
@@ -161,7 +150,7 @@
         </p>
         <div id="urbandirs" hidden>
           <div class="expert-note">
-            当前内核编进了 <b>URBAN</b>。城市算例必须给全球栅格目录 ——
+            本次向导打开了 <b>URBAN</b>。城市算例必须给全球栅格目录 ——
             土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
           </div>
           <div class="row">
@@ -235,8 +224,8 @@
       <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>配参数</h1>
       <p class="sub">按 CoLM 源码 namelist 的用途配置参数。
-        <b>列表随第 2 步选的内核变</b> —— 换 default、urban、bgc 时可配置项会一起换；
-        未设置项显示源码默认值，只读派生项排在各分节末尾。</p>
+        不适用于当前向导配置的项会自动隐藏；未设置项显示源码默认值，
+        只读派生项排在各分节末尾。</p>
 
       <div id="timing"></div>
 
