@@ -35,11 +35,7 @@ pub fn identity(src: &Path, dst: &Path) -> Result<()> {
         let mut out = fout
             .add_variable::<f64>(&v.name(), &dim_refs)
             .with_context(|| format!("cannot add variable {}", v.name()))?;
-        for a in v.attributes() {
-            if let Ok(netcdf::AttributeValue::Str(s)) = a.value() {
-                out.put_attribute(a.name(), s.as_str())?;
-            }
-        }
+        copy_attributes(&v, &mut out)?;
         out.put_values(&values, netcdf::Extents::All)
             .with_context(|| format!("cannot write {}", v.name()))?;
     }
@@ -99,11 +95,7 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let mut out = fout
             .add_variable::<f64>("time", &dim_refs)
             .with_context(|| "cannot add variable time".to_string())?;
-        for a in t.attributes() {
-            if let Ok(netcdf::AttributeValue::Str(s)) = a.value() {
-                out.put_attribute(a.name(), s.as_str())?;
-            }
-        }
+        copy_attributes(&t, &mut out)?;
         out.put_values(&vals, netcdf::Extents::All)?;
     }
 
@@ -192,12 +184,40 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let dim_refs: Vec<&str> = dims.iter().map(|s| s.as_str()).collect();
         let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
         let mut out = fout.add_variable::<f64>(&name, &dim_refs)?;
-        for a in v.attributes() {
-            if let Ok(netcdf::AttributeValue::Str(s)) = a.value() {
-                out.put_attribute(a.name(), s.as_str())?;
-            }
-        }
+        copy_attributes(&v, &mut out)?;
         out.put_values(&vals, netcdf::Extents::All)?;
+    }
+    Ok(())
+}
+
+/// 把一个变量的属性原样搬到另一个变量上。
+///
+/// **`_FillValue` 要单独处理。** 它是 netCDF 的保留属性，`put_attribute`
+/// 写不进去（悄悄没了，不报错），专用的是 `set_fill_value`，而且必须在
+/// 写数据**之前**调用 —— 写过数据之后是 late define，会失败。
+///
+/// 抽成一个函数不是为了整齐：这段逻辑原本在三个地方各抄了一遍
+/// （`identity`、时间轴、保留源变量），三处都只搬了 `Str` 类型的属性，
+/// 于是三处都把 `_FillValue` 丢在了源文件里。**同一段代码抄三遍，
+/// 错也会有三份。**
+///
+/// 源文件常是 `float32` 而产物统一 `f64`，所以两种类型都试一遍。
+fn copy_attributes(from: &netcdf::Variable, to: &mut netcdf::VariableMut) -> Result<()> {
+    let fill = from
+        .fill_value::<f64>()
+        .ok()
+        .flatten()
+        .or_else(|| from.fill_value::<f32>().ok().flatten().map(f64::from));
+    if let Some(fill) = fill {
+        to.set_fill_value(fill)?;
+    }
+    for a in from.attributes() {
+        if a.name() == "_FillValue" {
+            continue; // 上面用专用 API 设过了
+        }
+        if let Ok(val) = a.value() {
+            to.put_attribute(a.name(), val)?;
+        }
     }
     Ok(())
 }

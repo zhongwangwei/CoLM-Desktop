@@ -172,3 +172,52 @@ fn two_sources_sum_into_one_slot_and_both_survive_in_the_output() {
     assert!(note.contains("Rainf"), "要说出来源：{note}");
     assert!(note.contains("Snowf"), "要说出来源：{note}");
 }
+
+#[test]
+fn a_kept_source_variable_does_not_lose_its_fill_value() {
+    // **「转换可以增加信息，不能减少信息」也管属性。** `_FillValue` 是
+    // `Float` 不是 `Str`，只搬字符串属性会把它丢在源文件里 —— 产物的
+    // 读者就不知道哪个数代表缺测了。
+    let dir = std::env::temp_dir().join("colm-convert-fill");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("fill_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        for (n, vals) in [("Rainf", [1.0, 2.0]), ("Snowf", [0.5, 0.25])] {
+            let mut v = f.add_variable::<f64>(n, &["time"]).unwrap();
+            v.put_attribute("units", "kg/m2/s").unwrap();
+            v.put_attribute("_FillValue", -999.0_f64).unwrap();
+            v.put_attribute("long_name", "rate").unwrap();
+            v.put_values(&vals, netcdf::Extents::All).unwrap();
+        }
+    }
+
+    let dst = dir.join("out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 4,
+            source_name: "Rainf".into(),
+            source_units: "kg/m2/s".into(),
+            also_add: vec!["Snowf".into()],
+        }],
+    };
+    super::convert(&p, &dst, &plan).expect("convert");
+
+    let f = netcdf::open(&dst).unwrap();
+    for n in ["Rainf", "Snowf"] {
+        let v = f.variable(n).expect("源变量该保留");
+        let fill = v
+            .attribute_value("_FillValue")
+            .and_then(|r| r.ok())
+            .unwrap_or_else(|| panic!("{n} 丢了 _FillValue"));
+        assert!(
+            matches!(fill, netcdf::AttributeValue::Double(x) if x == -999.0),
+            "{n} 的 _FillValue 应当原样保留，得到 {fill:?}"
+        );
+        // 字符串属性本来就搬得过去，一并守住别回退。
+        assert!(v.attribute("long_name").is_some(), "{n} 丢了 long_name");
+    }
+}
