@@ -262,6 +262,50 @@ Tested: 两条新单测; FI-Kumpula 实测产物带上 48.05"
 - Create: `gui/src-tauri/src/forcing.rs`
 - Modify: `gui/src-tauri/src/lib.rs`（注册命令）
 
+### ⚠️ 原规格错了：GUI 不能直接调 `colm-forcing`
+
+第一版规格假设 `probe_forcing` 直接调 `colm_forcing::summarize`。
+**不行。** 实测：
+
+```
+gui/src-tauri 依赖的本仓库 crate：
+  colm-namelist  colm-schema  colm-case  colm-kernel  colm-hist
+```
+
+**没有 `colm-forcing`，而且 `cargo tree -i netcdf` 在 GUI 里查无此包。**
+`colm-hist` 在这里是不带 `io` feature 的 —— `oracle/Cargo.toml` 那条
+注释说明了为什么：
+
+> 依赖方向是 oracle → colm-hist，反过来不行 —— 闸门表那一半必须无依赖，
+> 否则 netcdf 会跟着它一起被拖进 GUI。
+
+加 `colm-forcing` 依赖会把静态 netcdf + HDF5 拖进 GUI，**正是这条注释
+刻意避免的事**。
+
+### 正确的路：走 sidecar
+
+`scan_sites` 就是这么做的 —— `crate::sidecar::capture(&args)` 起
+`colm-cli` 子进程，解析它的 JSON 输出。`capture` 固定调 `resolve_cli()`
+解析出的 `colm-cli`，不能调别的二进制。
+
+而 **`colm-cli` 已经依赖 `colm-forcing`**（`crates/colm-cli/Cargo.toml:15`）。
+
+所以 Task 2 分三层：
+
+| 层 | 做什么 |
+|---|---|
+| 2a | `colm-forcing` 抽出 `--slot` / `--height` 的解析函数（公开） |
+| 2b | `colm-cli` 加 `forcing-probe`（JSON）与 `forcing-convert` 两个子命令 |
+| 2c | `gui/src-tauri` 的两个 Tauri 命令走 `sidecar::capture` |
+
+**2a 是为了不抄第二遍。** `crates/colm-forcing/src/bin/forcing-convert.rs`
+已经有一份 `--slot N=名字:单位+另一个` 的解析，colm-cli 那边需要同样的
+逻辑。抄一遍意味着两处要同步改 —— A1 刚因为「同一段代码抄三遍，错也
+有三份」修过 `_FillValue` 那个 bug。
+
+**独立 bin `forcing-convert` 保留**，它对纯命令行用户仍然有用，
+且已经有实测覆盖。两边共用 2a 抽出来的解析函数。
+
 - [ ] **Step 1: 命令的形状（已核实，2026-08-20）**
 
 不用再去翻了，形状是这样的：
@@ -301,9 +345,34 @@ import 要解析得了、**模块不许成环**。写完必须跑。
 ///
 /// **只探不改。** 用户要先看到猜的结果、能改，才允许转换 ——
 /// 变量名猜错的后果是「跑得完、结果全错」。
+///
+/// 走 sidecar 而不是直接调库：GUI 不依赖 `colm-forcing`，
+/// 那会把 netcdf 拖进来（见上面那节）。
 #[tauri::command]
-pub fn probe_forcing(path: String) -> Result<Probe, String> { ... }
+pub async fn probe_forcing(path: String) -> Result<Probe, String> {
+    let json = crate::sidecar::capture(&[
+        "forcing-probe".into(),
+        path,
+        "--json".into(),
+        "1".into(),
+    ])?;
+    serde_json::from_str(&json).map_err(|e| {
+        // 说清楚是**解析**失败而不是探测失败 —— 照 `scan_sites` 的措辞，
+        // 两者的处置完全不同。
+        format!("colm-cli forcing-probe 的输出解析不了（两边的字段可能已经对不上）：{e}")
+    })
+}
 ```
+
+**`Probe` 与 `SlotGuess` 要 `Deserialize` 而不只是 `Serialize`** ——
+它们现在是从 JSON 读进来再转发给前端的。colm-cli 那边输出同样形状的
+JSON（字段名一致），两边各写各的结构体：`sites_tests.rs` 那条注释说了
+为什么这样反而更安全 ——
+
+> 两个 crate 不互相依赖；`Site` 与 `SiteInfo` 各写各的。哪天那边改了
+> 字段名，只有拿真输出跑一遍才发现得了。
+
+所以**必须有一条拿真数据跑的测试**，否则字段脱钩了没人知道。
 
 返回结构（字段名要与前端一致，`check-gui` 会验）：
 
