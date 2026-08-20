@@ -1,0 +1,54 @@
+# =======================================================
+# macOS ARM64 / Homebrew gfortran + OpenMPI
+# Local build options; keep Makeoptions.github Linux-only for CI.
+#
+
+  FF = mpif90 -fopenmp
+
+  NETCDF_PREFIX ?= /opt/homebrew
+  NETCDF_LIB = $(NETCDF_PREFIX)/lib
+  NETCDF_INC = $(NETCDF_PREFIX)/include
+
+  MOD_CMD = -J
+
+# determine the gfortran version
+  GCC_VERSION := "`gcc -dumpversion`"
+  IS_GCC_ABOVE_10 := $(shell expr "$(GCC_VERSION)" ">=" "10")
+  ifeq "$(IS_GCC_ABOVE_10)" "1"
+     FOPTS = -fdefault-real-8 -ffree-form -C -g \
+           -ffpe-trap=invalid,zero,overflow -fbounds-check \
+           -fbacktrace -fdump-core -cpp \
+           -ffree-line-length-0 -fallow-argument-mismatch
+  else
+     FOPTS = -fdefault-real-8 -ffree-form -C -g \
+           -ffpe-trap=invalid,zero,overflow -fbounds-check \
+           -fbacktrace -fdump-core -cpp \
+           -ffree-line-length-0
+  endif
+
+  INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
+  LDFLAGS = -L$(NETCDF_LIB) -lnetcdff -lnetcdf -llapack -lblas
+
+
+
+#============================================================
+# CaMa-Flood Mkinclude (macOS ARM64, gfortran)
+
+RM = /bin/rm -f
+CP = /bin/cp
+#----
+# Pre-Prosessing options
+# DMPI=-DUseMPI: activate when MPI parallelization is used
+# DCDF=-DUseCDF: activate when using netCDF, comment out when not needed
+# DATM=-DNoAtom: activate when OMP ATOMIC calculation should be avoided (bit identical simulation)
+#----
+#DMPI=-DUseMPI
+DCDF=-DUseCDF -DUseCDF_CMF
+#DATM=-DNoAtom
+CFLAGS=$(DMPI) $(DCDF) $(DATM)
+#----
+FCMP = gfortran -fopenmp
+FC   = gfortran
+
+LFLAGS =
+FFLAGS = -O0 -Wall -cpp -free -fimplicit-none -fbounds-check -fbacktrace

@@ -33,14 +33,20 @@ esac
 
 BUILD="$REPO_ROOT/$OUTDIR/build-$PRESET"
 rm -rf "$BUILD"
-# `-c core.symlinks=false`：CoLM 的源码树里有 tracked 符号链接
-# （include/Makeoptions 与 run/scripts/batch.config），而 **Windows 上创建
-# 符号链接需要特权**，默认没有。实测 MSYS2 里 worktree add 会在这两个上
-# 直接失败并 `Could not reset index file`。关掉之后 git 把它们写成普通文件，
-# 内容是链接目标的路径 —— 对本脚本没有影响，因为下面会把 include/Makeoptions
-# 整个换掉，而 batch.config 单点路径根本不读。
-git -C "$SRC" -c core.symlinks=false worktree add --detach --force "$BUILD" HEAD >/dev/null
-trap 'git -C "$SRC" worktree remove --force "$BUILD" >/dev/null 2>&1 || true' EXIT
+# **拷贝而不是 `git worktree`。** `vendor/CoLM202X` 曾经是 submodule，
+# 那时用 worktree 从它的 HEAD 建一棵临时树。入库之后它就是普通文件了
+# （见 `vendor/PROVENANCE.md`），没有独立的 git 仓库可以 worktree。
+#
+# 用 `tar` 管道而不是 `cp -r`：CoLM 的源码树里有符号链接
+# （`include/Makeoptions`、`run/scripts/batch.config`），`cp -r` 在
+# 不同平台上对它们的处理不一致，而 `tar` 原样复制。下面反正会把
+# `include/Makeoptions` 整个换掉，`batch.config` 单点路径根本不读。
+#
+# 每次都从头拷：构建会往树里写 `.o`、`.mod` 与生成的 `include/define.h`，
+# 直接在 `vendor/` 里编会污染入库的源码。
+mkdir -p "$BUILD"
+(cd "$SRC" && tar --exclude=.git -cf - .) | (cd "$BUILD" && tar -xf -)
+trap 'rm -rf "$BUILD"' EXIT
 
 cd "$BUILD"
 # 本仓库自带的预设直接拷进临时 worktree —— 它不在 submodule 里，

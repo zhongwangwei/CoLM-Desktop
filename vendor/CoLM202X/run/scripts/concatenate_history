@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Reassemble a DEF_HIST_mode='block' run's history output.
+#
+# Block mode does not write the single history files analysis scripts expect.
+# It writes per-block main-history files and, for the river network, one shard
+# per IO group. This wrapper turns both back into the same single files that
+# DEF_HIST_mode='one' produces, so nothing downstream has to change.
+#
+#   YOU MUST RUN THIS BEFORE ANALYSING A BLOCK-MODE RUN.
+#
+# Usage:
+#   run/scripts/concatenate_history <colm_namelist> <history_dir> [pattern]
+#
+#   <colm_namelist>  the namelist the run used
+#   <history_dir>    directory holding the history output
+#   [pattern]        optional shell glob restricting which history files are
+#                    processed, e.g. '*2000-01*'
+#
+# Exit status is non-zero if any aggregation fails, so it is safe to chain.
+#
+# Shards and block files are NOT deleted. Remove them only after checking the
+# .complete marker each aggregation leaves next to its output.
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+
+if [[ $# -lt 2 ]]; then
+  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit 2
+fi
+
+namelist=$1
+histdir=$2
+pattern=${3:-*}
+
+hist_x="$repo_root/run/hist_concatenate.x"
+river_x="$repo_root/run/river_hist_concatenate.x"
+
+for exe in "$hist_x" "$river_x"; do
+  if [[ ! -x "$exe" ]]; then
+    echo "ERROR: $exe not found; build with 'make postprocess.x'" >&2
+    exit 1
+  fi
+done
+
+[[ -d "$histdir" ]] || { echo "ERROR: no such directory: $histdir" >&2; exit 1; }
+[[ -f "$namelist" ]] || { echo "ERROR: no such namelist: $namelist" >&2; exit 1; }
+
+launcher=${MPIEXEC:-$(command -v mpiexec || command -v mpirun || true)}
+run_one() { if [[ -n "$launcher" ]]; then "$launcher" -n 1 "$@"; else "$@"; fi; }
+
+status=0
+did_any=0
+
+# ---- 1. main history: per-block files -> one file per period --------------
+# A block-mode main history file is <base>_<blockinfo>.nc; hist_concatenate
+# takes the name without the block part.
+while IFS= read -r target; do
+  [[ -z "$target" ]] && continue
+  did_any=1
+  echo "== main history: $target"
+  if run_one "$hist_x" "$namelist" "$target"; then
+    : > "${target}.complete"
+  else
+    echo "   FAILED" >&2; status=1
+  fi
+done < <(find "$histdir" -maxdepth 1 -name "${pattern}" -name '*_blockinfo.nc' 2>/dev/null \
+         | sed 's/_blockinfo\.nc$/.nc/' | sort -u)
+
+# ---- 2. river/lake unit-catchment shards -> one file per period -----------
+while IFS= read -r target; do
+  [[ -z "$target" ]] && continue
+  did_any=1
+  echo "== river history: $target"
+  if run_one "$river_x" "$namelist" "$target"; then
+    :   # the aggregator writes its own .complete marker
+  else
+    echo "   FAILED" >&2; status=1
+  fi
+# Shard names carry the run segment as well as the shard index
+# (<base>_seg<YYYYDDDSSSSSS>_shardNNNNN.nc), so BOTH have to come off to get
+# back to the target the aggregator expects. Stripping only _shardNNNNN left
+# the segment in the name, and the aggregator then globbed
+# <base>_seg..._seg*_shard00000.nc and reported "no shards found" -- once per
+# segment. The segment group is optional so a pre-segment name still maps.
+done < <(find "$histdir" -maxdepth 1 -name "${pattern}" -name '*_shard[0-9]*.nc' 2>/dev/null \
+         | sed -E 's/(_seg[0-9]+)?_shard[0-9]+\.nc$/.nc/' | sort -u)
+
+if [[ $did_any -eq 0 ]]; then
+  echo "Nothing to do: no block files or river shards matched in $histdir"
+  echo "(a DEF_HIST_mode='one' run needs no aggregation)"
+  exit 0
+fi
+
+if [[ $status -eq 0 ]]; then
+  echo
+  echo "concatenate_history: all aggregations completed"
+  echo "  block files and shards were left in place; delete them only after"
+  echo "  checking the .complete markers next to each output."
+else
+  echo
+  echo "concatenate_history: SOME AGGREGATIONS FAILED -- do not delete anything" >&2
+fi
+exit $status

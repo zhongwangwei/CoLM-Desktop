@@ -1,0 +1,37 @@
+&nl_colm_tracer_parameter
+    ! ------------------------------------------------------------------
+    ! Dilute conservative chloride tracer.
+    !
+    ! Main &nl_colm mapping example:
+    !   DEF_TRACER_NAMES       = 'CL'
+    !   DEF_TRACER_TYPES       = 'solute'
+    !   DEF_TRACER_PARAM_FILES = 'CL:run/standard_chloride_parameter.nml'
+    !
+    ! The current generic land transport carries a tracer/water ratio.  For CL,
+    ! mass_fraction means kg Cl per kg water; for dilute water this is
+    ! approximately mg/L divided by 1.0e6. River/lake amount diagnostics still
+    ! use the model's legacy ratio*m3 scaling, so this file is a conservative
+    ! hydrologic-tracer configuration, not yet a full salt-budget setup.
+    ! Explicit initial/forcing concentrations are separate.  init_delta is
+    ! retained only as the backward-compatible fallback for older files.
+    !
+    ! Dissolved chloride is limited to 1.0e-2 kg/kg water, restoring the
+    ! historical ChlorideWetDep safety ceiling. Excess mass is transferred to
+    ! location-preserving solid inventories and redissolves only up to the
+    ! available water capacity; no chloride mass is silently clipped.
+    ! Internal freeze/thaw still uses the generic bulk-water phase bookkeeping;
+    ! brine rejection, salt precipitation, ion activity, and electroneutrality
+    ! require a future coupled salinity/chemistry model.
+    ! ------------------------------------------------------------------
+    DEF_TRACER%unit_kind           = 'mass_fraction'
+    DEF_TRACER%mol_weight          = 35.453     ! Cl molecular weight [g/mol]
+    DEF_TRACER%ref_ratio           = 1.0        ! unused for conservative tracer
+    DEF_TRACER%init_delta          = 0.0        ! legacy fallback [kg Cl / kg water]
+    DEF_TRACER%init_conc           = 0.0        ! initial water [kg Cl / kg water]
+    DEF_TRACER%precip_default_conc = 0.0        ! when no precip field is configured
+    DEF_TRACER%vapor_default_conc  = 0.0        ! when no vapor field is configured
+    DEF_TRACER%max_dissolved_conc  = 1.0e-2     ! kg Cl / kg water
+    DEF_TRACER%reactive_decay_rate = 0.0
+    DEF_TRACER%charge              = -1
+
+/

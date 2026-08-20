@@ -1,0 +1,30 @@
+&nl_colm_tracer_parameter
+    ! ------------------------------------------------------------------
+    ! Generic per-tracer metadata for the delta-D (HDO) water isotope.
+    ! Read by MOD_Tracer_Defs when the main land namelist maps this
+    ! species via  DEF_TRACER_PARAM_FILES = 'HDO:<path>'.
+    ! Isotope fractionation factors are compiled in MOD_Tracer_Isotope_HDO.
+    ! ------------------------------------------------------------------
+    DEF_TRACER%unit_kind           = 'ratio'
+    DEF_TRACER%mol_weight          = 19.0       ! HDO molecular weight [g/mol]
+    DEF_TRACER%ref_ratio           = 1.5576e-4  ! VSMOW D/H reference ratio
+    DEF_TRACER%init_delta          = -70.0      ! initial delta-D [permil]
+    DEF_TRACER%reactive_decay_rate = 0.0        ! isotope: no reactive loss
+/
+
+&nl_colm_tracer_forcing
+    ! ------------------------------------------------------------------
+    ! This species' OWN forcing inputs, read by MOD_Tracer_ForcingInput
+    ! (in main/TRACER/). IsoGSM HDO fields are SMOW-normalised
+    ! (raw = water * R/Rstd); input_mode='normalized_over_total' tells the
+    ! reader to recover R = raw/total*Rstd.
+    ! ------------------------------------------------------------------
+    forcing_num        = 2
+    forcing_role       = 'precip', 'vapor'
+    forcing_fprefix    = 'IsoGSM_prate', 'IsoGSM_Q'
+    forcing_vname      = 'prate2sfc', 'spfh22m'
+    forcing_tintalgo   = 'nearest', 'linear'
+    forcing_dtime      = 21600, 21600
+    forcing_offset     = 10800, 10800
+    forcing_input_mode = 'normalized_over_total', 'normalized_over_total'
+/

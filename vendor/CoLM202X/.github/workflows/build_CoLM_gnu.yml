@@ -1,0 +1,183 @@
+name: Build_CoLM202X_gnu
+on:
+  pull_request:
+    branches: 
+      - master
+    paths-ignore:
+      # postprocess/ is NOT ignored: river_hist_concatenate is the only
+      # supported way to read a DEF_HIST_mode='block' run, so a change there
+      # can break the output of every block-mode run while CI stays green.
+      - 'preprocess/**'
+      - 'README.md'
+      - '.gitignore'
+  push:
+    branches:
+      - master
+    paths-ignore:
+      # postprocess/ is NOT ignored: river_hist_concatenate is the only
+      # supported way to read a DEF_HIST_mode='block' run, so a change there
+      # can break the output of every block-mode run while CI stays green.
+      - 'preprocess/**'
+      - 'README.md'
+      - '.gitignore'
+  workflow_dispatch:
+
+jobs:
+  Tracer-Tests:
+    runs-on: ubuntu-latest
+    steps:
+     - uses: actions/checkout@v4
+     - uses: mpi4py/setup-mpi@v1
+       with:
+          mpi: openmpi
+     - uses: fortran-lang/setup-fortran@v1
+       with:
+          compiler: gcc
+          version: 12
+     - name: Install test dependencies
+       run: python -m pip install pytest numpy netCDF4
+     - name: Run Python tests
+       run: python -m pytest -q
+     - name: Run MPI evaluator
+       if: ${{ always() }}
+       run: ./tests/run_river_mpi_evaluator.sh
+
+  River-History-Aggregation:
+    # The river-history shard writer and its offline aggregator are only
+    # exercised end to end by these suites: they need a built libcolm plus
+    # river_hist_concatenate.x, which the pytest job does not produce. Two
+    # defects shipped because the acceptance tests ran nowhere but a laptop --
+    # a wrapper that could not derive its target filename, and a shell
+    # injection through the target path.
+    runs-on: ubuntu-latest
+    steps:
+     - uses: actions/checkout@v4
+     - uses: mpi4py/setup-mpi@v1
+       with:
+          mpi: openmpi
+     - uses: fortran-lang/setup-fortran@v1
+       with:
+          compiler: gcc
+          version: 12
+     - name: Install netcdf-fortran and blas library
+       shell: bash -l {0}
+       run: sudo apt update && sudo apt install -y netcdf-bin libnetcdf-dev libnetcdff-dev "liblapack*" "libblas*"
+     - name: Install test dependencies
+       run: python -m pip install numpy netCDF4
+     - name: Build model and postprocess tools
+       run: |
+            cd ${{ github.workspace }}
+            # Same combination as the GRID_PC_TRACER_CH4_vanGen_CAMAOFF case in
+            # TestCaseLists, which Build-CoLM-gnu already compiles, so this job
+            # cannot fail for a reason unrelated to what it is testing. GRID
+            # implies GridRiverLakeFlow, which is what the shard writer needs.
+            ./.github/workflows/create_defineh.bash GRID LULC_IGBP_PC URBANOFF vanGenu CaMaOFF BGCON CROPOFF TRACERON
+            make all
+            make postprocess.x
+     - name: River history end-to-end (shards -> aggregator -> single file)
+       run: ./tests/run_river_hist_concat_e2e.sh
+     - name: River history negative cases (bad shard sets must be refused)
+       if: ${{ always() }}
+       run: ./tests/run_river_hist_concat_negative.sh
+     - name: River history shard evaluator
+       if: ${{ always() }}
+       run: ./tests/run_river_hist_shard_evaluator.sh
+
+  Build-CoLM-gnu:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04]
+        mpi: ['mpich', 'openmpi', 'intelmpi']
+        toolchain:
+          - {compiler: gcc, version: 14}
+          - {compiler: gcc, version: 13}
+          - {compiler: gcc, version: 12}
+          - {compiler: gcc, version: 11}
+          - {compiler: gcc, version: 10}
+          - {compiler: gcc, version:  9}
+       # include:
+       #   - os: ubuntu-latest
+       #     toolchain: {compiler: gcc, version: 12}
+        exclude:
+          - os: ubuntu-22.04
+            toolchain: {compiler: gcc, version: 14}
+          - mpi: 'mpich'
+            toolchain: {compiler: gcc, version: 9}
+            # mpich compiling FCFLAG has --fallow-type-mismatch, and will cause gfortran 9 failing
+          - os: ubuntu-latest
+            toolchain: {compiler: gcc, version: 9}
+          - os: ubuntu-latest
+            toolchain: {compiler: gcc, version: 10}
+          - os: ubuntu-latest
+            toolchain: {compiler: gcc, version: 11}
+
+    steps:
+     - uses: actions/checkout@v4
+     - uses: mpi4py/setup-mpi@v1
+       with:
+          mpi: ${{ matrix.mpi }}
+     - uses: fortran-lang/setup-fortran@v1
+       id: setup-fortran
+       with:
+          compiler: ${{ matrix.toolchain.compiler }}
+          version: ${{ matrix.toolchain.version }} 
+     - name: Install netcdf-fortran and blas library
+       shell: bash -l {0}
+       run: sudo apt update && sudo apt install -y netcdf-bin libnetcdf-dev libnetcdff-dev "liblapack*" "libblas*"
+     - name: Test mpi
+       #run: mpif90 -v
+       run: which mpif90
+     #- name: Test netcdf
+     #  run: nc-config --all
+     - name: Build CoLM202X
+       run: |
+            set -euo pipefail
+            cd ${{ github.workspace }}
+            TestList=./.github/workflows/TestCaseLists
+
+            # Compile every configuration once on the canonical toolchain.
+            # The remaining compiler/MPI matrix entries are compatibility
+            # smoke tests; rebuilding all 91 cases in each entry made MPICH /
+            # GCC 12 hit GitHub's six-hour job limit without a compiler error.
+            if [[ "${{ matrix.os }}" == "ubuntu-latest" && \
+                  "${{ matrix.mpi }}" == "openmpi" && \
+                  "${{ matrix.toolchain.version }}" == "12" ]]; then
+              mapfile -t CaseNames < <(awk 'NF {print $1}' "$TestList")
+            else
+              CaseNames=(
+                GRID_PFT_URBANON_CAMBELL_CAMAON_BGCON_CROPON
+                GRID_PC_TRACER_CH4_vanGen_CAMAOFF_BGCON_CROPOFF
+                GRID_PFT_TRACER_ONLY_vanGen_CAMAON_BGCOFF_CROPOFF
+              )
+            fi
+
+            ((${#CaseNames[@]} > 0)) || { echo "ERROR: no build cases selected"; exit 1; }
+            for CaseName in "${CaseNames[@]}"
+            do
+              CaseLine=$(awk -v name="$CaseName" '$1 == name {print; exit}' "$TestList")
+              [[ -n "$CaseLine" ]] || { echo "ERROR: unknown test case $CaseName"; exit 1; }
+              read -r -a CaseFields <<< "$CaseLine"
+
+              echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+              echo "Create test cases"
+              echo $CaseName
+              echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+ 
+              echo defineh "${CaseFields[@]:1}"
+              ./.github/workflows/create_defineh.bash "${CaseFields[@]:1}"
+
+              echo "Create test case $CaseName Complete!"
+              cat ./include/define.h
+
+              echo "...................................................................."
+              echo "Start Compilation $CaseName"
+              echo "...................................................................."
+ 
+              make clean && make all
+            done
+
+            echo "----------------------------------------------------------------------"
+            echo "All test cases are compiled successfully! "
+            echo "----------------------------------------------------------------------"

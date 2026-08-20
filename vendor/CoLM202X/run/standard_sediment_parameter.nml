@@ -1,0 +1,63 @@
+&nl_colm_tracer_parameter
+    ! ------------------------------------------------------------------
+    ! Generic per-tracer metadata for the SEDIMENT particle species.
+    ! Read by MOD_Tracer_Defs when the main land namelist maps this
+    ! species via  DEF_TRACER_PARAM_FILES = 'SEDIMENT:<path>'.
+    ! For a particle, init_delta is a reserved generic scalar; the sediment
+    ! particle module owns suspended volume concentration [m3/m3] state.
+    ! ------------------------------------------------------------------
+    DEF_TRACER%unit_kind           = 'volume_fraction'
+    DEF_TRACER%mol_weight          = 1.0        ! n/a for particle
+    DEF_TRACER%ref_ratio           = 1.0        ! n/a (no isotope ratio)
+    DEF_TRACER%init_delta          = 0.0        ! reserved for particle species
+    DEF_TRACER%reactive_decay_rate = 0.0        ! no generic reactive loss
+/
+
+&nl_colm_sediment_parameter
+    ! ------------------------------------------------------------------
+    ! Particle/sediment-specific parameters, read by the sediment particle
+    ! module (`MOD_Tracer_Particle_Sediment`). Mirrors how
+    ! standard_ch4_parameter.nml carries &nl_colm_methane_parameter.
+    ! Field names map onto the current sediment particle module
+    ! parameters (psedD/pwatD/sDiam/totlyrnum/sed_ignore_dph/...).
+    ! ------------------------------------------------------------------
+    DEF_SEDIMENT%nsed             = 3                       ! number of grain-size classes
+    DEF_SEDIMENT%grain_diameter   = 2.0e-5, 2.0e-4, 2.0e-3  ! [m] clay / silt / sand
+    DEF_SEDIMENT%grain_density    = 2650.0                  ! [kg/m3] quartz (psedD)
+    DEF_SEDIMENT%water_density    = 1000.0                  ! [kg/m3] (pwatD)
+    DEF_SEDIMENT%porosity         = 0.4                     ! bed porosity
+    DEF_SEDIMENT%ndeposit_layers  = 5                       ! bed deposition layers (totlyrnum)
+    DEF_SEDIMENT%ignore_depth_m   = 0.01                    ! min water depth for active sed (sed_ignore_dph)
+    DEF_SEDIMENT%active_layer_depth = 5.0e-2                ! active layer depth [m]
+    DEF_SEDIMENT%viscosity        = 1.0e-6                  ! kinematic viscosity [m2/s]
+    DEF_SEDIMENT%von_karman       = 0.4                     ! von Karman constant
+    DEF_SEDIMENT%settling_multiplier = 1.0                  ! settling velocity multiplier
+    ! hillslope erosion / sediment yield (precipitation-driven)
+    DEF_SEDIMENT%yield_coefficient = 0.01
+    DEF_SEDIMENT%slope_exponent    = 2.0
+    DEF_SEDIMENT%precipitation_exponent = 2.0
+    DEF_SEDIMENT%unit_conversion   = 1.0e-6
+    DEF_SEDIMENT%cfl_adv           = 0.5                     ! advection CFL factor
+    DEF_SEDIMENT%max_timestep_s    = 3600.0                  ! max sediment substep [s]
+/
+
+&nl_colm_tracer_forcing
+    ! ------------------------------------------------------------------
+    ! RESERVED / NOT IMPLEMENTED: sediment external forcing (role-tagged).
+    ! 'erosion_yield' is kept as a future role name, but the current sediment
+    ! particle module derives hillslope sediment yield from the model's own
+    ! precipitation and does not consume this external forcing block.
+    ! ------------------------------------------------------------------
+    ! Declared with forcing_num = 0: a role with no consumer is now refused
+    ! at startup instead of being stored and ignored.
+    !
+    !   forcing_num        = 1
+    !   forcing_role       = 'erosion_yield'
+    !   forcing_fprefix    = 'null'
+    !   forcing_vname      = 'null'
+    !   forcing_tintalgo   = 'nearest'
+    !   forcing_dtime      = 86400
+    !   forcing_offset     = 0
+    !   forcing_input_mode = 'direct'
+    forcing_num        = 0
+/

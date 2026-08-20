@@ -1,0 +1,40 @@
+#!/bin/bash
+#BSUB -J ch4_flat_2yr
+#BSUB -q normal
+#BSUB -o /share/home/dq013/zhwei/colm/cases/globe/g_global_ch4_flat_2yr/logs/lsf.%J.out
+#BSUB -e /share/home/dq013/zhwei/colm/cases/globe/g_global_ch4_flat_2yr/logs/lsf.%J.err
+#BSUB -n 720
+#BSUB -R "rusage[mem=150G]"
+#BSUB -R "span[ptile=48]"
+set -euo pipefail
+
+MPI=/share/home/dq013/software/mvapich2-2.3.7-1-intel
+NET=/share/home/dq013/software/netcdf_parallel_N
+HDF=/share/home/dq013/software/hdf5-1.14.3-Intel_MPI_N
+CODE=/share/home/dq013/zhwei/colm/script/CoLM202X
+RUN_DIR="$CODE/run"
+NML="$RUN_DIR/g_global_ch4_flat_2yr.nml"
+CASE_DIR=/share/home/dq013/zhwei/colm/cases/globe/g_global_ch4_flat_2yr
+
+mkdir -p "$CASE_DIR/logs"
+export PATH="$MPI/bin:$PATH"
+export LD_LIBRARY_PATH="$NET/lib:$HDF/lib:/share/home/dq013/software/zlib-1.2.11/lib:/share/home/dq013/software/szip-2.1.1/lib:$MPI/lib:${LD_LIBRARY_PATH:-}"
+export OMP_NUM_THREADS=1
+
+cd "$RUN_DIR"
+echo "job start: $(date)"
+echo "host: $(hostname)"
+echo "nml: $NML"
+echo "case: $CASE_DIR"
+echo "mpirun: $(command -v mpirun)"
+ldd ./colm.x | egrep 'libnetcdf|libnetcdff|libmpi|libmpifort|libblas|liblapack|not found' || true
+
+echo "=== mkinidata start: $(date) ==="
+mpirun -np 48 ./mkinidata.x "$NML" > "$CASE_DIR/mkinidata_global_current.log" 2>&1
+echo "=== mkinidata done: $(date) ==="
+
+echo "=== colm start: $(date) ==="
+mpirun -np 720 ./colm.x "$NML" > "$CASE_DIR/colm_global_current.log" 2>&1
+echo "=== colm done: $(date) ==="
+grep -E 'Master is|methane_registry_init|CoLM Execution Completed|Time elapsed|ERROR|Error|FATAL|MPI_Abort' "$CASE_DIR/colm_global_current.log" | tail -120 || true
+echo "job end: $(date)"

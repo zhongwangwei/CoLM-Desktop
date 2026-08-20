@@ -1,0 +1,5 @@
+ NX         360
+ NY         200
+ NLFP          10
+ REGIONALL           1
+ NSEQMAX       41455

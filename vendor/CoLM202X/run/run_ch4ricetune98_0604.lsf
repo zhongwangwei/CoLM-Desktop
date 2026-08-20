@@ -1,0 +1,32 @@
+#!/bin/bash
+#BSUB -J ch4tune98
+#BSUB -q normal
+#BSUB -o /share/home/dq013/zhwei/colm/cases/globe/ch4ricetune98_0604/logs/lsf.%J.out
+#BSUB -e /share/home/dq013/zhwei/colm/cases/globe/ch4ricetune98_0604/logs/lsf.%J.err
+#BSUB -n 720
+#BSUB -R rusage[mem=150G]
+#BSUB -R span[ptile=48]
+set -euo pipefail
+export PATH=/share/home/dq013/software/mvapich2-2.3.7-1-intel/bin:$PATH
+export LD_LIBRARY_PATH=/share/home/dq013/software/netcdf_parallel_N/lib:/share/home/dq013/software/hdf5-1.14.3-Intel_MPI_N/lib:/share/home/dq013/software/mvapich2-2.3.7-1-intel/lib:/share/home/dq013/software/zlib-1.2.11/lib:/share/home/dq013/software/szip-2.1.1/lib:/share/home/dq013/software/intel/oneapi/compiler/2022.0.2/linux/compiler/lib/intel64_lin:/usr/lib64:${LD_LIBRARY_PATH:-}
+export OMP_NUM_THREADS=1
+export MV2_ENABLE_AFFINITY=0
+export MV2_USE_RDMA_CM=0
+ulimit -s unlimited
+CODE=/share/home/dq013/zhwei/colm/script/CoLM202X
+RUN_DIR=$CODE/run
+CASE=/share/home/dq013/zhwei/colm/cases/globe/ch4ricetune98_0604
+BIN=$RUN_DIR/colm.x
+NML=$CASE/config/ch4ricetune98_0604.nml
+LOG=$CASE/colm_ch4ricetune98_0604.log
+cd "$RUN_DIR"
+echo "job ch4ricetune98_0604 start: $(date)"
+echo "bin=$BIN"
+echo "bin_mtime=$(stat -c '%y %s' "$BIN")"
+echo "nml=$NML"
+echo "ch4_param_key=$(grep -E 'inundation_mode|enable_rice_paddy|only_wetland|allowlakeprod|ch4_history_vars|f_methane_rice_paddy|redoxlag_rice_paddy' $CASE/config/standard_ch4_parameter.nml | tr '\n' ';')"
+/share/home/dq013/software/mvapich2-2.3.7-1-intel/bin/mpirun -np 720 "$BIN" "$NML" > "$LOG" 2>&1
+status=$?
+echo "mpirun status=$status end: $(date)"
+grep -E 'DATE =|CH4 column budget|methane_tran implicit clip|O2 cap adjustment|CoLM Execution Completed|ERROR|Error|FATAL|MPI_Abort|forrtl|severe|BAD TERMINATION' "$LOG" | tail -260 || true
+exit $status

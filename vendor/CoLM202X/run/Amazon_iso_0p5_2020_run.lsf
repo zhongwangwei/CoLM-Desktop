@@ -1,0 +1,40 @@
+#!/bin/bash
+#BSUB -J iso_run
+#BSUB -q normal
+#BSUB -o iso_run-o.out
+#BSUB -e iso_run-e.out
+#BSUB -n 240
+#BSUB -R rusage[mem=100G]
+#BSUB -R span[ptile=48]
+
+# -------------------------------------------------------------------
+# RUN stage: colm.x on 5 nodes x 48 = 240 ranks (rank 0 = master/IO).
+# Submit AFTER iso_prep finishes (landdata + initial restart ready).
+# -------------------------------------------------------------------
+
+export OMP_NUM_THREADS=1
+ulimit -s unlimited
+
+# colm.x is linked against MVAPICH2 (ifort). Use the exact runtime stack the
+# working riverlake production jobs use: MVAPICH2 launcher+libs, parallel
+# netCDF, the Intel-MPI HDF5 build, zlib/szip and the ifort runtime. Do NOT
+# add miniconda/lib (its HDF5 references a different MPI -> "MPI_Info_f2c"
+# undefined). lapack/blas resolve via the rpath baked into colm.x at link.
+MV2=/share/home/dq013/software/mvapich2-2.3.7-1-intel
+export PATH=$MV2/bin:$PATH
+export LD_LIBRARY_PATH=/share/home/dq013/software/netcdf_parallel_N/lib:/share/home/dq013/software/hdf5-1.14.3-Intel_MPI_N/lib:/share/home/dq013/software/mvapich2-2.3.7-1-intel/lib:/share/home/dq013/software/zlib-1.2.11/lib:/share/home/dq013/software/szip-2.1.1/lib:/share/home/dq013/software/intel/oneapi/compiler/2022.0.2/linux/compiler/lib/intel64_lin:/usr/lib64:${LD_LIBRARY_PATH:-}
+
+NML="/share/home/dq013/zhwei/colm/script/CoLM202X/run/Amazon_iso_0p5_2020.nml"
+cd /share/home/dq013/zhwei/colm/script/CoLM202X/run
+
+echo "job start: $(date)  host: $(hostname)"
+echo "mpirun: $(which mpirun)"
+echo "ldd libmpi: $(ldd ./colm.x | grep -i mpi)"
+
+echo ">>> colm.x (5x48 = 240) $(date)"
+$MV2/bin/mpirun -np 1 ./colm.x "${NML}" : -np 239 ./colm.x "${NML}" &> Amazon_iso_0p5_2020_colm.log
+RC=$?; echo "colm rc=${RC} $(date)"
+[ ${RC} -ne 0 ] && { echo "colm FAILED"; tail -120 Amazon_iso_0p5_2020_colm.log; exit ${RC}; }
+
+echo "run COMPLETE: $(date)"
+exit 0

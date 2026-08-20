@@ -1,0 +1,30 @@
+&nl_colm_tracer_parameter
+    ! ------------------------------------------------------------------
+    ! Generic per-tracer metadata for the delta-18O water isotope.
+    ! Read by MOD_Tracer_Defs when the main land namelist maps this
+    ! species via  DEF_TRACER_PARAM_FILES = 'H2_18O:<path>'.
+    ! Isotope fractionation factors are compiled in MOD_Tracer_Isotope_O18.
+    ! ------------------------------------------------------------------
+    DEF_TRACER%unit_kind           = 'ratio'
+    DEF_TRACER%mol_weight          = 20.0       ! H2(18O) molecular weight [g/mol]
+    DEF_TRACER%ref_ratio           = 2.0052e-3  ! VSMOW 18O/16O reference ratio
+    DEF_TRACER%init_delta          = -10.0      ! initial delta-18O [permil]
+    DEF_TRACER%reactive_decay_rate = 0.0        ! isotope: no reactive loss
+/
+
+&nl_colm_tracer_forcing
+    ! ------------------------------------------------------------------
+    ! This species' OWN forcing inputs, read by MOD_Tracer_ForcingInput
+    ! (in main/TRACER/). IsoGSM 18O fields are SMOW-normalised
+    ! (raw = water * R/Rstd); input_mode='normalized_over_total' tells the
+    ! reader to recover R = raw/total*Rstd.
+    ! ------------------------------------------------------------------
+    forcing_num        = 2
+    forcing_role       = 'precip', 'vapor'
+    forcing_fprefix    = 'IsoGSM_prate', 'IsoGSM_Q'
+    forcing_vname      = 'prate1sfc', 'spfh12m'
+    forcing_tintalgo   = 'nearest', 'linear'
+    forcing_dtime      = 21600, 21600
+    forcing_offset     = 10800, 10800
+    forcing_input_mode = 'normalized_over_total', 'normalized_over_total'
+/

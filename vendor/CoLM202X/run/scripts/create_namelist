@@ -1,0 +1,646 @@
+#!/bin/bash
+
+
+Help()
+{
+#DISPLAY help
+   echo "----------------------------- Usage ---------------------------------------"
+   echo "   Descripion: create CoLM simulation namelist files  "
+
+   echo '---------------------------------------------------------------------------'
+   echo 'Syntax: ./create_namelist -p $CasePath -n CaseName [ -t $startyr ] [ -e $endyr ]'
+   echo '     [ -d $RAWDATA ] [ -r $RUNTIME ] [ -a $reslat ] [ -o $reslat ] [ -f $Forcing ]'
+   echo '     [ -S $EDGES ] [ -N $EDGEN ] [ -E $EDGEE ] [ -W $EDGEW ]'
+   echo '     [ -x $NX_BLOCK ] [ -y $NY_BLOCK ] [ -g $NGROUP ] [ -s $SITENAME ] [ -L $SITELIST ]'
+   echo '!--------------------------------------------------------------------------'
+   echo options:
+   echo '  -p The path of the destimation case, which you want to create '
+   echo    '(including case name but without ''/'' at end of case path)'
+   echo
+   echo '  -n The name of the namelist'
+   echo
+   echo '  -t|--startyr (optional) ${startyr} is the start year of the simulation:'
+   echo
+   echo '          ${startyr} (default: 1980)'
+   echo '          Parameter should be a positive integer number to indicate the '
+   echo '          start year of the simulation.'
+   echo
+   echo '  -e|--endyr (optional) ${endyr} is the end year of the simulation: '
+   echo '       (i.e. ${endyr}=${startyr} if the simulation period is only one year)'
+   echo
+   echo '          ${endyr} (default: 2000 or 1980 if "--spinup sasund" is set up)'
+   echo '          Parameter should be a positive integer number to indicate the'
+   echo '          end year of the simulation. if "--spinup sasund" is set up, '
+   echo '          ${startyr}=${endyr}'
+   echo
+   echo '  -f|--forcing (optional) ${Forcing} is the name of meteorological forcing'
+   echo '       dataset, you may choose from following list:'
+   echo
+   echo '  -d|--rawdata (optional) ${RAWDATA} is the name of meteorological forcing'
+   echo '       dataset, you may choose from following list:'
+   echo
+   echo '  -r|--runtime (optional) ${RUNTIME} is the name of meteorological forcing'
+   echo '       dataset, you may choose from following list:'
+   echo
+   echo '  -a|--reslat (optional) ${reslat} is the grid resolution of latitude'
+   echo
+   echo '  -o|--reslon (optional) ${reslon} is the grid resolution of longitude'
+   echo 
+   echo '  -l|--landmask (optional) ${LandMask} is the filename with path of landmask file'
+   echo
+   echo '  -S|--south    (optional) ${EDGES} latitude of the south edge of simulation.'
+   echo
+   echo '  -N|--south    (optional) ${EDGEN} latitude of the north edge of simulation.'
+   echo
+   echo '  -W|--south    (optional) ${EDGEW} longitude of the west edge of simulation.'
+   echo
+   echo '  -E|--south    (optional) ${EDGEE} longitude of the east edge of simulation.'
+   echo
+   echo '  -i|--sasuspinup (optional) if present, sasu spinup is used.'
+   echo
+   echo '  -y|--nyblock (optional) number of latitudinal block.'
+   echo
+   echo '  -x|--nxblock (optional) number of longittudinal block.'
+   echo
+   echo '  -g|--ngroup (optional)  size of each mpi group.'
+   echo
+   echo '  -s|--site (optional) site name for single point set up. This argument must'
+   echo '       present, if -L is present'
+   echo
+   echo '  -L|--sitelist (optional) site list for single point set up. This argument '
+   echo '       must present, if -s is present.'
+   echo
+   echo -h display command information
+}
+
+CreateNamelist()
+{
+   CASEPATH=$1
+   CASENAME=$2
+   NMLNAME=$3
+   startyr=$4
+   endyr=$5
+   RAWDATA=$6
+   RUNTIME=$7
+   reslon=$8
+   reslat=$9
+   Forcing=${10}
+   ISUSESASU=${11}
+   LandMask=${12}
+   EDGES=${13}
+   EDGEN=${14}
+   EDGEW=${15}
+   EDGEE=${16}
+   NX_BLOCK=${17}
+   NY_BLOCK=${18}
+   NGROUP=${19}
+   SITENAME=${20}
+   SITELIST=${21}
+
+   if [ $ISUSESASU == False ];then
+      ISUSESASU=""
+   else
+      ISUSESASU='DEF_USE_SASU = .true.'	
+   fi
+   if [ $LandMask == False ];then
+      LandMask=""
+   fi
+
+cat>${CASEPATH}/${CASENAME}/${NMLNAME}<<EOF
+&nl_colm
+
+   DEF_CASE_NAME = '$CASENAME'
+
+   DEF_domain%edges = $EDGES
+   DEF_domain%edgen = $EDGEN
+   DEF_domain%edgew = $EDGEW
+   DEF_domain%edgee = $EDGEE
+
+   DEF_simulation_time%greenwich    = .TRUE.
+   DEF_simulation_time%start_year   = $startyr
+   DEF_simulation_time%start_month  = 1
+   DEF_simulation_time%start_day    = 1
+   DEF_simulation_time%start_sec    = 0
+   DEF_simulation_time%end_year     = $endyr
+   DEF_simulation_time%end_month    = 1
+   DEF_simulation_time%end_day      = 1
+   DEF_simulation_time%end_sec      = 0
+   DEF_simulation_time%spinup_year  = 0
+   DEF_simulation_time%spinup_month = 1
+   DEF_simulation_time%spinup_day   = 365
+   DEF_simulation_time%spinup_sec   = 86400
+   DEF_simulation_time%spinup_repeat = 0
+
+   DEF_simulation_time%timestep     = 1800.
+
+   DEF_dir_rawdata  = '$RAWDATA/'
+   DEF_dir_runtime  = '$RUNTIME/'
+   DEF_dir_output   = '$CASEPATH/'
+
+   ! ----- land units and land sets -----
+   ! for GRIDBASED
+   DEF_GRIDBASED_lon_res = $reslon
+   DEF_GRIDBASED_lat_res = $reslat
+
+   ! LAI setting
+   DEF_LAI_MONTHLY = .true.
+   DEF_LAI_CHANGE_YEARLY = .false.
+
+   DEF_USE_CN_INIT = .true.
+   DEF_file_cn_init = '$RUNTIME/cnsteadystate.nc'
+   ${LandMask}
+   ${ISUSESASU}
+
+   ! Canopy DEF Interception scheme selection
+   DEF_Interception_scheme=1 !1:CoLM2014；2:CLM4.5; 3:CLM5; 4:Noah-MP; 5:MATSIRO; 6:VIC
+!   DEF_USE_IRRIGATION = .true.
+
+   ! ----- forcing -----
+   ! Options :
+   ! PRINCETON | GSWP3   | QIAN  | CRUNCEPV4 | CRUNCEPV7 | ERA5LAND | ERA5 |  MSWX
+   ! WFDE5     | CRUJRA  | WFDEI | JRA55     | GDAS      | CMFD     | POINT
+   DEF_forcing_namelist = '$CASEPATH/$CASENAME/bld/run/${Forcing}.nml'
+
+   ! ----- history -----
+   DEF_HIST_lon_res = ${reslon}
+   DEF_HIST_lat_res = ${reslat}
+   DEF_WRST_FREQ = 'YEARLY' ! write restart file frequency: HOURLY/DAILY/MONTHLY/YEARLY
+   DEF_HIST_FREQ = 'MONTHLY' ! write history file frequency: HOURLY/DAILY/MONTHLY/YEARLY
+   DEF_HIST_groupby = 'MONTH' ! history in one file: DAY/MONTH/YEAR
+   DEF_HIST_mode = 'one' ! history in one or block
+   DEF_REST_CompressLevel = 1
+   DEF_HIST_CompressLevel = 1
+
+   DEF_HIST_vars_namelist = '$CASEPATH/$CASENAME/history.nml'
+   DEF_HIST_vars_out_default = .true.
+
+/
+EOF
+if [ ${SITELIST} == Null ];then
+   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+   ForcingPATH=$(awk -v s="FORCINGPATH" '$1 == s {print $2}' ${SCRIPT_DIR}/machine.config)
+   case ${Forcing} in
+	   GSWP3) ForcingPATHNAME=${ForcingPATH}/GSWP3/;;
+           CRUJRA) ForcingPATHNAME=${ForcingPATH}/crujra_v2.5/;;
+           CLDAS) ForcingPATHNAME=${ForcingPATH}/CLDAS/;;
+	   CMFD) ForcingPATHNAME=${ForcingPATH}/CMFD/;;
+	   CRUNCEPV4) ForcingPATHNAME=${ForcingPATH}/cruncep_v4/cruncep/;;
+	   CRUNCEPV7) ForcingPATHNAME=${ForcingPATH}/cruncep_v7/;;
+	   *) echo Error: wrong Forcing name ${Forcing}; exit ;;
+   esac
+   ROOTPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"/../../
+   sed -i "10i\   DEF_nx_blocks = ${NX_BLOCK}"   ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "11i\   DEF_ny_blocks = ${NY_BLOCK}"   ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "12i\   DEF_PIO_groupsize = ${NGROUP}" ${CASEPATH}/${CASENAME}/${NMLNAME}
+   mkdir -p ${CASEPATH}/${CASENAME}/bld/run/
+   cp -p ${ROOTPATH}/run/forcing/${Forcing}.nml  ${CASEPATH}/${CASENAME}/bld/run/${Forcing}.nml
+   echo $ForcingPATH ${SCRIPT_DIR}/machine.config
+   sed -i "s/DEF_dir_forcing.*/DEF_dir_forcing = '${ForcingPATHNAME//\//\\/}'/g" ${CASEPATH}/${CASENAME}/bld/run/${Forcing}.nml
+else
+   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+   ForcingPATH=$(awk -v s="FORCINGPATH" '$1 == s {print $2}' ${SCRIPT_DIR}/machine.config)
+   SITEDATA="'"${ForcingPATH}/$(awk -v s="$SITENAME" '$1 == s {print $7}' ${SITELIST})"'"
+   ForcingNML=${ForcingPATH}/$(awk -v s="$SITENAME" '$1 == s {print $6}' ${SITELIST})../Forcingnml
+   echo SITEDATA $SITEDATA
+   sed -i "10i\ SITE_fsitedata = ${SITEDATA}          " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "11i\ USE_SITE_pctpfts         = .true.     " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "12i\ USE_SITE_pctcrop         = .false.    " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "13i\ USE_SITE_htop            = .true.     " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "14i\ USE_SITE_LAI             = .true.     " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "15i\ USE_SITE_lakedepth       = .false.    " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "16i\ USE_SITE_soilreflectance = .false.    " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "17i\ USE_SITE_soilparameters  = .true.     " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "18i\ USE_SITE_dbedrock        = .false.    " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   sed -i "19i\ USE_SITE_topography      = .false.    " ${CASEPATH}/${CASENAME}/${NMLNAME}
+   mkdir -p ${CASEPATH}/${CASENAME}/bld/run/
+   echo copy $ForcingNML/${SITENAME}.nml ${CASEPATH}/${CASENAME}/bld/run/
+   cp -p $ForcingNML/${SITENAME}.nml ${CASEPATH}/${CASENAME}/bld/run/
+   ForcingPATHNAME="'${ForcingPATH}"/"$(awk -v s="${SITENAME}" '$1 == s {print $6}' ${SITELIST})'"
+   echo sed -i "/DEF_dir_forcing/c\DEF_dir_forcing              = ${ForcingPATHNAME}" ${CASEPATH}/${CASENAME}/bld/run/${SITENAME}.nml
+   sed -i "/DEF_dir_forcing/c\DEF_dir_forcing              = ${ForcingPATHNAME}" ${CASEPATH}/${CASENAME}/bld/run/${SITENAME}.nml
+fi
+}
+
+while getopts ":hip:n:t:e:d:r:a:o:f:l:S:N:W:E:x:y:g:s:L:" options ;
+do
+    case $options in
+      p) CASENAMEPATH="$OPTARG" ;;
+      n) NMLNAME="$OPTARG"     ;;
+      t) startyr="$OPTARG"  ;;
+      e) endyr="$OPTARG"    ;;
+      d) RAWDATA="$OPTARG"  ;;
+      r) RUNTIME="$OPTARG"  ;;
+      a) reslat="$OPTARG"   ;;
+      o) reslon="$OPTARG"   ;;
+      f) Forcing="$OPTARG"   ;;
+      i) ISUSESASU=True     ;;
+      l) LandMask="$OPTARG"  ;;
+      S) EDGES="$OPTARG"     ;;
+      N) EDGEN="$OPTARG"     ;;
+      W) EDGEW="$OPTARG"     ;;
+      E) EDGEE="$OPTARG"     ;;
+      x) NX_BLOCK="$OPTARG"  ;;
+      y) NY_BLOCK="$OPTARG"  ;;
+      g) NGROUP="$OPTARG"    ;;
+      s) SITENAME="$OPTARG"  ;;
+      L) SITELIST="$OPTARG"  ;;
+      h) Help; exit;;
+      *) echo "invalid option: $option";exit ;;
+    esac
+done
+if [ -z "${SITENAME}" ];then
+   if [ -z "${SITELIST}" ];then
+      echo
+      echo "Note: -s option is absent, run regional/global simulation"
+      echo
+      SITENAME=Null
+      SITELIST=Null
+   else
+      echo
+      echo "Error: -s option is absent while SITELIST ${SITELIST} is present, exit"
+      exit 1
+   fi
+else
+   if [ -z "${SITELIST}" ];then
+      echo
+      echo "Error: -L option is absent while SITENAME ${SITENAME} is present, exit"
+      exit 1
+   else
+      echo
+      pwd
+      if [ -f ${SITELIST} ];then
+         echo "Note: -s option is present, run single site simulation"
+      else
+	 echo "Error: Site list file ${SITELIST} is not found"
+	 exit 1
+      fi
+      if grep -q "^${SITENAME}[[:space:]]" "${SITELIST}"; then
+         echo "Note: Site name ${SITENAME} is found in the Site list file ${SITELIST}."
+	 awk '{
+              if (NF != 7) {
+                 print "Error: the " NR " line has only " NF " columns, (expected 7): " $0
+                 found_error = 1
+                           }
+              }' "${SITELIST}"
+
+         if [ ! -z "$found_error" ]; then
+            exit 1
+         fi
+      else
+         echo "Error: Site name ${SITENAME} is not found in the Site list file ${SITELIST}."
+         exit 1
+         echo
+      fi
+   fi
+fi
+
+if [ -z "$ISUSESASU" ];then
+   ISUSESASU=False
+fi
+
+if [ -z "${CASENAMEPATH}" ];then
+   echo 
+   echo 'Error: -s option is missing. See the syntax:'
+   Help
+   exit
+fi
+
+CASENAME=$(basename "${CASENAMEPATH}")
+CASEPATH=$(dirname "${CASENAMEPATH}")
+echo $CASENAME
+echo $CASEPATH
+
+if [ -z "${NMLNAME}" ];then
+   NMLNAME=input_${CASENAME}.nml
+fi
+
+if [ -z "${RAWDATA}" ];then
+   echo 
+   echo 'Error: -d option is missing. See the syntax:'
+   Help
+   exit
+fi
+
+if [ -z "${RUNTIME}" ];then
+   echo 
+   echo 'Error: -r option is missing. See the syntax:'
+   Help
+   exit
+fi
+
+if [ -z "${startyr}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -t option is absent, set startyr 1980 as the default."
+      echo
+      startyr=1980
+   else
+      echo
+      echo "Note: run single site, read startyr from SITELIST"
+      echo
+      startyr=$(awk -v s="$SITENAME" '$1 == s {print $2}' "$SITELIST")
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: startyr ${startyr} is set by the argument"
+      echo
+   else
+      tmp=$(awk -v s="$SITENAME" '$1 == s {print $2}' "$SITELIST")
+      if [ ${startyr} == ${tmp} ];then
+         echo
+	 echo "Note: startyr ${startyr} is set"
+      else
+	 echo
+         echo "Error: startyr ${startyr} from argument is conflict with SITELIST $SITELIST"
+	 echo
+	 exit 1
+      fi
+   fi
+fi
+
+if [ -z "${endyr}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -e option is absent, set endyr 2000 as the default."
+      echo
+      endyr=2000
+   else
+      echo
+      echo "Note: run single site, read endyr from SITELIST"
+      echo
+      endyr=$(awk -v s="$SITENAME" '$1 == s {print $3}' "$SITELIST")
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: endyr ${endyr} is set by the argument"
+      echo
+   else
+      tmp=`expr $(awk -v s="$SITENAME" '$1 == s {print $3}' "$SITELIST") + 1`
+      if [ ${endyr} == ${tmp} ];then
+         echo
+	 echo "Note: endyr ${endyr} is set"
+      else
+	 if [ ! -z "${SpinupScheme}" ];then
+	    if [ ${SpinupScheme} == sasund ];then
+	       echo "Note: endyr need to equal to startyr $startyr in sasund"
+	    else
+	       echo
+               echo "Error: endyr ${endyr} from argument is conflict with SITELIST $SITELIST"
+	       echo
+	       exit 1
+	    fi
+	 else
+            echo
+            echo "Error: endyr ${endyr} from argument is conflict with SITELIST $SITELIST"
+            echo
+            exit 1
+	 fi
+      fi
+   fi
+fi
+
+if [ -z "${reslat}" ];then
+   echo
+   echo "Note: -a option is absent, set reslat 0.5 as the default."
+   echo
+   reslat=0.5
+fi
+
+if [ -z "${reslon}" ];then
+   echo
+   echo "Note: -o option is absent, set reslon 0.5 as the default."
+   echo
+   reslon=0.5
+fi
+   
+if [ -z "${EDGES}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -S option is absent, set EDGES -90 as the default."
+      echo
+      EDGES=-90
+   else
+      EDGES=$(awk -v s="$SITENAME" '$1 == s {print $5}' "$SITELIST")
+      echo
+      echo "Note: EDGES ${EDGES} is read from SITELIST ${SITELIST}"
+      echo
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -S option is present, set EDGES ${EDGES} from argument"
+      echo
+   else
+      tmp=$(awk -v s="$SITENAME" '$1 == s {print $5}' "$SITELIST")
+      if [ ${tmp} == ${EDGES} ];then
+         echo
+	 echo "Note: EDGES ${EDGES} is set"
+      else
+	 echo
+         echo "Error: EDGES ${EDGES} from argument is conflict with SITELIST $SITELIST"
+	 echo
+	 exit 1
+      fi
+   fi
+fi
+
+if [ -z "${EDGEN}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -N option is absent, set EDGEN 90 as the default."
+      echo
+      EDGEN=90
+   else
+      EDGEN=$(awk -v s="$SITENAME" '$1 == s {print $5}' "$SITELIST")
+      echo
+      echo "Note: EDGEN ${EDGEN} is read from SITELIST ${SITELIST}"
+      echo
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -N option is present, set EDGEN ${EDGEN} from argument"
+      echo
+   else
+      tmp=$(awk -v s="${SITENAME}" '$1 == s {print $5}' "$SITELIST")
+      if [ ${tmp} == ${EDGEN} ];then
+         echo
+	 echo "Note: EDGEN ${EDGEN} is set"
+      else
+	 echo
+         echo "Error: EDGEN ${EDGEN} from argument is conflict with SITELIST $SITELIST"
+	 echo
+	 exit 1
+      fi
+   fi
+fi
+
+if [ -z "${EDGEW}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -W option is absent, set EDGEW -180 as the default."
+      echo
+      EDGEW=-180
+   else
+      EDGEW=$(awk -v s="${SITENAME}" '$1 == s {print $4}' "$SITELIST")
+      echo
+      echo "Note: EDGEW ${EDGEW} is read from SITELIST ${SITELIST}"
+      echo
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -W option is present, set EDGEW ${EDGEW} from argument"
+      echo
+   else
+      tmp=$(awk -v s="${SITENAME}" '$1 == s {print $4}' "$SITELIST")
+      if [ ${tmp} == ${EDGEW} ];then
+         echo
+	 echo "Note: EDGEW ${EDGEW} is set"
+      else
+	 echo
+         echo "Error: EDGEW ${EDGEW} from argument is conflict with SITELIST $SITELIST"
+	 echo
+	 exit 1
+      fi
+   fi
+fi
+
+if [ -z "${EDGEE}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -E option is absent, set EDGEE 180 as the default."
+      echo
+      EDGEE=180
+   else
+      EDGEE=$(awk -v s="${SITENAME}" '$1 == s {print $4}' "$SITELIST")
+      echo
+      echo "Note: EDGEE ${EDGEE} is read from SITELIST ${SITELIST}"
+      echo
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -E option is present, set EDGEE ${EDGEE} from argument"
+      echo
+   else
+      tmp=$(awk -v s="${SITENAME}" '$1 == s {print $4}' "$SITELIST")
+      if [ ${tmp} == ${EDGEE} ];then
+         echo
+	 echo "Note: EDGEE ${EDGEE} is set"
+      else
+	 echo
+         echo "Error: EDGEE ${EDGEE} from argument is conflict with SITELIST $SITELIST"
+	 echo
+	 exit 1
+      fi
+   fi
+fi
+
+if [ -z "${Forcing}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -f option is absent, set Forcing namelist CRUJRA.nml as the default."
+      echo
+      Forcing=CRUJRA
+   else
+      echo 
+      echo "Note: Forcing namelist is ${SITENAME}.nml"
+      echo
+      Forcing=${SITENAME}
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -f option is present, set Forcing namelist ${Forcing}.nml"
+      echo
+   else
+      if [ ${Forcing} == ${SITENAME} ];then
+	 echo
+	 echo "Note: Forcing namelist is ${SITENAME}.nml"
+	 echo
+      else
+	 echo
+	 echo "Error: Forcing namelist ${Forcing}.nml argument is conflict with SITENAME ${SITENAME}.nml"
+	 echo
+	 exit 1
+      fi
+   fi
+fi
+
+if [ -z "${LandMask}" ];then
+   echo
+   echo "Note: -l option is absent, no land mask file is used for DEF_file_mesh."
+   echo
+   LandMask=False
+fi
+
+if [ -z "${NX_BLOCK}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -x option is absent, DEF_nx_block = 18"
+      echo
+      NX_BLOCK=18
+   else
+      NX_BLOCK=Null
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -x option is present, DEF_nx_block = ${NX_BLOCK}"
+      echo
+   else
+      echo
+      echo "Error: -x option is present in single site simulation"
+      echo
+      exit 1
+   fi
+fi
+
+if [ -z "${NY_BLOCK}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -y option is absent, DEF_ny_block = 9"
+      echo
+      NY_BLOCK=9
+   else
+      NY_BLOCK=Null
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -x option is present, DEF_ny_block = ${NY_BLOCK}"
+      echo
+   else
+      echo
+      echo "Error: -x option is present in single site simulation"
+      echo
+      exit 1
+   fi
+fi
+
+if [ -z "${NGROUP}" ];then
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -g option is absent, DEF_PIO_groupsize = 24"
+      echo
+      NGROUP=24
+   else
+      NGROUP=Null
+   fi
+else
+   if [ ${SITENAME} == Null ];then
+      echo
+      echo "Note: -g option is present, DEF_PIO_groupsize = ${NGROUP}"
+      echo
+   else
+      echo
+      echo "Error: -g option is present in single site simulation"
+      echo
+      exit 1
+   fi
+fi
+CreateNamelist $CASEPATH $CASENAME $NMLNAME $startyr $endyr $RAWDATA $RUNTIME $reslon $reslat $Forcing $ISUSESASU $LandMask $EDGES $EDGEN $EDGEW $EDGEE $NX_BLOCK $NY_BLOCK $NGROUP $SITENAME $SITELIST
+
