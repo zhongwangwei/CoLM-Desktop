@@ -4,8 +4,8 @@
 //! 空间结构、研究什么过程、次网格方案、土壤水力、其余物理开关、调试，
 //! 选定之后再进六步主界面。这一步只做前两页 + 状态机骨架：后面几页
 //! 依赖一场正在进行的 CoLM 宏改造（把编译期宏变成运行时开关），那还
-//! 没完成，现在的内核只支持 LULC_IGBP + vanGenuchten 这一套。等宏改造
-//! 完成，把第 2 页的灰去掉、把状态机往后填四页就行 —— 这正是这一步的
+//! 没完成，PC 与 USGS 还选不了（各自的理由见 SUBGRID 表里那两条
+//! 注释 —— 一条是「还没跑过」，一条是「另一个工程」，不是同一回事）。
 //! 价值：机制先立起来。
 //!
 //! ## 两页
@@ -117,17 +117,26 @@ const SUBGRID = [
   {
     id: 'USGS', t: 'USGS', d: '24 类地表覆盖（旧方案）',
     tech: '一个 patch 一个地类', ready: false,
-    need: '数组尺寸由 N_land_classification 定死，仍是编译期宏',
+    // 与 PC 那条的「等等就有」不同，**这是另一个工程**：
+    // `N_land_classification` 是 Fortran `parameter`，24 类与 17 类的数组
+    // 尺寸编译期就定死，不是把 `#ifdef` 换成 `IF` 能解决的。
+    need: '数组尺寸由 N_land_classification 定死，要单独一轮数据结构改造',
   },
   {
+    // 端到端验证过：CN-Cng 只改 case.nml 的 `DEF_USE_PFT=.true.`、不动
+    // site.nc，mksrfdata→mkinidata→colm 整条跑完 11 天 528 步，LCT 与 PFT
+    // 两份 restart 都写出来了。原以为还要一份 plant_15s 栅格，实际不用 ——
+    // 那份 site.nc 里本来就带着逐 PFT 的数据。
     id: 'PFT', t: 'PFT', d: '植物功能型',
-    tech: '一个 patch 拆成多个功能型', ready: false,
-    need: 'CoLM 宏改造尚未完成',
+    tech: '一个 patch 拆成多个功能型', ready: true,
   },
   {
+    // 宏已经改成运行时开关 `DEF_USE_PC`，与 PFT 同一批（`06543f8`）。
+    // **但没有端到端跑通过的算例** —— 判据③只验了 PFT 那一路。
+    // 「代码改完了」和「能用」是两回事，没跑过就不给选。
     id: 'PC', t: 'PC', d: '植物群落',
     tech: '同 PFT，次网格组织方式不同', ready: false,
-    need: 'CoLM 宏改造尚未完成',
+    need: '已是运行时开关，但还没有端到端跑通的算例',
   },
 ];
 
@@ -150,8 +159,8 @@ function render() {
   $('gatetitle').textContent = page === 'domain' ? '这次要跑什么？' : '次网格怎么分？';
   $('gatesub').textContent = page === 'domain'
     ? '现在只有站点能跑。区域与全球的步骤链还没有实现。'
-    : '现在的内核只支持「默认」这一套物理过程 —— '
-      + '其余三档要等 CoLM 宏改造完成才能选。';
+    : 'IGBP 与 PFT 都跑通过；PC 的开关有了但还没有跑通的算例，'
+      + 'USGS 要等数组尺寸那一轮改造。';
   // 第 2 页专有的一句：说清楚次网格方案、土壤水力不在这一页问。
   // 第 3–6 页现在不存在，这句话是给将来占位的，但要现在就写上。
   $('gateinfo').textContent = page === 'subgrid'
