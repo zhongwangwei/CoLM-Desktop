@@ -32,10 +32,20 @@ fn a_bgc_variable_is_unwritable_under_the_default_kernel() {
 fn the_same_variable_is_writable_under_the_bgc_kernel() {
     // 同一个变量换个内核就该能写。这条与上一条成对 —— 只写一条的话，
     // 「永远报不能写」也能让上一条绿。
+    //
+    // BGC 现在是运行时开关（DEF_USE_BGC），不再是编译期宏 —— bgc 预设
+    // 编出来的 define.h 跟 default 完全一样（三个预设都不再用 BGC 分岔，
+    // 见 create_defineh.bash 头注释）。光换内核已经不够让 ar 变得可写，
+    // 这份配置还得把 DEF_USE_BGC 显式打开，闸门表里 ar 的运行时条件
+    // 才会求值为真。
     if !have_kernel("bgc") {
         return;
     }
-    let v = hist_vars("&nl_colm\n/\n".into(), kernel("bgc")).expect("runs");
+    let v = hist_vars(
+        "&nl_colm\n   DEF_USE_BGC = .true.\n/\n".into(),
+        kernel("bgc"),
+    )
+    .expect("runs");
     let ar = v.iter().find(|x| x.name == "ar").expect("ar");
     assert_eq!(ar.writable, Some(true), "blocked_by={:?}", ar.blocked_by);
 }

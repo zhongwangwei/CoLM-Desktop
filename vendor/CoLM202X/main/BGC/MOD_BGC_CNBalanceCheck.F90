@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 
 MODULE MOD_BGC_CNBalanceCheck
 
@@ -270,4 +269,3 @@ CONTAINS
    END SUBROUTINE NBalanceCheck
 
 END MODULE MOD_BGC_CNBalanceCheck
-#endif

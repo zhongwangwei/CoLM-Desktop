@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef URBAN_MODEL
 MODULE MOD_Urban_Vars_TimeInvariants
 
 !-----------------------------------------------------------------------
@@ -336,5 +335,4 @@ CONTAINS
    END SUBROUTINE deallocate_UrbanTimeInvariants
 
 END MODULE MOD_Urban_Vars_TimeInvariants
-#endif
 ! ---------- EOP ------------

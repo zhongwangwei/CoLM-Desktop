@@ -4,10 +4,8 @@ MODULE MOD_IniTimeVariable
 
 !-----------------------------------------------------------------------
    USE MOD_Precision
-#ifdef BGC
    USE MOD_BGC_CNSummary, only: CNDriverSummarizeStates, &
       CNDriverSummarizeNonvegetatedSoilStates, CNDriverSummarizeFluxes
-#endif
    IMPLICIT NONE
    SAVE
 
@@ -44,7 +42,6 @@ CONTAINS
 #endif
 !Ozone Variables
                      ,o3coefv_sun,o3coefv_sha,o3coefg_sun,o3coefg_sha&
-#if (defined BGC)
                      ,use_cnini, totlitc, totsomc, totcwdc, decomp_cpools, decomp_cpools_vr, ctrunc_veg, ctrunc_soil, ctrunc_vr &
                      ,totlitn, totsomn, totcwdn, decomp_npools, decomp_npools_vr, ntrunc_veg, ntrunc_soil, ntrunc_vr &
                      ,totvegc, totvegn, totcolc, totcoln, col_endcb, col_begcb, col_endnb, col_begnb &
@@ -71,7 +68,6 @@ CONTAINS
                      ,AKX_soil1_exit_n_vr_acc    , AKX_soil2_exit_n_vr_acc    , AKX_soil3_exit_n_vr_acc     &
                      ,diagVX_n_vr_acc            , upperVX_n_vr_acc           , lowerVX_n_vr_acc           &
 !------------------------------------------------------------
-#endif
                      ,use_soilini, nl_soil_ini, soil_z,   soil_t,   soil_w, use_snowini, snow_d &
                      ,use_wtd,     zwtmm,       zc_soimm, zi_soimm, vliq_r, nprms, prms)
 
@@ -87,11 +83,9 @@ CONTAINS
    USE MOD_Vars_TimeVariables, only: tlai, tsai
    USE MOD_Const_PFT, only: isevg, woody, leafcn, frootcn, livewdcn, deadwdcn, slatop, manure
    USE MOD_Vars_TimeInvariants, only: ibedrock, dbedrock
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
-#endif
    USE MOD_Vars_Global
 #ifdef HYPERSPECTRAL
    USE MOD_Albedo_HiRes
@@ -149,9 +143,7 @@ CONTAINS
          z0m                      ! aerodynamic roughness length [m]
 
    logical, intent(in)  :: use_soilini
-#ifdef BGC
    logical, intent(in)  :: use_cnini
-#endif
    integer, intent(in)  :: nl_soil_ini
    real(r8), intent(in) ::       &!
          soil_z(nl_soil_ini),    &! soil layer depth for initial (m)
@@ -251,7 +243,6 @@ CONTAINS
          o3coefg_sun,            &! Ozone stress factor for stomata on shaded leaf
          o3coefg_sha              ! Ozone stress factor for stomata on shaded leaf
 
-#ifdef BGC
    real(r8),intent(out) ::      &
         totlitc               , &
         totsomc               , &
@@ -364,8 +355,6 @@ CONTAINS
    !----------------------------------------------------
    logical, intent(out) :: &
         skip_balance_check
-
-#endif
 
    integer j, snl, m, ivt
    real(r8) wet(nl_soil), zi_soi_a(0:nl_soil), psi, vliq, wt, ssw, oro, rhosno_ini, a
@@ -518,7 +507,7 @@ CONTAINS
          ! (2) snow initialization
          !     variables: snowdp, sag, scv, fsno, snl, z_soisno, dz_soisno
          z0m = htop * z0mr
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF(patchtype==0)THEN
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
@@ -526,7 +515,7 @@ CONTAINS
                z0m_p(ps:pe) = htop_p(ps:pe) * z0mr
             ENDIF
          ENDIF
-#endif
+ENDIF
 
          IF (use_snowini) THEN
 
@@ -544,7 +533,7 @@ CONTAINS
             sai = tsai(ipatch) * sigf
 
             IF (patchtype == 0) THEN
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                ps = patch_pft_s(ipatch)
                pe = patch_pft_e(ipatch)
                CALL snowfraction_pftwrap (ipatch,zlnd,scv,snowdp,wt,sigf,fsno)
@@ -556,7 +545,7 @@ CONTAINS
                ENDIF
                sai_p(ps:pe) = tsai_p(ps:pe) * sigf_p(ps:pe)
                sai = sum(sai_p(ps:pe)*pftfrac(ps:pe))
-#endif
+ENDIF
             ENDIF
 
             IF(snl.lt.0)THEN
@@ -620,7 +609,7 @@ CONTAINS
          ENDIF
 
          IF (patchtype == 0) THEN
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
             ldew_rain_p(ps:pe) = 0.
@@ -635,7 +624,7 @@ CONTAINS
                gs0sun_p(ps:pe) = 1.0e4
                gs0sha_p(ps:pe) = 1.0e4
             ENDIF
-#endif
+ENDIF
          ENDIF
 
          ! (5) Ground
@@ -647,16 +636,16 @@ CONTAINS
 
          IF (.not. use_snowini) THEN
             IF (patchtype == 0) THEN
-#if (defined LULC_USGS || defined LULC_IGBP)
+IF (DEF_USE_LCT) THEN
                sigf = fveg
                lai  = tlai(ipatch)
                sai  = tsai(ipatch) * sigf
                IF(DEF_USE_OZONESTRESS)THEN
                   lai_old = lai
                ENDIF
-#endif
+ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                ps = patch_pft_s(ipatch)
                pe = patch_pft_e(ipatch)
                sigf_p (ps:pe)  = 1.
@@ -670,7 +659,7 @@ CONTAINS
                   lai_old = lai
                   lai_old_p(ps:pe) = lai_p(ps:pe)
                ENDIF
-#endif
+ENDIF
             ELSE
                sigf  = fveg
                lai   = tlai(ipatch)
@@ -694,7 +683,7 @@ CONTAINS
          mss_dst3  (:) = 0.
          mss_dst4  (:) = 0.
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
          totlitc                         = 0.0
          totsomc                         = 0.0
          totcwdc                         = 0.0
@@ -812,7 +801,7 @@ CONTAINS
          !----------------------------------------------------
          skip_balance_check              = .false.
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
          ! CNDriverSummarizeNonvegetatedSoilStates (main/BGC/MOD_BGC_CNSummary.F90)
          ! is a plain BGC routine, always compiled in with BGC -- but this
          ! particular cold-start call for wetland (patchtype==2) patches only
@@ -829,9 +818,9 @@ CONTAINS
                CALL CNDriverSummarizeNonvegetatedSoilStates(ipatch, nl_soil, dz_soi, ndecomp_pools)
             ENDIF
          ENDIF
-#endif
+ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF (patchtype == 0) THEN
             DO m = ps, pe
                ivt = pftclass(m)
@@ -1027,9 +1016,9 @@ CONTAINS
                ENDIF
             ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             CALL CNDriverSummarizeStates(ipatch,ps,pe,nl_soil,dz_soi,ndecomp_pools,.true.)
-#endif
+ENDIF
 
             ! SASU varaibles
             leafc0_p                 (ps:pe) = 0.0
@@ -1213,8 +1202,8 @@ CONTAINS
             AKX_grainn_xf_exit_p_acc                    (ps:pe) = 0._r8
 
          ENDIF
-#endif
-#endif
+ENDIF
+ENDIF
 
          ! (8) surface albedo
          ! Variables: alb, ssun, ssha, ssno, thermk, extkb, extkd

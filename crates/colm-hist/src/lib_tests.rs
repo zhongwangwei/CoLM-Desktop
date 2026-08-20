@@ -31,37 +31,51 @@ fn the_table_covers_every_live_write_site() {
 }
 
 #[test]
-fn the_default_preset_can_write_one_hundred_and_twenty_three() {
-    // 第一道闸门（编译期宏）之后剩 123 个，其中 113 个没有运行时条件。
-    // 实际写出 119 = 113 + 那 10 个里条件成立的 6 个。
-    assert_eq!(writable(&default()).len(), 123);
+fn the_default_preset_can_write_three_hundred_and_forty_six() {
+    // LULC/BGC/CROP/URBAN/LULCC 那组改造之后：BGC 与 URBAN_MODEL 不再是
+    // 编译期宏（`main/BGC/`、`main/URBAN/` 始终编译进去，`DEF_USE_BGC`/
+    // `DEF_URBAN_RUN` 在 MOD_Namelist.F90 里改成运行时开关），所以
+    // `MOD_Hist.F90` 里原来 `#ifdef BGC`/`#ifdef URBAN_MODEL` 包着的写出点
+    // 全部从第一道闸门（编译期宏）挪到了第二道闸门（运行时 `IF (DEF_*) THEN`）。
+    // 第一道闸门因此从 123 涨到 346——这不是多报，是如实反映「这些变量现在
+    // 编译期就在，运行时开关决定写不写」。113 个没有运行时条件不变
+    // （那批一直不挂 BGC/URBAN_MODEL），233 个挂着运行时条件（原来只有
+    // 10 个，见 every_runtime_gated_variable_carries_its_condition）。
+    assert_eq!(writable(&default()).len(), 346);
     assert_eq!(unconditional(&default()).len(), 113);
 }
 
 #[test]
 fn every_runtime_gated_variable_carries_its_condition() {
-    // 10 个过得了宏这一关但还挂着运行时条件。每个的条件原文都记在表里，
-    // 所以 GUI 能说清「为什么你勾了它却没有」，而不是只说「没有」。
+    // 233 个过得了宏这一关但还挂着运行时条件——从改造前的 10 个涨上来的
+    // 223 个几乎全部是 BGC（碳氮池、物候、GPP/NPP 逐 PFT 分量……）与
+    // URBAN_MODEL（屋顶/墙面/不透水地面能量通量……）两块。每个的条件原文
+    // 都记在表里，所以 GUI 能说清「为什么你勾了它却没有」，而不是只说
+    // 「没有」。这里不逐一枚举 233 个名字——那样改一次上游就要改一次
+    // 233 行——只验总数、验原来那 10 个仍然在（且条件原文不变），
+    // 再挑几个代表性的 BGC/URBAN_MODEL 变量验条件原文正确。
     let w = writable(&default());
     let u = unconditional(&default());
-    let gated: Vec<&str> = w.difference(&u).cloned().collect();
-    assert_eq!(
-        gated,
-        [
-            "dz_lake",
-            "lake_deficit",
-            "o3uptakesha",
-            "o3uptakesun",
-            "qcharge",
-            "qlayer",
-            "t2m_wmo",
-            "vegwp",
-            "wetwat",
-            "xy_hpbl",
-        ]
-    );
+    let gated: BTreeSet<&str> = w.difference(&u).cloned().collect();
+    assert_eq!(gated.len(), 233);
 
     let cond = |n: &str| all().iter().find(|v| v.name == n).unwrap().runtime.unwrap();
+
+    // 改造前就有的 10 个，条件原文不受这组改造影响。
+    for n in [
+        "dz_lake",
+        "lake_deficit",
+        "o3uptakesha",
+        "o3uptakesun",
+        "qcharge",
+        "qlayer",
+        "t2m_wmo",
+        "vegwp",
+        "wetwat",
+        "xy_hpbl",
+    ] {
+        assert!(gated.contains(n), "{n} should still be runtime-gated");
+    }
     // qlayer 与 qcharge 挂在同一个条件的两侧 —— 这道闸门是双向的，
     // 不是「条件成立才加」，而是「条件决定写哪一个」。
     // 而那个条件正是 CoLM 打印的第一条覆盖消息说的事：
@@ -78,19 +92,33 @@ fn every_runtime_gated_variable_carries_its_condition() {
     for n in ["o3uptakesha", "o3uptakesun"] {
         assert!(cond(n).contains("DEF_USE_OZONESTRESS"));
     }
+
+    // 新涨出来的 223 个：BGC 的碳氮池变量……
+    for n in ["leafc", "gpp", "totvegc", "sminn_vr", "hr"] {
+        assert!(gated.contains(n), "{n} should be BGC-gated");
+        assert_eq!(cond(n), "DEF_USE_BGC");
+    }
+    // ……与 URBAN_MODEL 的城市能量通量变量。
+    for n in ["t_roof", "fsenroof", "fhac", "t_room"] {
+        assert!(gated.contains(n), "{n} should be URBAN_MODEL-gated");
+        assert_eq!(cond(n), "DEF_URBAN_RUN");
+    }
 }
 
 #[test]
-fn turning_on_bgc_adds_variables_and_never_removes_any() {
-    // 加一个宏不会让已有变量消失 —— 这个直觉只在该宏没有 #ifndef 侧时成立。
-    // BGC 实测只有一处 `#ifdef BGC`、零处 `#ifndef BGC`，所以在它上面成立。
-    // （CatchLateralFlow 两侧都有，就不成立 —— 见 ifndef_really_does_subtract。）
+fn bgc_and_urban_model_are_no_longer_compile_time_gates() {
+    // 改造前：BGC 是编译期宏，加进宏集合会让 writable() 多报出一整块变量
+    // （123 -> 326）。改造后：main/BGC/ 与 main/URBAN/ 始终编译进去，
+    // `MOD_Hist.F90` 里不再有任何 `#ifdef BGC`/`#ifdef URBAN_MODEL`，
+    // 所以往宏集合里加 "BGC"/"URBAN_MODEL" 现在**什么也不改变**——
+    // 这正是这组改造要证明的事：BGC/URBAN_MODEL 变量的可用性只取决于
+    // 运行时开关（DEF_USE_BGC/DEF_URBAN_RUN），不取决于编译宏集合了。
     let base = writable(&default());
-    let mut with_bgc = default();
-    with_bgc.insert("BGC");
-    let more = writable(&with_bgc);
-    assert!(base.is_subset(&more));
-    assert_eq!(more.len(), 326); // 123 -> 326，BGC 那一块很大
+    let mut with_both = default();
+    with_both.insert("BGC");
+    with_both.insert("URBAN_MODEL");
+    let same = writable(&with_both);
+    assert_eq!(base, same);
 }
 
 #[test]
@@ -103,7 +131,8 @@ fn ifndef_really_does_subtract() {
     // 对本表毫无影响，拿它做断言会得到一条永远为真的假测试。
     //
     // `#ifndef CatchLateralFlow` 则实实在在管着 f_rsur_ie 与 f_rsur_se ——
-    // 两个都在黄金文件里（README 记着它们「两窗口恒为 0」）。
+    // 两个都在黄金文件里（README 记着它们「两窗口恒为 0」）。CatchLateralFlow
+    // 与 BGC/URBAN_MODEL 无关，不受这组改造影响，只是基数从 123 涨到 346。
     let base = writable(&default());
     assert!(base.contains("rsur_ie") && base.contains("rsur_se"));
 
@@ -114,5 +143,5 @@ fn ifndef_really_does_subtract() {
     assert!(!after.contains("rsur_se"));
     // 同一个宏的 #ifdef 侧又放行了三个，所以净变化是 +1 而不是 -2。
     assert!(after.contains("fldarea") && after.contains("xwsub") && after.contains("xwsur"));
-    assert_eq!(after.len(), 124);
+    assert_eq!(after.len(), 347);
 }

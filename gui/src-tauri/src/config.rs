@@ -124,6 +124,7 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
         "HIGHRESSOIL",
         "HIGHRESVEG",
         "LULCC_SCHEME",
+        "DEF_USE_LULCC",
     ]) {
         return Some("地表数据");
     }
@@ -171,6 +172,8 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
         "CNSOYFIXN",
         "DEF_USE_FIRE",
         "CHECKEQUILIBRIUM",
+        "DEF_USE_BGC",
+        "DEF_USE_CROP",
     ]) {
         return Some("生态与生地化");
     }
@@ -282,7 +285,13 @@ fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeS
     match field_section(field.name, field.group) {
         // 这些开关有一部分在公共 namelist 代码里无守护地出现，但对应子系统
         // 没编进内核时设置它们仍然不会产生任何效果。
-        Some("城市") => have.contains("URBAN_MODEL"),
+        //
+        // 没有「城市」这一条了：LULC/BGC/CROP/URBAN/LULCC 那组改造把
+        // URBAN_MODEL 也变成运行时开关了（`DEF_URBAN_RUN`），
+        // `main/URBAN/` 始终编译进去，`URBAN_MODEL` 本身从
+        // `include/define.h` 里彻底消失——城市字段现在在每个内核下都
+        // 「有意义」（能不能真的看到城市输出取决于 `DEF_URBAN_RUN`
+        // 本身怎么设，那是运行时的事，不是这个函数管的编译期相关性）。
         Some("示踪剂") => have.contains("TRACER"),
         Some("数据同化") => have.contains("DataAssimilation"),
         _ => true,

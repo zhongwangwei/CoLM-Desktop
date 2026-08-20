@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef BGC
 MODULE MOD_FireData
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -136,4 +135,3 @@ CONTAINS
    END SUBROUTINE update_hdm_data
 
 END MODULE MOD_FireData
-#endif

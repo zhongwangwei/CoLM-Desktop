@@ -69,15 +69,9 @@ CONTAINS
                        zol           ,rib           ,ustar         ,qstar         ,&
                        tstar         ,fm            ,fh            ,fq            ,&
                        pg_rain       ,pg_snow       ,t_precip      ,qintr_rain    ,&
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
                        qintr_snow    ,snofrz        ,sabg_snow_lyr ,canopy_phase_heat,canopy_phase_heat_p,&
                        canopy_smelt_mass_th, canopy_frzc_mass_th, &
                        qphs_thaw_lay_th, qphs_frzc_lay_th, raw_trc_th)
-#else
-                       qintr_snow    ,snofrz        ,sabg_snow_lyr ,canopy_phase_heat,&
-                       canopy_smelt_mass_th, canopy_frzc_mass_th, &
-                       qphs_thaw_lay_th, qphs_frzc_lay_th, raw_trc_th)
-#endif
 
 !=======================================================================
 !  this is the main subroutine to execute the calculation
@@ -120,7 +114,6 @@ CONTAINS
    USE MOD_GroundTemperature
    USE MOD_Qsadv
    USE MOD_SoilSurfaceResistance
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_TimeInvariants, only: patchclass
    USE MOD_Vars_TimeVariables, only: &
@@ -129,7 +122,6 @@ CONTAINS
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
    USE MOD_Vars_1DPFTFluxes
-#endif
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
@@ -265,9 +257,7 @@ CONTAINS
    ! Canopy rain<->snow fusion heat from LEAF_INTERCEPTION [W/m2].
    real(r8), intent(in) :: &
        canopy_phase_heat          ! canopy fusion heat flux [W/m^2]
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), intent(in) :: canopy_phase_heat_p(:)
-#endif
 
    ! Optional canopy phase-change mass exports for TRACER [mm].
    real(r8), intent(out), optional :: canopy_smelt_mass_th, canopy_frzc_mass_th
@@ -754,8 +744,7 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
 ENDIF
 
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
-IF (patchtype == 0) THEN
+IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
 
       ps = patch_pft_s(ipatch)
       pe = patch_pft_e(ipatch)
@@ -1209,7 +1198,6 @@ END IF
       deallocate ( raw_trc_p )
 
 ENDIF
-#endif
 
 
 !=======================================================================

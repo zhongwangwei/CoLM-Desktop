@@ -1,6 +1,5 @@
 #include <define.h>
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
 MODULE MOD_LandPFT
 
@@ -323,4 +322,3 @@ CONTAINS
    END SUBROUTINE map_patch_to_pft
 
 END MODULE MOD_LandPFT
-#endif

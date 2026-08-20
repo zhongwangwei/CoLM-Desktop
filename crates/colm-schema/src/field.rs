@@ -62,13 +62,18 @@ pub struct Field {
     /// 这个字段要**编译期开了哪些宏**才有意义；为空表示任何配置下都可能用到。
     ///
     /// 两种来源，都从源码扫：字段的全部用法都在某个 `#ifdef` 之内（实测 63 个），
-    /// 或全部落在某个可选子系统的目录里（`main/TRACER/`、`*Urban*`、`main/BGC/`、
-    /// `*Catch*`、`CaMa/`、`main/DA/`，实测 56 个，与前者有重叠）。
+    /// 或全部落在某个可选子系统的目录里（`*Catch*`、`CaMa/`、`main/DA/`，
+    /// 实测 56 个，与前者有重叠）。**`main/TRACER/`、`*Urban*`、`main/BGC/`
+    /// 不再在这一类里**——示踪物 / URBAN_MODEL / BGC 那两轮改造把它们的
+    /// 编译期宏都改成了运行时开关，这三个目录现在永远编译进去，见
+    /// `xtask/src/usage.rs` 里 `SUBSYSTEMS`/`BY_NAME` 头上的说明。
     ///
     /// **两种都覆盖不到的还有一类**：字段本身没被守，守护在**调用点**。
-    /// `DEF_URBAN_type_scheme` 就是 —— 它的四处用法一处都不在
-    /// `#ifdef URBAN_MODEL` 里，真正的守护是 `MKSRFDATA.F90:393` 那个
-    /// 唯一调用者。那一类只能人工列，见 `curated.rs`，而且每条都要带出处。
+    /// 那一类只能人工列，见 `curated.rs`，而且每条都要带出处。目前是空的——
+    /// 唯一进过这张表的例子 `DEF_URBAN_type_scheme`（当时守护在
+    /// `landurban_build` 唯一调用者外的 `#ifdef URBAN_MODEL`）已经过时了：
+    /// URBAN_MODEL 改成运行时开关之后，那个调用点的守护变成了
+    /// `IF (DEF_URBAN_RUN)`（`MKSRFDATA.F90`），不再是编译期宏。
     ///
     /// 判据落到界面上很便宜：内核的 `manifest.json` 已经记了它编进了哪些宏。
     pub requires: &'static [&'static str],

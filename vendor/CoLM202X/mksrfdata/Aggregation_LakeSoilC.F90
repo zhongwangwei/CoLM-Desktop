@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef BGC
 SUBROUTINE Aggregation_LakeSoilC ( &
       gland, dir_rawdata, dir_model_landdata, lc_year)
 
@@ -149,4 +148,3 @@ SUBROUTINE Aggregation_LakeSoilC ( &
       ENDIF
 
 END SUBROUTINE Aggregation_LakeSoilC
-#endif

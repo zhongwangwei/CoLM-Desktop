@@ -4,7 +4,6 @@
 ! Created by Yongjiu Dai, 03/2014
 !-----------------------------------------------------------------------
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 MODULE MOD_Vars_PFTimeInvariants
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -155,7 +154,6 @@ CONTAINS
    END SUBROUTINE check_PFTimeInvariants
 
 END MODULE MOD_Vars_PFTimeInvariants
-#endif
 
 MODULE MOD_Vars_TimeInvariants
 ! -------------------------------
@@ -163,15 +161,9 @@ MODULE MOD_Vars_TimeInvariants
 ! -------------------------------
 
    USE MOD_Precision
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeInvariants
-#endif
-#ifdef BGC
    USE MOD_BGC_Vars_TimeInvariants
-#endif
-#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_TimeInvariants
-#endif
    IMPLICIT NONE
    SAVE
 
@@ -186,9 +178,7 @@ MODULE MOD_Vars_TimeInvariants
 
    real(r8), allocatable :: lakedepth      (:)  !lake depth
    real(r8), allocatable :: dz_lake      (:,:)  !new lake scheme
-#ifdef BGC
    real(r8), allocatable :: lake_soilc_srf(:,:) !lake sediment organic carbon [gC/m3]
-#endif
 
    real(r8), allocatable :: soil_s_v_alb   (:)  !albedo of visible of the saturated soil
    real(r8), allocatable :: soil_d_v_alb   (:)  !albedo of visible of the dry soil
@@ -310,6 +300,7 @@ CONTAINS
    ! -------------------------------------------------------------------
 
    USE MOD_Precision
+   USE MOD_Namelist
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_LandPatch, only: numpatch
@@ -328,10 +319,10 @@ CONTAINS
 
             allocate (lakedepth            (numpatch))
             allocate (dz_lake      (nl_lake,numpatch))
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             allocate (lake_soilc_srf(nl_soil,numpatch))
             lake_soilc_srf(:,:) = 0._r8
-#endif
+ENDIF
 
             allocate (soil_s_v_alb         (numpatch))
             allocate (soil_d_v_alb         (numpatch))
@@ -422,17 +413,17 @@ CONTAINS
          ENDIF
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL allocate_PFTimeInvariants
-#endif
+ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL allocate_BGCTimeInvariants
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL allocate_UrbanTimeInvariants
-#endif
+ENDIF
 
    END SUBROUTINE allocate_TimeInvariants
 
@@ -473,9 +464,9 @@ CONTAINS
 
       CALL ncio_read_vector (file_restart, 'lakedepth',    landpatch, lakedepth)           !
       CALL ncio_read_vector (file_restart, 'dz_lake' ,     nl_lake, landpatch, dz_lake)    !
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL ncio_read_vector (file_restart, 'lake_soilc_srf', nl_soil, landpatch, lake_soilc_srf, defval = 0._r8)
-#endif
+ENDIF
 
       CALL ncio_read_vector (file_restart, 'soil_s_v_alb', landpatch, soil_s_v_alb)        ! albedo of visible of the saturated soil
       CALL ncio_read_vector (file_restart, 'soil_d_v_alb', landpatch, soil_d_v_alb)        ! albedo of visible of the dry soil
@@ -591,7 +582,7 @@ CONTAINS
          CALL ncio_read_vector (file_restart, 'cur_patches'      ,                 landpatch, cur_patches )
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef SinglePoint
       IF (patchtypes(SITE_landtype) == 0) THEN
          file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_pft_const' // '_lc' // trim(cyear) // '.nc'
@@ -601,17 +592,17 @@ CONTAINS
       file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_pft_const' // '_lc' // trim(cyear) // '.nc'
       CALL READ_PFTimeInvariants (file_restart)
 #endif
-#endif
+ENDIF
 
-#if (defined BGC)
+IF (DEF_USE_BGC) THEN
       file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_bgc_const' // '_lc' // trim(cyear) // '.nc'
       CALL READ_BGCTimeInvariants (file_restart)
-#endif
+ENDIF
 
-#if (defined URBAN_MODEL)
+IF (DEF_URBAN_RUN) THEN
       file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_urb_const' // '_lc' // trim(cyear) // '.nc'
       CALL READ_UrbanTimeInvariants (file_restart)
-#endif
+ENDIF
 
       IF (DEF_USE_RangeCheck) THEN
       CALL check_TimeInvariants ()
@@ -634,7 +625,8 @@ CONTAINS
    ! Original version: Yongjiu Dai, September 15, 1999, 03/2014
    !====================================================================
 
-   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_BEDROCK, DEF_USE_Campbell_SOIL_MODEL
+   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_BEDROCK, DEF_USE_Campbell_SOIL_MODEL, &
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
    USE MOD_NetCDFVector
@@ -692,9 +684,9 @@ CONTAINS
 
       CALL ncio_write_vector (file_restart, 'lakedepth' , 'patch', landpatch, lakedepth , compress)                  !
       CALL ncio_write_vector (file_restart, 'dz_lake'   ,  'lake', nl_lake, 'patch', landpatch, dz_lake, compress)   !
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL ncio_write_vector (file_restart, 'lake_soilc_srf', 'soil', nl_soil, 'patch', landpatch, lake_soilc_srf, compress)
-#endif
+ENDIF
 
       CALL ncio_write_vector (file_restart, 'soil_s_v_alb', 'patch', landpatch, soil_s_v_alb, compress)              ! albedo of visible of the saturated soil
       CALL ncio_write_vector (file_restart, 'soil_d_v_alb', 'patch', landpatch, soil_d_v_alb, compress)              ! albedo of visible of the dry soil
@@ -822,26 +814,27 @@ CONTAINS
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_pft_const' //'_lc'// trim(cyear) // '.nc'
       CALL WRITE_PFTimeInvariants (file_restart)
-#endif
+ENDIF
 
-#if (defined BGC)
+IF (DEF_USE_BGC) THEN
       file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_bgc_const' //'_lc'// trim(cyear) // '.nc'
       CALL WRITE_BGCTimeInvariants (file_restart)
-#endif
+ENDIF
 
-#if (defined URBAN_MODEL)
+IF (DEF_URBAN_RUN) THEN
       file_restart = trim(dir_restart) // '/const/' // trim(casename) //'_restart_urb_const' //'_lc'// trim(cyear) // '.nc'
       CALL WRITE_UrbanTimeInvariants (file_restart)
-#endif
+ENDIF
 
    END SUBROUTINE WRITE_TimeInvariants
 
    SUBROUTINE deallocate_TimeInvariants ()
 
-   USE MOD_Namelist, only: DEF_USE_Forcing_Downscaling, DEF_USE_Forcing_Downscaling_Simple
+   USE MOD_Namelist, only: DEF_USE_Forcing_Downscaling, DEF_USE_Forcing_Downscaling_Simple, &
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_SPMD_Task
    USE MOD_LandPatch, only: numpatch
 
@@ -864,9 +857,9 @@ CONTAINS
 
             deallocate (lakedepth      )
             deallocate (dz_lake        )
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             deallocate (lake_soilc_srf )
-#endif
+ENDIF
 
             deallocate (soil_s_v_alb   )
             deallocate (soil_d_v_alb   )
@@ -958,17 +951,17 @@ CONTAINS
          ENDIF
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL deallocate_PFTimeInvariants
-#endif
+ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL deallocate_BGCTimeInvariants
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL deallocate_UrbanTimeInvariants
-#endif
+ENDIF
    END SUBROUTINE deallocate_TimeInvariants
 
    SUBROUTINE check_TimeInvariants ()
@@ -977,7 +970,8 @@ CONTAINS
    USE MOD_RangeCheck
    USE MOD_Namelist, only: DEF_Runoff_SCHEME, DEF_TOPMOD_method, DEF_USE_BEDROCK, &
                            DEF_USE_Forcing_Downscaling, DEF_USE_Forcing_Downscaling_Simple, &
-                           DEF_USE_Campbell_SOIL_MODEL
+                           DEF_USE_Campbell_SOIL_MODEL, &
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
 
    IMPLICIT NONE
 
@@ -1117,13 +1111,13 @@ CONTAINS
          write(*,'(A,E20.10)') 'wetwatmax [mm]', wetwatmax ! maximum wetland water (mm)
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL check_PFTimeInvariants
-#endif
+ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL check_BGCTimeInvariants
-#endif
+ENDIF
 
    END SUBROUTINE check_TimeInvariants
 

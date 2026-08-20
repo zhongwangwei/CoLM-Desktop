@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef BGC
 MODULE MOD_NitrifData
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -168,4 +167,3 @@ CONTAINS
    END SUBROUTINE update_nitrif_data
 
 END MODULE MOD_NitrifData
-#endif

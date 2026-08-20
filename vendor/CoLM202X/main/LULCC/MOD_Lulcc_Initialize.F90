@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef LULCC
 MODULE MOD_Lulcc_Initialize
 
    USE MOD_Precision
@@ -28,14 +27,13 @@ CONTAINS
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
+   USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_Block
    USE MOD_Mesh
    USE MOD_LandElm
    USE MOD_LandPatch
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
    USE MOD_LandUrban
    USE MOD_Const_LC
    USE MOD_Const_PFT
@@ -74,12 +72,12 @@ CONTAINS
       CALL mesh_free_mem
       CALL landelm%forc_free_mem
       CALL landpatch%forc_free_mem
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL landpft%forc_free_mem
-#endif
-#ifdef URBAN_MODEL
+      ENDIF
+      IF (DEF_URBAN_RUN) THEN
       CALL landurban%forc_free_mem
-#endif
+      ENDIF
 
       ! load pixelset and mesh data of next year
       ! CALL pixel%load_from_file  (dir_landdata)
@@ -96,16 +94,16 @@ CONTAINS
       CALL pixelset_load_from_file (dir_landdata, 'landpatch', landpatch, numpatch, year)
 
       ! load pft data of PFT/PC of next year
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL pixelset_load_from_file (dir_landdata, 'landpft'  , landpft  , numpft  , year)
       CALL map_patch_to_pft
-#endif
+      ENDIF
 
       ! load urban data of next year
-#ifdef URBAN_MODEL
+      IF (DEF_URBAN_RUN) THEN
       CALL pixelset_load_from_file (dir_landdata, 'landurban', landurban, numurban, year)
       CALL map_patch_to_urban
-#endif
+      ENDIF
 
       ! initialize for data associated with land element
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -134,5 +132,4 @@ CONTAINS
    END SUBROUTINE LulccInitialize
 
 END MODULE MOD_Lulcc_Initialize
-#endif
 ! ---------- EOP ------------

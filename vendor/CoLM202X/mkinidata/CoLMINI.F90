@@ -33,12 +33,8 @@ PROGRAM CoLMINI
    USE MOD_Const_LC
    USE MOD_Const_PFT
    USE MOD_TimeManager
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -99,23 +95,23 @@ PROGRAM CoLMINI
 
 #ifdef SinglePoint
       fsrfdata = trim(dir_landdata) // '/srfdata.nc'
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
       CALL read_surface_data_single (fsrfdata, mksrfdata=.false.)
-#else
+ELSE
       CALL read_urban_surface_data_single (fsrfdata, mksrfdata=.false., mkrun=.true.)
-#endif
+ENDIF
 #endif
 
       CALL monthday2julian(s_year,s_month,s_day,s_julian)
       idate(1) = s_year; idate(2) = s_julian; idate(3) = s_seconds
       CALL adj2begin(idate)
 
-#ifdef LULCC
+IF (DEF_USE_LULCC) THEN
       lc_year = idate(1)
       DEF_LC_YEAR = lc_year
-#else
+ELSE
       lc_year = DEF_LC_YEAR
-#endif
+ENDIF
 
       CALL Init_GlobalVars
       CALL Init_LC_Const
@@ -135,15 +131,15 @@ PROGRAM CoLMINI
 
       CALL pixelset_load_from_file (dir_landdata, 'landpatch', landpatch, numpatch, lc_year)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL pixelset_load_from_file (dir_landdata, 'landpft', landpft, numpft, lc_year)
       CALL map_patch_to_pft
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL pixelset_load_from_file (dir_landdata, 'landurban', landurban, numurban, lc_year)
       CALL map_patch_to_urban
-#endif
+ENDIF
 #if (defined UNSTRUCTURED || defined CATCHMENT)
       CALL elm_vector_init ()
 #ifdef CATCHMENT

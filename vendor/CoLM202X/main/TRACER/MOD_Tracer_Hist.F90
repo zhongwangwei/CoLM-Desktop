@@ -1501,7 +1501,6 @@ CONTAINS
    END SUBROUTINE write_history_variable_2d
 
 
-#ifdef URBAN_MODEL
    SUBROUTINE write_history_variable_urb_2d ( is_hist, &
          acc_vec, file_hist, varname, itime_in_file, sumarea, filter, &
          longname, units)
@@ -1540,7 +1539,6 @@ CONTAINS
       END select
 
    END SUBROUTINE write_history_variable_urb_2d
-#endif
 
 
    SUBROUTINE write_history_variable_3d ( is_hist, &

@@ -157,9 +157,16 @@ MODULE MOD_Namelist
    integer :: DEF_LC_YEAR  = 2005
 
    ! ----- Subgrid scheme -----
+   ! DEF_USE_USGS/DEF_USE_IGBP: read-only reflection of the compile-time
+   ! land-classification choice (see "subgrid type related" conflict block
+   ! below) -- not independently settable.
    logical :: DEF_USE_USGS = .false.
    logical :: DEF_USE_IGBP = .false.
-   logical :: DEF_USE_LCT  = .false.
+   ! DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC: runtime subgrid-structure choice,
+   ! exactly one must be .true. (validated below). Default LCT, matching the
+   ! LULC_IGBP/LULC_USGS golden-regression baseline, so that a case.nml
+   ! which never mentions these three keys behaves exactly as before.
+   logical :: DEF_USE_LCT  = .true.
    logical :: DEF_USE_PFT  = .false.
    logical :: DEF_USE_PC   = .false.
    logical :: DEF_SOLO_PFT = .false.
@@ -229,6 +236,12 @@ MODULE MOD_Namelist
    ! 1: Same Type Assignment scheme (STA), state variables assignment for the same type (LC, PFT or PC)
    ! 2: Mass and Energy Conservation scheme (MEC), DO mass and energy conservation calculation
    integer :: DEF_LULCC_SCHEME = 1
+
+   ! Used to be a compile-time macro (LULCC in define.h, always #undef in
+   ! create_defineh.bash -- no existing kernel ever enabled it). main/LULCC/
+   ! is always compiled in now; this runtime switch picks whether the
+   ! year-to-year land-cover-change driver actually runs. Default .false.
+   logical :: DEF_USE_LULCC = .false.
 
 ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ! ----- Part 10: Urban model related ------
@@ -496,11 +509,11 @@ MODULE MOD_Namelist
    ! Per-species files carry unit/capability metadata plus optional
    ! species-owned parameter groups; use NAME:path mappings where possible.
    character(len=512) :: DEF_TRACER_PARAM_FILES = 'null'
-#ifdef BGC
    ! ----- Generic BGC/reactive-tracer shared inputs -----
+   ! Used to be declared only "#ifdef BGC"; BGC is a runtime switch now
+   ! (DEF_USE_BGC below, default .false.) so these are always declared.
    character(len=256) :: DEF_file_GIEMS = 'null'
    integer :: DEF_wetland_finundation_scheme = 1
-#endif
    ! ----- others -----
    character(len=5)   :: DEF_precip_phase_discrimination_scheme = 'II'
 
@@ -514,6 +527,34 @@ MODULE MOD_Namelist
    logical :: DEF_USE_PLANTHYDRAULICS   = .true.  ! Plant Hydraulics
    logical :: DEF_USE_MEDLYNST          = .false. ! Medlyn stomata model
    logical :: DEF_USE_WUEST             = .true.  ! WUE stomata model
+
+   ! ----- BGC (carbon-nitrogen biogeochemistry) model -----
+   ! Used to be a compile-time macro (BGC in define.h). main/BGC/*.F90 is
+   ! always compiled in now; this runtime switch picks whether it runs.
+   ! Dependency (validated in the conflict-check block below): DEF_USE_BGC
+   ! requires DEF_USE_PFT or DEF_USE_PC (BGC pool state is per-PFT,
+   ! MOD_BGC_Vars_*PFT*). Default .false., matching the LULC_IGBP/LCT
+   ! golden-regression baseline, which was never compiled with BGC.
+   logical :: DEF_USE_BGC                = .false.
+
+   ! ----- CROP model -----
+   ! Unlike BGC/URBAN_MODEL/LULCC, CROP stays a real compile-time macro:
+   ! N_PFT/N_CFT (MOD_Vars_Global.F90) and the crop-type lookup tables they
+   ! size (MOD_Const_PFT.F90) are Fortran `parameter` constants with
+   ! DIFFERENT values/extents when CROP is off (16 natural PFTs, one of
+   ! which -- "15 c3 crop" -- is a single generic cropland bucket) vs on
+   ! (15 natural PFTs + 64 specific crop functional types occupying
+   ! indices 15-78). Collapsing that to one runtime-sized layout would mean
+   ! turning dozens of `parameter, dimension(N_PFT+N_CFT-1)` physical
+   ! constant tables into runtime-sized arrays and re-deriving every
+   ! "natural PFT range" loop bound throughout mksrfdata/ that currently
+   ! reads differently depending on which of those two extents is compiled
+   ! -- the same category of data-structure redesign as LULC_USGS vs
+   ! LULC_IGBP above, not a body-level IF. See docs/plan-macro-runtime.md.
+   ! DEF_USE_CROP is therefore a read-only runtime *reflection* of the
+   ! compile-time CROP macro (like DEF_USE_USGS/DEF_USE_IGBP), not a free
+   ! runtime switch -- not read from the namelist file, just derived below.
+   logical :: DEF_USE_CROP               = .false.
 
    logical :: DEF_USE_SASU              = .false. ! Semi-Analytic-Spin-Up
    logical :: DEF_USE_DiagMatrix        = .false.
@@ -1266,6 +1307,9 @@ CONTAINS
       DEF_RSTFAC,                             & !add by Hongbin Liang @ sysu
       DEF_LC_YEAR,                            &
       DEF_LULCC_SCHEME,                       &
+      DEF_USE_LULCC,                          &
+
+      DEF_USE_BGC,                            &
 
       DEF_URBAN_type_scheme,                  &
       DEF_URBAN_geom_data,                    &
@@ -1360,9 +1404,7 @@ CONTAINS
       DEF_TRACER_SOIL_INIT_FILE,              &
       DEF_TRACER_SOIL_INIT_VARS,              &
       DEF_TRACER_PARAM_FILES,        &
-#ifdef BGC
       DEF_file_GIEMS,                         &
-#endif
 
       DEF_precip_phase_discrimination_scheme, &
 
@@ -1637,47 +1679,111 @@ CONTAINS
 
 ! ----- subgrid type related ------ Macros&Namelist conflicts and dependency management
 
-#if (defined LULC_USGS || defined LULC_IGBP)
-         DEF_USE_LCT  = .true.
-         DEF_USE_PFT  = .false.
-         DEF_USE_PC   = .false.
-         DEF_FAST_PC  = .false.
-         DEF_SOLO_PFT = .false.
-         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+         ! Land classification (USGS 24-category vs. IGBP/MODIS 17-category)
+         ! stays a compile-time choice, unlike the subgrid structure below.
+         ! Reason: N_land_classification, and the named patch-type indices
+         ! that depend on it (URBAN/WATERBODY/WETLAND/CROPLAND/GLACIERS in
+         ! MOD_Vars_Global.F90), are Fortran `parameter` constants with a
+         ! DIFFERENT value per classification (24 vs 17 categories, and the
+         ! category-to-meaning mapping itself differs -- e.g. USGS category 7
+         ! is "Open Shrubland" while IGBP category 7 is "Cropland"). Turning
+         ! that into a runtime choice would mean turning every
+         ! `parameter, dimension(N_land_classification)` lookup table in
+         ! MOD_Const_LC.F90 into a runtime-sized array and re-deriving the
+         ! patch-type identity codes at init time -- a genuine data-structure
+         ! redesign, not a body-level IF. See docs/plan-macro-runtime.md.
+         ! DEF_USE_USGS/DEF_USE_IGBP below are therefore a read-only runtime
+         ! *reflection* of the compile-time choice (for schema/GUI display
+         ! and for validating that a case.nml was not written against the
+         ! other classification), not a free runtime switch.
+#ifdef LULC_USGS
+         DEF_USE_USGS = .true.
+         DEF_USE_IGBP = .false.
+#else
+         DEF_USE_USGS = .false.
+         DEF_USE_IGBP = .true.
+#endif
+
+         ! DEF_USE_CROP: same "read-only reflection" treatment as
+         ! DEF_USE_USGS/DEF_USE_IGBP above, for the reason documented at its
+         ! declaration (N_PFT/N_CFT array-size parameters differ by CROP).
+#ifdef CROP
+         DEF_USE_CROP = .true.
+#else
+         DEF_USE_CROP = .false.
+#endif
+
+         ! Subgrid structure (LCT / PFT / PC) IS a runtime choice: all three
+         ! code paths are always compiled in now (numpft/landpft are already
+         ! runtime-allocated -- allocate(taux_p(numpft)) with numpft==0 for
+         ! LCT runs -- and the PFT-vs-PC physics dispatch already checks
+         ! DEF_USE_PC/DEF_USE_PFT at runtime in several places). Exactly one
+         ! of DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC must be .true.; default is
+         ! LCT (DEF_USE_LCT declared .true. above) so existing case.nml files
+         ! that never mention these three keys keep behaving exactly as the
+         ! LULC_IGBP/LULC_USGS kernels they used to be compiled from.
+         IF (count((/DEF_USE_LCT, DEF_USE_PFT, DEF_USE_PC/)) /= 1) THEN
             write(*,*) '                  *****                  '
-            write(*,*) 'Note: Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme.'
-            DEF_RSS_SCHEME = 0
+            write(*,*) 'Fatal ERROR: exactly one of DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC', &
+               ' must be .true. (subgrid structure is a mutually exclusive choice).'
+            CALL CoLM_stop ()
          ENDIF
-#endif
 
-#ifdef LULC_IGBP_PFT
-         DEF_USE_LCT  = .false.
-         DEF_USE_PFT  = .true.
-         DEF_USE_PC   = .false.
-         DEF_FAST_PC  = .false.
-#endif
-
-#ifdef LULC_IGBP_PC
-         DEF_USE_LCT  = .false.
-         DEF_USE_PFT  = .false.
-         DEF_USE_PC   = .true.
-         DEF_SOLO_PFT = .false.
-#endif
-
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
-         IF (.not.DEF_LAI_MONTHLY) THEN
-            write(*,*) '                  *****                  '
-            write(*,*) 'Warning: 8-day LAI data is not supported for '
-            write(*,*) 'LULC_IGBP_PFT and LULC_IGBP_PC.'
-            write(*,*) 'Changed to monthly data, set DEF_LAI_MONTHLY = .true.'
-            DEF_LAI_MONTHLY = .true.
+         IF (DEF_USE_LCT) THEN
+            DEF_FAST_PC  = .false.
+            DEF_SOLO_PFT = .false.
+            IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+               write(*,*) '                  *****                  '
+               write(*,*) 'Note: Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme.'
+               DEF_RSS_SCHEME = 0
+            ENDIF
          ENDIF
-#endif
+
+         IF (DEF_USE_PFT) THEN
+            DEF_FAST_PC = .false.
+         ENDIF
+
+         IF (DEF_USE_PC) THEN
+            DEF_SOLO_PFT = .false.
+         ENDIF
+
+         IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+            IF (.not.DEF_LAI_MONTHLY) THEN
+               write(*,*) '                  *****                  '
+               write(*,*) 'Warning: 8-day LAI data is not supported for '
+               write(*,*) 'LULC_IGBP_PFT and LULC_IGBP_PC.'
+               write(*,*) 'Changed to monthly data, set DEF_LAI_MONTHLY = .true.'
+               DEF_LAI_MONTHLY = .true.
+            ENDIF
+         ENDIF
 
 
 ! ----- BGC and CROP model related ------ Macros&Namelist conflicts and dependency management
 
-#ifndef BGC
+         ! BGC/CROP dependency chain (main/BGC/ is always compiled in now;
+         ! main/BGC/MOD_BGC_Vars_*PFT*.F90 state is per-PFT, so BGC needs the
+         ! PFT or PC subgrid structure -- this is the runtime equivalent of
+         ! create_defineh.bash's old compile-time "#ifndef LULC_IGBP_PFT
+         ! #ifndef LULC_IGBP_PC #undef BGC" cascade, and of the methane
+         ! #error "Methane (BGC) requires LULC_IGBP_PFT or LULC_IGBP_PC for
+         ! pftfrac access" -- both moved here since LULC/BGC became runtime
+         ! switches. CROP similarly needs BGC (old cascade:
+         ! "#ifndef BGC #undef CROP").
+         IF (DEF_USE_BGC .and. .not. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
+            write(*,*) '                  *****                  '
+            write(*,*) 'Fatal ERROR: DEF_USE_BGC requires DEF_USE_PFT or DEF_USE_PC', &
+               ' (BGC carbon/nitrogen pool state, and the methane tracer family if', &
+               ' DEF_USE_TRACER is on, are per-PFT and need pftfrac access).'
+            CALL CoLM_stop ()
+         ENDIF
+
+         IF (DEF_USE_CROP .and. .not. DEF_USE_BGC) THEN
+            write(*,*) '                  *****                  '
+            write(*,*) 'Fatal ERROR: DEF_USE_CROP requires DEF_USE_BGC.'
+            CALL CoLM_stop ()
+         ENDIF
+
+         IF (.not. DEF_USE_BGC) THEN
          IF(DEF_USE_LAIFEEDBACK)THEN
             DEF_USE_LAIFEEDBACK = .false.
             write(*,*) '                  *****                  '
@@ -1719,9 +1825,9 @@ CONTAINS
             write(*,*) 'Warning: Fire model is on when BGC is off.'
             write(*,*) 'DEF_USE_FIRE is set to false automatically when BGC is turned off.'
          ENDIF
-#endif
+         ENDIF
 
-#ifndef CROP
+         IF (.not. DEF_USE_CROP) THEN
          IF(DEF_USE_FERT)THEN
             DEF_USE_FERT = .false.
             write(*,*) '                  *****                  '
@@ -1742,7 +1848,7 @@ CONTAINS
             write(*,*) 'Warning: irrigation is on when CROP is off.'
             write(*,*) 'DEF_USE_IRRIGATION is set to false automatically when CROP is turned off.'
          ENDIF
-#endif
+         ENDIF
 
          IF(.not.(DEF_FERT_SOURCE == 1 .or. DEF_FERT_SOURCE == 2))THEN
             write(*,*) '                  *****                  '
@@ -1786,42 +1892,43 @@ CONTAINS
 
 ! ----- Urban model ----- Macros&Namelist conflicts and dependency management
 
-#ifdef URBAN_MODEL
-         DEF_URBAN_RUN = .true.
-
-         write(*,*) '                  *****                  '
-         write(*,*) 'When URBAN model is opened, WUEST/SUPERCOOL_WATER/PLANTHYDRAULICS/OZONESTRESS/SOILSNOW'
-         write(*,*) 'will be set to false automatically for simplicity.'
-         DEF_USE_WUEST           = .false.
-         DEF_USE_SUPERCOOL_WATER = .false.
-         DEF_USE_PLANTHYDRAULICS = .false.
-         DEF_USE_OZONESTRESS     = .false.
-         DEF_USE_OZONEDATA       = .false.
-         DEF_SPLIT_SOILSNOW      = .false.
-#else
+         ! Used to be "#ifdef URBAN_MODEL": every kernel that was compiled
+         ! with URBAN_MODEL got DEF_URBAN_RUN forced to .true., with no way
+         ! to compile urban support in but leave it off at runtime; the
+         ! "#else" branch forced DEF_URBAN_RUN off entirely for kernels
+         ! compiled without it. main/URBAN/ is always compiled in now, so
+         ! DEF_URBAN_RUN (already a namelist field, default .false.) is
+         ! simply respected as the user set it -- no forcing either way.
          IF (DEF_URBAN_RUN) THEN
             write(*,*) '                  *****                  '
-            write(*,*) 'Note: The Urban model is not opened. IF you want to run Urban model '
-            write(*,*) 'please #define URBAN_MODEL in define.h. otherwise DEF_URBAN_RUN will '
-            write(*,*) 'be set to false automatically.'
-            DEF_URBAN_RUN = .false.
+            write(*,*) 'When URBAN model is opened, WUEST/SUPERCOOL_WATER/PLANTHYDRAULICS/OZONESTRESS/SOILSNOW'
+            write(*,*) 'will be set to false automatically for simplicity.'
+            DEF_USE_WUEST           = .false.
+            DEF_USE_SUPERCOOL_WATER = .false.
+            DEF_USE_PLANTHYDRAULICS = .false.
+            DEF_USE_OZONESTRESS     = .false.
+            DEF_USE_OZONEDATA       = .false.
+            DEF_SPLIT_SOILSNOW      = .false.
          ENDIF
-#endif
 
 
 ! ----- LULCC ----- Macros&Namelist conflicts and dependency management
 
-#ifdef LULCC
+         ! Used to be "#ifdef LULCC" -- no existing kernel/preset ever
+         ! enabled it (create_defineh.bash always emitted "#undef LULCC").
+         ! main/LULCC/ is always compiled in now; DEF_USE_LULCC picks
+         ! whether the year-to-year land-cover-change driver runs.
+         IF (DEF_USE_LULCC) THEN
 
          write(*,*) '                  *****                  '
          write(*,*) 'Warning: The LULCC data is provided for years 2000 to 2020 right now! '
          write(*,*) 'Please make sure the year range you set is suitable. '
 
-#if (defined LULC_USGS || defined BGC)
+         IF (DEF_USE_USGS .or. DEF_USE_BGC) THEN
          write(*,*) '                  *****                  '
          write(*,*) 'Fatal ERROR: LULCC is not supported for LULC_USGS/BGC at present. STOP! '
          CALL CoLM_stop ()
-#endif
+         ENDIF
          IF (.not.DEF_LAI_MONTHLY) THEN
             write(*,*) '                  *****                  '
             write(*,*) 'Note: When LULCC is opened, DEF_LAI_MONTHLY '
@@ -1836,13 +1943,9 @@ CONTAINS
             DEF_LAI_CHANGE_YEARLY = .true.
          ENDIF
 
-#if (defined LULC_IGBP_PC || defined URBAN)
-         !write(*,*) '                  *****                  '
-         !write(*,*) 'Fatal ERROR: LULCC is not supported for LULC_IGBP_PC/URBAN at present. STOP! '
-         !write(*,*) 'It is coming soon. '
-         !CALL CoLM_stop ()
-         ![update] 24/10/2023: right now IGBP/PFT/PC and Urban are all supported.
-#endif
+         ! [update] 24/10/2023: IGBP/PFT/PC and Urban are all supported with
+         ! LULCC; only USGS/BGC (checked above) and SinglePoint (below)
+         ! remain unsupported.
 
 #if (defined SinglePoint)
          write(*,*) '                  *****                  '
@@ -1851,7 +1954,7 @@ CONTAINS
          CALL CoLM_stop ()
 #endif
 
-#endif
+         ENDIF
 
 #if (defined DEF_LAI_CHANGE_YEARLY)
          write(*,*) '                  *****                  '
@@ -1904,12 +2007,25 @@ CONTAINS
 
 ! ----- 2m WMO temperature ---- Macros&Namelist conflicts and dependency management
 
-#if !defined(GRIDBASED) || (defined  LULC_IGBP || defined LULC_USGS)
+         ! Used to be "#if !defined(GRIDBASED) || (LULC_IGBP || LULC_USGS)".
+         ! GRIDBASED stays a compile-time macro (out of scope for this
+         ! group); the IGBP/USGS half of the OR is the LCT subgrid
+         ! structure, now DEF_USE_LCT at runtime.
+#ifndef GRIDBASED
          IF (DEF_Output_2mWMO) THEN
             DEF_Output_2mWMO = .false.
             write(*,*) '                  *****                  '
             write(*,*) 'Warning: 2m WMO temperature is not well supported for IGBP and USGS'
             write(*,*) 'DEF_Output_2mWMO will be set to false automatically.'
+         ENDIF
+#else
+         IF (DEF_USE_LCT) THEN
+            IF (DEF_Output_2mWMO) THEN
+               DEF_Output_2mWMO = .false.
+               write(*,*) '                  *****                  '
+               write(*,*) 'Warning: 2m WMO temperature is not well supported for IGBP and USGS'
+               write(*,*) 'DEF_Output_2mWMO will be set to false automatically.'
+            ENDIF
          ENDIF
 #endif
 
@@ -1986,6 +2102,8 @@ CONTAINS
       CALL mpi_bcast (DEF_Srfdata_CompressLevel              ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
 
       ! 07/2023, added by yuan: subgrid setting related
+      CALL mpi_bcast (DEF_USE_USGS                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_USE_IGBP                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_LCT                            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_PFT                            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_PC                             ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
@@ -2009,6 +2127,10 @@ CONTAINS
       ! LULC related
       CALL mpi_bcast (DEF_LC_YEAR                            ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_LULCC_SCHEME                       ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_USE_LULCC                          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_USE_BGC                            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_USE_CROP                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 
       CALL mpi_bcast (DEF_URBAN_type_scheme                  ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_URBAN_geom_data                    ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
@@ -2153,10 +2275,8 @@ CONTAINS
       CALL mpi_bcast (DEF_TRACER_SOIL_INIT_FILE              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_SOIL_INIT_VARS              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_TRACER_PARAM_FILES        ,512 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
-#ifdef BGC
       CALL mpi_bcast (DEF_file_GIEMS                         ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_wetland_finundation_scheme         ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
-#endif
 
       CALL mpi_bcast (DEF_HISTORY_IN_VECTOR                  ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 
@@ -2384,7 +2504,6 @@ CONTAINS
       CALL sync_hist_vars_one (DEF_hist_vars%tref        , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%t2m_wmo     , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%qref        , set_defaults)
-#ifdef URBAN_MODEL
       CALL sync_hist_vars_one (DEF_hist_vars%fsen_roof   , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%fsen_wsun   , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%fsen_wsha   , set_defaults)
@@ -2405,12 +2524,10 @@ CONTAINS
       CALL sync_hist_vars_one (DEF_hist_vars%tafu        , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%t_roof      , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%t_wall      , set_defaults)
-#endif
       CALL sync_hist_vars_one (DEF_hist_vars%assimsun    , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%assimsha    , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%etrsun      , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%etrsha      , set_defaults)
-#ifdef BGC
       CALL sync_hist_vars_one (DEF_hist_vars%leafc              , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%leafc_storage      , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%leafc_xfer         , set_defaults)
@@ -2543,7 +2660,6 @@ CONTAINS
       CALL sync_hist_vars_one (DEF_hist_vars%npptoleafc_c3arcgrass   , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%npptoleafc_c3grass      , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%npptoleafc_c4grass      , set_defaults)
-#ifdef CROP
       CALL sync_hist_vars_one (DEF_hist_vars%cphase                          , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%gddmaturity                     , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%gddplant                        , set_defaults)
@@ -2617,7 +2733,6 @@ CONTAINS
          CALL sync_hist_vars_one (DEF_hist_vars%reservoirriver_demand        , set_defaults)
          CALL sync_hist_vars_one (DEF_hist_vars%reservoirriver_supply        , set_defaults)
       ENDIF
-#endif
       CALL sync_hist_vars_one (DEF_hist_vars%ndep_to_sminn                   , set_defaults)
       IF(DEF_USE_NITRIF)THEN
          CALL sync_hist_vars_one (DEF_hist_vars%CONC_O2_UNSAT                , set_defaults)
@@ -2683,7 +2798,6 @@ CONTAINS
       CALL sync_hist_vars_one (DEF_hist_vars%soil2nCap_vr                    , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%soil3nCap_vr                    , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%cwdnCap_vr                      , set_defaults)
-#endif
       IF(DEF_USE_OZONESTRESS)THEN
          CALL sync_hist_vars_one (DEF_hist_vars%o3uptakesun                  , set_defaults)
          CALL sync_hist_vars_one (DEF_hist_vars%o3uptakesha                  , set_defaults)
@@ -2734,7 +2848,6 @@ CONTAINS
       CALL sync_hist_vars_one (DEF_hist_vars%t_lake      , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%lake_icefrac, set_defaults)
 
-#ifdef BGC
       CALL sync_hist_vars_one (DEF_hist_vars%litr1c_vr   , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%litr2c_vr   , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%litr3c_vr   , set_defaults)
@@ -2750,7 +2863,6 @@ CONTAINS
       CALL sync_hist_vars_one (DEF_hist_vars%soil3n_vr   , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%cwdn_vr     , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%sminn_vr    , set_defaults)
-#endif
 
       CALL sync_hist_vars_one (DEF_hist_vars%ustar       , set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%ustar2      , set_defaults)

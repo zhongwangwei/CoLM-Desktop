@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_Soil_BiogeochemNitrifDenitrif
 
 !--------------------------------------------------------------------------------------------
@@ -183,4 +182,3 @@ CONTAINS
       ENDDO
    END SUBROUTINE SoilBiogeochemNitrifDenitrif
 END MODULE MOD_BGC_Soil_BiogeochemNitrifDenitrif
-#endif

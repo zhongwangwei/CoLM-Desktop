@@ -4,7 +4,6 @@
 ! Created by Yongjiu Dai, 03/2014
 !-----------------------------------------------------------------------
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 MODULE MOD_Vars_PFTimeVariables
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -15,9 +14,7 @@ MODULE MOD_Vars_PFTimeVariables
 
    USE MOD_Precision
    USE MOD_TimeManager
-#ifdef BGC
    USE MOD_BGC_Vars_PFTimeVariables
-#endif
 
    IMPLICIT NONE
    SAVE
@@ -96,6 +93,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_LandPFT
    USE MOD_Vars_Global
+   USE MOD_Namelist, only: DEF_USE_BGC
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
@@ -148,15 +146,15 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef BGC
+      IF (DEF_USE_BGC) THEN
       CALL allocate_BGCPFTimeVariables
-#endif
+      ENDIF
 
    END SUBROUTINE allocate_PFTimeVariables
 
    SUBROUTINE READ_PFTimeVariables (file_restart)
 
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, DEF_USE_BGC
    USE MOD_NetCDFVector
    USE MOD_LandPFT
    USE MOD_Vars_Global
@@ -207,16 +205,16 @@ IF(DEF_USE_IRRIGATION)THEN
       CALL ncio_read_vector (file_restart,'irrig_method_p', landpft,irrig_method_p, defval = 0)
 ENDIF
 
-#ifdef BGC
+      IF (DEF_USE_BGC) THEN
       CALL read_BGCPFTimeVariables (file_restart)
-#endif
+      ENDIF
 
    END SUBROUTINE READ_PFTimeVariables
 
    SUBROUTINE WRITE_PFTimeVariables (file_restart)
 
    USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
-                           DEF_USE_IRRIGATION
+                           DEF_USE_IRRIGATION, DEF_USE_BGC
    USE MOD_LandPFT
    USE MOD_NetCDFVector
    USE MOD_Vars_Global
@@ -282,9 +280,9 @@ IF(DEF_USE_IRRIGATION)THEN
       CALL ncio_write_vector (file_restart,'irrig_method_p','pft', landpft, irrig_method_p, compress)
 ENDIF
 
-#ifdef BGC
+      IF (DEF_USE_BGC) THEN
       CALL WRITE_BGCPFTimeVariables (file_restart)
-#endif
+      ENDIF
 
    END SUBROUTINE WRITE_PFTimeVariables
 
@@ -295,6 +293,7 @@ ENDIF
    !--------------------------------------------------------------------
    USE MOD_SPMD_Task
    USE MOD_LandPFT
+   USE MOD_Namelist, only: DEF_USE_BGC
 
       IF (p_is_worker) THEN
          IF (numpft > 0) THEN
@@ -345,16 +344,16 @@ ENDIF
          ENDIF
       ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL deallocate_BGCPFTimeVariables
-#endif
+ENDIF
 
    END SUBROUTINE deallocate_PFTimeVariables
 
    SUBROUTINE check_PFTimeVariables
 
    USE MOD_RangeCheck
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, DEF_USE_BGC
 
    IMPLICIT NONE
 
@@ -399,14 +398,13 @@ IF(DEF_USE_IRRIGATION)THEN
       CALL check_vector_data ('irrig_method_p', irrig_method_p )
 ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL check_BGCPFTimeVariables
-#endif
+ENDIF
 
    END SUBROUTINE check_PFTimeVariables
 
 END MODULE MOD_Vars_PFTimeVariables
-#endif
 
 
 MODULE MOD_Vars_TimeVariables
@@ -416,12 +414,8 @@ MODULE MOD_Vars_TimeVariables
 
    USE MOD_Precision
    USE MOD_TimeManager
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeVariables
-#endif
-#ifdef BGC
    USE MOD_BGC_Vars_TimeVariables
-#endif
 #ifdef CatchLateralFlow
    USE MOD_Catch_Vars_TimeVariables
 #endif
@@ -429,9 +423,7 @@ MODULE MOD_Vars_TimeVariables
    USE MOD_Grid_RiverLakeTimeVars
    USE MOD_Grid_RiverLakeHistState, only: write_gridriverlake_hist_restart
 #endif
-#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_TimeVariables
-#endif
 #ifdef EXTERNAL_LAKE
    USE MOD_Lake_TimeVars
 #endif
@@ -496,7 +488,6 @@ MODULE MOD_Vars_TimeVariables
    real(r8), allocatable :: laisha        (:) ! leaf area index for shaded leaf
    real(r8), allocatable :: tsai          (:) ! stem area index
    real(r8), allocatable :: sai           (:) ! stem area index
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: lai_enftemp   (:) ! lai for needleleaf evergreen temperate tree (m2 m-2)
    real(r8), allocatable :: lai_enfboreal (:) ! lai for needleleaf evergreen boreal tree (m2 m-2)
    real(r8), allocatable :: lai_dnfboreal (:) ! lai for needleleaf deciduous boreal tree (m2 m-2)
@@ -511,7 +502,6 @@ MODULE MOD_Vars_TimeVariables
    real(r8), allocatable :: lai_c3arcgrass(:) ! lai for c3 arctic grass (m2 m-2)
    real(r8), allocatable :: lai_c3grass   (:) ! lai for c3 grass (m2 m-2)
    real(r8), allocatable :: lai_c4grass   (:) ! lai for c4 grass (m2 m-2)
-#endif
 
    real(r8), allocatable :: coszen        (:) ! cosine of solar zenith angle
    real(r8), allocatable :: alb       (:,:,:) ! averaged albedo [-]
@@ -624,6 +614,7 @@ CONTAINS
    !--------------------------------------------------------------------
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_LandPatch, only: numpatch
@@ -688,7 +679,7 @@ CONTAINS
             allocate (tsai                        (numpatch)); tsai          (:) = spval
             allocate (sai                         (numpatch)); sai           (:) = spval
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             allocate (lai_enftemp                 (numpatch)); lai_enftemp   (:) = spval
             allocate (lai_enfboreal               (numpatch)); lai_enfboreal (:) = spval
             allocate (lai_dnfboreal               (numpatch)); lai_dnfboreal (:) = spval
@@ -703,7 +694,7 @@ CONTAINS
             allocate (lai_c3arcgrass              (numpatch)); lai_c3arcgrass(:) = spval
             allocate (lai_c3grass                 (numpatch)); lai_c3grass   (:) = spval
             allocate (lai_c4grass                 (numpatch)); lai_c4grass   (:) = spval
-#endif
+ENDIF
             allocate (coszen                      (numpatch)); coszen        (:) = spval
             allocate (alb                     (2,2,numpatch)); alb       (:,:,:) = spval
             allocate (ssun                    (2,2,numpatch)); ssun      (:,:,:) = spval
@@ -796,13 +787,25 @@ CONTAINS
          ENDIF
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL allocate_PFTimeVariables
-#endif
+ENDIF
 
-#ifdef BGC
+      ! Unlike allocate_PFTimeVariables above, this is NOT gated on
+      ! DEF_USE_BGC. MOD_Initialize.F90 passes totlitc/totsomc/... (and the
+      ! rest of MOD_BGC_Vars_TimeVariables' patch-level state) as plain
+      ! (non-optional) intent(out) actual arguments to iniTimeVar on every
+      ! call, regardless of DEF_USE_BGC -- unlike the PFT/PC arrays, which
+      ! are only ever touched from code already gated by
+      ! "DEF_USE_PFT .or. DEF_USE_PC" (or passed as genuinely `optional`
+      ! dummy arguments, e.g. numpft in write_surface_data_single). Gating
+      ! the allocation here left those arrays unallocated whenever BGC was
+      ! off, and iniTimeVar's unconditional totlitc(i) indexed into them
+      ! anyway -- caught at runtime as "Index '1' of dimension 1 of array
+      ! 'totlitc' above upper bound of 0". These are all sized numpatch
+      ! (not per-PFT), so allocating them unconditionally is cheap and has
+      ! no physics effect when DEF_USE_BGC is .false.: nothing reads them.
       CALL allocate_BGCTimeVariables
-#endif
 
 #ifdef CatchLateralFlow
       CALL allocate_CatchTimeVariables
@@ -812,9 +815,9 @@ CONTAINS
       CALL allocate_GridRiverLakeTimeVars
 #endif
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL allocate_UrbanTimeVariables
-#endif
+ENDIF
 
 #ifdef EXTERNAL_LAKE
       CALL allocate_LakeTimeVars
@@ -831,6 +834,7 @@ CONTAINS
    SUBROUTINE deallocate_TimeVariables ()
 
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_LandPatch, only: numpatch
    IMPLICIT NONE
 
@@ -894,7 +898,7 @@ CONTAINS
             deallocate (laisha                 )
             deallocate (tsai                   )
             deallocate (sai                    )
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             deallocate (lai_enftemp            )
             deallocate (lai_enfboreal          )
             deallocate (lai_dnfboreal          )
@@ -909,7 +913,7 @@ CONTAINS
             deallocate (lai_c3arcgrass         )
             deallocate (lai_c3grass            )
             deallocate (lai_c4grass            )
-#endif
+ENDIF
             deallocate (coszen                 )
             deallocate (alb                    )
             deallocate (ssun                   )
@@ -998,13 +1002,13 @@ CONTAINS
          ENDIF
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL deallocate_PFTimeVariables
-#endif
+ENDIF
 
-#if (defined BGC)
+      ! Matches the unconditional allocate_BGCTimeVariables call above --
+      ! see the comment there.
       CALL deallocate_BGCTimeVariables
-#endif
 
 #ifdef CatchLateralFlow
       CALL deallocate_CatchTimeVariables
@@ -1014,9 +1018,9 @@ CONTAINS
       CALL deallocate_GridRiverLakeTimeVars
 #endif
 
-#if (defined URBAN_MODEL)
+IF (DEF_URBAN_RUN) THEN
       CALL deallocate_UrbanTimeVariables
-#endif
+ENDIF
 
 #ifdef EXTERNAL_LAKE
       CALL deallocate_LakeTimeVars
@@ -1077,7 +1081,8 @@ CONTAINS
 
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
-                           DEF_USE_IRRIGATION, DEF_USE_Dynamic_Lake, SITE_landtype, DEF_USE_TRACER
+                           DEF_USE_IRRIGATION, DEF_USE_Dynamic_Lake, SITE_landtype, DEF_USE_TRACER, &
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_LandPatch
    USE MOD_NetCDFVector
    USE MOD_Vars_Global
@@ -1262,7 +1267,7 @@ IF (DEF_USE_IRRIGATION) THEN
       CALL ncio_write_vector (file_restart, 'zwt_stand             ' , 'patch',landpatch,zwt_stand             , compress)
 ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef SinglePoint
       IF (patchtypes(SITE_landtype) == 0) THEN
          file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_pft_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
@@ -1272,12 +1277,12 @@ ENDIF
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_pft_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL WRITE_PFTimeVariables (file_restart)
 #endif
-#endif
+ENDIF
 
-#if (defined BGC)
+IF (DEF_USE_BGC) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_bgc_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL WRITE_BGCTimeVariables (file_restart)
-#endif
+ENDIF
 
 #if (defined CatchLateralFlow)
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_basin_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
@@ -1292,10 +1297,10 @@ ENDIF
       CALL commit_GridRiverLakeRestart (file_restart)
 #endif
 
-#if (defined URBAN_MODEL)
+IF (DEF_URBAN_RUN) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_urban_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL WRITE_UrbanTimeVariables (file_restart)
-#endif
+ENDIF
 
 #ifdef EXTERNAL_LAKE
       CALL WRITE_LakeTimeVars (idate, lc_year, site, dir_restart)
@@ -1462,7 +1467,7 @@ IF (DEF_USE_IRRIGATION) THEN
       CALL ncio_read_vector (file_restart, 'zwt_stand             ' , landpatch, zwt_stand             )
 ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef SinglePoint
       IF (patchtypes(SITE_landtype) == 0) THEN
          file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_pft_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
@@ -1472,12 +1477,12 @@ ENDIF
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_pft_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL READ_PFTimeVariables (file_restart)
 #endif
-#endif
+ENDIF
 
-#if (defined BGC)
+IF (DEF_USE_BGC) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_bgc_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL READ_BGCTimeVariables (file_restart)
-#endif
+ENDIF
 
 #if (defined CatchLateralFlow)
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_basin_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
@@ -1489,10 +1494,10 @@ ENDIF
       CALL READ_GridRiverLakeTimeVars (file_restart)
 #endif
 
-#if (defined URBAN_MODEL)
+IF (DEF_URBAN_RUN) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_urban_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL READ_UrbanTimeVariables (file_restart)
-#endif
+ENDIF
 
 #ifdef EXTERNAL_LAKE
       CALL READ_LakeTimeVars(idate, lc_year, site, dir_restart)
@@ -1518,7 +1523,8 @@ ENDIF
    USE MOD_SPMD_Task
    USE MOD_RangeCheck
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, &
-                           DEF_USE_SNICAR, DEF_USE_Dynamic_Lake
+                           DEF_USE_SNICAR, DEF_USE_Dynamic_Lake, &
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
    USE MOD_Vars_TimeInvariants, only: dz_lake
 
    IMPLICIT NONE
@@ -1629,13 +1635,13 @@ IF (DEF_USE_IRRIGATION) THEN
       CALL check_vector_data ('zwt_stand             ' , zwt_stand             )
 ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL check_PFTimeVariables
-#endif
+ENDIF
 
-#if (defined BGC)
+IF (DEF_USE_BGC) THEN
       CALL check_BGCTimeVariables
-#endif
+ENDIF
 
 #ifdef EXTERNAL_LAKE
       CALL CHECK_LakeTimeVars

@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 
    SUBROUTINE bgc_driver (i,idate,deltim,dlat,dlon)
 
@@ -163,4 +162,3 @@
 
    END SUBROUTINE bgc_driver
 
-#endif

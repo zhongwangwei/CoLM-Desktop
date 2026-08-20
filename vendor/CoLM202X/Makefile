@@ -15,11 +15,17 @@ HEADER = include/define.h
 TRACER_ENABLED := YES
 # Methane (main/TRACER/MOD_Tracer_Reactive_Methane*.F90 and
 # MOD_Tracer_Reactive_BgcShim.F90) is one of TRACER's four families
-# (isotope/solute/particle/gas) but still needs BGC at compile time -- it
-# hard-USEs BGC carbon/nitrogen pools, so unlike TRACER itself this one stays
-# a real compile-time gate (`#ifdef BGC` in those files now; TRACER dropped
-# out of the condition since it is no longer a macro).
-METHANE_ENABLED := $(shell printf '\043include "include/define.h"\n\043ifdef BGC\nYES\n\043else\nNO\n\043endif\n' | cpp -P -I. -Iinclude - | awk '/^(YES|NO)$$/{v=$$0} END{print v}')
+# (isotope/solute/particle/gas) and hard-USEs BGC carbon/nitrogen pools.
+# It used to stay gated on "#ifdef BGC" (a real compile-time macro) even
+# after TRACER itself became a runtime switch. BGC is a runtime switch now
+# too (DEF_USE_BGC, share/MOD_Namelist.F90) -- main/BGC/ is always compiled
+# in and the BGC macro no longer exists in define.h at all, so probing for
+# it here would always read NO and silently stop building the methane
+# object set (which no longer has its own "#ifdef BGC" guard either, since
+# main/BGC/ always compiling in is exactly what let that guard come off).
+# Hardcoded YES, same treatment as TRACER_ENABLED above: every
+# `ifeq (${METHANE_ENABLED},YES)` block below is now permanently taken.
+METHANE_ENABLED := YES
 EXTENDED_INTERCEPTION_ENABLED := $(shell printf '\043include "include/define.h"\n\043ifdef extend_interception\nYES\n\043else\nNO\n\043endif\n' | cpp -P -I. -Iinclude - | awk '/^(YES|NO)$$/{v=$$0} END{print v}')
 
 INCLUDE_DIR = -Iinclude -I.bld/ -I${NETCDF_INC}

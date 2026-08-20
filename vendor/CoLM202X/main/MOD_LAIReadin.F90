@@ -37,10 +37,8 @@ CONTAINS
 
    USE MOD_Vars_Global
    USE MOD_Const_LC
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeVariables
-#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -68,7 +66,7 @@ CONTAINS
       landdir = trim(dir_landdata) // '/LAI'
 
 #ifdef SinglePoint
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
       IF (USE_SITE_LAI) THEN
          iyear = minloc(abs(SITE_LAI_year-year), dim=1)
       ELSE
@@ -78,20 +76,20 @@ CONTAINS
       IF (.not. DEF_LAI_MONTHLY) THEN
          itime = (time-1)/8 + 1
       ENDIF
-#endif
+ENDIF
 #endif
 
-#if (defined LULC_USGS || defined LULC_IGBP)
+IF (DEF_USE_LCT) THEN
 
 #ifdef SinglePoint
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
       IF (DEF_LAI_MONTHLY) THEN
          tlai(:) = SITE_LAI_monthly(time,iyear)
          tsai(:) = SITE_SAI_monthly(time,iyear)
       ELSE
          tlai(:) = SITE_LAI_8day(itime,iyear)
       ENDIF
-#endif
+ENDIF
 #else
       IF (DEF_LAI_MONTHLY) THEN
          write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
@@ -121,9 +119,9 @@ CONTAINS
 
             DO npatch = 1, numpatch
                m = patchclass(npatch)
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
                IF(m == URBAN) CYCLE
-#endif
+ENDIF
                IF(m == 0 .or. m == WATERBODY)THEN
                   fveg(npatch)  = 0.
                   tlai(npatch)  = 0.
@@ -150,13 +148,13 @@ CONTAINS
          ENDIF
       ENDIF
 
-#endif
+ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
 #ifdef SinglePoint
 
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
       IF (.not. DEF_USE_LAIFEEDBACK)THEN
          IF (patchtypes(SITE_landtype) == 0) THEN
             tlai_p(:) = pack(SITE_LAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
@@ -175,7 +173,7 @@ CONTAINS
             tsai(:) = SITE_SAI_monthly(time,iyear)
          ENDIF
       ENDIF
-#endif
+ENDIF
 #else
 
       write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
@@ -200,9 +198,9 @@ CONTAINS
             DO npatch = 1, numpatch
                m = patchclass(npatch)
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
                IF (m == URBAN) CYCLE
-#endif
+ENDIF
                !TODO@yuan: may need to revise patch LAI/SAI
                green(npatch) = 1.
                fveg (npatch) = fveg0(m)
@@ -218,7 +216,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#endif
+ENDIF
 
    END SUBROUTINE LAI_readin
 

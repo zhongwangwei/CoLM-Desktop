@@ -1,6 +1,5 @@
 #include <define.h>
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
 MODULE MOD_Vars_1DPFTFluxes
 !-----------------------------------------------------------------------
@@ -11,9 +10,7 @@ MODULE MOD_Vars_1DPFTFluxes
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
-#ifdef BGC
    USE MOD_BGC_Vars_1DPFTFluxes
-#endif
    IMPLICIT NONE
    SAVE
 
@@ -58,6 +55,7 @@ CONTAINS
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_LandPFT
+   USE MOD_Namelist, only: DEF_USE_BGC
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
@@ -83,9 +81,9 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL allocate_1D_BGCPFTFluxes
-#endif
+ENDIF
 
    END SUBROUTINE allocate_1D_PFTFluxes
 
@@ -95,6 +93,7 @@ CONTAINS
    ! -------------------------------------------------------------------
    USE MOD_SPMD_Task
    USE MOD_LandPFT
+   USE MOD_Namelist, only: DEF_USE_BGC
 
       IF (p_is_worker) THEN
          IF (numpft > 0) THEN
@@ -119,9 +118,9 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL deallocate_1D_BGCPFTFluxes
-#endif
+ENDIF
 
    END SUBROUTINE deallocate_1D_PFTFluxes
 
@@ -133,6 +132,7 @@ CONTAINS
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_LandPFT
+   USE MOD_Namelist, only: DEF_USE_BGC
    IMPLICIT NONE
 
    real(r8),intent(in) :: Values
@@ -161,13 +161,12 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL set_1D_BGCPFTFluxes (Values, Nan)
-#endif
+ENDIF
 
    END SUBROUTINE set_1D_PFTFluxes
 
 END MODULE MOD_Vars_1DPFTFluxes
 
-#endif
 ! ---------- EOP ------------

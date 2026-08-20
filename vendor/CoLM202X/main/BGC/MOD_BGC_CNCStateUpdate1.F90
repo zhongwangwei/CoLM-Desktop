@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 
 MODULE MOD_BGC_CNCStateUpdate1
 
@@ -510,4 +509,3 @@ CONTAINS
    END SUBROUTINE CDecompStateUpdate
 
 END MODULE MOD_BGC_CNCStateUpdate1
-#endif

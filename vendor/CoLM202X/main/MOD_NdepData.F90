@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef BGC
 MODULE MOD_NdepData
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -229,4 +228,3 @@ CONTAINS
    END SUBROUTINE update_ndep_data_monthly
 
 END MODULE MOD_NdepData
-#endif

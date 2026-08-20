@@ -124,7 +124,6 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_t_soisno_ens   (:,:,:)
 #endif
 
-#ifdef URBAN_MODEL
    real(r8), allocatable :: a_t_room    (:) !temperature of inner building [K]
    real(r8), allocatable :: a_tafu      (:) !temperature of outer building [K]
    real(r8), allocatable :: a_fhac      (:) !sensible flux from heat or cool AC [W/m2]
@@ -149,9 +148,7 @@ MODULE MOD_Vars_1DAccFluxes
 
    real(r8), allocatable :: a_troof     (:) !temperature of roof [K]
    real(r8), allocatable :: a_twall     (:) !temperature of wall [K]
-#endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: a_lai_enftemp      (:) !1
    real(r8), allocatable :: a_lai_enfboreal    (:) !2
    real(r8), allocatable :: a_lai_dnfboreal    (:) !3
@@ -166,9 +163,7 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_lai_c3arcgrass   (:) !12
    real(r8), allocatable :: a_lai_c3grass      (:) !13
    real(r8), allocatable :: a_lai_c4grass      (:) !14
-#endif
 
-#ifdef BGC
    real(r8), allocatable :: a_leafc              (:)
    real(r8), allocatable :: a_leafc_storage      (:)
    real(r8), allocatable :: a_leafc_xfer         (:)
@@ -382,7 +377,6 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_deadcrootnCap         (:)
    real(r8), allocatable :: a_deadcrootn_storageCap (:)
    real(r8), allocatable :: a_deadcrootn_xferCap    (:)
-#endif
 ! Ozone stress variables
    real(r8), allocatable :: a_ozone                 (:)
 ! End ozone stress variables
@@ -404,7 +398,6 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_t_lake      (:,:)
    real(r8), allocatable :: a_lake_icefrac(:,:)
 
-#ifdef BGC
    real(r8), allocatable :: a_litr1c_vr   (:,:)
    real(r8), allocatable :: a_litr2c_vr   (:,:)
    real(r8), allocatable :: a_litr3c_vr   (:,:)
@@ -438,7 +431,6 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_w_scalar    (:,:)
    real(r8), allocatable :: a_sminn_vr    (:,:)
    real(r8), allocatable :: decomp_vr_tmp (:,:)
-#endif
 
    real(r8), allocatable :: a_ustar   (:)
    real(r8), allocatable :: a_ustar2  (:)
@@ -489,6 +481,7 @@ CONTAINS
    SUBROUTINE allocate_acc_fluxes
 
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
    USE MOD_LandElm
    USE MOD_LandPatch
    USE MOD_LandUrban, only: numurban
@@ -610,7 +603,6 @@ CONTAINS
             allocate (a_t_soisno_ens   (maxsnl+1:nl_soil,DEF_DA_ENS_NUM,numpatch))
 #endif
 
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                allocate (a_t_room    (numurban))
                allocate (a_tafu      (numurban))
@@ -637,8 +629,7 @@ CONTAINS
                allocate (a_troof     (numurban))
                allocate (a_twall     (numurban))
             ENDIF
-#endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             allocate (a_lai_enftemp        (numpatch))
             allocate (a_lai_enfboreal      (numpatch))
             allocate (a_lai_dnfboreal      (numpatch))
@@ -653,8 +644,8 @@ CONTAINS
             allocate (a_lai_c3arcgrass     (numpatch))
             allocate (a_lai_c3grass        (numpatch))
             allocate (a_lai_c4grass        (numpatch))
-#endif
-#ifdef BGC
+ENDIF
+IF (DEF_USE_BGC) THEN
             allocate (a_leafc              (numpatch))
             allocate (a_leafc_storage      (numpatch))
             allocate (a_leafc_xfer         (numpatch))
@@ -871,7 +862,7 @@ CONTAINS
             allocate (a_deadcrootnCap         (numpatch))
             allocate (a_deadcrootn_storageCap (numpatch))
             allocate (a_deadcrootn_xferCap    (numpatch))
-#endif
+ENDIF
 ! Ozone stress variables
             allocate (a_ozone              (numpatch))
 ! End ozone stress variables
@@ -892,7 +883,7 @@ CONTAINS
             allocate (a_t_lake      (nl_lake,         numpatch))
             allocate (a_lake_icefrac(nl_lake,         numpatch))
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             allocate (a_litr1c_vr   (1:nl_soil,       numpatch))
             allocate (a_litr2c_vr   (1:nl_soil,       numpatch))
             allocate (a_litr3c_vr   (1:nl_soil,       numpatch))
@@ -927,7 +918,7 @@ CONTAINS
             allocate (a_cwdnCap_vr  (1:nl_soil,       numpatch))
             allocate (a_t_scalar    (1:nl_soil,       numpatch))
             allocate (a_w_scalar    (1:nl_soil,       numpatch))
-#endif
+ENDIF
 
             allocate (a_ustar     (numpatch))
             allocate (a_ustar2    (numpatch))
@@ -988,6 +979,7 @@ CONTAINS
    SUBROUTINE deallocate_acc_fluxes ()
 
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
    USE MOD_LandPatch, only: numpatch
    USE MOD_LandUrban, only: numurban
    IMPLICIT NONE
@@ -1104,7 +1096,6 @@ CONTAINS
             deallocate (a_t_soisno_ens   )
 #endif
 
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                deallocate (a_t_room    )
                deallocate (a_tafu      )
@@ -1131,9 +1122,8 @@ CONTAINS
                deallocate (a_troof     )
                deallocate (a_twall     )
             ENDIF
-#endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             deallocate (a_lai_enftemp        )
             deallocate (a_lai_enfboreal      )
             deallocate (a_lai_dnfboreal      )
@@ -1148,9 +1138,9 @@ CONTAINS
             deallocate (a_lai_c3arcgrass     )
             deallocate (a_lai_c3grass        )
             deallocate (a_lai_c4grass        )
-#endif
+ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             deallocate (a_leafc              )
             deallocate (a_leafc_storage      )
             deallocate (a_leafc_xfer         )
@@ -1367,7 +1357,7 @@ CONTAINS
             deallocate (a_deadcrootnCap        )
             deallocate (a_deadcrootn_storageCap)
             deallocate (a_deadcrootn_xferCap   )
-#endif
+ENDIF
 ! Ozone stress variables
             deallocate (a_ozone              )
 ! END ozone stress variables
@@ -1388,7 +1378,7 @@ CONTAINS
             deallocate (a_dz_lake     )
             deallocate (a_t_lake      )
             deallocate (a_lake_icefrac)
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             deallocate (a_litr1c_vr   )
             deallocate (a_litr2c_vr   )
             deallocate (a_litr3c_vr   )
@@ -1422,7 +1412,7 @@ CONTAINS
             deallocate (a_cwdnCap_vr  )
             deallocate (a_t_scalar    )
             deallocate (a_w_scalar    )
-#endif
+ENDIF
 
             deallocate (a_ustar     )
             deallocate (a_ustar2    )
@@ -1483,7 +1473,7 @@ CONTAINS
       USE MOD_LandPatch, only: numpatch
       USE MOD_LandUrban, only: numurban
       USE MOD_Vars_Global, only: spval
-      USE MOD_Namelist, only: DEF_USE_TRACER
+      USE MOD_Namelist, only: DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
       IMPLICIT NONE
       logical, intent(in), optional :: flush_reactive
       logical :: flush_reactive_active
@@ -1605,7 +1595,6 @@ CONTAINS
             a_t_soisno_ens   (:,:,:) = spval
 #endif
 
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                a_t_room   (:) = spval
                a_tafu     (:) = spval
@@ -1632,9 +1621,8 @@ CONTAINS
                a_troof    (:) = spval
                a_twall    (:) = spval
             ENDIF
-#endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             a_lai_enftemp      (:) = spval
             a_lai_enfboreal    (:) = spval
             a_lai_dnfboreal    (:) = spval
@@ -1649,8 +1637,8 @@ CONTAINS
             a_lai_c3arcgrass   (:) = spval
             a_lai_c3grass      (:) = spval
             a_lai_c4grass      (:) = spval
-#endif
-#ifdef BGC
+ENDIF
+IF (DEF_USE_BGC) THEN
             a_leafc              (:) = spval
             a_leafc_storage      (:) = spval
             a_leafc_xfer         (:) = spval
@@ -1866,7 +1854,7 @@ CONTAINS
             a_deadcrootnCap        (:) = spval
             a_deadcrootn_storageCap(:) = spval
             a_deadcrootn_xferCap   (:) = spval
-#endif
+ENDIF
             a_ozone                (:) = spval
 
             a_t_soisno     (:,:) = spval
@@ -1885,7 +1873,7 @@ CONTAINS
             a_dz_lake      (:,:) = spval
             a_t_lake       (:,:) = spval
             a_lake_icefrac (:,:) = spval
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             a_litr1c_vr    (:,:) = spval
             a_litr2c_vr    (:,:) = spval
             a_litr3c_vr    (:,:) = spval
@@ -1921,7 +1909,7 @@ CONTAINS
             a_w_scalar     (:,:) = spval
 
             a_sminn_vr     (:,:) = spval
-#endif
+ENDIF
 
             a_ustar (:) = spval
             a_ustar2(:) = spval
@@ -2001,7 +1989,7 @@ CONTAINS
    USE MOD_Vars_1DFluxes
    USE MOD_FrictionVelocity
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF, &
-      DEF_USE_TRACER
+      DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
    USE MOD_TurbulenceLEddy
    USE MOD_Vars_Global
 #ifdef CatchLateralFlow
@@ -2222,7 +2210,6 @@ CONTAINS
             CALL acc3d (t_soisno_ens   , a_t_soisno_ens   )
 #endif
 
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                CALL acc1d(t_room     , a_t_room    )
                CALL acc1d(tafu       , a_tafu      )
@@ -2249,9 +2236,8 @@ CONTAINS
                CALL acc1d(t_roof     , a_troof     )
                CALL acc1d(t_wall     , a_twall     )
             ENDIF
-#endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             CALL acc1d (lai_enftemp        , a_lai_enftemp       )
             CALL acc1d (lai_enfboreal      , a_lai_enfboreal     )
             CALL acc1d (lai_dnfboreal      , a_lai_dnfboreal     )
@@ -2266,8 +2252,8 @@ CONTAINS
             CALL acc1d (lai_c3arcgrass     , a_lai_c3arcgrass    )
             CALL acc1d (lai_c3grass        , a_lai_c3grass       )
             CALL acc1d (lai_c4grass        , a_lai_c4grass       )
-#endif
-#ifdef BGC
+ENDIF
+IF (DEF_USE_BGC) THEN
             CALL acc1d (leafc              , a_leafc               )
             CALL acc1d (leafc_storage      , a_leafc_storage       )
             CALL acc1d (leafc_xfer         , a_leafc_xfer          )
@@ -2485,7 +2471,7 @@ CONTAINS
                CALL acc1d (deadcrootn_storageCap,a_deadcrootn_storageCap)
                CALL acc1d (deadcrootn_xferCap   ,a_deadcrootn_xferCap   )
             ENDIF
-#endif
+ENDIF
             IF(DEF_USE_OZONESTRESS)THEN
                CALL acc1d (forc_ozone  , a_ozone       )
             ENDIF
@@ -2512,7 +2498,7 @@ CONTAINS
             ENDIF
             CALL acc2d (t_lake      , a_t_lake       )
             CALL acc2d (lake_icefrac, a_lake_icefrac )
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
             DO i = 1, numpatch
                DO j = 1, nl_soil
                   decomp_vr_tmp(j,i)  = decomp_cpools_vr(j,i_met_lit,i)
@@ -2687,7 +2673,7 @@ CONTAINS
 
             CALL acc2d (t_scalar     , a_t_scalar       )
             CALL acc2d (w_scalar     , a_w_scalar       )
-#endif
+ENDIF
             allocate (r_ustar  (numpatch));  r_ustar (:) = spval
             allocate (r_ustar2 (numpatch));  r_ustar2(:) = spval !Shaofeng, 2023.05.20
             allocate (r_tstar  (numpatch));  r_tstar (:) = spval

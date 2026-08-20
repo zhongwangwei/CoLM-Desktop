@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_Daylength
 
 !-----------------------------------------------------------------------
@@ -87,4 +86,3 @@ CONTAINS
    END FUNCTION declin_angle
 
 END MODULE MOD_BGC_Daylength
-#endif

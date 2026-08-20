@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_Veg_CNFireLi2016
 
 !-------------------------------------------------------------------------------------------------------------------
@@ -311,4 +310,3 @@ CONTAINS
    END SUBROUTINE CNFireArea
 
 END MODULE MOD_BGC_Veg_CNFireLi2016
-#endif

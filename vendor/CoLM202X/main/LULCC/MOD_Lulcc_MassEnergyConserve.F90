@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef LULCC
 MODULE MOD_Lulcc_MassEnergyConserve
 
    USE MOD_Precision
@@ -52,16 +51,12 @@ CONTAINS
    USE MOD_Lulcc_Vars_TimeInvariants
    USE MOD_Lulcc_Vars_TimeVariables
    USE MOD_Lulcc_TransferTraceReadin
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
-#endif
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
    USE MOD_Urban_Vars_TimeVariables
    USE MOD_Urban_Vars_TimeInvariants
-#endif
    USE MOD_Const_Physical, only: cpice, cpliq, hfus, tfrz, denh2o, denice
    USE MOD_GroundTemperature
    USE MOD_SnowFraction
@@ -877,7 +872,7 @@ ENDIF
 !                    ENDDO
 ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
                      IF (patchtype(np)==0) THEN
                         ps  = patch_pft_s(np)
@@ -949,9 +944,9 @@ ENDIF
                      !    ldew(np) = sum( ldew_p(ps:pe)*pftfrac(ps:pe) )
                      ! ENDIF
 
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
                      IF (patchclass(np)==URBAN) THEN
 
                         ! If there isn't any urban patch in last year's grid,initialized value was
@@ -1118,7 +1113,7 @@ ENDIF
                                 + scv_gimp(u)*(1-froof(u))*(1-fgper(u))
 
                      ENDIF
-#endif
+ENDIF
 
                      ! CALL albland (np, patchtype(np),deltim,&
                      !    soil_s_v_alb(np),soil_d_v_alb(np),soil_s_n_alb(np),soil_d_n_alb(np),&
@@ -1158,5 +1153,4 @@ ENDIF
    END SUBROUTINE LulccMassEnergyConserve
 
 END MODULE MOD_Lulcc_MassEnergyConserve
-#endif
 ! ---------- EOP ------------

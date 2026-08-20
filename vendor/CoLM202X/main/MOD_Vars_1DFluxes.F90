@@ -6,18 +6,12 @@ MODULE MOD_Vars_1DFluxes
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_1DPFTFluxes
-#endif
-#ifdef BGC
    USE MOD_BGC_Vars_1DFluxes
-#endif
 #ifdef CatchLateralFlow
    USE MOD_Catch_Vars_1DFluxes
 #endif
-#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_1DFluxes
-#endif
 #ifdef DataAssimilation
    USE MOD_DA_Vars_1DFluxes
 #endif
@@ -107,6 +101,7 @@ CONTAINS
    ! Allocates memory for CoLM 1d [numpatch] variables
    ! -------------------------------------------------------------------
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_LandPatch
@@ -182,21 +177,21 @@ CONTAINS
          ENDIF
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL allocate_1D_PFTFluxes
-#endif
+ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL allocate_1D_BGCFluxes
-#endif
+ENDIF
 
 #ifdef CatchLateralFlow
       CALL allocate_1D_CatchFluxes
 #endif
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL allocate_1D_UrbanFluxes
-#endif
+ENDIF
 
 #ifdef DataAssimilation
       CALL allocate_1D_DAFluxes
@@ -209,6 +204,7 @@ CONTAINS
    ! deallocates memory for CoLM 1d [numpatch] variables
    ! --------------------------------------------------------------------
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_LandPatch
 
       IF (p_is_worker) THEN
@@ -279,21 +275,21 @@ CONTAINS
          ENDIF
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL deallocate_1D_PFTFluxes
-#endif
+ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL deallocate_1D_BGCFluxes
-#endif
+ENDIF
 
 #ifdef CatchLateralFlow
       CALL deallocate_1D_CatchFluxes
 #endif
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL deallocate_1D_UrbanFluxes
-#endif
+ENDIF
 
 #ifdef DataAssimilation
       CALL deallocate_1D_DAFluxes

@@ -66,19 +66,13 @@ PROGRAM MKSRFDATA
    USE MOD_Land2mWMO
    USE MOD_SrfdataRestart
    USE MOD_Const_LC
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
 #ifdef CROP
    USE MOD_LandCrop
 #endif
    USE MOD_RegionClip
-#ifdef BGC
    USE MOD_Tracer_Reactive_Methane_Preprocessing, only: methane_preprocessing_requirements
-#endif
    USE MOD_SrfdataDiag, only: gdiag, srfdata_diag_init
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
@@ -106,9 +100,7 @@ PROGRAM MKSRFDATA
    character(len=4) :: cyear
    integer*8 :: start_time, end_time, c_per_sec, time_used
    logical   :: skip_rest
-#ifdef BGC
    logical   :: requires_lake_soilc, requires_spatial_ph
-#endif
 
 
 #ifdef USEMPI
@@ -126,21 +118,25 @@ PROGRAM MKSRFDATA
       CALL initimetype (DEF_simulation_time%greenwich)
 
 #ifdef SinglePoint
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
 
       CALL read_surface_data_single (SITE_fsitedata, mksrfdata = .true.)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+      ! numpft is an optional dummy argument of write_surface_data_single;
+      ! passing it unconditionally (rather than omitting it under the old
+      ! "#ifndef LULC_IGBP_PFT/PC" compile-time branch) is both simpler and
+      ! safer -- the subroutine's internal "IF (numpft > 0)" checks read an
+      ! absent OPTIONAL argument without a PRESENT() guard when numpft was
+      ! never passed at all, which is undefined behaviour. numpft is 0 in
+      ! LCT runs (see the module-level "numpft = 0" branch above), so this
+      ! is behaviourally identical for LCT and fixes that latent UB besides.
       CALL write_surface_data_single (numpatch, numpft)
-#else
-      CALL write_surface_data_single (numpatch)
-#endif
 
-#else
+ELSE
 
       CALL read_urban_surface_data_single (SITE_fsitedata, mksrfdata=.true.)
       CALL write_urban_surface_data_single(numurban)
 
-#endif
+ENDIF
 
       CALL single_srfdata_final ()
       write(*,*)  'Successful in surface data making.'
@@ -181,11 +177,11 @@ PROGRAM MKSRFDATA
       lai_year  = lc_year
       skip_rest = .FALSE.
 
-#ifdef LULCC
+IF (DEF_USE_LULCC) THEN
       IF ( lc_year < 2000 ) THEN
          lc_year = MAX(1985, (lc_year / 5) * 5)
       ENDIF
-#endif
+ENDIF
 
       ! define blocks
       CALL gblock%set ()
@@ -234,9 +230,9 @@ PROGRAM MKSRFDATA
 #ifdef LULC_IGBP
       CALL grid_patch%define_by_name ('colm_500m')
 #endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL grid_patch%define_by_name ('colm_500m')
-#endif
+ENDIF
 #if (defined CROP)
       ! define grid for crop parameters
       CALL grid_crop%define_from_file (trim(DEF_dir_rawdata)//&
@@ -276,11 +272,11 @@ PROGRAM MKSRFDATA
       ENDIF
 
       ! add by dong, only test for making urban data
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL grid_urban%define_by_name      ('colm_500m')
       CALL grid_urban_500m%define_by_name ('colm_500m')
       CALL grid_urban_5km%define_by_name  ('colm_5km' )
-#endif
+ENDIF
 
       ! assimilate grids to build pixels
 #ifndef SinglePoint
@@ -314,11 +310,11 @@ PROGRAM MKSRFDATA
          CALL pixel%assimilate_grid (grid_topo_factor)
       ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL pixel%assimilate_grid (grid_urban     )
       CALL pixel%assimilate_grid (grid_urban_500m)
       CALL pixel%assimilate_grid (grid_urban_5km )
-#endif
+ENDIF
 
       ! map pixels to grid coordinates
 #ifndef SinglePoint
@@ -352,11 +348,11 @@ PROGRAM MKSRFDATA
          CALL pixel%map_to_grid (grid_topo_factor)
       ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL pixel%map_to_grid (grid_urban     )
       CALL pixel%map_to_grid (grid_urban_500m)
       CALL pixel%map_to_grid (grid_urban_5km )
-#endif
+ENDIF
 
 
       ! build land elms
@@ -388,9 +384,9 @@ PROGRAM MKSRFDATA
       ! build land patches
       CALL landpatch_build(lc_year)
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL landurban_build(lc_year)
-#endif
+ENDIF
 
 #ifdef CROP
       CALL landcrop_build (lc_year)
@@ -402,9 +398,9 @@ PROGRAM MKSRFDATA
          CALL land2mwmo_build(lc_year)
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL landpft_build  (lc_year)
-#endif
+ENDIF
 
 ! ................................................................
 ! 2. SAVE land surface tessellation information
@@ -424,13 +420,13 @@ PROGRAM MKSRFDATA
 
       CALL pixelset_save_to_file  (dir_landdata, 'landpatch', landpatch, lc_year)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL pixelset_save_to_file  (dir_landdata, 'landpft'  , landpft  , lc_year)
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL pixelset_save_to_file  (dir_landdata, 'landurban', landurban, lc_year)
-#endif
+ENDIF
 
 ! ................................................................
 ! 3. Mapping land characteristic parameters to the model grids
@@ -447,14 +443,14 @@ PROGRAM MKSRFDATA
 
       !TODO: for lulcc, need to run for each year and SAVE to different subdirs
 
-#ifdef LULCC
+IF (DEF_USE_LULCC) THEN
       IF (lai_year<2000 .and. MOD(lai_year,5) /= 0) THEN
          CALL Aggregation_LAI          (grid_lai,  dir_rawdata, dir_landdata, lai_year)
          skip_rest = .TRUE.
       ELSE
          CALL MAKE_LulccTransferTrace  (lc_year)
       ENDIF
-#endif
+ENDIF
 
 IF (.not. (skip_rest)) THEN
 
@@ -464,13 +460,13 @@ IF (.not. (skip_rest)) THEN
 
       CALL Aggregation_SoilParameters  (grid_soil, dir_rawdata, dir_landdata, lc_year)
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       CALL methane_preprocessing_requirements (requires_lake_soilc, requires_spatial_ph)
       IF (requires_lake_soilc) &
          CALL Aggregation_LakeSoilC    (grid_soil, dir_rawdata, dir_landdata, lc_year)
       IF (requires_spatial_ph) &
          CALL Aggregation_MethanePH    (dir_rawdata, dir_landdata, lc_year)
-#endif
+ENDIF
 
       CALL Aggregation_SoilBrightness  (grid_500m, dir_rawdata, dir_landdata, lc_year)
 #ifdef HYPERSPECTRAL
@@ -501,10 +497,10 @@ IF (.not. (skip_rest)) THEN
             trim(DEF_DS_HiresTopographyDataDir), dir_landdata, lc_year)
       ENDIF
       
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL Aggregation_urban (dir_rawdata, dir_landdata, lc_year, &
                               grid_urban_5km, grid_urban_500m)
-#endif
+ENDIF
 
       CALL Aggregation_SoilTexture     (grid_soil, dir_rawdata, dir_landdata, lc_year)
 

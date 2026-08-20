@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_Veg_CNFireBase
 
 !---------------------------------------------------------------------------------------------------------------
@@ -418,4 +417,3 @@ CONTAINS
    END SUBROUTINE CNFireFluxes
 
 END MODULE MOD_BGC_Veg_CNFireBase
-#endif

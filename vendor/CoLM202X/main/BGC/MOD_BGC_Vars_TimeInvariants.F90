@@ -11,7 +11,6 @@ MODULE MOD_BGC_Vars_TimeInvariants
 ! !ORIGINAL:
 ! Xingjie Lu, 2022, created the original version
 ! -------------------------------
-#ifdef BGC
 
    USE MOD_Precision
    IMPLICIT NONE
@@ -504,5 +503,4 @@ CONTAINS
 
    END SUBROUTINE check_BGCTimeInvariants
 
-#endif
 END MODULE MOD_BGC_Vars_TimeInvariants

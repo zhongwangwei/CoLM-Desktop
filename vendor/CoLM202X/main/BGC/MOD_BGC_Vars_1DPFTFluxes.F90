@@ -1,9 +1,7 @@
 #include <define.h>
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
 MODULE MOD_BGC_Vars_1DPFTFluxes
-#ifdef BGC
 !---------------------------------------------------------------------------------------------------------
 ! !DESCRIPTION
 ! Define, allocate, and deallocate biogeochemical flux variables at pft level
@@ -1305,9 +1303,7 @@ CONTAINS
 !--------
 
    END SUBROUTINE set_1D_BGCPFTFluxes
-#endif
 
 END MODULE MOD_BGC_Vars_1DPFTFluxes
 
-#endif
 ! ---------- EOP ------------

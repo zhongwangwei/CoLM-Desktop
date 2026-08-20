@@ -163,11 +163,9 @@ SUBROUTINE CoLMMAIN ( &
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: tfrz, denh2o, denice, cpliq, cpice
    USE MOD_Vars_TimeVariables, only: tlai, tsai, waterstorage
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_PFTimeInvariants, only: pftfrac
    USE MOD_Vars_PFTimeVariables, only: tlai_p, lai_p, tsai_p, sai_p, sigf_p
-#endif
    USE MOD_RainSnowTemp, only: rain_snow_temp
 #ifdef HYPERSPECTRAL
    USE MOD_NetSolar_Hyper, only: netsolar_hyper
@@ -179,9 +177,7 @@ SUBROUTINE CoLMMAIN ( &
    USE MOD_Thermal, only: THERMAL
    USE MOD_SoilSnowHydrology, only: WATER_2014, WATER_VSF
    USE MOD_SnowFraction, only: snowfraction
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_SnowFraction, only: snowfraction_pftwrap
-#endif
    USE MOD_SnowLayersCombineDivide, only: snowcompaction, snowlayerscombine, &
       snowlayerscombine_snicar, snowlayersdivide, snowlayersdivide_snicar
    USE MOD_Glacier, only: GLACIER_TEMP, GLACIER_WATER, GLACIER_WATER_snicar
@@ -197,7 +193,8 @@ SUBROUTINE CoLMMAIN ( &
    USE MOD_TimeManager
    USE MOD_Namelist, only: DEF_Interception_scheme, DEF_USE_VariablySaturatedFlow, &
       DEF_USE_PLANTHYDRAULICS, DEF_USE_IRRIGATION, DEF_SPLIT_SOILSNOW, &
-      DEF_USE_Dynamic_Wetland, DEF_VEG_SNOW, DEF_URBAN_RUN, DEF_USE_TRACER
+      DEF_USE_Dynamic_Wetland, DEF_VEG_SNOW, DEF_URBAN_RUN, DEF_USE_TRACER, &
+      DEF_USE_LCT, DEF_USE_PFT, DEF_USE_PC
    USE MOD_Tracer_LandPhase, only: ntracers, trc_tiny, tracer_uses_land_water_transport, &
       tracer_precip, tracer_evapo, tracer_soil_water, tracer_wetland, &
       tracer_newsnow, tracer_save_storage, tracer_balance_check, &
@@ -211,9 +208,7 @@ SUBROUTINE CoLMMAIN ( &
    ! trc_wliq / trc_wice / trc_solid / trc_scv through the same per-layer topology as
    ! the water side, so no post-hoc redistribution is needed.
    USE MOD_LeafInterception, only: LEAF_interception_wrap
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LeafInterception, only: LEAF_interception_pftwrap
-#endif
 #if (defined CaMa_Flood)
    ! get flood depth [mm], flood fraction[0-1], flood evaporation [mm/s], flood inflow [mm/s]
    USE MOD_CaMa_colmCaMa, only: get_fldevp
@@ -689,9 +684,7 @@ SUBROUTINE CoLMMAIN ( &
    ! schemes 4/5/6/7. Prior to this path, the ROLLBACK NM-1 audit left
    ! the heat unaccounted, biasing tleaf warm and inflating Ec/ET.
    real(r8) :: canopy_phase_heat
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: canopy_phase_heat_p(:)
-#endif
    real(r8) :: canopy_smelt_mass_th, canopy_frzc_mass_th
    real(r8), allocatable :: soil_thaw_mass_th(:), soil_frzc_mass_th(:)
    real(r8) :: ldew_rain_bef_th, ldew_snow_bef_th    ! before THERMAL
@@ -880,7 +873,6 @@ SUBROUTINE CoLMMAIN ( &
          canopy_phase_heat = 0._r8
          canopy_smelt_mass_th = 0._r8
          canopy_frzc_mass_th  = 0._r8
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (patchtype == 0) THEN
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
@@ -889,11 +881,10 @@ SUBROUTINE CoLMMAIN ( &
             allocate(canopy_phase_heat_p(1:1))
          ENDIF
          canopy_phase_heat_p(:) = 0._r8
-#endif
 
          IF (patchtype == 0) THEN
 
-#if (defined LULC_USGS || defined LULC_IGBP)
+            IF (DEF_USE_LCT) THEN
             CALL LEAF_interception_wrap (deltim,dewmx,forc_us,forc_vs,chil,sigf,&
 #ifdef extend_interception
                       fsno,&
@@ -905,9 +896,9 @@ SUBROUTINE CoLMMAIN ( &
                       xsc_rain_out,xsc_snow_out,&
                       ldew_smelt_trc,ldew_frzc_trc,&
                       canopy_phase_heat)
-#endif
+            ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+            IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             CALL LEAF_interception_pftwrap (ipatch,deltim,dewmx,forc_us,forc_vs,forc_t,&
 #ifdef extend_interception
                       fsno,&
@@ -918,7 +909,7 @@ SUBROUTINE CoLMMAIN ( &
                       xsc_rain_out,xsc_snow_out,&
                       ldew_smelt_trc,ldew_frzc_trc,&
                       canopy_phase_heat,canopy_phase_heat_p)
-#endif
+            ENDIF
 
          ELSE
             CALL LEAF_interception_wrap (deltim,dewmx,forc_us,forc_vs,chil,sigf,&
@@ -1109,11 +1100,7 @@ SUBROUTINE CoLMMAIN ( &
               pg_rain           ,pg_snow           ,t_precip          ,qintr_rain        ,&
               qintr_snow        ,snofrz(lbsn:0)    ,sabg_snow_lyr(lb:1)                 &
 #ifdef extend_interception
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
              ,canopy_phase_heat, canopy_phase_heat_p                                    &
-#else
-             ,canopy_phase_heat                                                         &
-#endif
 #endif
              ,canopy_smelt_mass_th = canopy_smelt_mass_th, &
               canopy_frzc_mass_th  = canopy_frzc_mass_th, &
@@ -1584,9 +1571,7 @@ SUBROUTINE CoLMMAIN ( &
          IF (allocated(soil_thaw_mass_th)) deallocate(soil_thaw_mass_th)
          IF (allocated(soil_frzc_mass_th)) deallocate(soil_frzc_mass_th)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (allocated(canopy_phase_heat_p)) deallocate(canopy_phase_heat_p)
-#endif
 
          IF (DEF_USE_CoLMDEBUG) THEN
          IF (abs(errorw) > 1.e-3) THEN
@@ -2104,7 +2089,7 @@ SUBROUTINE CoLMMAIN ( &
 
          IF (patchtype == 0) THEN
 
-#if (defined LULC_USGS || defined LULC_IGBP)
+            IF (DEF_USE_LCT) THEN
             CALL snowfraction (tlai(ipatch),tsai(ipatch),z0m,zlnd,scv,snowdp,wt,sigf,fsno)
             lai = tlai(ipatch)
             sai = tsai(ipatch) * sigf
@@ -2113,9 +2098,9 @@ SUBROUTINE CoLMMAIN ( &
             IF ( DEF_VEG_SNOW ) THEN
                lai = tlai(ipatch) * sigf
             ENDIF
-#endif
+            ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+            IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
             CALL snowfraction_pftwrap (ipatch,zlnd,scv,snowdp,wt,sigf,fsno)
@@ -2133,7 +2118,7 @@ SUBROUTINE CoLMMAIN ( &
             ENDIF
             sai_p(ps:pe) = tsai_p(ps:pe) * sigf_p(ps:pe)
             sai = sum(sai_p(ps:pe)*pftfrac(ps:pe))
-#endif
+            ENDIF
 
          ELSE
             CALL snowfraction (tlai(ipatch),tsai(ipatch),z0m,zlnd,scv,snowdp,wt,sigf,fsno)

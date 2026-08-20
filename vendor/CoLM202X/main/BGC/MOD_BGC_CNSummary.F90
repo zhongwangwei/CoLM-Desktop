@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_CNSummary
 
 !------------------------------------------------------------------------------------------
@@ -941,4 +940,3 @@ CONTAINS
 END MODULE MOD_BGC_CNSummary
 
 
-#endif

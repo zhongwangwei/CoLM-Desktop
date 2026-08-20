@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef URBAN_MODEL
 
 MODULE MOD_UrbanReadin
 
@@ -318,4 +317,3 @@ CONTAINS
 
 END MODULE MOD_UrbanReadin
 
-#endif

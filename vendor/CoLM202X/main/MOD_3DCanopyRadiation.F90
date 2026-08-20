@@ -27,9 +27,7 @@ MODULE MOD_3DCanopyRadiation
    SAVE
 
 ! PUBLIC MEMBER FUNCTIONS:
-#ifdef LULC_IGBP_PC
    PUBLIC :: ThreeDCanopy_wrap
-#endif
    PUBLIC :: ThreeDCanopy
 
 
@@ -40,7 +38,6 @@ CONTAINS
 !-----------------------------------------------------------------------
 
 
-#ifdef LULC_IGBP_PC
 
    SUBROUTINE ThreeDCanopy_wrap (ipatch, czen, albg, albv, tran, ssun, ssha)
 
@@ -284,7 +281,6 @@ CONTAINS
       deallocate (fcover  )
 
    END SUBROUTINE ThreeDCanopy_wrap
-#endif
 
 
    SUBROUTINE ThreeDCanopy(ps, pe, canlay, fcover, csiz, chgt, chil, coszen, &

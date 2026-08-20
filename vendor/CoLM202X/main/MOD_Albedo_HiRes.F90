@@ -17,12 +17,10 @@ MODULE MOD_Albedo_HiRes
 ! PRIVATE MEMBER FUNCTIONS:
    PRIVATE :: twostream
    PRIVATE :: twostream_hires
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    PRIVATE :: twostream_mod
    PRIVATE :: twostream_wrap
    PRIVATE :: twostream_hires_mod
    PRIVATE :: twostream_hires_wrap
-#endif
    PRIVATE :: BSM_soil_moisture, calculate_tav, calculate_wgt_variable
 
 
@@ -94,19 +92,15 @@ CONTAINS
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: tfrz
-   USE MOD_Namelist, only: DEF_USE_SNICAR, DEF_HighResSoil
+   USE MOD_Namelist, only: DEF_USE_SNICAR, DEF_HighResSoil, DEF_USE_PFT, DEF_USE_PC, DEF_USE_LCT
    USE MOD_Vars_TimeInvariants, only: patchclass
    USE MOD_HighRes_Parameters, only: rad2deg
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
-#endif
    USE MOD_Aerosol, only: AerosolMasses
    USE MOD_SnowSnicar_HiRes, only: SnowAge_grain
-#ifdef LULC_IGBP_PC
    USE MOD_3DCanopyRadiation, only: ThreeDCanopy_wrap
-#endif
 
    ! IEEE arithmetic module for isnan function, only for debug
    ! use, intrinsic :: IEEE_ARITHMETIC, only: IEEE_IS_NAN, IEEE_SUPPORT_DATATYPE
@@ -368,7 +362,7 @@ CONTAINS
       ssno_lyr(:,:,:) = 0. !set initial snow layer absorption
 
 IF (patchtype == 0) THEN
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       ps = patch_pft_s(ipatch)
       pe = patch_pft_e(ipatch)
       ssun_p(:,:,ps:pe) = 0.
@@ -381,7 +375,7 @@ IF (patchtype == 0) THEN
       WHERE (lai_p(ps:pe)+sai_p(ps:pe) <= 1.e-6) thermk_p(ps:pe) = 1.
       extkb_p(ps:pe)    = 1.
       extkd_p(ps:pe)    = 0.718
-#endif
+ENDIF
 ENDIF
 
 ! ----------------------------------------------------------------------
@@ -651,7 +645,7 @@ END IF
 
          IF (patchtype == 0) THEN  !soil patches
 
-#if (defined LULC_USGS || defined LULC_IGBP)
+IF (DEF_USE_LCT) THEN
             ! High resolution vegetation
             write(*,*) "NOT SUPPORT NOW!!!!!!!"
             CALL twostream_hires (chil,reflectance,transmittance,green,lai,sai, fwet_snow,&
@@ -678,7 +672,7 @@ END IF
 
             ! alb(:,:) = albv(:,:)
 
-#endif
+ENDIF
          ELSE  !other patchtypes (/=0)
             CALL twostream (chil,rho,tau,green,lai,sai,fwet_snow,&
                             czen,albg,albv,tran,thermk,extkb,extkd,ssun,ssha)
@@ -705,7 +699,7 @@ END IF
 
       IF (patchtype == 0) THEN
 
-#ifdef LULC_IGBP_PFT
+IF (DEF_USE_PFT) THEN
       CALL twostream_hires_wrap (ipatch, czen, albg_hires, &
             albv_hires, tran_hires, ssun_hires, ssha_hires, &
             reflectance, transmittance, &
@@ -718,9 +712,9 @@ END IF
       CALL calculate_wgt_variable(albv_hires(:,2), fsds_vis_dif_frac, fsds_nir_dif_frac, alb(1,2), alb(2,2))
 
       alb_hires(:,:) = albv_hires(:,:)
-#endif
+ENDIF
 
-#ifdef LULC_IGBP_PC
+IF (DEF_USE_PC) THEN
          !NOTE: if patchclass is CROPLAND, using twostream model
          IF (patchclass(ipatch) == CROPLAND) THEN
             CALL twostream_wrap (ipatch, czen, albg, albv, tran, ssun, ssha)
@@ -729,7 +723,7 @@ END IF
             CALL ThreeDCanopy_wrap (ipatch, czen, albg, albv, tran, ssun, ssha)
             alb(:,:) = albv(:,:)
          ENDIF
-#endif
+ENDIF
       ENDIF
 
       ! treat soil/snow albedo in direct and diffuse respectively
@@ -1395,7 +1389,6 @@ END IF
    END SUBROUTINE twostream_hires
 
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE twostream_mod ( chil, rho, tau, green, lai, sai, fwet_snow, &
               coszen, albg, albv, tran, thermk, extkb, extkd, ssun, ssha )
 
@@ -2170,10 +2163,8 @@ END IF
       extkb = extkbd
 
    END SUBROUTINE twostream_hires_mod
-#endif
 
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE twostream_wrap ( ipatch, coszen, albg, &
               albv, tran, ssun, ssha )
 
@@ -2411,7 +2402,6 @@ END IF
       deallocate ( albv_p )
 
    END SUBROUTINE twostream_hires_wrap
-#endif
 
 
    SUBROUTINE snowage ( deltim,tg,scv,scvold,sag )

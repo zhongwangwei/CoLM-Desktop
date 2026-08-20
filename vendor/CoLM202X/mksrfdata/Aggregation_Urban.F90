@@ -17,7 +17,6 @@
 !           code for different urban type schemes.
 !-----------------------------------------------------------------------
 
-#ifdef URBAN_MODEL
 SUBROUTINE Aggregation_Urban (dir_rawdata, dir_srfdata, lc_year, &
                               grid_urban_5km, grid_urban_500m)
 
@@ -473,7 +472,7 @@ ENDIF
 
 
       ! ******* LAI, SAI *******
-#ifndef LULCC
+IF (.not. DEF_USE_LULCC) THEN
 IF (DEF_LAI_CHANGE_YEARLY) THEN
       start_year = max(DEF_LAI_START_YEAR, DEF_simulation_time%start_year)
       end_year   = min(DEF_LAI_END_YEAR,   DEF_simulation_time%end_year  )
@@ -481,10 +480,10 @@ ELSE
       start_year = lc_year
       end_year   = lc_year
 ENDIF
-#else
+ELSE
       start_year = lc_year
       end_year   = lc_year
-#endif
+ENDIF
 
       IF (p_is_io) THEN
          CALL allocate_block_data (grid_urban_500m, ulai)
@@ -1284,4 +1283,3 @@ ENDIF
       ENDIF
 
 END SUBROUTINE Aggregation_Urban
-#endif

@@ -227,6 +227,12 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
         // 实测默认那条路在栅格给不出城市类别时会越界崩溃，而 LCZ 分类
         // 的覆盖更完整。CoLM 自带的城市单点示例用的也是 2。
         out.push(("DEF_URBAN_type_scheme".into(), Value::Int(2)));
+        // URBAN_MODEL 从编译期宏改成运行时开关之后，`DEF_URBAN_RUN`
+        // 不再被"编译时带 URBAN_MODEL 就强制 .true."那条路径兜底
+        // （main/URBAN/ 现在总是编译进去，MOD_Namelist.F90 只是原样
+        // 尊重这个字段，不再强制）。写不写这一条会决定城市物理是否
+        // 真的跑——不写就默认 .false.，城市算例会悄悄退化成非城市配置。
+        out.push(("DEF_URBAN_RUN".into(), Value::Bool(true)));
         // `USE_SITE_lakedepth` / `USE_SITE_soilreflectance` /
         // `USE_SITE_soilparameters` 三项**保持 CoLM 默认的 `.true.`**
         // （「站点文件里有，就用它」），所以这里一个字都不写。

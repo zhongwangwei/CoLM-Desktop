@@ -23,7 +23,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Vars_1DFluxes
    USE MOD_LandPatch, only: numpatch,landpatch
    USE MOD_LandUrban, only: patch2urban
-   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_TRACER, DEF_USE_BGC
    USE MOD_Forcing, only: forcmask_pch
 
    USE MOD_Tracer_LandPhase, only: tracer_resolve_step, tracer_lake_step, &
@@ -76,12 +76,10 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 
          m = patchclass(i)
 
-#ifdef URBAN_MODEL
          IF (DEF_USE_TRACER .and. DEF_URBAN_RUN .and. m.eq.URBAN .and. ntracers > 0) THEN
             CALL CoLM_stop ('TRACER does not yet support full urban patches: ' // &
                'CoLMMAIN_Urban has no tracer sub-surface state or runoff tracer update.')
          ENDIF
-#endif
 
          steps_in_one_deltim = 1
          ! deltim need to be within 1800s for water body with snow in order to avoid large
@@ -223,7 +221,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          ENDIF
 
 
-#if (defined BGC)
+         IF (DEF_USE_BGC) THEN
          ! Vegetated soil patches: full CN driver (vegetation + soil decomp).
          IF(patchtype(i) .eq. 0)THEN
             !
@@ -235,10 +233,9 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          IF (DEF_USE_TRACER) CALL tracer_wetland_decomp (i, deltim)
 
          IF (DEF_USE_TRACER) CALL tracer_soil_step (istep_local, i, idate, deltim)
-#endif
+         ENDIF
 
 
-#ifdef URBAN_MODEL
          ! For urban model and urban patches
          IF (DEF_URBAN_RUN .and. m.eq.URBAN) THEN
 
@@ -375,7 +372,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 
          ENDIF
 
-#endif
       ENDDO
 
       ! Surface tracer diagnostics are routed through the TRACER entry point.

@@ -27,21 +27,17 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Pixel
    USE MOD_LandPatch
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
    USE MOD_UrbanIniTimeVariable
    USE MOD_UrbanReadin
    USE MOD_Urban_LAIReadin
    USE MOD_Urban_Albedo
-#endif
    USE MOD_Const_Physical
    USE MOD_Vars_TimeInvariants
    USE MOD_Vars_TimeVariables
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
-#endif
 #ifdef DataAssimilation
    USE MOD_DA_Vars_TimeVariables
 #endif
@@ -108,7 +104,6 @@ CONTAINS
 
    ! ------------------------ local variables -----------------------------
    real(r8) :: rlon, rlat
-#ifdef BGC
    ! wetland_tot_c/wetland_existing_c are computed and consumed only inside
    ! the "#ifdef BGC" block further below, itself gated at runtime on
    ! DEF_USE_TRACER (methane is one of TRACER's four families but needs BGC
@@ -117,7 +112,6 @@ CONTAINS
    real(r8) :: wetland_existing_c
    real(r8), parameter :: wetland_cn_ratio = 15._r8
    real(r8), parameter :: carbon_per_kg_om = 580._r8
-#endif
 
    ! for SOIL INIT of water, temperature, snow depth
    logical :: use_soilini
@@ -241,7 +235,6 @@ CONTAINS
    integer :: Julian_8day
    integer :: ltyp
 
-#ifdef BGC
    real(r8) f_s1s2 (1:nl_soil)
    real(r8) f_s1s3 (1:nl_soil)
    real(r8) rf_s1s2(1:nl_soil)
@@ -249,7 +242,6 @@ CONTAINS
    real(r8) f_s2s1
    real(r8) f_s2s3
    real(r8) t
-#endif
 
    integer  :: txt_id
    real(r8) :: vic_b_infilt_, vic_Dsmax_, vic_Ds_, vic_Ws_, vic_c_
@@ -334,15 +326,15 @@ ENDIF
          patchlatr(:) = SITE_lat_location * pi/180.
 #endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF (numpft > 0) pftclass = landpft%settyp
-#endif
+ENDIF
 
       ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL pct_readin (dir_landdata, lc_year)
-#endif
+ENDIF
 
 ! ------------------------------------------
 ! 1.1 Ponding water
@@ -374,7 +366,7 @@ ENDIF
 
       CALL soil_parameters_readin (dir_landdata, lc_year)
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       ! lake_soilc_srf is populated whenever BGC is compiled in (see its
       ! "#ifdef BGC" declaration/allocation, MOD_Vars_TimeInvariants.F90),
       ! regardless of DEF_USE_TRACER: the SinglePoint branch derives it
@@ -398,7 +390,7 @@ ENDIF
          ENDDO
       ENDIF
 #endif
-#endif
+ENDIF
 
       ! alpha_vgm/n_vgm are only meaningfully populated under vanGenuchten
       ! (see MOD_SoilParametersReadin.F90) -- under Campbell they are
@@ -440,9 +432,9 @@ ENDIF
 
       ! read global tree top height from nc file
       CALL HTOP_readin (dir_landdata, lc_year)
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL Urban_readin (dir_landdata, lc_year)
-#endif
+ENDIF
 ! ................................
 ! 1.5 Initialize topography data
 ! ................................
@@ -616,7 +608,7 @@ ENDIF
          ENDIF
       ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
    ! bgc constant
       i_met_lit = 1
       i_cel_lit = 2
@@ -735,7 +727,7 @@ ENDIF
 
       sf     = 0.1_r8
       sf_no3 = 1._r8
-#endif
+ENDIF
 
 ! ...............................................
 ! 1.6 Write out as a restart file [histTimeConst]
@@ -887,7 +879,7 @@ ENDIF
          ENDIF
       ENDIF
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
       IF (DEF_USE_CN_INIT) THEN
          fcndat = DEF_file_cn_init
          IF (p_is_master) THEN
@@ -1141,7 +1133,7 @@ ENDIF
       ELSE
          use_cnini = .false.
       ENDIF
-#endif
+ENDIF
 
       IF (p_is_worker) THEN
          IF (numpatch > 0) THEN
@@ -1277,14 +1269,14 @@ ENDIF
          IF (DEF_LAI_CHANGE_YEARLY) THEN
             ! 08/03/2019, yuan: read global LAI/SAI data
             CALL LAI_readin (year, month, dir_landdata)
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
             CALL UrbanLAI_readin (year, month, dir_landdata)
-#endif
+ENDIF
          ELSE
             CALL LAI_readin (lc_year, month, dir_landdata)
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
             CALL UrbanLAI_readin (lc_year, month, dir_landdata)
-#endif
+ENDIF
          ENDIF
       ELSE
          Julian_8day = int(calendarday(idate)-1)/8*8 + 1
@@ -1425,7 +1417,6 @@ ENDIF
 #endif
 !Ozone Vairables
                ,o3coefv_sun(i),o3coefv_sha(i),o3coefg_sun(i),o3coefg_sha(i)&
-#ifdef BGC
                ,use_cnini, totlitc(i), totsomc(i), totcwdc(i), decomp_cpools(:,i), decomp_cpools_vr(:,:,i) &
                ,ctrunc_veg(i), ctrunc_soil(i), ctrunc_vr(:,i) &
                ,totlitn(i), totsomn(i), totcwdn(i), decomp_npools(:,i), decomp_npools_vr(:,:,i) &
@@ -1454,7 +1445,6 @@ ENDIF
                ,AKX_soil1_exit_n_vr_acc    (:,i), AKX_soil2_exit_n_vr_acc    (:,i), AKX_soil3_exit_n_vr_acc    (:,i) &
                ,diagVX_n_vr_acc          (:,:,i), upperVX_n_vr_acc         (:,:,i), lowerVX_n_vr_acc         (:,:,i) &
    !------------------------------------------------------------
-#endif
                ! for SOIL INIT of water, temperature, snow depth
                ,use_soilini, nl_soil_ini, soil_z, soil_t(1:,i), soil_w(1:,i), use_snowini, snow_d(i) &
                ! for SOIL Water INIT by using water table depth
@@ -1466,7 +1456,7 @@ ENDIF
             ENDIF
 #endif
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
             IF (m == URBAN) THEN
 
                u = patch2urban(i)
@@ -1532,7 +1522,7 @@ ENDIF
                   swsun(:,:,u),swsha(:,:,u),sgimp(:,:,u),sgper(:,:,u),slake(:,:,u))
 
             ENDIF
-#endif
+ENDIF
          ENDDO
 
          DO i = 1, numpatch

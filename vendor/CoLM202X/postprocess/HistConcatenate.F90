@@ -212,7 +212,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_2d (filehist, 'f_xy_snow', timelen, compress, &
          'snow','mm/s')
    
-#ifdef BGC
+   IF (DEF_USE_BGC) THEN
             ! leaf carbon display pool
       CALL hist_concatenate_var_2d (filehist, 'f_leafc', timelen, compress, &
                 'leaf carbon display pool','gC/m2')
@@ -422,7 +422,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_2d (filehist, 'f_grainc_to_seed', timelen, compress, &
                 'grain to crop seed carbon','gC/m2/s')
 #endif
-#endif
+   ENDIF
       !--------------------------------------------------------------
       CALL hist_concatenate_var_3d (filehist, 'f_t_soisno   ', timelen, 'soilsnow', &
          nl_soil-maxsnl, compress, 'soil temperature','K')
@@ -462,7 +462,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_3d (filehist, 'f_lake_icefrac', timelen, 'lake', &
          nl_lake, compress, 'lake ice fraction cover','0-1')
    
-#ifdef BGC
+   IF (DEF_USE_BGC) THEN
             ! litter 1 carbon density in soil layers
       CALL hist_concatenate_var_3d (filehist, 'f_litr1c_vr', timelen, 'soil', &
          nl_soil, compress, 'litter 1 carbon density in soil layers','gC/m3')
@@ -523,7 +523,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_3d (filehist, 'f_sminn_vr', timelen, 'soil', &
          nl_soil, compress, 'mineral nitrogen density in soil layers','gN/m3')
    
-#endif
+   ENDIF
       CALL hist_concatenate_var_2d (filehist, 'f_ustar  ', timelen, compress, &
          'u* in similarity theory','m/s')
    

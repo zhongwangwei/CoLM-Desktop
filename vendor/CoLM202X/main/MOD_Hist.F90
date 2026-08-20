@@ -143,13 +143,9 @@ CONTAINS
    USE MOD_LandPatch
    USE MOD_SpatialMapping
    USE MOD_Vars_TimeInvariants, only: patchtype, patchclass, patchmask
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeInvariants, only: pftclass
    USE MOD_LandPFT, only: patch_pft_s
-#endif
 #if (defined CaMa_Flood)
    USE MOD_CaMa_Vars !definition of CaMa variables
 #endif
@@ -203,9 +199,7 @@ CONTAINS
 #endif
 
    integer i, u
-#ifdef URBAN_MODEL
    logical,  allocatable ::  filter_urb (:)
-#endif
 
 #ifdef DataAssimilation
    integer :: np
@@ -306,11 +300,9 @@ CONTAINS
                allocate (filter_dt (numpatch))
                allocate (vecacc    (numpatch))
             ENDIF
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                allocate (filter_urb (numurban))
             ENDIF
-#endif
 #ifdef CROP
             IF (numpatch > 0) THEN
                allocate (filter_crop (numpatch))
@@ -323,9 +315,9 @@ CONTAINS
             IF (p_is_io) THEN
                CALL allocate_block_data (ghist, sumarea)
                CALL allocate_block_data (ghist, sumarea_dt)
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
                CALL allocate_block_data (ghist, sumarea_urb)
-#endif
+ENDIF
 #ifdef CROP
                CALL allocate_block_data (ghist, sumarea_crop)
                CALL allocate_block_data (ghist, sumarea_irrig)
@@ -869,7 +861,7 @@ ENDIF
          ! Mapping the urban variables at patch [numurban] to grid
          ! ------------------------------------------------------------------
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
          IF (p_is_worker) THEN
             IF (numpatch > 0) THEN
                DO i = 1, numpatch
@@ -989,7 +981,7 @@ ENDIF
          CALL write_history_variable_urb_2d ( DEF_hist_vars%t_wall, &
             a_twall, file_hist, 'f_t_wall', itime_in_file, sumarea_urb, filter_urb, &
             'temperature of urban wall [K]','kelvin')
-#endif
+ENDIF
 
          ! ------------------------------------------------------------------
          ! Mapping the fluxes and state variables at patch [numpatch] to grid
@@ -1054,7 +1046,7 @@ ENDIF
              a_rss, file_hist, 'f_rss', itime_in_file, sumarea, filter, &
              'soil surface resistance','s/m')
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
          ! leaf carbon display pool
          CALL write_history_variable_2d ( DEF_hist_vars%leafc, &
              a_leafc, file_hist, 'f_leafc', itime_in_file, sumarea, filter, &
@@ -4149,7 +4141,7 @@ ENDIF
              vecacc, file_hist, 'f_cropprodc_unmanagedcrop', itime_in_file, sumarea, filter, &
              'Crop production (unmanaged crop production)','gC/m2/s')
 #endif
-#endif
+ENDIF
          ! --------------------------------------------------------------------
          ! Temperature and water (excluding land water bodies and ocean patches)
          ! [soil => 0; urban and built-up => 1; wetland => 2; land ice => 3;
@@ -4803,9 +4795,9 @@ ENDIF
 
          IF (allocated(filter    )) deallocate (filter    )
          IF (allocated(filter_dt )) deallocate (filter_dt )
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
          IF (allocated(filter_urb)) deallocate (filter_urb)
-#endif
+ENDIF
 
          CALL FLUSH_acc_fluxes ()
          IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
@@ -4903,7 +4895,6 @@ ENDIF
    END SUBROUTINE write_history_variable_2d
 
 
-#ifdef URBAN_MODEL
    SUBROUTINE write_history_variable_urb_2d ( is_hist, &
          acc_vec, file_hist, varname, itime_in_file, sumarea, filter, &
          longname, units)
@@ -4942,7 +4933,6 @@ ENDIF
       END select
 
    END SUBROUTINE write_history_variable_urb_2d
-#endif
 
 
    SUBROUTINE write_history_variable_3d ( is_hist, &

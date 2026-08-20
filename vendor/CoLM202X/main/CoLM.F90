@@ -41,13 +41,9 @@ PROGRAM CoLM
    USE MOD_LandHRU
 #endif
    USE MOD_LandPatch
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
    USE MOD_Urban_LAIReadin
-#endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
 #if (defined UNSTRUCTURED || defined CATCHMENT)
    USE MOD_ElmVector
 #endif
@@ -73,20 +69,16 @@ PROGRAM CoLM
    USE MOD_SrfdataRestart
    USE MOD_LAIReadin
 
-#ifdef BGC
    USE MOD_NitrifData
    USE MOD_NdepData
    USE MOD_FireData
    USE MOD_LightningData
-#endif
 
 #ifdef CROP
    USE MOD_CropReadin
 #endif
 
-#ifdef LULCC
    USE MOD_Lulcc_Driver
-#endif
 
    USE MOD_Hydro_SoilWater
 
@@ -206,11 +198,11 @@ PROGRAM CoLM
 
 #ifdef SinglePoint
       fsrfdata = trim(dir_landdata) // '/srfdata.nc'
-#ifndef URBAN_MODEL
-      CALL read_surface_data_single (fsrfdata, mksrfdata=.false.)
-#else
-      CALL read_urban_surface_data_single (fsrfdata, mksrfdata=.false., mkrun=.true.)
-#endif
+      IF (.not. DEF_URBAN_RUN) THEN
+         CALL read_surface_data_single (fsrfdata, mksrfdata=.false.)
+      ELSE
+         CALL read_urban_surface_data_single (fsrfdata, mksrfdata=.false., mkrun=.true.)
+      ENDIF
 #endif
 
       deltim    = DEF_simulation_time%timestep
@@ -243,12 +235,12 @@ PROGRAM CoLM
       CALL Init_LC_Const
       CALL Init_PFT_Const
 
-#ifdef LULCC
-      lc_year = s_year
-      DEF_LC_YEAR = lc_year
-#else
-      lc_year = DEF_LC_YEAR
-#endif
+      IF (DEF_USE_LULCC) THEN
+         lc_year = s_year
+         DEF_LC_YEAR = lc_year
+      ELSE
+         lc_year = DEF_LC_YEAR
+      ENDIF
 
 #ifndef SinglePoint
       CALL pixel%load_from_file    (dir_landdata)
@@ -264,15 +256,15 @@ PROGRAM CoLM
 
       CALL pixelset_load_from_file (dir_landdata, 'landpatch', landpatch, numpatch, lc_year)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
-      CALL pixelset_load_from_file (dir_landdata, 'landpft'  , landpft  , numpft  , lc_year)
-      CALL map_patch_to_pft
-#endif
+      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+         CALL pixelset_load_from_file (dir_landdata, 'landpft'  , landpft  , numpft  , lc_year)
+         CALL map_patch_to_pft
+      ENDIF
 
-#ifdef URBAN_MODEL
-      CALL pixelset_load_from_file (dir_landdata, 'landurban', landurban, numurban, lc_year)
-      CALL map_patch_to_urban
-#endif
+      IF (DEF_URBAN_RUN) THEN
+         CALL pixelset_load_from_file (dir_landdata, 'landurban', landurban, numurban, lc_year)
+         CALL map_patch_to_urban
+      ENDIF
 
 #if (defined UNSTRUCTURED || defined CATCHMENT)
       CALL elm_vector_init ()
@@ -375,7 +367,7 @@ PROGRAM CoLM
          CALL AerosolDepInit ()
       ENDIF
 
-#ifdef BGC
+      IF (DEF_USE_BGC) THEN
       IF (DEF_USE_NITRIF) THEN
          CALL init_nitrif_data (ststamp)
       ENDIF
@@ -394,10 +386,10 @@ PROGRAM CoLM
          CALL init_fire_data (sdate(1))
          CALL init_lightning_data (sdate)
       ENDIF
-#endif
+      ENDIF
 
 #ifdef CROP
-   CALL CROP_readin ()
+      CALL CROP_readin ()
 #endif
 
 #if (defined CatchLateralFlow)
@@ -449,7 +441,7 @@ PROGRAM CoLM
             CALL update_Ozone_data(itstamp, deltim)
          ENDIF
 
-#ifdef BGC
+         IF (DEF_USE_BGC) THEN
          IF(DEF_USE_NITRIF) THEN
             time_prev = itstamp + int(-deltim)
             CALL julian2monthday(time_prev%year,time_prev%day,month_prev,mday_prev)
@@ -460,7 +452,7 @@ PROGRAM CoLM
          IF(DEF_USE_FIRE)THEN
             CALL update_lightning_data (itstamp, deltim)
          ENDIF
-#endif
+         ENDIF
 
          ! Read in aerosol deposition forcing data
          IF (DEF_Aerosol_Readin) THEN
@@ -476,7 +468,7 @@ PROGRAM CoLM
 
          CALL julian2monthday (jdate(1), jdate(2), month, mday)
 
-#ifdef BGC
+         IF (DEF_USE_BGC) THEN
 
          IF (DEF_NDEP_FREQUENCY==1)THEN ! Read Annual Ndep data
             IF (jdate(1) /= year_p) THEN
@@ -497,7 +489,7 @@ PROGRAM CoLM
                CALL update_hdm_data (idate(1))
             ENDIF
          ENDIF
-#endif
+         ENDIF
 
          ! Call CoLM driver
          ! ----------------------------------------------------------------------
@@ -537,7 +529,7 @@ PROGRAM CoLM
 
          ! DO land use and land cover change simulation
          ! ----------------------------------------------------------------------
-#ifdef LULCC
+         IF (DEF_USE_LULCC) THEN
          IF ( isendofyear(idate, deltim) .and. &
             ( jdate(1)>=2000 .or. (jdate(1)>1985 .and. MOD(jdate(1),5)==0) ) ) THEN
 
@@ -561,7 +553,7 @@ PROGRAM CoLM
             CALL hist_init (dir_hist, lulcc_call=.true.)
             CALL allocate_1D_Fluxes
          ENDIF
-#endif
+         ENDIF
 
          ! Get leaf area index
          ! ----------------------------------------------------------------------
@@ -587,9 +579,9 @@ PROGRAM CoLM
          IF (DEF_LAI_MONTHLY) THEN
             IF (month /= month_p) THEN
                CALL LAI_readin (lai_year, month, dir_landdata)
-#ifdef URBAN_MODEL
-               CALL UrbanLAI_readin(lai_year, month, dir_landdata)
-#endif
+               IF (DEF_URBAN_RUN) THEN
+                  CALL UrbanLAI_readin(lai_year, month, dir_landdata)
+               ENDIF
             ENDIF
          ELSE
             ! Update every 8 days (time interval of the MODIS LAI data)
@@ -603,15 +595,15 @@ PROGRAM CoLM
          ! Write out the model state variables for restart run
          ! ----------------------------------------------------------------------
          IF (save_to_restart (idate, deltim, itstamp, ptstamp, etstamp)) THEN
-#ifdef LULCC
-            IF (jdate(1) >= 2000) THEN
-               CALL WRITE_TimeVariables (jdate, jdate(1), casename, dir_restart)
+            IF (DEF_USE_LULCC) THEN
+               IF (jdate(1) >= 2000) THEN
+                  CALL WRITE_TimeVariables (jdate, jdate(1), casename, dir_restart)
+               ELSE
+                  CALL WRITE_TimeVariables (jdate, (jdate(1)/5)*5, casename, dir_restart)
+               ENDIF
             ELSE
-               CALL WRITE_TimeVariables (jdate, (jdate(1)/5)*5, casename, dir_restart)
+               CALL WRITE_TimeVariables (jdate, lc_year,  casename, dir_restart)
             ENDIF
-#else
-            CALL WRITE_TimeVariables (jdate, lc_year,  casename, dir_restart)
-#endif
 
 #if (defined CaMa_Flood)
 #ifdef USEMPI

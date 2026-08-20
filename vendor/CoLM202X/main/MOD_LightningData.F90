@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef BGC
 MODULE MOD_LightningData
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -114,4 +113,3 @@ CONTAINS
    END SUBROUTINE update_lightning_data
 
 END MODULE MOD_LightningData
-#endif

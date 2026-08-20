@@ -8,12 +8,14 @@ use std::path::PathBuf;
 
 /// 与 `xtask/src/usage.rs::CURATED` 保持一致。两处各写一份是因为 xtask 是
 /// 二进制 crate，测试拿不到它的 const —— 由下面第二条测试把两份拴住。
-const CURATED: &[(&str, &str, &str, &str)] = &[(
-    "DEF_URBAN_type_scheme",
-    "URBAN_MODEL",
-    "mksrfdata/MKSRFDATA.F90",
-    "CALL landurban_build",
-)];
+///
+/// **目前是空的。** 原先唯一的一条——`DEF_URBAN_type_scheme` 需要
+/// `URBAN_MODEL`——在 LULC/BGC/CROP/URBAN/LULCC 那组改造里失效了：
+/// `landurban_build` 的调用点从 `#ifdef URBAN_MODEL` 改成了运行时
+/// `IF (DEF_URBAN_RUN) THEN`（mksrfdata/MKSRFDATA.F90），`URBAN_MODEL`
+/// 本身也从 `include/define.h` 里彻底消失。详见 `xtask/src/usage.rs`
+/// 的 `CURATED` 注释。
+const CURATED: &[(&str, &str, &str, &str)] = &[];
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

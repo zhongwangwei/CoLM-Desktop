@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_Veg_CNVegStructUpdate
 
 !----------------------------------------------------------------------------------
@@ -156,4 +155,3 @@ CONTAINS
    END SUBROUTINE CNVegStructUpdate
 
 END MODULE MOD_BGC_Veg_CNVegStructUpdate
-#endif

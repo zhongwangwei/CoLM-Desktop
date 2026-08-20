@@ -1,6 +1,5 @@
 #include <define.h>
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
 MODULE MOD_BGC_Vars_PFTimeVariables
 
@@ -12,7 +11,6 @@ MODULE MOD_BGC_Vars_PFTimeVariables
 ! !ORIGINAL:
 ! Xingjie Lu, 2022, created the original version
 
-#ifdef BGC
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_SASU, DEF_USE_DiagMatrix
@@ -2685,8 +2683,6 @@ CONTAINS
       ENDIF
    END SUBROUTINE check_BGCPFTimeVariables
 
-#endif
 END MODULE MOD_BGC_Vars_PFTimeVariables
 
-#endif
 ! ---------- EOP ------------

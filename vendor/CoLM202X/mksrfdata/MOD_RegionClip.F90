@@ -44,9 +44,7 @@ CONTAINS
 #ifdef CATCHMENT
    logical, allocatable :: hrumask  (:)
 #endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    logical, allocatable :: pftmask  (:)
-#endif
 
    integer :: month, YY, itime, Julian_day, nsl
    integer :: start_year, end_year
@@ -189,9 +187,9 @@ CONTAINS
 #ifdef CATCHMENT
                   CALL clip_pixelset (dir_landdata_in, 'landhru'  , iblk, jblk, elmmask, elmindex, hrumask  )
 #endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                   CALL clip_pixelset (dir_landdata_in, 'landpft'  , iblk, jblk, elmmask, elmindex, pftmask  )
-#endif
+ENDIF
                   CALL system('mkdir -p ' // trim(dir_landdata_out) // '/mesh')
                   file_in  = trim(dir_landdata_in)  // '/mesh/mesh.nc'
                   file_out = trim(dir_landdata_out) // '/mesh/mesh.nc'
@@ -233,7 +231,7 @@ CONTAINS
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'patchfrac_hru', patchmask)
 #endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                   CALL system('mkdir -p ' // trim(dir_landdata_out) // '/landpft')
                   file_in  = trim(dir_landdata_in)  // '/landpft/landpft.nc'
                   file_out = trim(dir_landdata_out) // '/landpft/landpft.nc'
@@ -241,7 +239,7 @@ CONTAINS
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxstt', pftmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', pftmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', pftmask)
-#endif
+ENDIF
                ENDIF
 
                ! Leaf Area Index
@@ -283,7 +281,7 @@ CONTAINS
                      ENDDO
                   ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                   DO month = 1, 12
                      write(c2,'(i2.2)') month
 
@@ -295,7 +293,7 @@ CONTAINS
                      file_out = trim(dir_landdata_out)//'/LAI/'//trim(cyear)//'/SAI_pfts'//trim(c2)//'.nc'
                      CALL clip_vector (file_in, file_out, iblk, jblk, 'SAI_pfts', pftmask)
                   ENDDO
-#endif
+ENDIF
                ENDDO
 
                ! depth to bedrock
@@ -311,11 +309,11 @@ CONTAINS
                file_in  = trim(dir_landdata_in)  // '/htop/htop_patches.nc'
                file_out = trim(dir_landdata_out) // '/htop/htop_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'htop_patches', patchmask)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                file_in  = trim(dir_landdata_in)  // '/htop/htop_pfts.nc'
                file_out = trim(dir_landdata_out) // '/htop/htop_pfts.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'htop_pfts', pftmask)
-#endif
+ENDIF
 
                ! lake depth
                CALL system('mkdir -p ' // trim(dir_landdata_out) // '/lakedepth')
@@ -325,7 +323,7 @@ CONTAINS
 
                ! plant function type percentage
                CALL system('mkdir -p ' // trim(dir_landdata_out) // '/pctpft')
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                file_in  = trim(dir_landdata_in)  // '/pctpft/pct_pfts.nc'
                file_out = trim(dir_landdata_out) // '/pctpft/pct_pfts.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'pct_pfts', pftmask)
@@ -334,12 +332,12 @@ CONTAINS
                file_out = trim(dir_landdata_out) // '/pctpft/pct_crops.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'pct_crops', patchmask)
 #endif
-#endif
+ENDIF
 
                ! soil
                CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil')
 
-#ifdef BGC
+IF (DEF_USE_BGC) THEN
                write(cyear,'(i4.4)') DEF_LC_YEAR
 
                file_in  = trim(dir_landdata_in)  // '/soil/' // trim(cyear) // '/lake_soilc_patches.nc'
@@ -359,7 +357,7 @@ CONTAINS
                   file_out = trim(dir_landdata_out) // '/soil/' // trim(cyear) // '/methane_ph_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'methane_ph_patches', patchmask)
                ENDIF
-#endif
+ENDIF
 
                file_in  = trim(dir_landdata_in)  // '/soil/soil_s_v_alb_patches.nc'
                file_out = trim(dir_landdata_out) // '/soil/soil_s_v_alb_patches.nc'
@@ -568,9 +566,9 @@ CONTAINS
 #ifdef CATCHMENT
       IF (allocated(hrumask  )) deallocate(hrumask  )
 #endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (allocated(pftmask  )) deallocate(pftmask  )
-#endif
+ENDIF
 
    END SUBROUTINE srfdata_region_clip
 

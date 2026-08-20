@@ -30,9 +30,7 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
    USE MOD_SrfdataDiag
 
    IMPLICIT NONE
@@ -53,10 +51,8 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
    ! for PFT
    type (block_data_real8_3d) :: pftPCT
    real(r8), allocatable :: pct_one(:), area_one(:)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: pct_pft_one(:,:)
    real(r8), allocatable :: pct_pfts(:)
-#endif
    integer  :: ipatch, ipc, ipft, p
    integer  :: wmo_pth
    real(r8) :: sumarea, sum_pct_pfts
@@ -80,7 +76,7 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #endif
 
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
       dir_5x5 = trim(dir_rawdata) // '/plant_15s'
       ! add parameter input for time year
@@ -207,6 +203,6 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
       ENDIF
 #endif
 
-#endif
+ENDIF
 
 END SUBROUTINE Aggregation_PercentagesPFT

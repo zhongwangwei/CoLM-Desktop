@@ -88,10 +88,8 @@ MODULE MOD_Forcing
 
    type(block_data_real8_2d) :: avgcos   ! time-average of cos(zenith)
    type(block_data_real8_2d) :: metdata  ! forcing data
-#ifdef URBAN_MODEL
    type(block_data_real8_2d) :: rainf
    type(block_data_real8_2d) :: snowf
-#endif
 
    type(block_data_real8_2d), allocatable :: forcn    (:)  ! forcing data
    type(block_data_real8_2d), allocatable :: forcn_LB (:)  ! forcing data at lower boundary
@@ -180,9 +178,11 @@ CONTAINS
          ! allocate memory for forcing data
          CALL allocate_block_data (gforc, metdata)  ! forcing data
          CALL allocate_block_data (gforc, avgcos )  ! time-average of cos(zenith)
-#if (defined URBAN_MODEL && defined SinglePoint)
+#ifdef SinglePoint
+         IF (DEF_URBAN_RUN) THEN
          CALL allocate_block_data (gforc, rainf)
          CALL allocate_block_data (gforc, snowf)
+         ENDIF
 #endif
 
       ENDIF
@@ -295,7 +295,7 @@ CONTAINS
 
          filename = trim(dir_forcing)//trim(fprefix(1))
 
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
          IF (ncio_var_exist(filename,'reference_height_v')) THEN
             CALL ncio_read_serial (filename, 'reference_height_v', Height_V)
          ENDIF
@@ -307,13 +307,13 @@ CONTAINS
          IF (ncio_var_exist(filename,'reference_height_q')) THEN
             CALL ncio_read_serial (filename, 'reference_height_q', Height_Q)
          ENDIF
-#else
+ELSE
          IF (ncio_var_exist(filename,'measurement_height_above_ground')) THEN
             CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_V)
             CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_T)
             CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_Q)
          ENDIF
-#endif
+ENDIF
 
       ENDIF
 
@@ -1069,9 +1069,9 @@ CONTAINS
                IF (forcing_read_ahead) THEN
                   metdata%blk(gblock%xblkme(1),gblock%yblkme(1))%val = forc_disk(time_i,ivar)
                ELSE
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
                   CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
-#else
+ELSE
                   IF (trim(vname(ivar)) == 'Rainf') THEN
                      CALL ncio_read_site_time (filename, 'Rainf', time_i, rainf)
                      CALL ncio_read_site_time (filename, 'Snowf', time_i, snowf)
@@ -1086,7 +1086,7 @@ CONTAINS
                   ELSE
                      CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
                   ENDIF
-#endif
+ENDIF
                ENDIF
             ELSE
                CALL ncio_read_block_time (filename, vname(ivar), gforc, time_i, metdata)
@@ -1118,9 +1118,9 @@ CONTAINS
                IF (forcing_read_ahead) THEN
                   metdata%blk(gblock%xblkme(1),gblock%yblkme(1))%val = forc_disk(time_i,ivar)
                ELSE
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
                   CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
-#else
+ELSE
                   IF (trim(vname(ivar)) == 'Rainf') THEN
                      CALL ncio_read_site_time (filename, 'Rainf', time_i, rainf)
                      CALL ncio_read_site_time (filename, 'Snowf', time_i, snowf)
@@ -1135,7 +1135,7 @@ CONTAINS
                   ELSE
                      CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
                   ENDIF
-#endif
+ENDIF
                ENDIF
             ELSE
                CALL ncio_read_block_time (filename, vname(ivar), gforc, time_i, metdata)
@@ -1327,10 +1327,10 @@ CONTAINS
          filename = trim(dir_forcing)//trim(metfilename(-1,-1,-1,-1))
          DO ivar = 1, NVAR
             IF (trim(vname(ivar)) /= 'NULL') THEN
-#ifndef URBAN_MODEL
+IF ((.not. DEF_URBAN_RUN)) THEN
                CALL ncio_read_period_serial (filename, vname(ivar), its, ite, metcache)
                forc_disk(:,ivar) = metcache(1,1,:)
-#else
+ELSE
                IF (trim(vname(ivar)) == 'Rainf') THEN
                   CALL ncio_read_period_serial (filename, 'Rainf', its, ite, metcache)
                   forc_disk(:,ivar) = metcache(1,1,:)
@@ -1341,7 +1341,7 @@ CONTAINS
                   CALL ncio_read_period_serial (filename, vname(ivar), its, ite, metcache)
                   forc_disk(:,ivar) = metcache(1,1,:)
                ENDIF
-#endif
+ENDIF
             ENDIF
          ENDDO
 

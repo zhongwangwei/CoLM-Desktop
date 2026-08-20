@@ -19,10 +19,8 @@ MODULE MOD_SingleSrfdata
    IMPLICIT NONE
    SAVE
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    integer,  allocatable :: SITE_pfttyp  (:)
    real(r8), allocatable :: SITE_pctpfts (:)
-#endif
 
 #ifdef CROP
    integer,  allocatable :: SITE_croptyp (:)
@@ -30,16 +28,12 @@ MODULE MOD_SingleSrfdata
 #endif
 
    real(r8) :: SITE_htop
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: SITE_htop_pfts (:)
-#endif
 
    real(r8), allocatable :: SITE_LAI_monthly (:,:)
    real(r8), allocatable :: SITE_SAI_monthly (:,:)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: SITE_LAI_pfts_monthly (:,:,:)
    real(r8), allocatable :: SITE_SAI_pfts_monthly (:,:,:)
-#endif
 
    integer,  allocatable :: SITE_LAI_year (:)
    real(r8), allocatable :: SITE_LAI_8day (:,:)
@@ -192,9 +186,7 @@ CONTAINS
    USE MOD_Const_PFT
    USE MOD_SPMD_Task
    USE MOD_LandPatch
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
    USE MOD_Mesh, only: numelm
    USE MOD_LandElm
    IMPLICIT NONE
@@ -311,12 +303,12 @@ CONTAINS
          CALL CoLM_stop()
       ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       IF (SITE_landtype /= URBAN) THEN
          write(*,*) 'Error! Please set SITE_landtype to URBAN in namelist file !'
          CALL CoLM_stop()
       ENDIF
-#endif
+ENDIF
 
       IF (mksrfdata) THEN
          write(*,'(A,A,3A)') 'Land cover type : ', trim(patchclassname(SITE_landtype)), &
@@ -368,7 +360,7 @@ CONTAINS
 
 
       ! (3) build/read "land pft" or "land pc" by using plant functional type data
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifndef CROP
       IF (patchtypes(SITE_landtype) == 0) THEN
 #else
@@ -428,31 +420,31 @@ CONTAINS
          ENDIF
       ENDIF
 
-#endif
+ENDIF
 
 
       ! (4) forest height
       readflag = (.not. mksrfdata) .or. USE_SITE_htop
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (patchtypes(SITE_landtype) == 0) THEN
          u_site_htop = readflag .and. ncio_var_exist(fsrfdata,'canopy_height_pfts',readflag)
       ELSE
          u_site_htop = readflag .and. ncio_var_exist(fsrfdata,'canopy_height',readflag)
       ENDIF
-#else
+ELSE
       u_site_htop = readflag .and. ncio_var_exist(fsrfdata,'canopy_height',readflag)
-#endif
+ENDIF
 
       IF (u_site_htop) THEN
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF (patchtypes(SITE_landtype) == 0) THEN
             CALL ncio_read_serial (fsrfdata, 'canopy_height_pfts', SITE_htop_pfts)
          ELSE
             CALL ncio_read_serial (fsrfdata, 'canopy_height', SITE_htop)
          ENDIF
-#else
+ELSE
          CALL ncio_read_serial (fsrfdata, 'canopy_height', SITE_htop)
-#endif
+ENDIF
       ELSE
 #ifdef LULC_USGS
          CALL gridhtop%define_by_name ('colm_1km')
@@ -468,17 +460,15 @@ CONTAINS
          CALL read_point_5x5_var_2d_real8 (gridhtop, dir_5x5, 'MOD'//trim(cyear), 'HTOP', &
             SITE_lon_location, SITE_lat_location, SITE_htop)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (numpft > 0) THEN
             allocate (SITE_htop_pfts (numpft))
             SITE_htop_pfts(:) = SITE_htop
          ENDIF
 #endif
-#endif
       ENDIF
 
       IF (mksrfdata) THEN
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF (patchtypes(SITE_landtype) == 0) THEN
             arraysize = size(SITE_htop_pfts)
             write(fmt_str, '("(A,", I0, "F8.2,3A)")') arraysize
@@ -486,16 +476,16 @@ CONTAINS
          ELSE
             write(*,'(A,F8.2,3A)') 'Forest height : ', SITE_htop, ' (from ',trim(datasource(u_site_htop)),')'
          ENDIF
-#else
+ELSE
          write(*,'(A,F8.2,3A)') 'Forest height : ', SITE_htop, ' (from ',trim(datasource(u_site_htop)),')'
-#endif
+ENDIF
       ENDIF
 
 
       ! (5) LAI
       readflag = ((.not. mksrfdata) .or. USE_SITE_LAI)
       readflag = readflag .and. ncio_var_exist(fsrfdata,'LAI_year',readflag)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (patchtypes(SITE_landtype) == 0) THEN
          u_site_lai = readflag .and. ncio_var_exist(fsrfdata,'LAI_pfts_monthly',readflag) &
             .and. ncio_var_exist(fsrfdata,'SAI_pfts_monthly',readflag)
@@ -503,20 +493,20 @@ CONTAINS
          u_site_lai = readflag .and. ncio_var_exist(fsrfdata,'LAI_monthly',readflag) &
             .and. ncio_var_exist(fsrfdata,'SAI_monthly',readflag)
       ENDIF
-#else
+ELSE
       IF (DEF_LAI_MONTHLY) THEN
          u_site_lai = readflag .and. ncio_var_exist(fsrfdata,'LAI_monthly',readflag) &
             .and. ncio_var_exist(fsrfdata,'SAI_monthly',readflag)
       ELSE
          u_site_lai = readflag .and. ncio_var_exist(fsrfdata,'LAI_8day',readflag)
       ENDIF
-#endif
+ENDIF
 
       IF (u_site_lai) THEN
          CALL ncio_read_serial (fsrfdata, 'LAI_year', SITE_LAI_year)
          start_year = 1
          end_year   = size(SITE_LAI_year)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF (patchtypes(SITE_landtype) == 0) THEN
             CALL ncio_read_serial (fsrfdata, 'LAI_pfts_monthly', SITE_LAI_pfts_monthly)
             CALL ncio_read_serial (fsrfdata, 'SAI_pfts_monthly', SITE_SAI_pfts_monthly)
@@ -526,7 +516,7 @@ CONTAINS
             CALL ncio_read_serial (fsrfdata, 'SAI_monthly', SITE_SAI_monthly)
             ntime = size(SITE_LAI_monthly,1)
          ENDIF
-#else
+ELSE
          IF (DEF_LAI_MONTHLY) THEN
             CALL ncio_read_serial (fsrfdata, 'LAI_monthly', SITE_LAI_monthly)
             CALL ncio_read_serial (fsrfdata, 'SAI_monthly', SITE_SAI_monthly)
@@ -535,7 +525,7 @@ CONTAINS
             CALL ncio_read_serial (fsrfdata, 'LAI_8day', SITE_LAI_8day)
             ntime = size(SITE_LAI_8day,1)
          ENDIF
-#endif
+ENDIF
       ELSE
 
          idate(1) = DEF_simulation_time%start_year
@@ -580,12 +570,10 @@ CONTAINS
             allocate (SITE_LAI_8day    (46,start_year:end_year))
          ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (numpft > 0) THEN
             allocate (SITE_LAI_pfts_monthly (numpft,12,start_year:end_year))
             allocate (SITE_SAI_pfts_monthly (numpft,12,start_year:end_year))
          ENDIF
-#endif
 
          CALL gridlai%define_by_name ('colm_500m')
 
@@ -594,7 +582,7 @@ CONTAINS
             write(cyear,'(i4.4)') iyear
 
             DO itime = 1, ntime
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
                dir_5x5 = trim(DEF_dir_rawdata) // '/plant_15s'
                CALL read_point_5x5_var_3d_time_real8 (gridlai, dir_5x5, 'MOD'//trim(cyear), 'MONTHLY_PFT_LAI', &
@@ -630,7 +618,7 @@ CONTAINS
                      SITE_SAI_monthly(itime,iyear))
                ENDIF
 
-#else
+ELSE
                IF (DEF_LAI_MONTHLY) THEN
                   dir_5x5 = trim(DEF_dir_rawdata) // '/plant_15s'
                   CALL read_point_5x5_var_2d_time_real8 (gridlai, dir_5x5, 'MOD'//trim(cyear), &
@@ -645,7 +633,7 @@ CONTAINS
                      SITE_lon_location, SITE_lat_location, itime, LAI)
                   SITE_LAI_8day(itime,iyear) = LAI * 0.1
                ENDIF
-#endif
+ENDIF
             ENDDO
          ENDDO
       ENDIF
@@ -653,7 +641,7 @@ CONTAINS
       IF (mksrfdata) THEN
          DO iyear = start_year, end_year
             write(c,'(i2)') ntime
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             IF (patchtypes(SITE_landtype) == 0) THEN
                DO i = 1, numpft
                   write(*,'(A,I4,A,I2,A,'//trim(c)//'F8.2,4A)') 'LAI (year ', SITE_LAI_year(iyear), &
@@ -669,7 +657,7 @@ CONTAINS
                write(*,'(A,I4,A,'//trim(c)//'F8.2,4A)') 'SAI (year ', SITE_LAI_year(iyear), ') : ', &
                   SITE_SAI_monthly(:,iyear), ' (from ',trim(datasource(u_site_lai)),')'
             ENDIF
-#else
+ELSE
             IF (DEF_LAI_MONTHLY) THEN
                write(*,'(A,I4,A,'//trim(c)//'F8.2,4A)') 'LAI (year ', SITE_LAI_year(iyear), ') : ', &
                   SITE_LAI_monthly(:,iyear), ' (from ',trim(datasource(u_site_lai)),')'
@@ -679,7 +667,7 @@ CONTAINS
                write(*,'(A,I4,A,'//trim(c)//'F8.2,4A)') 'LAI (year ', SITE_LAI_year(iyear), ') : ', &
                   SITE_LAI_8day(:,iyear), ' (from ',trim(datasource(u_site_lai)),')'
             ENDIF
-#endif
+ENDIF
          ENDDO
       ENDIF
 
@@ -1361,7 +1349,6 @@ CONTAINS
          allocate (landpatch%vecgs%vstt(1,1));  landpatch%vecgs%vstt(1,1) = 1
          allocate (landpatch%vecgs%vend(1,1));  landpatch%vecgs%vend(1,1) = numpatch
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
          IF (numpft > 0) THEN
 
@@ -1417,7 +1404,6 @@ CONTAINS
             allocate (patch_pft_s (numpatch)); patch_pft_s = -1
             allocate (patch_pft_e (numpatch)); patch_pft_e = -1
          ENDIF
-#endif
 
          numelm = 1
          allocate (landelm%settyp   (1));  landelm%settyp  (1) = 0
@@ -1425,14 +1411,14 @@ CONTAINS
          allocate (elm_patch%subend (1));  elm_patch%subend(1) = numpatch
 
          allocate (elm_patch%subfrc (numpatch)); elm_patch%subfrc = 1./numpatch
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef CROP
          ! SITE_pctcrop is allocated only for a CROPLAND site (per-crop patch
          ! fractions). On any other patch type it is unallocated, so guard the
          ! override; non-crop single points keep subfrc = 1/numpatch from above.
          IF (SITE_landtype == CROPLAND) elm_patch%subfrc = SITE_pctcrop
 #endif
-#endif
+ENDIF
 
       ENDIF
 
@@ -2812,11 +2798,9 @@ ENDIF
       CALL ncio_create_file (fsrfdata)
 
       CALL ncio_define_dimension (fsrfdata, 'patch', numpatch)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       IF (numpft > 0) THEN
          CALL ncio_define_dimension (fsrfdata, 'pft', numpft)
       ENDIF
-#endif
 
       CALL ncio_define_dimension (fsrfdata, 'LAI_year', size(SITE_LAI_year))
       IF (DEF_LAI_MONTHLY) THEN
@@ -2850,7 +2834,6 @@ ENDIF
       CALL ncio_put_attr     (fsrfdata, 'IGBP_classification', 'long_name', 'MODIS IGBP Land Use/Land Cover')
 #endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       IF (numpft > 0) THEN
          CALL ncio_write_serial (fsrfdata, 'pfttyp',  SITE_pfttyp,  'pft')
          CALL ncio_put_attr     (fsrfdata, 'pfttyp',  'source', trim(datasource(u_site_pfts)))
@@ -2860,7 +2843,6 @@ ENDIF
          CALL ncio_put_attr     (fsrfdata, 'pctpfts', 'source', trim(datasource(u_site_pfts)))
          CALL ncio_put_attr     (fsrfdata, 'pctpfts', 'long_name', 'fraction of plant functional type')
       ENDIF
-#endif
 #if (defined CROP)
       IF (SITE_landtype == CROPLAND) THEN
          CALL ncio_write_serial (fsrfdata, 'croptyp', SITE_croptyp, 'patch')
@@ -2877,18 +2859,16 @@ ENDIF
       CALL ncio_put_attr     (fsrfdata, 'canopy_height', 'source', trim(datasource(u_site_htop)))
       CALL ncio_put_attr     (fsrfdata, 'canopy_height', 'long_name', 'canopy height')
       CALL ncio_put_attr     (fsrfdata, 'canopy_height', 'units', 'm')
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       IF (numpft > 0) THEN
          CALL ncio_write_serial (fsrfdata, 'canopy_height_pfts', SITE_htop_pfts, 'pft')
          CALL ncio_put_attr     (fsrfdata, 'canopy_height_pfts', 'source', trim(datasource(u_site_htop)))
          CALL ncio_put_attr     (fsrfdata, 'canopy_height_pfts', 'long_name', 'canopy height')
          CALL ncio_put_attr     (fsrfdata, 'canopy_height_pfts', 'units', 'm')
       ENDIF
-#endif
 
       source = trim(datasource(u_site_lai))
       CALL ncio_write_serial (fsrfdata, 'LAI_year', SITE_LAI_year, 'LAI_year')
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (numpft > 0) THEN
          CALL ncio_write_serial (fsrfdata, 'LAI_pfts_monthly', SITE_LAI_pfts_monthly, 'pft', 'month', 'LAI_year')
          CALL ncio_put_attr     (fsrfdata, 'LAI_pfts_monthly', 'source', source)
@@ -2906,7 +2886,7 @@ ENDIF
          CALL ncio_put_attr     (fsrfdata, 'SAI_monthly', 'source', source)
          CALL ncio_put_attr     (fsrfdata, 'SAI_monthly', 'long_name', 'monthly stem area index')
       ENDIF
-#else
+ELSE
       IF (DEF_LAI_MONTHLY) THEN
          CALL ncio_write_serial (fsrfdata, 'LAI_monthly', SITE_LAI_monthly, 'month', 'LAI_year')
          CALL ncio_put_attr     (fsrfdata, 'LAI_monthly', 'source', source)
@@ -2920,7 +2900,7 @@ ENDIF
          CALL ncio_put_attr     (fsrfdata, 'LAI_8day', 'source', source)
          CALL ncio_put_attr     (fsrfdata, 'LAI_8day', 'long_name', '8-day leaf area index')
       ENDIF
-#endif
+ENDIF
 
       CALL ncio_write_serial (fsrfdata, 'lakedepth', SITE_lakedepth)
       CALL ncio_put_attr     (fsrfdata, 'lakedepth', 'source', trim(datasource(u_site_lakedepth)))
@@ -3434,26 +3414,26 @@ ENDIF
 
    IMPLICIT NONE
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (allocated(SITE_pfttyp )) deallocate(SITE_pfttyp )
       IF (allocated(SITE_pctpfts)) deallocate(SITE_pctpfts)
-#endif
+ENDIF
 
 #ifdef CROP
       IF (allocated(SITE_croptyp)) deallocate(SITE_croptyp)
       IF (allocated(SITE_pctcrop)) deallocate(SITE_pctcrop)
 #endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (allocated(SITE_htop_pfts)) deallocate(SITE_htop_pfts)
-#endif
+ENDIF
 
       IF (allocated(SITE_LAI_monthly)) deallocate(SITE_LAI_monthly)
       IF (allocated(SITE_SAI_monthly)) deallocate(SITE_SAI_monthly)
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (allocated(SITE_LAI_pfts_monthly)) deallocate(SITE_LAI_pfts_monthly)
       IF (allocated(SITE_SAI_pfts_monthly)) deallocate(SITE_SAI_pfts_monthly)
-#endif
+ENDIF
 
       IF (allocated(SITE_LAI_year)) deallocate(SITE_LAI_year)
       IF (allocated(SITE_LAI_8day)) deallocate(SITE_LAI_8day)

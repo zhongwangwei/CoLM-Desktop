@@ -31,9 +31,7 @@ SUBROUTINE Aggregation_ForestHeight ( &
 
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
 
    USE MOD_SrfdataDiag
 
@@ -205,7 +203,7 @@ SUBROUTINE Aggregation_ForestHeight ( &
       ENDIF
 #endif
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (p_is_io) THEN
          CALL allocate_block_data (gland, htop)
          CALL allocate_block_data (gland, pftPCT, N_PFT_modis, lb1 = 0)
@@ -321,6 +319,6 @@ SUBROUTINE Aggregation_ForestHeight ( &
          IF (allocated(pct_one     )) deallocate (pct_one     )
          IF (allocated(area_one    )) deallocate (area_one    )
       ENDIF
-#endif
+ENDIF
 
 END SUBROUTINE Aggregation_ForestHeight

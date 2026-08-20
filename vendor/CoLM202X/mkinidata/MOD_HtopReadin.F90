@@ -18,17 +18,16 @@ CONTAINS
 ! ===========================================================
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC
    USE MOD_SPMD_Task
    USE MOD_Vars_Global
    USE MOD_Const_LC
    USE MOD_Const_PFT
    USE MOD_Vars_TimeInvariants
    USE MOD_LandPatch
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
-#endif
    USE MOD_NetCDFVector
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
@@ -97,7 +96,7 @@ CONTAINS
 #endif
 
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef SinglePoint
       IF (numpft > 0) THEN
          allocate(htoppft(numpft))
@@ -145,7 +144,7 @@ CONTAINS
       ENDIF
 
       IF (allocated(htoppft)) deallocate(htoppft)
-#endif
+ENDIF
 
    END SUBROUTINE HTOP_readin
 

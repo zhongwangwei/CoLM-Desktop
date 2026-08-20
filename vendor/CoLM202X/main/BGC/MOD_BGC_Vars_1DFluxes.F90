@@ -1,7 +1,6 @@
 #include <define.h>
 
 MODULE MOD_BGC_Vars_1DFluxes
-#ifdef BGC
 !---------------------------------------------------------------------------------------------------------
 ! !DESCRIPTION
 ! Define, allocate, and deallocate biogeochemical flux variables at patch level
@@ -735,7 +734,6 @@ SUBROUTINE set_1D_BGCFluxes(Values, Nan)
 
    END SUBROUTINE set_1D_BGCFluxes
 
-#endif
 END MODULE MOD_BGC_Vars_1DFluxes
 ! ---------- EOP ------------
 

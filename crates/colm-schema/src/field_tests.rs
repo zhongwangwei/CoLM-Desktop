@@ -2,13 +2,17 @@ use crate::{all, find, Default, FieldKind};
 
 #[test]
 fn the_table_has_the_measured_number_of_fields() {
-    // 实测：207 个顶层标量 + 4 个派生类型共 535 个成员，合计 742。
+    // 实测：210 个顶层标量 + 4 个派生类型共 535 个成员，合计 745。
     // 三个调试宏改成运行时开关后新增了 DEF_USE_CoLMDEBUG /
     // DEF_USE_RangeCheck / DEF_USE_SrfdataDiag，顶层数从 202 变 205；
     // 土壤水力方案改成运行时开关后新增了 DEF_USE_Campbell_SOIL_MODEL
     // （extend_interception 没有对应的开关，见 MOD_Namelist.F90 里的说明），
     // 顶层数从 205 变 206；示踪物子系统改成运行时开关后新增了
-    // DEF_USE_TRACER，顶层数从 206 变 207。
+    // DEF_USE_TRACER，顶层数从 206 变 207；LULC/BGC/CROP/URBAN/LULCC
+    // 那组改造新增了 DEF_USE_BGC、DEF_USE_CROP、DEF_USE_LULCC 三个
+    // （DEF_USE_USGS/DEF_USE_IGBP/DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC
+    // 早就在 MOD_Namelist.F90 里声明了，不算新增，只是从死代码变成
+    // 真正被读/被用），顶层数从 207 变 210。
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
@@ -16,7 +20,7 @@ fn the_table_has_the_measured_number_of_fields() {
         "expected roughly 740 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 207, "top-level count changed");
+    assert_eq!(top, 210, "top-level count changed");
 }
 
 #[test]

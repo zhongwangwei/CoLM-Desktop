@@ -9,9 +9,7 @@ MODULE MOD_SnowFraction
 
 ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: snowfraction
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    PUBLIC :: snowfraction_pftwrap
-#endif
 
 
 !-----------------------------------------------------------------------
@@ -82,7 +80,6 @@ CONTAINS
 
    END SUBROUTINE snowfraction
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE snowfraction_pftwrap (ipatch,zlnd,scv,snowdp,wt,sigf,fsno)
 
 !-----------------------------------------------------------------------
@@ -169,7 +166,6 @@ CONTAINS
       ENDIF
 
    END SUBROUTINE snowfraction_pftwrap
-#endif
 
 END MODULE MOD_SnowFraction
 ! ---------- EOP ------------

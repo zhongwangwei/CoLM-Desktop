@@ -223,18 +223,15 @@ CONTAINS
    ! Allocates memory for Lulcc time variant variables
    ! --------------------------------------------------------------------
 
+   USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_LandPatch
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeVariables
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_TimeVariables
    USE MOD_LandUrban
-#endif
 
    IMPLICIT NONE
 
@@ -309,7 +306,6 @@ CONTAINS
             allocate (sum_irrig_count_             (numpatch))
          ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (numpft > 0) THEN
             allocate (tleaf_p_                        (numpft))
             allocate (ldew_p_                         (numpft))
@@ -334,9 +330,7 @@ CONTAINS
             allocate (o3uptakesha_p_                  (numpft))
             ! End allocate Ozone Stress Variables
          ENDIF
-#endif
 
-#ifdef URBAN_MODEL
          IF (numurban > 0) THEN
             allocate (fwsun_                        (numurban))
             allocate (dfwsun_                       (numurban))
@@ -414,23 +408,19 @@ CONTAINS
             allocate (tafu_                         (numurban))
             allocate (urb_green_                    (numurban))
          ENDIF
-#endif
       ENDIF
    END SUBROUTINE allocate_LulccTimeVariables
 
 
    SUBROUTINE SAVE_LulccTimeVariables
 
+   USE MOD_Namelist
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Vars_Global
    USE MOD_Vars_TimeVariables
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeVariables
-#endif
-#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_TimeVariables
-#endif
 
    IMPLICIT NONE
 
@@ -505,7 +495,7 @@ IF (DEF_USE_IRRIGATION) THEN
          sum_irrig_count_              = sum_irrig_count
 ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          tleaf_p_      = tleaf_p
          ldew_p_       = ldew_p
          ldew_rain_p_  = ldew_rain_p
@@ -531,9 +521,9 @@ IF(DEF_USE_OZONESTRESS)THEN
          o3uptakesha_p_  = o3uptakesha_p
          ! End allocate Ozone Stress Variables
 ENDIF
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
          fwsun_        = fwsun
          dfwsun_       = dfwsun
 
@@ -609,7 +599,7 @@ ENDIF
          t_wall_       = t_wall
          tafu_         = tafu
          urb_green_    = urb_green
-#endif
+ENDIF
       ENDIF
 
    END SUBROUTINE SAVE_LulccTimeVariables
@@ -617,6 +607,7 @@ ENDIF
 
    SUBROUTINE REST_LulccTimeVariables
 
+   USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_Precision
    USE MOD_Vars_Global
@@ -626,15 +617,11 @@ ENDIF
    USE MOD_Vars_TimeInvariants
    USE MOD_Vars_TimeVariables
    USE MOD_Lulcc_Vars_TimeInvariants
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_TimeVariables
    USE MOD_LandUrban
-#endif
 
    IMPLICIT NONE
 
@@ -717,7 +704,6 @@ ENDIF
                         CYCLE
                      ENDIF
 
-#ifdef URBAN_MODEL
                      IF (numurban > 0) THEN
                         u = patch2urban (np )
                         u_= patch2urban_(np_)
@@ -737,7 +723,6 @@ ENDIF
                            ENDIF
                         ENDIF
                      ENDIF
-#endif
                      ! otherwise, set patch value
                      ! only for the same patch type
                      z_sno       (:,np) = z_sno_       (:,np_)
@@ -815,7 +800,7 @@ IF(DEF_USE_IRRIGATION)THEN
                      sum_irrig_count (np) = sum_irrig_count_ (np_)
 ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 IF (patchtype(np)==0 .and. patchtype_(np_)==0) THEN
                      ip = patch_pft_s (np )
                      ip_= patch_pft_s_(np_)
@@ -873,9 +858,9 @@ ENDIF
                      pe       = patch_pft_e(np)
                      ldew(np) = sum( ldew_p(ps:pe)*pftfrac(ps:pe) )
 ENDIF
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
 IF (patchclass(np)==URBAN .and. patchclass_(np_)==URBAN) THEN
 
                      ! u = patch2urban (np )
@@ -993,7 +978,7 @@ IF (patchclass(np)==URBAN .and. patchclass_(np_)==URBAN) THEN
                      scv(np) = scv_roof(u)*froof(u) + scv_gper(u)*(1-froof(u))*fgper(u) &
                              + scv_gimp(u)*(1-froof(u))*(1-fgper(u))
 ENDIF
-#endif
+ENDIF
                      np = np + 1
                      np_= np_+ 1
                   ENDDO
@@ -1014,6 +999,7 @@ ENDIF
 
    SUBROUTINE deallocate_LulccTimeVariables
 
+   USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_Lulcc_Vars_TimeInvariants, only: numpatch_, numpft_, numpc_, numurban_
 
@@ -1092,7 +1078,7 @@ ENDIF
 
          ENDIF
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          IF (numpft_ > 0) THEN
             deallocate (tleaf_p_         )
             deallocate (ldew_p_          )
@@ -1117,9 +1103,9 @@ ENDIF
             deallocate (o3uptakesha_p_   )
             ! End allocate Ozone Stress Variables
          ENDIF
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
          IF (numurban_ > 0) THEN
             deallocate (fwsun_           )
             deallocate (dfwsun_          )
@@ -1197,7 +1183,7 @@ ENDIF
             deallocate (tafu_            )
             deallocate (urb_green_       )
          ENDIF
-#endif
+ENDIF
       ENDIF
 
    END SUBROUTINE deallocate_LulccTimeVariables

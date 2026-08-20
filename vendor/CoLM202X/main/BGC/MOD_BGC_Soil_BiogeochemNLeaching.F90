@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 
 MODULE MOD_BGC_Soil_BiogeochemNLeaching
 
@@ -164,4 +163,3 @@ CONTAINS
    END SUBROUTINE SoilBiogeochemNLeaching
 
 END MODULE MOD_BGC_Soil_BiogeochemNLeaching
-#endif

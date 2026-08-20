@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 MODULE MOD_BGC_Veg_CNPhenology
 
 !--------------------
@@ -1612,4 +1611,3 @@ CONTAINS
 #endif
 
 END MODULE MOD_BGC_Veg_CNPhenology
-#endif

@@ -15,16 +15,14 @@ CONTAINS
    SUBROUTINE pct_readin (dir_landdata, lc_year)
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_RangeCheck
+   USE MOD_Namelist, only: DEF_USE_RangeCheck, DEF_USE_PFT, DEF_USE_PC
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
    USE MOD_LandPatch
    USE MOD_RangeCheck
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
-#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -38,7 +36,7 @@ CONTAINS
    integer :: npatch, ipatch
 
       write(cyear,'(i4.4)') lc_year
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef SinglePoint
       IF (patchtypes(SITE_landtype) /= 0) RETURN
 #endif
@@ -84,7 +82,7 @@ CONTAINS
 #endif
       ENDIF
 
-#endif
+ENDIF
 
       IF (allocated(sumpct)) deallocate(sumpct)
 

@@ -32,12 +32,8 @@ MODULE MOD_SrfdataDiag
    type(spatial_mapping_type) :: m_elm2diag
 
    type(spatial_mapping_type) :: m_patch2diag
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    type(spatial_mapping_type) :: m_pft2diag
-#endif
-#ifdef URBAN_MODEL
    type(spatial_mapping_type) :: m_urb2diag
-#endif
 
    PUBLIC :: srfdata_diag_init
    PUBLIC :: srfdata_map_and_write
@@ -52,17 +48,14 @@ CONTAINS
    SUBROUTINE srfdata_diag_init (dir_landdata, lc_year)
 
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_URBAN_RUN
    USE MOD_LandElm
    USE MOD_LandPatch
 #ifdef CROP
    USE MOD_LandCrop
 #endif
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
 
    IMPLICIT NONE
 
@@ -87,13 +80,13 @@ CONTAINS
 
       CALL m_patch2diag%build_arealweighted (gdiag, landpatch)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL m_pft2diag%build_arealweighted (gdiag, landpft)
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       CALL m_urb2diag%build_arealweighted (gdiag, landurban)
-#endif
+ENDIF
 
       srf_data_id = 666
 

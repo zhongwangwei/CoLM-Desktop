@@ -246,16 +246,15 @@ MODULE MOD_Const_PFT
          /)
 
    ! reflectance of green leaf in visible band
-#if (defined LULC_IGBP_PC)
-   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
-   real(r8), parameter :: rhol_vis_p(0:N_PFT+N_CFT-1) &
+   ! Used to be two compile-time-selected `parameter` arrays (LULC_IGBP_PC
+   ! vs. not), same shape, values differing only for the PC 3D radiative
+   ! transfer scheme (Dong et al., 2021 measured data). A `parameter` can't
+   ! be picked at runtime, so -- same pattern as vmax25_p/lambda_p above
+   ! (Campbell vs. vanGenuchten) -- this is a plain module array filled in
+   ! by Init_PFT_Const below once DEF_USE_PC is known.
+   real(r8), parameter :: rhol_vis_p_pc(0:N_PFT+N_CFT-1) &
       = (/0.110,  0.070,  0.070,  0.070,  0.100,  0.110,  0.100,  0.100&
         , 0.100,  0.070,  0.100,  0.100,  0.110,  0.110,  0.110,  0.110&
-#else
-   real(r8), parameter :: rhol_vis_p(0:N_PFT+N_CFT-1) &
-      = (/0.110,  0.070,  0.070,  0.070,  0.100,  0.100,  0.100,  0.100&
-        , 0.100,  0.070,  0.100,  0.100,  0.110,  0.110,  0.110,  0.110&
-#endif
 #ifdef CROP
         , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
         , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
@@ -267,6 +266,21 @@ MODULE MOD_Const_PFT
         , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110    &
 #endif
          /)
+   real(r8), parameter :: rhol_vis_p_default(0:N_PFT+N_CFT-1) &
+      = (/0.110,  0.070,  0.070,  0.070,  0.100,  0.100,  0.100,  0.100&
+        , 0.100,  0.070,  0.100,  0.100,  0.110,  0.110,  0.110,  0.110&
+#ifdef CROP
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
+        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110    &
+#endif
+         /)
+   real(r8) :: rhol_vis_p(0:N_PFT+N_CFT-1)
 
    ! reflectance of dead leaf in visible band
    real(r8), parameter :: rhos_vis_p(0:N_PFT+N_CFT-1) &
@@ -285,16 +299,10 @@ MODULE MOD_Const_PFT
          /)
 
    ! reflectance of green leaf in near infrared band
-#if (defined LULC_IGBP_PC)
-   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
-   real(r8), parameter :: rhol_nir_p(0:N_PFT+N_CFT-1) &
+   ! Runtime-selected the same way as rhol_vis_p above.
+   real(r8), parameter :: rhol_nir_p_pc(0:N_PFT+N_CFT-1) &
       = (/0.350,  0.360,  0.370,  0.360,  0.450,  0.460,  0.450,  0.420&
         , 0.450,  0.350,  0.450,  0.450,  0.350,  0.350,  0.350,  0.350&
-#else
-   real(r8), parameter :: rhol_nir_p(0:N_PFT+N_CFT-1) &
-      = (/0.350,  0.350,  0.350,  0.350,  0.450,  0.450,  0.450,  0.450&
-        , 0.450,  0.350,  0.450,  0.450,  0.350,  0.350,  0.350,  0.350&
-#endif
 #ifdef CROP
         , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
         , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
@@ -306,6 +314,21 @@ MODULE MOD_Const_PFT
         , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350    &
 #endif
          /)
+   real(r8), parameter :: rhol_nir_p_default(0:N_PFT+N_CFT-1) &
+      = (/0.350,  0.350,  0.350,  0.350,  0.450,  0.450,  0.450,  0.450&
+        , 0.450,  0.350,  0.450,  0.450,  0.350,  0.350,  0.350,  0.350&
+#ifdef CROP
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
+        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350    &
+#endif
+         /)
+   real(r8) :: rhol_nir_p(0:N_PFT+N_CFT-1)
 
    ! reflectance of dead leaf in near infrared band
    real(r8), parameter :: rhos_nir_p(0:N_PFT+N_CFT-1) &
@@ -324,16 +347,10 @@ MODULE MOD_Const_PFT
          /)
 
    ! transmittance of green leaf in visible band
-#if (defined LULC_IGBP_PC)
-   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
-   real(r8), parameter :: taul_vis_p(0:N_PFT+N_CFT-1) &
+   ! Runtime-selected the same way as rhol_vis_p above.
+   real(r8), parameter :: taul_vis_p_pc(0:N_PFT+N_CFT-1) &
       = (/0.050,  0.050,  0.050,  0.050,  0.050,  0.060,  0.050,  0.060&
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-#else
-   real(r8), parameter :: taul_vis_p(0:N_PFT+N_CFT-1) &
-      = (/0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-#endif
 #ifdef CROP
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
@@ -345,6 +362,21 @@ MODULE MOD_Const_PFT
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050    &
 #endif
          /)
+   real(r8), parameter :: taul_vis_p_default(0:N_PFT+N_CFT-1) &
+      = (/0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+#ifdef CROP
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050    &
+#endif
+         /)
+   real(r8) :: taul_vis_p(0:N_PFT+N_CFT-1)
 
    ! transmittance of dead leaf in visible band
    real(r8), parameter :: taus_vis_p(0:N_PFT+N_CFT-1) &
@@ -363,16 +395,10 @@ MODULE MOD_Const_PFT
          /)
 
    ! transmittance of green leaf in near infrared band
-#if (defined LULC_IGBP_PC)
-   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
-   real(r8), parameter :: taul_nir_p(0:N_PFT+N_CFT-1) &
+   ! Runtime-selected the same way as rhol_vis_p above.
+   real(r8), parameter :: taul_nir_p_pc(0:N_PFT+N_CFT-1) &
       = (/0.340,  0.280,  0.290,  0.380,  0.250,  0.330,  0.250,  0.430&
         , 0.400,  0.100,  0.250,  0.250,  0.340,  0.340,  0.340,  0.340&
-#else
-   real(r8), parameter :: taul_nir_p(0:N_PFT+N_CFT-1) &
-      = (/0.340,  0.100,  0.100,  0.100,  0.250,  0.250,  0.250,  0.250&
-        , 0.250,  0.100,  0.250,  0.250,  0.340,  0.340,  0.340,  0.340&
-#endif
 #ifdef CROP
         , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
         , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
@@ -384,6 +410,21 @@ MODULE MOD_Const_PFT
         , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340    &
 #endif
          /)
+   real(r8), parameter :: taul_nir_p_default(0:N_PFT+N_CFT-1) &
+      = (/0.340,  0.100,  0.100,  0.100,  0.250,  0.250,  0.250,  0.250&
+        , 0.250,  0.100,  0.250,  0.250,  0.340,  0.340,  0.340,  0.340&
+#ifdef CROP
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
+        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340    &
+#endif
+         /)
+   real(r8) :: taul_nir_p(0:N_PFT+N_CFT-1)
 
    ! transmittance of dead leaf in near infrared band
    real(r8), parameter :: taus_nir_p(0:N_PFT+N_CFT-1) &
@@ -1704,7 +1745,7 @@ CONTAINS
 
    SUBROUTINE Init_PFT_Const
 
-   USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL
+   USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL, DEF_USE_PC
    IMPLICIT NONE
 
       ! vmax25_p / lambda_p: two vegetation parameters "temporarily tuned
@@ -1776,6 +1817,22 @@ CONTAINS
                 ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000.&
 #endif
                 /)
+      ENDIF
+
+      ! rhol_vis_p/rhol_nir_p/taul_vis_p/taul_nir_p: leaf optical properties
+      ! that differ between the PC 3D radiative transfer scheme (Dong et
+      ! al., 2021 measured data) and the two-stream scheme used by LCT/PFT
+      ! -- see the declarations above for why they can't stay `parameter`.
+      IF (DEF_USE_PC) THEN
+         rhol_vis_p = rhol_vis_p_pc
+         rhol_nir_p = rhol_nir_p_pc
+         taul_vis_p = taul_vis_p_pc
+         taul_nir_p = taul_nir_p_pc
+      ELSE
+         rhol_vis_p = rhol_vis_p_default
+         rhol_nir_p = rhol_nir_p_default
+         taul_vis_p = taul_vis_p_default
+         taul_nir_p = taul_nir_p_default
       ENDIF
 
       rho_p(1,1,:) = rhol_vis_p(:)

@@ -38,9 +38,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
    USE MOD_SrfdataDiag
 
    IMPLICIT NONE
@@ -133,18 +131,18 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 ! ... global plant leaf area index
 ! ................................................
 
-#if (defined LULC_USGS || defined LULC_IGBP)
+IF (DEF_USE_LCT) THEN
       ! add time variation of LAI
       IF (DEF_LAI_MONTHLY) THEN
          ! monthly average LAI
          ! if use lai change, LAI data of simulation start year and end year will be made
          ! if do not use lai change, only make LAI data of defined lc year
-#ifdef LULCC
+IF (DEF_USE_LULCC) THEN
          ! 07/2023, NOTE: if defined LULCC, only one year (lc_year) lai processed.
          start_year = lc_year
          end_year   = lc_year
          ntime      = 12
-#else
+ELSE
          IF (DEF_LAI_CHANGE_YEARLY) THEN
             start_year = max(simulation_lai_year_start, DEF_LAI_START_YEAR )
             start_year = min(start_year,                DEF_LAI_END_YEAR   )
@@ -156,7 +154,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
             end_year   = lc_year
             ntime      = 12
          ENDIF
-#endif
+ENDIF
       ! 8-day LAI
       ELSE
          start_year = max(simulation_lai_year_start, DEF_LAI_START_YEAR)
@@ -375,20 +373,20 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
             first_call_SAI_patch = .true.
          ENDDO
       ENDIF
-#endif
+ENDIF
 
 ! For both PFT and PC run LAI!!!!!
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          ! add time variation of LAI
          ! monthly average LAI
          ! if use lai change, LAI data of simulation start year and end year will be made
          ! if not use lai change, only make LAI data of defined lc year
-#ifdef LULCC
+IF (DEF_USE_LULCC) THEN
          ! 07/2023, NOTE: if defined LULCC, only one year (lc_year) lai processed.
          start_year = lc_year
          end_year   = lc_year
          ntime      = 12
-#else
+ELSE
       IF (DEF_LAI_CHANGE_YEARLY) THEN
          start_year = max(simulation_lai_year_start, DEF_LAI_START_YEAR )
          start_year = min(start_year,                DEF_LAI_END_YEAR   )
@@ -400,7 +398,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
          end_year   = lc_year
          ntime      = 12
       ENDIF
-#endif
+ENDIF
 
       IF (p_is_io) THEN
          CALL allocate_block_data (gridlai, pftLSAI, N_PFT_modis, lb1 = 0)
@@ -748,6 +746,6 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
          IF (allocated(area_one   )) deallocate(area_one   )
 
       ENDIF
-#endif
+ENDIF
 
 END SUBROUTINE Aggregation_LAI

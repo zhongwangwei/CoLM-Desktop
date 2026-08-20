@@ -1,7 +1,6 @@
 #include <define.h>
 
 MODULE MOD_BGC_Vars_TimeVariables
-#ifdef BGC
 !---------------------------------------------------------------------------------------------------------
 ! !DESCRIPTION
 ! Define, allocate, and deallocate biogeochemical state variables at patch level.
@@ -1532,6 +1531,5 @@ CONTAINS
 
    END SUBROUTINE check_BGCTimeVariables
 
-#endif
 END MODULE MOD_BGC_Vars_TimeVariables
 ! ------ EOP --------------

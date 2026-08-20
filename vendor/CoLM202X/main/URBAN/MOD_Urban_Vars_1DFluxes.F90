@@ -1,6 +1,5 @@
 #include <define.h>
 
-#if (defined URBAN_MODEL)
 MODULE MOD_Urban_Vars_1DFluxes
 
 !-----------------------------------------------------------------------
@@ -151,5 +150,4 @@ CONTAINS
    END SUBROUTINE set_1D_UrbanFluxes
 
 END MODULE MOD_Urban_Vars_1DFluxes
-#endif
 ! ---------- EOP ------------

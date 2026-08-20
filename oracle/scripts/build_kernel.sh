@@ -23,10 +23,29 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # MOD_Namelist.F90, default .false.) -- every main/TRACER module file is
 # always compiled in, so create_defineh.bash no longer takes that argument
 # either.
+#
+# Same story again for the subgrid structure (LULC_IGBP_PFT/LULC_IGBP_PC,
+# used to be part of the old 2nd argument), URBAN_MODEL (used to be a 3rd
+# argument, URBANON/URBANOFF) and BGC (used to be a 5th argument,
+# BGCON/BGCOFF): all runtime switches now (DEF_USE_PFT/DEF_USE_PC,
+# DEF_URBAN_RUN, DEF_USE_BGC -- MOD_Namelist.F90). main/BGC/, main/URBAN/,
+# main/LULCC/ and the PFT/PC subgrid modules are always compiled in, so
+# create_defineh.bash's 2nd argument only picks land *classification* now
+# (LULC_USGS/LULC_IGBP -- still a real compile-time choice, see that
+# script's header comment and docs/plan-macro-runtime.md for why), and the
+# URBANON/OFF and BGCON/OFF argument slots are gone entirely.
+#
+# The three presets below therefore now compile to the SAME define.h --
+# that is the point of this whole refactor ("一个二进制覆盖所有单点配置"):
+# what used to be three separate kernels is genuinely one binary, and
+# "bgc"/"urban" differ from "default" only in which case.nml a test points
+# them at (DEF_USE_BGC/DEF_USE_PFT/DEF_URBAN_RUN = .true.), not in what
+# gets compiled. The preset names are kept for the test scripts that
+# reference them by name.
 case "$PRESET" in
-  default) ARGS=(SinglePoint LULC_IGBP     URBANOFF CaMaOFF BGCOFF CROPOFF) ;;
-  bgc)       ARGS=(SinglePoint LULC_IGBP_PFT URBANOFF CaMaOFF BGCON  CROPOFF) ;;
-  urban)     ARGS=(SinglePoint LULC_IGBP     URBANON  CaMaOFF BGCOFF CROPOFF) ;;
+  default) ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
+  bgc)     ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
+  urban)   ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
@@ -105,14 +124,22 @@ EFFECTIVE=$(echo "$MACRO_PROBE" | awk '$1=="#define" && $2 !~ /^(_|__)/ && NF==2
 is_effective() { printf '%s\n' "$EFFECTIVE" | grep -qxF "$1"; }
 
 # 预设参数值 -> 它应该打开的宏名。以 create_defineh.bash 的实际映射为准
-# （该脚本按位置取 $1..$7，每个位置各自 case 出一对 #define/#undef——
+# （该脚本按位置取 $1..$4，每个位置各自 case 出一对 #define/#undef——
 # 去读那个脚本才知道，不能靠猜）。这里只列「要求打开」的取值，OFF 类
-# 取值（BGCOFF、CROPOFF……）不隐含任何宏，用不着查。
+# 取值（CROPOFF……）不隐含任何宏，用不着查。
 #
 # 没有 Campbell/vanGenu 条目——土壤水力方案改成运行时开关之后，
 # create_defineh.bash 不再吃这个参数，两条物理路径始终一起编进去。
 # 也没有 TRACERON 条目——TRACER 同样改成运行时开关了（DEF_USE_TRACER），
 # create_defineh.bash 不再吃这个参数，main/TRACER/ 底下的模块始终编进去。
+# 也没有 LULC_IGBP_PFT/LULC_IGBP_PC/URBANON/BGCON 条目——同一批理由：
+# 次网格结构（DEF_USE_PFT/DEF_USE_PC）、URBAN_MODEL（DEF_URBAN_RUN）、
+# BGC（DEF_USE_BGC）都改成运行时开关了，main/BGC/、main/URBAN/、
+# main/LULCC/ 与 PFT/PC 次网格模块始终编进去，create_defineh.bash 的
+# 第 2 个参数现在只选地类分类（LULC_USGS/LULC_IGBP，仍是编译期选择，
+# 理由见 create_defineh.bash 的头注释与 docs/plan-macro-runtime.md）。
+# URBAN_MODEL 现在随第 2 个参数（地类分类）无条件 #define，不再需要
+# 单独核对「有没有打开」。
 macro_for_arg() {
   case "$1" in
     GRID) echo GRIDBASED ;;
@@ -121,11 +148,7 @@ macro_for_arg() {
     SinglePoint) echo SinglePoint ;;
     LULC_USGS) echo LULC_USGS ;;
     LULC_IGBP) echo LULC_IGBP ;;
-    LULC_IGBP_PFT) echo LULC_IGBP_PFT ;;
-    LULC_IGBP_PC) echo LULC_IGBP_PC ;;
-    URBANON) echo URBAN_MODEL ;;
     CaMaON) echo CaMa_Flood ;;
-    BGCON) echo BGC ;;
     CROPON) echo CROP ;;
     *) : ;;
   esac
@@ -135,36 +158,29 @@ for arg in "${ARGS[@]}"; do
   want=$(macro_for_arg "$arg")
   [ -z "$want" ] && continue
   if ! is_effective "$want"; then
-    case "$want" in
-      BGC)
-        cat >&2 <<MSG
-$arg was requested but BGC is not in effect -- define.h turns it off
-unless LULC_IGBP_PFT or LULC_IGBP_PC is defined (see the "Conflicts"
-comment for BGC in create_defineh.bash, which is what generates the
-include/define.h actually compiled here). The kernel would build fine
-and run fine, and silently have no biogeochemistry.
-MSG
-        ;;
-      CROP)
-        cat >&2 <<MSG
-$arg was requested but CROP is not in effect -- define.h turns it off
-unless BGC is defined (see the "Conflicts" comment for CROP), and BGC
-itself turns off unless LULC_IGBP_PFT or LULC_IGBP_PC is defined. The
-kernel would build fine and run fine, and silently have no crop model.
-MSG
-        ;;
-      *)
-        echo "$arg was requested but $want is not in effect after" >&2
-        echo "define.h's conditional #undef blocks. Context from the" >&2
-        echo "generated include/define.h:" >&2
-        grep -n -B2 -A4 "$want\b" include/define.h >&2 || true
-        echo "The kernel would build fine and run fine while silently" >&2
-        echo "missing $want." >&2
-        ;;
-    esac
+    echo "$arg was requested but $want is not in effect after" >&2
+    echo "define.h's conditional #undef blocks. Context from the" >&2
+    echo "generated include/define.h:" >&2
+    grep -n -B2 -A4 "$want\b" include/define.h >&2 || true
+    echo "The kernel would build fine and run fine while silently" >&2
+    echo "missing $want." >&2
     exit 3
   fi
 done
+
+# URBAN_MODEL / BGC / LULCC no longer appear in $EFFECTIVE at all (they are
+# unconditional #define URBAN_MODEL in create_defineh.bash, and BGC/LULCC
+# don't appear in the generated define.h anymore -- see that script). This
+# self-check used to also confirm URBAN_MODEL/BGC took effect for the
+# "urban"/"bgc" presets specifically; that check is gone along with the
+# macros themselves. What actually turns urban/bgc physics on now is the
+# case.nml each preset's test points the kernel at (DEF_URBAN_RUN,
+# DEF_USE_BGC) -- not anything checkable from define.h at build time.
+if ! is_effective URBAN_MODEL; then
+  echo "URBAN_MODEL is not in effect -- create_defineh.bash should" >&2
+  echo "unconditionally #define it now; has that script regressed?" >&2
+  exit 3
+fi
 
 # Windows 上给 CoLM 建目录的路径**加引号**。
 #

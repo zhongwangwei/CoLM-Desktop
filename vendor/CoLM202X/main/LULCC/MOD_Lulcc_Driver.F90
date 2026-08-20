@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef LULCC
 MODULE MOD_Lulcc_Driver
 
    USE MOD_Precision
@@ -207,5 +206,4 @@ MODULE MOD_Lulcc_Driver
    END SUBROUTINE LulccDriver
 
 END MODULE MOD_Lulcc_Driver
-#endif
 ! ---------- EOP ------------

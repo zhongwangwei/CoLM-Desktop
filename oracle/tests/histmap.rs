@@ -64,16 +64,55 @@ fn the_static_map_never_misses_a_variable_that_was_actually_written() {
 }
 
 #[test]
-fn the_only_over_prediction_is_the_four_runtime_gated_ones() {
-    // 多报的必须**恰好**是那 4 个有运行时条件的。多出别的，说明宏闸门
-    // 有一处判错了，而这条测试会指名道姓。
+fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
+    // 多报的必须**全部**能用运行时条件解释——每一个都必须在闸门表里挂着
+    // `runtime` 条件（第二道闸门），而不是宏闸门（第一道）判错了放行了
+    // 不该放行的变量。多出一个没有运行时条件的，就是宏闸门的 bug。
+    //
+    // 改造前这里是硬编码的 4 个名字（dz_lake/qcharge/t2m_wmo/xy_hpbl）。
+    // LULC/BGC/CROP/URBAN/LULCC 那组改造把 BGC 与 URBAN_MODEL 从编译期宏
+    // 改成运行时开关（DEF_USE_BGC/DEF_URBAN_RUN，默认都是 .false.，这份
+    // 黄金算例也没有打开）之后，`main/BGC/`、`main/URBAN/` 始终编译进去，
+    // 于是它们那两大块变量全部从「宏挡住」变成「宏放行、运行时条件挡住」，
+    // 多报数从 4 涨到 227——不是宏判错了，是如实反映了新架构：这份黄金
+    // 算例的内核**编译期就有** BGC/URBAN 那些变量的写出点，只是这次运行
+    // 没有打开对应的运行时开关。逐一列出 227 个名字不利于维护，所以这里
+    // 只验总数、验每一个都真的挂着运行时条件，并挑几个代表性的验条件原文。
     let macros: BTreeSet<&str> = WATERHEAT.into_iter().collect();
     let golden = golden_vars();
     let over: Vec<&str> = colm_hist::writable(&macros)
         .into_iter()
         .filter(|v| !golden.contains(*v))
         .collect();
-    assert_eq!(over, ["dz_lake", "qcharge", "t2m_wmo", "xy_hpbl"]);
+    assert_eq!(over.len(), 227);
+
+    let all = colm_hist::all();
+    let runtime_of = |n: &str| all.iter().find(|v| v.name == n).and_then(|v| v.runtime);
+    let unexplained: Vec<&str> = over
+        .iter()
+        .filter(|n| runtime_of(n).is_none())
+        .cloned()
+        .collect();
+    assert!(
+        unexplained.is_empty(),
+        "these over-predicted variables have no runtime condition at all \
+         -- the macro gate let them through by mistake: {unexplained:?}"
+    );
+
+    // 改造前就有的 4 个，条件原文不受这组改造影响。
+    for n in ["dz_lake", "qcharge", "t2m_wmo", "xy_hpbl"] {
+        assert!(over.contains(&n), "{n} should still be over-predicted");
+    }
+    // 新涨出来的：BGC 的碳氮池变量……
+    for n in ["leafc", "gpp", "totvegc"] {
+        assert!(over.contains(&n), "{n} should be over-predicted (BGC off)");
+        assert_eq!(runtime_of(n), Some("DEF_USE_BGC"));
+    }
+    // ……与 URBAN_MODEL 的城市能量通量变量。
+    for n in ["t_roof", "fsenroof", "fhac"] {
+        assert!(over.contains(&n), "{n} should be over-predicted (URBAN_MODEL off)");
+        assert_eq!(runtime_of(n), Some("DEF_URBAN_RUN"));
+    }
 }
 
 #[test]

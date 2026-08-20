@@ -1,5 +1,4 @@
 #include <define.h>
-#ifdef BGC
 
 MODULE MOD_BGC_CNZeroFluxes
 
@@ -835,4 +834,3 @@ CONTAINS
    END SUBROUTINE CNZeroFluxes
 
 END MODULE MOD_BGC_CNZeroFluxes
-#endif

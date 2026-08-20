@@ -45,12 +45,11 @@ CONTAINS
    SUBROUTINE hist_gridded_init (dir_hist, lulcc_call)
 
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_URBAN_RUN
    USE MOD_Vars_Global
    USE MOD_Block
    USE MOD_LandPatch
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
    USE MOD_Vars_1DAccFluxes
    USE MOD_Forcing, only: gforc
 #ifdef SinglePoint
@@ -75,10 +74,10 @@ CONTAINS
       IF (present(lulcc_call)) CALL mp2g_hist%forc_free_mem
       CALL mp2g_hist%build_arealweighted (ghist, landpatch)
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
       IF (present(lulcc_call)) CALL mp2g_hist_urb%forc_free_mem
       CALL mp2g_hist_urb%build_arealweighted (ghist, landurban)
-#endif
+ENDIF
 
       IF (p_is_io) THEN
          CALL allocate_block_data (ghist, landfraction)

@@ -6,7 +6,6 @@
 ! DEF_USE_TRACER at the provider-registration call site
 ! (register_all_tracer_providers, via tracer_lifecycle_init <-
 ! land_tracer_init, called from CoLM.F90).
-#ifdef BGC
 
 module MOD_Tracer_Reactive_Methane_Physics
     !=======================================================================
@@ -3894,5 +3893,4 @@ contains
 		end do
 	end subroutine split_ch4_o2_phases
 END MODULE MOD_Tracer_Reactive_Methane_Physics
-#endif
 ! --------- EOP ----------

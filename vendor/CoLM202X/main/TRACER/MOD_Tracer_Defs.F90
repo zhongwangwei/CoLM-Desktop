@@ -746,6 +746,7 @@ CONTAINS
 
    SUBROUTINE validate_tracer_descriptor (itrc)
       USE MOD_SPMD_Task, only: p_is_master, CoLM_stop
+      USE MOD_Namelist, only: DEF_USE_BGC
       integer, intent(in) :: itrc
       logical :: supported_unit
 
@@ -869,14 +870,16 @@ CONTAINS
             'species-owned state requires unit_kind=species_owned')
       ENDIF
 
-#ifndef BGC
+      ! BGC used to be a compile-time macro; "requires compiling with BGC"
+      ! is a runtime check now (DEF_USE_BGC, MOD_Namelist.F90).
+      IF (.not. DEF_USE_BGC) THEN
       IF ((trim(tracer_upper(tracers(itrc)%name)) == 'CH4' .or. &
            trim(tracer_upper(tracers(itrc)%name)) == 'METHANE') .and. &
           tracers(itrc)%state_owner == STATE_OWNER_PROVIDER) THEN
          CALL tracer_descriptor_error(itrc, 'unit_kind', &
-            'species-owned CH4 requires compiling with BGC')
+            'species-owned CH4 requires DEF_USE_BGC = .true.')
       ENDIF
-#endif
+      ENDIF
 
    CONTAINS
 

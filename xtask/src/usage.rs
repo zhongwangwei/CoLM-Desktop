@@ -23,14 +23,31 @@ use anyhow::Result;
 /// `DEF_TRACER_*` 字段现在在每个内核下都可设，用户自己用运行时开关
 /// `DEF_USE_TRACER`（MOD_Namelist.F90）决定要不要用，那不是这张表管的事：
 /// 这张表只记录「编译期这个字段有没有意义」，不记录「运行时它生效吗」。
+///
+/// **同样没有 `main/BGC/` 条目。** LULC/BGC/CROP/URBAN/LULCC 那一组改造把
+/// BGC 也变成运行时开关了（`DEF_USE_BGC`，MOD_Namelist.F90，默认
+/// `.false.`）——`main/BGC/` 下的模块永远编译进去，`BGC` 这个宏本身从
+/// `include/define.h`（`create_defineh.bash`）里彻底消失，这个目录同样
+/// 不再暗示任何 `requires`。`main/URBAN/` 同理不在这里也不在 `BY_NAME`
+/// 里——见下面 `BY_NAME` 的注释。`main/LULCC/` 从来没进过这张表（LULCC
+/// 从来没被任何内核预设打开过），现在也一样——`DEF_USE_LULCC` 不需要
+/// 任何宏。`CROP` 与 `LULC_USGS`/`LULC_IGBP` 不在这张表里，因为它们
+/// **仍然是**编译期宏（N_PFT/N_CFT、N_land_classification 这类
+/// `parameter` 数组尺寸不同，见 docs/plan-macro-runtime.md）——它们该有
+/// 的 `requires` 由下面的通用 `#ifdef` 扫描直接抓到，不需要目录级近似。
 const SUBSYSTEMS: &[(&str, &str)] = &[
-    ("main/BGC/", "BGC"),
     ("main/DA/", "DataAssimilation"),
     ("CaMa/", "CaMa_Flood"),
 ];
 
 /// 文件名里带这些词的，归到对应的宏。目录分不出来时用它。
-const BY_NAME: &[(&str, &str)] = &[("Urban", "URBAN_MODEL"), ("Catch", "CATCHMENT")];
+///
+/// **没有 `Urban` 条目。** URBAN_MODEL 同一批改造里也变成运行时开关了
+/// （`DEF_URBAN_RUN`，已经存在，不再被 `#ifdef URBAN_MODEL` 强制赋值）——
+/// `main/URBAN/` 下的文件名依然带 `Urban`，但那不再对应任何编译期宏，
+/// 用文件名猜测只会把 `DEF_URBAN_*` 字段错误地标成「需要 URBAN_MODEL
+/// 才有意义」，而实际上它们在每个内核下都可设，运行时开关决定要不要用。
+const BY_NAME: &[(&str, &str)] = &[("Catch", "CATCHMENT")];
 
 /// 词法扫描看不出、但确实只在某个宏下才有意义的字段。
 ///
@@ -38,17 +55,15 @@ const BY_NAME: &[(&str, &str)] = &[("Urban", "URBAN_MODEL"), ("Catch", "CATCHMEN
 /// 第三列是 `文件:行`，`crates/colm-schema/tests/curated.rs` 会去读那一行，
 /// 确认它仍然包含所声明的守护。上游把那个 `#ifdef` 挪走时测试红，
 /// 而不是界面悄悄多显示一个没用的字段。
-pub const CURATED: &[(&str, &str, &str, &str)] = &[
-    // 字段, 需要的宏, 出处文件, 那一行必须包含的文本
-    (
-        "DEF_URBAN_type_scheme",
-        "URBAN_MODEL",
-        // 它的四处用法一处都不在 #ifdef URBAN_MODEL 里；真正的守护是这里 ——
-        // landurban_build 是唯一的调用者，而它被 #ifdef URBAN_MODEL 包着。
-        "mksrfdata/MKSRFDATA.F90",
-        "CALL landurban_build",
-    ),
-];
+///
+/// **目前是空的。** 原先唯一的一条——`DEF_URBAN_type_scheme` 需要
+/// `URBAN_MODEL`，出处是 `landurban_build` 的调用点——在 LULC/BGC/CROP/
+/// URBAN/LULCC 那组改造里失效了：`landurban_build` 的调用点从
+/// `#ifdef URBAN_MODEL` 改成了运行时 `IF (DEF_URBAN_RUN) THEN`
+/// （mksrfdata/MKSRFDATA.F90），`URBAN_MODEL` 本身也从 `include/define.h`
+/// 里彻底消失（create_defineh.bash 现在无条件 `#define` 它）。
+/// `DEF_URBAN_type_scheme` 现在在每个内核下都可设，不再需要人工表兜底。
+pub const CURATED: &[(&str, &str, &str, &str)] = &[];
 
 /// 扫出来的两张表。
 #[derive(Default)]

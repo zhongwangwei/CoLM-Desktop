@@ -58,17 +58,14 @@ CONTAINS
    ! Allocates memory for Lulcc time invariant variables
    ! --------------------------------------------------------------------
 
+   USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_LandPatch
    USE MOD_Mesh
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
 
    IMPLICIT NONE
 
@@ -91,20 +88,16 @@ CONTAINS
             allocate (patchtype_                 (numpatch))
             allocate (csol_              (nl_soil,numpatch))
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             IF (numpft > 0) THEN
                allocate (pftclass_                 (numpft))
                allocate (patch_pft_s_            (numpatch))
                allocate (patch_pft_e_            (numpatch))
             ENDIF
-#endif
 
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                 allocate (urbclass_              (numurban))
                 allocate (patch2urban_           (numpatch))
             ENDIF
-#endif
          ENDIF
       ENDIF
    END SUBROUTINE allocate_LulccTimeInvariants
@@ -112,6 +105,7 @@ CONTAINS
 
    SUBROUTINE SAVE_LulccTimeInvariants
 
+   USE MOD_Namelist
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
@@ -120,13 +114,9 @@ CONTAINS
    USE MOD_Landpatch
    USE MOD_Landelm
    USE MOD_Mesh
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeInvariants
    USE MOD_LandPFT
-#endif
-#ifdef URBAN_MODEL
    USE MOD_LandUrban
-#endif
 
    IMPLICIT NONE
 
@@ -140,22 +130,18 @@ CONTAINS
             patchtype_        (:) = patchtype        (:)
             csol_           (:,:) = csol           (:,:)
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             IF (numpft > 0) THEN
                numpft_            = numpft
                pftclass_      (:) = pftclass         (:)
                patch_pft_s_   (:) = patch_pft_s      (:)
                patch_pft_e_   (:) = patch_pft_e      (:)
             ENDIF
-#endif
 
-#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                numurban_          = numurban
                urbclass_      (:) = landurban%settyp (:)
                patch2urban_   (:) = patch2urban      (:)
             ENDIF
-#endif
          ENDIF
       ENDIF
 
@@ -165,6 +151,7 @@ CONTAINS
 
 
    SUBROUTINE deallocate_LulccTimeInvariants
+   USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_PixelSet
 ! --------------------------------------------------
@@ -178,20 +165,20 @@ CONTAINS
             deallocate    (patchtype_    )
             deallocate    (csol_         )
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             IF (numpft_ > 0) THEN
                deallocate (pftclass_     )
                deallocate (patch_pft_s_  )
                deallocate (patch_pft_e_  )
             ENDIF
-#endif
+ENDIF
 
-#ifdef URBAN_MODEL
+IF (DEF_URBAN_RUN) THEN
             IF (numurban_ > 0) THEN
                deallocate (urbclass_     )
                deallocate (patch2urban_  )
             ENDIF
-#endif
+ENDIF
          ENDIF
       ENDIF
 

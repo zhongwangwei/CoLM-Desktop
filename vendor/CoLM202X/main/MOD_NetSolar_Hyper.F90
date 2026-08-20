@@ -47,14 +47,12 @@ CONTAINS
 ! !USES:
    USE MOD_Precision
    USE MOD_Vars_Global
-   USE MOD_Namelist, only: DEF_USE_SNICAR
+   USE MOD_Namelist, only: DEF_USE_SNICAR, DEF_USE_PFT, DEF_USE_PC
    USE MOD_TimeManager, only: isgreenwich
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
    USE MOD_Vars_1DPFTFluxes
-#endif
 
    IMPLICIT NONE
 
@@ -160,7 +158,7 @@ CONTAINS
       sabg_snow_lyr(:) = 0.
 
       IF (patchtype == 0) THEN
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
          ps = patch_pft_s(ipatch)
          pe = patch_pft_e(ipatch)
 
@@ -185,7 +183,7 @@ CONTAINS
          ssha(1,2) = sum( ssha_p(1,2,ps:pe)*pftfrac(ps:pe) )
          ssha(2,1) = sum( ssha_p(2,1,ps:pe)*pftfrac(ps:pe) )
          ssha(2,2) = sum( ssha_p(2,2,ps:pe)*pftfrac(ps:pe) )
-#endif
+ENDIF
       ENDIF
 
       IF (forc_sols+forc_soll+forc_solsd+forc_solld > 0.) THEN
@@ -203,7 +201,7 @@ CONTAINS
 
             IF (patchtype == 0) THEN
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
                parsun_p (ps:pe) = forc_sols*ssun_p(1,1,ps:pe) + forc_solsd*ssun_p(1,2,ps:pe)
                parsha_p (ps:pe) = forc_sols*ssha_p(1,1,ps:pe) + forc_solsd*ssha_p(1,2,ps:pe)
@@ -211,7 +209,7 @@ CONTAINS
                                 + forc_soll*ssun_p(2,1,ps:pe) + forc_solld*ssun_p(2,2,ps:pe)
                sabvsha_p(ps:pe) = forc_sols*ssha_p(1,1,ps:pe) + forc_solsd*ssha_p(1,2,ps:pe) &
                                 + forc_soll*ssha_p(2,1,ps:pe) + forc_solld*ssha_p(2,2,ps:pe)
-#endif
+ENDIF
             ENDIF
 
          ELSE                       !lake and ocean

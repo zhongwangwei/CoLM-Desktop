@@ -115,7 +115,6 @@ CONTAINS
    USE MOD_GroundTemperature
    USE MOD_Qsadv
    USE MOD_SoilSurfaceResistance
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_TimeInvariants, only: patchclass
    USE MOD_Vars_TimeVariables, only: &
@@ -124,7 +123,6 @@ CONTAINS
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
    USE MOD_Vars_1DPFTFluxes
-#endif
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
@@ -740,8 +738,7 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
 ENDIF
 
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
-IF (patchtype == 0) THEN
+IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
 
       ps = patch_pft_s(ipatch)
       pe = patch_pft_e(ipatch)
@@ -1189,7 +1186,6 @@ END IF
       deallocate ( raw_trc_p )
 
 ENDIF
-#endif
 
       IF (present(canopy_smelt_mass_th)) canopy_smelt_mass_th = canopy_smelt_mass_local
       IF (present(canopy_frzc_mass_th))  canopy_frzc_mass_th  = canopy_frzc_mass_local

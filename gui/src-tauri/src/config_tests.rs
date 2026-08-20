@@ -236,8 +236,7 @@ fn forcing_namelist_path_is_used_by_colm_and_stays_visible() {
 #[test]
 fn kernel_macros_decide_which_parameters_are_relevant() {
     let default = ["SinglePoint"].into_iter().collect();
-    let urban = ["SinglePoint", "URBAN_MODEL"].into_iter().collect();
-    let bgc = ["SinglePoint", "BGC"].into_iter().collect();
+    let with_da = ["SinglePoint", "DataAssimilation"].into_iter().collect();
 
     let relevant = |name, have| {
         let f = colm_schema::find(name).expect(name);
@@ -245,8 +244,17 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
     };
     assert!(relevant("DEF_CASE_NAME", &default));
     assert!(relevant("DEF_dir_output", &default));
-    assert!(!relevant("DEF_URBAN_RUN", &default));
-    assert!(relevant("DEF_URBAN_RUN", &urban));
-    assert!(!relevant("DEF_USE_CN_INIT", &default));
-    assert!(relevant("DEF_USE_CN_INIT", &bgc));
+    // LULC/BGC/CROP/URBAN/LULCC 那组改造之后：URBAN_MODEL 与 BGC 不再是
+    // 编译期宏（main/URBAN/、main/BGC/ 始终编译进去，DEF_URBAN_RUN/
+    // DEF_USE_BGC 在 MOD_Namelist.F90 里改成运行时开关），所以
+    // `DEF_URBAN_RUN`/`DEF_USE_CN_INIT` 现在在**每个**内核下都相关——
+    // 不再有一个「URBAN_MODEL 没编进去」或「BGC 没编进去」的内核让它们
+    // 变得不相关，用户设了就会在运行时生效（或不生效，那是 DEF_URBAN_RUN/
+    // DEF_USE_BGC 本身的值决定的，不是这个函数管的编译期相关性）。
+    assert!(relevant("DEF_URBAN_RUN", &default));
+    assert!(relevant("DEF_USE_CN_INIT", &default));
+    // DataAssimilation 仍然是真正的编译期宏（这组改造没有碰它），
+    // 用来验证「宏决定相关性」这条机制本身还成立。
+    assert!(!relevant("DEF_DA_TWS", &default));
+    assert!(relevant("DEF_DA_TWS", &with_da));
 }

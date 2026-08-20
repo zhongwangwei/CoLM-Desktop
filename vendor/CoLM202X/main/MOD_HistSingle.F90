@@ -115,9 +115,7 @@ CONTAINS
       USE MOD_SingleSrfData
       USE MOD_NetCDFSerial
       USE MOD_Landpatch, only: numpatch
-#ifdef URBAN_MODEL
       USE MOD_Landurban, only: numurban
-#endif
       IMPLICIT NONE
 
       character (len=*), intent(in) :: filename

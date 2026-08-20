@@ -3186,7 +3186,6 @@ CONTAINS
 
    END SUBROUTINE LEAF_interception_wrap
 
-#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE LEAF_interception_pftwrap (ipatch,deltim,dewmx,forc_us,forc_vs,forc_t,fsno,&
                                prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
                                ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,pg_snow,qintr,qintr_rain,qintr_snow,&
@@ -3478,7 +3477,6 @@ CONTAINS
 
 
    END SUBROUTINE LEAF_interception_pftwrap
-#endif
 
    SUBROUTINE release_no_vegetation_canopy_storage(deltim,tleaf, &
          prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler, &
