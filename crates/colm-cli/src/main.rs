@@ -5,13 +5,14 @@
 //! 答「能产出什么」的 `colm-hist` 闸门表不认识 netcdf。
 //!
 //! ```text
-//! colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
-//! colm-cli new     --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
-//!                  [--spinup-years N] [--spinup-repeat N]
-//! colm-cli run     <算例目录> --kernel <目录> [--stream 1]
-//! colm-cli metrics <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
-//! colm-cli series  <算例目录> --vars f_rnet,f_fsena [--out series.json]
-//! colm-cli all     --site ... --out ... --kernel ... [--obs ...]
+//! colm-cli scan      --dir <Sitedata 目录> [--out sites.json] [--quick 1]
+//! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>]
+//! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
+//!                    [--spinup-years N] [--spinup-repeat N]
+//! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
+//! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
+//! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--out series.json]
+//! colm-cli all       --site ... --out ... --kernel ... [--obs ...]
 //! ```
 //!
 //! `--start` / `--end` 不给就用强迫场覆盖的完整范围。预热默认重复头一年
@@ -31,6 +32,10 @@ const USAGE: &str = "\
 usage:
   colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
+  colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N]
+                   [--rawdata <dir>]
+                   # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
+                   # 标称假设。--landtype 不给就不写，让 CoLM 回落
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--met <Met.nc>]   # 前处理转出来的强迫场；不给就按命名约定
                                       # 在 ../Forcing/ 下找，那两套约定只覆盖
@@ -70,6 +75,9 @@ fn main() -> Result<()> {
                 opts.get("--out").as_deref(),
                 opts.get("--quick").is_some(),
             )?;
+        }
+        "site-new" => {
+            cmd_site_new(&opts)?;
         }
         "new" => {
             let case = cmd_new(&opts)?;
@@ -235,6 +243,83 @@ impl Opts {
                 .with_context(|| format!("--spinup {v:?} is not a count")),
         }
     }
+
+    /// 一个必需的浮点数选项——`site-new` 的 `--lon`/`--lat`。
+    fn need_f64(&self, name: &str) -> Result<f64> {
+        let v = self.need_str(name)?;
+        v.parse()
+            .with_context(|| format!("{name} {v:?} is not a number"))
+    }
+
+    /// 一个可选的整数选项——`site-new` 的 `--landtype`。不给就是
+    /// `None`，不猜一个默认值：`site::skeleton` 对「没给地类」与
+    /// 「给了某个地类」是两条不同的路径，猜一个会把用户没说的话说死。
+    fn get_i32(&self, name: &str) -> Result<Option<i32>> {
+        match self.get(name) {
+            None => Ok(None),
+            Some(v) => v
+                .parse()
+                .map(Some)
+                .with_context(|| format!("{name} {v:?} is not an integer")),
+        }
+    }
+}
+
+// ------------------------------------------------------------- site-new
+
+/// `colm-cli site-new`：从一对经纬度建一份能跑的 site.nc。
+///
+/// 两步拼起来：[`colm_srfdata::site::skeleton`] 写出只有经纬度（可选地类）
+/// 的最小文件，[`colm_srfdata::site::fill`] 照阶段 B 的三级优先级
+/// （站点自有 > 栅格 > 模块默认）把 12 个必需字段补齐。中间那份 skeleton
+/// 文件放系统临时目录，补完即删——用户只关心 `--out` 那一份。
+///
+/// 没有 `--rawdata` 时 12 个字段全部落到模块默认或本 crate 自己发明的
+/// 标称假设；文件依然能跑，只是土壤/地形/反照率不是这个地点的实测值，
+/// 输出里的 `from default:` 那一行会把它们逐个点名。
+fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
+    let out = o.need("--out")?;
+    let lon = o.need_f64("--lon")?;
+    let lat = o.need_f64("--lat")?;
+    let landtype = o.get_i32("--landtype")?;
+    let rawdata = o.get("--rawdata");
+
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+
+    // skeleton 与 fill 之间的中间文件：用户不该知道它存在过。
+    let skel = std::env::temp_dir().join(format!("colm-site-new-{}.nc", std::process::id()));
+    colm_srfdata::site::skeleton(&skel, lon, lat, landtype)?;
+    let filled = colm_srfdata::site::fill(&skel, &out, rawdata.as_deref().map(Path::new), None);
+    let _ = std::fs::remove_file(&skel);
+    let r = filled?;
+
+    println!(
+        "soil texture: {} ({}), BVIC {} from sand {:.2}% / silt {:.2}% / clay {:.2}%",
+        r.texture, r.texture_name, r.bvic, r.fine_earth.0, r.fine_earth.1, r.fine_earth.2
+    );
+    if landtype.is_none() {
+        println!(
+            "note: no --landtype given; IGBP_classification is not written, so CoLM falls \
+             back on its own"
+        );
+    }
+    if !r.from_site.is_empty() {
+        println!("from site   : {}", r.from_site.join(", "));
+    }
+    if !r.from_raster.is_empty() {
+        println!("from raster : {}", r.from_raster.join(", "));
+    }
+    if !r.from_default.is_empty() {
+        println!(
+            "from default: {}  <-- nominal values, not measured at this site",
+            r.from_default.join(", ")
+        );
+    }
+    println!("wrote {}", out.display());
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- new
@@ -466,14 +551,33 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 而 CoLM 的 URBAN 路径本来就直接读原件（实测示例算例用的就是未经处理的
     // 原文件，逐字节相同）。对它做补齐既没有依据，也没有必要。
     let obs = sibling(&site_raw, "Observation", 1);
-    // 城市站点文件不带 `IGBP_classification` —— 那正是它的标志。
-    let looks_like_plumber2 = colm_srfdata::site::location(&site_raw)?.landtype.is_some();
+    // 城市站点文件不带 `IGBP_classification` —— 那正是它的标志。**但**
+    // `colm-cli site-new` 造出来的最小文件在用户不给 `--landtype` 时也没有
+    // 它，而它绝不是城市站点：`site::skeleton` + `site::fill` 已经把 12 个
+    // 必需字段都写好了，真正未处理的 Urban-PLUMBER 原始文件这时一个都没有
+    // （那正是 `prepare_urban` 存在的理由）。所以先看这一条更硬的证据——
+    // 地类缺席只在文件确实还缺这 12 个字段时，才说明它是城市站点。
+    let already_filled = colm_srfdata::site::missing_fields(&site_raw)?.is_empty();
+    let looks_like_plumber2 =
+        already_filled || colm_srfdata::site::location(&site_raw)?.landtype.is_some();
     // 没有 `--urban` 开关：拿一个草地站强行跑城市只会在 NCAR 属性表上越界，
     // 而一个城市站不跑城市模块也没有意义。判据完全交给站点文件的形状。
     let urban = !looks_like_plumber2;
     // 这个城市站点在不在两张预抽表里 —— 决定 `--rawdata` 缺席时该说什么。
     let mut urban_covered = false;
-    if looks_like_plumber2 {
+    if already_filled {
+        // 已经补齐过的文件——`site-new` 的产物，或者重新喂回来的一份旧
+        // 增广站点文件。原样拷过去，不再调用 `fill`：它的第一行就是
+        // `fs::copy`，第二行会在已经存在的变量名上报 `NC_ENAMEINUSE`。
+        std::fs::copy(&site_raw, layout.site_nc()).with_context(|| {
+            format!(
+                "cannot copy {} to {}",
+                site_raw.display(),
+                layout.site_nc().display()
+            )
+        })?;
+        println!("site: already has all 12 required fields (from site-new or a prior fill); copied as-is");
+    } else if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
             &layout.site_nc(),

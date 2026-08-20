@@ -413,3 +413,68 @@ fn the_extra_source_says_measured_not_assumed() {
         assert!(!s.contains("assumed"), "{n}: {s}");
     }
 }
+
+// -------------------------------------------------------------- skeleton
+
+#[test]
+fn a_skeleton_carries_only_what_the_user_gave() {
+    // **地类不给就不写**，而不是猜一个。`colm-case` 那条规矩：
+    //
+    // > 地类只在站点文件说得出时才写。说不出就整条不写 ——
+    // > 写一个猜的值比不写更糟，而 CoLM 有自己的回落路径。
+    let dir = std::env::temp_dir().join(format!("colm-skel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("skel.nc");
+    super::skeleton(&p, 123.5092, 44.5933, None).expect("写得出来");
+
+    let f = netcdf::open(&p).unwrap();
+    let lon: Vec<f64> = f
+        .variable("longitude")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(lon, vec![123.5092]);
+    assert!(
+        f.variable("IGBP_classification").is_none(),
+        "没给地类就不该写 —— 写一个猜的值比不写更糟"
+    );
+}
+
+#[test]
+fn a_skeleton_with_a_landtype_writes_it() {
+    let dir = std::env::temp_dir().join(format!("colm-skel-lt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("skel.nc");
+    super::skeleton(&p, 0.0, 0.0, Some(10)).expect("写得出来");
+    let f = netcdf::open(&p).unwrap();
+    let lt: Vec<f64> = f
+        .variable("IGBP_classification")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(lt, vec![10.0]);
+}
+
+#[test]
+fn a_skeleton_can_be_filled_straight_away() {
+    // 这两步串起来就是阶段 B 的主路径：给一对经纬度，拿到一份能跑的
+    // site.nc。
+    let dir = std::env::temp_dir().join(format!("colm-skel-fill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let skel = dir.join("skel.nc");
+    super::skeleton(&skel, 123.5092, 44.5933, None).unwrap();
+    let out = dir.join("site.nc");
+    let rep = super::fill(&skel, &out, None, None).expect("补得齐");
+
+    assert!(
+        super::missing_fields(&out).unwrap().is_empty(),
+        "12 个字段该齐全"
+    );
+    assert_eq!(rep.from_default.len(), 12, "没 rawdata 时应当全走标称/默认");
+}

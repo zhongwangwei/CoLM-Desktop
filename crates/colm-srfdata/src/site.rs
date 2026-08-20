@@ -82,6 +82,42 @@ pub fn location(file: &Path) -> Result<Location> {
     })
 }
 
+/// 从经纬度写出一份最小的站点文件，交给 [`fill`] 补齐。
+///
+/// **地类是可选的，而且不给就不写。** `colm-case` 的 `build.rs` 立的规矩：
+///
+/// > 地类只在站点文件说得出时才写。说不出就整条不写 ——
+/// > 写一个猜的值比不写更糟，而 CoLM 有自己的回落路径。
+///
+/// 变量名与维度形状要与 PLUMBER2 的站点文件一致 —— `fill` 与
+/// `location` 都按那套名字读（`longitude` / `latitude` /
+/// `IGBP_classification`）。三个变量都是 0 维标量，与实测的 CN-Cng 站点
+/// 文件（`ncdump -h`）逐条对上。
+///
+/// `longitude`/`latitude` 这里写成 `f64` 而不是 PLUMBER2 真实文件里的
+/// `float`（f32）：`fill`/`location` 都用 `get_values::<f64, _>` 读，
+/// netCDF 的类型转换会把 float 提升成 f64，两种存储类型下游都读得出来；
+/// 但 f32 只有约 7 位有效数字，123.5092 存成 f32 再提升回 f64 会变成
+/// 123.50920104980469——不是同一个数。用户敲的经纬度应当原样躺在文件里，
+/// 不该因为选了一个更贴近真实文件的存储类型而丢精度。`IGBP_classification`
+/// 没有这个顾虑（整型提升到 f64 是精确的），所以它照抄真实文件的 `int`。
+pub fn skeleton(dst: &Path, lon: f64, lat: f64, landtype: Option<i32>) -> Result<()> {
+    let mut f = netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+
+    let mut lon_var = f.add_variable::<f64>("longitude", &[])?;
+    lon_var.put_values(&[lon], netcdf::Extents::All)?;
+
+    let mut lat_var = f.add_variable::<f64>("latitude", &[])?;
+    lat_var.put_values(&[lat], netcdf::Extents::All)?;
+
+    if let Some(lt) = landtype {
+        let mut lt_var = f.add_variable::<i32>("IGBP_classification", &[])?;
+        lt_var.put_values(&[lt], netcdf::Extents::All)?;
+    }
+
+    Ok(())
+}
+
 /// 补齐一个站点文件。
 ///
 /// 取值优先级是**站点自有 > 栅格 > 模块默认**。「站点自有」指站点文件本身的
