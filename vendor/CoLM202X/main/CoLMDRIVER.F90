@@ -111,10 +111,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
                wf_gravels(1:,i),wf_sand(1:,i),   porsl(1:,i),     psi0(1:,i),      &
                bsw(1:,i),       theta_r(1:,i),   fsatmax(i),      fsatdcf(i),      &
                topoweti(i),     alp_twi(i),      chi_twi(i),      mu_twi(i),       &
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                alpha_vgm(1:,i), n_vgm(1:,i),     L_vgm(1:,i),                      &
                sc_vgm(1:,i),    fc_vgm(1:,i),                                      &
-#endif
                hksati(1:,i),    csol(1:,i),      k_solids(1:,i),  dksatu(1:,i),    &
                dksatf(1:,i),    dkdry(1:,i),     BA_alpha(1:,i),  BA_beta(1:,i),   &
                rootfr(1:,m),    lakedepth(i),    dz_lake(1:,i),   elvstd(i),       &
@@ -280,10 +278,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             vf_quartz(1:,i) ,vf_gravels(1:,i),vf_om(1:,i)     ,vf_sand(1:,i)   ,&
             wf_gravels(1:,i),wf_sand(1:,i)   ,porsl(1:,i)     ,psi0(1:,i)      ,&
             bsw(1:,i)       ,theta_r(1:,i)   ,fsatmax(i)      ,fsatdcf(i)      ,&
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             alpha_vgm(1:,i) ,n_vgm(1:,i)     ,L_vgm(1:,i)                      ,&
             sc_vgm(1:,i)    ,fc_vgm(1:,i)                                      ,&
-#endif
             hksati(1:,i)    ,csol(1:,i)      ,k_solids(1:,i)  ,dksatu(1:,i)    ,&
             dksatf(1:,i)    ,dkdry(1:,i)     ,BA_alpha(1:,i)  ,BA_beta(1:,i)   ,&
             alb_roof(:,:,u) ,alb_wall(:,:,u) ,alb_gimp(:,:,u) ,alb_gper(:,:,u) ,&

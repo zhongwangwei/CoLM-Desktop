@@ -1,6 +1,13 @@
 #!/bin/bash
-#./create_defineh.bash GRID LULC_IGBP_PFT URBANON vanGenu CaMaON BGCON CROPON TRACERON
-echo $1 $2 $3 $4 $5 $6 $7 ${8:-TRACEROFF}
+#./create_defineh.bash GRID LULC_IGBP_PFT URBANON CaMaON BGCON CROPON TRACERON
+#
+# Soil hydraulic scheme (Campbell vs. vanGenuchten) used to be a 4th
+# positional argument here, picking between two compile-time macros. Both
+# code paths are now always compiled in and the choice is a runtime
+# namelist switch instead (DEF_USE_Campbell_SOIL_MODEL, MOD_Namelist.F90,
+# default .false. i.e. vanGenuchten) -- so that argument slot is gone and
+# every argument after it moved down by one.
+echo $1 $2 $3 $4 $5 $6 ${7:-TRACEROFF}
 
 if [ $1 = "GRID" ];then
    GRIDBASE="#define GRIDBASED"
@@ -84,63 +91,47 @@ else
 fi
 #echo $URBAN
 
-if [ $4 = "Campbell" ];then
-   CAMPBELL="#define Campbell_SOIL_MODEL"
-   VENGENU="#undef vanGenuchten_Mualem_SOIL_MODEL"
-else
-   if [ $4 = "vanGenu" ];then
-      CAMPBELL="#undef Campbell_SOIL_MODEL"
-      VENGENU="#define vanGenuchten_Mualem_SOIL_MODEL"
-   else
-      echo "Error in argument 4, try (Campbell, vanGenu)"
-      exit
-   fi
-fi
-
-#echo $CAMPBELL
-#echo $VENGENU
-
-if [ $5 = "CaMaON" ];then
+if [ $4 = "CaMaON" ];then
    CaMa="#define CaMa_Flood"
 else
-   if [ $5 = "CaMaOFF" ];then
+   if [ $4 = "CaMaOFF" ];then
       CaMa="#undef CaMa_Flood"
    else
-      echo "Error in argument 5, try (CaMaON, CaMaOFF)"
+      echo "Error in argument 4, try (CaMaON, CaMaOFF)"
       exit
    fi
 fi
 #echo $CaMa
 
-if [ $6 = "BGCON" ];then
+if [ $5 = "BGCON" ];then
    BGC="#define BGC"
 else
-   if [ $6 = "BGCOFF" ];then
+   if [ $5 = "BGCOFF" ];then
       BGC="#undef BGC"
    else
-      echo "Error in argument 6, try (BGCON, BGCOFF)"
+      echo "Error in argument 5, try (BGCON, BGCOFF)"
       exit
    fi
 fi
 #echo $BGC
 
-if [ $7 = "CROPON" ];then
+if [ $6 = "CROPON" ];then
    CROP="#define CROP"
 else
-   if [ $7 = "CROPOFF" ];then
+   if [ $6 = "CROPOFF" ];then
       CROP="#undef CROP"
    else
-      echo "Error in argument 7, try (CROPON, CROPOFF)"
+      echo "Error in argument 6, try (CROPON, CROPOFF)"
    fi
 fi
 
-if [ "${8:-TRACEROFF}" = "TRACERON" ];then
+if [ "${7:-TRACEROFF}" = "TRACERON" ];then
    TRACER="#define TRACER"
 else
-   if [ "${8:-TRACEROFF}" = "TRACEROFF" ];then
+   if [ "${7:-TRACEROFF}" = "TRACEROFF" ];then
       TRACER="#undef TRACER"
    else
-      echo "Error in argument 8, try (TRACERON, TRACEROFF)"
+      echo "Error in argument 7, try (TRACERON, TRACEROFF)"
       exit
    fi
 fi
@@ -178,9 +169,12 @@ $URBAN
 #endif
 
 ! 5. Hydrological process options.
-! 5.1 Two soil hydraulic models can be used.
-$CAMPBELL
-$VENGENU
+! 5.1 Campbell_SOIL_MODEL / vanGenuchten_Mualem_SOIL_MODEL used to live
+!     here as two mutually exclusive compile-time macros (exactly one
+!     always defined, picked by this script's old 4th argument). Both
+!     code paths are now always compiled in and the choice is a runtime
+!     namelist switch instead (DEF_USE_Campbell_SOIL_MODEL,
+!     share/MOD_Namelist.F90, default .false. i.e. vanGenuchten).
 ! 5.2 If defined, lateral flow is modeled.
 #define  LATERAL_FLOW
 !    Conflicts :
@@ -222,9 +216,11 @@ $CROP
 
 ! 13. If defined, water tracer module is enabled.
 $TRACER
-#if (defined TRACER) && (defined Campbell_SOIL_MODEL)
-#error "TRACER requires vanGenuchten_Mualem_SOIL_MODEL; disable TRACER explicitly before using Campbell_SOIL_MODEL"
-#endif
+! TRACER requires vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.) --
+! used to be a compile-time #error here on (TRACER && Campbell_SOIL_MODEL),
+! but Campbell/vanGenuchten is a runtime choice now, so that check moved
+! to MOD_Namelist.F90 (it runs whenever TRACER is compiled in, regardless
+! of which soil scheme is picked at runtime).
 ! NOTE: TRACER as a whole does NOT require GridRiverLakeFlow. The tracer
 ! subsystem has four families (isotope, solute, particle, gas) and only the
 ! river-lake ones need a river network: MOD_Tracer_RiverLake.F90 and

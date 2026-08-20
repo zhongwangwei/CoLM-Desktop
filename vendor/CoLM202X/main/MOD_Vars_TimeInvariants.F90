@@ -218,13 +218,15 @@ MODULE MOD_Vars_TimeInvariants
    real(r8), allocatable :: bsw          (:,:)  !clapp and hornberger "b" parameter [-]
    real(r8), allocatable :: theta_r      (:,:)  !residual moisture content [-]
    real(r8), allocatable :: BVIC         (:)    !b parameter in Fraction of saturated soil in a grid calculated by VIC
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   ! alpha_vgm/L_vgm/n_vgm/sc_vgm/fc_vgm are only meaningful under
+   ! vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.), but are always
+   ! allocated -- see allocate_TimeInvariants -- so the vanGenuchten and
+   ! Campbell code paths can both be compiled in and chosen at runtime.
    real(r8), allocatable :: alpha_vgm    (:,:)  !a parameter corresponding approximately to the inverse of the air-entry value
    real(r8), allocatable :: L_vgm        (:,:)  !pore-connectivity parameter [dimensionless]
    real(r8), allocatable :: n_vgm        (:,:)  !a shape parameter [dimensionless]
    real(r8), allocatable :: sc_vgm       (:,:)  !saturation at the air entry value in the classical vanGenuchten model [-]
    real(r8), allocatable :: fc_vgm       (:,:)  !a scaling factor by using air entry value in the Mualem model [-]
-#endif
 
    integer,  allocatable :: soiltext       (:)  !USDA soil texture class
 
@@ -360,13 +362,11 @@ CONTAINS
             allocate (theta_r      (nl_soil,numpatch))
             allocate (BVIC                 (numpatch))
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             allocate (alpha_vgm    (nl_soil,numpatch))
             allocate (L_vgm        (nl_soil,numpatch))
             allocate (n_vgm        (nl_soil,numpatch))
             allocate (sc_vgm       (nl_soil,numpatch))
             allocate (fc_vgm       (nl_soil,numpatch))
-#endif
             allocate (soiltext             (numpatch))
 
             allocate (fsatmax              (numpatch))
@@ -502,13 +502,17 @@ CONTAINS
       CALL ncio_read_vector (file_restart, 'bsw    ' ,     nl_soil, landpatch, bsw       ) ! clapp and hornberger "b" parameter [-]
       CALL ncio_read_vector (file_restart, 'theta_r  ' ,   nl_soil, landpatch, theta_r   ) ! residual moisture content [-]
       CALL ncio_read_vector (file_restart, 'BVIC  ' ,      landpatch, BVIC   )             ! b parameter in Fraction of saturated soil in a grid calculated by VIC
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-      CALL ncio_read_vector (file_restart, 'alpha_vgm' ,   nl_soil, landpatch, alpha_vgm ) ! a parameter corresponding approximately to the inverse of the air-entry value
-      CALL ncio_read_vector (file_restart, 'L_vgm    ' ,   nl_soil, landpatch, L_vgm     ) ! pore-connectivity parameter [dimensionless]
-      CALL ncio_read_vector (file_restart, 'n_vgm    ' ,   nl_soil, landpatch, n_vgm     ) ! a shape parameter [dimensionless]
-      CALL ncio_read_vector (file_restart, 'sc_vgm   ' ,   nl_soil, landpatch, sc_vgm    ) ! saturation at the air entry value in the classical vanGenuchten model [-]
-      CALL ncio_read_vector (file_restart, 'fc_vgm   ' ,   nl_soil, landpatch, fc_vgm    ) ! a scaling factor by using air entry value in the Mualem model [-]
-#endif
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+         ! alpha_vgm/L_vgm/n_vgm/sc_vgm/fc_vgm only exist in a restart file
+         ! written under vanGenuchten -- a Campbell restart has none of
+         ! them, so this read (unlike the always-present theta_r above)
+         ! has to stay gated on the scheme actually in effect.
+         CALL ncio_read_vector (file_restart, 'alpha_vgm' ,   nl_soil, landpatch, alpha_vgm ) ! a parameter corresponding approximately to the inverse of the air-entry value
+         CALL ncio_read_vector (file_restart, 'L_vgm    ' ,   nl_soil, landpatch, L_vgm     ) ! pore-connectivity parameter [dimensionless]
+         CALL ncio_read_vector (file_restart, 'n_vgm    ' ,   nl_soil, landpatch, n_vgm     ) ! a shape parameter [dimensionless]
+         CALL ncio_read_vector (file_restart, 'sc_vgm   ' ,   nl_soil, landpatch, sc_vgm    ) ! saturation at the air entry value in the classical vanGenuchten model [-]
+         CALL ncio_read_vector (file_restart, 'fc_vgm   ' ,   nl_soil, landpatch, fc_vgm    ) ! a scaling factor by using air entry value in the Mualem model [-]
+      ENDIF
 #ifdef DataAssimilation
       IF (numpatch > 0 .and. p_is_worker) wf_silt = 1.0_r8 - wf_gravels - wf_sand - wf_clay - wf_om
 #endif
@@ -630,7 +634,7 @@ CONTAINS
    ! Original version: Yongjiu Dai, September 15, 1999, 03/2014
    !====================================================================
 
-   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_BEDROCK
+   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_BEDROCK, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
    USE MOD_NetCDFVector
@@ -718,13 +722,13 @@ CONTAINS
       CALL ncio_write_vector (file_restart, 'theta_r  ' , 'soil', nl_soil, 'patch', landpatch, theta_r   , compress) ! residual moisture content [-]
       CALL ncio_write_vector (file_restart, 'BVIC    '  , 'patch', landpatch, BVIC, compress) ! b parameter in Fraction of saturated soil in a grid calculated by VIC
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-      CALL ncio_write_vector (file_restart, 'alpha_vgm' , 'soil', nl_soil, 'patch', landpatch, alpha_vgm , compress) ! a parameter corresponding approximately to the inverse of the air-entry value
-      CALL ncio_write_vector (file_restart, 'L_vgm    ' , 'soil', nl_soil, 'patch', landpatch, L_vgm     , compress) ! pore-connectivity parameter [dimensionless]
-      CALL ncio_write_vector (file_restart, 'n_vgm    ' , 'soil', nl_soil, 'patch', landpatch, n_vgm     , compress) ! a shape parameter [dimensionless]
-      CALL ncio_write_vector (file_restart, 'sc_vgm   ' , 'soil', nl_soil, 'patch', landpatch, sc_vgm    , compress) ! saturation at the air entry value in the classical vanGenuchten model [-]
-      CALL ncio_write_vector (file_restart, 'fc_vgm   ' , 'soil', nl_soil, 'patch', landpatch, fc_vgm    , compress) ! a scaling factor by using air entry value in the Mualem model [-]
-#endif
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+         CALL ncio_write_vector (file_restart, 'alpha_vgm' , 'soil', nl_soil, 'patch', landpatch, alpha_vgm , compress) ! a parameter corresponding approximately to the inverse of the air-entry value
+         CALL ncio_write_vector (file_restart, 'L_vgm    ' , 'soil', nl_soil, 'patch', landpatch, L_vgm     , compress) ! pore-connectivity parameter [dimensionless]
+         CALL ncio_write_vector (file_restart, 'n_vgm    ' , 'soil', nl_soil, 'patch', landpatch, n_vgm     , compress) ! a shape parameter [dimensionless]
+         CALL ncio_write_vector (file_restart, 'sc_vgm   ' , 'soil', nl_soil, 'patch', landpatch, sc_vgm    , compress) ! saturation at the air entry value in the classical vanGenuchten model [-]
+         CALL ncio_write_vector (file_restart, 'fc_vgm   ' , 'soil', nl_soil, 'patch', landpatch, fc_vgm    , compress) ! a scaling factor by using air entry value in the Mualem model [-]
+      ENDIF
 
       CALL ncio_write_vector (file_restart, 'soiltext', 'patch', landpatch, soiltext)
 
@@ -893,13 +897,11 @@ CONTAINS
             deallocate (theta_r        )
             deallocate (BVIC           )
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             deallocate (alpha_vgm      )
             deallocate (L_vgm          )
             deallocate (n_vgm          )
             deallocate (sc_vgm         )
             deallocate (fc_vgm         )
-#endif
             deallocate (soiltext       )
 
             deallocate (fsatmax        )
@@ -974,7 +976,8 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_RangeCheck
    USE MOD_Namelist, only: DEF_Runoff_SCHEME, DEF_TOPMOD_method, DEF_USE_BEDROCK, &
-                           DEF_USE_Forcing_Downscaling, DEF_USE_Forcing_Downscaling_Simple
+                           DEF_USE_Forcing_Downscaling, DEF_USE_Forcing_Downscaling_Simple, &
+                           DEF_USE_Campbell_SOIL_MODEL
 
    IMPLICIT NONE
 
@@ -1013,14 +1016,14 @@ CONTAINS
       CALL check_vector_data ('porsl        [m3/m3] ', porsl       ) ! fraction of soil that is voids [-]
       CALL check_vector_data ('psi0         [mm]    ', psi0        ) ! minimum soil suction [mm] (NOTE: "-" valued)
       CALL check_vector_data ('bsw          [-]     ', bsw         ) ! clapp and hornberger "b" parameter [-]
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-      CALL check_vector_data ('theta_r      [m3/m3] ', theta_r     ) ! residual moisture content [-]
-      CALL check_vector_data ('alpha_vgm    [-]     ', alpha_vgm   ) ! a parameter corresponding approximately to the inverse of the air-entry value
-      CALL check_vector_data ('L_vgm        [-]     ', L_vgm       ) ! pore-connectivity parameter [dimensionless]
-      CALL check_vector_data ('n_vgm        [-]     ', n_vgm       ) ! a shape parameter [dimensionless]
-      CALL check_vector_data ('sc_vgm       [-]     ', sc_vgm      ) ! saturation at the air entry value in the classical vanGenuchten model [-]
-      CALL check_vector_data ('fc_vgm       [-]     ', fc_vgm      ) ! a scaling factor by using air entry value in the Mualem model [-]
-#endif
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+         CALL check_vector_data ('theta_r      [m3/m3] ', theta_r     ) ! residual moisture content [-]
+         CALL check_vector_data ('alpha_vgm    [-]     ', alpha_vgm   ) ! a parameter corresponding approximately to the inverse of the air-entry value
+         CALL check_vector_data ('L_vgm        [-]     ', L_vgm       ) ! pore-connectivity parameter [dimensionless]
+         CALL check_vector_data ('n_vgm        [-]     ', n_vgm       ) ! a shape parameter [dimensionless]
+         CALL check_vector_data ('sc_vgm       [-]     ', sc_vgm      ) ! saturation at the air entry value in the classical vanGenuchten model [-]
+         CALL check_vector_data ('fc_vgm       [-]     ', fc_vgm      ) ! a scaling factor by using air entry value in the Mualem model [-]
+      ENDIF
 
       IF ((DEF_Runoff_SCHEME == 0) .and. (DEF_TOPMOD_method == 1)) THEN
          CALL check_vector_data ('mean twi     [log m] ', topoweti) !

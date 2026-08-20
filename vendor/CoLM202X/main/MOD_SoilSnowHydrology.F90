@@ -546,9 +546,7 @@ ENDIF
               z_soisno    ,dz_soisno   ,zi_soisno   ,bsw         ,theta_r     ,&
               fsatmax     ,fsatdcf     ,topoweti    ,alp_twi     ,chi_twi     ,&
               mu_twi      ,elvstd      ,BVIC                                  ,&
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
               alpha_vgm   ,n_vgm       ,L_vgm       ,sc_vgm      ,fc_vgm      ,&
-#endif
               porsl       ,psi0        ,hksati      ,rootr       ,rootflux    ,&
               t_soisno    ,wliq_soisno ,wice_soisno ,smp         ,hk          ,&
               pg_rain     ,sm          ,etr         ,qseva       ,qsdew       ,&
@@ -599,6 +597,7 @@ ENDIF
    USE MOD_Vars_TimeInvariants, only: vic_b_infilt, vic_Dsmax, vic_Ds, vic_Ws, vic_c
    USE MOD_Vars_1DFluxes,       only: fevpg
    USE MOD_Opt_Baseflow,        only: scale_baseflow
+   USE MOD_Namelist,            only: DEF_USE_Campbell_SOIL_MODEL
 #ifdef DataAssimilation
    USE MOD_DA_TWS, only: fslp_k
 #endif
@@ -640,13 +639,11 @@ ENDIF
         alp_twi             , & ! alpha in three parameter gamma distribution of twi
         chi_twi             , & ! chi   in three parameter gamma distribution of twi
         mu_twi              , & ! mu    in three parameter gamma distribution of twi
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
         alpha_vgm(1:nl_soil), & ! a parameter corresponding approximately to the inverse of the air-entry value
         n_vgm    (1:nl_soil), & ! a shape parameter [dimensionless]
         L_vgm    (1:nl_soil), & ! pore-connectivity parameter [dimensionless]
         sc_vgm   (1:nl_soil), & ! saturation at the air entry value in the classical vanGenuchten model [-]
         fc_vgm   (1:nl_soil), & ! a scaling factor by using air entry value in the Mualem model [-]
-#endif
         porsl(1:nl_soil) , &! saturated volumetric soil water content(porosity)
         psi0(1:nl_soil)  , &! saturated soil suction (mm) (NEGATIVE)
         hksati(1:nl_soil), &! hydraulic conductivity at saturation (mm h2o/s)
@@ -762,12 +759,10 @@ ENDIF
    real(r8) :: icefracsum, fracice_rsub, imped
    real(r8) :: wblc
 
-#ifdef Campbell_SOIL_MODEL
-   integer, parameter :: nprms = 1
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   ! Used to be 1 under Campbell, 5 under vanGenuchten. Always sized for
+   ! the union now (5): Campbell only ever fills/reads prms(1,:), so the
+   ! extra rows are simply unused, not wrong -- see the fill below.
    integer, parameter :: nprms = 5
-#endif
    real(r8) :: prms(nprms, 1:nl_soil)
 #if (defined CaMa_Flood)
    real(r8) :: gfld,qinfl_all,rsur_fld, qinfl_fld_subgrid! inundation water input from top (mm/s)
@@ -782,16 +777,15 @@ ENDIF
    integer :: ps, pe, m
 
 
-#ifdef Campbell_SOIL_MODEL
-      prms(1,:) = bsw(1:nl_soil)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-      prms(1,1:nl_soil) = alpha_vgm(1:nl_soil)
-      prms(2,1:nl_soil) = n_vgm    (1:nl_soil)
-      prms(3,1:nl_soil) = L_vgm    (1:nl_soil)
-      prms(4,1:nl_soil) = sc_vgm   (1:nl_soil)
-      prms(5,1:nl_soil) = fc_vgm   (1:nl_soil)
-#endif
+      IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+         prms(1,:) = bsw(1:nl_soil)
+      ELSE
+         prms(1,1:nl_soil) = alpha_vgm(1:nl_soil)
+         prms(2,1:nl_soil) = n_vgm    (1:nl_soil)
+         prms(3,1:nl_soil) = L_vgm    (1:nl_soil)
+         prms(4,1:nl_soil) = sc_vgm   (1:nl_soil)
+         prms(5,1:nl_soil) = fc_vgm   (1:nl_soil)
+      ENDIF
 
 #ifdef TRACER
       ! Defaults for branches that skip soil_water_vertical_movement / wblc.

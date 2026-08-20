@@ -72,11 +72,9 @@ MODULE MOD_SingleSrfdata
    real(r8), allocatable :: SITE_soil_psi_s             (:)
    real(r8), allocatable :: SITE_soil_lambda            (:)
    real(r8), allocatable :: SITE_soil_theta_r           (:)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), allocatable :: SITE_soil_alpha_vgm         (:)
    real(r8), allocatable :: SITE_soil_L_vgm             (:)
    real(r8), allocatable :: SITE_soil_n_vgm             (:)
-#endif
    real(r8), allocatable :: SITE_soil_BA_alpha          (:)
    real(r8), allocatable :: SITE_soil_BA_beta           (:)
 
@@ -1036,7 +1034,10 @@ CONTAINS
          ENDDO
       ENDIF
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      ! theta_r/alpha_vgm/L_vgm/n_vgm are only meaningful under
+      ! vanGenuchten -- under Campbell they're skipped entirely (not
+      ! allocated), matching MOD_Vars_TimeInvariants/MOD_SoilParametersReadin.
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
       u_site_theta_r = readflag &
          .and. ncio_var_exist(fsrfdata,'soil_theta_r',readflag)
       IF (u_site_theta_r) THEN
@@ -1092,7 +1093,7 @@ CONTAINS
                SITE_lon_location, SITE_lat_location, SITE_soil_n_vgm(nsl))
          ENDDO
       ENDIF
-#endif
+      ENDIF
 
       u_site_BA_alpha = u_site_vf_gravels .and. u_site_vf_sand
       u_site_BA_beta  = u_site_vf_gravels .and. u_site_vf_sand
@@ -1145,12 +1146,12 @@ CONTAINS
          write(*,'(A,8ES10.2,3A)') 'soil_k_solids          : ', SITE_soil_k_solids         (1:8), ' (from ',trim(datasource(u_site_k_solids         )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_psi_s             : ', SITE_soil_psi_s            (1:8), ' (from ',trim(datasource(u_site_psi_s            )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_lambda            : ', SITE_soil_lambda           (1:8), ' (from ',trim(datasource(u_site_lambda           )),')'
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
          write(*,'(A,8ES10.2,3A)') 'soil_theta_r           : ', SITE_soil_theta_r          (1:8), ' (from ',trim(datasource(u_site_theta_r          )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_alpha_vgm         : ', SITE_soil_alpha_vgm        (1:8), ' (from ',trim(datasource(u_site_alpha_vgm        )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_L_vgm             : ', SITE_soil_L_vgm            (1:8), ' (from ',trim(datasource(u_site_L_vgm            )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_n_vgm             : ', SITE_soil_n_vgm            (1:8), ' (from ',trim(datasource(u_site_n_vgm            )),')'
-#endif
+         ENDIF
          write(*,'(A,8ES10.2,3A)') 'soil_BA_alpha          : ', SITE_soil_BA_alpha         (1:8), ' (from ',trim(datasource(u_site_BA_alpha         )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_BA_beta           : ', SITE_soil_BA_beta          (1:8), ' (from ',trim(datasource(u_site_BA_beta          )),')'
 
@@ -2361,7 +2362,7 @@ ENDIF
             ENDDO
          ENDIF
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
          u_site_theta_r = readflag .and. ncio_var_exist(fsrfdata,'soil_theta_r',readflag)
          IF (u_site_theta_r) THEN
             CALL ncio_read_serial (fsrfdata, 'soil_theta_r', SITE_soil_theta_r)
@@ -2413,7 +2414,7 @@ ENDIF
                   SITE_lon_location, SITE_lat_location, SITE_soil_n_vgm(nsl))
             ENDDO
          ENDIF
-#endif
+         ENDIF
 
          u_site_BA_alpha = .false.
          u_site_BA_beta  = .false.
@@ -2463,12 +2464,12 @@ ENDIF
          write(*,'(A,8ES10.2,3A)') 'soil_k_solids          : ', SITE_soil_k_solids         (1:8), ' (from ',trim(datasource(u_site_k_solids         )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_psi_s             : ', SITE_soil_psi_s            (1:8), ' (from ',trim(datasource(u_site_psi_s            )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_lambda            : ', SITE_soil_lambda           (1:8), ' (from ',trim(datasource(u_site_lambda           )),')'
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
          write(*,'(A,8ES10.2,3A)') 'soil_theta_r           : ', SITE_soil_theta_r          (1:8), ' (from ',trim(datasource(u_site_theta_r          )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_alpha_vgm         : ', SITE_soil_alpha_vgm        (1:8), ' (from ',trim(datasource(u_site_alpha_vgm        )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_L_vgm             : ', SITE_soil_L_vgm            (1:8), ' (from ',trim(datasource(u_site_L_vgm            )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_n_vgm             : ', SITE_soil_n_vgm            (1:8), ' (from ',trim(datasource(u_site_n_vgm            )),')'
-#endif
+         ENDIF
          write(*,'(A,8ES10.2,3A)') 'soil_BA_alpha          : ', SITE_soil_BA_alpha         (1:8), ' (from ',trim(datasource(u_site_BA_alpha         )),')'
          write(*,'(A,8ES10.2,3A)') 'soil_BA_beta           : ', SITE_soil_BA_beta          (1:8), ' (from ',trim(datasource(u_site_BA_beta          )),')'
 
@@ -2717,12 +2718,12 @@ ENDIF
          CALL ncio_read_serial (fsrfdata, 'soil_lambda'           , SITE_soil_lambda    )
          CALL ncio_read_serial (fsrfdata, 'soil_psi_s'            , SITE_soil_psi_s     )
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
          CALL ncio_read_serial (fsrfdata, 'soil_theta_r'  , SITE_soil_theta_r  )
          CALL ncio_read_serial (fsrfdata, 'soil_alpha_vgm', SITE_soil_alpha_vgm)
          CALL ncio_read_serial (fsrfdata, 'soil_L_vgm'    , SITE_soil_L_vgm    )
          CALL ncio_read_serial (fsrfdata, 'soil_n_vgm'    , SITE_soil_n_vgm    )
-#endif
+         ENDIF
 
          CALL ncio_read_serial (fsrfdata, 'soil_BA_alpha', SITE_soil_BA_alpha)
          CALL ncio_read_serial (fsrfdata, 'soil_BA_beta' , SITE_soil_BA_beta )
@@ -3032,7 +3033,7 @@ ENDIF
       CALL ncio_put_attr     (fsrfdata, 'soil_psi_s ', 'long_name', 'matric potential at saturation')
       CALL ncio_put_attr     (fsrfdata, 'soil_psi_s ', 'units', 'cm')
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
       CALL ncio_write_serial (fsrfdata, 'soil_theta_r', SITE_soil_theta_r(1:8), 'soil')
       CALL ncio_put_attr     (fsrfdata, 'soil_theta_r', 'source', trim(datasource(u_site_theta_r)))
       CALL ncio_put_attr     (fsrfdata, 'soil_theta_r', 'long_name', 'residual water content')
@@ -3050,7 +3051,7 @@ ENDIF
       CALL ncio_put_attr     (fsrfdata, 'soil_n_vgm', 'source', trim(datasource(u_site_n_vgm)))
       CALL ncio_put_attr     (fsrfdata, 'soil_n_vgm', 'long_name', 'a shape parameter [dimensionless]')
 
-#endif
+      ENDIF
 
       CALL ncio_write_serial (fsrfdata, 'soil_BA_alpha', SITE_soil_BA_alpha(1:8), 'soil')
       CALL ncio_put_attr     (fsrfdata, 'soil_BA_alpha', 'source', trim(datasource(u_site_BA_alpha)))
@@ -3333,7 +3334,7 @@ ENDIF
       CALL ncio_put_attr     (fsrfdata, 'soil_psi_s ', 'long_name', 'matric potential at saturation')
       CALL ncio_put_attr     (fsrfdata, 'soil_psi_s ', 'units', 'cm')
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
       CALL ncio_write_serial (fsrfdata, 'soil_theta_r', SITE_soil_theta_r(1:8), 'soil')
       CALL ncio_put_attr     (fsrfdata, 'soil_theta_r', 'source', trim(datasource(u_site_theta_r)))
       CALL ncio_put_attr     (fsrfdata, 'soil_theta_r', 'long_name', 'residual water content')
@@ -3351,7 +3352,7 @@ ENDIF
       CALL ncio_put_attr     (fsrfdata, 'soil_n_vgm', 'source', trim(datasource(u_site_n_vgm)))
       CALL ncio_put_attr     (fsrfdata, 'soil_n_vgm', 'long_name', 'a shape parameter [dimensionless]')
 
-#endif
+      ENDIF
 
       CALL ncio_write_serial (fsrfdata, 'soil_BA_alpha', SITE_soil_BA_alpha(1:8), 'soil')
       CALL ncio_put_attr     (fsrfdata, 'soil_BA_alpha', 'source', trim(datasource(u_site_BA_alpha)))
@@ -3478,11 +3479,9 @@ ENDIF
       IF (allocated(SITE_soil_psi_s            )) deallocate(SITE_soil_psi_s            )
       IF (allocated(SITE_soil_lambda           )) deallocate(SITE_soil_lambda           )
       IF (allocated(SITE_soil_theta_r          )) deallocate(SITE_soil_theta_r          )
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
       IF (allocated(SITE_soil_alpha_vgm        )) deallocate(SITE_soil_alpha_vgm        )
       IF (allocated(SITE_soil_L_vgm            )) deallocate(SITE_soil_L_vgm            )
       IF (allocated(SITE_soil_n_vgm            )) deallocate(SITE_soil_n_vgm            )
-#endif
       IF (allocated(SITE_soil_BA_alpha         )) deallocate(SITE_soil_BA_alpha         )
       IF (allocated(SITE_soil_BA_beta          )) deallocate(SITE_soil_BA_beta          )
 

@@ -138,6 +138,7 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
         "TOPMOD",
         "SPLIT_SOILSNOW",
         "VARIABLYSATURATEDFLOW",
+        "CAMPBELL_SOIL_MODEL",
         "BEDROCK",
         "PRECIP_PHASE",
         "DYNAMIC_LAKE",

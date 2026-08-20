@@ -108,12 +108,10 @@ CONTAINS
 
    ! update for zwt, wa, ldew
    real(r8) :: tolerance, tol_z, tol_v, zi_soisno(0:nl_soil), sp_zi(0:nl_soil), sp_dz(1:nl_soil)
-#ifdef Campbell_SOIL_MODEL
-   integer, parameter :: nprms = 1
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
+   ! the union now, see the fill further below (Campbell only ever uses
+   ! prms(1,:)).
    integer, parameter :: nprms = 5
-#endif
    real(r8) :: prms(nprms, 1:nl_soil)
    real(r8) :: ldew_tmp
 !-----------------------------------------------------------------------
@@ -793,16 +791,15 @@ ENDIF
                               ENDDO
                            ELSE
                               PRINT*, 'Water table is below the soil column.'
-#ifdef Campbell_SOIL_MODEL
-                              prms(1,1:nl_soil) = bsw(1:nl_soil,np)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-                              prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,np)
-                              prms(2,1:nl_soil) = n_vgm    (1:nl_soil,np)
-                              prms(3,1:nl_soil) = L_vgm    (1:nl_soil,np)
-                              prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,np)
-                              prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,np)
-#endif
+                              IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+                                 prms(1,1:nl_soil) = bsw(1:nl_soil,np)
+                              ELSE
+                                 prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,np)
+                                 prms(2,1:nl_soil) = n_vgm    (1:nl_soil,np)
+                                 prms(3,1:nl_soil) = L_vgm    (1:nl_soil,np)
+                                 prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,np)
+                                 prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,np)
+                              ENDIF
 
                               tolerance = 1.e-3
                               tol_z = tolerance / real(nl_soil,r8) /2.0

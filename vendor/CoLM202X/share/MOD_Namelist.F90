@@ -304,6 +304,36 @@ MODULE MOD_Namelist
    logical :: DEF_USE_VariablySaturatedFlow = .true.
    logical :: DEF_USE_BEDROCK               = .false.
 
+   ! ----- Soil hydraulic scheme: a two-way choice, not an on/off switch -----
+   ! Used to be two mutually exclusive compile-time macros
+   ! (Campbell_SOIL_MODEL / vanGenuchten_Mualem_SOIL_MODEL, exactly one
+   ! always defined by create_defineh.bash). Now both code paths are always
+   ! compiled in and this flag picks between them at runtime:
+   ! `.true.` selects Campbell (1974); `.false.` selects the modified
+   ! van Genuchten-Mualem scheme of Ippisch et al. (2006).
+   ! Default .false. (vanGenuchten) -- both kernels currently ship built
+   ! with vanGenuchten and the golden regression baseline is vanGenuchten;
+   ! flipping the default would silently change every existing result.
+   logical :: DEF_USE_Campbell_SOIL_MODEL = .false.
+
+   ! NOTE on extend_interception: this one is NOT converted to a runtime
+   ! switch here, unlike Campbell/vanGenuchten above. It looks like a plain
+   ! `#ifdef` at the 4 call sites in CoLMMAIN.F90, but it is actually a
+   ! compile-time *file-selection* macro: vendor/CoLM202X/Makefile uses it
+   ! (EXTENDED_INTERCEPTION_ENABLED) to choose between two non-interchangeable
+   ! source files for each of MOD_Thermal, MOD_LeafInterception,
+   ! MOD_LeafTemperature and MOD_LeafTemperaturePC (main/*.F90 vs.
+   ! extends/interception/*_Extended.F90 -- same module name, different
+   ! subroutine signatures, e.g. THERMAL takes extra canopy_phase_heat
+   ! arguments in the extended set). Two modules cannot share a name in one
+   ! binary, so this can't become a body-level `IF (DEF_USE_extend_interception)`
+   ! without first merging each file pair into one module with the two
+   ! code paths folded in -- a much larger job than the 4 occurrences
+   ! visible in CoLMMAIN.F90 suggest. It is also currently always on: every
+   ! create_defineh.bash caller gets an unconditional `#define
+   ! extend_interception`, no argument turns it off. Left as a compile-time
+   ! macro; see docs/plan-macro-runtime.md for the scope note.
+
    ! ----- Ozone stress -----
    logical :: DEF_USE_OZONESTRESS = .true.
    logical :: DEF_USE_OZONEDATA   = .true.
@@ -1278,6 +1308,7 @@ CONTAINS
       DEF_USE_DOMINANT_PATCHTYPE,             &
       DEF_USE_VariablySaturatedFlow,          &
       DEF_USE_BEDROCK,                        &
+      DEF_USE_Campbell_SOIL_MODEL,            &
       DEF_USE_OZONESTRESS,                    &
       DEF_USE_OZONEDATA,                      &
       DEF_USE_SNICAR,                         &
@@ -1467,12 +1498,12 @@ CONTAINS
 
 
 ! ----- SOIL model related ------ Macros&Namelist conflicts and dependency management
-#if (defined vanGenuchten_Mualem_SOIL_MODEL)
-         write(*,*) '                  *****                  '
-         write(*,*) 'Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.  '
-         write(*,*) 'when using vanGenuchten_Mualem_SOIL_MODEL. '
-         DEF_USE_VariablySaturatedFlow = .true.
-#endif
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+            write(*,*) '                  *****                  '
+            write(*,*) 'Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.  '
+            write(*,*) 'when using vanGenuchten_Mualem_SOIL_MODEL. '
+            DEF_USE_VariablySaturatedFlow = .true.
+         ENDIF
 #if (defined CatchLateralFlow)
          write(*,*) '                  *****                  '
          write(*,*) 'Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.  '
@@ -1480,6 +1511,21 @@ CONTAINS
          DEF_USE_VariablySaturatedFlow = .true.
 #endif
 #ifdef TRACER
+         ! TRACER used to be blocked from Campbell_SOIL_MODEL at compile
+         ! time (create_defineh.bash used to #error on that combination,
+         ! because the tracer soil-water physics is written against
+         ! vanGenuchten's variable set). Campbell/vanGenuchten are now a
+         ! runtime choice, so the same restriction has to be re-checked
+         ! here at runtime instead.
+         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+            write(*,*) '                  *****                  '
+            write(*,*) 'Fatal ERROR: TRACER requires vanGenuchten_Mualem_SOIL_MODEL'
+            write(*,*) '(DEF_USE_Campbell_SOIL_MODEL = .false.). The tracer soil-water'
+            write(*,*) 'physics is written against the vanGenuchten variable set.'
+            write(*,*) 'Set DEF_USE_Campbell_SOIL_MODEL = .false., or rebuild without'
+            write(*,*) '#define TRACER.'
+            CALL CoLM_stop ()
+         ENDIF
          SELECT CASE (trim(adjustl(DEF_TRACER_KINETIC_SCHEME)))
          CASE ('CAPPA2003', 'Cappa2003', 'cappa2003')
             DEF_TRACER_KINETIC_SCHEME = 'CAPPA2003'
@@ -1581,11 +1627,11 @@ CONTAINS
          DEF_USE_PC   = .false.
          DEF_FAST_PC  = .false.
          DEF_SOLO_PFT = .false.
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-         write(*,*) '                  *****                  '
-         write(*,*) 'Note: Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme.'
-         DEF_RSS_SCHEME = 0
-#endif
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+            write(*,*) '                  *****                  '
+            write(*,*) 'Note: Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme.'
+            DEF_RSS_SCHEME = 0
+         ENDIF
 #endif
 
 #ifdef LULC_IGBP_PFT
@@ -2006,6 +2052,7 @@ CONTAINS
       CALL mpi_bcast (DEF_USE_DOMINANT_PATCHTYPE             ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_VariablySaturatedFlow          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_BEDROCK                        ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_USE_Campbell_SOIL_MODEL            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_OZONESTRESS                    ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_OZONEDATA                      ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 

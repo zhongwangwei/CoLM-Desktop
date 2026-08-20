@@ -23,13 +23,9 @@ CONTAINS
                        dewmx         ,capr          ,cnfac         ,vf_quartz     ,&
                        vf_gravels    ,vf_om         ,vf_sand       ,wf_gravels    ,&
                        wf_sand       ,csol          ,porsl         ,psi0          ,&
-#ifdef Campbell_SOIL_MODEL
                        bsw           ,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                        theta_r       ,alpha_vgm     ,n_vgm         ,L_vgm         ,&
                        sc_vgm        ,fc_vgm        ,                              &
-#endif
                        k_solids      ,dksatu        ,dksatf        ,dkdry         ,&
                        BA_alpha      ,BA_beta       ,lai           ,laisun        ,&
                        laisha        ,sai           ,htop          ,hbot          ,&
@@ -131,12 +127,11 @@ CONTAINS
    USE MOD_Vars_PFTimeVariables
    USE MOD_Vars_1DPFTFluxes
 #endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq
-#endif
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
-                           DEF_USE_LCT,DEF_USE_PFT,DEF_USE_PC,DEF_PC_CROP_SPLIT
+                           DEF_USE_LCT,DEF_USE_PFT,DEF_USE_PC,DEF_PC_CROP_SPLIT, &
+                           DEF_USE_Campbell_SOIL_MODEL
 
    USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
@@ -172,17 +167,13 @@ CONTAINS
        csol      (1:nl_soil),    &! heat capacity of soil solids [J/(m3 K)]
        porsl     (1:nl_soil),    &! soil porosity [-]
        psi0      (1:nl_soil),    &! soil water suction, negative potential [mm]
-#ifdef Campbell_SOIL_MODEL
        bsw(1:nl_soil),           &! clapp and hornberger "b" parameter [-]
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
        theta_r   (1:nl_soil),    &! residual moisture content [-]
        alpha_vgm (1:nl_soil),    &! a parameter corresponding approximately to the inverse of the air-entry value
        n_vgm     (1:nl_soil),    &! pore-connectivity parameter [dimensionless]
        L_vgm     (1:nl_soil),    &! a shape parameter [dimensionless]
        sc_vgm    (1:nl_soil),    &! saturation at the air entry value in the classical vanGenuchten model [-]
        fc_vgm    (1:nl_soil),    &! a scaling factor by using air entry value in the Mualem model [-]
-#endif
        k_solids  (1:nl_soil),    &! thermal conductivity of minerals soil [W/m-K]
        dkdry     (1:nl_soil),    &! thermal conductivity of dry soil [W/m-K]
        dksatu    (1:nl_soil),    &! thermal conductivity of saturated unfrozen soil [W/m-K]
@@ -583,14 +574,13 @@ ENDIF
             fac  = max( fac, 0.001 )
          ENDIF
 
-#ifdef Campbell_SOIL_MODEL
-         psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-         psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
-            porsl(1), theta_r(1), psi0(1), &
-            5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
-#endif
+         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+            psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
+         ELSE
+            psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
+               porsl(1), theta_r(1), psi0(1), &
+               5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
+         ENDIF
          psit = max( -1.e8, psit )
          hr   = exp(psit/roverg/t_grnd)
          qred = (1.-fsno)*hr + fsno
@@ -637,12 +627,8 @@ ENDIF
          !NOTE: If the beta scheme is used, the rss is not soil resistance,
          !but soil beta factor (soil wetness relative to field capacity [0-1]).
          CALL SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0, &
-#ifdef Campbell_SOIL_MODEL
                             bsw, &
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-#endif
                             dz_soisno,t_soisno,wliq_soisno,wice_soisno,fsno,qg,rss)
       ELSE
          IF (DEF_RSS_SCHEME == 4) THEN
@@ -684,12 +670,8 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
 
          ! soil water stress factor on stomatal resistance
          CALL eroot (nl_soil,trsmx0,porsl,&
-#ifdef Campbell_SOIL_MODEL
             bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-#endif
             psi0,rootfr,dz_soisno,t_soisno,wliq_soisno,rootr,etrc,rstfac)
 
          ! fraction of sunlit and shaded leaves of canopy
@@ -828,12 +810,8 @@ IF (patchtype == 0) THEN
          IF (lai_p(i)+sai_p(i) > 1e-6) THEN
 
             CALL eroot (nl_soil,trsmx0,porsl,&
-#ifdef Campbell_SOIL_MODEL
                bsw, &
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-#endif
                psi0,rootfr_p(:,p),&
                dz_soisno,t_soisno,wliq_soisno,rootr_p(:,i),etrc_p(i),rstfac_p(i))
 
@@ -1248,13 +1226,9 @@ ENDIF
       CALL GroundTemperature (patchtype,is_dry_lake,lb,nl_soil,deltim,&
                       capr,cnfac,vf_quartz,vf_gravels,vf_om,vf_sand,wf_gravels,wf_sand,&
                       porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                       bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                       theta_r, alpha_vgm, n_vgm, L_vgm,&
                       sc_vgm , fc_vgm,&
-#endif
                       csol,k_solids,dksatu,dksatf,dkdry,&
                       BA_alpha,BA_beta,&
                       sigf,dz_soisno,z_soisno,zi_soisno,&

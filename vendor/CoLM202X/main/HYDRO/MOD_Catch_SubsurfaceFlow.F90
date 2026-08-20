@@ -177,7 +177,7 @@ CONTAINS
    ! ---------
    SUBROUTINE subsurface_flow (deltime)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_SPMD_Task
    USE MOD_UserDefFun
    USE MOD_Mesh
@@ -232,12 +232,9 @@ CONTAINS
    real(r8) :: exwater
    real(r8) :: sp_zi(0:nl_soil), sp_dz(1:nl_soil), zwtmm ! [mm]
    real(r8) :: vl_r (1:nl_soil)
-#ifdef Campbell_SOIL_MODEL
-   integer, parameter :: nprms = 1
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
+   ! the union now, see the fill below (Campbell only ever uses prms(1,:)).
    integer, parameter :: nprms = 5
-#endif
    real(r8) :: prms  (nprms,1:nl_soil)
    real(r8) :: vol_ice     (1:nl_soil)
    real(r8) :: vol_liq     (1:nl_soil)
@@ -669,18 +666,17 @@ CONTAINS
 
                exwater = xwsub(ipatch) * deltime
 
-#ifdef Campbell_SOIL_MODEL
-               vl_r(1:nl_soil) = 0._r8
-               prms(1,:) = bsw(1:nl_soil,ipatch)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-               vl_r  (1:nl_soil) = theta_r  (1:nl_soil,ipatch)
-               prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,ipatch)
-               prms(2,1:nl_soil) = n_vgm    (1:nl_soil,ipatch)
-               prms(3,1:nl_soil) = L_vgm    (1:nl_soil,ipatch)
-               prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,ipatch)
-               prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,ipatch)
-#endif
+               IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+                  vl_r(1:nl_soil) = 0._r8
+                  prms(1,:) = bsw(1:nl_soil,ipatch)
+               ELSE
+                  vl_r  (1:nl_soil) = theta_r  (1:nl_soil,ipatch)
+                  prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,ipatch)
+                  prms(2,1:nl_soil) = n_vgm    (1:nl_soil,ipatch)
+                  prms(3,1:nl_soil) = L_vgm    (1:nl_soil,ipatch)
+                  prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,ipatch)
+                  prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,ipatch)
+               ENDIF
 
                DO ilev = 1, nl_soil
                   vol_ice(ilev) = wice_soisno(ilev,ipatch)/denice*1000. / sp_dz(ilev)

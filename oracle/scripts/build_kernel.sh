@@ -11,10 +11,16 @@ OUTDIR="${2:-kernels}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$REPO_ROOT/vendor/CoLM202X"
 
+# Soil hydraulic scheme (Campbell vs. vanGenuchten) used to be a 4th
+# positional argument to create_defineh.bash here. It is a runtime
+# namelist switch now (DEF_USE_Campbell_SOIL_MODEL, MOD_Namelist.F90,
+# default .false. i.e. vanGenuchten) -- both code paths are always
+# compiled in, so create_defineh.bash no longer takes that argument and
+# the presets below don't pass it either.
 case "$PRESET" in
-  default) ARGS=(SinglePoint LULC_IGBP     URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
-  bgc)       ARGS=(SinglePoint LULC_IGBP_PFT URBANOFF vanGenu CaMaOFF BGCON  CROPOFF TRACEROFF) ;;
-  urban)     ARGS=(SinglePoint LULC_IGBP     URBANON  vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
+  default) ARGS=(SinglePoint LULC_IGBP     URBANOFF CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
+  bgc)       ARGS=(SinglePoint LULC_IGBP_PFT URBANOFF CaMaOFF BGCON  CROPOFF TRACEROFF) ;;
+  urban)     ARGS=(SinglePoint LULC_IGBP     URBANON  CaMaOFF BGCOFF CROPOFF TRACEROFF) ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
@@ -93,9 +99,12 @@ EFFECTIVE=$(echo "$MACRO_PROBE" | awk '$1=="#define" && $2 !~ /^(_|__)/ && NF==2
 is_effective() { printf '%s\n' "$EFFECTIVE" | grep -qxF "$1"; }
 
 # 预设参数值 -> 它应该打开的宏名。以 create_defineh.bash 的实际映射为准
-# （该脚本按位置取 $1..$8，每个位置各自 case 出一对 #define/#undef——
+# （该脚本按位置取 $1..$7，每个位置各自 case 出一对 #define/#undef——
 # 去读那个脚本才知道，不能靠猜）。这里只列「要求打开」的取值，OFF 类
 # 取值（BGCOFF、CROPOFF……）不隐含任何宏，用不着查。
+#
+# 没有 Campbell/vanGenu 条目——土壤水力方案改成运行时开关之后，
+# create_defineh.bash 不再吃这个参数，两条物理路径始终一起编进去。
 macro_for_arg() {
   case "$1" in
     GRID) echo GRIDBASED ;;
@@ -107,8 +116,6 @@ macro_for_arg() {
     LULC_IGBP_PFT) echo LULC_IGBP_PFT ;;
     LULC_IGBP_PC) echo LULC_IGBP_PC ;;
     URBANON) echo URBAN_MODEL ;;
-    Campbell) echo Campbell_SOIL_MODEL ;;
-    vanGenu) echo vanGenuchten_Mualem_SOIL_MODEL ;;
     CaMaON) echo CaMa_Flood ;;
     BGCON) echo BGC ;;
     CROPON) echo CROP ;;

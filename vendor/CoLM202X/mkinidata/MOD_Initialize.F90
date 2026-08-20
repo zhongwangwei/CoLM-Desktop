@@ -55,9 +55,7 @@ CONTAINS
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
    USE MOD_RangeCheck
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction
-#endif
    USE MOD_SpatialMapping
 #ifdef CatchLateralFlow
    USE MOD_Mesh
@@ -211,12 +209,10 @@ CONTAINS
    real(r8) :: zc_soimm(1:nl_soil)
    real(r8) :: zi_soimm(0:nl_soil)
    real(r8) :: vliq_r  (1:nl_soil)
-#ifdef Campbell_SOIL_MODEL
-   integer, parameter :: nprms = 1
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
+   ! the union now, see the fill further below (Campbell only ever uses
+   ! prms(1,:)).
    integer, parameter :: nprms = 5
-#endif
    real(r8) :: prms(nprms, 1:nl_soil)
 
    real(r8) :: wdsrfm, depthratio
@@ -391,8 +387,13 @@ ENDIF
 #endif
 #endif
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-      IF (p_is_worker) THEN
+      ! alpha_vgm/n_vgm are only meaningfully populated under vanGenuchten
+      ! (see MOD_SoilParametersReadin.F90) -- under Campbell they are
+      ! whatever allocate() left them as, and this build traps on invalid
+      ! FP ops (-ffpe-trap=invalid,zero,overflow), so this has to stay
+      ! gated rather than becoming unconditional like the plain
+      ! declare/allocate cases elsewhere.
+      IF ((.not. DEF_USE_Campbell_SOIL_MODEL) .and. p_is_worker) THEN
          IF (numpatch > 0) THEN
             DO ipatch = 1, numpatch
                DO i = 1, nl_soil
@@ -403,7 +404,6 @@ ENDIF
             ENDDO
          ENDIF
       ENDIF
-#endif
 
 #ifdef CatchLateralFlow
       use_soiltext = .true.
@@ -1363,18 +1363,17 @@ ENDIF
                zwtmm = zwt(i) * 1000.
             ENDIF
 
-#ifdef Campbell_SOIL_MODEL
-            vliq_r(:) = 0.
-            prms(1,1:nl_soil) = bsw(1:nl_soil,i)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-            vliq_r(:) = theta_r(1:nl_soil,i)
-            prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,i)
-            prms(2,1:nl_soil) = n_vgm    (1:nl_soil,i)
-            prms(3,1:nl_soil) = L_vgm    (1:nl_soil,i)
-            prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,i)
-            prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,i)
-#endif
+            IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+               vliq_r(:) = 0.
+               prms(1,1:nl_soil) = bsw(1:nl_soil,i)
+            ELSE
+               vliq_r(:) = theta_r(1:nl_soil,i)
+               prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,i)
+               prms(2,1:nl_soil) = n_vgm    (1:nl_soil,i)
+               prms(3,1:nl_soil) = L_vgm    (1:nl_soil,i)
+               prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,i)
+               prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,i)
+            ENDIF
 #ifdef HYPERSPECTRAL
             CALL flux_frac_init              ( )
             CALL leaf_property_init          ( rho_p, tau_p )

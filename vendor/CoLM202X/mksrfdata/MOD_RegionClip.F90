@@ -427,31 +427,35 @@ CONTAINS
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'wf_sand_s_l'//trim(c1)//'_patches', patchmask)
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-                  ! (7) VGM's pore-connectivity parameter (L)
-                  file_in  = trim(dir_landdata_in)  // '/soil/L_vgm_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/L_vgm_l'//trim(c1)//'_patches.nc'
-                  CALL clip_vector (file_in, file_out, iblk, jblk, &
-                     'L_vgm_l'//trim(c1)//'_patches', patchmask)
+                  ! L_vgm_l/theta_r_l/alpha_vgm_l/n_vgm_l are only written
+                  ! to landdata under vanGenuchten -- under Campbell these
+                  ! .nc files don't exist in dir_landdata_in, so this has
+                  ! to stay gated.
+                  IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+                     ! (7) VGM's pore-connectivity parameter (L)
+                     file_in  = trim(dir_landdata_in)  // '/soil/L_vgm_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/L_vgm_l'//trim(c1)//'_patches.nc'
+                     CALL clip_vector (file_in, file_out, iblk, jblk, &
+                        'L_vgm_l'//trim(c1)//'_patches', patchmask)
 
-                  ! (8) VGM's residual water content (theta_r) [cm3/cm3]
-                  file_in  = trim(dir_landdata_in)  // '/soil/theta_r_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/theta_r_l'//trim(c1)//'_patches.nc'
-                  CALL clip_vector (file_in, file_out, iblk, jblk, &
-                     'theta_r_l'//trim(c1)//'_patches', patchmask)
+                     ! (8) VGM's residual water content (theta_r) [cm3/cm3]
+                     file_in  = trim(dir_landdata_in)  // '/soil/theta_r_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/theta_r_l'//trim(c1)//'_patches.nc'
+                     CALL clip_vector (file_in, file_out, iblk, jblk, &
+                        'theta_r_l'//trim(c1)//'_patches', patchmask)
 
-                  ! (9) VGM's parameter corresponding approximately to the inverse of the air-entry value (alpha)
-                  file_in  = trim(dir_landdata_in)  // '/soil/alpha_vgm_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/alpha_vgm_l'//trim(c1)//'_patches.nc'
-                  CALL clip_vector (file_in, file_out, iblk, jblk, &
-                     'alpha_vgm_l'//trim(c1)//'_patches', patchmask)
+                     ! (9) VGM's parameter corresponding approximately to the inverse of the air-entry value (alpha)
+                     file_in  = trim(dir_landdata_in)  // '/soil/alpha_vgm_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/alpha_vgm_l'//trim(c1)//'_patches.nc'
+                     CALL clip_vector (file_in, file_out, iblk, jblk, &
+                        'alpha_vgm_l'//trim(c1)//'_patches', patchmask)
 
-                  ! (10) VGM's shape parameter (n)
-                  file_in  = trim(dir_landdata_in)  // '/soil/n_vgm_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/n_vgm_l'//trim(c1)//'_patches.nc'
-                  CALL clip_vector (file_in, file_out, iblk, jblk, &
-                     'n_vgm_l'//trim(c1)//'_patches', patchmask)
-#endif
+                     ! (10) VGM's shape parameter (n)
+                     file_in  = trim(dir_landdata_in)  // '/soil/n_vgm_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/n_vgm_l'//trim(c1)//'_patches.nc'
+                     CALL clip_vector (file_in, file_out, iblk, jblk, &
+                        'n_vgm_l'//trim(c1)//'_patches', patchmask)
+                  ENDIF
                   ! (11) saturated water content [cm3/cm3]
                   file_in  = trim(dir_landdata_in)  // '/soil/theta_s_l'//trim(c1)//'_patches.nc'
                   file_out = trim(dir_landdata_out) // '/soil/theta_s_l'//trim(c1)//'_patches.nc'

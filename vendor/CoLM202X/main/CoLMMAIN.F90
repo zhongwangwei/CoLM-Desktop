@@ -13,10 +13,8 @@ SUBROUTINE CoLMMAIN ( &
            wf_gravels,   wf_sand,      porsl,        psi0,         &
            bsw,          theta_r,      fsatmax,      fsatdcf,      &
            topoweti,     alp_twi,      chi_twi,      mu_twi,       &
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
            alpha_vgm,    n_vgm,        L_vgm,        &
            sc_vgm,       fc_vgm,       &
-#endif
            hksati,       csol,         k_solids,     dksatu,       &
            dksatf,       dkdry,        BA_alpha,     BA_beta,      &
            rootfr,       lakedepth,    dz_lake,      elvstd,  BVIC,&
@@ -286,13 +284,11 @@ SUBROUTINE CoLMMAIN ( &
         alp_twi              ,&! alpha in three parameter gamma distribution of twi
         chi_twi              ,&! chi   in three parameter gamma distribution of twi
         mu_twi               ,&! mu    in three parameter gamma distribution of twi
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
         alpha_vgm(1:nl_soil) ,&! parameter corresponding approximately to inverse of air-entry value
         n_vgm    (1:nl_soil) ,&! a shape parameter
         L_vgm    (1:nl_soil) ,&! pore-connectivity parameter
         sc_vgm   (1:nl_soil) ,&! saturation at air entry value in classical vanGenuchten model [-]
         fc_vgm   (1:nl_soil) ,&! a scaling factor by using air entry value in the Mualem model [-]
-#endif
         hksati     (nl_soil) ,&! hydraulic conductivity at saturation [mm h2o/s]
         csol       (nl_soil) ,&! heat capacity of soil solids [J/(m3 K)]
         k_solids   (nl_soil) ,&! thermal conductivity of minerals soil [W/m-K]
@@ -1081,13 +1077,9 @@ SUBROUTINE CoLMMAIN ( &
               dewmx             ,capr              ,cnfac             ,vf_quartz         ,&
               vf_gravels        ,vf_om             ,vf_sand           ,wf_gravels        ,&
               wf_sand           ,csol              ,porsl             ,psi0              ,&
-#ifdef Campbell_SOIL_MODEL
               bsw               ,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
               theta_r           ,alpha_vgm         ,n_vgm             ,L_vgm             ,&
               sc_vgm            ,fc_vgm            ,&
-#endif
               k_solids          ,dksatu            ,dksatf            ,dkdry             ,&
               BA_alpha          ,BA_beta           ,lai               ,laisun            ,&
               laisha            ,sai               ,htop              ,hbot              ,&
@@ -1256,10 +1248,8 @@ SUBROUTINE CoLMMAIN ( &
                  bsw               ,theta_r           ,fsatmax           ,fsatdcf           ,&
                  topoweti          ,alp_twi           ,chi_twi           ,mu_twi            ,&
                  elvstd            ,BVIC              ,&
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                  alpha_vgm         ,n_vgm             ,L_vgm             ,sc_vgm            ,&
                  fc_vgm            ,&
-#endif
                  porsl             ,psi0              ,hksati            ,rootr             ,&
                  rootflux          ,t_soisno(lb:)     ,wliq_soisno(lb:)  ,wice_soisno(lb:)  ,&
                  smp               ,hk                ,pg_rain           ,sm                ,&

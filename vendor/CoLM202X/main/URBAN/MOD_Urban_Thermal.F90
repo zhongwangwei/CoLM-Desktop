@@ -45,13 +45,9 @@ CONTAINS
         zsno           ,capr           ,cnfac          ,vf_quartz      ,&
         vf_gravels     ,vf_om          ,vf_sand        ,wf_gravels     ,&
         wf_sand        ,csol           ,porsl          ,psi0           ,&
-#ifdef Campbell_SOIL_MODEL
         bsw                                                            ,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
         theta_r        ,alpha_vgm      ,n_vgm          ,L_vgm          ,&
         sc_vgm         ,fc_vgm                                         ,&
-#endif
         k_solids       ,dksatu         ,dksatf         ,dkdry          ,&
         BA_alpha       ,BA_beta                                        ,&
         cv_roof        ,cv_wall        ,cv_gimp                        ,&
@@ -109,7 +105,7 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: denh2o,roverg,hvap,hsub,rgas,cpair,&
                                  stefnc,denice,tfrz,vonkar,grav
@@ -125,9 +121,7 @@ CONTAINS
    USE MOD_Urban_BEM
    USE MOD_Urban_LUCY, only: LUCY
    USE MOD_Eroot, only: eroot
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq
-#endif
 
    IMPLICIT NONE
 
@@ -212,10 +206,7 @@ CONTAINS
         csol      (1:nl_soil)          ,&! heat capacity of soil solids [J/(m3 K)]
         porsl     (1:nl_soil)          ,&! soil porosity [-]
         psi0      (1:nl_soil)          ,&! soil water suction, negative potential [mm]
-#ifdef Campbell_SOIL_MODEL
         bsw       (1:nl_soil)          ,&! clapp and hornberger "b" parameter [-]
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
         theta_r   (1:nl_soil)          ,&! residual water content (cm3/cm3)
 
         alpha_vgm (1:nl_soil)  ,&! parameter correspond approximately to inverse of air-entry value
@@ -223,7 +214,6 @@ CONTAINS
         L_vgm     (1:nl_soil)  ,&! pore-connectivity parameter
         sc_vgm    (1:nl_soil)  ,&! saturation at air entry value in classical vanGenuchten model [-]
         fc_vgm    (1:nl_soil)  ,&! a scaling factor by using air entry value in the Mualem model [-]
-#endif
         k_solids  (1:nl_soil)          ,&! thermal conductivity of minerals soil [W/m-K]
         dkdry     (1:nl_soil)          ,&! thermal conductivity of dry soil [W/m-K]
         dksatu    (1:nl_soil)          ,&! thermal conductivity of saturated unfrozen soil [W/m-K]
@@ -698,14 +688,13 @@ CONTAINS
             fac = max( fac, 0.001 )
          ENDIF
 
-#ifdef Campbell_SOIL_MODEL
-         psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-         psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
-            porsl(1), theta_r(1), psi0(1), &
-            5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
-#endif
+         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+            psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
+         ELSE
+            psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
+               porsl(1), theta_r(1), psi0(1), &
+               5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
+         ENDIF
          psit = max( -1.e8, psit )
          hr   = exp(psit/roverg/tgper)
          qred = (1.-fsno_gper)*hr + fsno_gper
@@ -850,12 +839,8 @@ CONTAINS
 
          ! soil water stress factor on stomatal resistance
          CALL eroot (nl_soil,trsmx0,porsl,&
-#ifdef Campbell_SOIL_MODEL
             bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-#endif
             psi0,rootfr,dz_gpersno,t_gpersno,wliq_gpersno,rootr,etrc,rstfac)
 
          nurb = 3
@@ -998,13 +983,9 @@ CONTAINS
            capr,cnfac,csol,k_solids,porsl,psi0,dkdry,dksatu,dksatf,&
            vf_quartz,vf_gravels,vf_om,vf_sand,wf_gravels,wf_sand,&
            BA_alpha, BA_beta,&
-#ifdef Campbell_SOIL_MODEL
            bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
            theta_r,alpha_vgm,n_vgm,L_vgm,&
            sc_vgm,fc_vgm,&
-#endif
            dz_gpersno,z_gpersno,zi_gpersno,&
            t_gpersno,wice_gpersno,wliq_gpersno,scv_gper,snowdp_gper,&
            lgper,clgper,sabgper,fsengper,fevpgper,cgper,htvp_gper,&

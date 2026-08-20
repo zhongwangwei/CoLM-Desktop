@@ -30,13 +30,9 @@ CONTAINS
                                 capr,cnfac,csol,k_solids,porsl,psi0,dkdry,dksatu,dksatf,&
                                 vf_quartz,vf_gravels,vf_om,vf_sand,wf_gravels,wf_sand,&
                                 BA_alpha, BA_beta,&
-#ifdef Campbell_SOIL_MODEL
                                 bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                                 theta_r,alpha_vgm,n_vgm,L_vgm,&
                                 sc_vgm,fc_vgm,&
-#endif
                                 dz_gpersno,z_gpersno,zi_gpersno,&
                                 t_gpersno,wice_gpersno,wliq_gpersno,scv_gper,snowdp_gper,&
                                 lgper,clgper,sabgper,fsengper,fevpgper,cgper,htvp,&
@@ -103,17 +99,13 @@ CONTAINS
    real(r8), intent(in) :: BA_alpha  (1:nl_soil)       !alpha in Balland and Arp(2005) thermal cond.
    real(r8), intent(in) :: BA_beta   (1:nl_soil)       !beta in Balland and Arp(2005) thermal cond.
 
-#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw       (1:nl_soil)       !clapp and hornberger "b" parameter [-]
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r   (1:nl_soil),&     !soil parameter for vanGenuchten scheme
                            alpha_vgm (1:nl_soil),&     !soil parameter for vanGenuchten scheme
                            n_vgm     (1:nl_soil),&     !soil parameter for vanGenuchten scheme
                            L_vgm     (1:nl_soil),&     !soil parameter for vanGenuchten scheme
                            sc_vgm    (1:nl_soil),&     !soil parameter for vanGenuchten scheme
                            fc_vgm    (1:nl_soil)       !soil parameter for vanGenuchten scheme
-#endif
 
    real(r8), intent(in) :: dz_gpersno(lb  :nl_soil)    !layer thickness [m]
    real(r8), intent(in) :: z_gpersno (lb  :nl_soil)    !node depth [m]
@@ -299,13 +291,9 @@ CONTAINS
                   t_gpersno_bef(lb:),t_gpersno(lb:),&
                   wliq_gpersno(lb:),wice_gpersno(lb:),imelt(lb:),&
                   scv_gper,snowdp_gper,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                   bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                   theta_r,alpha_vgm,n_vgm,L_vgm,&
                   sc_vgm,fc_vgm,&
-#endif
                   dz_soi(1:nl_soil))
 
    END SUBROUTINE UrbanPerviousTem

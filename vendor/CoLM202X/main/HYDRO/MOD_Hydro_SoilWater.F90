@@ -17,7 +17,7 @@ MODULE MOD_Hydro_SoilWater
 
    USE MOD_Precision
    USE MOD_Hydro_SoilFunction
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_UserDefFun, only: findloc_ud
 
    IMPLICIT NONE
@@ -2740,14 +2740,13 @@ CONTAINS
 
       CASE (type_weighted_geometric_mean)
 
-#ifdef Campbell_SOIL_MODEL
-         ! bsw => prms(1)
-         r0 = 1.0_r8 / (3.0_r8 / prms(1) + 2.0_r8)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-         ! n_gm => prms(2), L_gm => prms(3)
-         r0 = 1.0_r8 / (prms(3) * (prms(2) - 1.0_r8) + prms(2) * 2.0_r8)
-#endif
+         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+            ! bsw => prms(1)
+            r0 = 1.0_r8 / (3.0_r8 / prms(1) + 2.0_r8)
+         ELSE
+            ! n_gm => prms(2), L_gm => prms(3)
+            r0 = 1.0_r8 / (prms(3) * (prms(2) - 1.0_r8) + prms(2) * 2.0_r8)
+         ENDIF
 
          IF (grad_psi < 0) THEN
             rr = r0

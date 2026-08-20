@@ -21,13 +21,9 @@ CONTAINS
    SUBROUTINE GroundTemperature (patchtype,is_dry_lake,lb,nl_soil,deltim,&
                          capr,cnfac,vf_quartz,vf_gravels,vf_om,vf_sand,wf_gravels,wf_sand,&
                          porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                          bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                          theta_r, alpha_vgm, n_vgm, L_vgm,&
                          sc_vgm , fc_vgm,&
-#endif
                          csol,k_solids,dksatu,dksatf,dkdry,&
                          BA_alpha,BA_beta,&
                          sigf,dz_soisno,z_soisno,zi_soisno,&
@@ -73,7 +69,7 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_Const_Physical, only: stefnc,denh2o,denice,tfrz,cpice,cpliq,tkwat,tkice,tkair
-   USE MOD_Namelist, only: DEF_USE_SNICAR, DEF_SPLIT_SOILSNOW
+   USE MOD_Namelist, only: DEF_USE_SNICAR, DEF_SPLIT_SOILSNOW, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_PhaseChange
    USE MOD_SoilThermalParameters
    USE MOD_SPMD_Task
@@ -102,17 +98,13 @@ CONTAINS
 
    real(r8), intent(in) :: porsl(1:nl_soil)        !soil porosity [-]
    real(r8), intent(in) :: psi0 (1:nl_soil)        !soil water suction, negative potential [mm]
-#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw(1:nl_soil)          !clapp and hornberger "b" parameter [-]
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r  (1:nl_soil), & !
                            alpha_vgm(1:nl_soil), & !
                            n_vgm    (1:nl_soil), & !
                            L_vgm    (1:nl_soil), & !
                            sc_vgm   (1:nl_soil), & !
                            fc_vgm   (1:nl_soil)
-#endif
    real(r8), intent(in) :: csol     (1:nl_soil)    !heat capacity of soil solids [J/(m3 K)]
    real(r8), intent(in) :: k_solids (1:nl_soil)    !thermal cond. of minerals soil [W/m-K]
    real(r8), intent(in) :: dksatu   (1:nl_soil)    !thermal cond. of sat. unfrozen soil [W/m-K]
@@ -421,13 +413,9 @@ CONTAINS
                   fact(lb:),brr(lb:),hs,hs_soil,hs_snow,fsno,sabg_snow_lyr(lb:),dhsdT, &
                   t_soisno_bef(lb:),t_soisno(lb:),wliq_soisno(lb:),wice_soisno(lb:),imelt(lb:), &
                   scv,snowdp,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                   bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                   theta_r,alpha_vgm,n_vgm,L_vgm,&
                   sc_vgm,fc_vgm,&
-#endif
                   dz_soisno(1:nl_soil) &
 #ifdef TRACER
                  ,qphs_thaw_lay = qphs_thaw_lay, &
@@ -447,13 +435,9 @@ CONTAINS
                   fact(lb:),brr(lb:),hs,hs_soil,hs_snow,fsno,dhsdT, &
                   t_soisno_bef(lb:),t_soisno(lb:),wliq_soisno(lb:),wice_soisno(lb:),imelt(lb:), &
                   scv,snowdp,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                   bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                   theta_r,alpha_vgm,n_vgm,L_vgm,&
                   sc_vgm,fc_vgm,&
-#endif
                   dz_soisno(1:nl_soil) &
 #ifdef TRACER
                  ,qphs_thaw_lay = qphs_thaw_lay, &

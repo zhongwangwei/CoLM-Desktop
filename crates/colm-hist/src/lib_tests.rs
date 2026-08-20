@@ -5,17 +5,16 @@ use super::*;
 /// `CoLMDEBUG` / `RangeCheck` 不再在这里——调试三件套改成运行时开关
 /// （`DEF_USE_*`，`MOD_Namelist.F90`）之后，`create_defineh.bash` 不再
 /// `#define` 它们，`manifest.json` 的 `macros` 也就不再列出它们了。
-/// 没有任何 `Var.macros` 的 `Cond` 引用过这两个名字，所以这条改动不影响
-/// 下面两条测试的计数。
+/// `vanGenuchten_Mualem_SOIL_MODEL` 同理——土壤水力方案也改成运行时开关
+/// 之后不再是宏。`extend_interception` 还在：它没有对应的运行时开关
+/// （见 `MOD_Namelist.F90` 里的说明，它是编译期文件选择，不是简单的
+/// body-level 分支），`create_defineh.bash` 仍然无条件 `#define` 它。
+/// 没有任何 `Var.macros` 的 `Cond` 引用过 `vanGenuchten_Mualem_SOIL_MODEL`，
+/// 所以这条改动不影响下面两条测试的计数。
 fn default() -> BTreeSet<&'static str> {
-    [
-        "LULC_IGBP",
-        "SinglePoint",
-        "extend_interception",
-        "vanGenuchten_Mualem_SOIL_MODEL",
-    ]
-    .into_iter()
-    .collect()
+    ["LULC_IGBP", "SinglePoint", "extend_interception"]
+        .into_iter()
+        .collect()
 }
 
 #[test]

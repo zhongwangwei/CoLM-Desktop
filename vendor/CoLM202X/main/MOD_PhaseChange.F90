@@ -23,13 +23,9 @@ CONTAINS
                      fact,brr,hs,hs_soil,hs_snow,fsno,dhsdT, &
                      t_soisno_bef,t_soisno,wliq_soisno,wice_soisno,imelt, &
                      scv,snowdp,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                      bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                      theta_r,alpha_vgm,n_vgm,L_vgm,&
                      sc_vgm,fc_vgm,&
-#endif
                      dz &
 #ifdef TRACER
                     ,qphs_thaw_lay, qphs_frzc_lay &
@@ -82,17 +78,13 @@ CONTAINS
    real(r8), intent(in) :: dhsdT                       !temperature derivative of "hs"
    real(r8), intent(in) :: porsl(1:nl_soil)            !soil porosity [-]
    real(r8), intent(in) :: psi0 (1:nl_soil)            !soil water suction, negative potential [mm]
-#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw(1:nl_soil)              !clapp and hornberger "b" parameter [-]
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r  (1:nl_soil), &
                            alpha_vgm(1:nl_soil), &
                            n_vgm    (1:nl_soil), &
                            L_vgm    (1:nl_soil), &
                            sc_vgm   (1:nl_soil), &
                            fc_vgm   (1:nl_soil)
-#endif
    real(r8), intent(in) :: dz(1:nl_soil)               !soil layer thickness [m]
 
    real(r8), intent(inout) :: t_soisno   (lb:nl_soil)  !temperature at current time step [K]
@@ -150,12 +142,12 @@ CONTAINS
             IF(t_soisno(j) < tfrz .and. ((patchtype <=2) .or. is_dry_lake)) THEN
                smp = hfus * (t_soisno(j)-tfrz)/(grav*t_soisno(j)) * 1000.     ! mm
                IF (porsl(j) > 0.) THEN
-#ifdef Campbell_SOIL_MODEL
-                  supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
-#else
-                  supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
-                     (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
-#endif
+                  IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+                     supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
+                  ELSE
+                     supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
+                        (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
+                  ENDIF
                ELSE
                   supercool(j) = 0.
                ENDIF
@@ -345,13 +337,9 @@ CONTAINS
                      fact,brr,hs,hs_soil,hs_snow,fsno,sabg_snow_lyr,dhsdT, &
                      t_soisno_bef,t_soisno,wliq_soisno,wice_soisno,imelt, &
                      scv,snowdp,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                      bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                      theta_r,alpha_vgm,n_vgm,L_vgm,&
                      sc_vgm,fc_vgm,&
-#endif
                      dz &
 #ifdef TRACER
                     ,qphs_thaw_lay, qphs_frzc_lay &
@@ -405,17 +393,13 @@ CONTAINS
    real(r8), intent(in) :: sabg_snow_lyr (lb:1)        !snow layer absorption [W/m-2]
    real(r8), intent(in) :: porsl(1:nl_soil)            !soil porosity [-]
    real(r8), intent(in) :: psi0 (1:nl_soil)            !soil water suction, negative potential [mm]
-#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw(1:nl_soil)              !clapp and hornberger "b" parameter [-]
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r  (1:nl_soil), &
                            alpha_vgm(1:nl_soil), &
                            n_vgm    (1:nl_soil), &
                            L_vgm    (1:nl_soil), &
                            sc_vgm   (1:nl_soil), &
                            fc_vgm   (1:nl_soil)
-#endif
    real(r8), intent(in) :: dz(1:nl_soil)               !soil layer thickness [m]
 
    real(r8), intent(inout) :: t_soisno (lb:nl_soil)    !temperature at current time step [K]
@@ -474,12 +458,12 @@ CONTAINS
             IF(t_soisno(j) < tfrz .and. ((patchtype <= 2) .or. is_dry_lake)) THEN
                smp = hfus * (t_soisno(j)-tfrz)/(grav*t_soisno(j)) * 1000.     ! mm
                IF (porsl(j) > 0.) THEN
-#ifdef Campbell_SOIL_MODEL
-                  supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
-#else
-                  supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
-                     (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
-#endif
+                  IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+                     supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
+                  ELSE
+                     supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
+                        (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
+                  ENDIF
                ELSE
                   supercool(j) = 0.
                ENDIF

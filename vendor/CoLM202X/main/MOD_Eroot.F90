@@ -19,12 +19,8 @@ CONTAINS
 
 
    SUBROUTINE eroot (nl_soil,trsmx0,porsl, &
-#ifdef Campbell_SOIL_MODEL
          bsw, &
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
          theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-#endif
          psi0,rootfr, dz_soisno,t_soisno,wliq_soisno,rootr,etrc,rstfac)
 
 !=======================================================================
@@ -40,11 +36,9 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_Const_Physical, only: denh2o
-   USE MOD_Namelist, only: DEF_RSTFAC
+   USE MOD_Namelist, only: DEF_RSTFAC, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_Const_Physical, only: tfrz
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq, soil_vliq_from_psi
-#endif
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -53,17 +47,13 @@ CONTAINS
 
    real(r8), intent(in) :: trsmx0                 ! max transpiration for moist soil+100% veg.[mm/s]
    real(r8), intent(in) :: porsl(1:nl_soil)       ! soil porosity [-]
-#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw(1:nl_soil)         ! Clapp-Hornberger "B"
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r  (1:nl_soil)
    real(r8), intent(in) :: alpha_vgm(1:nl_soil)
    real(r8), intent(in) :: n_vgm    (1:nl_soil)
    real(r8), intent(in) :: L_vgm    (1:nl_soil)
    real(r8), intent(in) :: sc_vgm   (1:nl_soil)
    real(r8), intent(in) :: fc_vgm   (1:nl_soil)
-#endif
    real(r8), intent(in) :: psi0(1:nl_soil)        ! saturated soil suction (mm) (NEGATIVE)
    real(r8), intent(in) :: rootfr(1:nl_soil)      ! fraction of roots in a layer,
    real(r8), intent(in) :: dz_soisno(1:nl_soil)   ! layer thickness (m)
@@ -100,15 +90,14 @@ CONTAINS
             smpmax = -1.5e5
             s_node = max(wliq_soisno(i)/(1000.*dz_soisno(i)*porsl(i)),0.001)
             s_node = min(1., s_node)
-#ifdef Campbell_SOIL_MODEL
-            smp_node = max(smpmax, psi0(i)*s_node**(-bsw(i)))
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-            smp_node = soil_psi_from_vliq ( s_node*(porsl(i)-theta_r(i)) + theta_r(i), &
-               porsl(i), theta_r(i), psi0(i), &
-               5, (/alpha_vgm(i), n_vgm(i), L_vgm(i), sc_vgm(i), fc_vgm(i)/))
-            smp_node = max(smpmax, smp_node)
-#endif
+            IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+               smp_node = max(smpmax, psi0(i)*s_node**(-bsw(i)))
+            ELSE
+               smp_node = soil_psi_from_vliq ( s_node*(porsl(i)-theta_r(i)) + theta_r(i), &
+                  porsl(i), theta_r(i), psi0(i), &
+                  5, (/alpha_vgm(i), n_vgm(i), L_vgm(i), sc_vgm(i), fc_vgm(i)/))
+               smp_node = max(smpmax, smp_node)
+            ENDIF
             rresis(i) =(1.-smp_node/smpmax)/(1.-psi0(i)/smpmax)
             rootr(i) = rootfr(i)*rresis(i)
             roota = roota + rootr(i)
@@ -121,18 +110,17 @@ CONTAINS
       roota = 1.e-10  
       DO i = 1, nl_soil
          IF(t_soisno(i)>tfrz .and. porsl(i)>=1.e-6)THEN
-#ifdef Campbell_SOIL_MODEL
-            liqswc = denh2o*dz_soisno(i)*porsl(i)*((smpswc/psi0(i))**(-1/bsw(i)))
-            liqsfc = denh2o*dz_soisno(i)*porsl(i)*((smpsfc/psi0(i))**(-1/bsw(i)))
-            liqsat = denh2o*dz_soisno(i)*porsl(i)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-            liqswc = soil_vliq_from_psi(smpswc, porsl(i), theta_r(i), psi0(i), 5, (/alpha_vgm(i), n_vgm(i), L_vgm(i), sc_vgm(i), fc_vgm(i)/))
-            liqswc = denh2o*dz_soisno(i)*liqswc
-            liqsfc = soil_vliq_from_psi(smpsfc, porsl(i), theta_r(i), psi0(i), 5, (/alpha_vgm(i), n_vgm(i), L_vgm(i), sc_vgm(i), fc_vgm(i)/))
-            liqsfc = denh2o*dz_soisno(i)*liqsfc
-            liqsat = denh2o*dz_soisno(i)*porsl(i)
-#endif
+            IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+               liqswc = denh2o*dz_soisno(i)*porsl(i)*((smpswc/psi0(i))**(-1/bsw(i)))
+               liqsfc = denh2o*dz_soisno(i)*porsl(i)*((smpsfc/psi0(i))**(-1/bsw(i)))
+               liqsat = denh2o*dz_soisno(i)*porsl(i)
+            ELSE
+               liqswc = soil_vliq_from_psi(smpswc, porsl(i), theta_r(i), psi0(i), 5, (/alpha_vgm(i), n_vgm(i), L_vgm(i), sc_vgm(i), fc_vgm(i)/))
+               liqswc = denh2o*dz_soisno(i)*liqswc
+               liqsfc = soil_vliq_from_psi(smpsfc, porsl(i), theta_r(i), psi0(i), 5, (/alpha_vgm(i), n_vgm(i), L_vgm(i), sc_vgm(i), fc_vgm(i)/))
+               liqsfc = denh2o*dz_soisno(i)*liqsfc
+               liqsat = denh2o*dz_soisno(i)*porsl(i)
+            ENDIF
             rresis(i) = (wliq_soisno(i)-liqswc)/(liqsfc-liqswc)
             rresis(i) = min(1.0, rresis(i))
             rresis(i) = max(0.0, rresis(i))

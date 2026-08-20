@@ -668,17 +668,16 @@ CONTAINS
 
    real(r8) :: porsl(1:nl_ice)    ! not used
    real(r8) :: psi0 (1:nl_ice)    ! not used
-#ifdef Campbell_SOIL_MODEL
+   ! bsw/theta_r/alpha_vgm/... are not used by glacier ice either way --
+   ! both sets are always declared and passed through unconditionally to
+   ! meltf/meltf_snicar just to satisfy that shared interface.
    real(r8) :: bsw(1:nl_ice)      ! not used
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8) :: theta_r  (1:nl_ice), &
                alpha_vgm(1:nl_ice), &
                n_vgm    (1:nl_ice), &
                L_vgm    (1:nl_ice), &
                sc_vgm   (1:nl_ice), &
                fc_vgm   (1:nl_ice)
-#endif
 
 !-----------------------------------------------------------------------
 ! SNOW and LAND ICE heat capacity
@@ -832,13 +831,9 @@ CONTAINS
                    fact(lb:),brr(lb:),hs,hs,hs,1.,sabg_snow_lyr(lb:),dhsdT, &
                    t_icesno_bef(lb:),t_icesno(lb:),wliq_icesno(lb:),wice_icesno(lb:),imelt(lb:), &
                    scv,snowdp,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                    bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                    theta_r,alpha_vgm,n_vgm,L_vgm,&
                    sc_vgm,fc_vgm,&
-#endif
                    dz_icesno(1:))
 
          ! layer freezing mass flux (positive):
@@ -856,13 +851,9 @@ CONTAINS
                    fact(lb:),brr(lb:),hs,hs,hs,1.,dhsdT, &
                    t_icesno_bef(lb:),t_icesno(lb:),wliq_icesno(lb:),wice_icesno(lb:),imelt(lb:), &
                    scv,snowdp,sm,xmf,porsl,psi0,&
-#ifdef Campbell_SOIL_MODEL
                    bsw,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                    theta_r,alpha_vgm,n_vgm,L_vgm,&
                    sc_vgm,fc_vgm,&
-#endif
                    dz_icesno(1:))
       ENDIF
 

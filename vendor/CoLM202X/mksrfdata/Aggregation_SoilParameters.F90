@@ -75,12 +75,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
    type (block_data_real8_2d) :: theta_s_grid
    type (block_data_real8_2d) :: psi_s_grid
    type (block_data_real8_2d) :: lambda_grid
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    type (block_data_real8_2d) :: theta_r_grid
    type (block_data_real8_2d) :: alpha_vgm_grid
    type (block_data_real8_2d) :: L_vgm_grid
    type (block_data_real8_2d) :: n_vgm_grid
-#endif
    type (block_data_real8_2d) :: k_s_grid
    type (block_data_real8_2d) :: csol_grid
    type (block_data_real8_2d) :: tksatu_grid
@@ -102,12 +100,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
    real(r8), allocatable :: theta_s_patches (:)
    real(r8), allocatable :: psi_s_patches   (:)
    real(r8), allocatable :: lambda_patches  (:)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), allocatable :: theta_r_patches (:)
    real(r8), allocatable :: alpha_vgm_patches  (:)
    real(r8), allocatable :: L_vgm_patches  (:)
    real(r8), allocatable :: n_vgm_patches  (:)
-#endif
    real(r8), allocatable :: k_s_patches     (:)
    real(r8), allocatable :: csol_patches    (:)
    real(r8), allocatable :: tksatu_patches  (:)
@@ -131,12 +127,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
    real(r8), allocatable :: theta_s_one (:)
    real(r8), allocatable :: psi_s_one   (:)
    real(r8), allocatable :: lambda_one  (:)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), allocatable :: theta_r_one  (:)
    real(r8), allocatable :: alpha_vgm_one  (:)
    real(r8), allocatable :: L_vgm_one  (:)
    real(r8), allocatable :: n_vgm_one  (:)
-#endif
    real(r8), allocatable :: k_s_one     (:)
    real(r8), allocatable :: csol_one    (:)
    real(r8), allocatable :: tksatu_one  (:)
@@ -251,12 +245,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
          allocate ( theta_s_patches            (numpatch) )
          allocate ( psi_s_patches              (numpatch) )
          allocate ( lambda_patches             (numpatch) )
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
          allocate ( theta_r_patches   (numpatch) )
          allocate ( alpha_vgm_patches (numpatch) )
          allocate ( L_vgm_patches     (numpatch) )
          allocate ( n_vgm_patches     (numpatch) )
-#endif
          allocate ( k_s_patches       (numpatch) )
          allocate ( csol_patches      (numpatch) )
          allocate ( tksatu_patches    (numpatch) )
@@ -599,7 +591,13 @@ SUBROUTINE Aggregation_SoilParameters ( &
             -1.0e36_r8, lndname, 'wf_sand_s_l'//trim(c), compress = 1, write_mode = 'one')
          ENDIF
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         ! theta_r/alpha_vgm/L_vgm/n_vgm raw data and their VGM-specific
+         ! aggregation only apply under vanGenuchten -- under Campbell the
+         ! matching #ifndef block below reads theta_s/k_s on its own
+         ! instead (they're folded into this combined request when it
+         ! runs). Used to be #ifdef vanGenuchten_Mualem_SOIL_MODEL /
+         ! #ifndef vanGenuchten_Mualem_SOIL_MODEL, now a runtime pair.
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
 
          ! (7) VGM's pore-connectivity parameter (L)
          ! (8) VGM's residual water content (theta_r) [cm3/cm3]
@@ -873,7 +871,7 @@ SUBROUTINE Aggregation_SoilParameters ( &
             -1.0e36_r8, lndname, 'L_vgm_l'//trim(c), compress = 1, write_mode = 'one')
          ENDIF
 
-#endif
+         ENDIF
 
          ! (11) saturated water content [cm3/cm3]
          ! (12) saturated hydraulic conductivity [cm/day]
@@ -882,15 +880,15 @@ SUBROUTINE Aggregation_SoilParameters ( &
 
          IF (p_is_io) THEN
 
-#ifndef vanGenuchten_Mualem_SOIL_MODEL
-            CALL allocate_block_data (gland, theta_s_grid)
-            lndname = trim(dir_rawdata)//'/soil/theta_s.nc'
-            CALL ncio_read_block (lndname, 'theta_s_l'//trim(c), gland, theta_s_grid)
+            IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+               CALL allocate_block_data (gland, theta_s_grid)
+               lndname = trim(dir_rawdata)//'/soil/theta_s.nc'
+               CALL ncio_read_block (lndname, 'theta_s_l'//trim(c), gland, theta_s_grid)
 
-            CALL allocate_block_data (gland, k_s_grid)
-            lndname = trim(dir_rawdata)//'/soil/k_s.nc'
-            CALL ncio_read_block (lndname, 'k_s_l'//trim(c), gland, k_s_grid)
-#endif
+               CALL allocate_block_data (gland, k_s_grid)
+               lndname = trim(dir_rawdata)//'/soil/k_s.nc'
+               CALL ncio_read_block (lndname, 'k_s_l'//trim(c), gland, k_s_grid)
+            ENDIF
 
             CALL allocate_block_data (gland, psi_s_grid)
             lndname = trim(dir_rawdata)//'/soil/psi_s.nc'
@@ -1030,7 +1028,9 @@ SUBROUTINE Aggregation_SoilParameters ( &
          CALL check_vector_data ('lambda lev '//trim(c), lambda_patches)
          ENDIF
 
-#ifndef vanGenuchten_Mualem_SOIL_MODEL
+         ! Under vanGenuchten these were already written in the combined
+         ! block above; under Campbell they weren't, so write them here.
+         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
          lndname = trim(landdir)//'/theta_s_l'//trim(c)//'_patches.nc'
          CALL ncio_create_file_vector (lndname, landpatch)
          CALL ncio_define_dimension_vector (lndname, landpatch, 'patch')
@@ -1056,7 +1056,7 @@ SUBROUTINE Aggregation_SoilParameters ( &
          CALL srfdata_map_and_write (k_s_patches, landpatch%settyp, typpatch, m_patch2diag, &
             -1.0e36_r8, lndname, 'k_s_l'//trim(c), compress = 1, write_mode = 'one')
          ENDIF
-#endif
+         ENDIF
 
          lndname = trim(landdir)//'/psi_s_l'//trim(c)//'_patches.nc'
          CALL ncio_create_file_vector (lndname, landpatch)
@@ -1512,12 +1512,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
          deallocate ( theta_s_patches )
          deallocate ( psi_s_patches   )
          deallocate ( lambda_patches  )
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
          deallocate ( theta_r_patches  )
          deallocate ( alpha_vgm_patches)
          deallocate ( L_vgm_patches    )
          deallocate ( n_vgm_patches    )
-#endif
          deallocate ( k_s_patches     )
          deallocate ( csol_patches    )
          deallocate ( tksatu_patches  )
@@ -1541,12 +1539,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
          IF (allocated(theta_s_one))             deallocate (theta_s_one)
          IF (allocated(psi_s_one  ))             deallocate (psi_s_one  )
          IF (allocated(lambda_one ))     deallocate (lambda_one )
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
          IF (allocated ( theta_r_one  )) deallocate ( theta_r_one  )
          IF (allocated ( alpha_vgm_one)) deallocate ( alpha_vgm_one)
          IF (allocated ( L_vgm_one    )) deallocate ( L_vgm_one    )
          IF (allocated ( n_vgm_one    )) deallocate ( n_vgm_one    )
-#endif
          IF (allocated(k_s_one    ))     deallocate (k_s_one    )
          IF (allocated(csol_one   ))     deallocate (csol_one   )
          IF (allocated(tksatu_one ))     deallocate (tksatu_one )

@@ -79,10 +79,8 @@
            vf_quartz    ,vf_gravels   ,vf_om        ,vf_sand      ,&
            wf_gravels   ,wf_sand      ,porsl        ,psi0         ,&
            bsw          ,theta_r      ,fsatmax      ,fsatdcf      ,&
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
            alpha_vgm    ,n_vgm        ,L_vgm                      ,&
            sc_vgm       ,fc_vgm                                   ,&
-#endif
            hksati       ,csol         ,k_solids     ,dksatu       ,&
            dksatf       ,dkdry        ,BA_alpha     ,BA_beta      ,&
            alb_roof     ,alb_wall     ,alb_gimp     ,alb_gper     ,&
@@ -261,13 +259,11 @@
         fsatmax               ,&! maximum saturated area fraction [-]
         fsatdcf               ,&! decay factor in calculation of saturated area fraction [1/m]
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
         alpha_vgm (1:nl_soil) ,&! parameter correspond approximately to inverse of air-entry value
         n_vgm     (1:nl_soil) ,&! a shape parameter
         L_vgm     (1:nl_soil) ,&! pore-connectivity parameter
         sc_vgm    (1:nl_soil) ,&! saturation at air entry value in classical vanGenuchten model [-]
         fc_vgm    (1:nl_soil) ,&! a scaling factor by using air entry value in the Mualem model [-]
-#endif
         hksati      (nl_soil) ,&! hydraulic conductivity at saturation [mm h2o/s]
         csol        (nl_soil) ,&! heat capacity of soil solids [J/(m3 K)]
         k_solids    (nl_soil) ,&! thermal conductivity of minerals soil [W/m-K]
@@ -994,13 +990,9 @@
          zsno               ,capr               ,cnfac              ,vf_quartz          ,&
          vf_gravels         ,vf_om              ,vf_sand            ,wf_gravels         ,&
          wf_sand            ,csol               ,porsl              ,psi0               ,&
-#ifdef Campbell_SOIL_MODEL
          bsw                                                                            ,&
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
          theta_r            ,alpha_vgm          ,n_vgm              ,L_vgm              ,&
          sc_vgm             ,fc_vgm                                                     ,&
-#endif
          k_solids           ,dksatu             ,dksatf             ,dkdry              ,&
          BA_alpha           ,BA_beta                                                    ,&
          cv_roof            ,cv_wall            ,cv_gimp                                ,&

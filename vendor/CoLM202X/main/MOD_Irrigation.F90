@@ -6,7 +6,8 @@ MODULE MOD_Irrigation
 !      This MODULE has all irrigation related subroutines for irrigated crop at either IGBP/USGS or PFT Land type classification and even in the C and N cycle.
    USE MOD_Precision
    USE MOD_TimeManager
-   USE MOD_Namelist, only: DEF_simulation_time, DEF_IRRIGATION_ALLOCATION, DEF_USE_VariablySaturatedFlow
+   USE MOD_Namelist, only: DEF_simulation_time, DEF_IRRIGATION_ALLOCATION, DEF_USE_VariablySaturatedFlow, &
+       DEF_USE_Campbell_SOIL_MODEL
    USE MOD_Const_Physical, only: tfrz, denice, denh2o
    USE MOD_Const_PFT, only: irrig_crop
    USE MOD_LandPFT, only : patch_pft_s, patch_pft_e
@@ -14,9 +15,7 @@ MODULE MOD_Irrigation
        irrig_method_drip, irrig_method_sprinkler, irrig_method_flood, irrig_method_paddy
    USE MOD_Qsadv, only: qsadv
    USE MOD_Vars_TimeInvariants, only: pondmx, &
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
        theta_r, alpha_vgm, n_vgm, L_vgm, fc_vgm, sc_vgm,&
-#endif
        porsl, psi0, bsw
    USE MOD_Vars_TimeVariables, only: tref, t_soisno, wliq_soisno, wice_soisno, zwt, wa, &
        irrig_rate, sum_irrig, sum_deficit_irrig, sum_irrig_count, n_irrig_steps_left, &
@@ -166,20 +165,19 @@ CONTAINS
       !  calculate wilting point and field capacity
       DO j = 1, nl_soil
          IF (t_soisno(j,i) > tfrz .and. porsl(j,i) >= 1.e-6) THEN
-#ifdef Campbell_SOIL_MODEL
-            h2osoi_liq_wilting_point(j) = denh2o*dz_soi(j)*porsl(j,i)*((smpswc/psi0(j,i))**(-1/bsw(j,i)))
-            h2osoi_liq_field_capacity(j) = denh2o*dz_soi(j)*porsl(j,i)*((smpsfc/psi0(j,i))**(-1/bsw(j,i)))
-            h2osoi_liq_saturation_capacity(j) = denh2o*dz_soi(j)*porsl(j,i)
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-            h2osoi_liq_wilting_point(j) = soil_vliq_from_psi(smpswc, porsl(j,i), theta_r(j,i), psi0(j,i), 5, &
-              (/alpha_vgm(j,i), n_vgm(j,i), L_vgm(j,i), sc_vgm(j,i), fc_vgm(j,i)/))
-            h2osoi_liq_wilting_point(j) = denh2o*dz_soi(j)*h2osoi_liq_wilting_point(j)
-            h2osoi_liq_field_capacity(j) = soil_vliq_from_psi(smpsfc, porsl(j,i), theta_r(j,i), psi0(j,i), 5, &
-              (/alpha_vgm(j,i), n_vgm(j,i), L_vgm(j,i), sc_vgm(j,i), fc_vgm(j,i)/))
-            h2osoi_liq_field_capacity(j) = denh2o*dz_soi(j)*h2osoi_liq_field_capacity(j)
-            h2osoi_liq_saturation_capacity(j) = denh2o*dz_soi(j)*porsl(j,i)
-#endif
+            IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+               h2osoi_liq_wilting_point(j) = denh2o*dz_soi(j)*porsl(j,i)*((smpswc/psi0(j,i))**(-1/bsw(j,i)))
+               h2osoi_liq_field_capacity(j) = denh2o*dz_soi(j)*porsl(j,i)*((smpsfc/psi0(j,i))**(-1/bsw(j,i)))
+               h2osoi_liq_saturation_capacity(j) = denh2o*dz_soi(j)*porsl(j,i)
+            ELSE
+               h2osoi_liq_wilting_point(j) = soil_vliq_from_psi(smpswc, porsl(j,i), theta_r(j,i), psi0(j,i), 5, &
+                 (/alpha_vgm(j,i), n_vgm(j,i), L_vgm(j,i), sc_vgm(j,i), fc_vgm(j,i)/))
+               h2osoi_liq_wilting_point(j) = denh2o*dz_soi(j)*h2osoi_liq_wilting_point(j)
+               h2osoi_liq_field_capacity(j) = soil_vliq_from_psi(smpsfc, porsl(j,i), theta_r(j,i), psi0(j,i), 5, &
+                 (/alpha_vgm(j,i), n_vgm(j,i), L_vgm(j,i), sc_vgm(j,i), fc_vgm(j,i)/))
+               h2osoi_liq_field_capacity(j) = denh2o*dz_soi(j)*h2osoi_liq_field_capacity(j)
+               h2osoi_liq_saturation_capacity(j) = denh2o*dz_soi(j)*porsl(j,i)
+            ENDIF
          ENDIF
       ENDDO
 

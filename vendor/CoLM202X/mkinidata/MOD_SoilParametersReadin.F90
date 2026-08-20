@@ -27,7 +27,7 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_Vars_Global, only: nl_soil
-   USE MOD_Namelist, only: DEF_SOIL_REFL_SCHEME
+   USE MOD_Namelist, only: DEF_SOIL_REFL_SCHEME, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
    USE MOD_LandPatch
@@ -63,12 +63,10 @@ CONTAINS
 #ifdef HYPERSPECTRAL
    real(r8), allocatable :: soil_hyper_alb_wl          (:)
 #endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), allocatable :: soil_theta_r_l   (:)  ! residual water content (cm3/cm3)
    real(r8), allocatable :: soil_alpha_vgm_l (:)
    real(r8), allocatable :: soil_L_vgm_l     (:)
    real(r8), allocatable :: soil_n_vgm_l     (:)
-#endif
    real(r8), allocatable :: soil_k_s_l     (:)  ! saturated hydraulic conductivity (cm/day)
    real(r8), allocatable :: soil_csol_l    (:)  ! heat capacity of soil solids [J/(m3 K)]
    real(r8), allocatable :: soil_k_solids_l(:)  ! thermal conductivity of minerals soil [W/m-K]
@@ -110,12 +108,10 @@ CONTAINS
 #ifdef HYPERSPECTRAL
             allocate ( soil_hyper_alb_wl          (numpatch) )
 #endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             allocate ( soil_theta_r_l   (numpatch) )
             allocate ( soil_alpha_vgm_l (numpatch) )
             allocate ( soil_L_vgm_l     (numpatch) )
             allocate ( soil_n_vgm_l     (numpatch) )
-#endif
             allocate ( soil_k_s_l     (numpatch) )
             allocate ( soil_csol_l    (numpatch) )
             allocate ( soil_k_solids_l(numpatch) )
@@ -149,12 +145,16 @@ CONTAINS
          soil_theta_s_l             (:) = SITE_soil_theta_s           (nsl)
          soil_psi_s_l               (:) = SITE_soil_psi_s             (nsl)
          soil_lambda_l              (:) = SITE_soil_lambda            (nsl)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-         soil_theta_r_l   (:) = SITE_soil_theta_r  (nsl)
-         soil_alpha_vgm_l (:) = SITE_soil_alpha_vgm(nsl)
-         soil_L_vgm_l     (:) = SITE_soil_L_vgm    (nsl)
-         soil_n_vgm_l     (:) = SITE_soil_n_vgm    (nsl)
-#endif
+         ! theta_r_l/alpha_vgm_l/L_vgm_l/n_vgm_l are only populated by
+         ! MOD_SingleSrfdata under vanGenuchten -- under Campbell the
+         ! SITE_soil_* arrays here are never allocated, so this has to
+         ! stay gated (unlike the unconditional declare/allocate above).
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+            soil_theta_r_l   (:) = SITE_soil_theta_r  (nsl)
+            soil_alpha_vgm_l (:) = SITE_soil_alpha_vgm(nsl)
+            soil_L_vgm_l     (:) = SITE_soil_L_vgm    (nsl)
+            soil_n_vgm_l     (:) = SITE_soil_n_vgm    (nsl)
+         ENDIF
          soil_k_s_l     (:) = SITE_soil_k_s      (nsl)
          soil_csol_l    (:) = SITE_soil_csol     (nsl)
          soil_k_solids_l(:) = SITE_soil_k_solids (nsl)
@@ -212,27 +212,31 @@ CONTAINS
          CALL ncio_read_vector (lndname, 'lambda_l'//trim(c)//'_patches', &
                                 landpatch, soil_lambda_l)
 
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-         ! (10) read in residual water content [cm3/cm3]
-         lndname = trim(landdir)//'/theta_r_l'//trim(c)//'_patches.nc'
-         CALL ncio_read_vector (lndname, 'theta_r_l'//trim(c)//'_patches', &
-                                landpatch, soil_theta_r_l)
+         ! theta_r_l/alpha_vgm_l/L_vgm_l/n_vgm_l are only written to
+         ! landdata by Aggregation_SoilParameters.F90 under vanGenuchten --
+         ! under Campbell these .nc files don't exist, so this has to stay
+         ! gated.
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+            ! (10) read in residual water content [cm3/cm3]
+            lndname = trim(landdir)//'/theta_r_l'//trim(c)//'_patches.nc'
+            CALL ncio_read_vector (lndname, 'theta_r_l'//trim(c)//'_patches', &
+                                   landpatch, soil_theta_r_l)
 
-         ! (11) read in alpha in VGM model
-         lndname = trim(landdir)//'/alpha_vgm_l'//trim(c)//'_patches.nc'
-         CALL ncio_read_vector (lndname, 'alpha_vgm_l'//trim(c)//'_patches', &
-                                landpatch, soil_alpha_vgm_l)
+            ! (11) read in alpha in VGM model
+            lndname = trim(landdir)//'/alpha_vgm_l'//trim(c)//'_patches.nc'
+            CALL ncio_read_vector (lndname, 'alpha_vgm_l'//trim(c)//'_patches', &
+                                   landpatch, soil_alpha_vgm_l)
 
-         ! (12) read in L in VGM model
-         lndname = trim(landdir)//'/L_vgm_l'//trim(c)//'_patches.nc'
-         CALL ncio_read_vector (lndname, 'L_vgm_l'//trim(c)//'_patches', &
-                                landpatch, soil_L_vgm_l)
+            ! (12) read in L in VGM model
+            lndname = trim(landdir)//'/L_vgm_l'//trim(c)//'_patches.nc'
+            CALL ncio_read_vector (lndname, 'L_vgm_l'//trim(c)//'_patches', &
+                                   landpatch, soil_L_vgm_l)
 
-         ! (13) read in n in VGM model
-         lndname = trim(landdir)//'/n_vgm_l'//trim(c)//'_patches.nc'
-         CALL ncio_read_vector (lndname, 'n_vgm_l'//trim(c)//'_patches', &
-                                landpatch, soil_n_vgm_l)
-#endif
+            ! (13) read in n in VGM model
+            lndname = trim(landdir)//'/n_vgm_l'//trim(c)//'_patches.nc'
+            CALL ncio_read_vector (lndname, 'n_vgm_l'//trim(c)//'_patches', &
+                                   landpatch, soil_n_vgm_l)
+         ENDIF
 
          ! (14) read in the saturated hydraulic conductivity [cm/day]
          lndname = trim(landdir)//'/k_s_l'//trim(c)//'_patches.nc'
@@ -322,11 +326,9 @@ CONTAINS
                   psi0      (nsl,ipatch) = -1.e36
                   bsw       (nsl,ipatch) = -1.e36
                   theta_r   (nsl,ipatch) = -1.e36
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                   alpha_vgm (nsl,ipatch) = -1.e36
                   L_vgm     (nsl,ipatch) = -1.e36
                   n_vgm     (nsl,ipatch) = -1.e36
-#endif
                   hksati    (nsl,ipatch) = -1.e36
                   csol      (nsl,ipatch) = -1.e36
                   k_solids  (nsl,ipatch) = -1.e36
@@ -352,17 +354,17 @@ CONTAINS
                   bsw        (nsl,ipatch) = 1./soil_lambda_l          (ipatch)        ! dimensionless
                   wfc        (nsl,ipatch) = (-339.9/soil_psi_s_l(ipatch))**(-1.0*soil_lambda_l(ipatch))&
                                           * soil_theta_s_l(ipatch)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
-                  psi0       (nsl,ipatch) = -10.      ! mm
-                  theta_r    (nsl,ipatch) = soil_theta_r_l  (ipatch)
-                  alpha_vgm  (nsl,ipatch) = soil_alpha_vgm_l(ipatch)
-                  L_vgm      (nsl,ipatch) = soil_L_vgm_l    (ipatch)
-                  n_vgm      (nsl,ipatch) = soil_n_vgm_l    (ipatch)
-                  wfc        (nsl,ipatch) = soil_theta_r_l  (ipatch)+(soil_theta_s_l(ipatch)-soil_theta_r_l(ipatch))*&
-                             (1+(soil_alpha_vgm_l(ipatch)*339.9)**soil_n_vgm_l(ipatch))**(1.0/soil_n_vgm_l(ipatch)-1)
-#else
-                  theta_r    (nsl,ipatch) = 0.
-#endif
+                  IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+                     psi0       (nsl,ipatch) = -10.      ! mm
+                     theta_r    (nsl,ipatch) = soil_theta_r_l  (ipatch)
+                     alpha_vgm  (nsl,ipatch) = soil_alpha_vgm_l(ipatch)
+                     L_vgm      (nsl,ipatch) = soil_L_vgm_l    (ipatch)
+                     n_vgm      (nsl,ipatch) = soil_n_vgm_l    (ipatch)
+                     wfc        (nsl,ipatch) = soil_theta_r_l  (ipatch)+(soil_theta_s_l(ipatch)-soil_theta_r_l(ipatch))*&
+                                (1+(soil_alpha_vgm_l(ipatch)*339.9)**soil_n_vgm_l(ipatch))**(1.0/soil_n_vgm_l(ipatch)-1)
+                  ELSE
+                     theta_r    (nsl,ipatch) = 0.
+                  ENDIF
                   hksati     (nsl,ipatch) = soil_k_s_l      (ipatch) * 10./86400.  ! cm/day -> mm/s
                   csol       (nsl,ipatch) = soil_csol_l     (ipatch)               ! J/(m2 K)
                   k_solids   (nsl,ipatch) = soil_k_solids_l (ipatch)               ! W/(m K)
@@ -395,12 +397,10 @@ CONTAINS
             deallocate ( soil_theta_s_l             )
             deallocate ( soil_psi_s_l               )
             deallocate ( soil_lambda_l              )
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
             deallocate ( soil_theta_r_l   )
             deallocate ( soil_alpha_vgm_l )
             deallocate ( soil_L_vgm_l     )
             deallocate ( soil_n_vgm_l     )
-#endif
             deallocate ( soil_k_s_l     )
             deallocate ( soil_csol_l    )
             deallocate ( soil_k_solids_l)
@@ -438,11 +438,9 @@ CONTAINS
                psi0       (nsl,:) = psi0      (nsl-1,:)
                bsw        (nsl,:) = bsw       (nsl-1,:)
                theta_r    (nsl,:) = theta_r   (nsl-1,:)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                alpha_vgm  (nsl,:) = alpha_vgm (nsl-1,:)
                L_vgm      (nsl,:) = L_vgm     (nsl-1,:)
                n_vgm      (nsl,:) = n_vgm     (nsl-1,:)
-#endif
                hksati     (nsl,:) = hksati    (nsl-1,:)
                csol       (nsl,:) = csol      (nsl-1,:)
                k_solids   (nsl,:) = k_solids  (nsl-1,:)
@@ -470,11 +468,9 @@ CONTAINS
                psi0       (nsl,:) = psi0      (9,:)
                bsw        (nsl,:) = bsw       (9,:)
                theta_r    (nsl,:) = theta_r   (9,:)
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
                alpha_vgm  (nsl,:) = alpha_vgm (9,:)
                L_vgm      (nsl,:) = L_vgm     (9,:)
                n_vgm      (nsl,:) = n_vgm     (9,:)
-#endif
                hksati     (nsl,:) = hksati    (9,:)
                csol       (nsl,:) = csol      (9,:)
                k_solids   (nsl,:) = k_solids  (9,:)

@@ -7,14 +7,13 @@ use std::collections::BTreeSet;
 
 // `CoLMDEBUG` / `RangeCheck` 不在这里——调试三件套改成运行时开关之后，
 // `kernels/default/manifest.json` 的 `macros` 不再列出它们了（见
-// `create_defineh.bash`）。没有任何闸门表条目按这两个名字过滤，去掉
-// 它们不改变下面测的行为。
-const WATERHEAT: [&str; 4] = [
-    "LULC_IGBP",
-    "SinglePoint",
-    "extend_interception",
-    "vanGenuchten_Mualem_SOIL_MODEL",
-];
+// `create_defineh.bash`）。`vanGenuchten_Mualem_SOIL_MODEL` 同理——土壤
+// 水力方案也改成运行时开关了。`extend_interception` 还在：它是编译期的
+// 文件选择（main/ vs extends/interception/ 两套不同签名的实现），不是
+// 简单的 body-level 分支，没有对应的运行时开关，`create_defineh.bash`
+// 仍然无条件 `#define` 它。没有任何闸门表条目按
+// `vanGenuchten_Mualem_SOIL_MODEL` 过滤，去掉它不改变下面测的行为。
+const WATERHEAT: [&str; 3] = ["LULC_IGBP", "SinglePoint", "extend_interception"];
 
 fn golden_vars() -> BTreeSet<String> {
     let p =
