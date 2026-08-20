@@ -137,20 +137,23 @@ fn a_converted_forcing_matches_the_source_bit_for_bit() {
 /// 慢（建 srfdata/initdata + 跑一段月，几分钟），标成 `#[ignore]`，
 /// 但必须存在——它才是这条管道真正的判据。
 ///
-/// **实测目前会在 `Checking forcing ...` 之后崩溃（`SIGILL`），
-/// 不会跑到比对那一步。** 根因已定位、且很窄：`convert::convert` 只搬
-/// 时间轴与八个槽位变量，不搬 `reference_height_v/t/q` 这三个标量。
-/// CN-Cng 的原始文件带着它们（值都是 6），转换产物没有；`met::summarize`
-/// 对缺失的高度回落成 `NaN`（`met.rs` 里 `scalar(...).unwrap_or(f64::NAN)`），
-/// 于是 `DEF_forcing%HEIGHT_V/T/Q` 被渲染成 `NaN` 写进 `forcing.nml`。
+/// **这条测试写出来的时候是红的，而那正是它的价值。** 当时
+/// `convert::convert` 只搬时间轴与八个槽位变量，不搬
+/// `reference_height_v/t/q` 这三个标量。CN-Cng 的原始文件带着它们
+/// （值都是 6），转换产物没有；`met::summarize` 对缺失的高度回落成
+/// `NaN`（`met.rs` 里 `scalar(...).unwrap_or(f64::NAN)`），于是
+/// `DEF_forcing%HEIGHT_V/T/Q` 被渲染成 `NaN` 写进 `forcing.nml`。
 /// 跑时 `MOD_Forcing.F90:299-309` 见文件里没有这三个变量就不覆盖，
-/// `Height_V/T/Q` 就一直是 `NaN`，被这份 CoLMDEBUG 内核的 RangeCheck
-/// 当场判成非法指令中止。手工把这三个标量从源文件原样搬进产物（不改
-/// `convert()`，只在本地验证）之后三段就能跑完，且 history 与黄金文件
-/// `identical: 129 variables, 10 dimensions` ——说明这是唯一的缺口，
-/// 换算、维度、槽位取值那些都是对的。`convert()` 在
-/// `crates/colm-forcing/src/convert.rs`，不在本次改动范围内，留给
-/// 之后的任务补上；这条测试就是那个任务的判据。
+/// `Height_V/T/Q` 一直是 `NaN`，被 CoLMDEBUG 内核的 RangeCheck 当场
+/// 判成非法指令中止 —— **而报出来的是「内核编进了 CoLMDEBUG」，
+/// 看不出问题在强迫场少了三个标量。**
+///
+/// 已修（`191fea7`）：规则改成「槽位没消费的变量全搬」，不是特判那三个。
+/// 现在跑出 `identical: 129 variables, 10 dimensions`。
+///
+/// **文件层面那条测试当时是绿的。** 只比八个槽位变量，比不出少了三个
+/// 标量 —— 这就是为什么这条慢的必须存在：文件里的数一个不差，模型
+/// 照样起不来。
 #[test]
 #[ignore]
 fn a_converted_forcing_reproduces_the_golden_history() {
