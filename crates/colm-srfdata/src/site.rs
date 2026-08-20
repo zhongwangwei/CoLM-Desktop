@@ -122,7 +122,13 @@ pub fn fill(
     let (isc, lake, elev, elvstd, slope) = match rawdata {
         Some(r) => (
             point_i32(&r.join("soil_brightness.nc"), "soil_brightness", lon, lat).ok(),
-            point_f64(&r.join("lake_depth.nc"), "lake_depth", lon, lat).ok(),
+            // **栅格值要乘 0.1，模块默认值不乘。** CoLM 从栅格读时自己会乘
+            // （MOD_SingleSrfdata.F90:700 与 :2052 都是 `lakedepth * 0.1`），
+            // 而从 site.nc 读时直接用 —— 所以写进 site.nc 的必须是乘过的。
+            // 回落用的 1.0 是模块默认值（:47），它本来就是最终量纲，不能再乘。
+            point_f64(&r.join("lake_depth.nc"), "lake_depth", lon, lat)
+                .ok()
+                .map(|v| v * 0.1),
             point_f64(&r.join("topography.nc"), "elevation", lon, lat).ok(),
             point_f64(&r.join("topography.nc"), "elvstd", lon, lat).ok(),
             point_f64(&r.join("topography.nc"), "slope", lon, lat).ok(),
@@ -180,12 +186,16 @@ pub fn fill(
     }
 
     // --- 标量字段：每一个都走同一条优先级 ---
-    for (name, site, site_note, raster, fallback, fallback_note) in [
+    // `raster_note` 与 `site_note`/`fallback_note` 一样按字段各写各的：
+    // `lakedepth` 写进 site.nc 的是栅格值 x0.1（见上面读栅格那一行），
+    // 这句话必须说清楚，否则读 site.nc 的人会以为那就是栅格里的原值。
+    for (name, site, site_note, raster, raster_note, fallback, fallback_note) in [
         (
             "elevation",
             site_elevation,
             "site: Site elevation from the Observation file",
             elev,
+            "rawdata raster",
             0.0,
             "MOD_SingleSrfdata.F90:87 module default",
         ),
@@ -194,6 +204,8 @@ pub fn fill(
             None,
             "",
             lake,
+            "rawdata lake_depth.nc at this site, x0.1 as MOD_SingleSrfdata.F90:700/:2052 do \
+             when they read this same raster",
             1.0,
             "MOD_SingleSrfdata.F90:47 module default",
         ),
@@ -202,6 +214,7 @@ pub fn fill(
             None,
             "",
             elvstd,
+            "rawdata raster",
             0.0,
             "MOD_SingleSrfdata.F90:88 module default",
         ),
@@ -210,6 +223,7 @@ pub fn fill(
             None,
             "",
             slope,
+            "rawdata raster",
             0.0,
             "MOD_SingleSrfdata.F90:89 module default",
         ),
@@ -217,7 +231,7 @@ pub fn fill(
         let (v, src) = resolve(site, raster, Some(fallback)).expect("has a fallback");
         let note = match src {
             Source::Site => site_note.to_string(),
-            Source::Raster => "rawdata raster".to_string(),
+            Source::Raster => raster_note.to_string(),
             Source::Default => format!("synthesized: {fallback_note}"),
         };
         put_scalar(&mut f, name, v, &note)?;

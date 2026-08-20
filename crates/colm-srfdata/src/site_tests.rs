@@ -16,6 +16,118 @@ fn the_raster_wins_over_the_classifier_when_both_are_available() {
     assert!(REQUIRED_FIELDS.contains(&"soil_texture"));
 }
 
+// ------------------------------------------------------------ lakedepth
+
+/// 造一个最小的 PLUMBER2 形状站点文件：只有 `fill()` 跑通所需的变量。
+///
+/// 坐标定在 `(-180, 90)` —— `colm_500m` 网格上正好是 `(ilon, ilat) = (1, 1)`
+/// （见 `grid.rs`：`ilon(-180.0) == 1`，纬度 `>= lat_s(1)` 就是 `1`），
+/// 所以配套的栅格 fixture 只需要 1x1，不用假造 86400x43200 的全球网格。
+///
+/// 土壤剖面照抄 `derive_tests.rs` 的 `uniform()`：0-60cm 深度加权后是
+/// sand 40% / silt 45% / clay 15%，落在 USDA 三角内，质地分类不用靠栅格
+/// 兜底，`fill()` 才不会因为「两者都拿不到」报错。
+fn plumber_fixture(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("colm-srfdata-fill");
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let p = dir.join(format!("{name}.nc"));
+    let _ = std::fs::remove_file(&p);
+    let mut f = netcdf::create(&p).expect("create");
+    f.add_dimension("soil", 8).expect("soil");
+    // 0 维标量，与真实 PLUMBER2 站点文件的形状一致（`location` 的文档里
+    // 特意区分过这一点：Urban-PLUMBER 才是 (y, x)）。
+    for (n, v) in [
+        ("longitude", -180.0),
+        ("latitude", 90.0),
+        ("IGBP_classification", 10.0),
+    ] {
+        let mut var = f.add_variable::<f64>(n, &[]).expect("var");
+        var.put_values(&[v], netcdf::Extents::All).expect("put");
+    }
+    for (n, v) in [
+        ("soil_vf_sand", 0.30),
+        ("soil_vf_gravels", 0.10),
+        ("soil_vf_om", 0.02),
+        ("soil_wf_sand", 0.40),
+        ("soil_OM_density", 26.0),
+        ("soil_BD_all", 1300.0),
+    ] {
+        let mut var = f.add_variable::<f64>(n, &["soil"]).expect("var");
+        var.put_values(&[v; 8], netcdf::Extents::All).expect("put");
+    }
+    drop(f);
+    p
+}
+
+/// 造一个只有 `lake_depth.nc` 的 rawdata 目录，1x1，落在网格 `(1, 1)` ——
+/// 与 [`plumber_fixture`] 用的是同一个点，不用假造全球栅格。
+fn lake_raster_dir(name: &str, value: f64) -> std::path::PathBuf {
+    let dir = std::env::temp_dir()
+        .join("colm-srfdata-fill-raster")
+        .join(name);
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let p = dir.join("lake_depth.nc");
+    let _ = std::fs::remove_file(&p);
+    let mut f = netcdf::create(&p).expect("create");
+    f.add_dimension("lat", 1).expect("lat");
+    f.add_dimension("lon", 1).expect("lon");
+    let mut var = f
+        .add_variable::<f64>("lake_depth", &["lat", "lon"])
+        .expect("var");
+    var.put_values(&[value], netcdf::Extents::All).expect("put");
+    drop(f);
+    dir
+}
+
+/// 两个量纲混在一起是最容易回归的地方：栅格给的是原始栅格值，
+/// 写进 site.nc 的必须是它的 1/10 —— CoLM 从栅格读湖深时自己会乘 0.1
+/// （`MOD_SingleSrfdata.F90:700` 与 `:2052`），从 `site.nc` 读时直接用。
+#[test]
+fn lakedepth_from_the_raster_is_scaled_by_a_tenth_before_it_reaches_site_nc() {
+    let src = plumber_fixture("lakedepth-raster-src");
+    let dst = src.with_file_name("lakedepth-raster-dst.nc");
+    let raw = lake_raster_dir("lakedepth-raster", 37.0);
+
+    let r = fill(&src, &dst, Some(&raw), None).expect("fills");
+    assert!(r.from_raster.contains(&"lakedepth".to_string()));
+
+    let f = netcdf::open(&dst).expect("open");
+    let v = f.variable("lakedepth").expect("lakedepth");
+    let x: Vec<f64> = v.get_values(netcdf::Extents::All).expect("values");
+    assert!(
+        (x[0] - 3.7).abs() < 1e-9,
+        "got {}, want 3.7 (= 37.0 * 0.1)",
+        x[0]
+    );
+
+    let a = v
+        .attribute("source")
+        .expect("source")
+        .value()
+        .expect("read");
+    let netcdf::AttributeValue::Str(s) = a else {
+        panic!("source is not a string")
+    };
+    // 措辞必须点破换算，不能读起来像「这就是栅格里的原值」。
+    assert!(s.contains("x0.1"), "{s}");
+}
+
+/// 没有栅格时落到 `MOD_SingleSrfdata.F90:47` 的模块默认值 1.0 ——
+/// 那本来就是最终量纲，不是又一个要乘 0.1 的栅格值。
+#[test]
+fn lakedepth_without_a_raster_falls_back_to_the_module_default_not_a_tenth_of_it() {
+    let src = plumber_fixture("lakedepth-fallback-src");
+    let dst = src.with_file_name("lakedepth-fallback-dst.nc");
+
+    let r = fill(&src, &dst, None, None).expect("fills");
+    assert!(r.from_default.contains(&"lakedepth".to_string()));
+
+    let f = netcdf::open(&dst).expect("open");
+    let v = f.variable("lakedepth").expect("lakedepth");
+    let x: Vec<f64> = v.get_values(netcdf::Extents::All).expect("values");
+    assert_eq!(x[0], 1.0, "fallback must stay the module default, not 0.1");
+}
+
 // ---------------------------------------------------------------- 城市
 
 /// 造一个最小的 Urban-PLUMBER 形状站点文件：只有定位与地面高程。
