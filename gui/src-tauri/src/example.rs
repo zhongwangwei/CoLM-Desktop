@@ -37,10 +37,31 @@ fn source(app: &tauri::AppHandle) -> Option<PathBuf> {
 pub struct Example {
     /// 扫描用的 Sitedata 目录
     pub sitedir: String,
-    /// 建议的算例根目录，放在示例旁边
+    /// 建议的算例根目录（`~/CoLM-cases`，不放在示例数据旁边——见 [`cases_root`]）
     pub root: String,
     /// 已经在那儿了（这次没复制）
     pub already: bool,
+}
+
+/// 算例根目录**不能**放在 `app_data_dir()` 下。
+///
+/// macOS 的那个位置是 `~/Library/Application Support/…`，**含空格**，
+/// 而 CoLM 用不加引号的 shell `mkdir -p` 建输出树 —— 路径一有空格就被
+/// 拆成两个参数，建出一棵影子目录树，最后报一句指向完全错误方向的
+/// `Permission denied`。实测踩过：一路点默认值跑不通。
+///
+/// 换成 `~/CoLM-cases`：既没有空格，也不落在 `~/Documents`——后者在
+/// macOS 上是 TCC 保护的目录，一个没经过公证的开发版直接访问会弹出
+/// 系统权限对话框，同样打断「装完就能跑」。示例数据本身（`Sitedata` /
+/// `Forcing` / `Observation`）不受这条限制：那三样只被 netCDF 按路径
+/// 打开读取，不经过 `mkdir -p`，留在 `app_data_dir()` 下没问题
+/// （Step 1 实测过：强迫场在含空格路径下三段照样跑通）。
+fn cases_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("找不到用户主目录：{e}"))?
+        .join("CoLM-cases"))
 }
 
 /// 把示例数据放到一个**可写**的位置，返回路径。
@@ -50,8 +71,10 @@ pub struct Example {
 /// 用户点「确定」之后拿到的是一个权限错误，而错误信息里根本看不出
 /// 问题出在"这是安装目录"。
 ///
-/// 目标是应用数据目录。已经存在就不再复制：那份是用户自己的了，
-/// 他可能在里面建了算例，覆盖会把结果删掉。
+/// 站点数据的目标是应用数据目录；算例根目录另指到 [`cases_root`]，
+/// 见那里为什么不能是同一个地方。两处都是「已经存在就不再复制/不再新建」——
+/// 站点数据那份可能被用户改过，算例根目录下可能已经有他自己建的算例，
+/// 覆盖或改址都会让人以为东西丢了。
 #[tauri::command]
 pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
     let src =
@@ -66,9 +89,11 @@ pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
     if !already {
         copy_tree(&src, &dest)?;
     }
+    let root = cases_root(&app)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     Ok(Example {
         sitedir: dest.join("Sitedata").display().to_string(),
-        root: dest.join("cases").display().to_string(),
+        root: root.display().to_string(),
         already,
     })
 }

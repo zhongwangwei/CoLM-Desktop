@@ -10,6 +10,22 @@ import { renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
 import { currentKernel, kernelIsUrban } from './kernel.js';
 
+/** 算例根目录含空格，当场标出来。
+ *
+ *  CoLM 有 55 处不加引号的 `CALL system('mkdir -p ' // trim(dir))`——路径一有空格
+ *  就被拆成两截，建出一棵位置不对的影子目录树，而报出来的是 netCDF 的
+ *  `Permission denied`，指向完全错误的方向。`colm-cli new` 会直接拒绝这种
+ *  路径（见 crates/colm-cli），但**那是建算例那一刻才报**；这里要在填路径
+ *  的当场就说清楚，不能等按下「建算例」才知道，更不能等跑到一半。
+ *
+ *  判据与 `colm-cli new` 那条一致：路径里有没有空格。 */
+export function checkRootSpace() {
+  const warn = $('rootspace');
+  if (warn) warn.hidden = !$('root').value.includes(' ');
+}
+$('root').addEventListener('input', checkRootSpace);
+$('root').addEventListener('change', checkRootSpace);
+
 $('rescan').onclick = async () => {
   try {
     state.cases = await invoke('list_cases', { root: $('root').value.trim() });

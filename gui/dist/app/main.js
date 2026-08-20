@@ -9,7 +9,7 @@ import { refreshKernels, watchRun } from './runner.js';
 import { refreshPresets } from './presets.js';
 import { restoreRecent, wirePickers } from './recent.js';
 import { showDomainGate } from './domain.js';
-import { renderCases } from './sites.js';
+import { renderCases, checkRootSpace } from './sites.js';
 
 initShell();
 
@@ -32,6 +32,11 @@ async function boot() {
     await refreshKernels();
     await refreshPresets();
     await restoreRecent();
+    // `restoreRecent` 对文本框只赋值、不派发 `change`（见那里的注释），
+    // 而 `checkRootSpace` 挂在 `#root` 的 `change`/`input` 上 ——
+    // 恢复出来的旧路径若含空格，不补这一次调用就要等用户自己碰一下
+    // 那个框才会被标出来。
+    checkRootSpace();
     // 恢复出来的算例根目录里可能已经有算例 —— 不扫的话第 3 步是个空盒子，
     // 而用户上次的工作就在那里。
     const root = $('root').value.trim();

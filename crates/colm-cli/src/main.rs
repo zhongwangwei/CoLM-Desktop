@@ -358,6 +358,19 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             .with_context(|| format!("cannot resolve --site {}", given.display()))?
     };
     let out = o.need("--out")?;
+    // CoLM 有 55 处不加引号的 `CALL system('mkdir -p ' // trim(dir))`，
+    // 路径含空格会被 shell 拆成两个参数 —— 建出一棵影子目录树，而报出来的
+    // 是 netCDF 的 `Permission denied`，指向完全错误的方向。
+    // **在这里拦住，比让人对着那句报错发呆强。**
+    if out.to_string_lossy().contains(' ') {
+        bail!(
+            "the case directory must not contain spaces: {}\n  \
+             CoLM builds its output tree with unquoted shell `mkdir -p`, so a path \
+             with spaces silently creates the wrong directories and later fails with \
+             a misleading `Permission denied` from netCDF",
+            out.display()
+        );
+    }
     let met = sibling(&site_raw, "Forcing", 0).with_context(|| {
         format!(
             "cannot find the forcing file next to {}; expected ../Forcing/<stem>_Met.nc",

@@ -89,6 +89,12 @@
           <button class="btn-ghost pick" data-for="root">选择…</button>
           <button class="btn-ghost" id="rescan">重新扫描已建的</button>
         </div>
+        <p class="fail mini" id="rootspace" hidden>
+          路径含空格：CoLM 建输出目录用的是不加引号的 shell <code>mkdir -p</code>，
+          空格会把路径拆成两截，建出一棵位置不对的影子目录树，跑到一半报的还是
+          netCDF 的 <code>Permission denied</code>，看不出问题出在路径上。
+          请换一个不含空格的位置。
+        </p>
         <div id="urbandirs" hidden>
           <div class="expert-note">
             当前内核编进了 <b>URBAN</b>。城市算例必须给全球栅格目录 ——
