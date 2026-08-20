@@ -237,6 +237,10 @@ async function ensureCase(s) {
       start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,
+      // 空就不传 —— `colm-cli new` 那边会走命名约定，内置数据集正常。
+      // 只有「用自己的数据」才需要显式指定，而那时候约定会推出**原始**
+      // 强迫场并静默用它。
+      met: $('fmet').value.trim() || null,
     });
     setStatus(`已为 ${s.name} 建好算例`);
     return cname;

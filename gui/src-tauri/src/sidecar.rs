@@ -546,6 +546,11 @@ fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, Stri
 /// 经纬度、地类、时间步长、默认窗口都由 `colm-cli new` 从文件里读出来 ——
 /// 界面上只需要问「选哪个站」「叫什么名字」，以及可选的窗口收窄。
 #[tauri::command]
+// **参数多是因为它就是 `colm-cli new` 的命令行**，不是可以随手打包的
+// 内部函数签名。打成一个结构体会让前端的 `invoke` 从「一组具名参数」
+// 变成「一个嵌套对象」，而 `xtask check-gui` 正是逐个比对参数名的 ——
+// 那层静态检查比这条 lint 值钱。
+#[allow(clippy::too_many_arguments)]
 pub async fn new_case(
     site: String,
     out: String,
@@ -556,6 +561,12 @@ pub async fn new_case(
     // 只能从全球栅格取，站点文件里没有。非城市站点传空即可。
     rawdata: Option<String>,
     runtime: Option<String>,
+    // 强迫场文件。空就不传 —— `colm-cli new` 会走命名约定（`Sitedata`
+    // 的兄弟目录 `Forcing/`），内置数据集正常。只有「用自己的数据」才
+    // 需要显式指定：前处理页转出来的产物不在那个位置也不叫那个名字，
+    // 而约定失败的方式是**推出原始强迫场并静默用它** —— 用户以为跑的
+    // 是自己转换的数据，实际跑的是原始的。
+    met: Option<String>,
 ) -> Result<String, String> {
     let mut args = vec![
         "new".to_string(),
@@ -570,6 +581,7 @@ pub async fn new_case(
         ("--end", end),
         ("--rawdata", rawdata),
         ("--runtime", runtime),
+        ("--met", met),
     ] {
         if let Some(v) = v {
             if !v.trim().is_empty() {

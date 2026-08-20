@@ -137,6 +137,21 @@
           <button class="btn-ghost" id="pick-none">全不选</button>
           <span class="muted mini" id="pickinfo">还没选</span>
         </div>
+        <!-- 强迫场默认顺着命名约定找（`Sitedata` 的兄弟目录 `Forcing/`，
+             文件名 `<stem>_Met.nc` 或 `<stem>_metforcing_v1.nc`）。那两套
+             是 PLUMBER2 与 Urban-PLUMBER 的内部约定 —— **拿自己数据的人
+             没有理由遵守它们**，前处理页转出来的产物也不在那个位置。
+             填了就用填的，空着才走约定。与观测那一栏同一个模式。 -->
+        <div class="field" style="margin-top:12px">
+          <label>强迫场文件（可选）</label>
+          <div class="browse">
+            <input class="input" id="fmet" placeholder="留空 = 按命名约定在 ../Forcing/ 下找">
+            <button class="btn-ghost pick" data-for="fmet" data-file="nc">选择…</button>
+          </div>
+          <p class="muted mini" style="margin-top:4px">
+            在第 1 步转换过强迫场的话，在这里指定那份产物 ——
+            <b>不指定就会用原始文件，而且不报错</b>。</p>
+        </div>
         <!-- 建算例的按钮。**它是卡片内的动作，不是页面出口** ——
              页面出口是底部通用的「下一步：参数 →」。算例目录在第 2 步
              已经定好了，所以这里按下去不会再有「产物放哪」的疑问。 -->

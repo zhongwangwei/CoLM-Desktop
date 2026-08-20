@@ -12,7 +12,7 @@ import { $ } from './ui.js';
 // 的选择结果写进 `recent.json`，但**恢复只认这张表** —— 漏了的字段
 // 表现是「选过的东西下次打开没了」，而旁边的字段都还在，看着像随机失灵。
 // `fsrc`（前处理页的强迫场文件）就漏过一次，真机验收才发现。
-const REMEMBERED = ['sitedir', 'root', 'kernel', 'obs', 'fsrc'];
+const REMEMBERED = ['sitedir', 'root', 'kernel', 'obs', 'fsrc', 'fmet'];
 
 export async function restoreRecent() {
   let all = {};
