@@ -21,14 +21,14 @@
 | | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | ✅ 同上 |
 | | ~~`extend_interception`~~ | 4 | 1 | ❌ **不做** |
 | **③ 最大但独立** | `TRACER` | 342 | 69 | ✅ `1a60e9d` |
-| **④ 核心难点（必须一起）** | `LULC_IGBP` | 205 | 46 | 待做 |
-| | `LULC_IGBP_PC` | 159 | 40 | 待做 |
-| | `LULC_IGBP_PFT` | 150 | 38 | 待做 |
-| | `LULC_USGS` | 66 | 21 | 待做 |
-| | `CROP` | 256 | 41 | 待做 |
-| | `BGC` | 131 | 73 | 待做 |
-| | `URBAN_MODEL` | 92 | 29 | 待做 |
-| | `LULCC` | 16 | 8 | 待做 |
+| **④ 核心难点（必须一起）** | `LULC_IGBP_PC` | 159 | 40 | ✅ `06543f8` |
+| | `LULC_IGBP_PFT` | 150 | 38 | ✅ 同上 |
+| | `BGC` | 131 | 73 | ✅ 同上 |
+| | `URBAN_MODEL` | 92 | 29 | ✅ 同上 |
+| | `LULCC` | 16 | 8 | ✅ 同上 |
+| | `LULC_IGBP` | 205 | 46 | ❌ 止损，见下 |
+| | `LULC_USGS` | 66 | 21 | ❌ 止损，见下 |
+| | `CROP` | 256 | 41 | ❌ 止损，见下 |
 
 **约 1900 处。** `URBAN_LCZ` 是死宏（模板里有，代码里 0 处引用）。
 
@@ -236,6 +236,76 @@ USGS 用得少，CROP 是碳循环的子集，把它们留在编译期的代价�
 相关的数组改成运行时分配。**那一轮的判据与这四组不同** ——
 它动的是内存布局，黄金回归只能证明「默认配置没变」，
 证明不了「另一套尺寸下算得对」。
+
+## ④ 完成的结果（`06543f8`）
+
+真正做成运行时的五个（`LULC_IGBP_PC`/`LULC_IGBP_PFT`/`BGC`/`URBAN_MODEL`/
+`LULCC`）改完之后，`default`/`bgc`/`urban` 三个内核预设产出**完全相同**
+的 `define.h`——过去要三个二进制的组合，现在一个就够，运行时用哪套只看
+`case.nml`。
+
+**四类返工，从便宜到贵**（后续如果还有类似改造，照这个顺序排查）：
+
+1. 整个 `MODULE` 被 `#ifdef` 包住——不能包成运行时 `IF`（那是非法
+   Fortran），去掉包裹，模块总是编译进去，运行时逻辑挪到调用点。
+2. 参数列表/声明列表中间被 `#ifdef` 断开——同样不能包成 `IF`，去掉
+   包裹，参数永远在签名里。
+3. **混合结构 `#if...THEN <code> #else <code> ENDIF`**：批量转换脚本
+   没有特判块内的裸 `#else`，把它整段吞进 `IF...ENDIF`，留下孤立的
+   `#else`。这个不只是编译错误——曾经在 `gfortran -cpp -E` 下**静默
+   截断**预处理输出（退出码 0，没有 stderr），逐个手工修了约 15 处。
+   **教训**：只看 stderr 的批量自检不可信，得核对预处理输出本身的
+   完整性（行数、是不是以 `END MODULE`/`END PROGRAM` 收尾）。
+4. **「实参无条件传，但源数组只在条件分支里分配」**：`totlitc` 等 BGC
+   patch 级状态数组过去只在 `IF (DEF_USE_BGC) THEN CALL
+   allocate_BGCTimeVariables ENDIF` 里分配；把 `iniTimeVar` 里它们的
+   非 `optional` `intent(out)` 实参改成无条件传之后，`default` 内核
+   （`DEF_USE_BGC=.false.`）跑 `mkinidata` 直接数组越界崩溃。这类 bug
+   **只有真的跑起来才抓得到**，结构性检查（cpp 预处理、Fortran 嵌套）
+   都看不出来。修法是让 `allocate_BGCTimeVariables` 的调用也无条件——
+   这些数组只有 `numpatch` 大小，关着 BGC 时白占一点内存，没有物理
+   影响；`PFTimeVariables` 保持原样有条件分配，因为它只从已经被
+   `DEF_USE_PFT`/`DEF_USE_PC` 挡住的代码或真正 `optional` 的实参里
+   被碰到——不是所有「无条件传参」都能这样安全地无条件分配，得挨个
+   查实参是不是真的必需。
+
+**四条判据的结果**：
+
+1. 黄金回归逐位不变：`identical: 129 variables, 10 dimensions`
+2. `urban` 内核仍能跑通真实站点（Urban-PLUMBER）：`forcing_prep` 通过
+3. 运行时切到 PFT 方案（`case.nml` 里 `DEF_USE_PFT=.true.`,
+   `DEF_USE_LCT=.false.`，不改 `site.nc`）：**结果好于预期**——
+   `CN-Cng` 站点文件本来就自带 `pctpfts`/`LAI`/`SAI`，`mksrfdata`/
+   `mkinidata`/`colm` 三段全部跑完 11 天 528 步，PFT 与 LCT 两套
+   restart 都写出来了，不是「优雅失败在 `plant_15s` 缺失」而是真的
+   走通了一整条 PFT 次网格路径
+4. 用 `git worktree` 建 `ef1177d`（本组开工前的状态）的 `default`
+   内核，同一个算例，产物与运行时版本的 `default` 内核逐位相同：
+   `identical: 129 variables, 10 dimensions`
+
+**两道协调员额外要求的自检**：
+
+- **cpp 预处理后的非空行行数**逐文件比较（`git show HEAD` 版本 vs
+  改完后的工作区），112 个改动过的 `.F90` 文件全部只增不减——排除了
+  `#else` 静默截断类的回归重新出现。裸行数比较（不剔除空行）里有
+  52 个文件显示减 1~4 行，查实是移除 cpp 指令行在 `-P` 模式下的
+  空行边界伪影，不是内容丢失——**行数比较要剔除空行再看，否则会有
+  假阳性**。
+- **`nm -g` 导出符号数**：`ef1177d` 的 `default` 内核编出 270 个目标
+  文件，运行时版本编出 289 个（`main/BGC/`、`main/URBAN/` 不再被
+  `URBANOFF`/`BGCOFF` 挡在编译之外），总导出符号 1178 → 1423；20 个
+  重点改动文件（`MOD_Namelist.o`/`MOD_Vars_TimeVariables.o`/
+  `MOD_BGC_Vars_TimeVariables.o`/`MOD_IniTimeVariable.o` 等）逐个比对，
+  全部持平或增加，没有一个减少。
+
+**两道隐藏的第二道门**：`Makefile` 里 `METHANE_ENABLED` 原来靠 cpp 探测
+`define.h` 里的 `#ifdef BGC`，`BGC` 从 `define.h` 里消失后这个探测永远
+读到 NO，改成硬编码 `YES`；其余 `ifeq`/`ifneq` 不引用 `BGC`/`CROP`/
+`URBAN_MODEL`/`LULCC`，它们的目标文件本来就无条件列着。
+`xtask/src/usage.rs` 的 `SUBSYSTEMS` 去掉 `("main/BGC/", "BGC")`，
+`BY_NAME` 去掉 `("Urban", "URBAN_MODEL")`，`CURATED` 清空（唯一一条
+`DEF_URBAN_type_scheme` 过时了，真实守护点已经从 `#ifdef URBAN_MODEL`
+挪到 `IF (DEF_URBAN_RUN)`）。
 
 ## 已完成
 
