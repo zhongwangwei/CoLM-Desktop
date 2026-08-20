@@ -70,6 +70,31 @@ cargo test -p oracle --test forcing_convert -- --ignored
 **这条最容易被忽略。** 把 `#ifdef` 删掉、代码再也不执行，也能让
 ① ② 通过 —— 但功能没了。必须验证开关**双向**都work。
 
+## `extends/` 整个目录不在范围内
+
+```
+vendor/CoLM202X/extends/
+  ├─ CaMa/            洪水模型 —— 单点下 create_defineh.bash 强制 #undef
+  └─ interception/    冠层截留扩展 —— 就是 extend_interception 那个宏的家
+```
+
+**它们是扩展模块，不是核心物理。** 改造只动 `main/`、`share/`、
+`mksrfdata/`、`mkinidata/` 那几处。
+
+对工作量的影响很小（实测各宏在 `extends/` 里的处数）：
+
+| 宏 | 总处数 | `extends/` 里 |
+|---|---|---|
+| `TRACER` | 342 | 1 |
+| `CROP` | 237 | 2 |
+| `LULC_IGBP` | 205 | 5 |
+| `LULC_IGBP_PFT` | 150 | 5 |
+| 土壤水力两个 | 57 | **0** |
+| `BGC` / `URBAN_MODEL` | 211 | **0** |
+
+顺带解释了下面那件事：`extend_interception` 的家就在
+`extends/interception/` —— **它本来就不该在范围里**。
+
 ## `extend_interception` 为什么不做
 
 改造第二组时顺手捎带了它，做到一半发现它跟土壤水力那两个**不是一类
