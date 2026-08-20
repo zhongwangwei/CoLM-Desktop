@@ -23,7 +23,25 @@
 | 2 | 从经纬度建站点文件 + `colm-cli site-new` | ✅ `c420040` |
 | 2b | `site-new --json`（给界面用） | ✅ `8520ed7` |
 | 3 | 站点属性子栏 | ✅ `62d5526` + `ad74cb0` |
-| 4 | 端到端 | 进行中 |
+| 4 | 端到端 | ✅ `b1a5c4e` |
+| 5 | 补冠层高度（hbot/SAI 查证后不补） | ✅ `bd747b6` |
+
+**端到端判据**（`oracle/tests/site_prep.rs`，`#[ignore]`）：
+
+```
+① 两次都跑完三段，f_tref 264 个值，251.53 – 269.67 K
+② 12/12 字段齐全带 source；canopy_height = 0.5 追溯到 htop0_igbp[10]
+③ f_frcsat  合成 0.246047  vs  真实 0.158900   差 0.087147（35%）
+```
+
+**③ 换过变量。** 原本挑的 `f_h2osoi` 差值只有 2.7e-9（浮点噪声）——
+因为借了那 21 个土壤参数之后，真正驱动土壤水分的 van Genuchten 参数
+两边已经相同了。执行的 agent **没有放松判据**，而是扫描了每个 `f_*`
+变量，找到 `f_frcsat`（饱和地表面积比例）差 5 个数量级于噪声，
+换用它。
+
+**判据的意图是「站点属性影响结果」，不是「某个特定变量不同」。**
+换变量是对的；把断言改松就不是。
 
 ### 期间修的、不在原计划里的
 
@@ -108,12 +126,40 @@ u_site_lai = readflag .and. ncio_var_exist(fsrfdata,'LAI_monthly',readflag) &
 #endif
 ```
 
+### 第三个缺口：21 个土壤水力/热参数（Task 4 重做时发现）
+
+补完 `canopy_height`、借了 LAI/SAI 之后，`mksrfdata` **又死在**
+`soil_vf_quartz_mineral not found`，后面还排着一长串：
+
+```
+vf_gravels  vf_sand  vf_om  wf_gravels  wf_sand  OM_density  BD_all
+theta_s  k_s  csol  tksatu  tksatf  tkdry  k_solids  psi_s  lambda
+theta_r  alpha_vgm  L_vgm  n_vgm          （后四个由 VG 方案决定）
+```
+
+`MOD_SingleSrfdata.F90:759-1040` **无条件读这 21 个**，每个都回落到
+`<rawdata>/soil/*.nc` 全球栅格。
+
+**而 `site::fill` / `derive.rs` 一个都不推导** —— 它只算
+`vf_clay` / `wf_clay` / `wf_om` 三个。
+
+**真实 PLUMBER2 站点能跑，是因为原始文件本来就带着这 21 个**，
+而 `fill` 的第一行 `fs::copy` 把它们原样保留了下来。
+换句话说：那条路一直靠「用户的文件里已经有」，从来没有人补过它们。
+
 ### 所以 B 的承诺是
 
 ```
-经纬度 + 地类  →  12 个必需字段 + canopy_height（都有依据）
-LAI/SAI 月气候态 →  必须来自外部：<rawdata>/plant_15s/，或站点文件自带
+经纬度 + 地类     →  12 个必需字段 + canopy_height（都有依据）
+LAI/SAI 月气候态   →  必须外部提供
+21 个土壤水力/热参数 →  必须外部提供（PLUMBER2 的文件自带，从零建没有）
 ```
+
+**「只给经纬度」这个目标，实际达成度大约是一半。** 12 个字段加冠层
+高度能自动补齐，但真正驱动 Richards 方程的那批参数补不了 ——
+它们要么来自实测剖面，要么来自 240 GB 的栅格。
+
+这不是能靠写代码绕过的：**那 21 个是物理参数，没有可查的表。**
 
 **不编造季节曲线。** CoLM 的设计里 LAI 从来只从遥感或实测数据读，
 伪造一条塞进 `site.nc` 是编造科学输入数据。
