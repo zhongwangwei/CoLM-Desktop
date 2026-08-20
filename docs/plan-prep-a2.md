@@ -498,6 +498,24 @@ for (const b of document.querySelectorAll('button.pick'))   // boot() 里跑一�
 （`recent.js` 里补了 `dispatchEvent`）。**「做了动作，但依赖它的那
 一半没跑」—— 这个形状在这个代码库里出现过三次了。**
 
+### CSS class 约定（已核实）
+
+纯静态前端**没有类型检查器**，class 名写错不报错，只是样式不对。
+可用的（`gui/dist/app/style.css`）：
+
+| class | 用途 |
+|---|---|
+| `card` | 一张卡片 |
+| `card .ch` | 卡片标题下那行小字说明（灰、12px） |
+| `muted` / `mini` | 次要文字 / 小号字 |
+| `warn` / `fail` | 黄字 / 红字。**只有这两个状态色**，没有 `.ok` |
+| `expert-note` | 灰底的注意事项块 |
+| `pill-row` / `check` | 一行控件 / 带勾选框的标签 |
+| `input` / `select` / `btn-ghost` | 输入框 / 下拉 / 次要按钮 |
+
+**状态色只有两级**，所以「猜到了」不要上色（默认色即可），
+「单位要换算」用 `warn`，「必需槽位没猜到」用 `fail`。
+
 - [ ] **Step 2: 界面形状**
 
 四张卡片，顺序不可换（后一张依赖前一张的结果）：
