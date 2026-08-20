@@ -96,9 +96,14 @@ pub fn no_console(cmd: &mut std::process::Command) -> &mut std::process::Command
 ///
 /// **丢掉它们是无损的。** `MOD_RangeCheck.F90:262-270` 在越界或出现 NAN 时
 /// 往同一行尾部追加 ` with NAN` / ` Out of Range!`，而带标记的行**不满足**
-/// 这里的判据、会原样留下；更何况内核编进了 `CoLMDEBUG`，
-/// 那时 `MOD_RangeCheck.F90:295` 会直接 `CoLM_stop` 把运行终止掉 ——
+/// 这里的判据、会原样留下；`case.nml` 里打开 `DEF_USE_CoLMDEBUG` 的话，
+/// `MOD_RangeCheck.F90:295` 还会直接 `CoLM_stop` 把运行终止掉 ——
 /// 所以一次异常既进日志也让运行失败，两条路都不依赖这些播报行。
+///
+/// `RangeCheck`/`CoLMDEBUG` 本身也是运行时开关了（`DEF_USE_RangeCheck` /
+/// `DEF_USE_CoLMDEBUG`，`MOD_Namelist.F90`，默认 `.false.`），不是编译期宏——
+/// 默认设置下这个函数基本不会遇到匹配的行，因为内核压根不打印它们；
+/// 用户在 `case.nml` 里打开调试之后，丢弃这段逻辑才会真正派上用场。
 ///
 /// 判据取「以 `)` 收尾」而不是只看前缀：范围那一对括号是格式串的最后一项，
 /// 带标记的行一定在它后面还有字符。往**留下**的方向偏 ——
@@ -195,7 +200,7 @@ pub fn run_stage_streaming(
     // 在日志上长得一样** —— 而那两件事完全不同。
     if muted > 0 {
         text.push_str(&format!(
-            "\n--- {muted} 行无异常的 RangeCheck 播报未记入本日志。\n带 NAN / Out of Range 标记的行一律保留；\n内核编进了 CoLMDEBUG，那种行还会直接终止运行。---\n"
+            "\n--- {muted} 行无异常的 RangeCheck 播报未记入本日志。\n带 NAN / Out of Range 标记的行一律保留；\ncase.nml 里打开了 DEF_USE_CoLMDEBUG 的话，那种行还会直接终止运行。---\n"
         ));
     }
 

@@ -30,7 +30,7 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_Srfdata_CompressLevel
+   USE MOD_Namelist, only: DEF_Srfdata_CompressLevel, DEF_USE_RangeCheck
 #ifdef USEMPI
    USE MOD_SPMD_Task, only: p_comm_glb, p_err, p_is_master, p_is_io, p_is_worker, &
       p_address_master, p_np_worker, p_np_io, p_address_worker, p_address_io, &
@@ -48,9 +48,7 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
    USE MOD_NetCDFVector
    USE netcdf
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
 
    IMPLICIT NONE
 
@@ -281,9 +279,9 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('methane_ph_patches [pH]', methane_ph_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/methane_ph_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)

@@ -21,17 +21,13 @@ SUBROUTINE Aggregation_Topography ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
 
-#ifdef SrfdataDiag
    USE MOD_Mesh, only: numelm
    USE MOD_LandElm
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -56,9 +52,7 @@ SUBROUTINE Aggregation_Topography ( &
    real(r8), allocatable :: elevation_patches(:), elvstd_patches(:), sloperatio_patches(:)
    real(r8), allocatable :: landarea_one     (:)
 
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
-#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
@@ -156,11 +150,11 @@ SUBROUTINE Aggregation_Topography ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('elevation_patches ', elevation_patches )
       CALL check_vector_data ('elvstd_patches    ', elvstd_patches    )
       CALL check_vector_data ('sloperatio_patches', sloperatio_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/elevation_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -180,7 +174,7 @@ SUBROUTINE Aggregation_Topography ( &
       CALL ncio_write_vector (lndname, 'sloperatio_patches', 'patch', landpatch, &
          sloperatio_patches, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/topography_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (elevation_patches, landpatch%settyp, typpatch, m_patch2diag, &
@@ -195,7 +189,7 @@ SUBROUTINE Aggregation_Topography ( &
       lndname  = trim(dir_model_landdata) // '/diag/topography_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (sloperatio_patches, landpatch%settyp, typpatch, m_patch2diag, &
          -1.0e36_r8, lndname, 'sloperatio', compress = 1, write_mode = 'one')
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          deallocate ( elevation_patches  )

@@ -570,6 +570,7 @@ CONTAINS
    SUBROUTINE grid_sediment_calc(deltime)
    ! Main sediment calculation. Called from MOD_Grid_RiverLakeFlow after water routing.
    !-------------------------------------------------------------------------------------
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_Grid_RiverLakeNetwork, only: numucat, topo_rivwth, topo_rivlen, &
       topo_rivman, topo_area
    USE MOD_Const_Physical, only: grav
@@ -667,14 +668,14 @@ CONTAINS
       d_raw_seen = .false.
       es_eff_seen = .false.
       d_eff_seen = .false.
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       CALL system_clock(clk_total_start, clk_rate)
-#endif
+      ENDIF
 
       ! Store precipitation averaging time before reset
       precip_time_local = sed_precip_time
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       max_sed_precip_local = 0._r8
       max_precip_rate_local = 0._r8
       max_slope_local = 0._r8
@@ -708,7 +709,7 @@ CONTAINS
             ', max_precip_rate[mm/s]=', precip_diag_global(2), &
             ', max_slope=', precip_diag_global(3)
       ENDIF
-#endif
+      ENDIF
 
       sed_time_remaining = deltime
 
@@ -915,7 +916,7 @@ CONTAINS
       sed_precip_yield(:)  = 0._r8
       sed_precip_time      = 0._r8
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       CALL system_clock(clk_total_end, clk_rate)
       IF (p_iam_worker == 0) THEN
          IF (clk_rate > 0) THEN
@@ -929,7 +930,7 @@ CONTAINS
             ', adv=', t_adv, ', input=', t_input, ', exch=', t_exchange, &
             ', layer=', t_layer, ', diag=', t_diag
       ENDIF
-#endif
+      ENDIF
 
       sum_layer_local = 0._r8
       sum_seddep_local = 0._r8
@@ -990,7 +991,7 @@ CONTAINS
          n_susp_local, n_bed_local, n_exchange_pos_local, n_exchange_neg_local, &
          n_es_raw_local, n_d_raw_local, n_es_eff_local, n_d_eff_local, &
          n_flow_cancel_local /)
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
 #ifdef USEMPI
       CALL mpi_allreduce(MPI_IN_PLACE, diag_max_global, size(diag_max_global), &
          MPI_REAL8, MPI_MAX, p_comm_worker, p_err)
@@ -1036,7 +1037,7 @@ CONTAINS
          WRITE(*,'(A,I9,A,I9,A,I9,A,I9)') 'Sediment exchange counts raw: Es=', diag_count_global(8), &
             ', D=', diag_count_global(9), ', eff_Es=', diag_count_global(10), ', eff_D=', diag_count_global(11)
       ENDIF
-#endif
+      ENDIF
 
       deallocate(rivsto, rivout, rivout_abs, bed_area, fldfrc, wet_seen, shallow_seen, source_seen, &
          susp_seen, bed_seen, exch_pos_seen, exch_neg_seen, es_raw_seen, &

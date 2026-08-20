@@ -177,6 +177,7 @@ CONTAINS
    ! ---------
    SUBROUTINE subsurface_flow (deltime)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    USE MOD_UserDefFun
    USE MOD_Mesh
@@ -652,11 +653,11 @@ CONTAINS
 
          DO ipatch = 1, numpatch
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             ! For water balance check, the sum of water in soil column before the calcultion
             w_sum_before = sum(wliq_soisno(1:nl_soil,ipatch)) + sum(wice_soisno(1:nl_soil,ipatch)) &
                + wa(ipatch) + wdsrf(ipatch) + wetwat(ipatch)
-#endif
+            ENDIF
 
             IF (DEF_USE_Dynamic_Lake) THEN
                is_dry_lake = (patchtype(ipatch) == 4) .and. (zwt(ipatch) > 0.)
@@ -779,7 +780,7 @@ CONTAINS
 
             ENDIF
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             ! For water balance check, the sum of water in soil column after the calcultion
             w_sum_after = sum(wliq_soisno(1:nl_soil,ipatch)) + sum(wice_soisno(1:nl_soil,ipatch)) &
                + wa(ipatch) + wdsrf(ipatch) + wetwat(ipatch)
@@ -791,7 +792,7 @@ CONTAINS
                write(*,*) patchtype(ipatch)
                CALL CoLM_stop ()
             ENDIF
-#endif
+            ENDIF
          ENDDO
       ENDIF
 

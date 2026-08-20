@@ -183,9 +183,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
    USE MOD_NetCDFSerial
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_LandPatch
    USE MOD_Vars_Global
 
@@ -294,9 +292,9 @@ CONTAINS
       CALL ncio_read_bcast_serial (file_restart, 'sf', sf)
       CALL ncio_read_bcast_serial (file_restart, 'sf_no3', sf_no3)
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_BGCTimeInvariants ()
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -489,7 +487,6 @@ CONTAINS
 
    END SUBROUTINE deallocate_BGCTimeInvariants
 
-#ifdef RangeCheck
    !---------------------------------------
    SUBROUTINE check_BGCTimeInvariants ()
 
@@ -506,7 +503,6 @@ CONTAINS
       CALL check_vector_data ('rice2pdt       ',  rice2pdt       )
 
    END SUBROUTINE check_BGCTimeInvariants
-#endif
 
 #endif
 END MODULE MOD_BGC_Vars_TimeInvariants

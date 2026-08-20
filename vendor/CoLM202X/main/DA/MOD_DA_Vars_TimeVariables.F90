@@ -21,9 +21,7 @@ MODULE MOD_DA_Vars_TimeVariables
    PUBLIC :: deallocate_DATimeVariables
    PUBLIC :: READ_DATimeVariables
    PUBLIC :: WRITE_DATimeVariables
-#ifdef RangeCheck
    PUBLIC :: check_DATimeVariables
-#endif
 
    ! define variables
    ! Time-varying state variables which required by restart run, used to store tha noda trajectory state variable
@@ -562,9 +560,7 @@ CONTAINS
       USE MOD_Namelist
       USE MOD_SPMD_Task
       USE MOD_NetCDFVector
-#ifdef RangeCheck
       USE MOD_RangeCheck
-#endif
       USE MOD_LandPatch
       USE MOD_Vars_Global
       IMPLICIT NONE
@@ -635,9 +631,9 @@ CONTAINS
       CALL ncio_read_vector(file_restart, 'lake_icefrc', nl_lake, DEF_DA_ENS_NUM, landpatch, lake_icefrac_ens) ! lake ice fraction [-]
       CALL ncio_read_vector(file_restart, 'savedtke1  ', DEF_DA_ENS_NUM, landpatch, savedtke1_ens) ! saved tke1 [m2/s2]
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_DATimeVariables
-#endif
+      ENDIF
 
       IF (p_is_master) THEN
          write (*, *) 'Loading DA Time Variables done.'
@@ -645,7 +641,6 @@ CONTAINS
 
    END SUBROUTINE READ_DATimeVariables
 
-#ifdef RangeCheck
 !-----------------------------------------------------------------------
 
    SUBROUTINE check_DATimeVariables ()
@@ -710,7 +705,6 @@ CONTAINS
 
    END SUBROUTINE check_DATimeVariables
 !-----------------------------------------------------------------------------
-#endif
 
 END MODULE MOD_DA_Vars_TimeVariables
 #endif

@@ -46,13 +46,11 @@ CONTAINS
    ! ----------
    SUBROUTINE lateral_flow_init (lc_year)
 
-#ifdef CoLMDEBUG
    USE MOD_SPMD_Task
    USE MOD_Mesh
    USE MOD_Pixel
    USE MOD_LandPatch
    USE MOD_Utils
-#endif
    USE MOD_Catch_WriteParameters
    IMPLICIT NONE
 
@@ -116,6 +114,7 @@ CONTAINS
 
    USE MOD_UserDefFun, only : findloc_ud
    USE MOD_RangeCheck
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG, DEF_USE_RangeCheck
    IMPLICIT NONE
 
    integer,  intent(in) :: year
@@ -125,11 +124,9 @@ CONTAINS
    integer  :: i, j, j0, h, ps, pe, istep, s
    real(r8) :: rnofsrf, sumarea
    real(r8), allocatable :: wdsrf_p (:), wdsrf_hru_p (:)
-#ifdef CoLMDEBUG
    real(r8) :: dtolw, tolwat, toldis, maxdvol, maxdvol_g, sumdvol
    integer  :: hs, he, imax, bidmax
    real(r8), allocatable :: wdsrf_bsnhru_p(:), delvol(:)
-#endif
 
       IF (p_is_worker) THEN
 
@@ -171,12 +168,12 @@ CONTAINS
 
          CALL worker_push_data (push_elmhru2bsnhru, wdsrf_hru, wdsrf_bsnhru, spval)
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (numbsnhru > 0) THEN
             allocate (wdsrf_bsnhru_p (numbsnhru))
             wdsrf_bsnhru_p = wdsrf_bsnhru
          ENDIF
-#endif
+         ENDIF
 
          DO istep = 1, nsubstep
 
@@ -303,7 +300,7 @@ CONTAINS
             ENDIF
          ENDDO
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (numbasin > 0)  THEN
 
             allocate (delvol (numbasin))
@@ -381,7 +378,7 @@ CONTAINS
 
          IF (allocated(wdsrf_bsnhru_p)) deallocate(wdsrf_bsnhru_p)
          IF (allocated(delvol        )) deallocate(delvol        )
-#endif
+         ENDIF
 
          ! (3) ------------------- Subsurface lateral flow -------------------
          CALL subsurface_flow (deltime)
@@ -418,7 +415,7 @@ CONTAINS
 
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       IF (p_is_worker .and. (p_iam_worker == 0)) THEN
          write(*,'(/,A)') 'Checking Lateral Flow Variables ...'
          write(*,'(A,F12.5,A)') 'River Lake Flow minimum average timestep: ', &
@@ -433,7 +430,7 @@ CONTAINS
       CALL check_vector_data ('Subsurface bt HRU   [m/s]', xsubs_hru)
       CALL check_vector_data ('Subsurface bt patch [m/s]', xsubs_pch)
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (p_is_worker) THEN
 
          dtolw  = 0
@@ -470,8 +467,8 @@ CONTAINS
                ' m^3 in area  ', landarea, ' m^2'
          ENDIF
       ENDIF
-#endif
-#endif
+      ENDIF
+      ENDIF
 
       IF (allocated(wdsrf_p    )) deallocate(wdsrf_p    )
       IF (allocated(wdsrf_hru_p)) deallocate(wdsrf_hru_p)

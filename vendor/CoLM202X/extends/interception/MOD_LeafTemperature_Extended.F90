@@ -122,6 +122,7 @@ CONTAINS
    USE MOD_Ozone, only: CalcOzoneStress
    USE MOD_Qsadv
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -1426,11 +1427,11 @@ ENDIF
           ! account for vegetation heat change
           - dheatl
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF(abs(err) .gt. .2) &
       write(6,*) 'energy imbalance in LeafTemperature.F90',it-1,&
          err,sabv,irab,fsenl,htvpl*fevpl,hprl,dheatl,canopy_phase_heat
-#endif
+      ENDIF
 
 !-----------------------------------------------------------------------
 ! Update dew accumulation (kg/m2)

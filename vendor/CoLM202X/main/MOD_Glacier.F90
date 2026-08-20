@@ -71,6 +71,7 @@ CONTAINS
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_Const_Physical, only: hvap,hsub,rgas,cpair,stefnc,tfrz,cpliq,cpice
    USE MOD_FrictionVelocity
    USE MOD_Qsadv
@@ -321,14 +322,14 @@ CONTAINS
          errore = errore - (t_icesno(j)-t_icesno_bef(j))/fact(j)
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF(abs(errore)>.2)THEN
          write(6,*) 'GLACIER_TEMP.F90 : energy balance violation'
          write(6,100) errore,sabg,forc_frl,olrg,fsena,lfevpa,xmf,t_precip,t_icesno(lb)
          STOP
       ENDIF
 100   format(10(f7.3))
-#endif
+      ENDIF
 
    END SUBROUTINE GLACIER_TEMP
 

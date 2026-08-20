@@ -263,15 +263,13 @@ CONTAINS
    real(r8) :: totalvol_bef, totalvol_aft, totalrnof, totaldis
    real(r8) :: water_balance_err, water_balance_tol
    real(r8) :: water_balance_vec(4)
-#ifdef CoLMDEBUG
    real(r8) :: totalclip
    real(r8), allocatable :: trc_mass_bef(:), trc_mass_aft(:)
    real(r8), allocatable :: trc_mass_inp(:), trc_mass_dis(:), trc_mass_reactive(:)
    real(r8) :: bif_flux_sum_total, bif_flux_sum_max, bif_protected_clip_sum
    integer  :: itrc_dbg
-#endif
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
 #ifdef TRACER
       IF (ntracers > 0) THEN
          allocate (trc_mass_bef(ntracers), trc_mass_aft(ntracers), &
@@ -290,7 +288,7 @@ CONTAINS
       trc_mass_inp = 0._r8
       trc_mass_dis = 0._r8
       trc_mass_reactive = 0._r8
-#endif
+      ENDIF
 
       totalvol_bef = 0._r8
       totalvol_aft = 0._r8
@@ -509,7 +507,7 @@ CONTAINS
 
          ! Tracer conservation: snapshot old state and the queued input
          ! before merging that input into the pending pool below.
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
 #ifdef TRACER
          IF (numucat > 0) THEN
             DO itrc = 1, ntracers
@@ -534,7 +532,7 @@ CONTAINS
          trc_mass_dis = 0._r8
          trc_mass_reactive = 0._r8
 #endif
-#endif
+         ENDIF
 
 #ifdef TRACER
          ! Water is added in full before adaptive routing. Merge its tracer
@@ -637,12 +635,12 @@ CONTAINS
 
          ntimestep = 0
             totaldis  = 0._r8
-#ifdef CoLMDEBUG
+            IF (DEF_USE_CoLMDEBUG) THEN
             totalclip = 0._r8
             bif_flux_sum_total = 0._r8
             bif_flux_sum_max   = 0._r8
             bif_protected_clip_sum = 0._r8
-#endif
+            ENDIF
 
          dt_res(:) = acctime_rnof
 
@@ -1027,7 +1025,7 @@ CONTAINS
                      sum_hflux_riv = sum_hflux_base + bif_hflux_sum
                   END WHERE
                ENDIF
-#ifdef CoLMDEBUG
+               IF (DEF_USE_CoLMDEBUG) THEN
                ! Bifurcation conservation: the GLOBAL sum of bif_hflux_sum
                ! across all workers should be ~0 each step (what leaves
                ! one cell enters another). Track cumulative and worst-case.
@@ -1041,7 +1039,7 @@ CONTAINS
 #endif
                bif_flux_sum_total = bif_flux_sum_total + dt_this
                bif_flux_sum_max = max(bif_flux_sum_max, abs(dt_this))
-#endif
+               ENDIF
             ENDIF
 
             ! Per-sub-step tracer transport: advance tracer in lockstep
@@ -1087,13 +1085,13 @@ CONTAINS
                               ' clipped=', protected_clip
                            CALL CoLM_stop('BIF protected-side limiter failed')
                         ENDIF
-#ifdef CoLMDEBUG
+                        IF (DEF_USE_CoLMDEBUG) THEN
                         bif_protected_clip_sum = bif_protected_clip_sum + protected_clip
-#endif
+                        ENDIF
                      ENDIF
-#ifdef CoLMDEBUG
+               IF (DEF_USE_CoLMDEBUG) THEN
                IF (volwater < 0._r8) totalclip = totalclip - volwater
-#endif
+               ENDIF
                volwater = max(volwater, 0.)
 
                ! Inland depression overflow is a post-transport water correction.
@@ -1195,7 +1193,7 @@ CONTAINS
 
                   IF (ucat_next(i) <= 0) THEN
                      totaldis = totaldis + hflux_fc(i)*dt_all(irivsys(i))
-#ifdef CoLMDEBUG
+                     IF (DEF_USE_CoLMDEBUG) THEN
                      ! Accumulate tracer discharge at river mouth
 #ifdef TRACER
                      IF (ntracers > 0) THEN
@@ -1206,7 +1204,7 @@ CONTAINS
                         ENDDO
                      END IF
 #endif
-#endif
+                     ENDIF
                   ENDIF
 
                   acctime_ucat(i) = acctime_ucat(i) + dt_all(irivsys(i))
@@ -1339,7 +1337,7 @@ CONTAINS
                totalvol_aft = totalvol_aft + volwater
             ENDIF
          ENDDO
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          ! Tracer conservation: compute total mass after routing.
          ! Include protected-side pool so the levee repartition
          ! stays internally closed in the before/after accounting.
@@ -1357,7 +1355,7 @@ CONTAINS
 #else
          trc_mass_aft = 0._r8
 #endif
-#endif
+         ENDIF
       ENDIF
 
 #ifdef USEMPI
@@ -1383,7 +1381,7 @@ CONTAINS
          routing_mass_warn_count = routing_mass_warn_count + 1
       ENDIF
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
 #ifdef USEMPI
       IF (.not. p_is_worker) ntimestep = 0
       CALL mpi_allreduce (MPI_IN_PLACE, ntimestep, 1, MPI_INTEGER, MPI_MAX, p_comm_glb, p_err)
@@ -1426,9 +1424,9 @@ CONTAINS
          CALL mpi_allreduce (MPI_IN_PLACE, trc_mass_reactive, ntracers, MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
       END IF
 #endif
-#endif
+      ENDIF
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (p_is_master) THEN
          write(*,'(/,A)') 'Checking River Routing Flow ...'
          write(*,'(A,F12.5,A)') 'River Lake Flow minimum average timestep: ', acctime_rnof/ntimestep, ' seconds'
@@ -1466,7 +1464,7 @@ CONTAINS
 #endif
       ENDIF  ! p_is_master
 
-#endif
+      ENDIF
 
 #ifdef TRACER
       IF (tracer_lifecycle_route_has_active() .and. p_is_worker) THEN
@@ -1535,10 +1533,10 @@ CONTAINS
             IF (allocated(dt_all       )) deallocate(dt_all       )
          IF (allocated(volresv_safe)) deallocate(volresv_safe)
          IF (allocated(ucat2resv_safe)) deallocate(ucat2resv_safe)
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (allocated(trc_mass_bef)) deallocate(trc_mass_bef, trc_mass_aft, &
                                               trc_mass_inp, trc_mass_dis, trc_mass_reactive)
-#endif
+      ENDIF
 
    END SUBROUTINE grid_riverlake_flow
 

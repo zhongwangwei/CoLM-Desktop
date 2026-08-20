@@ -2423,7 +2423,6 @@ CONTAINS
    !-------------------------------------------------------------------------------------
    ! Diagnostic check: print min/max of tracer state variables
    !-------------------------------------------------------------------------------------
-#ifdef RangeCheck
    SUBROUTINE check_tracer_state ()
 
    USE MOD_SPMD_Task
@@ -2619,11 +2618,6 @@ CONTAINS
       deallocate (tmp)
 
    END SUBROUTINE check_tracer_state
-#else
-   SUBROUTINE check_tracer_state ()
-   IMPLICIT NONE
-   END SUBROUTINE check_tracer_state
-#endif
 
 
    !-------------------------------------------------------------------------------------

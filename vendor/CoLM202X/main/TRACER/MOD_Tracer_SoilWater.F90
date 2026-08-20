@@ -78,6 +78,7 @@ CONTAINS
       snow_qout_layer, tleaf_frac, t_soisno_frac, forc_q_frac, forc_psrf_frac, lai_frac, rst_frac, ra_frac, &
       rss_frac, dz_soi_frac, porsl_frac, dz_sno_frac)
 
+      USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
       IMPLICIT NONE
       integer,  intent(in) :: ipatch
       real(r8), intent(in) :: deltim
@@ -1454,14 +1455,14 @@ CONTAINS
                ! 6. Wetland water: standard soil path should not mutate it.
             ! ============================================================
             d_wetwat = wetwat - wetwat_bef
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (abs(d_wetwat) > trc_tiny) THEN
                write(*,'(A,I8,A,I3,A,E12.5,A,E12.5,A,E12.5)') &
                   ' WARNING tracer_soil_water: wetwat changed in standard soil path ipatch=', &
                   ipatch, ' itrc=', itrc, ' d_wetwat=', d_wetwat, &
                   ' wetwat_bef=', wetwat_bef, ' wetwat=', wetwat
             ENDIF
-#endif
+            ENDIF
 
             DO j = lb, nl_soil
                CALL tracer_equilibrate_dissolved(itrc, max(wliq_soisno(j), 0._r8), &

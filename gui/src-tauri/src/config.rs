@@ -16,6 +16,13 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
     if n.starts_with("DEF_HIST_VARS%") {
         return Some("输出变量");
     }
+    // 调试三件套（CoLMDEBUG / RangeCheck / SrfdataDiag）曾经是编译期宏，
+    // 现在是运行时开关（`MOD_Namelist.F90` 里的 `DEF_USE_*`，默认
+    // `.false.`）。三个都不属于任何单一物理过程，放在一起单独一栏，
+    // 别被 `SrfdataDiag` 的 "SRFDATA" 子串顺手分进下面的「地表数据」。
+    if n == "DEF_USE_COLMDEBUG" || n == "DEF_USE_RANGECHECK" || n == "DEF_USE_SRFDATADIAG" {
+        return Some("调试与诊断");
+    }
     if n.starts_with("DEF_SIMULATION_TIME%") {
         return Some("时间与预热");
     }

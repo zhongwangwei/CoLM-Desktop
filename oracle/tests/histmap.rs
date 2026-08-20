@@ -5,10 +5,12 @@
 
 use std::collections::BTreeSet;
 
-const WATERHEAT: [&str; 6] = [
-    "CoLMDEBUG",
+// `CoLMDEBUG` / `RangeCheck` 不在这里——调试三件套改成运行时开关之后，
+// `kernels/default/manifest.json` 的 `macros` 不再列出它们了（见
+// `create_defineh.bash`）。没有任何闸门表条目按这两个名字过滤，去掉
+// 它们不改变下面测的行为。
+const WATERHEAT: [&str; 4] = [
     "LULC_IGBP",
-    "RangeCheck",
     "SinglePoint",
     "extend_interception",
     "vanGenuchten_Mualem_SOIL_MODEL",

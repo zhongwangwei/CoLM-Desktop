@@ -138,6 +138,7 @@ CONTAINS
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
                            DEF_USE_LCT,DEF_USE_PFT,DEF_USE_PC,DEF_PC_CROP_SPLIT
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -1455,7 +1456,7 @@ ENDIF
          errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j)
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (abs(errore) > .5) THEN
       write(6,*) 'MOD_Thermal.F90: energy balance violation'
       write(6,*) ipatch,errore,sabv,sabg,frl,olrg,fsenl,fseng,hvap*fevpl,htvp*fevpg,xmf,hprl
@@ -1463,7 +1464,7 @@ ENDIF
       CALL CoLM_stop ()
       ENDIF
 100   format(10(f15.3))
-#endif
+      ENDIF
 
   END SUBROUTINE THERMAL
 

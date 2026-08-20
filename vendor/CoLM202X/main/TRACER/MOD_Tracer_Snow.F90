@@ -16,6 +16,7 @@ CONTAINS
    SUBROUTINE tracer_newsnow (ipatch, patchtype, snl, snl_old, pg_snow, deltim, &
       scv, scv_bef, wetwat_val, &
       wliq_soisno, wice_soisno, wice_soisno_bef)
+      USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
       IMPLICIT NONE
       integer,  intent(in) :: ipatch, patchtype, snl, snl_old
       real(r8), intent(in) :: pg_snow                    ! snow throughfall [mm/s]
@@ -44,7 +45,7 @@ CONTAINS
             R_snow_step = 0._r8
          ENDIF
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          ! Invariant: when the pre-newsnow state has layered snow
          ! (snl_old < 0), trc_scv must be zero — pre-layer accumulation
          ! stops once a real snow layer exists, and Cases B/C below will
@@ -58,7 +59,7 @@ CONTAINS
                ' WARNING tracer_newsnow: trc_scv residual under layered snow ipatch=', &
                ipatch, ' itrc=', itrc, ' trc_scv_pre=', trc_scv(itrc, ipatch)
          ENDIF
-#endif
+         ENDIF
 
          IF (snl_old == 0 .and. snl < 0) THEN
             ! Case A: First snow layer just created from accumulated scv.
@@ -100,7 +101,7 @@ CONTAINS
             ! — covers the regression risk if a future split path forgets
             ! to route through the hooks.
             j = snl + 1
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (present(wice_soisno)) THEN
                IF (abs(wice_soisno(1) - max(pg_snow, 0._r8) * deltim) > 1.e-6_r8) THEN
                   write(*,'(A,I8,A,I3,A,E12.5,A,E12.5)') &
@@ -110,7 +111,7 @@ CONTAINS
                      ' pg_snow*dt=', max(pg_snow, 0._r8) * deltim
                ENDIF
             ENDIF
-#endif
+            ENDIF
             IF (present(wice_soisno)) THEN
                trc_wice_soisno(itrc, j, ipatch) = wice_soisno(1) * R_snow_step
             ENDIF
@@ -141,7 +142,7 @@ CONTAINS
 	                  trc_wice_soisno(itrc, j, ipatch) = trc_wice_soisno(itrc, j, ipatch) &
 	                     + trc_pg_snow_ground(itrc, ipatch)
 	               ENDIF
-#if (defined CoLMDEBUG)
+               IF (DEF_USE_CoLMDEBUG) THEN
                IF (abs(d_wice - snow_mass_step) > 1.e-6_r8 .and. &
                    trc_pg_snow_ground(itrc, ipatch) > trc_tiny) THEN
                   write(*,'(A,I8,A,I3,A,E12.5,A,E12.5,A,E12.5)') &
@@ -150,7 +151,7 @@ CONTAINS
                      ' pg_snow*dt=', snow_mass_step, &
                      ' trc_pg_snow_ground=', trc_pg_snow_ground(itrc, ipatch)
 	               ENDIF
-#endif
+               ENDIF
 	               IF (abs(trc_scv(itrc, ipatch)) > trc_tiny) THEN
 	                  trc_wice_soisno(itrc, j, ipatch) = trc_wice_soisno(itrc, j, ipatch) &
 	                     + trc_scv(itrc, ipatch)

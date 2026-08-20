@@ -32,9 +32,7 @@ MODULE MOD_Vars_PFTimeInvariants
    PUBLIC :: READ_PFTimeInvariants
    PUBLIC :: WRITE_PFTimeInvariants
    PUBLIC :: deallocate_PFTimeInvariants
-#ifdef RangeCheck
    PUBLIC :: check_PFTimeInvariants
-#endif
 
 ! PRIVATE MEMBER FUNCTIONS:
 
@@ -142,7 +140,6 @@ CONTAINS
 
    END SUBROUTINE deallocate_PFTimeInvariants
 
-#ifdef RangeCheck
    SUBROUTINE check_PFTimeInvariants ()
 
    USE MOD_RangeCheck
@@ -156,7 +153,6 @@ CONTAINS
 #endif
 
    END SUBROUTINE check_PFTimeInvariants
-#endif
 
 END MODULE MOD_Vars_PFTimeInvariants
 #endif
@@ -451,9 +447,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
    USE MOD_NetCDFSerial
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_LandPatch
    USE MOD_Vars_Global
    USE MOD_Const_LC, only: patchtypes
@@ -615,9 +609,9 @@ CONTAINS
       CALL READ_UrbanTimeInvariants (file_restart)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_TimeInvariants ()
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -975,7 +969,6 @@ CONTAINS
 #endif
    END SUBROUTINE deallocate_TimeInvariants
 
-#ifdef RangeCheck
    SUBROUTINE check_TimeInvariants ()
 
    USE MOD_SPMD_Task
@@ -1130,7 +1123,6 @@ CONTAINS
 #endif
 
    END SUBROUTINE check_TimeInvariants
-#endif
 
 END MODULE MOD_Vars_TimeInvariants
 ! ---------- EOP ------------

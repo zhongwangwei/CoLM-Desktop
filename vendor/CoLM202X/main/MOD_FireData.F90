@@ -68,27 +68,27 @@ CONTAINS
          CALL ncio_read_block (file_fire, 'abm', grid_fire, f_xy_fire)
       ENDIF
       CALL mg2p_fire%grid2pset (f_xy_fire, abm_lf)
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('abm', abm_lf)
-#endif
+      ENDIF
 
       file_fire = trim(DEF_dir_runtime) // '/fire/peatf_colm_360x720_c100428.nc'
       IF (p_is_io) THEN
          CALL ncio_read_block (file_fire, 'peatf', grid_fire, f_xy_fire)
       ENDIF
       CALL mg2p_fire%grid2pset (f_xy_fire, peatf_lf)
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('peatf', peatf_lf)
-#endif
+      ENDIF
 
       file_fire = trim(DEF_dir_runtime) // '/fire/gdp_colm_360x720_c100428.nc'
       IF (p_is_io) THEN
          CALL ncio_read_block (file_fire, 'gdp', grid_fire, f_xy_fire)
       ENDIF
       CALL mg2p_fire%grid2pset (f_xy_fire, gdp_lf)
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('gdp', gdp_lf)
-#endif
+      ENDIF
 
       CALL update_hdm_data (YY)
 
@@ -129,9 +129,9 @@ CONTAINS
 
       CALL mg2p_fire%grid2pset (f_xy_fire, hdm_lf)
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('hdm', hdm_lf)
-#endif
+      ENDIF
 
    END SUBROUTINE update_hdm_data
 

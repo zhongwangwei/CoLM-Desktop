@@ -135,9 +135,9 @@ CONTAINS
          ENDDO
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('plant date value for rice2 ', pdrice2)
-#endif
+      ENDIF
 
       ! (2) Read in plant date.
       IF (p_is_worker) THEN
@@ -166,9 +166,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('plantdate_pfts value ', plantdate_p)
-#endif
+      ENDIF
 
       ! (3) Read in fertlization
       IF (DEF_FERT_SOURCE == 1) THEN
@@ -268,9 +268,9 @@ CONTAINS
          IF (allocated (manure_tmp))     deallocate(manure_tmp)
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('fert nitro value ', fertnitro_p)
-#endif
+      ENDIF
 
       ! (4) Read in irrigation method
       !file_irrig = trim(DEF_dir_runtime) // '/crop/surfdata_irrigation_method.nc'
@@ -314,9 +314,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('irrigation method ', irrig_method_p)
-#endif
+      ENDIF
 
       IF (allocated (pdrice2_tmp  ))    deallocate(pdrice2_tmp  )
       IF (allocated (plantdate_tmp))    deallocate(plantdate_tmp)
@@ -351,9 +351,9 @@ CONTAINS
 
          call mg2p_irrigalloc%grid2pset (f_xy_irrigalloc, irrig_gw_alloc)
 
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_vector_data ('irrigation goundwater allocation ', irrig_gw_alloc)
-#endif
+         ENDIF
 
          ! (6) Read in irrigation allocated to surfacewater
          IF (p_is_worker) THEN
@@ -366,9 +366,9 @@ CONTAINS
 
          call mg2p_irrigalloc%grid2pset (f_xy_irrigalloc, irrig_sw_alloc)
 
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_vector_data ('irrigation surfacewater allocation ', irrig_sw_alloc)
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE CROP_readin

@@ -986,7 +986,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
@@ -1011,7 +1011,7 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
-#endif
+      ENDIF
 
    END SUBROUTINE read_forcing
 

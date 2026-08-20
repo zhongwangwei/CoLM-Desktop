@@ -54,9 +54,7 @@ CONTAINS
    USE MOD_NetCDFSerial
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
 #ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction
 #endif
@@ -533,11 +531,11 @@ ENDIF
             ftopo = trim(dir_landdata)//'/topography/'//trim(cyear)//'/mean_twi_patches.nc'
             CALL ncio_read_vector (ftopo, 'mean_twi_patches', landpatch, topoweti)
 
-#ifdef RangeCheck
+            IF (DEF_USE_RangeCheck) THEN
             CALL check_vector_data ('maximum saturated fraction', fsatmax )
             CALL check_vector_data ('fsat decay factor         ', fsatdcf )
             CALL check_vector_data ('topographic wetness index ', topoweti)
-#endif
+            ENDIF
 
          ELSEIF (DEF_TOPMOD_method == 2) THEN
 
@@ -553,12 +551,12 @@ ENDIF
             ftopo = trim(dir_landdata)//'/topography/'//trim(cyear)//'/mu_twi_patches.nc'
             CALL ncio_read_vector (ftopo, 'mu_twi_patches', landpatch, mu_twi)
 
-#ifdef RangeCheck
+            IF (DEF_USE_RangeCheck) THEN
             CALL check_vector_data ('topographic wetness index  ', topoweti)
             CALL check_vector_data ('twi alpha in three gamma   ', alp_twi )
             CALL check_vector_data ('twi chi   in three gamma   ', chi_twi )
             CALL check_vector_data ('twi mu    in three gamma   ', mu_twi  )
-#endif
+            ENDIF
 
          ENDIF
       ENDIF
@@ -730,9 +728,9 @@ ENDIF
 ! 1.6 Write out as a restart file [histTimeConst]
 ! ...............................................
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_TimeInvariants ()
-#endif
+      ENDIF
 
       CALL WRITE_TimeInvariants (lc_year, casename, dir_restart)
 
@@ -1279,10 +1277,10 @@ ENDIF
          Julian_8day = int(calendarday(idate)-1)/8*8 + 1
          CALL LAI_readin (year, Julian_8day, dir_landdata)
       ENDIF
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('LAI ', tlai)
       CALL check_vector_data ('SAI ', tsai)
-#endif
+      ENDIF
 
 #ifdef CROP
          CALL CROP_readin ()
@@ -1615,10 +1613,10 @@ ENDIF
 
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('Basin Water Depth   [m]  ', wdsrf_bsn)
       CALL check_vector_data ('HRU Water Depth     [m]  ', wdsrf_bsnhru)
-#endif
+      ENDIF
 
       IF (allocated(patcharea)) deallocate(patcharea)
 
@@ -1694,9 +1692,9 @@ ENDIF
 ! 2.6 Write out the model variables for restart run [histTimeVar]
 ! ...............................................................
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_TimeVariables ()
-#endif
+      ENDIF
 
       IF ( .not. present(lulcc_call) ) THEN
          ! only be called in running MKINI, LULCC will be executed later

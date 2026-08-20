@@ -49,11 +49,9 @@ MODULE MOD_Hydro_SoilWater
    integer,  parameter :: max_iters_richards = 10
    real(r8), parameter :: tol_richards = 8.e-8
 
-#ifdef CoLMDEBUG
    integer(8) :: count_implicit = 0
    integer(8) :: count_explicit = 0
    integer(8) :: count_wet2dry  = 0
-#endif
 
    ! private subroutines and functions
    PRIVATE :: Richards_solver
@@ -657,6 +655,7 @@ CONTAINS
          ss_dp, waquifer, ss_vl, ss_wt, ss_q, &
          tol_q, tol_z, tol_v, tol_p)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    integer,  intent(in) :: lb, ub      ! lower and upper boundary
@@ -865,7 +864,7 @@ CONTAINS
 
                dt_done = dt_done + dt_this
 
-#ifdef CoLMDEBUG
+               IF (DEF_USE_CoLMDEBUG) THEN
                IF (f2_norm(iter) < tol_richards * dt_this) THEN
                   count_implicit = count_implicit + 1
                ELSEIF (iter >= max_iters_richards) then
@@ -873,7 +872,7 @@ CONTAINS
                ELSEIF (wet2dry) THEN
                   count_wet2dry = count_wet2dry + 1
                ENDIF
-#endif
+               ENDIF
 
                EXIT
 
@@ -2778,6 +2777,7 @@ CONTAINS
          psi_s_l, hksat_l, prms_l, dz_l, psi_l, hk_l, &
          flux_u, flux_l, tol_q, tol_p)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    integer,  intent(in) :: nprm
@@ -2870,11 +2870,11 @@ CONTAINS
          iter = iter + 1
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (iter == 50) THEN
          write(*,*) 'Warning : flux_at_unsaturated_interface: not converged.'
       ENDIF
-#endif
+      ENDIF
 
    END SUBROUTINE flux_at_unsaturated_interface
 
@@ -2885,6 +2885,7 @@ CONTAINS
          nlev_sat, dz_sat, psi_sat, hk_sat, psi_btm, &
          q_us_up, qlc, tol_q, tol_z, tol_p, flux_btm)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: psi_s_u, hksat_u
@@ -3040,11 +3041,11 @@ CONTAINS
          iter = iter + 1
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (iter == 50) THEN
          write(*,*) 'Warning : flux_top_transitive_interface: not converged.'
       ENDIF
-#endif
+      ENDIF
 
    END SUBROUTINE flux_top_transitive_interface
 
@@ -3055,6 +3056,7 @@ CONTAINS
          nlev_sat, dz_sat, psi_sat, hk_sat, psi_top, &
          q_us_l, qlc, tol_q, tol_z, tol_p, flux_top)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: psi_s_l, hksat_l
@@ -3213,11 +3215,11 @@ CONTAINS
          iter = iter + 1
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (iter == 50) THEN
          write(*,*) 'Warning : flux_btm_transitive_interface: not converged.'
       ENDIF
-#endif
+      ENDIF
 
    END SUBROUTINE flux_btm_transitive_interface
 
@@ -3231,6 +3233,7 @@ CONTAINS
          q_us_u, q_us_l, qlc, &
          tol_q, tol_z, tol_p)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    integer,  intent(in) :: ilev_us_u, ilev_us_l
@@ -3376,11 +3379,11 @@ CONTAINS
          iter = iter + 1
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (iter == 50) THEN
          write(*,*) 'Warning : flux_both_transitive_interface: not converged.'
       ENDIF
-#endif
+      ENDIF
 
    END SUBROUTINE flux_both_transitive_interface
 
@@ -3389,6 +3392,7 @@ CONTAINS
          vl_s, vl_r, psi_s, hksat, nprm, prms, tol_v, tol_z, &
          wa, zmin, zwt)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in)  :: vl_s, vl_r, psi_s, hksat
@@ -3446,11 +3450,11 @@ CONTAINS
          iter = iter + 1
       ENDDO
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (iter == 50) THEN
          write(*,*) 'Warning : get_zwt_from_wa: not converged.'
       ENDIF
-#endif
+      ENDIF
 
    END SUBROUTINE get_zwt_from_wa
 
@@ -3598,6 +3602,7 @@ CONTAINS
    ! -----
    SUBROUTINE print_VSF_iteration_stat_info ()
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    IMPLICIT NONE
 
@@ -3606,7 +3611,7 @@ CONTAINS
    integer(8), SAVE :: count_wet2dry_accum  = 0
    integer :: iwork
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (p_is_worker) THEN
 #ifdef USEMPI
          CALL mpi_allreduce (MPI_IN_PLACE, count_implicit, 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
@@ -3651,7 +3656,7 @@ CONTAINS
       count_implicit = 0
       count_explicit = 0
       count_wet2dry  = 0
-#endif
+      ENDIF
    END SUBROUTINE print_VSF_iteration_stat_info
 
 END MODULE MOD_Hydro_SoilWater

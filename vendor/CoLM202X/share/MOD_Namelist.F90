@@ -22,6 +22,19 @@ MODULE MOD_Namelist
 
    character(len=256) :: DEF_CASE_NAME = 'CASENAME'
 
+! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+! ----- Part 0.5: debug / diagnostic output -----
+! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+   ! These used to be compile-time macros (CoLMDEBUG, RangeCheck,
+   ! SrfdataDiag); they are runtime switches now so that one binary can
+   ! be built with all three debug code paths compiled in and toggled
+   ! on only when actually debugging. Default off, matching production
+   ! use -- turn them on explicitly in case.nml to see the old output.
+   logical :: DEF_USE_CoLMDEBUG   = .false.
+   logical :: DEF_USE_RangeCheck  = .false.
+   logical :: DEF_USE_SrfdataDiag = .false.
+
 ! ~~~~~~~~~~~~~~~~~~~~~~~~~~
 ! ----- Part 1: domain -----
 ! ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1146,6 +1159,10 @@ CONTAINS
       DEF_CASE_NAME,                          &
       DEF_domain,                             &
 
+      DEF_USE_CoLMDEBUG,                      &
+      DEF_USE_RangeCheck,                     &
+      DEF_USE_SrfdataDiag,                    &
+
       SITE_fsitedata,                         &
       SITE_lon_location,                      &
       SITE_lat_location,                      &
@@ -1784,11 +1801,11 @@ CONTAINS
 ! ----- single point run ----- Macros&Namelist conflicts and dependency management
 
 #if (defined SinglePoint)
-#ifdef SrfdataDiag
-         write(*,*) '                  *****                  '
-         write(*,*) 'Surface data diagnose is closed in SinglePoint case.'
-#undef SrfdataDiag
-#endif
+         IF (DEF_USE_SrfdataDiag) THEN
+            DEF_USE_SrfdataDiag = .false.
+            write(*,*) '                  *****                  '
+            write(*,*) 'Surface data diagnose is closed in SinglePoint case.'
+         ENDIF
          IF (trim(DEF_Forcing_Interp_Method) == 'bilinear') THEN
             DEF_Forcing_Interp_Method = 'arealweight'
             write(*,*) '                  *****                  '

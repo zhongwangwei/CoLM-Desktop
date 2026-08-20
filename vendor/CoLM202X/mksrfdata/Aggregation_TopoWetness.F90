@@ -24,14 +24,10 @@ SUBROUTINE Aggregation_TopoWetness ( &
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
    USE MOD_CatchmentDataReadin
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -59,9 +55,7 @@ SUBROUTINE Aggregation_TopoWetness ( &
    real(r8), allocatable :: twi_sort(:), xx(:), yy(:)
    integer,  allocatable :: order   (:)
 
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
-#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
@@ -269,14 +263,14 @@ SUBROUTINE Aggregation_TopoWetness ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('mean_twi_patches  ', mean_twi_patches)
       CALL check_vector_data ('fsatmax_patches   ', fsatmax_patches )
       CALL check_vector_data ('fsatdcf_patches   ', fsatdcf_patches )
       CALL check_vector_data ('alp_twi_patches   ', alp_twi_patches )
       CALL check_vector_data ('chi_twi_patches   ', chi_twi_patches )
       CALL check_vector_data ('mu_twi_patches    ', mu_twi_patches  )
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/mean_twi_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -315,7 +309,7 @@ SUBROUTINE Aggregation_TopoWetness ( &
          mu_twi_patches, DEF_Srfdata_CompressLevel)
 
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
 
       lndname  = trim(dir_model_landdata) // '/diag/twi_' // trim(cyear) // '.nc'
@@ -331,7 +325,7 @@ SUBROUTINE Aggregation_TopoWetness ( &
          spval, lndname, 'chi_twi',  compress = 1, write_mode = 'one')
       CALL srfdata_map_and_write (mu_twi_patches,   landpatch%settyp, typpatch, m_patch2diag, &
          spval, lndname, 'mu_twi',   compress = 1, write_mode = 'one')
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          deallocate ( mean_twi_patches )

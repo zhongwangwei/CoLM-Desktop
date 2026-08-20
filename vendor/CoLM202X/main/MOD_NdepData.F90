@@ -121,6 +121,7 @@ CONTAINS
    USE MOD_LandPatch
    USE MOD_Vars_TimeInvariants
    USE MOD_RangeCheck
+   USE MOD_Namelist, only: DEF_USE_RangeCheck
    IMPLICIT NONE
 
    integer, intent(in) :: YY
@@ -157,9 +158,9 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('ndep', ndep)
-#endif
+      ENDIF
 
    END SUBROUTINE update_ndep_data_annually
 
@@ -184,6 +185,7 @@ CONTAINS
    USE MOD_LandPatch
    USE MOD_Vars_TimeInvariants
    USE MOD_RangeCheck
+   USE MOD_Namelist, only: DEF_USE_RangeCheck
    IMPLICIT NONE
 
    integer, intent(in) :: YY,MM
@@ -220,9 +222,9 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('ndep', ndep)
-#endif
+      ENDIF
 
    END SUBROUTINE update_ndep_data_monthly
 

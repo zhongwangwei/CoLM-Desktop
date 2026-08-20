@@ -109,6 +109,7 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_SPMD_Task
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: denh2o,roverg,hvap,hsub,rgas,cpair,&
                                  stefnc,denice,tfrz,vonkar,grav
@@ -1327,7 +1328,7 @@ CONTAINS
 
       fgrnd = fgrnd - (Fhac + Fwst + Fach + vehc + meta)*(1-flake)
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (abs(errore)>.5) THEN
          write(6,*) 'Urban_THERMAL.F90: Urban energy balance violation'
          write(6,*) ipatch,errore,sabg,sabv*fveg*(1-flake)
@@ -1338,7 +1339,7 @@ CONTAINS
          CALL CoLM_stop()
       ENDIF
 100   format(10(f15.3))
-#endif
+      ENDIF
 
       ! diagnostic sabg only for pervious and impervious ground
       !sabg = sabgper*fgper + sabgimp*(1-fgper)

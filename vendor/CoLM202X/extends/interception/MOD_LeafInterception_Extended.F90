@@ -151,6 +151,7 @@ CONTAINS
    !---2002.08.31  Yongjiu Dai
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -309,11 +310,11 @@ CONTAINS
                tex_snow = tex_snow * deltim
             ENDIF
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10 .and. .not.DEF_VEG_SNOW) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : ',ldew,tex_rain,tex_snow,tti_rain,tti_snow,p0
             ENDIF
-#endif
+            ENDIF
 
          ELSE
             ! all intercepted by canopy leaves for very small precipitation
@@ -346,7 +347,7 @@ CONTAINS
          qintr_rain = prc_rain + prl_rain + qflx_irrig_sprinkler - thru_rain / deltim
          qintr_snow = prc_snow + prl_snow - thru_snow / deltim
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code: '
@@ -359,7 +360,7 @@ CONTAINS
             write(6,*) ldew, ldew_rain, ldew_snow
             CALL abort
          ENDIF
-#endif
+         ENDIF
 
       ELSE
          ! 07/15/2023, yuan: #bug found for ldew value reset.
@@ -431,6 +432,7 @@ CONTAINS
    !---2023.04.30  Zhongwang Wei @ SYSU : Snow and rain interception
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -566,11 +568,11 @@ CONTAINS
             tex_rain = min( tex_rain, rain_clamp*deltim - tti_rain )
             tex_snow = 0.
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : '
             ENDIF
-#endif
+            ENDIF
 
          ELSE
             ! all intercepted by canopy leves for very small precipitation
@@ -616,7 +618,7 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -627,7 +629,7 @@ CONTAINS
          CALL check_interception_balance('CoLM202x', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-#endif
+         ENDIF
 
       ELSE
          ! Release by phase instead of tleaf-based mixing. CoLM202x now
@@ -693,6 +695,7 @@ CONTAINS
    ! 2002.08.31  Yongjiu Dai
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -836,11 +839,11 @@ CONTAINS
             tex_rain = min(tex_rain, max(0._r8, rain_clamp*deltim - tti_rain))
             tex_snow = min(tex_snow, max(0._r8, snow_clamp*deltim - tti_snow))
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : '
             ENDIF
-#endif
+            ENDIF
 
 
          ELSE
@@ -885,14 +888,14 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
             write(6,*) w, ldew, (pg_rain+pg_snow)*deltim, satcap
             CALL abort
          ENDIF
-#endif
+         ENDIF
 
       ELSE
          ! Release canopy water per phase. CLM4 now tracks
@@ -971,6 +974,7 @@ CONTAINS
    ! 2021.12.08  Zhongwang Wei @ SYSU
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -1155,7 +1159,7 @@ CONTAINS
          xsc_rain_out = 0._r8
          xsc_snow_out = 0._r8
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          ! Mass balance check
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
@@ -1168,7 +1172,7 @@ CONTAINS
          CALL check_interception_balance('CLM5', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-#endif
+         ENDIF
 
       ELSE
          ! 07/15/2023, Hua Yuan: bug found for ldew value reset when vegetation disappears
@@ -1249,6 +1253,7 @@ CONTAINS
    ! 2021.12.08  Zhongwang Wei @ SYSU
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in)    :: deltim     !seconds in a time step [second]
@@ -1458,11 +1463,11 @@ CONTAINS
             ! Drip: excess precipitation on vegetation that cannot be intercepted
             tex_rain = rain_clamp*fvegc*deltim  - int_rain*deltim
             tex_snow = snow_clamp*fvegc*deltim - int_snow*deltim
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : '
             ENDIF
-#endif
+            ENDIF
          ELSE
             ! all intercepted by canopy leaves for very small precipitation
             tti_rain = 0.
@@ -1525,7 +1530,7 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -1536,7 +1541,7 @@ CONTAINS
          CALL check_interception_balance('NoahMP', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-#endif
+         ENDIF
 
       ELSE
          ! 07/15/2023, Hua Yuan: bug found for ldew value reset when vegetation disappears
@@ -1599,6 +1604,7 @@ CONTAINS
    ! 2021.12.08  Zhongwang Wei @ SYSU
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -1938,7 +1944,7 @@ CONTAINS
          ! residual accumulated into xsc_rain/xsc_snow BEFORE interception.
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -1949,7 +1955,7 @@ CONTAINS
          CALL check_interception_balance('MATSIRO', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-#endif
+         ENDIF
 
       ELSE
          ! No vegetation: all precipitation passes through, release any
@@ -2010,6 +2016,7 @@ CONTAINS
 !=======================================================================
 
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -2453,7 +2460,7 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -2464,7 +2471,7 @@ CONTAINS
          CALL check_interception_balance('VIC', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-#endif
+         ENDIF
 
       ELSE
          ! No vegetation: all precipitation passes through, release any
@@ -2570,6 +2577,7 @@ CONTAINS
       ! 2021.12.08  Zhongwang Wei @ SYSU
    !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in)    :: deltim     !seconds in a time step [second]
@@ -2980,7 +2988,7 @@ CONTAINS
          ! Same per-veg -> grid-scale conversion for the fusion heat flux.
          canopy_phase_heat_out = canopy_phase_heat_out * sigf_safe
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          ! Mass balance check: w_l (grid-scale old storage + precip) should equal
          ! new grid-scale storage + grid-scale ground flux
          w_l = w_l - ldew - (pg_rain + pg_snow) * deltim
@@ -2993,7 +3001,7 @@ CONTAINS
          CALL check_interception_balance('JULES', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-#endif
+         ENDIF
 
       ELSE
          ! No vegetation: all precipitation passes through, release any

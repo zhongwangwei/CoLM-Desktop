@@ -15,16 +15,12 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_Mesh, only: numelm
    USE MOD_LandElm
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
 
@@ -101,9 +97,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    integer :: ipatch, i, ps, pe, type, a, z, count_pixels, num_pixels, j, index, n
    integer :: wmo_src
 
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp  ! number of land classification
-#endif
    write(cyear,'(i4.4)') lc_year
    landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
 
@@ -361,14 +355,14 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+   IF (DEF_USE_RangeCheck) THEN
    CALL check_vector_data ('svf_patches       ', svf_patches      )
    CALL check_vector_data ('cur_patches       ', cur_patches      )
    CALL check_vector_data ('slp_type_patches  ', slp_type_patches )
    CALL check_vector_data ('asp_type_patches  ', asp_type_patches )
    CALL check_vector_data ('area_type_patches ', area_type_patches)
    CALL check_vector_data ('sf_lut_patches    ', sf_lut_patches   )
-#endif
+   ENDIF
 
 ! Reduce the dimension of the shadow factor array
 ! Construct a new array with dimensions of sf_curve_patches(azimuth, shadow factor parameters, patches)
@@ -472,7 +466,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    CALL ncio_write_vector (lndname, 'sf_curve_patches', 'azimuth', num_azimuth, 'zenith_p', num_zenith_parameter, 'patch', &
                            landpatch, sf_curve_patches, 1)
 
-#ifdef SrfdataDiag
+   IF (DEF_USE_SrfdataDiag) THEN
    typpatch = (/(ityp, ityp = 0, N_land_classification)/)
 
    ! only write the first type of slope and aspect at patches
@@ -508,7 +502,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
             -1.0e36_r8, lndname, 'sf_'//trim(sdir)//'_'//trim(sdir1), compress = 1, write_mode = 'one')
       ENDDO
    ENDDO
-#endif
+   ENDIF
 
    IF (p_is_worker) THEN
       IF (allocated(slp_type_patches)) deallocate ( slp_type_patches )

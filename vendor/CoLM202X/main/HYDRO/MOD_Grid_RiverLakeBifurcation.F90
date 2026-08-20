@@ -273,6 +273,7 @@ CONTAINS
       push_bif_dn2pth, push_bif_influx, &
       topo_rivelv
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in), target :: wdsrf_ucat (:)   ! water depth above riverbed [m]
@@ -808,7 +809,7 @@ CONTAINS
          ENDDO
       ENDIF
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       ! Diagnostic only: the global skip count just feeds the warning below.
       ! Keep this allreduce inside the CoLM-DEBUG guard so production builds do
       ! not pay a global collective on every routing substep for an unused count.
@@ -821,7 +822,7 @@ CONTAINS
             ' pathway(s) because source/destination routing dt differ; cross-river-system bifurcation may be inactive.'
          n_dt_mismatch_warn_count = n_dt_mismatch_warn_count + 1
       ENDIF
-#endif
+      ENDIF
       ! CaMa-style aggregate donor limiter.  CaMa applies the cell rate to
       ! ordinary routing and BIF together; CoLM's ordinary routing flux has
       ! already fixed dt and is not rescaled here.  For split-pool levee cells,

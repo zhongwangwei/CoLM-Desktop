@@ -23,12 +23,12 @@
 #undef LULC_IGBP_PC
 #endif
 
-! 3. If defined, debug information is output.
-#undef CoLMDEBUG
-! 3.1 If defined, range of variables is checked.
-#undef RangeCheck
-! 3.1 If defined, surface data in vector is mapped to gridded data for checking.
-#undef SrfdataDiag
+! 3. CoLMDEBUG / RangeCheck / SrfdataDiag used to live here as compile-time
+!    macros. They are runtime switches now (DEF_USE_CoLMDEBUG,
+!    DEF_USE_RangeCheck, DEF_USE_SrfdataDiag in share/MOD_Namelist.F90,
+!    default .false.) so a single binary can carry all three debug code
+!    paths and have them toggled on from case.nml instead of being
+!    baked in per kernel.
 
 ! 4. If defined, MPI parallelization is enabled.
 #define USEMPI

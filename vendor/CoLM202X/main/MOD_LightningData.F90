@@ -65,9 +65,9 @@ CONTAINS
       IF (itime .gt. 2920)itime = itime - 8 ! for the leap year
 
       CALL ncio_read_block_time (file_lightning, 'lnfm', grid_lightning, itime, f_lnfm)
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_block_data ('lightning', f_lnfm)
-#endif
+      ENDIF
 
    END SUBROUTINE init_lightning_data
 
@@ -79,6 +79,7 @@ CONTAINS
 !  read lightning data during simulation
 !-----------------------------------------------------------------------
 
+   USE MOD_Namelist, only: DEF_USE_RangeCheck
    USE MOD_TimeManager
    USE MOD_NetCDFBlock
    USE MOD_RangeCheck
@@ -100,14 +101,14 @@ CONTAINS
       IF (itime_next /= itime) THEN
          itime_next = min(itime_next,2920)
          CALL ncio_read_block_time (file_lightning, 'lnfm', grid_lightning, itime_next, f_lnfm)
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_block_data ('lightning', f_lnfm)
-#endif
+         ENDIF
 
          CALL mg2p_lnfm%grid2pset (f_lnfm, lnfm)
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_vector_data ('lightning', lnfm)
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE update_lightning_data

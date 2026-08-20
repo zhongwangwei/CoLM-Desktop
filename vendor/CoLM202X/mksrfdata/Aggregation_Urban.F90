@@ -38,12 +38,8 @@ SUBROUTINE Aggregation_Urban (dir_rawdata, dir_srfdata, lc_year, &
    USE MOD_Mesh
    USE MOD_Vars_Global, only: N_URB, nl_roof, nl_wall, nl_soil
    USE MOD_Urban_Const_LCZ
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
 
@@ -162,16 +158,14 @@ SUBROUTINE Aggregation_Urban (dir_rawdata, dir_srfdata, lc_year, &
    integer :: ipth, ipxl, il, iy, ielm, numpth, urb_s, urb_e
 
    ! for surface data diag
-#ifdef SrfdataDiag
    integer  :: ityp
    integer , allocatable, dimension(:) :: typindex
    real(r8), allocatable :: LUCY_rid_r8 (:)
-#endif
    logical  :: first_call_LSAI_urban
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       allocate( typindex(N_URB) )
-#endif
+      ENDIF
 
       write(cyear,'(i4.4)') lc_year
       landsrfdir = trim(dir_srfdata) // '/urban/' // trim(cyear)
@@ -360,7 +354,7 @@ ENDIF
       CALL ncio_define_dimension_vector (landname, landurban, 'urban')
       CALL ncio_write_vector (landname, 'BUILDING_HLR'  , 'urban', landurban, hlr_bld, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 1, N_URB)/)
       landname  = trim(dir_srfdata) // '/diag/ht_roof_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (ht_roof, landurban%settyp, typindex, m_urb2diag, &
@@ -375,17 +369,17 @@ ENDIF
       landname  = trim(dir_srfdata) // '/diag/hlr_bld_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (wt_roof, landurban%settyp, typindex, m_urb2diag, &
          -1.0e36_r8, landname, 'BUILDING_HLR', compress = 0, write_mode = 'one', defval=0._r8, create_mode = .true.)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('Urban Roof Fraction ', wt_roof)
       CALL check_vector_data ('Urban Roof Height '  , ht_roof)
       CALL check_vector_data ('Urban Building HLR ' , hlr_bld)
-#endif
+      ENDIF
 
 
       ! ******* Tree : PCT_Tree, HTOP *******
@@ -456,7 +450,7 @@ ENDIF
       CALL ncio_define_dimension_vector (landname, landurban, 'urban')
       CALL ncio_write_vector (landname, 'URBAN_TREE_TOP', 'urban', landurban, htop_urb, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 1, N_URB)/)
       landname  = trim(dir_srfdata) // '/diag/pct_urban_tree_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (pct_tree, landurban%settyp, typindex, m_urb2diag, &
@@ -466,16 +460,16 @@ ENDIF
       landname  = trim(dir_srfdata) // '/diag/htop_urban_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (htop_urb, landurban%settyp, typindex, m_urb2diag, &
          -1.0e36_r8, landname, 'Urban_Tree_HTOP', compress = 0, write_mode = 'one', defval = 0._r8, create_mode = .true.)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('Urban Tree Cover ', pct_tree)
       CALL check_vector_data ('Urban Tree Top '  , htop_urb)
-#endif
+      ENDIF
 
 
       ! ******* LAI, SAI *******
@@ -578,7 +572,7 @@ ENDIF
             CALL ncio_define_dimension_vector (landname, landurban, 'urban')
             CALL ncio_write_vector (landname, 'TREE_SAI', 'urban', landurban, sai_urb, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+            IF (DEF_USE_SrfdataDiag) THEN
             typindex = (/(ityp, ityp = 1, N_URB)/)
             landname  = trim(dir_srfdata) // '/diag/LAI_urban_'//trim(iyear)//'.nc'
             CALL srfdata_map_and_write (lai_urb, landurban%settyp, typindex, m_urb2diag, &
@@ -591,7 +585,7 @@ ENDIF
                   lastdimname = 'Itime', lastdimvalue = imonth, defval = 0._r8, create_mode = first_call_LSAI_urban)
 
             IF (first_call_LSAI_urban) first_call_LSAI_urban = .false.
-#endif
+            ENDIF
 
 #ifdef USEMPI
             CALL mpi_barrier (p_comm_glb, p_err)
@@ -599,10 +593,10 @@ ENDIF
 
             write(c1,'(i2.2)') imonth
 
-#ifdef RangeCheck
+            IF (DEF_USE_RangeCheck) THEN
             CALL check_vector_data ('Urban Tree LAI '//trim(c1), lai_urb)
             CALL check_vector_data ('Urban Tree SAI '//trim(c1), sai_urb)
-#endif
+            ENDIF
          ENDDO
          first_call_LSAI_urban = .true.
       ENDDO
@@ -653,20 +647,20 @@ ENDIF
       CALL ncio_define_dimension_vector (landname, landurban, 'urban')
       CALL ncio_write_vector (landname, 'PCT_Water', 'urban', landurban, pct_water, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 1, N_URB)/)
       landname  = trim(dir_srfdata) // '/diag/pct_urban_water_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (pct_water, landurban%settyp, typindex, m_urb2diag, &
          -1.0e36_r8, landname, 'PCT_Urban_Water', compress = 0, write_mode = 'one', defval = 0._r8, create_mode = .true.)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('Urban Water Cover ', pct_water)
-#endif
+      ENDIF
 
 
       ! ******* LUCY_id *******
@@ -709,7 +703,7 @@ ENDIF
       CALL ncio_define_dimension_vector (landname, landurban, 'urban')
       CALL ncio_write_vector (landname, 'LUCY_id', 'urban', landurban, LUCY_rid, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 1, N_URB)/)
       landname  = trim(dir_srfdata) // '/diag/LUCY_region_id_'//trim(cyear)//'.nc'
 
@@ -720,15 +714,15 @@ ENDIF
 
       CALL srfdata_map_and_write (LUCY_rid_r8, landurban%settyp, typindex, m_urb2diag, &
          -1.0e36_r8, landname, 'LUCY_id', compress = 0, write_mode = 'one', defval = 0._r8, create_mode = .true.)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('LUCY_ID ', LUCY_rid)
-#endif
+      ENDIF
 
 
       ! ******* POP_DEN *******
@@ -790,20 +784,20 @@ ENDIF
       CALL ncio_define_dimension_vector (landname, landurban, 'urban')
       CALL ncio_write_vector (landname, 'POP_DEN', 'urban', landurban, pop_den, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 1, N_URB)/)
       landname  = trim(dir_srfdata) // '/diag/population_urban_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (pop_den, landurban%settyp, typindex, m_urb2diag, &
          -1.0e36_r8, landname, 'POP_DEN', compress = 0, write_mode = 'one', defval = 0._r8, create_mode = .true.)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('POP_DEN ', pop_den)
-#endif
+      ENDIF
 
 
 IF (DEF_URBAN_type_scheme == 1) THEN
@@ -1103,7 +1097,7 @@ ENDIF
       CALL ncio_write_vector (landname, 'ALB_IMPROAD', 'numsolar', ns, 'numrad', nr, 'urban', landurban, alb_gimp, DEF_Srfdata_CompressLevel)
       CALL ncio_write_vector (landname, 'ALB_PERROAD', 'numsolar', ns, 'numrad', nr, 'urban', landurban, alb_gper, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 1, N_URB)/)
       landname  = trim(dir_srfdata) // '/diag/pct_urban_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (urb_pct, landurban%settyp, typindex, m_urb2diag, &
@@ -1183,13 +1177,13 @@ ENDIF
          -1.0e36_r8, landname, 'ALB_IMPROAD', compress = 0, write_mode = 'one', defval = 0._r8)
 
       deallocate (typindex)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('WTROAD_PERV '   , fgper   )
       CALL check_vector_data ('EM_ROOF '       , em_roof )
       CALL check_vector_data ('EM_WALL '       , em_wall )
@@ -1209,7 +1203,7 @@ ENDIF
       CALL check_vector_data ('THICK_WALL '    , thk_wall)
       CALL check_vector_data ('T_BUILDING_MIN ', tbld_min)
       CALL check_vector_data ('T_BUILDING_MAX ', tbld_max)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
 

@@ -8,7 +8,7 @@ MODULE MOD_SoilSnowHydrology
                            DEF_URBAN_RUN,           DEF_USE_IRRIGATION,    &
                            DEF_SPLIT_SOILSNOW,      DEF_Runoff_SCHEME,     &
                            DEF_DA_TWS_GRACE,        DEF_Optimize_Baseflow, &
-                           DEF_USE_Dynamic_Wetland
+                           DEF_USE_Dynamic_Wetland, DEF_USE_CoLMDEBUG
 #if (defined CaMa_Flood)
    USE YOS_CMF_INPUT,      only: LWINFILT
 #endif
@@ -496,11 +496,11 @@ ENDIF
 #endif
 
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF(abs(err_solver) > 1.e-3)THEN
          write(6,*) 'Warning: water balance violation after all soilwater calculation', err_solver
       ENDIF
-#endif
+      ENDIF
 
 
 !=======================================================================
@@ -1285,7 +1285,7 @@ ENDIF
       ENDIF
 #endif
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF(abs(err_solver) > 1.e-3)THEN
          write(6,'(A,E20.5,A,I0)') 'Warning (WATER_VSF): water balance violation', err_solver, &
             ' in element ', landpatch%eindex(ipatch)
@@ -1293,7 +1293,7 @@ ENDIF
       IF (any(wliq_soisno < -1.e-3)) THEN
          write(6,'(A,10E20.5)') 'Warning (WATER_VSF): negative soil water', wliq_soisno(1:nl_soil)
       ENDIF
-#endif
+      ENDIF
 
 !=======================================================================
 ! [6] assumed hydrological scheme for the wetland
@@ -2345,7 +2345,7 @@ ENDIF
 
       CALL tridia (nl_soil, amx, bmx, cmx, rmx, dwat )
 
-#if (defined CoLMDEBUG)
+  IF (DEF_USE_CoLMDEBUG) THEN
   ! The mass balance error (mm) for this time step is
       errorw = -deltim*(qin(1)-qout(nl_soil)-dqodw1(nl_soil)*dwat(nl_soil))
       DO j = 1, nl_soil
@@ -2359,7 +2359,7 @@ ENDIF
       IF(abs(errorw) > 1.e-3)THEN
          write(6,*) 'mass balance error in time step =',errorw
       ENDIF
-#endif
+  ENDIF
 
       ! Recharge rate qcharge to groundwater (positive to aquifer)
       qcharge = qout(nl_soil) + dqodw1(nl_soil)*dwat(nl_soil)

@@ -123,6 +123,7 @@ CONTAINS
    USE MOD_Ozone, only: CalcOzoneStress
    USE MOD_UserSpecifiedForcing, only: HEIGHT_mode
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -2240,11 +2241,11 @@ ENDIF
                 ! account for vegetation heat change
                 - dheatl(i)
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF(abs(err) .gt. .2) &
                write(6,*) 'energy imbalance in LeafTemperaturePC.F90', &
                           i,it-1,err,sabv(i),irab(i),fsenl(i),htvpl(i)*fevpl(i),hprl(i),dheatl(i),canopy_phase_heat(i)
-#endif
+            ENDIF
          ENDIF
       ENDDO
 

@@ -78,9 +78,7 @@ MODULE MOD_Vars_PFTimeVariables
    PUBLIC :: deallocate_PFTimeVariables
    PUBLIC :: READ_PFTimeVariables
    PUBLIC :: WRITE_PFTimeVariables
-#ifdef RangeCheck
    PUBLIC :: check_PFTimeVariables
-#endif
 
 ! PRIVATE MEMBER FUNCTIONS:
 
@@ -353,7 +351,6 @@ ENDIF
 
    END SUBROUTINE deallocate_PFTimeVariables
 
-#ifdef RangeCheck
    SUBROUTINE check_PFTimeVariables
 
    USE MOD_RangeCheck
@@ -407,7 +404,6 @@ ENDIF
 #endif
 
    END SUBROUTINE check_PFTimeVariables
-#endif
 
 END MODULE MOD_Vars_PFTimeVariables
 #endif
@@ -613,9 +609,7 @@ MODULE MOD_Vars_TimeVariables
    PUBLIC :: deallocate_TimeVariables
    PUBLIC :: READ_TimeVariables
    PUBLIC :: WRITE_TimeVariables
-#ifdef RangeCheck
    PUBLIC :: check_TimeVariables
-#endif
 
 
 !-----------------------------------------------------------------------
@@ -1331,9 +1325,7 @@ ENDIF
    USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_LandPatch
    USE MOD_Vars_Global
    USE MOD_Vars_TimeInvariants, only: dz_lake
@@ -1518,9 +1510,9 @@ ENDIF
       CALL READ_DATimeVariables (idate, lc_year, site, dir_restart)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_TimeVariables
-#endif
+      ENDIF
 
       IF (p_is_master) THEN
          write(*,*) 'Loading Time Variables done.'
@@ -1529,7 +1521,6 @@ ENDIF
    END SUBROUTINE READ_TimeVariables
 
 
-#ifdef RangeCheck
    SUBROUTINE check_TimeVariables ()
 
    USE MOD_SPMD_Task
@@ -1667,7 +1658,6 @@ ENDIF
 #endif
 
   END SUBROUTINE check_TimeVariables
-#endif
 
 
 END MODULE MOD_Vars_TimeVariables

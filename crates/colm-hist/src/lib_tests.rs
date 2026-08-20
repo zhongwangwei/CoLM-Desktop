@@ -1,11 +1,15 @@
 use super::*;
 
 /// default 预设的宏集合，取自 `kernels/default/manifest.json`。
+///
+/// `CoLMDEBUG` / `RangeCheck` 不再在这里——调试三件套改成运行时开关
+/// （`DEF_USE_*`，`MOD_Namelist.F90`）之后，`create_defineh.bash` 不再
+/// `#define` 它们，`manifest.json` 的 `macros` 也就不再列出它们了。
+/// 没有任何 `Var.macros` 的 `Cond` 引用过这两个名字，所以这条改动不影响
+/// 下面两条测试的计数。
 fn default() -> BTreeSet<&'static str> {
     [
-        "CoLMDEBUG",
         "LULC_IGBP",
-        "RangeCheck",
         "SinglePoint",
         "extend_interception",
         "vanGenuchten_Mualem_SOIL_MODEL",

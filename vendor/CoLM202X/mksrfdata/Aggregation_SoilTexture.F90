@@ -23,14 +23,10 @@ SUBROUTINE Aggregation_SoilTexture ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils, only: num_max_frequency
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -48,10 +44,8 @@ SUBROUTINE Aggregation_SoilTexture ( &
 
    type(block_data_int32_2d) :: soiltext
    integer, allocatable :: soiltext_patches(:), soiltext_one(:)
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
    real(r8), allocatable :: soiltext_r8 (:)
-#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/soil/' // trim(cyear)
@@ -107,9 +101,9 @@ SUBROUTINE Aggregation_SoilTexture ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('soiltext_patches ', soiltext_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/soiltexture_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -117,7 +111,7 @@ SUBROUTINE Aggregation_SoilTexture ( &
       CALL ncio_write_vector (lndname, 'soiltext_patches', 'patch', &
          landpatch, soiltext_patches, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname = trim(dir_model_landdata)//'/diag/soiltexture_'//trim(cyear)//'.nc'
       IF (allocated(soiltext_patches)) THEN
@@ -130,7 +124,7 @@ SUBROUTINE Aggregation_SoilTexture ( &
          create_mode=.true.)
 
       IF (allocated(soiltext_r8)) deallocate(soiltext_r8)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          IF (numpatch > 0) deallocate ( soiltext_patches )

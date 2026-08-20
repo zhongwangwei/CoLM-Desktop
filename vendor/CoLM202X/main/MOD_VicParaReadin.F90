@@ -131,12 +131,12 @@ CONTAINS
          !WRITE(*,*) 'Values of vic_b_infilt: ', vic_b_infilt
       ENDIF
    
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('vic_b_infilt', vic_b_infilt)
       CALL check_vector_data ('vic_Ws', vic_Ws)
       CALL check_vector_data ('vic_Ds', vic_Ds)
       CALL check_vector_data ('vic_Dsmax', vic_Dsmax)
-#endif
+      ENDIF
       IF (allocated (b_infilt_tmp)) deallocate (b_infilt_tmp)
       IF (allocated (Ws_tmp))       deallocate (Ws_tmp)
       IF (allocated (Ds_tmp))       deallocate (Ds_tmp)

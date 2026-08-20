@@ -79,9 +79,7 @@ PROGRAM MKSRFDATA
 #if (defined TRACER) && (defined BGC)
    USE MOD_Tracer_Reactive_Methane_Preprocessing, only: methane_preprocessing_requirements
 #endif
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag, only: gdiag, srfdata_diag_init
-#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -437,7 +435,7 @@ PROGRAM MKSRFDATA
 ! ................................................................
 ! 3. Mapping land characteristic parameters to the model grids
 ! ................................................................
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
 #ifdef GRIDBASED
       CALL gdiag%define_by_copy (gridmesh)
 #else
@@ -445,7 +443,7 @@ PROGRAM MKSRFDATA
 #endif
 
       CALL srfdata_diag_init (dir_landdata, lc_year)
-#endif
+      ENDIF
 
       !TODO: for lulcc, need to run for each year and SAVE to different subdirs
 

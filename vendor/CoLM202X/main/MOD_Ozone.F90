@@ -226,9 +226,9 @@ CONTAINS
       itime = (idate(3) - 1800) / 10800 + (min(idate(2),365) - 1) * 8 + 1
 
       CALL ncio_read_block_time (file_ozone, 'OZONE', grid_ozone, itime, f_ozone)
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_block_data ('Ozone', f_ozone)
-#endif
+      ENDIF
 
    END SUBROUTINE init_ozone_data
 
@@ -259,14 +259,14 @@ CONTAINS
       IF(time%sec/10800 .ne. (time%sec+int(deltim))/10800)then
          itime = (time%sec - int(deltim)) / 10800 + (min(time%day,365) - 1) * 8 + 1
          CALL ncio_read_block_time (file_ozone, 'OZONE', grid_ozone, itime, f_ozone)
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_block_data ('Ozone', f_ozone)
-#endif
+         ENDIF
 
          CALL mg2p_ozone%grid2pset (f_ozone, forc_ozone)
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_vector_data ('Ozone', forc_ozone)
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE update_ozone_data

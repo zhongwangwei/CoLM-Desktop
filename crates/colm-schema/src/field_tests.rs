@@ -2,15 +2,17 @@ use crate::{all, find, Default, FieldKind};
 
 #[test]
 fn the_table_has_the_measured_number_of_fields() {
-    // 实测：202 个顶层标量 + 4 个派生类型共 535 个成员，合计 737。
-    // 若这个数变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
+    // 实测：205 个顶层标量 + 4 个派生类型共 535 个成员，合计 740。
+    // 三个调试宏改成运行时开关后新增了 DEF_USE_CoLMDEBUG /
+    // DEF_USE_RangeCheck / DEF_USE_SrfdataDiag，顶层数从 202 变 205。
+    // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
         (700..=760).contains(&total),
-        "expected roughly 737 fields, got {total}"
+        "expected roughly 740 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 202, "top-level count changed");
+    assert_eq!(top, 205, "top-level count changed");
 }
 
 #[test]

@@ -1110,6 +1110,7 @@ CONTAINS
    END FUNCTION tracer_reactive_decay_fraction
 
       real(r8) FUNCTION mass_to_delta (trc_mass, water_mass, ref_ratio)
+         USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
          USE MOD_Vars_Global, only: spval
          real(r8), intent(in) :: trc_mass, water_mass, ref_ratio
          real(r8) :: R_sample
@@ -1130,10 +1131,10 @@ CONTAINS
             ! signs). Returning spval rather than silently clamping so
             ! history readers and assert tools can flag the cell instead
             ! of treating a bogus delta as physical.
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             write(*,'(A,E12.5,A,E12.5)') &
                ' WARNING mass_to_delta: R_sample<0 trc=', trc_mass, ' water=', water_mass
-#endif
+            ENDIF
             mass_to_delta = spval
          ELSE
             mass_to_delta = (R_sample / ref_ratio - 1.0_r8) * 1000.0_r8

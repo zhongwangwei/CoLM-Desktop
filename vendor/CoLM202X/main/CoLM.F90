@@ -88,9 +88,7 @@ PROGRAM CoLM
    USE MOD_Lulcc_Driver
 #endif
 
-#ifdef CoLMDEBUG
    USE MOD_Hydro_SoilWater
-#endif
 
 #ifdef HYPERSPECTRAL
    ! SNICAR model
@@ -640,19 +638,19 @@ PROGRAM CoLM
 #endif
          ENDIF
 
-#ifdef RangeCheck
+         IF (DEF_USE_RangeCheck) THEN
          CALL check_TimeVariables ()
-#endif
+         ENDIF
 
 #ifdef USEMPI
          CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (DEF_USE_VariablySaturatedFlow) THEN
             CALL print_VSF_iteration_stat_info ()
          ENDIF
-#endif
+         ENDIF
 
          CALL ParameterOptimization (idate, deltim, is_spinup)
 

@@ -786,12 +786,10 @@ CONTAINS
       CALL build_worker_pushdata (numucat, ucat_ucid, numucat, ucat_next, push_next2ucat)
       CALL build_worker_pushdata (numucat, ucat_ucid, numucat, ucat_ups,  wts_ups, push_ups2ucat )
 
-#ifdef CoLMDEBUG
       ! IF (p_is_worker) THEN
       !    write(*,'(A,I0,A,I0,A,I0,A)') 'worker ', p_iam_worker, ' has ', numucat, &
       !       ' unit catchment with ', sum(push_next2ucat%n_from_other), ' downstream to other workers'
       ! ENDIF
-#endif
 
       ! ----- Part 3: river systems -----
 
@@ -1368,6 +1366,7 @@ CONTAINS
    ! ---------
    SUBROUTINE read_and_distribute_bifurcation (parafile)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
    USE MOD_Utils
@@ -1403,13 +1402,11 @@ CONTAINS
 
    integer :: iworker, nucat, npth, ip, i, j, iloc
    integer :: max_bif_inc_global
-#ifdef CoLMDEBUG
    ! Debug-only bifurcation-connected-component diagnostic.
    integer,  allocatable :: uf_parent (:)   ! union-find over global ucats 1..totalnumucat
    integer,  allocatable :: sys_root  (:)   ! main-channel (river-system) root per ucat
    integer,  allocatable :: comp_nsys (:)   ! river systems per bif-connected component
    integer :: ib, ra, rb, k, nsys, ncomp_bif, max_sys_in_comp
-#endif
 
 #ifdef USEMPI
 
@@ -1421,7 +1418,7 @@ CONTAINS
          CALL read_bifurcation_global_arrays (parafile, bif_upst_all, bif_down_all, &
             bif_dist_all, bif_elev_all, bif_wdth_all, bif_mann_all)
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          ! Debug-only connectivity summary; do not print or allocate in production.
          IF (totalnumucat > 0) THEN
             allocate (uf_parent (totalnumucat))
@@ -1490,7 +1487,7 @@ CONTAINS
             write(*,'(A)')    '================================================================'
             deallocate (uf_parent, sys_root, comp_nsys)
          ENDIF
-#endif
+         ENDIF
 
          ! Build iworker_of_ucat: maps global seq index -> worker index
          allocate (iworker_of_ucat (totalnumucat))

@@ -236,6 +236,7 @@ SUBROUTINE CoLMMAIN ( &
    USE MOD_Lake_Driver, only: external_lake
 #endif
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -1542,11 +1543,11 @@ SUBROUTINE CoLMMAIN ( &
          ! energy balance
          ! ----------------------------------------
          zerr=errore
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (abs(errore) > .5) THEN
             write(6,*) 'Warning: energy balance violation ',errore,patchclass
          ENDIF
-#endif
+         ENDIF
 
          ! ----------------------------------------
          ! water balance
@@ -1616,7 +1617,7 @@ SUBROUTINE CoLMMAIN ( &
          IF (allocated(canopy_phase_heat_p)) deallocate(canopy_phase_heat_p)
 #endif
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (abs(errorw) > 1.e-3) THEN
             IF     (patchtype == 0) THEN
                write(6,*) 'Warning: water balance violation in CoLMMAIN (soil) ', errorw
@@ -1629,7 +1630,7 @@ SUBROUTINE CoLMMAIN ( &
             ENDIF
             CALL CoLM_stop ()
          ENDIF
-#endif
+         ENDIF
 
 !======================================================================
 
@@ -1802,14 +1803,14 @@ SUBROUTINE CoLMMAIN ( &
          errorw=(endwb-totwb)-(pg_rain+pg_snow-fevpa)*deltim
 #endif
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (DEF_USE_VariablySaturatedFlow) THEN
             IF (abs(errorw) > 1.e-3) THEN
                write(6,*) 'Warning: water balance violation in CoLMMAIN (land ice) ', errorw
                CALL CoLM_stop ()
             ENDIF
          ENDIF
-#endif
+         ENDIF
 
          IF (DEF_USE_VariablySaturatedFlow) THEN
             xerr=errorw/deltim
@@ -2013,12 +2014,12 @@ SUBROUTINE CoLMMAIN ( &
          errorw = errorw + rnof * deltim
 #endif
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (abs(errorw) > 1.e-3) THEN
             write(*,*) 'Warning: water balance violation in CoLMMAIN (lake) ', errorw
             CALL CoLM_stop ()
          ENDIF
-#endif
+         ENDIF
 
          IF (DEF_USE_Dynamic_Lake) THEN
             xerr = errorw / deltim

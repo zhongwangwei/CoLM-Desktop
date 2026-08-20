@@ -15,13 +15,12 @@ CONTAINS
    SUBROUTINE pct_readin (dir_landdata, lc_year)
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_RangeCheck
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
    USE MOD_LandPatch
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
 #if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
@@ -64,7 +63,7 @@ CONTAINS
 #endif
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       IF (p_is_worker) THEN
          npatch = count(patchtypes(landpatch%settyp) == 0)
          allocate (sumpct (npatch))
@@ -83,7 +82,7 @@ CONTAINS
 #if (defined CROP)
       CALL check_vector_data ('CROP pct', cropfrac)
 #endif
-#endif
+      ENDIF
 
 #endif
 

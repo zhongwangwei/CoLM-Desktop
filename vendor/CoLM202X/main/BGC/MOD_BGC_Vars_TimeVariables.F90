@@ -298,9 +298,7 @@ MODULE MOD_BGC_Vars_TimeVariables
    PUBLIC :: deallocate_BGCTimeVariables
    PUBLIC :: READ_BGCTimeVariables
    PUBLIC :: WRITE_BGCTimeVariables
-#ifdef RangeCheck
    PUBLIC :: check_BGCTimeVariables
-#endif
 
 ! PRIVATE MEMBER FUNCTIONS:
 
@@ -1088,9 +1086,7 @@ CONTAINS
    USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_LandPatch
    USE MOD_Vars_Global
 
@@ -1230,14 +1226,13 @@ CONTAINS
       CALL ncio_read_vector (file_restart, 'fertnitro_sugarcane' , landpatch, fertnitro_sugarcane)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_BGCTimeVariables
-#endif
+      ENDIF
 
    END SUBROUTINE READ_BGCTimeVariables
 
   !---------------------------------------
-#ifdef RangeCheck
    SUBROUTINE check_BGCTimeVariables ()
 
    USE MOD_SPMD_Task
@@ -1536,7 +1531,6 @@ CONTAINS
       CALL check_vector_data ('lag_npp    ' , lag_npp    )
 
    END SUBROUTINE check_BGCTimeVariables
-#endif
 
 #endif
 END MODULE MOD_BGC_Vars_TimeVariables

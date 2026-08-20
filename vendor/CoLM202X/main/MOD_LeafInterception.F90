@@ -139,6 +139,7 @@ CONTAINS
    !---2002.08.31  Yongjiu Dai
 !=======================================================================
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -299,11 +300,11 @@ CONTAINS
                tex_snow = tex_snow * deltim
             ENDIF
 
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10 .and. .not.DEF_VEG_SNOW) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : ',ldew,tex_rain,tex_snow,tti_rain,tti_snow,p0
             ENDIF
-#endif
+            ENDIF
 
          ELSE
             ! all intercepted by canopy leaves for very small precipitation
@@ -336,7 +337,7 @@ CONTAINS
          qintr_rain = prc_rain + prl_rain + qflx_irrig_sprinkler - thru_rain / deltim
          qintr_snow = prc_snow + prl_snow - thru_snow / deltim
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code: '
@@ -349,7 +350,7 @@ CONTAINS
             write(6,*) ldew, ldew_rain, ldew_snow
             CALL abort
          ENDIF
-#endif
+         ENDIF
 
       ELSE
          ! 07/15/2023, yuan: #bug found for ldew value reset.

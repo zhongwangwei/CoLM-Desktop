@@ -176,6 +176,7 @@
            fh           ,fq           ,hpbl                        )
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: tfrz, denh2o, denice
    USE MOD_Vars_TimeVariables, only: tlai, tsai
@@ -1233,11 +1234,11 @@
       ! energy balance check
       ! ----------------------------------------
       zerr=errore
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF(abs(errore)>.5)THEN
          write(6,*) 'Warning: energy balance violation ',errore,patchclass
       ENDIF
-#endif
+      ENDIF
 
       ! ----------------------------------------
       ! water balance check
@@ -1263,12 +1264,12 @@
       errorw = (endwb - totwb) - (forc_prc + forc_prl + urb_irrig - fevpa - rnof)*deltim
       xerr   = errorw/deltim
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF(abs(errorw)>1.e-3) THEN
          write(6,*) 'Warning: water balance violation', errorw, ipatch, patchclass
          !STOP
       ENDIF
-#endif
+      ENDIF
 
 !======================================================================
 ! Preparation for the next time step

@@ -814,8 +814,6 @@ CONTAINS
       croof  = croofs + croofl*htvp_roof
 
 
-#if (defined CoLMDEBUG)
-#endif
 
       tafu = taf(2)
 
@@ -915,6 +913,7 @@ CONTAINS
    USE MOD_Precision
    USE MOD_Const_Physical, only: vonkar,grav,hvap,cpair,stefnc,cpliq, cpice, &
                                  hfus, tfrz, denice, denh2o
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_FrictionVelocity
    USE MOD_CanopyLayerProfile
    USE MOD_AssimStomataConductance
@@ -2384,13 +2383,13 @@ ENDIF
       err = sabv + irab + dirab_dtl*dtl(it-1) &
           - fsenl - hvap*fevpl - dheatl
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (abs(err) .gt. .2) THEN
          write(6,*) 'energy imbalance in UrbanVegFlux.F90', &
          i,it-1,err,sabv,irab,fsenl,hvap*fevpl,dheatl
          CALL CoLM_stop()
       ENDIF
-#endif
+      ENDIF
 
 
       ! calculate longwave absorption

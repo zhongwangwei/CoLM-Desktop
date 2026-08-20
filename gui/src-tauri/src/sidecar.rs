@@ -20,6 +20,14 @@
 //! 的价值，只保证事件率有上界。
 //!
 //! 逐行抽取必须在**独立线程**里做 —— 管道满了之后不读就会死锁。
+//!
+//! **`RangeCheck`（连带 `CoLMDEBUG`）现在是运行时开关**
+//! （`DEF_USE_RangeCheck` / `DEF_USE_CoLMDEBUG`，`case.nml` 里设，
+//! 默认 `.false.`），不再是编译期宏。上面「39215 行 / 33357 行」是
+//! 开着调试时的实测数——默认关闭之后这条子栏跑出来的 `colm.log`
+//! 基本不会再有 `Check vector data` 那一路。但这段丢弃逻辑仍然要留着：
+//! 用户随时可能在 `case.nml` 里把 `DEF_USE_RangeCheck` 打开去调试，
+//! 这时候同一个内核照样会吐出那 85%，丢弃与节流两条路都还用得上。
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};

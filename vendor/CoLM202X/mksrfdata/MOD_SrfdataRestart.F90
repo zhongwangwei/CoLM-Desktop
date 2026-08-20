@@ -345,9 +345,9 @@ CONTAINS
 
       ENDIF
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (p_is_io) write(*,'(I10,A,I4)') numelm, ' elements on group ', p_iam_io
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL scatter_mesh_from_io_to_worker
@@ -416,6 +416,7 @@ CONTAINS
    !---------------------------
    SUBROUTINE pixelset_load_from_file (dir_landdata, psetname, pixelset, numset, lc_year)
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    USE MOD_Block
    USE MOD_NetCDFSerial
@@ -643,9 +644,9 @@ CONTAINS
          CALL ncio_read_vector (filename, 'pctshared', pixelset, pixelset%pctshared)
       ENDIF
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (p_is_io)  write(*,*) numset, trim(psetname), ' on group', p_iam_io
-#endif
+      ENDIF
 
    END SUBROUTINE pixelset_load_from_file
 

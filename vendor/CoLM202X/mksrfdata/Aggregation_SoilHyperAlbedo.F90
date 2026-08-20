@@ -20,14 +20,10 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
    USE MOD_LandPatch
    USE MOD_NetCDFBlock
    USE MOD_NetCDFVector
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
 
@@ -53,9 +49,7 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
    integer :: ipatch, iblkme, iblk, jblk, ix, iy, wl
    real(r8), allocatable :: soil_one(:)
 
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
-#endif
 
    write(cyear,'(i4.4)') lc_year
    landdir = trim(dir_model_landdata) // '/HyperAlbedo/' // trim(cyear)
@@ -135,9 +129,9 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('soil_hyper_alb ', soil_hyper_alb)
-#endif
+      ENDIF
 
       ! Write-out the hyper spectral soil albedo
       lndname = trim(landdir)//'/soil_hyper_alb_'//trim(wavelength)//'nm_patches.nc'
@@ -146,12 +140,12 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
       CALL ncio_write_vector (lndname, 'soil_hyper_alb', 'patch', &
          landpatch, soil_hyper_alb, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/soil_hyper_alb_' // trim(wavelength) // 'nm_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (soil_hyper_alb, landpatch%settyp, typpatch, m_patch2diag, &
          -1.0e36_r8, lndname, 'soil_hyper_alb', compress = 1, write_mode = 'one')
-#endif
+      ENDIF
 
    END DO   ! loop over "wl"
 

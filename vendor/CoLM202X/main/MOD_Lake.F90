@@ -375,6 +375,7 @@ CONTAINS
    USE MOD_SoilThermalParameters
    USE MOD_Utils
 
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 !-------------------------- Dummy Arguments ----------------------------
    integer, intent(in) :: patchtype    ! land patch type (4=deep lake, 5=shallow lake)
@@ -1304,7 +1305,7 @@ CONTAINS
       ENDIF
 
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       ! sum energy content and total energy into lake for energy check. any errors will be from the
       !     tridiagonal solution.
       esum1 = 0.0
@@ -1319,7 +1320,7 @@ CONTAINS
          write(6,*)'energy conservation error in LAND WATER COLUMN during tridiagonal solution,', &
                    'error (W/m^2):', errsoi, fgrnd
       ENDIF
-#endif
+      ENDIF
 
 
 !------------------------------------------------------------
@@ -1415,7 +1416,7 @@ CONTAINS
          ENDDO
       ENDIF
 
-#if (defined CoLMDEBUG)
+      IF (DEF_USE_CoLMDEBUG) THEN
       ! second energy check and water check. now check energy balance before and after phase
       ! change, considering the possibility of changed heat capacity during phase change, by
       ! using initial heat capacity in the first step, final heat capacity in the second step,
@@ -1436,7 +1437,7 @@ CONTAINS
       write(6,*) 'energy conservation error in LAND WATER COLUMN during phase change, error (W/m^2):', errsoi
       ENDIF
 
-#endif
+      ENDIF
 
 !------------------------------------------------------------
 !*[5] Convective mixing: make sure fracice*dz is conserved, heat content c*dz*T is conserved, and

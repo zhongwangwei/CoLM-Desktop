@@ -25,9 +25,7 @@ SUBROUTINE Aggregation_ForestHeight ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
 
@@ -37,9 +35,7 @@ SUBROUTINE Aggregation_ForestHeight ( &
    USE MOD_LandPFT
 #endif
 
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
 
@@ -67,7 +63,6 @@ SUBROUTINE Aggregation_ForestHeight ( &
    integer  :: ip, ipft
    real(r8) :: sumarea
 
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
 #ifndef CROP
    integer :: typpft  (N_PFT)
@@ -75,7 +70,6 @@ SUBROUTINE Aggregation_ForestHeight ( &
    integer :: typpft  (N_PFT+N_CFT)
 #endif
    integer :: typpc   (N_land_classification+1)
-#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/htop/' //trim(cyear)
@@ -129,21 +123,21 @@ SUBROUTINE Aggregation_ForestHeight ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('htop_patches ', tree_height_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/htop_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
       CALL ncio_define_dimension_vector (lndname, landpatch, 'patch')
       CALL ncio_write_vector (lndname, 'htop_patches', 'patch', landpatch, tree_height_patches, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/htop_patch_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (tree_height_patches, landpatch%settyp, typpatch, m_patch2diag, &
          -1.0e36_r8, lndname, 'htop', compress = 1, write_mode = 'one', defval=0._r8, create_mode=.true.)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          deallocate ( tree_height_patches )
@@ -188,21 +182,21 @@ SUBROUTINE Aggregation_ForestHeight ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('HTOP_patches ', htop_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/htop_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
       CALL ncio_define_dimension_vector (lndname, landpatch, 'patch')
       CALL ncio_write_vector (lndname, 'htop_patches', 'patch', landpatch, htop_patches, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/htop_patch_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (htop_patches, landpatch%settyp, typpatch, m_patch2diag, &
          -1.0e36_r8, lndname, 'htop', compress = 1, write_mode = 'one', defval=0._r8, create_mode=.true.)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          IF (allocated(htop_patches)) deallocate (htop_patches)
@@ -287,29 +281,29 @@ SUBROUTINE Aggregation_ForestHeight ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('HTOP_patches ', htop_patches)
       CALL check_vector_data ('HTOP_pfts    ', htop_pfts   )
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/htop_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
       CALL ncio_define_dimension_vector (lndname, landpatch, 'patch')
       CALL ncio_write_vector (lndname, 'htop_patches', 'patch', landpatch, htop_patches, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/htop_patch_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (htop_patches, landpatch%settyp, typpatch, m_patch2diag, &
          -1.0e36_r8, lndname, 'htop', compress = 1, write_mode = 'one', defval=0._r8, create_mode=.true.)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/htop_pfts.nc'
       CALL ncio_create_file_vector (lndname, landpft)
       CALL ncio_define_dimension_vector (lndname, landpft, 'pft')
       CALL ncio_write_vector (lndname, 'htop_pfts', 'pft', landpft, htop_pfts, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
 #ifndef CROP
       typpft  = (/(ityp, ityp = 0, N_PFT-1)/)
 #else
@@ -318,7 +312,7 @@ SUBROUTINE Aggregation_ForestHeight ( &
       lndname = trim(dir_model_landdata) // '/diag/htop_pft_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (htop_pfts, landpft%settyp, typpft, m_pft2diag, &
          -1.0e36_r8, lndname, 'htop_pft', compress = 1, write_mode = 'one', defval=0._r8, create_mode=.true.)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          IF (allocated(htop_patches)) deallocate (htop_patches)

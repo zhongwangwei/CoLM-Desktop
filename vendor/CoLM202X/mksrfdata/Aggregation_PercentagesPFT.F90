@@ -24,9 +24,7 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #endif
    USE MOD_NetCDFBlock
    USE MOD_NetCDFVector
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
 
    USE MOD_Const_LC
@@ -35,9 +33,7 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
 #endif
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
 
@@ -64,11 +60,9 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
    integer  :: ipatch, ipc, ipft, p
    integer  :: wmo_pth
    real(r8) :: sumarea, sum_pct_pfts
-#ifdef SrfdataDiag
    integer :: typpft(0:N_PFT-1)
 #ifdef CROP
    integer :: typcrop(N_CFT), ityp
-#endif
 #endif
 
       write(cyear,'(i4.4)') lc_year
@@ -170,9 +164,9 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #endif
 
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('PCT_PFTs ', pct_pfts)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/pct_pfts.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -180,14 +174,14 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
       CALL ncio_write_vector (lndname, 'pct_pfts', 'pft', &
          landpft, pct_pfts, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typpft = (/(ipft, ipft = 0, N_PFT-1)/)
       lndname = trim(dir_model_landdata)//'/diag/pftfrac_elm_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (pct_pfts, landpft%settyp, typpft, m_pft2diag, &
          -1.0e36_r8, lndname, 'pftfrac_elm', compress = 1, write_mode = 'one',  &
          defval=0._r8, stat_mode = 'fraction', pctshared = landpft%pctshared,   &
          create_mode=.true.)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          IF (allocated(pct_pfts   )) deallocate(pct_pfts   )
@@ -203,14 +197,14 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
       CALL ncio_write_vector (lndname, 'pct_crops', 'patch', &
          landpatch, cropfrac, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typcrop = (/(ityp, ityp = 1, N_CFT)/)
       lndname = trim(dir_model_landdata) // '/diag/cropfrac_elm_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (cropfrac, cropclass, typcrop, m_patch2diag,   &
          -1.0e36_r8, lndname, 'cropfrac_elm', compress = 1, write_mode = 'one', &
          defval=0._r8, stat_mode = 'fraction', pctshared = landpatch%pctshared, &
          create_mode=.true.)
-#endif
+      ENDIF
 #endif
 
 #endif

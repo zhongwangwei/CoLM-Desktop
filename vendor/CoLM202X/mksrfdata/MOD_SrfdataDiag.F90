@@ -1,6 +1,5 @@
 #include <define.h>
 
-#ifdef SrfdataDiag
 MODULE MOD_SrfdataDiag
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -550,4 +549,3 @@ CONTAINS
    END SUBROUTINE srf_write_grid_info
 
 END MODULE MOD_SrfdataDiag
-#endif

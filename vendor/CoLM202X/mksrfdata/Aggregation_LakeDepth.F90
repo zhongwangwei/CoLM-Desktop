@@ -36,14 +36,10 @@ SUBROUTINE Aggregation_LakeDepth ( &
    USE MOD_LandPatch
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -60,9 +56,7 @@ SUBROUTINE Aggregation_LakeDepth ( &
 
    type (block_data_real8_2d) :: lakedepth
    real(r8), allocatable :: lakedepth_patches(:), lakedepth_one(:)
-#ifdef SrfdataDiag
    integer :: typlake(1) = (/17/)
-#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/lakedepth/' // trim(cyear)
@@ -122,9 +116,9 @@ SUBROUTINE Aggregation_LakeDepth ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('lakedepth_patches ', lakedepth_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/lakedepth_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -132,11 +126,11 @@ SUBROUTINE Aggregation_LakeDepth ( &
       CALL ncio_write_vector (lndname, 'lakedepth_patches', 'patch', &
          landpatch, lakedepth_patches, DEF_Srfdata_CompressLevel)
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       lndname = trim(dir_model_landdata)//'/diag/lakedepth_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (lakedepth_patches, landpatch%settyp, typlake, m_patch2diag, &
          -1.0e36_r8, lndname, 'lakedepth', compress = 1, write_mode = 'one', create_mode=.true.)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          deallocate ( lakedepth_patches )

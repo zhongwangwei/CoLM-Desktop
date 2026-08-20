@@ -122,9 +122,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('CONC_O2_UNSAT', tCONC_O2_UNSAT)
-#endif
+      ENDIF
 
       DO nsl = 1, nl_soil
 
@@ -156,9 +156,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('O2_DECOMP_DEPTH_UNSAT', tO2_DECOMP_DEPTH_UNSAT)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          deallocate (tCONC_O2_UNSAT_tmp)

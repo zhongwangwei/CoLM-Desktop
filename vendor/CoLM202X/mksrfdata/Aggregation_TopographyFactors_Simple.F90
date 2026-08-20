@@ -15,16 +15,12 @@ SUBROUTINE Aggregation_TopographyFactors_Simple ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_Mesh, only: numelm
    USE MOD_LandElm
    USE MOD_SrfdataDiag
-#endif
 
    IMPLICIT NONE
 
@@ -63,9 +59,7 @@ SUBROUTINE Aggregation_TopographyFactors_Simple ( &
    ! local variables
    integer :: ipatch, i
 
-#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp  ! number of land classification
-#endif
    write(cyear,'(i4.4)') lc_year
    landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
 
@@ -180,11 +174,11 @@ SUBROUTINE Aggregation_TopographyFactors_Simple ( &
    CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+   IF (DEF_USE_RangeCheck) THEN
    CALL check_vector_data ('cur_patches       ', cur_patches      )
    CALL check_vector_data ('slp_type_patches  ', slp_type_patches )
    CALL check_vector_data ('asp_type_patches  ', asp_type_patches )
-#endif
+   ENDIF
 
    ! --------------------------------------------------------------------------
    ! write aggregated data to netcdf files
@@ -208,7 +202,7 @@ SUBROUTINE Aggregation_TopographyFactors_Simple ( &
    CALL ncio_write_vector (lndname, 'asp_type_patches', 'slope_type', num_aspect_type, 'patch', landpatch, asp_type_patches, 1)
 
    ! --------------------------------------------------------------------------
-#ifdef SrfdataDiag
+   IF (DEF_USE_SrfdataDiag) THEN
    typpatch = (/(ityp, ityp = 0, N_land_classification)/) 
 
    ! only write the first type of slope and aspect at patches
@@ -231,7 +225,7 @@ SUBROUTINE Aggregation_TopographyFactors_Simple ( &
    CALL srfdata_map_and_write (cur_patches, landpatch%settyp, typpatch, m_patch2diag, &
       -1.0e36_r8, lndname, 'cur', compress = 1, write_mode = 'one')
 
-#endif
+   ENDIF
 
    IF (p_is_worker) THEN
       IF (allocated(slp_type_patches)) deallocate ( slp_type_patches )

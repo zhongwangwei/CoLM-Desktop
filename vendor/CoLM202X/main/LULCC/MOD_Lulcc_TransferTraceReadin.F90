@@ -80,12 +80,8 @@ CONTAINS
    USE MOD_5x5DataReadin
    USE MOD_RegionClip
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_Vars_TimeInvariants
 
    IMPLICIT NONE

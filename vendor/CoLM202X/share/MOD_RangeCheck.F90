@@ -14,8 +14,8 @@ MODULE MOD_RangeCheck
 !  Created by Shupeng Zhang, May 2023
 !-----------------------------------------------------------------------
 
-#ifdef RangeCheck
    USE MOD_UserDefFun, only: isnan_ud
+   USE MOD_Namelist,   only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    INTERFACE check_block_data
@@ -167,11 +167,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (len_trim(exception) > 0) THEN
             CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
          ENDIF
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE check_block_data_real8_2d
@@ -291,11 +291,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (len_trim(exception) > 0) THEN
             CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
          ENDIF
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_1d
@@ -416,11 +416,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (len_trim(exception) > 0) THEN
             CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
          ENDIF
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_2d
@@ -544,11 +544,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (len_trim(exception) > 0) THEN
             CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
          ENDIF
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_3d
@@ -674,11 +674,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-#if (defined CoLMDEBUG)
+         IF (DEF_USE_CoLMDEBUG) THEN
          IF (len_trim(exception) > 0) THEN
             CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
          ENDIF
-#endif
+         ENDIF
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_4d
@@ -782,11 +782,11 @@ CONTAINS
             wfmt = "('Check vector data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(*,wfmt) varname, vmin, vmax, info
 
-#if(defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (len_trim(info) > 0) THEN
                CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
             ENDIF
-#endif
+            ENDIF
 
          ENDIF
 
@@ -881,6 +881,5 @@ CONTAINS
 
    END SUBROUTINE check_vector_data_int32_1d
 
-#endif
 
 END MODULE MOD_RangeCheck

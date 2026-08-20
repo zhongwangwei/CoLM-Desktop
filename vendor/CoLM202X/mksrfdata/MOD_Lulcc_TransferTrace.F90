@@ -82,12 +82,8 @@ CONTAINS
    USE MOD_5x5DataReadin
    USE MOD_RegionClip
    USE MOD_Utils
-#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
-#endif
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
 
    IMPLICIT NONE
 
@@ -105,10 +101,8 @@ CONTAINS
    integer, allocatable, dimension(:) :: grid_patch_s, grid_patch_e
    logical :: first_call
 ! for surface data diag
-#ifdef SrfdataDiag
    integer  :: ityp
    integer, allocatable, dimension(:) :: typindex
-#endif
 !-----------------------------------------------------------------------
 
       IF ( (lc_year < 1990) .or. (lc_year < 2000 .and. MOD(lc_year, 5) /= 0) ) RETURN
@@ -122,9 +116,9 @@ CONTAINS
 
       first_call = .true.
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       allocate( typindex(N_land_classification+1) )
-#endif
+      ENDIF
 
       CALL allocate_LulccTransferTrace
 
@@ -243,7 +237,7 @@ CONTAINS
             landpatch, lccpct_patches(:,ilc), DEF_Srfdata_CompressLevel)
       ENDDO
 
-#ifdef SrfdataDiag
+      IF (DEF_USE_SrfdataDiag) THEN
       typindex = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_landdata) // &
                  '/diag/lccpct_matrix_' // trim(thisyr) // '.nc'
@@ -255,16 +249,16 @@ CONTAINS
          IF ( first_call ) first_call = .false.
       ENDDO
       deallocate(typindex)
-#endif
+      ENDIF
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('lccpct_patches', lccpct_patches)
       CALL check_vector_data ('lccpct_matrix' , lccpct_matrix )
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          IF (allocated(area_one))    deallocate (area_one)

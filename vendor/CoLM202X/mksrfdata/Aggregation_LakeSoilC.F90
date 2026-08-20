@@ -23,9 +23,7 @@ SUBROUTINE Aggregation_LakeSoilC ( &
    USE MOD_LandPatch
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
-#ifdef RangeCheck
    USE MOD_RangeCheck
-#endif
    USE MOD_AggregationRequestData
 
    IMPLICIT NONE
@@ -42,10 +40,8 @@ SUBROUTINE Aggregation_LakeSoilC ( &
 
    type(block_data_real8_3d) :: lake_soilc_grid
    real(r8), allocatable :: lake_soilc_patches(:,:), lake_soilc_one(:,:), area_one(:)
-#ifdef SrfdataDiag
    ! No gridded diagnostic is written here because srfdata_map_and_write is
    ! scalar-patch oriented; history/restart expose the 3-D soil-by-patch field.
-#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/soil/' // trim(cyear)
@@ -137,9 +133,9 @@ SUBROUTINE Aggregation_LakeSoilC ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-#ifdef RangeCheck
+      IF (DEF_USE_RangeCheck) THEN
       CALL check_vector_data ('lake_soilc_patches [gC/m3]', lake_soilc_patches)
-#endif
+      ENDIF
 
       lndname = trim(landdir)//'/lake_soilc_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
