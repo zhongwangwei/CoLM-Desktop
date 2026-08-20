@@ -179,6 +179,22 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read {}", sp.source_name))?;
 
+        // **同一个变量不能既当源又在 also_add 里。** 那会把它加两次 ——
+        // 降水翻倍，退出码 0，一句警告都没有。
+        //
+        // 界面上已经防了一道（`5d42291`：主变量换成原来的额外变量时清掉它），
+        // 但那是界面自己的状态，而这条要防的正是界面出错的情况。
+        // 真机验收实测过修复前那份 payload：`4=Snowf:kg/m2/s+Snowf`
+        // 转出来的 `Precip` 精确等于 `2 × Snowf`，后端一声不吭。
+        if sp.also_add.contains(&sp.source_name) {
+            bail!(
+                "slot {} names {:?} both as its source and in also_add — \
+                 it would be added twice, silently doubling the values",
+                sp.index,
+                sp.source_name
+            );
+        }
+
         // 多源合成：同单位相加。
         for extra in &sp.also_add {
             let e = fin.variable(extra).with_context(|| {

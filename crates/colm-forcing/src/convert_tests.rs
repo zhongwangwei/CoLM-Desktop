@@ -497,3 +497,45 @@ fn a_product_directory_that_does_not_exist_yet_is_created() {
     super::convert(&p, &dst, &plan).expect("产物目录该被建出来");
     assert!(dst.exists(), "产物没写出来");
 }
+
+#[test]
+fn a_variable_listed_both_as_source_and_in_also_add_is_refused() {
+    // **后端要独立拦住这个，不能只靠界面。**
+    //
+    // 界面上修过一次（`5d42291`：主变量换成原来的额外变量时清掉它），
+    // 但那是唯一的防线 —— 而它防的正是界面自己的 bug。真机验收实测：
+    // 拿修复前会产生的那份 payload（`4=Snowf:kg/m2/s+Snowf`）跑后端，
+    // **Precip = 2× Snowf 精确，退出码 0，一句警告都没有**。
+    //
+    // 降水翻倍，模型跑得完，曲线照样是曲线。
+    let dir = std::env::temp_dir().join("colm-convert-dup");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("dup_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        let mut v = f.add_variable::<f64>("Snowf", &["time"]).unwrap();
+        v.put_attribute("units", "kg/m2/s").unwrap();
+        v.put_values(&[1.0, 2.0], netcdf::Extents::All).unwrap();
+    }
+
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 4,
+            source_name: "Snowf".into(),
+            source_units: "kg/m2/s".into(),
+            also_add: vec!["Snowf".into()],
+        }],
+        heights: None,
+    };
+    let e = super::convert(&p, &dir.join("out.nc"), &plan).unwrap_err();
+    let m = e.to_string();
+    assert!(m.contains("Snowf"), "报错要点名那个变量：{m}");
+    assert!(m.contains("twice"), "要说清楚后果是加了两次：{m}");
+}
