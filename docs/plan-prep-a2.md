@@ -758,6 +758,56 @@ Urban-PLUMBER 的 `_site_v1.nc`/`_metforcing_v1.nc`。
 
 ---
 
+## Task 6: 界面上也要能指定强迫场，否则 `--met` 只做了一半
+
+**Task 4 跑着的时候查出来的。**
+
+`20e3bd1` 给 `colm-cli new` 加了 `--met`，但 **GUI 的 `new_case`
+传不了它**：
+
+```
+sidecar.rs 的 new_case 参数：site, out, name, start, end, rawdata, runtime
+                                                       ↑ 没有 met
+```
+
+于是界面上的完整流程仍然是断的：
+
+```
+前处理页转换 → 产物在 ~/CoLM-forcing/
+站点页建算例 → new_case 不传 --met → sibling() 推出原始强迫场
+             → 用户转换的东西没被用上，而且不报错
+```
+
+### 照观测那条路做
+
+**观测早就是对的**（`results.js`）：
+
+```js
+const obs = $('obs').value.trim() || autoObs();   // 用户填的优先，约定回落
+```
+
+界面上有 `data-for="obs"` 的选择按钮。强迫场照抄这个形状：
+
+1. `sidecar.rs` 的 `new_case` 加 `met: Option<String>`，拼进 args
+2. 站点页（第 3 步）加一个「强迫场（可选）」输入框 + `pick` 按钮，
+   `data-for="fmet" data-file="nc"`
+3. `sites.js` 建算例时把它传进去，**空就不传**（走命名约定）
+4. `recent.js` 的 `REMEMBERED` 加 `fmet`
+   —— 那张表漏字段的后果见 `d892622`
+
+**默认留空是对的。** 内置数据集走命名约定完全正常，
+只有「用自己的数据」才需要显式指定。
+
+### 判据
+
+拿 FI-Kumpula 在界面上走一遍：转换 → 建算例时指定那份产物 →
+`forcing.nml` 里 `HEIGHT_T` 是 48.05 而不是 `NaN`。
+
+**那个 `NaN` 是可观测的信号**：它证明用的是原始文件
+（Urban-PLUMBER 的 21 个站都没有 `reference_height_*`）。
+
+---
+
 ## 附：这份计划**不做**什么
 
 - **不做表格导入**（阶段 C）
