@@ -36,7 +36,12 @@ anyhow.workspace = true
 netcdf = { workspace = true, features = ["static"] }
 toml.workspace = true
 serde = { workspace = true }
-serde_json.workspace = true
+# **`float_roundtrip`不是可有可无的。** `extract-urban-extra` 从一份 JSON 读
+# 树 LAI 的点值，而 serde_json 默认的浮点解析**会差 1 ULP**：实测
+# `1.8337343205163141` 解析成 `1.833734320516314`。那一位之差会一路走到
+# history 文件里，把「与真实栅格逐位相同」变成「几乎相同」——而几乎相同
+# 是这套黄金回归唯一不接受的结果。见该文件里的 `serde_json_parses_floats_exactly`。
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [lints]
 workspace = true
@@ -65,3 +70,10 @@ path = "src/bin/tier_check.rs"
 [[bin]]
 name = "extract-urban-soil"
 path = "src/bin/extract_urban_soil.rs"
+
+# 第二张表：LCZ 分类、LUCY 区号、土壤颜色档、湖深、地形起伏与坡度、
+# 以及 23 年 x 12 月的城市树 LAI/SAI。产物是
+# crates/colm-srfdata/src/urban_extra.rs，同样入库。
+[[bin]]
+name = "extract-urban-extra"
+path = "src/bin/extract_urban_extra.rs"

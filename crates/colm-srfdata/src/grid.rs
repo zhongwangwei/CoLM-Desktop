@@ -22,11 +22,33 @@ pub struct Grid {
 }
 
 /// `colm_500m`：`grid_define_by_ndims(86400, 43200)`。
-/// 三个 rawdata 栅格（lake_depth / soil_brightness / topography）都用它。
+/// 三个 rawdata 栅格（lake_depth / soil_brightness / topography）都用它，
+/// `urban_type/` 与 `urban_lai_500m/` 的 5x5 瓦片也是。
 pub const COLM_500M: Grid = Grid {
     nlon: 86400,
     nlat: 43200,
 };
+
+/// `colm_5km`：`grid_define_by_ndims(8640, 4320)`。
+///
+/// 只有 `urban/LUCY_regionid.nc` 用它（`MOD_SingleSrfdata.F90:1861`）。
+/// **网格名跟着文件走，不跟着模块走** —— 同一个 `read_point_var_2d_real8`
+/// 在别处配的是 `colm_500m`，用错网格不会报错，只会取到另一个像元。
+pub const COLM_5KM: Grid = Grid {
+    nlon: 8640,
+    nlat: 4320,
+};
+
+/// 一个 5°x5° 瓦片里的落点：文件名词干与瓦片内的 1-based 下标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tile5x5 {
+    /// `RG_<north>_<west>_<south>_<east>`，不含 `.<sfx>.nc`。
+    pub stem: String,
+    /// 瓦片内的经度下标，1-based。
+    pub ilon: usize,
+    /// 瓦片内的纬度下标，1-based。
+    pub ilat: usize,
+}
 
 impl Grid {
     pub fn dlon(&self) -> f64 {
@@ -64,6 +86,34 @@ impl Grid {
             i += 1;
         }
         i
+    }
+
+    /// 站点落在哪个 5°x5° 瓦片的哪一格。
+    ///
+    /// 逐行照抄 `share/MOD_NetCDFPoint.F90` 的 `get_5x5_filename`：
+    ///
+    /// ```text
+    /// nxbox = nlon/360*5           ibox = (ilon-1)/nxbox + 1
+    /// nybox = nlat/180*5           jbox = (ilat-1)/nybox + 1
+    /// RG_<(19-jbox)*5>_<(ibox-37)*5>_<(18-jbox)*5>_<(ibox-36)*5>
+    /// ```
+    ///
+    /// 四个数字的次序是**北、西、南、东**，而 `(19-jbox)*5` 是北、
+    /// `(18-jbox)*5` 是南 —— 纬度下标是降序的，所以 jbox 越大越靠南。
+    /// 照几何直觉写成「南在前」会得到一个存在的、但错了 5 度的文件名。
+    pub fn tile_5x5(&self, lon: f64, lat: f64) -> Tile5x5 {
+        let (ilon, ilat) = self.index_of(lon, lat);
+        let nxbox = self.nlon / 360 * 5;
+        let nybox = self.nlat / 180 * 5;
+        let ibox = (ilon - 1) / nxbox + 1;
+        let jbox = (ilat - 1) / nybox + 1;
+        let (north, west) = ((19 - jbox as i64) * 5, (ibox as i64 - 37) * 5);
+        let (south, east) = ((18 - jbox as i64) * 5, (ibox as i64 - 36) * 5);
+        Tile5x5 {
+            stem: format!("RG_{north}_{west}_{south}_{east}"),
+            ilon: ilon - (ibox - 1) * nxbox,
+            ilat: ilat - (jbox - 1) * nybox,
+        }
     }
 
     fn ilat(&self, lat: f64) -> usize {

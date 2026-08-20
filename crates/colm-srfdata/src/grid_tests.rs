@@ -114,3 +114,42 @@ fn indices_are_one_based_like_fortran() {
     let (ilon, ilat) = COLM_500M.index_of(-180.0, 90.0);
     assert_eq!((ilon, ilat), (1, 1));
 }
+
+/// 5x5 瓦片的文件名词干，钉住 `get_5x5_filename` 的四个数字与它们的次序。
+///
+/// **次序是北、西、南、东。** 照几何直觉写成「南在前」会得到一个
+/// **存在的**、但差 5 度的文件名 —— 那种错误既不报错也不越界，只会安静地
+/// 取到另一块地方的数据。所以这里挑的七个站横跨南北半球与东西半球：
+/// 期望值出自另一条独立算出来的路径（`north=ceil(lat/5)*5, west=floor(lon/5)*5`）。
+// 一行一个站点：三列对齐着看，才能一眼核出哪个站落在哪块上。
+// 拆成每项六行就核不动了 —— 而这张表的全部意义就是被人核对。
+#[rustfmt::skip]
+#[test]
+fn five_by_five_tile_names_match_colms_naming() {
+    for (site, lon, lat, want) in [
+        ("AU-Preston", 145.014_495_849_609_38, -37.730_598_449_707_03, "RG_-35_145_-40_150"),
+        ("FI-Kumpula", 24.961_099_624_633_79, 60.202_800_750_732_42, "RG_65_20_60_25"),
+        ("CA-Sunset", -123.078_399_658_203_13, 49.226_100_921_630_86, "RG_50_-125_45_-120"),
+        ("SG-TelokKurau06", 103.911_201_477_050_78, 1.314_299_941_062_927_2, "RG_5_100_0_105"),
+        ("MX-Escandon", -99.176_101_684_570_31, 19.404_199_600_219_727, "RG_20_-100_15_-95"),
+        ("US-Minneapolis1", -93.188_362_121_582_03, 44.998_401_641_845_7, "RG_45_-95_40_-90"),
+        ("UK-KingsCollege", -0.116_700_001_060_962_68, 51.511_798_858_642_58, "RG_55_-5_50_0"),
+    ] {
+        let t = COLM_500M.tile_5x5(lon, lat);
+        assert_eq!(t.stem, want, "{site} 落在了 {} 上", t.stem);
+        // 瓦片是 1200x1200，下标 1-based。
+        assert!((1..=1200).contains(&t.ilon), "{site}: ilon {}", t.ilon);
+        assert!((1..=1200).contains(&t.ilat), "{site}: ilat {}", t.ilat);
+    }
+}
+
+/// 瓦片内下标与全球下标必须自洽：`(ibox-1)*1200 + ilon` 要还原成全球下标。
+#[test]
+fn the_tile_offset_reconstructs_the_global_index() {
+    for (lon, lat) in [(145.0145, -37.7306), (-0.1167, 51.5118), (0.0, 0.0)] {
+        let (ilon, ilat) = COLM_500M.index_of(lon, lat);
+        let t = COLM_500M.tile_5x5(lon, lat);
+        assert_eq!((ilon - 1) % 1200 + 1, t.ilon);
+        assert_eq!((ilat - 1) % 1200 + 1, t.ilat);
+    }
+}

@@ -14,10 +14,11 @@
 //! 层数是 8：`mkinidata/MOD_SoilParametersReadin.F90` 是 `DO nsl = 1, 8`，
 //! 而栅格每层一个独立变量，正好 8 个。城市段回落时也是 `allocate(...(8))`。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use colm_srfdata::raster::{point_f64, point_i32};
+use oracle::sitedata::urban_sites;
 
 /// 一个剖面量：Rust 字段名、site.nc 变量名、栅格文件名、栅格里的层变量前缀。
 ///
@@ -80,14 +81,14 @@ fn main() -> Result<()> {
         bail!("{} is not a directory", soil.display());
     }
 
-    let sites = collect_sites(sitedata)?;
+    let sites = urban_sites(sitedata)?;
     if sites.is_empty() {
         bail!("no *_site_v1.nc under {}", sitedata.display());
     }
 
     let mut rows = Vec::new();
-    for (name, file) in &sites {
-        let (lon, lat) = read_lonlat(file)?;
+    for site in &sites {
+        let (name, lon, lat) = (&site.name, site.lon, site.lat);
         let mut profiles = Vec::new();
         for (_, _, raw_file, prefix) in PROFILE {
             let path = soil.join(raw_file);
@@ -117,37 +118,6 @@ fn main() -> Result<()> {
 
     emit(&rows);
     Ok(())
-}
-
-/// `<Sitedata>/*_site_v1.nc`，按站点名排序。
-fn collect_sites(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
-        let path = entry?.path();
-        let Some(stem) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if let Some(name) = stem.strip_suffix("_site_v1.nc") {
-            out.push((name.to_string(), path.clone()));
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// 城市站点文件的经纬度是 `float longitude(y, x)`，取第一个像元。
-fn read_lonlat(file: &Path) -> Result<(f64, f64)> {
-    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
-    let scalar = |n: &str| -> Result<f64> {
-        let v = f
-            .variable(n)
-            .with_context(|| format!("{n} not in {}", file.display()))?;
-        let x: Vec<f64> = v.get_values(netcdf::Extents::All)?;
-        x.first()
-            .copied()
-            .with_context(|| format!("{n} is empty in {}", file.display()))
-    };
-    Ok((scalar("longitude")?, scalar("latitude")?))
 }
 
 type Row = (String, f64, f64, Vec<[f64; 8]>, i32);

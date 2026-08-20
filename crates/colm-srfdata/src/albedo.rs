@@ -36,6 +36,10 @@ pub const SOIL_D_N_REFL: [f64; 20] = [
 pub const IGBP_WATER: i32 = 17;
 /// IGBP 的冰盖类别，同上。
 pub const IGBP_ICE: i32 = 15;
+/// IGBP 的「城市与建成区」。URBAN 路径把地类强制成它
+/// （`MOD_SingleSrfdata.F90:1548`），而它既不是水体也不是冰盖 ——
+/// 所以城市站点只要有颜色档就一定查得到四个反照率。
+pub const IGBP_URBAN: i32 = 13;
 
 /// 一个站点的四个土壤反照率。
 #[derive(Debug, Clone, Copy, PartialEq)]
