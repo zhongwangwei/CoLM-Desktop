@@ -17,8 +17,8 @@
 | **① 试点** | `CoLMDEBUG` | 92 | 30 | ✅ `acc596a` |
 | | `RangeCheck` | 121 | 39 | ✅ 同上 |
 | | `SrfdataDiag` | 98 | 20 | ✅ 同上 |
-| **② 两套物理方案共存** | `Campbell_SOIL_MODEL` | 63 | 19 | 🔄 |
-| | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | 🔄 |
+| **② 两套物理方案共存** | `Campbell_SOIL_MODEL` | 63 | 19 | ✅ `80de820` |
+| | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | ✅ 同上 |
 | | ~~`extend_interception`~~ | 4 | 1 | ❌ **不做** |
 | **③ 最大但独立** | `TRACER` | 342 | 69 | 待做 |
 | **④ 核心难点（必须一起）** | `LULC_IGBP` | 205 | 46 | 待做 |
@@ -81,19 +81,30 @@ vendor/CoLM202X/extends/
 **它们是扩展模块，不是核心物理。** 改造只动 `main/`、`share/`、
 `mksrfdata/`、`mkinidata/` 那几处。
 
-对工作量的影响很小（实测各宏在 `extends/` 里的处数）：
+### ⚠️ 上面那句「不在范围内」有一处重要例外
 
-| 宏 | 总处数 | `extends/` 里 |
-|---|---|---|
-| `TRACER` | 342 | 1 |
-| `CROP` | 237 | 2 |
-| `LULC_IGBP` | 205 | 5 |
-| `LULC_IGBP_PFT` | 150 | 5 |
-| 土壤水力两个 | 57 | **0** |
-| `BGC` / `URBAN_MODEL` | 211 | **0** |
+`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90` **必须改**。
 
-顺带解释了下面那件事：`extend_interception` 的家就在
-`extends/interception/` —— **它本来就不该在范围里**。
+理由：`extend_interception` 在 `create_defineh.bash` 的模板里是无条件
+`#define`，所以**那个文件就是每个内核实际编译进去的 `MOD_Thermal`**。
+不改它，土壤水力的运行时开关在生产配置下是**空操作** ——
+第二组判据③（运行时 Campbell 与改造前编译期 Campbell 逐位相同）
+直接依赖于这处改动。
+
+**我最初统计出「土壤水力在 extends/ 里 0 处」是错的**，而且错的方式
+值得记：**统计时那个 agent 已经改完了那 8 处**，`#ifdef` 已经变成
+`IF (DEF_USE_Campbell_SOIL_MODEL)`，所以 grep 自然是 0。
+
+**在一个正在被修改的代码库上统计「还剩多少要改」，得到的数是错的。**
+要么先停下所有改动再统计，要么统计一个固定的 commit。
+
+### 修正后的原则
+
+`extends/` 里**只有 CaMa 不在范围内**（单点下强制 `#undef`）。
+`extends/interception/` 参与每一次编译，与 `main/` 同等对待。
+
+至于 `extend_interception` **这个宏本身**不做 —— 那是另一回事
+（见下一节），与「它目录下的文件要不要跟着别的宏改」无关。
 
 ## `extend_interception` 为什么不做
 
