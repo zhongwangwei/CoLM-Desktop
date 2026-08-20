@@ -59,7 +59,7 @@
 //! 不进 `state`，也不进 `recent.js` 的 `REMEMBERED` 表** —— 关掉重开要
 //! 重新问，design-gate.md §5：「不做记住上次的选择——它是分流点，不是
 //! 一次性的欢迎页」。选择只有在最后一页按下「进入主界面」
-//! 时才落到 `state.domain` / `state.profile` / `state.wizard`，半路退出
+//! 时才落到 `state.domain` / `state.subgrid`，半路退出
 //! （刷新页面重新起）不留痕迹。
 //!
 //! 下一步：保存本页选择，进下一页，没选时禁用。
@@ -78,7 +78,7 @@
 //! const，被 `nextOf` / `go` / `renderSteps` 直接闭包引用 —— 三档各自一套
 //! 步骤链的话，得把它变成 `STEPS[state.domain]` 或一个函数，那三个调用点
 //! 都要跟着动。`state.domain` 现在**零读取点**，别以为它已经接好了 ——
-//! `state.profile` / `state.wizard` 同理，落到 case.nml 是宏改造完成后
+//! `state.subgrid` 同理，落到 case.nml 是宏改造完成后
 //! 的事（design-gate.md §3），这一步没做。
 //!
 //! 已经接好的那半：`renderNextButtons`（shell.js）遍历 `.page`，未知
@@ -103,87 +103,64 @@ const DOMAINS = [
 // 「碳氮循环」「城市」它说的是「打开哪些开关」，对「自定义」它说的是
 // 「需要什么机制」——同一个位置，起的是 design-gate.md §2b「①需要
 // 什么」那件事的作用。②「是什么造成的」由三档共用同一句
-// `PROFILE_BLOCKED_BY`，因为现在挡住它们的是同一场宏改造，不像
+// `SUBGRID_BLOCKED_BY`，因为现在挡住它们的是同一场宏改造，不像
 // design-gate.md 第 5 页那样各自指向前面某一页的某个选择——那要等
 // 第 3–6 页真的存在才有「回哪页改」这回事。
 //
 // **不含次网格方案或土壤水力**（没有 `IGBP · van Genuchten` 这类字样）
 // —— 那是第 3、4 页各自问的，「默认」不替用户预先决定。
-const PROFILES = [
+const SUBGRID = [
   {
-    id: 'default', t: '默认', d: '地表能量与水分平衡',
-    tech: '不开碳循环等附加过程', ready: true,
+    id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖',
+    tech: '一个 patch 一个地类', ready: true,
   },
   {
-    id: 'carbon_nitrogen', t: '碳氮循环', d: '植被生长与碳收支',
-    tech: 'BGC · CROP', ready: false,
+    id: 'USGS', t: 'USGS', d: '24 类地表覆盖（旧方案）',
+    tech: '一个 patch 一个地类', ready: false,
+    need: '数组尺寸由 N_land_classification 定死，仍是编译期宏',
   },
   {
-    id: 'urban', t: '城市', d: '城市冠层与人为热',
-    tech: 'URBAN', ready: false,
+    id: 'PFT', t: 'PFT', d: '植物功能型',
+    tech: '一个 patch 拆成多个功能型', ready: false,
+    need: 'CoLM 宏改造尚未完成',
   },
   {
-    id: 'custom', t: '自定义', d: '每一项都自己选',
-    tech: '逐项配置次网格方案 · 土壤水力 · 物理过程', ready: false,
+    id: 'PC', t: 'PC', d: '植物群落',
+    tech: '同 PFT，次网格组织方式不同', ready: false,
+    need: 'CoLM 宏改造尚未完成',
   },
 ];
-const PROFILE_BLOCKED_BY = 'CoLM 宏改造尚未完成';
 
-// 预设展开成的具体初值。**这是「预设 = 填好后面几页的初值」这件事的
-// 数据形状** —— 第 5 页（其余物理开关）落地后从这里读起始值去预填
-// 那一页的控件。字段名按 design-gate.md §1 的依赖表起：`bgc`/`crop`/
-// `urban`/`tracer`，都是第 5 页要问的物理过程开关。
-//
-// **不含 `lulc`/`soil`**——次网格方案（第 3 页）与土壤水力（第 4 页）
-// 是独立选的，不属于「研究什么过程」这一层的预设范围，「默认」也不
-// 替它们做主。
-//
-// 现在只有 `default` 选得到，但表按将来的样子写全，免得第 3–6 页
-// 落地时要回头重新设计这份数据结构。`custom`（自定义）没有条目——
-// 它的意思就是没有初值，用户在那几页自己一项项填。
-const PRESET_VALUES = {
-  default: { bgc: false, crop: false, urban: false, tracer: false },
-  carbon_nitrogen: {
-    // CROP 要先开 BGC（§1）。PFT/PC 那层次网格方案不在这里——
-    // 第 3 页会因为这一档打开了 BGC 而把 IGBP/USGS 灰掉，但那是第 3
-    // 页自己的约束重算，不是这张表要管的事。
-    bgc: true, crop: true, urban: false, tracer: false,
-  },
-  urban: { bgc: false, crop: false, urban: true, tracer: false },
-};
-
-/** 向导页顺序。加第 3 页时在这里插入，`render()`/`renderFoot()` 不用改
- *  —— 它们只认「当前是不是最后一页」，不认页数。 */
-const PAGES = ['domain', 'profile'];
+const PAGES = ['domain', 'subgrid'];
 
 let pageIdx = 0;
 /** 本次向导会话的暂存选择，见模块头部注释。 */
-let picked = { domain: null, profile: null };
+let picked = { domain: null, subgrid: null };
 
 /** 立起门。后台初始化在它后面照常跑 —— 门只是视觉遮挡。 */
 export function showDomainGate() {
   pageIdx = 0;
-  picked = { domain: null, profile: null };
+  picked = { domain: null, subgrid: null };
   render();
   $('domaingate').hidden = false;
 }
 
 function render() {
   const page = PAGES[pageIdx];
-  $('gatetitle').textContent = page === 'domain' ? '这次要跑什么？' : '这次研究什么过程？';
+  $('gatetitle').textContent = page === 'domain' ? '这次要跑什么？' : '次网格怎么分？';
   $('gatesub').textContent = page === 'domain'
     ? '现在只有站点能跑。区域与全球的步骤链还没有实现。'
     : '现在的内核只支持「默认」这一套物理过程 —— '
       + '其余三档要等 CoLM 宏改造完成才能选。';
   // 第 2 页专有的一句：说清楚次网格方案、土壤水力不在这一页问。
   // 第 3–6 页现在不存在，这句话是给将来占位的，但要现在就写上。
-  $('gateinfo').textContent = page === 'profile'
+  $('gateinfo').textContent = page === 'subgrid'
     ? 'ⓘ 次网格方案、土壤水力在后面几页选'
     : '';
   const box = $('gatecards');
   box.textContent = '';
-  const items = page === 'domain' ? DOMAINS : PROFILES;
-  const sel = page === 'domain' ? picked.domain : picked.profile;
+  const items = page === 'domain' ? DOMAINS : SUBGRID;
+  const sel = page === 'domain' ? picked.domain : picked.subgrid;
   for (const it of items) box.appendChild(card(it, page, sel === it.id));
   renderFoot();
 }
@@ -216,7 +193,7 @@ function card(it, page, isSelected) {
 
   if (it.ready) {
     b.onclick = () => {
-      if (page === 'domain') picked.domain = it.id; else picked.profile = it.id;
+      if (page === 'domain') picked.domain = it.id; else picked.subgrid = it.id;
       render();
     };
   } else if (page === 'domain') {
@@ -231,7 +208,7 @@ function card(it, page, isSelected) {
     // 第一件事「需要什么」已经在上面的 `.dtech` 里写过了，不重复。
     const why = document.createElement('span');
     why.className = 'dwhy';
-    why.textContent = PROFILE_BLOCKED_BY;
+    why.textContent = SUBGRID_BLOCKED_BY;
     b.appendChild(why);
   }
   return b;
@@ -248,7 +225,7 @@ function renderFoot() {
     cancel.textContent = '取消';
     cancel.onclick = () => {
       pageIdx = 0;
-      picked = { domain: null, profile: null };
+      picked = { domain: null, subgrid: null };
       render();
     };
     foot.appendChild(cancel);
@@ -259,15 +236,17 @@ function renderFoot() {
     // 只回页，不碰 `picked` —— 保留已选的正是判据②要的行为。
     prev.onclick = () => { pageIdx -= 1; render(); };
     foot.appendChild(prev);
-  }
 
   const page = PAGES[pageIdx];
-  const sel = page === 'domain' ? picked.domain : picked.profile;
+  const sel = page === 'domain' ? picked.domain : picked.subgrid;
   const isLast = pageIdx === PAGES.length - 1;
 
   const next = document.createElement('button');
   next.className = 'btn-next';
-  next.textContent = isLast ? '进入主界面 →' : '下一步 →';
+  // **不分是不是最后一页，一律叫「下一步」。** 最后一页叫「进入主界面」
+  // 看着更"贴心"，实际是多一种说法要人分辨 —— 而它做的事和前面每一页
+  // 完全一样：把当前选择存下，往前走。名字变了会让人以为行为也变了。
+  next.textContent = '下一步 →';
   // 没选时禁用，照 shell.js `renderNextButtons` 同一条规矩：
   // 进不去的时候不给一个能点但必然什么都不做的按钮。
   next.disabled = !sel;
@@ -277,13 +256,7 @@ function renderFoot() {
 
 function finish() {
   state.domain = picked.domain;
-  state.profile = picked.profile;
-  // 预设展开成的初值——`custom`（自定义）没有条目，落到 `null`，
-  // 意思是「没有初值，等第 3–6 页落地后自己填」。浅拷贝一份，免得
-  // 将来第 3–6 页改动 `state.wizard` 时顺手改到了 `PRESET_VALUES`
-  // 这张共享表。
-  const preset = PRESET_VALUES[picked.profile];
-  state.wizard = preset ? { ...preset } : null;
+  state.subgrid = picked.subgrid;
   $('domaingate').hidden = true;
   go('prep');
 }

@@ -263,15 +263,15 @@ td:first-child { overflow-wrap: anywhere; }
 .domain-card[aria-selected=true] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-weak); }
 .domain-card .dt { font-size: 16px; font-weight: 600; }
 .domain-card .dd { font-size: 12px; color: var(--muted); }
-/* 第 2 页每档下面那行技术选项（design-gate.md「不要叫默认」一节）。
-   等宽字体：这是一份配置读数，不是一句话说明，跟 .dd 的用途描述区分开。 */
-.domain-card .dtech { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+/* 第 2 页每档下面那行说明（design-gate.md §2b「①需要什么」）：默认
+   写不开什么，其余写打开哪些开关或需要什么机制。所有卡片都有，不论
+   置灰与否，所以是中性的 faint 色，不用告警色——它不是在说「有问题」。 */
+.domain-card .dtech { font-size: 11px; color: var(--faint); }
 .domain-card .dsoon { font-size: 11px; color: var(--warn); margin-top: 4px; }
-/* 第 2 页灰选项的两行说明：① 需要什么 ② 是什么造成的（design-gate.md §2b）。
-   两行都用告警色系但深浅不同，把「前提条件」与「卡在哪」区分开来，
-   不新增状态色 —— 这个程序的状态色只有 warn/fail。 */
-.domain-card .dneed { font-size: 11px; color: var(--warn); margin-top: 4px; }
-.domain-card .dwhy { font-size: 11px; color: var(--faint); }
+/* 灰选项的第二件事（design-gate.md §2b「②是什么造成的」）：这是「有
+   问题」的那一行，用告警色——不新增状态色，这个程序的状态色只有
+   warn/fail。第一件事「需要什么」已经在上面 .dtech 里写过，不重复。 */
+.domain-card .dwhy { font-size: 11px; color: var(--warn); margin-top: 4px; }
 /* 定义「预设」语义的那一句，只在第 2 页有内容（domain.js 按页清空）。
    :empty 收掉外边距，免得第 1 页凭空多出一段空白。 */
 #gateinfo { margin: 10px 0 0; }
