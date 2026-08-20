@@ -10,6 +10,73 @@
 
 ---
 
+## 这件事到此为止（2026-08-21 收口）
+
+**范围以这一节为准**，下面那张「完整清单」是 8-20 立目标时的快照，
+不再更新。
+
+**一个二进制现在覆盖这八个维度的任意组合：**
+
+| 维度 | 开关 | 活的 `#ifdef` |
+|---|---|---|
+| 调试三件套 | `DEF_USE_CoLMDEBUG` / `RangeCheck` / `SrfdataDiag` | 0 |
+| 土壤水力二选一 | `DEF_USE_Campbell_SOIL_MODEL`（`.not.` 即 vanGenuchten） | 0 |
+| TRACER | `DEF_USE_TRACER` | 0 |
+| PFT | `DEF_USE_PFT` | 0 |
+| PC | `DEF_USE_PC` | 0 |
+| BGC | `DEF_USE_BGC` | 0 |
+| 城市 | `DEF_URBAN_RUN` | 1 |
+| 土地利用变化 | `DEF_USE_LULCC` | 0 |
+
+城市那 1 处是 `mksrfdata/MOD_LandPatch.F90:265`，`#if (!defined(URBAN_MODEL)
+&& !defined(CROP))`，只控制一行 `Total: N patches.` 的打印，且同时依赖
+CROP —— 要转它得先转 CROP。不影响任何物理量。
+
+（另有 2 处 `!#if (defined CoLMDEBUG)` 在 `preprocess/rd_land_types.F90`，
+是上游本来就注释掉的死代码，不算。）
+
+### 三项不做，各自的理由不一样
+
+**`LULC_IGBP` / `LULC_USGS`（28 / 51 处）与 `CROP`（260 处）** —— 止损，
+`c3a8c6e` 记过一次。8-21 复查时试图找便宜路子，**没找到**，把证据留在这里
+免得下次再试一遍：
+
+一开始想的是「取并集」：把 `N_PFT+N_CFT` 一律开到最大（15+64=79），
+运行时只用前 N 个。这条路走不通，因为那些不是普通数组，是**带逐元素
+写死初始化数据的 `parameter` 数组**：
+
+```fortran
+integer , parameter :: canlay_p(0:N_PFT+N_CFT-1) &
+   = (/ …一长串逐元素的数据… /)
+```
+
+不开 CROP 是 16 个元素（16 个 PFT），开了是 79 个（15 PFT + 64 CFT），
+而且**两套数据的内容不同**，不是一套截断成另一套。开大尺寸只会让元素
+个数对不上；要合并就得把两张表逐元素并成一张，再把 `parameter` 改成
+运行时填充 —— 那是 `main/MOD_Const_PFT.F90` 整个文件加 133 处
+`N_PFT+N_CFT` 尺寸声明。
+
+`N_land_classification` 同理：定义在
+`preprocess/aggregation_landtypes.F90:29,32`，24 类（USGS）与 17 类（IGBP）
+各带一套配套数据，194 处依赖，29 个 `.F90` 受影响。
+
+**判据也不一样**，这才是它该独立成一轮的真正原因：前四组的判据①是
+「黄金回归 bit-identical」，那只证明**默认配置没变**；而这一轮改的正是
+数组尺寸本身，默认配置不变是必然的，证明不了另一套尺寸下算得对。
+要验证得另设计一套判据。
+
+留了只读镜像 `DEF_USE_USGS` / `DEF_USE_CROP`（各 9 处），让 GUI 能显示
+当前内核是哪一套 —— 不能改，只能读。
+
+**`extend_interception`（4 处）** —— 用户明令不做（见下面那一节）。
+
+### 所以「一个 exe 覆盖所有配置」达成到什么程度
+
+八个维度任意组合：一个二进制。
+IGBP/USGS 之间、开不开 CROP：**仍需分别编译**。
+
+---
+
 ## 完整清单（实测处数，2026-08-20）
 
 | 组 | 宏 | 处数 | 文件 | 状态 |
