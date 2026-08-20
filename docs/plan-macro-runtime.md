@@ -20,7 +20,7 @@
 | **② 两套物理方案共存** | `Campbell_SOIL_MODEL` | 63 | 19 | ✅ `80de820` |
 | | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | ✅ 同上 |
 | | ~~`extend_interception`~~ | 4 | 1 | ❌ **不做** |
-| **③ 最大但独立** | `TRACER` | 342 | 69 | 待做 |
+| **③ 最大但独立** | `TRACER` | 342 | 69 | ✅ `1a60e9d` |
 | **④ 核心难点（必须一起）** | `LULC_IGBP` | 205 | 46 | 待做 |
 | | `LULC_IGBP_PC` | 159 | 40 | 待做 |
 | | `LULC_IGBP_PFT` | 150 | 38 | 待做 |
@@ -162,6 +162,42 @@ vendor/CoLM202X/extends/
 5. **加 `DEF_USE_*` 就要动 schema** ——
    `xtask gen-schema` 重新生成、`config.rs` 给 UI 分区、
    `params.js` 的 `PARAM_SECTIONS` 对上（有测试强制两边一致）
+
+## ③ TRACER 的四个发现（第四组要当心）
+
+前两组没遇到的，都是**隐藏的第二道门**：
+
+**① `vendor/CoLM202X/Makefile` 有自己的编译门**
+
+```makefile
+TRACER_ENABLED := $(shell grep '#define TRACER' include/define.h)
+```
+
+**目录级的门** —— 决定要不要编 `main/TRACER/*.o`。改了 `.F90` 里的
+`#ifdef` 还不够，Makefile 在外面还拦一道。
+**第四组要先查 Makefile 里有没有 LULC/BGC/CROP 的同类门。**
+
+**② `xtask/src/usage.rs` 的 `SUBSYSTEMS` 映射**
+
+`main/TRACER/ → "TRACER"` 用来算 schema 的 `requires` 字段。宏消失之后，
+GUI 会把所有 `DEF_TRACER_*` 显示成「本内核未编入」—— 因为 `TRACER`
+再也不在 `macros` 列表里。
+
+**这条连锁不容易想到**：宏消失 → schema 的 `requires` 失效 → 界面显示错误。
+第四组同样要检查 `usage.rs` 里 LULC/BGC 相关的映射。
+
+**③ `/*` 出现在注释里会破坏 cpp**
+
+它在 `create_defineh.bash` 里写了一句含 `main/TRACER/*.F90` 的注释，
+`/*` 被当成 C 注释起始，`gfortran -cpp` 报 "unterminated comment"。
+
+**④ near-miss：84 处的大文件差点漏掉**
+
+`MOD_SnowLayersCombineDivide.F90` 分析过但忘了改，靠**最后的全仓库
+grep 扫描**才发现。那 84 处漏掉的话，判据 ① ② 可能照样通过
+（默认配置下那条路不执行），**但打开开关就是错的**。
+
+**每组收尾前必须全仓库扫一遍**，不能靠「我记得都改了」。
 
 ## 已完成
 
