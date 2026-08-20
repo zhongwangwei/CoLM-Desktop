@@ -720,6 +720,14 @@ Tested: cargo test -p colm-forcing --lib convert（恒等 + 改名换算）"
 
 **PLUMBER2 不受影响**：90 个站全部只有 `Precip`，零个含 `Snowf`（已实测）。
 
+**已实测、不必再查的事实**（2026-08-20）：
+
+- 21 个城市站的 `Rainf`/`Snowf` 单位**统一是 `kg/m2/s`**，与 PLUMBER2 的
+  `Precip` 一致 —— 所以走 `from == to` 的原样返回，**逐位不变**
+- 21 个站**零缺测**（`_FillValue = -999` 声明了，数据里一个都没有），
+  简单相加在当前语料下安全。**入口校验放 Task 5**，不在这里做
+- 变量形状 `(time, y, x)`、`float32`、站点数据 y=x=1
+
 **AU-Preston 是 0%**，所以它那条基准（264 条、`f_tref` 峰值
 311.964998337472 K）修完仍然成立 —— 继续当对照锚点。
 
@@ -762,7 +770,7 @@ fn two_sources_sum_into_one_slot_and_both_survive_in_the_output() {
         t.put_values(&[0.0, 1800.0, 3600.0], netcdf::Extents::All).unwrap();
         for (n, vals) in [("Rainf", [1.0, 0.0, 2.0]), ("Snowf", [0.0, 3.0, 0.5])] {
             let mut v = f.add_variable::<f64>(n, &["time"]).unwrap();
-            v.put_attribute("units", "mm/s").unwrap();
+            v.put_attribute("units", "kg/m2/s").unwrap();
             v.put_values(&vals, netcdf::Extents::All).unwrap();
         }
     }
@@ -772,7 +780,7 @@ fn two_sources_sum_into_one_slot_and_both_survive_in_the_output() {
         slots: vec![super::SlotPlan {
             index: 4,
             source_name: "Rainf".into(),
-            source_units: "mm/s".into(),
+            source_units: "kg/m2/s".into(),
             also_add: vec!["Snowf".into()],
         }],
     };
@@ -930,7 +938,7 @@ cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
 cargo build -p colm-forcing
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 ./target/debug/forcing-convert "$U/Forcing/FI-Kumpula"*.nc /tmp/fi-kumpula.nc \
-  --slot 4=Rainf:mm/s+Snowf
+  --slot 4=Rainf:kg/m2/s+Snowf
 ```
 
 （`--slot N=名字:单位+另一个名字` 的语法在 Task 5 里加；若那边还没做，
@@ -1010,10 +1018,17 @@ fn main() -> Result<()> {
                 let (name, units) = rest
                     .split_once(':')
                     .with_context(|| format!("--slot {spec:?} is missing :units"))?;
+                // `--slot 4=Rainf:kg/m2/s+Snowf` —— 加号后面是要合并进
+                // 同一个槽位的变量（见 Task 4b：不合并就丢掉全部降雪）。
+                let (units, extra) = match units.split_once('+') {
+                    Some((u, e)) => (u, e.split('+').map(str::to_string).collect()),
+                    None => (units, Vec::new()),
+                };
                 given.push(SlotPlan {
                     index: idx.parse().with_context(|| format!("{idx:?} is not a slot number"))?,
                     source_name: name.to_string(),
                     source_units: units.to_string(),
+                    also_add: extra,
                 });
             }
             other => bail!("unknown argument: {other}"),
@@ -1045,10 +1060,18 @@ fn main() -> Result<()> {
             continue;
         }
         let Some(name) = resolved.vname[i] else { continue };
+        // **用 `attribute_value` 而不是 `attribute`。** 后者的签名是
+        // `fn attribute<'a>(&'a self, ..) -> Option<Attribute<'a>>` —— 借用
+        // 那个 `Variable`。而这里 `v` 是**按值移进闭包**的，闭包一结束就
+        // drop，返回的 `Attribute` 就悬垂了，编译不过。
+        // `attribute_value` 返回 owned 的 `AttributeValue`，没有这个问题。
+        //
+        // （`convert.rs` 里 `t.attribute("units").and_then(..)` 那句是对的：
+        // 那里 `t` 是局部变量，活到语句结束。区别只在有没有移进闭包。）
         let units = f
             .variable(name)
-            .and_then(|v| v.attribute("units"))
-            .and_then(|a| a.value().ok())
+            .and_then(|v| v.attribute_value("units"))
+            .and_then(|r| r.ok())
             .and_then(|v| match v {
                 netcdf::AttributeValue::Str(s) => Some(s),
                 _ => None,
@@ -1058,6 +1081,8 @@ fn main() -> Result<()> {
             index: slot.index,
             source_name: name.to_string(),
             source_units: units,
+            // 自动匹配不做合成：合成要用户说清楚哪两个变量是同一个量。
+            also_add: Vec::new(),
         });
     }
 
@@ -1072,6 +1097,41 @@ fn main() -> Result<()> {
 
 `Cargo.toml` 里声明这个 bin（`forcing-nml` 是怎么声明的就怎么写；
 若那边靠 `src/bin/` 自动发现，这里也不用写）。
+
+- [ ] **Step 1b: 缺测值拦在入口**
+
+Urban-PLUMBER 的降水变量声明了 `_FillValue = -999`，虽然 21 个站实测
+零缺测，但**用户自己的数据很可能有**。而 -999 参与相加或单位换算之后
+仍然是个数，模型会拿着它跑完 —— 又一个「跑得完却给出错误结果」。
+
+在 `convert` 之前检查每个要用的变量：
+
+```rust
+    // **缺测拦在入口，不在转换里悄悄处理。** -999 乘个系数还是个数，
+    // 模型不会因此报错。这里报出来，用户才知道要先补数据。
+    for sp in &plan.slots {
+        for name in std::iter::once(&sp.source_name).chain(sp.also_add.iter()) {
+            let Some(v) = f.variable(name) else { continue };
+            let fill = match v.attribute_value("_FillValue").and_then(|r| r.ok()) {
+                Some(netcdf::AttributeValue::Float(x)) => f64::from(x),
+                Some(netcdf::AttributeValue::Double(x)) => x,
+                _ => continue,
+            };
+            let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
+            let n = vals.iter().filter(|x| (**x - fill).abs() < 1e-6).count();
+            if n > 0 {
+                bail!(
+                    "{name} has {n} missing value(s) (_FillValue = {fill}); \
+                     fill them before converting — a fill value survives unit \
+                     conversion as a plausible-looking number and the model will \
+                     run to completion with it"
+                );
+            }
+        }
+    }
+```
+
+**判据**：拿一个人为插入 -999 的文件试，必须报错并说出个数。
 
 - [ ] **Step 2: 手工验一次**
 
