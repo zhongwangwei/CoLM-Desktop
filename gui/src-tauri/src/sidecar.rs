@@ -575,7 +575,11 @@ pub async fn new_case(
     // 而约定失败的方式是**推出原始强迫场并静默用它** —— 用户以为跑的
     // 是自己转换的数据，实际跑的是原始的。
     met: Option<String>,
+    // 六页向导选出的运行时初值。只在新建时写；已有算例绝不能被启动向导覆盖。
+    fields: Vec<crate::config::FieldChange>,
 ) -> Result<String, String> {
+    let case_dir = out.clone();
+    let case_existed = PathBuf::from(&case_dir).exists();
     let mut args = vec![
         "new".to_string(),
         "--site".into(),
@@ -598,7 +602,14 @@ pub async fn new_case(
             }
         }
     }
-    capture(&args)
+    let output = capture(&args)?;
+    if let Err(error) = crate::config::apply_fields(&case_dir, &fields) {
+        if !case_existed {
+            let _ = std::fs::remove_dir_all(&case_dir);
+        }
+        return Err(error);
+    }
+    Ok(output)
 }
 
 /// 评估：把模型与观测配对，出指标与配对点。

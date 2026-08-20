@@ -162,6 +162,61 @@ fn a_batch_write_that_cannot_finish_writes_nothing() {
 }
 
 #[test]
+fn wizard_fields_are_written_together() {
+    let dir = batch("wizard", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[
+            FieldChange {
+                path: "DEF_USE_PFT".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_LCT".into(),
+                value: ".false.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_BGC".into(),
+                value: ".true.".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap();
+    let doc = colm_namelist::parse(&text).unwrap();
+    for (name, value) in [
+        ("DEF_USE_PFT", ".true."),
+        ("DEF_USE_LCT", ".false."),
+        ("DEF_USE_BGC", ".true."),
+    ] {
+        assert_eq!(doc.get(name).unwrap().to_string(), value, "{name}");
+    }
+}
+
+#[test]
+fn invalid_wizard_field_leaves_the_case_unchanged() {
+    let dir = batch("wizard-invalid", &[SAMPLE]).remove(0);
+    let path = std::path::Path::new(&dir).join("case.nml");
+    let before = std::fs::read_to_string(&path).unwrap();
+    let err = super::apply_fields(
+        &dir,
+        &[
+            FieldChange {
+                path: "DEF_USE_PFT".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_RangeCheck".into(),
+                value: "yes".into(),
+            },
+        ],
+    )
+    .unwrap_err();
+    assert!(err.contains("logical"), "{err}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+}
+
+#[test]
 fn fields_the_batch_disagrees_on_are_reported() {
     let dirs = batch("varies", &[NML_A, NML_B]);
     let v = super::varying_fields(dirs).unwrap();
@@ -253,6 +308,7 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
     // DEF_USE_BGC 本身的值决定的，不是这个函数管的编译期相关性）。
     assert!(relevant("DEF_URBAN_RUN", &default));
     assert!(relevant("DEF_USE_CN_INIT", &default));
+    assert!(relevant("DEF_USE_TRACER", &default));
     // DataAssimilation 仍然是真正的编译期宏（这组改造没有碰它），
     // 用来验证「宏决定相关性」这条机制本身还成立。
     assert!(!relevant("DEF_DA_TWS", &default));

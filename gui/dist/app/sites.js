@@ -8,7 +8,8 @@ import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
 import { renderSteps, setStatus } from './shell.js';
 import { updateCaseBatchButtons } from './batch.js';
-import { currentKernel, kernelIsUrban } from './kernel.js';
+import { currentKernel, urbanEnabled } from './kernel.js';
+import { wizardFields } from './domain.js';
 
 /** 算例根目录含空格，当场标出来。
  *
@@ -241,6 +242,7 @@ async function ensureCase(s) {
       // 只有「用自己的数据」才需要显式指定，而那时候约定会推出**原始**
       // 强迫场并静默用它。
       met: $('fmet').value.trim() || null,
+      fields: wizardFields(),
     });
     setStatus(`已为 ${s.name} 建好算例`);
     return cname;
@@ -310,13 +312,13 @@ export function renderSites(r = {}) {
   const noObs = state.sites.filter(s => !s.obs_file).length;
   renderMakeCase();
   const urban = state.sites.filter(s => s.urban).length;
-  const urbanKernel = kernelIsUrban();
+  const urbanRun = urbanEnabled();
   // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
   // 等于把一次可以立刻回答的问题推给用户。
   //
-  // 内核也报在这里：它是第 2 步定的，而到了这一页它决定哪些行能用 ——
-  // 让人回上一步去看自己选了什么，等于把上下文丢了。
-  const mismatch = state.sites.filter(x => x.urban !== urbanKernel).length;
+  // 内核名与向导的 URBAN 选择都报在这里：到了站点页，它们共同决定
+  // 哪些站点符合本次配置。
+  const mismatch = state.sites.filter(x => x.urban !== urbanRun).length;
   const kname = currentKernel()?.preset;
   $('sitesummary').textContent =
     `${state.sites.length} 个站点` +
@@ -359,11 +361,10 @@ export function renderSites(r = {}) {
     const c = state.cases.find(x => x.name === (s.caseName ?? s.name));
     if (c) tags.push(c.has_history ? '已跑过' : '已建算例');
     if (s.urban) tags.push('城市');
-    // **内核决定这个站点跑不跑得了。** 城市站要 URBANON 编进去的那一套，
-    // 非城市站用 urban 内核跑出来的东西也不对。标出来而不是藏起来 ——
-    // 过滤掉会让人以为「扫出来就这么多」。
-    if (s.urban && !urbanKernel) tags.push('要 urban 内核');
-    if (!s.urban && urbanKernel) tags.push('要非 urban 内核');
+    // 城市过程已是运行时开关。城市站与自然站是否匹配看向导选择，
+    // 不再从内核目录名猜。
+    if (s.urban && !urbanRun) tags.push('要在向导打开 URBAN');
+    if (!s.urban && urbanRun) tags.push('当前向导打开了 URBAN');
     if (!s.met_file) tags.push('无强迫场');
     if (!s.obs_file) tags.push('无观测');
     if (s.problem) tags.push('读不了');

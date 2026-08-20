@@ -8,7 +8,7 @@ import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
-import { kernelIsUrban } from './kernel.js';
+import { urbanEnabled } from './kernel.js';
 
 // 「选个目录」而是「选一套物理」—— 让它列出来，而不是让人记住路径。
 export async function refreshKernels() {
@@ -32,8 +32,7 @@ export async function refreshKernels() {
   await applyKernel();
 }
 
-/** 当前内核编不进去的字段。物理预设是编译期决定的，所以这份名单
- *  只随内核变，不随算例变。 */
+/** 当前内核真正没编进去的字段。向导控制的运行时开关不属于这份名单。 */
 async function refreshRelevance() {
   const dir = $('kernel').value;
   if (!dir) { state.irrelevant = new Set(); return; }
@@ -64,10 +63,9 @@ async function applyKernel() {
   $('kernelmeta').textContent = k
     ? `${k.generator_args}  ·  CoLM ${k.colm_git_sha}  ·  ${k.platform}`
     : '\u00a0';
-  // 城市栅格目录跟着内核走，不跟着站点走 —— 内核现在排在站点前面，
-  // 到选站点时这两个目录必须已经填好。
+  // 城市栅格目录跟着向导的 URBAN 开关走；到选站点时必须已经可见。
   const ud = $('urbandirs');
-  if (ud) ud.hidden = !kernelIsUrban();
+  if (ud) ud.hidden = !urbanEnabled();
   // 站点行上的「要 urban 内核」标记跟着内核变。不重画的话，切了内核
   // 站点列表还标着上一个内核的判断，而那正是最容易看错的一处。
   if (state.sites.length) renderSites();
@@ -77,16 +75,16 @@ async function applyKernel() {
   // state.sites 为空、没走 renderSites 那条分支时，这里才是唯一一次
   // 刷新左栏的机会，所以只在那时补一次。
   if (!state.sites.length) renderSteps();
-  // 自带的示例现在有两个：CN-Cng（自然）与 AU-Preston（城市）。两个都会装，
-  // 但按钮说出**当前内核下哪个用得上** —— 选了 urban 却看到「CN-Cng」，
-  // 人会以为自带的这份跟自己没关系。
+  // 自带的示例有自然站与城市站，按钮跟着向导选择说出本次该用哪个。
   const ex = $('use-example');
   if (ex) {
-    ex.textContent = kernelIsUrban()
+    ex.textContent = urbanEnabled()
       ? '用自带的示例站点（城市站 AU-Preston）'
       : '用自带的示例站点（CN-Cng）';
   }
 }
+
+addEventListener('colm:wizard', () => { applyKernel(); });
 
 $('run').onclick = async () => {
   if (!state.selected) return;

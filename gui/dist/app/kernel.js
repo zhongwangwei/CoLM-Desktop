@@ -1,4 +1,4 @@
-//! 「当前选的是哪个内核、它编进了什么」。
+//! 当前选中的内核，以及向导是否打开城市过程。
 //!
 //! **单独一个模块，不是为了整齐。** `runner.js`（切内核时更新界面）与
 //! `sites.js`（标出站点配不配得上内核）都要问同一个问题，而
@@ -17,7 +17,7 @@ export function currentKernel() {
   return state.kernels.find(k => k.dir === $('kernel')?.value) ?? null;
 }
 
-/** 当前内核编进了 URBAN 吗？城市站只有它跑得了。 */
-export function kernelIsUrban() {
-  return !!currentKernel()?.generator_args?.includes('URBANON');
+/** URBAN 已是运行时开关，站点匹配必须看向导配置而不是旧内核名。 */
+export function urbanEnabled() {
+  return !!state.wizard?.physics.urban;
 }

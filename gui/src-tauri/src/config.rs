@@ -3,7 +3,7 @@
 //! 这几个都不碰文件系统之外的东西，也都不需要 netcdf ——
 //! `colm-schema` 是一张生成的静态表，`colm-namelist` 是纯文本解析。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 把源码 namelist 字段放进用户看得懂的功能分组。
 ///
@@ -302,7 +302,6 @@ fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeS
         // `include/define.h` 里彻底消失——城市字段现在在每个内核下都
         // 「有意义」（能不能真的看到城市输出取决于 `DEF_URBAN_RUN`
         // 本身怎么设，那是运行时的事，不是这个函数管的编译期相关性）。
-        Some("示踪剂") => have.contains("TRACER"),
         Some("数据同化") => have.contains("DataAssimilation"),
         _ => true,
     }
@@ -501,6 +500,25 @@ pub fn varying_fields(dirs: Vec<String>) -> Result<Vec<String>, String> {
 pub struct BatchWrite {
     pub written: usize,
     pub text: String,
+}
+
+/// 向导在新算例里写入的一项运行时初值。
+#[derive(Debug, Deserialize)]
+pub struct FieldChange {
+    pub path: String,
+    pub value: String,
+}
+
+/// 一次校验并写入一组字段。任一值无效时，原文件保持不变。
+pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), String> {
+    let path = std::path::Path::new(dir).join("case.nml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
+    for field in fields {
+        let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
+        put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
+    }
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// 把一个字段写进这一批算例的每一份 case.nml。

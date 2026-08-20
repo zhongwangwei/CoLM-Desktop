@@ -18,10 +18,12 @@
 | 调试三件套 | `DEF_USE_CoLMDEBUG` / `RangeCheck` / `SrfdataDiag` | `acc596a` |
 | 土壤水力 | `DEF_USE_Campbell_SOIL_MODEL` | `80de820` |
 | 示踪物 | `DEF_USE_TRACER` | `1a60e9d` |
-| LULC 系 | `DEF_USE_LCT` / `PFT` / `PC` / `USGS` + BGC/CROP/URBAN | 进行中 |
+| LULC 系 | `DEF_USE_LCT` / `PFT` / `PC` + BGC/URBAN/LULCC | 已完成；USGS/CROP 仍是编译期 |
 
-**改造完成后一个二进制覆盖所有组合** —— 那时候向导才有东西可选。
-在此之前做这个界面，只会做出一个「选了也用不了」的页面。
+一个二进制已覆盖 IGBP/PFT/PC、BGC、URBAN、LULCC、土壤、TRACER 与调试组合；
+USGS 和 CROP 仍改变编译期数组尺寸，向导必须列出并置灰，不能伪装成可写开关。
+
+当前 GUI 已按下述约束实现六页；PC 虽有运行时开关，但在端到端算例通过前仍置灰。
 
 ---
 
