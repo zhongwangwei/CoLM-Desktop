@@ -19,7 +19,7 @@
 | | `SrfdataDiag` | 98 | 20 | ✅ 同上 |
 | **② 两套物理方案共存** | `Campbell_SOIL_MODEL` | 63 | 19 | 🔄 |
 | | `vanGenuchten_Mualem_SOIL_MODEL` | 115 | 27 | 🔄 |
-| | `extend_interception` | 4 | 1 | 🔄 |
+| | ~~`extend_interception`~~ | 4 | 1 | ❌ **不做** |
 | **③ 最大但独立** | `TRACER` | 342 | 69 | 待做 |
 | **④ 核心难点（必须一起）** | `LULC_IGBP` | 205 | 46 | 待做 |
 | | `LULC_IGBP_PC` | 159 | 40 | 待做 |
@@ -69,6 +69,18 @@ cargo test -p oracle --test forcing_convert -- --ignored
 
 **这条最容易被忽略。** 把 `#ifdef` 删掉、代码再也不执行，也能让
 ① ② 通过 —— 但功能没了。必须验证开关**双向**都work。
+
+## `extend_interception` 为什么不做
+
+改造第二组时顺手捎带了它，做到一半发现它跟土壤水力那两个**不是一类
+东西** —— `MOD_Namelist.F90` 那边的注释写着它「不能变成 body-level
+`IF`」，也就是说它影响的不只是「走哪条分支」。
+
+4 处的收益本来就小，而它需要的是另一种改法。**从范围里去掉**，
+保持编译期宏原样。
+
+将来真要动它，得先弄清楚那 4 处到底在什么位置上 ——
+那是一次独立的调查，不该混在别的组里顺手做。
 
 ## ① 试点的结果（`acc596a`）
 
