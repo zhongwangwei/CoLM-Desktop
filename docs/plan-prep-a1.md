@@ -235,8 +235,16 @@ Tested: cargo test -p colm-forcing --lib identity"
 
 #[test]
 fn celsius_becomes_kelvin() {
+    // **这里不能用 `assert_eq!` 比字面量。** `-40.0 + 273.15` 与直接写
+    // 下的字面量 `233.15` 差 1 ULP —— `273.15` 的最近 f64 比真值小，
+    // `233.15` 的最近 f64 比真值大，两边独立舍入的方向不一致，加法
+    // 补不平这个缝。`0.0` 与 `25.0` 那两个恰好逐位相同，所以这**不是**
+    // 「浮点都得用容差」，而是具体撞上了 -40 这个值。
     let v = super::convert_units("degC", "K", &[0.0, 25.0, -40.0]).unwrap();
-    assert_eq!(v, vec![273.15, 298.15, 233.15]);
+    let want = [273.15, 298.15, 233.15];
+    for (got, want) in v.iter().zip(want.iter()) {
+        assert!((got - want).abs() < 1e-9, "got {got}, want {want}");
+    }
 }
 
 #[test]
