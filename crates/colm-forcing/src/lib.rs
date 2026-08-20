@@ -13,6 +13,7 @@
 
 pub mod check;
 pub mod civil;
+pub mod convert;
 pub mod met;
 pub mod render;
 pub mod slots;
