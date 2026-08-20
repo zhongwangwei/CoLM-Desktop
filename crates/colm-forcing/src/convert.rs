@@ -137,10 +137,13 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
 /// CoLM 期望每个槽位用什么单位。
 fn canonical_units(index: usize) -> &'static str {
     match index {
-        1 => "K",        // 气温
-        2 => "kg/kg",    // 比湿
-        3 => "Pa",       // 气压
-        4 => "mm/s",     // 降水率
+        1 => "K",     // 气温
+        2 => "kg/kg", // 比湿
+        3 => "Pa",    // 气压
+        // **降水用 `kg/m2/s`，不是 `mm/s`。** PLUMBER2 与 Urban-PLUMBER
+        // 都是它，黄金回归那条直读路径上 CoLM 拿到的也是它。两者数值恒等，
+        // 所以标错不会报错 —— 只会让转换产物和直读的看起来是两种量。
+        4 => "kg/m2/s",  // 降水率
         5 | 6 => "m/s",  // 风
         7 | 8 => "W/m2", // 辐射
         _ => "",

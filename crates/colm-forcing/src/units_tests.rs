@@ -43,3 +43,24 @@ fn an_unknown_pair_is_refused_rather_than_silently_passed_through() {
         "报错要点名那个单位：{e}"
     );
 }
+
+#[test]
+fn a_rename_only_conversion_does_not_touch_the_numbers() {
+    // `kg/m2/s` 与 `mm/s` 是同一个量的两个名字（水的密度 1000 kg/m3，
+    // 1 kg/m2 就是 1 mm 水深）。**改名不该动数** —— 走 `* 1.0 + 0.0`
+    // 会把 `-0.0` 变成 `0.0`，而这条管道的地基是逐位复现。
+    let vals = [1.8337343205163141, 0.1 + 0.2, -0.0];
+    let v = super::convert_units("mm/s", "kg/m2/s", &vals).unwrap();
+    assert_eq!(v, vals.to_vec());
+    // `assert_eq!` 认为 -0.0 == 0.0，所以符号位要单独验。
+    assert!(v[2].is_sign_negative(), "-0.0 的符号位不该丢：{}", v[2]);
+}
+
+#[test]
+fn accumulated_precipitation_becomes_the_rate_colm_reads() {
+    // **目标是 `kg/m2/s` 而不是 `mm/s`** —— PLUMBER2 的 `Precip` 就是它
+    // （实测 90 个站全是），黄金回归那条直读路径上 CoLM 拿到的也是它。
+    // 转换产物标成别的，同一个模型就要认两套单位。
+    let v = super::convert_units("mm/hr", "kg/m2/s", &[3.6]).unwrap();
+    assert!((v[0] - 0.001).abs() < 1e-12, "got {}", v[0]);
+}

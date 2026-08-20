@@ -20,7 +20,17 @@ const TABLE: &[(&str, &str, f64, f64)] = &[
     ("hPa", "Pa", 100.0, 0.0),
     ("mb", "Pa", 100.0, 0.0),
     ("kPa", "Pa", 1000.0, 0.0),
-    // 降水：CoLM 要率（mm/s，等价于 kg/m2/s）
+    // 降水：**CoLM 用 `kg/m2/s`**。实测 PLUMBER2 的 90 个站与
+    // Urban-PLUMBER 的 21 个站全是它，黄金回归那条直读路径上 CoLM
+    // 拿到的也是它。数值上等同 `mm/s`（水的密度 1000 kg/m3，
+    // 1 kg/m2 就是 1 mm 水深），但**单位属性要跟直读那条路一致** ——
+    // CoLM 不检查单位，标错不报错，只会让人以为转换产物和直读的是两种量。
+    ("mm/hr", "kg/m2/s", 1.0 / 3600.0, 0.0),
+    ("mm/h", "kg/m2/s", 1.0 / 3600.0, 0.0),
+    ("mm/day", "kg/m2/s", 1.0 / 86400.0, 0.0),
+    ("mm/s", "kg/m2/s", 1.0, 0.0),
+    // 以 `mm/s` 为目标的几条留着：用户可能明确要一份 mm/s 的产物。
+    // 表是精确匹配的，多几条不冲突。
     ("mm/hr", "mm/s", 1.0 / 3600.0, 0.0),
     ("mm/h", "mm/s", 1.0 / 3600.0, 0.0),
     ("mm/day", "mm/s", 1.0 / 86400.0, 0.0),
@@ -37,6 +47,10 @@ pub fn convert_units(from: &str, to: &str, values: &[f64]) -> Result<Vec<f64>> {
         return Ok(values.to_vec());
     }
     match TABLE.iter().find(|(f, t, _, _)| *f == from && *t == to) {
+        // **恒等换算走原样返回。** `kg/m2/s` 与 `mm/s` 是同一个量的两个
+        // 名字，scale=1 offset=0。走乘加会把 `-0.0` 变成 `0.0` ——
+        // 名字变了，数不能变。
+        Some((_, _, s, o)) if *s == 1.0 && *o == 0.0 => Ok(values.to_vec()),
         Some((_, _, scale, offset)) => Ok(values.iter().map(|v| v * scale + offset).collect()),
         None => bail!(
             "no known conversion from {from:?} to {to:?}; \
