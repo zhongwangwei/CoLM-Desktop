@@ -498,6 +498,22 @@ for (const b of document.querySelectorAll('button.pick'))   // boot() 里跑一�
 （`recent.js` 里补了 `dispatchEvent`）。**「做了动作，但依赖它的那
 一半没跑」—— 这个形状在这个代码库里出现过三次了。**
 
+### 风的两种形式（实测，影响界面行数）
+
+```
+PLUMBER2      90 个站  只有 Wind             → 第 5 槽空，第 6 槽 = Wind
+Urban-PLUMBER 21 个站  只有 Wind_E + Wind_N  → 第 5 槽 = Wind_E，第 6 槽 = Wind_N
+```
+
+两种形式都被现有槽位定义覆盖 —— 第 6 槽的 `meaning` 写的就是
+`"northward or scalar wind"`。
+
+**界面要画 8 行，不能假设第 5 槽总是空的。** 一开始拿 CN-Cng 试会
+看到 7 行（第 5 槽 `guessed: null`），照那个写就会在城市站上漏掉
+`Wind_E`。
+
+第 5 槽 `optional: true` 的含义是「空着也能跑」，不是「总是空的」。
+
 ### CSS class 约定（已核实）
 
 纯静态前端**没有类型检查器**，class 名写错不报错，只是样式不对。
