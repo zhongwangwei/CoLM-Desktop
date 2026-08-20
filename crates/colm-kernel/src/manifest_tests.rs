@@ -22,7 +22,15 @@ pub const SAMPLE: &str = r#"{
 }"#;
 
 fn workdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("colm-kernel-manifest-{name}"));
+    // **目录名要带进程号。** 同一台机器上并行跑两个 `cargo test`
+    // （两个仓库、或者一个会话在验证另一个会话在改）会共用 `/tmp`，
+    // 固定名字就成了两个进程抢同一个目录：一个 `remove_dir_all`，
+    // 另一个正在写，报出来是 `Os { code: 22, kind: InvalidInput }` ——
+    // 看着像本模块的 bug，其实是隔壁进程删了你的目录。
+    let d = std::env::temp_dir().join(format!(
+        "colm-kernel-manifest-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("create workdir");
     d
