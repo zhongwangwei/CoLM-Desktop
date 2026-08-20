@@ -54,6 +54,14 @@ pub struct SlotPlan {
     pub source_name: String,
     /// 源文件里的单位（`units` 属性的原文）。
     pub source_units: String,
+    /// 还要**加到这个槽位上**的变量（同单位）。
+    ///
+    /// 为降水而设：Urban-PLUMBER 把降水分成 `Rainf` 与 `Snowf`，
+    /// 而槽位机制一个槽位只能指向一个变量名。不合并就丢掉全部降雪 ——
+    /// 实测 FI-Kumpula 少 24.7%，而模型照样跑得完。
+    ///
+    /// **合并之后源变量仍然原样保留在产物里**（见 `convert` 末尾那段）。
+    pub also_add: Vec<String>,
 }
 
 /// 整份转换方案。
@@ -109,9 +117,34 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let v = fin
             .variable(&sp.source_name)
             .with_context(|| format!("{} has no variable {}", src.display(), sp.source_name))?;
-        let raw: Vec<f64> = v
+        let mut raw: Vec<f64> = v
             .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read {}", sp.source_name))?;
+
+        // 多源合成：同单位相加。
+        for extra in &sp.also_add {
+            let e = fin.variable(extra).with_context(|| {
+                format!(
+                    "{} has no variable {} (named in also_add)",
+                    src.display(),
+                    extra
+                )
+            })?;
+            let add: Vec<f64> = e.get_values(netcdf::Extents::All)?;
+            if add.len() != raw.len() {
+                anyhow::bail!(
+                    "{} has {} steps but {} has {} — cannot add them",
+                    sp.source_name,
+                    raw.len(),
+                    extra,
+                    add.len()
+                );
+            }
+            for (a, b) in raw.iter_mut().zip(add.iter()) {
+                *a += *b;
+            }
+        }
+
         let want_units = canonical_units(slot.index);
         let vals = convert_units(&sp.source_units, want_units, &raw)?;
 
@@ -121,14 +154,49 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             .add_variable::<f64>(canonical, &dim_refs)
             .with_context(|| format!("cannot add variable {canonical}"))?;
         out.put_attribute("units", want_units)?;
-        out.put_attribute(
-            "source",
+        let note = if sp.also_add.is_empty() {
             format!(
                 "converted from {:?} ({}) by colm-forcing",
                 sp.source_name, sp.source_units
             )
-            .as_str(),
-        )?;
+        } else {
+            format!(
+                "sum of {:?} and {:?} ({}), all kept in this file; \
+                 CoLM re-derives phase by wet-bulb temperature (MOD_RainSnowTemp.F90)",
+                sp.source_name, sp.also_add, sp.source_units
+            )
+        };
+        out.put_attribute("source", note.as_str())?;
+        out.put_values(&vals, netcdf::Extents::All)?;
+    }
+
+    // **源变量原样保留。** 转换可以增加信息，不能减少信息 ——
+    // 观测给的相态是实测事实，而 CoLM 判出来的是参数化推断，
+    // 合成之后把原变量丢掉等于用后者永久换掉前者。
+    let mut kept: Vec<String> = Vec::new();
+    for sp in &plan.slots {
+        if sp.also_add.is_empty() {
+            continue;
+        }
+        kept.push(sp.source_name.clone());
+        kept.extend(sp.also_add.iter().cloned());
+    }
+    for name in kept {
+        if fout.variable(&name).is_some() {
+            continue;
+        }
+        let Some(v) = fin.variable(&name) else {
+            continue;
+        };
+        let dims: Vec<String> = v.dimensions().iter().map(|d| d.name()).collect();
+        let dim_refs: Vec<&str> = dims.iter().map(|s| s.as_str()).collect();
+        let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
+        let mut out = fout.add_variable::<f64>(&name, &dim_refs)?;
+        for a in v.attributes() {
+            if let Ok(netcdf::AttributeValue::Str(s)) = a.value() {
+                out.put_attribute(a.name(), s.as_str())?;
+            }
+        }
         out.put_values(&vals, netcdf::Extents::All)?;
     }
     Ok(())

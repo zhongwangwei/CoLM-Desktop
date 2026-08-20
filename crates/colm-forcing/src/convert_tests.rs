@@ -73,6 +73,7 @@ fn a_renamed_and_rescaled_variable_lands_in_the_slot_with_the_canonical_name() {
             index: 1,
             source_name: "TA_F".into(),
             source_units: "degC".into(),
+            also_add: Vec::new(),
         }],
     };
     super::convert(&p, &dst, &plan).expect("convert");
@@ -98,4 +99,76 @@ fn a_renamed_and_rescaled_variable_lands_in_the_slot_with_the_canonical_name() {
     };
     assert!(note.contains("TA_F"), "要说出原变量名：{note}");
     assert!(note.contains("degC"), "要说出原单位：{note}");
+}
+
+#[test]
+fn two_sources_sum_into_one_slot_and_both_survive_in_the_output() {
+    let dir = std::env::temp_dir().join("colm-convert-sum");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("split_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 3).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0, 3600.0], netcdf::Extents::All)
+            .unwrap();
+        for (n, vals) in [("Rainf", [1.0, 0.0, 2.0]), ("Snowf", [0.0, 3.0, 0.5])] {
+            let mut v = f.add_variable::<f64>(n, &["time"]).unwrap();
+            v.put_attribute("units", "kg/m2/s").unwrap();
+            v.put_values(&vals, netcdf::Extents::All).unwrap();
+        }
+    }
+
+    let dst = dir.join("out_Met.nc");
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 4,
+            source_name: "Rainf".into(),
+            source_units: "kg/m2/s".into(),
+            also_add: vec!["Snowf".into()],
+        }],
+    };
+    super::convert(&p, &dst, &plan).expect("convert");
+
+    let f = netcdf::open(&dst).unwrap();
+
+    // 合成的总降水进第 4 槽的规范名。1+0、0+3、2+0.5 都是二进制精确的，
+    // 所以这里比得起字面量。
+    let precip: Vec<f64> = f
+        .variable("Precip")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(precip, vec![1.0, 3.0, 2.5], "总降水应当是两者之和");
+
+    // **两个源变量都要还在** —— 转换可以增加信息，不能减少信息
+    let rain: Vec<f64> = f
+        .variable("Rainf")
+        .expect("Rainf 必须保留在产物里")
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    let snow: Vec<f64> = f
+        .variable("Snowf")
+        .expect("Snowf 必须保留在产物里")
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(rain, vec![1.0, 0.0, 2.0]);
+    assert_eq!(snow, vec![0.0, 3.0, 0.5]);
+
+    // source 属性要说出它是合成的，以及 CoLM 会重新判相态
+    let note = match f
+        .variable("Precip")
+        .unwrap()
+        .attribute("source")
+        .and_then(|a| a.value().ok())
+    {
+        Some(netcdf::AttributeValue::Str(s)) => s,
+        other => panic!("Precip 应当带 source 属性，得到 {other:?}"),
+    };
+    assert!(note.contains("Rainf"), "要说出来源：{note}");
+    assert!(note.contains("Snowf"), "要说出来源：{note}");
 }
