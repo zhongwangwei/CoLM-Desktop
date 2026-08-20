@@ -12,7 +12,15 @@ import { $ } from './ui.js';
 // 的选择结果写进 `recent.json`，但**恢复只认这张表** —— 漏了的字段
 // 表现是「选过的东西下次打开没了」，而旁边的字段都还在，看着像随机失灵。
 // `fsrc`（前处理页的强迫场文件）就漏过一次，真机验收才发现。
-const REMEMBERED = ['sitedir', 'root', 'kernel', 'obs', 'fsrc', 'fmet'];
+const REMEMBERED = [
+  'sitedir', 'root', 'kernel', 'obs',
+  'fsrc', 'fmet',        // 前处理：强迫场的源文件与建算例时指定的产物
+  'soutdir', 'srawdata', // 前处理：站点属性的产物目录与 rawdata
+  // **经纬度不记。** 那是每个站点各不相同的东西，恢复上一个站点的坐标
+  // 只会让人在没注意的情况下建出一份位置错的站点文件 —— 而位置错的
+  // 站点文件跑得完，结果全错。目录不同：它是「我把东西放哪」，
+  // 换个站点也不会变。
+];
 
 export async function restoreRecent() {
   let all = {};
