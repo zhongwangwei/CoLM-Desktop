@@ -676,6 +676,57 @@ cd gui/src-tauri && cargo build && ./target/debug/colm-desktop-gui > /tmp/gui.lo
 
 ---
 
+## Task 5: 转出来的文件要能被指定，否则它没人用
+
+**这条是 Task 3b 验收期间查出来的，不在原计划里，但没有它 A2 交付的
+是「一份文件」而不是「一条路」。**
+
+### 缺口
+
+`colm-cli new --site <site.nc>` 靠**命名约定**找强迫场
+（`crates/colm-cli/src/main.rs` 的 `sibling()`）：
+
+```
+site:    <root>/Sitedata/<stem><后缀>
+forcing: <root>/Forcing/<stem><后缀>      ← 兄弟目录，文件名必须匹配
+```
+
+只认两套（`LAYOUTS`）：PLUMBER2 的 `_site.nc`/`_Met.nc`，
+Urban-PLUMBER 的 `_site_v1.nc`/`_metforcing_v1.nc`。
+
+**转换产物在 `~/CoLM-forcing/`，推导不到。** 而且不是报错 ——
+`sibling()` 会推出**原始强迫场**的路径并用它：
+
+```
+站点文件  Urban-PLUMBER/Sitedata/FI-Kumpula_site_v1.nc
+推导出的  Urban-PLUMBER/Forcing/FI-Kumpula_metforcing_v1.nc   ← 原始
+转换产物  ~/CoLM-forcing/FI-Kumpula_metforcing_v1.nc          ← 静默忽略
+```
+
+**用户以为跑的是自己转换的数据，实际跑的是原始的。**
+又一个「跑得完却给出错误结果」。
+
+### 做什么
+
+给 `colm-cli new` 加 `--met <path>`：给了就用它，不给才走命名约定。
+
+**显式优于约定。** 「用自己的数据」这件事本来就不该被两套命名约定
+绑住 —— 那两套是 PLUMBER2 与 Urban-PLUMBER 的内部约定，
+用户没有理由遵守它们。
+
+有独立价值，不依赖阶段 B：**同一个站点、自己处理过的强迫场**
+是个真实场景，用户已经有站点文件时 `--met` 就够了。
+
+界面上：转换完成后的「下一步」要说清楚这个文件怎么用，
+而不只是「回站点页重新扫描」—— 站点页扫的是 `Sitedata/`，
+扫不到 `~/CoLM-forcing/`。
+
+判据：拿转换产物 + 原始站点文件建算例，跑出来的 history 与
+**用原始强迫场跑的**不同（因为降水合并了 `Snowf`），
+且 `forcing.nml` 里的 `HEIGHT_*` 是手填的那个值而不是 `NaN`。
+
+---
+
 ## 附：这份计划**不做**什么
 
 - **不做表格导入**（阶段 C）
