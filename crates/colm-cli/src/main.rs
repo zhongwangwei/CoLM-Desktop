@@ -33,7 +33,7 @@ usage:
   colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N]
-                   [--rawdata <dir>]
+                   [--rawdata <dir>] [--json 1]
                    # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
                    # 标称假设。--landtype 不给就不写，让 CoLM 回落
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
@@ -295,6 +295,27 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     let filled = colm_srfdata::site::fill(&skel, &out, rawdata.as_deref().map(Path::new), None);
     let _ = std::fs::remove_file(&skel);
     let r = filled?;
+
+    // `--json 1` 给界面用：三个来源列表要能逐字段摆出来，而人读的那几行
+    // 是拼给终端的。**别让界面去解析人读的文本** —— 那是 `scan` 与
+    // `metrics` 早就立下的做法（两边各写各的结构体，靠一条拿真输出跑的
+    // 测试盯着字段不脱钩）。
+    if o.get("--json").is_some() {
+        let j = serde_json::json!({
+            "path": out.display().to_string(),
+            "texture": r.texture,
+            "texture_name": r.texture_name,
+            "bvic": r.bvic,
+            "sand_silt_clay": [r.fine_earth.0, r.fine_earth.1, r.fine_earth.2],
+            // 地类没给就没写 —— 界面上要说清楚这不是遗漏，是有意的。
+            "landtype": landtype,
+            "from_site": r.from_site,
+            "from_raster": r.from_raster,
+            "from_default": r.from_default,
+        });
+        println!("{}", serde_json::to_string_pretty(&j)?);
+        return Ok(out);
+    }
 
     println!(
         "soil texture: {} ({}), BVIC {} from sand {:.2}% / silt {:.2}% / clay {:.2}%",
