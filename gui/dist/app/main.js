@@ -16,16 +16,12 @@ import { renderCases, checkRootSpace } from './sites.js';
 import './forcing.js';
 import './sitedata.js';
 
-window.__probe && window.__probe('main.js 顶层到达，import 链全部解析成功');
 initShell();
-window.__probe && window.__probe('initShell 返回');
 
 // 门先立起来，后台初始化在它后面照常跑 —— 用户点完站点时界面已经就绪。
 // **门不拦后台的错误**：list_kernels 失败、示例数据装不上，照常落状态栏，
 // 选完站点就看得见。把错误藏在门后面等于延迟暴露。
-window.__probe && window.__probe('即将调用 showDomainGate');
 showDomainGate();
-window.__probe && window.__probe('showDomainGate 返回，domaingate.hidden=' + document.getElementById('domaingate').hidden);
 
 if (!hasBackend) {
   // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是渲染成一片空白。
@@ -60,13 +56,4 @@ async function boot() {
   } catch (e) { setStatus('后端出错：' + e); }
   await watchRun();
   addEventListener('colm:mode', () => { if (state.selected) renderFields(); });
-}
-
-// 门被关掉是 domain.js:261 的 finish() 唯一该做的事。如果日志显示
-// hidden 在没人点按钮的情况下变回 true，说明还有第二个地方在动它。
-const gateEl = document.getElementById('domaingate');
-if (gateEl) {
-  new MutationObserver(() => {
-    window.__probe && window.__probe('domaingate.hidden 变为 ' + gateEl.hidden);
-  }).observe(gateEl, { attributes: true, attributeFilter: ['hidden'] });
 }

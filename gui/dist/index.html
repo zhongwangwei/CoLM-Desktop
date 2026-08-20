@@ -405,7 +405,7 @@
     var invoke = iv();
     if (invoke) { clearInterval(t); while (q.length) invoke('probe_log', { msg: q.shift() }); }
   }, 50);
-  send('HTML-PARSED fp=A1');
+  send('HTML-PARSED');
 })();
 </script>
 <script type="module" src="app/main.js"></script>
