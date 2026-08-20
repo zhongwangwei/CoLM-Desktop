@@ -17,6 +17,7 @@ pub mod raster;
 pub mod site;
 pub mod texture;
 pub mod urban_extra;
+pub mod urban_runtime;
 pub mod urban_soil;
 
 pub use albedo::{albedo, SoilAlbedo};

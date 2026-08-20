@@ -22,7 +22,7 @@ mod fingerprint;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use colm_case::{fields, minimal::required, render, CaseSpec, Dirs, Layout, Spinup, Window};
 use colm_kernel::outcome::Stage;
 use colm_kernel::Kernel;
@@ -34,7 +34,8 @@ usage:
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--spinup-years N] [--spinup-repeat N]   (默认 1 年 x 10 遍)
                    [--rawdata <dir>] [--runtime <dir>]
-                   # 城市站点由文件形状自动识别，那时 --rawdata/--runtime 必填
+                   # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
+                   # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1]
                    # --force 忽略指纹，三段全部重跑
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
@@ -248,8 +249,9 @@ struct SiteInfo {
     met_file: Option<String>,
     /// 观测文件。没有就不能自动评估，这一条决定评估按钮的死活。
     obs_file: Option<String>,
-    /// 城市形状：站点文件不带 `IGBP_classification`。城市算例必须给
-    /// `--rawdata` / `--runtime`，界面据此决定问不问。
+    /// 城市形状：站点文件不带 `IGBP_classification`。预抽表盖住的 21 个
+    /// Urban-PLUMBER 站不需要 `--rawdata`/`--runtime`；表外的城市站点仍然
+    /// 要 `--rawdata`。界面据此决定问不问。
     urban: bool,
     lon: f64,
     lat: f64,
@@ -388,8 +390,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 没有 `--urban` 开关：拿一个草地站强行跑城市只会在 NCAR 属性表上越界，
     // 而一个城市站不跑城市模块也没有意义。判据完全交给站点文件的形状。
     let urban = !looks_like_plumber2;
-    // 这个城市站点的土壤剖面在不在预抽表里 —— 决定 `--rawdata` 缺席时该说什么。
-    let mut urban_soil_covered = false;
+    // 这个城市站点在不在两张预抽表里 —— 决定 `--rawdata` 缺席时该说什么。
+    let mut urban_covered = false;
     if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
@@ -428,7 +430,21 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
                  nothing written, so CoLM reads the global soil/ rasters"
             ),
         }
-        urban_soil_covered = rep.soil_site.is_some();
+        match rep.extra_site {
+            Some(name) => println!(
+                "  urban: {} more variable(s) from the built-in {name} row (LCZ class, LUCY \
+                 region, soil albedo, lake depth, topography, {} years of tree LAI/SAI) — \
+                 the urban_type/ and urban_lai_500m/ tiles are not read",
+                rep.extra_vars.len(),
+                colm_srfdata::urban_extra::LAI_YEARS.len()
+            ),
+            None => println!(
+                "  urban: this site is not in the pre-extracted table (21 Urban-PLUMBER sites); \
+                 nothing written, so CoLM reads the LCZ, urban tree LAI, lake depth, soil \
+                 albedo and topography rasters"
+            ),
+        }
+        urban_covered = rep.needs_no_rawdata();
     }
 
     // 2. 强迫场 namelist —— 不转换数据，CoLM 直接读 PLUMBER2 的 Met 文件
@@ -523,41 +539,40 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 该有的都写进 site.nc 了 —— 所以那里故意指向一个不存在的目录：跑通了就
     // **证明**没读。
     //
-    // **城市算例还做不到。** 预抽表已经把最大的一块搬走了（`soil/` 的 24 个
-    // 栅格，实测 122 GB），但 mksrfdata 还有四处会去开栅格，而且**开不到就
-    // `CoLM_stop`，不是警告**（`nccheck` → `CoLM_stop`，`MOD_NetCDFSerial.F90:146`）：
+    // **城市算例现在也一样。** 两张预抽表合起来盖住了 mksrfdata 会去开的
+    // 每一处（`soil/` 的 24 个栅格实测 122 GB，加上 `urban_type/`、
+    // `urban_lai_500m/`、`lake_depth.nc`、`soil_brightness.nc`、
+    // `topography.nc`、`urban/LUCY_regionid.nc`），而 `DEF_dir_runtime` 下的
+    // `urban/LUCY_rawdata.nc` 是随仓库发、由 `colm-cli` 铺进算例目录的。
     //
-    //   * `urban_type/` 的 LCZ 分类 —— 实测 21 个站点分布在 1/2/3/5/6/8/12
-    //     七个类别上，assume 一个值会把 14 个站的城市形态整个换掉；
-    //   * `urban_lai_500m/` 的城市树 LAI/SAI —— 站点文件里没有，也没有预抽表；
-    //   * `lake_depth.nc`（49 MB）与 `soil_brightness.nc`（28 MB）；
-    //   * `topography.nc` 的 `elvstd` / `sloperatio`。
-    //
-    // 而 `DEF_dir_runtime` 下的 `urban/LUCY_rawdata.nc` 是 mkinidata 无条件要
-    // 的（`MOD_UrbanReadin.F90:193`），连回落分支都没有。
-    //
-    // 所以这两个目录对城市算例仍然必填。要解开，缺的是第二张「量出来的」表 ——
-    // 不是给没量过的站点编一个默认值。
+    // 剩下的门槛只有一条：**站点在不在那 21 个里**。不在就照旧要 `--rawdata`，
+    // 而且错误信息要说清楚是这个原因 —— 不是给没量过的站点编一个默认值。
     let dirs = if urban {
-        let raw = o.get("--rawdata").ok_or_else(|| {
-            let soil = if urban_soil_covered {
-                "this site's soil profile came from the built-in table, but the LCZ class, \
-                 urban tree LAI, lake depth, soil albedo and topography are still read from \
-                 the global grid"
-            } else {
-                "this site is not in the pre-extracted soil table (21 Urban-PLUMBER sites), \
-                 so the 122 GB soil/ rasters are needed on top of the LCZ class, urban tree \
-                 LAI, lake depth, soil albedo and topography"
-            };
-            anyhow!("an urban case needs --rawdata: {soil}")
-        })?;
-        let run = o.get("--runtime").ok_or_else(|| {
-            anyhow!(
-                "an urban case needs --runtime: mkinidata reads \
-                 <runtime>/urban/LUCY_rawdata.nc unconditionally (MOD_UrbanReadin.F90:193)"
-            )
-        })?;
-        (slash(Path::new(&raw)), slash(Path::new(&run)))
+        let raw = match o.get("--rawdata") {
+            // 给了就用。表外的站点靠它，表内的站点给了也无妨（site.nc
+            // 里有的量 CoLM 不会再去开栅格）。
+            Some(r) => slash(Path::new(&r)),
+            // 没给而两张表都命中 —— 指向一个不存在的目录，跑通了就**证明**
+            // 一个栅格都没读。与水热算例用的是同一招。
+            None if urban_covered => text(&out.join("rawdata_unused/")),
+            None => bail!(
+                "an urban case for a site outside the pre-extracted tables needs --rawdata: \
+                 {name} is not one of the 21 Urban-PLUMBER sites, so CoLM will read the \
+                 global soil/, urban_type/ and urban_lai_500m/ grids for it"
+            ),
+        };
+        let run = match o.get("--runtime") {
+            Some(r) => slash(Path::new(&r)),
+            // 没给就自带一份。`LUCY_rawdata.nc` 是张 37 KB 的全局区域参数表，
+            // 与站点无关，所以表内表外都能这样兜住。
+            None => {
+                let dir = layout.runtime();
+                let f = colm_srfdata::urban_runtime::stage(&dir)?;
+                println!("  runtime: {} written from the built-in copy", f.display());
+                slash(&dir)
+            }
+        };
+        (raw, run)
     } else {
         (
             text(&out.join("rawdata_unused/")),

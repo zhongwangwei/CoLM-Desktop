@@ -10,10 +10,11 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::albedo::albedo;
+use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
 use crate::raster::{point_f64, point_i32};
 use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
+use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
 
 /// CoLM 无条件读取而 PLUMBER2 站点文件不提供的 12 个字段。
@@ -398,7 +399,7 @@ mod site_tests;
 /// 的变量集完全不同（23 个城市形态学量，没有土壤剖面也没有
 /// `IGBP_classification`），推导无从谈起 —— 这里补的两样东西都不靠推导。
 ///
-/// 做两件事：
+/// 做三件事：
 ///
 /// 1. 把 `ground_height` 抄成 `elevation`。CoLM 的 URBAN 路径在站点文件没有
 ///    `elevation` 时回落到 `<rawdata>/elevation.nc`，那是个 **7 GB** 的全球
@@ -413,17 +414,27 @@ mod site_tests;
 ///    `soil_texture` 藏在 `IF (DEF_Runoff_SCHEME == 3)` 里，而 3 是 CoLM 的
 ///    默认值，所以它一样要写。
 ///
-/// **查不到就一个字都不写。** 表只覆盖 Urban-PLUMBER 那 21 个站；表外的站点
-/// 让 CoLM 照旧回落栅格。土壤剖面不像 `elvstd`/`sloperatio` 那样「模块默认值
-/// 恰好没代价」—— 编一个剖面出来，结果会错得看不出来。
+/// 3. 把 [`urban_extra`] 那张表里剩下的六处写进去：`LCZ_DOM`、`LUCY_ID`、
+///    四个土壤反照率、`lakedepth`、`elvstd`/`sloperatio`，以及 23 年 x 12 月的
+///    `TREE_LAI`/`TREE_SAI`（连同它们的 `LAI_year`）。这一批省掉的是
+///    `urban_type/` 与 `urban_lai_500m/` 的 5x5 瓦片（后者实测 15 块 x 23 年
+///    ≈ 7 GB）加三个全球栅格。写完之后城市算例**一个 rawdata 文件都不读**。
 ///
-/// 这两样都只在站点文件本身没有那个变量时才写：站点自己说的话优先。
+/// **查不到就一个字都不写。** 表只覆盖 Urban-PLUMBER 那 21 个站；表外的站点
+/// 让 CoLM 照旧回落栅格。这些量一个都不像「模块默认值恰好没代价」——
+/// `LCZ_DOM` 编一个 6，21 个站里有 15 个的城市形态会被换掉；`lakedepth`
+/// 实测全是 0.0 而模块默认值是 1.0。编出来的结果会错得看不出来。
+///
+/// 三样都只在站点文件本身没有那个变量时才写：站点自己说的话优先。
+/// **实测 `US-Minneapolis1`/`2` 的站点文件自带 `LCZ_DOM = 6`**，而栅格给 12 ——
+/// 覆盖它是错的。
 pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
     std::fs::copy(src, dst)
         .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
 
     let loc = location(dst)?;
     let soil = urban_soil::lookup(loc.lon, loc.lat);
+    let extra = urban_extra::lookup(loc.lon, loc.lat);
 
     let (has_elevation, ground_height) = {
         let f = netcdf::open(dst)?;
@@ -439,10 +450,12 @@ pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
         elevation: None,
         soil_site: soil.map(|s| s.site),
         soil_vars: Vec::new(),
+        extra_site: extra.map(|s| s.site),
+        extra_vars: Vec::new(),
     };
     // 没有东西要写就不开写句柄 —— `netcdf::append` 会重排文件头，而
     // 「什么都没补」应当意味着输出与输入逐字节相同。
-    if elevation.is_none() && soil.is_none() {
+    if elevation.is_none() && soil.is_none() && extra.is_none() {
         return Ok(report);
     }
 
@@ -460,7 +473,130 @@ pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
     if let Some(s) = soil {
         report.soil_vars = put_urban_soil(&mut f, s)?;
     }
+    if let Some(s) = extra {
+        report.extra_vars = put_urban_extra(&mut f, s)?;
+    }
     Ok(report)
+}
+
+/// 把 [`urban_extra`] 里一个站点的六批点值写进 site.nc，返回写下的变量名。
+///
+/// **站点文件自己有的一律不动。** 实测 `US-Minneapolis1`/`2` 自带
+/// `LCZ_DOM = 6`（栅格给 12），覆盖它会把这两个站的城市形态换掉。
+///
+/// 四个土壤反照率**必须一起写或一起不写**：CoLM 的判据是四个都存在
+/// （`MOD_SingleSrfdata.F90:2062-2066` 的四个 `.and.`），少一个就四个全部
+/// 回落到 `soil_brightness.nc`，那时写下的另外三个反而变成了噪音。
+fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String>> {
+    // 「量出来的」。措辞与 `fill` 里那些 `synthesized:` 明确分开。
+    const RASTER: &str = "extracted from CoLM 2024 rawdata";
+    let mut written = Vec::new();
+
+    // --- 局地气候区。整型：CoLM 按 `ncio_read_serial` 的 int32 版读它。 ---
+    if f.variable("LCZ_DOM").is_none() {
+        put_int(
+            f,
+            "LCZ_DOM",
+            s.lcz_dom,
+            &format!("{RASTER} urban_type/*.URBTYP.nc at this site"),
+        )?;
+        written.push("LCZ_DOM".to_string());
+    }
+
+    // --- LUCY 区号。实型：CoLM 用 `read_point_var_2d_real8` 读那个 int 栅格，
+    //     `SITE_lucyid` 本身就是 `real(r8)`。 ---
+    if f.variable("LUCY_ID").is_none() {
+        put_scalar(
+            f,
+            "LUCY_ID",
+            s.lucy_id,
+            &format!("{RASTER} urban/LUCY_regionid.nc at this site (colm_5km grid)"),
+        )?;
+        written.push("LUCY_ID".to_string());
+    }
+
+    // --- 四个土壤反照率。量出来的是**颜色档**，四个数是 CoLM 自己的常量表
+    //     （`mkinidata/MOD_SoilColorRefl.F90`）在这个档位上的取值。 ---
+    let albedos = [
+        "soil_s_v_alb",
+        "soil_d_v_alb",
+        "soil_s_n_alb",
+        "soil_d_n_alb",
+    ];
+    if albedos.iter().all(|n| f.variable(n).is_none()) {
+        // 地类在 URBAN 路径下被强制成 13，既不是水体也不是冰盖，所以
+        // 这张表一定查得到 —— 查不到说明表或档位变了，那要看得见。
+        let a = albedo(s.soil_colour, IGBP_URBAN).with_context(|| {
+            format!(
+                "no soil albedo for colour class {} at {}; the pre-extracted table and \
+                 MOD_SoilColorRefl.F90 have drifted apart",
+                s.soil_colour, s.site
+            )
+        })?;
+        let note = format!(
+            "{RASTER} soil_brightness.nc at this site: colour class {} -> \
+             MOD_SoilColorRefl.F90 table",
+            s.soil_colour
+        );
+        for (name, v) in albedos.iter().zip([a.s_v, a.d_v, a.s_n, a.d_n]) {
+            put_scalar(f, name, v, &note)?;
+            written.push((*name).to_string());
+        }
+    }
+
+    // --- 湖深。表里存的已经是 `SITE_lakedepth`（栅格值 x 0.1）。 ---
+    if f.variable("lakedepth").is_none() {
+        put_scalar(
+            f,
+            "lakedepth",
+            s.lakedepth,
+            &format!(
+                "{RASTER} lake_depth.nc at this site, x0.1 as MOD_SingleSrfdata.F90:2052 does"
+            ),
+        )?;
+        written.push("lakedepth".to_string());
+    }
+
+    // --- 地形。栅格里叫 `slope`，站点文件里叫 `sloperatio`。 ---
+    for (name, v) in [("elvstd", s.elvstd), ("sloperatio", s.sloperatio)] {
+        if f.variable(name).is_some() {
+            continue;
+        }
+        put_scalar(f, name, v, &format!("{RASTER} topography.nc at this site"))?;
+        written.push(name.to_string());
+    }
+
+    // --- 城市树 LAI/SAI。三个变量一起写：CoLM 命中 `TREE_LAI` 之后会接着
+    //     无条件读 `LAI_year` 与 `TREE_SAI`（`MOD_SingleSrfdata.F90:1704-1708`），
+    //     只写其中一两个会让它在下一行 `check_ncfile_exist` 上停住。 ---
+    if f.variable("TREE_LAI").is_none() {
+        // 维度次序是 C 序的 `(LAI_year, month)`，对应 Fortran 的
+        // `SITE_LAI_monthly(12, nyear)` —— CoLM 写 srfdata.nc 时的
+        // `ncio_write_serial(..., 'month', 'LAI_year')` 就是这个形状。
+        const YEAR_DIM: &str = "LAI_year";
+        const MONTH_DIM: &str = "month";
+        let ny = urban_extra::LAI_YEARS.len();
+        if f.dimension(YEAR_DIM).is_none() {
+            f.add_dimension(YEAR_DIM, ny)?;
+        }
+        if f.dimension(MONTH_DIM).is_none() {
+            f.add_dimension(MONTH_DIM, 12)?;
+        }
+        let note = format!("{RASTER} urban_lai_500m/*.URBLAI_<year>.nc at this site");
+        let mut v = f.add_variable::<i32>("LAI_year", &[YEAR_DIM])?;
+        v.put_values(&urban_extra::LAI_YEARS, netcdf::Extents::All)?;
+        v.put_attribute("source", note.as_str())?;
+        written.push("LAI_year".to_string());
+        for (name, table) in [("TREE_LAI", &s.tree_lai), ("TREE_SAI", &s.tree_sai)] {
+            let flat: Vec<f64> = table.iter().flatten().copied().collect();
+            let mut v = f.add_variable::<f64>(name, &[YEAR_DIM, MONTH_DIM])?;
+            v.put_values(&flat, netcdf::Extents::All)?;
+            v.put_attribute("source", note.as_str())?;
+            written.push(name.to_string());
+        }
+    }
+
+    Ok(written)
 }
 
 /// 把预抽表里一个站点的土壤剖面写进 site.nc，返回写下的变量名。
@@ -549,4 +685,23 @@ pub struct UrbanReport {
     pub soil_site: Option<&'static str>,
     /// 写进 site.nc 的土壤变量名，按 `SITE_VARS` 的顺序。
     pub soil_vars: Vec<String>,
+    /// 第二张预抽表命中的站点名。**`None` 表示这个站点不在表里** —— 那时
+    /// `LCZ_DOM` / `LUCY_ID` / 四个反照率 / `lakedepth` / `elvstd` /
+    /// `sloperatio` / `TREE_LAI` 一个都没写，CoLM 会去开 `urban_type/`、
+    /// `urban_lai_500m/` 的 5x5 瓦片与三个全球栅格，所以那样的算例仍然
+    /// 需要 `--rawdata`。
+    pub extra_site: Option<&'static str>,
+    /// 写进 site.nc 的第二批变量名。
+    pub extra_vars: Vec<String>,
+}
+
+impl UrbanReport {
+    /// 这个站点是不是两张表都命中了。
+    ///
+    /// **只有两张都命中，算例才真的不需要 `--rawdata`。** 命中一张就以为
+    /// 够了，会让 mksrfdata 在另一张缺的那个栅格上 `CoLM_stop` ——
+    /// 而那时错误信息说的是「文件打不开」，不是「这个站点不在表里」。
+    pub fn needs_no_rawdata(&self) -> bool {
+        self.soil_site.is_some() && self.extra_site.is_some()
+    }
 }

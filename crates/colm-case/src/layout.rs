@@ -5,6 +5,7 @@
 //! ├── case.nml       生成，只含偏离默认的字段
 //! ├── forcing.nml    生成（colm-forcing）
 //! ├── site.nc        补齐后的站点文件（colm-srfdata）
+//! ├── runtime/       只有城市算例才有：随仓库发的 urban/LUCY_rawdata.nc
 //! └── out/           模型产物
 //! ```
 
@@ -31,6 +32,16 @@ impl Layout {
     }
     pub fn out(&self) -> PathBuf {
         self.root.join("out")
+    }
+
+    /// `DEF_dir_runtime` 指向的目录。
+    ///
+    /// 只有城市算例用得上：`mkinidata/MOD_UrbanReadin.F90:193` 无条件读
+    /// `<runtime>/urban/LUCY_rawdata.nc`，而那张表 37 KB、随仓库发，
+    /// 于是每个城市算例自带一份。水热与 BGC 算例的 `DEF_dir_runtime`
+    /// 故意指向一个不存在的目录 —— 跑通了就证明没读。
+    pub fn runtime(&self) -> PathBuf {
+        self.root.join("runtime")
     }
 }
 
