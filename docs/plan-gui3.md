@@ -3745,6 +3745,35 @@ cargo run -q -p oracle --bin golden-compare -- \
 
 ---
 
+## 附：并发提交踩过的两个坑
+
+这轮有多个会话同时在一个工作目录上干活，踩到两处，都值得记：
+
+**1. `git commit` 会带走所有已 stage 的东西，不只是你刚 `git add` 的那个。**
+
+实测：另一个会话用 `git mv` 改了 `oracle/fixtures/waterheat_hist_vars.txt`
+（`git mv` **会自动 stage**），随后本会话执行
+`git add docs/plan-gui3.md && git commit`，那次重命名就被一起提交了 ——
+提交信息里完全没提它。内容没坏，但提交边界不干净，事后追查改名是谁做的
+会指向错误的提交。
+
+**做法**：并发环境下提交前先 `git status --short` 看一眼暂存区，
+或者用 `git commit -- <明确的文件列表>` 限定范围。
+
+**2. 基于内容的 `grep -rln` 漏掉纯文件名匹配。**
+
+`waterheat` 改名的清单是 `grep -rln waterheat` 出来的，它找的是**文件内容**，
+而 `oracle/fixtures/waterheat_hist_vars.txt` 是**文件名**含 `waterheat`、
+内容不含 —— 清单天然漏掉它。执行时 `oracle/tests/histmap.rs` 改完引用路径
+后指向一个不存在的文件，跑测试才发现。
+
+**做法**：改名类任务的清单要两条都跑：
+
+```bash
+grep -rln <名字> --exclude-dir=.git --exclude-dir=target .   # 内容
+find . -name "*<名字>*" -not -path "./.git/*"                # 文件名
+```
+
 ## 附：过程中发现、但**没有修**的既有问题
 
 这些不是本轮改动引入的，修它们会动到回归基准或超出范围，**记在这里而不是
