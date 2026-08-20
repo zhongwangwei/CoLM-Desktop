@@ -33,7 +33,8 @@
 
   <main class="work" id="work">
 
-    <!-- ① 前处理（未实现，形状先定下来） -->
+    <!-- ① 前处理：目前只有强迫场子栏（design-prep.md §2.1 阶段 A）。
+         站点属性、观测两个子栏还没做，见 docs/design-prep.md §2.2/§2.3。 -->
     <section class="page" data-step="prep">
       <div class="work-head"><span class="kicker">第 1 步</span></div>
       <h1>前处理</h1>
@@ -42,24 +43,20 @@
         判据与第 5 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
 
       <div class="card">
-        <h3>还没有实现</h3>
-        <div class="ch">这一页是预留的。下面是它打算做的事，写出来是为了它落地时不跑偏。</div>
-        <table>
-          <tr><th>要做的</th><th>为什么现在还不做</th></tr>
-          <tr><td>强迫场单位与变量名归一</td>
-              <td>目前 <code>colm-forcing</code> 直接认 PLUMBER2 与 Urban-PLUMBER 两套约定，还没遇到第三套</td></tr>
-          <tr><td>时间轴重采样（半小时 ↔ 小时）</td>
-              <td>两套数据集都是 1800 秒，<b>88/90 个站点如此</b>，另两个是 3600 且模型能直接跟</td></tr>
-          <tr><td>缺测填补与 QC 过滤</td>
-              <td>观测侧的 QC 已在配对时处理（至少一个半小时 qc==0 取平均）；强迫场侧还没量过有多少缺测</td></tr>
-          <tr><td>全球栅格裁到站点邻域</td>
-              <td>只有城市算例要读栅格，而它一次只读一格；裁剪的收益要先量</td></tr>
-        </table>
-        <div class="expert-note">
-          <b>落地时的两条约束</b>：转换产物要与源文件分开存放（原始数据永远不动），
-          且每一步都要能说出「这一项为什么跳过」—— 静默跳过与静默失败在界面上长得一样。
+        <h3>强迫场文件</h3>
+        <div class="ch">选一份原始强迫场 <code>.nc</code>，探测里面有哪些变量、
+          八个槽位怎么对应、时间轴是否均匀、观测高度有没有。探完才看得到下面几张卡片。</div>
+        <div class="browse">
+          <input class="input" id="fsrc" placeholder="…/Met/CN-Cng_1979-2017_FLUXNET2015_Met.nc">
+          <button class="btn-ghost pick" data-for="fsrc" data-file="nc">选择…</button>
+          <button class="btn-ghost" id="fprobe">探一探</button>
         </div>
       </div>
+
+      <!-- 探完才有内容，动态渲染没问题 —— 只要它里面不含 pick 按钮：
+           wirePickers() 是一次性绑定，不是事件委托，动态渲染出来的 pick
+           按钮不会被接线，点了没反应也不报错。 -->
+      <div id="forcing-cards"></div>
     </section>
 
     <!-- ③ 基本设定：跑一次模拟最少要定的三件事 —— 在哪跑、用什么物理、跑多久。
