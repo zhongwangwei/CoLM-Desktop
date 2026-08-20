@@ -1069,7 +1069,53 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
 6. **`f_xy_us` 与 `f_xy_vs` 实测完全相同**（标量风速被均分到两个分量）。
    Rust 强迫场转换器必须复现这个约定，具体公式未确证。
 7. **BGC 与 URBAN 预设的移植面未测量**。§2.13 的 LOC 数字前提是 BGC/CROP/TRACER 全关。
-8. **默认预热让首次运行要跑几小时，而界面上看不出来**（2026-08-20 实测）。
+8. **四种 LULC 只覆盖了一种**（2026-08-20 查证，用户提出）。
+
+   上游 `include/define.h` 是四选一：
+
+   | LULC | 站点文件要给 | 栅格回落 | 我们 |
+   |---|---|---|---|
+   | `LULC_IGBP` | `IGBP_classification`（一个数） | `landtypes/` | ✅ 走通了 |
+   | `LULC_USGS` | `USGS_classification`（一个数） | `landtypes/landtype-usgs-update.nc` | ❌ |
+   | `LULC_IGBP_PFT` | `pfttyp` + `pctpfts`（两个数组） | `plant_15s/` | ⚠️ 预设有，**从没构建过** |
+   | `LULC_IGBP_PC` | **同 PFT** | 同上 | ❌ |
+
+   **PC 没有任何独有分支** —— 实测 `MOD_SingleSrfdata.F90` 里
+   `defined LULC_IGBP_PC` 全部与 PFT 共享同一个 `#if`，区别只在模型内部
+   怎么组织次网格。所以四种其实是**三套数据需求**。
+
+   都走同一套 `USE_SITE_*` 机制（`USE_SITE_pctpfts` 与 `USE_SITE_landtype`
+   并列）。
+
+   **涉及四层**：内核构建（加两个预设）、站点数据（`site-new` 要能产出
+   `pfttyp`/`pctpfts`，那是 `REQUIRED_FIELDS` 那 12 个之外的另一套）、
+   前处理界面（选了 LULC，要填的东西跟着变）、验证（每种一条端到端）。
+
+8a. **内核构建不核对实际生效的宏 —— 这条要先修。**
+
+   `define.h` 里有静默的 `#undef`：
+
+   ```c
+   #ifndef LULC_IGBP_PFT
+   #ifndef LULC_IGBP_PC
+   #undef BGC          // LULC_IGBP + BGCON → BGC 被悄悄关掉
+   #endif
+   #endif
+   ```
+
+   还有一条：`URBAN_MODEL && SinglePoint` 时强制 `LULC_IGBP` 并
+   `#undef` 掉另外三个（第 19–24 行）。**这解释了 `urban` 预设为什么
+   必须是 `LULC_IGBP` —— 不是我们选的，是上游强制的。**
+
+   而 `oracle/scripts/build_kernel.sh` 编完不核对，
+   `kernel-manifest.json` 里记的是**我们传的参数**，不是**实际生效的宏**。
+   于是一个配错的预设会产出「名字对、内容错」的内核 ——
+   又一个「跑得完却给出错误结果」，而且这次连判据都是假的。
+
+   **补 LULC 预设之前先修这条**，否则后面每加一个预设都是在一个
+   不可信的基础上加。
+
+9. **默认预热让首次运行要跑几小时，而界面上看不出来**（2026-08-20 实测）。
    `colm-cli new` 的默认是 `--spinup-years 1 --spinup-repeat 10`，理由写在
    代码注释里且站得住：
 
