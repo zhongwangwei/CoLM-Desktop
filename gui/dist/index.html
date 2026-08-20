@@ -358,13 +358,20 @@
   </footer>
 </div>
 
-<!-- 进门那道分流。默认 hidden，由 domain.js 立起来 —— 直接写成可见的话，
-     JS 加载失败时它会永远挡在那里，而那种故障从外面看就是「程序打不开」。 -->
+<!-- 进门那道分流，现在是能前进/后退的两页向导（第 1 页域、第 2 页配置，
+     见 docs/design-gate.md）。默认 hidden，由 domain.js 立起来 ——
+     直接写成可见的话，JS 加载失败时它会永远挡在那里，而那种故障从外面
+     看就是「程序打不开」。标题/说明/卡片/翻页按钮都是 domain.js 按当前
+     页动态填的，两页共用这一套容器。 -->
 <div id="domaingate" class="gate" hidden>
   <div class="gate-panel">
-    <h2>这次要跑什么？</h2>
-    <p class="muted mini">现在只有站点能跑。区域与全球的步骤链还没有实现。</p>
-    <div class="domain-cards" id="domaincards"></div>
+    <h2 id="gatetitle">这次要跑什么？</h2>
+    <p class="muted mini" id="gatesub">现在只有站点能跑。区域与全球的步骤链还没有实现。</p>
+    <div class="domain-cards" id="gatecards"></div>
+    <!-- 只在第 2 页有内容：定义「预设」是什么意思——填好后面几页的初值，
+         不是跳过它们。第 1 页没有预设这回事，domain.js 把它清空。 -->
+    <p class="muted mini" id="gateinfo"></p>
+    <div class="gate-foot" id="gatefoot"></div>
   </div>
 </div>
 

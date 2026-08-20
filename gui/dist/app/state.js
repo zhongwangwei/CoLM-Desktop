@@ -8,9 +8,26 @@
 export const state = {
   /** 当前在第几步，见 shell.js 的 STEPS。 */
   step: 'prep',
-  /** 这次要跑什么。'site' | 'region' | 'global'，进门那道门设的。
+  /** 这次要跑什么。'site' | 'region' | 'global'，进门向导第 1 页设的。
    *  区域与全球还没有步骤链，现在只可能是 'site'。 */
   domain: null,
+  /** 从哪套配置开始。'default' | 'carbon_nitrogen' | 'urban' | 'custom'，
+   *  进门向导第 2 页设的。「default」这个名字这次没问题 ——
+   *  预设的语义是「填好第 3–6 页的初值，逐页可见、随时能改」，不是
+   *  「跳过后面几页」，所以它不是「正确答案」，只是「不知道从哪开始
+   *  时的起点」（docs/design-gate.md「预设是填好后面几页，不是跳过
+   *  后面几页」一节）。除 'default' 外现在选不到 —— CoLM 宏改造
+   *  （docs/plan-macro-runtime.md）没完成之前，内核只有这一套，
+   *  别的档位在 domain.js 里置灰。跟 `domain` 一样零读取点：落到
+   *  case.nml 是宏改造完成后的事（docs/design-gate.md §3），
+   *  这一步只把状态机立起来。 */
+  profile: null,
+  /** `profile` 展开成的具体初值，见 domain.js 的 `PRESET_VALUES`——
+   *  第 3–6 页落地后从这里读起始值。形如
+   *  `{ lulc, soil, bgc, crop, urban, tracer }`；`profile` 是 'custom'
+   *  时为 null（没有初值，等那几页落地后用户自己填）。跟 `domain` /
+   *  `profile` 一样零读取点，这一步只把数据形状定下来。 */
+  wizard: null,
   cases: [],
   /** 站点库扫描结果，见 colm-cli scan */
   sites: [],
