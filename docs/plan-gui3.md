@@ -3745,6 +3745,119 @@ cargo run -q -p oracle --bin golden-compare -- \
 
 ---
 
+## Task 15: 算例目录含空格时不要让人对着 `Permission denied` 发呆
+
+**这条挡在「装完就能跑」前面**，而且 GUI 的默认路径正好踩中。
+
+### 根因（已查证）
+
+CoLM 有 **55 处**不加引号的 `CALL system('mkdir -p ' // trim(dir) ...)`，
+路径来自 `dir_landdata` / `dir_restart` / `ncdir` / `landdir` 等变量
+（最终源头是 namelist 的 `DEF_dir_*`）。路径含空格就被 shell 拆成两个参数。
+
+**实测**：算例放在 `~/Library/Application Support/…` 下时，建出了
+`/Users/zhongwangwei/Library/Application` 与一棵影子目录树，真正的
+`landdata/` 从没建出来 —— 而 netCDF 报的是 **`Permission denied`**，
+指向完全错误的方向。
+
+**「Rust 侧预先建好目录」不可行**：那 55 处的子目录名有十几种
+（`/soil`、`/lai/global_30s_10_year_avg`、`/mesh/`、`/lulcc/`、
+`/landpatch/`、`/topography` …）且随配置变，跟着上游维护一份清单
+必然会漂。
+
+### 做两件事
+
+**一、立刻可用：不让用户走进那条路。**
+
+- `colm-cli new`：算例输出目录含空格时**拒绝并说清楚**，
+  错误信息要点出「CoLM 用不加引号的 shell mkdir，路径含空格会建错地方，
+  而报出来的错是 Permission denied」——**别只说「路径非法」**
+- GUI 第 2 步「算例放哪」：默认值换成无空格位置；用户手填含空格的路径时
+  当场标出来，不要等到跑到一半
+
+**二、治本：上游加引号。** 那 55 处改成
+`'mkdir -p "' // trim(dir) // '"'`。**另开一个 PR**，不混进这一轮。
+
+**Files:**
+- Modify: `crates/colm-cli/src/main.rs`
+- Modify: `gui/src-tauri/src/example.rs`（默认算例根目录）
+- Modify: `gui/dist/app/sites.js`（含空格时的提示）
+
+- [ ] **Step 1: 先实测「换哪些路径就够了」**
+
+Task 13 实测「换成无空格目录后 CN-Cng 六步全绿」，但当时**示例数据本身**
+还在 `Application Support` 下。要弄清楚：
+
+- 只换**算例根目录**够不够？（强迫场与站点文件是只读的，大概率不经过 mkdir）
+- 还是**示例数据**也得搬？
+
+```bash
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+P=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
+T=/tmp/nospace-case && rm -rf $T
+# 算例目录无空格，但强迫场留在有空格的位置
+mkdir -p "/tmp/has space/forcing" && cp "$P/Forcing/CN-Cng"*.nc "/tmp/has space/forcing/"
+./target/debug/colm-cli new --site "$P/Sitedata/CN-Cng"*.nc --out $T --name CN-Cng
+./target/debug/colm-cli run $T --kernel kernels/default 2>&1 | tail -8
+```
+
+**把实测结果写进报告** —— 它决定第 2 步只改一处还是两处。
+
+- [ ] **Step 2: `colm-cli new` 拒绝含空格的输出目录**
+
+错误信息要说出**机理**，不能只说「不合法」：
+
+```rust
+    // CoLM 有 55 处不加引号的 `CALL system('mkdir -p ' // trim(dir))`，
+    // 路径含空格会被 shell 拆成两个参数 —— 建出一棵影子目录树，而报出来的
+    // 是 netCDF 的 `Permission denied`，指向完全错误的方向。
+    // **在这里拦住，比让人对着那句报错发呆强。**
+    if out.to_string_lossy().contains(' ') {
+        bail!(
+            "the case directory must not contain spaces: {}\n  \
+             CoLM builds its output tree with unquoted shell `mkdir -p`, so a path \
+             with spaces silently creates the wrong directories and later fails with \
+             a misleading `Permission denied` from netCDF",
+            out.display()
+        );
+    }
+```
+
+- [ ] **Step 3: GUI 的默认算例根目录换到无空格位置**
+
+`install_example` 现在把算例根目录建议成 `<app_data_dir>/examples/cases`，
+而 macOS 的 `app_data_dir` 是 `~/Library/Application Support/…` ——
+**必然含空格**。
+
+换成一个无空格的位置。候选（按你实测哪个可写）：
+`~/CoLM-cases`、`~/Documents/CoLM/cases`。注释要写明为什么不用
+`app_data_dir`，否则下一个人会「顺手改回去」。
+
+若 Step 1 表明示例数据本身也不能待在有空格的路径下，那 `install_example`
+的目标目录也要一起换。
+
+- [ ] **Step 4: 界面上当场标出来**
+
+用户手填算例根目录时，含空格就在旁边标一句（红字或警告条），
+**不要等到跑到一半**。判据与 `colm-cli` 那条一致。
+
+- [ ] **Step 5: 验证 —— 默认路径下六步全绿**
+
+清掉旧的示例安装（`rm -rf ~/Library/Application\ Support/edu.sysu.colm.desktop/examples`），
+重新走一遍：门 → ① … ⑥，**全程不手动改任何路径**。
+
+期望：⑥ 画得出图。**这一条走通，「装完就能跑」才算成立。**
+
+- [ ] **Step 6: 提交**
+
+- [ ] **Step 7（另开 PR，不混进这一轮）: 上游加引号**
+
+`vendor/CoLM202X` 新开一个分支，把那 55 处改成
+`'mkdir -p "' // trim(dir) // '"'`，验证后开 PR 到
+`zhongwangwei/CoLM202X` 的 `master`（**不是 CoLM-SYSU/CoLM**）。
+
+---
+
 ## 附：收尾时踩出的两个真缺陷（**还挡在「装完就能跑」前面**）
 
 端到端走六步时撞到，两条都在 CLI 与 GUI 双侧复现过。**不是这轮引入的**，
