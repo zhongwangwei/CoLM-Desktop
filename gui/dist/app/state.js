@@ -11,13 +11,13 @@ export const state = {
   /** 这次要跑什么。'site' | 'region' | 'global'，进门向导第 1 页设的。
    *  区域与全球还没有步骤链，现在只可能是 'site'。 */
   domain: null,
-  /** 次网格怎么分。'IGBP' | 'USGS' | 'PFT' | 'PC'，进门向导第 3 页设的。
+  /** 次网格怎么分。'IGBP' | 'USGS' | 'PFT' | 'PC'，进门向导第 2 页设的。
    *
    *  IGBP 与 PFT 已跑通；`LULC_USGS` 的数组尺寸仍由编译期参数
    *  `N_land_classification` 定死，PC 则还没有端到端跑通的算例。
    *  新建算例时由 `domain.wizardFields()` 落到 case.nml。 */
   subgrid: null,
-  /** 六页向导的实际选择；不进 recent，每次启动重新问。 */
+  /** 五页向导的实际选择；不进 recent，每次启动重新问。 */
   wizard: null,
   cases: [],
   /** 站点库扫描结果，见 colm-cli scan */

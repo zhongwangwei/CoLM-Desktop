@@ -61,30 +61,33 @@ showDomainGate();
 if (ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('page 1 missing');
 choose('站点');
 next();
-if (ids.gatetitle.textContent !== '这次研究什么过程？') throw new Error('page 2 missing');
-choose('自定义');
-next();
-if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('page 3 missing');
+if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('page 2 missing');
+if (cards().map(c => c.children[0].textContent).join('|') !== 'USGS|IGBP|PFT|PC') {
+  throw new Error('page 2 must list USGS, IGBP, PFT, and PC in order');
+}
+if (!card('USGS').disabled || !card('PC').disabled || card('IGBP').disabled || card('PFT').disabled) {
+  throw new Error('page 2 readiness does not match runtime support');
+}
 choose('IGBP');
 next();
-if (ids.gatetitle.textContent !== '土壤水力用哪套？') throw new Error('page 4 missing');
+if (ids.gatetitle.textContent !== '土壤水力用哪套？') throw new Error('page 3 missing');
 choose('Campbell');
 next();
-if (ids.gatetitle.textContent !== '还要打开哪些过程？') throw new Error('page 5 missing');
+if (ids.gatetitle.textContent !== '还要打开哪些过程？') throw new Error('page 4 missing');
 if (card('BGC').getAttribute('aria-disabled') !== 'true') throw new Error('BGC must require PFT or PC');
 if (card('TRACER').getAttribute('aria-disabled') !== 'true') throw new Error('TRACER must require van Genuchten');
 card('BGC').onclick();
-if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('blocked option did not link to page 3');
+if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('blocked option did not link to page 2');
 next(); next();
 choose('URBAN');
 choose('LULCC');
 next();
-if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('page 6 missing');
+if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('page 5 missing');
 choose('RangeCheck');
 next();
 
 if (!ids.domaingate.hidden) throw new Error('wizard did not finish');
-if (state.wizard.profile !== 'custom' || state.wizard.soil !== 'campbell') {
+if (state.wizard.soil !== 'campbell' || 'profile' in state.wizard) {
   throw new Error(`wrong wizard state: ${JSON.stringify(state.wizard)}`);
 }
 const fields = Object.fromEntries(wizardFields().map(x => [x.path, x.value]));
@@ -99,9 +102,9 @@ for (const [path, value] of Object.entries({
   if (fields[path] !== value) throw new Error(`${path}: expected ${value}, got ${fields[path]}`);
 }
 
-// 预设只填初值，仍逐页经过 3–6；改第 3 页时第 4/5 页的无关选择保留并重算约束。
+// 改第 2 页时，第 3/4 页的无关选择保留并重算约束。
 showDomainGate();
-choose('站点'); next(); choose('自定义'); next(); choose('IGBP'); next(); choose('van Genuchten–Mualem'); next();
+choose('站点'); next(); choose('IGBP'); next(); choose('van Genuchten–Mualem'); next();
 choose('LULCC');
 previous(); previous();
 choose('PFT');
@@ -113,10 +116,4 @@ next();
 if (card('LULCC').getAttribute('aria-pressed') !== 'true') throw new Error('unrelated physics choice was lost');
 if (card('BGC').getAttribute('aria-disabled') === 'true') throw new Error('BGC did not become available for PFT');
 
-showDomainGate();
-choose('站点'); next(); choose('碳氮循环'); next();
-if (card('PFT').getAttribute('aria-selected') !== 'true') throw new Error('carbon preset did not select PFT');
-next(); next();
-if (card('BGC').getAttribute('aria-pressed') !== 'true') throw new Error('carbon preset did not enable BGC');
-
-console.log('gate: six pages, constraints, finish state, and namelist fields resolve');
+console.log('gate: five pages, constraints, finish state, and namelist fields resolve');

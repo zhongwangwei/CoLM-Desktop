@@ -1,7 +1,7 @@
-//! 进门向导。顺序按约束方向排：空间 → 研究目的 → 次网格 → 土壤 → 物理 → 调试。
+//! 进门向导。顺序按约束方向排：空间 → 次网格 → 土壤 → 物理 → 调试。
 //!
-//! 预设只填后四页的初值，不跳页；回退保留无关选择，改上游时只清掉已经
-//! 失效的下游值。USGS、CROP 仍是编译期方案，PC 尚未端到端跑通，因此都
+//! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS、CROP
+//! 仍是编译期方案，PC 尚未端到端跑通，因此都
 //! 列出来但不可选，不能给一个点了之后必然失败的入口。
 
 import { state } from './state.js';
@@ -14,19 +14,12 @@ const DOMAINS = [
   { id: 'global', t: '全球', d: '全球网格', ready: false, need: '全球步骤链尚未实现' },
 ];
 
-const PROFILES = [
-  { id: 'default', t: '默认', d: '地表能量与水分平衡', tech: 'IGBP · van Genuchten' },
-  { id: 'carbon', t: '碳氮循环', d: '植被生长与碳收支', tech: 'PFT · BGC（CROP 需专用内核）' },
-  { id: 'urban', t: '城市', d: '城市冠层与人为热', tech: 'IGBP · URBAN' },
-  { id: 'custom', t: '自定义', d: '每一项都自己选', tech: '不预选后续页' },
-];
-
 const SUBGRIDS = [
-  { id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖', tech: '一个 patch 一个地类', ready: true },
   {
     id: 'USGS', t: 'USGS', d: '24 类地表覆盖（旧方案）', tech: '一个 patch 一个地类',
     ready: false, need: '数组尺寸由 N_land_classification 编译期定死，需要 USGS 内核',
   },
+  { id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖', tech: '一个 patch 一个地类', ready: true },
   { id: 'PFT', t: 'PFT', d: '植物功能型', tech: '一个 patch 拆成多个功能型', ready: true },
   {
     id: 'PC', t: 'PC', d: '植物群落', tech: '同 PFT，次网格组织方式不同',
@@ -56,25 +49,17 @@ const DEBUG = [
   { id: 'srfdatadiag', t: 'SrfdataDiag', d: '地表数据诊断' },
 ];
 
-const PAGES = ['domain', 'profile', 'subgrid', 'soil', 'physics', 'debug'];
+const PAGES = ['domain', 'subgrid', 'soil', 'physics', 'debug'];
 
 const emptyPhysics = () => ({ urban: false, lulcc: false, bgc: false, crop: false, tracer: false });
 const emptyDebug = () => ({ rangecheck: false, colmdebug: false, srfdatadiag: false });
 const emptyPicked = () => ({
   domain: null,
-  profile: null,
   subgrid: null,
   soil: null,
   physics: emptyPhysics(),
   debug: emptyDebug(),
 });
-
-const PRESETS = {
-  default: { subgrid: 'IGBP', soil: 'vg', physics: emptyPhysics() },
-  carbon: { subgrid: 'PFT', soil: 'vg', physics: { ...emptyPhysics(), bgc: true } },
-  urban: { subgrid: 'IGBP', soil: 'vg', physics: { ...emptyPhysics(), urban: true } },
-  custom: { subgrid: null, soil: null, physics: emptyPhysics() },
-};
 
 let pageIdx = 0;
 let picked = emptyPicked();
@@ -90,7 +75,6 @@ function render() {
   const page = PAGES[pageIdx];
   const copy = {
     domain: ['这次要跑什么？', '空间结构先定；现在只有站点步骤链能跑。'],
-    profile: ['这次研究什么过程？', '预设只填初值，后面四页仍会逐页显示并允许修改。'],
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '土壤方案决定 TRACER 是否可用，也改变站点数据要求。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
@@ -103,8 +87,7 @@ function render() {
   const box = $('gatecards');
   box.textContent = '';
   if (page === 'domain') renderCards(DOMAINS, picked.domain, chooseDomain);
-  if (page === 'profile') renderCards(PROFILES, picked.profile, chooseProfile);
-  if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid, subgridBlock);
+  if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid);
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
   if (page === 'debug') renderCards(DEBUG, picked.debug, toggleDebug, null, true);
@@ -112,7 +95,6 @@ function render() {
 }
 
 function pageInfo(page) {
-  if (page === 'profile') return 'ⓘ 默认 / 碳氮循环 / 城市都是后续页的可修改初值，不会跳页';
   if (page === 'subgrid') {
     if (picked.subgrid === 'PFT' || picked.subgrid === 'PC') {
       return 'ⓘ 站点文件最好提供 pfttyp 与 pctpfts；缺少时会回落到 rawdata/plant_15s';
@@ -182,17 +164,6 @@ function chooseDomain(id) {
   render();
 }
 
-function chooseProfile(id) {
-  if (picked.profile !== id) {
-    const preset = PRESETS[id];
-    picked.profile = id;
-    picked.subgrid = preset.subgrid;
-    picked.soil = preset.soil;
-    picked.physics = { ...preset.physics };
-  }
-  render();
-}
-
 function chooseSubgrid(id) {
   picked.subgrid = id;
   if (id !== 'PFT' && id !== 'PC') {
@@ -219,21 +190,13 @@ function toggleDebug(id) {
   render();
 }
 
-function subgridBlock(item) {
-  if (item.ready === false) return null;
-  if (picked.profile === 'carbon' && item.id !== 'PFT' && item.id !== 'PC') {
-    return { need: '碳氮循环需要 PFT 或 PC', cause: '第 2 页选了碳氮循环', page: 1 };
-  }
-  return null;
-}
-
 function physicsBlock(item) {
   if (item.ready === false) return null;
   if (item.id === 'bgc' && picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-    return { need: '需要 PFT 或 PC 次网格', cause: `第 3 页选了 ${picked.subgrid}`, page: 2 };
+    return { need: '需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
   }
   if (item.id === 'tracer' && picked.soil !== 'vg') {
-    return { need: '需要 van Genuchten 土壤水力', cause: '第 4 页选了 Campbell', page: 3 };
+    return { need: '需要 van Genuchten 土壤水力', cause: '第 3 页选了 Campbell', page: 2 };
   }
   return null;
 }
@@ -256,7 +219,7 @@ function renderFoot() {
   }
 
   const page = PAGES[pageIdx];
-  const required = { domain: picked.domain, profile: picked.profile, subgrid: picked.subgrid, soil: picked.soil };
+  const required = { domain: picked.domain, subgrid: picked.subgrid, soil: picked.soil };
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = '下一步 →';
@@ -272,7 +235,6 @@ function finish() {
   state.domain = picked.domain;
   state.subgrid = picked.subgrid;
   state.wizard = {
-    profile: picked.profile,
     subgrid: picked.subgrid,
     soil: picked.soil,
     physics: { ...picked.physics },
