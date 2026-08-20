@@ -3677,6 +3677,21 @@ git log --oneline -12
 
 ---
 
+## 附：过程中发现、但**没有修**的既有问题
+
+这些不是本轮改动引入的，修它们会动到回归基准或超出范围，**记在这里而不是
+悄悄修掉**：
+
+| 问题 | 位置 | 为什么没修 |
+|---|---|---|
+| `site::fill` 的 `lakedepth` **少乘 0.1** | `crates/colm-srfdata/src/site.rs` | CoLM 两条路径（`MOD_SingleSrfdata.F90:700` 与 `:2052`）都是 `raster * 0.1`，而 `fill()` 写的是原始值。改它会动 CN-Cng 的黄金基准，得单独一轮 |
+| `colm-cli new` 只校验 `--end` 不校验 `--start` | `crates/colm-cli/src/main.rs` | 用 1993 建一个强迫场从 1995 起的算例能建出来，跑到 `colm` 段才报 `Forcing does not cover simulation period!` |
+| `colm-kernel` 少数测试对时序敏感 | `crates/colm-kernel/src/run_tests.rs` | 机器负载高时偶发失败（实测一次 38/39，重跑 39/39）。那几个要真 spawn 内核进程 |
+| `docs/plan-gui3.md` 两处引用旧的 `an urban case needs --rawdata` 文案 | 本文件 | 8c-4 之后已经不成立，但那是历史叙述的一部分 |
+
+**为什么要写下来**：这一轮里「早就红了的 `params_groups.rs` 测试」正是因为
+上一次没人记下来，红了很久没被发现。发现了不修可以，发现了不说不行。
+
 ## 附：这份计划**不做**什么
 
 - 不实现区域与全球的步骤链 —— 只把入口摆出来
