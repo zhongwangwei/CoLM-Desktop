@@ -95,20 +95,7 @@ const DOMAINS = [
   { id: 'global', t: '全球', d: '全球网格', ready: false },
 ];
 
-// 第 2 页：这次研究什么过程。除「默认」外全部置灰 —— 不是因为它们不对，
-// 是因为现在的内核只编进了 IGBP + vanGenuchten 这一套，开 BGC/CROP/
-// URBAN 这些附加过程选了会在跑到一半才炸，而不是灰着更糟。
-//
-// `tech` 是每档下面那句说明：对「默认」它说的是「不开什么」，对
-// 「碳氮循环」「城市」它说的是「打开哪些开关」，对「自定义」它说的是
-// 「需要什么机制」——同一个位置，起的是 design-gate.md §2b「①需要
-// 什么」那件事的作用。②「是什么造成的」由三档共用同一句
-// `SUBGRID_BLOCKED_BY`，因为现在挡住它们的是同一场宏改造，不像
-// design-gate.md 第 5 页那样各自指向前面某一页的某个选择——那要等
-// 第 3–6 页真的存在才有「回哪页改」这回事。
-//
-// **不含次网格方案或土壤水力**（没有 `IGBP · van Genuchten` 这类字样）
-// —— 那是第 3、4 页各自问的，「默认」不替用户预先决定。
+// 第 2 页：次网格方案。`tech` 说明方案，`need` 说明该选项为何暂不可用。
 const SUBGRID = [
   {
     id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖',
@@ -213,11 +200,10 @@ function card(it, page, isSelected) {
     soon.textContent = '暂不支持';
     b.appendChild(soon);
   } else {
-    // 第 2 页灰选项的第二件事（design-gate.md §2b）：是什么造成的。
-    // 第一件事「需要什么」已经在上面的 `.dtech` 里写过了，不重复。
+    // 第 2 页灰选项还要说清楚是什么挡住了它。
     const why = document.createElement('span');
     why.className = 'dwhy';
-    why.textContent = SUBGRID_BLOCKED_BY;
+    why.textContent = it.need;
     b.appendChild(why);
   }
   return b;

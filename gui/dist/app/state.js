@@ -17,9 +17,8 @@ export const state = {
    *  （默认/碳氮循环/城市/自定义），后来去掉了 —— 那是个中间概念，
    *  而用户真正要定的就是次网格方案本身。少一层转换，少一处对不上。
    *
-   *  除 'IGBP' 外现在选不到：`LULC_USGS` 的数组尺寸由
-   *  `N_land_classification` 定死，仍是编译期宏（见
-   *  docs/plan-macro-runtime.md 的止损那节）；PFT/PC 要等宏改造完成。
+   *  IGBP 与 PFT 已跑通；`LULC_USGS` 的数组尺寸仍由编译期参数
+   *  `N_land_classification` 定死，PC 则还没有端到端跑通的算例。
    *
    *  跟 `domain` 一样零读取点 —— 落到 case.nml 是后面几页落地时的事。 */
   subgrid: null,
