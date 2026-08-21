@@ -36,15 +36,17 @@ globalThis.document = {
   createElement: tag => new El(tag),
   querySelectorAll: () => [],
 };
+globalThis.window = globalThis;
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), 'colm-gate-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 
-const { showDomainGate, wizardFields } = await import(join(temp, 'app', 'domain.js'));
+const { showDomainGate, wizardFields, wizardFieldNames } = await import(join(temp, 'app', 'domain.js'));
 const { state } = await import(join(temp, 'app', 'state.js'));
 const { kernelForSubgrid } = await import(join(temp, 'app', 'kernel.js'));
+const { withoutWizardFields } = await import(join(temp, 'app', 'params.js'));
 
 state.kernels = [
   { preset: 'default', dir: '/igbp', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF' },
@@ -117,6 +119,14 @@ if (usgs.DEF_USE_LCT !== '.true.' || usgs.DEF_USE_PFT !== '.false.' || usgs.DEF_
 const pc = Object.fromEntries(wizardFields({ ...state.wizard, subgrid: 'PC' }).map(x => [x.path, x.value]));
 if (pc.DEF_USE_LCT !== '.false.' || pc.DEF_USE_PFT !== '.false.' || pc.DEF_USE_PC !== '.true.') {
   throw new Error(`wrong PC structure fields: ${JSON.stringify(pc)}`);
+}
+const owned = wizardFieldNames();
+const mainFields = withoutWizardFields([
+  ...owned.map(path => ({ path })),
+  { path: 'DEF_HIST_FREQ' },
+]);
+if (mainFields.map(x => x.path).join('|') !== 'DEF_HIST_FREQ') {
+  throw new Error(`main page repeated wizard fields: ${JSON.stringify(mainFields)}`);
 }
 
 // 改第 2 页时，第 3/4 页的无关选择保留并重算约束。

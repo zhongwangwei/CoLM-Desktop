@@ -6,6 +6,7 @@ import { $, status, baseName } from './ui.js';
 import { renderHistVars } from './histvars.js';
 import { renderTiming } from './timing.js';
 import { editTarget } from './batch.js';
+import { wizardFieldNames } from './domain.js';
 
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
 // 新字段不能掉进「其他」。这里只规定页面顺序。
@@ -35,6 +36,12 @@ const HINTS = {
   'DEF_simulation_time%spinup_day': '预热截止时刻的日，见 spinup_repeat 的说明。',
   'DEF_simulation_time%spinup_sec': '预热截止时刻的当天秒数，见 spinup_repeat 的说明。',
 };
+
+/** 向导已定下的字段不在主界面重复出现。 */
+export function withoutWizardFields(entries) {
+  const owned = new Set(wizardFieldNames());
+  return entries.filter(e => !owned.has(e.path));
+}
 
 // 控件按 schema 的类型选，不一律给文本框。
 //
@@ -144,7 +151,7 @@ export async function renderFields() {
     .filter(f => f.group === 'nl_colm' || f.derived)
     .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
                  derived: f.derived, unset: true }));
-  const entriesAll = entries.concat(extra);
+  const entriesAll = withoutWizardFields(entries.concat(extra));
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
   // 当前编译产物不包含的字段默认不显示。
   const hidden = inGroup.filter(e => state.irrelevant.has(e.path));

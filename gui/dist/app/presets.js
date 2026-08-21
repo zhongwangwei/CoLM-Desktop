@@ -1,15 +1,13 @@
-//! 参数预设：存下这份算例的物理与输出设置，套到别的算例上。
+//! 参数预设：存下向导之外的参数与输出设置，套到别的算例上。
 //!
-//! 站点、路径、算例名**不进预设**（后端 `IDENTITY_PREFIXES` 挡着）——
-//! 它们是算例身份不是参数，混进去会让套用变成「悄悄换了个站点」。
-//! 被挡下的字段由 `save_preset` 返回，这里说出来：静默丢弃会让人以为
-//! 存进去了，然后在套用时发现站点没跟着过来。
+//! 站点身份与向导字段都不进预设；旧预设里即使有，套用时也会跳过。
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { editTarget } from './batch.js';
 import { $, status } from './ui.js';
 import { renderFields } from './params.js';
+import { wizardFieldNames } from './domain.js';
 
 export async function refreshPresets() {
   const s = $('preset');
@@ -36,7 +34,8 @@ $('preset-save').onclick = async () => {
   const name = prompt('预设名');
   if (!name) return;
   try {
-    const skipped = await invoke('save_preset', { name, text: state.text });
+    const skipped = await invoke('save_preset',
+      { name, text: state.text, exclude: wizardFieldNames() });
     await refreshPresets();
     $('preset').value = name;
     status(skipped.length
@@ -50,7 +49,7 @@ $('preset-apply').onclick = async () => {
   if (!name || !state.selected) return;
   try {
     const dirs = editTarget();
-    const r = await invoke('apply_preset_batch', { name, dirs });
+    const r = await invoke('apply_preset_batch', { name, dirs, exclude: wizardFieldNames() });
     state.text = r.text;
     await renderFields();
     status(r.written > 1 ? `已把 ${name} 套到 ${r.written} 个算例上` : `已套用 ${name}`);

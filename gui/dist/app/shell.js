@@ -16,7 +16,7 @@ export const STEPS = [
     need: () => ($('kernel').value
       ? null
       : `当前安装缺少 ${state.subgrid === 'USGS' ? 'USGS' : 'IGBP'} 运行产物`) },
-  { id: 'params', t: '参数',   d: '时间与预热 · namelist 字段表',
+  { id: 'params', t: '参数',   d: '时间与预热 · 其它 namelist 字段',
     need: () => (state.selected ? null : '先在第 3 步建一个算例') },
   { id: 'run',    t: '运行',   d: '输出与运行',
     need: () => (state.selected ? null : '先在第 3 步建一个算例') },

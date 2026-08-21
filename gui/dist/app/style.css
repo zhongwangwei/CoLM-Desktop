@@ -270,8 +270,7 @@ td:first-child { overflow-wrap: anywhere; }
 .domain-card .dsoon { font-size: 11px; color: var(--warn); margin-top: 4px; }
 /* 灰选项的约束原因用告警色；可回退的卡片会把来源页也写在这里。 */
 .domain-card .dwhy { font-size: 11px; color: var(--warn); margin-top: 4px; }
-/* 定义「预设」语义的那一句，只在第 2 页有内容（domain.js 按页清空）。
-   :empty 收掉外边距，免得第 1 页凭空多出一段空白。 */
+/* 没有本页提示时收掉外边距。 */
 #gateinfo { margin: 10px 0 0; }
 #gateinfo:empty { margin: 0; }
 .gate-foot { display: flex; gap: 8px; margin-top: var(--s-xl); justify-content: center; }

@@ -269,6 +269,15 @@ export function wizardFields(wizard = state.wizard) {
   ].map(([path, value]) => ({ path, value: logical(value) }));
 }
 
+/** 主界面与预设都不得再次修改向导已经定下的字段。 */
+export function wizardFieldNames() {
+  const empty = {
+    subgrid: null, soil: null,
+    physics: emptyPhysics(), debug: emptyDebug(),
+  };
+  return wizardFields(empty).map(x => x.path).concat('DEF_USE_USGS', 'DEF_USE_IGBP');
+}
+
 globalThis.addEventListener?.('colm:kernels', () => {
   if (!$('domaingate').hidden) render();
 });

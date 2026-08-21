@@ -47,6 +47,14 @@ fn the_prefix_rule_covers_fields_nobody_listed() {
 }
 
 #[test]
+fn wizard_fields_never_reenter_through_a_preset() {
+    let excluded = vec!["DEF_USE_BGC".to_string(), "DEF_USE_CoLMDEBUG".to_string()];
+    assert!(is_excluded("DEF_USE_BGC", &excluded));
+    assert!(is_excluded("def_use_colmdebug", &excluded));
+    assert!(!is_excluded("DEF_HIST_FREQ", &excluded));
+}
+
+#[test]
 fn applying_a_preset_merges_rather_than_replaces() {
     // 预设存的是字段列表，不是整份文件 —— 所以套用之后，
     // 预设里没有的字段（这里是站点身份）必须原样还在。

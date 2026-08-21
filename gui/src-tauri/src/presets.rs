@@ -1,4 +1,4 @@
-//! 参数预设：把一份算例里的**物理与输出设置**存下来，套到别的算例上。
+//! 参数预设：把向导之外的参数与输出设置存下来，套到别的算例上。
 //!
 //! 两个决定值得写在这里。
 //!
@@ -20,7 +20,7 @@ pub struct Preset {
     pub fields: Vec<(String, String)>,
 }
 
-/// 这些字段**不进预设**。
+/// 这些身份字段**不进预设**；向导字段由前端通过 `exclude` 传入。
 ///
 /// 它们是**算例身份**，不是参数：站点是哪个、文件放在哪、强迫场配置在哪。
 /// 把它们塞进预设，套用时就会把 A 站的算例悄悄指向 B 站的数据 ——
@@ -31,6 +31,10 @@ const IDENTITY_PREFIXES: &[&str] = &["SITE_", "DEF_dir", "DEF_CASE_NAME", "DEF_f
 
 fn is_identity(path: &str) -> bool {
     IDENTITY_PREFIXES.iter().any(|p| path.starts_with(p))
+}
+
+fn is_excluded(path: &str, excluded: &[String]) -> bool {
+    excluded.iter().any(|p| path.eq_ignore_ascii_case(p))
 }
 
 fn dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -46,13 +50,14 @@ fn dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 
 /// 从一份算例文本里抽出可复用的部分，存成预设。
 ///
-/// 返回被挡下的身份字段，交给界面说明 —— **静默丢弃会让人以为存进去了**，
+/// 返回被挡下的身份与向导字段，交给界面说明 —— **静默丢弃会让人以为存进去了**，
 /// 然后在套用时发现站点没跟着过来。
 #[tauri::command]
 pub fn save_preset(
     app: tauri::AppHandle,
     name: String,
     text: String,
+    exclude: Vec<String>,
 ) -> Result<Vec<String>, String> {
     let name = name.trim();
     if name.is_empty() || name.contains(['/', '\\', '.']) {
@@ -62,7 +67,7 @@ pub fn save_preset(
     let mut fields = Vec::new();
     let mut skipped = Vec::new();
     for p in doc.paths() {
-        if is_identity(&p) {
+        if is_identity(&p) || is_excluded(&p, &exclude) {
             skipped.push(p);
             continue;
         }
@@ -99,18 +104,26 @@ pub fn list_presets(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// 把预设套到一份算例文本上，返回新文本。
+/// 把预设套到一份算例文本上，返回新文本；`exclude` 保护向导字段。
 ///
 /// **合并，不覆盖。** 预设里没有的字段原样保留 —— 那正是「存字段列表而不是
 /// 整份文件」换来的东西。未改动的行仍然逐字节不变（`colm-namelist` 的往返保证）。
 #[tauri::command]
-pub fn apply_preset(app: tauri::AppHandle, name: String, text: String) -> Result<String, String> {
+pub fn apply_preset(
+    app: tauri::AppHandle,
+    name: String,
+    text: String,
+    exclude: Vec<String>,
+) -> Result<String, String> {
     let path = dir(&app)?.join(format!("{name}.json"));
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let preset: Preset =
         serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out = text;
     for (p, v) in &preset.fields {
+        if is_excluded(p, &exclude) {
+            continue;
+        }
         // 逐个走 `set_field`，于是类型校验、大小写不敏感的字段查找、
         // 以及往返保证都与人手改一个字段时完全一样。
         //
@@ -134,12 +147,16 @@ pub fn apply_preset_batch(
     app: tauri::AppHandle,
     name: String,
     dirs: Vec<String>,
+    exclude: Vec<String>,
 ) -> Result<crate::config::BatchWrite, String> {
     let mut done = Vec::with_capacity(dirs.len());
     for d in &dirs {
         let p = std::path::Path::new(d).join("case.nml");
         let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        done.push((d.clone(), apply_preset(app.clone(), name.clone(), text)?));
+        done.push((
+            d.clone(),
+            apply_preset(app.clone(), name.clone(), text, exclude.clone())?,
+        ));
     }
     crate::config::write_all(&done)
 }
