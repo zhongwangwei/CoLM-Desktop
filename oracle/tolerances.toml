@@ -25,10 +25,7 @@ variables = [
   "band", "lake", "rtyp", "soil", "soilinterface", "soilsnow", "vegnodes",
   # 未启用的用户自定义诊断槽：两个黄金文件里全是 -1e36 的 missing_value
   "f_sensors",
-  # f_lai 只在 DEF_VEG_SNOW 关闭时才是逐位安全的：CoLMMAIN.F90:2143-2149 里
-  # lai = tlai，但该开关打开时变成 lai = tlai * sigf，于是继承雪盖状态。
-  # 两个黄金算例都没开它。若将来算例打开，f_lai 必须移到 tier2。
-  "f_lai", "f_green",
+  "f_green",
   "f_xy_t", "f_xy_q", "f_xy_pbot", "f_xy_us", "f_xy_vs",
   "f_xy_solarin", "f_xy_frl", "f_xy_prc", "f_xy_prl",
   "f_xy_rain", "f_xy_snow",
@@ -77,13 +74,12 @@ variables = [
   "f_qinfl", "f_qdrip", "f_qintr", "f_ldew",
   "f_frcsat", "f_rss", "f_respc",
   "f_wdsrf", "f_wdsrf_inst", "f_wetwat", "f_wetwat_inst", "f_wetzwt",
-  "f_o3uptakesun", "f_o3uptakesha",
-  "f_laisun", "f_laisha",
+  "f_lai", "f_laisun", "f_laisha",
   "f_xerr", "f_zerr",
   # 从 tier0/tier1 移入。依据见本文件顶部的"层级不倒挂"不变式：
   #   f_z0m  —— 是 MOD_LeafTemperature_Extended.F90:1299 的输出（40 次准 Newton
   #             迭代耦合 Monin-Obukhov），设计文档 §2.11 点名的最难移植单元之一
-  #   f_sai  —— CoLMMAIN.F90:2144 是 sai = tsai * sigf，无条件继承雪盖状态
+  #   f_lai / f_sai —— 植被积雪开启时乘以 sigf，继承雪盖状态
   #   f_sigf / f_fsno —— MOD_SnowFraction 的输出，由 scv/snowdp 驱动
   #   f_scv / f_snowdp —— 雪盖状态本身
   #   f_olrg / f_trad —— 由地表与叶片温度导出（实测与 f_t_soisno 相关 +0.98）
