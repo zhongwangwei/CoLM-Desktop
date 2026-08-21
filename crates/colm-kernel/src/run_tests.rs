@@ -20,12 +20,17 @@ fn fake_kernel(name: &str, script: &str) -> (Kernel, PathBuf) {
     std::fs::create_dir_all(d.join("work")).expect("create workdir");
     for prog in crate::manifest::PROGRAMS {
         let p = d.join(crate::manifest::program_file(prog));
-        std::fs::write(&p, script).expect("write script");
+        // Linux CI 偶发 `Text file busy`：在 overlayfs 上，刚关闭写句柄就直接
+        // exec 同一路径仍可能撞到 ETXTBSY。先写临时文件、关句柄，再原子改名，
+        // 让最终可执行路径从未以写模式打开过。
+        let tmp = p.with_extension("new");
+        std::fs::write(&tmp, script).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
+        std::fs::rename(&tmp, &p).expect("install script");
     }
     let manifest = serde_json::from_str(crate::manifest::manifest_tests::SAMPLE).expect("manifest");
     (

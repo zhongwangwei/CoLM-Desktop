@@ -23,6 +23,11 @@ export const state = {
   /** 五页向导的实际选择；不进 recent，每次启动重新问。 */
   wizard: null,
   cases: [],
+  /** 本次向导中由界面新建的算例目录。root 里的历史算例仍用于避开重名，
+   *  但不进入列表、批量运行或评估。返回首页开始新任务时清空。 */
+  createdCases: new Set(),
+  /** 站点文件 -> 本次为它创建的算例目录，防止重复点击又建一份。 */
+  createdBySite: new Map(),
   /** 站点库扫描结果，见 colm-cli scan */
   sites: [],
   /** 勾中的站点，批量的作用对象。键是**站点文件的绝对路径**。

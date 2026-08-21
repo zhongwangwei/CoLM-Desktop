@@ -198,6 +198,9 @@ export async function renderFields() {
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
   flows.add('basic-timing');
+  // 这一页还含不属于 namelist 的“批量并行算例数”，不能因为单点内核过滤掉
+  // 所有 MPI 字段就把整个入口藏掉。
+  flows.add('basic-grid');
 
   for (const [page, basic] of basics) {
     const rows = shown.filter(e => page.sections.includes(sectionOf(e)))

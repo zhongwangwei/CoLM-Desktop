@@ -82,6 +82,19 @@ fn without_an_explicit_path_the_naming_convention_is_used() {
 }
 
 #[test]
+fn scanning_can_match_the_same_site_in_an_explicit_forcing_directory() {
+    let root = std::env::temp_dir().join(format!("colm-met-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let site = layout(&root);
+    let chosen = root.join("converted");
+    std::fs::create_dir_all(&chosen).unwrap();
+    let met = chosen.join("AA_Met.nc");
+    std::fs::write(&met, b"converted").unwrap();
+
+    assert_eq!(super::forcing_for(&site, Some(&chosen)), Some(met));
+}
+
+#[test]
 fn an_explicit_path_wins_over_the_convention() {
     // **这条是「用自己的数据」的关键。** 转换产物不在 `<root>/Forcing/`
     // 下，也不叫 `<stem>_Met.nc` —— 那两套命名是 PLUMBER2 与

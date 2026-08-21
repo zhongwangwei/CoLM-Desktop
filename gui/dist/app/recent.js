@@ -14,7 +14,8 @@ import { $ } from './ui.js';
 // `fsrc`（前处理页的强迫场文件）就漏过一次，真机验收才发现。
 const REMEMBERED = [
   'sitedir', 'root', 'obs',
-  'fsrc', 'fmet',        // 前处理：强迫场的源文件与建算例时指定的产物
+  'fsrc', 'forcingdir',  // 前处理源文件，以及建算例时用于匹配的强迫场目录
+  'cpu-workers',         // 批量运行同时占用的 CPU 核数
   'soutdir', 'srawdata', // 前处理：站点属性的产物目录与 rawdata
   // **经纬度不记。** 那是每个站点各不相同的东西，恢复上一个站点的坐标
   // 只会让人在没注意的情况下建出一份位置错的站点文件 —— 而位置错的

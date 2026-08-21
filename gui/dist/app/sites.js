@@ -7,7 +7,9 @@ import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
 import { renderSteps, setStatus } from './shell.js';
-import { batchTarget, updateCaseBatchButtons } from './batch.js';
+import {
+  batchTarget, currentCases, freshCaseName, updateCaseBatchButtons,
+} from './batch.js';
 import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
 
@@ -42,16 +44,16 @@ $('rescan').onclick = async () => {
 
 /** 算例列表渲染进一个容器。
  *
- *  **两页各一个。** 基本设定看目录全表，运行页只看本次批次；
+ *  **两页各一个。** 基本设定看本次创建的算例，运行页看本次运行批次；
  *  一个 DOM 元素进不了两页。
  *  勾选状态共享 `state.pickedCases`，两边贯通。 */
 function renderCasesInto(box) {
   box.textContent = '';
-  const cases = box.id === 'cases-run' ? batchTarget() : state.cases;
+  const cases = box.id === 'cases-run' ? batchTarget() : currentCases();
   if (!cases.length) {
     box.innerHTML = box.id === 'cases-run'
       ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在前面选站点并建算例。</p>'
-      : '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
+      : '<p class="muted" style="font-size:11px">本次还没有创建算例；root 里的旧算例不会显示。</p>';
     return;
   }
   for (const c of cases) {
@@ -234,24 +236,29 @@ export function assignCaseNames(sites) {
 async function ensureCase(s) {
   const root = $('root').value.trim();
   if (!root) { setStatus('先在“基本设定 / 文件与目录”指定算例放哪'); return null; }
-  const cname = s.caseName ?? s.name;
-  if (state.cases.some(c => c.name === cname)) return cname;
+  const madeDir = state.createdBySite.get(s.site_file);
+  const made = state.cases.find(c => c.dir === madeDir);
+  if (made) return made.name;
+  const cname = freshCaseName(s.caseName ?? s.name);
   if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
   setStatus(`正在为 ${s.name} 建算例…`);
   try {
+    const out = joinPath(root, cname);
     await invoke('new_case', {
-      site: s.site_file, out: joinPath(root, cname), name: cname,
+      site: s.site_file, out, name: cname,
       // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
       // 时间边界与预热在基本设定的专门分页显示。
       start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,
-      // 空就不传 —— `colm-cli new` 那边会走命名约定，内置数据集正常。
-      // 只有「用自己的数据」才需要显式指定，而那时候约定会推出**原始**
-      // 强迫场并静默用它。
-      met: $('fmet').value.trim() || null,
+      // 扫描已经按“强迫场目录 + 站点名”匹配到具体文件；把确切路径传下去，
+      // 避免 new 再按兄弟目录约定推回另一份旧文件。
+      met: s.met_file,
       fields: wizardFields(),
     });
+    state.createdCases.add(out);
+    state.createdBySite.set(s.site_file, out);
+    s.caseName = cname;
     setStatus(`已为 ${s.name} 建好算例`);
     return cname;
   } catch (e) { setStatus(`${s.name}：${e}`); return null; }
@@ -268,7 +275,9 @@ $('scan').onclick = async () => {
   try {
     // quick: 只读站点文件。实测 90 站 0.07 秒，而完整读要 0.35 秒 ——
     // 第一屏只要经纬度与地类，强迫场的时间范围等选中了再补。
-    const r = await invoke('scan_sites', { dir, quick: true });
+    const r = await invoke('scan_sites', {
+      dir, forcingDir: $('forcingdir').value.trim() || null, quick: true,
+    });
     // 算例目录也别问 —— 默认放在站点数据旁边。**显示出来且可改**，
     // 不是偷偷决定：产物落在哪儿是用户该看得见的事。
     if (!$('root').value.trim()) {
@@ -365,7 +374,7 @@ export function renderSites(r = {}) {
     // 按 caseName 匹配，不是 name —— 重名站点（AU-Preston 在 PLUMBER2 与
     // Urban-PLUMBER 里各有一个）建出来的目录带后缀，按 name 找会一个都
     // 认不出、或者两行都认成同一个。
-    const c = state.cases.find(x => x.name === (s.caseName ?? s.name));
+    const c = currentCases().find(x => x.name === (s.caseName ?? s.name));
     if (c) tags.push(c.has_history ? '已跑过' : '已建算例');
     if (s.urban) tags.push('城市');
     if (!s.met_file) tags.push('无强迫场');
@@ -400,13 +409,18 @@ export function renderSites(r = {}) {
 export async function ensureCases(sites) {
   const names = [];
   const failed = [];
+  const root = $('root').value.trim();
+  // 旧算例不展示，但命名时必须看见它们，否则会覆盖同名目录。
+  if (root) {
+    try { state.cases = await invoke('list_cases', { root }); }
+    catch { state.cases = []; } // root 还没创建时自然没有重名
+  }
   for (const [i, s] of sites.entries()) {
     setStatus(`准备算例 ${i + 1}/${sites.length}：${s.name}`);
     const n = await ensureCase(s);
     if (n) names.push(n); else failed.push(s.name);
   }
   // **扫一次，不是每建一个扫一次。** 见 ensureCase 的注释。
-  const root = $('root').value.trim();
   if (root) {
     try {
       state.cases = await invoke('list_cases', { root });
@@ -441,8 +455,9 @@ $('use-example').onclick = async () => {
   try {
     const e = await invoke('install_example');
     $('sitedir').value = e.sitedir;
+    $('forcingdir').value = e.forcingdir;
     $('root').value = e.root;
-    for (const id of ['sitedir', 'root']) $(id).dispatchEvent(new Event('change'));
+    for (const id of ['sitedir', 'forcingdir', 'root']) $(id).dispatchEvent(new Event('change'));
     setStatus(e.already ? '示例数据已经在了' : '示例数据已放好');
     $('scan').click();
   } catch (err) { setStatus(err); }

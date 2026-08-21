@@ -10,6 +10,21 @@ import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
 
+// 单点内核不启 MPI；多核的实际用途是并发跑多个独立站点。默认沿用原来的
+// 两路并发，但让用户在基本设定里按机器容量调整。
+const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
+$('cpu-workers').max = String(cpuCapacity);
+$('cpu-workers').value = String(Math.min(cpuCapacity, Number($('cpu-workers').value) || 2));
+$('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
+
+function requestedWorkers() {
+  const n = Math.trunc(Number($('cpu-workers').value));
+  const valid = Number.isFinite(n) ? n : 1;
+  const clamped = Math.max(1, Math.min(cpuCapacity, valid));
+  $('cpu-workers').value = String(clamped);
+  return clamped;
+}
+
 export async function refreshKernels() {
   const s = $('kernel');
   state.kernels = await invoke('list_kernels');
@@ -176,7 +191,9 @@ $('runall').onclick = async () => {
   for (const d of dirs) state.runState[d] = '待运行';
   renderCases();
   try {
-    const n = await invoke('run_batch', { cases: dirs, kernel: $('kernel').value });
+    const n = await invoke('run_batch', {
+      cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
+    });
     status(`批次结束：${n}/${dirs.length} 个算例跑完`);
   } catch (e) { status(e); }
   finally { updateCaseBatchButtons(); $('run').disabled = false; }

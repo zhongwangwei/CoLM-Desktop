@@ -477,10 +477,9 @@ fn pump(
 
 /// 同时最多跑几个算例。
 ///
-/// **这个数没被测过。** 每个子进程都读同一份 rawdata、写各自的输出，
-/// 瓶颈大概率在磁盘而不是 CPU，但没量过。要调之前先量 ——
-/// 别把猜的数留成看起来经过调优的样子。
-const MAX_CONCURRENT: usize = 2;
+fn batch_width(requested: usize, available: usize) -> usize {
+    requested.clamp(1, available.max(1))
+}
 
 /// 排队跑一批算例。**返回时批次还没跑完** —— 进度全靠事件，
 /// 每条都带 `case`，前端据此更新对应那一行。
@@ -493,9 +492,14 @@ pub async fn run_batch(
     log: tauri::State<'_, RunLog>,
     cases: Vec<String>,
     kernel: String,
+    max_concurrent: usize,
 ) -> Result<usize, String> {
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let width = batch_width(max_concurrent, available);
     let mut done = 0usize;
-    for chunk in cases.chunks(MAX_CONCURRENT) {
+    for chunk in cases.chunks(width) {
         let mut handles = Vec::new();
         for case in chunk {
             let (a, c, k) = (app.clone(), case.clone(), kernel.clone());

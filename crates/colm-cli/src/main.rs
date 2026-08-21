@@ -5,7 +5,8 @@
 //! 答「能产出什么」的 `colm-hist` 闸门表不认识 netcdf。
 //!
 //! ```text
-//! colm-cli scan      --dir <Sitedata 目录> [--out sites.json] [--quick 1]
+//! colm-cli scan      --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
+//!                    [--out sites.json] [--quick 1]
 //! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>]
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
@@ -30,7 +31,8 @@ use colm_kernel::Kernel;
 
 const USAGE: &str = "\
 usage:
-  colm-cli scan    --dir <Sitedata 目录> [--out sites.json] [--quick 1]
+  colm-cli scan    --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
+                   [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N]
                    [--rawdata <dir>] [--json 1]
@@ -72,6 +74,7 @@ fn main() -> Result<()> {
         "scan" => {
             cmd_scan(
                 &opts.need("--dir")?,
+                opts.get("--forcing-dir").as_deref().map(Path::new),
                 opts.get("--out").as_deref(),
                 opts.get("--quick").is_some(),
             )?;
@@ -403,21 +406,32 @@ const LAYOUTS: [(&str, &str, &str); 2] = [
 ///
 /// 两套约定都试 —— 用户只给一个站点文件路径，其余两个推得出来。
 fn sibling(site: &Path, dir: &str, which: usize) -> Option<PathBuf> {
+    companion_name(site, which).and_then(|name| {
+        let p = site.parent()?.parent()?.join(dir).join(name);
+        p.exists().then_some(p)
+    })
+}
+
+/// 按数据集命名约定，从站点文件名得到配套的强迫场或观测文件名。
+fn companion_name(site: &Path, which: usize) -> Option<String> {
     let name = site.file_name()?.to_str()?;
     for (site_suffix, met, flux) in LAYOUTS {
         let Some(stem) = name.strip_suffix(site_suffix) else {
             continue;
         };
-        let p = site
-            .parent()?
-            .parent()?
-            .join(dir)
-            .join(format!("{stem}{}", if which == 0 { met } else { flux }));
-        if p.exists() {
-            return Some(p);
-        }
+        return Some(format!("{stem}{}", if which == 0 { met } else { flux }));
     }
     None
+}
+
+/// 扫描时显式选择的强迫场目录优先；不给才使用 Sitedata 的兄弟目录。
+fn forcing_for(site: &Path, forcing_dir: Option<&Path>) -> Option<PathBuf> {
+    match forcing_dir {
+        Some(dir) => companion_name(site, 0)
+            .map(|name| dir.join(name))
+            .filter(|path| path.is_file()),
+        None => sibling(site, "Forcing", 0),
+    }
 }
 
 /// 强迫场文件：显式给了就用它，没给才按命名约定推。
@@ -479,7 +493,7 @@ struct SiteInfo {
     problem: Option<String>,
 }
 
-fn cmd_scan(dir: &Path, out: Option<&str>, quick: bool) -> Result<()> {
+fn cmd_scan(dir: &Path, forcing_dir: Option<&Path>, out: Option<&str>, quick: bool) -> Result<()> {
     let mut sites: Vec<SiteInfo> = Vec::new();
     let rd = std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
@@ -497,7 +511,7 @@ fn cmd_scan(dir: &Path, out: Option<&str>, quick: bool) -> Result<()> {
             continue;
         };
         let short = stem.split('_').next().unwrap_or(stem).to_string();
-        let met = sibling(&p, "Forcing", 0);
+        let met = forcing_for(&p, forcing_dir);
         let obs = sibling(&p, "Observation", 1);
 
         let (mut lon, mut lat, mut landtype, mut problem) = (f64::NAN, f64::NAN, None, None);

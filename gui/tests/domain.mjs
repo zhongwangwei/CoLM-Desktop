@@ -100,6 +100,7 @@ choose('RangeCheck');
 next();
 
 if (!ids.domaingate.hidden) throw new Error('wizard did not finish');
+if (state.step !== 'basic-files') throw new Error(`wizard finished at ${state.step}, not basic-files`);
 ids.homeBtn.onclick();
 if (ids.domaingate.hidden || ids.gatetitle.textContent !== '这次要跑什么？') {
   throw new Error('home button did not reopen the wizard at page 1');

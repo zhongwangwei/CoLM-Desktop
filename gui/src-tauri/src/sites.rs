@@ -99,8 +99,16 @@ fn suggest_nearby(dir: &std::path::Path) -> Option<String> {
 /// 完整 0.35 秒、`--quick` 0.07 秒（macOS ARM，热缓存）。两者都够快到
 /// 可以同步调，`quick` 留给网络盘或机械盘。
 #[tauri::command]
-pub async fn scan_sites(dir: String, quick: bool) -> Result<ScanResult, String> {
+pub async fn scan_sites(
+    dir: String,
+    forcing_dir: Option<String>,
+    quick: bool,
+) -> Result<ScanResult, String> {
     let mut args = vec!["scan".to_string(), "--dir".into(), dir.clone()];
+    if let Some(forcing_dir) = forcing_dir.filter(|path| !path.trim().is_empty()) {
+        args.push("--forcing-dir".into());
+        args.push(forcing_dir);
+    }
     if quick {
         args.push("--quick".into());
         args.push("1".into());

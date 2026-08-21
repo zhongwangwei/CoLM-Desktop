@@ -11,6 +11,20 @@
 import { state } from './state.js';
 import { $ } from './ui.js';
 
+/** root 中可以有很多历史算例；主界面只展示本次向导创建的这一批。 */
+export function currentCases() {
+  return state.cases.filter(c => state.createdCases.has(c.dir));
+}
+
+/** 不覆盖 root 里同名的旧算例；给新算例找一个稳定、可读的新名字。 */
+export function freshCaseName(base, cases = state.cases) {
+  const names = new Set(cases.map(c => c.name));
+  if (!names.has(base)) return base;
+  let n = 2;
+  while (names.has(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+}
+
 /** 参数改动作用于哪些算例目录。**默认是整批** —— 用户勾了 20 个站点是要配
  *  "这一次运行"，不是配其中第一个。
  *
@@ -26,13 +40,14 @@ export function editTarget() {
 /** 批量操作作用于谁：勾了就是勾中的；否则只用这次建/选出来的批次。
  *  不再默认扫整个 root —— 那里面常有上一次残留的自然站/旧算例。 */
 export function batchTarget() {
-  const picked = state.cases.filter(c => state.pickedCases.has(c.dir));
+  const current = currentCases();
+  const picked = current.filter(c => state.pickedCases.has(c.dir));
   if (picked.length) return picked;
   if (state.batch.length) {
     const want = new Set(state.batch);
-    return state.cases.filter(c => want.has(c.dir));
+    return current.filter(c => want.has(c.dir));
   }
-  return state.selected ? [state.selected] : [];
+  return state.selected && state.createdCases.has(state.selected.dir) ? [state.selected] : [];
 }
 
 /** 两个批量按钮上的字**就是它们会做的事**。
@@ -41,7 +56,7 @@ export function batchTarget() {
  *  但按钮上只写「全部运行」的话，那条规则就是**隐藏的** —— 用户勾了三个、
  *  按下去跑了九个，事后才知道。所以文字跟着勾选变。 */
 export function updateCaseBatchButtons() {
-  const picked = state.cases.filter(c => state.pickedCases.has(c.dir));
+  const picked = currentCases().filter(c => state.pickedCases.has(c.dir));
   const target = batchTarget();
   const suffix = picked.length ? `选中的 ${picked.length} 个` : `本次 ${target.length} 个`;
   const run = $('runall');

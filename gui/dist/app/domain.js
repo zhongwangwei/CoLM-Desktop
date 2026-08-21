@@ -243,6 +243,8 @@ function finish() {
   state.pickedSite = null;
   state.pickedCases.clear();
   state.batch = [];
+  state.createdCases.clear();
+  state.createdBySite.clear();
   state.selected = null;
   state.text = '';
   state.domain = picked.domain;
@@ -255,7 +257,9 @@ function finish() {
   };
   globalThis.dispatchEvent?.(new Event('colm:wizard'));
   $('domaingate').hidden = true;
-  go('prep');
+  // 向导已经决定本次模型结构；通常下一步是选现成站点并建算例，不是重新
+  // 制作原始数据。前处理仍在左侧作为按需入口，但不再拦住主路径。
+  go('basic-files');
 }
 
 const logical = value => value ? '.true.' : '.false.';

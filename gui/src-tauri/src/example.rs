@@ -37,6 +37,8 @@ fn source(app: &tauri::AppHandle) -> Option<PathBuf> {
 pub struct Example {
     /// 扫描用的 Sitedata 目录
     pub sitedir: String,
+    /// 与 Sitedata 配套的 Forcing 目录
+    pub forcingdir: String,
     /// 建议的算例根目录（`~/CoLM-cases`，不放在示例数据旁边——见 [`cases_root`]）
     pub root: String,
     /// 已经在那儿了（这次没复制）
@@ -93,6 +95,7 @@ pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     Ok(Example {
         sitedir: dest.join("Sitedata").display().to_string(),
+        forcingdir: dest.join("Forcing").display().to_string(),
         root: root.display().to_string(),
         already,
     })

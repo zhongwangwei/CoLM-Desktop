@@ -166,3 +166,11 @@ fn a_failed_run_says_why_not_just_the_exit_code() {
     assert_eq!(failure_reason(&[]), None);
     assert_eq!(failure_reason(&["   ".to_string()]), None);
 }
+
+#[test]
+fn requested_batch_cpu_count_is_bounded_by_the_machine() {
+    assert_eq!(batch_width(0, 8), 1);
+    assert_eq!(batch_width(4, 8), 4);
+    assert_eq!(batch_width(99, 8), 8);
+    assert_eq!(batch_width(4, 0), 1);
+}

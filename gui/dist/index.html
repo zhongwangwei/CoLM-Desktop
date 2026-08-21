@@ -151,13 +151,13 @@
             </div>
           </div>
           <div class="field">
-            <label>强迫场文件 <span class="hint">（可选）</span></label>
+            <label>强迫场目录 <span class="hint">（可选）</span></label>
             <div class="browse">
-              <input class="input" id="fmet" placeholder="留空 = 按命名约定在 ../Forcing/ 下找">
-              <button class="btn-ghost pick" data-for="fmet" data-file="nc">选择…</button>
+              <input class="input" id="forcingdir" placeholder="留空 = 使用站点目录旁的 ../Forcing/">
+              <button class="btn-ghost pick" data-for="forcingdir">选择…</button>
             </div>
             <div class="muted mini" style="margin-top:5px">
-              第 1 步转换过强迫场时指定产物；留空会使用命名约定找到的原始文件。
+              扫描时按站点名称在这里匹配强迫场；留空则使用站点目录旁的 Forcing 目录。
             </div>
           </div>
           <div id="urbandirs" hidden>
@@ -194,7 +194,7 @@
             <div class="browse">
               <input class="input" id="root" placeholder="…/colm-cases">
               <button class="btn-ghost pick" data-for="root">选择…</button>
-              <button class="btn-ghost" id="rescan">重新扫描已建的</button>
+              <button class="btn-ghost" id="rescan">刷新本次算例</button>
             </div>
             <p class="fail mini" id="rootspace" hidden>
               路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。
@@ -212,7 +212,16 @@
         <div id="timing"><p class="muted">先在“文件与目录”里选择站点并建算例</p></div>
       </div>
       <div class="flow-pane" data-flow-pane="basic-grid" hidden>
-        <div class="card"><h3>网格与并行</h3><div id="basic-grid-fields"><p class="muted">先建算例</p></div></div>
+        <div class="card">
+          <h3>CPU 并行</h3>
+          <div class="ch">单点内核本身是串行的；这里控制批量运行时同时启动多少个算例，每个算例使用一个 CPU 核。</div>
+          <div class="field" style="margin-top:12px">
+            <label>并行算例数（CPU 核）</label>
+            <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
+            <div class="muted mini" id="cpu-capacity" style="margin-top:5px"></div>
+          </div>
+        </div>
+        <div class="card"><h3>网格与并行参数</h3><div id="basic-grid-fields"><p class="muted">先建算例</p></div></div>
       </div>
       <div class="flow-pane" data-flow-pane="basic-surface" hidden>
         <div class="card"><h3>地表数据</h3><div id="basic-surface-fields"><p class="muted">先建算例</p></div></div>
