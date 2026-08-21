@@ -104,6 +104,11 @@ code { font-family: var(--mono); font-size: .92em; background: var(--surface-2);
 .flow-block:not(:last-child)::after { content: ""; position: absolute; left: 22px; top: 34px;
                                       bottom: -3px; width: 1.5px; background: var(--border); }
 .flow-head { z-index: 1; }
+summary.flow-head { list-style: none; }
+summary.flow-head::-webkit-details-marker { display: none; }
+summary.flow-head::after { content: "›"; margin-left: auto; color: var(--muted);
+                           font-size: 18px; line-height: 1; transition: transform .12s; }
+details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .flow-children { margin: 0 4px 8px 45px; padding-left: 8px;
                  border-left: 1px solid var(--border); }
 .substep { position: relative; display: flex; flex-direction: column; padding: 6px 8px;

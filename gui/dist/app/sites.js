@@ -11,6 +11,11 @@ import { updateCaseBatchButtons } from './batch.js';
 import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
 
+/** 站点身份必须与向导的 URBAN 选择一致，示例与用户目录走同一条规则。 */
+export function sitesForWizard(sites = state.sites) {
+  return sites.filter(s => s.urban === urbanEnabled());
+}
+
 /** 算例根目录含空格，当场标出来。
  *
  *  CoLM 有 55 处不加引号的 `CALL system('mkdir -p ' // trim(dir))`——路径一有空格
@@ -143,7 +148,7 @@ export function pickSite(s) {
  *  勾了就用勾中的那些，一个没勾就用高亮的那一个 —— 与批量按钮同一条规则，
  *  而按钮上的字说出它会做什么，不留隐藏模式。 */
 async function confirmSelection() {
-  const checked = state.sites.filter(s => state.picked.has(s.site_file));
+  const checked = sitesForWizard().filter(s => state.picked.has(s.site_file));
   const target = checked.length ? checked : (state.pickedSite ? [state.pickedSite] : []);
   if (!target.length) { setStatus('先点一个站点，或勾选几个'); return; }
   const btn = $('makecase').querySelector('button');
@@ -307,23 +312,26 @@ export function renderSites(r = {}) {
     $('sitesummary').textContent = '\u00a0';
     return;
   }
-  const bad = state.sites.filter(s => s.problem).length;
-  const noObs = state.sites.filter(s => !s.obs_file).length;
+  const sites = sitesForWizard();
+  const allowed = new Set(sites.map(s => s.site_file));
+  for (const path of state.picked) if (!allowed.has(path)) state.picked.delete(path);
+  if (state.pickedSite && !allowed.has(state.pickedSite.site_file)) state.pickedSite = null;
+  const bad = sites.filter(s => s.problem).length;
+  const noObs = sites.filter(s => !s.obs_file).length;
   renderMakeCase();
-  const urban = state.sites.filter(s => s.urban).length;
   const urbanRun = urbanEnabled();
-  // 把「有多少不能跑 / 不能评估」直接说出来。让人自己数一列图标，
-  // 等于把一次可以立刻回答的问题推给用户。
-  //
-  const mismatch = state.sites.filter(x => x.urban !== urbanRun).length;
   $('sitesummary').textContent =
-    `${state.sites.length} 个站点` +
-    (urban ? ` · ${urban} 个城市` : '') +
+    `${sites.length} 个${urbanRun ? '城市' : '自然'}站点` +
     (noObs ? ` · ${noObs} 个无观测` : '') +
-    (bad ? ` · ${bad} 个读不了` : '') +
-    (mismatch ? `，其中 ${mismatch} 个跑不了` : '');
+    (bad ? ` · ${bad} 个读不了` : '');
 
-  for (const s of state.sites) {
+  if (!sites.length && state.sites.length) {
+    box.innerHTML = `<p class="muted mini">目录里没有${urbanRun ? '城市' : '自然'}站点。</p>`;
+    renderSteps();
+    return;
+  }
+
+  for (const s of sites) {
     const d = document.createElement('div');
     d.className = 'case';
     d.setAttribute('aria-selected', String(state.pickedSite?.name === s.name));
@@ -356,10 +364,6 @@ export function renderSites(r = {}) {
     const c = state.cases.find(x => x.name === (s.caseName ?? s.name));
     if (c) tags.push(c.has_history ? '已跑过' : '已建算例');
     if (s.urban) tags.push('城市');
-    // 城市过程已是运行时开关。城市站与自然站是否匹配看向导选择，
-    // 不再从内核目录名猜。
-    if (s.urban && !urbanRun) tags.push('要在向导打开 URBAN');
-    if (!s.urban && urbanRun) tags.push('当前向导打开了 URBAN');
     if (!s.met_file) tags.push('无强迫场');
     if (!s.obs_file) tags.push('无观测');
     if (s.problem) tags.push('读不了');
@@ -415,7 +419,7 @@ export async function ensureCases(sites) {
 
 
 
-$('pick-all').onclick = () => { for (const s of state.sites) state.picked.add(s.site_file); renderSites(); };
+$('pick-all').onclick = () => { for (const s of sitesForWizard()) state.picked.add(s.site_file); renderSites(); };
 $('pick-none').onclick = () => { state.picked.clear(); renderSites(); };
 
 

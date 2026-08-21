@@ -4,29 +4,29 @@ import { state } from './state.js';
 import { $ } from './ui.js';
 
 const ready = () => (state.selected ? null : '先在文件与目录建一个算例');
+const available = id => () => state.availableFlows.has(id);
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
   { n: 1, t: '前处理', d: '原始数据转成模型格式', steps: [
     { id: 'prep', page: 'prep', t: '强迫场与站点属性', d: '准备模型输入', need: () => null },
   ] },
-  { n: 2, t: '基本设定', d: '建例与基础输入', steps: [
-    { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null },
-    { id: 'basic-site', page: 'basic', t: '站点信息', d: '位置、地类与站点文件', need: ready },
-    { id: 'basic-timing', page: 'basic', t: '时间与预热', d: '模拟范围与 spin-up', need: ready },
-    { id: 'basic-grid', page: 'basic', t: '网格与并行', d: '网格和进程划分', need: ready },
-    { id: 'basic-surface', page: 'basic', t: '地表数据', d: '地表输入设置', need: ready },
-    { id: 'basic-initial', page: 'basic', t: '初始场', d: '初始状态设置', need: ready },
-    { id: 'basic-forcing', page: 'basic', t: '强迫场', d: '强迫场读取设置', need: ready },
-    { id: 'basic-other', page: 'basic', t: '其他', d: '按配置显示附加设置', need: ready },
+  { n: 2, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [
+    { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null, show: available('basic-files') },
+    { id: 'basic-site', page: 'basic', t: '站点信息', d: '位置、地类与站点文件', need: ready, show: available('basic-site') },
+    { id: 'basic-timing', page: 'basic', t: '时间与预热', d: '模拟范围与 spin-up', need: ready, show: available('basic-timing') },
+    { id: 'basic-grid', page: 'basic', t: '网格与并行', d: '网格和进程划分', need: ready, show: available('basic-grid') },
+    { id: 'basic-surface', page: 'basic', t: '地表数据', d: '地表输入设置', need: ready, show: available('basic-surface') },
+    { id: 'basic-initial', page: 'basic', t: '初始场', d: '初始状态设置', need: ready, show: available('basic-initial') },
+    { id: 'basic-forcing', page: 'basic', t: '强迫场', d: '强迫场读取设置', need: ready, show: available('basic-forcing') },
   ] },
-  { n: 3, t: '过程参数', d: '按过程逐项配置', steps: [
-    { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready },
-    { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready },
-    { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready },
-    { id: 'params-da', page: 'params', t: '数据同化', d: '同化过程设置', need: ready },
-    { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready },
-    { id: 'params-other', page: 'params', t: '其他', d: '调试与诊断', need: ready },
+  { n: 3, key: 'params', collapsible: true, t: '过程参数', d: '按过程逐项配置', steps: [
+    { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready, show: available('params-water') },
+    { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready, show: available('params-eco') },
+    { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready, show: available('params-river') },
+    { id: 'params-da', page: 'params', t: '数据同化', d: '同化过程设置', need: ready, show: available('params-da') },
+    { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: available('params-tracer') },
+    { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: available('params-urban') },
   ] },
   { n: 4, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
@@ -36,24 +36,28 @@ export const WORKFLOW = [
   ] },
 ];
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
+const visibleSteps = () => STEPS.filter(step => !step.show || step.show());
 
 export function nextOf(id) {
-  const i = STEPS.findIndex(s => s.id === id);
+  const steps = visibleSteps();
+  const i = steps.findIndex(s => s.id === id);
   if (i < 0) return null;
-  return STEPS[i + 1] ?? null;
+  return steps[i + 1] ?? null;
 }
 
 export function prevOf(id) {
-  const i = STEPS.findIndex(s => s.id === id);
+  const steps = visibleSteps();
+  const i = steps.findIndex(s => s.id === id);
   if (i <= 0) return null;
-  return STEPS[i - 1];
+  return steps[i - 1];
 }
 
 /** 每个子步骤都用同一对按钮相连。 */
 export function renderNextButtons() {
   for (const page of document.querySelectorAll('.page')) {
-    const here = STEPS.find(s => s.id === state.step && s.page === page.dataset.step)
-      ?? STEPS.find(s => s.page === page.dataset.step);
+    const steps = visibleSteps();
+    const here = steps.find(s => s.id === state.step && s.page === page.dataset.step)
+      ?? steps.find(s => s.page === page.dataset.step);
     const prev = prevOf(here?.id);
     const next = nextOf(here?.id);
     if (!prev && !next) { page.querySelector('.foot')?.remove(); continue; }
@@ -85,10 +89,12 @@ export function renderNextButtons() {
 
 export function go(id) {
   const step = STEPS.find(s => s.id === id);
-  if (!step) { setStatus(`没有这一步：${id}`); return; }
+  if (!step || (step.show && !step.show())) { setStatus(`当前配置没有这一步：${id}`); return; }
   const why = step.need();
   if (why) { setStatus(why); return; }
   state.step = id;
+  const group = WORKFLOW.find(g => g.steps.includes(step));
+  if (group?.collapsible) state.expandedFlows.add(group.key);
   for (const p of document.querySelectorAll('.page')) p.hidden = p.dataset.step !== step.page;
   for (const p of document.querySelectorAll('[data-flow-pane]')) {
     p.hidden = p.dataset.flowPane !== id;
@@ -101,21 +107,31 @@ export function renderSteps() {
   const box = $('steps');
   box.textContent = '';
   for (const group of WORKFLOW) {
-    const active = group.steps.some(s => s.id === state.step);
-    const why = group.steps[0].need();
-    const block = document.createElement('div');
+    const steps = group.steps.filter(step => !step.show || step.show());
+    if (!steps.length) continue;
+    const active = steps.some(s => s.id === state.step);
+    const why = steps[0].need();
+    const block = document.createElement(group.collapsible ? 'details' : 'div');
     block.className = 'flow-block';
-    const d = document.createElement('div');
+    if (group.collapsible) {
+      block.dataset.group = group.key;
+      block.open = state.expandedFlows.has(group.key);
+      block.ontoggle = () => {
+        if (block.open) state.expandedFlows.add(group.key);
+        else state.expandedFlows.delete(group.key);
+      };
+    }
+    const d = document.createElement(group.collapsible ? 'summary' : 'div');
     d.className = 'step flow-head' + (active ? ' current' : '');
     if (why) d.setAttribute('aria-disabled', 'true');
     d.innerHTML = `<span class="num">${group.n}</span><span class="step-copy">
       <span class="t">${group.t}</span><span class="d">${why ?? group.d}</span></span>`;
-    d.onclick = () => go(group.steps[0].id);
+    if (!group.collapsible) d.onclick = () => go(steps[0].id);
     block.appendChild(d);
-    if (group.steps.length > 1) {
+    if (group.collapsible) {
       const children = document.createElement('div');
       children.className = 'flow-children';
-      for (const s of group.steps) {
+      for (const s of steps) {
         const childWhy = s.need();
         const child = document.createElement('div');
         child.className = 'substep' + (state.step === s.id ? ' active' : '');
@@ -188,6 +204,18 @@ export function initShell() {
         p.classList.toggle('on', p.dataset.pane === b.dataset.pane);
     };
   }
+  addEventListener('colm:flows', () => {
+    const visible = visibleSteps();
+    if (!visible.some(step => step.id === state.step)) {
+      const currentGroup = WORKFLOW.find(group => group.steps.some(step => step.id === state.step));
+      const fallback = currentGroup?.steps.find(step => visible.includes(step))
+        ?? visible.find(step => step.id === 'basic-files')
+        ?? visible[0];
+      if (fallback) go(fallback.id);
+      return;
+    }
+    renderSteps();
+  });
   renderSteps();
 }
 

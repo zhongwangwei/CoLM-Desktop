@@ -12,22 +12,21 @@ import { urbanEnabled } from './kernel.js';
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
 // 新字段不能掉进「其他」。基本设定与过程参数各自只认这一份归属表。
 const BASIC_PAGES = [
-  { target: 'basic-files-fields', sections: ['算例', '文件与目录'] },
-  { target: 'basic-site-fields', sections: ['站点'] },
-  { target: 'basic-grid-fields', sections: ['网格与并行'] },
-  { target: 'basic-surface-fields', sections: ['地表数据'] },
-  { target: 'basic-initial-fields', sections: ['初始场'] },
-  { target: 'basic-forcing-fields', sections: ['强迫场'] },
-  { target: 'basic-other-fields', sections: ['城市'] },
+  { id: 'basic-site', target: 'basic-site-fields', sections: ['站点'] },
+  { id: 'basic-grid', target: 'basic-grid-fields', sections: ['网格与并行'] },
+  { id: 'basic-surface', target: 'basic-surface-fields', sections: ['地表数据'] },
+  { id: 'basic-initial', target: 'basic-initial-fields', sections: ['初始场'] },
+  { id: 'basic-forcing', target: 'basic-forcing-fields', sections: ['强迫场'] },
 ];
-const BASIC_SECTIONS = BASIC_PAGES.flatMap(p => p.sections);
 const PARAM_PAGES = [
-  { target: 'param-water-fields', sections: ['水热过程'] },
-  { target: 'param-eco-fields', sections: ['生态与生地化'] },
-  { target: 'param-river-fields', sections: ['河道与水库'] },
-  { target: 'param-da-fields', sections: ['数据同化'] },
-  { target: 'param-tracer-fields', sections: ['示踪剂'] },
-  { target: 'param-other-fields', sections: ['调试与诊断'] },
+  { id: 'params-water', target: 'param-water-fields', sections: ['水热过程'] },
+  { id: 'params-eco', target: 'param-eco-fields', sections: ['生态与生地化'] },
+  { id: 'params-river', target: 'param-river-fields', sections: ['河道与水库'] },
+  { id: 'params-da', target: 'param-da-fields', sections: ['数据同化'] },
+  { id: 'params-tracer', target: 'param-tracer-fields', sections: ['示踪剂'],
+    enabled: () => !!state.wizard?.physics?.tracer },
+  { id: 'params-urban', target: 'param-urban-fields', sections: ['城市'],
+    enabled: urbanEnabled },
 ];
 
 
@@ -136,6 +135,7 @@ export async function renderFields() {
   const hist = $('hist-fields');
   const basics = BASIC_PAGES.map(p => [p, $(p.target)]);
   const processes = PARAM_PAGES.map(p => [p, $(p.target)]);
+  const flows = new Set(['basic-files']);
   output.textContent = '';
   hist.textContent = '';
   for (const [, basic] of basics) basic.textContent = '';
@@ -150,6 +150,7 @@ export async function renderFields() {
     for (const [, process] of processes) {
       process.innerHTML = '<p class="muted">先在“文件与目录”里选择站点并建算例</p>';
     }
+    publishFlows(flows);
     return;
   }
   let entries;
@@ -157,6 +158,7 @@ export async function renderFields() {
   catch (e) {
     for (const [, target] of basics.concat(processes)) target.textContent = String(e);
     status(e);
+    publishFlows(flows);
     return;
   }
   // 这一批里取值不一致的字段。**必须标出来** —— 一个显示着某个值的输入框
@@ -184,30 +186,30 @@ export async function renderFields() {
   // 而那是个常规问题。
   const shown = inGroup.filter(e => !state.irrelevant.has(e.path));
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
-  const basicParams = shown.filter(e => BASIC_SECTIONS.includes(sectionOf(e)));
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
+  flows.add('basic-timing');
 
   for (const [page, basic] of basics) {
-    const rows = (page.sections.includes('城市') && !urbanEnabled() ? [] : basicParams)
-      .filter(e => page.sections.includes(sectionOf(e)))
+    const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (!rows.length) {
-      basic.innerHTML = page.sections.includes('城市') && !urbanEnabled()
-        ? '<p class="muted">当前是自然站配置，没有额外基础设置。</p>'
-        : '<p class="muted">当前配置没有这一类可设置项。</p>';
+      basic.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
       continue;
     }
+    flows.add(page.id);
     renderScope(basic);
     basic.appendChild(table(rows));
   }
 
   for (const [page, process] of processes) {
-    const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
+    const rows = (page.enabled && !page.enabled() ? [] : shown)
+      .filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (!rows.length) {
       process.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
       continue;
     }
+    flows.add(page.id);
     renderScope(process);
     process.appendChild(table(rows));
   }
@@ -223,7 +225,13 @@ export async function renderFields() {
   } else {
     output.innerHTML = '<p class="muted">当前配置没有可配置的输出参数。</p>';
   }
+  publishFlows(flows);
   await renderHistVars(hist);
+}
+
+function publishFlows(flows) {
+  state.availableFlows = flows;
+  globalThis.dispatchEvent?.(new Event('colm:flows'));
 }
 
 /** 一组字段渲染成一张表。分节之后每节各调一次。 */

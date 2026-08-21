@@ -88,13 +88,19 @@ fn basic_sections() -> BTreeSet<String> {
         .collect()
 }
 
-/// 这三个分类**有意**不进通用字段表 —— 各自有专门的卡片：
-/// 时间与预热在基本设定（`timing.js`），输出与重启在运行页的输出卡片
-/// （`renderFields` 的 `outputFields` 分支），输出变量在 `histvars.js`。
+/// 这些分类**有意**不进通用字段表：算例与目录已有专门控件，调试开关
+/// 由进门向导负责；时间、输出与输出变量各有专门卡片。
 ///
 /// 写死在这里而不是「凡是不认识的都放过」：新增一个分类时这个测试要红，
 /// 逼人做一次决定 —— 是进字段表，还是也给它一张卡片。
-const HANDLED_ELSEWHERE: &[&str] = &["时间与预热", "输出与重启", "输出变量"];
+const HANDLED_ELSEWHERE: &[&str] = &[
+    "算例",
+    "文件与目录",
+    "时间与预热",
+    "调试与诊断",
+    "输出与重启",
+    "输出变量",
+];
 
 #[test]
 fn every_backend_section_is_handled_by_the_frontend() {
@@ -138,24 +144,15 @@ fn basic_and_parameter_sections_do_not_overlap() {
         "这些分类在基本设定和参数页重复出现：{overlap:?}"
     );
 
-    let expected: BTreeSet<String> = [
-        "算例",
-        "文件与目录",
-        "站点",
-        "网格与并行",
-        "地表数据",
-        "初始场",
-        "城市",
-        "强迫场",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
+    let expected: BTreeSet<String> = ["站点", "网格与并行", "地表数据", "初始场", "强迫场"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     assert_eq!(basic, expected, "基本设定分页的字段归属变了");
 }
 
 #[test]
-fn the_three_special_sections_really_exist() {
+fn the_special_sections_really_exist() {
     // 白名单写错一个字，对应那组字段就悄悄掉进「没人处理」里，
     // 而上面那条测试**不会**报 —— 它只看有没有漏，不看白名单本身对不对。
     let backend = backend_sections();

@@ -139,6 +139,11 @@ fn the_installer_carries_a_runnable_example() {
     // 找到 ../Forcing 与 ../Observation。压平了扫描仍列得出站点，
     // 但强迫场找不到。
     assert!(js("sites.js").contains("install_example"), "界面上没有入口");
+    assert!(
+        js("sites.js").contains("sitesForWizard")
+            && js("sites.js").contains("s.urban === urbanEnabled()"),
+        "示例列表没有按自然站 / 城市站配置过滤"
+    );
 
     // 示例要小到能塞进安装包。原始三件套 19 MB，deflate 之后 3.1 MB。
     let bytes: u64 = ["Sitedata", "Forcing", "Observation"]

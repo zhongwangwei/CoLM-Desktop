@@ -8,6 +8,10 @@
 export const state = {
   /** 当前在第几步，见 shell.js 的 STEPS。 */
   step: 'prep',
+  /** 当前配置真正有内容的基础 / 过程子步骤。 */
+  availableFlows: new Set(['basic-files']),
+  /** 原生折叠组默认收起；用户打开后跨重绘保持。 */
+  expandedFlows: new Set(),
   /** 这次要跑什么。'site' | 'region' | 'global'，进门向导第 1 页设的。
    *  区域与全球还没有步骤链，现在只可能是 'site'。 */
   domain: null,

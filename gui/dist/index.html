@@ -147,17 +147,6 @@
             </div>
           </div>
           <div class="field">
-            <label>算例放哪</label>
-            <div class="browse">
-              <input class="input" id="root" placeholder="…/colm-cases">
-              <button class="btn-ghost pick" data-for="root">选择…</button>
-              <button class="btn-ghost" id="rescan">重新扫描已建的</button>
-            </div>
-            <p class="fail mini" id="rootspace" hidden>
-              路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。
-            </p>
-          </div>
-          <div class="field">
             <label>强迫场文件 <span class="hint">（可选）</span></label>
             <div class="browse">
               <input class="input" id="fmet" placeholder="留空 = 按命名约定在 ../Forcing/ 下找">
@@ -185,8 +174,8 @@
         </div>
 
         <div class="card">
-          <h3>选择站点并建算例</h3>
-          <div class="ch">点行只高亮；勾选用于批量。按“建算例”才会写文件。</div>
+          <h3>选择站点</h3>
+          <div class="ch">列表只显示与向导一致的自然站或城市站；点行高亮，勾选用于批量。</div>
           <p class="muted mini" id="sitesummary">&nbsp;</p>
           <div id="sites" class="listbox"></div>
           <div class="pill-row" style="margin-top:12px">
@@ -194,14 +183,24 @@
             <button class="btn-ghost" id="pick-none">全不选</button>
             <span class="muted mini" id="pickinfo">还没选</span>
           </div>
-          <div id="makecase" style="margin-top:12px"></div>
-          <div id="cases-built" class="listbox" style="margin-top:12px"></div>
         </div>
 
         <div class="card">
-          <h3>算例文件字段</h3>
-          <div class="ch">建好算例后，这里显示 case.nml 里的算例名和文件目录字段。</div>
-          <div id="basic-files-fields"><p class="muted">先选择站点并建算例</p></div>
+          <h3>算例放哪并建算例</h3>
+          <div class="ch">选择产物目录后，按按钮才会写入算例文件。</div>
+          <div class="field">
+            <label>算例根目录</label>
+            <div class="browse">
+              <input class="input" id="root" placeholder="…/colm-cases">
+              <button class="btn-ghost pick" data-for="root">选择…</button>
+              <button class="btn-ghost" id="rescan">重新扫描已建的</button>
+            </div>
+            <p class="fail mini" id="rootspace" hidden>
+              路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。
+            </p>
+          </div>
+          <div id="makecase" style="margin-top:12px"></div>
+          <div id="cases-built" class="listbox" style="margin-top:12px"></div>
         </div>
       </div>
 
@@ -224,18 +223,14 @@
       <div class="flow-pane" data-flow-pane="basic-forcing" hidden>
         <div class="card"><h3>强迫场</h3><div id="basic-forcing-fields"><p class="muted">先建算例</p></div></div>
       </div>
-      <div class="flow-pane" data-flow-pane="basic-other" hidden>
-        <div class="card"><h3>其他</h3><div class="ch">只显示本次配置真正启用的附加设置。</div>
-          <div id="basic-other-fields"><p class="muted">先建算例</p></div></div>
-      </div>
     </section>
 
     <!-- ③ 参数 -->
     <section class="page" data-step="params" hidden>
       <div class="work-head"><span class="kicker">第 3 步</span></div>
       <h1>过程参数</h1>
-      <p class="sub">这里只保留水热、生态生地化、河道水库、数据同化、示踪剂和诊断参数；
-        站点、路径、网格、地表、初始场、城市与强迫场都在基本设定。</p>
+      <p class="sub">按当前配置显示水热、生态生地化、河道水库、数据同化、示踪剂和城市过程；
+        没有启用或没有可设置项的分栏会自动隐藏。</p>
 
       <div class="card">
         <h3>参数预设</h3>
@@ -264,8 +259,8 @@
       <div class="flow-pane" data-flow-pane="params-tracer" hidden>
         <div class="card"><h3>示踪剂</h3><div id="param-tracer-fields"></div></div>
       </div>
-      <div class="flow-pane" data-flow-pane="params-other" hidden>
-        <div class="card"><h3>其他</h3><div id="param-other-fields"></div></div>
+      <div class="flow-pane" data-flow-pane="params-urban" hidden>
+        <div class="card"><h3>城市过程</h3><div id="param-urban-fields"></div></div>
       </div>
     </section>
 

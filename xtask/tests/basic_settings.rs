@@ -25,7 +25,6 @@ fn basic_settings_owns_site_selection_and_its_left_hand_substeps() {
         "basic-surface",
         "basic-initial",
         "basic-forcing",
-        "basic-other",
     ] {
         assert!(
             basic.contains(&format!(r#"data-flow-pane="{pane}""#)),
@@ -42,6 +41,17 @@ fn basic_settings_owns_site_selection_and_its_left_hand_substeps() {
             "{id} 仍未并入基本设定"
         );
     }
+    let sites = basic.find(r#"id="sites""#).expect("site list");
+    let root = basic.find(r#"id="root""#).expect("case root");
+    let makecase = basic.find(r#"id="makecase""#).expect("make case");
+    assert!(
+        sites < root && root < makecase,
+        "算例目录没有移到站点列表下面"
+    );
+    assert!(
+        !basic.contains(r#"id="basic-files-fields""#),
+        "不需要的算例文件字段卡仍在"
+    );
     assert!(
         !html.contains(r#"data-step="sites""#),
         "站点已经并入基本设定，不应再保留重复步骤"
@@ -51,6 +61,7 @@ fn basic_settings_owns_site_selection_and_its_left_hand_substeps() {
 #[test]
 fn the_left_workflow_connects_basic_and_process_substeps() {
     let shell = std::fs::read_to_string(root().join("gui/dist/app/shell.js")).expect("shell.js");
+    let state = std::fs::read_to_string(root().join("gui/dist/app/state.js")).expect("state.js");
     for step in [
         "basic-files",
         "basic-site",
@@ -59,13 +70,12 @@ fn the_left_workflow_connects_basic_and_process_substeps() {
         "basic-surface",
         "basic-initial",
         "basic-forcing",
-        "basic-other",
         "params-water",
         "params-eco",
         "params-river",
         "params-da",
         "params-tracer",
-        "params-other",
+        "params-urban",
     ] {
         assert!(
             shell.contains(&format!("id: '{step}'")),
@@ -83,6 +93,18 @@ fn the_left_workflow_connects_basic_and_process_substeps() {
     assert!(
         shell.contains("nextOf") && shell.contains("下一步"),
         "子步骤没有下一步连接"
+    );
+    assert!(
+        shell.contains("'details'") && state.contains("expandedFlows: new Set()"),
+        "基本设定与过程参数没有使用默认折叠的原生分组"
+    );
+    assert!(
+        shell.contains("availableFlows") && shell.contains("step.show"),
+        "空分栏不会按当前配置自动隐藏"
+    );
+    assert!(
+        !shell.contains("id: 'params-other'"),
+        "无意义的过程参数“其他”仍在"
     );
 }
 
@@ -107,7 +129,6 @@ fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
         "网格与并行",
         "地表数据",
         "初始场",
-        "城市",
         "强迫场",
     ] {
         let param_start = js.find("const PARAM_PAGES").expect("PARAM_PAGES");
@@ -118,7 +139,8 @@ fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
         );
     }
     assert!(
-        js.contains("urbanEnabled()") && js.contains("basic-other-fields"),
-        "城市字段没有并入其他或没有按 URBAN 配置隐藏"
+        js.contains("enabled: urbanEnabled") && js.contains("param-urban-fields"),
+        "城市字段没有移入过程参数或没有按 URBAN 配置隐藏"
     );
+    assert!(!params.contains(r#"data-flow-pane="params-other""#));
 }
