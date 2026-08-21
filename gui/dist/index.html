@@ -136,7 +136,7 @@
     <section class="page" data-step="basic" hidden>
       <div class="work-head"><span class="kicker">第 2 步</span></div>
       <h1>基本设定</h1>
-      <p class="sub">站点、路径、时间和建例所需的数据设置都收在这里；
+      <p class="sub">站点、路径、预热和建例所需的数据设置都收在这里；
         过程参数留在下一步，避免同一个字段出现两次。</p>
 
       <div class="flow-pane" data-flow-pane="basic-files">
@@ -213,7 +213,9 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="basic-site" hidden>
-        <div class="card"><h3>站点信息</h3><div class="ch">站点文件、位置、地类及 USE_SITE 开关。</div>
+        <div class="card"><h3>站点信息</h3>
+          <div class="ch">站点属性文件、经纬度和地表覆盖类型在建例时按站点自动写入，不在这里批量修改。</div>
+          <p class="muted mini">自然站从站点文件的 <code>IGBP_classification</code> 读取地表覆盖类型；城市站固定为 IGBP 13。下面只保留可调整的数据来源开关。</p>
           <div id="basic-site-fields"><p class="muted">先在“文件与目录”里选择站点并建算例</p></div></div>
       </div>
       <div class="flow-pane" data-flow-pane="basic-timing" hidden>
@@ -291,7 +293,7 @@
       <h1>运行</h1>
       <p class="sub">设置输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
         <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。
-        时间与预热在第 2 步“基本设定”。</p>
+        预热在第 2 步“基本设定”。</p>
 
       <div class="card">
         <h3>跑哪些</h3>

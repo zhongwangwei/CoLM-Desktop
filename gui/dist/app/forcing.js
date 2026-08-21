@@ -270,7 +270,7 @@ function timingCard() {
   card.innerHTML = `
     <h3>时间轴与观测高度</h3>
     <div class="ch">步长与观测高度会写进产物；模拟用哪一段时间范围仍以强迫场
-      覆盖范围为准，在“基本设定 / 时间与预热”里看。</div>
+      覆盖范围为准，由建例时自动确定，不需要手动填写。</div>
     <table>
       <tr><th>步长</th><td>${probe.step_seconds} 秒</td></tr>
       <tr><th>步数</th><td>${probe.steps}</td></tr>

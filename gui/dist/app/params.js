@@ -7,7 +7,8 @@ import { renderHistVars } from './histvars.js';
 import { renderTiming } from './timing.js';
 import { editTarget } from './batch.js';
 import { wizardFieldNames } from './domain.js';
-import { urbanEnabled } from './kernel.js';
+import { language } from './i18n.js';
+import { fieldLabel, optionLabel, technicalFieldHint } from './param-presentation.js';
 
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
 // 新字段不能掉进「其他」。基本设定与过程参数各自只认这一份归属表。
@@ -20,22 +21,12 @@ const BASIC_PAGES = [
 ];
 const PARAM_PAGES = [
   { id: 'params-water', target: 'param-water-fields', sections: ['水热过程'] },
-  { id: 'params-eco', target: 'param-eco-fields', sections: ['生态与生地化'],
-    enabled: () => !!state.wizard?.physics?.bgc },
+  { id: 'params-eco', target: 'param-eco-fields', sections: ['生态与生地化'] },
   { id: 'params-river', target: 'param-river-fields', sections: ['河道与水库'] },
   { id: 'params-da', target: 'param-da-fields', sections: ['数据同化'] },
-  { id: 'params-tracer', target: 'param-tracer-fields', sections: ['示踪剂'],
-    enabled: () => !!state.wizard?.physics?.tracer },
-  { id: 'params-urban', target: 'param-urban-fields', sections: ['城市'],
-    enabled: urbanEnabled },
+  { id: 'params-tracer', target: 'param-tracer-fields', sections: ['示踪剂'] },
+  { id: 'params-urban', target: 'param-urban-fields', sections: ['城市'] },
 ];
-
-// MOD_Namelist 会在 Urban 打开时无条件关掉这六项。让用户看见并修改一组
-// 必然被覆盖的开关，只会造成“明明设了却没生效”。
-const URBAN_DISABLED_FIELDS = new Set([
-  'DEF_USE_WUEST', 'DEF_USE_SUPERCOOL_WATER', 'DEF_USE_PLANTHYDRAULICS',
-  'DEF_USE_OZONESTRESS', 'DEF_USE_OZONEDATA', 'DEF_SPLIT_SOILSNOW',
-]);
 
 
 // 少数几个字段光看名字会理解反，在这里补一句。
@@ -58,6 +49,40 @@ const HINTS = {
   'DEF_simulation_time%spinup_sec': '预热截止时刻的当天秒数，见 spinup_repeat 的说明。',
 };
 
+// 打开这些父开关时，缺少路径就不是“以后再补”的半成品，而是下一阶段
+// 必然失败的配置。选择 true 后立即打开原生选择器；取消则保持原值不变。
+const PATH_ON_ENABLE = Object.freeze({
+  DEF_USE_SoilInit: { path: 'DEF_file_SoilInit', kind: 'file' },
+  DEF_USE_SnowInit: { path: 'DEF_file_SnowInit', kind: 'file' },
+  DEF_USE_CN_INIT: { path: 'DEF_file_cn_init', kind: 'file' },
+  DEF_USE_WaterTableInit: { path: 'DEF_file_WaterTable', kind: 'file' },
+  DEF_USE_Forcing_Downscaling: { path: 'DEF_DS_HiresTopographyDataDir', kind: 'folder' },
+});
+const PATH_FIELDS = Object.freeze(Object.fromEntries(
+  Object.values(PATH_ON_ENABLE).map(spec => [spec.path, spec.kind])));
+
+// CoLM 对这两个开关分别分配同名、不同形状的数组，不能同时为 true。
+// 用户启用一个时在同一次原子写入里关闭另一个，不要求先手工关旧方案。
+const MUTEX_ON_ENABLE = Object.freeze({
+  DEF_USE_Forcing_Downscaling: 'DEF_USE_Forcing_Downscaling_Simple',
+  DEF_USE_Forcing_Downscaling_Simple: 'DEF_USE_Forcing_Downscaling',
+});
+
+const enabled = value => /true|\.t\./i.test(String(value));
+
+async function pickParameterPath(path, kind) {
+  try {
+    const picked = kind === 'file'
+      ? await invoke('pick_file', { key: path, filter: 'nc' })
+      : await invoke('pick_folder', { key: path });
+    if (picked) await invoke('save_recent', { key: path, value: picked });
+    return picked;
+  } catch (e) {
+    status(e);
+    return null;
+  }
+}
+
 /** 向导已定下的字段不在主界面重复出现。 */
 export function withoutWizardFields(entries) {
   const owned = new Set(wizardFieldNames());
@@ -72,37 +97,59 @@ export function withoutWizardFields(entries) {
 //
 // **写回文件的仍是 Fortran 字面量** —— `colm-namelist` 的往返保证不能因为
 // 界面换了控件就破掉。
-function control(e, meta) {
+function control(e, meta, fieldState) {
   const raw = e.value.replace(/^'|'$/g, '');
   const kind = meta?.kind ?? '';
-  if (meta?.values?.length) {
+  const runtimeValues = fieldState?.allowed_values ?? [];
+  const knownValues = runtimeValues.length ? runtimeValues : (meta?.values ?? []);
+  if (kind.startsWith('Logical')) {
+    // 互斥降尺度由 onchange 原子地切换，所以即使另一项当前已打开，也必须
+    // 让用户直接选“启用”，不能逼他先去另一行手工关闭。
+    const allowed = MUTEX_ON_ENABLE[e.path]
+      ? ['.true.', '.false.']
+      : (runtimeValues.length ? runtimeValues : ['.true.', '.false.']);
     const s = document.createElement('select');
-    for (const v of meta.values) {
+    for (const v of allowed) {
+      const yes = /true|\.t\./i.test(v);
       const o = document.createElement('option');
-      o.value = v; o.textContent = v;
+      o.value = yes ? '.true.' : '.false.';
+      o.textContent = optionLabel(e.path, o.value, language());
+      s.appendChild(o);
+    }
+    const current = /true|\.t\./i.test(raw) ? '.true.' : '.false.';
+    // 已有配置可能违反新约束（例如两个降尺度开关都为 true）。保留当前值
+    // 作为可见选项，用户才能看见并把它改回合法状态。
+    if (![...s.children].some(o => o.value === current)) {
+      const o = document.createElement('option');
+      o.value = current;
+      o.textContent = optionLabel(e.path, current, language()) + '（当前值不满足约束）';
+      s.appendChild(o);
+    }
+    s.value = current;
+    s.className = 'select';
+    return s;
+  }
+  if (knownValues.length) {
+    const s = document.createElement('select');
+    for (const v of knownValues) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = optionLabel(e.path, v, language());
       s.appendChild(o);
     }
     // 文件里的值可能不在集合里（上游加了新取值，或者用户手写的）。
     // 那时把它作为一项补进去并选中 —— 悄悄改成第一项是最糟的做法。
-    if (!meta.values.includes(raw)) {
+    if (!knownValues.includes(raw)) {
       const o = document.createElement('option');
-      o.value = raw; o.textContent = raw + '（不在已知取值里）';
+      o.value = raw;
+      o.textContent = optionLabel(e.path, raw, language()) + '（不在已知取值里）';
       s.appendChild(o);
     }
     s.value = raw;
-    return s;
-  }
-  if (kind.startsWith('Logical')) {
-    const s = document.createElement('select');
-    for (const [v, label] of [['.true.', '是（.true.）'], ['.false.', '否（.false.）']]) {
-      const o = document.createElement('option');
-      o.value = v; o.textContent = label;
-      s.appendChild(o);
-    }
-    s.value = /true|\.t\./i.test(raw) ? '.true.' : '.false.';
+    s.className = 'select';
     return s;
   }
   const inp = document.createElement('input');
+  inp.className = 'input';
   if (kind.startsWith('Integer') || kind.startsWith('Real')) {
     inp.type = 'number';
     // 实数不限步长；整数按 1。`any` 让浏览器不对小数报警。
@@ -143,7 +190,7 @@ export async function renderFields() {
   const hist = $('hist-fields');
   const basics = BASIC_PAGES.map(p => [p, $(p.target)]);
   const processes = PARAM_PAGES.map(p => [p, $(p.target)]);
-  const flows = new Set(['basic-files']);
+  const flows = new Set(['basic-files', 'basic-timing', 'basic-grid']);
   output.textContent = '';
   hist.textContent = '';
   for (const [, basic] of basics) basic.textContent = '';
@@ -188,20 +235,47 @@ export async function renderFields() {
                  derived: f.derived, unset: true }));
   const entriesAll = withoutWizardFields(entries.concat(extra));
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
-  // 严格跟随所选内核。**只读派生项不再藏在专家模式后面** ——
+  // 内核宏和 case.nml 当前值统一在 Rust 配置层判定。这里不再复制城市、BGC、
+  // SinglePoint 等规则；父字段保存后重新调用，子字段会立刻出现或消失。
+  let fieldStates = new Map();
+  const kernelDir = $('kernel').value;
+  try {
+    if (!kernelDir) throw new Error('请先选择或安装 CoLM 内核');
+    const runtimeStates = await invoke('field_states_batch', { dirs: editTarget(), kernelDir });
+    fieldStates = new Map(runtimeStates.map(item => [item.name, item]));
+    if (fieldStates.size !== state.fields.length) {
+      throw new Error(`字段状态不完整：后端返回 ${fieldStates.size}/${state.fields.length}`);
+    }
+  } catch (e) {
+    // 运行时规则拿不到时必须 fail closed。退回编译期过滤会把 SinglePoint、
+    // 城市或 BGC 下无效的参数重新露出来，让用户以为它们会生效。
+    const message = `无法核实当前配置下哪些参数有效：${e}`;
+    const showError = target => {
+      const p = document.createElement('p');
+      p.className = 'warn';
+      p.textContent = message;
+      target.replaceChildren(p);
+    };
+    for (const [, target] of basics.concat(processes)) {
+      showError(target);
+    }
+    showError(output);
+    showError(hist);
+    state.fieldStates = new Map();
+    status(message);
+    publishFlows(flows);
+    return;
+  }
+  state.fieldStates = fieldStates;
+  // **只读派生项不再藏在专家模式后面** ——
   // 全仓库只有 6 个（DEF_dir_landdata/restart/history、DEF_USE_USGS/IGBP、
   // DEF_wetland_finundation_scheme），它们是「这个值现在是多少」的答案，
   // 而那是个常规问题。
   const shown = inGroup
-    .filter(e => !state.irrelevant.has(e.path))
-    .filter(e => !urbanEnabled() || !URBAN_DISABLED_FIELDS.has(e.path));
+    // 未知字段仍需显示为错误，已知字段则一律服从后端；不保留第二套前端规则。
+    .filter(e => !e.known || fieldStates.get(e.path)?.mode !== 'hidden');
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
-  flows.add('basic-timing');
-  // 这一页还含不属于 namelist 的“批量并行算例数”，不能因为单点内核过滤掉
-  // 所有 MPI 字段就把整个入口藏掉。
-  flows.add('basic-grid');
-
   for (const [page, basic] of basics) {
     const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
@@ -211,12 +285,11 @@ export async function renderFields() {
     }
     flows.add(page.id);
     renderScope(basic);
-    basic.appendChild(table(rows));
+    basic.appendChild(table(rows, fieldStates));
   }
 
   for (const [page, process] of processes) {
-    const rows = (page.enabled && !page.enabled() ? [] : shown)
-      .filter(e => page.sections.includes(sectionOf(e)))
+    const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (!rows.length) {
       process.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
@@ -224,7 +297,7 @@ export async function renderFields() {
     }
     flows.add(page.id);
     renderScope(process);
-    process.appendChild(table(rows));
+    process.appendChild(table(rows, fieldStates));
   }
 
   if (outputFields.length) {
@@ -234,7 +307,8 @@ export async function renderFields() {
     // `config.rs` 里**显式列举**了这两个名字，早于 `DEF_DIR` 前缀规则，
     // 所以它们落在这个分支，而不是上面那个 PARAM_SECTIONS 循环里。
     output.appendChild(table(
-      outputFields.slice().sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0))));
+      outputFields.slice().sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0)),
+      fieldStates));
   } else {
     output.innerHTML = '<p class="muted">当前配置没有可配置的输出参数。</p>';
   }
@@ -248,19 +322,24 @@ function publishFlows(flows) {
 }
 
 /** 一组字段渲染成一张表。分节之后每节各调一次。 */
-function table(shown) {
+function table(shown, fieldStates = new Map()) {
   const tbl = document.createElement('table');
+  tbl.className = 'parameter-table';
   for (const e of shown) {
     const tr = document.createElement('tr');
     const k = document.createElement('td');
-    k.textContent = e.path;
     // schema 元数据在下面选控件时也要用，所以在这里取一次，
     // 不放进 else 分支里 —— 放进去的话 `control(e, meta)` 就取不到它了。
     const meta = state.fields.find(f => f.name === e.path);
+    const fieldState = fieldStates.get(e.path);
     if (!e.known) {
+      k.textContent = e.path;
       k.className = 'warn';
       k.title = 'CoLM 不认识这个字段';
     } else {
+      // 主标签说人话，CoLM 原始键保留在 tooltip 供查文档和排错。
+      k.textContent = fieldLabel(e.path, language());
+      k.title = technicalFieldHint(e.path, language());
       // schema 里 713 个字段有 108 个带 CoLM 自己的行尾注释。有就显示出来，
       // 顺带把声明的默认值也放上去 —— 用户最常问的就是「不改会怎样」。
       const hint = HINTS[e.path];
@@ -272,40 +351,70 @@ function table(shown) {
         k.style.cursor = 'help';
       }
       if (meta) {
-        k.title = (hint ? hint + '\n\n' : '') + (meta.doc ? meta.doc + '\n' : '') + '默认 ' + meta.default;
+        const details = [technicalFieldHint(e.path, language())];
+        if (hint) details.push(hint);
+        if (meta.doc) details.push(meta.doc);
+        details.push('默认：' + optionLabel(e.path, meta.default, language()));
+        k.title = details.join('\n\n');
       }
-      if (state.irrelevant.has(e.path)) {
-        k.className = 'muted';
-        k.title = `本内核未编入（需要 ${meta?.requires?.join('、') ?? '某个宏'}），设了也没用\n` + (k.title ?? '');
+      if (fieldState?.reason) {
+        k.title = (k.title ? k.title + '\n\n' : '') + fieldState.reason;
       }
+    }
+    const warnings = [];
+    if (fieldState?.mixed) {
+      warnings.push('这一批算例对该字段的适用条件不同；它只对其中一部分算例生效。');
     }
     if (state.varies.has(e.path)) {
       // 这一行显示的是代表算例的值，别的算例不是这个值。改它会抹平全部。
+      warnings.push('这一批算例在这个字段上取值不同，显示的是第一个的值。改它会把全部改成同一个值。');
+    }
+    if (warnings.length) {
       k.textContent += ' ⚠';
       k.className = 'warn';
-      k.title = (k.title ? k.title + '\n\n' : '')
-        + '这一批算例在这个字段上取值不同，显示的是第一个的值。改它会把全部改成同一个值。';
+      k.title = (k.title ? k.title + '\n\n' : '') + warnings.join('\n');
     }
     const v = document.createElement('td');
     if (e.derived) {
       // 有声明有默认值，但不在任何 namelist 组里 —— 用户设了也没用。
       // 给一个改了没用的输入框比只读地显示更糟。
-      v.textContent = e.value + '（派生值，改不了）';
+      v.textContent = optionLabel(e.path, e.value, language()) + '（派生值，改不了）';
       v.className = 'muted';
     } else {
-      const inp = control(e, meta);
+      const inp = control(e, meta, fieldState);
+      if (fieldState?.mode === 'disabled') inp.disabled = true;
       // 未设过的字段标灰：它显示的是 CoLM 的默认值，不是这份文件里的内容。
       if (e.unset) { inp.style.opacity = '0.55'; v.title = '这份配置没设它，显示的是默认值'; }
       inp.onchange = async () => {
+        const before = e.value.replace(/^'|'$/g, '');
         try {
+          const changes = [{ path: e.path, value: inp.value }];
+          if (enabled(inp.value) && PATH_ON_ENABLE[e.path]) {
+            const spec = PATH_ON_ENABLE[e.path];
+            const picked = await pickParameterPath(spec.path, spec.kind);
+            // 取消选择就不打开父开关，避免留下 true + null。
+            if (!picked) { inp.value = before; return; }
+            changes.push({ path: spec.path, value: picked });
+          }
+          if (enabled(inp.value) && MUTEX_ON_ENABLE[e.path]) {
+            changes.push({ path: MUTEX_ON_ENABLE[e.path], value: '.false.' });
+          }
+          // 独立地下水位文件在 SoilInit 下会被 CoLM 忽略；打开完整土壤初始场
+          // 时顺手关掉这个无效父开关，配置文件也与实际执行保持一致。
+          if (enabled(inp.value) && e.path === 'DEF_USE_SoilInit') {
+            changes.push({ path: 'DEF_USE_WaterTableInit', value: '.false.' });
+          }
           // 后端读改写全部算例，成功后把**代表算例**的新内容带回来。
           // 前端不再自己 write_text —— 那条路只写得动一个文件。
-          const r = await invoke('set_field_batch',
-            { dirs: editTarget(), path: e.path, value: inp.value });
+          const r = changes.length > 1
+            ? await invoke('set_fields_batch', { dirs: editTarget(), fields: changes })
+            : await invoke('set_field_batch',
+              { dirs: editTarget(), path: e.path, value: inp.value });
           state.text = r.text;
           status(r.written > 1 ? `已写入 ${r.written} 个算例：${e.path}` : `已保存 ${e.path}`);
-          // 改过之后这个字段就一致了，标记要跟着消失。
-          if (state.varies.delete(e.path)) renderFields();
+          // 父开关会改变其他行是否有效；任何保存都重新读一次统一状态。
+          state.varies.delete(e.path);
+          await renderFields();
         } catch (err) {
           // 类型不对在后端就被拦下了，原样报出来 —— 它说得比我们编的具体
           status(err);
@@ -313,8 +422,28 @@ function table(shown) {
         }
       };
       v.appendChild(inp);
+      if (PATH_FIELDS[e.path]) {
+        const pick = document.createElement('button');
+        pick.type = 'button';
+        pick.className = 'btn-ghost';
+        pick.style.marginLeft = '8px';
+        pick.textContent = PATH_FIELDS[e.path] === 'file' ? '选择文件…' : '选择目录…';
+        pick.onclick = async () => {
+          const chosen = await pickParameterPath(e.path, PATH_FIELDS[e.path]);
+          if (!chosen) return;
+          inp.value = chosen;
+          inp.dispatchEvent(new Event('change'));
+        };
+        v.appendChild(pick);
+      }
     }
     tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
   }
   return tbl;
 }
+
+// 切换中英文时方案名也要跟着变；它们不是静态 HTML，通用文本替换无法知道
+// 同一个 `I` 在两个不同方案字段里分别代表什么。
+globalThis.addEventListener?.('colm:language', () => {
+  if (state.text) renderFields();
+});

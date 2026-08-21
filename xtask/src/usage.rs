@@ -62,9 +62,52 @@ const BY_NAME: &[(&str, &str)] = &[("Catch", "CATCHMENT")];
 /// `DEF_URBAN_type_scheme` 现在在每个内核下都可设，不再需要人工表兜底。
 pub const CURATED: &[(&str, &str, &str, &str)] = &[];
 
-/// 数值枚举没有字符串引号，通用扫描器不会把任意比较都误判成完整取值域。
-/// 这一项源码只接受 1（NCAR）或 2（LCZ）。
-const CURATED_VALUES: &[(&str, &[&str])] = &[("DEF_URBAN_type_scheme", &["1", "2"])];
+/// 数值枚举没有字符串引号，通用扫描器不能把任意 `== 1` 误判成完整取值域：
+/// 很多整数同时也用于阈值、计数或数组下标。这里仅列源码声明注释或完整分支明确
+/// 给出全部方案的字段。字符型但完整分支跨过扫描器 60 行窗口的 SSP，以及用
+/// `ELSE` 表达第二种方案的长波降尺度也在这里补全。
+///
+/// 出处集中在 `MOD_Namelist.F90` 的方案说明，以及对应实现中的完整 CASE/IF：
+/// `MOD_SoilSurfaceResistance.F90`、`MOD_SoilThermalParameters.F90`、
+/// `MOD_SoilSnowHydrology.F90`、`MOD_RainSnowTemp.F90`、`MOD_ForcingDownscaling.F90`、
+/// `MOD_Irrigation.F90`、`MOD_Eroot.F90`、`MOD_CropReadin.F90` 和 `main/DA/MOD_DA_RTM.F90`。
+const CURATED_VALUES: &[(&str, &[&str])] = &[
+    ("DEF_SOIL_REFL_SCHEME", &["1", "2"]),
+    ("DEF_LULCC_SCHEME", &["1", "2"]),
+    ("DEF_URBAN_type_scheme", &["1", "2"]),
+    (
+        "DEF_Interception_scheme",
+        &["1", "2", "3", "4", "5", "6", "7", "8"],
+    ),
+    (
+        "DEF_THERMAL_CONDUCTIVITY_SCHEME",
+        &["1", "2", "3", "4", "5", "6", "7", "8"],
+    ),
+    ("DEF_RSS_SCHEME", &["0", "1", "2", "3", "4", "5"]),
+    ("DEF_Runoff_SCHEME", &["0", "1", "2", "3"]),
+    ("DEF_TOPMOD_method", &["0", "1", "2"]),
+    ("DEF_NDEP_FREQUENCY", &["1", "2"]),
+    ("DEF_Reservoir_Method", &["0", "1"]),
+    (
+        "DEF_wetland_finundation_scheme",
+        &["1", "2", "3", "4", "5", "6", "7"],
+    ),
+    ("DEF_SSP", &["126", "245", "370", "585"]),
+    ("DEF_IRRIGATION_ALLOCATION", &["1", "2", "3"]),
+    ("DEF_RSTFAC", &["1", "2"]),
+    ("DEF_FERT_SOURCE", &["1", "2"]),
+    ("DEF_DA_RTM_diel", &["0", "1", "2", "3"]),
+    ("DEF_DA_RTM_rough", &["0", "1", "2", "3"]),
+    ("DEF_DS_longwave_adjust_scheme", &["I", "II"]),
+    (
+        "DEF_WRST_FREQ",
+        &["none", "TIMESTEP", "HOURLY", "DAILY", "MONTHLY", "YEARLY"],
+    ),
+    (
+        "DEF_HIST_FREQ",
+        &["none", "TIMESTEP", "HOURLY", "DAILY", "MONTHLY", "YEARLY"],
+    ),
+];
 
 /// 扫出来的两张表。
 #[derive(Default)]

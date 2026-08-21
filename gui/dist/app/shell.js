@@ -13,8 +13,8 @@ export const WORKFLOW = [
   ] },
   { n: 2, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [
     { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null, show: available('basic-files') },
-    { id: 'basic-site', page: 'basic', t: '站点信息', d: '位置、地类与站点文件', need: ready, show: available('basic-site') },
-    { id: 'basic-timing', page: 'basic', t: '时间与预热', d: '模拟范围与 spin-up', need: ready, show: available('basic-timing') },
+    { id: 'basic-site', page: 'basic', t: '站点信息', d: '逐站点数据来源设置', need: ready, show: available('basic-site') },
+    { id: 'basic-timing', page: 'basic', t: '预热', d: '慢变量平衡设置', need: ready, show: available('basic-timing') },
     { id: 'basic-grid', page: 'basic', t: '网格与并行', d: '网格和进程划分', need: ready, show: available('basic-grid') },
     { id: 'basic-surface', page: 'basic', t: '地表数据', d: '地表输入设置', need: ready, show: available('basic-surface') },
     { id: 'basic-initial', page: 'basic', t: '初始场', d: '初始状态设置', need: ready, show: available('basic-initial') },

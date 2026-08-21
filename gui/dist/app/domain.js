@@ -42,7 +42,10 @@ const PHYSICS = [
 const DEBUG = [
   { id: 'rangecheck', t: 'RangeCheck', d: '逐变量范围检查' },
   { id: 'colmdebug', t: 'CoLMDEBUG', d: '详细诊断输出' },
-  { id: 'srfdatadiag', t: 'SrfdataDiag', d: '地表数据诊断' },
+  {
+    id: 'srfdatadiag', t: 'SrfdataDiag', d: '地表数据诊断', ready: false,
+    need: '单点站点会自动关闭地表数据诊断',
+  },
 ];
 
 const PAGES = ['domain', 'subgrid', 'soil', 'physics', 'debug'];

@@ -35,7 +35,7 @@ fn basic_settings_owns_site_selection_and_its_left_hand_substeps() {
         !basic.contains("data-basic-tab"),
         "基本设定不应再用横向标签页"
     );
-    for id in ["root", "sitedir", "sites", "fmet", "makecase"] {
+    for id in ["root", "sitedir", "sites", "forcingdir", "makecase"] {
         assert!(
             basic.contains(&format!(r#"id="{id}""#)),
             "{id} 仍未并入基本设定"
@@ -142,8 +142,19 @@ fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
         );
     }
     assert!(
-        js.contains("enabled: urbanEnabled") && js.contains("param-urban-fields"),
-        "城市字段没有移入过程参数或没有按 URBAN 配置隐藏"
+        js.contains("param-urban-fields"),
+        "城市字段没有移入过程参数"
+    );
+    assert!(
+        js.contains("invoke('field_states_batch'") && js.contains("mode !== 'hidden'"),
+        "参数页没有消费后端统一的运行时字段状态"
+    );
+    assert!(
+        js.contains("运行时规则拿不到时必须 fail closed")
+            && js.contains("state.fieldStates = new Map();")
+            && js.contains("publishFlows(flows);")
+            && js.contains("return;"),
+        "运行时状态失败后仍可能回退并显示无效字段"
     );
     assert!(!params.contains(r#"data-flow-pane="params-other""#));
 }
@@ -151,25 +162,46 @@ fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
 #[test]
 fn conditional_processes_and_spinup_are_not_shown_or_saved_prematurely() {
     let params = std::fs::read_to_string(root().join("gui/dist/app/params.js")).unwrap();
+    assert!(params.contains("id: 'params-eco'"));
     assert!(
-        params.contains("id: 'params-eco'")
-            && params.contains("enabled: () => !!state.wizard?.physics?.bgc"),
-        "没有选择 BGC 时生态与生地化仍会出现"
+        !params.contains("enabled: () => !!state.wizard?.physics?.bgc"),
+        "生态页面仍用 BGC 粗粒度开关，独立的积雪/臭氧/植被过程会被误隐藏"
     );
-    for field in [
-        "DEF_USE_WUEST",
-        "DEF_USE_SUPERCOOL_WATER",
-        "DEF_USE_PLANTHYDRAULICS",
-        "DEF_USE_OZONESTRESS",
-        "DEF_USE_OZONEDATA",
-        "DEF_SPLIT_SOILSNOW",
+    assert!(
+        params.contains("invoke('field_states_batch'")
+            && params.contains("fieldStates.get(e.path)"),
+        "BGC/CROP/Urban/SinglePoint 约束没有统一交给后端"
+    );
+    assert!(
+        !params.contains("URBAN_DISABLED_FIELDS"),
+        "前端仍保留会与后端漂移的城市特例表"
+    );
+    assert!(
+        params.contains("await renderFields()"),
+        "父字段保存后没有重新计算子字段状态"
+    );
+    assert!(
+        params.contains("fieldLabel(e.path, language())")
+            && params.contains("optionLabel(e.path, v, language())")
+            && params.contains("technicalFieldHint(e.path, language())"),
+        "参数页仍直接暴露 DEF_* 或只显示不可理解的原始枚举值"
+    );
+
+    let presentation =
+        std::fs::read_to_string(root().join("gui/dist/app/param-presentation.js")).unwrap();
+    for required in [
+        "DEF_Runoff_SCHEME",
+        "Simple VIC",
+        "DEF_precip_phase_discrimination_scheme",
+        "湿球温度经验方案",
+        "DEF_DS_longwave_adjust_scheme",
+        "TopoSCALE",
     ] {
         assert!(
-            params.contains(field),
-            "Urban 会自动关闭的 {field} 没有从过程参数中过滤"
+            presentation.contains(required),
+            "参数友好名称/方案说明缺少 {required}"
         );
     }
-    assert!(params.contains("URBAN_DISABLED_FIELDS.has(e.path)"));
 
     let timing = std::fs::read_to_string(root().join("gui/dist/app/timing.js")).unwrap();
     assert!(
@@ -182,11 +214,31 @@ fn conditional_processes_and_spinup_are_not_shown_or_saved_prematurely() {
         "spin-up 仍会在另一格还是 0 时提前保存"
     );
 
+    let params = std::fs::read_to_string(root().join("gui/dist/app/params.js")).unwrap();
+    for required in [
+        "DEF_USE_SoilInit",
+        "DEF_file_SoilInit",
+        "DEF_USE_SnowInit",
+        "DEF_file_SnowInit",
+        "DEF_USE_CN_INIT",
+        "DEF_file_cn_init",
+        "DEF_USE_WaterTableInit",
+        "DEF_file_WaterTable",
+        "DEF_USE_Forcing_Downscaling",
+        "DEF_DS_HiresTopographyDataDir",
+        "set_fields_batch",
+    ] {
+        assert!(
+            params.contains(required),
+            "启用即选择路径/互斥保存缺少 {required}"
+        );
+    }
+
     let runner = std::fs::read_to_string(root().join("gui/dist/app/runner.js")).unwrap();
     assert!(
         runner.contains("p.total_steps"),
         "进度没有使用后端算出的总步数"
     );
-    assert!(runner.contains("100 * p.step / total"));
+    assert!(runner.contains("100 * p.step / p.total_steps"));
     assert!(!runner.contains("Math.log10"), "进度仍在用对数猜测");
 }

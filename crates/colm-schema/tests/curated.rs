@@ -101,3 +101,52 @@ fn urban_classification_cannot_be_an_arbitrary_integer() {
         &["1", "2"]
     );
 }
+
+#[test]
+fn model_schemes_expose_complete_discrete_choices_to_the_gui() {
+    let expected: &[(&str, &[&str])] = &[
+        ("DEF_SOIL_REFL_SCHEME", &["1", "2"]),
+        ("DEF_LULCC_SCHEME", &["1", "2"]),
+        (
+            "DEF_Interception_scheme",
+            &["1", "2", "3", "4", "5", "6", "7", "8"],
+        ),
+        (
+            "DEF_THERMAL_CONDUCTIVITY_SCHEME",
+            &["1", "2", "3", "4", "5", "6", "7", "8"],
+        ),
+        ("DEF_RSS_SCHEME", &["0", "1", "2", "3", "4", "5"]),
+        ("DEF_Runoff_SCHEME", &["0", "1", "2", "3"]),
+        ("DEF_TOPMOD_method", &["0", "1", "2"]),
+        ("DEF_NDEP_FREQUENCY", &["1", "2"]),
+        ("DEF_Reservoir_Method", &["0", "1"]),
+        (
+            "DEF_wetland_finundation_scheme",
+            &["1", "2", "3", "4", "5", "6", "7"],
+        ),
+        ("DEF_SSP", &["126", "245", "370", "585"]),
+        ("DEF_IRRIGATION_ALLOCATION", &["1", "2", "3"]),
+        ("DEF_RSTFAC", &["1", "2"]),
+        ("DEF_FERT_SOURCE", &["1", "2"]),
+        ("DEF_DA_RTM_diel", &["0", "1", "2", "3"]),
+        ("DEF_DA_RTM_rough", &["0", "1", "2", "3"]),
+        ("DEF_DS_longwave_adjust_scheme", &["I", "II"]),
+        (
+            "DEF_WRST_FREQ",
+            &["DAILY", "HOURLY", "MONTHLY", "TIMESTEP", "YEARLY", "none"],
+        ),
+        (
+            "DEF_HIST_FREQ",
+            &["DAILY", "HOURLY", "MONTHLY", "TIMESTEP", "YEARLY", "none"],
+        ),
+    ];
+    for (name, values) in expected {
+        assert_eq!(
+            colm_schema::find(name)
+                .unwrap_or_else(|| panic!("schema 里没有 {name}"))
+                .values,
+            *values,
+            "{name} 应渲染为有限选项而不是自由输入"
+        );
+    }
+}

@@ -21,8 +21,8 @@ if (translateZh('第 12/48 步 · 2008-01-01') !== 'Step 12/48 · 2008-01-01') {
 if (translateZh('第 2 步') !== 'Step 2') {
   throw new Error('workflow step labels are not translated');
 }
-if (translateZh('站点、路径、时间和建例所需的数据设置都收在这里；')
-    !== 'Site, path, time, and case-creation data settings are collected here;'
+if (translateZh('站点、路径、预热和建例所需的数据设置都收在这里；')
+    !== 'Site, path, spin-up, and case-creation data settings are collected here;'
     || translateZh('过程参数留在下一步，避免同一个字段出现两次。')
       !== 'process parameters stay in the next step so each field appears only once.') {
   throw new Error('basic-setup prose must not become mixed Chinese and English');
@@ -31,11 +31,13 @@ if (translateZh('检测到 8 个逻辑 CPU；单个站点仍使用 1 核。')
     !== '8 logical CPUs detected; each site still uses one core.') {
   throw new Error('dynamic CPU guidance is not translated');
 }
-if (translateZh('各算例从自己的预热结束处开始')
-    !== 'Each case starts output after its own spin-up period'
-    || translateZh('这 4 个算例的预热设置不一致')
+if (translateZh('这 4 个算例的预热设置不一致')
       !== '4 cases have different spin-up settings') {
-  throw new Error('multi-site timing guidance is not translated');
+  throw new Error('multi-site spin-up guidance is not translated');
+}
+if (translateZh('预热：每轮 2 年，共重复 3 轮')
+    !== 'Spin-up: 2 years per cycle, 3 cycles') {
+  throw new Error('spin-up status must describe both values without a multiplication symbol');
 }
 if (translateZh('用户自定义站点说明') !== '用户自定义站点说明') {
   throw new Error('unknown user text must stay intact rather than become half translated');

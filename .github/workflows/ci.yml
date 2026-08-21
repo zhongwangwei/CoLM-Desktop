@@ -83,6 +83,7 @@ jobs:
           cargo run -q -p xtask -- check-gui
           node gui/tests/domain.mjs
           node gui/tests/batch.mjs
+          node gui/tests/params.mjs
           node gui/tests/runview.mjs
           node gui/tests/i18n.mjs
 

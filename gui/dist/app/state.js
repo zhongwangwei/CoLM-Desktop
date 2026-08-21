@@ -68,6 +68,8 @@ export const state = {
   group: 'nl_colm',
   /** 当前内核下用不上的字段名（Set）。见 config::irrelevant_fields。 */
   irrelevant: new Set(),
+  /** 当前内核 + case.nml 的统一字段交互状态。 */
+  fieldStates: new Map(),
   /** 专家入口保留给后续内容；当前只显示明确的占位说明。 */
   expert: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */

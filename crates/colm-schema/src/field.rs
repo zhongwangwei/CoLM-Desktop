@@ -53,7 +53,8 @@ pub struct Field {
     /// 这个字段的**合法取值**，为空表示不是枚举型。
     ///
     /// 从 CoLM 自己的分支里扫出来：`SELECT CASE (trim(adjustl(DEF_x)))` 的
-    /// 各个 `CASE ('…')`，以及 `trim(DEF_x) == '…'`。实测 12 个字段有，
+    /// 各个 `CASE ('…')`，以及 `trim(DEF_x) == '…'`；整数方案与跨越扫描窗口
+    /// 的少数字符方案由 `xtask::usage::CURATED_VALUES` 补全。当前 30 个字段有，
     /// 其中 `DEF_HIST_mode` 两种写法都用到 —— **只扫一种会漏掉 7 个**。
     ///
     /// GUI 据此把文本框换成下拉框：这些字段拼错了要等 CoLM 读 namelist
