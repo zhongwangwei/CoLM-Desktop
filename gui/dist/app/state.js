@@ -43,8 +43,16 @@ export const state = {
   /** 算例目录 -> '待运行' | '运行中' | '已完成' | '失败'。
    *  批量跑时事件是全局广播的，靠 payload 里的 `case` 分发到这里。 */
   runState: {},
-  /** 本次运行里三段各自的状态，键是 mksrfdata/mkinidata/colm。 */
-  stages: {},
+  /** 算例目录 -> { mksrfdata/mkinidata/colm: begin|ok|failed|skipped }。 */
+  runStages: {},
+  /** 算例目录 -> 最近一次精确步进。每个站点各画一条进度，不互相覆盖。 */
+  runProgress: {},
+  /** 算例目录 -> 这个站点自己的 GUI 日志文本。 */
+  runLogs: {},
+  /** 当前这一轮运行的全部算例与尚未结束的算例。 */
+  runTargets: [],
+  runningCases: new Set(),
+  runFailures: new Set(),
   kernels: [],
   selected: null,
   /** 参数页正在配置哪些算例（目录路径）。**参数改动作用于整批** ——
@@ -60,6 +68,8 @@ export const state = {
   group: 'nl_colm',
   /** 当前内核下用不上的字段名（Set）。见 config::irrelevant_fields。 */
   irrelevant: new Set(),
+  /** 专家入口保留给后续内容；当前只显示明确的占位说明。 */
+  expert: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,

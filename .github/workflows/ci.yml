@@ -78,7 +78,13 @@ jobs:
       # GUI 的前端是纯静态 JS，没有类型检查器 —— 一个拼错的命令名要等到
       # 点下去才会以「command not found」暴露。这条把它提前到 CI。
       - name: GUI interface
-        run: cargo run -q -p xtask -- check-gui
+        shell: bash
+        run: |
+          cargo run -q -p xtask -- check-gui
+          node gui/tests/domain.mjs
+          node gui/tests/batch.mjs
+          node gui/tests/runview.mjs
+          node gui/tests/i18n.mjs
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

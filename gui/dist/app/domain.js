@@ -9,7 +9,7 @@ import { go } from './shell.js';
 import { kernelForSubgrid } from './kernel.js';
 
 const DOMAINS = [
-  { id: 'site', t: '站点', d: 'PLUMBER2 / Urban-PLUMBER 单点模拟', ready: true },
+  { id: 'site', t: '站点', d: '单点站点模拟', ready: true },
   { id: 'region', t: '区域', d: '有限范围网格', ready: false, need: '区域步骤链尚未实现' },
   { id: 'global', t: '全球', d: '全球网格', ready: false, need: '全球步骤链尚未实现' },
 ];

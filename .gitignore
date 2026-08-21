@@ -7,6 +7,8 @@ target/
 /kernels/
 # 黄金运行的工作目录
 /oracle/work/
+# 本地参考/回归算例含百 MB 级 history，不作为源码或小型测试夹具提交。
+/AU-Preston/
 .DS_Store
 # Tauri 的 tauri-build 在每次构建时生成 gen/schemas/。其中 macOS-schema.json
 # 是**平台专有**的，Linux 上会生成 linux-schema.json —— 三平台都入库就会互相

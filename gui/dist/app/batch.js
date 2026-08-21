@@ -50,6 +50,14 @@ export function batchTarget() {
   return state.selected && state.createdCases.has(state.selected.dir) ? [state.selected] : [];
 }
 
+/** 找回一个新算例来自哪个站点。算例为避开旧目录可能改名成 `site-2`，
+ * 因而不能拿算例名反查观测文件；建例时保存的 site_file -> case dir 才是主键。 */
+export function sourceSite(c) {
+  const siteFile = [...state.createdBySite].find(([, dir]) => dir === c.dir)?.[0];
+  return state.sites.find(s => s.site_file === siteFile)
+    ?? state.sites.find(s => s.name === c.name);
+}
+
 /** 两个批量按钮上的字**就是它们会做的事**。
  *
  *  「勾了就作用于勾中的、没勾就作用于全部」这条规则本身没问题，
@@ -62,7 +70,7 @@ export function updateCaseBatchButtons() {
   const run = $('runall');
   if (run) {
     run.textContent = `运行${suffix}`;
-    run.disabled = !target.length;
+    run.disabled = !target.length || state.runningCases.size > 0;
   }
   const ev = $('eval-all');
   if (ev) {

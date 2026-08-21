@@ -3,7 +3,8 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
-import { batchTarget, updateCaseBatchButtons } from './batch.js';
+import { batchTarget, sourceSite, updateCaseBatchButtons } from './batch.js';
+import { metricText } from './metric-format.js';
 
 // 能画的只有 (time, patch) 形状的那些 —— 119 个变量里 108 个是。
 // 其余 11 个是剖面（(time, patch, soil) 之类），需要另一种画法。
@@ -155,10 +156,10 @@ function renderMetrics(rows) {
     const tr = document.createElement('tr');
     const cells = [
       [r.obs_var ?? r.name, ''],
-      [r.n, 'n'], [r.rmse.toFixed(1), 'n'],
-      [(r.bias >= 0 ? '+' : '') + r.bias.toFixed(2), 'n'],
-      [r.r2.toFixed(3), 'n'],
-      [(r.kge >= 0 ? '+' : '') + r.kge.toFixed(3), 'n'],
+      [r.n, 'n'], [metricText(r.rmse, 1), 'n'],
+      [metricText(r.bias, 2, true), 'n'],
+      [metricText(r.r2), 'n'],
+      [metricText(r.kge, 3, true), 'n'],
     ];
     for (const [v, cls] of cells) {
       const td = document.createElement('td');
@@ -200,9 +201,9 @@ function drawComparison(r) {
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
   const summary = document.createElement('p');
   summary.className = 'muted mini';
-  summary.textContent = `${r.name} · n=${r.n} · RMSE=${r.rmse.toFixed(2)}`
-    + ` · bias=${r.bias >= 0 ? '+' : ''}${r.bias.toFixed(2)}`
-    + ` · R²=${r.r2.toFixed(3)} · KGE=${r.kge >= 0 ? '+' : ''}${r.kge.toFixed(3)}`;
+  summary.textContent = `${r.name} · n=${r.n} · RMSE=${metricText(r.rmse, 2)}`
+    + ` · bias=${metricText(r.bias, 2, true)}`
+    + ` · R²=${metricText(r.r2)} · KGE=${metricText(r.kge, 3, true)}`;
   box.appendChild(summary);
   const host = document.createElement('div');
   host.className = 'chart';
@@ -263,7 +264,7 @@ $('eval-all').onclick = async () => {
     for (let i = 0; i < todo.length; i++) {
       const c = todo[i];
       status(`评估 ${i + 1}/${todo.length}：${c.name}`);
-      const obs = state.sites.find(s => s.name === c.name)?.obs_file;
+      const obs = sourceSite(c)?.obs_file;
       // 没有观测就跳过，并**记下来** —— 一张少了几行的表，
       // 不说明少了谁的话，看的人会以为那几个站评估结果为零。
       if (!obs) { failed.push([c.name, '没有观测文件']); continue; }
@@ -275,7 +276,10 @@ $('eval-all').onclick = async () => {
       } catch (e) { failed.push([c.name, String(e)]); }
     }
     renderSummary(rows, failed, todo.length);
-    status(`批量评估完成：${todo.length} 个算例`);
+    const succeeded = todo.length - failed.length;
+    status(failed.length
+      ? `批量评估完成：${succeeded}/${todo.length} 个算例有结果`
+      : `批量评估完成：${succeeded} 个算例`);
   } finally { updateCaseBatchButtons(); }
 };
 
@@ -321,7 +325,9 @@ function renderSummary(rows, failed, total) {
     for (const [, k] of COLS) {
       const td = document.createElement('td');
       const v = r[k];
-      td.textContent = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(3)) : v;
+      td.textContent = typeof v === 'number'
+        ? (Number.isInteger(v) ? v : metricText(v))
+        : (v ?? '—');
       if (k !== 'site') td.className = 'n';
       tr.appendChild(td);
     }

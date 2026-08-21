@@ -11,11 +11,19 @@
 <div class="app">
 
   <header class="top">
-    <div class="brand"><span class="glyph">◍</span><span>CoLM <span class="dim">Desktop</span></span></div>
+    <div class="brand"><img class="brand-icon" src="assets/colm-icon.png" alt=""><span>CoLM <span class="dim">Desktop</span></span></div>
     <div class="sep"></div>
     <input class="proj-name" id="casename" readonly value="还没有算例" title="当前算例">
     <button class="btn-ghost" id="homeBtn" title="重新选择空间、次网格与物理配置">返回首页</button>
     <div class="grow"></div>
+    <div class="seg" id="langSeg" aria-label="界面语言">
+      <button class="on" data-lang="zh" aria-pressed="true">中文</button>
+      <button data-lang="en" aria-pressed="false">EN</button>
+    </div>
+    <div class="seg" id="modeSeg" aria-label="参数模式">
+      <button class="on" data-mode="normal" aria-pressed="true">常规</button>
+      <button data-mode="expert" aria-pressed="false">专家</button>
+    </div>
     <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
   </header>
 
@@ -241,6 +249,10 @@
       <p class="sub">按当前配置显示水热、生态生地化、河道水库、数据同化、示踪剂和城市过程；
         没有启用或没有可设置项的分栏会自动隐藏。</p>
 
+      <div class="expert-note" id="expert-placeholder" hidden>
+        专家选项还在规划中。你后续提供的专家内容会放在这里；当前不会额外改写任何模型参数。
+      </div>
+
       <div class="card">
         <h3>参数预设</h3>
         <div id="unknown"></div>
@@ -282,14 +294,6 @@
         时间与预热在第 2 步“基本设定”。</p>
 
       <div class="card">
-        <h3>输出</h3>
-        <div class="ch">这里设置输出频率、目录与重启，并选择需要写入 history 的变量。</div>
-        <div id="output-fields"></div>
-        <h4 style="margin-top:16px">输出变量</h4>
-        <div id="hist-fields"></div>
-      </div>
-
-      <div class="card">
         <h3>跑哪些</h3>
         <div class="ch">勾选决定「全部运行」作用于谁；一个没勾就是全部。
           没建过的算例会在运行前自动建。</div>
@@ -307,6 +311,18 @@
         </div>
         <div class="stages" id="stages"></div>
       </div>
+
+      <div class="card">
+        <h3>输出</h3>
+        <div class="ch">设置输出频率、目录与重启。先运行时不必翻完几百个输出变量。</div>
+        <div id="output-fields"></div>
+      </div>
+
+      <details class="card fold-card">
+        <summary>输出变量（按需展开）</summary>
+        <div class="ch">选择需要写入 history 的变量；默认收起，避免把运行按钮推到页面底部。</div>
+        <div id="hist-fields"></div>
+      </details>
     </section>
 
     <!-- ⑤ 结果 -->
@@ -358,6 +374,7 @@
     <div class="live-body">
       <div class="live-pane on" data-pane="log">
         <div class="pill-row" style="margin-bottom:8px">
+          <select class="select" id="log-case" aria-label="选择日志站点"></select>
           <button class="btn-ghost" id="log-copy">复制</button>
           <button class="btn-ghost" id="log-clear">清空</button>
           <span class="muted mini" id="loginfo">&nbsp;</span>
@@ -368,6 +385,7 @@
         <div class="progress"><i id="prog"></i></div>
         <p class="muted mini" id="progtext">&nbsp;</p>
         <div class="stages" id="stages2"></div>
+        <div id="case-progress"></div>
       </div>
     </div>
   </aside>
@@ -385,6 +403,12 @@
      看就是「程序打不开」。标题/说明/卡片/翻页按钮都是 domain.js 按当前
      页动态填的，五页共用这一套容器。 -->
 <div id="domaingate" class="gate" hidden>
+  <div class="gate-tools">
+    <div class="seg" id="gateLangSeg" aria-label="界面语言">
+      <button class="on" data-lang="zh" aria-pressed="true">中文</button>
+      <button data-lang="en" aria-pressed="false">EN</button>
+    </div>
+  </div>
   <div class="gate-panel">
     <h2 id="gatetitle">这次要跑什么？</h2>
     <p class="muted mini" id="gatesub">现在只有站点能跑。区域与全球的步骤链还没有实现。</p>

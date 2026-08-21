@@ -174,3 +174,14 @@ fn requested_batch_cpu_count_is_bounded_by_the_machine() {
     assert_eq!(batch_width(99, 8), 8);
     assert_eq!(batch_width(4, 0), 1);
 }
+
+#[test]
+fn batch_summary_distinguishes_success_from_attempted() {
+    let summary = BatchSummary {
+        total: 4,
+        succeeded: 3,
+        failed: 1,
+    };
+    let json = serde_json::to_string(&summary).unwrap();
+    assert_eq!(json, r#"{"total":4,"succeeded":3,"failed":1}"#);
+}

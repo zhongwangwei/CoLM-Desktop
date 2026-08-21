@@ -64,9 +64,8 @@ code { font-family: var(--mono); font-size: .92em; background: var(--surface-2);
 }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700;
          letter-spacing: -.02em; font-size: 15px; white-space: nowrap; }
-.brand .glyph { width: 26px; height: 26px; border-radius: 7px; display: grid;
-                place-items: center; background: linear-gradient(135deg, #3c78c8, var(--accent));
-                color: #fff; box-shadow: var(--shadow); }
+.brand-icon { width: 28px; height: 28px; border-radius: 7px; object-fit: contain;
+              background: #fff; box-shadow: var(--shadow); }
 .top .sep { width: 1px; height: 22px; background: var(--border); }
 .proj-name { padding: 5px 10px; border: 1px solid transparent; border-radius: var(--r-sm);
              background: var(--bg); min-width: 200px; color: var(--muted);
@@ -139,6 +138,8 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
         padding: var(--s-lg); box-shadow: var(--shadow); margin-bottom: var(--s-lg); }
 .card h3 { font-size: 14px; margin-bottom: 3px; }
 .card .ch { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+.fold-card > summary { cursor: pointer; font-size: 14px; font-weight: 650; }
+.fold-card[open] > summary { margin-bottom: 10px; }
 .field { margin-bottom: 13px; }
 .field:last-child { margin-bottom: 0; }
 .field label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 5px; }
@@ -206,6 +207,7 @@ td:first-child { overflow-wrap: anywhere; }
 .live-pane.on { display: block; }
 #log { margin: 0; font-family: var(--mono); font-size: 11px; line-height: 1.65;
        color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+#log-case { width: auto; min-width: 130px; max-width: 230px; }
 .progress { height: 8px; border-radius: 5px; background: var(--surface-2);
             overflow: hidden; margin: 10px 0; }
 .progress > i { display: block; height: 100%; width: 0;
@@ -217,6 +219,13 @@ td:first-child { overflow-wrap: anywhere; }
 .stages span.on   { background: var(--accent-weak); color: var(--accent-ink); }
 .stages span.ok   { background: var(--pass-bg); color: var(--pass); }
 .stages span.fail { background: var(--fail-bg); color: var(--fail); }
+.case-progress { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+.case-progress:first-child { border-top: 0; }
+.case-progress-head { display: flex; justify-content: space-between; gap: 8px;
+                      font-size: 11px; font-weight: 650; }
+.case-progress-head span:last-child { color: var(--muted); font-weight: 400; }
+.case-progress .progress { margin: 5px 0 3px; }
+.case-progress p { margin: 0; }
 
 /* ---------------- 状态栏 ---------------- */
 .status { grid-area: status; display: flex; align-items: center; gap: 14px;
@@ -273,6 +282,7 @@ td:first-child { overflow-wrap: anywhere; }
 /* **这一条不能省。** `display:flex` 会盖掉 `[hidden]` 的默认
    `display:none`，不补的话门隐藏不了 —— 点完站点界面仍然被挡着。 */
 .gate[hidden] { display: none; }
+.gate-tools { position: fixed; z-index: 1; top: var(--s-lg); right: var(--s-lg); }
 .gate-panel { width: 100%; max-width: 760px; margin: auto; padding: var(--s-xl); text-align: center; }
 .gate-panel h2 { margin: 0 0 6px; font-size: 20px; }
 /* wrap: 第 2 页四张卡片比第 1 页三张宽，窄窗口下换行而不是溢出 gate-panel。 */

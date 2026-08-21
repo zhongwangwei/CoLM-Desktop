@@ -196,6 +196,22 @@ export function initShell() {
     localStorage.setItem('theme', next);
   };
 
+  for (const b of document.querySelectorAll('#modeSeg button')) {
+    b.onclick = () => {
+      state.expert = b.dataset.mode === 'expert';
+      document.body.classList.toggle('expert', state.expert);
+      document.body.classList.toggle('normal', !state.expert);
+      for (const x of document.querySelectorAll('#modeSeg button')) {
+        const on = x === b;
+        x.classList.toggle('on', on);
+        x.setAttribute('aria-pressed', String(on));
+      }
+      const note = $('expert-placeholder');
+      if (note) note.hidden = !state.expert;
+      window.dispatchEvent(new CustomEvent('colm:mode'));
+    };
+  }
+
   const tabs = $('livetabs');
   for (const b of tabs.querySelectorAll('button')) {
     b.onclick = () => {

@@ -9,12 +9,14 @@ import { refreshPresets } from './presets.js';
 import { restoreRecent, wirePickers } from './recent.js';
 import { showDomainGate } from './domain.js';
 import { renderCases, checkRootSpace } from './sites.js';
+import { initI18n } from './i18n.js';
 // 只为它们顶层的 `$('fprobe').onclick = …` / `$('smake').onclick = …`
 // 接线而 import —— 前处理页两个子栏（强迫场、站点属性）的状态都是各自
 // 模块内部的闭包变量，没有别的模块要用它们的导出。
 import './forcing.js';
 import './sitedata.js';
 
+initI18n();
 initShell();
 
 // 门先立起来，后台初始化在它后面照常跑 —— 用户点完站点时界面已经就绪。

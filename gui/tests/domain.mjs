@@ -1,7 +1,7 @@
 import { cp, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 class El {
   constructor(tag = 'div') {
@@ -43,10 +43,11 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-gate-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 
-const { showDomainGate, wizardFields, wizardFieldNames } = await import(join(temp, 'app', 'domain.js'));
-const { state } = await import(join(temp, 'app', 'state.js'));
-const { kernelForSubgrid } = await import(join(temp, 'app', 'kernel.js'));
-const { withoutWizardFields } = await import(join(temp, 'app', 'params.js'));
+const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
+const { showDomainGate, wizardFields, wizardFieldNames } = await import(moduleUrl('domain.js'));
+const { state } = await import(moduleUrl('state.js'));
+const { kernelForSubgrid } = await import(moduleUrl('kernel.js'));
+const { withoutWizardFields } = await import(moduleUrl('params.js'));
 
 state.kernels = [
   { preset: 'default', dir: '/igbp', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF' },

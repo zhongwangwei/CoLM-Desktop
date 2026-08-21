@@ -2,13 +2,14 @@
 
 import { invoke, listen } from './ipc.js';
 import { state } from './state.js';
-import { $, status } from './ui.js';
+import { $, status, baseName } from './ui.js';
 import { renderCases, ensureCases, renderSites } from './sites.js';
 import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
+import { appendLogText, progressText } from './run-format.js';
 
 // 单点内核不启 MPI；多核的实际用途是并发跑多个独立站点。默认沿用原来的
 // 两路并发，但让用户在基本设定里按机器容量调整。
@@ -23,6 +24,126 @@ function requestedWorkers() {
   const clamped = Math.max(1, Math.min(cpuCapacity, valid));
   $('cpu-workers').value = String(clamped);
   return clamped;
+}
+
+function runName(dir) {
+  return state.cases.find(c => c.dir === dir)?.name ?? baseName(dir);
+}
+
+function renderSelectedLog() {
+  const dir = $('log-case').value;
+  $('log').textContent = state.runLogs[dir] ?? '';
+  $('log').scrollTop = $('log').scrollHeight;
+  updateLogInfo();
+}
+
+function renderLogChoices(dirs, preferred = $('log-case').value) {
+  const pick = $('log-case');
+  pick.textContent = '';
+  for (const dir of dirs) {
+    const o = document.createElement('option');
+    o.value = dir;
+    o.textContent = runName(dir);
+    pick.appendChild(o);
+  }
+  const fallback = state.selected && dirs.includes(state.selected.dir) ? state.selected.dir : dirs[0];
+  pick.value = dirs.includes(preferred) ? preferred : (fallback ?? '');
+  renderSelectedLog();
+}
+$('log-case').onchange = renderSelectedLog;
+
+function resetRunView(dirs) {
+  state.runTargets = [...dirs];
+  state.runningCases = new Set(dirs);
+  state.runFailures = new Set();
+  for (const dir of dirs) {
+    state.runState[dir] = '待运行';
+    state.runStages[dir] = {};
+    state.runProgress[dir] = { step: 0, total_steps: 0, date: '', stage: '' };
+    state.runLogs[dir] = '';
+  }
+  renderLogChoices(dirs);
+  renderCaseProgress();
+  renderStages();
+  updateOverallProgress();
+  setRunning('busy', `运行中（0/${dirs.length}）`);
+  setStatus(`开始运行 ${dirs.length} 个算例`);
+}
+
+function failPendingRuns(reason) {
+  const message = String(reason);
+  for (const dir of [...state.runningCases]) {
+    state.runningCases.delete(dir);
+    state.runFailures.add(dir);
+    state.runState[dir] = '失败';
+    state.runProgress[dir] = { ...(state.runProgress[dir] ?? {}), reason: message };
+    updateCaseProgress(dir);
+  }
+  updateOverallProgress();
+  renderStages();
+  renderCases();
+}
+
+function ensureRunTarget(dir) {
+  if (state.runTargets.includes(dir)) return;
+  state.runTargets.push(dir);
+  state.runningCases.add(dir);
+  state.runStages[dir] ??= {};
+  state.runProgress[dir] ??= { step: 0, total_steps: 0, date: '', stage: '' };
+  state.runLogs[dir] ??= '';
+  renderLogChoices(state.runTargets, dir);
+  renderCaseProgress();
+}
+
+function renderCaseProgress() {
+  const box = $('case-progress');
+  box.textContent = '';
+  for (const dir of state.runTargets) {
+    const row = document.createElement('div');
+    row.className = 'case-progress';
+    row.dataset.case = dir;
+    const head = document.createElement('div');
+    head.className = 'case-progress-head';
+    const name = document.createElement('span'); name.textContent = runName(dir);
+    const stateEl = document.createElement('span'); stateEl.dataset.role = 'state';
+    head.appendChild(name); head.appendChild(stateEl);
+    const bar = document.createElement('div'); bar.className = 'progress';
+    const fill = document.createElement('i'); bar.appendChild(fill);
+    const text = document.createElement('p'); text.className = 'muted mini';
+    text.dataset.role = 'text';
+    row.appendChild(head); row.appendChild(bar); row.appendChild(text);
+    box.appendChild(row);
+    updateCaseProgress(dir);
+  }
+}
+
+function progressRow(dir) {
+  return [...$('case-progress').children].find(row => row.dataset.case === dir);
+}
+
+function updateCaseProgress(dir) {
+  const row = progressRow(dir);
+  if (!row) return;
+  const p = state.runProgress[dir] ?? {};
+  const label = state.runState[dir] ?? '待运行';
+  const done = label === '已完成';
+  const pct = done ? 100 : (p.total_steps ? Math.min(100, 100 * p.step / p.total_steps) : 0);
+  row.querySelector('.progress > i').style.width = `${pct}%`;
+  row.querySelector('[data-role=state]').textContent = label;
+  row.querySelector('[data-role=text]').textContent = progressText(p, label);
+}
+
+function updateOverallProgress() {
+  const dirs = state.runTargets;
+  const known = dirs.map(d => state.runProgress[d]).filter(p => p?.total_steps);
+  const total = known.reduce((n, p) => n + p.total_steps, 0);
+  const step = known.reduce((n, p) => n + Math.min(p.step, p.total_steps), 0);
+  const finished = dirs.filter(d => !state.runningCases.has(d)).length;
+  const pct = total ? Math.min(100, 100 * step / total) : 0;
+  $('prog').style.width = `${pct}%`;
+  $('progtext').textContent = dirs.length
+    ? `批量总体：${finished}/${dirs.length} 个站点结束` + (total ? ` · 模型步 ${step}/${total}` : '')
+    : '\u00a0';
 }
 
 export async function refreshKernels() {
@@ -93,20 +214,22 @@ addEventListener('colm:wizard', () => { syncKernel(); });
 $('run').onclick = async () => {
   if (!state.selected) return;
   $('run').disabled = true;
-  $('log').textContent = '';
-  $('prog').style.width = '0';
-  $('progtext').textContent = '启动…';
+  resetRunView([state.selected.dir]);
   try {
-    renderStages({});   // 三段都回到「待运行」
-    setRunning('busy', '运行中');
     await invoke('run_case', {
       case: state.selected.dir, kernel: $('kernel').value, force: $('force').checked,
     });
   } catch (e) {
     // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点，
     // 不写的话进度文字会永远停在「启动…」。
-    $('status').textContent = String(e);
-    $('progtext').textContent = '没能启动 —— ' + e;
+    state.runningCases.delete(state.selected.dir);
+    state.runFailures.add(state.selected.dir);
+    state.runState[state.selected.dir] = '失败';
+    state.runProgress[state.selected.dir].reason = String(e);
+    updateCaseProgress(state.selected.dir);
+    updateOverallProgress();
+    setRunning('fail', '启动失败');
+    setStatus(e);
     $('run').disabled = false;
   }
 };
@@ -117,57 +240,62 @@ export async function watchRun() {
       // 三段串行，而**只有 colm.x 打 TIMESTEP** —— 没有这条，前两段跑的时候
       // 界面完全不知道进行到哪。标记由 colm-cli 自己打，不认 CoLM 的措辞。
       const { stage, state: st, case: dir } = e.payload;
-      if (dir) { state.runState[dir] = '运行中'; renderCases(); }
-      state.stages = { ...state.stages, [stage]: st };
-      renderStages(state.stages);
-      if (st === 'begin') {
-        $('progtext').textContent = `${stage} 运行中…`;
-        // 前两段没有步数，阶段徽标负责说明状态；不拿猜出来的 2%/4% 冒充进度。
-        $('prog').style.width = '0';
-      }
+      if (!dir) return;
+      ensureRunTarget(dir);
+      state.runState[dir] = '运行中';
+      state.runStages[dir] = { ...(state.runStages[dir] ?? {}), [stage]: st };
+      state.runProgress[dir] = {
+        ...(state.runProgress[dir] ?? {}), stage, stage_state: st,
+      };
+      updateCaseProgress(dir);
+      renderStages();
+      renderCases();
     });
     await listen('run://progress', e => {
       // 后端已从 case.nml 算出总步数；这里直接显示模型步完成比例。
       const p = e.payload;
-      // 预热与正常推进要分开说。CoLM 在预热期**不写 history**
-      // （MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），
-      // 混进正常进度会让人以为那段输出被算进了结果。
-      const total = p.total_steps || p.step;
-      $('progtext').textContent = p.spinup
-        ? `预热 ${p.spinup[0]}/${p.spinup[1]} 轮 · 第 ${p.step}/${total} 步 · ${p.date}`
-        : `第 ${p.step}/${total} 步 · ${p.date}`;
-      $('prog').style.width = Math.min(100, 100 * p.step / total) + '%';
+      ensureRunTarget(p.case);
+      state.runState[p.case] = '运行中';
+      state.runProgress[p.case] = p;
+      updateCaseProgress(p.case);
+      updateOverallProgress();
     });
     await listen('run://lines', e => {
-      const el = $('log');
-      // 事件是**成批**到的（后端每 100 毫秒合并一次），所以这里一次追加一批。
-      // payload 从数组变成了 { case, lines } —— 批量跑时要分得清来源。
-      el.textContent += e.payload.lines.join('\n') + '\n';
-      if (el.textContent.length > 60000) el.textContent = el.textContent.slice(-40000);
-      el.scrollTop = el.scrollHeight;
-      updateLogInfo();
+      const { case: dir, lines } = e.payload;
+      ensureRunTarget(dir);
+      state.runLogs[dir] = appendLogText(state.runLogs[dir] ?? '', lines);
+      if ($('log-case').value === dir) renderSelectedLog();
     });
     await listen('run://done', e => {
       const d = e.payload;
-      if (d.case) { state.runState[d.case] = d.code === 0 ? '已完成' : '失败'; renderCases(); }
-      // 状态栏是切到别的步骤时**唯一还看得见运行结果**的地方。
-      // **退出码说明不了任何事。** 真正的原因在 stderr 上，后端现在把它
-      // 一并带过来了 —— 只报「失败（退出码 1）」会逼着人自己去磁盘上翻日志。
-      setRunning(d.code === 0 ? 'ok' : 'fail',
-        d.code === 0 ? '完成' : `失败：${d.reason ?? '退出码 ' + d.code}`);
-      $('prog').style.width = d.code === 0 ? '100%' : '0';
-      $('progtext').textContent =
-        `${d.code === 0 ? '完成' : '失败（退出码 ' + d.code + '）' + (d.reason ? '：' + d.reason : '')} · ` +
-        `子进程打了 ${d.total} 行，丢弃 ${d.dropped} 行噪声`;
-      $('run').disabled = false;
-      if (d.code === 0 && state.selected) {
-        // list_cases 是运行**之前**扫的，这个标记那时还是 false ——
-        // 不在这里更新的话，跑完第一次「画图」仍然是灰的，
-        // 而用户完全看不出为什么。
-        state.selected.has_history = true;
-        renderCases();
-        refreshVars();
+      if (!d.case) return;
+      ensureRunTarget(d.case);
+      state.runningCases.delete(d.case);
+      state.runState[d.case] = d.code === 0 ? '已完成' : '失败';
+      if (d.code !== 0) state.runFailures.add(d.case);
+      const p = state.runProgress[d.case] ?? {};
+      state.runProgress[d.case] = {
+        ...p, reason: d.reason,
+        step: d.code === 0 && p.total_steps ? p.total_steps : (p.step ?? 0),
+      };
+      // 必须按事件里的 case 更新；批量跑时 state.selected 只是代表算例，
+      // 把每个完成事件都写给它会让其余站点永远显示“未跑”。
+      const c = state.cases.find(c => c.dir === d.case);
+      if (c && d.code === 0) c.has_history = true;
+      updateCaseProgress(d.case);
+      updateOverallProgress();
+      renderStages();
+      renderCases();
+      if (state.runningCases.size) {
+        const ended = state.runTargets.length - state.runningCases.size;
+        setRunning('busy', `运行中（${ended}/${state.runTargets.length}）`);
+      } else if (state.runFailures.size) {
+        setRunning('fail', `${state.runFailures.size} 个站点失败`);
+      } else {
+        setRunning('ok', '全部完成');
       }
+      $('run').disabled = state.runningCases.size > 0;
+      if (d.code === 0 && state.selected?.dir === d.case) refreshVars();
     });
 }
 
@@ -186,36 +314,55 @@ $('runall').onclick = async () => {
   if (!dirs.length) return;
   $('runall').disabled = true;
   $('run').disabled = true;
-  // 先把所有算例标成「待运行」。不先标的话，还没轮到的那些在界面上
-  // 与「已完成」长得一样，用户看不出批次进行到哪。
-  for (const d of dirs) state.runState[d] = '待运行';
+  resetRunView(dirs);
   renderCases();
   try {
-    const n = await invoke('run_batch', {
+    const summary = await invoke('run_batch', {
       cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
+      force: $('force').checked,
     });
-    status(`批次结束：${n}/${dirs.length} 个算例跑完`);
-  } catch (e) { status(e); }
+    status(summary.failed
+      ? `批次结束：${summary.succeeded}/${summary.total} 个成功，${summary.failed} 个失败`
+      : `批次结束：${summary.succeeded}/${summary.total} 个算例全部成功`);
+  } catch (e) {
+    failPendingRuns(e);
+    status(e);
+    setRunning('fail', '批次启动失败');
+  }
   finally { updateCaseBatchButtons(); $('run').disabled = false; }
 };
 
 
 /** 三段各自的状态。**分开显示是必须的** —— 只有 colm.x 打 TIMESTEP，
  *  前两段没有步进度可看，而城市算例里 mksrfdata 恰恰是最慢的那段。 */
-function renderStages(st) {
-  const box = $('stages');
-  box.textContent = '';
+function renderStages() {
   const LABEL = { begin: '运行中', ok: '成功', failed: '失败', skipped: '跳过' };
-  for (const s of ['mksrfdata', 'mkinidata', 'colm']) {
-    const d = document.createElement('span');
-    const state = st[s];
-    d.textContent = `${s}：${LABEL[state] ?? '待运行'}`;
-    d.style.cssText = 'font-size:11px;padding:2px 8px;border-radius:10px;background:var(--soft)';
-    if (state === 'failed') d.className = 'warn';
-    // 「跳过」要看得出来是**有意跳过**而不是没跑 —— 两者在界面上长得太像，
-    // 而误以为没跑会让人去按强制重跑，白等一次。
-    if (state === 'skipped') { d.className = 'muted'; d.title = '产物齐全且输入未变'; }
-    box.appendChild(d);
+  for (const id of ['stages', 'stages2']) {
+    const box = $(id);
+    if (!box) continue;
+    box.textContent = '';
+    for (const s of ['mksrfdata', 'mkinidata', 'colm']) {
+      const d = document.createElement('span');
+      const states = state.runTargets.map(dir => state.runStages[dir]?.[s]).filter(Boolean);
+      if (state.runTargets.length <= 1) {
+        const st = states[0];
+        d.textContent = `${s}：${LABEL[st] ?? '待运行'}`;
+        if (st === 'failed') d.className = 'warn';
+        if (st === 'skipped') { d.className = 'muted'; d.title = '产物齐全且输入未变'; }
+      } else {
+        const count = key => states.filter(st => st === key).length;
+        const parts = [];
+        if (count('ok')) parts.push(`${count('ok')}成功`);
+        if (count('skipped')) parts.push(`${count('skipped')}跳过`);
+        if (count('begin')) parts.push(`${count('begin')}运行中`);
+        if (count('failed')) parts.push(`${count('failed')}失败`);
+        const waiting = state.runTargets.length - states.length;
+        if (waiting) parts.push(`${waiting}等待`);
+        d.textContent = `${s}：${parts.join(' · ')}`;
+        if (count('failed')) d.className = 'warn';
+      }
+      box.appendChild(d);
+    }
   }
 }
 
@@ -232,7 +379,7 @@ $('log-copy').onclick = async () => {
   if (!text.trim()) { setStatus('日志是空的'); return; }
   try {
     await navigator.clipboard.writeText(text);
-    const dir = state.selected?.dir;
+    const dir = $('log-case').value;
     setStatus(`已复制 ${text.length} 个字符`
       + (dir ? `；完整日志在 ${dir}/{mksrfdata,mkinidata,colm}.log` : ''));
   } catch (e) {
@@ -246,7 +393,11 @@ $('log-copy').onclick = async () => {
   }
 };
 
-$('log-clear').onclick = () => { $('log').textContent = ''; updateLogInfo(); };
+$('log-clear').onclick = () => {
+  const dir = $('log-case').value;
+  if (dir) state.runLogs[dir] = '';
+  renderSelectedLog();
+};
 
 export function updateLogInfo() {
   const n = $('log').textContent.length;

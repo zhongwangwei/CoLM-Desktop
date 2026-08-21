@@ -373,4 +373,14 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
     assert!(!relevant("DEF_Reservoir_Method", &default));
     assert!(relevant("DEF_ElementNeighbour_file", &with_river));
     assert!(relevant("DEF_Reservoir_Method", &with_river));
+    for field in colm_schema::all()
+        .iter()
+        .filter(|field| super::field_section(field.name, field.group) == Some("网格与并行"))
+    {
+        assert!(
+            !super::field_is_relevant(field, &default),
+            "单点内核仍显示网格/MPI 字段：{}",
+            field.name
+        );
+    }
 }

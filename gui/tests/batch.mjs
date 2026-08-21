@@ -1,7 +1,7 @@
 import { cp, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const elements = new Map();
 globalThis.document = {
@@ -16,8 +16,9 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-batch-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 
-const { state } = await import(join(temp, 'app', 'state.js'));
-const { currentCases, freshCaseName, batchTarget } = await import(join(temp, 'app', 'batch.js'));
+const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
+const { state } = await import(moduleUrl('state.js'));
+const { currentCases, freshCaseName, batchTarget, sourceSite } = await import(moduleUrl('batch.js'));
 
 state.cases = [
   { name: 'old', dir: '/cases/old' },
@@ -26,6 +27,8 @@ state.cases = [
 ];
 state.createdCases.add('/cases/site-2');
 state.batch = ['/cases/site-2', '/cases/old'];
+state.sites = [{ name: 'site', site_file: '/data/site.nc', obs_file: '/data/site-obs.nc' }];
+state.createdBySite.set('/data/site.nc', '/cases/site-2');
 
 if (currentCases().map(c => c.name).join('|') !== 'site-2') {
   throw new Error('old root cases leaked into the current-task list');
@@ -35,6 +38,9 @@ if (batchTarget().map(c => c.name).join('|') !== 'site-2') {
 }
 if (freshCaseName('site') !== 'site-3' || freshCaseName('new') !== 'new') {
   throw new Error('new case names do not avoid old root directories');
+}
+if (sourceSite(state.cases[2])?.obs_file !== '/data/site-obs.nc') {
+  throw new Error('renamed case lost the observation file of its source site');
 }
 
 console.log('batch: only current-created cases are visible and old names are not overwritten');

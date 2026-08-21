@@ -32,7 +32,8 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -481,8 +482,14 @@ fn batch_width(requested: usize, available: usize) -> usize {
     requested.clamp(1, available.max(1))
 }
 
-/// 排队跑一批算例。**返回时批次还没跑完** —— 进度全靠事件，
-/// 每条都带 `case`，前端据此更新对应那一行。
+#[derive(Debug, Serialize)]
+pub struct BatchSummary {
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+}
+
+/// 用固定数量的工作线程跑一批算例，始终把空出来的 CPU 核补上。
 ///
 /// 一个算例失败**不中止整批**：90 个站点里有一个跑不通，其余 89 个仍要跑完。
 /// 失败信息随那个算例自己的 `run://done`（`code != 0`）到达。
@@ -493,35 +500,93 @@ pub async fn run_batch(
     cases: Vec<String>,
     kernel: String,
     max_concurrent: usize,
-) -> Result<usize, String> {
+    force: bool,
+) -> Result<BatchSummary, String> {
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let width = batch_width(max_concurrent, available);
-    let mut done = 0usize;
-    for chunk in cases.chunks(width) {
-        let mut handles = Vec::new();
-        for case in chunk {
-            let (a, c, k) = (app.clone(), case.clone(), kernel.clone());
-            handles.push(std::thread::spawn(move || run_one(&a, &c, &k)));
-        }
-        for h in handles {
-            // 线程 panic 也不该让整批停下 —— 那正是「一个坏算例毁掉一批」。
-            if h.join().is_ok() {
-                done += 1;
+    let total = cases.len();
+    let width = batch_width(max_concurrent, available).min(total.max(1));
+    let queue = Arc::new(Mutex::new(VecDeque::from(cases)));
+    let succeeded = Arc::new(AtomicUsize::new(0));
+    let mut workers = Vec::with_capacity(width);
+    for _ in 0..width {
+        let (a, k, q, ok) = (
+            app.clone(),
+            kernel.clone(),
+            Arc::clone(&queue),
+            Arc::clone(&succeeded),
+        );
+        workers.push(std::thread::spawn(move || loop {
+            // 一个 worker 的 panic 不该把队列锁永久毒死；恢复锁后其余站点
+            // 仍能继续排队运行。
+            let case = q
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            let Some(case) = case else { break };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_one(&a, &case, &k, force)
+            }));
+            match outcome {
+                Ok(Ok(0)) => {
+                    ok.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    // 子进程连启动都失败时没有 stdout 可供 pump 发 done；这里补齐，
+                    // 否则这个站点会永久停在“待运行”。
+                    let _ = a.emit(
+                        "run://done",
+                        Done {
+                            case,
+                            code: -1,
+                            total: 0,
+                            dropped: 0,
+                            reason: Some(error),
+                        },
+                    );
+                }
+                Err(_) => {
+                    // catch_unwind 保证这一站即使触发内部 panic，也会收到终态，
+                    // UI 不会永远把它留在“运行中”，worker 还可继续取下一站。
+                    let _ = a.emit(
+                        "run://done",
+                        Done {
+                            case,
+                            code: -1,
+                            total: 0,
+                            dropped: 0,
+                            reason: Some("运行线程异常退出".into()),
+                        },
+                    );
+                }
             }
-        }
+        }));
+    }
+    for worker in workers {
+        let _ = worker.join(); // 单个 worker 异常不能让其余 worker 停下
     }
     let _ = log; // 环形缓冲区只服务单算例视图，批量时不共享
-    Ok(done)
+    let succeeded = succeeded.load(Ordering::Relaxed);
+    Ok(BatchSummary {
+        total,
+        succeeded,
+        failed: total.saturating_sub(succeeded),
+    })
 }
 
 /// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
-fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, String> {
+fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str, force: bool) -> Result<i32, String> {
     let cli = resolve_cli();
     let mut cmd = std::process::Command::new(&cli);
     let out = colm_kernel::run::no_console(&mut cmd)
         .args(["run", case, "--kernel", kernel, "--stream", "1"])
+        .args(if force {
+            &["--force", "1"][..]
+        } else {
+            &[][..]
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -531,11 +596,11 @@ fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, Stri
             let reader = pump(app, case, out);
             let errs = drain_stderr(err);
             let st = c.wait();
-            let _ = reader.join(); // 读完再走，否则最后一批日志会丢
-            Ok((st?, errs.join().unwrap_or_default()))
+            let (total, dropped, _) = reader.join().unwrap_or_default();
+            Ok((st?, errs.join().unwrap_or_default(), total, dropped))
         })
         .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
-    let (status, err) = out;
+    let (status, err, total, dropped) = out;
     let code = status.code().unwrap_or(-1);
     if !err.is_empty() {
         let _ = app.emit(
@@ -551,8 +616,8 @@ fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str) -> Result<i32, Stri
         Done {
             case: case.to_string(),
             code,
-            total: 0,
-            dropped: 0,
+            total,
+            dropped,
             reason: (code != 0).then(|| failure_reason(&err)).flatten(),
         },
     );

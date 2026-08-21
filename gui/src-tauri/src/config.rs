@@ -312,6 +312,10 @@ fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeS
                 || have.contains("GridRiverLakeFlow")
                 || have.contains("CatchLateralFlow")
         }
+        // SinglePoint 在时间管理器里自己固定 360×180 block 映射，不读区域边界、
+        // mesh、PIO 分组或用户给的 block 划分。CPU 并发是 GUI 自己的批量设置，
+        // 不属于这些 namelist 字段；入口保留，但这一整张无效参数表要隐藏。
+        Some("网格与并行") => !have.contains("SinglePoint"),
         _ => true,
     }
 }
