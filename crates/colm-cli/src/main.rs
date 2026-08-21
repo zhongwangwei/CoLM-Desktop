@@ -55,6 +55,7 @@ usage:
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
   colm-cli forcing-probe   <met.nc> [--json 1]
+  colm-cli netcdf-probe    <data.nc> [--json 1]
                            # 探测一份强迫场文件：八个槽位各猜到了什么变量，
                            # 猜不到就是 null；三个观测高度缺失时也是 null，
                            # 不是 NaN —— GUI 前处理页据此决定问不问用户
@@ -130,6 +131,12 @@ fn main() -> Result<()> {
         "forcing-probe" => {
             cmd_forcing_probe(
                 &opts.positional_at(0, "a forcing file")?,
+                opts.get("--json").is_some(),
+            )?;
+        }
+        "netcdf-probe" => {
+            cmd_netcdf_probe(
+                &opts.positional_at(0, "a NetCDF file")?,
                 opts.get("--json").is_some(),
             )?;
         }
@@ -1426,11 +1433,19 @@ struct SlotProbe {
 #[derive(serde::Serialize)]
 struct ForcingProbe {
     variables: Vec<String>,
+    /// 每个变量的维度名与长度。GUI 用它阻止把整张区域网格误当成单点
+    /// 边界层高度：`ncio_read_site_time` 对 POINT 只会取 (1,1,time)，
+    /// 网格大于 1 时虽然能读，却会安静地读错站点。
+    shapes: Vec<VariableShape>,
     slots: Vec<SlotProbe>,
     steps: usize,
     step_seconds: f64,
     step_uniform: bool,
     time_units: String,
+    /// `time` 变量首末两个原始数值。仅比较 units/步数/步长仍可能漏掉整条
+    /// 时间轴平移一个时间步的文件，POINT 边界层高度必须逐时对齐。
+    time_first: f64,
+    time_last: f64,
     /// 三个观测高度。源文件没有 `reference_height_*` 时是 `None`
     /// （JSON 里是 `null`），不是 `NaN`——`NaN` 不是合法的 JSON 数值。
     /// 实测 Urban-PLUMBER 的 21 个站全都没有这三个标量，PLUMBER2 的
@@ -1438,6 +1453,65 @@ struct ForcingProbe {
     height_v: Option<f64>,
     height_t: Option<f64>,
     height_q: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+struct VariableShape {
+    name: String,
+    dimensions: Vec<DimensionShape>,
+}
+
+#[derive(serde::Serialize)]
+struct DimensionShape {
+    name: String,
+    len: usize,
+}
+
+#[derive(serde::Serialize)]
+struct DatasetProbe {
+    variables: Vec<String>,
+    shapes: Vec<VariableShape>,
+}
+
+fn dataset_probe(f: &netcdf::File) -> DatasetProbe {
+    let variables = f.variables().map(|variable| variable.name()).collect();
+    let shapes = f
+        .variables()
+        .map(|variable| VariableShape {
+            name: variable.name(),
+            dimensions: variable
+                .dimensions()
+                .iter()
+                .map(|dimension| DimensionShape {
+                    name: dimension.name(),
+                    len: dimension.len(),
+                })
+                .collect(),
+        })
+        .collect();
+    DatasetProbe { variables, shapes }
+}
+
+/// 通用 NetCDF 结构探测，不要求气象强迫场的 time 坐标格式。臭氧文件只按
+/// 索引读取 `OZONE`，合法文件可能有 time 维却没有同名坐标变量，不能拿
+/// forcing-probe 的额外契约误拒绝。
+fn cmd_netcdf_probe(file: &Path, json: bool) -> Result<()> {
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let probe = dataset_probe(&f);
+    if json {
+        println!("{}", serde_json::to_string(&probe)?);
+    } else {
+        for shape in probe.shapes {
+            let dimensions = shape
+                .dimensions
+                .iter()
+                .map(|dimension| format!("{}={}", dimension.name, dimension.len))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("{} ({dimensions})", shape.name);
+        }
+    }
+    Ok(())
 }
 
 /// `NaN` 不能进 JSON（`serde_json` 序列化会报错或写出不可靠的 `null`），
@@ -1457,6 +1531,12 @@ fn cmd_forcing_probe(file: &Path, json: bool) -> Result<()> {
     let summary = colm_forcing::summarize(file)?;
     let (resolved, _missing) = colm_forcing::resolve(&summary.variables);
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let time_values: Vec<f64> = f
+        .variable("time")
+        .context("time variable disappeared after forcing summary")?
+        .get_values(netcdf::Extents::All)?;
+
+    let shapes = dataset_probe(&f).shapes;
 
     let slots: Vec<SlotProbe> = colm_forcing::SLOTS
         .iter()
@@ -1476,11 +1556,14 @@ fn cmd_forcing_probe(file: &Path, json: bool) -> Result<()> {
 
     let probe = ForcingProbe {
         variables: summary.variables.clone(),
+        shapes,
         slots,
         steps: summary.steps,
         step_seconds: summary.step_seconds,
         step_uniform: summary.step_uniform,
         time_units: summary.time_units.clone(),
+        time_first: *time_values.first().context("time axis is empty")?,
+        time_last: *time_values.last().context("time axis is empty")?,
         height_v: present(summary.height_v),
         height_t: present(summary.height_t),
         height_q: present(summary.height_q),

@@ -393,6 +393,7 @@ struct VisibilityContext<'a> {
     snicar: bool,
     aerosol_readin: bool,
     ozone_stress: bool,
+    ozone_data: bool,
     interception: i64,
     medlyn: bool,
     wuest: bool,
@@ -454,6 +455,7 @@ impl<'a> VisibilityContext<'a> {
             snicar: logical(doc, "DEF_USE_SNICAR"),
             aerosol_readin: logical(doc, "DEF_Aerosol_Readin"),
             ozone_stress: logical(doc, "DEF_USE_OZONESTRESS"),
+            ozone_data: logical(doc, "DEF_USE_OZONEDATA"),
             interception: integer(doc, "DEF_Interception_scheme"),
             medlyn: logical(doc, "DEF_USE_MEDLYNST"),
             wuest: logical(doc, "DEF_USE_WUEST"),
@@ -683,6 +685,25 @@ fn field_runtime_state(
         return hidden("站点 POINT 强迫场始终循环同一文件，此开关不会改变读入");
     }
 
+    // 完整扩展截留模块由 extend_interception 宏选择整套源文件。当前随软件
+    // 发布的所有内核都带该宏，因此 1..8 都真实可用；若用户安装了不带宏的
+    // 外部内核，回退模块只调用 CoLM2014，实现上只有方案 1。
+    if name == "DEF_Interception_scheme" {
+        return if c.have.contains("extend_interception") {
+            (
+                FieldMode::Editable,
+                Some("当前内核已编入扩展截留模块，8 种方案均有实际计算路径"),
+                vec!["1", "2", "3", "4", "5", "6", "7", "8"],
+            )
+        } else {
+            (
+                FieldMode::Editable,
+                Some("当前内核未编入 extend_interception，只能使用 CoLM2014 方案"),
+                vec!["1"],
+            )
+        };
+    }
+
     if name == "DEF_MATSIRO_CWCAP_SCALE" && c.interception != 5 {
         return hidden("仅 MATSIRO 截留方案使用");
     }
@@ -733,8 +754,24 @@ fn field_runtime_state(
     if name == "DEF_USE_CROP" && !c.crop {
         return hidden("当前内核未启用 CROP");
     }
+    if c.single
+        && !c.biological_land()
+        && one_of(&[
+            "DEF_VEG_SNOW",
+            "DEF_USE_OZONESTRESS",
+            "DEF_USE_OZONEDATA",
+            "DEF_file_Ozone",
+            "DEF_USE_MEDLYNST",
+            "DEF_USE_WUEST",
+        ])
+    {
+        return hidden("当前站点不是植被地表，不会使用叶片或冠层过程");
+    }
     if name == "DEF_USE_OZONEDATA" && !c.ozone_stress {
         return hidden("需要先启用臭氧胁迫");
+    }
+    if name == "DEF_file_Ozone" && (!c.ozone_stress || !c.ozone_data) {
+        return hidden("仅从文件读取臭氧数据时使用");
     }
     if one_of(&["DEF_file_snowoptics", "DEF_file_snowaging"]) {
         return hidden("CoLM 会从运行时目录派生 SNICAR 数据文件");
@@ -976,6 +1013,7 @@ pub fn read_case(text: String) -> Result<Vec<Entry>, String> {
 /// 未被改动的行**逐字节不变**，这是 `colm-namelist` 的往返保证：
 /// 用户算例文件里的注释是他们自己的笔记，保存一次不该把它们冲掉。
 #[tauri::command]
+#[cfg(test)]
 pub fn set_field(text: String, path: String, value: String) -> Result<String, String> {
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
     let v = typed(&path, &value)?;

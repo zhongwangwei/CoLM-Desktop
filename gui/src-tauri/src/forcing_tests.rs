@@ -125,6 +125,52 @@ fn build_convert_args_adds_height_when_given() {
     assert_eq!(args[i + 1], "10,12.5,12.5");
 }
 
+fn probe_with_shape(name: &str, dimensions: &[(&str, usize)]) -> Probe {
+    Probe {
+        variables: vec![name.into()],
+        shapes: vec![VariableShape {
+            name: name.into(),
+            dimensions: dimensions
+                .iter()
+                .map(|(name, len)| DimensionShape {
+                    name: (*name).into(),
+                    len: *len,
+                })
+                .collect(),
+        }],
+        slots: vec![],
+        steps: 10,
+        step_seconds: 1800.0,
+        step_uniform: true,
+        time_units: "seconds since 2000-01-01 00:00:00".into(),
+        time_first: 0.0,
+        time_last: 16200.0,
+        height_v: None,
+        height_t: None,
+        height_q: None,
+        suggest_dst: String::new(),
+    }
+}
+
+#[test]
+fn point_cbl_accepts_known_names_but_rejects_a_regional_grid() {
+    let point = probe_with_shape("PBLH", &[("time", 10), ("y", 1), ("x", 1)]);
+    assert_eq!(cbl_variable(&point).unwrap(), "PBLH");
+
+    let regional = probe_with_shape("blh", &[("time", 10), ("lat", 180), ("lon", 360)]);
+    let error = cbl_variable(&regional).expect_err("区域场不能静默取第一个像元");
+    assert!(
+        error.contains("SinglePoint") && error.contains("180"),
+        "{error}"
+    );
+}
+
+#[test]
+fn point_cbl_requires_an_explicit_time_dimension() {
+    let no_time = probe_with_shape("boundary_layer_height", &[("record", 10), ("site", 1)]);
+    assert!(cbl_variable(&no_time).unwrap_err().contains("time"));
+}
+
 #[test]
 fn reject_same_dir_rejects_same_directory_and_the_tmp_private_tmp_alias() {
     let scratch = std::env::temp_dir().join("colm-forcing-reject-same-dir-test");

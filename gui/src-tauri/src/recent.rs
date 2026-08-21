@@ -4,7 +4,7 @@
 //! `/Users/…/PLUMBER2s/Sitedata` 已经够烦，每次打开都手打就没人会用了。
 //!
 //! **只记目录，不记算例内容。** 这里存的是「上次在哪儿找数据」，
-//! 是使用习惯不是配置；配置在 `case.nml` 里，预设在 `presets/`。
+//! 是使用习惯不是配置；模型配置始终在各算例的 `case.nml` 里。
 //! 三者混在一起的话，删掉一个会连带影响另外两个。
 
 use std::collections::BTreeMap;
@@ -71,7 +71,7 @@ pub async fn pick_folder(app: tauri::AppHandle, key: String) -> Option<String> {
         .map(|h| h.path().display().to_string())
 }
 
-/// 选一个文件。`filter` 是后缀名，如 `nc`。
+/// 选一个文件。`filter` 是逗号分隔的后缀名，如 `nc,nc4`。
 #[tauri::command]
 pub async fn pick_file(
     app: tauri::AppHandle,
@@ -93,7 +93,14 @@ pub async fn pick_file(
         d = d.set_directory(s);
     }
     if let Some(f) = filter.as_deref() {
-        d = d.add_filter(f, &[f]);
+        let extensions: Vec<&str> = f
+            .split(',')
+            .map(str::trim)
+            .filter(|extension| !extension.is_empty())
+            .collect();
+        if !extensions.is_empty() {
+            d = d.add_filter("data", &extensions);
+        }
     }
     d.pick_file().await.map(|h| h.path().display().to_string())
 }

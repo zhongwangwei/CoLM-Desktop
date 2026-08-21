@@ -71,10 +71,10 @@ fn required_keeps_the_order_it_was_given() {
     let f = vec![
         ("DEF_CASE_NAME".to_string(), Value::Str("X".into())),
         ("DEF_Runoff_SCHEME".to_string(), Value::Int(3)), // 等于默认，会被滤掉
-        ("DEF_USE_OZONEDATA".to_string(), Value::Bool(false)),
+        ("DEF_VEG_SNOW".to_string(), Value::Bool(false)),
     ];
     let r = required(&f);
     assert_eq!(r.len(), 2);
     assert_eq!(r[0].0, "DEF_CASE_NAME");
-    assert_eq!(r[1].0, "DEF_USE_OZONEDATA");
+    assert_eq!(r[1].0, "DEF_VEG_SNOW");
 }

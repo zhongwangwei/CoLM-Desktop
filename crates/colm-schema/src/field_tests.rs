@@ -2,7 +2,7 @@ use crate::{all, find, Default, FieldKind};
 
 #[test]
 fn the_table_has_the_measured_number_of_fields() {
-    // 实测：210 个顶层标量 + 4 个派生类型共 535 个成员，合计 745。
+    // 实测：211 个顶层标量 + 4 个派生类型共 535 个成员，合计 746。
     // 三个调试宏改成运行时开关后新增了 DEF_USE_CoLMDEBUG /
     // DEF_USE_RangeCheck / DEF_USE_SrfdataDiag，顶层数从 202 变 205；
     // 土壤水力方案改成运行时开关后新增了 DEF_USE_Campbell_SOIL_MODEL
@@ -12,7 +12,8 @@ fn the_table_has_the_measured_number_of_fields() {
     // 那组改造新增了 DEF_USE_BGC、DEF_USE_CROP、DEF_USE_LULCC 三个
     // （DEF_USE_USGS/DEF_USE_IGBP/DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC
     // 早就在 MOD_Namelist.F90 里声明了，不算新增，只是从死代码变成
-    // 真正被读/被用），顶层数从 207 变 210。
+    // 真正被读/被用），顶层数从 207 变 210；臭氧文件从硬编码运行时目录
+    // 改为可选择的 DEF_file_Ozone 后，顶层数从 210 变 211。
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
@@ -20,7 +21,7 @@ fn the_table_has_the_measured_number_of_fields() {
         "expected roughly 740 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 210, "top-level count changed");
+    assert_eq!(top, 211, "top-level count changed");
 }
 
 #[test]
@@ -45,13 +46,14 @@ fn an_array_field_records_its_arity() {
 
 #[test]
 fn defaults_are_recorded_exactly_as_colm_declares_them() {
-    // 这两个默认值都假设 HPC 数据树存在（见 design.md §2.5）：臭氧要 2.8 GB
-    // 的全球场，Simple VIC 要站点文件里有 soil_texture。处置并不相同 ——
-    // 臭氧是本项目唯一必须显式关掉的，产流方案则沿用 CoLM 的 3 并补数据。
-    // 但那都是上层的决定：schema 只负责如实记录 CoLM 声明的原值，
-    // 不在这里偷偷改掉，否则「CoLM 的默认」与「我们建议的默认」就分不清了。
+    // CoLM Desktop 会为新算例显式关闭臭氧，但 schema 仍逐字记录内核的
+    // 兼容默认；植被积雪则按新版冠层路径默认开启。
     assert_eq!(
         find("DEF_USE_OZONEDATA").map(|f| f.default),
+        Some(Default::Logical(true))
+    );
+    assert_eq!(
+        find("DEF_VEG_SNOW").map(|f| f.default),
         Some(Default::Logical(true))
     );
     assert_eq!(

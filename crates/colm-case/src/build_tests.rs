@@ -49,7 +49,7 @@ fn the_first_day_starts_where_the_forcing_starts() {
 }
 
 #[test]
-fn the_golden_case_needs_nineteen_fields() {
+fn the_golden_case_needs_twenty_fields() {
     // 实测：手写的 oracle/cases/CN-Cng/case.nml 设 43 个字段，其中 22 个
     // 等于 CoLM 的声明默认值。删掉那 22 行重跑，history 与黄金文件
     // identical: 129 variables。
@@ -57,12 +57,13 @@ fn the_golden_case_needs_nineteen_fields() {
     // 21 -> 19：预热关掉时，截止时刻的年月日秒四项都落回 CoLM 的默认值
     // 而被剪掉，只剩 `spinup_repeat = 0`。**模型行为没变** ——
     // 决定开不开预热的是 `ststamp < ptstamp`，而 year=0 与原来那版
-    // （year 不写、同样是 0）一样让它为假。
+    // （year 不写、同样是 0）一样让它为假。19 -> 20：臭氧胁迫本身也显式
+    // 关闭，桌面端新算例不会再隐式套用固定 100 ppbv。
     let all = fields(&cn_cng());
     let req = crate::minimal::required(&all);
     assert_eq!(
         req.len(),
-        19,
+        20,
         "{:#?}",
         req.iter().map(|f| &f.0).collect::<Vec<_>>()
     );

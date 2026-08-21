@@ -59,7 +59,8 @@ const PATH_ON_ENABLE = Object.freeze({
   DEF_USE_Forcing_Downscaling: { path: 'DEF_DS_HiresTopographyDataDir', kind: 'folder' },
 });
 const PATH_FIELDS = Object.freeze(Object.fromEntries(
-  Object.values(PATH_ON_ENABLE).map(spec => [spec.path, spec.kind])));
+  Object.values(PATH_ON_ENABLE).map(spec => [spec.path, spec.kind])
+    .concat([['DEF_file_Ozone', 'file']])));
 
 // CoLM 对这两个开关分别分配同名、不同形状的数组，不能同时为 true。
 // 用户启用一个时在同一次原子写入里关闭另一个，不要求先手工关旧方案。
@@ -73,7 +74,7 @@ const enabled = value => /true|\.t\./i.test(String(value));
 async function pickParameterPath(path, kind) {
   try {
     const picked = kind === 'file'
-      ? await invoke('pick_file', { key: path, filter: 'nc' })
+      ? await invoke('pick_file', { key: path, filter: 'nc,nc4' })
       : await invoke('pick_folder', { key: path });
     if (picked) await invoke('save_recent', { key: path, value: picked });
     return picked;
@@ -98,6 +99,21 @@ export function withoutWizardFields(entries) {
 // **写回文件的仍是 Fortran 字面量** —— `colm-namelist` 的往返保证不能因为
 // 界面换了控件就破掉。
 function control(e, meta, fieldState) {
+  if (e.synthetic === 'stomatal') {
+    const s = document.createElement('select');
+    const values = e.value === 'INVALID'
+      ? ['INVALID', 'BALL_BERRY', 'MEDLYN', 'WUE']
+      : ['BALL_BERRY', 'MEDLYN', 'WUE'];
+    for (const value of values) {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = optionLabel(e.path, value, language());
+      s.appendChild(o);
+    }
+    s.value = e.value;
+    s.className = 'select';
+    return s;
+  }
   const raw = e.value.replace(/^'|'$/g, '');
   const kind = meta?.kind ?? '';
   const runtimeValues = fieldState?.allowed_values ?? [];
@@ -289,8 +305,9 @@ export async function renderFields() {
   }
 
   for (const [page, process] of processes) {
-    const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
+    let rows = shown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
+    if (page.id === 'params-eco') rows = collapseStomatal(rows);
     if (!rows.length) {
       process.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
       continue;
@@ -316,6 +333,29 @@ export async function renderFields() {
   await renderHistVars(hist);
 }
 
+/** 两个底层 logical 实际表示一个三选一方案：都关是 Ball–Berry。 */
+function collapseStomatal(rows) {
+  const medlyn = rows.find(e => e.path === 'DEF_USE_MEDLYNST');
+  const wue = rows.find(e => e.path === 'DEF_USE_WUEST');
+  if (!medlyn && !wue) return rows;
+  const medlynOn = medlyn && enabled(medlyn.value);
+  const wueOn = wue && enabled(wue.value);
+  const value = medlynOn && wueOn ? 'INVALID'
+    : medlynOn ? 'MEDLYN'
+      : wueOn ? 'WUE' : 'BALL_BERRY';
+  const first = rows.findIndex(e => e.path === 'DEF_USE_MEDLYNST' || e.path === 'DEF_USE_WUEST');
+  const collapsed = rows.filter(e => e.path !== 'DEF_USE_MEDLYNST' && e.path !== 'DEF_USE_WUEST');
+  collapsed.splice(first, 0, {
+    path: 'GUI_STOMATAL_CONDUCTANCE_SCHEME',
+    value,
+    known: true,
+    synthetic: 'stomatal',
+    sourcePaths: ['DEF_USE_MEDLYNST', 'DEF_USE_WUEST'],
+    unset: Boolean(medlyn?.unset && wue?.unset),
+  });
+  return collapsed;
+}
+
 function publishFlows(flows) {
   state.availableFlows = flows;
   globalThis.dispatchEvent?.(new Event('colm:flows'));
@@ -339,7 +379,9 @@ function table(shown, fieldStates = new Map()) {
     } else {
       // 主标签说人话，CoLM 原始键保留在 tooltip 供查文档和排错。
       k.textContent = fieldLabel(e.path, language());
-      k.title = technicalFieldHint(e.path, language());
+      k.title = e.synthetic === 'stomatal'
+        ? '由 DEF_USE_MEDLYNST 与 DEF_USE_WUEST 两个底层开关原子写入；两者都关闭时使用 Ball–Berry。'
+        : technicalFieldHint(e.path, language());
       // schema 里 713 个字段有 108 个带 CoLM 自己的行尾注释。有就显示出来，
       // 顺带把声明的默认值也放上去 —— 用户最常问的就是「不改会怎样」。
       const hint = HINTS[e.path];
@@ -365,7 +407,7 @@ function table(shown, fieldStates = new Map()) {
     if (fieldState?.mixed) {
       warnings.push('这一批算例对该字段的适用条件不同；它只对其中一部分算例生效。');
     }
-    if (state.varies.has(e.path)) {
+    if (state.varies.has(e.path) || e.sourcePaths?.some(path => state.varies.has(path))) {
       // 这一行显示的是代表算例的值，别的算例不是这个值。改它会抹平全部。
       warnings.push('这一批算例在这个字段上取值不同，显示的是第一个的值。改它会把全部改成同一个值。');
     }
@@ -388,6 +430,51 @@ function table(shown, fieldStates = new Map()) {
       inp.onchange = async () => {
         const before = e.value.replace(/^'|'$/g, '');
         try {
+          if (e.synthetic === 'stomatal') {
+            if (inp.value === 'INVALID') return;
+            const fields = [
+              { path: 'DEF_USE_MEDLYNST', value: inp.value === 'MEDLYN' ? '.true.' : '.false.' },
+              { path: 'DEF_USE_WUEST', value: inp.value === 'WUE' ? '.true.' : '.false.' },
+            ];
+            const r = await invoke('set_fields_batch', {
+              dirs: editTarget(),
+              fields,
+            });
+            state.text = r.text;
+            state.varies.delete('DEF_USE_MEDLYNST');
+            state.varies.delete('DEF_USE_WUEST');
+            status(r.written > 1
+              ? `已为 ${r.written} 个算例设置气孔导度方案`
+              : '已保存气孔导度方案');
+            await renderFields();
+            return;
+          }
+          if (enabled(inp.value) && e.path === 'DEF_USE_CBL_HEIGHT') {
+            const picked = await pickParameterPath('DEF_USE_CBL_HEIGHT', 'file');
+            if (!picked) { inp.value = before; return; }
+            const r = await invoke('configure_cbl_batch', { dirs: editTarget(), file: picked });
+            state.text = r.text;
+            status('已校验并接入边界层高度文件');
+            await renderFields();
+            return;
+          }
+          if (enabled(inp.value)
+              && (e.path === 'DEF_USE_OZONESTRESS' || e.path === 'DEF_USE_OZONEDATA')) {
+            const picked = await pickParameterPath('DEF_file_Ozone', 'file');
+            if (!picked) { inp.value = before; return; }
+            const r = await invoke('configure_ozone_batch', { dirs: editTarget(), file: picked });
+            state.text = r.text;
+            status('已校验臭氧数据，并启用臭氧胁迫与数据读取');
+            await renderFields();
+            return;
+          }
+          if (e.path === 'DEF_file_Ozone') {
+            const r = await invoke('configure_ozone_batch', { dirs: editTarget(), file: inp.value });
+            state.text = r.text;
+            status('已校验并更换臭氧数据文件');
+            await renderFields();
+            return;
+          }
           const changes = [{ path: e.path, value: inp.value }];
           if (enabled(inp.value) && PATH_ON_ENABLE[e.path]) {
             const spec = PATH_ON_ENABLE[e.path];
@@ -398,6 +485,9 @@ function table(shown, fieldStates = new Map()) {
           }
           if (enabled(inp.value) && MUTEX_ON_ENABLE[e.path]) {
             changes.push({ path: MUTEX_ON_ENABLE[e.path], value: '.false.' });
+          }
+          if (!enabled(inp.value) && e.path === 'DEF_USE_OZONESTRESS') {
+            changes.push({ path: 'DEF_USE_OZONEDATA', value: '.false.' });
           }
           // 独立地下水位文件在 SoilInit 下会被 CoLM 忽略；打开完整土壤初始场
           // 时顺手关掉这个无效父开关，配置文件也与实际执行保持一致。
@@ -422,6 +512,24 @@ function table(shown, fieldStates = new Map()) {
         }
       };
       v.appendChild(inp);
+      if (e.path === 'DEF_USE_CBL_HEIGHT') {
+        const pick = document.createElement('button');
+        pick.type = 'button';
+        pick.className = 'btn-ghost';
+        pick.style.marginLeft = '8px';
+        pick.textContent = '选择/更换边界层数据…';
+        pick.onclick = async () => {
+          const chosen = await pickParameterPath('DEF_USE_CBL_HEIGHT', 'file');
+          if (!chosen) return;
+          try {
+            const r = await invoke('configure_cbl_batch', { dirs: editTarget(), file: chosen });
+            state.text = r.text;
+            status('已校验并接入边界层高度文件');
+            await renderFields();
+          } catch (err) { status(err); }
+        };
+        v.appendChild(pick);
+      }
       if (PATH_FIELDS[e.path]) {
         const pick = document.createElement('button');
         pick.type = 'button';
@@ -431,6 +539,15 @@ function table(shown, fieldStates = new Map()) {
         pick.onclick = async () => {
           const chosen = await pickParameterPath(e.path, PATH_FIELDS[e.path]);
           if (!chosen) return;
+          if (e.path === 'DEF_file_Ozone') {
+            try {
+              const r = await invoke('configure_ozone_batch', { dirs: editTarget(), file: chosen });
+              state.text = r.text;
+              status('已校验并更换臭氧数据文件');
+              await renderFields();
+            } catch (err) { status(err); }
+            return;
+          }
           inp.value = chosen;
           inp.dispatchEvent(new Event('change'));
         };

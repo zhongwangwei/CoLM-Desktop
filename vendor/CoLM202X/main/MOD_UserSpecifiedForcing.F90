@@ -686,8 +686,16 @@ CONTAINS
       IF (DEF_USE_CBL_HEIGHT) THEN
          select CASE (var_i)
          CASE (9)
-            metfilename = '/'//trim(fprefix(9))//'_'//trim(yearstr)//'_'//trim(monthstr)//&
-               '_boundary_layer_height.nc4'
+            IF (trim(DEF_forcing%dataset) == 'POINT') THEN
+               ! POINT 边界层强迫由桌面端选择一份已经提取到本站、并与主
+               ! 强迫场共用时间轴的文件。这里必须把 CBL_fprefix 当完整文件名；
+               ! 原先无条件拼 ERA5 月文件后缀，会让单点配置即使选了文件也
+               ! 永远打不开它。
+               metfilename = '/'//trim(fprefix(9))
+            ELSE
+               metfilename = '/'//trim(fprefix(9))//'_'//trim(yearstr)//'_'//trim(monthstr)//&
+                  '_boundary_layer_height.nc4'
+            ENDIF
          END select
       ENDIF
    END FUNCTION metfilename

@@ -343,8 +343,9 @@ CoLM 的默认值假设 HPC 数据树存在：`DEF_USE_OZONEDATA` 默认 `.true.
 要读 2.8 GB 的 `Ozone/Global/OZONE-setgrid.nc`；`DEF_Runoff_SCHEME` 默认 `3`
 （Simple VIC），要求站点文件里有 `soil_texture`。
 
-这两条的处置并不相同：臭氧是**本项目唯一必须显式关掉**的默认开关，
-而产流方案沿用 CoLM 的 `3`，代价是站点文件缺 `soil_texture` 时要合成一个。
+这两条的处置并不相同：桌面端新算例会显式关闭臭氧胁迫与臭氧读取；用户在
+GUI 启用时选择并校验 NetCDF 文件。产流方案则沿用 CoLM 的 `3`，代价是站点
+文件缺 `soil_texture` 时要合成一个。
 哪个照搬、哪个偏离、偏离的理由，都由上层决定并解释，schema 不参与 ——
 见 `docs/design.md` §2.5 与 §2.7。
 

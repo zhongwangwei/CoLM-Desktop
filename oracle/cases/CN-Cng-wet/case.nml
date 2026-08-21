@@ -47,6 +47,9 @@
    DEF_LAI_MONTHLY       = .true.
    DEF_LAI_CHANGE_YEARLY = .true.
 
+! 固定旧金标的冠层积雪行为；Desktop 新算例使用新的 .true. 默认。
+   DEF_VEG_SNOW = .false.
+
 ! Simple VIC (CoLM 默认)。需要站点文件里有 soil_texture
    DEF_Runoff_SCHEME = 3
 

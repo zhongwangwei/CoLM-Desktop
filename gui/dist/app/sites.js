@@ -5,7 +5,6 @@ import { state } from './state.js';
 import { $, status, joinPath } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
-import { refreshPresets } from './presets.js';
 import { renderSteps, setStatus } from './shell.js';
 import {
   batchTarget, currentCases, freshCaseName, updateCaseBatchButtons,
@@ -127,7 +126,6 @@ async function selectCase(c) {
     }
     renderFields();
     refreshVars();
-    refreshPresets();
   } catch (e) { $('status').textContent = String(e); }
 }
 

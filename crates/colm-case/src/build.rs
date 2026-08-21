@@ -206,10 +206,10 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
             "DEF_forcing_namelist".into(),
             Value::Str(s.dirs.forcing_namelist.clone()),
         ),
-        // ---- 预设级 ----
-        // 臭氧是本项目唯一必须显式关掉的默认开关：CoLM 默认 .true.，
-        // 要读 2.8 GB 的 Ozone/Global/OZONE-setgrid.nc。关掉之后
-        // MOD_Ozone.F90:83 用常数 100 ppbv，臭氧胁迫仍生效。见 design.md §2.7。
+        // ---- 桌面端安全默认 ----
+        // 臭氧胁迫不依赖 BGC，但 CoLM 的上游默认会立即读取 2.8 GB 全球场；
+        // 新算例显式关闭两层开关，用户在 GUI 启用时再选择并校验数据文件。
+        ("DEF_USE_OZONESTRESS".into(), Value::Bool(false)),
         ("DEF_USE_OZONEDATA".into(), Value::Bool(false)),
         ("DEF_WRST_FREQ".into(), Value::Str("MONTHLY".into())),
         ("DEF_HIST_FREQ".into(), Value::Str("HOURLY".into())),

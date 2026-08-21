@@ -67,6 +67,7 @@ const LABELS = Object.freeze({
 
   DEF_USE_OZONESTRESS: pair('启用臭氧胁迫', 'Enable ozone stress'),
   DEF_USE_OZONEDATA: pair('读取臭氧数据', 'Read ozone data'),
+  DEF_file_Ozone: pair('臭氧数据文件', 'Ozone-data file'),
   DEF_USE_SNICAR: pair('启用 SNICAR 积雪辐射模型', 'Enable SNICAR snow-radiation model'),
   DEF_Aerosol_Readin: pair('读取气溶胶数据', 'Read aerosol data'),
   DEF_Aerosol_Clim: pair('使用气溶胶气候态', 'Use aerosol climatology'),
@@ -82,6 +83,7 @@ const LABELS = Object.freeze({
   DEF_USE_PLANTHYDRAULICS: pair('启用植物水力过程', 'Enable plant hydraulics'),
   DEF_USE_MEDLYNST: pair('启用 Medlyn 气孔导度', 'Enable Medlyn stomatal conductance'),
   DEF_USE_WUEST: pair('启用水分利用效率气孔方案', 'Enable WUE stomatal scheme'),
+  GUI_STOMATAL_CONDUCTANCE_SCHEME: pair('气孔导度方案', 'Stomatal-conductance scheme'),
   DEF_USE_SASU: pair('启用半解析预热', 'Enable semi-analytic spin-up'),
   DEF_USE_DiagMatrix: pair('输出生地化诊断矩阵', 'Output biogeochemical diagnostic matrix'),
   DEF_USE_PN: pair('启用脉冲加氮预热', 'Enable punctuated-N spin-up'),
@@ -304,6 +306,16 @@ const OPTIONS = Object.freeze({
   DEF_USE_Forcing_Downscaling_Simple: {
     '.true.': pair('启用简化方案（自动关闭完整方案）', 'Enable simple mode (disables full mode)'),
     '.false.': pair('关闭简化方案', 'Disable simple mode'),
+  },
+  DEF_USE_OZONEDATA: {
+    '.true.': pair('从所选 NetCDF 文件读取', 'Read from the selected NetCDF file'),
+    '.false.': pair('使用固定臭氧浓度（100 ppbv）', 'Use a fixed ozone concentration (100 ppbv)'),
+  },
+  GUI_STOMATAL_CONDUCTANCE_SCHEME: {
+    BALL_BERRY: pair('Ball–Berry（CoLM 默认）', 'Ball–Berry (CoLM default)'),
+    MEDLYN: pair('Medlyn', 'Medlyn'),
+    WUE: pair('水分利用效率（WUE）', 'Water-use efficiency (WUE)'),
+    INVALID: pair('配置冲突：Medlyn 与 WUE 同时开启', 'Invalid: Medlyn and WUE are both enabled'),
   },
 });
 

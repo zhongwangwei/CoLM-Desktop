@@ -19,34 +19,26 @@ fn js(name: &str) -> String {
 
 #[test]
 fn nothing_in_the_frontend_writes_a_single_case() {
-    // `write_text` 已经从后端删掉、`set_field` 与 `apply_preset` 已经从命令表
+    // `write_text` 已经从后端删掉、`set_field` 已经从命令表
     // 摘掉。**前端再出现它们就是回退** —— 那条路只写得动一个文件。
-    for f in ["params.js", "histvars.js", "presets.js", "timing.js"] {
+    for f in ["params.js", "histvars.js", "timing.js"] {
         let t = js(f);
-        for bad in [
-            "invoke('write_text'",
-            "invoke('set_field'",
-            "invoke('apply_preset'",
-        ] {
+        for bad in ["invoke('write_text'", "invoke('set_field'"] {
             assert!(!t.contains(bad), "{f} 又走回单份写入：{bad}");
         }
     }
     // 后端也不该再注册它们。
     let lib = std::fs::read_to_string(root().join("gui/src-tauri/src/lib.rs")).expect("lib.rs");
-    for bad in [
-        "            set_field,",
-        "            write_text,",
-        "            apply_preset,",
-    ] {
+    for bad in ["            set_field,", "            write_text,"] {
         assert!(!lib.contains(bad), "命令表里又出现了单份写入：{bad}");
     }
 }
 
 #[test]
 fn every_editor_asks_who_it_applies_to() {
-    // 三处编辑入口（参数、输出变量、预设）都要问 `editTarget()`。
+    // 三处编辑入口（参数、输出变量、预热）都要问 `editTarget()`。
     // 漏掉任何一处，那一处就悄悄退回"只改第一个"。
-    for f in ["params.js", "histvars.js", "presets.js", "timing.js"] {
+    for f in ["params.js", "histvars.js", "timing.js"] {
         let t = js(f);
         assert!(
             t.contains("editTarget"),
@@ -56,6 +48,24 @@ fn every_editor_asks_who_it_applies_to() {
     // `editTarget` 住在 batch.js：params.js 已经 import 了 timing.js，
     // 放在 params.js 里会形成一个环，而 ES module 的环不报错。
     assert!(js("batch.js").contains("export function editTarget"));
+}
+
+#[test]
+fn parameter_presets_are_removed_instead_of_left_half_wired() {
+    let root = root();
+    assert!(!root.join("gui/dist/app/presets.js").exists());
+    assert!(!root.join("gui/src-tauri/src/presets.rs").exists());
+    let html = std::fs::read_to_string(root.join("gui/dist/index.html")).unwrap();
+    assert!(!html.contains("参数预设") && !html.contains("preset-apply"));
+    let lib = std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs")).unwrap();
+    for removed in [
+        "save_preset",
+        "list_presets",
+        "delete_preset",
+        "apply_preset",
+    ] {
+        assert!(!lib.contains(removed), "参数预设后端仍残留：{removed}");
+    }
 }
 
 #[test]

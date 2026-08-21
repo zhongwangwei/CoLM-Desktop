@@ -1324,9 +1324,12 @@ ENDIF
 
          allocate (forc_disk (size(forctime),NVAR))
 
-         filename = trim(dir_forcing)//trim(metfilename(-1,-1,-1,-1))
          DO ivar = 1, NVAR
             IF (trim(vname(ivar)) /= 'NULL') THEN
+               ! POINT 的边界层高度可以来自另一份、但时间轴完全相同的站点
+               ! 文件。每个变量都按自己的 fprefix 求文件名；原先在循环外用
+               ! var_i=-1 固定成主强迫场，read-ahead 会错误地去主文件找 blh。
+               filename = trim(dir_forcing)//trim(metfilename(-1,-1,-1,ivar))
 IF ((.not. DEF_URBAN_RUN)) THEN
                CALL ncio_read_period_serial (filename, vname(ivar), its, ite, metcache)
                forc_disk(:,ivar) = metcache(1,1,:)

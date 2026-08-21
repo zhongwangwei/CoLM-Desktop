@@ -579,6 +579,7 @@ fn child_fields_follow_initial_forcing_runoff_and_process_switches() {
         "DEF_Aerosol_Readin",
         "DEF_Aerosol_Clim",
         "DEF_USE_OZONEDATA",
+        "DEF_file_Ozone",
     ] {
         assert_eq!(mode(&off, name), &FieldMode::Hidden, "{name}");
     }
@@ -597,7 +598,8 @@ fn child_fields_follow_initial_forcing_runoff_and_process_switches() {
          DEF_VIC_OPT = .true.\n\
          DEF_USE_SNICAR = .true.\n\
          DEF_Aerosol_Readin = .true.\n\
-         DEF_USE_OZONESTRESS = .true.\n/\n",
+         DEF_USE_OZONESTRESS = .true.\n\
+         DEF_USE_OZONEDATA = .false.\n/\n",
         &["SinglePoint", "LULC_IGBP"],
     );
     for name in [
@@ -614,6 +616,12 @@ fn child_fields_follow_initial_forcing_runoff_and_process_switches() {
     ] {
         assert_eq!(mode(&on, name), &FieldMode::Editable, "{name}");
     }
+    assert_eq!(mode(&on, "DEF_file_Ozone"), &FieldMode::Hidden);
+    let ozone_file = runtime_states(
+        "&nl_colm\n DEF_USE_OZONESTRESS=.true.\n DEF_USE_OZONEDATA=.true.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&ozone_file, "DEF_file_Ozone"), &FieldMode::Editable);
     // SoilInit wins over a separate water-table file; VIC parameter paths are
     // derived from DEF_dir_runtime by MOD_Namelist.
     for name in [
@@ -757,6 +765,8 @@ fn subgrid_bgc_crop_urban_and_landtype_constraints_are_composed() {
     assert_eq!(mode(&pc_crop_urban, "DEF_URBAN_BEM"), &FieldMode::Editable);
     assert_eq!(mode(&pc_crop_urban, "DEF_URBAN_ONLY"), &FieldMode::Hidden);
     for forced_off in [
+        "DEF_VEG_SNOW",
+        "DEF_USE_MEDLYNST",
         "DEF_USE_WUEST",
         "DEF_USE_SUPERCOOL_WATER",
         "DEF_USE_PLANTHYDRAULICS",
@@ -770,6 +780,46 @@ fn subgrid_bgc_crop_urban_and_landtype_constraints_are_composed() {
             "{forced_off}"
         );
     }
+}
+
+#[test]
+fn ozone_is_leaf_physiology_not_a_bgc_only_process() {
+    let natural = runtime_states(
+        "&nl_colm\n SITE_landtype=1\n DEF_USE_BGC=.false.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&natural, "DEF_USE_OZONESTRESS"), &FieldMode::Editable);
+    let lake = runtime_states(
+        "&nl_colm\n SITE_landtype=17\n DEF_USE_BGC=.true.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for name in [
+        "DEF_USE_OZONESTRESS",
+        "DEF_USE_OZONEDATA",
+        "DEF_USE_MEDLYNST",
+        "DEF_USE_WUEST",
+        "DEF_VEG_SNOW",
+    ] {
+        assert_eq!(mode(&lake, name), &FieldMode::Hidden, "{name}");
+    }
+}
+
+#[test]
+fn interception_choices_follow_the_kernel_file_selection_macro() {
+    let extended = runtime_states(
+        "&nl_colm\n/\n",
+        &["SinglePoint", "LULC_IGBP", "extend_interception"],
+    );
+    assert_eq!(
+        runtime_state(&extended, "DEF_Interception_scheme").allowed_values,
+        ["1", "2", "3", "4", "5", "6", "7", "8"]
+    );
+
+    let fallback = runtime_states("&nl_colm\n/\n", &["SinglePoint", "LULC_IGBP"]);
+    assert_eq!(
+        runtime_state(&fallback, "DEF_Interception_scheme").allowed_values,
+        ["1"]
+    );
 }
 
 #[test]

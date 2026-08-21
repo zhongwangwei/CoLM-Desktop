@@ -311,7 +311,7 @@ MODULE MOD_Namelist
    ! ----- Account for vegetation snow process -----
    ! NOTE: This option will be activated in the new release, accompanied by
    !       a new set of canopy structure data, include the snow-free LAI.
-   logical :: DEF_VEG_SNOW = .false.
+   logical :: DEF_VEG_SNOW = .true.
 
    ! ----- Variably Saturated Flow Soil Water -----
    logical :: DEF_USE_VariablySaturatedFlow = .true.
@@ -348,8 +348,12 @@ MODULE MOD_Namelist
    ! macro; see docs/plan-macro-runtime.md for the scope note.
 
    ! ----- Ozone stress -----
+   ! Ozone stress is an optional leaf-physiology process, not a BGC switch.
+   ! Keep upstream defaults for old scientific cases; CoLM Desktop writes
+   ! both switches false for new cases and requires a selected file to enable.
    logical :: DEF_USE_OZONESTRESS = .true.
    logical :: DEF_USE_OZONEDATA   = .true.
+   character(len=256) :: DEF_file_Ozone = 'null'
 
    ! ----- SNICAR model related -----
    logical :: DEF_USE_SNICAR                  = .false.
@@ -1366,6 +1370,7 @@ CONTAINS
       DEF_USE_Campbell_SOIL_MODEL,            &
       DEF_USE_OZONESTRESS,                    &
       DEF_USE_OZONEDATA,                      &
+      DEF_file_Ozone,                         &
       DEF_USE_SNICAR,                         &
       DEF_Aerosol_Readin,                     &
       DEF_Aerosol_Clim,                       &
@@ -2193,6 +2198,7 @@ CONTAINS
       CALL mpi_bcast (DEF_USE_Campbell_SOIL_MODEL            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_OZONESTRESS                    ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_OZONEDATA                      ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_file_Ozone                         ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
 
       CALL mpi_bcast (DEF_precip_phase_discrimination_scheme ,5   ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
 

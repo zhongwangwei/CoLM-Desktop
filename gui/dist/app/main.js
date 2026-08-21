@@ -5,7 +5,6 @@ import { state } from './state.js';
 import { $ } from './ui.js';
 import { initShell, renderSteps, setStatus } from './shell.js';
 import { refreshKernels, watchRun } from './runner.js';
-import { refreshPresets } from './presets.js';
 import { restoreRecent, wirePickers } from './recent.js';
 import { showDomainGate } from './domain.js';
 import { renderCases, checkRootSpace } from './sites.js';
@@ -36,7 +35,6 @@ async function boot() {
     setStatus(await invoke('backend_ready'));
     state.fields = await invoke('describe_fields');
     await refreshKernels();
-    await refreshPresets();
     await restoreRecent();
     // `restoreRecent` 对文本框只赋值、不派发 `change`（见那里的注释），
     // 而 `checkRootSpace` 挂在 `#root` 的 `change`/`input` 上 ——
