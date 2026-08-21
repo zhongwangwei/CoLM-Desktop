@@ -303,10 +303,14 @@ fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeS
         // 「有意义」（能不能真的看到城市输出取决于 `DEF_URBAN_RUN`
         // 本身怎么设，那是运行时的事，不是这个函数管的编译期相关性）。
         Some("数据同化") => have.contains("DataAssimilation"),
-        // 上游这一项漏了 `requires = GridRiverLakeFlow`，所以仅靠生成表会在
-        // CaMaOFF 的单点内核里凭空撑出整个“河道与水库”分栏。
-        Some("河道与水库") if field.name == "DEF_Reservoir_Method" => {
-            have.contains("GridRiverLakeFlow")
+        // 单点内核没有河网，整个分栏都没有意义。上游至少有
+        // `DEF_ElementNeighbour_file` 和 `DEF_Reservoir_Method` 漏了 `requires`；
+        // 只逐项补洞会让下一个漏标字段再次把空分栏撑出来。因此这里以过程
+        // 是否编进内核为分栏总闸门，字段自身更细的 `requires` 已在上面检查。
+        Some("河道与水库") => {
+            have.contains("CaMa_Flood")
+                || have.contains("GridRiverLakeFlow")
+                || have.contains("CatchLateralFlow")
         }
         _ => true,
     }

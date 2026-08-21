@@ -357,8 +357,20 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
     // 用来验证「宏决定相关性」这条机制本身还成立。
     assert!(!relevant("DEF_DA_TWS", &default));
     assert!(relevant("DEF_DA_TWS", &with_da));
-    // 这项在上游声明处漏了 requires；没有河网时让它留在页面上，会凭空
-    // 撑出整个“河道与水库”分栏。
+    // 上游不止一项漏了 requires；单点内核没有任何河网过程时，整个分栏
+    // 必须为空，不能让任意一个漏标字段把它撑出来。
+    for field in colm_schema::all()
+        .iter()
+        .filter(|field| super::field_section(field.name, field.group) == Some("河道与水库"))
+    {
+        assert!(
+            !super::field_is_relevant(field, &default),
+            "单点内核仍显示河道字段：{}",
+            field.name
+        );
+    }
+    assert!(!relevant("DEF_ElementNeighbour_file", &default));
     assert!(!relevant("DEF_Reservoir_Method", &default));
+    assert!(relevant("DEF_ElementNeighbour_file", &with_river));
     assert!(relevant("DEF_Reservoir_Method", &with_river));
 }
