@@ -11,6 +11,19 @@ fn the_epoch_offset_matches_the_real_history_file() {
 }
 
 #[test]
+fn a_midyear_observation_origin_is_not_reduced_to_january_first() {
+    // AU-Preston 的观测不是从元旦开始，而是从 2003-08-12 03:30 开始。
+    // 模型 04:00 的标签相对这个原点只能是 1800 秒；如果只解析年份，
+    // 会错出 223 天，得到一批看似“模型特别差”的伪指标。
+    let at_four_am = minutes_from_1900(2003) as f64
+        + (31 + 28 + 31 + 30 + 31 + 30 + 31 + 11) as f64 * 1440.0
+        + 4.0 * 60.0;
+    let sec = model_seconds_from_units(&[at_four_am], "seconds since 2003-08-12T03:30:00")
+        .expect("valid CF time units");
+    assert_eq!(sec, vec![1800.0]);
+}
+
+#[test]
 fn leap_years_follow_the_gregorian_rule() {
     // 1900 不是闰年（能被 100 整除且不能被 400 整除），2000 是。
     // 弄错任何一个，2008 的偏移就会差一整天 1440 分，配对全错位。

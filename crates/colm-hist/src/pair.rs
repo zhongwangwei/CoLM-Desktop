@@ -1,4 +1,4 @@
-//! 把模型逐小时序列与观测半小时序列配成对。
+//! 把模型半小时或逐小时序列与观测半小时序列配成对。
 //!
 //! 聚合规则是**至少一个半小时 `qc == 0` 即可用，取好的那些的平均**，
 //! 不是「两个都必须好」。这条是实测定下来的，不是选的：
@@ -59,10 +59,24 @@ pub fn pair_with_time(
     spinup: usize,
 ) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::new();
+    // TIMESTEP history 与 AU-Preston 观测同为半小时：同名时刻一一配对。
+    // HOURLY history 则保留原有规则，用标签覆盖的两个半小时观测。
+    let shortest_model_step = model_seconds
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|step| *step > 1.0)
+        .fold(f64::INFINITY, f64::min);
+    let one_observation_per_label = shortest_model_step <= 1801.0;
     for k in spinup..model_seconds.len() {
         let mut acc = 0.0;
         let mut n = 0;
-        for want in observation_slots(model_seconds[k]) {
+        let slots = if one_observation_per_label {
+            [model_seconds[k], model_seconds[k]]
+        } else {
+            observation_slots(model_seconds[k])
+        };
+        let slot_count = if one_observation_per_label { 1 } else { 2 };
+        for want in slots.into_iter().take(slot_count) {
             // 观测步长是 1800 秒，误差 1 秒内视为同一时刻
             let Some(i) = obs.seconds.iter().position(|&x| (x - want).abs() < 1.0) else {
                 continue;

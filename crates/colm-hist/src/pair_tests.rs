@@ -32,6 +32,28 @@ fn an_hour_averages_its_two_half_hours() {
 }
 
 #[test]
+fn a_half_hour_model_uses_the_observation_with_the_same_label_once() {
+    // AU-Preston 用 TIMESTEP 输出，模型与观测都是半小时。再把前一条观测
+    // 平均进来会重复使用每个样本，并把 SWup 的 RMSE 从 3.8 放大到 7.8 W/m²。
+    let ms = vec![1800.0, 3600.0, 5400.0];
+    let mv = vec![10.0, 20.0, 30.0];
+    let os = vec![0.0, 1800.0, 3600.0, 5400.0];
+    let ov = vec![1.0, 2.0, 3.0, 4.0];
+    let oq = vec![0.0; 4];
+    let p = pair(
+        &ms,
+        &mv,
+        &Series {
+            seconds: &os,
+            values: &ov,
+            qc: &oq,
+        },
+        0,
+    );
+    assert_eq!(p, vec![(10.0, 2.0), (20.0, 3.0), (30.0, 4.0)]);
+}
+
+#[test]
 fn one_bad_half_hour_leaves_the_other_one_usable() {
     // 这条是本模块的核心规则。把它改成「两个都要好」，
     // design.md 的 253 / 254 会变成 250 / 245。

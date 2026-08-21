@@ -1184,9 +1184,11 @@ fn cmd_metrics(
 
     let o_t = colm_hist::obs::read_1d(obs_path, "time")?;
     let m_t = read_history(&hists, "time")?;
-    // 观测的 time 原点是它自己记录的起始年；模型换算到同一原点
-    let year = observation_year(obs_path)?;
-    let m_sec = colm_hist::time::model_seconds(&m_t, year);
+    // 观测的 time 原点可能在年中（AU-Preston 是 2003-08-12 03:30），
+    // 必须按完整日期时间换算；只取年份会把序列错配几个月。
+    let units = colm_hist::obs::time_units(obs_path)?;
+    let m_sec = colm_hist::time::model_seconds_from_units(&m_t, &units)
+        .with_context(|| format!("unsupported observation time units {units:?}"))?;
 
     if !json {
         println!(
@@ -1677,18 +1679,6 @@ fn check_increasing(t: &[f64]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// 观测文件 `time:units` 里的起始年。
-fn observation_year(p: &Path) -> Result<i32> {
-    let u = colm_hist::obs::time_units(p)?;
-    let y = u
-        .split("since")
-        .nth(1)
-        .and_then(|r| r.trim().split('-').next())
-        .and_then(|y| y.trim().parse().ok())
-        .with_context(|| format!("cannot read a start year out of {u:?}"))?;
-    Ok(y)
 }
 
 #[cfg(test)]

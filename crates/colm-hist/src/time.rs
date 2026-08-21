@@ -35,6 +35,61 @@ pub fn model_seconds(minutes_since_1900: &[f64], year: i32) -> Vec<f64> {
         .collect()
 }
 
+/// 模型时间转换到观测文件 `time:units` 声明的精确原点。
+///
+/// PLUMBER2 并不保证观测从元旦开始。比如 AU-Preston 写的是
+/// `seconds since 2003-08-12T03:30:00`；只取年份会把两条序列错开 223 天。
+/// 支持 CF 文件里常见的空格或 `T` 日期时间分隔符，以及可选的秒小数。
+pub fn model_seconds_from_units(minutes_since_1900: &[f64], units: &str) -> Option<Vec<f64>> {
+    let (unit, origin) = units.split_once("since")?;
+    if !unit.trim().eq_ignore_ascii_case("seconds") {
+        return None;
+    }
+
+    let normalized = origin.trim().replace('T', " ");
+    let mut words = normalized.split_whitespace();
+    let date = words.next()?;
+    let time = words.next().unwrap_or("00:00:00").trim_end_matches('Z');
+
+    let mut date_parts = date.split('-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: usize = date_parts.next()?.parse().ok()?;
+    let day: usize = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() || !(1..=12).contains(&month) {
+        return None;
+    }
+
+    let month_days = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    if day == 0 || day > month_days[month - 1] {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour: usize = time_parts.next()?.parse().ok()?;
+    let minute: usize = time_parts.next()?.parse().ok()?;
+    let second: f64 = time_parts.next()?.parse().ok()?;
+    if time_parts.next().is_some() || hour > 23 || minute > 59 || !(0.0..60.0).contains(&second) {
+        return None;
+    }
+
+    let days_before_month: usize = month_days[..month - 1].iter().sum();
+    let origin_minutes = minutes_from_1900(year) as f64
+        + (days_before_month + day - 1) as f64 * 1440.0
+        + hour as f64 * 60.0
+        + minute as f64
+        + second / 60.0;
+    Some(
+        minutes_since_1900
+            .iter()
+            .map(|t| (t - origin_minutes) * 60.0)
+            .collect(),
+    )
+}
+
 /// 模型标签 `t`（秒）对应的两个观测半小时样本的时刻。
 ///
 /// 标签在中点意味着 00:30 这个标签覆盖 00:00–01:00，而观测标签在起点，
