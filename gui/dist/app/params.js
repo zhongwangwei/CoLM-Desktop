@@ -1,4 +1,4 @@
-//! 配置页签与字段表格。
+//! 基本设定与过程参数字段表格。
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
@@ -7,13 +7,27 @@ import { renderHistVars } from './histvars.js';
 import { renderTiming } from './timing.js';
 import { editTarget } from './batch.js';
 import { wizardFieldNames } from './domain.js';
+import { urbanEnabled } from './kernel.js';
 
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
-// 新字段不能掉进「其他」。这里只规定页面顺序。
-const PARAM_SECTIONS = [
-  '算例', '站点', '文件与目录', '网格与并行', '地表数据', '初始场',
-  '城市', '水热过程', '生态与生地化', '河道与水库', '强迫场', '数据同化', '示踪剂',
-  '调试与诊断',
+// 新字段不能掉进「其他」。基本设定与过程参数各自只认这一份归属表。
+const BASIC_PAGES = [
+  { target: 'basic-files-fields', sections: ['算例', '文件与目录'] },
+  { target: 'basic-site-fields', sections: ['站点'] },
+  { target: 'basic-grid-fields', sections: ['网格与并行'] },
+  { target: 'basic-surface-fields', sections: ['地表数据'] },
+  { target: 'basic-initial-fields', sections: ['初始场'] },
+  { target: 'basic-forcing-fields', sections: ['强迫场'] },
+  { target: 'basic-other-fields', sections: ['城市'] },
+];
+const BASIC_SECTIONS = BASIC_PAGES.flatMap(p => p.sections);
+const PARAM_PAGES = [
+  { target: 'param-water-fields', sections: ['水热过程'] },
+  { target: 'param-eco-fields', sections: ['生态与生地化'] },
+  { target: 'param-river-fields', sections: ['河道与水库'] },
+  { target: 'param-da-fields', sections: ['数据同化'] },
+  { target: 'param-tracer-fields', sections: ['示踪剂'] },
+  { target: 'param-other-fields', sections: ['调试与诊断'] },
 ];
 
 
@@ -118,22 +132,33 @@ function renderScope(box) {
 }
 
 export async function renderFields() {
-  const box = $('fields');
   const output = $('output-fields');
   const hist = $('hist-fields');
-  box.textContent = '';
+  const basics = BASIC_PAGES.map(p => [p, $(p.target)]);
+  const processes = PARAM_PAGES.map(p => [p, $(p.target)]);
   output.textContent = '';
   hist.textContent = '';
-  // 时间、输出都属于「怎么运行」，但仍写回同一份 case.nml。
+  for (const [, basic] of basics) basic.textContent = '';
+  for (const [, process] of processes) process.textContent = '';
+  // 时间在基本设定，输出在运行页，但仍写回同一份 case.nml。
   await renderTiming();
   if (!state.text) {
-    box.innerHTML = '<p class="muted">先在左边选一个算例</p>';
     output.innerHTML = '<p class="muted">先选一个算例</p>';
+    for (const [, basic] of basics) {
+      basic.innerHTML = '<p class="muted">先在“文件与目录”里选择站点并建算例</p>';
+    }
+    for (const [, process] of processes) {
+      process.innerHTML = '<p class="muted">先在“文件与目录”里选择站点并建算例</p>';
+    }
     return;
   }
   let entries;
   try { entries = await invoke('read_case', { text: state.text }); }
-  catch (e) { box.textContent = String(e); return; }
+  catch (e) {
+    for (const [, target] of basics.concat(processes)) target.textContent = String(e);
+    status(e);
+    return;
+  }
   // 这一批里取值不一致的字段。**必须标出来** —— 一个显示着某个值的输入框
   // 其实代表着 20 个不同的值，而改它会把另外 19 个悄悄抹平。
   try {
@@ -153,49 +178,38 @@ export async function renderFields() {
                  derived: f.derived, unset: true }));
   const entriesAll = withoutWizardFields(entries.concat(extra));
   const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
-  // 当前编译产物不包含的字段默认不显示。
-  const hidden = inGroup.filter(e => state.irrelevant.has(e.path));
   // 严格跟随所选内核。**只读派生项不再藏在专家模式后面** ——
   // 全仓库只有 6 个（DEF_dir_landdata/restart/history、DEF_USE_USGS/IGBP、
   // DEF_wetland_finundation_scheme），它们是「这个值现在是多少」的答案，
   // 而那是个常规问题。
   const shown = inGroup.filter(e => !state.irrelevant.has(e.path));
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
-  const params = shown.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
+  const basicParams = shown.filter(e => BASIC_SECTIONS.includes(sectionOf(e)));
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
-  const hiddenParams = hidden.filter(e => PARAM_SECTIONS.includes(sectionOf(e)));
 
-  // 专家模式这轮腾空了 —— 那 6 个只读派生项已经并入各分节。开关与
-  // body.expert 都留着等后续挂选项，但空着的时候要明说：一个点了没反应的
-  // 按钮比没有按钮更糟。
-  if (state.expert) {
-    const note = document.createElement('div');
-    note.className = 'expert-note';
-    note.style.marginBottom = '10px';
-    note.textContent =
-      '专家选项还在规划中。只读派生项已经并入下面各分节，不再单列 —— '
-      + '现在常规模式看到的就是全部。';
-    box.appendChild(note);
-  }
-  renderScope(box);
-  renderToolbar(box, params.length, hiddenParams.length);
-  const filter = state.fieldFilter?.trim().toLowerCase() ?? '';
-  const visible = filter ? params.filter(e => e.path.toLowerCase().includes(filter)) : params;
-
-  for (const section of PARAM_SECTIONS) {
-    // 可编辑的在前，只读派生项排到本节末尾 —— 只读行混在中间会打断编辑节奏。
-    // 按 field_section() 实际推导，最多的一节（文件与目录）也只有 3 个。
-    const rows = visible.filter(e => sectionOf(e) === section)
+  for (const [page, basic] of basics) {
+    const rows = (page.sections.includes('城市') && !urbanEnabled() ? [] : basicParams)
+      .filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
-    if (!rows.length) continue;
-    const h = document.createElement('h2');
-    h.textContent = `${section}（${rows.length}）`;
-    h.style.marginTop = '14px';
-    box.appendChild(h);
-    box.appendChild(table(rows));
+    if (!rows.length) {
+      basic.innerHTML = page.sections.includes('城市') && !urbanEnabled()
+        ? '<p class="muted">当前是自然站配置，没有额外基础设置。</p>'
+        : '<p class="muted">当前配置没有这一类可设置项。</p>';
+      continue;
+    }
+    renderScope(basic);
+    basic.appendChild(table(rows));
   }
-  if (!visible.length) {
-    box.insertAdjacentHTML('beforeend', `<p class="muted">没有名字含「${filter}」的字段</p>`);
+
+  for (const [page, process] of processes) {
+    const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
+      .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
+    if (!rows.length) {
+      process.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
+      continue;
+    }
+    renderScope(process);
+    process.appendChild(table(rows));
   }
 
   if (outputFields.length) {
@@ -210,27 +224,6 @@ export async function renderFields() {
     output.innerHTML = '<p class="muted">当前配置没有可配置的输出参数。</p>';
   }
   await renderHistVars(hist);
-}
-
-/** 顶部一行：当前可用项统计 + 过滤框。 */
-function renderToolbar(box, shown, hidden) {
-  const bar = document.createElement('div');
-  bar.className = 'row';
-  bar.style.marginBottom = '8px';
-  const note = document.createElement('span');
-  note.className = 'muted mini';
-  note.textContent = `当前配置可用 ${shown} 项` + (hidden ? ` · 已隐藏 ${hidden} 项` : '');
-  bar.appendChild(note);
-  const f = document.createElement('input');
-  f.placeholder = '过滤字段名';
-  f.value = state.fieldFilter ?? '';
-  f.style.flex = '1';
-  // input 而不是 change：202 个字段时边打边筛才有用。
-  f.oninput = () => { state.fieldFilter = f.value; renderFields(); };
-  bar.appendChild(f);
-  box.appendChild(bar);
-  // 过滤框重绘后会失焦，补回去 —— 否则打第二个字符就得再点一次。
-  if (state.fieldFilter) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
 }
 
 /** 一组字段渲染成一张表。分节之后每节各调一次。 */

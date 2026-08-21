@@ -4,7 +4,6 @@ import { invoke, hasBackend } from './ipc.js';
 import { state } from './state.js';
 import { $ } from './ui.js';
 import { initShell, renderSteps, setStatus } from './shell.js';
-import { renderFields } from './params.js';
 import { refreshKernels, watchRun } from './runner.js';
 import { refreshPresets } from './presets.js';
 import { restoreRecent, wirePickers } from './recent.js';
@@ -42,7 +41,7 @@ async function boot() {
     // 恢复出来的旧路径若含空格，不补这一次调用就要等用户自己碰一下
     // 那个框才会被标出来。
     checkRootSpace();
-    // 恢复出来的算例根目录里可能已经有算例 —— 不扫的话第 3 步是个空盒子，
+    // 恢复出来的算例根目录里可能已经有算例 —— 不扫的话基本设定是个空盒子，
     // 而用户上次的工作就在那里。
     const root = $('root').value.trim();
     if (root) {
@@ -55,5 +54,4 @@ async function boot() {
     renderSteps();
   } catch (e) { setStatus('后端出错：' + e); }
   await watchRun();
-  addEventListener('colm:mode', () => { if (state.selected) renderFields(); });
 }

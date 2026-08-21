@@ -88,19 +88,36 @@ code { font-family: var(--mono); font-size: .92em; background: var(--surface-2);
            letter-spacing: .09em; margin: 0 8px 10px; font-weight: 700; }
 .step { display: flex; gap: 11px; align-items: flex-start; padding: 9px 10px;
         border-radius: var(--r-md); position: relative; cursor: pointer; margin-bottom: 1px; }
+.step-copy { display: flex; flex-direction: column; min-width: 0; }
 .step:hover { background: var(--surface-2); }
-.step.active { background: var(--accent-weak); }
+.step.current { color: var(--accent-ink); }
 .step .num { flex: none; width: 25px; height: 25px; border-radius: 50%; display: grid;
              place-items: center; font-size: 12px; font-weight: 700;
              border: 1.5px solid var(--border); color: var(--muted); background: var(--bg); z-index: 1; }
-.step.active .num { background: var(--accent); border-color: var(--accent); color: #fff; }
+.step.current .num { background: var(--accent); border-color: var(--accent); color: #fff; }
 .step.done .num { border-color: var(--pass); color: var(--pass); }
 .step .t { font-weight: 620; line-height: 1.35; }
-.step.active .t { color: var(--accent-ink); }
+.step.current .t { color: var(--accent-ink); }
 .step .d { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
 .step[aria-disabled=true] { opacity: .5; cursor: default; }
-.step:not(:last-child)::after { content: ""; position: absolute; left: 22px; top: 34px;
-                                bottom: -2px; width: 1.5px; background: var(--border); }
+.flow-block { position: relative; }
+.flow-block:not(:last-child)::after { content: ""; position: absolute; left: 22px; top: 34px;
+                                      bottom: -3px; width: 1.5px; background: var(--border); }
+.flow-head { z-index: 1; }
+.flow-children { margin: 0 4px 8px 45px; padding-left: 8px;
+                 border-left: 1px solid var(--border); }
+.substep { position: relative; display: flex; flex-direction: column; padding: 6px 8px;
+           border-radius: var(--r-sm); cursor: pointer; }
+.substep::before { content: ""; position: absolute; left: -12px; top: 14px;
+                   width: 7px; height: 7px; border-radius: 50%;
+                   border: 1px solid var(--border); background: var(--surface); }
+.substep:hover { background: var(--surface-2); }
+.substep.active { background: var(--accent-weak); }
+.substep.active::before { border-color: var(--accent); background: var(--accent); }
+.substep .t { font-size: 12px; font-weight: 620; }
+.substep.active .t { color: var(--accent-ink); }
+.substep .d { color: var(--muted); font-size: 10.5px; }
+.substep[aria-disabled=true] { opacity: .5; cursor: default; }
 .est { margin: 14px 8px 0; padding: 11px; border: 1px solid var(--border);
        border-radius: var(--r-md); background: var(--bg); }
 .est .lab { color: var(--muted); font-size: 11px; }
@@ -140,6 +157,8 @@ code { font-family: var(--mono); font-size: .92em; background: var(--surface-2);
          font-size: 12px; color: var(--muted); }
 .check input[type=checkbox] { width: auto; }
 .page[hidden] { display: none; }
+
+.flow-pane[hidden] { display: none; }
 
 /* 需要人特别注意的一段说明。虚线框是「这里跟别处不一样」的信号。 */
 .expert-note { border: 1.5px dashed var(--accent); border-radius: var(--r-md);
@@ -227,13 +246,13 @@ td:first-child { overflow-wrap: anywhere; }
   /* 窄屏上步骤条横过来，省掉一大块高度。连线在横排下没有意义，去掉。 */
   #steps { display: flex; gap: 6px; overflow-x: auto; }
   .step { flex: none; margin-bottom: 0; }
-  .step:not(:last-child)::after { display: none; }
+  .flow-block:not(:last-child)::after { display: none; }
   .step .d, .est { display: none; }
   .work { padding: var(--s-lg); }
 }
 
 /* 每一页底部的出口。**让人自己回左栏找下一步，等于把「现在该干嘛」推给用户。** */
-.foot { display: flex; justify-content: flex-end; margin-top: var(--s-lg);
+.foot { display: flex; justify-content: space-between; gap: var(--s-md); margin-top: var(--s-lg);
         padding-top: var(--s-lg); border-top: 1px solid var(--border); }
 
 /* 勾选框的点击区。**一个十几像素的靶子紧挨着另一个可点区域，误点是必然。**

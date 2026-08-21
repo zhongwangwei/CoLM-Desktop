@@ -16,10 +16,6 @@
     <input class="proj-name" id="casename" readonly value="还没有算例" title="当前算例">
     <button class="btn-ghost" id="homeBtn" title="重新选择空间、次网格与物理配置">返回首页</button>
     <div class="grow"></div>
-    <div class="seg" id="modeSeg">
-      <button class="on" data-mode="normal">常规</button>
-      <button data-mode="expert">专家</button>
-    </div>
     <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
   </header>
 
@@ -49,7 +45,7 @@
       <h1>前处理</h1>
       <p class="sub">把原始数据批量转成模型要的格式，<b>产出的就是下一步要扫的站点数据</b>。
         已经转好的会跳过 ——
-        判据与第 5 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
+        判据与第 4 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
 
       <h2 style="font-size:15px;font-weight:700;letter-spacing:-.01em;margin:0 0 12px">强迫场</h2>
       <div class="card">
@@ -128,128 +124,158 @@
       <div id="site-result"></div>
     </section>
 
-    <!-- ③ 基本设定：物理已在进门向导选完，这里只定算例目录。 -->
+    <!-- ② 基本设定：数据身份、路径与建例后的基础 namelist 字段只在这里出现。 -->
     <section class="page" data-step="basic" hidden>
       <div class="work-head"><span class="kicker">第 2 步</span></div>
       <h1>基本设定</h1>
-      <p class="sub">物理与次网格已在进门向导选完；这里只定<b>算例放哪</b>。</p>
+      <p class="sub">站点、路径、时间和建例所需的数据设置都收在这里；
+        过程参数留在下一步，避免同一个字段出现两次。</p>
 
-      <div class="card">
-        <h3>算例放哪</h3>
-        <div class="ch">每个站点占一个子目录。默认放在站点数据旁边，可以改。
-          下一步选中的每个站点都会在这里建一个。</div>
-        <div class="browse">
-          <input class="input" id="root" placeholder="…/colm-cases">
-          <button class="btn-ghost pick" data-for="root">选择…</button>
-          <button class="btn-ghost" id="rescan">重新扫描已建的</button>
-        </div>
-        <p class="fail mini" id="rootspace" hidden>
-          路径含空格：CoLM 建输出目录用的是不加引号的 shell <code>mkdir -p</code>，
-          空格会把路径拆成两截，建出一棵位置不对的影子目录树，跑到一半报的还是
-          netCDF 的 <code>Permission denied</code>，看不出问题出在路径上。
-          请换一个不含空格的位置。
-        </p>
-        <div id="urbandirs" hidden>
-          <div class="expert-note">
-            本次向导打开了 <b>URBAN</b>。城市算例必须给全球栅格目录 ——
-            土壤剖面、湖深、土壤反照率与 LCZ 分类都只能从那里取，站点文件里没有。
+      <div class="flow-pane" data-flow-pane="basic-files">
+        <div class="card">
+          <h3>文件与目录</h3>
+          <div class="ch">先选站点数据和算例根目录，再在同一页建算例。</div>
+          <div class="field">
+            <label>站点目录</label>
+            <div class="browse">
+              <input class="input" id="sitedir" placeholder="…/PLUMBER2s/Sitedata">
+              <button class="btn-ghost pick" data-for="sitedir">选择…</button>
+              <button class="btn-ghost" id="scan">扫描</button>
+            </div>
+            <div class="muted mini" style="margin-top:5px">
+              找 <code>*_site.nc</code> 或 <code>*_site_v1.nc</code>；同目录约定下的强迫场和观测会一并匹配。
+            </div>
           </div>
-          <div class="row">
-            <div class="field"><label>rawdata 目录</label>
-              <div class="browse"><input class="input" id="rawdata">
-                <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
-            <div class="field"><label>runtime 目录</label>
-              <div class="browse"><input class="input" id="runtime">
-                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
+          <div class="field">
+            <label>算例放哪</label>
+            <div class="browse">
+              <input class="input" id="root" placeholder="…/colm-cases">
+              <button class="btn-ghost pick" data-for="root">选择…</button>
+              <button class="btn-ghost" id="rescan">重新扫描已建的</button>
+            </div>
+            <p class="fail mini" id="rootspace" hidden>
+              路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。
+            </p>
+          </div>
+          <div class="field">
+            <label>强迫场文件 <span class="hint">（可选）</span></label>
+            <div class="browse">
+              <input class="input" id="fmet" placeholder="留空 = 按命名约定在 ../Forcing/ 下找">
+              <button class="btn-ghost pick" data-for="fmet" data-file="nc">选择…</button>
+            </div>
+            <div class="muted mini" style="margin-top:5px">
+              第 1 步转换过强迫场时指定产物；留空会使用命名约定找到的原始文件。
+            </div>
+          </div>
+          <div id="urbandirs" hidden>
+            <div class="expert-note">本次向导打开了 <b>URBAN</b>；表外城市站点需要这些数据目录。</div>
+            <div class="row">
+              <div class="field"><label>rawdata 目录</label>
+                <div class="browse"><input class="input" id="rawdata">
+                  <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
+              <div class="field"><label>runtime 目录</label>
+                <div class="browse"><input class="input" id="runtime">
+                  <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
+            </div>
+          </div>
+          <div class="pill-row" style="margin-top:10px">
+            <button class="btn-ghost" id="use-example">用自带的示例站点</button>
+            <span class="muted mini">CN-Cng 自然站或 AU-Preston 城市站</span>
           </div>
         </div>
+
+        <div class="card">
+          <h3>选择站点并建算例</h3>
+          <div class="ch">点行只高亮；勾选用于批量。按“建算例”才会写文件。</div>
+          <p class="muted mini" id="sitesummary">&nbsp;</p>
+          <div id="sites" class="listbox"></div>
+          <div class="pill-row" style="margin-top:12px">
+            <button class="btn-ghost" id="pick-all">全选</button>
+            <button class="btn-ghost" id="pick-none">全不选</button>
+            <span class="muted mini" id="pickinfo">还没选</span>
+          </div>
+          <div id="makecase" style="margin-top:12px"></div>
+          <div id="cases-built" class="listbox" style="margin-top:12px"></div>
+        </div>
+
+        <div class="card">
+          <h3>算例文件字段</h3>
+          <div class="ch">建好算例后，这里显示 case.nml 里的算例名和文件目录字段。</div>
+          <div id="basic-files-fields"><p class="muted">先选择站点并建算例</p></div>
+        </div>
+      </div>
+
+      <div class="flow-pane" data-flow-pane="basic-site" hidden>
+        <div class="card"><h3>站点信息</h3><div class="ch">站点文件、位置、地类及 USE_SITE 开关。</div>
+          <div id="basic-site-fields"><p class="muted">先在“文件与目录”里选择站点并建算例</p></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="basic-timing" hidden>
+        <div id="timing"><p class="muted">先在“文件与目录”里选择站点并建算例</p></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="basic-grid" hidden>
+        <div class="card"><h3>网格与并行</h3><div id="basic-grid-fields"><p class="muted">先建算例</p></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="basic-surface" hidden>
+        <div class="card"><h3>地表数据</h3><div id="basic-surface-fields"><p class="muted">先建算例</p></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="basic-initial" hidden>
+        <div class="card"><h3>初始场</h3><div id="basic-initial-fields"><p class="muted">先建算例</p></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="basic-forcing" hidden>
+        <div class="card"><h3>强迫场</h3><div id="basic-forcing-fields"><p class="muted">先建算例</p></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="basic-other" hidden>
+        <div class="card"><h3>其他</h3><div class="ch">只显示本次配置真正启用的附加设置。</div>
+          <div id="basic-other-fields"><p class="muted">先建算例</p></div></div>
       </div>
     </section>
 
-    <!-- ② 站点 -->
-    <section class="page" data-step="sites" hidden>
-      <div class="work-head"><span class="kicker">第 3 步</span></div>
-      <h1>有哪些站点可以跑</h1>
-      <p class="sub">指向 PLUMBER2 或 Urban-PLUMBER 的 <code>Sitedata</code> 目录。
-        程序顺着命名约定把每个站点的强迫场与观测文件一并找出来 ——
-        <b>有没有观测，决定了跑完能不能自动评估</b>。选好之后在这一页建算例。</p>
-
-      <div class="card">
-        <h3>站点目录</h3>
-        <div class="ch">找的是 <code>*_site.nc</code>（PLUMBER2）或 <code>*_site_v1.nc</code>（Urban-PLUMBER）。</div>
-        <div class="browse">
-          <input class="input" id="sitedir" placeholder="…/PLUMBER2s/Sitedata">
-          <button class="btn-ghost pick" data-for="sitedir">选择…</button>
-          <button class="btn-ghost" id="scan">扫描</button>
-        </div>
-        <div class="pill-row" style="margin-top:10px">
-          <button class="btn-ghost" id="use-example">用自带的示例站点</button>
-          <span class="muted mini">CN-Cng 内蒙古草地、AU-Preston 墨尔本城市站，
-            两个都装在程序里，不用另外下数据</span>
-        </div>
-        <p class="muted mini" id="sitesummary">&nbsp;</p>
-        <div id="sites" class="listbox"></div>
-        <div class="pill-row" style="margin-top:12px">
-          <button class="btn-ghost" id="pick-all">全选</button>
-          <button class="btn-ghost" id="pick-none">全不选</button>
-          <span class="muted mini" id="pickinfo">还没选</span>
-        </div>
-        <!-- 强迫场默认顺着命名约定找（`Sitedata` 的兄弟目录 `Forcing/`，
-             文件名 `<stem>_Met.nc` 或 `<stem>_metforcing_v1.nc`）。那两套
-             是 PLUMBER2 与 Urban-PLUMBER 的内部约定 —— **拿自己数据的人
-             没有理由遵守它们**，前处理页转出来的产物也不在那个位置。
-             填了就用填的，空着才走约定。与观测那一栏同一个模式。 -->
-        <div class="field" style="margin-top:12px">
-          <label>强迫场文件（可选）</label>
-          <div class="browse">
-            <input class="input" id="fmet" placeholder="留空 = 按命名约定在 ../Forcing/ 下找">
-            <button class="btn-ghost pick" data-for="fmet" data-file="nc">选择…</button>
-          </div>
-          <p class="muted mini" style="margin-top:4px">
-            在第 1 步转换过强迫场的话，在这里指定那份产物 ——
-            <b>不指定就会用原始文件，而且不报错</b>。</p>
-        </div>
-        <!-- 建算例的按钮。**它是卡片内的动作，不是页面出口** ——
-             页面出口是底部通用的「下一步：参数 →」。算例目录在第 2 步
-             已经定好了，所以这里按下去不会再有「产物放哪」的疑问。 -->
-        <div id="makecase" style="margin-top:12px"></div>
-        <div id="cases-built" class="listbox" style="margin-top:12px"></div>
-        <p class="muted mini" style="margin-top:8px">
-          点行只是选中，<b>不会动任何文件</b>。按「建算例」才会真的建 ——
-          那一步要读站点文件与强迫场并写出补齐后的 <code>site.nc</code>。</p>
-      </div>
-    </section>
-
-    <!-- ④ 参数 -->
+    <!-- ③ 参数 -->
     <section class="page" data-step="params" hidden>
-      <div class="work-head"><span class="kicker">第 4 步</span></div>
-      <h1>配参数</h1>
-      <p class="sub">配置向导之外的 CoLM namelist 参数。
-        次网格、土壤、物理与调试开关不再重复显示；未设置项显示源码默认值。</p>
-
-      <div id="timing"></div>
+      <div class="work-head"><span class="kicker">第 3 步</span></div>
+      <h1>过程参数</h1>
+      <p class="sub">这里只保留水热、生态生地化、河道水库、数据同化、示踪剂和诊断参数；
+        站点、路径、网格、地表、初始场、城市与强迫场都在基本设定。</p>
 
       <div class="card">
-        <h3>namelist 参数</h3>
+        <h3>参数预设</h3>
         <div id="unknown"></div>
         <div class="pill-row" style="margin:12px 0">
           <select class="select" id="preset" style="max-width:220px"></select>
           <button class="btn-ghost" id="preset-apply" disabled>套用</button>
           <button class="btn-ghost" id="preset-save" disabled>存为预设…</button>
           <button class="btn-ghost" id="preset-del" disabled>删除</button>
-          <span class="muted mini">预设只含其它参数与输出设置；不含向导选项、站点与路径</span>
+          <span class="muted mini">预设不会替换向导选项、站点身份与路径</span>
         </div>
-        <div id="fields"></div>
+      </div>
+
+      <div class="flow-pane" data-flow-pane="params-water">
+        <div class="card"><h3>水热过程</h3><div id="param-water-fields"></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="params-eco" hidden>
+        <div class="card"><h3>生态与生地化</h3><div id="param-eco-fields"></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="params-river" hidden>
+        <div class="card"><h3>河道与水库</h3><div id="param-river-fields"></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="params-da" hidden>
+        <div class="card"><h3>数据同化</h3><div id="param-da-fields"></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="params-tracer" hidden>
+        <div class="card"><h3>示踪剂</h3><div id="param-tracer-fields"></div></div>
+      </div>
+      <div class="flow-pane" data-flow-pane="params-other" hidden>
+        <div class="card"><h3>其他</h3><div id="param-other-fields"></div></div>
       </div>
     </section>
 
-    <!-- ⑤ 运行 -->
+    <!-- ④ 运行 -->
     <section class="page" data-step="run" hidden>
-      <div class="work-head"><span class="kicker">第 5 步</span></div>
+      <div class="work-head"><span class="kicker">第 4 步</span></div>
       <h1>运行</h1>
       <p class="sub">设置输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
         <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。
-        时间与预热在第 4 步。</p>
+        时间与预热在第 2 步“基本设定”。</p>
 
       <div class="card">
         <h3>输出</h3>
@@ -279,12 +305,12 @@
       </div>
     </section>
 
-    <!-- ⑥ 结果 -->
+    <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
-      <div class="work-head"><span class="kicker">第 6 步</span></div>
+      <div class="work-head"><span class="kicker">第 5 步</span></div>
       <h1>结果</h1>
       <p class="sub">画模型输出，或与观测配对算指标。<b>「丢弃前 N 条」丢的是输出记录</b>，
-        与第 4 步里的模型预热（spin-up）不是一回事。</p>
+        与第 2 步基本设定里的模型预热（spin-up）不是一回事。</p>
 
       <div class="card">
         <h3>曲线</h3>
@@ -303,7 +329,7 @@
           <button class="btn-ghost pick" data-for="obs" data-file="nc">选择…</button>
         </div>
         <div class="pill-row" style="margin-top:10px">
-          <label class="check" title="丢的是输出记录，单位是条。与第 4 步的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
+          <label class="check" title="丢的是输出记录，单位是条。与第 2 步基本设定里的预热（spin-up）不是一回事 —— 那个的单位是轮数，且预热期本来就不写 history。">
             丢弃前 <input class="input" id="spinup" type="number" value="0" min="0" style="width:5.5em"> 条 ⓘ</label>
           <label class="check" title="涡度相关的湍流通量普遍关不上能量收支，观测文件自带订正版 Qle_cor / Qh_cor。实测 AT-Neu：订正把观测 Qle 抬高 25.5 W/m²，而模型对未订正观测的偏差是 +19.8 —— 偏差的大小基本就是那个缺口。默认关，因为 design.md 的目标值是拿未订正版算的。">
             <input type="checkbox" id="corrected"> 用能量闭合订正后的观测 ⓘ</label>

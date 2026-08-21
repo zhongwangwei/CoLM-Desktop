@@ -37,10 +37,9 @@ $('rescan').onclick = async () => {
 
 /** 算例列表渲染进一个容器。
  *
- *  **两页各一个。** 第 3 步问「建出来没有」，第 5 步问「跑哪些」，
+ *  **两页各一个。** 基本设定问「建出来没有」，运行页问「跑哪些」，
  *  两处都要看得见同一份列表，而一个 DOM 元素进不了两页。
- *  勾选状态共享 `state.pickedCases`，两边贯通 —— 在第 3 步勾中的那几个，
- *  翻到第 5 步仍然是勾着的。 */
+ *  勾选状态共享 `state.pickedCases`，两边贯通。 */
 function renderCasesInto(box) {
   box.textContent = '';
   if (!state.cases.length) {
@@ -155,8 +154,8 @@ async function confirmSelection() {
     // 整批都交给参数页。代表算例是第一个，但改动落到每一个上。
     state.batch = [...new Set(made.map(c => c.dir))];
     // **刚建的这批就是马上要跑的那批。** 不灌 pickedCases 的话，
-    // 第 4 步说「改动会写进 2 个算例」而第 5 步说「运行全部 4 个」——
-    // 那两步紧挨着，两个数打架。想跑全部，第 5 步取消勾选即可。
+    // 过程参数说「改动会写进 2 个算例」而运行页说「运行全部 4 个」会打架。
+    // 想跑全部，在运行页取消勾选即可。
     for (const c of made) state.pickedCases.add(c.dir);
     // **走 selectCase，不要只设 state.selected。** 那里还要把 case.nml 读进来、
     // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，
@@ -225,7 +224,7 @@ export function assignCaseNames(sites) {
  *  返回名字而不是 `Case` 对象，是因为对象要等收尾那次扫描才拿得到。 */
 async function ensureCase(s) {
   const root = $('root').value.trim();
-  if (!root) { setStatus('先指定算例放哪（第 2 步「算例放哪」那张卡片）'); return null; }
+  if (!root) { setStatus('先在“基本设定 / 文件与目录”指定算例放哪'); return null; }
   const cname = s.caseName ?? s.name;
   if (state.cases.some(c => c.name === cname)) return cname;
   if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
@@ -234,7 +233,7 @@ async function ensureCase(s) {
     await invoke('new_case', {
       site: s.site_file, out: joinPath(root, cname), name: cname,
       // 不传时间窗口：`colm-cli new` 用强迫场的完整范围，
-      // 而缩短窗口是参数页「时间与预热」里的事。
+      // 时间边界与预热在基本设定的专门分页显示。
       start: null, end: null,
       rawdata: $('rawdata').value.trim() || null,
       runtime: $('runtime').value.trim() || null,

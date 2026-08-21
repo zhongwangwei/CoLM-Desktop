@@ -1,51 +1,62 @@
-//! 外壳：步骤条、常规/专家、主题、状态栏、右栏页签。
-//!
-//! 这一层不碰业务，只管「现在在哪一步、界面长什么样」。
-//! 把它单独拎出来是因为它是**唯一回答「这几块什么关系」的地方** ——
-//! 原来那版把站点库、新建、算例库并排摆着，谁也看不出它们是一条流水线。
+//! 外壳：左侧工作流、主题、状态栏、右栏页签。
 
 import { state } from './state.js';
 import { $ } from './ui.js';
 
-/** 六步。`need` 说明这一步要什么才能进 —— 灰着的步骤要能说出为什么。 */
-export const STEPS = [
-  // 前处理在前：它产出的正是后面要扫的东西。
-  { id: 'prep',   t: '前处理', d: '原始数据转成模型要的格式', need: () => null },
-  { id: 'basic',  t: '基本设定', d: '算例目录', need: () => null },
-  { id: 'sites',  t: '站点',   d: '扫目录、选站、建算例',
-    need: () => ($('kernel').value
-      ? null
-      : `当前安装缺少 ${state.subgrid === 'USGS' ? 'USGS' : 'IGBP'} 运行产物`) },
-  { id: 'params', t: '参数',   d: '时间与预热 · 其它 namelist 字段',
-    need: () => (state.selected ? null : '先在第 3 步建一个算例') },
-  { id: 'run',    t: '运行',   d: '输出与运行',
-    need: () => (state.selected ? null : '先在第 3 步建一个算例') },
-  { id: 'result', t: '结果',   d: '曲线与指标',
-    need: () => (state.selected ? null : '先在第 3 步建一个算例') },
-];
+const ready = () => (state.selected ? null : '先在文件与目录建一个算例');
 
-/** 下一步是哪一步。**每一页都要有出口** —— 让人自己回左栏找下一步，
- *  等于把「现在该干嘛」这个问题推给用户，而那正是原来那版最大的毛病。 */
+/** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
+export const WORKFLOW = [
+  { n: 1, t: '前处理', d: '原始数据转成模型格式', steps: [
+    { id: 'prep', page: 'prep', t: '强迫场与站点属性', d: '准备模型输入', need: () => null },
+  ] },
+  { n: 2, t: '基本设定', d: '建例与基础输入', steps: [
+    { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null },
+    { id: 'basic-site', page: 'basic', t: '站点信息', d: '位置、地类与站点文件', need: ready },
+    { id: 'basic-timing', page: 'basic', t: '时间与预热', d: '模拟范围与 spin-up', need: ready },
+    { id: 'basic-grid', page: 'basic', t: '网格与并行', d: '网格和进程划分', need: ready },
+    { id: 'basic-surface', page: 'basic', t: '地表数据', d: '地表输入设置', need: ready },
+    { id: 'basic-initial', page: 'basic', t: '初始场', d: '初始状态设置', need: ready },
+    { id: 'basic-forcing', page: 'basic', t: '强迫场', d: '强迫场读取设置', need: ready },
+    { id: 'basic-other', page: 'basic', t: '其他', d: '按配置显示附加设置', need: ready },
+  ] },
+  { n: 3, t: '过程参数', d: '按过程逐项配置', steps: [
+    { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready },
+    { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready },
+    { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready },
+    { id: 'params-da', page: 'params', t: '数据同化', d: '同化过程设置', need: ready },
+    { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready },
+    { id: 'params-other', page: 'params', t: '其他', d: '调试与诊断', need: ready },
+  ] },
+  { n: 4, t: '运行', d: '输出与运行', steps: [
+    { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
+  ] },
+  { n: 5, t: '结果', d: '曲线与指标', steps: [
+    { id: 'result', page: 'result', t: '查看结果', d: '绘图与评估', need: ready },
+  ] },
+];
+export const STEPS = WORKFLOW.flatMap(group => group.steps);
+
 export function nextOf(id) {
-  // `findIndex` 找不到时返回 -1，而 `STEPS[-1 + 1]` 正好是第一步 ——
-  // `?? null` 永远兜不住。表现是：改 step id 时漏改一处，页面不报错，
-  // 只是渲染出一个**指回第 1 步**的「下一步」。实测 nextOf('data') === prep。
   const i = STEPS.findIndex(s => s.id === id);
   if (i < 0) return null;
   return STEPS[i + 1] ?? null;
 }
 
-/** 给每一页底部装一个「下一步」。进不去时按钮说出原因，而不是只灰着。 */
+export function prevOf(id) {
+  const i = STEPS.findIndex(s => s.id === id);
+  if (i <= 0) return null;
+  return STEPS[i - 1];
+}
+
+/** 每个子步骤都用同一对按钮相连。 */
 export function renderNextButtons() {
   for (const page of document.querySelectorAll('.page')) {
-    // 有自己出口的页不注入通用按钮：站点页的出口要先建算例再走，
-    // 两个长得差不多、行为不同的按钮摆在一起，比没有按钮更糟。
-    if (page.hasAttribute('data-own-foot')) continue;
-    const next = nextOf(page.dataset.step);
-    // 没有下一步的那一页（结果页）不该留一个空的 `.foot` —— 它带
-    // border-top 与 padding，实测在页面底部渲染出一条 33px 的、
-    // 下面什么都没有的横线。
-    if (!next) { page.querySelector('.foot')?.remove(); continue; }
+    const here = STEPS.find(s => s.id === state.step && s.page === page.dataset.step)
+      ?? STEPS.find(s => s.page === page.dataset.step);
+    const prev = prevOf(here?.id);
+    const next = nextOf(here?.id);
+    if (!prev && !next) { page.querySelector('.foot')?.remove(); continue; }
     let foot = page.querySelector('.foot');
     if (!foot) {
       foot = document.createElement('div');
@@ -53,41 +64,69 @@ export function renderNextButtons() {
       page.appendChild(foot);
     }
     foot.textContent = '';
-    const why = next.need();
-    const b = document.createElement('button');
-    b.className = 'btn-next';
-    b.textContent = why ? why : `下一步：${next.t} →`;
-    b.disabled = !!why;
-    b.onclick = () => go(next.id);
-    foot.appendChild(b);
+    if (prev) {
+      const b = document.createElement('button');
+      b.className = 'btn-ghost';
+      b.textContent = '← 上一步';
+      b.onclick = () => go(prev.id);
+      foot.appendChild(b);
+    }
+    if (next) {
+      const why = next.need();
+      const b = document.createElement('button');
+      b.className = 'btn-next';
+      b.textContent = why ?? `下一步：${next.t} →`;
+      b.disabled = !!why;
+      b.onclick = () => go(next.id);
+      foot.appendChild(b);
+    }
   }
 }
 
 export function go(id) {
   const step = STEPS.find(s => s.id === id);
-  // 未知 id 时 `step?.need()` 是 undefined（假值），于是照常往下走，
-  // 把**所有**页都 hide 掉 —— 内容区整块空白，而且不报错。
-  // 实测 go('nope') 之后可见页数 0。改 id 的任务还有好几个，让它说出来。
   if (!step) { setStatus(`没有这一步：${id}`); return; }
   const why = step.need();
   if (why) { setStatus(why); return; }
   state.step = id;
-  for (const p of document.querySelectorAll('.page')) p.hidden = p.dataset.step !== id;
+  for (const p of document.querySelectorAll('.page')) p.hidden = p.dataset.step !== step.page;
+  for (const p of document.querySelectorAll('[data-flow-pane]')) {
+    p.hidden = p.dataset.flowPane !== id;
+  }
+  $('work').scrollTop = 0;
   renderSteps();
 }
 
 export function renderSteps() {
   const box = $('steps');
   box.textContent = '';
-  for (const [i, s] of STEPS.entries()) {
-    const why = s.need();
+  for (const group of WORKFLOW) {
+    const active = group.steps.some(s => s.id === state.step);
+    const why = group.steps[0].need();
+    const block = document.createElement('div');
+    block.className = 'flow-block';
     const d = document.createElement('div');
-    d.className = 'step' + (state.step === s.id ? ' active' : '');
+    d.className = 'step flow-head' + (active ? ' current' : '');
     if (why) d.setAttribute('aria-disabled', 'true');
-    d.innerHTML = `<span class="num">${i + 1}</span><span class="step-copy">
-      <span class="t">${s.t}</span><span class="d">${why ?? s.d}</span></span>`;
-    d.onclick = () => go(s.id);
-    box.appendChild(d);
+    d.innerHTML = `<span class="num">${group.n}</span><span class="step-copy">
+      <span class="t">${group.t}</span><span class="d">${why ?? group.d}</span></span>`;
+    d.onclick = () => go(group.steps[0].id);
+    block.appendChild(d);
+    if (group.steps.length > 1) {
+      const children = document.createElement('div');
+      children.className = 'flow-children';
+      for (const s of group.steps) {
+        const childWhy = s.need();
+        const child = document.createElement('div');
+        child.className = 'substep' + (state.step === s.id ? ' active' : '');
+        if (childWhy) child.setAttribute('aria-disabled', 'true');
+        child.innerHTML = `<span class="t">${s.t}</span><span class="d">${childWhy ?? s.d}</span>`;
+        child.onclick = () => go(s.id);
+        children.appendChild(child);
+      }
+      block.appendChild(children);
+    }
+    box.appendChild(block);
   }
   // 左下角说的是当前作用的站点/算例。
   // **批量时必须说出是几个。** 勾了 20 个站点却只显示一个名字，界面看起来
@@ -99,14 +138,14 @@ export function renderSteps() {
   // 会同时有值且不相等：勾了 20 个、而批次里还是上次建的那 1 个。
   // 写成 `batch.length || picked.size` 的话短路会让左栏固执地显示旧数字，
   // 而勾选现在每次都重绘左栏 —— 显示旧数字比干脆不刷新更像在骗人。实测踩过。
-  const onSites = state.step === 'sites';
-  const n = onSites
+  const onBasic = state.step.startsWith('basic-');
+  const n = onBasic
     ? (state.picked.size || (state.pickedSite ? 1 : 0))
     : (state.batch.length || state.picked.size);
   // **`one` 必须跟 `n` 同源。** 勾了两个、又点了第三个（没勾）的时候，
   // `n` 数的是勾中的两个而 `pickedSite` 是第三个 —— 左栏会写出
   // 「US-Urb 等 2 个」，而那 2 个里根本没有 US-Urb。实测踩过。
-  const one = onSites
+  const one = onBasic
     ? (state.picked.size
        ? state.sites.find(x => state.picked.has(x.site_file))?.name
        : state.pickedSite?.name)
@@ -140,15 +179,6 @@ export function initShell() {
     setTheme(next);
     localStorage.setItem('theme', next);
   };
-
-  for (const b of document.querySelectorAll('#modeSeg button')) {
-    b.onclick = () => {
-      for (const x of document.querySelectorAll('#modeSeg button')) x.classList.toggle('on', x === b);
-      state.expert = b.dataset.mode === 'expert';
-      document.body.className = state.expert ? 'expert' : 'normal';
-      window.dispatchEvent(new CustomEvent('colm:mode'));
-    };
-  }
 
   const tabs = $('livetabs');
   for (const b of tabs.querySelectorAll('button')) {

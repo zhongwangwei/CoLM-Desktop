@@ -95,8 +95,8 @@ fn the_spin_up_card_says_what_spin_up_costs() {
     // 时间范围是强迫场决定的，不该让人填。
     let html = std::fs::read_to_string(root().join("gui/dist/index.html")).expect("index.html");
     assert!(
-        html.contains(r#"<div id="timing"></div>"#),
-        "参数页没有时间与预热那一块"
+        html.contains(r#"data-flow-pane="basic-timing""#) && html.contains(r#"id="timing""#),
+        "基本设定没有时间与预热子步骤"
     );
 }
 

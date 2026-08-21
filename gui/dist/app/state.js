@@ -27,7 +27,7 @@ export const state = {
    *  按名字存的话勾一个会连带勾中另一个 —— 而那两个要跑的东西完全不同。 */
   picked: new Set(),
   /** 高亮（而不是勾选）的那一个站点。**只高亮不动文件** ——
-   *  建算例是第 3 步「确定」按下去的事。 */
+   *  建算例是第 2 步“基本设定 / 文件与目录”按下去的事。 */
   pickedSite: null,
   /** 勾选的算例目录。批量运行与批量评估的作用对象。 */
   pickedCases: new Set(),
@@ -51,8 +51,6 @@ export const state = {
   group: 'nl_colm',
   /** 当前内核下用不上的字段名（Set）。见 config::irrelevant_fields。 */
   irrelevant: new Set(),
-  /** 专家模式额外显示当前内核下的源码派生只读项。 */
-  expert: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,
