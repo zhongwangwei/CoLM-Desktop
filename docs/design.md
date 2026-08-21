@@ -214,8 +214,9 @@ CN-Cng 实测：砂 14.3% / 粉 64.3% / 黏 21.4% → **第 4 类 Silt loam** �
 
 **runtime 的可携带性**：`snicar/` 只有 468 KB，若要开启雪粒径演化辐射
 （`DEF_USE_SNICAR`）可以随包分发；`Ozone/` 2.8 GB 不可能随包，所以
-`DEF_USE_OZONEDATA = .false.` 与常数 100 ppbv 的偏离（§2.7 的 runtime 表）
-继续成立，除非将来抽取单点臭氧时间序列。
+Desktop 新算例会同时令 `DEF_USE_OZONESTRESS = .false.` 与
+`DEF_USE_OZONEDATA = .false.`；只有用户显式启用臭氧胁迫并选取通过校验的单点
+臭氧文件时才进入该过程，避免把 2.8 GB 全球数据树当作隐式依赖。
 
 ### 2.8 端到端已跑通，且物理正确
 
@@ -227,7 +228,7 @@ mkinidata.x  → CoLM Initialization Execution Completed → restart/{const,2008
 colm.x       → CoLM Execution Completed.          → history/CN-Cng_hist_2008-01.nc
 ```
 
-耗时 **1.8 秒**（10 天）。history 文件 1.3 MB / 129 个变量 / 264 个时间步。
+耗时 **1.8 秒**（10 天）。history 文件 1.3 MB / 127 个变量 / 264 个时间步。
 `f_xerr`（水量平衡误差）与 `f_zerr`（能量平衡误差）均为 0。
 `VSF scheme all steps: 528 (implicit) 6 (explicit) 0 (wet2dry)` —— 变饱和流求解器
 真的在跑，且有 6 步显式回退（正是 §2.11 的路径依赖来源）。
@@ -238,9 +239,9 @@ colm.x       → CoLM Execution Completed.          → history/CN-Cng_hist_2008
 
 | 变量 | n | RMSE | bias | R² | KGE |
 |---|---|---|---|---|---|
-| 净辐射 Rnet | 256 | 14.7 | **−0.87** | **0.986** | +0.829 |
-| 感热 Qh | 253 | 46.1 | +34.9 | 0.530 | **−11.56** |
-| 潜热 Qle | 254 | 32.2 | +13.3 | 0.044 | −1.42 |
+| 净辐射 Rnet | 256 | 15.05 | **−0.39** | **0.986** | +0.828 |
+| 感热 Qh | 253 | 46.37 | +35.09 | 0.530 | **−11.64** |
+| 潜热 Qle | 254 | 32.47 | +13.53 | 0.047 | −1.45 |
 
 （`DEF_Runoff_SCHEME = 0` TOPMODEL 对照：Rnet RMSE 15.2 / bias +0.22 / R² 0.986；
 Qh RMSE 39.2 / bias +24.3 / R² 0.459；Qle RMSE 32.0 / bias +17.1 / R² 0.115。
@@ -258,7 +259,7 @@ Rnet 不可能对到 0.986。
 1. **黄金算例窗口必须包含降水事件。** 1 月 1–11 日窗口内 `f_rnof` / `f_rsur` /
    `f_rsub` / `f_rsur_ie` / `f_rsur_se` **全程为 0**（冻结期无降水），产流分支一行未执行。
    **已补湿季窗口**（见 §2.8b）。
-2. **KGE 在观测均值接近 0 时不可用。** 感热 KGE = −11.56，纯粹因为冬季观测均值趋近 0
+2. **KGE 在观测均值接近 0 时不可用。** 感热 KGE = −11.64，纯粹因为冬季观测均值趋近 0
    使 β = 模拟均值 / 观测均值 爆掉。`colm-hist` 必须对 KGE 做保护：
    `|observed mean|` 低于阈值时报 N/A，而不是输出一个荒谬数字。
 
@@ -282,20 +283,19 @@ Rnet 不可能对到 0.986。
 远在 `CoLMDEBUG` 阈值（0.5 W/m²、1e-3 mm）内。
 
 **与观测对比**（剔除前 4 天预热，观测仅 `qc==0`；7 月生长季通量量级大，指标比 1 月有意义）。
-**本表已由 `oracle/tests/metrics.rs` 复现**，唯一的例外是 Qh 的 R²：实测 0.4547
-而本表记 0.456，差 0.0013。两边 n 都是 287，配对若相同该逐位相同，所以这是个
-**未解释的小残差**，不是舍入 —— 详见那个测试里的注释。
+**本表已由 `oracle/tests/metrics.rs` 直接复现**。当前黄金基线使用 Desktop 的安全默认：
+植被积雪过程开启，臭氧胁迫与臭氧数据读取关闭。
 
 | 变量 | n | RMSE | bias | R² | KGE | 观测均值 |
 |---|---|---|---|---|---|---|
-| 净辐射 Rnet | 287 | 13.5 | −2.95 | **0.999** | +0.939 | 121.7 |
-| 潜热 Qle | 278 | 76.5 | +36.4 | **0.853** | +0.362 | 84.4 |
-| 感热 Qh | 287 | 36.3 | −24.9 | 0.456 | −1.55 | 9.9 |
+| 净辐射 Rnet | 287 | 12.99 | −2.60 | **0.999** | +0.943 | 121.7 |
+| 潜热 Qle | 278 | 79.47 | +38.37 | **0.852** | +0.327 | 84.4 |
+| 感热 Qh | 287 | 38.65 | −26.56 | 0.388 | −1.72 | 9.9 |
 
-Qle 偏高 +36.4、Qh 偏低 −24.9，净 +11.5，而 Rnet bias 仅 −2.95 ——
+Qle 偏高 +38.37、Qh 偏低 −26.56，净 +11.81，而 Rnet bias 仅 −2.60 ——
 **模型把能量更多分配给潜热、更少给感热，但总量守恒**。这是连贯的物理行为
 （默认参数 + 合成质地/黏粒的预期结果），不是缺陷。
-Qh 的 KGE = −1.55 再次印证近零均值保护的必要（观测均值仅 9.9）。
+Qh 的 KGE = −1.72 再次印证近零均值保护的必要（观测均值仅 9.9）。
 
 **两个窗口共同构成里程碑 1 的回归基准。** `f_rsur_ie` 与 `f_rsub` 仍需第三个窗口
 或人工构造的强降水/深湿润算例才能覆盖 —— 记入未决问题。
@@ -383,8 +383,9 @@ Qh 的 KGE = −1.55 再次印证近零均值保护的必要（观测均值仅 9
 改用 `extends/interception/*_Extended.F90` 以**相同模块名**重建。
 `main/` 里有 5,441 行是死代码，**不得移植**。
 而且 extends 版不是重构：它是 **8 个运行时可选的截留方案**
-（`DEF_Interception_scheme` 1..8：CoLM2014 / CoLM202x / CLM4 / CLM5 / Noah-MP /
-MATSIRO / VIC / JULES），`main/` 版只有 1 个。
+（`DEF_Interception_scheme` 1..8：CoLM2014 / CLM4.5 / CLM5 / Noah-MP /
+MATSIRO / VIC / JULES / CoLM202x），`main/` 版只有 1 个。这里的
+`extend_interception` 是编译期整套源文件选择器，不是第 2 个运行时方案。
 
 ### 2.13 移植面（实测 LOC）
 
@@ -481,7 +482,7 @@ netcdf 0.12.1 / netcdf-sys 0.9.2 / netcdf-src 0.5.3 / hdf5-metno-sys 0.12.2
 打包出去自然更不可能。回退方案（运行时 `DYLD_LIBRARY_PATH`、构建期嵌 rpath）实测都可行，
 但都不满足「分发一个安装包即可运行」这一第一目标。
 
-**两个依赖图都已验证可用**（都是静态构建、都读了真实黄金文件、都 129/129 变量成功）：
+**两个依赖图都已验证可用**（都是静态构建、都读了当时的真实黄金文件、都 129/129 变量成功）：
 
 | 组合 | netcdf-sys | 静态链入的 HDF5 | 构建 | 读黄金文件 |
 |---|---|---|---|---|
@@ -511,7 +512,7 @@ netCDF-C 4.9.3 / netcdf-fortran 4.6.3 / HDF5 1.14.6   （均来自 miniforge）
 
 **API 已实测可用**（`netcdf 0.12.x`）：`open` / `dimensions()` / `attributes()` /
 `attribute(n).value()` / `AttributeValue` / `variables()` / `variable(n)` / `name()` /
-`get_values::<f64, _>(Extents::All)`。黄金文件的 **129/129 个变量都能按 `f64` 读出**
+`get_values::<f64, _>(Extents::All)`。当前黄金文件的 **127/127 个变量都能按 `f64` 读出**
 （含 8 个 `int` 变量），`create_time` 读出为 `Str("20260817-16:27:52 UTC+08:00")`。
 
 ### 2.15c `[workspace.package]` 与 `[workspace.dependencies]` 都只是模板
@@ -1164,6 +1165,7 @@ make FF="gfortran -fopenmp" mksrfdata.x mkinidata.x colm.x
 #      USE_SITE_* 全部 .true.（本机无 rawdata）
 #      DEF_simulation_time%greenwich = .FALSE.   ← PLUMBER2 用地方时
 #      DEF_Runoff_SCHEME = 3                     ← CoLM 默认 Simple VIC，要求 soil_texture
+#      DEF_USE_OZONESTRESS = .false.             ← Desktop 默认不隐式启用臭氧叶片过程
 #      DEF_USE_OZONEDATA = .false.               ← 默认 .true. 要求 runtime 数据
 #      DEF_USE_BEDROCK = .false. / DEF_USE_SoilInit = .false.
 
@@ -1173,8 +1175,8 @@ make FF="gfortran -fopenmp" mksrfdata.x mkinidata.x colm.x
 ./run/colm.x      case/CN-Cng.nml   # → CoLM Execution Completed.  (1.8 秒 / 10 天)
 ```
 
-结果：`history/CN-Cng_hist_2008-01.nc`，1.3 MB / 129 变量 / 264 时间步，
-`f_xerr = f_zerr = 0`，Rnet 对观测 R²=0.986 / bias=+0.22 W/m²。
+结果：`history/CN-Cng_hist_2008-01.nc`，1.3 MB / 127 变量 / 264 时间步，
+`f_xerr = f_zerr = 0`，Rnet 对观测 R²=0.986 / bias=−0.39 W/m²。
 
 ---
 

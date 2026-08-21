@@ -20,8 +20,7 @@ fn golden(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// 一行期望值。`n` 与 `r2` 精确比，其余给容差 —— 湿季三行与 design.md
-/// 只差末位（RMSE 13.4 vs 13.5），是舍入不是算法分歧。
+/// 一行期望值。`n` 精确比，其余给打印精度对应的容差。
 struct Row {
     obs: &'static str,
     model: &'static str,
@@ -55,12 +54,8 @@ fn check(hist: &str, spinup: usize, rows: &[Row]) {
         let m = compute(&pair(&m_sec, &m_v, &s, spinup)).expect("enough pairs");
 
         assert_eq!(m.n, r.n, "{} n", r.obs);
-        // R² 容差 2e-3：六行里五行在 design.md 的打印精度（3 位小数）上完全一致，
-        // 只有湿季 Qh 实测 0.4547 而记录是 0.456，差 0.0013。
-        // n 两边都是 287，配对相同的话 R² 该逐位相同，所以这 0.0013 是个
-        // **未解释的残差**，不是舍入。已排除的可能：把「两个半小时里只有一个
-        // 好时仍取两个的平均」当作聚合规则 —— 那样湿季 Rnet 的 R² 会掉到
-        // 0.998、Qle 涨到 0.877，比现在差得多。不编理由，如实留着。
+        // design.md 只记录到 3 位小数；2e-3 足以覆盖显示舍入，仍能拦住
+        // 时间轴、配对规则或物理默认改变造成的真实漂移。
         assert!(
             (m.r2 - r.r2).abs() < 2e-3,
             "{} R² {} vs {}",
@@ -103,28 +98,28 @@ fn the_winter_window_reproduces_section_2_8() {
                 obs: "Rnet",
                 model: "f_rnet",
                 n: 256,
-                rmse: 14.7,
-                bias: -0.87,
+                rmse: 15.05,
+                bias: -0.39,
                 r2: 0.986,
-                kge: 0.829,
+                kge: 0.828,
             },
             Row {
                 obs: "Qh",
                 model: "f_fsena",
                 n: 253,
-                rmse: 46.1,
-                bias: 34.9,
+                rmse: 46.37,
+                bias: 35.09,
                 r2: 0.530,
-                kge: -11.56,
+                kge: -11.64,
             },
             Row {
                 obs: "Qle",
                 model: "f_lfevpa",
                 n: 254,
-                rmse: 32.2,
-                bias: 13.3,
-                r2: 0.044,
-                kge: -1.42,
+                rmse: 32.47,
+                bias: 13.53,
+                r2: 0.047,
+                kge: -1.45,
             },
         ],
     );
@@ -142,28 +137,28 @@ fn the_wet_window_reproduces_section_2_8b() {
                 obs: "Rnet",
                 model: "f_rnet",
                 n: 287,
-                rmse: 13.5,
-                bias: -2.95,
+                rmse: 12.99,
+                bias: -2.60,
                 r2: 0.999,
-                kge: 0.939,
+                kge: 0.943,
             },
             Row {
                 obs: "Qh",
                 model: "f_fsena",
                 n: 287,
-                rmse: 36.3,
-                bias: -24.9,
-                r2: 0.456,
-                kge: -1.55,
+                rmse: 38.65,
+                bias: -26.56,
+                r2: 0.388,
+                kge: -1.72,
             },
             Row {
                 obs: "Qle",
                 model: "f_lfevpa",
                 n: 278,
-                rmse: 76.5,
-                bias: 36.4,
-                r2: 0.853,
-                kge: 0.362,
+                rmse: 79.47,
+                bias: 38.37,
+                r2: 0.852,
+                kge: 0.327,
             },
         ],
     );
@@ -174,7 +169,7 @@ fn shifting_the_model_clock_by_eight_hours_destroys_the_fit() {
     // design.md §2.8 写着「若时区偏 8 小时，Rnet 不可能对到 0.986」。
     // 这条把那句话变成可执行的 —— 也排除了「剔除前 8 小时」其实是在
     // 补偿一个 8 小时错位的可能（CN-Cng 在 123.5°E，正好 UTC+8）。
-    // 实测：平移后 R² 从 0.986 掉到 0.146 / 0.122，RMSE 从 14.7 涨到 ~126。
+    // 实测：平移后 R² 从 0.986 掉到 0.146 / 0.122，RMSE 从约 15 涨到 ~126。
     let Some(root) = plumber2() else { return };
     let obs_path = root.join("Observation/CN-Cng_2008-2009_FLUXNET2015_Flux.nc");
     let hist_path = golden("CN-Cng_hist_2008-01.nc");
@@ -206,8 +201,8 @@ fn shifting_the_model_clock_by_eight_hours_destroys_the_fit() {
 
 #[test]
 fn the_beta_warning_fires_on_exactly_the_two_rows_design_md_calls_out() {
-    // §2.8 的冬季 Qh（观测均值 2.8，β=13.55）与 §2.8b 的湿季 Qh
-    // （均值 9.9 而模型均值为负，β=−1.52）。其余四行不该报警。
+    // §2.8 的冬季 Qh（观测均值 2.8，β=13.64）与 §2.8b 的湿季 Qh
+    // （均值 9.9 而模型均值为负，β=−1.69）。其余四行不该报警。
     let Some(root) = plumber2() else { return };
     let obs_path = root.join("Observation/CN-Cng_2008-2009_FLUXNET2015_Flux.nc");
     let o_t = read_1d(&obs_path, "time").expect("obs time");

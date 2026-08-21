@@ -147,7 +147,7 @@ fn changed_global_attribute_is_reported() {
 #[test]
 fn create_time_alone_is_whitelisted() {
     // 唯一允许不同的属性。CoLM 每次写文件都盖墙上时钟，重跑必然不同，
-    // 而 129 个变量的数据逐位相同 —— 这是回归基准得以成立的前提。
+    // 而黄金基线的全部变量数据逐位相同 —— 这是回归基准得以成立的前提。
     let p = problems("createtime", |o| {
         o.create_time = "19700101-00:00:00 UTC+00:00"
     });

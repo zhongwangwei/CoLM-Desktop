@@ -47,14 +47,11 @@
    DEF_LAI_MONTHLY       = .true.
    DEF_LAI_CHANGE_YEARLY = .true.
 
-! 固定旧金标的冠层积雪行为；Desktop 新算例使用新的 .true. 默认。
-   DEF_VEG_SNOW = .false.
-
 ! Simple VIC (CoLM 默认)。需要站点文件里有 soil_texture
    DEF_Runoff_SCHEME = 3
 
-! CoLM 默认 .true.，会去 DEF_dir_runtime 读 Ozone/Global/OZONE-setgrid.nc。
-! 关闭后 MOD_Ozone.F90:83 用常数 forc_ozone = 100 ppbv，臭氧胁迫仍生效。
+! Desktop 新算例默认不启用臭氧叶片过程，也不隐式读取全球臭氧数据。
+   DEF_USE_OZONESTRESS = .false.
    DEF_USE_OZONEDATA = .false.
 
    DEF_forcing_namelist = '@WORK_DIR@/forcing.nml'

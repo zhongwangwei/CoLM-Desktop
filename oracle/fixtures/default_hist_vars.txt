@@ -30,8 +30,6 @@ lake_deficit
 lake_icefrac
 ldew
 lfevpa
-o3uptakesha
-o3uptakesun
 olrg
 qdrip
 qinfl

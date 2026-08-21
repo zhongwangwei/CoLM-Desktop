@@ -161,7 +161,7 @@ fn main() -> Result<()> {
         println!("  wrote golden: {}", golden.display());
         // 黄金文件的字节由 Fortran 侧写出，而 kernels/ 是 gitignore 的，
         // 所以「是什么工具链产出了这些字节」在仓库里本来没有任何记录。
-        // 工具链一变（Homebrew 升 gcc、conda 升 netcdf），比对会在 129 个变量上
+        // 工具链一变（Homebrew 升 gcc、conda 升 netcdf），比对会在全部变量上
         // 全红，而没人分得清是物理改了还是编译器改了。把 manifest 一并入库。
         let src = kernel.dir.join("manifest.json");
         let dst = repo.join("oracle/golden/kernel-manifest.json");
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
 ///
 /// 刻意不比 `sha256`：Fortran 构建不逐字节可复现（实测同一路径连跑两次，三个
 /// 二进制的摘要全变），拿它比配置身份只会永远告警。只警告不失败也是刻意的：
-/// 工具链变了未必意味着结果错了，但必须让人看见，否则一场 129 个变量全红的
+/// 工具链变了未必意味着结果错了，但必须让人看见，否则一场全部变量全红的
 /// 比对会被误读成物理回归。
 fn check_kernel_provenance(repo: &Path, have: &Manifest) -> Result<()> {
     let recorded = repo.join("oracle/golden/kernel-manifest.json");

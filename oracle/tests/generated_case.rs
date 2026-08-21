@@ -2,7 +2,7 @@
 //!
 //! 这条比「生成的文件长得对」强得多：它证明生成的配置与手写那份**语义等价**，
 //! 而不是看起来等价。等价性的前提已经单独验证过一次 —— 把手写算例里 22 个
-//! 等于 CoLM 默认值的字段删掉重跑，history 与黄金文件 `identical: 129 variables`。
+//! 等于 CoLM 默认值的字段删掉重跑，history 与黄金文件 `identical: 127 variables`。
 //! 所以生成版若对不上，只可能是生成错了。
 //!
 //! 需要 `PLUMBER2_ROOT` 与一个已构建的内核（`kernels/default`），
@@ -106,13 +106,15 @@ fn a_generated_case_reproduces_the_golden_history() {
 
     let all = fields(&spec);
     let req = required(&all);
-    // 19 而不是 21：预热关掉时截止时刻的年月日秒都落回 CoLM 的默认值而被剪掉。
+    // 20 而不是 22：预热关掉时截止时刻的年月日秒都落回 CoLM 的默认值而被剪掉。
+    // Desktop 还会显式关闭臭氧胁迫与臭氧数据读取，避免新算例隐式依赖
+    // 上游 2.8 GB 全球臭氧文件，因此这两项都必须保留在最小配置里。
     // 这条钉的是「生成的算例只写该写的」，不是钉某个具体数字 ——
     // 真正的判据是下面那句 history 与黄金文件逐变量相同。
     assert_eq!(
         req.len(),
-        19,
-        "expected 19 non-default fields, got {}",
+        20,
+        "expected 20 non-default fields, got {}",
         req.len()
     );
     std::fs::write(layout.case_nml(), render(&req)).expect("write case.nml");
@@ -151,5 +153,7 @@ fn a_generated_case_reproduces_the_golden_history() {
         "generated case differs from the golden run:\n{}",
         report.problems.join("\n")
     );
-    assert_eq!(report.compared, 129);
+    // 两个臭氧吸收通量只在臭氧胁迫开启时写出；Desktop 新算例默认关闭，
+    // 因此当前安全基线是 127 个公共变量，而不是旧基线的 129 个。
+    assert_eq!(report.compared, 127);
 }

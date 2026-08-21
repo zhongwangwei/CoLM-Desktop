@@ -2,7 +2,7 @@
 //! 而且他在界面上做的选择真的传到了模型。**
 //!
 //! `forcing_convert.rs`（A1）已经钉住了转换管道本身：CN-Cng 走一遍恒等
-//! 转换，history 与黄金文件 `identical: 129 variables`。但那条测试只覆盖
+//! 转换，history 与黄金文件 `identical: 127 variables`。但那条测试只覆盖
 //! 了转换管道最省心的一种情况——单位不变、高度源文件自带、降水只有一个
 //! `Precip`、内核是 `default`。这一条补的是它没走过的三条路：
 //!

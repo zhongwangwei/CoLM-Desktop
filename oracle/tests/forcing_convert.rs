@@ -1,6 +1,6 @@
 //! 转换管道的端到端判据：**转出来的与直读逐位相同**。
 //!
-//! CN-Cng 是黄金回归站点，直读的结果有 `identical: 129 variables` 钉着。
+//! CN-Cng 是黄金回归站点，直读的结果有 `identical: 127 variables` 钉着。
 //! 把它的原始 Met 文件走一遍转换管道（变量名与单位都不变，所以这是一次
 //! 恒等转换），拿转出来的文件建算例并跑完三段 —— history 应当与黄金文件
 //! 逐位相同。
@@ -152,7 +152,7 @@ fn a_converted_forcing_matches_the_source_bit_for_bit() {
 /// 看不出问题在强迫场少了三个标量。**
 ///
 /// 已修（`191fea7`）：规则改成「槽位没消费的变量全搬」，不是特判那三个。
-/// 现在跑出 `identical: 129 variables, 10 dimensions`。
+/// 现在跑出 `identical: 127 variables, 10 dimensions`。
 ///
 /// **文件层面那条测试当时是绿的。** 只比八个槽位变量，比不出少了三个
 /// 标量 —— 这就是为什么这条慢的必须存在：文件里的数一个不差，模型
@@ -285,5 +285,5 @@ fn a_converted_forcing_reproduces_the_golden_history() {
         "converted-forcing case differs from the golden run:\n{}",
         report.problems.join("\n")
     );
-    assert_eq!(report.compared, 129);
+    assert_eq!(report.compared, 127);
 }
