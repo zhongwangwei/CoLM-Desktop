@@ -335,11 +335,11 @@ MODULE MOD_Namelist
    ! compile-time *file-selection* macro: vendor/CoLM202X/Makefile uses it
    ! (EXTENDED_INTERCEPTION_ENABLED) to choose between two non-interchangeable
    ! source files for each of MOD_Thermal, MOD_LeafInterception,
-   ! MOD_LeafTemperature and MOD_LeafTemperaturePC (main/*.F90 vs.
-   ! extends/interception/*_Extended.F90 -- same module name, different
-   ! subroutine signatures, e.g. THERMAL takes extra canopy_phase_heat
-   ! arguments in the extended set). Two modules cannot share a name in one
-   ! binary, so this can't become a body-level `IF (DEF_USE_extend_interception)`
+   ! MOD_LeafTemperature and MOD_LeafTemperaturePC (the copies under main/
+   ! vs. _Extended.F90 under extends/interception/ -- same name, different
+   ! subroutine signatures; e.g. THERMAL takes extra canopy_phase_heat
+   ! arguments). Two modules cannot share a name in one binary, so this
+   ! can't become a body-level `IF (DEF_USE_extend_interception)`
    ! without first merging each file pair into one module with the two
    ! code paths folded in -- a much larger job than the 4 occurrences
    ! visible in CoLMMAIN.F90 suggest. It is also currently always on: every
@@ -399,7 +399,7 @@ MODULE MOD_Namelist
 
    ! ----- tracer module -----
    ! Water tracer subsystem: isotope / solute / particle / gas families
-   ! (main/TRACER/*.F90, 42 modules). Used to be a compile-time macro
+   ! (42 modules under main/TRACER/). Used to be a compile-time macro
    ! (TRACER, create_defineh.bash's old 7th argument, TRACERON/TRACEROFF).
    ! Every TRACER module is now always compiled in and this flag picks
    ! whether the subsystem actually runs at runtime instead. Default
@@ -529,8 +529,8 @@ MODULE MOD_Namelist
    logical :: DEF_USE_WUEST             = .true.  ! WUE stomata model
 
    ! ----- BGC (carbon-nitrogen biogeochemistry) model -----
-   ! Used to be a compile-time macro (BGC in define.h). main/BGC/*.F90 is
-   ! always compiled in now; this runtime switch picks whether it runs.
+   ! Used to be a compile-time macro (BGC in define.h). Everything under
+   ! main/BGC/ is always compiled in now; this switch picks whether it runs.
    ! Dependency (validated in the conflict-check block below): DEF_USE_BGC
    ! requires DEF_USE_PFT or DEF_USE_PC (BGC pool state is per-PFT,
    ! MOD_BGC_Vars_*PFT*). Default .false., matching the LULC_IGBP/LCT

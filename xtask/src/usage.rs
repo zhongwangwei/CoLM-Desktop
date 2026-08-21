@@ -350,7 +350,23 @@ fn quoted(s: &str) -> Vec<String> {
     out
 }
 
+/// 走 `vendor/CoLM202X` 下的 `.F90`，**跳过 `tests/`**。
+///
+/// 跳过它不是嫌它无关，是因为它**不在库里**：`vendor/CoLM202X/.gitignore`
+/// 第 21 行写着 `/tests`，那 13 个 `.F90` 谁的工作树里有就有、克隆出来
+/// 一定没有。扫进去的话，生成表就带上了只有本机看得见的东西 —— 本地
+/// `gen-schema` 与入库产物一致，CI 上重新生成却少了那部分，于是
+/// `colm-schema` 的 drift 测试在 macOS 与 Windows 上同时红（实测 ci run
+/// 32445644279，报 "generated.rs is out of date with MOD_Namelist.F90"，
+/// 而 `MOD_Namelist.F90` 那次根本没动）。生成物入库就必须只由入库的输入
+/// 决定，否则 drift 守的不再是「上游改了没重新生成」，而是「谁最后跑的
+/// 生成器」。
+///
+/// 只挡顶层那一个 `tests`（`.gitignore` 的 `/tests` 也只挡顶层），不是
+/// 见到叫 tests 的目录就跳 —— 上游哪天在子目录里放入库的 `tests/`，
+/// 那份该扫。
 fn walk(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let untracked_tests = dir.join("tests");
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -360,7 +376,7 @@ fn walk(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                if p.file_name().and_then(|n| n.to_str()) != Some(".git") {
+                if p.file_name().and_then(|n| n.to_str()) != Some(".git") && p != untracked_tests {
                     stack.push(p);
                 }
             } else if p.extension().and_then(|x| x.to_str()) == Some("F90") {

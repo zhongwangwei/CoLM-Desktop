@@ -102,6 +102,10 @@ fn the_kernel_build_quotes_the_paths_it_hands_to_cmd() {
     // 引号+正斜杠退出码 0，不加引号退出码 1 且目录没建。
     let sh = read("oracle/scripts/build_kernel.sh");
     assert!(
+        sh.contains("tar -h --exclude=.git -cf - ."),
+        "构建源码归档必须解引用符号链接，否则 MSYS2 会按归档顺序随机失败"
+    );
+    assert!(
         sh.contains("mkdir \\\"' //"),
         "构建脚本没有给 mkdir 的路径加引号"
     );

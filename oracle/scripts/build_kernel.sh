@@ -65,14 +65,24 @@ rm -rf "$BUILD"
 # （见 `vendor/PROVENANCE.md`），没有独立的 git 仓库可以 worktree。
 #
 # 用 `tar` 管道而不是 `cp -r`：CoLM 的源码树里有符号链接
-# （`include/Makeoptions`、`run/scripts/batch.config`），`cp -r` 在
-# 不同平台上对它们的处理不一致，而 `tar` 原样复制。下面反正会把
-# `include/Makeoptions` 整个换掉，`batch.config` 单点路径根本不读。
+# （`include/Makeoptions`、`run/scripts/batch.config`、
+# `run/scripts/machine.config`），`cp -r` 在不同平台上对它们的处理不一致。
+#
+# 打包端的 `-h`（解引用）不是可选项。MSYS2 的 tar **建不了真正的符号
+# 链接**，它退而复制目标文件 —— 而目标只有在归档里排在链接前面时才
+# 已经落地。归档顺序是目录项顺序，不是字母序：vendor 里增删任何一个
+# 文件都可能把 `batch.github.config` 挪到 `batch.config` 后面，于是
+# Windows 构建报 `Cannot create symlink to 'batch.github.config':
+# No such file or directory` 当场退出（实测 windows-kernel run
+# 32445644366，同一份脚本此前多次通过）。解引用之后归档里只剩普通
+# 文件，顺序怎么变都无所谓；三个链接指的都是同目录下现存的文件，
+# 内容一模一样。下面反正会把 `include/Makeoptions` 整个换掉，
+# `batch.config` 与 `machine.config` 单点路径根本不读。
 #
 # 每次都从头拷：构建会往树里写 `.o`、`.mod` 与生成的 `include/define.h`，
 # 直接在 `vendor/` 里编会污染入库的源码。
 mkdir -p "$BUILD"
-(cd "$SRC" && tar --exclude=.git -cf - .) | (cd "$BUILD" && tar -xf -)
+(cd "$SRC" && tar -h --exclude=.git -cf - .) | (cd "$BUILD" && tar -xf -)
 trap 'rm -rf "$BUILD"' EXIT
 
 cd "$BUILD"
@@ -224,6 +234,54 @@ if [ -n "$OWN_MAKEOPTS" ]; then
     echo "some 'mkdir -p' lines did not match the rewrite -- they would fail at run time" >&2
     exit 3
   fi
+fi
+
+# 注释里的 `/` 紧跟 `*` 会让 cpp 从那里开始**吞代码**。
+#
+# `-cpp` 走的是 C 预处理器，而它不认识 Fortran 的 `!`：一行注释里写
+# `main/BGC/*.F90`，那个 `/*` 就开了一段 C 注释，一直吞到下一个 `*/`
+# 为止 —— 中间几百行代码照吞不误，不警告，退出码 0。实测
+# `share/MOD_Namelist.F90` 里 4 处这种写法（`main/*.F90`、
+# `main/TRACER/*.F90` ……）把第 338 行到第 649 行整段吃掉，
+# `type nl_forcing_type` 的定义没了，只剩它的 `END type` 孤零零留在
+# 那里，Linux 构建报 `Expecting END MODULE statement`（release run
+# 32445653124）。同一个坑此前在 `create_defineh.bash` 的头注释里踩过
+# 一次（见 06543f8），所以这次立一道检查，不再靠记性。
+#
+# **本机看不见这件事。** `Makeoptions.Mac-arm` 带 `-C`（预处理保留注释），
+# C 注释于是原样交给 Fortran 前端，而前端只看行首的 `!`，一切正常；
+# `Makeoptions.github` 不带 `-C`。所以同一份源码 macOS 编得过、Linux
+# 编不过，本地全量构建绿着也证明不了什么 —— 这道检查因此放在这里，
+# 在**每个**平台的构建里跑。
+#
+# 只报「跨行**且**吞掉代码」的那种：`main/HYDRO/MOD_Hydro_VIC*.F90` 从
+# VIC 移植来的 doxygen 块注释也是跨行 `/* ... */`，但它每一行都是注释，
+# 无害 —— 报出来只会训练人忽略这道检查。`tests/` 不看：它在上游的
+# `.gitignore` 里（`/tests`），谁的工作树里有就有，不参与构建。
+SWALLOWED=$(find . -name '*.F90' ! -path './tests/*' -print0 | xargs -0 awk '
+  FNR == 1 { if (inc) printf "%s:%d: unterminated C comment eats the rest of the file\n", prev, start; inc = 0; eaten = 0 }
+  {
+    prev = FILENAME
+    if (inc) { t = $0; sub(/^[ \t]+/, "", t); if (t != "" && substr(t, 1, 1) != "!") eaten = 1 }
+    i = 1
+    while (i < length($0)) {
+      two = substr($0, i, 2)
+      if (!inc && two == "/*") { inc = 1; start = FNR; eaten = 0; i += 2; continue }
+      if (inc && two == "*/") {
+        if (start != FNR && eaten) printf "%s:%d: C comment opened here is closed on line %d, eating the code in between\n", FILENAME, start, FNR
+        inc = 0; eaten = 0; i += 2; continue
+      }
+      i++
+    }
+  }
+  END { if (inc) printf "%s:%d: unterminated C comment eats the rest of the file\n", FILENAME, start }
+')
+if [ -n "$SWALLOWED" ]; then
+  echo "$SWALLOWED" >&2
+  echo "cpp would delete Fortran code above -- a comment contains '/' followed" >&2
+  echo "by '*'. Rewrite it in words (\"every module under main/BGC/\"), the way" >&2
+  echo "create_defineh.bash's header comment was rewritten in 06543f8." >&2
+  exit 3
 fi
 
 # MPI 的**头文件路径**。SinglePoint 产物不用 MPI，编译却仍然要它：
