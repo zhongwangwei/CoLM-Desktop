@@ -91,7 +91,9 @@ card('BGC').onclick();
 if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('blocked option did not link to page 2');
 next(); next();
 choose('URBAN');
-choose('LULCC');
+if (card('LULCC').getAttribute('aria-disabled') !== 'true') {
+  throw new Error('LULCC must be blocked for SinglePoint/site runs');
+}
 next();
 if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('page 5 missing');
 choose('RangeCheck');
@@ -111,7 +113,7 @@ for (const [path, value] of Object.entries({
   DEF_USE_PFT: '.false.',
   DEF_USE_Campbell_SOIL_MODEL: '.true.',
   DEF_URBAN_RUN: '.true.',
-  DEF_USE_LULCC: '.true.',
+  DEF_USE_LULCC: '.false.',
   DEF_USE_RangeCheck: '.true.',
 })) {
   if (fields[path] !== value) throw new Error(`${path}: expected ${value}, got ${fields[path]}`);
@@ -136,7 +138,7 @@ if (mainFields.map(x => x.path).join('|') !== 'DEF_HIST_FREQ') {
 // 改第 2 页时，第 3/4 页的无关选择保留并重算约束。
 showDomainGate();
 choose('站点'); next(); choose('IGBP'); next(); choose('van Genuchten–Mualem'); next();
-choose('LULCC');
+choose('URBAN');
 previous(); previous();
 choose('PFT');
 next();
@@ -144,7 +146,7 @@ if (card('van Genuchten–Mualem').getAttribute('aria-selected') !== 'true') {
   throw new Error('soil choice was not preserved after changing subgrid');
 }
 next();
-if (card('LULCC').getAttribute('aria-pressed') !== 'true') throw new Error('unrelated physics choice was lost');
+if (card('URBAN').getAttribute('aria-pressed') !== 'true') throw new Error('unrelated physics choice was lost');
 if (card('BGC').getAttribute('aria-disabled') === 'true') throw new Error('BGC did not become available for PFT');
 
 console.log('gate: five pages, constraints, finish state, and namelist fields resolve');

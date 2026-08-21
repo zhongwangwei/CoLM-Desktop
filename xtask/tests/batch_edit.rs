@@ -86,6 +86,24 @@ fn sites_are_keyed_by_file_not_by_name() {
 }
 
 #[test]
+fn a_new_wizard_run_cannot_inherit_old_cases() {
+    let batch = js("batch.js");
+    assert!(batch.contains("state.batch.length") && batch.contains("state.selected ?"));
+    assert!(!batch.contains("return picked.length ? picked : state.cases"));
+    assert!(js("sites.js").contains("state.pickedCases.clear()"));
+
+    let domain = js("domain.js");
+    for reset in [
+        "state.picked.clear()",
+        "state.pickedCases.clear()",
+        "state.batch = []",
+        "state.selected = null",
+    ] {
+        assert!(domain.contains(reset), "新向导没有清理旧状态：{reset}");
+    }
+}
+
+#[test]
 fn the_spin_up_card_says_what_spin_up_costs() {
     // 预热期不写 history，所以开着预热就等于从输出里扣掉开头那几年。
     // **这一句必须在界面上**：扣掉的那段在结果里什么痕迹都不留。

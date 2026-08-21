@@ -213,7 +213,7 @@ chmod +x /tmp/clicktext.sh
 - [ ] **Step 3: 确认 sidecar 与内核都在，否则界面走不到第 3 步以后**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 ls target/debug/colm-cli kernels/default/manifest.json
 ```
 
@@ -305,7 +305,7 @@ export const STEPS = [
 `data-step="data"` 在整个仓库只出现一次。改成 `sites`：
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 grep -rn 'data-step="data"' gui/dist/
 ```
 
@@ -345,7 +345,7 @@ grep -rn 'data-step="data"' gui/dist/
 - [ ] **Step 5: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/state.js && node --check gui/dist/app/shell.js
 cargo run -p xtask -- check-gui
 ```
@@ -468,7 +468,7 @@ Task 2 只换了 `STEPS` 数组本身，这行注释还写着「五步」：
 - [ ] **Step 5: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/shell.js
 cargo run -p xtask -- check-gui
 ```
@@ -673,7 +673,7 @@ Task 2b 加的「已选站点：AT-Neu 等 20 个」只在 `renderSteps()` 里�
 它的下一步正是参数页，**这一行不用改**。确认一下就行：
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 grep -n "go('" gui/dist/app/sites.js
 ```
 
@@ -731,7 +731,7 @@ sites 页的 `<p class="sub">` 换成：
 - [ ] **Step 10: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/shell.js && node --check gui/dist/app/sites.js
 cargo run -p xtask -- check-gui
 ```
@@ -741,9 +741,9 @@ cargo run -p xtask -- check-gui
 - [ ] **Step 11: 跑起来验顺序与门槛**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/src-tauri
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/src-tauri
 cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/ax.sh | grep "前处理\|基本设定\|站点\|参数\|运行\|结果\|先在第"
@@ -780,7 +780,7 @@ pkill -f "target/debug/colm-desktop-gui"
 - [ ] **Step 12: 提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add gui/dist/app/shell.js gui/dist/app/sites.js gui/dist/index.html
 git commit -m "内核排到站点前面，并让骨架自洽
 
@@ -946,7 +946,7 @@ showDomainGate();
 - [ ] **Step 5: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/domain.js && node --check gui/dist/app/main.js
 cargo run -p xtask -- check-gui
 ```
@@ -960,7 +960,7 @@ cargo run -p xtask -- check-gui
 和门会跑 —— 这一步只验门本身，别指望别的。
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/dist
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/dist
 python3 -m http.server 8749 > /dev/null 2>&1 &
 sleep 1
 ```
@@ -981,7 +981,7 @@ playwright 的运行产物落在 `.playwright-mcp/`，**收尾时删掉**，别�
 - [ ] **Step 7: 提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add gui/dist/app/domain.js gui/dist/app/main.js gui/dist/index.html gui/dist/app/style.css
 git commit -m "进门先分流域类型
 
@@ -1046,10 +1046,10 @@ Tested: node --check; xtask check-gui 无成环; playwright 验门开与关"
 - [ ] **Step 3: 静态检查与跑一遍**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/click.sh "站点"      # 进门
@@ -1194,7 +1194,7 @@ import { kernelIsUrban } from './kernel.js';
 - [ ] **Step 5: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/kernel.js && node --check gui/dist/app/runner.js && node --check gui/dist/app/sites.js
 cargo run -p xtask -- check-gui
 ```
@@ -1206,7 +1206,7 @@ cargo run -p xtask -- check-gui
 
 ```bash
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/click.sh "站点"; sleep 1
@@ -1321,7 +1321,7 @@ export function renderMakeCase() {
 **全仓库替换所有调用点**：
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 grep -rn "renderDataFoot\|datafoot" gui/dist/
 ```
 
@@ -1359,7 +1359,7 @@ import { renderSteps, setStatus } from './shell.js';
 - [ ] **Step 5: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/sites.js
 grep -rn "renderDataFoot\|datafoot" gui/dist/ || echo "改名干净"
 cargo run -p xtask -- check-gui
@@ -1371,7 +1371,7 @@ cargo run -p xtask -- check-gui
 
 ```bash
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/click.sh "站点"; sleep 1          # 进门
@@ -1502,7 +1502,7 @@ sha256，不过的会被静默丢掉。
 - [ ] **Step 4: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/shell.js && node --check gui/dist/app/sites.js
 cargo run -p xtask -- check-gui
 ```
@@ -1511,7 +1511,7 @@ cargo run -p xtask -- check-gui
 
 ```bash
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/click.sh "站点"; sleep 1
@@ -1524,7 +1524,7 @@ pkill -f "target/debug/colm-desktop-gui"
 再验没有内核的那条路 —— **这是本任务的重点**，把内核目录临时藏起来：
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 mv kernels kernels-hidden
 cd gui/src-tauri
 ./target/debug/colm-desktop-gui > /tmp/nokernel.log 2>&1 &
@@ -1616,11 +1616,11 @@ Tested: node --check; xtask check-gui; 藏掉 kernels/ 实测新文案"
 - [ ] **Step 4: 静态检查与跑一遍**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/timing.js
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 ```
@@ -1756,7 +1756,7 @@ export function renderSites(r = {}) {
 - [ ] **Step 5: 静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/sites.js && node --check gui/dist/app/runner.js
 cargo run -p xtask -- check-gui
 ```
@@ -1767,7 +1767,7 @@ cargo run -p xtask -- check-gui
 
 ```bash
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/click.sh "站点"; sleep 1
@@ -1843,7 +1843,7 @@ u_site_utype = ncio_var_exist(fsrfdata,'LCZ_DOM')
 在哪一步停、报什么。
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 T=/tmp/urban-probe && rm -rf $T
 ./target/debug/colm-cli new --site "$U/Sitedata/AU-Preston_site_v1.nc" \
@@ -1923,7 +1923,7 @@ roof_area_fraction        0.445
 - [ ] **Step 5: 实测 AU-Preston 不给栅格跑完三段**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 ./oracle/scripts/build_kernel.sh urban        # 还没编的话
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 T=/tmp/urban-run && rm -rf $T
@@ -2028,7 +2028,7 @@ Error: an urban case needs --rawdata: the site file carries only morphology,
 - [ ] **Step 1: 把三个文件复制进 `examples/`**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 cp "$U/Sitedata/AU-Preston_site_v1.nc"   examples/Sitedata/
 cp "$U/Forcing/AU-Preston"*.nc           examples/Forcing/
@@ -2181,7 +2181,7 @@ so soil, lake depth, albedo and the LCZ class all come from the global grid
 - [ ] **Step 8: 静态检查与跑一遍**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/sites.js && node --check gui/dist/app/runner.js
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo test 2>&1 | tail -5
@@ -2194,7 +2194,7 @@ cd gui/src-tauri && cargo test 2>&1 | tail -5
 
 ```bash
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 bash $S/click.sh "站点"; sleep 1
@@ -2229,7 +2229,7 @@ urban 内核这台机器没编，按钮文案随内核变那条**跳过**，在�
 - [ ] **Step 9: 提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add examples/ gui/dist/app/sites.js gui/dist/app/runner.js gui/dist/index.html gui/src-tauri/src/example.rs
 git commit -m "自带一个城市示例站点，并把栅格门槛说在前面
 
@@ -2343,7 +2343,7 @@ export function renderCases() {
 - [ ] **Step 3: 确认没有别处还按老 id 取它**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 grep -rn "'cases'\|\"cases\"" gui/dist/app/ gui/dist/index.html || echo "干净"
 ```
 
@@ -2355,7 +2355,7 @@ grep -rn "'cases'\|\"cases\"" gui/dist/app/ gui/dist/index.html || echo "干净"
 node --check gui/dist/app/sites.js
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 ```
@@ -2436,11 +2436,11 @@ Tested: node --check; xtask check-gui; 第 3 步勾选在第 5 步仍然勾着"
 - [ ] **Step 3: 静态检查与跑一遍**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/params.js
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 ```
@@ -2506,11 +2506,11 @@ Task 10 之后 `state.expert` 没有任何消费者了，切过去界面纹丝�
 - [ ] **Step 2: 静态检查与跑一遍**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 node --check gui/dist/app/params.js
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /dev/null 2>&1 &
 sleep 4
 ```
@@ -2708,7 +2708,7 @@ fn the_three_special_sections_really_exist() {
 - [ ] **Step 2: 跑**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo test -p xtask --test params_groups 2>&1 | tail -12
 ```
 
@@ -2720,7 +2720,7 @@ cargo test -p xtask --test params_groups 2>&1 | tail -12
 再跑一次，必须**红**：
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cp gui/dist/app/params.js /tmp/params.js.bak
 sed -i '' "s/'算例', '站点'/'站点'/" gui/dist/app/params.js
 cargo test -p xtask --test params_groups 2>&1 | grep -E "算例|test result"
@@ -2996,7 +2996,7 @@ CoLM 回落栅格，若目录不存在就报错。这是对的：不能对没量
 - [ ] **Step 4: 实测 AU-Preston 完全不给栅格跑完三段**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo build -p colm-cli
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 T=/tmp/urban-final && rm -rf $T
@@ -3293,7 +3293,7 @@ PLUMBER2 数据在本机 `/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s`，
 **逐一核对过、完全一致**。
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 export PLUMBER2_ROOT=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
 cargo run -p oracle --bin golden-run -- CN-Cng 2>&1 | tail -8
 ```
@@ -3321,7 +3321,7 @@ identical: 129 variables, 10 dimensions (ignoring ["create_time"])
 - [ ] **Step 2: 脚本与内核目录**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 sed -i '' 's/default/default/g' oracle/scripts/build_kernel.sh
 grep -n "default" oracle/scripts/build_kernel.sh
 ```
@@ -3342,7 +3342,7 @@ cat kernels/default/manifest.json | head -8
 - [ ] **Step 3: Rust 源码、测试与黄金文件**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 for f in \
   oracle/golden/kernel-manifest.json \
   oracle/src/bin/golden_run.rs \
@@ -3387,7 +3387,7 @@ grep -rln "default" docs/
 - [ ] **Step 6: 全量测试**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo test --workspace 2>&1 | tail -20
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
 cargo run -p xtask -- check-gui
@@ -3454,7 +3454,7 @@ Tested: cargo test --workspace; clippy -D warnings; xtask check-gui; 黄金比�
 - [ ] **Step 1: 全量静态检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 for f in gui/dist/app/*.js; do node --check "$f" || echo "FAIL $f"; done
 cargo run -p xtask -- check-gui
 cargo test --workspace 2>&1 | tail -10
@@ -3469,8 +3469,8 @@ GUI 那个独立 workspace **44 passed**。`cargo fmt --all -- --check` 也要�
 - [ ] **Step 2: 端到端走一遍六步**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/src-tauri && cargo build
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/src-tauri && cargo build
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 ./target/debug/colm-desktop-gui > /tmp/gui-final.log 2>&1 &
 sleep 4
 ```
@@ -3498,7 +3498,7 @@ pkill -f "target/debug/colm-desktop-gui"
 走到第 3 步，把站点目录填成上面那个路径、点「扫描」，然后点「全选」：
 
 ```bash
-S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Rust/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
+S=/private/tmp/claude-501/-Users-zhongwangwei-Desktop-Github-CoLM-Desktop/bb10e196-9af7-4677-8652-790e39e5da15/scratchpad
 bash $S/ax.sh | grep -A2 "已选站点"
 bash $S/ax.sh | grep "个站点\|已勾"
 ```
@@ -3564,7 +3564,7 @@ recorded kernel` 出现。
 - [ ] **Step 3: 清掉 playwright 的运行垃圾并加进 `.gitignore`**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 rm -rf .playwright-mcp
 grep -q '^\.playwright-mcp/' .gitignore || echo '/.playwright-mcp/' >> .gitignore
 tail -3 .gitignore
@@ -3575,7 +3575,7 @@ tail -3 .gitignore
 这是这轮最有分量的成果，必须端到端验一次。
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 T=/tmp/final-urban && rm -rf $T
 ./target/debug/colm-cli new --site "$U/Sitedata/AU-Preston_site_v1.nc" \
@@ -3821,7 +3821,7 @@ Task 13 实测「换成无空格目录后 CN-Cng 六步全绿」，但当时**�
 - 还是**示例数据**也得搬？
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 P=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
 T=/tmp/nospace-case && rm -rf $T
 # 算例目录无空格，但强迫场留在有空格的位置

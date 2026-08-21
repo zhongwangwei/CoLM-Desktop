@@ -194,6 +194,9 @@ function subgridBlock(item) {
 
 function physicsBlock(item) {
   if (item.ready === false) return null;
+  if (item.id === 'lulcc' && picked.domain === 'site') {
+    return { need: '单点站点暂不支持 LULCC', cause: '第 1 页选择了站点', page: 0 };
+  }
   if (item.id === 'bgc' && picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
     return { need: '需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
   }
@@ -234,6 +237,14 @@ function renderFoot() {
 }
 
 function finish() {
+  // 新向导就是一次新任务；站点库可以复用，但上一次的选择和运行批次不能
+  // 混进来，否则运行页会出现与本次模型配置无关的旧算例。
+  state.picked.clear();
+  state.pickedSite = null;
+  state.pickedCases.clear();
+  state.batch = [];
+  state.selected = null;
+  state.text = '';
   state.domain = picked.domain;
   state.subgrid = picked.subgrid;
   state.wizard = {

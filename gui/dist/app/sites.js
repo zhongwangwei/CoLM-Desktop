@@ -7,7 +7,7 @@ import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { refreshPresets } from './presets.js';
 import { renderSteps, setStatus } from './shell.js';
-import { updateCaseBatchButtons } from './batch.js';
+import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
 
@@ -42,16 +42,19 @@ $('rescan').onclick = async () => {
 
 /** 算例列表渲染进一个容器。
  *
- *  **两页各一个。** 基本设定问「建出来没有」，运行页问「跑哪些」，
- *  两处都要看得见同一份列表，而一个 DOM 元素进不了两页。
+ *  **两页各一个。** 基本设定看目录全表，运行页只看本次批次；
+ *  一个 DOM 元素进不了两页。
  *  勾选状态共享 `state.pickedCases`，两边贯通。 */
 function renderCasesInto(box) {
   box.textContent = '';
-  if (!state.cases.length) {
-    box.innerHTML = '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
+  const cases = box.id === 'cases-run' ? batchTarget() : state.cases;
+  if (!cases.length) {
+    box.innerHTML = box.id === 'cases-run'
+      ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在前面选站点并建算例。</p>'
+      : '<p class="muted" style="font-size:11px">这个目录下没有算例</p>';
     return;
   }
-  for (const c of state.cases) {
+  for (const c of cases) {
     const d = document.createElement('div');
     d.className = 'case';
     d.setAttribute('aria-selected', String(state.selected?.dir === c.dir));
@@ -160,7 +163,8 @@ async function confirmSelection() {
     state.batch = [...new Set(made.map(c => c.dir))];
     // **刚建的这批就是马上要跑的那批。** 不灌 pickedCases 的话，
     // 过程参数说「改动会写进 2 个算例」而运行页说「运行全部 4 个」会打架。
-    // 想跑全部，在运行页取消勾选即可。
+    // 先清掉上次批次；否则旧算例仍会被误认为本次目标。
+    state.pickedCases.clear();
     for (const c of made) state.pickedCases.add(c.dir);
     // **走 selectCase，不要只设 state.selected。** 那里还要把 case.nml 读进来、
     // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，

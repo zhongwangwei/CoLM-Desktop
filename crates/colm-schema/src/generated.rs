@@ -101,7 +101,7 @@ pub static FIELDS: &[Field] = &[
     Field { name: "DEF_file_WaterTable", kind: FieldKind::Character { len: 256 }, default: Default::Str("null"), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 229 },
     Field { name: "DEF_LULCC_SCHEME", kind: FieldKind::Integer, default: Default::Integer(1), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 238 },
     Field { name: "DEF_USE_LULCC", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 244 },
-    Field { name: "DEF_URBAN_type_scheme", kind: FieldKind::Integer, default: Default::Integer(1), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 253 },
+    Field { name: "DEF_URBAN_type_scheme", kind: FieldKind::Integer, default: Default::Integer(1), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &["1", "2"], requires: &[], line: 253 },
     Field { name: "DEF_URBAN_geom_data", kind: FieldKind::Integer, default: Default::Integer(1), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 254 },
     Field { name: "DEF_URBAN_ONLY", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 255 },
     Field { name: "DEF_URBAN_RUN", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 256 },

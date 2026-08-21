@@ -135,6 +135,10 @@
         <div class="card">
           <h3>文件与目录</h3>
           <div class="ch">先选站点数据和算例根目录，再在同一页建算例。</div>
+          <div class="pill-row" style="margin-top:10px">
+            <button class="btn-ghost" id="use-example">用自带的示例站点</button>
+            <span class="muted mini">CN-Cng 自然站或 AU-Preston 城市站</span>
+          </div>
           <div class="field">
             <label>站点目录</label>
             <div class="browse">
@@ -167,10 +171,6 @@
                   <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
             </div>
           </div>
-          <div class="pill-row" style="margin-top:10px">
-            <button class="btn-ghost" id="use-example">用自带的示例站点</button>
-            <span class="muted mini">CN-Cng 自然站或 AU-Preston 城市站</span>
-          </div>
         </div>
 
         <div class="card">
@@ -183,11 +183,12 @@
             <button class="btn-ghost" id="pick-none">全不选</button>
             <span class="muted mini" id="pickinfo">还没选</span>
           </div>
+          <div id="makecase" style="margin-top:12px"></div>
         </div>
 
         <div class="card">
-          <h3>算例放哪并建算例</h3>
-          <div class="ch">选择产物目录后，按按钮才会写入算例文件。</div>
+          <h3>算例放哪</h3>
+          <div class="ch">选择产物目录；上面“建算例”按钮会把选中的站点写到这里。</div>
           <div class="field">
             <label>算例根目录</label>
             <div class="browse">
@@ -199,7 +200,6 @@
               路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。
             </p>
           </div>
-          <div id="makecase" style="margin-top:12px"></div>
           <div id="cases-built" class="listbox" style="margin-top:12px"></div>
         </div>
       </div>
@@ -313,6 +313,7 @@
           <select class="select" id="var" style="max-width:260px"></select>
           <button class="btn-ghost" id="plot" disabled>画图</button>
         </div>
+        <p class="muted mini">图表缩放：在图上拖选一段横向范围可放大；双击图表恢复全范围。</p>
         <div id="charts" style="margin-top:12px"></div>
       </div>
 
@@ -332,6 +333,7 @@
           <button class="btn-ghost" id="eval-all" disabled>评估全部已跑算例</button>
         </div>
         <div id="metrics" style="margin-top:12px"></div>
+        <p class="muted mini">对比图同样支持拖选横向范围放大，双击恢复全范围。</p>
         <div id="evaluation-charts" style="margin-top:12px"></div>
         <div id="summary"></div>
       </div>

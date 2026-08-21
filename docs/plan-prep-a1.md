@@ -171,7 +171,7 @@ fn an_identity_conversion_reproduces_every_value_bit_for_bit() {
 - [ ] **Step 2: 跑，确认它因为 `identity` 不存在而失败**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo test -p colm-forcing --lib identity 2>&1 | tail -5
 ```
 
@@ -995,7 +995,7 @@ cargo test -p colm-forcing --lib convert 2>&1 | tail -6
 - [ ] **Step 5: 实测 Urban-PLUMBER 的降水真的补回来了**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo build -p colm-forcing
 U=/Users/zhongwangwei/Desktop/colm-rust/Urban-PLUMBER
 ./target/debug/forcing-convert "$U/Forcing/FI-Kumpula"*.nc /tmp/fi-kumpula.nc \
@@ -1197,7 +1197,7 @@ Urban-PLUMBER 的降水变量声明了 `_FillValue = -999`，虽然 21 个站实
 - [ ] **Step 2: 手工验一次**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo build -p colm-forcing
 P=/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s
 ./target/debug/forcing-convert \

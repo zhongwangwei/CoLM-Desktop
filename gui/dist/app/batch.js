@@ -23,10 +23,16 @@ export function editTarget() {
   return state.selected ? [state.selected.dir] : [];
 }
 
-/** 批量操作作用于谁：勾了就是勾中的，一个没勾就是全部。 */
+/** 批量操作作用于谁：勾了就是勾中的；否则只用这次建/选出来的批次。
+ *  不再默认扫整个 root —— 那里面常有上一次残留的自然站/旧算例。 */
 export function batchTarget() {
   const picked = state.cases.filter(c => state.pickedCases.has(c.dir));
-  return picked.length ? picked : state.cases;
+  if (picked.length) return picked;
+  if (state.batch.length) {
+    const want = new Set(state.batch);
+    return state.cases.filter(c => want.has(c.dir));
+  }
+  return state.selected ? [state.selected] : [];
 }
 
 /** 两个批量按钮上的字**就是它们会做的事**。
@@ -36,8 +42,8 @@ export function batchTarget() {
  *  按下去跑了九个，事后才知道。所以文字跟着勾选变。 */
 export function updateCaseBatchButtons() {
   const picked = state.cases.filter(c => state.pickedCases.has(c.dir));
-  const target = picked.length ? picked : state.cases;
-  const suffix = picked.length ? `选中的 ${picked.length} 个` : `全部 ${state.cases.length} 个`;
+  const target = batchTarget();
+  const suffix = picked.length ? `选中的 ${picked.length} 个` : `本次 ${target.length} 个`;
   const run = $('runall');
   if (run) {
     run.textContent = `运行${suffix}`;
@@ -46,7 +52,7 @@ export function updateCaseBatchButtons() {
   const ev = $('eval-all');
   if (ev) {
     const done = target.filter(c => c.has_history).length;
-    ev.textContent = picked.length ? `评估选中的 ${done} 个已跑算例` : `评估全部 ${done} 个已跑算例`;
+    ev.textContent = picked.length ? `评估选中的 ${done} 个已跑算例` : `评估本次 ${done} 个已跑算例`;
     ev.disabled = !done;
   }
 }

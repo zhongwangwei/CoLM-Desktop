@@ -52,8 +52,7 @@ pub struct CaseSpec {
 pub struct Spinup {
     /// 预热周期的长度，单位年。截止时刻 = 起始时刻 + 这么多年。
     pub years: u32,
-    /// 跑几遍。**0 与 1 都是不预热** —— CoLM 把 0 提成 1
-    /// （`CoLM.F90:313` 的 `max(n_spinupcycle,1)`），而跑一遍就是正常推进。
+    /// 跑几遍。0 表示界面主动关闭；CoLM 自己会把手写的 0 提成 1。
     pub repeat: u32,
 }
 
@@ -65,7 +64,7 @@ impl Spinup {
     };
 
     pub fn is_on(&self) -> bool {
-        self.years > 0 && self.repeat > 1
+        self.years > 0 && self.repeat > 0
     }
 }
 
@@ -101,7 +100,7 @@ pub struct Dirs {
 /// 月日秒照抄。只改年而让其余部分留在 CoLM 的默认值上，
 /// 会让截止时刻落在窗口之外，而窗口未必从 1 月 1 日开始。
 pub fn spinup_fields(start: (i32, u32, u32, u32), sp: Spinup) -> Vec<(String, Value)> {
-    // 关掉时写 year=0：`is_spinup = (ststamp < ptstamp)`（`CoLM.F90:314`），
+    // 关掉时写 year=0：`is_spinup = (ststamp < ptstamp)`（`CoLM.F90:300`），
     // 0 年早于任何真实起始时刻，判据为假。**这比 repeat=0 更可靠** ——
     // repeat 会被 `max(n,1)` 提成 1，真正决定开关的是那个比较。
     let (y, m, d, sec) = if sp.is_on() {

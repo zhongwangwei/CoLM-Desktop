@@ -120,7 +120,7 @@ $SINGLEPOI
 
 ! 2. Land TYPE classification: still a compile-time choice (see the
 !    header comment above -- N_land_classification and its lookup tables
-!    in MOD_Const_LC.F90 are `parameter`-sized differently per choice).
+!    in MOD_Const_LC.F90 are parameter-sized differently per choice).
 !    The subgrid *structure* that used to live here as LULC_IGBP_PFT/
 !    LULC_IGBP_PC is a runtime switch now (DEF_USE_LCT/DEF_USE_PFT/
 !    DEF_USE_PC, MOD_Namelist.F90) -- main/ and mksrfdata/'s PFT/PC code
@@ -177,7 +177,7 @@ $CaMa
 
 ! 7.1 CROP model: still a compile-time macro (see the header comment
 !     above -- N_PFT/N_CFT and their lookup tables in MOD_Const_PFT.F90
-!     are `parameter`-sized differently per choice). DEF_USE_CROP
+!     are parameter-sized differently per choice). DEF_USE_CROP
 !     (MOD_Namelist.F90) is a read-only reflection of this macro, not a
 !     free runtime switch.
 $CROP

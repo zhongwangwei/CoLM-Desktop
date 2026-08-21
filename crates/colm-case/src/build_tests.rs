@@ -101,22 +101,35 @@ fn spin_up_is_taken_off_the_front_of_the_window() {
         colm_namelist::Value::Int(10)
     );
 
-    // repeat = 1 是**不预热**：CoLM 的 max(n,1) 把 0 和 1 都变成跑一遍。
-    // 写成"预热一遍"会让人以为多跑了一轮，实际什么都没多跑。
-    for r in [0, 1] {
-        let mut off = cn_cng();
-        off.spinup = crate::Spinup {
-            years: 1,
-            repeat: r,
-        };
-        let all = fields(&off);
-        let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
-        assert_eq!(
-            by("DEF_simulation_time%spinup_year"),
-            Some(colm_namelist::Value::Int(0)),
-            "repeat={r} 时预热必须是关的"
-        );
-    }
+    // repeat = 0 是界面主动关闭。repeat = 1 仍会让 CoLM 把窗口开头
+    // 到 ptstamp 的一段当预热跑一遍，并且不写 history。
+    let mut off = cn_cng();
+    off.spinup = crate::Spinup {
+        years: 1,
+        repeat: 0,
+    };
+    let all = fields(&off);
+    let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
+    assert_eq!(
+        by("DEF_simulation_time%spinup_year"),
+        Some(colm_namelist::Value::Int(0))
+    );
+
+    let mut one = cn_cng();
+    one.spinup = crate::Spinup {
+        years: 1,
+        repeat: 1,
+    };
+    let all = fields(&one);
+    let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
+    assert_eq!(
+        by("DEF_simulation_time%spinup_year"),
+        Some(colm_namelist::Value::Int(2009))
+    );
+    assert_eq!(
+        by("DEF_simulation_time%spinup_repeat"),
+        Some(colm_namelist::Value::Int(1))
+    );
 }
 
 #[test]

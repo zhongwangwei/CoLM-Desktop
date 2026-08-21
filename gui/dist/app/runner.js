@@ -161,7 +161,12 @@ export async function watchRun() {
 $('runall').onclick = async () => {
   // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。
   const wanted = state.sites.filter(s => state.picked.has(s.site_file));
-  if (wanted.length) await ensureCases(wanted);
+  if (wanted.length) {
+    const made = await ensureCases(wanted);
+    state.batch = [...new Set(made.map(c => c.dir))];
+    state.pickedCases.clear();
+    for (const c of made) state.pickedCases.add(c.dir);
+  }
   const dirs = batchTarget().map(c => c.dir);
   if (!dirs.length) return;
   $('runall').disabled = true;

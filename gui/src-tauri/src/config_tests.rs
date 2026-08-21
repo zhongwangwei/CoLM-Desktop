@@ -217,6 +217,16 @@ fn invalid_wizard_field_leaves_the_case_unchanged() {
 }
 
 #[test]
+fn urban_classification_rejects_values_outside_ncar_and_lcz() {
+    let err = super::typed("DEF_URBAN_type_scheme", "-18").unwrap_err();
+    assert!(err.contains("1, 2"), "{err}");
+    assert_eq!(
+        super::typed("DEF_URBAN_type_scheme", "2").unwrap(),
+        colm_namelist::Value::Int(2)
+    );
+}
+
+#[test]
 fn fields_the_batch_disagrees_on_are_reported() {
     let dirs = batch("varies", &[NML_A, NML_B]);
     let v = super::varying_fields(dirs).unwrap();
@@ -256,6 +266,16 @@ fn spin_up_is_computed_per_case_not_shared() {
     assert_eq!(t.spinup_years, 1);
     assert_eq!(t.spinup_repeat, 10);
     // 输出从预热结束处才开始 —— 这是预热的代价，界面必须能说出来。
+    assert_eq!(t.output_start, "2003-01-01");
+}
+
+#[test]
+fn one_spinup_cycle_is_not_erased() {
+    let dirs = batch("spinup_one", &[NML_A]);
+    super::set_spinup(dirs.clone(), 1, 1).unwrap();
+    let t = super::read_timing(dirs).unwrap();
+    assert_eq!(t.spinup_years, 1);
+    assert_eq!(t.spinup_repeat, 1);
     assert_eq!(t.output_start, "2003-01-01");
 }
 

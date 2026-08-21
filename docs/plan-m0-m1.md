@@ -1,4 +1,4 @@
-# colm-desktop 里程碑 0–1 实施计划
+# CoLM-Desktop 里程碑 0–1 实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -140,7 +140,7 @@ edition = "2021"
 # 本项目在同一轮里被这个机制咬了两次（rust-version，以及一个失效的 netcdf-sys 钉子）。
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/zhongwangwei/colm-desktop"
+repository = "https://github.com/zhongwangwei/CoLM-Desktop"
 # 这是研究模型的私有提取，永不上 crates.io。
 publish = false
 
@@ -2223,7 +2223,7 @@ cp ~/Desktop/colm-rust/CoLM202X/docs/colm-desktop-plan-m0-m1.md docs/plan-m0-m1.
 - [ ] **Step 2: 写 README**
 
 ```markdown
-# colm-desktop
+# CoLM-Desktop
 
 把 CoLM202X 的 SinglePoint 模式做成跨平台桌面程序。设计见 `docs/design.md`。
 

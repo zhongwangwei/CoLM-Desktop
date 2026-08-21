@@ -71,3 +71,33 @@ fn the_generated_table_agrees_with_the_curated_one() {
         );
     }
 }
+
+#[test]
+fn vendored_source_keeps_upstream_numeric_fixes() {
+    let root = repo().join("vendor/CoLM202X");
+    let topo = std::fs::read_to_string(root.join("mksrfdata/Aggregation_TopographyFactors.F90"))
+        .expect("Aggregation_TopographyFactors.F90");
+    assert!(topo.contains("index = 2"));
+
+    let mapping = std::fs::read_to_string(root.join("share/MOD_SpatialMapping.F90"))
+        .expect("MOD_SpatialMapping.F90");
+    assert!(mapping.contains(".and.(sumdata%blk(xblk,yblk)%val /= 0.)"));
+
+    let generator = std::fs::read_to_string(root.join(".github/workflows/create_defineh.bash"))
+        .expect("create_defineh.bash");
+    let here_doc = generator
+        .split_once("cat>include/define.h<<EOF")
+        .expect("define.h heredoc")
+        .1;
+    assert!(!here_doc.contains('`'));
+}
+
+#[test]
+fn urban_classification_cannot_be_an_arbitrary_integer() {
+    assert_eq!(
+        colm_schema::find("DEF_URBAN_type_scheme")
+            .expect("DEF_URBAN_type_scheme")
+            .values,
+        &["1", "2"]
+    );
+}

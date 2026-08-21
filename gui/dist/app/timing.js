@@ -53,7 +53,7 @@ export async function renderTiming() {
     try {
       const r = await invoke('set_spinup', { dirs, years, repeat });
       state.text = r.text;
-      const what = repeat > 1 && years > 0
+      const what = repeat > 0 && years > 0
         ? `预热：重复开头 ${years} 年 ×${repeat} 遍`
         : '已关闭预热';
       status(r.written > 1 ? `${what}（${r.written} 个算例）` : what);

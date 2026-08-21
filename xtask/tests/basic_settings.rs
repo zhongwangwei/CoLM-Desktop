@@ -42,12 +42,15 @@ fn basic_settings_owns_site_selection_and_its_left_hand_substeps() {
         );
     }
     let sites = basic.find(r#"id="sites""#).expect("site list");
+    let example = basic.find(r#"id="use-example""#).expect("example button");
+    let sitedir = basic.find(r#"id="sitedir""#).expect("site directory");
     let root = basic.find(r#"id="root""#).expect("case root");
     let makecase = basic.find(r#"id="makecase""#).expect("make case");
     assert!(
-        sites < root && root < makecase,
-        "算例目录没有移到站点列表下面"
+        sites < makecase && makecase < root,
+        "建算例按钮应在站点列表下方，算例目录应作为下一栏"
     );
+    assert!(example < sitedir, "内置示例入口应在站点目录前面");
     assert!(
         !basic.contains(r#"id="basic-files-fields""#),
         "不需要的算例文件字段卡仍在"

@@ -36,7 +36,7 @@ ES module —— 本次事故里它两次报「通过」，而模块实际有致
 **每一轮验证的标准动作**（后面反复引用为「标准重启」）：
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 pkill -9 -f colm-desktop-gui 2>/dev/null; sleep 1
 (cd gui/src-tauri && cargo build 2>&1 | grep -E "^error|Finished" | tail -3)
 (cd gui/src-tauri && nohup ./target/debug/colm-desktop-gui > /tmp/gui.log 2>&1 &)
@@ -92,7 +92,7 @@ pub fn probe_log(msg: String) {
 - [ ] **步骤 3：静态检查必须过**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo run -p xtask -- check-gui
 ```
 
@@ -110,7 +110,7 @@ Task 2 加上调用之后 `called` 那个数字会 +1。）
 - [ ] **步骤 4：编译**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/src-tauri && cargo build 2>&1 | tail -3
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/src-tauri && cargo build 2>&1 | tail -3
 ```
 
 预期：`Finished`，无 error。
@@ -118,7 +118,7 @@ cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/src-tauri && cargo build 2>&
 - [ ] **步骤 5：提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add gui/src-tauri/src/config.rs gui/src-tauri/src/lib.rs
 git commit -m "GUI 加一条 stderr 诊断通道 probe_log
 
@@ -180,7 +180,7 @@ strings 又因为 Tauri 压缩嵌入资源而搜不到任何前端字符串 —�
 - [ ] **步骤 2：静态检查仍要过**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo run -p xtask -- check-gui
 ```
 
@@ -211,7 +211,7 @@ colm-desktop[probe]: HTML-PARSED fp=A1
 - [ ] **步骤 5：提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add gui/dist/index.html
 git commit -m "前端接上诊断探针，普通 script 排在 module 之前
 
@@ -275,7 +275,7 @@ if (gateEl) {
 
 ```js
 import { JSDOM } from 'jsdom';   // 没有 jsdom 就用下面的手搓 mock
-const mod = await import('/Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/dist/app/domain.js');
+const mod = await import('/Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/dist/app/domain.js');
 console.log('domain.js 加载 OK', Object.keys(mod));
 ```
 
@@ -288,7 +288,7 @@ globalThis.document = {
   createElement: () => ({ classList: { add(){} }, appendChild(){}, setAttribute(){}, style: {} }),
   addEventListener(){},
 };
-const mod = await import('/Users/zhongwangwei/Desktop/Github/CoLM-Rust/gui/dist/app/domain.js');
+const mod = await import('/Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/dist/app/domain.js');
 console.log('加载 OK');
 ```
 
@@ -297,7 +297,7 @@ console.log('加载 OK');
 - [ ] **步骤 5：提交打点**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add gui/dist/app/main.js
 git commit -m "启动路径打点，另加一个 hidden 属性的 MutationObserver
 
@@ -334,7 +334,7 @@ git commit -m "启动路径打点，另加一个 hidden 属性的 MutationObserv
 - [ ] **步骤 1：先证伪 —— 确认这不是缓存问题**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 rm -rf ~/Library/Caches/edu.sysu.colm.desktop ~/Library/WebKit/edu.sysu.colm.desktop
 ```
 再做标准重启。仍无 `HTML-PARSED` 才继续（WKWebView 缓存已在本次事故中排除过一次，
@@ -358,7 +358,7 @@ fn main() {
 - [ ] **步骤 3：验证它真的生效**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 sed -i '' 's/fp=A1/fp=A2/' gui/dist/index.html
 cd gui/src-tauri && cargo build 2>&1 | grep -E "Compiling|Finished"
 ```
@@ -370,7 +370,7 @@ cd gui/src-tauri && cargo build 2>&1 | grep -E "Compiling|Finished"
 - [ ] **步骤 4：如果仍然不行，用绝对判据看嵌入内容**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 rm -rf gui/src-tauri/target/debug/build/colm-desktop-gui-*
 cd gui/src-tauri && cargo build 2>&1 | grep -E "Compiling|Finished"
 ```
@@ -379,7 +379,7 @@ cd gui/src-tauri && cargo build 2>&1 | grep -E "Compiling|Finished"
 - [ ] **步骤 5：提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add gui/src-tauri/build.rs
 git commit -m "build.rs 补 rerun-if-changed=../dist
 
@@ -464,7 +464,7 @@ new MutationObserver(() => {
 - [ ] **步骤 3：全套检查**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 cargo run -p xtask -- check-gui
 cd gui/src-tauri && cargo test 2>&1 | tail -5
 ```
@@ -475,7 +475,7 @@ cd gui/src-tauri && cargo test 2>&1 | tail -5
 - [ ] **步骤 4：标准重启，确认门还在，提交**
 
 ```bash
-cd /Users/zhongwangwei/Desktop/Github/CoLM-Rust
+cd /Users/zhongwangwei/Desktop/Github/CoLM-Desktop
 git add -A gui/
 git commit -m "撤掉一次性打点，保留 window.onerror 到 stderr 的常驻通道
 

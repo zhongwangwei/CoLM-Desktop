@@ -144,7 +144,7 @@ serde_json = "1"
 ```
 
 顺带：`repository` 字段还写着 `.../colm-desktop`，而仓库已经是
-`https://github.com/zhongwangwei/colm-rust`。一起改掉。
+`https://github.com/zhongwangwei/CoLM-Desktop`。
 
 - [ ] **Step 2: `crates/colm-kernel/Cargo.toml` 的 `[dependencies]`**
 

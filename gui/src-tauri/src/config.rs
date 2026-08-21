@@ -389,6 +389,13 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
     let Some(f) = colm_schema::find(path) else {
         return Ok(Value::Str(s.to_string()));
     };
+    let bare = s.trim_matches(|c| c == '\'' || c == '"');
+    if !f.values.is_empty() && !f.values.iter().any(|v| v.eq_ignore_ascii_case(bare)) {
+        return Err(format!(
+            "{path} only accepts {}; {raw:?} is invalid",
+            f.values.join(", ")
+        ));
+    }
     match f.kind {
         K::Logical => match s.to_ascii_lowercase().trim_matches('.') {
             "true" | "t" => Ok(Value::Bool(true)),
@@ -412,7 +419,6 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
             })
         }
         K::Character { len } => {
-            let bare = s.trim_matches(|c| c == '\'' || c == '"');
             if bare.len() > len {
                 return Err(format!(
                     "{path} holds character(len={len}); {:?} is {} characters",
@@ -634,9 +640,11 @@ fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, Strin
     );
     let repeat = int("DEF_simulation_time%spinup_repeat").max(0) as u32;
     let py = int("DEF_simulation_time%spinup_year");
-    // 预热开着的判据与 CoLM 一样：截止时刻晚于起始时刻（`CoLM.F90:314`）。
-    // 光看 repeat 会把 `year = 0` 那种关法读成开着。
-    let on = py > sy && repeat > 1;
+    // 预热开着的判据与 CoLM 一样：截止时刻晚于起始时刻（`CoLM.F90:300`）。
+    // `spinup_repeat = 1` 仍会把 start→spinup 截止这段当预热跑一遍且不写 history；
+    // 手写 0 也会被 CoLM 提成 1。界面关闭预热靠写 `spinup_year = 0`。
+    let on = py > sy;
+    let repeat = if on { repeat.max(1) } else { repeat };
     let ymd = |y: i64, m: i64, d: i64| format!("{y:04}-{m:02}-{d:02}");
     let stamp = |y: i64, m: i64, d: i64, sec: i64| {
         // Howard Hinnant 的 days_from_civil。这里不能依赖 colm-forcing：那会把

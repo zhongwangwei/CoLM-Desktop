@@ -35,10 +35,7 @@ use anyhow::Result;
 /// **仍然是**编译期宏（N_PFT/N_CFT、N_land_classification 这类
 /// `parameter` 数组尺寸不同，见 docs/plan-macro-runtime.md）——它们该有
 /// 的 `requires` 由下面的通用 `#ifdef` 扫描直接抓到，不需要目录级近似。
-const SUBSYSTEMS: &[(&str, &str)] = &[
-    ("main/DA/", "DataAssimilation"),
-    ("CaMa/", "CaMa_Flood"),
-];
+const SUBSYSTEMS: &[(&str, &str)] = &[("main/DA/", "DataAssimilation"), ("CaMa/", "CaMa_Flood")];
 
 /// 文件名里带这些词的，归到对应的宏。目录分不出来时用它。
 ///
@@ -64,6 +61,10 @@ const BY_NAME: &[(&str, &str)] = &[("Catch", "CATCHMENT")];
 /// 里彻底消失（create_defineh.bash 现在无条件 `#define` 它）。
 /// `DEF_URBAN_type_scheme` 现在在每个内核下都可设，不再需要人工表兜底。
 pub const CURATED: &[(&str, &str, &str, &str)] = &[];
+
+/// 数值枚举没有字符串引号，通用扫描器不会把任意比较都误判成完整取值域。
+/// 这一项源码只接受 1（NCAR）或 2（LCZ）。
+const CURATED_VALUES: &[(&str, &[&str])] = &[("DEF_URBAN_type_scheme", &["1", "2"])];
 
 /// 扫出来的两张表。
 #[derive(Default)]
@@ -155,6 +156,12 @@ pub fn scan(root: &Path) -> Result<Usage> {
         requires
             .entry((*name).to_string())
             .or_insert_with(|| vec![(*macro_).to_string()]);
+    }
+    for (name, allowed) in CURATED_VALUES {
+        values
+            .entry((*name).to_string())
+            .or_default()
+            .extend(allowed.iter().map(|v| (*v).to_string()));
     }
 
     Ok(Usage {

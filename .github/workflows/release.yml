@@ -33,8 +33,6 @@ jobs:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -155,5 +153,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/**/*
-          draft: true          # 人过一眼再发
+          draft: false
           generate_release_notes: true

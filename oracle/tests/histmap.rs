@@ -110,7 +110,10 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
     }
     // ……与 URBAN_MODEL 的城市能量通量变量。
     for n in ["t_roof", "fsenroof", "fhac"] {
-        assert!(over.contains(&n), "{n} should be over-predicted (URBAN_MODEL off)");
+        assert!(
+            over.contains(&n),
+            "{n} should be over-predicted (URBAN_MODEL off)"
+        );
         assert_eq!(runtime_of(n), Some("DEF_URBAN_RUN"));
     }
 }

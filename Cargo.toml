@@ -18,7 +18,7 @@ edition = "2021"
 # 本项目在同一轮里被这个机制咬了两次（rust-version，以及一个失效的 netcdf-sys 钉子）。
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/zhongwangwei/colm-rust"
+repository = "https://github.com/zhongwangwei/CoLM-Desktop"
 # 这是研究模型的私有提取，永不上 crates.io。
 publish = false
 
