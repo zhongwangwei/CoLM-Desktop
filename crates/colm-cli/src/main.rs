@@ -732,6 +732,13 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         Some(s) => parse_date(&s)?,
         None => (summary.start.year, summary.start.month, summary.start.day),
     };
+    let forc_start_sec =
+        summary.start.hour * 3600 + summary.start.minute * 60 + summary.start.second;
+    let start_sec = if start == (summary.start.year, summary.start.month, summary.start.day) {
+        forc_start_sec
+    } else {
+        0
+    };
     let e = summary.end();
     let end = match o.get("--end") {
         Some(s) => parse_date(&s)?,
@@ -748,10 +755,15 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         86400
     };
     check_window(
-        start,
-        end,
-        (summary.start.year, summary.start.month, summary.start.day),
-        (e.year, e.month, e.day),
+        (start.0, start.1, start.2, start_sec),
+        (end.0, end.1, end.2, end_sec),
+        (
+            summary.start.year,
+            summary.start.month,
+            summary.start.day,
+            forc_start_sec,
+        ),
+        (e.year, e.month, e.day, forc_end_sec),
     )?;
     // 预热。默认重复第一年 10 遍 —— 陆面模式的土壤温湿与（开了 BGC 时的）
     // 碳库是慢变量，直接从初始场跑出来的头一段并不代表这个站点的气候态。
@@ -845,6 +857,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             start_year: start.0,
             start_month: start.1,
             start_day: start.2,
+            start_sec,
             end_year: end.0,
             end_month: end.1,
             end_day: end.2,
@@ -888,6 +901,16 @@ fn ymd((y, m, d): (i32, u32, u32)) -> String {
     format!("{y}-{m:02}-{d:02}")
 }
 
+fn ymds((y, m, d, sec): (i32, u32, u32, u32)) -> String {
+    format!(
+        "{} {:02}:{:02}:{:02}",
+        ymd((y, m, d)),
+        sec / 3600,
+        sec / 60 % 60,
+        sec % 60
+    )
+}
+
 /// 要跑的窗口必须落在强迫场的覆盖范围之内。
 ///
 /// **越界要当场说，不能让人等一次运行再看日志。** 越界时 CoLM 是跑到
@@ -897,32 +920,32 @@ fn ymd((y, m, d): (i32, u32, u32)) -> String {
 /// 原先只校验 `--end`。起点没人管，于是 `--start` 早于强迫场就一路
 /// 放行到 CoLM 里去了 —— 同一个理由，漏了一半。
 fn check_window(
-    start: (i32, u32, u32),
-    end: (i32, u32, u32),
-    forcing_start: (i32, u32, u32),
-    forcing_end: (i32, u32, u32),
+    start: (i32, u32, u32, u32),
+    end: (i32, u32, u32, u32),
+    forcing_start: (i32, u32, u32, u32),
+    forcing_end: (i32, u32, u32, u32),
 ) -> Result<()> {
     // 这条与强迫场无关，纯粹是窗口本身不成立。不拦的话建出来的算例
     // 窗口是空的，而空输出与「跑失败了」在界面上长得一样。
     if start > end {
         bail!(
             "--start {} 晚于 --end {}：这个窗口是空的",
-            ymd(start),
-            ymd(end)
+            ymds(start),
+            ymds(end)
         );
     }
     if start < forcing_start {
         bail!(
             "--start {} 早于强迫场的起点（{} 起）",
-            ymd(start),
-            ymd(forcing_start)
+            ymds(start),
+            ymds(forcing_start)
         );
     }
     if end > forcing_end {
         bail!(
             "--end {} 超出强迫场的覆盖范围（到 {}）",
-            ymd(end),
-            ymd(forcing_end)
+            ymds(end),
+            ymds(forcing_end)
         );
     }
     Ok(())

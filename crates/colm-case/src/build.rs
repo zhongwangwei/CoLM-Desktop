@@ -74,6 +74,8 @@ pub struct Window {
     pub start_year: i32,
     pub start_month: u32,
     pub start_day: u32,
+    /// 起始当天的秒数，必须跟强迫场第一条记录一致或更晚。
+    pub start_sec: u32,
     pub end_year: i32,
     pub end_month: u32,
     pub end_day: u32,
@@ -95,17 +97,17 @@ pub struct Dirs {
 
 /// 预热那五项，按写进 namelist 的顺序。
 ///
-/// `start` 是模拟窗口的起始年月日 —— 预热截止时刻是**它加上若干年**，
-/// 月日照抄。只改年而让月日留在 CoLM 的默认值（1 月 1 日）上，
+/// `start` 是模拟窗口的起始时刻 —— 预热截止时刻是**它加上若干年**，
+/// 月日秒照抄。只改年而让其余部分留在 CoLM 的默认值上，
 /// 会让截止时刻落在窗口之外，而窗口未必从 1 月 1 日开始。
-pub fn spinup_fields(start: (i32, u32, u32), sp: Spinup) -> Vec<(String, Value)> {
+pub fn spinup_fields(start: (i32, u32, u32, u32), sp: Spinup) -> Vec<(String, Value)> {
     // 关掉时写 year=0：`is_spinup = (ststamp < ptstamp)`（`CoLM.F90:314`），
     // 0 年早于任何真实起始时刻，判据为假。**这比 repeat=0 更可靠** ——
     // repeat 会被 `max(n,1)` 提成 1，真正决定开关的是那个比较。
-    let (y, m, d) = if sp.is_on() {
-        (start.0 + sp.years as i32, start.1, start.2)
+    let (y, m, d, sec) = if sp.is_on() {
+        (start.0 + sp.years as i32, start.1, start.2, start.3)
     } else {
-        (0, 1, 1)
+        (0, 1, 1, 0)
     };
     vec![
         (
@@ -120,8 +122,10 @@ pub fn spinup_fields(start: (i32, u32, u32), sp: Spinup) -> Vec<(String, Value)>
             "DEF_simulation_time%spinup_day".into(),
             Value::Int(d as i64),
         ),
-        // 起始秒固定 0（见 start_sec），预热截止也跟着 0。
-        ("DEF_simulation_time%spinup_sec".into(), Value::Int(0)),
+        (
+            "DEF_simulation_time%spinup_sec".into(),
+            Value::Int(sec as i64),
+        ),
         (
             "DEF_simulation_time%spinup_repeat".into(),
             Value::Int(if sp.is_on() { sp.repeat as i64 } else { 0 }),
@@ -161,7 +165,10 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
             "DEF_simulation_time%start_day".into(),
             Value::Int(s.window.start_day as i64),
         ),
-        ("DEF_simulation_time%start_sec".into(), Value::Int(0)),
+        (
+            "DEF_simulation_time%start_sec".into(),
+            Value::Int(s.window.start_sec as i64),
+        ),
         (
             "DEF_simulation_time%end_year".into(),
             Value::Int(s.window.end_year as i64),
@@ -187,6 +194,7 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
             s.window.start_year,
             s.window.start_month,
             s.window.start_day,
+            s.window.start_sec,
         ),
         s.spinup,
     ));

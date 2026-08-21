@@ -83,6 +83,7 @@ fn a_generated_case_reproduces_the_golden_history() {
             start_year: 2008,
             start_month: 1,
             start_day: 1,
+            start_sec: 0,
             end_year: 2008,
             end_month: 1,
             end_day: 11,

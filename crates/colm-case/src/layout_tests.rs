@@ -17,6 +17,7 @@ fn hourly_site() -> CaseSpec {
             start_year: 2005,
             start_month: 6,
             start_day: 1,
+            start_sec: 0,
             end_year: 2005,
             end_month: 6,
             end_day: 11,

@@ -670,6 +670,7 @@ pub fn set_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWri
             int("DEF_simulation_time%start_year") as i32,
             int("DEF_simulation_time%start_month") as u32,
             int("DEF_simulation_time%start_day") as u32,
+            int("DEF_simulation_time%start_sec") as u32,
         );
         for (path, v) in colm_case::spinup_fields(start, colm_case::Spinup { years, repeat }) {
             put(&mut doc, &path, v).map_err(|e| format!("{d}: {e}"))?;

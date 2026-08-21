@@ -11,6 +11,7 @@ fn cn_cng() -> CaseSpec {
             start_year: 2008,
             start_month: 1,
             start_day: 1,
+            start_sec: 0,
             end_year: 2008,
             end_month: 1,
             end_day: 11,
@@ -28,6 +29,23 @@ fn cn_cng() -> CaseSpec {
             forcing_namelist: "/w/forcing.nml".into(),
         },
     }
+}
+
+#[test]
+fn the_first_day_starts_where_the_forcing_starts() {
+    let mut s = cn_cng();
+    s.window.start_sec = 23 * 3600 + 30 * 60;
+    s.spinup = Spinup {
+        years: 1,
+        repeat: 10,
+    };
+    let all = fields(&s);
+    let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
+    assert_eq!(by("DEF_simulation_time%start_sec"), Some(Value::Int(84600)));
+    assert_eq!(
+        by("DEF_simulation_time%spinup_sec"),
+        Some(Value::Int(84600))
+    );
 }
 
 #[test]
