@@ -191,6 +191,9 @@ td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border-soft); vertic
 tr:last-child td { border-bottom: 0; }
 td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 td:first-child { overflow-wrap: anywhere; }
+.parameter-table td:first-child { width: 44%; font-weight: 600; cursor: help; }
+.parameter-table td:nth-child(2) { width: 56%; }
+.parameter-table .input, .parameter-table .select { min-width: 0; }
 .warn { color: var(--warn); }
 .fail { color: var(--fail); }
 

@@ -97,6 +97,9 @@ if (card('LULCC').getAttribute('aria-disabled') !== 'true') {
 }
 next();
 if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('page 5 missing');
+if (!card('SrfdataDiag') || card('SrfdataDiag').getAttribute('aria-disabled') !== 'true') {
+  throw new Error('SinglePoint surface-data diagnostics must stay visible but disabled');
+}
 choose('RangeCheck');
 next();
 

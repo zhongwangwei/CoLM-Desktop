@@ -109,12 +109,20 @@ fn the_spin_up_card_says_what_spin_up_costs() {
     // **这一句必须在界面上**：扣掉的那段在结果里什么痕迹都不留。
     let t = js("timing.js");
     assert!(t.contains("MOD_Hist.F90:235"), "没说出预热为什么不出输出");
-    assert!(t.contains("不在结果里"), "没说出预热是从窗口头上扣的");
-    // 时间范围是强迫场决定的，不该让人填。
+    assert!(t.contains("预热期不写输出"), "没说清楚预热期没有输出");
+    assert!(t.contains("每轮预热年数") && t.contains("重复轮数"));
+    assert!(!t.contains('×'), "预热设置仍用乘号表达，含义不直观");
+    assert!(
+        !t.contains("<table>")
+            && !t.contains("t.output_start")
+            && !t.contains("t.start")
+            && !t.contains("t.end"),
+        "预热分栏仍展示用户不要的时间范围"
+    );
     let html = std::fs::read_to_string(root().join("gui/dist/index.html")).expect("index.html");
     assert!(
         html.contains(r#"data-flow-pane="basic-timing""#) && html.contains(r#"id="timing""#),
-        "基本设定没有时间与预热子步骤"
+        "基本设定没有预热子步骤"
     );
 }
 

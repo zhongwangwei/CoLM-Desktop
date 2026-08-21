@@ -38,6 +38,10 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
     {
         return Some("输出与重启");
     }
+    // LAI feedback is a prognostic BGC process, not a surface-data source.
+    if n == "DEF_USE_LAIFEEDBACK" {
+        return Some("生态与生地化");
+    }
     if group == Some("nl_colm_forcing")
         || has(&[
             "FORCING_INTERP",
@@ -234,13 +238,25 @@ pub struct Field {
     /// 实测 6 个，其中 `DEF_dir_history` 在 `MOD_Namelist.F90:1406` 被无条件覆盖。
     /// 界面该把它们显示成只读的派生值：给一个改了没用的输入框比不显示更糟。
     pub derived: bool,
-    /// 合法取值，非空时界面给下拉框而不是文本框。实测 12 个字段有。
+    /// 合法取值，非空时界面给下拉框而不是文本框。当前 30 个字段有。
     pub values: &'static [&'static str],
     /// 需要哪些编译期宏。与所选内核 `manifest.json` 的 `macros` 求交，
     /// 交不上就说明这个字段在当前内核下**根本没用**。实测 68 个字段有依赖。
     pub requires: &'static [&'static str],
     /// 从 CoLM 源码字段名与 namelist 组推导的功能分组。
     pub section: &'static str,
+}
+
+fn default_literal(value: colm_schema::Default) -> String {
+    match value {
+        colm_schema::Default::Logical(value) => {
+            if value { ".true." } else { ".false." }.to_string()
+        }
+        colm_schema::Default::Integer(value) => value.to_string(),
+        colm_schema::Default::Real(value)
+        | colm_schema::Default::Str(value)
+        | colm_schema::Default::Array(value) => value.to_string(),
+    }
 }
 
 #[tauri::command]
@@ -250,7 +266,10 @@ pub fn describe_fields() -> Vec<Field> {
         .map(|f| Field {
             name: f.name,
             kind: format!("{:?}", f.kind),
-            default: format!("{:?}", f.default),
+            // 前端会把未显式设置的字段默认值直接放进控件。Debug 文本
+            // `Integer(3)` / `Logical(true)` 不是 Fortran 值，会生成无法保存的
+            // 数字框或非法选项；必须传可直接写回 namelist 的字面量。
+            default: default_literal(f.default),
             doc: f.doc,
             group: f.group,
             derived: f.group.is_none(),
@@ -318,6 +337,584 @@ fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeS
         Some("网格与并行") => !have.contains("SinglePoint"),
         _ => true,
     }
+}
+
+/// 一个字段在当前算例里的交互状态。
+///
+/// `irrelevant_fields` 只回答编译期问题；这里把内核宏与 case.nml 当前值组合起来，
+/// 避免前端各处分散维护一套迟早会漂移的依赖关系。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldMode {
+    Editable,
+    Disabled,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldState {
+    pub name: String,
+    pub mode: FieldMode,
+    pub reason: Option<&'static str>,
+    /// 非空时覆盖 schema 的取值集合。用于表达运行时互斥和 SinglePoint
+    /// 不支持的枚举值，而不是等 CoLM 启动以后再纠正。
+    pub allowed_values: Vec<&'static str>,
+    /// 批量中至少两个算例对这个字段的状态不同。前端仍按“任一算例有效就显示”
+    /// 的安全方向处理，但必须明确警告，不能让代表算例掩盖差异。
+    pub mixed: bool,
+}
+
+struct VisibilityContext<'a> {
+    doc: &'a colm_namelist::Document,
+    have: &'a std::collections::BTreeSet<&'a str>,
+    single: bool,
+    usgs: bool,
+    lct: bool,
+    pft: bool,
+    pc: bool,
+    vg: bool,
+    bgc: bool,
+    crop: bool,
+    urban: bool,
+    lulcc: bool,
+    tracer: bool,
+    site_landtype: i64,
+    soil_init: bool,
+    snow_init: bool,
+    cn_init: bool,
+    water_table_init: bool,
+    downscale: bool,
+    downscale_simple: bool,
+    site_lai: bool,
+    lai_feedback: bool,
+    lai_change_yearly: bool,
+    soil_reflectance_scheme: i64,
+    runoff: i64,
+    snicar: bool,
+    aerosol_readin: bool,
+    ozone_stress: bool,
+    interception: i64,
+    medlyn: bool,
+    wuest: bool,
+}
+
+fn logical(doc: &colm_namelist::Document, name: &str) -> bool {
+    match doc.get(name) {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        _ => matches!(
+            colm_schema::find(name).map(|field| field.default),
+            Some(colm_schema::Default::Logical(true))
+        ),
+    }
+}
+
+fn integer(doc: &colm_namelist::Document, name: &str) -> i64 {
+    match doc.get(name) {
+        Some(colm_namelist::Value::Int(value)) => *value,
+        _ => match colm_schema::find(name).map(|field| field.default) {
+            Some(colm_schema::Default::Integer(value)) => value,
+            _ => 0,
+        },
+    }
+}
+
+impl<'a> VisibilityContext<'a> {
+    fn new(
+        doc: &'a colm_namelist::Document,
+        have: &'a std::collections::BTreeSet<&'a str>,
+    ) -> Self {
+        Self {
+            doc,
+            have,
+            single: have.contains("SinglePoint"),
+            usgs: have.contains("LULC_USGS"),
+            lct: logical(doc, "DEF_USE_LCT"),
+            pft: logical(doc, "DEF_USE_PFT"),
+            pc: logical(doc, "DEF_USE_PC"),
+            vg: !logical(doc, "DEF_USE_Campbell_SOIL_MODEL"),
+            bgc: logical(doc, "DEF_USE_BGC"),
+            // DEF_USE_CROP 是编译期数组尺寸选择的只读反映，不接受 case.nml
+            // 里的伪开关；manifest 是唯一可信来源。
+            crop: have.contains("CROP"),
+            urban: logical(doc, "DEF_URBAN_RUN"),
+            lulcc: logical(doc, "DEF_USE_LULCC"),
+            tracer: logical(doc, "DEF_USE_TRACER"),
+            site_landtype: integer(doc, "SITE_landtype"),
+            soil_init: logical(doc, "DEF_USE_SoilInit"),
+            snow_init: logical(doc, "DEF_USE_SnowInit"),
+            cn_init: logical(doc, "DEF_USE_CN_INIT"),
+            water_table_init: logical(doc, "DEF_USE_WaterTableInit"),
+            downscale: logical(doc, "DEF_USE_Forcing_Downscaling"),
+            downscale_simple: logical(doc, "DEF_USE_Forcing_Downscaling_Simple"),
+            site_lai: logical(doc, "USE_SITE_LAI"),
+            lai_feedback: logical(doc, "DEF_USE_LAIFEEDBACK"),
+            lai_change_yearly: logical(doc, "DEF_LAI_CHANGE_YEARLY"),
+            soil_reflectance_scheme: integer(doc, "DEF_SOIL_REFL_SCHEME"),
+            runoff: integer(doc, "DEF_Runoff_SCHEME"),
+            snicar: logical(doc, "DEF_USE_SNICAR"),
+            aerosol_readin: logical(doc, "DEF_Aerosol_Readin"),
+            ozone_stress: logical(doc, "DEF_USE_OZONESTRESS"),
+            interception: integer(doc, "DEF_Interception_scheme"),
+            medlyn: logical(doc, "DEF_USE_MEDLYNST"),
+            wuest: logical(doc, "DEF_USE_WUEST"),
+        }
+    }
+
+    fn waterbody(&self) -> bool {
+        self.site_landtype == if self.usgs { 16 } else { 17 }
+    }
+
+    fn wetland(&self) -> bool {
+        self.site_landtype == if self.usgs { 17 } else { 11 }
+    }
+
+    fn cropland(&self) -> bool {
+        self.site_landtype == if self.usgs { 7 } else { 12 }
+    }
+
+    fn urban_land(&self) -> bool {
+        self.site_landtype == if self.usgs { 1 } else { 13 }
+    }
+
+    fn glacier(&self) -> bool {
+        self.site_landtype == if self.usgs { 24 } else { 15 }
+    }
+
+    fn natural_pft_land(&self) -> bool {
+        !self.waterbody()
+            && !self.wetland()
+            && !self.urban_land()
+            && !self.glacier()
+            && !(self.crop && self.cropland())
+    }
+
+    fn biological_land(&self) -> bool {
+        self.natural_pft_land() || (self.crop && self.cropland())
+    }
+}
+
+fn hidden(reason: &'static str) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
+    (FieldMode::Hidden, Some(reason), Vec::new())
+}
+
+fn field_runtime_state(
+    field: &colm_schema::Field,
+    c: &VisibilityContext<'_>,
+) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
+    let name = field.name;
+    let one_of = |names: &[&str]| names.contains(&name);
+
+    if !field_is_relevant(field, c.have) {
+        return hidden("当前内核未编入这个功能");
+    }
+
+    if name == "DEF_URBAN_geom_data" {
+        return hidden("CoLM 当前只读取并广播此字段，没有任何计算路径使用它");
+    }
+
+    // SinglePoint 在读写完单点 surface data 后直接返回；这些字段只服务于
+    // 区域聚合、分块或区域历史输出，继续展示会制造“配置已生效”的假象。
+    if c.single
+        && one_of(&[
+            "USE_srfdata_from_larger_region",
+            "DEF_dir_existing_srfdata",
+            "USE_srfdata_from_3D_gridded_data",
+            "DEF_SOLO_PFT",
+            "DEF_FAST_PC",
+            "DEF_SUBGRID_SCHEME",
+            "DEF_LANDONLY",
+            "DEF_USE_DOMINANT_PATCHTYPE",
+            "DEF_USE_SOILPAR_UPS_FIT",
+            "USE_zip_for_aggregation",
+            "DEF_Srfdata_CompressLevel",
+            "DEF_Forcing_Interp_Method",
+            "DEF_TOPMOD_method",
+            "DEF_HISTORY_IN_VECTOR",
+            "DEF_HIST_grid_as_forcing",
+            "DEF_HIST_lon_res",
+            "DEF_HIST_lat_res",
+            "DEF_HIST_mode",
+            "DEF_HIST_WriteBack",
+            "DEF_URBAN_ONLY",
+            "DEF_USE_SrfdataDiag",
+        ])
+    {
+        return hidden("SinglePoint 执行路径不会使用这个字段");
+    }
+    if c.single && name == "DEF_HIST_CompressLevel" && !c.tracer {
+        return hidden("SinglePoint 普通历史文件不使用此压缩设置");
+    }
+
+    if one_of(&[
+        "DEF_HighResSoil",
+        "DEF_HighResVeg",
+        "DEF_PROSPECT",
+        "DEF_HighResUrban_albedo",
+    ]) && !c.have.contains("HYPERSPECTRAL")
+    {
+        return hidden("当前内核未启用 HYPERSPECTRAL");
+    }
+    if name == "DEF_HighResUrban_albedo" && !c.urban {
+        return hidden("仅城市高光谱模式使用");
+    }
+
+    // 站点身份在建例时逐站点写入。批量参数页若允许修改，会把多个站点的
+    // 文件、坐标或地类悄悄统一成同一个值，因此 SinglePoint 一律不展示。
+    // 自然站的地类来自站点 NetCDF 的 IGBP_classification；城市站固定为 13。
+    if c.single
+        && one_of(&[
+            "SITE_fsitedata",
+            "SITE_lon_location",
+            "SITE_lat_location",
+            "SITE_landtype",
+            "USE_SITE_landtype",
+        ])
+    {
+        return hidden("由选择站点并建算例按站点自动确定");
+    }
+    // 其余站点数据字段跟随实际分类。湖泊、湿地、作物和 PFT 比例只对
+    // 对应地表有意义。
+    if name == "USE_SITE_pctpfts" && (!(c.pft || c.pc) || !c.natural_pft_land()) {
+        return hidden("仅自然地表的 PFT/PC 次网格使用");
+    }
+    if name == "USE_SITE_pctcrop" && !(c.crop && c.cropland()) {
+        return hidden("仅 CROP 内核的作物地表使用");
+    }
+    if name == "USE_SITE_lakedepth" && !c.waterbody() {
+        return hidden("仅水体站点使用");
+    }
+    if name == "USE_SITE_dbedrock" && !logical(c.doc, "DEF_USE_BEDROCK") {
+        return hidden("需要先启用基岩过程");
+    }
+
+    if name == "DEF_PC_CROP_SPLIT" && (!c.pc || (c.single && !c.biological_land())) {
+        return hidden("仅 PC 次网格使用");
+    }
+    // 单点站点优先读取 site.nc 里的 LAI；这时原始 LAI 数据的年份与时间分辨率
+    // 不参与计算。关掉 USE_SITE_LAI 后，才显示对应的回退数据设置。
+    if c.single
+        && (c.site_lai || c.lai_feedback)
+        && one_of(&[
+            "DEF_LC_YEAR",
+            "DEF_LAI_START_YEAR",
+            "DEF_LAI_END_YEAR",
+            "DEF_LAI_MONTHLY",
+            "DEF_LAI_CHANGE_YEARLY",
+        ])
+    {
+        return hidden(if c.lai_feedback {
+            "LAI 由 BGC 叶碳反馈计算"
+        } else {
+            "当前按站点文件读取 LAI"
+        });
+    }
+    if one_of(&["DEF_LAI_START_YEAR", "DEF_LAI_END_YEAR"]) && !c.lai_change_yearly {
+        return hidden("需要先启用叶面积指数逐年变化");
+    }
+    if c.single && name == "DEF_LC_YEAR" && c.lai_change_yearly {
+        return hidden("逐年 LAI 使用模拟年份，不使用单一地表数据年份");
+    }
+    if name == "DEF_LAI_MONTHLY" && (c.pft || c.pc || c.lulcc || c.urban) {
+        return hidden("当前次网格会自动使用月尺度 LAI");
+    }
+    if name == "DEF_USE_LAIFEEDBACK" && !c.bgc {
+        return hidden("需要 BGC");
+    }
+    if name == "DEF_LULCC_SCHEME" && !c.lulcc {
+        return hidden("需要先启用 LULCC");
+    }
+    if name == "USE_SITE_soilreflectance" && c.soil_reflectance_scheme != 2 {
+        return hidden("当前方案按地表覆盖类型估算土壤反照率");
+    }
+
+    // 初始场文件是父开关的子项。SoilInit 同时打开时，CoLM 明确忽略独立的
+    // water-table 文件；CN 初始化则只在 BGC 下存在。
+    if name == "DEF_file_SoilInit" && !c.soil_init {
+        return hidden("需要先启用土壤初始场");
+    }
+    if name == "DEF_file_SnowInit" && !c.snow_init {
+        return hidden("需要先启用积雪初始场");
+    }
+    if one_of(&["DEF_USE_CN_INIT", "DEF_file_cn_init"]) && !c.bgc {
+        return hidden("需要 BGC");
+    }
+    if name == "DEF_file_cn_init" && !c.cn_init {
+        return hidden("需要先启用 CN 初始场");
+    }
+    if name == "DEF_file_WaterTable" && (!c.water_table_init || c.soil_init) {
+        return hidden("仅独立地下水位初始化使用");
+    }
+    if name == "DEF_USE_WaterTableInit" && c.soil_init {
+        return hidden("土壤初始场已经包含地下水位初值");
+    }
+
+    // 完整与简单降尺度共用数组，不能同时开启。子项关闭时不显示；降水方案
+    // III 的 MPI/Python 分支被 #ifndef SinglePoint 包围。
+    if name == "DEF_DS_HiresTopographyDataDir" && !c.downscale {
+        return hidden("仅完整地形强迫降尺度需要外部高分辨率地形目录");
+    }
+    if one_of(&[
+        "DEF_DS_precipitation_adjust_scheme",
+        "DEF_DS_longwave_adjust_scheme",
+    ]) && !(c.downscale || c.downscale_simple)
+    {
+        return hidden("需要先选择一种强迫场降尺度模式");
+    }
+    if name == "DEF_USE_Forcing_Downscaling" && c.downscale_simple {
+        return (
+            FieldMode::Editable,
+            Some("简单降尺度已开启；先关闭它才能开启完整降尺度"),
+            vec![".false."],
+        );
+    }
+    if name == "DEF_USE_Forcing_Downscaling_Simple" && c.downscale {
+        return (
+            FieldMode::Editable,
+            Some("完整降尺度已开启；先关闭它才能开启简单降尺度"),
+            vec![".false."],
+        );
+    }
+    if name == "DEF_DS_precipitation_adjust_scheme" && c.single {
+        return (FieldMode::Editable, None, vec!["I", "II"]);
+    }
+    // 站点工作流生成的 forcing.nml 固定使用 POINT 数据集。POINT 的文件名
+    // 不含年份，ClimForcing 只把年份替换为 `clim`，因此打开也不会改变读入。
+    if name == "DEF_USE_ClimForcing_for_Spinup" && c.single {
+        return hidden("站点 POINT 强迫场始终循环同一文件，此开关不会改变读入");
+    }
+
+    if name == "DEF_MATSIRO_CWCAP_SCALE" && c.interception != 5 {
+        return hidden("仅 MATSIRO 截留方案使用");
+    }
+    if name == "DEF_RSS_SCHEME" && c.lct && c.vg {
+        return hidden("LCT + van Genuchten 下 CoLM 会自动关闭土壤表面阻抗");
+    }
+    if name == "DEF_USE_VariablySaturatedFlow" && c.vg {
+        return hidden("van Genuchten 下 CoLM 会自动启用 VSF");
+    }
+    if one_of(&["DEF_VIC_OPT", "DEF_file_VIC_para", "DEF_file_VIC_OPT"]) && c.runoff != 1 {
+        return hidden("仅 VIC runoff 使用");
+    }
+    if one_of(&["DEF_file_VIC_para", "DEF_file_VIC_OPT"]) {
+        return hidden("CoLM 会从运行时目录派生 VIC 参数文件");
+    }
+    if name == "DEF_USE_Dynamic_Lake" && !c.waterbody() {
+        return hidden("仅水体站点使用");
+    }
+    if name == "DEF_USE_Dynamic_Wetland" && !c.wetland() {
+        return hidden("仅湿地站点使用");
+    }
+
+    // BGC/CROP 子过程必须跟随真实运行时/编译期能力，不能依赖整个页面的粗粒度
+    // 开关。独立的积雪、臭氧和植被物理选项仍可在 BGC 关闭时使用。
+    if one_of(&[
+        "DEF_NDEP_FREQUENCY",
+        "DEF_USE_NOSTRESSNITROGEN",
+        "DEF_USE_SASU",
+        "DEF_USE_DiagMatrix",
+        "DEF_USE_PN",
+        "DEF_USE_NITRIF",
+        "DEF_USE_FIRE",
+        "DEF_CheckEquilibrium",
+    ]) && (!c.bgc || (c.single && !c.biological_land()))
+    {
+        return hidden("需要 BGC");
+    }
+    if one_of(&[
+        "DEF_USE_FERT",
+        "DEF_FERT_SOURCE",
+        "DEF_USE_CNSOYFIXN",
+        "DEF_USE_IRRIGATION",
+        "DEF_IRRIGATION_ALLOCATION",
+    ]) && (!c.crop || (c.single && !c.cropland()))
+    {
+        return hidden("当前内核未启用 CROP");
+    }
+    if name == "DEF_USE_CROP" && !c.crop {
+        return hidden("当前内核未启用 CROP");
+    }
+    if name == "DEF_USE_OZONEDATA" && !c.ozone_stress {
+        return hidden("需要先启用臭氧胁迫");
+    }
+    if one_of(&["DEF_file_snowoptics", "DEF_file_snowaging"]) {
+        return hidden("CoLM 会从运行时目录派生 SNICAR 数据文件");
+    }
+    if one_of(&["DEF_Aerosol_Readin", "DEF_Aerosol_Clim"]) && !c.snicar {
+        return hidden("需要先启用 SNICAR");
+    }
+    if name == "DEF_Aerosol_Clim" && !c.aerosol_readin {
+        return hidden("需要先读取气溶胶数据");
+    }
+    if name == "DEF_USE_MEDLYNST" && c.wuest {
+        return (
+            FieldMode::Editable,
+            Some("WUEST 已开启；两种气孔方案不能同时开启"),
+            vec![".false."],
+        );
+    }
+    if name == "DEF_USE_WUEST" && c.medlyn {
+        return (
+            FieldMode::Editable,
+            Some("Medlyn 已开启；两种气孔方案不能同时开启"),
+            vec![".false."],
+        );
+    }
+
+    if field_section(name, field.group) == Some("城市") && !c.urban {
+        return hidden("需要先启用城市模型");
+    }
+    if c.urban
+        && one_of(&[
+            "DEF_USE_WUEST",
+            "DEF_USE_SUPERCOOL_WATER",
+            "DEF_USE_PLANTHYDRAULICS",
+            "DEF_USE_OZONESTRESS",
+            "DEF_USE_OZONEDATA",
+            "DEF_SPLIT_SOILSNOW",
+        ])
+    {
+        return hidden("城市模式会自动关闭这个过程");
+    }
+    if field_section(name, field.group) == Some("示踪剂") && !c.tracer {
+        return hidden("需要先启用 TRACER");
+    }
+
+    if field.group.is_none() {
+        return (
+            FieldMode::Disabled,
+            Some("由内核或其他路径自动派生，只读显示"),
+            Vec::new(),
+        );
+    }
+
+    (FieldMode::Editable, None, Vec::new())
+}
+
+pub(crate) fn field_states_for(
+    text: &str,
+    have: &std::collections::BTreeSet<&str>,
+) -> Result<Vec<FieldState>, String> {
+    let doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
+    let context = VisibilityContext::new(&doc, have);
+    Ok(colm_schema::all()
+        .iter()
+        .map(|field| {
+            let (mode, reason, allowed_values) = field_runtime_state(field, &context);
+            FieldState {
+                name: field.name.to_string(),
+                mode,
+                reason,
+                allowed_values,
+                mixed: false,
+            }
+        })
+        .collect())
+}
+
+fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
+    let Some(first) = groups.first() else {
+        return Vec::new();
+    };
+    first
+        .iter()
+        .enumerate()
+        .map(|(index, template)| {
+            let each: Vec<&FieldState> = groups.iter().map(|group| &group[index]).collect();
+            debug_assert!(each.iter().all(|state| state.name == template.name));
+            let visible: Vec<&FieldState> = each
+                .iter()
+                .copied()
+                .filter(|state| state.mode != FieldMode::Hidden)
+                .collect();
+            let mut mode = if visible.is_empty() {
+                FieldMode::Hidden
+            } else if visible
+                .iter()
+                .any(|state| state.mode == FieldMode::Editable)
+            {
+                FieldMode::Editable
+            } else {
+                FieldMode::Disabled
+            };
+
+            // 空 allowed_values 表示“使用 schema 的完整集合”，因此它是交集运算
+            // 的全集，不参与收窄；有多个非空约束时取交集。
+            let mut constraints = visible
+                .iter()
+                .filter(|state| !state.allowed_values.is_empty())
+                .map(|state| state.allowed_values.as_slice());
+            let (allowed_values, had_constraints) = constraints.next().map_or_else(
+                || (Vec::new(), false),
+                |head| {
+                    let rest: Vec<_> = constraints.collect();
+                    (
+                        head.iter()
+                            .copied()
+                            .filter(|value| rest.iter().all(|values| values.contains(value)))
+                            .collect(),
+                        true,
+                    )
+                },
+            );
+            let no_common_value = had_constraints && allowed_values.is_empty();
+            if no_common_value && mode != FieldMode::Hidden {
+                // 空 allowed_values 平时表示“schema 全部取值均可”。这里却是多个
+                // 非空约束的交集为空，不能把它误解释为无限制；批量编辑必须锁住。
+                mode = FieldMode::Disabled;
+            }
+            let mixed = no_common_value
+                || each.iter().any(|state| {
+                    state.mode != template.mode || state.allowed_values != template.allowed_values
+                });
+            let reason = if no_common_value {
+                Some("所选算例对这个字段没有共同合法值；请缩小批量范围后分别配置")
+            } else if mixed {
+                Some("所选算例的父开关或站点类型不同；此字段仅对其中一部分算例有效")
+            } else {
+                template.reason
+            };
+            FieldState {
+                name: template.name.clone(),
+                mode,
+                reason,
+                allowed_values,
+                mixed,
+            }
+        })
+        .collect()
+}
+
+/// 当前内核 + 当前 case.nml 的统一字段状态。
+#[tauri::command]
+pub fn field_states(text: String, kernel_dir: String) -> Result<Vec<FieldState>, String> {
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|e| format!("{e:#}"))?;
+    let have: std::collections::BTreeSet<&str> =
+        kernel.manifest.macros.iter().map(String::as_str).collect();
+    field_states_for(&text, &have)
+}
+
+/// 批量编辑时按全部算例合并状态：只有全部无效才隐藏；任一算例有效就显示，
+/// 同时用 `mixed` 标出条件差异。这样不会因代表算例 BGC=false 而把另一个
+/// BGC=true 算例的子字段整个藏掉。
+#[tauri::command]
+pub fn field_states_batch(
+    dirs: Vec<String>,
+    kernel_dir: String,
+) -> Result<Vec<FieldState>, String> {
+    if dirs.is_empty() {
+        return Err("没有可配置的算例".into());
+    }
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|e| format!("{e:#}"))?;
+    let have: std::collections::BTreeSet<&str> =
+        kernel.manifest.macros.iter().map(String::as_str).collect();
+    let all = read_all(&dirs)?;
+    let groups: Vec<Vec<FieldState>> = all
+        .iter()
+        .map(|(dir, text)| field_states_for(text, &have).map_err(|e| format!("{dir}: {e}")))
+        .collect::<Result<_, _>>()?;
+    Ok(merge_field_states(&groups))
 }
 
 /// 一份 namelist 文本里 `colm-schema` 不认识的字段。
@@ -550,11 +1147,26 @@ pub fn set_field_batch(
     path: String,
     value: String,
 ) -> Result<BatchWrite, String> {
+    set_fields_batch(dirs, vec![FieldChange { path, value }])
+}
+
+/// 把一组有关联的字段原子地写进整批算例。
+///
+/// 用于“启用初始场并选择文件”和互斥开关：不能先把父开关写成 true，再因
+/// 路径或另一开关写入失败而留下半套配置。
+#[tauri::command]
+pub fn set_fields_batch(dirs: Vec<String>, fields: Vec<FieldChange>) -> Result<BatchWrite, String> {
+    if fields.is_empty() {
+        return Err("没有要保存的字段".into());
+    }
     let all = read_all(&dirs)?;
     let mut done: Vec<(String, String)> = Vec::with_capacity(all.len());
     for (d, text) in all {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
-        put(&mut doc, &path, typed(&path, &value)?).map_err(|e| format!("{d}: {e}"))?;
+        for field in &fields {
+            let value = typed(&field.path, &field.value)?;
+            put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
+        }
         done.push((d, doc.to_string()));
     }
     write_all(&done)
