@@ -40,6 +40,7 @@ export async function renderTiming() {
                value="${t.spinup_years}" style="width:4.5em"> 年</label>
       <label class="check">×<input class="input" id="tm-repeat" type="number" min="0" step="1"
                value="${t.spinup_repeat}" style="width:4.5em"> 遍</label>
+      <button class="btn-ghost" id="tm-apply" type="button">应用</button>
       <span class="muted mini">任一格填 0 就是不预热</span>
     </div>
     <p class="muted mini" id="tm-note" style="margin-top:8px"></p>`;
@@ -60,8 +61,9 @@ export async function renderTiming() {
       await renderTiming();
     } catch (e) { status(e); }
   };
-  $('tm-years').onchange = apply;
-  $('tm-repeat').onchange = apply;
+  // 两个数是一项配置，必须成组提交。逐格 onchange 会在第一格改完、第二格
+  // 仍是 0 时把后端关掉并重绘，输入就会立刻跳回 0 × 0。
+  $('tm-apply').onclick = apply;
 }
 
 /** 模拟窗口那一格的字。

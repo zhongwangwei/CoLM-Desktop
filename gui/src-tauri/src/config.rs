@@ -303,6 +303,11 @@ fn field_is_relevant(field: &colm_schema::Field, have: &std::collections::BTreeS
         // 「有意义」（能不能真的看到城市输出取决于 `DEF_URBAN_RUN`
         // 本身怎么设，那是运行时的事，不是这个函数管的编译期相关性）。
         Some("数据同化") => have.contains("DataAssimilation"),
+        // 上游这一项漏了 `requires = GridRiverLakeFlow`，所以仅靠生成表会在
+        // CaMaOFF 的单点内核里凭空撑出整个“河道与水库”分栏。
+        Some("河道与水库") if field.name == "DEF_Reservoir_Method" => {
+            have.contains("GridRiverLakeFlow")
+        }
         _ => true,
     }
 }
@@ -573,6 +578,9 @@ pub struct Timing {
     /// history 从哪天开始。**不等于 start** —— 预热期不写 history
     /// （`MOD_Hist.F90:235` 在 `itstamp <= ptstamp` 时直接 RETURN）。
     pub output_start: String,
+    /// CoLM 会打印的 TIMESTEP 总数，含每一轮预热。进度事件里的 `step`
+    /// 从 1 单调递增到这个数，所以前端不必再猜百分比。
+    pub total_steps: u64,
 }
 
 /// 读出时间窗与预热。
@@ -598,12 +606,13 @@ pub fn read_timing(dirs: Vec<String>) -> Result<Timing, String> {
         spinup_years: first.2,
         spinup_repeat: first.3,
         spinup_varies: each.iter().any(|t| t.2 != first.2 || t.3 != first.3),
-        output_start: first.4,
+        output_start: first.4.clone(),
+        total_steps: first.5,
     })
 }
 
-/// 一份配置的 (start, end, 预热年数, 预热遍数, 输出起始日)。
-fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, String) {
+/// 一份配置的 (start, end, 预热年数, 预热遍数, 输出起始日, 总步数)。
+fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, String, u64) {
     let int = |p: &str| -> i64 {
         match doc.get(p) {
             Some(colm_namelist::Value::Int(v)) => *v,
@@ -618,19 +627,68 @@ fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, Strin
         int("DEF_simulation_time%start_month"),
         int("DEF_simulation_time%start_day"),
     );
+    let (ey, em, ed) = (
+        int("DEF_simulation_time%end_year"),
+        int("DEF_simulation_time%end_month"),
+        int("DEF_simulation_time%end_day"),
+    );
     let repeat = int("DEF_simulation_time%spinup_repeat").max(0) as u32;
     let py = int("DEF_simulation_time%spinup_year");
     // 预热开着的判据与 CoLM 一样：截止时刻晚于起始时刻（`CoLM.F90:314`）。
     // 光看 repeat 会把 `year = 0` 那种关法读成开着。
     let on = py > sy && repeat > 1;
     let ymd = |y: i64, m: i64, d: i64| format!("{y:04}-{m:02}-{d:02}");
+    let stamp = |y: i64, m: i64, d: i64, sec: i64| {
+        // Howard Hinnant 的 days_from_civil。这里不能依赖 colm-forcing：那会把
+        // netcdf/hdf5 拖进窗口进程，只为算两个日期的差。
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        (era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy) * 86_400 + sec
+    };
+    let start = stamp(sy, sm, sd, int("DEF_simulation_time%start_sec"));
+    let end = stamp(ey, em, ed, int("DEF_simulation_time%end_sec"));
+    let step = doc
+        .get("DEF_simulation_time%timestep")
+        .and_then(colm_namelist::Value::as_f64)
+        .or_else(
+            || match colm_schema::find("DEF_simulation_time%timestep")?.default {
+                colm_schema::Default::Real(v) => v.parse().ok(),
+                _ => None,
+            },
+        )
+        .unwrap_or(0.0) as i64;
+    let steps = |from: i64, to: i64| -> u64 {
+        if step <= 0 || to <= from {
+            0
+        } else {
+            ((to - from) as u64).div_ceil(step as u64)
+        }
+    };
+    let normal_steps = steps(start, end);
+    let total_steps = if on {
+        let spinup_end = stamp(
+            py,
+            int("DEF_simulation_time%spinup_month"),
+            int("DEF_simulation_time%spinup_day"),
+            int("DEF_simulation_time%spinup_sec"),
+        );
+        // 截止时刻必须落在窗口内才会触发重置。最后一轮不重置，而是从
+        // 截止处继续跑到 end；与 CoLM.F90 的 TIMELOOP 完全同序。
+        if spinup_end < end {
+            let spinup_steps = steps(start, spinup_end);
+            spinup_steps * repeat as u64 + steps(start + spinup_steps as i64 * step, end)
+        } else {
+            normal_steps
+        }
+    } else {
+        normal_steps
+    };
     (
         ymd(sy, sm, sd),
-        ymd(
-            int("DEF_simulation_time%end_year"),
-            int("DEF_simulation_time%end_month"),
-            int("DEF_simulation_time%end_day"),
-        ),
+        ymd(ey, em, ed),
         if on { (py - sy) as u32 } else { 0 },
         if on { repeat } else { 0 },
         if on {
@@ -642,6 +700,7 @@ fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, Strin
         } else {
             ymd(sy, sm, sd)
         },
+        total_steps,
     )
 }
 

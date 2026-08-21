@@ -260,6 +260,29 @@ fn spin_up_is_computed_per_case_not_shared() {
 }
 
 #[test]
+fn total_model_steps_include_every_spinup_cycle() {
+    let doc = colm_namelist::parse(
+        "&nl_colm\n\
+         DEF_simulation_time%start_year = 1992\n\
+         DEF_simulation_time%start_month = 12\n\
+         DEF_simulation_time%start_day = 31\n\
+         DEF_simulation_time%start_sec = 84600\n\
+         DEF_simulation_time%end_year = 2004\n\
+         DEF_simulation_time%end_month = 11\n\
+         DEF_simulation_time%end_day = 28\n\
+         DEF_simulation_time%end_sec = 45000\n\
+         DEF_simulation_time%spinup_year = 1993\n\
+         DEF_simulation_time%spinup_month = 12\n\
+         DEF_simulation_time%spinup_day = 31\n\
+         DEF_simulation_time%spinup_sec = 84600\n\
+         DEF_simulation_time%spinup_repeat = 10\n\
+         DEF_simulation_time%timestep = 1800.\n/\n",
+    )
+    .unwrap();
+    assert_eq!(super::one_timing(&doc).5, 366_458);
+}
+
+#[test]
 fn every_source_namelist_field_has_a_named_ui_section() {
     // 参数页不再用「其他」兜底。上游新增字段时应该在 CI 里
     // 点名，迫使我们读它的 namelist 语义后再归类，而不是随手堆进杂物箱。
@@ -292,6 +315,7 @@ fn forcing_namelist_path_is_used_by_colm_and_stays_visible() {
 fn kernel_macros_decide_which_parameters_are_relevant() {
     let default = ["SinglePoint"].into_iter().collect();
     let with_da = ["SinglePoint", "DataAssimilation"].into_iter().collect();
+    let with_river = ["SinglePoint", "GridRiverLakeFlow"].into_iter().collect();
 
     let relevant = |name, have| {
         let f = colm_schema::find(name).expect(name);
@@ -313,4 +337,8 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
     // 用来验证「宏决定相关性」这条机制本身还成立。
     assert!(!relevant("DEF_DA_TWS", &default));
     assert!(relevant("DEF_DA_TWS", &with_da));
+    // 这项在上游声明处漏了 requires；没有河网时让它留在页面上，会凭空
+    // 撑出整个“河道与水库”分栏。
+    assert!(!relevant("DEF_Reservoir_Method", &default));
+    assert!(relevant("DEF_Reservoir_Method", &with_river));
 }

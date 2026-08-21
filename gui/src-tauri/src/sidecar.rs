@@ -63,6 +63,8 @@ struct Progress {
     /// **不是**从 CoLM 的输出措辞里猜的。
     stage: String,
     step: u64,
+    /// 由 case.nml 的起止时刻、步长与预热轮数精确算出。
+    total_steps: u64,
     /// CoLM 打印的 `YYYY-MM-DD-SSSSS`，原样传，不解释
     date: String,
     /// 预热轮次 `(第几轮, 共几轮)`。正常推进时是 `None`。
@@ -391,6 +393,9 @@ fn pump(
 ) -> std::thread::JoinHandle<(usize, usize, VecDeque<String>)> {
     let h = app.clone();
     let case_id = case.to_string();
+    let total_steps = crate::config::read_timing(vec![case_id.clone()])
+        .map(|t| t.total_steps)
+        .unwrap_or(0);
     std::thread::spawn(move || {
         let (mut total, mut dropped) = (0usize, 0usize);
         let mut last_progress = Instant::now() - EMIT_INTERVAL;
@@ -433,6 +438,7 @@ fn pump(
                             case: case_id.clone(),
                             stage: stage.clone(),
                             step: s.step,
+                            total_steps,
                             date: s.date,
                             spinup: s.spinup,
                         },

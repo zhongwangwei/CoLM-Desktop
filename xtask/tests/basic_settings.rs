@@ -144,3 +144,46 @@ fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
     );
     assert!(!params.contains(r#"data-flow-pane="params-other""#));
 }
+
+#[test]
+fn conditional_processes_and_spinup_are_not_shown_or_saved_prematurely() {
+    let params = std::fs::read_to_string(root().join("gui/dist/app/params.js")).unwrap();
+    assert!(
+        params.contains("id: 'params-eco'")
+            && params.contains("enabled: () => !!state.wizard?.physics?.bgc"),
+        "没有选择 BGC 时生态与生地化仍会出现"
+    );
+    for field in [
+        "DEF_USE_WUEST",
+        "DEF_USE_SUPERCOOL_WATER",
+        "DEF_USE_PLANTHYDRAULICS",
+        "DEF_USE_OZONESTRESS",
+        "DEF_USE_OZONEDATA",
+        "DEF_SPLIT_SOILSNOW",
+    ] {
+        assert!(
+            params.contains(field),
+            "Urban 会自动关闭的 {field} 没有从过程参数中过滤"
+        );
+    }
+    assert!(params.contains("URBAN_DISABLED_FIELDS.has(e.path)"));
+
+    let timing = std::fs::read_to_string(root().join("gui/dist/app/timing.js")).unwrap();
+    assert!(
+        timing.contains("id=\"tm-apply\""),
+        "spin-up 缺少成组应用按钮"
+    );
+    assert!(
+        !timing.contains("$('tm-years').onchange = apply")
+            && !timing.contains("$('tm-repeat').onchange = apply"),
+        "spin-up 仍会在另一格还是 0 时提前保存"
+    );
+
+    let runner = std::fs::read_to_string(root().join("gui/dist/app/runner.js")).unwrap();
+    assert!(
+        runner.contains("p.total_steps"),
+        "进度没有使用后端算出的总步数"
+    );
+    assert!(runner.contains("100 * p.step / total"));
+    assert!(!runner.contains("Math.log10"), "进度仍在用对数猜测");
+}

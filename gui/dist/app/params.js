@@ -20,7 +20,8 @@ const BASIC_PAGES = [
 ];
 const PARAM_PAGES = [
   { id: 'params-water', target: 'param-water-fields', sections: ['水热过程'] },
-  { id: 'params-eco', target: 'param-eco-fields', sections: ['生态与生地化'] },
+  { id: 'params-eco', target: 'param-eco-fields', sections: ['生态与生地化'],
+    enabled: () => !!state.wizard?.physics?.bgc },
   { id: 'params-river', target: 'param-river-fields', sections: ['河道与水库'] },
   { id: 'params-da', target: 'param-da-fields', sections: ['数据同化'] },
   { id: 'params-tracer', target: 'param-tracer-fields', sections: ['示踪剂'],
@@ -28,6 +29,13 @@ const PARAM_PAGES = [
   { id: 'params-urban', target: 'param-urban-fields', sections: ['城市'],
     enabled: urbanEnabled },
 ];
+
+// MOD_Namelist 会在 Urban 打开时无条件关掉这六项。让用户看见并修改一组
+// 必然被覆盖的开关，只会造成“明明设了却没生效”。
+const URBAN_DISABLED_FIELDS = new Set([
+  'DEF_USE_WUEST', 'DEF_USE_SUPERCOOL_WATER', 'DEF_USE_PLANTHYDRAULICS',
+  'DEF_USE_OZONESTRESS', 'DEF_USE_OZONEDATA', 'DEF_SPLIT_SOILSNOW',
+]);
 
 
 // 少数几个字段光看名字会理解反，在这里补一句。
@@ -184,7 +192,9 @@ export async function renderFields() {
   // 全仓库只有 6 个（DEF_dir_landdata/restart/history、DEF_USE_USGS/IGBP、
   // DEF_wetland_finundation_scheme），它们是「这个值现在是多少」的答案，
   // 而那是个常规问题。
-  const shown = inGroup.filter(e => !state.irrelevant.has(e.path));
+  const shown = inGroup
+    .filter(e => !state.irrelevant.has(e.path))
+    .filter(e => !urbanEnabled() || !URBAN_DISABLED_FIELDS.has(e.path));
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
   flows.add('basic-timing');

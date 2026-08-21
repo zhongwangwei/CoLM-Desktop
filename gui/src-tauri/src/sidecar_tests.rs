@@ -117,12 +117,13 @@ fn every_run_event_says_which_case_it_came_from() {
         case: "/tmp/a".into(),
         stage: "colm".into(),
         step: 1,
+        total_steps: 48,
         date: "2008-01-01-00000".into(),
         spinup: None,
     };
-    assert!(serde_json::to_string(&p)
-        .unwrap()
-        .contains("\"case\":\"/tmp/a\""));
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(json.contains("\"case\":\"/tmp/a\""));
+    assert!(json.contains("\"total_steps\":48"));
     let d = Done {
         case: "/tmp/a".into(),
         code: 0,

@@ -107,21 +107,21 @@ export async function watchRun() {
       renderStages(state.stages);
       if (st === 'begin') {
         $('progtext').textContent = `${stage} 运行中…`;
-        $('prog').style.width = ({ mksrfdata: 2, mkinidata: 4, colm: 6 })[stage] + '%';
+        // 前两段没有步数，阶段徽标负责说明状态；不拿猜出来的 2%/4% 冒充进度。
+        $('prog').style.width = '0';
       }
     });
     await listen('run://progress', e => {
-      // 进度只到「第几步、模型时间到哪天」为止。总步数要等算例配置解析出来才知道，
-      // 在那之前不假装知道百分比 —— 一条走到一半又跳回去的进度条比没有更糟。
+      // 后端已从 case.nml 算出总步数；这里直接显示模型步完成比例。
       const p = e.payload;
       // 预热与正常推进要分开说。CoLM 在预热期**不写 history**
       // （MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），
       // 混进正常进度会让人以为那段输出被算进了结果。
+      const total = p.total_steps || p.step;
       $('progtext').textContent = p.spinup
-        ? `预热 ${p.spinup[0]}/${p.spinup[1]} 轮 · 第 ${p.step} 步 · ${p.date}`
-        : `第 ${p.step} 步 · ${p.date}`;
-      const w = Math.min(96, 6 + Math.log10(p.step + 1) * 30);
-      $('prog').style.width = w + '%';
+        ? `预热 ${p.spinup[0]}/${p.spinup[1]} 轮 · 第 ${p.step}/${total} 步 · ${p.date}`
+        : `第 ${p.step}/${total} 步 · ${p.date}`;
+      $('prog').style.width = Math.min(100, 100 * p.step / total) + '%';
     });
     await listen('run://lines', e => {
       const el = $('log');
