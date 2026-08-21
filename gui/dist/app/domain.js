@@ -281,3 +281,5 @@ export function wizardFieldNames() {
 globalThis.addEventListener?.('colm:kernels', () => {
   if (!$('domaingate').hidden) render();
 });
+
+$('homeBtn').onclick = showDomainGate;

@@ -28,7 +28,7 @@ class El {
 
 const ids = Object.fromEntries([
   'gatetitle', 'gatesub', 'gateinfo', 'gatecards', 'gatefoot', 'domaingate',
-  'steps', 'status', 'estSite', 'casename', 'kernel',
+  'steps', 'status', 'estSite', 'casename', 'kernel', 'homeBtn',
 ].map(id => [id, new El()]));
 
 globalThis.document = {
@@ -98,6 +98,10 @@ choose('RangeCheck');
 next();
 
 if (!ids.domaingate.hidden) throw new Error('wizard did not finish');
+ids.homeBtn.onclick();
+if (ids.domaingate.hidden || ids.gatetitle.textContent !== '这次要跑什么？') {
+  throw new Error('home button did not reopen the wizard at page 1');
+}
 if (state.wizard.soil !== 'campbell' || 'profile' in state.wizard) {
   throw new Error(`wrong wizard state: ${JSON.stringify(state.wizard)}`);
 }
