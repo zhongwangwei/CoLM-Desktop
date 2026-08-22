@@ -75,6 +75,84 @@ pub struct DimensionShape {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableColumn {
+    pub name: String,
+    pub units: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSite {
+    pub id: String,
+    pub rows: usize,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub landtype: Option<i32>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub step_seconds: Option<i64>,
+    pub inserted_steps: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSlot {
+    pub index: usize,
+    pub meaning: String,
+    pub optional: bool,
+    pub column: Option<String>,
+    pub units: Option<String>,
+    pub wants: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableProbe {
+    pub delimiter: String,
+    pub columns: Vec<TableColumn>,
+    pub rows: usize,
+    pub site_column: Option<String>,
+    pub time_column: Option<String>,
+    pub latitude_column: Option<String>,
+    pub longitude_column: Option<String>,
+    pub landtype_column: Option<String>,
+    pub utc_offset_column: Option<String>,
+    pub sites: Vec<TableSite>,
+    pub slots: Vec<TableSlot>,
+    #[serde(default)]
+    pub suggest_dst: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportedTableSite {
+    pub site: String,
+    pub safe_site: String,
+    pub staged_path: String,
+    pub final_path: String,
+    pub rows: usize,
+    pub inserted_steps: usize,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub landtype: Option<i32>,
+    pub timezone_offset_hours: Option<f64>,
+    pub timezone_source: String,
+    pub start_utc: i64,
+    pub end_utc: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TableImportOptions {
+    pub time_column: String,
+    pub site_column: Option<String>,
+    pub latitude_column: Option<String>,
+    pub longitude_column: Option<String>,
+    pub landtype_column: Option<String>,
+    pub utc_offset_column: Option<String>,
+    pub utc_offset: Option<f64>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub step_seconds: Option<i64>,
+    pub heights: Option<[f64; 3]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DatasetProbe {
     variables: Vec<String>,
     shapes: Vec<VariableShape>,
@@ -114,6 +192,24 @@ fn probe_dataset(path: &str) -> Result<DatasetProbe, String> {
 #[tauri::command]
 pub async fn probe_forcing(app: tauri::AppHandle, path: String) -> Result<Probe, String> {
     let mut probe = probe_file(&path)?;
+    probe.suggest_dst = suggested_dst(&app);
+    Ok(probe)
+}
+
+#[tauri::command]
+pub async fn probe_forcing_table(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<TableProbe, String> {
+    let json = crate::sidecar::capture(&[
+        "forcing-table-probe".into(),
+        path,
+        "--json".into(),
+        "1".into(),
+    ])?;
+    let mut probe: TableProbe = serde_json::from_str(&json).map_err(|error| {
+        format!("colm-cli forcing-table-probe 的输出解析不了（两边的字段可能已经对不上）：{error}")
+    })?;
     probe.suggest_dst = suggested_dst(&app);
     Ok(probe)
 }
@@ -174,6 +270,83 @@ fn build_convert_args(
         args.push(format!("{v},{t},{q}"));
     }
     args
+}
+
+fn build_table_convert_args(
+    src: &str,
+    dst: &str,
+    slots: &[SlotChoice],
+    options: &TableImportOptions,
+) -> Vec<String> {
+    let mut args = vec![
+        "forcing-table-convert".to_string(),
+        src.to_string(),
+        dst.to_string(),
+        "--time".into(),
+        options.time_column.clone(),
+    ];
+    for (flag, value) in [
+        ("--site", options.site_column.as_deref()),
+        ("--lat-column", options.latitude_column.as_deref()),
+        ("--lon-column", options.longitude_column.as_deref()),
+        ("--landtype-column", options.landtype_column.as_deref()),
+        ("--offset-column", options.utc_offset_column.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            args.push(flag.into());
+            args.push(value.into());
+        }
+    }
+    for (flag, value) in [
+        ("--utc-offset", options.utc_offset),
+        ("--lat", options.latitude),
+        ("--lon", options.longitude),
+    ] {
+        if let Some(value) = value {
+            args.push(flag.into());
+            args.push(value.to_string());
+        }
+    }
+    if let Some(step) = options.step_seconds {
+        args.push("--step-seconds".into());
+        args.push(step.to_string());
+    }
+    for slot in slots {
+        let mut spec = format!("{}={}:{}", slot.index, slot.name, slot.units);
+        for extra in &slot.also_add {
+            spec.push('+');
+            spec.push_str(extra);
+        }
+        args.push("--slot".into());
+        args.push(spec);
+    }
+    if let Some([v, t, q]) = options.heights {
+        args.push("--height".into());
+        args.push(format!("{v},{t},{q}"));
+    }
+    args.push("--json".into());
+    args.push("1".into());
+    args
+}
+
+#[tauri::command]
+pub async fn convert_forcing_table(
+    src: String,
+    dst: String,
+    slots: Vec<SlotChoice>,
+    options: TableImportOptions,
+) -> Result<Vec<ImportedTableSite>, String> {
+    if slots.is_empty() {
+        return Err("CSV/TXT 至少要确认一个强迫场变量槽位".into());
+    }
+    std::fs::create_dir_all(&dst).map_err(|error| format!("产物目录 {dst} 无法创建：{error}"))?;
+    let args = build_table_convert_args(&src, &dst, &slots, &options);
+    let json = crate::sidecar::capture(&args)?;
+    serde_json::from_str(&json).map_err(|error| {
+        format!(
+            "colm-cli forcing-table-convert 的输出解析不了（两边的字段可能已经对不上）：{error}"
+        )
+    })
 }
 
 /// 拒绝产物与源文件放在同一目录。

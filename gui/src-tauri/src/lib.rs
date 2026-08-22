@@ -45,6 +45,8 @@ pub fn run() {
             install_example,
             scan_sites,
             probe_forcing,
+            probe_forcing_table,
+            convert_forcing_table,
             probe_forcing_gaps,
             repair_forcing,
             download_era5land,

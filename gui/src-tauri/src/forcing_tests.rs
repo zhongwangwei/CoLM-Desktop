@@ -165,6 +165,41 @@ fn gap_repair_args_keep_science_options_explicit_and_auditable() {
     }
 }
 
+#[test]
+fn table_import_args_preserve_station_columns_timezones_and_slot_units() {
+    let options = super::TableImportOptions {
+        time_column: "timestamp".into(),
+        site_column: Some("station".into()),
+        latitude_column: Some("lat".into()),
+        longitude_column: Some("lon".into()),
+        landtype_column: Some("igbp".into()),
+        utc_offset_column: Some("utc_offset".into()),
+        utc_offset: None,
+        latitude: None,
+        longitude: None,
+        step_seconds: Some(1800),
+        heights: Some([10.0, 2.0, 2.0]),
+    };
+    let slots = vec![super::SlotChoice {
+        index: 4,
+        name: "Rain".into(),
+        units: "mm/hr".into(),
+        also_add: vec!["Snow".into()],
+    }];
+    let args = super::build_table_convert_args("raw.csv", "Forcing", &slots, &options);
+    assert_eq!(args[0], "forcing-table-convert");
+    assert!(args.windows(2).any(|pair| pair == ["--time", "timestamp"]));
+    assert!(args.windows(2).any(|pair| pair == ["--site", "station"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--step-seconds", "1800"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--slot", "4=Rain:mm/hr+Snow"]));
+    assert!(args.windows(2).any(|pair| pair == ["--height", "10,2,2"]));
+    assert_eq!(args[args.len() - 2..], ["--json", "1"]);
+}
+
 fn probe_with_shape(name: &str, dimensions: &[(&str, usize)]) -> Probe {
     Probe {
         variables: vec![name.into()],

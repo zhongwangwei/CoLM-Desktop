@@ -40,6 +40,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 | 引导式建模 | 通过空间结构、地类、次网格和物理配置卡片确定模型约束 |
 | 站点与算例管理 | 扫描站点目录、自动匹配强迫场与观测、批量创建当前会话算例 |
 | 约束感知参数界面 | 只显示当前模型可用的分栏和字段；派生项、互斥项与不可用项明确标识 |
+| CSV/TXT 多站点前处理 | 自动识别逗号、制表符、分号或空白长表，按站点拆分并统一生成标准单站 NetCDF；可同步批量生成站点文件 |
 | 强迫场缺测修复 | 短缺口按变量物理含义插值；长缺口换算至 UTC 后匹配 ERA5-Land 最近格点，并基于重叠观测进行偏差订正与逐时 QC 留痕 |
 | 多站点并发 | 按 CPU 核数并发运行独立单点算例，逐站点显示进度、阶段和日志 |
 | 分阶段运行 | 可分别运行 `mksrfdata`、`mkinidata`、`colm`，也可一键运行全部阶段 |
@@ -51,9 +52,9 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 ## 使用流程
 
 1. **选择模拟类型**：在启动卡片中选择站点、地类、次网格和物理过程。
-2. **设置文件与目录**：选择示例数据或自己的 `Sitedata` 目录，指定算例根目录。
-3. **创建算例**：扫描站点并勾选一个或多个站点，自动匹配强迫场与观测文件。
-4. **检查并修复强迫场**：前处理先诊断缺测与时区；短缺口直接插值，长缺口可下载或复用 ERA5-Land 缓存，经重叠期订正后生成不覆盖原始数据的中间文件。
+2. **准备自己的数据（可选）**：可选择单站 NetCDF，或包含单站/多站的 CSV、TXT、TSV；表格按站点拆分并归一到 UTC 后逐站诊断。短缺口直接插值，长缺口可下载或复用 ERA5-Land 缓存，经重叠期订正后生成不覆盖原始数据的标准文件。使用内置示例时可跳过。
+3. **设置文件与目录**：选择准备好的 `Sitedata` 与 `Forcing` 目录，指定算例根目录。
+4. **创建算例**：扫描站点并勾选一个或多个站点，自动匹配强迫场与观测文件。
 5. **检查基本设定**：配置预热、地表数据、初始场、强迫场和并行选项。
 6. **配置过程参数**：只处理当前模型约束下实际生效的过程。
 7. **选择输出并运行**：按阶段或全部运行，查看每个站点的实时进度和日志。
@@ -106,6 +107,9 @@ GUI 通过同一个 `colm-cli` 编排算例；命令行也可以独立使用：
 cargo run -p colm-cli -- scan \
   --dir /path/to/Sitedata \
   --forcing-dir /path/to/Forcing
+
+# 探测一份单站或多站 CSV/TXT 长表
+cargo run -p colm-cli -- forcing-table-probe /path/to/sites.csv --json 1
 
 # 创建算例
 cargo run -p colm-cli -- new \
@@ -198,6 +202,7 @@ cargo run -p oracle --bin golden-compare -- \
 - [GUI 工作流设计](docs/design-gui3.md)
 - [前处理设计](docs/design-prep.md)
 - [强迫场缺测修复设计与验收矩阵](docs/plan-forcing-gap-repair.md)
+- [CSV/TXT 多站点前处理契约与验收矩阵](docs/plan-tabular-multisite-prep.md)
 - [结果分析工作台设计](docs/plan-results-workbench.md)
 - [实现、缺陷复盘与验证记录](docs/implementation-verification.md)
 - [CoLM202X 来源与本地修改记录](vendor/PROVENANCE.md)

@@ -56,6 +56,12 @@ if (translateZh('16 个 history 文件 · 105120 步 · 2003/08/01 至 2004/11/3
 if (translateZh('用户自定义站点说明') !== '用户自定义站点说明') {
   throw new Error('unknown user text must stay intact rather than become half translated');
 }
+if (translateZh('先确认槽位映射；缺少观测高度：V、T、Q；请选择站点数据产物目录')
+    !== 'Confirm the slot mapping first; Missing observation heights: V、T、Q; Choose the site-data output directory'
+    || translateZh('多个站点必须各自提供纬度列和经度列，不能共用一个回退坐标')
+      !== 'Each site in a multi-site table must provide latitude and longitude columns; one fallback coordinate cannot be shared') {
+  throw new Error('dynamic table-import readiness guidance is not fully translated');
+}
 
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 if ((html.match(/data-lang="zh"/g) ?? []).length !== 2

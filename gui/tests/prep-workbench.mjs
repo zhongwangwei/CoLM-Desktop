@@ -40,11 +40,14 @@ assert.match(site, /scanPreparedSites/);
 const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
 assert.match(html, /<select class="input" id="slandtype"/);
 assert.doesNotMatch(html, /id="slandtype"[^>]*type="number"/);
+assert.match(html, /data-file="nc,nc4,csv,txt,tsv"/);
+assert.match(html, /单站或多站/);
 
 const forcing = await readFile(new URL('../dist/app/forcing.js', import.meta.url), 'utf8');
 assert.match(forcing, /missingForcingHeights\(heights\)/);
 assert.match(forcing, /forcingOutputName/);
 assert.match(forcing, /forcingdir/);
+assert.match(forcing, /scanPreparedSites\(\)/);
 
 const shell = await readFile(new URL('../dist/app/shell.js', import.meta.url), 'utf8');
 for (const id of ['prep-site', 'prep-forcing', 'prep-ready']) {

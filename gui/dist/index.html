@@ -112,12 +112,13 @@
 
       <div class="flow-pane" data-flow-pane="prep-forcing" hidden>
         <div class="card">
-          <h3>强迫场文件</h3>
-          <div class="ch">选择原始强迫场，确认八个变量槽位、单位、时间轴和 V/T/Q 观测高度。
+          <h3>强迫场数据</h3>
+          <div class="ch">选择单站 NetCDF，或包含单站或多站数据的 CSV / TXT / TSV。
+            表格会按站点拆分；随后统一确认八个变量槽位、单位、时间轴和 V/T/Q 观测高度。
             产物统一命名为 <code>&lt;站点名&gt;_Met.nc</code>，可与站点文件自动配对。</div>
           <div class="browse">
-            <input class="input" id="fsrc" placeholder="…/Met/AT-Neu.nc">
-            <button class="btn-ghost pick" data-for="fsrc" data-file="nc">选择…</button>
+            <input class="input" id="fsrc" placeholder="…/Met/AT-Neu.nc 或 stations.csv">
+            <button class="btn-ghost pick" data-for="fsrc" data-file="nc,nc4,csv,txt,tsv">选择…</button>
             <button class="btn-ghost" id="fprobe">探测</button>
           </div>
         </div>

@@ -125,6 +125,7 @@ function invalidateSite() {
     siteReport: null,
     forcingFile: null,
     forcingDir: null,
+    batchSites: [],
   });
   globalThis.dispatchEvent?.(new Event('colm:prep-site-invalidated'));
   renderResult();
@@ -280,6 +281,38 @@ export function renderPrepReady() {
   if (!box) return;
   box.textContent = '';
   const a = state.prepArtifacts;
+  const batch = a.batchSites ?? [];
+  if (batch.length) {
+    const ready = batch.filter(item => !item.error
+      && item.siteFile
+      && item.siteReport
+      && item.siteReport.readiness !== 'blocked'
+      && item.forcingFile);
+    const table = document.createElement('table');
+    table.innerHTML = '<tr><th>批量站点</th><th>站点文件</th><th>强迫场</th><th>运行契约</th></tr>';
+    for (const item of batch) {
+      const row = document.createElement('tr');
+      row.innerHTML = '<td></td><td></td><td></td><td></td>';
+      row.children[0].textContent = item.site;
+      row.children[1].textContent = item.siteFile ?? '—';
+      row.children[2].textContent = item.forcingFile ?? '—';
+      row.children[3].textContent = item.error
+        ? `失败：${item.error}`
+        : (item.siteReport?.readiness ?? '未生成');
+      if (item.error || item.siteReport?.readiness === 'blocked') row.children[3].className = 'fail';
+      table.appendChild(row);
+    }
+    box.appendChild(table);
+    const matched = ready.length === batch.length;
+    $('prep-use').disabled = !matched;
+    const note = document.createElement('p');
+    note.className = (matched ? 'muted' : 'warn') + ' mini';
+    note.textContent = matched
+      ? `${batch.length} 个站点的站点文件与强迫场均已配对。`
+      : `只有 ${ready.length}/${batch.length} 个站点满足当前模式的完整运行契约。`;
+    box.appendChild(note);
+    return;
+  }
   const rows = [
     ['站点文件', a.siteFile, a.siteReport?.readiness ?? '未生成'],
     ['强迫场', a.forcingFile, a.forcingFile ? '已匹配标准文件' : '未准备'],
@@ -307,7 +340,13 @@ export function renderPrepReady() {
 
 $('prep-use').onclick = async () => {
   if ($('prep-use').disabled) return;
-  await adoptPreparedSite();
+  if (state.prepArtifacts.batchSites?.length) {
+    $('sitedir').value = state.prepArtifacts.siteDir;
+    $('forcingdir').value = state.prepArtifacts.forcingDir;
+    await scanPreparedSites();
+  } else {
+    await adoptPreparedSite();
+  }
   go('basic-files');
 };
 

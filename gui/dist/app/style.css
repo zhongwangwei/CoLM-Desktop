@@ -149,6 +149,8 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
                   font: inherit; min-width: 0; }
 .input:focus, .select:focus { outline: none; border-color: var(--accent); }
 .row { display: flex; gap: var(--s-md); } .row > * { flex: 1; }
+.table-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+              gap: var(--s-md); }
 .browse { display: flex; gap: 6px; } .browse .input { flex: 1; }
 .btn-ghost { padding: 7px 11px; border: 1px solid var(--border); border-radius: var(--r-sm);
              background: var(--bg); white-space: nowrap; }

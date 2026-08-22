@@ -17,6 +17,8 @@ export const state = {
     rawdataDir: null,
     forcingFile: null,
     forcingDir: null,
+    /** CSV/TXT 批处理产物；单文件路径字段仍只用于单站交接。 */
+    batchSites: [],
   },
   /** 当前配置真正有内容的基础 / 过程子步骤。 */
   availableFlows: new Set(['basic-files']),

@@ -1,13 +1,12 @@
 //! 前处理页：强迫场探测与转换（`docs/design-prep.md` §2.1 阶段 A）。
 //!
-//! 四张卡片，顺序不可换：① 选文件（静态，见 index.html）→ ② 槽位映射 →
-//! ③ 时间轴与高度 → ④ 转换。后一张依赖前一张探出来的结果，所以②③④
-//! 全由同一份内部状态驱动，改任何一处都整体重画 —— 与 `timing.js` 同一个
-//! 套路：一张卡片自己渲染自己。
+//! NetCDF 走单站路径；CSV/TXT/TSV 可以是一站，也可以是带站点列的长表。
+//! 表格先按站点拆成 UTC 标准时间轴，再让每个站点复用同一套缺测诊断、
+//! 插值、ERA5-Land 订正和 QC 代码。两种输入最终都只产出标准单站 NetCDF，
+//! 下游不需要知道原始文件是哪一种格式。
 //!
-//! **这份状态不进 `state.js`。** 只有这一页用得到它，塞进共享 state
-//! 只是让别的模块多一条不需要的依赖。`forcing.js` 只 import `ipc.js`
-//! 与 `ui.js` 两个叶子模块，不读、不写 `state`，天然不会跟别的模块成环。
+//! 逐项编辑状态留在本模块；只有完成后的站点/强迫场清单进入共享 `state`，
+//! 供“就绪检查”和“基本设定”扫描，不让半成品污染下游。
 //!
 //! **确认映射是必经一步**（`design-prep.md` §2.1）：变量名猜错的后果是
 //! 「跑得完、结果全错」——模型照样跑完，曲线照样是曲线，界面上什么都看
@@ -18,7 +17,9 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status, joinPath, baseName, forcingDirectoryForSiteDirectory } from './ui.js';
-import { forcingOutputName, missingForcingHeights } from './prep-state.js';
+import {
+  forcingOutputName, missingForcingHeights, prepMode, siteOutputName,
+} from './prep-state.js';
 import { scanPreparedSites } from './sites.js';
 
 /** 探测结果。没探过是 `null`。 */
@@ -43,6 +44,13 @@ let lastResult = null;
 let gapReport = null;
 /** 已修复中间文件。没有缺测时保持 null，转换直接读原文件。 */
 let repairedSource = null;
+/** 非空表示当前输入是 CSV/TXT/TSV，而不是既有 NetCDF。 */
+let tableProbe = null;
+/** 表格列配置；自动探测只负责预填，用户确认的值才交给导入器。 */
+let tableSettings = null;
+/** 按站点拆分后的诊断/修复状态。每一项永远只对应一个站点。 */
+let tableBatch = [];
+let tableBusy = false;
 let gapSettings = {
   shortGap: 3,
   utcOffset: '',
@@ -69,17 +77,75 @@ const MEANING_ZH = {
 };
 const zh = m => MEANING_ZH[m] ?? m;
 
+const TABLE_CANONICAL_VARIABLES = {
+  1: 'Tair',
+  2: 'Qair',
+  3: 'Psurf',
+  4: 'Precip',
+  5: 'Wind_E',
+  6: 'Wind_N',
+  7: 'SWdown',
+  8: 'LWdown',
+};
+
+const isTabularPath = path => /\.(?:csv|txt|tsv)$/i.test(path);
+
+function resetOutputs() {
+  confirmed = false;
+  lastResult = null;
+  gapReport = null;
+  repairedSource = null;
+  tableBatch = [];
+  Object.assign(state.prepArtifacts, {
+    forcingFile: null,
+    forcingDir: null,
+    batchSites: [],
+  });
+  globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
+}
+
+function initializeMappings(result, tabular) {
+  probe = tabular
+    ? {
+        variables: result.columns.map(column => column.name),
+        slots: result.slots.map(slot => ({ ...slot, guessed: slot.column })),
+      }
+    : result;
+  picks = probe.slots.map(slot => slot.guessed ?? '');
+  unitsInput = probe.slots.map(slot => slot.units ?? '');
+  extras = probe.slots.map(() => []);
+}
+
 $('fprobe').onclick = async () => {
   const path = $('fsrc').value.trim();
   if (!path) { status('先选一份强迫场文件'); return; }
   $('fprobe').disabled = true;
   try {
-    probe = await invoke('probe_forcing', { path });
+    const tabular = isTabularPath(path);
+    const result = tabular
+      ? await invoke('probe_forcing_table', { path })
+      : await invoke('probe_forcing', { path });
     srcPath = path;
-    picks = probe.slots.map(s => s.guessed ?? '');
-    unitsInput = probe.slots.map(s => s.units ?? '');
-    extras = probe.slots.map(() => []);
-    heights = { v: probe.height_v, t: probe.height_t, q: probe.height_q };
+    tableProbe = tabular ? result : null;
+    initializeMappings(result, tabular);
+    heights = tabular
+      ? { v: null, t: null, q: null }
+      : { v: result.height_v, t: result.height_t, q: result.height_q };
+    tableSettings = tabular ? {
+      timeColumn: result.time_column ?? '',
+      siteColumn: result.site_column ?? '',
+      latitudeColumn: result.latitude_column ?? '',
+      longitudeColumn: result.longitude_column ?? '',
+      landtypeColumn: result.landtype_column ?? '',
+      offsetColumn: result.utc_offset_column ?? '',
+      latitude: '',
+      longitude: '',
+      utcOffset: '',
+      stepSeconds: commonTableStep(result),
+      createSites: true,
+      siteDir: $('soutdir')?.value.trim() || state.prepArtifacts.siteDir || '',
+      rawdata: $('srawdata')?.value.trim() || state.prepArtifacts.rawdataDir || '',
+    } : null;
     if (!gapSettings.latitude && $('slat')?.value) gapSettings.latitude = $('slat').value;
     if (!gapSettings.longitude && $('slon')?.value) gapSettings.longitude = $('slon').value;
     // 产物目录只在还没填过时用后端建议的那个 —— 用户改过就别再动它，
@@ -87,16 +153,13 @@ $('fprobe').onclick = async () => {
     if (!dstDir) {
       dstDir = state.prepArtifacts.siteDir
         ? forcingDirectoryForSiteDirectory(state.prepArtifacts.siteDir)
-        : (probe.suggest_dst ?? '');
+        : (result.suggest_dst ?? '');
     }
-    confirmed = false;
-    lastResult = null;
-    gapReport = null;
-    repairedSource = null;
-    Object.assign(state.prepArtifacts, { forcingFile: null, forcingDir: null });
-    globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
+    resetOutputs();
     renderCards();
-    status(`已探测 ${baseName(path)}：${probe.variables.length} 个变量，${probe.steps} 步`);
+    status(tabular
+      ? `已探测 ${baseName(path)}：${result.rows} 行，${result.sites.length} 个站点`
+      : `已探测 ${baseName(path)}：${probe.variables.length} 个变量，${probe.steps} 步`);
   } catch (e) { status(e); }
   finally { $('fprobe').disabled = false; }
 };
@@ -106,6 +169,12 @@ function renderCards() {
   if (!box) return;
   box.textContent = '';
   if (!probe) return;
+  if (tableProbe) {
+    box.appendChild(tableStructureCard());
+    box.appendChild(slotsCard());
+    box.appendChild(tableBatchCard());
+    return;
+  }
   box.appendChild(slotsCard());
   box.appendChild(timingCard());
   box.appendChild(gapCard());
@@ -116,6 +185,14 @@ function invalidateGap() {
   gapReport = null;
   repairedSource = null;
   lastResult = null;
+  tableBatch = [];
+}
+
+function commonTableStep(result) {
+  const values = result.sites
+    .map(site => site.step_seconds)
+    .filter(value => value != null);
+  return values.length && values.every(value => value === values[0]) ? String(values[0]) : '';
 }
 
 function selectedSlots() {
@@ -159,6 +236,14 @@ function missingUnitSlots() {
   return probe.slots
     .map((s, i) => ({ s, i }))
     .filter(({ i }) => picks[i] && !unitsInput[i].trim());
+}
+
+function unitsForVariable(name, slot) {
+  if (!name) return '';
+  if (tableProbe) {
+    return tableProbe.columns.find(column => column.name === name)?.units ?? '';
+  }
+  return name === slot.guessed ? (slot.units ?? '') : '';
 }
 
 function slotsCard() {
@@ -246,7 +331,7 @@ function slotRow(i) {
     // 探测阶段量到的单位只对**猜出来的那个变量**有效。换成别的变量之后
     // 留着旧单位会让人以为它还对 —— 只有选回原来那个猜测时才恢复，
     // 其余一律清空，逼用户自己填。
-    unitsInput[i] = sel.value && sel.value === s.guessed ? (s.units ?? '') : '';
+    unitsInput[i] = unitsForVariable(sel.value, s);
     if (s.index !== 4) extras[i] = []; // 只有降水槽用得到 also_add
     confirmed = false;
     invalidateGap();
@@ -328,6 +413,585 @@ function slotRow(i) {
   tr.appendChild(tdWant);
 
   return tr;
+}
+
+// ---------------------------------------- CSV / TXT：结构确认与多站点批处理
+
+function tableColumnField(label, key, required = false) {
+  const field = document.createElement('div');
+  field.className = 'field';
+  const lab = document.createElement('label');
+  lab.textContent = label;
+  field.appendChild(lab);
+  const select = document.createElement('select');
+  select.className = 'select';
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = required ? '请选择一列' : '（没有 / 不使用）';
+  select.appendChild(empty);
+  for (const column of tableProbe.columns) {
+    const option = document.createElement('option');
+    option.value = column.name;
+    option.textContent = column.units ? `${column.name} [${column.units}]` : column.name;
+    select.appendChild(option);
+  }
+  select.value = tableSettings[key];
+  select.onchange = () => {
+    tableSettings[key] = select.value;
+    tableBatch = [];
+    resetBatchArtifacts();
+    renderCards();
+  };
+  field.appendChild(select);
+  return field;
+}
+
+function tableNumberField(label, key, options = {}) {
+  const field = document.createElement('div');
+  field.className = 'field';
+  const lab = document.createElement('label');
+  lab.textContent = label;
+  field.appendChild(lab);
+  const input = document.createElement('input');
+  input.className = 'input';
+  input.type = 'number';
+  input.step = options.step ?? 'any';
+  if (options.min != null) input.min = String(options.min);
+  if (options.max != null) input.max = String(options.max);
+  input.placeholder = options.placeholder ?? '';
+  input.value = tableSettings[key] ?? '';
+  input.onchange = () => {
+    tableSettings[key] = input.value;
+    tableBatch = [];
+    resetBatchArtifacts();
+    renderCards();
+  };
+  field.appendChild(input);
+  return field;
+}
+
+function resetBatchArtifacts() {
+  const hadBatch = (state.prepArtifacts.batchSites?.length ?? 0) > 0;
+  Object.assign(state.prepArtifacts, {
+    forcingFile: null,
+    forcingDir: null,
+    batchSites: [],
+    ...(hadBatch ? { siteFile: null, siteReport: null } : {}),
+  });
+  globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
+}
+
+function tableStructureCard() {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <h3>CSV / TXT 表格结构与站点</h3>
+    <div class="ch">一份表格可以只含一个站点，也可以用站点列保存多个站点。
+      软件会先按站点拆分，不会把不同站点混进同一个文件；所有时间统一换算为 UTC，
+      缺少的整条时间记录会作为真实缺口交给后面的诊断和修复。</div>
+    <table style="margin-top:12px">
+      <tr><th>分隔方式</th><td>${tableProbe.delimiter}</td></tr>
+      <tr><th>数据行</th><td>${tableProbe.rows}</td></tr>
+      <tr><th>识别到的站点</th><td>${tableProbe.sites.length}</td></tr>
+    </table>`;
+
+  const columns = document.createElement('div');
+  columns.className = 'table-grid';
+  columns.style.marginTop = '12px';
+  for (const field of [
+    tableColumnField('时间列', 'timeColumn', true),
+    tableColumnField('站点名称列', 'siteColumn'),
+    tableColumnField('纬度列', 'latitudeColumn'),
+    tableColumnField('经度列', 'longitudeColumn'),
+    tableColumnField('地表覆盖类型列', 'landtypeColumn'),
+    tableColumnField('UTC 偏移列（小时）', 'offsetColumn'),
+  ]) columns.appendChild(field);
+  card.appendChild(columns);
+
+  const fallbacks = document.createElement('div');
+  fallbacks.className = 'table-grid';
+  fallbacks.style.marginTop = '10px';
+  for (const field of [
+    tableNumberField('单站纬度（表格无纬度列时）', 'latitude', { min: -90, max: 90 }),
+    tableNumberField('单站经度（表格无经度列时）', 'longitude', { min: -180, max: 180 }),
+    tableNumberField('人工 UTC 偏移（小时）', 'utcOffset', { min: -12, max: 14, step: 0.25, placeholder: '自动判断' }),
+    tableNumberField('时间步长（秒）', 'stepSeconds', { min: 1, step: 1, placeholder: '自动推断' }),
+  ]) fallbacks.appendChild(field);
+  card.appendChild(fallbacks);
+
+  const heightsRow = document.createElement('div');
+  heightsRow.className = 'table-grid';
+  heightsRow.style.marginTop = '10px';
+  for (const [key, label] of [
+    ['v', '观测高度 V（风速，米）'],
+    ['t', '观测高度 T（气温，米）'],
+    ['q', '观测高度 Q（湿度，米）'],
+  ]) {
+    const field = document.createElement('div');
+    field.className = 'field';
+    const lab = document.createElement('label');
+    lab.textContent = label;
+    field.appendChild(lab);
+    const input = document.createElement('input');
+    input.className = 'input';
+    input.type = 'number';
+    input.step = 'any';
+    input.value = heights[key] ?? '';
+    input.onchange = () => {
+      const value = Number(input.value);
+      heights[key] = input.value !== '' && Number.isFinite(value) ? value : null;
+      tableBatch = [];
+      resetBatchArtifacts();
+      renderCards();
+    };
+    field.appendChild(input);
+    heightsRow.appendChild(field);
+  }
+  card.appendChild(heightsRow);
+
+  const repairRow = document.createElement('div');
+  repairRow.className = 'table-grid';
+  repairRow.style.marginTop = '10px';
+  for (const [label, key, min] of [
+    ['短缺口上限（时间步）', 'shortGap', 0],
+    ['订正最少重叠样本', 'minOverlap', 1],
+  ]) {
+    const field = document.createElement('div');
+    field.className = 'field';
+    field.innerHTML = `<label>${label}</label>`;
+    const input = document.createElement('input');
+    input.className = 'input';
+    input.type = 'number';
+    input.min = String(min);
+    input.step = '1';
+    input.value = gapSettings[key];
+    input.onchange = () => {
+      gapSettings[key] = input.value;
+      tableBatch = [];
+      resetBatchArtifacts();
+      renderCards();
+    };
+    field.appendChild(input);
+    repairRow.appendChild(field);
+  }
+  card.appendChild(repairRow);
+
+  if (tableProbe.sites.length) {
+    const heading = document.createElement('p');
+    heading.className = 'muted mini';
+    heading.style.marginTop = '12px';
+    heading.textContent = '自动识别预览（修改上面的列选择后，以转换时的选择为准）：';
+    card.appendChild(heading);
+    const table = document.createElement('table');
+    table.innerHTML = '<tr><th>站点</th><th>行数</th><th>经纬度</th><th>地类</th><th>推断步长</th><th>缺少整行</th><th>时间范围</th></tr>';
+    for (const site of tableProbe.sites) {
+      const row = document.createElement('tr');
+      row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
+      row.children[0].textContent = site.id;
+      row.children[1].textContent = String(site.rows);
+      row.children[2].textContent = site.latitude != null && site.longitude != null
+        ? `${site.latitude}, ${site.longitude}` : '—';
+      row.children[3].textContent = site.landtype ?? '—';
+      row.children[4].textContent = site.step_seconds ? `${site.step_seconds} 秒` : '需填写';
+      row.children[5].textContent = String(site.inserted_steps);
+      row.children[6].textContent = `${site.start ?? '—'} — ${site.end ?? '—'}`;
+      table.appendChild(row);
+    }
+    card.appendChild(table);
+  }
+  return card;
+}
+
+function validOptionalNumber(value, min, max) {
+  if (value === '' || value == null) return false;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= min && number <= max;
+}
+
+function tableReadinessReasons() {
+  const reasons = [];
+  if (!confirmed) reasons.push('先确认槽位映射');
+  const missingReq = missingRequiredSlots();
+  if (missingReq.length) reasons.push('必需槽位没有映射完整');
+  if (missingUnitSlots().length) reasons.push('已选变量缺少源单位');
+  const missingHeights = missingForcingHeights(heights);
+  if (missingHeights.length) reasons.push(`缺少观测高度：${missingHeights.join('、')}`);
+  if (!tableSettings.timeColumn) reasons.push('请选择时间列');
+  if (tableProbe.sites.length > 1 && (!tableSettings.latitudeColumn || !tableSettings.longitudeColumn)) {
+    reasons.push('多个站点必须各自提供纬度列和经度列，不能共用一个回退坐标');
+  }
+  if (!tableSettings.latitudeColumn && !validOptionalNumber(tableSettings.latitude, -90, 90)) {
+    reasons.push('需要纬度列，或为单站表格填写纬度');
+  }
+  if (!tableSettings.longitudeColumn && !validOptionalNumber(tableSettings.longitude, -180, 180)) {
+    reasons.push('需要经度列，或为单站表格填写经度');
+  }
+  if (!dstDir.trim()) reasons.push('请选择强迫场产物目录');
+  if (tableSettings.createSites && !tableSettings.siteDir.trim()) reasons.push('请选择站点数据产物目录');
+  if (tableSettings.stepSeconds !== ''
+      && (!Number.isInteger(Number(tableSettings.stepSeconds)) || Number(tableSettings.stepSeconds) <= 0)) {
+    reasons.push('时间步长必须是正整数秒');
+  }
+  if (tableSettings.utcOffset !== ''
+      && !validOptionalNumber(tableSettings.utcOffset, -12, 14)) {
+    reasons.push('人工 UTC 偏移必须在 -12 到 +14 小时之间');
+  }
+  return reasons;
+}
+
+function tableBatchCard() {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <h3>按站点拆分、诊断与修复</h3>
+    <div class="ch">先把表格拆成每站一份暂存 NetCDF，再逐站点检查缺测。
+      短缺口采用统计插值；长缺口需要 ERA5-Land 对应格点并做偏差订正。
+      最终每个站点独立生成 <code>&lt;site-name&gt;_Met.nc</code> 和 QC 标记。</div>
+    <div class="field" style="margin-top:12px"><label>强迫场产物目录</label>
+      <div class="browse"><input class="input" id="table-forcing-dir" placeholder="…/Forcing"><button class="btn-ghost" id="table-forcing-pick">选择…</button></div>
+    </div>
+    <label class="check" style="margin-top:12px"><input type="checkbox" id="table-create-sites"> 同时批量生成或更新站点文件</label>
+    <div id="table-site-options"></div>
+    <div class="pill-row" style="margin-top:12px"><button class="btn-next" id="table-split">拆分并诊断全部站点</button></div>
+    <p class="mini" id="table-why"></p>
+    <div id="table-batch-result"></div>`;
+
+  const forcingDir = card.querySelector('#table-forcing-dir');
+  forcingDir.value = dstDir;
+  forcingDir.onchange = () => {
+    dstDir = forcingDir.value.trim();
+    tableBatch = [];
+    resetBatchArtifacts();
+    renderCards();
+  };
+  card.querySelector('#table-forcing-pick').onclick = async () => {
+    try {
+      const picked = await invoke('pick_folder', { key: 'table-forcing-dir' });
+      if (!picked) return;
+      dstDir = picked;
+      tableBatch = [];
+      resetBatchArtifacts();
+      renderCards();
+    } catch (error) { status(error); }
+  };
+
+  const createSites = card.querySelector('#table-create-sites');
+  createSites.checked = tableSettings.createSites;
+  createSites.onchange = () => {
+    tableSettings.createSites = createSites.checked;
+    tableBatch = [];
+    resetBatchArtifacts();
+    renderCards();
+  };
+  if (tableSettings.createSites) renderTableSiteOptions(card.querySelector('#table-site-options'));
+
+  const reasons = tableReadinessReasons();
+  const split = card.querySelector('#table-split');
+  split.disabled = tableBusy || reasons.length > 0;
+  split.onclick = splitAndDiagnoseTable;
+  const why = card.querySelector('#table-why');
+  why.className = (reasons.length ? 'fail' : 'muted') + ' mini';
+  why.textContent = reasons.length
+    ? reasons.join('；')
+    : '就绪：将处理表格里的全部站点，原始 CSV/TXT 不会被修改。';
+  if (tableBatch.length) renderTableBatchResult(card.querySelector('#table-batch-result'));
+  return card;
+}
+
+function renderTableSiteOptions(box) {
+  box.innerHTML = `
+    <div class="field" style="margin-top:10px"><label>站点数据产物目录</label>
+      <div class="browse"><input class="input" id="table-site-dir" placeholder="…/Sitedata"><button class="btn-ghost" id="table-site-pick">选择…</button></div>
+    </div>
+    <div class="field" style="margin-top:10px"><label>CoLM rawdata 目录（站点文件有缺项时需要）</label>
+      <div class="browse"><input class="input" id="table-rawdata" placeholder="…/rawdata"><button class="btn-ghost" id="table-rawdata-pick">选择…</button></div>
+    </div>`;
+  const siteDir = box.querySelector('#table-site-dir');
+  siteDir.value = tableSettings.siteDir;
+  siteDir.onchange = () => {
+    tableSettings.siteDir = siteDir.value.trim();
+    resetBatchArtifacts();
+    renderCards();
+  };
+  const rawdata = box.querySelector('#table-rawdata');
+  rawdata.value = tableSettings.rawdata;
+  rawdata.onchange = () => { tableSettings.rawdata = rawdata.value.trim(); resetBatchArtifacts(); };
+  box.querySelector('#table-site-pick').onclick = async () => {
+    try {
+      const picked = await invoke('pick_folder', { key: 'table-site-dir' });
+      if (!picked) return;
+      tableSettings.siteDir = picked;
+      renderCards();
+    } catch (error) { status(error); }
+  };
+  box.querySelector('#table-rawdata-pick').onclick = async () => {
+    try {
+      const picked = await invoke('pick_folder', { key: 'table-rawdata' });
+      if (!picked) return;
+      tableSettings.rawdata = picked;
+      renderCards();
+    } catch (error) { status(error); }
+  };
+}
+
+function canonicalTableSlots() {
+  return selectedSlots().map(slot => ({
+    index: slot.index,
+    name: TABLE_CANONICAL_VARIABLES[slot.index],
+    units: probe.slots.find(candidate => candidate.index === slot.index)?.wants ?? slot.units,
+    also_add: [],
+  }));
+}
+
+function tableImportOptions() {
+  const numberOrNull = value => value === '' ? null : optionalNumber(value);
+  const optionalText = value => value?.trim() || null;
+  return {
+    time_column: tableSettings.timeColumn,
+    site_column: optionalText(tableSettings.siteColumn),
+    latitude_column: optionalText(tableSettings.latitudeColumn),
+    longitude_column: optionalText(tableSettings.longitudeColumn),
+    landtype_column: optionalText(tableSettings.landtypeColumn),
+    utc_offset_column: optionalText(tableSettings.offsetColumn),
+    utc_offset: numberOrNull(tableSettings.utcOffset),
+    latitude: numberOrNull(tableSettings.latitude),
+    longitude: numberOrNull(tableSettings.longitude),
+    step_seconds: tableSettings.stepSeconds === '' ? null : Math.trunc(Number(tableSettings.stepSeconds)),
+    heights: [Number(heights.v), Number(heights.t), Number(heights.q)],
+  };
+}
+
+function tableGapOptions(item, includeEra5) {
+  return {
+    short_gap: Math.max(0, Math.trunc(Number(gapSettings.shortGap) || 0)),
+    // 拆分文件的时间轴已由导入器转成 UTC，不能再次应用原表时区。
+    utc_offset: 0,
+    latitude: item.latitude,
+    longitude: item.longitude,
+    era5: includeEra5 && item.report?.needs_era5 && gapSettings.era5.trim()
+      ? gapSettings.era5.trim() : null,
+    min_overlap: Math.max(1, Math.trunc(Number(gapSettings.minOverlap) || 24)),
+  };
+}
+
+async function runPool(items, limit, operation) {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      await operation(items[index], index);
+    }
+  });
+  const results = await Promise.allSettled(workers);
+  const failure = results.find(result => result.status === 'rejected');
+  if (failure) throw failure.reason;
+}
+
+async function splitAndDiagnoseTable() {
+  const reasons = tableReadinessReasons();
+  if (reasons.length || tableBusy) { status(reasons.join('；')); return; }
+  tableBusy = true;
+  tableBatch = [];
+  resetBatchArtifacts();
+  renderCards();
+  try {
+    status('正在按站点拆分 CSV/TXT…');
+    const imported = await invoke('convert_forcing_table', {
+      src: srcPath,
+      dst: dstDir.trim(),
+      slots: selectedSlots(),
+      options: tableImportOptions(),
+    });
+    tableBatch = imported.map(item => ({ ...item, phase: '诊断中', report: null, error: null, siteReport: null }));
+    let finished = 0;
+    await runPool(tableBatch, 4, async item => {
+      try {
+        item.report = await invoke('probe_forcing_gaps', {
+          src: item.staged_path,
+          slots: canonicalTableSlots(),
+          options: tableGapOptions(item, false),
+        });
+        item.phase = item.report.needs_era5 ? '需要 ERA5-Land' : '可修复';
+      } catch (error) {
+        item.error = String(error);
+        item.phase = '诊断失败';
+      }
+      finished += 1;
+      status(`正在诊断站点 ${finished}/${tableBatch.length}：${item.site}`);
+    });
+    const failed = tableBatch.filter(item => item.error).length;
+    status(failed
+      ? `已拆分 ${tableBatch.length} 个站点，其中 ${failed} 个诊断失败`
+      : `已拆分并诊断 ${tableBatch.length} 个站点`);
+  } catch (error) {
+    tableBatch = [];
+    status(error);
+  } finally {
+    tableBusy = false;
+    renderCards();
+  }
+}
+
+function renderTableBatchResult(box) {
+  const needsEra5 = tableBatch.some(item => item.report?.needs_era5);
+  const failed = tableBatch.some(item => item.error);
+  const allComplete = tableBatch.every(item => item.phase === '完成');
+  const table = document.createElement('table');
+  table.style.marginTop = '14px';
+  table.innerHTML = '<tr><th>站点</th><th>状态</th><th>原始行</th><th>补入时间步</th><th>缺测值</th><th>ERA5-Land</th><th>产物</th></tr>';
+  for (const item of tableBatch) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
+    row.children[0].textContent = item.site;
+    row.children[1].textContent = item.error ? `${item.phase}：${item.error}` : item.phase;
+    row.children[1].className = item.error ? 'fail' : (item.report?.needs_era5 ? 'warn' : '');
+    row.children[2].textContent = String(item.rows);
+    row.children[3].textContent = String(item.inserted_steps);
+    row.children[4].textContent = item.report ? String(item.report.missing) : '—';
+    row.children[5].textContent = item.report?.needs_era5 ? '需要' : '不需要';
+    row.children[6].textContent = item.phase === '完成' ? item.final_path : '—';
+    table.appendChild(row);
+  }
+  box.appendChild(table);
+
+  if (needsEra5) {
+    if (!gapSettings.era5 && dstDir) gapSettings.era5 = joinPath(dstDir, '.era5land');
+    const field = document.createElement('div');
+    field.className = 'field';
+    field.style.marginTop = '12px';
+    field.innerHTML = '<label>全部站点共用的 ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="table-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="table-era5-pick">选择…</button></div>';
+    const input = field.querySelector('#table-era5');
+    input.value = gapSettings.era5;
+    input.onchange = () => { gapSettings.era5 = input.value.trim(); renderCards(); };
+    field.querySelector('#table-era5-pick').onclick = async () => {
+      try {
+        const picked = await invoke('pick_folder', { key: 'table-era5' });
+        if (!picked) return;
+        gapSettings.era5 = picked;
+        renderCards();
+      } catch (error) { status(error); }
+    };
+    box.appendChild(field);
+  }
+
+  const bar = document.createElement('div');
+  bar.className = 'pill-row';
+  bar.style.marginTop = '12px';
+  if (needsEra5) {
+    const download = document.createElement('button');
+    download.className = 'btn-ghost';
+    download.textContent = '下载全部缺失站点的 ERA5-Land';
+    download.disabled = tableBusy || !gapSettings.era5.trim() || failed;
+    download.onclick = downloadTableEra5;
+    bar.appendChild(download);
+  }
+  const repair = document.createElement('button');
+  repair.className = 'btn-next';
+  repair.textContent = allComplete
+    ? '全部站点已完成'
+    : (tableSettings.createSites ? '修复并生成全部站点数据' : '修复并生成全部强迫场');
+  repair.disabled = tableBusy || allComplete || failed || (needsEra5 && !gapSettings.era5.trim());
+  repair.onclick = repairTableBatch;
+  bar.appendChild(repair);
+  box.appendChild(bar);
+}
+
+async function downloadTableEra5() {
+  const targets = tableBatch.filter(item => item.report?.needs_era5 && !item.error);
+  if (!targets.length || !gapSettings.era5.trim() || tableBusy) return;
+  tableBusy = true;
+  renderCards();
+  let finished = 0;
+  try {
+    // 同一 ERA5 格点可能被多个站点复用；串行下载避免两个 sidecar 同时写
+    // 同一个缓存文件。逐站点诊断和修复仍保持最多 4 个并发。
+    await runPool(targets, 1, async item => {
+      await invoke('download_era5land', {
+        dst: gapSettings.era5.trim(),
+        latitude: item.report.latitude,
+        longitude: item.report.longitude,
+        start: item.report.start_date,
+        end: item.report.end_date,
+      });
+      finished += 1;
+      status(`ERA5-Land 下载 ${finished}/${targets.length}：${item.site}`);
+    });
+    status(`已缓存 ${targets.length} 个站点需要的 ERA5-Land 数据`);
+  } catch (error) { status(error); }
+  finally { tableBusy = false; renderCards(); }
+}
+
+async function repairTableBatch() {
+  if (!tableBatch.length || tableBusy) return;
+  tableBusy = true;
+  renderCards();
+  let finished = 0;
+  try {
+    await runPool(tableBatch, 4, async item => {
+      try {
+        item.phase = '修复中';
+        item.report = await invoke('repair_forcing', {
+          src: item.staged_path,
+          dst: item.final_path,
+          slots: canonicalTableSlots(),
+          options: tableGapOptions(item, true),
+        });
+        if (item.report.unresolved) {
+          throw new Error(`仍有 ${item.report.unresolved} 个缺测值没有解决`);
+        }
+        if (tableSettings.createSites) {
+          item.phase = '生成站点文件';
+          item.siteReport = await invoke('make_site', {
+            out: joinPath(tableSettings.siteDir, siteOutputName(item.safe_site)),
+            lon: item.longitude,
+            lat: item.latitude,
+            landtype: item.landtype,
+            rawdata: tableSettings.rawdata || null,
+            mode: prepMode(state),
+          });
+        }
+        item.phase = '完成';
+        item.error = null;
+      } catch (error) {
+        item.error = String(error);
+        item.phase = '处理失败';
+      }
+      finished += 1;
+      status(`正在生成站点产物 ${finished}/${tableBatch.length}：${item.site}`);
+    });
+    const completed = tableBatch.filter(item => item.phase === '完成');
+    const failed = tableBatch.length - completed.length;
+    $('forcingdir').value = dstDir.trim();
+    Object.assign(state.prepArtifacts, {
+      forcingDir: dstDir.trim(),
+      forcingFile: completed.length === 1 ? completed[0].final_path : null,
+      siteDir: tableSettings.createSites ? tableSettings.siteDir : state.prepArtifacts.siteDir,
+      siteFile: tableSettings.createSites && completed.length === 1 ? completed[0].siteReport?.path ?? null : null,
+      siteReport: tableSettings.createSites && completed.length === 1 ? completed[0].siteReport : null,
+      rawdataDir: tableSettings.rawdata || null,
+      batchSites: tableBatch.map(item => ({
+        site: item.site,
+        siteFile: item.siteReport?.path ?? null,
+        siteReport: item.siteReport,
+        forcingFile: item.phase === '完成' ? item.final_path : null,
+        error: item.error,
+      })),
+    });
+    if (tableSettings.createSites) {
+      $('sitedir').value = tableSettings.siteDir;
+      if ($('rawdata')) $('rawdata').value = tableSettings.rawdata;
+      await scanPreparedSites();
+    }
+    globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
+    status(failed
+      ? `批量处理完成：${completed.length}/${tableBatch.length} 个站点成功`
+      : `批量处理完成：${completed.length} 个站点均已生成`);
+  } catch (error) {
+    status(error);
+  } finally {
+    tableBusy = false;
+    renderCards();
+  }
 }
 
 // -------------------------------------------------------- ③ 时间轴与高度

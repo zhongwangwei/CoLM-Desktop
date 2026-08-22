@@ -71,6 +71,16 @@ usage:
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
   colm-cli forcing-probe   <met.nc> [--json 1]
+  colm-cli forcing-table-probe <forcing.csv|txt|tsv> [--json 1]
+                           # 自动识别分隔符、站点/时间/经纬度列与变量候选
+  colm-cli forcing-table-convert <src.csv|txt|tsv> <Forcing-dir>
+                           --time COLUMN [--site COLUMN]
+                           [--lat-column COLUMN --lon-column COLUMN]
+                           [--landtype-column COLUMN] [--offset-column COLUMN]
+                           [--lat LAT --lon LON] [--utc-offset HOURS]
+                           [--step-seconds N] [--height V,T,Q]
+                           --slot N=column:units[+extra] ... [--json 1]
+                           # 按站点拆分到 .colm-tabular，缺失整行时间补成缺测值
   colm-cli netcdf-probe    <data.nc> [--json 1]
                            # 探测一份强迫场文件：八个槽位各猜到了什么变量，
                            # 猜不到就是 null；三个观测高度缺失时也是 null，
@@ -181,6 +191,19 @@ fn main() -> Result<()> {
             cmd_forcing_probe(
                 &opts.positional_at(0, "a forcing file")?,
                 opts.get("--json").is_some(),
+            )?;
+        }
+        "forcing-table-probe" => {
+            cmd_forcing_table_probe(
+                &opts.positional_at(0, "a CSV/TXT forcing file")?,
+                opts.get("--json").is_some(),
+            )?;
+        }
+        "forcing-table-convert" => {
+            cmd_forcing_table_convert(
+                &opts.positional_at(0, "a CSV/TXT forcing file")?,
+                &opts.positional_at(1, "a forcing destination directory")?,
+                &opts,
             )?;
         }
         "netcdf-probe" => {
@@ -1974,6 +1997,186 @@ fn read_file_1d(f: &netcdf::File, path: &Path, name: &str) -> Result<Vec<f64>> {
     variable
         .get_values::<f64, _>(..)
         .with_context(|| format!("cannot read {name} from {}", path.display()))
+}
+
+fn cmd_forcing_table_probe(file: &Path, json: bool) -> Result<()> {
+    let probe = colm_forcing::probe_table(file)?;
+    if json {
+        let columns = probe
+            .columns
+            .iter()
+            .map(|column| {
+                serde_json::json!({
+                    "name": column.name,
+                    "units": column.units,
+                })
+            })
+            .collect::<Vec<_>>();
+        let sites = probe
+            .sites
+            .iter()
+            .map(|site| {
+                serde_json::json!({
+                    "id": site.id,
+                    "rows": site.rows,
+                    "latitude": site.latitude,
+                    "longitude": site.longitude,
+                    "landtype": site.landtype,
+                    "start": site.start,
+                    "end": site.end,
+                    "step_seconds": site.step_seconds,
+                    "inserted_steps": site.inserted_steps,
+                })
+            })
+            .collect::<Vec<_>>();
+        let slots = probe
+            .slots
+            .iter()
+            .map(|slot| {
+                serde_json::json!({
+                    "index": slot.index,
+                    "meaning": slot.meaning,
+                    "optional": slot.optional,
+                    "column": slot.column,
+                    "units": slot.units,
+                    "wants": slot.wants,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "delimiter": probe.delimiter,
+                "columns": columns,
+                "rows": probe.rows,
+                "site_column": probe.site_column,
+                "time_column": probe.time_column,
+                "latitude_column": probe.latitude_column,
+                "longitude_column": probe.longitude_column,
+                "landtype_column": probe.landtype_column,
+                "utc_offset_column": probe.utc_offset_column,
+                "sites": sites,
+                "slots": slots,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{} row(s), {} site(s), {} delimiter",
+        probe.rows,
+        probe.sites.len(),
+        probe.delimiter
+    );
+    println!(
+        "columns: {}",
+        probe
+            .columns
+            .iter()
+            .map(|column| match &column.units {
+                Some(units) => format!("{} [{units}]", column.name),
+                None => column.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for site in &probe.sites {
+        println!(
+            "  {}: {} row(s), lat/lon {:?}/{:?}, step {:?}s, {} absent row(s)",
+            site.id,
+            site.rows,
+            site.latitude,
+            site.longitude,
+            site.step_seconds,
+            site.inserted_steps
+        );
+    }
+    Ok(())
+}
+
+fn cmd_forcing_table_convert(src: &Path, destination: &Path, opts: &Opts) -> Result<()> {
+    let slots = opts
+        .get_all("--slot")
+        .iter()
+        .map(|spec| {
+            let slot = colm_forcing::parse_slot_spec(spec)?;
+            Ok(colm_forcing::TabularSlot {
+                index: slot.index,
+                column: slot.source_name,
+                source_units: slot.source_units,
+                also_add: slot.also_add,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let optional_f64 = |name: &str| -> Result<Option<f64>> {
+        opts.get(name)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .with_context(|| format!("{name} {value:?} is not a number"))
+            })
+            .transpose()
+    };
+    let step_seconds = opts
+        .get("--step-seconds")
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .with_context(|| format!("--step-seconds {value:?} is not an integer"))
+        })
+        .transpose()?;
+    let plan = colm_forcing::TabularPlan {
+        time_column: opts.need_str("--time")?,
+        site_column: opts.get("--site"),
+        latitude_column: opts.get("--lat-column"),
+        longitude_column: opts.get("--lon-column"),
+        landtype_column: opts.get("--landtype-column"),
+        utc_offset_column: opts.get("--offset-column"),
+        manual_utc_offset: optional_f64("--utc-offset")?,
+        latitude: optional_f64("--lat")?,
+        longitude: optional_f64("--lon")?,
+        step_seconds,
+        heights: opts
+            .get("--height")
+            .as_deref()
+            .map(colm_forcing::parse_heights)
+            .transpose()?,
+        slots,
+    };
+    let imported = colm_forcing::import_table(src, destination, &plan)?;
+    if opts.get("--json").is_some() {
+        let sites = imported
+            .iter()
+            .map(|site| {
+                serde_json::json!({
+                    "site": site.site,
+                    "safe_site": site.safe_site,
+                    "staged_path": site.staged_path,
+                    "final_path": site.final_path,
+                    "rows": site.rows,
+                    "inserted_steps": site.inserted_steps,
+                    "latitude": site.latitude,
+                    "longitude": site.longitude,
+                    "landtype": site.landtype,
+                    "timezone_offset_hours": site.timezone_offset_hours,
+                    "timezone_source": site.timezone_source,
+                    "start_utc": site.start_utc,
+                    "end_utc": site.end_utc,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&sites)?);
+    } else {
+        for site in &imported {
+            println!(
+                "{}: {} row(s) + {} absent time step(s) -> {}",
+                site.site,
+                site.rows,
+                site.inserted_steps,
+                site.staged_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 一个槽位探测到的结果，交给 GUI 的前处理页。
