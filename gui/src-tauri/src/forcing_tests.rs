@@ -125,6 +125,46 @@ fn build_convert_args_adds_height_when_given() {
     assert_eq!(args[i + 1], "10,12.5,12.5");
 }
 
+#[test]
+fn gap_repair_args_keep_science_options_explicit_and_auditable() {
+    let slots = vec![SlotChoice {
+        index: 4,
+        name: "Rainf".into(),
+        units: "kg/m2/s".into(),
+        also_add: vec!["Snowf".into()],
+    }];
+    let options = GapOptions {
+        short_gap: 3,
+        utc_offset: Some(9.5),
+        latitude: Some(-37.73),
+        longitude: Some(145.01),
+        era5: Some("/cache/era5".into()),
+        min_overlap: 24,
+    };
+    let args = build_gap_args(
+        "forcing-repair",
+        "source.nc",
+        Some("repaired.nc"),
+        &slots,
+        &options,
+    );
+    for pair in [
+        ["--slot", "4=Rainf:kg/m2/s+Snowf"],
+        ["--short-gap", "3"],
+        ["--utc-offset", "9.5"],
+        ["--lat", "-37.73"],
+        ["--lon", "145.01"],
+        ["--era5", "/cache/era5"],
+        ["--min-overlap", "24"],
+        ["--json", "1"],
+    ] {
+        assert!(
+            args.windows(2).any(|window| window == pair),
+            "missing {pair:?} in {args:?}"
+        );
+    }
+}
+
 fn probe_with_shape(name: &str, dimensions: &[(&str, usize)]) -> Probe {
     Probe {
         variables: vec![name.into()],

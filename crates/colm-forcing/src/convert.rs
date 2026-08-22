@@ -21,6 +21,7 @@ pub fn identity(src: &Path, dst: &Path) -> Result<()> {
     ensure_parent(dst)?;
     let mut fout =
         netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+    copy_global_attributes(&fin, &mut fout)?;
 
     for d in fin.dimensions() {
         fout.add_dimension(&d.name(), d.len())
@@ -145,6 +146,7 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
     ensure_parent(dst)?;
     let mut fout =
         netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+    copy_global_attributes(&fin, &mut fout)?;
 
     for d in fin.dimensions() {
         fout.add_dimension(&d.name(), d.len())
@@ -277,6 +279,13 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         };
         let dims: Vec<String> = v.dimensions().iter().map(|d| d.name()).collect();
         let dim_refs: Vec<&str> = dims.iter().map(|s| s.as_str()).collect();
+        if name.ends_with("_gapfill_qc") {
+            let vals: Vec<u8> = v.get_values(netcdf::Extents::All)?;
+            let mut out = fout.add_variable::<u8>(&name, &dim_refs)?;
+            copy_attributes(&v, &mut out)?;
+            out.put_values(&vals, netcdf::Extents::All)?;
+            continue;
+        }
         let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
         let mut out = fout.add_variable::<f64>(&name, &dim_refs)?;
         copy_attributes(&v, &mut out)?;
@@ -317,7 +326,7 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
 /// （都是 `netcdf::open` + `netcdf::create`）。修这个 bug 时我的
 /// 查找替换先命中了 `identity` 那一份，对着没改到的地方调试了几轮 ——
 /// 和上一次修 `_FillValue` 时踩的是同一个坑。
-fn ensure_parent(dst: &Path) -> Result<()> {
+pub(crate) fn ensure_parent(dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
@@ -337,7 +346,7 @@ fn ensure_parent(dst: &Path) -> Result<()> {
 /// 错也会有三份。**
 ///
 /// 源文件常是 `float32` 而产物统一 `f64`，所以两种类型都试一遍。
-fn copy_attributes(from: &netcdf::Variable, to: &mut netcdf::VariableMut) -> Result<()> {
+pub(crate) fn copy_attributes(from: &netcdf::Variable, to: &mut netcdf::VariableMut) -> Result<()> {
     let fill = from
         .fill_value::<f64>()
         .ok()
@@ -352,6 +361,15 @@ fn copy_attributes(from: &netcdf::Variable, to: &mut netcdf::VariableMut) -> Res
         }
         if let Ok(val) = a.value() {
             to.put_attribute(a.name(), val)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_global_attributes(from: &netcdf::File, to: &mut netcdf::FileMut) -> Result<()> {
+    for attribute in from.attributes() {
+        if let Ok(value) = attribute.value() {
+            to.add_attribute(attribute.name(), value)?;
         }
     }
     Ok(())

@@ -103,6 +103,66 @@ fn a_renamed_and_rescaled_variable_lands_in_the_slot_with_the_canonical_name() {
 }
 
 #[test]
+fn conversion_preserves_global_timezone_and_gapfill_provenance() {
+    let dir = std::env::temp_dir().join("colm-convert-global-attrs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    {
+        let mut file = netcdf::create(&src).unwrap();
+        file.add_attribute("time_shown_in", "UTC").unwrap();
+        file.add_attribute("colm_gapfill_timezone_source", "manual_override")
+            .unwrap();
+        file.add_dimension("time", 2).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        time.put_values(&[0.0, 3600.0], netcdf::Extents::All)
+            .unwrap();
+        let mut tair = file.add_variable::<f64>("Tair", &["time"]).unwrap();
+        tair.put_attribute("units", "K").unwrap();
+        tair.put_values(&[280.0, 281.0], netcdf::Extents::All)
+            .unwrap();
+        let mut qc = file
+            .add_variable::<u8>("Tair_gapfill_qc", &["time"])
+            .unwrap();
+        qc.put_attribute("flag_meanings", "observed interpolated")
+            .unwrap();
+        qc.put_values(&[0, 1], netcdf::Extents::All).unwrap();
+    }
+    let dst = dir.join("converted.nc");
+    super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots: vec![super::SlotPlan {
+                index: 1,
+                source_name: "Tair".into(),
+                source_units: "K".into(),
+                also_add: Vec::new(),
+            }],
+            heights: None,
+        },
+    )
+    .unwrap();
+    let output = netcdf::open(dst).unwrap();
+    for name in ["time_shown_in", "colm_gapfill_timezone_source"] {
+        assert!(
+            output.attribute(name).is_some(),
+            "global attribute {name} was lost"
+        );
+    }
+    assert_eq!(
+        format!(
+            "{:?}",
+            output.variable("Tair_gapfill_qc").unwrap().vartype()
+        ),
+        "Int(U8)",
+        "gap-fill provenance must remain an integer flag variable"
+    );
+}
+
+#[test]
 fn two_sources_sum_into_one_slot_and_both_survive_in_the_output() {
     let dir = std::env::temp_dir().join("colm-convert-sum");
     let _ = std::fs::remove_dir_all(&dir);

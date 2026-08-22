@@ -59,6 +59,26 @@ pub fn convert_units(from: &str, to: &str, values: &[f64]) -> Result<Vec<f64>> {
     }
 }
 
+/// 把规范槽位单位换回源文件单位。缺测修复发生在格式标准化之前，ERA5-Land
+/// donor 用的是规范单位，而中间产物必须仍保持源文件的单位契约。
+pub fn from_canonical(canonical: &str, target: &str, values: &[f64]) -> Result<Vec<f64>> {
+    if canonical == target {
+        return Ok(values.to_vec());
+    }
+    match TABLE
+        .iter()
+        .find(|(f, t, _, _)| *f == target && *t == canonical)
+    {
+        Some((_, _, scale, offset)) if *scale != 0.0 => {
+            Ok(values.iter().map(|v| (v - offset) / scale).collect())
+        }
+        _ => bail!(
+            "no known conversion from canonical {canonical:?} back to source unit {target:?}; \
+             fix the source unit before gap repair"
+        ),
+    }
+}
+
 #[cfg(test)]
 #[path = "units_tests.rs"]
 mod units_tests;

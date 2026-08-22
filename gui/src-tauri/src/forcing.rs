@@ -227,6 +227,146 @@ pub async fn convert_forcing(
     Ok(dst)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapVariable {
+    pub slot: usize,
+    pub variable: String,
+    pub missing: usize,
+    pub short_missing: usize,
+    pub long_missing: usize,
+    pub longest_gap: usize,
+    pub interpolated: usize,
+    pub era5_corrected: usize,
+    pub unresolved: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapReport {
+    pub timezone_offset_hours: f64,
+    pub timezone_source: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub start_date: String,
+    pub end_date: String,
+    pub missing: usize,
+    pub unresolved: usize,
+    pub needs_era5: bool,
+    pub variables: Vec<GapVariable>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GapOptions {
+    pub short_gap: usize,
+    pub utc_offset: Option<f64>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub era5: Option<String>,
+    pub min_overlap: usize,
+}
+
+fn build_gap_args(
+    command: &str,
+    src: &str,
+    dst: Option<&str>,
+    slots: &[SlotChoice],
+    options: &GapOptions,
+) -> Vec<String> {
+    let mut args = vec![command.to_string(), src.to_string()];
+    if let Some(dst) = dst {
+        args.push(dst.to_string());
+    }
+    for slot in slots {
+        let mut spec = format!("{}={}:{}", slot.index, slot.name, slot.units);
+        for extra in &slot.also_add {
+            spec.push('+');
+            spec.push_str(extra);
+        }
+        args.push("--slot".into());
+        args.push(spec);
+    }
+    args.push("--short-gap".into());
+    args.push(options.short_gap.to_string());
+    if let Some(offset) = options.utc_offset {
+        args.push("--utc-offset".into());
+        args.push(offset.to_string());
+    }
+    if let Some(latitude) = options.latitude {
+        args.push("--lat".into());
+        args.push(latitude.to_string());
+    }
+    if let Some(longitude) = options.longitude {
+        args.push("--lon".into());
+        args.push(longitude.to_string());
+    }
+    if let Some(era5) = options
+        .era5
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push("--era5".into());
+        args.push(era5.to_string());
+    }
+    args.push("--min-overlap".into());
+    args.push(options.min_overlap.to_string());
+    args.push("--json".into());
+    args.push("1".into());
+    args
+}
+
+#[tauri::command]
+pub async fn probe_forcing_gaps(
+    src: String,
+    slots: Vec<SlotChoice>,
+    options: GapOptions,
+) -> Result<GapReport, String> {
+    let args = build_gap_args("forcing-gap-probe", &src, None, &slots, &options);
+    let json = crate::sidecar::capture(&args)?;
+    serde_json::from_str(&json).map_err(|error| {
+        format!("colm-cli forcing-gap-probe 的输出解析不了（两边的字段可能已经对不上）：{error}")
+    })
+}
+
+#[tauri::command]
+pub async fn repair_forcing(
+    src: String,
+    dst: String,
+    slots: Vec<SlotChoice>,
+    options: GapOptions,
+) -> Result<GapReport, String> {
+    if std::path::Path::new(&src) == std::path::Path::new(&dst) {
+        return Err("修复产物不能覆盖原始强迫场".into());
+    }
+    let args = build_gap_args("forcing-repair", &src, Some(&dst), &slots, &options);
+    let json = crate::sidecar::capture(&args)?;
+    serde_json::from_str(&json).map_err(|error| {
+        format!("colm-cli forcing-repair 的输出解析不了（两边的字段可能已经对不上）：{error}")
+    })
+}
+
+#[tauri::command]
+pub async fn download_era5land(
+    dst: String,
+    latitude: f64,
+    longitude: f64,
+    start: String,
+    end: String,
+) -> Result<String, String> {
+    let args = vec![
+        "era5land-download".into(),
+        dst.clone(),
+        "--lat".into(),
+        latitude.to_string(),
+        "--lon".into(),
+        longitude.to_string(),
+        "--start".into(),
+        start,
+        "--end".into(),
+        end,
+    ];
+    crate::sidecar::capture(&args)?;
+    Ok(dst)
+}
+
 fn required_string(doc: &colm_namelist::Document, path: &str) -> Result<String, String> {
     match doc.get(path) {
         Some(colm_namelist::Value::Str(value)) if !value.trim().is_empty() => Ok(value.clone()),

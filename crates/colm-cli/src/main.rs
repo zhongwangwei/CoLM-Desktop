@@ -78,6 +78,15 @@ usage:
   colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
                            # 与独立 bin forcing-convert 同样的行为，供 GUI 走
                            # sidecar 调用；没给 --slot 的槽位走自动匹配
+  colm-cli forcing-gap-probe <src.nc> [--slot N=name:units[+extra] ...]
+                           [--short-gap N] [--utc-offset HOURS] [--lat LAT --lon LON] [--json 1]
+                           # 只诊断缺口与时区，不修改源文件
+  colm-cli forcing-repair <src.nc> <dst.nc> [--slot N=name:units[+extra] ...]
+                           [--short-gap N] [--utc-offset HOURS] [--lat LAT --lon LON]
+                           [--era5 FILE_OR_DIR] [--min-overlap N] [--json 1]
+                           # 写一份带逐时 QC 的修复中间文件，原文件不动
+  colm-cli era5land-download <dst-dir> --lat LAT --lon LON --start YYYY-MM-DD --end YYYY-MM-DD
+                           # 用本机 Python cdsapi 和 ~/.cdsapirc 下载对应 0.1° 格点
 ";
 
 fn main() -> Result<()> {
@@ -186,6 +195,33 @@ fn main() -> Result<()> {
                 &opts.positional_at(1, "a destination file")?,
                 &opts.get_all("--slot"),
                 opts.get("--height").as_deref(),
+            )?;
+        }
+        "forcing-gap-probe" => {
+            let src = opts.positional_at(0, "a source forcing file")?;
+            let plan = forcing_repair_plan(&src, &opts)?;
+            let summary = colm_forcing::diagnose_file(&src, &plan)?;
+            print_repair_summary(&summary, opts.get("--json").is_some())?;
+        }
+        "forcing-repair" => {
+            let src = opts.positional_at(0, "a source forcing file")?;
+            let dst = opts.positional_at(1, "a repaired destination file")?;
+            let plan = forcing_repair_plan(&src, &opts)?;
+            let summary = colm_forcing::repair_file(&src, &dst, &plan)?;
+            if opts.get("--json").is_some() {
+                print_repair_summary(&summary, true)?;
+            } else {
+                println!("wrote {}", dst.display());
+                print_repair_summary(&summary, false)?;
+            }
+        }
+        "era5land-download" => {
+            cmd_era5land_download(
+                &opts.positional_at(0, "an ERA5-Land destination directory")?,
+                opts.need_f64("--lat")?,
+                opts.need_f64("--lon")?,
+                &opts.need_str("--start")?,
+                &opts.need_str("--end")?,
             )?;
         }
         other => {
@@ -2211,6 +2247,287 @@ fn cmd_forcing_convert(
     }
     Ok(())
 }
+
+fn forcing_repair_plan(src: &Path, opts: &Opts) -> Result<colm_forcing::RepairPlan> {
+    let mut given = opts
+        .get_all("--slot")
+        .iter()
+        .map(|spec| colm_forcing::parse_slot_spec(spec))
+        .collect::<Result<Vec<_>>>()?;
+    let summary = colm_forcing::summarize(src)?;
+    let overrides = given
+        .iter()
+        .map(|slot| (slot.index, slot.source_name.clone()))
+        .collect::<Vec<_>>();
+    let (resolved, missing) = colm_forcing::resolve_with(&summary.variables, &overrides);
+    if !missing.is_empty() {
+        for problem in &missing {
+            eprintln!("  {problem}");
+        }
+        bail!("{} forcing slot(s) unresolved", missing.len());
+    }
+    let file = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    for (position, slot) in colm_forcing::SLOTS.iter().enumerate() {
+        if given.iter().any(|given| given.index == slot.index) {
+            continue;
+        }
+        let Some(name) = resolved.vname[position] else {
+            continue;
+        };
+        given.push(colm_forcing::convert::SlotPlan {
+            index: slot.index,
+            source_name: name.to_string(),
+            source_units: variable_units(&file, name).unwrap_or_default(),
+            also_add: Vec::new(),
+        });
+    }
+    let parse_optional = |name: &str| -> Result<Option<f64>> {
+        opts.get(name)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .with_context(|| format!("{name} {value:?} is not a number"))
+            })
+            .transpose()
+    };
+    Ok(colm_forcing::RepairPlan {
+        slots: given
+            .into_iter()
+            .map(|slot| colm_forcing::RepairSlot {
+                index: slot.index,
+                source_name: slot.source_name,
+                source_units: slot.source_units,
+                also_add: slot.also_add,
+            })
+            .collect(),
+        short_gap_max: opts
+            .get("--short-gap")
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("--short-gap must be a non-negative number of time steps")?
+            .unwrap_or(3),
+        manual_utc_offset: parse_optional("--utc-offset")?,
+        latitude: parse_optional("--lat")?,
+        longitude: parse_optional("--lon")?,
+        era5: opts.get("--era5").map(PathBuf::from),
+        min_overlap: opts
+            .get("--min-overlap")
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("--min-overlap must be a non-negative sample count")?
+            .unwrap_or(24),
+    })
+}
+
+#[derive(serde::Serialize)]
+struct RepairSummaryJson<'a> {
+    timezone_offset_hours: f64,
+    timezone_source: &'static str,
+    latitude: f64,
+    longitude: f64,
+    start_date: String,
+    end_date: String,
+    missing: usize,
+    unresolved: usize,
+    needs_era5: bool,
+    variables: Vec<RepairVariableJson<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct RepairVariableJson<'a> {
+    slot: usize,
+    variable: &'a str,
+    missing: usize,
+    short_missing: usize,
+    long_missing: usize,
+    longest_gap: usize,
+    interpolated: usize,
+    era5_corrected: usize,
+    unresolved: usize,
+}
+
+fn repair_summary_json(summary: &colm_forcing::RepairSummary) -> RepairSummaryJson<'_> {
+    RepairSummaryJson {
+        timezone_offset_hours: summary.timezone.offset_hours,
+        timezone_source: summary.timezone.source.as_str(),
+        latitude: summary.latitude,
+        longitude: summary.longitude,
+        start_date: unix_date(summary.start_utc),
+        end_date: unix_date(summary.end_utc),
+        missing: summary.missing(),
+        unresolved: summary.unresolved(),
+        needs_era5: summary.needs_era5(),
+        variables: summary
+            .variables
+            .iter()
+            .map(|variable| RepairVariableJson {
+                slot: variable.slot,
+                variable: &variable.variable,
+                missing: variable.missing,
+                short_missing: variable.short_missing,
+                long_missing: variable.long_missing,
+                longest_gap: variable.longest_gap,
+                interpolated: variable.interpolated,
+                era5_corrected: variable.era5_corrected,
+                unresolved: variable.unresolved,
+            })
+            .collect(),
+    }
+}
+
+fn unix_date(seconds: i64) -> String {
+    let (year, month, day) = colm_forcing::civil_from_days(seconds.div_euclid(86400));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn print_repair_summary(summary: &colm_forcing::RepairSummary, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&repair_summary_json(summary))?
+        );
+        return Ok(());
+    }
+    println!(
+        "timezone UTC{:+} ({}) at {}, {}; missing={}, unresolved={}",
+        summary.timezone.offset_hours,
+        summary.timezone.source.as_str(),
+        summary.latitude,
+        summary.longitude,
+        summary.missing(),
+        summary.unresolved()
+    );
+    for variable in &summary.variables {
+        println!(
+            "  slot {} {}: missing={}, short={}, long={}, interpolated={}, era5={}, unresolved={}",
+            variable.slot,
+            variable.variable,
+            variable.missing,
+            variable.short_missing,
+            variable.long_missing,
+            variable.interpolated,
+            variable.era5_corrected,
+            variable.unresolved
+        );
+    }
+    Ok(())
+}
+
+fn cmd_era5land_download(
+    destination: &Path,
+    latitude: f64,
+    longitude: f64,
+    start: &str,
+    end: &str,
+) -> Result<()> {
+    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+        bail!("ERA5-Land point is outside the valid latitude/longitude range");
+    }
+    let start_date = parse_date(start)?;
+    let end_date = parse_date(end)?;
+    if start_date > end_date {
+        bail!("ERA5-Land start date {start} is after end date {end}");
+    }
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("cannot create {}", destination.display()))?;
+    let script = destination.join("download_era5land.py");
+    std::fs::write(&script, ERA5LAND_DOWNLOADER)
+        .with_context(|| format!("cannot write {}", script.display()))?;
+
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|program| {
+            std::process::Command::new(program)
+                .arg("-c")
+                .arg("import cdsapi")
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+        .context(
+            "Python cdsapi is unavailable. Install it with `python -m pip install cdsapi`, \
+             configure ~/.cdsapirc, and accept the ERA5-Land dataset terms in CDS",
+        )?;
+    let grid_lat = (latitude * 10.0).round() / 10.0;
+    let grid_lon = (longitude * 10.0).round() / 10.0;
+    let output = std::process::Command::new(python)
+        .arg(&script)
+        .arg(destination)
+        .arg(format!("{grid_lat:.1}"))
+        .arg(format!("{grid_lon:.1}"))
+        .arg(start)
+        .arg(end)
+        .output()
+        .with_context(|| format!("cannot launch {python}"))?;
+    if !output.status.success() {
+        bail!(
+            "ERA5-Land download failed. Check ~/.cdsapirc and accept the dataset terms at \
+             https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
+}
+
+const ERA5LAND_DOWNLOADER: &str = r#"#!/usr/bin/env python3
+import calendar
+import json
+import sys
+from collections import defaultdict
+from datetime import date, timedelta
+from pathlib import Path
+
+import cdsapi
+
+out = Path(sys.argv[1])
+lat = float(sys.argv[2])
+lon = float(sys.argv[3])
+start = date.fromisoformat(sys.argv[4]) - timedelta(days=1)
+end = date.fromisoformat(sys.argv[5]) + timedelta(days=1)
+days = defaultdict(list)
+cursor = start
+while cursor <= end:
+    days[(cursor.year, cursor.month)].append(f"{cursor.day:02d}")
+    cursor += timedelta(days=1)
+
+variables = [
+    "2m_temperature",
+    "2m_dewpoint_temperature",
+    "surface_pressure",
+    "total_precipitation",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "surface_solar_radiation_downwards",
+    "surface_thermal_radiation_downwards",
+]
+times = [f"{hour:02d}:00" for hour in range(24)]
+client = cdsapi.Client()
+manifest = []
+for (year, month), selected_days in sorted(days.items()):
+    target = out / f"era5land_{year:04d}_{month:02d}.nc"
+    request = {
+        "variable": variables,
+        "year": [f"{year:04d}"],
+        "month": [f"{month:02d}"],
+        "day": selected_days,
+        "time": times,
+        "area": [lat, lon, lat, lon],
+        "data_format": "netcdf",
+        "download_format": "unarchived",
+    }
+    manifest.append({"dataset": "reanalysis-era5-land", "target": str(target), "request": request})
+    if target.exists() and target.stat().st_size > 0:
+        print(f"cached {target}", flush=True)
+        continue
+    print(f"downloading {target}", flush=True)
+    client.retrieve("reanalysis-era5-land", request, str(target))
+
+(out / "era5land_request_manifest.json").write_text(
+    json.dumps(manifest, indent=2), encoding="utf-8"
+)
+print(f"ERA5-Land cache ready: {out}")
+"#;
 
 /// 删掉一个算例已有的 history 文件，返回删了几个。
 ///

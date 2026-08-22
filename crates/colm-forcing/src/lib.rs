@@ -18,6 +18,7 @@
 pub mod check;
 pub mod civil;
 pub mod convert;
+pub mod gapfill;
 pub mod met;
 pub mod render;
 pub mod slots;
@@ -26,6 +27,12 @@ pub mod units;
 pub use check::{check, MetSummary, REQUIRED_VARS};
 pub use civil::{civil_from_days, days_from_civil, Stamp};
 pub use convert::{canonical_units, parse_heights, parse_slot_spec};
+pub use gapfill::{
+    analyze_gaps, correction, decide_timezone, diagnose_file, fill_short_gaps, nearest_grid_point,
+    repair_file, CorrectionKind, RepairPlan, RepairSlot, RepairSummary, TimezoneSource,
+    VariableKind, VariableRepairSummary, QC_ERA5_CORRECTED, QC_INTERPOLATED, QC_OBSERVED,
+    QC_UNRESOLVED,
+};
 pub use met::summarize;
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};

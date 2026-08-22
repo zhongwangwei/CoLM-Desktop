@@ -39,6 +39,18 @@ let confirmed = false;
 let dstDir = '';
 /** 上一次转换成功的产物路径。`null` 表示还没转换过，或者刚探了新文件。 */
 let lastResult = null;
+/** 最近一次缺测诊断；映射或修复设置变化就失效。 */
+let gapReport = null;
+/** 已修复中间文件。没有缺测时保持 null，转换直接读原文件。 */
+let repairedSource = null;
+let gapSettings = {
+  shortGap: 3,
+  utcOffset: '',
+  latitude: '',
+  longitude: '',
+  era5: '',
+  minOverlap: 24,
+};
 
 globalThis.addEventListener?.('colm:prep-site-invalidated', () => {
   lastResult = null;
@@ -68,6 +80,8 @@ $('fprobe').onclick = async () => {
     unitsInput = probe.slots.map(s => s.units ?? '');
     extras = probe.slots.map(() => []);
     heights = { v: probe.height_v, t: probe.height_t, q: probe.height_q };
+    if (!gapSettings.latitude && $('slat')?.value) gapSettings.latitude = $('slat').value;
+    if (!gapSettings.longitude && $('slon')?.value) gapSettings.longitude = $('slon').value;
     // 产物目录只在还没填过时用后端建议的那个 —— 用户改过就别再动它，
     // 换一份源文件重新探测不该把他填的路径冲掉。
     if (!dstDir) {
@@ -77,6 +91,8 @@ $('fprobe').onclick = async () => {
     }
     confirmed = false;
     lastResult = null;
+    gapReport = null;
+    repairedSource = null;
     Object.assign(state.prepArtifacts, { forcingFile: null, forcingDir: null });
     globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
     renderCards();
@@ -92,7 +108,43 @@ function renderCards() {
   if (!probe) return;
   box.appendChild(slotsCard());
   box.appendChild(timingCard());
+  box.appendChild(gapCard());
   box.appendChild(convertCard());
+}
+
+function invalidateGap() {
+  gapReport = null;
+  repairedSource = null;
+  lastResult = null;
+}
+
+function selectedSlots() {
+  return probe.slots
+    .map((s, i) => ({ s, i }))
+    .filter(({ i }) => picks[i])
+    .map(({ s, i }) => ({
+      index: s.index,
+      name: picks[i],
+      units: unitsInput[i].trim(),
+      also_add: extras[i] ?? [],
+    }));
+}
+
+function optionalNumber(value) {
+  if (value === '' || value == null) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function gapOptions(includeEra5 = true) {
+  return {
+    short_gap: Math.max(0, Math.trunc(Number(gapSettings.shortGap) || 0)),
+    utc_offset: optionalNumber(gapSettings.utcOffset),
+    latitude: optionalNumber(gapSettings.latitude),
+    longitude: optionalNumber(gapSettings.longitude),
+    era5: includeEra5 && gapSettings.era5.trim() ? gapSettings.era5.trim() : null,
+    min_overlap: Math.max(1, Math.trunc(Number(gapSettings.minOverlap) || 24)),
+  };
 }
 
 // ------------------------------------------------------------ ② 槽位映射
@@ -197,6 +249,7 @@ function slotRow(i) {
     unitsInput[i] = sel.value && sel.value === s.guessed ? (s.units ?? '') : '';
     if (s.index !== 4) extras[i] = []; // 只有降水槽用得到 also_add
     confirmed = false;
+    invalidateGap();
     renderCards();
   };
   tdVar.appendChild(sel);
@@ -243,6 +296,7 @@ function slotRow(i) {
     extraSel.onchange = () => {
       extras[i] = extraSel.value ? [extraSel.value] : [];
       confirmed = false;
+      invalidateGap();
       renderCards();
     };
     tdVar.appendChild(extraSel);
@@ -263,6 +317,7 @@ function slotRow(i) {
   uInp.onchange = () => {
     unitsInput[i] = uInp.value.trim();
     confirmed = false;
+    invalidateGap();
     renderCards();
   };
   tdUnits.appendChild(uInp);
@@ -330,7 +385,194 @@ function timingCard() {
   return card;
 }
 
-// --------------------------------------------------------------- ④ 转换
+// ----------------------------------------------- ④ 缺测诊断、时区与 ERA5-Land
+
+function gapCard() {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <h3>缺测诊断与修复</h3>
+    <div class="ch">先检查被映射的变量。短缺口按变量类型插值；长缺口在把站点时间换算到 UTC 后，
+      读取 ERA5-Land 最近 0.1° 格点，并只用观测重叠期做偏差订正。原始文件不会被覆盖，
+      产物逐时记录观测、插值或 ERA5-Land 来源。</div>
+    <div class="row" style="margin-top:12px">
+      <div class="field"><label>短缺口上限（时间步）</label><input class="input" id="gap-short" type="number" min="0" step="1"></div>
+      <div class="field"><label>订正最少重叠样本</label><input class="input" id="gap-overlap" type="number" min="1" step="1"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>站点纬度</label><input class="input" id="gap-lat" type="number" min="-90" max="90" step="any" placeholder="优先读取文件"></div>
+      <div class="field"><label>站点经度</label><input class="input" id="gap-lon" type="number" min="-180" max="180" step="any" placeholder="优先读取文件"></div>
+      <div class="field"><label>人工 UTC 偏移（小时）</label><input class="input" id="gap-offset" type="number" min="-12" max="14" step="0.25" placeholder="自动判断"></div>
+    </div>
+    <div class="pill-row" style="margin-top:12px"><button class="btn-ghost" id="gap-probe">诊断缺测与时区</button></div>
+    <div id="gap-result"></div>`;
+
+  const bind = (selector, key, fallback = '') => {
+    const input = card.querySelector(selector);
+    input.value = gapSettings[key] ?? fallback;
+    input.onchange = () => {
+      gapSettings[key] = input.value;
+      invalidateGap();
+      renderCards();
+    };
+  };
+  bind('#gap-short', 'shortGap', 3);
+  bind('#gap-overlap', 'minOverlap', 24);
+  bind('#gap-lat', 'latitude');
+  bind('#gap-lon', 'longitude');
+  bind('#gap-offset', 'utcOffset');
+  card.querySelector('#gap-probe').onclick = diagnoseGaps;
+
+  const result = card.querySelector('#gap-result');
+  if (gapReport) result.appendChild(gapReportView());
+  return card;
+}
+
+function gapReportView() {
+  const box = document.createElement('div');
+  const timezoneLabels = {
+    manual_override: '人工覆盖',
+    file_metadata: '文件元数据',
+    longitude_inferred_offset: '按经度推断（不是行政时区）',
+  };
+  box.innerHTML = `
+    <table style="margin-top:12px">
+      <tr><th>UTC 偏移</th><td>UTC${gapReport.timezone_offset_hours >= 0 ? '+' : ''}${gapReport.timezone_offset_hours} · ${timezoneLabels[gapReport.timezone_source] ?? gapReport.timezone_source}</td></tr>
+      <tr><th>ERA5-Land 格点定位</th><td>${gapReport.latitude}, ${gapReport.longitude}</td></tr>
+      <tr><th>数据范围（UTC 日期）</th><td>${gapReport.start_date} — ${gapReport.end_date}</td></tr>
+      <tr><th>缺测总数</th><td class="${gapReport.missing ? 'warn' : ''}">${gapReport.missing}</td></tr>
+    </table>
+    <table style="margin-top:10px">
+      <tr><th>槽位</th><th>变量</th><th>缺测</th><th>短缺口</th><th>需 ERA5</th><th>最长</th><th>已插值</th><th>ERA5-Land</th></tr>
+    </table>`;
+  const table = box.querySelectorAll('table')[1];
+  for (const row of gapReport.variables) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.slot}</td><td></td><td>${row.missing}</td><td>${row.short_missing}</td><td class="${row.long_missing ? 'warn' : ''}">${row.long_missing}</td><td>${row.longest_gap}</td><td>${row.interpolated}</td><td>${row.era5_corrected}</td>`;
+    tr.children[1].textContent = row.variable;
+    table.appendChild(tr);
+  }
+
+  if (gapReport.missing === 0) {
+    const ready = document.createElement('p');
+    ready.className = 'muted mini';
+    ready.textContent = '没有缺测，原文件可直接进入标准化转换；时区判定仍会保留在诊断记录中。';
+    box.appendChild(ready);
+    return box;
+  }
+
+  if (gapReport.needs_era5) {
+    const field = document.createElement('div');
+    field.className = 'field';
+    field.style.marginTop = '12px';
+    field.innerHTML = `<label>ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="gap-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="gap-era5-pick">选择…</button></div>`;
+    const input = field.querySelector('#gap-era5');
+    if (!gapSettings.era5 && dstDir) gapSettings.era5 = joinPath(dstDir, '.era5land');
+    input.value = gapSettings.era5;
+    input.onchange = () => { gapSettings.era5 = input.value.trim(); repairedSource = null; renderCards(); };
+    field.querySelector('#gap-era5-pick').onclick = async () => {
+      try {
+        const picked = await invoke('pick_folder', { key: 'gap-era5' });
+        if (!picked) return;
+        gapSettings.era5 = picked;
+        repairedSource = null;
+        renderCards();
+      } catch (error) { status(error); }
+    };
+    box.appendChild(field);
+    const note = document.createElement('p');
+    note.className = 'muted mini';
+    note.textContent = '可选择已有 ERA5-Land NetCDF 缓存；也可用本机 CDS API 下载。下载需要先配置 ~/.cdsapirc 并接受 ERA5-Land 数据许可。';
+    box.appendChild(note);
+  }
+
+  const bar = document.createElement('div');
+  bar.className = 'pill-row';
+  bar.style.marginTop = '10px';
+  if (gapReport.needs_era5) {
+    const download = document.createElement('button');
+    download.className = 'btn-ghost';
+    download.textContent = '下载对应 ERA5-Land 格点';
+    download.disabled = !gapSettings.era5.trim();
+    download.onclick = downloadEra5;
+    bar.appendChild(download);
+  }
+  const repair = document.createElement('button');
+  repair.className = 'btn-next';
+  repair.textContent = '生成已修复中间文件';
+  repair.disabled = gapReport.needs_era5 && !gapSettings.era5.trim();
+  repair.onclick = repairGaps;
+  bar.appendChild(repair);
+  box.appendChild(bar);
+  if (repairedSource) {
+    const done = document.createElement('p');
+    done.className = 'mini';
+    done.append('修复完成：');
+    const code = document.createElement('code');
+    code.textContent = repairedSource;
+    done.appendChild(code);
+    box.appendChild(done);
+  }
+  return box;
+}
+
+async function diagnoseGaps() {
+  if (!confirmed) { status('先确认槽位映射，再诊断缺测'); return; }
+  const missingUnits = missingUnitSlots();
+  if (missingUnits.length) { status('先补齐所有已选变量的源单位'); return; }
+  try {
+    gapReport = await invoke('probe_forcing_gaps', {
+      src: srcPath,
+      slots: selectedSlots(),
+      options: gapOptions(false),
+    });
+    repairedSource = null;
+    status(gapReport.missing ? `发现 ${gapReport.missing} 个缺测值` : '未发现缺测值');
+  } catch (error) {
+    gapReport = null;
+    status(error);
+  }
+  renderCards();
+}
+
+async function downloadEra5() {
+  if (!gapReport || !gapSettings.era5.trim()) return;
+  try {
+    status('正在通过 CDS API 下载 ERA5-Land；长时间序列可能需要几分钟…');
+    await invoke('download_era5land', {
+      dst: gapSettings.era5.trim(),
+      latitude: gapReport.latitude,
+      longitude: gapReport.longitude,
+      start: gapReport.start_date,
+      end: gapReport.end_date,
+    });
+    status('ERA5-Land 对应格点已缓存，可以生成修复文件');
+  } catch (error) { status(error); }
+}
+
+async function repairGaps() {
+  if (!gapReport || !dstDir.trim()) { status('先诊断缺测并填写产物目录'); return; }
+  const stem = state.prepArtifacts.siteStem;
+  if (!stem) { status('先生成站点文件'); return; }
+  const repaired = joinPath(joinPath(dstDir.trim(), '.colm-gapfill'), `${stem}_Met_repaired.nc`);
+  try {
+    gapReport = await invoke('repair_forcing', {
+      src: srcPath,
+      dst: repaired,
+      slots: selectedSlots(),
+      options: gapOptions(true),
+    });
+    if (gapReport.unresolved) throw new Error(`仍有 ${gapReport.unresolved} 个缺测值没有解决`);
+    repairedSource = repaired;
+    status('缺测修复完成，逐时来源已写入 *_gapfill_qc');
+  } catch (error) {
+    repairedSource = null;
+    status(error);
+  }
+  renderCards();
+}
+
+// --------------------------------------------------------------- ⑤ 转换
 
 function convertCard() {
   const card = document.createElement('div');
@@ -351,6 +593,9 @@ function convertCard() {
   }
   if (!state.prepArtifacts.siteStem) reasons.push('先在“站点数据”子步骤填写站点名并生成站点文件');
   if (!dstDir.trim()) reasons.push('先填写强迫场产物目录');
+  if (!gapReport) reasons.push('先完成缺测与时区诊断');
+  else if (gapReport.missing > 0 && !repairedSource) reasons.push('先生成已修复中间文件');
+  else if (gapReport.unresolved > 0) reasons.push(`仍有 ${gapReport.unresolved} 个缺测值未解决`);
 
   card.innerHTML = `
     <h3>转换</h3>
@@ -409,18 +654,15 @@ async function doConvert() {
   const btn = $('fconvert');
   if (btn) btn.disabled = true;
   try {
-    const slots = probe.slots
-      .map((s, i) => ({ s, i }))
-      .filter(({ i }) => picks[i])
-      .map(({ s, i }) => ({
-        index: s.index,
-        name: picks[i],
-        units: unitsInput[i].trim(),
-        also_add: extras[i] ?? [],
-      }));
+    const slots = selectedSlots();
     const heightsReady = heights.v != null && heights.t != null && heights.q != null;
     const heightsArg = heightsReady ? [heights.v, heights.t, heights.q] : null;
-    lastResult = await invoke('convert_forcing', { src, dst, slots, heights: heightsArg });
+    lastResult = await invoke('convert_forcing', {
+      src: repairedSource ?? src,
+      dst,
+      slots,
+      heights: heightsArg,
+    });
     Object.assign(state.prepArtifacts, { forcingFile: lastResult, forcingDir: dir });
     $('forcingdir').value = dir;
     if (state.prepArtifacts.siteFile) {

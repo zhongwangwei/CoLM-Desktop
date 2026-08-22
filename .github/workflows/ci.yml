@@ -88,6 +88,7 @@ jobs:
           node gui/tests/i18n.mjs
           node gui/tests/sitepaths.mjs
           node gui/tests/prep-workbench.mjs
+          node gui/tests/forcing-gapfill.mjs
           node gui/tests/results.mjs
 
       - name: Clippy
