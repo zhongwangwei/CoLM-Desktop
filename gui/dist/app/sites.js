@@ -370,7 +370,7 @@ export function renderSites(r = {}) {
 
   for (const s of sites) {
     const d = document.createElement('div');
-    d.className = 'case';
+    d.className = 'case site-row';
     d.setAttribute('aria-selected', String(state.pickedSite?.name === s.name));
     // 多选是批量的入口。**流水线作用于「一组」，选 1 个只是 N=1** ——
     // 批量另开一套界面的话，就有两条流水线要各自维护，而它们迟早会分叉。
@@ -390,8 +390,12 @@ export function renderSites(r = {}) {
     lab.appendChild(cb);
     lab.onclick = e => e.stopPropagation();   // 勾选不等于「选中这一个」
     d.appendChild(lab);
-    d.appendChild(document.createTextNode(s.name));
+    const name = document.createElement('span');
+    name.className = 'site-name';
+    name.textContent = s.name;
+    d.appendChild(name);
     const small = document.createElement('small');
+    small.className = 'site-meta';
     const tags = [];
     // 算例状态排在最前：它是**这一行现在处在流水线哪一段**，
     // 比经纬度重要得多。原来这个信息藏在另一个列表里。

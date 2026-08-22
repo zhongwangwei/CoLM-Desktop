@@ -32,4 +32,14 @@ assert.match(
   'the create-case action must sit on the right of the site-selection card',
 );
 
+assert.match(sites, /d\.className = 'case site-row'/);
+assert.match(sites, /name\.className = 'site-name'/);
+assert.match(sites, /small\.className = 'site-meta'/);
+const css = await readFile(new URL('../dist/app/style.css', import.meta.url), 'utf8');
+assert.match(
+  css,
+  /\.case\.site-row\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:/s,
+  'site rows must use shared grid columns rather than content-dependent flex spacing',
+);
+
 console.log('site paths: forcing directory follows Sitedata and availability refreshes automatically');
