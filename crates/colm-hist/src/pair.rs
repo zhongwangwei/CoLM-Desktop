@@ -59,6 +59,7 @@ pub fn pair_with_time(
     spinup: usize,
 ) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::new();
+    let observation_time_is_sorted = obs.seconds.windows(2).all(|window| window[0] <= window[1]);
     // TIMESTEP history 与 AU-Preston 观测同为半小时：同名时刻一一配对。
     // HOURLY history 则保留原有规则，用标签覆盖的两个半小时观测。
     let shortest_model_step = model_seconds
@@ -78,7 +79,7 @@ pub fn pair_with_time(
         let slot_count = if one_observation_per_label { 1 } else { 2 };
         for want in slots.into_iter().take(slot_count) {
             // 观测步长是 1800 秒，误差 1 秒内视为同一时刻
-            let Some(i) = obs.seconds.iter().position(|&x| (x - want).abs() < 1.0) else {
+            let Some(i) = observation_index(obs.seconds, want, observation_time_is_sorted) else {
                 continue;
             };
             if obs.qc[i] == QC_MEASURED && obs.values[i] > FILL_VALUE + 1.0 {
@@ -91,6 +92,22 @@ pub fn pair_with_time(
         }
     }
     out
+}
+
+fn observation_index(seconds: &[f64], want: f64, sorted: bool) -> Option<usize> {
+    if !sorted {
+        // Keep the historical behavior for malformed/non-monotonic inputs. Valid
+        // PLUMBER2 time axes are sorted and use the logarithmic path below.
+        return seconds.iter().position(|&value| (value - want).abs() < 1.0);
+    }
+    // The old linear `position` ran once or twice for every model step, making an
+    // 11-year evaluation O(n²). `partition_point` preserves the same 1-second
+    // tolerance while reducing each lookup to O(log n).
+    let index = seconds.partition_point(|value| *value <= want - 1.0);
+    seconds
+        .get(index)
+        .is_some_and(|value| (*value - want).abs() < 1.0)
+        .then_some(index)
 }
 
 #[cfg(test)]

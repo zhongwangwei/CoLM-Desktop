@@ -72,10 +72,25 @@ export const state = {
   fieldStates: new Map(),
   /** 专家入口保留给后续内容；当前只显示明确的占位说明。 */
   expert: false,
+  /** 结果分析默认收起右侧运行监视器；用户在结果区手动切换后保持到离开结果区。 */
+  liveCollapsed: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,
+  /** 结果工作台的当前站点。与参数页 `selected` 分开，切图不能改变批量编辑目标。 */
+  resultCaseDir: null,
+  /** 结果总览中主动选入分析范围的站点；空集合表示本次全部已完成算例。 */
+  resultSelection: new Set(),
+  resultSelectionTouched: false,
+  /** 每个算例单独覆盖的观测路径。自动匹配仍由源站点映射提供。 */
+  resultObsOverrides: new Map(),
+  /** 批量评估的最近结果与失败项，供比较、诊断和报告分栏共享。 */
+  resultMetrics: [],
+  resultFailures: [],
+  /** 结果页筛选与排名设置。 */
+  resultCaseSearch: '',
+  resultStatusFilter: 'all',
   /** 批量汇总表：看哪个变量、按哪一列排。 */
   summaryVar: null,
-  summarySort: 'site',
+  summarySort: 'r2',
 };

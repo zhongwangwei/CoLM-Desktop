@@ -5,7 +5,7 @@ import { state } from './state.js';
 import { $, status, baseName } from './ui.js';
 import { renderCases, ensureCases, renderSites } from './sites.js';
 import { batchTarget, updateCaseBatchButtons } from './batch.js';
-import { refreshVars } from './results.js';
+import { invalidateResultCase, refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
@@ -310,6 +310,7 @@ export async function watchRun() {
       const c = state.cases.find(c => c.dir === d.case);
       if (c && d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) {
         c.has_history = true;
+        invalidateResultCase(d.case);
       }
       updateCaseProgress(d.case);
       updateOverallProgress();
@@ -324,8 +325,7 @@ export async function watchRun() {
         setRunning('ok', '全部完成');
       }
       updateCaseBatchButtons();
-      if (d.code === 0 && state.selected?.dir === d.case
-          && (d.requested_stage == null || d.requested_stage === 'colm')) refreshVars();
+      if (d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) refreshVars();
     });
 }
 

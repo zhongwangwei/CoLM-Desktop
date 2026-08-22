@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true   # 必须显式 opt-in，否则 MSRV 声明无效
 license.workspace = true
+authors.workspace = true
 publish.workspace = true
 
 [dependencies]

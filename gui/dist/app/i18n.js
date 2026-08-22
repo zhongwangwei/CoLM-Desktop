@@ -5,6 +5,7 @@
 const ZH_EN = [
   // Complete sentences come before short labels. This keeps prose grammatical and
   // prevents a label such as “运行” from creating half-translated paragraphs.
+  ['版权所有：CoLM陆面模式开发团队，中山大学大气科学学院', 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU'],
   ['把原始数据批量转成模型要的格式，', 'Convert raw data in batches to the format required by the model,'],
   ['产出的就是下一步要扫的站点数据', 'the output is the site data scanned in the next step'],
   ['已经转好的会跳过 ——', 'Inputs already converted are skipped —'],
@@ -53,12 +54,154 @@ const ZH_EN = [
   ['设置输出频率、目录与重启。先运行时不必翻完几百个输出变量。', 'Configure output frequency, directories, and restart settings. You do not need to review hundreds of output variables before the first run.'],
   ['选择需要写入 history 的变量；默认收起，避免把运行按钮推到页面底部。', 'Choose variables to write to history. This section is collapsed by default so the run controls stay near the top.'],
   ['画模型输出，或与观测配对算指标。', 'Plot model output or pair it with observations to calculate metrics.'],
+  ['第 5 步 · 结果分析', 'Step 5 · Results analysis'],
+  ['结果分析', 'Results analysis'],
+  ['浏览、评估与诊断', 'Browse, evaluate, and diagnose'],
+  ['本次站点与产物状态', 'Sites and outputs in this task'],
+  ['变量、单位与维度', 'Variables, units, and dimensions'],
+  ['按站点和变量绘图', 'Plot by site and variable'],
+  ['模型评估', 'Model evaluation'],
+  ['模型与观测配对', 'Pair model output with observations'],
+  ['排名与批量指标', 'Rankings and batch metrics'],
+  ['质量与物理检查', 'Quality and physical checks'],
+  ['保存分析结果', 'Save analysis results'],
+  ['本次创建的所有算例集中在这里。旧目录算例和运行页残留勾选不会改变结果范围。', 'All cases created in this task are collected here. Old root cases and stale run selections do not change the result scope.'],
+  ['点击已完成站点进入时间序列；失败站点可返回日志定位原因。', 'Open a completed site in Time series; use its log to diagnose a failed site.'],
+  ['查看 history 中实际存在的变量、单位、维度与可视化类型，不再局限于固定变量清单。', 'Inspect the variables, units, dimensions, and visualization types actually present in history instead of a fixed list.'],
+  ['按需读取当前站点和变量；长序列在 sidecar 中保极值降采样，导出仍可使用完整数据。', 'Load the current site and variable on demand. Long series are extrema-preserving downsampled in the sidecar, while exports can still use full data.'],
+  ['图表缩放：拖选横向范围可放大；双击恢复全范围。图表切换时复用同一个画布。', 'Chart zoom: drag across a horizontal range to zoom in and double-click to restore the full range. The canvas is reused when switching charts.'],
+  ['逐站点匹配观测，查看指标、时间序列、散点和残差。缺少观测只影响当前站点。', 'Match observations per site and inspect metrics, time series, scatter plots, and residuals. Missing observations affect only that site.'],
+  ['点击指标表中的变量切换图形。', 'Select a variable in the metrics table to switch the plots.'],
+  ['评估本次所有已完成算例。单站点失败不会终止批次，缺失原因会完整保留。', 'Evaluate every completed case in this task. A single-site failure does not stop the batch, and every missing-data reason is retained.'],
+  ['检查时间覆盖、缺测、物理范围和能量平衡。缺少所需变量时明确列出缺项，不生成伪结论。', 'Check time coverage, missing data, physical ranges, and energy balance. Missing required variables are listed explicitly instead of producing a false conclusion.'],
+  ['导出当前分析范围、指标、失败原因和软件署名；不会把未完成站点伪装成零值。', 'Export the current scope, metrics, failure reasons, and software attribution; unfinished sites are never represented as zero.'],
+  ['当前变量是多维结果，请在后续剖面/分类展示器中查看；不会错误地压成一条折线。', 'This is a multidimensional result. Use a profile/category renderer when available; it will not be incorrectly flattened into a line.'],
+  ['只有所需通量全部存在时才计算，不用零值补缺项。', 'This is calculated only when every required flux exists; missing terms are never replaced with zero.'],
+  ['诊断基于保极值抽样点；导出原始数据可做完整审计。', 'The diagnostic uses extrema-preserving sampled points; export raw data for a complete audit.'],
+  ['多维变量已识别，不会被错误压成一维折线。', 'Multidimensional variables were identified and will not be incorrectly flattened into a line.'],
+  ['当前 history 以标量时间序列为主。', 'This history mainly contains scalar time series.'],
+  ['没有符合筛选条件的站点。', 'No sites match the current filters.'],
+  ['本次还没有创建算例。', 'No cases have been created in this task.'],
+  ['尚未运行多站点评估。', 'Multi-site evaluation has not been run yet.'],
+  ['没有可配对的变量。', 'No variables could be paired.'],
+  ['要先给当前站点选择观测文件', 'Choose an observation file for the current site first'],
+  ['没有观测文件', 'No observation file'],
+  ['没有已定义范围检查的变量', 'No variables have a defined range check'],
+  ['抽样点均在合理范围', 'All sampled points are within the plausible range'],
+  ['结果索引已刷新', 'Results index refreshed'],
+  ['多站点指标 CSV 已复制', 'Multi-site metrics CSV copied'],
+  ['报告已复制', 'Report copied'],
+  ['本次算例', 'Cases in this task'],
+  ['已有结果', 'Results available'],
+  ['运行失败', 'Run failures'],
+  ['可与观测评估', 'Ready for evaluation'],
+  ['缺少观测', 'Missing observations'],
+  ['加入多站点分析范围', 'Include in multi-site analysis scope'],
+  ['运行状态', 'Run status'],
+  ['已匹配', 'Matched'],
+  ['可用', 'Available'],
+  ['显示点数', 'Displayed points'],
+  ['缺测点数', 'Missing points'],
+  ['最小值', 'Minimum'],
+  ['最大值', 'Maximum'],
+  ['平均值', 'Mean'],
+  ['标准差', 'Standard deviation'],
+  ['模型均值', 'Model mean'],
+  ['观测均值', 'Observation mean'],
+  ['模型标准差', 'Model standard deviation'],
+  ['观测标准差', 'Observation standard deviation'],
+  ['图形点', 'Chart points'],
+  ['时间与产物', 'Time coverage and outputs'],
+  ['History 文件', 'History files'],
+  ['时间步', 'Time steps'],
+  ['能量平衡残差', 'Energy-balance residual'],
+  ['能量平衡', 'Energy balance'],
+  ['有效点', 'Valid points'],
+  ['缺测点', 'Missing points'],
+  ['平均残差', 'Mean residual'],
+  ['最大绝对值', 'Maximum absolute value'],
+  ['物理范围', 'Physical ranges'],
+  ['变量结构', 'Variable structure'],
+  ['诊断失败', 'Diagnostic failed'],
+  ['无法计算', 'Cannot calculate'],
+  ['缺少变量', 'Missing variables'],
+  ['分类维度', 'Category dimensions'],
+  ['垂直剖面', 'Vertical profile'],
+  ['模型与观测', 'Model and observation'],
+  ['观测（横）与模型（纵）', 'Observation (x) vs model (y)'],
+  ['残差（模型 − 观测）', 'Residual (model − observation)'],
+  ['残差', 'Residual'],
+  ['净辐射 Rnet', 'Net radiation Rnet'],
+  ['感热 Qh', 'Sensible heat Qh'],
+  ['潜热 Qle', 'Latent heat Qle'],
+  ['地表热通量 Qg', 'Ground heat flux Qg'],
+  ['反射短波 SWup', 'Reflected shortwave SWup'],
+  ['参考高度气温', 'Reference-height air temperature'],
+  ['土壤与积雪温度', 'Soil and snow temperature'],
+  ['液态土壤水', 'Liquid soil water'],
+  ['土壤冰', 'Soil ice'],
+  ['总产流', 'Total runoff'],
+  ['地下水位', 'Water-table depth'],
+  ['入渗', 'Infiltration'],
+  ['地表产流', 'Surface runoff'],
+  ['冠层截留', 'Canopy interception'],
+  ['蒸腾', 'Transpiration'],
+  ['湿冠层蒸发', 'Wet-canopy evaporation'],
+  ['植被温度', 'Vegetation temperature'],
+  ['叶面积指数', 'Leaf area index'],
+  ['茎面积指数', 'Stem area index'],
+  ['光合作用', 'Photosynthesis'],
+  ['植物呼吸', 'Plant respiration'],
+  ['降雪', 'Snowfall'],
+  ['雪深', 'Snow depth'],
+  ['雪水当量', 'Snow water equivalent'],
+  ['显示 / 隐藏运行日志与进度', 'Show / hide run logs and progress'],
+  ['搜索变量名、中文名称或单位…', 'Search variable name, display name, or unit…'],
+  ['筛选变量类型', 'Filter variable type'],
+  ['搜索站点…', 'Search sites…'],
+  ['筛选结果状态', 'Filter result status'],
+  ['筛选站点…', 'Filter sites…'],
+  ['分析总览', 'Analysis overview'],
+  ['站点状态', 'Site status'],
+  ['全部状态', 'All statuses'],
+  ['未完成', 'Incomplete'],
+  ['刷新', 'Refresh'],
+  ['数据浏览', 'Data browser'],
+  ['全部类型', 'All types'],
+  ['时间序列', 'Time series'],
+  ['垂直剖面', 'Vertical profile'],
+  ['PFT / PC / 分类维度', 'PFT / PC / category dimensions'],
+  ['标量', 'Scalar'],
+  ['起始', 'Start'],
+  ['结束', 'End'],
+  ['绘制', 'Plot'],
+  ['完整范围', 'Full range'],
+  ['导出 PNG', 'Export PNG'],
+  ['导出完整 CSV', 'Export full CSV'],
+  ['观测文件', 'Observation file'],
+  ['能量闭合订正', 'Energy-closure correction'],
+  ['评估当前站点', 'Evaluate current site'],
+  ['图形诊断', 'Graphical diagnostics'],
+  ['多站点比较', 'Multi-site comparison'],
+  ['评估全部已完成站点', 'Evaluate all completed sites'],
+  ['排名指标', 'Ranking metric'],
+  ['站点排名', 'Site ranking'],
+  ['过程诊断', 'Process diagnostics'],
+  ['运行诊断', 'Run diagnostics'],
+  ['报告与导出', 'Reports and export'],
+  ['格式', 'Format'],
+  ['指标', 'Metrics'],
+  ['失败与缺失', 'Failures and missing data'],
+  ['生成报告', 'Generate report'],
+  ['下载文件', 'Download file'],
+  ['还没有生成报告。', 'No report has been generated yet.'],
   ['「丢弃前 N 条」丢的是输出记录', '“Discard first N” removes output records'],
   ['与第 2 步基本设定里的模型预热（spin-up）不是一回事。', 'and is different from model spin-up in Step 2, Basic setup.'],
   ['图表缩放：在图上拖选一段横向范围可放大；双击图表恢复全范围。', 'Chart zoom: drag across a horizontal range to zoom in; double-click the chart to restore the full range.'],
   ['观测文件按命名约定自动找；命名不合约定时可以自己指。', 'Observation files are found by naming convention; choose one manually when its name does not follow the convention.'],
   ['丢弃前', 'Discard first'],
   ['条 ⓘ', 'records ⓘ'],
+  ['条', 'records'],
   ['用能量闭合订正后的观测 ⓘ', 'Use energy-closure-corrected observations ⓘ'],
   ['对比图同样支持拖选横向范围放大，双击恢复全范围。', 'Comparison charts also support drag-to-zoom and double-click to restore the full range.'],
   ['现在只有站点能跑。区域与全球的步骤链还没有实现。', 'Only site simulations are currently available. Regional and global workflows are not yet implemented.'],
@@ -473,6 +616,51 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    .replace(/^无$/, 'None')
+    .replace(/^缺少$/, 'Missing')
+    .replace(/^模型$/, 'Model')
+    .replace(/^其他$/, 'Other')
+    .replace(/^能量$/, 'Energy')
+    .replace(/^水文\/土壤$/, 'Hydrology / soil')
+    .replace(/^植被\/碳氮$/, 'Vegetation / carbon–nitrogen')
+    .replace(/^能量\/辐射$/, 'Energy / radiation')
+    .replace(/^土壤\/积雪$/, 'Soil / snow')
+    .replace(/^碳循环$/, 'Carbon cycle')
+    .replace(/^辐射$/, 'Radiation')
+    .replace(/^水文$/, 'Hydrology')
+    .replace(/^植被$/, 'Vegetation')
+    .replace(/^积雪$/, 'Snow')
+    .replace(/^大气$/, 'Atmosphere')
+    .replace(/^分组$/, 'Group')
+    .replace(/^维度$/, 'Dimensions')
+    .replace(/^类型$/, 'Type')
+    .replace(/^名称$/, 'Name')
+    .replace(/^单位$/, 'Unit')
+    .replace(/^分析$/, 'Analyze')
+    .replace(/^正常$/, 'Normal')
+    .replace(/^注意$/, 'Attention')
+    .replace(/^信息$/, 'Information')
+    .replace(/^原因$/, 'Reason')
+    .replace(/^状态$/, 'Status')
+    .replace(/^(.+) 还没有 history 结果$/, '$1 does not have history results yet')
+    .replace(/^(\d+) 个 history 文件 · (\d+) 步 · (.+) 至 (.+) · (\d+) 个变量$/, '$1 history files · $2 steps · $3 to $4 · $5 variables')
+    .replace(/^读取 (.+) · (.+) 配对点…$/, 'Loading paired points for $1 · $2…')
+    .replace(/^读取 (.+) · (.+) 完整序列…$/, 'Loading the full series for $1 · $2…')
+    .replace(/^读取 (.+) · (.+)…$/, 'Loading $1 · $2…')
+    .replace(/^(.+) · (.+) · (\d+)\/(\d+) 点$/, '$1 · $2 · $3/$4 points')
+    .replace(/^(.+) · (.+) 已绘制（显示已保极值降采样）$/, '$1 · $2 plotted (extrema-preserving downsample shown)')
+    .replace(/^(.+) · (.+) 已绘制$/, '$1 · $2 plotted')
+    .replace(/^(.+) 评估完成：(\d+) 个变量$/, '$1 evaluation complete: $2 variables')
+    .replace(/^(.+) 没有可绘制的配对点$/, '$1 has no plottable paired points')
+    .replace(/^(.+) · (.+) 图形诊断已更新$/, '$1 · $2 graphical diagnostics updated')
+    .replace(/^(.+) · (.+) 完整 CSV 已导出：(\d+) 行$/, '$1 · $2 full CSV exported: $3 rows')
+    .replace(/^评估分析范围内的 (\d+) 个站点$/, 'Evaluate $1 sites in the analysis scope')
+    .replace(/^并发评估 (\d+) 个站点（最多 (\d+) 个同时进行）$/, 'Evaluating $1 sites (up to $2 concurrently)')
+    .replace(/^批量评估已取消：保留 (\d+) 个已完成站点$/, 'Batch evaluation cancelled: retained $1 completed sites')
+    .replace(/^批量评估完成：(\d+)\/(\d+) 个站点有结果$/, 'Batch evaluation complete: $1/$2 sites produced results')
+    .replace(/^(\d+) 个站点未完成评估：$/, '$1 sites did not complete evaluation:')
+    .replace(/^(\d+) 个抽样点越界$/, '$1 sampled points outside the plausible range')
+    .replace(/^已生成 ([A-Z]+) 报告$/, '$1 report generated')
     .replace(/^选中的\s*(\d+)\s*个$/, '$1 selected')
     .replace(/^本次\s*(\d+)\s*个$/, '$1 current')
     .replace(/^运行选中的\s*(\d+)\s*个$/, 'Run $1 selected cases')

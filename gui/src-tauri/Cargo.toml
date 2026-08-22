@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
+authors = ["魏忠旺 <weizhw6@mail.sysu.edu.cn>"]
+description = "CoLM single-site simulation and evaluation desktop application"
+homepage = "https://github.com/zhongwangwei/CoLM-Desktop"
+repository = "https://github.com/zhongwangwei/CoLM-Desktop"
 publish = false
 
 # Tauri 的二进制链接的是这个 lib；main.rs 只是一层薄壳。

@@ -236,6 +236,12 @@ function finish() {
   state.createdCases.clear();
   state.createdBySite.clear();
   state.selected = null;
+  state.resultCaseDir = null;
+  state.resultSelection.clear();
+  state.resultSelectionTouched = false;
+  state.resultObsOverrides.clear();
+  state.resultMetrics = [];
+  state.resultFailures = [];
   state.text = '';
   state.domain = picked.domain;
   state.subgrid = picked.subgrid;

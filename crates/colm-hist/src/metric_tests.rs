@@ -8,7 +8,11 @@ fn a_perfect_match_scores_perfectly() {
     assert_eq!(m.mae, 0.0);
     assert_eq!(m.bias, 0.0);
     assert!((m.r2 - 1.0).abs() < 1e-12);
+    assert!((m.correlation - 1.0).abs() < 1e-12);
+    assert!((m.nse - 1.0).abs() < 1e-12);
     assert!((m.kge - 1.0).abs() < 1e-12);
+    assert!((m.alpha - 1.0).abs() < 1e-12);
+    assert!((m.beta - 1.0).abs() < 1e-12);
     assert_eq!(m.beta_warning, None);
 }
 
@@ -80,4 +84,29 @@ fn bias_is_model_minus_observation() {
     let p = vec![(11.0, 10.0), (12.0, 10.0)];
     let m = compute(&p).unwrap();
     assert!((m.bias - 1.5).abs() < 1e-12, "{}", m.bias);
+}
+
+#[test]
+fn expanded_diagnostics_preserve_direction_and_scale() {
+    let p = vec![(2.0, 1.0), (4.0, 2.0), (6.0, 3.0), (8.0, 4.0)];
+    let m = compute(&p).unwrap();
+    assert!((m.correlation - 1.0).abs() < 1e-12);
+    assert!((m.alpha - 2.0).abs() < 1e-12);
+    assert!((m.beta - 2.0).abs() < 1e-12);
+    assert!((m.model_mean - 5.0).abs() < 1e-12);
+    assert!((m.obs_mean - 2.5).abs() < 1e-12);
+    assert!(
+        m.nse < 0.0,
+        "large scale bias must be visible in NSE: {}",
+        m.nse
+    );
+}
+
+#[test]
+fn constant_series_has_no_misleading_nan_metrics() {
+    let m = compute(&[(1.0, 2.0), (1.0, 2.0), (1.0, 2.0)]).unwrap();
+    assert_eq!(m.bias, -1.0);
+    assert!(m.correlation.is_nan());
+    assert!(m.nse.is_nan());
+    assert!(m.kge.is_nan());
 }

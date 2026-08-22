@@ -16,9 +16,17 @@ pub struct Metrics {
     pub bias: f64,
     /// Pearson r 的平方
     pub r2: f64,
+    /// Pearson 相关系数；R² 会丢掉正负号，诊断页需要原始相关方向。
+    pub correlation: f64,
+    /// Nash–Sutcliffe efficiency。
+    pub nse: f64,
     pub kge: f64,
+    pub model_mean: f64,
+    pub model_sd: f64,
     pub obs_mean: f64,
     pub obs_sd: f64,
+    /// KGE 的 α = σm / σo。
+    pub alpha: f64,
     /// KGE 的 β = mean(模型) / mean(观测)
     pub beta: f64,
     /// β 是否不可信，见 `BetaWarning`
@@ -50,11 +58,25 @@ pub fn compute(pairs: &[Pair]) -> Option<Metrics> {
     let cov = pairs.iter().map(|(m, o)| (m - mm) * (o - om)).sum::<f64>();
     let sm_ss = pairs.iter().map(|(m, _)| (m - mm).powi(2)).sum::<f64>();
     let so_ss = pairs.iter().map(|(_, o)| (o - om).powi(2)).sum::<f64>();
-    let r = cov / (sm_ss.sqrt() * so_ss.sqrt());
+    // 常数序列仍然有 RMSE/MAE/Bias，不能因为相关无定义就把整行丢掉。
+    // serde_json 会把这些非有限诊断量写成 null，GUI 显示为“—”。
+    let r = if sm_ss == 0.0 || so_ss == 0.0 {
+        f64::NAN
+    } else {
+        cov / (sm_ss.sqrt() * so_ss.sqrt())
+    };
     let beta = mm / om;
-    let kge = 1.0
-        - ((r - 1.0).powi(2) + (sm_ss.sqrt() / so_ss.sqrt() - 1.0).powi(2) + (beta - 1.0).powi(2))
-            .sqrt();
+    let alpha = if so_ss == 0.0 {
+        f64::NAN
+    } else {
+        sm_ss.sqrt() / so_ss.sqrt()
+    };
+    let nse = if so_ss == 0.0 {
+        f64::NAN
+    } else {
+        1.0 - pairs.iter().map(|(m, o)| (m - o).powi(2)).sum::<f64>() / so_ss
+    };
+    let kge = 1.0 - ((r - 1.0).powi(2) + (alpha - 1.0).powi(2) + (beta - 1.0).powi(2)).sqrt();
     // 样本标准差（n-1）—— 报给人看的那个，也是判据里的 σo
     let obs_sd = (so_ss / (nf - 1.0)).sqrt();
     let beta_warning = if mm * om < 0.0 {
@@ -70,9 +92,14 @@ pub fn compute(pairs: &[Pair]) -> Option<Metrics> {
         mae,
         bias: mm - om,
         r2: r * r,
+        correlation: r,
+        nse,
         kge,
+        model_mean: mm,
+        model_sd: (sm_ss / (nf - 1.0)).sqrt(),
         obs_mean: om,
         obs_sd,
+        alpha,
         beta,
         beta_warning,
     })

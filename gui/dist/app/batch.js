@@ -58,18 +58,11 @@ export function sourceSite(c) {
     ?? state.sites.find(s => s.name === c.name);
 }
 
-/** 运行按钮共用同一批目标；评估按钮把实际数量写在按钮上。 */
+/** 运行按钮共用同一批目标。结果工作台有独立分析范围，不在这里复用运行勾选。 */
 export function updateCaseBatchButtons() {
-  const picked = currentCases().filter(c => state.pickedCases.has(c.dir));
   const target = batchTarget();
   for (const id of ['run-mksrfdata', 'run-mkinidata', 'run-colm', 'runall']) {
     const run = $(id);
     if (run) run.disabled = !target.length || state.runningCases.size > 0;
-  }
-  const ev = $('eval-all');
-  if (ev) {
-    const done = target.filter(c => c.has_history).length;
-    ev.textContent = picked.length ? `评估选中的 ${done} 个已跑算例` : `评估本次 ${done} 个已跑算例`;
-    ev.disabled = !done;
   }
 }

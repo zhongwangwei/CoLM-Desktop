@@ -732,14 +732,17 @@ pub async fn new_case(
 /// 评估：把模型与观测配对，出指标与配对点。
 ///
 /// 走 sidecar 而不是在这里算 —— 要读两个 NetCDF 文件。
-/// **一次拿全**：指标表、双线图、散点图用的是同一批配对结果，
-/// 分三次跑等于把同一份文件读三遍，而且三者可能因参数不一致而对不上。
+/// 单站点**一次拿全**：指标表、双线图、散点图用同一批配对结果。
+/// 多站点排名传 `summary_only`，避免把每站几十万配对点送进 WebView。
 #[tauri::command]
 pub async fn metrics(
     case: String,
     obs: String,
     spinup: usize,
     corrected: bool,
+    summary_only: bool,
+    pair_var: Option<String>,
+    max_points: Option<usize>,
 ) -> Result<String, String> {
     let mut args = vec![
         "metrics".to_string(),
@@ -758,6 +761,18 @@ pub async fn metrics(
         args.push("--corrected".into());
         args.push("1".into());
     }
+    if summary_only {
+        args.push("--summary-only".into());
+        args.push("1".into());
+    }
+    if let Some(pair_var) = pair_var {
+        args.push("--pairs-var".into());
+        args.push(pair_var);
+    }
+    if let Some(max_points) = max_points {
+        args.push("--max-points".into());
+        args.push(max_points.to_string());
+    }
     capture(&args)
 }
 
@@ -766,8 +781,31 @@ pub async fn metrics(
 /// 走 sidecar 而不是在这里读 —— 窗口进程不链接 netcdf，
 /// 不该为了画一条曲线把整个静态 HDF5 拖进来。
 #[tauri::command]
-pub async fn series(case: String, vars: String) -> Result<String, String> {
-    capture(&["series".to_string(), case, "--vars".into(), vars])
+pub async fn series(
+    case: String,
+    vars: String,
+    from: Option<i64>,
+    to: Option<i64>,
+    max_points: Option<usize>,
+) -> Result<String, String> {
+    let mut args = vec!["series".to_string(), case, "--vars".into(), vars];
+    for (flag, value) in [
+        ("--from", from.map(|v| v.to_string())),
+        ("--to", to.map(|v| v.to_string())),
+        ("--max-points", max_points.map(|v| v.to_string())),
+    ] {
+        if let Some(value) = value {
+            args.push(flag.into());
+            args.push(value);
+        }
+    }
+    capture(&args)
+}
+
+/// 轻量结果索引：变量、单位、维度与时间覆盖。数值仍由 `series` 按需读取。
+#[tauri::command]
+pub async fn history_catalog(case: String) -> Result<String, String> {
+    capture(&["history-catalog".to_string(), case])
 }
 
 /// 跑一次 sidecar，把 stdout 整个收回来。

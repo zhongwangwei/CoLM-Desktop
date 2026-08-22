@@ -60,6 +60,7 @@ pub fn run() {
             run_case,
             run_batch,
             run_log_tail,
+            history_catalog,
             series,
             metrics,
             unknown_fields,

@@ -13,7 +13,9 @@
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
-//! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--out series.json]
+//!                    [--summary-only 1] [--pairs-var Rnet] [--max-points N]
+//! colm-cli history-catalog <算例目录>
+//! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli all       --site ... --out ... --kernel ... [--obs ...]
 //! ```
 //!
@@ -54,7 +56,12 @@ usage:
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
-  colm-cli series  <case-dir> --vars f_rnet,f_fsena [--out series.json]
+                   --summary-only: 只返回指标，不携带绘图用配对点
+                   --pairs-var: 只返回指定观测变量及其配对点
+                   --max-points: 配对点保极值降采样上限（指标仍用完整样本）
+  colm-cli history-catalog <case-dir>
+  colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
+                   [--max-points N] [--out series.json]
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
   colm-cli forcing-probe   <met.nc> [--json 1]
@@ -101,13 +108,18 @@ fn main() -> Result<()> {
         }
         "metrics" => {
             let case = opts.positional_case()?;
-            cmd_metrics(
-                &case,
-                &opts.need("--obs")?,
-                opts.spinup()?,
-                opts.get("--json").is_some(),
-                opts.get("--corrected").is_some(),
-            )?;
+            let obs_path = opts.need("--obs")?;
+            let pair_var = opts.get("--pairs-var");
+            cmd_metrics(MetricsRequest {
+                case: &case,
+                obs_path: &obs_path,
+                spinup: opts.spinup()?,
+                json: opts.get("--json").is_some(),
+                corrected: opts.get("--corrected").is_some(),
+                summary_only: opts.get("--summary-only").is_some(),
+                pair_var: pair_var.as_deref(),
+                pair_max_points: opts.get("--max-points").map(|v| v.parse()).transpose()?,
+            })?;
         }
         "series" => {
             let case = opts.positional_case()?;
@@ -115,7 +127,13 @@ fn main() -> Result<()> {
                 &case,
                 &opts.need_str("--vars")?,
                 opts.get("--out").as_deref(),
+                opts.get("--from").map(|v| v.parse()).transpose()?,
+                opts.get("--to").map(|v| v.parse()).transpose()?,
+                opts.get("--max-points").map(|v| v.parse()).transpose()?,
             )?;
+        }
+        "history-catalog" => {
+            cmd_history_catalog(&opts.positional_case()?)?;
         }
         "all" => {
             let case = cmd_new(&opts)?;
@@ -129,7 +147,16 @@ fn main() -> Result<()> {
                 None,
             )?;
             match opts.get("--obs") {
-                Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?, false, false)?,
+                Some(obs) => cmd_metrics(MetricsRequest {
+                    case: &case,
+                    obs_path: Path::new(&obs),
+                    spinup: opts.spinup()?,
+                    json: false,
+                    corrected: false,
+                    summary_only: false,
+                    pair_var: None,
+                    pair_max_points: None,
+                })?,
                 None => println!("no --obs given; skipping the metrics table"),
             }
         }
@@ -1216,37 +1243,96 @@ struct VarMetrics {
     mae: f64,
     bias: f64,
     r2: f64,
+    correlation: f64,
+    nse: f64,
     kge: f64,
+    model_mean: f64,
+    model_sd: f64,
     obs_mean: f64,
     obs_sd: f64,
+    alpha: f64,
     beta: f64,
     /// KGE 的 β 不可信时的原因。**非空一定要显示** ——
     /// 藏起来等于给一个假指标。
     beta_warning: Option<String>,
     /// 配对之后的时刻（unix 秒），与下面两条等长
-    time: Vec<i64>,
-    model: Vec<f64>,
-    obs: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    obs: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_source_n: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_n: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_downsampled: Option<bool>,
 }
 
-fn cmd_metrics(
-    case: &Path,
-    obs_path: &Path,
+struct MetricsRequest<'a> {
+    case: &'a Path,
+    obs_path: &'a Path,
     spinup: usize,
     json: bool,
     corrected: bool,
-) -> Result<()> {
+    summary_only: bool,
+    pair_var: Option<&'a str>,
+    pair_max_points: Option<usize>,
+}
+
+fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
+    let MetricsRequest {
+        case,
+        obs_path,
+        spinup,
+        json,
+        corrected,
+        summary_only,
+        pair_var,
+        pair_max_points,
+    } = request;
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
 
-    let o_t = colm_hist::obs::read_1d(obs_path, "time")?;
-    let m_t = read_history(&hists, "time")?;
+    // Open every NetCDF file once. The previous implementation reopened every one
+    // of 132 monthly history files for each flux, turning an AT-Neu evaluation into
+    // minutes of native-I/O setup rather than numerical work.
+    let obs_file =
+        netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
+    let o_t = read_file_1d(&obs_file, obs_path, "time")?;
+    let first_history =
+        netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
+    let available_model = colm_hist::obs::FLUX_PAIRS
+        .iter()
+        .filter(|(observation, _)| pair_var.is_none_or(|wanted| *observation == wanted))
+        .map(|(_, model)| *model)
+        .filter(|model| first_history.variable(model).is_some())
+        .collect::<Vec<_>>();
+    drop(first_history);
+    let mut wanted = vec!["time"];
+    wanted.extend(available_model);
+    let mut model_data = read_history_many(&hists, &wanted)?;
+    let m_t = model_data.remove("time").expect("time was requested");
     // 观测的 time 原点可能在年中（AU-Preston 是 2003-08-12 03:30），
     // 必须按完整日期时间换算；只取年份会把序列错配几个月。
-    let units = colm_hist::obs::time_units(obs_path)?;
+    let units = variable_units(&obs_file, "time")
+        .with_context(|| format!("time:units in {} is not a string", obs_path.display()))?;
     let m_sec = colm_hist::time::model_seconds_from_units(&m_t, &units)
         .with_context(|| format!("unsupported observation time units {units:?}"))?;
+    let by_sec = if json && !summary_only {
+        let unix = colm_hist::time::unix_seconds(&m_t);
+        Some(
+            m_sec
+                .iter()
+                .zip(unix)
+                .map(|(seconds, unix)| (*seconds as i64, unix))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+    } else {
+        None
+    };
 
     if !json {
         println!(
@@ -1256,18 +1342,21 @@ fn cmd_metrics(
     }
     let mut rows: Vec<VarMetrics> = Vec::new();
     for (o_name, m_name) in colm_hist::obs::FLUX_PAIRS {
+        if pair_var.is_some_and(|wanted| wanted != o_name) {
+            continue;
+        }
         // 订正版没有自己的 qc 变量（文件里只有 `Qle_cor_uc_qc`，那是不确定度的），
         // 所以质量控制一律用原始通量那一个：它说的是"这一步是实测还是插补"，
         // 而订正只改数值不改这件事。
         let o_var = corrected
             .then(|| colm_hist::obs::corrected(o_name))
             .flatten()
-            .filter(|c| colm_hist::obs::read_1d(obs_path, c).is_ok())
+            .filter(|candidate| obs_file.variable(candidate).is_some())
             .unwrap_or(o_name);
-        let (Ok(o_v), Ok(o_q), Ok(m_v)) = (
-            colm_hist::obs::read_1d(obs_path, o_var),
-            colm_hist::obs::read_1d(obs_path, &format!("{o_name}_qc")),
-            read_history(&hists, m_name),
+        let (Ok(o_v), Ok(o_q), Some(m_v)) = (
+            read_file_1d(&obs_file, obs_path, o_var),
+            read_file_1d(&obs_file, obs_path, &format!("{o_name}_qc")),
+            model_data.get(m_name),
         ) else {
             continue; // 这一对里有一侧没有，跳过而不是报错
         };
@@ -1276,20 +1365,63 @@ fn cmd_metrics(
             values: &o_v,
             qc: &o_q,
         };
-        let with_time = colm_hist::pair::pair_with_time(&m_sec, &m_v, &s, spinup);
+        let with_time = colm_hist::pair::pair_with_time(&m_sec, m_v, &s, spinup);
         let pairs: Vec<(f64, f64)> = with_time.iter().map(|(_, a, b)| (*a, *b)).collect();
         let Some(m) = colm_hist::metric::compute(&pairs) else {
             continue;
         };
         if json {
-            // 模型时间轴换算成 unix 秒，与 `series` 那条一致 ——
-            // 界面把两者画在同一张图上，原点不同就对不齐。
-            let unix = colm_hist::time::unix_seconds(&m_t);
-            let by_sec: std::collections::BTreeMap<i64, i64> = m_sec
-                .iter()
-                .zip(unix.iter())
-                .map(|(s, u)| (*s as i64, *u))
-                .collect();
+            let pair_source_n = with_time.len();
+            let pair_time = by_sec.as_ref().map(|by_sec| {
+                with_time
+                    .iter()
+                    .map(|(seconds, _, _)| {
+                        by_sec.get(&(*seconds as i64)).copied().unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let pair_model = (!summary_only).then(|| {
+                with_time
+                    .iter()
+                    .map(|(_, value, _)| *value)
+                    .collect::<Vec<_>>()
+            });
+            let pair_obs = (!summary_only).then(|| {
+                with_time
+                    .iter()
+                    .map(|(_, _, value)| *value)
+                    .collect::<Vec<_>>()
+            });
+            let pair_indexes = match (&pair_time, &pair_model, &pair_obs) {
+                (Some(time), Some(model), Some(obs)) => Some(series_indices_multi(
+                    time,
+                    &[model.as_slice(), obs.as_slice()],
+                    None,
+                    None,
+                    pair_max_points,
+                )),
+                _ => None,
+            };
+            let select_i64 = |values: Option<Vec<i64>>| {
+                values.map(|values| {
+                    pair_indexes
+                        .as_ref()
+                        .expect("pair indexes exist with pair values")
+                        .iter()
+                        .map(|&index| values[index])
+                        .collect::<Vec<_>>()
+                })
+            };
+            let select_f64 = |values: Option<Vec<f64>>| {
+                values.map(|values| {
+                    pair_indexes
+                        .as_ref()
+                        .expect("pair indexes exist with pair values")
+                        .iter()
+                        .map(|&index| values[index])
+                        .collect::<Vec<_>>()
+                })
+            };
             rows.push(VarMetrics {
                 name: o_name.to_string(),
                 obs_var: o_var.to_string(),
@@ -1299,9 +1431,14 @@ fn cmd_metrics(
                 mae: m.mae,
                 bias: m.bias,
                 r2: m.r2,
+                correlation: m.correlation,
+                nse: m.nse,
                 kge: m.kge,
+                model_mean: m.model_mean,
+                model_sd: m.model_sd,
                 obs_mean: m.obs_mean,
                 obs_sd: m.obs_sd,
+                alpha: m.alpha,
                 beta: m.beta,
                 beta_warning: match m.beta_warning {
                     Some(colm_hist::metric::BetaWarning::NearZeroMean) => {
@@ -1312,12 +1449,15 @@ fn cmd_metrics(
                     }
                     None => None,
                 },
-                time: with_time
-                    .iter()
-                    .map(|(s, _, _)| by_sec.get(&(*s as i64)).copied().unwrap_or_default())
-                    .collect(),
-                model: with_time.iter().map(|(_, a, _)| *a).collect(),
-                obs: with_time.iter().map(|(_, _, b)| *b).collect(),
+                // 指标始终来自完整配对；图表数据单独保极值降采样。
+                time: select_i64(pair_time),
+                model: select_f64(pair_model),
+                obs: select_f64(pair_obs),
+                pair_source_n: (!summary_only).then_some(pair_source_n),
+                pair_n: pair_indexes.as_ref().map(Vec::len),
+                pair_downsampled: pair_indexes
+                    .as_ref()
+                    .map(|indexes| indexes.len() < pair_source_n),
             });
             continue;
         }
@@ -1348,6 +1488,171 @@ fn cmd_metrics(
 
 // ---------------------------------------------------------------- series
 
+#[derive(serde::Serialize)]
+struct HistoryCatalog {
+    files: usize,
+    steps: usize,
+    start: i64,
+    end: i64,
+    variables: Vec<HistoryVariable>,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryVariable {
+    name: String,
+    units: Option<String>,
+    dimensions: Vec<DimensionShape>,
+    kind: &'static str,
+}
+
+fn history_kind(dimensions: &[(String, usize)]) -> &'static str {
+    if dimensions.is_empty() {
+        return "scalar";
+    }
+    let names: Vec<String> = dimensions
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let non_time = dimensions
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("time"))
+        .map(|(_, len)| *len)
+        .product::<usize>();
+    if non_time <= 1 {
+        "series"
+    } else if names.iter().any(|name| {
+        name.contains("soil")
+            || name.contains("snow")
+            || name.contains("lake")
+            || name.contains("lev")
+            || name.contains("depth")
+    }) {
+        "profile"
+    } else {
+        "category"
+    }
+}
+
+fn cmd_history_catalog(case: &Path) -> Result<()> {
+    let layout = Layout::new(case);
+    let name = colm_case::case_name(&layout.case_nml())?;
+    let hists = history_files(&layout.out().join(&name))?;
+    let time = read_history(&hists, "time")?;
+    let unix = colm_hist::time::unix_seconds(&time);
+    let file =
+        netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
+    let mut variables = file
+        .variables()
+        .map(|variable| {
+            let dimensions: Vec<(String, usize)> = variable
+                .dimensions()
+                .iter()
+                .map(|dimension| (dimension.name(), dimension.len()))
+                .collect();
+            HistoryVariable {
+                name: variable.name(),
+                units: variable_units(&file, &variable.name()),
+                kind: history_kind(&dimensions),
+                dimensions: dimensions
+                    .into_iter()
+                    .map(|(name, len)| DimensionShape { name, len })
+                    .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    variables.sort_by(|a, b| a.name.cmp(&b.name));
+    let catalog = HistoryCatalog {
+        files: hists.len(),
+        steps: unix.len(),
+        start: unix.first().copied().unwrap_or_default(),
+        end: unix.last().copied().unwrap_or_default(),
+        variables,
+    };
+    println!("{}", serde_json::to_string(&catalog)?);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct SeriesBody {
+    files: usize,
+    source_n: usize,
+    n: usize,
+    downsampled: bool,
+    time: Vec<i64>,
+    vars: std::collections::BTreeMap<String, Vec<Option<f64>>>,
+}
+
+#[cfg(test)]
+fn series_indices(
+    unix: &[i64],
+    values: &[f64],
+    from: Option<i64>,
+    to: Option<i64>,
+    max_points: Option<usize>,
+) -> Vec<usize> {
+    series_indices_multi(unix, &[values], from, to, max_points)
+}
+
+fn series_indices_multi(
+    unix: &[i64],
+    values: &[&[f64]],
+    from: Option<i64>,
+    to: Option<i64>,
+    max_points: Option<usize>,
+) -> Vec<usize> {
+    let candidates: Vec<usize> = unix
+        .iter()
+        .enumerate()
+        .filter(|(_, time)| from.is_none_or(|start| **time >= start))
+        .filter(|(_, time)| to.is_none_or(|end| **time <= end))
+        .map(|(index, _)| index)
+        .collect();
+    let Some(limit) = max_points.map(|value| value.max(3)) else {
+        return candidates;
+    };
+    if candidates.len() <= limit {
+        return candidates;
+    }
+    // Reserve min/max slots for every requested variable in each bucket. Most GUI
+    // requests contain one series; diagnostics request several, and choosing extrema
+    // from only the first series can hide a spike in the remaining fluxes.
+    let per_bucket = (2 * values.len().max(1)).min(limit - 2).max(1);
+    let buckets = ((limit - 2) / per_bucket).max(1);
+    let interior = candidates.len() - 2;
+    let mut selected = vec![candidates[0]];
+    for bucket in 0..buckets {
+        let start = 1 + interior * bucket / buckets;
+        let end = 1 + interior * (bucket + 1) / buckets;
+        if start >= end {
+            continue;
+        }
+        let mut extrema = Vec::with_capacity(per_bucket);
+        for series in values {
+            let mut min = candidates[start];
+            let mut max = candidates[start];
+            for &index in &candidates[start + 1..end] {
+                if series[index].is_finite()
+                    && (!series[min].is_finite() || series[index] < series[min])
+                {
+                    min = index;
+                }
+                if series[index].is_finite()
+                    && (!series[max].is_finite() || series[index] > series[max])
+                {
+                    max = index;
+                }
+            }
+            extrema.extend([min, max]);
+        }
+        extrema.sort_unstable();
+        extrema.dedup();
+        extrema.truncate(per_bucket);
+        selected.extend(extrema);
+    }
+    selected.push(*candidates.last().unwrap());
+    selected
+}
+
 /// 把 history 里的若干条序列导出成 JSON，供 GUI 画图。
 ///
 /// GUI 进程**不链接 netcdf** —— 让它去读 history 会把整个 HDF5 拖进窗口进程。
@@ -1357,41 +1662,41 @@ fn cmd_metrics(
 /// PLUMBER2 是**地方时**（算例里 `greenwich = .false.`），所以这些秒数是
 /// 「把地方时当成 UTC」算出来的 —— 前端必须按 UTC 格式化，才会显示成
 /// 站点当地的钟点。按本地时区格式化会平移一个时区。
-fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
+fn cmd_series(
+    case: &Path,
+    vars: &str,
+    out: Option<&str>,
+    from: Option<i64>,
+    to: Option<i64>,
+    max_points: Option<usize>,
+) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
 
-    let t_min = read_history(&hists, "time")?;
-    // 换算住在 colm-hist::time —— 那个模块已经拥有「两种时间轴」这件事，
-    // 而且它是 netcdf-free 的，GUI 后端将来也用得上。
-    let unix = colm_hist::time::unix_seconds(&t_min);
-
-    let mut body = String::from("{\n");
-    // 文件数而不是文件名：一条曲线现在跨着 132 个文件，报其中一个的名字
-    // 只会让人以为看到的就是那一个月。
-    body.push_str(&format!("  \"files\": {},\n", hists.len()));
-    body.push_str(&format!("  \"n\": {},\n", unix.len()));
-    body.push_str("  \"time\": [");
-    body.push_str(
-        &unix
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    body.push_str("],\n  \"vars\": {\n");
-    let names: Vec<&str> = vars
+    let mut names: Vec<&str> = vars
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
+    names.sort_unstable();
+    names.dedup();
     if names.is_empty() {
         bail!("--vars needs at least one variable name");
     }
-    let mut first = true;
+    if names.contains(&"time") {
+        bail!("time is always returned as the x axis and must not be listed in --vars");
+    }
+    let mut wanted = vec!["time"];
+    wanted.extend(names.iter().copied());
+    let mut raw = read_history_many(&hists, &wanted)?;
+    let t_min = raw.remove("time").expect("time was requested");
+    // 换算住在 colm-hist::time —— 那个模块已经拥有「两种时间轴」这件事，
+    // 而且它是 netcdf-free 的，GUI 后端将来也用得上。
+    let unix = colm_hist::time::unix_seconds(&t_min);
+
     for v in &names {
-        let values = read_history(&hists, v)?;
+        let values = &raw[*v];
         if values.len() != unix.len() {
             // 剖面变量是 (time, patch, soil) 之类，长度是时间步的数倍。
             // 它们要另一种画法，本轮不做 —— 但要说清楚而不是画出一条乱线。
@@ -1401,31 +1706,39 @@ fn cmd_series(case: &Path, vars: &str, out: Option<&str>) -> Result<()> {
                 unix.len()
             );
         }
-        if !first {
-            body.push_str(",\n");
-        }
-        first = false;
-        body.push_str(&format!(
-            "    {v:?}: [{}]",
-            values
-                .iter()
-                .map(|x| format!("{x:?}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
     }
-    body.push_str("\n  }\n}\n");
+    let series = raw.values().map(Vec::as_slice).collect::<Vec<_>>();
+    let indexes = series_indices_multi(&unix, &series, from, to, max_points);
+    let source_n = unix
+        .iter()
+        .filter(|time| from.is_none_or(|start| **time >= start))
+        .filter(|time| to.is_none_or(|end| **time <= end))
+        .count();
+    let body = SeriesBody {
+        files: hists.len(),
+        source_n,
+        n: indexes.len(),
+        downsampled: indexes.len() < source_n,
+        time: indexes.iter().map(|&index| unix[index]).collect(),
+        vars: raw
+            .into_iter()
+            .map(|(name, values)| {
+                let selected = indexes
+                    .iter()
+                    .map(|&index| values[index].is_finite().then_some(values[index]))
+                    .collect();
+                (name, selected)
+            })
+            .collect(),
+    };
+    let json = serde_json::to_string(&body)? + "\n";
 
     match out {
         Some(p) => {
-            std::fs::write(p, &body)?;
-            println!(
-                "wrote {} series x {} points to {p}",
-                names.len(),
-                unix.len()
-            );
+            std::fs::write(p, &json)?;
+            println!("wrote {} series x {} points to {p}", names.len(), body.n);
         }
-        None => print!("{body}"),
+        None => print!("{json}"),
     }
     Ok(())
 }
@@ -1450,6 +1763,15 @@ fn variable_units(f: &netcdf::File, name: &str) -> Option<String> {
             netcdf::AttributeValue::Str(s) => Some(s),
             _ => None,
         })
+}
+
+fn read_file_1d(f: &netcdf::File, path: &Path, name: &str) -> Result<Vec<f64>> {
+    let variable = f
+        .variable(name)
+        .with_context(|| format!("{} has no variable {name}", path.display()))?;
+    variable
+        .get_values::<f64, _>(..)
+        .with_context(|| format!("cannot read {name} from {}", path.display()))
 }
 
 /// 一个槽位探测到的结果，交给 GUI 的前处理页。
@@ -1784,14 +2106,33 @@ fn history_files(out: &Path) -> Result<Vec<PathBuf>> {
 /// **要验证单调递增。** 文件名排序碰巧等于时间序，但那是约定不是保证；
 /// 顺序错了的结果是一条乱序的曲线和一批错配的指标 —— 两者都不会报错。
 fn read_history(files: &[PathBuf], var: &str) -> Result<Vec<f64>> {
-    let mut out = Vec::new();
+    Ok(read_history_many(files, &[var])?
+        .remove(var)
+        .expect("the requested variable is present in the result map"))
+}
+
+/// Read several scalar history variables while opening each monthly file once.
+/// NetCDF/HDF5 open/close dominates multi-year evaluation; grouping by file makes
+/// batch analysis scale with months rather than `months × variables`.
+fn read_history_many(
+    files: &[PathBuf],
+    vars: &[&str],
+) -> Result<std::collections::BTreeMap<String, Vec<f64>>> {
+    let mut out = vars
+        .iter()
+        .map(|name| ((*name).to_string(), Vec::new()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     for f in files {
-        let v = colm_hist::obs::read_1d(f, var)
-            .with_context(|| format!("{} has no variable {var}", f.display()))?;
-        out.extend(v);
+        let file = netcdf::open(f).with_context(|| format!("cannot open {}", f.display()))?;
+        for name in vars {
+            let values = read_file_1d(&file, f, name)?;
+            out.get_mut(*name)
+                .expect("all names were inserted")
+                .extend(values);
+        }
     }
-    if var == "time" {
-        check_increasing(&out).with_context(|| {
+    if let Some(time) = out.get("time") {
+        check_increasing(time).with_context(|| {
             format!(
                 "the history files in {} do not concatenate into an increasing time axis; sorting by file name is not giving chronological order here",
                 files[0].parent().unwrap_or(Path::new(".")).display()

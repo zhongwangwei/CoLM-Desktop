@@ -5,6 +5,9 @@ import { $ } from './ui.js';
 
 const ready = () => (state.selected ? null : '先在文件与目录建一个算例');
 const available = id => () => state.availableFlows.has(id);
+const completedResults = () => state.cases.filter(c => state.createdCases.has(c.dir) && c.has_history);
+const hasResults = () => completedResults().length > 0;
+const hasMultipleResults = () => completedResults().length > 1;
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
@@ -31,8 +34,14 @@ export const WORKFLOW = [
   { n: 4, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
   ] },
-  { n: 5, t: '结果', d: '曲线与指标', steps: [
-    { id: 'result', page: 'result', t: '查看结果', d: '绘图与评估', need: ready },
+  { n: 5, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
+    { id: 'result-overview', page: 'result', t: '分析总览', d: '本次站点与产物状态', need: ready },
+    { id: 'result-data', page: 'result', t: '数据浏览', d: '变量、单位与维度', need: ready, show: hasResults },
+    { id: 'result-series', page: 'result', t: '时间序列', d: '按站点和变量绘图', need: ready, show: hasResults },
+    { id: 'result-evaluation', page: 'result', t: '模型评估', d: '模型与观测配对', need: ready, show: hasResults },
+    { id: 'result-comparison', page: 'result', t: '多站点比较', d: '排名与批量指标', need: ready, show: hasMultipleResults },
+    { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
+    { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: ready, show: hasResults },
   ] },
 ];
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
@@ -92,6 +101,9 @@ export function go(id) {
   if (!step || (step.show && !step.show())) { setStatus(`当前配置没有这一步：${id}`); return; }
   const why = step.need();
   if (why) { setStatus(why); return; }
+  const previous = STEPS.find(s => s.id === state.step);
+  if (step.page === 'result' && previous?.page !== 'result') state.liveCollapsed = true;
+  if (step.page !== 'result') state.liveCollapsed = false;
   state.step = id;
   const group = WORKFLOW.find(g => g.steps.includes(step));
   if (group?.collapsible) state.expandedFlows.add(group.key);
@@ -99,8 +111,10 @@ export function go(id) {
   for (const p of document.querySelectorAll('[data-flow-pane]')) {
     p.hidden = p.dataset.flowPane !== id;
   }
+  document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
   $('work').scrollTop = 0;
   renderSteps();
+  globalThis.dispatchEvent?.(new CustomEvent('colm:step', { detail: id }));
 }
 
 export function renderSteps() {
@@ -195,6 +209,11 @@ export function initShell() {
     setTheme(next);
     localStorage.setItem('theme', next);
   };
+  $('liveToggle').onclick = () => {
+    state.liveCollapsed = !state.liveCollapsed;
+    document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
+    $('liveToggle').setAttribute('aria-pressed', String(state.liveCollapsed));
+  };
 
   for (const b of document.querySelectorAll('#modeSeg button')) {
     b.onclick = () => {
@@ -238,4 +257,5 @@ export function initShell() {
 function setTheme(t) {
   document.documentElement.dataset.theme = t;
   $('themeBtn').textContent = t === 'dark' ? '☀️' : '🌙';
+  globalThis.dispatchEvent?.(new CustomEvent('colm:theme', { detail: t }));
 }

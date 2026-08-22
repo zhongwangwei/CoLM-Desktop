@@ -92,3 +92,94 @@ fn rerunning_clears_the_previous_history_but_not_the_restart() {
     // 第一次跑时目录还不存在 —— 那不是错误。
     assert_eq!(super::clear_history(&out.join("nope")).unwrap(), 0);
 }
+
+#[test]
+fn history_shapes_are_classified_for_the_result_browser() {
+    assert_eq!(
+        super::history_kind(&[("time".into(), 12), ("patch".into(), 1)]),
+        "series"
+    );
+    assert_eq!(
+        super::history_kind(&[("time".into(), 12), ("soil".into(), 8)]),
+        "profile"
+    );
+    assert_eq!(
+        super::history_kind(&[("time".into(), 12), ("pft".into(), 15)]),
+        "category"
+    );
+}
+
+#[test]
+fn displayed_series_keep_endpoints_and_extrema_under_the_point_limit() {
+    let unix: Vec<i64> = (0..1000).collect();
+    let mut values: Vec<f64> = unix.iter().map(|i| (*i as f64 / 10.0).sin()).collect();
+    values[501] = 9999.0;
+    let indexes = super::series_indices(&unix, &values, None, None, Some(80));
+    assert!(indexes.len() <= 80, "{}", indexes.len());
+    assert_eq!(indexes.first(), Some(&0));
+    assert_eq!(indexes.last(), Some(&999));
+    assert!(
+        indexes.contains(&501),
+        "the spike must survive downsampling"
+    );
+}
+
+#[test]
+fn displayed_series_apply_the_requested_time_window_before_sampling() {
+    let unix: Vec<i64> = (0..100).collect();
+    let values: Vec<f64> = unix.iter().map(|i| *i as f64).collect();
+    let indexes = super::series_indices(&unix, &values, Some(20), Some(29), Some(5));
+    assert!(indexes.len() <= 5);
+    assert_eq!(indexes.first(), Some(&20));
+    assert_eq!(indexes.last(), Some(&29));
+}
+
+#[test]
+fn multi_variable_sampling_keeps_spikes_from_every_requested_series() {
+    let unix: Vec<i64> = (0..1000).collect();
+    let mut a = vec![0.0; unix.len()];
+    let mut b = vec![0.0; unix.len()];
+    a[211] = 5000.0;
+    b[733] = -6000.0;
+    let indexes = super::series_indices_multi(&unix, &[&a, &b], None, None, Some(160));
+    assert!(indexes.len() <= 160, "{}", indexes.len());
+    assert!(indexes.contains(&211), "first variable spike was lost");
+    assert!(indexes.contains(&733), "second variable spike was lost");
+}
+
+#[test]
+fn summary_metrics_omit_the_large_chart_pair_arrays() {
+    let row = super::VarMetrics {
+        name: "Rnet".into(),
+        obs_var: "Rnet".into(),
+        model_var: "f_rnet".into(),
+        n: 10,
+        rmse: 1.0,
+        mae: 1.0,
+        bias: 0.0,
+        r2: 1.0,
+        correlation: 1.0,
+        nse: 1.0,
+        kge: 1.0,
+        model_mean: 2.0,
+        model_sd: 0.5,
+        obs_mean: 2.0,
+        obs_sd: 0.5,
+        alpha: 1.0,
+        beta: 1.0,
+        beta_warning: None,
+        time: None,
+        model: None,
+        obs: None,
+        pair_source_n: None,
+        pair_n: None,
+        pair_downsampled: None,
+    };
+    let json = serde_json::to_value(row).unwrap();
+    assert!(json.get("rmse").is_some());
+    assert!(json.get("time").is_none());
+    assert!(json.get("model").is_none());
+    assert!(json.get("obs").is_none());
+    assert!(json.get("pair_source_n").is_none());
+    assert!(json.get("pair_n").is_none());
+}

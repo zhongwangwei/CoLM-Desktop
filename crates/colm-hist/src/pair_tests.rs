@@ -145,3 +145,16 @@ fn an_hour_with_no_matching_observation_is_dropped() {
     );
     assert_eq!(p.len(), 1);
 }
+
+#[test]
+fn sorted_time_lookup_keeps_the_original_one_second_tolerance() {
+    let seconds = [0.0, 1800.0, 3600.0];
+    assert_eq!(observation_index(&seconds, 1800.5, true), Some(1));
+    assert_eq!(observation_index(&seconds, 1801.0, true), None);
+    assert_eq!(observation_index(&seconds, -0.5, true), Some(0));
+    // Malformed unsorted axes retain the previous linear-search behavior.
+    assert_eq!(
+        observation_index(&[3600.0, 0.0, 1800.0], 1800.0, false),
+        Some(2)
+    );
+}
