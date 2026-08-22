@@ -206,9 +206,7 @@ fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
     );
     assert_eq!(
         run_args("/case", "/kernel", true, None).unwrap(),
-        [
-            "run", "/case", "--kernel", "/kernel", "--stream", "1", "--force", "1",
-        ]
+        ["run", "/case", "--kernel", "/kernel", "--stream", "1", "--force", "1",]
     );
     assert!(run_args("/case", "/kernel", false, Some("unknown")).is_err());
 }
