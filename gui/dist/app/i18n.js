@@ -300,7 +300,6 @@ const ZH_EN = [
   ['选择…', 'Choose…'],
   ['选择文件…', 'Choose file…'],
   ['选择目录…', 'Choose folder…'],
-  ['选择/更换边界层数据…', 'Choose/change boundary-layer data…'],
   ['扫描', 'Scan'],
   ['全不选', 'Select none'],
   ['全选', 'Select all'],

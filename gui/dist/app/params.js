@@ -512,24 +512,6 @@ function table(shown, fieldStates = new Map()) {
         }
       };
       v.appendChild(inp);
-      if (e.path === 'DEF_USE_CBL_HEIGHT') {
-        const pick = document.createElement('button');
-        pick.type = 'button';
-        pick.className = 'btn-ghost';
-        pick.style.marginLeft = '8px';
-        pick.textContent = '选择/更换边界层数据…';
-        pick.onclick = async () => {
-          const chosen = await pickParameterPath('DEF_USE_CBL_HEIGHT', 'file');
-          if (!chosen) return;
-          try {
-            const r = await invoke('configure_cbl_batch', { dirs: editTarget(), file: chosen });
-            state.text = r.text;
-            status('已校验并接入边界层高度文件');
-            await renderFields();
-          } catch (err) { status(err); }
-        };
-        v.appendChild(pick);
-      }
       if (PATH_FIELDS[e.path]) {
         const pick = document.createElement('button');
         pick.type = 'button';

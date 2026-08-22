@@ -38,6 +38,8 @@ assert.match(params, /fieldLabel\(e\.path, language\(\)\)/);
 assert.match(params, /optionLabel\(e\.path, v, language\(\)\)/);
 assert.doesNotMatch(params, /k\.textContent = e\.path;\s*\/\/ 主标签/s);
 assert.match(params, /configure_cbl_batch/);
+assert.match(params, /enabled\(inp\.value\) && e\.path === 'DEF_USE_CBL_HEIGHT'[\s\S]*pickParameterPath\('DEF_USE_CBL_HEIGHT', 'file'\)[\s\S]*configure_cbl_batch/);
+assert.doesNotMatch(params, /选择\/更换边界层数据/);
 assert.match(params, /configure_ozone_batch/);
 assert.match(params, /collapseStomatal/);
 assert.match(params, /DEF_USE_MEDLYNST[\s\S]*DEF_USE_WUEST/);
