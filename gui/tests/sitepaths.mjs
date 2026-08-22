@@ -25,4 +25,11 @@ assert.match(
   'changing the forcing directory must refresh stale site availability',
 );
 
+const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
+assert.match(
+  html,
+  /id="makecase"[^>]*justify-content:flex-end/,
+  'the create-case action must sit on the right of the site-selection card',
+);
+
 console.log('site paths: forcing directory follows Sitedata and availability refreshes automatically');
