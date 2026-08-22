@@ -179,6 +179,25 @@ fn requested_batch_cpu_count_is_bounded_by_the_machine() {
 }
 
 #[test]
+fn selected_evaluation_variables_are_forwarded_individually() {
+    let args = metrics_args(
+        "/case".into(),
+        "/obs.nc".into(),
+        0,
+        false,
+        true,
+        Some(vec!["Rnet".into(), "GPP".into(), "NEE".into()]),
+        None,
+    );
+    let pairs = args
+        .windows(2)
+        .filter(|window| window[0] == "--pairs-var")
+        .map(|window| window[1].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(pairs, ["Rnet", "GPP", "NEE"]);
+}
+
+#[test]
 fn batch_summary_distinguishes_success_from_attempted() {
     let summary = BatchSummary {
         total: 4,

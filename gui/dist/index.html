@@ -406,6 +406,13 @@
             <button class="btn-next" id="evaluate" disabled>评估当前站点</button>
           </div>
         </div>
+        <div class="card">
+          <div class="result-card-head">
+            <div><h3>评估内容</h3><div class="ch">只计算勾选变量；不可用项会说明缺少的模型或观测变量。</div></div>
+            <div class="result-tools"><button class="btn-ghost" id="eval-select-all">全选可用</button><button class="btn-ghost" id="eval-select-none">清空</button></div>
+          </div>
+          <div id="evaluation-variable-selector" class="evaluation-variable-grid"><div class="result-empty">选择观测文件后显示可评估变量。</div></div>
+        </div>
         <div class="card"><div class="result-table-wrap" id="metrics"></div></div>
         <div class="card">
           <div class="result-card-head"><div><h3>图形诊断</h3><div class="ch">点击指标表中的变量切换图形。</div></div><button class="btn-ghost" id="evaluation-png" disabled>导出 PNG</button></div>
@@ -417,6 +424,13 @@
         <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>多站点比较</h1>
         <p class="sub">评估本次所有已完成算例。单站点失败不会终止批次，缺失原因会完整保留。</p>
+        <div class="card">
+          <div class="result-card-head">
+            <div><h3>批量评估内容</h3><div class="ch">选择需要跨站点比较的变量；每项会显示在分析范围内可用的站点数。</div></div>
+            <div class="result-tools"><button class="btn-ghost" id="batch-eval-select-all">全选</button><button class="btn-ghost" id="batch-eval-select-none">清空</button></div>
+          </div>
+          <div id="batch-evaluation-variable-selector" class="evaluation-variable-grid"><div class="result-empty">进入页面后读取各站点评估能力。</div></div>
+        </div>
         <div class="card result-sticky-tools">
           <div class="result-tools">
             <button class="btn-next" id="eval-all" disabled>评估全部已完成站点</button>
@@ -462,9 +476,11 @@
             <label class="check"><input type="checkbox" id="export-metrics" checked> 指标</label>
             <label class="check"><input type="checkbox" id="export-failures" checked> 失败与缺失</label>
             <button class="btn-next" id="export-report">生成报告</button>
+            <button class="btn-next" id="export-pdf">导出 PDF…</button>
             <button class="btn-ghost" id="export-copy" disabled>复制</button>
             <button class="btn-ghost" id="export-download" disabled>下载文件</button>
           </div>
+          <p class="muted mini">PDF 使用系统打印窗口生成；选择“另存为 PDF”即可保存带分页样式的报告。</p>
         </div>
         <div class="card"><pre id="export-preview" class="report-preview">还没有生成报告。</pre></div>
       </div>

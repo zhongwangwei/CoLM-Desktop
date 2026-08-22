@@ -69,6 +69,11 @@ pub fn pair_with_time(
         .fold(f64::INFINITY, f64::min);
     let one_observation_per_label = shortest_model_step <= 1801.0;
     for k in spinup..model_seconds.len() {
+        // 派生碳通量与原始 history 都可能遇到非有限值或 CoLM 的巨大负填充值。
+        // 这种记录不能进入指标，否则一项缺测就会把整行 RMSE/KGE 变成 NaN。
+        if !model_values[k].is_finite() || model_values[k] <= -1.0e30 {
+            continue;
+        }
         let mut acc = 0.0;
         let mut n = 0;
         let slots = if one_observation_per_label {

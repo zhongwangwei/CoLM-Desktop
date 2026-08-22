@@ -50,6 +50,10 @@ if (metricKey({ caseDir: '/a', obs: '/o', summaryOnly: false })
     === metricKey({ caseDir: '/a', obs: '/o', summaryOnly: true })) {
   throw new Error('summary-only metrics must not collide with chart-pair metrics in cache');
 }
+if (metricKey({ caseDir: '/a', obs: '/o', pairVars: ['Qle', 'Rnet'] })
+    !== metricKey({ caseDir: '/a', obs: '/o', pairVars: ['Rnet', 'Qle', 'Rnet'] })) {
+  throw new Error('selected evaluation variables do not produce a stable cache key');
+}
 
 const time = Array.from({ length: 1000 }, (_, i) => i);
 const values = time.map(i => i === 501 ? 9999 : Math.sin(i / 10));
@@ -76,10 +80,19 @@ for (const pane of [
 if (!html.includes('id="series-csv"')) {
   throw new Error('time-series workbench is missing the full-resolution CSV export');
 }
+for (const control of [
+  'evaluation-variable-selector', 'batch-evaluation-variable-selector', 'export-pdf',
+]) {
+  if (!html.includes(`id="${control}"`)) throw new Error(`results workbench is missing ${control}`);
+}
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
-if (!resultUi.includes('summaryOnly') || !resultUi.includes('pairVar')
-    || !resultUi.includes("false, summaryRow.name, 2400")) {
+if (!resultUi.includes('summaryOnly') || !resultUi.includes('pairVars')
+    || !resultUi.includes('false, [summaryRow.name], 2400')) {
   throw new Error('multi-site summaries and selected-variable chart pairs are not loaded independently');
 }
+if (!resultUi.includes("label: `${meta.label} · ${variable}`")
+    || !resultUi.includes('window.print()') || !resultUi.includes('printableReportHtml')) {
+  throw new Error('chart legend or printable PDF report support regressed');
+}
 
-console.log('results: independent scope, bounded concurrency, LRU, downsampling, export, and seven panes are present');
+console.log('results: scope, variable selection, chart labels, bounded loading, PDF, and seven panes are present');

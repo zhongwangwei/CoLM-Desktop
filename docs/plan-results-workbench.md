@@ -39,10 +39,11 @@
 
 - history catalog 返回文件数、时间范围、步数、变量、单位、维度和可绘制类型。
 - 标量时间序列走 uPlot；剖面/PFT/PC 变量在数据浏览中标识维度，首版不给错误的折线图。
+- 评估内容由用户勾选；统一目录覆盖 Rnet、Qh、Qle、Qg、SWup、Ustar、GPP、GPP_DT、Resp 与 NEE，并逐站点说明缺失的模型/观测变量及 QC 策略。
 - 指标至少包含 n、RMSE、MAE、Bias、R²、Pearson r、NSE、KGE、KGE r/α/β 分量、模型/观测均值和标准差。
 - 多站点比较提供变量/指标切换、搜索、排序、排名条和完整失败原因。
 - 诊断提供时间覆盖、缺测、物理范围、能量平衡残差；所需变量缺失时显示“无法计算”及缺项。
-- 导出覆盖 CSV、JSON、Markdown、HTML；图表提供 PNG 快照入口。
+- 导出覆盖 CSV、JSON、Markdown、HTML 与系统打印生成的分页 PDF；图表提供 PNG 快照入口。
 
 ## 5. 验收标准
 

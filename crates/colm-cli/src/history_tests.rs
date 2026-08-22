@@ -153,6 +153,10 @@ fn summary_metrics_omit_the_large_chart_pair_arrays() {
         name: "Rnet".into(),
         obs_var: "Rnet".into(),
         model_var: "f_rnet".into(),
+        label_zh: "净辐射".into(),
+        label_en: "Net radiation".into(),
+        units: "W/m²".into(),
+        quality_control: "measured_only".into(),
         n: 10,
         rmse: 1.0,
         mae: 1.0,
@@ -182,4 +186,37 @@ fn summary_metrics_omit_the_large_chart_pair_arrays() {
     assert!(json.get("obs").is_none());
     assert!(json.get("pair_source_n").is_none());
     assert!(json.get("pair_n").is_none());
+}
+
+#[test]
+fn evaluation_model_sources_apply_units_and_derived_expressions() {
+    use colm_hist::obs::ModelSource;
+    use std::collections::BTreeMap;
+
+    let data = BTreeMap::from([
+        ("f_assim".to_string(), vec![1.0e-6, 2.0e-6]),
+        ("f_respc".to_string(), vec![3.0e-6, 5.0e-6]),
+    ]);
+    assert_eq!(
+        super::model_values(
+            ModelSource::Direct {
+                variable: "f_assim",
+                scale: 1.0e6,
+            },
+            &data,
+        )
+        .unwrap(),
+        [1.0, 2.0]
+    );
+    let nee = super::model_values(
+        ModelSource::Difference {
+            minuend: "f_respc",
+            subtrahend: "f_assim",
+            scale: 1.0e6,
+        },
+        &data,
+    )
+    .unwrap();
+    assert!((nee[0] - 2.0).abs() < 1.0e-12);
+    assert!((nee[1] - 3.0).abs() < 1.0e-12);
 }

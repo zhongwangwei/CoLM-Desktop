@@ -62,6 +62,7 @@ pub fn run() {
             run_log_tail,
             history_catalog,
             series,
+            evaluation_catalog,
             metrics,
             unknown_fields,
             irrelevant_fields,

@@ -301,6 +301,20 @@ td:first-child { overflow-wrap: anywhere; }
 :root[lang="en"] .result-chart-host:empty::before { content: "Select a site and variable to plot"; }
 .result-chart-summary { margin-bottom: 8px; }
 
+.evaluation-variable-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                            gap: 8px; }
+.evaluation-variable { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+                       align-items: start; gap: 8px; padding: 10px 11px;
+                       border: 1px solid var(--border-soft); border-radius: var(--r-sm);
+                       background: var(--surface); cursor: pointer; }
+.evaluation-variable:hover { border-color: var(--accent); }
+.evaluation-variable.unavailable { opacity: .58; cursor: not-allowed; }
+.evaluation-variable input { margin-top: 2px; accent-color: var(--accent); }
+.evaluation-variable b { display: block; font-size: 11.5px; }
+.evaluation-variable small { display: block; margin-top: 2px; color: var(--muted);
+                             font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+.evaluation-variable .availability { color: var(--muted); font-size: 10px; white-space: nowrap; }
+
 .metric-ranking { display: grid; gap: 7px; margin-top: 12px; max-height: 360px; overflow: auto; }
 .metric-rank-row { display: grid; grid-template-columns: minmax(80px, 150px) 1fr 72px;
                    align-items: center; gap: 9px; font-size: 11px; }
@@ -321,6 +335,30 @@ td:first-child { overflow-wrap: anywhere; }
 .diagnostic-card p:last-child { margin-bottom: 0; }
 .report-preview { margin: 0; min-height: 320px; max-height: 62vh; overflow: auto;
                   white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.65 var(--mono); }
+
+#print-report { display: none; }
+
+@media print {
+  @page { size: A4; margin: 14mm; }
+  body > *:not(#print-report) { display: none !important; }
+  #print-report { display: block !important; color: #17251d; background: #fff;
+                  font: 10pt/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  #print-report h1 { margin: 0 0 3mm; color: #174c2d; font-size: 21pt; }
+  #print-report h2 { margin: 7mm 0 2.5mm; color: #174c2d; font-size: 13pt;
+                     break-after: avoid; }
+  #print-report .print-meta { display: grid; grid-template-columns: repeat(3, 1fr);
+                              gap: 2.5mm; margin: 4mm 0; }
+  #print-report .print-meta div { padding: 2.5mm; border: .25mm solid #d9e5dd;
+                                  border-radius: 2mm; break-inside: avoid; }
+  #print-report .print-meta b { display: block; font-size: 8pt; color: #617067; }
+  #print-report table { width: 100%; border-collapse: collapse; font-size: 8.2pt; }
+  #print-report th, #print-report td { padding: 1.5mm; border-bottom: .25mm solid #d9e5dd;
+                                       text-align: left; vertical-align: top; }
+  #print-report th { color: #385545; background: #f2f7f3; }
+  #print-report tr { break-inside: avoid; }
+  #print-report footer { margin-top: 9mm; padding-top: 3mm; border-top: .25mm solid #d9e5dd;
+                         color: #617067; text-align: center; font-size: 8pt; }
+}
 
 .app.live-collapsed { grid-template-columns: var(--rail-w) minmax(0, 1fr) 0; }
 .app.live-collapsed .live { display: none; }

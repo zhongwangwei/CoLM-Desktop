@@ -741,9 +741,29 @@ pub async fn metrics(
     spinup: usize,
     corrected: bool,
     summary_only: bool,
-    pair_var: Option<String>,
+    pair_vars: Option<Vec<String>>,
     max_points: Option<usize>,
 ) -> Result<String, String> {
+    capture(&metrics_args(
+        case,
+        obs,
+        spinup,
+        corrected,
+        summary_only,
+        pair_vars,
+        max_points,
+    ))
+}
+
+fn metrics_args(
+    case: String,
+    obs: String,
+    spinup: usize,
+    corrected: bool,
+    summary_only: bool,
+    pair_vars: Option<Vec<String>>,
+    max_points: Option<usize>,
+) -> Vec<String> {
     let mut args = vec![
         "metrics".to_string(),
         case,
@@ -765,7 +785,7 @@ pub async fn metrics(
         args.push("--summary-only".into());
         args.push("1".into());
     }
-    if let Some(pair_var) = pair_var {
+    for pair_var in pair_vars.unwrap_or_default() {
         args.push("--pairs-var".into());
         args.push(pair_var);
     }
@@ -773,7 +793,14 @@ pub async fn metrics(
         args.push("--max-points".into());
         args.push(max_points.to_string());
     }
-    capture(&args)
+    args
+}
+
+/// 当前算例与观测文件共同支持哪些评估变量。只读首个 history 文件的结构，
+/// 不加载长时间序列，供 GUI 在真正计算前展示完整可选清单和缺失原因。
+#[tauri::command]
+pub async fn evaluation_catalog(case: String, obs: String) -> Result<String, String> {
+    capture(&["evaluation-catalog".to_string(), case, "--obs".into(), obs])
 }
 
 /// 取绘图数据。

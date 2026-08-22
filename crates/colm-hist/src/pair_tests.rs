@@ -158,3 +158,19 @@ fn sorted_time_lookup_keeps_the_original_one_second_tolerance() {
         Some(2)
     );
 }
+
+#[test]
+fn nonfinite_and_model_fill_values_never_enter_metrics() {
+    let model_t = [0.0, 1800.0, 3600.0, 5400.0];
+    let model_v = [1.0, f64::NAN, -1.0e36, 4.0];
+    let obs_t = model_t;
+    let obs_v = [1.0, 2.0, 3.0, 4.0];
+    let qc = [0.0; 4];
+    let obs = super::Series {
+        seconds: &obs_t,
+        values: &obs_v,
+        qc: &qc,
+    };
+    let paired = super::pair_with_time(&model_t, &model_v, &obs, 0);
+    assert_eq!(paired, [(0.0, 1.0, 1.0), (5400.0, 4.0, 4.0)]);
+}

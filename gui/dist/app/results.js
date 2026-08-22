@@ -43,11 +43,14 @@ const COMMON_VARIABLES = {
 };
 
 const catalogCache = new LruCache(16);
+const evaluationCatalogCache = new LruCache(64);
 const seriesCache = new LruCache(12);
 const metricsCache = new LruCache(180);
 const charts = new Map();
 let currentMetricRows = [];
 let currentComparisonSummary = null;
+let currentEvaluationCatalog = [];
+let batchEvaluationCatalogs = [];
 let comparisonController = null;
 let activeSeriesRequest = 0;
 let activeMetricRequest = 0;
@@ -118,6 +121,21 @@ function variableMeta(name, units = '') {
   else if (/lai|sai|veg|assim|resp|gpp|npp|leaf/i.test(name)) group = '植被/碳氮';
   else if (/rad|rnet|solar|long|short|albedo|fsena|lfevpa|fgrnd/i.test(name)) group = '能量/辐射';
   return { label: bare, units: units || '—', group };
+}
+
+function evaluationLabel(variable) {
+  return language() === 'en' ? variable.label_en : variable.label_zh;
+}
+
+function selectedEvaluationNames() {
+  return [...state.evaluationVariables];
+}
+
+function evaluationMissingReason(variable) {
+  const missing = [];
+  if (variable.missing_model?.length) missing.push(`${language() === 'en' ? 'model' : '模型'}: ${variable.missing_model.join(', ')}`);
+  if (variable.missing_observation?.length) missing.push(`${language() === 'en' ? 'observation' : '观测'}: ${variable.missing_observation.join(', ')}`);
+  return missing.join(' · ') || (language() === 'en' ? 'No valid paired samples' : '没有有效配对样本');
 }
 
 function resultKpi(value, label, kind = '') {
@@ -264,6 +282,144 @@ async function loadCatalog(c) {
   const catalog = JSON.parse(await invoke('history_catalog', { case: c.dir }));
   catalogCache.set(c.dir, catalog);
   return catalog;
+}
+
+async function loadEvaluationCatalog(c, obs = observationFor(c)) {
+  if (!c || !obs) return [];
+  const key = `${c.dir}\u001f${obs}`;
+  const cached = evaluationCatalogCache.get(key);
+  if (cached) return cached;
+  const rows = JSON.parse(await invoke('evaluation_catalog', { case: c.dir, obs }));
+  return evaluationCatalogCache.set(key, rows);
+}
+
+function resetEvaluationResults(message = '') {
+  currentMetricRows = [];
+  currentComparisonSummary = null;
+  state.resultMetrics = [];
+  state.resultFailures = [];
+  state.resultMetricMissing = [];
+  $('metrics').textContent = '';
+  destroyChartsInside($('evaluation-charts'));
+  renderComparison();
+  if (message) status(message);
+}
+
+function setEvaluationVariable(name, checked) {
+  state.evaluationSelectionTouched = true;
+  if (checked) state.evaluationVariables.add(name);
+  else state.evaluationVariables.delete(name);
+  resetEvaluationResults(language() === 'en'
+    ? 'Evaluation contents changed; run the evaluation again.'
+    : '评估内容已更改，请重新运行评估。');
+  renderEvaluationSelector();
+  renderBatchEvaluationSelector();
+  updateButtons();
+}
+
+function replaceEvaluationSelection(names) {
+  state.evaluationSelectionTouched = true;
+  state.evaluationVariables = new Set(names);
+  resetEvaluationResults(language() === 'en'
+    ? 'Evaluation contents changed; run the evaluation again.'
+    : '评估内容已更改，请重新运行评估。');
+  renderEvaluationSelector();
+  renderBatchEvaluationSelector();
+  updateButtons();
+}
+
+function initializeEvaluationSelection(catalog) {
+  if (state.evaluationSelectionTouched || state.evaluationVariables.size) return;
+  catalog.filter(variable => variable.available)
+    .forEach(variable => state.evaluationVariables.add(variable.name));
+}
+
+function evaluationVariableNode(variable, availabilityText = '') {
+  const label = document.createElement('label');
+  label.className = `evaluation-variable${variable.available ? '' : ' unavailable'}`;
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = state.evaluationVariables.has(variable.name);
+  input.disabled = !variable.available;
+  input.onchange = () => setEvaluationVariable(variable.name, input.checked);
+  const text = node('span');
+  text.append(node('b', '', `${evaluationLabel(variable)} · ${variable.name}`));
+  const qc = variable.quality_control === 'measured_only'
+    ? (language() === 'en' ? 'QC=0 measured values' : '仅 QC=0 实测值')
+    : (language() === 'en' ? 'No QC field; all finite values' : '无 QC 字段；使用全部有限值');
+  text.append(node('small', '', `${variable.model_var} ↔ ${variable.obs_var} · ${variable.units} · ${qc}`));
+  if (!variable.available) text.append(node('small', 'warn', evaluationMissingReason(variable)));
+  label.append(input, text, node('span', 'availability', availabilityText));
+  return label;
+}
+
+function renderEvaluationSelector() {
+  const host = $('evaluation-variable-selector');
+  host.textContent = '';
+  if (!currentEvaluationCatalog.length) {
+    host.appendChild(node('div', 'result-empty', language() === 'en'
+      ? 'Choose an observation file to list evaluable variables.'
+      : '选择观测文件后显示可评估变量。'));
+    return;
+  }
+  initializeEvaluationSelection(currentEvaluationCatalog);
+  currentEvaluationCatalog.forEach(variable => host.appendChild(evaluationVariableNode(variable)));
+}
+
+function mergedEvaluationCatalog() {
+  const byName = new Map();
+  for (const entry of batchEvaluationCatalogs) {
+    for (const variable of entry.catalog) byName.set(variable.name, variable);
+  }
+  for (const variable of currentEvaluationCatalog) if (!byName.has(variable.name)) byName.set(variable.name, variable);
+  return [...byName.values()];
+}
+
+function renderBatchEvaluationSelector() {
+  const host = $('batch-evaluation-variable-selector');
+  host.textContent = '';
+  const definitions = mergedEvaluationCatalog();
+  if (!definitions.length) {
+    host.appendChild(node('div', 'result-empty', language() === 'en'
+      ? 'No evaluation catalogs are available in the current scope.'
+      : '当前分析范围还没有可用的评估目录。'));
+    return;
+  }
+  initializeEvaluationSelection(definitions);
+  const total = batchEvaluationCatalogs.length;
+  for (const definition of definitions) {
+    const available = batchEvaluationCatalogs.filter(entry => entry.catalog
+      .some(variable => variable.name === definition.name && variable.available)).length;
+    host.appendChild(evaluationVariableNode({ ...definition, available: available > 0 },
+      language() === 'en' ? `${available}/${total} sites` : `${available}/${total} 站点`));
+  }
+}
+
+async function refreshCurrentEvaluationCatalog() {
+  const c = activeCase();
+  const obs = $('obs').value.trim();
+  currentEvaluationCatalog = [];
+  renderEvaluationSelector();
+  if (!c || !obs) return;
+  try {
+    const rows = await loadEvaluationCatalog(c, obs);
+    if (activeCase()?.dir !== c.dir || $('obs').value.trim() !== obs) return;
+    currentEvaluationCatalog = rows;
+    renderEvaluationSelector();
+    updateButtons();
+  } catch (error) { status(error); }
+}
+
+async function refreshBatchEvaluationCatalogs() {
+  const scope = resultScope();
+  const width = Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 1));
+  const results = await boundedMap(scope, width, async c => {
+    const obs = observationFor(c);
+    if (!obs) return { case: c, catalog: [] };
+    return { case: c, catalog: await loadEvaluationCatalog(c, obs) };
+  });
+  batchEvaluationCatalogs = results.filter(result => result.ok).map(result => result.value);
+  renderBatchEvaluationSelector();
 }
 
 function kindLabel(kind) {
@@ -413,18 +569,22 @@ async function plotSeries() {
   $('plot').disabled = true;
   status(`读取 ${c.name} · ${variable}…`);
   try {
-    const data = await getSeries(c, variable, {
-      from: parseLocalClock($('series-from').value),
-      to: parseLocalClock($('series-to').value),
-      maxPoints: 2400,
-    });
+    const [data, catalog] = await Promise.all([
+      getSeries(c, variable, {
+        from: parseLocalClock($('series-from').value),
+        to: parseLocalClock($('series-to').value),
+        maxPoints: 2400,
+      }),
+      loadCatalog(c),
+    ]);
     if (token !== activeSeriesRequest || activeCase()?.dir !== c.dir) return;
     const values = data.vars[variable];
-    const meta = variableMeta(variable);
+    const catalogVariable = catalog.variables.find(item => item.name === variable);
+    const meta = variableMeta(variable, catalogVariable?.units);
     const colors = chartColors();
     makeChart($('charts'), {
       title: `${c.name} · ${meta.label} · ${data.n}/${data.source_n ?? data.n} 点`,
-      series: [{ label: '时间' }, { label: meta.units, stroke: colors.model, width: 1.3 }],
+      series: [{ label: '时间' }, { label: `${meta.label} · ${variable}`, stroke: colors.model, width: 1.3 }],
       axes: [{}, { label: meta.units }],
     }, [data.time, values], 300);
     renderSeriesStats(data, values, meta);
@@ -475,13 +635,14 @@ async function exportFullSeries() {
   finally { $('series-csv').disabled = !activeCase() || !$('var').value; }
 }
 
-async function getMetrics(c, obs, spinup, corrected, summaryOnly = false, pairVar = '', maxPoints = null) {
-  const key = metricKey({ caseDir: c.dir, obs, spinup, corrected, summaryOnly, pairVar, maxPoints: maxPoints ?? '' });
+async function getMetrics(c, obs, spinup, corrected, summaryOnly = false, pairVars = [], maxPoints = null) {
+  const variables = [...new Set(pairVars)].sort();
+  const key = metricKey({ caseDir: c.dir, obs, spinup, corrected, summaryOnly, pairVars: variables, maxPoints: maxPoints ?? '' });
   const cached = metricsCache.get(key);
   if (cached) return cached;
   const rows = JSON.parse(await invoke('metrics', {
     case: c.dir, obs, spinup, corrected, summaryOnly,
-    pairVar: pairVar || null, maxPoints,
+    pairVars: variables.length ? variables : null, maxPoints,
   }));
   return metricsCache.set(key, rows);
 }
@@ -490,11 +651,18 @@ async function evaluateCurrent() {
   const c = activeCase();
   const obs = $('obs').value.trim();
   if (!c || !obs) { status('要先给当前站点选择观测文件'); return; }
+  const selected = currentEvaluationCatalog
+    .filter(variable => variable.available && state.evaluationVariables.has(variable.name))
+    .map(variable => variable.name);
+  if (!selected.length) {
+    status(language() === 'en' ? 'Select at least one variable available at this site.' : '请至少选择一个当前站点可用的评估变量');
+    return;
+  }
   state.resultObsOverrides.set(c.dir, obs);
   const token = ++activeMetricRequest;
   $('evaluate').disabled = true;
   try {
-    const rows = await getMetrics(c, obs, Number($('spinup').value) || 0, $('corrected').checked, true);
+    const rows = await getMetrics(c, obs, Number($('spinup').value) || 0, $('corrected').checked, true, selected);
     if (token !== activeMetricRequest || activeCase()?.dir !== c.dir) return;
     currentMetricRows = rows;
     state.resultMetrics = state.resultMetrics.filter(row => row.case_dir !== c.dir);
@@ -517,15 +685,20 @@ function renderMetrics(rows) {
   const head = document.createElement('tr');
   for (const label of ['变量', 'n', 'RMSE', 'MAE', 'Bias', 'R²', 'r', 'NSE', 'KGE', 'α', 'β']) head.appendChild(th(label, label === '变量' ? '' : 'n'));
   table.appendChild(head);
-  for (const row of rows) {
+  for (const r of rows) {
     const tr = document.createElement('tr');
-    tr.dataset.variable = row.model_var;
-    const cells = [row.obs_var ?? row.name, row.n, metricText(row.rmse, 2), metricText(row.mae, 2),
-      metricText(row.bias, 2, true), metricText(row.r2), metricText(row.correlation), metricText(row.nse, 3, true),
-      metricText(row.kge, 3, true), metricText(row.alpha), metricText(row.beta)];
+    tr.dataset.variable = r.model_var;
+    const display = `${language() === 'en' ? r.label_en : r.label_zh} · ${r.model_var} ↔ ${r.obs_var ?? r.name}`;
+    const cells = [display, r.n, metricText(r.rmse, 2), metricText(r.mae, 2),
+      metricText(r.bias, 2, true), metricText(r.r2), metricText(r.correlation), metricText(r.nse, 3, true),
+      metricText(r.kge, 3, true), metricText(r.alpha), metricText(r.beta)];
     cells.forEach((value, index) => tr.appendChild(td(value, index ? 'n' : '')));
-    if (row.beta_warning) { tr.title = row.beta_warning; tr.lastChild.className = 'n warn'; }
-    tr.onclick = () => drawComparison(row);
+    const qc = r.quality_control === 'measured_only'
+      ? (language() === 'en' ? 'QC=0 measured observations only' : '仅使用 QC=0 的实测观测')
+      : (language() === 'en' ? 'Observation has no QC field; all finite values were used' : '观测没有 QC 字段，使用全部有限值');
+    tr.title = [qc, r.beta_warning].filter(Boolean).join('\n');
+    if (r.beta_warning) tr.lastChild.className = 'n warn';
+    tr.onclick = () => drawComparison(r);
     table.appendChild(tr);
   }
   box.appendChild(table);
@@ -541,7 +714,7 @@ async function drawComparison(summaryRow) {
   let rows;
   try {
     rows = await getMetrics(c, obs, Number($('spinup').value) || 0, $('corrected').checked,
-      false, summaryRow.name, 2400);
+      false, [summaryRow.name], 2400);
   } catch (error) { status(error); return; }
   if (token !== activeMetricChartRequest || activeCase()?.dir !== c.dir) return;
   const row = rows[0];
@@ -555,7 +728,7 @@ function renderComparisonCharts(row) {
   destroyChartsInside(host);
   host.textContent = '';
   const summary = node('p', 'muted mini result-chart-summary',
-    `${row.name} · n=${row.n} · RMSE=${metricText(row.rmse, 2)} · Bias=${metricText(row.bias, 2, true)} · R²=${metricText(row.r2)} · NSE=${metricText(row.nse, 3, true)} · KGE=${metricText(row.kge, 3, true)} · 图形点 ${row.pair_n ?? row.time.length}/${row.pair_source_n ?? row.time.length}`);
+    `${evaluationLabel(row)} · ${row.name} · n=${row.n} · RMSE=${metricText(row.rmse, 2)} · Bias=${metricText(row.bias, 2, true)} · R²=${metricText(row.r2)} · NSE=${metricText(row.nse, 3, true)} · KGE=${metricText(row.kge, 3, true)} · 图形点 ${row.pair_n ?? row.time.length}/${row.pair_source_n ?? row.time.length}`);
   const timeHost = node('div', 'chart');
   const scatterHost = node('div', 'chart');
   const residualHost = node('div', 'chart');
@@ -573,8 +746,8 @@ function renderComparisonCharts(row) {
   const colors = chartColors();
   makeChart(timeHost, {
     title: `${row.name} · 模型与观测`,
-    series: [{ label: '时间' }, { label: '模型', stroke: colors.model, width: 1.2 }, { label: '观测', stroke: colors.obs, width: 1.2 }],
-    axes: [{}, {}],
+    series: [{ label: '时间' }, { label: `CoLM · ${row.model_var}`, stroke: colors.model, width: 1.2 }, { label: `${language() === 'en' ? 'Observation' : '观测'} · ${row.obs_var}`, stroke: colors.obs, width: 1.2 }],
+    axes: [{}, { label: row.units }],
   }, [row.time, row.model, row.obs]);
   const order = row.obs.map((value, index) => [value, row.model[index]]).sort((a, b) => a[0] - b[0]);
   makeChart(scatterHost, {
@@ -592,13 +765,18 @@ function renderComparisonCharts(row) {
 
 function updateComparisonButton() {
   const scope = resultScope();
-  $('eval-all').disabled = !scope.length || !!comparisonController;
+  $('eval-all').disabled = !scope.length || !state.evaluationVariables.size || !!comparisonController;
   $('eval-all').textContent = `评估分析范围内的 ${scope.length} 个站点`;
 }
 
 async function evaluateAll() {
   const todo = resultScope();
   if (!todo.length) return;
+  const selected = selectedEvaluationNames();
+  if (!selected.length) {
+    status(language() === 'en' ? 'Select at least one variable for batch evaluation.' : '请至少选择一个批量评估变量');
+    return;
+  }
   comparisonController = new AbortController();
   $('eval-cancel').disabled = false;
   updateComparisonButton();
@@ -611,8 +789,21 @@ async function evaluateAll() {
   const results = await boundedMap(todo, width, async c => {
     const obs = observationFor(c);
     if (!obs) throw new Error('没有观测文件');
-    const rows = await getMetrics(c, obs, spinup, corrected, true);
-    return { case: c, rows };
+    const catalog = await loadEvaluationCatalog(c, obs);
+    const requested = catalog.filter(variable => selected.includes(variable.name));
+    const available = requested.filter(variable => variable.available).map(variable => variable.name);
+    const missing = requested.filter(variable => !variable.available)
+      .map(variable => ({ variable: variable.name, reason: evaluationMissingReason(variable) }));
+    const rows = available.length
+      ? await getMetrics(c, obs, spinup, corrected, true, available) : [];
+    const returned = new Set(rows.map(row => row.name));
+    for (const variable of available) {
+      if (!returned.has(variable)) missing.push({
+        variable,
+        reason: language() === 'en' ? 'No valid paired samples' : '没有有效配对样本',
+      });
+    }
+    return { case: c, rows, missing };
   }, {
     signal: comparisonController.signal,
     onProgress: progress => {
@@ -622,9 +813,15 @@ async function evaluateAll() {
   });
   state.resultMetrics = [];
   state.resultFailures = [];
+  state.resultMetricMissing = [];
   results.forEach((result, index) => {
     const c = todo[index];
-    if (result.ok) result.value.rows.forEach(row => state.resultMetrics.push({ site: c.name, case_dir: c.dir, ...row }));
+    if (result.ok) {
+      result.value.rows.forEach(row => state.resultMetrics.push({ site: c.name, case_dir: c.dir, ...row }));
+      result.value.missing.forEach(item => state.resultMetricMissing.push({
+        site: c.name, case_dir: c.dir, ...item,
+      }));
+    }
     else state.resultFailures.push({ site: c.name, case_dir: c.dir, reason: result.error, cancelled: !!result.cancelled });
   });
   const cancelled = comparisonController.signal.aborted;
@@ -645,37 +842,64 @@ function renderComparison() {
   rankingCard.hidden = !rows.length;
   const summary = $('summary');
   summary.textContent = '';
-  if (!rows.length && !state.resultFailures.length) {
+  if (!rows.length && !state.resultFailures.length && !state.resultMetricMissing.length) {
     summary.appendChild(node('div', 'result-empty', '尚未运行多站点评估。'));
     return;
   }
-  const variables = [...new Set(rows.map(row => row.name))];
+  const catalog = mergedEvaluationCatalog();
+  const selected = selectedEvaluationNames();
+  const variables = selected.length ? selected : [...new Set(rows.map(row => row.name))];
   state.summaryVar = variables.includes(state.summaryVar) ? state.summaryVar
     : variables.includes('Rnet') ? 'Rnet' : variables[0];
   const variableSelect = $('summary-var');
   variableSelect.textContent = '';
   for (const variable of variables) {
-    const option = document.createElement('option'); option.value = variable; option.textContent = variable; variableSelect.appendChild(option);
+    const definition = catalog.find(item => item.name === variable);
+    const option = document.createElement('option'); option.value = variable;
+    option.textContent = definition ? `${evaluationLabel(definition)} · ${variable}` : variable;
+    variableSelect.appendChild(option);
   }
   variableSelect.value = state.summaryVar ?? '';
   const metric = $('summary-metric').value || state.summarySort || 'r2';
   state.summarySort = metric;
   const search = $('summary-search').value.trim().toLowerCase();
-  const shown = rows.filter(row => row.name === state.summaryVar)
+  const valueRows = rows.filter(row => row.name === state.summaryVar)
     .filter(row => !search || row.site.toLowerCase().includes(search));
-  renderRanking(shown, metric);
+  renderRanking(valueRows, metric);
+  const byCase = new Map(valueRows.map(row => [row.case_dir, row]));
+  const shown = resultScope().filter(c => !search || c.name.toLowerCase().includes(search)).map(c => {
+    const value = byCase.get(c.dir);
+    if (value) return { ...value, availability: language() === 'en' ? 'Available' : '可用' };
+    const missing = state.resultMetricMissing.find(item => item.case_dir === c.dir && item.variable === state.summaryVar);
+    const failed = state.resultFailures.find(item => item.case_dir === c.dir);
+    return {
+      site: c.name, case_dir: c.dir, name: state.summaryVar,
+      availability: language() === 'en' ? 'Unavailable' : '不可用',
+      reason: missing?.reason ?? failed?.reason ?? (language() === 'en' ? 'Not evaluated' : '未评估'),
+    };
+  });
   const table = document.createElement('table');
-  const columns = [['站点', 'site'], ['n', 'n'], ['RMSE', 'rmse'], ['MAE', 'mae'], ['Bias', 'bias'], ['R²', 'r2'], ['r', 'correlation'], ['NSE', 'nse'], ['KGE', 'kge']];
+  const columns = [['站点', 'site'], ['状态', 'availability'], ['n', 'n'], ['RMSE', 'rmse'], ['MAE', 'mae'], ['Bias', 'bias'], ['R²', 'r2'], ['r', 'correlation'], ['NSE', 'nse'], ['KGE', 'kge']];
   const head = document.createElement('tr'); columns.forEach(([label], index) => head.appendChild(th(label, index ? 'n' : ''))); table.appendChild(head);
   const meta = METRIC_META[metric] ?? { better: 'high' };
   const badness = row => meta.better === 'low' ? Number(row[metric])
     : meta.better === 'zero' ? Math.abs(Number(row[metric])) : -Number(row[metric]);
-  shown.sort((a, b) => badness(b) - badness(a));
+  shown.sort((a, b) => Number(!a.n) - Number(!b.n) || badness(b) - badness(a));
   for (const row of shown) {
     const tr = document.createElement('tr');
-    columns.forEach(([, key], index) => tr.appendChild(td(index ? metricText(row[key], key === 'n' ? 0 : 3, key === 'bias') : row[key], index ? 'n' : '')));
-    if (row.beta_warning) tr.title = row.beta_warning;
-    tr.onclick = () => { setResultCase(row.case_dir); go('result-evaluation'); evaluateCurrent(); };
+    columns.forEach(([, key], index) => {
+      const raw = row[key];
+      const value = ['site', 'availability'].includes(key) ? raw
+        : metricText(raw, key === 'n' ? 0 : 3, key === 'bias');
+      tr.appendChild(td(value, index > 1 ? 'n' : ''));
+    });
+    tr.title = [row.reason, row.beta_warning].filter(Boolean).join('\n');
+    if (row.n) tr.onclick = async () => {
+      setResultCase(row.case_dir);
+      go('result-evaluation');
+      await refreshCurrentEvaluationCatalog();
+      await evaluateCurrent();
+    };
     table.appendChild(tr);
   }
   const wrap = node('div', 'result-table-wrap'); wrap.appendChild(table); summary.appendChild(wrap);
@@ -771,6 +995,9 @@ function reportData() {
   const evaluationFailures = state.resultFailures
     .filter(item => scopeDirs.has(item.case_dir))
     .map(item => ({ ...item, phase: 'evaluation' }));
+  const metricMissing = state.resultMetricMissing
+    .filter(item => scopeDirs.has(item.case_dir))
+    .map(item => ({ ...item, phase: 'variable', reason: `${item.variable}: ${item.reason}` }));
   return {
     product: 'CoLM Desktop', version: '0.1.0', generated_at: new Date().toISOString(),
     copyright: 'CoLM LSM Development Team, School of Atmospheric Sciences, SYSU',
@@ -781,6 +1008,7 @@ function reportData() {
       kernel: $('kernel')?.value || null,
       discarded_records: Number($('spinup').value) || 0,
       energy_closure_corrected: $('corrected').checked,
+      evaluation_variables: selectedEvaluationNames(),
       analysis_sites: scope.length,
     },
     cases: allCurrent().map(c => ({
@@ -789,7 +1017,7 @@ function reportData() {
     })),
     metrics: $('export-metrics').checked
       ? state.resultMetrics.filter(row => scopeDirs.has(row.case_dir)).map(stripMetricPairs) : [],
-    failures: $('export-failures').checked ? [...runFailures, ...evaluationFailures] : [],
+    failures: $('export-failures').checked ? [...runFailures, ...evaluationFailures, ...metricMissing] : [],
   };
 }
 
@@ -804,6 +1032,7 @@ function markdownReport(data) {
       `Generated: ${data.generated_at}`, `Analysis scope: ${data.settings.analysis_sites} sites`,
       `Subgrid scheme: ${data.settings.subgrid ?? '—'}`, `Discarded output records: ${data.settings.discarded_records}`,
       `Energy-closure correction: ${data.settings.energy_closure_corrected ? 'Yes' : 'No'}`,
+      `Evaluation variables: ${data.settings.evaluation_variables.join(', ') || '—'}`,
       '', '## Cases', '', '| Site | Status | Analysis scope | History | Observation |', '|---|---|---:|---:|---|'];
     data.cases.forEach(c => lines.push(`| ${c.name} | ${c.status} | ${c.in_analysis_scope ? 'Yes' : 'No'} | ${c.has_history ? 'Yes' : 'No'} | ${c.observation ?? '—'} |`));
     if (data.metrics.length) {
@@ -812,7 +1041,8 @@ function markdownReport(data) {
     }
     if (data.failures.length) {
       lines.push('', '## Incomplete items', '');
-      data.failures.forEach(item => lines.push(`- ${item.site} [${item.phase}]: ${item.reason}`));
+      const phases = { run: 'run', evaluation: 'evaluation', variable: 'variable' };
+      data.failures.forEach(item => lines.push(`- ${item.site} [${phases[item.phase] ?? item.phase}]: ${item.reason}`));
     }
     lines.push('', '---', '', 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU');
     return lines.join('\n') + '\n';
@@ -820,6 +1050,7 @@ function markdownReport(data) {
   const lines = ['# CoLM Desktop 结果分析报告', '', `软件版本：${data.version}`, `生成时间：${data.generated_at}`,
     `分析范围：${data.settings.analysis_sites} 个站点`, `次网格方案：${data.settings.subgrid ?? '—'}`,
     `丢弃输出记录：${data.settings.discarded_records}`, `能量闭合订正：${data.settings.energy_closure_corrected ? '是' : '否'}`,
+    `评估变量：${data.settings.evaluation_variables.join('、') || '—'}`,
     '', '## 算例', '', '| 站点 | 状态 | 分析范围 | History | 观测 |', '|---|---|---:|---:|---|'];
   const statusLabels = { done: '已完成', failed: '失败', running: '运行中', waiting: '未完成' };
   data.cases.forEach(c => lines.push(`| ${c.name} | ${statusLabels[c.status] ?? c.status} | ${c.in_analysis_scope ? '是' : '否'} | ${c.has_history ? '是' : '否'} | ${c.observation ?? '—'} |`));
@@ -829,7 +1060,7 @@ function markdownReport(data) {
   }
   if (data.failures.length) {
     lines.push('', '## 未完成项', '');
-    const phases = { run: '运行', evaluation: '评估' };
+    const phases = { run: '运行', evaluation: '评估', variable: '变量' };
     data.failures.forEach(item => lines.push(`- ${item.site} [${phases[item.phase] ?? item.phase}]：${item.reason}`));
   }
   lines.push('', '---', '', 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU');
@@ -838,6 +1069,50 @@ function markdownReport(data) {
 
 function escapeHtml(value) {
   return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+}
+
+function printableReportHtml(data) {
+  const en = language() === 'en';
+  const h = value => escapeHtml(value ?? '—');
+  const yes = value => value ? (en ? 'Yes' : '是') : (en ? 'No' : '否');
+  const statusLabels = en
+    ? { done: 'Completed', failed: 'Failed', running: 'Running', waiting: 'Pending' }
+    : { done: '已完成', failed: '失败', running: '运行中', waiting: '未完成' };
+  const caseRows = data.cases.map(c => `<tr><td>${h(c.name)}</td><td>${h(statusLabels[c.status] ?? c.status)}</td><td>${yes(c.in_analysis_scope)}</td><td>${yes(c.has_history)}</td><td>${h(c.observation)}</td></tr>`).join('');
+  const metricRows = data.metrics.map(row => `<tr><td>${h(row.site)}</td><td>${h(language() === 'en' ? row.label_en : row.label_zh)} · ${h(row.name)}</td><td>${h(row.n)}</td><td>${h(metricText(row.rmse))}</td><td>${h(metricText(row.mae))}</td><td>${h(metricText(row.bias))}</td><td>${h(metricText(row.r2))}</td><td>${h(metricText(row.correlation))}</td><td>${h(metricText(row.nse))}</td><td>${h(metricText(row.kge))}</td></tr>`).join('');
+  const failures = data.failures.map(item => `<li><b>${h(item.site)}</b> · ${h(item.reason)}</li>`).join('');
+  return `
+    <h1>${en ? 'CoLM Desktop Results Analysis Report' : 'CoLM Desktop 结果分析报告'}</h1>
+    <p>${en ? 'Generated' : '生成时间'}: ${h(data.generated_at)}</p>
+    <div class="print-meta">
+      <div><b>${en ? 'Analysis scope' : '分析范围'}</b>${h(data.settings.analysis_sites)} ${en ? 'sites' : '个站点'}</div>
+      <div><b>${en ? 'Evaluation variables' : '评估变量'}</b>${h(data.settings.evaluation_variables.join(', ') || '—')}</div>
+      <div><b>${en ? 'Energy closure correction' : '能量闭合订正'}</b>${yes(data.settings.energy_closure_corrected)}</div>
+      <div><b>${en ? 'Subgrid scheme' : '次网格方案'}</b>${h(data.settings.subgrid)}</div>
+      <div><b>${en ? 'Discarded records' : '丢弃输出记录'}</b>${h(data.settings.discarded_records)}</div>
+      <div><b>${en ? 'Software version' : '软件版本'}</b>${h(data.version)}</div>
+    </div>
+    <h2>${en ? 'Cases' : '算例'}</h2>
+    <table><thead><tr><th>${en ? 'Site' : '站点'}</th><th>${en ? 'Status' : '状态'}</th><th>${en ? 'In scope' : '分析范围'}</th><th>History</th><th>${en ? 'Observation' : '观测'}</th></tr></thead><tbody>${caseRows}</tbody></table>
+    ${data.metrics.length ? `<h2>${en ? 'Evaluation metrics' : '评估指标'}</h2><table><thead><tr><th>${en ? 'Site' : '站点'}</th><th>${en ? 'Variable' : '变量'}</th><th>n</th><th>RMSE</th><th>MAE</th><th>Bias</th><th>R²</th><th>r</th><th>NSE</th><th>KGE</th></tr></thead><tbody>${metricRows}</tbody></table>` : ''}
+    ${data.failures.length ? `<h2>${en ? 'Incomplete items' : '未完成项'}</h2><ul>${failures}</ul>` : ''}
+    <footer>${en ? 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU' : '版权所有：CoLM陆面模式开发团队，中山大学大气科学学院'}</footer>`;
+}
+
+function exportPdfReport() {
+  document.querySelector('#print-report')?.remove();
+  const report = document.createElement('article');
+  report.id = 'print-report';
+  report.innerHTML = printableReportHtml(reportData());
+  document.body.appendChild(report);
+  const cleanup = () => report.remove();
+  addEventListener('afterprint', cleanup, { once: true });
+  window.print();
+  // 某些 WebView 不触发 afterprint；留足打印对话框时间后再清理隐藏节点。
+  setTimeout(cleanup, 300_000);
+  status(language() === 'en'
+    ? 'Print dialog opened; choose Save as PDF.'
+    : '已打开打印窗口，请选择“另存为 PDF”。');
 }
 
 function generateReport() {
@@ -882,17 +1157,21 @@ function exportChart(host, filename) {
 
 export function invalidateResultCase(dir) {
   catalogCache.delete(dir);
+  evaluationCatalogCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
   seriesCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
   metricsCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
   state.resultMetrics = state.resultMetrics.filter(row => row.case_dir !== dir);
   state.resultFailures = state.resultFailures.filter(row => row.case_dir !== dir);
+  state.resultMetricMissing = state.resultMetricMissing.filter(row => row.case_dir !== dir);
 }
 
 function updateButtons() {
   const c = activeCase();
   $('plot').disabled = !c || !$('var').value;
   $('series-csv').disabled = !c || !$('var').value;
-  $('evaluate').disabled = !c || !$('obs').value.trim();
+  const hasSelectedAvailable = currentEvaluationCatalog.some(variable =>
+    variable.available && state.evaluationVariables.has(variable.name));
+  $('evaluate').disabled = !c || !$('obs').value.trim() || !hasSelectedAvailable;
   $('diagnose').disabled = !c;
   updateComparisonButton();
 }
@@ -913,7 +1192,11 @@ async function prepareActivePane() {
       if (state.step === 'result-data') await renderDataBrowser();
     } catch (error) { status(error); }
   }
-  if (state.step === 'result-comparison') renderComparison();
+  if (state.step === 'result-evaluation') await refreshCurrentEvaluationCatalog();
+  if (state.step === 'result-comparison') {
+    await refreshBatchEvaluationCatalogs();
+    renderComparison();
+  }
   updateButtons();
 }
 
@@ -940,7 +1223,20 @@ $('series-reset').onclick = async () => {
 };
 $('series-png').onclick = () => exportChart($('charts'), `${activeCase()?.name ?? 'colm'}-${$('var').value}.png`);
 $('series-csv').onclick = exportFullSeries;
-$('obs').onchange = () => { const c = activeCase(); if (c) state.resultObsOverrides.set(c.dir, $('obs').value.trim()); updateButtons(); };
+$('obs').onchange = async () => {
+  const c = activeCase();
+  if (c) state.resultObsOverrides.set(c.dir, $('obs').value.trim());
+  resetEvaluationResults();
+  await refreshCurrentEvaluationCatalog();
+  updateButtons();
+};
+$('eval-select-all').onclick = () => replaceEvaluationSelection(
+  currentEvaluationCatalog.filter(variable => variable.available).map(variable => variable.name));
+$('eval-select-none').onclick = () => replaceEvaluationSelection([]);
+$('batch-eval-select-all').onclick = () => replaceEvaluationSelection(
+  mergedEvaluationCatalog().filter(variable => batchEvaluationCatalogs.some(entry => entry.catalog
+    .some(item => item.name === variable.name && item.available))).map(variable => variable.name));
+$('batch-eval-select-none').onclick = () => replaceEvaluationSelection([]);
 $('evaluate').onclick = evaluateCurrent;
 $('corrected').onchange = () => { if (currentMetricRows.length) evaluateCurrent(); };
 $('evaluation-png').onclick = () => exportChart($('evaluation-charts'), `${activeCase()?.name ?? 'colm'}-evaluation.png`);
@@ -950,11 +1246,18 @@ $('summary-var').onchange = () => { state.summaryVar = $('summary-var').value; r
 $('summary-metric').onchange = () => { state.summarySort = $('summary-metric').value; renderComparison(); };
 $('summary-search').oninput = renderComparison;
 $('summary-copy').onclick = async () => {
-  const rows = state.resultMetrics.filter(row => row.name === state.summaryVar).map(stripMetricPairs);
+  const values = new Map(state.resultMetrics.filter(row => row.name === state.summaryVar)
+    .map(row => [row.case_dir, stripMetricPairs(row)]));
+  const rows = resultScope().map(c => values.get(c.dir) ?? {
+    site: c.name, case_dir: c.dir, name: state.summaryVar, status: 'unavailable',
+    reason: state.resultMetricMissing.find(item => item.case_dir === c.dir && item.variable === state.summaryVar)?.reason
+      ?? state.resultFailures.find(item => item.case_dir === c.dir)?.reason ?? 'not evaluated',
+  });
   await copyText(rowsToCsv(rows)); status('多站点指标 CSV 已复制');
 };
 $('diagnose').onclick = diagnoseCurrent;
 $('export-report').onclick = generateReport;
+$('export-pdf').onclick = exportPdfReport;
 $('export-copy').onclick = async () => { await copyText(reportText); status('报告已复制'); };
 $('export-download').onclick = () => downloadText(reportText, `colm-results-${new Date().toISOString().slice(0, 10)}.${reportExtension}`);
 

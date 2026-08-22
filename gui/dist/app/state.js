@@ -87,6 +87,11 @@ export const state = {
   /** 批量评估的最近结果与失败项，供比较、诊断和报告分栏共享。 */
   resultMetrics: [],
   resultFailures: [],
+  /** 用户明确选择的评估内容。首次打开时默认勾选当前可用的全部变量。 */
+  evaluationVariables: new Set(),
+  evaluationSelectionTouched: false,
+  /** 逐站点、逐变量不可评估的结构化原因，不与整个站点失败混在一起。 */
+  resultMetricMissing: [],
   /** 结果页筛选与排名设置。 */
   resultCaseSearch: '',
   resultStatusFilter: 'all',

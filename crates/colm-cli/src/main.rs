@@ -13,7 +13,8 @@
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
-//!                    [--summary-only 1] [--pairs-var Rnet] [--max-points N]
+//!                    [--summary-only 1] [--pairs-var Rnet ...] [--max-points N]
+//! colm-cli evaluation-catalog <算例目录> --obs <Flux.nc>
 //! colm-cli history-catalog <算例目录>
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli all       --site ... --out ... --kernel ... [--obs ...]
@@ -57,8 +58,10 @@ usage:
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
                    --summary-only: 只返回指标，不携带绘图用配对点
-                   --pairs-var: 只返回指定观测变量及其配对点
+                   --pairs-var: 只评估指定观测变量；可重复给出
                    --max-points: 配对点保极值降采样上限（指标仍用完整样本）
+  colm-cli evaluation-catalog <case-dir> --obs <Flux.nc>
+                   # 列出全部支持的评估变量及当前算例/观测是否可用
   colm-cli history-catalog <case-dir>
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
                    [--max-points N] [--out series.json]
@@ -109,7 +112,6 @@ fn main() -> Result<()> {
         "metrics" => {
             let case = opts.positional_case()?;
             let obs_path = opts.need("--obs")?;
-            let pair_var = opts.get("--pairs-var");
             cmd_metrics(MetricsRequest {
                 case: &case,
                 obs_path: &obs_path,
@@ -117,9 +119,12 @@ fn main() -> Result<()> {
                 json: opts.get("--json").is_some(),
                 corrected: opts.get("--corrected").is_some(),
                 summary_only: opts.get("--summary-only").is_some(),
-                pair_var: pair_var.as_deref(),
+                pair_vars: opts.get_all("--pairs-var"),
                 pair_max_points: opts.get("--max-points").map(|v| v.parse()).transpose()?,
             })?;
+        }
+        "evaluation-catalog" => {
+            cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;
         }
         "series" => {
             let case = opts.positional_case()?;
@@ -154,7 +159,7 @@ fn main() -> Result<()> {
                     json: false,
                     corrected: false,
                     summary_only: false,
-                    pair_var: None,
+                    pair_vars: Vec::new(),
                     pair_max_points: None,
                 })?,
                 None => println!("no --obs given; skipping the metrics table"),
@@ -1238,6 +1243,11 @@ struct VarMetrics {
     obs_var: String,
     /// 模型 history 里的对应变量
     model_var: String,
+    label_zh: String,
+    label_en: String,
+    units: String,
+    /// `measured_only` 表示使用 qc==0；`finite_only` 表示源文件没有 QC。
+    quality_control: String,
     n: usize,
     rmse: f64,
     mae: f64,
@@ -1277,8 +1287,101 @@ struct MetricsRequest<'a> {
     json: bool,
     corrected: bool,
     summary_only: bool,
-    pair_var: Option<&'a str>,
+    pair_vars: Vec<String>,
     pair_max_points: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+struct EvaluationAvailability {
+    name: String,
+    label_zh: String,
+    label_en: String,
+    units: String,
+    model_var: String,
+    obs_var: String,
+    qc_var: Option<String>,
+    quality_control: String,
+    available: bool,
+    missing_model: Vec<String>,
+    missing_observation: Vec<String>,
+}
+
+fn evaluation_availability(
+    variable: &colm_hist::obs::EvaluationVariable,
+    history: &netcdf::File,
+    observation: &netcdf::File,
+) -> EvaluationAvailability {
+    let missing_model = variable
+        .model
+        .required()
+        .into_iter()
+        .filter(|name| !name.is_empty() && history.variable(name).is_none())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut missing_observation = Vec::new();
+    if observation.variable(variable.observation).is_none() {
+        missing_observation.push(variable.observation.to_string());
+    }
+    if let Some(qc) = variable.qc.filter(|qc| observation.variable(qc).is_none()) {
+        missing_observation.push(qc.to_string());
+    }
+    EvaluationAvailability {
+        name: variable.observation.to_string(),
+        label_zh: variable.label_zh.to_string(),
+        label_en: variable.label_en.to_string(),
+        units: variable.units.to_string(),
+        model_var: variable.model.label(),
+        obs_var: variable.observation.to_string(),
+        qc_var: variable.qc.map(str::to_string),
+        quality_control: if variable.qc.is_some() {
+            "measured_only"
+        } else {
+            "finite_only"
+        }
+        .to_string(),
+        available: missing_model.is_empty() && missing_observation.is_empty(),
+        missing_model,
+        missing_observation,
+    }
+}
+
+fn cmd_evaluation_catalog(case: &Path, obs_path: &Path) -> Result<()> {
+    let layout = Layout::new(case);
+    let name = colm_case::case_name(&layout.case_nml())?;
+    let hists = history_files(&layout.out().join(&name))?;
+    let history =
+        netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
+    let observation =
+        netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
+    let rows = colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .map(|variable| evaluation_availability(variable, &history, &observation))
+        .collect::<Vec<_>>();
+    println!("{}", serde_json::to_string(&rows)?);
+    Ok(())
+}
+
+fn model_values(
+    source: colm_hist::obs::ModelSource,
+    data: &std::collections::BTreeMap<String, Vec<f64>>,
+) -> Option<Vec<f64>> {
+    use colm_hist::obs::ModelSource;
+    match source {
+        ModelSource::Direct { variable, scale } => Some(
+            data.get(variable)?
+                .iter()
+                .map(|value| value * scale)
+                .collect(),
+        ),
+        ModelSource::Difference {
+            minuend,
+            subtrahend,
+            scale,
+        } => {
+            let (a, b) = (data.get(minuend)?, data.get(subtrahend)?);
+            (a.len() == b.len()).then(|| a.iter().zip(b).map(|(a, b)| (a - b) * scale).collect())
+        }
+    }
 }
 
 fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
@@ -1289,7 +1392,7 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
         json,
         corrected,
         summary_only,
-        pair_var,
+        pair_vars,
         pair_max_points,
     } = request;
     let layout = Layout::new(case);
@@ -1304,15 +1407,28 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
     let o_t = read_file_1d(&obs_file, obs_path, "time")?;
     let first_history =
         netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
-    let available_model = colm_hist::obs::FLUX_PAIRS
+    let selected = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
-        .filter(|(observation, _)| pair_var.is_none_or(|wanted| *observation == wanted))
-        .map(|(_, model)| *model)
-        .filter(|model| first_history.variable(model).is_some())
+        .filter(|variable| {
+            pair_vars.is_empty()
+                || pair_vars
+                    .iter()
+                    .any(|wanted| wanted == variable.observation)
+        })
+        .filter(|variable| evaluation_availability(variable, &first_history, &obs_file).available)
         .collect::<Vec<_>>();
+    let mut wanted = std::collections::BTreeSet::from(["time"]);
+    for variable in &selected {
+        wanted.extend(
+            variable
+                .model
+                .required()
+                .into_iter()
+                .filter(|name| !name.is_empty()),
+        );
+    }
     drop(first_history);
-    let mut wanted = vec!["time"];
-    wanted.extend(available_model);
+    let wanted = wanted.into_iter().collect::<Vec<_>>();
     let mut model_data = read_history_many(&hists, &wanted)?;
     let m_t = model_data.remove("time").expect("time was requested");
     // 观测的 time 原点可能在年中（AU-Preston 是 2003-08-12 03:30），
@@ -1341,10 +1457,8 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
         );
     }
     let mut rows: Vec<VarMetrics> = Vec::new();
-    for (o_name, m_name) in colm_hist::obs::FLUX_PAIRS {
-        if pair_var.is_some_and(|wanted| wanted != o_name) {
-            continue;
-        }
+    for variable in selected {
+        let o_name = variable.observation;
         // 订正版没有自己的 qc 变量（文件里只有 `Qle_cor_uc_qc`，那是不确定度的），
         // 所以质量控制一律用原始通量那一个：它说的是"这一步是实测还是插补"，
         // 而订正只改数值不改这件事。
@@ -1353,19 +1467,25 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
             .flatten()
             .filter(|candidate| obs_file.variable(candidate).is_some())
             .unwrap_or(o_name);
-        let (Ok(o_v), Ok(o_q), Some(m_v)) = (
-            read_file_1d(&obs_file, obs_path, o_var),
-            read_file_1d(&obs_file, obs_path, &format!("{o_name}_qc")),
-            model_data.get(m_name),
-        ) else {
-            continue; // 这一对里有一侧没有，跳过而不是报错
+        let Ok(o_v) = read_file_1d(&obs_file, obs_path, o_var) else {
+            continue;
+        };
+        let o_q = match variable.qc {
+            Some(qc) => match read_file_1d(&obs_file, obs_path, qc) {
+                Ok(values) => values,
+                Err(_) => continue,
+            },
+            None => vec![colm_hist::pair::QC_MEASURED; o_v.len()],
+        };
+        let Some(m_v) = model_values(variable.model, &model_data) else {
+            continue;
         };
         let s = colm_hist::pair::Series {
             seconds: &o_t,
             values: &o_v,
             qc: &o_q,
         };
-        let with_time = colm_hist::pair::pair_with_time(&m_sec, m_v, &s, spinup);
+        let with_time = colm_hist::pair::pair_with_time(&m_sec, &m_v, &s, spinup);
         let pairs: Vec<(f64, f64)> = with_time.iter().map(|(_, a, b)| (*a, *b)).collect();
         let Some(m) = colm_hist::metric::compute(&pairs) else {
             continue;
@@ -1425,7 +1545,16 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
             rows.push(VarMetrics {
                 name: o_name.to_string(),
                 obs_var: o_var.to_string(),
-                model_var: m_name.to_string(),
+                model_var: variable.model.label(),
+                label_zh: variable.label_zh.to_string(),
+                label_en: variable.label_en.to_string(),
+                units: variable.units.to_string(),
+                quality_control: if variable.qc.is_some() {
+                    "measured_only"
+                } else {
+                    "finite_only"
+                }
+                .to_string(),
                 n: m.n,
                 rmse: m.rmse,
                 mae: m.mae,

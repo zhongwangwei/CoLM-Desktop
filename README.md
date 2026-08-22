@@ -42,7 +42,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 | 约束感知参数界面 | 只显示当前模型可用的分栏和字段；派生项、互斥项与不可用项明确标识 |
 | 多站点并发 | 按 CPU 核数并发运行独立单点算例，逐站点显示进度、阶段和日志 |
 | 分阶段运行 | 可分别运行 `mksrfdata`、`mkinidata`、`colm`，也可一键运行全部阶段 |
-| 结果分析工作台 | 七个分栏覆盖总览、变量目录、时间序列、模型评估、多站点排名、过程诊断和报告导出 |
+| 结果分析工作台 | 七个分栏覆盖总览、变量目录、时间序列、可选变量评估、多站点排名、过程诊断及 PDF/HTML/CSV/JSON/Markdown 导出 |
 | 中英文界面 | 首页与主工作流均可切换中文/English，保留常规与专家模式入口 |
 
 当前配置体系覆盖 IGBP / USGS、PFT / PC、水热、BGC 与城市过程；GUI 会根据单点模式及过程约束自动隐藏河道、水库、示踪剂等不适用内容。
@@ -56,7 +56,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 5. **配置过程参数**：只处理当前模型约束下实际生效的过程。
 6. **选择输出并运行**：按阶段或全部运行，查看每个站点的实时进度和日志。
 7. **分析结果**：浏览实际 history 变量与维度，按站点绘图、缩放和导出完整 CSV。
-8. **评估与诊断**：计算 RMSE、MAE、Bias、R²、Pearson r、NSE、KGE 及其分量，比较多个站点并导出报告。
+8. **评估与诊断**：从净辐射、能量通量、摩擦速度、GPP、生态系统呼吸和 NEE 等可用观测中勾选评估内容，计算 RMSE、MAE、Bias、R²、Pearson r、NSE、KGE 及其分量，比较多个站点并导出报告或 PDF。
 
 结果工作台只纳入本次任务创建的算例，不会混入算例根目录中的旧结果。长序列和模型—观测配对图按需保极值降采样；指标仍使用完整样本。多站点评估采用有上限的并发池，单个站点缺观测或失败不会中断其余站点。
 
@@ -116,6 +116,11 @@ cargo run -p colm-cli -- run /path/to/cases/site-name \
 
 # 与观测计算指标
 cargo run -p colm-cli -- metrics /path/to/cases/site-name \
+  --obs /path/to/Observation/site_Flux.nc \
+  --pairs-var Rnet --pairs-var GPP --pairs-var NEE
+
+# 检查当前算例和观测共同支持哪些评估变量
+cargo run -p colm-cli -- evaluation-catalog /path/to/cases/site-name \
   --obs /path/to/Observation/site_Flux.nc
 
 # 浏览 history 目录并导出保极值降采样序列

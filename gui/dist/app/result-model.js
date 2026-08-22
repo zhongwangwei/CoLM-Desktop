@@ -140,10 +140,11 @@ export function seriesStats(values) {
 /** 供报告和缓存使用的稳定键。 */
 export function metricKey({
   caseDir, obs, spinup = 0, corrected = false, summaryOnly = false,
-  pairVar = '', maxPoints = '',
+  pairVars = [], maxPoints = '',
 }) {
+  const variables = Array.isArray(pairVars) ? [...new Set(pairVars)].sort().join(',') : String(pairVars ?? '');
   return [caseDir, obs, Math.max(0, Number(spinup) || 0), corrected ? 1 : 0,
-    summaryOnly ? 1 : 0, pairVar, maxPoints].join('\u001f');
+    summaryOnly ? 1 : 0, variables, maxPoints].join('\u001f');
 }
 
 export function seriesKey({ caseDir, variable, from = '', to = '', maxPoints = 2400 }) {
