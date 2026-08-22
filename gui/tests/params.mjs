@@ -45,5 +45,10 @@ assert.match(params, /configure_ozone_batch/);
 assert.match(params, /collapseStomatal/);
 assert.match(params, /DEF_USE_MEDLYNST[\s\S]*DEF_USE_WUEST/);
 assert.match(params, /STABLE_IN_PLACE_FIELDS[\s\S]*DEF_precip_phase_discrimination_scheme/);
+const scope = params.slice(
+  params.indexOf('function renderScope'),
+  params.indexOf('export async function renderFields'),
+);
+assert.doesNotMatch(scope, /createElement\('button'\)|state\.batch/);
 
 console.log('params: scheme choices have readable labels while preserving raw CoLM values');

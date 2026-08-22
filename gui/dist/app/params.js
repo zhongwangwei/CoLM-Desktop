@@ -185,8 +185,8 @@ function control(e, meta, fieldState) {
 /** 顶上一条横幅，说清楚"改一下会动几个文件"。
  *
  *  **不能只在状态栏事后说。** 状态栏是改完之后才出现的，而这里要回答的是
- *  改之前那个问题：我现在改的是一个还是二十个。旁边给一个立刻缩回单个的
- *  按钮 —— 想给某一个站点单独设个值时，不用退回上一步重来。 */
+ *  改之前那个问题：我现在改的是一个还是二十个。批量建出的算例必须保持
+ *  同一套过程配置；这里不再提供把当前算例悄悄拆出批次的入口。 */
 function renderScope(box) {
   const dirs = editTarget();
   if (dirs.length < 2) return;
@@ -196,15 +196,6 @@ function renderScope(box) {
   const names = dirs.map(baseName);
   bar.innerHTML = `下面的改动会写进 <b>${dirs.length} 个算例</b>：`
     + names.slice(0, 6).join('、') + (names.length > 6 ? ` 等 ${names.length} 个` : '');
-  const b = document.createElement('button');
-  b.className = 'btn-ghost';
-  b.style.marginLeft = '10px';
-  b.textContent = `只改 ${state.selected?.name ?? names[0]}`;
-  b.onclick = () => {
-    state.batch = state.selected ? [state.selected.dir] : [dirs[0]];
-    renderFields();
-  };
-  bar.appendChild(b);
   box.appendChild(bar);
 }
 

@@ -377,7 +377,6 @@ const ZH_EN = [
   ['预热截止时刻的日，见 spinup_repeat 的说明。', 'Day of the spin-up cutoff; see spinup_repeat.'],
   ['预热截止时刻的当天秒数，见 spinup_repeat 的说明。', 'Seconds into the spin-up cutoff day; see spinup_repeat.'],
   ['下面的改动会写进', 'The changes below will be written to'],
-  ['只改', 'Edit only'],
   ['输出与重启', 'Output & restart'],
   ['CoLM 不认识这个字段', 'CoLM does not recognize this field'],
   ['本内核未编入（需要', 'Not compiled into this kernel (requires '],
