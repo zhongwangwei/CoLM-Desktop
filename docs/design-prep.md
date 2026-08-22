@@ -93,7 +93,7 @@
 
 CoLM 接收的是**总降水**（`forc_prc` 对流性 + `forc_prl` 大尺度），
 然后自己判相态 —— `MOD_RainSnowTemp.F90` 的 `rain_snow_temp`，三种方案
-（`DEF_precip_phase_discrimination_scheme` = I/II/III，默认 `II`），
+（`DEF_precip_phase_discrimination_scheme` = I/II/III，默认 `I`），
 判据是**湿球温度**（`CALL wetbulb(forc_t, forc_psrf, forc_q, t_precip)`）。
 
 所以：

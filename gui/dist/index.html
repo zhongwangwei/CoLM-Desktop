@@ -295,15 +295,6 @@
       </div>
 
       <div class="card">
-        <h3>开始运行</h3>
-        <div class="pill-row" style="margin-top:14px">
-          <button class="run-btn" id="run" disabled>▶ 运行</button>
-          <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
-        </div>
-        <div class="stages" id="stages"></div>
-      </div>
-
-      <div class="card">
         <h3>输出</h3>
         <div class="ch">设置输出频率、目录与重启。先运行时不必翻完几百个输出变量。</div>
         <div id="output-fields"></div>
@@ -311,9 +302,18 @@
 
       <details class="card fold-card">
         <summary>输出变量（按需展开）</summary>
-        <div class="ch">选择需要写入 history 的变量；默认收起，避免把运行按钮推到页面底部。</div>
+        <div class="ch">选择需要写入 history 的变量；默认收起，避免一次展示过多选项。</div>
         <div id="hist-fields"></div>
       </details>
+
+      <div class="card">
+        <h3>开始运行</h3>
+        <div class="pill-row" style="margin-top:14px">
+          <button class="run-btn" id="run" disabled>▶ 运行</button>
+          <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
+        </div>
+        <div class="stages" id="stages"></div>
+      </div>
     </section>
 
     <!-- ⑤ 结果 -->
@@ -388,12 +388,9 @@
   </footer>
 </div>
 
-<!-- 进门那道分流，现在是能前进/后退的五页向导，
-     见 docs/design-gate.md）。默认 hidden，由 domain.js 立起来 ——
-     直接写成可见的话，JS 加载失败时它会永远挡在那里，而那种故障从外面
-     看就是「程序打不开」。标题/说明/卡片/翻页按钮都是 domain.js 按当前
-     页动态填的，五页共用这一套容器。 -->
-<div id="domaingate" class="gate" hidden>
+<!-- 进门那道分流默认可见，避免 module 初始化前短暂露出主工作台。
+     domain.js 启动后会立即填充卡片；完成五页选择时才隐藏它。 -->
+<div id="domaingate" class="gate">
   <div class="gate-tools">
     <div class="seg" id="gateLangSeg" aria-label="界面语言">
       <button class="on" data-lang="zh" aria-pressed="true">中文</button>

@@ -10,22 +10,21 @@ import { kernelForSubgrid } from './kernel.js';
 
 const DOMAINS = [
   { id: 'site', t: '站点', d: '单点站点模拟', ready: true },
+  { id: 'watershed', t: '流域', d: '流域尺度模拟', ready: false, need: '流域步骤链尚未实现' },
   { id: 'region', t: '区域', d: '有限范围网格', ready: false, need: '区域步骤链尚未实现' },
   { id: 'global', t: '全球', d: '全球网格', ready: false, need: '全球步骤链尚未实现' },
 ];
 
 const SUBGRIDS = [
-  {
-    id: 'USGS', t: 'USGS', d: '24 类地表覆盖（旧方案）', tech: '一个 patch 一个地类',
-  },
-  { id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖', tech: '一个 patch 一个地类', ready: true },
-  { id: 'PFT', t: 'PFT', d: '植物功能型', tech: '一个 patch 拆成多个功能型', ready: true },
-  { id: 'PC', t: 'PC', d: '植物群落', tech: '同 PFT，次网格组织方式不同' },
+  { id: 'USGS', t: 'USGS', d: '24 类地表覆盖' },
+  { id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖', ready: true },
+  { id: 'PFT', t: 'PFT', d: '植物功能型', ready: true },
+  { id: 'PC', t: 'PC', d: '植物群落' },
 ];
 
 const SOILS = [
-  { id: 'vg', t: 'van Genuchten–Mualem', d: '默认土壤水力方案', tech: '支持 TRACER' },
-  { id: 'campbell', t: 'Campbell', d: 'Campbell 土壤水力', tech: '不需要 alpha_vgm / n_vgm / theta_r' },
+  { id: 'vg', t: 'van Genuchten–Mualem', d: '默认土壤水力方案' },
+  { id: 'campbell', t: 'Campbell', d: 'Campbell 土壤水力' },
 ];
 
 const PHYSICS = [
@@ -75,7 +74,7 @@ function render() {
   const copy = {
     domain: ['这次要跑什么？', '空间结构先定；现在只有站点步骤链能跑。'],
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
-    soil: ['土壤水力用哪套？', '土壤方案决定 TRACER 是否可用，也改变站点数据要求。'],
+    soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
     debug: ['要打开调试吗？', '可全部不选；这些开关只增加检查与日志，不改变页间约束。'],
   }[page];
@@ -99,11 +98,6 @@ function pageInfo(page) {
       return 'ⓘ 站点文件最好提供 pfttyp 与 pctpfts；缺少时会回落到 rawdata/plant_15s';
     }
     return picked.subgrid === 'IGBP' ? 'ⓘ 站点数据使用 IGBP_classification' : 'ⓘ 必须选择一种次网格方案';
-  }
-  if (page === 'soil') {
-    return picked.soil === 'campbell'
-      ? 'ⓘ Campbell 不需要 alpha_vgm / n_vgm / theta_r，但不能使用 TRACER'
-      : 'ⓘ van Genuchten 需要 alpha_vgm / n_vgm / theta_r，并支持 TRACER';
   }
   if (page === 'physics') return 'ⓘ 灰项仍然列出；带“← 第 N 页”的卡片可直接返回修改';
   if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
@@ -133,13 +127,6 @@ function card(item, selected, choose, blocked, multi) {
   desc.className = 'dd';
   desc.textContent = item.d;
   b.appendChild(desc);
-
-  if (item.tech) {
-    const tech = document.createElement('span');
-    tech.className = 'dtech';
-    tech.textContent = item.tech;
-    b.appendChild(tech);
-  }
 
   blocked ??= item.ready === false ? { need: item.need } : null;
   if (!blocked) {

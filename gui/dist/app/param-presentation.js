@@ -228,6 +228,7 @@ const OPTIONS = Object.freeze({
     III: pair('湿空气能量平衡方案（Harder–Pomeroy）', 'Psychrometric energy-balance scheme (Harder–Pomeroy)'),
   },
   DEF_SSP: {
+    off: pair('关闭（保持 2022 年末浓度）', 'Off (hold the late-2022 concentration)'),
     126: pair('SSP1-2.6：低排放', 'SSP1-2.6: low emissions'),
     245: pair('SSP2-4.5：中等排放', 'SSP2-4.5: intermediate emissions'),
     370: pair('SSP3-7.0：高排放', 'SSP3-7.0: high emissions'),

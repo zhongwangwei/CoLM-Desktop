@@ -288,7 +288,7 @@ td:first-child { overflow-wrap: anywhere; }
 .gate-tools { position: fixed; z-index: 1; top: var(--s-lg); right: var(--s-lg); }
 .gate-panel { width: 100%; max-width: 760px; margin: auto; padding: var(--s-xl); text-align: center; }
 .gate-panel h2 { margin: 0 0 6px; font-size: 20px; }
-/* wrap: 第 2 页四张卡片比第 1 页三张宽，窄窗口下换行而不是溢出 gate-panel。 */
+/* 第一、二页都有四张卡片；窄窗口下换行而不是溢出 gate-panel。 */
 .domain-cards { display: flex; flex-wrap: wrap; gap: var(--s-lg); margin-top: var(--s-xl);
   justify-content: center; }
 .domain-card { display: flex; flex-direction: column; gap: 6px; width: 180px;
@@ -302,8 +302,6 @@ td:first-child { overflow-wrap: anywhere; }
   border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-weak); }
 .domain-card .dt { font-size: 16px; font-weight: 600; }
 .domain-card .dd { font-size: 12px; color: var(--muted); }
-/* 卡片的技术说明是中性信息，不论是否可选都用 faint 色。 */
-.domain-card .dtech { font-size: 11px; color: var(--faint); }
 .domain-card .dsoon { font-size: 11px; color: var(--warn); margin-top: 4px; }
 /* 灰选项的约束原因用告警色；可回退的卡片会把来源页也写在这里。 */
 .domain-card .dwhy { font-size: 11px; color: var(--warn); margin-top: 4px; }

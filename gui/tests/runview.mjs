@@ -33,5 +33,14 @@ if (!runner.includes('function failPendingRuns(reason)')
     || !/catch \(e\) \{\s*failPendingRuns\(e\);/.test(runner)) {
   throw new Error('a rejected batch launch must clear every pending per-site run');
 }
+const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
+const outputVariables = html.indexOf('输出变量（按需展开）');
+const startRun = html.indexOf('<h3>开始运行</h3>');
+if (outputVariables < 0 || startRun < 0 || outputVariables > startRun) {
+  throw new Error('start-run card must be below output variables');
+}
+if (!/<div id="domaingate" class="gate">/.test(html)) {
+  throw new Error('the startup wizard must be visible before JavaScript initializes');
+}
 
 console.log('runview: per-site progress/log formatting and undefined metrics are safe');

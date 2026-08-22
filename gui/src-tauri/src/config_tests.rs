@@ -37,7 +37,8 @@ fn described_defaults_are_writable_fortran_literals() {
     };
     assert_eq!(default("DEF_Runoff_SCHEME"), "3");
     assert_eq!(default("DEF_USE_SNICAR"), ".false.");
-    assert_eq!(default("DEF_precip_phase_discrimination_scheme"), "II");
+    assert_eq!(default("DEF_precip_phase_discrimination_scheme"), "I");
+    assert_eq!(default("DEF_SSP"), "off");
     assert_eq!(default("DEF_simulation_time%timestep"), "1800.");
 }
 

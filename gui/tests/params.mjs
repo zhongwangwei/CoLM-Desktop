@@ -10,6 +10,7 @@ assert.equal(fieldLabel('DEF_Runoff_SCHEME', 'en'), 'Runoff scheme');
 assert.match(optionLabel('DEF_Runoff_SCHEME', '3', 'zh'), /Simple VIC/);
 assert.match(optionLabel('DEF_Runoff_SCHEME', '3', 'zh'), /3/);
 assert.match(optionLabel('DEF_precip_phase_discrimination_scheme', 'I', 'zh'), /湿球温度/);
+assert.match(optionLabel('DEF_SSP', 'off', 'zh'), /关闭/);
 assert.match(optionLabel('DEF_DS_precipitation_adjust_scheme', 'II', 'zh'), /MicroMet/);
 assert.match(optionLabel('DEF_DS_longwave_adjust_scheme', 'I', 'zh'), /TopoSCALE/);
 assert.match(optionLabel('DEF_USE_Campbell_SOIL_MODEL', '.false.', 'zh'), /van Genuchten/);
@@ -43,5 +44,6 @@ assert.doesNotMatch(params, /选择\/更换边界层数据/);
 assert.match(params, /configure_ozone_batch/);
 assert.match(params, /collapseStomatal/);
 assert.match(params, /DEF_USE_MEDLYNST[\s\S]*DEF_USE_WUEST/);
+assert.match(params, /STABLE_IN_PLACE_FIELDS[\s\S]*DEF_precip_phase_discrimination_scheme/);
 
 console.log('params: scheme choices have readable labels while preserving raw CoLM values');

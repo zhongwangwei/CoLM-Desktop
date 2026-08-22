@@ -519,9 +519,9 @@ MODULE MOD_Namelist
    character(len=256) :: DEF_file_GIEMS = 'null'
    integer :: DEF_wetland_finundation_scheme = 1
    ! ----- others -----
-   character(len=5)   :: DEF_precip_phase_discrimination_scheme = 'II'
+   character(len=5)   :: DEF_precip_phase_discrimination_scheme = 'I'
 
-   character(len=256) :: DEF_SSP        = '585'   ! Co2 path for CMIP6 future scenario.
+   character(len=256) :: DEF_SSP        = 'off'   ! CMIP6 future CO2 path; off holds the last observed value.
 
    logical :: DEF_USE_IRRIGATION        = .false. ! use irrigation
    integer :: DEF_IRRIGATION_ALLOCATION = 1       ! irrigation allocated method

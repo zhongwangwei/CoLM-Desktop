@@ -59,6 +59,7 @@ if (kernelForSubgrid('PC')?.dir !== '/igbp' || kernelForSubgrid('USGS')?.dir !==
 
 const cards = () => ids.gatecards.children;
 const card = label => cards().find(c => c.children[0]?.textContent === label);
+const nodeText = node => [node.textContent, ...node.children.flatMap(nodeText)].join(' ');
 const foot = label => ids.gatefoot.children.find(b => b.textContent.includes(label));
 const choose = label => {
   const c = card(label);
@@ -71,6 +72,12 @@ const previous = () => foot('上一步').onclick();
 
 showDomainGate();
 if (ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('page 1 missing');
+if (cards().map(c => c.children[0].textContent).join('|') !== '站点|流域|区域|全球') {
+  throw new Error('page 1 must list site, watershed, regional, and global in order');
+}
+if (card('流域').getAttribute('aria-disabled') !== 'true' || !card('流域').disabled) {
+  throw new Error('watershed must be visible but temporarily unavailable');
+}
 choose('站点');
 next();
 if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('page 2 missing');
@@ -80,9 +87,16 @@ if (cards().map(c => c.children[0].textContent).join('|') !== 'USGS|IGBP|PFT|PC'
 if (['USGS', 'IGBP', 'PFT', 'PC'].some(label => card(label).disabled)) {
   throw new Error('page 2 readiness does not match runtime support');
 }
+if (cards().some(c => /旧方案|patch|一个地类/.test(nodeText(c)))) {
+  throw new Error('page 2 must not expose legacy or patch implementation wording');
+}
 choose('IGBP');
 next();
 if (ids.gatetitle.textContent !== '土壤水力用哪套？') throw new Error('page 3 missing');
+if (/支持 TRACER|不需要 alpha_vgm|TRACER 是否可用/.test(
+  [ids.gatesub.textContent, ids.gateinfo.textContent, ...cards().map(nodeText)].join(' '))) {
+  throw new Error('page 3 must not expose tracer or parameter-requirement explanations');
+}
 choose('Campbell');
 next();
 if (ids.gatetitle.textContent !== '还要打开哪些过程？') throw new Error('page 4 missing');

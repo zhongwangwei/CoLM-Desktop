@@ -63,11 +63,18 @@ const PATH_FIELDS = Object.freeze(Object.fromEntries(
     .concat([['DEF_file_Ozone', 'file']])));
 
 // CoLM 对这两个开关分别分配同名、不同形状的数组，不能同时为 true。
-// 用户启用一个时在同一次原子写入里关闭另一个，不要求先手工关旧方案。
+// 用户启用一个时在同一次原子写入里关闭另一个，不要求先手工关闭另一方案。
 const MUTEX_ON_ENABLE = Object.freeze({
   DEF_USE_Forcing_Downscaling: 'DEF_USE_Forcing_Downscaling_Simple',
   DEF_USE_Forcing_Downscaling_Simple: 'DEF_USE_Forcing_Downscaling',
 });
+
+// 这两项只改变模型取值，不参与 `field_runtime_state` 的显隐约束。保存后保留
+// 当前控件而不是重建整张参数表，避免用户刚选完方案，行位置和滚动位置就跳动。
+const STABLE_IN_PLACE_FIELDS = new Set([
+  'DEF_precip_phase_discrimination_scheme',
+  'DEF_SSP',
+]);
 
 const enabled = value => /true|\.t\./i.test(String(value));
 
@@ -502,8 +509,16 @@ function table(shown, fieldStates = new Map()) {
               { dirs: editTarget(), path: e.path, value: inp.value });
           state.text = r.text;
           status(r.written > 1 ? `已写入 ${r.written} 个算例：${e.path}` : `已保存 ${e.path}`);
-          // 父开关会改变其他行是否有效；任何保存都重新读一次统一状态。
+          // 父开关会改变其他行是否有效，通常保存后要重新读取统一状态；
+          // 明确不参与显隐规则的枚举则留在原位，避免无意义的整页跳动。
           state.varies.delete(e.path);
+          if (STABLE_IN_PLACE_FIELDS.has(e.path)) {
+            e.value = inp.value;
+            e.unset = false;
+            inp.style.opacity = '';
+            v.title = '';
+            return;
+          }
           await renderFields();
         } catch (err) {
           // 类型不对在后端就被拦下了，原样报出来 —— 它说得比我们编的具体

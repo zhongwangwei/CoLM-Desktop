@@ -124,7 +124,7 @@ fn model_schemes_expose_complete_discrete_choices_to_the_gui() {
             "DEF_wetland_finundation_scheme",
             &["1", "2", "3", "4", "5", "6", "7"],
         ),
-        ("DEF_SSP", &["126", "245", "370", "585"]),
+        ("DEF_SSP", &["126", "245", "370", "585", "off"]),
         ("DEF_IRRIGATION_ALLOCATION", &["1", "2", "3"]),
         ("DEF_RSTFAC", &["1", "2"]),
         ("DEF_FERT_SOURCE", &["1", "2"]),
