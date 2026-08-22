@@ -31,3 +31,16 @@ export function joinPath(dir, name) {
   const d = String(dir).replace(/[\\/]+$/, '');
   return d + (d.includes('\\') && !d.includes('/') ? '\\' : '/') + name;
 }
+
+/** 站点目录旁边按 CoLM 数据集约定放置的强迫场目录。
+ *
+ * 这和 `colm-cli scan` 的默认规则保持一致：站点文件所在目录的兄弟目录
+ * `Forcing`。切换数据集时不能继续沿用上一套数据的强迫场路径，否则扫描
+ * 会得到“站点存在、强迫场全不存在”的假象。
+ */
+export function forcingDirectoryForSiteDirectory(dir) {
+  const d = String(dir).trim().replace(/[\\/]+$/, '');
+  const split = Math.max(d.lastIndexOf('/'), d.lastIndexOf('\\'));
+  if (split < 0) return '';
+  return joinPath(d.slice(0, split), 'Forcing');
+}

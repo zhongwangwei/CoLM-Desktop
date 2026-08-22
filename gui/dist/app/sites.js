@@ -2,7 +2,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
-import { $, status, joinPath } from './ui.js';
+import { $, status, joinPath, forcingDirectoryForSiteDirectory } from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { renderSteps, setStatus } from './shell.js';
@@ -221,6 +221,33 @@ export function assignCaseNames(sites) {
   }
   return sites;
 }
+
+let scanTimer = null;
+
+/** 目录选择器连续更新站点、强迫场和算例路径时，只在本轮末尾扫描一次。 */
+function scheduleSiteScan() {
+  if (!$('sitedir').value.trim()) return;
+  if (scanTimer !== null) clearTimeout(scanTimer);
+  scanTimer = setTimeout(() => {
+    scanTimer = null;
+    $('scan').click();
+  }, 0);
+}
+
+// 强迫场目录与站点目录是一组。换了 Sitedata 还保留上一套 forcingdir，
+// 显式旧路径会覆盖 CLI 本来能正确找到的 ../Forcing，整表因此误报“无强迫场”。
+$('sitedir').addEventListener('change', () => {
+  const forcing = $('forcingdir');
+  const expected = forcingDirectoryForSiteDirectory($('sitedir').value);
+  if (forcing.value !== expected) {
+    forcing.value = expected;
+    forcing.dispatchEvent(new Event('change'));
+  }
+  scheduleSiteScan();
+});
+
+// 已经列出站点后再更换强迫场目录，旧的“无强迫场”标签不能留到手动重扫。
+$('forcingdir').addEventListener('change', scheduleSiteScan);
 
 /** 这个站点的算例，没有就建一个。返回**算例名**，建不了返回 `null`。
  *
@@ -456,7 +483,7 @@ $('use-example').onclick = async () => {
     $('root').value = e.root;
     for (const id of ['sitedir', 'forcingdir', 'root']) $(id).dispatchEvent(new Event('change'));
     setStatus(e.already ? '示例数据已经在了' : '示例数据已放好');
-    $('scan').click();
+    scheduleSiteScan();
   } catch (err) { setStatus(err); }
   finally { $('use-example').disabled = false; }
 };
