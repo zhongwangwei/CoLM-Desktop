@@ -9,37 +9,83 @@ import {
 } from './prep-state.js';
 import { scanPreparedSites } from './sites.js';
 import { go } from './shell.js';
+import { language } from './i18n.js';
+import { landCoverClasses, landCoverLabel } from './land-cover.js';
 
 let result = null;
 const REQUIRED_FIELD_COUNT = 12;
 
 const MODE_LABELS = {
-  igbp: 'IGBP 自然站点',
-  usgs: 'USGS 自然站点',
-  pft: 'PFT 自然站点',
-  pc: 'PC 自然站点',
-  urban: 'URBAN 城市站点',
+  igbp: ['IGBP 自然站点', 'IGBP natural site'],
+  usgs: ['USGS 自然站点', 'USGS natural site'],
+  pft: ['PFT 自然站点', 'PFT natural site'],
+  pc: ['PC 自然站点', 'PC natural site'],
+  urban: ['URBAN 城市站点', 'URBAN site'],
 };
 
+let renderedLandCoverMode = null;
+let renderedLandCoverLanguage = null;
+
 function parseLandtype() {
-  if (prepMode(state) === 'urban') return { value: null };
+  const mode = prepMode(state);
+  if (mode === 'urban') return { value: null };
   const raw = $('slandtype').value.trim();
   if (!raw) return { value: null };
   const n = Number(raw);
-  if (!Number.isInteger(n)) return { error: '地表覆盖类型必须是整数；留空则由 rawdata 提供' };
+  if (!landCoverClasses(mode).some(item => item.value === n)) {
+    return { error: mode === 'usgs' ? '请选择有效的 USGS 地表覆盖类型' : '请选择有效的 IGBP 地表覆盖类型' };
+  }
   return { value: n };
+}
+
+function syncLandCoverOptions(mode) {
+  const select = $('slandtype');
+  const locale = language();
+  const optionMode = mode === 'urban' ? 'urban' : (mode === 'usgs' ? 'usgs' : 'igbp');
+  const modeChanged = renderedLandCoverMode !== null && renderedLandCoverMode !== optionMode;
+  const selected = modeChanged ? '' : select.value;
+  const needsRender = renderedLandCoverMode !== optionMode || renderedLandCoverLanguage !== locale;
+
+  if (needsRender) {
+    select.replaceChildren();
+    if (mode === 'urban') {
+      const option = document.createElement('option');
+      const urban = landCoverClasses('igbp').find(item => item.value === 13);
+      option.value = '13';
+      option.textContent = landCoverLabel(urban, locale);
+      select.appendChild(option);
+      select.value = '13';
+    } else {
+      const automatic = document.createElement('option');
+      automatic.value = '';
+      automatic.textContent = locale === 'en'
+        ? 'Not specified · read from rawdata'
+        : '不手动指定 · 由 rawdata 提供';
+      select.appendChild(automatic);
+      for (const item of landCoverClasses(mode)) {
+        const option = document.createElement('option');
+        option.value = String(item.value);
+        option.textContent = landCoverLabel(item, locale);
+        select.appendChild(option);
+      }
+      select.value = [...select.options].some(option => option.value === selected) ? selected : '';
+    }
+    renderedLandCoverMode = optionMode;
+    renderedLandCoverLanguage = locale;
+  }
+  select.disabled = mode === 'urban';
 }
 
 function syncIdentity() {
   const stem = normalizeSiteStem($('sname').value);
   $('soutname').value = stem ? siteOutputName(stem) : '_site.nc';
   const mode = prepMode(state);
-  $('smode').value = MODE_LABELS[mode] ?? mode.toUpperCase();
-  $('slandtype').disabled = mode === 'urban';
-  $('slandtype').placeholder = mode === 'urban' ? '城市模式由向导固定' : '留空 = 由 rawdata 提供';
-  $('slandtype-label').firstChild.textContent = mode === 'usgs'
-    ? 'USGS 地表覆盖类型 '
-    : '地表覆盖类型 ';
+  const localeIndex = language() === 'en' ? 1 : 0;
+  $('smode').value = MODE_LABELS[mode]?.[localeIndex] ?? mode.toUpperCase();
+  syncLandCoverOptions(mode);
+  $('slandtype-label').firstChild.textContent = language() === 'en'
+    ? (mode === 'usgs' ? 'USGS land-cover class ' : 'Land-cover class ')
+    : (mode === 'usgs' ? 'USGS 地表覆盖类型 ' : '地表覆盖类型 ');
 }
 
 function readyReasons() {
@@ -94,6 +140,7 @@ globalThis.addEventListener?.('colm:wizard', () => {
   invalidateSite();
   syncIdentity();
 });
+globalThis.addEventListener?.('colm:language', syncIdentity);
 updateGenerateState();
 
 $('smake').onclick = async () => {

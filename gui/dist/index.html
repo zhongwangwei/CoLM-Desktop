@@ -72,10 +72,10 @@
             </div>
           </div>
           <div class="field" style="margin-top:13px">
-            <label id="slandtype-label">地表覆盖类型 <span class="hint">（可选；确实知道时才填）</span></label>
-            <input class="input" id="slandtype" type="number" step="1" placeholder="留空 = 由 rawdata 提供">
+            <label id="slandtype-label">地表覆盖类型 <span class="hint">（可选；不确定时由 rawdata 提供）</span></label>
+            <select class="input" id="slandtype"></select>
             <div class="muted mini" style="margin-top:5px">
-              不从经纬度猜地类。留空时它会作为明确的外部依赖显示；城市模式由向导固定为城市路径。
+              列表随 IGBP / USGS 方案切换并显示具体地类名称；不从经纬度猜测。城市模式固定显示“城市与建成区”。
             </div>
           </div>
         </div>

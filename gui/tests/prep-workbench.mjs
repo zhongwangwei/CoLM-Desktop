@@ -7,6 +7,10 @@ import {
   normalizeSiteStem,
   siteOutputName,
 } from '../dist/app/prep-state.js';
+import {
+  landCoverClasses,
+  landCoverLabel,
+} from '../dist/app/land-cover.js';
 
 assert.equal(normalizeSiteStem(' AT-Neu '), 'AT-Neu');
 assert.equal(normalizeSiteStem('AT Neu/site'), 'AT-Neu-site');
@@ -15,6 +19,16 @@ assert.equal(forcingOutputName('AT-Neu'), 'AT-Neu_Met.nc');
 assert.deepEqual(missingForcingHeights({ v: 10, t: null, q: 2 }), ['T']);
 assert.deepEqual(missingForcingHeights({ v: 10, t: 2, q: 2 }), []);
 
+const igbp = landCoverClasses('igbp');
+const usgs = landCoverClasses('usgs');
+assert.equal(igbp.length, 17);
+assert.equal(usgs.length, 24);
+assert.deepEqual(igbp.map(item => item.value), Array.from({ length: 17 }, (_, i) => i + 1));
+assert.deepEqual(usgs.map(item => item.value), Array.from({ length: 24 }, (_, i) => i + 1));
+assert.equal(landCoverLabel(igbp[9], 'zh'), '10 · 草地');
+assert.equal(landCoverLabel(igbp[9], 'en'), '10 · Grasslands');
+assert.equal(landCoverLabel(usgs[0], 'zh'), '1 · 城市与建成区');
+
 const state = await readFile(new URL('../dist/app/state.js', import.meta.url), 'utf8');
 assert.match(state, /prepArtifacts:\s*\{/);
 
@@ -22,6 +36,10 @@ const site = await readFile(new URL('../dist/app/sitedata.js', import.meta.url),
 assert.match(site, /adoptPreparedSite/);
 assert.match(site, /sitedir/);
 assert.match(site, /scanPreparedSites/);
+
+const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
+assert.match(html, /<select class="input" id="slandtype"/);
+assert.doesNotMatch(html, /id="slandtype"[^>]*type="number"/);
 
 const forcing = await readFile(new URL('../dist/app/forcing.js', import.meta.url), 'utf8');
 assert.match(forcing, /missingForcingHeights\(heights\)/);
