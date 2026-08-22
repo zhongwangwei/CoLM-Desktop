@@ -278,6 +278,9 @@ async function ensureCase(s) {
       // 扫描已经按“强迫场目录 + 站点名”匹配到具体文件；把确切路径传下去，
       // 避免 new 再按兄弟目录约定推回另一份旧文件。
       met: s.met_file,
+      // 站点就绪契约必须与进门向导一致；PFT/PC 字段是在 CLI 建例之后才
+      // 批量写入 case.nml 的，不显式传会被错误地按 IGBP 检查。
+      mode: urbanEnabled() ? 'urban' : String(state.subgrid ?? 'IGBP').toLowerCase(),
       fields: wizardFields(),
     });
     state.createdCases.add(out);
@@ -291,10 +294,10 @@ async function ensureCase(s) {
 
 // ---------------------------------------------------------------- 站点库
 
-/** 扫一个 Sitedata 目录。两套命名约定都认，判据在 `colm-cli scan`。 */
-$('scan').onclick = async () => {
+/** 扫一个 Sitedata 目录。`selectFile` 来自前处理交接；普通手工扫描留空。 */
+export async function scanPreparedSites(selectFile = null) {
   const dir = $('sitedir').value.trim();
-  if (!dir) { status('要先填 Sitedata 目录'); return; }
+  if (!dir) { status('要先填 Sitedata 目录'); return null; }
   $('scan').disabled = true;
   try {
     // quick: 只读站点文件。实测 90 站 0.07 秒，而完整读要 0.35 秒 ——
@@ -319,11 +322,17 @@ $('scan').onclick = async () => {
     state.picked.clear();
     state.pickedSite = null;
     state.sites = assignCaseNames(r.sites);
+    if (selectFile) {
+      state.pickedSite = state.sites.find(site => site.site_file === selectFile) ?? null;
+    }
     renderSites(r);
     renderSteps();
-  } catch (e) { status(e); }
+    return state.pickedSite;
+  } catch (e) { status(e); return null; }
   finally { $('scan').disabled = false; }
-};
+}
+
+$('scan').onclick = () => scanPreparedSites();
 
 export function renderSites(r = {}) {
   const box = $('sites');

@@ -190,7 +190,8 @@ async function syncKernel() {
 
 /** 向导改变后，更新与编译产物相关的后续状态。 */
 async function applyKernel() {
-  // 城市栅格目录跟着向导的 URBAN 开关走；到选站点时必须已经可见。
+  // runtime 是城市专用；rawdata 对任意缺少植被/土壤变量的站点都可能需要，
+  // 因而始终显示，不能再跟着 URBAN 一起隐藏。
   const ud = $('urbandirs');
   if (ud) ud.hidden = !urbanEnabled();
   // 向导变更后站点的 URBAN 匹配也要立即重画。

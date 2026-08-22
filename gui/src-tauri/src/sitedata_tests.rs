@@ -17,7 +17,13 @@ const SAMPLE: &str = r#"{
     "soil_s_v_alb", "soil_d_v_alb", "soil_s_n_alb", "soil_d_n_alb",
     "elevation", "lakedepth", "elvstd", "sloperatio",
     "soil_vf_clay", "soil_wf_clay", "soil_wf_om", "soil_texture"
-  ]
+  ],
+  "from_lookup": [],
+  "needs_external": ["IGBP_classification", "LAI_year", "LAI_monthly", "SAI_monthly"],
+  "site_kind": "natural",
+  "mode": "igbp",
+  "readiness": "blocked",
+  "self_contained": false
 }"#;
 
 #[test]
@@ -30,6 +36,11 @@ fn parses_the_documented_json_shape() {
     assert_eq!(r.from_default.len(), 12);
     assert!(r.from_site.is_empty());
     assert!(r.from_raster.is_empty());
+    assert_eq!(r.site_kind, "natural");
+    assert_eq!(r.mode, "igbp");
+    assert_eq!(r.readiness, "blocked");
+    assert!(!r.self_contained);
+    assert!(r.needs_external.contains(&"LAI_year".to_string()));
 }
 
 #[test]
@@ -44,11 +55,12 @@ fn build_site_new_args_omits_landtype_and_rawdata_when_not_given() {
     // **地类不给就不该出现 `--landtype`。** 这不是省事——`colm-cli` 那边
     // 对「没给」与「给了某个地类」是两条不同的路径（`site::skeleton` 的
     // 文档），拼一个空字符串或猜一个数字都会把用户没说的话说死。
-    let args = build_site_new_args("out.nc", 123.5092, 44.5933, None, None);
+    let args = build_site_new_args("out.nc", 123.5092, 44.5933, None, None, "igbp");
     assert_eq!(
         args,
         vec![
-            "site-new", "--out", "out.nc", "--lon", "123.5092", "--lat", "44.5933", "--json", "1",
+            "site-new", "--out", "out.nc", "--lon", "123.5092", "--lat", "44.5933", "--mode",
+            "igbp", "--json", "1",
         ]
     );
     assert!(!args.iter().any(|a| a == "--landtype"));
@@ -57,7 +69,14 @@ fn build_site_new_args_omits_landtype_and_rawdata_when_not_given() {
 
 #[test]
 fn build_site_new_args_includes_landtype_and_rawdata_when_given() {
-    let args = build_site_new_args("out.nc", 123.5092, 44.5933, Some(10), Some("/data/raw"));
+    let args = build_site_new_args(
+        "out.nc",
+        123.5092,
+        44.5933,
+        Some(10),
+        Some("/data/raw"),
+        "pft",
+    );
     let i = args
         .iter()
         .position(|a| a == "--landtype")
@@ -68,6 +87,8 @@ fn build_site_new_args_includes_landtype_and_rawdata_when_given() {
         .position(|a| a == "--rawdata")
         .expect("给了 rawdata 就该有 --rawdata");
     assert_eq!(args[j + 1], "/data/raw");
+    let k = args.iter().position(|a| a == "--mode").unwrap();
+    assert_eq!(args[k + 1], "pft");
 }
 
 #[test]
@@ -77,7 +98,7 @@ fn build_site_new_args_accepts_negative_coordinates() {
     // 长什么样；负经纬度真能被 colm-cli 解析对是它自己的测试的事
     // （已用 `./target/debug/colm-cli site-new --lon -70.5 --lat -33.2`
     // 实测核实过一次）。
-    let args = build_site_new_args("out.nc", -70.5, -33.2, None, None);
+    let args = build_site_new_args("out.nc", -70.5, -33.2, None, None, "igbp");
     assert!(args.contains(&"-70.5".to_string()));
     assert!(args.contains(&"-33.2".to_string()));
 }
@@ -100,7 +121,14 @@ fn it_parses_what_the_real_cli_prints() {
     std::fs::create_dir_all(&dir).unwrap();
     let out = dir.join("site.nc");
 
-    let args = build_site_new_args(&out.display().to_string(), 123.5092, 44.5933, None, None);
+    let args = build_site_new_args(
+        &out.display().to_string(),
+        123.5092,
+        44.5933,
+        None,
+        None,
+        "igbp",
+    );
     let json = match crate::sidecar::capture(&args) {
         Ok(j) => j,
         Err(e) => panic!("colm-cli site-new 跑不起来：{e}"),
@@ -115,6 +143,13 @@ fn it_parses_what_the_real_cli_prints() {
     assert!(report.landtype.is_none(), "没给 --landtype 就该是 null");
     assert!(report.from_site.is_empty());
     assert!(report.from_raster.is_empty());
+    assert_eq!(report.site_kind, "natural");
+    assert_eq!(report.mode, "igbp");
+    assert_eq!(report.readiness, "blocked");
+    assert!(!report.self_contained);
+    assert!(report
+        .needs_external
+        .contains(&"soil_vf_quartz_mineral".to_string()));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

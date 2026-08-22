@@ -7,7 +7,17 @@
 
 export const state = {
   /** 当前在第几步，见 shell.js 的 STEPS。 */
-  step: 'prep',
+  step: 'basic-files',
+  /** 前处理两条支线共同维护的产物。生成/转换后立即交接给基本设定。 */
+  prepArtifacts: {
+    siteStem: null,
+    siteFile: null,
+    siteDir: null,
+    siteReport: null,
+    rawdataDir: null,
+    forcingFile: null,
+    forcingDir: null,
+  },
   /** 当前配置真正有内容的基础 / 过程子步骤。 */
   availableFlows: new Set(['basic-files']),
   /** 原生折叠组默认收起；用户打开后跨重绘保持。 */

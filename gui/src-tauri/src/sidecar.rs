@@ -682,8 +682,8 @@ pub async fn new_case(
     name: Option<String>,
     start: Option<String>,
     end: Option<String>,
-    // 城市站点必须给这两个：土壤剖面、湖深、土壤反照率与 LCZ 分类
-    // 只能从全球栅格取，站点文件里没有。非城市站点传空即可。
+    // rawdata 对任何缺少地类、LAI/SAI 或土壤变量的站点都可能需要；runtime
+    // 仍是城市过程专用。两者都由前处理/基本设定按当前站点契约传入。
     rawdata: Option<String>,
     runtime: Option<String>,
     // 强迫场文件。空就不传 —— `colm-cli new` 会走命名约定（`Sitedata`
@@ -692,6 +692,9 @@ pub async fn new_case(
     // 而约定失败的方式是**推出原始强迫场并静默用它** —— 用户以为跑的
     // 是自己转换的数据，实际跑的是原始的。
     met: Option<String>,
+    // 当前向导选择的运行契约。必须在 `new` 阶段传给 CLI；PFT/PC 字段稍后
+    // 才批量写入 case.nml，若不显式传，站点就绪检查只能误按 IGBP 处理。
+    mode: Option<String>,
     // 进门向导选出的运行时初值。只在新建时写；已有算例绝不能被启动向导覆盖。
     fields: Vec<crate::config::FieldChange>,
 ) -> Result<String, String> {
@@ -711,6 +714,7 @@ pub async fn new_case(
         ("--rawdata", rawdata),
         ("--runtime", runtime),
         ("--met", met),
+        ("--mode", mode),
     ] {
         if let Some(v) = v {
             if !v.trim().is_empty() {
@@ -719,7 +723,18 @@ pub async fn new_case(
             }
         }
     }
-    let output = capture(&args)?;
+    let output = match capture(&args) {
+        Ok(output) => output,
+        Err(error) => {
+            // `colm-cli new` creates the case directory before it validates the
+            // complete site/forcing contract. A failed preflight must not leave a
+            // ghost case that later appears runnable in the GUI.
+            if !case_existed {
+                let _ = std::fs::remove_dir_all(&case_dir);
+            }
+            return Err(error);
+        }
+    };
     if let Err(error) = crate::config::apply_fields(&case_dir, &fields) {
         if !case_existed {
             let _ = std::fs::remove_dir_all(&case_dir);

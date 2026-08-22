@@ -95,6 +95,25 @@ fn scanning_can_match_the_same_site_in_an_explicit_forcing_directory() {
 }
 
 #[test]
+fn scanning_a_generated_site_without_landtype_keeps_it_natural() {
+    let root = std::env::temp_dir().join(format!("colm-scan-generated-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let sites = root.join("Sitedata");
+    std::fs::create_dir_all(&sites).unwrap();
+    let skeleton = root.join("skeleton.nc");
+    let site = sites.join("Arbitrary_site.nc");
+    colm_srfdata::site::skeleton(&skeleton, 11.7, 47.12, None).unwrap();
+    colm_srfdata::site::fill(&skeleton, &site, None, None).unwrap();
+
+    let report = root.join("sites.json");
+    super::cmd_scan(&sites, None, report.to_str(), true).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let entry = &json.as_array().unwrap()[0];
+    assert_eq!(entry["name"], "Arbitrary");
+    assert_eq!(entry["urban"], false);
+}
+
+#[test]
 fn an_explicit_path_wins_over_the_convention() {
     // **这条是「用自己的数据」的关键。** 转换产物不在 `<root>/Forcing/`
     // 下，也不叫 `<stem>_Met.nc` —— 那两套命名是 PLUMBER2 与

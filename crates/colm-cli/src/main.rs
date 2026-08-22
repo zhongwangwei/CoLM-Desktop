@@ -8,8 +8,10 @@
 //! colm-cli scan      --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
 //!                    [--out sites.json] [--quick 1]
 //! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>]
+//!                    [--mode igbp|usgs|pft|pc|urban]
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
+//!                    [--mode igbp|usgs|pft|pc|urban]
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
@@ -39,7 +41,7 @@ usage:
                    [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N]
-                   [--rawdata <dir>] [--json 1]
+                   [--rawdata <dir>] [--mode igbp|usgs|pft|pc|urban] [--json 1]
                    # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
                    # 标称假设。--landtype 不给就不写，让 CoLM 回落
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
@@ -47,6 +49,7 @@ usage:
                                       # 在 ../Forcing/ 下找，那两套约定只覆盖
                                       # PLUMBER2 与 Urban-PLUMBER
                    [--spinup-years N] [--spinup-repeat N]   (默认 1 年 x 10 遍)
+                   [--mode igbp|usgs|pft|pc|urban]
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
@@ -314,22 +317,22 @@ impl Opts {
 
 // ------------------------------------------------------------- site-new
 
-/// `colm-cli site-new`：从一对经纬度建一份能跑的 site.nc。
+/// `colm-cli site-new`：从站点身份与经纬度建立标准命名的 site.nc。
 ///
-/// 两步拼起来：[`colm_srfdata::site::skeleton`] 写出只有经纬度（可选地类）
-/// 的最小文件，[`colm_srfdata::site::fill`] 照阶段 B 的三级优先级
-/// （站点自有 > 栅格 > 模块默认）把 12 个必需字段补齐。中间那份 skeleton
-/// 文件放系统临时目录，补完即删——用户只关心 `--out` 那一份。
+/// 两步拼起来：[`colm_srfdata::site::skeleton_with_mode`] 写出只有经纬度
+/// （可选地类）的最小文件，[`colm_srfdata::site::fill`] 按“站点自有 > 栅格 >
+/// 模块默认”补齐 12 个结构字段。中间 skeleton 放系统临时目录，补完即删。
 ///
-/// 没有 `--rawdata` 时 12 个字段全部落到模块默认或本 crate 自己发明的
-/// 标称假设；文件依然能跑，只是土壤/地形/反照率不是这个地点的实测值，
-/// 输出里的 `from default:` 那一行会把它们逐个点名。
+/// **结构完整不等于运行完整。** 随后的模式感知审计还会检查地类、LAI/SAI、
+/// PFT/PC/城市专属数组与 24 项土壤水热变量，并明确返回 self-contained、
+/// 依赖 rawdata 或 blocked。经纬度绝不能被用来编造这些科学输入。
 fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     let out = o.need("--out")?;
     let lon = o.need_f64("--lon")?;
     let lat = o.need_f64("--lat")?;
     let landtype = o.get_i32("--landtype")?;
     let rawdata = o.get("--rawdata");
+    let mode = parse_site_mode(o.get("--mode").as_deref())?;
 
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
@@ -338,25 +341,20 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
 
     // skeleton 与 fill 之间的中间文件：用户不该知道它存在过。
     let skel = std::env::temp_dir().join(format!("colm-site-new-{}.nc", std::process::id()));
-    colm_srfdata::site::skeleton(&skel, lon, lat, landtype)?;
+    let kind = if mode == colm_srfdata::site::SiteMode::Urban {
+        colm_srfdata::site::SiteKind::Urban
+    } else {
+        colm_srfdata::site::SiteKind::Natural
+    };
+    colm_srfdata::site::skeleton_with_mode(&skel, lon, lat, landtype, kind, mode)?;
     let filled = colm_srfdata::site::fill(&skel, &out, rawdata.as_deref().map(Path::new), None);
     let _ = std::fs::remove_file(&skel);
     let r = filled?;
+    let audit = colm_srfdata::site::audit(&out, mode, rawdata.as_deref().map(Path::new))?;
 
-    // 冠层高度查得到（`r.from_lookup` 里有 `canopy_height`）就不用外部数据；
-    // 查不到（没给 `--landtype`，或给的不是有效 IGBP 类别）就还得靠
-    // `<rawdata>/plant_15s/`。LAI/SAI 这个 crate 从不合成 —— `site-new` 造出
-    // 来的文件里永远没有月气候态，所以它俩永远在这张单子上。
-    // `SAI_monthly` 与 `LAI_monthly` 是 mksrfdata 绑定读取的一对
-    // （`MOD_SingleSrfdata.F90:505-506`：缺一个另一个也作废），所以两个都要
-    // 列出来，不能只写 LAI。
+    // 人读输出仍单独说明 IGBP 冠层高度是否来自 CoLM 查表；完整运行缺项只由
+    // `site::audit` 生成，不能在 CLI 再维护第二张会漂移的变量表。
     let canopy_height_ready = r.from_lookup.iter().any(|n| n == "canopy_height");
-    let mut needs_external: Vec<&str> = Vec::new();
-    if !canopy_height_ready {
-        needs_external.push("canopy_height");
-    }
-    needs_external.push("LAI_monthly");
-    needs_external.push("SAI_monthly");
 
     // `--json 1` 给界面用：三个来源列表要能逐字段摆出来，而人读的那几行
     // 是拼给终端的。**别让界面去解析人读的文本** —— 那是 `scan` 与
@@ -377,7 +375,11 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
             "from_lookup": r.from_lookup,
             // 这份 site.nc 还需要哪些外部数据 mksrfdata 才能跑完 ——
             // 见上面 `needs_external` 的注释。界面要把这个显示出来。
-            "needs_external": needs_external,
+            "needs_external": audit.needs_external,
+            "site_kind": audit.kind.as_str(),
+            "mode": audit.mode.as_str(),
+            "readiness": audit.readiness.as_str(),
+            "self_contained": audit.self_contained(),
         });
         println!("{}", serde_json::to_string_pretty(&j)?);
         return Ok(out);
@@ -422,7 +424,28 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
         );
     }
     println!("wrote {}", out.display());
+    println!(
+        "readiness: {} (mode {}, kind {})",
+        audit.readiness.as_str(),
+        audit.mode.as_str(),
+        audit.kind.as_str()
+    );
+    if !audit.needs_external.is_empty() {
+        println!("external data: {}", audit.needs_external.join(", "));
+    }
     Ok(out)
+}
+
+fn parse_site_mode(value: Option<&str>) -> Result<colm_srfdata::site::SiteMode> {
+    use colm_srfdata::site::SiteMode;
+    match value.unwrap_or("igbp").to_ascii_lowercase().as_str() {
+        "igbp" => Ok(SiteMode::Igbp),
+        "usgs" => Ok(SiteMode::Usgs),
+        "pft" => Ok(SiteMode::Pft),
+        "pc" => Ok(SiteMode::Pc),
+        "urban" => Ok(SiteMode::Urban),
+        other => bail!("unsupported --mode {other:?}; use igbp, usgs, pft, pc, or urban"),
+    }
 }
 
 // ---------------------------------------------------------------- new
@@ -591,8 +614,12 @@ fn cmd_scan(dir: &Path, forcing_dir: Option<&Path>, out: Option<&str>, quick: bo
             site_file: text(&p),
             met_file: met.as_deref().map(text),
             obs_file: obs.as_deref().map(text),
-            // 地类读不出来时不当成城市 —— 那会让一个坏文件被送进 URBAN 路径。
-            urban: problem.is_none() && landtype.is_none(),
+            // Missing land type is not an urban marker. Generated natural files may
+            // intentionally leave it unresolved for rawdata; scan and `new` share the
+            // same classifier so they cannot silently disagree.
+            urban: problem.is_none()
+                && colm_srfdata::site::site_kind(&p)
+                    .is_ok_and(|kind| kind == colm_srfdata::site::SiteKind::Urban),
             lon,
             lat,
             landtype,
@@ -665,33 +692,23 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // 而 CoLM 的 URBAN 路径本来就直接读原件（实测示例算例用的就是未经处理的
     // 原文件，逐字节相同）。对它做补齐既没有依据，也没有必要。
     let obs = sibling(&site_raw, "Observation", 1);
-    // 城市站点文件不带 `IGBP_classification` —— 那正是它的标志。**但**
-    // `colm-cli site-new` 造出来的最小文件在用户不给 `--landtype` 时也没有
-    // 它，而它绝不是城市站点：`site::skeleton` + `site::fill` 已经把 12 个
-    // 必需字段都写好了，真正未处理的 Urban-PLUMBER 原始文件这时一个都没有
-    // （那正是 `prepare_urban` 存在的理由）。所以先看这一条更硬的证据——
-    // 地类缺席只在文件确实还缺这 12 个字段时，才说明它是城市站点。
     let already_filled = colm_srfdata::site::missing_fields(&site_raw)?.is_empty();
-    // **但「已补齐」不等于「不是城市站」。** 一个已经建过算例的城市
-    // `site.nc` 同样是 12/12 齐全的（`prepare_urban` 补的），把它重新喂回来
-    // 会被当成 PLUMBER2，于是 `SITE_landtype = 13` 与
-    // `DEF_URBAN_type_scheme = 2` 一个都不写 —— 站点文件里有城市数据、
-    // namelist 却不跑城市模块，**跑得完，结果全错**。
-    //
-    // 实测过：改判据之前那条路会撞 `NC_ENAMEINUSE` 而失败，加了
-    // `already_filled` 之后变成静默产出错误配置。**从报错退化成静默错误。**
-    //
-    // `LCZ_DOM`（局地气候区分类）只有城市路径写，拿它当第二条证据。
-    let has_urban_marker = netcdf::open(&site_raw)
-        .ok()
-        .is_some_and(|f| f.variable("LCZ_DOM").is_some());
-    let looks_like_plumber2 = !has_urban_marker
-        && (already_filled || colm_srfdata::site::location(&site_raw)?.landtype.is_some());
-    // 没有 `--urban` 开关：拿一个草地站强行跑城市只会在 NCAR 属性表上越界，
-    // 而一个城市站不跑城市模块也没有意义。判据完全交给站点文件的形状。
-    let urban = !looks_like_plumber2;
+    let kind = colm_srfdata::site::site_kind(&site_raw)?;
+    let urban = kind == colm_srfdata::site::SiteKind::Urban;
+    let mode = match o.get("--mode") {
+        Some(value) => parse_site_mode(Some(&value))?,
+        None if urban => colm_srfdata::site::SiteMode::Urban,
+        None => colm_srfdata::site::SiteMode::Igbp,
+    };
+    if urban != (mode == colm_srfdata::site::SiteMode::Urban) {
+        bail!(
+            "site kind {} does not match --mode {}; choose the same natural/urban mode used in the entry wizard",
+            kind.as_str(),
+            mode.as_str()
+        );
+    }
+    let looks_like_plumber2 = !urban;
     // 这个城市站点在不在两张预抽表里 —— 决定 `--rawdata` 缺席时该说什么。
-    let mut urban_covered = false;
     if already_filled {
         // 已经补齐过的文件——`site-new` 的产物，或者重新喂回来的一份旧
         // 增广站点文件。原样拷过去，不再调用 `fill`：它的第一行就是
@@ -710,7 +727,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         //
         // 不置这一位的话，重新喂回来的城市 `site.nc` 会因为算例名不在
         // 那 21 个站里而被要求 `--rawdata`，尽管它一个字节都不需要。
-        urban_covered = true;
+        // Full run readiness is checked below. Twelve structural fields alone do
+        // not prove that an urban file contains soil, geometry, and tree LAI.
     } else if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
@@ -763,8 +781,25 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
                  albedo and topography rasters"
             ),
         }
-        urban_covered = rep.needs_no_rawdata();
     }
+
+    // The 12-field fill is only the structural layer. Validate the actual
+    // mksrfdata-facing contract after preparing the file, and keep every missing
+    // dependency visible rather than failing minutes later inside Fortran.
+    let site_audit = colm_srfdata::site::audit(
+        &layout.site_nc(),
+        mode,
+        o.get("--rawdata").as_deref().map(Path::new),
+    )?;
+    if site_audit.readiness == colm_srfdata::site::Readiness::Blocked {
+        bail!(
+            "{} is structurally valid but is not runnable in {} mode without --rawdata; missing: {}",
+            site_raw.display(),
+            mode.as_str(),
+            site_audit.needs_external.join(", ")
+        );
+    }
+    let urban_covered = urban && site_audit.self_contained();
 
     // 2. 强迫场 namelist —— 不转换数据，CoLM 直接读 PLUMBER2 的 Met 文件
     let summary = colm_forcing::summarize(&met)?;
@@ -851,6 +886,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     }
 
     let loc = colm_srfdata::site::location(&layout.site_nc())?;
+    let mode_landtype = colm_srfdata::site::landtype_for_mode(&layout.site_nc(), mode)?;
     let name = o.get("--name").unwrap_or_else(|| {
         site_raw
             .file_name()
@@ -860,9 +896,9 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             .to_string()
     });
 
-    // 全球栅格目录。水热与 BGC 算例一个字节都不读它 —— `site::fill` 已经把
-    // 该有的都写进 site.nc 了 —— 所以那里故意指向一个不存在的目录：跑通了就
-    // **证明**没读。
+    // 全球栅格目录。自包含站点一个字节都不读它，因此未传 rawdata 时故意指向
+    // 不存在的目录；需要外部地类、LAI/SAI 或土壤变量的站点已由上面的审计
+    // 强制要求 `--rawdata`，这里必须原样保留该路径。
     //
     // **城市算例现在也一样。** 两张预抽表合起来盖住了 mksrfdata 会去开的
     // 每一处（`soil/` 的 24 个栅格实测 122 GB，加上 `urban_type/`、
@@ -899,10 +935,11 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         };
         (raw, run)
     } else {
-        (
-            text(&out.join("rawdata_unused/")),
-            text(&out.join("runtime_unused/")),
-        )
+        let raw = match o.get("--rawdata") {
+            Some(r) => slash(Path::new(&r)),
+            None => text(&out.join("rawdata_unused/")),
+        };
+        (raw, text(&out.join("runtime_unused/")))
     };
 
     let spec = CaseSpec {
@@ -910,7 +947,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         site_file: text(&layout.site_nc()),
         lon: loc.lon,
         lat: loc.lat,
-        landtype: loc.landtype,
+        landtype: mode_landtype,
         window: Window {
             start_year: start.0,
             start_month: start.1,

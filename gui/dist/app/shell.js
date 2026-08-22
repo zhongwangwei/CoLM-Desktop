@@ -11,8 +11,10 @@ const hasMultipleResults = () => completedResults().length > 1;
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
-  { n: 1, t: '前处理', d: '原始数据转成模型格式', steps: [
-    { id: 'prep', page: 'prep', t: '强迫场与站点属性', d: '准备模型输入', need: () => null },
+  { n: 1, key: 'prep', collapsible: true, t: '前处理', d: '原始数据转成模型格式', steps: [
+    { id: 'prep-site', page: 'prep', t: '站点数据', d: '位置、模式与运行契约', need: () => null },
+    { id: 'prep-forcing', page: 'prep', t: '强迫场', d: '变量映射、时间轴与高度', need: () => null },
+    { id: 'prep-ready', page: 'prep', t: '就绪检查', d: '核对产物并交给基本设定', need: () => null },
   ] },
   { n: 2, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [
     { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null, show: available('basic-files') },

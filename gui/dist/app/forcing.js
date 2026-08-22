@@ -16,7 +16,10 @@
 //! 否则「我看过了」说的是改之前那一版。
 
 import { invoke } from './ipc.js';
-import { $, status, joinPath, baseName } from './ui.js';
+import { state } from './state.js';
+import { $, status, joinPath, baseName, forcingDirectoryForSiteDirectory } from './ui.js';
+import { forcingOutputName, missingForcingHeights } from './prep-state.js';
+import { scanPreparedSites } from './sites.js';
 
 /** 探测结果。没探过是 `null`。 */
 let probe = null;
@@ -36,6 +39,11 @@ let confirmed = false;
 let dstDir = '';
 /** 上一次转换成功的产物路径。`null` 表示还没转换过，或者刚探了新文件。 */
 let lastResult = null;
+
+globalThis.addEventListener?.('colm:prep-site-invalidated', () => {
+  lastResult = null;
+  if (probe) renderCards();
+});
 
 const MEANING_ZH = {
   'air temperature': '气温',
@@ -62,9 +70,15 @@ $('fprobe').onclick = async () => {
     heights = { v: probe.height_v, t: probe.height_t, q: probe.height_q };
     // 产物目录只在还没填过时用后端建议的那个 —— 用户改过就别再动它，
     // 换一份源文件重新探测不该把他填的路径冲掉。
-    if (!dstDir) dstDir = probe.suggest_dst ?? '';
+    if (!dstDir) {
+      dstDir = state.prepArtifacts.siteDir
+        ? forcingDirectoryForSiteDirectory(state.prepArtifacts.siteDir)
+        : (probe.suggest_dst ?? '');
+    }
     confirmed = false;
     lastResult = null;
+    Object.assign(state.prepArtifacts, { forcingFile: null, forcingDir: null });
+    globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
     renderCards();
     status(`已探测 ${baseName(path)}：${probe.variables.length} 个变量，${probe.steps} 步`);
   } catch (e) { status(e); }
@@ -331,6 +345,12 @@ function convertCard() {
   if (missingU.length) {
     reasons.push('选了变量但没填源单位：' + missingU.map(({ s }) => `第 ${s.index} 槽`).join('、'));
   }
+  const missingHeights = missingForcingHeights(heights);
+  if (missingHeights.length) {
+    reasons.push(`缺少观测高度：${missingHeights.join('、')}`);
+  }
+  if (!state.prepArtifacts.siteStem) reasons.push('先在“站点数据”子步骤填写站点名并生成站点文件');
+  if (!dstDir.trim()) reasons.push('先填写强迫场产物目录');
 
   card.innerHTML = `
     <h3>转换</h3>
@@ -347,9 +367,11 @@ function convertCard() {
 
   const dstInp = card.querySelector('#fdst');
   dstInp.value = dstDir;
-  dstInp.onchange = () => { dstDir = dstInp.value; };
+  dstInp.onchange = () => { dstDir = dstInp.value.trim(); renderCards(); };
   card.querySelector('#fdst-note').textContent =
-    `产物文件名沿用源文件名（${baseName(srcPath)}），只是换了目录。`;
+    state.prepArtifacts.siteStem
+      ? `标准文件名：${forcingOutputName(state.prepArtifacts.siteStem)}，可与站点文件自动配对。`
+      : '先生成站点文件，强迫场将沿用同一个站点名。';
 
   const btn = card.querySelector('#fconvert');
   btn.disabled = reasons.length > 0;
@@ -368,9 +390,7 @@ function convertCard() {
     p1.append('已转换：', code);
     const p2 = document.createElement('p');
     p2.className = 'muted mini';
-    p2.textContent =
-      '下一步：回到「站点」那一步，把 Sitedata 目录指到产物所在的位置（或它的上级目录）' +
-      '重新扫描 —— 这份产物已经是标准约定的强迫场，扫描认得出来。';
+    p2.textContent = '已自动写入基本设定的强迫场目录，并与刚生成的站点重新配对。';
     resultBox.appendChild(p1);
     resultBox.appendChild(p2);
   }
@@ -381,7 +401,11 @@ async function doConvert() {
   const src = srcPath;
   const dir = $('fdst').value.trim();
   if (!dir) { status('先填产物放哪个目录'); return; }
-  const dst = joinPath(dir, baseName(src));
+  const stem = state.prepArtifacts.siteStem;
+  if (!stem) { status('先在“站点数据”子步骤生成站点文件'); return; }
+  const missingHeights = missingForcingHeights(heights);
+  if (missingHeights.length) { status(`先补齐观测高度：${missingHeights.join('、')}`); return; }
+  const dst = joinPath(dir, forcingOutputName(stem));
   const btn = $('fconvert');
   if (btn) btn.disabled = true;
   try {
@@ -397,9 +421,17 @@ async function doConvert() {
     const heightsReady = heights.v != null && heights.t != null && heights.q != null;
     const heightsArg = heightsReady ? [heights.v, heights.t, heights.q] : null;
     lastResult = await invoke('convert_forcing', { src, dst, slots, heights: heightsArg });
+    Object.assign(state.prepArtifacts, { forcingFile: lastResult, forcingDir: dir });
+    $('forcingdir').value = dir;
+    if (state.prepArtifacts.siteFile) {
+      await scanPreparedSites(state.prepArtifacts.siteFile);
+    }
+    globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
     status('转换完成：' + lastResult);
   } catch (e) {
     lastResult = null;
+    Object.assign(state.prepArtifacts, { forcingFile: null, forcingDir: null });
+    globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
     status(e);
   } finally {
     renderCards();

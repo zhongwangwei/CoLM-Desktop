@@ -1,191 +1,268 @@
-//! 前处理页：站点属性子栏（`docs/plan-prep-b.md`，`docs/design-prep.md` §2.2）。
-//!
-//! 三张卡片：① 位置（经纬度必填、地类可选）→ ② 产物（目录 + 文件名 +
-//! 可选 rawdata + 「生成」）→ ③ 结果（12 个必需字段逐个说来自哪里）。
-//! ①② 静态放在 `index.html`，③ 探完/生成完才有内容、动态渲染——
-//! 与 `forcing.js` 的 `forcing-cards` 同一条约束：`recent.js` 的
-//! `wirePickers()` 是一次性绑定，不是事件委托，动态渲染出来的 `pick`
-//! 按钮不会被接线，点了没反应也不报错，所以两个「选择…」按钮必须在
-//! 页面加载时就已经在 DOM 里。
-//!
-//! **这份状态不进 `state.js`。** 只有这一页用得到它，与 `forcing.js`
-//! 同一个理由：只 import `ipc.js` 与 `ui.js` 两个叶子模块，不读、不写
-//! `state`，天然不会跟别的模块成环。
-//!
-//! **`out` 只在点「生成」那一刻拼。** 目录与文件名分两个框，是因为
-//! `site-new` 造的是一份新文件——不像强迫场转换有源文件名可以照抄，
-//! 这里没有天然的默认文件名，用户可能要建好几个站点、每次换个名字，
-//! 分开两个框比每次都要在一整条路径里找到文件名那一段再改容易。
+//! Preprocessing workbench: create a standard site file, expose the complete
+//! mksrfdata contract, and hand the generated dataset to Basic Settings.
 
 import { invoke } from './ipc.js';
-import { $, status, joinPath } from './ui.js';
+import { state } from './state.js';
+import { $, status, joinPath, forcingDirectoryForSiteDirectory } from './ui.js';
+import {
+  normalizeSiteStem, parentDirectory, prepMode, siteOutputName,
+} from './prep-state.js';
+import { scanPreparedSites } from './sites.js';
+import { go } from './shell.js';
 
-/** 上一次「生成」成功的结果。`null` 表示还没生成过，或者刚改过输入。 */
 let result = null;
-
-/** 12 个必需字段：地类以外，`site-new` 逐字段说明来自哪里的那些。
- *  只用于「结果」卡片里数一数「一共 12 个」有没有对上——不是给后端用的，
- *  后端已经在 `from_site`/`from_raster`/`from_default` 三个列表里给全了。 */
 const REQUIRED_FIELD_COUNT = 12;
 
-/** 解析地类输入框。留空是 `{ value: null }`——合法，意思是「不写，让 CoLM
- *  自己回落」；非空又不是整数是 `{ error }`。**校验与取值走同一个函数**，
- *  不然「生成」按钮判定的合法性与真正发出去的值可能对不上——分开写
- *  两遍校验逻辑，改一处忘改另一处就是这么错的。 */
+const MODE_LABELS = {
+  igbp: 'IGBP 自然站点',
+  usgs: 'USGS 自然站点',
+  pft: 'PFT 自然站点',
+  pc: 'PC 自然站点',
+  urban: 'URBAN 城市站点',
+};
+
 function parseLandtype() {
+  if (prepMode(state) === 'urban') return { value: null };
   const raw = $('slandtype').value.trim();
   if (!raw) return { value: null };
   const n = Number(raw);
-  if (!Number.isInteger(n)) return { error: '地类要是一个整数，留空就不写' };
+  if (!Number.isInteger(n)) return { error: '地表覆盖类型必须是整数；留空则由 rawdata 提供' };
   return { value: n };
 }
 
-/** 「生成」按钮能不能按，以及按不了的原因。**每次输入变化都要重算**——
- *  ④ 的转换按钮（forcing.js）已经立过这个规矩：不能让人点下去才知道
- *  差什么。 */
+function syncIdentity() {
+  const stem = normalizeSiteStem($('sname').value);
+  $('soutname').value = stem ? siteOutputName(stem) : '_site.nc';
+  const mode = prepMode(state);
+  $('smode').value = MODE_LABELS[mode] ?? mode.toUpperCase();
+  $('slandtype').disabled = mode === 'urban';
+  $('slandtype').placeholder = mode === 'urban' ? '城市模式由向导固定' : '留空 = 由 rawdata 提供';
+  $('slandtype-label').firstChild.textContent = mode === 'usgs'
+    ? 'USGS 地表覆盖类型 '
+    : '地表覆盖类型 ';
+}
+
 function readyReasons() {
   const reasons = [];
+  const stem = normalizeSiteStem($('sname').value);
   const lon = Number($('slon').value.trim());
   const lat = Number($('slat').value.trim());
-  if (!$('slon').value.trim() || !Number.isFinite(lon)) reasons.push('经度必填');
-  if (!$('slat').value.trim() || !Number.isFinite(lat)) reasons.push('纬度必填');
+  if (!stem) reasons.push('站点名必填');
+  if (!$('slon').value.trim() || !Number.isFinite(lon) || lon < -180 || lon > 180) {
+    reasons.push('经度必须在 -180 到 180 之间');
+  }
+  if (!$('slat').value.trim() || !Number.isFinite(lat) || lat < -90 || lat > 90) {
+    reasons.push('纬度必须在 -90 到 90 之间');
+  }
   const lt = parseLandtype();
   if (lt.error) reasons.push(lt.error);
-  if (!$('soutdir').value.trim()) reasons.push('先填产物放哪个目录');
-  if (!$('soutname').value.trim()) reasons.push('产物文件名不能为空');
+  if (!$('soutdir').value.trim()) reasons.push('先选择站点数据目录');
   return reasons;
 }
 
 function updateGenerateState() {
+  syncIdentity();
   const reasons = readyReasons();
-  const btn = $('smake');
-  if (btn) btn.disabled = reasons.length > 0;
-  const why = $('smake-why');
-  if (why) {
-    why.className = (reasons.length ? 'fail' : 'muted') + ' mini';
-    why.textContent = reasons.length ? reasons.join('；') : '就绪，可以生成。';
-  }
+  $('smake').disabled = reasons.length > 0;
+  $('smake-why').className = (reasons.length ? 'fail' : 'muted') + ' mini';
+  $('smake-why').textContent = reasons.length
+    ? reasons.join('；')
+    : '可以生成结构文件；生成后会继续检查当前模式的完整运行契约。';
 }
 
-// 位置、产物两张卡片的每一个输入框改动都要重算「生成」按钮的状态——
-// 与 `forcing.js` 的槽位映射同一个道理：不能让人点了才知道差什么。
-for (const id of ['slon', 'slat', 'slandtype', 'soutdir', 'soutname', 'srawdata']) {
-  const el = $(id);
-  if (el) el.addEventListener('input', updateGenerateState);
+function invalidateSite() {
+  result = null;
+  Object.assign(state.prepArtifacts, {
+    siteStem: null,
+    siteFile: null,
+    siteDir: null,
+    siteReport: null,
+    forcingFile: null,
+    forcingDir: null,
+  });
+  globalThis.dispatchEvent?.(new Event('colm:prep-site-invalidated'));
+  renderResult();
+  renderPrepReady();
+  updateGenerateState();
 }
+
+for (const id of ['sname', 'slon', 'slat', 'slandtype', 'soutdir', 'srawdata']) {
+  const el = $(id);
+  if (el) el.addEventListener('input', invalidateSite);
+}
+globalThis.addEventListener?.('colm:wizard', () => {
+  invalidateSite();
+  syncIdentity();
+});
 updateGenerateState();
 
 $('smake').onclick = async () => {
   const reasons = readyReasons();
   if (reasons.length) { status(reasons.join('；')); return; }
-  const lon = Number($('slon').value.trim());
-  const lat = Number($('slat').value.trim());
-  const { value: landtype } = parseLandtype();
+  const stem = normalizeSiteStem($('sname').value);
+  const outDir = $('soutdir').value.trim();
   const rawdataDir = $('srawdata').value.trim();
-  const out = joinPath($('soutdir').value.trim(), $('soutname').value.trim());
-  const btn = $('smake');
-  btn.disabled = true;
+  const out = joinPath(outDir, siteOutputName(stem));
+  const { value: landtype } = parseLandtype();
+  $('smake').disabled = true;
   try {
     result = await invoke('make_site', {
       out,
-      lon,
-      lat,
+      lon: Number($('slon').value.trim()),
+      lat: Number($('slat').value.trim()),
       landtype,
       rawdata: rawdataDir || null,
+      mode: prepMode(state),
     });
-    status(`已生成 ${result.path}：${result.from_default.length} 个字段走标称假设`);
-  } catch (e) {
+    Object.assign(state.prepArtifacts, {
+      siteStem: stem,
+      siteFile: result.path,
+      siteDir: parentDirectory(result.path),
+      siteReport: result,
+      rawdataDir: rawdataDir || null,
+    });
+    await adoptPreparedSite(result);
+    status(result.readiness === 'blocked'
+      ? `已生成 ${result.path}，但当前模式还缺 ${result.needs_external.length} 项外部数据`
+      : `站点数据已生成并交给基本设定：${result.path}`);
+  } catch (error) {
     result = null;
-    status(e);
+    Object.assign(state.prepArtifacts, {
+      siteStem: null, siteFile: null, siteDir: null, siteReport: null,
+    });
+    status(error);
   } finally {
-    updateGenerateState();
     renderResult();
+    renderPrepReady();
+    updateGenerateState();
   }
 };
 
-// --------------------------------------------------------------- ③ 结果
+export async function adoptPreparedSite(report = state.prepArtifacts.siteReport) {
+  if (!report?.path) return null;
+  const dir = parentDirectory(report.path);
+  $('sitedir').value = dir;
+  $('forcingdir').value = state.prepArtifacts.forcingDir
+    || forcingDirectoryForSiteDirectory(dir);
+  if ($('rawdata')) $('rawdata').value = state.prepArtifacts.rawdataDir ?? '';
+  const selected = await scanPreparedSites(report.path);
+  if (selected?.met_file && !state.prepArtifacts.forcingFile) {
+    state.prepArtifacts.forcingFile = selected.met_file;
+    state.prepArtifacts.forcingDir = parentDirectory(selected.met_file);
+    $('forcingdir').value = state.prepArtifacts.forcingDir;
+  }
+  renderPrepReady();
+  return selected;
+}
 
-/** 一组来源（站点自身 / rawdata 栅格 / 标称假设）。`cls` 非空时整组
- *  标出状态色——**只有 `warn`/`fail` 两种状态色，没有 `.ok`**：
- *  「来自站点自身」「来自 rawdata 栅格」不上色，默认色就是「正常」。 */
 function sourceGroup(title, fields, cls, note) {
   const wrap = document.createElement('div');
   wrap.style.marginTop = '14px';
-  const h = document.createElement('div');
-  h.className = 'mini' + (cls ? ' ' + cls : '');
-  h.style.fontWeight = '650';
-  h.textContent = `${title}（${fields.length}）`;
-  wrap.appendChild(h);
+  const heading = document.createElement('div');
+  heading.className = 'mini' + (cls ? ` ${cls}` : '');
+  heading.style.fontWeight = '650';
+  heading.textContent = `${title}（${fields.length}）`;
+  wrap.appendChild(heading);
   if (note) {
     const p = document.createElement('p');
-    p.className = (cls ? cls : 'muted') + ' mini';
+    p.className = (cls || 'muted') + ' mini';
     p.style.margin = '4px 0 0';
     p.textContent = note;
     wrap.appendChild(p);
   }
-  if (!fields.length) {
-    const p = document.createElement('p');
-    p.className = 'muted mini';
-    p.style.margin = '4px 0 0';
-    p.textContent = '（无）';
-    wrap.appendChild(p);
-  } else {
-    const ul = document.createElement('ul');
-    if (cls) ul.className = cls;
-    ul.style.margin = '4px 0 0';
-    ul.style.paddingLeft = '18px';
-    for (const f of fields) {
-      const li = document.createElement('li');
-      li.className = 'mini';
-      li.textContent = f;
-      ul.appendChild(li);
-    }
-    wrap.appendChild(ul);
-  }
+  const list = document.createElement('div');
+  list.className = 'mini';
+  list.style.marginTop = '4px';
+  list.textContent = fields.length ? fields.join(' · ') : '（无）';
+  wrap.appendChild(list);
   return wrap;
+}
+
+function readinessCopy(report) {
+  if (report.readiness === 'self_contained') {
+    return ['可独立运行', '站点文件自身满足当前模式，不需要 CoLM 全球 rawdata。', ''];
+  }
+  if (report.readiness === 'ready_with_rawdata') {
+    return ['可随 rawdata 运行', `站点文件还缺 ${report.needs_external.length} 项；已选择的 rawdata 将在 mksrfdata 阶段提供。`, 'warn'];
+  }
+  return ['尚不可运行', `缺少 ${report.needs_external.length} 项且没有可用 rawdata。文件可以保存，但建例会被阻止。`, 'fail'];
 }
 
 function renderResult() {
   const box = $('site-result');
-  if (!box) return;
   box.textContent = '';
   if (!result) return;
-
   const card = document.createElement('div');
   card.className = 'card';
-  card.innerHTML = '<h3>③ 结果</h3>';
+  card.innerHTML = '<h3>生成结果与运行契约</h3>';
+  const [title, detail, cls] = readinessCopy(result);
+  const banner = document.createElement('div');
+  banner.className = `ch${cls ? ` ${cls}` : ''}`;
+  banner.textContent = `${title}：${detail}`;
+  card.appendChild(banner);
 
-  const ch = document.createElement('div');
-  ch.className = 'ch';
   const total = result.from_site.length + result.from_raster.length + result.from_default.length;
-  ch.textContent = total === REQUIRED_FIELD_COUNT
-    ? `CoLM 无条件要读的 ${REQUIRED_FIELD_COUNT} 个必需字段，每个都归到了下面某一类。`
-    // 与后端脱钩的信号——12 不该变，见 sitedata_tests.rs 的真 CLI 测试；
-    // 界面上不该假装没看见，用户拿这份文件跑之前该知道数对不上。
-    : `一共 ${total} 个字段有来源说明（预期 ${REQUIRED_FIELD_COUNT} 个——如果不是，
-       说明这份 GUI 与当前的 colm-cli 版本没对齐，先别拿它建算例）。`;
-  card.appendChild(ch);
-
-  const summary = document.createElement('table');
-  const landtypeText = result.landtype != null
-    ? String(result.landtype)
-    : '未填 —— 交给 CoLM 按自己的规则回落';
-  summary.innerHTML = `
+  const table = document.createElement('table');
+  table.innerHTML = `
     <tr><th>产物</th><td><code>${result.path}</code></td></tr>
-    <tr><th>质地</th><td>${result.texture_name}（第 ${result.texture} 类），BVIC ${result.bvic}</td></tr>
-    <tr><th>地类</th><td>${landtypeText}</td></tr>
-  `;
-  card.appendChild(summary);
-
+    <tr><th>模式</th><td>${String(result.mode).toUpperCase()} · ${result.site_kind === 'urban' ? '城市' : '自然'}站点</td></tr>
+    <tr><th>结构字段</th><td>${total}/${REQUIRED_FIELD_COUNT}</td></tr>
+    <tr><th>质地</th><td>${result.texture_name}（第 ${result.texture} 类），BVIC ${result.bvic}</td></tr>`;
+  card.appendChild(table);
   card.appendChild(sourceGroup('来自站点自身', result.from_site, '', ''));
   card.appendChild(sourceGroup('来自 rawdata 栅格', result.from_raster, '', ''));
   card.appendChild(sourceGroup(
-    '标称假设',
-    result.from_default,
-    'warn',
-    '这些是标称假设，不是这个站点实测的 —— 拿这份文件跑出来的结果，' +
-    '这些字段部分的可信度取决于这一点，不能当成量出来的数。',
+    '有依据的查表值', result.from_lookup, 'warn',
+    '查表值不是站点实测；只有对应方案确有模型查表依据时才写入。',
   ));
-
+  card.appendChild(sourceGroup(
+    '标称或模块默认值', result.from_default, 'warn',
+    '这些值不是本站实测值；结果解释时必须保留这一数据来源限制。',
+  ));
+  card.appendChild(sourceGroup(
+    '仍需外部数据', result.needs_external, result.needs_external.length ? (result.readiness === 'blocked' ? 'fail' : 'warn') : '',
+    result.needs_external.length
+      ? '清单来自 mksrfdata 的模式契约，不再只检查 12 个结构字段。'
+      : '当前站点文件已经自包含。',
+  ));
   box.appendChild(card);
 }
+
+export function renderPrepReady() {
+  const box = $('prep-ready-summary');
+  if (!box) return;
+  box.textContent = '';
+  const a = state.prepArtifacts;
+  const rows = [
+    ['站点文件', a.siteFile, a.siteReport?.readiness ?? '未生成'],
+    ['强迫场', a.forcingFile, a.forcingFile ? '已匹配标准文件' : '未准备'],
+    ['rawdata', a.rawdataDir, a.rawdataDir ? '已选择' : '未选择'],
+  ];
+  const table = document.createElement('table');
+  for (const [label, path, stateText] of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<th>${label}</th><td>${path ? `<code>${path}</code>` : '—'}<div class="muted mini">${stateText}</div></td>`;
+    table.appendChild(tr);
+  }
+  box.appendChild(table);
+  const runnableSite = a.siteReport && a.siteReport.readiness !== 'blocked';
+  const matched = runnableSite && !!a.forcingFile;
+  $('prep-use').disabled = !matched;
+  if (!matched) {
+    const p = document.createElement('p');
+    p.className = 'warn mini';
+    p.textContent = !runnableSite
+      ? '先生成一份可独立运行或可随 rawdata 运行的站点文件。'
+      : '站点数据已就绪；还需要在“强迫场”子步骤完成转换。';
+    box.appendChild(p);
+  }
+}
+
+$('prep-use').onclick = async () => {
+  if ($('prep-use').disabled) return;
+  await adoptPreparedSite();
+  go('basic-files');
+};
+
+globalThis.addEventListener?.('colm:prep-artifacts', renderPrepReady);
+renderPrepReady();

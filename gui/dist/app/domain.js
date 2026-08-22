@@ -243,6 +243,10 @@ function finish() {
   state.resultMetrics = [];
   state.resultFailures = [];
   state.text = '';
+  state.prepArtifacts = {
+    siteStem: null, siteFile: null, siteDir: null, siteReport: null,
+    rawdataDir: null, forcingFile: null, forcingDir: null,
+  };
   state.domain = picked.domain;
   state.subgrid = picked.subgrid;
   state.wizard = {

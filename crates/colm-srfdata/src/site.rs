@@ -17,6 +17,8 @@ use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
 use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
 
+const SITE_KIND_ATTRIBUTE: &str = "colm_desktop_site_kind";
+
 /// CoLM 无条件读取而 PLUMBER2 站点文件不提供的 12 个字段。
 pub const REQUIRED_FIELDS: [&str; 12] = [
     "elevation",
@@ -32,6 +34,235 @@ pub const REQUIRED_FIELDS: [&str; 12] = [
     "soil_wf_clay",
     "soil_wf_om",
 ];
+
+/// Natural-site soil variables that `MOD_SingleSrfdata.F90` reads one by one.
+/// Missing variables are not harmless: CoLM falls back to the corresponding global
+/// raster under `<rawdata>/soil`, so a file can satisfy [`REQUIRED_FIELDS`] and still
+/// be unable to run without external data.
+pub const SOIL_RUN_FIELDS: [&str; 24] = [
+    "soil_vf_quartz_mineral",
+    "soil_vf_gravels",
+    "soil_vf_sand",
+    "soil_vf_clay",
+    "soil_vf_om",
+    "soil_wf_gravels",
+    "soil_wf_sand",
+    "soil_wf_clay",
+    "soil_wf_om",
+    "soil_OM_density",
+    "soil_BD_all",
+    "soil_theta_s",
+    "soil_k_s",
+    "soil_csol",
+    "soil_tksatu",
+    "soil_tksatf",
+    "soil_tkdry",
+    "soil_k_solids",
+    "soil_psi_s",
+    "soil_lambda",
+    "soil_theta_r",
+    "soil_alpha_vgm",
+    "soil_L_vgm",
+    "soil_n_vgm",
+];
+
+/// The physical identity of a site file. This is deliberately independent from
+/// whether a land-cover number happens to be present: generated natural sites may
+/// leave land type unresolved and Urban-PLUMBER files use different markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteKind {
+    Natural,
+    Urban,
+}
+
+impl SiteKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Natural => "natural",
+            Self::Urban => "urban",
+        }
+    }
+}
+
+/// The current CoLM vegetation/spatial contract used to audit a site file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteMode {
+    Igbp,
+    Usgs,
+    Pft,
+    Pc,
+    Urban,
+}
+
+impl SiteMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Igbp => "igbp",
+            Self::Usgs => "usgs",
+            Self::Pft => "pft",
+            Self::Pc => "pc",
+            Self::Urban => "urban",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    SelfContained,
+    ReadyWithRawdata,
+    Blocked,
+}
+
+impl Readiness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfContained => "self_contained",
+            Self::ReadyWithRawdata => "ready_with_rawdata",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteAudit {
+    pub kind: SiteKind,
+    pub mode: SiteMode,
+    /// Variables absent from the site file. Every item can be supplied by CoLM
+    /// rawdata; they are kept visible even when a rawdata directory is selected.
+    pub needs_external: Vec<String>,
+    pub readiness: Readiness,
+}
+
+impl SiteAudit {
+    pub fn self_contained(&self) -> bool {
+        self.readiness == Readiness::SelfContained
+    }
+}
+
+fn string_attribute(file: &netcdf::File, name: &str) -> Option<String> {
+    match file.attribute(name)?.value().ok()? {
+        netcdf::AttributeValue::Str(value) => Some(value),
+        _ => None,
+    }
+}
+
+/// Classify a site from an explicit CoLM Desktop marker first, then from urban-only
+/// variables. A missing land type is never, by itself, evidence of an urban site.
+pub fn site_kind(file: &Path) -> Result<SiteKind> {
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    if let Some(marked) = string_attribute(&f, SITE_KIND_ATTRIBUTE) {
+        return match marked.as_str() {
+            "natural" => Ok(SiteKind::Natural),
+            "urban" => Ok(SiteKind::Urban),
+            other => bail!(
+                "{} has unsupported {SITE_KIND_ATTRIBUTE}={other:?}",
+                file.display()
+            ),
+        };
+    }
+    if [
+        "LCZ_DOM",
+        "URBAN_DENSITY_CLASS",
+        "ground_height",
+        "building_mean_height",
+    ]
+    .iter()
+    .any(|name| f.variable(name).is_some())
+    {
+        return Ok(SiteKind::Urban);
+    }
+    Ok(SiteKind::Natural)
+}
+
+/// Audit the complete mksrfdata-facing contract for the selected mode.
+///
+/// This only checks whether variables are present; it intentionally does not invent
+/// values or claim that an arbitrary rawdata tree contains a valid value at the site.
+/// A selected rawdata directory therefore changes `blocked` to
+/// `ready_with_rawdata`, while the exact external dependencies remain visible.
+pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<SiteAudit> {
+    if let Some(raw) = rawdata {
+        if !raw.is_dir() {
+            bail!("rawdata directory does not exist: {}", raw.display());
+        }
+    }
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let kind = site_kind(file)?;
+    let mut required: Vec<&str> = REQUIRED_FIELDS.to_vec();
+    required.extend(SOIL_RUN_FIELDS);
+
+    match mode {
+        SiteMode::Igbp => required.extend([
+            "IGBP_classification",
+            "canopy_height",
+            "LAI_year",
+            "LAI_monthly",
+            "SAI_monthly",
+        ]),
+        SiteMode::Usgs => required.extend([
+            "USGS_classification",
+            "canopy_height",
+            "LAI_year",
+            "LAI_monthly",
+            "SAI_monthly",
+        ]),
+        SiteMode::Pft | SiteMode::Pc => required.extend([
+            "IGBP_classification",
+            "pfttyp",
+            "pctpfts",
+            "canopy_height_pfts",
+            "LAI_year",
+            "LAI_pfts_monthly",
+            "SAI_pfts_monthly",
+        ]),
+        SiteMode::Urban => required.extend([
+            "LCZ_DOM",
+            "building_mean_height",
+            "roof_area_fraction",
+            "impervious_area_fraction",
+            "canyon_height_width_ratio",
+            "tree_mean_height",
+            "water_area_fraction",
+            "tree_area_fraction",
+            "LAI_year",
+            "TREE_LAI",
+            "TREE_SAI",
+        ]),
+    }
+
+    required.sort_unstable();
+    required.dedup();
+    let mut needs_external: Vec<String> = required
+        .into_iter()
+        .filter(|name| f.variable(name).is_none())
+        .map(str::to_string)
+        .collect();
+
+    // The urban type and canyon geometry each have two accepted encodings.
+    if mode == SiteMode::Urban {
+        if f.variable("URBAN_DENSITY_CLASS").is_some() {
+            needs_external.retain(|name| name != "LCZ_DOM");
+        }
+        if f.variable("wall_to_plan_area_ratio").is_some() {
+            needs_external.retain(|name| name != "canyon_height_width_ratio");
+        }
+    }
+    needs_external.sort();
+
+    let readiness = if needs_external.is_empty() {
+        Readiness::SelfContained
+    } else if rawdata.is_some() {
+        Readiness::ReadyWithRawdata
+    } else {
+        Readiness::Blocked
+    };
+    Ok(SiteAudit {
+        kind,
+        mode,
+        needs_external,
+        readiness,
+    })
+}
 
 /// 站点文件缺哪些必需字段。
 pub fn missing_fields(file: &Path) -> Result<Vec<String>> {
@@ -78,8 +309,35 @@ pub fn location(file: &Path) -> Result<Location> {
         // 城市站点文件不带这一项 —— Urban-PLUMBER 的 21 个站一个都没有，
         // 而 CoLM 的 URBAN 路径反正会把地类强制成 13
         // （`MOD_SingleSrfdata.F90:1548`）。所以缺了不是错，是「这份文件不说」。
-        landtype: first("IGBP_classification")?.map(|x| x as i32),
+        landtype: first("IGBP_classification")?
+            .or(first("USGS_classification")?)
+            .map(|x| x as i32),
     })
+}
+
+/// Return only the classification understood by the selected compiled scheme.
+/// An IGBP number must never be written to `SITE_landtype` for a USGS kernel: doing
+/// so suppresses CoLM's USGS rawdata lookup while silently changing its meaning.
+pub fn landtype_for_mode(file: &Path, mode: SiteMode) -> Result<Option<i32>> {
+    if mode == SiteMode::Urban {
+        return Ok(None);
+    }
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let name = if mode == SiteMode::Usgs {
+        "USGS_classification"
+    } else {
+        "IGBP_classification"
+    };
+    let Some(v) = f.variable(name) else {
+        return Ok(None);
+    };
+    let values: Vec<f64> = v.get_values(netcdf::Extents::All)?;
+    Ok(Some(
+        values
+            .first()
+            .copied()
+            .with_context(|| format!("{name} is empty in {}", file.display()))? as i32,
+    ))
 }
 
 /// 从经纬度写出一份最小的站点文件，交给 [`fill`] 补齐。
@@ -102,7 +360,29 @@ pub fn location(file: &Path) -> Result<Location> {
 /// 不该因为选了一个更贴近真实文件的存储类型而丢精度。`IGBP_classification`
 /// 没有这个顾虑（整型提升到 f64 是精确的），所以它照抄真实文件的 `int`。
 pub fn skeleton(dst: &Path, lon: f64, lat: f64, landtype: Option<i32>) -> Result<()> {
+    skeleton_with_kind(dst, lon, lat, landtype, SiteKind::Natural)
+}
+
+pub fn skeleton_with_kind(
+    dst: &Path,
+    lon: f64,
+    lat: f64,
+    landtype: Option<i32>,
+    kind: SiteKind,
+) -> Result<()> {
+    skeleton_with_mode(dst, lon, lat, landtype, kind, SiteMode::Igbp)
+}
+
+pub fn skeleton_with_mode(
+    dst: &Path,
+    lon: f64,
+    lat: f64,
+    landtype: Option<i32>,
+    kind: SiteKind,
+    mode: SiteMode,
+) -> Result<()> {
     let mut f = netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+    f.add_attribute(SITE_KIND_ATTRIBUTE, kind.as_str())?;
 
     let mut lon_var = f.add_variable::<f64>("longitude", &[])?;
     lon_var.put_values(&[lon], netcdf::Extents::All)?;
@@ -111,7 +391,12 @@ pub fn skeleton(dst: &Path, lon: f64, lat: f64, landtype: Option<i32>) -> Result
     lat_var.put_values(&[lat], netcdf::Extents::All)?;
 
     if let Some(lt) = landtype {
-        let mut lt_var = f.add_variable::<i32>("IGBP_classification", &[])?;
+        let variable = if mode == SiteMode::Usgs {
+            "USGS_classification"
+        } else {
+            "IGBP_classification"
+        };
+        let mut lt_var = f.add_variable::<i32>(variable, &[])?;
         lt_var.put_values(&[lt], netcdf::Extents::All)?;
     }
 
@@ -314,7 +599,7 @@ pub fn fill(
     // PLUMBER2 站点文件本来就带 `canopy_height`（FLUXNET BADM 实测值），
     // 站点自己说的话必须赢，与 elevation/lakedepth 是同一条规矩；没有
     // 地类就查不了表（`HTOP0_IGBP` 按 IGBP 类别索引），那时不写比猜一个好。
-    if f.variable("canopy_height").is_none() {
+    if f.variable("canopy_height").is_none() && f.variable("IGBP_classification").is_some() {
         if let Some(lt) = landtype.filter(|lt| (1..=17).contains(lt)) {
             let h = HTOP0_IGBP[(lt - 1) as usize];
             put_scalar(
@@ -542,10 +827,17 @@ fn read_inputs(file: &Path) -> Result<Inputs> {
     let lon = scalar("longitude")?;
     let lat = scalar("latitude")?;
 
-    let landtype = match f.variable("IGBP_classification") {
+    let landtype = match f
+        .variable("IGBP_classification")
+        .or_else(|| f.variable("USGS_classification"))
+    {
         Some(v) => {
             let x: Vec<f64> = v.get_values(netcdf::Extents::All)?;
-            Some(x.first().copied().context("IGBP_classification is empty")? as i32)
+            Some(
+                x.first()
+                    .copied()
+                    .context("land-cover classification is empty")? as i32,
+            )
         }
         None => None,
     };

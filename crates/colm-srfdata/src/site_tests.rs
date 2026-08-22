@@ -443,6 +443,85 @@ fn a_skeleton_carries_only_what_the_user_gave() {
 }
 
 #[test]
+fn a_generated_site_without_landtype_is_explicitly_natural() {
+    let dir = std::env::temp_dir().join(format!("colm-skel-kind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("generated_site.nc");
+
+    super::skeleton(&p, 123.5092, 44.5933, None).expect("write skeleton");
+
+    assert_eq!(super::site_kind(&p).unwrap(), super::SiteKind::Natural);
+}
+
+#[test]
+fn run_readiness_distinguishes_a_file_from_a_runnable_site() {
+    let dir = std::env::temp_dir().join(format!("colm-site-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let skel = dir.join("skel.nc");
+    let out = dir.join("audit_site.nc");
+    super::skeleton(&skel, 123.5092, 44.5933, None).unwrap();
+    super::fill(&skel, &out, None, None).unwrap();
+
+    let blocked = super::audit(&out, super::SiteMode::Igbp, None).unwrap();
+    assert_eq!(blocked.readiness, super::Readiness::Blocked);
+    for field in [
+        "IGBP_classification",
+        "LAI_year",
+        "LAI_monthly",
+        "SAI_monthly",
+        "soil_vf_quartz_mineral",
+        "soil_n_vgm",
+    ] {
+        assert!(
+            blocked.needs_external.iter().any(|name| name == field),
+            "the run contract must report {field}"
+        );
+    }
+
+    let rawdata = dir.join("rawdata");
+    std::fs::create_dir_all(&rawdata).unwrap();
+    let with_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata)).unwrap();
+    assert_eq!(with_rawdata.readiness, super::Readiness::ReadyWithRawdata);
+    assert_eq!(with_rawdata.needs_external, blocked.needs_external);
+}
+
+#[test]
+fn pft_and_pc_audits_expose_their_array_contract() {
+    let dir = std::env::temp_dir().join(format!("colm-site-pft-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let skel = dir.join("skel.nc");
+    let out = dir.join("pft_site.nc");
+    super::skeleton(&skel, 123.5092, 44.5933, Some(10)).unwrap();
+    super::fill(&skel, &out, None, None).unwrap();
+
+    for mode in [super::SiteMode::Pft, super::SiteMode::Pc] {
+        let report = super::audit(&out, mode, None).unwrap();
+        for field in [
+            "pfttyp",
+            "pctpfts",
+            "canopy_height_pfts",
+            "LAI_pfts_monthly",
+            "SAI_pfts_monthly",
+        ] {
+            assert!(
+                report.needs_external.iter().any(|name| name == field),
+                "{mode:?} must report {field}"
+            );
+        }
+        assert!(
+            !report
+                .needs_external
+                .iter()
+                .any(|name| name == "LAI_monthly"),
+            "PFT/PC must show the array contract instead of the scalar one"
+        );
+    }
+}
+
+#[test]
 fn a_skeleton_with_a_landtype_writes_it() {
     let dir = std::env::temp_dir().join(format!("colm-skel-lt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -457,6 +536,35 @@ fn a_skeleton_with_a_landtype_writes_it() {
         .get_values(netcdf::Extents::All)
         .unwrap();
     assert_eq!(lt, vec![10.0]);
+}
+
+#[test]
+fn a_usgs_skeleton_never_relabels_an_igbp_number() {
+    let dir = std::env::temp_dir().join(format!("colm-skel-usgs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("usgs_site.nc");
+    super::skeleton_with_mode(
+        &p,
+        0.0,
+        0.0,
+        Some(7),
+        super::SiteKind::Natural,
+        super::SiteMode::Usgs,
+    )
+    .unwrap();
+
+    let f = netcdf::open(&p).unwrap();
+    assert!(f.variable("USGS_classification").is_some());
+    assert!(f.variable("IGBP_classification").is_none());
+    assert_eq!(
+        super::landtype_for_mode(&p, super::SiteMode::Usgs).unwrap(),
+        Some(7)
+    );
+    assert_eq!(
+        super::landtype_for_mode(&p, super::SiteMode::Igbp).unwrap(),
+        None
+    );
 }
 
 #[test]

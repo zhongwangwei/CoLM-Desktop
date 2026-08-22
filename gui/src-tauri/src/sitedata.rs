@@ -1,4 +1,4 @@
-//! 从一对经纬度建一份能跑的站点文件（阶段 B，`docs/plan-prep-b.md`）。
+//! 从站点身份与经纬度建立标准站点文件，并返回模式感知的运行就绪审计。
 //!
 //! **走 sidecar 而不是直接调 `colm_srfdata::site`。** GUI 进程里不能有 netcdf
 //! （`Cargo.toml` 那条量化过的注释：`colm-srfdata` 7 个、`colm-cli` 9 个
@@ -38,6 +38,15 @@ pub struct SiteReport {
     /// 上也没有数据时，落到这一级——12 个必需字段全从这三个列表里出，
     /// 三者加起来恒为 12。
     pub from_default: Vec<String>,
+    /// CoLM 自带查表得到的字段（目前仅 IGBP 冠层高度）。
+    pub from_lookup: Vec<String>,
+    /// 文件本身没有、运行时需要由 rawdata 提供的完整 mksrfdata 契约。
+    pub needs_external: Vec<String>,
+    pub site_kind: String,
+    pub mode: String,
+    /// `self_contained` / `ready_with_rawdata` / `blocked`。
+    pub readiness: String,
+    pub self_contained: bool,
 }
 
 /// 拼 `colm-cli site-new --json 1` 的参数列表。
@@ -51,6 +60,7 @@ fn build_site_new_args(
     lat: f64,
     landtype: Option<i32>,
     rawdata: Option<&str>,
+    mode: &str,
 ) -> Vec<String> {
     let mut args = vec![
         "site-new".to_string(),
@@ -69,13 +79,15 @@ fn build_site_new_args(
         args.push("--rawdata".into());
         args.push(r.to_string());
     }
+    args.push("--mode".into());
+    args.push(mode.to_string());
     args.push("--json".into());
     args.push("1".into());
     args
 }
 
-/// 从经纬度建一份能跑的 `site.nc`：12 个必需字段由 rawdata 栅格或标称假设
-/// 补齐，每个都带着来自哪里的说明。
+/// 从经纬度建立 `site.nc`：先补齐 12 个结构字段，再由 CLI 按当前模式检查
+/// 完整 mksrfdata 契约。缺少的科学数据只会列为 rawdata 依赖，不会被编造。
 ///
 /// **地类不给就不传 `--landtype`。** 界面上不该替用户猜——`colm-cli` 那边
 /// 已经把这条规矩定死：不给就整条不写，让 CoLM 走自己的回落路径。
@@ -86,8 +98,9 @@ pub async fn make_site(
     lat: f64,
     landtype: Option<i32>,
     rawdata: Option<String>,
+    mode: String,
 ) -> Result<SiteReport, String> {
-    let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref());
+    let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode);
     let json = crate::sidecar::capture(&args)?;
     serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是建站点失败 —— 照 `probe_forcing`/`scan_sites`

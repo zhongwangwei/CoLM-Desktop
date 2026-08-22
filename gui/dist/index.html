@@ -40,97 +40,100 @@
 
   <main class="work" id="work">
 
-    <!-- ① 前处理：强迫场、站点属性两个子栏（design-prep.md §2.1/§2.2，
-         阶段 A + B）。观测子栏还没做，见 docs/design-prep.md §2.3。
-
-         两个子栏同页顺序摆放，不做成可切换的标签页：右栏的运行日志已经
-         用了 `.live-tabs`/`.live-pane`（见 shell.js `initShell()` 里对
-         `#livetabs` 的接线），那份接线代码不在本次改动范围内，硬套一层
-         会在这里再造一遍事件绑定；而两个子栏各自要看的东西不冲突——
-         强迫场探完不会覆盖掉站点属性的卡片，堆叠展示不丢信息，只是
-         多滚一屏。等真加了观测子栏（第三个）再看要不要收成标签页。 -->
-    <section class="page" data-step="prep">
+    <!-- ① 前处理：站点数据与强迫场共享一份产物状态；左栏子步骤负责切换。 -->
+    <section class="page" data-step="prep" hidden>
       <div class="work-head"><span class="kicker">第 1 步</span></div>
       <h1>前处理</h1>
-      <p class="sub">把原始数据批量转成模型要的格式，<b>产出的就是下一步要扫的站点数据</b>。
-        已经转好的会跳过 ——
-        判据与第 4 步的阶段跳过一样，是输入指纹而不是文件在不在。</p>
+      <p class="sub">把任意站点的原始输入整理成 CoLM Desktop 可识别的数据集。
+        “文件已生成”和“当前模式可以运行”分别检查；缺少的科学数据不会用猜测掩盖。</p>
 
-      <h2 style="font-size:15px;font-weight:700;letter-spacing:-.01em;margin:0 0 12px">强迫场</h2>
-      <div class="card">
-        <h3>强迫场文件</h3>
-        <div class="ch">选一份原始强迫场 <code>.nc</code>，探测里面有哪些变量、
-          八个槽位怎么对应、时间轴是否均匀、观测高度有没有。探完才看得到下面几张卡片。</div>
-        <div class="browse">
-          <input class="input" id="fsrc" placeholder="…/Met/CN-Cng_1979-2017_FLUXNET2015_Met.nc">
-          <button class="btn-ghost pick" data-for="fsrc" data-file="nc">选择…</button>
-          <button class="btn-ghost" id="fprobe">探一探</button>
+      <div class="flow-pane" data-flow-pane="prep-site">
+        <div class="card">
+          <h3>站点身份与位置</h3>
+          <div class="ch">站点名决定标准文件名；当前模式来自首页向导，站点文件会写入明确的自然 / 城市标记。</div>
+          <div class="row">
+            <div class="field">
+              <label>站点名</label>
+              <input class="input" id="sname" placeholder="例如 AT-Neu">
+            </div>
+            <div class="field">
+              <label>当前数据契约</label>
+              <input class="input" id="smode" readonly value="IGBP 自然站点">
+            </div>
+          </div>
+          <div class="row" style="margin-top:13px">
+            <div class="field">
+              <label>经度（度）</label>
+              <input class="input" id="slon" type="number" step="any" min="-180" max="180" placeholder="例如 11.70">
+            </div>
+            <div class="field">
+              <label>纬度（度）</label>
+              <input class="input" id="slat" type="number" step="any" min="-90" max="90" placeholder="例如 47.12">
+            </div>
+          </div>
+          <div class="field" style="margin-top:13px">
+            <label id="slandtype-label">地表覆盖类型 <span class="hint">（可选；确实知道时才填）</span></label>
+            <input class="input" id="slandtype" type="number" step="1" placeholder="留空 = 由 rawdata 提供">
+            <div class="muted mini" style="margin-top:5px">
+              不从经纬度猜地类。留空时它会作为明确的外部依赖显示；城市模式由向导固定为城市路径。
+            </div>
+          </div>
         </div>
+
+        <div class="card">
+          <h3>生成站点数据</h3>
+          <div class="ch">输出统一命名为 <code>&lt;站点名&gt;_site.nc</code>。rawdata 可提供地类、植被和土壤栅格；
+            未选择时仍可生成结构文件，但只有文件自身满足完整契约才会标为可运行。</div>
+          <div class="field">
+            <label>站点数据目录</label>
+            <div class="browse">
+              <input class="input" id="soutdir" placeholder="…/MyDataset/Sitedata">
+              <button class="btn-ghost pick" data-for="soutdir">选择…</button>
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label>标准文件名</label>
+            <input class="input" id="soutname" readonly value="_site.nc">
+          </div>
+          <div class="field" style="margin-top:13px">
+            <label>CoLM rawdata 目录 <span class="hint">（缺少站点实测变量时需要）</span></label>
+            <div class="browse">
+              <input class="input" id="srawdata" placeholder="…/rawdata">
+              <button class="btn-ghost pick" data-for="srawdata">选择…</button>
+            </div>
+          </div>
+          <div class="pill-row" style="margin-top:12px">
+            <button class="btn-ghost" id="smake">生成并检查</button>
+          </div>
+          <p class="mini" id="smake-why"></p>
+        </div>
+        <div id="site-result"></div>
       </div>
 
-      <!-- 探完才有内容，动态渲染没问题 —— 只要它里面不含 pick 按钮：
-           wirePickers() 是一次性绑定，不是事件委托，动态渲染出来的 pick
-           按钮不会被接线，点了没反应也不报错。 -->
-      <div id="forcing-cards"></div>
-
-      <h2 style="font-size:15px;font-weight:700;letter-spacing:-.01em;margin:28px 0 12px">站点属性</h2>
-      <p class="sub">只给一对经纬度就能建出一份能跑的 <code>site.nc</code> ——
-        CoLM 无条件要读的 12 个必需字段，由 rawdata 栅格或标称假设补齐，
-        <b>每个都带来自哪里的说明</b>（<code>docs/plan-prep-b.md</code>）。</p>
-
-      <div class="card">
-        <h3>① 位置</h3>
-        <div class="ch">经纬度是唯一必填的两项。</div>
-        <div class="row">
-          <div class="field">
-            <label>经度（度）</label>
-            <input class="input" id="slon" type="number" step="any" placeholder="例如 123.5092">
-          </div>
-          <div class="field">
-            <label>纬度（度）</label>
-            <input class="input" id="slat" type="number" step="any" placeholder="例如 44.5933">
-          </div>
-        </div>
-        <div class="field" style="margin-top:13px">
-          <label>地类 <span class="hint">（可选，IGBP 分类号）</span></label>
-          <input class="input" id="slandtype" type="number" step="1" placeholder="留空 = 不写">
-          <div class="muted mini" style="margin-top:5px">
-            不填就让 CoLM 按自己的规则回落 —— <b>写一个猜的值比不写更糟</b>。
-            只有确实知道这个站点的地类时才填这一项；城市站点不受这条影响，
-            CoLM 会把地类强制成 13。
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>② 产物</h3>
-        <div class="ch">写出一份新的 <code>site.nc</code>。给了 rawdata 目录，能抽到的字段
-          就从栅格抽；抽不到的（以及压根没给 rawdata 的全部）走标称假设 ——
-          文件依然能跑，只是这些数不是这个站点的实测值。</div>
-        <div class="browse">
-          <input class="input" id="soutdir" placeholder="…/CoLM-sites">
-          <button class="btn-ghost pick" data-for="soutdir">选择…</button>
-        </div>
-        <div class="field" style="margin-top:10px">
-          <label>文件名</label>
-          <input class="input" id="soutname" value="site.nc">
-        </div>
-        <div class="field" style="margin-top:13px">
-          <label>rawdata 目录 <span class="hint">（可选）</span></label>
+      <div class="flow-pane" data-flow-pane="prep-forcing" hidden>
+        <div class="card">
+          <h3>强迫场文件</h3>
+          <div class="ch">选择原始强迫场，确认八个变量槽位、单位、时间轴和 V/T/Q 观测高度。
+            产物统一命名为 <code>&lt;站点名&gt;_Met.nc</code>，可与站点文件自动配对。</div>
           <div class="browse">
-            <input class="input" id="srawdata" placeholder="（可选）…/rawdata">
-            <button class="btn-ghost pick" data-for="srawdata">选择…</button>
+            <input class="input" id="fsrc" placeholder="…/Met/AT-Neu.nc">
+            <button class="btn-ghost pick" data-for="fsrc" data-file="nc">选择…</button>
+            <button class="btn-ghost" id="fprobe">探测</button>
           </div>
         </div>
-        <div class="pill-row" style="margin-top:12px">
-          <button class="btn-ghost" id="smake">生成</button>
-        </div>
-        <p class="mini" id="smake-why"></p>
+        <div id="forcing-cards"></div>
       </div>
 
-      <!-- ③ 结果：生成之后才有内容，动态渲染 —— 与 #forcing-cards 同一条
-           约束，这里面不放 pick 按钮。 -->
-      <div id="site-result"></div>
+      <div class="flow-pane" data-flow-pane="prep-ready" hidden>
+        <div class="card">
+          <h3>数据集就绪检查</h3>
+          <div class="ch">这里汇总站点文件、完整运行契约和强迫场。只有匹配的标准文件才会交给下一步。</div>
+          <div id="prep-ready-summary"></div>
+          <div class="pill-row" style="margin-top:14px">
+            <button class="btn-next" id="prep-use" disabled>在基本设定中使用这些产物</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ② 基本设定：数据身份、路径与建例后的基础 namelist 字段只在这里出现。 -->
@@ -169,16 +172,16 @@
               扫描时按站点名称在这里匹配强迫场；留空则使用站点目录旁的 Forcing 目录。
             </div>
           </div>
+          <div class="field">
+            <label>rawdata 目录 <span class="hint">（站点文件有缺项时需要）</span></label>
+            <div class="browse"><input class="input" id="rawdata" placeholder="完整站点文件可留空">
+              <button class="btn-ghost pick" data-for="rawdata">选择…</button></div>
+          </div>
           <div id="urbandirs" hidden>
-            <div class="expert-note">本次向导打开了 <b>URBAN</b>；表外城市站点需要这些数据目录。</div>
-            <div class="row">
-              <div class="field"><label>rawdata 目录</label>
-                <div class="browse"><input class="input" id="rawdata">
-                  <button class="btn-ghost pick" data-for="rawdata">选择…</button></div></div>
-              <div class="field"><label>runtime 目录</label>
-                <div class="browse"><input class="input" id="runtime">
-                  <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
-            </div>
+            <div class="expert-note">本次向导打开了 <b>URBAN</b>；城市过程还需要 runtime 数据。</div>
+            <div class="field"><label>runtime 目录</label>
+              <div class="browse"><input class="input" id="runtime">
+                <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
           </div>
         </div>
 
