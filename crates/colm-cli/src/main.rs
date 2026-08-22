@@ -11,6 +11,7 @@
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
+//!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--out series.json]
 //! colm-cli all       --site ... --out ... --kernel ... [--obs ...]
@@ -47,7 +48,9 @@ usage:
                    # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1]
+                   [--stage mksrfdata|mkinidata|colm]
                    # --force 忽略指纹，三段全部重跑
+                   # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -93,6 +96,7 @@ fn main() -> Result<()> {
                 &opts.need("--kernel")?,
                 opts.get("--stream").is_some(),
                 opts.get("--force").is_some(),
+                requested_run_stage(opts.get("--stage").as_deref())?,
             )?;
         }
         "metrics" => {
@@ -122,6 +126,7 @@ fn main() -> Result<()> {
                 // `all` 刚造完算例，三段都没跑过 —— 指纹本来就是空的，
                 // 这里传 false 与 true 等价，写 false 以免暗示它会跳过什么。
                 false,
+                None,
             )?;
             match opts.get("--obs") {
                 Some(obs) => cmd_metrics(&case, Path::new(&obs), opts.spinup()?, false, false)?,
@@ -1010,7 +1015,23 @@ fn slash(p: &Path) -> String {
 /// `TIMESTEP = n | DATE = ...`，日志窗要的就是原始行，而这两样都只在
 /// 子进程的 stdout 里。同一个可执行文件同时服务两个诉求不同的调用方，
 /// 于是由调用方说要哪一种。
-fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool, force: bool) -> Result<()> {
+fn requested_run_stage(value: Option<&str>) -> Result<Option<Stage>> {
+    match value {
+        None => Ok(None),
+        Some("mksrfdata") => Ok(Some(Stage::MkSrfData)),
+        Some("mkinidata") => Ok(Some(Stage::MkIniData)),
+        Some("colm") => Ok(Some(Stage::Colm)),
+        Some(other) => bail!("unknown run stage {other:?}; expected mksrfdata, mkinidata, or colm"),
+    }
+}
+
+fn cmd_run(
+    case: &Path,
+    kernel_dir: &Path,
+    stream: bool,
+    force: bool,
+    only_stage: Option<Stage>,
+) -> Result<()> {
     // **绝对化算例目录。** `run_stage` 用 `current_dir(work)` 启动子进程，
     // 于是一个相对的 namelist 路径会被相对 `work` 解析而不是相对调用方的当前
     // 目录 —— `colm-cli run oracle/work/CN-Cng` 会让 CoLM 去
@@ -1050,13 +1071,29 @@ fn cmd_run(case: &Path, kernel_dir: &Path, stream: bool, force: bool) -> Result<
         "{}@{}",
         kernel.manifest.preset, kernel.manifest.colm_git_sha
     );
-    let mut marks = if force {
-        Default::default()
-    } else {
-        fingerprint::load(case)
-    };
+    let mut marks = fingerprint::load(case);
+    if force {
+        match only_stage {
+            None => marks.clear(),
+            Some(requested) => {
+                // 显式重跑某一段后，它以及所有下游指纹都失效；上游仍然有效。
+                // 例如只重建 mkinidata 不应让下一次“运行全部”白跑 mksrfdata，
+                // 但旧 colm 输出不能继续被当作与新初始场一致。
+                let first = stages
+                    .iter()
+                    .position(|(stage, _)| *stage == requested)
+                    .expect("requested stage is one of the fixed stages");
+                for (stage, _) in &stages[first..] {
+                    marks.remove(stage.program());
+                }
+            }
+        }
+    }
 
     for (stage, artifacts) in &stages {
+        if only_stage.is_some_and(|requested| requested != *stage) {
+            continue;
+        }
         let sname = stage.program();
         let want = fingerprint::compute(sname, &layout.case_nml(), &kernel_id)?;
         // 两个条件都要满足才跳过：指纹一致，**且**产物真的都在。
@@ -1781,6 +1818,10 @@ fn check_increasing(t: &[f64]) -> Result<()> {
 #[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+#[path = "run_stage_tests.rs"]
+mod run_stage_tests;
 
 #[cfg(test)]
 #[path = "window_tests.rs"]

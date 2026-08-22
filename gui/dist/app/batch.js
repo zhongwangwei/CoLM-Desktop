@@ -1,4 +1,4 @@
-//! 批量操作的作用对象，以及两个批量按钮的文字。
+//! 批量操作的作用对象，以及运行/评估按钮的可用状态与文字。
 //!
 //! **单独一个模块，不是为了整齐。** 这几个函数被 `sites`（渲染列表时）、
 //! `runner`（批量运行）与 `results`（批量评估）三处用到，
@@ -58,19 +58,13 @@ export function sourceSite(c) {
     ?? state.sites.find(s => s.name === c.name);
 }
 
-/** 两个批量按钮上的字**就是它们会做的事**。
- *
- *  「勾了就作用于勾中的、没勾就作用于全部」这条规则本身没问题，
- *  但按钮上只写「全部运行」的话，那条规则就是**隐藏的** —— 用户勾了三个、
- *  按下去跑了九个，事后才知道。所以文字跟着勾选变。 */
+/** 运行按钮共用同一批目标；评估按钮把实际数量写在按钮上。 */
 export function updateCaseBatchButtons() {
   const picked = currentCases().filter(c => state.pickedCases.has(c.dir));
   const target = batchTarget();
-  const suffix = picked.length ? `选中的 ${picked.length} 个` : `本次 ${target.length} 个`;
-  const run = $('runall');
-  if (run) {
-    run.textContent = `运行${suffix}`;
-    run.disabled = !target.length || state.runningCases.size > 0;
+  for (const id of ['run-mksrfdata', 'run-mkinidata', 'run-colm', 'runall']) {
+    const run = $(id);
+    if (run) run.disabled = !target.length || state.runningCases.size > 0;
   }
   const ev = $('eval-all');
   if (ev) {

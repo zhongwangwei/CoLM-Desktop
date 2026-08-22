@@ -126,12 +126,15 @@ fn every_run_event_says_which_case_it_came_from() {
     assert!(json.contains("\"total_steps\":48"));
     let d = Done {
         case: "/tmp/a".into(),
+        requested_stage: Some("mkinidata".into()),
         code: 0,
         total: 10,
         dropped: 3,
         reason: None,
     };
-    assert!(serde_json::to_string(&d).unwrap().contains("\"case\""));
+    let done_json = serde_json::to_string(&d).unwrap();
+    assert!(done_json.contains("\"case\""));
+    assert!(done_json.contains("\"requested_stage\":\"mkinidata\""));
     let l = Lines {
         case: "/tmp/a".into(),
         lines: vec!["x".into()],
@@ -184,4 +187,28 @@ fn batch_summary_distinguishes_success_from_attempted() {
     };
     let json = serde_json::to_string(&summary).unwrap();
     assert_eq!(json, r#"{"total":4,"succeeded":3,"failed":1}"#);
+}
+
+#[test]
+fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
+    assert_eq!(
+        run_args("/case", "/kernel", false, Some("mksrfdata")).unwrap(),
+        [
+            "run",
+            "/case",
+            "--kernel",
+            "/kernel",
+            "--stream",
+            "1",
+            "--stage",
+            "mksrfdata",
+        ]
+    );
+    assert_eq!(
+        run_args("/case", "/kernel", true, None).unwrap(),
+        [
+            "run", "/case", "--kernel", "/kernel", "--stream", "1", "--force", "1",
+        ]
+    );
+    assert!(run_args("/case", "/kernel", false, Some("unknown")).is_err());
 }

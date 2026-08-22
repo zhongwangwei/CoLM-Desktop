@@ -48,7 +48,7 @@ const ZH_EN = [
   ['设置输出，然后依次运行', 'Configure output, then run'],
   ['输入没变的阶段会按输入指纹跳过', 'Stages with unchanged inputs are skipped using input fingerprints'],
   ['预热在第 2 步“基本设定”。', 'Spin-up is configured in Step 2, “Basic setup”.'],
-  ['勾选决定「全部运行」作用于谁；一个没勾就是全部。', 'Checked cases define the “Run all” target; with none checked, all current cases are used.'],
+  ['勾选决定下方四个运行按钮作用于谁；一个没勾就是本次全部算例。', 'Checked cases define the target of the four run buttons below; with none checked, all cases in this batch are used.'],
   ['没建过的算例会在运行前自动建。', 'Cases not yet created are created automatically before running.'],
   ['设置输出频率、目录与重启。先运行时不必翻完几百个输出变量。', 'Configure output frequency, directories, and restart settings. You do not need to review hundreds of output variables before the first run.'],
   ['选择需要写入 history 的变量；默认收起，避免把运行按钮推到页面底部。', 'Choose variables to write to history. This section is collapsed by default so the run controls stay near the top.'],
@@ -73,6 +73,10 @@ const ZH_EN = [
   ['城市站', 'urban site'],
   ['还没选', 'Nothing selected'],
   ['运行全部', 'Run all'],
+  ['运行 mksrfdata', 'Run mksrfdata'],
+  ['运行 mkinidata', 'Run mkinidata'],
+  ['运行 colm', 'Run colm'],
+  ['单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。', 'A single-stage button explicitly reruns that stage; “Run all” still skips stages whose input fingerprints are unchanged.'],
   ['评估全部已跑算例', 'Evaluate all completed cases'],
   ['示踪剂', 'Tracer'],
   ['强迫场', 'Forcing'],
@@ -478,6 +482,8 @@ export function translateZh(text, target = 'en') {
     .replace(/^评估本次\s*(\d+)\s*个已跑算例$/, 'Evaluate $1 current completed cases')
     .replace(/^检测到\s*(\d+)\s*个逻辑 CPU；单个站点仍使用 1 核。$/, '$1 logical CPUs detected; each site still uses one core.')
     .replace(/^开始运行\s*(\d+)\s*个算例$/, 'Starting $1 cases')
+    .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行完成$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} completed`)
+    .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行失败（退出码\s*(-?\d+)）$/, (_, stage, code) => `${stage === '全部阶段' ? 'All stages' : stage} failed (exit code ${code})`)
     .replace(/^运行中（(\d+)\/(\d+)）$/, 'Running ($1/$2)')
     .replace(/^批量总体：(\d+)\/(\d+)\s*个站点结束(?:\s*·\s*模型步\s*(\d+)\/(\d+))?$/, (_, a, b, c, d) => `Batch total: ${a}/${b} sites finished${c ? ` · model steps ${c}/${d}` : ''}`)
     .replace(/^批次结束：(\d+)\/(\d+)\s*个成功，(\d+)\s*个失败$/, 'Batch finished: $1/$2 succeeded, $3 failed')

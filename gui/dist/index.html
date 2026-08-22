@@ -286,12 +286,9 @@
 
       <div class="card">
         <h3>跑哪些</h3>
-        <div class="ch">勾选决定「全部运行」作用于谁；一个没勾就是全部。
+        <div class="ch">勾选决定下方四个运行按钮作用于谁；一个没勾就是本次全部算例。
           没建过的算例会在运行前自动建。</div>
         <div id="cases-run" class="listbox"></div>
-        <div class="pill-row" style="margin-top:10px">
-          <button class="btn-ghost" id="runall" disabled>运行全部</button>
-        </div>
       </div>
 
       <div class="card">
@@ -308,8 +305,12 @@
 
       <div class="card">
         <h3>开始运行</h3>
+        <div class="ch">单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。</div>
         <div class="pill-row" style="margin-top:14px">
-          <button class="run-btn" id="run" disabled>▶ 运行</button>
+          <button class="btn-ghost" id="run-mksrfdata" disabled>运行 mksrfdata</button>
+          <button class="btn-ghost" id="run-mkinidata" disabled>运行 mkinidata</button>
+          <button class="btn-ghost" id="run-colm" disabled>运行 colm</button>
+          <button class="run-btn" id="runall" disabled>▶ 运行全部</button>
           <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
         </div>
         <div class="stages" id="stages"></div>

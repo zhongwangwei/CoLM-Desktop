@@ -94,6 +94,8 @@ struct Lines {
 #[derive(Serialize, Clone)]
 struct Done {
     case: String,
+    /// `None` 表示三段完整流程；有值表示这次只请求了其中一段。
+    requested_stage: Option<String>,
     code: i32,
     /// 子进程一共打了多少行
     total: usize,
@@ -288,6 +290,40 @@ fn exe_name() -> &'static str {
     }
 }
 
+fn validate_run_stage(stage: Option<&str>) -> Result<(), String> {
+    match stage {
+        None | Some("mksrfdata" | "mkinidata" | "colm") => Ok(()),
+        Some(other) => Err(format!(
+            "未知运行阶段 {other:?}；只能选择 mksrfdata、mkinidata 或 colm"
+        )),
+    }
+}
+
+/// GUI 的单算例与批量路径必须构造完全相同的 sidecar 参数。
+fn run_args(
+    case: &str,
+    kernel: &str,
+    force: bool,
+    stage: Option<&str>,
+) -> Result<Vec<String>, String> {
+    validate_run_stage(stage)?;
+    let mut args = vec![
+        "run".to_string(),
+        case.to_string(),
+        "--kernel".to_string(),
+        kernel.to_string(),
+        "--stream".to_string(),
+        "1".to_string(),
+    ];
+    if let Some(stage) = stage {
+        args.extend(["--stage".to_string(), stage.to_string()]);
+    }
+    if force {
+        args.extend(["--force".to_string(), "1".to_string()]);
+    }
+    Ok(args)
+}
+
 /// 跑一个算例。返回子进程的退出码。
 #[tauri::command]
 pub async fn run_case(
@@ -296,9 +332,11 @@ pub async fn run_case(
     case: String,
     kernel: String,
     force: bool,
+    stage: Option<String>,
 ) -> Result<i32, String> {
     let cli = resolve_cli();
     let mut cmd = std::process::Command::new(&cli);
+    let args = run_args(&case, &kernel, force, stage.as_deref())?;
     // Windows 上不给它开控制台窗口 —— 见 `colm_kernel::run::no_console`。
     let mut child = colm_kernel::run::no_console(&mut cmd)
         // `--stream` 不是可选的润色：不加的话 `colm-cli run` 只在每段跑完
@@ -306,12 +344,7 @@ pub async fn run_case(
         // 下面这整套「解析 TIMESTEP、限流、批量发送」就没有输入可处理，
         // 进度条从 0 直接跳到 100，日志窗在运行期间一片空白。
         // 实测同一次城市算例：不加 39 行，加了 34180 行（含 528 条 TIMESTEP）。
-        .args(["run", &case, "--kernel", &kernel, "--stream", "1"])
-        .args(if force {
-            &["--force", "1"][..]
-        } else {
-            &[][..]
-        })
+        .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -345,6 +378,7 @@ pub async fn run_case(
         "run://done",
         Done {
             case,
+            requested_stage: stage,
             code,
             total,
             dropped,
@@ -501,7 +535,9 @@ pub async fn run_batch(
     kernel: String,
     max_concurrent: usize,
     force: bool,
+    stage: Option<String>,
 ) -> Result<BatchSummary, String> {
+    validate_run_stage(stage.as_deref())?;
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -511,11 +547,12 @@ pub async fn run_batch(
     let succeeded = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(width);
     for _ in 0..width {
-        let (a, k, q, ok) = (
+        let (a, k, q, ok, requested_stage) = (
             app.clone(),
             kernel.clone(),
             Arc::clone(&queue),
             Arc::clone(&succeeded),
+            stage.clone(),
         );
         workers.push(std::thread::spawn(move || loop {
             // 一个 worker 的 panic 不该把队列锁永久毒死；恢复锁后其余站点
@@ -526,7 +563,7 @@ pub async fn run_batch(
                 .pop_front();
             let Some(case) = case else { break };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_one(&a, &case, &k, force)
+                run_one(&a, &case, &k, force, requested_stage.as_deref())
             }));
             match outcome {
                 Ok(Ok(0)) => {
@@ -540,6 +577,7 @@ pub async fn run_batch(
                         "run://done",
                         Done {
                             case,
+                            requested_stage: requested_stage.clone(),
                             code: -1,
                             total: 0,
                             dropped: 0,
@@ -554,6 +592,7 @@ pub async fn run_batch(
                         "run://done",
                         Done {
                             case,
+                            requested_stage: requested_stage.clone(),
                             code: -1,
                             total: 0,
                             dropped: 0,
@@ -577,16 +616,18 @@ pub async fn run_batch(
 }
 
 /// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
-fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str, force: bool) -> Result<i32, String> {
+fn run_one(
+    app: &tauri::AppHandle,
+    case: &str,
+    kernel: &str,
+    force: bool,
+    stage: Option<&str>,
+) -> Result<i32, String> {
     let cli = resolve_cli();
     let mut cmd = std::process::Command::new(&cli);
+    let args = run_args(case, kernel, force, stage)?;
     let out = colm_kernel::run::no_console(&mut cmd)
-        .args(["run", case, "--kernel", kernel, "--stream", "1"])
-        .args(if force {
-            &["--force", "1"][..]
-        } else {
-            &[][..]
-        })
+        .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -615,6 +656,7 @@ fn run_one(app: &tauri::AppHandle, case: &str, kernel: &str, force: bool) -> Res
         "run://done",
         Done {
             case: case.to_string(),
+            requested_stage: stage.map(str::to_string),
             code,
             total,
             dropped,

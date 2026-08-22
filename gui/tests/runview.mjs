@@ -39,6 +39,21 @@ const startRun = html.indexOf('<h3>开始运行</h3>');
 if (outputVariables < 0 || startRun < 0 || outputVariables > startRun) {
   throw new Error('start-run card must be below output variables');
 }
+const runSection = html.slice(startRun, html.indexOf('</section>', startRun));
+const expectedRunButtons = [
+  ['run-mksrfdata', '运行 mksrfdata'],
+  ['run-mkinidata', '运行 mkinidata'],
+  ['run-colm', '运行 colm'],
+  ['runall', '运行全部'],
+];
+for (const [id, label] of expectedRunButtons) {
+  if (!new RegExp(`<button[^>]+id="${id}"[^>]*>[^<]*${label}`).test(runSection)) {
+    throw new Error(`start-run card is missing ${label}`);
+  }
+}
+if (!runner.includes("const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null]")) {
+  throw new Error('the four run buttons must map to three individual stages and the full workflow');
+}
 if (!/<div id="domaingate" class="gate">/.test(html)) {
   throw new Error('the startup wizard must be visible before JavaScript initializes');
 }

@@ -211,28 +211,55 @@ async function applyKernel() {
 
 addEventListener('colm:wizard', () => { syncKernel(); });
 
-$('run').onclick = async () => {
-  if (!state.selected) return;
-  $('run').disabled = true;
-  resetRunView([state.selected.dir]);
-  try {
-    await invoke('run_case', {
-      case: state.selected.dir, kernel: $('kernel').value, force: $('force').checked,
-    });
-  } catch (e) {
-    // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点，
-    // 不写的话进度文字会永远停在「启动…」。
-    state.runningCases.delete(state.selected.dir);
-    state.runFailures.add(state.selected.dir);
-    state.runState[state.selected.dir] = '失败';
-    state.runProgress[state.selected.dir].reason = String(e);
-    updateCaseProgress(state.selected.dir);
-    updateOverallProgress();
-    setRunning('fail', '启动失败');
-    setStatus(e);
-    $('run').disabled = false;
+const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null];
+const RUN_BUTTONS = ['run-mksrfdata', 'run-mkinidata', 'run-colm', 'runall'];
+
+for (let i = 0; i < RUN_STAGES.length; i++) {
+  $(RUN_BUTTONS[i]).onclick = () => runRequested(RUN_STAGES[i]);
+}
+
+/** 下方四个按钮共用同一批目标。指定单段是明确的手工重建意图，始终强制
+ *  执行该段；“运行全部”才由“强制全部重跑”决定是否忽略阶段指纹。 */
+async function runRequested(stage) {
+  // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。
+  const wanted = state.sites.filter(s => state.picked.has(s.site_file));
+  if (wanted.length) {
+    const made = await ensureCases(wanted);
+    state.batch = [...new Set(made.map(c => c.dir))];
+    state.pickedCases.clear();
+    for (const c of made) state.pickedCases.add(c.dir);
   }
-};
+  const dirs = batchTarget().map(c => c.dir);
+  if (!dirs.length) return;
+  resetRunView(dirs);
+  renderCases();
+  const force = stage !== null || $('force').checked;
+  try {
+    if (dirs.length === 1) {
+      const code = await invoke('run_case', {
+        case: dirs[0], kernel: $('kernel').value, force, stage,
+      });
+      status(code === 0
+        ? `${stage ?? '全部阶段'}运行完成`
+        : `${stage ?? '全部阶段'}运行失败（退出码 ${code}）`);
+    } else {
+      const summary = await invoke('run_batch', {
+        cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
+        force, stage,
+      });
+      status(summary.failed
+        ? `批次结束：${summary.succeeded}/${summary.total} 个成功，${summary.failed} 个失败`
+        : `批次结束：${summary.succeeded}/${summary.total} 个算例全部成功`);
+    }
+  } catch (e) {
+    failPendingRuns(e);
+    // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点。
+    status(e);
+    setRunning('fail', '批次启动失败');
+  } finally {
+    updateCaseBatchButtons();
+  }
+}
 
 /** 订阅三个运行事件。由 `main.js` 在启动时调一次。 */
 export async function watchRun() {
@@ -281,7 +308,9 @@ export async function watchRun() {
       // 必须按事件里的 case 更新；批量跑时 state.selected 只是代表算例，
       // 把每个完成事件都写给它会让其余站点永远显示“未跑”。
       const c = state.cases.find(c => c.dir === d.case);
-      if (c && d.code === 0) c.has_history = true;
+      if (c && d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) {
+        c.has_history = true;
+      }
       updateCaseProgress(d.case);
       updateOverallProgress();
       renderStages();
@@ -294,43 +323,11 @@ export async function watchRun() {
       } else {
         setRunning('ok', '全部完成');
       }
-      $('run').disabled = state.runningCases.size > 0;
-      if (d.code === 0 && state.selected?.dir === d.case) refreshVars();
+      updateCaseBatchButtons();
+      if (d.code === 0 && state.selected?.dir === d.case
+          && (d.requested_stage == null || d.requested_stage === 'colm')) refreshVars();
     });
 }
-
-// ---------------------------------------------------------------- 批量
-
-$('runall').onclick = async () => {
-  // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。
-  const wanted = state.sites.filter(s => state.picked.has(s.site_file));
-  if (wanted.length) {
-    const made = await ensureCases(wanted);
-    state.batch = [...new Set(made.map(c => c.dir))];
-    state.pickedCases.clear();
-    for (const c of made) state.pickedCases.add(c.dir);
-  }
-  const dirs = batchTarget().map(c => c.dir);
-  if (!dirs.length) return;
-  $('runall').disabled = true;
-  $('run').disabled = true;
-  resetRunView(dirs);
-  renderCases();
-  try {
-    const summary = await invoke('run_batch', {
-      cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
-      force: $('force').checked,
-    });
-    status(summary.failed
-      ? `批次结束：${summary.succeeded}/${summary.total} 个成功，${summary.failed} 个失败`
-      : `批次结束：${summary.succeeded}/${summary.total} 个算例全部成功`);
-  } catch (e) {
-    failPendingRuns(e);
-    status(e);
-    setRunning('fail', '批次启动失败');
-  }
-  finally { updateCaseBatchButtons(); $('run').disabled = false; }
-};
 
 
 /** 三段各自的状态。**分开显示是必须的** —— 只有 colm.x 打 TIMESTEP，

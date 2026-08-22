@@ -107,7 +107,6 @@ async function selectCase(c) {
   if (!state.batch.includes(c.dir)) state.batch = [c.dir];
   renderSteps();
   renderCases();
-  $('run').disabled = false;
   try {
     state.text = await invoke('read_text', { path: c.dir + '/case.nml' });
     const unknown = await invoke('unknown_fields', { text: state.text });
