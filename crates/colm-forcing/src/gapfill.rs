@@ -673,11 +673,10 @@ fn combined_canonical(
     steps: usize,
 ) -> Result<Vec<f64>> {
     let mut values = variable_values(file, path, &slot.source_name, steps)?;
-    let primary_fill = fill_value(file, &slot.source_name);
-    normalize_missing(&mut values, primary_fill);
+    normalize_declared_missing(file, &slot.source_name, &mut values);
     for extra in &slot.also_add {
         let mut add = variable_values(file, path, extra, steps)?;
-        normalize_missing(&mut add, fill_value(file, extra));
+        normalize_declared_missing(file, extra, &mut add);
         for (value, extra_value) in values.iter_mut().zip(add) {
             if value.is_finite() && extra_value.is_finite() {
                 *value += extra_value;
@@ -712,12 +711,35 @@ fn variable_values(file: &netcdf::File, path: &Path, name: &str, steps: usize) -
 
 fn fill_value(file: &netcdf::File, name: &str) -> Option<f64> {
     file.variable(name).and_then(|variable| {
-        variable
-            .fill_value::<f64>()
-            .ok()
-            .flatten()
-            .or_else(|| variable.fill_value::<f32>().ok().flatten().map(f64::from))
+        numeric_variable_attribute(&variable, "_FillValue").or_else(|| {
+            variable
+                .fill_value::<f64>()
+                .ok()
+                .flatten()
+                .or_else(|| variable.fill_value::<f32>().ok().flatten().map(f64::from))
+        })
     })
+}
+
+fn numeric_variable_attribute(variable: &netcdf::Variable<'_>, name: &str) -> Option<f64> {
+    variable
+        .attribute_value(name)
+        .and_then(|value| value.ok())
+        .and_then(|value| match value {
+            netcdf::AttributeValue::Double(value) => Some(value),
+            netcdf::AttributeValue::Float(value) => Some(f64::from(value)),
+            netcdf::AttributeValue::Int(value) => Some(f64::from(value)),
+            netcdf::AttributeValue::Short(value) => Some(f64::from(value)),
+            _ => None,
+        })
+}
+
+fn normalize_declared_missing(file: &netcdf::File, name: &str, values: &mut [f64]) {
+    normalize_missing(values, fill_value(file, name));
+    let missing = file
+        .variable(name)
+        .and_then(|variable| numeric_variable_attribute(&variable, "missing_value"));
+    normalize_missing(values, missing);
 }
 
 fn normalize_missing(values: &mut [f64], fill: Option<f64>) {

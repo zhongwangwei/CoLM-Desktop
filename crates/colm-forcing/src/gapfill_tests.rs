@@ -237,6 +237,25 @@ fn failed_observation_qc_is_reported_and_repaired_like_a_gap() {
 }
 
 #[test]
+fn declared_missing_value_is_not_reported_as_a_qc_rejection() {
+    let dir = std::env::temp_dir().join("colm-gapfill-missing-value");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    write_source(&src, &[280.0, -8888.0, 282.0]);
+    netcdf::append(&src)
+        .unwrap()
+        .variable_mut("Tair")
+        .unwrap()
+        .put_attribute("missing_value", -8888.0_f64)
+        .unwrap();
+
+    let diagnosis = diagnose_file(&src, &repair_plan(None, 1)).unwrap();
+    assert_eq!(diagnosis.variables[0].missing, 1);
+    assert_eq!(diagnosis.variables[0].quality_rejected, 0);
+}
+
+#[test]
 fn local_timezone_metadata_uses_a_numeric_offset_and_survives_rediagnosis() {
     let dir = std::env::temp_dir().join("colm-gapfill-local-timezone");
     let _ = std::fs::remove_dir_all(&dir);
