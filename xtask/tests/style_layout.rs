@@ -100,8 +100,8 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
     let workspace = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
     let gui =
         std::fs::read_to_string(root.join("gui/src-tauri/Cargo.toml")).expect("GUI Cargo.toml");
-    let backend = std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs"))
-        .expect("GUI backend");
+    let backend =
+        std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs")).expect("GUI backend");
     let html = std::fs::read_to_string(root.join("gui/dist/index.html")).expect("index.html");
     let frontend = std::fs::read_to_string(root.join("gui/dist/app/main.js")).expect("main.js");
     assert!(workspace.contains("[workspace.package]\nversion = \"0.2.0\""));
