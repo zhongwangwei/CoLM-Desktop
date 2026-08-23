@@ -2631,6 +2631,7 @@ fn cmd_era5land_download(
     if start_date > end_date {
         bail!("ERA5-Land start date {start} is after end date {end}");
     }
+    require_cds_api_config()?;
     std::fs::create_dir_all(destination)
         .with_context(|| format!("cannot create {}", destination.display()))?;
     let script = destination.join("download_era5land.py");
@@ -2671,6 +2672,64 @@ fn cmd_era5land_download(
     }
     print!("{}", String::from_utf8_lossy(&output.stdout));
     Ok(())
+}
+
+fn require_cds_api_config() -> Result<()> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .context("无法确定用户主目录，不能查找 ~/.cdsapirc")?;
+    require_cds_api_config_at(&PathBuf::from(home).join(".cdsapirc"))
+}
+
+fn require_cds_api_config_at(path: &Path) -> Result<()> {
+    let metadata = std::fs::metadata(path).with_context(|| cds_api_config_help(path))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!(cds_api_config_help(path));
+    }
+    std::fs::File::open(path).with_context(|| cds_api_config_help(path))?;
+    Ok(())
+}
+
+fn cds_api_config_help(path: &Path) -> String {
+    format!(
+        "没有找到可用的 CDS API 配置：{}\n\
+         请按以下步骤配置：\n\
+         1. 登录 https://cds.climate.copernicus.eu/how-to-api\n\
+         2. 将该页面提供的配置内容原样保存到 {}\n\
+         3. 运行 `python -m pip install cdsapi` 安装客户端\n\
+         4. 打开 https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land 并接受数据许可\n\
+         5. 返回 CoLM Desktop，再次点击 ERA5-Land 下载。\n\
+         软件只检查该文件是否存在、非空且可读，不会显示或上传其中的凭据。",
+        path.display(),
+        path.display()
+    )
+}
+
+#[cfg(test)]
+mod era5land_download_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_cds_config_gives_complete_setup_steps() {
+        let path = std::env::temp_dir().join(format!(
+            "colm-cdsapi-missing-{}-.cdsapirc",
+            std::process::id()
+        ));
+        let message = require_cds_api_config_at(&path).unwrap_err().to_string();
+        for expected in [
+            path.to_string_lossy().as_ref(),
+            "https://cds.climate.copernicus.eu/how-to-api",
+            "python -m pip install cdsapi",
+            "reanalysis-era5-land",
+            "不会显示或上传",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?}: {message}"
+            );
+        }
+    }
 }
 
 const ERA5LAND_DOWNLOADER: &str = r#"#!/usr/bin/env python3
