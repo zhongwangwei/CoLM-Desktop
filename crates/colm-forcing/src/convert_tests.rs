@@ -357,6 +357,250 @@ fn variables_the_slots_do_not_consume_are_carried_over() {
 }
 
 #[test]
+fn conversion_refuses_a_stale_unit_from_the_plan() {
+    let dir = std::env::temp_dir().join("colm-convert-unit-contract");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "TA_F", &[0.0, 1.0]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        file.variable_mut("TA_F")
+            .unwrap()
+            .put_attribute("units", "degC")
+            .unwrap();
+    }
+    let dst = dir.join("out.nc");
+    let error = super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots: vec![super::SlotPlan {
+                index: 1,
+                source_name: "TA_F".into(),
+                source_units: "K".into(),
+                also_add: Vec::new(),
+            }],
+            heights: None,
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("re-probe"));
+}
+
+#[test]
+fn split_precipitation_is_converted_per_source_before_summing() {
+    let dir = std::env::temp_dir().join("colm-convert-mixed-units");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "Rainf", &[1.0, 1.0]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        file.variable_mut("Rainf")
+            .unwrap()
+            .put_attribute("units", "kg/m2/s")
+            .unwrap();
+        let mut snow = file.add_variable::<f64>("Snowf", &["time"]).unwrap();
+        snow.put_attribute("units", "mm/hr").unwrap();
+        snow.put_values(&[3600.0, 1800.0], netcdf::Extents::All)
+            .unwrap();
+    }
+    let dst = dir.join("out.nc");
+    super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots: vec![super::SlotPlan {
+                index: 4,
+                source_name: "Rainf".into(),
+                source_units: "kg/m2/s".into(),
+                also_add: vec!["Snowf".into()],
+            }],
+            heights: None,
+        },
+    )
+    .unwrap();
+    let output = netcdf::open(dst).unwrap();
+    let values: Vec<f64> = output
+        .variable("Precip")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(values, vec![2.0, 1.5]);
+}
+
+#[test]
+fn interval_precipitation_uses_the_file_cadence() {
+    let dir = std::env::temp_dir().join("colm-convert-interval-units");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "Rain", &[1.8, 3.6]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        file.variable_mut("Rain")
+            .unwrap()
+            .put_attribute("units", "mm")
+            .unwrap();
+    }
+    let dst = dir.join("out.nc");
+    super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots: vec![super::SlotPlan {
+                index: 4,
+                source_name: "Rain".into(),
+                source_units: "mm".into(),
+                also_add: Vec::new(),
+            }],
+            heights: None,
+        },
+    )
+    .unwrap();
+    let output = netcdf::open(dst).unwrap();
+    let values: Vec<f64> = output
+        .variable("Precip")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert!((values[0] - 0.001).abs() < 1e-12);
+    assert!((values[1] - 0.002).abs() < 1e-12);
+}
+
+#[test]
+fn ancillary_integer_variables_keep_their_netcdf_type() {
+    let dir = std::env::temp_dir().join("colm-convert-ancillary-type");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "TA_F", &[280.0, 281.0]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        file.variable_mut("TA_F")
+            .unwrap()
+            .put_attribute("units", "K")
+            .unwrap();
+        let mut qc = file.add_variable::<i16>("station_qc", &["time"]).unwrap();
+        qc.put_values(&[0, 2], netcdf::Extents::All).unwrap();
+    }
+    let dst = dir.join("out.nc");
+    super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots: vec![super::SlotPlan {
+                index: 1,
+                source_name: "TA_F".into(),
+                source_units: "K".into(),
+                also_add: Vec::new(),
+            }],
+            heights: None,
+        },
+    )
+    .unwrap();
+    let output = netcdf::open(dst).unwrap();
+    assert_eq!(
+        output.variable("station_qc").unwrap().vartype(),
+        netcdf::types::NcVariableType::Int(netcdf::types::IntType::I16)
+    );
+}
+
+#[test]
+fn measurement_heights_must_be_positive() {
+    assert!(super::parse_heights("10,2,0").is_err());
+    assert!(super::parse_heights("10,-2,2").is_err());
+    assert!(super::parse_heights("10,2,NaN").is_err());
+}
+
+#[test]
+fn relative_humidity_can_supply_the_specific_humidity_slot() {
+    let dir = std::env::temp_dir().join("colm-convert-relative-humidity");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "Tair", &[293.15, 293.15]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        file.variable_mut("Tair")
+            .unwrap()
+            .put_attribute("units", "K")
+            .unwrap();
+        let mut rh = file.add_variable::<f64>("RH", &["time"]).unwrap();
+        rh.put_attribute("units", "%").unwrap();
+        rh.put_values(&[50.0, 60.0], netcdf::Extents::All).unwrap();
+        let mut pressure = file.add_variable::<f64>("Psurf", &["time"]).unwrap();
+        pressure.put_attribute("units", "Pa").unwrap();
+        pressure
+            .put_values(&[100_000.0, 100_000.0], netcdf::Extents::All)
+            .unwrap();
+    }
+    let slots = [(1, "Tair", "K"), (2, "RH", "%"), (3, "Psurf", "Pa")]
+        .into_iter()
+        .map(|(index, name, units)| super::SlotPlan {
+            index,
+            source_name: name.into(),
+            source_units: units.into(),
+            also_add: Vec::new(),
+        })
+        .collect();
+    let dst = dir.join("out.nc");
+    super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots,
+            heights: None,
+        },
+    )
+    .unwrap();
+    let output = netcdf::open(dst).unwrap();
+    let humidity: Vec<f64> = output.variable("Qair").unwrap().get_values(..).unwrap();
+    assert!(humidity[0] > 0.0 && humidity[0] < humidity[1]);
+}
+
+#[test]
+fn invalid_derived_humidity_is_not_written_as_nan() {
+    let dir = std::env::temp_dir().join("colm-convert-invalid-relative-humidity");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "Tair", &[293.15, 293.15]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        file.variable_mut("Tair")
+            .unwrap()
+            .put_attribute("units", "K")
+            .unwrap();
+        let mut rh = file.add_variable::<f64>("RH", &["time"]).unwrap();
+        rh.put_attribute("units", "%").unwrap();
+        rh.put_values(&[150.0, 50.0], ..).unwrap();
+        let mut pressure = file.add_variable::<f64>("Psurf", &["time"]).unwrap();
+        pressure.put_attribute("units", "Pa").unwrap();
+        pressure.put_values(&[100_000.0, 100_000.0], ..).unwrap();
+    }
+    let slots = [(1, "Tair", "K"), (2, "RH", "%"), (3, "Psurf", "Pa")]
+        .into_iter()
+        .map(|(index, name, units)| super::SlotPlan {
+            index,
+            source_name: name.into(),
+            source_units: units.into(),
+            also_add: Vec::new(),
+        })
+        .collect();
+    let dst = dir.join("out.nc");
+    let error = super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots,
+            heights: None,
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("non-finite"));
+    assert!(
+        !dst.exists(),
+        "failed conversion must not leave a partial product"
+    );
+}
+
+#[test]
 fn heights_given_by_hand_land_in_the_product() {
     // Urban-PLUMBER 的 21 个站都没有 reference_height_*，而 CoLM 要它们。
     // 界面上让人填，填了就要写进产物 —— **产物必须自包含**，不能只写

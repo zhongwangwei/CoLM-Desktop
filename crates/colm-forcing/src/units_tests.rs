@@ -77,3 +77,69 @@ fn common_cf_unit_spellings_convert_without_changing_values() {
         assert_eq!(super::from_canonical(to, from, &[1.25]).unwrap(), [1.25]);
     }
 }
+
+#[test]
+fn interval_accumulated_precipitation_uses_the_actual_time_step() {
+    let half_hour = super::convert_units_with_step("mm", "kg/m2/s", &[1.8], Some(1800.0)).unwrap();
+    assert!((half_hour[0] - 0.001).abs() < 1e-12);
+    let hourly = super::convert_units_with_step("kg m-2", "kg/m2/s", &[3.6], Some(3600.0)).unwrap();
+    assert!((hourly[0] - 0.001).abs() < 1e-12);
+}
+
+#[test]
+fn interval_accumulation_without_a_time_step_is_refused() {
+    let error = super::convert_units_with_step("mm", "kg/m2/s", &[1.0], None).unwrap_err();
+    assert!(format!("{error:#}").contains("time step"));
+}
+
+#[test]
+fn canonical_rate_converts_back_to_an_interval_amount() {
+    let got =
+        super::from_canonical_with_step("kg/m2/s", "mm", &[1.0 / 1800.0], Some(1800.0)).unwrap();
+    assert_eq!(got, vec![1.0]);
+}
+
+#[test]
+fn relative_humidity_and_vpd_become_specific_humidity() {
+    let temperature = [293.15];
+    let pressure = [100_000.0];
+    let from_rh = super::humidity_to_specific("RH", "%", &[50.0], &temperature, &pressure)
+        .unwrap()
+        .unwrap();
+    let saturation = 611.2_f64 * (17.67_f64 * 20.0 / (293.15_f64 - 29.65)).exp();
+    let deficit_kpa = saturation / 2000.0;
+    let from_vpd =
+        super::humidity_to_specific("VPD", "kPa", &[deficit_kpa], &temperature, &pressure)
+            .unwrap()
+            .unwrap();
+    assert!((from_rh[0] - from_vpd[0]).abs() < 1e-12);
+    assert!(from_rh[0] > 0.0 && from_rh[0] < 0.02);
+    let round_trip = super::humidity_from_specific("RH", "%", &from_rh, &temperature, &pressure)
+        .unwrap()
+        .unwrap();
+    assert!((round_trip[0] - 50.0).abs() < 1e-10);
+}
+
+#[test]
+fn humidity_names_accept_common_spacing_and_british_spelling() {
+    let temperature = [293.15];
+    let pressure = [100_000.0];
+    assert!(super::humidity_to_specific(
+        "relative humidity",
+        "%",
+        &[50.0],
+        &temperature,
+        &pressure,
+    )
+    .unwrap()
+    .is_some());
+    assert!(super::humidity_to_specific(
+        "vapour-pressure-deficit",
+        "kPa",
+        &[1.0],
+        &temperature,
+        &pressure,
+    )
+    .unwrap()
+    .is_some());
+}

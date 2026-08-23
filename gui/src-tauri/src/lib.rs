@@ -28,10 +28,43 @@ use recent::*;
 use sidecar::*;
 use sitedata::*;
 use sites::*;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .menu(|app| {
+            use tauri::menu::{Menu, MenuItem};
+
+            let menu = Menu::default(app)?;
+            let about =
+                MenuItem::with_id(app, "about-colm", "About CoLM Desktop", true, None::<&str>)?;
+
+            #[cfg(target_os = "macos")]
+            let parent = menu
+                .items()?
+                .into_iter()
+                .next()
+                .and_then(|item| item.as_submenu().cloned());
+            #[cfg(not(target_os = "macos"))]
+            let parent = menu
+                .get(tauri::menu::HELP_SUBMENU_ID)
+                .and_then(|item| item.as_submenu().cloned());
+            if let Some(parent) = parent {
+                parent.remove_at(0)?;
+                parent.insert(&about, 0)?;
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == "about-colm" {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    let _ = window.emit("colm-about", app.package_info().version.to_string());
+                }
+            }
+        })
         .manage(RunLog::default())
         // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
         // 单份写入）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，

@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "colm-case"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "colm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "colm-forcing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "colm-hist"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "netcdf",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "colm-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -112,18 +112,18 @@ dependencies = [
 
 [[package]]
 name = "colm-namelist"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "colm-schema"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "colm-srfdata"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "netcdf",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "oracle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "colm-schema",

@@ -23,6 +23,7 @@ fn plan() -> super::TabularPlan {
         latitude: None,
         longitude: None,
         step_seconds: Some(3600),
+        land_cover_scheme: Some(super::LandCoverScheme::Igbp),
         heights: Some(crate::convert::Heights {
             v: 10.0,
             t: 2.0,
@@ -38,6 +39,127 @@ fn plan() -> super::TabularPlan {
             super::TabularSlot::new(8, "LWdown", "W/m2"),
         ],
     }
+}
+
+#[test]
+fn one_second_timestamp_jitter_is_rejected_instead_of_inferred_as_one_second_data() {
+    let root = temp("jitter");
+    let src = root.join("jitter.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00:00,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 00:30:00,50,10,10,281,.006,100010,0,2,20,301\n\
+         A,2020-01-01 01:00:01,50,10,10,282,.007,100020,0,2,30,302\n",
+    );
+    let probe = super::probe_table(&src).unwrap();
+    assert_eq!(probe.sites[0].step_seconds, Some(1800));
+    assert_eq!(probe.sites[0].inserted_steps, 0);
+
+    let mut p = plan();
+    p.step_seconds = None;
+    let error = super::import_table(&src, &root.join("Forcing"), &p).unwrap_err();
+    assert!(format!("{error:#}").contains("off the inferred 1800s cadence"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn land_cover_class_is_validated_for_the_selected_scheme() {
+    let root = temp("land-cover-scheme");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00,50,10,20,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 01:00,50,10,20,281,.006,100010,0,2,20,301\n",
+    );
+    let error = super::import_table(&src, &root.join("Forcing"), &plan()).unwrap_err();
+    assert!(format!("{error:#}").contains("IGBP"));
+
+    let mut usgs = plan();
+    usgs.land_cover_scheme = Some(super::LandCoverScheme::Usgs);
+    assert!(super::import_table(&src, &root.join("Forcing-usgs"), &usgs).is_ok());
+
+    let mut urban = plan();
+    urban.land_cover_scheme = Some(super::LandCoverScheme::Urban);
+    assert!(super::import_table(&src, &root.join("Forcing-lcz"), &urban).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_precipitation_columns_are_converted_before_summing() {
+    let root = temp("mixed-extra-units");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Rainf[kg/m2/s],Snowf[mm/hr],Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00Z,50,10,10,280,.005,100000,1,3600,2,0,300\n\
+         A,2020-01-01 01:00Z,50,10,10,281,.006,100010,1,1800,2,20,301\n",
+    );
+    let mut import = plan();
+    let precipitation = import
+        .slots
+        .iter_mut()
+        .find(|slot| slot.index == 4)
+        .unwrap();
+    precipitation.column = "Rainf".into();
+    precipitation.source_units = "kg/m2/s".into();
+    precipitation.also_add = vec!["Snowf".into()];
+    let sites = super::import_table(&src, &root.join("Forcing"), &import).unwrap();
+    let file = netcdf::open(&sites[0].staged_path).unwrap();
+    let values: Vec<f64> = file.variable("Precip").unwrap().get_values(..).unwrap();
+    assert_eq!(values, vec![2.0, 1.5]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn relative_humidity_column_can_supply_specific_humidity() {
+    let root = temp("relative-humidity");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair[K],RH[%],Psurf[Pa],Precip[mm/hr],Wind[m/s],SWdown[W/m2],LWdown[W/m2]\n\
+         A,2020-01-01 00:00Z,50,10,10,293.15,50,100000,0,2,0,300\n\
+         A,2020-01-01 01:00Z,50,10,10,293.15,60,100000,0,2,20,301\n",
+    );
+    let mut import = plan();
+    let humidity = import
+        .slots
+        .iter_mut()
+        .find(|slot| slot.index == 2)
+        .unwrap();
+    humidity.column = "RH".into();
+    humidity.source_units = "%".into();
+    let sites = super::import_table(&src, &root.join("Forcing"), &import).unwrap();
+    let file = netcdf::open(&sites[0].staged_path).unwrap();
+    let values: Vec<f64> = file.variable("Qair").unwrap().get_values(..).unwrap();
+    assert!(values[0] > 0.0 && values[0] < values[1]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_per_row_offset_column_can_represent_daylight_saving_changes() {
+    let root = temp("varying-offsets");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,utc_offset,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-03-29 01:00,1,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-03-29 03:00,2,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let mut p = plan();
+    p.utc_offset_column = Some("utc_offset".into());
+    let imported = super::import_table(&src, &root.join("Forcing"), &p).unwrap();
+    assert_eq!(imported[0].timezone_offset_hours, None);
+    assert_eq!(imported[0].timezone_source, "table_offset_column");
+    assert_eq!(imported[0].end_utc - imported[0].start_utc, 3600);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn table_expansion_has_a_hard_safety_limit() {
+    let error = super::checked_step_count(0, 20_000_000, 1, 2).unwrap_err();
+    assert!(format!("{error:#}").contains("would create"));
 }
 
 #[test]

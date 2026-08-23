@@ -28,12 +28,12 @@ let renderedLandCoverLanguage = null;
 
 function parseLandtype() {
   const mode = prepMode(state);
-  if (mode === 'urban') return { value: null };
   const raw = $('slandtype').value.trim();
   if (!raw) return { value: null };
   const n = Number(raw);
   if (!landCoverClasses(mode).some(item => item.value === n)) {
-    return { error: mode === 'usgs' ? '请选择有效的 USGS 地表覆盖类型' : '请选择有效的 IGBP 地表覆盖类型' };
+    const scheme = mode === 'urban' ? 'LCZ' : (mode === 'usgs' ? 'USGS' : 'IGBP');
+    return { error: `请选择有效的 ${scheme} 地表覆盖类型` };
   }
   return { value: n };
 }
@@ -48,32 +48,26 @@ function syncLandCoverOptions(mode) {
 
   if (needsRender) {
     select.replaceChildren();
-    if (mode === 'urban') {
-      const option = document.createElement('option');
-      const urban = landCoverClasses('igbp').find(item => item.value === 13);
-      option.value = '13';
-      option.textContent = landCoverLabel(urban, locale);
-      select.appendChild(option);
-      select.value = '13';
-    } else {
+    if (mode !== 'urban') {
       const automatic = document.createElement('option');
       automatic.value = '';
       automatic.textContent = locale === 'en'
         ? 'Not specified · read from rawdata'
         : '不手动指定 · 由 rawdata 提供';
       select.appendChild(automatic);
-      for (const item of landCoverClasses(mode)) {
-        const option = document.createElement('option');
-        option.value = String(item.value);
-        option.textContent = landCoverLabel(item, locale);
-        select.appendChild(option);
-      }
-      select.value = [...select.options].some(option => option.value === selected) ? selected : '';
     }
+    for (const item of landCoverClasses(mode)) {
+      const option = document.createElement('option');
+      option.value = String(item.value);
+      option.textContent = landCoverLabel(item, locale);
+      select.appendChild(option);
+    }
+    const fallback = mode === 'urban' ? '6' : '';
+    select.value = [...select.options].some(option => option.value === selected) ? selected : fallback;
     renderedLandCoverMode = optionMode;
     renderedLandCoverLanguage = locale;
   }
-  select.disabled = mode === 'urban';
+  select.disabled = false;
 }
 
 function syncIdentity() {
@@ -84,8 +78,8 @@ function syncIdentity() {
   $('smode').value = MODE_LABELS[mode]?.[localeIndex] ?? mode.toUpperCase();
   syncLandCoverOptions(mode);
   $('slandtype-label').firstChild.textContent = language() === 'en'
-    ? (mode === 'usgs' ? 'USGS land-cover class ' : 'Land-cover class ')
-    : (mode === 'usgs' ? 'USGS 地表覆盖类型 ' : '地表覆盖类型 ');
+    ? (mode === 'urban' ? 'Local Climate Zone (LCZ) ' : (mode === 'usgs' ? 'USGS land-cover class ' : 'Land-cover class '))
+    : (mode === 'urban' ? '局地气候区（LCZ） ' : (mode === 'usgs' ? 'USGS 地表覆盖类型 ' : '地表覆盖类型 '));
 }
 
 function readyReasons() {
@@ -143,6 +137,18 @@ globalThis.addEventListener?.('colm:wizard', () => {
 });
 globalThis.addEventListener?.('colm:language', syncIdentity);
 updateGenerateState();
+
+$('prep-single-site').onclick = () => {
+  $('single-site-prep').hidden = false;
+  $('prep-single-site').setAttribute('aria-pressed', 'true');
+  $('sname').focus();
+};
+
+$('prep-multi-site').onclick = () => {
+  go('prep-forcing');
+  $('fsrc').focus();
+  status('请选择一份 CSV / TXT / TSV；软件会按站点列拆分并批量生成站点文件');
+};
 
 $('smake').onclick = async () => {
   const reasons = readyReasons();
@@ -344,8 +350,17 @@ $('prep-use').onclick = async () => {
     $('sitedir').value = state.prepArtifacts.siteDir;
     $('forcingdir').value = state.prepArtifacts.forcingDir;
     await scanPreparedSites();
+    const scanned = new Map(state.sites.map(site => [site.site_file, site]));
+    const ready = state.prepArtifacts.batchSites.every(item => {
+      const scannedSite = scanned.get(item.siteFile);
+      return !item.error && item.siteFile && item.forcingFile
+        && item.siteReport?.readiness !== 'blocked'
+        && scannedSite?.met_file;
+    });
+    if (!ready) { status('交接前重新检查失败：仍有站点或强迫场没有就绪'); return; }
   } else {
-    await adoptPreparedSite();
+    const selected = await adoptPreparedSite();
+    if (!selected?.met_file) { status('交接前重新检查失败：站点与强迫场未配对'); return; }
   }
   go('basic-files');
 };

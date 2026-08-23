@@ -38,5 +38,6 @@ pub use met::summarize;
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};
 pub use tabular::{
-    import_table, probe_table, ImportedTableSite, TabularPlan, TabularProbe, TabularSlot,
+    import_table, probe_table, ImportedTableSite, LandCoverScheme, TabularPlan, TabularProbe,
+    TabularSlot,
 };

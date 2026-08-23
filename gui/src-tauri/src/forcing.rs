@@ -149,6 +149,7 @@ pub struct TableImportOptions {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub step_seconds: Option<i64>,
+    pub land_cover_scheme: Option<String>,
     pub heights: Option<[f64; 3]>,
 }
 
@@ -310,6 +311,14 @@ fn build_table_convert_args(
     if let Some(step) = options.step_seconds {
         args.push("--step-seconds".into());
         args.push(step.to_string());
+    }
+    if let Some(scheme) = options
+        .land_cover_scheme
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push("--land-cover-scheme".into());
+        args.push(scheme.into());
     }
     for slot in slots {
         let mut spec = format!("{}={}:{}", slot.index, slot.name, slot.units);
@@ -541,7 +550,9 @@ pub async fn download_era5land(
         "--end".into(),
         end,
     ];
-    crate::sidecar::capture(&args)?;
+    tauri::async_runtime::spawn_blocking(move || crate::sidecar::capture(&args))
+        .await
+        .map_err(|error| format!("ERA5-Land 下载任务异常终止：{error}"))??;
     Ok(dst)
 }
 

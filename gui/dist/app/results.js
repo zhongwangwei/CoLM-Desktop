@@ -664,23 +664,32 @@ async function evaluateCurrent() {
   try {
     const rows = await getMetrics(c, obs, Number($('spinup').value) || 0, $('corrected').checked, true, selected);
     if (token !== activeMetricRequest || activeCase()?.dir !== c.dir) return;
+    const returned = new Set(rows.map(row => row.name));
+    const missing = selected.filter(variable => !returned.has(variable));
     currentMetricRows = rows;
     state.resultMetrics = state.resultMetrics.filter(row => row.case_dir !== c.dir);
     rows.forEach(row => state.resultMetrics.push({ site: c.name, case_dir: c.dir, ...row }));
-    renderMetrics(rows);
+    renderMetrics(rows, missing);
     if (rows.length) drawComparison(rows[0]);
-    status(`${c.name} 评估完成：${rows.length} 个变量`);
+    status(language() === 'en'
+      ? `${c.name}: ${rows.length} variable(s) evaluated${missing.length ? `; ${missing.length} had no valid paired samples` : ''}`
+      : `${c.name} 评估完成：${rows.length} 个变量${missing.length ? `；${missing.length} 个没有有效配对样本` : ''}`);
   } catch (error) { status(error); }
   finally { if (token === activeMetricRequest) $('evaluate').disabled = false; }
 }
 
-function renderMetrics(rows) {
+function renderMetrics(rows, missing = []) {
   const box = $('metrics');
   box.textContent = '';
   destroyChartsInside($('evaluation-charts'));
   $('evaluation-charts').textContent = '';
   $('evaluation-png').disabled = true;
-  if (!rows.length) { box.appendChild(node('div', 'result-empty', '没有可配对的变量。')); return; }
+  if (!rows.length) {
+    box.appendChild(node('div', 'result-empty', missing.length
+      ? (language() === 'en' ? `No valid paired samples: ${missing.join(', ')}` : `当前时段没有有效配对样本：${missing.join('、')}`)
+      : (language() === 'en' ? 'No variables can be paired.' : '没有可配对的变量。')));
+    return;
+  }
   const table = document.createElement('table');
   const head = document.createElement('tr');
   for (const label of ['变量', 'n', 'RMSE', 'MAE', 'Bias', 'R²', 'r', 'NSE', 'KGE', 'α', 'β']) head.appendChild(th(label, label === '变量' ? '' : 'n'));
@@ -702,6 +711,9 @@ function renderMetrics(rows) {
     table.appendChild(tr);
   }
   box.appendChild(table);
+  if (missing.length) box.appendChild(node('p', 'warn mini', language() === 'en'
+    ? `No valid paired samples: ${missing.join(', ')}`
+    : `当前时段没有有效配对样本：${missing.join('、')}`));
 }
 
 async function drawComparison(summaryRow) {

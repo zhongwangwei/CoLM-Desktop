@@ -13,7 +13,10 @@ export const forcingOutputName = stem => `${normalizeSiteStem(stem)}_Met.nc`;
 
 export function missingForcingHeights(heights) {
   return [['V', heights?.v], ['T', heights?.t], ['Q', heights?.q]]
-    .filter(([, value]) => value == null || !Number.isFinite(Number(value)))
+    .filter(([, value]) => {
+      const number = Number(value);
+      return value == null || !Number.isFinite(number) || number <= 0;
+    })
     .map(([name]) => name);
 }
 

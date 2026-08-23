@@ -14,33 +14,12 @@ use anyhow::{bail, Context, Result};
 /// **这是转换管道的地基，也是它的第一条判据。** 恒等转换必须逐位复现 ——
 /// 若这一步就丢精度，后面所有换算的正确性都无从谈起。
 ///
-/// 实现上是「读出来再写进去」而不是 `std::fs::copy`：`fs::copy` 复现的是
-/// 字节，证明不了「我们的读写路径不丢精度」，而后者才是要验的东西。
+/// 恒等路径不需要重新编码 NetCDF：直接复制才能同时保住数值、类型、压缩、
+/// 分块和用户自定义类型，且不会引入任何舍入。
 pub fn identity(src: &Path, dst: &Path) -> Result<()> {
-    let fin = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
     ensure_parent(dst)?;
-    let mut fout =
-        netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
-    copy_global_attributes(&fin, &mut fout)?;
-
-    for d in fin.dimensions() {
-        fout.add_dimension(&d.name(), d.len())
-            .with_context(|| format!("cannot add dimension {}", d.name()))?;
-    }
-
-    for v in fin.variables() {
-        let dims: Vec<String> = v.dimensions().iter().map(|d| d.name()).collect();
-        let dim_refs: Vec<&str> = dims.iter().map(|s| s.as_str()).collect();
-        let values: Vec<f64> = v
-            .get_values(netcdf::Extents::All)
-            .with_context(|| format!("cannot read {}", v.name()))?;
-        let mut out = fout
-            .add_variable::<f64>(&v.name(), &dim_refs)
-            .with_context(|| format!("cannot add variable {}", v.name()))?;
-        copy_attributes(&v, &mut out)?;
-        out.put_values(&values, netcdf::Extents::All)
-            .with_context(|| format!("cannot write {}", v.name()))?;
-    }
+    std::fs::copy(src, dst)
+        .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
     Ok(())
 }
 
@@ -120,6 +99,12 @@ pub fn parse_heights(spec: &str) -> Result<Heights> {
             n.len()
         );
     };
+    if [v, t, q]
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        bail!("--height {spec:?} values must all be finite and greater than zero");
+    }
     Ok(Heights { v, t, q })
 }
 
@@ -131,6 +116,24 @@ pub struct Plan {
     pub heights: Option<Heights>,
 }
 
+pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
+    if src == dst {
+        bail!("forcing conversion destination must differ from its source");
+    }
+    ensure_parent(dst)?;
+    let file_name = dst
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("forcing conversion destination has no filename")?;
+    let temporary = dst.with_file_name(format!(".{file_name}.convert-{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temporary);
+    if let Err(error) = convert_into(src, &temporary, plan) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    crate::gapfill::install_repaired_file(&temporary, dst)
+}
+
 /// 按方案把源文件转成 CoLM 认的约定。
 ///
 /// **落地用规范名**（槽位候选名的第一个），不是用户的名字 —— 转换的
@@ -138,11 +141,12 @@ pub struct Plan {
 ///
 /// 每个转换过的变量带一条 `source` 属性，说出它从哪个变量、哪个单位来。
 /// **换算过的必须标出来**，否则读文件的人会以为那就是源数据里的值。
-pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
+fn convert_into(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
     use crate::slots::SLOTS;
-    use crate::units::convert_units;
+    use crate::units::convert_units_with_step;
 
     let fin = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    let step_seconds = record_step_seconds(&fin);
     ensure_parent(dst)?;
     let mut fout =
         netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
@@ -177,9 +181,20 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let v = fin
             .variable(&sp.source_name)
             .with_context(|| format!("{} has no variable {}", src.display(), sp.source_name))?;
-        let mut raw: Vec<f64> = v
+        let raw: Vec<f64> = v
             .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read {}", sp.source_name))?;
+        if let Some(actual) = string_attribute(&v, "units")? {
+            if actual != sp.source_units {
+                bail!(
+                    "{} says {} uses unit {:?}, but the conversion plan says {:?}; re-probe the file",
+                    src.display(),
+                    sp.source_name,
+                    actual,
+                    sp.source_units
+                );
+            }
+        }
 
         // **同一个变量不能既当源又在 also_add 里。** 那会把它加两次 ——
         // 降水翻倍，退出码 0，一句警告都没有。
@@ -197,7 +212,25 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             );
         }
 
-        // 多源合成：同单位相加。
+        let want_units = canonical_units(slot.index);
+        let mut vals = if slot.index == 2 {
+            let temperature = plan_slot_values(&fin, src, plan, 1, step_seconds)?;
+            let pressure = plan_slot_values(&fin, src, plan, 3, step_seconds)?;
+            match crate::units::humidity_to_specific(
+                &sp.source_name,
+                &sp.source_units,
+                &raw,
+                &temperature,
+                &pressure,
+            )? {
+                Some(values) => values,
+                None => convert_units_with_step(&sp.source_units, want_units, &raw, step_seconds)?,
+            }
+        } else {
+            convert_units_with_step(&sp.source_units, want_units, &raw, step_seconds)?
+        };
+
+        // 多源先各自按自己的单位转到槽位规范单位，再相加。
         for extra in &sp.also_add {
             let e = fin.variable(extra).with_context(|| {
                 format!(
@@ -206,23 +239,35 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
                     extra
                 )
             })?;
-            let add: Vec<f64> = e.get_values(netcdf::Extents::All)?;
-            if add.len() != raw.len() {
+            let raw_add: Vec<f64> = e.get_values(netcdf::Extents::All)?;
+            if raw_add.len() != vals.len() {
                 anyhow::bail!(
                     "{} has {} steps but {} has {} — cannot add them",
                     sp.source_name,
-                    raw.len(),
+                    vals.len(),
                     extra,
-                    add.len()
+                    raw_add.len()
                 );
             }
-            for (a, b) in raw.iter_mut().zip(add.iter()) {
+            let extra_units = string_attribute(&e, "units")?.with_context(|| {
+                format!(
+                    "{extra} has no units attribute; cannot safely add it to {}",
+                    sp.source_name
+                )
+            })?;
+            let add = convert_units_with_step(&extra_units, want_units, &raw_add, step_seconds)?;
+            for (a, b) in vals.iter_mut().zip(add.iter()) {
                 *a += *b;
             }
         }
-
-        let want_units = canonical_units(slot.index);
-        let vals = convert_units(&sp.source_units, want_units, &raw)?;
+        let invalid = vals.iter().filter(|value| !value.is_finite()).count();
+        if invalid > 0 {
+            bail!(
+                "slot {} ({}) produces {invalid} non-finite value(s); run gap diagnosis and repair before converting",
+                sp.index,
+                sp.source_name
+            );
+        }
 
         let dims: Vec<String> = v.dimensions().iter().map(|d| d.name()).collect();
         let dim_refs: Vec<&str> = dims.iter().map(|s| s.as_str()).collect();
@@ -237,9 +282,9 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             )
         } else {
             format!(
-                "sum of {:?} and {:?} ({}), all kept in this file; \
+                "sum of {:?} ({}) and {:?}, each converted to {}, all kept in this file; \
                  CoLM re-derives phase by wet-bulb temperature (MOD_RainSnowTemp.F90)",
-                sp.source_name, sp.also_add, sp.source_units
+                sp.source_name, sp.source_units, sp.also_add, want_units
             )
         };
         out.put_attribute("source", note.as_str())?;
@@ -277,24 +322,18 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let Some(v) = fin.variable(&name) else {
             continue;
         };
-        let dims: Vec<String> = v.dimensions().iter().map(|d| d.name()).collect();
-        let dim_refs: Vec<&str> = dims.iter().map(|s| s.as_str()).collect();
-        if name.ends_with("_gapfill_qc") {
-            let vals: Vec<u8> = v.get_values(netcdf::Extents::All)?;
-            let mut out = fout.add_variable::<u8>(&name, &dim_refs)?;
-            copy_attributes(&v, &mut out)?;
-            out.put_values(&vals, netcdf::Extents::All)?;
-            continue;
-        }
-        let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
-        let mut out = fout.add_variable::<f64>(&name, &dim_refs)?;
-        copy_attributes(&v, &mut out)?;
-        out.put_values(&vals, netcdf::Extents::All)?;
+        copy_variable(&v, &mut fout)?;
     }
 
     // **手填的高度只在源文件没有时写。** 源文件说了的是量出来的，
     // 界面填的是人估的 —— 让后者覆盖前者是在拿估计换掉测量。
     if let Some(h) = &plan.heights {
+        if [h.v, h.t, h.q]
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            bail!("forcing measurement heights must all be finite and greater than zero");
+        }
         for (name, val) in [
             ("reference_height_v", h.v),
             ("reference_height_t", h.t),
@@ -364,6 +403,138 @@ pub(crate) fn copy_attributes(from: &netcdf::Variable, to: &mut netcdf::Variable
         }
     }
     Ok(())
+}
+
+fn copy_non_fill_attributes(from: &netcdf::Variable, to: &mut netcdf::VariableMut) -> Result<()> {
+    for attribute in from.attributes() {
+        if attribute.name() != "_FillValue" {
+            to.put_attribute(attribute.name(), attribute.value()?)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_typed<T>(
+    from: &netcdf::Variable,
+    to: &mut netcdf::FileMut,
+    dimensions: &[&str],
+) -> Result<()>
+where
+    T: netcdf::types::NcTypeDescriptor + Copy,
+{
+    let values: Vec<T> = from.get_values(netcdf::Extents::All)?;
+    let mut output = to.add_variable::<T>(&from.name(), dimensions)?;
+    if let Some(fill) = from.fill_value::<T>()? {
+        output.set_fill_value(fill)?;
+    }
+    copy_non_fill_attributes(from, &mut output)?;
+    output.put_values(&values, netcdf::Extents::All)?;
+    Ok(())
+}
+
+/// Ancillary variables are part of the source contract. Preserve every common
+/// primitive type exactly; refuse uncommon NetCDF user types rather than
+/// silently coercing them to `f64`.
+fn copy_variable(from: &netcdf::Variable, to: &mut netcdf::FileMut) -> Result<()> {
+    use netcdf::types::{FloatType, IntType, NcVariableType};
+
+    let names: Vec<String> = from
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect();
+    let dimensions: Vec<&str> = names.iter().map(String::as_str).collect();
+    match from.vartype() {
+        NcVariableType::Int(IntType::U8) => copy_typed::<u8>(from, to, &dimensions),
+        NcVariableType::Int(IntType::U16) => copy_typed::<u16>(from, to, &dimensions),
+        NcVariableType::Int(IntType::U32) => copy_typed::<u32>(from, to, &dimensions),
+        NcVariableType::Int(IntType::U64) => copy_typed::<u64>(from, to, &dimensions),
+        NcVariableType::Int(IntType::I8) => copy_typed::<i8>(from, to, &dimensions),
+        NcVariableType::Int(IntType::I16) => copy_typed::<i16>(from, to, &dimensions),
+        NcVariableType::Int(IntType::I32) => copy_typed::<i32>(from, to, &dimensions),
+        NcVariableType::Int(IntType::I64) => copy_typed::<i64>(from, to, &dimensions),
+        NcVariableType::Float(FloatType::F32) => copy_typed::<f32>(from, to, &dimensions),
+        NcVariableType::Float(FloatType::F64) => copy_typed::<f64>(from, to, &dimensions),
+        kind => bail!(
+            "cannot preserve ancillary variable {} with NetCDF type {kind:?}; convert or remove that variable explicitly",
+            from.name()
+        ),
+    }
+}
+
+fn string_attribute(variable: &netcdf::Variable, name: &str) -> Result<Option<String>> {
+    let Some(attribute) = variable.attribute(name) else {
+        return Ok(None);
+    };
+    match attribute.value()? {
+        netcdf::AttributeValue::Str(value) => Ok(Some(value)),
+        netcdf::AttributeValue::Strs(values) => Ok(values.into_iter().next()),
+        other => bail!(
+            "{}.{} must be a string, got {other:?}",
+            variable.name(),
+            name
+        ),
+    }
+}
+
+fn record_step_seconds(file: &netcdf::File) -> Option<f64> {
+    let time = file.variable("time")?;
+    let values: Vec<f64> = time.get_values(netcdf::Extents::All).ok()?;
+    let first = *values.get(1)? - values[0];
+    let unit = string_attribute(&time, "units").ok()??;
+    let scale = match unit
+        .split_whitespace()
+        .next()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "second" | "seconds" => 1.0,
+        "minute" | "minutes" => 60.0,
+        "hour" | "hours" => 3600.0,
+        "day" | "days" => 86_400.0,
+        _ => return None,
+    };
+    (first.is_finite()
+        && first > 0.0
+        && values
+            .windows(2)
+            .all(|window| (window[1] - window[0] - first).abs() < 1e-6))
+    .then_some(first * scale)
+}
+
+fn plan_slot_values(
+    file: &netcdf::File,
+    path: &Path,
+    plan: &Plan,
+    index: usize,
+    step_seconds: Option<f64>,
+) -> Result<Vec<f64>> {
+    let slot = plan
+        .slots
+        .iter()
+        .find(|slot| slot.index == index)
+        .with_context(|| format!("humidity derivation also needs forcing slot {index}"))?;
+    let variable = file
+        .variable(&slot.source_name)
+        .with_context(|| format!("{} has no variable {}", path.display(), slot.source_name))?;
+    if let Some(actual) = string_attribute(&variable, "units")? {
+        if actual != slot.source_units {
+            bail!(
+                "{} says {} uses unit {:?}, but the conversion plan says {:?}; re-probe the file",
+                path.display(),
+                slot.source_name,
+                actual,
+                slot.source_units
+            );
+        }
+    }
+    let raw: Vec<f64> = variable.get_values(netcdf::Extents::All)?;
+    crate::units::convert_units_with_step(
+        &slot.source_units,
+        canonical_units(index),
+        &raw,
+        step_seconds,
+    )
 }
 
 fn copy_global_attributes(from: &netcdf::File, to: &mut netcdf::FileMut) -> Result<()> {

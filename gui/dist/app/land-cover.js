@@ -52,12 +52,29 @@ const USGS = [
   [24, '冰雪', 'Snow or Ice'],
 ];
 
+const LCZ = [
+  [1, '紧凑高层建筑', 'Compact high-rise'],
+  [2, '紧凑中层建筑', 'Compact mid-rise'],
+  [3, '紧凑低层建筑', 'Compact low-rise'],
+  [4, '开放高层建筑', 'Open high-rise'],
+  [5, '开放中层建筑', 'Open mid-rise'],
+  [6, '开放低层建筑', 'Open low-rise'],
+  [7, '轻质低层建筑', 'Lightweight low-rise'],
+  [8, '大型低层建筑', 'Large low-rise'],
+  [9, '稀疏建筑', 'Sparsely built'],
+  [10, '重工业区', 'Heavy industry'],
+];
+
 const entries = rows => Object.freeze(rows.map(([value, zh, en]) => Object.freeze({ value, zh, en })));
 const IGBP_CLASSES = entries(IGBP);
 const USGS_CLASSES = entries(USGS);
+const LCZ_CLASSES = entries(LCZ);
 
 export function landCoverClasses(mode) {
-  return String(mode).toLowerCase() === 'usgs' ? USGS_CLASSES : IGBP_CLASSES;
+  const value = String(mode).toLowerCase();
+  if (value === 'usgs') return USGS_CLASSES;
+  if (value === 'urban') return LCZ_CLASSES;
+  return IGBP_CLASSES;
 }
 
 export function landCoverLabel(item, locale = 'zh') {

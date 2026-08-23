@@ -49,7 +49,24 @@
 
       <div class="flow-pane" data-flow-pane="prep-site">
         <div class="card">
-          <h3>站点身份与位置</h3>
+          <h3>选择处理方式</h3>
+          <div class="ch">单站点可以手动填写；多站点直接导入一份带站点列的表格，不需要逐个填写身份与位置。</div>
+          <div class="domain-cards">
+            <button class="domain-card" id="prep-single-site" type="button" aria-controls="single-site-prep" aria-pressed="false">
+              <span class="dt">单站手动建立</span>
+              <span class="dd">填写一个站点的名称、经纬度和地表覆盖类型。</span>
+            </button>
+            <button class="domain-card" id="prep-multi-site" type="button">
+              <span class="dt">多站点表格导入</span>
+              <span class="dd">CSV / TXT / TSV 按站点拆分、质控和修复，并批量生成站点文件。</span>
+            </button>
+          </div>
+          <p class="muted mini">多站表格应包含时间和站点名称列；经纬度、地表覆盖类型与 UTC 偏移可按站点列提供。</p>
+        </div>
+
+        <div id="single-site-prep" hidden>
+        <div class="card">
+          <h3>单站点身份与位置</h3>
           <div class="ch">站点名决定标准文件名；当前模式来自首页向导，站点文件会写入明确的自然 / 城市标记。</div>
           <div class="row">
             <div class="field">
@@ -108,6 +125,7 @@
           <p class="mini" id="smake-why"></p>
         </div>
         <div id="site-result"></div>
+        </div>
       </div>
 
       <div class="flow-pane" data-flow-pane="prep-forcing" hidden>
@@ -523,6 +541,23 @@
   </footer>
 </div>
 
+<dialog id="aboutDialog" class="about-dialog" aria-labelledby="about-title">
+  <form method="dialog" class="about-card">
+    <button class="about-close" aria-label="关闭" title="关闭">×</button>
+    <img class="about-logo" src="assets/colm-icon.png" alt="">
+    <h2 id="about-title">CoLM Desktop</h2>
+    <p class="muted">版本 <span id="about-version">0.2.0</span></p>
+    <div class="about-signature">
+      <strong>开发与维护</strong>
+      <div class="about-maintainer">Zhongwang Wei (魏忠旺)</div>
+      <div class="about-email">weizhw6@mail.sysu.edu.cn</div>
+      <div class="about-team">CoLM LSM Development Team</div>
+      <div>School of Atmospheric Sciences, SYSU</div>
+    </div>
+    <p class="muted mini">版权所有：CoLM陆面模式开发团队，中山大学大气科学学院</p>
+  </form>
+</dialog>
+
 <!-- 进门那道分流默认可见，避免 module 初始化前短暂露出主工作台。
      domain.js 启动后会立即填充卡片；完成五页选择时才隐藏它。 -->
 <div id="domaingate" class="gate">
@@ -574,5 +609,6 @@
   send('HTML-PARSED');
 })();
 </script>
-<script type="module" src="app/main.js"></script>
+<!-- 首页由轻量模块先画；完整工作台在首帧之后动态加载。 -->
+<script type="module" src="app/gate-boot.js"></script>
 </body>

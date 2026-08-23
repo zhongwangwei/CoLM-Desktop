@@ -482,9 +482,129 @@ fn run_readiness_distinguishes_a_file_from_a_runnable_site() {
 
     let rawdata = dir.join("rawdata");
     std::fs::create_dir_all(&rawdata).unwrap();
+    let empty_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata)).unwrap();
+    assert_eq!(empty_rawdata.readiness, super::Readiness::Blocked);
+    assert!(empty_rawdata
+        .needs_external
+        .iter()
+        .any(|n| n.starts_with("rawdata:")));
+
+    for sub in ["soil", "plant_15s"] {
+        let d = rawdata.join(sub);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("marker.nc");
+        drop(netcdf::create(&p).unwrap());
+    }
     let with_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata)).unwrap();
     assert_eq!(with_rawdata.readiness, super::Readiness::ReadyWithRawdata);
     assert_eq!(with_rawdata.needs_external, blocked.needs_external);
+}
+
+#[test]
+fn audit_rejects_present_but_invalid_site_values() {
+    let dir = std::env::temp_dir().join(format!("colm-site-invalid-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("bad.nc");
+    super::skeleton(&p, 123.0, 45.0, Some(10)).unwrap();
+    {
+        let mut file = netcdf::append(&p).unwrap();
+        file.variable_mut("latitude")
+            .unwrap()
+            .put_value(95.0, ())
+            .unwrap();
+    }
+
+    let report = super::audit(&p, super::SiteMode::Igbp, None).unwrap();
+    assert_eq!(report.readiness, super::Readiness::Blocked);
+    assert!(
+        report
+            .needs_external
+            .iter()
+            .any(|n| n == "latitude: outside [-90, 90]"),
+        "{:?}",
+        report.needs_external
+    );
+
+    let rawdata = dir.join("rawdata");
+    for sub in ["soil", "plant_15s"] {
+        std::fs::create_dir_all(rawdata.join(sub)).unwrap();
+        drop(netcdf::create(rawdata.join(sub).join("marker.nc")).unwrap());
+    }
+    assert_eq!(
+        super::audit(&p, super::SiteMode::Igbp, Some(&rawdata))
+            .unwrap()
+            .readiness,
+        super::Readiness::Blocked,
+        "rawdata cannot repair an invalid site coordinate"
+    );
+}
+
+#[test]
+fn skeleton_rejects_invalid_coordinates_before_writing() {
+    let path = std::env::temp_dir().join(format!(
+        "colm-site-invalid-coordinate-{}.nc",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    assert!(super::skeleton(&path, 181.0, 45.0, Some(10)).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
+fn an_urban_skeleton_writes_lcz_not_igbp() {
+    let dir = std::env::temp_dir().join(format!("colm-skel-urban-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("urban_site.nc");
+    super::skeleton_with_mode(
+        &p,
+        145.0,
+        -37.0,
+        Some(6),
+        super::SiteKind::Urban,
+        super::SiteMode::Urban,
+    )
+    .unwrap();
+
+    let f = netcdf::open(&p).unwrap();
+    assert!(f.variable("LCZ_DOM").is_some());
+    assert!(f.variable("IGBP_classification").is_none());
+}
+
+#[test]
+fn skeleton_land_cover_ranges_follow_the_selected_scheme() {
+    let dir = std::env::temp_dir().join(format!("colm-skel-ranges-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    assert!(super::skeleton_with_mode(
+        &dir.join("bad_igbp.nc"),
+        0.0,
+        0.0,
+        Some(24),
+        super::SiteKind::Natural,
+        super::SiteMode::Igbp,
+    )
+    .is_err());
+    assert!(super::skeleton_with_mode(
+        &dir.join("ok_usgs.nc"),
+        0.0,
+        0.0,
+        Some(24),
+        super::SiteKind::Natural,
+        super::SiteMode::Usgs,
+    )
+    .is_ok());
+    assert!(super::skeleton_with_mode(
+        &dir.join("bad_lcz.nc"),
+        0.0,
+        0.0,
+        Some(11),
+        super::SiteKind::Urban,
+        super::SiteMode::Urban,
+    )
+    .is_err());
 }
 
 #[test]

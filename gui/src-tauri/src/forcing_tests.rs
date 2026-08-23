@@ -178,6 +178,7 @@ fn table_import_args_preserve_station_columns_timezones_and_slot_units() {
         latitude: None,
         longitude: None,
         step_seconds: Some(1800),
+        land_cover_scheme: Some("IGBP".into()),
         heights: Some([10.0, 2.0, 2.0]),
     };
     let slots = vec![super::SlotChoice {
@@ -193,6 +194,9 @@ fn table_import_args_preserve_station_columns_timezones_and_slot_units() {
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--step-seconds", "1800"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--land-cover-scheme", "IGBP"]));
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--slot", "4=Rain:mm/hr+Snow"]));

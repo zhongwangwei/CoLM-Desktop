@@ -339,24 +339,18 @@ fn solar_noon_evidence(
         .sum::<f64>()
         / noons.len() as f64)
         .sqrt();
-    let theoretical_utc_noon = (12.0 - longitude / 15.0).rem_euclid(24.0);
-    let theoretical_local_noon =
-        (theoretical_utc_noon + longitude_offset(longitude)).rem_euclid(24.0);
-    let matches_utc = circular_hour_distance(observed_noon, theoretical_utc_noon) < 1.5;
-    let matches_local = circular_hour_distance(observed_noon, theoretical_local_noon) < 1.5;
-    let classification = if std_noon >= 1.0 {
+    let theoretical_utc_noon = 12.0 - longitude / 15.0;
+    let best = nearest_solar_offset(observed_noon, theoretical_utc_noon);
+    let classification = if std_noon >= 1.0 || best.residual > 0.75 {
         SolarClassification::Uncertain
+    } else if best.offset.abs() < f64::EPSILON && (best.residual <= 0.5 || best.margin >= 0.15) {
+        SolarClassification::Utc
+    } else if best.offset.abs() >= f64::EPSILON && best.margin >= 0.15 {
+        SolarClassification::Local
     } else {
-        match (matches_utc, matches_local) {
-            (true, false) => SolarClassification::Utc,
-            (false, true) => SolarClassification::Local,
-            _ => SolarClassification::Uncertain,
-        }
+        SolarClassification::Uncertain
     };
-    let inferred_offset = (classification == SolarClassification::Local).then(|| {
-        let theoretical = 12.0 - longitude / 15.0;
-        nearest_civil_offset(((observed_noon - theoretical) * 4.0).round() / 4.0)
-    });
+    let inferred_offset = (classification == SolarClassification::Local).then_some(best.offset);
     Some(SolarNoonEvidence {
         observed_noon,
         std_noon,
@@ -371,22 +365,40 @@ fn longitude_offset(longitude: f64) -> f64 {
     (longitude / 15.0).round().clamp(-12.0, 14.0)
 }
 
-fn nearest_civil_offset(solar_offset: f64) -> f64 {
-    const OFFSETS: &[f64] = &[
-        -12.0, -11.0, -10.0, -9.5, -9.0, -8.0, -7.0, -6.0, -5.0, -4.5, -4.0, -3.5, -3.0, -2.0,
-        -1.0, 0.0, 1.0, 2.0, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 5.75, 6.0, 6.5, 7.0, 8.0, 8.75, 9.0,
-        9.5, 10.0, 10.5, 11.0, 12.0, 12.75, 13.0, 13.75, 14.0,
-    ];
-    OFFSETS
+#[derive(Debug, Clone, Copy)]
+struct SolarOffsetMatch {
+    offset: f64,
+    residual: f64,
+    margin: f64,
+}
+
+fn nearest_solar_offset(observed_noon: f64, theoretical_utc_noon: f64) -> SolarOffsetMatch {
+    let mut ranked = CIVIL_OFFSETS
         .iter()
         .copied()
-        .min_by(|a, b| {
-            (a - solar_offset)
-                .abs()
-                .total_cmp(&(b - solar_offset).abs())
+        .map(|offset| SolarOffsetMatch {
+            offset,
+            residual: circular_hour_distance(
+                observed_noon,
+                (theoretical_utc_noon + offset).rem_euclid(24.0),
+            ),
+            margin: 0.0,
         })
-        .unwrap_or(solar_offset)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| a.residual.total_cmp(&b.residual));
+    let mut best = ranked[0];
+    best.margin = ranked
+        .get(1)
+        .map(|second| second.residual - best.residual)
+        .unwrap_or(f64::INFINITY);
+    best
 }
+
+const CIVIL_OFFSETS: &[f64] = &[
+    -12.0, -11.0, -10.0, -9.5, -9.0, -8.0, -7.0, -6.0, -5.0, -4.5, -4.0, -3.5, -3.0, -2.0, -1.0,
+    0.0, 1.0, 2.0, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 5.75, 6.0, 6.5, 7.0, 8.0, 8.75, 9.0, 9.5, 10.0,
+    10.5, 11.0, 12.0, 12.75, 13.0, 13.75, 14.0,
+];
 
 fn percentile_95(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
@@ -649,7 +661,7 @@ impl RepairSummary {
     pub fn needs_era5(&self) -> bool {
         self.variables
             .iter()
-            .any(|variable| variable.long_missing > 0)
+            .any(|variable| variable.long_missing > variable.era5_corrected)
     }
 }
 
@@ -657,14 +669,14 @@ impl RepairSummary {
 pub fn diagnose_file(src: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
     let file = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
     let (source_local_times, _) = file_times(&file, "time", 0.0)?;
-    source_step_seconds(&source_local_times)?;
+    let step_seconds = source_step_seconds(&source_local_times)? as f64;
     let steps = source_local_times.len();
     let (latitude, longitude) = site_coordinates(&file, plan.latitude, plan.longitude)?;
     let timezone = file_timezone(&file, src, plan, &source_local_times, longitude, steps)?;
     let offset_seconds = (timezone.offset_hours * 3600.0).round() as i64;
     let mut variables = Vec::with_capacity(plan.slots.len());
     for slot in &plan.slots {
-        let mut values = combined_canonical(&file, src, slot, steps)?;
+        let mut values = combined_canonical(&file, src, slot, &plan.slots, steps, step_seconds)?;
         let scalar_wind =
             slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5);
         let quality_rejected = apply_basic_qc(&mut values, slot.index, scalar_wind)?;
@@ -703,6 +715,7 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
     let file = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
     let (source_local_times, time_units) = file_times(&file, "time", 0.0)?;
     let steps = source_local_times.len();
+    let step_seconds = source_step_seconds(&source_local_times)? as f64;
     let (latitude, longitude) = site_coordinates(&file, plan.latitude, plan.longitude)?;
     let timezone = file_timezone(&file, src, plan, &source_local_times, longitude, steps)?;
     let offset_seconds = (timezone.offset_hours * 3600.0).round() as i64;
@@ -723,9 +736,20 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
     let mut replacements = BTreeMap::<String, Vec<f64>>::new();
     let mut quality = BTreeMap::<String, Vec<u8>>::new();
     let mut summaries = Vec::with_capacity(plan.slots.len());
+    let mut repaired_canonical = BTreeMap::<usize, Vec<f64>>::new();
+    let mut ordered_slots = plan.slots.iter().collect::<Vec<_>>();
+    // Specific humidity derived from RH/VPD needs the repaired T and pressure
+    // series when it is converted back to the source representation.
+    ordered_slots.sort_by_key(|slot| {
+        if slot.index == 2 {
+            usize::MAX
+        } else {
+            slot.index
+        }
+    });
 
-    for slot in &plan.slots {
-        let mut values = combined_canonical(&file, src, slot, steps)?;
+    for slot in ordered_slots {
+        let mut values = combined_canonical(&file, src, slot, &plan.slots, steps, step_seconds)?;
         let scalar_wind =
             slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5);
         let quality_rejected = apply_basic_qc(&mut values, slot.index, scalar_wind)?;
@@ -771,11 +795,36 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
         // 合并槽位的修复值写入主变量，额外相态变量在被修复的时刻置零；
         // 这样后续 forcing-convert 的总和精确等于修复后的槽位值，同时所有原始
         // 完整时刻仍逐位保留。
-        let source_values = crate::units::from_canonical(
-            crate::convert::canonical_units(slot.index),
-            &slot.source_units,
-            &values,
-        )?;
+        let source_values = if slot.index == 2 {
+            let temperature = repaired_canonical
+                .get(&1)
+                .context("humidity repair needs the repaired air-temperature slot")?;
+            let pressure = repaired_canonical
+                .get(&3)
+                .context("humidity repair needs the repaired surface-pressure slot")?;
+            match crate::units::humidity_from_specific(
+                &slot.source_name,
+                &slot.source_units,
+                &values,
+                temperature,
+                pressure,
+            )? {
+                Some(values) => values,
+                None => crate::units::from_canonical_with_step(
+                    crate::convert::canonical_units(slot.index),
+                    &slot.source_units,
+                    &values,
+                    Some(step_seconds),
+                )?,
+            }
+        } else {
+            crate::units::from_canonical_with_step(
+                crate::convert::canonical_units(slot.index),
+                &slot.source_units,
+                &values,
+                Some(step_seconds),
+            )?
+        };
         let mut primary = variable_values(&file, src, &slot.source_name, steps)?;
         for (index, code) in qc.iter().enumerate() {
             if *code != QC_OBSERVED {
@@ -793,6 +842,7 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
             replacements.insert(extra.clone(), extra_values);
         }
         quality.insert(slot.source_name.clone(), qc.clone());
+        repaired_canonical.insert(slot.index, values);
         summaries.push(VariableRepairSummary {
             slot: slot.index,
             variable: slot.source_name.clone(),
@@ -812,6 +862,7 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
             unresolved,
         });
     }
+    summaries.sort_by_key(|summary| summary.slot);
     drop(file);
 
     write_repaired(
@@ -848,7 +899,19 @@ fn variable_kind(slot: usize) -> Result<VariableKind> {
 /// 将明显超出陆面强迫物理范围的有限值变成缺测，交给同一套短缺口/ERA5 修复。
 /// 阈值故意宽松，只剔除不可能或高度可疑的传感器值，不做气候异常检测。
 fn apply_basic_qc(values: &mut [f64], slot: usize, scalar_wind: bool) -> Result<usize> {
-    let (minimum, maximum) = match slot {
+    let (minimum, maximum) = physical_range(slot, scalar_wind)?;
+    let mut rejected = 0;
+    for value in values {
+        if value.is_finite() && !(minimum..=maximum).contains(value) {
+            *value = f64::NAN;
+            rejected += 1;
+        }
+    }
+    Ok(rejected)
+}
+
+fn physical_range(slot: usize, scalar_wind: bool) -> Result<(f64, f64)> {
+    Ok(match slot {
         1 => (180.0, 350.0),        // K
         2 => (0.0, 0.1),            // kg/kg
         3 => (30_000.0, 110_000.0), // Pa
@@ -859,15 +922,7 @@ fn apply_basic_qc(values: &mut [f64], slot: usize, scalar_wind: bool) -> Result<
         7 => (0.0, 1_800.0),  // W/m2
         8 => (0.0, 800.0),    // W/m2
         _ => bail!("unknown CoLM forcing slot {slot}"),
-    };
-    let mut rejected = 0;
-    for value in values {
-        if value.is_finite() && !(minimum..=maximum).contains(value) {
-            *value = f64::NAN;
-            rejected += 1;
-        }
-    }
-    Ok(rejected)
+    })
 }
 
 fn correction_kind(slot: usize) -> Result<CorrectionKind> {
@@ -890,12 +945,18 @@ fn fill_from_donor(
     if values.len() != donor.len() || values.len() != months.len() || values.len() != qc.len() {
         bail!("source, ERA5-Land, month and QC axes have different lengths");
     }
+    let (minimum, maximum) = physical_range(slot, false)?;
+    let valid = |value: f64| value.is_finite() && (minimum..=maximum).contains(&value);
     let observed = original
         .iter()
-        .map(|value| value.is_finite().then_some(*value))
+        .map(|value| valid(*value).then_some(*value))
+        .collect::<Vec<_>>();
+    let donor = donor
+        .iter()
+        .map(|value| if valid(*value) { *value } else { f64::NAN })
         .collect::<Vec<_>>();
     let kind = correction_kind(slot)?;
-    let global = correction(&observed, donor, kind, min_overlap)?;
+    let global = correction(&observed, &donor, kind, min_overlap)?;
     let mut by_month = BTreeMap::<u32, BiasCorrection>::new();
     for month in 1..=12 {
         let mut month_obs = Vec::new();
@@ -919,14 +980,17 @@ fn fill_from_donor(
             continue;
         }
         let bias = by_month.get(&months[index]).copied().unwrap_or(global);
-        let mut value = bias.apply(era);
+        let value = bias.apply(era);
         if matches!(
             variable_kind(slot)?,
             VariableKind::NonNegative | VariableKind::Precipitation
         ) {
-            value = value.max(0.0);
-        }
-        if value.is_finite() {
+            let value = value.max(0.0);
+            if (minimum..=maximum).contains(&value) {
+                values[index] = value;
+                qc[index] = QC_ERA5_CORRECTED;
+            }
+        } else if (minimum..=maximum).contains(&value) {
             values[index] = value;
             qc[index] = QC_ERA5_CORRECTED;
         }
@@ -938,13 +1002,77 @@ fn combined_canonical(
     file: &netcdf::File,
     path: &Path,
     slot: &RepairSlot,
+    all_slots: &[RepairSlot],
     steps: usize,
+    step_seconds: f64,
 ) -> Result<Vec<f64>> {
     let mut values = variable_values(file, path, &slot.source_name, steps)?;
     normalize_declared_missing(file, &slot.source_name, &mut values);
+    if let Some(actual) = file
+        .variable(&slot.source_name)
+        .and_then(|variable| variable_string_attribute(&variable, "units"))
+    {
+        if actual != slot.source_units {
+            bail!(
+                "{} says {} uses unit {:?}, but the repair plan says {:?}; re-probe the file",
+                path.display(),
+                slot.source_name,
+                actual,
+                slot.source_units
+            );
+        }
+    }
+    let canonical = crate::convert::canonical_units(slot.index);
+    let mut values = if slot.index == 2 {
+        let temperature_slot = all_slots
+            .iter()
+            .find(|candidate| candidate.index == 1)
+            .context("humidity derivation also needs forcing slot 1")?;
+        let pressure_slot = all_slots
+            .iter()
+            .find(|candidate| candidate.index == 3)
+            .context("humidity derivation also needs forcing slot 3")?;
+        let temperature =
+            combined_canonical(file, path, temperature_slot, all_slots, steps, step_seconds)?;
+        let pressure =
+            combined_canonical(file, path, pressure_slot, all_slots, steps, step_seconds)?;
+        match crate::units::humidity_to_specific(
+            &slot.source_name,
+            &slot.source_units,
+            &values,
+            &temperature,
+            &pressure,
+        )? {
+            Some(values) => values,
+            None => crate::units::convert_units_with_step(
+                &slot.source_units,
+                canonical,
+                &values,
+                Some(step_seconds),
+            )?,
+        }
+    } else {
+        crate::units::convert_units_with_step(
+            &slot.source_units,
+            canonical,
+            &values,
+            Some(step_seconds),
+        )?
+    };
     for extra in &slot.also_add {
         let mut add = variable_values(file, path, extra, steps)?;
         normalize_declared_missing(file, extra, &mut add);
+        let units = file
+            .variable(extra)
+            .and_then(|variable| variable_string_attribute(&variable, "units"))
+            .with_context(|| {
+                format!(
+                    "{extra} has no units attribute; cannot safely add it to {}",
+                    slot.source_name
+                )
+            })?;
+        let add =
+            crate::units::convert_units_with_step(&units, canonical, &add, Some(step_seconds))?;
         for (value, extra_value) in values.iter_mut().zip(add) {
             if value.is_finite() && extra_value.is_finite() {
                 *value += extra_value;
@@ -953,11 +1081,7 @@ fn combined_canonical(
             }
         }
     }
-    crate::units::convert_units(
-        &slot.source_units,
-        crate::convert::canonical_units(slot.index),
-        &values,
-    )
+    Ok(values)
 }
 
 fn variable_values(file: &netcdf::File, path: &Path, name: &str, steps: usize) -> Result<Vec<f64>> {
@@ -1044,12 +1168,28 @@ fn site_coordinates(
     latitude: Option<f64>,
     longitude: Option<f64>,
 ) -> Result<(f64, f64)> {
-    let latitude =
-        latitude.or_else(|| scalar_variable(file, &["latitude", "lat", "LATITUDE", "LAT"]));
-    let longitude =
-        longitude.or_else(|| scalar_variable(file, &["longitude", "lon", "LONGITUDE", "LON"]));
-    let latitude = latitude.context("site latitude is absent; give it explicitly")?;
-    let longitude = longitude.context("site longitude is absent; give it explicitly")?;
+    let file_latitude = scalar_variable(file, &["latitude", "lat", "LATITUDE", "LAT"]);
+    let file_longitude = scalar_variable(file, &["longitude", "lon", "LONGITUDE", "LON"]);
+    if let (Some(file_value), Some(given)) = (file_latitude, latitude) {
+        if (file_value - given).abs() > 1e-4 {
+            bail!(
+                "given latitude {given} conflicts with forcing-file latitude {file_value}; re-probe the selected station"
+            );
+        }
+    }
+    if let (Some(file_value), Some(given)) = (file_longitude, longitude) {
+        if (file_value - given).abs() > 1e-4 {
+            bail!(
+                "given longitude {given} conflicts with forcing-file longitude {file_value}; re-probe the selected station"
+            );
+        }
+    }
+    let latitude = file_latitude
+        .or(latitude)
+        .context("site latitude is absent; give it explicitly")?;
+    let longitude = file_longitude
+        .or(longitude)
+        .context("site longitude is absent; give it explicitly")?;
     if !(-90.0..=90.0).contains(&latitude) {
         bail!("site latitude {latitude} is outside -90..=90");
     }
@@ -1077,7 +1217,14 @@ fn file_timezone(
     steps: usize,
 ) -> Result<TimezoneDecision> {
     let solar = if let Some(slot) = plan.slots.iter().find(|slot| slot.index == 7) {
-        let mut swdown = combined_canonical(file, path, slot, steps)?;
+        let mut swdown = combined_canonical(
+            file,
+            path,
+            slot,
+            &plan.slots,
+            steps,
+            source_step_seconds(local_times)? as f64,
+        )?;
         apply_basic_qc(&mut swdown, 7, false)?;
         solar_noon_evidence(local_times, &swdown, longitude)
     } else {
@@ -1174,6 +1321,7 @@ fn file_times(file: &netcdf::File, name: &str, offset_hours: f64) -> Result<(Vec
     let variable = file
         .variable(name)
         .with_context(|| format!("file has no {name} time coordinate"))?;
+    validate_cf_calendar(&variable)?;
     let units = variable
         .attribute("units")
         .context("time coordinate has no units")?
@@ -1191,9 +1339,38 @@ fn file_times(file: &netcdf::File, name: &str, offset_hours: f64) -> Result<(Vec
     let values: Vec<f64> = variable.get_values(netcdf::Extents::All)?;
     let times = values
         .into_iter()
-        .map(|value| origin + (value * factor).round() as i64 - offset)
-        .collect();
+        .map(|value| {
+            let seconds = value * factor;
+            if !seconds.is_finite() || seconds < i64::MIN as f64 || seconds > i64::MAX as f64 {
+                bail!("time coordinate contains a non-finite or out-of-range value {value}");
+            }
+            origin
+                .checked_add(seconds.round() as i64)
+                .and_then(|time| time.checked_sub(offset))
+                .context("time coordinate overflows the supported Unix-second range")
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok((times, units))
+}
+
+fn validate_cf_calendar(variable: &netcdf::Variable<'_>) -> Result<()> {
+    let Some(calendar) = variable
+        .attribute_value("calendar")
+        .and_then(|value| value.ok())
+        .and_then(|value| match value {
+            netcdf::AttributeValue::Str(value) => Some(value),
+            netcdf::AttributeValue::Strs(values) => values.into_iter().next(),
+            _ => None,
+        })
+    else {
+        return Ok(());
+    };
+    match calendar.trim().to_ascii_lowercase().as_str() {
+        "" | "standard" | "gregorian" | "proleptic_gregorian" => Ok(()),
+        other => bail!(
+            "unsupported CF calendar {other:?}; convert the time axis to Gregorian/UTC before gap repair"
+        ),
+    }
 }
 
 fn parse_cf_time_units(units: &str) -> Result<(f64, i64)> {
@@ -1260,7 +1437,11 @@ impl Era5Catalog {
         } else {
             vec![path.to_path_buf()]
         };
-        files.sort();
+        files.sort_by_key(|file| {
+            std::fs::metadata(file)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
         if files.is_empty() {
             bail!("{} contains no ERA5-Land .nc file", path.display());
         }
@@ -1405,20 +1586,18 @@ impl Era5Catalog {
                     _ => None,
                 })
                 .unwrap_or_default();
-            let interval_amounts = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("era5land_timeseries_"));
+            let interval_amounts = era5_interval_amounts(path, &file, &variable);
             apply_donor_transform(&times, &mut values, &units, transform, interval_amounts)?;
             for (time, value) in times.into_iter().zip(values) {
-                // Padded or repeated downloads can overlap. Prefer a finite value if
-                // the earlier cache's boundary sample could not be de-accumulated.
+                // Padded or repeated downloads can overlap. Files are oldest first,
+                // so a later successful download replaces stale cached values while
+                // a finite older boundary still survives a newer missing sample.
                 match merged.entry(time) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(value);
                     }
                     std::collections::btree_map::Entry::Occupied(mut entry)
-                        if !entry.get().is_finite() && value.is_finite() =>
+                        if value.is_finite() =>
                     {
                         entry.insert(value);
                     }
@@ -1453,6 +1632,62 @@ fn netcdf_files(path: &Path) -> Result<Vec<PathBuf>> {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("nc"))
         })
         .collect())
+}
+
+fn era5_interval_amounts(
+    path: &Path,
+    file: &netcdf::File,
+    variable: &netcdf::Variable<'_>,
+) -> bool {
+    for text in [
+        string_attribute(file, "dataset"),
+        string_attribute(file, "cds_dataset"),
+        string_attribute(file, "source"),
+        variable_string_attribute(variable, "dataset"),
+        variable_string_attribute(variable, "source"),
+        era5_manifest_dataset(path),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if text.to_ascii_lowercase().contains("era5-land-timeseries") {
+            return true;
+        }
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("era5land_timeseries_"))
+}
+
+fn variable_string_attribute(variable: &netcdf::Variable<'_>, name: &str) -> Option<String> {
+    variable
+        .attribute_value(name)
+        .and_then(|value| value.ok())
+        .and_then(|value| match value {
+            netcdf::AttributeValue::Str(value) => Some(value),
+            netcdf::AttributeValue::Strs(values) => values.into_iter().next(),
+            _ => None,
+        })
+}
+
+fn era5_manifest_dataset(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    for entry in std::fs::read_dir(path.parent()?).ok()?.flatten() {
+        let entry_path = entry.path();
+        if entry_path
+            .extension()
+            .is_none_or(|extension| extension != "json")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry_path) else {
+            continue;
+        };
+        if text.contains(file_name) && text.contains("reanalysis-era5-land-timeseries") {
+            return Some("reanalysis-era5-land-timeseries".into());
+        }
+    }
+    None
 }
 
 pub fn era5_point_cache_name(latitude: f64, longitude: f64) -> String {
@@ -1658,7 +1893,7 @@ fn sample_donor(
                 if left_distance > tolerance && right_distance > tolerance {
                     output.push(f64::NAN);
                 } else if interval_rate {
-                    output.push(values[left]);
+                    output.push(values[right]);
                 } else if values[left].is_finite() && values[right].is_finite() {
                     let fraction = left_distance as f64 / (times[right] - times[left]) as f64;
                     output.push(values[left] + (values[right] - values[left]) * fraction);
@@ -1816,7 +2051,7 @@ fn update_repaired_file(
     Ok(())
 }
 
-fn install_repaired_file(temp: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn install_repaired_file(temp: &Path, dst: &Path) -> Result<()> {
     if !dst.exists() {
         return std::fs::rename(temp, dst)
             .with_context(|| format!("cannot install repaired file {}", dst.display()));

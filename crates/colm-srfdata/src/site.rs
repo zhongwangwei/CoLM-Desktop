@@ -176,10 +176,10 @@ pub fn site_kind(file: &Path) -> Result<SiteKind> {
 
 /// Audit the complete mksrfdata-facing contract for the selected mode.
 ///
-/// This only checks whether variables are present; it intentionally does not invent
-/// values or claim that an arbitrary rawdata tree contains a valid value at the site.
-/// A selected rawdata directory therefore changes `blocked` to
-/// `ready_with_rawdata`, while the exact external dependencies remain visible.
+/// Presence is not enough: a variable that is empty, non-finite, out of its basic
+/// range, or shaped unlike the variable group CoLM reads is reported in
+/// `needs_external` and blocks the site just like a missing variable. Rawdata is
+/// only considered useful when its current tree has the required coarse buckets.
 pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<SiteAudit> {
     if let Some(raw) = rawdata {
         if !raw.is_dir() {
@@ -188,7 +188,8 @@ pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<Site
     }
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
     let kind = site_kind(file)?;
-    let mut required: Vec<&str> = REQUIRED_FIELDS.to_vec();
+    let mut required: Vec<&str> = vec!["longitude", "latitude"];
+    required.extend(REQUIRED_FIELDS);
     required.extend(SOIL_RUN_FIELDS);
 
     match mode {
@@ -232,26 +233,58 @@ pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<Site
 
     required.sort_unstable();
     required.dedup();
-    let mut needs_external: Vec<String> = required
-        .into_iter()
-        .filter(|name| f.variable(name).is_none())
-        .map(str::to_string)
-        .collect();
+    let mut needs_external = Vec::new();
+    for name in required {
+        match f.variable(name) {
+            Some(v) => {
+                if let Some(issue) = validate_site_variable(&f, mode, name, &v)? {
+                    needs_external.push(format!("{name}: {issue}"));
+                }
+            }
+            None => needs_external.push(name.to_string()),
+        }
+    }
 
     // The urban type and canyon geometry each have two accepted encodings.
     if mode == SiteMode::Urban {
-        if f.variable("URBAN_DENSITY_CLASS").is_some() {
+        if matches!(
+            f.variable("URBAN_DENSITY_CLASS")
+                .map(|v| validate_site_variable(&f, mode, "URBAN_DENSITY_CLASS", &v))
+                .transpose()?,
+            Some(None)
+        ) {
             needs_external.retain(|name| name != "LCZ_DOM");
         }
-        if f.variable("wall_to_plan_area_ratio").is_some() {
+        if matches!(
+            f.variable("wall_to_plan_area_ratio")
+                .map(|v| validate_site_variable(&f, mode, "wall_to_plan_area_ratio", &v))
+                .transpose()?,
+            Some(None)
+        ) {
             needs_external.retain(|name| name != "canyon_height_width_ratio");
         }
     }
     needs_external.sort();
 
+    let rawdata_blocker = rawdata
+        .filter(|_| !needs_external.is_empty())
+        .and_then(|raw| rawdata_blocker(raw, mode, &needs_external));
+    if let Some(blocker) = rawdata_blocker {
+        needs_external.push(blocker);
+    }
+    needs_external.sort();
+
+    let cannot_be_repaired_from_rawdata = needs_external.iter().any(|issue| {
+        issue == "longitude"
+            || issue == "latitude"
+            || (issue.contains(": ") && !issue.starts_with("rawdata:"))
+    });
     let readiness = if needs_external.is_empty() {
         Readiness::SelfContained
-    } else if rawdata.is_some() {
+    } else if rawdata.is_some()
+        && !cannot_be_repaired_from_rawdata
+        && !needs_external.iter().any(|s| s.starts_with("rawdata:"))
+    {
         Readiness::ReadyWithRawdata
     } else {
         Readiness::Blocked
@@ -261,6 +294,174 @@ pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<Site
         mode,
         needs_external,
         readiness,
+    })
+}
+
+fn validate_site_variable(
+    file: &netcdf::File,
+    mode: SiteMode,
+    name: &str,
+    var: &netcdf::Variable<'_>,
+) -> Result<Option<String>> {
+    let values: Vec<f64> = var.get_values(netcdf::Extents::All)?;
+    if values.is_empty() {
+        return Ok(Some("empty".to_string()));
+    }
+    if values.iter().any(|v| !v.is_finite()) {
+        return Ok(Some("contains non-finite values".to_string()));
+    }
+    let dim_names: Vec<String> = var.dimensions().iter().map(|d| d.name()).collect();
+    let range_issue = match name {
+        "longitude" if !values.iter().all(|v| (-180.0..=180.0).contains(v)) => {
+            Some("outside [-180, 180]")
+        }
+        "latitude" if !values.iter().all(|v| (-90.0..=90.0).contains(v)) => {
+            Some("outside [-90, 90]")
+        }
+        "IGBP_classification" if !integers_in(&values, 1..=17) => Some("outside IGBP 1..=17"),
+        "USGS_classification" if !integers_in(&values, 1..=24) => Some("outside USGS 1..=24"),
+        "LCZ_DOM" if !integers_in(&values, 1..=10) => Some("outside CoLM LCZ 1..=10"),
+        "URBAN_DENSITY_CLASS" if values.iter().any(|v| *v < 1.0) => Some("must be positive"),
+        "soil_texture" if !integers_in(&values, -1..=12) => {
+            Some("outside accepted texture -1..=12")
+        }
+        "soil_vf_quartz_mineral"
+        | "soil_vf_gravels"
+        | "soil_vf_sand"
+        | "soil_vf_clay"
+        | "soil_vf_om"
+        | "soil_wf_gravels"
+        | "soil_wf_sand"
+        | "soil_wf_clay"
+        | "soil_wf_om"
+            if !values.iter().all(|v| (0.0..=1.0).contains(v)) =>
+        {
+            Some("fractions must be within 0..1")
+        }
+        "soil_theta_s" | "soil_theta_r" if !values.iter().all(|v| (0.0..=1.0).contains(v)) => {
+            Some("soil water content must be within 0..1")
+        }
+        "pctpfts" if !valid_fraction_sum(&values) => Some("PFT/PC fractions must sum to 1 or 100"),
+        "pfttyp" if !integers_in(&values, 0..=16) => Some("outside PFT 0..=16"),
+        "roof_area_fraction"
+        | "impervious_area_fraction"
+        | "water_area_fraction"
+        | "tree_area_fraction"
+            if !values.iter().all(|v| (0.0..=1.0).contains(v)) =>
+        {
+            Some("urban fractions must be within 0..1")
+        }
+        "building_mean_height"
+        | "tree_mean_height"
+        | "canyon_height_width_ratio"
+        | "wall_to_plan_area_ratio"
+            if values.iter().any(|v| *v < 0.0) =>
+        {
+            Some("urban geometry must be non-negative")
+        }
+        "LAI_monthly" | "SAI_monthly" | "LAI_pfts_monthly" | "SAI_pfts_monthly" | "TREE_LAI"
+        | "TREE_SAI"
+            if values.len() % 12 != 0 || values.iter().any(|v| *v < 0.0 || *v > 30.0) =>
+        {
+            Some("monthly canopy values must be 12-month groups within 0..30")
+        }
+        "LAI_year" if !integers_in(&values, 1800..=2300) => Some("years must be integer years"),
+        _ => None,
+    };
+    if let Some(issue) = range_issue {
+        return Ok(Some(issue.to_string()));
+    }
+
+    if SOIL_RUN_FIELDS.contains(&name) && name != "soil_texture" && values.len() < 8 {
+        return Ok(Some("soil profile has fewer than 8 layers".to_string()));
+    }
+    if matches!(
+        name,
+        "LAI_monthly"
+            | "SAI_monthly"
+            | "LAI_pfts_monthly"
+            | "SAI_pfts_monthly"
+            | "TREE_LAI"
+            | "TREE_SAI"
+    ) && !dim_names.iter().any(|d| d == "month")
+        && values.len() != 12
+    {
+        return Ok(Some("monthly variable has no month dimension".to_string()));
+    }
+    if matches!(mode, SiteMode::Pft | SiteMode::Pc)
+        && matches!(name, "pctpfts" | "pfttyp" | "canopy_height_pfts")
+        && file
+            .variable("pctpfts")
+            .map(|p| p.len())
+            .zip(file.variable("pfttyp").map(|p| p.len()))
+            .is_some_and(|(a, b)| a != b)
+    {
+        return Ok(Some("PFT type/fraction lengths differ".to_string()));
+    }
+    Ok(None)
+}
+
+fn integers_in(values: &[f64], range: std::ops::RangeInclusive<i32>) -> bool {
+    values.iter().all(|v| {
+        let rounded = v.round();
+        (*v - rounded).abs() < 1e-9 && range.contains(&(rounded as i32))
+    })
+}
+
+fn valid_fraction_sum(values: &[f64]) -> bool {
+    if !values.iter().all(|v| (0.0..=100.0).contains(v)) {
+        return false;
+    }
+    let sum: f64 = values.iter().sum();
+    (sum - 1.0).abs() <= 0.01 || (sum - 100.0).abs() <= 1.0
+}
+
+fn rawdata_blocker(raw: &Path, mode: SiteMode, needs: &[String]) -> Option<String> {
+    let needs_name = |name: &str| {
+        needs
+            .iter()
+            .any(|n| n == name || n.starts_with(&format!("{name}:")))
+    };
+    let mut buckets = Vec::new();
+    if needs.iter().any(|n| n.starts_with("soil_")) {
+        buckets.push(("soil", raw.join("soil")));
+    }
+    if ["canopy_height", "LAI_year", "LAI_monthly", "SAI_monthly"]
+        .iter()
+        .any(|n| needs_name(n))
+        || matches!(mode, SiteMode::Pft | SiteMode::Pc)
+    {
+        buckets.push(("plant_15s", raw.join("plant_15s")));
+    }
+    if mode == SiteMode::Urban
+        && !has_netcdf_under(&raw.join("urban"))
+        && !has_netcdf_under(&raw.join("urban_type"))
+    {
+        return Some("rawdata: missing usable urban or urban_type".to_string());
+    }
+    let missing: Vec<String> = buckets
+        .into_iter()
+        .filter(|(_, p)| !has_netcdf_under(p))
+        .map(|(label, _)| label.to_string())
+        .collect();
+    (!missing.is_empty()).then(|| format!("rawdata: missing usable {}", missing.join(", ")))
+}
+
+fn has_netcdf_under(path: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return false;
+    };
+    rd.filter_map(Result::ok).any(|e| {
+        let p = e.path();
+        p.extension().is_some_and(|ext| ext == "nc")
+            || p.is_dir()
+                && std::fs::read_dir(&p).is_ok_and(|mut xs| {
+                    xs.any(|x| {
+                        x.ok()
+                            .and_then(|x| x.path().extension().map(|e| e == "nc"))
+                            .unwrap_or(false)
+                    })
+                })
     })
 }
 
@@ -381,6 +582,12 @@ pub fn skeleton_with_mode(
     kind: SiteKind,
     mode: SiteMode,
 ) -> Result<()> {
+    if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        bail!("site longitude must be finite and within -180..=180, got {lon}");
+    }
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+        bail!("site latitude must be finite and within -90..=90, got {lat}");
+    }
     let mut f = netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
     f.add_attribute(SITE_KIND_ATTRIBUTE, kind.as_str())?;
 
@@ -391,10 +598,25 @@ pub fn skeleton_with_mode(
     lat_var.put_values(&[lat], netcdf::Extents::All)?;
 
     if let Some(lt) = landtype {
-        let variable = if mode == SiteMode::Usgs {
-            "USGS_classification"
-        } else {
-            "IGBP_classification"
+        let variable = match mode {
+            SiteMode::Usgs => {
+                if !(1..=24).contains(&lt) {
+                    bail!("USGS land cover must be within 1..=24, got {lt}");
+                }
+                "USGS_classification"
+            }
+            SiteMode::Urban => {
+                if !(1..=10).contains(&lt) {
+                    bail!("CoLM LCZ class must be within 1..=10, got {lt}");
+                }
+                "LCZ_DOM"
+            }
+            SiteMode::Igbp | SiteMode::Pft | SiteMode::Pc => {
+                if !(1..=17).contains(&lt) {
+                    bail!("IGBP land cover must be within 1..=17, got {lt}");
+                }
+                "IGBP_classification"
+            }
         };
         let mut lt_var = f.add_variable::<i32>(variable, &[])?;
         lt_var.put_values(&[lt], netcdf::Extents::All)?;

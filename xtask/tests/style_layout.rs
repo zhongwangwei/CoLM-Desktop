@@ -61,3 +61,63 @@ fn the_layout_has_all_three_breakpoints() {
         "三档都该给出自己的区域布局"
     );
 }
+
+#[test]
+fn the_home_gate_paints_before_the_full_application_loads() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("repo root");
+    let html = std::fs::read_to_string(root.join("gui/dist/index.html")).expect("index.html");
+    let boot =
+        std::fs::read_to_string(root.join("gui/dist/app/gate-boot.js")).expect("gate-boot.js");
+    assert!(html.contains(r#"type="module" src="app/gate-boot.js""#));
+    assert!(!html.contains(r#"type="module" src="app/main.js""#));
+    let gate = boot.find("showDomainGate();").expect("home gate render");
+    let app = boot
+        .find("import('./main.js')")
+        .expect("deferred app import");
+    assert!(gate < app, "完整应用不能挡在首页首帧之前");
+    assert!(boot.contains("requestAnimationFrame") && boot.contains("setTimeout"));
+}
+
+#[test]
+fn about_dialog_carries_the_release_version_and_maintainer_signature() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("repo root");
+    let config = std::fs::read_to_string(root.join("gui/src-tauri/tauri.conf.json"))
+        .expect("tauri.conf.json");
+    for required in [
+        r#""version": "0.2.0""#,
+        "Zhongwang Wei (魏忠旺)",
+        "CoLM LSM Development Team, School of Atmospheric Sciences, SYSU",
+        "weizhw6@mail.sysu.edu.cn",
+    ] {
+        assert!(config.contains(required), "About 元数据缺少 {required}");
+    }
+    let workspace = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+    let gui =
+        std::fs::read_to_string(root.join("gui/src-tauri/Cargo.toml")).expect("GUI Cargo.toml");
+    let backend = std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs"))
+        .expect("GUI backend");
+    let html = std::fs::read_to_string(root.join("gui/dist/index.html")).expect("index.html");
+    let frontend = std::fs::read_to_string(root.join("gui/dist/app/main.js")).expect("main.js");
+    assert!(workspace.contains("[workspace.package]\nversion = \"0.2.0\""));
+    assert!(gui.contains("version = \"0.2.0\""));
+    assert!(
+        backend.contains("MenuItem::with_id")
+            && backend.contains("\"about-colm\"")
+            && backend.contains("window.emit(\"colm-about\""),
+        "系统 About 会吞掉 Credits，菜单必须打开软件自己的 About"
+    );
+    assert!(
+        html.contains("id=\"aboutDialog\"")
+            && html.contains("Zhongwang Wei (魏忠旺)")
+            && html.contains("weizhw6@mail.sysu.edu.cn")
+            && frontend.contains("listen('colm-about'")
+            && frontend.contains("showModal()"),
+        "自定义 About 必须实际渲染维护者、团队、邮箱和版本"
+    );
+}

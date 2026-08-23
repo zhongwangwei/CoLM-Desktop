@@ -22,6 +22,37 @@ fn gap_runs_are_classified_without_touching_observations() {
 }
 
 #[test]
+fn repaired_long_gaps_do_not_request_era5_again() {
+    let report = RepairSummary {
+        timezone: TimezoneDecision {
+            offset_hours: 0.0,
+            source: TimezoneSource::FileMetadata,
+            confidence: TimezoneConfidence::High,
+            conflict: false,
+            solar_noon_hour: None,
+            solar_noon_std_hours: None,
+        },
+        latitude: 0.0,
+        longitude: 0.0,
+        start_utc: 0,
+        end_utc: 0,
+        variables: vec![VariableRepairSummary {
+            slot: 1,
+            variable: "Tair".into(),
+            missing: 2,
+            quality_rejected: 0,
+            short_missing: 0,
+            long_missing: 2,
+            longest_gap: 2,
+            interpolated: 0,
+            era5_corrected: 2,
+            unresolved: 0,
+        }],
+    };
+    assert!(!report.needs_era5());
+}
+
+#[test]
 fn continuous_short_gap_is_linear_and_long_gap_stays_missing() {
     let mut values = vec![
         0.0,
@@ -131,14 +162,14 @@ fn solar_noon_distinguishes_local_clock_from_utc() {
 }
 
 #[test]
-fn solar_noon_does_not_misclassify_at_neu_as_utc() {
+fn solar_noon_confirms_at_neu_utc_instead_of_longitude_fallback() {
     let (times, shortwave) = synthetic_shortwave(12, 11.70);
     let decision =
         decide_timezone_with_solar(None, None, Some(11.3175), &times, &shortwave).unwrap();
 
-    assert_eq!(decision.source, TimezoneSource::LongitudeInferred);
-    assert_eq!(decision.offset_hours, 1.0);
-    assert_eq!(decision.confidence, TimezoneConfidence::Low);
+    assert_eq!(decision.source, TimezoneSource::SolarNoonConfirmedUtc);
+    assert_eq!(decision.offset_hours, 0.0);
+    assert_eq!(decision.confidence, TimezoneConfidence::Medium);
     assert!((decision.solar_noon_hour.unwrap() - 11.70).abs() < 0.1);
 }
 
@@ -203,6 +234,32 @@ fn nearest_grid_handles_longitude_wrap() {
         nearest_grid_point(&lats, &lons, -37.73, -0.1).unwrap(),
         (1, 0)
     );
+}
+
+#[test]
+fn stale_manual_coordinates_cannot_override_the_forcing_file() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-gapfill-coordinate-contract-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("point.nc");
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        let mut latitude = file.add_variable::<f64>("latitude", &[]).unwrap();
+        latitude.put_value(47.1, ()).unwrap();
+        let mut longitude = file.add_variable::<f64>("longitude", &[]).unwrap();
+        longitude.put_value(11.3, ()).unwrap();
+    }
+    let file = netcdf::open(path).unwrap();
+    let error = super::site_coordinates(&file, Some(-37.7), Some(145.0)).unwrap_err();
+    assert!(format!("{error:#}").contains("conflicts"));
+    assert_eq!(
+        super::site_coordinates(&file, Some(47.1), Some(11.3)).unwrap(),
+        (47.1, 11.3)
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -434,7 +491,67 @@ fn timeseries_interval_amounts_are_converted_without_second_deaccumulation() {
     assert_eq!(interpolated, [281.0]);
 
     let held = sample_donor(&[0, 3600], &[10.0, 20.0], &[0, 1800, 3600], true).unwrap();
-    assert_eq!(held, [10.0, 10.0, 20.0]);
+    assert_eq!(held, [10.0, 20.0, 20.0]);
+}
+
+#[test]
+fn unsupported_cf_calendar_is_rejected() {
+    let dir = std::env::temp_dir().join("colm-gapfill-calendar");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    write_source(&src, &[280.0, 281.0, 282.0]);
+    netcdf::append(&src)
+        .unwrap()
+        .variable_mut("time")
+        .unwrap()
+        .put_attribute("calendar", "noleap")
+        .unwrap();
+
+    let error = diagnose_file(&src, &repair_plan(None, 1))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unsupported CF calendar"), "{error}");
+}
+
+#[test]
+fn non_finite_time_coordinates_are_rejected() {
+    let dir = std::env::temp_dir().join("colm-gapfill-invalid-time");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    write_source(&src, &[280.0, 281.0, 282.0]);
+    netcdf::append(&src)
+        .unwrap()
+        .variable_mut("time")
+        .unwrap()
+        .put_value(f64::NAN, 1)
+        .unwrap();
+    let error = diagnose_file(&src, &repair_plan(None, 1))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("non-finite"), "{error}");
+}
+
+#[test]
+fn donor_fill_rejects_invalid_donors_before_and_after_correction() {
+    let mut values = [280.0, f64::NAN];
+    let original = [280.0, f64::NAN];
+    let donor = [280.0, 9999.0];
+    let months = [1, 1];
+    let mut qc = [QC_OBSERVED, QC_UNRESOLVED];
+    fill_from_donor(&mut values, &original, &donor, &months, &mut qc, 1, 1).unwrap();
+    assert!(values[1].is_nan());
+    assert_eq!(qc[1], QC_UNRESOLVED);
+
+    let mut values = [280.0, f64::NAN];
+    let original = [280.0, f64::NAN];
+    let donor = [9999.0, 281.0];
+    let mut qc = [QC_OBSERVED, QC_UNRESOLVED];
+    let error = fill_from_donor(&mut values, &original, &donor, &months, &mut qc, 1, 1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlapping samples"), "{error}");
 }
 
 fn write_era5_temperature(
@@ -465,6 +582,52 @@ fn write_era5_temperature(
         .unwrap();
     t2m.put_attribute("units", "K").unwrap();
     t2m.put_values(values, netcdf::Extents::All).unwrap();
+}
+
+fn write_era5_precip(path: &std::path::Path, file_name_is_timeseries: bool) {
+    let mut file = netcdf::create(path).unwrap();
+    if !file_name_is_timeseries {
+        file.add_attribute("dataset", "reanalysis-era5-land-timeseries")
+            .unwrap();
+    }
+    file.add_dimension("valid_time", 2).unwrap();
+    file.add_dimension("latitude", 1).unwrap();
+    file.add_dimension("longitude", 1).unwrap();
+    let mut time = file
+        .add_variable::<f64>("valid_time", &["valid_time"])
+        .unwrap();
+    time.put_attribute("units", "hours since 2008-01-01 00:00:00")
+        .unwrap();
+    time.put_values(&[0.0, 1.0], netcdf::Extents::All).unwrap();
+    let mut lat = file.add_variable::<f64>("latitude", &["latitude"]).unwrap();
+    lat.put_values(&[10.0], netcdf::Extents::All).unwrap();
+    let mut lon = file
+        .add_variable::<f64>("longitude", &["longitude"])
+        .unwrap();
+    lon.put_values(&[20.0], netcdf::Extents::All).unwrap();
+    let mut tp = file
+        .add_variable::<f64>("tp", &["valid_time", "latitude", "longitude"])
+        .unwrap();
+    tp.put_attribute("units", "m").unwrap();
+    tp.put_values(&[0.001, 0.002], netcdf::Extents::All)
+        .unwrap();
+}
+
+#[test]
+fn era5_timeseries_interval_detection_uses_metadata_before_filename() {
+    let dir = std::env::temp_dir().join("colm-gapfill-era5-metadata");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_era5_precip(&dir.join("renamed-cache.nc"), false);
+    let origin = crate::civil::days_from_civil(2008, 1, 1) * 86400;
+    let values = Era5Catalog::open(&dir, 10.0, 20.0)
+        .unwrap()
+        .series(4, false, &[origin, origin + 3600], 10.0, 20.0)
+        .unwrap();
+    assert_eq!(
+        values,
+        vec![0.001 * 1000.0 / 3600.0, 0.002 * 1000.0 / 3600.0]
+    );
 }
 
 #[test]

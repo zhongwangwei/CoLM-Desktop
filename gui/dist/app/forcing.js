@@ -52,14 +52,15 @@ let tableSettings = null;
 let tableBatch = [];
 let tableBusy = false;
 let era5Busy = false;
-let gapSettings = {
+const defaultGapSettings = () => ({
   shortGap: 3,
   utcOffset: '',
   latitude: '',
   longitude: '',
   era5: '',
   minOverlap: 24,
-};
+});
+let gapSettings = defaultGapSettings();
 
 globalThis.addEventListener?.('colm:prep-site-invalidated', () => {
   lastResult = null;
@@ -90,6 +91,10 @@ const TABLE_CANONICAL_VARIABLES = {
 };
 
 const isTabularPath = path => /\.(?:csv|txt|tsv)$/i.test(path);
+
+function resetForcingSourceState() {
+  gapSettings = defaultGapSettings();
+}
 
 function resetOutputs() {
   confirmed = false;
@@ -127,6 +132,7 @@ $('fprobe').onclick = async () => {
       ? await invoke('probe_forcing_table', { path })
       : await invoke('probe_forcing', { path });
     srcPath = path;
+    resetForcingSourceState();
     tableProbe = tabular ? result : null;
     initializeMappings(result, tabular);
     heights = tabular
@@ -147,8 +153,7 @@ $('fprobe').onclick = async () => {
       siteDir: $('soutdir')?.value.trim() || state.prepArtifacts.siteDir || '',
       rawdata: $('srawdata')?.value.trim() || state.prepArtifacts.rawdataDir || '',
     } : null;
-    if (!gapSettings.latitude && $('slat')?.value) gapSettings.latitude = $('slat').value;
-    if (!gapSettings.longitude && $('slon')?.value) gapSettings.longitude = $('slon').value;
+    // 经纬度/时区/ERA5 缓存不沿用上一站点；后端会优先读文件坐标，读不到才用这里的人填值。
     // 产物目录只在还没填过时用后端建议的那个 —— 用户改过就别再动它，
     // 换一份源文件重新探测不该把他填的路径冲掉。
     if (!dstDir) {
@@ -483,6 +488,10 @@ function resetBatchArtifacts() {
 }
 
 function tableStructureCard() {
+  const landScheme = prepMode(state);
+  const landColumnLabel = landScheme === 'urban'
+    ? '局地气候区（LCZ）列'
+    : `${landScheme === 'usgs' ? 'USGS' : 'IGBP'} 地表覆盖类型列`;
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `
@@ -504,7 +513,7 @@ function tableStructureCard() {
     tableColumnField('站点名称列', 'siteColumn'),
     tableColumnField('纬度列', 'latitudeColumn'),
     tableColumnField('经度列', 'longitudeColumn'),
-    tableColumnField('地表覆盖类型列', 'landtypeColumn'),
+    tableColumnField(landColumnLabel, 'landtypeColumn'),
     tableColumnField('UTC 偏移列（小时）', 'offsetColumn'),
   ]) columns.appendChild(field);
   card.appendChild(columns);
@@ -537,10 +546,11 @@ function tableStructureCard() {
     input.className = 'input';
     input.type = 'number';
     input.step = 'any';
+    input.min = '0.000001';
     input.value = heights[key] ?? '';
     input.onchange = () => {
       const value = Number(input.value);
-      heights[key] = input.value !== '' && Number.isFinite(value) ? value : null;
+      heights[key] = input.value !== '' && Number.isFinite(value) && value > 0 ? value : null;
       tableBatch = [];
       resetBatchArtifacts();
       renderCards();
@@ -753,6 +763,7 @@ function tableImportOptions() {
     latitude_column: optionalText(tableSettings.latitudeColumn),
     longitude_column: optionalText(tableSettings.longitudeColumn),
     landtype_column: optionalText(tableSettings.landtypeColumn),
+    land_cover_scheme: prepMode(state),
     utc_offset_column: optionalText(tableSettings.offsetColumn),
     utc_offset: numberOrNull(tableSettings.utcOffset),
     latitude: numberOrNull(tableSettings.latitude),
@@ -1045,10 +1056,11 @@ function timingCard() {
     inp.className = 'input';
     inp.type = 'number';
     inp.step = 'any';
+    inp.min = '0.000001';
     inp.value = heights[key] ?? '';
     inp.onchange = () => {
       const n = parseFloat(inp.value);
-      heights[key] = Number.isFinite(n) ? n : null;
+      heights[key] = Number.isFinite(n) && n > 0 ? n : null;
       renderCards();
     };
     f.appendChild(inp);
@@ -1341,8 +1353,21 @@ function convertCard() {
   return card;
 }
 
+async function ensureRepairedSource(stem) {
+  if (repairedSource) return repairedSource;
+  const repaired = joinPath(joinPath(dstDir.trim(), '.colm-gapfill'), `${stem}_Met_repaired.nc`);
+  gapReport = await invoke('repair_forcing', {
+    src: srcPath,
+    dst: repaired,
+    slots: selectedSlots(),
+    options: gapOptions(true),
+  });
+  if (gapReport.unresolved) throw new Error(`仍有 ${gapReport.unresolved} 个缺测值没有解决`);
+  repairedSource = repaired;
+  return repairedSource;
+}
+
 async function doConvert() {
-  const src = srcPath;
   const dir = $('fdst').value.trim();
   if (!dir) { status('先填产物放哪个目录'); return; }
   const stem = state.prepArtifacts.siteStem;
@@ -1354,10 +1379,11 @@ async function doConvert() {
   if (btn) btn.disabled = true;
   try {
     const slots = selectedSlots();
+    const sourceForConvert = await ensureRepairedSource(stem);
     const heightsReady = heights.v != null && heights.t != null && heights.q != null;
     const heightsArg = heightsReady ? [heights.v, heights.t, heights.q] : null;
     lastResult = await invoke('convert_forcing', {
-      src: repairedSource ?? src,
+      src: sourceForConvert,
       dst,
       slots,
       heights: heightsArg,
@@ -1365,7 +1391,8 @@ async function doConvert() {
     Object.assign(state.prepArtifacts, { forcingFile: lastResult, forcingDir: dir });
     $('forcingdir').value = dir;
     if (state.prepArtifacts.siteFile) {
-      await scanPreparedSites(state.prepArtifacts.siteFile);
+      const selected = await scanPreparedSites(state.prepArtifacts.siteFile);
+      if (!selected?.met_file) throw new Error('转换已写出，但重新扫描未能把站点与强迫场配对；请检查强迫场目录');
     }
     globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
     status('转换完成：' + lastResult);

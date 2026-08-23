@@ -14,6 +14,42 @@ use crate::convert::{canonical_units, Heights};
 use crate::gapfill::decide_timezone_with_solar;
 use crate::slots::SLOTS;
 
+const MAX_SITE_STEPS: usize = 10_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandCoverScheme {
+    Igbp,
+    Usgs,
+    Pft,
+    Pc,
+    Urban,
+}
+
+impl LandCoverScheme {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "igbp" => Ok(Self::Igbp),
+            "usgs" => Ok(Self::Usgs),
+            "pft" => Ok(Self::Pft),
+            "pc" => Ok(Self::Pc),
+            "urban" => Ok(Self::Urban),
+            other => bail!("unsupported land-cover scheme {other:?}"),
+        }
+    }
+
+    fn validate(self, site: &str, value: i32) -> Result<()> {
+        let (name, range) = match self {
+            Self::Usgs => ("USGS", 1..=24),
+            Self::Urban => ("LCZ", 1..=10),
+            Self::Igbp | Self::Pft | Self::Pc => ("IGBP", 1..=17),
+        };
+        if !range.contains(&value) {
+            bail!("site {site:?} {name} class {value} is outside {range:?}");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabularColumn {
     pub name: String,
@@ -92,6 +128,9 @@ pub struct TabularPlan {
     /// only two records separated by a missing row: the intended cadence cannot
     /// be recovered from those two timestamps alone.
     pub step_seconds: Option<i64>,
+    /// The selected kernel/subgrid scheme decides how a numeric classification
+    /// column is interpreted. Without it a value such as 20 is ambiguous.
+    pub land_cover_scheme: Option<LandCoverScheme>,
     pub heights: Option<Heights>,
     pub slots: Vec<TabularSlot>,
 }
@@ -341,12 +380,16 @@ pub fn import_table(
             bail!("site {site:?} longitude {longitude} is outside -180..=180");
         }
         let landtype = consistent_integer(&rows, landtype_index, "landtype")?;
-        if landtype.is_some_and(|value| !(1..=24).contains(&value)) {
-            bail!("site {site:?} landtype {landtype:?} is outside 1..=24");
+        if let Some(value) = landtype {
+            let scheme = plan.land_cover_scheme.context(
+                "a land-cover column needs the selected scheme (IGBP/USGS/PFT/PC/Urban)",
+            )?;
+            scheme.validate(&site, value)?;
         }
-        let column_offset = consistent_number(&rows, offset_index, "UTC offset")?;
         let mut records = Vec::with_capacity(rows.len());
-        let mut explicit_offsets = Vec::new();
+        let mut resolved_row_offsets = Vec::new();
+        let mut saw_timestamp_offset = false;
+        let mut saw_column_offset = false;
         for row in &rows {
             let parsed = parse_timestamp(&row.cells[time_index]).with_context(|| {
                 format!(
@@ -354,33 +397,53 @@ pub fn import_table(
                     row.line, row.cells[time_index]
                 )
             })?;
-            explicit_offsets.push(parsed.offset_seconds);
-            records.push((row, parsed));
+            let column_offset = offset_index
+                .map(|index| parse_offset_cell(row, index))
+                .transpose()?
+                .flatten();
+            if let (Some(timestamp), Some(column)) = (parsed.offset_seconds, column_offset) {
+                if timestamp != column {
+                    bail!(
+                        "line {} timestamp UTC offset disagrees with the UTC offset column",
+                        row.line
+                    );
+                }
+            }
+            saw_timestamp_offset |= parsed.offset_seconds.is_some();
+            saw_column_offset |= column_offset.is_some();
+            let resolved = parsed.offset_seconds.or(column_offset);
+            resolved_row_offsets.push(resolved);
+            records.push((row, parsed, resolved));
         }
-        let has_explicit = explicit_offsets.iter().any(Option::is_some);
-        let all_explicit = explicit_offsets.iter().all(Option::is_some);
+        let has_explicit = resolved_row_offsets.iter().any(Option::is_some);
+        let all_explicit = resolved_row_offsets.iter().all(Option::is_some);
         if has_explicit && !all_explicit {
-            bail!(
-                "site {site:?} mixes timestamps with and without explicit UTC offsets; make the column consistent"
-            );
+            bail!("site {site:?} mixes rows with and without UTC offsets; make every row explicit");
         }
         let (fallback_offset, timezone_source, timezone_confidence, timezone_conflict) =
             if all_explicit {
-                (0_i64, "timestamp_offset".to_string(), "high", false)
+                let source = if saw_timestamp_offset {
+                    "timestamp_offset"
+                } else if saw_column_offset {
+                    "table_offset_column"
+                } else {
+                    unreachable!()
+                };
+                (0_i64, source.to_string(), "high", false)
             } else {
                 let local_times = records
                     .iter()
-                    .map(|(_, parsed)| parsed.local_seconds)
+                    .map(|(_, parsed, _)| parsed.local_seconds)
                     .collect::<Vec<_>>();
                 let swdown = match swdown_index {
                     Some(index) => records
                         .iter()
-                        .map(|(row, _)| parse_value(row, index, "shortwave radiation"))
+                        .map(|(row, _, _)| parse_value(row, index, "shortwave radiation"))
                         .collect::<Result<Vec<_>>>()?,
                     None => Vec::new(),
                 };
                 let decision = decide_timezone_with_solar(
-                    plan.manual_utc_offset.or(column_offset),
+                    plan.manual_utc_offset,
                     None,
                     Some(longitude),
                     &local_times,
@@ -388,8 +451,6 @@ pub fn import_table(
                 )?;
                 let source = if plan.manual_utc_offset.is_some() {
                     "manual_override"
-                } else if column_offset.is_some() {
-                    "table_offset_column"
                 } else {
                     decision.source.as_str()
                 };
@@ -401,8 +462,8 @@ pub fn import_table(
                 )
             };
         let mut by_time = BTreeMap::<i64, &Row>::new();
-        for (row, parsed) in records {
-            let offset = parsed.offset_seconds.unwrap_or(fallback_offset);
+        for (row, parsed, row_offset) in records {
+            let offset = row_offset.unwrap_or(fallback_offset);
             let utc = parsed.local_seconds - offset;
             if let Some(previous) = by_time.insert(utc, row) {
                 bail!(
@@ -426,19 +487,18 @@ pub fn import_table(
             let difference = pair[1] - pair[0];
             if difference <= 0 || difference % step != 0 {
                 bail!(
-                    "site {site:?} timestamp difference {difference}s is not a multiple of the {step}s time step"
+                    "site {site:?} timestamp difference {difference}s is off the inferred {step}s cadence; correct the timestamp or choose an explicit valid cadence"
                 );
             }
         }
         let start = observed_times[0];
         let end = *observed_times.last().unwrap();
-        let steps = ((end - start) / step + 1) as usize;
+        let steps = checked_step_count(start, end, step, by_time.len())?;
         let inserted_steps = steps - by_time.len();
         let staged_path = staging.join(format!("{safe_site}_Met.nc"));
         let final_path = destination.join(format!("{safe_site}_Met.nc"));
-        let resolved_offset = explicit_common_offset(&explicit_offsets)
+        let resolved_offset = explicit_common_offset(&resolved_row_offsets)
             .or(plan.manual_utc_offset)
-            .or(column_offset)
             .or_else(|| (!all_explicit).then_some(fallback_offset as f64 / 3600.0));
         write_site_file(
             path,
@@ -722,16 +782,24 @@ fn probe_sites(
         .map(|(id, rows)| {
             let mut times = if let Some(index) = time_index {
                 rows.iter()
-                    .map(|row| parse_timestamp(&row.cells[index]).map(|stamp| stamp.local_seconds))
+                    .map(|row| {
+                        parse_timestamp(&row.cells[index])
+                            .map(|stamp| (stamp.local_seconds, row.cells[index].clone()))
+                    })
                     .collect::<Result<Vec<_>>>()?
             } else {
                 Vec::new()
             };
-            times.sort_unstable();
-            let step_seconds = infer_step(&times).ok();
+            times.sort_unstable_by_key(|item| item.0);
+            let seconds = times.iter().map(|item| item.0).collect::<Vec<_>>();
+            let step_seconds = infer_step(&seconds).ok();
             let inserted_steps = step_seconds
                 .filter(|_| times.len() >= 2)
-                .map(|step| ((times[times.len() - 1] - times[0]) / step + 1) as usize - times.len())
+                .and_then(|step| {
+                    checked_step_count(seconds[0], seconds[seconds.len() - 1], step, seconds.len())
+                        .ok()
+                })
+                .map(|steps| steps.saturating_sub(times.len()))
                 .unwrap_or(0);
             Ok(TabularSiteProbe {
                 id,
@@ -739,8 +807,8 @@ fn probe_sites(
                 latitude: consistent_number(&rows, lat_index, "latitude")?,
                 longitude: consistent_number(&rows, lon_index, "longitude")?,
                 landtype: consistent_integer(&rows, landtype_index, "landtype")?,
-                start: time_index.map(|index| rows[0].cells[index].clone()),
-                end: time_index.map(|index| rows[rows.len() - 1].cells[index].clone()),
+                start: times.first().map(|item| item.1.clone()),
+                end: times.last().map(|item| item.1.clone()),
                 step_seconds,
                 inserted_steps,
             })
@@ -823,6 +891,30 @@ fn parse_value(row: &Row, index: usize, label: &str) -> Result<f64> {
     }
     raw.parse::<f64>()
         .with_context(|| format!("line {} {label} value {raw:?} is not numeric", row.line))
+}
+
+fn parse_offset_cell(row: &Row, index: usize) -> Result<Option<i64>> {
+    let raw = row.cells[index].trim();
+    if is_missing(raw) {
+        return Ok(None);
+    }
+    let hours = raw
+        .parse::<f64>()
+        .with_context(|| format!("line {} UTC offset {raw:?} is not numeric", row.line))?;
+    if !hours.is_finite() || !(-12.0..=14.0).contains(&hours) {
+        bail!(
+            "line {} UTC offset {hours} is outside -12..=14 hours",
+            row.line
+        );
+    }
+    let seconds = (hours * 3600.0).round() as i64;
+    if ((seconds as f64 / 3600.0) - hours).abs() > 1e-9 {
+        bail!(
+            "line {} UTC offset {hours} is not representable in whole seconds",
+            row.line
+        );
+    }
+    Ok(Some(seconds))
 }
 
 fn is_missing(raw: &str) -> bool {
@@ -960,15 +1052,35 @@ fn infer_step(times: &[i64]) -> Result<i64> {
     if times.len() < 2 {
         bail!("at least two timestamps are required");
     }
-    let mut step = 0_i64;
-    for difference in times.windows(2).map(|pair| pair[1] - pair[0]) {
-        if difference <= 0 {
+    let differences = times
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    for difference in &differences {
+        if *difference <= 0 {
             bail!("timestamps are not strictly increasing");
         }
-        step = gcd(step, difference);
     }
-    if step <= 0 {
-        bail!("time step is not positive");
+
+    // Common station cadences, longest first. A one-second typo in an otherwise
+    // half-hourly file must not turn a decade into hundreds of millions of rows.
+    const CADENCES: &[i64] = &[
+        86_400, 43_200, 21_600, 10_800, 7_200, 3_600, 1_800, 1_200, 900, 600, 300, 60,
+    ];
+    if let Some(step) = CADENCES.iter().copied().find(|candidate| {
+        differences.iter().all(|difference| {
+            let remainder = difference.rem_euclid(*candidate);
+            remainder <= 1 || candidate - remainder <= 1
+        })
+    }) {
+        return Ok(step);
+    }
+
+    let step = differences.iter().copied().fold(0_i64, gcd);
+    if step < 60 {
+        bail!(
+            "timestamp differences imply an implausible {step}s cadence; correct timestamp jitter or specify the intended time step"
+        );
     }
     Ok(step)
 }
@@ -980,6 +1092,26 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
         b = remainder;
     }
     a.abs()
+}
+
+pub(crate) fn checked_step_count(start: i64, end: i64, step: i64, rows: usize) -> Result<usize> {
+    if step <= 0 || end < start {
+        bail!("invalid time range or non-positive step");
+    }
+    let span = end
+        .checked_sub(start)
+        .context("time range overflows while counting table rows")?;
+    let raw = span
+        .checked_div(step)
+        .and_then(|value| value.checked_add(1))
+        .context("time range overflows while counting table rows")?;
+    let steps = usize::try_from(raw).context("table time axis does not fit in memory")?;
+    if steps > MAX_SITE_STEPS {
+        bail!(
+            "table expansion would create {steps} time steps from {rows} rows; the safety limit is {MAX_SITE_STEPS}. Correct the cadence or split the input"
+        );
+    }
+    Ok(steps)
 }
 
 fn safe_site_name(site: &str) -> Result<String> {
@@ -1120,19 +1252,67 @@ fn write_site_file(
                     raw.push(f64::NAN);
                     continue;
                 };
-                let mut value = parse_value(row, primary_index, &slot.column)?;
-                for (extra_name, extra_index) in slot.also_add.iter().zip(&extra_indexes) {
-                    let extra = parse_value(row, *extra_index, extra_name)?;
+                raw.push(parse_value(row, primary_index, &slot.column)?);
+            }
+            let units = canonical_units(slot.index);
+            let mut converted = if slot.index == 2 {
+                let temperature = tabular_support_values(table, rows, start, step, steps, plan, 1)?;
+                let pressure = tabular_support_values(table, rows, start, step, steps, plan, 3)?;
+                match crate::units::humidity_to_specific(
+                    &slot.column,
+                    &slot.source_units,
+                    &raw,
+                    &temperature,
+                    &pressure,
+                )? {
+                    Some(values) => values,
+                    None => crate::units::convert_units_with_step(
+                        &slot.source_units,
+                        units,
+                        &raw,
+                        Some(step as f64),
+                    )?,
+                }
+            } else {
+                crate::units::convert_units_with_step(
+                    &slot.source_units,
+                    units,
+                    &raw,
+                    Some(step as f64),
+                )?
+            };
+            for (extra_name, extra_index) in slot.also_add.iter().zip(&extra_indexes) {
+                let source_units = table.columns[*extra_index]
+                    .units
+                    .as_deref()
+                    .with_context(|| {
+                        format!(
+                            "extra column {extra_name:?} has no unit in its header; cannot safely add it to {:?}",
+                            slot.column
+                        )
+                    })?;
+                let raw_extra = (0..steps)
+                    .map(|index| {
+                        let timestamp = start + index as i64 * step;
+                        rows.get(&timestamp).map_or(Ok(f64::NAN), |row| {
+                            parse_value(row, *extra_index, extra_name)
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let extra = crate::units::convert_units_with_step(
+                    source_units,
+                    units,
+                    &raw_extra,
+                    Some(step as f64),
+                )?;
+                for (value, extra) in converted.iter_mut().zip(extra) {
                     if value.is_finite() && extra.is_finite() {
-                        value += extra;
+                        *value += extra;
                     } else {
-                        value = f64::NAN;
+                        *value = f64::NAN;
                     }
                 }
-                raw.push(value);
             }
-            let converted =
-                crate::units::convert_units(&slot.source_units, canonical_units(slot.index), &raw)?;
             let fill = -9999.0_f64;
             let values = converted
                 .into_iter()
@@ -1140,7 +1320,7 @@ fn write_site_file(
                 .collect::<Vec<_>>();
             let mut variable = file.add_variable::<f64>(canonical, &["time"])?;
             variable.set_fill_value(fill)?;
-            variable.put_attribute("units", canonical_units(slot.index))?;
+            variable.put_attribute("units", units)?;
             let source_note = if slot.also_add.is_empty() {
                 format!("tabular column {:?} ({})", slot.column, slot.source_units)
             } else {
@@ -1161,6 +1341,36 @@ fn write_site_file(
     }
     install_file(&tmp, destination)?;
     Ok(())
+}
+
+fn tabular_support_values(
+    table: &Table,
+    rows: &BTreeMap<i64, &Row>,
+    start: i64,
+    step: i64,
+    steps: usize,
+    plan: &TabularPlan,
+    index: usize,
+) -> Result<Vec<f64>> {
+    let slot = plan
+        .slots
+        .iter()
+        .find(|slot| slot.index == index)
+        .with_context(|| format!("humidity derivation also needs forcing slot {index}"))?;
+    let column = column_index(table, &slot.column)?;
+    let raw = (0..steps)
+        .map(|position| {
+            let timestamp = start + position as i64 * step;
+            rows.get(&timestamp)
+                .map_or(Ok(f64::NAN), |row| parse_value(row, column, &slot.column))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::units::convert_units_with_step(
+        &slot.source_units,
+        canonical_units(index),
+        &raw,
+        Some(step as f64),
+    )
 }
 
 fn scalar(

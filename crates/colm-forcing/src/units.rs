@@ -8,7 +8,7 @@
 //! 是两条独立的表项。名字的模糊匹配放在调用方（界面上让人确认），
 //! 这里只做确定的算术。
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 /// `(from, to, scale, offset)`：`out = in * scale + offset`
 const TABLE: &[(&str, &str, f64, f64)] = &[
@@ -59,8 +59,33 @@ const TABLE: &[(&str, &str, f64, f64)] = &[
 /// `from == to` 时**原样返回**，不做 `* 1.0 + 0.0` —— 那会让
 /// 非规格化的浮点值发生变化，而这条管道的地基正是逐位复现。
 pub fn convert_units(from: &str, to: &str, values: &[f64]) -> Result<Vec<f64>> {
+    convert_units_with_step(from, to, values, None)
+}
+
+/// Convert units that may represent an amount accumulated over one source
+/// record. Bare `mm`/`kg m-2` are common tower exports; their rate is defined
+/// only together with the actual record cadence.
+pub fn convert_units_with_step(
+    from: &str,
+    to: &str,
+    values: &[f64],
+    step_seconds: Option<f64>,
+) -> Result<Vec<f64>> {
     if from == to {
         return Ok(values.to_vec());
+    }
+    if to == "kg/m2/s"
+        && matches!(
+            from.trim(),
+            "mm" | "kg/m2" | "kg m-2" | "kg m^-2" | "kg m**-2"
+        )
+    {
+        let step = step_seconds
+            .filter(|step| step.is_finite() && *step > 0.0)
+            .context(
+                "an interval-accumulated precipitation unit needs a positive source time step",
+            )?;
+        return Ok(values.iter().map(|value| value / step).collect());
     }
     match TABLE.iter().find(|(f, t, _, _)| *f == from && *t == to) {
         // **恒等换算走原样返回。** `kg/m2/s` 与 `mm/s` 是同一个量的两个
@@ -75,11 +100,157 @@ pub fn convert_units(from: &str, to: &str, values: &[f64]) -> Result<Vec<f64>> {
     }
 }
 
+/// Convert relative humidity or vapour-pressure deficit to CoLM specific
+/// humidity. Temperature and pressure must already be in K and Pa.
+pub fn humidity_to_specific(
+    source_name: &str,
+    source_units: &str,
+    values: &[f64],
+    temperature: &[f64],
+    pressure: &[f64],
+) -> Result<Option<Vec<f64>>> {
+    if values.len() != temperature.len() || values.len() != pressure.len() {
+        bail!("humidity, temperature, and pressure series must have the same length");
+    }
+    let (relative, deficit) = humidity_source_kind(source_name);
+    if !relative && !deficit {
+        return Ok(None);
+    }
+    let humidity = if relative {
+        match source_units.trim() {
+            "%" | "percent" | "percentage" => values.iter().map(|value| value / 100.0).collect(),
+            "1" | "fraction" => values.to_vec(),
+            other => bail!("relative humidity unit {other:?} is not % or a 0..1 fraction"),
+        }
+    } else {
+        convert_units(source_units, "Pa", values)?
+    };
+    Ok(Some(
+        humidity
+            .into_iter()
+            .zip(temperature)
+            .zip(pressure)
+            .map(|((humidity, temperature), pressure)| {
+                if !humidity.is_finite() || !temperature.is_finite() || !pressure.is_finite() {
+                    return f64::NAN;
+                }
+                let saturation =
+                    611.2 * (17.67 * (temperature - 273.15) / (temperature - 29.65)).exp();
+                let vapour = if relative {
+                    if !(0.0..=1.0).contains(&humidity) {
+                        return f64::NAN;
+                    }
+                    humidity * saturation
+                } else {
+                    if humidity < 0.0 || humidity > saturation {
+                        return f64::NAN;
+                    }
+                    saturation - humidity
+                };
+                let denominator = pressure - (1.0 - 0.622) * vapour;
+                if denominator > 0.0 {
+                    0.622 * vapour / denominator
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect(),
+    ))
+}
+
+pub fn humidity_from_specific(
+    source_name: &str,
+    source_units: &str,
+    values: &[f64],
+    temperature: &[f64],
+    pressure: &[f64],
+) -> Result<Option<Vec<f64>>> {
+    if values.len() != temperature.len() || values.len() != pressure.len() {
+        bail!("humidity, temperature, and pressure series must have the same length");
+    }
+    let (relative, deficit) = humidity_source_kind(source_name);
+    if !relative && !deficit {
+        return Ok(None);
+    }
+    let pascals = values
+        .iter()
+        .zip(temperature)
+        .zip(pressure)
+        .map(|((humidity, temperature), pressure)| {
+            if !humidity.is_finite() || !temperature.is_finite() || !pressure.is_finite() {
+                return f64::NAN;
+            }
+            let vapour = humidity * pressure / (0.622 + (1.0 - 0.622) * humidity);
+            let saturation = 611.2 * (17.67 * (temperature - 273.15) / (temperature - 29.65)).exp();
+            if relative {
+                vapour / saturation
+            } else {
+                saturation - vapour
+            }
+        })
+        .collect::<Vec<_>>();
+    if relative {
+        match source_units.trim() {
+            "%" | "percent" | "percentage" => Ok(Some(
+                pascals.into_iter().map(|value| value * 100.0).collect(),
+            )),
+            "1" | "fraction" => Ok(Some(pascals)),
+            other => bail!("relative humidity unit {other:?} is not % or a 0..1 fraction"),
+        }
+    } else {
+        Ok(Some(from_canonical("Pa", source_units, &pascals)?))
+    }
+}
+
+fn humidity_source_kind(source_name: &str) -> (bool, bool) {
+    let name = source_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let compact = name.replace('_', "");
+    let relative = compact.contains("relativehumidity")
+        || name == "rh"
+        || name.starts_with("rh_")
+        || name.ends_with("_rh");
+    let deficit = name.contains("vpd")
+        || compact.contains("vaporpressuredeficit")
+        || compact.contains("vapourpressuredeficit");
+    (relative, deficit)
+}
+
 /// 把规范槽位单位换回源文件单位。缺测修复发生在格式标准化之前，ERA5-Land
 /// donor 用的是规范单位，而中间产物必须仍保持源文件的单位契约。
 pub fn from_canonical(canonical: &str, target: &str, values: &[f64]) -> Result<Vec<f64>> {
+    from_canonical_with_step(canonical, target, values, None)
+}
+
+pub fn from_canonical_with_step(
+    canonical: &str,
+    target: &str,
+    values: &[f64],
+    step_seconds: Option<f64>,
+) -> Result<Vec<f64>> {
     if canonical == target {
         return Ok(values.to_vec());
+    }
+    if canonical == "kg/m2/s"
+        && matches!(
+            target.trim(),
+            "mm" | "kg/m2" | "kg m-2" | "kg m^-2" | "kg m**-2"
+        )
+    {
+        let step = step_seconds
+            .filter(|step| step.is_finite() && *step > 0.0)
+            .context(
+                "an interval-accumulated precipitation unit needs a positive source time step",
+            )?;
+        return Ok(values.iter().map(|value| value * step).collect());
     }
     match TABLE
         .iter()

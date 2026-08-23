@@ -149,6 +149,14 @@ fn the_metrics_table_says_which_observation_it_used() {
 }
 
 #[test]
+fn single_site_evaluation_reports_selected_variables_without_valid_pairs() {
+    let t = js("results.js");
+    assert!(t.contains("const missing = selected.filter"));
+    assert!(t.contains("当前时段没有有效配对样本"));
+    assert!(t.contains("No valid paired samples"));
+}
+
+#[test]
 fn the_installer_carries_a_runnable_example() {
     // 一个刚装好程序的人手上没有任何数据。PLUMBER2 要注册、几十 GB ——
     // 在拿到数据之前他连「这程序能不能用」都判断不了。
@@ -191,5 +199,78 @@ fn the_installer_carries_a_runnable_example() {
         bytes < 8 * 1024 * 1024,
         "示例数据 {} MB，太大了 —— 重新 nccopy -d 5 压一遍",
         bytes / 1048576
+    );
+}
+
+#[test]
+fn forcing_prep_resets_station_specific_state_and_persists_timezone_before_convert() {
+    let forcing = js("forcing.js");
+    assert!(
+        forcing.contains("resetForcingSourceState();"),
+        "探测新强迫源时没有清理上一站点的时区/经纬度/ERA5 状态"
+    );
+    for stale in ["$('slat')?.value", "$('slon')?.value"] {
+        assert!(
+            !forcing.contains(stale),
+            "强迫场诊断又从站点表单继承坐标，可能跨站污染：{stale}"
+        );
+    }
+    assert!(
+        forcing.contains("async function ensureRepairedSource")
+            && forcing.contains("await invoke('repair_forcing'")
+            && forcing.contains("src: sourceForConvert"),
+        "无缺测 NetCDF 转换前也必须走 repair_forcing，把时区诊断写进中间文件"
+    );
+    assert!(
+        forcing.contains("重新扫描未能把站点与强迫场配对"),
+        "转换交接没有以重新扫描成功作为准入"
+    );
+}
+
+#[test]
+fn forcing_heights_must_be_positive_numbers() {
+    let prep = js("prep-state.js");
+    assert!(
+        prep.contains("number <= 0"),
+        "观测高度 0 或负数仍会被当成有效高度"
+    );
+    let forcing = js("forcing.js");
+    assert!(
+        forcing.contains("input.min = '0.000001'") && forcing.contains("inp.min = '0.000001'"),
+        "单 NetCDF 与表格导入的高度输入都应限制为正值"
+    );
+}
+
+#[test]
+fn preprocessing_handoff_rechecks_before_entering_basic_settings() {
+    let site = js("sitedata.js");
+    assert!(
+        site.contains("交接前重新检查失败")
+            && site.contains("const selected = await adoptPreparedSite()")
+            && site.contains("!selected?.met_file"),
+        "前处理交接仍可能只信内存路径、不确认站点与强迫场真实配对"
+    );
+}
+
+#[test]
+fn preprocessing_starts_with_an_explicit_single_or_multi_site_path() {
+    let html = std::fs::read_to_string(root().join("gui/dist/index.html")).unwrap();
+    let site = js("sitedata.js");
+    let forcing = js("forcing.js");
+    assert!(
+        html.contains("id=\"prep-single-site\"")
+            && html.contains("id=\"prep-multi-site\"")
+            && html.contains("id=\"single-site-prep\" hidden"),
+        "前处理入口必须先区分单站手动与多站表格，不能默认展示一套单站表单"
+    );
+    assert!(
+        site.contains("$('prep-multi-site').onclick")
+            && site.contains("go('prep-forcing')")
+            && site.contains("$('fsrc').focus()"),
+        "多站入口应直接进入现有表格导入流程"
+    );
+    assert!(
+        forcing.contains("createSites: true"),
+        "表格导入应默认逐站生成站点文件"
     );
 }

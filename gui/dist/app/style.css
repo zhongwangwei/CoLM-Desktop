@@ -168,6 +168,23 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 
 .flow-pane[hidden] { display: none; }
 
+.about-dialog { width: min(440px, calc(100vw - 32px)); padding: 0; border: 0;
+  border-radius: var(--r-md); color: var(--text); background: var(--elevated);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .28); }
+.about-dialog::backdrop { background: rgba(12, 18, 28, .54); backdrop-filter: blur(3px); }
+.about-card { position: relative; padding: 30px 34px 26px; text-align: center; }
+.about-close { position: absolute; top: 10px; right: 12px; width: 30px; height: 30px;
+  border: 0; border-radius: 50%; color: var(--muted); background: transparent;
+  font-size: 22px; line-height: 1; cursor: pointer; }
+.about-close:hover { color: var(--text); background: var(--border-soft); }
+.about-logo { width: 72px; height: 72px; border-radius: 16px; }
+.about-card h2 { margin: 10px 0 4px; }
+.about-signature { margin: 20px 0 18px; padding: 18px 0; border-block: 1px solid var(--border-soft);
+  line-height: 1.65; }
+.about-maintainer { margin-top: 7px; font-size: 14px; font-weight: 400; }
+.about-email { color: var(--accent); }
+.about-team { margin-top: 10px; font-size: 17px; font-weight: 700; }
+
 /* 需要人特别注意的一段说明。虚线框是「这里跟别处不一样」的信号。 */
 .expert-note { border: 1.5px dashed var(--accent); border-radius: var(--r-md);
                padding: 12px 14px; margin: 12px 0; font-size: 12px;

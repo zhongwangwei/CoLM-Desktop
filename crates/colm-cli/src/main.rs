@@ -77,6 +77,7 @@ usage:
                            --time COLUMN [--site COLUMN]
                            [--lat-column COLUMN --lon-column COLUMN]
                            [--landtype-column COLUMN] [--offset-column COLUMN]
+                           [--land-cover-scheme IGBP|USGS|PFT|PC|Urban]
                            [--lat LAT --lon LON] [--utc-offset HOURS]
                            [--step-seconds N] [--height V,T,Q]
                            --slot N=column:units[+extra] ... [--json 1]
@@ -1986,8 +1987,50 @@ fn variable_units(f: &netcdf::File, name: &str) -> Option<String> {
         .and_then(|r| r.ok())
         .and_then(|v| match v {
             netcdf::AttributeValue::Str(s) => Some(s),
+            netcdf::AttributeValue::Strs(values) => values.into_iter().next(),
             _ => None,
         })
+}
+
+fn numeric_attribute_values(value: netcdf::AttributeValue) -> Vec<f64> {
+    use netcdf::AttributeValue::*;
+    match value {
+        Uchar(value) => vec![f64::from(value)],
+        Uchars(values) => values.into_iter().map(f64::from).collect(),
+        Schar(value) => vec![f64::from(value)],
+        Schars(values) => values.into_iter().map(f64::from).collect(),
+        Ushort(value) => vec![f64::from(value)],
+        Ushorts(values) => values.into_iter().map(f64::from).collect(),
+        Short(value) => vec![f64::from(value)],
+        Shorts(values) => values.into_iter().map(f64::from).collect(),
+        Uint(value) => vec![f64::from(value)],
+        Uints(values) => values.into_iter().map(f64::from).collect(),
+        Int(value) => vec![f64::from(value)],
+        Ints(values) => values.into_iter().map(f64::from).collect(),
+        Ulonglong(value) => vec![value as f64],
+        Ulonglongs(values) => values.into_iter().map(|value| value as f64).collect(),
+        Longlong(value) => vec![value as f64],
+        Longlongs(values) => values.into_iter().map(|value| value as f64).collect(),
+        Float(value) => vec![f64::from(value)],
+        Floats(values) => values.into_iter().map(f64::from).collect(),
+        Double(value) => vec![value],
+        Doubles(values) => values,
+        Str(_) | Strs(_) => Vec::new(),
+    }
+}
+
+fn variable_missing_count(variable: &netcdf::Variable) -> Result<usize> {
+    let markers = ["_FillValue", "missing_value"]
+        .into_iter()
+        .filter_map(|name| variable.attribute_value(name))
+        .filter_map(Result::ok)
+        .flat_map(numeric_attribute_values)
+        .collect::<Vec<_>>();
+    let values: Vec<f64> = variable.get_values(netcdf::Extents::All)?;
+    Ok(values
+        .iter()
+        .filter(|value| !value.is_finite() || markers.contains(value))
+        .count())
 }
 
 fn read_file_1d(f: &netcdf::File, path: &Path, name: &str) -> Result<Vec<f64>> {
@@ -2135,6 +2178,11 @@ fn cmd_forcing_table_convert(src: &Path, destination: &Path, opts: &Opts) -> Res
         latitude: optional_f64("--lat")?,
         longitude: optional_f64("--lon")?,
         step_seconds,
+        land_cover_scheme: opts
+            .get("--land-cover-scheme")
+            .as_deref()
+            .map(colm_forcing::LandCoverScheme::parse)
+            .transpose()?,
         heights: opts
             .get("--height")
             .as_deref()
@@ -2364,8 +2412,9 @@ fn cmd_forcing_probe(file: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// 与独立 bin `forcing-convert` 同样的行为：没被 `--slot` 指定的槽位走
-/// 自动匹配，带缺测的变量拦在入口，再转换。**`--slot`/`--height` 的解析
+/// 与独立 bin `forcing-convert` 同样的行为：必需槽位自动补齐；只要用户给过
+/// `--slot`，未选择的可选槽位就保持未使用。带缺测的变量拦在入口，再转换。
+/// **`--slot`/`--height` 的解析
 /// 调 `colm_forcing::parse_slot_spec`/`parse_heights`**——那份解析原来在
 /// `forcing-convert.rs` 里单独一份，抄第二遍意味着两处要同步改
 /// （`convert.rs` 的 `copy_attributes` 就是同一段代码抄三遍、错也有三份
@@ -2398,8 +2447,12 @@ fn cmd_forcing_convert(
     }
 
     let f = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    let has_explicit_slots = !given.is_empty();
     for (i, slot) in colm_forcing::SLOTS.iter().enumerate() {
         if given.iter().any(|s| s.index == slot.index) {
+            continue;
+        }
+        if slot.optional && has_explicit_slots {
             continue;
         }
         let Some(name) = resolved.vname[i] else {
@@ -2418,16 +2471,10 @@ fn cmd_forcing_convert(
     for sp in &given {
         for name in std::iter::once(&sp.source_name).chain(sp.also_add.iter()) {
             let Some(v) = f.variable(name) else { continue };
-            let fill = match v.attribute_value("_FillValue").and_then(|r| r.ok()) {
-                Some(netcdf::AttributeValue::Float(x)) => f64::from(x),
-                Some(netcdf::AttributeValue::Double(x)) => x,
-                _ => continue,
-            };
-            let vals: Vec<f64> = v.get_values(netcdf::Extents::All)?;
-            let n = vals.iter().filter(|x| (**x - fill).abs() < 1e-6).count();
+            let n = variable_missing_count(&v)?;
             if n > 0 {
                 bail!(
-                    "{name} has {n} missing value(s) (_FillValue = {fill}); \
+                    "{name} has {n} non-finite or declared missing value(s); \
                      fill them before converting — a fill value survives unit \
                      conversion as a plausible-looking number and the model will \
                      run to completion with it"
@@ -2470,8 +2517,12 @@ fn forcing_repair_plan(src: &Path, opts: &Opts) -> Result<colm_forcing::RepairPl
         bail!("{} forcing slot(s) unresolved", missing.len());
     }
     let file = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
+    let has_explicit_slots = !given.is_empty();
     for (position, slot) in colm_forcing::SLOTS.iter().enumerate() {
         if given.iter().any(|given| given.index == slot.index) {
+            continue;
+        }
+        if slot.optional && has_explicit_slots {
             continue;
         }
         let Some(name) = resolved.vname[position] else {
@@ -2649,10 +2700,11 @@ fn cmd_era5land_download(
     std::fs::write(&script, ERA5LAND_DOWNLOADER)
         .with_context(|| format!("cannot write {}", script.display()))?;
 
-    let python = ["python3", "python"]
+    let (python, python_args) = python_candidates(cfg!(windows))
         .into_iter()
-        .find(|program| {
+        .find(|(program, prefix)| {
             std::process::Command::new(program)
+                .args(*prefix)
                 .arg("-c")
                 .arg("import cdsapi")
                 .status()
@@ -2666,6 +2718,7 @@ fn cmd_era5land_download(
     let grid_lon = (longitude * 10.0).round() / 10.0;
     let point_cache = destination.join(colm_forcing::era5_point_cache_name(grid_lat, grid_lon));
     let output = std::process::Command::new(python)
+        .args(python_args)
         .arg(&script)
         .arg(point_cache)
         .arg(format!("{grid_lat:.1}"))
@@ -2684,6 +2737,14 @@ fn cmd_era5land_download(
     }
     print!("{}", String::from_utf8_lossy(&output.stdout));
     Ok(())
+}
+
+fn python_candidates(windows: bool) -> Vec<(&'static str, &'static [&'static str])> {
+    if windows {
+        vec![("py", &["-3"]), ("python", &[]), ("python3", &[])]
+    } else {
+        vec![("python3", &[]), ("python", &[])]
+    }
 }
 
 fn require_cds_api_config() -> Result<()> {
@@ -2765,6 +2826,13 @@ mod era5land_download_tests {
             ERA5LAND_DOWNLOADER.contains(r#""date": [f"{start.isoformat()}/{end.isoformat()}"]"#)
         );
         assert!(!ERA5LAND_DOWNLOADER.contains("for (year, month)"));
+        assert!(ERA5LAND_DOWNLOADER.contains("saved_start <= start and saved_end >= end"));
+        assert!(ERA5LAND_DOWNLOADER.contains("os.O_CREAT | os.O_EXCL"));
+    }
+
+    #[test]
+    fn windows_python_launcher_is_supported() {
+        assert!(python_candidates(true).contains(&("py", &["-3"])));
     }
 }
 
@@ -2773,6 +2841,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from zipfile import ZipFile, is_zipfile
@@ -2806,20 +2875,55 @@ request = {
     "data_format": "netcdf",
 }
 
-try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    files = [cache / name for name in manifest.get("files", [])]
-    if manifest.get("request") == request and files and all(path.stat().st_size > 0 for path in files):
-        print(f"cached {cache}", flush=True)
-        print(f"ERA5-Land cache ready: {cache}")
-        raise SystemExit(0)
-except (AttributeError, FileNotFoundError, OSError, TypeError, ValueError):
-    pass
+def cached_files_cover_request():
+    for candidate in cache.glob("era5land_timeseries_*.json"):
+        try:
+            manifest = json.loads(candidate.read_text(encoding="utf-8"))
+            saved = manifest.get("request", {})
+            saved_dates = saved.get("date", [])
+            if (saved.get("variable") != variables
+                    or saved.get("location") != request["location"]
+                    or len(saved_dates) != 1):
+                continue
+            saved_start, saved_end = map(date.fromisoformat, saved_dates[0].split("/"))
+            files = [cache / name for name in manifest.get("files", [])]
+            if saved_start <= start and saved_end >= end and files \
+                    and all(path.stat().st_size > 0 for path in files):
+                return files
+        except (AttributeError, FileNotFoundError, OSError, TypeError, ValueError):
+            continue
+    return []
+
+if cached_files_cover_request():
+    print(f"cached {cache}", flush=True)
+    print(f"ERA5-Land cache ready: {cache}")
+    raise SystemExit(0)
+
+# One point cache has one writer. This is deliberately a simple filesystem lock:
+# it also works when two CoLM Desktop instances or CLI processes share the cache.
+lock = cache / ".download.lock"
+while True:
+    try:
+        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        break
+    except FileExistsError:
+        try:
+            if time.time() - lock.stat().st_mtime > 21600:
+                lock.unlink()
+                continue
+        except FileNotFoundError:
+            continue
+        print("another ERA5-Land request is writing this shared point cache; waiting…", flush=True)
+        time.sleep(2)
 
 download = cache / f".{key}.{os.getpid()}.download"
 created = []
-print(f"submitting {lat:.1f}, {lon:.1f}: {start} to {end}; CDS may queue the request", flush=True)
 try:
+    if cached_files_cover_request():
+        print(f"cached {cache}", flush=True)
+        raise SystemExit(0)
+    print(f"submitting {lat:.1f}, {lon:.1f}: {start} to {end}; CDS may queue the request", flush=True)
     cdsapi.Client().retrieve("reanalysis-era5-land-timeseries", request).download(str(download))
     if is_zipfile(download):
         with ZipFile(download) as archive:
@@ -2838,21 +2942,25 @@ try:
         target = cache / f"{key}.nc"
         download.replace(target)
         created.append(target)
+    if not created or any(path.stat().st_size == 0 for path in created):
+        raise RuntimeError("ERA5-Land download produced an empty NetCDF file")
+    manifest = {
+        "dataset": "reanalysis-era5-land-timeseries",
+        "request": request,
+        "files": [path.name for path in created],
+    }
+    temporary_manifest = manifest_path.with_suffix(".json.part")
+    temporary_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    temporary_manifest.replace(manifest_path)
+    print(f"ERA5-Land cache ready: {cache}")
 finally:
     if download.exists():
         download.unlink()
-
-if not created or any(path.stat().st_size == 0 for path in created):
-    raise RuntimeError("ERA5-Land download produced an empty NetCDF file")
-manifest = {
-    "dataset": "reanalysis-era5-land-timeseries",
-    "request": request,
-    "files": [path.name for path in created],
-}
-temporary_manifest = manifest_path.with_suffix(".json.part")
-temporary_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-temporary_manifest.replace(manifest_path)
-print(f"ERA5-Land cache ready: {cache}")
+    os.close(descriptor)
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
 "#;
 
 /// 删掉一个算例已有的 history 文件，返回删了几个。
