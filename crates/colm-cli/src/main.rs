@@ -2675,9 +2675,14 @@ fn cmd_era5land_download(
 }
 
 fn require_cds_api_config() -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+    let variables = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+    let home = variables
+        .into_iter()
+        .find_map(|name| std::env::var_os(name).filter(|value| !value.is_empty()))
         .context("无法确定用户主目录，不能查找 ~/.cdsapirc")?;
     require_cds_api_config_at(&PathBuf::from(home).join(".cdsapirc"))
 }
@@ -2692,12 +2697,17 @@ fn require_cds_api_config_at(path: &Path) -> Result<()> {
 }
 
 fn cds_api_config_help(path: &Path) -> String {
+    let install = if cfg!(windows) {
+        "py -m pip install cdsapi"
+    } else {
+        "python -m pip install cdsapi"
+    };
     format!(
         "没有找到可用的 CDS API 配置：{}\n\
          请按以下步骤配置：\n\
          1. 登录 https://cds.climate.copernicus.eu/how-to-api\n\
          2. 将该页面提供的配置内容原样保存到 {}\n\
-         3. 运行 `python -m pip install cdsapi` 安装客户端\n\
+         3. 运行 `{install}` 安装客户端\n\
          4. 打开 https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land 并接受数据许可\n\
          5. 返回 CoLM Desktop，再次点击 ERA5-Land 下载。\n\
          软件只检查该文件是否存在、非空且可读，不会显示或上传其中的凭据。",
@@ -2717,10 +2727,15 @@ mod era5land_download_tests {
             std::process::id()
         ));
         let message = require_cds_api_config_at(&path).unwrap_err().to_string();
+        let install = if cfg!(windows) {
+            "py -m pip install cdsapi"
+        } else {
+            "python -m pip install cdsapi"
+        };
         for expected in [
             path.to_string_lossy().as_ref(),
             "https://cds.climate.copernicus.eu/how-to-api",
-            "python -m pip install cdsapi",
+            install,
             "reanalysis-era5-land",
             "不会显示或上传",
         ] {
