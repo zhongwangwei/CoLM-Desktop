@@ -64,3 +64,16 @@ fn accumulated_precipitation_becomes_the_rate_colm_reads() {
     let v = super::convert_units("mm/hr", "kg/m2/s", &[3.6]).unwrap();
     assert!((v[0] - 0.001).abs() < 1e-12, "got {}", v[0]);
 }
+
+#[test]
+fn common_cf_unit_spellings_convert_without_changing_values() {
+    for (from, to) in [
+        ("kg m-2 s-1", "kg/m2/s"),
+        ("kg kg-1", "kg/kg"),
+        ("m s-1", "m/s"),
+        ("W m-2", "W/m2"),
+    ] {
+        assert_eq!(super::convert_units(from, to, &[1.25]).unwrap(), [1.25]);
+        assert_eq!(super::from_canonical(to, from, &[1.25]).unwrap(), [1.25]);
+    }
+}

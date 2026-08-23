@@ -345,6 +345,7 @@ pub struct VariableRepairSummary {
     pub slot: usize,
     pub variable: String,
     pub missing: usize,
+    pub quality_rejected: usize,
     pub short_missing: usize,
     pub long_missing: usize,
     pub longest_gap: usize,
@@ -395,6 +396,9 @@ pub fn diagnose_file(src: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
     let mut variables = Vec::with_capacity(plan.slots.len());
     for slot in &plan.slots {
         let mut values = combined_canonical(&file, src, slot, steps)?;
+        let scalar_wind =
+            slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5);
+        let quality_rejected = apply_basic_qc(&mut values, slot.index, scalar_wind)?;
         let gap = analyze_gaps(&values, plan.short_gap_max);
         let qc = fill_short_gaps(&mut values, plan.short_gap_max, variable_kind(slot.index)?);
         let locally_fillable = qc.iter().filter(|value| **value == QC_INTERPOLATED).count();
@@ -402,6 +406,7 @@ pub fn diagnose_file(src: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
             slot: slot.index,
             variable: slot.source_name.clone(),
             missing: gap.missing,
+            quality_rejected,
             short_missing: locally_fillable,
             long_missing: gap.missing - locally_fillable,
             longest_gap: gap.longest_gap,
@@ -453,6 +458,9 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
 
     for slot in &plan.slots {
         let mut values = combined_canonical(&file, src, slot, steps)?;
+        let scalar_wind =
+            slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5);
+        let quality_rejected = apply_basic_qc(&mut values, slot.index, scalar_wind)?;
         let original = values.clone();
         let gap = analyze_gaps(&values, plan.short_gap_max);
         let kind = variable_kind(slot.index)?;
@@ -467,11 +475,10 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
             })?;
             let donor_values = catalog.series(
                 slot.index,
-                slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5),
+                scalar_wind,
                 &source_utc_times,
                 latitude,
                 longitude,
-                source_step_seconds(&source_utc_times)?,
             )?;
             fill_from_donor(
                 &mut values,
@@ -522,6 +529,7 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
             slot: slot.index,
             variable: slot.source_name.clone(),
             missing: gap.missing,
+            quality_rejected,
             short_missing: qc.iter().filter(|value| **value == QC_INTERPOLATED).count(),
             long_missing: qc
                 .iter()
@@ -567,6 +575,31 @@ fn variable_kind(slot: usize) -> Result<VariableKind> {
         1 | 3 | 5 | 6 => Ok(VariableKind::Continuous),
         _ => bail!("unknown CoLM forcing slot {slot}"),
     }
+}
+
+/// 将明显超出陆面强迫物理范围的有限值变成缺测，交给同一套短缺口/ERA5 修复。
+/// 阈值故意宽松，只剔除不可能或高度可疑的传感器值，不做气候异常检测。
+fn apply_basic_qc(values: &mut [f64], slot: usize, scalar_wind: bool) -> Result<usize> {
+    let (minimum, maximum) = match slot {
+        1 => (180.0, 350.0),        // K
+        2 => (0.0, 0.1),            // kg/kg
+        3 => (30_000.0, 110_000.0), // Pa
+        4 => (0.0, 0.1),            // kg/m2/s = 360 mm/h
+        5 => (-100.0, 100.0),       // m/s, eastward component
+        6 if scalar_wind => (0.0, 100.0),
+        6 => (-100.0, 100.0), // m/s, northward component
+        7 => (0.0, 1_800.0),  // W/m2
+        8 => (0.0, 800.0),    // W/m2
+        _ => bail!("unknown CoLM forcing slot {slot}"),
+    };
+    let mut rejected = 0;
+    for value in values {
+        if value.is_finite() && !(minimum..=maximum).contains(value) {
+            *value = f64::NAN;
+            rejected += 1;
+        }
+    }
+    Ok(rejected)
 }
 
 fn correction_kind(slot: usize) -> Result<CorrectionKind> {
@@ -906,7 +939,6 @@ impl Era5Catalog {
         target_times: &[i64],
         latitude: f64,
         longitude: f64,
-        target_step: i64,
     ) -> Result<Vec<f64>> {
         match slot {
             2 => {
@@ -915,9 +947,7 @@ impl Era5Catalog {
                     target_times,
                     latitude,
                     longitude,
-                    target_step,
                     DonorTransform::Identity,
-                    VariableKind::NonNegative,
                 ) {
                     return Ok(q);
                 }
@@ -926,12 +956,9 @@ impl Era5Catalog {
                     target_times,
                     latitude,
                     longitude,
-                    target_step,
                     DonorTransform::Identity,
-                    VariableKind::Continuous,
                 )?;
-                let pressure =
-                    self.series(3, false, target_times, latitude, longitude, target_step)?;
+                let pressure = self.series(3, false, target_times, latitude, longitude)?;
                 Ok(dewpoint
                     .into_iter()
                     .zip(pressure)
@@ -943,41 +970,32 @@ impl Era5Catalog {
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::Identity,
-                VariableKind::Continuous,
             ),
             3 => self.variable_series(
                 &["sp", "surface_pressure", "PSurf", "Psurf"],
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::Identity,
-                VariableKind::Continuous,
             ),
             4 => self.variable_series(
                 &["tp", "total_precipitation", "Precip"],
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::AccumulatedWater,
-                VariableKind::Precipitation,
             ),
             5 => self.variable_series(
                 &["u10", "10m_u_component_of_wind", "Wind_E"],
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::Identity,
-                VariableKind::Continuous,
             ),
             6 if scalar_wind => {
-                let east = self.series(5, false, target_times, latitude, longitude, target_step)?;
-                let north =
-                    self.series(6, false, target_times, latitude, longitude, target_step)?;
+                let east = self.series(5, false, target_times, latitude, longitude)?;
+                let north = self.series(6, false, target_times, latitude, longitude)?;
                 Ok(east
                     .into_iter()
                     .zip(north)
@@ -989,42 +1007,33 @@ impl Era5Catalog {
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::Identity,
-                VariableKind::Continuous,
             ),
             7 => self.variable_series(
                 &["ssrd", "surface_solar_radiation_downwards", "SWdown"],
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::AccumulatedEnergy,
-                VariableKind::NonNegative,
             ),
             8 => self.variable_series(
                 &["strd", "surface_thermal_radiation_downwards", "LWdown"],
                 target_times,
                 latitude,
                 longitude,
-                target_step,
                 DonorTransform::AccumulatedEnergy,
-                VariableKind::NonNegative,
             ),
             _ => bail!("unknown CoLM forcing slot {slot}"),
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn variable_series(
         &self,
         candidates: &[&str],
         target_times: &[i64],
         latitude: f64,
         longitude: f64,
-        target_step: i64,
         transform: DonorTransform,
-        kind: VariableKind,
     ) -> Result<Vec<f64>> {
         let mut merged = BTreeMap::<i64, f64>::new();
         let mut found = false;
@@ -1087,7 +1096,12 @@ impl Era5Catalog {
             );
         }
         let (times, values): (Vec<_>, Vec<_>) = merged.into_iter().unzip();
-        sample_donor(&times, &values, target_times, target_step, kind)
+        sample_donor(
+            &times,
+            &values,
+            target_times,
+            transform != DonorTransform::Identity,
+        )
     }
 }
 
@@ -1286,8 +1300,7 @@ fn sample_donor(
     times: &[i64],
     values: &[f64],
     targets: &[i64],
-    _target_step: i64,
-    kind: VariableKind,
+    interval_rate: bool,
 ) -> Result<Vec<f64>> {
     if times.len() != values.len() || times.len() < 2 {
         bail!("ERA5-Land series needs matching time/value axes with at least two steps");
@@ -1306,12 +1319,8 @@ fn sample_donor(
                 let right_distance = times[right] - target;
                 if left_distance > tolerance && right_distance > tolerance {
                     output.push(f64::NAN);
-                } else if matches!(kind, VariableKind::Precipitation) {
-                    output.push(if left_distance <= right_distance {
-                        values[left]
-                    } else {
-                        values[right]
-                    });
+                } else if interval_rate {
+                    output.push(values[left]);
                 } else if values[left].is_finite() && values[right].is_finite() {
                     let fraction = left_distance as f64 / (times[right] - times[left]) as f64;
                     output.push(values[left] + (values[right] - values[left]) * fraction);
@@ -1399,7 +1408,7 @@ fn update_repaired_file(
             .with_context(|| format!("source variable {name} disappeared"))?;
         variable.put_attribute(
             "gapfill_note",
-            "missing values repaired by CoLM Desktop; see paired *_gapfill_qc",
+            "missing or basic-QC-rejected values repaired by CoLM Desktop; see paired *_gapfill_qc",
         )?;
         variable.put_values(values, netcdf::Extents::All)?;
     }
@@ -1426,6 +1435,10 @@ fn update_repaired_file(
         variable.put_values(values, netcdf::Extents::All)?;
     }
     output.add_attribute("colm_gapfill_version", env!("CARGO_PKG_VERSION"))?;
+    output.add_attribute(
+        "colm_gapfill_observation_qc",
+        "canonical-unit inclusive ranges: T 180..350 K; q 0..0.1 kg/kg; P 30000..110000 Pa; precipitation 0..0.1 kg/m2/s; wind components -100..100 m/s (scalar wind 0..100); SW 0..1800 W/m2; LW 0..800 W/m2",
+    )?;
     output.add_attribute("colm_gapfill_timezone_offset_hours", timezone.offset_hours)?;
     output.add_attribute("colm_gapfill_timezone_source", timezone.source.as_str())?;
     output.add_attribute(

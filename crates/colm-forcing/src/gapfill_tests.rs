@@ -65,6 +65,21 @@ fn precipitation_is_not_invented_between_wet_bounds() {
 }
 
 #[test]
+fn basic_qc_turns_only_physically_implausible_observations_into_gaps() {
+    let mut temperature = [280.0, 999.0, 180.0, 350.0];
+    assert_eq!(apply_basic_qc(&mut temperature, 1, false).unwrap(), 1);
+    assert!(temperature[1].is_nan());
+    assert_eq!(temperature[0], 280.0);
+
+    let mut scalar_wind = [2.0, -1.0, 101.0];
+    assert_eq!(apply_basic_qc(&mut scalar_wind, 6, true).unwrap(), 2);
+    assert!(scalar_wind[1..].iter().all(|value| value.is_nan()));
+
+    let mut wind_component = [-50.0, 50.0];
+    assert_eq!(apply_basic_qc(&mut wind_component, 6, false).unwrap(), 0);
+}
+
+#[test]
 fn timezone_prefers_manual_then_metadata_then_longitude() {
     let manual = decide_timezone(Some(9.5), Some("UTC"), Some(120.0)).unwrap();
     assert_eq!(manual.offset_hours, 9.5);
@@ -197,6 +212,31 @@ fn short_gap_repair_writes_a_new_file_with_qc_and_keeps_source_unchanged() {
 }
 
 #[test]
+fn failed_observation_qc_is_reported_and_repaired_like_a_gap() {
+    let dir = std::env::temp_dir().join("colm-gapfill-qc-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    let dst = dir.join("repaired.nc");
+    write_source(&src, &[280.0, 999.0, 282.0]);
+
+    let diagnosis = diagnose_file(&src, &repair_plan(None, 1)).unwrap();
+    assert_eq!(diagnosis.variables[0].quality_rejected, 1);
+    assert_eq!(diagnosis.missing(), 1);
+
+    let summary = repair_file(&src, &dst, &repair_plan(None, 1)).unwrap();
+    assert_eq!(summary.variables[0].quality_rejected, 1);
+    assert_eq!(summary.variables[0].interpolated, 1);
+    let repaired: Vec<f64> = netcdf::open(&dst)
+        .unwrap()
+        .variable("Tair")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(repaired, vec![280.0, 281.0, 282.0]);
+}
+
+#[test]
 fn local_timezone_metadata_uses_a_numeric_offset_and_survives_rediagnosis() {
     let dir = std::env::temp_dir().join("colm-gapfill-local-timezone");
     let _ = std::fs::remove_dir_all(&dir);
@@ -268,15 +308,11 @@ fn timeseries_interval_amounts_are_converted_without_second_deaccumulation() {
     .unwrap();
     assert_eq!(water, [1.0 / 3600.0, 2.0 / 3600.0, 0.0]);
 
-    let interpolated = sample_donor(
-        &[0, 3600],
-        &[280.0, 282.0],
-        &[1800],
-        1800,
-        VariableKind::Continuous,
-    )
-    .unwrap();
+    let interpolated = sample_donor(&[0, 3600], &[280.0, 282.0], &[1800], false).unwrap();
     assert_eq!(interpolated, [281.0]);
+
+    let held = sample_donor(&[0, 3600], &[10.0, 20.0], &[0, 1800, 3600], true).unwrap();
+    assert_eq!(held, [10.0, 10.0, 20.0]);
 }
 
 fn write_era5_temperature(
@@ -337,7 +373,6 @@ fn era5_catalog_merges_multiple_month_files_in_time_order() {
             &[origin, origin + 3600, origin + 7200, origin + 10800],
             10.0,
             20.0,
-            3600,
         )
         .unwrap();
     assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
@@ -351,6 +386,13 @@ fn era5_cache_root_resolves_the_downloaded_point_directory() {
     assert!(point.ends_with("era5land_lat_m37p7_lon_p145p0"));
     std::fs::create_dir_all(&point).unwrap();
     write_era5_temperature(
+        &root.join("legacy_other_station.nc"),
+        &[0.0, 1.0],
+        0.0,
+        0.0,
+        &[999.0, 999.0],
+    );
+    write_era5_temperature(
         &point.join("era5land_timeseries_2008.nc"),
         &[0.0, 1.0],
         -37.7,
@@ -360,7 +402,7 @@ fn era5_cache_root_resolves_the_downloaded_point_directory() {
     let origin = crate::civil::days_from_civil(2008, 1, 1) * 86400;
     let values = Era5Catalog::open(&root, -37.73, 145.01)
         .unwrap()
-        .series(1, false, &[origin, origin + 3600], -37.73, 145.01, 3600)
+        .series(1, false, &[origin, origin + 3600], -37.73, 145.01)
         .unwrap();
     assert_eq!(values, vec![280.0, 281.0]);
 }

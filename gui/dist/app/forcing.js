@@ -51,6 +51,7 @@ let tableSettings = null;
 /** 按站点拆分后的诊断/修复状态。每一项永远只对应一个站点。 */
 let tableBatch = [];
 let tableBusy = false;
+let era5Busy = false;
 let gapSettings = {
   shortGap: 3,
   utcOffset: '',
@@ -838,18 +839,20 @@ function renderTableBatchResult(box) {
   const allComplete = tableBatch.every(item => item.phase === '完成');
   const table = document.createElement('table');
   table.style.marginTop = '14px';
-  table.innerHTML = '<tr><th>站点</th><th>状态</th><th>原始行</th><th>补入时间步</th><th>缺测值</th><th>ERA5-Land</th><th>产物</th></tr>';
+  table.innerHTML = '<tr><th>站点</th><th>状态</th><th>原始行</th><th>补入时间步</th><th>缺测/不合格</th><th>QC 剔除</th><th>ERA5-Land</th><th>产物</th></tr>';
   for (const item of tableBatch) {
     const row = document.createElement('tr');
-    row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
+    row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
     row.children[0].textContent = item.site;
     row.children[1].textContent = item.error ? `${item.phase}：${item.error}` : item.phase;
     row.children[1].className = item.error ? 'fail' : (item.report?.needs_era5 ? 'warn' : '');
     row.children[2].textContent = String(item.rows);
     row.children[3].textContent = String(item.inserted_steps);
     row.children[4].textContent = item.report ? String(item.report.missing) : '—';
-    row.children[5].textContent = item.report?.needs_era5 ? '需要' : '不需要';
-    row.children[6].textContent = item.phase === '完成' ? item.final_path : '—';
+    row.children[5].textContent = item.report
+      ? String(item.report.variables.reduce((sum, variable) => sum + variable.quality_rejected, 0)) : '—';
+    row.children[6].textContent = item.report?.needs_era5 ? '需要' : '不需要';
+    row.children[7].textContent = item.phase === '完成' ? item.final_path : '—';
     table.appendChild(row);
   }
   box.appendChild(table);
@@ -875,6 +878,10 @@ function renderTableBatchResult(box) {
       } catch (error) { status(error); }
     };
     box.appendChild(field);
+    const queueNote = document.createElement('p');
+    queueNote.className = 'muted mini';
+    queueNote.textContent = '各站点按格点共享缓存并依次提交；CDS 服务器可能排队，长序列请等待，不要重复点击。';
+    box.appendChild(queueNote);
   }
 
   const bar = document.createElement('div');
@@ -909,6 +916,7 @@ async function downloadTableEra5() {
     // 同一 ERA5 格点可能被多个站点复用；串行下载避免两个 sidecar 同时写
     // 同一个缓存文件。逐站点诊断和修复仍保持最多 4 个并发。
     await runPool(targets, 1, async item => {
+      status(`正在提交 ${finished + 1}/${targets.length}：${item.site}；CDS 服务器可能排队，请等待…`);
       await invoke('download_era5land', {
         dst: gapSettings.era5.trim(),
         latitude: item.report.latitude,
@@ -1065,9 +1073,11 @@ function gapCard() {
   card.className = 'card';
   card.innerHTML = `
     <h3>缺测诊断与修复</h3>
-    <div class="ch">先检查被映射的变量。短缺口按变量类型插值；长缺口在把站点时间换算到 UTC 后，
+    <div class="ch">先把源单位转换为 CoLM 标准单位并做宽松物理范围 QC；不合格值按缺测处理。
+      短缺口按变量类型插值；长缺口在把站点时间换算到 UTC 后，
       读取 ERA5-Land 最近 0.1° 格点，并只用观测重叠期做偏差订正。原始文件不会被覆盖，
       产物逐时记录观测、插值或 ERA5-Land 来源。</div>
+    <p class="muted mini">QC 范围：气温 180–350 K、比湿 0–0.1 kg/kg、气压 30–110 kPa、降水 0–0.1 kg/m²/s、风速/分量不超过 100 m/s、短波 0–1800 W/m²、长波 0–800 W/m²。</p>
     <div class="row" style="margin-top:12px">
       <div class="field"><label>短缺口上限（时间步）</label><input class="input" id="gap-short" type="number" min="0" step="1"></div>
       <div class="field"><label>订正最少重叠样本</label><input class="input" id="gap-overlap" type="number" min="1" step="1"></div>
@@ -1103,6 +1113,7 @@ function gapCard() {
 
 function gapReportView() {
   const box = document.createElement('div');
+  const qualityRejected = gapReport.variables.reduce((sum, row) => sum + row.quality_rejected, 0);
   const timezoneLabels = {
     manual_override: '人工覆盖',
     file_metadata: '文件元数据',
@@ -1113,15 +1124,16 @@ function gapReportView() {
       <tr><th>UTC 偏移</th><td>UTC${gapReport.timezone_offset_hours >= 0 ? '+' : ''}${gapReport.timezone_offset_hours} · ${timezoneLabels[gapReport.timezone_source] ?? gapReport.timezone_source}</td></tr>
       <tr><th>ERA5-Land 格点定位</th><td>${gapReport.latitude}, ${gapReport.longitude}</td></tr>
       <tr><th>数据范围（UTC 日期）</th><td>${gapReport.start_date} — ${gapReport.end_date}</td></tr>
-      <tr><th>缺测总数</th><td class="${gapReport.missing ? 'warn' : ''}">${gapReport.missing}</td></tr>
+      <tr><th>缺测/不合格总数</th><td class="${gapReport.missing ? 'warn' : ''}">${gapReport.missing}</td></tr>
+      <tr><th>其中 QC 剔除</th><td class="${qualityRejected ? 'warn' : ''}">${qualityRejected}</td></tr>
     </table>
     <table style="margin-top:10px">
-      <tr><th>槽位</th><th>变量</th><th>缺测</th><th>短缺口</th><th>需 ERA5</th><th>最长</th><th>已插值</th><th>ERA5-Land</th></tr>
+      <tr><th>槽位</th><th>变量</th><th>缺测/不合格</th><th>QC 剔除</th><th>短缺口</th><th>需 ERA5</th><th>最长</th><th>已插值</th><th>ERA5-Land</th></tr>
     </table>`;
   const table = box.querySelectorAll('table')[1];
   for (const row of gapReport.variables) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${row.slot}</td><td></td><td>${row.missing}</td><td>${row.short_missing}</td><td class="${row.long_missing ? 'warn' : ''}">${row.long_missing}</td><td>${row.longest_gap}</td><td>${row.interpolated}</td><td>${row.era5_corrected}</td>`;
+    tr.innerHTML = `<td>${row.slot}</td><td></td><td>${row.missing}</td><td>${row.quality_rejected}</td><td>${row.short_missing}</td><td class="${row.long_missing ? 'warn' : ''}">${row.long_missing}</td><td>${row.longest_gap}</td><td>${row.interpolated}</td><td>${row.era5_corrected}</td>`;
     tr.children[1].textContent = row.variable;
     table.appendChild(tr);
   }
@@ -1159,7 +1171,7 @@ function gapReportView() {
     box.appendChild(field);
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = '可选择已有 ERA5-Land NetCDF 缓存；也可用本机 CDS API 一次下载该站点完整时间段。下载需要先配置 ~/.cdsapirc 并接受 ERA5-Land 数据许可。';
+    note.textContent = '可选择已有 ERA5-Land NetCDF 缓存；也可用本机 CDS API 一次下载该站点完整时间段。CDS 服务器可能排队，长序列请等待且不要重复点击。下载前需配置 ~/.cdsapirc 并接受数据许可。';
     box.appendChild(note);
   }
 
@@ -1169,15 +1181,15 @@ function gapReportView() {
   if (gapReport.needs_era5) {
     const download = document.createElement('button');
     download.className = 'btn-ghost';
-    download.textContent = '下载对应 ERA5-Land 格点';
-    download.disabled = !gapSettings.era5.trim();
+    download.textContent = era5Busy ? 'CDS 排队或下载中…' : '下载对应 ERA5-Land 格点';
+    download.disabled = era5Busy || !gapSettings.era5.trim();
     download.onclick = downloadEra5;
     bar.appendChild(download);
   }
   const repair = document.createElement('button');
   repair.className = 'btn-next';
   repair.textContent = '生成已修复中间文件';
-  repair.disabled = gapReport.needs_era5 && !gapSettings.era5.trim();
+  repair.disabled = era5Busy || (gapReport.needs_era5 && !gapSettings.era5.trim());
   repair.onclick = repairGaps;
   bar.appendChild(repair);
   box.appendChild(bar);
@@ -1204,7 +1216,7 @@ async function diagnoseGaps() {
       options: gapOptions(false),
     });
     repairedSource = null;
-    status(gapReport.missing ? `发现 ${gapReport.missing} 个缺测值` : '未发现缺测值');
+    status(gapReport.missing ? `发现 ${gapReport.missing} 个缺测或 QC 不合格值` : '缺测与基础 QC 均通过');
   } catch (error) {
     gapReport = null;
     status(error);
@@ -1213,9 +1225,11 @@ async function diagnoseGaps() {
 }
 
 async function downloadEra5() {
-  if (!gapReport || !gapSettings.era5.trim()) return;
+  if (!gapReport || !gapSettings.era5.trim() || era5Busy) return;
+  era5Busy = true;
+  renderCards();
   try {
-    status('正在通过 CDS API 下载 ERA5-Land；长时间序列可能需要几分钟…');
+    status('ERA5-Land 请求已提交；CDS 服务器可能排队，长时间序列请耐心等待…');
     await invoke('download_era5land', {
       dst: gapSettings.era5.trim(),
       latitude: gapReport.latitude,
@@ -1225,6 +1239,7 @@ async function downloadEra5() {
     });
     status('ERA5-Land 对应格点已缓存，可以生成修复文件');
   } catch (error) { showEra5DownloadError(error); }
+  finally { era5Busy = false; renderCards(); }
 }
 
 async function repairGaps() {
@@ -1241,7 +1256,7 @@ async function repairGaps() {
     });
     if (gapReport.unresolved) throw new Error(`仍有 ${gapReport.unresolved} 个缺测值没有解决`);
     repairedSource = repaired;
-    status('缺测修复完成，逐时来源已写入 *_gapfill_qc');
+    status('缺测与 QC 修复完成，逐时来源已写入 *_gapfill_qc');
   } catch (error) {
     repairedSource = null;
     status(error);

@@ -405,6 +405,7 @@ pub struct GapVariable {
     pub slot: usize,
     pub variable: String,
     pub missing: usize,
+    pub quality_rejected: usize,
     pub short_missing: usize,
     pub long_missing: usize,
     pub longest_gap: usize,

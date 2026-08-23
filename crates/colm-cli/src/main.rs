@@ -2541,6 +2541,7 @@ struct RepairVariableJson<'a> {
     slot: usize,
     variable: &'a str,
     missing: usize,
+    quality_rejected: usize,
     short_missing: usize,
     long_missing: usize,
     longest_gap: usize,
@@ -2567,6 +2568,7 @@ fn repair_summary_json(summary: &colm_forcing::RepairSummary) -> RepairSummaryJs
                 slot: variable.slot,
                 variable: &variable.variable,
                 missing: variable.missing,
+                quality_rejected: variable.quality_rejected,
                 short_missing: variable.short_missing,
                 long_missing: variable.long_missing,
                 longest_gap: variable.longest_gap,
@@ -2602,10 +2604,11 @@ fn print_repair_summary(summary: &colm_forcing::RepairSummary, json: bool) -> Re
     );
     for variable in &summary.variables {
         println!(
-            "  slot {} {}: missing={}, short={}, long={}, interpolated={}, era5={}, unresolved={}",
+            "  slot {} {}: missing={}, qc_rejected={}, short={}, long={}, interpolated={}, era5={}, unresolved={}",
             variable.slot,
             variable.variable,
             variable.missing,
+            variable.quality_rejected,
             variable.short_missing,
             variable.long_missing,
             variable.interpolated,
@@ -2807,7 +2810,7 @@ except (AttributeError, FileNotFoundError, OSError, TypeError, ValueError):
 
 download = cache / f".{key}.{os.getpid()}.download"
 created = []
-print(f"downloading {lat:.1f}, {lon:.1f}: {start} to {end}", flush=True)
+print(f"submitting {lat:.1f}, {lon:.1f}: {start} to {end}; CDS may queue the request", flush=True)
 try:
     cdsapi.Client().retrieve("reanalysis-era5-land-timeseries", request).download(str(download))
     if is_zipfile(download):
