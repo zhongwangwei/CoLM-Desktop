@@ -92,6 +92,107 @@ fn timezone_prefers_manual_then_metadata_then_longitude() {
     let inferred = decide_timezone(None, None, Some(145.0)).unwrap();
     assert_eq!(inferred.offset_hours, 10.0);
     assert_eq!(inferred.source, TimezoneSource::LongitudeInferred);
+    assert_eq!(inferred.confidence, TimezoneConfidence::Low);
+}
+
+fn synthetic_shortwave(days: usize, peak_hour: f64) -> (Vec<i64>, Vec<f64>) {
+    let times = (0..days * 24)
+        .map(|index| index as i64 * 3600)
+        .collect::<Vec<_>>();
+    let shortwave = times
+        .iter()
+        .map(|time| {
+            let hour = time.rem_euclid(86400) as f64 / 3600.0;
+            let cosine = ((hour - peak_hour) / 12.0 * std::f64::consts::PI).cos();
+            if cosine > 0.0 {
+                900.0 * cosine.powi(2)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    (times, shortwave)
+}
+
+#[test]
+fn solar_noon_distinguishes_local_clock_from_utc() {
+    let (times, local_shortwave) = synthetic_shortwave(12, 12.0);
+    let local =
+        decide_timezone_with_solar(None, None, Some(116.4), &times, &local_shortwave).unwrap();
+    assert_eq!(local.source, TimezoneSource::SolarNoonInferred);
+    assert_eq!(local.offset_hours, 8.0);
+    assert_eq!(local.confidence, TimezoneConfidence::Medium);
+    assert!(!local.conflict);
+
+    let (_, utc_shortwave) = synthetic_shortwave(12, 4.25);
+    let utc = decide_timezone_with_solar(None, None, Some(116.4), &times, &utc_shortwave).unwrap();
+    assert_eq!(utc.source, TimezoneSource::SolarNoonConfirmedUtc);
+    assert_eq!(utc.offset_hours, 0.0);
+}
+
+#[test]
+fn solar_noon_does_not_misclassify_at_neu_as_utc() {
+    let (times, shortwave) = synthetic_shortwave(12, 11.70);
+    let decision =
+        decide_timezone_with_solar(None, None, Some(11.3175), &times, &shortwave).unwrap();
+
+    assert_eq!(decision.source, TimezoneSource::LongitudeInferred);
+    assert_eq!(decision.offset_hours, 1.0);
+    assert_eq!(decision.confidence, TimezoneConfidence::Low);
+    assert!((decision.solar_noon_hour.unwrap() - 11.70).abs() < 0.1);
+}
+
+#[test]
+fn declared_timezone_wins_but_disagreement_is_reported() {
+    let (times, local_shortwave) = synthetic_shortwave(12, 12.0);
+    let decision =
+        decide_timezone_with_solar(None, Some("UTC"), Some(116.4), &times, &local_shortwave)
+            .unwrap();
+    assert_eq!(decision.source, TimezoneSource::FileMetadata);
+    assert_eq!(decision.offset_hours, 0.0);
+    assert!(decision.conflict);
+    assert_eq!(decision.confidence, TimezoneConfidence::Low);
+}
+
+#[test]
+fn netcdf_diagnosis_uses_the_selected_shortwave_slot_as_timezone_evidence() {
+    let dir = std::env::temp_dir().join("colm-gapfill-solar-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    let (times, shortwave) = synthetic_shortwave(12, 12.0);
+    let mut file = netcdf::create(&src).unwrap();
+    file.add_dimension("time", times.len()).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "seconds since 2020-01-01 00:00:00")
+        .unwrap();
+    time.put_values(
+        &times.iter().map(|value| *value as f64).collect::<Vec<_>>(),
+        ..,
+    )
+    .unwrap();
+    let mut lat = file.add_variable::<f64>("latitude", &[]).unwrap();
+    lat.put_value(39.9, ()).unwrap();
+    let mut lon = file.add_variable::<f64>("longitude", &[]).unwrap();
+    lon.put_value(116.4, ()).unwrap();
+    let mut tair = file.add_variable::<f64>("Tair", &["time"]).unwrap();
+    tair.put_attribute("units", "K").unwrap();
+    tair.put_values(&vec![280.0; times.len()], ..).unwrap();
+    let mut sw = file.add_variable::<f64>("SWdown", &["time"]).unwrap();
+    sw.put_attribute("units", "W/m2").unwrap();
+    sw.put_values(&shortwave, ..).unwrap();
+    drop(file);
+
+    let mut plan = repair_plan(None, 1);
+    plan.slots.push(RepairSlot {
+        index: 7,
+        source_name: "SWdown".into(),
+        source_units: "W/m2".into(),
+        also_add: Vec::new(),
+    });
+    let diagnosis = diagnose_file(&src, &plan).unwrap();
+    assert_eq!(diagnosis.timezone.source, TimezoneSource::SolarNoonInferred);
+    assert_eq!(diagnosis.timezone.offset_hours, 8.0);
 }
 
 #[test]
@@ -265,6 +366,8 @@ fn local_timezone_metadata_uses_a_numeric_offset_and_survives_rediagnosis() {
     {
         let mut file = netcdf::append(&src).unwrap();
         file.add_attribute("time_shown_in", "local standard time")
+            .unwrap();
+        file.add_attribute("time_zone", "Australia/Brisbane")
             .unwrap();
         file.add_attribute("local_utc_offset_hours", 10.0_f64)
             .unwrap();

@@ -2526,6 +2526,10 @@ fn forcing_repair_plan(src: &Path, opts: &Opts) -> Result<colm_forcing::RepairPl
 struct RepairSummaryJson<'a> {
     timezone_offset_hours: f64,
     timezone_source: &'static str,
+    timezone_confidence: &'static str,
+    timezone_conflict: bool,
+    solar_noon_hour: Option<f64>,
+    solar_noon_std_hours: Option<f64>,
     latitude: f64,
     longitude: f64,
     start_date: String,
@@ -2554,6 +2558,10 @@ fn repair_summary_json(summary: &colm_forcing::RepairSummary) -> RepairSummaryJs
     RepairSummaryJson {
         timezone_offset_hours: summary.timezone.offset_hours,
         timezone_source: summary.timezone.source.as_str(),
+        timezone_confidence: summary.timezone.confidence.as_str(),
+        timezone_conflict: summary.timezone.conflict,
+        solar_noon_hour: summary.timezone.solar_noon_hour,
+        solar_noon_std_hours: summary.timezone.solar_noon_std_hours,
         latitude: summary.latitude,
         longitude: summary.longitude,
         start_date: unix_date(summary.start_utc),

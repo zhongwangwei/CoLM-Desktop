@@ -1117,11 +1117,18 @@ function gapReportView() {
   const timezoneLabels = {
     manual_override: '人工覆盖',
     file_metadata: '文件元数据',
+    solar_noon_confirmed_utc: '短波辐射太阳正午确认 UTC',
+    solar_noon_inferred_offset: '短波辐射太阳正午推断',
     longitude_inferred_offset: '按经度推断（不是行政时区）',
   };
+  const confidenceLabels = { high: '高', medium: '中', low: '低' };
+  const solarEvidence = gapReport.solar_noon_hour == null
+    ? '无可用太阳正午证据'
+    : `${gapReport.solar_noon_hour.toFixed(2)} 时（逐日标准差 ${gapReport.solar_noon_std_hours.toFixed(2)} 小时）`;
   box.innerHTML = `
     <table style="margin-top:12px">
       <tr><th>UTC 偏移</th><td>UTC${gapReport.timezone_offset_hours >= 0 ? '+' : ''}${gapReport.timezone_offset_hours} · ${timezoneLabels[gapReport.timezone_source] ?? gapReport.timezone_source}</td></tr>
+      <tr><th>时区证据</th><td class="${gapReport.timezone_conflict ? 'warn' : ''}">${confidenceLabels[gapReport.timezone_confidence] ?? gapReport.timezone_confidence}置信度 · ${solarEvidence}${gapReport.timezone_conflict ? ' · 与人工/文件声明冲突' : ''}</td></tr>
       <tr><th>ERA5-Land 格点定位</th><td>${gapReport.latitude}, ${gapReport.longitude}</td></tr>
       <tr><th>数据范围（UTC 日期）</th><td>${gapReport.start_date} — ${gapReport.end_date}</td></tr>
       <tr><th>缺测/不合格总数</th><td class="${gapReport.missing ? 'warn' : ''}">${gapReport.missing}</td></tr>

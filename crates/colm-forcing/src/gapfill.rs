@@ -113,6 +113,8 @@ pub fn fill_short_gaps(values: &mut [f64], short_gap_max: usize, kind: VariableK
 pub enum TimezoneSource {
     ManualOverride,
     FileMetadata,
+    SolarNoonConfirmedUtc,
+    SolarNoonInferred,
     LongitudeInferred,
 }
 
@@ -121,7 +123,26 @@ impl TimezoneSource {
         match self {
             Self::ManualOverride => "manual_override",
             Self::FileMetadata => "file_metadata",
+            Self::SolarNoonConfirmedUtc => "solar_noon_confirmed_utc",
+            Self::SolarNoonInferred => "solar_noon_inferred_offset",
             Self::LongitudeInferred => "longitude_inferred_offset",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimezoneConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl TimezoneConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
         }
     }
 }
@@ -131,6 +152,10 @@ pub struct TimezoneDecision {
     /// Local time = UTC + offset_hours.
     pub offset_hours: f64,
     pub source: TimezoneSource,
+    pub confidence: TimezoneConfidence,
+    pub conflict: bool,
+    pub solar_noon_hour: Option<f64>,
+    pub solar_noon_std_hours: Option<f64>,
 }
 
 /// 人工值是明确覆盖，因此优先于文件；没有人工值时文件元数据优先，最后才
@@ -140,20 +165,60 @@ pub fn decide_timezone(
     metadata: Option<&str>,
     longitude: Option<f64>,
 ) -> Result<TimezoneDecision> {
+    decide_timezone_from_evidence(manual_offset, metadata, longitude, None)
+}
+
+pub(crate) fn decide_timezone_with_solar(
+    manual_offset: Option<f64>,
+    metadata: Option<&str>,
+    longitude: Option<f64>,
+    local_times: &[i64],
+    swdown: &[f64],
+) -> Result<TimezoneDecision> {
+    let solar = longitude.and_then(|value| solar_noon_evidence(local_times, swdown, value));
+    decide_timezone_from_evidence(manual_offset, metadata, longitude, solar)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SolarClassification {
+    Utc,
+    Local,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SolarNoonEvidence {
+    observed_noon: f64,
+    std_noon: f64,
+    classification: SolarClassification,
+    inferred_offset: Option<f64>,
+}
+
+fn decide_timezone_from_evidence(
+    manual_offset: Option<f64>,
+    metadata: Option<&str>,
+    longitude: Option<f64>,
+    solar: Option<SolarNoonEvidence>,
+) -> Result<TimezoneDecision> {
     if let Some(offset_hours) = manual_offset {
         validate_offset(offset_hours)?;
-        return Ok(TimezoneDecision {
+        return Ok(explicit_timezone(
             offset_hours,
-            source: TimezoneSource::ManualOverride,
-        });
+            TimezoneSource::ManualOverride,
+            solar,
+        ));
     }
     if let Some(raw) = metadata.filter(|value| !value.trim().is_empty()) {
-        let offset_hours = parse_utc_offset(raw)
-            .with_context(|| format!("unsupported forcing timezone metadata {raw:?}"))?;
-        return Ok(TimezoneDecision {
+        let offset_hours = parse_utc_offset(raw).with_context(|| {
+            format!(
+                "unsupported forcing timezone metadata {raw:?}; use UTC±HH:MM, or convert an IANA/DST-aware local time axis to UTC before import"
+            )
+        })?;
+        return Ok(explicit_timezone(
             offset_hours,
-            source: TimezoneSource::FileMetadata,
-        });
+            TimezoneSource::FileMetadata,
+            solar,
+        ));
     }
     let lon = longitude.context(
         "forcing timezone is absent and longitude is unavailable; give a UTC offset explicitly",
@@ -161,11 +226,216 @@ pub fn decide_timezone(
     if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
         bail!("longitude {lon} is outside -180..=180 degrees");
     }
-    let offset_hours = (lon / 15.0).round().clamp(-12.0, 14.0);
+    if let Some(solar) = solar {
+        let (offset_hours, source, confidence) = match solar.classification {
+            SolarClassification::Utc => (
+                0.0,
+                TimezoneSource::SolarNoonConfirmedUtc,
+                TimezoneConfidence::Medium,
+            ),
+            SolarClassification::Local => (
+                solar.inferred_offset.unwrap_or(0.0),
+                TimezoneSource::SolarNoonInferred,
+                TimezoneConfidence::Medium,
+            ),
+            SolarClassification::Uncertain => (
+                longitude_offset(lon),
+                TimezoneSource::LongitudeInferred,
+                TimezoneConfidence::Low,
+            ),
+        };
+        return Ok(TimezoneDecision {
+            offset_hours,
+            source,
+            confidence,
+            conflict: false,
+            solar_noon_hour: Some(solar.observed_noon),
+            solar_noon_std_hours: Some(solar.std_noon),
+        });
+    }
+    let offset_hours = longitude_offset(lon);
     Ok(TimezoneDecision {
         offset_hours,
         source: TimezoneSource::LongitudeInferred,
+        confidence: TimezoneConfidence::Low,
+        conflict: false,
+        solar_noon_hour: None,
+        solar_noon_std_hours: None,
     })
+}
+
+fn explicit_timezone(
+    offset_hours: f64,
+    source: TimezoneSource,
+    solar: Option<SolarNoonEvidence>,
+) -> TimezoneDecision {
+    let conflict = solar.is_some_and(|evidence| match evidence.classification {
+        SolarClassification::Utc => offset_hours.abs() > 1.0,
+        SolarClassification::Local => evidence
+            .inferred_offset
+            .is_some_and(|solar_offset| (solar_offset - offset_hours).abs() > 1.0),
+        SolarClassification::Uncertain => false,
+    });
+    let solar_validates = solar.is_some_and(|evidence| {
+        matches!(
+            evidence.classification,
+            SolarClassification::Utc | SolarClassification::Local
+        )
+    });
+    TimezoneDecision {
+        offset_hours,
+        source,
+        confidence: if conflict {
+            TimezoneConfidence::Low
+        } else if solar_validates {
+            TimezoneConfidence::High
+        } else {
+            TimezoneConfidence::Medium
+        },
+        conflict,
+        solar_noon_hour: solar.map(|evidence| evidence.observed_noon),
+        solar_noon_std_hours: solar.map(|evidence| evidence.std_noon),
+    }
+}
+
+fn solar_noon_evidence(
+    local_times: &[i64],
+    swdown: &[f64],
+    longitude: f64,
+) -> Option<SolarNoonEvidence> {
+    if local_times.len() != swdown.len() || local_times.is_empty() {
+        return None;
+    }
+    let mut days = BTreeMap::<i64, Vec<(i64, f64)>>::new();
+    for (&time, &value) in local_times.iter().zip(swdown) {
+        if value.is_finite() && value > 0.0 {
+            days.entry(time.div_euclid(86400))
+                .or_default()
+                .push((time, value));
+        }
+    }
+    let mut eligible = days
+        .into_values()
+        .filter(|samples| samples.len() >= 10)
+        .map(|mut samples| {
+            samples.sort_by_key(|sample| sample.0);
+            let score = percentile_95(samples.iter().map(|sample| sample.1).collect());
+            (score, samples)
+        })
+        .collect::<Vec<_>>();
+    if eligible.len() < 3 {
+        return None;
+    }
+    eligible.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let noons = eligible
+        .iter()
+        .take(5)
+        .map(|(_, samples)| daily_solar_noon(samples))
+        .collect::<Vec<_>>();
+    let observed_noon = noons.iter().sum::<f64>() / noons.len() as f64;
+    let std_noon = (noons
+        .iter()
+        .map(|hour| (hour - observed_noon).powi(2))
+        .sum::<f64>()
+        / noons.len() as f64)
+        .sqrt();
+    let theoretical_utc_noon = (12.0 - longitude / 15.0).rem_euclid(24.0);
+    let theoretical_local_noon =
+        (theoretical_utc_noon + longitude_offset(longitude)).rem_euclid(24.0);
+    let matches_utc = circular_hour_distance(observed_noon, theoretical_utc_noon) < 1.5;
+    let matches_local = circular_hour_distance(observed_noon, theoretical_local_noon) < 1.5;
+    let classification = if std_noon >= 1.0 {
+        SolarClassification::Uncertain
+    } else {
+        match (matches_utc, matches_local) {
+            (true, false) => SolarClassification::Utc,
+            (false, true) => SolarClassification::Local,
+            _ => SolarClassification::Uncertain,
+        }
+    };
+    let inferred_offset = (classification == SolarClassification::Local).then(|| {
+        let theoretical = 12.0 - longitude / 15.0;
+        nearest_civil_offset(((observed_noon - theoretical) * 4.0).round() / 4.0)
+    });
+    Some(SolarNoonEvidence {
+        observed_noon,
+        std_noon,
+        classification,
+        inferred_offset,
+    })
+}
+
+fn longitude_offset(longitude: f64) -> f64 {
+    // ponytail: longitude is only a fixed-offset fallback; explicit metadata or a
+    // manual offset remains required for civil-zone exceptions.
+    (longitude / 15.0).round().clamp(-12.0, 14.0)
+}
+
+fn nearest_civil_offset(solar_offset: f64) -> f64 {
+    const OFFSETS: &[f64] = &[
+        -12.0, -11.0, -10.0, -9.5, -9.0, -8.0, -7.0, -6.0, -5.0, -4.5, -4.0, -3.5, -3.0, -2.0,
+        -1.0, 0.0, 1.0, 2.0, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 5.75, 6.0, 6.5, 7.0, 8.0, 8.75, 9.0,
+        9.5, 10.0, 10.5, 11.0, 12.0, 12.75, 13.0, 13.75, 14.0,
+    ];
+    OFFSETS
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            (a - solar_offset)
+                .abs()
+                .total_cmp(&(b - solar_offset).abs())
+        })
+        .unwrap_or(solar_offset)
+}
+
+fn percentile_95(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let position = (values.len() - 1) as f64 * 0.95;
+    let lower = position.floor() as usize;
+    let fraction = position - lower as f64;
+    values[lower] + (values[position.ceil() as usize] - values[lower]) * fraction
+}
+
+fn daily_solar_noon(samples: &[(i64, f64)]) -> f64 {
+    let peak = if samples.len() < 3 {
+        samples
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    } else {
+        (0..samples.len())
+            .max_by(|&a, &b| smoothed_sample(samples, a).total_cmp(&smoothed_sample(samples, b)))
+            .unwrap_or(0)
+    };
+    let fraction = if peak > 0 && peak + 1 < samples.len() {
+        let (y0, y1, y2) = (samples[peak - 1].1, samples[peak].1, samples[peak + 1].1);
+        let denominator = y0 - 2.0 * y1 + y2;
+        if denominator == 0.0 {
+            0.0
+        } else {
+            (0.5 * (y0 - y2) / denominator).clamp(-1.0, 1.0)
+        }
+    } else {
+        0.0
+    };
+    let mut hour = samples[peak].0.rem_euclid(86400) as f64 / 3600.0;
+    if peak > 0 && peak + 1 < samples.len() {
+        hour += fraction * (samples[peak + 1].0 - samples[peak - 1].0) as f64 / 7200.0;
+    }
+    hour
+}
+
+fn smoothed_sample(samples: &[(i64, f64)], index: usize) -> f64 {
+    let left = index.checked_sub(1).map_or(0.0, |i| samples[i].1);
+    let right = samples.get(index + 1).map_or(0.0, |sample| sample.1);
+    (left + samples[index].1 + right) / 3.0
+}
+
+fn circular_hour_distance(a: f64, b: f64) -> f64 {
+    let distance = (a - b).abs().rem_euclid(24.0);
+    distance.min(24.0 - distance)
 }
 
 fn validate_offset(offset: f64) -> Result<()> {
@@ -390,8 +660,7 @@ pub fn diagnose_file(src: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
     source_step_seconds(&source_local_times)?;
     let steps = source_local_times.len();
     let (latitude, longitude) = site_coordinates(&file, plan.latitude, plan.longitude)?;
-    let metadata = timezone_metadata(&file);
-    let timezone = decide_timezone(plan.manual_utc_offset, metadata.as_deref(), Some(longitude))?;
+    let timezone = file_timezone(&file, src, plan, &source_local_times, longitude, steps)?;
     let offset_seconds = (timezone.offset_hours * 3600.0).round() as i64;
     let mut variables = Vec::with_capacity(plan.slots.len());
     for slot in &plan.slots {
@@ -435,8 +704,7 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
     let (source_local_times, time_units) = file_times(&file, "time", 0.0)?;
     let steps = source_local_times.len();
     let (latitude, longitude) = site_coordinates(&file, plan.latitude, plan.longitude)?;
-    let metadata = timezone_metadata(&file);
-    let timezone = decide_timezone(plan.manual_utc_offset, metadata.as_deref(), Some(longitude))?;
+    let timezone = file_timezone(&file, src, plan, &source_local_times, longitude, steps)?;
     let offset_seconds = (timezone.offset_hours * 3600.0).round() as i64;
     let source_utc_times = source_local_times
         .iter()
@@ -800,6 +1068,30 @@ fn scalar_variable(file: &netcdf::File, names: &[&str]) -> Option<f64> {
     })
 }
 
+fn file_timezone(
+    file: &netcdf::File,
+    path: &Path,
+    plan: &RepairPlan,
+    local_times: &[i64],
+    longitude: f64,
+    steps: usize,
+) -> Result<TimezoneDecision> {
+    let solar = if let Some(slot) = plan.slots.iter().find(|slot| slot.index == 7) {
+        let mut swdown = combined_canonical(file, path, slot, steps)?;
+        apply_basic_qc(&mut swdown, 7, false)?;
+        solar_noon_evidence(local_times, &swdown, longitude)
+    } else {
+        None
+    };
+    let metadata = timezone_metadata(file);
+    decide_timezone_from_evidence(
+        plan.manual_utc_offset,
+        metadata.as_deref(),
+        Some(longitude),
+        solar,
+    )
+}
+
 fn string_attribute(file: &netcdf::File, name: &str) -> Option<String> {
     file.attribute(name)
         .and_then(|attribute| match attribute.value() {
@@ -810,16 +1102,10 @@ fn string_attribute(file: &netcdf::File, name: &str) -> Option<String> {
 }
 
 fn timezone_metadata(file: &netcdf::File) -> Option<String> {
-    for name in ["time_shown_in", "timezone", "time_zone"] {
-        if let Some(value) = string_attribute(file, name) {
-            let normalized = value.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "local" | "local time" | "local standard time" | "lst"
-            ) {
-                return Some(value);
-            }
-        }
+    if let Some(value) =
+        string_attribute(file, "time_shown_in").filter(|value| !is_local_time(value))
+    {
+        return Some(value);
     }
     for name in [
         "colm_gapfill_timezone_offset_hours",
@@ -833,8 +1119,38 @@ fn timezone_metadata(file: &netcdf::File) -> Option<String> {
         if let Some(value) = string_attribute(file, name) {
             return Some(value);
         }
+        if let Some(value) = scalar_variable(file, &[name]) {
+            return Some(format!("UTC{value:+}"));
+        }
+    }
+    for name in ["timezone_declared", "timezone", "time_zone"] {
+        if let Some(value) = string_attribute(file, name).filter(|value| !is_local_time(value)) {
+            return Some(value);
+        }
+    }
+    if let Some(time) = file.variable("time") {
+        for name in ["timezone", "time_zone"] {
+            if let Some(value) = time
+                .attribute_value(name)
+                .and_then(|value| value.ok())
+                .and_then(|value| match value {
+                    netcdf::AttributeValue::Str(value) => Some(value),
+                    _ => None,
+                })
+                .filter(|value| !is_local_time(value))
+            {
+                return Some(value);
+            }
+        }
     }
     None
+}
+
+fn is_local_time(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "local" | "local time" | "local standard time" | "lst"
+    )
 }
 
 fn numeric_attribute(file: &netcdf::File, name: &str) -> Option<f64> {
@@ -1463,6 +1779,20 @@ fn update_repaired_file(
     )?;
     output.add_attribute("colm_gapfill_timezone_offset_hours", timezone.offset_hours)?;
     output.add_attribute("colm_gapfill_timezone_source", timezone.source.as_str())?;
+    output.add_attribute(
+        "colm_gapfill_timezone_confidence",
+        timezone.confidence.as_str(),
+    )?;
+    output.add_attribute(
+        "colm_gapfill_timezone_conflict",
+        i32::from(timezone.conflict),
+    )?;
+    if let Some(hour) = timezone.solar_noon_hour {
+        output.add_attribute("colm_gapfill_solar_noon_hour", hour)?;
+    }
+    if let Some(std) = timezone.solar_noon_std_hours {
+        output.add_attribute("colm_gapfill_solar_noon_std_hours", std)?;
+    }
     output.add_attribute(
         "time_shown_in",
         if timezone.offset_hours.abs() < 1e-12 {

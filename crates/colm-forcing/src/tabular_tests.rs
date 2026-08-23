@@ -220,6 +220,41 @@ fn whitespace_txt_and_compact_timestamps_are_supported() {
 }
 
 #[test]
+fn tabular_local_time_uses_shortwave_solar_noon_before_longitude_fallback() {
+    let root = temp("solar-timezone");
+    let src = root.join("beijing.csv");
+    let mut csv =
+        String::from("site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n");
+    for index in 0..96 {
+        let day = index / 24 + 1;
+        let hour = index % 24;
+        let cosine = ((hour as f64 - 12.0) / 12.0 * std::f64::consts::PI).cos();
+        let swdown = if cosine > 0.0 {
+            900.0 * cosine.powi(2)
+        } else {
+            0.0
+        };
+        csv.push_str(&format!(
+            "CN-Bej,2020-01-{day:02} {hour:02}:00,39.9,116.4,10,280,.005,100000,0,2,{swdown},300\n"
+        ));
+    }
+    write(&src, &csv);
+
+    let imported = super::import_table(&src, &root.join("Forcing"), &plan()).unwrap();
+    assert_eq!(imported[0].timezone_source, "solar_noon_inferred_offset");
+    assert_eq!(imported[0].timezone_offset_hours, Some(8.0));
+    let file = netcdf::open(&imported[0].staged_path).unwrap();
+    assert_eq!(
+        file.attribute("tabular_timezone_confidence")
+            .unwrap()
+            .value()
+            .unwrap(),
+        netcdf::AttributeValue::Str("medium".into())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn duplicate_station_timestamps_are_rejected() {
     let root = temp("duplicate");
     let src = root.join("bad.csv");

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::convert::{canonical_units, Heights};
-use crate::gapfill::decide_timezone;
+use crate::gapfill::decide_timezone_with_solar;
 use crate::slots::SLOTS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +271,12 @@ pub fn import_table(
         .as_deref()
         .map(|name| column_index(&table, name))
         .transpose()?;
+    let swdown_index = plan
+        .slots
+        .iter()
+        .find(|slot| slot.index == 7)
+        .map(|slot| column_index(&table, &slot.column))
+        .transpose()?;
 
     let fallback_site = path
         .file_stem()
@@ -358,26 +364,42 @@ pub fn import_table(
                 "site {site:?} mixes timestamps with and without explicit UTC offsets; make the column consistent"
             );
         }
-        let (fallback_offset, timezone_source) = if all_explicit {
-            (0_i64, "timestamp_offset".to_string())
-        } else {
-            let decision = decide_timezone(
-                plan.manual_utc_offset.or(column_offset),
-                None,
-                Some(longitude),
-            )?;
-            let source = if plan.manual_utc_offset.is_some() {
-                "manual_override"
-            } else if column_offset.is_some() {
-                "table_offset_column"
+        let (fallback_offset, timezone_source, timezone_confidence, timezone_conflict) =
+            if all_explicit {
+                (0_i64, "timestamp_offset".to_string(), "high", false)
             } else {
-                decision.source.as_str()
+                let local_times = records
+                    .iter()
+                    .map(|(_, parsed)| parsed.local_seconds)
+                    .collect::<Vec<_>>();
+                let swdown = match swdown_index {
+                    Some(index) => records
+                        .iter()
+                        .map(|(row, _)| parse_value(row, index, "shortwave radiation"))
+                        .collect::<Result<Vec<_>>>()?,
+                    None => Vec::new(),
+                };
+                let decision = decide_timezone_with_solar(
+                    plan.manual_utc_offset.or(column_offset),
+                    None,
+                    Some(longitude),
+                    &local_times,
+                    &swdown,
+                )?;
+                let source = if plan.manual_utc_offset.is_some() {
+                    "manual_override"
+                } else if column_offset.is_some() {
+                    "table_offset_column"
+                } else {
+                    decision.source.as_str()
+                };
+                (
+                    (decision.offset_hours * 3600.0).round() as i64,
+                    source.to_string(),
+                    decision.confidence.as_str(),
+                    decision.conflict,
+                )
             };
-            (
-                (decision.offset_hours * 3600.0).round() as i64,
-                source.to_string(),
-            )
-        };
         let mut by_time = BTreeMap::<i64, &Row>::new();
         for (row, parsed) in records {
             let offset = parsed.offset_seconds.unwrap_or(fallback_offset);
@@ -414,6 +436,10 @@ pub fn import_table(
         let inserted_steps = steps - by_time.len();
         let staged_path = staging.join(format!("{safe_site}_Met.nc"));
         let final_path = destination.join(format!("{safe_site}_Met.nc"));
+        let resolved_offset = explicit_common_offset(&explicit_offsets)
+            .or(plan.manual_utc_offset)
+            .or(column_offset)
+            .or_else(|| (!all_explicit).then_some(fallback_offset as f64 / 3600.0));
         write_site_file(
             path,
             &table,
@@ -428,9 +454,9 @@ pub fn import_table(
             &by_time,
             plan,
             &timezone_source,
-            explicit_common_offset(&explicit_offsets)
-                .or(plan.manual_utc_offset)
-                .or(column_offset),
+            resolved_offset,
+            timezone_confidence,
+            timezone_conflict,
         )?;
         imported.push(ImportedTableSite {
             site,
@@ -442,10 +468,7 @@ pub fn import_table(
             latitude,
             longitude,
             landtype,
-            timezone_offset_hours: explicit_common_offset(&explicit_offsets)
-                .or(plan.manual_utc_offset)
-                .or(column_offset)
-                .or_else(|| Some(fallback_offset as f64 / 3600.0)),
+            timezone_offset_hours: resolved_offset,
             timezone_source,
             start_utc: start,
             end_utc: end,
@@ -996,6 +1019,8 @@ fn write_site_file(
     plan: &TabularPlan,
     timezone_source: &str,
     timezone_offset_hours: Option<f64>,
+    timezone_confidence: &str,
+    timezone_conflict: bool,
 ) -> Result<()> {
     let parent = destination
         .parent()
@@ -1018,6 +1043,8 @@ fn write_site_file(
         file.add_attribute("site_id", site)?;
         file.add_attribute("time_shown_in", "UTC")?;
         file.add_attribute("tabular_timezone_source", timezone_source)?;
+        file.add_attribute("tabular_timezone_confidence", timezone_confidence)?;
+        file.add_attribute("tabular_timezone_conflict", i32::from(timezone_conflict))?;
         if let Some(offset) = timezone_offset_hours {
             file.add_attribute("tabular_source_utc_offset_hours", offset)?;
         }

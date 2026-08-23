@@ -418,6 +418,10 @@ pub struct GapVariable {
 pub struct GapReport {
     pub timezone_offset_hours: f64,
     pub timezone_source: String,
+    pub timezone_confidence: String,
+    pub timezone_conflict: bool,
+    pub solar_noon_hour: Option<f64>,
+    pub solar_noon_std_hours: Option<f64>,
     pub latitude: f64,
     pub longitude: f64,
     pub start_date: String,
