@@ -442,7 +442,11 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
         .map(|time| month_from_unix(*time))
         .collect::<Vec<_>>();
 
-    let donor = plan.era5.as_deref().map(Era5Catalog::open).transpose()?;
+    let donor = plan
+        .era5
+        .as_deref()
+        .map(|path| Era5Catalog::open(path, latitude, longitude))
+        .transpose()?;
     let mut replacements = BTreeMap::<String, Vec<f64>>::new();
     let mut quality = BTreeMap::<String, Vec<u8>>::new();
     let mut summaries = Vec::with_capacity(plan.slots.len());
@@ -874,17 +878,14 @@ struct Era5Catalog {
 }
 
 impl Era5Catalog {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(path: &Path, latitude: f64, longitude: f64) -> Result<Self> {
         let mut files = if path.is_dir() {
-            std::fs::read_dir(path)
-                .with_context(|| format!("cannot read ERA5-Land directory {}", path.display()))?
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|entry| {
-                    entry
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("nc"))
-                })
-                .collect::<Vec<_>>()
+            let point_cache = path.join(era5_point_cache_name(latitude, longitude));
+            if point_cache.is_dir() {
+                netcdf_files(&point_cache)?
+            } else {
+                netcdf_files(path)?
+            }
         } else {
             vec![path.to_path_buf()]
         };
@@ -1057,10 +1058,14 @@ impl Era5Catalog {
                     _ => None,
                 })
                 .unwrap_or_default();
-            apply_donor_transform(&times, &mut values, &units, transform)?;
+            let interval_amounts = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("era5land_timeseries_"));
+            apply_donor_transform(&times, &mut values, &units, transform, interval_amounts)?;
             for (time, value) in times.into_iter().zip(values) {
-                // Monthly downloads overlap by a padded day. Prefer a finite value if
-                // the first file's boundary sample could not be de-accumulated.
+                // Padded or repeated downloads can overlap. Prefer a finite value if
+                // the earlier cache's boundary sample could not be de-accumulated.
                 match merged.entry(time) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(value);
@@ -1084,6 +1089,32 @@ impl Era5Catalog {
         let (times, values): (Vec<_>, Vec<_>) = merged.into_iter().unzip();
         sample_donor(&times, &values, target_times, target_step, kind)
     }
+}
+
+fn netcdf_files(path: &Path) -> Result<Vec<PathBuf>> {
+    Ok(std::fs::read_dir(path)
+        .with_context(|| format!("cannot read ERA5-Land directory {}", path.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|entry| {
+            entry
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("nc"))
+        })
+        .collect())
+}
+
+pub fn era5_point_cache_name(latitude: f64, longitude: f64) -> String {
+    let coordinate = |value: f64| {
+        format!("{:+.1}", (value * 10.0).round() / 10.0)
+            .replace('+', "p")
+            .replace('-', "m")
+            .replace('.', "p")
+    };
+    format!(
+        "era5land_lat_{}_lon_{}",
+        coordinate(latitude),
+        coordinate(longitude)
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1193,6 +1224,7 @@ fn apply_donor_transform(
     values: &mut [f64],
     units: &str,
     transform: DonorTransform,
+    interval_amounts: bool,
 ) -> Result<()> {
     if transform == DonorTransform::Identity {
         return Ok(());
@@ -1201,9 +1233,8 @@ fn apply_donor_transform(
         bail!("ERA5-Land time and value axes differ");
     }
     let step = source_step_seconds(times)? as f64;
-    // Downloaded ERA5-Land accumulated fields are cumulative within the forecast day.
-    // Convert them to each interval before unit conversion. At 01 UTC a new daily
-    // forecast starts; at other hours subtract the preceding accumulation.
+    // Legacy ERA5-Land grid downloads are cumulative within the forecast day;
+    // the point time-series API already returns interval amounts.
     let original = values.to_vec();
     for index in 0..values.len() {
         if !original[index].is_finite() {
@@ -1211,7 +1242,7 @@ fn apply_donor_transform(
             continue;
         }
         let hour = times[index].rem_euclid(86400) / 3600;
-        let amount = if hour == 1 {
+        let amount = if interval_amounts || hour == 1 {
             original[index]
         } else if index > 0 && original[index - 1].is_finite() {
             original[index] - original[index - 1]
@@ -1255,7 +1286,7 @@ fn sample_donor(
     times: &[i64],
     values: &[f64],
     targets: &[i64],
-    target_step: i64,
+    _target_step: i64,
     kind: VariableKind,
 ) -> Result<Vec<f64>> {
     if times.len() != values.len() || times.len() < 2 {
@@ -1264,7 +1295,7 @@ fn sample_donor(
     if !times.windows(2).all(|pair| pair[1] > pair[0]) {
         bail!("ERA5-Land time axis is not strictly increasing");
     }
-    let tolerance = (target_step.abs().min(times[1] - times[0]) / 2).max(1);
+    let tolerance = (times[1] - times[0]).max(1);
     let mut output = Vec::with_capacity(targets.len());
     for target in targets {
         match times.binary_search(target) {

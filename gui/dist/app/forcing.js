@@ -862,7 +862,10 @@ function renderTableBatchResult(box) {
     field.innerHTML = '<label>全部站点共用的 ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="table-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="table-era5-pick">选择…</button></div>';
     const input = field.querySelector('#table-era5');
     input.value = gapSettings.era5;
-    input.onchange = () => { gapSettings.era5 = input.value.trim(); renderCards(); };
+    input.onchange = () => {
+      gapSettings.era5 = input.value.trim();
+      renderCards();
+    };
     field.querySelector('#table-era5-pick').onclick = async () => {
       try {
         const picked = await invoke('pick_folder', { key: 'table-era5' });
@@ -1139,7 +1142,11 @@ function gapReportView() {
     const input = field.querySelector('#gap-era5');
     if (!gapSettings.era5 && dstDir) gapSettings.era5 = joinPath(dstDir, '.era5land');
     input.value = gapSettings.era5;
-    input.onchange = () => { gapSettings.era5 = input.value.trim(); repairedSource = null; renderCards(); };
+    input.onchange = () => {
+      gapSettings.era5 = input.value.trim();
+      repairedSource = null;
+      renderCards();
+    };
     field.querySelector('#gap-era5-pick').onclick = async () => {
       try {
         const picked = await invoke('pick_folder', { key: 'gap-era5' });
@@ -1152,7 +1159,7 @@ function gapReportView() {
     box.appendChild(field);
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = '可选择已有 ERA5-Land NetCDF 缓存；也可用本机 CDS API 下载。下载需要先配置 ~/.cdsapirc 并接受 ERA5-Land 数据许可。';
+    note.textContent = '可选择已有 ERA5-Land NetCDF 缓存；也可用本机 CDS API 一次下载该站点完整时间段。下载需要先配置 ~/.cdsapirc 并接受 ERA5-Land 数据许可。';
     box.appendChild(note);
   }
 

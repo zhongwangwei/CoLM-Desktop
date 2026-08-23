@@ -227,7 +227,14 @@ fn local_timezone_metadata_uses_a_numeric_offset_and_survives_rediagnosis() {
 fn accumulated_era5_water_and_energy_are_deaccumulated_across_midnight() {
     let times = [23 * 3600, 24 * 3600, 25 * 3600, 26 * 3600];
     let mut water = [0.023, 0.024, 0.001, 0.003];
-    apply_donor_transform(&times, &mut water, "m", DonorTransform::AccumulatedWater).unwrap();
+    apply_donor_transform(
+        &times,
+        &mut water,
+        "m",
+        DonorTransform::AccumulatedWater,
+        false,
+    )
+    .unwrap();
     assert!(water[0].is_nan());
     for (got, amount_m) in water[1..].iter().zip([0.001, 0.001, 0.002]) {
         let expected = amount_m * 1000.0 / 3600.0;
@@ -240,10 +247,36 @@ fn accumulated_era5_water_and_energy_are_deaccumulated_across_midnight() {
         &mut energy,
         "J m-2",
         DonorTransform::AccumulatedEnergy,
+        false,
     )
     .unwrap();
     assert!(energy[0].is_nan());
     assert_eq!(&energy[1..], &[1.0, 1.0, 2.0]);
+}
+
+#[test]
+fn timeseries_interval_amounts_are_converted_without_second_deaccumulation() {
+    let times = [0, 3600, 7200];
+    let mut water = [0.001, 0.002, 0.0];
+    apply_donor_transform(
+        &times,
+        &mut water,
+        "m",
+        DonorTransform::AccumulatedWater,
+        true,
+    )
+    .unwrap();
+    assert_eq!(water, [1.0 / 3600.0, 2.0 / 3600.0, 0.0]);
+
+    let interpolated = sample_donor(
+        &[0, 3600],
+        &[280.0, 282.0],
+        &[1800],
+        1800,
+        VariableKind::Continuous,
+    )
+    .unwrap();
+    assert_eq!(interpolated, [281.0]);
 }
 
 fn write_era5_temperature(
@@ -296,7 +329,7 @@ fn era5_catalog_merges_multiple_month_files_in_time_order() {
         &[3.0, 4.0],
     );
     let origin = crate::civil::days_from_civil(2008, 1, 1) * 86400;
-    let values = Era5Catalog::open(&dir)
+    let values = Era5Catalog::open(&dir, 10.0, 20.0)
         .unwrap()
         .series(
             1,
@@ -308,6 +341,28 @@ fn era5_catalog_merges_multiple_month_files_in_time_order() {
         )
         .unwrap();
     assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn era5_cache_root_resolves_the_downloaded_point_directory() {
+    let root = std::env::temp_dir().join("colm-gapfill-era5-point-root");
+    let _ = std::fs::remove_dir_all(&root);
+    let point = root.join(era5_point_cache_name(-37.73, 145.01));
+    assert!(point.ends_with("era5land_lat_m37p7_lon_p145p0"));
+    std::fs::create_dir_all(&point).unwrap();
+    write_era5_temperature(
+        &point.join("era5land_timeseries_2008.nc"),
+        &[0.0, 1.0],
+        -37.7,
+        145.0,
+        &[280.0, 281.0],
+    );
+    let origin = crate::civil::days_from_civil(2008, 1, 1) * 86400;
+    let values = Era5Catalog::open(&root, -37.73, 145.01)
+        .unwrap()
+        .series(1, false, &[origin, origin + 3600], -37.73, 145.01, 3600)
+        .unwrap();
+    assert_eq!(values, vec![280.0, 281.0]);
 }
 
 #[test]

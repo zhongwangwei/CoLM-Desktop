@@ -2653,9 +2653,10 @@ fn cmd_era5land_download(
         )?;
     let grid_lat = (latitude * 10.0).round() / 10.0;
     let grid_lon = (longitude * 10.0).round() / 10.0;
+    let point_cache = destination.join(colm_forcing::era5_point_cache_name(grid_lat, grid_lon));
     let output = std::process::Command::new(python)
         .arg(&script)
-        .arg(destination)
+        .arg(point_cache)
         .arg(format!("{grid_lat:.1}"))
         .arg(format!("{grid_lon:.1}"))
         .arg(start)
@@ -2665,7 +2666,7 @@ fn cmd_era5land_download(
     if !output.status.success() {
         bail!(
             "ERA5-Land download failed. Check ~/.cdsapirc and accept the dataset terms at \
-             https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land\n{}{}",
+             https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-timeseries\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -2708,7 +2709,7 @@ fn cds_api_config_help(path: &Path) -> String {
          1. 登录 https://cds.climate.copernicus.eu/how-to-api\n\
          2. 将该页面提供的配置内容原样保存到 {}\n\
          3. 运行 `{install}` 安装客户端\n\
-         4. 打开 https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land 并接受数据许可\n\
+         4. 打开 https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-timeseries 并接受数据许可\n\
          5. 返回 CoLM Desktop，再次点击 ERA5-Land 下载。\n\
          软件只检查该文件是否存在、非空且可读，不会显示或上传其中的凭据。",
         path.display(),
@@ -2745,28 +2746,33 @@ mod era5land_download_tests {
             );
         }
     }
+
+    #[test]
+    fn point_download_uses_one_long_timeseries_request() {
+        assert!(ERA5LAND_DOWNLOADER.contains("reanalysis-era5-land-timeseries"));
+        assert!(
+            ERA5LAND_DOWNLOADER.contains(r#""date": [f"{start.isoformat()}/{end.isoformat()}"]"#)
+        );
+        assert!(!ERA5LAND_DOWNLOADER.contains("for (year, month)"));
+    }
 }
 
 const ERA5LAND_DOWNLOADER: &str = r#"#!/usr/bin/env python3
-import calendar
 import json
+import os
+import shutil
 import sys
-from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
+from zipfile import ZipFile, is_zipfile
 
 import cdsapi
 
-out = Path(sys.argv[1])
+cache = Path(sys.argv[1])
 lat = float(sys.argv[2])
 lon = float(sys.argv[3])
 start = date.fromisoformat(sys.argv[4]) - timedelta(days=1)
 end = date.fromisoformat(sys.argv[5]) + timedelta(days=1)
-days = defaultdict(list)
-cursor = start
-while cursor <= end:
-    days[(cursor.year, cursor.month)].append(f"{cursor.day:02d}")
-    cursor += timedelta(days=1)
 
 variables = [
     "2m_temperature",
@@ -2778,32 +2784,64 @@ variables = [
     "surface_solar_radiation_downwards",
     "surface_thermal_radiation_downwards",
 ]
-times = [f"{hour:02d}:00" for hour in range(24)]
-client = cdsapi.Client()
-manifest = []
-for (year, month), selected_days in sorted(days.items()):
-    target = out / f"era5land_{year:04d}_{month:02d}.nc"
-    request = {
-        "variable": variables,
-        "year": [f"{year:04d}"],
-        "month": [f"{month:02d}"],
-        "day": selected_days,
-        "time": times,
-        "area": [lat, lon, lat, lon],
-        "data_format": "netcdf",
-        "download_format": "unarchived",
-    }
-    manifest.append({"dataset": "reanalysis-era5-land", "target": str(target), "request": request})
-    if target.exists() and target.stat().st_size > 0:
-        print(f"cached {target}", flush=True)
-        continue
-    print(f"downloading {target}", flush=True)
-    client.retrieve("reanalysis-era5-land", request, str(target))
 
-(out / "era5land_request_manifest.json").write_text(
-    json.dumps(manifest, indent=2), encoding="utf-8"
-)
-print(f"ERA5-Land cache ready: {out}")
+cache.mkdir(parents=True, exist_ok=True)
+key = f"era5land_timeseries_{start.isoformat()}_{end.isoformat()}"
+manifest_path = cache / f"{key}.json"
+request = {
+    "variable": variables,
+    "location": {"longitude": lon, "latitude": lat},
+    "date": [f"{start.isoformat()}/{end.isoformat()}"],
+    "data_format": "netcdf",
+}
+
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = [cache / name for name in manifest.get("files", [])]
+    if manifest.get("request") == request and files and all(path.stat().st_size > 0 for path in files):
+        print(f"cached {cache}", flush=True)
+        print(f"ERA5-Land cache ready: {cache}")
+        raise SystemExit(0)
+except (AttributeError, FileNotFoundError, OSError, TypeError, ValueError):
+    pass
+
+download = cache / f".{key}.{os.getpid()}.download"
+created = []
+print(f"downloading {lat:.1f}, {lon:.1f}: {start} to {end}", flush=True)
+try:
+    cdsapi.Client().retrieve("reanalysis-era5-land-timeseries", request).download(str(download))
+    if is_zipfile(download):
+        with ZipFile(download) as archive:
+            members = [member for member in archive.infolist()
+                       if not member.is_dir() and Path(member.filename).suffix.lower() == ".nc"]
+            if not members:
+                raise RuntimeError("ERA5-Land response contains no NetCDF file")
+            for index, member in enumerate(members):
+                target = cache / f"{key}_{index:02d}_{Path(member.filename).name}"
+                part = target.with_suffix(target.suffix + ".part")
+                with archive.open(member) as source, part.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+                part.replace(target)
+                created.append(target)
+    else:
+        target = cache / f"{key}.nc"
+        download.replace(target)
+        created.append(target)
+finally:
+    if download.exists():
+        download.unlink()
+
+if not created or any(path.stat().st_size == 0 for path in created):
+    raise RuntimeError("ERA5-Land download produced an empty NetCDF file")
+manifest = {
+    "dataset": "reanalysis-era5-land-timeseries",
+    "request": request,
+    "files": [path.name for path in created],
+}
+temporary_manifest = manifest_path.with_suffix(".json.part")
+temporary_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+temporary_manifest.replace(manifest_path)
+print(f"ERA5-Land cache ready: {cache}")
 "#;
 
 /// 删掉一个算例已有的 history 文件，返回删了几个。
