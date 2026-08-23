@@ -24,6 +24,7 @@ assert.match(frontend, /const allComplete = tableBatch\.every/);
 assert.match(frontend, /siteOutputName/);
 assert.match(frontend, /短缺口上限（时间步）/);
 assert.match(frontend, /ERA5-Land 缓存目录/);
+assert.match(frontend, /message\.includes\('CDS API 配置'\).*globalThis\.alert/);
 assert.match(frontend, /\*_gapfill_qc/);
 assert.match(frontend, /if \(!gapReport\) reasons\.push\('先完成缺测与时区诊断'\)/);
 assert.match(frontend, /gapReport\.missing > 0 && !repairedSource/);

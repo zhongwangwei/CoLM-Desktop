@@ -917,8 +917,14 @@ async function downloadTableEra5() {
       status(`ERA5-Land 下载 ${finished}/${targets.length}：${item.site}`);
     });
     status(`已缓存 ${targets.length} 个站点需要的 ERA5-Land 数据`);
-  } catch (error) { status(error); }
+  } catch (error) { showEra5DownloadError(error); }
   finally { tableBusy = false; renderCards(); }
+}
+
+function showEra5DownloadError(error) {
+  const message = String(error);
+  status(message);
+  if (message.includes('CDS API 配置')) globalThis.alert?.(message);
 }
 
 async function repairTableBatch() {
@@ -1211,7 +1217,7 @@ async function downloadEra5() {
       end: gapReport.end_date,
     });
     status('ERA5-Land 对应格点已缓存，可以生成修复文件');
-  } catch (error) { status(error); }
+  } catch (error) { showEra5DownloadError(error); }
 }
 
 async function repairGaps() {
