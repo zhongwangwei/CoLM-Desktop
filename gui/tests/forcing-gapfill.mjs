@@ -32,7 +32,8 @@ assert.match(frontend, /message\.includes\('CDS API 配置'\).*globalThis\.alert
 assert.match(frontend, /\*_gapfill_qc/);
 assert.match(frontend, /if \(!gapReport\) reasons\.push\('先完成缺测与时区诊断'\)/);
 assert.match(frontend, /gapReport\.missing > 0 && !repairedSource/);
-assert.match(frontend, /src: repairedSource \?\? src/);
+assert.match(frontend, /sourceForConvert = await ensureRepairedSource/);
+assert.match(frontend, /src: sourceForConvert/);
 
 const backend = await readFile(new URL('../src-tauri/src/forcing.rs', import.meta.url), 'utf8');
 for (const command of [

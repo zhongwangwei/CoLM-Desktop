@@ -97,6 +97,7 @@ const ZH_EN = [
   ['留空 = 由 rawdata 提供', 'Leave blank = provided by rawdata'],
   ['版权所有：CoLM陆面模式开发团队，中山大学大气科学学院', 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU'],
   ['开发与维护', 'Developed and maintained by'],
+  ['Zhongwang Wei (魏忠旺)', 'Zhongwang Wei'],
   ['版本', 'Version'],
   ['关闭', 'Close'],
   ['把原始数据批量转成模型要的格式，', 'Convert raw data in batches to the format required by the model,'],
