@@ -181,9 +181,10 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .about-card h2 { margin: 10px 0 4px; }
 .about-signature { margin: 20px 0 18px; padding: 18px 0; border-block: 1px solid var(--border-soft);
   line-height: 1.65; }
-.about-maintainer { margin-top: 7px; font-size: 14px; font-weight: 400; }
+.about-contact { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.about-maintainer { font-size: 14px; font-weight: 400; }
 .about-email { color: var(--accent); }
-.about-team { margin-top: 10px; font-size: 17px; font-weight: 700; }
+.about-team { margin-top: 7px; font-size: 17px; font-weight: 700; }
 
 /* 需要人特别注意的一段说明。虚线框是「这里跟别处不一样」的信号。 */
 .expert-note { border: 1.5px dashed var(--accent); border-radius: var(--r-md);

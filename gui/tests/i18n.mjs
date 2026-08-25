@@ -98,6 +98,10 @@ if (translateZh('版权所有：CoLM陆面模式开发团队，中山大学大�
     !== 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU') {
   throw new Error('copyright attribution is not translated');
 }
+if (translateZh('开发与维护团队') !== 'Development and maintenance team'
+    || translateZh('联系人') !== 'Contact') {
+  throw new Error('about attribution is not translated');
+}
 if (translateZh('下一步：站点信息 →') !== 'Next: Site information →') {
   throw new Error('dynamic workflow navigation is not translated');
 }
