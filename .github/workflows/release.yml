@@ -70,20 +70,20 @@ jobs:
             mingw-w64-x86_64-lapack
             mingw-w64-x86_64-msmpi
 
-      # ---- 两种编译期地类 ----
-      # PFT/PC/BGC/URBAN 已是运行时选择；只有 IGBP/USGS 需要两份产物。
-      - name: Build the two land classifications (unix)
+      # ---- 发布编译期内核 ----
+      # PFT/PC/BGC/URBAN 已是运行时选择；IGBP/USGS 与 CROP 数组尺寸仍需产物。
+      - name: Build release kernels (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          for p in default usgs; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs crop; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
 
-      - name: Build the two land classifications (Windows)
+      - name: Build release kernels (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          for p in default usgs; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs crop; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
           # 动态链接 netcdff/netcdf，所以二进制要跟 MSYS2 的 DLL 一起走。
           # 实测：不带 DLL 时退出码 -1073741515（STATUS_DLL_NOT_FOUND），
@@ -98,6 +98,16 @@ jobs:
               ldd "$x" | grep -io '/mingw64/bin/[^ ]*\.dll'
             done | sort -u | while read -r dll; do cp -n "$dll" "$d"; done
             echo "$d: $(ls "$d"*.dll | wc -l) DLLs"
+          done
+
+      - name: Release kernels use the production profile
+        shell: bash
+        run: |
+          for manifest in kernels/*/manifest.json; do
+            grep -q '"build_profile": "production"' "$manifest" || {
+              echo "::error file=$manifest::release kernel is not production"
+              exit 1
+            }
           done
 
       - name: Bundle
@@ -115,7 +125,7 @@ jobs:
         working-directory: gui/src-tauri
         run: |
           app='target/release/bundle/macos/CoLM Desktop.app'
-          for p in default usgs; do
+          for p in default usgs crop; do
             test -x "$app/Contents/Resources/kernels/$p/colm.x"
             test -f "$app/Contents/Resources/kernels/$p/manifest.json"
           done
@@ -128,6 +138,15 @@ jobs:
           test -f "$app/Contents/Resources/examples/Sitedata/${s}_site.nc"
           test -f "$app/Contents/Resources/examples/Forcing/${s}_Met.nc"
           test -f "$app/Contents/Resources/examples/Observation/${s}_Flux.nc"
+          c=US-Ne3_2002-2003_FLUXNET2015_CROP
+          test -f "$app/Contents/Resources/examples/Sitedata/${c}_site.nc"
+          test -f "$app/Contents/Resources/examples/Forcing/${c}_Met.nc"
+          test -f "$app/Contents/Resources/examples/Runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc"
+          s=AT-Neu_2010-2012_FLUXNET-CH4
+          test -f "$app/Contents/Resources/examples/Sitedata/${s}_site.nc"
+          test -f "$app/Contents/Resources/examples/Forcing/${s}_Met.nc"
+          test -f "$app/Contents/Resources/examples/Observation/${s}_Flux.nc"
+          test -f "$app/Contents/Resources/examples/Forcingnml/AT-Neu.nml"
 
       - uses: actions/upload-artifact@v4
         with:

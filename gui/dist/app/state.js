@@ -50,6 +50,8 @@ export const state = {
   /** 高亮（而不是勾选）的那一个站点。**只高亮不动文件** ——
    *  建算例是第 2 步“基本设定 / 文件与目录”按下去的事。 */
   pickedSite: null,
+  /** 当前高亮站点是否由向导自动选择；用户点过站点后不再自动改。 */
+  pickedSiteAuto: false,
   /** 勾选的算例目录。批量运行与批量评估的作用对象。 */
   pickedCases: new Set(),
   /** 算例目录 -> '待运行' | '运行中' | '已完成' | '失败'。
@@ -65,11 +67,10 @@ export const state = {
   runTargets: [],
   runningCases: new Set(),
   runFailures: new Set(),
+  runCancelled: new Set(),
   kernels: [],
   selected: null,
-  /** 参数页正在配置哪些算例（目录路径）。**参数改动作用于整批** ——
-   *  用户勾了 20 个站点是要配"这一次运行"，不是配其中第一个。
-   *  只配第一个的话，另外 19 个会带着未改的配置跑完，而界面上看不出异常。 */
+  /** 本次算例批次。预热/输出/网格可整批写；逐站点基本设定和过程参数有范围下拉。 */
   batch: [],
   /** 这一批里取值不一致的字段名。界面据此在那些行上标出来。 */
   varies: new Set(),
@@ -82,8 +83,10 @@ export const state = {
   irrelevant: new Set(),
   /** 当前内核 + case.nml 的统一字段交互状态。 */
   fieldStates: new Map(),
-  /** 专家入口保留给后续内容；当前只显示明确的占位说明。 */
+  /** 过程参数当前站点；专家外部参数文件与 case.nml 共用这一选择。 */
   expert: false,
+  expertCaseDir: null,
+  expertPftType: null,
   /** 结果分析默认收起右侧运行监视器；用户在结果区手动切换后保持到离开结果区。 */
   liveCollapsed: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */

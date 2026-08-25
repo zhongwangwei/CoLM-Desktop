@@ -55,6 +55,7 @@ MODULE MOD_MonthlyinSituCO2MaunaLoa
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_SSP
+   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
    SAVE
 
@@ -716,9 +717,7 @@ CONTAINS
             co2mlo(2099,:) = (/ 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55 /)
             co2mlo(2100,:) = (/ 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21 /)
       CASE DEFAULT
-            print *, 'Warning: unknown DEF_SSP; future CO2 held at the last observed value.'
-            print *, 'DEF_SSP = ', trim(DEF_SSP)
-            co2mlo(2023:eyear,:) = co2mlo(2022,12)
+            CALL CoLM_stop ('Fatal ERROR: unknown DEF_SSP=' // trim(DEF_SSP))
       END select
 
    END SUBROUTINE init_monthly_co2_mlo

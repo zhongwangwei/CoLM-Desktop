@@ -5,23 +5,19 @@
 #undef UNSTRUCTURED
 #undef SinglePoint
 
-! 2. Land subgrid type classification:
-!    Select one of the following options.
+! 2. Land TYPE classification: still a compile-time choice (see the
+!    header comment above -- N_land_classification and its lookup tables
+!    in MOD_Const_LC.F90 are parameter-sized differently per choice).
+!    The subgrid *structure* that used to live here as LULC_IGBP_PFT/
+!    LULC_IGBP_PC is a runtime switch now (DEF_USE_LCT/DEF_USE_PFT/
+!    DEF_USE_PC, MOD_Namelist.F90) -- PFT/PC code under main/ and mksrfdata/
+!    is always compiled in, so those two macros no longer exist here.
 #undef LULC_USGS
-#undef LULC_IGBP
-#define LULC_IGBP_PFT
-#undef LULC_IGBP_PC
-
-! 2.1 3D Urban model (put it temporarily here):
-#undef URBAN_MODEL
-!    Dependence:  only LULC_IGBP subgrid type for
-!    single point URBAN_MODEL right now.
-#if (defined URBAN_MODEL && defined SinglePoint)
 #define LULC_IGBP
-#undef LULC_USGS
-#undef LULC_IGBP_PFT
-#undef LULC_IGBP_PC
-#endif
+! 2.1 Urban model: always compiled in now, DEF_URBAN_RUN
+!     (MOD_Namelist.F90, default .false.) picks whether it runs.
+#define URBAN_MODEL
+#undef URBAN_LCZ
 
 ! 3. CoLMDEBUG / RangeCheck / SrfdataDiag used to live here as compile-time
 !    macros. They are runtime switches now (DEF_USE_CoLMDEBUG,
@@ -31,18 +27,21 @@
 !    baked in per kernel.
 
 ! 4. If defined, MPI parallelization is enabled.
-#define USEMPI
+#define  USEMPI
 !    Conflict: not used when defined SingPoint.
 #if (defined SinglePoint)
 #undef USEMPI
 #endif
 
 ! 5. Hydrological process options.
-! 5.1 Two soil hydraulic models can be used.
-#undef   Campbell_SOIL_MODEL
-#define  vanGenuchten_Mualem_SOIL_MODEL
+! 5.1 Campbell_SOIL_MODEL / vanGenuchten_Mualem_SOIL_MODEL used to live
+!     here as two mutually exclusive compile-time macros (exactly one
+!     always defined, picked by the old 4th script argument). Both
+!     code paths are now always compiled in and the choice is a runtime
+!     namelist switch instead (DEF_USE_Campbell_SOIL_MODEL,
+!     share/MOD_Namelist.F90, default .false. i.e. vanGenuchten).
 ! 5.2 If defined, lateral flow is modeled.
-#define CatchLateralFlow
+#define  CatchLateralFlow
 !    Conflicts :
 #ifndef CATCHMENT
 #undef CatchLateralFlow
@@ -50,12 +49,6 @@
 
 ! 6. If defined, CaMa-Flood model will be used.
 #undef CaMa_Flood
-#if (defined SinglePoint)
-#undef CaMa_Flood
-#endif
-#ifndef USEMPI
-#undef CaMa_Flood
-#endif
 
 #define GridRiverLakeFlow
 !    Conflicts :
@@ -63,78 +56,60 @@
 #undef GridRiverLakeFlow
 #endif
 
-! NOTE: the former standalone river-lake sediment macro has been retired.
-! Sediment is now a TRACER 'particle' species and is compiled/activated
-! under #ifdef TRACER together with GridRiverLakeFlow.
+! 7. BGC model: always compiled in now (every main/BGC/ module). DEF_USE_BGC
+!    (MOD_Namelist.F90, default .false.) picks whether it runs; the old
+!    compile-time conflict that required LULC_IGBP_PFT or LULC_IGBP_PC
+!    moved to MOD_Namelist.F90 too
+!    (DEF_USE_BGC requires DEF_USE_PFT or DEF_USE_PC, validated there).
 
-! 7. If defined, BGC model is used.
-#define BGC
-
-!    Conflicts :  only used when LULC_IGBP_PFT is defined.
-#ifndef LULC_IGBP_PFT
-#ifndef LULC_IGBP_PC
-#undef BGC
-#endif
-#endif
-! 7.1 If defined, CROP model is used
-#define CROP
-!    Conflicts : only used when BGC is defined
-#ifndef BGC
+! 7.1 CROP model: still a compile-time macro (see the header comment
+!     above -- N_PFT/N_CFT and their lookup tables in MOD_Const_PFT.F90
+!     are parameter-sized differently per choice). DEF_USE_CROP
+!     (MOD_Namelist.F90) is a read-only reflection of this macro, not a
+!     free runtime switch.
 #undef CROP
-#endif
+!    Conflicts : only used when BGC is defined. BGC is a runtime switch
+!    now, so this can no longer be checked here at compile time; the
+!    equivalent check (DEF_USE_CROP requires DEF_USE_BGC) lives in
+!    MOD_Namelist.F90.
 
-! 8. If defined, open Land use and land cover change mode.
-#undef LULCC
-
-! 9. If defined, data assimilation is used.
-#undef DataAssimilation
-#if (defined DataAssimilation)
-#define LULC_IGBP
-#undef LULC_USGS
-#undef LULC_IGBP_PFT
-#undef LULC_IGBP_PC
-#endif
-
-! 10. Interface to AI model.
-#undef USESplitAI
-
-! 11. External lake models.
-#undef EXTERNAL_LAKE
-
-! 12. Hyperspectral scheme.
-#undef HYPERSPECTRAL
+! 8. Land use and land cover change mode: always compiled in now
+!    (every main/LULCC/ module). DEF_USE_LULCC (MOD_Namelist.F90, default
+!    .false.) picks whether it runs -- no existing kernel/preset ever
+!    set the old "#define LULCC" here, so this stays .false. by default.
 
 ! 12b. If defined, extended canopy interception schemes are enabled.
 #define extend_interception
 
-! 13. If defined, the tracer subsystem is enabled (isotope, solute,
-!     particle, and gas families).
-!     This repository template currently enables TRACER; switch to #undef
-!     TRACER only for builds that intentionally exclude all tracer species.
-#define TRACER
-!    Conflicts: TRACER requires VariablySaturatedFlow soil hydrology
-!    (vanGenuchten_Mualem_SOIL_MODEL). Campbell_SOIL_MODEL cannot silently
-!    disable TRACER because that changes the requested physics at compile time.
-#if (defined TRACER) && (defined Campbell_SOIL_MODEL)
-#error "TRACER requires vanGenuchten_Mualem_SOIL_MODEL; disable TRACER explicitly before using Campbell_SOIL_MODEL"
-#endif
-!    Dependency: only the routing-borne TRACER species require GridRiverLakeFlow
-!    (in-river isotope transport in MOD_Tracer_RiverLake, and the sediment
-!    particle species). Those are compiled only when GridRiverLakeFlow is also
-!    defined. Land tracers do not route and build without it, so no hard error
-!    is raised here -- SinglePoint forces GridRiverLakeFlow off (section 6),
-!    which made TRACER impossible to build for a single point at all.
-
-! 13b. Methane gas provider.
-!     Activation is runtime: register a tracer named "CH4" or "METHANE"
-!     with type="gas" in the &nl_colm DEF_TRACER_NAMES / DEF_TRACER_TYPES
-!     namelist. The methane module is compiled whenever both TRACER and BGC
-!     are defined; its lifecycle registrar attaches the CH4 hooks and index.
-!     A configured CH4 row without that compiled provider fails at startup.
-!     Additional dependency: requires LULC_IGBP_PFT or LULC_IGBP_PC for
-!     pftfrac access (per-PFT NPP and root-respiration aggregation).
-#if (defined TRACER) && (defined BGC)
-#if (!defined LULC_IGBP_PFT && !defined LULC_IGBP_PC)
-#error "Methane (TRACER+BGC) requires LULC_IGBP_PFT or LULC_IGBP_PC for pftfrac access."
-#endif
-#endif
+! 13. Water tracer module (isotope / solute / particle / gas families).
+!     TRACER used to live here as a compile-time macro (the old script
+!     7th argument, TRACERON/TRACEROFF). Every main/TRACER module file is
+!     now always compiled in and the choice is a runtime namelist switch
+!     instead (DEF_USE_TRACER, share/MOD_Namelist.F90, default .false.) --
+!     so that argument slot is gone and this line no longer exists.
+!
+!     TRACER requiring vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.)
+!     used to be a compile-time #error here on (TRACER && Campbell_SOIL_MODEL);
+!     Campbell/vanGenuchten became a runtime choice first (see above), so that
+!     check already moved to MOD_Namelist.F90 -- it now runs whenever
+!     DEF_USE_TRACER is .true., regardless of which soil scheme is picked.
+!
+!     NOTE: TRACER as a whole does NOT require GridRiverLakeFlow. The tracer
+!     subsystem has four families (isotope, solute, particle, gas) and only
+!     the river-lake ones need a river network: MOD_Tracer_RiverLake.F90 and
+!     MOD_Tracer_Particle_Sediment.F90 guard themselves with
+!     #ifdef GridRiverLakeFlow, so they simply are not compiled without it.
+!     The other 38 MOD_Tracer_*.F90 modules -- water isotopes, snow tracers,
+!     forcing tracers -- are independent of the river network and are
+!     perfectly meaningful for SinglePoint runs, where water-isotope
+!     observations are common.
+!
+! 13.1 Methane (one of the four TRACER families: MOD_Tracer_Reactive_Methane*.F90
+!      and MOD_Tracer_Reactive_BgcShim.F90) hard-USEs BGC carbon/nitrogen
+!      pools. BGC is a runtime switch now too (see 7. above), so unlike
+!      before, this is no longer a compile-time gate at all -- main/BGC/ is
+!      always compiled in, so the hard USE always resolves. The runtime
+!      requirement (methane needs DEF_USE_BGC = .true., which itself needs
+!      DEF_USE_PFT or DEF_USE_PC) is enforced by the MOD_Namelist.F90
+!      DEF_USE_BGC-requires-PFT-or-PC check, replacing
+!      the old compile-time #error that used to live here.

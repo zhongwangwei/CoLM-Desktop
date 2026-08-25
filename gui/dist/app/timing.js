@@ -47,7 +47,9 @@ export async function renderTiming() {
     const years = Math.max(0, +$('tm-years').value | 0);
     const repeat = Math.max(0, +$('tm-repeat').value | 0);
     try {
-      const r = await invoke('set_spinup', { dirs, years, repeat });
+      const r = await invoke('set_spinup', {
+        dirs, years, repeat, kernelDir: $('kernel').value,
+      });
       state.text = r.text;
       const what = repeat > 0 && years > 0
         ? `预热：每轮 ${years} 年，共重复 ${repeat} 轮`

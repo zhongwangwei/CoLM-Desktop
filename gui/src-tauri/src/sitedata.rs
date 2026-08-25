@@ -49,6 +49,73 @@ pub struct SiteReport {
     pub self_contained: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PftComponentReport {
+    pub pft_type: u8,
+    pub fraction: f64,
+    pub name_zh: String,
+    pub name_en: String,
+}
+
+fn pft_site_input(case_dir: &std::path::Path) -> Result<(std::path::PathBuf, Option<i64>), String> {
+    let file = case_dir.join("case.nml");
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let doc = colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", file.display()))?;
+    let enabled = |name| matches!(doc.get(name), Some(colm_namelist::Value::Bool(true)));
+    if !enabled("DEF_USE_PFT") && !enabled("DEF_USE_PC") {
+        return Err("当前算例没有使用 PFT 或 PC 次网格".into());
+    }
+    let Some(colm_namelist::Value::Str(path)) = doc.get("SITE_fsitedata") else {
+        return Err("当前算例没有 SITE_fsitedata".into());
+    };
+    let path = std::path::Path::new(path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    };
+    let landtype = match doc.get("SITE_landtype") {
+        Some(colm_namelist::Value::Int(value)) if *value >= 0 => Some(*value),
+        _ => None,
+    };
+    Ok((path, landtype))
+}
+
+/// Read a case's active PFT composition through the netcdf-owning sidecar.
+#[tauri::command]
+pub async fn site_pfts(dir: String, kernel_dir: String) -> Result<Vec<PftComponentReport>, String> {
+    let (site, landtype) = pft_site_input(std::path::Path::new(&dir))?;
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|error| format!("{error:#}"))?;
+    let mut args = vec!["site-pfts".to_string(), site.to_string_lossy().to_string()];
+    if kernel.manifest.macros.iter().any(|name| name == "CROP") {
+        args.extend(["--crop".to_string(), "1".to_string()]);
+    }
+    if let Some(landtype) = landtype {
+        args.extend(["--landtype".to_string(), landtype.to_string()]);
+    }
+    let json = crate::sidecar::capture_async(args).await?;
+    #[derive(Deserialize)]
+    struct Raw {
+        pft_type: u8,
+        fraction: f64,
+    }
+    let raw: Vec<Raw> = serde_json::from_str(&json)
+        .map_err(|e| format!("colm-cli site-pfts 的输出解析不了：{e}"))?;
+    raw.into_iter()
+        .map(|p| {
+            let names = colm_case::pft::pft_name(p.pft_type)
+                .ok_or_else(|| format!("PFT {} 超出常量表范围", p.pft_type))?;
+            Ok(PftComponentReport {
+                pft_type: p.pft_type,
+                fraction: p.fraction,
+                name_zh: names.zh.to_string(),
+                name_en: names.en.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// 拼 `colm-cli site-new --json 1` 的参数列表。
 ///
 /// 抽成同步函数是为了不引入 tokio 就能测 —— `#[tauri::command]` 的
@@ -101,7 +168,7 @@ pub async fn make_site(
     mode: String,
 ) -> Result<SiteReport, String> {
     let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode);
-    let json = crate::sidecar::capture(&args)?;
+    let json = crate::sidecar::capture_async(args).await?;
     serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是建站点失败 —— 照 `probe_forcing`/`scan_sites`
         // 的措辞，两者的处置完全不同：前者是我们两边的结构体对不上了，

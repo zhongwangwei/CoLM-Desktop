@@ -54,13 +54,14 @@ const FAILURE_MARKERS: &[&str] = &[
     "Memory allocation (malloc) failure",
     "Fortran runtime error",
     "Error termination",
-    // 能量/水量平衡越界。`CoLMDEBUG` 下 `CoLMMAIN.F90:1545` 与 `:1620` 会打印
-    // `Warning: ... balance violation ...` 然后**继续跑** —— 与 RangeCheck 不同，
-    // 这里没有 `CoLM_stop`。（design.md §6.5 原先写它「同样走 CoLM_stop」，是错的，
-    // 已就地改正。）
+    // 能量/水量平衡越界。`CoLMDEBUG` 下，能量路径在 `CoLMMAIN.F90:1503`
+    // 打印 `Warning: ... balance violation ...` 后继续跑；水收支路径在
+    // `CoLMMAIN.F90:1579-1587`、`:1759-1760`、`:1969-1970` 打印后
+    // `CoLM_stop()`。
     //
     // 于是一次能量不守恒的运行会跑到底并被判成功，而它的输出是错的。
-    // §6.5 定的政策是「宁可炸也不要给出错的数」—— CoLM 自己不执行，就得这里执行。
+    // §6.5 定的政策是「宁可炸也不要给出错的数」—— 能量路径 CoLM 自己
+    // 不执行，就得这里执行。
     // 十种消息文本共享 `balance violation` 这一个子串，一条标记全覆盖。
     // 实测两次健康运行的 colm.log 里零次出现。
     //

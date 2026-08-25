@@ -1,5 +1,17 @@
 use super::*;
 
+fn set_batch(dirs: Vec<String>, path: String, value: String) -> Result<BatchWrite, String> {
+    super::set_field_batch(dirs, path, value, None)
+}
+
+fn set_batches(dirs: Vec<String>, fields: Vec<FieldChange>) -> Result<BatchWrite, String> {
+    super::set_fields_batch(dirs, fields, None)
+}
+
+fn set_test_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWrite, String> {
+    super::set_spinup(dirs, years, repeat, None)
+}
+
 const SAMPLE: &str = "\
 &nl_colm
 
@@ -40,6 +52,24 @@ fn described_defaults_are_writable_fortran_literals() {
     assert_eq!(default("DEF_precip_phase_discrimination_scheme"), "I");
     assert_eq!(default("DEF_SSP"), "off");
     assert_eq!(default("DEF_simulation_time%timestep"), "1800.");
+    for name in [
+        "DEF_BALL_BERRY_GRADM",
+        "DEF_BALL_BERRY_BINTER",
+        "DEF_MEDLYN_G1",
+        "DEF_MEDLYN_G0",
+        "DEF_WUE_LAMBDA",
+    ] {
+        assert_eq!(default(name), "-1.0_r8", "{name}");
+    }
+    for name in [
+        "DEF_TUNING_ZLND",
+        "DEF_TUNING_CAPR",
+        "DEF_PH_ROOT_RADIUS",
+        "DEF_OZONE_KO3",
+        "DEF_DS_SHORTWAVE_SIMPLE_LIMIT",
+    ] {
+        assert!(!default(name).is_empty(), "{name}");
+    }
 }
 
 #[test]
@@ -49,6 +79,10 @@ fn unknown_fields_names_the_ones_colm_would_reject() {
     // MOD_Namelist.F90 删除 —— 那个示例现在根本跑不了。
     let u = unknown_fields(SAMPLE.into()).expect("parses");
     assert_eq!(u, ["USE_SITE_topostd"]);
+
+    let pft =
+        unknown_fields("&nl_colm\n DEF_PFT_C3C4(15)=0\n DEF_PFT_C3C4(80)=0\n/\n".into()).unwrap();
+    assert_eq!(pft, ["DEF_PFT_C3C4(80)"], "only slots 1..=79 are valid");
 }
 
 #[test]
@@ -89,6 +123,13 @@ fn a_value_of_the_wrong_type_is_refused_before_it_reaches_the_file() {
     )
     .unwrap_err();
     assert!(e.contains("real"), "{e}");
+    let e = set_field(
+        SAMPLE.into(),
+        "DEF_simulation_time%timestep".into(),
+        "NaN".into(),
+    )
+    .unwrap_err();
+    assert!(e.contains("finite"), "{e}");
 }
 
 #[test]
@@ -144,6 +185,45 @@ fn batch_in(tmp: &std::path::Path, texts: &[&str]) -> Vec<String> {
         .collect()
 }
 
+fn pft_test_kernel(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("colm-pft-kernel-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut hashes = serde_json::Map::new();
+    for program in colm_kernel::manifest::PROGRAMS {
+        let bytes = format!("fake {program}");
+        std::fs::write(
+            dir.join(colm_kernel::manifest::program_file(program)),
+            bytes.as_bytes(),
+        )
+        .unwrap();
+        hashes.insert(
+            program.into(),
+            serde_json::Value::String(colm_kernel::manifest::sha256_hex(bytes.as_bytes())),
+        );
+    }
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "preset": "pft-test",
+        "platform": std::env::consts::OS,
+        "colm_git_sha": "test",
+        "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
+        "build_profile": "debug",
+        "macros": ["SinglePoint", "LULC_IGBP", "URBAN_MODEL"],
+        "built_with": "test",
+        "netcdf_c": "test",
+        "netcdf_fortran": "test",
+        "hdf5": "",
+        "sha256": hashes,
+    });
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    dir
+}
+
 const NML_A: &str = "&nl_colm\n   DEF_simulation_time%start_year = 2002\n   DEF_simulation_time%end_year = 2013\n   DEF_HIST_FREQ = 'HOURLY'\n/\n";
 const NML_B: &str = "&nl_colm\n   DEF_simulation_time%start_year = 2005\n   DEF_simulation_time%end_year = 2008\n   DEF_HIST_FREQ = 'DAILY'\n/\n";
 
@@ -152,7 +232,7 @@ fn one_change_lands_in_every_case_of_the_batch() {
     // 勾了 20 个站点是要配"这一次运行"，不是配其中第一个。只改第一个的话，
     // 另外 19 个会带着未改的配置跑完，而界面上看不出任何异常。
     let dirs = batch("every", &[NML_A, NML_B]);
-    let r = super::set_field_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
+    let r = set_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
     assert_eq!(r.written, 2);
     for d in &dirs {
         let t = std::fs::read_to_string(std::path::Path::new(d).join("case.nml")).unwrap();
@@ -166,7 +246,9 @@ fn one_change_lands_in_every_case_of_the_batch() {
 #[test]
 fn related_changes_land_atomically_in_every_case() {
     let dirs = batch("related", &[NML_A, NML_B]);
-    let r = super::set_fields_batch(
+    let topo = std::env::temp_dir().join("colm-batch-related-topography");
+    std::fs::create_dir_all(&topo).unwrap();
+    let r = set_batches(
         dirs.clone(),
         vec![
             FieldChange {
@@ -179,7 +261,7 @@ fn related_changes_land_atomically_in_every_case() {
             },
             FieldChange {
                 path: "DEF_DS_HiresTopographyDataDir".into(),
-                value: "/data/topography".into(),
+                value: topo.display().to_string(),
             },
         ],
     )
@@ -189,8 +271,373 @@ fn related_changes_land_atomically_in_every_case() {
         let text = std::fs::read_to_string(std::path::Path::new(d).join("case.nml")).unwrap();
         assert!(text.contains("DEF_USE_Forcing_Downscaling = .true."));
         assert!(text.contains("DEF_USE_Forcing_Downscaling_Simple = .false."));
-        assert!(text.contains("DEF_DS_HiresTopographyDataDir = '/data/topography'"));
+        assert!(text.contains(&format!(
+            "DEF_DS_HiresTopographyDataDir = '{}'",
+            topo.display()
+        )));
     }
+}
+
+#[test]
+fn runtime_contracts_are_checked_before_batch_write() {
+    let dirs = batch(
+        "contract-tracer",
+        &["&nl_colm\n DEF_USE_TRACER=.true.\n DEF_USE_Campbell_SOIL_MODEL=.true.\n/\n"],
+    );
+    let before = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    let err = set_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap_err();
+    assert!(
+        err.contains("TRACER") && err.contains("van Genuchten"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap(),
+        before
+    );
+
+    let dirs = batch(
+        "contract-lct",
+        &["&nl_colm\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n/\n"],
+    );
+    let err = set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap_err();
+    assert!(err.contains("DEF_USE_LCT"), "{err}");
+
+    // 水同位素属于通用 TRACER，不依赖 BGC；只有 CH4 需要 PFT/PC 的碳氮池。
+    let dirs = batch(
+        "contract-isotope",
+        &["&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_NAMES='H218O'\n DEF_TRACER_TYPES='isotope'\n/\n"],
+    );
+    set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
+
+    let dirs = batch(
+        "contract-urban-pc",
+        &["&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.false.\n DEF_USE_PC=.true.\n DEF_URBAN_RUN=.true.\n/\n"],
+    );
+    set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
+}
+
+#[test]
+fn stomatal_tuning_rejects_inactive_or_unsafe_values() {
+    let dirs = batch(
+        "stomatal-inactive",
+        &["&nl_colm\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.false.\n/\n"],
+    );
+    let before = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    let err = set_batch(dirs.clone(), "DEF_MEDLYN_G1".into(), "4.0".into()).unwrap_err();
+    assert!(err.contains("Medlyn"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap(),
+        before
+    );
+
+    set_batches(
+        dirs,
+        vec![
+            FieldChange {
+                path: "DEF_USE_MEDLYNST".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_WUEST".into(),
+                value: ".false.".into(),
+            },
+            FieldChange {
+                path: "DEF_MEDLYN_G1".into(),
+                value: "4.0".into(),
+            },
+        ],
+    )
+    .expect("scheme and its coefficients are one valid atomic edit");
+
+    let conflict =
+        colm_namelist::parse("&nl_colm\n DEF_USE_MEDLYNST=.true.\n DEF_USE_WUEST=.true.\n/\n")
+            .unwrap();
+    let err = super::validate_runtime_contract(&conflict, &std::env::temp_dir(), None).unwrap_err();
+    assert!(err.contains("不能同时开启"), "{err}");
+
+    for (tag, field, value) in [
+        ("gradm", "DEF_BALL_BERRY_GRADM", "1.6"),
+        ("binter", "DEF_BALL_BERRY_BINTER", "-0.1"),
+        ("g1", "DEF_MEDLYN_G1", "-0.1"),
+        ("g0", "DEF_MEDLYN_G0", "NaN"),
+        ("lambda", "DEF_WUE_LAMBDA", "0.0"),
+    ] {
+        let text = format!("&nl_colm\n {field}={value}\n/\n");
+        let doc = colm_namelist::parse(&text).unwrap();
+        let err = super::validate_runtime_contract(&doc, &std::env::temp_dir(), None).unwrap_err();
+        assert!(err.contains(field), "{tag}: {err}");
+    }
+}
+
+#[test]
+fn every_model_fatal_runtime_combination_is_rejected_before_write() {
+    for (tag, text, expected) in [
+        (
+            "bgc-lct",
+            "&nl_colm\n DEF_USE_BGC=.true.\n/\n",
+            "PFT 或 DEF_USE_PC",
+        ),
+        (
+            "methane-no-bgc",
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_NAMES='CH4'\n DEF_TRACER_TYPES='gas'\n/\n",
+            "甲烷 TRACER",
+        ),
+        (
+            "tracer-campbell",
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_TRACER=.true.\n DEF_USE_Campbell_SOIL_MODEL=.true.\n/\n",
+            "van Genuchten",
+        ),
+        (
+            "tracer-bifurcation",
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_USE_BIFURCATION=.true.\n/\n",
+            "河道分汊",
+        ),
+        (
+            "tracer-negative",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_BALANCE_ABORT_NBAD=-1\n/\n",
+            "非负整数",
+        ),
+        (
+            "tracer-count-negative",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=-1\n/\n",
+            "0 到 1000",
+        ),
+        (
+            "tracer-count-huge",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1001\n/\n",
+            "0 到 1000",
+        ),
+        (
+            "tracer-relative-humidity",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_CG_RELHUM_MAX=1.0\n/\n",
+            "严格位于 0 与 1",
+        ),
+        (
+            "tracer-snow-equilibrium",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_SNOWMELT_EQUILIBRATION=1.1\n/\n",
+            "SNOWMELT_EQUILIBRATION",
+        ),
+        (
+            "tracer-canopy-equilibrium",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_CANOPY_EQUILIBRATION=-0.1\n/\n",
+            "CANOPY_EQUILIBRATION",
+        ),
+        (
+            "tracer-sublimation-skin",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_SUBL_SKIN_MM=-0.1\n/\n",
+            "SUBL_SKIN_MM",
+        ),
+        (
+            "tracer-supersaturation",
+            "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_ICE_SUPERSAT_SLOPE=-0.1\n/\n",
+            "ICE_SUPERSAT_SLOPE",
+        ),
+        (
+            "timestep-zero",
+            "&nl_colm\n DEF_simulation_time%timestep=0.0\n/\n",
+            "不超过 3600",
+        ),
+        (
+            "timestep-too-long",
+            "&nl_colm\n DEF_simulation_time%timestep=7200.0\n/\n",
+            "不超过 3600",
+        ),
+        (
+            "lulcc-site",
+            "&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LULCC=.true.\n/\n",
+            "SinglePoint",
+        ),
+        (
+            "lulcc-bgc",
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_LULCC=.true.\n/\n",
+            "USGS 或 BGC",
+        ),
+        (
+            "urban-bgc-site",
+            "&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.true.\n DEF_URBAN_RUN=.true.\n DEF_USE_BGC=.true.\n/\n",
+            "DEF_USE_BGC 需要 DEF_USE_PFT 或 DEF_USE_PC",
+        ),
+    ] {
+        let dirs = batch(tag, &[text]);
+        let err = set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into())
+            .unwrap_err();
+        assert!(err.contains(expected), "{tag}: {err}");
+    }
+}
+
+#[test]
+fn compile_time_classification_and_crop_constraints_use_kernel_facts() {
+    let dir = std::env::temp_dir();
+    let lulcc = colm_namelist::parse("&nl_colm\n DEF_USE_LULCC=.true.\n/\n").unwrap();
+    let err = super::validate_runtime_contract(
+        &lulcc,
+        &dir,
+        Some(super::KernelFacts {
+            single: false,
+            usgs: true,
+            crop: false,
+        }),
+    )
+    .unwrap_err();
+    assert!(err.contains("USGS"), "{err}");
+
+    let crop = colm_namelist::parse("&nl_colm\n/\n").unwrap();
+    let err = super::validate_runtime_contract(
+        &crop,
+        &dir,
+        Some(super::KernelFacts {
+            single: false,
+            usgs: false,
+            crop: true,
+        }),
+    )
+    .unwrap_err();
+    assert!(err.contains("CROP") && err.contains("BGC"), "{err}");
+}
+
+#[test]
+fn crop_management_runtime_files_are_checked_before_write() {
+    let root = std::env::temp_dir().join(format!("colm-crop-runtime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("crop")).unwrap();
+    let facts = Some(super::KernelFacts {
+        single: true,
+        usgs: false,
+        crop: true,
+    });
+    let doc = |fields: &str| {
+        colm_namelist::parse(&format!(
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_dir_runtime='{}'\n {fields}\n/\n",
+            root.display()
+        ))
+        .unwrap()
+    };
+
+    super::validate_runtime_contract(
+        &doc(
+            "DEF_TUNING_CROP_PLANTING_DAY=120.\n DEF_USE_FERT=.false.\n DEF_USE_IRRIGATION=.false.",
+        ),
+        &root,
+        facts,
+    )
+    .unwrap();
+
+    let err = super::validate_runtime_contract(
+        &doc("DEF_USE_FERT=.false.\n DEF_USE_IRRIGATION=.false."),
+        &root,
+        facts,
+    )
+    .unwrap_err();
+    assert!(err.contains("CROP 播种日期"), "{err}");
+    std::fs::write(root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"), []).unwrap();
+
+    let source_one = doc("DEF_USE_FERT=.true.\n DEF_USE_IRRIGATION=.false.\n DEF_FERT_SOURCE=1");
+    let err = super::validate_runtime_contract(&source_one, &root, facts).unwrap_err();
+    assert!(err.contains("fertnitro_fillcoast.nc"), "{err}");
+    std::fs::write(root.join("crop/fertnitro_fillcoast.nc"), []).unwrap();
+    super::validate_runtime_contract(&source_one, &root, facts).unwrap();
+
+    let source_two = doc("DEF_USE_FERT=.true.\n DEF_USE_IRRIGATION=.false.\n DEF_FERT_SOURCE=2");
+    let err = super::validate_runtime_contract(&source_two, &root, facts).unwrap_err();
+    assert!(err.contains("fertilizer_2015soc.nc"), "{err}");
+    std::fs::write(root.join("crop/fertilizer_2015soc.nc"), []).unwrap();
+    super::validate_runtime_contract(&source_two, &root, facts).unwrap();
+
+    let allocation_one =
+        doc("DEF_USE_FERT=.false.\n DEF_USE_IRRIGATION=.true.\n DEF_IRRIGATION_ALLOCATION=1");
+    let err = super::validate_runtime_contract(&allocation_one, &root, facts).unwrap_err();
+    assert!(
+        err.contains("surfdata_irrigation_method_96x144.nc"),
+        "{err}"
+    );
+    std::fs::write(root.join("crop/surfdata_irrigation_method_96x144.nc"), []).unwrap();
+    super::validate_runtime_contract(&allocation_one, &root, facts).unwrap();
+
+    let allocation_three =
+        doc("DEF_USE_FERT=.false.\n DEF_USE_IRRIGATION=.true.\n DEF_IRRIGATION_ALLOCATION=3");
+    let err = super::validate_runtime_contract(&allocation_three, &root, facts).unwrap_err();
+    assert!(err.contains("surfdata_irrigation_allocation.nc"), "{err}");
+    std::fs::write(root.join("crop/surfdata_irrigation_allocation.nc"), []).unwrap();
+    super::validate_runtime_contract(&allocation_three, &root, facts).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn child_paths_are_not_written_to_inactive_cases_in_a_batch() {
+    let on = "&nl_colm
+ DEF_USE_SoilInit=.true.
+ DEF_file_SoilInit='null'
+/
+";
+    let off = "&nl_colm
+ DEF_USE_SoilInit=.false.
+/
+";
+    let dirs = batch("mixed-path", &[on, off]);
+    let file = std::path::Path::new(&dirs[0]).join("soil-init.nc");
+    std::fs::write(&file, "stub").unwrap();
+    let err = set_batch(dirs, "DEF_file_SoilInit".into(), file.display().to_string()).unwrap_err();
+    assert!(err.contains("case1") && err.contains("土壤初始场"), "{err}");
+}
+
+#[test]
+fn enabled_picker_paths_must_exist_and_match_kind() {
+    let dir = batch("contract-path", &[NML_A]).remove(0);
+    let missing = std::env::temp_dir().join("colm-missing-soil-init.nc");
+    let err = set_batches(
+        vec![dir.clone()],
+        vec![
+            FieldChange {
+                path: "DEF_USE_SoilInit".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_file_SoilInit".into(),
+                value: missing.display().to_string(),
+            },
+        ],
+    )
+    .unwrap_err();
+    assert!(err.contains("DEF_file_SoilInit"), "{err}");
+
+    let file = std::path::Path::new(&dir).join("soil-init.nc");
+    std::fs::write(&file, "stub").unwrap();
+    set_batches(
+        vec![dir],
+        vec![
+            FieldChange {
+                path: "DEF_USE_SoilInit".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_file_SoilInit".into(),
+                value: file.display().to_string(),
+            },
+        ],
+    )
+    .unwrap();
+}
+
+#[test]
+fn write_all_rolls_back_files_already_written_on_late_failure() {
+    let dirs = batch("write-rollback", &[NML_A, NML_B]);
+    let first = std::path::Path::new(&dirs[0]).join("case.nml");
+    let second = std::path::Path::new(&dirs[1]).join("case.nml");
+    let before = std::fs::read_to_string(&first).unwrap();
+    let original_permissions = std::fs::metadata(&second).unwrap().permissions();
+    let mut perms = original_permissions.clone();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&second, perms).unwrap();
+
+    let err = super::write_all(&[
+        (dirs[0].clone(), "first was changed".into()),
+        (dirs[1].clone(), "second cannot be changed".into()),
+    ])
+    .unwrap_err();
+
+    std::fs::set_permissions(&second, original_permissions).unwrap();
+    assert!(err.contains("case.nml"), "{err}");
+    assert_eq!(std::fs::read_to_string(first).unwrap(), before);
 }
 
 #[test]
@@ -199,7 +646,7 @@ fn a_batch_write_that_cannot_finish_writes_nothing() {
     // 东西不一样 —— 所以宁可一份都不写。
     let dirs = batch("nothing", &[NML_A, "&nl_colm\n   这不是 namelist"]);
     let before = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
-    let e = super::set_field_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into())
+    let e = set_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into())
         .expect_err("坏文件必须让整批失败");
     assert!(e.contains("case1"), "错误要说清是哪一个：{e}");
     assert_eq!(
@@ -227,6 +674,22 @@ fn wizard_fields_are_written_together() {
                 path: "DEF_USE_BGC".into(),
                 value: ".true.".into(),
             },
+            FieldChange {
+                path: "DEF_TRACER_NUM".into(),
+                value: "1".into(),
+            },
+            FieldChange {
+                path: "DEF_TRACER_NAMES".into(),
+                value: "CH4".into(),
+            },
+            FieldChange {
+                path: "DEF_TRACER_TYPES".into(),
+                value: "gas".into(),
+            },
+            FieldChange {
+                path: "DEF_TRACER_PARAM_FILES".into(),
+                value: "CH4:standard_ch4_parameter.nml".into(),
+            },
         ],
     )
     .unwrap();
@@ -236,9 +699,273 @@ fn wizard_fields_are_written_together() {
         ("DEF_USE_PFT", ".true."),
         ("DEF_USE_LCT", ".false."),
         ("DEF_USE_BGC", ".true."),
+        ("DEF_TRACER_NUM", "1"),
+        ("DEF_TRACER_NAMES", "'CH4'"),
+        ("DEF_TRACER_TYPES", "'gas'"),
+        ("DEF_TRACER_PARAM_FILES", "'CH4:standard_ch4_parameter.nml'"),
     ] {
         assert_eq!(doc.get(name).unwrap().to_string(), value, "{name}");
     }
+}
+
+#[test]
+fn methane_wizard_stages_safe_single_point_parameters() {
+    let dir = batch("wizard-ch4", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:standard_ch4_parameter.nml".into(),
+        }],
+    )
+    .unwrap();
+    let ch4 =
+        std::fs::read_to_string(std::path::Path::new(&dir).join("standard_ch4_parameter.nml"))
+            .unwrap();
+    assert!(ch4.contains("DEF_METHANE%inundation_mode  = 'wetwat'"));
+    assert!(ch4.contains("DEF_METHANE%enable_rice_paddy = .false."));
+    assert!(ch4.contains("DEF_METHANE%use_spatial_ph   = .false."));
+    assert!(ch4.contains("DEF_METHANE%write_ch4_history = .true."));
+}
+
+#[test]
+fn expert_process_parameters_are_read_from_case_local_files() {
+    let dir = batch("expert-process", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:standard_ch4_parameter.nml".into(),
+        }],
+    )
+    .unwrap();
+    let files = process_parameter_files(dir.clone()).unwrap();
+    let ch4 = files
+        .iter()
+        .find(|file| file.title == "standard_ch4_parameter.nml")
+        .expect("CH4 parameter file");
+    assert_eq!(ch4.section, "示踪剂");
+    let q10 = ch4
+        .entries
+        .iter()
+        .find(|entry| entry.path == "DEF_METHANE%q10methane")
+        .expect("q10 methane");
+    assert_eq!(q10.value, "2.0");
+    assert_eq!(q10.default.as_deref(), Some("2."));
+    let mode = ch4
+        .entries
+        .iter()
+        .find(|entry| entry.path == "DEF_METHANE%inundation_mode")
+        .expect("inundation mode");
+    assert_eq!(mode.value, "'wetwat'");
+    assert_eq!(mode.default.as_deref(), Some("'hybrid'"));
+    let biome = ch4
+        .entries
+        .iter()
+        .find(|entry| entry.path == "DEF_METHANE%use_biome_f_methane")
+        .expect("biome methane yield");
+    assert_eq!(biome.value, ".true.");
+    assert_eq!(biome.default.as_deref(), Some(".false."));
+    let scalar = ch4
+        .entries
+        .iter()
+        .find(|entry| entry.path == "DEF_METHANE%f_methane")
+        .expect("omitted code-default scalar");
+    assert!(scalar.unset);
+    assert_eq!(scalar.value, "0.2");
+    let hydrology = ch4
+        .entries
+        .iter()
+        .find(|entry| entry.path == "DEF_METHANE_hydrology%vdcf")
+        .expect("omitted hydrology default");
+    assert!(hydrology.unset);
+    assert_eq!(hydrology.default.as_deref(), Some("2."));
+}
+
+#[test]
+fn expert_process_parameter_writes_only_that_case_file() {
+    let dir = batch("expert-process-write", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:standard_ch4_parameter.nml".into(),
+        }],
+    )
+    .unwrap();
+    let r = set_process_parameter_field_batch(
+        vec![dir.clone()],
+        "standard_ch4_parameter.nml".into(),
+        "DEF_METHANE%f_methane".into(),
+        "0.25".into(),
+    )
+    .unwrap();
+    assert_eq!(r.written, 1);
+    let text =
+        std::fs::read_to_string(std::path::Path::new(&dir).join("standard_ch4_parameter.nml"))
+            .unwrap();
+    assert!(text.contains("DEF_METHANE%f_methane = 0.25"));
+    assert!(
+        std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml"))
+            .unwrap()
+            .contains("CN-Cng")
+    );
+}
+
+#[test]
+fn expert_process_parameter_batch_write_updates_all_cases() {
+    let dirs = batch("expert-process-batch-write", &[SAMPLE, SAMPLE]);
+    for dir in &dirs {
+        super::apply_fields(
+            dir,
+            &[FieldChange {
+                path: "DEF_TRACER_PARAM_FILES".into(),
+                value: "CH4:standard_ch4_parameter.nml".into(),
+            }],
+        )
+        .unwrap();
+    }
+    let r = set_process_parameter_field_batch(
+        dirs.clone(),
+        "standard_ch4_parameter.nml".into(),
+        "DEF_METHANE%f_methane".into(),
+        "0.31".into(),
+    )
+    .unwrap();
+    assert_eq!(r.written, 2);
+    for dir in &dirs {
+        let text =
+            std::fs::read_to_string(std::path::Path::new(dir).join("standard_ch4_parameter.nml"))
+                .unwrap();
+        assert!(
+            text.contains("DEF_METHANE%f_methane = 0.31"),
+            "{dir}: {text}"
+        );
+    }
+}
+
+#[test]
+fn expert_core_tuning_batch_write_updates_all_cases() {
+    let dirs = batch("expert-core-batch-write", &[SAMPLE, SAMPLE]);
+    let r = set_batch(dirs.clone(), "DEF_TUNING_ZLND".into(), "0.02".into()).unwrap();
+    assert_eq!(r.written, 2);
+    for dir in dirs {
+        let text = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap();
+        assert!(text.contains("DEF_TUNING_ZLND = 0.02"), "{dir}: {text}");
+    }
+}
+
+#[test]
+fn expert_process_parameter_batch_write_is_all_or_nothing() {
+    let dirs = batch("expert-process-batch-atomic", &[SAMPLE, SAMPLE]);
+    for dir in &dirs {
+        super::apply_fields(
+            dir,
+            &[FieldChange {
+                path: "DEF_TRACER_PARAM_FILES".into(),
+                value: "CH4:standard_ch4_parameter.nml".into(),
+            }],
+        )
+        .unwrap();
+    }
+    let first = std::path::Path::new(&dirs[0]).join("standard_ch4_parameter.nml");
+    let before = std::fs::read_to_string(&first).unwrap();
+    std::fs::remove_file(std::path::Path::new(&dirs[1]).join("standard_ch4_parameter.nml"))
+        .unwrap();
+    let err = set_process_parameter_field_batch(
+        dirs.clone(),
+        "standard_ch4_parameter.nml".into(),
+        "DEF_METHANE%f_methane".into(),
+        "0.41".into(),
+    )
+    .unwrap_err();
+    assert!(err.contains("standard_ch4_parameter.nml"), "{err}");
+    assert_eq!(std::fs::read_to_string(first).unwrap(), before);
+}
+
+#[test]
+fn every_standard_process_parameter_has_a_fortran_code_default() {
+    let known: std::collections::BTreeSet<String> = super::process_code_defaults()
+        .into_iter()
+        .map(|field| field.path.to_ascii_lowercase())
+        .collect();
+    for (name, text) in [
+        (
+            "CH4",
+            include_str!("../../../vendor/CoLM202X/run/standard_ch4_parameter.nml"),
+        ),
+        (
+            "chloride",
+            include_str!("../../../vendor/CoLM202X/run/standard_chloride_parameter.nml"),
+        ),
+        (
+            "HDO",
+            include_str!("../../../vendor/CoLM202X/run/standard_HDO_parameter.nml"),
+        ),
+        (
+            "O18",
+            include_str!("../../../vendor/CoLM202X/run/standard_O18_parameter.nml"),
+        ),
+        (
+            "sediment",
+            include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml"),
+        ),
+    ] {
+        let doc = colm_namelist::parse(text).unwrap();
+        let missing: Vec<_> = doc
+            .paths()
+            .into_iter()
+            .filter(|path| !known.contains(&path.to_ascii_lowercase()))
+            .collect();
+        assert!(missing.is_empty(), "{name}: {missing:?}");
+    }
+}
+
+#[test]
+fn process_group_not_filename_decides_the_expert_page() {
+    let dir = batch("expert-group", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:standard_ch4_parameter.nml".into(),
+        }],
+    )
+    .unwrap();
+    let source = std::path::Path::new(&dir).join("standard_ch4_parameter.nml");
+    let opaque = std::path::Path::new(&dir).join("opaque_parameter.nml");
+    std::fs::copy(source, &opaque).unwrap();
+    let file = super::process_entries(&opaque, "opaque_parameter.nml".into()).unwrap();
+    assert_eq!(file.section, "示踪剂");
+}
+
+#[test]
+fn process_writes_validate_the_fortran_type_not_a_malformed_file_value() {
+    let dir = batch("expert-code-type", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:standard_ch4_parameter.nml".into(),
+        }],
+    )
+    .unwrap();
+    let path = std::path::Path::new(&dir).join("standard_ch4_parameter.nml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let malformed = original.replace(
+        "DEF_METHANE%q10methane       = 2.0",
+        "DEF_METHANE%q10methane       = 'wrong'",
+    );
+    std::fs::write(&path, &malformed).unwrap();
+    let err = set_process_parameter_field_batch(
+        vec![dir],
+        "standard_ch4_parameter.nml".into(),
+        "DEF_METHANE%q10methane".into(),
+        "still-wrong".into(),
+    )
+    .unwrap_err();
+    assert!(err.contains("实数"), "{err}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
 }
 
 #[test]
@@ -295,7 +1022,7 @@ fn spin_up_is_computed_per_case_not_shared() {
     // 各站点的强迫场起点不同。用同一个绝对年份会让一部分算例的预热落在
     // 窗口之外（等于没预热），另一部分落得过深（等于把输出砍掉一大截）。
     let dirs = batch("spinup", &[NML_A, NML_B]);
-    super::set_spinup(dirs.clone(), 1, 10).unwrap();
+    set_test_spinup(dirs.clone(), 1, 10).unwrap();
     let year = |d: &str| {
         let t = std::fs::read_to_string(std::path::Path::new(d).join("case.nml")).unwrap();
         t.lines()
@@ -318,13 +1045,32 @@ fn spin_up_is_computed_per_case_not_shared() {
 }
 
 #[test]
+fn spinup_that_covers_the_whole_window_is_rejected_without_erasing_the_old_value() {
+    let dirs = batch("spinup-too-long", &[NML_B]);
+    let path = std::path::Path::new(&dirs[0]).join("case.nml");
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let err = set_test_spinup(dirs, 3, 10).unwrap_err();
+    assert!(err.contains("预热截止时间必须早于模拟结束时间"), "{err}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+}
+
+#[test]
 fn one_spinup_cycle_is_not_erased() {
     let dirs = batch("spinup_one", &[NML_A]);
-    super::set_spinup(dirs.clone(), 1, 1).unwrap();
+    set_test_spinup(dirs.clone(), 1, 1).unwrap();
     let t = super::read_timing(dirs).unwrap();
     assert_eq!(t.spinup_years, 1);
     assert_eq!(t.spinup_repeat, 1);
     assert_eq!(t.output_start, "2003-01-01");
+}
+
+#[test]
+fn either_zero_spinup_input_still_means_disabled() {
+    let dirs = batch("spinup_zero_repeat", &[NML_B]);
+    set_test_spinup(dirs.clone(), 30, 0).unwrap();
+    let t = super::read_timing(dirs).unwrap();
+    assert_eq!((t.spinup_years, t.spinup_repeat), (0, 0));
 }
 
 #[test]
@@ -647,6 +1393,24 @@ fn child_fields_follow_initial_forcing_runoff_and_process_switches() {
 }
 
 #[test]
+fn methane_hides_isotope_only_process_parameters() {
+    let states = runtime_states(
+        "&nl_colm\n\
+         DEF_USE_TRACER=.true.\n\
+         DEF_TRACER_TYPES='gas'\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for name in [
+        "DEF_TRACER_USE_FRACTIONATION",
+        "DEF_TRACER_KINETIC_SCHEME",
+        "DEF_TRACER_SOIL_DIFFUSION",
+        "DEF_TRACER_SOIL_INIT_FILE",
+    ] {
+        assert_eq!(mode(&states, name), &FieldMode::Hidden, "{name}");
+    }
+}
+
+#[test]
 fn singlepoint_surface_fields_follow_the_actual_lai_and_albedo_sources() {
     assert_eq!(
         super::field_section("DEF_USE_LAIFEEDBACK", Some("nl_colm")),
@@ -799,9 +1563,667 @@ fn ozone_is_leaf_physiology_not_a_bgc_only_process() {
         "DEF_USE_OZONEDATA",
         "DEF_USE_MEDLYNST",
         "DEF_USE_WUEST",
+        "DEF_BALL_BERRY_GRADM",
+        "DEF_BALL_BERRY_BINTER",
+        "DEF_MEDLYN_G1",
+        "DEF_MEDLYN_G0",
+        "DEF_WUE_LAMBDA",
         "DEF_VEG_SNOW",
     ] {
         assert_eq!(mode(&lake, name), &FieldMode::Hidden, "{name}");
+    }
+}
+
+#[test]
+fn stomatal_tuning_fields_follow_the_selected_scheme() {
+    for (name, text, visible) in [
+        (
+            "Ball–Berry",
+            "&nl_colm\n SITE_landtype=1\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.false.\n/\n",
+            ["DEF_BALL_BERRY_GRADM", "DEF_BALL_BERRY_BINTER"].as_slice(),
+        ),
+        (
+            "Medlyn",
+            "&nl_colm\n SITE_landtype=1\n DEF_USE_MEDLYNST=.true.\n DEF_USE_WUEST=.false.\n/\n",
+            ["DEF_MEDLYN_G1", "DEF_MEDLYN_G0"].as_slice(),
+        ),
+        (
+            "WUE",
+            "&nl_colm\n SITE_landtype=1\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.true.\n/\n",
+            ["DEF_WUE_LAMBDA"].as_slice(),
+        ),
+    ] {
+        let states = runtime_states(text, &["SinglePoint", "LULC_IGBP"]);
+        for field in [
+            "DEF_BALL_BERRY_GRADM",
+            "DEF_BALL_BERRY_BINTER",
+            "DEF_MEDLYN_G1",
+            "DEF_MEDLYN_G0",
+            "DEF_WUE_LAMBDA",
+        ] {
+            let expected = if visible.contains(&field) {
+                &FieldMode::Editable
+            } else {
+                &FieldMode::Hidden
+            };
+            assert_eq!(mode(&states, field), expected, "{name}: {field}");
+        }
+    }
+
+    let ball_berry = runtime_states(
+        "&nl_colm\n SITE_landtype=1\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.false.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    let medlyn = runtime_states(
+        "&nl_colm\n SITE_landtype=1\n DEF_USE_MEDLYNST=.true.\n DEF_USE_WUEST=.false.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    let mixed = super::merge_field_states(&[ball_berry, medlyn]);
+    for field in [
+        "DEF_BALL_BERRY_GRADM",
+        "DEF_BALL_BERRY_BINTER",
+        "DEF_MEDLYN_G1",
+        "DEF_MEDLYN_G0",
+        "DEF_WUE_LAMBDA",
+    ] {
+        assert_eq!(mode(&mixed, field), &FieldMode::Hidden, "mixed: {field}");
+    }
+
+    let conflict = runtime_states(
+        "&nl_colm\n SITE_landtype=1\n DEF_USE_MEDLYNST=.true.\n DEF_USE_WUEST=.true.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for field in [
+        "DEF_BALL_BERRY_GRADM",
+        "DEF_BALL_BERRY_BINTER",
+        "DEF_MEDLYN_G1",
+        "DEF_MEDLYN_G0",
+        "DEF_WUE_LAMBDA",
+    ] {
+        assert_eq!(
+            mode(&conflict, field),
+            &FieldMode::Hidden,
+            "conflict: {field}"
+        );
+    }
+}
+
+#[test]
+fn land_cover_expert_defaults_follow_classification_and_site_landtype() {
+    let igbp = runtime_states(
+        "&nl_colm
+ SITE_landtype=1
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_USE_PLANTHYDRAULICS=.true.
+ DEF_USE_MEDLYNST=.false.
+ DEF_USE_WUEST=.false.
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    let default = |states: &[FieldState], name: &str| {
+        parse_real(
+            runtime_state(states, name)
+                .context_default
+                .as_deref()
+                .unwrap_or_else(|| panic!("missing contextual default for {name}")),
+        )
+        .expect("numeric contextual default")
+    };
+    assert_eq!(mode(&igbp, "DEF_LC_HTOP0"), &FieldMode::Editable);
+    assert_eq!(default(&igbp, "DEF_LC_HTOP0"), 17.0);
+    assert_eq!(default(&igbp, "DEF_LC_VMAX25"), 54.0);
+    assert_eq!(default(&igbp, "DEF_BALL_BERRY_GRADM"), 9.0);
+    assert_eq!(default(&igbp, "DEF_LC_KMAX_SUN"), 2.0e-8);
+    assert_eq!(
+        runtime_state(&igbp, "DEF_LC_C3C4").allowed_values,
+        ["0", "1"]
+    );
+
+    let usgs = runtime_states(
+        "&nl_colm
+ SITE_landtype=13
+ DEF_USE_LCT=.true.
+ DEF_USE_PLANTHYDRAULICS=.true.
+/
+",
+        &["SinglePoint", "LULC_USGS"],
+    );
+    assert_eq!(default(&usgs, "DEF_LC_HTOP0"), 35.0);
+    assert_eq!(default(&usgs, "DEF_LC_VMAX25"), 72.0);
+
+    let pft = runtime_states(
+        "&nl_colm
+ SITE_landtype=1
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.true.
+ DEF_USE_PC=.false.
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&pft, "DEF_LC_HTOP0"), &FieldMode::Hidden);
+    assert!(runtime_state(&pft, "DEF_LC_HTOP0")
+        .context_default
+        .is_none());
+
+    let no_hydraulics = runtime_states(
+        "&nl_colm
+ SITE_landtype=1
+ DEF_USE_LCT=.true.
+ DEF_USE_PLANTHYDRAULICS=.false.
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&no_hydraulics, "DEF_LC_HTOP0"), &FieldMode::Editable);
+    assert_eq!(mode(&no_hydraulics, "DEF_LC_KMAX_SUN"), &FieldMode::Hidden);
+}
+
+#[test]
+fn all_sites_keeps_land_cover_defaults_editable_but_marks_different_tables() {
+    let first = runtime_states(
+        "&nl_colm
+ SITE_landtype=1
+ DEF_USE_LCT=.true.
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    let second = runtime_states(
+        "&nl_colm
+ SITE_landtype=2
+ DEF_USE_LCT=.true.
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    let merged = super::merge_field_states(&[first, second]);
+    let height = runtime_state(&merged, "DEF_LC_HTOP0");
+    assert_eq!(height.mode, FieldMode::Editable);
+    assert!(
+        !height.mixed,
+        "different defaults are not applicability conflicts"
+    );
+    assert!(height.default_mixed);
+    assert!(!runtime_state(&merged, "DEF_LC_Z0MR").default_mixed);
+}
+
+#[test]
+fn land_cover_expert_override_batch_write_is_validated_and_atomic() {
+    let dirs = batch(
+        "lc-expert-all",
+        &[
+            "&nl_colm\n SITE_landtype=1\n/\n",
+            "&nl_colm\n SITE_landtype=2\n/\n",
+        ],
+    );
+    let written = set_batch(dirs.clone(), "DEF_LC_VMAX25".into(), "60".into()).unwrap();
+    assert_eq!(written.written, 2);
+    for dir in &dirs {
+        let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap();
+        assert!(text.contains("DEF_LC_VMAX25 = 60"), "{dir}: {text}");
+    }
+
+    let before: Vec<_> = dirs
+        .iter()
+        .map(|dir| std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap())
+        .collect();
+    let error = set_batch(dirs.clone(), "DEF_LC_FVEG0".into(), "1.1".into()).unwrap_err();
+    assert!(error.contains("DEF_LC_FVEG0"), "{error}");
+    for (dir, expected) in dirs.iter().zip(before) {
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots() {
+    const CASE: &str = "&nl_colm\n SITE_landtype=10\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n DEF_USE_BGC=.false.\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.false.\n/\n";
+    let dirs = batch("pft-expert-all", &[CASE, CASE]);
+    let kernel = pft_test_kernel("states");
+    let kernel_dir = kernel.display().to_string();
+
+    let states = pft_parameter_states(dirs.clone(), 13, kernel_dir.clone()).unwrap();
+    let height = states
+        .iter()
+        .find(|state| state.name == "DEF_PFT_HTOP0")
+        .expect("PFT height");
+    assert_eq!(parse_real(&height.default), Some(0.5));
+    assert!(states.iter().any(|state| state.name == "DEF_PFT_GRADM"));
+    assert!(!states.iter().any(|state| state.name == "DEF_PFT_G1"));
+
+    let written = set_pft_parameter_batch(
+        dirs.clone(),
+        13,
+        "DEF_PFT_VMAX25".into(),
+        Some("60".into()),
+        kernel_dir.clone(),
+    )
+    .unwrap();
+    assert_eq!(written.written, 2);
+    for dir in &dirs {
+        let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap();
+        assert!(text.contains("DEF_PFT_VMAX25(14) = 60"), "{dir}: {text}");
+    }
+
+    set_pft_parameter_batch(
+        dirs.clone(),
+        13,
+        "DEF_PFT_VMAX25".into(),
+        None,
+        kernel_dir.clone(),
+    )
+    .unwrap();
+    for dir in &dirs {
+        let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap();
+        assert!(!text.contains("DEF_PFT_VMAX25"), "{dir}: {text}");
+    }
+
+    let before: Vec<_> = dirs
+        .iter()
+        .map(|dir| std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap())
+        .collect();
+    assert!(set_pft_parameter_batch(
+        dirs.clone(),
+        13,
+        "DEF_PFT_SQRTDI".into(),
+        Some("0".into()),
+        kernel_dir,
+    )
+    .is_err());
+    for (dir, expected) in dirs.iter().zip(before) {
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_case_wide_stomatal_override_hides_the_ignored_pft_coefficient() {
+    let dirs = batch(
+        "pft-global-stomata",
+        &["&nl_colm\n SITE_landtype=10\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.false.\n DEF_BALL_BERRY_GRADM=9.5\n/\n"],
+    );
+    let kernel = pft_test_kernel("global-stomata");
+    let states = pft_parameter_states(dirs, 13, kernel.display().to_string()).unwrap();
+    assert!(!states.iter().any(|state| state.name == "DEF_PFT_GRADM"));
+    assert!(states.iter().any(|state| state.name == "DEF_PFT_BINTER"));
+}
+
+#[test]
+fn pft_expert_visibility_follows_pft_structure_and_available_defaults() {
+    let natural_doc = colm_namelist::parse(
+        "&nl_colm\n SITE_landtype=10\n DEF_USE_BGC=.true.\n DEF_USE_PFT=.true.\n/\n",
+    )
+    .unwrap();
+    let natural_macros = ["SinglePoint", "LULC_IGBP"].into_iter().collect();
+    let natural = VisibilityContext::new(&natural_doc, &natural_macros);
+    let meta = |name| colm_case::pft::parameter(name).unwrap();
+
+    assert!(colm_case::pft::all_parameters()
+        .iter()
+        .all(|parameter| !pft_parameter_applies(parameter, &natural, 0)));
+    assert!(pft_parameter_applies(meta("DEF_PFT_LIVEWDCN"), &natural, 1));
+    assert!(!pft_parameter_applies(
+        meta("DEF_PFT_LIVEWDCN"),
+        &natural,
+        13
+    ));
+    assert!(pft_parameter_applies(
+        meta("DEF_PFT_STEM_LEAF"),
+        &natural,
+        1
+    ));
+    assert!(!pft_parameter_applies(
+        meta("DEF_PFT_STEM_LEAF"),
+        &natural,
+        13
+    ));
+    assert!(pft_parameter_has_default(meta("DEF_PFT_PSI50_ROOT"), &natural, 13).unwrap());
+
+    let crop_doc = colm_namelist::parse(
+        "&nl_colm\n SITE_landtype=12\n DEF_USE_BGC=.true.\n DEF_USE_PFT=.true.\n DEF_USE_FERT=.true.\n DEF_FERT_SOURCE=1\n/\n",
+    )
+    .unwrap();
+    let crop_macros = ["SinglePoint", "LULC_IGBP", "CROP"].into_iter().collect();
+    let crop = VisibilityContext::new(&crop_doc, &crop_macros);
+    assert!(pft_parameter_applies(meta("DEF_PFT_LFEMERG"), &crop, 15));
+    assert!(pft_parameter_applies(meta("DEF_PFT_LFEMERG"), &crop, 16));
+    assert!(pft_parameter_applies(meta("DEF_PFT_LFEMERG"), &crop, 17));
+    assert!(pft_parameter_applies(meta("DEF_PFT_MANURE"), &crop, 15));
+    let no_manure_doc = colm_namelist::parse(
+        "&nl_colm\n DEF_USE_BGC=.true.\n DEF_USE_FERT=.true.\n DEF_FERT_SOURCE=2\n/\n",
+    )
+    .unwrap();
+    let no_manure = VisibilityContext::new(&no_manure_doc, &crop_macros);
+    assert!(!pft_parameter_applies(
+        meta("DEF_PFT_MANURE"),
+        &no_manure,
+        15
+    ));
+    assert!(pft_parameter_has_default(meta("DEF_PFT_LFEMERG"), &crop, 17).unwrap());
+    assert!(!pft_parameter_has_default(meta("DEF_PFT_LFEMERG"), &crop, 33).unwrap());
+}
+
+#[test]
+fn expert_core_tuning_fields_follow_runtime_switches() {
+    let natural = runtime_states(
+        "&nl_colm
+\
+         SITE_landtype=1
+\
+         DEF_Runoff_SCHEME=3
+\
+         DEF_USE_BGC=.false.
+\
+         DEF_USE_PLANTHYDRAULICS=.true.
+\
+         DEF_USE_OZONESTRESS=.true.
+\
+         DEF_USE_Forcing_Downscaling=.false.
+\
+         DEF_USE_Forcing_Downscaling_Simple=.false.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for name in [
+        "DEF_TUNING_ZLND",
+        "DEF_TUNING_CAPR",
+        "DEF_TUNING_CSOILC",
+        "DEF_TUNING_SMPMAX",
+        "DEF_TUNING_SOIL_ICE_IMPEDANCE",
+        "DEF_TUNING_SIMPLE_VIC_DS",
+        "DEF_TUNING_SIMPLE_VIC_WS",
+        "DEF_TUNING_SNOW_COVER_EXPONENT",
+        "DEF_PH_ROOT_RADIUS",
+        "DEF_OZONE_KO3",
+    ] {
+        assert_eq!(mode(&natural, name), &FieldMode::Editable, "{name}");
+    }
+    for name in [
+        "DEF_TUNING_WETWATMAX",
+        "DEF_TUNING_SMPMAX_HR",
+        "DEF_TUNING_TOPMOD_DECAY",
+        "DEF_TUNING_IRRIGATION_START_SEC",
+        "DEF_DS_TEMP_LAPSE_RATE",
+        "DEF_DS_SHORTWAVE_LIMIT",
+        "DEF_DS_SHORTWAVE_SIMPLE_LIMIT",
+    ] {
+        assert_eq!(mode(&natural, name), &FieldMode::Hidden, "{name}");
+    }
+
+    let lake = runtime_states(
+        "&nl_colm
+ SITE_landtype=17
+ DEF_USE_PLANTHYDRAULICS=.true.
+ DEF_USE_OZONESTRESS=.true.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for name in [
+        "DEF_TUNING_CSOILC",
+        "DEF_TUNING_SOIL_ICE_IMPEDANCE",
+        "DEF_TUNING_SIMPLE_VIC_DS",
+        "DEF_TUNING_SIMPLE_VIC_WS",
+        "DEF_PH_ROOT_RADIUS",
+        "DEF_OZONE_KO3",
+    ] {
+        assert_eq!(mode(&lake, name), &FieldMode::Hidden, "{name}");
+    }
+
+    let dry_lake = runtime_states(
+        "&nl_colm
+ SITE_landtype=17
+ DEF_USE_Dynamic_Lake=.true.
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(
+        mode(&dry_lake, "DEF_TUNING_SOIL_ICE_IMPEDANCE"),
+        &FieldMode::Editable
+    );
+
+    let urban = runtime_states(
+        "&nl_colm
+ SITE_landtype=13
+ DEF_URBAN_RUN=.true.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&urban, "DEF_TUNING_CSOILC"), &FieldMode::Editable);
+    assert_eq!(
+        mode(&urban, "DEF_TUNING_SOIL_ICE_IMPEDANCE"),
+        &FieldMode::Editable,
+        "urban pervious ground uses WATER_2014 soil hydraulics"
+    );
+
+    let wetland = runtime_states(
+        "&nl_colm
+ SITE_landtype=11
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&wetland, "DEF_TUNING_WETWATMAX"), &FieldMode::Editable);
+
+    let dynamic_wetland = runtime_states(
+        "&nl_colm
+ SITE_landtype=1
+ DEF_USE_Dynamic_Wetland=.true.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(
+        mode(&dynamic_wetland, "DEF_TUNING_WETWATMAX"),
+        &FieldMode::Editable
+    );
+
+    let full = runtime_states(
+        "&nl_colm
+ DEF_USE_Forcing_Downscaling=.true.
+ DEF_USE_Forcing_Downscaling_Simple=.false.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for name in [
+        "DEF_DS_TEMP_LAPSE_RATE",
+        "DEF_DS_LONGWAVE_LIMIT",
+        "DEF_DS_SHORTWAVE_LIMIT",
+    ] {
+        assert_eq!(mode(&full, name), &FieldMode::Editable, "{name}");
+    }
+    assert_eq!(
+        mode(&full, "DEF_DS_SHORTWAVE_SIMPLE_LIMIT"),
+        &FieldMode::Hidden
+    );
+    assert_eq!(
+        mode(&full, "DEF_DS_LONGWAVE_LAPSE_RATE"),
+        &FieldMode::Hidden,
+        "a non-glacier site does not use the glacier longwave lapse rate"
+    );
+
+    let glacier_longwave_ii = runtime_states(
+        "&nl_colm
+ SITE_landtype=15
+ DEF_USE_Forcing_Downscaling=.true.
+ DEF_DS_longwave_adjust_scheme='II'
+/
+",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(
+        mode(&glacier_longwave_ii, "DEF_DS_LONGWAVE_LAPSE_RATE"),
+        &FieldMode::Editable
+    );
+
+    let simple = runtime_states(
+        "&nl_colm
+ DEF_USE_Forcing_Downscaling=.false.
+ DEF_USE_Forcing_Downscaling_Simple=.true.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    for name in [
+        "DEF_DS_TEMP_LAPSE_RATE",
+        "DEF_DS_LONGWAVE_LIMIT",
+        "DEF_DS_SHORTWAVE_SIMPLE_LIMIT",
+    ] {
+        assert_eq!(mode(&simple, name), &FieldMode::Editable, "{name}");
+    }
+    assert_eq!(mode(&simple, "DEF_DS_SHORTWAVE_LIMIT"), &FieldMode::Hidden);
+
+    let irrigated_crop = runtime_states(
+        "&nl_colm
+ SITE_landtype=12
+ DEF_USE_IRRIGATION=.true.
+/
+",
+        &["SinglePoint", "LULC_IGBP", "CROP"],
+    );
+    for name in [
+        "DEF_TUNING_CROP_PLANTING_DAY",
+        "DEF_TUNING_IRRIGATION_START_SEC",
+        "DEF_TUNING_IRRIGATION_DURATION_SEC",
+        "DEF_TUNING_IRRIGATION_MAX_DEPTH",
+        "DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION",
+        "DEF_TUNING_IRRIGATION_SUPPLY_FRACTION",
+        "DEF_TUNING_IRRIGATION_MIN_CPHASE",
+        "DEF_TUNING_IRRIGATION_MAX_CPHASE",
+        "DEF_TUNING_IRRIGATION_PONDMX",
+    ] {
+        assert_eq!(mode(&irrigated_crop, name), &FieldMode::Editable, "{name}");
+    }
+}
+
+#[test]
+fn expert_core_tuning_validation_matches_fortran_limits() {
+    let ok = colm_namelist::parse(
+        "&nl_colm
+\
+         DEF_TUNING_ZLND=.01
+\
+         DEF_TUNING_CAPR=2.0
+\
+         DEF_TUNING_CNFAC=.5
+\
+         DEF_TUNING_WIMP=.5
+\
+         DEF_TUNING_SMPMAX=-10.
+\
+         DEF_TUNING_SMPMIN=-20.
+\
+         DEF_TUNING_SMPMAX_HR=-2.
+\
+         DEF_TUNING_SMPMIN_HR=-3.
+\
+         DEF_TUNING_SIMPLE_VIC_DS=.1
+\
+         DEF_TUNING_SIMPLE_VIC_WS=.6
+\
+         DEF_TUNING_IRRIGATION_START_SEC=21600.
+\
+         DEF_TUNING_IRRIGATION_DURATION_SEC=3600.
+\
+         DEF_TUNING_IRRIGATION_MIN_CPHASE=1.
+\
+         DEF_TUNING_IRRIGATION_MAX_CPHASE=4.
+\
+         DEF_TUNING_CROP_PLANTING_DAY=120.
+\
+         DEF_PH_ROOT_RADIUS=2.9e-4
+\
+         DEF_OZONE_KO3=0.
+\
+         DEF_DS_TEMP_LAPSE_RATE=0.
+\
+         DEF_DS_SHORTWAVE_LIMIT=1.
+/\n",
+    )
+    .unwrap();
+    validate_expert_tuning(
+        &ok,
+        [
+            "DEF_TUNING_ZLND",
+            "DEF_TUNING_CAPR",
+            "DEF_TUNING_CNFAC",
+            "DEF_TUNING_WIMP",
+            "DEF_TUNING_SMPMAX",
+            "DEF_TUNING_SMPMIN",
+            "DEF_TUNING_SMPMAX_HR",
+            "DEF_TUNING_SMPMIN_HR",
+            "DEF_TUNING_SIMPLE_VIC_DS",
+            "DEF_TUNING_SIMPLE_VIC_WS",
+            "DEF_TUNING_IRRIGATION_START_SEC",
+            "DEF_TUNING_IRRIGATION_DURATION_SEC",
+            "DEF_TUNING_IRRIGATION_MIN_CPHASE",
+            "DEF_TUNING_IRRIGATION_MAX_CPHASE",
+            "DEF_TUNING_CROP_PLANTING_DAY",
+            "DEF_PH_ROOT_RADIUS",
+            "DEF_OZONE_KO3",
+            "DEF_DS_TEMP_LAPSE_RATE",
+            "DEF_DS_SHORTWAVE_LIMIT",
+        ]
+        .into_iter()
+        .map(String::from),
+    )
+    .unwrap();
+
+    for (name, value, message) in [
+        ("DEF_TUNING_ZLND", "0.", "大于 0"),
+        ("DEF_TUNING_CNFAC", "1.1", "0 到 1"),
+        ("DEF_TUNING_WIMP", "1.", "小于 1"),
+        ("DEF_TUNING_SIMPLE_VIC_DS", "0.", "大于 0"),
+        ("DEF_TUNING_IRRIGATION_START_SEC", "86400.", "86400（不含）"),
+        ("DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION", "1.1", "0 到 1"),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "367.", "1 到 366"),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "120.5", "整数"),
+        ("DEF_OZONE_KO3", "-0.1", "不小于 0"),
+        ("DEF_DS_TEMP_LAPSE_RATE", "-0.1", "不小于 0"),
+    ] {
+        let text = format!("&nl_colm\n {name}={value}\n/\n");
+        let doc = colm_namelist::parse(&text).unwrap();
+        let err = validate_expert_tuning(&doc, [name.to_string()]).unwrap_err();
+        assert!(err.contains(message), "{name}: {err}");
+    }
+
+    let bad_pair = colm_namelist::parse(
+        "&nl_colm
+ DEF_TUNING_SMPMAX=-20.
+ DEF_TUNING_SMPMIN=-10.
+/\n",
+    )
+    .unwrap();
+    let err = validate_expert_tuning(
+        &bad_pair,
+        ["DEF_TUNING_SMPMAX".into(), "DEF_TUNING_SMPMIN".into()],
+    )
+    .unwrap_err();
+    assert!(err.contains("DEF_TUNING_SMPMIN"), "{err}");
+
+    for (text, names, message) in [
+        (
+            "&nl_colm\n DEF_TUNING_SIMPLE_VIC_DS=.8\n DEF_TUNING_SIMPLE_VIC_WS=.6\n/\n",
+            ["DEF_TUNING_SIMPLE_VIC_DS", "DEF_TUNING_SIMPLE_VIC_WS"],
+            "小于等于",
+        ),
+        (
+            "&nl_colm\n DEF_TUNING_IRRIGATION_MIN_CPHASE=3.\n DEF_TUNING_IRRIGATION_MAX_CPHASE=2.\n/\n",
+            [
+                "DEF_TUNING_IRRIGATION_MIN_CPHASE",
+                "DEF_TUNING_IRRIGATION_MAX_CPHASE",
+            ],
+            "起始作物阶段",
+        ),
+    ] {
+        let doc = colm_namelist::parse(text).unwrap();
+        let err = validate_expert_tuning(&doc, names.into_iter().map(String::from)).unwrap_err();
+        assert!(err.contains(message), "{err}");
     }
 }
 

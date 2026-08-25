@@ -20,6 +20,35 @@ pub const REQUIRED_VARS: [&str; 7] = [
     "Tair", "Qair", "Psurf", "Precip", "Wind", "SWdown", "LWdown",
 ];
 
+/// CoLM accepts only positive forcing timesteps no larger than one hour.
+pub const MAX_CADENCE_SECONDS: f64 = 3600.0;
+
+/// Shared cadence contract for direct NetCDF forcing and tabular imports.
+pub fn cadence_problem(steps: usize, step_seconds: f64) -> Option<String> {
+    if steps == 0 {
+        return None;
+    }
+    if steps < 2 {
+        return Some(
+            "the forcing file has only one time step; at least two timestamps are required to infer a valid cadence".into(),
+        );
+    }
+    if !step_seconds.is_finite() {
+        return Some(format!(
+            "time step must be finite and positive, got {step_seconds:?}"
+        ));
+    }
+    if step_seconds <= 0.0 {
+        return Some(format!("time step must be positive, got {step_seconds:?}"));
+    }
+    if step_seconds > MAX_CADENCE_SECONDS {
+        return Some(format!(
+            "time step {step_seconds}s exceeds CoLM's maximum supported forcing cadence of {MAX_CADENCE_SECONDS}s"
+        ));
+    }
+    None
+}
+
 /// 从强迫场文件读出来的元数据。`met.rs` 负责填它，本模块只做纯计算。
 #[derive(Debug, Clone)]
 pub struct MetSummary {
@@ -90,8 +119,23 @@ pub fn check(m: &MetSummary, window: Option<(Stamp, Stamp)>) -> Vec<String> {
         );
     }
 
+    for (name, value) in [
+        ("reference_height_v / DEF_forcing%HEIGHT_V", m.height_v),
+        ("reference_height_t / DEF_forcing%HEIGHT_T", m.height_t),
+        ("reference_height_q / DEF_forcing%HEIGHT_Q", m.height_q),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            p.push(format!(
+                "{name} must be a finite positive observation height; got {value:?}"
+            ));
+        }
+    }
+
     if m.steps == 0 {
         p.push("the forcing file has no time steps".to_string());
+    }
+    if let Some(problem) = cadence_problem(m.steps, m.step_seconds) {
+        p.push(problem);
     }
 
     if let Some((from, to)) = window {

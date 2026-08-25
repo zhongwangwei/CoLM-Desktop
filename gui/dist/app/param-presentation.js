@@ -7,6 +7,18 @@
 const pair = (zh, en) => Object.freeze([zh, en]);
 const pick = (value, lang) => value?.[lang === 'en' ? 1 : 0];
 
+/** Convert a Fortran real literal into a value accepted by <input type="number">. */
+export function fortranNumberInputValue(value) {
+  let text = String(value ?? '').trim();
+  if (!text) return null;
+  text = text
+    .replace(/_(?:[a-z]\w*|\d+)$/i, '')
+    .replace(/d([+-]?\d+)$/i, 'e$1')
+    .replace(/^([+-]?)\./, '$10.')
+    .replace(/\.([eE]|$)/, '.0$1');
+  return Number.isFinite(Number(text)) ? text : null;
+}
+
 const LABELS = Object.freeze({
   SITE_fsitedata: pair('站点属性文件', 'Site-property file'),
   SITE_lon_location: pair('站点经度', 'Site longitude'),
@@ -84,6 +96,92 @@ const LABELS = Object.freeze({
   DEF_USE_MEDLYNST: pair('启用 Medlyn 气孔导度', 'Enable Medlyn stomatal conductance'),
   DEF_USE_WUEST: pair('启用水分利用效率气孔方案', 'Enable WUE stomatal scheme'),
   GUI_STOMATAL_CONDUCTANCE_SCHEME: pair('气孔导度方案', 'Stomatal-conductance scheme'),
+  DEF_BALL_BERRY_GRADM: pair('Ball–Berry 斜率 gradm', 'Ball–Berry slope gradm'),
+  DEF_BALL_BERRY_BINTER: pair('Ball–Berry 截距 binter', 'Ball–Berry intercept binter'),
+  DEF_MEDLYN_G1: pair('Medlyn 斜率 g1', 'Medlyn slope g1'),
+  DEF_MEDLYN_G0: pair('Medlyn 截距 g0', 'Medlyn intercept g0'),
+  DEF_WUE_LAMBDA: pair('WUE 边际水分成本 lambda', 'WUE marginal water cost lambda'),
+  DEF_LC_HTOP0: pair('冠层顶部高度（m）', 'Canopy-top height (m)'),
+  DEF_LC_HBOT0: pair('冠层底部高度（m）', 'Canopy-bottom height (m)'),
+  DEF_LC_FVEG0: pair('植被覆盖度', 'Vegetation cover fraction'),
+  DEF_LC_SAI0: pair('茎面积指数', 'Stem-area index'),
+  DEF_LC_Z0MR: pair('粗糙度长度与冠层高度之比', 'Roughness-length to canopy-height ratio'),
+  DEF_LC_DISPLAR: pair('零平面位移与冠层高度之比', 'Displacement-height to canopy-height ratio'),
+  DEF_LC_SQRTDI: pair('叶片特征尺寸倒平方根（m⁻⁰·⁵）', 'Inverse square root of leaf dimension (m⁻⁰·⁵)'),
+  DEF_LC_CHIL: pair('叶倾角分布参数', 'Leaf-angle distribution parameter'),
+  DEF_LC_RHOL_VIS: pair('绿叶可见光反射率', 'Green-leaf visible reflectance'),
+  DEF_LC_RHOL_NIR: pair('绿叶近红外反射率', 'Green-leaf near-infrared reflectance'),
+  DEF_LC_RHOS_VIS: pair('枯叶可见光反射率', 'Dead-leaf visible reflectance'),
+  DEF_LC_RHOS_NIR: pair('枯叶近红外反射率', 'Dead-leaf near-infrared reflectance'),
+  DEF_LC_TAUL_VIS: pair('绿叶可见光透射率', 'Green-leaf visible transmittance'),
+  DEF_LC_TAUL_NIR: pair('绿叶近红外透射率', 'Green-leaf near-infrared transmittance'),
+  DEF_LC_TAUS_VIS: pair('枯叶可见光透射率', 'Dead-leaf visible transmittance'),
+  DEF_LC_TAUS_NIR: pair('枯叶近红外透射率', 'Dead-leaf near-infrared transmittance'),
+  DEF_LC_VMAX25: pair('25 ℃ 最大羧化速率（μmol m⁻² s⁻¹）', 'Maximum carboxylation at 25 °C (μmol m⁻² s⁻¹)'),
+  DEF_LC_EFFCON: pair('光合量子效率', 'Photosynthetic quantum efficiency'),
+  DEF_LC_C3C4: pair('光合途径', 'Photosynthetic pathway'),
+  DEF_LC_RESPCP: pair('叶片呼吸比例', 'Leaf-respiration fraction'),
+  DEF_LC_SHTI: pair('高温抑制斜率', 'High-temperature inhibition slope'),
+  DEF_LC_SLTI: pair('低温抑制斜率', 'Low-temperature inhibition slope'),
+  DEF_LC_TRDA: pair('气孔温度响应系数 A', 'Stomatal temperature coefficient A'),
+  DEF_LC_TRDM: pair('气孔温度响应系数 M（K）', 'Stomatal temperature coefficient M (K)'),
+  DEF_LC_TROP: pair('光合最适温度（K）', 'Photosynthetic optimum temperature (K)'),
+  DEF_LC_HHTI: pair('高温抑制半响应温度（K）', 'High-temperature inhibition midpoint (K)'),
+  DEF_LC_HLTI: pair('低温抑制半响应温度（K）', 'Low-temperature inhibition midpoint (K)'),
+  DEF_LC_EXTKN: pair('叶氮垂直分配系数', 'Leaf-nitrogen extinction coefficient'),
+  DEF_LC_D50: pair('50% 根系深度（cm）', '50% rooting depth (cm)'),
+  DEF_LC_BETA: pair('根系分布形状参数', 'Root-profile shape parameter'),
+  DEF_LC_KMAX_SUN: pair('阳叶最大导水率', 'Maximum sunlit-leaf conductance'),
+  DEF_LC_KMAX_SHA: pair('阴叶最大导水率', 'Maximum shaded-leaf conductance'),
+  DEF_LC_KMAX_XYL: pair('木质部最大导水率', 'Maximum xylem conductance'),
+  DEF_LC_KMAX_ROOT: pair('根系最大导水率', 'Maximum root conductance'),
+  DEF_LC_PSI50_SUN: pair('阳叶 50% 失导水势（mm H₂O）', 'Sunlit-leaf water potential at 50% loss (mm H₂O)'),
+  DEF_LC_PSI50_SHA: pair('阴叶 50% 失导水势（mm H₂O）', 'Shaded-leaf water potential at 50% loss (mm H₂O)'),
+  DEF_LC_PSI50_XYL: pair('木质部 50% 失导水势（mm H₂O）', 'Xylem water potential at 50% loss (mm H₂O)'),
+  DEF_LC_PSI50_ROOT: pair('根系 50% 失导水势（mm H₂O）', 'Root water potential at 50% loss (mm H₂O)'),
+  DEF_LC_CK: pair('水力脆弱性曲线形状参数', 'Hydraulic vulnerability-curve shape'),
+  DEF_TUNING_ZLND: pair('土壤空气动力粗糙长度（m）', 'Soil aerodynamic roughness length (m)'),
+  DEF_TUNING_ZSNO: pair('雪面空气动力粗糙长度（m）', 'Snow aerodynamic roughness length (m)'),
+  DEF_TUNING_CSOILC: pair('冠层下土壤拖曳系数', 'Below-canopy soil drag coefficient'),
+  DEF_TUNING_DEWMX: pair('冠层最大露水储量（mm）', 'Maximum canopy dew storage (mm)'),
+  DEF_TUNING_CAPR: pair('首层土温到地表温度调节因子', 'First-layer-to-surface temperature tuning factor'),
+  DEF_TUNING_CNFAC: pair('Crank–Nicolson 权重', 'Crank–Nicolson weighting factor'),
+  DEF_TUNING_SSI: pair('积雪不可排水饱和度比例', 'Irreducible snow-water saturation fraction'),
+  DEF_TUNING_WIMP: pair('土壤不透水孔隙率阈值', 'Impermeable-soil porosity threshold'),
+  DEF_TUNING_PONDMX: pair('最大地表积水深度（mm）', 'Maximum ponding depth (mm)'),
+  DEF_TUNING_SMPMAX: pair('Simple VIC 萎蔫土壤基质势（mm）', 'Simple VIC wilting matric potential (mm)'),
+  DEF_TUNING_SMPMIN: pair('土壤基质势下限（mm）', 'Soil matric-potential lower limit (mm)'),
+  DEF_TUNING_SMPMAX_HR: pair('异养呼吸土壤水势上限（mm）', 'Heterotrophic-respiration soil-potential upper limit (mm)'),
+  DEF_TUNING_SMPMIN_HR: pair('异养呼吸土壤水势下限（mm）', 'Heterotrophic-respiration soil-potential lower limit (mm)'),
+  DEF_TUNING_TRSMX0: pair('最大蒸腾速率（mm s⁻¹）', 'Maximum transpiration rate (mm s⁻¹)'),
+  DEF_TUNING_WETWATMAX: pair('湿地最大地表水储量（mm）', 'Maximum wetland surface-water storage (mm)'),
+  DEF_TUNING_SOIL_ICE_IMPEDANCE: pair('冻结土壤导水阻抗指数', 'Frozen-soil hydraulic impedance exponent'),
+  DEF_TUNING_TOPMOD_DECAY: pair('TOPMODEL 地下水位衰减系数（m⁻¹）', 'TOPMODEL water-table decay coefficient (m⁻¹)'),
+  DEF_TUNING_SIMPLE_VIC_DS: pair('Simple VIC 基流比例 Ds', 'Simple VIC baseflow fraction Ds'),
+  DEF_TUNING_SIMPLE_VIC_WS: pair('Simple VIC 基流阈值 Ws', 'Simple VIC baseflow threshold Ws'),
+  DEF_TUNING_SNOW_COVER_EXPONENT: pair('积雪覆盖密度指数', 'Snow-cover density exponent'),
+  DEF_TUNING_IRRIGATION_START_SEC: pair('当地灌溉开始时刻（当天秒数）', 'Local irrigation start time (second of day)'),
+  DEF_TUNING_IRRIGATION_DURATION_SEC: pair('每日灌溉持续时间（s）', 'Daily irrigation duration (s)'),
+  DEF_TUNING_IRRIGATION_MAX_DEPTH: pair('灌溉土壤最大深度（m）', 'Maximum irrigated soil depth (m)'),
+  DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION: pair('灌溉触发阈值比例', 'Irrigation trigger fraction'),
+  DEF_TUNING_IRRIGATION_SUPPLY_FRACTION: pair('灌溉缺水补给比例', 'Irrigation deficit supply fraction'),
+  DEF_TUNING_IRRIGATION_MIN_CPHASE: pair('灌溉起始作物阶段', 'First irrigated crop phase'),
+  DEF_TUNING_IRRIGATION_MAX_CPHASE: pair('灌溉结束作物阶段（不含）', 'Exclusive last irrigated crop phase'),
+  DEF_TUNING_IRRIGATION_PONDMX: pair('稻田最大积水深度（mm）', 'Maximum paddy ponding depth (mm)'),
+  DEF_TUNING_CROP_PLANTING_DAY: pair('作物种植日（年内日序）', 'Crop planting day (day of year)'),
+  DEF_PH_CROOT_LATERAL_LENGTH: pair('粗根横向长度（m）', 'Coarse-root lateral length (m)'),
+  DEF_PH_K_AXS: pair('根轴向水力导度系数', 'Root axial hydraulic-conductivity coefficient'),
+  DEF_PH_FROOT_CARBON: pair('细根碳储量（g C m⁻²）', 'Fine-root carbon stock (g C m⁻²)'),
+  DEF_PH_ROOT_RADIUS: pair('细根半径（m）', 'Fine-root radius (m)'),
+  DEF_PH_ROOT_DENSITY: pair('根组织密度（g m⁻³）', 'Root tissue density (g m⁻³)'),
+  DEF_PH_FROOT_LEAF: pair('细根叶片分配比', 'Fine-root to leaf allocation ratio'),
+  DEF_PH_KRMAX: pair('最大根径向导度', 'Maximum root radial conductivity'),
+  DEF_OZONE_KO3: pair('臭氧气孔阻力系数', 'Ozone stomatal-resistance coefficient'),
+  DEF_DS_TEMP_LAPSE_RATE: pair('气温递减率（K m⁻¹）', 'Temperature lapse rate (K m⁻¹)'),
+  DEF_DS_LONGWAVE_LAPSE_RATE: pair('冰川长波辐射递减率（W m⁻² m⁻¹）', 'Glacier longwave lapse rate (W m⁻² m⁻¹)'),
+  DEF_DS_LONGWAVE_LIMIT: pair('长波降尺度修正上限', 'Longwave downscaling correction limit'),
+  DEF_DS_SHORTWAVE_LIMIT: pair('完整降尺度短波修正上限', 'Full-mode shortwave correction limit'),
+  DEF_DS_SHORTWAVE_SIMPLE_LIMIT: pair('简化降尺度短波修正上限', 'Simple-mode shortwave correction limit'),
   DEF_USE_SASU: pair('启用半解析预热', 'Enable semi-analytic spin-up'),
   DEF_USE_DiagMatrix: pair('输出生地化诊断矩阵', 'Output biogeochemical diagnostic matrix'),
   DEF_USE_PN: pair('启用脉冲加氮预热', 'Enable punctuated-N spin-up'),
@@ -152,6 +250,24 @@ const LABELS = Object.freeze({
   DEF_dir_history: pair('历史结果目录', 'History directory'),
   DEF_forcing_namelist: pair('强迫场配置文件', 'Forcing namelist'),
 });
+
+const EXPERT_ONLY_FIELDS = new Set([
+  'DEF_BALL_BERRY_GRADM', 'DEF_BALL_BERRY_BINTER',
+  'DEF_MEDLYN_G1', 'DEF_MEDLYN_G0', 'DEF_WUE_LAMBDA',
+  'DEF_OZONE_KO3', 'DEF_DS_TEMP_LAPSE_RATE',
+  'DEF_DS_LONGWAVE_LAPSE_RATE', 'DEF_DS_LONGWAVE_LIMIT', 'DEF_DS_SHORTWAVE_LIMIT',
+  'DEF_DS_SHORTWAVE_SIMPLE_LIMIT',
+]);
+
+/** 已人工命名且不是校准系数的字段是普通用户常用项。 */
+export function isCommonField(path) {
+  if (path.startsWith('DEF_LC_')) return false;
+  return Object.hasOwn(LABELS, path)
+    && !path.startsWith('DEF_TUNING_')
+    && !path.startsWith('DEF_PH_')
+    && !path.startsWith('DEF_LC_')
+    && !EXPERT_ONLY_FIELDS.has(path);
+}
 
 const OPTIONS = Object.freeze({
   DEF_SOIL_REFL_SCHEME: {
@@ -317,6 +433,10 @@ const OPTIONS = Object.freeze({
     MEDLYN: pair('Medlyn', 'Medlyn'),
     WUE: pair('水分利用效率（WUE）', 'Water-use efficiency (WUE)'),
     INVALID: pair('配置冲突：Medlyn 与 WUE 同时开启', 'Invalid: Medlyn and WUE are both enabled'),
+  },
+  DEF_LC_C3C4: {
+    0: pair('C4 光合途径', 'C4 photosynthesis'),
+    1: pair('C3 光合途径', 'C3 photosynthesis'),
   },
 });
 

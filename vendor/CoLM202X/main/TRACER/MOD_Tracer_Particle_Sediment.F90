@@ -650,6 +650,21 @@ CONTAINS
       t_exchange = 0._r8
       t_layer = 0._r8
       t_diag = 0._r8
+      clk_rate = 0
+      max_sed_precip_local = 0._r8
+      max_precip_rate_local = 0._r8
+      max_slope_local = 0._r8
+      max_sedcon_local = 0._r8
+      max_sedout_local = 0._r8
+      max_bedout_local = 0._r8
+      max_sedinp_local = 0._r8
+      max_netflw_local = 0._r8
+      max_shearvel_local = 0._r8
+      max_es_raw_local = 0._r8
+      max_d_raw_local = 0._r8
+      max_es_eff_local = 0._r8
+      max_d_eff_local = 0._r8
+      n_flow_cancel_local = 0
       sum_sedinp_local = 0._r8
       sum_sedout_down_local = 0._r8
       sum_sedout_up_local = 0._r8
@@ -682,20 +697,6 @@ CONTAINS
       precip_time_local = sed_precip_time
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      max_sed_precip_local = 0._r8
-      max_precip_rate_local = 0._r8
-      max_slope_local = 0._r8
-      max_sedcon_local = 0._r8
-      max_sedout_local = 0._r8
-      max_bedout_local = 0._r8
-      max_sedinp_local = 0._r8
-      max_netflw_local = 0._r8
-      max_shearvel_local = 0._r8
-      max_es_raw_local = 0._r8
-      max_d_raw_local = 0._r8
-      max_es_eff_local = 0._r8
-      max_d_eff_local = 0._r8
-      n_flow_cancel_local = 0
       IF (numucat > 0) THEN
          max_sed_precip_local = maxval(sed_precip)
          max_precip_rate_local = max_sed_precip_local / max(precip_time_local, 1.e-20_r8)

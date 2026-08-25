@@ -242,6 +242,16 @@ function readinessCopy(report) {
   return ['尚不可运行', `缺少 ${report.needs_external.length} 项且没有可用 rawdata。文件可以保存，但建例会被阻止。`, 'fail'];
 }
 
+function appendResultRow(table, label, renderValue) {
+  const tr = document.createElement('tr');
+  const th = document.createElement('th');
+  th.textContent = label;
+  const td = document.createElement('td');
+  renderValue(td);
+  tr.append(th, td);
+  table.appendChild(tr);
+}
+
 function renderResult() {
   const box = $('site-result');
   box.textContent = '';
@@ -257,11 +267,18 @@ function renderResult() {
 
   const total = result.from_site.length + result.from_raster.length + result.from_default.length;
   const table = document.createElement('table');
-  table.innerHTML = `
-    <tr><th>产物</th><td><code>${result.path}</code></td></tr>
-    <tr><th>模式</th><td>${String(result.mode).toUpperCase()} · ${result.site_kind === 'urban' ? '城市' : '自然'}站点</td></tr>
-    <tr><th>结构字段</th><td>${total}/${REQUIRED_FIELD_COUNT}</td></tr>
-    <tr><th>质地</th><td>${result.texture_name}（第 ${result.texture} 类），BVIC ${result.bvic}</td></tr>`;
+  appendResultRow(table, '产物', td => {
+    const code = document.createElement('code');
+    code.textContent = result.path;
+    td.appendChild(code);
+  });
+  appendResultRow(table, '模式', td => {
+    td.textContent = `${String(result.mode).toUpperCase()} · ${result.site_kind === 'urban' ? '城市' : '自然'}站点`;
+  });
+  appendResultRow(table, '结构字段', td => { td.textContent = `${total}/${REQUIRED_FIELD_COUNT}`; });
+  appendResultRow(table, '质地', td => {
+    td.textContent = `${result.texture_name}（第 ${result.texture} 类），BVIC ${result.bvic}`;
+  });
   card.appendChild(table);
   card.appendChild(sourceGroup('来自站点自身', result.from_site, '', ''));
   card.appendChild(sourceGroup('来自 rawdata 栅格', result.from_raster, '', ''));
@@ -326,9 +343,19 @@ export function renderPrepReady() {
   ];
   const table = document.createElement('table');
   for (const [label, path, stateText] of rows) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<th>${label}</th><td>${path ? `<code>${path}</code>` : '—'}<div class="muted mini">${stateText}</div></td>`;
-    table.appendChild(tr);
+    appendResultRow(table, label, td => {
+      if (path) {
+        const code = document.createElement('code');
+        code.textContent = path;
+        td.appendChild(code);
+      } else {
+        td.textContent = '—';
+      }
+      const detail = document.createElement('div');
+      detail.className = 'muted mini';
+      detail.textContent = stateText;
+      td.appendChild(detail);
+    });
   }
   box.appendChild(table);
   const runnableSite = a.siteReport && a.siteReport.readiness !== 'blocked';

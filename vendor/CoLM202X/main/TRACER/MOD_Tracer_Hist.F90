@@ -702,7 +702,7 @@ CONTAINS
             ENDIF
          ENDDO
          CALL single_write_2d (ratio_vec, file_hist, varname, itime_in_file, &
-            longname, units)
+            filter, longname, units)
          deallocate(ratio_vec)
          RETURN
       ENDIF
@@ -821,7 +821,7 @@ CONTAINS
             ENDDO
          ENDDO
          CALL single_write_3d (ratio_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, longname, units)
+            dim1name, ndim1, filter, longname, units)
          deallocate(ratio_vec)
          RETURN
       ENDIF
@@ -944,7 +944,7 @@ CONTAINS
             ENDIF
          ENDDO
          CALL single_write_2d (delta_vec, file_hist, varname, itime_in_file, &
-            longname, units)
+            filter, longname, units)
          deallocate(delta_vec)
          RETURN
       ENDIF
@@ -1494,7 +1494,7 @@ CONTAINS
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 #endif
       END select
 
@@ -1534,7 +1534,7 @@ CONTAINS
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 #endif
       END select
 
@@ -1611,7 +1611,7 @@ CONTAINS
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_3d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, longname, units)
+            dim1name, ndim1, filter, longname, units)
 #endif
       END select
 

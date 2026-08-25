@@ -46,7 +46,7 @@ Rust 桌面程序，让不会编译 Fortran、不会写 namelist 的人也能跑
 
 本节每一条都在 macOS ARM / gfortran 16.1.0 / netcdf-fortran 4.6.3 上实测过，不是推断。
 
-### 2.1 SinglePoint 今天可以编译，三个物理预设各自成立
+### 2.1 SinglePoint 的历史构建基线：三个物理预设各自成立
 
 | 预设 | 宏（`gfortran -E` 实测） | 结果 | `colm.x` |
 |---|---|---|---|
@@ -61,12 +61,13 @@ Rust 桌面程序，让不会编译 Fortran、不会写 namelist 的人也能跑
 唯一失败的目标是 `river_hist_concatenate.x`（postprocess，与单点无关，链接期 `_MAIN__`
 符号缺失）。
 
-### 2.2 BGC 与 URBAN 在单点下互斥
+### 2.2 BGC 与 URBAN 在单点下互斥（历史结论，已被运行时重构取代）
 
-`define.h:19-24`：`URBAN_MODEL && SinglePoint` → 强制 `#define LULC_IGBP`；
-`:74-78` → `#undef BGC`；`:82-84` → `#undef CROP`。
+当前 Desktop 已把 PFT / PC / BGC / URBAN 改为运行时开关；城市过程不会改写
+`DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC` 的选择。现行约束见
+`docs/plan-macro-runtime.md`。下面的预设说明仅记录改造前的编译期基线。
 
-所以这不是「一个开关」，而是**三个预设**，GUI 里做成单选组，各自对应一个预编译二进制。
+当前 GUI 因此把次网格结构和城市过程作为两个独立选择，并由同一分类内核在运行时组合。
 
 ### 2.3 MPI 可以彻底甩掉
 
@@ -136,10 +137,10 @@ Warning: Latitude mismatch: 44.593299865722656 in data file and 44.5932999999999
 
 | 字段 | 取值 | 依据 |
 |---|---|---|
-| `lakedepth` | 1.0 | `MOD_SingleSrfdata.F90:47` 模块默认值 |
+| `lakedepth` | 1.0 | `MOD_SingleSrfdata.F90:41` 模块默认值 |
 | `elevation` | 138.0 | 取自同站 `Observation` 文件的 `elevation` |
-| `elvstd` | 0.0 | `MOD_SingleSrfdata.F90:88` 模块默认值 |
-| `sloperatio` | 0.0 | `MOD_SingleSrfdata.F90:89` 模块默认值（平地） |
+| `elvstd` | 0.0 | `MOD_SingleSrfdata.F90:80` 模块默认值 |
+| `sloperatio` | 0.0 | `MOD_SingleSrfdata.F90:81` 模块默认值（平地） |
 | `soil_s_v_alb` / `soil_d_v_alb` / `soil_s_n_alb` / `soil_d_n_alb` | 0.14 / 0.25 / 0.28 / 0.39 | `MOD_SoilColorRefl` 的 L=10 档 |
 | `soil_vf_clay` / `soil_wf_clay` | 非砂/砾/有机质剩余量的 25% | 壤土的 1:3 黏/粉比例假设 |
 | `soil_wf_om` | `vf_om × OM_density / BD_all` | 由文件已有量推导 |
@@ -424,8 +425,9 @@ MATSIRO / VIC / JULES / CoLM202x），`main/` 版只有 1 个。这里的
 - `tests/river_hist_compare.py` —— 通用的、基于发现的 NetCDF 目录差分器（先逐位再
   rtol/atol）。除河道分片文件名跳过逻辑外可直接复用。
   `tests/river_hist_schema_lock.py` 明确是 producer-independent 的。
-- **内建物理不变量** —— `CoLMMAIN.F90:1545` 的 `|errore| > 0.5` W/m²、`:1620` 的
-  `|errorw| > 1.e-3` mm → `CoLM_stop()`。仅在 `CoLMDEBUG` 下武装，仓库默认 `define.h`
+- **内建物理不变量** —— `CoLMMAIN.F90:1503` 的 `|errore| > 0.5` W/m² 只警告；
+  `:1579-1587`、`:1759-1760`、`:1969-1970` 的 `|errorw| > 1.e-3` mm
+  会 `CoLM_stop()`。仅在 `CoLMDEBUG` 下武装，仓库默认 `define.h`
   关闭，但 `run/scripts/create_newcase` 生成的站点算例里是 `#define` 的。
 - `run/scripts/SiteList` —— 90 站机读清单。
   `run/scripts/create_test_standard-sites` —— 10 个启用算例 × 90 站、切换 13 个 `DEF_*`。
@@ -450,10 +452,9 @@ MATSIRO / VIC / JULES / CoLM202x），`main/` 版只有 1 个。这里的
   `colm.x` 9.7 MB。
 - `.gitignore` 已加入 `.superpowers/`。
 
-**未修复（需决策）**：`create_defineh.bash` 发出 `LATERAL_FLOW`，而该宏在 `.F90` 中
-出现 **0 次**（真名 `CatchLateralFlow`，23 个文件在用）。因此所有生成的头文件里侧向流
-都是静默关闭的，包括 CI 那 91 个用例。修正它会让 CATCHMENT 用例第一次真的编译侧向流
-代码路径，可能直接使 CI 失败 —— 属于需要单独评估的变更。
+- `create_defineh.bash` 曾发出源码从未读取的 `LATERAL_FLOW`，使生成内核静默关闭
+  真正由 `CatchLateralFlow` 守护的侧向流路径。现已统一为 `CatchLateralFlow`，并由
+  `test_create_newcase_runtime_contract.sh` 阻止旧宏回归。
 
 ### 2.15b netcdf 必须静态链接；依赖钉版本的必要性被我自己的实验误判过
 
@@ -671,7 +672,7 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 
 1. 检测站点文件缺哪些 CoLM 无条件读取的字段。
 2. 对每个缺失字段提供**三个选项**：从站点参数包取（若有）、用默认值（并显示该默认值
-   的出处，如「`MOD_SingleSrfdata.F90:47` 模块默认值」）、手工填。
+   的出处，如「`MOD_SingleSrfdata.F90:41` 模块默认值」）、手工填。
 3. 土壤亮度以「土壤颜色等级 1–20」下拉呈现，而不是 4 个裸反射率数字。
 4. 合成的字段必须在 NetCDF 属性里标记 `source = "synthesized ..."`，并进入
    `run_manifest.json`。**永远不能让用户以为合成值是观测值。**
@@ -689,17 +690,18 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 
 | 闸门 | 判据在哪 | 谁回答 | default 下 |
 |---|---|---|---|
-| 1. 编译期宏 | `MOD_Hist.F90` 的 `#ifdef` / `#ifndef` | `colm-hist`，输入是内核清单的 `macros`（§6.1） | 456 个写出点 → **123** |
-| 2. 运行时 `DEF_*` 条件 | 同一文件的内联 `.and.` 与外层 `IF (DEF_*) THEN` | 记下条件原文，由调用方结合算例配置求值 | 10 个带条件，本次 6 真 4 假 → **119** |
-| 3. 变量开关 `DEF_hist_vars%X` | `MOD_Namelist.F90` | `colm-schema`（§4.2 的那张字段表） | 默认全开 |
+| 1. 编译期宏 | `MOD_Hist.F90` 的 `#ifdef` / `#ifndef` | `colm-hist`，输入是内核清单的 `macros`（§6.1） | 456 个写出点 → **346** |
+| 2. 运行时 `DEF_*` 条件 | 同一文件的内联条件与完整 `IF` / `ELSE` 嵌套 | 记下并合并条件，由调用方结合算例配置求值 | 114 个无条件，232 个有条件；本次 5 个条件成立 → **119** |
+| 3. 变量开关 `DEF_hist_vars%X` | `MOD_Namelist.F90` | `colm-schema`（§4.2 的那张字段表） | 482 个中 343 个默认开启 |
 
 闸门 1 的表是生成的（`xtask gen-histmap`），产物入库，drift 测试守住它不与上游脱节；
-并由 `oracle/tests/histmap.rs` 拿入库的黄金文件做经验校验 —— **零漏报**是硬要求，
-多报恰好是闸门 2 挡下的 `dz_lake` / `qcharge` / `t2m_wmo` / `xy_hpbl` 四个。
+并由 `oracle/tests/histmap.rs` 拿入库的黄金文件做经验校验 —— **零漏报**是硬要求；
+宏层多报的每一项都必须带可解释的运行时条件（当前黄金算例为 229 项）。
 多报的方向是安全的（说「可能产出 X」而实际没有），漏报则是拿一张静态表去否定
 一次真实运行。
 
-闸门 2 刻意只记原文、不求值：求值需要一份具体的算例配置，那是命令层的事。
+闸门 2 记下完整逻辑表达式，并把互补分支中的同一写出变量合并；求值需要一份
+具体的算例配置，那是命令层的事。
 两张表也刻意不在生成期耦合，在 GUI 层合并即可。
 
 这道闸门与 §6.4 的静默覆盖是同一件事的两面：`qlayer` 与 `qcharge` 挂在
@@ -726,20 +728,21 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 本节原先写的是 `kernels/manifest.json` 里一个 `kernels` 数组，实现时改成了
 `kernels/<preset>/manifest.json`，理由见下一段的「同生同存」—— 清单认定的是
 紧挨着它的那三个二进制，一份全局清单会让它在预设之间失去这个含义。
-实测的 `kernels/default/manifest.json`：
+当前内置的 `kernels/default/manifest.json`：
 
 ```json
 {
   "schema": 1,
   "preset": "default",
   "platform": "Darwin-arm64",
-  "colm_git_sha": "72dd76b9",
-  "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",
-  "macros": ["CoLMDEBUG","LULC_IGBP","RangeCheck","SinglePoint","extend_interception","vanGenuchten_Mualem_SOIL_MODEL"],
+  "colm_git_sha": "7e54fc0",
+  "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
+  "build_profile": "production",
+  "macros": ["LULC_IGBP","SinglePoint","URBAN_MODEL","extend_interception"],
   "built_with": "GNU Fortran (Homebrew GCC 16.1.0) 16.1.0",
-  "netcdf_c": "netCDF 4.9.3",
+  "netcdf_c": "netCDF 4.10.1",
   "netcdf_fortran": "4.6.3",
-  "hdf5": "1.14.6",
+  "hdf5": "",
   "sha256": { "mksrfdata": "…", "mkinidata": "…", "colm": "…" }
 }
 ```
@@ -749,8 +752,8 @@ Rust 侧必须遵守 §2.10 的全部实测细节。本节只补充设计层面�
 **为什么必须记 `netcdf_c` / `netcdf_fortran` / `hdf5`**：黄金文件的字节由
 **Fortran 侧**写出（`colm.x` 链接系统 netcdf-fortran），Rust 判官只负责读。
 `Cargo.lock` 对 Fortran 侧库版本毫无约束，所以这三个版本号是黄金文件可复现性的
-唯一记录点。本机实测值即上所示（均来自 miniforge）。Rust 侧静态链入 HDF5 2.x，
-读 1.14.6 写出的文件实测正常。
+唯一记录点。这些字段由构建脚本按本机环境写入；上面的空 `hdf5` 表示该次构建
+未能从 NetCDF 头文件探测出版本，不代表未链接 HDF5。
 
 **Fortran 构建不是逐字节可复现的**（实测：同一路径连跑两次，三个二进制 sha256 全不同）。
 故 manifest 里两组字段职责不同：`macros`/`colm_git_sha`/`generator_args` 可复现，
@@ -790,7 +793,7 @@ GUI 只渲染校验通过的预设（backend-owned UI vocabulary）。
    | `Memory allocation (malloc) failure` | 非法时间窗口等 | 是 |
    | `Fortran runtime error` | gfortran 运行期，**只走 stderr** | 是 |
    | `Error termination` | 同上 | 是 |
-   | `balance violation` | `CoLMMAIN.F90:1545/1620`，10 种文本 | **否，只警告**（见 §6.5） |
+   | `balance violation` | `CoLMMAIN.F90:1503` 能量警告；`:1579-1587`/`:1759-1760`/`:1969-1970` 水收支停止 | 能量否，水收支是（见 §6.5） |
    | ` with NAN` / ` Out of Range!` | `MOD_RangeCheck.F90:139/144` | 仅当定义了 `CoLMDEBUG` |
    | `Netcdf error` / `***** ERROR` / `ERROR in` | 笼统兜底 | 视来源而定 |
    | `does not exist` | `MOD_NetCDFSerial.F90:163` 缺输入文件 | 是，但走**无参数**的 `CoLM_stop()`，一句话都不再打印 |
@@ -829,14 +832,14 @@ GUI 只渲染校验通过的预设（backend-owned UI vocabulary）。
 
 ### 6.5 默认武装 `CoLMDEBUG`
 
-它武装 `CoLMMAIN.F90:1545` 的 `|errore| > 0.5` W/m² 与 `:1620` 的 `|errorw| > 1.e-3` mm。
+它武装 `CoLMMAIN.F90:1503` 的 `|errore| > 0.5` W/m²，以及
+`:1579-1587`、`:1759-1760`、`:1969-1970` 的 `|errorw| > 1.e-3` mm。
 GUI 场景下宁可炸也不要给出错的数。
 
-**本节原先写「它同样走 `CoLM_stop` → 退出码 0，仍靠 §6.3 捕获」，那是错的。**
-实测源码：这两处是 `write(6,*) 'Warning: ... balance violation ...'`，
-**打印之后继续跑**，没有 `CoLM_stop`。所以一次能量不守恒的运行会跑到底、
-写出完整产物、打出成功标记 —— CoLM 自己不执行「宁可炸」这条政策，
-执行它的必须是 §6.3。十种消息文本共享 `balance violation` 一个子串。
+能量路径只 `write(6,*) 'Warning: energy balance violation ...'`，打印之后继续跑，
+没有 `CoLM_stop`。水收支路径不同：打印 `Warning: water balance violation ...` 后
+调用 `CoLM_stop()`。所以 §6.3 仍要把 `balance violation` 判失败：它补上
+能量路径不会自停的缺口，也让水收支路径在裸 `STOP 0` 时仍有明确失败原因。
 
 同一个宏还武装 `MOD_RangeCheck.F90`，但那边的行为不同：它在
 `len_trim(exception) > 0` 时确实调 `CoLM_stop(' ***** ERROR: ...')`。
@@ -845,14 +848,14 @@ GUI 场景下宁可炸也不要给出错的数。
 
 ### 6.6 进程生命周期
 
-- 单算例：全局单一 run lease（`Mutex<Option<RunState>>`），`Drop` 时保留活着的子进程
-  PID，使取消在 future 被放弃后仍然有效。
-- 批量：换成 N 槽信号量。
-- 取消：按 PID kill（`kill -KILL` / `taskkill /PID /F /T`）；kill 失败保留 PID 以便重试。
+- 单算例与批量共用 `RunProcesses` 注册表（算例目录 → 顶层 `colm-cli` PID）；
+  批量由固定 worker 池从队列取站点，未启动站点也保留取消标记。
+- Unix/macOS 启动顶层 sidecar 时令其成为独立进程组；取消先向整个组发 `TERM`，
+  仍存活则发 `KILL`。Windows 用 `taskkill /PID /T /F` 终止整棵进程树。
+- 关闭窗口会取消注册表中的在跑与待跑任务；`run://done` 单独报告 `cancelled`，
+  不把用户取消混成模型失败。Study 取消先写取消标记，再终止当前 sidecar 树。
 - 日志：stdout/stderr 各一个 `std::thread` 逐行抽取（避免管道死锁），发一个自定义事件。
   进度从 `colm` 打印的日期行解析。
-- 内核二进制先暂存到临时副本再运行（EarthMesh 的静态 netcdf 二进制在源码树中运行时
-  被 SIGKILL），带体积与 mtime 陈旧性检查。
 
 ---
 
@@ -1052,8 +1055,7 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
    | `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 挪进 `#ifdef USEMPI` | 它在守卫**之外**，于是 `#undef USEMPI` 的 SinglePoint 构建仍然要求 MPI 头文件。macOS 与 Linux 上恰好都装着 MPI，所以从没暴露过；Windows 是第一台没有的机器。注意是**挪不是删** —— `MPI_STATUS_SIZE` 用在第 97 行的 `#else` 分支里 | MSYS2 装 `mingw-w64-x86_64-msmpi`，它提供 21 KB 的 `mpif.h` |
    | `CoLM_stop` 的裸 `STOP` 改成 `STOP 1`（§2.4） | 它是失败专用路径，却与成功共用退出码 0 | `colm-kernel` 的三条腿判定，即便上游改了也仍然需要 |
 
-1. **`LATERAL_FLOW` → `CatchLateralFlow` 是否修**（§2.15）。修正会让 91 个 CI 用例
-   第一次真的编译侧向流路径，可能使 CI 失败。
+1. ~~`LATERAL_FLOW` → `CatchLateralFlow`~~ —— **已修复，见 §2.15**。
 2. ~~容差策略~~ —— **已决定，见 §8.1**（分层：Tier 0 逐位 / Tier 1 rtol 1e-12 /
    Tier 2 以求解器收敛容差为下限 / Tier 3 统计等价）。
 3. ~~签名主体与预算~~ —— **已决定，见 §9**（买 Apple $99/年；Windows v1 未签名；
@@ -1104,9 +1106,9 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
    #endif
    ```
 
-   还有一条：`URBAN_MODEL && SinglePoint` 时强制 `LULC_IGBP` 并
-   `#undef` 掉另外三个（第 19–24 行）。**这解释了 `urban` 预设为什么
-   必须是 `LULC_IGBP` —— 不是我们选的，是上游强制的。**
+   当时静态 `include/define.h` 还有一条 `URBAN_MODEL && SinglePoint` 时强制
+   `LULC_IGBP` 的旧块，但实际生成脚本没有这条。当前 Desktop 又已把 PFT / PC
+   与 URBAN 改为互相独立的运行时选择，因此不能再据此限制城市卡片。
 
    而 `oracle/scripts/build_kernel.sh` 编完不核对，
    `kernel-manifest.json` 里记的是**我们传的参数**，不是**实际生效的宏**。
@@ -1116,38 +1118,20 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
    **补 LULC 预设之前先修这条**，否则后面每加一个预设都是在一个
    不可信的基础上加。
 
-9. **默认预热让首次运行要跑几小时，而界面上看不出来**（2026-08-20 实测）。
-   `colm-cli new` 的默认是 `--spinup-years 1 --spinup-repeat 10`，理由写在
-   代码注释里且站得住：
-
-   > 碳库是慢变量，直接从初始场跑出来的头一段并不代表这个站点的气候态。
-
-   代价是 CN-Cng 那条默认路径要算 **12 年**（10 遍预热 + 2 年模拟）。
-   实测跑了 2 分半才产出第一个月的 history，外推 6 小时以上。
-
-   对比：上游 CoLM 全部 15 个示例 nml 与本仓库的黄金基准都是
-   `spinup_repeat = 0`。**只有 GUI 建出来的算例是 10。**
-
-   **不建议直接改默认值。** 那是在替用户做科学判断。真正的缺口是
-   **界面上说不出这次要跑多久** —— 运行页只显示「预热 x/10 轮」，
-   看不出总量，也看不出预热吃掉了多少。一个刚装好程序的人点默认值，
-   得到的是一个看不到头的进度条。
-
-   倾向的做法：建完算例就把「这个配置要算多少模型步、预热占几成」
-   摆出来，让人自己决定要不要在第 4 步调小。**给信息而不是替他决定** ——
-   与前处理页那条「每一步都要能说出为什么」是同一条规矩。
+9. **默认预热必须能在首次运行中完成**（2026-08-23 修正）。
+   `colm-cli new` 默认使用 `--spinup-years 1 --spinup-repeat 1`：先用窗口开头
+   一年的强迫场预热一轮，再进入正式输出。原来的 10 轮默认会让两年示例站
+   实际计算约 12 年，首次运行需要数小时；需要更长平衡期时由用户在“预热”
+   分栏明确增加轮数。运行页按预热轮数和总模型步显示实际进度。
 
 ---
 
 ## 附录 A：已验证的复现步骤（CN-Cng）
 
 ```bash
-# 1. 构建 SinglePoint 水热预设（在独立 worktree 中，不动主工作树）
-git worktree add --detach /tmp/wt HEAD && cd /tmp/wt
-ln -sf Makeoptions.Mac-arm include/Makeoptions
-./.github/workflows/create_defineh.bash \
-    SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF
-make FF="gfortran -fopenmp" mksrfdata.x mkinidata.x colm.x
+# 1. 从仓库根目录构建 SinglePoint IGBP 生产内核；脚本在临时副本中编译，
+#    不污染 vendor 源码树。
+./oracle/scripts/build_kernel.sh default
 
 # 2. 增广站点文件：注入 12 个 CoLM 无条件读取但 PLUMBER2 不提供的字段
 #    （取值与出处见 §2.7）

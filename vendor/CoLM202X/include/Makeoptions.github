@@ -18,15 +18,28 @@
 
   MOD_CMD = -J
 
-  FOPTS = -fdefault-real-8 -ffree-form -g -fcheck=all \
-          -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
-          -ffree-line-length-0
+  # Desktop releases default to optimized kernels.  The old full-check build
+  # remains available with COLM_KERNEL_PROFILE=debug.
+  COLM_KERNEL_PROFILE ?= production
+  FOPTS_COMMON = -fdefault-real-8 -ffree-form -g \
+                 -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
+                 -ffree-line-length-0
   GFORTRAN_MAJOR := $(shell $(word 1,$(FF)) -dumpversion 2>/dev/null | cut -d. -f1)
   ifneq ($(shell test "$(GFORTRAN_MAJOR)" -ge 10 2>/dev/null && echo yes),)
-     FOPTS += -fallow-argument-mismatch
+     FOPTS_COMMON += -fallow-argument-mismatch
   endif
   ifeq ($(shell uname -m),x86_64)
-     FOPTS += -mcmodel=medium
+     FOPTS_COMMON += -mcmodel=medium
+  endif
+
+  FOPTS_PRODUCTION = -O2 $(FOPTS_COMMON)
+  FOPTS_DEBUG = -O0 -fcheck=all $(FOPTS_COMMON)
+  ifeq ($(COLM_KERNEL_PROFILE),production)
+     FOPTS = $(FOPTS_PRODUCTION)
+  else ifeq ($(COLM_KERNEL_PROFILE),debug)
+     FOPTS = $(FOPTS_DEBUG)
+  else
+     $(error COLM_KERNEL_PROFILE must be production or debug)
   endif
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)

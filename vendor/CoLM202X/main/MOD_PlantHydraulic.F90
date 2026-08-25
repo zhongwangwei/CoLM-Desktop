@@ -3,7 +3,8 @@ MODULE MOD_PlantHydraulic
 
 !-----------------------------------------------------------------------
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_RSS_SCHEME
+   USE MOD_Namelist, only: DEF_RSS_SCHEME, DEF_PH_CROOT_LATERAL_LENGTH, DEF_PH_K_AXS, &
+      DEF_PH_FROOT_CARBON, DEF_PH_ROOT_RADIUS, DEF_PH_ROOT_DENSITY, DEF_PH_FROOT_LEAF, DEF_PH_KRMAX
    USE MOD_SPMD_Task
    IMPLICIT NONE
    SAVE
@@ -143,19 +144,12 @@ CONTAINS
    real(r8) rs_resis              ! combined soil-root resistance [s]
    real(r8) cf                    ! s m**2/umol -> s/m
 
-   real(r8), parameter :: croot_lateral_length = 0.25_r8   ! specified lateral coarse root length [m]
    real(r8), parameter :: c_to_b               = 2.0_r8    ! (g biomass /g C)
    real(r8), parameter :: rpi                  = 3.14159265358979_r8
    integer , parameter :: root                 = 4
    real(r8), parameter :: toldb                = 1.e-2_r8  ! tolerance for satisfactory bsun/bsha solution
-   real(r8), parameter :: K_axs                = 2.0e-1
 
  ! temporary input
-   real(r8), parameter :: froot_carbon = 288.392056287006_r8
-   real(r8), parameter :: root_radius  = 2.9e-4_r8
-   real(r8), parameter :: root_density = 310000._r8
-   real(r8), parameter :: froot_leaf   = 1.5_r8
-   real(r8), parameter :: krmax        = 3.981071705534969e-009_r8
 
    real(r8),dimension(nvegwcs) :: x      ! vegetation water potential
 
@@ -165,19 +159,19 @@ CONTAINS
       DO j = 1,nl_soil
 
          ! calculate conversion from conductivity to conductance
-         root_biomass_density = c_to_b * froot_carbon * rootfr(j) / dz_soi(j)
+         root_biomass_density = c_to_b * DEF_PH_FROOT_CARBON * rootfr(j) / dz_soi(j)
          ! ensure minimum root biomass (using 1gC/m2)
          root_biomass_density = max(c_to_b*1._r8,root_biomass_density)
 
          ! Root length density: m root per m3 soil
-         root_cross_sec_area = rpi*root_radius**2
-         root_length_density = root_biomass_density / (root_density * root_cross_sec_area)
+         root_cross_sec_area = rpi*DEF_PH_ROOT_RADIUS**2
+         root_length_density = root_biomass_density / (DEF_PH_ROOT_DENSITY * root_cross_sec_area)
 
          ! Root-area index (RAI)
-         rai(j) = (sai+laisun+laisha) * froot_leaf * rootfr(j)
+         rai(j) = (sai+laisun+laisha) * DEF_PH_FROOT_LEAF * rootfr(j)
 
          ! fix coarse root_average_length to specified length
-         croot_average_length = croot_lateral_length
+         croot_average_length = DEF_PH_CROOT_LATERAL_LENGTH
 
          ! calculate r_soil using Gardner/spa equation (Bonan, GMD, 2014)
          r_soil = sqrt(1./(rpi*root_length_density))
@@ -188,8 +182,8 @@ CONTAINS
          ! USE vegetation plc function to adjust root conductance
          fs(j)=  plc(amax1(smp(j),-1._r8),psi50_root,ck)
 
-         ! krmax is root conductance per area per length
-         root_conductance = (fs(j)*rai(j)*krmax)/(croot_average_length + z_soi(j))
+         ! DEF_PH_KRMAX is root conductance per area per length
+         root_conductance = (fs(j)*rai(j)*DEF_PH_KRMAX)/(croot_average_length + z_soi(j))
          soil_conductance = max(soil_conductance, 1.e-16_r8)
          root_conductance = max(root_conductance, 1.e-16_r8)
 
@@ -203,7 +197,7 @@ CONTAINS
          ELSE
             k_soil_root(j) =  0.
          ENDIF
-         k_ax_root(j) = (rootfr(j)/(dz_soi(j)*1000))*K_axs*0.6
+         k_ax_root(j) = (rootfr(j)/(dz_soi(j)*1000))*DEF_PH_K_AXS*0.6
       ENDDO
 !=======================================================================
 

@@ -10,7 +10,7 @@ await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 
 const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 const { metricText } = await import(moduleUrl('metric-format.js'));
-const { appendLogText, progressText } = await import(moduleUrl('run-format.js'));
+const { acceptsRunEvent, appendLogText, progressText } = await import(moduleUrl('run-format.js'));
 if (metricText(null) !== '—' || metricText(Number.NaN) !== '—') {
   throw new Error('undefined metrics must render without calling toFixed');
 }
@@ -24,6 +24,15 @@ if (progressText({ step: 12, total_steps: 48, date: '2008-01-01-21600' })
 if (!progressText({ step: 2, total_steps: 8, date: 'x', spinup: [2, 3] }).startsWith('预热 2/3 轮')) {
   throw new Error('per-site progress must distinguish spin-up cycles');
 }
+if (progressText({}, '已取消') !== '已取消') {
+  throw new Error('cancelled runs must not be rendered as failures');
+}
+if (acceptsRunEvent(['/new'], '/old', false, 'run-2', 'run-2')
+    || acceptsRunEvent(['/new'], '/new', false, 'run-2', 'run-1')
+    || !acceptsRunEvent(['/new'], '/new', false, 'run-2', 'run-2')
+    || !acceptsRunEvent([], '/restored', true, null, 'run-restored')) {
+  throw new Error('late events from a previous run must not re-enter the current run view');
+}
 const long = appendLogText('x'.repeat(59999), ['site-only']);
 if (long.length > 40020 || !long.endsWith('site-only\n')) {
   throw new Error('per-site log ring did not retain the newest lines');
@@ -32,6 +41,17 @@ const runner = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 if (!runner.includes('function failPendingRuns(reason)')
     || !/catch \(e\) \{\s*failPendingRuns\(e\);/.test(runner)) {
   throw new Error('a rejected batch launch must clear every pending per-site run');
+}
+const css = await readFile(join(root, 'dist', 'app', 'style.css'), 'utf8');
+if (!/--live-w/.test(css) || !/--live-h/.test(css) || !/col-resize/.test(css)
+    || !/row-resize/.test(css) || !/#log\s*\{[^}]*resize:\s*vertical/s.test(css)) {
+  throw new Error('live log panel must be resizable');
+}
+const mainJs = await readFile(join(root, 'dist', 'app', 'main.js'), 'utf8');
+if (!mainJs.includes("stacked ? '--live-h' : '--live-w'")
+    || !mainJs.includes("$('live-resizer').addEventListener('pointerdown', beginLiveResize)")
+    || !mainJs.includes("window.addEventListener('pointermove', apply)")) {
+  throw new Error('right live panel border drag must update --live-w after leaving the border');
 }
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 const outputVariables = html.indexOf('输出变量（按需展开）');
@@ -45,6 +65,7 @@ const expectedRunButtons = [
   ['run-mkinidata', '运行 mkinidata'],
   ['run-colm', '运行 colm'],
   ['runall', '运行全部'],
+  ['cancel-run', '取消运行'],
 ];
 for (const [id, label] of expectedRunButtons) {
   if (!new RegExp(`<button[^>]+id="${id}"[^>]*>[^<]*${label}`).test(runSection)) {
@@ -54,8 +75,20 @@ for (const [id, label] of expectedRunButtons) {
 if (!runner.includes("const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null]")) {
   throw new Error('the four run buttons must map to three individual stages and the full workflow');
 }
-if (!/<div id="domaingate" class="gate">/.test(html)) {
-  throw new Error('the startup wizard must be visible before JavaScript initializes');
+if (!runner.includes("invoke('cancel_runs', { cases })")
+    || !runner.includes("d.cancelled ? '已取消'")) {
+  throw new Error('run cancellation must reach the backend and keep its own terminal state');
+}
+if (runner.includes('status(state.runCancelled.has')
+    || !runner.includes('const terminal = d.cancelled')) {
+  throw new Error('terminal cancellation status must come from run://done, not event ordering');
+}
+if (!runner.includes("state.wizard?.tracer === 'methane'")) {
+  throw new Error('restored methane cases must keep the required runtime directory control visible');
+}
+if (!/<div id="launchgate" class="gate launch-gate">/.test(html)
+    || !/<div id="domaingate" class="gate" hidden>/.test(html)) {
+  throw new Error('the local/server launcher must be visible before JavaScript initializes');
 }
 
 console.log('runview: per-site progress/log formatting and undefined metrics are safe');

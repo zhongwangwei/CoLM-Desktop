@@ -1,8 +1,4 @@
-//! 参数页对**整批**算例生效，而不是只对第一个。
-//!
-//! 这几条是源文本断言：勾了 20 个站点却只配到第一个，是一个不报错的故障
-//! —— 另外 19 个会带着未改的配置跑完，界面上一切正常。所以钉住的是
-//! 「前端没有第二条单份写入的路子」这件事，而不是某个函数怎么写。
+//! 预热、输出和网格可批量写；逐站点基本设定与过程参数由下拉菜单选择站点或全部。
 
 use std::path::PathBuf;
 
@@ -18,7 +14,7 @@ fn js(name: &str) -> String {
 }
 
 #[test]
-fn nothing_in_the_frontend_writes_a_single_case() {
+fn all_frontend_writes_still_go_through_validated_backend_commands() {
     // `write_text` 已经从后端删掉、`set_field` 已经从命令表
     // 摘掉。**前端再出现它们就是回退** —— 那条路只写得动一个文件。
     for f in ["params.js", "histvars.js", "timing.js"] {
@@ -48,6 +44,14 @@ fn every_editor_asks_who_it_applies_to() {
     // `editTarget` 住在 batch.js：params.js 已经 import 了 timing.js，
     // 放在 params.js 里会形成一个环，而 ES module 的环不报错。
     assert!(js("batch.js").contains("export function editTarget"));
+    let params = js("params.js");
+    assert!(params.contains("const EXPERT_ALL = '__all__'"));
+    assert!(params.contains("const processDirs = expertDirs()"));
+    assert!(params.contains("state.expertCaseDir === EXPERT_ALL"));
+    assert!(params.contains("renderProcessPicker(basic, parameterCases)"));
+    assert!(params.contains("processDirs.length > 1"));
+    assert!(params.contains("set_process_parameter_field_batch"));
+    assert!(params.contains("修改站点") && params.contains("全部站点"));
 }
 
 #[test]
@@ -164,20 +168,25 @@ fn the_installer_carries_a_runnable_example() {
         .expect("tauri.bundle.conf.json");
     assert!(conf.contains("examples"), "示例数据没进 bundle.resources");
 
-    // 三件套缺一不可：少了 Forcing 界面会说「没有强迫场，跑不了」，
+    // 自然站与甲烷站的三件套缺一不可：少了 Forcing 界面会说「没有强迫场，跑不了」，
     // 少了 Observation 则是评估按钮一直灰着 —— 都不像是打包漏了。
-    let s = "CN-Cng_2008-2009_FLUXNET2015";
-    for (d, suf) in [
-        ("Sitedata", "site"),
-        ("Forcing", "Met"),
-        ("Observation", "Flux"),
+    for s in [
+        "CN-Cng_2008-2009_FLUXNET2015",
+        "AT-Neu_2010-2012_FLUXNET-CH4",
     ] {
-        let p = root()
-            .join("examples")
-            .join(d)
-            .join(format!("{s}_{suf}.nc"));
-        assert!(p.is_file(), "{} 不在", p.display());
+        for (d, suf) in [
+            ("Sitedata", "site"),
+            ("Forcing", "Met"),
+            ("Observation", "Flux"),
+        ] {
+            let p = root()
+                .join("examples")
+                .join(d)
+                .join(format!("{s}_{suf}.nc"));
+            assert!(p.is_file(), "{} 不在", p.display());
+        }
     }
+    assert!(root().join("examples/Forcingnml/AT-Neu.nml").is_file());
 
     // 目录形状就是 `colm-cli scan` 依赖的那个：它顺着命名约定从 Sitedata
     // 找到 ../Forcing 与 ../Observation。压平了扫描仍列得出站点，
@@ -185,18 +194,19 @@ fn the_installer_carries_a_runnable_example() {
     assert!(js("sites.js").contains("install_example"), "界面上没有入口");
     assert!(
         js("sites.js").contains("sitesForWizard")
-            && js("sites.js").contains("s.urban === urbanEnabled()"),
+            && js("sites.js").contains("s.urban === urban")
+            && js("sites.js").contains("matchesBundledExampleMode"),
         "示例列表没有按自然站 / 城市站配置过滤"
     );
 
-    // 示例要小到能塞进安装包。原始三件套 19 MB，deflate 之后 3.1 MB。
+    // 三个站点仍要小到能塞进安装包。
     let bytes: u64 = ["Sitedata", "Forcing", "Observation"]
         .iter()
         .flat_map(|d| std::fs::read_dir(root().join("examples").join(d)).unwrap())
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum();
     assert!(
-        bytes < 8 * 1024 * 1024,
+        bytes < 10 * 1024 * 1024,
         "示例数据 {} MB，太大了 —— 重新 nccopy -d 5 压一遍",
         bytes / 1048576
     );

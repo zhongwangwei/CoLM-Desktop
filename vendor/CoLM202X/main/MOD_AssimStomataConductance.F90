@@ -179,16 +179,36 @@ CONTAINS
    real(r8) :: &
       eyy(iterationtotal),    &! differnce of pco2i at two iteration step
       pco2y(iterationtotal),  &! adjusted to total iteration number
-      range                    !
+      range,                  &
+      g1_used,                &! case override, or the land-cover/PFT table value
+      g0_used,                &
+      gradm_used,             &
+      binter_used,            &
+      lambda_used
 
    integer ic
 !-----------------------------------------------------------------------
+
+      g1_used = g1
+      g0_used = g0
+      gradm_used = gradm
+      binter_used = binter
+      lambda_used = lambda
+      IF (DEF_USE_MEDLYNST) THEN
+         IF (DEF_MEDLYN_G1 >= 0.0_r8) g1_used = DEF_MEDLYN_G1
+         IF (DEF_MEDLYN_G0 >= 0.0_r8) g0_used = DEF_MEDLYN_G0
+      ELSE IF (DEF_USE_WUEST) THEN
+         IF (DEF_WUE_LAMBDA > 0.0_r8) lambda_used = DEF_WUE_LAMBDA
+      ELSE
+         IF (DEF_BALL_BERRY_GRADM > 1.6_r8) gradm_used = DEF_BALL_BERRY_GRADM
+         IF (DEF_BALL_BERRY_BINTER >= 0.0_r8) binter_used = DEF_BALL_BERRY_BINTER
+      ENDIF
 
       CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
                              trop, slti, hlti, shti, hhti, trda, trdm, cint, &
                              vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
 
-      bintc = binter * max( 0.1, rstfac )
+      bintc = binter_used * max( 0.1, rstfac )
       bintc = bintc * cint(3)
 
 !-----------------------------------------------------------------------
@@ -200,7 +220,7 @@ CONTAINS
       co2m = pco2m/psrf                               ! mol mol-1
       co2a = pco2a/psrf
 
-      range = pco2m * ( 1. - 1.6/gradm ) - gammas
+      range = pco2m * ( 1. - 1.6/gradm_used ) - gammas
 
       DO ic = 1, iterationtotal    ! loop for total iteration number
          pco2y(ic) = 0.
@@ -216,7 +236,7 @@ CONTAINS
             pco2i_c = pco2i
             pco2i_e = pco2i
          ELSE
-            CALL WUE_solver(gammas, lambda, co2a, ei, ea, psrf, pco2i_c, pco2i_e)
+            CALL WUE_solver(gammas, lambda_used, co2a, ei, ea, psrf, pco2i_c, pco2i_e)
          ENDIF
 
 !-----------------------------------------------------------------------
@@ -320,14 +340,14 @@ CONTAINS
                vpd   = amax1((ei - ea),50._r8) * 1.e-3 ! in kpa
                acp   = 1.6*assmt/co2st                 ! in mol m-2 s-1
                aquad = 1._r8
-               bquad = -2*(g0*1.e-6 + acp) - (g1*acp)**2/(gbh2o*vpd)       ! in mol m-2 s-1
-               cquad = (g0*1.e-6)**2 + (2*g0*1.e-6+acp*(1-g1**2)/vpd)*acp  ! in (mol m-2 s-1)**2
+               bquad = -2*(g0_used*1.e-6 + acp) - (g1_used*acp)**2/(gbh2o*vpd)       ! in mol m-2 s-1
+               cquad = (g0_used*1.e-6)**2 + (2*g0_used*1.e-6+acp*(1-g1_used**2)/vpd)*acp  ! in (mol m-2 s-1)**2
 
                sqrtin= max( 0., ( bquad**2 - 4.*aquad*cquad ) )
                gsh2o = ( -bquad + sqrt ( sqrtin ) ) / (2.*aquad)
 
             ELSE
-               hcdma = ei*co2st / ( gradm*assmt )
+               hcdma = ei*co2st / ( gradm_used*assmt )
 
                aquad = hcdma
                bquad = gbh2o*hcdma - ei - bintc*hcdma
@@ -669,12 +689,17 @@ CONTAINS
    integer, parameter :: iterationtotal = 6   ! total iteration number in pco2i calculation
 
    real(r8) :: &
-            eyy(iterationtotal),    &! differnce of pco2i at two iteration step
-            pco2y(iterationtotal),  &! adjusted to total iteration number
-            range                    !
+      eyy(iterationtotal),    &! differnce of pco2i at two iteration step
+      pco2y(iterationtotal),  &! adjusted to total iteration number
+      range,                  &
+      gradm_used
 
    integer ic
 !-----------------------------------------------------------------------
+
+      gradm_used = gradm
+      IF (.not. DEF_USE_MEDLYNST .and. .not. DEF_USE_WUEST .and. &
+          DEF_BALL_BERRY_GRADM > 1.6_r8) gradm_used = DEF_BALL_BERRY_GRADM
 
       CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
                              trop, slti, hlti, shti, hhti, trda, trdm, cint, &
@@ -682,7 +707,7 @@ CONTAINS
 
       co2a = pco2a/psrf
 
-      range = pco2m * ( 1. - 1.6/gradm ) - gammas
+      range = pco2m * ( 1. - 1.6/gradm_used ) - gammas
 
       DO ic = 1, iterationtotal    ! loop for total iteration number
          pco2y(ic) = 0.

@@ -36,6 +36,8 @@ const site = await readFile(new URL('../dist/app/sitedata.js', import.meta.url),
 assert.match(site, /adoptPreparedSite/);
 assert.match(site, /sitedir/);
 assert.match(site, /scanPreparedSites/);
+assert.doesNotMatch(site, /innerHTML\s*=\s*`[\s\S]*?\$\{/, 'site reports must not interpolate paths or report fields into HTML');
+assert.doesNotMatch(site, /<code>\$\{(?:result\.path|path)\}/, 'site file paths must be rendered through textContent');
 
 const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
 assert.match(html, /<select class="input" id="slandtype"/);
@@ -48,6 +50,9 @@ assert.match(forcing, /missingForcingHeights\(heights\)/);
 assert.match(forcing, /forcingOutputName/);
 assert.match(forcing, /forcingdir/);
 assert.match(forcing, /scanPreparedSites\(\)/);
+const dynamicForcingHtml = (forcing.match(/innerHTML\s*=\s*`[\s\S]*?`/g) ?? [])
+  .filter(block => block.includes('${'));
+assert.deepEqual(dynamicForcingHtml, [], 'forcing reports must not interpolate probe/report fields into HTML');
 
 const shell = await readFile(new URL('../dist/app/shell.js', import.meta.url), 'utf8');
 for (const id of ['prep-site', 'prep-forcing', 'prep-ready']) {

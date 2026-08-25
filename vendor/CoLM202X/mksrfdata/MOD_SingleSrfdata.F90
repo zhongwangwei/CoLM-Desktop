@@ -1436,6 +1436,7 @@ ENDIF
    USE MOD_Utils
    USE MOD_SPMD_Task
    USE MOD_LandPatch
+   USE MOD_LandPFT
    USE MOD_LandUrban
    USE MOD_Urban_Const_LCZ
    USE MOD_Vars_Global, only: PI, URBAN
@@ -2750,6 +2751,25 @@ ENDIF
          allocate (landpatch%vecgs%vlen(1,1));  landpatch%vecgs%vlen(1,1) = numpatch
          allocate (landpatch%vecgs%vstt(1,1));  landpatch%vecgs%vstt(1,1) = 1
          allocate (landpatch%vecgs%vend(1,1));  landpatch%vecgs%vend(1,1) = numpatch
+
+IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+         ! A pure urban point has no vegetation PFTs, but the PFT/PC runtime
+         ! layout still expects the same empty mapping used by other
+         ! non-vegetated SinglePoint patches.
+         landpft%nset = 0
+         allocate (landpft%settyp (0))
+
+         landpft%nblkgrp = 1
+         allocate (landpft%xblkgrp(1));       landpft%xblkgrp(1) = 1
+         allocate (landpft%yblkgrp(1));       landpft%yblkgrp(1) = 1
+
+         allocate (landpft%vecgs%vlen(1,1));  landpft%vecgs%vlen(1,1) = 0
+         allocate (landpft%vecgs%vstt(1,1));  landpft%vecgs%vstt(1,1) = 1
+         allocate (landpft%vecgs%vend(1,1));  landpft%vecgs%vend(1,1) = 0
+
+         allocate (patch_pft_s (numpatch)); patch_pft_s = -1
+         allocate (patch_pft_e (numpatch)); patch_pft_e = -1
+ENDIF
 
          landurban%nset = numurban
 

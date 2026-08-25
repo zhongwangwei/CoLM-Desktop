@@ -2,13 +2,13 @@
 //!
 //! 一个刚装好程序的人手上**没有任何数据**。PLUMBER2 要注册才能下载、
 //! 几十 GB，而在拿到数据之前他连"这程序能不能用"都判断不了。
-//! 所以装两个站点进去：CN-Cng（内蒙古草地，2008–2009）与 AU-Preston
-//! （墨尔本城市站）—— 后者是给选了 `urban` 内核的人准备的。
+//! 所以装四个站点进去：CN-Cng（内蒙古草地，2008–2009）、AT-Neu（甲烷，
+//! 2010–2012）、AU-Preston（墨尔本城市站）与 US-Ne3（农田站）。
 //!
-//! **城市那个的数据门槛另说。** 土壤剖面、湖深、LCZ 分类都不在站点文件里，
-//! 原本只能从 240 GB 的全球栅格取；那条链正在被拆掉（见 plan-gui3.md 的
-//! Task 8c 系列），在它完成之前 AU-Preston 装完还不能直接跑。
-//! CN-Cng 则装完就能跑通建算例 → 三段运行 → 与观测比对的完整流程。
+//! AU-Preston 缺少的城市土壤、地形与 LCZ 数据由程序内置点值补齐，
+//! 不再要求用户下载 240 GB 全球栅格。
+//! CN-Cng 装完即可跑完整流程；AT-Neu 自带甲烷建例与评估数据，
+//! 真正运行 BGC / 甲烷前仍需用户指定 CoLM runtime 数据。
 
 use std::path::{Path, PathBuf};
 
@@ -16,20 +16,25 @@ use tauri::Manager;
 
 /// 示例数据在安装包里的位置。
 ///
-/// 与 `list_kernels` 同一条路子：`bundle.resources` 落在 `resource_dir()`
-/// 下（macOS 的 `Contents/Resources/`），而 `externalBin` 落在主二进制旁边
-/// —— 两处不同，各按各的来。最后一条是仓库里的位置，`cargo tauri dev`
-/// 走那条。
+/// 与 `list_kernels` 同一条路子：发行版优先读取 `bundle.resources`；开发版
+/// 优先读取仓库，避免 `target/debug/examples` 中残留的旧暂存内容遮住新增站点。
 fn source(app: &tauri::AppHandle) -> Option<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("COLM_EXAMPLES") {
         roots.push(PathBuf::from(p));
     }
-    if let Ok(d) = app.path().resource_dir() {
-        roots.push(d.join("examples"));
-    }
-    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples"));
+    roots.extend(example_roots(app.path().resource_dir().ok()));
     roots.into_iter().find(|r| r.join("Sitedata").is_dir())
+}
+
+fn example_roots(resource_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let resource = resource_dir.map(|dir| dir.join("examples"));
+    if cfg!(debug_assertions) {
+        std::iter::once(repository).chain(resource).collect()
+    } else {
+        resource.into_iter().chain(std::iter::once(repository)).collect()
+    }
 }
 
 /// 装好之后示例在哪。
@@ -41,6 +46,8 @@ pub struct Example {
     pub forcingdir: String,
     /// 建议的算例根目录（`~/CoLM-cases`，不放在示例数据旁边——见 [`cases_root`]）
     pub root: String,
+    /// 与 BGC/CROP 配套的最小 Runtime 目录
+    pub runtimedir: String,
     /// 已经在那儿了（这次没复制）
     pub already: bool,
 }
@@ -87,16 +94,23 @@ pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
         .map_err(|e| format!("找不到应用数据目录：{e}"))?
         .join("examples");
 
-    let already = dest.join("Sitedata").is_dir();
-    if !already {
-        copy_tree(&src, &dest)?;
-    }
+    // 旧版可能只安装了 CN-Cng / AU-Preston。每次都补齐新文件，
+    // 但不覆盖用户已经修改过的示例数据。
+    let already = [
+        "Sitedata/AT-Neu_2010-2012_FLUXNET-CH4_site.nc",
+        "Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc",
+        "Runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
+    ]
+    .iter()
+    .all(|path| dest.join(path).is_file());
+    copy_tree(&src, &dest)?;
     let root = cases_root(&app)?;
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     Ok(Example {
         sitedir: dest.join("Sitedata").display().to_string(),
         forcingdir: dest.join("Forcing").display().to_string(),
         root: root.display().to_string(),
+        runtimedir: dest.join("Runtime").display().to_string(),
         already,
     })
 }
@@ -109,7 +123,7 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
         let to = dest.join(e.file_name());
         if e.path().is_dir() {
             copy_tree(&e.path(), &to)?;
-        } else {
+        } else if !to.exists() {
             std::fs::copy(e.path(), &to).map_err(|err| format!("{}: {err}", to.display()))?;
         }
     }

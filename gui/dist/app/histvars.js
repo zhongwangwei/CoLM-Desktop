@@ -62,6 +62,8 @@ export async function renderHistVars(box) {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = v.on;
+    cb.disabled = v.settable === false;
+    cb.title = v.settable === false ? '由模型内置输出选择器控制' : '';
     cb.style.width = 'auto';
     cb.onchange = async () => {
       try {
@@ -70,6 +72,7 @@ export async function renderHistVars(box) {
         const r = await invoke('set_field_batch', {
           dirs: editTarget(), path: `DEF_hist_vars%${v.name}`,
           value: cb.checked ? '.true.' : '.false.',
+          kernelDir: kernel,
         });
         state.text = r.text;
         status(r.written > 1 ? `已写入 ${r.written} 个算例：${v.name}` : `已保存 ${v.name}`);
@@ -87,6 +90,9 @@ export async function renderHistVars(box) {
       why.className = 'muted';
       why.textContent = '未知';
       why.title = v.blocked_by ?? '';
+    } else if (v.settable === false) {
+      why.className = 'muted';
+      why.textContent = '由甲烷输出选择器控制';
     }
     tr.appendChild(c); tr.appendChild(nm); tr.appendChild(why);
     tbl.appendChild(tr);

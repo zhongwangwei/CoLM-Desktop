@@ -14,29 +14,32 @@
 
 把 CoLM202X 的 SinglePoint 模式做成跨平台桌面程序。设计见 `docs/design.md`。
 
-**当前状态**：命令行端到端可用 —— 一条命令从原始 PLUMBER2 站点文件跑到
-指标表。PFT / PC / BGC / URBAN 已是运行时开关；IGBP / USGS 分别由两份编译产物覆盖。GUI 已按
-GUI 能扫站点、按功能分类改参数、
-批量运行、自动配对观测并出评估图。安装包由 `release.yml` 三平台产出，
+**当前状态**：命令行端到端可用 —— 一条命令可从站点文件建例、运行并生成
+指标表。PFT / PC / BGC / URBAN / TRACER 是运行时开关；IGBP / USGS
+由两份编译产物覆盖。GUI 能完成站点数据前处理、按约束建例、批量配置与运行、
+结果浏览和评估，并提供不确定性分析、参数调优及报告导出工作流。
+安装包由 `release.yml` 三平台产出，
 内核随包走 —— **用桌面程序的人不需要装任何编译器**。
 
 ### GUI 能做什么
 
-**进门先分流，然后走五步。** 启动时先问「这次要跑什么」——「站点」「区域」
-「全球」三档。三种域要的前处理、地表数据与并行设置都不一样，将来各自展开
-自己的步骤链；**现在只有「站点」能点，另外两档是灰的（「暂不支持」）**，
-而不是点了报错——一个能点但必然失败的入口比一个灰着的更糟。这道门每次
-启动都弹，它是分流点而不是一次性欢迎页。
+启动时先选择计算资源：本地运行可用，服务器运行保留为不可选入口。进入本地
+工作台后先走约束卡片，确定空间结构、地类体系、次网格、过程模块与土壤水力；
+区域、全球和流域等尚未实现的入口保持灰色，不能进入一个必然失败的流程。
 
-选了「站点」之后是五步，**顺序由依赖链定，不是按界面好看排的**：
+约束卡片完成后直接进入「基本设定 / 文件与目录」。左侧工作流有八个顶级组；
+前处理是独立入口，不再强迫已经准备好站点数据的用户先经过它：
 
 | | 步骤 | 要什么才能进 |
 |---|---|---|
-| ① | 前处理 | ——（这一页目前是预留的，把打算做的事写出来） |
-| ② | 基本设定 | 扫站点、建算例；文件、站点、时间、网格、地表、初始场与强迫场分栏 |
-| ③ | 过程参数 | 要先建过算例；只显示当前模型涉及的过程 |
-| ④ | 运行 | 同上 |
-| ⑤ | 结果 | 同上 |
+| ① | 前处理 | 可选；将 NetCDF 或单站/多站 CSV、TXT、TSV 整理成站点数据和强迫场 |
+| ② | 基本设定 | 扫站点、建算例；文件、预热、网格、地表、初始场与强迫场分栏 |
+| ③ | 过程参数 | 要先建过算例；只显示当前模型涉及且可配置的过程 |
+| ④ | 运行 | 分站点运行、取消、进度与日志 |
+| ⑤ | 结果分析 | 时间序列、多站比较、模型评估与图形诊断 |
+| ⑥ | 不确定性分析 | 从完成算例创建并运行参数扰动 Study |
+| ⑦ | 参数调优 | 差分进化、校准/验证窗口与候选应用 |
+| ⑧ | 报告与导出 | 汇总并导出结果 |
 
 物理和次网格已在进门向导选完。GUI 后台按选择自动匹配 IGBP 或 USGS 产物，
 主界面不再给用户一个重复的“选内核”下拉框。
@@ -45,20 +48,19 @@ GUI 能扫站点、按功能分类改参数、
 |---|---|
 | 站点库 | 扫 `Sitedata` 目录，两套命名约定都认；列出「城市 / 无观测 / 读不了」 |
 | 参数 | 按用途分节；向导已定义的字段不重复显示，当前配置不可用的也默认隐藏 |
-| 输出变量 | 482 个开关独立成页，逐条说明「勾了到底写不写得出来」 |
-| 运行 | 三段各自状态；**输入没变就跳过**（指纹，不是只看文件在不在）；批量跑并逐算例显示状态 |
-| 评估 | 指标表（含 KGE 不可信的警告）、模型 vs 观测双线图、散点图、批量汇总表 |
-| 预设 | 存下其它参数与输出设置跨算例复用；**向导字段与身份字段挡在外面** |
+| 输出变量 | 输出开关独立成页，并说明当前配置下能否产出；TRACER history 同样进入闸门 |
+| 运行 | 三段各自状态；**输入没变就跳过**（输入指纹，不是只看文件在不在）；逐站点显示进度和日志并可取消 |
+| 评估 | 指标表（含 KGE 可信度提示）、模型 vs 观测双线图、散点图和批量汇总表 |
+| Study | 不确定性与调优共用后端执行、状态恢复和导出契约，界面保持两个独立工作流 |
 
 ## 仓库与依赖
 
 `vendor/CoLM202X` 是入库的源码快照；来源、基线 commit 与本地改动记录在
 `vendor/PROVENANCE.md`，普通克隆不需要再初始化 submodule。
 
-CI 分两层。每个 PR 在 ubuntu / macOS / Windows 三平台跑 **182/204** 条测试 ——
-`cargo test --workspace --lib --bins` 的纯计算部分（161 条），加上五条各自点名的
-集成测试：判官、namelist 往返、schema 漂移、输出变量闸门表的经验校验与其漂移。
-这些只需要源码与已入库的黄金文件。其余 22 条要 5.5 GB 的 PLUMBER2 与 38 GB 的
+CI 分两层。每个 PR 在 Ubuntu / macOS / Windows 运行 workspace 与 GUI 测试、
+静态 GUI IPC 契约检查、格式化和 Clippy；需要源码与已入库黄金文件的集成测试
+也在门禁中显式列出。依赖 5.5 GB PLUMBER2 与 38 GB
 rawdata（或一个已构建的内核），只能在带那些东西的自托管 runner 上跑；
 「它们没跑」这件事会在 PR 界面上以警告形式出现，而不是静默缺席。
 
@@ -104,8 +106,9 @@ colm-cli all --site <PLUMBER2>/Sitedata/CN-Cng_..._site.nc \
              --start 2008-01-01 --end 2008-01-11 --spinup 8
 ```
 
-城市站点由站点文件的形状自动认出（没有 `IGBP_classification` 就是城市），
-没有 `--urban` 开关；那时两个栅格目录必填：
+城市站点由站点文件内容识别，没有单独的 `--urban` 开关。完整站点文件已经包含
+城市类型、人口密度和其它必需字段时可以不提供 rawdata；审计缺少字段时会明确
+列出仍需哪一类外部数据：
 
 ```bash
 colm-cli new --site <Urban-PLUMBER>/Sitedata/AU-Preston_site_v1.nc \
@@ -116,8 +119,8 @@ colm-cli run ~/cases/AU-Preston --kernel kernels/default
 ```
 
 `colm-cli` 是**唯一的编排可执行文件**（`design.md` §4.2：「GUI 只跟它说话」），
-所以它是唯一一处同时依赖全部五层的地方；各层之间仍然互不依赖。四个子命令：
-`new` 造算例、`run` 跑三段、`metrics` 出指标表、`all` 串起来。
+所以它是唯一一处同时依赖全部五层的地方；各层之间仍然互不依赖。建例、三段
+运行、评估、前处理、ERA5-Land 与 Study 子命令都通过这一边界提供给 GUI。
 
 **能读出来的都不问。** 强迫场与观测文件在站点文件旁边找 —— PLUMBER2 的三个
 目录共用同一个词干，只差 `_site.nc` / `_Met.nc` / `_Flux.nc`；经纬度与地类读自
@@ -364,21 +367,21 @@ GUI 启用时选择并校验 NetCDF 文件。产流方案则沿用 CoLM 的 `3`�
 
 | 闸门 | 判据在哪 | default 下 |
 |---|---|---|
-| 1. 编译期宏 | `MOD_Hist.F90` 里的 `#ifdef` / `#ifndef` | 456 个写出点 → **123** |
-| 2. 运行时 `DEF_*` 条件 | 同一文件里的内联 `.and.` 与外层 `IF (DEF_*) THEN` | 123 里 10 个带条件，本次 6 真 4 假 → **119** |
-| 3. 变量自己的开关 | `DEF_hist_vars%X`，在 `colm-schema` 里 | 默认全开 |
+| 1. 编译期宏 | `MOD_Hist.F90` 里的 `#ifdef` / `#ifndef` | 456 个写出点 → **346** |
+| 2. 运行时 `DEF_*` 条件 | 同一文件里的内联条件与完整 `IF` / `ELSE` 嵌套 | 114 个无条件，232 个有条件；本次 5 个条件成立 → **119** |
+| 3. 变量自己的开关 | `DEF_hist_vars%X`，在 `colm-schema` 里 | 482 个中 343 个默认开启 |
 
 `crates/colm-hist` 只回答闸门 1，输入是内核清单里的 `macros`：
 
 ```rust
 // 清单里的 macros 是 Vec<String>（它要能从 JSON 反序列化），闸门表要 &str
 let macros = manifest.macros.iter().map(String::as_str).collect();
-colm_hist::writable(&macros)   // -> BTreeSet<&'static str>，default 下 123 个
+colm_hist::writable(&macros)   // -> BTreeSet<&'static str>，default 下 346 个
 ```
 
-闸门 2 的条件**原样记下来**而不求值 —— 求值需要一份具体的算例配置，那是调用方
-的事；这一层的职责是如实报出 CoLM 写了什么条件，好让 GUI 说清「为什么你勾了它
-却没有」。闸门 3 已经在 `colm-schema` 里，两张表在 GUI 层合并即可。
+闸门 2 会保留完整逻辑表达式、合并互补分支，但不在生成时绑定具体配置；GUI 再用
+当前算例求值，好让界面说清「为什么你勾了它却没有」。闸门 3 已经在
+`colm-schema` 里，两张表在 GUI 层合并即可。
 
 表由 `cargo run -p xtask -- gen-histmap` 生成，产物入库，`tests/drift.rs` 守住它
 不与上游脱节。
@@ -532,20 +535,14 @@ v=12.1 而 t=q=1.5，差 8 倍）。时间步长也不是普适的 1800 s：88 �
 
 ## 什么时候要自己编内核
 
-**大多数时候不用。** 物理预设是**编译期**的东西 —— 一个内核目录就是一组
-CPP 宏，装出来的程序自带三个：
+**大多数时候不用。** 当前发行包只需要 IGBP 与 USGS 两份编译产物；两者必须
+分开是因为地类数组尺寸不同。PFT / PC / BGC / URBAN / CROP / TRACER、土壤水力
+与调试开关均由运行时 namelist 控制，`bgc` / `urban` 目录只是旧版兼容别名，
+不再代表独立物理内核。
 
-| 预设 | 宏组合 |
-|---|---|
-| `default` | `SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
-| `bgc` | `SinglePoint LULC_IGBP_PFT URBANOFF vanGenu CaMaOFF BGCON CROPOFF TRACEROFF` |
-| `urban` | `SinglePoint LULC_IGBP URBANON vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF` |
-
-要自己编，只有三种情况：**想要第四种宏组合**（开 CROP、开 TRACER、
-换 Campbell 土壤、开 CaMa-Flood…）、**改了 CoLM 的 Fortran 源码**、
-或者**要一个没发布的平台/架构**。
-
-桌面端不暴露这些目录；它按向导的 IGBP/USGS 选择匹配 `generator_args`。
+只有改了 Fortran 源码、需要尚未随包发布的平台/架构，或确实改变仍属编译期的
+结构宏时才需要自己构建。桌面端依据约束卡片在 IGBP/USGS 产物间选择，不向用户
+暴露一组重复且可能互相矛盾的“物理预设内核”。
 
 ### GitHub 直接产出安装包
 
@@ -595,14 +592,13 @@ make                              # 加 git
 `#undef USEMPI`，但 `share/MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'`
 写在 `#ifndef USEMPI` **之外** —— 头文件必须存在，哪怕一个 MPI 符号都不会被用到。
 macOS 与 Linux 上恰好都装着 MPI，所以这件事在 Windows 之前从没暴露过。
-（改上游一行就能去掉，但那会让 submodule 离开一个干净的上游 commit，
-不值得；装一个只提供头文件的包更便宜。）
+（改上游一行就能去掉，但会增加一处没有必要的 vendor 偏离；装一个只提供
+头文件的包更便宜。）
 
 ### Windows 上二进制叫 `.exe`，不叫 `.x`
 
 CoLM 的 Makefile 在所有平台都产出 `.x`；`build_kernel.sh` 在 Windows 上把
-**拷进内核目录的那份**改名（不碰 `run/` 里 Makefile 的产物，submodule 因此
-保持在一个干净的上游 commit 上）。
+**拷进内核目录的那份**改名，不碰 `run/` 里 Makefile 的产物。
 
 理由是 Windows 的 `PATHEXT` 不含 `.x`：系统不把这个文件当可执行文件，而是当
 「文档」。实测 PowerShell 直接拒绝 `& .\colm.x | ...`，报
@@ -638,13 +634,13 @@ CI 里唯一跑通过的那次，是**先把 `.x` 拷成 `.exe` 再跑的**。�
 
 ## 运行时物理与地类产物的实际状态
 
-| 配置 | 构建 | 运行 | 备注 |
+| 配置 | 所需发行内核 | 运行 | 备注 |
 |---|---|---|---|
-| `default` | ✅ 38 s | ✅ 黄金基准 | —— |
-| `PC` | 共用 IGBP | ✅ 三阶段 + 96 步 | 运行时 `DEF_USE_PC` |
-| `USGS` | ✅ 独立产物 | ✅ 三阶段 + 96 步 | 编译期地类数组不同 |
-| `bgc` | ✅ 44 s | ✅ 三段跑通 | 需要两份 runtime 数据，见下 |
-| `urban` | ✅ 38 s | ✅ 三段跑通，**不用给 rawdata/runtime** | 只对 Urban-PLUMBER 那 21 个站，见下 |
+| `default` | IGBP | ✅ 黄金基准 | —— |
+| `PC` | IGBP | ✅ 三阶段 + 96 步 | 运行时 `DEF_USE_PC` |
+| `USGS` | USGS | ✅ 三阶段 + 96 步 | 编译期地类数组不同 |
+| `bgc` | IGBP | ✅ 三段跑通 | BGC 是运行时开关；需要两份 runtime 数据，见下 |
+| `urban` | IGBP | ✅ 三段跑通 | URBAN 是运行时开关；完整站点文件可不提供 rawdata，见下 |
 
 **BGC 需要两份 runtime 数据，而 `design.md` §10 只记了一份。**
 `nitrif/`（30 MB）是记过的；`ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc`
@@ -667,8 +663,8 @@ schema 里也只有频率没有开关。
 **门槛分四步拆掉，缺一不可：**
 
 1. **两个上游 Fortran bug** —— 它们让「站点文件里有就用站点文件」那条分支
-   根本不可达。修在 `vendor/CoLM202X` 的 `fix/urban-site-fallbacks` 分支
-   （`ad77af53`），**尚未 push 到上游**：
+   根本不可达。修补已经纳入当前 `vendor/CoLM202X` 快照；来源与本地差异见
+   `vendor/PROVENANCE.md`：
    - `lakedepth` 的 readflag 取自一个**还没赋值的结果变量**，`.and.` 短路之后
      连警告都不打，站点值静默地被栅格顶掉；
    - `TREE_LAI` 命中站点分支时不分配 `SITE_LAI_year`，而写出时无条件调
@@ -685,7 +681,8 @@ schema 里也只有频率没有开关。
    `runtime/urban/`。
 
 **省下的不是估算，是实测。** AU-Preston（1993-01-01 至 01-11，1800 s 步长）
-**完全不给 `--rawdata` / `--runtime`**：三段全 `ok`，264 条小时记录，
+在站点文件包含城市人口密度等完整字段时，**完全不给 `--rawdata` / `--runtime`**：
+三段全 `ok`，264 条小时记录，
 `f_tref` 峰值 `311.9649983374719 K`。拿同一个算例、改成直接读 122 GB 栅格的
 参照 run 比对：
 
@@ -778,3 +775,232 @@ identical: 146 variables
 **但这不是一次干净的对照**：`bgc` 预设同时把 `LULC_IGBP` 换成了
 `LULC_IGBP_PFT`，所以两个变量一起变了。要分清是 BGC 还是 PFT 方案带来的
 改善，得再构建一个只改其中一个的预设。这一条记在这里，不当结论用。
+
+## 全仓深度审计（2026-08-24）
+
+### 修复复核（当前工作树）
+
+首次审计发现已经逐项复核。下表是当前结论；后面的长清单保留为**修复前快照**，
+用于说明问题来源，不再代表现在的实现状态。
+
+| 原编号 | 当前状态 | 修复或判定 |
+|---|---|---|
+| H1 / H2 | 已修复 | 动态文案补齐翻译；`gui/tests/i18n.mjs` 机械扫描 `app/*.js` 的普通字符串和模板字符串，未知中文会使测试失败 |
+| M1 | 已修复 | `golden-run` 与 Study 测试内核都从 `case.nml` 读取 `DEF_LC_YEAR`，不再写死 `lc2005` |
+| M2 / M10 | 已修复必要部分 | 单算例和批量运行可取消，窗口退出会终止进程树；阻塞 sidecar 调用统一离开 Tokio worker。未加任意绝对超时，避免合法的长模拟被误杀 |
+| M3 | 已修复 | rawdata 文件和目录内容进入输入指纹；大文件采用头尾有界采样加元数据，避免为缓存判断完整读取数十 GB |
+| M4 | 已修复 | `check-gui` 的导出检查和 import 环检查均支持多行 import，并有回归测试 |
+| M5 | 已修复（待提交） | AT-Neu 四件套与 `kernel_profile` 测试已纳入 Git 索引，CI 显式运行该集成测试；发布前须连同本轮代码一起提交 |
+| M6 / M7 | 已修复 | 城市站点契约加入 `resident_population_density`；真实 site-vs-raster 测试明确验证站点文件优先 |
+| M8 / M9 | 已修复 | history 闸门由主 history 与 TRACER/CH4 源共同生成，共 618 个写出点；tier-check 增加层级不倒挂断言 |
+| M11 / M12 / M13 | 已修复 | 删除未调用命令、共享 RunLog 和前端重复降采样；原生 prompt/confirm 也经过翻译 |
+| M14 | 非缺陷 | `tolerances.toml` 约束的是黄金 history 比较，不覆盖地理匹配、单位换算和时间轴判断的局部数值容差 |
+| M15 | 约定债务 | 1-based 语义已有结构字段注释和测试保护；为追求后缀统一而批量改名没有运行时收益，未制造无意义 churn |
+| 低危批量 | 已修复本轮处理的可触发项 | `--pairs-var` 未知值会报错；primary/TRACER/CaMa history 分流；转换与修复均拒绝同文件别名；时间输入标明 UTC；CLI 支持 `--help` |
+
+当前验证：`cargo test --workspace`、GUI 后端 111 项测试、全部 `gui/tests/*.mjs`、
+workspace 与 GUI Clippy（`-D warnings`）、`cargo fmt --check`、`check-gui`
+（56 注册 / 56 调用 / 6 事件）均通过；tier-check 覆盖 127 个黄金变量。
+
+### 首次审计快照（修复前，只读证据）
+
+> 方法：8 条并行审计线（配置管线 / 评估物理 / 运行编排 / 强迫场前处理 /
+> 地表数据 / GUI 后端 / GUI 前端 / 门禁·测试·CI·文档，各自读源码取证）+
+> 2 条交叉验证线（跨层契约复核、物理对账），全程只读，未改任何文件。
+> 当时审计对象有 119 处未提交改动，其中 Study 调参特性
+> （`crates/colm-cli/src/study/`、`crates/colm-case/src/tuning.rs`、
+> `gui/dist/app/study-model.js`）与 AT-Neu 示例均未入库。
+
+### 修复前执行证据（实测，非声称）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test -p colm-schema --test drift` / `--lib`；`-p colm-namelist`（含 roundtrip）；`-p colm-case --lib` | 1+15 / 28+5 / 31 通过 |
+| `cargo test -p colm-forcing --lib`；`-p colm-srfdata --lib` | 109 / 77 通过 |
+| `cargo test -p colm-kernel --lib`；`-p colm-cli --bin colm-cli` | 40 / 98 通过 |
+| `cargo test -p colm-hist --lib` / `--features io` / `--test drift` | 32 / 35 / 1 通过 |
+| `cargo test -p oracle --test judge` / `histmap` / `metrics` | 10 / 4 / 4（metrics 因无 PLUMBER2_ROOT 走 skip） |
+| `tier-check` | 127 变量全覆盖，无重复无 stale |
+| `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` | 106 通过 |
+| `cargo run -q -p xtask -- check-gui` | `59 registered, 55 called, 6 events — all resolve` |
+| `node gui/tests/*.mjs`（10 个） | 全部 exit 0 |
+| **合计** | **546+ 通过 / 0 失败** |
+
+未跑（按约定）：黄金回归（需重建内核）、`colm-srfdata` raster/real_sites
+（38 GB）、`colm-forcing` met/real_forcing（PLUMBER2）、release 打包。
+
+### 修复前六维判定
+
+| 维度 | 判定 | 一句话理由 |
+|---|---|---|
+| 合理性 | 良 | 三阶段编排、成功判定三件套、容差分层、sidecar 隔离均有实测依据；短板在进程生命周期（无超时/取消） |
+| 完整性 | 不通过 | i18n 漏翻约 167 处；城市"免 rawdata"声称不成立；TRACER 闸门表缺；README/design.md 滞后于 Study 功能；release 资产未入库 |
+| 物理缺陷 | 无致命项 | 全部常数逐位一致、公式标准、单位/符号/时区正确；仅冰区间饱和水汽压公式分叉（dormant）与若干低危边界 |
+| bugs | 无功能性 bug | 546+ 测试全绿；实锤均为低-中危边界，且交叉验证后两处被降级（见 M 节） |
+| 自洽 | 良（有漂移） | 前后端契约（59/55/6）静态守死；漂移集中在文档（7 vs 9 pane、25 vs 26、submodule 分布、PROVENANCE 计数） |
+| 扁平化 | 良好 | 指标公式/单位换算/配对逻辑均单一实现；重复与死代码清单见下 |
+
+### 修复前高危（2）
+
+**H1. i18n 漏翻约 167 处动态文案，英文模式中英混排。** 证据：
+`gui/dist/app/sitedata.js:237,278,286-294,341-342,390`（"可独立运行/结构字段/
+有依据的查表值"整卡）、`shell.js:17,48-52`、`forcing.js:177-179,1156-1158`、
+`results.js:1960`（"请先创建调优 Study。"，词典只有无"调优"的版本）、
+`domain.js:220-240`、`params.js:275,294`。用真实 `translateZh` 仿真（占位法）：
+426 个含中文串翻译后仍留中文，扣除 `param-presentation.js` 的 pair() 双语机制后
+≈167 处。sitedata.js 是最近提交 f7122a3 引入的新文案 —— 违反"新增文案必须
+同步 i18n.js 并加断言"的仓库规则。
+
+**H2. i18n.mjs 断言机制拦不住 JS 模块漏翻。** `gui/tests/i18n.mjs:12-74` 只
+手工抽查十几个动态串，`:97-117` 的"全量"检查只覆盖 `index.html` 静态文本；
+`i18n.js:1033-1037` 对未知文本保持原样 → 漏翻静默无信号。建议测试改为收集
+全部 `app/*.js` 中文字面量逐个跑 `translateZh` 断言无残留中文。
+
+### 修复前中危（15）
+
+- **M1. mkinidata 产物年份写死 `lc2005`，与可配 `DEF_LC_YEAR` 脱钩（真实可触发）。**
+  `crates/colm-cli/src/main.rs:1660-1661` 与 `oracle/src/bin/golden_run.rs:100`
+  写死；Fortran 侧按年号拼名（`MOD_Vars_TimeInvariants.F90:455-456`，
+  `lc_year = DEF_LC_YEAR`）；**GUI 暴露并可编辑该字段**（`config.rs:120,1101,1117`）。
+  用户改年份 → 产物校验误报 MissingArtifact。同源：`study/runner.rs:2286`
+  测试脚手架也写死。产物表在 colm-cli 与 oracle 各一份拷贝，改一处忘另一处。
+- **M2. 运行无超时/无取消；GUI 退出后 colm-cli + 三个内核进程成孤儿。**
+  `colm-kernel/src/run.rs:189`、`gui/src-tauri/src/sidecar.rs:363,642` 阻塞
+  `child.wait()` 无超时；全后端仅 `study_cancel`；`runner.js:226-265` 无取消入口；
+  `capture()`（sidecar.rs:1167-1179）与 ERA5 下载（main.rs:3199-3208）同样无超时。
+- **M3. fingerprint 对 rawdata 目录内容变化漏报。** `fingerprint.rs:85-167,195-201`
+  只哈希 `looks_like_config_path` 命中的字段，`DEF_dir_rawdata` 不命中 —— 换掉
+  栅格内容（路径不变）指纹判"可跳过"，旧 srfdata.nc 被当新数据。
+- **M4. check-gui 对多行 import 完全失明（导出检查与环检测同病）。**
+  `xtask/src/gui.rs:172-186`（`split_once('}')` 要求 `{`/`}` 同行）、`:87-98`；
+  当前树已有 5 处多行 import（results.js:15-18、sitedata.js:7-9、forcing.js:20-22、
+  sites.js:5-7,11-13）。逐名验证这些名字当前都真实存在 —— **检查器失效但暂无实害**，
+  未来改名/删 export 时两条检查线同时静默。
+- **M5. release 资产未入库。** `release.yml:141-145` 断言 AT-Neu 三件套 +
+  `Forcingnml/AT-Neu.nml` 进包，但 `git ls-files` 无、`git check-ignore` exit=1
+  （非 gitignore 所致）—— fresh checkout 上 macOS 作业必挂。
+  `xtask/tests/kernel_profile.rs`（production 档位守门）也未跟踪，且 `ci.yml:72`
+  的 `--lib --bins` 不跑 xtask 集成测试。
+- **M6. 城市"免 rawdata"声称不成立。** `USE_SITE_urban_human` 默认 `.true.`
+  （`MOD_Namelist.F90:95`），缺 `resident_population_density` 时 CoLM 回落
+  `urban/URBSRF*` 瓦片 `POP_DEN`（`MOD_SingleSrfdata.F90:1826-1843`），而该字段
+  不在 audit 必需清单（site.rs:225-237）也不在 urban_extra 表。
+- **M7. 测试名与实现相反且断言空洞。** `site_tests.rs:17`
+  `the_raster_wins_over_the_classifier_when_both_are_available` —— 实现是
+  站点优先（site.rs:709-718），断言体只查 `REQUIRED_FIELDS` 成员。
+- **M8. TRACER 输出不在闸门表。** `generated.rs` 恰 456 条、源仅 `MOD_Hist.F90`，
+  grep `methane|TRACER` 零命中；`f_methane_surf_flux_tot` 由
+  `MOD_Tracer_Reactive_Methane_Hist.F90:826` 写出而 `obs.rs:189` 引用它。
+  评估侧不受影响（`evaluation_availability` 读真实文件），但 GUI histvars 门
+  会把 tracer 变量漏报为"产不出"。
+- **M9. tier-check 不查"层级不倒挂"不变式。** `tier_check.rs` 只做重复/无层级/
+  无变量三类完备性检查；`tolerances.toml:6-9` 声称的硬约束靠人工维护。
+- **M10. async 命令在 tokio 线程上做阻塞 IO。** `run_case`/`run_batch`/`capture`
+  直接阻塞，仅 `study_run` 与 `download_era5land` 用 `spawn_blocking`；
+  run_batch 期间并发调 series/probe 会延迟。
+- **M11. 4 个注册未调用命令 + RunLog 死代码。** `run_log_tail`、`field_states`、
+  `study_create`、`set_process_parameter_field` 前端零调用（55/59 差 4 一一对应）；
+  `sidecar.rs:358` `run_case` 开头 `log.lines.lock().clear()` 使并发单算例互相
+  清空缓冲区。
+- **M12. downsampleSeries 前端副本，app 内无使用者。** `result-model.js:75-101`
+  唯一引用在测试；与 `main.rs:2301-2359` Rust 版 NaN 处理不同，双份漂移时测试
+  只锁 JS 那份。
+- **M13. 原生 confirm/prompt 对话框完全不翻译。** `results.js:1664,1925,1947,1974,1975`
+  五处，不走 MutationObserver。
+- **M14. "容差不许内联魔数"声称过宽。** 引擎 crates 约 20 处内联容差（gapfill.rs:459
+  1e-9、tabular.rs:870 1e-8、site.rs:413 1e-9 等），但均属地理匹配/单位换算/
+  时间轴检查，非 history 比较容差；`tolerances.toml` 目前仅被 tier-check
+  完备性消费（比较器尚未实现，属文档明示的阶段设计）。
+- **M15. `_one_based` 后缀约定从未落地。** 全仓 grep 仅 1 处（grid_tests.rs:110
+  测试名）；1-based 语义函数全用注释替代。
+
+### 修复前中低危与低危（交叉验证后修正过的口径）
+
+- **饱和水汽压 Bolton vs Flatau 冰区间分叉（交叉线定量新发现）。**
+  `units.rs:138` 的 Bolton 液态拟合 vs `MOD_Qsadv.F90:83-93` 的冰多项式：
+  0–30°C 仅差 0.05–0.1%（**此前口头估计的"0.3–0.5%"被证伪**），0°C 以下
+  差 5–18%（−10°C −9.4%、−20°C −18%）。三个示例文件直给 `Qair`，该路径
+  当前 dormant；若未来启用冬季 RH→q 预处理需换 Flatau 或按冰多项式处理。
+- **forcing-convert 只认 `_FillValue` 不认 `missing_value`（已降级）。**
+  `bin/forcing-convert.rs:103-107` 有洞，但 GUI 走 colm-cli 子命令
+  （main.rs:2501-2513）两者都查 —— 独立 bin 未随包分发，实害度近零。
+- **表格导入 heights 恒发 0,0,0（已确认不可达）。** `forcing.js:785` 的
+  `Number(null)=0` 是潜在 footgun，但双层守卫（按钮禁用 + 函数早退）使正常
+  UI 路径到不了后端，CLI 层也 loud-fail。
+- **`DEF_dir_output` 被 usage 扫描误标 `requires: CatchLateralFlow`（已确认无实害）。**
+  `generated.rs:61` 元数据错（成因 `usage.rs:144-146` 跳过 MOD_Namelist.F90），
+  但 GUI 已硬编码补偿（`config.rs:318-323`）。
+- 其余低危批量：`_hist_cama_*.nc` 混入 primary 流（CaMaON 时时间轴拼接失败）、
+  scalar_wind 按计划槽位判定、高湿 q 超饱和无防护、全零 ERA5 重叠期乘性订正
+  bail、`canonical_units` 的 `_ => ""`、CRLF/末尾无换行静默规范化（与"保留原文"
+  承诺相悖）、series 时间窗按 UTC 解释而控件是 datetime-local、repair_forcing
+  同文件保护弱于 convert、`--pairs-var` 未知变量静默空结果、r² 不截断/β 无
+  零分母（GUI 有 serde_json NaN→null→"—"兜底链，已从 serde 源码级确认）、
+  time:units 时区 token 静默忽略、产物校验只看存在性（design.md:773 声称的
+  内容校验未实现）、USAGE 缺 3 条 study 命令、`--help` 报 unknown command、
+  非 UTF-8 路径 panic、评估后改 spinup/corrected 表图口径不一致、转换/修复
+  按钮无 busy 守卫、实数解析三处重复、tuning 活动性 `_ => true` 兜底、fill
+  非幂等、NaN 经 clamp 传播、lon=180 像元分歧、URBTYP 审计缺口、25 vs 26
+  一致数四处注释漂移、study 模块 3 处 `#![allow(dead_code)]`。
+
+### 物理正确性：逐位核对通过项（对照 vendor 源码）
+
+反照率 4×20 表 = `MOD_SoilColorRefl.F90:44-54`；USDA 三角 26 顶点/12 多边形/
+pointinpolygon = `rawdata_soil_solids_fractions.F90:233-359`；`BVIC_USDA(0:12)`
+= `MOD_Initialize.F90:261`；`HTOP0_IGBP`、`DZ_SOIL[8]` 层边界、
+`wf_om = OM_density/BD_all` 恒等式、lakedepth×0.1、5x5 瓦片命名与 1-based
+索引 —— 全部逐位一致。单位换算系数（K↔°C、hPa/Pa、mm/hr→kg/m2/s、g/kg→kg/kg）
+与区间累计量需显式步长（防"累计当率"）正确。时区符号（local = UTC + offset）、
+太阳正午推断（`12 − lon/15`）正确。缺测修复物理正确（线性插值仅限两侧有观测
+的短缺口、边界不外推、降水仅双零才补零、非负钳制）。ERA5-Land 最近格点 +
+0.15° 闸门、加性（状态量）/乘性（降水辐射）订正、逐月+全局回退、缺测段不参与
+拟合、逐时 QC 留痕 —— 全部正确。
+
+指标公式（RMSE/MAE/Bias(m−o)/r²=Pearson²/NSE/KGE 等权）与标准定义逐条对上，
+**python 三组小样本独立验算通过**；α 与报告 σ 的 n 因子在比值中相消（α ≡
+model_sd/obs_sd 严格相等，非不一致）。时间轴 1900-1-1 原点手算验证
+（2008-01-01T00:30 = 56_802_270 分）、中点标签 t−1800s 与 t 两观测点平均、
+半开窗口、1 秒容差配对 —— 全部兑现。观测映射（FCH4 ×1e9 nmol、GPP ×1e6 µmol、
+NEE = respc−assim 符号、Qg 方向与 PLUMBER2 实测一致、ANNOPTLM 的 1/3 QC
+编码）用仓库真实观测文件核对。`tol_richards = 8.e-8`
+（`MOD_Hydro_SoilWater.F90:50`）与 `tolerances.toml:58` 逐位一致。成功判定
+11 条 FAILURE_MARKERS 与 Fortran 实际输出形态逐条核实（含 `CoLM_stop`
+退出码 0、stderr 专属标记、BENIGN_LINES 豁免）。架构硬约束：窗口进程零
+NetCDF/HDF5 链接（GUI Cargo.lock 491 包 grep 零命中）、读 NetCDF 全走
+sidecar、Tauri v2 camelCase 映射 81 处 invoke 全对。
+
+### 扁平化
+
+**单一实现（通过）**：指标公式零前端副本（唯一实现在 `metric.rs`）；单位换算
+单一实现（`units.rs:14-55`）；配对逻辑四层 API 委托单一实现；GUI 无任何绕过
+colm-cli 的路径（sidecar 仅 4 处 `Command::new` 全是 colm-cli）；命令解析唯一；
+`other =>` 全部是显式报错退出而非静默兜底。
+
+**重复/冗余**：downsampleSeries JS 副本（app 内未用）；饱和水汽压三处内联
+（units.rs:138,184 / gapfill.rs:1915）；实数解析三处（value.rs / minimal.rs /
+tuning.rs）；缺测检查三份实现口径分裂（独立 bin / colm-cli 子命令 / gapfill）；
+产物表两份拷贝（main.rs:1653-1666 vs golden_run.rs:100-109）；status/setStatus
+双实现（ui.js:9 vs shell.js:202）；4 个死命令 + RunLog + 3 处
+`#![allow(dead_code)]`。
+
+### 修复前优先级（历史）
+
+- **P0（下次提交前）**：入库 4 个 AT-Neu 示例 + `xtask/tests/kernel_profile.rs`；
+  i18n 补约 167 处词典条目并把 i18n.mjs 改为全量机械扫描；修 check-gui 多行
+  import 盲区（顺带 import_cycles）。
+- **P1（下一迭代）**：lc2005 → 从 case.nml 读 `DEF_LC_YEAR`（含 golden_run 与
+  study 脚手架同步）；运行取消/超时/GUI 退出清理子进程；fingerprint 纳入
+  rawdata 目录内容；城市 audit 补 `resident_population_density`（或改声称）；
+  修测试名与断言空洞；TRACER 闸门表边界声明；tier-check 加"层级不倒挂"
+  可执行断言；清理 4 死命令/RunLog/`allow(dead_code)`/downsampleSeries 副本。
+- **P2（低危批量）**：饱和水汽压注释与冰区间处理、`--pairs-var` 校验、repair
+  同文件保护、UTC 标注、fill 幂等、NaN 守卫、CRLF 语义、`_one_based` 约定、
+  文档漂移批量（README 补 Study 与"九个分栏"、design.md 补 KGE"标记不改值"
+  与产物内容校验承诺、field.rs 计数、PROVENANCE 计数、submodule 残留）。
+
+### 当前仍未覆盖
+
+本轮没有重建并重跑全部内核黄金算例，也没有读取 38 GB rawdata 或执行真机
+WebView 自动化、三平台 release 打包；依赖真实内核或外部 PLUMBER2 数据的三项
+测试保持 `ignored`。Windows 专属 job object 与安装包行为仍由 CI / release
+runner 验证；`vendor/CoLM202X` 没有自身 `.git`，无法与上游 commit 做字节级 diff。

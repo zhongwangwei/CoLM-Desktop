@@ -7,12 +7,15 @@ MODULE MOD_Irrigation
    USE MOD_Precision
    USE MOD_TimeManager
    USE MOD_Namelist, only: DEF_simulation_time, DEF_IRRIGATION_ALLOCATION, DEF_USE_VariablySaturatedFlow, &
-       DEF_USE_Campbell_SOIL_MODEL
+       DEF_USE_Campbell_SOIL_MODEL, DEF_TUNING_IRRIGATION_START_SEC, &
+       DEF_TUNING_IRRIGATION_DURATION_SEC, DEF_TUNING_IRRIGATION_MAX_DEPTH, &
+       DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION, DEF_TUNING_IRRIGATION_SUPPLY_FRACTION, &
+       DEF_TUNING_IRRIGATION_MIN_CPHASE, DEF_TUNING_IRRIGATION_MAX_CPHASE
    USE MOD_Const_Physical, only: tfrz, denice, denh2o
    USE MOD_Const_PFT, only: irrig_crop
    USE MOD_LandPFT, only : patch_pft_s, patch_pft_e
-   USE MOD_Vars_Global, only: irrig_start_time, irrig_max_depth, irrig_threshold_fraction, irrig_supply_fraction, irrig_min_cphase, irrig_max_cphase, irrig_time_per_day, &
-       irrig_method_drip, irrig_method_sprinkler, irrig_method_flood, irrig_method_paddy
+   USE MOD_Vars_Global, only: irrig_method_drip, irrig_method_sprinkler, &
+       irrig_method_flood, irrig_method_paddy
    USE MOD_Qsadv, only: qsadv
    USE MOD_Vars_TimeInvariants, only: pondmx, &
        theta_r, alpha_vgm, n_vgm, L_vgm, fc_vgm, sc_vgm,&
@@ -118,7 +121,7 @@ CONTAINS
          sum_deficit_irrig(i) = sum_deficit_irrig(i) + deficit_irrig(i)
       ENDIF
       IF ((check_for_irrig) .and. (actual_irrig(i) > 0)) THEN
-         irrig_nsteps_per_day = nint(irrig_time_per_day/deltim)
+         irrig_nsteps_per_day = nint(DEF_TUNING_IRRIGATION_DURATION_SEC/deltim)
          irrig_rate(i) = actual_irrig(i)/deltim/irrig_nsteps_per_day
          n_irrig_steps_left(i) = irrig_nsteps_per_day
          sum_irrig(i) = sum_irrig(i) + actual_irrig(i)
@@ -185,7 +188,7 @@ CONTAINS
       DO m = ps, pe
          DO j = 1, nl_soil
             IF (.not. reached_max_depth) THEN
-               IF (z_soi(j) > irrig_max_depth) THEN
+               IF (z_soi(j) > DEF_TUNING_IRRIGATION_MAX_DEPTH) THEN
                   reached_max_depth = .true.
                ELSEIF (j > nbedrock) THEN
                   reached_max_depth = .true.
@@ -213,18 +216,23 @@ CONTAINS
 
       !  calculate irrigation threshold
       deficit_irrig(i) = 0._r8
-      h2osoi_liq_at_threshold = h2osoi_liq_wilting_point_tot + irrig_threshold_fraction * (h2osoi_liq_target_tot - h2osoi_liq_wilting_point_tot)
+      h2osoi_liq_at_threshold = h2osoi_liq_wilting_point_tot + &
+         DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION * &
+         (h2osoi_liq_target_tot - h2osoi_liq_wilting_point_tot)
 
       !   calculate total irrigation
       DO m = ps, pe
          IF (h2osoi_liq_tot < h2osoi_liq_at_threshold) THEN
             IF (irrig_method_p(m) == irrig_method_sprinkler) THEN
-                deficit_irrig(i) = irrig_supply_fraction * (h2osoi_liq_field_capacity_tot - h2osoi_liq_tot)
-                ! deficit_irrig(i) = irrig_supply_fraction * (h2osoi_liq_field_capacity_tot - h2osoi_liq_tot + potential_evapotranspiration(i))
+                deficit_irrig(i) = DEF_TUNING_IRRIGATION_SUPPLY_FRACTION * &
+                   (h2osoi_liq_field_capacity_tot - h2osoi_liq_tot)
+                ! deficit_irrig(i) = DEF_TUNING_IRRIGATION_SUPPLY_FRACTION * (h2osoi_liq_field_capacity_tot - h2osoi_liq_tot + potential_evapotranspiration(i))
             ELSEIF (irrig_method_p(m) == irrig_method_flood) THEN
-                deficit_irrig(i) = irrig_supply_fraction * (h2osoi_liq_saturation_capacity_tot - h2osoi_liq_tot)
+                deficit_irrig(i) = DEF_TUNING_IRRIGATION_SUPPLY_FRACTION * &
+                   (h2osoi_liq_saturation_capacity_tot - h2osoi_liq_tot)
             ELSE
-                deficit_irrig(i) = irrig_supply_fraction * (h2osoi_liq_field_capacity_tot - h2osoi_liq_tot)
+                deficit_irrig(i) = DEF_TUNING_IRRIGATION_SUPPLY_FRACTION * &
+                   (h2osoi_liq_field_capacity_tot - h2osoi_liq_tot)
             ENDIF
          ELSE
             deficit_irrig(i) = 0
@@ -300,12 +308,13 @@ CONTAINS
       DO m = ps, pe
          ivt = pftclass(m)
          IF ((ivt >= npcropmin) .and. (irrig_crop(ivt)) .and. &
-            (cphase_p(m) >= irrig_min_cphase) .and. (cphase_p(m)<irrig_max_cphase)) THEN
+            (cphase_p(m) >= DEF_TUNING_IRRIGATION_MIN_CPHASE) .and. &
+            (cphase_p(m) < DEF_TUNING_IRRIGATION_MAX_CPHASE)) THEN
             IF (DEF_simulation_time%greenwich) THEN
                 CALL gmt2local(idate, dlon, ldate)
-                seconds_since_irrig_start_time = ldate(3) - irrig_start_time + deltim
+                seconds_since_irrig_start_time = ldate(3) - DEF_TUNING_IRRIGATION_START_SEC + deltim
             ELSE
-                seconds_since_irrig_start_time = idate(3) - irrig_start_time + deltim
+                seconds_since_irrig_start_time = idate(3) - DEF_TUNING_IRRIGATION_START_SEC + deltim
             ENDIF
             IF ((seconds_since_irrig_start_time >= 0._r8) .and. (seconds_since_irrig_start_time < deltim)) THEN
                 check_for_irrig = .true.
@@ -337,9 +346,9 @@ CONTAINS
 
    !     IF (DEF_simulation_time%greenwich) THEN
    !         CALL gmt2local(idate, dlon, ldate)
-   !         seconds_since_irrig_start_time = ldate(3) - irrig_start_time + deltim
+   !         seconds_since_irrig_start_time = ldate(3) - DEF_TUNING_IRRIGATION_START_SEC + deltim
    !     ELSE
-   !         seconds_since_irrig_start_time = idate(3) - irrig_start_time + deltim
+   !         seconds_since_irrig_start_time = idate(3) - DEF_TUNING_IRRIGATION_START_SEC + deltim
    !     ENDIF
 
    !     IF (((seconds_since_irrig_start_time-deltim) >= 0) .and. ((seconds_since_irrig_start_time-deltim) < deltim)) THEN

@@ -221,13 +221,14 @@ CheckSiteList()
    SITELIST=$2
    if grep -q "^${SITENAME}[[:space:]]" "${SITELIST}"; then
       echo "Note: Site name ${SITENAME} is found in the Site list file ${SITELIST}."
-      awk '{
+      if ! awk '{
           if (NF != 7) {
-             print "Error: the " NR " line has only " NF " columns, (expected 7): " $0
+             print "Error: line " NR " has " NF " columns (expected 7): " $0
              found_error = 1
                        }
-           }' "${SITELIST}"
-      if [ ! -z "$found_error" ]; then
+           }
+           END { exit found_error }
+           ' "${SITELIST}"; then
          exit 1
       fi
    else
@@ -236,6 +237,95 @@ CheckSiteList()
       echo
    fi
 }
+
+DefineIsOn()
+{
+   [ "$1" = "#define" ]
+}
+
+LogicalForDefine()
+{
+   if DefineIsOn "$1"; then
+      echo ".true."
+   else
+      echo ".false."
+   fi
+}
+
+RequireOne()
+{
+   name=$1
+   shift
+   count=0
+   for value in "$@"; do
+      if [ "$value" = "#define" ]; then
+         count=$((count + 1))
+      fi
+   done
+   if [ "$count" -ne 1 ]; then
+      echo "Error: exactly one ${name} option must be selected, got ${count}."
+      exit 1
+   fi
+}
+
+RuntimeContract()
+{
+   RequireOne "spatial structure" "$IsDefGrid" "$IsDefCatch" "$IsDefUnstr" "$IsDefSingl"
+   lct="#undef"
+   if DefineIsOn "$IsDefUSGS" || { DefineIsOn "$IsDefIGBP" && ! DefineIsOn "$IsDefPFT" && ! DefineIsOn "$IsDefPC"; }; then
+      lct="#define"
+   fi
+
+   # PFT/PC are runtime subgrid structures inside the IGBP-classified build.
+   if ! DefineIsOn "$IsDefUSGS" && { DefineIsOn "$IsDefPFT" || DefineIsOn "$IsDefPC"; }; then
+      IsDefIGBP="#define"
+   fi
+   RequireOne "land classification" "$IsDefUSGS" "$IsDefIGBP"
+   RequireOne "runtime subgrid structure" "$lct" "$IsDefPFT" "$IsDefPC"
+
+   if DefineIsOn "$IsDefBGC" && ! DefineIsOn "$IsDefPFT" && ! DefineIsOn "$IsDefPC"; then
+      echo "Error: -b|--bgc requires -s pft or -s pc."
+      exit 1
+   fi
+   if DefineIsOn "$IsDefCrop" && ! DefineIsOn "$IsDefBGC"; then
+      echo "Error: -p|--crop requires -b|--bgc."
+      exit 1
+   fi
+   if DefineIsOn "$IsDefLuLCC"; then
+      if DefineIsOn "$IsDefSingl" || DefineIsOn "$IsDefUSGS" || DefineIsOn "$IsDefBGC"; then
+         echo "Error: -l|--lulcc is incompatible with SinglePoint, USGS, and BGC."
+         exit 1
+      fi
+   fi
+   RequireOne "soil hydraulic model" "$IsDefCB" "$IsDefVG"
+
+   export COLM_DEF_USE_LCT=$(LogicalForDefine "$lct")
+   export COLM_DEF_USE_PFT=$(LogicalForDefine "$IsDefPFT")
+   export COLM_DEF_USE_PC=$(LogicalForDefine "$IsDefPC")
+   export COLM_DEF_USE_BGC=$(LogicalForDefine "$IsDefBGC")
+   export COLM_DEF_URBAN_RUN=$(LogicalForDefine "$IsDefUrban")
+   export COLM_DEF_USE_LULCC=$(LogicalForDefine "$IsDefLuLCC")
+   export COLM_DEF_USE_Campbell_SOIL_MODEL=$(LogicalForDefine "$IsDefCB")
+}
+
+CompileArgSpatial()
+{
+   if DefineIsOn "$IsDefGrid"; then echo GRID; return; fi
+   if DefineIsOn "$IsDefCatch"; then echo CATCHMENT; return; fi
+   if DefineIsOn "$IsDefUnstr"; then echo UNSTRUCTURED; return; fi
+   echo SinglePoint
+}
+
+CompileArgLulc()
+{
+   if DefineIsOn "$IsDefUSGS"; then echo LULC_USGS; else echo LULC_IGBP; fi
+}
+
+CompileArgOnOff()
+{
+   if DefineIsOn "$1"; then echo "$2"ON; else echo "$2"OFF; fi
+}
+
 #--------------------------------------------------------------------------------------
 #machine.config
 if [ ! -f machine.config ];then
@@ -1208,10 +1298,11 @@ else
             echo "Error: endyr ${endyr} from argument is conflict with SITELIST $SITELIST"
             echo
             exit 1
-	 fi
+fi
       fi
    fi
 fi
+RuntimeContract
 mkdir -p $CASEPATH/$CASENAME
 
 cd $CASEPATH/$CASENAME
@@ -1288,86 +1379,16 @@ else
 fi
 
 $ROOT/run/scripts/copy_code -s $ROOT -d ${CASEPATH}/${CASENAME}/bld
-
-cat>bld/include/define.h<<EOF
-! 1. Spatial structure:
-!    Select one of the following options.
-$IsDefGrid GRIDBASED
-$IsDefCatch CATCHMENT
-$IsDefUnstr UNSTRUCTURED
-$IsDefSingl SinglePoint
-
-! 2. Land subgrid type classification:
-!    Select one of the following options.
-$IsDefUSGS LULC_USGS
-$IsDefIGBP LULC_IGBP
-$IsDefPFT LULC_IGBP_PFT
-$IsDefPC LULC_IGBP_PC
-
-! 2.1 3D Urban model (put it temporarily here):
-$IsDefUrban URBAN_MODEL
-
-! 3. If defined, debug information is output.
-#define CoLMDEBUG
-! 3.1 If defined, range of variables is checked.
-#undef RangeCheck
-! 3.1 If defined, surface data in vector is mapped to gridded data for checking.
-#undef SrfdataDiag
-
-! 4. If defined, MPI parallelization is enabled.
-#define USEMPI
-!    Conflict: not used when defined SingPoint.
-#if (defined SinglePoint)
-#undef USEMPI
-#endif
-
-! 5. Hydrological process options.
-! 5.1 Two soil hydraulic models can be used.
-$IsDefCB   Campbell_SOIL_MODEL
-$IsDefVG  vanGenuchten_Mualem_SOIL_MODEL
-! 5.2 If defined, lateral flow is modeled.
-#define CatchLateralFlow
-!    Conflicts :
-#ifndef CATCHMENT
-#undef CatchLateralFlow
-#endif
-
-! 6. If defined, CaMa-Flood model will be used.
-#undef CaMa_Flood
-
-! 7. If defined, BGC model is used.
-$IsDefBGC BGC
-
-!    Conflicts :  only used when LULC_IGBP_PFT is defined.
-#ifndef LULC_IGBP_PFT
-#ifndef LULC_IGBP_PC
-#undef BGC
-#endif
-#endif
-! 7.1 If defined, CROP model is used
-$IsDefCrop CROP
-!    Conflicts : only used when BGC is defined
-#ifndef BGC
-#undef CROP
-#endif
-
-! 8. If defined, open Land use and land cover change mode.
-$IsDefLuLCC LULCC
-
-! 9. If defined, data assimilation is used.
-#undef DataAssimilation
-
-! 10. Vector write model.
-!     1) "VectorInOneFileP" : write vector data in one file in parallel mode;  
-!     2) "VectorInOneFileS" : write vector data in one file in serial mode;  
-!     3) Neither "VectorInOneFileS" nor "VectorInOneFileP" is defined : 
-!        write vector data in separate files.  
-#undef VectorInOneFileP
-!     Conflict
-#ifdef VectorInOneFileP
-#undef VectorInOneFileS
-#endif
-EOF
+if ! (
+   cd bld || exit 1
+   bash "${ROOT}/.github/workflows/create_defineh.bash" \
+      "$(CompileArgSpatial)" \
+      "$(CompileArgLulc)" \
+      "$(CompileArgOnOff "$IsDefCaMa" CaMa)" \
+      "$(CompileArgOnOff "$IsDefCrop" CROP)"
+); then
+   echo "Error: failed to generate bld/include/define.h."
+   exit 1
+fi
 
 ln -sf $MAKEOPTION bld/include/Makeoptions
-

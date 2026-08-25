@@ -7,9 +7,19 @@
 //! 本 crate **不依赖 `colm-kernel`**：造文件与跑模型是两件事。
 
 pub mod build;
+pub mod land_cover;
 pub mod layout;
 pub mod minimal;
+pub mod pft;
+pub mod tuning;
 
 pub use build::{fields, spinup_fields, CaseSpec, Dirs, Spinup, Window};
 pub use layout::{case_name, render, Layout};
 pub use minimal::{is_default, required};
+
+#[cfg(test)]
+mod land_cover_tests;
+#[cfg(test)]
+mod pft_tests;
+#[cfg(test)]
+mod tuning_tests;

@@ -184,9 +184,7 @@ fn every_generated_field_is_settable_from_the_main_namelist() {
 
 #[test]
 fn a_site_without_a_land_cover_class_writes_neither_landtype_field() {
-    // Urban-PLUMBER 的 21 个站点文件都不带 IGBP_classification，而 CoLM 的
-    // URBAN 路径会把地类强制成 13（MOD_SingleSrfdata.F90:1548）。
-    // 猜一个值写进去比不写更糟：CoLM 有自己的回落路径，而我们没有依据。
+    // 自然站没给地类时不猜。城市算例另有显式回落测试。
     let mut s = cn_cng();
     s.landtype = None;
     let without = fields(&s);
@@ -212,8 +210,8 @@ fn the_land_cover_fields_sit_right_after_the_coordinates() {
 
 #[test]
 fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
-    // 城市站点文件都不带 IGBP_classification，而 URBAN 路径会把地类强制成 13
-    // （MOD_SingleSrfdata.F90:1548）。写出来是为了让配置文件说出实际会发生的事。
+    // 城市站点文件都不带分类地类，调用方没给 scheme-specific 值时保留
+    // IGBP/PFT/PC 的城市类号 13。
     let mut s = cn_cng();
     s.landtype = None;
     s.urban = true;
@@ -228,6 +226,21 @@ fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
     assert_eq!(*by("SITE_landtype"), colm_namelist::Value::Int(13));
     // 方案 2 = LCZ。默认是 1（NCAR），而实测那条路在栅格给不出城市类别时越界。
     assert_eq!(*by("DEF_URBAN_type_scheme"), colm_namelist::Value::Int(2));
+}
+
+#[test]
+fn an_usgs_urban_case_declares_usgs_urban_land_cover() {
+    let mut s = cn_cng();
+    s.landtype = Some(crate::build::URBAN_LANDTYPE_USGS);
+    s.urban = true;
+    let all = fields(&s);
+    let req = crate::minimal::required(&all);
+    let value = &req
+        .iter()
+        .find(|(p, _)| p == "SITE_landtype")
+        .expect("SITE_landtype")
+        .1;
+    assert_eq!(*value, colm_namelist::Value::Int(1));
 }
 
 #[test]

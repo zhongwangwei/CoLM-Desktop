@@ -1,6 +1,6 @@
 //! 482 个输出变量开关，以及「勾了到底写不写得出来」。
 //!
-//! `nl_colm_history` 一组就占 737 个字段里的 482 个，全部是
+//! `nl_colm_history` 占配置 schema 的大部分，全部是
 //! `DEF_hist_vars%<变量名>` 形式的 logical。它们不该和其余字段挤一张表
 //! （见 `plan-gui2.md` §1.1），也不该只是一排开关 —— **勾了却没有输出**
 //! 是这个界面最该防的事。
@@ -24,6 +24,8 @@ pub struct HistVar {
     pub writable: Option<bool>,
     /// 写不出来的原因，或不知道的原因。原样给人看。
     pub blocked_by: Option<String>,
+    /// 能否通过 DEF_hist_vars%name 这类布尔开关直接编辑。
+    pub settable: bool,
 }
 
 #[tauri::command]
@@ -46,6 +48,7 @@ pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, Strin
     };
 
     let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for f in colm_schema::all() {
         let Some(name) = f.name.strip_prefix("DEF_hist_vars%") else {
             continue;
@@ -77,33 +80,146 @@ pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, Strin
                 }
             }
         };
+        seen.insert(name.to_string());
         out.push(HistVar {
             name: name.to_string(),
             on,
             writable,
             blocked_by,
+            settable: true,
         });
+    }
+    if truth("DEF_USE_TRACER") {
+        for v in colm_hist::generated::VARS {
+            if seen.contains(v.name) {
+                continue;
+            }
+            let writable = if let Some(c) = v.macros.iter().find(|c| !c.holds(&macros)) {
+                out.push(HistVar {
+                    name: v.name.to_string(),
+                    on: true,
+                    writable: Some(false),
+                    blocked_by: Some(format!("本内核未编入：需要 {}", cond_text(c))),
+                    settable: false,
+                });
+                continue;
+            } else {
+                match v.runtime {
+                    None => (Some(true), None),
+                    Some(expr) => match eval(expr, &truth) {
+                        Some(true) => (Some(true), None),
+                        Some(false) => (Some(false), Some(format!("需要 {expr}"))),
+                        None => (None, Some(format!("条件 {expr} 需要人工判断"))),
+                    },
+                }
+            };
+            out.push(HistVar {
+                name: v.name.to_string(),
+                on: true,
+                writable: writable.0,
+                blocked_by: writable.1,
+                settable: false,
+            });
+        }
     }
     Ok(out)
 }
 
-/// 只认两种形状：`DEF_X` 与 `.not.DEF_X`。
-///
-/// 闸门表刻意保留了条件原文而不解析成表达式（见 `colm_hist::Var::runtime`
-/// 的注释）—— 求值需要一份具体配置，那是这里的事。但也**只求这两种**：
-/// 遇到别的形状返回 `None`，由调用方如实报「需要人工判断」。
+/// Evaluate the logical subset emitted by the history-map generator: fields,
+/// parentheses, `.not.`, `.and.` and `.or.`. Numeric comparisons remain
+/// unknown instead of being guessed.
 fn eval(expr: &str, truth: &dyn Fn(&str) -> bool) -> Option<bool> {
-    let e = expr.trim();
-    let (neg, name) = match e.strip_prefix(".not.") {
-        Some(r) => (true, r.trim()),
-        None => (false, e),
-    };
+    let e = strip_outer_parens(expr.trim());
+    if let Some(parts) = split_top_level(e, ".or.") {
+        let mut unknown = false;
+        for part in parts {
+            match eval(part, truth) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => unknown = true,
+            }
+        }
+        return (!unknown).then_some(false);
+    }
+    if let Some(parts) = split_top_level(e, ".and.") {
+        let mut unknown = false;
+        for part in parts {
+            match eval(part, truth) {
+                Some(false) => return Some(false),
+                Some(true) => {}
+                None => unknown = true,
+            }
+        }
+        return (!unknown).then_some(true);
+    }
+    let lower = e.to_ascii_lowercase();
+    if lower.starts_with(".not.") {
+        return eval(e[5..].trim(), truth).map(|value| !value);
+    }
+    let name = e;
     if !name.starts_with("DEF_") || name.contains(|c: char| !c.is_alphanumeric() && c != '_') {
         return None;
     }
     colm_schema::find(name)?;
-    let v = truth(name);
-    Some(if neg { !v } else { v })
+    Some(truth(name))
+}
+
+fn strip_outer_parens(mut expr: &str) -> &str {
+    loop {
+        let bytes = expr.as_bytes();
+        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+            return expr;
+        }
+        let mut depth = 0i32;
+        let mut closes_at_end = false;
+        for (i, byte) in bytes.iter().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closes_at_end = i + 1 == bytes.len();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !closes_at_end {
+            return expr;
+        }
+        expr = expr[1..expr.len() - 1].trim();
+    }
+}
+
+fn split_top_level<'a>(expr: &'a str, operator: &str) -> Option<Vec<&'a str>> {
+    let lower = expr.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let op = operator.as_bytes();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i + op.len() <= bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 && &bytes[i..i + op.len()] == op => {
+                parts.push(expr[start..i].trim());
+                i += op.len();
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        parts.push(expr[start..].trim());
+        Some(parts)
+    }
 }
 
 fn cond_text(c: &colm_hist::Cond) -> String {

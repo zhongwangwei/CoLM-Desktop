@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 pub fn check(root: &Path) -> Result<()> {
     let html = frontend_sources(&root.join("gui/dist"))?;
@@ -83,19 +83,12 @@ fn import_cycles(dir: &Path) -> Result<Vec<String>> {
     let mut graph: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for f in &files {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
-        let mut deps = Vec::new();
-        for line in std::fs::read_to_string(f)?.lines() {
-            let t = line.trim_start();
-            if !t.starts_with("import ") {
-                continue;
-            }
-            let Some(target) = t.split('\'').nth(1).or_else(|| t.split('"').nth(1)) else {
-                continue;
-            };
-            if let Some(n) = target.rsplit('/').next() {
-                deps.push(n.to_string());
-            }
-        }
+        let text = std::fs::read_to_string(f)?;
+        let deps = import_statements(&text)
+            .into_iter()
+            .filter_map(|stmt| import_target(&stmt))
+            .filter_map(|target| target.rsplit('/').next().map(str::to_string))
+            .collect();
         graph.insert(name, deps);
     }
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -150,6 +143,7 @@ fn unresolved_imports(dir: &Path) -> Result<Vec<String>> {
             let rest = rest
                 .trim_start_matches("async ")
                 .trim_start_matches("function ")
+                .trim_start_matches("class ")
                 .trim_start_matches("const ")
                 .trim_start_matches("let ");
             // JS 的标识符允许 `$` 与 `_`。漏掉 `$` 的话 `export const $ = …`
@@ -169,32 +163,23 @@ fn unresolved_imports(dir: &Path) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     for f in &files {
         let from = f.file_name().unwrap().to_string_lossy().into_owned();
-        for line in std::fs::read_to_string(f)?.lines() {
-            let t = line.trim_start();
-            if !t.starts_with("import ") || !t.contains('{') {
-                continue;
-            }
-            let Some((names, tail)) = t.split_once('}') else {
+        let text = std::fs::read_to_string(f)?;
+        for stmt in import_statements(&text) {
+            let Some(names) = named_imports(&stmt) else {
                 continue;
             };
-            let Some(names) = names.split_once('{').map(|(_, n)| n) else {
+            let Some(target) = import_target(&stmt) else {
                 continue;
             };
-            let Some(target) = tail.split('\'').nth(1).or_else(|| tail.split('"').nth(1)) else {
-                continue;
-            };
-            let target = target.rsplit('/').next().unwrap_or(target).to_string();
+            let target = target.rsplit('/').next().unwrap_or(&target).to_string();
             let Some(have) = exports.get(&target) else {
                 problems.push(format!(
                     "{from} imports from {target}, which does not exist"
                 ));
                 continue;
             };
-            for n in names.split(',') {
-                // `import { a as b }` —— 要找的是 `as` 之前那个
-                let n = n.trim().split(" as ").next().unwrap_or("").trim();
-                // 同样：被导入的名字也可能是 `$`
-                if !n.is_empty() && !have.contains(n) {
+            for n in names {
+                if !have.contains(&n) {
                     problems.push(format!(
                         "{from} imports {n:?} from {target}, which does not export it"
                     ));
@@ -203,6 +188,57 @@ fn unresolved_imports(dir: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(problems)
+}
+
+fn import_statements(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_import = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !in_import && trimmed.starts_with("import ") {
+            in_import = true;
+            current.clear();
+        }
+        if in_import {
+            current.push_str(line);
+            current.push('\n');
+            if line.contains(';') {
+                out.push(current.clone());
+                in_import = false;
+            }
+        }
+    }
+    if in_import {
+        out.push(current);
+    }
+    out
+}
+
+fn import_target(stmt: &str) -> Option<String> {
+    let tail = stmt
+        .split_once(" from ")
+        .map(|(_, tail)| tail)
+        .or_else(|| stmt.trim_start().strip_prefix("import "))?;
+    let quote = tail.find(['\'', '"'])?;
+    let q = tail[quote..].chars().next()?;
+    let rest = &tail[quote + q.len_utf8()..];
+    let end = rest.find(q)?;
+    Some(rest[..end].to_string())
+}
+
+fn named_imports(stmt: &str) -> Option<Vec<String>> {
+    let start = stmt.find('{')?;
+    let end = stmt[start + 1..].find('}')? + start + 1;
+    Some(
+        stmt[start + 1..end]
+            .split(',')
+            .filter_map(|name| {
+                let name = name.trim().split(" as ").next().unwrap_or("").trim();
+                (!name.is_empty()).then(|| name.to_string())
+            })
+            .collect(),
+    )
 }
 
 /// 前端的全部源码，拼成一份。
@@ -244,10 +280,10 @@ fn collect(
     skip_dirs: &[&str],
     out: &mut Vec<std::path::PathBuf>,
 ) -> Result<()> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Ok(()); // 目录不存在就当没有，交给调用方的「一个都没解析到」兜底
-    };
-    for e in rd.flatten() {
+    let rd = std::fs::read_dir(dir)
+        .with_context(|| format!("cannot read source directory {}", dir.display()))?;
+    for entry in rd {
+        let e = entry.with_context(|| format!("cannot read an entry in {}", dir.display()))?;
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
         if p.is_dir() {
@@ -438,7 +474,11 @@ mod tests {
     use super::*;
 
     fn tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("check-gui-{name}"));
+        let d = std::env::temp_dir().join(format!(
+            "check-gui-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         for (rel, body) in files {
             let p = d.join(rel);
@@ -516,6 +556,24 @@ mod tests {
     }
 
     #[test]
+    fn multiline_imports_are_checked_for_exports_and_cycles() {
+        let d = tree(
+            "multiline-imports",
+            &[
+                ("a.js", "import {\n  missing,\n  present as localPresent,\n} from './b.js';\nexport const a = 1;"),
+                ("b.js", "import { a } from './a.js';\nexport const present = 1;"),
+            ],
+        );
+        let imports = unresolved_imports(&d).unwrap().join("\n");
+        assert!(imports.contains("missing"), "{imports}");
+        let cycles = import_cycles(&d).unwrap().join("\n");
+        assert!(
+            cycles.contains("a.js") && cycles.contains("b.js"),
+            "{cycles}"
+        );
+    }
+
+    #[test]
     fn a_command_registered_by_path_still_counts_as_registered() {
         // `generate_handler![sites::scan_sites]` 是合法写法。不认它的话，
         // 检查会报「前端调了一个没注册的命令」，而它注册了 —— 一条假警报，
@@ -534,5 +592,46 @@ mod tests {
         let b = frontend_sources(&d).unwrap();
         assert_eq!(a, b);
         assert!(a.find("invoke('a')").unwrap() < a.find("invoke('b')").unwrap());
+    }
+
+    #[test]
+    fn unresolved_imports_handles_multiline_named_imports() {
+        let d = tree(
+            "multiline-import",
+            &[
+                (
+                    "state.js",
+                    "export const state = {};\nexport function save() {}",
+                ),
+                (
+                    "main.js",
+                    "import {\n  state,\n  save as persist,\n} from './state.js';",
+                ),
+            ],
+        );
+        assert!(unresolved_imports(&d).unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_cycles_handles_multiline_imports() {
+        let d = tree(
+            "multiline-cycle",
+            &[
+                (
+                    "a.js",
+                    "import {\n  b,\n} from './b.js';\nexport const a = 1;",
+                ),
+                ("b.js", "import { a } from './a.js';\nexport const b = 1;"),
+            ],
+        );
+        let got = import_cycles(&d).unwrap().join("\n");
+        assert!(got.contains("import cycle"), "{got}");
+    }
+
+    #[test]
+    fn a_missing_source_directory_is_an_error() {
+        let d = std::env::temp_dir().join("check-gui-definitely-missing");
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(frontend_sources(&d).is_err());
     }
 }

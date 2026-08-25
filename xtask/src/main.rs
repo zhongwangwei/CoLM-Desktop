@@ -2,7 +2,7 @@
 //!
 //! 用法:
 //!   cargo run -p xtask -- gen-schema    `MOD_Namelist.F90` -> `colm-schema` 的字段表
-//!   cargo run -p xtask -- gen-histmap   `MOD_Hist.F90`     -> `colm-hist` 的闸门表
+//!   cargo run -p xtask -- gen-histmap   history writers     -> `colm-hist` 的闸门表
 //!
 //! 两个产物都**入库**，各由自己的 `tests/drift.rs` 守住：重新生成必须逐字节
 //! 一致。入库而不是 build.rs 现生成，是为了让表的变化出现在 code review 的
@@ -66,7 +66,20 @@ fn gen_histmap() -> Result<()> {
     let src = root.join("vendor/CoLM202X/main/MOD_Hist.F90");
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
-    let vars = hist::extract(&text)?;
+    let mut vars = hist::extract(&text)?;
+
+    let src = root.join("vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90");
+    let text =
+        std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
+    let mut methane = hist::extract_at_least(&text, 100)?;
+    for var in &mut methane {
+        var.runtime = match var.runtime.take() {
+            Some(runtime) => Some(format!("(DEF_USE_TRACER) .and. ({runtime})")),
+            None => Some("DEF_USE_TRACER".to_string()),
+        };
+    }
+    vars.extend(methane);
+
     let out = hist::render(&vars);
     let dst = root.join("crates/colm-hist/src/generated.rs");
     std::fs::write(&dst, out)?;

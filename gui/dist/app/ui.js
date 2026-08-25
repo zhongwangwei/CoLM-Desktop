@@ -44,3 +44,13 @@ export function forcingDirectoryForSiteDirectory(dir) {
   if (split < 0) return '';
   return joinPath(d.slice(0, split), 'Forcing');
 }
+
+/** 自带示例各服务一种入口；普通用户站点不受这个筛选影响。 */
+export function matchesBundledExampleMode(path, mode) {
+  const name = baseName(path).toLowerCase();
+  const required = name === 'cn-cng_2008-2009_fluxnet2015_site.nc' ? 'natural'
+    : name === 'at-neu_2010-2012_fluxnet-ch4_site.nc' ? 'methane'
+      : name === 'us-ne3_2002-2003_fluxnet2015_crop_site.nc' ? 'crop'
+        : name === 'au-preston_site_v1.nc' ? 'urban' : null;
+  return required === null || required === mode;
+}

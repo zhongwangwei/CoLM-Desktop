@@ -121,9 +121,13 @@ fn timezone_prefers_manual_then_metadata_then_longitude() {
     assert_eq!(explicit.source, TimezoneSource::FileMetadata);
 
     let inferred = decide_timezone(None, None, Some(145.0)).unwrap();
-    assert_eq!(inferred.offset_hours, 10.0);
+    assert_eq!(inferred.offset_hours, 9.75);
     assert_eq!(inferred.source, TimezoneSource::LongitudeInferred);
     assert_eq!(inferred.confidence, TimezoneConfidence::Low);
+
+    let half_hour = decide_timezone(None, None, Some(82.5)).unwrap();
+    assert_eq!(half_hour.offset_hours, 5.5);
+    assert_eq!(half_hour.source, TimezoneSource::LongitudeInferred);
 }
 
 fn synthetic_shortwave(days: usize, peak_hour: f64) -> (Vec<i64>, Vec<f64>) {
@@ -536,22 +540,77 @@ fn non_finite_time_coordinates_are_rejected() {
 #[test]
 fn donor_fill_rejects_invalid_donors_before_and_after_correction() {
     let mut values = [280.0, f64::NAN];
-    let original = [280.0, f64::NAN];
     let donor = [280.0, 9999.0];
     let months = [1, 1];
     let mut qc = [QC_OBSERVED, QC_UNRESOLVED];
-    fill_from_donor(&mut values, &original, &donor, &months, &mut qc, 1, 1).unwrap();
+    fill_from_donor(&mut values, &donor, &months, &mut qc, 1, false, 1).unwrap();
     assert!(values[1].is_nan());
     assert_eq!(qc[1], QC_UNRESOLVED);
 
     let mut values = [280.0, f64::NAN];
-    let original = [280.0, f64::NAN];
     let donor = [9999.0, 281.0];
     let mut qc = [QC_OBSERVED, QC_UNRESOLVED];
-    let error = fill_from_donor(&mut values, &original, &donor, &months, &mut qc, 1, 1)
+    let error = fill_from_donor(&mut values, &donor, &months, &mut qc, 1, false, 1)
         .unwrap_err()
         .to_string();
     assert!(error.contains("overlapping samples"), "{error}");
+}
+
+#[test]
+fn donor_fill_never_creates_negative_scalar_wind() {
+    let mut values = [10.0, f64::NAN];
+    let donor = [20.0, 5.0];
+    let months = [1, 1];
+    let mut qc = [QC_OBSERVED, QC_UNRESOLVED];
+
+    fill_from_donor(&mut values, &donor, &months, &mut qc, 6, true, 1).unwrap();
+
+    assert!(values[1].is_nan());
+    assert_eq!(qc[1], QC_UNRESOLVED);
+}
+
+#[test]
+fn donor_sampling_does_not_bridge_a_missing_era5_interval() {
+    let sampled = sample_donor(&[0, 3600, 10_800], &[0.0, 1.0, 3.0], &[7200], false).unwrap();
+    assert!(sampled[0].is_nan());
+}
+
+#[test]
+fn cf_time_units_reject_invalid_calendar_and_clock_values() {
+    assert!(parse_cf_time_units("hours since 2020-02-30 00:00:00").is_err());
+    assert!(parse_cf_time_units("hours since 2020-01-01 24:00:00").is_err());
+    assert!(parse_cf_time_units("hours since 2020-01-01 00:00:00 garbage").is_err());
+    assert!(parse_cf_time_units("hours since 2020-01-01 00:00:00+01:00").is_err());
+    assert_eq!(
+        parse_cf_time_units("hours since 2020-01-01T00:00:00.000Z").unwrap(),
+        parse_cf_time_units("hours since 2020-01-01").unwrap()
+    );
+}
+
+#[test]
+fn repair_plan_rejects_ambiguous_or_zero_overlap_inputs_before_io() {
+    let missing = std::path::Path::new("does-not-need-to-exist.nc");
+    let mut plan = repair_plan(None, 1);
+    plan.min_overlap = 0;
+    assert!(diagnose_file(missing, &plan)
+        .unwrap_err()
+        .to_string()
+        .contains("at least one"));
+
+    let mut plan = repair_plan(None, 1);
+    plan.slots.push(plan.slots[0].clone());
+    assert!(diagnose_file(missing, &plan)
+        .unwrap_err()
+        .to_string()
+        .contains("listed more than once"));
+
+    let mut plan = repair_plan(None, 1);
+    let source = plan.slots[0].source_name.clone();
+    plan.slots[0].also_add.push(source);
+    assert!(diagnose_file(missing, &plan)
+        .unwrap_err()
+        .to_string()
+        .contains("both as its source"));
 }
 
 fn write_era5_temperature(

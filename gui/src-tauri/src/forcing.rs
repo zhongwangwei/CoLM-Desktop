@@ -192,7 +192,9 @@ fn probe_dataset(path: &str) -> Result<DatasetProbe, String> {
 /// 界面上什么都看不出来。
 #[tauri::command]
 pub async fn probe_forcing(app: tauri::AppHandle, path: String) -> Result<Probe, String> {
-    let mut probe = probe_file(&path)?;
+    let mut probe = tauri::async_runtime::spawn_blocking(move || probe_file(&path))
+        .await
+        .map_err(|error| format!("强迫场探测任务异常终止：{error}"))??;
     probe.suggest_dst = suggested_dst(&app);
     Ok(probe)
 }
@@ -202,12 +204,13 @@ pub async fn probe_forcing_table(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<TableProbe, String> {
-    let json = crate::sidecar::capture(&[
+    let json = crate::sidecar::capture_async(vec![
         "forcing-table-probe".into(),
         path,
         "--json".into(),
         "1".into(),
-    ])?;
+    ])
+    .await?;
     let mut probe: TableProbe = serde_json::from_str(&json).map_err(|error| {
         format!("colm-cli forcing-table-probe 的输出解析不了（两边的字段可能已经对不上）：{error}")
     })?;
@@ -350,7 +353,7 @@ pub async fn convert_forcing_table(
     }
     std::fs::create_dir_all(&dst).map_err(|error| format!("产物目录 {dst} 无法创建：{error}"))?;
     let args = build_table_convert_args(&src, &dst, &slots, &options);
-    let json = crate::sidecar::capture(&args)?;
+    let json = crate::sidecar::capture_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {
         format!(
             "colm-cli forcing-table-convert 的输出解析不了（两边的字段可能已经对不上）：{error}"
@@ -405,7 +408,7 @@ pub async fn convert_forcing(
 ) -> Result<String, String> {
     reject_same_dir(std::path::Path::new(&src), std::path::Path::new(&dst))?;
     let args = build_convert_args(&src, &dst, &slots, heights);
-    crate::sidecar::capture(&args)?;
+    crate::sidecar::capture_async(args).await?;
     Ok(dst)
 }
 
@@ -507,7 +510,7 @@ pub async fn probe_forcing_gaps(
     options: GapOptions,
 ) -> Result<GapReport, String> {
     let args = build_gap_args("forcing-gap-probe", &src, None, &slots, &options);
-    let json = crate::sidecar::capture(&args)?;
+    let json = crate::sidecar::capture_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {
         format!("colm-cli forcing-gap-probe 的输出解析不了（两边的字段可能已经对不上）：{error}")
     })
@@ -524,7 +527,7 @@ pub async fn repair_forcing(
         return Err("修复产物不能覆盖原始强迫场".into());
     }
     let args = build_gap_args("forcing-repair", &src, Some(&dst), &slots, &options);
-    let json = crate::sidecar::capture(&args)?;
+    let json = crate::sidecar::capture_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {
         format!("colm-cli forcing-repair 的输出解析不了（两边的字段可能已经对不上）：{error}")
     })
@@ -550,9 +553,9 @@ pub async fn download_era5land(
         "--end".into(),
         end,
     ];
-    tauri::async_runtime::spawn_blocking(move || crate::sidecar::capture(&args))
+    crate::sidecar::capture_async(args)
         .await
-        .map_err(|error| format!("ERA5-Land 下载任务异常终止：{error}"))??;
+        .map_err(|error| format!("ERA5-Land 下载任务异常终止：{error}"))?;
     Ok(dst)
 }
 
@@ -632,6 +635,7 @@ fn common_parent(a: &std::path::Path, b: &std::path::Path) -> Option<std::path::
 pub fn configure_cbl_batch(
     dirs: Vec<String>,
     file: String,
+    kernel_dir: Option<String>,
 ) -> Result<crate::config::BatchWrite, String> {
     if dirs.len() != 1 {
         return Err(
@@ -760,7 +764,12 @@ pub fn configure_cbl_batch(
     }
     std::fs::write(&forcing_path, forcing_doc.to_string())
         .map_err(|e| format!("{}: {e}", forcing_path.display()))?;
-    crate::config::set_field_batch(dirs, "DEF_USE_CBL_HEIGHT".into(), ".true.".into())
+    crate::config::set_field_batch(
+        dirs,
+        "DEF_USE_CBL_HEIGHT".into(),
+        ".true.".into(),
+        kernel_dir,
+    )
 }
 
 /// 打开臭氧胁迫并绑定一份可读的 NetCDF 数据。臭氧不依赖 BGC，但只有植被
@@ -769,6 +778,7 @@ pub fn configure_cbl_batch(
 pub fn configure_ozone_batch(
     dirs: Vec<String>,
     file: String,
+    kernel_dir: Option<String>,
 ) -> Result<crate::config::BatchWrite, String> {
     let chosen = std::path::Path::new(&file)
         .canonicalize()
@@ -815,6 +825,7 @@ pub fn configure_ozone_batch(
                 value: chosen.display().to_string(),
             },
         ],
+        kernel_dir,
     )
 }
 

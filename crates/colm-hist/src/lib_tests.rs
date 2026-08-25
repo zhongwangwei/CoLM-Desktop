@@ -19,9 +19,8 @@ fn default() -> BTreeSet<&'static str> {
 
 #[test]
 fn the_table_covers_every_live_write_site() {
-    // 456，不是直接 grep 得到的 466 —— 后者含 10 个整段被注释掉的写出点
-    // （cwddecomp / cwdprod / 8 个 pd*）。它们永远产不出来，进表就是多报。
-    assert_eq!(all().len(), 456);
+    // 456 个 MOD_Hist.F90 变量 + 162 个 TRACER/CH4 写出变量。
+    assert_eq!(all().len(), 618);
     for dead in ["cwddecomp", "cwdprod", "pdcorn", "pdwwheat"] {
         assert!(
             all().iter().all(|v| v.name != dead),
@@ -31,37 +30,35 @@ fn the_table_covers_every_live_write_site() {
 }
 
 #[test]
-fn the_default_preset_can_write_three_hundred_and_forty_six() {
+fn the_default_preset_can_write_five_hundred_and_eight() {
     // LULC/BGC/CROP/URBAN/LULCC 那组改造之后：BGC 与 URBAN_MODEL 不再是
     // 编译期宏（`main/BGC/`、`main/URBAN/` 始终编译进去，`DEF_USE_BGC`/
     // `DEF_URBAN_RUN` 在 MOD_Namelist.F90 里改成运行时开关），所以
     // `MOD_Hist.F90` 里原来 `#ifdef BGC`/`#ifdef URBAN_MODEL` 包着的写出点
     // 全部从第一道闸门（编译期宏）挪到了第二道闸门（运行时 `IF (DEF_*) THEN`）。
-    // 第一道闸门因此从 123 涨到 346——这不是多报，是如实反映「这些变量现在
-    // 编译期就在，运行时开关决定写不写」。113 个没有运行时条件不变
-    // （那批一直不挂 BGC/URBAN_MODEL），233 个挂着运行时条件（原来只有
-    // 10 个，见 every_runtime_gated_variable_carries_its_condition）。
-    assert_eq!(writable(&default()).len(), 346);
-    assert_eq!(unconditional(&default()).len(), 113);
+    // 第一道闸门因此从 123 涨到 346；纳入 TRACER/CH4 写出后是 508。
+    // CH4 写出点统一挂 DEF_USE_TRACER，所以默认无运行时条件的仍是 114。
+    assert_eq!(writable(&default()).len(), 508);
+    assert_eq!(unconditional(&default()).len(), 114);
 }
 
 #[test]
 fn every_runtime_gated_variable_carries_its_condition() {
-    // 233 个过得了宏这一关但还挂着运行时条件——从改造前的 10 个涨上来的
-    // 223 个几乎全部是 BGC（碳氮池、物候、GPP/NPP 逐 PFT 分量……）与
+    // 232 个过得了宏这一关但还挂着运行时条件——其中新增加的 223 个
+    // 几乎全部是 BGC（碳氮池、物候、GPP/NPP 逐 PFT 分量……）与
     // URBAN_MODEL（屋顶/墙面/不透水地面能量通量……）两块。每个的条件原文
     // 都记在表里，所以 GUI 能说清「为什么你勾了它却没有」，而不是只说
-    // 「没有」。这里不逐一枚举 233 个名字——那样改一次上游就要改一次
-    // 233 行——只验总数、验原来那 10 个仍然在（且条件原文不变），
+    // 「没有」。这里不逐一枚举 232 个名字——那样改一次上游就要改一次
+    // 232 行——只验总数、验原来那 9 个仍然在（且条件原文不变），
     // 再挑几个代表性的 BGC/URBAN_MODEL 变量验条件原文正确。
     let w = writable(&default());
     let u = unconditional(&default());
     let gated: BTreeSet<&str> = w.difference(&u).cloned().collect();
-    assert_eq!(gated.len(), 233);
+    assert_eq!(gated.len(), 394);
 
     let cond = |n: &str| all().iter().find(|v| v.name == n).unwrap().runtime.unwrap();
 
-    // 改造前就有的 10 个，条件原文不受这组改造影响。
+    // 改造前就有且仍受条件控制的 9 个。
     for n in [
         "dz_lake",
         "lake_deficit",
@@ -71,7 +68,6 @@ fn every_runtime_gated_variable_carries_its_condition() {
         "qlayer",
         "t2m_wmo",
         "vegwp",
-        "wetwat",
         "xy_hpbl",
     ] {
         assert!(gated.contains(n), "{n} should still be runtime-gated");
@@ -88,9 +84,19 @@ fn every_runtime_gated_variable_carries_its_condition() {
     assert!(cond("t2m_wmo").contains("DEF_Output_2mWMO"));
     assert!(cond("xy_hpbl").contains("DEF_USE_CBL_HEIGHT"));
     assert!(cond("vegwp").contains("DEF_USE_PLANTHYDRAULICS"));
-    assert!(cond("wetwat").contains("DEF_USE_Dynamic_Wetland"));
+    let wetwat = all().iter().find(|v| v.name == "wetwat").unwrap();
+    assert!(wetwat.runtime.is_none(), "wetwat 的 IF/ELSE 两边都写出");
+    assert!(unconditional(&default()).contains("wetwat"));
     for n in ["o3uptakesha", "o3uptakesun"] {
         assert!(cond(n).contains("DEF_USE_OZONESTRESS"));
+    }
+    for (name, inner) in [
+        ("CONC_O2_UNSAT", "DEF_USE_NITRIF"),
+        ("leafcCap", "DEF_USE_DiagMatrix"),
+        ("groundwater_demand", "DEF_USE_IRRIGATION"),
+    ] {
+        assert!(cond(name).contains("DEF_USE_BGC"), "{name}");
+        assert!(cond(name).contains(inner), "{name}");
     }
 
     // 新涨出来的 223 个：BGC 的碳氮池变量……
@@ -102,6 +108,19 @@ fn every_runtime_gated_variable_carries_its_condition() {
     for n in ["t_roof", "fsenroof", "fhac", "t_room"] {
         assert!(gated.contains(n), "{n} should be URBAN_MODEL-gated");
         assert_eq!(cond(n), "DEF_URBAN_RUN");
+    }
+}
+
+#[test]
+fn methane_history_variables_are_in_the_gate_table() {
+    let w = writable(&default());
+    for n in [
+        "methane_surf_flux_tot",
+        "methane_prod_depth",
+        "conc_methane",
+        "lake_water_ch4_stock",
+    ] {
+        assert!(w.contains(n), "{n} missing from history gate table");
     }
 }
 
@@ -132,7 +151,7 @@ fn ifndef_really_does_subtract() {
     //
     // `#ifndef CatchLateralFlow` 则实实在在管着 f_rsur_ie 与 f_rsur_se ——
     // 两个都在黄金文件里（README 记着它们「两窗口恒为 0」）。CatchLateralFlow
-    // 与 BGC/URBAN_MODEL 无关，不受这组改造影响，只是基数从 123 涨到 346。
+    // 与 BGC/URBAN_MODEL 无关，不受这组改造影响；纳入 TRACER/CH4 后基数是 508。
     let base = writable(&default());
     assert!(base.contains("rsur_ie") && base.contains("rsur_se"));
 
@@ -143,5 +162,5 @@ fn ifndef_really_does_subtract() {
     assert!(!after.contains("rsur_se"));
     // 同一个宏的 #ifdef 侧又放行了三个，所以净变化是 +1 而不是 -2。
     assert!(after.contains("fldarea") && after.contains("xwsub") && after.contains("xwsur"));
-    assert_eq!(after.len(), 347);
+    assert_eq!(after.len(), 509);
 }

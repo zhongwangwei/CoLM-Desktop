@@ -25,7 +25,7 @@ Module MOD_Ozone
    USE MOD_DataType
    USE MOD_SpatialMapping
    USE MOD_Vars_1DForcing, only: forc_ozone
-   USE MOD_Namelist, only: DEF_USE_OZONEDATA
+   USE MOD_Namelist, only: DEF_USE_OZONEDATA, DEF_OZONE_KO3
    IMPLICIT NONE
 
    character(len=256) :: file_ozone
@@ -76,9 +76,6 @@ CONTAINS
    real(r8) :: lai_thresh     ! LAI threshold for LAIs that asymptote and don't
    real(r8) :: o3_flux_threshold !threshold below which o3flux is set to 0 (nmol m^-2 s^-1)
 
-   real(r8), parameter :: ko3 = 1.51_r8  !F. Li
-
-
       IF(.not. DEF_USE_OZONEDATA)THEN
          forc_ozone = 100._r8  ! ozone partial pressure [ppbv]
       ENDIF
@@ -86,7 +83,7 @@ CONTAINS
       o3concnmolm3 = forc_ozone * (forc_psrf/(th * 8.314 ))
 
       ! calculate instantaneous flux
-      o3flux = o3concnmolm3/ (ko3*rs+ rb + ram)
+      o3flux = o3concnmolm3/ (DEF_OZONE_KO3*rs+ rb + ram)
 
       ! set lai_thresh
        IF (isevg(ivt)) THEN

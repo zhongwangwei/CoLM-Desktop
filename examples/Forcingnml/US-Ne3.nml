@@ -1,0 +1,5 @@
+&nl_colm_forcing
+  DEF_forcing%HEIGHT_V = 3.0
+  DEF_forcing%HEIGHT_T = 3.0
+  DEF_forcing%HEIGHT_Q = 3.0
+/

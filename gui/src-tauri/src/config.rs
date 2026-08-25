@@ -26,6 +26,25 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
     if n.starts_with("DEF_SIMULATION_TIME%") {
         return Some("时间与预热");
     }
+    if n.starts_with("DEF_LC_") {
+        return Some("生态与生地化");
+    }
+    if matches!(
+        n.as_str(),
+        "DEF_TUNING_CSOILC"
+            | "DEF_TUNING_DEWMX"
+            | "DEF_TUNING_TRSMX0"
+            | "DEF_TUNING_CROP_PLANTING_DAY"
+    ) || n.starts_with("DEF_TUNING_IRRIGATION_")
+    {
+        return Some("生态与生地化");
+    }
+    if let Some(parameter) = colm_case::land_cover::parameter(&n) {
+        return Some(parameter.section);
+    }
+    if n.starts_with("DEF_TUNING_") {
+        return Some("水热过程");
+    }
     if n.starts_with("DEF_HIST")
         || n.starts_with("DEF_WRST")
         || n.starts_with("DEF_REST")
@@ -165,8 +184,12 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
         "NOSTRESSNITROGEN",
         "DEF_RSTFAC",
         "PLANTHYDRAULICS",
+        "DEF_PH_",
+        "BALL_BERRY",
         "MEDLYNST",
+        "MEDLYN_",
         "WUEST",
+        "WUE_LAMBDA",
         "DEF_USE_SASU",
         "DIAGMATRIX",
         "DEF_USE_PN",
@@ -362,6 +385,12 @@ pub struct FieldState {
     /// 批量中至少两个算例对这个字段的状态不同。前端仍按“任一算例有效就显示”
     /// 的安全方向处理，但必须明确警告，不能让代表算例掩盖差异。
     pub mixed: bool,
+    /// `MOD_Const_LC.F90` 按分类体系和地类解析出的内置值。它不是 case.nml
+    /// 里的显式覆盖，因此与 schema 中的“未设置”哨兵分开传给前端。
+    pub context_default: Option<String>,
+    /// 批量站点的内置地类默认值不同。仍允许 All 写同一个显式覆盖，但前端
+    /// 必须先提醒用户，不能把第一个站点的值冒充整批默认值。
+    pub default_mixed: bool,
 }
 
 struct VisibilityContext<'a> {
@@ -378,6 +407,7 @@ struct VisibilityContext<'a> {
     urban: bool,
     lulcc: bool,
     tracer: bool,
+    isotope_tracer: bool,
     site_landtype: i64,
     soil_init: bool,
     snow_init: bool,
@@ -394,6 +424,8 @@ struct VisibilityContext<'a> {
     aerosol_readin: bool,
     ozone_stress: bool,
     ozone_data: bool,
+    plant_hydraulics: bool,
+    dynamic_wetland: bool,
     interception: i64,
     medlyn: bool,
     wuest: bool,
@@ -419,6 +451,38 @@ fn integer(doc: &colm_namelist::Document, name: &str) -> i64 {
     }
 }
 
+fn parse_real(value: &str) -> Option<f64> {
+    value
+        .split('_')
+        .next()
+        .unwrap_or(value)
+        .replace(['d', 'D'], "e")
+        .parse()
+        .ok()
+}
+
+fn real(doc: &colm_namelist::Document, name: &str) -> f64 {
+    match doc.get(name) {
+        Some(value) => value.as_f64().or_else(|| parse_real(&value.to_string())),
+        None => match colm_schema::find(name).map(|field| field.default) {
+            Some(colm_schema::Default::Real(value)) => parse_real(value),
+            Some(colm_schema::Default::Integer(value)) => Some(value as f64),
+            _ => None,
+        },
+    }
+    .unwrap_or(f64::NAN)
+}
+
+fn character(doc: &colm_namelist::Document, name: &str) -> String {
+    match doc.get(name) {
+        Some(colm_namelist::Value::Str(value)) => value.clone(),
+        _ => match colm_schema::find(name).map(|field| field.default) {
+            Some(colm_schema::Default::Str(value)) => value.to_string(),
+            _ => String::new(),
+        },
+    }
+}
+
 impl<'a> VisibilityContext<'a> {
     fn new(
         doc: &'a colm_namelist::Document,
@@ -440,6 +504,9 @@ impl<'a> VisibilityContext<'a> {
             urban: logical(doc, "DEF_URBAN_RUN"),
             lulcc: logical(doc, "DEF_USE_LULCC"),
             tracer: logical(doc, "DEF_USE_TRACER"),
+            isotope_tracer: character(doc, "DEF_TRACER_TYPES")
+                .split(',')
+                .any(|kind| kind.trim().eq_ignore_ascii_case("isotope")),
             site_landtype: integer(doc, "SITE_landtype"),
             soil_init: logical(doc, "DEF_USE_SoilInit"),
             snow_init: logical(doc, "DEF_USE_SnowInit"),
@@ -456,6 +523,8 @@ impl<'a> VisibilityContext<'a> {
             aerosol_readin: logical(doc, "DEF_Aerosol_Readin"),
             ozone_stress: logical(doc, "DEF_USE_OZONESTRESS"),
             ozone_data: logical(doc, "DEF_USE_OZONEDATA"),
+            plant_hydraulics: logical(doc, "DEF_USE_PLANTHYDRAULICS"),
+            dynamic_wetland: logical(doc, "DEF_USE_Dynamic_Wetland"),
             interception: integer(doc, "DEF_Interception_scheme"),
             medlyn: logical(doc, "DEF_USE_MEDLYNST"),
             wuest: logical(doc, "DEF_USE_WUEST"),
@@ -493,10 +562,614 @@ impl<'a> VisibilityContext<'a> {
     fn biological_land(&self) -> bool {
         self.natural_pft_land() || (self.crop && self.cropland())
     }
+
+    fn soil_hydrology(&self) -> bool {
+        !self.single
+            || (!self.glacier() && (!self.waterbody() || logical(self.doc, "DEF_USE_Dynamic_Lake")))
+    }
+
+    fn valid_landtype(&self) -> bool {
+        (1..=if self.usgs { 24 } else { 17 }).contains(&self.site_landtype)
+    }
+}
+
+fn simulation_stamp(doc: &colm_namelist::Document, prefix: &str) -> i64 {
+    let int = |suffix: &str| integer(doc, &format!("{prefix}{suffix}"));
+    civil_stamp(int("year"), int("month"), int("day"), int("sec"))
+}
+
+fn civil_stamp(y: i64, m: i64, d: i64, sec: i64) -> i64 {
+    // Howard Hinnant days_from_civil; duplicated here to keep GUI free of chrono.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    (era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy) * 86_400 + sec
+}
+
+fn active_path(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    switch: &str,
+    path: &str,
+    want_dir: bool,
+) -> Result<(), String> {
+    if !matches!(doc.get(switch), Some(colm_namelist::Value::Bool(true))) {
+        return Ok(());
+    }
+    let value = character(doc, path);
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return Err(format!("{switch} 已开启，请选择 {path}"));
+    }
+    let configured = std::path::Path::new(trimmed);
+    let p = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        case_dir.join(configured)
+    };
+    let meta = std::fs::metadata(&p).map_err(|e| format!("{path}: {}: {e}", p.display()))?;
+    if want_dir && !meta.is_dir() {
+        return Err(format!("{path}: {} 不是目录", p.display()));
+    }
+    if !want_dir && !meta.is_file() {
+        return Err(format!("{path}: {} 不是文件", p.display()));
+    }
+    Ok(())
+}
+
+fn is_expert_tuning_name(name: &str) -> bool {
+    colm_case::land_cover::is_parameter(name)
+        || name.starts_with("DEF_TUNING_")
+        || name.starts_with("DEF_PH_")
+        || name == "DEF_OZONE_KO3"
+        || matches!(
+            name,
+            "DEF_DS_TEMP_LAPSE_RATE"
+                | "DEF_DS_LONGWAVE_LAPSE_RATE"
+                | "DEF_DS_LONGWAVE_LIMIT"
+                | "DEF_DS_SHORTWAVE_LIMIT"
+                | "DEF_DS_SHORTWAVE_SIMPLE_LIMIT"
+        )
+}
+
+fn validate_real_value(name: &str, value: f64) -> Result<(), String> {
+    if colm_case::land_cover::is_parameter(name) {
+        return colm_case::land_cover::validate_override(name, value).map_err(|e| format!("{e:#}"));
+    }
+    let one_of = |names: &[&str]| names.contains(&name);
+    if !value.is_finite() {
+        return Err(format!("{name} 必须是有限数值"));
+    }
+    if one_of(&[
+        "DEF_TUNING_ZLND",
+        "DEF_TUNING_ZSNO",
+        "DEF_TUNING_CSOILC",
+        "DEF_TUNING_DEWMX",
+        "DEF_TUNING_CAPR",
+        "DEF_TUNING_TRSMX0",
+        "DEF_TUNING_WETWATMAX",
+        "DEF_TUNING_SOIL_ICE_IMPEDANCE",
+        "DEF_TUNING_TOPMOD_DECAY",
+        "DEF_TUNING_SNOW_COVER_EXPONENT",
+        "DEF_TUNING_IRRIGATION_DURATION_SEC",
+        "DEF_TUNING_IRRIGATION_MAX_DEPTH",
+        "DEF_PH_CROOT_LATERAL_LENGTH",
+        "DEF_PH_K_AXS",
+        "DEF_PH_FROOT_CARBON",
+        "DEF_PH_ROOT_RADIUS",
+        "DEF_PH_ROOT_DENSITY",
+        "DEF_PH_FROOT_LEAF",
+        "DEF_PH_KRMAX",
+    ]) && value <= 0.0
+    {
+        return Err(format!("{name} 必须大于 0"));
+    }
+    if name == "DEF_TUNING_PONDMX" && value < 0.0 {
+        return Err(format!("{name} 必须不小于 0"));
+    }
+    if name == "DEF_TUNING_IRRIGATION_PONDMX" && value < 0.0 {
+        return Err(format!("{name} 必须不小于 0"));
+    }
+    if one_of(&[
+        "DEF_TUNING_CNFAC",
+        "DEF_TUNING_SSI",
+        "DEF_DS_LONGWAVE_LIMIT",
+        "DEF_DS_SHORTWAVE_LIMIT",
+        "DEF_DS_SHORTWAVE_SIMPLE_LIMIT",
+    ]) && !(0.0..=1.0).contains(&value)
+    {
+        return Err(format!("{name} 必须在 0 到 1 之间"));
+    }
+    if name == "DEF_TUNING_WIMP" && !(0.0..1.0).contains(&value) {
+        return Err(format!("{name} 必须大于等于 0 且小于 1"));
+    }
+    if matches!(
+        name,
+        "DEF_TUNING_SIMPLE_VIC_DS" | "DEF_TUNING_SIMPLE_VIC_WS"
+    ) && !(value > 0.0 && value < 1.0)
+    {
+        return Err(format!("{name} 必须大于 0 且小于 1"));
+    }
+    if matches!(
+        name,
+        "DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION" | "DEF_TUNING_IRRIGATION_SUPPLY_FRACTION"
+    ) && !(0.0..=1.0).contains(&value)
+    {
+        return Err(format!("{name} 必须在 0 到 1 之间"));
+    }
+    if name == "DEF_TUNING_IRRIGATION_START_SEC" && !(0.0..86_400.0).contains(&value) {
+        return Err(format!("{name} 必须在 0（含）到 86400（不含）秒之间"));
+    }
+    if name == "DEF_TUNING_IRRIGATION_DURATION_SEC" && value > 86_400.0 {
+        return Err(format!("{name} 不能超过 86400 秒"));
+    }
+    if name == "DEF_TUNING_IRRIGATION_MIN_CPHASE" && !(0.0..=4.0).contains(&value) {
+        return Err(format!("{name} 必须在 0 到 4 之间"));
+    }
+    if name == "DEF_TUNING_IRRIGATION_MAX_CPHASE" && !(value > 0.0 && value <= 4.0) {
+        return Err(format!("{name} 必须大于 0 且不超过 4"));
+    }
+    if name == "DEF_TUNING_CROP_PLANTING_DAY"
+        && value != 0.0
+        && (!(1.0..=366.0).contains(&value) || value.fract() != 0.0)
+    {
+        return Err(format!("{name} 必须为 0，或 1 到 366 之间的整数"));
+    }
+    if one_of(&[
+        "DEF_TUNING_SMPMAX",
+        "DEF_TUNING_SMPMIN",
+        "DEF_TUNING_SMPMAX_HR",
+        "DEF_TUNING_SMPMIN_HR",
+    ]) && value >= 0.0
+    {
+        return Err(format!("{name} 必须小于 0"));
+    }
+    if name == "DEF_OZONE_KO3" && value < 0.0 {
+        return Err(format!("{name} 必须不小于 0"));
+    }
+    if one_of(&["DEF_DS_TEMP_LAPSE_RATE", "DEF_DS_LONGWAVE_LAPSE_RATE"]) && value < 0.0 {
+        return Err(format!("{name} 必须不小于 0"));
+    }
+    Ok(())
+}
+
+fn validate_expert_tuning(
+    doc: &colm_namelist::Document,
+    names: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    let names: std::collections::BTreeSet<String> = names
+        .into_iter()
+        .filter(|name| is_expert_tuning_name(name))
+        .collect();
+    for name in &names {
+        validate_real_value(name, real(doc, name))?;
+    }
+    if names.contains("DEF_TUNING_SMPMAX") || names.contains("DEF_TUNING_SMPMIN") {
+        let max = real(doc, "DEF_TUNING_SMPMAX");
+        let min = real(doc, "DEF_TUNING_SMPMIN");
+        if min >= max {
+            return Err("DEF_TUNING_SMPMIN 必须小于 DEF_TUNING_SMPMAX".into());
+        }
+    }
+    if names.contains("DEF_TUNING_SMPMAX_HR") || names.contains("DEF_TUNING_SMPMIN_HR") {
+        let max = real(doc, "DEF_TUNING_SMPMAX_HR");
+        let min = real(doc, "DEF_TUNING_SMPMIN_HR");
+        if min >= max {
+            return Err("DEF_TUNING_SMPMIN_HR 必须小于 DEF_TUNING_SMPMAX_HR".into());
+        }
+    }
+    if names.contains("DEF_TUNING_SIMPLE_VIC_DS") || names.contains("DEF_TUNING_SIMPLE_VIC_WS") {
+        let ds = real(doc, "DEF_TUNING_SIMPLE_VIC_DS");
+        let ws = real(doc, "DEF_TUNING_SIMPLE_VIC_WS");
+        if ds > ws {
+            return Err("DEF_TUNING_SIMPLE_VIC_DS 必须小于等于 DEF_TUNING_SIMPLE_VIC_WS".into());
+        }
+    }
+    if names.contains("DEF_TUNING_IRRIGATION_MIN_CPHASE")
+        || names.contains("DEF_TUNING_IRRIGATION_MAX_CPHASE")
+    {
+        let min = real(doc, "DEF_TUNING_IRRIGATION_MIN_CPHASE");
+        let max = real(doc, "DEF_TUNING_IRRIGATION_MAX_CPHASE");
+        if min >= max {
+            return Err("灌溉起始作物阶段必须小于结束阶段".into());
+        }
+    }
+    if names.contains("DEF_TUNING_IRRIGATION_DURATION_SEC") {
+        let duration = real(doc, "DEF_TUNING_IRRIGATION_DURATION_SEC");
+        let timestep = real(doc, "DEF_simulation_time%timestep");
+        if duration < timestep {
+            return Err("灌溉持续时间不能短于一个模型时间步".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_changed_fields(
+    doc: &colm_namelist::Document,
+    fields: &[FieldChange],
+) -> Result<(), String> {
+    for field in fields {
+        match field.path.as_str() {
+            "DEF_file_SoilInit" if !logical(doc, "DEF_USE_SoilInit") => {
+                return Err("DEF_file_SoilInit 只对已启用土壤初始场的算例有效".into())
+            }
+            "DEF_file_SnowInit" if !logical(doc, "DEF_USE_SnowInit") => {
+                return Err("DEF_file_SnowInit 只对已启用积雪初始场的算例有效".into())
+            }
+            "DEF_file_cn_init"
+                if !logical(doc, "DEF_USE_CN_INIT") || !logical(doc, "DEF_USE_BGC") =>
+            {
+                return Err("DEF_file_cn_init 只对已启用 BGC 与 CN 初始场的算例有效".into())
+            }
+            "DEF_file_WaterTable"
+                if !logical(doc, "DEF_USE_WaterTableInit") || logical(doc, "DEF_USE_SoilInit") =>
+            {
+                return Err("DEF_file_WaterTable 只对独立地下水位初始场有效".into())
+            }
+            "DEF_DS_HiresTopographyDataDir" if !logical(doc, "DEF_USE_Forcing_Downscaling") => {
+                return Err("DEF_DS_HiresTopographyDataDir 只对完整地形强迫降尺度有效".into())
+            }
+            "DEF_file_Ozone"
+                if !(logical(doc, "DEF_USE_OZONESTRESS") && logical(doc, "DEF_USE_OZONEDATA")) =>
+            {
+                return Err("DEF_file_Ozone 只对已启用臭氧胁迫和臭氧数据读取的算例有效".into())
+            }
+            "DEF_BALL_BERRY_GRADM" | "DEF_BALL_BERRY_BINTER"
+                if logical(doc, "DEF_USE_MEDLYNST") || logical(doc, "DEF_USE_WUEST") =>
+            {
+                return Err("Ball–Berry 系数只对 Ball–Berry 气孔导度方案有效".into())
+            }
+            "DEF_MEDLYN_G1" | "DEF_MEDLYN_G0"
+                if !logical(doc, "DEF_USE_MEDLYNST") || logical(doc, "DEF_USE_WUEST") =>
+            {
+                return Err("Medlyn 系数只对 Medlyn 气孔导度方案有效".into())
+            }
+            "DEF_WUE_LAMBDA"
+                if !logical(doc, "DEF_USE_WUEST") || logical(doc, "DEF_USE_MEDLYNST") =>
+            {
+                return Err("lambda 只对水分利用效率（WUE）气孔导度方案有效".into())
+            }
+            _ => {}
+        }
+    }
+    validate_expert_tuning(doc, fields.iter().map(|field| field.path.clone()))?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct KernelFacts {
+    single: bool,
+    usgs: bool,
+    crop: bool,
+}
+
+fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String> {
+    let Some(dir) = kernel_dir.filter(|dir| !dir.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(dir))
+        .map_err(|error| format!("{error:#}"))?;
+    let has = |name: &str| kernel.manifest.macros.iter().any(|macro_| macro_ == name);
+    Ok(Some(KernelFacts {
+        single: has("SinglePoint"),
+        usgs: has("LULC_USGS"),
+        crop: has("CROP"),
+    }))
+}
+
+fn validate_runtime_contract(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    kernel: Option<KernelFacts>,
+) -> Result<(), String> {
+    validate_expert_tuning(
+        doc,
+        colm_schema::all()
+            .iter()
+            .filter(|field| is_expert_tuning_name(field.name))
+            .map(|field| field.name.to_string()),
+    )?;
+    let timestep = real(doc, "DEF_simulation_time%timestep");
+    if !timestep.is_finite() || timestep <= 0.0 || timestep > 3600.0 {
+        return Err("DEF_simulation_time%timestep 必须是大于 0 且不超过 3600 秒的有限数值".into());
+    }
+
+    let lct = logical(doc, "DEF_USE_LCT");
+    let pft = logical(doc, "DEF_USE_PFT");
+    let pc = logical(doc, "DEF_USE_PC");
+    if [lct, pft, pc].into_iter().filter(|on| *on).count() != 1 {
+        return Err("DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC 必须且只能开启一个".into());
+    }
+
+    let bgc = logical(doc, "DEF_USE_BGC");
+    let tracer = logical(doc, "DEF_USE_TRACER");
+    if logical(doc, "DEF_USE_MEDLYNST") && logical(doc, "DEF_USE_WUEST") {
+        return Err("Medlyn 与 WUE 气孔导度方案不能同时开启".into());
+    }
+    let methane = character(doc, "DEF_TRACER_NAMES")
+        .split(',')
+        .any(|name| matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE"));
+    let urban = logical(doc, "DEF_URBAN_RUN");
+    let single = kernel.map(|facts| facts.single).unwrap_or_else(|| {
+        doc.get("SITE_fsitedata").is_some()
+            || doc.get("SITE_lon_location").is_some()
+            || doc.get("SITE_lat_location").is_some()
+    });
+    let usgs = kernel
+        .map(|facts| facts.usgs)
+        .unwrap_or_else(|| logical(doc, "DEF_USE_USGS"));
+    let crop = kernel
+        .map(|facts| facts.crop)
+        .unwrap_or_else(|| logical(doc, "DEF_USE_CROP"));
+
+    if bgc && !(pft || pc) {
+        return Err("DEF_USE_BGC 需要 DEF_USE_PFT 或 DEF_USE_PC".into());
+    }
+    if crop && !bgc {
+        return Err("当前 CROP 内核需要同时开启 DEF_USE_BGC".into());
+    }
+    if tracer {
+        if urban {
+            return Err("城市模式暂不支持 TRACER".into());
+        }
+        if logical(doc, "DEF_USE_Campbell_SOIL_MODEL")
+            || !logical(doc, "DEF_USE_VariablySaturatedFlow")
+        {
+            return Err("TRACER 需要 van Genuchten/VariablySaturatedFlow 土壤水方案".into());
+        }
+        if methane && (!bgc || !(pft || pc)) {
+            return Err("甲烷 TRACER 需要 BGC 且使用 PFT 或 PC 次网格".into());
+        }
+        if logical(doc, "DEF_USE_BIFURCATION") && integer(doc, "DEF_TRACER_NUM") > 0 {
+            return Err("TRACER 不能与河道分汊 DEF_USE_BIFURCATION 同时开启".into());
+        }
+        let tracer_num = integer(doc, "DEF_TRACER_NUM");
+        if !(0..=1000).contains(&tracer_num) {
+            return Err("DEF_TRACER_NUM 必须在 0 到 1000 之间".into());
+        }
+        let relative_humidity = real(doc, "DEF_TRACER_CG_RELHUM_MAX");
+        if !(relative_humidity > 0.0 && relative_humidity < 1.0) {
+            return Err("DEF_TRACER_CG_RELHUM_MAX 必须严格位于 0 与 1 之间".into());
+        }
+        for name in [
+            "DEF_TRACER_SNOWMELT_EQUILIBRATION",
+            "DEF_TRACER_CANOPY_EQUILIBRATION",
+        ] {
+            let value = real(doc, name);
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(format!("{name} 必须在 0 到 1 之间"));
+            }
+        }
+        for name in ["DEF_TRACER_SUBL_SKIN_MM", "DEF_TRACER_ICE_SUPERSAT_SLOPE"] {
+            let value = real(doc, name);
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} 必须为非负有限数值"));
+            }
+        }
+        for name in [
+            "DEF_TRACER_BALANCE_ABORT_NBAD",
+            "DEF_TRACER_RESID_ABORT_NBAD",
+            "DEF_TRACER_LULCC_ABORT_NBAD",
+        ] {
+            if integer(doc, name) < 0 {
+                return Err(format!("{name} 必须为非负整数"));
+            }
+        }
+    }
+    if single && urban && bgc {
+        return Err("纯城市 SinglePoint 当前不运行 BGC，请关闭 BGC 或改用自然/混合区域配置".into());
+    }
+    if logical(doc, "DEF_USE_LULCC") {
+        if single {
+            return Err("SinglePoint 当前不支持 LULCC".into());
+        }
+        if usgs || bgc {
+            return Err("LULCC 当前不支持 USGS 或 BGC".into());
+        }
+    }
+
+    active_path(
+        doc,
+        case_dir,
+        "DEF_USE_SoilInit",
+        "DEF_file_SoilInit",
+        false,
+    )?;
+    active_path(
+        doc,
+        case_dir,
+        "DEF_USE_SnowInit",
+        "DEF_file_SnowInit",
+        false,
+    )?;
+    active_path(doc, case_dir, "DEF_USE_CN_INIT", "DEF_file_cn_init", false)?;
+    if !logical(doc, "DEF_USE_SoilInit") {
+        active_path(
+            doc,
+            case_dir,
+            "DEF_USE_WaterTableInit",
+            "DEF_file_WaterTable",
+            false,
+        )?;
+    }
+    active_path(
+        doc,
+        case_dir,
+        "DEF_USE_Forcing_Downscaling",
+        "DEF_DS_HiresTopographyDataDir",
+        true,
+    )?;
+    if logical(doc, "DEF_USE_OZONESTRESS") {
+        active_path(doc, case_dir, "DEF_USE_OZONEDATA", "DEF_file_Ozone", false)?;
+    }
+    if crop {
+        for (name, label) in crop_runtime_files(
+            real(doc, "DEF_TUNING_CROP_PLANTING_DAY"),
+            logical(doc, "DEF_USE_FERT"),
+            integer(doc, "DEF_FERT_SOURCE"),
+            logical(doc, "DEF_USE_IRRIGATION"),
+            integer(doc, "DEF_IRRIGATION_ALLOCATION"),
+        ) {
+            runtime_file(doc, case_dir, name, label)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn crop_runtime_files(
+    planting_day: f64,
+    fertilisation: bool,
+    fertilisation_source: i64,
+    irrigation: bool,
+    irrigation_allocation: i64,
+) -> Vec<(&'static str, &'static str)> {
+    let mut files = Vec::new();
+    if planting_day <= 0.0 || fertilisation || irrigation {
+        files.push((
+            "crop/plantdt-colm-64cfts-rice2_fillcoast.nc",
+            "CROP 播种日期",
+        ));
+    }
+    if fertilisation {
+        files.push((
+            if fertilisation_source == 2 {
+                "crop/fertilizer_2015soc.nc"
+            } else {
+                "crop/fertnitro_fillcoast.nc"
+            },
+            "CROP 施肥",
+        ));
+    }
+    if irrigation {
+        files.push(("crop/surfdata_irrigation_method_96x144.nc", "CROP 灌溉"));
+        if irrigation_allocation == 3 {
+            files.push(("crop/surfdata_irrigation_allocation.nc", "CROP 灌溉分配"));
+        }
+    }
+    files
+}
+
+fn runtime_file(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    name: &str,
+    label: &str,
+) -> Result<(), String> {
+    let root = character(doc, "DEF_dir_runtime");
+    let root = root.trim();
+    if root.is_empty() || root.eq_ignore_ascii_case("null") {
+        return Err(format!("{label} 已开启，请选择 DEF_dir_runtime"));
+    }
+    let root = std::path::Path::new(root);
+    let file = if root.is_absolute() {
+        root.join(name)
+    } else {
+        case_dir.join(root).join(name)
+    };
+    if !file.is_file() {
+        return Err(format!("{label} 运行时目录缺少数据：{}", file.display()));
+    }
+    Ok(())
 }
 
 fn hidden(reason: &'static str) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
     (FieldMode::Hidden, Some(reason), Vec::new())
+}
+
+fn expert_tuning_runtime_state(
+    name: &str,
+    c: &VisibilityContext<'_>,
+) -> Option<(FieldMode, Option<&'static str>, Vec<&'static str>)> {
+    let one_of = |names: &[&str]| names.contains(&name);
+    if name.starts_with("DEF_LC_") && colm_case::land_cover::is_parameter(name) {
+        if !(c.single && c.lct && c.valid_landtype() && c.biological_land()) {
+            return Some(hidden(
+                "仅单点 LCT 植被地表使用；PFT/PC 参数来自 MOD_Const_PFT",
+            ));
+        }
+        if colm_case::land_cover::needs_plant_hydraulics(name) && !c.plant_hydraulics {
+            return Some(hidden("需要先启用植物水力过程"));
+        }
+        if name == "DEF_LC_C3C4" {
+            return Some((FieldMode::Editable, None, vec!["0", "1"]));
+        }
+    }
+    if c.single
+        && !c.biological_land()
+        && one_of(&["DEF_TUNING_CSOILC", "DEF_TUNING_DEWMX", "DEF_TUNING_TRSMX0"])
+        && !c.urban
+    {
+        return Some(hidden("仅植被或城市地表使用"));
+    }
+    if name == "DEF_TUNING_WETWATMAX" && !(c.wetland() || c.dynamic_wetland) {
+        return Some(hidden("仅湿地或动态湿地过程使用"));
+    }
+    if matches!(
+        name,
+        "DEF_TUNING_SMPMAX"
+            | "DEF_TUNING_SOIL_ICE_IMPEDANCE"
+            | "DEF_TUNING_TOPMOD_DECAY"
+            | "DEF_TUNING_SIMPLE_VIC_DS"
+            | "DEF_TUNING_SIMPLE_VIC_WS"
+    ) && !c.soil_hydrology()
+    {
+        return Some(hidden("当前单点地表不运行土壤水分过程"));
+    }
+    if name == "DEF_TUNING_SMPMAX" && c.runoff != 3 {
+        return Some(hidden("仅 Simple VIC 产流方案使用"));
+    }
+    if name == "DEF_TUNING_TOPMOD_DECAY" && c.runoff != 0 {
+        return Some(hidden("仅 TOPMODEL 产流方案使用"));
+    }
+    if matches!(
+        name,
+        "DEF_TUNING_SIMPLE_VIC_DS" | "DEF_TUNING_SIMPLE_VIC_WS"
+    ) && c.runoff != 3
+    {
+        return Some(hidden("仅 Simple VIC 产流方案使用"));
+    }
+    if name.starts_with("DEF_TUNING_IRRIGATION_")
+        && !(c.crop && (!c.single || c.cropland()) && logical(c.doc, "DEF_USE_IRRIGATION"))
+    {
+        return Some(hidden("需要 CROP 农田并启用灌溉"));
+    }
+    if name == "DEF_TUNING_CROP_PLANTING_DAY" && !(c.single && c.crop && c.cropland()) {
+        return Some(hidden("仅单点 CROP 农田使用"));
+    }
+    if one_of(&["DEF_TUNING_SMPMAX_HR", "DEF_TUNING_SMPMIN_HR"]) && !c.bgc {
+        return Some(hidden("需要 BGC"));
+    }
+    if name.starts_with("DEF_PH_") && !(c.plant_hydraulics && c.biological_land()) {
+        return Some(hidden("需要植被地表并启用植物水力过程"));
+    }
+    if name == "DEF_OZONE_KO3" && !(c.ozone_stress && c.biological_land()) {
+        return Some(hidden("需要植被地表并启用臭氧胁迫"));
+    }
+    if one_of(&[
+        "DEF_DS_TEMP_LAPSE_RATE",
+        "DEF_DS_LONGWAVE_LAPSE_RATE",
+        "DEF_DS_LONGWAVE_LIMIT",
+    ]) && !(c.downscale || c.downscale_simple)
+    {
+        return Some(hidden("需要先选择一种强迫场降尺度模式"));
+    }
+    if name == "DEF_DS_LONGWAVE_LAPSE_RATE"
+        && character(c.doc, "DEF_DS_longwave_adjust_scheme").eq_ignore_ascii_case("I")
+    {
+        return Some(hidden("仅长波降尺度方案 II 使用"));
+    }
+    if name == "DEF_DS_LONGWAVE_LAPSE_RATE" && c.single && !c.glacier() {
+        return Some(hidden("方案 II 仅在冰川地表使用此长波递减率"));
+    }
+    if name == "DEF_DS_SHORTWAVE_LIMIT" && !c.downscale {
+        return Some(hidden("仅完整地形强迫降尺度使用"));
+    }
+    if name == "DEF_DS_SHORTWAVE_SIMPLE_LIMIT" && !c.downscale_simple {
+        return Some(hidden("仅简化地形强迫降尺度使用"));
+    }
+    None
 }
 
 fn field_runtime_state(
@@ -505,6 +1178,10 @@ fn field_runtime_state(
 ) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
     let name = field.name;
     let one_of = |names: &[&str]| names.contains(&name);
+
+    if let Some(state) = expert_tuning_runtime_state(name, c) {
+        return state;
+    }
 
     if !field_is_relevant(field, c.have) {
         return hidden("当前内核未编入这个功能");
@@ -763,6 +1440,11 @@ fn field_runtime_state(
             "DEF_file_Ozone",
             "DEF_USE_MEDLYNST",
             "DEF_USE_WUEST",
+            "DEF_BALL_BERRY_GRADM",
+            "DEF_BALL_BERRY_BINTER",
+            "DEF_MEDLYN_G1",
+            "DEF_MEDLYN_G0",
+            "DEF_WUE_LAMBDA",
         ])
     {
         return hidden("当前站点不是植被地表，不会使用叶片或冠层过程");
@@ -772,6 +1454,27 @@ fn field_runtime_state(
     }
     if name == "DEF_file_Ozone" && (!c.ozone_stress || !c.ozone_data) {
         return hidden("仅从文件读取臭氧数据时使用");
+    }
+    if c.medlyn
+        && c.wuest
+        && one_of(&[
+            "DEF_BALL_BERRY_GRADM",
+            "DEF_BALL_BERRY_BINTER",
+            "DEF_MEDLYN_G1",
+            "DEF_MEDLYN_G0",
+            "DEF_WUE_LAMBDA",
+        ])
+    {
+        return hidden("请先解决 Medlyn 与 WUE 同时开启的方案冲突");
+    }
+    if one_of(&["DEF_BALL_BERRY_GRADM", "DEF_BALL_BERRY_BINTER"]) && (c.medlyn || c.wuest) {
+        return hidden("仅 Ball–Berry 气孔导度方案使用");
+    }
+    if one_of(&["DEF_MEDLYN_G1", "DEF_MEDLYN_G0"]) && !c.medlyn {
+        return hidden("仅 Medlyn 气孔导度方案使用");
+    }
+    if name == "DEF_WUE_LAMBDA" && !c.wuest {
+        return hidden("仅水分利用效率（WUE）气孔导度方案使用");
     }
     if one_of(&["DEF_file_snowoptics", "DEF_file_snowaging"]) {
         return hidden("CoLM 会从运行时目录派生 SNICAR 数据文件");
@@ -815,6 +1518,30 @@ fn field_runtime_state(
     if field_section(name, field.group) == Some("示踪剂") && !c.tracer {
         return hidden("需要先启用 TRACER");
     }
+    if c.tracer
+        && !c.isotope_tracer
+        && one_of(&[
+            "DEF_TRACER_USE_FRACTIONATION",
+            "DEF_TRACER_KINETIC_SCHEME",
+            "DEF_TRACER_ICE_SUPERSAT_SLOPE",
+            "DEF_TRACER_CG_RELHUM_MAX",
+            "DEF_TRACER_OPEN_WATER_KINETIC",
+            "DEF_TRACER_SUBL_SKIN_MM",
+            "DEF_TRACER_SOIL_KINETIC",
+            "DEF_TRACER_SOIL_DIFFUSION",
+            "DEF_TRACER_SOIL_VAPOR_DIFFUSION",
+            "DEF_TRACER_CANOPY_EQUILIBRATION",
+            "DEF_TRACER_SNOWMELT_EQUILIBRATION",
+            "DEF_TRACER_NSS_LEAF_WATER_PER_LAI",
+            "DEF_TRACER_NSS_LEAF_PATH_LENGTH",
+            "DEF_TRACER_NSS_LEAF_RB",
+            "DEF_TRACER_USE_SOIL_INIT",
+            "DEF_TRACER_SOIL_INIT_FILE",
+            "DEF_TRACER_SOIL_INIT_VARS",
+        ])
+    {
+        return hidden("当前选择的是气体示踪，不使用水同位素参数");
+    }
 
     if field.group.is_none() {
         return (
@@ -833,19 +1560,37 @@ pub(crate) fn field_states_for(
 ) -> Result<Vec<FieldState>, String> {
     let doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
     let context = VisibilityContext::new(&doc, have);
-    Ok(colm_schema::all()
+    colm_schema::all()
         .iter()
         .map(|field| {
             let (mode, reason, allowed_values) = field_runtime_state(field, &context);
-            FieldState {
+            let context_default = if mode != FieldMode::Hidden
+                && context.single
+                && context.lct
+                && context.valid_landtype()
+                && context.biological_land()
+                && colm_case::land_cover::is_parameter(field.name)
+            {
+                colm_case::land_cover::default_literal(
+                    field.name,
+                    context.usgs,
+                    context.site_landtype,
+                )
+                .map_err(|error| format!("{}: {error:#}", field.name))?
+            } else {
+                None
+            };
+            Ok(FieldState {
                 name: field.name.to_string(),
                 mode,
                 reason,
                 allowed_values,
                 mixed: false,
-            }
+                context_default,
+                default_mixed: false,
+            })
         })
-        .collect())
+        .collect()
 }
 
 fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
@@ -903,6 +1648,24 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
                 || each.iter().any(|state| {
                     state.mode != template.mode || state.allowed_values != template.allowed_values
                 });
+            let context_default = visible
+                .first()
+                .and_then(|state| state.context_default.clone());
+            let default_mixed = visible
+                .iter()
+                .any(|state| state.context_default != context_default);
+            if mixed
+                && matches!(
+                    template.name.as_str(),
+                    "DEF_BALL_BERRY_GRADM"
+                        | "DEF_BALL_BERRY_BINTER"
+                        | "DEF_MEDLYN_G1"
+                        | "DEF_MEDLYN_G0"
+                        | "DEF_WUE_LAMBDA"
+                )
+            {
+                mode = FieldMode::Hidden;
+            }
             let reason = if no_common_value {
                 Some("所选算例对这个字段没有共同合法值；请缩小批量范围后分别配置")
             } else if mixed {
@@ -916,19 +1679,11 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
                 reason,
                 allowed_values,
                 mixed,
+                context_default,
+                default_mixed,
             }
         })
         .collect()
-}
-
-/// 当前内核 + 当前 case.nml 的统一字段状态。
-#[tauri::command]
-pub fn field_states(text: String, kernel_dir: String) -> Result<Vec<FieldState>, String> {
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
-        .map_err(|e| format!("{e:#}"))?;
-    let have: std::collections::BTreeSet<&str> =
-        kernel.manifest.macros.iter().map(String::as_str).collect();
-    field_states_for(&text, &have)
 }
 
 /// 批量编辑时按全部算例合并状态：只有全部无效才隐藏；任一算例有效就显示，
@@ -966,8 +1721,771 @@ pub fn unknown_fields(text: String) -> Result<Vec<String>, String> {
     Ok(doc
         .paths()
         .into_iter()
-        .filter(|p| colm_schema::find(p).is_none())
+        .filter(|p| colm_schema::find(p).is_none() && !colm_case::pft::is_override_path(p))
         .collect())
+}
+
+#[derive(Debug, Serialize)]
+pub struct PftParameterState {
+    pub name: &'static str,
+    pub label_zh: &'static str,
+    pub label_en: &'static str,
+    pub group_zh: &'static str,
+    pub group_en: &'static str,
+    pub unit: Option<&'static str>,
+    pub kind: &'static str,
+    pub default: String,
+    pub default_mixed: bool,
+    pub value: Option<String>,
+    pub mixed: bool,
+    pub allowed_values: Vec<&'static str>,
+}
+
+fn pft_parameter_applies(
+    meta: &colm_case::pft::ParameterMeta,
+    context: &VisibilityContext<'_>,
+    pft_type: u8,
+) -> bool {
+    use colm_case::pft::Condition;
+    if pft_type == 0 {
+        return false;
+    }
+    let process_applies = match meta.condition {
+        Condition::Always => true,
+        Condition::BallBerry => !context.medlyn && !context.wuest,
+        Condition::Medlyn => context.medlyn && !context.wuest,
+        Condition::Wue => context.wuest && !context.medlyn,
+        Condition::PlantHydraulics => context.plant_hydraulics,
+        Condition::Bgc => context.bgc,
+        Condition::Fire => context.bgc && logical(context.doc, "DEF_USE_FIRE"),
+        Condition::Crop => context.crop && context.bgc && pft_type >= 15,
+    };
+    process_applies
+        && match meta.name {
+            // A case-wide override wins inside MOD_AssimStomataConductance.
+            // Do not offer a per-PFT value that the running model will ignore.
+            "DEF_PFT_GRADM" => real(context.doc, "DEF_BALL_BERRY_GRADM") <= 1.6,
+            "DEF_PFT_BINTER" => real(context.doc, "DEF_BALL_BERRY_BINTER") < 0.0,
+            "DEF_PFT_G1" => real(context.doc, "DEF_MEDLYN_G1") < 0.0,
+            "DEF_PFT_G0" => real(context.doc, "DEF_MEDLYN_G0") < 0.0,
+            "DEF_PFT_LAMBDA" => real(context.doc, "DEF_WUE_LAMBDA") <= 0.0,
+            "DEF_PFT_LIVEWDCN" | "DEF_PFT_DEADWDCN" | "DEF_PFT_CROOT_STEM" | "DEF_PFT_FLIVEWD" => {
+                (1..=11).contains(&pft_type) || pft_type >= 15
+            }
+            "DEF_PFT_STEM_LEAF" => (1..=11).contains(&pft_type),
+            "DEF_PFT_MANURE" => {
+                logical(context.doc, "DEF_USE_FERT") && integer(context.doc, "DEF_FERT_SOURCE") == 1
+            }
+            _ => true,
+        }
+}
+
+fn pft_parameter_has_default(
+    meta: &colm_case::pft::ParameterMeta,
+    context: &VisibilityContext<'_>,
+    pft_type: u8,
+) -> Result<bool, String> {
+    let value = colm_case::pft::default_value(
+        meta.name,
+        pft_type,
+        logical(context.doc, "DEF_USE_Campbell_SOIL_MODEL"),
+        context.pc,
+    )
+    .map_err(|error| format!("{}: {error:#}", meta.name))?;
+    Ok(value.is_some_and(|value| {
+        // CoLM's crop tables use exactly -999/-999.9 for unavailable CFT entries;
+        // large negative hydraulic potentials are real defaults and must remain visible.
+        let unavailable = value == -999.0 || (value + 999.9).abs() < 1e-9;
+        !unavailable && colm_case::pft::validate_override(meta.name, value).is_ok()
+    }))
+}
+
+fn pft_override_path(name: &str, pft_type: u8) -> String {
+    format!("{name}({})", usize::from(pft_type) + 1)
+}
+
+/// Return the authoritative MOD_Const_PFT defaults plus sparse overrides for
+/// one PFT type.  Only parameters active under every selected case are shown;
+/// this keeps an All-sites edit from silently writing a coefficient some cases
+/// cannot use.
+#[tauri::command]
+pub fn pft_parameter_states(
+    dirs: Vec<String>,
+    pft_type: u8,
+    kernel_dir: String,
+) -> Result<Vec<PftParameterState>, String> {
+    if dirs.is_empty() {
+        return Err("没有可配置的算例".into());
+    }
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|error| format!("{error:#}"))?;
+    let have: std::collections::BTreeSet<&str> =
+        kernel.manifest.macros.iter().map(String::as_str).collect();
+    let crop = have.contains("CROP");
+    let max = if crop { 78 } else { 15 };
+    if pft_type > max {
+        return Err(format!("当前内核只支持 PFT 0..={max}，收到 {pft_type}"));
+    }
+    let all = read_all(&dirs)?;
+    let docs = all
+        .iter()
+        .map(|(dir, text)| {
+            let doc = colm_namelist::parse(text).map_err(|e| format!("{dir}: {e:#}"))?;
+            let context = VisibilityContext::new(&doc, &have);
+            if !(context.single && (context.pft || context.pc) && context.biological_land()) {
+                return Err(format!("{dir}: 当前算例不是可编辑的单点 PFT/PC 植被算例"));
+            }
+            Ok(doc)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut out = Vec::new();
+    for meta in colm_case::pft::all_parameters() {
+        let contexts = docs
+            .iter()
+            .map(|doc| VisibilityContext::new(doc, &have))
+            .collect::<Vec<_>>();
+        let mut available = true;
+        for context in &contexts {
+            available &= pft_parameter_applies(meta, context, pft_type)
+                && pft_parameter_has_default(meta, context, pft_type)?;
+        }
+        if !available {
+            continue;
+        }
+        let defaults = contexts
+            .iter()
+            .map(|context| {
+                colm_case::pft::default_literal(
+                    meta.name,
+                    pft_type,
+                    logical(context.doc, "DEF_USE_Campbell_SOIL_MODEL"),
+                    context.pc,
+                )
+                .map_err(|error| format!("{}: {error:#}", meta.name))?
+                .ok_or_else(|| format!("{} 没有 PFT 默认值", meta.name))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let path = pft_override_path(meta.name, pft_type);
+        let values = docs
+            .iter()
+            .map(|doc| doc.get(&path).map(ToString::to_string))
+            .collect::<Vec<_>>();
+        out.push(PftParameterState {
+            name: meta.name,
+            label_zh: meta.label_zh,
+            label_en: meta.label_en,
+            group_zh: meta.group_zh,
+            group_en: meta.group_en,
+            unit: meta.unit,
+            kind: match meta.kind {
+                colm_case::pft::Kind::Real => "real",
+                colm_case::pft::Kind::Integer => "integer",
+            },
+            default: defaults[0].clone(),
+            default_mixed: defaults.iter().any(|value| value != &defaults[0]),
+            value: values[0].clone(),
+            mixed: values.iter().any(|value| value != &values[0]),
+            allowed_values: if meta.name == "DEF_PFT_C3C4" {
+                vec!["0", "1"]
+            } else {
+                Vec::new()
+            },
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn set_pft_parameter_batch(
+    dirs: Vec<String>,
+    pft_type: u8,
+    name: String,
+    value: Option<String>,
+    kernel_dir: String,
+) -> Result<BatchWrite, String> {
+    if dirs.is_empty() {
+        return Err("没有可配置的算例".into());
+    }
+    let meta = colm_case::pft::parameter(&name).ok_or_else(|| format!("未知 PFT 参数：{name}"))?;
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|error| format!("{error:#}"))?;
+    let have: std::collections::BTreeSet<&str> =
+        kernel.manifest.macros.iter().map(String::as_str).collect();
+    let max = if have.contains("CROP") { 78 } else { 15 };
+    if pft_type > max {
+        return Err(format!("当前内核只支持 PFT 0..={max}，收到 {pft_type}"));
+    }
+    let typed = value
+        .as_deref()
+        .map(|raw| {
+            let number = parse_real(raw).ok_or_else(|| format!("{name} 需要数值，收到 {raw:?}"))?;
+            colm_case::pft::validate_override(meta.name, number)
+                .map_err(|error| format!("{error:#}"))?;
+            Ok(match meta.kind {
+                colm_case::pft::Kind::Real => colm_namelist::Value::Real {
+                    text: raw.trim().to_string(),
+                },
+                colm_case::pft::Kind::Integer => {
+                    if number.fract() != 0.0 {
+                        return Err(format!("{name} 必须是整数"));
+                    }
+                    colm_namelist::Value::Int(number as i64)
+                }
+            })
+        })
+        .transpose()?;
+    let path = pft_override_path(meta.name, pft_type);
+    let kernel_facts = KernelFacts {
+        single: have.contains("SinglePoint"),
+        usgs: have.contains("LULC_USGS"),
+        crop: have.contains("CROP"),
+    };
+    let mut done = Vec::new();
+    for (dir, text) in read_all(&dirs)? {
+        let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
+        let context = VisibilityContext::new(&doc, &have);
+        if !(context.single && (context.pft || context.pc) && context.biological_land()) {
+            return Err(format!("{dir}: 当前算例不是可编辑的单点 PFT/PC 植被算例"));
+        }
+        if !pft_parameter_applies(meta, &context, pft_type) {
+            return Err(format!("{dir}: {} 在当前过程配置下不生效", meta.name));
+        }
+        if !pft_parameter_has_default(meta, &context, pft_type)? {
+            return Err(format!("{dir}: {} 没有可用的内置 PFT 参数", meta.name));
+        }
+        match &typed {
+            Some(value) => doc
+                .insert(&path, value.clone(), "nl_colm")
+                .map_err(|e| format!("{dir}: {e:#}"))?,
+            None => {
+                doc.remove(&path).map_err(|e| format!("{dir}: {e:#}"))?;
+            }
+        }
+        validate_runtime_contract(&doc, std::path::Path::new(&dir), Some(kernel_facts))
+            .map_err(|e| format!("{dir}: {e}"))?;
+        done.push((dir, doc.to_string()));
+    }
+    write_all(&done)
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProcessParamFile {
+    pub file: String,
+    pub title: String,
+    pub section: &'static str,
+    pub entries: Vec<ProcessParamEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProcessParamEntry {
+    pub path: String,
+    pub value: String,
+    pub default: Option<String>,
+    pub kind: &'static str,
+    pub group: String,
+    pub unset: bool,
+    pub doc: Option<String>,
+}
+
+#[derive(Clone)]
+struct ProcessCodeDefault {
+    path: String,
+    value: String,
+    kind: &'static str,
+    group: &'static str,
+    doc: Option<String>,
+    insertable: bool,
+}
+
+fn process_section(name: &str, groups: &std::collections::BTreeSet<String>) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if groups.iter().any(|group| {
+        group.starts_with("nl_colm_tracer")
+            || group.contains("methane")
+            || group.contains("sediment")
+    }) || n.contains("methane")
+        || n.contains("ch4")
+        || n.contains("tracer")
+        || n.contains("sediment")
+        || n.contains("chloride")
+        || n.contains("hdo")
+        || n.contains("o18")
+    {
+        "示踪剂"
+    } else if n.contains("cama") || n.contains("flood") || n.contains("dam") {
+        "河道与水库"
+    } else if n.contains("urban") {
+        "城市"
+    } else if n.contains("bgc") || n.contains("carbon") || n.contains("nitrogen") {
+        "生态与生地化"
+    } else {
+        "水热过程"
+    }
+}
+
+fn value_kind(value: &colm_namelist::Value) -> &'static str {
+    match value {
+        colm_namelist::Value::Bool(_) => "logical",
+        colm_namelist::Value::Int(_) => "integer",
+        colm_namelist::Value::Real { .. } => "real",
+        colm_namelist::Value::Str(_) => "character",
+        colm_namelist::Value::List(_) => "list",
+    }
+}
+
+fn typed_like(reference: &colm_namelist::Value, raw: &str) -> Result<colm_namelist::Value, String> {
+    use colm_namelist::Value;
+    let s = raw.trim();
+    match reference {
+        Value::Bool(_) => match s.to_ascii_lowercase().trim_matches('.') {
+            "true" | "t" => Ok(Value::Bool(true)),
+            "false" | "f" => Ok(Value::Bool(false)),
+            _ => Err(format!("{raw:?} 不是逻辑值")),
+        },
+        Value::Int(_) => s
+            .parse()
+            .map(Value::Int)
+            .map_err(|_| format!("{raw:?} 不是整数")),
+        Value::Real { .. } => parse_real(s)
+            .filter(|v| v.is_finite())
+            .map(|_| Value::Real {
+                text: s.to_string(),
+            })
+            .ok_or_else(|| format!("{raw:?} 不是实数")),
+        Value::Str(_) => Ok(Value::Str(s.trim_matches(['\'', '"']).to_string())),
+        Value::List(items) => {
+            let parts: Vec<&str> = s
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .collect();
+            if parts.is_empty() {
+                return Err("列表不能为空".into());
+            }
+            let fallback_string;
+            let fallback = match items.first() {
+                Some(value) => value,
+                None => {
+                    fallback_string = Value::Str(String::new());
+                    &fallback_string
+                }
+            };
+            Ok(Value::List(
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, part)| typed_like(items.get(i).unwrap_or(fallback), part))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+    }
+}
+
+fn typed_process(kind: &str, raw: &str) -> Result<colm_namelist::Value, String> {
+    use colm_namelist::Value;
+    let reference = match kind {
+        "logical" => Value::Bool(false),
+        "integer" => Value::Int(0),
+        "real" => Value::Real { text: "0".into() },
+        "character" => Value::Str(String::new()),
+        _ => return Err(format!("不支持新增 {kind} 类型的过程参数")),
+    };
+    typed_like(&reference, raw)
+}
+
+fn typed_process_known(
+    kind: &str,
+    current: &colm_namelist::Value,
+    raw: &str,
+) -> Result<colm_namelist::Value, String> {
+    if matches!(current, colm_namelist::Value::List(_)) {
+        let values: Vec<_> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| typed_process(kind, value))
+            .collect::<Result<_, _>>()?;
+        if values.is_empty() {
+            return Err("列表不能为空".into());
+        }
+        Ok(colm_namelist::Value::List(values))
+    } else {
+        typed_process(kind, raw)
+    }
+}
+
+fn tracer_param_files(doc: &colm_namelist::Document) -> Vec<String> {
+    let Some(colm_namelist::Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty() && !x.eq_ignore_ascii_case("null"))
+        .map(|x| {
+            x.rsplit_once(':')
+                .map_or(x, |(_, file)| file)
+                .trim()
+                .trim_matches(['\'', '"'])
+                .to_string()
+        })
+        .collect()
+}
+
+fn safe_process_file(case_dir: &std::path::Path, file: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(file);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    };
+    let canon = candidate
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", candidate.display()))?;
+    let case = case_dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", case_dir.display()))?;
+    if !canon.starts_with(&case) {
+        return Err(format!("过程参数文件不在算例目录内：{}", canon.display()));
+    }
+    Ok(canon)
+}
+
+fn process_decl_kind(decl: &str) -> Option<&'static str> {
+    let decl = decl.trim().to_ascii_lowercase();
+    if decl.starts_with("logical") {
+        Some("logical")
+    } else if decl.starts_with("integer") {
+        Some("integer")
+    } else if decl.starts_with("real") {
+        Some("real")
+    } else if decl.starts_with("character") {
+        Some("character")
+    } else {
+        None
+    }
+}
+
+fn process_code_value(kind: &str, raw: &str) -> String {
+    let clean = raw.trim().replace("_r8", "").replace("_R8", "");
+    match kind {
+        "logical" => {
+            let value = if clean.to_ascii_lowercase().contains("true") {
+                ".true."
+            } else {
+                ".false."
+            };
+            value.into()
+        }
+        "integer" => clean,
+        "real" => {
+            let normalized = clean.replace(['d', 'D'], "e");
+            if parse_real(&normalized).is_some() {
+                return normalized;
+            }
+            // A few CoLM defaults are literal ratios. Fold those so an HTML
+            // number input can display and later write the source default.
+            if let Some((left, right)) = normalized.split_once('/') {
+                if !right.contains('/') {
+                    if let (Some(a), Some(b)) = (parse_real(left.trim()), parse_real(right.trim()))
+                    {
+                        if b != 0.0 {
+                            let value = format!("{:.12}", a / b)
+                                .trim_end_matches('0')
+                                .trim_end_matches('.')
+                                .to_string();
+                            return value;
+                        }
+                    }
+                }
+            }
+            normalized
+        }
+        _ => clean,
+    }
+}
+
+fn process_type_defaults(
+    source: &str,
+    type_name: &str,
+    owner: &str,
+    group: &'static str,
+) -> Vec<ProcessCodeDefault> {
+    let type_name = type_name.to_ascii_lowercase();
+    let mut inside = false;
+    let mut fields = Vec::new();
+    for line in source.lines() {
+        let lower = line.trim().to_ascii_lowercase();
+        if !inside {
+            if lower == format!("type {type_name}") || lower == format!("type :: {type_name}") {
+                inside = true;
+            }
+            continue;
+        }
+        if lower.starts_with("end type") {
+            break;
+        }
+        let (declaration, comment) = line.split_once('!').unwrap_or((line, ""));
+        let Some((decl, assignment)) = declaration.split_once("::") else {
+            continue;
+        };
+        let Some(kind) = process_decl_kind(decl) else {
+            continue;
+        };
+        let Some((name, raw)) = assignment.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let array = name.contains('(');
+        let name = name.split('(').next().unwrap_or(name).trim();
+        if name.is_empty() || name.contains(',') {
+            continue;
+        }
+        let value = process_code_value(kind, raw);
+        fields.push(ProcessCodeDefault {
+            path: format!("{owner}%{name}"),
+            value,
+            kind,
+            group,
+            doc: (!comment.trim().is_empty()).then(|| comment.trim().to_string()),
+            insertable: !array,
+        });
+    }
+    fields
+}
+
+fn process_code_defaults() -> Vec<ProcessCodeDefault> {
+    let mut defaults = process_type_defaults(
+        include_str!("../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Defs.F90"),
+        "tracer_parameter_type",
+        "DEF_TRACER",
+        "nl_colm_tracer_parameter",
+    );
+    let methane =
+        include_str!("../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Const.F90");
+    defaults.extend(process_type_defaults(
+        methane,
+        "Methane_type",
+        "DEF_METHANE",
+        "nl_colm_methane_parameter",
+    ));
+    defaults.extend(process_type_defaults(
+        methane,
+        "Methane_hydrology_type",
+        "DEF_METHANE_hydrology",
+        "nl_colm_methane_parameter",
+    ));
+    defaults.extend(process_type_defaults(
+        include_str!("../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Particle_Sediment.F90"),
+        "sediment_parameter_type",
+        "DEF_SEDIMENT",
+        "nl_colm_sediment_parameter",
+    ));
+    // MOD_Tracer_ForcingInput initializes these scratch variables immediately
+    // before reading &nl_colm_tracer_forcing. Array defaults apply to every slot.
+    for (path, value, kind, insertable) in [
+        ("forcing_num", "0", "integer", true),
+        ("forcing_role", "'none'", "character", false),
+        ("forcing_fprefix", "'null'", "character", false),
+        ("forcing_vname", "'null'", "character", false),
+        ("forcing_tintalgo", "'linear'", "character", false),
+        ("forcing_dtime", "21600", "integer", false),
+        ("forcing_offset", "0", "integer", false),
+        (
+            "forcing_input_mode",
+            "'normalized_over_total'",
+            "character",
+            false,
+        ),
+    ] {
+        defaults.push(ProcessCodeDefault {
+            path: path.into(),
+            value: value.into(),
+            kind,
+            group: "nl_colm_tracer_forcing",
+            doc: None,
+            insertable,
+        });
+    }
+    defaults
+}
+
+fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessParamFile, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let doc = colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("parameter.nml")
+        .to_string();
+    let defaults = process_code_defaults();
+    let by_path: std::collections::HashMap<String, &ProcessCodeDefault> = defaults
+        .iter()
+        .map(|field| (field.path.to_ascii_lowercase(), field))
+        .collect();
+    let mut group = String::new();
+    let mut groups = std::collections::BTreeSet::new();
+    let mut present = std::collections::BTreeSet::new();
+    let mut entries = Vec::new();
+    for item in &doc.items {
+        match item {
+            colm_namelist::document::Item::GroupStart(line) => {
+                group = line.trim().trim_start_matches('&').to_string();
+                groups.insert(group.to_ascii_lowercase());
+            }
+            colm_namelist::document::Item::Entry(entry) => {
+                let path = entry.path.to_string();
+                present.insert(path.to_ascii_lowercase());
+                let code = by_path.get(&path.to_ascii_lowercase()).copied();
+                entries.push(ProcessParamEntry {
+                    default: code.map(|field| field.value.clone()),
+                    kind: value_kind(&entry.value),
+                    value: entry.value.to_string(),
+                    group: group.clone(),
+                    unset: false,
+                    doc: code.and_then(|field| field.doc.clone()),
+                    path,
+                });
+            }
+            _ => {}
+        }
+    }
+    for field in defaults {
+        if field.insertable
+            && groups.contains(&field.group.to_ascii_lowercase())
+            && !present.contains(&field.path.to_ascii_lowercase())
+        {
+            entries.push(ProcessParamEntry {
+                path: field.path,
+                value: field.value.clone(),
+                default: Some(field.value),
+                kind: field.kind,
+                group: field.group.into(),
+                unset: true,
+                doc: field.doc,
+            });
+        }
+    }
+    Ok(ProcessParamFile {
+        section: process_section(&name, &groups),
+        title: name.clone(),
+        file: file_id,
+        entries,
+    })
+}
+
+#[tauri::command]
+pub fn process_parameter_files(dir: String) -> Result<Vec<ProcessParamFile>, String> {
+    let case_dir = std::path::Path::new(&dir);
+    let case_text = std::fs::read_to_string(case_dir.join("case.nml"))
+        .map_err(|e| format!("{}: {e}", case_dir.join("case.nml").display()))?;
+    let case_doc = colm_namelist::parse(&case_text).map_err(|e| format!("{dir}: {e:#}"))?;
+    let mut files: std::collections::BTreeSet<String> =
+        tracer_param_files(&case_doc).into_iter().collect();
+    for entry in std::fs::read_dir(case_dir).map_err(|e| format!("{dir}: {e}"))? {
+        let entry = entry.map_err(|e| format!("{dir}: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with("_parameter.nml") || name.contains("parameter") && name.ends_with(".nml")
+        {
+            files.insert(name);
+        }
+    }
+    files
+        .into_iter()
+        .map(|file| {
+            safe_process_file(case_dir, &file).and_then(|path| process_entries(&path, file))
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn set_process_parameter_field_batch(
+    dirs: Vec<String>,
+    file: String,
+    path: String,
+    value: String,
+) -> Result<BatchWrite, String> {
+    if dirs.is_empty() {
+        return Err("没有可配置的算例".into());
+    }
+    let mut done = Vec::with_capacity(dirs.len());
+    for dir in &dirs {
+        let case_dir = std::path::Path::new(dir);
+        let path_file = safe_process_file(case_dir, &file)?;
+        let text = std::fs::read_to_string(&path_file)
+            .map_err(|e| format!("{}: {e}", path_file.display()))?;
+        let mut doc =
+            colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", path_file.display()))?;
+        let code = process_code_defaults()
+            .into_iter()
+            .find(|field| field.path.eq_ignore_ascii_case(&path));
+        if let Some(current) = doc.get(&path).cloned() {
+            let value = match code {
+                Some(field) => typed_process_known(field.kind, &current, &value)?,
+                None => typed_like(&current, &value)?,
+            };
+            doc.set(&path, value)
+                .map_err(|e| format!("{path_file:?}: {e:#}"))?;
+        } else {
+            let field = code
+                .filter(|field| field.insertable)
+                .ok_or_else(|| format!("{} 里没有可安全新增的字段 {path}", path_file.display()))?;
+            doc.insert(&path, typed_process(field.kind, &value)?, field.group)
+                .map_err(|e| format!("{}: {e:#}", path_file.display()))?;
+        }
+        done.push((path_file, doc.to_string()));
+    }
+    write_process_files(&done)?;
+    Ok(BatchWrite {
+        written: done.len(),
+        text: std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml"))
+            .unwrap_or_default(),
+    })
+}
+
+fn write_process_files(done: &[(std::path::PathBuf, String)]) -> Result<(), String> {
+    // ponytail: process parameter edits are rare; one global lock is enough unless UI writes become concurrent-hot.
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static BACKUP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _guard = WRITE_LOCK
+        .lock()
+        .map_err(|_| "过程参数写入锁已损坏；请重启 CoLM Desktop".to_string())?;
+    let tag = format!(
+        "{}.{}",
+        std::process::id(),
+        BACKUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let mut backups = Vec::with_capacity(done.len());
+    for (index, (path, _)) in done.iter().enumerate() {
+        let backup = path.with_file_name(format!(
+            ".{}.bak-{tag}-{index}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("process_parameter.nml")
+        ));
+        if let Err(error) = std::fs::copy(path, &backup) {
+            for backup in &backups {
+                let _ = std::fs::remove_file(backup);
+            }
+            return Err(format!("{}: {error}", backup.display()));
+        }
+        backups.push(backup);
+    }
+    for (index, (path, text)) in done.iter().enumerate() {
+        if let Err(error) = std::fs::write(path, text) {
+            for ((prior, _), backup) in done.iter().zip(backups.iter()).take(index + 1) {
+                let _ = std::fs::copy(backup, prior);
+            }
+            for backup in &backups {
+                let _ = std::fs::remove_file(backup);
+            }
+            return Err(format!("{}: {error}", path.display()));
+        }
+    }
+    for backup in &backups {
+        let _ = std::fs::remove_file(backup);
+    }
+    Ok(())
 }
 
 /// 一份 namelist 里的一个字段，交给前端渲染。
@@ -990,6 +2508,7 @@ pub fn read_case(text: String) -> Result<Vec<Entry>, String> {
     Ok(doc
         .paths()
         .into_iter()
+        .filter(|path| !colm_case::pft::is_override_path(path))
         .map(|p| {
             let f = colm_schema::find(&p);
             Entry {
@@ -1054,9 +2573,11 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
         K::Real => {
             // 存原文：1800. 与 1800.0 与 1.8e3 等价，往返要还原用户写的那种。
             // 但先确认它确实是个数，否则会把一个打错的字悄悄写进文件。
-            s.replace(['d', 'D'], "e")
-                .parse::<f64>()
-                .map_err(|_| format!("{path} is a real; {raw:?} is not a number"))?;
+            let value = parse_real(s)
+                .ok_or_else(|| format!("{path} is a real; {raw:?} is not a number"))?;
+            if !value.is_finite() {
+                return Err(format!("{path} is a real; {raw:?} is not finite"));
+            }
             Ok(Value::Real {
                 text: s.to_string(),
             })
@@ -1172,7 +2693,46 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
     }
+    validate_runtime_contract(&doc, std::path::Path::new(dir), None)
+        .map_err(|e| format!("{dir}: {e}"))?;
+    validate_changed_fields(&doc, fields).map_err(|e| format!("{dir}: {e}"))?;
+    stage_ch4_parameter(dir, fields)?;
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// 复用上游 CH4 参数，只关闭单点没有的路由/CROP/空间 pH 输入。
+fn stage_ch4_parameter(dir: &str, fields: &[FieldChange]) -> Result<(), String> {
+    let wants_builtin = fields.iter().any(|field| {
+        field.path == "DEF_TRACER_PARAM_FILES"
+            && field.value.trim_matches(['\'', '"']) == "CH4:standard_ch4_parameter.nml"
+    });
+    if !wants_builtin {
+        return Ok(());
+    }
+
+    let mut text =
+        include_str!("../../../vendor/CoLM202X/run/standard_ch4_parameter.nml").to_string();
+    for (from, to) in [
+        (
+            "DEF_METHANE%inundation_mode  = 'hybrid'",
+            "DEF_METHANE%inundation_mode  = 'wetwat'",
+        ),
+        (
+            "DEF_METHANE%enable_rice_paddy = .true.",
+            "DEF_METHANE%enable_rice_paddy = .false.",
+        ),
+        (
+            "DEF_METHANE%use_spatial_ph   = .true.",
+            "DEF_METHANE%use_spatial_ph   = .false.",
+        ),
+    ] {
+        if text.matches(from).count() != 1 {
+            return Err(format!("内置 CH4 参数模板缺少唯一设置：{from}"));
+        }
+        text = text.replacen(from, to, 1);
+    }
+    let path = std::path::Path::new(dir).join("standard_ch4_parameter.nml");
+    std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// 把一个字段写进这一批算例的每一份 case.nml。
@@ -1184,8 +2744,9 @@ pub fn set_field_batch(
     dirs: Vec<String>,
     path: String,
     value: String,
+    kernel_dir: Option<String>,
 ) -> Result<BatchWrite, String> {
-    set_fields_batch(dirs, vec![FieldChange { path, value }])
+    set_fields_batch(dirs, vec![FieldChange { path, value }], kernel_dir)
 }
 
 /// 把一组有关联的字段原子地写进整批算例。
@@ -1193,10 +2754,15 @@ pub fn set_field_batch(
 /// 用于“启用初始场并选择文件”和互斥开关：不能先把父开关写成 true，再因
 /// 路径或另一开关写入失败而留下半套配置。
 #[tauri::command]
-pub fn set_fields_batch(dirs: Vec<String>, fields: Vec<FieldChange>) -> Result<BatchWrite, String> {
+pub fn set_fields_batch(
+    dirs: Vec<String>,
+    fields: Vec<FieldChange>,
+    kernel_dir: Option<String>,
+) -> Result<BatchWrite, String> {
     if fields.is_empty() {
         return Err("没有要保存的字段".into());
     }
+    let kernel = kernel_facts(kernel_dir.as_deref())?;
     let all = read_all(&dirs)?;
     let mut done: Vec<(String, String)> = Vec::with_capacity(all.len());
     for (d, text) in all {
@@ -1205,15 +2771,53 @@ pub fn set_fields_batch(dirs: Vec<String>, fields: Vec<FieldChange>) -> Result<B
             let value = typed(&field.path, &field.value)?;
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
         }
+        validate_runtime_contract(&doc, std::path::Path::new(&d), kernel)
+            .map_err(|e| format!("{d}: {e}"))?;
+        validate_changed_fields(&doc, &fields).map_err(|e| format!("{d}: {e}"))?;
         done.push((d, doc.to_string()));
     }
     write_all(&done)
 }
 
 pub(crate) fn write_all(done: &[(String, String)]) -> Result<BatchWrite, String> {
-    for (d, text) in done {
+    // ponytail: GUI writes are rare; shard this global lock per case only if measured contention appears.
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static BACKUP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _guard = WRITE_LOCK
+        .lock()
+        .map_err(|_| "配置写入锁已损坏；请重启 CoLM Desktop".to_string())?;
+    let tag = format!(
+        "{}.{}",
+        std::process::id(),
+        BACKUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let mut backups = Vec::with_capacity(done.len());
+    for (i, (d, _)) in done.iter().enumerate() {
+        let path = std::path::Path::new(d).join("case.nml");
+        let backup = std::path::Path::new(d).join(format!(".case.nml.bak-{tag}-{i}"));
+        if let Err(error) = std::fs::copy(&path, &backup) {
+            for (_, prior) in &backups {
+                let _ = std::fs::remove_file(prior);
+            }
+            return Err(format!("{}: {error}", backup.display()));
+        }
+        backups.push((path, backup));
+    }
+
+    for (index, (d, text)) in done.iter().enumerate() {
         let p = std::path::Path::new(d).join("case.nml");
-        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+        if let Err(error) = std::fs::write(&p, text) {
+            for (path, backup) in backups.iter().take(index + 1) {
+                let _ = std::fs::copy(backup, path);
+            }
+            for (_, backup) in &backups {
+                let _ = std::fs::remove_file(backup);
+            }
+            return Err(format!("{}: {error}", p.display()));
+        }
+    }
+    for (_, backup) in &backups {
+        let _ = std::fs::remove_file(backup);
     }
     Ok(BatchWrite {
         written: done.len(),
@@ -1377,7 +2981,13 @@ fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, Strin
 /// 用同一个绝对年份会让一部分算例的预热落在窗口之外（等于没预热），
 /// 另一部分落得过深（等于把输出砍掉一大截）。
 #[tauri::command]
-pub fn set_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWrite, String> {
+pub fn set_spinup(
+    dirs: Vec<String>,
+    years: u32,
+    repeat: u32,
+    kernel_dir: Option<String>,
+) -> Result<BatchWrite, String> {
+    let kernel = kernel_facts(kernel_dir.as_deref())?;
     let all = read_all(&dirs)?;
     let mut done = Vec::with_capacity(all.len());
     for (d, text) in all {
@@ -1397,9 +3007,24 @@ pub fn set_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWri
             int("DEF_simulation_time%start_day") as u32,
             int("DEF_simulation_time%start_sec") as u32,
         );
-        for (path, v) in colm_case::spinup_fields(start, colm_case::Spinup { years, repeat }) {
+        let end_stamp = simulation_stamp(&doc, "DEF_simulation_time%end_");
+        let spinup_end = civil_stamp(
+            start.0 as i64 + years as i64,
+            start.1 as i64,
+            start.2 as i64,
+            start.3 as i64,
+        );
+        if years > 0 && repeat > 0 && spinup_end >= end_stamp {
+            return Err(format!(
+                "{d}: 预热截止时间必须早于模拟结束时间；请缩短预热年数或延长模拟窗口"
+            ));
+        }
+        let spinup = colm_case::Spinup { years, repeat };
+        for (path, v) in colm_case::spinup_fields(start, spinup) {
             put(&mut doc, &path, v).map_err(|e| format!("{d}: {e}"))?;
         }
+        validate_runtime_contract(&doc, std::path::Path::new(&d), kernel)
+            .map_err(|e| format!("{d}: {e}"))?;
         done.push((d, doc.to_string()));
     }
     write_all(&done)

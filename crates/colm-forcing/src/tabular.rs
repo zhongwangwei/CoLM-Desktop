@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::check::cadence_problem;
 use crate::convert::{canonical_units, Heights};
 use crate::gapfill::decide_timezone_with_solar;
 use crate::slots::SLOTS;
@@ -349,7 +350,7 @@ pub fn import_table(
     let mut safe_names = BTreeMap::<String, String>::new();
     for site in groups.keys() {
         let safe = safe_site_name(site)?;
-        if let Some(other) = safe_names.insert(safe.clone(), site.clone()) {
+        if let Some(other) = safe_names.insert(safe.to_ascii_lowercase(), site.clone()) {
             bail!("site names {other:?} and {site:?} both normalize to {safe:?}");
         }
     }
@@ -478,8 +479,7 @@ pub fn import_table(
         }
         let observed_times = by_time.keys().copied().collect::<Vec<_>>();
         let step = match plan.step_seconds {
-            Some(value) if value > 0 => value,
-            Some(value) => bail!("time step {value} must be positive"),
+            Some(value) => validate_step(value)?,
             None => infer_step(&observed_times)
                 .with_context(|| format!("cannot infer a uniform time step for site {site:?}"))?,
         };
@@ -1073,7 +1073,7 @@ fn infer_step(times: &[i64]) -> Result<i64> {
             remainder <= 1 || candidate - remainder <= 1
         })
     }) {
-        return Ok(step);
+        return validate_step(step);
     }
 
     let step = differences.iter().copied().fold(0_i64, gcd);
@@ -1081,6 +1081,13 @@ fn infer_step(times: &[i64]) -> Result<i64> {
         bail!(
             "timestamp differences imply an implausible {step}s cadence; correct timestamp jitter or specify the intended time step"
         );
+    }
+    validate_step(step)
+}
+
+fn validate_step(step: i64) -> Result<i64> {
+    if let Some(problem) = cadence_problem(2, step as f64) {
+        bail!(problem);
     }
     Ok(step)
 }
@@ -1339,7 +1346,7 @@ fn write_site_file(
         let _ = std::fs::remove_file(&tmp);
         return Err(error);
     }
-    install_file(&tmp, destination)?;
+    crate::gapfill::install_repaired_file(&tmp, destination)?;
     Ok(())
 }
 
@@ -1385,39 +1392,6 @@ fn scalar(
     variable.put_attribute("source", source)?;
     variable.put_value(value, ())?;
     Ok(())
-}
-
-fn install_file(tmp: &Path, destination: &Path) -> Result<()> {
-    if !destination.exists() {
-        std::fs::rename(tmp, destination).with_context(|| {
-            format!(
-                "cannot install {} as {}",
-                tmp.display(),
-                destination.display()
-            )
-        })?;
-        return Ok(());
-    }
-    let backup = destination.with_extension(format!(
-        "{}.backup-{}",
-        destination
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("nc"),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&backup);
-    std::fs::rename(destination, &backup)?;
-    match std::fs::rename(tmp, destination) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(backup);
-            Ok(())
-        }
-        Err(error) => {
-            let _ = std::fs::rename(&backup, destination);
-            Err(error).with_context(|| format!("cannot replace {}", destination.display()))
-        }
-    }
 }
 
 fn explicit_common_offset(offsets: &[Option<i64>]) -> Option<f64> {

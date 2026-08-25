@@ -6,6 +6,7 @@
 //! 正确做法是整体读取一个 `CALL write_history_variable_*` 调用 ——
 //! 顺带也必须这么做，因为**闸门 2 的内联 `.and.` 就写在首参里**。
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -22,6 +23,12 @@ pub struct Var {
 pub enum Cond {
     AnyOf(Vec<String>),
     Not(String),
+}
+
+#[derive(Default)]
+struct RuntimeFrame {
+    prior: Vec<String>,
+    current: Option<String>,
 }
 
 /// `#ifdef X` / `#ifndef X` / `#if (defined A || defined B)`。
@@ -65,13 +72,27 @@ fn parse_cond(line: &str) -> Result<Option<Cond>> {
 }
 
 pub fn extract(text: &str) -> Result<Vec<Var>> {
+    extract_at_least(text, 400)
+}
+
+pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
     let mut out: BTreeMap<String, Var> = BTreeMap::new();
     let mut mstack: Vec<Option<Cond>> = Vec::new();
-    let mut ifstack: Vec<Option<String>> = Vec::new();
+    let mut ifstack: Vec<RuntimeFrame> = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     while i < lines.len() {
-        let t = lines[i].trim();
+        let first = strip_comment(lines[i]).trim();
+        let is_if = {
+            let low = first.to_ascii_lowercase();
+            low.starts_with("if") || low.starts_with("else if") || low.starts_with("elseif")
+        };
+        let (logical, after_control) = if is_if {
+            logical_statement(&lines, i)
+        } else {
+            (first.to_string(), i + 1)
+        };
+        let t = logical.trim();
 
         if t.starts_with("#if") {
             mstack.push(parse_cond(t)?);
@@ -97,13 +118,41 @@ pub fn extract(text: &str) -> Result<Vec<Var>> {
 
         // 块形式的 IF ... THEN。单行 IF 没有配对的 ENDIF，不能进栈。
         let low = t.to_ascii_lowercase();
-        if low.starts_with("if") && low.replace(' ', "").ends_with(")then") {
-            ifstack.push(runtime_if(t));
-            i += 1;
+        if low == "else" {
+            let Some(frame) = ifstack.last_mut() else {
+                bail!("unmatched Fortran ELSE at line {}", i + 1);
+            };
+            frame.current = alternative_after(&frame.prior, None);
+            i = after_control;
             continue;
         }
-        if low == "endif" || low == "end if" {
-            ifstack.pop();
+        if (low.starts_with("else if") || low.starts_with("elseif"))
+            && low.replace(' ', "").ends_with(")then")
+        {
+            let next = runtime_if(t);
+            let Some(frame) = ifstack.last_mut() else {
+                bail!("unmatched Fortran ELSE IF at line {}", i + 1);
+            };
+            frame.current = alternative_after(&frame.prior, next.clone());
+            if let Some(next) = next {
+                frame.prior.push(next);
+            }
+            i = after_control;
+            continue;
+        }
+        if low.starts_with("if") && low.replace(' ', "").ends_with(")then") {
+            let current = runtime_if(t);
+            ifstack.push(RuntimeFrame {
+                prior: current.iter().cloned().collect(),
+                current,
+            });
+            i = after_control;
+            continue;
+        }
+        if low.replace(' ', "") == "endif" {
+            if ifstack.pop().is_none() {
+                bail!("unmatched Fortran ENDIF at line {}", i + 1);
+            }
             i += 1;
             continue;
         }
@@ -128,28 +177,110 @@ pub fn extract(text: &str) -> Result<Vec<Var>> {
                     break;
                 }
             }
-            // 内联条件优先；没有的话用最近的一层带 DEF_ 的外层 IF。
-            let rt = inline_runtime(&buf).or_else(|| ifstack.iter().flatten().next_back().cloned());
+            let rt = conjunction(
+                ifstack
+                    .iter()
+                    .filter_map(|frame| frame.current.clone())
+                    .chain(inline_runtime(&buf)),
+            );
             for name in literals(&buf) {
                 let macros: Vec<Cond> = mstack.iter().flatten().cloned().collect();
-                out.entry(name.clone()).or_insert(Var {
+                let candidate = Var {
                     name,
                     macros,
                     runtime: rt.clone(),
                     line: (start + 1) as u32,
-                });
+                };
+                match out.entry(candidate.name.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(candidate);
+                    }
+                    Entry::Occupied(mut e) => merge_sites(e.get_mut(), candidate)?,
+                }
             }
             continue;
         }
         i += 1;
     }
-    if out.len() < 400 {
+    if !mstack.is_empty() || !ifstack.is_empty() {
+        bail!("unterminated conditional in MOD_Hist.F90");
+    }
+    if out.len() < minimum {
         bail!(
             "only {} write sites found — the call format must have changed",
             out.len()
         );
     }
     Ok(out.into_values().collect())
+}
+
+/// Join a free-form Fortran statement continued with trailing `&` markers.
+fn logical_statement(lines: &[&str], start: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut i = start;
+    loop {
+        let line = strip_comment(lines[i]).trim();
+        let continued = line.ends_with('&');
+        let piece = line.trim_end_matches('&').trim_start_matches('&').trim();
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(piece);
+        i += 1;
+        if !continued || i == lines.len() {
+            return (out, i);
+        }
+    }
+}
+
+fn alternative_after(prior: &[String], next: Option<String>) -> Option<String> {
+    let previous = disjunction(prior.iter().cloned());
+    conjunction(previous.map(negate).into_iter().chain(next))
+}
+
+fn conjunction(parts: impl IntoIterator<Item = String>) -> Option<String> {
+    joined(parts, ".and.")
+}
+
+fn disjunction(parts: impl IntoIterator<Item = String>) -> Option<String> {
+    joined(parts, ".or.")
+}
+
+fn joined(parts: impl IntoIterator<Item = String>, operator: &str) -> Option<String> {
+    let parts: Vec<String> = parts.into_iter().filter(|s| !s.is_empty()).collect();
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => Some(
+            parts
+                .into_iter()
+                .map(|part| format!("({part})"))
+                .collect::<Vec<_>>()
+                .join(&format!(" {operator} ")),
+        ),
+    }
+}
+
+fn negate(expr: String) -> String {
+    format!(".not.({expr})")
+}
+
+fn merge_sites(existing: &mut Var, candidate: Var) -> Result<()> {
+    if existing.macros != candidate.macros {
+        bail!(
+            "{} is written under different compile-time conditions at lines {} and {}",
+            existing.name,
+            existing.line,
+            candidate.line
+        );
+    }
+    existing.runtime = match (existing.runtime.take(), candidate.runtime) {
+        (None, _) | (_, None) => None,
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(a), Some(b)) if negate(a.clone()) == b || negate(b.clone()) == a => None,
+        (Some(a), Some(b)) => Some(format!("({a}) .or. ({b})")),
+    };
+    Ok(())
 }
 
 /// 外层 `IF (...) THEN` 中含 `DEF_` 的条件原文；其余返回 `None`。
@@ -230,10 +361,11 @@ pub fn render(vars: &[Var]) -> String {
         "//! 由 `cargo run -p xtask -- gen-histmap` 生成。**不要手改。**\n\
          //!\n\
          //! 源：vendor/CoLM202X/main/MOD_Hist.F90\n\
+         //!     vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90\n\
          //! 漂移由 crates/colm-hist/tests/drift.rs 守住。\n\n\
          use crate::{Cond, Var};\n\n\
          // 一个变量一行 —— 上游改一处，diff 就只有一行。rustfmt 会把每条拆成\n\
-         // 六行（456 条 -> 近三千行），那样 code review 里就看不出改了什么了。\n\
+         // 六行（618 条 -> 近四千行），那样 code review 里就看不出改了什么了。\n\
          // colm-schema 的同类文件不用写这条：它有一条 626 字符、断不开的数组\n\
          // 默认值，rustfmt 因此整块放弃 —— 那是巧合，不是设计，这里写明。\n\
          #[rustfmt::skip]\n\
@@ -273,5 +405,72 @@ fn render_cond(c: &Cond) -> String {
             format!("Cond::AnyOf(&[{list}])")
         }
         Cond::Not(n) => format!("Cond::Not({n:?})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn corpus(extra: &str) -> String {
+        let mut text = String::new();
+        for i in 0..401 {
+            writeln!(
+                text,
+                "CALL write_history_variable_2d (x, y, z, 'f_base_{i}')"
+            )
+            .unwrap();
+        }
+        text.push_str(extra);
+        text
+    }
+
+    #[test]
+    fn a_variable_written_in_both_if_branches_is_unconditional() {
+        let vars = extract(&corpus(
+            "IF (DEF_SWITCH) THEN\n\
+             CALL write_history_variable_2d (x, y, z, 'f_both')\n\
+             ELSE\n\
+             CALL write_history_variable_2d (x, y, z, 'f_both')\n\
+             ENDIF\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            vars.iter().find(|v| v.name == "both").unwrap().runtime,
+            None
+        );
+    }
+
+    #[test]
+    fn nested_runtime_guards_are_joined_instead_of_dropping_the_outer_one() {
+        let vars = extract(&corpus(
+            "IF (DEF_OUTER) THEN\n\
+             IF (DEF_INNER) THEN\n\
+             CALL write_history_variable_2d (x, y, z, 'f_nested')\n\
+             ENDIF\n\
+             ENDIF\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            vars.iter().find(|v| v.name == "nested").unwrap().runtime,
+            Some("(DEF_OUTER) .and. (DEF_INNER)".to_string())
+        );
+    }
+
+    #[test]
+    fn a_multiline_non_config_if_does_not_pop_an_outer_runtime_guard() {
+        let vars = extract(&corpus(
+            "IF (DEF_OUTER) THEN\n\
+             IF (worker .and. &\n\
+                 count > 0) THEN\n\
+             CALL write_history_variable_2d (x, y, z, 'f_guarded')\n\
+             ENDIF\n\
+             ENDIF\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            vars.iter().find(|v| v.name == "guarded").unwrap().runtime,
+            Some("DEF_OUTER".to_string())
+        );
     }
 }

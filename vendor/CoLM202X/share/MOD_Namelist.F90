@@ -531,6 +531,113 @@ MODULE MOD_Namelist
    logical :: DEF_USE_PLANTHYDRAULICS   = .true.  ! Plant Hydraulics
    logical :: DEF_USE_MEDLYNST          = .false. ! Medlyn stomata model
    logical :: DEF_USE_WUEST             = .true.  ! WUE stomata model
+   ! Optional case-level stomatal calibration.  -1 keeps the existing
+   ! land-cover/PFT-specific lookup table unchanged.
+   real(r8) :: DEF_BALL_BERRY_GRADM = -1.0_r8 ! Ball-Berry slope; valid override > 1.6
+   real(r8) :: DEF_BALL_BERRY_BINTER = -1.0_r8 ! Ball-Berry intercept; valid override >= 0
+   real(r8) :: DEF_MEDLYN_G1 = -1.0_r8 ! Medlyn slope; valid override >= 0
+   real(r8) :: DEF_MEDLYN_G0 = -1.0_r8 ! Medlyn intercept; valid override >= 0
+   real(r8) :: DEF_WUE_LAMBDA = -1.0_r8 ! WUE marginal water cost; valid override > 0
+
+   ! Optional SinglePoint land-cover table override. LC_OVERRIDE_UNSET keeps built-in tables bit-identical.
+   real(r8), parameter :: LC_OVERRIDE_UNSET = -1.e36_r8
+   real(r8) :: DEF_LC_HTOP0 = -1.e36_r8
+   real(r8) :: DEF_LC_HBOT0 = -1.e36_r8
+   real(r8) :: DEF_LC_FVEG0 = -1.e36_r8
+   real(r8) :: DEF_LC_SAI0 = -1.e36_r8
+   real(r8) :: DEF_LC_Z0MR = -1.e36_r8
+   real(r8) :: DEF_LC_DISPLAR = -1.e36_r8
+   real(r8) :: DEF_LC_SQRTDI = -1.e36_r8
+   real(r8) :: DEF_LC_CHIL = -1.e36_r8
+   real(r8) :: DEF_LC_RHOL_VIS = -1.e36_r8
+   real(r8) :: DEF_LC_RHOL_NIR = -1.e36_r8
+   real(r8) :: DEF_LC_RHOS_VIS = -1.e36_r8
+   real(r8) :: DEF_LC_RHOS_NIR = -1.e36_r8
+   real(r8) :: DEF_LC_TAUL_VIS = -1.e36_r8
+   real(r8) :: DEF_LC_TAUL_NIR = -1.e36_r8
+   real(r8) :: DEF_LC_TAUS_VIS = -1.e36_r8
+   real(r8) :: DEF_LC_TAUS_NIR = -1.e36_r8
+   real(r8) :: DEF_LC_VMAX25 = -1.e36_r8
+   real(r8) :: DEF_LC_EFFCON = -1.e36_r8
+   real(r8) :: DEF_LC_RESPCP = -1.e36_r8
+   real(r8) :: DEF_LC_SHTI = -1.e36_r8
+   real(r8) :: DEF_LC_SLTI = -1.e36_r8
+   real(r8) :: DEF_LC_TRDA = -1.e36_r8
+   real(r8) :: DEF_LC_TRDM = -1.e36_r8
+   real(r8) :: DEF_LC_TROP = -1.e36_r8
+   real(r8) :: DEF_LC_HHTI = -1.e36_r8
+   real(r8) :: DEF_LC_HLTI = -1.e36_r8
+   real(r8) :: DEF_LC_EXTKN = -1.e36_r8
+   real(r8) :: DEF_LC_D50 = -1.e36_r8
+   real(r8) :: DEF_LC_BETA = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_SUN = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_SHA = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_XYL = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_ROOT = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_SUN = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_SHA = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_XYL = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_ROOT = -1.e36_r8
+   real(r8) :: DEF_LC_CK = -1.e36_r8
+   integer :: DEF_LC_C3C4 = -1
+
+   integer, parameter :: PFT_OVERRIDE_SLOTS = 79
+#ifdef CROP
+   integer, parameter :: PFT_OVERRIDE_ACTIVE_SLOTS = PFT_OVERRIDE_SLOTS
+#else
+   integer, parameter :: PFT_OVERRIDE_ACTIVE_SLOTS = 16
+#endif
+   real(r8), parameter :: PFT_OVERRIDE_UNSET = -1.e36_r8
+   integer, parameter :: PFT_OVERRIDE_INT_UNSET = -2147483647
+#define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) real(r8) :: VAR(PFT_OVERRIDE_SLOTS) = PFT_OVERRIDE_UNSET
+#define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) integer :: VAR(PFT_OVERRIDE_SLOTS) = PFT_OVERRIDE_INT_UNSET
+#include <pft_override_fields.inc>
+#undef PFT_OVERRIDE_INTEGER
+#undef PFT_OVERRIDE_REAL
+
+   ! Expert-mode scalar tuning defaults match the legacy hard-coded constants.
+   real(r8) :: DEF_TUNING_ZLND = 0.01_r8 ! Soil aerodynamic roughness length [m]
+   real(r8) :: DEF_TUNING_ZSNO = 0.0024_r8 ! Snow aerodynamic roughness length [m]
+   real(r8) :: DEF_TUNING_CSOILC = 0.004_r8 ! Soil drag coefficient below canopy [-]
+   real(r8) :: DEF_TUNING_DEWMX = 0.1_r8 ! Maximum canopy dew storage [mm]
+   real(r8) :: DEF_TUNING_CAPR = 0.34_r8 ! First-layer-to-surface temperature tuning factor [-]
+   real(r8) :: DEF_TUNING_CNFAC = 0.5_r8 ! Crank-Nicolson weighting factor [0,1]
+   real(r8) :: DEF_TUNING_SSI = 0.033_r8 ! Irreducible snow-water saturation fraction [0,1]
+   real(r8) :: DEF_TUNING_WIMP = 0.05_r8 ! Impermeable-soil porosity threshold [0,1)
+   real(r8) :: DEF_TUNING_PONDMX = 10.0_r8 ! Maximum surface ponding depth [mm]
+   real(r8) :: DEF_TUNING_SMPMAX = -1.5e5_r8 ! Simple VIC wilting matric potential [mm]
+   real(r8) :: DEF_TUNING_SMPMIN = -1.e8_r8 ! Minimum allowed soil matric potential [mm]
+   real(r8) :: DEF_TUNING_SMPMAX_HR = -2.e2_r8 ! Heterotrophic-respiration soil-potential upper limit [mm]
+   real(r8) :: DEF_TUNING_SMPMIN_HR = -2.e5_r8 ! Heterotrophic-respiration soil-potential lower limit [mm]
+   real(r8) :: DEF_TUNING_TRSMX0 = 2.e-4_r8 ! Maximum transpiration rate [mm s-1]
+   real(r8) :: DEF_TUNING_WETWATMAX = 200.0_r8 ! Maximum wetland surface-water storage [mm]
+   real(r8) :: DEF_TUNING_SOIL_ICE_IMPEDANCE = 6.0_r8 ! Frozen-soil hydraulic impedance exponent [-]
+   real(r8) :: DEF_TUNING_TOPMOD_DECAY = 2.0_r8 ! TOPMODEL water-table decay coefficient [m-1]
+   real(r8) :: DEF_TUNING_SIMPLE_VIC_DS = 0.061_r8 ! Simple VIC baseflow fraction [-]
+   real(r8) :: DEF_TUNING_SIMPLE_VIC_WS = 0.646_r8 ! Simple VIC baseflow threshold fraction [-]
+   real(r8) :: DEF_TUNING_SNOW_COVER_EXPONENT = 1.0_r8 ! Snow-cover density exponent [-]
+   real(r8) :: DEF_TUNING_IRRIGATION_START_SEC = 21600.0_r8 ! Local irrigation start second [s]
+   real(r8) :: DEF_TUNING_IRRIGATION_DURATION_SEC = 14400.0_r8 ! Irrigation application duration [s]
+   real(r8) :: DEF_TUNING_IRRIGATION_MAX_DEPTH = 1.0_r8 ! Maximum irrigated soil depth [m]
+   real(r8) :: DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION = 1.0_r8 ! Irrigation trigger fraction [-]
+   real(r8) :: DEF_TUNING_IRRIGATION_SUPPLY_FRACTION = 1.0_r8 ! Irrigation deficit supply fraction [-]
+   real(r8) :: DEF_TUNING_IRRIGATION_MIN_CPHASE = 1.0_r8 ! First irrigated crop phase [-]
+   real(r8) :: DEF_TUNING_IRRIGATION_MAX_CPHASE = 4.0_r8 ! Exclusive last irrigated crop phase [-]
+   real(r8) :: DEF_TUNING_IRRIGATION_PONDMX = 100.0_r8 ! Paddy maximum ponding depth [mm]
+   real(r8) :: DEF_TUNING_CROP_PLANTING_DAY = 0.0_r8 ! Single-point planting day; 0 reads runtime data [day of year]
+   real(r8) :: DEF_PH_CROOT_LATERAL_LENGTH = 0.25_r8 ! Coarse-root lateral length [m]
+   real(r8) :: DEF_PH_K_AXS = 2.0e-1_r8 ! Root axial hydraulic-conductivity coefficient
+   real(r8) :: DEF_PH_FROOT_CARBON = 288.392056287006_r8 ! Fine-root carbon stock [g C m-2]
+   real(r8) :: DEF_PH_ROOT_RADIUS = 2.9e-4_r8 ! Fine-root radius [m]
+   real(r8) :: DEF_PH_ROOT_DENSITY = 310000._r8 ! Root tissue density [g biomass m-3]
+   real(r8) :: DEF_PH_FROOT_LEAF = 1.5_r8 ! Fine-root to leaf-area allocation factor [-]
+   real(r8) :: DEF_PH_KRMAX = 3.981071705534969e-009_r8 ! Maximum radial-root conductance coefficient
+   real(r8) :: DEF_OZONE_KO3 = 1.51_r8 ! Ozone stomatal-resistance coefficient [-]
+   real(r8) :: DEF_DS_TEMP_LAPSE_RATE = 0.006_r8 ! Temperature lapse rate [K m-1]
+   real(r8) :: DEF_DS_LONGWAVE_LAPSE_RATE = 0.032_r8 ! Glacier longwave lapse rate [W m-2 m-1]
+   real(r8) :: DEF_DS_LONGWAVE_LIMIT = 0.5_r8 ! Relative longwave correction limit [0,1]
+   real(r8) :: DEF_DS_SHORTWAVE_LIMIT = 0.5_r8 ! Full-mode relative shortwave correction limit [0,1]
+   real(r8) :: DEF_DS_SHORTWAVE_SIMPLE_LIMIT = 0.2_r8 ! Simple-mode relative shortwave correction limit [0,1]
 
    ! ----- BGC (carbon-nitrogen biogeochemistry) model -----
    ! Used to be a compile-time macro (BGC in define.h). Everything under
@@ -1348,6 +1455,97 @@ CONTAINS
       DEF_USE_PLANTHYDRAULICS,                & !add by xingjie lu @ sysu 2023/05/28
       DEF_USE_MEDLYNST,                       & !add by xingjie lu @ sysu 2023/05/28
       DEF_USE_WUEST,                          & !add by xingjie lu @ sysu 2024/05/28
+      DEF_BALL_BERRY_GRADM,                   &
+      DEF_BALL_BERRY_BINTER,                  &
+      DEF_MEDLYN_G1,                          &
+      DEF_MEDLYN_G0,                          &
+      DEF_WUE_LAMBDA,                         &
+      DEF_LC_HTOP0,                             &
+      DEF_LC_HBOT0,                             &
+      DEF_LC_FVEG0,                             &
+      DEF_LC_SAI0,                              &
+      DEF_LC_Z0MR,                              &
+      DEF_LC_DISPLAR,                           &
+      DEF_LC_SQRTDI,                            &
+      DEF_LC_CHIL,                              &
+      DEF_LC_RHOL_VIS,                          &
+      DEF_LC_RHOL_NIR,                          &
+      DEF_LC_RHOS_VIS,                          &
+      DEF_LC_RHOS_NIR,                          &
+      DEF_LC_TAUL_VIS,                          &
+      DEF_LC_TAUL_NIR,                          &
+      DEF_LC_TAUS_VIS,                          &
+      DEF_LC_TAUS_NIR,                          &
+      DEF_LC_VMAX25,                            &
+      DEF_LC_EFFCON,                            &
+      DEF_LC_RESPCP,                            &
+      DEF_LC_SHTI,                              &
+      DEF_LC_SLTI,                              &
+      DEF_LC_TRDA,                              &
+      DEF_LC_TRDM,                              &
+      DEF_LC_TROP,                              &
+      DEF_LC_HHTI,                              &
+      DEF_LC_HLTI,                              &
+      DEF_LC_EXTKN,                             &
+      DEF_LC_D50,                               &
+      DEF_LC_BETA,                              &
+      DEF_LC_KMAX_SUN,                          &
+      DEF_LC_KMAX_SHA,                          &
+      DEF_LC_KMAX_XYL,                          &
+      DEF_LC_KMAX_ROOT,                         &
+      DEF_LC_PSI50_SUN,                         &
+      DEF_LC_PSI50_SHA,                         &
+      DEF_LC_PSI50_XYL,                         &
+      DEF_LC_PSI50_ROOT,                        &
+      DEF_LC_CK,                                &
+      DEF_LC_C3C4,                           &
+#define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) VAR, &
+#define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) VAR, &
+#include <pft_override_fields.inc>
+#undef PFT_OVERRIDE_INTEGER
+#undef PFT_OVERRIDE_REAL
+      DEF_TUNING_ZLND,                        &
+      DEF_TUNING_ZSNO,                        &
+      DEF_TUNING_CSOILC,                      &
+      DEF_TUNING_DEWMX,                       &
+      DEF_TUNING_CAPR,                        &
+      DEF_TUNING_CNFAC,                       &
+      DEF_TUNING_SSI,                         &
+      DEF_TUNING_WIMP,                        &
+      DEF_TUNING_PONDMX,                      &
+      DEF_TUNING_SMPMAX,                      &
+      DEF_TUNING_SMPMIN,                      &
+      DEF_TUNING_SMPMAX_HR,                   &
+      DEF_TUNING_SMPMIN_HR,                   &
+      DEF_TUNING_TRSMX0,                      &
+      DEF_TUNING_WETWATMAX,                   &
+      DEF_TUNING_SOIL_ICE_IMPEDANCE,          &
+      DEF_TUNING_TOPMOD_DECAY,                &
+      DEF_TUNING_SIMPLE_VIC_DS,               &
+      DEF_TUNING_SIMPLE_VIC_WS,               &
+      DEF_TUNING_SNOW_COVER_EXPONENT,         &
+      DEF_TUNING_IRRIGATION_START_SEC,         &
+      DEF_TUNING_IRRIGATION_DURATION_SEC,      &
+      DEF_TUNING_IRRIGATION_MAX_DEPTH,         &
+      DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION,&
+      DEF_TUNING_IRRIGATION_SUPPLY_FRACTION,   &
+      DEF_TUNING_IRRIGATION_MIN_CPHASE,        &
+      DEF_TUNING_IRRIGATION_MAX_CPHASE,        &
+      DEF_TUNING_IRRIGATION_PONDMX,            &
+      DEF_TUNING_CROP_PLANTING_DAY,            &
+      DEF_PH_CROOT_LATERAL_LENGTH,            &
+      DEF_PH_K_AXS,                           &
+      DEF_PH_FROOT_CARBON,                    &
+      DEF_PH_ROOT_RADIUS,                     &
+      DEF_PH_ROOT_DENSITY,                    &
+      DEF_PH_FROOT_LEAF,                      &
+      DEF_PH_KRMAX,                           &
+      DEF_OZONE_KO3,                          &
+      DEF_DS_TEMP_LAPSE_RATE,                 &
+      DEF_DS_LONGWAVE_LAPSE_RATE,             &
+      DEF_DS_LONGWAVE_LIMIT,                  &
+      DEF_DS_SHORTWAVE_LIMIT,                 &
+      DEF_DS_SHORTWAVE_SIMPLE_LIMIT,          &
       DEF_USE_SASU,                           & !add by Xingjie Lu @ sysu 2023/06/27
       DEF_USE_DiagMatrix,                     & !add by Xingjie Lu @ sysu 2023/06/27
       DEF_USE_PN,                             & !add by Xingjie Lu @ sysu 2023/06/27
@@ -1534,6 +1732,15 @@ CONTAINS
          CASE DEFAULT
             write(*,'(A,A,A)') 'Fatal ERROR: DEF_HIST_mode="', &
                trim(DEF_HIST_mode), '" is invalid; use one or block.'
+            CALL CoLM_stop ()
+         END SELECT
+
+         SELECT CASE (trim(adjustl(DEF_SSP)))
+         CASE ('off', '126', '245', '370', '585')
+            DEF_SSP = trim(adjustl(DEF_SSP))
+         CASE DEFAULT
+            write(*,'(A,A,A)') 'Fatal ERROR: DEF_SSP="', trim(DEF_SSP), &
+               '" is invalid; use off, 126, 245, 370, or 585.'
             CALL CoLM_stop ()
          END SELECT
 
@@ -1880,6 +2087,224 @@ CONTAINS
             ENDIF
          ENDIF
 
+         IF (.not. ieee_is_finite(DEF_BALL_BERRY_GRADM) .or. &
+             (DEF_BALL_BERRY_GRADM /= -1.0_r8 .and. DEF_BALL_BERRY_GRADM <= 1.6_r8)) THEN
+            write(*,*) 'Fatal ERROR: DEF_BALL_BERRY_GRADM must be -1 or greater than 1.6.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_BALL_BERRY_BINTER) .or. &
+             (DEF_BALL_BERRY_BINTER /= -1.0_r8 .and. DEF_BALL_BERRY_BINTER < 0.0_r8)) THEN
+            write(*,*) 'Fatal ERROR: DEF_BALL_BERRY_BINTER must be -1 or non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_MEDLYN_G1) .or. &
+             (DEF_MEDLYN_G1 /= -1.0_r8 .and. DEF_MEDLYN_G1 < 0.0_r8)) THEN
+            write(*,*) 'Fatal ERROR: DEF_MEDLYN_G1 must be -1 or non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_MEDLYN_G0) .or. &
+             (DEF_MEDLYN_G0 /= -1.0_r8 .and. DEF_MEDLYN_G0 < 0.0_r8)) THEN
+            write(*,*) 'Fatal ERROR: DEF_MEDLYN_G0 must be -1 or non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_WUE_LAMBDA) .or. &
+             (DEF_WUE_LAMBDA /= -1.0_r8 .and. DEF_WUE_LAMBDA <= 0.0_r8)) THEN
+            write(*,*) 'Fatal ERROR: DEF_WUE_LAMBDA must be -1 or positive.'
+            CALL CoLM_stop ()
+         ENDIF
+
+         CALL check_lc_override('DEF_LC_FVEG0', DEF_LC_FVEG0, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_DISPLAR', DEF_LC_DISPLAR, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_RHOL_VIS', DEF_LC_RHOL_VIS, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_RHOL_NIR', DEF_LC_RHOL_NIR, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_RHOS_VIS', DEF_LC_RHOS_VIS, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_RHOS_NIR', DEF_LC_RHOS_NIR, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_TAUL_VIS', DEF_LC_TAUL_VIS, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_TAUL_NIR', DEF_LC_TAUL_NIR, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_TAUS_VIS', DEF_LC_TAUS_VIS, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_TAUS_NIR', DEF_LC_TAUS_NIR, 0.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_HTOP0', DEF_LC_HTOP0, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_HBOT0', DEF_LC_HBOT0, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_SAI0', DEF_LC_SAI0, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_Z0MR', DEF_LC_Z0MR, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_VMAX25', DEF_LC_VMAX25, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_EFFCON', DEF_LC_EFFCON, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_RESPCP', DEF_LC_RESPCP, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_SHTI', DEF_LC_SHTI, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_SLTI', DEF_LC_SLTI, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_TRDA', DEF_LC_TRDA, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_TRDM', DEF_LC_TRDM, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_TROP', DEF_LC_TROP, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_HHTI', DEF_LC_HHTI, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_HLTI', DEF_LC_HLTI, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_EXTKN', DEF_LC_EXTKN, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_KMAX_SUN', DEF_LC_KMAX_SUN, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_KMAX_SHA', DEF_LC_KMAX_SHA, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_KMAX_XYL', DEF_LC_KMAX_XYL, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_KMAX_ROOT', DEF_LC_KMAX_ROOT, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_CK', DEF_LC_CK, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_SQRTDI', DEF_LC_SQRTDI, 0.0_r8, 0.0_r8, 'gt')
+         CALL check_lc_override('DEF_LC_D50', DEF_LC_D50, 0.0_r8, 0.0_r8, 'gt')
+         CALL check_lc_override('DEF_LC_BETA', DEF_LC_BETA, 0.0_r8, 0.0_r8, 'negative')
+         CALL check_lc_override('DEF_LC_CHIL', DEF_LC_CHIL, -1.0_r8, 1.0_r8, 'range')
+         CALL check_lc_override('DEF_LC_PSI50_SUN', DEF_LC_PSI50_SUN, 0.0_r8, 0.0_r8, 'negative')
+         CALL check_lc_override('DEF_LC_PSI50_SHA', DEF_LC_PSI50_SHA, 0.0_r8, 0.0_r8, 'negative')
+         CALL check_lc_override('DEF_LC_PSI50_XYL', DEF_LC_PSI50_XYL, 0.0_r8, 0.0_r8, 'negative')
+         CALL check_lc_override('DEF_LC_PSI50_ROOT', DEF_LC_PSI50_ROOT, 0.0_r8, 0.0_r8, 'negative')
+         IF (DEF_LC_C3C4 /= -1 .and. DEF_LC_C3C4 /= 0 .and. DEF_LC_C3C4 /= 1) THEN
+            write(*,*) 'Fatal ERROR: DEF_LC_C3C4 must be -1, 0, or 1.'
+            CALL CoLM_stop ()
+         ENDIF
+#define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) CALL check_pft_real_override(LABEL, VAR, RULE)
+#define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) CALL check_pft_integer_override(LABEL, VAR, RULE)
+#include <pft_override_fields.inc>
+#undef PFT_OVERRIDE_INTEGER
+#undef PFT_OVERRIDE_REAL
+
+         IF (.not. ieee_is_finite(DEF_TUNING_ZLND) .or. DEF_TUNING_ZLND <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_ZLND must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_ZSNO) .or. DEF_TUNING_ZSNO <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_ZSNO must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_CSOILC) .or. DEF_TUNING_CSOILC <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_CSOILC must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_DEWMX) .or. DEF_TUNING_DEWMX <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_DEWMX must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_CAPR) .or. DEF_TUNING_CAPR <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_CAPR must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_CNFAC) .or. DEF_TUNING_CNFAC < 0._r8 .or. DEF_TUNING_CNFAC > 1._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_CNFAC must be finite and in [0,1].'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_SSI) .or. DEF_TUNING_SSI < 0._r8 .or. DEF_TUNING_SSI > 1._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_SSI must be finite and in [0,1].'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_WIMP) .or. DEF_TUNING_WIMP < 0._r8 .or. DEF_TUNING_WIMP >= 1._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_WIMP must be finite and in [0,1).'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_PONDMX) .or. DEF_TUNING_PONDMX < 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_PONDMX must be finite and non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_SMPMAX) .or. .not. ieee_is_finite(DEF_TUNING_SMPMIN) .or. &
+             DEF_TUNING_SMPMAX >= 0._r8 .or. DEF_TUNING_SMPMIN >= DEF_TUNING_SMPMAX) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_SMPMAX must be negative and DEF_TUNING_SMPMIN < DEF_TUNING_SMPMAX.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_SMPMAX_HR) .or. .not. ieee_is_finite(DEF_TUNING_SMPMIN_HR) .or. &
+             DEF_TUNING_SMPMAX_HR >= 0._r8 .or. DEF_TUNING_SMPMIN_HR >= DEF_TUNING_SMPMAX_HR) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_SMPMAX_HR must be negative and DEF_TUNING_SMPMIN_HR < DEF_TUNING_SMPMAX_HR.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_TRSMX0) .or. DEF_TUNING_TRSMX0 <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_TRSMX0 must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_WETWATMAX) .or. DEF_TUNING_WETWATMAX <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_TUNING_WETWATMAX must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_SOIL_ICE_IMPEDANCE) .or. &
+             DEF_TUNING_SOIL_ICE_IMPEDANCE <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_TUNING_TOPMOD_DECAY) .or. DEF_TUNING_TOPMOD_DECAY <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_TUNING_SNOW_COVER_EXPONENT) .or. DEF_TUNING_SNOW_COVER_EXPONENT <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: soil-ice, TOPMODEL decay, and snow-cover tuning values must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_SIMPLE_VIC_DS) .or. &
+             .not. ieee_is_finite(DEF_TUNING_SIMPLE_VIC_WS) .or. &
+             DEF_TUNING_SIMPLE_VIC_DS <= 0._r8 .or. &
+             DEF_TUNING_SIMPLE_VIC_DS > DEF_TUNING_SIMPLE_VIC_WS .or. &
+             DEF_TUNING_SIMPLE_VIC_WS >= 1._r8) THEN
+            write(*,*) 'Fatal ERROR: Simple VIC requires 0 < DS <= WS < 1.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_IRRIGATION_START_SEC) .or. &
+             DEF_TUNING_IRRIGATION_START_SEC < 0._r8 .or. DEF_TUNING_IRRIGATION_START_SEC >= 86400._r8) THEN
+            write(*,*) 'Fatal ERROR: irrigation start second must be finite and in [0,86400).'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_IRRIGATION_DURATION_SEC) .or. &
+             DEF_TUNING_IRRIGATION_DURATION_SEC < DEF_simulation_time%timestep .or. &
+             DEF_TUNING_IRRIGATION_DURATION_SEC > 86400._r8) THEN
+            write(*,*) 'Fatal ERROR: irrigation duration must be finite, at least one timestep, and no more than one day.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_IRRIGATION_MAX_DEPTH) .or. &
+             DEF_TUNING_IRRIGATION_MAX_DEPTH <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_TUNING_IRRIGATION_PONDMX) .or. DEF_TUNING_IRRIGATION_PONDMX < 0._r8) THEN
+            write(*,*) 'Fatal ERROR: irrigation depth must be positive and paddy ponding must be non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION) .or. &
+             DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION < 0._r8 .or. &
+             DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION > 1._r8 .or. &
+             .not. ieee_is_finite(DEF_TUNING_IRRIGATION_SUPPLY_FRACTION) .or. &
+             DEF_TUNING_IRRIGATION_SUPPLY_FRACTION < 0._r8 .or. &
+             DEF_TUNING_IRRIGATION_SUPPLY_FRACTION > 1._r8) THEN
+            write(*,*) 'Fatal ERROR: irrigation threshold and supply fractions must be finite and in [0,1].'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_IRRIGATION_MIN_CPHASE) .or. &
+             .not. ieee_is_finite(DEF_TUNING_IRRIGATION_MAX_CPHASE) .or. &
+             DEF_TUNING_IRRIGATION_MIN_CPHASE < 0._r8 .or. &
+             DEF_TUNING_IRRIGATION_MIN_CPHASE >= DEF_TUNING_IRRIGATION_MAX_CPHASE .or. &
+             DEF_TUNING_IRRIGATION_MAX_CPHASE > 4._r8) THEN
+            write(*,*) 'Fatal ERROR: irrigation crop phases require 0 <= minimum < maximum <= 4.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_TUNING_CROP_PLANTING_DAY) .or. &
+             DEF_TUNING_CROP_PLANTING_DAY < 0._r8 .or. DEF_TUNING_CROP_PLANTING_DAY > 366._r8 .or. &
+             DEF_TUNING_CROP_PLANTING_DAY /= real(nint(DEF_TUNING_CROP_PLANTING_DAY), r8)) THEN
+            write(*,*) 'Fatal ERROR: crop planting day must be 0 or an integer in [1,366].'
+            CALL CoLM_stop ()
+         ENDIF
+#ifndef SinglePoint
+         IF (DEF_TUNING_CROP_PLANTING_DAY > 0._r8) THEN
+            write(*,*) 'Fatal ERROR: crop planting-day override is only supported in SinglePoint.'
+            CALL CoLM_stop ()
+         ENDIF
+#endif
+         IF (.not. ieee_is_finite(DEF_PH_CROOT_LATERAL_LENGTH) .or. DEF_PH_CROOT_LATERAL_LENGTH <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_PH_K_AXS) .or. DEF_PH_K_AXS <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_PH_FROOT_CARBON) .or. DEF_PH_FROOT_CARBON <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_PH_ROOT_RADIUS) .or. DEF_PH_ROOT_RADIUS <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_PH_ROOT_DENSITY) .or. DEF_PH_ROOT_DENSITY <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_PH_FROOT_LEAF) .or. DEF_PH_FROOT_LEAF <= 0._r8 .or. &
+             .not. ieee_is_finite(DEF_PH_KRMAX) .or. DEF_PH_KRMAX <= 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_PH_* values must be finite and positive.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_OZONE_KO3) .or. DEF_OZONE_KO3 < 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_OZONE_KO3 must be finite and non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_DS_TEMP_LAPSE_RATE) .or. DEF_DS_TEMP_LAPSE_RATE < 0._r8 .or. &
+             .not. ieee_is_finite(DEF_DS_LONGWAVE_LAPSE_RATE) .or. DEF_DS_LONGWAVE_LAPSE_RATE < 0._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_DS_*_LAPSE_RATE values must be finite and non-negative.'
+            CALL CoLM_stop ()
+         ENDIF
+         IF (.not. ieee_is_finite(DEF_DS_LONGWAVE_LIMIT) .or. &
+             DEF_DS_LONGWAVE_LIMIT < 0._r8 .or. DEF_DS_LONGWAVE_LIMIT > 1._r8 .or. &
+             .not. ieee_is_finite(DEF_DS_SHORTWAVE_LIMIT) .or. &
+             DEF_DS_SHORTWAVE_LIMIT < 0._r8 .or. DEF_DS_SHORTWAVE_LIMIT > 1._r8 .or. &
+             .not. ieee_is_finite(DEF_DS_SHORTWAVE_SIMPLE_LIMIT) .or. &
+             DEF_DS_SHORTWAVE_SIMPLE_LIMIT < 0._r8 .or. DEF_DS_SHORTWAVE_SIMPLE_LIMIT > 1._r8) THEN
+            write(*,*) 'Fatal ERROR: DEF_DS_*_LIMIT values must be finite and in [0,1].'
+            CALL CoLM_stop ()
+         ENDIF
+
 ! ----- SNICAR model ------ Macros&Namelist conflicts and dependency management
 
          DEF_file_snowoptics = trim(DEF_dir_runtime)//'/snicar/snicar_optics_5bnd_mam_c211006.nc'
@@ -2177,6 +2602,97 @@ CONTAINS
       CALL mpi_bcast (DEF_USE_PLANTHYDRAULICS                ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_MEDLYNST                       ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_WUEST                          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_BALL_BERRY_GRADM                   ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_BALL_BERRY_BINTER                  ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_MEDLYN_G1                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_MEDLYN_G0                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_WUE_LAMBDA                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HTOP0                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HBOT0                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_FVEG0                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SAI0                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_Z0MR                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_DISPLAR                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SQRTDI                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_CHIL                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOL_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOL_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOS_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOS_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUL_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUL_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUS_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUS_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_VMAX25                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_EFFCON                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RESPCP                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SHTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SLTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TRDA                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TRDM                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TROP                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HHTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HLTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_EXTKN                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_D50                           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_BETA                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_SUN                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_SHA                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_XYL                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_ROOT                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_SUN                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_SHA                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_XYL                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_ROOT                    ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_CK                            ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_C3C4                          ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
+#define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) CALL mpi_bcast (VAR, PFT_OVERRIDE_SLOTS, mpi_real8, p_address_master, p_comm_glb, p_err)
+#define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) CALL mpi_bcast (VAR, PFT_OVERRIDE_SLOTS, mpi_integer, p_address_master, p_comm_glb, p_err)
+#include <pft_override_fields.inc>
+#undef PFT_OVERRIDE_INTEGER
+#undef PFT_OVERRIDE_REAL
+      CALL mpi_bcast (DEF_TUNING_ZLND                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_ZSNO                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_CSOILC                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_DEWMX                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_CAPR                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_CNFAC                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SSI                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_WIMP                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_PONDMX                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SMPMAX                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SMPMIN                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SMPMAX_HR                   ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SMPMIN_HR                   ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_TRSMX0                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_WETWATMAX                   ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SOIL_ICE_IMPEDANCE         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_TOPMOD_DECAY               ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SIMPLE_VIC_DS              ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SIMPLE_VIC_WS              ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_SNOW_COVER_EXPONENT        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_START_SEC        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_DURATION_SEC     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_MAX_DEPTH        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION,1  ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_SUPPLY_FRACTION  ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_MIN_CPHASE       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_MAX_CPHASE       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_IRRIGATION_PONDMX           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_TUNING_CROP_PLANTING_DAY           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_CROOT_LATERAL_LENGTH            ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_K_AXS                           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_FROOT_CARBON                    ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_ROOT_RADIUS                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_ROOT_DENSITY                    ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_FROOT_LEAF                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_PH_KRMAX                           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_OZONE_KO3                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_DS_TEMP_LAPSE_RATE                 ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_DS_LONGWAVE_LAPSE_RATE             ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_DS_LONGWAVE_LIMIT                  ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_DS_SHORTWAVE_LIMIT                 ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_DS_SHORTWAVE_SIMPLE_LIMIT          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_SASU                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_DiagMatrix                     ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_PN                             ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
@@ -2425,6 +2941,134 @@ CONTAINS
       CALL sync_hist_vars (set_defaults = .false.)
 
    END SUBROUTINE read_namelist
+
+   SUBROUTINE check_lc_override(name, value, lower, upper, rule)
+   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: name
+   character(len=*), intent(in) :: rule
+   real(r8), intent(in) :: value
+   real(r8), intent(in) :: lower
+   real(r8), intent(in) :: upper
+   logical :: ok
+
+      IF (value == -1.e36_r8) RETURN
+      ok = ieee_is_finite(value)
+      IF (ok) THEN
+         SELECT CASE (trim(rule))
+         CASE ('range')
+            ok = value >= lower .and. value <= upper
+         CASE ('ge')
+            ok = value >= lower
+         CASE ('gt')
+            ok = value > lower
+         CASE ('negative')
+            ok = value < 0._r8
+         CASE DEFAULT
+            ok = .false.
+         END SELECT
+      ENDIF
+      IF (.not. ok) THEN
+         write(*,*) 'Fatal ERROR: invalid land-cover override ', trim(name), '. Use -1.e36 for no override.'
+         CALL CoLM_stop ()
+      ENDIF
+
+   END SUBROUTINE check_lc_override
+
+   SUBROUTINE check_pft_real_override(name, values, rule)
+   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: name
+   character(len=*), intent(in) :: rule
+   real(r8), intent(in) :: values(PFT_OVERRIDE_SLOTS)
+   integer :: idx
+
+      DO idx = 1, PFT_OVERRIDE_SLOTS
+         IF (idx > PFT_OVERRIDE_ACTIVE_SLOTS .and. values(idx) /= PFT_OVERRIDE_UNSET) THEN
+            write(*,*) 'Fatal ERROR: ', trim(name), '(', idx, ') is not supported by this kernel.'
+            CALL CoLM_stop ()
+         ENDIF
+         CALL check_pft_real_value(name, idx, values(idx), rule)
+      ENDDO
+
+   END SUBROUTINE check_pft_real_override
+
+   SUBROUTINE check_pft_real_value(name, idx, value, rule)
+   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: name
+   character(len=*), intent(in) :: rule
+   integer, intent(in) :: idx
+   real(r8), intent(in) :: value
+   logical :: ok
+
+      IF (value == PFT_OVERRIDE_UNSET) RETURN
+      ok = ieee_is_finite(value)
+      IF (ok) THEN
+         SELECT CASE (trim(rule))
+         CASE ('range01')
+            ok = value >= 0._r8 .and. value <= 1._r8
+         CASE ('range_chil')
+            ok = value >= -1._r8 .and. value <= 1._r8
+         CASE ('open01')
+            ok = value > 0._r8 .and. value < 1._r8
+         CASE ('ge')
+            ok = value >= 0._r8
+         CASE ('gt')
+            ok = value > 0._r8
+         CASE ('gt_1_6')
+            ok = value > 1.6_r8
+         CASE ('negative')
+            ok = value < 0._r8
+         CASE ('dynamic_or_ge')
+            ok = value == -1._r8 .or. value >= 0._r8
+         CASE ('finite')
+            ok = .true.
+         CASE DEFAULT
+            ok = .false.
+         END SELECT
+      ENDIF
+      IF (.not. ok) THEN
+         write(*,*) 'Fatal ERROR: invalid PFT override ', trim(name), '(', idx, '). Use -1.e36 for no override.'
+         CALL CoLM_stop ()
+      ENDIF
+
+   END SUBROUTINE check_pft_real_value
+
+   SUBROUTINE check_pft_integer_override(name, values, rule)
+   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: name
+   character(len=*), intent(in) :: rule
+   integer, intent(in) :: values(PFT_OVERRIDE_SLOTS)
+   integer :: idx
+   logical :: ok
+
+      DO idx = 1, PFT_OVERRIDE_SLOTS
+         IF (values(idx) == PFT_OVERRIDE_INT_UNSET) CYCLE
+         IF (idx > PFT_OVERRIDE_ACTIVE_SLOTS) THEN
+            write(*,*) 'Fatal ERROR: ', trim(name), '(', idx, ') is not supported by this kernel.'
+            CALL CoLM_stop ()
+         ENDIF
+         SELECT CASE (trim(rule))
+         CASE ('binary')
+            ok = values(idx) == 0 .or. values(idx) == 1
+         CASE ('ge')
+            ok = values(idx) >= 0
+         CASE DEFAULT
+            ok = .false.
+         END SELECT
+         IF (.not. ok) THEN
+            write(*,*) 'Fatal ERROR: invalid PFT override ', trim(name), '(', idx, ').'
+            CALL CoLM_stop ()
+         ENDIF
+      ENDDO
+
+   END SUBROUTINE check_pft_integer_override
 
    ! ---------------
    SUBROUTINE sync_hist_vars (set_defaults)

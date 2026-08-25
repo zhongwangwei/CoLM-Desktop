@@ -8,7 +8,9 @@ MODULE MOD_SoilSnowHydrology
                            DEF_URBAN_RUN,           DEF_USE_IRRIGATION,    &
                            DEF_SPLIT_SOILSNOW,      DEF_Runoff_SCHEME,     &
                            DEF_DA_TWS_GRACE,        DEF_Optimize_Baseflow, &
-                           DEF_USE_Dynamic_Wetland, DEF_USE_CoLMDEBUG
+                           DEF_USE_Dynamic_Wetland, DEF_USE_CoLMDEBUG,     &
+                           DEF_TUNING_SOIL_ICE_IMPEDANCE,                  &
+                           DEF_TUNING_IRRIGATION_PONDMX
 #if (defined CaMa_Flood)
    USE YOS_CMF_INPUT,      only: LWINFILT
 #endif
@@ -81,7 +83,7 @@ CONTAINS
    USE MOD_Vars_TimeInvariants, only: vic_b_infilt, vic_Dsmax, vic_Ds, vic_Ws, vic_c
    USE MOD_Vars_1DFluxes,       only: fevpg
 #ifdef CROP
-   USE MOD_Vars_Global, only : irrig_method_paddy, pondmxc
+   USE MOD_Vars_Global, only : irrig_method_paddy
    use MOD_LandPFT, only : patch_pft_s, patch_pft_e
    use MOD_Vars_PFTimeVariables, only: irrig_method_p
 #endif
@@ -353,9 +355,9 @@ IF(patchtype<=1)THEN   ! soil ground only
                IF(irrig_method_p(m) == irrig_method_paddy)THEN
                   wdsrf = rsur*deltim
                   rsur = 0.
-                  IF(wdsrf.gt.pondmxc)THEN
-                     wdsrf = pondmxc
-                     rsur = rsur + (wdsrf - pondmxc)/deltim
+                  IF(wdsrf.gt.DEF_TUNING_IRRIGATION_PONDMX)THEN
+                     rsur = rsur + (wdsrf - DEF_TUNING_IRRIGATION_PONDMX)/deltim
+                     wdsrf = DEF_TUNING_IRRIGATION_PONDMX
                   ENDIF
                ENDIF
             ENDDO
@@ -582,7 +584,7 @@ ENDIF
    USE MOD_DA_TWS, only: fslp_k
 #endif
 #ifdef CROP
-   USE MOD_Vars_Global, only : irrig_method_paddy, pondmxc
+   USE MOD_Vars_Global, only : irrig_method_paddy
    use MOD_LandPFT, only : patch_pft_s, patch_pft_e
    use MOD_Vars_PFTimeVariables, only: irrig_method_p
 #endif
@@ -749,8 +751,6 @@ ENDIF
    type(soil_con_struct ) :: soil_con
    type(cell_data_struct) :: cell
    real(r8) :: wliq_soisno_tmp(1:nl_soil)
-
-   real(r8), parameter :: e_ice=6.0      !soil ice impedance factor
 
    integer :: ps, pe, m
 
@@ -1155,10 +1155,10 @@ ENDIF
          ps = patch_pft_s(ipatch)
          pe = patch_pft_e(ipatch)
          DO m = ps, pe
-            IF(irrig_method_p(m).eq.irrig_method_paddy .AND. wdsrf.gt.pondmxc)THEN
-               rsur = rsur + (wdsrf - pondmxc)/deltim
-               rsur_ie = rsur_ie + (wdsrf - pondmxc) / deltim
-               wdsrf = pondmxc
+            IF(irrig_method_p(m).eq.irrig_method_paddy .AND. wdsrf.gt.DEF_TUNING_IRRIGATION_PONDMX)THEN
+               rsur = rsur + (wdsrf - DEF_TUNING_IRRIGATION_PONDMX)/deltim
+               rsur_ie = rsur_ie + (wdsrf - DEF_TUNING_IRRIGATION_PONDMX) / deltim
+               wdsrf = DEF_TUNING_IRRIGATION_PONDMX
             ELSEIF(irrig_method_p(m).ne.irrig_method_paddy .AND. wdsrf.gt.pondmx)THEN
                rsur = rsur + (wdsrf - pondmx) / deltim
                rsur_ie = rsur_ie + (wdsrf - pondmx) / deltim
@@ -1210,7 +1210,7 @@ ENDIF
             ! consider impedance factor
             vol_ice(j) = max(min(porsl(j), wice_soisno(j)/(dz_soisno(j)*denice)), 0.)
             icefrac(j) = vol_ice(j)/porsl(j)
-            imped = 10.**(-e_ice*icefrac(j))
+            imped = 10.**(-DEF_TUNING_SOIL_ICE_IMPEDANCE*icefrac(j))
             hk(j) = imped * hk(j)
          ENDIF
       ENDDO
@@ -1303,7 +1303,7 @@ ELSE
                smp(j) = max(smpmin, smp(j))
                vol_ice(j) = max(min(porsl(j), wice_soisno(j)/(dz_soisno(j)*denice)), 0.)
                icefrac(j) = vol_ice(j)/porsl(j)
-               imped      = 10.**(-e_ice*icefrac(j))
+               imped      = 10.**(-DEF_TUNING_SOIL_ICE_IMPEDANCE*icefrac(j))
                hk (j)     = imped * hksati(j)
             ENDIF
          ENDDO
@@ -2063,7 +2063,6 @@ ENDIF
 
    integer  :: jwt               ! index of the soil layer right above the water table (-)
 
-   real(r8), parameter :: e_ice=6.0      !soil ice impedance factor
 !-----------------------------------------------------------------------
 
       qlayer_trc(:) = 0._r8
@@ -2196,7 +2195,8 @@ ENDIF
             ENDIF
 
             ! replace fracice with impedance factor
-            imped(j)=10.**(-e_ice*(0.5*(icefrac(j)+icefrac(min(nl_soil,j+1)))))
+            imped(j)=10.**(-DEF_TUNING_SOIL_ICE_IMPEDANCE* &
+               (0.5*(icefrac(j)+icefrac(min(nl_soil,j+1)))))
             hk(j) = imped(j) * hk(j)
             dhkdw1(j) = imped(j) * dhkdw1(j)
             dhkdw2(j) = imped(j) * dhkdw2(j)

@@ -48,6 +48,18 @@ fn an_identity_conversion_reproduces_every_value_bit_for_bit() {
 }
 
 #[test]
+fn identity_conversion_cannot_truncate_its_source() {
+    let dir = std::env::temp_dir().join("colm-convert-identity-alias");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "Tair", &[280.0, 281.0]);
+    let before = std::fs::read(&src).unwrap();
+
+    assert!(super::identity(&src, &dir.join(".").join("tiny_Met.nc")).is_err());
+    assert_eq!(std::fs::read(&src).unwrap(), before);
+}
+
+#[test]
 fn a_renamed_and_rescaled_variable_lands_in_the_slot_with_the_canonical_name() {
     let dir = std::env::temp_dir().join("colm-convert-rename");
     let _ = std::fs::remove_dir_all(&dir);
@@ -598,6 +610,39 @@ fn invalid_derived_humidity_is_not_written_as_nan() {
         !dst.exists(),
         "failed conversion must not leave a partial product"
     );
+}
+
+#[test]
+fn declared_fill_values_must_be_repaired_before_conversion() {
+    let dir = std::env::temp_dir().join("colm-convert-declared-fill");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = tiny_met(&dir, "TA", &[280.0, -9999.0]);
+    {
+        let mut file = netcdf::append(&src).unwrap();
+        let mut variable = file.variable_mut("TA").unwrap();
+        variable.put_attribute("units", "K").unwrap();
+        variable
+            .put_attribute("missing_value", -9999.0_f64)
+            .unwrap();
+    }
+    let dst = dir.join("out.nc");
+    let error = super::convert(
+        &src,
+        &dst,
+        &super::Plan {
+            slots: vec![super::SlotPlan {
+                index: 1,
+                source_name: "TA".into(),
+                source_units: "K".into(),
+                also_add: Vec::new(),
+            }],
+            heights: None,
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("non-finite"), "{error:#}");
+    assert!(!dst.exists());
 }
 
 #[test]

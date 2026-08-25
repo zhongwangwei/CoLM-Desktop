@@ -174,3 +174,65 @@ fn nonfinite_and_model_fill_values_never_enter_metrics() {
     let paired = super::pair_with_time(&model_t, &model_v, &obs, 0);
     assert_eq!(paired, [(0.0, 1.0, 1.0), (5400.0, 4.0, 4.0)]);
 }
+
+#[test]
+fn window_keeps_from_and_excludes_to() {
+    let (ms, mv) = model();
+    let (os, ov, oq) = obs_all_good();
+    let s = Series {
+        seconds: &os,
+        values: &ov,
+        qc: &oq,
+    };
+    let p = pair_with_time_in_window(
+        &ms,
+        &mv,
+        &s,
+        0,
+        Some(TimeWindow {
+            from: 5400.0,
+            to: 9000.0,
+        }),
+    );
+    assert_eq!(p, vec![(5400.0, 20.0, 3.5)]);
+}
+
+#[test]
+fn no_window_matches_the_original_api() {
+    let (ms, mv) = model();
+    let (os, ov, oq) = obs_all_good();
+    let s = Series {
+        seconds: &os,
+        values: &ov,
+        qc: &oq,
+    };
+    assert_eq!(pair_in_window(&ms, &mv, &s, 0, None), pair(&ms, &mv, &s, 0));
+    assert_eq!(
+        pair_with_time_in_window(&ms, &mv, &s, 0, None),
+        pair_with_time(&ms, &mv, &s, 0)
+    );
+}
+
+#[test]
+fn window_is_applied_after_spinup_and_before_qc_pairing() {
+    let (ms, mv) = model();
+    let (os, ov, mut oq) = obs_all_good();
+    oq[2] = 9.0;
+    oq[3] = 9.0; // 01:00/01:30 bad, so the kept window hour is dropped by QC.
+    let s = Series {
+        seconds: &os,
+        values: &ov,
+        qc: &oq,
+    };
+    let p = pair_with_time_in_window(
+        &ms,
+        &mv,
+        &s,
+        1,
+        Some(TimeWindow {
+            from: 1800.0,
+            to: 9001.0,
+        }),
+    );
+    assert_eq!(p, vec![(9000.0, 30.0, 5.5)]);
+}

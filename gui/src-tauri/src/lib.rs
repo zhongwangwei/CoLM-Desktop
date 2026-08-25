@@ -30,6 +30,13 @@ use sitedata::*;
 use sites::*;
 use tauri::{Emitter, Manager};
 
+#[tauri::command]
+fn print_report(window: tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .print()
+        .map_err(|e| format!("无法打开系统打印窗口：{e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -65,7 +72,12 @@ pub fn run() {
                 }
             }
         })
-        .manage(RunLog::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                let _ = window.app_handle().state::<RunProcesses>().cancel(None);
+            }
+        })
+        .manage(RunProcesses::default())
         // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
         // 单份写入）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，
         // 因为"改一个字段"与"改这一批的一个字段"必须是同一件事。
@@ -87,6 +99,7 @@ pub fn run() {
             configure_cbl_batch,
             configure_ozone_batch,
             make_site,
+            site_pfts,
             new_case,
             read_text,
             read_case,
@@ -97,20 +110,37 @@ pub fn run() {
             varying_fields,
             run_case,
             run_batch,
-            run_log_tail,
+            cancel_runs,
             history_catalog,
+            study_params,
+            study_create_json,
+            study_preflight_json,
+            study_run,
+            study_status,
+            study_pause,
+            study_resume,
+            study_cancel,
+            study_retry,
+            study_export,
+            study_apply,
+            study_apply_preview,
+            study_result,
             series,
             evaluation_catalog,
             metrics,
             unknown_fields,
             irrelevant_fields,
-            field_states,
             field_states_batch,
+            pft_parameter_states,
+            set_pft_parameter_batch,
+            process_parameter_files,
+            set_process_parameter_field_batch,
             hist_vars,
             load_recent,
             save_recent,
             pick_folder,
             pick_file,
+            print_report,
         ])
         .run(tauri::generate_context!())
         .expect("error running CoLM Desktop");

@@ -25,8 +25,8 @@ export function freshCaseName(base, cases = state.cases) {
   return `${base}-${n}`;
 }
 
-/** 参数改动作用于哪些算例目录。**默认是整批** —— 用户勾了 20 个站点是要配
- *  "这一次运行"，不是配其中第一个。
+/** 批次级编辑项作用于哪些算例目录。预热、输出和网格设置默认写整批；
+ *  逐站点基本设定与过程参数在 params.js 中另选站点或全部站点。
  *
  *  放在这里而不是 `params.js`：`timing.js` 也要问同一个问题，而 `params.js`
  *  已经 import 了 `timing.js` —— 反过来 import 就是一个环。

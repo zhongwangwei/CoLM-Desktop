@@ -2,7 +2,9 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
-import { $, status, joinPath, forcingDirectoryForSiteDirectory } from './ui.js';
+import {
+  $, status, joinPath, forcingDirectoryForSiteDirectory, matchesBundledExampleMode,
+} from './ui.js';
 import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { renderSteps, setStatus } from './shell.js';
@@ -13,8 +15,26 @@ import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
 
 /** 站点身份必须与向导的 URBAN 选择一致，示例与用户目录走同一条规则。 */
+function methaneEnabled() {
+  return !!(state.wizard?.physics?.tracer && state.wizard?.tracer === 'methane');
+}
+
+function cropEnabled() {
+  return !!state.wizard?.physics?.crop;
+}
+function wizardMode() {
+  return urbanEnabled() ? 'urban' : (cropEnabled() ? 'crop' : (methaneEnabled() ? 'methane' : 'natural'));
+}
+
 export function sitesForWizard(sites = state.sites) {
-  return sites.filter(s => s.urban === urbanEnabled());
+  const urban = urbanEnabled();
+  const mode = wizardMode();
+  return sites.filter(s => s.urban === urban && matchesBundledExampleMode(s.site_file, mode));
+}
+
+function preferredExampleSite(sites) {
+  const prefix = urbanEnabled() ? 'AU-Preston' : (cropEnabled() ? 'US-Ne3' : (methaneEnabled() ? 'AT-Neu' : 'CN-Cng'));
+  return sites.find(s => (s.caseName ?? s.name).startsWith(prefix));
 }
 
 /** 算例根目录含空格，当场标出来。
@@ -102,6 +122,7 @@ export function renderCases() {
 
 async function selectCase(c) {
   state.selected = c;
+  state.expertCaseDir = c.dir;
   // 从算例列表点进来的是**单个**算例。不重置的话，上一次批量选中的
   // 那 20 个还留在 state.batch 里，改一个字段会连带改掉它们。
   if (!state.batch.includes(c.dir)) state.batch = [c.dir];
@@ -141,6 +162,7 @@ export function pickSite(s) {
   // 就是一次读站点文件、读强迫场、写 site.nc —— 而勾选框就在旁边，
   // 误点是常事而不是意外。建算例挪到「确定」，那是一个人明确按下的地方。
   state.pickedSite = s;
+  state.pickedSiteAuto = false;
   renderSites();
   setStatus(`已选 ${s.name}${s.met_file ? '' : '（没有强迫场，跑不了）'}`);
 }
@@ -280,7 +302,9 @@ async function ensureCase(s) {
       met: s.met_file,
       // 站点就绪契约必须与进门向导一致；PFT/PC 字段是在 CLI 建例之后才
       // 批量写入 case.nml 的，不显式传会被错误地按 IGBP 检查。
-      mode: urbanEnabled() ? 'urban' : String(state.subgrid ?? 'IGBP').toLowerCase(),
+      mode: urbanEnabled()
+        ? `urban-${String(state.subgrid ?? 'IGBP').toLowerCase()}`
+        : String(state.subgrid ?? 'IGBP').toLowerCase(),
       fields: wizardFields(),
     });
     state.createdCases.add(out);
@@ -321,9 +345,11 @@ export async function scanPreparedSites(selectFile = null) {
     // 旧目录站点的算例，界面上看不出异常。
     state.picked.clear();
     state.pickedSite = null;
+    state.pickedSiteAuto = false;
     state.sites = assignCaseNames(r.sites);
     if (selectFile) {
       state.pickedSite = state.sites.find(site => site.site_file === selectFile) ?? null;
+    state.pickedSiteAuto = false;
     }
     renderSites(r);
     renderSteps();
@@ -362,17 +388,25 @@ export function renderSites(r = {}) {
   const allowed = new Set(sites.map(s => s.site_file));
   for (const path of state.picked) if (!allowed.has(path)) state.picked.delete(path);
   if (state.pickedSite && !allowed.has(state.pickedSite.site_file)) state.pickedSite = null;
+  if (!state.picked.size) {
+    const preferred = preferredExampleSite(sites);
+    if (preferred && (!state.pickedSite || state.pickedSiteAuto)) {
+      state.pickedSite = preferred;
+      state.pickedSiteAuto = true;
+    }
+  }
   const bad = sites.filter(s => s.problem).length;
   const noObs = sites.filter(s => !s.obs_file).length;
   renderMakeCase();
-  const urbanRun = urbanEnabled();
+  const mode = wizardMode();
+  const siteKind = mode === 'urban' ? '城市' : (mode === 'crop' ? '作物' : (mode === 'methane' ? '甲烷' : '自然'));
   $('sitesummary').textContent =
-    `${sites.length} 个${urbanRun ? '城市' : '自然'}站点` +
+    `${sites.length} 个${siteKind}站点` +
     (noObs ? ` · ${noObs} 个无观测` : '') +
     (bad ? ` · ${bad} 个读不了` : '');
 
   if (!sites.length && state.sites.length) {
-    box.innerHTML = `<p class="muted mini">目录里没有${urbanRun ? '城市' : '自然'}站点。</p>`;
+    box.innerHTML = `<p class="muted mini">目录里没有${siteKind}站点。</p>`;
     renderSteps();
     return;
   }
@@ -380,7 +414,7 @@ export function renderSites(r = {}) {
   for (const s of sites) {
     const d = document.createElement('div');
     d.className = 'case site-row';
-    d.setAttribute('aria-selected', String(state.pickedSite?.name === s.name));
+    d.setAttribute('aria-selected', String(state.pickedSite?.site_file === s.site_file));
     // 多选是批量的入口。**流水线作用于「一组」，选 1 个只是 N=1** ——
     // 批量另开一套界面的话，就有两条流水线要各自维护，而它们迟早会分叉。
     //
@@ -494,7 +528,8 @@ $('use-example').onclick = async () => {
     $('sitedir').value = e.sitedir;
     $('forcingdir').value = e.forcingdir;
     $('root').value = e.root;
-    for (const id of ['sitedir', 'forcingdir', 'root']) $(id).dispatchEvent(new Event('change'));
+    if (e.runtimedir && (state.wizard?.physics?.bgc || state.wizard?.physics?.crop || methaneEnabled())) $('runtime').value = e.runtimedir;
+    for (const id of ['sitedir', 'forcingdir', 'root', 'runtime']) $(id).dispatchEvent(new Event('change'));
     setStatus(e.already ? '示例数据已经在了' : '示例数据已放好');
     scheduleSiteScan();
   } catch (err) { setStatus(err); }

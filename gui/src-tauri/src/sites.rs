@@ -113,7 +113,7 @@ pub async fn scan_sites(
         args.push("--quick".into());
         args.push("1".into());
     }
-    let json = crate::sidecar::capture(&args)?;
+    let json = crate::sidecar::capture_async(args).await?;
     let sites: Vec<Site> = serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是扫描失败 —— 两者的处置完全不同：
         // 前者是我们两边的结构体对不上了，后者是用户给的目录有问题。

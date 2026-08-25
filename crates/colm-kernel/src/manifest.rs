@@ -4,7 +4,8 @@
 //! **不接受其他参数，没有 `--version`**（`main/CoLM.F90:185` 等）。所以版本握手
 //! 靠构建期写出的 `manifest.json`，而不是问二进制。
 //!
-//! 清单里两组字段职责不同。`macros` / `colm_git_sha` / `generator_args` 可复现，
+//! 清单里两组字段职责不同。`macros` / `colm_git_sha` / `generator_args` /
+//! `build_profile` 可复现，
 //! 认定**配置身份** —— 单点模式最容易搞错的正是编译期宏集合。`sha256` 每次构建
 //! 都变（实测：同一路径连跑两次，三个二进制的 sha256 全不同），只认定**完整性**：
 //! 二进制自其清单写出以来未被替换。后者要求清单与二进制同生同存，不能分开分发，
@@ -65,6 +66,9 @@ pub struct Manifest {
     pub platform: String,
     pub colm_git_sha: String,
     pub generator_args: String,
+    /// Fortran 构建档位。旧清单没有这个字段，空串保持其原有身份格式。
+    #[serde(default)]
+    pub build_profile: String,
     /// **实际生效**的宏集合 —— `include/define.h` 生成之后经预处理器展开，
     /// 而不是 `generator_args` 原样转述。两者的差异正是 `build_kernel.sh`
     /// 的自检要抓的东西，见本文件顶部的模块文档。
@@ -75,6 +79,19 @@ pub struct Manifest {
     pub hdf5: String,
     /// 程序名 -> sha256。用 `BTreeMap` 让报错里的顺序稳定。
     pub sha256: BTreeMap<String, String>,
+}
+
+impl Manifest {
+    /// 稳定的计算身份。production/debug 来自同一提交时也必须区分，否则阶段
+    /// 指纹会把另一种浮点构建留下的 history 错当成当前产物。
+    pub fn identity(&self) -> String {
+        let base = format!("{}@{}", self.preset, self.colm_git_sha);
+        if self.build_profile.is_empty() {
+            base
+        } else {
+            format!("{base}#{}", self.build_profile)
+        }
+    }
 }
 
 /// 一个已校验的内核目录。

@@ -4,6 +4,7 @@ MODULE MOD_SnowFraction
 
 !-----------------------------------------------------------------------
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_TUNING_SNOW_COVER_EXPONENT
    IMPLICIT NONE
    SAVE
 
@@ -50,10 +51,6 @@ CONTAINS
 
 !-------------------------- Local Variables ----------------------------
    real(r8) :: fmelt              ! dimensionless melting factor
-   real(r8), parameter :: m = 1.0 ! the value of m used in CLM4.5 is 1.0.
-                                  ! WHILE the value of m given by Niu et al (2007) is 1.6
-                                  ! WHILE Niu (2012) suggested 3.0
-
 !-----------------------------------------------------------------------
       IF(lai+sai > 1e-6) THEN
          ! Fraction of vegetation buried (covered) by snow
@@ -74,7 +71,7 @@ CONTAINS
 ! Fraction of soil covered by snow
       fsno = 0.0
       IF(snowdp > 0.) THEN
-         fmelt = (scv/snowdp/100.) ** m
+         fmelt = (scv/snowdp/100.) ** DEF_TUNING_SNOW_COVER_EXPONENT
          fsno  = tanh(snowdp/(2.5 * zlnd * fmelt))
       ENDIF
 
@@ -115,10 +112,6 @@ CONTAINS
 
 !-------------------------- Local Variables ----------------------------
    real(r8) :: fmelt              ! dimensionless melting factor
-   real(r8), parameter :: m = 1.0 ! the value of m used in CLM4.5 is 1.0.
-                                  ! WHILE the value of m given by Niu et al (2007) is 1.6
-                                  ! WHILE Niu (2012) suggested 3.0
-
    integer i, p, ps, pe
    real(r8) wt_tmp
 !-----------------------------------------------------------------------
@@ -161,7 +154,7 @@ CONTAINS
       ! Fraction of soil covered by snow
       fsno = 0.0
       IF(snowdp > 0.) THEN
-         fmelt = (scv/snowdp/100.) ** m
+         fmelt = (scv/snowdp/100.) ** DEF_TUNING_SNOW_COVER_EXPONENT
          fsno  = tanh(snowdp/(2.5 * zlnd * fmelt))
       ENDIF
 

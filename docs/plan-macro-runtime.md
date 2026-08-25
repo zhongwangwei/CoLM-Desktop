@@ -406,7 +406,7 @@ USGS 用得少，CROP 是碳循环的子集，把它们留在编译期的代价�
 **编译时真正读的 `define.h` 不是 `vendor/CoLM202X/include/define.h`。**
 
 `.github/workflows/create_defineh.bash` 第 148–236 行整个重写它，
-而且两份内容**不一样** —— 静态那份有「`URBAN_MODEL && SinglePoint`
-强制 `LULC_IGBP`」，生成的那份没有。
+而且两份内容曾经**不一样** —— 静态那份一度有「`URBAN_MODEL && SinglePoint`
+强制 `LULC_IGBP`」，生成的那份没有；2026-08-23 已删除这条过时静态约束。
 
 **改宏配置要改那个脚本。** 我自己差点改错文件。
