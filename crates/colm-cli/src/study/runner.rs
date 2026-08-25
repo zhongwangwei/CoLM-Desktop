@@ -2495,7 +2495,11 @@ esac
             .find(|row| row.field == "DEF_TUNING_CNFAC")
             .expect("preview must include changed field");
         assert_eq!(row.site, "caseA");
-        assert!(row.file.ends_with("caseA/case.nml"), "{}", row.file);
+        assert!(
+            Path::new(&row.file).ends_with(Path::new("caseA").join("case.nml")),
+            "{}",
+            row.file
+        );
         assert_eq!(row.old, "0.5");
         assert!(!row.new.is_empty());
 

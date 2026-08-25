@@ -20,8 +20,7 @@ pub fn member_case(
 ) -> Result<PathBuf> {
     validate_component(member_id, "member id")?;
     validate_component(site_id, "site id")?;
-    let baseline = baseline
-        .canonicalize()
+    let baseline = colm_kernel::manifest::absolute(baseline)
         .with_context(|| format!("cannot resolve baseline case {}", baseline.display()))?;
     let source_nml = baseline.join("case.nml");
     let text = std::fs::read_to_string(&source_nml)
@@ -30,8 +29,7 @@ pub fn member_case(
 
     std::fs::create_dir_all(destination)
         .with_context(|| format!("cannot create {}", destination.display()))?;
-    let destination = destination
-        .canonicalize()
+    let destination = colm_kernel::manifest::absolute(destination)
         .with_context(|| format!("cannot resolve {}", destination.display()))?;
 
     // Relative paths in the baseline are relative to its working directory.
@@ -194,7 +192,7 @@ fn copy_process_parameters(
     let mut copied = BTreeMap::new();
     let mut basenames = BTreeMap::<String, PathBuf>::new();
     for source in sources {
-        let source = source.canonicalize().with_context(|| {
+        let source = colm_kernel::manifest::absolute(&source).with_context(|| {
             format!("cannot resolve process parameter file {}", source.display())
         })?;
         let file = source
@@ -218,7 +216,7 @@ fn copy_process_parameters(
     if raw.is_some() {
         let mut rewritten = Vec::new();
         for (prefix, source) in listed {
-            let source = source.canonicalize()?;
+            let source = colm_kernel::manifest::absolute(&source)?;
             if let Some(target) = copied.get(&source) {
                 let path = target.to_string_lossy();
                 rewritten.push(if prefix.is_empty() {
@@ -278,7 +276,7 @@ mod tests {
         let original = "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_dir_output = 'out'\n   SITE_fsitedata = 'site.nc'\n   DEF_forcing_namelist = 'forcing.nml'\n   DEF_TRACER_PARAM_FILES = 'methane:standard_ch4_parameter.nml'\n/\n";
         std::fs::write(baseline.join("case.nml"), original).unwrap();
 
-        member_case(
+        let member = member_case(
             &baseline,
             &member,
             "m000001",
@@ -320,8 +318,9 @@ mod tests {
         )
         .unwrap();
 
-        member_case(&baseline, &member, "m000001", "AT-Neu", &[]).unwrap();
+        let member = member_case(&baseline, &member, "m000001", "AT-Neu", &[]).unwrap();
         let text = std::fs::read_to_string(member.join("case.nml")).unwrap();
+        let baseline = colm_kernel::manifest::absolute(&baseline).unwrap();
         assert!(text.contains(baseline.join("missing/site.nc").to_string_lossy().as_ref()));
         let _ = std::fs::remove_dir_all(root);
     }

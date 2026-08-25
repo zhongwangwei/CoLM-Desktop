@@ -33,7 +33,10 @@ fn example_roots(resource_dir: Option<PathBuf>) -> Vec<PathBuf> {
     if cfg!(debug_assertions) {
         std::iter::once(repository).chain(resource).collect()
     } else {
-        resource.into_iter().chain(std::iter::once(repository)).collect()
+        resource
+            .into_iter()
+            .chain(std::iter::once(repository))
+            .collect()
     }
 }
 

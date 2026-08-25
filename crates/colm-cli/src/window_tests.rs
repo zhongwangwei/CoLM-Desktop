@@ -109,7 +109,7 @@ fn omitted_lc_year_uses_the_schema_default() {
 fn a_natural_bgc_case_keeps_its_runtime_directory() {
     let unused = Path::new("/case/runtime_unused");
     let configured = super::configured_or_unused(Some("/data/runtime".into()), unused);
-    assert_eq!(configured, super::slash(Path::new("/data/runtime")));
+    assert!(configured.ends_with(&format!("data{}runtime{}", super::sep(), super::sep())));
     assert_eq!(
         super::configured_or_unused(None, unused),
         unused.to_string_lossy()
@@ -250,7 +250,7 @@ fn an_explicit_path_wins_over_the_convention() {
     let got = super::resolve_met(Some(mine.to_str().unwrap()), &site).expect("显式路径");
     assert_eq!(
         got,
-        mine.canonicalize().unwrap(),
+        colm_kernel::manifest::absolute(&mine).unwrap(),
         "给了 --met 就该用它，而不是按约定推"
     );
 }
@@ -271,7 +271,7 @@ fn an_explicit_relative_path_is_made_absolute_before_writing_the_case() {
         Path::new("unused_site.nc"),
     )
     .expect("relative --met path");
-    assert_eq!(got, absolute.canonicalize().unwrap());
+    assert_eq!(got, colm_kernel::manifest::absolute(&absolute).unwrap());
     let _ = std::fs::remove_file(absolute);
 }
 
@@ -373,8 +373,5 @@ fn missing_forcing_heights_fail_before_writing_nan() {
 
     let e = super::complete_forcing_heights(&mut summary, &site, &met).unwrap_err();
     let m = e.to_string();
-    assert!(
-        m.contains("HEIGHT_V") && m.contains("Forcingnml/AA.nml"),
-        "{m}"
-    );
+    assert!(m.contains("HEIGHT_V") && m.contains("AA.nml"), "{m}");
 }

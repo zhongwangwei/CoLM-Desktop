@@ -190,7 +190,7 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
             .status()
             .map_err(|e| format!("cannot kill process group {pid}: {e}"))?;
         std::thread::sleep(Duration::from_millis(50));
-        if !kill.success() || process_group_alive(pid) {
+        if !kill.success() && process_group_alive(pid) {
             return Err(format!("cannot kill process group {pid}: {kill}"));
         }
     }
@@ -236,11 +236,6 @@ fn process_group_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn process_group_alive(_pid: u32) -> bool {
-    false
 }
 
 #[tauri::command]
@@ -551,7 +546,10 @@ fn kernel_roots(resource_dir: Option<PathBuf>) -> Vec<PathBuf> {
     if cfg!(debug_assertions) {
         std::iter::once(repository).chain(resource).collect()
     } else {
-        resource.into_iter().chain(std::iter::once(repository)).collect()
+        resource
+            .into_iter()
+            .chain(std::iter::once(repository))
+            .collect()
     }
 }
 

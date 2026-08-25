@@ -24,7 +24,10 @@ fn bundled_crop_example_contains_the_files_needed_to_create_a_case() {
         "Forcingnml/US-Ne3.nml",
         "Runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
     ] {
-        assert!(root.join(file).is_file(), "missing bundled CROP file: {file}");
+        assert!(
+            root.join(file).is_file(),
+            "missing bundled CROP file: {file}"
+        );
     }
 }
 
