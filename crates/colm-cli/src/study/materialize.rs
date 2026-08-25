@@ -112,7 +112,7 @@ fn absolutize_existing_paths(
             continue;
         }
         let candidate = baseline.join(candidate);
-        let absolute = candidate.canonicalize().unwrap_or(candidate);
+        let absolute = colm_kernel::manifest::absolute(&candidate).unwrap_or(candidate);
         document.set(&field, Value::Str(absolute.to_string_lossy().into_owned()))?;
     }
     Ok(())
@@ -290,8 +290,10 @@ mod tests {
             original
         );
         let text = std::fs::read_to_string(member.join("case.nml")).unwrap();
+        let baseline = colm_kernel::manifest::absolute(&baseline).unwrap();
         assert!(text.contains("DEF_CASE_NAME = 'm000001-AT-Neu'"));
         assert!(text.contains(member.join("out").to_string_lossy().as_ref()));
+        assert!(text.contains(baseline.join("site.nc").to_string_lossy().as_ref()));
         assert!(text.contains("DEF_TUNING_ZLND"));
         assert!(text.contains("methane:"));
         assert!(!text.contains("unused_parameter.nml"));

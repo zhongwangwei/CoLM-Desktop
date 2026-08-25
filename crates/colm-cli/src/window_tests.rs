@@ -109,7 +109,9 @@ fn omitted_lc_year_uses_the_schema_default() {
 fn a_natural_bgc_case_keeps_its_runtime_directory() {
     let unused = Path::new("/case/runtime_unused");
     let configured = super::configured_or_unused(Some("/data/runtime".into()), unused);
-    assert!(configured.ends_with(&format!("data{}runtime{}", super::sep(), super::sep())));
+    assert!(configured
+        .replace('/', &super::sep().to_string())
+        .ends_with(&format!("data{}runtime{}", super::sep(), super::sep())));
     assert_eq!(
         super::configured_or_unused(None, unused),
         unused.to_string_lossy()
@@ -118,15 +120,17 @@ fn a_natural_bgc_case_keeps_its_runtime_directory() {
 
 #[test]
 fn a_relative_runtime_directory_is_made_absolute_before_writing_the_case() {
-    let root = std::env::temp_dir().join(format!("colm-cli-runtime-{}", std::process::id()));
+    let root = PathBuf::from("target").join(format!("colm-cli-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("Runtime")).unwrap();
-    let cwd = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&root).unwrap();
-    let got = super::configured_or_unused(Some("Runtime".into()), Path::new("unused"));
-    std::env::set_current_dir(cwd).unwrap();
-    assert!(Path::new(got.trim_end_matches(super::sep())).is_absolute());
-    assert!(got.contains("Runtime"));
+    let runtime = root.join("Runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let got = super::configured_or_unused(
+        Some(runtime.to_string_lossy().into_owned()),
+        Path::new("unused"),
+    );
+    let got = Path::new(got.trim_end_matches(super::sep()));
+    assert!(got.is_absolute());
+    assert!(got.ends_with(&runtime));
     std::fs::remove_dir_all(root).unwrap();
 }
 

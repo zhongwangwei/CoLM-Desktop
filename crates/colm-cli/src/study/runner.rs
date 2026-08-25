@@ -1590,6 +1590,7 @@ pub fn apply(
             .as_nanos()
     ));
     fs::create_dir(&stage)?;
+    let stage = colm_kernel::manifest::absolute(&stage)?;
     let staged = manifest
         .spec
         .base_cases
@@ -2516,11 +2517,11 @@ esac
         );
 
         let out = root.join("applied");
-        apply(&study, "best", &out, None).unwrap();
+        let published = apply(&study, "best", &out, None).unwrap();
         assert!(out.join("case.nml").is_file());
         let applied = std::fs::read_to_string(out.join("case.nml")).unwrap();
         assert!(!applied.contains(".colm-study-apply-"), "{applied}");
-        assert!(applied.contains(out.join("forcing.nml").to_string_lossy().as_ref()));
+        assert!(applied.contains(published[0].join("forcing.nml").to_string_lossy().as_ref()));
         assert_eq!(std::fs::read_to_string(&baseline).unwrap(), before);
 
         let precreated = root.join("precreated");

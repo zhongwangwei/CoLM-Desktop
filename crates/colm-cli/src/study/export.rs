@@ -45,7 +45,7 @@ fn prepare_output_dir(study_dir: &Path, output_dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(output_dir)?;
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
     let output_dir = colm_kernel::manifest::absolute(output_dir)?;
-    if same_or_child(&output_dir, &study_dir) {
+    if output_dir.starts_with(&study_dir) {
         if created {
             let _ = fs::remove_dir(&output_dir);
         }
@@ -55,20 +55,6 @@ fn prepare_output_dir(study_dir: &Path, output_dir: &Path) -> Result<PathBuf> {
         );
     }
     Ok(output_dir)
-}
-
-fn same_or_child(path: &Path, root: &Path) -> bool {
-    path.starts_with(root)
-        || path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase()
-            .starts_with(&format!(
-                "{}/",
-                root.to_string_lossy()
-                    .replace('\\', "/")
-                    .to_ascii_lowercase()
-            ))
 }
 
 fn flatten_samples(samples_dir: &Path, output: &Path) -> Result<()> {

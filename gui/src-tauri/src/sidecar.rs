@@ -173,7 +173,7 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
     // addresses that group, so the active Fortran child dies with colm-cli.
     let group = format!("-{pid}");
     let term = sidecar_command("kill")
-        .args(["-TERM", group.as_str()])
+        .args(["-TERM", "--", group.as_str()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -184,13 +184,13 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
     std::thread::sleep(Duration::from_millis(300));
     if process_group_alive(pid) {
         let kill = sidecar_command("kill")
-            .args(["-KILL", group.as_str()])
+            .args(["-KILL", "--", group.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .map_err(|e| format!("cannot kill process group {pid}: {e}"))?;
         std::thread::sleep(Duration::from_millis(50));
-        if !kill.success() && process_group_alive(pid) {
+        if !kill.success() || process_group_alive(pid) {
             return Err(format!("cannot kill process group {pid}: {kill}"));
         }
     }
@@ -229,13 +229,19 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
 
 #[cfg(unix)]
 fn process_group_alive(pid: u32) -> bool {
-    sidecar_command("kill")
-        .args(["-0", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let Ok(output) = sidecar_command("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .output()
+    else {
+        return false;
+    };
+    let group = pid.to_string();
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some(group.as_str())
+                && fields.next().is_some_and(|stat| !stat.starts_with('Z'))
+        })
 }
 
 #[tauri::command]
