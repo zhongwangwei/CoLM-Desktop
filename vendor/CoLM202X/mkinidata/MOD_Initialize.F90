@@ -490,26 +490,26 @@ ENDIF
 ! ................................
 ! 1.6 Initialize TUNABLE constants
 ! ................................
-      zlnd   = 0.01     !Roughness length for soil [m]
-      zsno   = 0.0024   !Roughness length for snow [m]
-      csoilc = 0.004    !Drag coefficient for soil under canopy [-]
-      dewmx  = 0.1      !maximum dew
+      zlnd   = DEF_TUNING_ZLND     !Roughness length for soil [m]
+      zsno   = DEF_TUNING_ZSNO   !Roughness length for snow [m]
+      csoilc = DEF_TUNING_CSOILC    !Drag coefficient for soil under canopy [-]
+      dewmx  = DEF_TUNING_DEWMX      !maximum dew
 
       ! 'wtfact' is updated to gridded 'fsatmax' data. (by Shupeng Zhang)
       ! wtfact = 0.38   !Maximum saturated fraction (global mean; see Niu et al., 2005)
 
-      capr   = 0.34     !Tuning factor to turn first layer T into surface T
-      cnfac  = 0.5      !Crank Nicholson factor between 0 and 1
-      ssi    = 0.033    !Irreducible water saturation of snow
-      wimp   = 0.05     !Water impremeable if porosity less than wimp
-      pondmx = 10.0     !Ponding depth (mm)
-      smpmax = -1.5e5   !Wilting point potential in mm
-      smpmin = -1.e8    !Restriction for min of soil poten. (mm)
-      smpmax_hr = -2.e2 !Wilting point potential in mm
-      smpmin_hr = -2.e5 !Restriction for min of soil poten. (mm)
-      trsmx0 = 2.e-4    !Max transpiration for moist soil+100% veg. [mm/s]
+      capr   = DEF_TUNING_CAPR     !Tuning factor to turn first layer T into surface T
+      cnfac  = DEF_TUNING_CNFAC      !Crank Nicholson factor between 0 and 1
+      ssi    = DEF_TUNING_SSI    !Irreducible water saturation of snow
+      wimp   = DEF_TUNING_WIMP     !Water impremeable if porosity less than wimp
+      pondmx = DEF_TUNING_PONDMX     !Ponding depth (mm)
+      smpmax = DEF_TUNING_SMPMAX   !Wilting point potential in mm
+      smpmin = DEF_TUNING_SMPMIN    !Restriction for min of soil poten. (mm)
+      smpmax_hr = DEF_TUNING_SMPMAX_HR !Wilting point potential in mm
+      smpmin_hr = DEF_TUNING_SMPMIN_HR !Restriction for min of soil poten. (mm)
+      trsmx0 = DEF_TUNING_TRSMX0    !Max transpiration for moist soil+100% veg. [mm/s]
       tcrit  = 2.5      !critical temp. to determine rain or snow
-      wetwatmax = 200.0 !maximum wetland water (mm)
+      wetwatmax = DEF_TUNING_WETWATMAX !maximum wetland water (mm)
 
       ! for TOPMODEL: read saturated fraction parameter data from files.
       ! (see Niu et al., 2005)

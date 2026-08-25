@@ -4,6 +4,8 @@ MODULE MOD_Runoff
 
 !-----------------------------------------------------------------------
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_TOPMOD_method, DEF_TUNING_SOIL_ICE_IMPEDANCE, &
+      DEF_TUNING_TOPMOD_DECAY, DEF_TUNING_SIMPLE_VIC_DS, DEF_TUNING_SIMPLE_VIC_WS
    IMPLICIT NONE
    SAVE
 
@@ -37,7 +39,6 @@ CONTAINS
 !  Author : Yongjiu Dai, 07/29/2002, Guoyue Niu, 06/2012
 !=======================================================================
 
-   USE MOD_Namelist,        only: DEF_TOPMOD_method
    USE MOD_IncompleteGamma, only: GRATIO
    USE MOD_SPMD_Task
    IMPLICIT NONE
@@ -73,8 +74,6 @@ CONTAINS
 
 !-------------------------- Local Variables ----------------------------
 
-   real(r8), parameter :: vdcf = 2.0
-
    real(r8) qinmax       ! maximum infiltration capability
    real(r8) fsat         ! fractional area with water table at surface
 
@@ -90,7 +89,7 @@ CONTAINS
       !fsat = wtfact*min(1.0,exp(-0.5*fff*zwt))
       IF ((DEF_TOPMOD_method == 0) .or. (DEF_TOPMOD_method == 1)) THEN
 
-         fsat = fsatmax * exp(- fsatdcf * vdcf * zwt)
+         fsat = fsatmax * exp(- fsatdcf * DEF_TUNING_TOPMOD_DECAY * zwt)
 
       ELSE
 
@@ -107,10 +106,10 @@ CONTAINS
                niter = niter + 1
                CALL GRATIO (alp_twi+1, (eta-mu_twi)/chi_twi, pgr1, qgr, 0)
                CALL GRATIO (alp_twi,   (eta-mu_twi)/chi_twi, pgr0, qgr, 0)
-               gfun = ((eta-mu_twi)*pgr0 - chi_twi*alp_twi*pgr1)/vdcf - zwt
+               gfun = ((eta-mu_twi)*pgr0 - chi_twi*alp_twi*pgr1)/DEF_TUNING_TOPMOD_DECAY - zwt
 
                IF (abs(gfun) > 1.e-6) THEN
-                  eta = mu_twi + (chi_twi * alp_twi * pgr1 + vdcf*zwt) / pgr0
+                  eta = mu_twi + (chi_twi * alp_twi * pgr1 + DEF_TUNING_TOPMOD_DECAY*zwt) / pgr0
                ELSE
                   EXIT
                ENDIF
@@ -158,7 +157,6 @@ CONTAINS
    SUBROUTINE SubsurfaceRunoff_TOPMOD (nl_soil, icefrac, dz_soisno, zi_soisno, zwt, rsubst, &
          hksati, topoweti, eta)
 
-   USE MOD_Namelist, only: DEF_TOPMOD_method
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -176,8 +174,6 @@ CONTAINS
    real(r8), intent(in), optional :: eta
 
 !-------------------------- Local Variables ----------------------------
-
-   real(r8), parameter :: vdcf = 2.0
 
    integer  :: j                ! indices
    integer  :: jwt              ! index of the soil layer right above the water table (-)
@@ -214,9 +210,10 @@ CONTAINS
       imped = max(0.,1.-fracice_rsub)
 
       IF ((DEF_TOPMOD_method == 1) .and. present(hksati) .and. present(topoweti)) THEN
-         rsubst = imped * 3.e4 * sum(hksati(1:nl_soil))/nl_soil / vdcf * exp(-topoweti) * exp(-vdcf*zwt)
+         rsubst = imped * 3.e4 * sum(hksati(1:nl_soil))/nl_soil / DEF_TUNING_TOPMOD_DECAY * &
+            exp(-topoweti) * exp(-DEF_TUNING_TOPMOD_DECAY*zwt)
       ELSEIF ((DEF_TOPMOD_method == 2) .and. present(hksati) .and. present(eta)) THEN
-         rsubst = imped * 3.e3 * sum(hksati(1:nl_soil))/nl_soil / vdcf * exp(-eta)
+         rsubst = imped * 3.e3 * sum(hksati(1:nl_soil))/nl_soil / DEF_TUNING_TOPMOD_DECAY * exp(-eta)
       ELSE
          rsubst = imped * 5.5e-3 * exp(-2.5*zwt)
       ENDIF
@@ -390,8 +387,6 @@ CONTAINS
    real(r8), intent(out) :: rsubst ! subsurface runoff (mm h2o/s)
 
    ! Local Variables
-   real(r8), parameter :: Ds = 0.061 ! a fraction of Dsmax
-   real(r8), parameter :: Ws = 0.646 ! a fraction of the potential water storage as Wmb-Wwb
    real(r8) :: Dsmax ! maximum subsurface flow
    real(r8) :: Wwb   ! (layer 8+9, from 0.83m to 2.30m) water storage at wilting point
    real(r8) :: Wmb   ! (layer 8+9, from 0.83m to 2.30m) maximum water storage
@@ -399,7 +394,6 @@ CONTAINS
    real(r8) :: Wab   ! (layer 8+9, from 0.83m to 2.30m) relative water storage
 
    real(r8) :: vol_ice, icefrac, eff_porosity, imped, hk
-   real(r8), parameter :: e_ice=6.0  ! soil ice impedance factor
    integer  :: ilev
 
       Wwb   = 0.
@@ -420,7 +414,7 @@ CONTAINS
             eff_porosity, theta_r(ilev), psi0(ilev), nprms, prms(:,ilev))
 
          icefrac = vol_ice/porsl(ilev)
-         imped = 10.**(-e_ice*icefrac)
+         imped = 10.**(-DEF_TUNING_SOIL_ICE_IMPEDANCE*icefrac)
          hk    = imped * hksati(ilev)
          Dsmax = max(Dsmax, hk)
       ENDDO
@@ -428,10 +422,12 @@ CONTAINS
       Wab = (Wlb-Wwb) / (Wmb-Wwb)
       Wab = min(max(Wab, 0.), 1.)
 
-      IF (Wab <= Ws) THEN
-         rsubst = Dsmax * Ds * (Wab/Ws)
+      IF (Wab <= DEF_TUNING_SIMPLE_VIC_WS) THEN
+         rsubst = Dsmax * DEF_TUNING_SIMPLE_VIC_DS * (Wab/DEF_TUNING_SIMPLE_VIC_WS)
       ELSE
-         rsubst = Dsmax * Ds * (Wab/Ws) + Dsmax * (1-Ds/Ws) * ((Wab-Ws)/(1-Ws))**2
+         rsubst = Dsmax * DEF_TUNING_SIMPLE_VIC_DS * (Wab/DEF_TUNING_SIMPLE_VIC_WS) + &
+            Dsmax * (1-DEF_TUNING_SIMPLE_VIC_DS/DEF_TUNING_SIMPLE_VIC_WS) * &
+            ((Wab-DEF_TUNING_SIMPLE_VIC_WS)/(1-DEF_TUNING_SIMPLE_VIC_WS))**2
       ENDIF
 
    END SUBROUTINE SubsurfaceRunoff_SimpleVIC

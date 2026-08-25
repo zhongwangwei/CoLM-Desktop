@@ -2,7 +2,7 @@ use crate::{all, find, Default, FieldKind};
 
 #[test]
 fn the_table_has_the_measured_number_of_fields() {
-    // 实测：211 个顶层标量 + 4 个派生类型共 535 个成员，合计 746。
+    // 实测：297 个顶层标量 + 4 个派生类型共 535 个成员，合计 832。
     // 三个调试宏改成运行时开关后新增了 DEF_USE_CoLMDEBUG /
     // DEF_USE_RangeCheck / DEF_USE_SrfdataDiag，顶层数从 202 变 205；
     // 土壤水力方案改成运行时开关后新增了 DEF_USE_Campbell_SOIL_MODEL
@@ -13,15 +13,21 @@ fn the_table_has_the_measured_number_of_fields() {
     // （DEF_USE_USGS/DEF_USE_IGBP/DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC
     // 早就在 MOD_Namelist.F90 里声明了，不算新增，只是从死代码变成
     // 真正被读/被用），顶层数从 207 变 210；臭氧文件从硬编码运行时目录
-    // 改为可选择的 DEF_file_Ozone 后，顶层数从 210 变 211。
+    // 改为可选择的 DEF_file_Ozone 后，顶层数从 210 变 211；五个算例级
+    // 气孔导度调参覆盖项使顶层数从 211 变 216；随后把原来写死的
+    // 水热、植物水力、臭氧与强迫降尺度 28 个核心系数改成专家模式
+    // 运行时参数，顶层数从 216 变 244；MOD_Const_LC 的 39 个可调地类
+    // 常量新增为稀疏 SinglePoint 覆盖后，顶层数从 244 变 283；冻结土壤、
+    // TOPMODEL、Simple VIC、积雪覆盖与灌溉的 13 个运行时系数使其变为 296；
+    // CROP 单点播种日覆盖项使其变为 297。
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
-        (700..=760).contains(&total),
-        "expected roughly 740 fields, got {total}"
+        (790..=840).contains(&total),
+        "expected roughly 832 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 211, "top-level count changed");
+    assert_eq!(top, 297, "top-level count changed");
 }
 
 #[test]

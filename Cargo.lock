@@ -76,10 +76,12 @@ dependencies = [
  "colm-hist",
  "colm-kernel",
  "colm-namelist",
+ "colm-schema",
  "colm-srfdata",
  "netcdf",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -358,6 +360,7 @@ dependencies = [
  "colm-hist",
  "colm-kernel",
  "colm-namelist",
+ "colm-schema",
  "colm-srfdata",
  "netcdf",
  "serde",

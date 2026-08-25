@@ -103,6 +103,22 @@ fn build_site_new_args_accepts_negative_coordinates() {
     assert!(args.contains(&"-33.2".to_string()));
 }
 
+#[test]
+fn pft_site_path_resolves_the_case_relative_site_file() {
+    let dir = std::env::temp_dir().join(format!("colm-pft-case-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("input")).unwrap();
+    std::fs::write(
+        dir.join("case.nml"),
+        "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n SITE_landtype=12\n SITE_fsitedata='input/site.nc'\n/\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pft_site_input(&dir).unwrap(),
+        (dir.join("input/site.nc"), Some(12))
+    );
+}
+
 /// **这条才是两边结构体不脱钩的保证。** `colm-cli` 在另一个 workspace，
 /// 两个 crate 不互相依赖；`SiteReport` 与 `cmd_site_new` 拼的那份 JSON
 /// 各写各的。哪天那边改了字段名，只有拿真输出跑一遍才发现得了。

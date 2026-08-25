@@ -44,8 +44,6 @@ MODULE MOD_ForcingDownscaling
    ! Kunkel, K. E., 1989: Simple procedures for extrapolation of humidity variables in the
    ! mountainous western United States.  J. Climate, 2, 656-669. lapse_rate = /Jan -
    ! Dec/4.4,5.9,7.1,7.8,8.1,8.2,8.1,8.1,7.7,6.8,5.5,4.7/ (deg km-1)
-   real(r8), parameter :: lapse_rate = 0.006_r8         ! surface temperature lapse rate (deg m-1)
-
    SAVE
 
 ! PUBLIC MEMBER FUNCTIONS:
@@ -216,7 +214,7 @@ CONTAINS
       zbot    = forc_hgt_g              ! atm ref height
 
       hsurf_c = forc_topo_c                           ! column sfc elevation
-      tbot_c  = tbot_g-lapse_rate*(hsurf_c-hsurf_g)   ! adjust [temp] for column
+      tbot_c  = tbot_g-DEF_DS_TEMP_LAPSE_RATE*(hsurf_c-hsurf_g)   ! adjust [temp] for column
       Hbot    = rair*0.5_r8*(tbot_g+tbot_c)/grav      ! scale ht at avg temp
       pbot_c  = pbot_g*exp(-(hsurf_c-hsurf_g)/Hbot)   ! adjust [press] for column
 
@@ -594,9 +592,7 @@ CONTAINS
    real(r8) :: emissivity_allsky_g   ! all-sky emissivity at grid cell
    real(r8) :: es_g, es_c, dum1, dum2, dum3
 
-   real(r8), parameter :: lapse_rate_longwave = 0.032_r8 ! longwave radiation lapse rate (W m-2 m-1)
    ! relative limit for how much longwave downscaling can be done (unitless)
-   real(r8), parameter :: longwave_downscaling_limit = 0.5_r8
 
 !--------------------------------------------------------------------------
 
@@ -630,7 +626,7 @@ CONTAINS
          ! al., 2016, TC) Figure 6, doi:10.5194/tc-10-2379-2016
 
          IF (glaciers) THEN
-            forc_lwrad_c = forc_lwrad_g - lapse_rate_longwave * (hsurf_c-hsurf_g)
+            forc_lwrad_c = forc_lwrad_g - DEF_DS_LONGWAVE_LAPSE_RATE * (hsurf_c-hsurf_g)
 
             ! Here we assume that deltaLW = (dLW/dT)*(dT/dz)*deltaz
             ! We get dLW/dT = 4*eps*sigma*T^3 = 4*LW/T from the Stefan-Boltzmann law,
@@ -639,7 +635,7 @@ CONTAINS
          ELSE
             forc_lwrad_c = forc_lwrad_g &
                - 4.0_r8 * forc_lwrad_g/(0.5_r8*(forc_t_c+forc_t_g)) &
-               * lapse_rate * (hsurf_c - hsurf_g)
+               * DEF_DS_TEMP_LAPSE_RATE * (hsurf_c - hsurf_g)
          ENDIF
       ENDIF
 
@@ -649,8 +645,8 @@ CONTAINS
       ! small lwrad value in one column can lead to a big normalization factor,
       ! leading to huge lwrad values in other columns.
 
-      forc_lwrad_c = min(forc_lwrad_c, forc_lwrad_g * (1._r8 + longwave_downscaling_limit))
-      forc_lwrad_c = max(forc_lwrad_c, forc_lwrad_g * (1._r8 - longwave_downscaling_limit))
+      forc_lwrad_c = min(forc_lwrad_c, forc_lwrad_g * (1._r8 + DEF_DS_LONGWAVE_LIMIT))
+      forc_lwrad_c = max(forc_lwrad_c, forc_lwrad_g * (1._r8 - DEF_DS_LONGWAVE_LIMIT))
 
    END SUBROUTINE downscale_longwave
 
@@ -687,7 +683,6 @@ CONTAINS
    integer,  parameter :: S = 1370                               ! solar constant (W/m**2)
    real(r8), parameter :: thr = 85*PI/180                        ! threshold of zenith
    ! relative limit for how much shortwave downscaling can be done (unitless)
-   real(r8), parameter :: shortwave_downscaling_limit = 0.5_r8
 
    ! ARGUMENTS:
    real(r8), intent(in) :: julian_day          ! day of year
@@ -871,9 +866,9 @@ CONTAINS
       ! leading to huge swrad values in other columns.
 
       forc_swrad_c = min(forc_swrad_c, &
-               forc_swrad_g * (1._r8 + shortwave_downscaling_limit))
+               forc_swrad_g * (1._r8 + DEF_DS_SHORTWAVE_LIMIT))
       forc_swrad_c = max(forc_swrad_c, &
-               forc_swrad_g * (1._r8 - shortwave_downscaling_limit))
+               forc_swrad_g * (1._r8 - DEF_DS_SHORTWAVE_LIMIT))
       ! Ensure that the denominator is not 0 during shortwave normalization
       IF (forc_swrad_c==0.) forc_swrad_c = 0.0001
 
@@ -896,7 +891,6 @@ CONTAINS
    integer,  parameter :: S = 1370                               ! solar constant (W/m**2)
    real(r8), parameter :: thr = 85*PI/180                        ! threshold of zenith
    ! relative limit for how much shortwave downscaling can be done (unitless)
-   real(r8), parameter :: shortwave_downscaling_limit = 0.2_r8
 
    ! ARGUMENTS:
    real(r8), intent(in) :: julian_day          ! day of year
@@ -1036,9 +1030,9 @@ CONTAINS
       ! leading to huge swrad values in other columns.
 
       forc_swrad_c = min(forc_swrad_c, &
-               forc_swrad_g * (1._r8 + shortwave_downscaling_limit)) 
+               forc_swrad_g * (1._r8 + DEF_DS_SHORTWAVE_SIMPLE_LIMIT))
       forc_swrad_c = max(forc_swrad_c, &
-               forc_swrad_g * (1._r8 - shortwave_downscaling_limit))
+               forc_swrad_g * (1._r8 - DEF_DS_SHORTWAVE_SIMPLE_LIMIT))
       ! Ensure that the denominator is not 0 during shortwave normalization
       IF (forc_swrad_c < 1.e-4) forc_swrad_c = 0.0001
 

@@ -5,9 +5,13 @@ import { $ } from './ui.js';
 
 const ready = () => (state.selected ? null : '先在文件与目录建一个算例');
 const available = id => () => state.availableFlows.has(id);
+// 过程步骤在建例前要保持可见，让用户知道后续流程；此时 `need` 会把它们
+// 灰置。建例后才按当前站点/内核的真实可用分栏收窄。
+const processAvailable = id => () => !state.selected || state.availableFlows.has(id);
 const completedResults = () => state.cases.filter(c => state.createdCases.has(c.dir) && c.has_history);
 const hasResults = () => completedResults().length > 0;
 const hasMultipleResults = () => completedResults().length > 1;
+const resultsReady = () => ready() ?? (hasResults() ? null : '先运行完成至少一个算例');
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
@@ -26,12 +30,12 @@ export const WORKFLOW = [
     { id: 'basic-forcing', page: 'basic', t: '强迫场', d: '强迫场读取设置', need: ready, show: available('basic-forcing') },
   ] },
   { n: 3, key: 'params', collapsible: true, t: '过程参数', d: '按过程逐项配置', steps: [
-    { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready, show: available('params-water') },
-    { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready, show: available('params-eco') },
-    { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready, show: available('params-river') },
-    { id: 'params-da', page: 'params', t: '数据同化', d: '同化过程设置', need: ready, show: available('params-da') },
-    { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: available('params-tracer') },
-    { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: available('params-urban') },
+    { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready, show: processAvailable('params-water') },
+    { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready, show: processAvailable('params-eco') },
+    { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready, show: processAvailable('params-river') },
+    { id: 'params-da', page: 'params', t: '数据同化', d: '同化过程设置', need: ready, show: processAvailable('params-da') },
+    { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: processAvailable('params-tracer') },
+    { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
   { n: 4, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
@@ -43,7 +47,15 @@ export const WORKFLOW = [
     { id: 'result-evaluation', page: 'result', t: '模型评估', d: '模型与观测配对', need: ready, show: hasResults },
     { id: 'result-comparison', page: 'result', t: '多站点比较', d: '排名与批量指标', need: ready, show: hasMultipleResults },
     { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
-    { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: ready, show: hasResults },
+  ] },
+  { n: 6, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
+    { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: 'OAT / LHS 参数扰动', need: resultsReady },
+  ] },
+  { n: 7, t: '参数调优', d: '差分进化与目标函数', steps: [
+    { id: 'result-tuning', page: 'result', t: '参数调优', d: '差分进化与目标函数', need: resultsReady },
+  ] },
+  { n: 8, t: '报告与导出', d: '保存分析结果', steps: [
+    { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
   ] },
 ];
 export const STEPS = WORKFLOW.flatMap(group => group.steps);

@@ -165,8 +165,19 @@ CONTAINS
             minutes = minutes - 262800
          END select
 
-         itime_mem = itime_mem + 1
-         time_memory(itime_mem) = minutes
+         ! `hist_out` writes more than one SinglePoint history file for the
+         ! same model timestamp (main history first, optional tracer history
+         ! second).  The write-back cache is shared across those calls, so a
+         ! second call for the same timestamp must reuse the memory slot instead
+         ! of advancing it; otherwise the final flush defines one file with N
+         ! time records while later variables are written with slot N+1.
+         IF (itime_mem <= 0) THEN
+            itime_mem = itime_mem + 1
+            time_memory(itime_mem) = minutes
+         ELSEIF (minutes /= time_memory(itime_mem)) THEN
+            itime_mem = itime_mem + 1
+            time_memory(itime_mem) = minutes
+         ENDIF
 
          IF (memory_to_disk) THEN
             CALL ncio_define_dimension(filename, 'time', itime_mem)
@@ -185,7 +196,7 @@ CONTAINS
 
    ! -- write 2D data --
    SUBROUTINE single_write_2d ( &
-         acc_vec, file_hist, varname, itime_in_file, longname, units)
+         acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 
       USE MOD_Vars_Global,      only: spval
       IMPLICIT NONE
@@ -194,8 +205,11 @@ CONTAINS
       character(len=*), intent(in)    :: file_hist
       character(len=*), intent(in)    :: varname
       integer,          intent(in)    :: itime_in_file
+      logical,          intent(in)    :: filter(:)
       character(len=*), intent(in)    :: longname
       character(len=*), intent(in)    :: units
+
+      WHERE (.not. filter) acc_vec = spval
 
       IF (USE_SITE_HistWriteBack) THEN
 
@@ -240,7 +254,7 @@ CONTAINS
 
    ! -- write 3D data --
    SUBROUTINE single_write_3d ( &
-         acc_vec, file_hist, varname, itime_in_file, dim1name, ndim1, longname, units)
+         acc_vec, file_hist, varname, itime_in_file, dim1name, ndim1, filter, longname, units)
 
       USE MOD_Vars_1DAccFluxes, only: nac
       USE MOD_Vars_Global,      only: spval
@@ -252,8 +266,15 @@ CONTAINS
       integer,          intent(in)    :: itime_in_file
       character(len=*), intent(in)    :: dim1name
       integer,          intent(in)    :: ndim1
+      logical,          intent(in)    :: filter(:)
       character(len=*), intent(in)    :: longname
       character(len=*), intent(in)    :: units
+
+      integer :: i1
+
+      DO i1 = 1, size(acc_vec, 1)
+         WHERE (.not. filter) acc_vec(i1,:) = spval
+      ENDDO
 
       WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
 
@@ -303,7 +324,7 @@ CONTAINS
    ! -- write 4D data --
    SUBROUTINE single_write_4d ( &
          acc_vec, file_hist, varname, itime_in_file, &
-         dim1name, ndim1, dim2name, ndim2, longname, units)
+         dim1name, ndim1, dim2name, ndim2, filter, longname, units)
 
       USE MOD_Vars_Global,      only: spval
       IMPLICIT NONE
@@ -316,8 +337,17 @@ CONTAINS
       integer,          intent(in)    :: ndim1
       character(len=*), intent(in)    :: dim2name
       integer,          intent(in)    :: ndim2
+      logical,          intent(in)    :: filter(:)
       character(len=*), intent(in)    :: longname
       character(len=*), intent(in)    :: units
+
+      integer :: i1, i2
+
+      DO i1 = 1, size(acc_vec, 1)
+         DO i2 = 1, size(acc_vec, 2)
+            WHERE (.not. filter) acc_vec(i1,i2,:) = spval
+         ENDDO
+      ENDDO
 
       IF (USE_SITE_HistWriteBack) THEN
 

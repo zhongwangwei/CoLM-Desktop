@@ -11,19 +11,28 @@
 
   MOD_CMD = -J
 
+# Desktop releases run the optimized profile.  Developers can retain the
+# former bounds-checked build with COLM_KERNEL_PROFILE=debug.
+  COLM_KERNEL_PROFILE ?= production
+  FOPTS_COMMON = -fdefault-real-8 -ffree-form -g \
+                 -ffpe-trap=invalid,zero,overflow \
+                 -fbacktrace -fdump-core -cpp -ffree-line-length-0
+
 # determine the gfortran version
   GCC_VERSION := "`gcc -dumpversion`"
   IS_GCC_ABOVE_10 := $(shell expr "$(GCC_VERSION)" ">=" "10")
   ifeq "$(IS_GCC_ABOVE_10)" "1"
-     FOPTS = -fdefault-real-8 -ffree-form -C -g \
-           -ffpe-trap=invalid,zero,overflow -fbounds-check \
-           -fbacktrace -fdump-core -cpp \
-           -ffree-line-length-0 -fallow-argument-mismatch
+     FOPTS_COMMON += -fallow-argument-mismatch
+  endif
+
+  FOPTS_PRODUCTION = -O2 $(FOPTS_COMMON)
+  FOPTS_DEBUG = -O0 -C -fbounds-check $(FOPTS_COMMON)
+  ifeq "$(COLM_KERNEL_PROFILE)" "production"
+     FOPTS = $(FOPTS_PRODUCTION)
+  else ifeq "$(COLM_KERNEL_PROFILE)" "debug"
+     FOPTS = $(FOPTS_DEBUG)
   else
-     FOPTS = -fdefault-real-8 -ffree-form -C -g \
-           -ffpe-trap=invalid,zero,overflow -fbounds-check \
-           -fbacktrace -fdump-core -cpp \
-           -ffree-line-length-0
+     $(error COLM_KERNEL_PROFILE must be production or debug)
   endif
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)

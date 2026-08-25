@@ -2,7 +2,7 @@
 //!
 //! 实现计划与科学边界见 `docs/plan-forcing-gap-repair.md`。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -362,7 +362,7 @@ fn solar_noon_evidence(
 fn longitude_offset(longitude: f64) -> f64 {
     // ponytail: longitude is only a fixed-offset fallback; explicit metadata or a
     // manual offset remains required for civil-zone exceptions.
-    (longitude / 15.0).round().clamp(-12.0, 14.0)
+    ((longitude / 15.0) * 4.0).round().clamp(-48.0, 56.0) / 4.0
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -622,6 +622,46 @@ pub struct RepairPlan {
     pub min_overlap: usize,
 }
 
+fn validate_repair_plan(plan: &RepairPlan) -> Result<()> {
+    if plan.min_overlap == 0 {
+        bail!("minimum ERA5-Land overlap must be at least one sample");
+    }
+    let mut slots = BTreeSet::new();
+    for slot in &plan.slots {
+        if !slots.insert(slot.index) {
+            bail!(
+                "forcing repair slot {} is listed more than once",
+                slot.index
+            );
+        }
+        if slot.source_name.trim().is_empty() {
+            bail!(
+                "forcing repair slot {} has an empty source name",
+                slot.index
+            );
+        }
+        if slot.also_add.iter().any(|name| name == &slot.source_name) {
+            bail!(
+                "slot {} names {:?} both as its source and in also_add",
+                slot.index,
+                slot.source_name
+            );
+        }
+        let mut additions = BTreeSet::new();
+        if slot
+            .also_add
+            .iter()
+            .any(|name| name.trim().is_empty() || !additions.insert(name))
+        {
+            bail!(
+                "forcing repair slot {} has an empty or duplicate also_add variable",
+                slot.index
+            );
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct VariableRepairSummary {
     pub slot: usize,
@@ -667,6 +707,7 @@ impl RepairSummary {
 
 /// 读取被选槽位并报告缺口，不改文件，也不要求 ERA5-Land 已经下载。
 pub fn diagnose_file(src: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
+    validate_repair_plan(plan)?;
     let file = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
     let (source_local_times, _) = file_times(&file, "time", 0.0)?;
     let step_seconds = source_step_seconds(&source_local_times)? as f64;
@@ -709,9 +750,10 @@ pub fn diagnose_file(src: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
 /// 生成新的已修复中间文件。原始文件只读；任何长缺口无法经偏差订正的
 /// ERA5-Land donor 解决时，函数在写产物前失败。
 pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSummary> {
-    if src == dst {
+    if crate::same_existing_file(src, dst) {
         bail!("gap repair destination must differ from its source");
     }
+    validate_repair_plan(plan)?;
     let file = netcdf::open(src).with_context(|| format!("cannot open {}", src.display()))?;
     let (source_local_times, time_units) = file_times(&file, "time", 0.0)?;
     let steps = source_local_times.len();
@@ -753,7 +795,6 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
         let scalar_wind =
             slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5);
         let quality_rejected = apply_basic_qc(&mut values, slot.index, scalar_wind)?;
-        let original = values.clone();
         let gap = analyze_gaps(&values, plan.short_gap_max);
         let kind = variable_kind(slot.index)?;
         let mut qc = fill_short_gaps(&mut values, plan.short_gap_max, kind);
@@ -774,11 +815,11 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
             )?;
             fill_from_donor(
                 &mut values,
-                &original,
                 &donor_values,
                 &months,
                 &mut qc,
                 slot.index,
+                scalar_wind,
                 plan.min_overlap,
             )?;
         }
@@ -935,21 +976,22 @@ fn correction_kind(slot: usize) -> Result<CorrectionKind> {
 
 fn fill_from_donor(
     values: &mut [f64],
-    original: &[f64],
     donor: &[f64],
     months: &[u32],
     qc: &mut [u8],
     slot: usize,
+    scalar_wind: bool,
     min_overlap: usize,
 ) -> Result<()> {
     if values.len() != donor.len() || values.len() != months.len() || values.len() != qc.len() {
         bail!("source, ERA5-Land, month and QC axes have different lengths");
     }
-    let (minimum, maximum) = physical_range(slot, false)?;
+    let (minimum, maximum) = physical_range(slot, scalar_wind)?;
     let valid = |value: f64| value.is_finite() && (minimum..=maximum).contains(&value);
-    let observed = original
+    let observed = values
         .iter()
-        .map(|value| valid(*value).then_some(*value))
+        .zip(qc.iter())
+        .map(|(value, quality)| (*quality == QC_OBSERVED && valid(*value)).then_some(*value))
         .collect::<Vec<_>>();
     let donor = donor
         .iter()
@@ -1126,7 +1168,7 @@ fn numeric_variable_attribute(variable: &netcdf::Variable<'_>, name: &str) -> Op
         })
 }
 
-fn normalize_declared_missing(file: &netcdf::File, name: &str, values: &mut [f64]) {
+pub(crate) fn normalize_declared_missing(file: &netcdf::File, name: &str, values: &mut [f64]) {
     normalize_missing(values, fill_value(file, name));
     let missing = file
         .variable(name)
@@ -1384,12 +1426,26 @@ fn parse_cf_time_units(units: &str) -> Result<(f64, i64)> {
         "days" | "day" | "d" => 86400.0,
         other => bail!("unsupported time unit {other:?}"),
     };
-    let cleaned = origin.trim().trim_end_matches('Z').trim();
-    if cleaned.len() < 10 {
-        bail!("time origin {cleaned:?} is too short");
-    }
-    let date = &cleaned[..10];
-    let time = cleaned.get(11..19).unwrap_or("00:00:00");
+    let raw = origin.trim();
+    let cleaned = raw.strip_suffix('Z').unwrap_or(raw).trim();
+    let (date, time) = if cleaned.len() == 10 {
+        (cleaned, "00:00:00")
+    } else {
+        if cleaned
+            .as_bytes()
+            .get(10)
+            .is_none_or(|separator| !matches!(separator, b' ' | b'T'))
+        {
+            bail!("invalid time origin {cleaned:?}");
+        }
+        (
+            cleaned.get(..10).context("time origin date is not ASCII")?,
+            cleaned
+                .get(11..)
+                .filter(|value| !value.is_empty())
+                .context("time origin has no clock")?,
+        )
+    };
     let mut date_parts = date.split('-');
     let year: i32 = date_parts
         .next()
@@ -1403,20 +1459,43 @@ fn parse_cf_time_units(units: &str) -> Result<(f64, i64)> {
         .next()
         .context("time origin has no day")?
         .parse()?;
+    if date_parts.next().is_some() {
+        bail!("invalid time origin {cleaned:?}");
+    }
     let mut time_parts = time.split(':');
     let hour: i64 = time_parts.next().unwrap_or("0").parse()?;
     let minute: i64 = time_parts.next().unwrap_or("0").parse()?;
-    let second: i64 = time_parts
-        .next()
-        .unwrap_or("0")
-        .split('.')
-        .next()
-        .unwrap_or("0")
-        .parse()?;
-    let origin = crate::civil::days_from_civil(year, month, day) * 86400
-        + hour * 3600
-        + minute * 60
-        + second;
+    let second_text = time_parts.next().unwrap_or("0");
+    if time_parts.next().is_some() {
+        bail!("invalid time origin {cleaned:?}");
+    }
+    let (second_text, fraction) = second_text
+        .split_once('.')
+        .map_or((second_text, None), |(second, fraction)| {
+            (second, Some(fraction))
+        });
+    if fraction.is_some_and(|value| value.is_empty() || !value.bytes().all(|byte| byte == b'0')) {
+        bail!("sub-second or suffixed time origin {cleaned:?} is unsupported");
+    }
+    let second: i64 = second_text.parse()?;
+    if !(1..=12).contains(&month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+        || hour < 0
+        || minute < 0
+        || second < 0
+    {
+        bail!("invalid time origin {cleaned:?}");
+    }
+    let days = crate::civil::days_from_civil(year, month, day);
+    if crate::civil::civil_from_days(days) != (year, month, day) {
+        bail!("invalid time origin {cleaned:?}");
+    }
+    let origin = days
+        .checked_mul(86400)
+        .and_then(|value| value.checked_add(hour * 3600 + minute * 60 + second))
+        .context("time origin overflows the supported Unix-second range")?;
     Ok((factor, origin))
 }
 
@@ -1881,7 +1960,12 @@ fn sample_donor(
     if !times.windows(2).all(|pair| pair[1] > pair[0]) {
         bail!("ERA5-Land time axis is not strictly increasing");
     }
-    let tolerance = (times[1] - times[0]).max(1);
+    let cadence = times
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .min()
+        .unwrap_or(1)
+        .max(1);
     let mut output = Vec::with_capacity(targets.len());
     for target in targets {
         match times.binary_search(target) {
@@ -1889,8 +1973,7 @@ fn sample_donor(
             Err(right) if right > 0 && right < times.len() => {
                 let left = right - 1;
                 let left_distance = target - times[left];
-                let right_distance = times[right] - target;
-                if left_distance > tolerance && right_distance > tolerance {
+                if times[right] - times[left] > cadence {
                     output.push(f64::NAN);
                 } else if interval_rate {
                     output.push(values[right]);

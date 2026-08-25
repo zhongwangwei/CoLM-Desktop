@@ -17,6 +17,34 @@ import './sitedata.js';
 initI18n();
 initShell();
 
+function beginLiveResize(e) {
+  const live = document.querySelector('.live');
+  if (!live || document.querySelector('.app')?.classList.contains('live-collapsed')) return;
+  const stacked = innerWidth <= 1240;
+  const apply = ev => {
+    const size = stacked
+      ? Math.min(innerHeight - 220, Math.max(160, innerHeight - 34 - ev.clientY))
+      : Math.min(720, Math.max(260, innerWidth - ev.clientX));
+    document.documentElement.style.setProperty(stacked ? '--live-h' : '--live-w', `${size}px`);
+  };
+  const up = () => {
+    document.body.classList.remove('resizing-live');
+    window.removeEventListener('pointermove', apply);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+  };
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget?.setPointerCapture?.(e.pointerId);
+  document.body.classList.add('resizing-live');
+  apply(e);
+  window.addEventListener('pointermove', apply);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+}
+
+$('live-resizer').addEventListener('pointerdown', beginLiveResize);
+
 if (listen) {
   listen('colm-about', event => {
     $('about-version').textContent = event.payload;

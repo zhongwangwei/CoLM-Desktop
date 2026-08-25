@@ -62,6 +62,130 @@ fn a_start_earlier_on_the_same_day_is_refused() {
 
 use std::path::{Path, PathBuf};
 
+fn case_with_nml(name: &str, text: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("colm-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("case.nml"), text).unwrap();
+    root
+}
+
+#[test]
+fn mkinidata_artifacts_follow_def_lc_year() {
+    let case = case_with_nml(
+        "lc-year",
+        "&nl_colm\n   DEF_CASE_NAME = 'LC2010'\n   DEF_LC_YEAR = 2010\n/\n",
+    );
+    let year = super::land_cover_year(&case.join("case.nml")).unwrap();
+    let artifacts = super::stage_artifacts(&case.join("out/LC2010"), "LC2010", year);
+
+    let names = artifacts[1]
+        .1
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "LC2010_restart_const_lc2010_w180_s90.nc",
+            "LC2010_restart_const_lc2010.nc",
+        ]
+    );
+}
+
+#[test]
+fn omitted_lc_year_uses_the_schema_default() {
+    let case = case_with_nml(
+        "lc-default",
+        "&nl_colm\n   DEF_CASE_NAME = 'DefaultLC'\n/\n",
+    );
+    assert_eq!(
+        super::land_cover_year(&case.join("case.nml")).unwrap(),
+        2005
+    );
+}
+
+#[test]
+fn a_natural_bgc_case_keeps_its_runtime_directory() {
+    let unused = Path::new("/case/runtime_unused");
+    let configured = super::configured_or_unused(Some("/data/runtime".into()), unused);
+    assert!(configured
+        .replace('/', &super::sep().to_string())
+        .ends_with(&format!("data{}runtime{}", super::sep(), super::sep())));
+    assert_eq!(
+        super::configured_or_unused(None, unused),
+        unused.to_string_lossy()
+    );
+}
+
+#[test]
+fn a_relative_runtime_directory_is_made_absolute_before_writing_the_case() {
+    let root = PathBuf::from("target").join(format!("colm-cli-runtime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let runtime = root.join("Runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let got = super::configured_or_unused(
+        Some(runtime.to_string_lossy().into_owned()),
+        Path::new("unused"),
+    );
+    let got = Path::new(got.trim_end_matches(super::sep()));
+    assert!(got.is_absolute());
+    assert!(got.ends_with(&runtime));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn crop_new_fields_make_cli_crop_cases_runnable() {
+    let mut fields = Vec::new();
+    super::add_crop_fields(&mut fields);
+    assert!(fields.contains(&("DEF_USE_BGC".into(), colm_namelist::Value::Bool(true))));
+    assert!(fields.contains(&(
+        "DEF_USE_LAIFEEDBACK".into(),
+        colm_namelist::Value::Bool(true)
+    )));
+    assert!(fields.contains(&("DEF_USE_FERT".into(), colm_namelist::Value::Bool(false))));
+    assert!(fields.contains(&(
+        "DEF_USE_IRRIGATION".into(),
+        colm_namelist::Value::Bool(false)
+    )));
+}
+
+#[test]
+fn urban_usgs_mode_keeps_urban_site_audit_but_writes_usgs_landtype() {
+    let mode = super::parse_new_mode(Some("urban-usgs")).unwrap();
+    assert_eq!(mode.site, colm_srfdata::site::SiteMode::Urban);
+    assert_eq!(
+        mode.urban_landtype,
+        Some(colm_case::build::URBAN_LANDTYPE_USGS)
+    );
+
+    let mut fields = Vec::new();
+    super::add_subgrid_fields(&mut fields, mode.subgrid);
+    assert_eq!(
+        fields,
+        vec![
+            ("DEF_USE_LCT".into(), colm_namelist::Value::Bool(true)),
+            ("DEF_USE_PFT".into(), colm_namelist::Value::Bool(false)),
+            ("DEF_USE_PC".into(), colm_namelist::Value::Bool(false)),
+        ]
+    );
+}
+
+#[test]
+fn urban_modes_preserve_every_runtime_subgrid() {
+    for (name, expected) in [
+        ("urban-igbp", super::Subgrid::Lct),
+        ("urban-usgs", super::Subgrid::Lct),
+        ("urban-pft", super::Subgrid::Pft),
+        ("urban-pc", super::Subgrid::Pc),
+    ] {
+        let mode = super::parse_new_mode(Some(name)).unwrap();
+        assert_eq!(mode.site, colm_srfdata::site::SiteMode::Urban);
+        assert!(mode.urban_landtype.is_some());
+        assert!(mode.subgrid == expected, "{name}");
+    }
+}
+
 /// 造一个 `<root>/Sitedata/X_site.nc` + `<root>/Forcing/X_Met.nc` 的树。
 fn layout(root: &Path) -> PathBuf {
     std::fs::create_dir_all(root.join("Sitedata")).unwrap();
@@ -128,7 +252,31 @@ fn an_explicit_path_wins_over_the_convention() {
     std::fs::write(&mine, b"x").unwrap();
 
     let got = super::resolve_met(Some(mine.to_str().unwrap()), &site).expect("显式路径");
-    assert_eq!(got, mine, "给了 --met 就该用它，而不是按约定推");
+    assert_eq!(
+        got,
+        colm_kernel::manifest::absolute(&mine).unwrap(),
+        "给了 --met 就该用它，而不是按约定推"
+    );
+}
+
+#[test]
+fn an_explicit_relative_path_is_made_absolute_before_writing_the_case() {
+    let cwd = std::env::current_dir().unwrap();
+    let relative = PathBuf::from(format!(
+        "target/colm-met-relative-{}.nc",
+        std::process::id()
+    ));
+    let absolute = cwd.join(&relative);
+    std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+    std::fs::write(&absolute, b"x").unwrap();
+
+    let got = super::resolve_met(
+        Some(relative.to_str().unwrap()),
+        Path::new("unused_site.nc"),
+    )
+    .expect("relative --met path");
+    assert_eq!(got, colm_kernel::manifest::absolute(&absolute).unwrap());
+    let _ = std::fs::remove_file(absolute);
 }
 
 #[test]
@@ -145,4 +293,89 @@ fn an_explicit_path_that_does_not_exist_is_refused() {
         !m.contains("Sitedata"),
         "不该提约定那条路——用户明确给了路径，回落只会让人更糊涂：{m}"
     );
+}
+
+fn minimal_summary() -> colm_forcing::MetSummary {
+    colm_forcing::MetSummary {
+        time_units: "seconds since 2010-01-01 00:00:00".into(),
+        start: colm_forcing::Stamp {
+            year: 2010,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        },
+        steps: 2,
+        step_seconds: 1800.0,
+        step_uniform: true,
+        height_v: f64::NAN,
+        height_t: f64::NAN,
+        height_q: f64::NAN,
+        variables: [
+            "Tair", "Qair", "Psurf", "Precip", "Wind", "SWdown", "LWdown",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        time_shown_in: None,
+    }
+}
+
+#[test]
+fn companion_forcing_nml_fills_missing_observation_heights() {
+    let root = std::env::temp_dir().join(format!("colm-height-nml-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Sitedata")).unwrap();
+    std::fs::create_dir_all(root.join("Forcing")).unwrap();
+    std::fs::create_dir_all(root.join("Forcingnml")).unwrap();
+    let site = root.join("Sitedata/AT-Neu_2002-2012_FLUXNET2015_site.nc");
+    let met = root.join("Forcing/AT-Neu_2010_FLUXNET-CH4_Met.nc");
+    std::fs::write(&site, b"").unwrap();
+    std::fs::write(&met, b"").unwrap();
+    std::fs::write(
+        root.join("Forcingnml/AT-Neu.nml"),
+        "&nl_colm_forcing\n DEF_forcing%HEIGHT_V = 20.0\n DEF_forcing%HEIGHT_T = 21\n DEF_forcing%HEIGHT_Q = 22.d0\n/\n",
+    )
+    .unwrap();
+
+    let mut summary = minimal_summary();
+    super::complete_forcing_heights(&mut summary, &site, &met).unwrap();
+    assert_eq!(
+        (summary.height_v, summary.height_t, summary.height_q),
+        (20.0, 21.0, 22.0)
+    );
+}
+
+#[test]
+fn source_observation_heights_win_over_companion_nml() {
+    let root = std::env::temp_dir().join(format!("colm-height-win-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Sitedata")).unwrap();
+    std::fs::create_dir_all(root.join("Forcing")).unwrap();
+    std::fs::create_dir_all(root.join("Forcingnml")).unwrap();
+    let site = root.join("Sitedata/AA_site.nc");
+    let met = root.join("Forcing/AA_Met.nc");
+    std::fs::write(root.join("Forcingnml/AA.nml"), "&nl_colm_forcing\n DEF_forcing%HEIGHT_V = 99\n DEF_forcing%HEIGHT_T = 99\n DEF_forcing%HEIGHT_Q = 99\n/\n").unwrap();
+    let mut summary = minimal_summary();
+    summary.height_v = 3.0;
+
+    super::complete_forcing_heights(&mut summary, &site, &met).unwrap();
+    assert_eq!(summary.height_v, 3.0);
+    assert_eq!(summary.height_t, 99.0);
+}
+
+#[test]
+fn missing_forcing_heights_fail_before_writing_nan() {
+    let root = std::env::temp_dir().join(format!("colm-height-miss-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Sitedata")).unwrap();
+    std::fs::create_dir_all(root.join("Forcing")).unwrap();
+    let site = root.join("Sitedata/AA_site.nc");
+    let met = root.join("Forcing/AA_Met.nc");
+    let mut summary = minimal_summary();
+
+    let e = super::complete_forcing_heights(&mut summary, &site, &met).unwrap_err();
+    let m = e.to_string();
+    assert!(m.contains("HEIGHT_V") && m.contains("AA.nml"), "{m}");
 }

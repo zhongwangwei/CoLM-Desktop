@@ -837,6 +837,8 @@ ENDIF
       tau    (2,2,:) = taus_nir_igbp   (:)
 #endif
 
+      CALL apply_lc_scalar_overrides()
+
       ! ----------------------------------------------------------
       ! The definition of global root distribution is based on
       ! Schenk and Jackson, 2002: The Global Biogeography of Roots.
@@ -873,6 +875,59 @@ ENDIF
       ENDIF
 
    END SUBROUTINE Init_LC_Const
+
+   SUBROUTINE apply_lc_scalar_overrides()
+   USE MOD_Namelist
+   IMPLICIT NONE
+
+#ifdef SinglePoint
+   integer :: lc
+
+      IF (.not. DEF_USE_LCT) RETURN
+      lc = SITE_landtype
+      IF (lc < 1 .or. lc > N_land_classification) RETURN
+      IF (DEF_LC_HTOP0 /= LC_OVERRIDE_UNSET) htop0(lc) = DEF_LC_HTOP0
+      IF (DEF_LC_HBOT0 /= LC_OVERRIDE_UNSET) hbot0(lc) = DEF_LC_HBOT0
+      IF (DEF_LC_FVEG0 /= LC_OVERRIDE_UNSET) fveg0(lc) = DEF_LC_FVEG0
+      IF (DEF_LC_SAI0 /= LC_OVERRIDE_UNSET) sai0(lc) = DEF_LC_SAI0
+      IF (DEF_LC_Z0MR /= LC_OVERRIDE_UNSET) z0mr(lc) = DEF_LC_Z0MR
+      IF (DEF_LC_DISPLAR /= LC_OVERRIDE_UNSET) displar(lc) = DEF_LC_DISPLAR
+      IF (DEF_LC_SQRTDI /= LC_OVERRIDE_UNSET) sqrtdi(lc) = DEF_LC_SQRTDI
+      IF (DEF_LC_CHIL /= LC_OVERRIDE_UNSET) chil(lc) = DEF_LC_CHIL
+      IF (DEF_LC_RHOL_VIS /= LC_OVERRIDE_UNSET) rho(1,1,lc) = DEF_LC_RHOL_VIS
+      IF (DEF_LC_RHOL_NIR /= LC_OVERRIDE_UNSET) rho(2,1,lc) = DEF_LC_RHOL_NIR
+      IF (DEF_LC_RHOS_VIS /= LC_OVERRIDE_UNSET) rho(1,2,lc) = DEF_LC_RHOS_VIS
+      IF (DEF_LC_RHOS_NIR /= LC_OVERRIDE_UNSET) rho(2,2,lc) = DEF_LC_RHOS_NIR
+      IF (DEF_LC_TAUL_VIS /= LC_OVERRIDE_UNSET) tau(1,1,lc) = DEF_LC_TAUL_VIS
+      IF (DEF_LC_TAUL_NIR /= LC_OVERRIDE_UNSET) tau(2,1,lc) = DEF_LC_TAUL_NIR
+      IF (DEF_LC_TAUS_VIS /= LC_OVERRIDE_UNSET) tau(1,2,lc) = DEF_LC_TAUS_VIS
+      IF (DEF_LC_TAUS_NIR /= LC_OVERRIDE_UNSET) tau(2,2,lc) = DEF_LC_TAUS_NIR
+      IF (DEF_LC_VMAX25 /= LC_OVERRIDE_UNSET) vmax25     (lc) = DEF_LC_VMAX25 * 1.e-6_r8
+      IF (DEF_LC_EFFCON /= LC_OVERRIDE_UNSET) effcon(lc) = DEF_LC_EFFCON
+      IF (DEF_LC_C3C4 /= -1) c3c4(lc) = DEF_LC_C3C4
+      IF (DEF_LC_RESPCP /= LC_OVERRIDE_UNSET) respcp(lc) = DEF_LC_RESPCP
+      IF (DEF_LC_SHTI /= LC_OVERRIDE_UNSET) shti(lc) = DEF_LC_SHTI
+      IF (DEF_LC_SLTI /= LC_OVERRIDE_UNSET) slti(lc) = DEF_LC_SLTI
+      IF (DEF_LC_TRDA /= LC_OVERRIDE_UNSET) trda(lc) = DEF_LC_TRDA
+      IF (DEF_LC_TRDM /= LC_OVERRIDE_UNSET) trdm(lc) = DEF_LC_TRDM
+      IF (DEF_LC_TROP /= LC_OVERRIDE_UNSET) trop(lc) = DEF_LC_TROP
+      IF (DEF_LC_HHTI /= LC_OVERRIDE_UNSET) hhti(lc) = DEF_LC_HHTI
+      IF (DEF_LC_HLTI /= LC_OVERRIDE_UNSET) hlti(lc) = DEF_LC_HLTI
+      IF (DEF_LC_EXTKN /= LC_OVERRIDE_UNSET) extkn(lc) = DEF_LC_EXTKN
+      IF (DEF_LC_D50 /= LC_OVERRIDE_UNSET) d50(lc) = DEF_LC_D50
+      IF (DEF_LC_BETA /= LC_OVERRIDE_UNSET) beta(lc) = DEF_LC_BETA
+      IF (DEF_LC_KMAX_SUN /= LC_OVERRIDE_UNSET) kmax_sun(lc) = DEF_LC_KMAX_SUN
+      IF (DEF_LC_KMAX_SHA /= LC_OVERRIDE_UNSET) kmax_sha(lc) = DEF_LC_KMAX_SHA
+      IF (DEF_LC_KMAX_XYL /= LC_OVERRIDE_UNSET) kmax_xyl(lc) = DEF_LC_KMAX_XYL
+      IF (DEF_LC_KMAX_ROOT /= LC_OVERRIDE_UNSET) kmax_root(lc) = DEF_LC_KMAX_ROOT
+      IF (DEF_LC_PSI50_SUN /= LC_OVERRIDE_UNSET) psi50_sun(lc) = DEF_LC_PSI50_SUN
+      IF (DEF_LC_PSI50_SHA /= LC_OVERRIDE_UNSET) psi50_sha(lc) = DEF_LC_PSI50_SHA
+      IF (DEF_LC_PSI50_XYL /= LC_OVERRIDE_UNSET) psi50_xyl(lc) = DEF_LC_PSI50_XYL
+      IF (DEF_LC_PSI50_ROOT /= LC_OVERRIDE_UNSET) psi50_root(lc) = DEF_LC_PSI50_ROOT
+      IF (DEF_LC_CK /= LC_OVERRIDE_UNSET) ck(lc) = DEF_LC_CK
+#endif
+
+   END SUBROUTINE apply_lc_scalar_overrides
 
 END MODULE MOD_Const_LC
 ! ---------- EOP ------------

@@ -9,11 +9,14 @@ import { invalidateResultCase, refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
-import { appendLogText, progressText } from './run-format.js';
+import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 
 // 单点内核不启 MPI；多核的实际用途是并发跑多个独立站点。默认沿用原来的
 // 两路并发，但让用户在基本设定里按机器容量调整。
 const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
+let discoverRunTargets = true;
+let activeRunId = null;
+let fallbackRunSequence = 0;
 $('cpu-workers').max = String(cpuCapacity);
 $('cpu-workers').value = String(Math.min(cpuCapacity, Number($('cpu-workers').value) || 2));
 $('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
@@ -53,9 +56,12 @@ function renderLogChoices(dirs, preferred = $('log-case').value) {
 $('log-case').onchange = renderSelectedLog;
 
 function resetRunView(dirs) {
+  discoverRunTargets = false;
+  activeRunId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${++fallbackRunSequence}`;
   state.runTargets = [...dirs];
   state.runningCases = new Set(dirs);
   state.runFailures = new Set();
+  state.runCancelled = new Set();
   for (const dir of dirs) {
     state.runState[dir] = '待运行';
     state.runStages[dir] = {};
@@ -68,6 +74,12 @@ function resetRunView(dirs) {
   updateOverallProgress();
   setRunning('busy', `运行中（0/${dirs.length}）`);
   setStatus(`开始运行 ${dirs.length} 个算例`);
+  syncCancelButton();
+  return activeRunId;
+}
+
+function syncCancelButton() {
+  $('cancel-run').disabled = state.runningCases.size === 0;
 }
 
 function failPendingRuns(reason) {
@@ -82,9 +94,12 @@ function failPendingRuns(reason) {
   updateOverallProgress();
   renderStages();
   renderCases();
+  syncCancelButton();
 }
 
-function ensureRunTarget(dir) {
+function ensureRunTarget(dir, runId) {
+  if (discoverRunTargets && !activeRunId && runId) activeRunId = runId;
+  if (!acceptsRunEvent(state.runTargets, dir, discoverRunTargets, activeRunId, runId)) return false;
   if (state.runTargets.includes(dir)) return;
   state.runTargets.push(dir);
   state.runningCases.add(dir);
@@ -93,6 +108,7 @@ function ensureRunTarget(dir) {
   state.runLogs[dir] ??= '';
   renderLogChoices(state.runTargets, dir);
   renderCaseProgress();
+  return true;
 }
 
 function renderCaseProgress() {
@@ -190,10 +206,12 @@ async function syncKernel() {
 
 /** 向导改变后，更新与编译产物相关的后续状态。 */
 async function applyKernel() {
-  // runtime 是城市专用；rawdata 对任意缺少植被/土壤变量的站点都可能需要，
-  // 因而始终显示，不能再跟着 URBAN 一起隐藏。
+  // 城市和 BGC 都会读 runtime（BGC 至少读取 ndep）；CH4 又依赖 BGC。
+  // rawdata 对任意缺少植被/土壤变量的站点都可能需要，因而始终显示。
   const ud = $('urbandirs');
-  if (ud) ud.hidden = !urbanEnabled();
+  const methane = state.wizard?.physics?.tracer && state.wizard?.tracer === 'methane';
+  const crop = state.wizard?.physics?.crop;
+  if (ud) ud.hidden = !(urbanEnabled() || state.wizard?.physics?.bgc || methane || crop);
   // 向导变更后站点的 URBAN 匹配也要立即重画。
   if (state.sites.length) renderSites();
   await refreshRelevance();
@@ -204,9 +222,11 @@ async function applyKernel() {
   // 自带的示例有自然站与城市站，按钮跟着向导选择说出本次该用哪个。
   const ex = $('use-example');
   if (ex) {
+    const methane = state.wizard?.physics?.tracer && state.wizard?.tracer === 'methane';
+    const crop = state.wizard?.physics?.crop;
     ex.textContent = urbanEnabled()
       ? '用自带的示例站点（城市站 AU-Preston）'
-      : '用自带的示例站点（CN-Cng）';
+      : (crop ? '用自带的示例站点（作物站 US-Ne3）' : (methane ? '用自带的示例站点（甲烷站 AT-Neu）' : '用自带的示例站点（CN-Cng）'));
   }
 }
 
@@ -218,6 +238,20 @@ const RUN_BUTTONS = ['run-mksrfdata', 'run-mkinidata', 'run-colm', 'runall'];
 for (let i = 0; i < RUN_STAGES.length; i++) {
   $(RUN_BUTTONS[i]).onclick = () => runRequested(RUN_STAGES[i]);
 }
+
+$('cancel-run').onclick = async () => {
+  const cases = [...state.runningCases];
+  if (!cases.length) return;
+  $('cancel-run').disabled = true;
+  setRunning('busy', '正在取消运行…');
+  try {
+    const count = await invoke('cancel_runs', { cases });
+    status(`已请求取消 ${count} 个算例`);
+  } catch (error) {
+    syncCancelButton();
+    status(error);
+  }
+};
 
 /** 下方四个按钮共用同一批目标。指定单段是明确的手工重建意图，始终强制
  *  执行该段；“运行全部”才由“强制全部重跑”决定是否忽略阶段指纹。 */
@@ -232,25 +266,19 @@ async function runRequested(stage) {
   }
   const dirs = batchTarget().map(c => c.dir);
   if (!dirs.length) return;
-  resetRunView(dirs);
+  const runId = resetRunView(dirs);
   renderCases();
   const force = stage !== null || $('force').checked;
   try {
     if (dirs.length === 1) {
-      const code = await invoke('run_case', {
-        case: dirs[0], kernel: $('kernel').value, force, stage,
+      await invoke('run_case', {
+        runId, case: dirs[0], kernel: $('kernel').value, force, stage,
       });
-      status(code === 0
-        ? `${stage ?? '全部阶段'}运行完成`
-        : `${stage ?? '全部阶段'}运行失败（退出码 ${code}）`);
     } else {
-      const summary = await invoke('run_batch', {
-        cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
+      await invoke('run_batch', {
+        runId, cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
         force, stage,
       });
-      status(summary.failed
-        ? `批次结束：${summary.succeeded}/${summary.total} 个成功，${summary.failed} 个失败`
-        : `批次结束：${summary.succeeded}/${summary.total} 个算例全部成功`);
     }
   } catch (e) {
     failPendingRuns(e);
@@ -259,6 +287,7 @@ async function runRequested(stage) {
     setRunning('fail', '批次启动失败');
   } finally {
     updateCaseBatchButtons();
+    syncCancelButton();
   }
 }
 
@@ -269,7 +298,7 @@ export async function watchRun() {
       // 界面完全不知道进行到哪。标记由 colm-cli 自己打，不认 CoLM 的措辞。
       const { stage, state: st, case: dir } = e.payload;
       if (!dir) return;
-      ensureRunTarget(dir);
+      if (ensureRunTarget(dir, e.payload.run_id) === false) return;
       state.runState[dir] = '运行中';
       state.runStages[dir] = { ...(state.runStages[dir] ?? {}), [stage]: st };
       state.runProgress[dir] = {
@@ -282,7 +311,7 @@ export async function watchRun() {
     await listen('run://progress', e => {
       // 后端已从 case.nml 算出总步数；这里直接显示模型步完成比例。
       const p = e.payload;
-      ensureRunTarget(p.case);
+      if (ensureRunTarget(p.case, p.run_id) === false) return;
       state.runState[p.case] = '运行中';
       state.runProgress[p.case] = p;
       updateCaseProgress(p.case);
@@ -290,26 +319,27 @@ export async function watchRun() {
     });
     await listen('run://lines', e => {
       const { case: dir, lines } = e.payload;
-      ensureRunTarget(dir);
+      if (ensureRunTarget(dir, e.payload.run_id) === false) return;
       state.runLogs[dir] = appendLogText(state.runLogs[dir] ?? '', lines);
       if ($('log-case').value === dir) renderSelectedLog();
     });
     await listen('run://done', e => {
       const d = e.payload;
       if (!d.case) return;
-      ensureRunTarget(d.case);
+      if (ensureRunTarget(d.case, d.run_id) === false) return;
       state.runningCases.delete(d.case);
-      state.runState[d.case] = d.code === 0 ? '已完成' : '失败';
-      if (d.code !== 0) state.runFailures.add(d.case);
+      state.runState[d.case] = d.cancelled ? '已取消' : d.code === 0 ? '已完成' : '失败';
+      if (d.cancelled) state.runCancelled.add(d.case);
+      else if (d.code !== 0) state.runFailures.add(d.case);
       const p = state.runProgress[d.case] ?? {};
       state.runProgress[d.case] = {
         ...p, reason: d.reason,
-        step: d.code === 0 && p.total_steps ? p.total_steps : (p.step ?? 0),
+        step: !d.cancelled && d.code === 0 && p.total_steps ? p.total_steps : (p.step ?? 0),
       };
       // 必须按事件里的 case 更新；批量跑时 state.selected 只是代表算例，
       // 把每个完成事件都写给它会让其余站点永远显示“未跑”。
       const c = state.cases.find(c => c.dir === d.case);
-      if (c && d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) {
+      if (c && !d.cancelled && d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) {
         c.has_history = true;
         invalidateResultCase(d.case);
       }
@@ -320,13 +350,30 @@ export async function watchRun() {
       if (state.runningCases.size) {
         const ended = state.runTargets.length - state.runningCases.size;
         setRunning('busy', `运行中（${ended}/${state.runTargets.length}）`);
+      } else if (state.runTargets.length === 1) {
+        const stage = d.requested_stage ?? '全部阶段';
+        const terminal = d.cancelled
+          ? `${stage}运行已取消`
+          : d.code === 0
+          ? `${stage}运行完成`
+          : `${stage}运行失败（退出码 ${d.code}）`;
+        setRunning(d.cancelled || d.code === 0 ? 'ok' : 'fail', terminal);
+        status(terminal);
       } else if (state.runFailures.size) {
-        setRunning('fail', `${state.runFailures.size} 个站点失败`);
+        const terminal = `${state.runFailures.size} 个站点失败${state.runCancelled.size ? ` · ${state.runCancelled.size} 个已取消` : ''}`;
+        setRunning('fail', terminal);
+        status(terminal);
+      } else if (state.runCancelled.size) {
+        const terminal = `${state.runCancelled.size} 个站点已取消`;
+        setRunning('ok', terminal);
+        status(terminal);
       } else {
         setRunning('ok', '全部完成');
+        status('全部完成');
       }
       updateCaseBatchButtons();
-      if (d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) refreshVars();
+      syncCancelButton();
+      if (!d.cancelled && d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) refreshVars();
     });
 }
 

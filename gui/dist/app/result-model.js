@@ -68,38 +68,6 @@ export async function boundedMap(items, limit, worker, options = {}) {
   return out;
 }
 
-/**
- * Min/max bucket sampling：首尾必留，每个桶按原顺序保留最小/最大点。
- * 相比“每隔 N 个取一个”，尖峰不会因为恰好落在间隔之间而消失。
- */
-export function downsampleSeries(time, values, maxPoints = 2400) {
-  const n = Math.min(time.length, values.length);
-  const limit = Math.max(3, Math.trunc(maxPoints) || 3);
-  if (n <= limit) return { time: time.slice(0, n), values: values.slice(0, n) };
-  const buckets = Math.max(1, Math.floor((limit - 2) / 2));
-  const interior = n - 2;
-  const indexes = [0];
-  for (let bucket = 0; bucket < buckets; bucket++) {
-    const start = 1 + Math.floor(interior * bucket / buckets);
-    const end = 1 + Math.floor(interior * (bucket + 1) / buckets);
-    if (start >= end) continue;
-    let min = start;
-    let max = start;
-    for (let i = start + 1; i < end; i++) {
-      if (values[i] < values[min]) min = i;
-      if (values[i] > values[max]) max = i;
-    }
-    if (min === max) indexes.push(min);
-    else if (min < max) indexes.push(min, max);
-    else indexes.push(max, min);
-  }
-  indexes.push(n - 1);
-  return {
-    time: indexes.map(i => time[i]),
-    values: indexes.map(i => values[i]),
-  };
-}
-
 function csvCell(value) {
   if (value == null) return '';
   const text = String(value);

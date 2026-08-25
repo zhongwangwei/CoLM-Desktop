@@ -87,6 +87,28 @@ fn land_cover_class_is_validated_for_the_selected_scheme() {
 }
 
 #[test]
+fn import_rejects_cadences_the_model_cannot_run() {
+    let root = temp("bad-cadence");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 02:00,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+
+    let mut p = plan();
+    p.step_seconds = Some(7200);
+    let explicit = super::import_table(&src, &root.join("explicit"), &p).unwrap_err();
+    assert!(format!("{explicit:#}").contains("maximum supported"));
+
+    p.step_seconds = None;
+    let inferred = super::import_table(&src, &root.join("inferred"), &p).unwrap_err();
+    assert!(format!("{inferred:#}").contains("maximum supported"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn split_precipitation_columns_are_converted_before_summing() {
     let root = temp("mixed-extra-units");
     let src = root.join("site.csv");
@@ -283,7 +305,7 @@ fn multisite_import_normalizes_utc_inserts_missing_rows_and_keeps_sites_separate
     let b = imported.iter().find(|site| site.site == "B").unwrap();
     assert_eq!(a.rows, 3);
     assert_eq!(a.inserted_steps, 1);
-    assert_eq!(a.timezone_offset_hours, Some(1.0));
+    assert_eq!(a.timezone_offset_hours, Some(0.75));
     assert_eq!(a.timezone_source, "longitude_inferred_offset");
     assert_eq!(b.timezone_offset_hours, Some(0.0));
     assert_eq!(b.timezone_source, "timestamp_offset");
@@ -411,5 +433,22 @@ fn multisite_table_requires_per_site_coordinates_instead_of_reusing_one_fallback
     p.longitude = Some(10.0);
     let err = super::import_table(&src, &root.join("Forcing"), &p).unwrap_err();
     assert!(format!("{err:#}").contains("multiple sites"), "{err:#}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn site_names_cannot_collide_on_case_insensitive_filesystems() {
+    let root = temp("case-insensitive-site-collision");
+    let src = root.join("bad.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         AT-Neu,2020-01-01T00:00Z,47,11,10,280,.005,100000,0,2,0,300\n\
+         AT-Neu,2020-01-01T01:00Z,47,11,10,281,.006,100010,0,2,20,301\n\
+         at-neu,2020-01-01T00:00Z,48,12,10,282,.007,100020,0,2,10,302\n\
+         at-neu,2020-01-01T01:00Z,48,12,10,283,.008,100030,0,2,30,303\n",
+    );
+    let err = super::import_table(&src, &root.join("Forcing"), &plan()).unwrap_err();
+    assert!(format!("{err:#}").contains("both normalize"), "{err:#}");
     let _ = std::fs::remove_dir_all(root);
 }

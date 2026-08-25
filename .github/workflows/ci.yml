@@ -75,6 +75,8 @@ jobs:
           cargo test -p colm-schema --test drift
           cargo test -p oracle --test histmap
           cargo test -p colm-hist --test drift
+          cargo test -p xtask --test kernel_profile
+          bash vendor/CoLM202X/run/scripts/test_create_newcase_runtime_contract.sh
       # GUI 的前端是纯静态 JS，没有类型检查器 —— 一个拼错的命令名要等到
       # 点下去才会以「command not found」暴露。这条把它提前到 CI。
       - name: GUI interface
@@ -90,6 +92,7 @@ jobs:
           node gui/tests/prep-workbench.mjs
           node gui/tests/forcing-gapfill.mjs
           node gui/tests/results.mjs
+          node gui/tests/study-model.mjs
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -209,8 +212,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build kernel
-        run: ./oracle/scripts/build_kernel.sh default
+      - name: Build default and crop kernels
+        run: |
+          for p in default crop; do ./oracle/scripts/build_kernel.sh "$p"; done
 
       - name: Golden regression (both windows)
         env:

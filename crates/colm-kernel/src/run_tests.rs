@@ -246,3 +246,22 @@ fn a_muted_run_says_how_many_lines_it_dropped() {
     assert_eq!(kept.len(), 1, "只该留下那一行 TIMESTEP：{kept:?}");
     assert!(kept[0].contains("TIMESTEP"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_top_level_sidecar_leads_its_own_process_group() {
+    let mut child = super::top_level_sidecar(&mut std::process::Command::new("sh"))
+        .args(["-c", "sleep 30"])
+        .spawn()
+        .expect("spawn probe");
+    let group = format!("-{}", child.id());
+    let exists = std::process::Command::new("kill")
+        .args(["-0", group.as_str()])
+        .status()
+        .expect("probe process group");
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", group.as_str()])
+        .status();
+    let _ = child.wait();
+    assert!(exists.success(), "sidecar must be its process-group leader");
+}

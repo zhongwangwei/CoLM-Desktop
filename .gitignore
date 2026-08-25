@@ -18,3 +18,8 @@ target/
 # 打包时暂存进去的 sidecar 副本（由 `xtask stage-sidecar` 生成）
 /gui/src-tauri/binaries/
 /.playwright-mcp/
+
+# Claude Code 的个人偏好文件，不共享
+CLAUDE.local.md
+# Claude Code 的本机 hook 设置，不共享
+.claude/settings.local.json

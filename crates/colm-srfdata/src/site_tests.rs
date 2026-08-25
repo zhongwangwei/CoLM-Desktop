@@ -1,5 +1,9 @@
 use super::*;
 
+fn test_suffix() -> String {
+    format!("{}-{:?}", std::process::id(), std::thread::current().id())
+}
+
 #[test]
 fn the_required_list_is_the_twelve_measured_gaps() {
     // 实测：90 个 PLUMBER2 站点文件的变量集完全相同（各 39 个），
@@ -10,10 +14,33 @@ fn the_required_list_is_the_twelve_measured_gaps() {
 }
 
 #[test]
-fn the_raster_wins_over_the_classifier_when_both_are_available() {
-    // 这是本 Task 的全部要点，写成一句可执行的断言而不是注释。
-    // 实测 90 个站点里两者只有 25 个一致；哪个赢必须是确定的。
-    assert!(REQUIRED_FIELDS.contains(&"soil_texture"));
+fn the_site_classifier_wins_over_the_raster_when_both_are_available() {
+    let src = plumber_fixture("texture-site-src");
+    let dst = src.with_file_name("texture-site-dst.nc");
+    let raw = src.parent().unwrap().join("rawdata/soil");
+    std::fs::create_dir_all(&raw).unwrap();
+    let p = raw.join("soiltexture_0cm-60cm_mean.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("lat", 1).unwrap();
+        f.add_dimension("lon", 1).unwrap();
+        let mut v = f
+            .add_variable::<i32>("soiltexture", &["lat", "lon"])
+            .unwrap();
+        v.put_values(&[12], netcdf::Extents::All).unwrap();
+    }
+
+    let r = fill(
+        &src,
+        &dst,
+        Some(src.parent().unwrap().join("rawdata").as_path()),
+        None,
+    )
+    .expect("fills");
+    assert_eq!(r.site_texture, Some(r.texture));
+    assert_eq!(r.raster_texture, Some(12));
+    assert_ne!(r.texture, 12, "站点剖面和栅格冲突时必须让站点剖面赢");
 }
 
 // ------------------------------------------------------------ lakedepth
@@ -28,10 +55,11 @@ fn the_raster_wins_over_the_classifier_when_both_are_available() {
 /// sand 40% / silt 45% / clay 15%，落在 USDA 三角内，质地分类不用靠栅格
 /// 兜底，`fill()` 才不会因为「两者都拿不到」报错。
 fn plumber_fixture(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("colm-srfdata-fill");
+    let dir = std::env::temp_dir().join(format!("colm-srfdata-fill-{}", test_suffix()));
     std::fs::create_dir_all(&dir).expect("workdir");
     let p = dir.join(format!("{name}.nc"));
     let _ = std::fs::remove_file(&p);
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f = netcdf::create(&p).expect("create");
     f.add_dimension("soil", 8).expect("soil");
     // 0 维标量，与真实 PLUMBER2 站点文件的形状一致（`location` 的文档里
@@ -63,11 +91,12 @@ fn plumber_fixture(name: &str) -> std::path::PathBuf {
 /// 与 [`plumber_fixture`] 用的是同一个点，不用假造全球栅格。
 fn lake_raster_dir(name: &str, value: f64) -> std::path::PathBuf {
     let dir = std::env::temp_dir()
-        .join("colm-srfdata-fill-raster")
+        .join(format!("colm-srfdata-fill-raster-{}", test_suffix()))
         .join(name);
     std::fs::create_dir_all(&dir).expect("workdir");
     let p = dir.join("lake_depth.nc");
     let _ = std::fs::remove_file(&p);
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f = netcdf::create(&p).expect("create");
     f.add_dimension("lat", 1).expect("lat");
     f.add_dimension("lon", 1).expect("lon");
@@ -112,7 +141,7 @@ fn lakedepth_from_the_raster_is_scaled_by_a_tenth_before_it_reaches_site_nc() {
     assert!(s.contains("x0.1"), "{s}");
 }
 
-/// 没有栅格时落到 `MOD_SingleSrfdata.F90:47` 的模块默认值 1.0 ——
+/// 没有栅格时落到 `MOD_SingleSrfdata.F90:41` 的模块默认值 1.0 ——
 /// 那本来就是最终量纲，不是又一个要乘 0.1 的栅格值。
 #[test]
 fn lakedepth_without_a_raster_falls_back_to_the_module_default_not_a_tenth_of_it() {
@@ -135,10 +164,11 @@ fn lakedepth_without_a_raster_falls_back_to_the_module_default_not_a_tenth_of_it
 /// 形状照抄真件 —— `longitude` / `latitude` 是 `(y, x)`（各长 1）而不是
 /// 0 维标量。`location` 正是为这个差别写的，测试里也不能把它抹平。
 fn urban_fixture(name: &str, lon: f64, lat: f64) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("colm-srfdata-prepare-urban");
+    let dir = std::env::temp_dir().join(format!("colm-srfdata-prepare-urban-{}", test_suffix()));
     std::fs::create_dir_all(&dir).expect("workdir");
     let p = dir.join(format!("{name}.nc"));
     let _ = std::fs::remove_file(&p);
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f = netcdf::create(&p).expect("create");
     f.add_dimension("y", 1).expect("y");
     f.add_dimension("x", 1).expect("x");
@@ -172,7 +202,10 @@ fn an_urban_site_in_the_table_gets_the_whole_soil_profile() {
     // 那是 CoLM 的默认值。
     assert_eq!(r.soil_vars.len(), 25);
     assert_eq!(r.elevation, Some(93.0));
-    assert!(r.needs_no_rawdata(), "两张表都命中才算不需要 rawdata");
+    assert!(
+        !r.needs_no_rawdata(),
+        "人口密度没有进表，仍需站点自带或 rawdata/urban"
+    );
 
     let f = netcdf::open(&dst).expect("open");
     let sand = f.variable("soil_vf_sand").expect("soil_vf_sand");
@@ -262,6 +295,16 @@ fn an_urban_site_in_the_table_also_gets_the_second_batch() {
     let r = prepare_urban(&src, &dst).expect("prepare");
 
     assert_eq!(r.extra_site, Some("AU-Preston"));
+    assert!(
+        !r.needs_no_rawdata(),
+        "人口密度仍需站点自带或 rawdata/urban 提供"
+    );
+    let audit = super::audit(&dst, super::SiteMode::Urban, None, false).unwrap();
+    assert_eq!(audit.readiness, super::Readiness::Blocked);
+    assert!(audit
+        .needs_external
+        .iter()
+        .any(|n| n == "resident_population_density"));
     // LCZ_DOM + LUCY_ID + 四个反照率 + lakedepth + elvstd + sloperatio
     // + LAI_year + TREE_LAI + TREE_SAI = 12。
     assert_eq!(r.extra_vars.len(), 12);
@@ -305,6 +348,7 @@ fn the_site_files_own_lcz_class_is_not_overwritten() {
     let src = urban_fixture("own-lcz-src", -93.188_362_121_582_03, 44.998_401_641_845_7);
     // 站点文件自带 LCZ_DOM = 6。
     {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
         let mut f = netcdf::append(&src).expect("append");
         let mut v = f.add_variable::<i32>("LCZ_DOM", &[]).expect("var");
         v.put_values(&[6], netcdf::Extents::All).expect("put");
@@ -346,6 +390,7 @@ fn a_site_with_only_coordinates_can_still_be_filled() {
 
     let src = dir.join("bare_site.nc");
     {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
         let mut f = netcdf::create(&src).unwrap();
         let mut lon = f.add_variable::<f64>("longitude", &[]).unwrap();
         lon.put_values(&[123.5092], netcdf::Extents::All).unwrap();
@@ -464,7 +509,7 @@ fn run_readiness_distinguishes_a_file_from_a_runnable_site() {
     super::skeleton(&skel, 123.5092, 44.5933, None).unwrap();
     super::fill(&skel, &out, None, None).unwrap();
 
-    let blocked = super::audit(&out, super::SiteMode::Igbp, None).unwrap();
+    let blocked = super::audit(&out, super::SiteMode::Igbp, None, false).unwrap();
     assert_eq!(blocked.readiness, super::Readiness::Blocked);
     for field in [
         "IGBP_classification",
@@ -482,7 +527,7 @@ fn run_readiness_distinguishes_a_file_from_a_runnable_site() {
 
     let rawdata = dir.join("rawdata");
     std::fs::create_dir_all(&rawdata).unwrap();
-    let empty_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata)).unwrap();
+    let empty_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata), false).unwrap();
     assert_eq!(empty_rawdata.readiness, super::Readiness::Blocked);
     assert!(empty_rawdata
         .needs_external
@@ -493,9 +538,12 @@ fn run_readiness_distinguishes_a_file_from_a_runnable_site() {
         let d = rawdata.join(sub);
         std::fs::create_dir_all(&d).unwrap();
         let p = d.join("marker.nc");
-        drop(netcdf::create(&p).unwrap());
+        {
+            let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+            drop(netcdf::create(&p).unwrap());
+        }
     }
-    let with_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata)).unwrap();
+    let with_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata), false).unwrap();
     assert_eq!(with_rawdata.readiness, super::Readiness::ReadyWithRawdata);
     assert_eq!(with_rawdata.needs_external, blocked.needs_external);
 }
@@ -508,6 +556,7 @@ fn audit_rejects_present_but_invalid_site_values() {
     let p = dir.join("bad.nc");
     super::skeleton(&p, 123.0, 45.0, Some(10)).unwrap();
     {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
         let mut file = netcdf::append(&p).unwrap();
         file.variable_mut("latitude")
             .unwrap()
@@ -515,7 +564,7 @@ fn audit_rejects_present_but_invalid_site_values() {
             .unwrap();
     }
 
-    let report = super::audit(&p, super::SiteMode::Igbp, None).unwrap();
+    let report = super::audit(&p, super::SiteMode::Igbp, None, false).unwrap();
     assert_eq!(report.readiness, super::Readiness::Blocked);
     assert!(
         report
@@ -529,15 +578,38 @@ fn audit_rejects_present_but_invalid_site_values() {
     let rawdata = dir.join("rawdata");
     for sub in ["soil", "plant_15s"] {
         std::fs::create_dir_all(rawdata.join(sub)).unwrap();
-        drop(netcdf::create(rawdata.join(sub).join("marker.nc")).unwrap());
+        {
+            let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+            drop(netcdf::create(rawdata.join(sub).join("marker.nc")).unwrap());
+        }
     }
     assert_eq!(
-        super::audit(&p, super::SiteMode::Igbp, Some(&rawdata))
+        super::audit(&p, super::SiteMode::Igbp, Some(&rawdata), false)
             .unwrap()
             .readiness,
         super::Readiness::Blocked,
         "rawdata cannot repair an invalid site coordinate"
     );
+}
+
+#[test]
+fn location_rejects_nonfinite_or_out_of_range_coordinates() {
+    let dir = std::env::temp_dir().join(format!("colm-site-bad-location-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("bad.nc");
+    super::skeleton(&p, 123.0, 45.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&p).unwrap();
+        file.variable_mut("longitude")
+            .unwrap()
+            .put_value(f64::INFINITY, ())
+            .unwrap();
+    }
+
+    let e = super::location(&p).expect_err("不能把 inf 写进 case.nml");
+    assert!(e.to_string().contains("longitude"), "{e}");
 }
 
 #[test]
@@ -618,7 +690,7 @@ fn pft_and_pc_audits_expose_their_array_contract() {
     super::fill(&skel, &out, None, None).unwrap();
 
     for mode in [super::SiteMode::Pft, super::SiteMode::Pc] {
-        let report = super::audit(&out, mode, None).unwrap();
+        let report = super::audit(&out, mode, None, false).unwrap();
         for field in [
             "pfttyp",
             "pctpfts",
@@ -639,6 +711,133 @@ fn pft_and_pc_audits_expose_their_array_contract() {
             "PFT/PC must show the array contract instead of the scalar one"
         );
     }
+}
+
+#[test]
+fn pft_components_follow_the_same_natural_and_crop_indices_as_colm() {
+    let dir = std::env::temp_dir().join(format!("colm-pft-components-{}", test_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("site.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("pft", 4).unwrap();
+        file.add_dimension("crop", 2).unwrap();
+        file.add_variable::<i32>("pfttyp", &["pft"])
+            .unwrap()
+            .put_values(&[1, 13, 14, 15], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<f64>("pctpfts", &["pft"])
+            .unwrap()
+            .put_values(&[20.0, 30.0, 40.0, 10.0], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<i32>("croptyp", &["crop"])
+            .unwrap()
+            .put_values(&[1, 64], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<f64>("pctcrop", &["crop"])
+            .unwrap()
+            .put_values(&[1.0, 3.0], netcdf::Extents::All)
+            .unwrap();
+    }
+
+    let natural = pft_components(&path, false, None).unwrap();
+    assert_eq!(
+        natural.iter().map(|p| p.pft_type).collect::<Vec<_>>(),
+        [1, 13, 14, 15]
+    );
+    assert!((natural[1].fraction - 0.3).abs() < 1e-12);
+
+    assert!(
+        pft_components(&path, true, Some(10)).is_err(),
+        "a CROP kernel reserves type 15 for mapped crop types, so natural pfttyp stops at 14"
+    );
+
+    let crop = pft_components(&path, true, Some(12)).unwrap();
+    assert_eq!(
+        crop.iter().map(|p| p.pft_type).collect::<Vec<_>>(),
+        [15, 78]
+    );
+    assert!((crop[0].fraction - 0.25).abs() < 1e-12);
+}
+
+#[test]
+fn crop_cropland_pft_components_require_crop_arrays() {
+    let dir = std::env::temp_dir().join(format!("colm-crop-missing-pctcrop-{}", test_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("site.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("pft", 1).unwrap();
+        file.add_variable::<i32>("pfttyp", &["pft"])
+            .unwrap()
+            .put_values(&[13], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<f64>("pctpfts", &["pft"])
+            .unwrap()
+            .put_values(&[1.0], netcdf::Extents::All)
+            .unwrap();
+    }
+    let err = pft_components(&path, true, Some(12))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("croptyp/pctcrop"), "{err}");
+}
+
+#[test]
+fn non_crop_site_audit_rejects_the_first_out_of_range_pft_type() {
+    let dir = std::env::temp_dir().join(format!("colm-pft-boundary-{}", test_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("site.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("pft", 1).unwrap();
+        file.add_variable::<i32>("pfttyp", &["pft"])
+            .unwrap()
+            .put_values(&[16], netcdf::Extents::All)
+            .unwrap();
+    }
+    let file = netcdf::open(&path).unwrap();
+    let variable = file.variable("pfttyp").unwrap();
+    assert_eq!(
+        super::validate_site_variable(&file, super::SiteMode::Pft, "pfttyp", &variable).unwrap(),
+        Some("outside PFT 0..=15".to_string())
+    );
+}
+
+#[test]
+fn bundled_crop_site_is_audited_against_crop_arrays() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc");
+    let file = netcdf::open(&path).unwrap();
+    let pfttyp = file.variable("pfttyp").unwrap();
+    assert_eq!(pfttyp.dimensions()[0].name(), "pft");
+    assert_eq!(
+        pfttyp.get_values::<i32, _>(netcdf::Extents::All).unwrap(),
+        [17]
+    );
+    drop(file);
+
+    let out = std::env::temp_dir().join(format!("colm-crop-audit-{}.nc", test_suffix()));
+    super::fill(&path, &out, None, None).unwrap();
+    let crop = super::audit(&out, super::SiteMode::Pft, None, true).unwrap();
+    assert!(crop.self_contained(), "{:?}", crop.needs_external);
+
+    let natural = super::audit(&out, super::SiteMode::Pft, None, false).unwrap();
+    assert!(
+        natural
+            .needs_external
+            .iter()
+            .any(|issue| issue.starts_with("pfttyp:")),
+        "the CROP-only pfttyp must not be accepted by a non-CROP case"
+    );
+
+    let incompatible = super::audit(&out, super::SiteMode::Urban, None, true).unwrap_err();
+    assert!(incompatible
+        .to_string()
+        .contains("CROP site audit requires PFT or PC mode"));
 }
 
 #[test]
@@ -806,6 +1005,7 @@ fn fill_never_overwrites_a_site_files_own_canopy_height() {
     let skel = dir.join("skel.nc");
     super::skeleton(&skel, 123.5092, 44.5933, Some(10)).unwrap();
     {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
         let mut f = netcdf::append(&skel).unwrap();
         let mut v = f.add_variable::<f64>("canopy_height", &[]).unwrap();
         v.put_values(&[12.34], netcdf::Extents::All).unwrap();

@@ -5,19 +5,21 @@ import { state } from './state.js';
 import { $, status, baseName } from './ui.js';
 import { renderHistVars } from './histvars.js';
 import { renderTiming } from './timing.js';
-import { editTarget } from './batch.js';
+import { editTarget, currentCases } from './batch.js';
 import { wizardFieldNames } from './domain.js';
 import { language } from './i18n.js';
-import { fieldLabel, optionLabel, technicalFieldHint } from './param-presentation.js';
+import {
+  fieldLabel, fortranNumberInputValue, isCommonField, optionLabel, technicalFieldHint,
+} from './param-presentation.js';
 
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
 // 新字段不能掉进「其他」。基本设定与过程参数各自只认这一份归属表。
 const BASIC_PAGES = [
-  { id: 'basic-site', target: 'basic-site-fields', sections: ['站点'] },
+  { id: 'basic-site', target: 'basic-site-fields', sections: ['站点'], scoped: true },
   { id: 'basic-grid', target: 'basic-grid-fields', sections: ['网格与并行'] },
-  { id: 'basic-surface', target: 'basic-surface-fields', sections: ['地表数据'] },
-  { id: 'basic-initial', target: 'basic-initial-fields', sections: ['初始场'] },
-  { id: 'basic-forcing', target: 'basic-forcing-fields', sections: ['强迫场'] },
+  { id: 'basic-surface', target: 'basic-surface-fields', sections: ['地表数据'], scoped: true },
+  { id: 'basic-initial', target: 'basic-initial-fields', sections: ['初始场'], scoped: true },
+  { id: 'basic-forcing', target: 'basic-forcing-fields', sections: ['强迫场'], scoped: true },
 ];
 const PARAM_PAGES = [
   { id: 'params-water', target: 'param-water-fields', sections: ['水热过程'] },
@@ -77,6 +79,11 @@ const STABLE_IN_PLACE_FIELDS = new Set([
 ]);
 
 const enabled = value => /true|\.t\./i.test(String(value));
+const EXPERT_ALL = '__all__';
+const PFT_SITE_CACHE = new Map();
+const PFT_IDENTITY_FIELDS = new Set([
+  'SITE_fsitedata', 'SITE_landtype', 'DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC',
+]);
 
 async function pickParameterPath(path, kind) {
   try {
@@ -178,24 +185,22 @@ function control(e, meta, fieldState) {
     // 实数不限步长；整数按 1。`any` 让浏览器不对小数报警。
     inp.step = kind.startsWith('Integer') ? '1' : 'any';
   }
-  inp.value = raw;
+  inp.value = kind.startsWith('Real') ? (fortranNumberInputValue(raw) ?? '') : raw;
   return inp;
 }
 
-/** 顶上一条横幅，说清楚"改一下会动几个文件"。
- *
- *  **不能只在状态栏事后说。** 状态栏是改完之后才出现的，而这里要回答的是
- *  改之前那个问题：我现在改的是一个还是二十个。批量建出的算例必须保持
- *  同一套过程配置；这里不再提供把当前算例悄悄拆出批次的入口。 */
-function renderScope(box) {
-  const dirs = editTarget();
+/** 批量编辑区先说清楚会动几个文件；过程参数改用独立的站点下拉。 */
+function renderScope(box, dirs = editTarget()) {
   if (dirs.length < 2) return;
   const bar = document.createElement('div');
   bar.className = 'expert-note';
   bar.style.marginBottom = '10px';
   const names = dirs.map(baseName);
-  bar.innerHTML = `下面的改动会写进 <b>${dirs.length} 个算例</b>：`
-    + names.slice(0, 6).join('、') + (names.length > 6 ? ` 等 ${names.length} 个` : '');
+  bar.append('除逐站点数据文件外，下面的改动会写进 ');
+  const count = document.createElement('b');
+  count.textContent = `${dirs.length} 个算例`;
+  bar.append(count, '：', names.slice(0, 6).join('、'));
+  if (names.length > 6) bar.append(` 等 ${names.length} 个`);
   box.appendChild(bar);
 }
 
@@ -222,6 +227,11 @@ export async function renderFields() {
     publishFlows(flows);
     return;
   }
+  // 批量写命令返回批次第一份文本；基本设定仍应显示算例列表当前站点。
+  if (state.selected) {
+    try { state.text = await invoke('read_text', { path: state.selected.dir + '/case.nml' }); }
+    catch (e) { status(e); return; }
+  }
   let entries;
   try { entries = await invoke('read_case', { text: state.text }); }
   catch (e) {
@@ -230,35 +240,61 @@ export async function renderFields() {
     publishFlows(flows);
     return;
   }
-  // 这一批里取值不一致的字段。**必须标出来** —— 一个显示着某个值的输入框
-  // 其实代表着 20 个不同的值，而改它会把另外 19 个悄悄抹平。
-  try {
-    state.varies = new Set(await invoke('varying_fields', { dirs: editTarget() }));
-  } catch (e) { state.varies = new Set(); status(e); }
-
   // 列表来自源码 schema，而不是只列 case.nml 里已经写过的项；
   // 再按向导自动匹配的编译产物过滤。
-  const have = new Set(entries.map(e => e.path));
-  const extra = state.fields
-    .filter(f => !have.has(f.name))
-    // 这里只编辑 case.nml 的 nl_colm 组。forcing/history 是另外的 namelist；
-    // 派生项虽然不属于任何组，但仍要显示 —— 它们回答「这个值现在是多少」，
-    // 排在各分节末尾，只读。
-    .filter(f => f.group === 'nl_colm' || f.derived)
-    .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
-                 derived: f.derived, unset: true }));
-  const entriesAll = withoutWizardFields(entries.concat(extra));
-  const inGroup = entriesAll.filter(e => !e.path.startsWith('DEF_hist_vars%'));
-  // 内核宏和 case.nml 当前值统一在 Rust 配置层判定。这里不再复制城市、BGC、
-  // SinglePoint 等规则；父字段保存后重新调用，子字段会立刻出现或消失。
+  const complete = source => {
+    const have = new Set(source.map(e => e.path));
+    const extra = state.fields
+      .filter(f => !have.has(f.name))
+      // 这里只编辑 case.nml 的 nl_colm 组。forcing/history 是另外的 namelist；
+      // 派生项虽然不属于任何组，但仍要显示 —— 它们回答「这个值现在是多少」，
+      // 排在各分节末尾，只读。
+      .filter(f => f.group === 'nl_colm' || f.derived)
+      .map(f => ({ path: f.name, value: f.default, known: true, group: f.group,
+                   derived: f.derived, unset: true }));
+    return withoutWizardFields(source.concat(extra))
+      .filter(e => !e.path.startsWith('DEF_hist_vars%'));
+  };
+  const inGroup = complete(entries);
+  // 参数页默认编辑一个站点，也可明确切到“全部站点”。输出和预热继续使用
+  // 本次批次范围；二者不是同一个选择，避免改一个站点参数时误伤整批。
+  const batchDirs = editTarget();
+  const selectedProcessCase = expertCase();
+  const processDirs = expertDirs();
+  const parameterCases = expertCases();
+  // 只在明确选择多站点时提示差异；单站编辑不需要拿其他站点的值干扰当前行。
+  try {
+    state.varies = new Set(await invoke('varying_fields', {
+      dirs: [...new Set(batchDirs.concat(processDirs))],
+    }));
+  } catch (e) { state.varies = new Set(); status(e); }
+  const representativeDir = selectedProcessCase?.dir ?? processDirs[0];
+  let processInGroup = inGroup;
+  if (representativeDir && representativeDir !== state.selected?.dir) {
+    try {
+      const text = await invoke('read_text', { path: representativeDir + '/case.nml' });
+      processInGroup = complete(await invoke('read_case', { text }));
+    } catch (e) { status(e); return; }
+  }
   let fieldStates = new Map();
+  let processFieldStates = new Map();
   const kernelDir = $('kernel').value;
   try {
     if (!kernelDir) throw new Error('请先选择或安装 CoLM 内核');
-    const runtimeStates = await invoke('field_states_batch', { dirs: editTarget(), kernelDir });
+    const runtimeStates = await invoke('field_states_batch', { dirs: batchDirs, kernelDir });
     fieldStates = new Map(runtimeStates.map(item => [item.name, item]));
     if (fieldStates.size !== state.fields.length) {
       throw new Error(`字段状态不完整：后端返回 ${fieldStates.size}/${state.fields.length}`);
+    }
+    if (processDirs.length === batchDirs.length
+        && processDirs.every((dir, i) => dir === batchDirs[i])) {
+      processFieldStates = fieldStates;
+    } else {
+      const processStates = await invoke('field_states_batch', { dirs: processDirs, kernelDir });
+      processFieldStates = new Map(processStates.map(item => [item.name, item]));
+      if (processFieldStates.size !== state.fields.length) {
+        throw new Error(`过程字段状态不完整：后端返回 ${processFieldStates.size}/${state.fields.length}`);
+      }
     }
   } catch (e) {
     // 运行时规则拿不到时必须 fail closed。退回编译期过滤会把 SinglePoint、
@@ -281,39 +317,65 @@ export async function renderFields() {
     return;
   }
   state.fieldStates = fieldStates;
+  const withContextDefaults = (items, states) => items.map(e => {
+    const value = states.get(e.path)?.context_default;
+    return e.unset && value != null ? { ...e, value } : e;
+  });
   // **只读派生项不再藏在专家模式后面** ——
   // 全仓库只有 6 个（DEF_dir_landdata/restart/history、DEF_USE_USGS/IGBP、
   // DEF_wetland_finundation_scheme），它们是「这个值现在是多少」的答案，
   // 而那是个常规问题。
-  const shown = inGroup
+  const shown = withContextDefaults(inGroup, fieldStates)
     // 未知字段仍需显示为错误，已知字段则一律服从后端；不保留第二套前端规则。
     .filter(e => !e.known || fieldStates.get(e.path)?.mode !== 'hidden');
+  const processShown = withContextDefaults(processInGroup, processFieldStates)
+    .filter(e => !e.known || processFieldStates.get(e.path)?.mode !== 'hidden');
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
   for (const [page, basic] of basics) {
-    const rows = shown.filter(e => page.sections.includes(sectionOf(e)))
+    const scoped = page.scoped;
+    const rows = (scoped ? processShown : shown)
+      .filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (!rows.length) {
       basic.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
       continue;
     }
     flows.add(page.id);
-    renderScope(basic);
-    basic.appendChild(table(rows, fieldStates));
+    if (scoped) {
+      renderProcessPicker(basic, parameterCases);
+      basic.appendChild(table(
+        rows, processFieldStates, processDirs, processDirs.length > 1, false,
+      ));
+    } else {
+      renderScope(basic, batchDirs);
+      basic.appendChild(table(rows, fieldStates, batchDirs));
+    }
   }
 
   for (const [page, process] of processes) {
-    let rows = shown.filter(e => page.sections.includes(sectionOf(e)))
+    let rows = processShown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (page.id === 'params-eco') rows = collapseStomatal(rows);
-    if (!rows.length) {
-      process.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
+    const commonField = e => e.derived || e.synthetic || !e.known
+      || isCommonField(e.path) || HINTS[e.path];
+    const common = rows.filter(commonField);
+    const expert = rows.filter(e => !commonField(e));
+    if (!common.length && !(state.expert && expert.length)) {
+      process.innerHTML = '<p class="muted empty-params">当前配置没有这一类可设置项。</p>';
       continue;
     }
     flows.add(page.id);
-    renderScope(process);
-    process.appendChild(table(rows, fieldStates));
+    renderProcessPicker(process, parameterCases);
+    if (common.length) process.appendChild(table(
+      common, processFieldStates, processDirs, processDirs.length > 1, false,
+    ));
+    if (state.expert && expert.length) {
+      process.appendChild(renderExpertFields(expert, processFieldStates, processDirs));
+    }
   }
+  if (state.expert) await renderExpertProcessFiles(processes, flows);
+  if (state.expert) await renderPftParameters(processes, flows);
 
   if (outputFields.length) {
     renderScope(output);
@@ -323,7 +385,7 @@ export async function renderFields() {
     // 所以它们落在这个分支，而不是上面那个 PARAM_SECTIONS 循环里。
     output.appendChild(table(
       outputFields.slice().sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0)),
-      fieldStates));
+      fieldStates, batchDirs));
   } else {
     output.innerHTML = '<p class="muted">当前配置没有可配置的输出参数。</p>';
   }
@@ -354,13 +416,437 @@ function collapseStomatal(rows) {
   return collapsed;
 }
 
+function renderExpertFields(rows, fieldStates, dirs) {
+  const wrap = document.createElement('details');
+  wrap.className = 'expert-param-file';
+  const summary = document.createElement('summary');
+  summary.textContent = language() === 'en'
+    ? `Expert case.nml parameters (${rows.length})`
+    : `case.nml 专家参数（${rows.length}）`;
+  wrap.appendChild(summary);
+  wrap.appendChild(table(rows, fieldStates, dirs, dirs.length > 1, false, true));
+  return wrap;
+}
+
+
+function expertCases() {
+  const cases = currentCases();
+  return cases.length ? cases : (state.selected ? [state.selected] : []);
+}
+
+function expertCase() {
+  const cases = expertCases();
+  if (!cases.length) return null;
+  if (state.expertCaseDir === EXPERT_ALL && cases.length > 1) return cases[0];
+  if (!cases.some(c => c.dir === state.expertCaseDir)) {
+    state.expertCaseDir = state.selected && cases.some(c => c.dir === state.selected.dir)
+      ? state.selected.dir : cases[0].dir;
+  }
+  return cases.find(c => c.dir === state.expertCaseDir) ?? cases[0];
+}
+
+function expertDirs() {
+  const cases = expertCases();
+  if (state.expertCaseDir === EXPERT_ALL && cases.length > 1) return cases.map(c => c.dir);
+  const selected = expertCase();
+  return selected ? [selected.dir] : editTarget().slice(0, 1);
+}
+
+function renderProcessPicker(box, cases) {
+  if (cases.length < 2 || box.querySelector('.process-site-picker')) return;
+  const row = document.createElement('div');
+  row.className = 'expert-site-picker process-site-picker';
+  const label = document.createElement('label');
+  label.textContent = language() === 'en' ? 'Edit site' : '修改站点';
+  const pick = document.createElement('select');
+  pick.className = 'select';
+  if (cases.length > 1) {
+    const all = document.createElement('option');
+    all.value = EXPERT_ALL;
+    all.textContent = language() === 'en' ? 'All sites' : '全部站点';
+    pick.appendChild(all);
+  }
+  for (const c of cases) {
+    const o = document.createElement('option');
+    o.value = c.dir;
+    o.textContent = c.name;
+    pick.appendChild(o);
+  }
+  pick.value = state.expertCaseDir === EXPERT_ALL && cases.length > 1
+    ? EXPERT_ALL : (expertCase()?.dir ?? '');
+  pick.onchange = async () => {
+    state.expertCaseDir = pick.value;
+    await renderFields();
+  };
+  label.appendChild(pick);
+  row.appendChild(label);
+  box.appendChild(row);
+}
+
+function processControl(entry) {
+  const raw = entry.value.replace(/^'|'$/g, '');
+  if (entry.kind === 'logical') {
+    const s = document.createElement('select');
+    s.className = 'select';
+    for (const value of ['.true.', '.false.']) {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = optionLabel(entry.path, value, language());
+      s.appendChild(o);
+    }
+    s.value = /true|\.t\./i.test(entry.value) ? '.true.' : '.false.';
+    return s;
+  }
+  const inp = document.createElement('input');
+  inp.className = 'input';
+  inp.value = entry.kind === 'list' ? entry.value.replace(/\s+/g, ', ') : raw;
+  if (entry.kind === 'integer' || entry.kind === 'real') {
+    const number = entry.kind === 'real' ? fortranNumberInputValue(raw) : raw;
+    if (number !== null && Number.isFinite(Number(number))) {
+      inp.type = 'number';
+      inp.step = entry.kind === 'integer' ? '1' : 'any';
+      inp.value = number;
+    } else if (entry.unset) {
+      inp.value = '';
+      inp.placeholder = raw;
+      inp.inputMode = 'decimal';
+    }
+  }
+  return inp;
+}
+
+function defaultValueText(path, value, kind = '') {
+  if (value == null) return null;
+  if (String(kind).toLowerCase() === 'real') {
+    const number = fortranNumberInputValue(value);
+    if (number != null) return number;
+  }
+  return value === ''
+    ? (language() === 'en' ? '(empty)' : '（空）')
+    : optionLabel(path, value, language());
+}
+
+function appendDefaultValue(cell, path, value, kind = '') {
+  const contextual = path.startsWith('DEF_LC_') || ['DEF_BALL_BERRY_GRADM', 'DEF_BALL_BERRY_BINTER', 'DEF_MEDLYN_G1', 'DEF_MEDLYN_G0', 'DEF_WUE_LAMBDA'].includes(path);
+  const text = defaultValueText(path, value, kind);
+  if (text == null) return;
+  const note = document.createElement('div');
+  note.className = 'parameter-default';
+  note.textContent = `${contextual ? (language() === 'en' ? 'Current land-cover default' : '当前地类默认值') : (language() === 'en' ? 'Default' : '默认值')}：${text}`;
+  cell.appendChild(note);
+}
+
+function renderExpertTable(file, dirs) {
+  const wrap = document.createElement('details');
+  wrap.className = 'expert-param-file';
+  const summary = document.createElement('summary');
+  summary.textContent = language() === 'en'
+    ? `Expert parameter file: ${file.title} (${file.entries.length})`
+    : `专家参数文件：${file.title}（${file.entries.length}）`;
+  wrap.appendChild(summary);
+  const tbl = document.createElement('table');
+  tbl.className = 'parameter-table expert-parameter-table';
+  for (const entry of file.entries) {
+    const tr = document.createElement('tr');
+    const k = document.createElement('td');
+    k.textContent = fieldLabel(entry.path, language());
+    const defaultText = defaultValueText(entry.path, entry.default, entry.kind);
+    k.title = `${entry.path}\n&${entry.group}`
+      + (defaultText == null ? '' : `\n${language() === 'en' ? 'Code default' : '代码默认值'}：${defaultText}`)
+      + (entry.doc ? `\n${entry.doc}` : '');
+    const v = document.createElement('td');
+    const inp = processControl(entry);
+    inp.title = defaultText == null
+      ? '' : `${language() === 'en' ? 'Code default' : '代码默认值'}：${defaultText}`;
+    if (entry.unset) {
+      inp.style.opacity = '0.55';
+      inp.title += (inp.title ? '\n' : '') + '当前文件未设置，显示代码默认值';
+    }
+    inp.onchange = async () => {
+      if (entry.unset && !inp.value.trim()) return;
+      try {
+        const r = await invoke('set_process_parameter_field_batch', {
+          dirs, file: file.file, path: entry.path, value: inp.value,
+        });
+        if (state.selected && dirs.includes(state.selected.dir)) state.text = r.text || state.text;
+        status(r.written > 1
+          ? `已写入 ${r.written} 个站点：${entry.path}`
+          : `已保存 ${baseName(dirs[0])}：${entry.path}`);
+        await renderFields();
+      } catch (e) {
+        status(e);
+        const raw = entry.value.replace(/^'|'$/g, '');
+        inp.value = entry.kind === 'real' ? (fortranNumberInputValue(raw) ?? raw) : raw;
+      }
+    };
+    v.appendChild(inp);
+    appendDefaultValue(v, entry.path, entry.default, entry.kind);
+    tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
+  }
+  wrap.appendChild(tbl);
+  return wrap;
+}
+
+async function renderExpertProcessFiles(processes, flows) {
+  const cases = expertCases();
+  const dirs = expertDirs();
+  if (!dirs.length) return;
+  let files = [];
+  try {
+    const lists = await Promise.all(dirs.map(dir => invoke('process_parameter_files', { dir })));
+    files = commonProcessFiles(lists);
+  } catch (e) {
+    status(e);
+    return;
+  }
+  for (const [page, target] of processes) {
+    const mine = files.filter(file => page.sections.includes(file.section));
+    if (!mine.length) continue;
+    target.querySelector('.empty-params')?.remove();
+    const note = document.createElement('div');
+    note.className = 'expert-note';
+    note.textContent = '专家模式：这些值来自过程参数文件，不写入公共 case.nml。';
+    target.appendChild(note);
+    renderProcessPicker(target, cases);
+    for (const file of mine) target.appendChild(renderExpertTable(file, dirs));
+    flows.add(page.id);
+  }
+}
+
+function commonProcessFiles(lists) {
+  if (!lists.length) return [];
+  const tail = lists.slice(1);
+  return lists[0].map(file => {
+    const entries = file.entries.filter(entry => tail.every(list => {
+      const peer = list.find(other => other.file === file.file);
+      return peer?.entries.some(other => other.path === entry.path);
+    }));
+    return entries.length ? { ...file, entries } : null;
+  }).filter(Boolean);
+}
+
+async function pftSites(cases) {
+  const kernelDir = $('kernel').value;
+  return Promise.all(cases.map(async siteCase => {
+    const key = `${kernelDir}\u001f${siteCase.dir}`;
+    if (!PFT_SITE_CACHE.has(key)) {
+      const pending = invoke('site_pfts', { dir: siteCase.dir, kernelDir })
+        .catch(error => {
+          PFT_SITE_CACHE.delete(key);
+          throw error;
+        });
+      PFT_SITE_CACHE.set(key, pending);
+    }
+    const components = await PFT_SITE_CACHE.get(key);
+    return { siteCase, components };
+  }));
+}
+
+function invalidatePftSites(dirs, changes) {
+  if (!changes.some(change => PFT_IDENTITY_FIELDS.has(change.path))) return;
+  for (const key of PFT_SITE_CACHE.keys()) {
+    if (dirs.some(dir => key.endsWith(`\u001f${dir}`))) PFT_SITE_CACHE.delete(key);
+  }
+}
+
+function pftParameterControl(parameter) {
+  if (parameter.allowed_values?.length) {
+    const select = document.createElement('select');
+    select.className = 'select';
+    for (const value of parameter.allowed_values) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = parameter.name === 'DEF_PFT_C3C4'
+        ? (value === '1' ? 'C3' : 'C4') : value;
+      select.appendChild(option);
+    }
+    select.value = parameter.value ?? parameter.default;
+    return select;
+  }
+  const input = document.createElement('input');
+  input.className = 'input';
+  input.type = 'number';
+  input.step = parameter.kind === 'integer' ? '1' : 'any';
+  input.value = fortranNumberInputValue(parameter.value ?? parameter.default)
+    ?? (parameter.value ?? parameter.default);
+  return input;
+}
+
+function renderPftParameterGroup(group, parameters, dirs, pftType) {
+  const details = document.createElement('details');
+  details.className = 'expert-param-file';
+  const summary = document.createElement('summary');
+  summary.textContent = `${group}（${parameters.length}）`;
+  details.appendChild(summary);
+  const table = document.createElement('table');
+  table.className = 'parameter-table expert-parameter-table';
+  for (const parameter of parameters) {
+    const row = document.createElement('tr');
+    const key = document.createElement('td');
+    const label = language() === 'en' ? parameter.label_en : parameter.label_zh;
+    key.textContent = label + (parameter.unit ? `（${parameter.unit}）` : '');
+    key.title = `${parameter.name}(${Number(pftType) + 1})`;
+    const warnings = [];
+    if (parameter.mixed) warnings.push(language() === 'en'
+      ? 'Selected sites have different explicit overrides; editing makes them equal.'
+      : '所选站点的显式覆盖不同；修改后会统一为同一个值。');
+    if (parameter.default_mixed) warnings.push(language() === 'en'
+      ? 'Built-in defaults differ because the selected cases use different schemes.'
+      : '所选算例的内置方案不同，因此默认值不同。');
+    if (warnings.length) {
+      key.textContent += ' ⚠';
+      key.className = 'warn';
+      key.title += `\n${warnings.join('\n')}`;
+    }
+    const valueCell = document.createElement('td');
+    const control = pftParameterControl(parameter);
+    if (parameter.value == null) control.style.opacity = '0.55';
+    control.onchange = async () => {
+      try {
+        const result = await invoke('set_pft_parameter_batch', {
+          dirs, pftType: Number(pftType), name: parameter.name,
+          value: control.value, kernelDir: $('kernel').value,
+        });
+        status(result.written > 1
+          ? `${parameter.name} 已写入 ${result.written} 个站点`
+          : `${parameter.name} 已保存`);
+        await renderFields();
+      } catch (error) {
+        status(error);
+        control.value = fortranNumberInputValue(parameter.value ?? parameter.default)
+          ?? (parameter.value ?? parameter.default);
+      }
+    };
+    valueCell.appendChild(control);
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'btn-ghost';
+    reset.style.marginLeft = '8px';
+    reset.textContent = language() === 'en' ? 'Use built-in' : '恢复内置值';
+    reset.disabled = parameter.value == null && !parameter.mixed;
+    reset.onclick = async () => {
+      try {
+        const result = await invoke('set_pft_parameter_batch', {
+          dirs, pftType: Number(pftType), name: parameter.name,
+          value: null, kernelDir: $('kernel').value,
+        });
+        status(result.written > 1
+          ? `${parameter.name} 已在 ${result.written} 个站点恢复内置值`
+          : `${parameter.name} 已恢复内置值`);
+        await renderFields();
+      } catch (error) { status(error); }
+    };
+    valueCell.appendChild(reset);
+    const note = document.createElement('div');
+    note.className = 'parameter-default';
+    note.textContent = `${language() === 'en' ? 'Built-in default' : '当前 PFT 内置值'}：${parameter.default}`;
+    valueCell.appendChild(note);
+    row.append(key, valueCell);
+    table.appendChild(row);
+  }
+  details.appendChild(table);
+  return details;
+}
+
+async function renderPftParameters(processes, flows) {
+  const eco = processes.find(([page]) => page.id === 'params-eco');
+  if (!eco) return;
+  const [, target] = eco;
+  const allCases = expertCases();
+  if (!allCases.length) return;
+  const selectedCases = state.expertCaseDir === EXPERT_ALL && allCases.length > 1
+    ? allCases : [expertCase()].filter(Boolean);
+  let usable;
+  try {
+    usable = await pftSites(selectedCases);
+  } catch (error) {
+    status(error);
+    return;
+  }
+
+  const types = new Map();
+  for (const { siteCase, components } of usable) {
+    for (const component of components) {
+      const current = types.get(component.pft_type) ?? {
+        ...component, sites: [], fractions: [],
+      };
+      current.sites.push(siteCase);
+      current.fractions.push(component.fraction);
+      types.set(component.pft_type, current);
+    }
+  }
+  if (!types.size) return;
+  const ids = [...types.keys()].filter(id => id !== 0).sort((a, b) => a - b);
+  if (!ids.length) return;
+  if (!ids.includes(Number(state.expertPftType))) state.expertPftType = ids[0];
+  const selected = types.get(Number(state.expertPftType));
+  const dirs = selected.sites.map(item => item.dir);
+  let parameters;
+  try {
+    parameters = await invoke('pft_parameter_states', {
+      dirs, pftType: Number(state.expertPftType), kernelDir: $('kernel').value,
+    });
+  } catch (error) {
+    status(error);
+    return;
+  }
+  if (!parameters.length) return;
+
+  target.querySelector('.empty-params')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'expert-note pft-expert-editor';
+  const picker = document.createElement('label');
+  picker.textContent = language() === 'en' ? 'Plant functional type' : '植被功能型';
+  const select = document.createElement('select');
+  select.className = 'select';
+  for (const id of ids) {
+    const item = types.get(id);
+    const option = document.createElement('option');
+    option.value = id;
+    const name = language() === 'en' ? item.name_en : item.name_zh;
+    const suffix = usable.length === 1
+      ? ` · ${(item.fractions[0] * 100).toFixed(1)}%`
+      : ` · ${item.sites.length}/${usable.length} ${language() === 'en' ? 'sites' : '个站点'}`;
+    option.textContent = `${id} · ${name}${suffix}`;
+    select.appendChild(option);
+  }
+  select.value = String(state.expertPftType);
+  select.onchange = async () => {
+    state.expertPftType = Number(select.value);
+    await renderFields();
+  };
+  picker.appendChild(select);
+  wrap.appendChild(picker);
+  const explanation = document.createElement('div');
+  explanation.className = 'parameter-default';
+  explanation.textContent = language() === 'en'
+    ? `Sparse overrides are written only for PFT ${state.expertPftType}; sites without this PFT are left unchanged.`
+    : `仅为 PFT ${state.expertPftType} 写入稀疏覆盖；不含该 PFT 的站点不会被修改。`;
+  wrap.appendChild(explanation);
+  target.appendChild(wrap);
+
+  const groups = new Map();
+  for (const parameter of parameters) {
+    const group = language() === 'en' ? parameter.group_en : parameter.group_zh;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(parameter);
+  }
+  for (const [group, items] of groups) {
+    target.appendChild(renderPftParameterGroup(group, items, dirs, state.expertPftType));
+  }
+  flows.add('params-eco');
+}
+
 function publishFlows(flows) {
   state.availableFlows = flows;
   globalThis.dispatchEvent?.(new Event('colm:flows'));
 }
 
 /** 一组字段渲染成一张表。分节之后每节各调一次。 */
-function table(shown, fieldStates = new Map()) {
+function table(
+  shown, fieldStates = new Map(), dirs = editTarget(), showVaries = true, syncText = true,
+  showDefaults = false,
+) {
   const tbl = document.createElement('table');
   tbl.className = 'parameter-table';
   for (const e of shown) {
@@ -387,25 +873,40 @@ function table(shown, fieldStates = new Map()) {
         k.title = hint;
         // 有说明的字段要看得出来有说明 —— 一个只在悬停时才出现的提示，
         // 等于没有。
-        k.textContent = e.path + ' ⓘ';
+        k.textContent = fieldLabel(e.path, language()) + ' ⓘ';
         k.style.cursor = 'help';
       }
       if (meta) {
         const details = [technicalFieldHint(e.path, language())];
         if (hint) details.push(hint);
         if (meta.doc) details.push(meta.doc);
-        details.push('默认：' + optionLabel(e.path, meta.default, language()));
+        const defaultText = defaultValueText(
+          e.path, fieldState?.context_default ?? meta.default, meta.kind,
+        );
+        if (defaultText != null) {
+          details.push(`${language() === 'en' ? 'Default' : '默认'}：${defaultText}`);
+        }
         k.title = details.join('\n\n');
       }
       if (fieldState?.reason) {
         k.title = (k.title ? k.title + '\n\n' : '') + fieldState.reason;
+      }
+      if (e.path === 'DEF_USE_CBL_HEIGHT' && expertCases().length > 1) {
+        const site = dirs.length === 1 ? baseName(dirs[0]) : null;
+        k.textContent += language() === 'en'
+          ? (site ? ` (file for ${site})` : ' (select one site)')
+          : (site ? `（当前站点：${site}）` : '（请选择单个站点）');
       }
     }
     const warnings = [];
     if (fieldState?.mixed) {
       warnings.push('这一批算例对该字段的适用条件不同；它只对其中一部分算例生效。');
     }
-    if (state.varies.has(e.path) || e.sourcePaths?.some(path => state.varies.has(path))) {
+    if (fieldState?.default_mixed) {
+      warnings.push('所选站点的内置默认值随地类不同；这里显示第一个站点的默认值，修改会给全部站点写入同一个显式值。');
+    }
+    if (showVaries
+        && (state.varies.has(e.path) || e.sourcePaths?.some(path => state.varies.has(path)))) {
       // 这一行显示的是代表算例的值，别的算例不是这个值。改它会抹平全部。
       warnings.push('这一批算例在这个字段上取值不同，显示的是第一个的值。改它会把全部改成同一个值。');
     }
@@ -423,6 +924,13 @@ function table(shown, fieldStates = new Map()) {
     } else {
       const inp = control(e, meta, fieldState);
       if (fieldState?.mode === 'disabled') inp.disabled = true;
+      // 一批算例对字段的适用条件不同，就不能拿第一个算例的控件覆盖整批。
+      // 需要修改时先让配置一致；后端也会做同一条最终防线。
+      if (fieldState?.mixed) inp.disabled = true;
+      // 边界层高度是逐站点数据；同一份文件不能安全地套到整批站点。
+      if (e.path === 'DEF_USE_CBL_HEIGHT' && dirs.length > 1) inp.disabled = true;
+      // 路径必须经原生选择器写入，避免手填一个不存在或类型不对的路径。
+      if (PATH_FIELDS[e.path]) inp.readOnly = true;
       // 未设过的字段标灰：它显示的是 CoLM 的默认值，不是这份文件里的内容。
       if (e.unset) { inp.style.opacity = '0.55'; v.title = '这份配置没设它，显示的是默认值'; }
       inp.onchange = async () => {
@@ -435,10 +943,11 @@ function table(shown, fieldStates = new Map()) {
               { path: 'DEF_USE_WUEST', value: inp.value === 'WUE' ? '.true.' : '.false.' },
             ];
             const r = await invoke('set_fields_batch', {
-              dirs: editTarget(),
+              dirs,
               fields,
+              kernelDir: $('kernel').value,
             });
-            state.text = r.text;
+            if (syncText) state.text = r.text;
             state.varies.delete('DEF_USE_MEDLYNST');
             state.varies.delete('DEF_USE_WUEST');
             status(r.written > 1
@@ -448,11 +957,14 @@ function table(shown, fieldStates = new Map()) {
             return;
           }
           if (enabled(inp.value) && e.path === 'DEF_USE_CBL_HEIGHT') {
+            if (dirs.length !== 1) throw new Error('请先在“修改站点”中选择一个站点');
             const picked = await pickParameterPath('DEF_USE_CBL_HEIGHT', 'file');
             if (!picked) { inp.value = before; return; }
-            const r = await invoke('configure_cbl_batch', { dirs: editTarget(), file: picked });
-            state.text = r.text;
-            status('已校验并接入边界层高度文件');
+            const r = await invoke('configure_cbl_batch', {
+              dirs, file: picked, kernelDir: $('kernel').value,
+            });
+            if (syncText) state.text = r.text;
+            status(`已为 ${baseName(dirs[0])} 校验并接入边界层高度文件`);
             await renderFields();
             return;
           }
@@ -460,15 +972,19 @@ function table(shown, fieldStates = new Map()) {
               && (e.path === 'DEF_USE_OZONESTRESS' || e.path === 'DEF_USE_OZONEDATA')) {
             const picked = await pickParameterPath('DEF_file_Ozone', 'file');
             if (!picked) { inp.value = before; return; }
-            const r = await invoke('configure_ozone_batch', { dirs: editTarget(), file: picked });
-            state.text = r.text;
+            const r = await invoke('configure_ozone_batch', {
+              dirs, file: picked, kernelDir: $('kernel').value,
+            });
+            if (syncText) state.text = r.text;
             status('已校验臭氧数据，并启用臭氧胁迫与数据读取');
             await renderFields();
             return;
           }
           if (e.path === 'DEF_file_Ozone') {
-            const r = await invoke('configure_ozone_batch', { dirs: editTarget(), file: inp.value });
-            state.text = r.text;
+            const r = await invoke('configure_ozone_batch', {
+              dirs, file: inp.value, kernelDir: $('kernel').value,
+            });
+            if (syncText) state.text = r.text;
             status('已校验并更换臭氧数据文件');
             await renderFields();
             return;
@@ -495,10 +1011,13 @@ function table(shown, fieldStates = new Map()) {
           // 后端读改写全部算例，成功后把**代表算例**的新内容带回来。
           // 前端不再自己 write_text —— 那条路只写得动一个文件。
           const r = changes.length > 1
-            ? await invoke('set_fields_batch', { dirs: editTarget(), fields: changes })
+            ? await invoke('set_fields_batch', {
+              dirs, fields: changes, kernelDir: $('kernel').value,
+            })
             : await invoke('set_field_batch',
-              { dirs: editTarget(), path: e.path, value: inp.value });
-          state.text = r.text;
+              { dirs, path: e.path, value: inp.value, kernelDir: $('kernel').value });
+          if (syncText) state.text = r.text;
+          invalidatePftSites(dirs, changes);
           status(r.written > 1 ? `已写入 ${r.written} 个算例：${e.path}` : `已保存 ${e.path}`);
           // 父开关会改变其他行是否有效，通常保存后要重新读取统一状态；
           // 明确不参与显隐规则的枚举则留在原位，避免无意义的整页跳动。
@@ -514,7 +1033,9 @@ function table(shown, fieldStates = new Map()) {
         } catch (err) {
           // 类型不对在后端就被拦下了，原样报出来 —— 它说得比我们编的具体
           status(err);
-          inp.value = e.value.replace(/^'|'$/g, '');
+          const raw = e.value.replace(/^'|'$/g, '');
+          inp.value = meta?.kind?.startsWith('Real')
+            ? (fortranNumberInputValue(raw) ?? '') : raw;
         }
       };
       v.appendChild(inp);
@@ -522,6 +1043,7 @@ function table(shown, fieldStates = new Map()) {
         const pick = document.createElement('button');
         pick.type = 'button';
         pick.className = 'btn-ghost';
+        pick.disabled = inp.disabled;
         pick.style.marginLeft = '8px';
         pick.textContent = PATH_FIELDS[e.path] === 'file' ? '选择文件…' : '选择目录…';
         pick.onclick = async () => {
@@ -529,8 +1051,10 @@ function table(shown, fieldStates = new Map()) {
           if (!chosen) return;
           if (e.path === 'DEF_file_Ozone') {
             try {
-              const r = await invoke('configure_ozone_batch', { dirs: editTarget(), file: chosen });
-              state.text = r.text;
+              const r = await invoke('configure_ozone_batch', {
+                dirs, file: chosen, kernelDir: $('kernel').value,
+              });
+              if (syncText) state.text = r.text;
               status('已校验并更换臭氧数据文件');
               await renderFields();
             } catch (err) { status(err); }
@@ -541,6 +1065,9 @@ function table(shown, fieldStates = new Map()) {
         };
         v.appendChild(pick);
       }
+      if (showDefaults) appendDefaultValue(
+        v, e.path, fieldState?.context_default ?? meta?.default, meta?.kind,
+      );
     }
     tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
   }
@@ -550,5 +1077,8 @@ function table(shown, fieldStates = new Map()) {
 // 切换中英文时方案名也要跟着变；它们不是静态 HTML，通用文本替换无法知道
 // 同一个 `I` 在两个不同方案字段里分别代表什么。
 globalThis.addEventListener?.('colm:language', () => {
+  if (state.text) renderFields();
+});
+globalThis.addEventListener?.('colm:mode', () => {
   if (state.text) renderFields();
 });

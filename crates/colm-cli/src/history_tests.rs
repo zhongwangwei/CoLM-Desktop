@@ -8,9 +8,33 @@
 
 use std::path::PathBuf;
 
+#[test]
+fn metric_variable_filter_rejects_unknown_names() {
+    super::validate_pair_vars(&["Rnet".into(), "not-a-variable".into()])
+        .expect_err("unknown evaluation variables must not silently return an empty result");
+    super::validate_pair_vars(&["Rnet".into(), "FCH4_f_ann".into()]).unwrap();
+}
+
+#[test]
+fn auxiliary_history_files_are_separate_streams() {
+    let files = [
+        "/tmp/Case_hist_2001-01.nc",
+        "/tmp/Case_hist_2001-02.nc",
+        "/tmp/Case_hist_tracer_2001-01.nc",
+        "/tmp/Case_hist_cama_2001-01.nc",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect::<Vec<_>>();
+    let streams = super::history_streams(&files);
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams[0], files[..2]);
+    assert!(streams.iter().skip(1).all(|stream| stream.len() == 1));
+}
+
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir()
-        .join(format!("colm-hist-{tag}"))
+        .join(format!("colm-hist-{tag}-{:?}", std::thread::current().id()))
         .join("history");
     let _ = std::fs::remove_dir_all(d.parent().unwrap());
     std::fs::create_dir_all(&d).unwrap();
@@ -125,6 +149,47 @@ fn displayed_series_keep_endpoints_and_extrema_under_the_point_limit() {
 }
 
 #[test]
+fn metric_unix_window_is_translated_without_reapplying_a_timezone() {
+    let minutes = [56_802_270.0, 56_802_330.0];
+    let normalized = [1_800.0, 5_400.0];
+    let unix0 = colm_hist::time::unix_seconds(&minutes[..1])[0];
+    let window =
+        super::normalized_metric_window(&minutes, &normalized, Some(unix0), Some(unix0 + 3_600))
+            .unwrap()
+            .unwrap();
+    assert_eq!(window.from, 1_800.0);
+    assert_eq!(window.to, 5_400.0);
+}
+
+#[test]
+fn metric_window_rejects_an_empty_or_reversed_interval() {
+    let error = super::normalized_metric_window(&[0.0], &[0.0], Some(8), Some(8))
+        .expect_err("a half-open window must not be empty");
+    assert!(error.to_string().contains("earlier"), "{error}");
+    assert!(super::normalized_metric_window(&[0.0], &[0.0], None, None)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn metric_window_preserves_one_sided_bounds() {
+    let minutes = [56_802_270.0];
+    let normalized = [1_800.0];
+    let unix = colm_hist::time::unix_seconds(&minutes)[0];
+    let from = super::normalized_metric_window(&minutes, &normalized, Some(unix), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(from.from, 1_800.0);
+    assert_eq!(from.to, f64::INFINITY);
+
+    let to = super::normalized_metric_window(&minutes, &normalized, None, Some(unix))
+        .unwrap()
+        .unwrap();
+    assert_eq!(to.from, f64::NEG_INFINITY);
+    assert_eq!(to.to, 1_800.0);
+}
+
+#[test]
 fn displayed_series_apply_the_requested_time_window_before_sampling() {
     let unix: Vec<i64> = (0..100).collect();
     let values: Vec<f64> = unix.iter().map(|i| *i as f64).collect();
@@ -219,4 +284,121 @@ fn evaluation_model_sources_apply_units_and_derived_expressions() {
     .unwrap();
     assert!((nee[0] - 2.0).abs() < 1.0e-12);
     assert!((nee[1] - 3.0).abs() < 1.0e-12);
+}
+
+fn write_history_nc(path: &std::path::Path, vars: &[(&str, &[f64])]) {
+    let mut file = netcdf::create(path).unwrap();
+    let n = vars
+        .iter()
+        .find(|(name, _)| *name == "time")
+        .map(|(_, values)| values.len())
+        .unwrap_or_else(|| vars.first().map(|(_, values)| values.len()).unwrap_or(0));
+    file.add_dimension("time", n).unwrap();
+    for (name, values) in vars {
+        let mut var = file.add_variable::<f64>(name, &["time"]).unwrap();
+        var.put_values(values, ..).unwrap();
+    }
+}
+
+#[test]
+fn main_and_tracer_history_keep_separate_time_axes() {
+    let d = tmp("tracer-time");
+    write_history_nc(
+        &d.join("AT-Neu_hist_2010-01.nc"),
+        &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
+    );
+    write_history_nc(
+        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &[
+            ("time", &[1.0, 2.0]),
+            ("f_methane_surf_flux_tot", &[3.0, 4.0]),
+        ],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    assert_eq!(super::read_history(&files, "time").unwrap(), [1.0, 2.0]);
+    let data = super::read_history_many(&files, &["time", "f_methane_surf_flux_tot"]).unwrap();
+    assert_eq!(data["time"], [1.0, 2.0]);
+    assert_eq!(data["f_methane_surf_flux_tot"], [3.0, 4.0]);
+}
+
+#[test]
+fn mixed_main_and_tracer_series_read_from_their_own_files() {
+    let d = tmp("tracer-mixed");
+    write_history_nc(
+        &d.join("AT-Neu_hist_2010-01.nc"),
+        &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
+    );
+    write_history_nc(
+        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &[
+            ("time", &[1.0, 2.0]),
+            ("f_methane_surf_flux_tot", &[3.0, 4.0]),
+        ],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let data =
+        super::read_history_many(&files, &["time", "f_rnet", "f_methane_surf_flux_tot"]).unwrap();
+    assert_eq!(data["time"], [1.0, 2.0]);
+    assert_eq!(data["f_rnet"], [10.0, 20.0]);
+    assert_eq!(data["f_methane_surf_flux_tot"], [3.0, 4.0]);
+}
+
+#[test]
+fn history_catalog_includes_main_and_tracer_variables() {
+    let d = tmp("tracer-history-catalog");
+    write_history_nc(
+        &d.join("AT-Neu_hist_2010-01.nc"),
+        &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
+    );
+    write_history_nc(
+        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &[
+            ("time", &[1.0, 2.0]),
+            ("f_methane_surf_flux_tot", &[3.0, 4.0]),
+        ],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let names = super::history_variables(&files)
+        .unwrap()
+        .into_iter()
+        .map(|variable| variable.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"f_rnet".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"f_methane_surf_flux_tot".to_string()),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn evaluation_catalog_sees_methane_in_tracer_history() {
+    let d = tmp("tracer-catalog");
+    write_history_nc(
+        &d.join("AT-Neu_hist_2010-01.nc"),
+        &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
+    );
+    write_history_nc(
+        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &[
+            ("time", &[1.0, 2.0]),
+            ("f_methane_surf_flux_tot", &[3.0, 4.0]),
+        ],
+    );
+    let obs_path = d.parent().unwrap().join("obs.nc");
+    write_history_nc(
+        &obs_path,
+        &[("time", &[1.0, 2.0]), ("FCH4_f_ann", &[3.0, 4.0])],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let obs = netcdf::open(&obs_path).unwrap();
+    let variable = colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .find(|variable| variable.observation == "FCH4_f_ann")
+        .unwrap();
+    let row = super::evaluation_availability(variable, &files, &obs);
+    assert!(
+        row.available,
+        "{:?} {:?}",
+        row.missing_model, row.missing_observation
+    );
 }

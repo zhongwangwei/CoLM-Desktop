@@ -7,6 +7,7 @@
 //! 每个补进去的变量都带一个 `source` 属性，写明它是量出来的还是假设的。
 
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 
@@ -18,6 +19,11 @@ use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
 
 const SITE_KIND_ATTRIBUTE: &str = "colm_desktop_site_kind";
+
+fn netcdf_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// CoLM 无条件读取而 PLUMBER2 站点文件不提供的 12 个字段。
 pub const REQUIRED_FIELDS: [&str; 12] = [
@@ -133,10 +139,119 @@ pub struct SiteAudit {
     pub readiness: Readiness,
 }
 
+/// One positive vegetation fraction from a PFT/PC single-point site.
+///
+/// `pft_type` is the index used by `MOD_Const_PFT`: natural PFTs are read
+/// directly from `pfttyp`; CROP types 1..64 map to table indices 15..78.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PftComponent {
+    pub pft_type: u8,
+    pub fraction: f64,
+}
+
 impl SiteAudit {
     pub fn self_contained(&self) -> bool {
         self.readiness == Readiness::SelfContained
     }
+}
+
+/// Read the PFT composition that CoLM will use for one single-point site.
+///
+/// CROP is a compile-time table layout, so callers must say whether that
+/// kernel is active and may provide the case's `SITE_landtype` override.
+/// Only IGBP cropland (12) uses `croptyp`; its 1-based crop IDs are mapped
+/// exactly as `MOD_SingleSrfdata.F90` does: `croptyp + N_PFT - 1`, where
+/// `N_PFT=15`.
+pub fn pft_components(
+    file: &Path,
+    crop_enabled: bool,
+    landtype_override: Option<i32>,
+) -> Result<Vec<PftComponent>> {
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let read_pair =
+        |type_name: &str, fraction_name: &str| -> Result<Option<(Vec<f64>, Vec<f64>)>> {
+            let Some(type_var) = f.variable(type_name) else {
+                return Ok(None);
+            };
+            let Some(fraction_var) = f.variable(fraction_name) else {
+                bail!("{} has {type_name} but no {fraction_name}", file.display());
+            };
+            let types = type_var.get_values::<f64, _>(netcdf::Extents::All)?;
+            let fractions = fraction_var.get_values::<f64, _>(netcdf::Extents::All)?;
+            if types.len() != fractions.len() {
+                bail!(
+                    "{} has {} {type_name} values but {} {fraction_name} values",
+                    file.display(),
+                    types.len(),
+                    fractions.len()
+                );
+            }
+            Ok(Some((types, fractions)))
+        };
+
+    let landtype = match landtype_override.filter(|value| *value >= 0) {
+        Some(value) => Some(value),
+        None => f
+            .variable("IGBP_classification")
+            .map(|variable| -> Result<Option<i32>> {
+                let values = variable.get_values::<f64, _>(netcdf::Extents::All)?;
+                Ok(values.first().copied().map(|value| value as i32))
+            })
+            .transpose()?
+            .flatten(),
+    };
+    // PFT/PC uses the IGBP table; with CROP, CoLM only switches to CFTs for
+    // IGBP class 12 and does not fall back to pfttyp/pctpfts.
+    let (types, fractions, crop_ids) = if crop_enabled && landtype == Some(12) {
+        read_pair("croptyp", "pctcrop")?
+            .map(|(types, fractions)| (types, fractions, true))
+            .ok_or_else(|| anyhow::anyhow!("{} has no croptyp/pctcrop", file.display()))?
+    } else {
+        read_pair("pfttyp", "pctpfts")?
+            .map(|(types, fractions)| (types, fractions, false))
+            .ok_or_else(|| anyhow::anyhow!("{} has no pfttyp/pctpfts", file.display()))?
+    };
+
+    let mut out = Vec::new();
+    for (kind, fraction) in types.into_iter().zip(fractions) {
+        if !kind.is_finite() || !fraction.is_finite() {
+            bail!("{} has non-finite PFT type or fraction", file.display());
+        }
+        if fraction <= 0.0 {
+            continue;
+        }
+        let rounded = kind.round();
+        if (kind - rounded).abs() > 1e-9 {
+            bail!("{} has non-integer PFT type {kind}", file.display());
+        }
+        let pft_type = if crop_ids {
+            if !(1.0..=64.0).contains(&rounded) {
+                bail!("{} has crop type {kind} outside 1..=64", file.display());
+            }
+            rounded as i32 + 14
+        } else {
+            let max = if crop_enabled { 14.0 } else { 15.0 };
+            if !(0.0..=max).contains(&rounded) {
+                bail!("{} has PFT type {kind} outside 0..={max}", file.display());
+            }
+            rounded as i32
+        };
+        out.push(PftComponent {
+            pft_type: pft_type as u8,
+            fraction,
+        });
+    }
+    if out.is_empty() {
+        bail!("{} has no positive PFT fractions", file.display());
+    }
+    let total: f64 = out.iter().map(|component| component.fraction).sum();
+    if !total.is_finite() || total <= 0.0 {
+        bail!("{} has an invalid PFT fraction sum", file.display());
+    }
+    for component in &mut out {
+        component.fraction /= total;
+    }
+    Ok(out)
 }
 
 fn string_attribute(file: &netcdf::File, name: &str) -> Option<String> {
@@ -180,7 +295,18 @@ pub fn site_kind(file: &Path) -> Result<SiteKind> {
 /// range, or shaped unlike the variable group CoLM reads is reported in
 /// `needs_external` and blocks the site just like a missing variable. Rawdata is
 /// only considered useful when its current tree has the required coarse buckets.
-pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<SiteAudit> {
+pub fn audit(
+    file: &Path,
+    mode: SiteMode,
+    rawdata: Option<&Path>,
+    crop_enabled: bool,
+) -> Result<SiteAudit> {
+    if crop_enabled && !matches!(mode, SiteMode::Pft | SiteMode::Pc) {
+        bail!(
+            "CROP site audit requires PFT or PC mode, got {}",
+            mode.as_str()
+        );
+    }
     if let Some(raw) = rawdata {
         if !raw.is_dir() {
             bail!("rawdata directory does not exist: {}", raw.display());
@@ -207,6 +333,15 @@ pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<Site
             "LAI_monthly",
             "SAI_monthly",
         ]),
+        SiteMode::Pft | SiteMode::Pc if crop_enabled => required.extend([
+            "IGBP_classification",
+            "croptyp",
+            "pctcrop",
+            "canopy_height_pfts",
+            "LAI_year",
+            "LAI_pfts_monthly",
+            "SAI_pfts_monthly",
+        ]),
         SiteMode::Pft | SiteMode::Pc => required.extend([
             "IGBP_classification",
             "pfttyp",
@@ -228,6 +363,7 @@ pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<Site
             "LAI_year",
             "TREE_LAI",
             "TREE_SAI",
+            "resident_population_density",
         ]),
     }
 
@@ -242,6 +378,16 @@ pub fn audit(file: &Path, mode: SiteMode, rawdata: Option<&Path>) -> Result<Site
                 }
             }
             None => needs_external.push(name.to_string()),
+        }
+    }
+    if crop_enabled {
+        let cropland = f
+            .variable("IGBP_classification")
+            .and_then(|v| v.get_values::<f64, _>(netcdf::Extents::All).ok())
+            .and_then(|values| values.first().copied())
+            .is_some_and(|value| (value - 12.0).abs() < 1e-9);
+        if !cropland {
+            needs_external.push("IGBP_classification: CROP requires 12 Croplands".to_string());
         }
     }
 
@@ -342,7 +488,9 @@ fn validate_site_variable(
             Some("soil water content must be within 0..1")
         }
         "pctpfts" if !valid_fraction_sum(&values) => Some("PFT/PC fractions must sum to 1 or 100"),
-        "pfttyp" if !integers_in(&values, 0..=16) => Some("outside PFT 0..=16"),
+        "pctcrop" if !valid_fraction_sum(&values) => Some("crop fractions must sum to 1 or 100"),
+        "pfttyp" if !integers_in(&values, 0..=15) => Some("outside PFT 0..=15"),
+        "croptyp" if !integers_in(&values, 1..=64) => Some("outside crop type 1..=64"),
         "roof_area_fraction"
         | "impervious_area_fraction"
         | "water_area_fraction"
@@ -358,6 +506,9 @@ fn validate_site_variable(
             if values.iter().any(|v| *v < 0.0) =>
         {
             Some("urban geometry must be non-negative")
+        }
+        "resident_population_density" if values.iter().any(|v| *v < 0.0) => {
+            Some("population density must be non-negative")
         }
         "LAI_monthly" | "SAI_monthly" | "LAI_pfts_monthly" | "SAI_pfts_monthly" | "TREE_LAI"
         | "TREE_SAI"
@@ -397,6 +548,16 @@ fn validate_site_variable(
             .is_some_and(|(a, b)| a != b)
     {
         return Ok(Some("PFT type/fraction lengths differ".to_string()));
+    }
+    if matches!(mode, SiteMode::Pft | SiteMode::Pc)
+        && matches!(name, "pctcrop" | "croptyp")
+        && file
+            .variable("pctcrop")
+            .map(|p| p.len())
+            .zip(file.variable("croptyp").map(|p| p.len()))
+            .is_some_and(|(a, b)| a != b)
+    {
+        return Ok(Some("crop type/fraction lengths differ".to_string()));
     }
     Ok(None)
 }
@@ -504,12 +665,26 @@ pub fn location(file: &Path) -> Result<Location> {
     let need = |name: &str| -> Result<f64> {
         first(name)?.with_context(|| format!("{} has no {name}", file.display()))
     };
+    let lon = need("longitude")?;
+    let lat = need("latitude")?;
+    if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        bail!(
+            "{} longitude must be finite and within -180..=180, got {lon}",
+            file.display()
+        );
+    }
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+        bail!(
+            "{} latitude must be finite and within -90..=90, got {lat}",
+            file.display()
+        );
+    }
     Ok(Location {
-        lon: need("longitude")?,
-        lat: need("latitude")?,
-        // 城市站点文件不带这一项 —— Urban-PLUMBER 的 21 个站一个都没有，
-        // 而 CoLM 的 URBAN 路径反正会把地类强制成 13
-        // （`MOD_SingleSrfdata.F90:1548`）。所以缺了不是错，是「这份文件不说」。
+        lon,
+        lat,
+        // 城市站点文件不带这一项 —— Urban-PLUMBER 的 21 个站一个都没有。
+        // 建算例时按内核分类显式写 USGS=1 或 IGBP/PFT/PC=13；这里缺了不是错，
+        // 只是「这份文件本身不声明地类体系」。
         landtype: first("IGBP_classification")?
             .or(first("USGS_classification")?)
             .map(|x| x as i32),
@@ -588,6 +763,8 @@ pub fn skeleton_with_mode(
     if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
         bail!("site latitude must be finite and within -90..=90, got {lat}");
     }
+    // ponytail: NetCDF/HDF5 writes are serialized; split locks only if write throughput matters.
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f = netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
     f.add_attribute(SITE_KIND_ATTRIBUTE, kind.as_str())?;
 
@@ -678,7 +855,7 @@ pub fn fill(
             // **栅格值要乘 0.1，模块默认值不乘。** CoLM 从栅格读时自己会乘
             // （MOD_SingleSrfdata.F90:700 与 :2052 都是 `lakedepth * 0.1`），
             // 而从 site.nc 读时直接用 —— 所以写进 site.nc 的必须是乘过的。
-            // 回落用的 1.0 是模块默认值（:47），它本来就是最终量纲，不能再乘。
+            // 回落用的 1.0 是模块默认值（:41），它本来就是最终量纲，不能再乘。
             point_f64(&r.join("lake_depth.nc"), "lake_depth", lon, lat)
                 .ok()
                 .map(|v| v * 0.1),
@@ -709,6 +886,8 @@ pub fn fill(
             )
         })?;
 
+    // ponytail: NetCDF/HDF5 writes are serialized; split locks only if write throughput matters.
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f =
         netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
 
@@ -772,7 +951,7 @@ pub fn fill(
             elev,
             "rawdata raster",
             0.0,
-            "MOD_SingleSrfdata.F90:87 module default",
+            "MOD_SingleSrfdata.F90:79 module default",
         ),
         (
             "lakedepth",
@@ -782,7 +961,7 @@ pub fn fill(
             "rawdata lake_depth.nc at this site, x0.1 as MOD_SingleSrfdata.F90:700/:2052 do \
              when they read this same raster",
             1.0,
-            "MOD_SingleSrfdata.F90:47 module default",
+            "MOD_SingleSrfdata.F90:41 module default",
         ),
         (
             "elvstd",
@@ -791,7 +970,7 @@ pub fn fill(
             elvstd,
             "rawdata raster",
             0.0,
-            "MOD_SingleSrfdata.F90:88 module default",
+            "MOD_SingleSrfdata.F90:80 module default",
         ),
         (
             "sloperatio",
@@ -800,7 +979,7 @@ pub fn fill(
             slope,
             "rawdata raster",
             0.0,
-            "MOD_SingleSrfdata.F90:89 module default",
+            "MOD_SingleSrfdata.F90:81 module default",
         ),
     ] {
         let (v, src) = resolve(site, raster, Some(fallback)).expect("has a fallback");
@@ -833,7 +1012,7 @@ pub fn fill(
                      CoLM itself no longer consults this table once canopy_height is in \
                      the file (it reads the value straight from site.nc), but the table is \
                      still compiled in, same pattern as lakedepth's \
-                     MOD_SingleSrfdata.F90:47 module default"
+                     MOD_SingleSrfdata.F90:41 module default"
                 ),
             )?;
             report.from_lookup.push("canopy_height".to_string());
@@ -902,7 +1081,7 @@ pub fn fill(
 /// `canopy_height` 一旦在文件里，`MOD_SingleSrfdata.F90:442/456` 直接
 /// `ncio_read_serial` 读那个值，压根不碰这张表。但表里的值仍然编译在
 /// CoLM 里，可以当有依据的默认写进 site.nc——与 `lakedepth` 走
-/// `MOD_SingleSrfdata.F90:47 module default` 是同一个模式。
+/// `MOD_SingleSrfdata.F90:41 module default` 是同一个模式。
 ///
 /// **只有这一张表被用上。** `MOD_Const_LC.F90` 紧挨着还有 `hbot0_igbp`
 /// （冠层底高）与 `sai0_igbp`（茎面积指数），逐条查过
@@ -1274,6 +1453,8 @@ pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
         return Ok(report);
     }
 
+    // ponytail: NetCDF/HDF5 writes are serialized; split locks only if write throughput matters.
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f =
         netcdf::append(dst).with_context(|| format!("cannot append to {}", dst.display()))?;
     if let Some(h) = elevation {
@@ -1501,8 +1682,8 @@ pub struct UrbanReport {
     /// 写进 site.nc 的土壤变量名，按 `SITE_VARS` 的顺序。
     pub soil_vars: Vec<String>,
     /// 第二张预抽表命中的站点名。**`None` 表示这个站点不在表里** —— 那时
-    /// `LCZ_DOM` / `LUCY_ID` / 四个反照率 / `lakedepth` / `elvstd` /
-    /// `sloperatio` / `TREE_LAI` 一个都没写，CoLM 会去开 `urban_type/`、
+    /// `resident_population_density` / `LCZ_DOM` / `LUCY_ID` / 四个反照率 /
+    /// `lakedepth` / `elvstd` / `sloperatio` / `TREE_LAI` 一个都没写，CoLM 会去开 `urban/`、`urban_type/`、
     /// `urban_lai_500m/` 的 5x5 瓦片与三个全球栅格，所以那样的算例仍然
     /// 需要 `--rawdata`。
     pub extra_site: Option<&'static str>,
@@ -1517,6 +1698,11 @@ impl UrbanReport {
     /// 够了，会让 mksrfdata 在另一张缺的那个栅格上 `CoLM_stop` ——
     /// 而那时错误信息说的是「文件打不开」，不是「这个站点不在表里」。
     pub fn needs_no_rawdata(&self) -> bool {
-        self.soil_site.is_some() && self.extra_site.is_some()
+        self.soil_site.is_some()
+            && self.extra_site.is_some()
+            && self
+                .extra_vars
+                .iter()
+                .any(|name| name == "resident_population_density")
     }
 }

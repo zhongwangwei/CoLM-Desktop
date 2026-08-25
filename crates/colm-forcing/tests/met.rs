@@ -7,6 +7,10 @@ use std::path::PathBuf;
 
 use colm_forcing::met::summarize;
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 /// 强迫场数据的位置。缺失时测试**失败**而不是跳过 ——
 /// 跳过会被读成通过，这个仓库栽过一次。
 fn forcing() -> PathBuf {
@@ -51,6 +55,12 @@ fn the_three_heights_are_read_separately() {
     );
     assert_eq!(m.height_t, m.height_q);
     assert_ne!(m.height_v, m.height_t);
+}
+
+#[test]
+fn urban_plumber_measurement_height_fills_all_three_forcing_heights() {
+    let m = summarize(&repo_root().join("examples/Forcing/AU-Preston_metforcing_v1.nc")).unwrap();
+    assert_eq!((m.height_v, m.height_t, m.height_q), (40.0, 40.0, 40.0));
 }
 
 #[test]

@@ -60,15 +60,27 @@ pub fn summarize(file: &Path) -> Result<MetSummary> {
         _ => None,
     });
 
+    // Urban-PLUMBER publishes one tower measurement height instead of the
+    // three PLUMBER2 reference_height_* scalars. It is the observation level
+    // for wind, temperature, and humidity, so use it only for missing values;
+    // source-specific reference heights still win.
+    let measurement_height = scalar("measurement_height_above_ground");
+
     Ok(MetSummary {
         start: parse_units_start(&time_units)?,
         time_units,
         steps: t.len(),
         step_seconds,
         step_uniform,
-        height_v: scalar("reference_height_v").unwrap_or(f64::NAN),
-        height_t: scalar("reference_height_t").unwrap_or(f64::NAN),
-        height_q: scalar("reference_height_q").unwrap_or(f64::NAN),
+        height_v: scalar("reference_height_v")
+            .or(measurement_height)
+            .unwrap_or(f64::NAN),
+        height_t: scalar("reference_height_t")
+            .or(measurement_height)
+            .unwrap_or(f64::NAN),
+        height_q: scalar("reference_height_q")
+            .or(measurement_height)
+            .unwrap_or(f64::NAN),
         variables,
         time_shown_in,
     })

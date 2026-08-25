@@ -103,11 +103,80 @@ fn a_switch_the_gate_table_does_not_know_says_so() {
 
 #[test]
 fn an_expression_we_do_not_understand_is_not_guessed() {
-    // 只认 `DEF_X` 与 `.not.DEF_X`。别的形状返回 None，由上层报
-    // 「需要人工判断」—— 给一个可能反了的结论比不给更糟。
-    let t = |_: &str| true;
+    // 逻辑组合来自生成器，可以直接求；数值比较仍不猜。
+    let t = |name: &str| name == "DEF_USE_BGC" || name == "DEF_USE_SNICAR";
     assert_eq!(eval("DEF_USE_SNICAR", &t), Some(true));
     assert_eq!(eval(".not.DEF_USE_SNICAR", &t), Some(false));
-    assert_eq!(eval("DEF_A .and. DEF_B", &t), None);
+    assert_eq!(eval(".not.(DEF_USE_NITRIF)", &t), Some(true));
+    assert_eq!(
+        eval("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)", &t),
+        Some(false)
+    );
+    assert_eq!(eval("(DEF_USE_BGC) .or. (DEF_USE_NITRIF)", &t), Some(true));
+    assert_eq!(eval("DEF_DA_ENS_NUM > 1", &t), None);
     assert_eq!(eval("DEF_NOT_A_REAL_FIELD", &t), None, "不认识的字段不猜");
+}
+
+#[test]
+fn wetwat_is_writable_for_static_and_dynamic_wetland_cases() {
+    if !have_kernel("default") {
+        return;
+    }
+    for enabled in [false, true] {
+        let text = format!(
+            "&nl_colm\n DEF_USE_Dynamic_Wetland = {}\n/\n",
+            if enabled { ".true." } else { ".false." }
+        );
+        let vars = hist_vars(text, kernel("default")).expect("hist vars");
+        let wetwat = vars.iter().find(|v| v.name == "wetwat").expect("wetwat");
+        assert_eq!(wetwat.writable, Some(true), "enabled={enabled}");
+    }
+}
+
+#[test]
+fn tracer_configuration_lists_methane_history_variables() {
+    if !have_kernel("default") {
+        return;
+    }
+    let vars = hist_vars(
+        "&nl_colm\n DEF_USE_TRACER = .true.\n/\n".into(),
+        kernel("default"),
+    )
+    .expect("hist vars");
+    let methane = vars
+        .iter()
+        .find(|v| v.name == "methane_surf_flux_tot")
+        .expect("methane variable from TRACER writer");
+    assert!(
+        !methane.settable,
+        "CH4 history is controlled outside DEF_hist_vars"
+    );
+}
+
+#[test]
+fn default_configuration_still_matches_the_measured_history_catalog() {
+    if !have_kernel("default") {
+        return;
+    }
+    let vars = hist_vars("&nl_colm\n/\n".into(), kernel("default")).expect("hist vars");
+    let ready = vars
+        .iter()
+        .filter(|var| var.on && var.writable == Some(true))
+        .count();
+    let selected = colm_kernel::Kernel::open(std::path::Path::new(&kernel("default")))
+        .expect("default kernel");
+    let macros = selected
+        .manifest
+        .macros
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let unconditional = colm_hist::unconditional(&macros);
+    let ready_without_runtime_gate = vars
+        .iter()
+        .filter(|var| var.on && unconditional.contains(var.name.as_str()))
+        .count();
+    assert_eq!(ready_without_runtime_gate, 114);
+    assert_eq!(ready - ready_without_runtime_gate, 5);
+    assert_eq!(ready, 119);
 }

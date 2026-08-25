@@ -8,8 +8,15 @@ export function appendLogText(text, lines) {
   return out;
 }
 
+export function acceptsRunEvent(targets, dir, discoverTargets, activeRunId, eventRunId) {
+  return Boolean(dir && eventRunId)
+    && (!activeRunId || activeRunId === eventRunId)
+    && (discoverTargets || targets.includes(dir));
+}
+
 export function progressText(p, stateLabel = '运行中') {
   if (stateLabel === '已完成') return '完成';
+  if (stateLabel === '已取消') return '已取消';
   if (stateLabel === '失败') return p.reason ? `失败：${p.reason}` : '失败';
   if (p.step > 0) {
     const spin = p.spinup ? `预热 ${p.spinup[0]}/${p.spinup[1]} 轮 · ` : '';

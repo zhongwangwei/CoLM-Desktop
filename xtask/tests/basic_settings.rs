@@ -112,6 +112,32 @@ fn the_left_workflow_connects_basic_and_process_substeps() {
 }
 
 #[test]
+fn site_specific_basic_pages_share_the_site_or_all_scope_picker() {
+    let params = std::fs::read_to_string(root().join("gui/dist/app/params.js")).expect("params.js");
+    for page in [
+        "basic-site",
+        "basic-surface",
+        "basic-initial",
+        "basic-forcing",
+    ] {
+        let line = params
+            .lines()
+            .find(|line| line.contains(&format!("id: '{page}'")))
+            .unwrap_or_else(|| panic!("missing {page}"));
+        assert!(
+            line.contains("scoped: true"),
+            "{page} 缺少逐站点 / 全部站点编辑范围"
+        );
+    }
+    assert!(params.contains("renderProcessPicker(basic, parameterCases)"));
+    let grid = params
+        .lines()
+        .find(|line| line.contains("id: 'basic-grid'"))
+        .expect("basic-grid");
+    assert!(!grid.contains("scoped: true"), "网格与并行仍应按整批设置");
+}
+
+#[test]
 fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
     let html = std::fs::read_to_string(root().join("gui/dist/index.html")).expect("index.html");
     let start = html.find(r#"data-step="params""#).expect("params page");
@@ -161,6 +187,10 @@ fn timing_and_moved_sections_no_longer_live_on_the_parameter_page() {
 
 #[test]
 fn conditional_processes_and_spinup_are_not_shown_or_saved_prematurely() {
+    let cli = std::fs::read_to_string(root().join("crates/colm-cli/src/main.rs")).unwrap();
+    assert!(cli.contains("默认 1 年 x 1 遍"));
+    assert!(!cli.contains("默认 1 年 x 10 遍"));
+
     let params = std::fs::read_to_string(root().join("gui/dist/app/params.js")).unwrap();
     assert!(params.contains("id: 'params-eco'"));
     assert!(
@@ -241,4 +271,17 @@ fn conditional_processes_and_spinup_are_not_shown_or_saved_prematurely() {
     );
     assert!(runner.contains("100 * p.step / p.total_steps"));
     assert!(!runner.contains("Math.log10"), "进度仍在用对数猜测");
+}
+
+#[test]
+fn methane_provider_registration_is_not_guarded_by_the_removed_bgc_macro() {
+    let providers = std::fs::read_to_string(
+        root().join("vendor/CoLM202X/include/tracer_lifecycle_providers.inc"),
+    )
+    .unwrap();
+    assert!(providers.contains("ch4_register_tracer_provider"));
+    assert!(
+        !providers.contains("#ifdef BGC"),
+        "BGC is a runtime switch; this guard builds CH4 but omits its provider"
+    );
 }

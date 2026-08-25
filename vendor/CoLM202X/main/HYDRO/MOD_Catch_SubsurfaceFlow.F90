@@ -16,6 +16,7 @@ MODULE MOD_Catch_SubsurfaceFlow
 !-------------------------------------------------------------------------------------
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_TUNING_SOIL_ICE_IMPEDANCE
    USE MOD_DataType
    USE MOD_Catch_HillslopeNetwork
    IMPLICIT NONE
@@ -27,8 +28,6 @@ MODULE MOD_Catch_SubsurfaceFlow
    real(r8), allocatable :: lakedepth_elm(:)
    real(r8), allocatable :: riverdpth_elm(:)
    real(r8), allocatable :: wdsrf_elm    (:)
-
-   real(r8), parameter :: e_ice  = 6.0   ! soil ice impedance factor
 
    ! anisotropy ratio of lateral/vertical hydraulic conductivity (unitless)
    ! for USDA soil texture class:
@@ -331,7 +330,7 @@ CONTAINS
                      IF (patchtype(ipatch) <= 2) THEN
                         DO ilev = 1, nl_soil
                            icefrac = min(1., wice_soisno(ilev,ipatch)/denice/dz_soi(ilev)/porsl(ilev,ipatch))
-                           imped   = 10.**(-e_ice*icefrac)
+                           imped   = 10.**(-DEF_TUNING_SOIL_ICE_IMPEDANCE*icefrac)
                            Kl_h(i) = Kl_h(i) + hru_patch%subfrc(ipatch) * raniso(soiltext(ipatch)) &
                               * hksati(ilev,ipatch)/1.0e3 * imped * dz_soi(ilev)/zi_soi(nl_soil)
                         ENDDO

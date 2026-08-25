@@ -11,12 +11,17 @@
 //! 而失效 —— 我们要测的是判官的逻辑，不是某份数据。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use oracle::judge::compare;
 
 /// 每个测试用独立目录，避免并行时互相踩。
 fn workdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("oracle-judge-{name}"));
+    let d = std::env::temp_dir().join(format!(
+        "oracle-judge-{name}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("create workdir");
     d
@@ -27,6 +32,7 @@ fn workdir(name: &str) -> PathBuf {
 /// `patch` 长度刻意为 1，与真实输出一致 —— 正因为它是 1，维度置换才不会
 /// 改变扁平化后的元素顺序，这也正是维度比较必须存在的原因。
 fn write_file(path: &Path, opts: Opts) {
+    let _guard = netcdf_write_lock().lock().unwrap();
     let mut f = netcdf::create(path).expect("create");
     f.add_dimension("time", 3).unwrap();
     f.add_dimension("patch", 1).unwrap();
@@ -61,6 +67,11 @@ fn write_file(path: &Path, opts: Opts) {
         e.put_values(&[0.0f64, 0.0, 0.0], netcdf::Extents::All)
             .unwrap();
     }
+}
+
+fn netcdf_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Clone, Copy)]

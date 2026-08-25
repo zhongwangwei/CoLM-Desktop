@@ -5,6 +5,147 @@
 const ZH_EN = [
   // Complete sentences come before short labels. This keeps prose grammatical and
   // prevents a label such as “运行” from creating half-translated paragraphs.
+  ['先选择计算资源；本地运行已可用，服务器运行将在后续版本开放。', 'Choose compute resources first. Local execution is available; server execution will be added in a future release.'],
+  ['在本机创建算例、运行 CoLM 内核并查看结果。', 'Create cases, run CoLM kernels, and inspect results on this computer.'],
+  ['用于未来接入远程队列、HPC 和服务器端批量任务。', 'Reserved for future remote queues, HPC, and server-side batch jobs.'],
+  ['选择运行方式', 'Choose run mode'],
+  ['运行方式', 'Run mode'],
+  ['本地运行', 'Local run'],
+  ['服务器运行', 'Server run'],
+  ['进入本地工作台 →', 'Open local workspace →'],
+  ['H₂¹⁸O / HDO 水循环同位素', 'H₂¹⁸O / HDO water-cycle isotopes'],
+  ['LULCC 不支持 USGS 次网格', 'LULCC does not support the USGS subgrid'],
+  ['LULCC 不能与 BGC 同时开启', 'LULCC cannot be enabled together with BGC'],
+  ['纯城市单点不运行 BGC', 'Pure urban SinglePoint does not run BGC'],
+  ['本页已开启 URBAN', 'URBAN is enabled on this page'],
+  ['城市单点暂不支持甲烷示踪', 'Urban SinglePoint does not support methane tracing yet'],
+  ['局地气候区（LCZ）列', 'Local Climate Zone (LCZ) column'],
+  ['自动推断', 'Auto-detect'],
+  ['需填写', 'Required'],
+  ['请选择时间列', 'Select a time column'],
+  ['正在按站点拆分 CSV/TXT…', 'Splitting CSV/TXT by site…'],
+  ['缺测/不合格', 'Missing / invalid'],
+  ['QC 剔除', 'QC rejected'],
+  ['产物', 'Output'],
+  ['各站点按格点共享缓存并依次提交；CDS 服务器可能排队，长序列请等待，不要重复点击。', 'Sites share cache by grid cell and are submitted one by one; CDS servers may queue requests, so wait for long series and do not click repeatedly.'],
+  ['CDS API 配置', 'CDS API configuration'],
+  ['步长与观测高度会写进产物；模拟用哪一段时间范围仍以强迫场', 'The time step and observation heights are written to the output; the simulation period still follows the forcing'],
+  ['覆盖范围为准，由建例时自动确定，不需要手动填写。', 'coverage and is determined automatically during case creation; no manual entry is needed.'],
+  ['先把源单位转换为 CoLM 标准单位并做宽松物理范围 QC；不合格值按缺测处理。', 'First convert source units to CoLM standard units and apply broad physical-range QC; invalid values are treated as missing.'],
+  ['短缺口按变量类型插值；长缺口在把站点时间换算到 UTC 后，', 'Short gaps are interpolated by variable type; long gaps are handled after converting site time to UTC,'],
+  ['QC 范围：气温 180–350 K、比湿 0–0.1 kg/kg、气压 30–110 kPa、降水 0–0.1 kg/m²/s、风速/分量不超过 100 m/s、短波 0–1800 W/m²、长波 0–800 W/m²。', 'QC ranges: air temperature 180–350 K, specific humidity 0–0.1 kg/kg, pressure 30–110 kPa, precipitation 0–0.1 kg/m²/s, wind speed/components up to 100 m/s, shortwave 0–1800 W/m², longwave 0–800 W/m².'],
+  ['短波辐射太阳正午确认 UTC', 'Shortwave solar noon confirms UTC'],
+  ['短波辐射太阳正午推断', 'Shortwave solar-noon inference'],
+  ['高', 'High'],
+  ['中', 'Medium'],
+  ['低', 'Low'],
+  ['无可用太阳正午证据', 'No usable solar-noon evidence'],
+  ['时区证据', 'Timezone evidence'],
+  ['缺测/不合格总数', 'Total missing / invalid'],
+  ['其中 QC 剔除', 'QC rejected among them'],
+  ['可选择已有 ERA5-Land NetCDF 缓存；也可用本机 CDS API 一次下载该站点完整时间段。CDS 服务器可能排队，长序列请等待且不要重复点击。下载前需配置 ~/.cdsapirc 并接受数据许可。', 'Choose an existing ERA5-Land NetCDF cache, or use the local CDS API to download the full site period in one request. CDS servers may queue requests; wait for long series and do not click repeatedly. Configure ~/.cdsapirc and accept the data license before downloading.'],
+  ['CDS 排队或下载中…', 'CDS queued or downloading…'],
+  ['修复完成：', 'Repair completed: '],
+  ['先确认槽位映射，再诊断缺测', 'Confirm slot mapping before diagnosing gaps'],
+  ['先补齐所有已选变量的源单位', 'Fill in source units for all selected variables first'],
+  ['缺测与基础 QC 均通过', 'Missing-data and basic QC checks passed'],
+  ['ERA5-Land 请求已提交；CDS 服务器可能排队，长时间序列请耐心等待…', 'ERA5-Land request submitted; CDS servers may queue it, so wait patiently for long time series…'],
+  ['ERA5-Land 对应格点已缓存，可以生成修复文件', 'The matching ERA5-Land grid cell is cached; a repaired file can be generated'],
+  ['先诊断缺测并填写产物目录', 'Diagnose gaps and fill the output directory first'],
+  ['先生成站点文件', 'Generate the site file first'],
+  ['缺测与 QC 修复完成，逐时来源已写入 *_gapfill_qc', 'Gap and QC repair completed; hourly sources were written to *_gapfill_qc'],
+  ['先在“站点数据”子步骤填写站点名并生成站点文件', 'Enter the site name and generate the site file in the “Site data” substep first'],
+  ['先填写强迫场产物目录', 'Fill the forcing-output directory first'],
+  ['先生成站点文件，强迫场将沿用同一个站点名。', 'Generate the site file first; forcing will use the same site name.'],
+  ['已自动写入基本设定的强迫场目录，并与刚生成的站点重新配对。', 'The forcing directory was written into Basic settings and paired with the newly generated site.'],
+  ['先在“站点数据”子步骤生成站点文件', 'Generate the site file in the “Site data” substep first'],
+  ['转换已写出，但重新扫描未能把站点与强迫场配对；请检查强迫场目录', 'Conversion was written, but rescanning could not pair the site with forcing; check the forcing directory'],
+  ['由模型内置输出选择器控制', 'Controlled by the model built-in output selector'],
+  ['由甲烷输出选择器控制', 'Controlled by the methane output selector'],
+  ['（当前值不满足约束）', '(current value violates constraints)'],
+  ['请先选择或安装 CoLM 内核', 'Select or install a CoLM kernel first'],
+  ['（空）', '(empty)'],
+  ['当前文件未设置，显示代码默认值', 'The current file does not set this; showing code default'],
+  ['所选站点的显式覆盖不同；修改后会统一为同一个值。', 'Selected sites have different explicit overrides; editing makes them equal.'],
+  ['所选算例的内置方案不同，因此默认值不同。', 'Built-in defaults differ because the selected cases use different schemes.'],
+  ['恢复内置值', 'Use built-in'],
+  ['植被功能型', 'Plant functional type'],
+  ['由 DEF_USE_MEDLYNST 与 DEF_USE_WUEST 两个底层开关原子写入；两者都关闭时使用 Ball–Berry。', 'Written atomically through DEF_USE_MEDLYNST and DEF_USE_WUEST; Ball–Berry is used when both are off.'],
+  ['（请选择单个站点）', '(select one site)'],
+  ['这一批算例对该字段的适用条件不同；它只对其中一部分算例生效。', 'This batch has mixed applicability for this field; it affects only some cases.'],
+  ['已保存气孔导度方案', 'Stomatal-conductance scheme saved'],
+  ['请先在“修改站点”中选择一个站点', 'Choose a site in “Edit site” first'],
+  ['已校验臭氧数据，并启用臭氧胁迫与数据读取', 'Ozone data verified; ozone stress and data reading enabled'],
+  ['已校验并更换臭氧数据文件', 'Ozone data file verified and changed'],
+  ['没有有效配对样本', 'No valid paired samples'],
+  ['评估内容已更改，请重新运行评估。', 'Evaluation contents changed; rerun evaluation.'],
+  ['仅 QC=0 实测值', 'Observed values with QC=0 only'],
+  ['无 QC 字段；使用全部有限值', 'No QC field; using all finite values'],
+  ['当前分析范围还没有可用的评估目录。', 'The current analysis scope has no usable evaluation directory yet.'],
+  ['请至少选择一个当前站点可用的评估变量', 'Select at least one evaluation variable available for the current site'],
+  ['仅使用 QC=0 的实测观测', 'Use only observed values with QC=0'],
+  ['观测没有 QC 字段，使用全部有限值', 'The observation has no QC field; using all finite values'],
+  ['请至少选择一个批量评估变量', 'Select at least one batch-evaluation variable'],
+  ['不可用', 'Unavailable'],
+  ['未评估', 'Not evaluated'],
+  ['按 Rnet − Qh − Qle − Qg 计算。', 'Calculated as Rnet − Qh − Qle − Qg.'],
+  ['越界', 'Out of range'],
+  ['# CoLM Desktop 结果分析报告', '# CoLM Desktop Results Analysis Report'],
+  ['## 算例', '## Cases'],
+  ['| 站点 | 状态 | 分析范围 | History | 观测 |', '| Site | Status | Analysis scope | History | Observation |'],
+  ['## 未完成项', '## Incomplete items'],
+  ['否', 'No'],
+  ['未完成项', 'Incomplete items'],
+  ['当前环境不支持打印。', 'Printing is unavailable in the current environment.'],
+  ['已打开打印窗口，请选择“另存为 PDF”。', 'Print dialog opened; choose “Save as PDF”.'],
+  ['CoLM Desktop 结果分析报告', 'CoLM Desktop Results Analysis Report'],
+  ['线性', 'Linear'],
+  ['对数', 'Log'],
+  ['当前没有已审核的普通模式采样范围；请切换到专家模式并显式填写有限范围。', 'There are no reviewed normal-mode sampling ranges; switch to expert mode and explicitly enter finite ranges.'],
+  ['当前分析范围没有所有站点共同的 history 时间序列变量。', 'The current analysis scope has no history time-series variable common to all sites.'],
+  ['请先创建调优 Study。', 'Create a tuning Study first.'],
+  ['变量映射、时间轴与高度', 'Variable mapping, time axis, and heights'],
+  ['就绪检查', 'Readiness check'],
+  ['核对产物并交给基本设定', 'Check outputs and hand off to Basic settings'],
+  ['城市冠层与人为热', 'Urban canopy and anthropogenic heat'],
+  ['OAT / LHS 参数扰动', 'OAT / LHS parameter perturbation'],
+  ['差分进化与目标函数', 'Differential evolution and objective function'],
+  ['不手动指定 · 由 rawdata 提供', 'Do not specify manually · provided by rawdata'],
+  ['局地气候区（LCZ）', 'Local Climate Zone (LCZ)'],
+  ['经度必须在 -180 到 180 之间', 'Longitude must be between -180 and 180'],
+  ['纬度必须在 -90 到 90 之间', 'Latitude must be between -90 and 90'],
+  ['先选择站点数据目录', 'Choose the site-data directory first'],
+  ['可以生成结构文件；生成后会继续检查当前模式的完整运行契约。', 'A structural file can be generated; after generation the full run contract for the current mode will still be checked.'],
+  ['请选择一份 CSV / TXT / TSV；软件会按站点列拆分并批量生成站点文件', 'Choose a CSV / TXT / TSV file; the software will split by site column and generate site files in batch'],
+  ['可独立运行', 'Runnable by itself'],
+  ['站点文件自身满足当前模式，不需要 CoLM 全球 rawdata。', 'The site file satisfies the current mode by itself; CoLM global rawdata is not required.'],
+  ['可随 rawdata 运行', 'Runnable with rawdata'],
+  ['尚不可运行', 'Not runnable yet'],
+  ['生成结果与运行契约', 'Generated output and run contract'],
+  ['模式', 'Mode'],
+  ['结构字段', 'Structural fields'],
+  ['有依据的查表值', 'Evidence-backed lookup values'],
+  ['查表值不是站点实测；只有对应方案确有模型查表依据时才写入。', 'Lookup values are not site observations; they are written only when the selected scheme has a model-backed lookup basis.'],
+  ['标称或模块默认值', 'Nominal or module-default values'],
+  ['这些值不是本站实测值；结果解释时必须保留这一数据来源限制。', 'These values are not site observations; keep this data-source limitation when interpreting results.'],
+  ['仍需外部数据', 'External data still required'],
+  ['清单来自 mksrfdata 的模式契约，不再只检查 12 个结构字段。', 'The list comes from the mksrfdata mode contract and no longer checks only the 12 structural fields.'],
+  ['当前站点文件已经自包含。', 'The current site file is already self-contained.'],
+  ['站点文件', 'Site file'],
+  ['未生成', 'Not generated'],
+  ['已匹配标准文件', 'Matched standard file'],
+  ['未准备', 'Not ready'],
+  ['已选择', 'Selected'],
+  ['未选择', 'Not selected'],
+  ['先生成一份可独立运行或可随 rawdata 运行的站点文件。', 'Generate a site file that is runnable by itself or runnable with rawdata first.'],
+  ['站点数据已就绪；还需要在“强迫场”子步骤完成转换。', 'Site data are ready; conversion must still be completed in the “Forcing” substep.'],
+  ['交接前重新检查失败：仍有站点或强迫场没有就绪', 'Pre-handoff recheck failed: some site or forcing data are still not ready'],
+  ['交接前重新检查失败：站点与强迫场未配对', 'Pre-handoff recheck failed: site and forcing are not paired'],
+  ['已经有了', 'Already exists'],
+  ['这程序能不能用', 'Can this program be used?'],
+  ['那是安装目录', 'That is the installation directory'],
+  ['我没有看到 spin-up 的选项', 'I do not see the spin-up option'],
+  ['预热期不写输出（MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN）；', 'Spin-up writes no output (MOD_Hist.F90:235 returns when itstamp <= ptstamp);'],
   ['选择单站 NetCDF，或包含单站或多站数据的 CSV / TXT / TSV。', 'Choose a single-site NetCDF or a CSV / TXT / TSV containing one or multiple sites.'],
   ['表格会按站点拆分；随后统一确认八个变量槽位、单位、时间轴和 V/T/Q 观测高度。', 'Tables are split by site; then confirm the eight variable slots, units, time axis, and V/T/Q observation heights.'],
   ['一份表格可以只含一个站点，也可以用站点列保存多个站点。', 'A table may contain one site or use a site column for multiple sites.'],
@@ -54,6 +195,26 @@ const ZH_EN = [
   ['（没有 / 不使用）', '(none / unused)'],
   ['<站点名>_Met.nc', '<site-name>_Met.nc'],
   ['…/Met/AT-Neu.nc 或 stations.csv', '…/Met/AT-Neu.nc or stations.csv'],
+  ['选择示踪剂类型', 'Choose tracer type'],
+  ['目前只开放甲烷 CH₄；其他类型保留入口但不可选。', 'Only methane CH₄ is available now; other tracer families are listed but disabled.'],
+  ['同位素 / 溶质 / 气体 / 颗粒示踪；当前仅开放甲烷', 'Isotope / solute / gas / particle tracers; methane is currently the only available option'],
+  ['水同位素', 'Water isotopes'],
+  ['甲烷 CH₄', 'Methane CH₄'],
+  ['甲烷总地表通量', 'Total surface methane flux'],
+  ['甲烷', 'Methane'],
+  ['湿地、土壤、湖泊甲烷产生/氧化/排放', 'Wetland, soil, and lake methane production / oxidation / emission'],
+  ['溶质', 'Solutes'],
+  ['水溶性示踪物', 'Water-soluble tracers'],
+  ['泥沙', 'Sediment'],
+  ['颗粒泥沙输移', 'Particle sediment transport'],
+  ['暂未开放', 'Not available yet'],
+  ['单点站点不可用；需要河道/流域输移链路', 'Unavailable for SinglePoint; requires the routing/watershed transport chain'],
+  ['甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例', 'Methane requires PFT or PC, BGC, and van Genuchten soil hydrology; this page writes the run parameters automatically.'],
+  ['甲烷示踪需要 PFT 或 PC 次网格', 'Methane tracing requires PFT or PC subgrid'],
+  ['甲烷示踪需要同时开启 BGC', 'Methane tracing also requires BGC'],
+  ['BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。', 'BGC/methane cases require a runtime-data directory; select runtime under Basic settings / Files and directories.'],
+  ['BGC/甲烷运行时目录缺少氮沉降数据：', 'The BGC/methane runtime directory is missing nitrogen-deposition data: '],
+  ['BGC/甲烷运行时目录缺少硝化数据：', 'The BGC/methane runtime directory is missing nitrification data: '],
   ['把任意站点的原始输入整理成 CoLM Desktop 可识别的数据集。', 'Prepare raw inputs from any site as a dataset recognized by CoLM Desktop.'],
   ['“文件已生成”和“当前模式可以运行”分别检查；缺少的科学数据不会用猜测掩盖。', 'File creation and run readiness for the current mode are checked separately; missing scientific data are never hidden by guesses.'],
   ['单站点可以手动填写；多站点直接导入一份带站点列的表格，不需要逐个填写身份与位置。', 'Enter one site manually, or import a table with a site column without entering each site identity and location separately.'],
@@ -75,7 +236,8 @@ const ZH_EN = [
   ['，可与站点文件自动配对。', ', so it can be paired with the site file automatically.'],
   ['（缺少站点实测变量时需要）', '(required when site measurements are missing)'],
   ['（站点文件有缺项时需要）', '(required when the site file has missing inputs)'],
-  ['城市过程还需要 runtime 数据。', 'Urban processes also require runtime data.'],
+  ['本次配置会读取外部过程数据；BGC 默认需要 runtime 中的氮沉降与硝化数据。', 'This configuration reads external process data; BGC requires nitrogen-deposition and nitrification data under runtime by default.'],
+  ['（URBAN / BGC）', '(URBAN / BGC)'],
   ['完整站点文件可留空', 'Leave blank for a complete site file'],
   ['（可选；确实知道时才填）', '(optional; enter only when known)'],
   ['（可选；不确定时由 rawdata 提供）', '(optional; use rawdata when uncertain)'],
@@ -96,7 +258,8 @@ const ZH_EN = [
   ['在基本设定中使用这些产物', 'Use these outputs in Basic settings'],
   ['留空 = 由 rawdata 提供', 'Leave blank = provided by rawdata'],
   ['版权所有：CoLM陆面模式开发团队，中山大学大气科学学院', 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU'],
-  ['开发与维护', 'Developed and maintained by'],
+  ['开发与维护团队', 'Development and maintenance team'],
+  ['联系人', 'Contact'],
   ['Zhongwang Wei (魏忠旺)', 'Zhongwang Wei'],
   ['版本', 'Version'],
   ['关闭', 'Close'],
@@ -116,7 +279,7 @@ const ZH_EN = [
   ['不填就让 CoLM 按自己的规则回落 ——', 'Leave it empty to use CoLM’s own fallback —'],
   ['写一个猜的值比不写更糟', 'a guessed value is worse than no value'],
   ['只有确实知道这个站点的地类时才填这一项；城市站点不受这条影响，', 'Only enter a class when it is known for this site. Urban sites are unaffected;'],
-  ['CoLM 会把地类强制成 13。', 'CoLM forces their land-cover class to 13.'],
+  ['CoLM 会按所选地类体系使用城市类型（IGBP 为 13，USGS 为 1）。', 'CoLM uses the urban class of the selected classification (13 for IGBP, 1 for USGS).'],
   ['写出一份新的', 'Create a new'],
   ['给了 rawdata 目录，能抽到的字段', 'When a rawdata directory is provided, available fields'],
   ['就从栅格抽；抽不到的（以及压根没给 rawdata 的全部）走标称假设 ——', 'come from rasters; unavailable fields (or all fields when rawdata is omitted) use nominal assumptions —'],
@@ -124,7 +287,7 @@ const ZH_EN = [
   ['站点、路径、预热和建例所需的数据设置都收在这里；', 'Site, path, spin-up, and case-creation data settings are collected here;'],
   ['过程参数留在下一步，避免同一个字段出现两次。', 'process parameters stay in the next step so each field appears only once.'],
   ['先选站点数据和算例根目录，再在同一页建算例。', 'Choose the site data and case root, then create cases on this page.'],
-  ['CN-Cng 自然站或 AU-Preston 城市站', 'CN-Cng natural site or AU-Preston urban site'],
+  ['CN-Cng 自然站、AT-Neu 甲烷站、US-Ne3 作物站或 AU-Preston 城市站', 'CN-Cng natural, AT-Neu methane, US-Ne3 crop, or AU-Preston urban site'],
   ['找', 'Find'],
   ['同目录约定下的强迫场和观测会一并匹配。', 'Forcing and observations following the sibling-directory convention are matched automatically.'],
   ['；同目录约定下的强迫场和观测会一并匹配。', '; forcing and observations following the sibling-directory convention are matched automatically.'],
@@ -135,8 +298,7 @@ const ZH_EN = [
   ['选择产物目录；上面“建算例”按钮会把选中的站点写到这里。', 'Choose the output directory; the “Create cases” button above writes the selected sites here.'],
   ['路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。', 'The path contains spaces, which CoLM shell commands split incorrectly. Choose a location without spaces.'],
   ['站点属性文件、经纬度和地表覆盖类型在建例时按站点自动写入，不在这里批量修改。', 'The site-properties file, coordinates, and land-cover class are written per site when cases are created and cannot be batch-edited here.'],
-  ['自然站从站点文件的', 'Natural sites read the land-cover class from'],
-  ['读取地表覆盖类型；城市站固定为 IGBP 13。下面只保留可调整的数据来源开关。', '; urban sites always use IGBP 13. Only adjustable data-source switches are shown below.'],
+  ['自然站从站点文件读取地表覆盖类型；城市站使用所选地类体系的城市类型（IGBP 为 13，USGS 为 1）。下面只保留可调整的数据来源开关。', 'Natural sites read their land-cover class from the site file; urban sites use the urban class of the selected classification (13 for IGBP, 1 for USGS). Only adjustable data-source switches are shown below.'],
   ['单点内核本身是串行的；这里控制批量运行时同时启动多少个算例，每个算例使用一个 CPU 核。', 'The single-point kernel is serial. This controls how many cases run concurrently; each case uses one CPU core.'],
   ['按当前配置显示水热、生态生地化、河道水库、数据同化、示踪剂和城市过程；', 'Show hydrothermal, ecological and biogeochemical, routing and reservoir, data-assimilation, tracer, and urban processes for the current configuration;'],
   ['没有启用或没有可设置项的分栏会自动隐藏。', 'sections that are disabled or have no configurable fields are hidden automatically.'],
@@ -149,6 +311,9 @@ const ZH_EN = [
   ['选择需要写入 history 的变量；默认收起，避免把运行按钮推到页面底部。', 'Choose variables to write to history. This section is collapsed by default so the run controls stay near the top.'],
   ['画模型输出，或与观测配对算指标。', 'Plot model output or pair it with observations to calculate metrics.'],
   ['第 5 步 · 结果分析', 'Step 5 · Results analysis'],
+  ['第 6 步 · 不确定性分析', 'Step 6 · Uncertainty analysis'],
+  ['第 7 步 · 参数调优', 'Step 7 · Parameter tuning'],
+  ['第 8 步 · 报告与导出', 'Step 8 · Reports and export'],
   ['结果分析', 'Results analysis'],
   ['浏览、评估与诊断', 'Browse, evaluate, and diagnose'],
   ['本次站点与产物状态', 'Sites and outputs in this task'],
@@ -271,6 +436,8 @@ const ZH_EN = [
   ['垂直剖面', 'Vertical profile'],
   ['PFT / PC / 分类维度', 'PFT / PC / category dimensions'],
   ['标量', 'Scalar'],
+  ['起始（UTC）', 'Start (UTC)'],
+  ['结束（UTC）', 'End (UTC)'],
   ['起始', 'Start'],
   ['结束', 'End'],
   ['绘制', 'Plot'],
@@ -293,6 +460,9 @@ const ZH_EN = [
   ['过程诊断', 'Process diagnostics'],
   ['运行诊断', 'Run diagnostics'],
   ['报告与导出', 'Reports and export'],
+  ['评估后自动显示第一项；也可点击指标表变量切换，或手动刷新。', 'The first item is plotted after evaluation; click a metric-table variable to switch, or refresh manually.'],
+  ['显示 / 刷新图形', 'Show / refresh charts'],
+  ['请先运行评估并选择一个变量。', 'Run the evaluation and select a variable first.'],
   ['格式', 'Format'],
   ['指标', 'Metrics'],
   ['失败与缺失', 'Failures and missing data'],
@@ -324,6 +494,8 @@ const ZH_EN = [
   ['运行 mksrfdata', 'Run mksrfdata'],
   ['运行 mkinidata', 'Run mkinidata'],
   ['运行 colm', 'Run colm'],
+  ['取消运行', 'Cancel run'],
+  ['正在取消运行…', 'Cancelling runs…'],
   ['单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。', 'A single-stage button explicitly reruns that stage; “Run all” still skips stages whose input fingerprints are unchanged.'],
   ['评估全部已跑算例', 'Evaluate all completed cases'],
   ['示踪剂', 'Tracer'],
@@ -351,18 +523,22 @@ const ZH_EN = [
   ['17 类地表覆盖', '17-class land cover'],
   ['植物功能型', 'Plant functional types'],
   ['植物群落', 'Plant communities'],
-  ['默认土壤水力方案', 'Default soil-hydraulics scheme'],
-  ['Campbell 土壤水力', 'Campbell soil hydraulics'],
-  ['城市冠层与人为热', 'Urban canopy and anthropogenic heat'],
+  ['van Genuchten–Mualem（Ippisch 2006）', 'van Genuchten–Mualem (Ippisch 2006)'],
+  ['启用 van Genuchten–Mualem 土壤水力模型', 'Enable the van Genuchten–Mualem soil-hydraulics model'],
+  ['Campbell（1974）', 'Campbell (1974)'],
+  ['启用 Campbell 土壤水力模型', 'Enable the Campbell soil-hydraulics model'],
+  ['城市冠层与人为热；不锁定次网格方案', 'Urban canopy and anthropogenic heat; does not lock the subgrid scheme'],
   ['土地利用变化', 'Land-use change'],
   ['碳氮循环', 'Carbon and nitrogen cycling'],
   ['作物模型', 'Crop model'],
-  ['同位素 / 溶质示踪', 'Isotope / solute tracing'],
   ['逐变量范围检查', 'Per-variable range checks'],
   ['详细诊断输出', 'Detailed diagnostic output'],
   ['地表数据诊断', 'Surface-data diagnostics'],
   ['单点站点会自动关闭地表数据诊断', 'Single-point runs automatically disable surface-data diagnostics'],
   ['CROP 仍决定数组尺寸，需要 CROP-enabled 内核；同时需要 BGC', 'CROP still determines array sizes, so it needs a CROP-enabled kernel as well as BGC'],
+  ['城市单点暂不支持 CROP', 'Urban SinglePoint does not support CROP yet'],
+  ['CROP 需要同时开启 BGC', 'CROP requires BGC to be enabled'],
+  ['用自带的示例站点（作物站 US-Ne3）', 'Use bundled example site (crop US-Ne3)'],
   ['ⓘ 站点文件最好提供 pfttyp 与 pctpfts；缺少时会回落到 rawdata/plant_15s', 'ⓘ Site files should provide pfttyp and pctpfts; missing values fall back to rawdata/plant_15s'],
   ['ⓘ 站点数据使用 IGBP_classification', 'ⓘ Site data uses IGBP_classification'],
   ['ⓘ 必须选择一种次网格方案', 'ⓘ Choose a subgrid scheme'],
@@ -590,13 +766,21 @@ const ZH_EN = [
   ['没有 IPC 后端 —— 这个页面不在 Tauri 里运行', 'No IPC backend—this page is not running inside Tauri'],
   ['后端出错：', 'Backend error: '],
   ['先在文件与目录建一个算例', 'Create a case under Files & directories first'],
+  ['先运行完成至少一个算例', 'Complete at least one case run first'],
   ['绘图与评估', 'Plotting & evaluation'],
   ['当前配置没有这一步：', 'This configuration does not include this step: '],
   ['已选 ', 'Selected '],
   ['（没有强迫场，跑不了）', ' (no forcing; cannot run)'],
   ['建算例：', 'Create case: '],
-  ['专家选项还在规划中。你后续提供的专家内容会放在这里；当前不会额外改写任何模型参数。',
-    'Expert options are being planned. The expert content you provide later will appear here; enabling this mode currently changes no model parameters.'],
+  ['专家模式会在各过程分栏显示不常用的 case.nml 参数和外部过程参数文件；多站点时先用下拉菜单选择要修改的站点。',
+    'Expert mode shows less-common case.nml fields and external process-parameter files in each process section; for multiple sites, choose the site to edit first.'],
+  ['这里只列 CoLM 运行时真正读取的参数；数组尺寸、物理常数等编译期常量不会伪装成可编辑项。',
+    'Only parameters that CoLM actually reads at runtime are listed; compile-time dimensions and physical constants are not presented as editable fields.'],
+  ['专家模式：这些值来自过程参数文件，不写入公共 case.nml。', 'Expert mode: these values come from process-parameter files, not the shared case.nml.'],
+  ['修改站点', 'Edit site'],
+  ['全部站点', 'All sites'],
+  ['专家参数文件：', 'Expert parameter file: '],
+  ['代码默认值：', 'Code default: '],
   ['常规', 'Normal'],
   ['专家', 'Expert'],
   ['选择…', 'Choose…'],
@@ -640,6 +824,7 @@ const ZH_EN = [
   ['待运行', 'Queued'],
   ['运行中', 'Running'],
   ['已完成', 'Completed'],
+  ['已取消', 'Cancelled'],
   ['完成', 'Completed'],
   ['全部完成', 'All completed'],
   ['没有找到内核', 'No kernel found'],
@@ -653,6 +838,8 @@ const ZH_EN = [
   ['完整日志在', 'full logs are in'],
   ['用自带的示例站点（城市站 AU-Preston）', 'Use bundled example site (urban AU-Preston)'],
   ['用自带的示例站点（CN-Cng）', 'Use bundled example site (CN-Cng)'],
+  ['用自带的示例站点（甲烷站 AT-Neu）', 'Use bundled example site (methane AT-Neu)'],
+  ['拖动调整日志栏大小', 'Drag to resize the log panel'],
   ['成功', 'Completed'],
   ['失败', 'Failed'],
   ['跳过', 'Skipped'],
@@ -677,12 +864,13 @@ const ZH_EN = [
   ['预热截止时刻的月，见 spinup_repeat 的说明。', 'Month of the spin-up cutoff; see spinup_repeat.'],
   ['预热截止时刻的日，见 spinup_repeat 的说明。', 'Day of the spin-up cutoff; see spinup_repeat.'],
   ['预热截止时刻的当天秒数，见 spinup_repeat 的说明。', 'Seconds into the spin-up cutoff day; see spinup_repeat.'],
-  ['下面的改动会写进', 'The changes below will be written to'],
+  ['除逐站点数据文件外，下面的改动会写进', 'Except for per-site data files, the changes below will be written to'],
   ['输出与重启', 'Output & restart'],
   ['CoLM 不认识这个字段', 'CoLM does not recognize this field'],
   ['本内核未编入（需要', 'Not compiled into this kernel (requires '],
   ['），设了也没用', '); setting it has no effect'],
   ['这一批算例在这个字段上取值不同，显示的是第一个的值。改它会把全部改成同一个值。', 'Cases in this batch differ for this field. The first value is shown; editing it applies one value to all cases.'],
+  ['所选站点的内置默认值随地类不同；这里显示第一个站点的默认值，修改会给全部站点写入同一个显式值。', 'Built-in defaults differ by land-cover class. The first site default is shown; editing writes the same explicit value to every selected site.'],
   ['这份配置没设它，显示的是默认值', 'This configuration does not set it; the default is shown'],
   ['先在“文件与目录”里选择站点并建算例', 'Select sites and create cases under “Files & directories” first'],
   ['先建算例', 'Create a case first'],
@@ -713,6 +901,7 @@ const ZH_EN = [
   ['个 CoLM 已经不认识的字段，会让运行在读取时就停：', ' fields no longer recognized by CoLM, which will stop the run while reading:'],
   ['城市', 'Urban'],
   ['自然', 'natural'],
+  ['作物', 'crop'],
   ['或', 'or'],
   ['没有观测文件', 'No observation file'],
   ['净辐射 Rnet', 'Net radiation Rnet'],
@@ -763,6 +952,116 @@ const ZH_EN = [
   ['默认值', 'default value'],
   ['默认', 'Default'],
   ['默认 ', 'Default '],
+  ['不确定性分析', 'Uncertainty analysis'],
+  ['参数调优', 'Parameter tuning'],
+  ['站点方式', 'Site mode'],
+  ['多站点共享参数向量', 'Shared multi-site parameter vector'],
+  ['每个站点单独 Study', 'Separate Study per site'],
+  ['分析开始', 'Analysis start'],
+  ['分析结束', 'Analysis end'],
+  ['校准开始', 'Calibration start'],
+  ['校准结束', 'Calibration end'],
+  ['独立验证', 'Independent validation'],
+  ['验证开始', 'Validation start'],
+  ['验证结束', 'Validation end'],
+  ['预算预览', 'Budget preview'],
+  ['运行状态', 'Run status'],
+  ['重试失败', 'Retry failed'],
+  ['导出 Study', 'Export Study'],
+  ['最佳候选另存', 'Save best candidate as'],
+  ['参数范围', 'Parameter ranges'],
+  ['目标变量', 'Target variables'],
+  ['输出变量', 'Output variables'],
+  ['内核目录', 'Kernel directory'],
+  ['使用当前内核', 'Use current kernel'],
+  ['选择参数后显示。', 'Shown after selecting parameters.'],
+  ['选择参数和目标后显示。', 'Shown after selecting parameters and targets.'],
+  ['运行后显示分位数包络、参数重要性和成员表。', 'After running, shows quantile envelopes, parameter importance, and member table.'],
+  ['运行后显示目标函数、最佳候选和成员表。', 'After running, shows objective scores, the best candidate, and member table.'],
+  ['候选目标函数', 'Candidate objectives'],
+  ['参数影响排序', 'Parameter influence ranking'],
+  ['成员表（CSV 预览）', 'Member table (CSV preview)'],
+  ['样本分位带', 'Sample quantile envelope'],
+  ['加载图表', 'Load chart'],
+  ['运行完成后由后端生成。', 'Generated by the backend after the run completes.'],
+  ['运行完成后可按站点和变量加载，不会一次读取全部成员 history。', 'After the run, load one site and variable at a time; all member history is never loaded at once.'],
+  ['可行', 'Feasible'],
+  ['校准', 'Calibration'],
+  ['验证', 'Validation'],
+  ['影响', 'Influence'],
+  ['用当前已完成算例创建 OAT 或 LHS 参数扰动 Study；基准成员单独保留，不参与不确定性分位数统计。', 'Create an OAT or LHS parameter-perturbation Study from completed cases; the baseline member is kept separately and excluded from uncertainty quantiles.'],
+  ['选择不确定性包络要统计的 history 变量。', 'Choose history variables for the uncertainty envelope.'],
+  ['读取后显示可采样的专家参数。', 'Sampleable expert parameters appear after loading.'],
+  ['还没有创建不确定性分析 Study。', 'No uncertainty-analysis Study has been created yet.'],
+  ['用差分进化生成初代参数种群；目标函数要求所有勾选目标都存在，缺任一目标即判为不可行。', 'Use differential evolution to create the initial parameter population; every selected target is required, and a missing target makes the candidate infeasible.'],
+  ['读取后显示带观测文件的可评估变量。', 'Evaluable variables with observation files appear after loading.'],
+  ['读取后显示可调参数。', 'Tunable parameters appear after loading.'],
+  ['还没有创建参数调优 Study。', 'No parameter-tuning Study has been created yet.'],
+  ['LHS 拉丁超立方', 'LHS Latin hypercube'],
+  ['OAT 单因子', 'OAT one-at-a-time'],
+  ['创建调优 Study', 'Create tuning Study'],
+  ['创建 Study', 'Create Study'],
+  ['刷新状态', 'Refresh status'],
+  ['暂停派发', 'Pause dispatch'],
+  ['读取参数', 'Load parameters'],
+  ['随机种子', 'Random seed'],
+  ['最少配对', 'Minimum pairs'],
+  ['权重', 'Weight'],
+  ['我确认采样范围由我负责', 'I confirm that I am responsible for the sampling ranges'],
+  ['仅专家自定义范围', 'expert-defined range only'],
+  ['使用内核默认值', 'use the kernel default'],
+  ['代码默认', 'code default'],
+  ['硬边界', 'hard bounds'],
+  ['不可采样', 'not sampleable'],
+  ['哨兵', 'sentinel'],
+  ['样本数', 'Samples'],
+  ['方法', 'Method'],
+  ['并发', 'Parallel jobs'],
+  ['种群', 'Population'],
+  ['代数', 'Generations'],
+  ['恢复', 'Resume'],
+  ['后端未连接', 'Backend is not connected'],
+  [' 需要有限且 min < max 的范围。', ' requires a finite range with min < max.'],
+  ['当前分析范围没有可用 history 时间序列变量。', 'No usable history time-series variable exists in the current analysis scope.'],
+  ['参数调优要求分析范围内每个算例都有观测文件。', 'Parameter tuning requires an observation file for every case in the analysis scope.'],
+  ['当前观测文件没有共同可评估变量。', 'The current observation files have no common evaluable variable.'],
+  ['日期窗口需要开始和结束日期。', 'The date window requires start and end dates.'],
+  ['参数调优需要每个站点都有观测文件。', 'Parameter tuning requires an observation file for every site.'],
+  ['请至少勾选一个参数，并填写有限的最小/最大值。', 'Select at least one parameter and enter finite minimum and maximum values.'],
+  ['请确认采样范围由用户负责。', 'Confirm that the user is responsible for the sampling ranges.'],
+  ['调优目标需要校准期开始和结束日期。', 'Tuning targets require calibration-period start and end dates.'],
+  ['调优目标需要验证期开始和结束日期。', 'Tuning targets require validation-period start and end dates.'],
+  ['校准期/验证期必须满足开始 < 结束。', 'Calibration and validation periods must satisfy start < end.'],
+  ['校准期与验证期不能重叠。', 'Calibration and validation periods must not overlap.'],
+  ['最少配对样本数必须是至少 2 的整数。', 'Minimum paired samples must be an integer of at least 2.'],
+  [' 的权重必须是正数。', ' weight must be positive.'],
+  ['参数调优至少选择一个目标变量。', 'Parameter tuning requires at least one target variable.'],
+  ['不确定性分析窗口必须满足开始 < 结束。', 'The uncertainty-analysis window must satisfy start < end.'],
+  ['不确定性分析至少选择一个输出变量。', 'Uncertainty analysis requires at least one output variable.'],
+  ['没有已完成算例可用于 Study。', 'No completed case is available for a Study.'],
+  ['Study 需要同一算例根目录下的算例。', 'A Study requires cases under the same case root.'],
+  ['Study 已创建。', 'Study created.'],
+  ['Study 正在运行。', 'Study is already running.'],
+  ['Study 运行完成。', 'Study run completed.'],
+  ['请先创建 Study。', 'Create a Study first.'],
+  ['请先选择内核。', 'Select a kernel first.'],
+  ['存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？', 'Some task process states cannot be verified. Retry only after confirming that the original model processes have exited. Continue?'],
+  ['已请求暂停派发。', 'Pause dispatch requested.'],
+  ['已恢复派发。', 'Dispatch resumed.'],
+  ['已请求取消待运行任务。', 'Cancellation of pending tasks requested.'],
+  ['导出目录', 'Export directory'],
+  ['另存为算例目录', 'Save as case directory'],
+  [' 还没有可应用的最佳候选。', ' has no best candidate that can be applied yet.'],
+  ['没有符合筛选条件的日志。', 'No log entries match the filters.'],
+  ['还没有 Study。', 'No Study exists yet.'],
+  ['成员', 'Member'],
+  ['阶段', 'Stage'],
+  ['全部', 'All'],
+  ['目标函数', 'Objective'],
+  ['说明', 'Details'],
+  ['上一页', 'Previous page'],
+  ['下一页', 'Next page'],
+  ['参数', 'Parameter'],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -808,7 +1107,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^(.+) · (.+) · (\d+)\/(\d+) 点$/, '$1 · $2 · $3/$4 points')
     .replace(/^(.+) · (.+) 已绘制（显示已保极值降采样）$/, '$1 · $2 plotted (extrema-preserving downsample shown)')
     .replace(/^(.+) · (.+) 已绘制$/, '$1 · $2 plotted')
-    .replace(/^(.+) 评估完成：(\d+) 个变量$/, '$1 evaluation complete: $2 variables')
+    .replace(/^(.+) 评估完成：(\d+) 个变量.*$/, '$1 evaluation complete: $2 variables')
     .replace(/^(.+) 没有可绘制的配对点$/, '$1 has no plottable paired points')
     .replace(/^(.+) · (.+) 图形诊断已更新$/, '$1 · $2 graphical diagnostics updated')
     .replace(/^(.+) · (.+) 完整 CSV 已导出：(\d+) 行$/, '$1 · $2 full CSV exported: $3 rows')
@@ -828,12 +1127,17 @@ export function translateZh(text, target = 'en') {
     .replace(/^检测到\s*(\d+)\s*个逻辑 CPU；单个站点仍使用 1 核。$/, '$1 logical CPUs detected; each site still uses one core.')
     .replace(/^开始运行\s*(\d+)\s*个算例$/, 'Starting $1 cases')
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行完成$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} completed`)
+    .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行已取消$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} cancelled`)
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行失败（退出码\s*(-?\d+)）$/, (_, stage, code) => `${stage === '全部阶段' ? 'All stages' : stage} failed (exit code ${code})`)
     .replace(/^运行中（(\d+)\/(\d+)）$/, 'Running ($1/$2)')
     .replace(/^批量总体：(\d+)\/(\d+)\s*个站点结束(?:\s*·\s*模型步\s*(\d+)\/(\d+))?$/, (_, a, b, c, d) => `Batch total: ${a}/${b} sites finished${c ? ` · model steps ${c}/${d}` : ''}`)
     .replace(/^批次结束：(\d+)\/(\d+)\s*个成功，(\d+)\s*个失败$/, 'Batch finished: $1/$2 succeeded, $3 failed')
+    .replace(/^批次结束：(\d+)\/(\d+)\s*个成功，(\d+)\s*个失败，(\d+)\s*个取消$/, 'Batch finished: $1/$2 succeeded, $3 failed, $4 cancelled')
     .replace(/^批次结束：(\d+)\/(\d+)\s*个算例全部成功$/, 'Batch finished: all $1/$2 cases succeeded')
+    .replace(/^(\d+)\s*个站点失败\s*·\s*(\d+)\s*个已取消$/, '$1 sites failed · $2 cancelled')
     .replace(/^(\d+)\s*个站点失败$/, '$1 sites failed')
+    .replace(/^(\d+)\s*个站点已取消$/, '$1 sites cancelled')
+    .replace(/^已请求取消\s*(\d+)\s*个算例$/, 'Cancellation requested for $1 cases')
     .replace(/^已复制\s*(\d+)\s*个字符$/, 'Copied $1 characters')
     .replace(/^第\s*(\d+)\/(\d+)\s*页\s*·\s*/, 'Page $1/$2 · ')
     .replace(/^第\s*(\d+)\s*页选了\s*/, 'Page $1 selected ')
@@ -848,8 +1152,10 @@ export function translateZh(text, target = 'en') {
     .replace(/^准备算例\s*(\d+)\/(\d+)：/, 'Preparing case $1/$2: ')
     .replace(/^已选\s*(\d+)\s*个?$/, '$1 selected')
     .replace(/^建算例：选中的\s*(\d+)\s*个站点$/, 'Create cases for $1 selected sites')
-    .replace(/^(\d+)\s*个(城市|自然)站点$/, (_, n, kind) => `${n} ${kind === '城市' ? 'urban' : 'natural'} sites`)
-    .replace(/^目录里没有(城市|自然)站点。$/, (_, kind) => `No ${kind === '城市' ? 'urban' : 'natural'} sites in this directory.`)
+    .replace(/^(\d+)\s*个(城市|自然|作物|甲烷)站点$/, (_, n, kind) => `${n} ${{ 城市: 'urban', 自然: 'natural', 作物: 'crop', 甲烷: 'methane' }[kind]} sites`)
+    .replace(/^目录里没有(城市|自然|作物|甲烷)站点。$/, (_, kind) => `No ${{ 城市: 'urban', 自然: 'natural', 作物: 'crop', 甲烷: 'methane' }[kind]} sites in this directory.`)
+    .replace(/^(\d+)\s*个NAME站点$/, '$1 sites')
+    .replace(/^目录里没有NAME站点。$/, 'No sites of this type in this directory.')
     .replace(/^等\s*(\d+)\s*个$/, 'and $1 more')
     .replace(/^(.+)\s+等\s*(\d+)\s*个$/, '$1 and $2 more')
     .replace(/^已生成\s*(.+)：(\d+)\s*个字段走标称假设$/, 'Generated $1: $2 fields use nominal assumptions')
@@ -863,7 +1169,59 @@ export function translateZh(text, target = 'en') {
     .replace(/^预热\s*(\d+)\/(\d+)\s*轮\s*·\s*/, 'Spin-up $1/$2 · ')
     .replace(/^评估\s*(\d+)\/(\d+)：/, 'Evaluating $1/$2: ')
     .replace(/^批量评估完成：(\d+)\/(\d+)\s*个算例有结果$/, 'Batch evaluation complete: $1/$2 cases produced results')
-    .replace(/^批量评估完成：(\d+)\s*个算例$/, 'Batch evaluation complete: $1 cases');
+    .replace(/^批量评估完成：(\d+)\s*个算例$/, 'Batch evaluation complete: $1 cases')
+    .replace(/^已探测\s*(.+)：(\d+)\s*行，(\d+)\s*个站点$/, 'Inspected $1: $2 rows, $3 sites')
+    .replace(/^正在诊断站点\s*(\d+)\/(\d+)：(.+)$/, 'Diagnosing site $1/$2: $3')
+    .replace(/^已拆分\s*(\d+)\s*个站点，其中\s*(\d+)\s*个诊断失败$/, 'Split $1 sites; $2 failed diagnosis')
+    .replace(/^已拆分并诊断\s*(\d+)\s*个站点$/, 'Split and diagnosed $1 sites')
+    .replace(/^正在提交\s*(\d+)\/(\d+)：(.+)；CDS 服务器可能排队，请等待…$/, 'Submitting $1/$2: $3; CDS servers may queue the request, please wait…')
+    .replace(/^ERA5-Land 下载\s*(\d+)\/(\d+)：(.+)$/, 'ERA5-Land download $1/$2: $3')
+    .replace(/^已缓存\s*(\d+)\s*个站点需要的 ERA5-Land 数据$/, 'Cached ERA5-Land data needed by $1 sites')
+    .replace(/^仍有\s*(\d+)\s*个缺测值没有解决$/, '$1 missing values remain unresolved')
+    .replace(/^正在生成站点产物\s*(\d+)\/(\d+)：(.+)$/, 'Generating site output $1/$2: $3')
+    .replace(/^批量处理完成：(\d+)\/(\d+)\s*个站点成功$/, 'Batch processing complete: $1/$2 sites succeeded')
+    .replace(/^批量处理完成：(\d+)\s*个站点均已生成$/, 'Batch processing complete: all $1 sites generated')
+    .replace(/^(\d+(?:\.\d+)?)\s*时（逐日标准差\s*(\d+(?:\.\d+)?)\s*小时）$/, '$1 h (daily standard deviation $2 h)')
+    .replace(/^(高|中|低)置信度 · (.+)$/, (_, level, evidence) => `${level === '高' ? 'High' : level === '中' ? 'Medium' : 'Low'} confidence · ${evidence}`)
+    .replace(/^发现\s*(\d+)\s*个缺测或 QC 不合格值$/, 'Found $1 missing or QC-invalid values')
+    .replace(/^先补齐观测高度：(.+)$/, 'Fill observation heights first: $1')
+    .replace(/^字段状态不完整：后端返回\s*(\d+)\/(\d+)$/, 'Incomplete field state: backend returned $1/$2')
+    .replace(/^过程字段状态不完整：后端返回\s*(\d+)\/(\d+)$/, 'Incomplete process-field state: backend returned $1/$2')
+    .replace(/^无法核实当前配置下哪些参数有效：(.+)$/, 'Cannot verify which parameters are valid for the current configuration: $1')
+    .replace(/^（当前站点：(.+)）$/, '(current site: $1)')
+    .replace(/^已为\s*(\d+)\s*个算例设置气孔导度方案$/, 'Set the stomatal-conductance scheme for $1 cases')
+    .replace(/^(.+) 已在 (\d+) 个站点恢复内置值$/, 'Restored the built-in $1 value at $2 sites')
+    .replace(/^(.+) 已恢复内置值$/, 'Restored the built-in $1 value')
+    .replace(/^仅为 PFT (.+) 写入稀疏覆盖；不含该 PFT 的站点不会被修改。$/, 'Sparse overrides are written only for PFT $1; sites without this PFT are left unchanged.')
+    .replace(/^已为\s*(.+)\s*校验并接入边界层高度文件$/, 'Verified and connected the boundary-layer-height file for $1')
+    .replace(/^(.+) · (.+) 已绘制(.*)$/, '$1 · $2 plotted$3')
+    .replace(/^当前时段没有有效配对样本：(.+)$/, 'No valid paired samples in the current period: $1')
+    .replace(/^软件版本：(.+)$/, 'Software version: $1')
+    .replace(/^分析范围：(\d+)\s*个站点$/, 'Analysis scope: $1 sites')
+    .replace(/^次网格方案：(.+)$/, 'Subgrid scheme: $1')
+    .replace(/^丢弃输出记录：(.+)$/, 'Discarded output records: $1')
+    .replace(/^(.+) 需要填写上下界。$/, '$1 requires lower and upper bounds.')
+    .replace(/^(.+) · (.+) · 覆盖 (\d+)\/(\d+)$/, '$1 · $2 · coverage $3/$4')
+    .replace(/^参数 (\d+) · 站点 (\d+) · 候选 (\d+) · 成员×站点 (\d+) · 阶段运行 (\d+) · 并发 (\d+) · 预计时间未知（暂无基准实测） · 磁盘需求未知（暂无基准产物大小）$/, 'Parameters $1 · sites $2 · candidates $3 · member-site tasks $4 · stage runs $5 · parallel jobs $6 · estimated time unknown (no benchmark yet) · disk use unknown (no baseline output size yet)')
+    .replace(/^不确定性分析至少需要一个适用于\s*(.+)\s*的输出变量。$/, 'Uncertainty analysis requires at least one output variable applicable to $1.')
+    .replace(/^候选成员数必须不超过\s*(\d+)。$/, 'Candidate members must not exceed $1.')
+    .replace(/^本次共会创建\s*(\d+)\s*个候选成员，可能耗时很长。是否继续？$/, 'This will create $1 candidate members and may take a long time. Continue?')
+    .replace(/^已创建但未登记的 Study：$/, 'Created but unregistered Study:')
+    .replace(/^(.+) Study 正在运行，不能重试。$/, '$1 Study is running and cannot be retried.')
+    .replace(/^未知 Study 操作：(.+)$/, 'Unknown Study action: $1')
+    .replace(/^批量总体：(\d+)\/(\d+)\s*个站点结束$/, 'Batch total: $1/$2 sites finished')
+    .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行失败（退出码\s*(-?\d+)）$/, (_, stage, code) => `${stage === '全部阶段' ? 'All stages' : stage} failed (exit code ${code})`)
+    .replace(/^请选择有效的\s*(.+)\s*地表覆盖类型$/, 'Select a valid $1 land-cover type')
+    .replace(/^已生成\s*(.+)，但当前模式还缺\s*(\d+)\s*项外部数据$/, 'Generated $1, but the current mode still needs $2 external data items')
+    .replace(/^站点数据已生成并交给基本设定：(.+)$/, 'Site data generated and handed to Basic settings: $1')
+    .replace(/^站点文件还缺\s*(\d+)\s*项；已选择的 rawdata 将在 mksrfdata 阶段提供。$/, 'The site file still lacks $1 items; the selected rawdata will provide them during mksrfdata.')
+    .replace(/^缺少\s*(\d+)\s*项且没有可用 rawdata。文件可以保存，但建例会被阻止。$/, '$1 items are missing and no usable rawdata is available. The file can be saved, but case creation will be blocked.')
+    .replace(/^(\d+)\s*个站点的站点文件与强迫场均已配对。$/, 'Site files and forcing are paired for $1 sites.')
+    .replace(/^只有\s*(\d+)\/(\d+)\s*个站点满足当前模式的完整运行契约。$/, 'Only $1/$2 sites satisfy the full run contract for the current mode.')
+    .replace(/^每轮使用开头\s*(\d+)\s*年，共重复\s*(\d+)\s*轮。$/, 'Each cycle uses the first $1 years and runs $2 cycles.');
+  out = out
+    .replace(/^参数 (\d+) · 站点 (\d+) · 候选 (\d+) · 成员×站点 (\d+) · 阶段运行 (\d+) · 并发 (\d+)$/, 'Parameters $1 · sites $2 · candidates $3 · member-site tasks $4 · stage runs $5 · parallel jobs $6')
+    .replace(/^可行候选 (\d+)\/(\d+)$/, 'Feasible candidates $1/$2');
   for (const [zh, en] of ZH_EN) out = out.split(zh).join(en);
   out = out
     .replace(/第\s*(\d+)\/(\d+)\s*page/g, 'Page $1/$2')

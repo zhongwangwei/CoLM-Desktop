@@ -1,7 +1,7 @@
-//! 进门向导。顺序按约束方向排：空间 → 次网格 → 土壤 → 物理 → 调试。
+//! 进门向导。顺序按约束方向排：空间 → 次网格 → 土壤 → 物理 → 示踪剂 → 调试。
 //!
 //! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS 由向导
-//! 自动匹配专用编译产物；PC 已三阶段跑通。CROP 仍列出但不可选。
+//! 自动匹配专用编译产物；CROP 需要 CROP-enabled 内核。
 
 import { state } from './state.js';
 import { $ } from './ui.js';
@@ -23,19 +23,16 @@ const SUBGRIDS = [
 ];
 
 const SOILS = [
-  { id: 'vg', t: 'van Genuchten–Mualem', d: '默认土壤水力方案' },
-  { id: 'campbell', t: 'Campbell', d: 'Campbell 土壤水力' },
+  { id: 'vg', t: 'van Genuchten–Mualem（Ippisch 2006）', d: '启用 van Genuchten–Mualem 土壤水力模型' },
+  { id: 'campbell', t: 'Campbell（1974）', d: '启用 Campbell 土壤水力模型' },
 ];
 
 const PHYSICS = [
-  { id: 'urban', t: 'URBAN', d: '城市冠层与人为热' },
+  { id: 'urban', t: 'URBAN', d: '城市冠层与人为热；不锁定次网格方案' },
   { id: 'lulcc', t: 'LULCC', d: '土地利用变化' },
   { id: 'bgc', t: 'BGC', d: '碳氮循环' },
-  {
-    id: 'crop', t: 'CROP', d: '作物模型',
-    ready: false, need: 'CROP 仍决定数组尺寸，需要 CROP-enabled 内核；同时需要 BGC',
-  },
-  { id: 'tracer', t: 'TRACER', d: '同位素 / 溶质示踪' },
+  { id: 'crop', t: 'CROP', d: '作物模型' },
+  { id: 'tracer', t: 'TRACER', d: '同位素 / 溶质 / 气体 / 颗粒示踪；当前仅开放甲烷' },
 ];
 
 const DEBUG = [
@@ -47,15 +44,23 @@ const DEBUG = [
   },
 ];
 
-const PAGES = ['domain', 'subgrid', 'soil', 'physics', 'debug'];
+const TRACERS = [
+  { id: 'isotope', t: '水同位素', d: 'H₂¹⁸O / HDO 水循环同位素', ready: false, need: '暂未开放' },
+  { id: 'methane', t: '甲烷 CH₄', d: '湿地、土壤、湖泊甲烷产生/氧化/排放', ready: true },
+  { id: 'solute', t: '溶质', d: '水溶性示踪物', ready: false, need: '暂未开放' },
+  { id: 'sediment', t: '泥沙', d: '颗粒泥沙输移', ready: false, need: '单点站点不可用；需要河道/流域输移链路' },
+];
+
+const pages = () => ['domain', 'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []), 'debug'];
 
 const emptyPhysics = () => ({ urban: false, lulcc: false, bgc: false, crop: false, tracer: false });
 const emptyDebug = () => ({ rangecheck: false, colmdebug: false, srfdatadiag: false });
 const emptyPicked = () => ({
   domain: null,
   subgrid: null,
-  soil: null,
+  soil: 'vg',
   physics: emptyPhysics(),
+  tracer: null,
   debug: emptyDebug(),
 });
 
@@ -70,16 +75,19 @@ export function showDomainGate() {
 }
 
 function render() {
-  const page = PAGES[pageIdx];
+  const list = pages();
+  if (pageIdx >= list.length) pageIdx = list.length - 1;
+  const page = list[pageIdx];
   const copy = {
     domain: ['这次要跑什么？', '空间结构先定；现在只有站点步骤链能跑。'],
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
+    tracer: ['选择示踪剂类型', '目前只开放甲烷 CH₄；其他类型保留入口但不可选。'],
     debug: ['要打开调试吗？', '可全部不选；这些开关只增加检查与日志，不改变页间约束。'],
   }[page];
   $('gatetitle').textContent = copy[0];
-  $('gatesub').textContent = `第 ${pageIdx + 1}/${PAGES.length} 页 · ${copy[1]}`;
+  $('gatesub').textContent = `第 ${pageIdx + 1}/${list.length} 页 · ${copy[1]}`;
   $('gateinfo').textContent = pageInfo(page);
 
   const box = $('gatecards');
@@ -88,6 +96,7 @@ function render() {
   if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid, subgridBlock);
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
+  if (page === 'tracer') renderCards(TRACERS, picked.tracer, chooseTracer, tracerBlock);
   if (page === 'debug') renderCards(DEBUG, picked.debug, toggleDebug, null, true);
   renderFoot();
 }
@@ -100,6 +109,7 @@ function pageInfo(page) {
     return picked.subgrid === 'IGBP' ? 'ⓘ 站点数据使用 IGBP_classification' : 'ⓘ 必须选择一种次网格方案';
   }
   if (page === 'physics') return 'ⓘ 灰项仍然列出；带“← 第 N 页”的卡片可直接返回修改';
+  if (page === 'tracer') return 'ⓘ 甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例';
   if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
   return '';
 }
@@ -155,19 +165,38 @@ function chooseSubgrid(id) {
   if (id !== 'PFT' && id !== 'PC') {
     picked.physics.bgc = false;
     picked.physics.crop = false;
+    picked.physics.tracer = false;
+    picked.tracer = null;
   }
   render();
 }
 
 function chooseSoil(id) {
   picked.soil = id;
-  if (id === 'campbell') picked.physics.tracer = false;
+  if (id === 'campbell') { picked.physics.tracer = false; picked.tracer = null; }
   render();
 }
 
 function togglePhysics(id) {
   picked.physics[id] = !picked.physics[id];
-  if (id === 'bgc' && !picked.physics.bgc) picked.physics.crop = false;
+  if (id === 'urban' && picked.domain === 'site' && picked.physics.urban) {
+    picked.physics.bgc = false;
+    picked.physics.crop = false;
+    picked.physics.tracer = false;
+    picked.physics.lulcc = false;
+    picked.tracer = null;
+  }
+  if (id === 'bgc') {
+    if (!picked.physics.bgc) { picked.physics.crop = false; picked.physics.tracer = false; picked.tracer = null; }
+    picked.physics.lulcc = false;
+  }
+  if (id === 'crop' && picked.physics.crop) picked.physics.lulcc = false;
+  if (id === 'tracer' && !picked.physics.tracer) picked.tracer = null;
+  render();
+}
+
+function chooseTracer(id) {
+  picked.tracer = id;
   render();
 }
 
@@ -184,15 +213,49 @@ function subgridBlock(item) {
 
 function physicsBlock(item) {
   if (item.ready === false) return null;
-  if (item.id === 'lulcc' && picked.domain === 'site') {
-    return { need: '单点站点暂不支持 LULCC', cause: '第 1 页选择了站点', page: 0 };
+  if (item.id === 'lulcc') {
+    if (picked.subgrid === 'USGS') {
+      return { need: 'LULCC 不支持 USGS 次网格', cause: '第 2 页选了 USGS', page: 1 };
+    }
+    if (picked.physics.bgc) return { need: 'LULCC 不能与 BGC 同时开启' };
+    if (picked.domain === 'site') {
+      return { need: '单点站点暂不支持 LULCC', cause: '第 1 页选择了站点', page: 0 };
+    }
   }
-  if (item.id === 'bgc' && picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-    return { need: '需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+  if (item.id === 'urban') {
+    return null;
   }
-  if (item.id === 'tracer' && picked.soil !== 'vg') {
-    return { need: '需要 van Genuchten 土壤水力', cause: '第 3 页选了 Campbell', page: 2 };
+  if (item.id === 'bgc') {
+    if (picked.domain === 'site' && picked.physics.urban) {
+      return { need: '纯城市单点不运行 BGC', cause: '本页已开启 URBAN' };
+    }
+    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
+      return { need: '需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+    }
   }
+  if (item.id === 'crop') {
+    if (picked.domain === 'site' && picked.physics.urban) return { need: '城市单点暂不支持 CROP', cause: '本页已开启 URBAN' };
+    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') return { need: 'CROP 需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+    if (!picked.physics.bgc) return { need: 'CROP 需要同时开启 BGC' };
+    if (!kernelForSubgrid(picked.subgrid, { crop: true })) return { need: '当前安装缺少 CROP-enabled 内核' };
+  }
+  if (item.id === 'tracer') {
+    if (picked.domain === 'site' && picked.physics.urban) {
+      return { need: '城市单点暂不支持甲烷示踪', cause: '本页已开启 URBAN' };
+    }
+    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
+      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+    }
+    if (picked.soil !== 'vg') {
+      return { need: '需要 van Genuchten 土壤水力', cause: '第 3 页选了 Campbell', page: 2 };
+    }
+    if (!picked.physics.bgc) return { need: '甲烷示踪需要同时开启 BGC' };
+  }
+  return null;
+}
+
+function tracerBlock(item) {
+  if (item.ready === false) return { need: item.need };
   return null;
 }
 
@@ -213,14 +276,15 @@ function renderFoot() {
     foot.appendChild(prev);
   }
 
-  const page = PAGES[pageIdx];
-  const required = { domain: picked.domain, subgrid: picked.subgrid, soil: picked.soil };
+  const list = pages();
+  const page = list[pageIdx];
+  const required = { domain: picked.domain, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = '下一步 →';
   next.disabled = Object.hasOwn(required, page) && !required[page];
   next.onclick = () => {
-    if (pageIdx === PAGES.length - 1) finish();
+    if (pageIdx === list.length - 1) finish();
     else { pageIdx += 1; render(); }
   };
   foot.appendChild(next);
@@ -231,11 +295,13 @@ function finish() {
   // 混进来，否则运行页会出现与本次模型配置无关的旧算例。
   state.picked.clear();
   state.pickedSite = null;
+  state.pickedSiteAuto = false;
   state.pickedCases.clear();
   state.batch = [];
   state.createdCases.clear();
   state.createdBySite.clear();
   state.selected = null;
+  state.expertCaseDir = null;
   state.resultCaseDir = null;
   state.resultSelection.clear();
   state.resultSelectionTouched = false;
@@ -245,7 +311,7 @@ function finish() {
   state.text = '';
   state.prepArtifacts = {
     siteStem: null, siteFile: null, siteDir: null, siteReport: null,
-    rawdataDir: null, forcingFile: null, forcingDir: null,
+    rawdataDir: null, forcingFile: null, forcingDir: null, batchSites: [],
   };
   state.domain = picked.domain;
   state.subgrid = picked.subgrid;
@@ -253,6 +319,7 @@ function finish() {
     subgrid: picked.subgrid,
     soil: picked.soil,
     physics: { ...picked.physics },
+    tracer: picked.tracer,
     debug: { ...picked.debug },
   };
   globalThis.dispatchEvent?.(new Event('colm:wizard'));
@@ -269,28 +336,56 @@ export function wizardFields(wizard = state.wizard) {
   if (!wizard) return [];
   const p = wizard.physics;
   const d = wizard.debug;
-  return [
-    ['DEF_USE_LCT', wizard.subgrid === 'IGBP' || wizard.subgrid === 'USGS'],
-    ['DEF_USE_PFT', wizard.subgrid === 'PFT'],
-    ['DEF_USE_PC', wizard.subgrid === 'PC'],
-    ['DEF_USE_Campbell_SOIL_MODEL', wizard.soil === 'campbell'],
-    ['DEF_USE_BGC', p.bgc],
-    ['DEF_URBAN_RUN', p.urban],
-    ['DEF_USE_LULCC', p.lulcc],
-    ['DEF_USE_TRACER', p.tracer],
-    ['DEF_USE_RangeCheck', d.rangecheck],
-    ['DEF_USE_CoLMDEBUG', d.colmdebug],
-    ['DEF_USE_SrfdataDiag', d.srfdatadiag],
-  ].map(([path, value]) => ({ path, value: logical(value) }));
+  const methane = p.tracer && wizard.tracer === 'methane';
+  const urban = p.urban;
+  const fields = [
+    ['DEF_USE_LCT', wizard.subgrid === 'IGBP' || wizard.subgrid === 'USGS', 'logical'],
+    ['DEF_USE_PFT', wizard.subgrid === 'PFT', 'logical'],
+    ['DEF_USE_PC', wizard.subgrid === 'PC', 'logical'],
+    ['DEF_USE_Campbell_SOIL_MODEL', wizard.soil === 'campbell', 'logical'],
+    ['DEF_USE_BGC', p.bgc || p.crop || methane, 'logical'],
+    ['DEF_URBAN_RUN', urban, 'logical'],
+    ['DEF_USE_LULCC', p.lulcc, 'logical'],
+    ['DEF_USE_TRACER', methane, 'logical'],
+    ['DEF_USE_RangeCheck', d.rangecheck, 'logical'],
+    ['DEF_USE_CoLMDEBUG', d.colmdebug, 'logical'],
+    ['DEF_USE_SrfdataDiag', d.srfdatadiag, 'logical'],
+  ];
+  if (p.crop) fields.push(
+    ['DEF_USE_LAIFEEDBACK', true, 'logical'],
+    ['DEF_USE_FERT', false, 'logical'],
+    ['DEF_USE_CNSOYFIXN', false, 'logical'],
+    ['DEF_USE_IRRIGATION', false, 'logical'],
+    ['DEF_TUNING_CROP_PLANTING_DAY', '120'],
+  );
+  if (methane) fields.push(
+    ['DEF_USE_Dynamic_Wetland', false, 'logical'],
+    ['DEF_TRACER_NUM', '1'],
+    ['DEF_TRACER_NAMES', 'CH4'],
+    ['DEF_TRACER_TYPES', 'gas'],
+    ['DEF_TRACER_MRAT', '16.04'],
+    ['DEF_TRACER_REF_RATIO', '1.0'],
+    ['DEF_TRACER_INIT_DELTA', '0.0'],
+    ['DEF_TRACER_REACTIVE_DECAY_RATE', '0.0'],
+    ['DEF_TRACER_PARAM_FILES', 'CH4:standard_ch4_parameter.nml'],
+  );
+  return fields.map(([path, value, kind]) => ({ path, value: kind === 'logical' ? logical(value) : String(value) }));
 }
 
-/** 主界面与预设都不得再次修改向导已经定下的字段。 */
-export function wizardFieldNames() {
+/** 向导锁定结构字段；CROP 的施肥、灌溉和种植日只是初值，仍可在过程/专家页调。 */
+export function wizardFieldNames(wizard = state.wizard) {
   const empty = {
-    subgrid: null, soil: null,
+    subgrid: null, soil: null, tracer: null,
     physics: emptyPhysics(), debug: emptyDebug(),
   };
-  return wizardFields(empty).map(x => x.path).concat('DEF_USE_USGS', 'DEF_USE_IGBP');
+  const names = wizardFields(empty).map(x => x.path).concat(
+    'DEF_USE_USGS', 'DEF_USE_IGBP',
+    'DEF_TRACER_NUM', 'DEF_TRACER_NAMES', 'DEF_TRACER_TYPES', 'DEF_TRACER_MRAT',
+    'DEF_TRACER_REF_RATIO', 'DEF_TRACER_INIT_DELTA', 'DEF_TRACER_REACTIVE_DECAY_RATE',
+    'DEF_TRACER_PARAM_FILES',
+  );
+  if (wizard?.tracer === 'methane') names.push('DEF_USE_Dynamic_Wetland');
+  return names;
 }
 
 globalThis.addEventListener?.('colm:kernels', () => {

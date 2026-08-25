@@ -8,25 +8,39 @@
 //! colm-cli scan      --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
 //!                    [--out sites.json] [--quick 1]
 //! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>]
-//!                    [--mode igbp|usgs|pft|pc|urban]
+//!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
+//! colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
-//!                    [--mode igbp|usgs|pft|pc|urban]
+//!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
 //!                    [--stage mksrfdata|mkinidata|colm]
-//! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
+//! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
+//!                    [--json 1] [--corrected 1]
 //!                    [--summary-only 1] [--pairs-var Rnet ...] [--max-points N]
 //! colm-cli evaluation-catalog <算例目录> --obs <Flux.nc>
 //! colm-cli history-catalog <算例目录>
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
+//! colm-cli study-parameters
+//! colm-cli study-preflight <case-root> --spec study.json
+//! colm-cli study-create <case-root> --spec study.json
+//! colm-cli study-status <study-dir>
+//! colm-cli study-run <study-dir> --kernel <目录> [--stream 1]
+//! colm-cli study-export <study-dir> --out <目录>
+//! colm-cli study-pause|study-resume|study-cancel <study-dir>
+//! colm-cli study-retry <study-dir> [--include-review 1]
+//! colm-cli study-apply-preview <study-dir> --member <id|best>
+//! colm-cli study-apply <study-dir> --member <id|best> --out <目录> [--name N]
+//! colm-cli study-result <study-dir> --path <结果文件>
 //! colm-cli all       --site ... --out ... --kernel ... [--obs ...]
 //! ```
 //!
 //! `--start` / `--end` 不给就用强迫场覆盖的完整范围。预热默认重复头一年
-//! 10 遍，而预热期是从窗口头上扣的（输出因此少一年）。经纬度与地类读自站点
+//! 1 遍，而预热期是从窗口头上扣的（输出因此少一年）。经纬度与地类读自站点
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod fingerprint;
+mod study;
 
 use std::path::{Path, PathBuf};
 
@@ -41,15 +55,18 @@ usage:
                    [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
   colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N]
-                   [--rawdata <dir>] [--mode igbp|usgs|pft|pc|urban] [--json 1]
+                   [--rawdata <dir>] [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc] [--json 1]
                    # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
                    # 标称假设。--landtype 不给就不写，让 CoLM 回落
+  colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
+                   # 输出 PFT/PC 站点的非零 PFT 类型与归一化比例
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--met <Met.nc>]   # 前处理转出来的强迫场；不给就按命名约定
                                       # 在 ../Forcing/ 下找，那两套约定只覆盖
                                       # PLUMBER2 与 Urban-PLUMBER
-                   [--spinup-years N] [--spinup-repeat N]   (默认 1 年 x 10 遍)
-                   [--mode igbp|usgs|pft|pc|urban]
+                   [--spinup-years N] [--spinup-repeat N]   (默认 1 年 x 1 遍)
+                   [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
+                   [--crop 1]   # CROP 内核：按 croptyp/pctcrop 审核农田站点
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
@@ -58,7 +75,8 @@ usage:
                    # --force 忽略指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
-  colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--json 1] [--corrected 1]
+  colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
+                   [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
                    --summary-only: 只返回指标，不携带绘图用配对点
                    --pairs-var: 只评估指定观测变量；可重复给出
@@ -68,6 +86,28 @@ usage:
   colm-cli history-catalog <case-dir>
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
                    [--max-points N] [--out series.json]
+  colm-cli study-parameters
+                   # 输出可采样专家参数元数据
+  colm-cli study-preflight <case-root> --spec study.json
+                   # 只校验 Study，不创建目录
+  colm-cli study-create <case-root> --spec study.json
+                   # 创建不确定性分析/参数调优 Study，写采样设计
+  colm-cli study-status <study-dir>
+                   # 输出 Study manifest 与成员状态
+  colm-cli study-run <study-dir> --kernel <dir> [--stream 1]
+                   # 串行运行尚未完成的成员算例
+  colm-cli study-export <study-dir> --out <dir>
+                   # 导出 manifest、samples、status、report.md/html
+  colm-cli study-apply-preview <study-dir> --member <id|best>
+                   # 只读预览最佳/指定候选会改哪些参数
+  colm-cli study-pause|study-resume|study-cancel <study-dir>
+                   # 请求暂停派发、恢复派发或取消尚未开始任务
+  colm-cli study-retry <study-dir> [--include-review 1]
+                   # 把失败成员（可选含待复核成员）重新放回队列
+  colm-cli study-apply <study-dir> --member <id|best> --out <dir> [--name N]
+                   # 将指定成员参数写入新的独立算例
+  colm-cli study-result <study-dir> --path <result.json>
+                   # 读取并校验单个成员结果
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
   colm-cli forcing-probe   <met.nc> [--json 1]
@@ -108,6 +148,7 @@ fn main() -> Result<()> {
     };
     let opts = Opts::parse(&args[1..])?;
     match cmd.as_str() {
+        "help" | "-h" | "--help" => print!("{USAGE}"),
         "scan" => {
             cmd_scan(
                 &opts.need("--dir")?,
@@ -118,6 +159,23 @@ fn main() -> Result<()> {
         }
         "site-new" => {
             cmd_site_new(&opts)?;
+        }
+        "site-pfts" => {
+            let site = opts.positional_at(0, "a site.nc file")?;
+            let crop = opts.get("--crop").is_some();
+            let landtype = opts
+                .get("--landtype")
+                .map(|value| {
+                    value
+                        .parse::<i32>()
+                        .context("--landtype must be an integer")
+                })
+                .transpose()?;
+            let components = colm_srfdata::site::pft_components(&site, crop, landtype)?
+                .into_iter()
+                .map(|p| serde_json::json!({ "pft_type": p.pft_type, "fraction": p.fraction }))
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string(&components)?);
         }
         "new" => {
             let case = cmd_new(&opts)?;
@@ -144,6 +202,8 @@ fn main() -> Result<()> {
                 summary_only: opts.get("--summary-only").is_some(),
                 pair_vars: opts.get_all("--pairs-var"),
                 pair_max_points: opts.get("--max-points").map(|v| v.parse()).transpose()?,
+                from: opts.get("--from").map(|v| v.parse()).transpose()?,
+                to: opts.get("--to").map(|v| v.parse()).transpose()?,
             })?;
         }
         "evaluation-catalog" => {
@@ -162,6 +222,95 @@ fn main() -> Result<()> {
         }
         "history-catalog" => {
             cmd_history_catalog(&opts.positional_case()?)?;
+        }
+        "study-params" | "study-parameters" => println!("{}", study::engine::parameters_json()?),
+        "study-preflight" | "study-create" => {
+            let case_root = opts.positional_case()?;
+            let spec_file = match opts.get("--spec") {
+                Some(path) => PathBuf::from(path),
+                None => opts.positional_at(1, "a Study spec file")?,
+            };
+            study::runner::preflight_create(&case_root, &spec_file)?;
+            if cmd == "study-preflight" {
+                println!("ok");
+            } else {
+                let manifest = study::engine::create(&case_root, &spec_file)?;
+                println!("{}", manifest.root);
+            }
+        }
+        "study-status" => {
+            #[derive(serde::Serialize)]
+            struct StudyStatusJson {
+                manifest: study::spec::Manifest,
+                state: Option<study::state::StudyState>,
+                pause_requested: bool,
+                cancel_requested: bool,
+                results: Vec<study::runner::ResultFile>,
+                events: Vec<serde_json::Value>,
+            }
+            let study_dir = opts.positional_case()?;
+            println!(
+                "{}",
+                serde_json::to_string(&StudyStatusJson {
+                    manifest: study::engine::status(&study_dir)?,
+                    state: study::checkpoint::load_latest::<study::state::StudyState>(
+                        &study_dir.join("checkpoints/state"),
+                    )?
+                    .map(|loaded| loaded.payload),
+                    pause_requested: study::state::pause_requested(&study_dir),
+                    cancel_requested: study::state::cancel_requested(&study_dir),
+                    results: study::runner::result_files(&study_dir)?,
+                    events: study::runner::event_log_tail(&study_dir, 300)?,
+                })?
+            );
+        }
+        "study-result" => print!(
+            "{}",
+            study::runner::read_result(
+                &opts.positional_case()?,
+                Path::new(&opts.need_str("--path")?)
+            )?
+        ),
+        "study-run" => {
+            let study_dir = opts.positional_case()?;
+            let manifest = study::engine::status(&study_dir)?;
+            let kernel = opts
+                .get("--kernel")
+                .or_else(|| manifest.spec.kernel_dir.clone())
+                .context("study-run needs --kernel or spec.kernel_dir")?;
+            cmd_study_run(
+                &study_dir,
+                Path::new(&kernel),
+                opts.get("--stream").is_some(),
+                opts.get("--jobs")
+                    .map(|v| v.parse())
+                    .transpose()?
+                    .unwrap_or(manifest.spec.budget.jobs),
+                opts.get("--retry-failed").is_some(),
+            )?;
+        }
+        "study-export" => {
+            let output = match opts.get("--out") {
+                Some(path) => PathBuf::from(path),
+                None => opts.positional_at(1, "an export directory")?,
+            };
+            study::export::export(&opts.positional_case()?, &output)?;
+        }
+        "study-pause" => study::state::request_pause(&opts.positional_case()?)?,
+        "study-resume" => study::state::resume(&opts.positional_case()?)?,
+        "study-cancel" => study::state::request_cancel(&opts.positional_case()?)?,
+        "study-retry" => cmd_study_retry(
+            &opts.positional_case()?,
+            opts.get("--include-review").is_some(),
+        )?,
+        "study-apply" => cmd_study_apply(
+            &opts.positional_case()?,
+            &opts.need_str("--member")?,
+            &opts.need("--out")?,
+            opts.get("--name"),
+        )?,
+        "study-apply-preview" => {
+            cmd_study_apply_preview(&opts.positional_case()?, &opts.need_str("--member")?)?
         }
         "all" => {
             let case = cmd_new(&opts)?;
@@ -184,6 +333,8 @@ fn main() -> Result<()> {
                     summary_only: false,
                     pair_vars: Vec::new(),
                     pair_max_points: None,
+                    from: None,
+                    to: None,
                 })?,
                 None => println!("no --obs given; skipping the metrics table"),
             }
@@ -410,7 +561,7 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     let filled = colm_srfdata::site::fill(&skel, &out, rawdata.as_deref().map(Path::new), None);
     let _ = std::fs::remove_file(&skel);
     let r = filled?;
-    let audit = colm_srfdata::site::audit(&out, mode, rawdata.as_deref().map(Path::new))?;
+    let audit = colm_srfdata::site::audit(&out, mode, rawdata.as_deref().map(Path::new), false)?;
 
     // 人读输出仍单独说明 IGBP 冠层高度是否来自 CoLM 查表；完整运行缺项只由
     // `site::audit` 生成，不能在 CLI 再维护第二张会漂移的变量表。
@@ -503,9 +654,77 @@ fn parse_site_mode(value: Option<&str>) -> Result<colm_srfdata::site::SiteMode> 
         "usgs" => Ok(SiteMode::Usgs),
         "pft" => Ok(SiteMode::Pft),
         "pc" => Ok(SiteMode::Pc),
-        "urban" => Ok(SiteMode::Urban),
-        other => bail!("unsupported --mode {other:?}; use igbp, usgs, pft, pc, or urban"),
+        "urban" | "urban-igbp" | "urban-usgs" | "urban-pft" | "urban-pc" => {
+            Ok(SiteMode::Urban)
+        }
+        other => bail!(
+            "unsupported --mode {other:?}; use igbp, usgs, pft, pc, urban, urban-igbp, urban-usgs, urban-pft, or urban-pc"
+        ),
     }
+}
+
+#[derive(Clone, Copy)]
+struct NewMode {
+    site: colm_srfdata::site::SiteMode,
+    subgrid: Subgrid,
+    urban_landtype: Option<i32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Subgrid {
+    Lct,
+    Pft,
+    Pc,
+}
+
+fn parse_new_mode(value: Option<&str>) -> Result<NewMode> {
+    use colm_case::build::{URBAN_LANDTYPE_IGBP, URBAN_LANDTYPE_USGS};
+    use colm_srfdata::site::SiteMode;
+    Ok(match value.unwrap_or("igbp").to_ascii_lowercase().as_str() {
+        "igbp" => NewMode {
+            site: SiteMode::Igbp,
+            subgrid: Subgrid::Lct,
+            urban_landtype: None,
+        },
+        "usgs" => NewMode {
+            site: SiteMode::Usgs,
+            subgrid: Subgrid::Lct,
+            urban_landtype: None,
+        },
+        "pft" => NewMode {
+            site: SiteMode::Pft,
+            subgrid: Subgrid::Pft,
+            urban_landtype: None,
+        },
+        "pc" => NewMode {
+            site: SiteMode::Pc,
+            subgrid: Subgrid::Pc,
+            urban_landtype: None,
+        },
+        "urban" | "urban-igbp" => NewMode {
+            site: SiteMode::Urban,
+            subgrid: Subgrid::Lct,
+            urban_landtype: Some(URBAN_LANDTYPE_IGBP),
+        },
+        "urban-usgs" => NewMode {
+            site: SiteMode::Urban,
+            subgrid: Subgrid::Lct,
+            urban_landtype: Some(URBAN_LANDTYPE_USGS),
+        },
+        "urban-pft" => NewMode {
+            site: SiteMode::Urban,
+            subgrid: Subgrid::Pft,
+            urban_landtype: Some(URBAN_LANDTYPE_IGBP),
+        },
+        "urban-pc" => NewMode {
+            site: SiteMode::Urban,
+            subgrid: Subgrid::Pc,
+            urban_landtype: Some(URBAN_LANDTYPE_IGBP),
+        },
+        other => bail!(
+            "unsupported --mode {other:?}; use igbp, usgs, pft, pc, urban, urban-igbp, urban-usgs, urban-pft, or urban-pc"
+        ),
+    })
 }
 
 // ---------------------------------------------------------------- new
@@ -579,7 +798,8 @@ fn resolve_met(explicit: Option<&str>, site: &Path) -> Result<PathBuf> {
         if !p.exists() {
             bail!("--met {} does not exist", p.display());
         }
-        return Ok(p);
+        return colm_kernel::manifest::absolute(&p)
+            .with_context(|| format!("cannot resolve --met {}", p.display()));
     }
     sibling(site, "Forcing", 0).with_context(|| {
         format!(
@@ -588,6 +808,81 @@ fn resolve_met(explicit: Option<&str>, site: &Path) -> Result<PathBuf> {
             site.display()
         )
     })
+}
+
+fn complete_forcing_heights(
+    summary: &mut colm_forcing::MetSummary,
+    site: &Path,
+    met: &Path,
+) -> Result<()> {
+    if valid_height(summary.height_v)
+        && valid_height(summary.height_t)
+        && valid_height(summary.height_q)
+    {
+        return Ok(());
+    }
+
+    let companion = forcing_height_nml(site, met);
+    if let Some(path) = companion.as_ref().filter(|path| path.is_file()) {
+        let doc = colm_namelist::parse(&std::fs::read_to_string(path)?)
+            .with_context(|| format!("cannot parse {}", path.display()))?;
+        if !valid_height(summary.height_v) {
+            summary.height_v = nml_height(&doc, "DEF_forcing%HEIGHT_V").unwrap_or(summary.height_v);
+        }
+        if !valid_height(summary.height_t) {
+            summary.height_t = nml_height(&doc, "DEF_forcing%HEIGHT_T").unwrap_or(summary.height_t);
+        }
+        if !valid_height(summary.height_q) {
+            summary.height_q = nml_height(&doc, "DEF_forcing%HEIGHT_Q").unwrap_or(summary.height_q);
+        }
+    }
+
+    let missing = [
+        ("HEIGHT_V", summary.height_v),
+        ("HEIGHT_T", summary.height_t),
+        ("HEIGHT_Q", summary.height_q),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| (!valid_height(value)).then_some(name))
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "{} lacks finite positive forcing observation height(s): {}; expected them as reference_height_v/t/q in the NetCDF file or as DEF_forcing%HEIGHT_V/T/Q in {}",
+            met.display(),
+            missing.join(", "),
+            companion
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "../Forcingnml/<site>.nml".to_string())
+        )
+    }
+}
+
+fn valid_height(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+fn nml_height(doc: &colm_namelist::Document, field: &str) -> Option<f64> {
+    doc.get(field)
+        .and_then(colm_namelist::Value::as_f64)
+        .filter(|v| valid_height(*v))
+}
+
+fn forcing_height_nml(site: &Path, met: &Path) -> Option<PathBuf> {
+    let stem = site.file_name()?.to_str().and_then(|name| {
+        LAYOUTS
+            .iter()
+            .find_map(|(suffix, _, _)| name.strip_suffix(suffix))
+    })?;
+    let short = stem.split('_').next().unwrap_or(stem);
+    Some(
+        met.parent()?
+            .parent()?
+            .join("Forcingnml")
+            .join(format!("{short}.nml")),
+    )
 }
 
 /// 一个站点在界面上要显示的一切。
@@ -755,11 +1050,12 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     let already_filled = colm_srfdata::site::missing_fields(&site_raw)?.is_empty();
     let kind = colm_srfdata::site::site_kind(&site_raw)?;
     let urban = kind == colm_srfdata::site::SiteKind::Urban;
-    let mode = match o.get("--mode") {
-        Some(value) => parse_site_mode(Some(&value))?,
-        None if urban => colm_srfdata::site::SiteMode::Urban,
-        None => colm_srfdata::site::SiteMode::Igbp,
+    let new_mode = match o.get("--mode") {
+        Some(value) => parse_new_mode(Some(&value))?,
+        None if urban => parse_new_mode(Some("urban"))?,
+        None => parse_new_mode(None)?,
     };
+    let mode = new_mode.site;
     if urban != (mode == colm_srfdata::site::SiteMode::Urban) {
         bail!(
             "site kind {} does not match --mode {}; choose the same natural/urban mode used in the entry wizard",
@@ -850,6 +1146,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         &layout.site_nc(),
         mode,
         o.get("--rawdata").as_deref().map(Path::new),
+        o.get("--crop").is_some(),
     )?;
     if site_audit.readiness == colm_srfdata::site::Readiness::Blocked {
         bail!(
@@ -862,7 +1159,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     let urban_covered = urban && site_audit.self_contained();
 
     // 2. 强迫场 namelist —— 不转换数据，CoLM 直接读 PLUMBER2 的 Met 文件
-    let summary = colm_forcing::summarize(&met)?;
+    let mut summary = colm_forcing::summarize(&met)?;
+    complete_forcing_heights(&mut summary, &site_raw, &met)?;
     let problems = colm_forcing::check(&summary, None);
     if !problems.is_empty() {
         for p in &problems {
@@ -918,14 +1216,14 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         ),
         (e.year, e.month, e.day, forc_end_sec),
     )?;
-    // 预热。默认重复第一年 10 遍 —— 陆面模式的土壤温湿与（开了 BGC 时的）
+    // 预热。默认重复第一年 1 遍 —— 陆面模式的土壤温湿与（开了 BGC 时的）
     // 碳库是慢变量，直接从初始场跑出来的头一段并不代表这个站点的气候态。
     //
     // **代价是输出少一年**：CoLM 的预热期是从窗口头上扣的，不是加在前面的
     // （`MOD_Hist.F90:235` 在预热期直接 RETURN）。所以周期只取一年，
     // 而不是常见的"重复整段"—— PLUMBER2 里最短的站点只有两年多。
     let spin_years = o.count("--spinup-years", 1)?;
-    let spin_repeat = o.count("--spinup-repeat", 10)?;
+    let spin_repeat = o.count("--spinup-repeat", 1)?;
     let mut spinup = Spinup {
         years: spin_years,
         repeat: spin_repeat,
@@ -946,7 +1244,12 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     }
 
     let loc = colm_srfdata::site::location(&layout.site_nc())?;
-    let mode_landtype = colm_srfdata::site::landtype_for_mode(&layout.site_nc(), mode)?;
+    let mode_landtype = new_mode
+        .urban_landtype
+        .or(colm_srfdata::site::landtype_for_mode(
+            &layout.site_nc(),
+            mode,
+        )?);
     let name = o.get("--name").unwrap_or_else(|| {
         site_raw
             .file_name()
@@ -995,11 +1298,9 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         };
         (raw, run)
     } else {
-        let raw = match o.get("--rawdata") {
-            Some(r) => slash(Path::new(&r)),
-            None => text(&out.join("rawdata_unused/")),
-        };
-        (raw, text(&out.join("runtime_unused/")))
+        let raw = configured_or_unused(o.get("--rawdata"), &out.join("rawdata_unused/"));
+        let run = configured_or_unused(o.get("--runtime"), &out.join("runtime_unused/"));
+        (raw, run)
     };
 
     let spec = CaseSpec {
@@ -1030,7 +1331,11 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             forcing_namelist: text(&layout.forcing_nml()),
         },
     };
-    let all = fields(&spec);
+    let mut all = fields(&spec);
+    add_subgrid_fields(&mut all, new_mode.subgrid);
+    if o.get("--crop").is_some() {
+        add_crop_fields(&mut all);
+    }
     let req = required(&all);
     std::fs::write(layout.case_nml(), render(&req))?;
     println!(
@@ -1135,6 +1440,61 @@ fn slash(p: &Path) -> String {
     }
 }
 
+fn configured_or_unused(configured: Option<String>, unused: &Path) -> String {
+    configured
+        .map(|path| {
+            let path = Path::new(&path);
+            slash(&if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
+            })
+        })
+        .unwrap_or_else(|| text(unused))
+}
+
+fn add_crop_fields(fields: &mut Vec<(String, colm_namelist::Value)>) {
+    fields.extend([
+        ("DEF_USE_BGC".into(), colm_namelist::Value::Bool(true)),
+        (
+            "DEF_USE_LAIFEEDBACK".into(),
+            colm_namelist::Value::Bool(true),
+        ),
+        ("DEF_USE_FERT".into(), colm_namelist::Value::Bool(false)),
+        (
+            "DEF_USE_CNSOYFIXN".into(),
+            colm_namelist::Value::Bool(false),
+        ),
+        (
+            "DEF_USE_IRRIGATION".into(),
+            colm_namelist::Value::Bool(false),
+        ),
+        (
+            "DEF_TUNING_CROP_PLANTING_DAY".into(),
+            colm_namelist::Value::Real { text: "120".into() },
+        ),
+    ]);
+}
+
+fn add_subgrid_fields(fields: &mut Vec<(String, colm_namelist::Value)>, subgrid: Subgrid) {
+    fields.extend([
+        (
+            "DEF_USE_LCT".into(),
+            colm_namelist::Value::Bool(subgrid == Subgrid::Lct),
+        ),
+        (
+            "DEF_USE_PFT".into(),
+            colm_namelist::Value::Bool(subgrid == Subgrid::Pft),
+        ),
+        (
+            "DEF_USE_PC".into(),
+            colm_namelist::Value::Bool(subgrid == Subgrid::Pc),
+        ),
+    ]);
+}
+
 // ---------------------------------------------------------------- run
 
 /// `stream` 打开时，子进程的每一行原样即时转发到本进程的 stdout。
@@ -1154,12 +1514,39 @@ fn requested_run_stage(value: Option<&str>) -> Result<Option<Stage>> {
     }
 }
 
+enum RunNotice<'a> {
+    StageBegin(&'a str),
+    StageSkipped(&'a str),
+    Log { stage: &'a str, line: &'a str },
+    StageDone { stage: &'a str, ok: bool },
+}
+
 fn cmd_run(
     case: &Path,
     kernel_dir: &Path,
     stream: bool,
     force: bool,
     only_stage: Option<Stage>,
+) -> Result<()> {
+    run_case(
+        case,
+        kernel_dir,
+        stream,
+        force,
+        only_stage,
+        false,
+        &mut |_| {},
+    )
+}
+
+fn run_case(
+    case: &Path,
+    kernel_dir: &Path,
+    stream: bool,
+    force: bool,
+    only_stage: Option<Stage>,
+    quiet: bool,
+    notice: &mut dyn FnMut(RunNotice<'_>),
 ) -> Result<()> {
     // **绝对化算例目录。** `run_stage` 用 `current_dir(work)` 启动子进程，
     // 于是一个相对的 namelist 路径会被相对 `work` 解析而不是相对调用方的当前
@@ -1172,34 +1559,24 @@ fn cmd_run(
     let case = &colm_kernel::manifest::absolute(case)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
     let kernel = Kernel::open(kernel_dir)?;
-    println!(
-        "kernel: {} {} ({})",
-        kernel.manifest.preset, kernel.manifest.colm_git_sha, kernel.manifest.platform
-    );
+    if !quiet {
+        println!(
+            "kernel: {} ({})",
+            kernel.manifest.identity(),
+            kernel.manifest.platform
+        );
+    }
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let out = layout.out().join(&name);
-    let const_dir = out.join("restart/const");
+    let lc_year = land_cover_year(&layout.case_nml())?;
     // 产物必须列到**文件**：目录在程序写任何东西之前就已存在，
     // 只列目录的话「跑完了但什么都没写」恰好抓不到。
-    let stages = [
-        (Stage::MkSrfData, vec![out.join("landdata/srfdata.nc")]),
-        (
-            Stage::MkIniData,
-            vec![
-                const_dir.join(format!("{name}_restart_const_lc2005_w180_s90.nc")),
-                const_dir.join(format!("{name}_restart_const_lc2005.nc")),
-            ],
-        ),
-        (Stage::Colm, vec![]),
-    ];
+    let stages = stage_artifacts(&out, &name, lc_year);
     // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
     // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
     // 算新算例，且没有任何迹象。见 `fingerprint.rs`。
-    let kernel_id = format!(
-        "{}@{}",
-        kernel.manifest.preset, kernel.manifest.colm_git_sha
-    );
+    let kernel_id = kernel.manifest.identity();
     let mut marks = fingerprint::load(case);
     if force {
         match only_stage {
@@ -1224,19 +1601,22 @@ fn cmd_run(
             continue;
         }
         let sname = stage.program();
-        let want = fingerprint::compute(sname, &layout.case_nml(), &kernel_id)?;
-        // 两个条件都要满足才跳过：指纹一致，**且**产物真的都在。
-        // 只看指纹的话，手动删掉输出目录之后会跳过一段本该重跑的。
-        let have_all = !artifacts.is_empty() && artifacts.iter().all(|p| p.is_file());
-        let skip = have_all
-            && marks
-                .get(sname)
-                .is_some_and(|old| fingerprint::first_difference(old, &want).is_none());
+        let (want, have_all, skip) = stage_fingerprint_status(
+            *stage,
+            artifacts,
+            &layout.case_nml(),
+            &out,
+            &marks,
+            &kernel_id,
+        )?;
         if skip {
-            if stream {
+            notice(RunNotice::StageSkipped(sname));
+            if stream && !quiet {
                 println!("=== colm-stage {sname} skipped ===");
             }
-            println!("  {sname:<10} skipped (产物齐全且输入未变)");
+            if !quiet {
+                println!("  {sname:<10} skipped (产物齐全且输入未变)");
+            }
             continue;
         }
         // 说出**为什么**要重跑。「又跑了一遍」而不知道原因，
@@ -1244,7 +1624,9 @@ fn cmd_run(
         if let Some(old) = marks.get(sname) {
             if have_all {
                 if let Some(why) = fingerprint::first_difference(old, &want) {
-                    println!("  {sname:<10} 需要重跑：{why}");
+                    if !quiet {
+                        println!("  {sname:<10} 需要重跑：{why}");
+                    }
                 }
             }
         }
@@ -1260,7 +1642,7 @@ fn cmd_run(
         // 只删 `*_hist_*.nc`：restart 是 `mkinidata` 的产物，`colm` 要读它。
         if matches!(stage, Stage::Colm) {
             let removed = clear_history(&out)?;
-            if removed > 0 {
+            if removed > 0 && !quiet {
                 println!("  {sname:<10} 清掉上一次的 {removed} 个 history 文件");
             }
         }
@@ -1271,7 +1653,8 @@ fn cmd_run(
         //
         // 前缀选得刻意难撞：CoLM 的输出里没有 `===` 开头的行（实测 34180 行
         // 一条都没有），而 `colm-stage` 这个词组也不出现在上游源码里。
-        if stream {
+        notice(RunNotice::StageBegin(sname));
+        if stream && !quiet {
             println!("=== colm-stage {} begin ===", stage.program());
         }
         // 转发时**每行都 flush**。默认的行缓冲只在 stdout 连着终端时才生效；
@@ -1279,6 +1662,9 @@ fn cmd_run(
         // 几大块一起吐出来 —— 从界面上看跟完全不转发几乎没有区别。
         let mut forward = |line: &str| {
             if stream {
+                notice(RunNotice::Log { stage: sname, line });
+            }
+            if stream && !quiet {
                 use std::io::Write as _;
                 let mut o = std::io::stdout().lock();
                 let _ = writeln!(o, "{line}");
@@ -1293,25 +1679,35 @@ fn cmd_run(
             artifacts,
             &mut forward,
         )?;
-        if stream {
+        notice(RunNotice::StageDone {
+            stage: sname,
+            ok: r.succeeded(),
+        });
+        if stream && !quiet {
             println!(
                 "=== colm-stage {} {} ===",
                 stage.program(),
                 if r.succeeded() { "ok" } else { "failed" }
             );
         }
-        if r.succeeded() {
-            println!("  {:<10} ok", stage.program());
-        } else {
-            eprintln!("  {:<10} FAILED: {:?}", stage.program(), r.outcome);
+        if !quiet {
+            if r.succeeded() {
+                println!("  {:<10} ok", stage.program());
+            } else {
+                eprintln!("  {:<10} FAILED: {:?}", stage.program(), r.outcome);
+            }
         }
         // CoLM 会不声不响地改掉你的配置然后继续跑 —— 失败时尤其要列，
         // 它恰恰会先改配置再死在别处。
         for o in &r.overrides {
-            println!("             {}", o.text);
+            if !quiet {
+                println!("             {}", o.text);
+            }
         }
         if !r.succeeded() {
-            eprintln!("  log: {}", r.log.display());
+            if !quiet {
+                eprintln!("  log: {}", r.log.display());
+            }
             // 失败的那一段**不记指纹**，否则下次会把一个没跑成的阶段当成
             // 「已完成且输入未变」而跳过。
             marks.remove(sname);
@@ -1321,6 +1717,138 @@ fn cmd_run(
         marks.insert(sname.to_string(), want);
         fingerprint::save(case, &marks)?;
     }
+    Ok(())
+}
+
+fn land_cover_year(case_nml: &Path) -> Result<i32> {
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let doc = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    let year = match doc.get("DEF_LC_YEAR") {
+        Some(colm_namelist::Value::Int(value)) => *value,
+        Some(other) => bail!("DEF_LC_YEAR must be an integer, got {other}"),
+        None => match colm_schema::find("DEF_LC_YEAR").map(|field| field.default) {
+            Some(colm_schema::Default::Integer(value)) => value,
+            _ => bail!("DEF_LC_YEAR default is missing from the generated schema"),
+        },
+    };
+    if !(0..=9999).contains(&year) {
+        bail!("DEF_LC_YEAR {year} cannot be formatted as a four-digit land-cover year");
+    }
+    Ok(year as i32)
+}
+
+fn stage_artifacts(out: &Path, name: &str, lc_year: i32) -> [(Stage, Vec<PathBuf>); 3] {
+    let const_dir = out.join("restart/const");
+    let lc = format!("lc{lc_year:04}");
+    [
+        (Stage::MkSrfData, vec![out.join("landdata/srfdata.nc")]),
+        (
+            Stage::MkIniData,
+            vec![
+                const_dir.join(format!("{name}_restart_const_{lc}_w180_s90.nc")),
+                const_dir.join(format!("{name}_restart_const_{lc}.nc")),
+            ],
+        ),
+        (Stage::Colm, vec![]),
+    ]
+}
+
+fn stage_fingerprint_status(
+    stage: Stage,
+    artifacts: &[PathBuf],
+    case_nml: &Path,
+    out: &Path,
+    marks: &std::collections::BTreeMap<String, fingerprint::Fingerprint>,
+    kernel_id: &str,
+) -> Result<(fingerprint::Fingerprint, bool, bool)> {
+    let sname = stage.program();
+    let want = fingerprint::compute(sname, case_nml, kernel_id)?;
+    // 两个条件都要满足才跳过：指纹一致，**且**产物真的都在。
+    let have_all = if stage == Stage::Colm {
+        history_files(out).is_ok()
+    } else {
+        !artifacts.is_empty() && artifacts.iter().all(|path| path.is_file())
+    };
+    let current = have_all
+        && marks
+            .get(sname)
+            .is_some_and(|old| fingerprint::first_difference(old, &want).is_none());
+    Ok((want, have_all, current))
+}
+
+pub(crate) fn case_is_current(case: &Path, kernel_id: &str) -> Result<bool> {
+    let layout = Layout::new(case);
+    let name = colm_case::case_name(&layout.case_nml())?;
+    let out = layout.out().join(&name);
+    let lc_year = land_cover_year(&layout.case_nml())?;
+    let marks = fingerprint::load(case);
+    for (stage, artifacts) in stage_artifacts(&out, &name, lc_year) {
+        if !stage_fingerprint_status(
+            stage,
+            &artifacts,
+            &layout.case_nml(),
+            &out,
+            &marks,
+            kernel_id,
+        )?
+        .2
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn cmd_study_run(
+    study_dir: &Path,
+    kernel_dir: &Path,
+    stream: bool,
+    jobs: usize,
+    retry_failed: bool,
+) -> Result<()> {
+    let state = study::runner::run(
+        study_dir,
+        study::runner::RunOptions {
+            kernel_dir,
+            jobs,
+            stream,
+            retry_failed,
+        },
+    )?;
+    if !stream {
+        println!("{}", serde_json::to_string(&state)?);
+    }
+    Ok(())
+}
+
+fn cmd_study_retry(study_dir: &Path, include_review: bool) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&study::runner::retry(study_dir, include_review)?)?
+    );
+    Ok(())
+}
+
+fn cmd_study_apply(study_dir: &Path, member: &str, out: &Path, name: Option<String>) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&study::runner::apply(
+            study_dir,
+            member,
+            out,
+            name.as_deref()
+        )?)?
+    );
+    Ok(())
+}
+
+fn cmd_study_apply_preview(study_dir: &Path, member: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&study::runner::apply_preview(study_dir, member)?)?
+    );
     Ok(())
 }
 
@@ -1386,6 +1914,8 @@ struct MetricsRequest<'a> {
     summary_only: bool,
     pair_vars: Vec<String>,
     pair_max_points: Option<usize>,
+    from: Option<i64>,
+    to: Option<i64>,
 }
 
 #[derive(serde::Serialize)]
@@ -1405,14 +1935,14 @@ struct EvaluationAvailability {
 
 fn evaluation_availability(
     variable: &colm_hist::obs::EvaluationVariable,
-    history: &netcdf::File,
+    hists: &[PathBuf],
     observation: &netcdf::File,
 ) -> EvaluationAvailability {
     let missing_model = variable
         .model
         .required()
         .into_iter()
-        .filter(|name| !name.is_empty() && history.variable(name).is_none())
+        .filter(|name| !name.is_empty() && !history_has_variables(hists, &[*name]))
         .map(str::to_string)
         .collect::<Vec<_>>();
     let mut missing_observation = Vec::new();
@@ -1446,13 +1976,11 @@ fn cmd_evaluation_catalog(case: &Path, obs_path: &Path) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
-    let history =
-        netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
     let observation =
         netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
     let rows = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
-        .map(|variable| evaluation_availability(variable, &history, &observation))
+        .map(|variable| evaluation_availability(variable, &hists, &observation))
         .collect::<Vec<_>>();
     println!("{}", serde_json::to_string(&rows)?);
     Ok(())
@@ -1481,7 +2009,31 @@ fn model_values(
     }
 }
 
-fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
+fn normalized_metric_window(
+    model_minutes: &[f64],
+    normalized_seconds: &[f64],
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<Option<colm_hist::pair::TimeWindow>> {
+    if from.is_none() && to.is_none() {
+        return Ok(None);
+    }
+    if from.zip(to).is_some_and(|(from, to)| from >= to) {
+        bail!("metric --from must be earlier than --to");
+    }
+    let unix = colm_hist::time::unix_seconds(model_minutes);
+    let offset = unix
+        .first()
+        .zip(normalized_seconds.first())
+        .map(|(unix, normalized)| *unix as f64 - *normalized)
+        .unwrap_or(0.0);
+    Ok(Some(colm_hist::pair::TimeWindow {
+        from: from.map_or(f64::NEG_INFINITY, |value| value as f64 - offset),
+        to: to.map_or(f64::INFINITY, |value| value as f64 - offset),
+    }))
+}
+
+fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     let MetricsRequest {
         case,
         obs_path,
@@ -1491,7 +2043,10 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
         summary_only,
         pair_vars,
         pair_max_points,
+        from,
+        to,
     } = request;
+    validate_pair_vars(&pair_vars)?;
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
@@ -1502,8 +2057,6 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
     let obs_file =
         netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
     let o_t = read_file_1d(&obs_file, obs_path, "time")?;
-    let first_history =
-        netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
     let selected = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
         .filter(|variable| {
@@ -1512,7 +2065,7 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
                     .iter()
                     .any(|wanted| wanted == variable.observation)
         })
-        .filter(|variable| evaluation_availability(variable, &first_history, &obs_file).available)
+        .filter(|variable| evaluation_availability(variable, &hists, &obs_file).available)
         .collect::<Vec<_>>();
     let mut wanted = std::collections::BTreeSet::from(["time"]);
     for variable in &selected {
@@ -1524,7 +2077,6 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
                 .filter(|name| !name.is_empty()),
         );
     }
-    drop(first_history);
     let wanted = wanted.into_iter().collect::<Vec<_>>();
     let mut model_data = read_history_many(&hists, &wanted)?;
     let m_t = model_data.remove("time").expect("time was requested");
@@ -1534,8 +2086,9 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
         .with_context(|| format!("time:units in {} is not a string", obs_path.display()))?;
     let m_sec = colm_hist::time::model_seconds_from_units(&m_t, &units)
         .with_context(|| format!("unsupported observation time units {units:?}"))?;
+    let unix = colm_hist::time::unix_seconds(&m_t);
+    let metric_window = normalized_metric_window(&m_t, &m_sec, from, to)?;
     let by_sec = if json && !summary_only {
-        let unix = colm_hist::time::unix_seconds(&m_t);
         Some(
             m_sec
                 .iter()
@@ -1582,7 +2135,8 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
             values: &o_v,
             qc: &o_q,
         };
-        let with_time = colm_hist::pair::pair_with_time(&m_sec, &m_v, &s, spinup);
+        let with_time =
+            colm_hist::pair::pair_with_time_in_window(&m_sec, &m_v, &s, spinup, metric_window);
         let pairs: Vec<(f64, f64)> = with_time.iter().map(|(_, a, b)| (*a, *b)).collect();
         let Some(m) = colm_hist::metric::compute(&pairs) else {
             continue;
@@ -1706,6 +2260,36 @@ fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
             None => println!(),
         }
     }
+    Ok(rows)
+}
+
+fn validate_pair_vars(pair_vars: &[String]) -> Result<()> {
+    let unknown = pair_vars
+        .iter()
+        .filter(|wanted| {
+            !colm_hist::obs::EVALUATION_VARIABLES
+                .iter()
+                .any(|variable| variable.observation == wanted.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        let known = colm_hist::obs::EVALUATION_VARIABLES
+            .iter()
+            .map(|variable| variable.observation)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "unknown --pairs-var value(s): {}; choose from {known}",
+            unknown.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {
+    let json = request.json;
+    let rows = compute_metric_rows(request)?;
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     }
@@ -1759,34 +2343,45 @@ fn history_kind(dimensions: &[(String, usize)]) -> &'static str {
     }
 }
 
+fn history_variables(files: &[PathBuf]) -> Result<Vec<HistoryVariable>> {
+    let mut variables = std::collections::BTreeMap::new();
+    for stream in history_streams(files) {
+        let path = stream.first().expect("empty history streams were removed");
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        for variable in file.variables() {
+            let name = variable.name();
+            if variables.contains_key(&name) {
+                continue;
+            }
+            let dimensions: Vec<(String, usize)> = variable
+                .dimensions()
+                .iter()
+                .map(|dimension| (dimension.name(), dimension.len()))
+                .collect();
+            variables.insert(
+                name.clone(),
+                HistoryVariable {
+                    units: variable_units(&file, &name),
+                    name,
+                    kind: history_kind(&dimensions),
+                    dimensions: dimensions
+                        .into_iter()
+                        .map(|(name, len)| DimensionShape { name, len })
+                        .collect(),
+                },
+            );
+        }
+    }
+    Ok(variables.into_values().collect())
+}
+
 fn cmd_history_catalog(case: &Path) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
     let time = read_history(&hists, "time")?;
     let unix = colm_hist::time::unix_seconds(&time);
-    let file =
-        netcdf::open(&hists[0]).with_context(|| format!("cannot open {}", hists[0].display()))?;
-    let mut variables = file
-        .variables()
-        .map(|variable| {
-            let dimensions: Vec<(String, usize)> = variable
-                .dimensions()
-                .iter()
-                .map(|dimension| (dimension.name(), dimension.len()))
-                .collect();
-            HistoryVariable {
-                name: variable.name(),
-                units: variable_units(&file, &variable.name()),
-                kind: history_kind(&dimensions),
-                dimensions: dimensions
-                    .into_iter()
-                    .map(|(name, len)| DimensionShape { name, len })
-                    .collect(),
-            }
-        })
-        .collect::<Vec<_>>();
-    variables.sort_by(|a, b| a.name.cmp(&b.name));
+    let variables = history_variables(&hists)?;
     let catalog = HistoryCatalog {
         files: hists.len(),
         steps: unix.len(),
@@ -3028,10 +3623,61 @@ fn read_history(files: &[PathBuf], var: &str) -> Result<Vec<f64>> {
         .expect("the requested variable is present in the result map"))
 }
 
-/// Read several scalar history variables while opening each monthly file once.
-/// NetCDF/HDF5 open/close dominates multi-year evaluation; grouping by file makes
-/// batch analysis scale with months rather than `months × variables`.
-fn read_history_many(
+fn history_stream_name(path: &Path) -> &str {
+    let suffix = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.split_once("_hist_"))
+        .map(|(_, suffix)| suffix)
+        .unwrap_or_default();
+    let prefix = suffix.split('_').next().unwrap_or_default();
+    if prefix.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        "primary"
+    } else {
+        prefix
+    }
+}
+
+fn history_streams(files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+    let mut streams = std::collections::BTreeMap::<&str, Vec<PathBuf>>::new();
+    for path in files {
+        streams
+            .entry(history_stream_name(path))
+            .or_default()
+            .push(path.clone());
+    }
+    let mut out = Vec::with_capacity(streams.len());
+    if let Some(primary) = streams.remove("primary") {
+        out.push(primary);
+    }
+    out.extend(streams.into_values());
+    out
+}
+
+fn primary_history_files(files: &[PathBuf]) -> Vec<PathBuf> {
+    history_streams(files)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| files.to_vec())
+}
+
+fn files_with_variables(files: &[PathBuf], vars: &[&str]) -> Result<Vec<PathBuf>> {
+    for stream in history_streams(files) {
+        let first = stream.first().expect("empty streams were removed");
+        let file =
+            netcdf::open(first).with_context(|| format!("cannot open {}", first.display()))?;
+        if vars.iter().all(|name| file.variable(name).is_some()) {
+            return Ok(stream);
+        }
+    }
+    bail!("no history file contains {}", vars.join(", "))
+}
+
+fn history_has_variables(files: &[PathBuf], vars: &[&str]) -> bool {
+    files_with_variables(files, vars).is_ok()
+}
+
+fn read_history_many_from(
     files: &[PathBuf],
     vars: &[&str],
 ) -> Result<std::collections::BTreeMap<String, Vec<f64>>> {
@@ -3055,6 +3701,84 @@ fn read_history_many(
                 files[0].parent().unwrap_or(Path::new(".")).display()
             )
         })?;
+    }
+    Ok(out)
+}
+
+/// Read scalar history variables from the file series that actually contains them.
+/// Main and tracer history are separate NetCDF series with duplicate timestamps; do
+/// not concatenate both just because both names match `*_hist_*.nc`.
+fn read_history_many(
+    files: &[PathBuf],
+    vars: &[&str],
+) -> Result<std::collections::BTreeMap<String, Vec<f64>>> {
+    let wants_time = vars.contains(&"time");
+    let data_vars = vars
+        .iter()
+        .copied()
+        .filter(|name| *name != "time")
+        .collect::<std::collections::BTreeSet<_>>();
+    if data_vars.is_empty() {
+        return read_history_many_from(&primary_history_files(files), vars);
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    let mut found = std::collections::BTreeSet::new();
+    let mut reference_time: Option<Vec<f64>> = None;
+    for stream in history_streams(files) {
+        let first = stream.first().expect("empty streams were removed");
+        let file =
+            netcdf::open(first).with_context(|| format!("cannot open {}", first.display()))?;
+        let stream_vars = data_vars
+            .iter()
+            .copied()
+            .filter(|name| !found.contains(name) && file.variable(name).is_some())
+            .collect::<Vec<_>>();
+        drop(file);
+        if stream_vars.is_empty() {
+            continue;
+        }
+        let mut request = Vec::new();
+        if wants_time || reference_time.is_some() {
+            request.push("time");
+        }
+        request.extend(stream_vars.iter().copied());
+        let mut data = read_history_many_from(&stream, &request)?;
+        if let Some(time) = data.remove("time") {
+            if let Some(reference) = &reference_time {
+                if reference != &time {
+                    bail!(
+                        "history streams use different time axes for {}",
+                        stream_vars.join(", ")
+                    );
+                }
+            } else {
+                reference_time = Some(time);
+            }
+        }
+        for name in stream_vars {
+            out.insert(
+                name.to_string(),
+                data.remove(name).expect("stream variable requested"),
+            );
+            found.insert(name);
+        }
+    }
+    for name in data_vars {
+        if !found.contains(name) {
+            bail!("{} has no variable {}", files[0].display(), name);
+        }
+    }
+    if wants_time {
+        out.insert(
+            "time".into(),
+            reference_time.unwrap_or_else(|| {
+                read_history_many_from(&primary_history_files(files), &["time"])
+                    .unwrap_or_default()
+                    .remove("time")
+                    .unwrap_or_default()
+            }),
+        );
     }
     Ok(out)
 }

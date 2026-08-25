@@ -198,9 +198,9 @@ fn the_healthy_history_namelist_line_is_still_benign() {
 }
 
 #[test]
-fn a_balance_violation_fails_the_run_because_colm_only_warns() {
-    // CoLMMAIN.F90:1545 / :1620 在 CoLMDEBUG 下打印这些然后继续跑 ——
-    // 没有 CoLM_stop。十种文本共享 `balance violation` 一个子串。
+fn every_balance_violation_fails_the_run() {
+    // 能量路径只警告；水收支路径会 CoLM_stop。无论内核是否自己停止，
+    // 十种文本共享 `balance violation` 一个子串，桌面端都必须明确判失败。
     for line in [
         " Warning: energy balance violation    1.2345678901234567      10",
         " Warning: water balance violation in CoLMMAIN (soil)    0.1234567890123457",

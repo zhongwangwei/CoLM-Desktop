@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 
 /// 可选子系统：目录或文件名归属 -> 需要的宏。
 ///
@@ -153,22 +153,39 @@ pub fn scan(root: &Path) -> Result<Usage> {
             }
             let t = line.trim_start();
             if t.starts_with("#endif") || t.starts_with("# endif") {
-                stack.pop();
+                if stack.pop().is_none() {
+                    bail!("unmatched #endif in {}", path.display());
+                }
+                continue;
+            }
+            if let Some(m) = elif_macro(line) {
+                let Some(branch) = stack.last_mut() else {
+                    bail!("unmatched #elif in {}", path.display());
+                };
+                *branch = m;
                 continue;
             }
             // `#else` 之后那一段的守护条件是**反过来的**，也就是「这个宏没开」。
             // 我们只关心「开了才有」，所以整段按无守护处理 —— 保守方向：
             // 宁可多显示一个字段，也不要把一个有用的字段藏起来。
             if t.starts_with("#else") || t.starts_with("# else") {
-                stack.pop();
-                stack.push(String::new());
+                let Some(branch) = stack.last_mut() else {
+                    bail!("unmatched #else in {}", path.display());
+                };
+                branch.clear();
                 continue;
             }
-            for name in def_names(line) {
+            for name in def_names(&executable_text(line)) {
                 let g: BTreeSet<String> = stack.iter().filter(|s| !s.is_empty()).cloned().collect();
                 guards.entry(name.clone()).or_default().push(g);
                 files.entry(name).or_default().insert(rel.clone());
             }
+        }
+        if !stack.is_empty() {
+            bail!(
+                "unterminated preprocessor conditional in {}",
+                path.display()
+            );
         }
     }
 
@@ -281,25 +298,75 @@ fn ifdef_macro(line: &str) -> Option<String> {
         return Some(String::new()); // 占位，保持嵌套深度对齐
     }
     if let Some(r) = rest.strip_prefix("if") {
-        let r = r.trim();
-        if let Some(d) = r.strip_prefix("defined") {
-            let d = d.trim().trim_start_matches('(').trim();
-            let name: String = d
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            // `#if (defined A || defined B)` 是「二选一」，不是「都要」——
-            // 当成单个宏会把只开了 B 的配置误判成不相关。整段按无守护处理。
-            if r.contains("||") {
-                return Some(String::new());
-            }
-            if !name.is_empty() {
-                return Some(name);
-            }
+        if r.starts_with("def") || r.starts_with("ndef") {
+            return None;
         }
-        return Some(String::new());
+        return Some(single_positive_macro(r));
     }
     None
+}
+
+fn elif_macro(line: &str) -> Option<String> {
+    let rest = line
+        .trim_start()
+        .strip_prefix('#')?
+        .trim_start()
+        .strip_prefix("elif")?;
+    Some(single_positive_macro(rest))
+}
+
+/// Return the sole positive `defined` macro, or an empty guard when the
+/// expression cannot be represented by this table (OR, AND, negation, `#if 0`).
+fn single_positive_macro(expr: &str) -> String {
+    let compact: String = expr.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("||") || compact.contains("&&") || compact.contains('!') {
+        return String::new();
+    }
+    let mut s = compact.as_str();
+    while s.starts_with('(') && s.ends_with(')') && s.len() >= 2 {
+        s = &s[1..s.len() - 1];
+    }
+    let name = s
+        .strip_prefix("defined(")
+        .and_then(|s| s.strip_suffix(')'))
+        .or_else(|| s.strip_prefix("defined"))
+        .unwrap_or("");
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        name.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Remove comments and string literals before looking for executable `DEF_`
+/// references. Diagnostics and comments often spell field names but do not use
+/// their values, so counting them can incorrectly erase a real macro guard.
+fn executable_text(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                if chars.peek() == Some(&q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            out.push(' ');
+            continue;
+        }
+        match c {
+            '!' => break,
+            '\'' | '"' => {
+                quote = Some(c);
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn def_names(line: &str) -> Vec<String> {
@@ -413,10 +480,10 @@ fn walk(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for e in rd.flatten() {
+        let rd = std::fs::read_dir(&d)
+            .with_context(|| format!("cannot read source directory {}", d.display()))?;
+        for entry in rd {
+            let e = entry.with_context(|| format!("cannot read an entry in {}", d.display()))?;
             let p = e.path();
             if p.is_dir() {
                 if p.file_name().and_then(|n| n.to_str()) != Some(".git") && p != untracked_tests {
@@ -429,4 +496,38 @@ fn walk(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parenthesized_and_elif_guards_are_not_lost() {
+        assert_eq!(ifdef_macro("#if (defined CROP)"), Some("CROP".into()));
+        assert_eq!(
+            ifdef_macro("#if(defined LULC_USGS)"),
+            Some("LULC_USGS".into())
+        );
+        assert_eq!(
+            elif_macro("#elif (defined BATS_CLASSIFICATION)"),
+            Some("BATS_CLASSIFICATION".into())
+        );
+        assert_eq!(
+            ifdef_macro("#if (defined A || defined B)"),
+            Some(String::new())
+        );
+        assert_eq!(
+            ifdef_macro("#if defined(A) && !defined(B)"),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn diagnostics_and_comments_are_not_field_uses() {
+        let code = executable_text("write(*,*) 'set DEF_HIDDEN' ! DEF_COMMENT");
+        assert!(def_names(&code).is_empty());
+        let code = executable_text("IF (DEF_REAL) write(*,*) \"DEF_MESSAGE\"");
+        assert_eq!(def_names(&code), vec!["DEF_REAL"]);
+    }
 }

@@ -168,7 +168,7 @@
           <div class="ch">先选站点数据和算例根目录，再在同一页建算例。</div>
           <div class="pill-row" style="margin-top:10px">
             <button class="btn-ghost" id="use-example">用自带的示例站点</button>
-            <span class="muted mini">CN-Cng 自然站或 AU-Preston 城市站</span>
+            <span class="muted mini">CN-Cng 自然站、AT-Neu 甲烷站、US-Ne3 作物站或 AU-Preston 城市站</span>
           </div>
           <div class="field">
             <label>站点目录</label>
@@ -197,8 +197,8 @@
               <button class="btn-ghost pick" data-for="rawdata">选择…</button></div>
           </div>
           <div id="urbandirs" hidden>
-            <div class="expert-note">本次向导打开了 <b>URBAN</b>；城市过程还需要 runtime 数据。</div>
-            <div class="field"><label>runtime 目录</label>
+            <div class="expert-note">本次配置会读取外部过程数据；BGC 默认需要 runtime 中的氮沉降与硝化数据。</div>
+            <div class="field"><label>runtime 目录 <span class="hint">（URBAN / BGC）</span></label>
               <div class="browse"><input class="input" id="runtime">
                 <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
           </div>
@@ -238,7 +238,7 @@
       <div class="flow-pane" data-flow-pane="basic-site" hidden>
         <div class="card"><h3>站点信息</h3>
           <div class="ch">站点属性文件、经纬度和地表覆盖类型在建例时按站点自动写入，不在这里批量修改。</div>
-          <p class="muted mini">自然站从站点文件的 <code>IGBP_classification</code> 读取地表覆盖类型；城市站固定为 IGBP 13。下面只保留可调整的数据来源开关。</p>
+          <p class="muted mini">自然站从站点文件读取地表覆盖类型；城市站使用所选地类体系的城市类型（IGBP 为 13，USGS 为 1）。下面只保留可调整的数据来源开关。</p>
           <div id="basic-site-fields"><p class="muted">先在“文件与目录”里选择站点并建算例</p></div></div>
       </div>
       <div class="flow-pane" data-flow-pane="basic-timing" hidden>
@@ -275,7 +275,8 @@
         没有启用或没有可设置项的分栏会自动隐藏。</p>
 
       <div class="expert-note" id="expert-placeholder" hidden>
-        专家选项还在规划中。你后续提供的专家内容会放在这里；当前不会额外改写任何模型参数。
+        专家模式会在各过程分栏显示不常用的 case.nml 参数和外部过程参数文件；多站点时先用下拉菜单选择要修改的站点。
+        这里只列 CoLM 运行时真正读取的参数；数组尺寸、物理常数等编译期常量不会伪装成可编辑项。
       </div>
       <div id="unknown"></div>
 
@@ -334,6 +335,7 @@
           <button class="btn-ghost" id="run-mkinidata" disabled>运行 mkinidata</button>
           <button class="btn-ghost" id="run-colm" disabled>运行 colm</button>
           <button class="run-btn" id="runall" disabled>▶ 运行全部</button>
+          <button class="btn-ghost" id="cancel-run" disabled>取消运行</button>
           <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
         </div>
         <div class="stages" id="stages"></div>
@@ -398,8 +400,8 @@
           <div class="result-tools result-tools-wide">
             <label>站点 <select class="select result-case-select" data-result-case></select></label>
             <label>变量 <select class="select" id="var"></select></label>
-            <label>起始 <input class="input" id="series-from" type="datetime-local"></label>
-            <label>结束 <input class="input" id="series-to" type="datetime-local"></label>
+            <label>起始（UTC） <input class="input" id="series-from" type="datetime-local"></label>
+            <label>结束（UTC） <input class="input" id="series-to" type="datetime-local"></label>
             <button class="btn-next" id="plot" disabled>绘制</button>
             <button class="btn-ghost" id="series-reset">完整范围</button>
             <button class="btn-ghost" id="series-png" disabled>导出 PNG</button>
@@ -437,7 +439,10 @@
         </div>
         <div class="card"><div class="result-table-wrap" id="metrics"></div></div>
         <div class="card">
-          <div class="result-card-head"><div><h3>图形诊断</h3><div class="ch">点击指标表中的变量切换图形。</div></div><button class="btn-ghost" id="evaluation-png" disabled>导出 PNG</button></div>
+          <div class="result-card-head">
+            <div><h3>图形诊断</h3><div class="ch">评估后自动显示第一项；也可点击指标表变量切换，或手动刷新。</div></div>
+            <div class="result-tools"><button class="btn-ghost" id="evaluation-chart-refresh" disabled>显示 / 刷新图形</button><button class="btn-ghost" id="evaluation-png" disabled>导出 PNG</button></div>
+          </div>
           <div id="evaluation-charts" class="result-chart-host"></div>
         </div>
       </div>
@@ -488,13 +493,83 @@
         <div id="diagnostics" class="diagnostic-grid"></div>
       </div>
 
+      <div class="flow-pane" data-flow-pane="result-uncertainty" hidden>
+        <div class="work-head"><span class="kicker">第 6 步 · 不确定性分析</span></div>
+        <h1>不确定性分析</h1>
+        <p class="sub">用当前已完成算例创建 OAT 或 LHS 参数扰动 Study；基准成员单独保留，不参与不确定性分位数统计。</p>
+        <div class="card result-sticky-tools">
+          <div class="result-tools result-tools-wide">
+            <label>方法 <select class="select" id="uq-method"><option value="lhs">LHS 拉丁超立方</option><option value="oat">OAT 单因子</option></select></label>
+            <label>站点方式 <select class="select" id="uq-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独 Study</option></select></label>
+            <label>分析开始 <input class="input" id="uq-from" type="date"></label>
+            <label>分析结束 <input class="input" id="uq-to" type="date"></label>
+            <label>样本数 <input class="input" id="uq-count" type="number" min="1" max="1000" value="40"></label>
+            <label>随机种子 <input class="input" id="uq-seed" type="number" value="1"></label>
+            <label>并发 <input class="input" id="uq-jobs" type="number" min="1" value="1"></label>
+            <label>内核目录 <input class="input" id="uq-kernel-dir" readonly placeholder="使用当前内核"></label>
+            <button class="btn-ghost" id="uq-refresh-params">读取参数</button>
+            <button class="btn-next" id="uq-create">创建 Study</button>
+            <button class="btn-ghost" id="uq-run">运行 Study</button>
+            <button class="btn-ghost" id="uq-status">刷新状态</button>
+            <button class="btn-ghost" id="uq-retry">重试失败</button>
+            <button class="btn-ghost" id="uq-pause">暂停派发</button>
+            <button class="btn-ghost" id="uq-resume">恢复</button>
+            <button class="btn-ghost" id="uq-cancel">取消待运行</button>
+            <button class="btn-ghost" id="uq-export-study">导出 Study</button>
+          </div>
+        </div>
+        <div class="card"><h3>预算预览</h3><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
+        <div class="card"><h3>输出变量</h3><div id="uq-outputs" class="evaluation-variable-grid"><div class="result-empty">选择不确定性包络要统计的 history 变量。</div></div></div>
+        <div class="card"><h3>参数范围</h3><div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div><label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我确认采样范围由我负责</label></div>
+        <div class="card"><h3>运行状态</h3><div id="uq-study-view" class="study-view"></div><pre id="uq-preview" class="report-preview">还没有创建不确定性分析 Study。</pre></div>
+        <div class="card"><h3>结果</h3><div id="uq-results" class="study-results"><div class="result-empty">运行后显示分位数包络、参数重要性和成员表。</div></div></div>
+      </div>
+
+      <div class="flow-pane" data-flow-pane="result-tuning" hidden>
+        <div class="work-head"><span class="kicker">第 7 步 · 参数调优</span></div>
+        <h1>参数调优</h1>
+        <p class="sub">用差分进化生成初代参数种群；目标函数要求所有勾选目标都存在，缺任一目标即判为不可行。</p>
+        <div class="card result-sticky-tools">
+          <div class="result-tools result-tools-wide">
+            <label>指标 <select class="select" id="tune-metric"><option value="nrmse">NRMSE</option><option value="mae">MAE</option><option value="abs_bias">|Bias|</option><option value="nse">1-NSE</option><option value="kge">1-KGE</option><option value="r2">1-R²</option><option value="r">1-R</option></select></label>
+            <label>最少配对 <input class="input" id="tune-min-pairs" type="number" min="2" value="30"></label>
+            <label>站点方式 <select class="select" id="tune-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独 Study</option></select></label>
+            <label>校准开始 <input class="input" id="tune-from" type="date"></label>
+            <label>校准结束 <input class="input" id="tune-to" type="date"></label>
+            <label class="check"><input id="tune-validation" type="checkbox" checked> 独立验证</label>
+            <label>验证开始 <input class="input" id="tune-val-from" type="date"></label>
+            <label>验证结束 <input class="input" id="tune-val-to" type="date"></label>
+            <label>种群 <input class="input" id="tune-pop" type="number" min="4" max="1000" value="12"></label>
+            <label>代数 <input class="input" id="tune-gen" type="number" min="1" value="5"></label>
+            <label>随机种子 <input class="input" id="tune-seed" type="number" value="1"></label>
+            <label>并发 <input class="input" id="tune-jobs" type="number" min="1" value="1"></label>
+            <label>内核目录 <input class="input" id="tune-kernel-dir" readonly placeholder="使用当前内核"></label>
+            <button class="btn-ghost" id="tune-refresh-params">读取参数</button>
+            <button class="btn-next" id="tune-create">创建调优 Study</button>
+            <button class="btn-ghost" id="tune-run">运行 Study</button>
+            <button class="btn-ghost" id="tune-status">刷新状态</button>
+            <button class="btn-ghost" id="tune-retry">重试失败</button>
+            <button class="btn-ghost" id="tune-pause">暂停派发</button>
+            <button class="btn-ghost" id="tune-resume">恢复</button>
+            <button class="btn-ghost" id="tune-cancel">取消待运行</button>
+            <button class="btn-ghost" id="tune-export-study">导出 Study</button>
+            <button class="btn-ghost" id="tune-apply-best">最佳候选另存</button>
+          </div>
+        </div>
+        <div class="card"><h3>预算预览</h3><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
+        <div class="card"><h3>目标变量</h3><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
+        <div class="card"><h3>参数范围</h3><div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div><label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我确认采样范围由我负责</label></div>
+        <div class="card"><h3>运行状态</h3><div id="tune-study-view" class="study-view"></div><pre id="tune-preview" class="report-preview">还没有创建参数调优 Study。</pre></div>
+        <div class="card"><h3>结果</h3><div id="tune-results" class="study-results"><div class="result-empty">运行后显示目标函数、最佳候选和成员表。</div></div></div>
+      </div>
+
       <div class="flow-pane" data-flow-pane="result-export" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 8 步 · 报告与导出</span></div>
         <h1>报告与导出</h1>
         <p class="sub">导出当前分析范围、指标、失败原因和软件署名；不会把未完成站点伪装成零值。</p>
         <div class="card">
           <div class="result-tools result-tools-wide">
-            <label>格式 <select class="select" id="export-format"><option value="markdown">Markdown</option><option value="html">HTML</option><option value="json">JSON</option><option value="csv">CSV</option></select></label>
+            <label>格式 <select class="select" id="export-format"><option value="markdown">Markdown</option><option value="html">HTML</option><option value="json">JSON</option><option value="csv">CSV</option><option value="pdf">PDF</option></select></label>
             <label class="check"><input type="checkbox" id="export-metrics" checked> 指标</label>
             <label class="check"><input type="checkbox" id="export-failures" checked> 失败与缺失</label>
             <button class="btn-next" id="export-report">生成报告</button>
@@ -511,6 +586,7 @@
 
   <!-- 右栏跟着运行走：切到哪一步都看得见日志与进度。 -->
   <aside class="live">
+    <div class="live-resizer" id="live-resizer" title="拖动调整日志栏大小" aria-hidden="true"></div>
     <div class="live-tabs" id="livetabs">
       <button class="on" data-pane="log">日志</button>
       <button data-pane="progress">进度</button>
@@ -548,19 +624,47 @@
     <h2 id="about-title">CoLM Desktop</h2>
     <p class="muted">版本 <span id="about-version">0.2.0</span></p>
     <div class="about-signature">
-      <strong>开发与维护</strong>
-      <div class="about-maintainer">Zhongwang Wei (魏忠旺)</div>
-      <div class="about-email">weizhw6@mail.sysu.edu.cn</div>
+      <strong>开发与维护团队</strong>
       <div class="about-team">CoLM LSM Development Team</div>
       <div>School of Atmospheric Sciences, SYSU</div>
+      <div class="about-contact">联系人</div>
+      <div class="about-maintainer">Zhongwang Wei (魏忠旺)</div>
+      <div class="about-email">weizhw6@mail.sysu.edu.cn</div>
     </div>
     <p class="muted mini">版权所有：CoLM陆面模式开发团队，中山大学大气科学学院</p>
   </form>
 </dialog>
 
-<!-- 进门那道分流默认可见，避免 module 初始化前短暂露出主工作台。
-     domain.js 启动后会立即填充卡片；完成五页选择时才隐藏它。 -->
-<div id="domaingate" class="gate">
+<!-- 启动页直接写在 HTML 里，保证完整工作台尚未加载时先看到运行入口。
+     服务器入口保留但明确不可用。 -->
+<div id="launchgate" class="gate launch-gate">
+  <div class="gate-tools">
+    <div class="seg" id="launchLangSeg" aria-label="界面语言">
+      <button class="on" data-lang="zh" aria-pressed="true">中文</button>
+      <button data-lang="en" aria-pressed="false">EN</button>
+    </div>
+  </div>
+  <div class="gate-panel launch-panel">
+    <div class="launch-brand"><img src="assets/colm-icon.png" alt=""><span>CoLM Desktop</span></div>
+    <h1>选择运行方式</h1>
+    <p class="muted">先选择计算资源；本地运行已可用，服务器运行将在后续版本开放。</p>
+    <div class="domain-cards launch-mode-cards" aria-label="运行方式">
+      <button class="domain-card launch-mode-card" id="localRunCard" type="button">
+        <span class="dt">本地运行</span>
+        <span class="dd">在本机创建算例、运行 CoLM 内核并查看结果。</span>
+        <span class="launch-action">进入本地工作台 →</span>
+      </button>
+      <button class="domain-card launch-mode-card" id="serverRunCard" type="button" disabled aria-disabled="true">
+        <span class="dt">服务器运行</span>
+        <span class="dd">用于未来接入远程队列、HPC 和服务器端批量任务。</span>
+        <span class="dsoon">暂未开放</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 本地运行选定后才显示模型约束向导；完成五页选择时隐藏。 -->
+<div id="domaingate" class="gate" hidden>
   <div class="gate-tools">
     <div class="seg" id="gateLangSeg" aria-label="界面语言">
       <button class="on" data-lang="zh" aria-pressed="true">中文</button>

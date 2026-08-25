@@ -23,6 +23,7 @@ colm-forcing = { path = "../crates/colm-forcing" }
 colm-hist = { path = "../crates/colm-hist", features = ["io"] }
 colm-kernel = { path = "../crates/colm-kernel" }
 colm-namelist = { path = "../crates/colm-namelist" }
+colm-schema = { path = "../crates/colm-schema" }
 # tests/generated_case.rs 用它读站点自带的经纬度与地类 —— 那三项不该抄。
 colm-srfdata = { path = "../crates/colm-srfdata" }
 anyhow.workspace = true

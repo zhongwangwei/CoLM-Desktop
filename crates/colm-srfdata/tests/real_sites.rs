@@ -4,21 +4,38 @@
 //! 先前的实现在 CN-Cng 上看起来完全正确，而它对另外 89 个站点是错的 ——
 //! 因为它把一个恰好在 CN-Cng 成立的常数写死了。
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use colm_srfdata::site::{fill, missing_fields};
 
-fn plumber2() -> PathBuf {
-    let p = PathBuf::from(
-        std::env::var("PLUMBER2_ROOT")
-            .unwrap_or_else(|_| "/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s".to_string()),
-    );
+static NEXT_TMP: AtomicUsize = AtomicUsize::new(0);
+
+fn unique_workdir(prefix: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).expect("workdir");
+    dir
+}
+
+fn plumber2() -> Option<PathBuf> {
+    let Ok(root) = std::env::var("PLUMBER2_ROOT") else {
+        eprintln!("skipping PLUMBER2 real-site test; set PLUMBER2_ROOT to run it");
+        return None;
+    };
+    let p = PathBuf::from(root);
     assert!(
         p.join("Sitedata").is_dir(),
         "PLUMBER2 not found at {}; set PLUMBER2_ROOT",
         p.display()
     );
-    p
+    Some(p)
 }
 
 fn rawdata() -> PathBuf {
@@ -28,8 +45,8 @@ fn rawdata() -> PathBuf {
     )
 }
 
-fn site_files() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(plumber2().join("Sitedata"))
+fn site_files() -> Option<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(plumber2()?.join("Sitedata"))
         .expect("readable")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "nc"))
@@ -40,12 +57,20 @@ fn site_files() -> Vec<PathBuf> {
         "expected ~90 site files, found {}",
         out.len()
     );
-    out
+    Some(out)
+}
+
+#[test]
+fn real_site_workdirs_are_unique_per_test_call() {
+    let a = unique_workdir("colm-srfdata-real-sites-proof");
+    let b = unique_workdir("colm-srfdata-real-sites-proof");
+    assert_ne!(a, b);
 }
 
 #[test]
 fn every_site_is_missing_exactly_the_same_twelve_fields() {
-    for f in site_files() {
+    let Some(files) = site_files() else { return };
+    for f in files {
         let m = missing_fields(&f).expect("readable");
         assert_eq!(m.len(), 12, "{}: missing {:?}", f.display(), m);
     }
@@ -53,15 +78,14 @@ fn every_site_is_missing_exactly_the_same_twelve_fields() {
 
 #[test]
 fn every_site_fills_and_lands_inside_the_usda_triangle() {
-    let dir = std::env::temp_dir().join("colm-srfdata-real-sites");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("workdir");
+    let dir = unique_workdir("colm-srfdata-real-sites");
     let raw = rawdata();
     let raw = raw.join("soil_brightness.nc").exists().then_some(raw);
 
     let mut failures = Vec::new();
     let mut classes = std::collections::BTreeMap::new();
-    for f in site_files() {
+    let Some(files) = site_files() else { return };
+    for f in files {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
         let out = dir.join(format!("{name}.nc"));
         match fill(&f, &out, raw.as_deref(), None) {
@@ -107,12 +131,11 @@ fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
             raw.display()
         );
     }
-    let dir = std::env::temp_dir().join("colm-srfdata-texture-agreement");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("workdir");
+    let dir = unique_workdir("colm-srfdata-texture-agreement");
     let mut agree = 0usize;
     let mut total = 0usize;
-    for f in site_files() {
+    let Some(files) = site_files() else { return };
+    for f in files {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
         let out = dir.join(format!("{name}.nc"));
         let r = fill(&f, &out, Some(&raw), None).expect("fills");
@@ -131,7 +154,7 @@ fn the_raster_and_the_classifier_disagree_about_as_often_as_measured() {
 #[test]
 fn every_site_file_carries_its_own_location_and_landtype() {
     // 新建算例时这三项不该问用户。实测 90 个站点文件全都自带。
-    let root = plumber2();
+    let Some(root) = plumber2() else { return };
     let dir = root.join("Sitedata");
     let mut n = 0;
     let mut classes = std::collections::BTreeSet::new();
@@ -164,7 +187,7 @@ fn every_site_file_carries_its_own_location_and_landtype() {
 #[test]
 fn the_golden_site_matches_the_hand_written_case() {
     // 手写的 oracle/cases/CN-Cng/case.nml 里那三个数就是从这里来的。
-    let root = plumber2();
+    let Some(root) = plumber2() else { return };
     let p = root.join("Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc");
     let l = colm_srfdata::site::location(&p).expect("location");
     assert!((l.lon - 123.5092).abs() < 1e-4, "{}", l.lon);

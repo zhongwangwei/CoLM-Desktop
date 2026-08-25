@@ -41,3 +41,26 @@ pub use tabular::{
     import_table, probe_table, ImportedTableSite, LandCoverScheme, TabularPlan, TabularProbe,
     TabularSlot,
 };
+
+fn same_existing_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(test)]
+mod path_tests {
+    #[test]
+    fn path_aliases_cannot_overwrite_the_source() {
+        let dir = std::env::temp_dir().join(format!("colm-forcing-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("forcing.nc");
+        std::fs::write(&file, b"test").unwrap();
+        assert!(super::same_existing_file(
+            &file,
+            &dir.join(".").join("forcing.nc")
+        ));
+    }
+}

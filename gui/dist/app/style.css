@@ -18,7 +18,7 @@
   --shadow:0 1px 2px rgba(31,35,40,.08), 0 2px 8px rgba(31,35,40,.06);
   --r-sm:6px; --r-md:10px;
   --s-sm:4px; --s-md:8px; --s-lg:16px; --s-xl:24px;
-  --rail-w:250px; --live-w:360px; --top-h:52px; --status-h:34px;
+  --rail-w:250px; --live-w:360px; --live-h:34vh; --top-h:52px; --status-h:34px;
   --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
 }
@@ -181,9 +181,10 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .about-card h2 { margin: 10px 0 4px; }
 .about-signature { margin: 20px 0 18px; padding: 18px 0; border-block: 1px solid var(--border-soft);
   line-height: 1.65; }
-.about-maintainer { margin-top: 7px; font-size: 14px; font-weight: 400; }
+.about-contact { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.about-maintainer { font-size: 14px; font-weight: 400; }
 .about-email { color: var(--accent); }
-.about-team { margin-top: 10px; font-size: 17px; font-weight: 700; }
+.about-team { margin-top: 7px; font-size: 17px; font-weight: 700; }
 
 /* 需要人特别注意的一段说明。虚线框是「这里跟别处不一样」的信号。 */
 .expert-note { border: 1.5px dashed var(--accent); border-radius: var(--r-md);
@@ -220,12 +221,16 @@ td:first-child { overflow-wrap: anywhere; }
 .parameter-table td:first-child { width: 44%; font-weight: 600; cursor: help; }
 .parameter-table td:nth-child(2) { width: 56%; }
 .parameter-table .input, .parameter-table .select { min-width: 0; }
+.parameter-default { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
 .warn { color: var(--warn); }
 .fail { color: var(--fail); }
 
 /* ---------------- 右栏 ---------------- */
 .live { grid-area: live; background: var(--surface); border-left: 1px solid var(--border);
-        display: flex; flex-direction: column; min-height: 0; }
+        display: flex; flex-direction: column; min-height: 0; position: relative; }
+.live::before { content: ''; position: absolute; z-index: 3; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; touch-action: none; }
+.live-resizer { position: absolute; z-index: 4; left: -6px; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; }
+body.resizing-live { user-select: none; }
 .live-tabs { display: flex; gap: 2px; padding: 9px var(--s-md) 0;
              border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .live-tabs button { padding: 8px 13px; border: 0; background: transparent; color: var(--muted);
@@ -235,7 +240,8 @@ td:first-child { overflow-wrap: anywhere; }
 .live-pane { display: none; height: 100%; min-height: 0; overflow: auto; }
 .live-pane.on { display: block; }
 #log { margin: 0; font-family: var(--mono); font-size: 11px; line-height: 1.65;
-       color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+       color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere;
+       min-height: 220px; overflow: auto; resize: vertical; }
 #log-case { width: auto; min-width: 130px; max-width: 230px; }
 .progress { height: 8px; border-radius: 5px; background: var(--surface-2);
             overflow: hidden; margin: 10px 0; }
@@ -403,10 +409,14 @@ td:first-child { overflow-wrap: anywhere; }
   .app { grid-template:
     "top  top"   var(--top-h)
     "rail work"  1fr
-    "rail live"  minmax(180px, 34vh)
+    "rail live"  minmax(180px, var(--live-h))
     "status status" var(--status-h)
     / var(--rail-w) minmax(0, 1fr); }
   .live { border-left: 0; border-top: 1px solid var(--border); }
+  .live::before { left: 0; right: 0; top: -4px; bottom: auto; width: auto; height: 8px;
+                  cursor: row-resize; touch-action: none; }
+  .live-resizer { left: 0; right: 0; top: -6px; bottom: auto; width: auto; height: 12px;
+                  cursor: row-resize; }
   .app.live-collapsed { grid-template:
     "top top" var(--top-h)
     "rail work" 1fr
@@ -419,7 +429,7 @@ td:first-child { overflow-wrap: anywhere; }
     "top"  var(--top-h)
     "rail" auto
     "work" 1fr
-    "live" minmax(160px, 30vh)
+    "live" minmax(160px, var(--live-h))
     "status" var(--status-h)
     / minmax(0, 1fr); }
   .rail { border-right: 0; border-bottom: 1px solid var(--border); }
@@ -451,6 +461,13 @@ td:first-child { overflow-wrap: anywhere; }
 .gate-tools { position: fixed; z-index: 1; top: var(--s-lg); right: var(--s-lg); }
 .gate-panel { width: 100%; max-width: 760px; margin: auto; padding: var(--s-xl); text-align: center; }
 .gate-panel h2 { margin: 0 0 6px; font-size: 20px; }
+.launch-panel { max-width: 720px; }
+.launch-panel h1 { margin: 10px 0 4px; font-size: 25px; }
+.launch-brand { display: inline-flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 750; }
+.launch-brand img { width: 40px; height: 40px; border-radius: 10px; box-shadow: var(--shadow); }
+.launch-mode-cards { margin-top: var(--s-lg); }
+.launch-mode-card { width: min(310px, 100%); min-height: 126px; }
+.launch-action { margin-top: auto; color: var(--accent); font-size: 12px; font-weight: 700; }
 /* 第一、二页都有四张卡片；窄窗口下换行而不是溢出 gate-panel。 */
 .domain-cards { display: flex; flex-wrap: wrap; gap: var(--s-lg); margin-top: var(--s-xl);
   justify-content: center; }
@@ -472,3 +489,26 @@ td:first-child { overflow-wrap: anywhere; }
 #gateinfo { margin: 10px 0 0; }
 #gateinfo:empty { margin: 0; }
 .gate-foot { display: flex; gap: 8px; margin-top: var(--s-xl); justify-content: center; }
+.expert-param-file { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: color-mix(in srgb, var(--panel) 94%, var(--accent)); }
+.expert-param-file > summary { cursor: pointer; padding: 10px 12px; font-weight: 700; color: var(--ink); }
+.expert-parameter-table { margin: 0; border-top: 1px solid var(--line); }
+.expert-site-picker { display: flex; justify-content: flex-start; margin: 10px 0; }
+.expert-site-picker label { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.expert-site-picker .select { min-width: 180px; }
+.pft-expert-editor { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pft-expert-editor label { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+.pft-expert-editor .select { min-width: 280px; }
+.study-budget { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); color: var(--muted); }
+.study-view { display: grid; gap: 10px; }
+.study-status-box { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.study-view table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.study-view th, .study-view td { border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+.study-log { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+.study-log-filters, .study-pager { align-items: center; }
+.study-param-option { grid-template-columns: auto minmax(180px, 1fr) minmax(90px, 120px) minmax(90px, 130px) minmax(90px, 130px); align-items: center; }
+.mini-input { max-width: 90px; }
+.study-target-weight { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+.study-range-confirm { display: inline-flex; margin-top: 10px; }
+.study-results { display: grid; gap: 10px; }
+.study-result-card { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px; background: var(--elevated); }
+.study-result-card h4 { margin: 0 0 8px; }

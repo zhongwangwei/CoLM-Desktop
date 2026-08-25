@@ -17,6 +17,9 @@ use anyhow::{bail, Context, Result};
 /// 恒等路径不需要重新编码 NetCDF：直接复制才能同时保住数值、类型、压缩、
 /// 分块和用户自定义类型，且不会引入任何舍入。
 pub fn identity(src: &Path, dst: &Path) -> Result<()> {
+    if crate::same_existing_file(src, dst) {
+        bail!("forcing identity destination must differ from its source");
+    }
     ensure_parent(dst)?;
     std::fs::copy(src, dst)
         .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
@@ -117,7 +120,7 @@ pub struct Plan {
 }
 
 pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
-    if src == dst {
+    if crate::same_existing_file(src, dst) {
         bail!("forcing conversion destination must differ from its source");
     }
     ensure_parent(dst)?;
@@ -181,9 +184,10 @@ fn convert_into(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
         let v = fin
             .variable(&sp.source_name)
             .with_context(|| format!("{} has no variable {}", src.display(), sp.source_name))?;
-        let raw: Vec<f64> = v
+        let mut raw: Vec<f64> = v
             .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read {}", sp.source_name))?;
+        crate::gapfill::normalize_declared_missing(&fin, &sp.source_name, &mut raw);
         if let Some(actual) = string_attribute(&v, "units")? {
             if actual != sp.source_units {
                 bail!(
@@ -239,7 +243,8 @@ fn convert_into(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
                     extra
                 )
             })?;
-            let raw_add: Vec<f64> = e.get_values(netcdf::Extents::All)?;
+            let mut raw_add: Vec<f64> = e.get_values(netcdf::Extents::All)?;
+            crate::gapfill::normalize_declared_missing(&fin, extra, &mut raw_add);
             if raw_add.len() != vals.len() {
                 anyhow::bail!(
                     "{} has {} steps but {} has {} — cannot add them",
@@ -528,7 +533,8 @@ fn plan_slot_values(
             );
         }
     }
-    let raw: Vec<f64> = variable.get_values(netcdf::Extents::All)?;
+    let mut raw: Vec<f64> = variable.get_values(netcdf::Extents::All)?;
+    crate::gapfill::normalize_declared_missing(file, &slot.source_name, &mut raw);
     crate::units::convert_units_with_step(
         &slot.source_units,
         canonical_units(index),

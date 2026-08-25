@@ -1,4 +1,5 @@
-//! 读 PLUMBER2 的 `Observation/*_Flux.nc` 与模型的 `*_hist_*.nc`。
+//! 读 PLUMBER2 / FLUXNET-CH4 的 `Observation/*_Flux.nc` 与模型的
+//! `*_hist_*.nc`。
 //!
 //! 实测的观测文件形状（CN-Cng，2008-2009）：
 //! `time = 35088` 半小时步长、`x = y = 1`；能量通量与 `Ustar` / `NEE`
@@ -65,8 +66,9 @@ pub struct EvaluationVariable {
 }
 
 const MOL_TO_MICROMOL: f64 = 1_000_000.0;
+const MOL_TO_NANOMOL: f64 = 1_000_000_000.0;
 
-pub const EVALUATION_VARIABLES: [EvaluationVariable; 10] = [
+pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
     EvaluationVariable {
         observation: "Rnet",
         label_zh: "净辐射",
@@ -177,6 +179,19 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 10] = [
             scale: MOL_TO_MICROMOL,
         },
         qc: Some("NEE_qc"),
+    },
+    EvaluationVariable {
+        observation: "FCH4_f_ann",
+        label_zh: "甲烷通量（FLUXNET-CH4 插补）",
+        label_en: "Methane flux (FLUXNET-CH4 gap-filled)",
+        units: "nmol CH₄/m²/s",
+        model: ModelSource::Direct {
+            variable: "f_methane_surf_flux_tot",
+            scale: MOL_TO_NANOMOL,
+        },
+        // ANNOPTLM 的 QC 编码是 1/3，不是 PLUMBER2 的 0=实测约定；这里比较
+        // 数据集明确提供的连续插补序列，不能套用另一套 QC 后把样本全滤光。
+        qc: None,
     },
 ];
 

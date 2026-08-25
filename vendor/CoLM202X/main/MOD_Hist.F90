@@ -4888,7 +4888,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 #endif
       END select
 
@@ -4928,7 +4928,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 #endif
       END select
 
@@ -4975,7 +4975,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_3d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, longname, units)
+            dim1name, ndim1, filter, longname, units)
 #endif
       END select
 
@@ -5056,7 +5056,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_4d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, dim2name, ndim2, longname, units)
+            dim1name, ndim1, dim2name, ndim2, filter, longname, units)
 #endif
       END select
 

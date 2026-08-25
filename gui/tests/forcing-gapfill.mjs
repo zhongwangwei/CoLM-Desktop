@@ -34,6 +34,11 @@ assert.match(frontend, /if \(!gapReport\) reasons\.push\('先完成缺测与时�
 assert.match(frontend, /gapReport\.missing > 0 && !repairedSource/);
 assert.match(frontend, /sourceForConvert = await ensureRepairedSource/);
 assert.match(frontend, /src: sourceForConvert/);
+const interpolatedHtml = (frontend.match(/innerHTML\s*=\s*`[\s\S]*?`/g) ?? [])
+  .filter(block => block.includes('${'));
+assert.deepEqual(interpolatedHtml, [], 'forcing UI must render probe/report values with textContent, not template HTML');
+assert.match(frontend, /header: true, text: 'UTC 偏移'/);
+assert.match(frontend, /\{ text: row\.variable \}/);
 
 const backend = await readFile(new URL('../src-tauri/src/forcing.rs', import.meta.url), 'utf8');
 for (const command of [

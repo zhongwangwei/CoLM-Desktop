@@ -39,8 +39,9 @@ fn main() -> Result<()> {
     verify_inputs(&repo, &plumber2)?;
     let kernel = Kernel::open(&repo.join(&kernel_dir))?;
     println!(
-        "  kernel: {} {} ({})",
-        kernel.manifest.preset, kernel.manifest.colm_git_sha, kernel.manifest.platform
+        "  kernel: {} ({})",
+        kernel.manifest.identity(),
+        kernel.manifest.platform
     );
     check_kernel_provenance(&repo, &kernel.manifest)?;
 
@@ -96,7 +97,7 @@ fn main() -> Result<()> {
     // adjudicate 用的是 Path::exists，而目录在 mkinidata 写任何东西之前就已存在，
     // 于是「跑完了但什么都没写」——正是产物校验这条腿存在的理由——恰好抓不到。
     // 两个文件名见 design.md §6.2；block 后缀实测是 _w180_s90。
-    let lc = "lc2005";
+    let lc = land_cover_label(&nml)?;
     let const_dir = out.join("restart/const");
     let stages = [
         (Stage::MkSrfData, vec![out.join("landdata/srfdata.nc")]),
@@ -216,6 +217,7 @@ fn check_kernel_provenance(repo: &Path, have: &Manifest) -> Result<()> {
     cmp("platform", &want.platform, &have.platform);
     cmp("colm_git_sha", &want.colm_git_sha, &have.colm_git_sha);
     cmp("generator_args", &want.generator_args, &have.generator_args);
+    cmp("build_profile", &want.build_profile, &have.build_profile);
     cmp("built_with", &want.built_with, &have.built_with);
     cmp("netcdf_c", &want.netcdf_c, &have.netcdf_c);
     cmp("netcdf_fortran", &want.netcdf_fortran, &have.netcdf_fortran);
@@ -253,6 +255,24 @@ fn repo_root() -> Result<PathBuf> {
         bail!("not inside a git repository");
     }
     Ok(PathBuf::from(String::from_utf8(out.stdout)?.trim()))
+}
+
+fn land_cover_label(nml: &Path) -> Result<String> {
+    let text = fs::read_to_string(nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let doc =
+        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
+    let year = match doc.get("DEF_LC_YEAR") {
+        Some(colm_namelist::Value::Int(value)) => *value,
+        Some(other) => bail!("DEF_LC_YEAR is {other:?}, not an integer"),
+        None => match colm_schema::find("DEF_LC_YEAR").map(|field| field.default) {
+            Some(colm_schema::Default::Integer(value)) => value,
+            _ => bail!("DEF_LC_YEAR default is missing from the generated schema"),
+        },
+    };
+    if !(0..=9999).contains(&year) {
+        bail!("DEF_LC_YEAR {year} cannot be formatted as a four-digit land-cover year");
+    }
+    Ok(format!("lc{year:04}"))
 }
 
 /// 算例名决定所有产物路径，所以取错了会一路错到「找不到 history」。

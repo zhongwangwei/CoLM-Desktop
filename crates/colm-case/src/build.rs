@@ -16,9 +16,8 @@ pub struct CaseSpec {
     pub site_file: String,
     pub lon: f64,
     pub lat: f64,
-    /// IGBP 地类。`None` 表示站点文件没说 —— 城市站点文件都不带它，
-    /// 而 URBAN 路径反正会强制成 13。那时两个 landtype 字段都不写，
-    /// 让 CoLM 自己从文件或栅格去定。
+    /// 当前地类体系里的地类号。`None` 表示站点文件没说；非城市算例不写，
+    /// 城市算例回落到 IGBP/PFT/PC 的城市类号。
     pub landtype: Option<i32>,
     pub window: Window,
     /// 强迫场文件的时间步长（秒）。实测 88/90 个站点是 1800，
@@ -217,11 +216,11 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
     // 地类只在站点文件说得出时才写。说不出就整条不写 —— 写一个猜的值
     // 比不写更糟，而 CoLM 有自己的回落路径（站点文件的分类变量，或栅格）。
     //
-    // 城市算例是例外：地类由 URBAN 路径强制成 13，而城市站点文件都不带
-    // `IGBP_classification`，所以这里显式写出来 —— 让配置文件说出实际会发生
-    // 的事，而不是让人读源码才知道。
+    // 城市算例是例外：城市站点文件都不带地类变量，所以这里显式写出
+    // 所选分类体系的城市类号。调用方知道当前内核是 USGS 时传 `Some(1)`；
+    // 旧调用方没传时保留 IGBP/PC/PFT 的城市类号 13。
     let landtype = if s.urban {
-        Some(URBAN_LANDTYPE)
+        Some(s.landtype.unwrap_or(URBAN_LANDTYPE_IGBP))
     } else {
         s.landtype
     };
@@ -259,8 +258,10 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
     out
 }
 
-/// IGBP 的「城市与建成区」。URBAN 路径会把地类强制成它。
-pub const URBAN_LANDTYPE: i32 = 13;
+/// USGS 的「城市与建成区」。
+pub const URBAN_LANDTYPE_USGS: i32 = 1;
+/// IGBP/PFT/PC 的「城市与建成区」。
+pub const URBAN_LANDTYPE_IGBP: i32 = 13;
 
 #[cfg(test)]
 #[path = "build_tests.rs"]

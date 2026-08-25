@@ -74,10 +74,10 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
     // 改成运行时开关（DEF_USE_BGC/DEF_URBAN_RUN，默认都是 .false.，这份
     // 黄金算例也没有打开）之后，`main/BGC/`、`main/URBAN/` 始终编译进去，
     // 于是它们那两大块变量全部从「宏挡住」变成「宏放行、运行时条件挡住」，
-    // 多报数从 4 涨到 229——不是宏判错了，是如实反映了新架构：这份黄金
-    // 算例的内核**编译期就有** BGC/URBAN 那些变量的写出点，只是这次运行
-    // 没有打开对应的运行时开关；另外 Desktop 新算例默认关闭臭氧胁迫，
-    // 两个臭氧吸收通量也成为有运行时条件的可解释多报。逐一列出 229 个名字不利于维护，所以这里
+    // 多报数从 4 涨到 229；纳入 162 个 CH4/TRACER 写出点后是 391——
+    // 不是宏判错了，是如实反映了新架构：这份黄金算例的内核**编译期就有**
+    // BGC/URBAN/TRACER 那些变量的写出点，只是这次运行没有打开对应的运行时开关；
+    // 另外 Desktop 新算例默认关闭臭氧胁迫，两个臭氧吸收通量也成为有运行时条件的可解释多报。逐一列出 391 个名字不利于维护，所以这里
     // 只验总数、验每一个都真的挂着运行时条件，并挑几个代表性的验条件原文。
     let macros: BTreeSet<&str> = WATERHEAT.into_iter().collect();
     let golden = golden_vars();
@@ -85,7 +85,7 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
         .into_iter()
         .filter(|v| !golden.contains(*v))
         .collect();
-    assert_eq!(over.len(), 229);
+    assert_eq!(over.len(), 391);
 
     let all = colm_hist::all();
     let runtime_of = |n: &str| all.iter().find(|v| v.name == n).and_then(|v| v.runtime);
@@ -116,6 +116,18 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
             "{n} should be over-predicted (URBAN_MODEL off)"
         );
         assert_eq!(runtime_of(n), Some("DEF_URBAN_RUN"));
+    }
+    // CH4/TRACER 变量由单独的 tracer history writer 写出，但仍受 DEF_USE_TRACER 控制。
+    for n in [
+        "methane_surf_flux_tot",
+        "methane_prod_depth",
+        "conc_methane",
+    ] {
+        assert!(
+            over.contains(&n),
+            "{n} should be over-predicted (TRACER off)"
+        );
+        assert!(runtime_of(n).is_some_and(|r| r.contains("DEF_USE_TRACER")));
     }
 }
 

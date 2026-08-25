@@ -1,18 +1,36 @@
 # 自带的示例站点
 
-CN-Cng（内蒙古草地，2008–2009，FLUXNET2015），随安装包一起分发，
-**装完就能跑一遍完整流程**：建算例 → 三段运行 → 与观测比对。
+CN-Cng（内蒙古草地，FLUXNET2015）、AT-Neu（奥地利草地甲烷站，
+FLUXNET-CH4）、AU-Preston（墨尔本城市站）和 US-Ne3（农田站）随安装包一起分发。
+CN-Cng 可直接跑完整流程；AT-Neu 用于甲烷建例与评估，运行 BGC /
+甲烷前仍需在基本设定中指定 CoLM runtime 数据。US-Ne3 自带最小 BGC runtime，
+用于验证 CROP 内核、作物初始化和主模拟链路。
 
 | 文件 | 是什么 |
 |---|---|
 | `Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc` | 站点属性（经纬度、地类、土壤、LAI） |
 | `Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc` | 半小时强迫场，两年 |
 | `Observation/CN-Cng_2008-2009_FLUXNET2015_Flux.nc` | 通量观测，用来算指标 |
+| `Sitedata/AT-Neu_2010-2012_FLUXNET-CH4_site.nc` | 甲烷站点属性 |
+| `Forcing/AT-Neu_2010-2012_FLUXNET-CH4_Met.nc` | 半小时强迫场，三年 |
+| `Observation/AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc` | 含 `FCH4_f_ann` 的甲烷通量观测 |
+| `Forcingnml/AT-Neu.nml` | AT-Neu 的风、温、湿观测高度 |
+| `Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc` | US-Ne3 农田属性与 CFT 信息 |
+| `Forcing/US-Ne3_2002-2003_FLUXNET2015_CROP_Met.nc` | US-Ne3 小时强迫场，两年 |
+| `Forcingnml/US-Ne3.nml` | US-Ne3 的风、温、湿观测高度 |
+| `Runtime/` | 示例所需的年氮沉降与硝化过程数据 |
 
-## 为什么是这两个站点
+## 为什么是这四个站点
 
 CN-Cng 就是黄金回归用的那个站点（`oracle/cases/CN-Cng/`）。示例与测试覆盖
 的是同一份数据 —— 示例跑不通，回归测试会先一步红。
+
+AT-Neu 同时有完整的 PLUMBER2 站点属性和 FLUXNET-CH4 半小时
+甲烷通量；强迫场与观测只取 2010–2012，观测文件仅保留甲烷
+评估所需变量，以控制安装包大小。
+
+US-Ne3 来自已有 CoLM CROP 单点样例。分发版保留 2002–2003 两年强迫，
+默认按雨养农田运行，并通过单点种植日覆盖值避免依赖全球作物管理图。
 
 AU-Preston 是 URBAN 预设验收用的那个（README「三个物理预设的实际状态」
 一节）。选了 `urban` 内核的人手上得有个能试的东西 —— 而现在这件事不再
@@ -42,11 +60,16 @@ Urban-PLUMBER 的 23 个变量全是形态学量（建筑高度、道路面积�
 放在 `~/Library/Application Support/…`），以及 **AU-Preston 的默认时间窗口
 比强迫场早一天**，要显式给 `--start`。所以严格说，AU-Preston 现在是
 「数据齐了、命令给对了就能跑」，还不是「双击进去一路点到底就能跑」。
-CN-Cng 则装完就能跑通建算例 → 三段运行 → 与观测比对的完整流程
-（前提同样是算例目录里没有空格）。
+CN-Cng 装完就能跑通建算例 → 三段运行 → 与观测比对的完整流程
+（前提同样是算例目录里没有空格）。AT-Neu 的站点、强迫与甲烷观测
+自包含，但 BGC / 甲烷内核还会读取 runtime 中的过程数据。
 
 ## 文件动过什么
 
-三个文件都用 `nccopy -d 5` 重新压缩过，14.9 MB → 680 KB（22 倍）。
-**数值逐位相同** —— deflate 是无损的，压缩只改存储不改内容，
-且逐变量比对过。除此之外与 PLUMBER2 发布的原始文件一致。
+数据文件都用 netCDF deflate 无损压缩；AT-Neu 观测只保留时间、位置、
+`FCH4` / `FCH4_f` / `FCH4_f_ann` 及其 QC，数值未改动。AT-Neu 站点属性来自
+PLUMBER2，强迫场与甲烷观测来自 FLUXNET-CH4 2010–2012 半小时产品。
+
+US-Ne3 使用 CROP 内核、BGC 与 PFT/PC；默认关闭施肥和灌溉，并设置
+`DEF_TUNING_CROP_PLANTING_DAY=120`。`Runtime/` 中仅保留该示例运行所需的
+年氮沉降与十层硝化输入。

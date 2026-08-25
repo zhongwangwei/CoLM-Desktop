@@ -29,6 +29,19 @@ pub struct Series<'a> {
     pub qc: &'a [f64],
 }
 
+/// 已归一化秒时间轴上的半开评估窗口：`from <= t < to`。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimeWindow {
+    pub from: f64,
+    pub to: f64,
+}
+
+impl TimeWindow {
+    fn contains(self, seconds: f64) -> bool {
+        seconds >= self.from && seconds < self.to
+    }
+}
+
 /// 配对。
 ///
 /// `spinup` 是**丢掉的模型记录条数**，必须由调用方显式给出：
@@ -40,7 +53,18 @@ pub fn pair(
     obs: &Series<'_>,
     spinup: usize,
 ) -> Vec<Pair> {
-    pair_with_time(model_seconds, model_values, obs, spinup)
+    pair_in_window(model_seconds, model_values, obs, spinup, None)
+}
+
+/// 同 `pair`，但只评估已归一化秒时间轴上的 `[from, to)` 窗口。
+pub fn pair_in_window(
+    model_seconds: &[f64],
+    model_values: &[f64],
+    obs: &Series<'_>,
+    spinup: usize,
+    window: Option<TimeWindow>,
+) -> Vec<Pair> {
+    pair_with_time_in_window(model_seconds, model_values, obs, spinup, window)
         .into_iter()
         .map(|(_, m, o)| (m, o))
         .collect()
@@ -58,6 +82,17 @@ pub fn pair_with_time(
     obs: &Series<'_>,
     spinup: usize,
 ) -> Vec<(f64, f64, f64)> {
+    pair_with_time_in_window(model_seconds, model_values, obs, spinup, None)
+}
+
+/// 同 `pair_with_time`，但只评估已归一化秒时间轴上的 `[from, to)` 窗口。
+pub fn pair_with_time_in_window(
+    model_seconds: &[f64],
+    model_values: &[f64],
+    obs: &Series<'_>,
+    spinup: usize,
+    window: Option<TimeWindow>,
+) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::new();
     let observation_time_is_sorted = obs.seconds.windows(2).all(|window| window[0] <= window[1]);
     // TIMESTEP history 与 AU-Preston 观测同为半小时：同名时刻一一配对。
@@ -69,6 +104,9 @@ pub fn pair_with_time(
         .fold(f64::INFINITY, f64::min);
     let one_observation_per_label = shortest_model_step <= 1801.0;
     for k in spinup..model_seconds.len() {
+        if window.is_some_and(|window| !window.contains(model_seconds[k])) {
+            continue;
+        }
         // 派生碳通量与原始 history 都可能遇到非有限值或 CoLM 的巨大负填充值。
         // 这种记录不能进入指标，否则一项缺测就会把整行 RMSE/KGE 变成 NaN。
         if !model_values[k].is_finite() || model_values[k] <= -1.0e30 {

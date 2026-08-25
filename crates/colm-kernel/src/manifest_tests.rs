@@ -2,22 +2,23 @@ use std::path::PathBuf;
 
 use super::*;
 
-/// 本机实测的清单，一字不改地当作固件。
+/// 当前内置 default 内核的清单，一字不改地当作固件。
 pub const SAMPLE: &str = r#"{
   "schema": 1,
   "preset": "default",
   "platform": "Darwin-arm64",
-  "colm_git_sha": "72dd76b9",
-  "generator_args": "SinglePoint LULC_IGBP URBANOFF vanGenu CaMaOFF BGCOFF CROPOFF TRACEROFF",
-  "macros": ["CoLMDEBUG","LULC_IGBP","RangeCheck","SinglePoint","extend_interception","vanGenuchten_Mualem_SOIL_MODEL"],
+  "colm_git_sha": "7e54fc0",
+  "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
+  "build_profile": "production",
+  "macros": ["LULC_IGBP","SinglePoint","URBAN_MODEL","extend_interception"],
   "built_with": "GNU Fortran (Homebrew GCC 16.1.0) 16.1.0",
-  "netcdf_c": "netCDF 4.9.3",
+  "netcdf_c": "netCDF 4.10.1",
   "netcdf_fortran": "4.6.3",
-  "hdf5": "1.14.6",
+  "hdf5": "",
   "sha256": {
-    "mksrfdata": "053ba92bfbe62d2c74a2d866afe458eeb878b4d557bbe01aecd7e6a9b6e0c0bb",
-    "mkinidata": "a707e8c030b650d242ddaa09e4aed8c1e14938afe494bc5b47817b817279fff2",
-    "colm":      "8dc6a40aabc704da4a49941779cfa3369e3d5d5125a76d684ad45b8a282140e4"
+    "mksrfdata": "8b2b9a2d26f9f8e9a3c859655641196295d922a10fca2d0eea78ecf43c14dd20",
+    "mkinidata": "a92cd21809d434b93a5276fba71c45dfb13c6d1992a85a14edfdfef95cb5bacf",
+    "colm":      "452d398034cfaf4d968391ec7656cfbb0c103f2fb5ee08fd2b4c2ba13470e2b4"
   }
 }"#;
 
@@ -45,9 +46,9 @@ fn fake_kernel(name: &str, bodies: &[(&str, &str)]) -> PathBuf {
         // 把清单里的占位 sha256 换成这个内容的真实值
         let want = sha256_hex(body.as_bytes());
         let old = match *prog {
-            "mksrfdata" => "053ba92bfbe62d2c74a2d866afe458eeb878b4d557bbe01aecd7e6a9b6e0c0bb",
-            "mkinidata" => "a707e8c030b650d242ddaa09e4aed8c1e14938afe494bc5b47817b817279fff2",
-            _ => "8dc6a40aabc704da4a49941779cfa3369e3d5d5125a76d684ad45b8a282140e4",
+            "mksrfdata" => "8b2b9a2d26f9f8e9a3c859655641196295d922a10fca2d0eea78ecf43c14dd20",
+            "mkinidata" => "a92cd21809d434b93a5276fba71c45dfb13c6d1992a85a14edfdfef95cb5bacf",
+            _ => "452d398034cfaf4d968391ec7656cfbb0c103f2fb5ee08fd2b4c2ba13470e2b4",
         };
         m = m.replace(old, &want);
     }
@@ -66,11 +67,21 @@ fn the_sample_manifest_parses_into_its_fields() {
     let m: Manifest = serde_json::from_str(SAMPLE).expect("parses");
     assert_eq!(m.schema, 1);
     assert_eq!(m.preset, "default");
-    assert_eq!(m.colm_git_sha, "72dd76b9");
+    assert_eq!(m.colm_git_sha, "7e54fc0");
+    assert_eq!(m.build_profile, "production");
+    assert_eq!(m.identity(), "default@7e54fc0#production");
     assert_eq!(m.netcdf_fortran, "4.6.3");
-    assert_eq!(m.macros.len(), 6);
+    assert_eq!(m.macros.len(), 4);
     assert!(m.macros.iter().any(|x| x == "SinglePoint"));
     assert_eq!(m.sha256.len(), 3);
+}
+
+#[test]
+fn a_legacy_manifest_keeps_its_old_kernel_identity() {
+    let legacy = SAMPLE.replace("  \"build_profile\": \"production\",\n", "");
+    let m: Manifest = serde_json::from_str(&legacy).expect("legacy manifest parses");
+    assert!(m.build_profile.is_empty());
+    assert_eq!(m.identity(), "default@7e54fc0");
 }
 
 #[test]
@@ -80,7 +91,7 @@ fn the_nested_sha256_object_is_read_as_values_not_keys() {
     let m: Manifest = serde_json::from_str(SAMPLE).expect("parses");
     assert_eq!(
         m.sha256.get("colm").map(String::as_str),
-        Some("8dc6a40aabc704da4a49941779cfa3369e3d5d5125a76d684ad45b8a282140e4")
+        Some("452d398034cfaf4d968391ec7656cfbb0c103f2fb5ee08fd2b4c2ba13470e2b4")
     );
 }
 

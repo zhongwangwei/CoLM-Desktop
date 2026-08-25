@@ -20,9 +20,20 @@
   MOD_CMD = -J
 
   # HDF5 打开 netCDF 文件时会置 invalid；zero/overflow 仍由 CoLM 捕获。
-  FOPTS = -fdefault-real-8 -ffree-form -g -fcheck=all \
-          -ffpe-trap=zero,overflow -fbacktrace -cpp \
-          -ffree-line-length-0 -fallow-argument-mismatch
+  # 安装包默认使用 -O2；需要定位越界时显式设 COLM_KERNEL_PROFILE=debug。
+  COLM_KERNEL_PROFILE ?= production
+  FOPTS_COMMON = -fdefault-real-8 -ffree-form -g \
+                 -ffpe-trap=zero,overflow -fbacktrace -cpp \
+                 -ffree-line-length-0 -fallow-argument-mismatch
+  FOPTS_PRODUCTION = -O2 $(FOPTS_COMMON)
+  FOPTS_DEBUG = -O0 -fcheck=all $(FOPTS_COMMON)
+  ifeq ($(COLM_KERNEL_PROFILE),production)
+     FOPTS = $(FOPTS_PRODUCTION)
+  else ifeq ($(COLM_KERNEL_PROFILE),debug)
+     FOPTS = $(FOPTS_DEBUG)
+  else
+     $(error COLM_KERNEL_PROFILE must be production or debug)
+  endif
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
   BLAS_LIBS ?= -llapack -lblas

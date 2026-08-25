@@ -48,6 +48,12 @@ fn host_triple() -> Result<String> {
         .arg("-vV")
         .output()
         .context("cannot run rustc")?;
+    if !out.status.success() {
+        bail!(
+            "rustc -vV failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     let text = String::from_utf8(out.stdout)?;
     text.lines()
         .find_map(|l| l.strip_prefix("host: "))

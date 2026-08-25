@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 # 从 vendor/CoLM202X 构建一个 SinglePoint 物理预设，并写出内核清单。
+# 默认是 production (-O2)；定位编译期越界时用
+# `COLM_KERNEL_PROFILE=debug ./oracle/scripts/build_kernel.sh ...`。
 #
 # colm.x 只接受一个参数（namelist 路径，getarg(1)），没有 --version。
 # 因此版本握手靠构建期生成的 manifest.json + sha256，而不是问二进制。
 set -euo pipefail
 
-PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban> [outdir]}"
+PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop> [outdir]}"
 OUTDIR="${2:-kernels}"
+PROFILE="${COLM_KERNEL_PROFILE:-production}"
+case "$PROFILE" in
+  production|debug) ;;
+  *) echo "COLM_KERNEL_PROFILE must be production or debug, got: $PROFILE" >&2; exit 2 ;;
+esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in
+  /*) OUT_BASE="$OUTDIR" ;;
+  *)  OUT_BASE="$REPO_ROOT/$OUTDIR" ;;
+esac
 SRC="$REPO_ROOT/vendor/CoLM202X"
 
 # Soil hydraulic scheme (Campbell vs. vanGenuchten) used to be a 4th
@@ -36,12 +47,13 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # URBANON/OFF and BGCON/OFF argument slots are gone entirely.
 #
 # default/bgc/urban 编成同一份 IGBP 产物；bgc/urban 只为旧测试名保留别名。
-# usgs 是唯一另外的编译组合，因为 N_land_classification 与查表数组尺寸不同。
+# usgs 是地类分类编译组合；crop 仍需要 CROPON，因为 CFT 数组尺寸不同。
 case "$PRESET" in
   default) ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   usgs)    ARGS=(SinglePoint LULC_USGS CaMaOFF CROPOFF) ;;
   bgc)     ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   urban)   ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
+  crop)    ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPON) ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
@@ -58,7 +70,7 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported host; add a Makeoptions preset" >&2; exit 2 ;;
 esac
 
-BUILD="$REPO_ROOT/$OUTDIR/build-$PRESET"
+BUILD="$OUT_BASE/build-$PRESET"
 rm -rf "$BUILD"
 # **拷贝而不是 `git worktree`。** `vendor/CoLM202X` 曾经是 submodule，
 # 那时用 worktree 从它的 HEAD 建一棵临时树。入库之后它就是普通文件了
@@ -111,7 +123,7 @@ cp "include/$MAKEOPTS" include/Makeoptions
 # 每次配错都要先陪一次全量 Fortran 编译。
 #
 # 取「预处理后的生效集」而不是 grep define.h 的 #define 原文：原文 grep
-# 会把 USEMPI / GridRiverLakeFlow / LATERAL_FLOW 都报成已定义，而它们在
+# 会把 USEMPI / GridRiverLakeFlow / CatchLateralFlow 都报成已定义，而它们在
 # SinglePoint 下实际都被下游的 conflict 块关掉了。下面算出来的 $EFFECTIVE
 # 后面 manifest.json 的 macros 字段直接复用，不重算第二遍——重算两遍还要
 # 保证两边算法一致，本身就是又一个出错点。
@@ -174,9 +186,8 @@ for arg in "${ARGS[@]}"; do
   fi
 done
 
-# URBAN_MODEL / BGC / LULCC no longer appear in $EFFECTIVE at all (they are
-# unconditional #define URBAN_MODEL in create_defineh.bash, and BGC/LULCC
-# don't appear in the generated define.h anymore -- see that script). This
+# BGC / LULCC no longer appear in $EFFECTIVE at all; URBAN_MODEL is instead
+# unconditionally defined by create_defineh.bash. This
 # self-check used to also confirm URBAN_MODEL/BGC took effect for the
 # "urban"/"bgc" presets specifically; that check is gone along with the
 # macros themselves. What actually turns urban/bgc physics on now is the
@@ -301,9 +312,10 @@ fi
 # FF=gfortran 而非 mpif90：SinglePoint 已 #undef USEMPI，用 mpif90 只会白链 4 个 MPI 库。
 # 实测去掉后依赖只剩 netcdff/netcdf/LAPACK/BLAS/libgfortran/libgomp/libquadmath。
 # 只借它的 -I，不借它的 -l。
-make FF="gfortran -fopenmp $MPI_INC" mksrfdata.x mkinidata.x colm.x
+make FF="gfortran -fopenmp $MPI_INC" COLM_KERNEL_PROFILE="$PROFILE" \
+  mksrfdata.x mkinidata.x colm.x
 
-DEST="$REPO_ROOT/$OUTDIR/$PRESET"
+DEST="$OUT_BASE/$PRESET"
 mkdir -p "$DEST"
 cp run/mksrfdata.x run/mkinidata.x run/colm.x "$DEST/"
 
@@ -351,6 +363,7 @@ cat > "$DEST/manifest.json" <<JSON
   "platform": "$(uname -s)-$(uname -m)",
   "colm_git_sha": "$GIT_SHA",
   "generator_args": "${ARGS[*]}",
+  "build_profile": "$PROFILE",
   "macros": [$MACROS],
   "built_with": "$(gfortran --version | head -1)",
   "netcdf_c": "$(nc-config --version 2>/dev/null)",
@@ -364,5 +377,5 @@ cat > "$DEST/manifest.json" <<JSON
 }
 JSON
 
-echo "built $PRESET -> $DEST"
+echo "built $PRESET ($PROFILE) -> $DEST"
 cat "$DEST/manifest.json"

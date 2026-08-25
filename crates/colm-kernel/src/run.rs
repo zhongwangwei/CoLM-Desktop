@@ -89,6 +89,21 @@ pub fn no_console(cmd: &mut std::process::Command) -> &mut std::process::Command
     cmd
 }
 
+/// GUI 启动的顶层 `colm-cli` 放进自己的进程组。
+///
+/// 用户点取消时，界面可以按这个进程组杀掉 `colm-cli` 与它正在跑的
+/// `mksrfdata.x`/`mkinidata.x`/`colm.x`，而不是只杀父进程留下 Fortran 孤儿。
+/// Windows 走 `taskkill /T`，这里只保留不弹黑框的标志。
+pub fn top_level_sidecar(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    no_console(cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd
+}
+
 /// RangeCheck 的逐变量播报里**不带异常标记**的那些行。
 ///
 /// 实测一次 11 年的 AT-Neu：2208 万行，占 `colm.log` 2.0 GB 的绝大部分。

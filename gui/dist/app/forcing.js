@@ -62,6 +62,17 @@ const defaultGapSettings = () => ({
 });
 let gapSettings = defaultGapSettings();
 
+function tableRow(cells) {
+  const row = document.createElement('tr');
+  for (const cell of cells) {
+    const td = document.createElement(cell.header ? 'th' : 'td');
+    td.textContent = cell.text ?? '';
+    if (cell.className) td.className = cell.className;
+    row.appendChild(td);
+  }
+  return row;
+}
+
 globalThis.addEventListener?.('colm:prep-site-invalidated', () => {
   lastResult = null;
   if (probe) renderCards();
@@ -499,11 +510,13 @@ function tableStructureCard() {
     <div class="ch">一份表格可以只含一个站点，也可以用站点列保存多个站点。
       软件会先按站点拆分，不会把不同站点混进同一个文件；所有时间统一换算为 UTC，
       缺少的整条时间记录会作为真实缺口交给后面的诊断和修复。</div>
-    <table style="margin-top:12px">
-      <tr><th>分隔方式</th><td>${tableProbe.delimiter}</td></tr>
-      <tr><th>数据行</th><td>${tableProbe.rows}</td></tr>
-      <tr><th>识别到的站点</th><td>${tableProbe.sites.length}</td></tr>
-    </table>`;
+    <table style="margin-top:12px"></table>`;
+  const summary = card.querySelector('table');
+  summary.append(
+    tableRow([{ header: true, text: '分隔方式' }, { text: tableProbe.delimiter }]),
+    tableRow([{ header: true, text: '数据行' }, { text: String(tableProbe.rows) }]),
+    tableRow([{ header: true, text: '识别到的站点' }, { text: String(tableProbe.sites.length) }]),
+  );
 
   const columns = document.createElement('div');
   columns.className = 'table-grid';
@@ -569,7 +582,9 @@ function tableStructureCard() {
   ]) {
     const field = document.createElement('div');
     field.className = 'field';
-    field.innerHTML = `<label>${label}</label>`;
+    const labelEl = document.createElement('label');
+    labelEl.textContent = label;
+    field.appendChild(labelEl);
     const input = document.createElement('input');
     input.className = 'input';
     input.type = 'number';
@@ -596,17 +611,15 @@ function tableStructureCard() {
     const table = document.createElement('table');
     table.innerHTML = '<tr><th>站点</th><th>行数</th><th>经纬度</th><th>地类</th><th>推断步长</th><th>缺少整行</th><th>时间范围</th></tr>';
     for (const site of tableProbe.sites) {
-      const row = document.createElement('tr');
-      row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
-      row.children[0].textContent = site.id;
-      row.children[1].textContent = String(site.rows);
-      row.children[2].textContent = site.latitude != null && site.longitude != null
-        ? `${site.latitude}, ${site.longitude}` : '—';
-      row.children[3].textContent = site.landtype ?? '—';
-      row.children[4].textContent = site.step_seconds ? `${site.step_seconds} 秒` : '需填写';
-      row.children[5].textContent = String(site.inserted_steps);
-      row.children[6].textContent = `${site.start ?? '—'} — ${site.end ?? '—'}`;
-      table.appendChild(row);
+      table.appendChild(tableRow([
+        { text: site.id },
+        { text: String(site.rows) },
+        { text: site.latitude != null && site.longitude != null ? `${site.latitude}, ${site.longitude}` : '—' },
+        { text: site.landtype ?? '—' },
+        { text: site.step_seconds ? `${site.step_seconds} 秒` : '需填写' },
+        { text: String(site.inserted_steps) },
+        { text: `${site.start ?? '—'} — ${site.end ?? '—'}` },
+      ]));
     }
     card.appendChild(table);
   }
@@ -852,19 +865,22 @@ function renderTableBatchResult(box) {
   table.style.marginTop = '14px';
   table.innerHTML = '<tr><th>站点</th><th>状态</th><th>原始行</th><th>补入时间步</th><th>缺测/不合格</th><th>QC 剔除</th><th>ERA5-Land</th><th>产物</th></tr>';
   for (const item of tableBatch) {
-    const row = document.createElement('tr');
-    row.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>';
-    row.children[0].textContent = item.site;
-    row.children[1].textContent = item.error ? `${item.phase}：${item.error}` : item.phase;
-    row.children[1].className = item.error ? 'fail' : (item.report?.needs_era5 ? 'warn' : '');
-    row.children[2].textContent = String(item.rows);
-    row.children[3].textContent = String(item.inserted_steps);
-    row.children[4].textContent = item.report ? String(item.report.missing) : '—';
-    row.children[5].textContent = item.report
-      ? String(item.report.variables.reduce((sum, variable) => sum + variable.quality_rejected, 0)) : '—';
-    row.children[6].textContent = item.report?.needs_era5 ? '需要' : '不需要';
-    row.children[7].textContent = item.phase === '完成' ? item.final_path : '—';
-    table.appendChild(row);
+    table.appendChild(tableRow([
+      { text: item.site },
+      {
+        text: item.error ? `${item.phase}：${item.error}` : item.phase,
+        className: item.error ? 'fail' : (item.report?.needs_era5 ? 'warn' : ''),
+      },
+      { text: String(item.rows) },
+      { text: String(item.inserted_steps) },
+      { text: item.report ? String(item.report.missing) : '—' },
+      {
+        text: item.report
+          ? String(item.report.variables.reduce((sum, variable) => sum + variable.quality_rejected, 0)) : '—',
+      },
+      { text: item.report?.needs_era5 ? '需要' : '不需要' },
+      { text: item.phase === '完成' ? item.final_path : '—' },
+    ]));
   }
   box.appendChild(table);
 
@@ -1032,13 +1048,16 @@ function timingCard() {
     <h3>时间轴与观测高度</h3>
     <div class="ch">步长与观测高度会写进产物；模拟用哪一段时间范围仍以强迫场
       覆盖范围为准，由建例时自动确定，不需要手动填写。</div>
-    <table>
-      <tr><th>步长</th><td>${probe.step_seconds} 秒</td></tr>
-      <tr><th>步数</th><td>${probe.steps}</td></tr>
-      <tr><th>是否等间隔</th><td class="${uniformWarn ? 'warn' : ''}">${
-        uniformWarn ? '不是 —— 重采样不在这一阶段，请先自己处理' : '是'
-      }</td></tr>
-    </table>`;
+    <table></table>`;
+  const table = card.querySelector('table');
+  table.append(
+    tableRow([{ header: true, text: '步长' }, { text: `${probe.step_seconds} 秒` }]),
+    tableRow([{ header: true, text: '步数' }, { text: String(probe.steps) }]),
+    tableRow([
+      { header: true, text: '是否等间隔' },
+      { text: uniformWarn ? '不是 —— 重采样不在这一阶段，请先自己处理' : '是', className: uniformWarn ? 'warn' : '' },
+    ]),
+  );
   const row = document.createElement('div');
   row.className = 'row';
   row.style.marginTop = '12px';
@@ -1137,24 +1156,42 @@ function gapReportView() {
   const solarEvidence = gapReport.solar_noon_hour == null
     ? '无可用太阳正午证据'
     : `${gapReport.solar_noon_hour.toFixed(2)} 时（逐日标准差 ${gapReport.solar_noon_std_hours.toFixed(2)} 小时）`;
-  box.innerHTML = `
-    <table style="margin-top:12px">
-      <tr><th>UTC 偏移</th><td>UTC${gapReport.timezone_offset_hours >= 0 ? '+' : ''}${gapReport.timezone_offset_hours} · ${timezoneLabels[gapReport.timezone_source] ?? gapReport.timezone_source}</td></tr>
-      <tr><th>时区证据</th><td class="${gapReport.timezone_conflict ? 'warn' : ''}">${confidenceLabels[gapReport.timezone_confidence] ?? gapReport.timezone_confidence}置信度 · ${solarEvidence}${gapReport.timezone_conflict ? ' · 与人工/文件声明冲突' : ''}</td></tr>
-      <tr><th>ERA5-Land 格点定位</th><td>${gapReport.latitude}, ${gapReport.longitude}</td></tr>
-      <tr><th>数据范围（UTC 日期）</th><td>${gapReport.start_date} — ${gapReport.end_date}</td></tr>
-      <tr><th>缺测/不合格总数</th><td class="${gapReport.missing ? 'warn' : ''}">${gapReport.missing}</td></tr>
-      <tr><th>其中 QC 剔除</th><td class="${qualityRejected ? 'warn' : ''}">${qualityRejected}</td></tr>
-    </table>
-    <table style="margin-top:10px">
-      <tr><th>槽位</th><th>变量</th><th>缺测/不合格</th><th>QC 剔除</th><th>短缺口</th><th>需 ERA5</th><th>最长</th><th>已插值</th><th>ERA5-Land</th></tr>
-    </table>`;
-  const table = box.querySelectorAll('table')[1];
+  const summary = document.createElement('table');
+  summary.style.marginTop = '12px';
+  summary.append(
+    tableRow([
+      { header: true, text: 'UTC 偏移' },
+      { text: `UTC${gapReport.timezone_offset_hours >= 0 ? '+' : ''}${gapReport.timezone_offset_hours} · ${timezoneLabels[gapReport.timezone_source] ?? gapReport.timezone_source}` },
+    ]),
+    tableRow([
+      { header: true, text: '时区证据' },
+      {
+        text: `${confidenceLabels[gapReport.timezone_confidence] ?? gapReport.timezone_confidence}置信度 · ${solarEvidence}${gapReport.timezone_conflict ? ' · 与人工/文件声明冲突' : ''}`,
+        className: gapReport.timezone_conflict ? 'warn' : '',
+      },
+    ]),
+    tableRow([{ header: true, text: 'ERA5-Land 格点定位' }, { text: `${gapReport.latitude}, ${gapReport.longitude}` }]),
+    tableRow([{ header: true, text: '数据范围（UTC 日期）' }, { text: `${gapReport.start_date} — ${gapReport.end_date}` }]),
+    tableRow([{ header: true, text: '缺测/不合格总数' }, { text: String(gapReport.missing), className: gapReport.missing ? 'warn' : '' }]),
+    tableRow([{ header: true, text: '其中 QC 剔除' }, { text: String(qualityRejected), className: qualityRejected ? 'warn' : '' }]),
+  );
+  box.appendChild(summary);
+  const table = document.createElement('table');
+  table.style.marginTop = '10px';
+  table.innerHTML = '<tr><th>槽位</th><th>变量</th><th>缺测/不合格</th><th>QC 剔除</th><th>短缺口</th><th>需 ERA5</th><th>最长</th><th>已插值</th><th>ERA5-Land</th></tr>';
+  box.appendChild(table);
   for (const row of gapReport.variables) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${row.slot}</td><td></td><td>${row.missing}</td><td>${row.quality_rejected}</td><td>${row.short_missing}</td><td class="${row.long_missing ? 'warn' : ''}">${row.long_missing}</td><td>${row.longest_gap}</td><td>${row.interpolated}</td><td>${row.era5_corrected}</td>`;
-    tr.children[1].textContent = row.variable;
-    table.appendChild(tr);
+    table.appendChild(tableRow([
+      { text: String(row.slot) },
+      { text: row.variable },
+      { text: String(row.missing) },
+      { text: String(row.quality_rejected) },
+      { text: String(row.short_missing) },
+      { text: String(row.long_missing), className: row.long_missing ? 'warn' : '' },
+      { text: String(row.longest_gap) },
+      { text: String(row.interpolated) },
+      { text: String(row.era5_corrected) },
+    ]));
   }
 
   if (gapReport.missing === 0) {

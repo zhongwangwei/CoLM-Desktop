@@ -24,7 +24,19 @@ fn every_scientific_observation_variable_has_one_model_definition() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        ["Rnet", "Qh", "Qle", "Qg", "SWup", "Ustar", "GPP", "GPP_DT", "Resp", "NEE"]
+        [
+            "Rnet",
+            "Qh",
+            "Qle",
+            "Qg",
+            "SWup",
+            "Ustar",
+            "GPP",
+            "GPP_DT",
+            "Resp",
+            "NEE",
+            "FCH4_f_ann"
+        ]
     );
     assert_eq!(
         super::EVALUATION_VARIABLES
@@ -32,7 +44,7 @@ fn every_scientific_observation_variable_has_one_model_definition() {
             .filter(|variable| variable.qc.is_none())
             .map(|variable| variable.observation)
             .collect::<Vec<_>>(),
-        ["GPP", "GPP_DT", "Resp"]
+        ["GPP", "GPP_DT", "Resp", "FCH4_f_ann"]
     );
 }
 
@@ -57,4 +69,16 @@ fn carbon_flux_definitions_convert_moles_and_derive_nee_explicitly() {
         .unwrap();
     assert_eq!(nee.model.required(), ["f_respc", "f_assim"]);
     assert_eq!(nee.model.label(), "f_respc - f_assim");
+
+    let methane = super::EVALUATION_VARIABLES
+        .iter()
+        .find(|variable| variable.observation == "FCH4_f_ann")
+        .unwrap();
+    assert_eq!(
+        methane.model,
+        ModelSource::Direct {
+            variable: "f_methane_surf_flux_tot",
+            scale: 1_000_000_000.0,
+        }
+    );
 }

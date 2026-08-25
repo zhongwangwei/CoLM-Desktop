@@ -70,6 +70,32 @@ fn an_uneven_time_step_is_reported() {
 }
 
 #[test]
+fn invalid_cadences_are_reported() {
+    for (steps, step, text) in [
+        (1, 0.0, "only one time step"),
+        (2, 0.0, "positive"),
+        (2, -1800.0, "positive"),
+        (2, 7200.0, "maximum supported"),
+    ] {
+        let mut m = ok_met();
+        m.steps = steps;
+        m.step_seconds = step;
+        let p = check(&m, None);
+        assert!(p.iter().any(|x| x.contains(text)), "{steps}/{step}: {p:?}");
+    }
+}
+
+#[test]
+fn missing_or_invalid_heights_are_reported() {
+    let mut m = ok_met();
+    m.height_v = f64::NAN;
+    m.height_q = 0.0;
+    let p = check(&m, None);
+    assert!(p.iter().any(|x| x.contains("HEIGHT_V")), "{p:?}");
+    assert!(p.iter().any(|x| x.contains("HEIGHT_Q")), "{p:?}");
+}
+
+#[test]
 fn a_window_past_the_end_of_the_forcing_is_reported() {
     // 这是本 crate 存在的头号理由。CoLM 自己的注释是
     // "when reaching the END of forcing data, show a Warning but still try to run"

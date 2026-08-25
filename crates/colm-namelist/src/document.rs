@@ -89,12 +89,27 @@ impl Document {
     /// 通常说明它不是一份完整的算例配置，而那个问题不该被一次插入掩盖。
     pub fn insert(&mut self, path: &str, value: Value, group: &str) -> Result<()> {
         let want = Path::parse(path)?;
-        if self
-            .items
-            .iter()
-            .any(|i| matches!(i, Item::Entry(e) if e.path == want))
-        {
-            return self.set(path, value);
+        let mut inside = false;
+        let mut found_outside = false;
+        for item in &mut self.items {
+            match item {
+                Item::GroupStart(s) => {
+                    inside = s.trim().trim_start_matches('&').eq_ignore_ascii_case(group);
+                }
+                Item::GroupEnd(_) => inside = false,
+                Item::Entry(e) if e.path == want => {
+                    if inside {
+                        e.text = value.to_string();
+                        e.value = value;
+                        return Ok(());
+                    }
+                    found_outside = true;
+                }
+                _ => {}
+            }
+        }
+        if found_outside {
+            bail!("{path} already exists outside &{group}");
         }
         // 找那个组的 `/`。GroupStart 的原文形如 `&nl_colm`（可能带缩进）。
         let mut inside = false;
@@ -123,6 +138,16 @@ impl Document {
         bail!("this namelist has no group &{group} to put {path} in")
     }
 
+    /// Remove one exact assignment. Missing fields are already at their
+    /// declared default, so removing an absent field is a harmless no-op.
+    pub fn remove(&mut self, path: &str) -> Result<bool> {
+        let want = Path::parse(path)?;
+        let before = self.items.len();
+        self.items
+            .retain(|item| !matches!(item, Item::Entry(entry) if entry.path == want));
+        Ok(self.items.len() != before)
+    }
+
     /// 列出全部字段路径，按出现顺序。
     pub fn paths(&self) -> Vec<String> {
         self.items
@@ -146,3 +171,7 @@ impl std::fmt::Display for Document {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "document_tests.rs"]
+mod document_tests;
