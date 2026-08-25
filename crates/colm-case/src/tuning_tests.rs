@@ -175,11 +175,7 @@ fn sampled_vectors_reject_duplicates_and_crossed_soil_potentials() {
 
 #[test]
 fn applies_runtime_values_without_touching_the_source_on_error() {
-    let root = std::env::temp_dir().join(format!(
-        "colm-tuning-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
+    let root = std::env::temp_dir().join(format!("colm-tuning-{}-apply", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("case.nml");
     let original = "&nl_colm\n   DEF_CASE_NAME = 'base'\n/\n";
@@ -212,11 +208,7 @@ fn applies_runtime_values_without_touching_the_source_on_error() {
 
 #[test]
 fn study_rejects_sentinel_and_inactive_scheme_parameters() {
-    let root = std::env::temp_dir().join(format!(
-        "colm-tuning-active-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
+    let root = std::env::temp_dir().join(format!("colm-tuning-active-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("case.nml");
     std::fs::write(
