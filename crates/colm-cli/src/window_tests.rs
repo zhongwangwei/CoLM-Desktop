@@ -72,7 +72,7 @@ fn case_with_nml(name: &str, text: &str) -> PathBuf {
 
 #[test]
 fn urban_site_new_applies_the_built_in_urban_tables_before_readiness_audit() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = case_with_nml("urban-site-new-prep", "&nl_colm\n/\n");
     let out = root.join("AU-Preston.nc");
     let args = [
@@ -269,7 +269,7 @@ fn without_an_explicit_path_the_naming_convention_is_used() {
 
 #[test]
 fn scanning_can_match_the_same_site_in_an_explicit_forcing_directory() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-met-dir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let site = layout(&root);
@@ -283,7 +283,7 @@ fn scanning_can_match_the_same_site_in_an_explicit_forcing_directory() {
 
 #[test]
 fn scanning_a_generated_site_without_landtype_keeps_it_natural() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-scan-generated-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let sites = root.join("Sitedata");
@@ -304,7 +304,7 @@ fn scanning_a_generated_site_without_landtype_keeps_it_natural() {
 
 #[test]
 fn scanning_the_bundled_crop_site_marks_it_as_crop() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Sitedata");
     if !root
         .join("US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc")
@@ -328,7 +328,7 @@ fn scanning_the_bundled_crop_site_marks_it_as_crop() {
 
 #[test]
 fn generated_crop_sites_keep_their_identity_until_rawdata_fills_them() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!(
         "colm-cli-crop-site-new-{}-{:?}",
         std::process::id(),

@@ -34,7 +34,11 @@ fn auxiliary_history_files_are_separate_streams() {
 
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir()
-        .join(format!("colm-hist-{tag}-{:?}", std::thread::current().id()))
+        .join(format!(
+            "colm-hist-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
         .join("history");
     let _ = std::fs::remove_dir_all(d.parent().unwrap());
     std::fs::create_dir_all(&d).unwrap();
@@ -288,7 +292,7 @@ fn evaluation_model_sources_apply_units_and_derived_expressions() {
 
 #[test]
 fn evaluation_resolves_one_carbon_source_before_reading_values() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("bgc-source");
     let path = d.join("CN-Cng_hist_2008-01.nc");
     write_history_nc(
@@ -355,7 +359,7 @@ fn write_history_nc(path: &std::path::Path, vars: &[(&str, &[f64])]) {
 
 #[test]
 fn declared_history_missing_values_are_not_returned_as_data() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("missing-value");
     let path = d.join("US-Ne3_hist_2002-01.nc");
     let mut file = netcdf::create(&path).unwrap();
@@ -381,7 +385,7 @@ fn declared_history_missing_values_are_not_returned_as_data() {
 
 #[test]
 fn main_and_tracer_history_keep_separate_time_axes() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-time");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -403,7 +407,7 @@ fn main_and_tracer_history_keep_separate_time_axes() {
 
 #[test]
 fn mixed_main_and_tracer_series_read_from_their_own_files() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-mixed");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -426,7 +430,7 @@ fn mixed_main_and_tracer_series_read_from_their_own_files() {
 
 #[test]
 fn history_catalog_includes_main_and_tracer_variables() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-history-catalog");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -454,7 +458,7 @@ fn history_catalog_includes_main_and_tracer_variables() {
 
 #[test]
 fn history_catalog_rejects_time_only_files_as_incomplete_results() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("time-only-history");
     write_history_nc(&d.join("Bad_hist_2010-01.nc"), &[("time", &[1.0, 2.0])]);
     let files = super::history_files(d.parent().unwrap()).unwrap();
@@ -496,7 +500,7 @@ fn history_catalog_rejects_static_coordinates_without_a_time_series() {
 
 #[test]
 fn evaluation_catalog_sees_methane_in_tracer_history() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-catalog");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -530,7 +534,7 @@ fn evaluation_catalog_sees_methane_in_tracer_history() {
 
 #[test]
 fn evaluation_catalog_derives_urban_plumber_rnet_from_radiation_components() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("urban-rnet-catalog");
     write_history_nc(
         &d.join("AU-Preston_hist_2010-01.nc"),
@@ -566,7 +570,7 @@ fn evaluation_catalog_derives_urban_plumber_rnet_from_radiation_components() {
 
 #[test]
 fn urban_plumber_rnet_observation_values_drop_component_qc_and_fill_samples() {
-    let _netcdf_guard = super::netcdf_test_lock().lock().unwrap();
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("urban-rnet-values");
     let obs_path = d.parent().unwrap().join("obs.nc");
     write_history_nc(

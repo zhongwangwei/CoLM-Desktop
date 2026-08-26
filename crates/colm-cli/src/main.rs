@@ -4183,6 +4183,13 @@ fn netcdf_test_lock() -> &'static std::sync::Mutex<()> {
 }
 
 #[cfg(test)]
+fn netcdf_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    netcdf_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
 
