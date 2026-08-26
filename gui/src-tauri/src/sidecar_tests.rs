@@ -81,6 +81,38 @@ fn bgc_case_requires_its_runtime_inputs() {
     assert!(validate_bgc_runtime(root.to_str(), &fields).is_ok());
 
     fields.push(crate::config::FieldChange {
+        path: "DEF_NDEP_FREQUENCY".into(),
+        value: "2".into(),
+    });
+    assert!(validate_bgc_runtime(root.to_str(), &fields)
+        .unwrap_err()
+        .contains("fndep_colm_monthly.nc"));
+    std::fs::write(root.join("ndep/fndep_colm_monthly.nc"), []).unwrap();
+    assert!(validate_bgc_runtime(root.to_str(), &fields).is_ok());
+    fields.pop();
+
+    fields.push(crate::config::FieldChange {
+        path: "DEF_USE_FIRE".into(),
+        value: ".true.".into(),
+    });
+    assert!(validate_bgc_runtime(root.to_str(), &fields)
+        .unwrap_err()
+        .contains("abm_colm_double_fillcoast.nc"));
+    for name in [
+        "fire/abm_colm_double_fillcoast.nc",
+        "fire/peatf_colm_360x720_c100428.nc",
+        "fire/gdp_colm_360x720_c100428.nc",
+        "fire/colmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc",
+        "fire/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc",
+    ] {
+        let file = root.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, []).unwrap();
+    }
+    assert!(validate_bgc_runtime(root.to_str(), &fields).is_ok());
+    fields.pop();
+
+    fields.push(crate::config::FieldChange {
         path: "DEF_TUNING_CROP_PLANTING_DAY".into(),
         value: "120".into(),
     });

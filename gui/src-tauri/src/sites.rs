@@ -24,9 +24,11 @@ pub struct Site {
     pub met_file: Option<String>,
     /// 没有观测就不能自动评估。这一条决定评估按钮的死活。
     pub obs_file: Option<String>,
-    /// 城市站点（站点文件不带 `IGBP_classification`）。城市算例必须给
-    /// rawdata 与 runtime 目录，界面据此决定问不问。
+    /// 城市站点（站点文件不带 `IGBP_classification`）。表内 Urban-PLUMBER
+    /// 站点可由内置数据补齐；表外站点才需要 rawdata，runtime 也可由 CLI 内置。
     pub urban: bool,
+    /// 作物站点（显式 CROP 标记或已有 croptyp/pctcrop）。向导据此避免自然/作物混列。
+    pub crop: bool,
     pub lon: f64,
     pub lat: f64,
     pub landtype: Option<i32>,

@@ -33,13 +33,29 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
                 .into_owned()
         });
         out.push(CaseEntry {
-            has_history: history_of(&d, &name).is_some(),
+            has_history: history_of(&d, &name).is_some() && !colm_case::results_are_stale(&d),
             dir: d.to_string_lossy().into_owned(),
             name,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// 参数已写入、新的 colm 还没有成功时，旧 history 不能跨重启重新变成“可用”。
+#[tauri::command]
+pub fn mark_results_stale(dirs: Vec<String>) -> Result<(), String> {
+    let cases: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+    for case in &cases {
+        if !case.join("case.nml").is_file() {
+            return Err(format!("{} 不是算例目录", case.display()));
+        }
+    }
+    for case in &cases {
+        colm_case::mark_results_stale(case)
+            .map_err(|error| format!("{}: {error}", case.display()))?;
+    }
+    Ok(())
 }
 
 /// 算例里那个唯一的 `*_hist_*.nc`，没有就是没跑过。

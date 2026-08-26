@@ -8,6 +8,7 @@ const SAMPLE: &str = r#"[
     "met_file": "/d/Forcing/AT-Neu_2002-2012_FLUXNET2015_Met.nc",
     "obs_file": null,
     "urban": false,
+    "crop": false,
     "lon": 11.3175,
     "lat": 47.1166,
     "landtype": 10,
@@ -28,6 +29,7 @@ fn a_site_says_whether_its_forcing_and_observation_are_there() {
     assert!(s[0].obs_file.is_none(), "这个样本刻意没有观测");
     assert_eq!(s[0].landtype, Some(10));
     assert!(!s[0].urban);
+    assert!(!s[0].crop);
 }
 
 #[test]

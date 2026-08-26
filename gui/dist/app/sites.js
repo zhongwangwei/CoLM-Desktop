@@ -29,7 +29,9 @@ function wizardMode() {
 export function sitesForWizard(sites = state.sites) {
   const urban = urbanEnabled();
   const mode = wizardMode();
-  return sites.filter(s => s.urban === urban && matchesBundledExampleMode(s.site_file, mode));
+  return sites.filter(s => s.urban === urban
+    && (mode === 'crop' ? (!!s.crop || s.landtype === 12) : !s.crop)
+    && matchesBundledExampleMode(s.site_file, mode));
 }
 
 function preferredExampleSite(sites) {

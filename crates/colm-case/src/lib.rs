@@ -11,11 +11,13 @@ pub mod land_cover;
 pub mod layout;
 pub mod minimal;
 pub mod pft;
+mod result_state;
 pub mod tuning;
 
 pub use build::{fields, spinup_fields, CaseSpec, Dirs, Spinup, Window};
 pub use layout::{case_name, render, Layout};
 pub use minimal::{is_default, required};
+pub use result_state::{clear_results_stale, mark_results_stale, results_are_stale};
 
 #[cfg(test)]
 mod land_cover_tests;

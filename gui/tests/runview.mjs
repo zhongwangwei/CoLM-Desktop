@@ -75,6 +75,9 @@ for (const [id, label] of expectedRunButtons) {
 if (!runner.includes("const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null]")) {
   throw new Error('the four run buttons must map to three individual stages and the full workflow');
 }
+if (!runner.includes("['begin', 'failed'].includes(colmState)")) {
+  throw new Error('a failed colm stage must leave its partially replaced history unavailable');
+}
 if (!runner.includes("invoke('cancel_runs', { cases })")
     || !runner.includes("d.cancelled ? '已取消'")) {
   throw new Error('run cancellation must reach the backend and keep its own terminal state');

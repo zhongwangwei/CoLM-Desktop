@@ -48,6 +48,7 @@ export function forcingDirectoryForSiteDirectory(dir) {
 /** 自带示例各服务一种入口；普通用户站点不受这个筛选影响。 */
 export function matchesBundledExampleMode(path, mode) {
   const name = baseName(path).toLowerCase();
+  if (name === 'at-neu_2002-2012_fluxnet2015_site.nc') return false;
   const required = name === 'cn-cng_2008-2009_fluxnet2015_site.nc' ? 'natural'
     : name === 'at-neu_2010-2012_fluxnet-ch4_site.nc' ? 'methane'
       : name === 'us-ne3_2002-2003_fluxnet2015_crop_site.nc' ? 'crop'

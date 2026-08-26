@@ -2279,6 +2279,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lhs_study_runs_end_to_end_with_a_fake_kernel() {
+        let _netcdf_guard = crate::netcdf_test_lock().lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
 
         let root = std::env::temp_dir().join(format!(
