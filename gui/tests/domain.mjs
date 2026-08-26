@@ -22,6 +22,7 @@ class El {
     if (value === '') this.children = [];
   }
   appendChild(child) { this.children.push(child); return child; }
+  append(...children) { this.children.push(...children); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] ?? null; }
 }
@@ -37,6 +38,7 @@ globalThis.document = {
   querySelectorAll: () => [],
 };
 globalThis.window = globalThis;
+globalThis.addEventListener = () => {};
 globalThis.requestAnimationFrame = () => 0;
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -194,6 +196,9 @@ for (const [subgrid, expected] of Object.entries({
   }
 }
 const owned = wizardFieldNames();
+for (const path of ['DEF_USE_NITRIF', 'DEF_USE_FERT', 'DEF_USE_CNSOYFIXN', 'DEF_Aerosol_Readin']) {
+  if (owned.includes(path)) throw new Error(`${path} is an editable process initial value, not a locked wizard field`);
+}
 const mainFields = withoutWizardFields([
   ...owned.map(path => ({ path })),
   { path: 'DEF_HIST_FREQ' },
@@ -231,6 +236,25 @@ choose('站点'); next(); choose('PC'); next(); choose('van Genuchten–Mualem�
 choose('BGC');
 if (card('LULCC').getAttribute('aria-disabled') !== 'true' || !/BGC/.test(nodeText(card('LULCC')))) {
   throw new Error('LULCC must be blocked when BGC is enabled');
+}
+const bgcFields = Object.fromEntries(wizardFields({
+  subgrid: 'PFT', soil: 'vg', tracer: null,
+  physics: { urban: false, lulcc: false, bgc: true, crop: false, tracer: false },
+  debug: { rangecheck: false, colmdebug: false, srfdatadiag: false },
+}).map(x => [x.path, x.value]));
+if (bgcFields.DEF_USE_NITRIF !== '.true.'
+  || bgcFields.DEF_USE_FERT !== '.false.'
+  || bgcFields.DEF_USE_CNSOYFIXN !== '.false.'
+  || bgcFields.DEF_Aerosol_Readin !== '.false.') {
+  throw new Error('natural BGC cases must disable crop-only nitrogen inputs');
+}
+const waterFields = Object.fromEntries(wizardFields({
+  subgrid: 'IGBP', soil: 'vg', tracer: null,
+  physics: { urban: false, lulcc: false, bgc: false, crop: false, tracer: false },
+  debug: { rangecheck: false, colmdebug: false, srfdatadiag: false },
+}).map(x => [x.path, x.value]));
+for (const name of ['DEF_USE_NITRIF', 'DEF_USE_FERT', 'DEF_USE_CNSOYFIXN', 'DEF_Aerosol_Readin']) {
+  if (waterFields[name] !== '.false.') throw new Error(`ordinary natural cases must disable ${name}`);
 }
 
 showDomainGate();

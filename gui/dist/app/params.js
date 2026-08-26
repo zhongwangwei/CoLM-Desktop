@@ -4,12 +4,13 @@ import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status, baseName } from './ui.js';
 import { renderHistVars } from './histvars.js';
+import { markResultsStale } from './results.js';
 import { renderTiming } from './timing.js';
 import { editTarget, currentCases } from './batch.js';
 import { wizardFieldNames } from './domain.js';
 import { language } from './i18n.js';
 import {
-  fieldLabel, fortranNumberInputValue, isCommonField, optionLabel, technicalFieldHint,
+  fieldLabel, fieldOptions, fortranNumberInputValue, isCommonField, optionLabel, technicalFieldHint,
 } from './param-presentation.js';
 
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
@@ -49,6 +50,7 @@ const HINTS = {
   'DEF_simulation_time%spinup_month': '预热截止时刻的月，见 spinup_repeat 的说明。',
   'DEF_simulation_time%spinup_day': '预热截止时刻的日，见 spinup_repeat 的说明。',
   'DEF_simulation_time%spinup_sec': '预热截止时刻的当天秒数，见 spinup_repeat 的说明。',
+  DEF_file_GIEMS: '卫星淹水模式必需的 GIEMS-MC 月湿地比例 NetCDF 文件。',
 };
 
 // 打开这些父开关时，缺少路径就不是“以后再补”的半成品，而是下一阶段
@@ -62,7 +64,7 @@ const PATH_ON_ENABLE = Object.freeze({
 });
 const PATH_FIELDS = Object.freeze(Object.fromEntries(
   Object.values(PATH_ON_ENABLE).map(spec => [spec.path, spec.kind])
-    .concat([['DEF_file_Ozone', 'file']])));
+    .concat([['DEF_file_Ozone', 'file'], ['DEF_file_GIEMS', 'file']])));
 
 // CoLM 对这两个开关分别分配同名、不同形状的数组，不能同时为 true。
 // 用户启用一个时在同一次原子写入里关闭另一个，不要求先手工关闭另一方案。
@@ -80,6 +82,7 @@ const STABLE_IN_PLACE_FIELDS = new Set([
 
 const enabled = value => /true|\.t\./i.test(String(value));
 const EXPERT_ALL = '__all__';
+
 const PFT_SITE_CACHE = new Map();
 const PFT_IDENTITY_FIELDS = new Set([
   'SITE_fsitedata', 'SITE_landtype', 'DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC',
@@ -209,7 +212,9 @@ export async function renderFields() {
   const hist = $('hist-fields');
   const basics = BASIC_PAGES.map(p => [p, $(p.target)]);
   const processes = PARAM_PAGES.map(p => [p, $(p.target)]);
-  const flows = new Set(['basic-files', 'basic-timing', 'basic-grid']);
+  // 文件/预热总是基本设定；其余分栏只在后端确认有可编辑/可见字段后加入。
+  // SinglePoint/Urban 会把“网格与并行”等整栏隐藏，避免空分栏误导用户。
+  const flows = new Set(['basic-files', 'basic-timing']);
   output.textContent = '';
   hist.textContent = '';
   for (const [, basic] of basics) basic.textContent = '';
@@ -497,8 +502,28 @@ function processControl(entry) {
     s.value = /true|\.t\./i.test(entry.value) ? '.true.' : '.false.';
     return s;
   }
+  const options = fieldOptions(entry.path);
+  if (options.length && entry.kind !== 'list' && entry.path !== 'DEF_METHANE%ch4_history_vars') {
+    const s = document.createElement('select');
+    s.className = 'select';
+    for (const value of options) {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = optionLabel(entry.path, value, language());
+      s.appendChild(o);
+    }
+    if (!options.includes(raw)) {
+      const o = document.createElement('option');
+      o.value = raw;
+      o.textContent = optionLabel(entry.path, raw, language()) + '（不在已知取值里）';
+      s.appendChild(o);
+    }
+    s.value = raw;
+    return s;
+  }
   const inp = document.createElement('input');
   inp.className = 'input';
+  if (entry.path === 'DEF_METHANE%ch4_history_vars') inp.setAttribute('list', 'ch4-history-presets');
   inp.value = entry.kind === 'list' ? entry.value.replace(/\s+/g, ', ') : raw;
   if (entry.kind === 'integer' || entry.kind === 'real') {
     const number = entry.kind === 'real' ? fortranNumberInputValue(raw) : raw;
@@ -569,6 +594,7 @@ function renderExpertTable(file, dirs) {
           dirs, file: file.file, path: entry.path, value: inp.value,
         });
         if (state.selected && dirs.includes(state.selected.dir)) state.text = r.text || state.text;
+        await markResultsStale(dirs);
         status(r.written > 1
           ? `已写入 ${r.written} 个站点：${entry.path}`
           : `已保存 ${baseName(dirs[0])}：${entry.path}`);
@@ -707,6 +733,7 @@ function renderPftParameterGroup(group, parameters, dirs, pftType) {
           dirs, pftType: Number(pftType), name: parameter.name,
           value: control.value, kernelDir: $('kernel').value,
         });
+        await markResultsStale(dirs);
         status(result.written > 1
           ? `${parameter.name} 已写入 ${result.written} 个站点`
           : `${parameter.name} 已保存`);
@@ -730,6 +757,7 @@ function renderPftParameterGroup(group, parameters, dirs, pftType) {
           dirs, pftType: Number(pftType), name: parameter.name,
           value: null, kernelDir: $('kernel').value,
         });
+        await markResultsStale(dirs);
         status(result.written > 1
           ? `${parameter.name} 已在 ${result.written} 个站点恢复内置值`
           : `${parameter.name} 已恢复内置值`);
@@ -948,6 +976,7 @@ function table(
               kernelDir: $('kernel').value,
             });
             if (syncText) state.text = r.text;
+            await markResultsStale(dirs);
             state.varies.delete('DEF_USE_MEDLYNST');
             state.varies.delete('DEF_USE_WUEST');
             status(r.written > 1
@@ -964,6 +993,7 @@ function table(
               dirs, file: picked, kernelDir: $('kernel').value,
             });
             if (syncText) state.text = r.text;
+            await markResultsStale(dirs);
             status(`已为 ${baseName(dirs[0])} 校验并接入边界层高度文件`);
             await renderFields();
             return;
@@ -976,6 +1006,7 @@ function table(
               dirs, file: picked, kernelDir: $('kernel').value,
             });
             if (syncText) state.text = r.text;
+            await markResultsStale(dirs);
             status('已校验臭氧数据，并启用臭氧胁迫与数据读取');
             await renderFields();
             return;
@@ -985,6 +1016,7 @@ function table(
               dirs, file: inp.value, kernelDir: $('kernel').value,
             });
             if (syncText) state.text = r.text;
+            await markResultsStale(dirs);
             status('已校验并更换臭氧数据文件');
             await renderFields();
             return;
@@ -1017,6 +1049,7 @@ function table(
             : await invoke('set_field_batch',
               { dirs, path: e.path, value: inp.value, kernelDir: $('kernel').value });
           if (syncText) state.text = r.text;
+          await markResultsStale(dirs);
           invalidatePftSites(dirs, changes);
           status(r.written > 1 ? `已写入 ${r.written} 个算例：${e.path}` : `已保存 ${e.path}`);
           // 父开关会改变其他行是否有效，通常保存后要重新读取统一状态；

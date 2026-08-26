@@ -167,6 +167,7 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
         "PRECIP_PHASE",
         "DYNAMIC_LAKE",
         "DYNAMIC_WETLAND",
+        "CHECKEQUILIBRIUM",
     ]) {
         return Some("水热过程");
     }
@@ -198,7 +199,6 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
         "NITRIF",
         "CNSOYFIXN",
         "DEF_USE_FIRE",
-        "CHECKEQUILIBRIUM",
         "DEF_USE_BGC",
         "DEF_USE_CROP",
     ]) {
@@ -1004,6 +1004,23 @@ fn validate_runtime_contract(
     if logical(doc, "DEF_USE_OZONESTRESS") {
         active_path(doc, case_dir, "DEF_USE_OZONEDATA", "DEF_file_Ozone", false)?;
     }
+    let runtime = character(doc, "DEF_dir_runtime");
+    let runtime = runtime.trim();
+    let runtime = (!runtime.is_empty() && !runtime.eq_ignore_ascii_case("null")).then(|| {
+        let path = std::path::Path::new(runtime);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            case_dir.join(path)
+        }
+    });
+    validate_bgc_runtime_dir(
+        runtime.as_deref(),
+        bgc,
+        integer(doc, "DEF_NDEP_FREQUENCY"),
+        logical(doc, "DEF_USE_NITRIF"),
+        logical(doc, "DEF_USE_FIRE"),
+    )?;
     if crop {
         for (name, label) in crop_runtime_files(
             real(doc, "DEF_TUNING_CROP_PLANTING_DAY"),
@@ -1013,6 +1030,54 @@ fn validate_runtime_contract(
             integer(doc, "DEF_IRRIGATION_ALLOCATION"),
         ) {
             runtime_file(doc, case_dir, name, label)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bgc_runtime_dir(
+    root: Option<&std::path::Path>,
+    bgc: bool,
+    ndep_frequency: i64,
+    nitrif: bool,
+    fire: bool,
+) -> Result<(), String> {
+    if !bgc {
+        return Ok(());
+    }
+    let root =
+        root.ok_or("BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。")?;
+    let ndep = match ndep_frequency {
+        1 => "ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
+        2 => "ndep/fndep_colm_monthly.nc",
+        _ => return Err("DEF_NDEP_FREQUENCY 只能选择年尺度（1）或月尺度（2）".into()),
+    };
+    let require = |name: &str, label: &str| {
+        let file = root.join(name);
+        file.is_file()
+            .then_some(())
+            .ok_or_else(|| format!("BGC/甲烷运行时目录缺少{label}：{}", file.display()))
+    };
+    require(ndep, "氮沉降数据")?;
+    if nitrif {
+        for family in ["CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT"] {
+            for layer in 1..=10 {
+                require(
+                    &format!("nitrif/{family}/{family}_l{layer:02}.nc"),
+                    "硝化数据",
+                )?;
+            }
+        }
+    }
+    if fire {
+        for name in [
+            "fire/abm_colm_double_fillcoast.nc",
+            "fire/peatf_colm_360x720_c100428.nc",
+            "fire/gdp_colm_360x720_c100428.nc",
+            "fire/colmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc",
+            "fire/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc",
+        ] {
+            require(name, "火灾过程数据")?;
         }
     }
     Ok(())
@@ -1413,7 +1478,6 @@ fn field_runtime_state(
         "DEF_USE_PN",
         "DEF_USE_NITRIF",
         "DEF_USE_FIRE",
-        "DEF_CheckEquilibrium",
     ]) && (!c.bgc || (c.single && !c.biological_land()))
     {
         return hidden("需要 BGC");
