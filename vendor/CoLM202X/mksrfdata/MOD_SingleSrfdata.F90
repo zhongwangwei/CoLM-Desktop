@@ -1837,7 +1837,7 @@ ENDIF
                pop_i = 5 - (ceiling(DEF_LC_YEAR*1./5.)*5 - DEF_LC_YEAR) + 1
             ENDIF
 
-            CALL read_point_5x5_var_2d_time_real8 (gridlaiu, dir_5x5, 'URBSRF'//trim(c5year), &
+            CALL read_point_5x5_var_2d_time_real8 (gridpopu, dir_5x5, 'URBSRF'//trim(c5year), &
                   'POP_DEN', SITE_lon_location, SITE_lat_location, pop_i, &
                   SITE_popden)
          ENDIF
