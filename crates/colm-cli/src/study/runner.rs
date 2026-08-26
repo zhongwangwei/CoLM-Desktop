@@ -92,17 +92,24 @@ impl Drop for StudyRunLock {
 
 fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
     let path = study_dir.join("run.lock");
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let Some(owner) = run_lock_owner(&path)? else {
+        return Ok(());
     };
-    let owner: ProcessIdentity = serde_json::from_slice(&bytes)
-        .with_context(|| format!("cannot verify the owner of {}; remove it manually only after confirming the scheduler exited", path.display()))?;
     if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS {
         bail!("Study scheduler PID {} is still running", owner.pid);
     }
     fs::remove_file(&path).with_context(|| format!("cannot remove stale {}", path.display()))
+}
+
+fn run_lock_owner(path: &Path) -> Result<Option<ProcessIdentity>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("cannot verify the owner of {}; remove it manually only after confirming the scheduler exited", path.display()))
+        .map(Some)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -300,8 +307,12 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     let kernel_dir = colm_kernel::manifest::absolute(options.kernel_dir)?;
     let manifest = super::engine::status(&study_dir)?;
     let kernel = colm_kernel::Kernel::open(&kernel_dir)?;
-    let kernel_id = kernel.manifest.identity();
-    let kernel_identity = format!("{} ({})", kernel_id, kernel.manifest.platform);
+    let kernel_identity = format!(
+        "{} ({})",
+        kernel.manifest.identity(),
+        kernel.manifest.platform
+    );
+    let kernel_id = kernel.manifest.stage_fingerprint_identity();
     if manifest.spec.kernel_dir.is_none() || manifest.provenance.kernel_id.is_empty() {
         bail!("Study has no frozen kernel identity; create a new Study");
     }
@@ -447,6 +458,110 @@ fn bounded_jobs(requested: usize, available: usize) -> usize {
 
 pub(super) fn ensure_scheduler_idle(study_dir: &Path) -> Result<()> {
     clear_stale_run_lock(study_dir)
+}
+
+/// GUI 已确认对应进程树退出后再落盘；PID 必须对上，避免迟到的取消请求
+/// 误关掉后来启动的调度器。
+pub fn finalize_cancel(study_dir: &Path, expected_pid: u32) -> Result<StudyState> {
+    let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    let lock_path = study_dir.join("run.lock");
+    let checkpoint_dir = study_dir.join("checkpoints/state");
+    let mut state = super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?
+        .map(|loaded| loaded.payload)
+        .with_context(|| format!("{} has no Study state checkpoint", study_dir.display()))?;
+    let had_lock = match run_lock_owner(&lock_path)? {
+        Some(owner) => {
+            if owner.pid != expected_pid {
+                bail!(
+                    "Study scheduler changed while cancelling: expected PID {expected_pid}, found {}",
+                    owner.pid
+                );
+            }
+            if scheduler_process_alive(owner.pid)? {
+                bail!("Study scheduler PID {} is still running", owner.pid);
+            }
+            true
+        }
+        None => {
+            if state
+                .tasks
+                .values()
+                .any(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating))
+            {
+                bail!("Study scheduler lock is missing while active tasks remain");
+            }
+            false
+        }
+    };
+    let mut changed = false;
+    for task in state.tasks.values_mut() {
+        if matches!(
+            task.status,
+            TaskStatus::Pending
+                | TaskStatus::Materialized
+                | TaskStatus::Queued
+                | TaskStatus::Running
+                | TaskStatus::Evaluating
+        ) {
+            task.status = TaskStatus::Cancelled;
+            task.stage = None;
+            task.process = None;
+            task.reason = Some("cancelled by user".into());
+            changed = true;
+        }
+    }
+    state.finish_status();
+    if changed {
+        state.status = StudyStatus::Cancelled;
+        super::checkpoint::write_next(&checkpoint_dir, &state)?;
+        emit(
+            &study_dir,
+            false,
+            serde_json::json!({"type":"study_cancelled","kind":"study_cancelled","study":state.study_id,"status":state.status}),
+        )?;
+    }
+    if had_lock {
+        fs::remove_file(&lock_path).with_context(|| {
+            format!("cannot remove cancelled Study lock {}", lock_path.display())
+        })?;
+    }
+    Ok(state)
+}
+
+#[cfg(unix)]
+fn scheduler_process_alive(pid: u32) -> Result<bool> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .context("cannot inspect Study scheduler process")?;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|status| !status.trim_start().starts_with('Z')))
+}
+
+#[cfg(windows)]
+fn scheduler_process_alive(pid: u32) -> Result<bool> {
+    let mut command = std::process::Command::new("tasklist");
+    colm_kernel::run::no_console(&mut command);
+    let output = command
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .context("cannot inspect Study scheduler process")?;
+    if !output.status.success() {
+        bail!("tasklist failed while checking Study scheduler PID {pid}");
+    }
+    let pid = pid.to_string();
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split(',')
+            .nth(1)
+            .is_some_and(|field| field.trim().trim_matches('"') == pid)
+    }))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn scheduler_process_alive(_pid: u32) -> Result<bool> {
+    bail!("cannot verify a Study scheduler process on this platform")
 }
 
 fn baseline_tasks_succeeded(manifest: &Manifest, state: &StudyState) -> bool {
@@ -1345,7 +1460,10 @@ fn write_importance(
                         }));
                     }
                     StudyMethod::Oat => {
-                        let baseline = members.iter().find(|member| member.baseline).unwrap();
+                        let baseline = members
+                            .iter()
+                            .find(|member| member.baseline)
+                            .context("OAT Study has no baseline member")?;
                         let parameter_index = super::sample::sorted_parameter_names(&manifest.spec)
                             .iter()
                             .position(|name| name == &parameter.name)
@@ -2196,6 +2314,51 @@ mod tests {
         let task = &retried.tasks["m000001/site"];
         assert_eq!(task.status, TaskStatus::Queued);
         assert!(task.process.is_none());
+        assert!(!dir.join("run.lock").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn verified_gui_cancel_closes_active_tasks_and_rejects_a_new_scheduler() {
+        assert!(scheduler_process_alive(std::process::id()).unwrap());
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-finalize-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut running = crate::study::state::TaskState {
+            member: "m000001".into(),
+            site: "site".into(),
+            case_dir: "/case".into(),
+            status: TaskStatus::Running,
+            stage: Some("colm".into()),
+            reason: None,
+            objective: None,
+            validation_objective: None,
+            process: Some(supervisor_identity()),
+        };
+        let mut queued = running.clone();
+        queued.member = "m000002".into();
+        queued.status = TaskStatus::Queued;
+        running.process.as_mut().unwrap().pid = u32::MAX;
+        let state = StudyState::new("s".into(), [running, queued]).unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        let mut owner = supervisor_identity();
+        owner.pid = u32::MAX;
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
+
+        assert!(finalize_cancel(&dir, 9999).is_err());
+        assert!(dir.join("run.lock").is_file());
+        let cancelled = finalize_cancel(&dir, u32::MAX).unwrap();
+        assert_eq!(cancelled.status, StudyStatus::Cancelled);
+        assert!(cancelled.tasks.values().all(|task| {
+            task.status == TaskStatus::Cancelled && task.stage.is_none() && task.process.is_none()
+        }));
         assert!(!dir.join("run.lock").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }

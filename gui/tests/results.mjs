@@ -118,6 +118,18 @@ for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
+if (!resultUi.includes('let activePaneRequest = 0')
+    || !resultUi.includes('let activeDataBrowserRequest = 0')
+    || !resultUi.includes('let activeBatchEvaluationCatalogRequest = 0')
+    || !resultUi.includes('const isCurrent = () => token === activePaneRequest')
+    || !resultUi.includes("state.step !== 'result-data' || activeCase()?.dir !== c.dir")
+    || !resultUi.includes("state.step !== 'result-comparison' || resultScopeKey() !== scopeKey")) {
+  throw new Error('result async pane refreshes must ignore stale case, step, and scope responses');
+}
+if (!resultUi.includes('const cached = maxPoints === null ? undefined : seriesCache.get(key)')
+    || !resultUi.includes('return maxPoints === null ? data : seriesCache.set(key, data)')) {
+  throw new Error('full-resolution series exports must bypass the bounded plotting LRU');
+}
 const paramsUi = await readFile(join(root, 'dist', 'app', 'params.js'), 'utf8');
 const timingUi = await readFile(join(root, 'dist', 'app', 'timing.js'), 'utf8');
 if (!resultUi.includes('summaryOnly') || !resultUi.includes('pairVars')

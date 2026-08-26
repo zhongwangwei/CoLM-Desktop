@@ -368,6 +368,17 @@ fn cancellation_wins_the_spawn_registration_race() {
 }
 
 #[test]
+fn a_study_cancel_can_identify_the_scheduler_it_killed() {
+    let processes = RunProcesses::default();
+    let key = study_process_key("/tmp/study");
+    processes.prepare(std::slice::from_ref(&key)).unwrap();
+    assert!(processes.remember(&key, 42).unwrap());
+    assert_eq!(processes.running_pid(&key).unwrap(), Some(42));
+    processes.forget(&key).unwrap();
+    assert_eq!(processes.running_pid(&key).unwrap(), None);
+}
+
+#[test]
 fn cancelling_a_finished_case_does_not_poison_its_next_run() {
     let processes = RunProcesses::default();
     let case = "/tmp/finished".to_string();

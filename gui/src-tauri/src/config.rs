@@ -1994,6 +1994,9 @@ pub fn set_pft_parameter_batch(
                     if number.fract() != 0.0 {
                         return Err(format!("{name} 必须是整数"));
                     }
+                    if !(i32::MIN as f64..=i32::MAX as f64).contains(&number) {
+                        return Err(format!("{name} 超出 Fortran 默认整数/i32 范围"));
+                    }
                     colm_namelist::Value::Int(number as i64)
                 }
             })

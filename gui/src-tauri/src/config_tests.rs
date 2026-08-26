@@ -1925,6 +1925,16 @@ fn pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots() {
         assert!(!text.contains("DEF_PFT_VMAX25"), "{dir}: {text}");
     }
 
+    let err = set_pft_parameter_batch(
+        dirs.clone(),
+        13,
+        "DEF_PFT_MXMAT".into(),
+        Some("1e20".into()),
+        kernel_dir.clone(),
+    )
+    .unwrap_err();
+    assert!(err.contains("i32") || err.contains("Fortran"), "{err}");
+
     let before: Vec<_> = dirs
         .iter()
         .map(|dir| std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap())

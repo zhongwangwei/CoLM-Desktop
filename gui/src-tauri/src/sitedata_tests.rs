@@ -152,6 +152,67 @@ fn prepared_pair_checks_both_inputs_before_touching_old_outputs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn prepared_pair_rejects_symlinks_before_installing() {
+    use std::os::unix::fs::symlink;
+
+    let dir =
+        std::env::temp_dir().join(format!("colm-prepared-pair-symlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let outside = dir.join("outside.nc");
+    let site_stage = dir.join(".site.stage");
+    let forcing_stage = dir.join(".forcing.stage");
+    let site_final = dir.join("A_site.nc");
+    let forcing_final = dir.join("A_Met.nc");
+    std::fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, &site_stage).unwrap();
+    std::fs::write(&forcing_stage, b"new forcing").unwrap();
+    std::fs::write(&site_final, b"old site").unwrap();
+    std::fs::write(&forcing_final, b"old forcing").unwrap();
+
+    let err =
+        install_pair([&site_stage, &forcing_stage], [&site_final, &forcing_final]).unwrap_err();
+    assert!(err.contains("符号链接") || err.contains("symlink"), "{err}");
+    assert_eq!(std::fs::read(&site_final).unwrap(), b"old site");
+    assert_eq!(std::fs::read(&forcing_final).unwrap(), b"old forcing");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_pair_rejects_symlink_outputs_before_installing() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!(
+        "colm-prepared-pair-final-symlink-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let outside = dir.join("outside.nc");
+    let site_stage = dir.join(".site.stage");
+    let forcing_stage = dir.join(".forcing.stage");
+    let site_final = dir.join("A_site.nc");
+    let forcing_final = dir.join("A_Met.nc");
+    std::fs::write(&site_stage, b"new site").unwrap();
+    std::fs::write(&forcing_stage, b"new forcing").unwrap();
+    std::fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, &site_final).unwrap();
+    std::fs::write(&forcing_final, b"old forcing").unwrap();
+
+    let err =
+        install_pair([&site_stage, &forcing_stage], [&site_final, &forcing_final]).unwrap_err();
+    assert!(err.contains("符号链接") || err.contains("symlink"), "{err}");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    assert_eq!(std::fs::read(&forcing_final).unwrap(), b"old forcing");
+    assert!(site_stage.exists());
+    assert!(forcing_stage.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn pft_site_path_resolves_the_case_relative_site_file() {
     let dir = std::env::temp_dir().join(format!("colm-pft-case-{}", std::process::id()));

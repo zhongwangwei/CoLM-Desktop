@@ -28,6 +28,7 @@
 //! colm-cli study-run <study-dir> --kernel <目录> [--stream 1]
 //! colm-cli study-export <study-dir> --out <目录>
 //! colm-cli study-pause|study-resume|study-cancel <study-dir>
+//! colm-cli study-finalize-cancel <study-dir> --pid <pid>
 //! colm-cli study-retry <study-dir> [--include-review 1]
 //! colm-cli study-apply-preview <study-dir> --member <id|best>
 //! colm-cli study-apply <study-dir> --member <id|best> --out <目录> [--name N]
@@ -103,6 +104,8 @@ usage:
                    # 只读预览最佳/指定候选会改哪些参数
   colm-cli study-pause|study-resume|study-cancel <study-dir>
                    # 请求暂停派发、恢复派发或取消尚未开始任务
+  colm-cli study-finalize-cancel <study-dir> --pid <pid>
+                   # GUI 杀死对应调度进程后持久化取消终态
   colm-cli study-retry <study-dir> [--include-review 1]
                    # 把失败成员（可选含待复核成员）重新放回队列
   colm-cli study-apply <study-dir> --member <id|best> --out <dir> [--name N]
@@ -300,6 +303,14 @@ fn main() -> Result<()> {
         "study-pause" => study::state::request_pause(&opts.positional_case()?)?,
         "study-resume" => study::state::resume(&opts.positional_case()?)?,
         "study-cancel" => study::state::request_cancel(&opts.positional_case()?)?,
+        "study-finalize-cancel" => {
+            study::runner::finalize_cancel(
+                &opts.positional_case()?,
+                opts.need_str("--pid")?
+                    .parse()
+                    .context("--pid must be an integer")?,
+            )?;
+        }
         "study-retry" => cmd_study_retry(
             &opts.positional_case()?,
             opts.get("--include-review").is_some(),
@@ -1664,7 +1675,7 @@ fn run_case(
     // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
     // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
     // 算新算例，且没有任何迹象。见 `fingerprint.rs`。
-    let kernel_id = kernel.manifest.identity();
+    let kernel_id = kernel.manifest.stage_fingerprint_identity();
     let mut marks = fingerprint::load(case);
     if force {
         match only_stage {
@@ -3288,14 +3299,9 @@ fn cmd_netcdf_probe(file: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `NaN` 不能进 JSON（`serde_json` 序列化会报错或写出不可靠的 `null`），
-/// 所以在这里显式转成 `Option`，交给 `serde` 序列化。
+/// 非有限数不能进 JSON，所以在这里显式转成 `Option`，交给 `serde` 序列化。
 fn present(x: f64) -> Option<f64> {
-    if x.is_nan() {
-        None
-    } else {
-        Some(x)
-    }
+    x.is_finite().then_some(x)
 }
 
 /// 探测一份强迫场文件：八个槽位各猜到了什么变量、单位是什么，
@@ -4200,3 +4206,7 @@ mod run_stage_tests;
 #[cfg(test)]
 #[path = "window_tests.rs"]
 mod window_tests;
+
+#[cfg(test)]
+#[path = "forcing_probe_tests.rs"]
+mod forcing_probe_tests;

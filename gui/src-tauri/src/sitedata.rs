@@ -191,11 +191,26 @@ fn install_pair(
         return Err("站点与强迫场必须使用不同文件".into());
     }
     for (source, destination) in staged.iter().zip(final_paths.iter()) {
+        if source
+            .symlink_metadata()
+            .map_err(|error| format!("无法检查 {}：{error}", source.display()))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(format!("待安装产物不能是符号链接：{}", source.display()));
+        }
         if !source.is_file() {
             return Err(format!("待安装产物不存在：{}", source.display()));
         }
         if source == destination {
             return Err("待安装产物不能与目标路径相同".into());
+        }
+        if destination
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!("产物目标不能是符号链接：{}", destination.display()));
         }
         if destination.exists() && !destination.is_file() {
             return Err(format!("产物目标不是文件：{}", destination.display()));

@@ -40,6 +40,12 @@ pub fn summarize(file: &Path) -> Result<MetSummary> {
     if t.is_empty() {
         bail!("{} has an empty time axis", file.display());
     }
+    if let Some(index) = t.iter().position(|value| !value.is_finite()) {
+        bail!(
+            "{} time has a non-finite value at index {index}",
+            file.display()
+        );
+    }
     let step_seconds = if t.len() > 1 { t[1] - t[0] } else { 0.0 };
     let step_uniform = t
         .windows(2)
@@ -111,3 +117,7 @@ fn parse_units_start(u: &str) -> Result<Stamp> {
         second: num(32, 33)?,
     })
 }
+
+#[cfg(test)]
+#[path = "met_tests.rs"]
+mod met_tests;

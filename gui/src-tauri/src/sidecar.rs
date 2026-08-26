@@ -119,6 +119,13 @@ impl RunProcesses {
         Ok(state.cancelled.remove(key))
     }
 
+    fn running_pid(&self, key: &str) -> Result<Option<u32>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "run process registry poisoned".to_string())
+            .map(|state| state.pids.get(key).copied())
+    }
+
     pub(crate) fn cancel(&self, keys: Option<Vec<String>>) -> Result<usize, String> {
         let (requested, targets) = {
             let mut state = self
@@ -1471,7 +1478,18 @@ pub async fn study_cancel(
     study_dir: String,
 ) -> Result<String, String> {
     let out = capture_async(vec!["study-cancel".to_string(), study_dir.clone()]).await?;
-    processes.cancel(Some(vec![study_process_key(&study_dir)]))?;
+    let key = study_process_key(&study_dir);
+    let pid = processes.running_pid(&key)?;
+    processes.cancel(Some(vec![key]))?;
+    if let Some(pid) = pid {
+        capture_async(vec![
+            "study-finalize-cancel".to_string(),
+            study_dir,
+            "--pid".into(),
+            pid.to_string(),
+        ])
+        .await?;
+    }
     Ok(out)
 }
 

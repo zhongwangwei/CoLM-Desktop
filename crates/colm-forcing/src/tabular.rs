@@ -1003,14 +1003,14 @@ fn parse_offset_cell(row: &Row, index: usize) -> Result<Option<i64>> {
             row.line
         );
     }
-    let seconds = (hours * 3600.0).round() as i64;
-    if ((seconds as f64 / 3600.0) - hours).abs() > 1e-9 {
+    let minutes = (hours * 60.0).round() as i64;
+    if ((minutes as f64 / 60.0) - hours).abs() > 1e-9 {
         bail!(
-            "line {} UTC offset {hours} is not representable in whole seconds",
+            "line {} UTC offset {hours} is not representable in whole minutes",
             row.line
         );
     }
-    Ok(Some(seconds))
+    Ok(Some(minutes * 60))
 }
 
 fn is_missing(raw: &str) -> bool {

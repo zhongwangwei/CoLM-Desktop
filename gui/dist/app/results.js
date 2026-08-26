@@ -98,6 +98,9 @@ let comparisonController = null;
 let activeSeriesRequest = 0;
 let activeMetricRequest = 0;
 let activeMetricChartRequest = 0;
+let activePaneRequest = 0;
+let activeDataBrowserRequest = 0;
+let activeBatchEvaluationCatalogRequest = 0;
 let reportText = '';
 let reportExtension = 'md';
 
@@ -122,6 +125,9 @@ const resultScope = () => {
   if (!state.resultSelectionTouched) return done;
   return done.filter(c => state.resultSelection.has(c.dir));
 };
+const resultScopeKey = () => resultScope()
+  .map(c => `${c.dir}\u001f${observationFor(c)}`)
+  .join('\u001e');
 
 function activeCase() {
   const done = completed();
@@ -524,19 +530,23 @@ function renderBatchEvaluationSelector() {
 async function refreshCurrentEvaluationCatalog() {
   const c = activeCase();
   const obs = $('obs').value.trim();
+  const isCurrent = () => state.step === 'result-evaluation'
+    && activeCase()?.dir === c?.dir && $('obs').value.trim() === obs;
   currentEvaluationCatalog = [];
   renderEvaluationSelector();
   if (!c || !obs) return;
   try {
     const rows = await loadEvaluationCatalog(c, obs);
-    if (activeCase()?.dir !== c.dir || $('obs').value.trim() !== obs) return;
+    if (!isCurrent()) return;
     currentEvaluationCatalog = rows;
     renderEvaluationSelector();
     updateButtons();
-  } catch (error) { status(error); }
+  } catch (error) { if (isCurrent()) status(error); }
 }
 
 async function refreshBatchEvaluationCatalogs() {
+  const token = ++activeBatchEvaluationCatalogRequest;
+  const scopeKey = resultScopeKey();
   const scope = resultScope();
   const width = Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 1));
   const results = await boundedMap(scope, width, async c => {
@@ -544,6 +554,7 @@ async function refreshBatchEvaluationCatalogs() {
     if (!obs) return { case: c, catalog: [] };
     return { case: c, catalog: await loadEvaluationCatalog(c, obs) };
   });
+  if (token !== activeBatchEvaluationCatalogRequest || state.step !== 'result-comparison' || resultScopeKey() !== scopeKey) return false;
   batchEvaluationCatalogs = [];
   batchEvaluationCatalogFailures = [];
   results.forEach((result, index) => {
@@ -554,6 +565,7 @@ async function refreshBatchEvaluationCatalogs() {
     });
   });
   renderBatchEvaluationSelector();
+  return true;
 }
 
 function kindLabel(kind) {
@@ -561,12 +573,14 @@ function kindLabel(kind) {
 }
 
 async function renderDataBrowser() {
+  const token = ++activeDataBrowserRequest;
   const c = activeCase();
   const table = $('result-variable-table');
   table.textContent = '';
   if (!c) return;
   try {
     const catalog = await loadCatalog(c);
+    if (token !== activeDataBrowserRequest || state.step !== 'result-data' || activeCase()?.dir !== c.dir) return;
     $('result-catalog-summary').textContent = `${catalog.files} 个 history 文件 · ${catalog.steps} 步 · ${utcText(catalog.start)} 至 ${utcText(catalog.end)} · ${catalog.variables.length} 个变量`;
     const query = $('result-variable-search').value.trim().toLowerCase();
     const kind = $('result-variable-kind').value;
@@ -596,7 +610,9 @@ async function renderDataBrowser() {
     }
     fillVariableSelect(catalog);
   } catch (error) {
-    table.appendChild(node('caption', 'warn', String(error)));
+    if (token === activeDataBrowserRequest && state.step === 'result-data' && activeCase()?.dir === c.dir) {
+      table.appendChild(node('caption', 'warn', String(error)));
+    }
   }
 }
 
@@ -637,14 +653,15 @@ async function getSeries(c, variable, options = {}) {
     from: options.from ?? '', to: options.to ?? '', maxPoints: maxPoints ?? 'all',
   };
   const key = seriesKey(request);
-  const cached = seriesCache.get(key);
+  const cached = maxPoints === null ? undefined : seriesCache.get(key);
   if (cached) return cached;
   const json = await invoke('series', {
     case: c.dir, vars: variable,
     from: options.from ?? null, to: options.to ?? null,
     maxPoints,
   });
-  return seriesCache.set(key, JSON.parse(json));
+  const data = JSON.parse(json);
+  return maxPoints === null ? data : seriesCache.set(key, data);
 }
 
 function destroyChart(host) {
@@ -1364,38 +1381,46 @@ function updateButtons() {
 
 async function prepareActivePane() {
   if (!state.step.startsWith('result-')) return;
+  const token = ++activePaneRequest;
+  const step = state.step;
   renderOverview();
   syncResultCaseSelects();
   syncObservation();
   const c = activeCase();
+  const isCurrent = () => token === activePaneRequest && state.step === step && activeCase()?.dir === c?.dir;
   if (!c) { updateButtons(); return; }
-  if (['result-data', 'result-series'].includes(state.step)) {
+  if (['result-data', 'result-series'].includes(step)) {
     try {
       const catalog = await loadCatalog(c);
+      if (!isCurrent()) return;
       fillVariableSelect(catalog);
       if (!$('series-from').value) $('series-from').value = inputClock(catalog.start);
       if (!$('series-to').value) $('series-to').value = inputClock(catalog.end);
-      if (state.step === 'result-data') await renderDataBrowser();
-    } catch (error) { status(error); }
+      if (step === 'result-data') await renderDataBrowser();
+      if (!isCurrent()) return;
+    } catch (error) { if (isCurrent()) status(error); }
   }
-  if (state.step === 'result-evaluation') await refreshCurrentEvaluationCatalog();
-  if (state.step === 'result-comparison') {
-    await refreshBatchEvaluationCatalogs();
-    renderComparison();
+  if (step === 'result-evaluation') {
+    await refreshCurrentEvaluationCatalog();
+    if (!isCurrent()) return;
   }
-  if (state.step === 'result-uncertainty') {
+  if (step === 'result-comparison') {
+    if (await refreshBatchEvaluationCatalogs()) renderComparison();
+    if (!isCurrent()) return;
+  }
+  if (step === 'result-uncertainty') {
     syncStudyKernelLabels();
     await loadStudyParams().catch(() => {});
     await renderStudyOutputs();
     if (activeStudyDirs('uq').length) await refreshStudy('uq').catch(() => {});
   }
-  if (state.step === 'result-tuning') {
+  if (step === 'result-tuning') {
     syncStudyKernelLabels();
     await loadStudyParams().catch(() => {});
     await renderTuningTargets().catch(() => {});
     if (activeStudyDirs('tuning').length) await refreshStudy('tuning').catch(() => {});
   }
-  updateButtons();
+  if (isCurrent()) updateButtons();
 }
 
 /** 外部仍调用旧名字 `refreshVars`；现在它刷新的是整个结果索引。 */

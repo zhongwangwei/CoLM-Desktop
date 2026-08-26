@@ -179,6 +179,32 @@ fn a_per_row_offset_column_can_represent_daylight_saving_changes() {
 }
 
 #[test]
+fn numeric_utc_offsets_must_be_whole_minutes_but_keep_half_and_quarter_hours() {
+    let root = temp("numeric-offset-minutes");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,utc_offset,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00,5.75,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 01:00,5.75,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let mut p = plan();
+    p.utc_offset_column = Some("utc_offset".into());
+    let imported = super::import_table(&src, &root.join("ok"), &p).unwrap();
+    assert_eq!(imported[0].timezone_offset_hours, Some(5.75));
+
+    write(
+        &src,
+        "site,time,utc_offset,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00,0.0002777777777777778,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 01:00,0.0002777777777777778,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let err = super::import_table(&src, &root.join("bad"), &p).unwrap_err();
+    assert!(format!("{err:#}").contains("whole minutes"), "{err:#}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn probe_uses_explicit_offsets_before_inferring_cadence() {
     let root = temp("probe-varying-offsets");
     let src = root.join("site.csv");
