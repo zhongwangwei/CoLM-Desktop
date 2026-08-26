@@ -12,11 +12,17 @@
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/latest"><img src="https://img.shields.io/github/v/release/zhongwangwei/CoLM-Desktop?display_name=tag" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
 </p>
 
 CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结果评估整合到一个图形界面中。发行包内置运行所需的 `colm-cli`、Fortran 内核和示例数据，普通用户无需安装 Rust、Fortran、MPI 或 NetCDF 编译环境。
+
+> [!WARNING]
+> **当前版本为 `0.2.0-beta.1` 测试版。** 功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
+>
+> **This is the `0.2.0-beta.1` prerelease.** Features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.
 
 > [!IMPORTANT]
 > 当前稳定工作流面向**单点站点模拟**，支持把多个站点作为独立算例并发运行。流域、区域和全球模式仍显示为“暂不可用”，不会进入不完整流程。

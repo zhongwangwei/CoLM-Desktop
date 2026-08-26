@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "colm-case"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "colm-desktop-gui"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "colm-case",
  "colm-hist",
@@ -536,11 +536,11 @@ dependencies = [
 
 [[package]]
 name = "colm-hist"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 
 [[package]]
 name = "colm-kernel"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -551,14 +551,14 @@ dependencies = [
 
 [[package]]
 name = "colm-namelist"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "colm-schema"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 
 [[package]]
 name = "combine"

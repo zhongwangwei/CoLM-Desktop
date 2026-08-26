@@ -3,6 +3,7 @@
 //! 同步翻译新节点，而不是要求每个 render 函数再维护一套 DOM。
 
 const ZH_EN = [
+  ['测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。', 'Beta release: features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.'],
   // Complete sentences come before short labels. This keeps prose grammatical and
   // prevents a label such as “运行” from creating half-translated paragraphs.
   ['先选择计算资源；本地运行已可用，服务器运行将在后续版本开放。', 'Choose compute resources first. Local execution is available; server execution will be added in a future release.'],
@@ -78,6 +79,18 @@ const ZH_EN = [
   ['已校验臭氧数据，并启用臭氧胁迫与数据读取', 'Ozone data verified; ozone stress and data reading enabled'],
   ['已校验并更换臭氧数据文件', 'Ozone data file verified and changed'],
   ['没有有效配对样本', 'No valid paired samples'],
+  ['空调制冷显热', 'Air-conditioning cooling sensible heat'],
+  ['空调供热显热', 'Air-conditioning heating sensible heat'],
+  ['屋顶感热通量', 'Roof sensible heat flux'],
+  ['车辆人为热', 'Vehicle anthropogenic heat'],
+  ['屋顶潜热通量', 'Roof latent heat flux'],
+  ['屋顶温度', 'Roof temperature'],
+  ['室内空气温度', 'Indoor air temperature'],
+  ['墙体温度', 'Wall temperature'],
+  ['history 文件损坏或不完整', 'History file is damaged or incomplete'],
+  ['结果异常', 'Invalid result'],
+  ['检查中', 'Checking'],
+  ['损坏', 'Damaged'],
   ['评估内容已更改，请重新运行评估。', 'Evaluation contents changed; rerun evaluation.'],
   ['仅 QC=0 实测值', 'Observed values with QC=0 only'],
   ['无 QC 字段；使用全部有限值', 'No QC field; using all finite values'],
@@ -201,6 +214,26 @@ const ZH_EN = [
   ['水同位素', 'Water isotopes'],
   ['甲烷 CH₄', 'Methane CH₄'],
   ['甲烷总地表通量', 'Total surface methane flux'],
+  ['活动地表甲烷通量', 'Active-surface methane flux'],
+  ['物理地表甲烷通量', 'Physical surface methane flux'],
+  ['土壤甲烷通量', 'Soil methane flux'],
+  ['湿地甲烷通量', 'Wetland methane flux'],
+  ['湖泊甲烷通量', 'Lake methane flux'],
+  ['稻田甲烷通量', 'Rice-paddy methane flux'],
+  ['全地表平均甲烷通量（含湖泊）', 'All-surface mean methane flux (including lakes)'],
+  ['全地表平均物理甲烷通量（含湖泊）', 'All-surface mean physical methane flux (including lakes)'],
+  ['甲烷总产生率', 'Total methane production rate'],
+  ['甲烷总氧化率', 'Total methane oxidation rate'],
+  ['土柱甲烷储量', 'Soil-column methane stock'],
+  ['甲烷质量平衡残差', 'Methane mass-balance residual'],
+  ['全地表平均甲烷质量平衡残差（含湖泊）', 'All-surface mean methane mass-balance residual (including lakes)'],
+  ['甲烷数值截断修正', 'Methane numerical-clipping correction'],
+  ['全地表平均甲烷数值截断修正（含湖泊）', 'All-surface mean methane numerical-clipping correction (including lakes)'],
+  ['氧气上限修正增益', 'Oxygen-cap correction gain'],
+  ['氧气上限修正损失', 'Oxygen-cap correction loss'],
+  ['非淹水区土壤氧气浓度', 'Soil oxygen concentration in non-inundated area'],
+  ['非淹水区土壤耗氧率', 'Soil oxygen-consumption rate in non-inundated area'],
+  ['卫星淹水模式必需的 GIEMS-MC 月湿地比例 NetCDF 文件。', 'GIEMS-MC monthly wetland-fraction NetCDF file required by the satellite inundation mode.'],
   ['甲烷', 'Methane'],
   ['湿地、土壤、湖泊甲烷产生/氧化/排放', 'Wetland, soil, and lake methane production / oxidation / emission'],
   ['溶质', 'Solutes'],
@@ -215,6 +248,8 @@ const ZH_EN = [
   ['BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。', 'BGC/methane cases require a runtime-data directory; select runtime under Basic settings / Files and directories.'],
   ['BGC/甲烷运行时目录缺少氮沉降数据：', 'The BGC/methane runtime directory is missing nitrogen-deposition data: '],
   ['BGC/甲烷运行时目录缺少硝化数据：', 'The BGC/methane runtime directory is missing nitrification data: '],
+  ['BGC/甲烷运行时目录缺少火灾过程数据：', 'The BGC/methane runtime directory is missing fire-process data: '],
+  ['DEF_NDEP_FREQUENCY 只能选择年尺度（1）或月尺度（2）', 'DEF_NDEP_FREQUENCY must be annual (1) or monthly (2)'],
   ['把任意站点的原始输入整理成 CoLM Desktop 可识别的数据集。', 'Prepare raw inputs from any site as a dataset recognized by CoLM Desktop.'],
   ['“文件已生成”和“当前模式可以运行”分别检查；缺少的科学数据不会用猜测掩盖。', 'File creation and run readiness for the current mode are checked separately; missing scientific data are never hidden by guesses.'],
   ['单站点可以手动填写；多站点直接导入一份带站点列的表格，不需要逐个填写身份与位置。', 'Enter one site manually, or import a table with a site column without entering each site identity and location separately.'],
@@ -399,6 +434,17 @@ const ZH_EN = [
   ['感热 Qh', 'Sensible heat Qh'],
   ['潜热 Qle', 'Latent heat Qle'],
   ['地表热通量 Qg', 'Ground heat flux Qg'],
+  ['总初级生产力 GPP', 'Gross primary productivity GPP'],
+  ['籽粒碳库', 'Grain carbon pool'],
+  ['一年期作物产品碳库', 'Annual crop-product carbon pool'],
+  ['作物产品碳损失', 'Crop-product carbon loss'],
+  ['作物种子碳亏缺', 'Crop seed carbon deficit'],
+  ['雨养温带玉米产量碳', 'Rainfed temperate corn production carbon'],
+  ['雨养温带玉米播种日', 'Rainfed temperate corn planting day'],
+  ['播种后积温', 'Growing degree days after planting'],
+  ['成熟所需积温', 'Growing degree days to maturity'],
+  ['热量单位指数 HUI', 'Heat unit index HUI'],
+  ['施肥氮输入', 'Fertilizer nitrogen input'],
   ['反射短波 SWup', 'Reflected shortwave SWup'],
   ['参考高度气温', 'Reference-height air temperature'],
   ['土壤与积雪温度', 'Soil and snow temperature'],
@@ -494,6 +540,7 @@ const ZH_EN = [
   ['运行 mksrfdata', 'Run mksrfdata'],
   ['运行 mkinidata', 'Run mkinidata'],
   ['运行 colm', 'Run colm'],
+  ['需重跑', 'Rerun required'],
   ['取消运行', 'Cancel run'],
   ['正在取消运行…', 'Cancelling runs…'],
   ['单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。', 'A single-stage button explicitly reruns that stage; “Run all” still skips stages whose input fingerprints are unchanged.'],
@@ -651,6 +698,7 @@ const ZH_EN = [
   ['必需槽位没有映射完整', 'Required slots are not fully mapped'],
   ['已选变量缺少源单位', 'Selected variables are missing source units'],
   ['缺少观测高度：', 'Missing observation heights: '],
+  ['多个站点必须保留站点名称列，不能合并成一个站点', 'Keep the site-name column for multi-site tables; sites cannot be merged into one'],
   ['多个站点必须各自提供纬度列和经度列，不能共用一个回退坐标', 'Each site in a multi-site table must provide latitude and longitude columns; one fallback coordinate cannot be shared'],
   ['需要纬度列，或为单站表格填写纬度', 'Choose a latitude column or enter a latitude for a single-site table'],
   ['需要经度列，或为单站表格填写经度', 'Choose a longitude column or enter a longitude for a single-site table'],
@@ -901,6 +949,7 @@ const ZH_EN = [
   ['个 CoLM 已经不认识的字段，会让运行在读取时就停：', ' fields no longer recognized by CoLM, which will stop the run while reading:'],
   ['城市', 'Urban'],
   ['自然', 'natural'],
+  ['作物站点', 'Crop site'],
   ['作物', 'crop'],
   ['或', 'or'],
   ['没有观测文件', 'No observation file'],
@@ -1100,6 +1149,9 @@ export function translateZh(text, target = 'en') {
     .replace(/^原因$/, 'Reason')
     .replace(/^状态$/, 'Status')
     .replace(/^(.+) 还没有 history 结果$/, '$1 does not have history results yet')
+    .replace(/^(.+) 还没有可分析的 history 结果$/, '$1 does not have analyzable history results yet')
+    .replace(/^(\d+) 个站点评估目录读取失败：(.*)$/, '$1 site evaluation catalogs failed to load: $2')
+    .replace(/^(\d+)\/(\d+) 个站点评估目录读取失败：(.*)$/, '$1/$2 site evaluation catalogs failed to load: $3')
     .replace(/^(\d+) 个 history 文件 · (\d+) 步 · (.+) 至 (.+) · (\d+) 个变量$/, '$1 history files · $2 steps · $3 to $4 · $5 variables')
     .replace(/^读取 (.+) · (.+) 配对点…$/, 'Loading paired points for $1 · $2…')
     .replace(/^读取 (.+) · (.+) 完整序列…$/, 'Loading the full series for $1 · $2…')
@@ -1159,6 +1211,8 @@ export function translateZh(text, target = 'en') {
     .replace(/^等\s*(\d+)\s*个$/, 'and $1 more')
     .replace(/^(.+)\s+等\s*(\d+)\s*个$/, '$1 and $2 more')
     .replace(/^已生成\s*(.+)：(\d+)\s*个字段走标称假设$/, 'Generated $1: $2 fields use nominal assumptions')
+    .replace(/^站点数据仍缺\s*(\d+)\s*项当前模式必需数据$/, 'Site data still lacks $1 required items for the current mode')
+    .replace(/^城市站点还缺\s*(\d+)\s*项形态、人口、树冠或土壤输入；请选择 CoLM rawdata，或使用自带\/完整 Urban-PLUMBER 站点文件。$/, 'The urban site still lacks $1 morphology, population, canopy, or soil inputs; select CoLM rawdata or use a bundled/complete Urban-PLUMBER site file.')
     .replace(/^一共\s*(\d+)\s*个字段有来源说明（预期\s*(\d+)\s*个——如果不是，\s*说明这份 GUI 与当前的 colm-cli 版本没对齐，先别拿它建算例）。$/, 'A total of $1 fields have source notes (expected $2; otherwise this GUI and colm-cli are out of sync, so do not create cases yet).')
     .replace(/^产物\s*(.+)\s*质地\s*(.+)（第\s*(\d+)\s*类），BVIC\s*(.+)\s*地类\s*(.+)$/, 'Output $1 · texture $2 (class $3) · BVIC $4 · land-cover class $5')
     .replace(/^预热：每轮\s*(\d+)\s*年，共重复\s*(\d+)\s*轮$/, 'Spin-up: $1 years per cycle, $2 cycles')
