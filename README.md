@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/version-v0.2.0--beta.1-orange" alt="Current beta version: v0.2.0-beta.1"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.2.0-beta.1"><img src="https://img.shields.io/badge/version-v0.2.0--beta.1-orange" alt="Current beta version: v0.2.0-beta.1"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -29,7 +29,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/zhongwangwei/CoLM-Desktop/releases/latest) 下载对应平台的安装包：
+前往 [v0.2.0-beta.1 Beta Release](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.2.0-beta.1) 下载对应平台的安装包：
 
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
