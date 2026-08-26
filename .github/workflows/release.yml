@@ -59,7 +59,21 @@ jobs:
           build=true
           publish=false
           if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch ]]; then
-            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            complete=false
+            if metadata=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | @tsv' 2>/dev/null); then
+              IFS=$'\t' read -r draft actual_prerelease <<< "$metadata"
+              mapfile -t assets < <(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+              complete=true
+              [[ "$draft" == false && "$actual_prerelease" == "$prerelease" ]] || complete=false
+              for suffix in .dmg .AppImage .deb .rpm .msi .exe; do
+                found=false
+                for asset in "${assets[@]}"; do
+                  [[ "$asset" == *"$suffix" ]] && found=true && break
+                done
+                [[ "$found" == true ]] || complete=false
+              done
+            fi
+            if [[ "$complete" == true ]]; then
               build=false
             else
               publish=true
