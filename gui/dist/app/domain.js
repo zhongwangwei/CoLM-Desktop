@@ -338,12 +338,17 @@ export function wizardFields(wizard = state.wizard) {
   const d = wizard.debug;
   const methane = p.tracer && wizard.tracer === 'methane';
   const urban = p.urban;
+  const bgc = p.bgc || p.crop || methane;
   const fields = [
     ['DEF_USE_LCT', wizard.subgrid === 'IGBP' || wizard.subgrid === 'USGS', 'logical'],
     ['DEF_USE_PFT', wizard.subgrid === 'PFT', 'logical'],
     ['DEF_USE_PC', wizard.subgrid === 'PC', 'logical'],
     ['DEF_USE_Campbell_SOIL_MODEL', wizard.soil === 'campbell', 'logical'],
-    ['DEF_USE_BGC', p.bgc || p.crop || methane, 'logical'],
+    ['DEF_USE_BGC', bgc, 'logical'],
+    ['DEF_USE_NITRIF', bgc, 'logical'],
+    ['DEF_USE_FERT', false, 'logical'],
+    ['DEF_USE_CNSOYFIXN', false, 'logical'],
+    ['DEF_Aerosol_Readin', false, 'logical'],
     ['DEF_URBAN_RUN', urban, 'logical'],
     ['DEF_USE_LULCC', p.lulcc, 'logical'],
     ['DEF_USE_TRACER', methane, 'logical'],
@@ -353,8 +358,6 @@ export function wizardFields(wizard = state.wizard) {
   ];
   if (p.crop) fields.push(
     ['DEF_USE_LAIFEEDBACK', true, 'logical'],
-    ['DEF_USE_FERT', false, 'logical'],
-    ['DEF_USE_CNSOYFIXN', false, 'logical'],
     ['DEF_USE_IRRIGATION', false, 'logical'],
     ['DEF_TUNING_CROP_PLANTING_DAY', '120'],
   );
@@ -378,7 +381,10 @@ export function wizardFieldNames(wizard = state.wizard) {
     subgrid: null, soil: null, tracer: null,
     physics: emptyPhysics(), debug: emptyDebug(),
   };
-  const names = wizardFields(empty).map(x => x.path).concat(
+  const editableInitials = new Set([
+    'DEF_USE_NITRIF', 'DEF_USE_FERT', 'DEF_USE_CNSOYFIXN', 'DEF_Aerosol_Readin',
+  ]);
+  const names = wizardFields(empty).map(x => x.path).filter(path => !editableInitials.has(path)).concat(
     'DEF_USE_USGS', 'DEF_USE_IGBP',
     'DEF_TRACER_NUM', 'DEF_TRACER_NAMES', 'DEF_TRACER_TYPES', 'DEF_TRACER_MRAT',
     'DEF_TRACER_REF_RATIO', 'DEF_TRACER_INIT_DELTA', 'DEF_TRACER_REACTIVE_DECAY_RATE',

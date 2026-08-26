@@ -49,6 +49,50 @@ fn every_scientific_observation_variable_has_one_model_definition() {
 }
 
 #[test]
+fn urban_plumber_rnet_is_derived_from_radiative_components_with_strict_qc() {
+    assert_eq!(
+        super::derived_observation_components("Rnet"),
+        Some(["SWdown", "LWdown", "SWup", "LWup"])
+    );
+    assert_eq!(
+        super::derived_observation_label("Rnet"),
+        Some("SWdown+LWdown-SWup-LWup")
+    );
+    let (values, qc) = super::derive_urban_rnet(
+        [
+            &[500.0, 500.0, crate::pair::FILL_VALUE][..],
+            &[350.0, 350.0, 350.0][..],
+            &[100.0, 100.0, 100.0][..],
+            &[420.0, 420.0, 420.0][..],
+        ],
+        [
+            &[
+                crate::pair::QC_MEASURED,
+                crate::pair::QC_MEASURED,
+                crate::pair::QC_MEASURED,
+            ][..],
+            &[
+                crate::pair::QC_MEASURED,
+                crate::pair::QC_MEASURED,
+                crate::pair::QC_MEASURED,
+            ][..],
+            &[crate::pair::QC_MEASURED, 1.0, crate::pair::QC_MEASURED][..],
+            &[
+                crate::pair::QC_MEASURED,
+                crate::pair::QC_MEASURED,
+                crate::pair::QC_MEASURED,
+            ][..],
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        values,
+        [330.0, crate::pair::FILL_VALUE, crate::pair::FILL_VALUE]
+    );
+    assert_eq!(qc, [crate::pair::QC_MEASURED, 1.0, 1.0]);
+}
+
+#[test]
 fn carbon_flux_definitions_convert_moles_and_derive_nee_explicitly() {
     use super::ModelSource;
 
@@ -56,19 +100,46 @@ fn carbon_flux_definitions_convert_moles_and_derive_nee_explicitly() {
         .iter()
         .find(|variable| variable.observation == "GPP")
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         gpp.model,
-        ModelSource::Direct {
-            variable: "f_assim",
-            scale: 1_000_000.0,
+        ModelSource::Alternative {
+            preferred: &ModelSource::Direct {
+                variable: "f_gpp",
+                ..
+            },
+            fallback: &ModelSource::Direct {
+                variable: "f_assim",
+                ..
+            },
         }
+    ));
+    assert_eq!(
+        gpp.model.required_alternatives(),
+        [vec!["f_gpp"], vec!["f_assim"]]
     );
     let nee = super::EVALUATION_VARIABLES
         .iter()
         .find(|variable| variable.observation == "NEE")
         .unwrap();
-    assert_eq!(nee.model.required(), ["f_respc", "f_assim"]);
-    assert_eq!(nee.model.label(), "f_respc - f_assim");
+    assert!(matches!(
+        nee.model,
+        ModelSource::Alternative {
+            preferred: &ModelSource::SumDifference {
+                positive: &["f_ar", "f_hr"],
+                negative: &["f_gpp"],
+                ..
+            },
+            fallback: &ModelSource::Difference {
+                minuend: "f_respc",
+                subtrahend: "f_assim",
+                ..
+            },
+        }
+    ));
+    assert_eq!(
+        nee.model.required_alternatives(),
+        [vec!["f_ar", "f_hr", "f_gpp"], vec!["f_respc", "f_assim"]]
+    );
 
     let methane = super::EVALUATION_VARIABLES
         .iter()

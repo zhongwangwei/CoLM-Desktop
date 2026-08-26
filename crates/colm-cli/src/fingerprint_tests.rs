@@ -190,6 +190,52 @@ fn output_settings_never_invalidate_the_first_two_stages() {
 }
 
 #[test]
+fn runtime_directory_content_changes_the_fingerprint() {
+    let d = temp_dir("runtime-dir-content");
+    let runtime = d.join("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(runtime.join("table.txt"), b"first").unwrap();
+    let case = d.join("case.nml");
+    std::fs::write(
+        &case,
+        format!(
+            "&nl_colm\n SITE_fsitedata='/no/such/site.nc'\n DEF_dir_runtime='{}'\n/\n",
+            runtime.display()
+        ),
+    )
+    .unwrap();
+
+    let a = compute("colm", &case, "k").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    std::fs::write(runtime.join("table.txt"), b"second").unwrap();
+    let b = compute("colm", &case, "k").unwrap();
+    assert!(first_difference(&a, &b).unwrap().contains("外部输入"));
+}
+
+#[test]
+fn compact_directory_field_names_are_still_tracked() {
+    let d = temp_dir("compact-dir-field");
+    let topography = d.join("topography");
+    std::fs::create_dir_all(&topography).unwrap();
+    std::fs::write(topography.join("grid.nc"), b"first").unwrap();
+    let case = d.join("case.nml");
+    std::fs::write(
+        &case,
+        format!(
+            "&nl_colm\n SITE_fsitedata='/no/such/site.nc'\n DEF_DS_HiresTopographyDataDir='{}'\n/\n",
+            topography.display()
+        ),
+    )
+    .unwrap();
+
+    let a = compute("colm", &case, "k").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    std::fs::write(topography.join("grid.nc"), b"second").unwrap();
+    let b = compute("colm", &case, "k").unwrap();
+    assert!(first_difference(&a, &b).unwrap().contains("外部输入"));
+}
+
+#[test]
 fn rawdata_directory_content_changes_the_surface_fingerprint() {
     let d = temp_dir("rawdata-dir-content");
     let raw = d.join("rawdata");

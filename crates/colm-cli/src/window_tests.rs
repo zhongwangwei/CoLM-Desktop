@@ -71,6 +71,32 @@ fn case_with_nml(name: &str, text: &str) -> PathBuf {
 }
 
 #[test]
+fn urban_site_new_applies_the_built_in_urban_tables_before_readiness_audit() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let root = case_with_nml("urban-site-new-prep", "&nl_colm\n/\n");
+    let out = root.join("AU-Preston.nc");
+    let args = [
+        "--out".to_string(),
+        out.display().to_string(),
+        "--lon".to_string(),
+        "145.01449584960938".to_string(),
+        "--lat".to_string(),
+        "-37.73059844970703".to_string(),
+        "--landtype".to_string(),
+        "6".to_string(),
+        "--mode".to_string(),
+        "urban".to_string(),
+    ];
+    let opts = super::Opts::parse(&args).unwrap();
+    super::cmd_site_new(&opts).expect("urban site-new");
+
+    let file = netcdf::open(&out).expect("prepared urban site");
+    for name in ["soil_theta_s", "TREE_LAI", "TREE_SAI", "LCZ_DOM"] {
+        assert!(file.variable(name).is_some(), "{name} was not prepared");
+    }
+}
+
+#[test]
 fn mkinidata_artifacts_follow_def_lc_year() {
     let case = case_with_nml(
         "lc-year",
@@ -148,6 +174,42 @@ fn crop_new_fields_make_cli_crop_cases_runnable() {
         "DEF_USE_IRRIGATION".into(),
         colm_namelist::Value::Bool(false)
     )));
+    assert!(fields.contains(&(
+        "DEF_Aerosol_Readin".into(),
+        colm_namelist::Value::Bool(false)
+    )));
+}
+
+#[test]
+fn ordinary_new_fields_disable_inactive_child_processes() {
+    let mut fields = Vec::new();
+    super::add_inactive_process_fields(&mut fields);
+    for name in [
+        "DEF_USE_NITRIF",
+        "DEF_USE_FERT",
+        "DEF_USE_CNSOYFIXN",
+        "DEF_Aerosol_Readin",
+    ] {
+        assert!(fields.contains(&(name.into(), colm_namelist::Value::Bool(false))));
+    }
+}
+
+#[test]
+fn crop_new_rejects_an_incomplete_runtime_before_the_model_runs() {
+    let root = std::env::temp_dir().join(format!("colm-cli-crop-runtime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let error = super::validate_default_crop_runtime(Some(root.to_str().unwrap())).unwrap_err();
+    assert!(error.to_string().contains("氮沉降"), "{error:#}");
+
+    let ndep = root
+        .join("ndep")
+        .join("fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+    std::fs::create_dir_all(ndep.parent().unwrap()).unwrap();
+    std::fs::write(ndep, []).unwrap();
+    let error = super::validate_default_crop_runtime(Some(root.to_str().unwrap())).unwrap_err();
+    assert!(error.to_string().contains("硝化"), "{error:#}");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -207,6 +269,7 @@ fn without_an_explicit_path_the_naming_convention_is_used() {
 
 #[test]
 fn scanning_can_match_the_same_site_in_an_explicit_forcing_directory() {
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-met-dir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let site = layout(&root);
@@ -220,6 +283,7 @@ fn scanning_can_match_the_same_site_in_an_explicit_forcing_directory() {
 
 #[test]
 fn scanning_a_generated_site_without_landtype_keeps_it_natural() {
+    let _netcdf_guard = super::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-scan-generated-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let sites = root.join("Sitedata");
@@ -235,6 +299,76 @@ fn scanning_a_generated_site_without_landtype_keeps_it_natural() {
     let entry = &json.as_array().unwrap()[0];
     assert_eq!(entry["name"], "Arbitrary");
     assert_eq!(entry["urban"], false);
+    assert_eq!(entry["crop"], false);
+}
+
+#[test]
+fn scanning_the_bundled_crop_site_marks_it_as_crop() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Sitedata");
+    if !root
+        .join("US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc")
+        .is_file()
+    {
+        return;
+    }
+    let report = std::env::temp_dir().join(format!("colm-scan-crop-{}.json", std::process::id()));
+    super::cmd_scan(&root, None, report.to_str(), true).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let crop = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "US-Ne3")
+        .expect("bundled crop site should scan");
+    assert_eq!(crop["urban"], false);
+    assert_eq!(crop["crop"], true);
+    let _ = std::fs::remove_file(report);
+}
+
+#[test]
+fn generated_crop_sites_keep_their_identity_until_rawdata_fills_them() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let root = std::env::temp_dir().join(format!(
+        "colm-cli-crop-site-new-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let site = root.join("US-Ne3_site.nc");
+    let args = [
+        "--out",
+        site.to_str().unwrap(),
+        "--lon",
+        "-96.4396",
+        "--lat",
+        "41.1796",
+        "--landtype",
+        "12",
+        "--mode",
+        "pft",
+        "--crop",
+        "1",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let opts = super::Opts::parse(&args).unwrap();
+    super::cmd_site_new(&opts).unwrap();
+
+    let audit =
+        colm_srfdata::site::audit(&site, colm_srfdata::site::SiteMode::Pft, None, true).unwrap();
+    assert!(
+        audit.needs_external.iter().any(|name| name == "croptyp"),
+        "the generated file must remain honest about missing crop composition"
+    );
+
+    let report = root.join("sites.json");
+    super::cmd_scan(&root, None, report.to_str(), true).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    assert_eq!(json.as_array().unwrap()[0]["crop"], true);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

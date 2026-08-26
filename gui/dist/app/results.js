@@ -39,7 +39,45 @@ const COMMON_VARIABLES = {
   f_sai: ['茎面积指数', 'm²/m²', '植被'],
   f_assim: ['光合作用', 'µmol/m²/s', '碳循环'],
   f_respc: ['植物呼吸', 'µmol/m²/s', '碳循环'],
+  f_gpp: ['总初级生产力 GPP', 'gC/m²/s', '碳循环'],
+  f_grainc: ['籽粒碳库', 'gC/m²', '作物'],
+  f_cropprod1c: ['一年期作物产品碳库', 'gC/m²', '作物'],
+  f_cropprod1c_loss: ['作物产品碳损失', 'gC/m²/s', '作物'],
+  f_cropseedc_deficit: ['作物种子碳亏缺', 'gC/m²/s', '作物'],
+  f_cropprodc_rainfed_temp_corn: ['雨养温带玉米产量碳', 'gC/m²/s', '作物'],
+  f_plantdate_rainfed_temp_corn: ['雨养温带玉米播种日', 'day', '作物'],
+  f_gddplant: ['播种后积温', 'degree days', '作物'],
+  f_gddmaturity: ['成熟所需积温', 'degree days', '作物'],
+  f_hui: ['热量单位指数 HUI', '—', '作物'],
+  f_fert_to_sminn: ['施肥氮输入', 'gN/m²/s', '作物'],
   f_methane_surf_flux_tot: ['甲烷总地表通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_tot_active: ['活动地表甲烷通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_tot_phys: ['物理地表甲烷通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_soil: ['土壤甲烷通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_wetland: ['湿地甲烷通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_lake: ['湖泊甲烷通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_rice: ['稻田甲烷通量', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_global_total_with_lake: ['全地表平均甲烷通量（含湖泊）', 'mol/m²/s', '甲烷'],
+  f_methane_surf_flux_global_phys_with_lake: ['全地表平均物理甲烷通量（含湖泊）', 'mol/m²/s', '甲烷'],
+  f_methane_prod_tot: ['甲烷总产生率', 'mol/m²/s', '甲烷'],
+  f_methane_oxid_tot: ['甲烷总氧化率', 'mol/m²/s', '甲烷'],
+  f_totcol_methane: ['土柱甲烷储量', 'mol/m²', '甲烷'],
+  f_methane_balance_residual: ['甲烷质量平衡残差', 'mol/m²/s', '甲烷'],
+  f_methane_balance_residual_global_with_lake: ['全地表平均甲烷质量平衡残差（含湖泊）', 'mol/m²/s', '甲烷'],
+  f_methane_ch4_clip_credit: ['甲烷数值截断修正', 'mol/m²/s', '甲烷'],
+  f_methane_ch4_clip_credit_global_with_lake: ['全地表平均甲烷数值截断修正（含湖泊）', 'mol/m²/s', '甲烷'],
+  f_o2_cap_gain: ['氧气上限修正增益', 'mol/m²/s', '甲烷'],
+  f_o2_cap_loss: ['氧气上限修正损失', 'mol/m²/s', '甲烷'],
+  f_CONC_O2_UNSAT: ['非淹水区土壤氧气浓度', 'mol/m³', '甲烷'],
+  f_O2_DECOMP_DEPTH_UNSAT: ['非淹水区土壤耗氧率', 'mol/m³/s', '甲烷'],
+  f_fach: ['空调制冷显热', 'W/m²', '城市'],
+  f_fhac: ['空调供热显热', 'W/m²', '城市'],
+  f_fsenroof: ['屋顶感热通量', 'W/m²', '城市'],
+  f_fvehc: ['车辆人为热', 'W/m²', '城市'],
+  f_lfevproof: ['屋顶潜热通量', 'W/m²', '城市'],
+  f_t_roof: ['屋顶温度', 'K', '城市'],
+  f_t_room: ['室内空气温度', 'K', '城市'],
+  f_t_wall: ['墙体温度', 'K', '城市'],
   f_xy_snow: ['降雪', 'mm/s', '积雪'],
   f_snowdp: ['雪深', 'm', '积雪'],
   f_scv: ['雪水当量', 'kg/m²', '积雪'],
@@ -55,10 +93,14 @@ let currentMetricRows = [];
 let currentComparisonSummary = null;
 let currentEvaluationCatalog = [];
 let batchEvaluationCatalogs = [];
+let batchEvaluationCatalogFailures = [];
 let comparisonController = null;
 let activeSeriesRequest = 0;
 let activeMetricRequest = 0;
 let activeMetricChartRequest = 0;
+let activePaneRequest = 0;
+let activeDataBrowserRequest = 0;
+let activeBatchEvaluationCatalogRequest = 0;
 let reportText = '';
 let reportExtension = 'md';
 
@@ -71,13 +113,21 @@ const node = (tag, cls = '', text = '') => {
 const td = (text, cls = '') => node('td', cls, text);
 const th = (text, cls = '') => node('th', cls, text);
 const badge = (text, kind = '') => node('span', `result-badge ${kind}`.trim(), text);
-const completed = () => resultCases(state.cases, state.createdCases, true);
+const historyHealth = new Map();
+const isStaleResult = c => state.runState[c.dir] === '需重跑';
+const isActiveResult = c => ['待运行', '运行中'].includes(state.runState[c.dir]);
+const hasValidatedHistory = c => c.has_history && !isStaleResult(c) && !isActiveResult(c)
+  && historyHealth.get(c.dir)?.ok === true;
+const completed = () => resultCases(state.cases, state.createdCases, false).filter(hasValidatedHistory);
 const allCurrent = () => resultCases(state.cases, state.createdCases, false);
 const resultScope = () => {
   const done = completed();
   if (!state.resultSelectionTouched) return done;
   return done.filter(c => state.resultSelection.has(c.dir));
 };
+const resultScopeKey = () => resultScope()
+  .map(c => `${c.dir}\u001f${observationFor(c)}`)
+  .join('\u001e');
 
 function activeCase() {
   const done = completed();
@@ -96,13 +146,18 @@ function caseState(c) {
   const running = state.runState[c.dir];
   if (running === '失败') return 'failed';
   if (running === '运行中') return 'running';
-  if (c.has_history || running === '已完成') return 'done';
+  const health = historyHealth.get(c.dir);
+  if (isStaleResult(c)) return 'stale';
+  if (c.has_history && health?.ok === false && !health.pending) return 'invalid';
+  if (hasValidatedHistory(c) || (running === '已完成' && !isStaleResult(c))) return 'done';
   return 'waiting';
 }
 
 function stateBadge(c) {
   const value = caseState(c);
   return value === 'done' ? badge('已完成', 'pass')
+    : value === 'stale' ? badge('需重跑', 'warn')
+    : value === 'invalid' ? badge('结果异常', 'fail')
     : value === 'failed' ? badge('失败', 'fail')
     : value === 'running' ? badge('运行中', 'on') : badge('未完成');
 }
@@ -119,9 +174,11 @@ function variableMeta(name, units = '') {
   if (known) return { label: known[0], units: units || known[1], group: known[2] };
   const bare = name.replace(/^f_/, '').replaceAll('_', ' ');
   let group = '其他';
-  if (/snow|sno|ice/i.test(name)) group = '积雪';
+  if (/methane|ch4|(^|_)o2(_|$)/i.test(name)) group = '甲烷';
+  else if (/snow|sno|ice/i.test(name)) group = '积雪';
   else if (/soil|soi|zwt|runoff|rnof|qinfl|qover|water/i.test(name)) group = '水文/土壤';
-  else if (/urban|roof|wall|imper|perv/i.test(name)) group = '城市';
+  else if (/urban|roof|wall|room|fach|fhac|fvehc|imper|perv/i.test(name)) group = '城市';
+  else if (/crop|grain|fert|plantdate|gdd|hui/i.test(name)) group = '作物';
   else if (/lai|sai|veg|assim|resp|gpp|npp|leaf/i.test(name)) group = '植被/碳氮';
   else if (/rad|rnet|solar|long|short|albedo|fsena|lfevpa|fgrnd/i.test(name)) group = '能量/辐射';
   return { label: bare, units: units || '—', group };
@@ -150,7 +207,12 @@ function resultKpi(value, label, kind = '') {
 
 function renderOverview() {
   const cases = allCurrent();
-  const done = cases.filter(c => c.has_history);
+  validateHistoryCases(cases).catch(status);
+  const done = completed();
+  const invalid = cases.filter(c => {
+    const health = historyHealth.get(c.dir);
+    return c.has_history && health?.ok === false && !health.pending;
+  });
   if (!state.resultSelectionTouched) {
     state.resultSelection.clear();
     done.forEach(c => state.resultSelection.add(c.dir));
@@ -163,6 +225,7 @@ function renderOverview() {
     resultKpi(cases.length, '本次算例'),
     resultKpi(done.length, '已有结果', done.length ? 'pass' : ''),
     resultKpi(failed.length, '运行失败', failed.length ? 'fail' : ''),
+    resultKpi(invalid.length, '结果异常', invalid.length ? 'fail' : ''),
     resultKpi(observed.length, '可与观测评估'),
     resultKpi(Math.max(0, done.length - observed.length), '缺少观测', done.length > observed.length ? 'warn' : ''),
   );
@@ -173,8 +236,8 @@ function renderOverview() {
     .filter(c => filter === 'all'
       || (filter === 'done' && caseState(c) === 'done')
       || (filter === 'failed' && caseState(c) === 'failed')
-      || (filter === 'waiting' && !['done', 'failed'].includes(caseState(c)))
-      || (filter === 'no-observation' && c.has_history && !observationFor(c)));
+      || (filter === 'waiting' && ['waiting', 'running'].includes(caseState(c)))
+      || (filter === 'no-observation' && hasValidatedHistory(c) && !observationFor(c)));
   const host = $('result-case-matrix');
   host.textContent = '';
   if (!shown.length) {
@@ -193,7 +256,7 @@ function renderOverview() {
     const check = document.createElement('input');
     check.type = 'checkbox';
     check.checked = state.resultSelection.has(c.dir);
-    check.disabled = !c.has_history;
+    check.disabled = !hasValidatedHistory(c);
     check.title = '加入多站点分析范围';
     check.onchange = event => {
       event.stopPropagation();
@@ -212,10 +275,20 @@ function renderOverview() {
         : value === 'failed' ? badge('失败', 'fail') : value === 'begin' ? badge('运行中', 'on') : badge('—'));
       row.appendChild(cell);
     }
-    const hist = td(''); hist.appendChild(c.has_history ? badge('可用', 'pass') : badge('无')); row.appendChild(hist);
-    const obs = td(''); obs.appendChild(observationFor(c) ? badge('已匹配', 'pass') : badge('缺少', c.has_history ? 'warn' : '')); row.appendChild(obs);
+    const health = historyHealth.get(c.dir);
+    const hist = td('');
+    hist.appendChild(!c.has_history ? badge('无')
+      : health?.pending ? badge('检查中', 'on')
+        : health?.ok === true ? badge('可用', 'pass')
+          : badge('损坏', 'fail'));
+    if (health?.error) hist.title = health.error;
+    row.appendChild(hist);
+    const obs = td(''); obs.appendChild(observationFor(c) ? badge('已匹配', 'pass') : badge('缺少', hasValidatedHistory(c) ? 'warn' : '')); row.appendChild(obs);
     row.onclick = () => {
-      if (!c.has_history) { status(`${c.name} 还没有 history 结果`); return; }
+      if (!hasValidatedHistory(c)) {
+        status(historyHealth.get(c.dir)?.error ?? `${c.name} 还没有可分析的 history 结果`);
+        return;
+      }
       setResultCase(c.dir);
       go('result-series');
     };
@@ -281,12 +354,57 @@ function syncObservation() {
   updateButtons();
 }
 
+async function validateHistoryCases(cases = allCurrent()) {
+  const pending = cases.filter(c => c.has_history && !historyHealth.has(c.dir));
+  if (!pending.length) return;
+  if (!hasBackend) {
+    pending.forEach(c => historyHealth.set(c.dir, { ok: true }));
+    return;
+  }
+  pending.forEach(c => historyHealth.set(c.dir, { ok: false, pending: true }));
+  const width = Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 1));
+  const results = await boundedMap(pending, width, async c => {
+    const catalog = JSON.parse(await invoke('history_catalog', { case: c.dir }));
+    assertUsableCatalog(catalog);
+    catalogCache.set(c.dir, catalog);
+    return catalog;
+  });
+  results.forEach((result, index) => {
+    const c = pending[index];
+    if (result.ok) historyHealth.set(c.dir, { ok: true });
+    else historyHealth.set(c.dir, { ok: false, error: result.error });
+  });
+  if (['result-data', 'result-series', 'result-evaluation', 'result-comparison'].includes(state.step)) {
+    await prepareActivePane();
+  } else {
+    syncResultCaseSelects();
+    syncObservation();
+    renderOverview();
+    updateButtons();
+  }
+}
+
 async function loadCatalog(c) {
   const cached = catalogCache.get(c.dir);
   if (cached) return cached;
-  const catalog = JSON.parse(await invoke('history_catalog', { case: c.dir }));
-  catalogCache.set(c.dir, catalog);
-  return catalog;
+  try {
+    const catalog = JSON.parse(await invoke('history_catalog', { case: c.dir }));
+    assertUsableCatalog(catalog);
+    historyHealth.set(c.dir, { ok: true });
+    catalogCache.set(c.dir, catalog);
+    return catalog;
+  } catch (error) {
+    if (c?.has_history) historyHealth.set(c.dir, { ok: false, error: String(error) });
+    throw error;
+  }
+}
+
+function assertUsableCatalog(catalog) {
+  if (!catalog?.steps || !catalog.variables?.some(variable => variable.name !== 'time')) {
+    throw new Error(language() === 'en'
+      ? 'history file is damaged or incomplete'
+      : 'history 文件损坏或不完整');
+  }
 }
 
 async function loadEvaluationCatalog(c, obs = observationFor(c)) {
@@ -304,6 +422,7 @@ function resetEvaluationResults(message = '') {
   state.resultMetrics = [];
   state.resultFailures = [];
   state.resultMetricMissing = [];
+  batchEvaluationCatalogFailures = [];
   $('metrics').textContent = '';
   destroyChartsInside($('evaluation-charts'));
   $('evaluation-chart-refresh').disabled = true;
@@ -390,34 +509,44 @@ function renderBatchEvaluationSelector() {
     host.appendChild(node('div', 'result-empty', language() === 'en'
       ? 'No evaluation catalogs are available in the current scope.'
       : '当前分析范围还没有可用的评估目录。'));
+    if (batchEvaluationCatalogFailures.length) {
+      host.appendChild(node('div', 'warn mini', `${batchEvaluationCatalogFailures.length} 个站点评估目录读取失败：${batchEvaluationCatalogFailures.map(item => item.site).join('、')}`));
+    }
     return;
   }
   initializeEvaluationSelection(definitions);
-  const total = batchEvaluationCatalogs.length;
+  const total = resultScope().length;
   for (const definition of definitions) {
     const available = batchEvaluationCatalogs.filter(entry => entry.catalog
       .some(variable => variable.name === definition.name && variable.available)).length;
     host.appendChild(evaluationVariableNode({ ...definition, available: available > 0 },
       language() === 'en' ? `${available}/${total} sites` : `${available}/${total} 站点`));
   }
+  if (batchEvaluationCatalogFailures.length) {
+    host.appendChild(node('div', 'warn mini', `${batchEvaluationCatalogFailures.length}/${total} 个站点评估目录读取失败：${batchEvaluationCatalogFailures.map(item => `${item.site}（${item.reason}）`).join('、')}`));
+  }
 }
 
 async function refreshCurrentEvaluationCatalog() {
   const c = activeCase();
   const obs = $('obs').value.trim();
+  const isCurrent = () => state.step === 'result-evaluation'
+    && activeCase()?.dir === c?.dir && $('obs').value.trim() === obs;
   currentEvaluationCatalog = [];
   renderEvaluationSelector();
   if (!c || !obs) return;
   try {
     const rows = await loadEvaluationCatalog(c, obs);
-    if (activeCase()?.dir !== c.dir || $('obs').value.trim() !== obs) return;
+    if (!isCurrent()) return;
     currentEvaluationCatalog = rows;
     renderEvaluationSelector();
     updateButtons();
-  } catch (error) { status(error); }
+  } catch (error) { if (isCurrent()) status(error); }
 }
 
 async function refreshBatchEvaluationCatalogs() {
+  const token = ++activeBatchEvaluationCatalogRequest;
+  const scopeKey = resultScopeKey();
   const scope = resultScope();
   const width = Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 1));
   const results = await boundedMap(scope, width, async c => {
@@ -425,8 +554,18 @@ async function refreshBatchEvaluationCatalogs() {
     if (!obs) return { case: c, catalog: [] };
     return { case: c, catalog: await loadEvaluationCatalog(c, obs) };
   });
-  batchEvaluationCatalogs = results.filter(result => result.ok).map(result => result.value);
+  if (token !== activeBatchEvaluationCatalogRequest || state.step !== 'result-comparison' || resultScopeKey() !== scopeKey) return false;
+  batchEvaluationCatalogs = [];
+  batchEvaluationCatalogFailures = [];
+  results.forEach((result, index) => {
+    const c = scope[index];
+    if (result.ok) batchEvaluationCatalogs.push(result.value);
+    else batchEvaluationCatalogFailures.push({
+      site: c.name, case_dir: c.dir, reason: result.error,
+    });
+  });
   renderBatchEvaluationSelector();
+  return true;
 }
 
 function kindLabel(kind) {
@@ -434,12 +573,14 @@ function kindLabel(kind) {
 }
 
 async function renderDataBrowser() {
+  const token = ++activeDataBrowserRequest;
   const c = activeCase();
   const table = $('result-variable-table');
   table.textContent = '';
   if (!c) return;
   try {
     const catalog = await loadCatalog(c);
+    if (token !== activeDataBrowserRequest || state.step !== 'result-data' || activeCase()?.dir !== c.dir) return;
     $('result-catalog-summary').textContent = `${catalog.files} 个 history 文件 · ${catalog.steps} 步 · ${utcText(catalog.start)} 至 ${utcText(catalog.end)} · ${catalog.variables.length} 个变量`;
     const query = $('result-variable-search').value.trim().toLowerCase();
     const kind = $('result-variable-kind').value;
@@ -469,7 +610,9 @@ async function renderDataBrowser() {
     }
     fillVariableSelect(catalog);
   } catch (error) {
-    table.appendChild(node('caption', 'warn', String(error)));
+    if (token === activeDataBrowserRequest && state.step === 'result-data' && activeCase()?.dir === c.dir) {
+      table.appendChild(node('caption', 'warn', String(error)));
+    }
   }
 }
 
@@ -510,14 +653,15 @@ async function getSeries(c, variable, options = {}) {
     from: options.from ?? '', to: options.to ?? '', maxPoints: maxPoints ?? 'all',
   };
   const key = seriesKey(request);
-  const cached = seriesCache.get(key);
+  const cached = maxPoints === null ? undefined : seriesCache.get(key);
   if (cached) return cached;
   const json = await invoke('series', {
     case: c.dir, vars: variable,
     from: options.from ?? null, to: options.to ?? null,
     maxPoints,
   });
-  return seriesCache.set(key, JSON.parse(json));
+  const data = JSON.parse(json);
+  return maxPoints === null ? data : seriesCache.set(key, data);
 }
 
 function destroyChart(host) {
@@ -862,7 +1006,7 @@ function renderComparison() {
   rankingCard.hidden = !rows.length;
   const summary = $('summary');
   summary.textContent = '';
-  if (!rows.length && !state.resultFailures.length && !state.resultMetricMissing.length) {
+  if (!rows.length && !state.resultFailures.length && !state.resultMetricMissing.length && !batchEvaluationCatalogFailures.length) {
     summary.appendChild(node('div', 'result-empty', '尚未运行多站点评估。'));
     return;
   }
@@ -926,6 +1070,11 @@ function renderComparison() {
   if (state.resultFailures.length) {
     const failure = node('div', 'warn mini');
     failure.textContent = `${state.resultFailures.length} 个站点未完成评估：` + state.resultFailures.map(item => `${item.site}（${item.reason}）`).join('、');
+    summary.appendChild(failure);
+  }
+  if (batchEvaluationCatalogFailures.length) {
+    const failure = node('div', 'warn mini');
+    failure.textContent = `${batchEvaluationCatalogFailures.length} 个站点评估目录读取失败：` + batchEvaluationCatalogFailures.map(item => `${item.site}（${item.reason}）`).join('、');
     summary.appendChild(failure);
   }
 }
@@ -1015,6 +1164,18 @@ function reportData() {
   const evaluationFailures = state.resultFailures
     .filter(item => scopeDirs.has(item.case_dir))
     .map(item => ({ ...item, phase: 'evaluation' }));
+  const catalogFailures = batchEvaluationCatalogFailures
+    .filter(item => scopeDirs.has(item.case_dir))
+    .map(item => ({ ...item, phase: 'catalog' }));
+  const invalidHistoryFailures = allCurrent()
+    .filter(c => {
+      const health = historyHealth.get(c.dir);
+      return c.has_history && health?.ok === false && !health.pending;
+    })
+    .map(c => ({
+      site: c.name, case_dir: c.dir, phase: 'history',
+      reason: historyHealth.get(c.dir)?.error ?? (language() === 'en' ? 'Invalid history file' : 'history 文件损坏或不完整'),
+    }));
   const metricMissing = state.resultMetricMissing
     .filter(item => scopeDirs.has(item.case_dir))
     .map(item => ({ ...item, phase: 'variable', reason: `${item.variable}: ${item.reason}` }));
@@ -1037,7 +1198,7 @@ function reportData() {
     })),
     metrics: $('export-metrics').checked
       ? state.resultMetrics.filter(row => scopeDirs.has(row.case_dir)).map(stripMetricPairs) : [],
-    failures: $('export-failures').checked ? [...runFailures, ...evaluationFailures, ...metricMissing] : [],
+    failures: $('export-failures').checked ? [...runFailures, ...invalidHistoryFailures, ...catalogFailures, ...evaluationFailures, ...metricMissing] : [],
   };
 }
 
@@ -1072,7 +1233,7 @@ function markdownReport(data) {
     `丢弃输出记录：${data.settings.discarded_records}`, `能量闭合订正：${data.settings.energy_closure_corrected ? '是' : '否'}`,
     `评估变量：${data.settings.evaluation_variables.join('、') || '—'}`,
     '', '## 算例', '', '| 站点 | 状态 | 分析范围 | History | 观测 |', '|---|---|---:|---:|---|'];
-  const statusLabels = { done: '已完成', failed: '失败', running: '运行中', waiting: '未完成' };
+  const statusLabels = { done: '已完成', invalid: '结果异常', failed: '失败', running: '运行中', waiting: '未完成' };
   data.cases.forEach(c => lines.push(`| ${c.name} | ${statusLabels[c.status] ?? c.status} | ${c.in_analysis_scope ? '是' : '否'} | ${c.has_history ? '是' : '否'} | ${c.observation ?? '—'} |`));
   if (data.metrics.length) {
     lines.push('', '## 评估指标', '', '| 站点 | 变量 | n | RMSE | MAE | Bias | R² | r | NSE | KGE |', '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|');
@@ -1096,8 +1257,8 @@ function printableReportHtml(data) {
   const h = value => escapeHtml(value ?? '—');
   const yes = value => value ? (en ? 'Yes' : '是') : (en ? 'No' : '否');
   const statusLabels = en
-    ? { done: 'Completed', failed: 'Failed', running: 'Running', waiting: 'Pending' }
-    : { done: '已完成', failed: '失败', running: '运行中', waiting: '未完成' };
+    ? { done: 'Completed', invalid: 'Invalid result', failed: 'Failed', running: 'Running', waiting: 'Pending' }
+    : { done: '已完成', invalid: '结果异常', failed: '失败', running: '运行中', waiting: '未完成' };
   const caseRows = data.cases.map(c => `<tr><td>${h(c.name)}</td><td>${h(statusLabels[c.status] ?? c.status)}</td><td>${yes(c.in_analysis_scope)}</td><td>${yes(c.has_history)}</td><td>${h(c.observation)}</td></tr>`).join('');
   const metricRows = data.metrics.map(row => `<tr><td>${h(row.site)}</td><td>${h(language() === 'en' ? row.label_en : row.label_zh)} · ${h(row.name)}</td><td>${h(row.n)}</td><td>${h(metricText(row.rmse))}</td><td>${h(metricText(row.mae))}</td><td>${h(metricText(row.bias))}</td><td>${h(metricText(row.r2))}</td><td>${h(metricText(row.correlation))}</td><td>${h(metricText(row.nse))}</td><td>${h(metricText(row.kge))}</td></tr>`).join('');
   const failures = data.failures.map(item => `<li><b>${h(item.site)}</b> · ${h(item.reason)}</li>`).join('');
@@ -1184,14 +1345,27 @@ function exportChart(host, filename) {
   const link = document.createElement('a'); link.href = canvas.toDataURL('image/png'); link.download = filename; link.click();
 }
 
+export async function markResultsStale(dirs) {
+  const target = new Set(dirs);
+  for (const c of state.cases) {
+    if (!target.has(c.dir)) continue;
+    c.has_history = false;
+    state.runState[c.dir] = '需重跑';
+    invalidateResultCase(c.dir);
+  }
+  if (hasBackend && target.size) await invoke('mark_results_stale', { dirs: [...target] });
+}
+
 export function invalidateResultCase(dir) {
   catalogCache.delete(dir);
+  historyHealth.delete(dir);
   evaluationCatalogCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
   seriesCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
   metricsCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
   state.resultMetrics = state.resultMetrics.filter(row => row.case_dir !== dir);
   state.resultFailures = state.resultFailures.filter(row => row.case_dir !== dir);
   state.resultMetricMissing = state.resultMetricMissing.filter(row => row.case_dir !== dir);
+  batchEvaluationCatalogFailures = batchEvaluationCatalogFailures.filter(row => row.case_dir !== dir);
 }
 
 function updateButtons() {
@@ -1207,52 +1381,64 @@ function updateButtons() {
 
 async function prepareActivePane() {
   if (!state.step.startsWith('result-')) return;
+  const token = ++activePaneRequest;
+  const step = state.step;
   renderOverview();
   syncResultCaseSelects();
   syncObservation();
   const c = activeCase();
+  const isCurrent = () => token === activePaneRequest && state.step === step && activeCase()?.dir === c?.dir;
   if (!c) { updateButtons(); return; }
-  if (['result-data', 'result-series'].includes(state.step)) {
+  if (['result-data', 'result-series'].includes(step)) {
     try {
       const catalog = await loadCatalog(c);
+      if (!isCurrent()) return;
       fillVariableSelect(catalog);
       if (!$('series-from').value) $('series-from').value = inputClock(catalog.start);
       if (!$('series-to').value) $('series-to').value = inputClock(catalog.end);
-      if (state.step === 'result-data') await renderDataBrowser();
-    } catch (error) { status(error); }
+      if (step === 'result-data') await renderDataBrowser();
+      if (!isCurrent()) return;
+    } catch (error) { if (isCurrent()) status(error); }
   }
-  if (state.step === 'result-evaluation') await refreshCurrentEvaluationCatalog();
-  if (state.step === 'result-comparison') {
-    await refreshBatchEvaluationCatalogs();
-    renderComparison();
+  if (step === 'result-evaluation') {
+    await refreshCurrentEvaluationCatalog();
+    if (!isCurrent()) return;
   }
-  if (state.step === 'result-uncertainty') {
+  if (step === 'result-comparison') {
+    if (await refreshBatchEvaluationCatalogs()) renderComparison();
+    if (!isCurrent()) return;
+  }
+  if (step === 'result-uncertainty') {
     syncStudyKernelLabels();
     await loadStudyParams().catch(() => {});
     await renderStudyOutputs();
     if (activeStudyDirs('uq').length) await refreshStudy('uq').catch(() => {});
   }
-  if (state.step === 'result-tuning') {
+  if (step === 'result-tuning') {
     syncStudyKernelLabels();
     await loadStudyParams().catch(() => {});
     await renderTuningTargets().catch(() => {});
     if (activeStudyDirs('tuning').length) await refreshStudy('tuning').catch(() => {});
   }
-  updateButtons();
+  if (isCurrent()) updateButtons();
 }
 
 /** 外部仍调用旧名字 `refreshVars`；现在它刷新的是整个结果索引。 */
-export function refreshVars() {
+export async function refreshVars() {
   renderOverview();
   syncResultCaseSelects();
   syncObservation();
   renderSteps();
-  prepareActivePane();
+  await prepareActivePane();
 }
 
 $('result-case-search').oninput = () => { state.resultCaseSearch = $('result-case-search').value; renderOverview(); };
 $('result-status-filter').onchange = () => { state.resultStatusFilter = $('result-status-filter').value; renderOverview(); };
-$('result-refresh').onclick = () => { catalogCache.clear(); refreshVars(); status('结果索引已刷新'); };
+$('result-refresh').onclick = async () => {
+  allCurrent().forEach(c => invalidateResultCase(c.dir));
+  await refreshVars();
+  status('结果索引已刷新');
+};
 $('result-variable-search').oninput = renderDataBrowser;
 $('result-variable-kind').onchange = renderDataBrowser;
 $('plot').onclick = plotSeries;

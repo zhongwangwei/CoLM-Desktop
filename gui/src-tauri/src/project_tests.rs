@@ -57,6 +57,16 @@ fn a_case_without_a_history_file_is_marked_as_not_run() {
     std::fs::write(h.join("CN-Cng_hist_2008-01.nc"), b"not really netcdf").expect("write");
     let cases = list_cases(root.to_string_lossy().into_owned()).expect("lists");
     assert!(cases[0].has_history);
+
+    mark_results_stale(vec![d.to_string_lossy().into_owned()]).unwrap();
+    let cases = list_cases(root.to_string_lossy().into_owned()).expect("lists");
+    assert!(
+        !cases[0].has_history,
+        "stale history must stay hidden after a rescan"
+    );
+    colm_case::clear_results_stale(&d).unwrap();
+    let cases = list_cases(root.to_string_lossy().into_owned()).expect("lists");
+    assert!(cases[0].has_history);
 }
 
 #[test]

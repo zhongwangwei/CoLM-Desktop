@@ -65,13 +65,9 @@ fn lookup_misses_when_no_site_is_near() {
     assert!(lookup(-30.0, 0.0).is_none());
 }
 
-/// `LCZ_DOM` 要落在 LCZ 的 1..=17 里。
-///
-/// 越界不是「值不好看」而是**越界访问**：LCZ 方案下 CoLM 直接拿它当下标
-/// 取 `emroof_lcz(utyp)`（`MOD_SingleSrfdata.F90:1971` 起）。栅格自己的
-/// `_FillValue` 是 0，所以 0 尤其要挡住。
+/// 来源栅格包含完整 LCZ 1..=17；写入前另行限制为 CoLM 支持的城市类 1..=10。
 #[test]
-fn lcz_classes_are_in_range() {
+fn source_lcz_classes_are_in_product_range() {
     for s in SITES {
         assert!(
             (1..=17).contains(&s.lcz_dom),

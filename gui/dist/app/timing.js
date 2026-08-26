@@ -13,6 +13,7 @@ import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
 import { editTarget } from './batch.js';
+import { markResultsStale } from './results.js';
 
 /** 画卡片。`box` 是 `#timing`。 */
 export async function renderTiming() {
@@ -51,6 +52,7 @@ export async function renderTiming() {
         dirs, years, repeat, kernelDir: $('kernel').value,
       });
       state.text = r.text;
+      await markResultsStale(dirs);
       const what = repeat > 0 && years > 0
         ? `预热：每轮 ${years} 年，共重复 ${repeat} 轮`
         : '已关闭预热';

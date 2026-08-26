@@ -140,6 +140,9 @@ CONTAINS
 
          IF (numpatch > 0) THEN
             allocate (patcharea (numpatch))
+#ifdef SinglePoint
+            patcharea(:) = 1._r8
+#else
             patcharea(:) = 0.
             DO ip = 1, numpatch
                ie = landpatch%ielm(ip)
@@ -152,6 +155,7 @@ CONTAINS
                   patcharea(ip) = patcharea(ip) * landpatch%pctshared(ip)
                ENDIF
             ENDDO
+#endif
          ENDIF
 
       ENDIF

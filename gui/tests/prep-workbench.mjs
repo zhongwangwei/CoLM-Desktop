@@ -36,8 +36,13 @@ const site = await readFile(new URL('../dist/app/sitedata.js', import.meta.url),
 assert.match(site, /adoptPreparedSite/);
 assert.match(site, /sitedir/);
 assert.match(site, /scanPreparedSites/);
+assert.match(site, /invoke\('make_site'[\s\S]*crop: !!state\.wizard\?\.physics\?\.crop/);
+assert.match(site, /filter\(item => !crop \|\| item\.value === 12\)/, 'CROP preprocessing must not offer non-cropland land-cover classes');
+assert.match(site, /crop \? '12' : ''/, 'CROP preprocessing must default to the required IGBP Croplands class');
+assert.match(site, /el\.addEventListener\('input', invalidateSite\);[\s\S]*el\.addEventListener\('change', invalidateSite\);/, 'site generation must react to picker change events as well as typing');
 assert.doesNotMatch(site, /innerHTML\s*=\s*`[\s\S]*?\$\{/, 'site reports must not interpolate paths or report fields into HTML');
 assert.doesNotMatch(site, /<code>\$\{(?:result\.path|path)\}/, 'site file paths must be rendered through textContent');
+assert.match(site, /report\.site_kind === 'urban'[\s\S]*完整 Urban-PLUMBER 站点文件/, 'urban coordinate-only preprocessing must explain rawdata or complete Urban-PLUMBER input requirement');
 
 const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
 assert.match(html, /<select class="input" id="slandtype"/);

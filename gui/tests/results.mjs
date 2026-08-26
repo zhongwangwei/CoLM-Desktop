@@ -118,10 +118,96 @@ for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
+if (!resultUi.includes('let activePaneRequest = 0')
+    || !resultUi.includes('let activeDataBrowserRequest = 0')
+    || !resultUi.includes('let activeBatchEvaluationCatalogRequest = 0')
+    || !resultUi.includes('const isCurrent = () => token === activePaneRequest')
+    || !resultUi.includes("state.step !== 'result-data' || activeCase()?.dir !== c.dir")
+    || !resultUi.includes("state.step !== 'result-comparison' || resultScopeKey() !== scopeKey")) {
+  throw new Error('result async pane refreshes must ignore stale case, step, and scope responses');
+}
+if (!resultUi.includes('const cached = maxPoints === null ? undefined : seriesCache.get(key)')
+    || !resultUi.includes('return maxPoints === null ? data : seriesCache.set(key, data)')) {
+  throw new Error('full-resolution series exports must bypass the bounded plotting LRU');
+}
+const paramsUi = await readFile(join(root, 'dist', 'app', 'params.js'), 'utf8');
+const timingUi = await readFile(join(root, 'dist', 'app', 'timing.js'), 'utf8');
 if (!resultUi.includes('summaryOnly') || !resultUi.includes('pairVars')
     || !resultUi.includes('false, [summaryRow.name], 2400')
     || !resultUi.includes("$('evaluation-chart-refresh').onclick")) {
   throw new Error('multi-site summaries and selected-variable chart pairs are not loaded independently');
+}
+const histvarsUi = await readFile(join(root, 'dist', 'app', 'histvars.js'), 'utf8');
+if (!resultUi.includes('export async function markResultsStale(dirs)')
+    || !resultUi.includes("state.runState[c.dir] = '需重跑'")
+    || !resultUi.includes('c.has_history = false')
+    || !resultUi.includes("invoke('mark_results_stale', { dirs: [...target] })")
+    || !resultUi.includes("value === 'stale' ? badge('需重跑', 'warn')")
+    || !paramsUi.includes("import { markResultsStale } from './results.js';")
+    || !paramsUi.includes('await markResultsStale(dirs);')
+    || !timingUi.includes("import { markResultsStale } from './results.js';")
+    || !timingUi.includes('await markResultsStale(dirs);')
+    || !histvarsUi.includes("import { markResultsStale } from './results.js';")
+    || !histvarsUi.includes('await markResultsStale(dirs);')) {
+  throw new Error('parameter saves must mark old history as stale and invalidate result caches');
+}
+if (!resultUi.includes("['待运行', '运行中'].includes(state.runState[c.dir])")) {
+  throw new Error('results being regenerated must not remain readable during colm execution');
+}
+if (!resultUi.includes("$('result-refresh').onclick = async () =>")
+    || !resultUi.includes('allCurrent().forEach(c => invalidateResultCase(c.dir))')
+    || resultUi.includes("$('result-refresh').onclick = () => { catalogCache.clear();")) {
+  throw new Error('manual result refresh must invalidate every current case cache, not only the catalog cache');
+}
+if (!resultUi.includes('const historyHealth = new Map()')
+    || !resultUi.includes('hasValidatedHistory')
+    || !resultUi.includes("invoke('history_catalog'")
+    || !resultUi.includes('assertUsableCatalog(catalog)')
+    || !resultUi.includes("['waiting', 'running'].includes(caseState(c))")
+    || !resultUi.includes("await prepareActivePane();")
+    || !resultUi.includes('history 文件损坏或不完整')
+    || !resultUi.includes('batchEvaluationCatalogFailures')
+    || !resultUi.includes('const total = resultScope().length')) {
+  throw new Error('result analysis must validate history files and keep failed site catalogs in the denominator');
+}
+if (!resultUi.includes('allCurrent().forEach(c => invalidateResultCase(c.dir))')
+    || !resultUi.includes('export async function refreshVars()')) {
+  throw new Error('manual result refresh must invalidate every per-case cache before reloading');
+}
+for (const urban of ['f_fach', 'f_fhac', 'f_fsenroof', 'f_fvehc', 'f_lfevproof', 'f_t_roof', 'f_t_room', 'f_t_wall']) {
+  if (!resultUi.includes(urban)) throw new Error(`urban history variable ${urban} lacks a readable result mapping`);
+}
+for (const crop of [
+  'f_grainc', 'f_cropprod1c', 'f_cropprodc_rainfed_temp_corn',
+  'f_plantdate_rainfed_temp_corn', 'f_gddplant', 'f_gddmaturity', 'f_hui',
+]) {
+  if (!resultUi.includes(crop)) throw new Error(`crop history variable ${crop} lacks a readable result mapping`);
+}
+if (!resultUi.includes("/crop|grain|fert|plantdate|gdd|hui/i.test(name)")) {
+  throw new Error('crop history variables are not grouped as crop outputs');
+}
+for (const methane of [
+  'f_methane_surf_flux_soil', 'f_methane_surf_flux_wetland', 'f_methane_surf_flux_lake',
+  'f_methane_prod_tot', 'f_methane_oxid_tot', 'f_totcol_methane', 'f_o2_cap_gain',
+  'f_CONC_O2_UNSAT', 'f_O2_DECOMP_DEPTH_UNSAT',
+]) {
+  if (!resultUi.includes(methane)) throw new Error(`methane history variable ${methane} lacks a readable result mapping`);
+}
+for (const variable of [
+  'f_methane_surf_flux_global_total_with_lake',
+  'f_methane_surf_flux_global_phys_with_lake',
+  'f_methane_balance_residual_global_with_lake',
+  'f_methane_ch4_clip_credit_global_with_lake',
+]) {
+  if (!resultUi.includes(`${variable}:`) || !resultUi.match(new RegExp(`${variable}:[^\\n]+mol/m²/s`))) {
+    throw new Error(`${variable} must keep the model's land-area-mean flux unit`);
+  }
+}
+if (!resultUi.includes('/methane|ch4|(^|_)o2(_|$)/i.test(name)')) {
+  throw new Error('methane history variables are not grouped as methane outputs');
+}
+if (!resultUi.includes("invalid: 'Invalid result'") || !resultUi.includes("invalid: '结果异常'")) {
+  throw new Error('printable reports do not localize invalid history results');
 }
 if (!resultUi.includes("label: `${meta.label} · ${variable}`")
     || !resultUi.includes("const dialogText = text =>")

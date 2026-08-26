@@ -102,6 +102,7 @@ pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
     let already = [
         "Sitedata/AT-Neu_2010-2012_FLUXNET-CH4_site.nc",
         "Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc",
+        "Observation/US-Ne3_2002-2003_FLUXNET2015_CROP_Flux.nc",
         "Runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
     ]
     .iter()

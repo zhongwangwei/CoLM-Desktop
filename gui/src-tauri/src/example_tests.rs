@@ -21,6 +21,7 @@ fn bundled_crop_example_contains_the_files_needed_to_create_a_case() {
     for file in [
         "Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc",
         "Forcing/US-Ne3_2002-2003_FLUXNET2015_CROP_Met.nc",
+        "Observation/US-Ne3_2002-2003_FLUXNET2015_CROP_Flux.nc",
         "Forcingnml/US-Ne3.nml",
         "Runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
     ] {

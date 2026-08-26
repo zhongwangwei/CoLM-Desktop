@@ -4,6 +4,7 @@ import {
   fortranNumberInputValue,
   isCommonField,
   optionLabel,
+  fieldOptions,
   technicalFieldHint,
 } from '../dist/app/param-presentation.js';
 
@@ -22,6 +23,8 @@ assert.match(optionLabel('DEF_DS_precipitation_adjust_scheme', 'II', 'zh'), /Mic
 assert.match(optionLabel('DEF_DS_longwave_adjust_scheme', 'I', 'zh'), /TopoSCALE/);
 assert.match(optionLabel('DEF_USE_Campbell_SOIL_MODEL', '.false.', 'zh'), /van Genuchten/);
 assert.equal(fieldLabel('DEF_RSS_SCHEME', 'zh'), '土壤表面阻抗方案');
+assert.equal(fieldLabel('DEF_CheckEquilibrium', 'zh'), '检查水量平衡收敛');
+assert.equal(fieldLabel('DEF_CheckEquilibrium', 'en'), 'Check water-balance equilibrium');
 assert.equal(optionLabel('DEF_USE_SNICAR', '.true.', 'zh'), '启用');
 assert.equal(optionLabel('DEF_USE_SNICAR', '.false.', 'en'), 'Disabled');
 assert.match(optionLabel('DEF_USE_Forcing_Downscaling', '.true.', 'zh'), /自动关闭简化方案/);
@@ -59,6 +62,12 @@ assert.equal(fieldLabel('DEF_PH_ROOT_RADIUS', 'en'), 'Fine-root radius (m)');
 assert.equal(fieldLabel('DEF_OZONE_KO3', 'zh'), '臭氧气孔阻力系数');
 assert.equal(fieldLabel('DEF_DS_SHORTWAVE_SIMPLE_LIMIT', 'en'), 'Simple-mode shortwave correction limit');
 assert.match(optionLabel('DEF_USE_OZONEDATA', '.false.', 'zh'), /100 ppbv/);
+assert.equal(fieldLabel('DEF_METHANE%inundation_mode', 'zh'), '甲烷淹水范围模式');
+assert.equal(fieldLabel('DEF_file_GIEMS', 'en'), 'GIEMS satellite wetland data');
+assert.match(optionLabel('DEF_METHANE%inundation_mode', 'wetwat', 'zh'), /wetwat/);
+assert.deepEqual(fieldOptions('DEF_METHANE%inundation_mode'), ['wetwat', 'satellite']);
+assert.deepEqual(fieldOptions('DEF_METHANE%atm_methane_file_units'), ['auto', 'mol/mol', 'ppmv', 'ppbv']);
+assert.deepEqual(fieldOptions('DEF_METHANE%ch4_history_vars'), ['core', 'diagnostic', 'all', 'none']);
 
 // 即使上游新增字段尚未写专门翻译，也不能把 DEF_/USE_SITE_ 暴露为主标签。
 for (const name of ['DEF_NEW_SOIL_SCHEME', 'USE_SITE_new_measurement', 'SITE_new_value']) {
@@ -135,4 +144,17 @@ assert.match(params, /commonProcessFiles\(lists\)/);
 assert.match(params, /const cases = currentCases\(\)/);
 assert.match(params, /renderProcessPicker\(basic, parameterCases\)/);
 assert.match(params, /appendDefaultValue\(v, entry\.path, entry\.default, entry\.kind\)/);
+assert.match(params, /fieldOptions\(entry\.path\)/);
+assert.match(params, /optionLabel\(entry\.path, value, language\(\)\)/);
+assert.match(params, /entry\.path !== 'DEF_METHANE%ch4_history_vars'/,
+  'the CH4 history selector must preserve custom comma-separated variable lists');
+assert.match(params, /setAttribute\('list', 'ch4-history-presets'\)/);
+assert.match(params, /\['DEF_file_GIEMS', 'file'\]/);
+const paramsHtml = await import('node:fs').then(fs =>
+  fs.readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8'));
+for (const value of ['core', 'diagnostic', 'all', 'none']) {
+  assert.match(paramsHtml, new RegExp(`<option value="${value}">`));
+}
 assert.match(params, /if \(showDefaults\) appendDefaultValue\([\s\S]*fieldState\?\.context_default \?\? meta\?\.default/);
+assert.match(params, /const flows = new Set\(\['basic-files', 'basic-timing'\]\)/);
+assert.doesNotMatch(params, /const flows = new Set\(\['basic-files', 'basic-timing', 'basic-grid'\]\)/);

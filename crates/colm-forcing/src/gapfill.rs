@@ -626,6 +626,9 @@ fn validate_repair_plan(plan: &RepairPlan) -> Result<()> {
     if plan.min_overlap == 0 {
         bail!("minimum ERA5-Land overlap must be at least one sample");
     }
+    if i32::try_from(plan.short_gap_max).is_err() {
+        bail!("short-gap limit is too large to record in a NetCDF product");
+    }
     let mut slots = BTreeSet::new();
     for slot in &plan.slots {
         if !slots.insert(slot.index) {
@@ -791,7 +794,25 @@ pub fn repair_file(src: &Path, dst: &Path, plan: &RepairPlan) -> Result<RepairSu
     });
 
     for slot in ordered_slots {
-        let mut values = combined_canonical(&file, src, slot, &plan.slots, steps, step_seconds)?;
+        let mut values = if slot.index == 2 {
+            let temperature = repaired_canonical
+                .get(&1)
+                .context("humidity repair needs the repaired air-temperature slot")?;
+            let pressure = repaired_canonical
+                .get(&3)
+                .context("humidity repair needs the repaired surface-pressure slot")?;
+            combined_humidity_canonical_with_support(
+                &file,
+                src,
+                slot,
+                steps,
+                step_seconds,
+                temperature,
+                pressure,
+            )?
+        } else {
+            combined_canonical(&file, src, slot, &plan.slots, steps, step_seconds)?
+        };
         let scalar_wind =
             slot.index == 6 && !plan.slots.iter().any(|candidate| candidate.index == 5);
         let quality_rejected = apply_basic_qc(&mut values, slot.index, scalar_wind)?;
@@ -1065,7 +1086,7 @@ fn combined_canonical(
         }
     }
     let canonical = crate::convert::canonical_units(slot.index);
-    let mut values = if slot.index == 2 {
+    if slot.index == 2 {
         let temperature_slot = all_slots
             .iter()
             .find(|candidate| candidate.index == 1)
@@ -1078,28 +1099,87 @@ fn combined_canonical(
             combined_canonical(file, path, temperature_slot, all_slots, steps, step_seconds)?;
         let pressure =
             combined_canonical(file, path, pressure_slot, all_slots, steps, step_seconds)?;
-        match crate::units::humidity_to_specific(
-            &slot.source_name,
-            &slot.source_units,
-            &values,
+        return combined_humidity_canonical_with_support(
+            file,
+            path,
+            slot,
+            steps,
+            step_seconds,
             &temperature,
             &pressure,
-        )? {
-            Some(values) => values,
-            None => crate::units::convert_units_with_step(
-                &slot.source_units,
-                canonical,
-                &values,
-                Some(step_seconds),
-            )?,
+        );
+    }
+    let mut values = crate::units::convert_units_with_step(
+        &slot.source_units,
+        canonical,
+        &values,
+        Some(step_seconds),
+    )?;
+    for extra in &slot.also_add {
+        let mut add = variable_values(file, path, extra, steps)?;
+        normalize_declared_missing(file, extra, &mut add);
+        let units = file
+            .variable(extra)
+            .and_then(|variable| variable_string_attribute(&variable, "units"))
+            .with_context(|| {
+                format!(
+                    "{extra} has no units attribute; cannot safely add it to {}",
+                    slot.source_name
+                )
+            })?;
+        let add =
+            crate::units::convert_units_with_step(&units, canonical, &add, Some(step_seconds))?;
+        for (value, extra_value) in values.iter_mut().zip(add) {
+            if value.is_finite() && extra_value.is_finite() {
+                *value += extra_value;
+            } else {
+                *value = f64::NAN;
+            }
         }
-    } else {
-        crate::units::convert_units_with_step(
+    }
+    Ok(values)
+}
+
+fn combined_humidity_canonical_with_support(
+    file: &netcdf::File,
+    path: &Path,
+    slot: &RepairSlot,
+    steps: usize,
+    step_seconds: f64,
+    temperature: &[f64],
+    pressure: &[f64],
+) -> Result<Vec<f64>> {
+    let mut values = variable_values(file, path, &slot.source_name, steps)?;
+    normalize_declared_missing(file, &slot.source_name, &mut values);
+    if let Some(actual) = file
+        .variable(&slot.source_name)
+        .and_then(|variable| variable_string_attribute(&variable, "units"))
+    {
+        if actual != slot.source_units {
+            bail!(
+                "{} says {} uses unit {:?}, but the repair plan says {:?}; re-probe the file",
+                path.display(),
+                slot.source_name,
+                actual,
+                slot.source_units
+            );
+        }
+    }
+    let canonical = crate::convert::canonical_units(slot.index);
+    let mut values = match crate::units::humidity_to_specific(
+        &slot.source_name,
+        &slot.source_units,
+        &values,
+        temperature,
+        pressure,
+    )? {
+        Some(values) => values,
+        None => crate::units::convert_units_with_step(
             &slot.source_units,
             canonical,
             &values,
             Some(step_seconds),
-        )?
+        )?,
     };
     for extra in &slot.also_add {
         let mut add = variable_values(file, path, extra, steps)?;
@@ -2058,7 +2138,9 @@ fn update_repaired_file(
 ) -> Result<()> {
     let mut output =
         netcdf::append(path).with_context(|| format!("cannot update {}", path.display()))?;
-    for (name, values) in replacements {
+
+    output.redef()?;
+    for name in replacements.keys() {
         let mut variable = output
             .variable_mut(name)
             .with_context(|| format!("source variable {name} disappeared"))?;
@@ -2066,9 +2148,8 @@ fn update_repaired_file(
             "gapfill_note",
             "missing or basic-QC-rejected values repaired by CoLM Desktop; see paired *_gapfill_qc",
         )?;
-        variable.put_values(values, netcdf::Extents::All)?;
     }
-    for (name, values) in quality {
+    for name in quality.keys() {
         let dimensions = output
             .variable(name)
             .with_context(|| format!("source variable {name} disappeared"))?
@@ -2080,7 +2161,10 @@ fn update_repaired_file(
         let quality_name = format!("{name}_gapfill_qc");
         let mut variable = match output.variable_mut(&quality_name) {
             Some(variable) => variable,
-            None => output.add_variable::<u8>(&quality_name, &refs)?,
+            None => match output.add_variable::<u8>(&quality_name, &refs) {
+                Ok(variable) => variable,
+                Err(_) => output.add_variable::<i16>(&quality_name, &refs)?,
+            },
         };
         variable.put_attribute("long_name", format!("gap-fill provenance for {name}"))?;
         variable.put_attribute(
@@ -2088,7 +2172,6 @@ fn update_repaired_file(
             "observed short_gap_interpolation era5_land_bias_corrected unresolved",
         )?;
         variable.put_attribute("flag_values", "0 1 2 9")?;
-        variable.put_values(values, netcdf::Extents::All)?;
     }
     output.add_attribute("colm_gapfill_version", env!("CARGO_PKG_VERSION"))?;
     output.add_attribute(
@@ -2123,7 +2206,7 @@ fn update_repaired_file(
     output.add_attribute("colm_gapfill_longitude", longitude)?;
     output.add_attribute(
         "colm_gapfill_short_gap_max_steps",
-        plan.short_gap_max as i64,
+        i32::try_from(plan.short_gap_max).expect("repair plan validation bounds short_gap_max"),
     )?;
     output.add_attribute(
         "colm_gapfill_correction",
@@ -2131,6 +2214,30 @@ fn update_repaired_file(
     )?;
     output.add_attribute("colm_gapfill_time_units", time_units)?;
     output.add_attribute("colm_gapfill_era5_source", era5_source.unwrap_or(""))?;
+    output.enddef()?;
+
+    for (name, values) in replacements {
+        let mut variable = output
+            .variable_mut(name)
+            .with_context(|| format!("source variable {name} disappeared"))?;
+        variable.put_values(values, netcdf::Extents::All)?;
+    }
+    for (name, values) in quality {
+        let quality_name = format!("{name}_gapfill_qc");
+        let mut variable = output
+            .variable_mut(&quality_name)
+            .with_context(|| format!("QC variable {quality_name} disappeared"))?;
+        match variable.vartype() {
+            netcdf::types::NcVariableType::Int(netcdf::types::IntType::I16) => {
+                let values = values
+                    .iter()
+                    .map(|value| i16::from(*value))
+                    .collect::<Vec<_>>();
+                variable.put_values(&values, netcdf::Extents::All)?;
+            }
+            _ => variable.put_values(values, netcdf::Extents::All)?,
+        }
+    }
     Ok(())
 }
 

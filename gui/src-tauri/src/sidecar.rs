@@ -119,6 +119,13 @@ impl RunProcesses {
         Ok(state.cancelled.remove(key))
     }
 
+    fn running_pid(&self, key: &str) -> Result<Option<u32>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "run process registry poisoned".to_string())
+            .map(|state| state.pids.get(key).copied())
+    }
+
     pub(crate) fn cancel(&self, keys: Option<Vec<String>>) -> Result<usize, String> {
         let (requested, targets) = {
             let mut state = self
@@ -1121,34 +1128,15 @@ fn validate_bgc_runtime(
     }
     let root = runtime
         .filter(|path| !path.trim().is_empty())
-        .ok_or("BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。")?;
-    let root = PathBuf::from(root);
-    let ndep = root
-        .join("ndep")
-        .join("fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
-    if !ndep.is_file() {
-        return Err(format!(
-            "BGC/甲烷运行时目录缺少氮沉降数据：{}",
-            ndep.display()
-        ));
-    }
-    if logical("DEF_USE_NITRIF", true) {
-        // `MOD_Vars_Global.F90` currently fixes the active soil column at 10 layers.
-        for family in ["CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT"] {
-            for layer in 1..=10 {
-                let file = root
-                    .join("nitrif")
-                    .join(family)
-                    .join(format!("{family}_l{layer:02}.nc"));
-                if !file.is_file() {
-                    return Err(format!(
-                        "BGC/甲烷运行时目录缺少硝化数据：{}",
-                        file.display()
-                    ));
-                }
-            }
-        }
-    }
+        .map(PathBuf::from);
+    crate::config::validate_bgc_runtime_dir(
+        root.as_deref(),
+        bgc,
+        integer("DEF_NDEP_FREQUENCY", 1),
+        logical("DEF_USE_NITRIF", true),
+        logical("DEF_USE_FIRE", false),
+    )?;
+    let root = root.expect("BGC runtime was validated above");
     if is_crop_case(fields) {
         for (name, label) in crate::config::crop_runtime_files(
             real("DEF_TUNING_CROP_PLANTING_DAY", 0.0),
@@ -1490,7 +1478,18 @@ pub async fn study_cancel(
     study_dir: String,
 ) -> Result<String, String> {
     let out = capture_async(vec!["study-cancel".to_string(), study_dir.clone()]).await?;
-    processes.cancel(Some(vec![study_process_key(&study_dir)]))?;
+    let key = study_process_key(&study_dir);
+    let pid = processes.running_pid(&key)?;
+    processes.cancel(Some(vec![key]))?;
+    if let Some(pid) = pid {
+        capture_async(vec![
+            "study-finalize-cancel".to_string(),
+            study_dir,
+            "--pid".into(),
+            pid.to_string(),
+        ])
+        .await?;
+    }
     Ok(out)
 }
 

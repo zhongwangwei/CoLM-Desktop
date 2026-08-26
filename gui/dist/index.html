@@ -622,7 +622,8 @@
     <button class="about-close" aria-label="关闭" title="关闭">×</button>
     <img class="about-logo" src="assets/colm-icon.png" alt="">
     <h2 id="about-title">CoLM Desktop</h2>
-    <p class="muted">版本 <span id="about-version">0.2.0</span></p>
+    <p class="muted">版本 <span id="about-version">0.2.0-beta.1</span></p>
+    <p class="beta-note">测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。</p>
     <div class="about-signature">
       <strong>开发与维护团队</strong>
       <div class="about-team">CoLM LSM Development Team</div>
@@ -648,6 +649,7 @@
     <div class="launch-brand"><img src="assets/colm-icon.png" alt=""><span>CoLM Desktop</span></div>
     <h1>选择运行方式</h1>
     <p class="muted">先选择计算资源；本地运行已可用，服务器运行将在后续版本开放。</p>
+    <p class="beta-note">测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。</p>
     <div class="domain-cards launch-mode-cards" aria-label="运行方式">
       <button class="domain-card launch-mode-card" id="localRunCard" type="button">
         <span class="dt">本地运行</span>
@@ -679,6 +681,12 @@
     <div class="gate-foot" id="gatefoot"></div>
   </div>
 </div>
+
+<!-- CH4 history also accepts a custom comma-separated variable list. -->
+<datalist id="ch4-history-presets">
+  <option value="core"></option><option value="diagnostic"></option>
+  <option value="all"></option><option value="none"></option>
+</datalist>
 
 <script src="vendor/uplot/uPlot.iife.min.js"></script>
 <!-- 诊断通道。**必须是普通 script 且排在 module 之前** —— module 是 defer 的，

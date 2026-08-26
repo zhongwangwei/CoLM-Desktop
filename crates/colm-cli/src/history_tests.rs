@@ -34,7 +34,11 @@ fn auxiliary_history_files_are_separate_streams() {
 
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir()
-        .join(format!("colm-hist-{tag}-{:?}", std::thread::current().id()))
+        .join(format!(
+            "colm-hist-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
         .join("history");
     let _ = std::fs::remove_dir_all(d.parent().unwrap());
     std::fs::create_dir_all(&d).unwrap();
@@ -286,6 +290,59 @@ fn evaluation_model_sources_apply_units_and_derived_expressions() {
     assert!((nee[1] - 3.0).abs() < 1.0e-12);
 }
 
+#[test]
+fn evaluation_resolves_one_carbon_source_before_reading_values() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("bgc-source");
+    let path = d.join("CN-Cng_hist_2008-01.nc");
+    write_history_nc(
+        &path,
+        &[
+            ("time", &[1.0, 2.0]),
+            ("f_ar", &[1.0, 2.0]),
+            ("f_hr", &[3.0, 4.0]),
+            ("f_gpp", &[5.0, 6.0]),
+            ("f_respc", &[7.0, 8.0]),
+            ("f_assim", &[9.0, 10.0]),
+        ],
+    );
+    let nee = colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .find(|variable| variable.observation == "NEE")
+        .unwrap();
+    let source = super::resolve_model_source(nee.model, &[path]).unwrap();
+    assert_eq!(source.label(), "f_ar + f_hr - f_gpp");
+
+    let broken_preferred = std::collections::BTreeMap::from([
+        ("f_ar".to_string(), vec![1.0, 2.0]),
+        ("f_hr".to_string(), vec![3.0]),
+        ("f_gpp".to_string(), vec![5.0, 6.0]),
+        ("f_respc".to_string(), vec![7.0, 8.0]),
+        ("f_assim".to_string(), vec![9.0, 10.0]),
+    ]);
+    assert!(
+        super::model_values(source, &broken_preferred).is_none(),
+        "a broken BGC source must not silently fall back to legacy fluxes"
+    );
+    assert!(super::model_values(nee.model, &broken_preferred).is_none());
+
+    let legacy = d.join("Legacy_hist_2008-01.nc");
+    write_history_nc(
+        &legacy,
+        &[
+            ("time", &[1.0, 2.0]),
+            ("f_respc", &[7.0, 8.0]),
+            ("f_assim", &[9.0, 10.0]),
+        ],
+    );
+    assert_eq!(
+        super::resolve_model_source(nee.model, &[legacy])
+            .unwrap()
+            .label(),
+        "f_respc - f_assim"
+    );
+}
+
 fn write_history_nc(path: &std::path::Path, vars: &[(&str, &[f64])]) {
     let mut file = netcdf::create(path).unwrap();
     let n = vars
@@ -301,7 +358,34 @@ fn write_history_nc(path: &std::path::Path, vars: &[(&str, &[f64])]) {
 }
 
 #[test]
+fn declared_history_missing_values_are_not_returned_as_data() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("missing-value");
+    let path = d.join("US-Ne3_hist_2002-01.nc");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("time", 3).unwrap();
+    let mut variable = file
+        .add_variable::<f64>("f_cropprodc_irrigated_temp_corn", &["time"])
+        .unwrap();
+    variable
+        .put_attribute("missing_value", -1.0e36_f64)
+        .unwrap();
+    variable.put_values(&[1.0, -1.0e36, 2.0], ..).unwrap();
+    drop(file);
+
+    let file = netcdf::open(&path).unwrap();
+    let values = super::read_file_1d(&file, &path, "f_cropprodc_irrigated_temp_corn").unwrap();
+    assert_eq!(values[0], 1.0);
+    assert!(
+        values[1].is_nan(),
+        "declared fill value must become missing"
+    );
+    assert_eq!(values[2], 2.0);
+}
+
+#[test]
 fn main_and_tracer_history_keep_separate_time_axes() {
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-time");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -323,6 +407,7 @@ fn main_and_tracer_history_keep_separate_time_axes() {
 
 #[test]
 fn mixed_main_and_tracer_series_read_from_their_own_files() {
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-mixed");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -345,6 +430,7 @@ fn mixed_main_and_tracer_series_read_from_their_own_files() {
 
 #[test]
 fn history_catalog_includes_main_and_tracer_variables() {
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-history-catalog");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -371,7 +457,50 @@ fn history_catalog_includes_main_and_tracer_variables() {
 }
 
 #[test]
+fn history_catalog_rejects_time_only_files_as_incomplete_results() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("time-only-history");
+    write_history_nc(&d.join("Bad_hist_2010-01.nc"), &[("time", &[1.0, 2.0])]);
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let time = super::read_history(&files, "time").unwrap();
+    let variables = super::history_variables(&files).unwrap();
+    let error = super::ensure_usable_history_catalog(&time, &variables)
+        .expect_err("a time-only history cannot be treated as an analyzable result");
+    assert!(
+        error.to_string().contains("no analyzable variables"),
+        "{error}"
+    );
+}
+
+#[test]
+fn history_catalog_rejects_static_coordinates_without_a_time_series() {
+    let variables = vec![
+        super::HistoryVariable {
+            name: "time".to_string(),
+            units: None,
+            dimensions: vec![super::DimensionShape {
+                name: "time".to_string(),
+                len: 2,
+            }],
+            kind: "series",
+        },
+        super::HistoryVariable {
+            name: "longitude".to_string(),
+            units: None,
+            dimensions: vec![super::DimensionShape {
+                name: "x".to_string(),
+                len: 1,
+            }],
+            kind: "series",
+        },
+    ];
+    super::ensure_usable_history_catalog(&[1.0, 2.0], &variables)
+        .expect_err("coordinates alone are not an analyzable model result");
+}
+
+#[test]
 fn evaluation_catalog_sees_methane_in_tracer_history() {
+    let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-catalog");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
@@ -401,4 +530,79 @@ fn evaluation_catalog_sees_methane_in_tracer_history() {
         "{:?} {:?}",
         row.missing_model, row.missing_observation
     );
+}
+
+#[test]
+fn evaluation_catalog_derives_urban_plumber_rnet_from_radiation_components() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("urban-rnet-catalog");
+    write_history_nc(
+        &d.join("AU-Preston_hist_2010-01.nc"),
+        &[("time", &[1.0, 2.0]), ("f_rnet", &[330.0, 331.0])],
+    );
+    let obs_path = d.parent().unwrap().join("obs.nc");
+    write_history_nc(
+        &obs_path,
+        &[
+            ("time", &[1.0, 2.0]),
+            ("SWdown", &[500.0, 501.0]),
+            ("LWdown", &[350.0, 350.0]),
+            ("SWup", &[100.0, 100.0]),
+            ("LWup", &[420.0, 420.0]),
+            ("SWdown_qc", &[0.0, 0.0]),
+            ("LWdown_qc", &[0.0, 0.0]),
+            ("SWup_qc", &[0.0, 0.0]),
+            ("LWup_qc", &[0.0, 0.0]),
+        ],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let obs = netcdf::open(&obs_path).unwrap();
+    let variable = colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .find(|variable| variable.observation == "Rnet")
+        .unwrap();
+    let row = super::evaluation_availability(variable, &files, &obs);
+    assert!(row.available, "{:?}", row.missing_observation);
+    assert_eq!(row.obs_var, "SWdown+LWdown-SWup-LWup");
+    assert_eq!(row.qc_var.as_deref(), Some("component_qc"));
+    assert_eq!(row.quality_control, "measured_only");
+}
+
+#[test]
+fn urban_plumber_rnet_observation_values_drop_component_qc_and_fill_samples() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("urban-rnet-values");
+    let obs_path = d.parent().unwrap().join("obs.nc");
+    write_history_nc(
+        &obs_path,
+        &[
+            ("time", &[1.0, 2.0, 3.0]),
+            ("SWdown", &[500.0, 500.0, colm_hist::pair::FILL_VALUE]),
+            ("LWdown", &[350.0, 350.0, 350.0]),
+            ("SWup", &[100.0, 100.0, 100.0]),
+            ("LWup", &[420.0, 420.0, 420.0]),
+            ("SWdown_qc", &[0.0, 0.0, 0.0]),
+            ("LWdown_qc", &[0.0, 0.0, 0.0]),
+            ("SWup_qc", &[0.0, 1.0, 0.0]),
+            ("LWup_qc", &[0.0, 0.0, 0.0]),
+        ],
+    );
+    let obs = netcdf::open(&obs_path).unwrap();
+    let variable = colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .find(|variable| variable.observation == "Rnet")
+        .unwrap();
+    let data = super::observation_values(&obs, &obs_path, variable, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(data.label, "SWdown+LWdown-SWup-LWup");
+    assert_eq!(
+        data.values,
+        [
+            330.0,
+            colm_hist::pair::FILL_VALUE,
+            colm_hist::pair::FILL_VALUE
+        ]
+    );
+    assert_eq!(data.qc, [0.0, 1.0, 1.0]);
 }

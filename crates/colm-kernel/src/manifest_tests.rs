@@ -83,6 +83,39 @@ fn a_legacy_manifest_keeps_its_old_kernel_identity() {
     assert!(m.build_profile.is_empty());
     assert_eq!(m.identity(), "default@7e54fc0");
 }
+#[test]
+fn stage_fingerprint_identity_tracks_config_not_manifest_order() {
+    let m: Manifest = serde_json::from_str(SAMPLE).expect("parses");
+    let mut reordered = m.clone();
+    reordered.macros.reverse();
+    assert_eq!(m.identity(), "default@7e54fc0#production");
+    assert_eq!(
+        m.stage_fingerprint_identity(),
+        reordered.stage_fingerprint_identity()
+    );
+    assert!(m
+        .stage_fingerprint_identity()
+        .contains("platform=Darwin-arm64"));
+    assert!(m
+        .stage_fingerprint_identity()
+        .contains("args=SinglePoint LULC_IGBP CaMaOFF CROPOFF"));
+    assert!(m
+        .stage_fingerprint_identity()
+        .contains("macros=LULC_IGBP,SinglePoint,URBAN_MODEL,extend_interception"));
+
+    let mut other = m.clone();
+    other.generator_args.push_str(" DEBUG");
+    assert_ne!(
+        m.stage_fingerprint_identity(),
+        other.stage_fingerprint_identity()
+    );
+    let mut other = m.clone();
+    other.macros.push("BGC".into());
+    assert_ne!(
+        m.stage_fingerprint_identity(),
+        other.stage_fingerprint_identity()
+    );
+}
 
 #[test]
 fn the_nested_sha256_object_is_read_as_values_not_keys() {

@@ -7,7 +7,7 @@
 //! ```text
 //! colm-cli scan      --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
 //!                    [--out sites.json] [--quick 1]
-//! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>]
+//! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>] [--crop 1]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
@@ -28,6 +28,7 @@
 //! colm-cli study-run <study-dir> --kernel <目录> [--stream 1]
 //! colm-cli study-export <study-dir> --out <目录>
 //! colm-cli study-pause|study-resume|study-cancel <study-dir>
+//! colm-cli study-finalize-cancel <study-dir> --pid <pid>
 //! colm-cli study-retry <study-dir> [--include-review 1]
 //! colm-cli study-apply-preview <study-dir> --member <id|best>
 //! colm-cli study-apply <study-dir> --member <id|best> --out <目录> [--name N]
@@ -54,8 +55,9 @@ usage:
   colm-cli scan    --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
                    [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
-  colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N]
-                   [--rawdata <dir>] [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc] [--json 1]
+  colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N] [--crop 1]
+                   [--rawdata <dir>]
+                   [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc] [--json 1]
                    # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
                    # 标称假设。--landtype 不给就不写，让 CoLM 回落
   colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
@@ -102,6 +104,8 @@ usage:
                    # 只读预览最佳/指定候选会改哪些参数
   colm-cli study-pause|study-resume|study-cancel <study-dir>
                    # 请求暂停派发、恢复派发或取消尚未开始任务
+  colm-cli study-finalize-cancel <study-dir> --pid <pid>
+                   # GUI 杀死对应调度进程后持久化取消终态
   colm-cli study-retry <study-dir> [--include-review 1]
                    # 把失败成员（可选含待复核成员）重新放回队列
   colm-cli study-apply <study-dir> --member <id|best> --out <dir> [--name N]
@@ -299,6 +303,14 @@ fn main() -> Result<()> {
         "study-pause" => study::state::request_pause(&opts.positional_case()?)?,
         "study-resume" => study::state::resume(&opts.positional_case()?)?,
         "study-cancel" => study::state::request_cancel(&opts.positional_case()?)?,
+        "study-finalize-cancel" => {
+            study::runner::finalize_cancel(
+                &opts.positional_case()?,
+                opts.need_str("--pid")?
+                    .parse()
+                    .context("--pid must be an integer")?,
+            )?;
+        }
         "study-retry" => cmd_study_retry(
             &opts.positional_case()?,
             opts.get("--include-review").is_some(),
@@ -532,7 +544,8 @@ impl Opts {
 ///
 /// 两步拼起来：[`colm_srfdata::site::skeleton_with_mode`] 写出只有经纬度
 /// （可选地类）的最小文件，[`colm_srfdata::site::fill`] 按“站点自有 > 栅格 >
-/// 模块默认”补齐 12 个结构字段。中间 skeleton 放系统临时目录，补完即删。
+/// 模块默认”补齐 12 个结构字段。Urban 站再复用 `prepare_urban`
+/// 补上内置 Urban-PLUMBER 表已有的土壤、LCZ 与树冠数据。
 ///
 /// **结构完整不等于运行完整。** 随后的模式感知审计还会检查地类、LAI/SAI、
 /// PFT/PC/城市专属数组与 24 项土壤水热变量，并明确返回 self-contained、
@@ -544,6 +557,7 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     let landtype = o.get_i32("--landtype")?;
     let rawdata = o.get("--rawdata");
     let mode = parse_site_mode(o.get("--mode").as_deref())?;
+    let crop = o.get("--crop").is_some();
 
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
@@ -551,17 +565,31 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     }
 
     // skeleton 与 fill 之间的中间文件：用户不该知道它存在过。
-    let skel = std::env::temp_dir().join(format!("colm-site-new-{}.nc", std::process::id()));
+    let skel = out.with_extension(format!("site-new-input-{}.nc", std::process::id()));
     let kind = if mode == colm_srfdata::site::SiteMode::Urban {
         colm_srfdata::site::SiteKind::Urban
     } else {
         colm_srfdata::site::SiteKind::Natural
     };
-    colm_srfdata::site::skeleton_with_mode(&skel, lon, lat, landtype, kind, mode)?;
-    let filled = colm_srfdata::site::fill(&skel, &out, rawdata.as_deref().map(Path::new), None);
+    colm_srfdata::site::skeleton_with_mode(&skel, lon, lat, landtype, kind, mode, crop)?;
+    let generic = if mode == colm_srfdata::site::SiteMode::Urban {
+        out.with_extension(format!("site-new-{}.nc", std::process::id()))
+    } else {
+        out.clone()
+    };
+    let filled = colm_srfdata::site::fill(&skel, &generic, rawdata.as_deref().map(Path::new), None);
     let _ = std::fs::remove_file(&skel);
-    let r = filled?;
-    let audit = colm_srfdata::site::audit(&out, mode, rawdata.as_deref().map(Path::new), false)?;
+    let mut r = filled?;
+    if mode == colm_srfdata::site::SiteMode::Urban {
+        let prepared = colm_srfdata::site::prepare_urban(&generic, &out);
+        let _ = std::fs::remove_file(&generic);
+        let prepared = prepared?;
+        r.from_lookup.extend(prepared.soil_vars);
+        r.from_lookup.extend(prepared.extra_vars);
+        r.from_lookup.sort();
+        r.from_lookup.dedup();
+    }
+    let audit = colm_srfdata::site::audit(&out, mode, rawdata.as_deref().map(Path::new), crop)?;
 
     // 人读输出仍单独说明 IGBP 冠层高度是否来自 CoLM 查表；完整运行缺项只由
     // `site::audit` 生成，不能在 CLI 再维护第二张会漂移的变量表。
@@ -630,7 +658,7 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     }
     if !r.from_lookup.is_empty() {
         println!(
-            "from lookup : {}  <-- CoLM's IGBP table, not measured at this site",
+            "from lookup : {}  <-- evidence-backed CoLM tables, not measured at this site",
             r.from_lookup.join(", ")
         );
     }
@@ -903,6 +931,8 @@ struct SiteInfo {
     /// Urban-PLUMBER 站不需要 `--rawdata`/`--runtime`；表外的城市站点仍然
     /// 要 `--rawdata`。界面据此决定问不问。
     urban: bool,
+    /// 用户明确创建的 CROP 站点，或带 croptyp/pctcrop 的 IGBP 农田站点。
+    crop: bool,
     lon: f64,
     lat: f64,
     landtype: Option<i32>,
@@ -964,6 +994,14 @@ fn cmd_scan(dir: &Path, forcing_dir: Option<&Path>, out: Option<&str>, quick: bo
             }
         }
 
+        let crop = match colm_srfdata::site::crop_site(&p, landtype) {
+            Ok(crop) => crop,
+            Err(error) => {
+                problem.get_or_insert_with(|| format!("{error:#}"));
+                false
+            }
+        };
+
         sites.push(SiteInfo {
             name: short,
             site_file: text(&p),
@@ -975,6 +1013,7 @@ fn cmd_scan(dir: &Path, forcing_dir: Option<&Path>, out: Option<&str>, quick: bo
             urban: problem.is_none()
                 && colm_srfdata::site::site_kind(&p)
                     .is_ok_and(|kind| kind == colm_srfdata::site::SiteKind::Urban),
+            crop,
             lon,
             lat,
             landtype,
@@ -1025,6 +1064,9 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             out.display()
         );
     }
+    if o.get("--crop").is_some() {
+        validate_default_crop_runtime(o.get("--runtime").as_deref())?;
+    }
     let met = resolve_met(o.get("--met").as_deref(), &site_raw)?;
 
     std::fs::create_dir_all(&out)?;
@@ -1065,9 +1107,28 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     }
     let looks_like_plumber2 = !urban;
     // 这个城市站点在不在两张预抽表里 —— 决定 `--rawdata` 缺席时该说什么。
-    if already_filled {
-        // 已经补齐过的文件——`site-new` 的产物，或者重新喂回来的一份旧
-        // 增广站点文件。原样拷过去，不再调用 `fill`：它的第一行就是
+    if already_filled && urban {
+        // `site-new --mode urban` 会先写 12 个结构占位字段（source=synthesized），
+        // 但城市全流程还需要土壤、LCZ/LUCY、树 LAI/SAI 等城市专属量。
+        // 不能因为“12 个结构字段齐了”就跳过 `prepare_urban`，否则这些占位值会
+        // 被 CoLM 当作真实站点数据使用，且不会再读取 rawdata。`prepare_urban`
+        // 只替换 synthesized 占位值，站点文件自带的真实变量仍然优先。
+        let rep = colm_srfdata::site::prepare_urban(&site_raw, &layout.site_nc())?;
+        println!("site: already has all 12 required fields; urban-specific inputs checked");
+        if !rep.soil_vars.is_empty() {
+            println!(
+                "  soil: {} synthesized/absent variable(s) replaced from the built-in urban table",
+                rep.soil_vars.len()
+            );
+        }
+        if !rep.extra_vars.is_empty() {
+            println!(
+                "  urban: {} synthesized/absent variable(s) replaced from the built-in urban table",
+                rep.extra_vars.len()
+            );
+        }
+    } else if already_filled {
+        // 已经补齐过的自然站点文件。原样拷过去，不再调用 `fill`：它的第一行就是
         // `fs::copy`，第二行会在已经存在的变量名上报 `NC_ENAMEINUSE`。
         std::fs::copy(&site_raw, layout.site_nc()).with_context(|| {
             format!(
@@ -1077,14 +1138,6 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             )
         })?;
         println!("site: already has all 12 required fields (from site-new or a prior fill); copied as-is");
-        // **已补齐的城市站点文件不必再查预抽表。** 那张表回答的是
-        // 「这个站点的城市数据能不能不靠 `--rawdata` 拿到」，而这份文件
-        // 里已经有了 —— `prepare_urban` 上一次建算例时就写进去了。
-        //
-        // 不置这一位的话，重新喂回来的城市 `site.nc` 会因为算例名不在
-        // 那 21 个站里而被要求 `--rawdata`，尽管它一个字节都不需要。
-        // Full run readiness is checked below. Twelve structural fields alone do
-        // not prove that an urban file contains soil, geometry, and tree LAI.
     } else if looks_like_plumber2 {
         let rep = colm_srfdata::site::fill(
             &site_raw,
@@ -1335,6 +1388,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     add_subgrid_fields(&mut all, new_mode.subgrid);
     if o.get("--crop").is_some() {
         add_crop_fields(&mut all);
+    } else {
+        add_inactive_process_fields(&mut all);
     }
     let req = required(&all);
     std::fs::write(layout.case_nml(), render(&req))?;
@@ -1472,10 +1527,54 @@ fn add_crop_fields(fields: &mut Vec<(String, colm_namelist::Value)>) {
             colm_namelist::Value::Bool(false),
         ),
         (
+            "DEF_Aerosol_Readin".into(),
+            colm_namelist::Value::Bool(false),
+        ),
+        (
             "DEF_TUNING_CROP_PLANTING_DAY".into(),
             colm_namelist::Value::Real { text: "120".into() },
         ),
     ]);
+}
+
+fn add_inactive_process_fields(fields: &mut Vec<(String, colm_namelist::Value)>) {
+    fields.extend(
+        [
+            "DEF_USE_NITRIF",
+            "DEF_USE_FERT",
+            "DEF_USE_CNSOYFIXN",
+            "DEF_Aerosol_Readin",
+        ]
+        .map(|name| (name.into(), colm_namelist::Value::Bool(false))),
+    );
+}
+
+/// `colm-cli new --crop` writes BGC=true, NITRIF=true, while planting day,
+/// fertilizer, and irrigation use file-free defaults. Validate exactly those
+/// default runtime inputs before creating a case that can only fail in `colm`.
+fn validate_default_crop_runtime(runtime: Option<&str>) -> Result<()> {
+    let root = runtime
+        .filter(|path| !path.trim().is_empty())
+        .map(Path::new)
+        .ok_or_else(|| anyhow::anyhow!("CROP 算例需要 --runtime 运行时数据目录"))?;
+    let ndep = root
+        .join("ndep")
+        .join("fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+    if !ndep.is_file() {
+        bail!("CROP 运行时目录缺少氮沉降数据：{}", ndep.display());
+    }
+    for family in ["CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT"] {
+        for layer in 1..=10 {
+            let file = root
+                .join("nitrif")
+                .join(family)
+                .join(format!("{family}_l{layer:02}.nc"));
+            if !file.is_file() {
+                bail!("CROP 运行时目录缺少硝化数据：{}", file.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn add_subgrid_fields(fields: &mut Vec<(String, colm_namelist::Value)>, subgrid: Subgrid) {
@@ -1576,7 +1675,7 @@ fn run_case(
     // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
     // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
     // 算新算例，且没有任何迹象。见 `fingerprint.rs`。
-    let kernel_id = kernel.manifest.identity();
+    let kernel_id = kernel.manifest.stage_fingerprint_identity();
     let mut marks = fingerprint::load(case);
     if force {
         match only_stage {
@@ -1610,6 +1709,10 @@ fn run_case(
             &kernel_id,
         )?;
         if skip {
+            if matches!(stage, Stage::Colm) {
+                colm_case::clear_results_stale(case)
+                    .with_context(|| format!("cannot mark {} results current", case.display()))?;
+            }
             notice(RunNotice::StageSkipped(sname));
             if stream && !quiet {
                 println!("=== colm-stage {sname} skipped ===");
@@ -1641,6 +1744,8 @@ fn run_case(
         //
         // 只删 `*_hist_*.nc`：restart 是 `mkinidata` 的产物，`colm` 要读它。
         if matches!(stage, Stage::Colm) {
+            colm_case::mark_results_stale(case)
+                .with_context(|| format!("cannot mark {} results stale", case.display()))?;
             let removed = clear_history(&out)?;
             if removed > 0 && !quiet {
                 println!("  {sname:<10} 清掉上一次的 {removed} 个 history 文件");
@@ -1716,6 +1821,10 @@ fn run_case(
         }
         marks.insert(sname.to_string(), want);
         fingerprint::save(case, &marks)?;
+        if matches!(stage, Stage::Colm) {
+            colm_case::clear_results_stale(case)
+                .with_context(|| format!("cannot mark {} results current", case.display()))?;
+        }
     }
     Ok(())
 }
@@ -1938,37 +2047,164 @@ fn evaluation_availability(
     hists: &[PathBuf],
     observation: &netcdf::File,
 ) -> EvaluationAvailability {
-    let missing_model = variable
-        .model
-        .required()
-        .into_iter()
-        .filter(|name| !name.is_empty() && !history_has_variables(hists, &[*name]))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let mut missing_observation = Vec::new();
-    if observation.variable(variable.observation).is_none() {
-        missing_observation.push(variable.observation.to_string());
-    }
-    if let Some(qc) = variable.qc.filter(|qc| observation.variable(qc).is_none()) {
-        missing_observation.push(qc.to_string());
-    }
+    let resolved = resolve_model_source(variable.model, hists);
+    let missing_model = resolved.map(|_| Vec::new()).unwrap_or_else(|| {
+        variable
+            .model
+            .required()
+            .into_iter()
+            .filter(|name| !history_has_variables(hists, &[*name]))
+            .map(str::to_string)
+            .collect()
+    });
+    let source = observation_source(variable, observation);
+    let missing_observation = source
+        .as_ref()
+        .map(|_| Vec::new())
+        .unwrap_or_else(|| missing_observation_sources(variable, observation));
     EvaluationAvailability {
         name: variable.observation.to_string(),
         label_zh: variable.label_zh.to_string(),
         label_en: variable.label_en.to_string(),
         units: variable.units.to_string(),
-        model_var: variable.model.label(),
-        obs_var: variable.observation.to_string(),
-        qc_var: variable.qc.map(str::to_string),
-        quality_control: if variable.qc.is_some() {
+        model_var: resolved.unwrap_or(variable.model).label(),
+        obs_var: source
+            .as_ref()
+            .map(|source| (*source).label().to_string())
+            .unwrap_or_else(|| variable.observation.to_string()),
+        qc_var: source
+            .as_ref()
+            .and_then(|source| (*source).qc_label().map(str::to_string))
+            .or_else(|| variable.qc.map(str::to_string)),
+        quality_control: if source
+            .as_ref()
+            .map(|source| (*source).measured_qc())
+            .unwrap_or(variable.qc.is_some())
+        {
             "measured_only"
         } else {
             "finite_only"
         }
         .to_string(),
-        available: missing_model.is_empty() && missing_observation.is_empty(),
+        available: missing_model.is_empty() && source.is_some(),
         missing_model,
         missing_observation,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ObservationSource {
+    Direct {
+        label: &'static str,
+        qc_label: Option<&'static str>,
+        measured_qc: bool,
+    },
+    DerivedUrbanRnet {
+        label: &'static str,
+        qc_label: Option<&'static str>,
+        measured_qc: bool,
+    },
+}
+
+impl ObservationSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Direct { label, .. } | Self::DerivedUrbanRnet { label, .. } => label,
+        }
+    }
+
+    fn qc_label(self) -> Option<&'static str> {
+        match self {
+            Self::Direct { qc_label, .. } | Self::DerivedUrbanRnet { qc_label, .. } => qc_label,
+        }
+    }
+
+    fn measured_qc(self) -> bool {
+        match self {
+            Self::Direct { measured_qc, .. } | Self::DerivedUrbanRnet { measured_qc, .. } => {
+                measured_qc
+            }
+        }
+    }
+}
+
+fn observation_source(
+    variable: &colm_hist::obs::EvaluationVariable,
+    observation: &netcdf::File,
+) -> Option<ObservationSource> {
+    if observation.variable(variable.observation).is_some()
+        && variable
+            .qc
+            .is_none_or(|qc| observation.variable(qc).is_some())
+    {
+        return Some(ObservationSource::Direct {
+            label: variable.observation,
+            qc_label: variable.qc,
+            measured_qc: variable.qc.is_some(),
+        });
+    }
+    let components = colm_hist::obs::derived_observation_components(variable.observation)?;
+    let qcs = colm_hist::obs::derived_observation_qc(variable.observation)?;
+    if components
+        .iter()
+        .chain(qcs.iter())
+        .all(|name| observation.variable(name).is_some())
+    {
+        Some(ObservationSource::DerivedUrbanRnet {
+            label: colm_hist::obs::derived_observation_label(variable.observation)
+                .unwrap_or(variable.observation),
+            qc_label: Some("component_qc"),
+            measured_qc: true,
+        })
+    } else {
+        None
+    }
+}
+
+fn missing_observation_sources(
+    variable: &colm_hist::obs::EvaluationVariable,
+    observation: &netcdf::File,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if observation.variable(variable.observation).is_none() {
+        missing.push(variable.observation.to_string());
+    }
+    if let Some(qc) = variable.qc.filter(|qc| observation.variable(qc).is_none()) {
+        missing.push(qc.to_string());
+    }
+    if let (Some(components), Some(qcs)) = (
+        colm_hist::obs::derived_observation_components(variable.observation),
+        colm_hist::obs::derived_observation_qc(variable.observation),
+    ) {
+        missing.extend(
+            components
+                .into_iter()
+                .chain(qcs)
+                .filter(|name| observation.variable(name).is_none())
+                .map(str::to_string),
+        );
+        missing.sort();
+        missing.dedup();
+    }
+    missing
+}
+
+fn resolve_model_source(
+    source: colm_hist::obs::ModelSource,
+    hists: &[PathBuf],
+) -> Option<colm_hist::obs::ModelSource> {
+    use colm_hist::obs::ModelSource;
+    match source {
+        ModelSource::Alternative {
+            preferred,
+            fallback,
+        } => resolve_model_source(*preferred, hists)
+            .or_else(|| resolve_model_source(*fallback, hists)),
+        other => other
+            .required_alternatives()
+            .into_iter()
+            .any(|required| history_has_variables(hists, &required))
+            .then_some(other),
     }
 }
 
@@ -2006,7 +2242,128 @@ fn model_values(
             let (a, b) = (data.get(minuend)?, data.get(subtrahend)?);
             (a.len() == b.len()).then(|| a.iter().zip(b).map(|(a, b)| (a - b) * scale).collect())
         }
+        ModelSource::Sum { variables, scale } => {
+            let first = data.get(*variables.first()?)?;
+            let mut out = vec![0.0; first.len()];
+            for variable in variables {
+                let values = data.get(*variable)?;
+                if values.len() != out.len() {
+                    return None;
+                }
+                for (sum, value) in out.iter_mut().zip(values) {
+                    *sum += value;
+                }
+            }
+            Some(out.into_iter().map(|value| value * scale).collect())
+        }
+        ModelSource::SumDifference {
+            positive,
+            negative,
+            scale,
+        } => {
+            let first = positive.first().or_else(|| negative.first())?;
+            let mut out = vec![0.0; data.get(*first)?.len()];
+            for variable in positive {
+                let values = data.get(*variable)?;
+                if values.len() != out.len() {
+                    return None;
+                }
+                for (sum, value) in out.iter_mut().zip(values) {
+                    *sum += value;
+                }
+            }
+            for variable in negative {
+                let values = data.get(*variable)?;
+                if values.len() != out.len() {
+                    return None;
+                }
+                for (sum, value) in out.iter_mut().zip(values) {
+                    *sum -= value;
+                }
+            }
+            Some(out.into_iter().map(|value| value * scale).collect())
+        }
+        ModelSource::Alternative {
+            preferred,
+            fallback,
+        } => {
+            let preferred_present = preferred
+                .required()
+                .into_iter()
+                .all(|name| data.contains_key(name));
+            if preferred_present {
+                model_values(*preferred, data)
+            } else {
+                model_values(*fallback, data)
+            }
+        }
     }
+}
+
+struct ObservationData {
+    label: String,
+    values: Vec<f64>,
+    qc: Vec<f64>,
+}
+
+fn observation_values(
+    obs_file: &netcdf::File,
+    obs_path: &Path,
+    variable: &colm_hist::obs::EvaluationVariable,
+    corrected: bool,
+) -> Result<Option<ObservationData>> {
+    let o_name = variable.observation;
+    let direct = corrected
+        .then(|| colm_hist::obs::corrected(o_name))
+        .flatten()
+        .filter(|candidate| obs_file.variable(candidate).is_some())
+        .unwrap_or(o_name);
+    if obs_file.variable(direct).is_some()
+        && variable.qc.is_none_or(|qc| obs_file.variable(qc).is_some())
+    {
+        let values = read_file_1d(obs_file, obs_path, direct)?;
+        let qc = match variable.qc {
+            Some(qc) => read_file_1d(obs_file, obs_path, qc)?,
+            None => vec![colm_hist::pair::QC_MEASURED; values.len()],
+        };
+        return Ok(Some(ObservationData {
+            label: direct.to_string(),
+            values,
+            qc,
+        }));
+    }
+    let Some(components) = colm_hist::obs::derived_observation_components(o_name) else {
+        return Ok(None);
+    };
+    let Some(qc_names) = colm_hist::obs::derived_observation_qc(o_name) else {
+        return Ok(None);
+    };
+    if !components
+        .iter()
+        .chain(qc_names.iter())
+        .all(|name| obs_file.variable(name).is_some())
+    {
+        return Ok(None);
+    }
+    let swdown = read_file_1d(obs_file, obs_path, components[0])?;
+    let lwdown = read_file_1d(obs_file, obs_path, components[1])?;
+    let swup = read_file_1d(obs_file, obs_path, components[2])?;
+    let lwup = read_file_1d(obs_file, obs_path, components[3])?;
+    let swdown_qc = read_file_1d(obs_file, obs_path, qc_names[0])?;
+    let lwdown_qc = read_file_1d(obs_file, obs_path, qc_names[1])?;
+    let swup_qc = read_file_1d(obs_file, obs_path, qc_names[2])?;
+    let lwup_qc = read_file_1d(obs_file, obs_path, qc_names[3])?;
+    let (values, qc) = colm_hist::obs::derive_urban_rnet(
+        [&swdown, &lwdown, &swup, &lwup],
+        [&swdown_qc, &lwdown_qc, &swup_qc, &lwup_qc],
+    )?;
+    Ok(Some(ObservationData {
+        label: colm_hist::obs::derived_observation_label(o_name)
+            .unwrap_or(o_name)
+            .to_string(),
+        values,
+        qc,
+    }))
 }
 
 fn normalized_metric_window(
@@ -2065,17 +2422,19 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                     .iter()
                     .any(|wanted| wanted == variable.observation)
         })
-        .filter(|variable| evaluation_availability(variable, &hists, &obs_file).available)
+        .filter_map(|variable| {
+            let available = evaluation_availability(variable, &hists, &obs_file);
+            available.available.then(|| {
+                (
+                    *variable,
+                    resolve_model_source(variable.model, &hists).unwrap(),
+                )
+            })
+        })
         .collect::<Vec<_>>();
     let mut wanted = std::collections::BTreeSet::from(["time"]);
-    for variable in &selected {
-        wanted.extend(
-            variable
-                .model
-                .required()
-                .into_iter()
-                .filter(|name| !name.is_empty()),
-        );
+    for (_, source) in &selected {
+        wanted.extend(source.required());
     }
     let wanted = wanted.into_iter().collect::<Vec<_>>();
     let mut model_data = read_history_many(&hists, &wanted)?;
@@ -2107,33 +2466,22 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         );
     }
     let mut rows: Vec<VarMetrics> = Vec::new();
-    for variable in selected {
+    for (variable, source) in selected {
         let o_name = variable.observation;
-        // 订正版没有自己的 qc 变量（文件里只有 `Qle_cor_uc_qc`，那是不确定度的），
-        // 所以质量控制一律用原始通量那一个：它说的是"这一步是实测还是插补"，
-        // 而订正只改数值不改这件事。
-        let o_var = corrected
-            .then(|| colm_hist::obs::corrected(o_name))
-            .flatten()
-            .filter(|candidate| obs_file.variable(candidate).is_some())
-            .unwrap_or(o_name);
-        let Ok(o_v) = read_file_1d(&obs_file, obs_path, o_var) else {
+        let Ok(Some(obs_data)) = observation_values(&obs_file, obs_path, &variable, corrected)
+        else {
             continue;
         };
-        let o_q = match variable.qc {
-            Some(qc) => match read_file_1d(&obs_file, obs_path, qc) {
-                Ok(values) => values,
-                Err(_) => continue,
-            },
-            None => vec![colm_hist::pair::QC_MEASURED; o_v.len()],
-        };
-        let Some(m_v) = model_values(variable.model, &model_data) else {
-            continue;
-        };
+        let m_v = model_values(source, &model_data).ok_or_else(|| {
+            anyhow::anyhow!(
+                "model history source {} is incomplete or has inconsistent lengths",
+                source.label()
+            )
+        })?;
         let s = colm_hist::pair::Series {
             seconds: &o_t,
-            values: &o_v,
-            qc: &o_q,
+            values: &obs_data.values,
+            qc: &obs_data.qc,
         };
         let with_time =
             colm_hist::pair::pair_with_time_in_window(&m_sec, &m_v, &s, spinup, metric_window);
@@ -2195,12 +2543,14 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
             };
             rows.push(VarMetrics {
                 name: o_name.to_string(),
-                obs_var: o_var.to_string(),
-                model_var: variable.model.label(),
+                obs_var: obs_data.label.clone(),
+                model_var: source.label(),
                 label_zh: variable.label_zh.to_string(),
                 label_en: variable.label_en.to_string(),
                 units: variable.units.to_string(),
-                quality_control: if variable.qc.is_some() {
+                quality_control: if variable.qc.is_some()
+                    || colm_hist::obs::derived_observation_qc(o_name).is_some()
+                {
                     "measured_only"
                 } else {
                     "finite_only"
@@ -2242,8 +2592,8 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
             continue;
         }
         print!(
-            "{o_var:<10} {:>7} {:>8.1} {:>+9.2} {:>7.3} {:>+9.3}",
-            m.n, m.rmse, m.bias, m.r2, m.kge
+            "{:<10} {:>7} {:>8.1} {:>+9.2} {:>7.3} {:>+9.3}",
+            obs_data.label, m.n, m.rmse, m.bias, m.r2, m.kge
         );
         // KGE 的 β 在观测均值接近零或与模型均值反号时没有意义。
         // 只标记，不改值 —— 改了就与 design.md 的参考表对不上。
@@ -2375,6 +2725,22 @@ fn history_variables(files: &[PathBuf]) -> Result<Vec<HistoryVariable>> {
     Ok(variables.into_values().collect())
 }
 
+fn ensure_usable_history_catalog(time: &[f64], variables: &[HistoryVariable]) -> Result<()> {
+    if time.is_empty() {
+        bail!("history files are incomplete: no time steps");
+    }
+    if !variables.iter().any(|variable| {
+        variable.name != "time"
+            && variable
+                .dimensions
+                .iter()
+                .any(|dimension| dimension.name.eq_ignore_ascii_case("time"))
+    }) {
+        bail!("history files are incomplete: no analyzable variables");
+    }
+    Ok(())
+}
+
 fn cmd_history_catalog(case: &Path) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
@@ -2382,6 +2748,7 @@ fn cmd_history_catalog(case: &Path) -> Result<()> {
     let time = read_history(&hists, "time")?;
     let unix = colm_hist::time::unix_seconds(&time);
     let variables = history_variables(&hists)?;
+    ensure_usable_history_catalog(&time, &variables)?;
     let catalog = HistoryCatalog {
         files: hists.len(),
         steps: unix.len(),
@@ -2614,13 +2981,17 @@ fn numeric_attribute_values(value: netcdf::AttributeValue) -> Vec<f64> {
     }
 }
 
-fn variable_missing_count(variable: &netcdf::Variable) -> Result<usize> {
-    let markers = ["_FillValue", "missing_value"]
+fn variable_missing_markers(variable: &netcdf::Variable) -> Vec<f64> {
+    ["_FillValue", "missing_value"]
         .into_iter()
         .filter_map(|name| variable.attribute_value(name))
         .filter_map(Result::ok)
         .flat_map(numeric_attribute_values)
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn variable_missing_count(variable: &netcdf::Variable) -> Result<usize> {
+    let markers = variable_missing_markers(variable);
     let values: Vec<f64> = variable.get_values(netcdf::Extents::All)?;
     Ok(values
         .iter()
@@ -2632,9 +3003,16 @@ fn read_file_1d(f: &netcdf::File, path: &Path, name: &str) -> Result<Vec<f64>> {
     let variable = f
         .variable(name)
         .with_context(|| format!("{} has no variable {name}", path.display()))?;
-    variable
+    let markers = variable_missing_markers(&variable);
+    let mut values = variable
         .get_values::<f64, _>(..)
-        .with_context(|| format!("cannot read {name} from {}", path.display()))
+        .with_context(|| format!("cannot read {name} from {}", path.display()))?;
+    for value in &mut values {
+        if markers.contains(value) {
+            *value = f64::NAN;
+        }
+    }
+    Ok(values)
 }
 
 fn cmd_forcing_table_probe(file: &Path, json: bool) -> Result<()> {
@@ -2921,14 +3299,9 @@ fn cmd_netcdf_probe(file: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `NaN` 不能进 JSON（`serde_json` 序列化会报错或写出不可靠的 `null`），
-/// 所以在这里显式转成 `Option`，交给 `serde` 序列化。
+/// 非有限数不能进 JSON，所以在这里显式转成 `Option`，交给 `serde` 序列化。
 fn present(x: f64) -> Option<f64> {
-    if x.is_nan() {
-        None
-    } else {
-        Some(x)
-    }
+    x.is_finite().then_some(x)
 }
 
 /// 探测一份强迫场文件：八个槽位各猜到了什么变量、单位是什么，
@@ -3422,7 +3795,10 @@ mod era5land_download_tests {
         );
         assert!(!ERA5LAND_DOWNLOADER.contains("for (year, month)"));
         assert!(ERA5LAND_DOWNLOADER.contains("saved_start <= start and saved_end >= end"));
-        assert!(ERA5LAND_DOWNLOADER.contains("os.O_CREAT | os.O_EXCL"));
+        assert!(ERA5LAND_DOWNLOADER.contains("fcntl.flock"));
+        assert!(ERA5LAND_DOWNLOADER.contains("msvcrt.locking"));
+        assert!(ERA5LAND_DOWNLOADER.contains("errno.EACCES, errno.EAGAIN"));
+        assert!(!ERA5LAND_DOWNLOADER.contains("21600"));
     }
 
     #[test]
@@ -3433,6 +3809,7 @@ mod era5land_download_tests {
 
 const ERA5LAND_DOWNLOADER: &str = r#"#!/usr/bin/env python3
 import json
+import errno
 import os
 import shutil
 import sys
@@ -3494,21 +3871,28 @@ if cached_files_cover_request():
     print(f"ERA5-Land cache ready: {cache}")
     raise SystemExit(0)
 
-# One point cache has one writer. This is deliberately a simple filesystem lock:
-# it also works when two CoLM Desktop instances or CLI processes share the cache.
+# One point cache has one writer. OS advisory locks are released automatically
+# when a downloader exits or crashes, so a long CDS queue can never be mistaken
+# for a stale writer and two processes cannot install the same cache together.
 lock = cache / ".download.lock"
+lock_handle = lock.open("a+b")
+lock_handle.seek(0, os.SEEK_END)
+if lock_handle.tell() == 0:
+    lock_handle.write(b"0")
+    lock_handle.flush()
 while True:
     try:
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        lock_handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         break
-    except FileExistsError:
-        try:
-            if time.time() - lock.stat().st_mtime > 21600:
-                lock.unlink()
-                continue
-        except FileNotFoundError:
-            continue
+    except OSError as error:
+        if error.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
         print("another ERA5-Land request is writing this shared point cache; waiting…", flush=True)
         time.sleep(2)
 
@@ -3551,11 +3935,12 @@ try:
 finally:
     if download.exists():
         download.unlink()
-    os.close(descriptor)
-    try:
-        lock.unlink()
-    except FileNotFoundError:
-        pass
+    lock_handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    lock_handle.close()
 "#;
 
 /// 删掉一个算例已有的 history 文件，返回删了几个。
@@ -3798,6 +4183,19 @@ fn check_increasing(t: &[f64]) -> Result<()> {
 }
 
 #[cfg(test)]
+fn netcdf_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+fn netcdf_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    netcdf_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
 
@@ -3808,3 +4206,7 @@ mod run_stage_tests;
 #[cfg(test)]
 #[path = "window_tests.rs"]
 mod window_tests;
+
+#[cfg(test)]
+#[path = "forcing_probe_tests.rs"]
+mod forcing_probe_tests;

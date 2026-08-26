@@ -17,6 +17,8 @@ assert.equal(forcingDirectoryForSiteDirectory(''), '');
 
 assert.equal(matchesBundledExampleMode('/examples/Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc', 'natural'), true);
 assert.equal(matchesBundledExampleMode('/examples/Sitedata/AT-Neu_2010-2012_FLUXNET-CH4_site.nc', 'natural'), false);
+assert.equal(matchesBundledExampleMode('/examples/Sitedata/AT-Neu_2002-2012_FLUXNET2015_site.nc', 'natural'), false);
+assert.equal(matchesBundledExampleMode('/examples/Sitedata/AT-Neu_2002-2012_FLUXNET2015_site.nc', 'methane'), false);
 assert.equal(matchesBundledExampleMode('C:\\examples\\Sitedata\\AT-Neu_2010-2012_FLUXNET-CH4_site.nc', 'methane'), true);
 assert.equal(matchesBundledExampleMode('/examples/Sitedata/CN-Cng_2008-2009_FLUXNET2015_site.nc', 'methane'), false);
 assert.equal(matchesBundledExampleMode('/examples/Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc', 'crop'), true);
@@ -27,6 +29,8 @@ const sites = await readFile(new URL('../dist/app/sites.js', import.meta.url), '
 const index = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
 assert.match(index, /US-Ne3 作物站/, 'bundled-site help must name the crop example');
 assert.match(sites, /mode === 'crop' \? '作物'/, 'empty and summary labels must distinguish crop sites');
+assert.match(sites, /!!s\.crop \|\| s\.landtype === 12/, 'CROP must accept IGBP Croplands sites whose CFT fractions will come from rawdata');
+assert.match(sites, /mode === 'crop' \? \(!!s\.crop \|\| s\.landtype === 12\) : !s\.crop/, 'explicit CROP sites must stay out of natural and methane workflows');
 assert.match(
   sites,
   /\$\('sitedir'\)\.addEventListener\('change',[\s\S]*forcingDirectoryForSiteDirectory/,

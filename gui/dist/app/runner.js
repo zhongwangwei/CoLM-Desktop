@@ -339,6 +339,11 @@ export async function watchRun() {
       // 必须按事件里的 case 更新；批量跑时 state.selected 只是代表算例，
       // 把每个完成事件都写给它会让其余站点永远显示“未跑”。
       const c = state.cases.find(c => c.dir === d.case);
+      const colmState = state.runStages[d.case]?.colm;
+      if (c && (d.cancelled || d.code !== 0) && ['begin', 'failed'].includes(colmState)) {
+        c.has_history = false;
+        invalidateResultCase(d.case);
+      }
       if (c && !d.cancelled && d.code === 0 && (d.requested_stage == null || d.requested_stage === 'colm')) {
         c.has_history = true;
         invalidateResultCase(d.case);

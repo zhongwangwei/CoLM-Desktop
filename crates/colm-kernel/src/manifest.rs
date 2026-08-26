@@ -82,8 +82,8 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// 稳定的计算身份。production/debug 来自同一提交时也必须区分，否则阶段
-    /// 指纹会把另一种浮点构建留下的 history 错当成当前产物。
+    /// 显示/Study provenance 用的旧身份。不要把更多字段塞进来：旧 manifest
+    /// 和已有 Study 记录靠这个格式保持可读。
     pub fn identity(&self) -> String {
         let base = format!("{}@{}", self.preset, self.colm_git_sha);
         if self.build_profile.is_empty() {
@@ -91,6 +91,22 @@ impl Manifest {
         } else {
             format!("{base}#{}", self.build_profile)
         }
+    }
+
+    /// 阶段重跑判定用的稳定配置身份。这里必须包含所有会改变可执行文件
+    /// 计算语义的 manifest 字段；`macros` 排序后再写，避免清单输出顺序抖动。
+    pub fn stage_fingerprint_identity(&self) -> String {
+        let mut macros = self.macros.clone();
+        macros.sort();
+        format!(
+            "preset={};platform={};git={};profile={};args={};macros={}",
+            self.preset,
+            self.platform,
+            self.colm_git_sha,
+            self.build_profile,
+            self.generator_args,
+            macros.join(",")
+        )
     }
 }
 

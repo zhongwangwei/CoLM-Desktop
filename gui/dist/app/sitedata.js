@@ -41,7 +41,8 @@ function parseLandtype() {
 function syncLandCoverOptions(mode) {
   const select = $('slandtype');
   const locale = language();
-  const optionMode = mode === 'urban' ? 'urban' : (mode === 'usgs' ? 'usgs' : 'igbp');
+  const crop = !!state.wizard?.physics?.crop;
+  const optionMode = crop ? 'crop' : (mode === 'urban' ? 'urban' : (mode === 'usgs' ? 'usgs' : 'igbp'));
   const modeChanged = renderedLandCoverMode !== null && renderedLandCoverMode !== optionMode;
   const selected = modeChanged ? '' : select.value;
   const needsRender = renderedLandCoverMode !== optionMode || renderedLandCoverLanguage !== locale;
@@ -56,13 +57,13 @@ function syncLandCoverOptions(mode) {
         : '不手动指定 · 由 rawdata 提供';
       select.appendChild(automatic);
     }
-    for (const item of landCoverClasses(mode)) {
+    for (const item of landCoverClasses(mode).filter(item => !crop || item.value === 12)) {
       const option = document.createElement('option');
       option.value = String(item.value);
       option.textContent = landCoverLabel(item, locale);
       select.appendChild(option);
     }
-    const fallback = mode === 'urban' ? '6' : '';
+    const fallback = mode === 'urban' ? '6' : (crop ? '12' : '');
     select.value = [...select.options].some(option => option.value === selected) ? selected : fallback;
     renderedLandCoverMode = optionMode;
     renderedLandCoverLanguage = locale;
@@ -75,7 +76,9 @@ function syncIdentity() {
   $('soutname').value = stem ? siteOutputName(stem) : '_site.nc';
   const mode = prepMode(state);
   const localeIndex = language() === 'en' ? 1 : 0;
-  $('smode').value = MODE_LABELS[mode]?.[localeIndex] ?? mode.toUpperCase();
+  $('smode').value = state.wizard?.physics?.crop
+    ? [`${mode.toUpperCase()} CROP 作物站点`, `${mode.toUpperCase()} CROP site`][localeIndex]
+    : MODE_LABELS[mode]?.[localeIndex] ?? mode.toUpperCase();
   syncLandCoverOptions(mode);
   $('slandtype-label').firstChild.textContent = language() === 'en'
     ? (mode === 'urban' ? 'Local Climate Zone (LCZ) ' : (mode === 'usgs' ? 'USGS land-cover class ' : 'Land-cover class '))
@@ -129,7 +132,9 @@ function invalidateSite() {
 
 for (const id of ['sname', 'slon', 'slat', 'slandtype', 'soutdir', 'srawdata']) {
   const el = $(id);
-  if (el) el.addEventListener('input', invalidateSite);
+  if (!el) continue;
+  el.addEventListener('input', invalidateSite);
+  el.addEventListener('change', invalidateSite);
 }
 globalThis.addEventListener?.('colm:wizard', () => {
   invalidateSite();
@@ -167,6 +172,7 @@ $('smake').onclick = async () => {
       landtype,
       rawdata: rawdataDir || null,
       mode: prepMode(state),
+      crop: !!state.wizard?.physics?.crop,
     });
     Object.assign(state.prepArtifacts, {
       siteStem: stem,
@@ -239,6 +245,9 @@ function readinessCopy(report) {
   if (report.readiness === 'ready_with_rawdata') {
     return ['可随 rawdata 运行', `站点文件还缺 ${report.needs_external.length} 项；已选择的 rawdata 将在 mksrfdata 阶段提供。`, 'warn'];
   }
+  if (report.site_kind === 'urban') {
+    return ['尚不可运行', `城市站点还缺 ${report.needs_external.length} 项形态、人口、树冠或土壤输入；请选择 CoLM rawdata，或使用自带/完整 Urban-PLUMBER 站点文件。`, 'fail'];
+  }
   return ['尚不可运行', `缺少 ${report.needs_external.length} 项且没有可用 rawdata。文件可以保存，但建例会被阻止。`, 'fail'];
 }
 
@@ -273,7 +282,8 @@ function renderResult() {
     td.appendChild(code);
   });
   appendResultRow(table, '模式', td => {
-    td.textContent = `${String(result.mode).toUpperCase()} · ${result.site_kind === 'urban' ? '城市' : '自然'}站点`;
+    const kind = result.site_kind === 'urban' ? '城市' : (state.wizard?.physics?.crop ? '作物' : '自然');
+    td.textContent = `${String(result.mode).toUpperCase()} · ${kind}站点`;
   });
   appendResultRow(table, '结构字段', td => { td.textContent = `${total}/${REQUIRED_FIELD_COUNT}`; });
   appendResultRow(table, '质地', td => {

@@ -10,6 +10,7 @@ for (const command of [
   'download_era5land',
   'convert_forcing',
   'make_site',
+  'install_prepared_pair',
 ]) {
   assert.match(frontend, new RegExp(`invoke\\('${command}'`), `${command} must be wired`);
 }
@@ -19,8 +20,18 @@ assert.match(frontend, /tableProbe/);
 assert.match(frontend, /splitAndDiagnoseTable/);
 assert.match(frontend, /repairTableBatch/);
 assert.match(frontend, /canonicalTableSlots/);
+assert.match(frontend, /name === slot\.guessed \? slot\.units \?\? '' : ''/);
 assert.match(frontend, /tableBatch\s*=\s*imported\.map/);
 assert.match(frontend, /const allComplete = tableBatch\.every/);
+assert.match(frontend, /mustKeepSiteColumn/);
+assert.match(frontend, /多个站点必须保留站点名称列，不能合并成一个站点/);
+assert.match(frontend, /function invalidateTableBatch\(\)[\s\S]*tableBatch = \[\][\s\S]*resetBatchArtifacts\(\)/);
+assert.doesNotMatch(frontend, /gapReport\.missing === 0[\s\S]{0,100}return srcPath/,
+  'even gap-free sources must persist the diagnosed timezone before conversion');
+assert.match(frontend, /item\.phase = '生成站点文件'[\s\S]*invoke\('make_site'[\s\S]*item\.phase = '修复中'[\s\S]*invoke\('repair_forcing'/);
+assert.match(frontend, /invoke\('make_site'[\s\S]*crop: !!state\.wizard\?\.physics\?\.crop/);
+assert.match(frontend, /invoke\('install_prepared_pair'[\s\S]*item\.siteReport\.path = item\.siteFinalPath/);
+assert.match(frontend, /item\.siteReport\.readiness === 'blocked'[\s\S]*throw new Error/);
 assert.match(frontend, /siteOutputName/);
 assert.match(frontend, /短缺口上限（时间步）/);
 assert.match(frontend, /ERA5-Land 缓存目录/);

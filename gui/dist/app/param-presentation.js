@@ -190,7 +190,7 @@ const LABELS = Object.freeze({
   DEF_USE_NITRIF: pair('启用硝化与反硝化', 'Enable nitrification and denitrification'),
   DEF_USE_CNSOYFIXN: pair('启用大豆固氮', 'Enable soybean nitrogen fixation'),
   DEF_USE_FIRE: pair('启用火灾过程', 'Enable fire process'),
-  DEF_CheckEquilibrium: pair('检查碳氮平衡', 'Check carbon-nitrogen equilibrium'),
+  DEF_CheckEquilibrium: pair('检查水量平衡收敛', 'Check water-balance equilibrium'),
 
   DEF_URBAN_type_scheme: pair('城市分类体系', 'Urban classification'),
   DEF_URBAN_RUN: pair('启用城市模型', 'Enable urban model'),
@@ -222,7 +222,20 @@ const LABELS = Object.freeze({
   DEF_TRACER_PARAM_FILES: pair('示踪剂参数文件', 'Tracer parameter files'),
   DEF_TRACER_USE_SOIL_INIT: pair('使用示踪剂土壤初始场', 'Use tracer soil initial state'),
   DEF_TRACER_SOIL_INIT_FILE: pair('示踪剂土壤初始场文件', 'Tracer soil initial-state file'),
+  DEF_file_GIEMS: pair('GIEMS 卫星湿地数据', 'GIEMS satellite wetland data'),
   DEF_wetland_finundation_scheme: pair('甲烷湿地淹水范围来源', 'Methane wetland-inundation source'),
+  'DEF_METHANE%inundation_mode': pair('甲烷淹水范围模式', 'Methane inundation mode'),
+  'DEF_METHANE%enable_rice_paddy': pair('启用稻田甲烷过程', 'Enable rice-paddy methane'),
+  'DEF_METHANE%only_wetland': pair('仅在湿地计算甲烷', 'Compute methane only on wetlands'),
+  'DEF_METHANE%use_spatial_ph': pair('使用空间土壤 pH', 'Use spatial soil pH'),
+  'DEF_METHANE%q10methane': pair('甲烷温度敏感性 Q10', 'Methane temperature sensitivity Q10'),
+  'DEF_METHANE%use_biome_f_methane': pair('按生物群系设置甲烷产率', 'Use biome-specific methane yield'),
+  'DEF_METHANE%f_methane': pair('甲烷产率系数', 'Methane production-yield factor'),
+  'DEF_METHANE%write_ch4_history': pair('输出甲烷历史变量', 'Write methane history variables'),
+  'DEF_METHANE%ch4_history_vars': pair('甲烷历史变量集合', 'Methane history-variable set'),
+  'DEF_METHANE%use_transient_atm_methane': pair('使用瞬变大气甲烷浓度', 'Use transient atmospheric methane'),
+  'DEF_METHANE%atm_methane_file': pair('大气甲烷浓度文件', 'Atmospheric methane file'),
+  'DEF_METHANE%atm_methane_file_units': pair('大气甲烷浓度单位', 'Atmospheric methane units'),
 
   DEF_Reservoir_Method: pair('水库调度方案', 'Reservoir-operation scheme'),
   DEF_USE_EstimatedRiverDepth: pair('估算河道深度', 'Estimate river depth'),
@@ -338,6 +351,25 @@ const OPTIONS = Object.freeze({
     6: pair('动态地下水位', 'Dynamic water table'),
     7: pair('河网洪泛比例', 'River-routing flood fraction'),
   },
+  'DEF_METHANE%inundation_mode': {
+    wetwat: pair('站点湿地类型 / wetwat（单点安全）', 'Site wetland type / wetwat (single-point safe)'),
+    satellite: pair('卫星湿地面积 / GIEMS', 'Satellite wetland area / GIEMS'),
+    routing: pair('河网洪泛比例', 'River-routing flood fraction'),
+    dynamic_wtd: pair('动态地下水位（需要动态湿地）', 'Dynamic water table (requires dynamic wetland)'),
+    hybrid: pair('动态地下水位 + 河网洪泛（需要动态湿地）', 'Dynamic water table + routing (requires dynamic wetland)'),
+  },
+  'DEF_METHANE%ch4_history_vars': {
+    core: pair('核心变量', 'Core variables'),
+    diagnostic: pair('诊断变量', 'Diagnostic variables'),
+    all: pair('全部甲烷诊断', 'All methane diagnostics'),
+    none: pair('不输出甲烷诊断', 'No methane diagnostics'),
+  },
+  'DEF_METHANE%atm_methane_file_units': {
+    auto: pair('自动识别', 'Auto-detect'),
+    'mol/mol': pair('摩尔比 mol/mol', 'Mole fraction mol/mol'),
+    ppmv: pair('ppmv', 'ppmv'),
+    ppbv: pair('ppbv', 'ppbv'),
+  },
   DEF_precip_phase_discrimination_scheme: {
     I: pair('湿球温度经验方案（Wang / Behrangi）', 'Wet-bulb empirical scheme (Wang / Behrangi)'),
     II: pair('气温线性阈值方案', 'Air-temperature linear-threshold scheme'),
@@ -439,6 +471,13 @@ const OPTIONS = Object.freeze({
     1: pair('C3 光合途径', 'C3 photosynthesis'),
   },
 });
+
+export function fieldOptions(path) {
+  const options = OPTIONS[path];
+  if (!options) return [];
+  if (path === 'DEF_METHANE%inundation_mode') return ['wetwat', 'satellite'];
+  return Object.keys(options);
+}
 
 const ZH_TOKENS = Object.freeze({
   use: '启用', file: '文件', dir: '目录', scheme: '方案', model: '模型', runoff: '产流',

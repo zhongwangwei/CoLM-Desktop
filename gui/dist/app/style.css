@@ -185,6 +185,7 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .about-maintainer { font-size: 14px; font-weight: 400; }
 .about-email { color: var(--accent); }
 .about-team { margin-top: 7px; font-size: 17px; font-weight: 700; }
+.beta-note { display: inline-block; margin: 12px auto 0; padding: 8px 11px; border: 1px solid var(--warn); border-radius: var(--r-sm); color: var(--warn); background: var(--warn-bg); font-size: 12px; line-height: 1.45; }
 
 /* 需要人特别注意的一段说明。虚线框是「这里跟别处不一样」的信号。 */
 .expert-note { border: 1.5px dashed var(--accent); border-radius: var(--r-md);

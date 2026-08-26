@@ -7,6 +7,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
+import { markResultsStale } from './results.js';
 import { editTarget } from './batch.js';
 import { $, status } from './ui.js';
 
@@ -69,12 +70,14 @@ export async function renderHistVars(box) {
       try {
         // 输出变量与其他参数走同一条批量路径 —— 勾选的 20 个算例要输出
         // 同一批变量，否则结果页拿它们做比对时会缺变量。
+        const dirs = editTarget();
         const r = await invoke('set_field_batch', {
-          dirs: editTarget(), path: `DEF_hist_vars%${v.name}`,
+          dirs, path: `DEF_hist_vars%${v.name}`,
           value: cb.checked ? '.true.' : '.false.',
           kernelDir: kernel,
         });
         state.text = r.text;
+        await markResultsStale(dirs);
         status(r.written > 1 ? `已写入 ${r.written} 个算例：${v.name}` : `已保存 ${v.name}`);
       } catch (e) { status(e); cb.checked = v.on; }
     };

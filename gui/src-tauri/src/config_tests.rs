@@ -500,6 +500,9 @@ fn crop_management_runtime_files_are_checked_before_write() {
     let root = std::env::temp_dir().join(format!("colm-crop-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("crop")).unwrap();
+    let ndep = root.join("ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+    std::fs::create_dir_all(ndep.parent().unwrap()).unwrap();
+    std::fs::write(ndep, []).unwrap();
     let facts = Some(super::KernelFacts {
         single: true,
         usgs: false,
@@ -507,7 +510,7 @@ fn crop_management_runtime_files_are_checked_before_write() {
     });
     let doc = |fields: &str| {
         colm_namelist::parse(&format!(
-            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_dir_runtime='{}'\n {fields}\n/\n",
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_NITRIF=.false.\n DEF_dir_runtime='{}'\n {fields}\n/\n",
             root.display()
         ))
         .unwrap()
@@ -559,6 +562,64 @@ fn crop_management_runtime_files_are_checked_before_write() {
     assert!(err.contains("surfdata_irrigation_allocation.nc"), "{err}");
     std::fs::write(root.join("crop/surfdata_irrigation_allocation.nc"), []).unwrap();
     super::validate_runtime_contract(&allocation_three, &root, facts).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bgc_runtime_contract_checks_selected_ndep_nitrif_and_fire_inputs() {
+    let root = std::env::temp_dir().join(format!("colm-bgc-contract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let doc = |fields: &str| {
+        colm_namelist::parse(&format!(
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n DEF_USE_BGC=.true.\n DEF_dir_runtime='{}'\n {fields}\n/\n",
+            root.display()
+        ))
+        .unwrap()
+    };
+
+    let err =
+        super::validate_runtime_contract(&doc("DEF_USE_NITRIF=.false."), &root, None).unwrap_err();
+    assert!(err.contains("氮沉降"), "{err}");
+    let annual = root.join("ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+    std::fs::create_dir_all(annual.parent().unwrap()).unwrap();
+    std::fs::write(annual, []).unwrap();
+    super::validate_runtime_contract(&doc("DEF_USE_NITRIF=.false."), &root, None).unwrap();
+
+    let monthly = root.join("ndep/fndep_colm_monthly.nc");
+    let err = super::validate_runtime_contract(
+        &doc("DEF_NDEP_FREQUENCY=2\n DEF_USE_NITRIF=.false."),
+        &root,
+        None,
+    )
+    .unwrap_err();
+    assert!(err.contains("fndep_colm_monthly.nc"), "{err}");
+    std::fs::write(monthly, []).unwrap();
+
+    let err = super::validate_runtime_contract(
+        &doc("DEF_NDEP_FREQUENCY=2\n DEF_USE_NITRIF=.false.\n DEF_USE_FIRE=.true."),
+        &root,
+        None,
+    )
+    .unwrap_err();
+    assert!(err.contains("abm_colm_double_fillcoast.nc"), "{err}");
+    for name in [
+        "fire/abm_colm_double_fillcoast.nc",
+        "fire/peatf_colm_360x720_c100428.nc",
+        "fire/gdp_colm_360x720_c100428.nc",
+        "fire/colmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc",
+        "fire/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc",
+    ] {
+        let file = root.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, []).unwrap();
+    }
+    super::validate_runtime_contract(
+        &doc("DEF_NDEP_FREQUENCY=2\n DEF_USE_NITRIF=.false.\n DEF_USE_FIRE=.true."),
+        &root,
+        None,
+    )
+    .unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -659,6 +720,10 @@ fn a_batch_write_that_cannot_finish_writes_nothing() {
 #[test]
 fn wizard_fields_are_written_together() {
     let dir = batch("wizard", &[SAMPLE]).remove(0);
+    let runtime = std::path::Path::new(&dir).join("runtime");
+    let ndep = runtime.join("ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+    std::fs::create_dir_all(ndep.parent().unwrap()).unwrap();
+    std::fs::write(ndep, []).unwrap();
     super::apply_fields(
         &dir,
         &[
@@ -673,6 +738,14 @@ fn wizard_fields_are_written_together() {
             FieldChange {
                 path: "DEF_USE_BGC".into(),
                 value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_NITRIF".into(),
+                value: ".false.".into(),
+            },
+            FieldChange {
+                path: "DEF_dir_runtime".into(),
+                value: runtime.display().to_string(),
             },
             FieldChange {
                 path: "DEF_TRACER_NUM".into(),
@@ -1295,6 +1368,21 @@ fn natural_lct_singlepoint_hides_unreachable_and_overwritten_fields() {
 }
 
 #[test]
+fn singlepoint_pc_hides_fast_pc_because_that_switch_is_not_in_the_site_path() {
+    let states = runtime_states(
+        "&nl_colm\n\
+         SITE_landtype = 10\n\
+         DEF_USE_LCT = .false.\n\
+         DEF_USE_PFT = .false.\n\
+         DEF_USE_PC = .true.\n\
+         DEF_URBAN_RUN = .false.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+
+    assert_eq!(mode(&states, "DEF_FAST_PC"), &FieldMode::Hidden);
+}
+
+#[test]
 fn child_fields_follow_initial_forcing_runoff_and_process_switches() {
     let off = runtime_states(
         "&nl_colm\n\
@@ -1475,6 +1563,19 @@ fn singlepoint_surface_fields_follow_the_actual_lai_and_albedo_sources() {
         mode(&yearly_fallback, "DEF_LAI_END_YEAR"),
         &FieldMode::Editable
     );
+}
+
+#[test]
+fn water_balance_equilibrium_is_not_a_bgc_only_control() {
+    assert_eq!(
+        super::field_section("DEF_CheckEquilibrium", Some("nl_colm")),
+        Some("水热过程")
+    );
+    let states = runtime_states(
+        "&nl_colm\n SITE_landtype=10\n DEF_USE_BGC=.false.\n/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(mode(&states, "DEF_CheckEquilibrium"), &FieldMode::Editable);
 }
 
 #[test]
@@ -1823,6 +1924,16 @@ fn pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots() {
         let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap();
         assert!(!text.contains("DEF_PFT_VMAX25"), "{dir}: {text}");
     }
+
+    let err = set_pft_parameter_batch(
+        dirs.clone(),
+        13,
+        "DEF_PFT_MXMAT".into(),
+        Some("1e20".into()),
+        kernel_dir.clone(),
+    )
+    .unwrap_err();
+    assert!(err.contains("i32") || err.contains("Fortran"), "{err}");
 
     let before: Vec<_> = dirs
         .iter()

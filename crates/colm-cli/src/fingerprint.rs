@@ -200,6 +200,7 @@ fn looks_like_config_path(field: &str) -> bool {
     lower.contains("file")
         || lower.contains("namelist")
         || lower.contains("rawdata")
+        || lower.contains("dir")
         || lower.ends_with("_data")
         || lower.ends_with("_files")
 }

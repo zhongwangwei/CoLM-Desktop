@@ -90,7 +90,7 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
     let config = std::fs::read_to_string(root.join("gui/src-tauri/tauri.conf.json"))
         .expect("tauri.conf.json");
     for required in [
-        r#""version": "0.2.0""#,
+        r#""version": "0.2.0-beta.1""#,
         "Zhongwang Wei (魏忠旺)",
         "CoLM LSM Development Team, School of Atmospheric Sciences, SYSU",
         "weizhw6@mail.sysu.edu.cn",
@@ -104,8 +104,8 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
         std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs")).expect("GUI backend");
     let html = std::fs::read_to_string(root.join("gui/dist/index.html")).expect("index.html");
     let frontend = std::fs::read_to_string(root.join("gui/dist/app/main.js")).expect("main.js");
-    assert!(workspace.contains("[workspace.package]\nversion = \"0.2.0\""));
-    assert!(gui.contains("version = \"0.2.0\""));
+    assert!(workspace.contains("[workspace.package]\nversion = \"0.2.0-beta.1\""));
+    assert!(gui.contains("version = \"0.2.0-beta.1\""));
     assert!(
         backend.contains("MenuItem::with_id")
             && backend.contains("\"about-colm\"")
@@ -116,6 +116,8 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
         html.contains("id=\"aboutDialog\"")
             && html.contains("Zhongwang Wei (魏忠旺)")
             && html.contains("weizhw6@mail.sysu.edu.cn")
+            && html.matches("class=\"beta-note\"").count() == 2
+            && html.contains("正式科研使用前务必独立核验结果")
             && frontend.contains("listen('colm-about'")
             && frontend.contains("showModal()"),
         "自定义 About 必须实际渲染维护者、团队、邮箱和版本"

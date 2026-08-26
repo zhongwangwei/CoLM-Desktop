@@ -128,6 +128,7 @@ fn build_site_new_args(
     landtype: Option<i32>,
     rawdata: Option<&str>,
     mode: &str,
+    crop: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "site-new".to_string(),
@@ -145,6 +146,10 @@ fn build_site_new_args(
     if let Some(r) = rawdata {
         args.push("--rawdata".into());
         args.push(r.to_string());
+    }
+    if crop {
+        args.push("--crop".into());
+        args.push("1".into());
     }
     args.push("--mode".into());
     args.push(mode.to_string());
@@ -166,8 +171,9 @@ pub async fn make_site(
     landtype: Option<i32>,
     rawdata: Option<String>,
     mode: String,
+    crop: bool,
 ) -> Result<SiteReport, String> {
-    let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode);
+    let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode, crop);
     let json = crate::sidecar::capture_async(args).await?;
     serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是建站点失败 —— 照 `probe_forcing`/`scan_sites`
@@ -175,6 +181,137 @@ pub async fn make_site(
         // 后者是用户给的经纬度或 rawdata 有问题。
         format!("colm-cli site-new 的输出解析不了（两边的字段可能已经对不上）：{e}")
     })
+}
+
+fn install_pair(
+    staged: [&std::path::Path; 2],
+    final_paths: [&std::path::Path; 2],
+) -> Result<(), String> {
+    if staged[0] == staged[1] || final_paths[0] == final_paths[1] {
+        return Err("站点与强迫场必须使用不同文件".into());
+    }
+    for (source, destination) in staged.iter().zip(final_paths.iter()) {
+        if source
+            .symlink_metadata()
+            .map_err(|error| format!("无法检查 {}：{error}", source.display()))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(format!("待安装产物不能是符号链接：{}", source.display()));
+        }
+        if !source.is_file() {
+            return Err(format!("待安装产物不存在：{}", source.display()));
+        }
+        if source == destination {
+            return Err("待安装产物不能与目标路径相同".into());
+        }
+        if destination
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!("产物目标不能是符号链接：{}", destination.display()));
+        }
+        if destination.exists() && !destination.is_file() {
+            return Err(format!("产物目标不是文件：{}", destination.display()));
+        }
+        let source_parent = source
+            .parent()
+            .ok_or_else(|| format!("待安装产物没有父目录：{}", source.display()))?
+            .canonicalize()
+            .map_err(|error| format!("无法检查 {}：{error}", source.display()))?;
+        let destination_parent = destination
+            .parent()
+            .ok_or_else(|| format!("产物目标没有父目录：{}", destination.display()))?
+            .canonicalize()
+            .map_err(|error| format!("无法检查 {}：{error}", destination.display()))?;
+        if source_parent != destination_parent {
+            return Err(format!(
+                "待安装产物必须先写在目标目录中：{}",
+                source.display()
+            ));
+        }
+    }
+
+    let backups = final_paths.map(|path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        (0..)
+            .map(|index| {
+                path.with_file_name(format!(
+                    ".{name}.colm-backup-{}-{index}",
+                    std::process::id()
+                ))
+            })
+            .find(|candidate| !candidate.exists())
+            .expect("an unused backup filename")
+    });
+    let mut preserved = [false; 2];
+    for index in 0..2 {
+        if final_paths[index].exists() {
+            if let Err(error) = std::fs::rename(final_paths[index], &backups[index]) {
+                for previous in (0..index).rev().filter(|previous| preserved[*previous]) {
+                    let _ = std::fs::rename(&backups[previous], final_paths[previous]);
+                }
+                return Err(format!(
+                    "无法保留旧产物 {}：{error}",
+                    final_paths[index].display()
+                ));
+            }
+            preserved[index] = true;
+        }
+    }
+
+    for index in 0..2 {
+        if let Err(error) = std::fs::rename(staged[index], final_paths[index]) {
+            let mut rollback_errors = Vec::new();
+            for installed in (0..index).rev() {
+                if let Err(rollback) = std::fs::rename(final_paths[installed], staged[installed]) {
+                    rollback_errors.push(rollback.to_string());
+                }
+            }
+            for previous in (0..2).rev().filter(|previous| preserved[*previous]) {
+                if let Err(rollback) = std::fs::rename(&backups[previous], final_paths[previous]) {
+                    rollback_errors.push(rollback.to_string());
+                }
+            }
+            return Err(format!(
+                "无法安装产物 {}：{error}{}",
+                final_paths[index].display(),
+                if rollback_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!("；回滚失败：{}", rollback_errors.join("；"))
+                }
+            ));
+        }
+    }
+    for (index, backup) in backups.iter().enumerate() {
+        if preserved[index] {
+            let _ = std::fs::remove_file(backup);
+        }
+    }
+    Ok(())
+}
+
+/// 批量前处理先把站点与强迫场都写到各自目标目录中的隐藏文件；两份都成功后
+/// 才一起替换正式产物，任一份失败都会恢复原文件。
+#[tauri::command]
+pub fn install_prepared_pair(
+    site_staged: String,
+    site_final: String,
+    forcing_staged: String,
+    forcing_final: String,
+) -> Result<(), String> {
+    install_pair(
+        [
+            std::path::Path::new(&site_staged),
+            std::path::Path::new(&forcing_staged),
+        ],
+        [
+            std::path::Path::new(&site_final),
+            std::path::Path::new(&forcing_final),
+        ],
+    )
 }
 
 #[cfg(test)]

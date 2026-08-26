@@ -899,7 +899,7 @@ CONTAINS
       hrv_xsmrpool_to_atm(i) = sum(hrv_xsmrpool_to_atm_p(ps:pe) * pftfrac(ps:pe))
   
       nfixlags = nfix_timeconst * 86400._r8
-      IF(lag_npp(i) /= spval)THEN
+      IF(nfixlags > 0._r8 .and. lag_npp(i) /= spval)THEN
          lag_npp(i) = lag_npp(i) * exp(-deltim/nfixlags) + &
                       (gpp(i) - ar(i)) * (1._r8 - exp(-deltim/nfixlags))
       ELSE
