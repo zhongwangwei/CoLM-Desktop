@@ -258,7 +258,8 @@ function missingUnitSlots() {
 function unitsForVariable(name, slot) {
   if (!name) return '';
   if (tableProbe) {
-    return tableProbe.columns.find(column => column.name === name)?.units ?? '';
+    return tableProbe.columns.find(column => column.name === name)?.units
+      ?? (name === slot.guessed ? slot.units ?? '' : '');
   }
   return name === slot.guessed ? (slot.units ?? '') : '';
 }
@@ -444,7 +445,9 @@ function tableColumnField(label, key, required = false) {
   select.className = 'select';
   const empty = document.createElement('option');
   empty.value = '';
-  empty.textContent = required ? '请选择一列' : '（没有 / 不使用）';
+  const mustKeepSiteColumn = key === 'siteColumn' && tableProbe.sites.length > 1;
+  empty.textContent = required || mustKeepSiteColumn ? '请选择一列' : '（没有 / 不使用）';
+  empty.disabled = mustKeepSiteColumn;
   select.appendChild(empty);
   for (const column of tableProbe.columns) {
     const option = document.createElement('option');
@@ -455,8 +458,7 @@ function tableColumnField(label, key, required = false) {
   select.value = tableSettings[key];
   select.onchange = () => {
     tableSettings[key] = select.value;
-    tableBatch = [];
-    resetBatchArtifacts();
+    invalidateTableBatch();
     renderCards();
   };
   field.appendChild(select);
@@ -479,8 +481,7 @@ function tableNumberField(label, key, options = {}) {
   input.value = tableSettings[key] ?? '';
   input.onchange = () => {
     tableSettings[key] = input.value;
-    tableBatch = [];
-    resetBatchArtifacts();
+    invalidateTableBatch();
     renderCards();
   };
   field.appendChild(input);
@@ -496,6 +497,11 @@ function resetBatchArtifacts() {
     ...(hadBatch ? { siteFile: null, siteReport: null } : {}),
   });
   globalThis.dispatchEvent?.(new Event('colm:prep-artifacts'));
+}
+
+function invalidateTableBatch() {
+  tableBatch = [];
+  resetBatchArtifacts();
 }
 
 function tableStructureCard() {
@@ -564,8 +570,7 @@ function tableStructureCard() {
     input.onchange = () => {
       const value = Number(input.value);
       heights[key] = input.value !== '' && Number.isFinite(value) && value > 0 ? value : null;
-      tableBatch = [];
-      resetBatchArtifacts();
+      invalidateTableBatch();
       renderCards();
     };
     field.appendChild(input);
@@ -593,8 +598,7 @@ function tableStructureCard() {
     input.value = gapSettings[key];
     input.onchange = () => {
       gapSettings[key] = input.value;
-      tableBatch = [];
-      resetBatchArtifacts();
+      invalidateTableBatch();
       renderCards();
     };
     field.appendChild(input);
@@ -641,6 +645,9 @@ function tableReadinessReasons() {
   const missingHeights = missingForcingHeights(heights);
   if (missingHeights.length) reasons.push(`缺少观测高度：${missingHeights.join('、')}`);
   if (!tableSettings.timeColumn) reasons.push('请选择时间列');
+  if (tableProbe.sites.length > 1 && !tableSettings.siteColumn) {
+    reasons.push('多个站点必须保留站点名称列，不能合并成一个站点');
+  }
   if (tableProbe.sites.length > 1 && (!tableSettings.latitudeColumn || !tableSettings.longitudeColumn)) {
     reasons.push('多个站点必须各自提供纬度列和经度列，不能共用一个回退坐标');
   }
@@ -684,8 +691,7 @@ function tableBatchCard() {
   forcingDir.value = dstDir;
   forcingDir.onchange = () => {
     dstDir = forcingDir.value.trim();
-    tableBatch = [];
-    resetBatchArtifacts();
+    invalidateTableBatch();
     renderCards();
   };
   card.querySelector('#table-forcing-pick').onclick = async () => {
@@ -693,8 +699,7 @@ function tableBatchCard() {
       const picked = await invoke('pick_folder', { key: 'table-forcing-dir' });
       if (!picked) return;
       dstDir = picked;
-      tableBatch = [];
-      resetBatchArtifacts();
+      invalidateTableBatch();
       renderCards();
     } catch (error) { status(error); }
   };
@@ -703,8 +708,7 @@ function tableBatchCard() {
   createSites.checked = tableSettings.createSites;
   createSites.onchange = () => {
     tableSettings.createSites = createSites.checked;
-    tableBatch = [];
-    resetBatchArtifacts();
+    invalidateTableBatch();
     renderCards();
   };
   if (tableSettings.createSites) renderTableSiteOptions(card.querySelector('#table-site-options'));
@@ -734,17 +738,22 @@ function renderTableSiteOptions(box) {
   siteDir.value = tableSettings.siteDir;
   siteDir.onchange = () => {
     tableSettings.siteDir = siteDir.value.trim();
-    resetBatchArtifacts();
+    invalidateTableBatch();
     renderCards();
   };
   const rawdata = box.querySelector('#table-rawdata');
   rawdata.value = tableSettings.rawdata;
-  rawdata.onchange = () => { tableSettings.rawdata = rawdata.value.trim(); resetBatchArtifacts(); };
+  rawdata.onchange = () => {
+    tableSettings.rawdata = rawdata.value.trim();
+    invalidateTableBatch();
+    renderCards();
+  };
   box.querySelector('#table-site-pick').onclick = async () => {
     try {
       const picked = await invoke('pick_folder', { key: 'table-site-dir' });
       if (!picked) return;
       tableSettings.siteDir = picked;
+      invalidateTableBatch();
       renderCards();
     } catch (error) { status(error); }
   };
@@ -753,6 +762,7 @@ function renderTableSiteOptions(box) {
       const picked = await invoke('pick_folder', { key: 'table-rawdata' });
       if (!picked) return;
       tableSettings.rawdata = picked;
+      invalidateTableBatch();
       renderCards();
     } catch (error) { status(error); }
   };
@@ -973,10 +983,28 @@ async function repairTableBatch() {
   try {
     await runPool(tableBatch, 4, async item => {
       try {
+        if (tableSettings.createSites) {
+          item.phase = '生成站点文件';
+          item.siteFinalPath = joinPath(tableSettings.siteDir, siteOutputName(item.safe_site));
+          item.siteStagedPath = joinPath(tableSettings.siteDir, `.${item.safe_site}.colm-site-stage`);
+          item.forcingStagedPath = joinPath(dstDir.trim(), `.${item.safe_site}.colm-forcing-stage`);
+          item.siteReport = await invoke('make_site', {
+            out: item.siteStagedPath,
+            lon: item.longitude,
+            lat: item.latitude,
+            landtype: item.landtype,
+            rawdata: tableSettings.rawdata || null,
+            mode: prepMode(state),
+            crop: !!state.wizard?.physics?.crop,
+          });
+          if (item.siteReport.readiness === 'blocked') {
+            throw new Error(`站点数据仍缺 ${item.siteReport.needs_external.length} 项当前模式必需数据`);
+          }
+        }
         item.phase = '修复中';
         item.report = await invoke('repair_forcing', {
           src: item.staged_path,
-          dst: item.final_path,
+          dst: tableSettings.createSites ? item.forcingStagedPath : item.final_path,
           slots: canonicalTableSlots(),
           options: tableGapOptions(item, true),
         });
@@ -984,15 +1012,13 @@ async function repairTableBatch() {
           throw new Error(`仍有 ${item.report.unresolved} 个缺测值没有解决`);
         }
         if (tableSettings.createSites) {
-          item.phase = '生成站点文件';
-          item.siteReport = await invoke('make_site', {
-            out: joinPath(tableSettings.siteDir, siteOutputName(item.safe_site)),
-            lon: item.longitude,
-            lat: item.latitude,
-            landtype: item.landtype,
-            rawdata: tableSettings.rawdata || null,
-            mode: prepMode(state),
+          await invoke('install_prepared_pair', {
+            siteStaged: item.siteStagedPath,
+            siteFinal: item.siteFinalPath,
+            forcingStaged: item.forcingStagedPath,
+            forcingFinal: item.final_path,
           });
+          item.siteReport.path = item.siteFinalPath;
         }
         item.phase = '完成';
         item.error = null;
@@ -1015,8 +1041,8 @@ async function repairTableBatch() {
       rawdataDir: tableSettings.rawdata || null,
       batchSites: tableBatch.map(item => ({
         site: item.site,
-        siteFile: item.siteReport?.path ?? null,
-        siteReport: item.siteReport,
+        siteFile: item.phase === '完成' ? item.siteReport?.path ?? null : null,
+        siteReport: item.phase === '完成' ? item.siteReport : null,
         forcingFile: item.phase === '完成' ? item.final_path : null,
         error: item.error,
       })),

@@ -55,7 +55,7 @@ fn build_site_new_args_omits_landtype_and_rawdata_when_not_given() {
     // **地类不给就不该出现 `--landtype`。** 这不是省事——`colm-cli` 那边
     // 对「没给」与「给了某个地类」是两条不同的路径（`site::skeleton` 的
     // 文档），拼一个空字符串或猜一个数字都会把用户没说的话说死。
-    let args = build_site_new_args("out.nc", 123.5092, 44.5933, None, None, "igbp");
+    let args = build_site_new_args("out.nc", 123.5092, 44.5933, None, None, "igbp", false);
     assert_eq!(
         args,
         vec![
@@ -65,6 +65,7 @@ fn build_site_new_args_omits_landtype_and_rawdata_when_not_given() {
     );
     assert!(!args.iter().any(|a| a == "--landtype"));
     assert!(!args.iter().any(|a| a == "--rawdata"));
+    assert!(!args.iter().any(|a| a == "--crop"));
 }
 
 #[test]
@@ -73,15 +74,16 @@ fn build_site_new_args_includes_landtype_and_rawdata_when_given() {
         "out.nc",
         123.5092,
         44.5933,
-        Some(10),
+        Some(12),
         Some("/data/raw"),
         "pft",
+        true,
     );
     let i = args
         .iter()
         .position(|a| a == "--landtype")
         .expect("给了地类就该有 --landtype");
-    assert_eq!(args[i + 1], "10");
+    assert_eq!(args[i + 1], "12");
     let j = args
         .iter()
         .position(|a| a == "--rawdata")
@@ -89,6 +91,8 @@ fn build_site_new_args_includes_landtype_and_rawdata_when_given() {
     assert_eq!(args[j + 1], "/data/raw");
     let k = args.iter().position(|a| a == "--mode").unwrap();
     assert_eq!(args[k + 1], "pft");
+    let c = args.iter().position(|a| a == "--crop").unwrap();
+    assert_eq!(args[c + 1], "1");
 }
 
 #[test]
@@ -98,9 +102,54 @@ fn build_site_new_args_accepts_negative_coordinates() {
     // 长什么样；负经纬度真能被 colm-cli 解析对是它自己的测试的事
     // （已用 `./target/debug/colm-cli site-new --lon -70.5 --lat -33.2`
     // 实测核实过一次）。
-    let args = build_site_new_args("out.nc", -70.5, -33.2, None, None, "igbp");
+    let args = build_site_new_args("out.nc", -70.5, -33.2, None, None, "igbp", false);
     assert!(args.contains(&"-70.5".to_string()));
     assert!(args.contains(&"-33.2".to_string()));
+}
+
+#[test]
+fn prepared_site_and_forcing_are_installed_together() {
+    let dir = std::env::temp_dir().join(format!("colm-prepared-pair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let site_stage = dir.join(".site.stage");
+    let forcing_stage = dir.join(".forcing.stage");
+    let site_final = dir.join("A_site.nc");
+    let forcing_final = dir.join("A_Met.nc");
+    std::fs::write(&site_stage, b"new site").unwrap();
+    std::fs::write(&forcing_stage, b"new forcing").unwrap();
+    std::fs::write(&site_final, b"old site").unwrap();
+    std::fs::write(&forcing_final, b"old forcing").unwrap();
+
+    install_pair([&site_stage, &forcing_stage], [&site_final, &forcing_final]).unwrap();
+
+    assert_eq!(std::fs::read(&site_final).unwrap(), b"new site");
+    assert_eq!(std::fs::read(&forcing_final).unwrap(), b"new forcing");
+    assert!(!site_stage.exists());
+    assert!(!forcing_stage.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn prepared_pair_checks_both_inputs_before_touching_old_outputs() {
+    let dir =
+        std::env::temp_dir().join(format!("colm-prepared-pair-missing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let site_stage = dir.join(".site.stage");
+    let forcing_stage = dir.join(".forcing.stage");
+    let site_final = dir.join("A_site.nc");
+    let forcing_final = dir.join("A_Met.nc");
+    std::fs::write(&site_stage, b"new site").unwrap();
+    std::fs::write(&site_final, b"old site").unwrap();
+    std::fs::write(&forcing_final, b"old forcing").unwrap();
+
+    assert!(install_pair([&site_stage, &forcing_stage], [&site_final, &forcing_final],).is_err());
+
+    assert_eq!(std::fs::read(&site_final).unwrap(), b"old site");
+    assert_eq!(std::fs::read(&forcing_final).unwrap(), b"old forcing");
+    assert!(site_stage.exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -144,6 +193,7 @@ fn it_parses_what_the_real_cli_prints() {
         None,
         None,
         "igbp",
+        false,
     );
     let json = match crate::sidecar::capture(&args) {
         Ok(j) => j,
