@@ -141,6 +141,7 @@ jobs:
           c=US-Ne3_2002-2003_FLUXNET2015_CROP
           test -f "$app/Contents/Resources/examples/Sitedata/${c}_site.nc"
           test -f "$app/Contents/Resources/examples/Forcing/${c}_Met.nc"
+          test -f "$app/Contents/Resources/examples/Observation/${c}_Flux.nc"
           test -f "$app/Contents/Resources/examples/Runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc"
           s=AT-Neu_2010-2012_FLUXNET-CH4
           test -f "$app/Contents/Resources/examples/Sitedata/${s}_site.nc"
