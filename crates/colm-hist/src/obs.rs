@@ -19,12 +19,27 @@ use std::path::Path;
 pub enum ModelSource {
     /// 一个 history 变量乘单位换算系数。
     Direct { variable: &'static str, scale: f64 },
-    /// `(minuend - subtrahend) * scale`。NEE 没有独立 history 变量，
-    /// 但总呼吸减总同化就是模型的净生态系统交换。
+    /// 多个 history 变量求和后乘单位换算系数。
+    Sum {
+        variables: &'static [&'static str],
+        scale: f64,
+    },
+    /// `(minuend - subtrahend) * scale`。
     Difference {
         minuend: &'static str,
         subtrahend: &'static str,
         scale: f64,
+    },
+    /// `(sum(positive) - sum(negative)) * scale`。
+    SumDifference {
+        positive: &'static [&'static str],
+        negative: &'static [&'static str],
+        scale: f64,
+    },
+    /// 优先使用新 BGC history 变量；旧/非 BGC history 缺变量时回退。
+    Alternative {
+        preferred: &'static ModelSource,
+        fallback: &'static ModelSource,
     },
 }
 
@@ -32,22 +47,60 @@ impl ModelSource {
     pub fn label(self) -> String {
         match self {
             Self::Direct { variable, .. } => variable.to_string(),
+            Self::Sum { variables, .. } => variables.join(" + "),
             Self::Difference {
                 minuend,
                 subtrahend,
                 ..
             } => format!("{minuend} - {subtrahend}"),
+            Self::SumDifference {
+                positive, negative, ..
+            } => format!("{} - {}", positive.join(" + "), negative.join(" + ")),
+            Self::Alternative {
+                preferred,
+                fallback,
+            } => {
+                format!("{} or {}", preferred.label(), fallback.label())
+            }
         }
     }
 
-    pub fn required(self) -> [&'static str; 2] {
+    pub fn required(self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for group in self.required_alternatives() {
+            for name in group {
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn required_alternatives(self) -> Vec<Vec<&'static str>> {
         match self {
-            Self::Direct { variable, .. } => [variable, ""],
+            Self::Direct { variable, .. } => vec![vec![variable]],
+            Self::Sum { variables, .. } => vec![variables.to_vec()],
             Self::Difference {
                 minuend,
                 subtrahend,
                 ..
-            } => [minuend, subtrahend],
+            } => vec![vec![minuend, subtrahend]],
+            Self::SumDifference {
+                positive, negative, ..
+            } => {
+                let mut names = positive.to_vec();
+                names.extend_from_slice(negative);
+                vec![names]
+            }
+            Self::Alternative {
+                preferred,
+                fallback,
+            } => {
+                let mut groups = preferred.required_alternatives();
+                groups.extend(fallback.required_alternatives());
+                groups
+            }
         }
     }
 }
@@ -66,7 +119,37 @@ pub struct EvaluationVariable {
 }
 
 const MOL_TO_MICROMOL: f64 = 1_000_000.0;
+const GC_TO_MICROMOL_C: f64 = 1_000_000.0 / 12.011;
 const MOL_TO_NANOMOL: f64 = 1_000_000_000.0;
+const BGC_GPP_MODEL: ModelSource = ModelSource::Direct {
+    variable: "f_gpp",
+    scale: GC_TO_MICROMOL_C,
+};
+const LEGACY_GPP_MODEL: ModelSource = ModelSource::Direct {
+    variable: "f_assim",
+    scale: MOL_TO_MICROMOL,
+};
+const BGC_RESP_MODEL: ModelSource = ModelSource::Sum {
+    variables: &["f_ar", "f_hr"],
+    scale: GC_TO_MICROMOL_C,
+};
+const LEGACY_RESP_MODEL: ModelSource = ModelSource::Direct {
+    variable: "f_respc",
+    scale: MOL_TO_MICROMOL,
+};
+const BGC_NEE_MODEL: ModelSource = ModelSource::SumDifference {
+    positive: &["f_ar", "f_hr"],
+    negative: &["f_gpp"],
+    scale: GC_TO_MICROMOL_C,
+};
+const LEGACY_NEE_MODEL: ModelSource = ModelSource::Difference {
+    minuend: "f_respc",
+    subtrahend: "f_assim",
+    scale: MOL_TO_MICROMOL,
+};
+pub const URBAN_RNET_COMPONENTS: [&str; 4] = ["SWdown", "LWdown", "SWup", "LWup"];
+pub const URBAN_RNET_COMPONENT_QC: [&str; 4] = ["SWdown_qc", "LWdown_qc", "SWup_qc", "LWup_qc"];
+pub const URBAN_RNET_EXPRESSION: &str = "SWdown+LWdown-SWup-LWup";
 
 pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
     EvaluationVariable {
@@ -140,9 +223,9 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "总初级生产力（夜间分割）",
         label_en: "GPP (nighttime partitioning)",
         units: "µmol/m²/s",
-        model: ModelSource::Direct {
-            variable: "f_assim",
-            scale: MOL_TO_MICROMOL,
+        model: ModelSource::Alternative {
+            preferred: &BGC_GPP_MODEL,
+            fallback: &LEGACY_GPP_MODEL,
         },
         qc: None,
     },
@@ -151,9 +234,9 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "总初级生产力（日间分割）",
         label_en: "GPP (daytime partitioning)",
         units: "µmol/m²/s",
-        model: ModelSource::Direct {
-            variable: "f_assim",
-            scale: MOL_TO_MICROMOL,
+        model: ModelSource::Alternative {
+            preferred: &BGC_GPP_MODEL,
+            fallback: &LEGACY_GPP_MODEL,
         },
         qc: None,
     },
@@ -162,9 +245,9 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "生态系统呼吸",
         label_en: "Ecosystem respiration",
         units: "µmol/m²/s",
-        model: ModelSource::Direct {
-            variable: "f_respc",
-            scale: MOL_TO_MICROMOL,
+        model: ModelSource::Alternative {
+            preferred: &BGC_RESP_MODEL,
+            fallback: &LEGACY_RESP_MODEL,
         },
         qc: None,
     },
@@ -173,10 +256,9 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "净生态系统交换",
         label_en: "Net ecosystem exchange",
         units: "µmol/m²/s",
-        model: ModelSource::Difference {
-            minuend: "f_respc",
-            subtrahend: "f_assim",
-            scale: MOL_TO_MICROMOL,
+        model: ModelSource::Alternative {
+            preferred: &BGC_NEE_MODEL,
+            fallback: &LEGACY_NEE_MODEL,
         },
         qc: Some("NEE_qc"),
     },
@@ -214,6 +296,60 @@ pub fn corrected(o_name: &str) -> Option<&'static str> {
         "Qh" => Some("Qh_cor"),
         _ => None,
     }
+}
+
+pub fn derived_observation_components(o_name: &str) -> Option<[&'static str; 4]> {
+    (o_name == "Rnet").then_some(URBAN_RNET_COMPONENTS)
+}
+
+pub fn derived_observation_qc(o_name: &str) -> Option<[&'static str; 4]> {
+    (o_name == "Rnet").then_some(URBAN_RNET_COMPONENT_QC)
+}
+
+pub fn derived_observation_label(o_name: &str) -> Option<&'static str> {
+    (o_name == "Rnet").then_some(URBAN_RNET_EXPRESSION)
+}
+
+fn valid_observation_value(value: f64) -> bool {
+    value.is_finite() && value > crate::pair::FILL_VALUE + 1.0
+}
+
+/// Urban-PLUMBER style files do not always ship a direct `Rnet`; derive it
+/// from the four radiative components while keeping QC strict: the derived
+/// sample is measured only when every component is finite and every component
+/// QC says measured.
+pub fn derive_urban_rnet(
+    components: [&[f64]; 4],
+    qcs: [&[f64]; 4],
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    let n = components[0].len();
+    if components.iter().any(|values| values.len() != n)
+        || qcs.iter().any(|values| values.len() != n)
+    {
+        anyhow::bail!("Urban Rnet components and QC arrays have inconsistent lengths");
+    }
+    let mut values = Vec::with_capacity(n);
+    let mut qc = Vec::with_capacity(n);
+    for i in 0..n {
+        let sample = [
+            components[0][i],
+            components[1][i],
+            components[2][i],
+            components[3][i],
+        ];
+        let measured = sample.iter().all(|value| valid_observation_value(*value))
+            && qcs
+                .iter()
+                .all(|values| values[i] == crate::pair::QC_MEASURED);
+        if measured {
+            values.push(sample[0] + sample[1] - sample[2] - sample[3]);
+            qc.push(crate::pair::QC_MEASURED);
+        } else {
+            values.push(crate::pair::FILL_VALUE);
+            qc.push(1.0);
+        }
+    }
+    Ok((values, qc))
 }
 
 pub fn read_1d(path: &Path, name: &str) -> Result<Vec<f64>> {
