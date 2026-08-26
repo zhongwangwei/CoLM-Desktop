@@ -54,6 +54,18 @@ fn urban_plumber_fills_both_wind_slots() {
 }
 
 #[test]
+fn fluxnet_ch4_gap_filled_names_are_recognized_for_forcing() {
+    let r = ok(&v(&[
+        "TA", "TA_F", "RH_F", "VPD", "VPD_F", "PA_F", "P", "P_F", "WS", "WS_F", "SW_IN", "SW_IN_F",
+        "LW_IN", "LW_IN_F",
+    ]));
+    assert_eq!(
+        r.names(),
+        ["TA_F", "VPD_F", "PA_F", "P_F", "NULL", "WS_F", "SW_IN_F", "LW_IN_F"]
+    );
+}
+
+#[test]
 fn pressure_and_precipitation_accept_both_spellings() {
     // Psurf/PSurf 与 Precip/Rainf 是同一个量的两种写法。
     // 大小写在这里**不能**一概不敏感：Fortran 的 namelist 名字不敏感，

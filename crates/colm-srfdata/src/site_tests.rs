@@ -254,6 +254,66 @@ fn the_soil_source_says_measured_not_assumed() {
 }
 
 #[test]
+fn urban_prepare_replaces_synthesized_site_new_placeholders() {
+    // Reproduce the GUI preprocessing path: `site-new --mode urban` starts from
+    // coordinates, writes LCZ_DOM plus 12 synthesized structural placeholders, then
+    // `new --mode urban` must replace those placeholders with the pre-extracted
+    // Urban-PLUMBER table whenever the coordinates are covered.
+    let dir = std::env::temp_dir().join(format!("colm-srfdata-urban-site-new-{}", test_suffix()));
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let skel = dir.join("skel.nc");
+    let filled = dir.join("filled.nc");
+    let dst = dir.join("prepared.nc");
+    skeleton_with_mode(
+        &skel,
+        145.014_495_849_609_38,
+        -37.730_598_449_707_03,
+        Some(6),
+        SiteKind::Urban,
+        SiteMode::Urban,
+        false,
+    )
+    .expect("skeleton");
+    fill(&skel, &filled, None, None).expect("generic fill");
+
+    let r = prepare_urban(&filled, &dst).expect("prepare urban");
+    assert!(r.soil_vars.iter().any(|n| n == "soil_vf_clay"));
+    assert!(r.soil_vars.iter().any(|n| n == "soil_texture"));
+    assert!(r.extra_vars.iter().any(|n| n == "soil_s_v_alb"));
+    assert!(r.extra_vars.iter().any(|n| n == "lakedepth"));
+
+    let f = netcdf::open(&dst).expect("open");
+    let source = |name: &str| -> String {
+        let v = f.variable(name).unwrap_or_else(|| panic!("{name} missing"));
+        match v
+            .attribute("source")
+            .expect("source")
+            .value()
+            .expect("attr")
+        {
+            netcdf::AttributeValue::Str(s) => s,
+            other => panic!("{name} source is not a string: {other:?}"),
+        }
+    };
+    for name in ["soil_vf_clay", "soil_texture", "soil_s_v_alb", "lakedepth"] {
+        let s = source(name);
+        assert!(
+            s.starts_with("extracted from CoLM 2024 rawdata"),
+            "{name}: {s}"
+        );
+        assert!(!s.starts_with("synthesized:"), "{name}: {s}");
+    }
+    let lcz = f.variable("LCZ_DOM").expect("LCZ_DOM");
+    let xs: Vec<i32> = lcz.get_values(netcdf::Extents::All).expect("LCZ");
+    assert_eq!(
+        xs[0], 6,
+        "user-selected LCZ is not a synthesized placeholder"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_urban_site_outside_the_table_gets_no_soil_at_all() {
     // 大西洋中间。**一个土壤变量都不许写** —— 编一个剖面出来，CoLM 会跑完
     // 并给出看不出错的结果，而回落栅格至少是对的。
@@ -374,6 +434,25 @@ fn the_site_files_own_lcz_class_is_not_overwritten() {
     );
 }
 
+#[test]
+fn an_unsupported_raw_lcz_is_never_written_into_a_runnable_site() {
+    // The source raster class at Minneapolis is 12 (a natural LCZ class), while
+    // CoLM's urban lookup tables only contain built classes 1..=10.
+    let src = urban_fixture(
+        "unsupported-lcz-src",
+        -93.188_362_121_582_03,
+        44.998_401_641_845_7,
+    );
+    let dst = src.with_file_name("unsupported-lcz-dst.nc");
+    let report = prepare_urban(&src, &dst).expect("prepare");
+
+    assert!(!report.extra_vars.iter().any(|n| n == "LCZ_DOM"));
+    assert!(netcdf::open(&dst)
+        .expect("open")
+        .variable("LCZ_DOM")
+        .is_none());
+}
+
 // ---------------------------------------------------------- bare coordinates
 
 #[test]
@@ -415,6 +494,37 @@ fn a_site_with_only_coordinates_can_still_be_filled() {
         rep.from_site.is_empty(),
         "站点文件里什么都没有：{:?}",
         rep.from_site
+    );
+}
+
+#[test]
+fn a_classic_site_with_only_coordinates_can_be_filled() {
+    let dir = std::env::temp_dir().join(format!("colm-site-classic-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("bare-classic.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create_with(&src, netcdf::Options::empty()).unwrap();
+        file.add_variable::<f64>("longitude", &[]).unwrap();
+        file.add_variable::<f64>("latitude", &[]).unwrap();
+        file.enddef().unwrap();
+        file.variable_mut("longitude")
+            .unwrap()
+            .put_values(&[123.5092], netcdf::Extents::All)
+            .unwrap();
+        file.variable_mut("latitude")
+            .unwrap()
+            .put_values(&[44.5933], netcdf::Extents::All)
+            .unwrap();
+    }
+
+    let dst = dir.join("filled.nc");
+    super::fill(&src, &dst, None, None).expect("classic NetCDF sites must be fillable");
+    assert!(
+        super::missing_fields(&dst).unwrap().is_empty(),
+        "classic site output must contain the complete required field set"
     );
 }
 
@@ -543,9 +653,81 @@ fn run_readiness_distinguishes_a_file_from_a_runnable_site() {
             drop(netcdf::create(&p).unwrap());
         }
     }
+    let empty_markers = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata), false).unwrap();
+    assert_eq!(empty_markers.readiness, super::Readiness::Blocked);
+
+    for sub in ["soil", "plant_15s"] {
+        let p = rawdata.join(sub).join("marker.nc");
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut f = netcdf::create(&p).unwrap();
+        let mut marker = f.add_variable::<f64>("marker", &[]).unwrap();
+        marker.put_values(&[1.0], netcdf::Extents::All).unwrap();
+    }
     let with_rawdata = super::audit(&out, super::SiteMode::Igbp, Some(&rawdata), false).unwrap();
     assert_eq!(with_rawdata.readiness, super::Readiness::ReadyWithRawdata);
     assert_eq!(with_rawdata.needs_external, blocked.needs_external);
+}
+
+#[test]
+fn urban_readiness_checks_each_real_rawdata_bucket() {
+    let rawdata = std::env::temp_dir().join(format!("colm-urban-rawdata-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&rawdata);
+    std::fs::create_dir_all(&rawdata).unwrap();
+    let needs = [
+        "soil_theta_s",
+        "LCZ_DOM",
+        "building_mean_height",
+        "LAI_year",
+        "TREE_LAI",
+        "TREE_SAI",
+    ]
+    .map(str::to_string);
+
+    let blocker = super::rawdata_blocker(&rawdata, super::SiteMode::Urban, &needs).unwrap();
+    for bucket in ["soil", "urban_type", "urban", "urban_lai_500m"] {
+        assert!(blocker.contains(bucket), "{blocker}");
+    }
+    assert!(!blocker.contains("plant_15s"), "{blocker}");
+
+    for bucket in ["soil", "urban_type", "urban", "urban_lai_500m"] {
+        let dir = rawdata.join(bucket);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("marker.nc");
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut f = netcdf::create(&p).unwrap();
+        let mut marker = f.add_variable::<f64>("marker", &[]).unwrap();
+        marker.put_values(&[1.0], netcdf::Extents::All).unwrap();
+    }
+    assert_eq!(
+        super::rawdata_blocker(&rawdata, super::SiteMode::Urban, &needs),
+        None
+    );
+}
+
+#[test]
+fn crop_composition_requires_the_plant_rawdata_bucket() {
+    let rawdata = std::env::temp_dir().join(format!("colm-crop-rawdata-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&rawdata);
+    std::fs::create_dir_all(&rawdata).unwrap();
+    let needs = ["croptyp".to_string(), "pctcrop".to_string()];
+    let blocker = super::rawdata_blocker(&rawdata, super::SiteMode::Pc, &needs).unwrap();
+    assert!(blocker.contains("plant_15s"), "{blocker}");
+    let _ = std::fs::remove_dir_all(rawdata);
+}
+
+#[test]
+fn urban_population_rawdata_fallback_uses_its_initialized_grid() {
+    let source = include_str!("../../../vendor/CoLM202X/mksrfdata/MOD_SingleSrfdata.F90");
+    let population = source
+        .split("u_site_pop=")
+        .nth(1)
+        .and_then(|tail| tail.split("u_site_lucy=").next())
+        .expect("urban population block");
+    assert!(
+        population.contains("read_point_5x5_var_2d_time_real8 (gridpopu"),
+        "population fallback must use the grid it just initialized"
+    );
+    assert!(!population.contains("read_point_5x5_var_2d_time_real8 (gridlaiu"));
 }
 
 #[test]
@@ -636,6 +818,7 @@ fn an_urban_skeleton_writes_lcz_not_igbp() {
         Some(6),
         super::SiteKind::Urban,
         super::SiteMode::Urban,
+        false,
     )
     .unwrap();
 
@@ -657,6 +840,7 @@ fn skeleton_land_cover_ranges_follow_the_selected_scheme() {
         Some(24),
         super::SiteKind::Natural,
         super::SiteMode::Igbp,
+        false,
     )
     .is_err());
     assert!(super::skeleton_with_mode(
@@ -666,6 +850,7 @@ fn skeleton_land_cover_ranges_follow_the_selected_scheme() {
         Some(24),
         super::SiteKind::Natural,
         super::SiteMode::Usgs,
+        false,
     )
     .is_ok());
     assert!(super::skeleton_with_mode(
@@ -675,8 +860,24 @@ fn skeleton_land_cover_ranges_follow_the_selected_scheme() {
         Some(11),
         super::SiteKind::Urban,
         super::SiteMode::Urban,
+        false,
     )
     .is_err());
+    let bad_crop = dir.join("bad_crop.nc");
+    assert!(super::skeleton_with_mode(
+        &bad_crop,
+        0.0,
+        0.0,
+        Some(10),
+        super::SiteKind::Natural,
+        super::SiteMode::Pft,
+        true,
+    )
+    .is_err());
+    assert!(
+        !bad_crop.exists(),
+        "invalid CROP input must fail before writing"
+    );
 }
 
 #[test]
@@ -870,6 +1071,7 @@ fn a_usgs_skeleton_never_relabels_an_igbp_number() {
         Some(7),
         super::SiteKind::Natural,
         super::SiteMode::Usgs,
+        false,
     )
     .unwrap();
 

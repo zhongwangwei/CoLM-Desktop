@@ -179,6 +179,127 @@ fn a_per_row_offset_column_can_represent_daylight_saving_changes() {
 }
 
 #[test]
+fn probe_uses_explicit_offsets_before_inferring_cadence() {
+    let root = temp("probe-varying-offsets");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,utc_offset,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-03-29 01:00,1,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-03-29 03:00,2,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let probe = super::probe_table(&src).unwrap();
+    assert_eq!(probe.utc_offset_column.as_deref(), Some("utc_offset"));
+    assert_eq!(probe.sites[0].step_seconds, Some(3600));
+    assert_eq!(probe.sites[0].inserted_steps, 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn empty_site_identifier_is_rejected_during_probe_too() {
+    let root = temp("empty-site-probe");
+    let src = root.join("bad.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         ,2020-01-01T00:00Z,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01T01:00Z,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let err = super::probe_table(&src).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("empty site identifier"),
+        "{err:#}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn malformed_non_ascii_timestamps_error_instead_of_panicking() {
+    let result = std::panic::catch_unwind(|| super::parse_timestamp("中a中"));
+    assert!(
+        result.is_ok(),
+        "malformed UTF-8-boundary input must be reported, not panic"
+    );
+    assert!(result.unwrap().is_err());
+}
+
+#[test]
+fn nonzero_fractional_timestamp_seconds_are_rejected() {
+    let root = temp("fractional-seconds");
+    let src = root.join("bad.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01T00:00:00.500Z,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01T01:00:00Z,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let err = super::probe_table(&src).unwrap_err();
+    assert!(format!("{err:#}").contains("fractional seconds"), "{err:#}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn empty_fractional_timestamp_seconds_are_rejected() {
+    let root = temp("empty-fractional-seconds");
+    let src = root.join("bad.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01T00:00:00.Z,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01T01:00:00Z,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let err = super::probe_table(&src).unwrap_err();
+    assert!(format!("{err:#}").contains("fractional seconds"), "{err:#}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn zero_fractional_timestamp_seconds_are_accepted() {
+    let root = temp("zero-fractional-seconds");
+    let src = root.join("ok.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01T00:00:00.000Z,50,10,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01T01:00:00.000Z,50,10,10,281,.006,100010,0,2,20,301\n",
+    );
+    let probe = super::probe_table(&src).unwrap();
+    assert_eq!(probe.sites[0].step_seconds, Some(3600));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn tabular_also_add_rejects_duplicates_and_empty_columns() {
+    let root = temp("tabular-bad-also-add");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Rainf,Snowf,Wind,SWdown,LWdown\n\
+         A,2020-01-01T00:00Z,50,10,10,280,.005,100000,0,0,2,0,300\n\
+         A,2020-01-01T01:00Z,50,10,10,281,.006,100010,0,0,2,20,301\n",
+    );
+    let mut p = plan();
+    {
+        let precip = p.slots.iter_mut().find(|slot| slot.index == 4).unwrap();
+        precip.column = "Rainf".into();
+        precip.also_add = vec!["Snowf".into(), "Snowf".into()];
+    }
+    let duplicate = super::import_table(&src, &root.join("dup"), &p).unwrap_err();
+    assert!(
+        format!("{duplicate:#}").contains("more than once"),
+        "{duplicate:#}"
+    );
+    p.slots
+        .iter_mut()
+        .find(|slot| slot.index == 4)
+        .unwrap()
+        .also_add = vec!["".into()];
+    let empty = super::import_table(&src, &root.join("empty"), &p).unwrap_err();
+    assert!(format!("{empty:#}").contains("empty also_add"), "{empty:#}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn table_expansion_has_a_hard_safety_limit() {
     let error = super::checked_step_count(0, 20_000_000, 1, 2).unwrap_err();
     assert!(format!("{error:#}").contains("would create"));
@@ -227,6 +348,96 @@ fn csv_probe_finds_two_sites_columns_units_and_slot_candidates() {
         probe.slots.iter().find(|s| s.index == 5).unwrap().column,
         None
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn fluxnet_ch4_table_probe_prefers_gap_filled_forcing_columns() {
+    let root = temp("probe-fluxnet-ch4");
+    let src = root.join("FLX_AT-Neu_FLUXNET-CH4_HH_2010-2012_1-1.csv");
+    write(
+        &src,
+        "TIMESTAMP_START,FCH4,TA,TA_F,RH_F,VPD,VPD_F,PA_F,P,P_F,WS,WS_F,SW_IN,SW_IN_F,LW_IN,LW_IN_F\n\
+         201001010000,1,1,2,80,3,4,90,0,1,2,3,4,5,6,7\n\
+         201001010030,1,1,2,80,3,4,90,0,1,2,3,4,5,6,7\n",
+    );
+
+    let probe = super::probe_table(&src).unwrap();
+    assert_eq!(probe.time_column.as_deref(), Some("TIMESTAMP_START"));
+    assert_eq!(probe.sites[0].id, "AT-Neu");
+    assert_eq!(probe.sites[0].step_seconds, Some(1800));
+    let slot = |index| {
+        probe
+            .slots
+            .iter()
+            .find(|s| s.index == index)
+            .unwrap()
+            .column
+            .as_deref()
+    };
+    assert_eq!(slot(1), Some("TA_F"));
+    assert_eq!(slot(2), Some("VPD_F"));
+    assert_eq!(slot(3), Some("PA_F"));
+    assert_eq!(slot(4), Some("P_F"));
+    assert_eq!(slot(6), Some("WS_F"));
+    assert_eq!(slot(7), Some("SW_IN_F"));
+    assert_eq!(slot(8), Some("LW_IN_F"));
+    assert_eq!(
+        probe
+            .slots
+            .iter()
+            .find(|s| s.index == 2)
+            .unwrap()
+            .units
+            .as_deref(),
+        Some("hPa")
+    );
+    assert_eq!(
+        probe
+            .slots
+            .iter()
+            .find(|s| s.index == 4)
+            .unwrap()
+            .units
+            .as_deref(),
+        Some("mm")
+    );
+    let plan = super::TabularPlan {
+        time_column: "TIMESTAMP_START".into(),
+        site_column: None,
+        latitude_column: None,
+        longitude_column: None,
+        landtype_column: None,
+        utc_offset_column: None,
+        manual_utc_offset: Some(0.0),
+        latitude: Some(47.12),
+        longitude: Some(11.32),
+        step_seconds: None,
+        land_cover_scheme: Some(super::LandCoverScheme::Pft),
+        heights: None,
+        slots: probe
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                Some(super::TabularSlot::new(
+                    slot.index,
+                    slot.column.as_ref()?,
+                    slot.units.as_ref()?,
+                ))
+            })
+            .collect(),
+    };
+    let imported = super::import_table(&src, &root.join("Forcing"), &plan).unwrap();
+    assert_eq!(imported[0].site, "AT-Neu");
+    let file = netcdf::open(&imported[0].staged_path).unwrap();
+    let temperature: Vec<f64> = file.variable("Tair").unwrap().get_values(..).unwrap();
+    let humidity: Vec<f64> = file.variable("Qair").unwrap().get_values(..).unwrap();
+    let precipitation: Vec<f64> = file.variable("Precip").unwrap().get_values(..).unwrap();
+    assert!((temperature[0] - 275.15).abs() < 1e-12);
+    assert!(humidity
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0));
+    assert!((precipitation[0] - 1.0 / 1800.0).abs() < 1e-12);
     let _ = std::fs::remove_dir_all(root);
 }
 

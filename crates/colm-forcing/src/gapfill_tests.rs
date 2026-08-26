@@ -374,6 +374,137 @@ fn short_gap_repair_writes_a_new_file_with_qc_and_keeps_source_unchanged() {
 }
 
 #[test]
+fn rh_observations_survive_temperature_support_repair() {
+    let dir = std::env::temp_dir().join("colm-gapfill-rh-support");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    let dst = dir.join("repaired.nc");
+
+    let mut file = netcdf::create(&src).unwrap();
+    file.add_attribute("time_shown_in", "UTC").unwrap();
+    file.add_dimension("time", 3).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "seconds since 2020-01-01 00:00:00")
+        .unwrap();
+    time.put_values(&[0.0, 3600.0, 7200.0], netcdf::Extents::All)
+        .unwrap();
+    let mut lat = file.add_variable::<f64>("latitude", &[]).unwrap();
+    lat.put_value(47.1, ()).unwrap();
+    let mut lon = file.add_variable::<f64>("longitude", &[]).unwrap();
+    lon.put_value(11.3, ()).unwrap();
+    let mut tair = file.add_variable::<f64>("Tair", &["time"]).unwrap();
+    tair.set_fill_value(-9999.0).unwrap();
+    tair.put_attribute("units", "K").unwrap();
+    tair.put_values(&[280.0, -9999.0, 284.0], netcdf::Extents::All)
+        .unwrap();
+    let mut ps = file.add_variable::<f64>("PSurf", &["time"]).unwrap();
+    ps.put_attribute("units", "Pa").unwrap();
+    ps.put_values(&[90000.0, 90000.0, 90000.0], netcdf::Extents::All)
+        .unwrap();
+    let mut rh = file.add_variable::<f64>("RH", &["time"]).unwrap();
+    rh.put_attribute("units", "%").unwrap();
+    rh.put_values(&[50.0, 50.0, 50.0], netcdf::Extents::All)
+        .unwrap();
+    drop(file);
+
+    let mut plan = repair_plan(None, 1);
+    plan.slots.push(RepairSlot {
+        index: 2,
+        source_name: "RH".into(),
+        source_units: "%".into(),
+        also_add: Vec::new(),
+    });
+    plan.slots.push(RepairSlot {
+        index: 3,
+        source_name: "PSurf".into(),
+        source_units: "Pa".into(),
+        also_add: Vec::new(),
+    });
+
+    repair_file(&src, &dst, &plan).unwrap();
+    let output = netcdf::open(&dst).unwrap();
+    let rh_out: Vec<f64> = output
+        .variable("RH")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(rh_out, vec![50.0, 50.0, 50.0]);
+    let rh_qc: Vec<u8> = output
+        .variable("RH_gapfill_qc")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(rh_qc, vec![QC_OBSERVED, QC_OBSERVED, QC_OBSERVED]);
+}
+
+#[test]
+fn short_gap_repair_updates_classic_netcdf3_files() {
+    let dir = std::env::temp_dir().join("colm-gapfill-classic-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("source.nc");
+    let dst = dir.join("repaired.nc");
+
+    let mut file = netcdf::create_with(&src, netcdf::Options::_64BIT_OFFSET).unwrap();
+    file.add_attribute("time_shown_in", "UTC").unwrap();
+    file.add_dimension("time", 3).unwrap();
+    {
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+    }
+    file.add_variable::<f64>("latitude", &[]).unwrap();
+    file.add_variable::<f64>("longitude", &[]).unwrap();
+    {
+        let mut tair = file.add_variable::<f64>("Tair", &["time"]).unwrap();
+        tair.set_fill_value(-9999.0).unwrap();
+        tair.put_attribute("units", "K").unwrap();
+    }
+    file.enddef().unwrap();
+    file.variable_mut("time")
+        .unwrap()
+        .put_values(&[0.0, 3600.0, 7200.0], netcdf::Extents::All)
+        .unwrap();
+    file.variable_mut("latitude")
+        .unwrap()
+        .put_value(-37.73, ())
+        .unwrap();
+    file.variable_mut("longitude")
+        .unwrap()
+        .put_value(145.01, ())
+        .unwrap();
+    file.variable_mut("Tair")
+        .unwrap()
+        .put_values(&[280.0, -9999.0, 282.0], netcdf::Extents::All)
+        .unwrap();
+    drop(file);
+
+    repair_file(&src, &dst, &repair_plan(None, 1)).unwrap();
+    let output = netcdf::open(&dst).unwrap();
+    let repaired: Vec<f64> = output
+        .variable("Tair")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(repaired, vec![280.0, 281.0, 282.0]);
+    let qc: Vec<i16> = output
+        .variable("Tair_gapfill_qc")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(
+        qc,
+        vec![
+            i16::from(QC_OBSERVED),
+            i16::from(QC_INTERPOLATED),
+            i16::from(QC_OBSERVED)
+        ]
+    );
+    assert!(output.attribute("colm_gapfill_version").is_some());
+}
+
+#[test]
 fn failed_observation_qc_is_reported_and_repaired_like_a_gap() {
     let dir = std::env::temp_dir().join("colm-gapfill-qc-file");
     let _ = std::fs::remove_dir_all(&dir);
@@ -596,6 +727,13 @@ fn repair_plan_rejects_ambiguous_or_zero_overlap_inputs_before_io() {
         .unwrap_err()
         .to_string()
         .contains("at least one"));
+
+    let mut plan = repair_plan(None, 1);
+    plan.short_gap_max = i32::MAX as usize + 1;
+    assert!(diagnose_file(missing, &plan)
+        .unwrap_err()
+        .to_string()
+        .contains("too large"));
 
     let mut plan = repair_plan(None, 1);
     plan.slots.push(plan.slots[0].clone());

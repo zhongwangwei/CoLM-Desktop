@@ -5,6 +5,7 @@
 //!
 //! **产物与源文件分开存放，原始数据永不改动**（前处理页立的约束）。
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -70,6 +71,7 @@ pub fn parse_slot_spec(spec: &str) -> Result<SlotPlan> {
     let index: usize = idx.parse().with_context(|| {
         format!("--slot {spec:?} is not N=name:units ({idx:?} is not a slot number)")
     })?;
+    validate_slot_additions(index, name, &extra)?;
     Ok(SlotPlan {
         index,
         source_name: name.to_string(),
@@ -123,6 +125,7 @@ pub fn convert(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
     if crate::same_existing_file(src, dst) {
         bail!("forcing conversion destination must differ from its source");
     }
+    validate_plan_additions(plan)?;
     ensure_parent(dst)?;
     let file_name = dst
         .file_name()
@@ -198,22 +201,6 @@ fn convert_into(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
                     sp.source_units
                 );
             }
-        }
-
-        // **同一个变量不能既当源又在 also_add 里。** 那会把它加两次 ——
-        // 降水翻倍，退出码 0，一句警告都没有。
-        //
-        // 界面上已经防了一道（`5d42291`：主变量换成原来的额外变量时清掉它），
-        // 但那是界面自己的状态，而这条要防的正是界面出错的情况。
-        // 真机验收实测过修复前那份 payload：`4=Snowf:kg/m2/s+Snowf`
-        // 转出来的 `Precip` 精确等于 `2 × Snowf`，后端一声不吭。
-        if sp.also_add.contains(&sp.source_name) {
-            bail!(
-                "slot {} names {:?} both as its source and in also_add — \
-                 it would be added twice, silently doubling the values",
-                sp.index,
-                sp.source_name
-            );
         }
 
         let want_units = canonical_units(slot.index);
@@ -351,6 +338,36 @@ fn convert_into(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             out.put_attribute("units", "m")?;
             out.put_attribute("source", "given by hand in the prep page")?;
             out.put_values(&[val], netcdf::Extents::All)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_additions(plan: &Plan) -> Result<()> {
+    for slot in &plan.slots {
+        validate_slot_additions(slot.index, &slot.source_name, &slot.also_add)?;
+    }
+    Ok(())
+}
+
+fn validate_slot_additions(index: usize, source_name: &str, also_add: &[String]) -> Result<()> {
+    if source_name.trim().is_empty() {
+        bail!("slot {index} has an empty source variable name");
+    }
+    let mut seen = BTreeSet::new();
+    for extra in also_add {
+        let extra = extra.trim();
+        if extra.is_empty() {
+            bail!("slot {index} has an empty also_add variable name");
+        }
+        if extra == source_name.trim() {
+            bail!(
+                "slot {index} names {source_name:?} both as its source and in also_add — \
+                 it would be added twice, silently doubling the values"
+            );
+        }
+        if !seen.insert(extra) {
+            bail!("slot {index} names also_add variable {extra:?} more than once");
         }
     }
     Ok(())

@@ -205,7 +205,14 @@ pub fn probe_table(path: &Path) -> Result<TabularProbe> {
     let site_column = guess_column(&names, &["site", "site_id", "station", "station_id"]);
     let time_column = guess_column(
         &names,
-        &["time", "timestamp", "datetime", "date_time", "date"],
+        &[
+            "time",
+            "timestamp",
+            "TIMESTAMP_START",
+            "datetime",
+            "date_time",
+            "date",
+        ],
     );
     let latitude_column = guess_column(&names, &["latitude", "lat", "site_latitude"]);
     let longitude_column = guess_column(&names, &["longitude", "lon", "lng", "site_longitude"]);
@@ -233,11 +240,14 @@ pub fn probe_table(path: &Path) -> Result<TabularProbe> {
     let sites = probe_sites(
         path,
         &table,
-        site_column.as_deref(),
-        time_column.as_deref(),
-        latitude_column.as_deref(),
-        longitude_column.as_deref(),
-        landtype_column.as_deref(),
+        ProbeSiteColumns {
+            site: site_column.as_deref(),
+            time: time_column.as_deref(),
+            utc_offset: utc_offset_column.as_deref(),
+            latitude: latitude_column.as_deref(),
+            longitude: longitude_column.as_deref(),
+            landtype: landtype_column.as_deref(),
+        },
     )?;
     let slots = SLOTS
         .iter()
@@ -251,6 +261,7 @@ pub fn probe_table(path: &Path) -> Result<TabularProbe> {
                     .iter()
                     .find(|candidate| candidate.name == name)
                     .and_then(|candidate| candidate.units.clone())
+                    .or_else(|| inferred_units(name))
             });
             TabularSlotGuess {
                 index: slot.index,
@@ -318,12 +329,7 @@ pub fn import_table(
         .map(|slot| column_index(&table, &slot.column))
         .transpose()?;
 
-    let fallback_site = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .context("tabular forcing filename has no usable site name")?
-        .to_string();
+    let fallback_site = fallback_site_name(path)?;
     let mut groups = BTreeMap::<String, Vec<&Row>>::new();
     for row in &table.rows {
         let site = match site_index {
@@ -706,33 +712,58 @@ fn guess_column(columns: &[String], aliases: &[&str]) -> Option<String> {
     })
 }
 
+fn inferred_units(name: &str) -> Option<String> {
+    let n = normalize(name);
+    let unit = match n.as_str() {
+        "taf" | "ta" => "degC",
+        "rhf" | "rh" => "%",
+        "vpdf" | "vpd" => "hPa",
+        "paf" | "pa" => "kPa",
+        "pf" | "p" => "mm",
+        "wsf" | "ws" => "m s-1",
+        "swinf" | "swin" | "lwinf" | "lwin" => "W m-2",
+        _ => return None,
+    };
+    Some(unit.to_string())
+}
+
 fn slot_aliases(index: usize) -> &'static [&'static str] {
     match index {
-        1 => &["Tair", "TA", "TA_F", "air_temperature", "temperature"],
-        2 => &["Qair", "QA", "QA_F", "specific_humidity", "humidity"],
+        1 => &["Tair", "TA_F", "TA", "air_temperature", "temperature"],
+        2 => &[
+            "Qair",
+            "QA_F",
+            "QA",
+            "VPD_F",
+            "VPD",
+            "RH_F",
+            "RH",
+            "specific_humidity",
+            "humidity",
+        ],
         3 => &[
             "Psurf",
             "PSurf",
-            "PA",
             "PA_F",
+            "PA",
             "surface_pressure",
             "pressure",
         ],
-        4 => &["Precip", "Rainf", "P", "P_F", "precipitation", "rainfall"],
+        4 => &["Precip", "Rainf", "P_F", "P", "precipitation", "rainfall"],
         5 => &["Wind_E", "U", "U10", "eastward_wind", "wind_east"],
         6 => &[
             "Wind_N",
             "Wind",
-            "WS",
             "WS_F",
+            "WS",
             "wind_speed",
             "northward_wind",
         ],
-        7 => &["SWdown", "SW_IN", "SW_IN_F", "shortwave", "solar_radiation"],
+        7 => &["SWdown", "SW_IN_F", "SW_IN", "shortwave", "solar_radiation"],
         8 => &[
             "LWdown",
-            "LW_IN",
             "LW_IN_F",
+            "LW_IN",
             "longwave",
             "thermal_radiation",
         ],
@@ -740,66 +771,119 @@ fn slot_aliases(index: usize) -> &'static [&'static str] {
     }
 }
 
+struct ProbeSiteColumns<'a> {
+    site: Option<&'a str>,
+    time: Option<&'a str>,
+    utc_offset: Option<&'a str>,
+    latitude: Option<&'a str>,
+    longitude: Option<&'a str>,
+    landtype: Option<&'a str>,
+}
+
+fn fallback_site_name(path: &Path) -> Result<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .context("tabular forcing filename has no usable site name")?;
+    Ok(stem
+        .strip_prefix("FLX_")
+        .and_then(|name| name.split_once("_FLUXNET-CH4").map(|(site, _)| site))
+        .filter(|site| !site.is_empty())
+        .unwrap_or(stem)
+        .to_string())
+}
+
 fn probe_sites(
     path: &Path,
     table: &Table,
-    site_column: Option<&str>,
-    time_column: Option<&str>,
-    latitude_column: Option<&str>,
-    longitude_column: Option<&str>,
-    landtype_column: Option<&str>,
+    columns: ProbeSiteColumns<'_>,
 ) -> Result<Vec<TabularSiteProbe>> {
-    let fallback = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("site")
-        .to_string();
-    let site_index = site_column
+    let fallback = fallback_site_name(path)?;
+    let site_index = columns
+        .site
         .map(|name| column_index(table, name))
         .transpose()?;
-    let time_index = time_column
+    let time_index = columns
+        .time
         .map(|name| column_index(table, name))
         .transpose()?;
-    let lat_index = latitude_column
+    let offset_index = columns
+        .utc_offset
         .map(|name| column_index(table, name))
         .transpose()?;
-    let lon_index = longitude_column
+    let lat_index = columns
+        .latitude
         .map(|name| column_index(table, name))
         .transpose()?;
-    let landtype_index = landtype_column
+    let lon_index = columns
+        .longitude
+        .map(|name| column_index(table, name))
+        .transpose()?;
+    let landtype_index = columns
+        .landtype
         .map(|name| column_index(table, name))
         .transpose()?;
     let mut groups = BTreeMap::<String, Vec<&Row>>::new();
     for row in &table.rows {
-        let id = site_index
-            .map(|index| row.cells[index].trim())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&fallback);
+        let id = match site_index {
+            Some(index) => {
+                let value = row.cells[index].trim();
+                if value.is_empty() {
+                    bail!("line {} has an empty site identifier", row.line);
+                }
+                value
+            }
+            None => &fallback,
+        };
         groups.entry(id.to_string()).or_default().push(row);
     }
     groups
         .into_iter()
         .map(|(id, rows)| {
-            let mut times = if let Some(index) = time_index {
+            let times = if let Some(index) = time_index {
                 rows.iter()
                     .map(|row| {
-                        parse_timestamp(&row.cells[index])
-                            .map(|stamp| (stamp.local_seconds, row.cells[index].clone()))
+                        let stamp = parse_timestamp(&row.cells[index])?;
+                        let column_offset = offset_index
+                            .map(|offset| parse_offset_cell(row, offset))
+                            .transpose()?
+                            .flatten();
+                        if let (Some(timestamp), Some(column)) =
+                            (stamp.offset_seconds, column_offset)
+                        {
+                            if timestamp != column {
+                                bail!(
+                                    "line {} timestamp UTC offset disagrees with the UTC offset column",
+                                    row.line
+                                );
+                            }
+                        }
+                        let offset = stamp.offset_seconds.or(column_offset);
+                        Ok((stamp.local_seconds, offset, row.cells[index].clone()))
                     })
                     .collect::<Result<Vec<_>>>()?
             } else {
                 Vec::new()
             };
-            times.sort_unstable_by_key(|item| item.0);
-            let seconds = times.iter().map(|item| item.0).collect::<Vec<_>>();
+            let has_explicit = times.iter().any(|item| item.1.is_some());
+            if has_explicit && !times.iter().all(|item| item.1.is_some()) {
+                bail!("site {id:?} mixes rows with and without UTC offsets; make every row explicit");
+            }
+            let mut normalized = times
+                .iter()
+                .map(|(local, offset, raw)| (local - offset.unwrap_or(0), raw.clone()))
+                .collect::<Vec<_>>();
+            normalized.sort_unstable_by_key(|item| item.0);
+            let seconds = normalized.iter().map(|item| item.0).collect::<Vec<_>>();
             let step_seconds = infer_step(&seconds).ok();
             let inserted_steps = step_seconds
-                .filter(|_| times.len() >= 2)
+                .filter(|_| normalized.len() >= 2)
                 .and_then(|step| {
                     checked_step_count(seconds[0], seconds[seconds.len() - 1], step, seconds.len())
                         .ok()
                 })
-                .map(|steps| steps.saturating_sub(times.len()))
+                .map(|steps| steps.saturating_sub(normalized.len()))
                 .unwrap_or(0);
             Ok(TabularSiteProbe {
                 id,
@@ -807,8 +891,8 @@ fn probe_sites(
                 latitude: consistent_number(&rows, lat_index, "latitude")?,
                 longitude: consistent_number(&rows, lon_index, "longitude")?,
                 landtype: consistent_integer(&rows, landtype_index, "landtype")?,
-                start: times.first().map(|item| item.1.clone()),
-                end: times.last().map(|item| item.1.clone()),
+                start: normalized.first().map(|item| item.1.clone()),
+                end: normalized.last().map(|item| item.1.clone()),
                 step_seconds,
                 inserted_steps,
             })
@@ -827,10 +911,22 @@ fn validate_plan(table: &Table, plan: &TabularPlan) -> Result<()> {
             bail!("unknown CoLM forcing slot {}", slot.index);
         }
         column_index(table, &slot.column)?;
+        let mut additions = BTreeSet::new();
         for extra in &slot.also_add {
+            let extra = extra.trim();
+            if extra.is_empty() {
+                bail!("slot {} has an empty also_add column", slot.index);
+            }
             column_index(table, extra)?;
-            if extra == &slot.column {
+            if extra == slot.column.trim() {
                 bail!("slot {} uses column {:?} twice", slot.index, slot.column);
+            }
+            if !additions.insert(extra) {
+                bail!(
+                    "slot {} names also_add column {:?} more than once",
+                    slot.index,
+                    extra
+                );
             }
         }
         if slot.source_units.trim().is_empty() {
@@ -944,19 +1040,23 @@ fn parse_timestamp(raw: &str) -> Result<ParsedTimestamp> {
         text.pop();
         offset_seconds = Some(0);
     } else if text.len() >= 6 {
-        let suffix = &text[text.len() - 6..];
-        if matches!(suffix.as_bytes()[0], b'+' | b'-') && suffix.as_bytes()[3] == b':' {
+        let bytes = text.as_bytes();
+        let start = bytes.len() - 6;
+        if matches!(bytes[start], b'+' | b'-') && bytes[start + 3] == b':' {
+            let suffix = &text[start..];
             offset_seconds = Some(parse_offset(suffix)?);
-            text.truncate(text.len() - 6);
+            text.truncate(start);
         }
     }
     if offset_seconds.is_none() && text.len() >= 5 {
-        let suffix = &text[text.len() - 5..];
-        if matches!(suffix.as_bytes()[0], b'+' | b'-')
-            && suffix[1..].bytes().all(|byte| byte.is_ascii_digit())
+        let bytes = text.as_bytes();
+        let start = bytes.len() - 5;
+        if matches!(bytes[start], b'+' | b'-')
+            && bytes[start + 1..].iter().all(|byte| byte.is_ascii_digit())
         {
+            let suffix = &text[start..];
             offset_seconds = Some(parse_offset(suffix)?);
-            text.truncate(text.len() - 5);
+            text.truncate(start);
         }
     }
     let digits = text.trim();
@@ -1000,13 +1100,7 @@ fn parse_timestamp(raw: &str) -> Result<ParsedTimestamp> {
             let mut clock_parts = clock.split(':');
             let hour = clock_parts.next().unwrap_or("0").parse()?;
             let minute = clock_parts.next().unwrap_or("0").parse()?;
-            let second = clock_parts
-                .next()
-                .unwrap_or("0")
-                .split('.')
-                .next()
-                .unwrap_or("0")
-                .parse()?;
+            let second = parse_second(clock_parts.next().unwrap_or("0"))?;
             if clock_parts.next().is_some() {
                 bail!("timestamp clock has too many components");
             }
@@ -1028,6 +1122,18 @@ fn parse_timestamp(raw: &str) -> Result<ParsedTimestamp> {
         local_seconds: days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64,
         offset_seconds,
     })
+}
+
+fn parse_second(raw: &str) -> Result<u32> {
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    if raw.ends_with('.')
+        || (!fraction.is_empty()
+            && (!fraction.bytes().all(|byte| byte.is_ascii_digit())
+                || fraction.bytes().any(|byte| byte != b'0')))
+    {
+        bail!("timestamp fractional seconds must be zero; sub-second forcing is not supported");
+    }
+    whole.parse().context("timestamp seconds are not numeric")
 }
 
 fn parse_offset(raw: &str) -> Result<i64> {

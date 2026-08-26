@@ -19,6 +19,7 @@ use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
 
 const SITE_KIND_ATTRIBUTE: &str = "colm_desktop_site_kind";
+const SITE_CROP_ATTRIBUTE: &str = "colm_desktop_crop";
 
 fn netcdf_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -287,6 +288,23 @@ pub fn site_kind(file: &Path) -> Result<SiteKind> {
         return Ok(SiteKind::Urban);
     }
     Ok(SiteKind::Natural)
+}
+
+/// Whether this file belongs to a CROP workflow. Generated coordinate-only
+/// files carry an explicit marker until CoLM rawdata supplies `croptyp` and
+/// `pctcrop`; imported files are recognized from their actual crop variables.
+pub fn crop_site(file: &Path, landtype: Option<i32>) -> Result<bool> {
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    if let Some(marked) = string_attribute(&f, SITE_CROP_ATTRIBUTE) {
+        return match marked.as_str() {
+            "true" => Ok(true),
+            other => bail!(
+                "{} has unsupported {SITE_CROP_ATTRIBUTE}={other:?}",
+                file.display()
+            ),
+        };
+    }
+    Ok(landtype == Some(12) && f.variable("croptyp").is_some() && f.variable("pctcrop").is_some())
 }
 
 /// Audit the complete mksrfdata-facing contract for the selected mode.
@@ -587,18 +605,51 @@ fn rawdata_blocker(raw: &Path, mode: SiteMode, needs: &[String]) -> Option<Strin
     if needs.iter().any(|n| n.starts_with("soil_")) {
         buckets.push(("soil", raw.join("soil")));
     }
-    if ["canopy_height", "LAI_year", "LAI_monthly", "SAI_monthly"]
+    if mode != SiteMode::Urban
+        && [
+            "canopy_height",
+            "canopy_height_pfts",
+            "pfttyp",
+            "pctpfts",
+            "croptyp",
+            "pctcrop",
+            "LAI_year",
+            "LAI_monthly",
+            "SAI_monthly",
+            "LAI_pfts_monthly",
+            "SAI_pfts_monthly",
+        ]
         .iter()
         .any(|n| needs_name(n))
-        || matches!(mode, SiteMode::Pft | SiteMode::Pc)
     {
         buckets.push(("plant_15s", raw.join("plant_15s")));
     }
-    if mode == SiteMode::Urban
-        && !has_netcdf_under(&raw.join("urban"))
-        && !has_netcdf_under(&raw.join("urban_type"))
-    {
-        return Some("rawdata: missing usable urban or urban_type".to_string());
+    if mode == SiteMode::Urban {
+        if ["LCZ_DOM", "URBAN_DENSITY_CLASS"]
+            .iter()
+            .any(|n| needs_name(n))
+        {
+            buckets.push(("urban_type", raw.join("urban_type")));
+        }
+        if [
+            "building_mean_height",
+            "roof_area_fraction",
+            "tree_mean_height",
+            "water_area_fraction",
+            "tree_area_fraction",
+            "resident_population_density",
+        ]
+        .iter()
+        .any(|n| needs_name(n))
+        {
+            buckets.push(("urban", raw.join("urban")));
+        }
+        if ["LAI_year", "TREE_LAI", "TREE_SAI"]
+            .iter()
+            .any(|n| needs_name(n))
+        {
+            buckets.push(("urban_lai_500m", raw.join("urban_lai_500m")));
+        }
     }
     let missing: Vec<String> = buckets
         .into_iter()
@@ -614,16 +665,21 @@ fn has_netcdf_under(path: &Path) -> bool {
     };
     rd.filter_map(Result::ok).any(|e| {
         let p = e.path();
-        p.extension().is_some_and(|ext| ext == "nc")
+        p.extension().is_some_and(|ext| ext == "nc") && usable_netcdf(&p)
             || p.is_dir()
                 && std::fs::read_dir(&p).is_ok_and(|mut xs| {
                     xs.any(|x| {
-                        x.ok()
-                            .and_then(|x| x.path().extension().map(|e| e == "nc"))
-                            .unwrap_or(false)
+                        x.ok().is_some_and(|x| {
+                            let p = x.path();
+                            p.extension().is_some_and(|e| e == "nc") && usable_netcdf(&p)
+                        })
                     })
                 })
     })
+}
+
+fn usable_netcdf(path: &Path) -> bool {
+    netcdf::open(path).is_ok_and(|f| f.variables().next().is_some())
 }
 
 /// 站点文件缺哪些必需字段。
@@ -746,7 +802,7 @@ pub fn skeleton_with_kind(
     landtype: Option<i32>,
     kind: SiteKind,
 ) -> Result<()> {
-    skeleton_with_mode(dst, lon, lat, landtype, kind, SiteMode::Igbp)
+    skeleton_with_mode(dst, lon, lat, landtype, kind, SiteMode::Igbp, false)
 }
 
 pub fn skeleton_with_mode(
@@ -756,6 +812,7 @@ pub fn skeleton_with_mode(
     landtype: Option<i32>,
     kind: SiteKind,
     mode: SiteMode,
+    crop: bool,
 ) -> Result<()> {
     if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
         bail!("site longitude must be finite and within -180..=180, got {lon}");
@@ -763,10 +820,21 @@ pub fn skeleton_with_mode(
     if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
         bail!("site latitude must be finite and within -90..=90, got {lat}");
     }
+    if crop {
+        if !matches!(mode, SiteMode::Pft | SiteMode::Pc) {
+            bail!("CROP site creation requires PFT or PC mode");
+        }
+        if landtype.is_some_and(|value| value != 12) {
+            bail!("CROP site creation requires IGBP land cover 12 Croplands");
+        }
+    }
     // ponytail: NetCDF/HDF5 writes are serialized; split locks only if write throughput matters.
     let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut f = netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
     f.add_attribute(SITE_KIND_ATTRIBUTE, kind.as_str())?;
+    if crop {
+        f.add_attribute(SITE_CROP_ATTRIBUTE, "true")?;
+    }
 
     let mut lon_var = f.add_variable::<f64>("longitude", &[])?;
     lon_var.put_values(&[lon], netcdf::Extents::All)?;
@@ -1303,9 +1371,7 @@ fn fill_clay_and_om_without_a_profile(
     // 8 层挂在自建的维度上：没有剖面就没有任何土壤维度可借
     // （`put_urban_soil` 对城市站点用的是同一个办法）。
     const DIM: &str = "soil";
-    if f.dimension(DIM).is_none() {
-        f.add_dimension(DIM, 8)?;
-    }
+    ensure_dimension(f, DIM, 8)?;
 
     for (name, prefix, fallback, fallback_note) in [
         (
@@ -1355,18 +1421,82 @@ fn raster_layers(rawdata: &Path, prefix: &str, lon: f64, lat: f64) -> Option<[f6
     Some(out)
 }
 
-fn put_scalar(f: &mut netcdf::FileMut, name: &str, value: f64, source: &str) -> Result<()> {
-    let mut v = f.add_variable::<f64>(name, &[])?;
-    v.put_values(&[value], netcdf::Extents::All)?;
-    v.put_attribute("source", source)?;
+fn ensure_dimension(f: &mut netcdf::FileMut, name: &str, len: usize) -> Result<()> {
+    if f.dimension(name).is_some() {
+        return Ok(());
+    }
+    f.redef()?;
+    f.add_dimension(name, len)?;
+    f.enddef()?;
     Ok(())
 }
 
-fn put_int(f: &mut netcdf::FileMut, name: &str, value: i32, source: &str) -> Result<()> {
-    let mut v = f.add_variable::<i32>(name, &[])?;
-    v.put_values(&[value], netcdf::Extents::All)?;
-    v.put_attribute("source", source)?;
+fn put_values<T: netcdf::NcTypeDescriptor>(
+    f: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[T],
+    source: &str,
+) -> Result<()> {
+    // Classic NetCDF requires definitions and attributes in define mode, then
+    // values in data mode. NetCDF4 accepts the same explicit transition.
+    f.redef()?;
+    {
+        let mut variable = f.add_variable::<T>(name, dimensions)?;
+        variable.put_attribute("source", source)?;
+    }
+    f.enddef()?;
+    f.variable_mut(name)
+        .with_context(|| format!("variable {name} disappeared after definition"))?
+        .put_values(values, netcdf::Extents::All)?;
     Ok(())
+}
+
+fn source_attribute(f: &netcdf::FileMut, name: &str) -> Option<String> {
+    match f.variable(name)?.attribute("source")?.value().ok()? {
+        netcdf::AttributeValue::Str(value) => Some(value),
+        _ => None,
+    }
+}
+
+/// Synthetic values written by the generic coordinate-only filler are placeholders,
+/// not site measurements. Urban pre-extracted values may replace those placeholders,
+/// while user/file-provided variables (no `synthesized:` marker) still win.
+fn urban_slot_writable(f: &netcdf::FileMut, name: &str) -> bool {
+    f.variable(name).is_none()
+        || source_attribute(f, name).is_some_and(|source| source.starts_with("synthesized:"))
+}
+
+fn put_or_replace_values<T: netcdf::NcTypeDescriptor>(
+    f: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[T],
+    source: &str,
+) -> Result<()> {
+    if f.variable(name).is_none() {
+        return put_values(f, name, dimensions, values, source);
+    }
+    f.redef()?;
+    {
+        let mut variable = f
+            .variable_mut(name)
+            .with_context(|| format!("variable {name} disappeared before updating"))?;
+        variable.put_attribute("source", source)?;
+    }
+    f.enddef()?;
+    f.variable_mut(name)
+        .with_context(|| format!("variable {name} disappeared after update"))?
+        .put_values(values, netcdf::Extents::All)?;
+    Ok(())
+}
+
+fn put_scalar(f: &mut netcdf::FileMut, name: &str, value: f64, source: &str) -> Result<()> {
+    put_values(f, name, &[], &[value], source)
+}
+
+fn put_int(f: &mut netcdf::FileMut, name: &str, value: i32, source: &str) -> Result<()> {
+    put_values(f, name, &[], &[value], source)
 }
 
 fn put_layers(
@@ -1376,10 +1506,7 @@ fn put_layers(
     dim: &str,
     source: &str,
 ) -> Result<()> {
-    let mut v = f.add_variable::<f64>(name, &[dim])?;
-    v.put_values(values, netcdf::Extents::All)?;
-    v.put_attribute("source", source)?;
-    Ok(())
+    put_values(f, name, &[dim], values, source)
 }
 
 #[cfg(test)]
@@ -1488,8 +1615,9 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
     const RASTER: &str = "extracted from CoLM 2024 rawdata";
     let mut written = Vec::new();
 
-    // --- 局地气候区。整型：CoLM 按 `ncio_read_serial` 的 int32 版读它。 ---
-    if f.variable("LCZ_DOM").is_none() {
+    // --- 局地气候区。CoLM 的城市常量表只有建成类 1..=10；来源栅格的
+    //     自然类 11..=17 不能直接拿来当 Fortran 数组下标。 ---
+    if f.variable("LCZ_DOM").is_none() && (1..=10).contains(&s.lcz_dom) {
         put_int(
             f,
             "LCZ_DOM",
@@ -1519,7 +1647,7 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
         "soil_s_n_alb",
         "soil_d_n_alb",
     ];
-    if albedos.iter().all(|n| f.variable(n).is_none()) {
+    if albedos.iter().all(|n| urban_slot_writable(f, n)) {
         // 地类在 URBAN 路径下被强制成 13，既不是水体也不是冰盖，所以
         // 这张表一定查得到 —— 查不到说明表或档位变了，那要看得见。
         let a = albedo(s.soil_colour, IGBP_URBAN).with_context(|| {
@@ -1535,17 +1663,18 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
             s.soil_colour
         );
         for (name, v) in albedos.iter().zip([a.s_v, a.d_v, a.s_n, a.d_n]) {
-            put_scalar(f, name, v, &note)?;
+            put_or_replace_values(f, name, &[], &[v], &note)?;
             written.push((*name).to_string());
         }
     }
 
     // --- 湖深。表里存的已经是 `SITE_lakedepth`（栅格值 x 0.1）。 ---
-    if f.variable("lakedepth").is_none() {
-        put_scalar(
+    if urban_slot_writable(f, "lakedepth") {
+        put_or_replace_values(
             f,
             "lakedepth",
-            s.lakedepth,
+            &[],
+            &[s.lakedepth],
             &format!(
                 "{RASTER} lake_depth.nc at this site, x0.1 as MOD_SingleSrfdata.F90:2052 does"
             ),
@@ -1555,10 +1684,16 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
 
     // --- 地形。栅格里叫 `slope`，站点文件里叫 `sloperatio`。 ---
     for (name, v) in [("elvstd", s.elvstd), ("sloperatio", s.sloperatio)] {
-        if f.variable(name).is_some() {
+        if !urban_slot_writable(f, name) {
             continue;
         }
-        put_scalar(f, name, v, &format!("{RASTER} topography.nc at this site"))?;
+        put_or_replace_values(
+            f,
+            name,
+            &[],
+            &[v],
+            &format!("{RASTER} topography.nc at this site"),
+        )?;
         written.push(name.to_string());
     }
 
@@ -1572,22 +1707,20 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
         const YEAR_DIM: &str = "LAI_year";
         const MONTH_DIM: &str = "month";
         let ny = urban_extra::LAI_YEARS.len();
-        if f.dimension(YEAR_DIM).is_none() {
-            f.add_dimension(YEAR_DIM, ny)?;
-        }
-        if f.dimension(MONTH_DIM).is_none() {
-            f.add_dimension(MONTH_DIM, 12)?;
-        }
+        ensure_dimension(f, YEAR_DIM, ny)?;
+        ensure_dimension(f, MONTH_DIM, 12)?;
         let note = format!("{RASTER} urban_lai_500m/*.URBLAI_<year>.nc at this site");
-        let mut v = f.add_variable::<i32>("LAI_year", &[YEAR_DIM])?;
-        v.put_values(&urban_extra::LAI_YEARS, netcdf::Extents::All)?;
-        v.put_attribute("source", note.as_str())?;
+        put_values(
+            f,
+            "LAI_year",
+            &[YEAR_DIM],
+            &urban_extra::LAI_YEARS,
+            note.as_str(),
+        )?;
         written.push("LAI_year".to_string());
         for (name, table) in [("TREE_LAI", &s.tree_lai), ("TREE_SAI", &s.tree_sai)] {
             let flat: Vec<f64> = table.iter().flatten().copied().collect();
-            let mut v = f.add_variable::<f64>(name, &[YEAR_DIM, MONTH_DIM])?;
-            v.put_values(&flat, netcdf::Extents::All)?;
-            v.put_attribute("source", note.as_str())?;
+            put_values(f, name, &[YEAR_DIM, MONTH_DIM], &flat, note.as_str())?;
             written.push(name.to_string());
         }
     }
@@ -1611,24 +1744,24 @@ fn put_urban_soil(f: &mut netcdf::FileMut, s: &UrbanSoil) -> Result<Vec<String>>
     // 每个土壤量都是 `DO nsl = 1, 8`，多写的层 CoLM 不会看。
     const NLAYER: usize = 8;
 
-    if f.dimension(DIM).is_none() {
-        f.add_dimension(DIM, NLAYER)?;
-    }
+    ensure_dimension(f, DIM, NLAYER)?;
     let mut written = Vec::new();
     for (field, var) in urban_soil::SITE_VARS {
-        // 站点文件自己有就不动它。
-        if f.variable(var).is_some() {
+        // 站点文件自己有就不动它；但 `site-new --mode urban` 先写出的
+        // synthesized 占位值必须被预抽城市表替换，否则 CoLM 会把那些占位值
+        // 当真实站点数据使用而不再读取 rawdata。
+        if !urban_slot_writable(f, var) {
             continue;
         }
         if field == "texture" {
             // **照抄 `-1`**：21 个站里 16 个落在质地产品的空洞上，而 CoLM
             // 拿到负值会 `WHERE (soiltext < 0) soiltext = 0` 再取
             // `BVIC_USDA(0) = 1.0`。由砂黏比反推一个类别反而会改掉结果。
-            put_int(f, var, s.texture, SOURCE)?;
+            put_or_replace_values(f, var, &[], &[s.texture], SOURCE)?;
         } else {
             let xs = layers(s, field)
                 .with_context(|| format!("urban_soil::SITE_VARS names a field {field:?} that site.rs cannot read; the generated table and this writer have drifted apart"))?;
-            put_layers(f, var, xs, DIM, SOURCE)?;
+            put_or_replace_values(f, var, &[DIM], xs, SOURCE)?;
         }
         written.push(var.to_string());
     }

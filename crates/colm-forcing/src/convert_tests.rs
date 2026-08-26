@@ -777,6 +777,22 @@ fn a_slot_spec_without_a_plus_has_nothing_to_add() {
 }
 
 #[test]
+fn slot_spec_rejects_empty_or_duplicate_also_add_entries() {
+    for bad in [
+        "4=Rainf:kg/m2/s+",
+        "4=Rainf:kg/m2/s+Snowf+Snowf",
+        "4=Snowf:kg/m2/s+Snowf",
+    ] {
+        let err = super::parse_slot_spec(bad).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("also_add") || text.contains("twice"),
+            "{bad:?}: {text}"
+        );
+    }
+}
+
+#[test]
 fn a_malformed_slot_spec_says_what_it_wanted() {
     // **报错要说出正确的形状**，不能只说「格式错误」——
     // 用户下一步要用的正是那个形状。
@@ -887,4 +903,38 @@ fn a_variable_listed_both_as_source_and_in_also_add_is_refused() {
     let m = e.to_string();
     assert!(m.contains("Snowf"), "报错要点名那个变量：{m}");
     assert!(m.contains("twice"), "要说清楚后果是加了两次：{m}");
+}
+
+#[test]
+fn programmatic_also_add_duplicates_are_refused_before_summing() {
+    let dir = std::env::temp_dir().join("colm-convert-dup-extra");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let p = dir.join("dup_extra_Met.nc");
+    {
+        let mut f = netcdf::create(&p).unwrap();
+        f.add_dimension("time", 2).unwrap();
+        let mut t = f.add_variable::<f64>("time", &["time"]).unwrap();
+        t.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+            .unwrap();
+        t.put_values(&[0.0, 1800.0], netcdf::Extents::All).unwrap();
+        for name in ["Rainf", "Snowf"] {
+            let mut v = f.add_variable::<f64>(name, &["time"]).unwrap();
+            v.put_attribute("units", "kg/m2/s").unwrap();
+            v.put_values(&[1.0, 2.0], netcdf::Extents::All).unwrap();
+        }
+    }
+
+    let plan = super::Plan {
+        slots: vec![super::SlotPlan {
+            index: 4,
+            source_name: "Rainf".into(),
+            source_units: "kg/m2/s".into(),
+            also_add: vec!["Snowf".into(), "Snowf".into()],
+        }],
+        heights: None,
+    };
+    let e = super::convert(&p, &dir.join("out.nc"), &plan).unwrap_err();
+    assert!(format!("{e:#}").contains("more than once"), "{e:#}");
 }
