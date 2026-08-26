@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/latest"><img src="https://img.shields.io/github/v/release/zhongwangwei/CoLM-Desktop?display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/version-v0.2.0--beta.1-orange" alt="Current beta version: v0.2.0-beta.1"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
