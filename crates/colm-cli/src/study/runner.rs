@@ -2321,6 +2321,19 @@ mod tests {
     #[test]
     fn verified_gui_cancel_closes_active_tasks_and_rejects_a_new_scheduler() {
         assert!(scheduler_process_alive(std::process::id()).unwrap());
+        #[cfg(windows)]
+        let mut exited = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
+        let mut exited = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let exited_pid = exited.id();
+        assert!(exited.wait().unwrap().success());
+        assert!(!scheduler_process_alive(exited_pid).unwrap());
         let dir = std::env::temp_dir().join(format!(
             "colm-study-finalize-cancel-{}-{}",
             std::process::id(),
@@ -2345,16 +2358,16 @@ mod tests {
         let mut queued = running.clone();
         queued.member = "m000002".into();
         queued.status = TaskStatus::Queued;
-        running.process.as_mut().unwrap().pid = u32::MAX;
+        running.process.as_mut().unwrap().pid = exited_pid;
         let state = StudyState::new("s".into(), [running, queued]).unwrap();
         super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
         let mut owner = supervisor_identity();
-        owner.pid = u32::MAX;
+        owner.pid = exited_pid;
         std::fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
 
         assert!(finalize_cancel(&dir, 9999).is_err());
         assert!(dir.join("run.lock").is_file());
-        let cancelled = finalize_cancel(&dir, u32::MAX).unwrap();
+        let cancelled = finalize_cancel(&dir, exited_pid).unwrap();
         assert_eq!(cancelled.status, StudyStatus::Cancelled);
         assert!(cancelled.tasks.values().all(|task| {
             task.status == TaskStatus::Cancelled && task.stage.is_none() && task.process.is_none()

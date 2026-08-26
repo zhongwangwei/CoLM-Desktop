@@ -2,7 +2,7 @@
 
 ## 0. 总评
 
-相对 2026-08-24 审查，本轮没有重复上报已清零的 S1/S2，也没有发现新的 S1；新增确认并解决了 **3 个 S2、6 个 S3、1 个 S4**：Study 主动取消不落持久终态、内核实际宏与若干外部目录不进入阶段指纹、数值时区/PFT 整数入口过宽、前处理产物可安装符号链接、损坏 forcing 的非有限值错误不清楚、OAT 损坏样本可触发 panic、结果页快速切换异步竞态，以及完整导出被 LRU 长期保留。20 万点与 132 个 history 文件的实测表明 Rust/NetCDF/降采样路径不是当前瓶颈；本轮唯一有证据值得实施的性能改动把 12 份完整导出的隔离 Node 堆保留量从 **73.2 MiB 降到 0.0 MiB**，同时保留有界绘图缓存。
+相对 2026-08-24 审查，本轮没有重复上报已清零的 S1/S2，也没有发现新的 S1；新增确认并解决了 **3 个 S2、6 个 S3、2 个 S4**：Study 主动取消不落持久终态、内核实际宏与若干外部目录不进入阶段指纹、数值时区/PFT 整数入口过宽、前处理产物可安装符号链接、损坏 forcing 的非有限值错误不清楚、OAT 损坏样本可触发 panic、结果页快速切换异步竞态、完整导出被 LRU 长期保留，以及取消回归测试使用 Windows `tasklist` 不接受的伪 PID。20 万点与 132 个 history 文件的实测表明 Rust/NetCDF/降采样路径不是当前瓶颈；本轮唯一有证据值得实施的性能改动把 12 份完整导出的隔离 Node 堆保留量从 **73.2 MiB 降到 0.0 MiB**，同时保留有界绘图缓存。
 
 结论：本轮确认项均已修复；根 workspace、GUI workspace、全部前端 Node 检查、两张生成表 drift 与 namelist 逐字节 roundtrip 均通过。由于本机只有 macOS，Windows/Linux 仍由 GitHub CI 提供最终平台证据。
 
@@ -20,6 +20,7 @@
 | S3 一般 | `crates/colm-forcing/src/met.rs:37-50`；`crates/colm-cli/src/main.rs:3299-3305` | forcing `time` 轴的 `Inf/NaN` 未在摘要入口拒绝，参考高度只过滤 `NaN`；损坏文件可能最后表现为泛化 JSON 序列化错误。 | 用户无法定位 forcing 损坏，且非有限时间可能继续参与步长判断。 | **已修复**：摘要逐点拒绝非有限时间并报告索引；probe 对全部非有限高度统一输出 `null`。 |
 | S3 一般 | `crates/colm-cli/src/study/runner.rs:1462-1467` | OAT 结果写出对 baseline 使用 `unwrap()`；手工损坏/不完整样本可让 CLI panic。 | Study 结果命令异常终止且缺少可处置的上下文。 | **已修复**：改为带 `OAT Study has no baseline member` 上下文的普通错误。 |
 | S4 提示 | `gui/dist/app/results.js:648-665` | CSV 完整导出使用 `maxPoints:null`，但结果仍进入 12 项 `seriesCache`；每次导出都可能把 10 MiB 级 JSON 对象长期留在 WebView。 | 连续导出不同变量组合时造成不必要的堆增长和 GC 压力；不影响数值正确性。 | **已修复**：仅完整导出绕过 LRU；默认 2400 点和诊断用有界绘图请求继续缓存。 |
+| S4 提示 | `crates/colm-cli/src/study/runner.rs:2318-2370` | 新增的取消回归测试用 `u32::MAX` 代表已退出 PID；Windows `tasklist /FI` 把该值视为无效过滤器并返回失败。 | 产品路径未受影响，但 Windows Rust CI 被测试夹具误报阻断。 | **已修复**：测试跨平台启动并等待一个真实子进程退出，再用其合法 PID 验证存活检查与 finalize。 |
 
 ## 2. 性能分析（每条附基准数字）
 
@@ -61,7 +62,7 @@
 |---|---|---|
 | `crates/colm-kernel/src/manifest.rs`、`manifest_tests.rs` | 增加稳定且完整的阶段内核配置身份，宏顺序规范化。 | `cargo test -p colm-kernel manifest_tests::`；根 workspace test/clippy/fmt。 |
 | `crates/colm-cli/src/fingerprint.rs`、`fingerprint_tests.rs`、`main.rs` | 目录内容进入指纹；普通运行使用完整内核配置身份；forcing probe 过滤非有限高度；注册取消 finalize。 | `cargo test -p colm-cli fingerprint_tests::`；`cargo test -p colm-cli forcing_probe_tests::probe_never_serializes_non_finite_heights -- --exact`；根 workspace test/clippy/fmt。 |
-| `crates/colm-cli/src/study/runner.rs` | Study 使用完整阶段身份；取消后安全落 checkpoint；OAT baseline 缺失返回错误。 | `cargo test -p colm-cli study::runner::tests::verified_gui_cancel_closes_active_tasks_and_rejects_a_new_scheduler -- --exact`；根 workspace test/clippy/fmt。 |
+| `crates/colm-cli/src/study/runner.rs` | Study 使用完整阶段身份；取消后安全落 checkpoint；OAT baseline 缺失返回错误；取消测试使用真实已退出 PID。 | `cargo test -p colm-cli study::runner::tests::verified_gui_cancel_closes_active_tasks_and_rejects_a_new_scheduler -- --exact`；根 workspace test/clippy/fmt；GitHub Windows Rust CI。 |
 | `crates/colm-cli/src/forcing_probe_tests.rs`、`crates/colm-forcing/src/met.rs`、`met_tests.rs` | 非有限 forcing time/height 回归。 | `cargo test -p colm-forcing met::met_tests::forcing_summary_rejects_a_non_finite_time_axis -- --exact`；根 workspace test/clippy/fmt。 |
 | `crates/colm-forcing/src/tabular.rs`、`tabular_tests.rs` | 数值 UTC offset 收紧为整分钟。 | `cargo test -p colm-forcing tabular::tabular_tests`；根 workspace test/clippy/fmt。 |
 | `gui/src-tauri/src/config.rs`、`config_tests.rs` | PFT Integer 写入前增加 Fortran 默认整数范围检查。 | `cargo test --manifest-path gui/src-tauri/Cargo.toml pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots`；GUI workspace test/clippy/fmt。 |
