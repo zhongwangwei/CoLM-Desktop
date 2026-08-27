@@ -326,9 +326,9 @@ pub fn validate_study_parameters(params: &[StudyParameter<'_>]) -> Result<()> {
     Ok(())
 }
 
-/// Reject parameters that the selected case would not actually use.  This is
-/// deliberately a Study-side gate: a harmless manual sentinel/default must
-/// never become an automatic sampling dimension.
+/// Reject parameters that the selected case would not actually use. Sentinel
+/// baselines remain valid: Study bounds are checked separately and every
+/// sampled candidate receives an explicit value.
 pub fn validate_case_parameter_activity(
     case_nml: &Path,
     names: &[String],
@@ -361,20 +361,6 @@ pub fn validate_case_parameter_activity(
     for name in names {
         let parameter =
             find(name)?.ok_or_else(|| anyhow!("{name} is not a registered tuning parameter"))?;
-        let current = doc
-            .get(parameter.name)
-            .and_then(colm_namelist::Value::as_f64)
-            .unwrap_or(parameter.default);
-        if parameter
-            .sentinel
-            .is_some_and(|sentinel| current == sentinel.value)
-        {
-            bail!(
-                "{} still uses its sentinel default; set an explicit scalar before sampling",
-                parameter.name
-            );
-        }
-
         let active = match parameter.name {
             "DEF_BALL_BERRY_GRADM" | "DEF_BALL_BERRY_BINTER" => biological && !medlyn && !wue,
             "DEF_MEDLYN_G1" | "DEF_MEDLYN_G0" => biological && medlyn && !wue,

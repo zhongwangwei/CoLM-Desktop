@@ -182,21 +182,21 @@ fn applies_runtime_values_without_touching_the_source_on_error() {
 }
 
 #[test]
-fn study_rejects_sentinel_and_inactive_scheme_parameters() {
+fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
     let root = std::env::temp_dir().join(format!("colm-tuning-active-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("case.nml");
     std::fs::write(
         &path,
-        "&nl_colm\n DEF_USE_MEDLYNST=.true.\n DEF_USE_WUEST=.false.\n DEF_MEDLYN_G1=-1.0\n DEF_BALL_BERRY_GRADM=9.0\n/\n",
+        "&nl_colm\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.true.\n DEF_WUE_LAMBDA=-1.0\n DEF_BALL_BERRY_GRADM=9.0\n/\n",
     )
     .unwrap();
-    assert!(tuning::validate_case_parameter_activity(
+    tuning::validate_case_parameter_activity(
         &path,
-        &["DEF_MEDLYN_G1".into()],
-        &["SinglePoint".into()]
+        &["DEF_WUE_LAMBDA".into()],
+        &["SinglePoint".into()],
     )
-    .is_err());
+    .unwrap();
     assert!(tuning::validate_case_parameter_activity(
         &path,
         &["DEF_BALL_BERRY_GRADM".into()],
