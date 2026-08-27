@@ -117,6 +117,8 @@ for (const control of [
   'evaluation-variable-selector', 'batch-evaluation-variable-selector',
   'uq-readiness', 'uq-create', 'uq-run', 'uq-status', 'uq-retry', 'uq-from', 'uq-to',
   'uq-range-confirm', 'uq-step-progress', 'uq-step-do', 'uq-step-why', 'uq-step-prev', 'uq-step-next',
+  'uq-purpose', 'uq-method-help', 'uq-site-mode-help', 'uq-window-help', 'uq-count-help',
+  'uq-seed-help', 'uq-jobs-help', 'uq-kernel-help',
   'tune-readiness', 'tune-create', 'tune-run', 'tune-status', 'tune-retry', 'tune-val-from', 'tune-val-to',
   'tune-min-pairs', 'tune-range-confirm', 'tune-step-progress', 'tune-step-do', 'tune-step-why', 'tune-step-prev', 'tune-step-next',
   'evaluation-chart-refresh', 'export-pdf',
@@ -130,6 +132,14 @@ for (const kind of ['uq', 'tuning']) {
 }
 for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以创建', '先设计，再创建，再运行', '先确认观测与目标，再开始搜索']) {
   if (!html.includes(text)) throw new Error(`Study guidance is missing: ${text}`);
+}
+for (const text of [
+  '不确定性分析要回答什么？', '有限样本分位带不是统计置信区间',
+  '创建阶段不做模型计算', 'OAT 候选数 = 2 × 已选参数数',
+  '不会缩短 CoLM 的完整模拟', '少于 20 仅适合流程试跑',
+  '并发只影响墙钟时间', '记录路径和内核指纹',
+]) {
+  if (!html.includes(text)) throw new Error(`uncertainty design guidance is missing: ${text}`);
 }
 for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
@@ -151,6 +161,11 @@ if (!resultUi.includes('const studyAsyncRequests =')
     || !resultUi.includes('async function renderStudyOutputs(stillCurrent = () => true)')
     || !resultUi.includes('async function renderTuningTargets(stillCurrent = () => true)')
     || !resultUi.includes('function studyDesign(kind)')
+    || !resultUi.includes("const seedText = $('uq-seed')?.value.trim() || ''")
+    || !resultUi.includes("method === 'lhs' && (!seedText")
+    || !resultUi.includes('Number.isSafeInteger(seed)')
+    || !resultUi.includes('seed: design.seed')
+    || !resultUi.includes("for (const target of ['uq-count', 'uq-seed'])")
     || !resultUi.includes('使用对数采样时上下界必须大于 0')
     || !resultUi.includes('采样范围超出代码硬边界')) {
   throw new Error('Study page transitions must reject stale responses and invalid page-level scientific inputs');

@@ -506,9 +506,22 @@
         <div class="work-head"><span class="kicker">第 6 步 · 不确定性分析</span></div>
         <h1>不确定性分析</h1>
         <p class="sub">这是基本设定完成后的可选研究流程。Study 会复制当前算例并独立运行，不修改原算例。</p>
+        <div class="card study-purpose" id="uq-purpose">
+          <h3>不确定性分析要回答什么？</h3>
+          <p>在你给定的参数范围内，系统生成多组参数成员并重复运行 CoLM，用来判断模型输出会变化多少、哪些参数最可能主导变化，以及哪些结果对参数假设更敏感。它用于敏感性筛查和情景范围评估，不是参数自动校准。</p>
+          <div class="study-purpose-grid">
+            <div><strong>可以回答</strong><span>输出的样本范围与 P05 / P50 / P95 分位带、参数影响方向和排序，以及下一步应优先约束哪些参数。</span></div>
+            <div><strong>不能直接回答</strong><span>有限样本分位带不是统计置信区间，也不代表参数的真实概率分布；范围过窄会低估不确定性，过宽可能产生非物理或失败成员。</span></div>
+          </div>
+        </div>
         <div class="card study-guide">
           <div>
             <h3>先设计，再创建，再运行</h3>
+            <div class="study-lifecycle">
+              <div><strong>1 · 设计</strong><span>定义科学问题、方法、站点、分析窗口和样本预算。这里只形成试验方案，不创建目录，也不运行模型。</span></div>
+              <div><strong>2 · 创建</strong><span>校验参数与输出，记录输入和内核指纹，再生成 baseline、候选成员目录及清单。创建阶段不做模型计算。</span></div>
+              <div><strong>3 · 运行</strong><span>按成员执行 mksrfdata、mkinidata 和 colm，持续记录进度并汇总结果；可暂停派发或重试失败成员，原算例保持不变。</span></div>
+            </div>
             <div class="study-step-explain" aria-live="polite">
               <div><strong>本页做什么</strong><span id="uq-step-do">选择 OAT 或 LHS、站点组织方式、分析时段、样本数和并发数。</span></div>
               <div><strong>为什么需要</strong><span id="uq-step-why">这些设置决定如何覆盖参数空间、要计算多少成员，以及结果对应哪段模拟时段。</span></div>
@@ -519,17 +532,75 @@
         <div class="study-wizard-progress" aria-live="polite"><span id="uq-step-progress">第 1/7 页 · 试验设计</span></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="0">
           <h3>1 · 试验设计</h3>
-          <div class="ch">选择方法、作用站点和分析窗口。尚未运行过基准算例也可以配置，Study 会先运行自己的 baseline。</div>
-          <div class="result-tools result-tools-wide">
-            <label>方法 <select class="select" id="uq-method"><option value="lhs">LHS 拉丁超立方</option><option value="oat">OAT 单因子</option></select></label>
-            <label>站点方式 <select class="select" id="uq-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独 Study</option></select></label>
-            <label>分析开始 <input class="input" id="uq-from" type="date"></label>
-            <label>分析结束 <input class="input" id="uq-to" type="date"></label>
-            <label>样本数 <input class="input" id="uq-count" type="number" min="1" max="1000" value="40"></label>
-            <label>随机种子 <input class="input" id="uq-seed" type="number" value="1"></label>
-            <label>并发 <input class="input" id="uq-jobs" type="number" min="1" value="1"></label>
-            <label>内核目录 <input class="input" id="uq-kernel-dir" readonly placeholder="使用当前内核"></label>
-            <button class="btn-ghost" id="uq-refresh-params">读取参数</button>
+          <div class="ch">本页定义成员如何生成、多个站点如何组织，以及用哪段输出做统计。尚未运行过基准算例也可以配置，Study 会运行自己的 baseline。</div>
+          <div class="study-design-grid">
+            <section class="study-design-field">
+              <label for="uq-method">方法</label>
+              <select class="select" id="uq-method" aria-describedby="uq-method-help"><option value="lhs">LHS 拉丁超立方</option><option value="oat">OAT 单因子</option></select>
+              <dl class="study-field-help" id="uq-method-help">
+                <div><dt>是什么</dt><dd>OAT 每次只把一个参数设为下界或上界，其余保持 baseline；LHS 让所有参数同时在各自范围内分层抽样。</dd></div>
+                <div><dt>怎么选</dt><dd>快速筛查单个参数影响时选 OAT；评估多参数共同变化造成的输出范围时选 LHS。</dd></div>
+                <div><dt>选择后果</dt><dd>OAT 候选数 = 2 × 已选参数数，不能识别参数交互，样本数和随机种子不生效；LHS 可分析联合变化和 Spearman 秩相关，但需要更多样本。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="uq-site-mode">站点方式</label>
+              <select class="select" id="uq-site-mode" aria-describedby="uq-site-mode-help"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独 Study</option></select>
+              <dl class="study-field-help" id="uq-site-mode-help">
+                <div><dt>是什么</dt><dd>共享模式把同一参数成员应用到全部站点；独立模式为每个站点分别创建一个 Study。</dd></div>
+                <div><dt>怎么选</dt><dd>比较同一参数假设在多站点的影响时选共享；站点的基准值、可用参数或输出不同则选独立。</dd></div>
+                <div><dt>选择后果</dt><dd>共享模式要求所选参数的 baseline 一致且输出适用于所有站点；独立模式更灵活，但 Study 数量和管理成本随站点数增加。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field study-design-field-wide">
+              <span class="study-field-label">分析窗口</span>
+              <div class="study-control-row">
+                <label for="uq-from">分析开始 <input class="input" id="uq-from" type="date" aria-describedby="uq-window-help"></label>
+                <label for="uq-to">分析结束 <input class="input" id="uq-to" type="date" aria-describedby="uq-window-help"></label>
+              </div>
+              <dl class="study-field-help" id="uq-window-help">
+                <div><dt>是什么</dt><dd>只限定读取和统计结果的连续时段，不会缩短 CoLM 的完整模拟；留空时使用全部可用结果。</dd></div>
+                <div><dt>怎么选</dt><dd>选择与科学问题一致且结果已稳定的时段，避开 spin-up、缺测期或异常强迫期。</dd></div>
+                <div><dt>选择后果</dt><dd>窗口过短会让分位带和参数排序不稳定；包含 spin-up 会混入初始条件影响；更长窗口会增加读取和统计成本。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="uq-count">样本数</label>
+              <input class="input" id="uq-count" type="number" min="1" max="1000" step="1" value="40" aria-describedby="uq-count-help">
+              <dl class="study-field-help" id="uq-count-help">
+                <div><dt>是什么</dt><dd>LHS 的候选参数成员数；OAT 的候选数由参数数量自动决定，因此不使用此值。</dd></div>
+                <div><dt>怎么选</dt><dd>40 可用于初步分析；少于 20 仅适合流程试跑，无法形成稳定分位带；参数越多通常越需要增加样本。</dd></div>
+                <div><dt>选择后果</dt><dd>总任务量约为（候选成员 + 1 个 baseline）× 站点 × 3 个模型阶段；增加样本会提高覆盖度，也会线性增加耗时、磁盘占用和排错成本。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="uq-seed">随机种子</label>
+              <input class="input" id="uq-seed" type="number" min="0" max="9007199254740991" step="1" value="1" aria-describedby="uq-seed-help">
+              <dl class="study-field-help" id="uq-seed-help">
+                <div><dt>是什么</dt><dd>控制 LHS 分层排列与区间内抽样的非负整数；OAT 不使用随机抽样。</dd></div>
+                <div><dt>怎么选</dt><dd>复现实验时保持不变；检查抽样偶然性时更换种子并重新创建 Study。</dd></div>
+                <div><dt>选择后果</dt><dd>同一方法、范围和种子会生成相同参数设计；完整复现还要求算例、输入和内核一致。改变种子会得到另一组确定性成员，但不代表结果更好。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="uq-jobs">并发</label>
+              <input class="input" id="uq-jobs" type="number" min="1" step="1" value="1" aria-describedby="uq-jobs-help">
+              <dl class="study-field-help" id="uq-jobs-help">
+                <div><dt>是什么</dt><dd>同时派发的任务数，上限为本机检测到的逻辑 CPU。共享模式控制成员/站点任务；运行多个独立 Study 时控制 Study 数且每个 Study 内部并发为 1，只有一个 Study 时则控制其内部任务。</dd></div>
+                <div><dt>怎么选</dt><dd>普通笔记本先用 1–2；确认 CPU、内存和磁盘余量充足后再增加。</dd></div>
+                <div><dt>选择后果</dt><dd>并发只影响墙钟时间，不改变采样设计或科学结果；过高会造成 CPU、内存和磁盘争用，可能反而变慢或增加失败。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="uq-kernel-dir">内核目录</label>
+              <input class="input" id="uq-kernel-dir" readonly placeholder="使用当前内核" aria-describedby="uq-kernel-help">
+              <dl class="study-field-help" id="uq-kernel-help">
+                <div><dt>是什么</dt><dd>基本设定当前匹配到的 CoLM 内核运行目录；它决定有效物理方案、可采样参数、计划输出和实际数值计算。</dd></div>
+                <div><dt>怎么选</dt><dd>这里自动使用当前匹配内核；如需更换，应先回到基本设定修改物理方案并选择对应构建。</dd></div>
+                <div><dt>选择后果</dt><dd>创建 Study 时会记录路径和内核指纹，运行时再次校验；更换内核会破坏结果的可重复性和可比性。</dd></div>
+              </dl>
+              <button class="btn-ghost" id="uq-refresh-params">读取参数</button>
+            </section>
           </div>
         </div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden><h3>4 · 预算预览</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再创建。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>

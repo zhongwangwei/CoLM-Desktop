@@ -1540,7 +1540,7 @@ const studyWizardTitles = {
 };
 const studyWizardHelp = {
   uq: [
-    ['选择 OAT 或 LHS、站点组织方式、分析时段、样本数和并发数。', '这些设置决定如何覆盖参数空间、要计算多少成员，以及结果对应哪段模拟时段。'],
+    ['先明确要评估哪些参数假设会让哪些输出发生多大变化，再选择方法、站点方式、分析窗口、样本数、随机种子、并发和内核。', '设计决定成员如何覆盖参数空间、计算成本与可重复性。结果是给定范围内的有限样本情景分位带，不是自动校准或统计置信区间。'],
     ['从当前配置预计写出的标量 history 中，选择要形成不确定性包络的输出。', '只分析与科学问题相关且各站点可用的变量，可避免无效运行和无法比较的结果。'],
     ['选择参与扰动的参数，填写有限采样上下界与线性/对数尺度，并确认范围责任。', '参数范围就是不确定性假设；过宽会产生非物理解，过窄则会低估结果敏感性。'],
     ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次 Study 的计算规模。', '在创建前看清任务量，便于控制计算时间、磁盘占用和样本预算。'],
@@ -2049,7 +2049,10 @@ function studyDesign(kind) {
   const from = $('uq-from')?.value ? unixDate('uq-from') : undefined;
   const to = $('uq-to')?.value ? unixDate('uq-to') : undefined;
   if ((from !== undefined || to !== undefined) && !(from < to)) throw new Error('不确定性分析窗口必须满足开始 < 结束。');
-  return { method, candidate_count, from, to };
+  const seedText = $('uq-seed')?.value.trim() || '';
+  const seed = method === 'lhs' ? Number(seedText) : 1;
+  if (method === 'lhs' && (!seedText || !Number.isSafeInteger(seed) || seed < 0)) throw new Error('随机种子必须是非负安全整数。');
+  return { method, candidate_count, from, to, seed };
 }
 
 function studySpec(kind, cases, independent = false) {
@@ -2083,7 +2086,7 @@ function studySpec(kind, cases, independent = false) {
     .map(input => input.dataset.uqOutput);
   if (!outputs.length) throw new Error(`不确定性分析至少需要一个适用于 ${cases.map(caseName).join('、')} 的输出变量。`);
   return {
-    kind: 'uncertainty', method: design.method, seed: Number($('uq-seed').value), kernel_dir,
+    kind: 'uncertainty', method: design.method, seed: design.seed, kernel_dir,
     base_cases: cases.map(c => c.dir), parameters, outputs, site_mode: independent ? 'independent' : 'shared',
     analysis_from: design.from, analysis_to: design.to,
     budget: { candidate_count: design.candidate_count, jobs: studyJobCount('uq') },
@@ -2474,8 +2477,8 @@ for (const kind of ['uq', 'tuning']) for (const action of ['pause', 'resume', 'c
 wireStudyButton('uq-export-study', () => exportStudy('uq'));
 wireStudyButton('tune-export-study', () => exportStudy('tuning'));
 wireStudyButton('tune-apply-best', applyBestCandidate);
-for (const id of ['uq-method', 'uq-count', 'uq-jobs', 'tune-pop', 'tune-gen', 'tune-jobs']) if ($(id)) $(id).oninput = $(id).onchange = () => {
-  if (id === 'uq-method' && $('uq-count')) $('uq-count').disabled = $('uq-method').value === 'oat';
+for (const id of ['uq-method', 'uq-count', 'uq-seed', 'uq-jobs', 'tune-pop', 'tune-gen', 'tune-jobs']) if ($(id)) $(id).oninput = $(id).onchange = () => {
+  if (id === 'uq-method') for (const target of ['uq-count', 'uq-seed']) $(target).disabled = $('uq-method').value === 'oat';
   renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
 };
 if ($('tune-site-mode')) $('tune-site-mode').onchange = () => renderTuningTargets().catch(e => status(e.message || e));
