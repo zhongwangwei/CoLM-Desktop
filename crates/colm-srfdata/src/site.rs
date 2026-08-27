@@ -290,6 +290,17 @@ pub fn site_kind(file: &Path) -> Result<SiteKind> {
     Ok(SiteKind::Natural)
 }
 
+pub fn supports_ncar_urban(file: &Path) -> Result<bool> {
+    let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let scalar = |name: &str| {
+        f.variable(name)
+            .and_then(|v| v.get_values::<i32, _>(netcdf::Extents::All).ok())
+            .and_then(|values| values.first().copied())
+    };
+    Ok(matches!(scalar("URBTYP"), Some(1..=33))
+        && matches!(scalar("URBAN_DENSITY_CLASS"), Some(1..=3)))
+}
+
 /// Whether this file belongs to a CROP workflow. Generated coordinate-only
 /// files carry an explicit marker until CoLM rawdata supplies `croptyp` and
 /// `pctcrop`; imported files are recognized from their actual crop variables.
@@ -1535,7 +1546,7 @@ mod site_tests;
 ///    `soil_texture` 藏在 `IF (DEF_Runoff_SCHEME == 3)` 里，而 3 是 CoLM 的
 ///    默认值，所以它一样要写。
 ///
-/// 3. 把 [`urban_extra`] 那张表里剩下的六处写进去：`LCZ_DOM`、`LUCY_ID`、
+/// 3. 把 [`urban_extra`] 的城市分类与其余点值写进去：LCZ、NCAR、LUCY、
 ///    四个土壤反照率、`lakedepth`、`elvstd`/`sloperatio`，以及 23 年 x 12 月的
 ///    `TREE_LAI`/`TREE_SAI`（连同它们的 `LAI_year`）。这一批省掉的是
 ///    `urban_type/` 与 `urban_lai_500m/` 的 5x5 瓦片（后者实测 15 块 x 23 年
@@ -1602,7 +1613,7 @@ pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
     Ok(report)
 }
 
-/// 把 [`urban_extra`] 里一个站点的六批点值写进 site.nc，返回写下的变量名。
+/// 把 [`urban_extra`] 里一个站点的城市点值写进 site.nc，返回写下的变量名。
 ///
 /// **站点文件自己有的一律不动。** 实测 `US-Minneapolis1`/`2` 自带
 /// `LCZ_DOM = 6`（栅格给 12），覆盖它会把这两个站的城市形态换掉。
@@ -1625,6 +1636,24 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
             &format!("{RASTER} urban_type/*.URBTYP.nc at this site"),
         )?;
         written.push("LCZ_DOM".to_string());
+    }
+    if f.variable("URBTYP").is_none() && (1..=33).contains(&s.ncar_region) {
+        put_int(
+            f,
+            "URBTYP",
+            s.ncar_region,
+            &format!("{RASTER} urban_type/*.URBTYP.nc REGION_ID at this site"),
+        )?;
+        written.push("URBTYP".to_string());
+    }
+    if f.variable("URBAN_DENSITY_CLASS").is_none() && (1..=3).contains(&s.ncar_density) {
+        put_int(
+            f,
+            "URBAN_DENSITY_CLASS",
+            s.ncar_density,
+            &format!("{RASTER} urban_type/*.URBTYP.nc at this site"),
+        )?;
+        written.push("URBAN_DENSITY_CLASS".to_string());
     }
 
     // --- LUCY 区号。实型：CoLM 用 `read_point_var_2d_real8` 读那个 int 栅格，

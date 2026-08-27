@@ -82,6 +82,7 @@ const COMMON_VARIABLES = {
   f_snowdp: ['雪深', 'm', '积雪'],
   f_scv: ['雪水当量', 'kg/m²', '积雪'],
 };
+const PLANNED_PROFILE_VARIABLES = new Set(['f_t_soisno', 'f_wliq_soisno', 'f_wice_soisno']);
 
 const catalogCache = new LruCache(16);
 const evaluationCatalogCache = new LruCache(64);
@@ -1386,6 +1387,30 @@ async function prepareActivePane() {
   renderOverview();
   syncResultCaseSelects();
   syncObservation();
+  // 两类 Study 是基本设定后的独立分支，不要求原算例先有 history。
+  // 因此必须在 `activeCase()`（只返回已完成结果）这个早退之前准备页面。
+  if (step === 'result-uncertainty' || step === 'result-tuning') {
+    const kind = step === 'result-tuning' ? 'tuning' : 'uq';
+    const scopeKey = studyScopeKey();
+    const isCurrent = () => token === activePaneRequest && state.step === step && studyScopeKey() === scopeKey;
+    syncStudyKernelLabels();
+    renderStudyWizard(kind);
+    try {
+      await loadStudyParams(isCurrent);
+      if (!isCurrent()) return;
+      if (kind === 'tuning') await renderTuningTargets(isCurrent);
+      else await renderStudyOutputs(isCurrent);
+      if (!isCurrent()) return;
+      if (activeStudyDirs(kind).length) await refreshStudy(kind);
+    } catch (error) {
+      if (token === activePaneRequest && state.step === step) status(error);
+    }
+    if (token === activePaneRequest && state.step === step) {
+      renderStudyBudget(kind);
+      updateButtons();
+    }
+    return;
+  }
   const c = activeCase();
   const isCurrent = () => token === activePaneRequest && state.step === step && activeCase()?.dir === c?.dir;
   if (!c) { updateButtons(); return; }
@@ -1407,18 +1432,6 @@ async function prepareActivePane() {
   if (step === 'result-comparison') {
     if (await refreshBatchEvaluationCatalogs()) renderComparison();
     if (!isCurrent()) return;
-  }
-  if (step === 'result-uncertainty') {
-    syncStudyKernelLabels();
-    await loadStudyParams().catch(() => {});
-    await renderStudyOutputs();
-    if (activeStudyDirs('uq').length) await refreshStudy('uq').catch(() => {});
-  }
-  if (step === 'result-tuning') {
-    syncStudyKernelLabels();
-    await loadStudyParams().catch(() => {});
-    await renderTuningTargets().catch(() => {});
-    if (activeStudyDirs('tuning').length) await refreshStudy('tuning').catch(() => {});
   }
   if (isCurrent()) updateButtons();
 }
@@ -1513,18 +1526,54 @@ addEventListener('colm:theme', () => {
 // Study panes: keep the browser thin; Rust sidecar validates the science contract.
 let studyParamCatalog = [];
 let studyParamCasesKey = '';
-const studyDatesInitialized = { uq: false, tuning: false };
+const studyDatesInitialized = { uq: '', tuning: '' };
 const studyDirs = { uq: [], tuning: [] };
 const studyEvents = { uq: [], tuning: [] };
 const studyRunning = { uq: false, tuning: false };
 const studyViews = { uq: null, tuning: null };
 const studyPages = { uq: 1, tuning: 1 };
+const studyWizardPages = { uq: 0, tuning: 0 };
+const studyAsyncRequests = { params: 0, outputs: 0, targets: 0 };
+const studyWizardTitles = {
+  uq: ['试验设计', '输出变量', '参数范围', '预算预览', '创建与运行', '运行状态', '结果'],
+  tuning: ['优化设计', '目标变量', '参数范围', '预算预览', '创建与运行', '运行状态', '结果'],
+};
+const studyWizardHelp = {
+  uq: [
+    ['选择 OAT 或 LHS、站点组织方式、分析时段、样本数和并发数。', '这些设置决定如何覆盖参数空间、要计算多少成员，以及结果对应哪段模拟时段。'],
+    ['从当前配置预计写出的标量 history 中，选择要形成不确定性包络的输出。', '只分析与科学问题相关且各站点可用的变量，可避免无效运行和无法比较的结果。'],
+    ['选择参与扰动的参数，填写有限采样上下界与线性/对数尺度，并确认范围责任。', '参数范围就是不确定性假设；过宽会产生非物理解，过窄则会低估结果敏感性。'],
+    ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次 Study 的计算规模。', '在创建前看清任务量，便于控制计算时间、磁盘占用和样本预算。'],
+    ['先创建冻结内核与算例副本的 Study，再启动、暂停、恢复、重试或导出任务。', '创建和运行分开可先审查可复现清单；所有成员独立运行，不会修改原算例。'],
+    ['查看 baseline 与各成员的阶段进度、成功/失败状态和筛选后的事件日志。', '运行状态用于定位失败成员并安全暂停或重试，而不是盲目重复整批计算。'],
+    ['查看输出分位数包络、参数影响排序和成员明细，并按站点与变量加载图表。', '这些结果用于判断预测区间、主要不确定性来源，以及下一步应优先约束哪些参数。'],
+  ],
+  tuning: [
+    ['选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群和代数。', '这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。'],
+    ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
+    ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
+    ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '调优成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
+    ['创建冻结输入与内核的调优 Study，再运行差分进化；最佳候选只能另存为新算例。', '冻结与复制保证每个候选可复现，并保护原算例不被搜索过程覆盖。'],
+    ['跟踪 baseline、候选成员、校准与评估状态，查看失败原因并执行暂停、恢复或重试。', '实时状态让你区分模型失败、数据不足和正常搜索进展，避免错误应用未完成结果。'],
+    ['比较候选目标函数、最佳成员、校准/验证表现和成员表，并预览最佳参数改动。', '结果页用于确认改进是否跨验证期成立，再决定是否把最佳候选另存并进入后续模拟。'],
+  ],
+};
 const studyLogFilters = { uq: { study_dir: '', member: '', site: '', stage: '' }, tuning: { study_dir: '', member: '', site: '', stage: '' } };
 const studyCpuCapacity = Math.max(1, Number(globalThis.navigator?.hardwareConcurrency) || 1);
 const parentDir = p => String(p || '').replace(/[\\/]+$/, '').replace(/[\\/][^\\/]*$/, '');
 const caseName = c => c.name || String(c.dir || '').split(/[\\/]/).pop();
 const oneDay = 86400;
-const studyScope = () => resultScope();
+// Study 自己运行 baseline；它的输入是本次已经建好的算例，不是“已经有结果”的
+// 子集。若用户在结果总览明确缩小过分析范围，则继续尊重那个选择。
+const studyScope = () => {
+  const cases = allCurrent();
+  return state.resultSelectionTouched
+    ? cases.filter(c => state.resultSelection.has(c.dir))
+    : cases;
+};
+const studyScopeKey = () => studyScope()
+  .map(c => `${c.dir}\u001f${observationFor(c)}`)
+  .join('\u001e');
 const activeStudyDirs = kind => scopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir));
 const setActiveStudyDirs = (kind, dirs) => {
   studyDirs[kind] = replaceScopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir), dirs);
@@ -1532,6 +1581,68 @@ const setActiveStudyDirs = (kind, dirs) => {
 const currentKernel = () => $('kernel')?.value || '';
 const setPreview = (kind, text) => { const el = $(kind === 'tuning' ? 'tune-preview' : 'uq-preview'); if (el) el.textContent = text; };
 const studyLabel = kind => kind === 'tuning' ? '参数调优' : '不确定性分析';
+
+function studyWizardIssue(kind, page) {
+  const tuning = kind === 'tuning';
+  const prefix = tuning ? 'tune' : 'uq';
+  const cases = studyScope();
+  if (page === 0) {
+    if (!cases.length) return '先在“基本设定 / 文件与目录”创建算例';
+    if (new Set(cases.map(c => parentDir(c.dir))).size !== 1) return 'Study 中的算例必须位于同一个项目目录';
+    if (!currentKernel()) return '当前配置没有匹配的内核运行产物';
+    if (tuning && cases.some(c => !observationFor(c))) return '参数调优要求分析范围内每个算例都有观测文件。';
+    try { studyDesign(kind); } catch (error) { return error?.message || String(error); }
+  }
+  if (page === 1) {
+    const selections = [...document.querySelectorAll(tuning
+      ? '[data-tune-target]:checked:not(:disabled)'
+      : '[data-uq-output]:checked:not(:disabled)')];
+    if (!selections.length) return tuning ? '至少选择一个可评估目标' : '至少选择一个输出变量';
+    if ($(`${prefix}-site-mode`)?.value === 'independent') {
+      const uncovered = cases.filter(c => !selections.some(input => (input.dataset[tuning ? 'targetSites' : 'outputSites'] || '')
+        .split('\u001f').includes(studySiteId(c))));
+      if (uncovered.length) return `以下算例没有选中的适用${tuning ? '目标' : '输出变量'}：${uncovered.map(caseName).join('、')}`;
+    }
+  }
+  if (page === 2) {
+    try {
+      if (!selectedStudyParams(`${prefix}-params`).length) return '至少选择一个参数并填写有限范围';
+    } catch (error) { return error?.message || String(error); }
+    if (!$(`${prefix}-range-confirm`)?.checked) return '检查范围后勾选责任确认';
+  }
+  if ((page === 4 || page === 5) && !activeStudyDirs(kind).length) return '请先创建 Study。';
+  return '';
+}
+
+function renderStudyWizard(kind) {
+  const prefix = kind === 'tuning' ? 'tune' : 'uq';
+  const steps = [...document.querySelectorAll(`[data-study-wizard="${kind}"]`)]
+    .sort((a, b) => Number(a.dataset.studyStep) - Number(b.dataset.studyStep));
+  if (!steps.length) return;
+  const page = Math.max(0, Math.min(steps.length - 1, studyWizardPages[kind] || 0));
+  studyWizardPages[kind] = page;
+  steps.forEach((step, index) => { step.hidden = index !== page; });
+  const title = studyWizardTitles[kind][page];
+  const help = studyWizardHelp[kind][page];
+  $(`${prefix}-step-progress`).textContent = language() === 'en'
+    ? `Page ${page + 1}/${steps.length} · ${dialogText(title)}`
+    : `第 ${page + 1}/${steps.length} 页 · ${title}`;
+  $(`${prefix}-step-do`).textContent = dialogText(help[0]);
+  $(`${prefix}-step-why`).textContent = dialogText(help[1]);
+  const previous = $(`${prefix}-step-prev`);
+  const next = $(`${prefix}-step-next`);
+  const issue = page < steps.length - 1 ? studyWizardIssue(kind, page) : '';
+  previous.disabled = page === 0;
+  next.disabled = page === steps.length - 1 || !!issue;
+  next.title = issue ? dialogText(issue) : '';
+  $(`${prefix}-step-note`).textContent = issue ? dialogText(issue) : '';
+}
+
+function setStudyWizardPage(kind, page) {
+  studyWizardPages[kind] = page;
+  renderStudyWizard(kind);
+  document.querySelector(`[data-study-wizard="${kind}"][data-study-step="${page}"]`)?.scrollIntoView({ block: 'start' });
+}
 
 function studyJobCount(kind) {
   const input = $(kind === 'tuning' ? 'tune-jobs' : 'uq-jobs');
@@ -1556,7 +1667,9 @@ function kindForStudyDir(dir) {
   return state.step === 'result-tuning' ? 'tuning' : 'uq';
 }
 
-async function loadStudyParams() {
+async function loadStudyParams(stillCurrent = () => true) {
+  const request = ++studyAsyncRequests.params;
+  const current = () => request === studyAsyncRequests.params && stillCurrent();
   if (!hasBackend) throw new Error('后端未连接');
   const cases = studyScope();
   const key = cases.map(c => c.dir).join('\u001f') + '\u001e' + currentKernel() + `\u001e${state.expert}`;
@@ -1565,9 +1678,11 @@ async function loadStudyParams() {
       for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).checked = false;
     }
     const catalog = JSON.parse(await invoke('study_params'));
+    if (!current()) return studyParamCatalog;
     let states = new Map();
     if (cases.length && currentKernel()) {
       const rows = await invoke('field_states_batch', { dirs: cases.map(c => c.dir), kernelDir: currentKernel() });
+      if (!current()) return studyParamCatalog;
       states = new Map(rows.map(item => [item.name, item]));
     }
     studyParamCatalog = catalog
@@ -1576,11 +1691,43 @@ async function loadStudyParams() {
       .filter(p => state.expert || p.review !== 'expert_range_only');
     studyParamCasesKey = key;
   }
+  if (!current()) return studyParamCatalog;
   renderStudyParams('uq-params');
   renderStudyParams('tune-params');
   renderStudyBudget('uq');
   renderStudyBudget('tuning');
   return studyParamCatalog;
+}
+
+/**
+ * 在 baseline 尚未运行时，从 case.nml + 内核闸门得到“计划写出”的标量变量。
+ * 复用运行页同一个 `hist_vars` 后端；只保留结果工作台已知可画成单序列的变量，
+ * 避免把土层数组误交给只接受标量时间序列的 Study 聚合器。
+ */
+async function plannedHistoryCatalog(c) {
+  const text = await invoke('read_text', { path: `${c.dir}/case.nml` });
+  const variables = await invoke('hist_vars', { text, kernelDir: currentKernel() });
+  return {
+    planned: true,
+    variables: variables
+      .filter(variable => variable.on && variable.writable === true)
+      .map(variable => `f_${variable.name}`)
+      .filter(name => COMMON_VARIABLES[name] && !PLANNED_PROFILE_VARIABLES.has(name))
+      .map(name => ({ name, units: COMMON_VARIABLES[name][1], kind: 'series' })),
+  };
+}
+
+async function initializeStudyDatesFromCases(kind, cases, isCurrent = () => true) {
+  if (!cases.length || studyDatesInitialized[kind] === studyScopeKey()) return;
+  try {
+    const timing = await invoke('read_timing', { dirs: cases.map(c => c.dir) });
+    if (!isCurrent()) return;
+    const start = Date.parse(`${timing.output_start || timing.start}T00:00:00Z`) / 1000;
+    const end = Date.parse(`${timing.end}T00:00:00Z`) / 1000;
+    if (Number.isFinite(start) && Number.isFinite(end) && start <= end) {
+      initializeStudyDates(kind, [{ start, end }]);
+    }
+  } catch {}
 }
 
 function renderStudyParams(hostId) {
@@ -1631,18 +1778,27 @@ function renderStudyParams(hostId) {
 function selectedStudyParams(hostId) {
   return [...$(hostId).querySelectorAll('[data-study-param]:checked')].map(cb => {
     const name = cb.dataset.studyParam;
+    const meta = studyParamCatalog.find(parameter => parameter.name === name);
+    const label = fieldLabel(name, language());
     const minInput = $(hostId).querySelector(`[data-study-min="${CSS.escape(name)}"]`);
     const maxInput = $(hostId).querySelector(`[data-study-max="${CSS.escape(name)}"]`);
-    if (!minInput?.value.trim() || !maxInput?.value.trim()) throw new Error(`${fieldLabel(name, language())} 需要填写上下界。`);
+    if (!minInput?.value.trim() || !maxInput?.value.trim()) throw new Error(`${label} 需要填写上下界。`);
     const min = Number(minInput.value);
     const max = Number(maxInput.value);
-    if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) throw new Error(`${fieldLabel(name, language())} 需要有限且 min < max 的范围。`);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) throw new Error(`${label} 需要有限且 min < max 的范围。`);
     const scale = $(hostId).querySelector(`[data-study-scale="${CSS.escape(name)}"]`)?.value || 'linear';
+    if (scale === 'log' && (min <= 0 || max <= 0)) throw new Error(`${label} 使用对数采样时上下界必须大于 0。`);
+    const below = meta?.min != null && (min < meta.min || (!meta.min_inclusive && min === meta.min));
+    const above = meta?.max != null && (max > meta.max || (!meta.max_inclusive && max === meta.max));
+    if (below || above) throw new Error(`${label} 的采样范围超出代码硬边界。`);
+    if (meta?.sentinel != null && (min === meta.sentinel || max === meta.sentinel)) throw new Error(`${label} 不能把哨兵值用作采样边界。`);
     return { name, sample_min: min, sample_max: max, scale };
   });
 }
 
-async function renderStudyOutputs() {
+async function renderStudyOutputs(stillCurrent = () => true) {
+  const request = ++studyAsyncRequests.outputs;
+  const current = () => request === studyAsyncRequests.outputs && stillCurrent();
   const host = $('uq-outputs');
   if (!host) return;
   const previous = new Set([...host.querySelectorAll('[data-uq-output]:checked')].map(input => input.dataset.uqOutput));
@@ -1650,26 +1806,34 @@ async function renderStudyOutputs() {
   host.textContent = '';
   const byName = new Map();
   const catalogs = [];
+  const failures = [];
   const cases = studyScope();
   for (const c of cases) {
     try {
-      const catalog = await loadCatalog(c);
-      catalogs.push(catalog);
+      const catalog = !c.has_history || isStaleResult(c) || isActiveResult(c)
+        ? await plannedHistoryCatalog(c)
+        : await loadCatalog(c);
+      if (!current()) return;
+      if (!catalog.planned) catalogs.push(catalog);
       for (const v of catalog.variables || []) {
         if (v.kind !== 'series' || v.name === 'time') continue;
-        const current = byName.get(v.name) || { variable: v, n: 0, sites: [] };
+        const current = byName.get(v.name) || { variable: v, n: 0, sites: [], planned: false };
         current.n += 1;
         current.sites.push(studySiteId(c));
+        current.planned ||= catalog.planned === true;
         byName.set(v.name, current);
       }
-    } catch {}
+    } catch (error) { failures.push(`${caseName(c)}：${error?.message || error}`); }
   }
+  if (!current()) return;
   initializeStudyDates('uq', catalogs);
+  if (!catalogs.length) await initializeStudyDatesFromCases('uq', cases, current);
+  if (!current()) return;
   const independent = $('uq-site-mode')?.value === 'independent';
   const rows = [...byName.values()]
     .filter(row => independent || row.n === cases.length)
     .sort((a, b) => Number(!COMMON_VARIABLES[a.variable.name]) - Number(!COMMON_VARIABLES[b.variable.name]) || a.variable.name.localeCompare(b.variable.name));
-  for (const { variable: v, n, sites } of rows) {
+  for (const { variable: v, n, sites, planned } of rows) {
     const meta = variableMeta(v.name, v.units);
     const row = node('label', 'evaluation-variable');
     const input = document.createElement('input');
@@ -1678,14 +1842,17 @@ async function renderStudyOutputs() {
     input.checked = hadSelection ? previous.has(v.name) : v.name === 'f_rnet';
     input.onchange = () => renderStudyBudget('uq');
     const text = node('span');
-    text.append(node('b', '', meta.label), node('small', '', `${v.name} · ${meta.units} · 覆盖 ${n}/${cases.length}`));
+    text.append(node('b', '', meta.label), node('small', '', `${v.name} · ${meta.units} · 覆盖 ${n}/${cases.length} · ${planned ? '按当前配置预计写出' : '已在 history 中确认'}`));
     row.append(input, text);
     host.appendChild(row);
   }
   if (!rows.length) host.appendChild(node('div', 'result-empty', independent ? '当前分析范围没有可用 history 时间序列变量。' : '当前分析范围没有所有站点共同的 history 时间序列变量。'));
+  if (failures.length) host.appendChild(node('div', 'warn mini', `以下已有结果未通过 history 检查，不会退回计划值：${failures.join('；')}`));
 }
 
-async function renderTuningTargets() {
+async function renderTuningTargets(stillCurrent = () => true) {
+  const request = ++studyAsyncRequests.targets;
+  const current = () => request === studyAsyncRequests.targets && stillCurrent();
   const host = $('tune-targets');
   if (!host) return;
   const previous = new Map([...host.querySelectorAll('[data-tune-target]')].map(input => [input.dataset.tuneTarget, {
@@ -1696,20 +1863,39 @@ async function renderTuningTargets() {
   const cases = studyScope();
   if (!cases.length || cases.some(c => !observationFor(c))) {
     host.innerHTML = '<div class="result-empty">参数调优要求分析范围内每个算例都有观测文件。</div>';
+    renderStudyBudget('tuning');
     return;
   }
-  const rows = await boundedMap(cases, Math.min(4, cases.length), async c => ({ case: c, catalog: await loadEvaluationCatalog(c, observationFor(c)) }));
-  initializeStudyDates('tuning', (await Promise.all(cases.map(c => loadCatalog(c).catch(() => null)))).filter(Boolean));
+  const rows = await boundedMap(cases, Math.min(4, cases.length), async c => ({
+    case: c,
+    catalog: !c.has_history || isStaleResult(c) || isActiveResult(c)
+      ? JSON.parse(await invoke('evaluation_plan', {
+          case: c.dir, obs: observationFor(c), kernelDir: currentKernel(),
+        }))
+      : await loadEvaluationCatalog(c, observationFor(c)),
+  }));
+  if (!current()) return;
+  const historyCatalogs = (await Promise.all(cases.map(c => loadCatalog(c).catch(() => null)))).filter(Boolean);
+  if (!current()) return;
+  initializeStudyDates('tuning', historyCatalogs);
+  if (!historyCatalogs.length) await initializeStudyDatesFromCases('tuning', cases, current);
+  if (!current()) return;
   const counts = new Map();
-  for (const result of rows.filter(r => r.ok)) for (const v of result.value.catalog.filter(v => v.available)) {
-    const current = counts.get(v.name) || { variable: v, n: 0, sites: [] };
-    current.n += 1;
-    current.sites.push(studySiteId(result.value.case));
+  for (const result of rows.filter(r => r.ok)) for (const v of result.value.catalog) {
+    const current = counts.get(v.name) || { variable: v, n: 0, sites: [], reasons: new Set() };
+    if (v.available) {
+      current.n += 1;
+      current.sites.push(studySiteId(result.value.case));
+    } else {
+      const reason = evaluationMissingReason(v);
+      if (reason) current.reasons.add(reason);
+    }
     counts.set(v.name, current);
   }
+  const failures = rows.filter(row => !row.ok).map(row => `${caseName(cases[row.index])}：${row.error}`);
   host.textContent = '';
   const independent = $('tune-site-mode')?.value === 'independent';
-  for (const { variable: v, n, sites } of [...counts.values()].sort((a, b) => a.variable.name.localeCompare(b.variable.name))) {
+  for (const { variable: v, n, sites, reasons } of [...counts.values()].sort((a, b) => a.variable.name.localeCompare(b.variable.name))) {
     const label = language() === 'en' ? v.label_en : v.label_zh;
     const saved = previous.get(v.name);
     const row = node('div', 'evaluation-variable');
@@ -1721,7 +1907,8 @@ async function renderTuningTargets() {
     if (input.disabled) input.checked = false;
     input.onchange = () => renderStudyBudget('tuning');
     const text = node('span');
-    text.append(node('b', '', label), node('small', '', `${v.name} · ${v.model_var} ↔ ${v.obs_var} · ${n}/${cases.length} 站点`));
+    const why = reasons.size ? ` · ${[...reasons].join('；')}` : '';
+    text.append(node('b', '', label), node('small', '', `${v.name} · ${v.model_var} ↔ ${v.obs_var} · ${n}/${cases.length} 站点${why}`));
     const weightLabel = node('label', 'study-target-weight', '权重 ');
     const weight = node('input', 'input mini-input');
     weight.type = 'number'; weight.min = '0.000001'; weight.step = '0.1'; weight.value = saved?.weight ?? '1';
@@ -1732,6 +1919,7 @@ async function renderTuningTargets() {
     host.appendChild(row);
   }
   if (!counts.size) host.appendChild(node('div', 'result-empty', '当前观测文件没有共同可评估变量。'));
+  if (failures.length) host.appendChild(node('div', 'warn mini', `以下已有结果未通过评估目录检查，不会退回计划值：${failures.join('；')}`));
   renderStudyBudget('tuning');
 }
 
@@ -1744,7 +1932,8 @@ function unixDate(id, message = '日期窗口需要开始和结束日期。') {
 function dateValue(unix) { return new Date(unix * 1000).toISOString().slice(0, 10); }
 
 function initializeStudyDates(kind, catalogs) {
-  if (studyDatesInitialized[kind] || !catalogs.length) return;
+  const scopeKey = studyScopeKey();
+  if (studyDatesInitialized[kind] === scopeKey || !catalogs.length) return;
   const start = Math.max(...catalogs.map(c => Number(c.start)).filter(Number.isFinite));
   const last = Math.min(...catalogs.map(c => Number(c.end)).filter(Number.isFinite));
   if (!Number.isFinite(start) || !Number.isFinite(last) || start >= last) return;
@@ -1759,7 +1948,7 @@ function initializeStudyDates(kind, catalogs) {
     $('tune-val-from').value = dateValue(split);
     $('tune-val-to').value = dateValue(end);
   }
-  studyDatesInitialized[kind] = true;
+  studyDatesInitialized[kind] = scopeKey;
 }
 
 function renderStudyBudget(kind) {
@@ -1773,17 +1962,67 @@ function renderStudyBudget(kind) {
     ? studyBudget({ method: 'de', paramCount, siteCount, population: Number($('tune-pop')?.value), generations: Number($('tune-gen')?.value), jobs: studyJobCount('tuning') })
     : studyBudget({ method: $('uq-method')?.value, paramCount, siteCount, candidates: $('uq-method')?.value === 'lhs' ? Number($('uq-count')?.value) : null, jobs: studyJobCount('uq') });
   host.textContent = `参数 ${paramCount} · 站点 ${siteCount} · 候选 ${budget.candidateCount} · 成员×站点 ${budget.memberSiteTasks} · 阶段运行 ${budget.totalStageRuns} · 并发 ${budget.jobs} · 预计时间未知（暂无基准实测） · 磁盘需求未知（暂无基准产物大小）`;
+  renderStudyReadiness(kind);
 }
 
-function studySpec(kind, cases, independent = false) {
+function renderStudyReadiness(kind) {
   const tuning = kind === 'tuning';
-  const kernel_dir = currentKernel() || undefined;
-  const observations = Object.fromEntries(cases.map(c => [studySiteId(c), observationFor(c)]).filter(([, obs]) => obs));
-  if (tuning && Object.keys(observations).length !== cases.length) throw new Error('参数调优需要每个站点都有观测文件。');
-  const parameters = selectedStudyParams(tuning ? 'tune-params' : 'uq-params');
-  if (!parameters.length) throw new Error('请至少勾选一个参数，并填写有限的最小/最大值。');
-  if (!$(tuning ? 'tune-range-confirm' : 'uq-range-confirm')?.checked) throw new Error('请确认采样范围由用户负责。');
-  if (tuning) {
+  const en = language() === 'en';
+  const prefix = tuning ? 'tune' : 'uq';
+  const host = $(`${prefix}-readiness`);
+  if (!host) return;
+  const cases = studyScope();
+  const roots = new Set(cases.map(c => parentDir(c.dir)));
+  let parameterCount = 0;
+  try { parameterCount = selectedStudyParams(`${prefix}-params`).length; } catch {}
+  const selections = [...document.querySelectorAll(tuning
+    ? '[data-tune-target]:checked:not(:disabled)'
+    : '[data-uq-output]:checked:not(:disabled)')];
+  const selectionCount = selections.length;
+  const independent = $(`${prefix}-site-mode`)?.value === 'independent';
+  const uncovered = independent ? cases.filter(c => !selections.some(input => {
+    const sites = input.dataset[tuning ? 'targetSites' : 'outputSites'] || '';
+    return sites.split('\u001f').includes(studySiteId(c));
+  })) : [];
+  const confirmed = $(`${prefix}-range-confirm`)?.checked === true;
+  const observations = tuning ? cases.filter(c => observationFor(c)).length : cases.length;
+  const dateValues = tuning
+    ? ['tune-from', 'tune-to', ...($('tune-validation')?.checked === false ? [] : ['tune-val-from', 'tune-val-to'])]
+    : [];
+  const datesReady = dateValues.every(id => $(id)?.value);
+  const checks = [
+    { ok: cases.length > 0, text: cases.length ? (en ? `${cases.length} base case(s) selected` : `已选择 ${cases.length} 个基础算例`) : (en ? 'Create a case in Basic setup / Files and directories first' : '先在“基本设定 / 文件与目录”创建算例') },
+    { ok: roots.size === 1, text: roots.size === 1 ? (en ? 'Cases share one project directory' : '算例位于同一个项目目录') : (en ? 'Study cases must share one project directory' : 'Study 中的算例必须位于同一个项目目录') },
+    { ok: !!currentKernel(), text: currentKernel() ? (en ? 'Matching physics kernel is available' : '已匹配当前物理内核') : (en ? 'No matching kernel build is available' : '当前配置没有匹配的内核运行产物') },
+  ];
+  if (tuning) checks.push({
+    ok: observations === cases.length && cases.length > 0,
+    text: observations === cases.length && cases.length > 0
+      ? (en ? `Observations matched for all ${cases.length} case(s)` : `全部 ${cases.length} 个算例已匹配观测`)
+      : (en ? `Observation files ${observations}/${cases.length}; every case requires one` : `观测文件 ${observations}/${cases.length}；每个算例都必须有观测`),
+  });
+  checks.push(
+    { ok: parameterCount > 0, text: parameterCount ? (en ? `${parameterCount} parameter(s) have valid ranges` : `已选择 ${parameterCount} 个参数并填写有效范围`) : (en ? 'Select at least one parameter and enter finite ranges' : '至少选择一个参数并填写有限范围') },
+    { ok: selectionCount > 0 && uncovered.length === 0, text: uncovered.length
+      ? (en ? `No selected applicable ${tuning ? 'target' : 'output'} for: ${uncovered.map(caseName).join(', ')}` : `以下算例没有选中的适用${tuning ? '目标' : '输出变量'}：${uncovered.map(caseName).join('、')}`)
+      : selectionCount ? (en ? `${selectionCount} ${tuning ? 'target(s)' : 'output variable(s)'} selected` : `已选择 ${selectionCount} 个${tuning ? '目标' : '输出变量'}`) : (en ? `Select at least one ${tuning ? 'evaluable target' : 'output variable'}` : `至少选择一个${tuning ? '可评估目标' : '输出变量'}`) },
+    { ok: confirmed, text: confirmed ? (en ? 'Sampling-range responsibility confirmed' : '已确认采样范围责任') : (en ? 'Review the ranges and confirm responsibility' : '检查范围后勾选责任确认') },
+  );
+  if (tuning) checks.push({ ok: datesReady, text: datesReady ? (en ? 'Calibration/validation windows are filled' : '校准/验证窗口已填写') : (en ? 'Fill the calibration period and any enabled validation period' : '填写校准期及启用的验证期') });
+  host.replaceChildren(...checks.map(check => node('div', `study-ready-item ${check.ok ? 'pass' : 'warn'}`, check.text)));
+  const create = $(`${prefix}-create`);
+  if (create) create.disabled = checks.some(check => !check.ok);
+  const hasStudy = activeStudyDirs(kind).length > 0;
+  for (const action of ['run', 'status', 'retry', 'pause', 'resume', 'cancel', 'export-study']) {
+    const button = $(`${prefix}-${action}`);
+    if (button) button.disabled = !hasStudy;
+  }
+  if (tuning && $('tune-apply-best')) $('tune-apply-best').disabled = !hasStudy;
+  renderStudyWizard(kind);
+}
+
+function studyDesign(kind) {
+  if (kind === 'tuning') {
     const from = unixDate('tune-from', '调优目标需要校准期开始和结束日期。');
     const to = unixDate('tune-to', '调优目标需要校准期开始和结束日期。');
     const useValidation = $('tune-validation')?.checked !== false;
@@ -1793,40 +2032,67 @@ function studySpec(kind, cases, independent = false) {
     if (useValidation && !(validation_to <= from || validation_from >= to)) throw new Error('校准期与验证期不能重叠。');
     const minPairs = Number($('tune-min-pairs')?.value);
     if (!Number.isInteger(minPairs) || minPairs < 2) throw new Error('最少配对样本数必须是至少 2 的整数。');
+    const population = Number($('tune-pop')?.value);
+    const generations = Number($('tune-gen')?.value);
+    if (!Number.isInteger(population) || population < 4) throw new Error('种群必须是至少 4 的整数。');
+    if (!Number.isInteger(generations) || generations < 1) throw new Error('代数必须是至少 1 的整数。');
+    if (!Number.isSafeInteger(population * (generations + 1)) || population * (generations + 1) > MAX_STUDY_CANDIDATES) {
+      throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
+    }
+    return { from, to, validation_from, validation_to, minPairs, population, generations };
+  }
+  const method = $('uq-method')?.value || 'lhs';
+  const candidate_count = method === 'lhs' ? Number($('uq-count')?.value) : undefined;
+  if (method === 'lhs' && (!Number.isInteger(candidate_count) || candidate_count < 1 || candidate_count > MAX_STUDY_CANDIDATES)) {
+    throw new Error(`样本数必须是 1 至 ${MAX_STUDY_CANDIDATES} 的整数。`);
+  }
+  const from = $('uq-from')?.value ? unixDate('uq-from') : undefined;
+  const to = $('uq-to')?.value ? unixDate('uq-to') : undefined;
+  if ((from !== undefined || to !== undefined) && !(from < to)) throw new Error('不确定性分析窗口必须满足开始 < 结束。');
+  return { method, candidate_count, from, to };
+}
+
+function studySpec(kind, cases, independent = false) {
+  const tuning = kind === 'tuning';
+  const design = studyDesign(kind);
+  const kernel_dir = currentKernel() || undefined;
+  const observations = Object.fromEntries(cases.map(c => [studySiteId(c), observationFor(c)]).filter(([, obs]) => obs));
+  if (tuning && Object.keys(observations).length !== cases.length) throw new Error('参数调优需要每个站点都有观测文件。');
+  const parameters = selectedStudyParams(tuning ? 'tune-params' : 'uq-params');
+  if (!parameters.length) throw new Error('请至少勾选一个参数，并填写有限的最小/最大值。');
+  if (!$(tuning ? 'tune-range-confirm' : 'uq-range-confirm')?.checked) throw new Error('请确认采样范围由用户负责。');
+  if (tuning) {
     const targets = [...document.querySelectorAll('[data-tune-target]:checked')]
       .filter(x => cases.every(c => (x.dataset.targetSites || '').split('\u001f').includes(studySiteId(c))))
       .map(input => {
         const name = input.dataset.tuneTarget;
         const weight = Number(document.querySelector(`[data-tune-weight="${CSS.escape(name)}"]`)?.value);
         if (!Number.isFinite(weight) || weight <= 0) throw new Error(`${name} 的权重必须是正数。`);
-        return { key: name, variable: name, metric: $('tune-metric')?.value || 'nrmse', weight, min_pairs: minPairs, from, to, validation_from, validation_to };
+        return { key: name, variable: name, metric: $('tune-metric')?.value || 'nrmse', weight, min_pairs: design.minPairs, from: design.from, to: design.to, validation_from: design.validation_from, validation_to: design.validation_to };
       });
     if (!targets.length) throw new Error('参数调优至少选择一个目标变量。');
     return {
       kind: 'tuning', method: 'differential-evolution', seed: Number($('tune-seed')?.value || 1), kernel_dir,
       base_cases: cases.map(c => c.dir), observations, parameters, site_mode: independent ? 'independent' : 'shared',
       targets,
-      budget: { population: Number($('tune-pop').value), generations: Number($('tune-gen').value), jobs: studyJobCount('tuning') },
+      budget: { population: design.population, generations: design.generations, jobs: studyJobCount('tuning') },
     };
   }
-  const from = $('uq-from')?.value ? unixDate('uq-from') : undefined;
-  const to = $('uq-to')?.value ? unixDate('uq-to') : undefined;
-  if ((from !== undefined || to !== undefined) && !(from < to)) throw new Error('不确定性分析窗口必须满足开始 < 结束。');
   const outputs = [...document.querySelectorAll('[data-uq-output]:checked')]
     .filter(input => cases.every(c => (input.dataset.outputSites || '').split('\u001f').includes(studySiteId(c))))
     .map(input => input.dataset.uqOutput);
   if (!outputs.length) throw new Error(`不确定性分析至少需要一个适用于 ${cases.map(caseName).join('、')} 的输出变量。`);
   return {
-    kind: 'uncertainty', method: $('uq-method').value, seed: Number($('uq-seed').value), kernel_dir,
+    kind: 'uncertainty', method: design.method, seed: Number($('uq-seed').value), kernel_dir,
     base_cases: cases.map(c => c.dir), parameters, outputs, site_mode: independent ? 'independent' : 'shared',
-    analysis_from: from, analysis_to: to,
-    budget: { candidate_count: $('uq-method').value === 'lhs' ? Number($('uq-count').value) : undefined, jobs: studyJobCount('uq') },
+    analysis_from: design.from, analysis_to: design.to,
+    budget: { candidate_count: design.candidate_count, jobs: studyJobCount('uq') },
   };
 }
 
 async function createStudy(kind) {
   const cases = studyScope();
-  if (!cases.length) return status('没有已完成算例可用于 Study。');
+  if (!cases.length) return status('没有已建算例可用于 Study。');
   const roots = new Set(cases.map(c => parentDir(c.dir)));
   if (roots.size !== 1) return status('Study 需要同一算例根目录下的算例。');
   await loadStudyParams();
@@ -1862,6 +2128,7 @@ async function createStudy(kind) {
   }
   setActiveStudyDirs(kind, dirs);
   saveStudyDirs();
+  renderStudyReadiness(kind);
   setPreview(kind, dirs.join('\n'));
   await refreshStudy(kind);
   status(`${studyLabel(kind)} Study 已创建。`);
@@ -2084,6 +2351,7 @@ async function runStudy(kind) {
   if (studyRunning[kind]) return status(`${studyLabel(kind)} Study 正在运行。`);
   const jobs = studyJobCount(kind);
   studyRunning[kind] = true;
+  setStudyWizardPage(kind, 5);
   try {
     const perStudyJobs = dirs.length === 1 ? jobs : 1;
     const results = await boundedMap(dirs, Math.min(jobs, dirs.length), async dir => ({
@@ -2154,7 +2422,8 @@ async function applyBestCandidate() {
     const envelope = JSON.parse(await invoke('study_status', { studyDir: dir }));
     const member = envelope.state?.best_member;
     if (!member) throw new Error(`${envelope.manifest?.id || dir} 还没有可应用的最佳候选。`);
-    const site = envelope.manifest?.spec?.base_cases?.[0] || member;
+    const baseCase = envelope.manifest?.spec?.base_cases?.[0] || member;
+    const site = studySiteId({ dir: baseCase });
     members.push({ dir, member, site });
     const rows = JSON.parse(await invoke('study_apply_preview', { studyDir: dir, member }));
     previews.push(`${dir}\n${rows.map(row => `${row.site}: ${row.field} ${row.old} -> ${row.new}`).join('\n')}`);
@@ -2215,6 +2484,22 @@ if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;
   renderStudyBudget('tuning');
 };
+for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).onchange = () => {
+  renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
+};
+for (const id of ['uq-from', 'uq-to', 'tune-from', 'tune-to', 'tune-val-from', 'tune-val-to', 'tune-min-pairs']) if ($(id)) {
+  $(id).oninput = $(id).onchange = () => renderStudyReadiness(id.startsWith('tune') ? 'tuning' : 'uq');
+}
+for (const kind of ['uq', 'tuning']) {
+  const prefix = kind === 'tuning' ? 'tune' : 'uq';
+  $(`${prefix}-step-prev`).onclick = () => setStudyWizardPage(kind, studyWizardPages[kind] - 1);
+  $(`${prefix}-step-next`).onclick = () => setStudyWizardPage(kind, studyWizardPages[kind] + 1);
+  renderStudyWizard(kind);
+}
+addEventListener('colm:language', () => {
+  renderStudyWizard('uq');
+  renderStudyWizard('tuning');
+});
 addEventListener('colm:mode', () => {
   studyParamCasesKey = '';
   if (state.step === 'result-uncertainty' || state.step === 'result-tuning') prepareActivePane();

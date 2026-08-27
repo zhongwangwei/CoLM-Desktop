@@ -11,7 +11,7 @@ use colm_namelist::Value;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::science::{ObjectiveMetric, ObjectiveScore, ObjectiveTerm};
+use super::science::{ObjectiveMetric, ObjectiveTerm};
 use super::spec::{Manifest, MemberPlan, StudyKind, StudyMethod, StudySpec, TargetSpec};
 use super::state::{CandidateState, ProcessIdentity, StudyState, StudyStatus, TaskStatus};
 use crate::{Layout, MetricsRequest, RunNotice, VarMetrics};
@@ -31,6 +31,7 @@ struct StudyRunLock {
 
 const RUN_LOCK_HEARTBEAT_SECONDS: u64 = 10;
 const RUN_LOCK_STALE_SECONDS: i64 = 60;
+const NON_SCALAR_UQ_OUTPUTS: &[&str] = &["f_t_soisno", "f_wliq_soisno", "f_wice_soisno"];
 
 impl StudyRunLock {
     fn acquire(study_dir: &Path) -> Result<Self> {
@@ -95,7 +96,9 @@ fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
     let Some(owner) = run_lock_owner(&path)? else {
         return Ok(());
     };
-    if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS {
+    if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS
+        || scheduler_process_alive(owner.pid)?
+    {
         bail!("Study scheduler PID {} is still running", owner.pid);
     }
     fs::remove_file(&path).with_context(|| format!("cannot remove stale {}", path.display()))
@@ -224,51 +227,63 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         )?;
     }
     if spec.kind == StudyKind::Uncertainty {
+        for output in &spec.outputs {
+            if NON_SCALAR_UQ_OUTPUTS.contains(&output.as_str()) {
+                bail!(
+                    "UQ output {output} is a vertical profile; Study outputs must be scalar time series"
+                );
+            }
+        }
         for (site, case) in &sites {
+            let planned = crate::planned_history_variables(&case.join("case.nml"), &resolved)?;
             for output in &spec.outputs {
-                let (_, values, _) =
-                    model_series(case, output, spec.analysis_from, spec.analysis_to)?;
-                if !values.iter().any(|value| value.is_finite()) {
-                    bail!("baseline output {output} has no finite values for {site}");
+                if !planned.contains(output) {
+                    bail!(
+                        "baseline output {output} is not enabled by the case and frozen kernel for {site}"
+                    );
                 }
             }
         }
         return Ok(());
     }
-    let mut terms = Vec::new();
     for (site, case) in &sites {
         let observation = observation_for(&spec, &case_root, site)?;
+        let catalog = crate::evaluation_plan_rows(&case.join("case.nml"), &observation, &resolved)?;
         for target in spec
             .targets
             .iter()
             .filter(|target| target.site.as_deref().is_none_or(|wanted| wanted == site))
         {
-            let result = target_result(case, &observation, site, target, false, sites.len())?;
-            terms.push(ObjectiveTerm {
-                metric: result.metric,
-                value: result.value,
-                observation_sd: result.observation_sd,
-                weight: result.weight,
-                pairs: result.pairs,
-            });
-            if target.validation_from.is_some() {
-                let result = target_result(case, &observation, site, target, true, sites.len())?;
-                terms.push(ObjectiveTerm {
-                    metric: result.metric,
-                    value: result.value,
-                    observation_sd: result.observation_sd,
-                    weight: result.weight,
-                    pairs: result.pairs,
-                });
+            let row = catalog
+                .iter()
+                .find(|row| row.name.eq_ignore_ascii_case(&target.variable))
+                .with_context(|| {
+                    format!(
+                        "required target {} ({}) is not supported for {site}",
+                        target.key, target.variable
+                    )
+                })?;
+            if !row.available {
+                let missing = row
+                    .missing_model
+                    .iter()
+                    .map(|name| format!("model {name}"))
+                    .chain(
+                        row.missing_observation
+                            .iter()
+                            .map(|name| format!("observation {name}")),
+                    )
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "required target {} ({}) is unavailable for {site}: missing {missing}",
+                    target.key,
+                    target.variable
+                );
             }
         }
     }
-    match super::science::score_required(&terms, 0) {
-        ObjectiveScore::Feasible(_) => Ok(()),
-        ObjectiveScore::Infeasible(reason) => {
-            bail!("baseline does not satisfy the frozen tuning targets: {reason}")
-        }
-    }
+    Ok(())
 }
 
 pub fn result_files(study_dir: &Path) -> Result<Vec<ResultFile>> {
@@ -1065,11 +1080,10 @@ fn refresh_candidates(
                         calibration.extend(result.calibration);
                         validation.extend(result.validation);
                     }
-                    Err(error) if manifest.spec.kind == StudyKind::Tuning => {
+                    Err(error) => {
                         reason = Some(error.to_string());
                         break;
                     }
-                    Err(_) => {}
                 }
             }
         }
@@ -1354,14 +1368,20 @@ fn write_uncertainty_results(
                     manifest.spec.analysis_to,
                 ) {
                     Ok((time, values, _)) if time == baseline_time => ensemble.push(values),
-                    Ok(_) => state.warnings.push(format!(
-                        "{} / {} / {} has a different time axis and was excluded",
-                        member.id, site, variable
-                    )),
-                    Err(error) => state.warnings.push(format!(
-                        "{} / {} / {} was excluded: {error}",
-                        member.id, site, variable
-                    )),
+                    Ok(_) => push_warning_once(
+                        state,
+                        format!(
+                            "{} / {} / {} has a different time axis and was excluded",
+                            member.id, site, variable
+                        ),
+                    ),
+                    Err(error) => push_warning_once(
+                        state,
+                        format!(
+                            "{} / {} / {} was excluded: {error}",
+                            member.id, site, variable
+                        ),
+                    ),
                 }
             }
             let mut p05 = Vec::with_capacity(baseline_time.len());
@@ -2392,6 +2412,16 @@ mod tests {
         assert!(ensure_scheduler_idle(&dir).is_err());
         drop(live);
 
+        let mut stale_but_alive = supervisor_identity();
+        stale_but_alive.heartbeat_unix = 0;
+        std::fs::write(
+            dir.join("run.lock"),
+            serde_json::to_vec(&stale_but_alive).unwrap(),
+        )
+        .unwrap();
+        assert!(ensure_scheduler_idle(&dir).is_err());
+        assert!(dir.join("run.lock").is_file());
+
         let mut stale = supervisor_identity();
         stale.pid = u32::MAX;
         stale.heartbeat_unix = 0;
@@ -2543,6 +2573,52 @@ esac
             .unwrap(),
         )
         .unwrap();
+        // Preflight must validate the frozen plan, not require history from the
+        // untouched base case; the Study runs its own baseline member below.
+        preflight_create(&root, &spec).unwrap();
+        let profile_spec = root.join("profile-spec.json");
+        let mut profile_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&spec).unwrap()).unwrap();
+        profile_json["outputs"] = serde_json::json!(["f_t_soisno"]);
+        std::fs::write(
+            &profile_spec,
+            serde_json::to_vec_pretty(&profile_json).unwrap(),
+        )
+        .unwrap();
+        let error = preflight_create(&root, &profile_spec)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("vertical profile"), "{error}");
+        let observation = root.join("obs.nc");
+        {
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", 2).unwrap();
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&[1.0, 2.0], ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&[0.0, 0.0], ..)
+                .unwrap();
+        }
+        let tuning_spec = root.join("tuning-spec.json");
+        std::fs::write(
+            &tuning_spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "tuning",
+                "method": "differential-evolution",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "observations": {"site": observation},
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+                "targets": [{"key":"Qle","variable":"Qle","from":0,"to":10,"min_pairs":2}],
+                "budget": {"population":4,"generations":1}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        preflight_create(&root, &tuning_spec).unwrap();
         let manifest = super::super::engine::create(&root, &spec).unwrap();
         let study = PathBuf::from(&manifest.root);
         let state = run(
@@ -2566,6 +2642,13 @@ esac
             .iter()
             .any(|file| file.path == "envelopes/site/f_lfevpa.json"));
         assert!(files.iter().any(|file| file.path == "members.csv"));
+        std::fs::remove_file(task_result_path(&manifest, "m000001", "site")).unwrap();
+        let members = super::super::generation::load_members(&manifest).unwrap();
+        let mut refreshed = state.clone();
+        refresh_candidates(&manifest, &members, &mut refreshed).unwrap();
+        let candidate = &refreshed.candidates["m000001"];
+        assert!(!candidate.feasible);
+        assert!(candidate.reason.is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

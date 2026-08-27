@@ -157,9 +157,11 @@ function updateOverallProgress() {
   const finished = dirs.filter(d => !state.runningCases.has(d)).length;
   const pct = total ? Math.min(100, 100 * step / total) : 0;
   $('prog').style.width = `${pct}%`;
-  $('progtext').textContent = dirs.length
-    ? `批量总体：${finished}/${dirs.length} 个站点结束` + (total ? ` · 模型步 ${step}/${total}` : '')
-    : '\u00a0';
+  $('progtext').textContent = dirs.length === 1
+    ? progressText(state.runProgress[dirs[0]] ?? {}, state.runState[dirs[0]] ?? '待运行')
+    : dirs.length
+      ? `批量总体：${finished}/${dirs.length} 个站点结束` + (total ? ` · 模型步 ${step}/${total}` : '')
+      : '\u00a0';
 }
 
 export async function refreshKernels() {

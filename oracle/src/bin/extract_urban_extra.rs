@@ -7,13 +7,14 @@
 //!   cargo run -p oracle --bin extract-urban-extra -- <Sitedata> <rawdata> --from-tiles \
 //!     > crates/colm-srfdata/src/urban_extra.rs
 //!
-//! `extract-urban-soil` 搬走的是 `soil/` 那 122 GB；这一支搬走剩下的六处，
+//! `extract-urban-soil` 搬走的是 `soil/` 那 122 GB；这一支搬走剩下的点值，
 //! 清单同样是**实测**出来的（拿真 rawdata 跑一遍城市算例，照 mksrfdata
 //! 报的 `Warning: <name> not found in site.nc` 逐条对）：
 //!
 //! | 量 | 栅格 | CoLM 读它的地方 |
 //! |---|---|---|
 //! | `LCZ_DOM` | `urban_type/` 5x5 瓦片 | `MOD_SingleSrfdata.F90:1591` |
+//! | `REGION_ID` / `URBAN_DENSITY_CLASS` | 同一 `urban_type/` 瓦片 | :1562 / :1565 |
 //! | `LUCY_ID` | `urban/LUCY_regionid.nc`（**colm_5km**） | :1862 |
 //! | 土壤颜色档 | `soil_brightness.nc` | :2072 |
 //! | `lakedepth` | `lake_depth.nc` | :2050 |
@@ -53,6 +54,8 @@ struct Row {
     lon: f64,
     lat: f64,
     lcz_dom: i32,
+    ncar_region: i32,
+    ncar_density: i32,
     lucy_id: f64,
     soil_colour: i32,
     lakedepth: f64,
@@ -279,6 +282,16 @@ fn extract(s: &Site, raw: &Path, years: &[i32], lai: &LaiSource) -> Result<Row> 
     // LCZ 局地气候区，`urban_type/` 的 5x5 瓦片。整型，`_FillValue = 0`。
     let lcz_dom = point_5x5_i32(&raw.join("urban_type"), "URBTYP", "LCZ_DOM", lon, lat)
         .with_context(|| at("LCZ_DOM"))?;
+    let ncar_region = point_5x5_i32(&raw.join("urban_type"), "URBTYP", "REGION_ID", lon, lat)
+        .with_context(|| at("REGION_ID"))?;
+    let ncar_density = point_5x5_i32(
+        &raw.join("urban_type"),
+        "URBTYP",
+        "URBAN_DENSITY_CLASS",
+        lon,
+        lat,
+    )
+    .with_context(|| at("URBAN_DENSITY_CLASS"))?;
 
     // LUCY 区号。**这个栅格是 colm_5km，不是 colm_500m** —— 见
     // `MOD_SingleSrfdata.F90:1861`。而且 CoLM 用 `read_point_var_2d_real8`
@@ -353,6 +366,8 @@ fn extract(s: &Site, raw: &Path, years: &[i32], lai: &LaiSource) -> Result<Row> 
         lon,
         lat,
         lcz_dom,
+        ncar_region,
+        ncar_density,
         lucy_id,
         soil_colour,
         lakedepth,
@@ -392,7 +407,7 @@ fn emit(rows: &[Row], years: &[i32]) {
     println!("/// 一个城市站点的第二批栅格点值。");
     println!("///");
     println!("/// 与 [`crate::urban_soil::UrbanSoil`] 是两张表而不是一张：那张是");
-    println!("/// `soil/` 的剖面，这张是六个各自独立的栅格。合成一张的话，重抽其中");
+    println!("/// `soil/` 的剖面，这张是八批点值。合成一张的话，重抽其中");
     println!("/// 一半就得把另一半也重抽一遍。");
     println!("pub struct UrbanExtra {{");
     println!("    pub site: &'static str,");
@@ -401,6 +416,10 @@ fn emit(rows: &[Row], years: &[i32]) {
     println!("    /// 局地气候区分类，写进 site.nc 的 `LCZ_DOM`。");
     println!("    /// 实测 21 个站落在 7 个类别上 —— 编一个默认值会把大多数站换掉。");
     println!("    pub lcz_dom: i32,");
+    println!("    /// NCAR 城市属性表的区域编号，写进 `URBTYP`。");
+    println!("    pub ncar_region: i32,");
+    println!("    /// NCAR 三类城市密度，写进 `URBAN_DENSITY_CLASS`。");
+    println!("    pub ncar_density: i32,");
     println!("    /// LUCY 区号，写进 site.nc 的 `LUCY_ID`。");
     println!("    /// CoLM 按实型读（`read_point_var_2d_real8`），所以这里也是 f64。");
     println!("    pub lucy_id: f64,");
@@ -433,6 +452,8 @@ fn emit(rows: &[Row], years: &[i32]) {
         println!("        lon: {:?},", r.lon);
         println!("        lat: {:?},", r.lat);
         println!("        lcz_dom: {},", r.lcz_dom);
+        println!("        ncar_region: {},", r.ncar_region);
+        println!("        ncar_density: {},", r.ncar_density);
         println!("        lucy_id: {:?},", r.lucy_id);
         println!("        soil_colour: {},", r.soil_colour);
         println!("        lakedepth: {:?},", r.lakedepth);
@@ -452,7 +473,7 @@ fn emit(rows: &[Row], years: &[i32]) {
     print!("{LOOKUP}");
 }
 
-const HEADER: &str = r#"//! 21 个 Urban-PLUMBER 站点在**六个**全球栅格上的点值，从 CoLM 2024
+const HEADER: &str = r#"//! 21 个 Urban-PLUMBER 站点的城市栅格点值，从 CoLM 2024
 //! rawdata 抽出。
 //!
 //! **生成的产物，不要手改。** 重生成：
@@ -460,7 +481,7 @@ const HEADER: &str = r#"//! 21 个 Urban-PLUMBER 站点在**六个**全球栅格
 //! （树 LAI 的点值来自那份 JSON；`--from-tiles` 换成直接读 698 GB 的瓦片目录。）
 //!
 //! **为什么要它**：`urban_soil.rs` 搬走了 `soil/` 那 122 GB 之后，城市算例
-//! 还有六处会去开栅格，而且**开不到就 `CoLM_stop`，不是警告**。其中
+//! 还有八批点值会去开栅格，而且**开不到就 `CoLM_stop`，不是警告**。其中
 //! `urban_lai_500m/` 单个瓦片实测 85 MB，21 个站要 15 块 x 23 年 ≈ 7 GB；
 //! 这张表把同一批数压到 230 KB。
 //!

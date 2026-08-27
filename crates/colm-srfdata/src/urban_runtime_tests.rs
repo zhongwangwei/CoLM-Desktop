@@ -1,4 +1,4 @@
-//! 守住随仓库发的 `LUCY_rawdata.nc`：还在、还是那张全局表、铺得出来。
+//! 守住随仓库发的两张城市参数表：内容有效、维度正确、能铺到 CoLM 的固定路径。
 
 use super::*;
 
@@ -38,6 +38,21 @@ fn staging_puts_it_where_colm_looks_for_it() {
     stage(&dir).expect("覆盖失败");
     assert_eq!(std::fs::read(&file).unwrap(), LUCY_RAWDATA);
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn staging_ncar_puts_the_three_class_table_in_rawdata() {
+    let dir = std::env::temp_dir().join(format!("colm-ncar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = stage_ncar(&dir).expect("铺不出来");
+    assert_eq!(file, dir.join(NCAR_RELATIVE));
+    let f = netcdf::open(&file).expect("打不开");
+    assert_eq!(f.dimension("region").expect("region").len(), 33);
+    assert_eq!(
+        f.dimension("density_class").expect("density_class").len(),
+        3
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

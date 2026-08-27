@@ -37,15 +37,8 @@ pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, Strin
     let doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
 
     // 这份配置里某个 logical 的实际取值：文件里设了就用文件的，否则用默认值。
-    let truth = |path: &str| -> bool {
-        match doc.get(path) {
-            Some(colm_namelist::Value::Bool(b)) => *b,
-            _ => matches!(
-                colm_schema::find(path).map(|f| f.default),
-                Some(colm_schema::Default::Logical(true))
-            ),
-        }
-    };
+    let truth = |path: &str| -> bool { truth_value(&doc, path).unwrap_or(false) };
+    let gate_truth = |path: &str| -> Option<bool> { truth_value(&doc, path) };
 
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -69,7 +62,7 @@ pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, Strin
                 } else {
                     match v.runtime {
                         None => (Some(true), None),
-                        Some(expr) => match eval(expr, &truth) {
+                        Some(expr) => match colm_hist::eval_runtime_gate(expr, &gate_truth) {
                             Some(true) => (Some(true), None),
                             Some(false) => (Some(false), Some(format!("需要 {expr}"))),
                             // 表达式不是我们认得的两种形状。**不猜** ——
@@ -106,7 +99,7 @@ pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, Strin
             } else {
                 match v.runtime {
                     None => (Some(true), None),
-                    Some(expr) => match eval(expr, &truth) {
+                    Some(expr) => match colm_hist::eval_runtime_gate(expr, &gate_truth) {
                         Some(true) => (Some(true), None),
                         Some(false) => (Some(false), Some(format!("需要 {expr}"))),
                         None => (None, Some(format!("条件 {expr} 需要人工判断"))),
@@ -125,100 +118,13 @@ pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, Strin
     Ok(out)
 }
 
-/// Evaluate the logical subset emitted by the history-map generator: fields,
-/// parentheses, `.not.`, `.and.` and `.or.`. Numeric comparisons remain
-/// unknown instead of being guessed.
-fn eval(expr: &str, truth: &dyn Fn(&str) -> bool) -> Option<bool> {
-    let e = strip_outer_parens(expr.trim());
-    if let Some(parts) = split_top_level(e, ".or.") {
-        let mut unknown = false;
-        for part in parts {
-            match eval(part, truth) {
-                Some(true) => return Some(true),
-                Some(false) => {}
-                None => unknown = true,
-            }
-        }
-        return (!unknown).then_some(false);
-    }
-    if let Some(parts) = split_top_level(e, ".and.") {
-        let mut unknown = false;
-        for part in parts {
-            match eval(part, truth) {
-                Some(false) => return Some(false),
-                Some(true) => {}
-                None => unknown = true,
-            }
-        }
-        return (!unknown).then_some(true);
-    }
-    let lower = e.to_ascii_lowercase();
-    if lower.starts_with(".not.") {
-        return eval(e[5..].trim(), truth).map(|value| !value);
-    }
-    let name = e;
-    if !name.starts_with("DEF_") || name.contains(|c: char| !c.is_alphanumeric() && c != '_') {
-        return None;
-    }
-    colm_schema::find(name)?;
-    Some(truth(name))
-}
-
-fn strip_outer_parens(mut expr: &str) -> &str {
-    loop {
-        let bytes = expr.as_bytes();
-        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
-            return expr;
-        }
-        let mut depth = 0i32;
-        let mut closes_at_end = false;
-        for (i, byte) in bytes.iter().enumerate() {
-            match byte {
-                b'(' => depth += 1,
-                b')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        closes_at_end = i + 1 == bytes.len();
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !closes_at_end {
-            return expr;
-        }
-        expr = expr[1..expr.len() - 1].trim();
-    }
-}
-
-fn split_top_level<'a>(expr: &'a str, operator: &str) -> Option<Vec<&'a str>> {
-    let lower = expr.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let op = operator.as_bytes();
-    let mut depth = 0i32;
-    let mut start = 0;
-    let mut parts = Vec::new();
-    let mut i = 0;
-    while i + op.len() <= bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            _ if depth == 0 && &bytes[i..i + op.len()] == op => {
-                parts.push(expr[start..i].trim());
-                i += op.len();
-                start = i;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        parts.push(expr[start..].trim());
-        Some(parts)
+fn truth_value(doc: &colm_namelist::Document, path: &str) -> Option<bool> {
+    match doc.get(path) {
+        Some(colm_namelist::Value::Bool(value)) => Some(*value),
+        _ => match colm_schema::find(path).map(|field| field.default) {
+            Some(colm_schema::Default::Logical(value)) => Some(value),
+            _ => None,
+        },
     }
 }
 

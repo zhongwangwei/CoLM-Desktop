@@ -365,9 +365,9 @@ fn an_urban_site_in_the_table_also_gets_the_second_batch() {
         .needs_external
         .iter()
         .any(|n| n == "resident_population_density"));
-    // LCZ_DOM + LUCY_ID + 四个反照率 + lakedepth + elvstd + sloperatio
-    // + LAI_year + TREE_LAI + TREE_SAI = 12。
-    assert_eq!(r.extra_vars.len(), 12);
+    // LCZ + NCAR 区域/密度 + LUCY_ID + 四个反照率 + lakedepth + elvstd
+    // + sloperatio + LAI_year + TREE_LAI + TREE_SAI = 14。
+    assert_eq!(r.extra_vars.len(), 14);
 
     let f = netcdf::open(&dst).expect("open");
     let one = |n: &str| -> f64 {
@@ -377,6 +377,9 @@ fn an_urban_site_in_the_table_also_gets_the_second_batch() {
     };
     // 这几个数出自「给了真实 rawdata」的参照运行的 srfdata.nc。
     assert_eq!(one("LCZ_DOM"), 6.0);
+    assert_eq!(one("URBTYP"), 2.0);
+    assert_eq!(one("URBAN_DENSITY_CLASS"), 3.0);
+    assert!(super::supports_ncar_urban(&dst).unwrap());
     assert_eq!(one("LUCY_ID"), 12.0);
     assert_eq!(one("lakedepth"), 0.0);
     assert_eq!(one("elvstd"), 5.195_305_347_442_627);

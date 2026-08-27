@@ -104,17 +104,37 @@ fn a_switch_the_gate_table_does_not_know_says_so() {
 #[test]
 fn an_expression_we_do_not_understand_is_not_guessed() {
     // 逻辑组合来自生成器，可以直接求；数值比较仍不猜。
-    let t = |name: &str| name == "DEF_USE_BGC" || name == "DEF_USE_SNICAR";
-    assert_eq!(eval("DEF_USE_SNICAR", &t), Some(true));
-    assert_eq!(eval(".not.DEF_USE_SNICAR", &t), Some(false));
-    assert_eq!(eval(".not.(DEF_USE_NITRIF)", &t), Some(true));
+    let t = |name: &str| match name {
+        "DEF_USE_BGC" | "DEF_USE_SNICAR" => Some(true),
+        "DEF_USE_NITRIF" => Some(false),
+        _ => None,
+    };
     assert_eq!(
-        eval("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)", &t),
+        colm_hist::eval_runtime_gate("DEF_USE_SNICAR", &t),
+        Some(true)
+    );
+    assert_eq!(
+        colm_hist::eval_runtime_gate(".not.DEF_USE_SNICAR", &t),
         Some(false)
     );
-    assert_eq!(eval("(DEF_USE_BGC) .or. (DEF_USE_NITRIF)", &t), Some(true));
-    assert_eq!(eval("DEF_DA_ENS_NUM > 1", &t), None);
-    assert_eq!(eval("DEF_NOT_A_REAL_FIELD", &t), None, "不认识的字段不猜");
+    assert_eq!(
+        colm_hist::eval_runtime_gate(".not.(DEF_USE_NITRIF)", &t),
+        Some(true)
+    );
+    assert_eq!(
+        colm_hist::eval_runtime_gate("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)", &t),
+        Some(false)
+    );
+    assert_eq!(
+        colm_hist::eval_runtime_gate("(DEF_USE_BGC) .or. (DEF_USE_NITRIF)", &t),
+        Some(true)
+    );
+    assert_eq!(colm_hist::eval_runtime_gate("DEF_DA_ENS_NUM > 1", &t), None);
+    assert_eq!(
+        colm_hist::eval_runtime_gate("DEF_NOT_A_REAL_FIELD", &t),
+        None,
+        "不认识的字段不猜"
+    );
 }
 
 #[test]

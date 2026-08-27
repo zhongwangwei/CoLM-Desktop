@@ -379,6 +379,20 @@ fn a_study_cancel_can_identify_the_scheduler_it_killed() {
 }
 
 #[test]
+fn study_process_keys_normalize_equivalent_paths() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-study-process-key-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let plain = study_process_key(root.to_str().unwrap());
+    let slash = study_process_key(&format!("{}/", root.display()));
+    assert_eq!(plain, slash);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cancelling_a_finished_case_does_not_poison_its_next_run() {
     let processes = RunProcesses::default();
     let case = "/tmp/finished".to_string();
@@ -433,6 +447,21 @@ fn requested_batch_cpu_count_is_bounded_by_the_machine() {
     assert_eq!(batch_width(4, 8), 4);
     assert_eq!(batch_width(99, 8), 8);
     assert_eq!(batch_width(4, 0), 1);
+}
+
+#[test]
+fn evaluation_plan_forwards_case_obs_and_kernel() {
+    assert_eq!(
+        evaluation_plan_args("/case".into(), "/obs.nc".into(), "/kernel".into()),
+        [
+            "evaluation-plan",
+            "/case",
+            "--obs",
+            "/obs.nc",
+            "--kernel",
+            "/kernel",
+        ]
+    );
 }
 
 #[test]

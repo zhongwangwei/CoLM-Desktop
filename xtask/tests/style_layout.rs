@@ -63,7 +63,7 @@ fn the_layout_has_all_three_breakpoints() {
 }
 
 #[test]
-fn the_home_gate_paints_before_the_full_application_loads() {
+fn the_loading_gate_paints_before_the_full_application_loads() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .canonicalize()
@@ -73,11 +73,18 @@ fn the_home_gate_paints_before_the_full_application_loads() {
         std::fs::read_to_string(root.join("gui/dist/app/gate-boot.js")).expect("gate-boot.js");
     assert!(html.contains(r#"type="module" src="app/gate-boot.js""#));
     assert!(!html.contains(r#"type="module" src="app/main.js""#));
-    let gate = boot.find("showDomainGate();").expect("home gate render");
+    assert!(html.contains(r#"id="loadinggate" class="gate loading-gate""#));
+    assert!(html.contains(r#"id="launchgate" class="gate launch-gate" hidden"#));
+    assert!(html.contains(r#"src="assets/colm-logo.png""#));
     let app = boot
         .find("import('./main.js')")
         .expect("deferred app import");
-    assert!(gate < app, "完整应用不能挡在首页首帧之前");
+    let ready = boot.find("await ready").expect("application ready promise");
+    let launcher = boot.rfind("showLaunchGate();").expect("launcher reveal");
+    assert!(
+        app < ready && ready < launcher,
+        "运行方式卡片只能在完整应用就绪后显示"
+    );
     assert!(boot.contains("requestAnimationFrame") && boot.contains("setTimeout"));
 }
 

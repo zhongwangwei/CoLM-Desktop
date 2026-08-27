@@ -116,7 +116,6 @@ const RAW: &[RawParameter] = &[
     ("DEF_TUNING_SSI", b!(>= 0.0), b!(<= 1.0), None),
     ("DEF_TUNING_WIMP", b!(>= 0.0), b!(< 1.0), None),
     ("DEF_TUNING_PONDMX", b!(>= 0.0), None, None),
-    ("DEF_TUNING_SMPMAX", None, b!(< 0.0), None),
     ("DEF_TUNING_SMPMIN", None, b!(< 0.0), None),
     ("DEF_TUNING_SMPMAX_HR", None, b!(< 0.0), None),
     ("DEF_TUNING_SMPMIN_HR", None, b!(< 0.0), None),
@@ -124,8 +123,6 @@ const RAW: &[RawParameter] = &[
     ("DEF_TUNING_WETWATMAX", b!(> 0.0), None, None),
     ("DEF_TUNING_SOIL_ICE_IMPEDANCE", b!(> 0.0), None, None),
     ("DEF_TUNING_TOPMOD_DECAY", b!(> 0.0), None, None),
-    ("DEF_TUNING_SIMPLE_VIC_DS", b!(> 0.0), b!(< 1.0), None),
-    ("DEF_TUNING_SIMPLE_VIC_WS", b!(> 0.0), b!(< 1.0), None),
     ("DEF_TUNING_SNOW_COVER_EXPONENT", b!(> 0.0), None, None),
     (
         "DEF_TUNING_IRRIGATION_START_SEC",
@@ -238,18 +235,11 @@ pub fn validate_values(values: &[(String, f64)]) -> Result<()> {
             bail!("duplicate tuning parameter {name}");
         }
     }
-    validate_value_order(&actual, "DEF_TUNING_SMPMIN", "DEF_TUNING_SMPMAX", false)?;
     validate_value_order(
         &actual,
         "DEF_TUNING_SMPMIN_HR",
         "DEF_TUNING_SMPMAX_HR",
         false,
-    )?;
-    validate_value_order(
-        &actual,
-        "DEF_TUNING_SIMPLE_VIC_DS",
-        "DEF_TUNING_SIMPLE_VIC_WS",
-        true,
     )?;
     validate_value_order(
         &actual,
@@ -321,18 +311,11 @@ pub fn validate_study_parameters(params: &[StudyParameter<'_>]) -> Result<()> {
         ranges.insert(meta.name, (p.sample_min, p.sample_max));
     }
 
-    validate_paired_order(&ranges, "DEF_TUNING_SMPMIN", "DEF_TUNING_SMPMAX", false)?;
     validate_paired_order(
         &ranges,
         "DEF_TUNING_SMPMIN_HR",
         "DEF_TUNING_SMPMAX_HR",
         false,
-    )?;
-    validate_paired_order(
-        &ranges,
-        "DEF_TUNING_SIMPLE_VIC_DS",
-        "DEF_TUNING_SIMPLE_VIC_WS",
-        true,
     )?;
     validate_paired_order(
         &ranges,
@@ -400,12 +383,9 @@ pub fn validate_case_parameter_activity(
                 !single || biological || urban
             }
             "DEF_TUNING_WETWATMAX" => wetland || logical(&doc, "DEF_USE_Dynamic_Wetland"),
-            "DEF_TUNING_SMPMAX" => soil_hydrology && integer(&doc, "DEF_Runoff_SCHEME") == 3,
+            "DEF_TUNING_SMPMIN" => soil_hydrology,
             "DEF_TUNING_SOIL_ICE_IMPEDANCE" => soil_hydrology,
             "DEF_TUNING_TOPMOD_DECAY" => soil_hydrology && integer(&doc, "DEF_Runoff_SCHEME") == 0,
-            "DEF_TUNING_SIMPLE_VIC_DS" | "DEF_TUNING_SIMPLE_VIC_WS" => {
-                soil_hydrology && integer(&doc, "DEF_Runoff_SCHEME") == 3
-            }
             "DEF_TUNING_CROP_PLANTING_DAY" => single && crop && cropland,
             name if name.starts_with("DEF_TUNING_IRRIGATION_") => {
                 crop && logical(&doc, "DEF_USE_IRRIGATION") && (!single || cropland)
@@ -481,7 +461,6 @@ fn validate_document_values(doc: &colm_namelist::Document) -> Result<()> {
     for (min_name, max_name, allow_equal) in [
         ("DEF_TUNING_SMPMIN", "DEF_TUNING_SMPMAX", false),
         ("DEF_TUNING_SMPMIN_HR", "DEF_TUNING_SMPMAX_HR", false),
-        ("DEF_TUNING_SIMPLE_VIC_DS", "DEF_TUNING_SIMPLE_VIC_WS", true),
         (
             "DEF_TUNING_IRRIGATION_MIN_CPHASE",
             "DEF_TUNING_IRRIGATION_MAX_CPHASE",

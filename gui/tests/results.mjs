@@ -13,7 +13,7 @@ const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 const {
   LruCache, boundedMap, metricKey, resultCases, rowsToCsv,
 } = await import(moduleUrl('result-model.js'));
-const { WORKFLOW } = await import(moduleUrl('shell.js'));
+const { WORKFLOW, nextOf } = await import(moduleUrl('shell.js'));
 const { state } = await import(moduleUrl('state.js'));
 
 const groupFor = id => WORKFLOW.find(group => group.steps.some(step => step.id === id));
@@ -36,11 +36,19 @@ for (const id of ['result-uncertainty', 'result-tuning', 'result-export']) {
 state.selected = { dir: '/cases/pending', name: 'pending' };
 state.cases = [state.selected];
 state.createdCases.add(state.selected.dir);
-for (const id of ['result-uncertainty', 'result-tuning', 'result-export']) {
-  if (!groupFor(id).steps[0].need()?.includes('至少一个算例')) {
-    throw new Error(`${id} must be disabled, not hidden, before results exist`);
+for (const id of ['result-uncertainty', 'result-tuning']) {
+  if (groupFor(id).steps[0].need() !== null || groupFor(id).steps[0].optional !== true) {
+    throw new Error(`${id} must unlock as soon as Basic setup has created a case`);
   }
 }
+if (!groupFor('result-export').steps[0].need()?.includes('至少一个算例')) {
+  throw new Error('result-export must still require a completed result');
+}
+state.selected.has_history = true;
+if (nextOf('result-diagnostics')?.id !== 'result-export') {
+  throw new Error('optional Study branches must not become required Next steps');
+}
+state.selected.has_history = false;
 
 const cases = [
   { dir: '/cases/old', name: 'old', has_history: true },
@@ -107,17 +115,46 @@ if (!html.includes('<option value="pdf">PDF</option>')) {
 }
 for (const control of [
   'evaluation-variable-selector', 'batch-evaluation-variable-selector',
-  'uq-create', 'uq-run', 'uq-status', 'uq-retry', 'uq-from', 'uq-to',
-  'uq-range-confirm',
-  'tune-create', 'tune-run', 'tune-status', 'tune-retry', 'tune-val-from', 'tune-val-to',
-  'tune-min-pairs', 'tune-range-confirm', 'evaluation-chart-refresh', 'export-pdf',
+  'uq-readiness', 'uq-create', 'uq-run', 'uq-status', 'uq-retry', 'uq-from', 'uq-to',
+  'uq-range-confirm', 'uq-step-progress', 'uq-step-do', 'uq-step-why', 'uq-step-prev', 'uq-step-next',
+  'tune-readiness', 'tune-create', 'tune-run', 'tune-status', 'tune-retry', 'tune-val-from', 'tune-val-to',
+  'tune-min-pairs', 'tune-range-confirm', 'tune-step-progress', 'tune-step-do', 'tune-step-why', 'tune-step-prev', 'tune-step-next',
+  'evaluation-chart-refresh', 'export-pdf',
 ]) {
   if (!html.includes(`id="${control}"`)) throw new Error(`results workbench is missing ${control}`);
+}
+for (const kind of ['uq', 'tuning']) {
+  const steps = [...html.matchAll(new RegExp(`data-study-wizard="${kind}" data-study-step="(\\d+)"`, 'g'))]
+    .map(match => Number(match[1])).sort((a, b) => a - b);
+  if (steps.join(',') !== '0,1,2,3,4,5,6') throw new Error(`${kind} must be a seven-page guided Study workflow`);
+}
+for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以创建', '先设计，再创建，再运行', '先确认观测与目标，再开始搜索']) {
+  if (!html.includes(text)) throw new Error(`Study guidance is missing: ${text}`);
 }
 for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
+if (!resultUi.includes('function studyWizardIssue(kind, page)')
+    || !resultUi.includes('function renderStudyWizard(kind)')
+    || !resultUi.includes('function setStudyWizardPage(kind, page)')
+    || !resultUi.includes('const studyWizardHelp =')
+    || !resultUi.includes("$(`${prefix}-step-do`).textContent = dialogText(help[0])")
+    || !resultUi.includes("$(`${prefix}-step-why`).textContent = dialogText(help[1])")
+    || !resultUi.includes('setStudyWizardPage(kind, 5)')
+    || !resultUi.includes("$(`${prefix}-step-prev`).onclick")
+    || !resultUi.includes("$(`${prefix}-step-next`).onclick")) {
+  throw new Error('Study workflows must provide guarded previous/next pages and move running work to status');
+}
+if (!resultUi.includes('const studyAsyncRequests =')
+    || !resultUi.includes('async function loadStudyParams(stillCurrent = () => true)')
+    || !resultUi.includes('async function renderStudyOutputs(stillCurrent = () => true)')
+    || !resultUi.includes('async function renderTuningTargets(stillCurrent = () => true)')
+    || !resultUi.includes('function studyDesign(kind)')
+    || !resultUi.includes('使用对数采样时上下界必须大于 0')
+    || !resultUi.includes('采样范围超出代码硬边界')) {
+  throw new Error('Study page transitions must reject stale responses and invalid page-level scientific inputs');
+}
 if (!resultUi.includes('let activePaneRequest = 0')
     || !resultUi.includes('let activeDataBrowserRequest = 0')
     || !resultUi.includes('let activeBatchEvaluationCatalogRequest = 0')
@@ -234,7 +271,11 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || !resultUi.includes('row.n === cases.length')
     || !resultUi.includes('dataset.outputSites')
     || !resultUi.includes('MAX_STUDY_CANDIDATES')
-    || !resultUi.includes('const studyScope = () => resultScope()')
+    || resultUi.includes('const studyScope = () => resultScope()')
+    || !resultUi.includes('const cases = allCurrent();')
+    || !resultUi.includes("invoke('hist_vars'")
+    || !resultUi.includes("invoke('evaluation_plan'")
+    || !resultUi.includes('renderStudyReadiness(kind)')
     || !resultUi.includes('const totalCandidates = candidateCounts.reduce')
     || !resultUi.includes('state: { status: \'multiple\', tasks, candidates }')
     || !resultUi.includes("invoke('study_apply_preview'")
@@ -242,7 +283,7 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || !resultUi.includes('已创建但未登记的 Study')
     || !resultUi.includes('study_key')
     || !resultUi.includes('min_pairs')
-    || !resultUi.includes('analysis_from: from')
+    || !resultUi.includes('analysis_from: design.from')
     || !resultUi.includes("invoke('study_retry'")
     || !resultUi.includes("invoke('study_preflight_json'")
     || !resultUi.includes('studyCpuCapacity')
@@ -251,6 +292,28 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || !resultUi.includes("listen('study://event'")
     || !resultUi.includes('if (!dir || !active.has(dir)) return;')) {
   throw new Error('study workflows must gate parameters, include windows, stream events, and load backend results on demand');
+}
+if (!resultUi.includes('studyDatesInitialized[kind] === scopeKey')
+    || !resultUi.includes('studyDatesInitialized[kind] = scopeKey')
+    || !resultUi.includes('const site = studySiteId({ dir: baseCase });')
+    || resultUi.includes('const site = envelope.manifest?.spec?.base_cases?.[0] || member;')) {
+  throw new Error('Study dates and applied case names must follow the current result scope safely');
+}
+if (!resultUi.includes("const PLANNED_PROFILE_VARIABLES = new Set(['f_t_soisno', 'f_wliq_soisno', 'f_wice_soisno'])")
+    || !resultUi.includes('!PLANNED_PROFILE_VARIABLES.has(name)')) {
+  throw new Error('pre-run UQ output preview must not mislabel known vertical profiles as scalar series');
+}
+if (!resultUi.includes('!c.has_history || isStaleResult(c) || isActiveResult(c)')
+    || resultUi.includes('try { catalog = await loadCatalog(c); }\n      catch { catalog = await plannedHistoryCatalog(c); }')
+    || !resultUi.includes('不会退回计划值')
+    || !resultUi.includes('以下已有结果未通过评估目录检查，不会退回计划值')
+    || resultUi.includes('if (!counts.size) {\n    const failures = rows.filter')) {
+  throw new Error('broken completed histories must remain visible instead of falling back to planned outputs');
+}
+if (!resultUi.includes('const uncovered = independent ? cases.filter')
+    || !resultUi.includes("sites.split('\\u001f').includes(studySiteId(c))")
+    || !resultUi.includes('uncovered.length === 0')) {
+  throw new Error('independent Study readiness must require an applicable selection for every site');
 }
 const syntaxFile = join(temp, 'results-syntax.mjs');
 await writeFile(syntaxFile, resultUi);

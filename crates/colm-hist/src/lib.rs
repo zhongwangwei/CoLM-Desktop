@@ -98,6 +98,102 @@ pub fn unconditional(macros: &BTreeSet<&str>) -> BTreeSet<&'static str> {
         .collect()
 }
 
+/// Evaluate the logical subset emitted by the history-map generator: fields,
+/// parentheses, `.not.`, `.and.` and `.or.`. Numeric comparisons and unknown
+/// fields return `None` instead of being guessed.
+pub fn eval_runtime_gate(expr: &str, truth: &dyn Fn(&str) -> Option<bool>) -> Option<bool> {
+    let e = strip_outer_parens(expr.trim());
+    if let Some(parts) = split_top_level(e, ".or.") {
+        let mut unknown = false;
+        for part in parts {
+            match eval_runtime_gate(part, truth) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => unknown = true,
+            }
+        }
+        return (!unknown).then_some(false);
+    }
+    if let Some(parts) = split_top_level(e, ".and.") {
+        let mut unknown = false;
+        for part in parts {
+            match eval_runtime_gate(part, truth) {
+                Some(false) => return Some(false),
+                Some(true) => {}
+                None => unknown = true,
+            }
+        }
+        return (!unknown).then_some(true);
+    }
+    let lower = e.to_ascii_lowercase();
+    if lower.starts_with(".not.") {
+        return eval_runtime_gate(e[5..].trim(), truth).map(|value| !value);
+    }
+    if !e.starts_with("DEF_") || e.contains(|c: char| !c.is_alphanumeric() && c != '_' && c != '%')
+    {
+        return None;
+    }
+    truth(e)
+}
+
+fn strip_outer_parens(mut expr: &str) -> &str {
+    loop {
+        let bytes = expr.as_bytes();
+        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+            return expr;
+        }
+        let mut depth = 0i32;
+        let mut closes_at_end = false;
+        for (i, byte) in bytes.iter().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closes_at_end = i + 1 == bytes.len();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !closes_at_end {
+            return expr;
+        }
+        expr = expr[1..expr.len() - 1].trim();
+    }
+}
+
+fn split_top_level<'a>(expr: &'a str, operator: &str) -> Option<Vec<&'a str>> {
+    let lower = expr.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let op = operator.as_bytes();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i + op.len() <= bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 && &bytes[i..i + op.len()] == op => {
+                parts.push(expr[start..i].trim());
+                i += op.len();
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        parts.push(expr[start..].trim());
+        Some(parts)
+    }
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;

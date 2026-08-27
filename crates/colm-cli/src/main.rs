@@ -19,6 +19,7 @@
 //!                    [--json 1] [--corrected 1]
 //!                    [--summary-only 1] [--pairs-var Rnet ...] [--max-points N]
 //! colm-cli evaluation-catalog <算例目录> --obs <Flux.nc>
+//! colm-cli evaluation-plan <算例目录> --obs <Flux.nc> --kernel <目录>
 //! colm-cli history-catalog <算例目录>
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli study-parameters
@@ -85,6 +86,8 @@ usage:
                    --max-points: 配对点保极值降采样上限（指标仍用完整样本）
   colm-cli evaluation-catalog <case-dir> --obs <Flux.nc>
                    # 列出全部支持的评估变量及当前算例/观测是否可用
+  colm-cli evaluation-plan <case-dir> --obs <Flux.nc> --kernel <dir>
+                   # 不依赖 history，按 case.nml + 内核预览可评估目标
   colm-cli history-catalog <case-dir>
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
                    [--max-points N] [--out series.json]
@@ -212,6 +215,13 @@ fn main() -> Result<()> {
         }
         "evaluation-catalog" => {
             cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;
+        }
+        "evaluation-plan" => {
+            cmd_evaluation_plan(
+                &opts.positional_case()?,
+                &opts.need("--obs")?,
+                &opts.need("--kernel")?,
+            )?;
         }
         "series" => {
             let case = opts.positional_case()?;
@@ -1319,8 +1329,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     // **城市算例现在也一样。** 两张预抽表合起来盖住了 mksrfdata 会去开的
     // 每一处（`soil/` 的 24 个栅格实测 122 GB，加上 `urban_type/`、
     // `urban_lai_500m/`、`lake_depth.nc`、`soil_brightness.nc`、
-    // `topography.nc`、`urban/LUCY_regionid.nc`），而 `DEF_dir_runtime` 下的
-    // `urban/LUCY_rawdata.nc` 是随仓库发、由 `colm-cli` 铺进算例目录的。
+    // `topography.nc`、`urban/LUCY_regionid.nc`）。两张很小的全局参数表随包发：
+    // runtime 下的 LUCY（37 KB）和 rawdata 下的 NCAR 城市属性（62 KB）。
     //
     // 剩下的门槛只有一条：**站点在不在那 21 个里**。不在就照旧要 `--rawdata`，
     // 而且错误信息要说清楚是这个原因 —— 不是给没量过的站点编一个默认值。
@@ -1329,26 +1339,42 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             // 给了就用。表外的站点靠它，表内的站点给了也无妨（site.nc
             // 里有的量 CoLM 不会再去开栅格）。
             Some(r) => slash(Path::new(&r)),
-            // 没给而两张表都命中 —— 指向一个不存在的目录，跑通了就**证明**
-            // 一个栅格都没读。与水热算例用的是同一招。
-            None if urban_covered => text(&out.join("rawdata_unused/")),
+            // 两张站点表已经抽掉全球栅格；NCAR 的 33×3 城市属性表只有
+            // 62 KB，直接铺进算例，LCZ/NCAR 两种分类都能重建地表数据。
+            None if urban_covered => {
+                if colm_srfdata::site::supports_ncar_urban(&layout.site_nc())? {
+                    let root = out.join("rawdata");
+                    let file = colm_srfdata::urban_runtime::stage_ncar(&root)?;
+                    println!(
+                        "  rawdata: {} written from the built-in copy",
+                        file.display()
+                    );
+                    slash(&root)
+                } else {
+                    text(&out.join("rawdata_unused/"))
+                }
+            }
             None => bail!(
                 "an urban case for a site outside the pre-extracted tables needs --rawdata: \
                  {name} is not one of the 21 Urban-PLUMBER sites, so CoLM will read the \
                  global soil/, urban_type/ and urban_lai_500m/ grids for it"
             ),
         };
-        let run = match o.get("--runtime") {
-            Some(r) => slash(Path::new(&r)),
-            // 没给就自带一份。`LUCY_rawdata.nc` 是张 37 KB 的全局区域参数表，
-            // 与站点无关，所以表内表外都能这样兜住。
-            None => {
-                let dir = layout.runtime();
-                let f = colm_srfdata::urban_runtime::stage(&dir)?;
-                println!("  runtime: {} written from the built-in copy", f.display());
-                slash(&dir)
-            }
-        };
+        // `LUCY_rawdata.nc` 是张 37 KB 的全局区域参数表，与站点无关。
+        // 即使用户给了 BGC/CROP runtime，里面也未必有 urban 子目录；缺时
+        // 补上内置表，已有自定义表则原样保留。
+        let requested = o.get("--runtime");
+        let run = configured_or_unused(requested.clone(), &layout.runtime());
+        let dir = Path::new(&run);
+        if requested.is_none()
+            || !dir
+                .join(colm_srfdata::urban_runtime::LUCY_RELATIVE)
+                .is_file()
+        {
+            let f = colm_srfdata::urban_runtime::stage(dir)?;
+            println!("  runtime: {} written from the built-in copy", f.display());
+        }
+        let run = slash(dir);
         (raw, run)
     } else {
         let raw = configured_or_unused(o.get("--rawdata"), &out.join("rawdata_unused/"));
@@ -2027,7 +2053,7 @@ struct MetricsRequest<'a> {
     to: Option<i64>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct EvaluationAvailability {
     name: String,
     label_zh: String,
@@ -2057,6 +2083,15 @@ fn evaluation_availability(
             .map(str::to_string)
             .collect()
     });
+    evaluation_availability_row(variable, resolved, missing_model, observation)
+}
+
+fn evaluation_availability_row(
+    variable: &colm_hist::obs::EvaluationVariable,
+    resolved: Option<colm_hist::obs::ModelSource>,
+    missing_model: Vec<String>,
+    observation: &netcdf::File,
+) -> EvaluationAvailability {
     let source = observation_source(variable, observation);
     let missing_observation = source
         .as_ref()
@@ -2208,6 +2243,83 @@ fn resolve_model_source(
     }
 }
 
+fn evaluation_plan_availability(
+    variable: &colm_hist::obs::EvaluationVariable,
+    model_available: &dyn Fn(&str) -> bool,
+    observation: &netcdf::File,
+) -> EvaluationAvailability {
+    let resolved = resolve_model_source_planned(variable.model, model_available);
+    let missing_model = resolved.map(|_| Vec::new()).unwrap_or_else(|| {
+        variable
+            .model
+            .required()
+            .into_iter()
+            .filter(|name| !model_available(name))
+            .map(str::to_string)
+            .collect()
+    });
+    evaluation_availability_row(variable, resolved, missing_model, observation)
+}
+
+fn resolve_model_source_planned(
+    source: colm_hist::obs::ModelSource,
+    model_available: &dyn Fn(&str) -> bool,
+) -> Option<colm_hist::obs::ModelSource> {
+    use colm_hist::obs::ModelSource;
+    match source {
+        ModelSource::Alternative {
+            preferred,
+            fallback,
+        } => resolve_model_source_planned(*preferred, model_available)
+            .or_else(|| resolve_model_source_planned(*fallback, model_available)),
+        other => other
+            .required_alternatives()
+            .into_iter()
+            .any(|required| required.iter().all(|name| model_available(name)))
+            .then_some(other),
+    }
+}
+
+fn planned_history_variables(
+    case_nml: &Path,
+    kernel_dir: &Path,
+) -> Result<std::collections::BTreeSet<String>> {
+    let kernel = Kernel::open(kernel_dir)?;
+    let macros = kernel
+        .manifest
+        .macros
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let doc = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    let truth = |path: &str| -> bool {
+        match doc.get(path) {
+            Some(colm_namelist::Value::Bool(value)) => *value,
+            _ => matches!(
+                colm_schema::find(path).map(|field| field.default),
+                Some(colm_schema::Default::Logical(true))
+            ),
+        }
+    };
+    let gate_truth = |path: &str| -> Option<bool> { colm_schema::find(path).map(|_| truth(path)) };
+    Ok(colm_hist::all()
+        .iter()
+        .filter(|var| var.macros.iter().all(|cond| cond.holds(&macros)))
+        .filter(|var| {
+            var.runtime
+                .is_none_or(|expr| colm_hist::eval_runtime_gate(expr, &gate_truth) == Some(true))
+        })
+        .filter(|var| {
+            let switch = format!("DEF_hist_vars%{}", var.name);
+            colm_schema::find(&switch).is_none_or(|_| truth(&switch))
+        })
+        .map(|var| format!("f_{}", var.name))
+        .collect())
+}
+
 fn cmd_evaluation_catalog(case: &Path, obs_path: &Path) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
@@ -2218,6 +2330,28 @@ fn cmd_evaluation_catalog(case: &Path, obs_path: &Path) -> Result<()> {
         .iter()
         .map(|variable| evaluation_availability(variable, &hists, &observation))
         .collect::<Vec<_>>();
+    println!("{}", serde_json::to_string(&rows)?);
+    Ok(())
+}
+
+fn evaluation_plan_rows(
+    case_nml: &Path,
+    obs_path: &Path,
+    kernel_dir: &Path,
+) -> Result<Vec<EvaluationAvailability>> {
+    let planned = planned_history_variables(case_nml, kernel_dir)?;
+    let observation =
+        netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
+    Ok(colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .map(|variable| {
+            evaluation_plan_availability(variable, &|name| planned.contains(name), &observation)
+        })
+        .collect())
+}
+
+fn cmd_evaluation_plan(case: &Path, obs_path: &Path, kernel_dir: &Path) -> Result<()> {
+    let rows = evaluation_plan_rows(&Layout::new(case).case_nml(), obs_path, kernel_dir)?;
     println!("{}", serde_json::to_string(&rows)?);
     Ok(())
 }

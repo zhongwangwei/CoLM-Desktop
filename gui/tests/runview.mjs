@@ -42,6 +42,9 @@ if (!runner.includes('function failPendingRuns(reason)')
     || !/catch \(e\) \{\s*failPendingRuns\(e\);/.test(runner)) {
   throw new Error('a rejected batch launch must clear every pending per-site run');
 }
+if (!runner.includes("dirs.length === 1\n    ? progressText")) {
+  throw new Error('single-case overall progress must retain detailed spin-up text');
+}
 const css = await readFile(join(root, 'dist', 'app', 'style.css'), 'utf8');
 if (!/--live-w/.test(css) || !/--live-h/.test(css) || !/col-resize/.test(css)
     || !/row-resize/.test(css) || !/#log\s*\{[^}]*resize:\s*vertical/s.test(css)) {
@@ -52,6 +55,9 @@ if (!mainJs.includes("stacked ? '--live-h' : '--live-w'")
     || !mainJs.includes("$('live-resizer').addEventListener('pointerdown', beginLiveResize)")
     || !mainJs.includes("window.addEventListener('pointermove', apply)")) {
   throw new Error('right live panel border drag must update --live-w after leaving the border');
+}
+if (!/catch \(e\) \{\s*setStatus\('后端出错：' \+ e\);\s*throw e;/s.test(mainJs)) {
+  throw new Error('a failed backend boot must keep the loading gate visible');
 }
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 const outputVariables = html.indexOf('输出变量（按需展开）');
@@ -89,9 +95,10 @@ if (runner.includes('status(state.runCancelled.has')
 if (!runner.includes("state.wizard?.tracer === 'methane'")) {
   throw new Error('restored methane cases must keep the required runtime directory control visible');
 }
-if (!/<div id="launchgate" class="gate launch-gate">/.test(html)
+if (!/<div id="loadinggate" class="gate loading-gate"[^>]*>/.test(html)
+    || !/<div id="launchgate" class="gate launch-gate" hidden>/.test(html)
     || !/<div id="domaingate" class="gate" hidden>/.test(html)) {
-  throw new Error('the local/server launcher must be visible before JavaScript initializes');
+  throw new Error('the loading page must be visible before JavaScript initializes');
 }
 
 console.log('runview: per-site progress/log formatting and undefined metrics are safe');

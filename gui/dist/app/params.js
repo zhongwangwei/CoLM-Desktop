@@ -425,9 +425,7 @@ function renderExpertFields(rows, fieldStates, dirs) {
   const wrap = document.createElement('details');
   wrap.className = 'expert-param-file';
   const summary = document.createElement('summary');
-  summary.textContent = language() === 'en'
-    ? `Expert case.nml parameters (${rows.length})`
-    : `case.nml 专家参数（${rows.length}）`;
+  summary.textContent = language() === 'en' ? 'Expert parameters' : '专家参数';
   wrap.appendChild(summary);
   wrap.appendChild(table(rows, fieldStates, dirs, dirs.length > 1, false, true));
   return wrap;

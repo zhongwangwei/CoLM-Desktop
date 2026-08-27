@@ -1,4 +1,4 @@
-//! 21 个 Urban-PLUMBER 站点在**六个**全球栅格上的点值，从 CoLM 2024
+//! 21 个 Urban-PLUMBER 站点的城市栅格点值，从 CoLM 2024
 //! rawdata 抽出。
 //!
 //! **生成的产物，不要手改。** 重生成：
@@ -6,7 +6,7 @@
 //! （树 LAI 的点值来自那份 JSON；`--from-tiles` 换成直接读 698 GB 的瓦片目录。）
 //!
 //! **为什么要它**：`urban_soil.rs` 搬走了 `soil/` 那 122 GB 之后，城市算例
-//! 还有六处会去开栅格，而且**开不到就 `CoLM_stop`，不是警告**。其中
+//! 还有八批点值会去开栅格，而且**开不到就 `CoLM_stop`，不是警告**。其中
 //! `urban_lai_500m/` 单个瓦片实测 85 MB，21 个站要 15 块 x 23 年 ≈ 7 GB；
 //! 这张表把同一批数压到 230 KB。
 //!
@@ -40,7 +40,7 @@ pub static LAI_YEARS: [i32; 23] = [
 /// 一个城市站点的第二批栅格点值。
 ///
 /// 与 [`crate::urban_soil::UrbanSoil`] 是两张表而不是一张：那张是
-/// `soil/` 的剖面，这张是六个各自独立的栅格。合成一张的话，重抽其中
+/// `soil/` 的剖面，这张是八批点值。合成一张的话，重抽其中
 /// 一半就得把另一半也重抽一遍。
 pub struct UrbanExtra {
     pub site: &'static str,
@@ -49,6 +49,10 @@ pub struct UrbanExtra {
     /// 局地气候区分类，写进 site.nc 的 `LCZ_DOM`。
     /// 实测 21 个站落在 7 个类别上 —— 编一个默认值会把大多数站换掉。
     pub lcz_dom: i32,
+    /// NCAR 城市属性表的区域编号，写进 `URBTYP`。
+    pub ncar_region: i32,
+    /// NCAR 三类城市密度，写进 `URBAN_DENSITY_CLASS`。
+    pub ncar_density: i32,
     /// LUCY 区号，写进 site.nc 的 `LUCY_ID`。
     /// CoLM 按实型读（`read_point_var_2d_real8`），所以这里也是 f64。
     pub lucy_id: f64,
@@ -77,6 +81,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 145.01449584960938,
         lat: -37.73059844970703,
         lcz_dom: 6,
+        ncar_region: 2,
+        ncar_density: 3,
         lucy_id: 12.0,
         soil_colour: 16,
         lakedepth: 0.0,
@@ -138,6 +144,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 145.0989990234375,
         lat: -37.826499938964844,
         lcz_dom: 6,
+        ncar_region: 2,
+        ncar_density: 3,
         lucy_id: 12.0,
         soil_colour: 16,
         lakedepth: 0.0,
@@ -199,6 +207,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -123.07839965820313,
         lat: 49.22610092163086,
         lcz_dom: 6,
+        ncar_region: 6,
+        ncar_density: 2,
         lucy_id: 36.0,
         soil_colour: 20,
         lakedepth: 0.0,
@@ -260,6 +270,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 24.96109962463379,
         lat: 60.20280075073242,
         lcz_dom: 5,
+        ncar_region: 19,
+        ncar_density: 3,
         lucy_id: 69.0,
         soil_colour: 19,
         lakedepth: 0.0,
@@ -321,6 +333,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 24.93869972229004,
         lat: 60.16780090332031,
         lcz_dom: 1,
+        ncar_region: 19,
+        ncar_density: 2,
         lucy_id: 69.0,
         soil_colour: 19,
         lakedepth: 0.0,
@@ -382,6 +396,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 1.4453999996185303,
         lat: 43.60350036621094,
         lcz_dom: 2,
+        ncar_region: 33,
+        ncar_density: 2,
         lucy_id: 70.0,
         soil_colour: 15,
         lakedepth: 0.0,
@@ -443,6 +459,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 25.13279914855957,
         lat: 35.33610153198242,
         lcz_dom: 3,
+        ncar_region: 28,
+        ncar_density: 3,
         lucy_id: 79.0,
         soil_colour: 18,
         lakedepth: 0.0,
@@ -504,6 +522,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 139.6844940185547,
         lat: 35.66450119018555,
         lcz_dom: 2,
+        ncar_region: 10,
+        ncar_density: 2,
         lucy_id: 103.0,
         soil_colour: 18,
         lakedepth: 0.0,
@@ -565,6 +585,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 127.07939910888672,
         lat: 37.5906982421875,
         lcz_dom: 2,
+        ncar_region: 10,
+        ncar_density: 2,
         lucy_id: 110.0,
         soil_colour: 16,
         lakedepth: 0.0,
@@ -626,6 +648,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 127.43440246582031,
         lat: 36.71969985961914,
         lcz_dom: 8,
+        ncar_region: 10,
+        ncar_density: 0,
         lucy_id: 110.0,
         soil_colour: 15,
         lakedepth: 0.0,
@@ -687,6 +711,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -99.17610168457031,
         lat: 19.404199600219727,
         lcz_dom: 3,
+        ncar_region: 14,
+        ncar_density: 2,
         lucy_id: 135.0,
         soil_colour: 18,
         lakedepth: 0.0,
@@ -748,6 +774,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 4.892899990081787,
         lat: 52.36650085449219,
         lcz_dom: 2,
+        ncar_region: 33,
+        ncar_density: 2,
         lucy_id: 147.0,
         soil_colour: 15,
         lakedepth: 0.0,
@@ -809,6 +837,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 19.44529914855957,
         lat: 51.76250076293945,
         lcz_dom: 5,
+        ncar_region: 11,
+        ncar_density: 3,
         lucy_id: 168.0,
         soil_colour: 12,
         lakedepth: 0.0,
@@ -870,6 +900,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 19.48110008239746,
         lat: 51.77330017089844,
         lcz_dom: 5,
+        ncar_region: 11,
+        ncar_density: 3,
         lucy_id: 168.0,
         soil_colour: 12,
         lakedepth: 0.0,
@@ -931,6 +963,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: 103.91120147705078,
         lat: 1.3142999410629272,
         lcz_dom: 3,
+        ncar_region: 27,
+        ncar_density: 2,
         lucy_id: 188.0,
         soil_colour: 16,
         lakedepth: 0.0,
@@ -992,6 +1026,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -0.11670000106096268,
         lat: 51.51179885864258,
         lcz_dom: 2,
+        ncar_region: 19,
+        ncar_density: 2,
         lucy_id: 220.0,
         soil_colour: 16,
         lakedepth: 0.0,
@@ -1053,6 +1089,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -1.7980999946594238,
         lat: 51.584598541259766,
         lcz_dom: 6,
+        ncar_region: 19,
+        ncar_density: 3,
         lucy_id: 220.0,
         soil_colour: 15,
         lakedepth: 0.0,
@@ -1114,6 +1152,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -76.52149963378906,
         lat: 39.41279983520508,
         lcz_dom: 6,
+        ncar_region: 18,
+        ncar_density: 3,
         lucy_id: 221.0,
         soil_colour: 15,
         lakedepth: 0.0,
@@ -1175,6 +1215,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -93.18836212158203,
         lat: 44.9984016418457,
         lcz_dom: 12,
+        ncar_region: 17,
+        ncar_density: 0,
         lucy_id: 221.0,
         soil_colour: 8,
         lakedepth: 0.0,
@@ -1236,6 +1278,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -93.18836212158203,
         lat: 44.9984016418457,
         lcz_dom: 12,
+        ncar_region: 17,
+        ncar_density: 0,
         lucy_id: 221.0,
         soil_colour: 8,
         lakedepth: 0.0,
@@ -1297,6 +1341,8 @@ pub static SITES: &[UrbanExtra] = &[
         lon: -112.1426010131836,
         lat: 33.4838981628418,
         lcz_dom: 6,
+        ncar_region: 29,
+        ncar_density: 2,
         lucy_id: 221.0,
         soil_colour: 13,
         lakedepth: 0.0,

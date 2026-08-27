@@ -55,9 +55,10 @@ if (listen) {
 if (!hasBackend) {
   // 直接用浏览器打开这个文件时没有 IPC。说清楚而不是渲染成一片空白。
   setStatus('没有 IPC 后端 —— 这个页面不在 Tauri 里运行');
-} else {
-  boot();
 }
+
+// 启动页只等这一件事；不要再维护第二套“加载完成”状态。
+export const ready = hasBackend ? boot() : Promise.resolve();
 
 async function boot() {
   try {
@@ -81,6 +82,9 @@ async function boot() {
     }
     wirePickers();
     renderSteps();
-  } catch (e) { setStatus('后端出错：' + e); }
+  } catch (e) {
+    setStatus('后端出错：' + e);
+    throw e;
+  }
   await watchRun();
 }

@@ -91,7 +91,14 @@ fn urban_site_new_applies_the_built_in_urban_tables_before_readiness_audit() {
     super::cmd_site_new(&opts).expect("urban site-new");
 
     let file = netcdf::open(&out).expect("prepared urban site");
-    for name in ["soil_theta_s", "TREE_LAI", "TREE_SAI", "LCZ_DOM"] {
+    for name in [
+        "soil_theta_s",
+        "TREE_LAI",
+        "TREE_SAI",
+        "LCZ_DOM",
+        "URBTYP",
+        "URBAN_DENSITY_CLASS",
+    ] {
         assert!(file.variable(name).is_some(), "{name} was not prepared");
     }
 }
@@ -158,6 +165,60 @@ fn a_relative_runtime_directory_is_made_absolute_before_writing_the_case() {
     assert!(got.is_absolute());
     assert!(got.ends_with(&runtime));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn urban_new_stages_lucy_into_an_explicit_runtime_when_missing() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let root = std::env::temp_dir().join(format!(
+        "colm-cli-urban-runtime-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let runtime = root.join("Runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let args = [
+        "--site",
+        examples
+            .join("Sitedata/AU-Preston_site_v1.nc")
+            .to_str()
+            .unwrap(),
+        "--met",
+        examples
+            .join("Forcing/AU-Preston_metforcing_v1.nc")
+            .to_str()
+            .unwrap(),
+        "--out",
+        root.join("case").to_str().unwrap(),
+        "--mode",
+        "urban-igbp",
+        "--runtime",
+        runtime.to_str().unwrap(),
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let opts = super::Opts::parse(&args).unwrap();
+
+    super::cmd_new(&opts).expect("urban case creation");
+
+    assert!(runtime
+        .join(colm_srfdata::urban_runtime::LUCY_RELATIVE)
+        .is_file());
+    let case = root.join("case");
+    assert!(case
+        .join("rawdata")
+        .join(colm_srfdata::urban_runtime::NCAR_RELATIVE)
+        .is_file());
+    let site = netcdf::open(case.join("site.nc")).unwrap();
+    assert!(site.variable("URBTYP").is_some());
+    assert!(site.variable("URBAN_DENSITY_CLASS").is_some());
+    assert!(std::fs::read_to_string(case.join("case.nml"))
+        .unwrap()
+        .contains("/rawdata/"));
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

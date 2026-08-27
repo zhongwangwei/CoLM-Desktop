@@ -26,6 +26,7 @@ pub struct ObjectiveTerm {
     pub pairs: usize,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ObjectiveScore {
     Feasible(f64),
@@ -35,6 +36,7 @@ pub enum ObjectiveScore {
 /// Convert a frozen set of required targets to one minimization objective.
 /// Missing/invalid terms invalidate the whole candidate; weights are never
 /// renormalized around a failed target.
+#[cfg(test)]
 pub fn score_required(terms: &[ObjectiveTerm], min_pairs: usize) -> ObjectiveScore {
     if terms.is_empty() {
         return ObjectiveScore::Infeasible("no required targets".into());

@@ -673,12 +673,13 @@ schema 里也只有频率没有开关。
    预抽成 `crates/colm-srfdata/src/urban_soil.rs`（90 KB）。8 层不是
    `nl_soil`（那是 10）—— `MOD_SoilParametersReadin.F90` 是 `DO nsl = 1, 8`。
    这一步搬走 `soil/` 那 **122 GB**。
-3. **另外六个栅格**：LCZ_DOM、LUCY_ID、土壤颜色档、湖深、地形、树 LAI/SAI
-   → `crates/colm-srfdata/src/urban_extra.rs`（250 KB）。这六处**开不到就
+3. **其余城市栅格点值**：LCZ/NCAR 分类、LUCY_ID、土壤颜色档、湖深、地形、树 LAI/SAI
+   → `crates/colm-srfdata/src/urban_extra.rs`（约 250 KB）。这些来源**开不到就
    `CoLM_stop`，不是警告**；其中 `urban_lai_500m/` 单个瓦片 85 MB，21 个站
    要 15 块 × 23 年 ≈ 7 GB。
-4. **`LUCY_rawdata.nc`（37 KB）随包发**，`colm-cli new` 自动铺到算例的
-   `runtime/urban/`。
+4. **两张小型全局属性表随包发**：`LUCY_rawdata.nc`（37 KB）自动铺到
+   `runtime/urban/`；`NCAR_urban_properties.nc`（62 KB）在站点具有有效
+   `REGION_ID` 与 `URBAN_DENSITY_CLASS` 时自动铺到 `rawdata/urban/`。
 
 **省下的不是估算，是实测。** AU-Preston（1993-01-01 至 01-11，1800 s 步长）
 在站点文件包含城市人口密度等完整字段时，**完全不给 `--rawdata` / `--runtime`**：
@@ -745,11 +746,9 @@ identical: 146 variables
 附带一条：内核始终包含城市模块，但 `DEF_URBAN_RUN` 默认 `.false.`；新建城市
 算例会显式写成 `.true.`，自然站保持关闭。
 
-还有一条给下一个人的提醒，**表外的站点仍然要用**：城市栅格要摆两份。
-`<rawdata>/urban/` 与 `<runtime>/urban/` 都要有 LUCY 表 —— 前者给
-`mksrfdata`，后者给 `mkinidata`，路径由两处不同的代码各拼各的。
-（21 个站走内置表时，`runtime/urban/LUCY_rawdata.nc` 由 `colm-cli new`
-自动铺好，不用管这条。）
+还有一条给下一个人的提醒，**表外的站点仍然需要完整 rawdata**；21 个内置站点
+不再需要人工摆表。`colm-cli new` 会把 NCAR 城市属性表铺到 `<rawdata>/urban/`，
+把 LUCY 表铺到 `<runtime>/urban/`，两个目录分别供 `mksrfdata` 和后续阶段读取。
 
 ### 闸门表在第二个预设上被独立验证
 

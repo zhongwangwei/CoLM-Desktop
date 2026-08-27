@@ -499,6 +499,50 @@ fn history_catalog_rejects_static_coordinates_without_a_time_series() {
 }
 
 #[test]
+fn evaluation_plan_uses_case_and_kernel_without_history_files() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let kernel = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kernels/default");
+    if !kernel.join("manifest.json").is_file() {
+        return;
+    }
+    let d = tmp("evaluation-plan");
+    let case = d.parent().unwrap().join("Case");
+    std::fs::create_dir_all(&case).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'Case'\n DEF_hist_vars%rnet = .true.\n/\n",
+    )
+    .unwrap();
+    let obs_path = d.parent().unwrap().join("obs.nc");
+    write_history_nc(
+        &obs_path,
+        &[
+            ("time", &[1.0, 2.0]),
+            ("Rnet", &[3.0, 4.0]),
+            ("Rnet_qc", &[0.0, 0.0]),
+        ],
+    );
+
+    let rows = super::evaluation_plan_rows(&case.join("case.nml"), &obs_path, &kernel).unwrap();
+    assert_eq!(rows.len(), colm_hist::obs::EVALUATION_VARIABLES.len());
+    let rnet = rows.iter().find(|row| row.name == "Rnet").unwrap();
+    assert!(rnet.available, "{rnet:?}");
+
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'Case'\n DEF_hist_vars%rnet = .false.\n/\n",
+    )
+    .unwrap();
+    let rows = super::evaluation_plan_rows(&case.join("case.nml"), &obs_path, &kernel).unwrap();
+    let rnet = rows.iter().find(|row| row.name == "Rnet").unwrap();
+    assert!(
+        !rnet.available,
+        "hist switch must gate planned model variables"
+    );
+    assert_eq!(rnet.missing_model, ["f_rnet"]);
+}
+
+#[test]
 fn evaluation_catalog_sees_methane_in_tracer_history() {
     let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("tracer-catalog");

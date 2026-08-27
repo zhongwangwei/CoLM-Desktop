@@ -459,6 +459,11 @@ body.resizing-live { user-select: none; }
 /* **这一条不能省。** `display:flex` 会盖掉 `[hidden]` 的默认
    `display:none`，不补的话门隐藏不了 —— 点完站点界面仍然被挡着。 */
 .gate[hidden] { display: none; }
+.loading-gate { z-index: 60; }
+.loading-panel { width: min(360px, 90vw); padding: var(--s-xl); text-align: center; }
+.loading-logo { display: block; width: min(240px, 70vw); height: auto; margin: 0 auto 20px; }
+.loading-panel h1 { margin: 0; font-size: 26px; }
+.loading-version { margin: 3px 0 18px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .gate-tools { position: fixed; z-index: 1; top: var(--s-lg); right: var(--s-lg); }
 .gate-panel { width: 100%; max-width: 760px; margin: auto; padding: var(--s-xl); text-align: center; }
 .gate-panel h2 { margin: 0 0 6px; font-size: 20px; }
@@ -500,6 +505,26 @@ body.resizing-live { user-select: none; }
 .pft-expert-editor label { display: flex; align-items: center; gap: 8px; font-weight: 700; }
 .pft-expert-editor .select { min-width: 280px; }
 .study-budget { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); color: var(--muted); }
+.study-guide { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .8fr); gap: 18px; align-items: start; }
+.study-guide h3, .study-actions h3 { margin-top: 0; }
+.study-step-explain { display: grid; gap: 10px; }
+.study-step-explain > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; align-items: start; }
+.study-step-explain strong { color: var(--accent); font-size: 12px; }
+.study-step-explain span { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.study-readiness { display: grid; gap: 7px; }
+.study-wizard-progress { display: flex; align-items: center; justify-content: center; min-height: 38px;
+  margin: 16px 0 10px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--elevated); color: var(--accent); font-size: 13px; font-weight: 750; }
+.study-wizard-step { min-height: 220px; }
+.study-wizard-foot { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) minmax(120px, auto);
+  align-items: center; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.study-wizard-foot > :last-child { justify-self: end; }
+.study-wizard-note { color: var(--warn); font-size: 12px; text-align: center; }
+.study-ready-item { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 12px; }
+.study-ready-item::before { content: '○'; color: var(--muted); font-weight: 700; }
+.study-ready-item.pass { color: var(--text); }
+.study-ready-item.pass::before { content: '✓'; color: var(--pass); }
+.study-ready-item.warn::before { content: '!'; color: var(--warn); }
 .study-view { display: grid; gap: 10px; }
 .study-status-box { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
 .study-view table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -513,3 +538,4 @@ body.resizing-live { user-select: none; }
 .study-results { display: grid; gap: 10px; }
 .study-result-card { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px; background: var(--elevated); }
 .study-result-card h4 { margin: 0 0 8px; }
+@media (max-width: 980px) { .study-guide { grid-template-columns: 1fr; } }

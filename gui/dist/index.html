@@ -5,6 +5,15 @@
 <link rel="stylesheet" href="app/style.css">
 <body class="normal">
 
+<div id="loadinggate" class="gate loading-gate" role="status" aria-live="polite">
+  <div class="loading-panel">
+    <img class="loading-logo" src="assets/colm-logo.png" alt="CoLM">
+    <h1>CoLM Desktop</h1>
+    <p class="loading-version">v0.2.0-beta.1</p>
+    <p class="muted" id="loading-status">Loading…</p>
+  </div>
+</div>
+
 <!-- 运行产物由进门向导自动匹配；保留这个隐藏值供后端运行命令使用。 -->
 <select id="kernel" hidden aria-hidden="true"></select>
 
@@ -496,8 +505,21 @@
       <div class="flow-pane" data-flow-pane="result-uncertainty" hidden>
         <div class="work-head"><span class="kicker">第 6 步 · 不确定性分析</span></div>
         <h1>不确定性分析</h1>
-        <p class="sub">用当前已完成算例创建 OAT 或 LHS 参数扰动 Study；基准成员单独保留，不参与不确定性分位数统计。</p>
-        <div class="card result-sticky-tools">
+        <p class="sub">这是基本设定完成后的可选研究流程。Study 会复制当前算例并独立运行，不修改原算例。</p>
+        <div class="card study-guide">
+          <div>
+            <h3>先设计，再创建，再运行</h3>
+            <div class="study-step-explain" aria-live="polite">
+              <div><strong>本页做什么</strong><span id="uq-step-do">选择 OAT 或 LHS、站点组织方式、分析时段、样本数和并发数。</span></div>
+              <div><strong>为什么需要</strong><span id="uq-step-why">这些设置决定如何覆盖参数空间、要计算多少成员，以及结果对应哪段模拟时段。</span></div>
+            </div>
+          </div>
+          <div id="uq-readiness" class="study-readiness" aria-live="polite"></div>
+        </div>
+        <div class="study-wizard-progress" aria-live="polite"><span id="uq-step-progress">第 1/7 页 · 试验设计</span></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="0">
+          <h3>1 · 试验设计</h3>
+          <div class="ch">选择方法、作用站点和分析窗口。尚未运行过基准算例也可以配置，Study 会先运行自己的 baseline。</div>
           <div class="result-tools result-tools-wide">
             <label>方法 <select class="select" id="uq-method"><option value="lhs">LHS 拉丁超立方</option><option value="oat">OAT 单因子</option></select></label>
             <label>站点方式 <select class="select" id="uq-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独 Study</option></select></label>
@@ -508,6 +530,15 @@
             <label>并发 <input class="input" id="uq-jobs" type="number" min="1" value="1"></label>
             <label>内核目录 <input class="input" id="uq-kernel-dir" readonly placeholder="使用当前内核"></label>
             <button class="btn-ghost" id="uq-refresh-params">读取参数</button>
+          </div>
+        </div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden><h3>4 · 预算预览</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再创建。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="1" hidden><h3>2 · 输出变量</h3><div class="ch">只显示当前配置计划写出的标量 history 变量；已有结果时会用实际文件再次核对。</div><div id="uq-outputs" class="evaluation-variable-grid"><div class="result-empty">选择不确定性包络要统计的 history 变量。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="2" hidden><h3>3 · 参数范围</h3><div class="ch">范围必须有限并落在代码硬边界内；它是试验假设，不由软件替你猜。</div><div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div><label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label></div>
+        <div class="card study-actions study-wizard-step" data-study-wizard="uq" data-study-step="4" hidden>
+          <h3>5 · 创建与运行</h3>
+          <div class="ch">“创建”只生成 Study 清单和成员目录；“运行”才会启动模型。暂停仅停止继续派发，不会强杀正在计算的成员。</div>
+          <div class="result-tools result-tools-wide">
             <button class="btn-next" id="uq-create">创建 Study</button>
             <button class="btn-ghost" id="uq-run">运行 Study</button>
             <button class="btn-ghost" id="uq-status">刷新状态</button>
@@ -518,18 +549,29 @@
             <button class="btn-ghost" id="uq-export-study">导出 Study</button>
           </div>
         </div>
-        <div class="card"><h3>预算预览</h3><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
-        <div class="card"><h3>输出变量</h3><div id="uq-outputs" class="evaluation-variable-grid"><div class="result-empty">选择不确定性包络要统计的 history 变量。</div></div></div>
-        <div class="card"><h3>参数范围</h3><div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div><label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我确认采样范围由我负责</label></div>
-        <div class="card"><h3>运行状态</h3><div id="uq-study-view" class="study-view"></div><pre id="uq-preview" class="report-preview">还没有创建不确定性分析 Study。</pre></div>
-        <div class="card"><h3>结果</h3><div id="uq-results" class="study-results"><div class="result-empty">运行后显示分位数包络、参数重要性和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="5" hidden><h3>6 · 运行状态</h3><div id="uq-study-view" class="study-view"></div><pre id="uq-preview" class="report-preview">还没有创建不确定性分析 Study。</pre></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="6" hidden><h3>7 · 结果</h3><div id="uq-results" class="study-results"><div class="result-empty">运行后显示分位数包络、参数重要性和成员表。</div></div></div>
+        <div class="study-wizard-foot"><button class="btn-ghost" id="uq-step-prev">← 上一步</button><span class="study-wizard-note" id="uq-step-note"></span><button class="btn-next" id="uq-step-next">下一步 →</button></div>
       </div>
 
       <div class="flow-pane" data-flow-pane="result-tuning" hidden>
         <div class="work-head"><span class="kicker">第 7 步 · 参数调优</span></div>
         <h1>参数调优</h1>
-        <p class="sub">用差分进化生成初代参数种群；目标函数要求所有勾选目标都存在，缺任一目标即判为不可行。</p>
-        <div class="card result-sticky-tools">
+        <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立 Study 中搜索参数，不覆盖原算例。</p>
+        <div class="card study-guide">
+          <div>
+            <h3>先确认观测与目标，再开始搜索</h3>
+            <div class="study-step-explain" aria-live="polite">
+              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群和代数。</span></div>
+              <div><strong>为什么需要</strong><span id="tune-step-why">这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。</span></div>
+            </div>
+          </div>
+          <div id="tune-readiness" class="study-readiness" aria-live="polite"></div>
+        </div>
+        <div class="study-wizard-progress" aria-live="polite"><span id="tune-step-progress">第 1/7 页 · 优化设计</span></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="0">
+          <h3>1 · 优化设计</h3>
+          <div class="ch">选择目标指标、校准/验证窗口和差分进化预算。尚未运行过原算例也可以创建，Study 会自行运行 baseline 和候选成员。</div>
           <div class="result-tools result-tools-wide">
             <label>指标 <select class="select" id="tune-metric"><option value="nrmse">NRMSE</option><option value="mae">MAE</option><option value="abs_bias">|Bias|</option><option value="nse">1-NSE</option><option value="kge">1-KGE</option><option value="r2">1-R²</option><option value="r">1-R</option></select></label>
             <label>最少配对 <input class="input" id="tune-min-pairs" type="number" min="2" value="30"></label>
@@ -545,6 +587,15 @@
             <label>并发 <input class="input" id="tune-jobs" type="number" min="1" value="1"></label>
             <label>内核目录 <input class="input" id="tune-kernel-dir" readonly placeholder="使用当前内核"></label>
             <button class="btn-ghost" id="tune-refresh-params">读取参数</button>
+          </div>
+        </div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算预览</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点还会乘以站点数。</div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。</div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden><h3>3 · 参数范围</h3><div class="ch">只调当前方案真正会读取的参数；切换物理方案后列表会重新计算。</div><div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div><label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label></div>
+        <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>
+          <h3>5 · 创建与运行</h3>
+          <div class="ch">先创建并检查 Study，再开始运行；最佳候选始终另存为新算例。</div>
+          <div class="result-tools result-tools-wide">
             <button class="btn-next" id="tune-create">创建调优 Study</button>
             <button class="btn-ghost" id="tune-run">运行 Study</button>
             <button class="btn-ghost" id="tune-status">刷新状态</button>
@@ -556,11 +607,9 @@
             <button class="btn-ghost" id="tune-apply-best">最佳候选另存</button>
           </div>
         </div>
-        <div class="card"><h3>预算预览</h3><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
-        <div class="card"><h3>目标变量</h3><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
-        <div class="card"><h3>参数范围</h3><div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div><label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我确认采样范围由我负责</label></div>
-        <div class="card"><h3>运行状态</h3><div id="tune-study-view" class="study-view"></div><pre id="tune-preview" class="report-preview">还没有创建参数调优 Study。</pre></div>
-        <div class="card"><h3>结果</h3><div id="tune-results" class="study-results"><div class="result-empty">运行后显示目标函数、最佳候选和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="5" hidden><h3>6 · 运行状态</h3><div id="tune-study-view" class="study-view"></div><pre id="tune-preview" class="report-preview">还没有创建参数调优 Study。</pre></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 结果</h3><div id="tune-results" class="study-results"><div class="result-empty">运行后显示目标函数、最佳候选和成员表。</div></div></div>
+        <div class="study-wizard-foot"><button class="btn-ghost" id="tune-step-prev">← 上一步</button><span class="study-wizard-note" id="tune-step-note"></span><button class="btn-next" id="tune-step-next">下一步 →</button></div>
       </div>
 
       <div class="flow-pane" data-flow-pane="result-export" hidden>
@@ -636,9 +685,8 @@
   </form>
 </dialog>
 
-<!-- 启动页直接写在 HTML 里，保证完整工作台尚未加载时先看到运行入口。
-     服务器入口保留但明确不可用。 -->
-<div id="launchgate" class="gate launch-gate">
+<!-- 完整工作台就绪后才显示运行入口；服务器入口保留但明确不可用。 -->
+<div id="launchgate" class="gate launch-gate" hidden>
   <div class="gate-tools">
     <div class="seg" id="launchLangSeg" aria-label="界面语言">
       <button class="on" data-lang="zh" aria-pressed="true">中文</button>

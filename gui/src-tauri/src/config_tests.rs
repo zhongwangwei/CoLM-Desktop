@@ -311,7 +311,7 @@ fn runtime_contracts_are_checked_before_batch_write() {
 
     let dirs = batch(
         "contract-urban-pc",
-        &["&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.false.\n DEF_USE_PC=.true.\n DEF_URBAN_RUN=.true.\n/\n"],
+        &["&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.false.\n DEF_USE_PC=.true.\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=2\n/\n"],
     );
     set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
 }
@@ -454,7 +454,7 @@ fn every_model_fatal_runtime_combination_is_rejected_before_write() {
         ),
         (
             "urban-bgc-site",
-            "&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.true.\n DEF_URBAN_RUN=.true.\n DEF_USE_BGC=.true.\n/\n",
+            "&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.true.\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=2\n DEF_USE_BGC=.true.\n/\n",
             "DEF_USE_BGC 需要 DEF_USE_PFT 或 DEF_USE_PC",
         ),
     ] {
@@ -1075,6 +1075,37 @@ fn urban_classification_rejects_values_outside_ncar_and_lcz() {
 }
 
 #[test]
+fn urban_classification_only_offers_ncar_when_its_required_table_exists() {
+    let root = std::env::temp_dir().join(format!("colm-urban-schemes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let nml = |raw: &std::path::Path| {
+        format!(
+            "&nl_colm\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=2\n DEF_dir_rawdata='{}'\n/\n",
+            raw.display()
+        )
+    };
+    let missing = runtime_states(&nml(&root), &["SinglePoint"]);
+    assert_eq!(
+        runtime_state(&missing, "DEF_URBAN_type_scheme").allowed_values,
+        vec!["2"]
+    );
+    let invalid = colm_namelist::parse(
+        &nml(&root).replace("DEF_URBAN_type_scheme=2", "DEF_URBAN_type_scheme=1"),
+    )
+    .unwrap();
+    let error = super::validate_runtime_contract(&invalid, &root, None).unwrap_err();
+    assert!(error.contains("NCAR_urban_properties.nc"), "{error}");
+
+    std::fs::create_dir_all(root.join("urban")).unwrap();
+    std::fs::write(root.join("urban/NCAR_urban_properties.nc"), []).unwrap();
+    let complete = runtime_states(&nml(&root), &["SinglePoint"]);
+    assert!(runtime_state(&complete, "DEF_URBAN_type_scheme")
+        .allowed_values
+        .is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fields_the_batch_disagrees_on_are_reported() {
     let dirs = batch("varies", &[NML_A, NML_B]);
     let v = super::varying_fields(dirs).unwrap();
@@ -1254,7 +1285,7 @@ fn kernel_macros_decide_which_parameters_are_relevant() {
 
 fn runtime_states(text: &str, macros: &[&str]) -> Vec<FieldState> {
     let have = macros.iter().copied().collect();
-    super::field_states_for(text, &have).expect("runtime field states")
+    super::field_states_for_at(text, &have, None).expect("runtime field states")
 }
 
 fn mode<'a>(states: &'a [FieldState], name: &str) -> &'a FieldMode {
@@ -2047,10 +2078,7 @@ fn expert_core_tuning_fields_follow_runtime_switches() {
         "DEF_TUNING_ZLND",
         "DEF_TUNING_CAPR",
         "DEF_TUNING_CSOILC",
-        "DEF_TUNING_SMPMAX",
         "DEF_TUNING_SOIL_ICE_IMPEDANCE",
-        "DEF_TUNING_SIMPLE_VIC_DS",
-        "DEF_TUNING_SIMPLE_VIC_WS",
         "DEF_TUNING_SNOW_COVER_EXPONENT",
         "DEF_PH_ROOT_RADIUS",
         "DEF_OZONE_KO3",
@@ -2059,8 +2087,11 @@ fn expert_core_tuning_fields_follow_runtime_switches() {
     }
     for name in [
         "DEF_TUNING_WETWATMAX",
+        "DEF_TUNING_SMPMAX",
         "DEF_TUNING_SMPMAX_HR",
         "DEF_TUNING_TOPMOD_DECAY",
+        "DEF_TUNING_SIMPLE_VIC_DS",
+        "DEF_TUNING_SIMPLE_VIC_WS",
         "DEF_TUNING_IRRIGATION_START_SEC",
         "DEF_DS_TEMP_LAPSE_RATE",
         "DEF_DS_SHORTWAVE_LIMIT",
@@ -2209,6 +2240,45 @@ fn expert_core_tuning_fields_follow_runtime_switches() {
         "DEF_TUNING_IRRIGATION_PONDMX",
     ] {
         assert_eq!(mode(&irrigated_crop, name), &FieldMode::Editable, "{name}");
+    }
+}
+
+#[test]
+fn runoff_fields_follow_the_selected_scheme_and_live_call_paths() {
+    for scheme in 0..=3 {
+        let states = runtime_states(
+            &format!("&nl_colm\n DEF_Runoff_SCHEME={scheme}\n/\n"),
+            &["LULC_IGBP"],
+        );
+        assert_eq!(
+            mode(&states, "DEF_TOPMOD_method"),
+            if scheme == 0 {
+                &FieldMode::Editable
+            } else {
+                &FieldMode::Hidden
+            },
+            "TOPMODEL method under runoff scheme {scheme}"
+        );
+        assert_eq!(
+            mode(&states, "DEF_VIC_OPT"),
+            if scheme == 1 {
+                &FieldMode::Editable
+            } else {
+                &FieldMode::Hidden
+            },
+            "VIC option under runoff scheme {scheme}"
+        );
+        for name in [
+            "DEF_TUNING_SMPMAX",
+            "DEF_TUNING_SIMPLE_VIC_DS",
+            "DEF_TUNING_SIMPLE_VIC_WS",
+        ] {
+            assert_eq!(
+                mode(&states, name),
+                &FieldMode::Hidden,
+                "{name} has no live caller under runoff scheme {scheme}"
+            );
+        }
     }
 }
 

@@ -82,6 +82,8 @@ const params = await import('node:fs').then(fs =>
   fs.readFileSync(new URL('../dist/app/params.js', import.meta.url), 'utf8'));
 assert.match(params, /fieldLabel\(e\.path, language\(\)\)/);
 assert.match(params, /optionLabel\(e\.path, v, language\(\)\)/);
+assert.match(params, /language\(\) === 'en' \? 'Expert parameters' : '专家参数'/);
+assert.doesNotMatch(params, /case\.nml 专家参数（\$\{rows\.length\}）/);
 assert.doesNotMatch(params, /k\.textContent = e\.path;\s*\/\/ 主标签/s);
 assert.match(params, /configure_cbl_batch/);
 assert.match(params, /enabled\(inp\.value\) && e\.path === 'DEF_USE_CBL_HEIGHT'[\s\S]*pickParameterPath\('DEF_USE_CBL_HEIGHT', 'file'\)[\s\S]*configure_cbl_batch/);

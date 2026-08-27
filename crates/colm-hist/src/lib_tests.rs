@@ -112,6 +112,35 @@ fn every_runtime_gated_variable_carries_its_condition() {
 }
 
 #[test]
+fn runtime_gate_evaluator_handles_known_logical_subset_without_guessing() {
+    let truth = |name: &str| match name {
+        "DEF_USE_BGC" | "DEF_USE_SNICAR" | "DEF_hist_vars%rnet" => Some(true),
+        "DEF_USE_NITRIF" => Some(false),
+        _ => None,
+    };
+    assert_eq!(eval_runtime_gate("DEF_USE_SNICAR", &truth), Some(true));
+    assert_eq!(
+        eval_runtime_gate(".not.DEF_USE_SNICAR", &truth),
+        Some(false)
+    );
+    assert_eq!(
+        eval_runtime_gate(".not.(DEF_USE_NITRIF)", &truth),
+        Some(true)
+    );
+    assert_eq!(
+        eval_runtime_gate("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)", &truth),
+        Some(false)
+    );
+    assert_eq!(
+        eval_runtime_gate("(DEF_USE_BGC) .or. (DEF_USE_NITRIF)", &truth),
+        Some(true)
+    );
+    assert_eq!(eval_runtime_gate("DEF_hist_vars%rnet", &truth), Some(true));
+    assert_eq!(eval_runtime_gate("DEF_DA_ENS_NUM > 1", &truth), None);
+    assert_eq!(eval_runtime_gate("DEF_NOT_A_REAL_FIELD", &truth), None);
+}
+
+#[test]
 fn methane_history_variables_are_in_the_gate_table() {
     let w = writable(&default());
     for n in [

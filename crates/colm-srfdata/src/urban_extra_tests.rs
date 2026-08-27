@@ -50,6 +50,8 @@ fn au_preston_is_found_by_its_coordinates() {
     // sloperatio = 0.0399660468101501，而四个反照率对应颜色档 16。
     // **换栅格才该改这几个数。**
     assert_eq!(s.lcz_dom, 6);
+    assert_eq!(s.ncar_region, 2);
+    assert_eq!(s.ncar_density, 3);
     assert_eq!(s.lucy_id, 12.0);
     assert_eq!(s.soil_colour, 16);
     assert_eq!(s.lakedepth, 0.0);
@@ -82,6 +84,23 @@ fn source_lcz_classes_are_in_product_range() {
     // 实测七个类别。**这一条正是「不许编默认值」的证据** ——
     // 挑任何一个当默认值，另外六个类别上的站点全会被换掉。
     assert_eq!(classes, vec![1, 2, 3, 5, 6, 8, 12]);
+}
+
+#[test]
+fn ncar_classes_index_the_bundled_property_table() {
+    for s in SITES {
+        assert!((1..=33).contains(&s.ncar_region), "{} region", s.site);
+        assert!((0..=3).contains(&s.ncar_density), "{} density", s.site);
+    }
+    let unsupported = SITES
+        .iter()
+        .filter(|site| site.ncar_density == 0)
+        .map(|site| site.site)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unsupported,
+        ["KR-Ochang", "US-Minneapolis1", "US-Minneapolis2"]
+    );
 }
 
 /// `LUCY_ID` 要落在 `LUCY_rawdata.nc` 的 `region = 231` 里。

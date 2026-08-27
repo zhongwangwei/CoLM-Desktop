@@ -126,6 +126,42 @@ impl RunProcesses {
             .map(|state| state.pids.get(key).copied())
     }
 
+    pub(crate) fn cancel_on_shutdown(&self) -> Result<usize, String> {
+        let active = {
+            let state = self
+                .inner
+                .lock()
+                .map_err(|_| "run process registry poisoned")?;
+            state
+                .pids
+                .keys()
+                .chain(state.pending.iter())
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+        let mut cancelled = 0;
+        for key in active.iter().filter(|key| key.starts_with("study:")) {
+            let study_dir = key.trim_start_matches("study:").to_string();
+            let pid = self.running_pid(key)?;
+            let _ = capture(&["study-cancel".into(), study_dir.clone()]);
+            cancelled += self.cancel(Some(vec![key.clone()]))?;
+            if let Some(pid) = pid {
+                let _ = capture(&[
+                    "study-finalize-cancel".into(),
+                    study_dir,
+                    "--pid".into(),
+                    pid.to_string(),
+                ]);
+            }
+        }
+        let ordinary = active
+            .into_iter()
+            .filter(|key| !key.starts_with("study:"))
+            .collect::<Vec<_>>();
+        cancelled += self.cancel(Some(ordinary))?;
+        Ok(cancelled)
+    }
+
     pub(crate) fn cancel(&self, keys: Option<Vec<String>>) -> Result<usize, String> {
         let (requested, targets) = {
             let mut state = self
@@ -260,7 +296,9 @@ pub fn cancel_runs(
 }
 
 fn study_process_key(study_dir: &str) -> String {
-    format!("study:{study_dir}")
+    let path = PathBuf::from(study_dir);
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    format!("study:{}", path.display())
 }
 
 fn remember_process(
@@ -1247,6 +1285,27 @@ pub async fn evaluation_catalog(case: String, obs: String) -> Result<String, Str
         obs,
     ])
     .await
+}
+
+fn evaluation_plan_args(case: String, obs: String, kernel_dir: String) -> Vec<String> {
+    vec![
+        "evaluation-plan".to_string(),
+        case,
+        "--obs".into(),
+        obs,
+        "--kernel".into(),
+        kernel_dir,
+    ]
+}
+
+/// 未运行算例也能预览哪些评估目标可用于不确定性分析/参数调优。
+#[tauri::command]
+pub async fn evaluation_plan(
+    case: String,
+    obs: String,
+    kernel_dir: String,
+) -> Result<String, String> {
+    capture_async(evaluation_plan_args(case, obs, kernel_dir)).await
 }
 
 /// 取绘图数据。

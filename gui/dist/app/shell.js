@@ -12,6 +12,9 @@ const completedResults = () => state.cases.filter(c => state.createdCases.has(c.
 const hasResults = () => completedResults().length > 0;
 const hasMultipleResults = () => completedResults().length > 1;
 const resultsReady = () => ready() ?? (hasResults() ? null : '先运行完成至少一个算例');
+// Study 会自己运行 baseline 和候选成员；已有 history 不是入口前提。
+// 只要基本设定已经落成一份算例，就可以先配置可选的研究流程。
+const studyReady = () => ready();
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
@@ -49,10 +52,10 @@ export const WORKFLOW = [
     { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
   ] },
   { n: 6, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
-    { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: 'OAT / LHS 参数扰动', need: resultsReady },
+    { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: '可选：OAT / LHS 参数扰动', need: studyReady, optional: true },
   ] },
   { n: 7, t: '参数调优', d: '差分进化与目标函数', steps: [
-    { id: 'result-tuning', page: 'result', t: '参数调优', d: '差分进化与目标函数', need: resultsReady },
+    { id: 'result-tuning', page: 'result', t: '参数调优', d: '可选：差分进化与目标函数', need: studyReady, optional: true },
   ] },
   { n: 8, t: '报告与导出', d: '保存分析结果', steps: [
     { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
@@ -60,16 +63,17 @@ export const WORKFLOW = [
 ];
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
 const visibleSteps = () => STEPS.filter(step => !step.show || step.show());
+const sequentialSteps = () => visibleSteps().filter(step => !step.optional);
 
 export function nextOf(id) {
-  const steps = visibleSteps();
+  const steps = sequentialSteps();
   const i = steps.findIndex(s => s.id === id);
   if (i < 0) return null;
   return steps[i + 1] ?? null;
 }
 
 export function prevOf(id) {
-  const steps = visibleSteps();
+  const steps = sequentialSteps();
   const i = steps.findIndex(s => s.id === id);
   if (i <= 0) return null;
   return steps[i - 1];

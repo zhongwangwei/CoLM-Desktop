@@ -405,6 +405,7 @@ struct VisibilityContext<'a> {
     bgc: bool,
     crop: bool,
     urban: bool,
+    ncar_urban: bool,
     lulcc: bool,
     tracer: bool,
     isotope_tracer: bool,
@@ -483,10 +484,36 @@ fn character(doc: &colm_namelist::Document, name: &str) -> String {
     }
 }
 
+fn ncar_urban_properties(
+    doc: &colm_namelist::Document,
+    case_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let raw = character(doc, "DEF_dir_rawdata");
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let root = std::path::Path::new(raw);
+    let root = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        case_dir?.join(root)
+    };
+    Some(root.join("urban/NCAR_urban_properties.nc"))
+}
+
 impl<'a> VisibilityContext<'a> {
     fn new(
         doc: &'a colm_namelist::Document,
         have: &'a std::collections::BTreeSet<&'a str>,
+    ) -> Self {
+        Self::new_at(doc, have, None)
+    }
+
+    fn new_at(
+        doc: &'a colm_namelist::Document,
+        have: &'a std::collections::BTreeSet<&'a str>,
+        case_dir: Option<&std::path::Path>,
     ) -> Self {
         Self {
             doc,
@@ -502,6 +529,7 @@ impl<'a> VisibilityContext<'a> {
             // 里的伪开关；manifest 是唯一可信来源。
             crop: have.contains("CROP"),
             urban: logical(doc, "DEF_URBAN_RUN"),
+            ncar_urban: ncar_urban_properties(doc, case_dir).is_some_and(|path| path.is_file()),
             lulcc: logical(doc, "DEF_USE_LULCC"),
             tracer: logical(doc, "DEF_USE_TRACER"),
             isotope_tracer: character(doc, "DEF_TRACER_TYPES")
@@ -892,6 +920,15 @@ fn validate_runtime_contract(
         .split(',')
         .any(|name| matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE"));
     let urban = logical(doc, "DEF_URBAN_RUN");
+    if urban
+        && integer(doc, "DEF_URBAN_type_scheme") == 1
+        && !ncar_urban_properties(doc, Some(case_dir)).is_some_and(|path| path.is_file())
+    {
+        return Err(
+            "NCAR 城市分类需要 DEF_dir_rawdata/urban/NCAR_urban_properties.nc；当前数据只支持 LCZ"
+                .into(),
+        );
+    }
     let single = kernel.map(|facts| facts.single).unwrap_or_else(|| {
         doc.get("SITE_fsitedata").is_some()
             || doc.get("SITE_lon_location").is_some()
@@ -1173,27 +1210,19 @@ fn expert_tuning_runtime_state(
     }
     if matches!(
         name,
-        "DEF_TUNING_SMPMAX"
-            | "DEF_TUNING_SOIL_ICE_IMPEDANCE"
-            | "DEF_TUNING_TOPMOD_DECAY"
-            | "DEF_TUNING_SIMPLE_VIC_DS"
-            | "DEF_TUNING_SIMPLE_VIC_WS"
+        "DEF_TUNING_SMPMAX" | "DEF_TUNING_SIMPLE_VIC_DS" | "DEF_TUNING_SIMPLE_VIC_WS"
+    ) {
+        return Some(hidden("当前内核没有活动计算路径使用此字段"));
+    }
+    if matches!(
+        name,
+        "DEF_TUNING_SMPMIN" | "DEF_TUNING_SOIL_ICE_IMPEDANCE" | "DEF_TUNING_TOPMOD_DECAY"
     ) && !c.soil_hydrology()
     {
         return Some(hidden("当前单点地表不运行土壤水分过程"));
     }
-    if name == "DEF_TUNING_SMPMAX" && c.runoff != 3 {
-        return Some(hidden("仅 Simple VIC 产流方案使用"));
-    }
     if name == "DEF_TUNING_TOPMOD_DECAY" && c.runoff != 0 {
         return Some(hidden("仅 TOPMODEL 产流方案使用"));
-    }
-    if matches!(
-        name,
-        "DEF_TUNING_SIMPLE_VIC_DS" | "DEF_TUNING_SIMPLE_VIC_WS"
-    ) && c.runoff != 3
-    {
-        return Some(hidden("仅 Simple VIC 产流方案使用"));
     }
     if name.starts_with("DEF_TUNING_IRRIGATION_")
         && !(c.crop && (!c.single || c.cropland()) && logical(c.doc, "DEF_USE_IRRIGATION"))
@@ -1287,6 +1316,9 @@ fn field_runtime_state(
     }
     if c.single && name == "DEF_HIST_CompressLevel" && !c.tracer {
         return hidden("SinglePoint 普通历史文件不使用此压缩设置");
+    }
+    if name == "DEF_TOPMOD_method" && c.runoff != 0 {
+        return hidden("仅 TOPMODEL 产流方案使用");
     }
 
     if one_of(&[
@@ -1567,6 +1599,13 @@ fn field_runtime_state(
     if field_section(name, field.group) == Some("城市") && !c.urban {
         return hidden("需要先启用城市模型");
     }
+    if name == "DEF_URBAN_type_scheme" && !c.ncar_urban {
+        return (
+            FieldMode::Editable,
+            Some("当前 rawdata 未提供 NCAR 城市属性，只能使用 LCZ"),
+            vec!["2"],
+        );
+    }
     if c.urban
         && one_of(&[
             "DEF_USE_WUEST",
@@ -1618,12 +1657,13 @@ fn field_runtime_state(
     (FieldMode::Editable, None, Vec::new())
 }
 
-pub(crate) fn field_states_for(
+fn field_states_for_at(
     text: &str,
     have: &std::collections::BTreeSet<&str>,
+    case_dir: Option<&std::path::Path>,
 ) -> Result<Vec<FieldState>, String> {
     let doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
-    let context = VisibilityContext::new(&doc, have);
+    let context = VisibilityContext::new_at(&doc, have, case_dir);
     colm_schema::all()
         .iter()
         .map(|field| {
@@ -1768,7 +1808,10 @@ pub fn field_states_batch(
     let all = read_all(&dirs)?;
     let groups: Vec<Vec<FieldState>> = all
         .iter()
-        .map(|(dir, text)| field_states_for(text, &have).map_err(|e| format!("{dir}: {e}")))
+        .map(|(dir, text)| {
+            field_states_for_at(text, &have, Some(std::path::Path::new(dir)))
+                .map_err(|e| format!("{dir}: {e}"))
+        })
         .collect::<Result<_, _>>()?;
     Ok(merge_field_states(&groups))
 }

@@ -29,7 +29,7 @@ class El {
 
 const ids = Object.fromEntries([
   'gatetitle', 'gatesub', 'gateinfo', 'gatecards', 'gatefoot', 'domaingate',
-  'launchgate', 'localRunCard', 'steps', 'status', 'estSite', 'casename', 'kernel', 'homeBtn',
+  'loadinggate', 'launchgate', 'localRunCard', 'steps', 'status', 'estSite', 'casename', 'kernel', 'homeBtn',
 ].map(id => [id, new El()]));
 
 globalThis.document = {
@@ -47,8 +47,14 @@ await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 
 const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
-await import(moduleUrl('gate-boot.js'));
-if (ids.launchgate.hidden || !ids.domaingate.hidden) throw new Error('launch page must appear before the model wizard');
+const { showLaunchGate } = await import(moduleUrl('gate-boot.js'));
+if (ids.loadinggate.hidden || !ids.launchgate.hidden || !ids.domaingate.hidden) {
+  throw new Error('loading page must cover the launcher until the application is ready');
+}
+showLaunchGate();
+if (!ids.loadinggate.hidden || ids.launchgate.hidden) {
+  throw new Error('ready application must replace the loading page with the launcher');
+}
 ids.localRunCard.onclick();
 if (!ids.launchgate.hidden || ids.domaingate.hidden || ids.gatetitle.textContent !== '这次要跑什么？') {
   throw new Error('local run did not enter the existing model wizard');

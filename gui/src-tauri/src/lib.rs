@@ -74,7 +74,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                let _ = window.app_handle().state::<RunProcesses>().cancel(None);
+                let _ = window
+                    .app_handle()
+                    .state::<RunProcesses>()
+                    .cancel_on_shutdown();
             }
         })
         .manage(RunProcesses::default())
@@ -129,6 +132,7 @@ pub fn run() {
             study_result,
             series,
             evaluation_catalog,
+            evaluation_plan,
             metrics,
             unknown_fields,
             irrelevant_fields,
