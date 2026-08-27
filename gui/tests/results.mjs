@@ -115,10 +115,10 @@ if (!html.includes('<option value="pdf">PDF</option>')) {
 }
 for (const control of [
   'evaluation-variable-selector', 'batch-evaluation-variable-selector',
-  'uq-readiness', 'uq-create', 'uq-run', 'uq-status', 'uq-retry', 'uq-from', 'uq-to',
-  'uq-range-confirm', 'uq-step-progress', 'uq-step-do', 'uq-step-why', 'uq-step-prev', 'uq-step-next',
-  'uq-purpose', 'uq-method-help', 'uq-site-mode-help', 'uq-window-help', 'uq-count-help',
-  'uq-seed-help', 'uq-jobs-help', 'uq-kernel-help',
+  'uq-readiness', 'uq-create', 'uq-run', 'uq-status', 'uq-retry',
+  'uq-spinup-years', 'uq-spinup-repeat', 'uq-spinup-apply', 'uq-spinup-note', 'uq-range-confirm', 'uq-step-progress', 'uq-step-do', 'uq-step-why', 'uq-step-prev', 'uq-step-next',
+  'uq-purpose', 'uq-method-help', 'uq-spinup-help', 'uq-count-help',
+  'uq-seed-help', 'uq-jobs-help',
   'tune-readiness', 'tune-create', 'tune-run', 'tune-status', 'tune-retry', 'tune-val-from', 'tune-val-to',
   'tune-min-pairs', 'tune-range-confirm', 'tune-step-progress', 'tune-step-do', 'tune-step-why', 'tune-step-prev', 'tune-step-next',
   'evaluation-chart-refresh', 'export-pdf',
@@ -136,15 +136,36 @@ for (const text of ['尚未运行过基准算例也可以配置', '尚未运行�
 for (const text of [
   '不确定性分析要回答什么？', '有限样本分位带不是统计置信区间',
   '创建阶段不做模型计算', 'OAT 候选数 = 2 × 已选参数数',
-  '不会缩短 CoLM 的完整模拟', '少于 20 仅适合流程试跑',
-  '并发只影响墙钟时间', '记录路径和内核指纹',
+  '预热后实际写出的全部 history', '预热期不写 history', '少于 20 仅适合流程试跑',
+  '并发只影响墙钟时间', '无需再次选择运行目录', '应用到当前算例',
 ]) {
   if (!html.includes(text)) throw new Error(`uncertainty design guidance is missing: ${text}`);
+}
+
+for (const hidden of ['uq-site-mode', 'uq-from', 'uq-to', 'uq-kernel-dir', 'uq-site-mode-help', 'uq-window-help', 'uq-kernel-help']) {
+  if (html.includes(`id="${hidden}"`)) throw new Error(`uncertainty design should not expose ${hidden}`);
 }
 for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
+
+if (!resultUi.includes("site_mode: 'shared'")
+    || resultUi.includes("analysis_from: design.from")
+    || resultUi.includes("analysis_to: design.to")
+    || resultUi.includes("$('uq-site-mode')?.value === 'independent'")) {
+  throw new Error('uncertainty Study specs must default to shared mode and analyze each site full output');
+}
+if (!resultUi.includes("invoke('read_timing'")
+    || !resultUi.includes("invoke('set_spinup'")
+    || !resultUi.includes("uqSpinupTarget")
+    || !resultUi.includes("renderUqSpinup")
+    || !resultUi.includes('state.text = r.text;')
+    || !resultUi.includes('预热年数和重复轮数必须是非负整数。')
+    || !resultUi.includes('创建算例后显示预热设置。')
+    || !resultUi.includes("const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent'")) {
+  throw new Error('uncertainty design must expose and apply model spin-up settings from the base cases');
+}
 if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes('function renderStudyWizard(kind)')
     || !resultUi.includes('function setStudyWizardPage(kind, page)')
@@ -298,7 +319,6 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || !resultUi.includes('已创建但未登记的 Study')
     || !resultUi.includes('study_key')
     || !resultUi.includes('min_pairs')
-    || !resultUi.includes('analysis_from: design.from')
     || !resultUi.includes("invoke('study_retry'")
     || !resultUi.includes("invoke('study_preflight_json'")
     || !resultUi.includes('studyCpuCapacity')
@@ -306,13 +326,13 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || !resultUi.includes('boundedMap(dirs, Math.min(jobs, dirs.length)')
     || !resultUi.includes("listen('study://event'")
     || !resultUi.includes('if (!dir || !active.has(dir)) return;')) {
-  throw new Error('study workflows must gate parameters, include windows, stream events, and load backend results on demand');
+  throw new Error('study workflows must gate parameters, stream events, and load backend results on demand');
 }
-if (!resultUi.includes('studyDatesInitialized[kind] === scopeKey')
-    || !resultUi.includes('studyDatesInitialized[kind] = scopeKey')
+if (!resultUi.includes('tuningDatesInitialized === scopeKey')
+    || !resultUi.includes('tuningDatesInitialized = scopeKey')
     || !resultUi.includes('const site = studySiteId({ dir: baseCase });')
     || resultUi.includes('const site = envelope.manifest?.spec?.base_cases?.[0] || member;')) {
-  throw new Error('Study dates and applied case names must follow the current result scope safely');
+  throw new Error('tuning dates and applied case names must follow the current result scope safely');
 }
 if (!resultUi.includes("const PLANNED_PROFILE_VARIABLES = new Set(['f_t_soisno', 'f_wliq_soisno', 'f_wice_soisno'])")
     || !resultUi.includes('!PLANNED_PROFILE_VARIABLES.has(name)')) {
