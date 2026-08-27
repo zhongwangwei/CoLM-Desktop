@@ -149,6 +149,7 @@ for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
+const resultCss = await readFile(join(root, 'dist', 'app', 'style.css'), 'utf8');
 
 if (!resultUi.includes("site_mode: 'shared'")
     || resultUi.includes("analysis_from: design.from")
@@ -165,6 +166,16 @@ if (!resultUi.includes("invoke('read_timing'")
     || !resultUi.includes('创建算例后显示预热设置。')
     || !resultUi.includes("const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent'")) {
   throw new Error('uncertainty design must expose and apply model spin-up settings from the base cases');
+}
+if (resultUi.includes("node('label', 'evaluation-variable study-param-option')")
+    || !resultUi.includes("node('div', 'evaluation-variable study-param-option')")
+    || !resultUi.includes('input.ariaLabel = label;')
+    || !resultUi.includes("min.ariaLabel = `${label} 采样下界`;")
+    || !resultUi.includes("max.ariaLabel = `${label} 采样上界`;")) {
+  throw new Error('Study parameter range rows must not wrap numeric inputs in one label and must label lower/upper fields');
+}
+if (!resultCss.includes('#uq-params, #tune-params { grid-template-columns: minmax(0, 1fr); }')) {
+  throw new Error('Study parameter ranges must use full-width rows so lower/upper inputs cannot overlap neighboring parameters');
 }
 if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes('function renderStudyWizard(kind)')

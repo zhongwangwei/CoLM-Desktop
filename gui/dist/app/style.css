@@ -552,6 +552,7 @@ body.resizing-live { user-select: none; }
 .study-view th, .study-view td { border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; }
 .study-log { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
 .study-log-filters, .study-pager { align-items: center; }
+#uq-params, #tune-params { grid-template-columns: minmax(0, 1fr); }
 .study-param-option { grid-template-columns: auto minmax(180px, 1fr) minmax(90px, 120px) minmax(90px, 130px) minmax(90px, 130px); align-items: center; }
 .mini-input { max-width: 90px; }
 .study-target-weight { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }

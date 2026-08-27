@@ -1785,10 +1785,11 @@ function renderStudyParams(hostId) {
   host.textContent = '';
   for (const p of studyParamCatalog) {
     const saved = previous.get(p.name);
-    const row = node('label', 'evaluation-variable study-param-option');
+    const row = node('div', 'evaluation-variable study-param-option');
     const label = fieldLabel(p.name, language());
     const input = document.createElement('input');
     input.type = 'checkbox'; input.dataset.studyParam = p.name;
+    input.ariaLabel = label;
     input.checked = saved?.checked ?? false;
     input.onchange = invalidateConfirmation;
     const text = node('span');
@@ -1796,8 +1797,8 @@ function renderStudyParams(hostId) {
     const upper = p.max == null ? '+∞' : `${p.max_inclusive ? '≤' : '<'} ${metricText(p.max)}`;
     const sentinel = p.sentinel == null ? '' : ` · 哨兵 ${metricText(p.sentinel)}（${p.sentinel_meaning || '使用内核默认值'}，不可采样）`;
     text.append(node('b', '', label), node('small', '', `${p.name} · 代码默认 ${metricText(p.default)} · 硬边界 ${lower}, ${upper}${sentinel} · 仅专家自定义范围`));
-    const min = node('input', 'input'); min.type = 'number'; min.step = 'any'; min.placeholder = '最小值'; min.dataset.studyMin = p.name; min.value = saved?.min ?? '';
-    const max = node('input', 'input'); max.type = 'number'; max.step = 'any'; max.placeholder = '最大值'; max.dataset.studyMax = p.name; max.value = saved?.max ?? '';
+    const min = node('input', 'input'); min.type = 'number'; min.step = 'any'; min.placeholder = '采样下界'; min.ariaLabel = `${label} 采样下界`; min.dataset.studyMin = p.name; min.value = saved?.min ?? '';
+    const max = node('input', 'input'); max.type = 'number'; max.step = 'any'; max.placeholder = '采样上界'; max.ariaLabel = `${label} 采样上界`; max.dataset.studyMax = p.name; max.value = saved?.max ?? '';
     const scale = node('select', 'select'); scale.dataset.studyScale = p.name;
     for (const [value, label] of [['linear', language() === 'en' ? 'Linear' : '线性'], ['log', language() === 'en' ? 'Logarithmic' : '对数']]) {
       const option = document.createElement('option'); option.value = value; option.textContent = label; scale.appendChild(option);

@@ -1075,6 +1075,8 @@ const ZH_EN = [
   ['从当前配置预计写出的标量 history 中，选择要形成不确定性包络的输出。', 'From scalar history outputs planned by the current configuration, choose the variables used to form uncertainty envelopes.'],
   ['只分析与科学问题相关且各站点可用的变量，可避免无效运行和无法比较的结果。', 'Limiting analysis to scientifically relevant variables available at every site avoids wasted runs and incomparable results.'],
   ['选择参与扰动的参数，填写有限采样上下界与线性/对数尺度，并确认范围责任。', 'Select parameters to perturb, enter finite sampling bounds and linear or logarithmic scales, and confirm responsibility for the ranges.'],
+  ['采样下界', 'Sampling lower bound'],
+  ['采样上界', 'Sampling upper bound'],
   ['参数范围就是不确定性假设；过宽会产生非物理解，过窄则会低估结果敏感性。', 'Parameter ranges are the uncertainty assumptions: overly broad ranges produce nonphysical solutions, while overly narrow ranges underestimate sensitivity.'],
   ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次 Study 的计算规模。', 'Summarize parameters, candidates, sites, model stages, and concurrency to preview the Study scale.'],
   ['在创建前看清任务量，便于控制计算时间、磁盘占用和样本预算。', 'Reviewing task scale before creation helps control compute time, storage use, and the sampling budget.'],
