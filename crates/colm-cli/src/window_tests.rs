@@ -215,9 +215,8 @@ fn urban_new_stages_lucy_into_an_explicit_runtime_when_missing() {
     let site = netcdf::open(case.join("site.nc")).unwrap();
     assert!(site.variable("URBTYP").is_some());
     assert!(site.variable("URBAN_DENSITY_CLASS").is_some());
-    assert!(std::fs::read_to_string(case.join("case.nml"))
-        .unwrap()
-        .contains("/rawdata/"));
+    let case_nml = std::fs::read_to_string(case.join("case.nml")).unwrap();
+    assert!(case_nml.contains("/rawdata/") || case_nml.contains("\\rawdata\\"));
     let _ = std::fs::remove_dir_all(root);
 }
 

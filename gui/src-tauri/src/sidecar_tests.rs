@@ -380,10 +380,13 @@ fn a_study_cancel_can_identify_the_scheduler_it_killed() {
 
 #[test]
 fn study_process_keys_normalize_equivalent_paths() {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "colm-study-process-key-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
+        "colm-study-process-key-{}-{suffix}",
+        std::process::id()
     ));
     std::fs::create_dir_all(&root).unwrap();
     let plain = study_process_key(root.to_str().unwrap());

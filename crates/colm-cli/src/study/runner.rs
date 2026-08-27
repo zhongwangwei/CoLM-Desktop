@@ -2275,6 +2275,22 @@ mod tests {
         assert_eq!(bounded_jobs(4, 0), 1);
     }
 
+    fn exited_child_pid() -> u32 {
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        pid
+    }
+
     #[test]
     fn one_study_has_only_one_scheduler_writer() {
         let dir = std::env::temp_dir().join(format!(
@@ -2327,7 +2343,7 @@ mod tests {
         assert!(error.contains("still running"), "{error}");
         drop(live);
         let mut stale = supervisor_identity();
-        stale.pid = u32::MAX;
+        stale.pid = exited_child_pid();
         stale.heartbeat_unix = 0;
         std::fs::write(dir.join("run.lock"), serde_json::to_vec(&stale).unwrap()).unwrap();
         let retried = retry(&dir, true).unwrap();
@@ -2341,18 +2357,7 @@ mod tests {
     #[test]
     fn verified_gui_cancel_closes_active_tasks_and_rejects_a_new_scheduler() {
         assert!(scheduler_process_alive(std::process::id()).unwrap());
-        #[cfg(windows)]
-        let mut exited = std::process::Command::new("cmd")
-            .args(["/C", "exit", "0"])
-            .spawn()
-            .unwrap();
-        #[cfg(not(windows))]
-        let mut exited = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        let exited_pid = exited.id();
-        assert!(exited.wait().unwrap().success());
+        let exited_pid = exited_child_pid();
         assert!(!scheduler_process_alive(exited_pid).unwrap());
         let dir = std::env::temp_dir().join(format!(
             "colm-study-finalize-cancel-{}-{}",
@@ -2423,7 +2428,7 @@ mod tests {
         assert!(dir.join("run.lock").is_file());
 
         let mut stale = supervisor_identity();
-        stale.pid = u32::MAX;
+        stale.pid = exited_child_pid();
         stale.heartbeat_unix = 0;
         std::fs::write(dir.join("run.lock"), serde_json::to_vec(&stale).unwrap()).unwrap();
         ensure_scheduler_idle(&dir).unwrap();
