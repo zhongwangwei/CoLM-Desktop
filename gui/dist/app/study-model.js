@@ -6,7 +6,7 @@ export const MAX_STUDY_CANDIDATES = 1000;
 export const TERMINAL_STATUSES = new Set(['Succeeded', 'Failed', 'Interrupted', 'NeedsReview', 'Cancelled', 'Completed', 'CompletedWithFailures']);
 export const SUCCESS_STATUSES = new Set(['Succeeded', 'Completed']);
 export const FAILURE_STATUSES = new Set(['Failed', 'Interrupted', 'NeedsReview']);
-export const ACTIVE_STATUSES = new Set(['Running', 'Evaluating', 'Queued', 'Materialized', 'Reconcile']);
+export const ACTIVE_STATUSES = new Set(['Running', 'Evaluating', 'Reconcile']);
 
 export function canonicalStatus(value = 'Pending') {
   return String(value || 'Pending').split('_').map(part => part ? part[0].toUpperCase() + part.slice(1).toLowerCase() : '').join('');
@@ -62,7 +62,7 @@ export function aggregateStages(stages = []) {
   const cancelled = list.filter(x => x.status === 'Cancelled').length;
   const running = list.filter(x => ACTIVE_STATUSES.has(x.status)).length;
   const done = succeeded + failed + cancelled;
-  const status = failed ? 'Failed' : running ? 'Running' : done === total && total ? 'Succeeded' : 'Pending';
+  const status = failed ? 'Failed' : running ? 'Running' : cancelled ? 'Cancelled' : done === total && total ? 'Succeeded' : 'Pending';
   return { status, counts, total, succeeded, failed, cancelled, running, done, progress: total ? done / total : 0 };
 }
 
@@ -90,7 +90,7 @@ export function aggregateMember(member = {}) {
   const running = sites.filter(x => ACTIVE_STATUSES.has(x.status) || x.status === 'Running').length;
   const done = succeeded + failed + cancelled;
   const review = sites.some(x => x.status === 'NeedsReview');
-  const status = review ? 'NeedsReview' : failed ? 'Failed' : running ? 'Running' : done === total && total ? 'Succeeded' : 'Pending';
+  const status = review ? 'NeedsReview' : failed ? 'Failed' : running ? 'Running' : cancelled ? 'Cancelled' : done === total && total ? 'Succeeded' : 'Pending';
   return { ...member, sites, status, counts, total, succeeded, failed, cancelled, running, done, progress: total ? done / total : 0 };
 }
 
@@ -118,6 +118,7 @@ export function aggregateStudy(study = {}) {
   const status = running ? 'Running'
     : review ? 'NeedsReview'
     : failed ? 'CompletedWithFailures'
+      : cancelled || canonicalStatus(study.status ?? 'Draft') === 'Cancelled' ? 'Cancelled'
       : done === total && total ? 'Completed' : canonicalStatus(study.status ?? 'Draft');
   return { ...study, members, status, counts, total, succeeded, failed, cancelled, running, done, progress: total ? done / total : 0 };
 }

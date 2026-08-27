@@ -202,6 +202,11 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         )?;
     let case_root = colm_kernel::manifest::absolute(case_root)?;
     let sites = resolved_base_cases(&case_root, &spec)?;
+    let base_case_paths = sites
+        .iter()
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    super::engine::baseline(&base_case_paths, &spec)?;
     let site_names = sites
         .iter()
         .map(|(site, _)| site.clone())
@@ -1871,23 +1876,9 @@ fn study_case_root(manifest: &Manifest) -> Result<PathBuf> {
 }
 
 fn resolved_base_cases(case_root: &Path, spec: &StudySpec) -> Result<Vec<(String, PathBuf)>> {
-    spec.base_cases
-        .iter()
-        .map(|raw| {
-            let candidate = PathBuf::from(raw);
-            let candidate = if candidate.join("case.nml").is_file() {
-                candidate
-            } else {
-                case_root.join(raw)
-            };
-            let candidate = colm_kernel::manifest::absolute(&candidate)?;
-            if candidate.parent() != Some(case_root) || !candidate.join("case.nml").is_file() {
-                bail!(
-                    "base case {} must be a direct child of {}",
-                    candidate.display(),
-                    case_root.display()
-                );
-            }
+    super::engine::base_cases(case_root, spec)?
+        .into_iter()
+        .map(|candidate| {
             let site = candidate
                 .file_name()
                 .unwrap()
@@ -2436,6 +2427,37 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn write_fake_kernel(root: &Path) -> PathBuf {
+        let kernel = root.join("kernel");
+        std::fs::create_dir_all(&kernel).unwrap();
+        let body = b"#!/bin/sh\nexit 0\n";
+        let mut hashes = serde_json::Map::new();
+        for program in colm_kernel::PROGRAMS {
+            let path = kernel.join(colm_kernel::program_file(program));
+            std::fs::write(&path, body).unwrap();
+            hashes.insert(program.into(), serde_json::Value::String(sha256(body)));
+        }
+        std::fs::write(
+            kernel.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "preset": "study-test",
+                "platform": "test",
+                "colm_git_sha": "deadbeef",
+                "generator_args": "SinglePoint LULC_IGBP",
+                "macros": ["SinglePoint", "LULC_IGBP"],
+                "built_with": "test",
+                "netcdf_c": "test",
+                "netcdf_fortran": "test",
+                "hdf5": "test",
+                "sha256": hashes,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        kernel
+    }
+
     #[test]
     fn study_creation_requires_a_frozen_kernel() {
         let dir = std::env::temp_dir().join(format!(
@@ -2455,6 +2477,82 @@ mod tests {
         .unwrap();
         let error = preflight_create(&dir, &spec).unwrap_err().to_string();
         assert!(error.contains("kernel_dir"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_duplicate_base_cases_like_create() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-duplicate-base-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("caseA")).unwrap();
+        std::fs::write(
+            dir.join("caseA/case.nml"),
+            "&nl_colm\n DEF_TUNING_CNFAC = 0.5\n/\n",
+        )
+        .unwrap();
+        let spec = dir.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "uncertainty",
+                "method": "lhs",
+                "kernel_dir": "missing-kernel",
+                "base_cases": ["caseA", "./caseA"],
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.1,"sample_max":0.9}],
+                "outputs": ["Qle"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = preflight_create(&dir, &spec).unwrap_err().to_string();
+        assert!(error.contains("duplicate base case"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_shared_baseline_mismatch_like_create() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-baseline-mismatch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_kernel(&dir);
+        for (site, value) in [("caseA", "0.5"), ("caseB", "0.7")] {
+            std::fs::create_dir_all(dir.join(site)).unwrap();
+            std::fs::write(
+                dir.join(site).join("case.nml"),
+                format!("&nl_colm\n DEF_TUNING_CNFAC = {value}\n/\n"),
+            )
+            .unwrap();
+        }
+        let spec = dir.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "uncertainty",
+                "method": "lhs",
+                "kernel_dir": kernel,
+                "base_cases": ["caseA", "caseB"],
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.1,"sample_max":0.9}],
+                "outputs": ["Qle"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = preflight_create(&dir, &spec).unwrap_err().to_string();
+        assert!(
+            error.contains("shared study requires the same baseline value"),
+            "{error}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

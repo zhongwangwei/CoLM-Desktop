@@ -1460,6 +1460,10 @@ fn parse_study_event_line(line: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(line).ok()
 }
 
+fn is_study_task_log(payload: &serde_json::Value) -> bool {
+    payload.get("kind").and_then(serde_json::Value::as_str) == Some("task_log")
+}
+
 fn study_run_blocking(
     app: tauri::AppHandle,
     processes: RunProcesses,
@@ -1489,6 +1493,11 @@ fn study_run_blocking(
             object
                 .entry("study_dir")
                 .or_insert_with(|| serde_json::Value::String(study_dir.clone()));
+        }
+        // Member logs already live on disk; forwarding hundreds of thousands of
+        // raw lines delays the terminal event and leaves the GUI looking stuck.
+        if is_study_task_log(&payload) {
+            continue;
         }
         last = Some(payload.clone());
         let _ = app.emit("study://event", payload);

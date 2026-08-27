@@ -1222,6 +1222,7 @@ const ZH_EN = [
   ['Study 正在运行。', 'Study is already running.'],
   ['Study 运行完成。', 'Study run completed.'],
   ['请先创建 Study。', 'Create a Study first.'],
+  ['Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。', 'The Study has not finished. Return to page 5, click “Run Study,” and open results after completion.'],
   ['请先选择内核。', 'Select a kernel first.'],
   ['存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？', 'Some task process states cannot be verified. Retry only after confirming that the original model processes have exited. Continue?'],
   ['已请求暂停派发。', 'Pause dispatch requested.'],

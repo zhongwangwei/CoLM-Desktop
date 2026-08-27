@@ -43,6 +43,7 @@ assert.equal(studyBudget({ method: 'oat', paramCount: 2, siteCount: 3, candidate
 
 assert.equal(aggregateStages([{ status: 'Succeeded' }, { status: 'Running' }, { status: 'Pending' }]).status, 'Running');
 assert.equal(aggregateStages([{ status: 'Succeeded' }, { status: 'Failed' }]).status, 'Failed');
+assert.equal(aggregateStages([{ status: 'Cancelled' }]).status, 'Cancelled');
 const member = aggregateMember({
   id: 'm1',
   sites: [
@@ -66,6 +67,21 @@ const backendStudy = aggregateStudy({
 assert.equal(backendStudy.total, 2);
 assert.equal(backendStudy.done, 2);
 assert.equal(backendStudy.status, 'CompletedWithFailures');
+const readyStudy = aggregateStudy({
+  status: 'ready',
+  tasks: {
+    'm1/A': { member: 'm1', site: 'A', status: 'materialized' },
+    'm2/A': { member: 'm2', site: 'A', status: 'queued' },
+  },
+});
+assert.equal(readyStudy.running, 0);
+assert.equal(readyStudy.status, 'Ready');
+const cancelledStudy = aggregateStudy({
+  status: 'cancelled',
+  tasks: { 'm1/A': { member: 'm1', site: 'A', status: 'cancelled' } },
+});
+assert.equal(cancelledStudy.done, 1);
+assert.equal(cancelledStudy.status, 'Cancelled');
 const multiStudy = aggregateStudy({
   tasks: {
     's1/m000000/A': { study_dir: '/cases/.colm/studies/s1', member: 'm000000', site: 'A', status: 'succeeded' },

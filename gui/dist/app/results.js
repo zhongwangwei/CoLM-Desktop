@@ -1575,6 +1575,8 @@ const studyScopeKey = () => studyScope()
   .map(c => `${c.dir}\u001f${observationFor(c)}`)
   .join('\u001e');
 const activeStudyDirs = kind => scopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir));
+const studyResultsReady = view => ['Completed', 'CompletedWithFailures']
+  .includes(aggregateStudy(view?.state || view?.manifest || view || {}).status);
 const setActiveStudyDirs = (kind, dirs) => {
   studyDirs[kind] = replaceScopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir), dirs);
 };
@@ -1647,7 +1649,13 @@ function studyWizardIssue(kind, page) {
     } catch (error) { return error?.message || String(error); }
     if (!$(`${prefix}-range-confirm`)?.checked) return '检查范围后勾选责任确认';
   }
-  if ((page === 4 || page === 5) && !activeStudyDirs(kind).length) return '请先创建 Study。';
+  if (page === 4 && !activeStudyDirs(kind).length) return '请先创建 Study。';
+  if (page === 5) {
+    if (!activeStudyDirs(kind).length) return '请先创建 Study。';
+    if (!studyResultsReady(studyViews[kind])) {
+      return 'Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。';
+    }
+  }
   return '';
 }
 
@@ -2215,6 +2223,7 @@ function renderStudyEnvelope(kind, envelope) {
   const host = $(flowKind === 'tuning' ? 'tune-study-view' : 'uq-study-view');
   host?.replaceChildren(box, table, pager, filterBar, log);
   if (!envelope.event_only) setPreview(flowKind, JSON.stringify(view, null, 2));
+  renderStudyWizard(flowKind);
 }
 
 function mergeStudyEvent(kind, payload) {
@@ -2302,6 +2311,9 @@ async function renderStudyResults(kind, envelopes) {
   host.textContent = '';
   const dirs = activeStudyDirs(kind);
   if (!dirs.length) return host.appendChild(node('div', 'result-empty', '还没有 Study。'));
+  if (envelopes.some(envelope => !studyResultsReady(envelope))) {
+    return host.appendChild(node('div', 'result-empty', 'Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。'));
+  }
   for (let index = 0; index < dirs.length; index += 1) {
     const dir = dirs[index];
     const envelope = envelopes[index] || {};

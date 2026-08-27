@@ -297,7 +297,7 @@ fn member_tasks_from(
     out
 }
 
-fn base_cases(case_root: &Path, spec: &StudySpec) -> Result<Vec<PathBuf>> {
+pub(super) fn base_cases(case_root: &Path, spec: &StudySpec) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for raw in &spec.base_cases {
@@ -326,7 +326,7 @@ fn base_cases(case_root: &Path, spec: &StudySpec) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn baseline(base_cases: &[PathBuf], spec: &StudySpec) -> Result<BTreeMap<String, f64>> {
+pub(super) fn baseline(base_cases: &[PathBuf], spec: &StudySpec) -> Result<BTreeMap<String, f64>> {
     let mut out = BTreeMap::new();
     let metas = colm_case::tuning::all()?
         .into_iter()

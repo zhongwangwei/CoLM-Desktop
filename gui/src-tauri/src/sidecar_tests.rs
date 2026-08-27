@@ -596,6 +596,14 @@ fn study_events_are_strict_json_lines() {
 }
 
 #[test]
+fn only_raw_study_task_logs_are_suppressed_from_the_gui() {
+    let log = serde_json::json!({"kind":"task_log","line":"TIMESTEP = 1"});
+    let done = serde_json::json!({"kind":"task_done","member":"m000001"});
+    assert!(is_study_task_log(&log));
+    assert!(!is_study_task_log(&done));
+}
+
+#[test]
 fn study_spec_temp_names_are_unique_and_json_suffixed() {
     let a = write_temp_study_spec("{}").unwrap();
     let b = write_temp_study_spec("{}").unwrap();

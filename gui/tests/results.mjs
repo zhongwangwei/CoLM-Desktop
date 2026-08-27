@@ -188,6 +188,13 @@ if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes("$(`${prefix}-step-next`).onclick")) {
   throw new Error('Study workflows must provide guarded previous/next pages and move running work to status');
 }
+if (!resultUi.includes('const studyResultsReady = view =>')
+    || !resultUi.includes('if (!studyResultsReady(studyViews[kind]))')
+    || !resultUi.includes('envelopes.some(envelope => !studyResultsReady(envelope))')
+    || !resultUi.includes('renderStudyWizard(flowKind);')
+    || !resultUi.includes('Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。')) {
+  throw new Error('Study results must stay gated until the run reaches a result-bearing terminal state');
+}
 if (!resultUi.includes('const studyAsyncRequests =')
     || !resultUi.includes('async function loadStudyParams(stillCurrent = () => true)')
     || !resultUi.includes('async function renderStudyOutputs(stillCurrent = () => true)')
