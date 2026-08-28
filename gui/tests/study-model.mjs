@@ -16,11 +16,13 @@ const {
   canonicalStatus,
   aggregateMember,
   aggregateStudy,
+  aggregateStudyStatuses,
   aggregateStages,
   paginate,
   replaceScopedStudyDirs,
   scopedStudyDirs,
   studyBudget,
+  studyActionState,
   studySiteId,
   studyWarnings,
 } = await import(moduleUrl('study-model.js'));
@@ -28,6 +30,7 @@ const {
 assert.deepEqual(STUDY_STAGES, ['mksrfdata', 'mkinidata', 'colm']);
 assert.equal(MAX_STUDY_CANDIDATES, 1000);
 assert.equal(canonicalStatus('completed_with_failures'), 'CompletedWithFailures');
+assert.equal(canonicalStatus('CompletedWithFailures'), 'CompletedWithFailures');
 assert.equal(studyBudget({ method: 'oat', paramCount: 3, siteCount: 4 }).candidateCount, 6);
 assert.equal(studyBudget({ method: 'lhs', paramCount: 3, siteCount: 4 }).suggestedCandidateCount, 40);
 assert.equal(studyBudget({ method: 'lhs', paramCount: 8, siteCount: 4 }).suggestedCandidateCount, 80);
@@ -82,6 +85,32 @@ const cancelledStudy = aggregateStudy({
 });
 assert.equal(cancelledStudy.done, 1);
 assert.equal(cancelledStudy.status, 'Cancelled');
+assert.deepEqual(studyActionState('draft', false), {
+  run: false, refresh: false, retry: false, pause: false, resume: false,
+  cancel: false, export: false, apply: false, results: false,
+});
+assert.deepEqual(studyActionState('ready', true), {
+  run: true, refresh: true, retry: false, pause: false, resume: false,
+  cancel: false, export: true, apply: false, results: false,
+});
+assert.deepEqual(studyActionState('running', true), {
+  run: false, refresh: true, retry: false, pause: true, resume: false,
+  cancel: true, export: false, apply: false, results: false,
+});
+assert.deepEqual(studyActionState('paused', true), {
+  run: false, refresh: true, retry: false, pause: false, resume: true,
+  cancel: true, export: true, apply: false, results: false,
+});
+assert.deepEqual(studyActionState('completed_with_failures', true), {
+  run: false, refresh: true, retry: true, pause: false, resume: false,
+  cancel: false, export: true, apply: true, results: true,
+});
+assert.equal(studyActionState('completed', true).results, true);
+assert.equal(studyActionState('cancelled', true).results, false);
+assert.equal(aggregateStudyStatuses(['ready', 'ready']), 'Ready');
+assert.equal(aggregateStudyStatuses(['completed', 'ready']), 'Ready');
+assert.equal(aggregateStudyStatuses(['ready', 'running']), 'Running');
+assert.equal(aggregateStudyStatuses(['completed', 'completed_with_failures']), 'CompletedWithFailures');
 const multiStudy = aggregateStudy({
   tasks: {
     's1/m000000/A': { study_dir: '/cases/.colm/studies/s1', member: 'm000000', site: 'A', status: 'succeeded' },

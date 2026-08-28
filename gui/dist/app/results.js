@@ -11,7 +11,7 @@ import { go, renderSteps } from './shell.js';
 import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { fieldLabel } from './param-presentation.js';
-import { aggregateStudy, MAX_STUDY_CANDIDATES, paginate, replaceScopedStudyDirs, scopedStudyDirs, studyBudget, studySiteId } from './study-model.js';
+import { aggregateStudy, aggregateStudyStatuses, MAX_STUDY_CANDIDATES, paginate, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId } from './study-model.js';
 import {
   LruCache, METRIC_META, boundedMap, finite, metricKey, ranking, resultCases,
   rowsToCsv, seriesKey, seriesStats,
@@ -1535,17 +1535,17 @@ const studyPages = { uq: 1, tuning: 1 };
 const studyWizardPages = { uq: 0, tuning: 0 };
 const studyAsyncRequests = { params: 0, outputs: 0, targets: 0 };
 const studyWizardTitles = {
-  uq: ['试验设计', '输出变量', '参数范围', '预算预览', '创建与运行', '运行状态', '结果'],
-  tuning: ['优化设计', '目标变量', '参数范围', '预算预览', '创建与运行', '运行状态', '结果'],
+  uq: ['方法与预热', '输出变量', '参数范围', '预算确认', '生成分析任务', '开始计算与监控', '查看结果'],
+  tuning: ['目标与搜索', '目标变量', '参数范围', '预算确认', '生成调优任务', '开始搜索与监控', '查看最优结果'],
 };
 const studyWizardHelp = {
   uq: [
-    ['先明确要评估哪些参数假设会让哪些输出发生多大变化，再选择方法、预热、样本数、随机种子和并发。', '设计决定成员如何覆盖参数空间、计算成本与可重复性；站点固定共享参数，分析使用每个站点预热后实际写出的全部 history。结果是给定范围内的有限样本情景分位带，不是自动校准或统计置信区间。'],
+    ['先明确要评估哪些参数假设会让哪些输出发生多大变化，再选择方法、预热、样本数和随机种子；并行数在启动计算时设置。', '设计决定成员如何覆盖参数空间、计算成本与可重复性；站点固定共享参数，分析使用每个站点预热后实际写出的全部 history。结果是给定范围内的有限样本情景分位带，不是自动校准或统计置信区间。'],
     ['从当前配置预计写出的标量 history 中，选择要形成不确定性包络的输出。', '只分析与科学问题相关且各站点可用的变量，可避免无效运行和无法比较的结果。'],
     ['选择参与扰动的参数，填写有限采样上下界与线性/对数尺度，并确认范围责任。', '参数范围就是不确定性假设；过宽会产生非物理解，过窄则会低估结果敏感性。'],
-    ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次 Study 的计算规模。', '在创建前看清任务量，便于控制计算时间、磁盘占用和样本预算。'],
-    ['先创建冻结内核与算例副本的 Study，再启动、暂停、恢复、重试或导出任务。', '创建和运行分开可先审查可复现清单；所有成员独立运行，不会修改原算例。'],
-    ['查看 baseline 与各成员的阶段进度、成功/失败状态和筛选后的事件日志。', '运行状态用于定位失败成员并安全暂停或重试，而不是盲目重复整批计算。'],
+    ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次分析的计算规模。', '在生成任务前看清任务量，便于控制计算时间、磁盘占用和样本预算。'],
+    ['冻结基础算例、内核、参数范围和输出变量，生成可复现的成员目录与任务清单。', '生成任务只准备文件，不运行模型；把准备和计算分开可先确认方案并保护原算例。'],
+    ['设置本次同时运行数，启动计算并查看基准成员、参数成员的实时进度、失败原因和运行日志。', '并行数只影响耗时和资源占用，不改变科学结果；状态与日志会自动更新。'],
     ['查看输出分位数包络、参数影响排序和成员明细，并按站点与变量加载图表。', '这些结果用于判断预测区间、主要不确定性来源，以及下一步应优先约束哪些参数。'],
   ],
   tuning: [
@@ -1553,8 +1553,8 @@ const studyWizardHelp = {
     ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
     ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
     ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '调优成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
-    ['创建冻结输入与内核的调优 Study，再运行差分进化；最佳候选只能另存为新算例。', '冻结与复制保证每个候选可复现，并保护原算例不被搜索过程覆盖。'],
-    ['跟踪 baseline、候选成员、校准与评估状态，查看失败原因并执行暂停、恢复或重试。', '实时状态让你区分模型失败、数据不足和正常搜索进展，避免错误应用未完成结果。'],
+    ['冻结输入、观测、目标函数和内核，生成可复现的调优成员与任务清单。', '生成任务只准备搜索问题；冻结与复制保证候选可复现，并保护原算例不被覆盖。'],
+    ['设置本次同时运行数，启动搜索并跟踪基准成员、候选成员、校准与验证状态和运行日志。', '并行数只影响耗时和资源占用，不改变搜索定义；状态与日志会自动更新。'],
     ['比较候选目标函数、最佳成员、校准/验证表现和成员表，并预览最佳参数改动。', '结果页用于确认改进是否跨验证期成立，再决定是否把最佳候选另存并进入后续模拟。'],
   ],
 };
@@ -1583,7 +1583,95 @@ const setActiveStudyDirs = (kind, dirs) => {
 const currentKernel = () => $('kernel')?.value || '';
 const uqSpinupTarget = () => studyScope().map(c => c.dir);
 const setPreview = (kind, text) => { const el = $(kind === 'tuning' ? 'tune-preview' : 'uq-preview'); if (el) el.textContent = text; };
-const studyLabel = kind => kind === 'tuning' ? '参数调优' : '不确定性分析';
+const studyStatusLabel = value => dialogText({
+  Draft: '尚未生成', Ready: '待开始', Pending: '等待中', Materialized: '已准备', Queued: '等待运行',
+  Running: '运行中', Evaluating: '正在评估', Reconcile: '正在恢复', Paused: '已暂停',
+  Succeeded: '成功', Failed: '失败', Interrupted: '已中断', NeedsReview: '需要检查',
+  Cancelled: '已停止', Completed: '已完成', CompletedWithFailures: '完成（有失败）',
+}[value] || value || '—');
+
+function studyEventText(item) {
+  if (typeof item === 'string') return item;
+  const kind = item?.kind || item?.type || '';
+  const scope = [item?.member, item?.site, item?.stage].filter(Boolean).join(' / ');
+  if (kind === 'task_log') return [scope && `[${scope}]`, item?.line].filter(Boolean).join(' ');
+  const label = kind === 'task_started' || kind === 'stage_started' ? '运行中'
+    : kind === 'stage_skipped' ? '已跳过'
+      : kind === 'task_failed' || kind === 'study_failed' || kind === 'study_error' || item?.ok === false ? '失败'
+        : kind === 'task_done' || kind === 'stage_done' ? '成功'
+          : kind === 'study_done' ? '已完成' : kind;
+  const detail = item?.reason || (item?.objective != null ? `${dialogText('目标函数')} ${metricText(item.objective)}` : '');
+  return [scope && `[${scope}]`, dialogText(label), detail].filter(Boolean).join(' · ');
+}
+
+function renderStudyActions(kind) {
+  const tuning = kind === 'tuning';
+  const prefix = tuning ? 'tune' : 'uq';
+  const hasTask = activeStudyDirs(kind).length > 0;
+  const summary = aggregateStudy(studyViews[kind]?.state || studyViews[kind]?.manifest || studyViews[kind] || {});
+  const actions = studyActionState(summary.status, hasTask, studyRunning[kind]);
+  const create = $(`${prefix}-create`);
+  if (create) create.textContent = dialogText(hasTask
+    ? (tuning ? '重新生成调优任务' : '重新生成分析任务')
+    : (tuning ? '生成调优任务' : '生成分析任务'));
+
+  const run = $(`${prefix}-run`);
+  const jobs = $(`${prefix}-jobs`);
+  const heading = $(`${prefix}-run-heading`);
+  const detail = $(`${prefix}-run-state`);
+  const current = studyRunning[kind] ? 'Running' : summary.status;
+  const copy = !hasTask
+    ? ['尚未生成任务', '返回第 5 页生成任务后即可开始。', tuning ? '开始参数搜索' : '开始计算']
+    : current === 'Ready'
+      ? ['任务已准备，可以开始', tuning ? '点击“开始参数搜索”后，将运行基准成员并逐代搜索候选参数。' : '点击“开始计算”后，将先运行基准成员，再运行参数成员。', tuning ? '开始参数搜索' : '开始计算']
+      : current === 'Running'
+        ? ['计算正在进行', '进度会自动更新，无需反复点击手动刷新。', tuning ? '参数搜索中…' : '计算中…']
+        : current === 'Paused'
+          ? ['任务已暂停', '正在运行的成员已完成；点击“继续”后才会派发新成员。', '任务已暂停']
+          : current === 'Completed'
+            ? ['计算已完成', '结果页已经开放，可以继续查看和导出。', '计算已完成']
+            : current === 'CompletedWithFailures'
+              ? ['计算完成，但有成员失败', '可重试失败项；已有结果会保留。', '计算结束（有失败）']
+              : current === 'Cancelled'
+                ? ['任务已停止', '未运行成员不会继续派发；如需重做，请返回第 5 页重新生成。', '任务已停止']
+                : current === 'NeedsReview'
+                  ? ['任务需要检查', '检测到无法确认的旧进程状态，确认后可重试。', '需要检查']
+                  : current === 'Failed'
+                    ? ['无法读取任务状态', '请先手动刷新；若仍失败，请检查技术详情。', '状态异常']
+                    : ['正在读取任务状态', '请稍候，或点击“手动刷新”从磁盘读取最新状态。', '正在读取…'];
+  if (heading) heading.textContent = dialogText(copy[0]);
+  if (detail) detail.textContent = dialogText(copy[1]);
+  if (run) {
+    run.textContent = dialogText(copy[2]);
+    run.disabled = !actions.run;
+    run.title = actions.run ? '' : dialogText(hasTask ? '当前任务状态不能开始新的计算。' : '请先生成任务。');
+  }
+  if (jobs) {
+    jobs.disabled = current === 'Running';
+    jobs.title = current === 'Running' ? dialogText('任务运行中不能修改同时运行数。') : '';
+  }
+
+  const controls = {
+    status: [actions.refresh, '请先生成任务。'],
+    retry: [actions.retry, '当前没有可重试的失败项。'],
+    pause: [actions.pause, '只有运行中的任务可以暂停。'],
+    resume: [actions.resume, '只有已暂停的任务可以继续。'],
+    cancel: [actions.cancel, '只有运行中或已暂停的任务可以停止。'],
+    'export-study': [actions.export, studyRunning[kind] ? '运行结束或暂停后再导出完整记录。' : '请先生成任务。'],
+  };
+  for (const [name, [enabled, reason]] of Object.entries(controls)) {
+    const button = $(`${prefix}-${name}`);
+    if (!button) continue;
+    button.disabled = !enabled;
+    button.title = enabled ? '' : dialogText(reason);
+    if (['retry', 'pause', 'resume', 'cancel'].includes(name)) button.hidden = !enabled;
+  }
+  const apply = tuning ? $('tune-apply-best') : null;
+  if (apply) {
+    apply.disabled = !actions.apply;
+    apply.title = actions.apply ? '' : dialogText('调优完成后才能另存最佳方案。');
+  }
+}
 
 async function renderUqSpinup(stillCurrent = () => true) {
   const note = $('uq-spinup-note');
@@ -1627,7 +1715,7 @@ function studyWizardIssue(kind, page) {
   const cases = studyScope();
   if (page === 0) {
     if (!cases.length) return '先在“基本设定 / 文件与目录”创建算例';
-    if (new Set(cases.map(c => parentDir(c.dir))).size !== 1) return 'Study 中的算例必须位于同一个项目目录';
+    if (new Set(cases.map(c => parentDir(c.dir))).size !== 1) return '分析任务中的算例必须位于同一个项目目录';
     if (!currentKernel()) return '当前配置没有匹配的内核运行产物';
     if (tuning && cases.some(c => !observationFor(c))) return '参数调优要求分析范围内每个算例都有观测文件。';
     try { studyDesign(kind); } catch (error) { return error?.message || String(error); }
@@ -1649,11 +1737,13 @@ function studyWizardIssue(kind, page) {
     } catch (error) { return error?.message || String(error); }
     if (!$(`${prefix}-range-confirm`)?.checked) return '检查范围后勾选责任确认';
   }
-  if (page === 4 && !activeStudyDirs(kind).length) return '请先创建 Study。';
+  if (page === 4 && !activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。';
   if (page === 5) {
-    if (!activeStudyDirs(kind).length) return '请先创建 Study。';
+    if (!activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。';
     if (!studyResultsReady(studyViews[kind])) {
-      return 'Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。';
+      return kind === 'tuning'
+        ? '调优任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
+        : '分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。';
     }
   }
   return '';
@@ -2027,7 +2117,7 @@ function renderStudyReadiness(kind) {
   const datesReady = dateValues.every(id => $(id)?.value);
   const checks = [
     { ok: cases.length > 0, text: cases.length ? (en ? `${cases.length} base case(s) selected` : `已选择 ${cases.length} 个基础算例`) : (en ? 'Create a case in Basic setup / Files and directories first' : '先在“基本设定 / 文件与目录”创建算例') },
-    { ok: roots.size === 1, text: roots.size === 1 ? (en ? 'Cases share one project directory' : '算例位于同一个项目目录') : (en ? 'Study cases must share one project directory' : 'Study 中的算例必须位于同一个项目目录') },
+    { ok: roots.size === 1, text: roots.size === 1 ? (en ? 'Cases share one project directory' : '算例位于同一个项目目录') : (en ? 'Analysis cases must share one project directory' : '分析任务中的算例必须位于同一个项目目录') },
     { ok: !!currentKernel(), text: currentKernel() ? (en ? 'Matching physics kernel is available' : '已匹配当前物理内核') : (en ? 'No matching kernel build is available' : '当前配置没有匹配的内核运行产物') },
   ];
   if (tuning) checks.push({
@@ -2047,12 +2137,7 @@ function renderStudyReadiness(kind) {
   host.replaceChildren(...checks.map(check => node('div', `study-ready-item ${check.ok ? 'pass' : 'warn'}`, check.text)));
   const create = $(`${prefix}-create`);
   if (create) create.disabled = checks.some(check => !check.ok);
-  const hasStudy = activeStudyDirs(kind).length > 0;
-  for (const action of ['run', 'status', 'retry', 'pause', 'resume', 'cancel', 'export-study']) {
-    const button = $(`${prefix}-${action}`);
-    if (button) button.disabled = !hasStudy;
-  }
-  if (tuning && $('tune-apply-best')) $('tune-apply-best').disabled = !hasStudy;
+  renderStudyActions(kind);
   renderStudyWizard(kind);
 }
 
@@ -2126,46 +2211,53 @@ function studySpec(kind, cases, independent = false) {
 
 async function createStudy(kind) {
   const cases = studyScope();
-  if (!cases.length) return status('没有已建算例可用于 Study。');
+  if (!cases.length) return status('没有已建算例可用于生成分析任务。');
   const roots = new Set(cases.map(c => parentDir(c.dir)));
-  if (roots.size !== 1) return status('Study 需要同一算例根目录下的算例。');
-  await loadStudyParams();
-  if (kind === 'tuning') await renderTuningTargets(); else await renderStudyOutputs();
-  const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent';
-  const groups = independent ? cases.map(c => [c]) : [cases];
-  const plans = groups.map(group => ({
-    caseRoot: parentDir(group[0].dir),
-    specJson: JSON.stringify(studySpec(kind, group, independent)),
-  }));
-  const candidateCounts = plans.map(plan => {
-    const spec = JSON.parse(plan.specJson);
-    return spec.method === 'differential-evolution'
-      ? Number(spec.budget.population) * (Number(spec.budget.generations) + 1)
-      : Number(spec.budget.candidate_count || (spec.method === 'oat' ? spec.parameters.length * 2 : Math.max(40, spec.parameters.length * 10)));
-  });
-  const maxCandidates = Math.max(...candidateCounts);
-  const totalCandidates = candidateCounts.reduce((sum, count) => sum + count, 0);
-  if (!Number.isSafeInteger(maxCandidates) || maxCandidates > MAX_STUDY_CANDIDATES) {
-    throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
-  }
-  if (totalCandidates > 200 && !globalThis.confirm?.(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)) return;
-  for (const plan of plans) await invoke('study_preflight_json', plan);
-  const dirs = [];
+  if (roots.size !== 1) return status('分析任务要求所有算例位于同一个项目目录。');
+  const create = $(kind === 'tuning' ? 'tune-create' : 'uq-create');
+  if (create) { create.disabled = true; create.textContent = dialogText('正在生成任务…'); }
   try {
-    for (const plan of plans) {
-      const out = await invoke('study_create_json', plan);
-      dirs.push(out.trim());
+    await loadStudyParams();
+    if (kind === 'tuning') await renderTuningTargets(); else await renderStudyOutputs();
+    const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent';
+    const groups = independent ? cases.map(c => [c]) : [cases];
+    const plans = groups.map(group => ({
+      caseRoot: parentDir(group[0].dir),
+      specJson: JSON.stringify(studySpec(kind, group, independent)),
+    }));
+    const candidateCounts = plans.map(plan => {
+      const spec = JSON.parse(plan.specJson);
+      return spec.method === 'differential-evolution'
+        ? Number(spec.budget.population) * (Number(spec.budget.generations) + 1)
+        : Number(spec.budget.candidate_count || (spec.method === 'oat' ? spec.parameters.length * 2 : Math.max(40, spec.parameters.length * 10)));
+    });
+    const maxCandidates = Math.max(...candidateCounts);
+    const totalCandidates = candidateCounts.reduce((sum, count) => sum + count, 0);
+    if (!Number.isSafeInteger(maxCandidates) || maxCandidates > MAX_STUDY_CANDIDATES) {
+      throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
     }
-  } catch (error) {
-    const suffix = dirs.length ? `\n已创建但未登记的 Study：\n${dirs.join('\n')}` : '';
-    throw new Error(`${error?.message || error}${suffix}`);
+    if (totalCandidates > 200 && !globalThis.confirm?.(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)) return;
+    for (const plan of plans) await invoke('study_preflight_json', plan);
+    const dirs = [];
+    try {
+      for (const plan of plans) {
+        const out = await invoke('study_create_json', plan);
+        dirs.push(out.trim());
+      }
+    } catch (error) {
+      const unregistered = kind === 'tuning' ? '已生成但未登记的调优任务：' : '已生成但未登记的分析任务：';
+      const suffix = dirs.length ? `\n${dialogText(unregistered)}\n${dirs.join('\n')}` : '';
+      throw new Error(`${error?.message || error}${suffix}`);
+    }
+    setActiveStudyDirs(kind, dirs);
+    saveStudyDirs();
+    setPreview(kind, dirs.join('\n'));
+    await refreshStudy(kind);
+    setStudyWizardPage(kind, 5);
+    status(kind === 'tuning' ? '参数调优任务已生成。' : '不确定性分析任务已生成。');
+  } finally {
+    renderStudyReadiness(kind);
   }
-  setActiveStudyDirs(kind, dirs);
-  saveStudyDirs();
-  renderStudyReadiness(kind);
-  setPreview(kind, dirs.join('\n'));
-  await refreshStudy(kind);
-  status(`${studyLabel(kind)} Study 已创建。`);
 }
 
 function renderStudyEnvelope(kind, envelope) {
@@ -2183,11 +2275,11 @@ function renderStudyEnvelope(kind, envelope) {
   studyViews[flowKind] = view;
   const summary = aggregateStudy(view.state || view.manifest || view);
   const box = node('div', 'study-status-box');
-  box.append(resultKpi(summary.status || '—', '状态'), resultKpi(`${summary.done || 0}/${summary.total || 0}`, '成员'), resultKpi(`${Math.round((summary.progress || 0) * 100)}%`, '进度'));
+  box.append(resultKpi(studyStatusLabel(summary.status), '状态'), resultKpi(`${summary.done || 0}/${summary.total || 0}`, '成员'), resultKpi(`${Math.round((summary.progress || 0) * 100)}%`, '进度'));
   const filters = studyLogFilters[flowKind];
   const eventRows = view.events || [];
   const filterBar = node('div', 'result-tools study-log-filters');
-  for (const [key, label] of [['study_dir', 'Study'], ['member', '成员'], ['site', '站点'], ['stage', '阶段']]) {
+  for (const [key, label] of [['study_dir', '任务'], ['member', '成员'], ['site', '站点'], ['stage', '阶段']]) {
     const select = node('select', 'select');
     const all = document.createElement('option'); all.value = ''; all.textContent = `${label}：全部`; select.appendChild(all);
     const values = [...new Set(eventRows.map(item => typeof item === 'object' ? item?.[key] : '').filter(Boolean))].sort();
@@ -2198,10 +2290,21 @@ function renderStudyEnvelope(kind, envelope) {
     filterBar.appendChild(select);
   }
   const log = node('div', 'study-log');
+  log.setAttribute('aria-live', 'polite');
   const visibleEvents = eventRows.filter(item => typeof item !== 'object'
     || Object.entries(filters).every(([key, value]) => !value || item?.[key] === value));
-  for (const item of visibleEvents.slice(-120)) log.append(node('div', '', typeof item === 'string' ? item : JSON.stringify(item)));
-  if (!visibleEvents.length) log.append(node('div', '', '没有符合筛选条件的日志。'));
+  for (const item of visibleEvents.slice(-120)) {
+    const row = node('div', '', studyEventText(item));
+    if (typeof item === 'object') row.title = JSON.stringify(item);
+    log.append(row);
+  }
+  if (!visibleEvents.length) log.append(node('div', '', eventRows.length
+    ? '没有符合筛选条件的日志。'
+    : '尚无运行日志；启动任务后会自动显示。'));
+  const logPanel = document.createElement('details');
+  logPanel.className = 'study-technical study-event-log';
+  logPanel.open = true;
+  logPanel.append(node('summary', '', '实时运行日志'), filterBar, log);
   const candidates = view.state?.candidates || view.candidates || {};
   const members = (summary.members || []).map(m => {
     const candidateKey = m.study_key ? `${m.study_key}\u001f${m.member}` : m.member;
@@ -2211,7 +2314,7 @@ function renderStudyEnvelope(kind, envelope) {
   studyPages[flowKind] = page.page;
   const table = document.createElement('table');
   const head = document.createElement('tr'); ['成员', '状态', '目标函数', '站点'].forEach(x => head.appendChild(th(x))); table.appendChild(head);
-  for (const m of page.items) { const tr = document.createElement('tr'); tr.append(td(m.id), td(m.status || '—'), td(metricText(m.objective)), td(m.sites)); table.appendChild(tr); }
+  for (const m of page.items) { const tr = document.createElement('tr'); tr.append(td(m.id), td(studyStatusLabel(m.status)), td(metricText(m.objective)), td(m.sites)); table.appendChild(tr); }
   const pager = node('div', 'result-tools study-pager');
   if (page.pages > 1) {
     const previousButton = node('button', 'btn-ghost', '上一页'); previousButton.disabled = page.page <= 1;
@@ -2221,8 +2324,10 @@ function renderStudyEnvelope(kind, envelope) {
     pager.append(previousButton, node('span', 'muted mini', `${page.page}/${page.pages}`), nextButton);
   }
   const host = $(flowKind === 'tuning' ? 'tune-study-view' : 'uq-study-view');
-  host?.replaceChildren(box, table, pager, filterBar, log);
+  host?.replaceChildren(box, logPanel, table, pager);
+  log.scrollTop = log.scrollHeight;
   if (!envelope.event_only) setPreview(flowKind, JSON.stringify(view, null, 2));
+  renderStudyActions(flowKind);
   renderStudyWizard(flowKind);
 }
 
@@ -2310,9 +2415,11 @@ async function renderStudyResults(kind, envelopes) {
   if (!host) return;
   host.textContent = '';
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return host.appendChild(node('div', 'result-empty', '还没有 Study。'));
+  if (!dirs.length) return host.appendChild(node('div', 'result-empty', kind === 'tuning' ? '尚未生成调优任务。' : '尚未生成分析任务。'));
   if (envelopes.some(envelope => !studyResultsReady(envelope))) {
-    return host.appendChild(node('div', 'result-empty', 'Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。'));
+    return host.appendChild(node('div', 'result-empty', kind === 'tuning'
+      ? '调优任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
+      : '分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。'));
   }
   for (let index = 0; index < dirs.length; index += 1) {
     const dir = dirs[index];
@@ -2360,7 +2467,7 @@ async function renderStudyResults(kind, envelopes) {
 
 async function refreshStudy(kind) {
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return status('请先创建 Study。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
   const envelopes = [];
   for (const dir of dirs) {
     try {
@@ -2375,7 +2482,8 @@ async function refreshStudy(kind) {
     const tasks = Object.fromEntries(envelopes.flatMap((envelope, studyIndex) => Object.entries(envelope.state?.tasks || {}).map(([id, task]) => [`${dirs[studyIndex]}/${id}`, { ...task, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] }])));
     const candidates = Object.fromEntries(envelopes.flatMap((envelope, studyIndex) => Object.entries(envelope.state?.candidates || {}).map(([member, candidate]) => [`${dirs[studyIndex]}\u001f${member}`, candidate])));
     const events = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] })));
-    renderStudyEnvelope(kind, { state: { status: 'multiple', tasks, candidates }, events, kind_hint: kind });
+    const status = aggregateStudyStatuses(envelopes.map(envelope => envelope.state?.status));
+    renderStudyEnvelope(kind, { state: { status, tasks, candidates }, events, kind_hint: kind });
   }
   studyEvents[kind] = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] }))).slice(-300);
   await renderStudyResults(kind, envelopes);
@@ -2384,11 +2492,12 @@ async function refreshStudy(kind) {
 async function runStudy(kind) {
   const dirs = activeStudyDirs(kind);
   const kernel = currentKernel();
-  if (!dirs.length) return status('请先创建 Study。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
   if (!kernel) return status('请先选择内核。');
-  if (studyRunning[kind]) return status(`${studyLabel(kind)} Study 正在运行。`);
+  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数调优任务正在运行。' : '不确定性分析任务正在运行。');
   const jobs = studyJobCount(kind);
   studyRunning[kind] = true;
+  renderStudyActions(kind);
   setStudyWizardPage(kind, 5);
   try {
     const perStudyJobs = dirs.length === 1 ? jobs : 1;
@@ -2404,16 +2513,18 @@ async function runStudy(kind) {
     const failed = results.filter(result => !result.ok);
     if (failed.length) throw new Error(failed
       .map(result => `${dirs[result.index]}: ${result.error}`).join('\n'));
-    status(`${studyLabel(kind)} Study 运行完成。`);
+    status(kind === 'tuning' ? '参数搜索完成。' : '不确定性分析计算完成。');
   } finally {
     studyRunning[kind] = false;
+    renderStudyActions(kind);
+    renderStudyWizard(kind);
   }
 }
 
 async function retryStudy(kind) {
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return status('请先创建 Study。');
-  if (studyRunning[kind]) return status(`${studyLabel(kind)} Study 正在运行，不能重试。`);
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
+  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数调优任务正在运行，不能重试。' : '不确定性分析任务正在运行，不能重试。');
   const envelopes = [];
   for (const dir of dirs) envelopes.push(JSON.parse(await invoke('study_status', { studyDir: dir })));
   const needsConfirmation = envelopes.some(envelope => Object.values(envelope.state?.tasks || {})
@@ -2425,21 +2536,21 @@ async function retryStudy(kind) {
 
 async function controlStudy(kind, action) {
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return status('请先创建 Study。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
   const control = action === 'pause' ? dir => invoke('study_pause', { studyDir: dir })
     : action === 'resume' ? dir => invoke('study_resume', { studyDir: dir })
       : action === 'cancel' ? dir => invoke('study_cancel', { studyDir: dir })
         : null;
-  if (!control) throw new Error(`未知 Study 操作：${action}`);
+  if (!control) throw new Error(`未知任务操作：${action}`);
   for (const dir of dirs) await control(dir);
-  status(action === 'pause' ? '已请求暂停派发。' : action === 'resume' ? '已恢复派发。' : '已请求取消待运行任务。');
+  status(action === 'pause' ? '已请求暂停派发新任务。' : action === 'resume' ? '已恢复派发。' : '已请求停止剩余任务。');
   if (action === 'resume' && !studyRunning[kind]) await runStudy(kind);
   else await refreshStudy(kind);
 }
 
 async function exportStudy(kind) {
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return status('请先创建 Study。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
   const out = window.prompt(dialogText('导出目录'), `${parentDir(dirs[0])}/exports`);
   if (!out) return;
   const exported = [];
@@ -2453,7 +2564,7 @@ async function exportStudy(kind) {
 
 async function applyBestCandidate() {
   const dirs = activeStudyDirs('tuning');
-  if (!dirs.length) return status('请先创建调优 Study。');
+  if (!dirs.length) return status('请先生成调优任务。');
   const previews = [];
   const members = [];
   for (const dir of dirs) {

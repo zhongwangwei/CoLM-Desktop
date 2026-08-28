@@ -121,9 +121,9 @@ if (translateZh('检测到 8 个逻辑 CPU；单个站点仍使用 1 核。')
     !== '8 logical CPUs detected; each site still uses one core.') {
   throw new Error('dynamic CPU guidance is not translated');
 }
-if (translateZh('参数调优 Study 已创建。') !== 'Parameter tuning Study created.'
+if (translateZh('参数调优任务已生成。') !== 'Parameter-tuning task prepared.'
     || translateZh('Qle 的权重必须是正数。') !== 'Qle weight must be positive.'
-    || translateZh('请先创建 Study。') !== 'Create a Study first.'
+    || translateZh('请先生成分析任务。') !== 'Prepare an analysis task first.'
     || translateZh('没有符合筛选条件的日志。') !== 'No log entries match the filters.') {
   throw new Error('dynamic Study workflow content is not fully translated');
 }

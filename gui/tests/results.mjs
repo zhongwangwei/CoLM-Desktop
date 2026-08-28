@@ -128,18 +128,35 @@ for (const control of [
 for (const kind of ['uq', 'tuning']) {
   const steps = [...html.matchAll(new RegExp(`data-study-wizard="${kind}" data-study-step="(\\d+)"`, 'g'))]
     .map(match => Number(match[1])).sort((a, b) => a - b);
-  if (steps.join(',') !== '0,1,2,3,4,5,6') throw new Error(`${kind} must be a seven-page guided Study workflow`);
+  if (steps.join(',') !== '0,1,2,3,4,5,6') throw new Error(`${kind} must remain a seven-page guided analysis workflow`);
 }
-for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以创建', '先设计，再创建，再运行', '先确认观测与目标，再开始搜索']) {
+for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以准备', '先设计，再准备任务，最后开始计算', '先确认观测与目标，再开始搜索']) {
   if (!html.includes(text)) throw new Error(`Study guidance is missing: ${text}`);
 }
 for (const text of [
   '不确定性分析要回答什么？', '有限样本分位带不是统计置信区间',
-  '创建阶段不做模型计算', 'OAT 候选数 = 2 × 已选参数数',
+  '这个阶段不运行模型', 'OAT 候选数 = 2 × 已选参数数',
   '预热后实际写出的全部 history', '预热期不写 history', '少于 20 仅适合流程试跑',
   '并发只影响墙钟时间', '无需再次选择运行目录', '应用到当前算例',
 ]) {
   if (!html.includes(text)) throw new Error(`uncertainty design guidance is missing: ${text}`);
+}
+for (const text of ['5 · 生成分析任务', '6 · 开始计算与监控', '生成分析任务', '开始计算', '手动刷新', '导出分析记录']) {
+  if (!html.includes(text)) throw new Error(`analysis task flow is missing: ${text}`);
+}
+for (const [kind, jobs] of [['uq', 'uq-jobs'], ['tuning', 'tune-jobs']]) {
+  const page6 = html.indexOf(`data-study-wizard="${kind}" data-study-step="5"`);
+  const page7 = html.indexOf(`data-study-wizard="${kind}" data-study-step="6"`);
+  const control = html.indexOf(`id="${jobs}"`);
+  if (page6 < 0 || control < page6 || control > page7 || (html.match(new RegExp(`id="${jobs}"`, 'g')) || []).length !== 1) {
+    throw new Error(`${kind} parallel control must appear exactly once on the run-and-monitor page`);
+  }
+}
+for (const text of ['同时运行数（并行）', '实时运行日志', '尚无运行日志']) {
+  if (!html.includes(text)) throw new Error(`run-and-monitor guidance is missing: ${text}`);
+}
+for (const text of ['创建 Study', '运行 Study', '导出 Study']) {
+  if (html.includes(text)) throw new Error(`visible analysis workflow must not expose internal term: ${text}`);
 }
 
 for (const hidden of ['uq-site-mode', 'uq-from', 'uq-to', 'uq-kernel-dir', 'uq-site-mode-help', 'uq-window-help', 'uq-kernel-help']) {
@@ -184,6 +201,8 @@ if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes("$(`${prefix}-step-do`).textContent = dialogText(help[0])")
     || !resultUi.includes("$(`${prefix}-step-why`).textContent = dialogText(help[1])")
     || !resultUi.includes('setStudyWizardPage(kind, 5)')
+    || !resultUi.includes('function renderStudyActions(kind)')
+    || !resultUi.includes('studyActionState(summary.status, hasTask, studyRunning[kind])')
     || !resultUi.includes("$(`${prefix}-step-prev`).onclick")
     || !resultUi.includes("$(`${prefix}-step-next`).onclick")) {
   throw new Error('Study workflows must provide guarded previous/next pages and move running work to status');
@@ -192,7 +211,7 @@ if (!resultUi.includes('const studyResultsReady = view =>')
     || !resultUi.includes('if (!studyResultsReady(studyViews[kind]))')
     || !resultUi.includes('envelopes.some(envelope => !studyResultsReady(envelope))')
     || !resultUi.includes('renderStudyWizard(flowKind);')
-    || !resultUi.includes('Study 尚未运行完成；请返回第 5 页点击“运行 Study”，完成后再查看结果。')) {
+    || !resultUi.includes('分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。')) {
   throw new Error('Study results must stay gated until the run reaches a result-bearing terminal state');
 }
 if (!resultUi.includes('const studyAsyncRequests =')
@@ -331,10 +350,13 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || !resultUi.includes("invoke('evaluation_plan'")
     || !resultUi.includes('renderStudyReadiness(kind)')
     || !resultUi.includes('const totalCandidates = candidateCounts.reduce')
-    || !resultUi.includes('state: { status: \'multiple\', tasks, candidates }')
+    || !resultUi.includes('aggregateStudyStatuses(envelopes.map')
+    || resultUi.includes("status: 'multiple'")
+    || !resultUi.includes('studyEventText(item)')
+    || !resultUi.includes('logPanel.open = true')
     || !resultUi.includes("invoke('study_apply_preview'")
-    || !resultUi.includes('Study 正在运行，不能重试')
-    || !resultUi.includes('已创建但未登记的 Study')
+    || !resultUi.includes('分析任务正在运行，不能重试')
+    || !resultUi.includes('已生成但未登记的分析任务')
     || !resultUi.includes('study_key')
     || !resultUi.includes('min_pairs')
     || !resultUi.includes("invoke('study_retry'")

@@ -505,7 +505,7 @@
       <div class="flow-pane" data-flow-pane="result-uncertainty" hidden>
         <div class="work-head"><span class="kicker">第 6 步 · 不确定性分析</span></div>
         <h1>不确定性分析</h1>
-        <p class="sub">这是基本设定完成后的可选研究流程。Study 的创建与运行不修改原算例；只有点击“应用到当前算例”才会同步基本设定里的预热。</p>
+        <p class="sub">这是基本设定完成后的可选研究流程。生成和运行分析任务不会修改原算例；只有点击“应用到当前算例”才会同步基本设定里的预热。</p>
         <div class="card study-purpose" id="uq-purpose">
           <h3>不确定性分析要回答什么？</h3>
           <p>在你给定的参数范围内，系统生成多组参数成员并重复运行 CoLM，用来判断模型输出会变化多少、哪些参数最可能主导变化，以及哪些结果对参数假设更敏感。它用于敏感性筛查和情景范围评估，不是参数自动校准。</p>
@@ -516,23 +516,23 @@
         </div>
         <div class="card study-guide">
           <div>
-            <h3>先设计，再创建，再运行</h3>
+            <h3>先设计，再准备任务，最后开始计算</h3>
             <div class="study-lifecycle">
               <div><strong>1 · 设计</strong><span>定义科学问题、方法、模型预热和样本预算。这里只形成试验方案；预热仅在明确点击应用时写回基本设定。</span></div>
-              <div><strong>2 · 创建</strong><span>校验参数与输出，记录输入和内核指纹，再生成 baseline、候选成员目录及清单。创建阶段不做模型计算。</span></div>
-              <div><strong>3 · 运行</strong><span>按成员执行 mksrfdata、mkinidata 和 colm，持续记录进度并汇总结果；可暂停派发或重试失败成员，原算例保持不变。</span></div>
+              <div><strong>2 · 准备任务</strong><span>校验参数与输出，记录输入和内核指纹，再生成基准成员、候选成员目录及清单。这个阶段不运行模型。</span></div>
+              <div><strong>3 · 开始计算</strong><span>按成员执行 mksrfdata、mkinidata 和 colm，自动更新进度并汇总结果；可暂停新任务或重试失败成员，原算例保持不变。</span></div>
             </div>
             <div class="study-step-explain" aria-live="polite">
-              <div><strong>本页做什么</strong><span id="uq-step-do">选择 OAT 或 LHS、确认模型预热、样本数、随机种子和并发数。</span></div>
+              <div><strong>本页做什么</strong><span id="uq-step-do">选择 OAT 或 LHS、确认模型预热、样本数和随机种子；并行数在启动计算时设置。</span></div>
               <div><strong>为什么需要</strong><span id="uq-step-why">这些设置决定如何覆盖参数空间、要计算多少成员；分析使用每个站点预热后实际写出的全部 history。</span></div>
             </div>
           </div>
           <div id="uq-readiness" class="study-readiness" aria-live="polite"></div>
         </div>
-        <div class="study-wizard-progress" aria-live="polite"><span id="uq-step-progress">第 1/7 页 · 试验设计</span></div>
+        <div class="study-wizard-progress" aria-live="polite"><span id="uq-step-progress">第 1/7 页 · 方法与预热</span></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="0">
-          <h3>1 · 试验设计</h3>
-          <div class="ch">本页定义成员如何生成、模型预热如何同步，以及样本预算。尚未运行过基准算例也可以配置，Study 会运行自己的 baseline；统计不再裁剪日期。</div>
+          <h3>1 · 方法与预热</h3>
+          <div class="ch">本页定义成员如何生成、模型预热如何同步，以及样本预算。尚未运行过基准算例也可以配置；分析任务会先运行自己的基准成员，统计不再裁剪日期。</div>
           <div class="study-design-grid">
             <section class="study-design-field">
               <label for="uq-method">方法</label>
@@ -552,7 +552,7 @@
               </div>
               <dl class="study-field-help" id="uq-spinup-help">
                 <div><dt>是什么</dt><dd>与基本设定里的预热相同：让土壤温湿与碳库等慢变量先趋于平衡，预热期不写 history。</dd></div>
-                <div><dt>怎么选</dt><dd>任一格为 0 就是不预热。点击应用会把设置同步到当前基础算例；创建 Study 时成员只继承，不会再次改写。</dd></div>
+                <div><dt>怎么选</dt><dd>任一格为 0 就是不预热。点击应用会把设置同步到当前基础算例；生成分析任务时成员只继承，不会再次改写。</dd></div>
                 <div><dt>选择后果</dt><dd>预热会增加运行时间，但预热期不写 history；不确定性分析统计每个站点从正式输出开始到结束的全部数据。</dd></div>
               </dl>
               <p class="muted mini" id="uq-spinup-note">读取当前算例预热设置后显示。</p>
@@ -572,17 +572,8 @@
               <input class="input" id="uq-seed" type="number" min="0" max="9007199254740991" step="1" value="1" aria-describedby="uq-seed-help">
               <dl class="study-field-help" id="uq-seed-help">
                 <div><dt>是什么</dt><dd>控制 LHS 分层排列与区间内抽样的非负整数；OAT 不使用随机抽样。</dd></div>
-                <div><dt>怎么选</dt><dd>复现实验时保持不变；检查抽样偶然性时更换种子并重新创建 Study。</dd></div>
+                <div><dt>怎么选</dt><dd>复现实验时保持不变；检查抽样偶然性时更换种子并重新生成分析任务。</dd></div>
                 <div><dt>选择后果</dt><dd>同一方法、范围和种子会生成相同参数设计；完整复现还要求算例、输入和内核一致。改变种子会得到另一组确定性成员，但不代表结果更好。</dd></div>
-              </dl>
-            </section>
-            <section class="study-design-field">
-              <label for="uq-jobs">并发</label>
-              <input class="input" id="uq-jobs" type="number" min="1" step="1" value="1" aria-describedby="uq-jobs-help">
-              <dl class="study-field-help" id="uq-jobs-help">
-                <div><dt>是什么</dt><dd>同时派发的成员/站点任务数，上限为本机检测到的逻辑 CPU。</dd></div>
-                <div><dt>怎么选</dt><dd>普通笔记本先用 1–2；确认 CPU、内存和磁盘余量充足后再增加。</dd></div>
-                <div><dt>选择后果</dt><dd>并发只影响墙钟时间，不改变采样设计或科学结果；过高会造成 CPU、内存和磁盘争用，可能反而变慢或增加失败。</dd></div>
               </dl>
             </section>
             <section class="study-design-field">
@@ -592,32 +583,53 @@
             </section>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden><h3>4 · 预算预览</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再创建。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再生成分析任务。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="1" hidden><h3>2 · 输出变量</h3><div class="ch">只显示当前配置计划写出的标量 history 变量；已有结果时会用实际文件再次核对。</div><div id="uq-outputs" class="evaluation-variable-grid"><div class="result-empty">选择不确定性包络要统计的 history 变量。</div></div></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="2" hidden><h3>3 · 参数范围</h3><div class="ch">范围必须有限并落在代码硬边界内；它是试验假设，不由软件替你猜。</div><div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div><label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label></div>
         <div class="card study-actions study-wizard-step" data-study-wizard="uq" data-study-step="4" hidden>
-          <h3>5 · 创建与运行</h3>
-          <div class="ch">“创建”只生成 Study 清单和成员目录；“运行”才会启动模型。暂停仅停止继续派发，不会强杀正在计算的成员。</div>
-          <div class="result-tools result-tools-wide">
-            <button class="btn-next" id="uq-create">创建 Study</button>
-            <button class="btn-ghost" id="uq-run">运行 Study</button>
-            <button class="btn-ghost" id="uq-status">刷新状态</button>
-            <button class="btn-ghost" id="uq-retry">重试失败</button>
-            <button class="btn-ghost" id="uq-pause">暂停派发</button>
-            <button class="btn-ghost" id="uq-resume">恢复</button>
-            <button class="btn-ghost" id="uq-cancel">取消待运行</button>
-            <button class="btn-ghost" id="uq-export-study">导出 Study</button>
+          <h3>5 · 生成分析任务</h3>
+          <div class="ch">把前四页的设计冻结成可复现的运行清单。这里只准备目录和成员，不会启动 CoLM，也不会修改原算例。</div>
+          <div class="study-prepare-grid">
+            <div><strong>冻结输入</strong><span>记录基础算例、参数范围、输出变量和当前内核指纹。</span></div>
+            <div><strong>生成成员</strong><span>建立 1 个基准成员和 OAT/LHS 候选成员目录。</span></div>
+            <div><strong>写入清单</strong><span>保存随机种子、样本设计和任务状态，便于复现与恢复。</span></div>
+          </div>
+          <div class="study-primary-action">
+            <div><strong>确认后生成</strong><span>生成成功会自动进入“开始计算与监控”。若返回修改设计，需要重新生成任务。</span></div>
+            <button class="btn-next" id="uq-create">生成分析任务</button>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="5" hidden><h3>6 · 运行状态</h3><div id="uq-study-view" class="study-view"></div><pre id="uq-preview" class="report-preview">还没有创建不确定性分析 Study。</pre></div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="6" hidden><h3>7 · 结果</h3><div id="uq-results" class="study-results"><div class="result-empty">运行后显示分位数包络、参数重要性和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="5" hidden>
+          <h3>6 · 开始计算与监控</h3>
+          <div class="ch">开始后会先运行基准成员，再运行参数成员。进度会自动更新；“暂停”只停止派发新成员，不会强杀正在计算的成员。</div>
+          <div class="study-launch-panel">
+            <div><strong id="uq-run-heading">等待生成分析任务</strong><span id="uq-run-state" aria-live="polite">完成第 5 页后即可开始计算。</span></div>
+            <div class="study-parallel-setting" id="uq-jobs-help">
+              <label for="uq-jobs">同时运行数（并行） <input class="input" id="uq-jobs" type="number" min="1" step="1" value="1" aria-describedby="uq-jobs-note"></label>
+              <span id="uq-jobs-note">普通笔记本建议 1–2；软件会自动限制在本机逻辑 CPU 上限。</span>
+              <span>并发只影响墙钟时间，不改变采样设计或科学结果；过高会造成 CPU、内存和磁盘争用，可能反而变慢或增加失败。</span>
+            </div>
+            <button class="btn-next" id="uq-run" disabled>开始计算</button>
+          </div>
+          <div class="result-tools result-tools-wide study-runtime-actions">
+            <button class="btn-ghost" id="uq-status" disabled>手动刷新</button>
+            <button class="btn-ghost" id="uq-retry" disabled hidden>重试失败项</button>
+            <button class="btn-ghost" id="uq-pause" disabled hidden>暂停新任务</button>
+            <button class="btn-ghost" id="uq-resume" disabled hidden>继续计算</button>
+            <button class="btn-ghost" id="uq-cancel" disabled hidden>停止剩余任务</button>
+            <button class="btn-ghost" id="uq-export-study" disabled>导出分析记录</button>
+          </div>
+          <div id="uq-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始计算后会自动显示。</div></details></div>
+          <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="uq-preview" class="report-preview">尚未生成分析任务。</pre></details>
+        </div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="6" hidden><h3>7 · 查看结果</h3><div id="uq-results" class="study-results"><div class="result-empty">计算完成后显示分位数包络、参数重要性和成员表。</div></div></div>
         <div class="study-wizard-foot"><button class="btn-ghost" id="uq-step-prev">← 上一步</button><span class="study-wizard-note" id="uq-step-note"></span><button class="btn-next" id="uq-step-next">下一步 →</button></div>
       </div>
 
       <div class="flow-pane" data-flow-pane="result-tuning" hidden>
         <div class="work-head"><span class="kicker">第 7 步 · 参数调优</span></div>
         <h1>参数调优</h1>
-        <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立 Study 中搜索参数，不覆盖原算例。</p>
+        <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立调优任务中搜索参数，不覆盖原算例。</p>
         <div class="card study-guide">
           <div>
             <h3>先确认观测与目标，再开始搜索</h3>
@@ -631,11 +643,11 @@
         <div class="study-wizard-progress" aria-live="polite"><span id="tune-step-progress">第 1/7 页 · 优化设计</span></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="0">
           <h3>1 · 优化设计</h3>
-          <div class="ch">选择目标指标、校准/验证窗口和差分进化预算。尚未运行过原算例也可以创建，Study 会自行运行 baseline 和候选成员。</div>
+          <div class="ch">选择目标指标、校准/验证窗口和差分进化预算。尚未运行过原算例也可以准备；调优任务会自行运行基准成员和候选成员。</div>
           <div class="result-tools result-tools-wide">
             <label>指标 <select class="select" id="tune-metric"><option value="nrmse">NRMSE</option><option value="mae">MAE</option><option value="abs_bias">|Bias|</option><option value="nse">1-NSE</option><option value="kge">1-KGE</option><option value="r2">1-R²</option><option value="r">1-R</option></select></label>
             <label>最少配对 <input class="input" id="tune-min-pairs" type="number" min="2" value="30"></label>
-            <label>站点方式 <select class="select" id="tune-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独 Study</option></select></label>
+            <label>站点方式 <select class="select" id="tune-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独调优任务</option></select></label>
             <label>校准开始 <input class="input" id="tune-from" type="date"></label>
             <label>校准结束 <input class="input" id="tune-to" type="date"></label>
             <label class="check"><input id="tune-validation" type="checkbox" checked> 独立验证</label>
@@ -644,31 +656,50 @@
             <label>种群 <input class="input" id="tune-pop" type="number" min="4" max="1000" value="12"></label>
             <label>代数 <input class="input" id="tune-gen" type="number" min="1" value="5"></label>
             <label>随机种子 <input class="input" id="tune-seed" type="number" value="1"></label>
-            <label>并发 <input class="input" id="tune-jobs" type="number" min="1" value="1"></label>
             <label>内核目录 <input class="input" id="tune-kernel-dir" readonly placeholder="使用当前内核"></label>
             <button class="btn-ghost" id="tune-refresh-params">读取参数</button>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算预览</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点还会乘以站点数。</div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点还会乘以站点数。</div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。</div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden><h3>3 · 参数范围</h3><div class="ch">只调当前方案真正会读取的参数；切换物理方案后列表会重新计算。</div><div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div><label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label></div>
         <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>
-          <h3>5 · 创建与运行</h3>
-          <div class="ch">先创建并检查 Study，再开始运行；最佳候选始终另存为新算例。</div>
-          <div class="result-tools result-tools-wide">
-            <button class="btn-next" id="tune-create">创建调优 Study</button>
-            <button class="btn-ghost" id="tune-run">运行 Study</button>
-            <button class="btn-ghost" id="tune-status">刷新状态</button>
-            <button class="btn-ghost" id="tune-retry">重试失败</button>
-            <button class="btn-ghost" id="tune-pause">暂停派发</button>
-            <button class="btn-ghost" id="tune-resume">恢复</button>
-            <button class="btn-ghost" id="tune-cancel">取消待运行</button>
-            <button class="btn-ghost" id="tune-export-study">导出 Study</button>
-            <button class="btn-ghost" id="tune-apply-best">最佳候选另存</button>
+          <h3>5 · 生成调优任务</h3>
+          <div class="ch">把目标函数、参数范围、校准/验证窗口和搜索预算冻结成可复现的调优任务。这里只准备成员，不开始搜索。</div>
+          <div class="study-prepare-grid">
+            <div><strong>冻结证据</strong><span>记录基础算例、观测文件、目标函数和当前内核指纹。</span></div>
+            <div><strong>生成候选</strong><span>准备基准成员、初始种群和后续差分进化任务。</span></div>
+            <div><strong>保护原算例</strong><span>搜索结果保存在独立目录；最佳方案只能另存为新算例。</span></div>
+          </div>
+          <div class="study-primary-action">
+            <div><strong>确认后生成</strong><span>生成成功会自动进入“开始搜索与监控”。若返回修改设计，需要重新生成任务。</span></div>
+            <button class="btn-next" id="tune-create">生成调优任务</button>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="5" hidden><h3>6 · 运行状态</h3><div id="tune-study-view" class="study-view"></div><pre id="tune-preview" class="report-preview">还没有创建参数调优 Study。</pre></div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 结果</h3><div id="tune-results" class="study-results"><div class="result-empty">运行后显示目标函数、最佳候选和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="5" hidden>
+          <h3>6 · 开始搜索与监控</h3>
+          <div class="ch">开始后会运行基准成员和候选成员，并按代更新搜索结果。进度会自动更新；暂停只停止派发新成员。</div>
+          <div class="study-launch-panel">
+            <div><strong id="tune-run-heading">等待生成调优任务</strong><span id="tune-run-state" aria-live="polite">完成第 5 页后即可开始参数搜索。</span></div>
+            <div class="study-parallel-setting">
+              <label for="tune-jobs">同时运行数（并行） <input class="input" id="tune-jobs" type="number" min="1" step="1" value="1" aria-describedby="tune-jobs-note"></label>
+              <span id="tune-jobs-note">普通笔记本建议 1–2；软件会自动限制在本机逻辑 CPU 上限。</span>
+              <span>并发只影响墙钟时间，不改变搜索定义；过高会造成 CPU、内存和磁盘争用。</span>
+            </div>
+            <button class="btn-next" id="tune-run" disabled>开始参数搜索</button>
+          </div>
+          <div class="result-tools result-tools-wide study-runtime-actions">
+            <button class="btn-ghost" id="tune-status" disabled>手动刷新</button>
+            <button class="btn-ghost" id="tune-retry" disabled hidden>重试失败项</button>
+            <button class="btn-ghost" id="tune-pause" disabled hidden>暂停新任务</button>
+            <button class="btn-ghost" id="tune-resume" disabled hidden>继续搜索</button>
+            <button class="btn-ghost" id="tune-cancel" disabled hidden>停止剩余任务</button>
+            <button class="btn-ghost" id="tune-export-study" disabled>导出调优记录</button>
+          </div>
+          <div id="tune-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始搜索后会自动显示。</div></details></div>
+          <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="tune-preview" class="report-preview">尚未生成调优任务。</pre></details>
+        </div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div></div>
         <div class="study-wizard-foot"><button class="btn-ghost" id="tune-step-prev">← 上一步</button><span class="study-wizard-note" id="tune-step-note"></span><button class="btn-next" id="tune-step-next">下一步 →</button></div>
       </div>
 

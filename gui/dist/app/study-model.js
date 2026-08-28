@@ -9,7 +9,8 @@ export const FAILURE_STATUSES = new Set(['Failed', 'Interrupted', 'NeedsReview']
 export const ACTIVE_STATUSES = new Set(['Running', 'Evaluating', 'Reconcile']);
 
 export function canonicalStatus(value = 'Pending') {
-  return String(value || 'Pending').split('_').map(part => part ? part[0].toUpperCase() + part.slice(1).toLowerCase() : '').join('');
+  return String(value || 'Pending').replace(/([a-z0-9])([A-Z])/g, '$1_$2').split('_')
+    .map(part => part ? part[0].toUpperCase() + part.slice(1).toLowerCase() : '').join('');
 }
 
 export function studyBudget({
@@ -121,6 +122,29 @@ export function aggregateStudy(study = {}) {
       : cancelled || canonicalStatus(study.status ?? 'Draft') === 'Cancelled' ? 'Cancelled'
       : done === total && total ? 'Completed' : canonicalStatus(study.status ?? 'Draft');
   return { ...study, members, status, counts, total, succeeded, failed, cancelled, running, done, progress: total ? done / total : 0 };
+}
+
+export function studyActionState(status = 'Draft', hasTask = false, localRunning = false) {
+  const current = canonicalStatus(localRunning ? 'Running' : status);
+  const running = hasTask && current === 'Running';
+  const results = hasTask && ['Completed', 'CompletedWithFailures'].includes(current);
+  return {
+    run: hasTask && current === 'Ready',
+    refresh: hasTask,
+    retry: hasTask && ['CompletedWithFailures', 'NeedsReview', 'Failed'].includes(current),
+    pause: running,
+    resume: hasTask && current === 'Paused',
+    cancel: hasTask && ['Running', 'Paused'].includes(current),
+    export: hasTask && !running,
+    apply: results,
+    results,
+  };
+}
+
+export function aggregateStudyStatuses(values = []) {
+  const statuses = values.filter(Boolean).map(canonicalStatus);
+  return ['Running', 'NeedsReview', 'Paused', 'CompletedWithFailures', 'Ready', 'Cancelled', 'Completed']
+    .find(status => statuses.includes(status)) || 'Draft';
 }
 
 export function paginate(items = [], page = 1, pageSize = 50) {
