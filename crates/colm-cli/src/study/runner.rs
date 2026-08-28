@@ -3095,7 +3095,8 @@ mod tests {
         .unwrap();
         let error = preflight_create(&root, &spec).unwrap_err().to_string();
         assert!(error.contains("usable observation"), "{error}");
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows netCDF may release its final test-file handle after this assertion returns.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
