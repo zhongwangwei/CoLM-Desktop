@@ -144,16 +144,24 @@ for (const text of [
 for (const text of ['5 · 生成分析任务', '6 · 开始计算与监控', '生成分析任务', '开始计算', '手动刷新', '导出分析记录']) {
   if (!html.includes(text)) throw new Error(`analysis task flow is missing: ${text}`);
 }
-for (const [kind, jobs] of [['uq', 'uq-jobs'], ['tuning', 'tune-jobs']]) {
+for (const [kind, jobs, runJobs] of [['uq', 'uq-jobs', 'uq-run-jobs'], ['tuning', 'tune-jobs', 'tune-run-jobs']]) {
+  const page1 = html.indexOf(`data-study-wizard="${kind}" data-study-step="0"`);
+  const nextPage = html.indexOf(`data-study-wizard="${kind}"`, page1 + 1);
   const page6 = html.indexOf(`data-study-wizard="${kind}" data-study-step="5"`);
   const page7 = html.indexOf(`data-study-wizard="${kind}" data-study-step="6"`);
-  const control = html.indexOf(`id="${jobs}"`);
-  if (page6 < 0 || control < page6 || control > page7 || (html.match(new RegExp(`id="${jobs}"`, 'g')) || []).length !== 1) {
-    throw new Error(`${kind} parallel control must appear exactly once on the run-and-monitor page`);
+  const designControl = html.indexOf(`id="${jobs}"`);
+  const runControl = html.indexOf(`id="${runJobs}"`);
+  if (designControl < page1 || designControl > nextPage || runControl < page6 || runControl > page7
+      || (html.match(new RegExp(`id="${jobs}"`, 'g')) || []).length !== 1
+      || (html.match(new RegExp(`id="${runJobs}"`, 'g')) || []).length !== 1) {
+    throw new Error(`${kind} parallel controls must appear once on both design and run pages`);
   }
 }
-for (const text of ['同时运行数（并行）', '实时运行日志', '尚无运行日志']) {
+for (const text of ['同时运行数（并行）', '本次同时运行数（并行）', '实时运行日志', '尚无运行日志']) {
   if (!html.includes(text)) throw new Error(`run-and-monitor guidance is missing: ${text}`);
+}
+for (const text of ['线性（等差）', '对数（等比）', '下界 ≤ 0 必须选线性', '上界/下界约 ≥ 10']) {
+  if (!html.includes(text)) throw new Error(`sampling-scale guidance is missing: ${text}`);
 }
 for (const text of ['创建 Study', '运行 Study', '导出 Study']) {
   if (html.includes(text)) throw new Error(`visible analysis workflow must not expose internal term: ${text}`);
@@ -206,6 +214,11 @@ if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes("$(`${prefix}-step-prev`).onclick")
     || !resultUi.includes("$(`${prefix}-step-next`).onclick")) {
   throw new Error('Study workflows must provide guarded previous/next pages and move running work to status');
+}
+if (!html.includes('id="uq-cancel" disabled>终止运行</button>')
+    || !html.includes('id="tune-cancel" disabled>终止运行</button>')
+    || !resultUi.includes("if (['retry', 'pause', 'resume'].includes(name)) button.hidden = !enabled;")) {
+  throw new Error('Study termination must remain visible and become enabled when its state permits');
 }
 if (!resultUi.includes('const studyResultsReady = view =>')
     || !resultUi.includes('if (!studyResultsReady(studyViews[kind]))')
@@ -354,6 +367,10 @@ if (!resultUi.includes("invoke('field_states_batch'")
     || resultUi.includes("status: 'multiple'")
     || !resultUi.includes('studyEventText(item)')
     || !resultUi.includes('logPanel.open = true')
+    || !resultUi.includes("bindStudyJobInputs('uq')")
+    || !resultUi.includes("bindStudyJobInputs('tuning')")
+    || !resultUi.includes("['linear', '线性（等差）']")
+    || !resultUi.includes("['log', '对数（等比）']")
     || !resultUi.includes("invoke('study_apply_preview'")
     || !resultUi.includes('分析任务正在运行，不能重试')
     || !resultUi.includes('已生成但未登记的分析任务')

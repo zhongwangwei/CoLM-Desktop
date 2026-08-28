@@ -156,11 +156,17 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
              background: var(--bg); white-space: nowrap; }
 .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .btn-ghost:disabled, .run-btn:disabled, .btn-next:disabled { opacity: .45; cursor: default; }
+.btn-stop { border-color: var(--fail); color: var(--fail); background: var(--fail-bg); }
 .btn-next { padding: 8px 18px; border: 0; border-radius: var(--r-sm);
             background: var(--accent); color: #fff; font-weight: 650; }
 .run-btn { padding: 8px 20px; border: 0; border-radius: var(--r-sm); background: var(--pass);
            color: #fff; font-weight: 650; box-shadow: var(--shadow); }
 .pill-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.run-parallel-setting { display: grid; grid-template-columns: minmax(240px, 1fr) 84px minmax(180px, auto); gap: 12px; align-items: center; margin-top: 14px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); }
+.run-parallel-setting > div { display: grid; gap: 4px; }
+.run-parallel-setting label { color: var(--text); font-size: 13px; font-weight: 750; }
+.run-parallel-setting div span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.run-stop-note { margin: 10px 0 0; }
 .check { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
          font-size: 12px; color: var(--muted); }
 .check input[type=checkbox] { width: auto; }
@@ -556,6 +562,11 @@ body.resizing-live { user-select: none; }
 .study-field-help > div { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 8px; }
 .study-field-help dt { color: var(--accent); font-size: 11px; font-weight: 750; }
 .study-field-help dd { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.study-scale-guide { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.study-scale-guide > div { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); }
+.study-scale-guide strong { color: var(--accent); font-size: 12px; }
+.study-scale-guide span, .study-scale-guide p { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.study-scale-guide p { grid-column: 1 / -1; margin: 0; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-weak); }
 .study-wizard-foot { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) minmax(120px, auto);
   align-items: center; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .study-wizard-foot > :last-child { justify-self: end; }
@@ -572,7 +583,7 @@ body.resizing-live { user-select: none; }
 .study-log { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
 .study-log-filters, .study-pager { align-items: center; }
 #uq-params, #tune-params { grid-template-columns: minmax(0, 1fr); }
-.study-param-option { grid-template-columns: auto minmax(180px, 1fr) minmax(90px, 120px) minmax(90px, 130px) minmax(90px, 130px); align-items: center; }
+.study-param-option { grid-template-columns: auto minmax(180px, 1fr) minmax(120px, 150px) minmax(90px, 130px) minmax(90px, 130px); align-items: center; }
 .mini-input { max-width: 90px; }
 .study-target-weight { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
 .study-range-confirm { display: inline-flex; margin-top: 10px; }
@@ -580,7 +591,10 @@ body.resizing-live { user-select: none; }
 .study-result-card { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px; background: var(--elevated); }
 .study-result-card h4 { margin: 0 0 8px; }
 @media (max-width: 980px) {
-  .study-guide, .study-purpose-grid, .study-design-grid { grid-template-columns: 1fr; }
+  .study-guide, .study-purpose-grid, .study-design-grid, .study-scale-guide { grid-template-columns: 1fr; }
+  .study-scale-guide p { grid-column: auto; }
+  .run-parallel-setting { grid-template-columns: 1fr 84px; }
+  .run-parallel-setting > .mini { grid-column: 1 / -1; }
   .study-lifecycle, .study-prepare-grid { grid-template-columns: 1fr; }
   .study-design-field-wide { grid-column: auto; }
 }

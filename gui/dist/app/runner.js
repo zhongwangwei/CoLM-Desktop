@@ -12,7 +12,7 @@ import { kernelForSubgrid, urbanEnabled } from './kernel.js';
 import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 
 // 单点内核不启 MPI；多核的实际用途是并发跑多个独立站点。默认沿用原来的
-// 两路并发，但让用户在基本设定里按机器容量调整。
+// 两路并发，但让用户在运行页按机器容量调整。
 const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
 let discoverRunTargets = true;
 let activeRunId = null;

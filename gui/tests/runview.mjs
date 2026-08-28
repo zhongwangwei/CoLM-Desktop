@@ -66,12 +66,18 @@ if (outputVariables < 0 || startRun < 0 || outputVariables > startRun) {
   throw new Error('start-run card must be below output variables');
 }
 const runSection = html.slice(startRun, html.indexOf('</section>', startRun));
+if ((html.match(/id="cpu-workers"/g) || []).length !== 1
+    || !runSection.includes('id="cpu-workers"')
+    || !runSection.includes('id="cpu-capacity"')
+    || !runSection.includes('批量并行算例数')) {
+  throw new Error('batch parallelism must be configured once, next to the Step 4 run controls');
+}
 const expectedRunButtons = [
   ['run-mksrfdata', '运行 mksrfdata'],
   ['run-mkinidata', '运行 mkinidata'],
   ['run-colm', '运行 colm'],
   ['runall', '运行全部'],
-  ['cancel-run', '取消运行'],
+  ['cancel-run', '终止运行'],
 ];
 for (const [id, label] of expectedRunButtons) {
   if (!new RegExp(`<button[^>]+id="${id}"[^>]*>[^<]*${label}`).test(runSection)) {
@@ -85,7 +91,8 @@ if (!runner.includes("['begin', 'failed'].includes(colmState)")) {
   throw new Error('a failed colm stage must leave its partially replaced history unavailable');
 }
 if (!runner.includes("invoke('cancel_runs', { cases })")
-    || !runner.includes("d.cancelled ? '已取消'")) {
+    || !runner.includes("d.cancelled ? '已取消'")
+    || !runner.includes('maxConcurrent: requestedWorkers()')) {
   throw new Error('run cancellation must reach the backend and keep its own terminal state');
 }
 if (runner.includes('status(state.runCancelled.has')

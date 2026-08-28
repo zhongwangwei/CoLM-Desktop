@@ -109,6 +109,8 @@ usage:
                    # 请求暂停派发、恢复派发或取消尚未开始任务
   colm-cli study-finalize-cancel <study-dir> --pid <pid>
                    # GUI 杀死对应调度进程后持久化取消终态
+  colm-cli study-finalize-idle-cancel <study-dir>
+                   # GUI 无活动登记时，确认调度器已退出后持久化取消终态
   colm-cli study-retry <study-dir> [--include-review 1]
                    # 把失败成员（可选含待复核成员）重新放回队列
   colm-cli study-apply <study-dir> --member <id|best> --out <dir> [--name N]
@@ -267,10 +269,7 @@ fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string(&StudyStatusJson {
                     manifest: study::engine::status(&study_dir)?,
-                    state: study::checkpoint::load_latest::<study::state::StudyState>(
-                        &study_dir.join("checkpoints/state"),
-                    )?
-                    .map(|loaded| loaded.payload),
+                    state: study::runner::status_state(&study_dir)?,
                     pause_requested: study::state::pause_requested(&study_dir),
                     cancel_requested: study::state::cancel_requested(&study_dir),
                     results: study::runner::result_files(&study_dir)?,
@@ -320,6 +319,9 @@ fn main() -> Result<()> {
                     .parse()
                     .context("--pid must be an integer")?,
             )?;
+        }
+        "study-finalize-idle-cancel" => {
+            study::runner::finalize_idle_cancel(&opts.positional_case()?)?;
         }
         "study-retry" => cmd_study_retry(
             &opts.positional_case()?,

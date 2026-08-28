@@ -134,7 +134,7 @@ export function studyActionState(status = 'Draft', hasTask = false, localRunning
     retry: hasTask && ['CompletedWithFailures', 'NeedsReview', 'Failed'].includes(current),
     pause: running,
     resume: hasTask && current === 'Paused',
-    cancel: hasTask && ['Running', 'Paused'].includes(current),
+    cancel: hasTask && ['Running', 'Paused', 'NeedsReview'].includes(current),
     export: hasTask && !running,
     apply: results,
     results,

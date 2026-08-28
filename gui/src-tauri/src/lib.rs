@@ -74,10 +74,13 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                let _ = window
+                if let Err(error) = window
                     .app_handle()
                     .state::<RunProcesses>()
-                    .cancel_on_shutdown();
+                    .cancel_on_shutdown()
+                {
+                    eprintln!("failed to stop every run while closing: {error}");
+                }
             }
         })
         .manage(RunProcesses::default())
@@ -148,6 +151,16 @@ pub fn run() {
             pick_file,
             print_report,
         ])
-        .run(tauri::generate_context!())
-        .expect("error running CoLM Desktop");
+        .build(tauri::generate_context!())
+        .expect("error building CoLM Desktop")
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
+                    eprintln!("failed to stop every run while exiting: {error}");
+                }
+            }
+        });
 }

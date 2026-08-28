@@ -480,9 +480,67 @@ pub(super) fn ensure_scheduler_idle(study_dir: &Path) -> Result<()> {
     clear_stale_run_lock(study_dir)
 }
 
+pub fn status_state(study_dir: &Path) -> Result<Option<StudyState>> {
+    let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    let checkpoint_dir = study_dir.join("checkpoints/state");
+    let Some(mut state) =
+        super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?.map(|loaded| loaded.payload)
+    else {
+        return Ok(None);
+    };
+    if scheduler_is_live(&study_dir)? {
+        return Ok(Some(state));
+    }
+    if mark_exited_active_tasks_for_review(&mut state)? {
+        super::checkpoint::write_next(&checkpoint_dir, &state)?;
+    }
+    Ok(Some(state))
+}
+
+fn scheduler_is_live(study_dir: &Path) -> Result<bool> {
+    let Some(owner) = run_lock_owner(&study_dir.join("run.lock"))? else {
+        return Ok(false);
+    };
+    Ok(
+        unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS
+            || scheduler_process_alive(owner.pid)?,
+    )
+}
+
+fn mark_exited_active_tasks_for_review(state: &mut StudyState) -> Result<bool> {
+    let mut changed = false;
+    for task in state.tasks.values_mut() {
+        if matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating) {
+            let reason = match &task.process {
+                Some(process) if scheduler_process_alive(process.pid)? => continue,
+                Some(_) => "previous Study worker exited before reporting a final status",
+                None => "previous Study worker has no verifiable process identity",
+            };
+            task.status = TaskStatus::NeedsReview;
+            task.stage = None;
+            task.reason = Some(reason.into());
+            task.process = None;
+            changed = true;
+        }
+    }
+    if changed {
+        state.finish_status();
+        state.status = StudyStatus::NeedsReview;
+    }
+    Ok(changed)
+}
+
 /// GUI 已确认对应进程树退出后再落盘；PID 必须对上，避免迟到的取消请求
 /// 误关掉后来启动的调度器。
 pub fn finalize_cancel(study_dir: &Path, expected_pid: u32) -> Result<StudyState> {
+    finalize_cancel_impl(study_dir, Some(expected_pid))
+}
+
+pub fn finalize_idle_cancel(study_dir: &Path) -> Result<StudyState> {
+    finalize_cancel_impl(study_dir, None)
+}
+
+fn finalize_cancel_impl(study_dir: &Path, expected_pid: Option<u32>) -> Result<StudyState> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
     let lock_path = study_dir.join("run.lock");
     let checkpoint_dir = study_dir.join("checkpoints/state");
@@ -491,30 +549,31 @@ pub fn finalize_cancel(study_dir: &Path, expected_pid: u32) -> Result<StudyState
         .with_context(|| format!("{} has no Study state checkpoint", study_dir.display()))?;
     let had_lock = match run_lock_owner(&lock_path)? {
         Some(owner) => {
-            if owner.pid != expected_pid {
-                bail!(
-                    "Study scheduler changed while cancelling: expected PID {expected_pid}, found {}",
-                    owner.pid
-                );
+            if let Some(expected_pid) = expected_pid {
+                if owner.pid != expected_pid {
+                    bail!(
+                        "Study scheduler changed while cancelling: expected PID {expected_pid}, found {}",
+                        owner.pid
+                    );
+                }
             }
             if scheduler_process_alive(owner.pid)? {
                 bail!("Study scheduler PID {} is still running", owner.pid);
             }
             true
         }
-        None => {
-            if state
-                .tasks
-                .values()
-                .any(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating))
-            {
-                bail!("Study scheduler lock is missing while active tasks remain");
-            }
-            false
-        }
+        None => false,
     };
     let mut changed = false;
     for task in state.tasks.values_mut() {
+        if matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating) {
+            let Some(process) = &task.process else {
+                bail!("Study has active tasks without a verified process identity");
+            };
+            if scheduler_process_alive(process.pid)? {
+                bail!("Study worker PID {} is still running", process.pid);
+            }
+        }
         if matches!(
             task.status,
             TaskStatus::Pending
@@ -522,6 +581,7 @@ pub fn finalize_cancel(study_dir: &Path, expected_pid: u32) -> Result<StudyState
                 | TaskStatus::Queued
                 | TaskStatus::Running
                 | TaskStatus::Evaluating
+                | TaskStatus::NeedsReview
         ) {
             task.status = TaskStatus::Cancelled;
             task.stage = None;
@@ -2389,6 +2449,216 @@ mod tests {
             task.status == TaskStatus::Cancelled && task.stage.is_none() && task.process.is_none()
         }));
         assert!(!dir.join("run.lock").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn status_marks_exited_running_tasks_for_review_when_no_scheduler_is_live() {
+        let exited_pid = exited_child_pid();
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-status-review-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut process = supervisor_identity();
+        process.pid = exited_pid;
+        let state = StudyState::new(
+            "s".into(),
+            [
+                crate::study::state::TaskState {
+                    member: "m000001".into(),
+                    site: "site".into(),
+                    case_dir: "/case".into(),
+                    status: TaskStatus::Evaluating,
+                    stage: Some("metrics".into()),
+                    reason: None,
+                    objective: None,
+                    validation_objective: None,
+                    process: Some(process),
+                },
+                crate::study::state::TaskState {
+                    member: "m000002".into(),
+                    site: "site".into(),
+                    case_dir: "/case".into(),
+                    status: TaskStatus::Running,
+                    stage: Some("colm".into()),
+                    reason: None,
+                    objective: None,
+                    validation_objective: None,
+                    process: None,
+                },
+            ],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+
+        let recovered = status_state(&dir).unwrap().unwrap();
+        let task = &recovered.tasks["m000001/site"];
+        assert_eq!(recovered.status, StudyStatus::NeedsReview);
+        assert_eq!(task.status, TaskStatus::NeedsReview);
+        assert!(task.process.is_none());
+        assert_eq!(
+            recovered.tasks["m000002/site"].status,
+            TaskStatus::NeedsReview
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn status_does_not_recover_while_scheduler_lock_is_live() {
+        let exited_pid = exited_child_pid();
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-status-live-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut process = supervisor_identity();
+        process.pid = exited_pid;
+        let state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: Some(process),
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        let lock = StudyRunLock::acquire(&dir).unwrap();
+
+        let recovered = status_state(&dir).unwrap().unwrap();
+        assert_eq!(recovered.tasks["m000001/site"].status, TaskStatus::Running);
+        drop(lock);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn idle_gui_cancel_can_finalize_an_abandoned_scheduler() {
+        let exited_pid = exited_child_pid();
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-idle-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut process = supervisor_identity();
+        process.pid = exited_pid;
+        let state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: Some(process),
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        let mut owner = supervisor_identity();
+        owner.pid = exited_pid;
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
+
+        let cancelled = finalize_idle_cancel(&dir).unwrap();
+        assert_eq!(cancelled.status, StudyStatus::Cancelled);
+        assert!(!dir.join("run.lock").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn idle_gui_cancel_rejects_unverified_active_tasks() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-idle-cancel-unverified-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+
+        let error = finalize_idle_cancel(&dir).unwrap_err().to_string();
+        assert!(error.contains("verified process identity"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn idle_gui_cancel_finalizes_a_recovered_review_task() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-idle-cancel-review-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::NeedsReview,
+                stage: None,
+                reason: Some("previous worker exited".into()),
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        state.status = StudyStatus::NeedsReview;
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+
+        let cancelled = finalize_idle_cancel(&dir).unwrap();
+        assert_eq!(cancelled.status, StudyStatus::Cancelled);
+        assert_eq!(
+            cancelled.tasks["m000001/site"].status,
+            TaskStatus::Cancelled
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

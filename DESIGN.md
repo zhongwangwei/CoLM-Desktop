@@ -23,6 +23,7 @@
 
 ## Information architecture
 - Primary navigation: 基本设定完成后，不确定性分析和参数调优作为独立可选流程。
+- 普通批量运行的“批量并行算例数”放在第 4 步“开始运行”旁；它只控制同时启动的独立算例数，不属于网格参数，也不改变单点 CoLM 内核的串行性质。
 - Core routes/screens: 方法/目标 → 输出/目标变量 → 参数范围 → 预算确认 → 生成任务 → 运行与监控 → 结果。
 - Content hierarchy: 每页先说明“本页做什么/为什么需要”，再显示单一主操作，最后显示次要信息与高级细节。
 
@@ -31,6 +32,8 @@
 - Principle 2: 生成与运行分离。生成任务冻结内核、输入和成员清单；运行才启动 `mksrfdata`、`mkinidata`、`colm`。
 - Principle 3: 控件跟随状态。只显示当前可执行的暂停、继续、重试、停止等动作；不可用时给出原因，不制造一排无解释灰按钮。
 - Principle 4: 状态与日志自动更新。并行数在真正启动任务前设置；“手动刷新”只是恢复/核对手段。
+- Principle 5: 科学选项必须说明适用条件和后果。线性表示等绝对差，对数表示等倍数且只接受正边界。
+- Principle 6: 普通运行和研究任务的终止操作始终可见；退出应用必须终止本次应用启动并登记的进程树，遗留状态不得继续伪装为正在运行。
 - Tradeoffs: 保留现有 7 页与原生 HTML/JS，避免引入新框架；将“开始计算”和监控放在同页以便长任务控制。
 
 ## Visual language
@@ -43,7 +46,7 @@
 
 ## Components
 - Existing components to reuse: `.card`, `.study-guide`, `.study-readiness`, `.study-status-box`, `.result-tools`, `.btn-next`, `.btn-ghost`, `.report-preview`。
-- New/changed components: 任务准备说明卡、带并行数的运行启动区、按状态显示的控制区、默认展开的实时日志、折叠的任务清单/原始状态。
+- New/changed components: 任务准备说明卡、设计页与运行页同步的并行数、线性/对数选择指南、按状态显示的控制区、默认展开的实时日志、折叠的任务清单/原始状态。
 - Variants and states: 未生成、待开始、运行中、已暂停、完成（含部分失败）、已停止、需要检查。
 - Token/component ownership: 样式继续由 `gui/dist/app/style.css` 管理，状态规则由 `study-model.js` 的纯函数管理。
 

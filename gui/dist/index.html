@@ -254,15 +254,6 @@
         <div id="timing"><p class="muted">先在“文件与目录”里选择站点并建算例</p></div>
       </div>
       <div class="flow-pane" data-flow-pane="basic-grid" hidden>
-        <div class="card">
-          <h3>CPU 并行</h3>
-          <div class="ch">单点内核本身是串行的；这里控制批量运行时同时启动多少个算例，每个算例使用一个 CPU 核。</div>
-          <div class="field" style="margin-top:12px">
-            <label>并行算例数（CPU 核）</label>
-            <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
-            <div class="muted mini" id="cpu-capacity" style="margin-top:5px"></div>
-          </div>
-        </div>
         <div class="card"><h3>网格与并行参数</h3><div id="basic-grid-fields"><p class="muted">先建算例</p></div></div>
       </div>
       <div class="flow-pane" data-flow-pane="basic-surface" hidden>
@@ -339,14 +330,23 @@
       <div class="card">
         <h3>开始运行</h3>
         <div class="ch">单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。</div>
+        <div class="run-parallel-setting">
+          <div>
+            <label for="cpu-workers">批量并行算例数</label>
+            <span>仅在同时运行多个算例时生效；每个算例使用 1 个 CPU 核，单个算例仍为串行。</span>
+          </div>
+          <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
+          <span class="muted mini" id="cpu-capacity"></span>
+        </div>
         <div class="pill-row" style="margin-top:14px">
           <button class="btn-ghost" id="run-mksrfdata" disabled>运行 mksrfdata</button>
           <button class="btn-ghost" id="run-mkinidata" disabled>运行 mkinidata</button>
           <button class="btn-ghost" id="run-colm" disabled>运行 colm</button>
           <button class="run-btn" id="runall" disabled>▶ 运行全部</button>
-          <button class="btn-ghost" id="cancel-run" disabled>取消运行</button>
+          <button class="btn-ghost btn-stop" id="cancel-run" disabled>终止运行</button>
           <label class="check"><input type="checkbox" id="force"> 强制全部重跑</label>
         </div>
+        <p class="muted mini run-stop-note">终止运行会结束当前批次及其子进程；退出软件也会自动终止由本次软件启动的任务。</p>
         <div class="stages" id="stages"></div>
       </div>
     </section>
@@ -523,7 +523,7 @@
               <div><strong>3 · 开始计算</strong><span>按成员执行 mksrfdata、mkinidata 和 colm，自动更新进度并汇总结果；可暂停新任务或重试失败成员，原算例保持不变。</span></div>
             </div>
             <div class="study-step-explain" aria-live="polite">
-              <div><strong>本页做什么</strong><span id="uq-step-do">选择 OAT 或 LHS、确认模型预热、样本数和随机种子；并行数在启动计算时设置。</span></div>
+              <div><strong>本页做什么</strong><span id="uq-step-do">选择 OAT 或 LHS、确认模型预热、样本数、随机种子和并行数。</span></div>
               <div><strong>为什么需要</strong><span id="uq-step-why">这些设置决定如何覆盖参数空间、要计算多少成员；分析使用每个站点预热后实际写出的全部 history。</span></div>
             </div>
           </div>
@@ -577,6 +577,15 @@
               </dl>
             </section>
             <section class="study-design-field">
+              <label for="uq-jobs">同时运行数（并行）</label>
+              <input class="input" id="uq-jobs" type="number" min="1" step="1" value="1" aria-describedby="uq-jobs-help">
+              <dl class="study-field-help" id="uq-jobs-help">
+                <div><dt>是什么</dt><dd>同时派发的成员/站点任务数，上限为本机检测到的逻辑 CPU。</dd></div>
+                <div><dt>怎么选</dt><dd>普通笔记本先用 1–2；确认 CPU、内存和磁盘余量充足后再增加。</dd></div>
+                <div><dt>选择后果</dt><dd>并发只影响墙钟时间，不改变采样设计或科学结果；过高会造成 CPU、内存和磁盘争用，可能反而变慢或增加失败。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
               <span class="study-field-label">可采样参数</span>
               <div class="ch">参数列表来自当前内核和算例；更换物理方案或内核请回到基本设定。</div>
               <button class="btn-ghost" id="uq-refresh-params">刷新参数列表</button>
@@ -585,7 +594,17 @@
         </div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再生成分析任务。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="1" hidden><h3>2 · 输出变量</h3><div class="ch">只显示当前配置计划写出的标量 history 变量；已有结果时会用实际文件再次核对。</div><div id="uq-outputs" class="evaluation-variable-grid"><div class="result-empty">选择不确定性包络要统计的 history 变量。</div></div></div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="2" hidden><h3>3 · 参数范围</h3><div class="ch">范围必须有限并落在代码硬边界内；它是试验假设，不由软件替你猜。</div><div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div><label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="2" hidden>
+          <h3>3 · 参数范围</h3>
+          <div class="ch">范围必须有限并落在代码硬边界内；它是试验假设，不由软件替你猜。</div>
+          <div class="study-scale-guide">
+            <div><strong>线性（等差）</strong><span>上下界可以包含 0 或负值，或者相同的“绝对变化量”更有科学意义时使用；适合范围在同一数量级内的参数，例如反照率、比例或加性偏移量。</span></div>
+            <div><strong>对数（等比）</strong><span>仅当上下界都大于 0，且“放大几倍”比“增加多少”更有意义时使用；适合跨一个或多个数量级的正参数，例如水力传导率或速率常数。</span></div>
+            <p><strong>快速判断：</strong>下界 ≤ 0 必须选线性；正值范围的上界/下界约 ≥ 10 时通常优先考虑对数，否则默认线性。对数会均匀覆盖倍数变化，线性会均匀覆盖绝对差值。</p>
+          </div>
+          <div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div>
+          <label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
+        </div>
         <div class="card study-actions study-wizard-step" data-study-wizard="uq" data-study-step="4" hidden>
           <h3>5 · 生成分析任务</h3>
           <div class="ch">把前四页的设计冻结成可复现的运行清单。这里只准备目录和成员，不会启动 CoLM，也不会修改原算例。</div>
@@ -604,9 +623,9 @@
           <div class="ch">开始后会先运行基准成员，再运行参数成员。进度会自动更新；“暂停”只停止派发新成员，不会强杀正在计算的成员。</div>
           <div class="study-launch-panel">
             <div><strong id="uq-run-heading">等待生成分析任务</strong><span id="uq-run-state" aria-live="polite">完成第 5 页后即可开始计算。</span></div>
-            <div class="study-parallel-setting" id="uq-jobs-help">
-              <label for="uq-jobs">同时运行数（并行） <input class="input" id="uq-jobs" type="number" min="1" step="1" value="1" aria-describedby="uq-jobs-note"></label>
-              <span id="uq-jobs-note">普通笔记本建议 1–2；软件会自动限制在本机逻辑 CPU 上限。</span>
+            <div class="study-parallel-setting">
+              <label for="uq-run-jobs">本次同时运行数（并行） <input class="input" id="uq-run-jobs" type="number" min="1" step="1" value="1" aria-describedby="uq-run-jobs-note"></label>
+              <span id="uq-run-jobs-note">与设计页同步；普通笔记本建议 1–2，软件会限制在本机逻辑 CPU 上限。</span>
               <span>并发只影响墙钟时间，不改变采样设计或科学结果；过高会造成 CPU、内存和磁盘争用，可能反而变慢或增加失败。</span>
             </div>
             <button class="btn-next" id="uq-run" disabled>开始计算</button>
@@ -616,7 +635,7 @@
             <button class="btn-ghost" id="uq-retry" disabled hidden>重试失败项</button>
             <button class="btn-ghost" id="uq-pause" disabled hidden>暂停新任务</button>
             <button class="btn-ghost" id="uq-resume" disabled hidden>继续计算</button>
-            <button class="btn-ghost" id="uq-cancel" disabled hidden>停止剩余任务</button>
+            <button class="btn-ghost btn-stop" id="uq-cancel" disabled>终止运行</button>
             <button class="btn-ghost" id="uq-export-study" disabled>导出分析记录</button>
           </div>
           <div id="uq-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始计算后会自动显示。</div></details></div>
@@ -634,7 +653,7 @@
           <div>
             <h3>先确认观测与目标，再开始搜索</h3>
             <div class="study-step-explain" aria-live="polite">
-              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群和代数。</span></div>
+              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群、代数和并行数。</span></div>
               <div><strong>为什么需要</strong><span id="tune-step-why">这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。</span></div>
             </div>
           </div>
@@ -656,13 +675,24 @@
             <label>种群 <input class="input" id="tune-pop" type="number" min="4" max="1000" value="12"></label>
             <label>代数 <input class="input" id="tune-gen" type="number" min="1" value="5"></label>
             <label>随机种子 <input class="input" id="tune-seed" type="number" value="1"></label>
+            <label>同时运行数（并行） <input class="input" id="tune-jobs" type="number" min="1" step="1" value="1"></label>
             <label>内核目录 <input class="input" id="tune-kernel-dir" readonly placeholder="使用当前内核"></label>
             <button class="btn-ghost" id="tune-refresh-params">读取参数</button>
           </div>
         </div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点还会乘以站点数。</div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。</div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden><h3>3 · 参数范围</h3><div class="ch">只调当前方案真正会读取的参数；切换物理方案后列表会重新计算。</div><div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div><label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden>
+          <h3>3 · 参数范围</h3>
+          <div class="ch">只调当前方案真正会读取的参数；切换物理方案后列表会重新计算。</div>
+          <div class="study-scale-guide">
+            <div><strong>线性（等差）</strong><span>上下界可以包含 0 或负值，或者相同的“绝对变化量”更有科学意义时使用；适合范围在同一数量级内的参数，例如反照率、比例或加性偏移量。</span></div>
+            <div><strong>对数（等比）</strong><span>仅当上下界都大于 0，且“放大几倍”比“增加多少”更有意义时使用；适合跨一个或多个数量级的正参数，例如水力传导率或速率常数。</span></div>
+            <p><strong>快速判断：</strong>下界 ≤ 0 必须选线性；正值范围的上界/下界约 ≥ 10 时通常优先考虑对数，否则默认线性。对数会均匀覆盖倍数变化，线性会均匀覆盖绝对差值。</p>
+          </div>
+          <div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div>
+          <label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
+        </div>
         <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>
           <h3>5 · 生成调优任务</h3>
           <div class="ch">把目标函数、参数范围、校准/验证窗口和搜索预算冻结成可复现的调优任务。这里只准备成员，不开始搜索。</div>
@@ -682,8 +712,8 @@
           <div class="study-launch-panel">
             <div><strong id="tune-run-heading">等待生成调优任务</strong><span id="tune-run-state" aria-live="polite">完成第 5 页后即可开始参数搜索。</span></div>
             <div class="study-parallel-setting">
-              <label for="tune-jobs">同时运行数（并行） <input class="input" id="tune-jobs" type="number" min="1" step="1" value="1" aria-describedby="tune-jobs-note"></label>
-              <span id="tune-jobs-note">普通笔记本建议 1–2；软件会自动限制在本机逻辑 CPU 上限。</span>
+              <label for="tune-run-jobs">本次同时运行数（并行） <input class="input" id="tune-run-jobs" type="number" min="1" step="1" value="1" aria-describedby="tune-run-jobs-note"></label>
+              <span id="tune-run-jobs-note">与设计页同步；普通笔记本建议 1–2，软件会限制在本机逻辑 CPU 上限。</span>
               <span>并发只影响墙钟时间，不改变搜索定义；过高会造成 CPU、内存和磁盘争用。</span>
             </div>
             <button class="btn-next" id="tune-run" disabled>开始参数搜索</button>
@@ -693,7 +723,7 @@
             <button class="btn-ghost" id="tune-retry" disabled hidden>重试失败项</button>
             <button class="btn-ghost" id="tune-pause" disabled hidden>暂停新任务</button>
             <button class="btn-ghost" id="tune-resume" disabled hidden>继续搜索</button>
-            <button class="btn-ghost" id="tune-cancel" disabled hidden>停止剩余任务</button>
+            <button class="btn-ghost btn-stop" id="tune-cancel" disabled>终止运行</button>
             <button class="btn-ghost" id="tune-export-study" disabled>导出调优记录</button>
           </div>
           <div id="tune-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始搜索后会自动显示。</div></details></div>

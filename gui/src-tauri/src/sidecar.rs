@@ -140,26 +140,47 @@ impl RunProcesses {
                 .collect::<HashSet<_>>()
         };
         let mut cancelled = 0;
+        let mut failures = Vec::new();
         for key in active.iter().filter(|key| key.starts_with("study:")) {
             let study_dir = key.trim_start_matches("study:").to_string();
-            let pid = self.running_pid(key)?;
+            let pid = match self.running_pid(key) {
+                Ok(pid) => pid,
+                Err(error) => {
+                    failures.push(format!("{key}: {error}"));
+                    continue;
+                }
+            };
             let _ = capture(&["study-cancel".into(), study_dir.clone()]);
-            cancelled += self.cancel(Some(vec![key.clone()]))?;
-            if let Some(pid) = pid {
-                let _ = capture(&[
-                    "study-finalize-cancel".into(),
-                    study_dir,
-                    "--pid".into(),
-                    pid.to_string(),
-                ]);
+            match self.cancel(Some(vec![key.clone()])) {
+                Ok(count) => {
+                    cancelled += count;
+                    if let Some(pid) = pid {
+                        if let Err(error) = capture(&[
+                            "study-finalize-cancel".into(),
+                            study_dir,
+                            "--pid".into(),
+                            pid.to_string(),
+                        ]) {
+                            failures.push(format!("{key}: {error}"));
+                        }
+                    }
+                }
+                Err(error) => failures.push(format!("{key}: {error}")),
             }
         }
         let ordinary = active
             .into_iter()
             .filter(|key| !key.starts_with("study:"))
             .collect::<Vec<_>>();
-        cancelled += self.cancel(Some(ordinary))?;
-        Ok(cancelled)
+        match self.cancel(Some(ordinary)) {
+            Ok(count) => cancelled += count,
+            Err(error) => failures.push(error),
+        }
+        if failures.is_empty() {
+            Ok(cancelled)
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     pub(crate) fn cancel(&self, keys: Option<Vec<String>>) -> Result<usize, String> {
@@ -1464,6 +1485,15 @@ fn is_study_task_log(payload: &serde_json::Value) -> bool {
     payload.get("kind").and_then(serde_json::Value::as_str) == Some("task_log")
 }
 
+fn should_forward_study_task_log(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_none_or(|previous| now.saturating_duration_since(previous) >= EMIT_INTERVAL) {
+        *last = Some(now);
+        true
+    } else {
+        false
+    }
+}
+
 fn study_run_blocking(
     app: tauri::AppHandle,
     processes: RunProcesses,
@@ -1486,6 +1516,7 @@ fn study_run_blocking(
     let (out, err) = take_process_pipes(&mut child, &processes, &study_key)?;
     let errs = drain_stderr(err);
     let mut last = None;
+    let mut last_task_log_emit = None;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         let mut payload = parse_study_event_line(&line)
             .unwrap_or_else(|| serde_json::json!({"type":"log","kind":"log","line":line}));
@@ -1494,9 +1525,12 @@ fn study_run_blocking(
                 .entry("study_dir")
                 .or_insert_with(|| serde_json::Value::String(study_dir.clone()));
         }
-        // Member logs already live on disk; forwarding hundreds of thousands of
-        // raw lines delays the terminal event and leaves the GUI looking stuck.
+        // Member logs already live on disk; forward only a heartbeat sample so
+        // the GUI has live output without flooding the webview.
         if is_study_task_log(&payload) {
+            if should_forward_study_task_log(&mut last_task_log_emit, Instant::now()) {
+                let _ = app.emit("study://event", payload);
+            }
             continue;
         }
         last = Some(payload.clone());
@@ -1557,6 +1591,8 @@ pub async fn study_cancel(
             pid.to_string(),
         ])
         .await?;
+    } else {
+        capture_async(vec!["study-finalize-idle-cancel".to_string(), study_dir]).await?;
     }
     Ok(out)
 }

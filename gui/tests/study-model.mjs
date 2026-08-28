@@ -101,6 +101,7 @@ assert.deepEqual(studyActionState('paused', true), {
   run: false, refresh: true, retry: false, pause: false, resume: true,
   cancel: true, export: true, apply: false, results: false,
 });
+assert.equal(studyActionState('needs_review', true).cancel, true);
 assert.deepEqual(studyActionState('completed_with_failures', true), {
   run: false, refresh: true, retry: true, pause: false, resume: false,
   cancel: false, export: true, apply: true, results: true,

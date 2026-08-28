@@ -1540,7 +1540,7 @@ const studyWizardTitles = {
 };
 const studyWizardHelp = {
   uq: [
-    ['先明确要评估哪些参数假设会让哪些输出发生多大变化，再选择方法、预热、样本数和随机种子；并行数在启动计算时设置。', '设计决定成员如何覆盖参数空间、计算成本与可重复性；站点固定共享参数，分析使用每个站点预热后实际写出的全部 history。结果是给定范围内的有限样本情景分位带，不是自动校准或统计置信区间。'],
+    ['先明确要评估哪些参数假设会让哪些输出发生多大变化，再选择方法、预热、样本数、随机种子和并行数。', '设计决定成员如何覆盖参数空间、计算成本与可重复性；站点固定共享参数，分析使用每个站点预热后实际写出的全部 history。结果是给定范围内的有限样本情景分位带，不是自动校准或统计置信区间。'],
     ['从当前配置预计写出的标量 history 中，选择要形成不确定性包络的输出。', '只分析与科学问题相关且各站点可用的变量，可避免无效运行和无法比较的结果。'],
     ['选择参与扰动的参数，填写有限采样上下界与线性/对数尺度，并确认范围责任。', '参数范围就是不确定性假设；过宽会产生非物理解，过窄则会低估结果敏感性。'],
     ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次分析的计算规模。', '在生成任务前看清任务量，便于控制计算时间、磁盘占用和样本预算。'],
@@ -1549,7 +1549,7 @@ const studyWizardHelp = {
     ['查看输出分位数包络、参数影响排序和成员明细，并按站点与变量加载图表。', '这些结果用于判断预测区间、主要不确定性来源，以及下一步应优先约束哪些参数。'],
   ],
   tuning: [
-    ['选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群和代数。', '这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。'],
+    ['选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群、代数和并行数。', '这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。'],
     ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
     ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
     ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '调优成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
@@ -1616,7 +1616,7 @@ function renderStudyActions(kind) {
     : (tuning ? '生成调优任务' : '生成分析任务'));
 
   const run = $(`${prefix}-run`);
-  const jobs = $(`${prefix}-jobs`);
+  const jobInputs = studyJobInputs(kind);
   const heading = $(`${prefix}-run-heading`);
   const detail = $(`${prefix}-run-state`);
   const current = studyRunning[kind] ? 'Running' : summary.status;
@@ -1646,9 +1646,9 @@ function renderStudyActions(kind) {
     run.disabled = !actions.run;
     run.title = actions.run ? '' : dialogText(hasTask ? '当前任务状态不能开始新的计算。' : '请先生成任务。');
   }
-  if (jobs) {
-    jobs.disabled = current === 'Running';
-    jobs.title = current === 'Running' ? dialogText('任务运行中不能修改同时运行数。') : '';
+  for (const input of jobInputs) {
+    input.disabled = current === 'Running';
+    input.title = current === 'Running' ? dialogText('任务运行中不能修改同时运行数。') : '';
   }
 
   const controls = {
@@ -1656,7 +1656,7 @@ function renderStudyActions(kind) {
     retry: [actions.retry, '当前没有可重试的失败项。'],
     pause: [actions.pause, '只有运行中的任务可以暂停。'],
     resume: [actions.resume, '只有已暂停的任务可以继续。'],
-    cancel: [actions.cancel, '只有运行中或已暂停的任务可以停止。'],
+    cancel: [actions.cancel, '只有运行中、已暂停或需要检查的任务可以终止。'],
     'export-study': [actions.export, studyRunning[kind] ? '运行结束或暂停后再导出完整记录。' : '请先生成任务。'],
   };
   for (const [name, [enabled, reason]] of Object.entries(controls)) {
@@ -1664,7 +1664,7 @@ function renderStudyActions(kind) {
     if (!button) continue;
     button.disabled = !enabled;
     button.title = enabled ? '' : dialogText(reason);
-    if (['retry', 'pause', 'resume', 'cancel'].includes(name)) button.hidden = !enabled;
+    if (['retry', 'pause', 'resume'].includes(name)) button.hidden = !enabled;
   }
   const apply = tuning ? $('tune-apply-best') : null;
   if (apply) {
@@ -1779,11 +1779,26 @@ function setStudyWizardPage(kind, page) {
   document.querySelector(`[data-study-wizard="${kind}"][data-study-step="${page}"]`)?.scrollIntoView({ block: 'start' });
 }
 
+const studyJobInputs = kind => {
+  const prefix = kind === 'tuning' ? 'tune' : 'uq';
+  return [$(`${prefix}-jobs`), $(`${prefix}-run-jobs`)].filter(Boolean);
+};
+
 function studyJobCount(kind) {
-  const input = $(kind === 'tuning' ? 'tune-jobs' : 'uq-jobs');
-  const jobs = Math.max(1, Math.min(studyCpuCapacity, Math.trunc(Number(input?.value)) || 1));
-  if (input) { input.max = String(studyCpuCapacity); input.value = String(jobs); }
+  const inputs = studyJobInputs(kind);
+  const jobs = Math.max(1, Math.min(studyCpuCapacity, Math.trunc(Number(inputs[0]?.value)) || 1));
+  for (const input of inputs) { input.max = String(studyCpuCapacity); input.value = String(jobs); }
   return jobs;
+}
+
+function bindStudyJobInputs(kind) {
+  const inputs = studyJobInputs(kind);
+  for (const input of inputs) input.oninput = input.onchange = () => {
+    for (const other of inputs) other.value = input.value;
+    studyJobCount(kind);
+    renderStudyBudget(kind);
+  };
+  studyJobCount(kind);
 }
 
 function saveStudyDirs() {
@@ -1898,7 +1913,9 @@ function renderStudyParams(hostId) {
     const min = node('input', 'input'); min.type = 'number'; min.step = 'any'; min.placeholder = '采样下界'; min.ariaLabel = `${label} 采样下界`; min.dataset.studyMin = p.name; min.value = saved?.min ?? '';
     const max = node('input', 'input'); max.type = 'number'; max.step = 'any'; max.placeholder = '采样上界'; max.ariaLabel = `${label} 采样上界`; max.dataset.studyMax = p.name; max.value = saved?.max ?? '';
     const scale = node('select', 'select'); scale.dataset.studyScale = p.name;
-    for (const [value, label] of [['linear', language() === 'en' ? 'Linear' : '线性'], ['log', language() === 'en' ? 'Logarithmic' : '对数']]) {
+    scale.ariaLabel = `${label} ${dialogText('采样方式')}`;
+    scale.title = '线性按相同绝对差值采样；对数按相同倍数采样且上下界必须大于 0。';
+    for (const [value, label] of [['linear', '线性（等差）'], ['log', '对数（等比）']]) {
       const option = document.createElement('option'); option.value = value; option.textContent = label; scale.appendChild(option);
     }
     scale.value = saved?.scale || p.scale || 'linear';
@@ -2624,10 +2641,12 @@ for (const kind of ['uq', 'tuning']) for (const action of ['pause', 'resume', 'c
 wireStudyButton('uq-export-study', () => exportStudy('uq'));
 wireStudyButton('tune-export-study', () => exportStudy('tuning'));
 wireStudyButton('tune-apply-best', applyBestCandidate);
-for (const id of ['uq-method', 'uq-count', 'uq-seed', 'uq-jobs', 'tune-pop', 'tune-gen', 'tune-jobs']) if ($(id)) $(id).oninput = $(id).onchange = () => {
+for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen']) if ($(id)) $(id).oninput = $(id).onchange = () => {
   if (id === 'uq-method') for (const target of ['uq-count', 'uq-seed']) $(target).disabled = $('uq-method').value === 'oat';
   renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
 };
+bindStudyJobInputs('uq');
+bindStudyJobInputs('tuning');
 if ($('tune-site-mode')) $('tune-site-mode').onchange = () => renderTuningTargets().catch(e => status(e.message || e));
 if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;

@@ -604,6 +604,30 @@ fn only_raw_study_task_logs_are_suppressed_from_the_gui() {
 }
 
 #[test]
+fn study_task_logs_are_forwarded_at_a_bounded_rate() {
+    let start = Instant::now();
+    let mut last = None;
+    assert!(should_forward_study_task_log(&mut last, start));
+    assert!(!should_forward_study_task_log(
+        &mut last,
+        start + EMIT_INTERVAL / 2
+    ));
+    assert!(should_forward_study_task_log(
+        &mut last,
+        start + EMIT_INTERVAL
+    ));
+}
+
+#[test]
+fn shutdown_marks_pending_runs_as_cancelled() {
+    let processes = RunProcesses::default();
+    let key = "/tmp/shutdown-pending".to_string();
+    processes.prepare(std::slice::from_ref(&key)).unwrap();
+    assert_eq!(processes.cancel_on_shutdown().unwrap(), 1);
+    assert!(processes.take_cancelled(&key).unwrap());
+}
+
+#[test]
 fn study_spec_temp_names_are_unique_and_json_suffixed() {
     let a = write_temp_study_spec("{}").unwrap();
     let b = write_temp_study_spec("{}").unwrap();
