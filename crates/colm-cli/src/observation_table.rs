@@ -581,6 +581,7 @@ mod tests {
 
     #[test]
     fn probes_and_converts_multisite_observation_csv() {
+        let _netcdf_guard = crate::netcdf_test_guard();
         let dir = std::env::temp_dir().join(format!("colm_obs_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -630,6 +631,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_or_ambiguous_times() {
+        let _netcdf_guard = crate::netcdf_test_guard();
         assert!(parse_time("2021-02-29 00:00:00").is_err());
         assert!(parse_time("2020-02-29 24:00:00").is_err());
         assert_eq!(
