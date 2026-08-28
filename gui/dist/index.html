@@ -74,6 +74,15 @@
         </div>
 
         <div id="single-site-prep" hidden>
+        <details class="card fold-card" open>
+          <summary>单站手动建立样例</summary>
+          <div class="ch">示例会随当前自然、USGS、作物或城市数据契约切换；只填站点身份、经纬度和合法地类，不覆盖本机目录。</div>
+          <pre class="example-data" id="single-site-example"></pre>
+          <div class="pill-row">
+            <button class="btn-ghost" id="site-example-fill" type="button">填入这个示例</button>
+            <button class="btn-ghost" id="site-example-copy" type="button">复制示例</button>
+          </div>
+        </details>
         <div class="card">
           <h3>单站点身份与位置</h3>
           <div class="ch">站点名决定标准文件名；当前模式来自首页向导，站点文件会写入明确的自然 / 城市标记。</div>
@@ -139,6 +148,31 @@
 
       <div class="flow-pane" data-flow-pane="prep-forcing" hidden>
         <div class="card">
+          <h3>多站点表格样例</h3>
+          <div class="ch">一行表示一个站点的一个时间步。<code>site</code> 用于拆分站点，<code>utc_offset</code> 把当地时间换算为 UTC，经纬度和地类按站点提供；八个强迫变量的单位写在列名中。</div>
+          <p class="muted mini">样例只演示表格格式，数值不是科研输入；站点名与地类会随当前自然、USGS、作物或城市契约切换。</p>
+          <details class="fold-card">
+            <summary>查看 CSV 样例与字段说明</summary>
+            <pre class="example-data" id="forcing-table-example"></pre>
+            <div class="pill-row">
+              <button class="btn-ghost" id="forcing-example-copy" type="button">复制 CSV 样例</button>
+              <button class="btn-ghost" id="forcing-example-download" type="button">下载 CSV 样例</button>
+            </div>
+          </details>
+        </div>
+
+        <div class="card" id="era5land-guide">
+          <h3>ERA5-Land 长缺口修复</h3>
+          <div class="ch">软件会取最近的 0.1° 格点，并用站点与 ERA5-Land 的重叠期做偏差订正。</div>
+          <ol class="mini guidance-list">
+            <li>先探测数据并确认八个变量槽位与单位。</li>
+            <li>运行“诊断缺测与时区”；只有发现长缺口时才需要 ERA5-Land。</li>
+            <li>诊断后会显示缓存目录和下载按钮；已有缓存会按格点与时间范围复用。</li>
+          </ol>
+          <p class="muted mini">自动下载需要本机配置 <code>~/.cdsapirc</code> 并接受 ERA5-Land 数据许可。原始站点文件不会被覆盖，产物会记录观测、插值或 ERA5-Land 来源。</p>
+        </div>
+
+        <div class="card">
           <h3>强迫场数据</h3>
           <div class="ch">选择单站 NetCDF，或包含单站或多站数据的 CSV / TXT / TSV。
             表格会按站点拆分；随后统一确认八个变量槽位、单位、时间轴和 V/T/Q 观测高度。
@@ -152,10 +186,43 @@
         <div id="forcing-cards"></div>
       </div>
 
+      <div class="flow-pane" data-flow-pane="prep-validation" hidden>
+        <div class="card">
+          <h3>验证数据（可选）</h3>
+          <div class="ch">验证数据不参与 mksrfdata、mkinidata 或 colm 运行；它在结果页用于模型—观测评估，也是不确定性分析和参数调优检查真实配对数的依据。没有验证数据仍可继续建例和运行。</div>
+          <p class="muted mini">标准产物放在站点目录旁的 <code>Observation</code> 目录，命名为 <code>&lt;站点名&gt;_Flux.nc</code>。已有标准 NetCDF 无需再次转换；放到该目录后重新扫描即可自动配对。</p>
+          <div class="pill-row">
+            <button class="btn-ghost" id="validation-skip" type="button">跳过验证数据</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>从 CSV / TXT / TSV 制作验证数据</h3>
+          <div class="ch">表格至少需要时间列和一个可评估变量；多站点表格再提供站点列。时间标签保持原样，必须与对应强迫场一致；原始表格不会修改。</div>
+          <div class="browse">
+            <input class="input" id="vsrc" placeholder="…/Observation/flux.csv">
+            <button class="btn-ghost pick" data-for="vsrc" data-file="csv,txt,tsv">选择…</button>
+            <button class="btn-ghost" id="vprobe" type="button">探测</button>
+          </div>
+        </div>
+
+        <details class="card fold-card">
+          <summary>查看验证数据 CSV 样例</summary>
+          <div class="ch">QC 列可省略；省略时，有限值按可用观测写为 QC=0，缺测值写为 QC=1。正式研究仍应优先保留数据提供方的 QC。</div>
+          <pre class="example-data" id="validation-table-example"></pre>
+          <div class="pill-row">
+            <button class="btn-ghost" id="validation-example-copy" type="button">复制 CSV 样例</button>
+            <button class="btn-ghost" id="validation-example-download" type="button">下载 CSV 样例</button>
+          </div>
+        </details>
+
+        <div id="validation-cards"></div>
+      </div>
+
       <div class="flow-pane" data-flow-pane="prep-ready" hidden>
         <div class="card">
           <h3>数据集就绪检查</h3>
-          <div class="ch">这里汇总站点文件、完整运行契约和强迫场。只有匹配的标准文件才会交给下一步。</div>
+          <div class="ch">这里汇总站点文件、完整运行契约、强迫场和可选验证数据。只有站点与强迫场是运行门槛；缺少验证数据只会限制后续评估与调优。</div>
           <div id="prep-ready-summary"></div>
           <div class="pill-row" style="margin-top:14px">
             <button class="btn-next" id="prep-use" disabled>在基本设定中使用这些产物</button>

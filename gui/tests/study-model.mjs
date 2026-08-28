@@ -85,6 +85,20 @@ const cancelledStudy = aggregateStudy({
 });
 assert.equal(cancelledStudy.done, 1);
 assert.equal(cancelledStudy.status, 'Cancelled');
+assert.equal(aggregateStudy({
+  status: 'paused',
+  tasks: {
+    'm1/A': { member: 'm1', site: 'A', status: 'failed' },
+    'm2/A': { member: 'm2', site: 'A', status: 'queued' },
+  },
+}).status, 'Paused');
+assert.equal(aggregateStudy({
+  status: 'cancelled',
+  tasks: {
+    'm1/A': { member: 'm1', site: 'A', status: 'failed' },
+    'm2/A': { member: 'm2', site: 'A', status: 'cancelled' },
+  },
+}).status, 'Cancelled');
 assert.deepEqual(studyActionState('draft', false), {
   run: false, refresh: false, retry: false, pause: false, resume: false,
   cancel: false, export: false, apply: false, results: false,
@@ -112,6 +126,8 @@ assert.equal(aggregateStudyStatuses(['ready', 'ready']), 'Ready');
 assert.equal(aggregateStudyStatuses(['completed', 'ready']), 'Ready');
 assert.equal(aggregateStudyStatuses(['ready', 'running']), 'Running');
 assert.equal(aggregateStudyStatuses(['completed', 'completed_with_failures']), 'CompletedWithFailures');
+assert.equal(aggregateStudyStatuses(['completed_with_failures', 'cancelled']), 'Cancelled');
+assert.equal(aggregateStudyStatuses(['completed_with_failures', 'paused']), 'Paused');
 const multiStudy = aggregateStudy({
   tasks: {
     's1/m000000/A': { study_dir: '/cases/.colm/studies/s1', member: 'm000000', site: 'A', status: 'succeeded' },

@@ -21,6 +21,7 @@ export const WORKFLOW = [
   { n: 1, key: 'prep', collapsible: true, t: '前处理', d: '原始数据转成模型格式', steps: [
     { id: 'prep-site', page: 'prep', t: '站点数据入口', d: '单站手动或多站表格', need: () => null },
     { id: 'prep-forcing', page: 'prep', t: '强迫场', d: '变量映射、时间轴与高度', need: () => null },
+    { id: 'prep-validation', page: 'prep', t: '验证数据（可选）', d: '制作模型评估观测', need: () => null },
     { id: 'prep-ready', page: 'prep', t: '就绪检查', d: '核对产物并交给基本设定', need: () => null },
   ] },
   { n: 2, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [

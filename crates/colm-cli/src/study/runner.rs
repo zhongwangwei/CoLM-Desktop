@@ -46,11 +46,7 @@ impl StudyRunLock {
             }
         };
         let identity = supervisor_identity();
-        if let Err(error) = (|| -> Result<()> {
-            file.write_all(&serde_json::to_vec(&identity)?)?;
-            file.sync_all()?;
-            Ok(())
-        })() {
+        if let Err(error) = write_run_lock_identity(&path, &mut file, &identity) {
             let _ = fs::remove_file(&path);
             return Err(error);
         }
@@ -91,6 +87,16 @@ impl Drop for StudyRunLock {
     }
 }
 
+fn write_run_lock_identity(
+    path: &Path,
+    file: &mut fs::File,
+    identity: &ProcessIdentity,
+) -> Result<()> {
+    file.write_all(&serde_json::to_vec(identity)?)?;
+    file.sync_all()
+        .with_context(|| format!("cannot sync {}", path.display()))
+}
+
 fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
     let path = study_dir.join("run.lock");
     let Some(owner) = run_lock_owner(&path)? else {
@@ -105,12 +111,22 @@ fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
 }
 
 fn run_lock_owner(path: &Path) -> Result<Option<ProcessIdentity>> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    serde_json::from_slice(&bytes)
+    let mut last = Vec::new();
+    for attempt in 0..2 {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if let Ok(owner) = serde_json::from_slice(&bytes) {
+            return Ok(Some(owner));
+        }
+        last = bytes;
+        if attempt == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    serde_json::from_slice(&last)
         .with_context(|| format!("cannot verify the owner of {}; remove it manually only after confirming the scheduler exited", path.display()))
         .map(Some)
 }
@@ -230,6 +246,11 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
             &parameter_names,
             &kernel_macros,
         )?;
+        let study_parameters = study_parameters(&spec);
+        colm_case::tuning::validate_case_parameter_ranges(
+            &case.join("case.nml"),
+            &study_parameters,
+        )?;
     }
     if spec.kind == StudyKind::Uncertainty {
         for output in &spec.outputs {
@@ -285,6 +306,10 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
                     target.key,
                     target.variable
                 );
+            }
+            preflight_observation_window(&observation, site, target, false)?;
+            if target.validation_from.is_some() {
+                preflight_observation_window(&observation, site, target, true)?;
             }
         }
     }
@@ -391,6 +416,48 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         serde_json::json!({"type":"study_started","kind":"study_started","study":manifest.id,"jobs":jobs}),
     )?;
 
+    if manifest.spec.kind == StudyKind::Tuning {
+        if !baseline_tasks_succeeded(&manifest, &state) {
+            run_members(
+                &study_dir,
+                &manifest,
+                &mut state,
+                &checkpoint_dir,
+                &kernel_dir,
+                &kernel_id,
+                jobs,
+                options.stream,
+                options.retry_failed,
+                None,
+            )?;
+            refresh_candidates(&manifest, &members, &mut state)?;
+        }
+        if !baseline_tasks_succeeded(&manifest, &state) {
+            let cancelled = super::state::cancel_requested(&study_dir);
+            let paused = super::state::pause_requested(&study_dir);
+            if cancelled {
+                cancel_unstarted(&mut state);
+                state.status = StudyStatus::Cancelled;
+            } else if paused {
+                state.status = StudyStatus::Paused;
+            } else {
+                state.status = StudyStatus::CompletedWithFailures;
+                push_warning_once(
+                    &mut state,
+                    "tuning baseline failed; candidates were not run and can be retried after fixing the baseline".into(),
+                );
+            }
+            let _ = write_objective_tables(&manifest, &state);
+            super::checkpoint::write_next(&checkpoint_dir, &state)?;
+            emit(
+                &study_dir,
+                options.stream,
+                serde_json::json!({"type":"study_done","kind":"study_done","study":manifest.id,"status":state.status}),
+            )?;
+            return Ok(state);
+        }
+        ensure_tuning_baseline_ready(&manifest, &state)?;
+    }
     run_members(
         &study_dir,
         &manifest,
@@ -653,6 +720,71 @@ fn baseline_tasks_succeeded(manifest: &Manifest, state: &StudyState) -> bool {
     })
 }
 
+fn ensure_tuning_baseline_ready(manifest: &Manifest, state: &StudyState) -> Result<()> {
+    if manifest.spec.kind != StudyKind::Tuning {
+        return Ok(());
+    }
+    for site in &manifest.spec.base_cases {
+        let task = state
+            .tasks
+            .get(&super::state::task_id("m000000", site))
+            .with_context(|| format!("missing tuning baseline task for {site}"))?;
+        if task.status != TaskStatus::Succeeded {
+            bail!("tuning baseline for {site} did not finish successfully; fix it before running candidates");
+        }
+        let result = read_task_result(manifest, "m000000", site)?;
+        for row in result.calibration.iter().chain(&result.validation) {
+            if row.pairs < row.min_pairs {
+                bail!(
+                    "baseline target {} ({}) has only {} real model-observation pairs in {} for {site}; need at least {}",
+                    row.key, row.variable, row.pairs, row.period, row.min_pairs
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preflight_observation_window(
+    observation: &Path,
+    site: &str,
+    target: &TargetSpec,
+    validation: bool,
+) -> Result<()> {
+    let (from, to, period) = if validation {
+        (
+            target.validation_from.context("missing validation start")?,
+            target.validation_to.context("missing validation end")?,
+            "validation",
+        )
+    } else {
+        (target.from, target.to, "calibration")
+    };
+    let count = crate::observation_usable_count(observation, &target.variable, from, to)?;
+    if count < target.min_pairs {
+        bail!(
+            "target {} ({}) has only {count} usable observation points in the {period} window for {site}; need at least {}",
+            target.key, target.variable, target.min_pairs
+        );
+    }
+    Ok(())
+}
+
+fn study_parameters(spec: &StudySpec) -> Vec<colm_case::tuning::StudyParameter<'_>> {
+    spec.parameters
+        .iter()
+        .map(|p| colm_case::tuning::StudyParameter {
+            name: p.name.as_str(),
+            sample_min: p.sample_min,
+            sample_max: p.sample_max,
+            scale: match p.scale.unwrap_or(super::spec::ScaleSpec::Linear) {
+                super::spec::ScaleSpec::Linear => colm_case::tuning::Scale::Linear,
+                super::spec::ScaleSpec::Log => colm_case::tuning::Scale::Log,
+            },
+        })
+        .collect()
+}
+
 fn push_warning_once(state: &mut StudyState, warning: String) {
     if !state.warnings.contains(&warning) {
         state.warnings.push(warning);
@@ -690,12 +822,16 @@ fn run_members(
         }
         let stale_success = task.status == TaskStatus::Succeeded
             && !crate::case_is_current(Path::new(&task.case_dir), kernel_id).unwrap_or(false);
-        let allowed = matches!(
-            task.status,
-            TaskStatus::Pending | TaskStatus::Materialized | TaskStatus::Queued
-        ) || stale_success
-            || (retry_failed
-                && matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted));
+        let waiting_for_tuning_baseline = manifest.spec.kind == StudyKind::Tuning
+            && !baseline_tasks_succeeded(manifest, state)
+            && task.member != "m000000";
+        let allowed = !waiting_for_tuning_baseline
+            && (matches!(
+                task.status,
+                TaskStatus::Pending | TaskStatus::Materialized | TaskStatus::Queued
+            ) || stale_success
+                || (retry_failed
+                    && matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted)));
         if allowed {
             runnable.push_back((
                 task.member.clone(),
@@ -1913,13 +2049,41 @@ fn resolve_apply_member(
     manifest: &Manifest,
     member_id: &str,
 ) -> Result<MemberPlan> {
+    let state = super::checkpoint::load_latest::<StudyState>(&study_dir.join("checkpoints/state"))?
+        .map(|loaded| loaded.payload);
     let member_id = if member_id == "best" {
-        super::checkpoint::load_latest::<StudyState>(&study_dir.join("checkpoints/state"))?
-            .and_then(|loaded| loaded.payload.best_member)
+        state
+            .as_ref()
+            .and_then(|state| state.best_member.clone())
             .context("Study has no best member yet")?
     } else {
         member_id.to_string()
     };
+    if manifest.spec.kind == StudyKind::Tuning {
+        let state = state.context("Study has no state checkpoint")?;
+        if !matches!(
+            state.status,
+            StudyStatus::Completed | StudyStatus::CompletedWithFailures
+        ) {
+            bail!("parameter tuning results can only be applied after the Study finishes");
+        }
+        let candidate = state
+            .candidates
+            .get(&member_id)
+            .with_context(|| format!("Study member {member_id} has no objective result"))?;
+        if !candidate.feasible {
+            bail!("Study member {member_id} is not feasible and cannot be applied");
+        }
+        for site in &manifest.spec.base_cases {
+            let task = state
+                .tasks
+                .get(&super::state::task_id(&member_id, site))
+                .with_context(|| format!("Study member {member_id} has no task for {site}"))?;
+            if task.status != TaskStatus::Succeeded {
+                bail!("Study member {member_id} did not succeed for {site}");
+            }
+        }
+    }
     super::generation::load_members(manifest)?
         .into_iter()
         .find(|member| member.id == member_id)
@@ -2663,6 +2827,23 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_run_lock_is_not_treated_as_stale() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-corrupt-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.lock"), b"{").unwrap();
+        assert!(ensure_scheduler_idle(&dir).is_err());
+        assert!(dir.join("run.lock").is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn read_only_study_actions_ignore_only_a_confirmed_stale_lock() {
         let dir = std::env::temp_dir().join(format!(
             "colm-study-read-lock-{}-{}",
@@ -2855,6 +3036,68 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn preflight_rejects_tuning_windows_without_enough_observations() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-preflight-pairs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_kernel(&root);
+        let case = root.join("site");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm
+ DEF_CASE_NAME = 'site'
+ DEF_dir_output = 'out'
+ DEF_TUNING_CNFAC = 0.5
+/
+",
+        )
+        .unwrap();
+        let observation = root.join("obs.nc");
+        {
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", 2).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 1970-01-01 00:00:00")
+                .unwrap();
+            time.put_values(&[0.0, 1800.0], ..).unwrap();
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&[1.0, 2.0], ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&[0.0, 0.0], ..)
+                .unwrap();
+        }
+        let spec = root.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "tuning",
+                "method": "differential-evolution",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "observations": {"site": observation},
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+                "targets": [{"key":"Qle","variable":"Qle","from":0,"to":10,"min_pairs":2}],
+                "budget": {"population":4,"generations":1}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = preflight_create(&root, &spec).unwrap_err().to_string();
+        assert!(error.contains("usable observation"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn lhs_study_runs_end_to_end_with_a_fake_kernel() {
@@ -2966,6 +3209,10 @@ esac
         {
             let mut file = netcdf::create(&observation).unwrap();
             file.add_dimension("time", 2).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 1970-01-01 00:00:00")
+                .unwrap();
+            time.put_values(&[0.0, 1800.0], ..).unwrap();
             file.add_variable::<f64>("Qle", &["time"])
                 .unwrap()
                 .put_values(&[1.0, 2.0], ..)
@@ -2985,7 +3232,7 @@ esac
                 "base_cases": ["site"],
                 "observations": {"site": observation},
                 "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
-                "targets": [{"key":"Qle","variable":"Qle","from":0,"to":10,"min_pairs":2}],
+                "targets": [{"key":"Qle","variable":"Qle","from":0,"to":3600,"min_pairs":2}],
                 "budget": {"population":4,"generations":1}
             }))
             .unwrap(),

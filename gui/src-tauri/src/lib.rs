@@ -13,6 +13,7 @@ mod config;
 mod example;
 mod forcing;
 mod histvars;
+mod observation;
 mod project;
 mod recent;
 mod sidecar;
@@ -23,6 +24,7 @@ use config::*;
 use example::*;
 use forcing::*;
 use histvars::*;
+use observation::*;
 use project::*;
 use recent::*;
 use sidecar::*;
@@ -99,6 +101,8 @@ pub fn run() {
             probe_forcing,
             probe_forcing_table,
             convert_forcing_table,
+            probe_observation_table,
+            convert_observation_table,
             probe_forcing_gaps,
             repair_forcing,
             download_era5land,

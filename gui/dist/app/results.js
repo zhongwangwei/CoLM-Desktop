@@ -13,8 +13,8 @@ import { language, translateZh } from './i18n.js';
 import { fieldLabel } from './param-presentation.js';
 import { aggregateStudy, aggregateStudyStatuses, MAX_STUDY_CANDIDATES, paginate, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId } from './study-model.js';
 import {
-  LruCache, METRIC_META, boundedMap, finite, metricKey, ranking, resultCases,
-  rowsToCsv, seriesKey, seriesStats,
+  LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
+  rowsToCsv, seriesKey, seriesStats, sortedImportanceRows,
 } from './result-model.js';
 
 const COMMON_VARIABLES = {
@@ -1354,6 +1354,9 @@ export async function markResultsStale(dirs) {
     state.runState[c.dir] = '需重跑';
     invalidateResultCase(c.dir);
   }
+  for (const kind of ['uq', 'tuning']) {
+    if (studyScope().some(c => target.has(c.dir))) invalidateActiveStudy(kind, '基础算例输入已修改，请重新生成 Study 任务。');
+  }
   if (hasBackend && target.size) await invoke('mark_results_stale', { dirs: [...target] });
 }
 
@@ -1529,6 +1532,8 @@ let studyParamCatalog = [];
 let studyParamCasesKey = '';
 let tuningDatesInitialized = '';
 const studyDirs = { uq: [], tuning: [] };
+const studyDirScopes = { uq: {}, tuning: {} };
+const studyDirDesignKeys = { uq: {}, tuning: {} };
 const studyEvents = { uq: [], tuning: [] };
 const studyRunning = { uq: false, tuning: false };
 const studyViews = { uq: null, tuning: null };
@@ -1550,7 +1555,7 @@ const studyWizardHelp = {
     ['查看输出分位数包络、参数影响排序和成员明细，并按站点与变量加载图表。', '这些结果用于判断预测区间、主要不确定性来源，以及下一步应优先约束哪些参数。'],
   ],
   tuning: [
-    ['选择目标指标、最少有效配对数、站点组织方式、模型预热、校准/验证时段、种群、代数、随机种子和并行数。', '这些设置共同定义优化问题、初始状态、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。'],
+    ['选择目标指标、最少有效配对数、站点组织方式、模型预热、校准/验证时段、种群、代数、随机种子和并行数。', '这些设置共同定义优化问题、初始状态、数据证据门槛和搜索成本；生成时先检查观测覆盖，运行时先用基准成员复核真实模型—观测配对数，通过后才派发候选；验证期独立检验参数泛化能力。'],
     ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
     ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
     ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '调优成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
@@ -1572,15 +1577,37 @@ const studyScope = () => {
     ? cases.filter(c => state.resultSelection.has(c.dir))
     : cases;
 };
-const studyScopeKey = () => studyScope()
+const studyScopeKey = () => `${currentKernel()}\u001e${studyScope()
   .map(c => `${c.dir}\u001f${observationFor(c)}`)
-  .join('\u001e');
-const activeStudyDirs = kind => scopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir));
+  .sort()
+  .join('\u001e')}`;
+const scopedCurrentStudyDirs = kind => {
+  const scope = studyScopeKey();
+  return scopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir))
+    .filter(dir => studyDirScopes[kind]?.[dir] === scope);
+};
+const activeStudyDirs = kind => {
+  const currentKeys = new Set(studyDesignKeys(kind));
+  return scopedCurrentStudyDirs(kind)
+    .filter(dir => currentKeys.has(studyDirDesignKeys[kind]?.[dir]));
+};
 const studyResultsReady = view => ['Completed', 'CompletedWithFailures']
   .includes(aggregateStudy(view?.state || view?.manifest || view || {}).status);
 const setActiveStudyDirs = (kind, dirs) => {
+  const scoped = scopedCurrentStudyDirs(kind);
   studyDirs[kind] = replaceScopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir), dirs);
+  for (const dir of scoped) if (!dirs.includes(dir)) { delete studyDirScopes[kind][dir]; delete studyDirDesignKeys[kind][dir]; }
 };
+function invalidateActiveStudy(kind, reason) {
+  if (!scopedCurrentStudyDirs(kind).length) return;
+  setActiveStudyDirs(kind, []);
+  studyViews[kind] = null;
+  studyEvents[kind] = [];
+  saveStudyDirs();
+  setPreview(kind, reason || (kind === 'tuning' ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。'));
+  renderStudyActions(kind);
+  renderStudyWizard(kind);
+}
 const currentKernel = () => $('kernel')?.value || '';
 const studySpinupTarget = () => studyScope().map(c => c.dir);
 const setPreview = (kind, text) => { const el = $(kind === 'tuning' ? 'tune-preview' : 'uq-preview'); if (el) el.textContent = text; };
@@ -1621,6 +1648,9 @@ function renderStudyActions(kind) {
   const heading = $(`${prefix}-run-heading`);
   const detail = $(`${prefix}-run-state`);
   const current = studyRunning[kind] ? 'Running' : summary.status;
+  if (tuning) for (const step of document.querySelectorAll('[data-study-wizard="tuning"]')) {
+    if (Number(step.dataset.studyStep) < 5) step.inert = current === 'Running';
+  }
   const copy = !hasTask
     ? ['尚未生成任务', '返回第 5 页生成任务后即可开始。', tuning ? '开始参数搜索' : '开始计算']
     : current === 'Ready'
@@ -1707,7 +1737,9 @@ async function applyStudySpinup(kind) {
   }
   const r = await invoke('set_spinup', { dirs, years, repeat, kernelDir: currentKernel() });
   state.text = r.text;
+  if (kind === 'tuning') tuningDatesInitialized = '';
   await markResultsStale(dirs);
+  invalidateActiveStudy(kind, kind === 'tuning' ? '预热设置已修改，请重新生成调优任务。' : '预热设置已修改，请重新生成分析任务。');
   await renderStudySpinup(kind);
   status(repeat > 0 && years > 0 ? `预热：每轮 ${years} 年，共重复 ${repeat} 轮` : '已关闭预热');
 }
@@ -1806,11 +1838,21 @@ function bindStudyJobInputs(kind) {
 
 function saveStudyDirs() {
   try { localStorage.setItem('colm.studyDirs', JSON.stringify(studyDirs)); } catch {}
+  try { localStorage.setItem('colm.studyDirScopes', JSON.stringify(studyDirScopes)); } catch {}
+  try { localStorage.setItem('colm.studyDirDesignKeys', JSON.stringify(studyDirDesignKeys)); } catch {}
 }
 function restoreStudyDirs() {
   try {
     const raw = JSON.parse(localStorage.getItem('colm.studyDirs') || '{}');
     for (const kind of ['uq', 'tuning']) studyDirs[kind] = Array.isArray(raw[kind]) ? raw[kind] : (raw[kind] ? [raw[kind]] : []);
+  } catch {}
+  try {
+    const raw = JSON.parse(localStorage.getItem('colm.studyDirScopes') || '{}');
+    for (const kind of ['uq', 'tuning']) studyDirScopes[kind] = raw[kind] && typeof raw[kind] === 'object' ? raw[kind] : {};
+  } catch {}
+  try {
+    const raw = JSON.parse(localStorage.getItem('colm.studyDirDesignKeys') || '{}');
+    for (const kind of ['uq', 'tuning']) studyDirDesignKeys[kind] = raw[kind] && typeof raw[kind] === 'object' ? raw[kind] : {};
   } catch {}
 }
 restoreStudyDirs();
@@ -1873,13 +1915,12 @@ async function plannedHistoryCatalog(c) {
 async function initializeTuningDatesFromCases(cases, isCurrent = () => true) {
   if (!cases.length || tuningDatesInitialized === studyScopeKey()) return;
   try {
-    const timing = await invoke('read_timing', { dirs: cases.map(c => c.dir) });
-    if (!isCurrent()) return;
-    const start = Date.parse(`${timing.output_start || timing.start}T00:00:00Z`) / 1000;
-    const end = Date.parse(`${timing.end}T00:00:00Z`) / 1000;
-    if (Number.isFinite(start) && Number.isFinite(end) && start <= end) {
-      initializeTuningDates([{ start, end }]);
-    }
+    const rows = await boundedMap(cases, Math.min(4, cases.length), c => invoke('read_timing', { dirs: [c.dir] }));
+    if (!isCurrent() || rows.some(row => !row.ok)) return;
+    initializeTuningDates(rows.map(row => ({
+      start: Date.parse(`${row.value.output_start || row.value.start}T00:00:00Z`) / 1000,
+      end: Date.parse(`${row.value.end}T00:00:00Z`) / 1000,
+    })));
   } catch {}
 }
 
@@ -1894,9 +1935,11 @@ function renderStudyParams(hostId) {
   }]));
   const tuning = hostId.startsWith('tune');
   const invalidateConfirmation = () => {
+    const kind = tuning ? 'tuning' : 'uq';
     const confirmation = $(tuning ? 'tune-range-confirm' : 'uq-range-confirm');
     if (confirmation) confirmation.checked = false;
-    renderStudyBudget(tuning ? 'tuning' : 'uq');
+    invalidateActiveStudy(kind, tuning ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+    renderStudyBudget(kind);
   };
   host.textContent = '';
   for (const p of studyParamCatalog) {
@@ -1990,7 +2033,7 @@ async function renderStudyOutputs(stillCurrent = () => true) {
     input.type = 'checkbox'; input.dataset.uqOutput = v.name;
     input.dataset.outputSites = sites.join('\u001f');
     input.checked = hadSelection ? previous.has(v.name) : v.name === 'f_rnet';
-    input.onchange = () => renderStudyBudget('uq');
+    input.onchange = () => { invalidateActiveStudy('uq', '分析设计已修改，请重新生成分析任务。'); renderStudyBudget('uq'); };
     const text = node('span');
     text.append(node('b', '', meta.label), node('small', '', `${v.name} · ${meta.units} · 覆盖 ${n}/${cases.length} · ${planned ? '按当前配置预计写出' : '已在 history 中确认'}`));
     row.append(input, text);
@@ -2025,10 +2068,7 @@ async function renderTuningTargets(stillCurrent = () => true) {
       : await loadEvaluationCatalog(c, observationFor(c)),
   }));
   if (!current()) return;
-  const historyCatalogs = (await Promise.all(cases.map(c => loadCatalog(c).catch(() => null)))).filter(Boolean);
-  if (!current()) return;
-  initializeTuningDates(historyCatalogs);
-  if (!historyCatalogs.length) await initializeTuningDatesFromCases(cases, current);
+  await initializeTuningDatesFromCases(cases, current);
   if (!current()) return;
   const counts = new Map();
   for (const result of rows.filter(r => r.ok)) for (const v of result.value.catalog) {
@@ -2055,7 +2095,7 @@ async function renderTuningTargets(stillCurrent = () => true) {
     input.dataset.targetSites = sites.join('\u001f');
     input.disabled = independent ? n === 0 : n !== cases.length;
     if (input.disabled) input.checked = false;
-    input.onchange = () => renderStudyBudget('tuning');
+    input.onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderStudyBudget('tuning'); };
     const text = node('span');
     const why = reasons.size ? ` · ${[...reasons].join('；')}` : '';
     text.append(node('b', '', label), node('small', '', `${v.name} · ${v.model_var} ↔ ${v.obs_var} · ${n}/${cases.length} 站点${why}`));
@@ -2063,7 +2103,7 @@ async function renderTuningTargets(stillCurrent = () => true) {
     const weight = node('input', 'input mini-input');
     weight.type = 'number'; weight.min = '0.000001'; weight.step = '0.1'; weight.value = saved?.weight ?? '1';
     weight.dataset.tuneWeight = v.name; weight.setAttribute('aria-label', `${label} 权重`);
-    weight.oninput = () => renderStudyBudget('tuning');
+    weight.oninput = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderStudyBudget('tuning'); };
     weightLabel.appendChild(weight);
     row.append(input, text, weightLabel);
     host.appendChild(row);
@@ -2232,6 +2272,30 @@ function studySpec(kind, cases, independent = false) {
   };
 }
 
+function studyGroups(kind, cases = studyScope()) {
+  const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent';
+  return { independent, groups: independent ? cases.map(c => [c]) : [cases] };
+}
+
+function studyPlans(kind, cases = studyScope()) {
+  const { independent, groups } = studyGroups(kind, cases);
+  return groups.map(group => ({
+    caseRoot: parentDir(group[0].dir),
+    specJson: JSON.stringify(studySpec(kind, group, independent)),
+  }));
+}
+
+function stableStudySpecKey(specJson) {
+  const spec = JSON.parse(specJson);
+  if (spec.budget) delete spec.budget.jobs;
+  return JSON.stringify(spec);
+}
+
+function studyDesignKeys(kind, cases = studyScope()) {
+  try { return studyPlans(kind, cases).map(plan => stableStudySpecKey(plan.specJson)); }
+  catch { return []; }
+}
+
 async function createStudy(kind) {
   const cases = studyScope();
   if (!cases.length) return status('没有已建算例可用于生成分析任务。');
@@ -2242,12 +2306,8 @@ async function createStudy(kind) {
   try {
     await loadStudyParams();
     if (kind === 'tuning') await renderTuningTargets(); else await renderStudyOutputs();
-    const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent';
-    const groups = independent ? cases.map(c => [c]) : [cases];
-    const plans = groups.map(group => ({
-      caseRoot: parentDir(group[0].dir),
-      specJson: JSON.stringify(studySpec(kind, group, independent)),
-    }));
+    const plans = studyPlans(kind, cases);
+    const designKeys = plans.map(plan => stableStudySpecKey(plan.specJson));
     const candidateCounts = plans.map(plan => {
       const spec = JSON.parse(plan.specJson);
       return spec.method === 'differential-evolution'
@@ -2273,6 +2333,10 @@ async function createStudy(kind) {
       throw new Error(`${error?.message || error}${suffix}`);
     }
     setActiveStudyDirs(kind, dirs);
+    for (const [index, dir] of dirs.entries()) {
+      studyDirScopes[kind][dir] = studyScopeKey();
+      studyDirDesignKeys[kind][dir] = designKeys[index];
+    }
     saveStudyDirs();
     setPreview(kind, dirs.join('\n'));
     await refreshStudy(kind);
@@ -2401,24 +2465,104 @@ function resultObjectTable(value) {
   return table;
 }
 
+
+function importanceMethodLabel(method) {
+  if (method === 'spearman') return dialogText('Spearman 秩相关');
+  if (method === 'oat_finite_difference_slope') return dialogText('OAT 有限差分斜率');
+  return method || '';
+}
+
+function spearmanStrength(value) {
+  const a = Math.abs(value);
+  if (a >= 0.8) return dialogText('强');
+  if (a >= 0.5) return dialogText('中等');
+  if (a >= 0.2) return dialogText('弱');
+  return dialogText('很弱');
+}
+
+function importanceInterpretation(row) {
+  if (!Number.isFinite(row?.value)) return dialogText('不可判定：有效成员不足、参数取值恒定或输出均值恒定。');
+  const value = metricText(row.value);
+  const n = row.n ?? 0;
+  if (row.method === 'spearman') {
+    const direction = row.value > 0 ? dialogText('正') : row.value < 0 ? dialogText('负') : dialogText('无明显');
+    return dialogText('Spearman ρ') + `=${value}：${spearmanStrength(row.value)}${direction}${dialogText('单调关系；n 为有效配对数，不是百分比，也不证明因果。')}`;
+  }
+  if (row.method === 'oat_finite_difference_slope') {
+    const direction = row.value > 0 ? dialogText('输出均值随参数增加而增加') : row.value < 0 ? dialogText('输出均值随参数增加而降低') : dialogText('输出均值对该参数变化不明显');
+    return `${dialogText('OAT 斜率')}=${value}：${direction}；${dialogText('含义是每增加 1 个参数单位对应的输出均值变化量，单位为输出单位/参数单位；不同参数量纲不同，不能直接横向比较。')}`;
+  }
+  return `${dialogText('有效样本')} n=${n}`;
+}
+
+function importanceGuide(rows) {
+  const methods = new Set((rows || []).map(row => row.method));
+  const box = node('div', 'result-empty');
+  box.appendChild(node('p', '', dialogText('参数影响诊断回答：在本次采样范围内，哪些参数变化最伴随输出均值变化，以及变化方向如何。')));
+  if (methods.has('spearman')) box.appendChild(node('p', 'muted mini', dialogText('Spearman ρ 的范围是 -1 到 1：1.00 表示完全正单调关系，-0.220 表示弱负单调关系；绝对值越接近 1，单调关系越强。n 是有效参数—输出均值配对数。它不是百分比，也不证明因果。')));
+  if (methods.has('oat_finite_difference_slope')) box.appendChild(node('p', 'muted mini', dialogText('OAT 有限差分斜率表示“输出均值变化 / 参数变化”。它带有输出单位/参数单位，只能在同一站点、同一输出和相同参数定义下解释；不可把不同输出或参数量纲的斜率当成全局重要性排名。')));
+  return box;
+}
+
+function importanceSummary(rows) {
+  const sorted = sortedImportanceRows(rows);
+  const finiteRows = sorted.filter(row => Number.isFinite(row.value));
+  const unknown = (rows || []).length - finiteRows.length;
+  const box = node('div', 'result-empty');
+  box.appendChild(node('h5', '', dialogText('结果摘要与下一步')));
+  if (!finiteRows.length) {
+    box.appendChild(node('p', 'muted mini', dialogText('当前没有可判定的参数影响；通常是有效成员不足、参数或输出为常量，或任务未产出可用均值。')));
+    return box;
+  }
+  const spearmanTop = finiteRows.filter(row => row.method === 'spearman').slice(0, 3);
+  const oatTop = finiteRows.filter(row => row.method === 'oat_finite_difference_slope').slice(0, 3);
+  if (spearmanTop.length) {
+    const top = spearmanTop.map(row => `${row.site} / ${row.variable} / ${fieldLabel(row.parameter, language())}: ${metricText(row.value)} (${importanceMethodLabel(row.method)})`).join('；');
+    box.appendChild(node('p', 'muted mini', `${dialogText('Top 3 按 |Spearman ρ| 排序：')}${top}`));
+  }
+  if (oatTop.length) {
+    const top = oatTop.map(row => `${row.site} / ${row.variable} / ${fieldLabel(row.parameter, language())}: ${metricText(row.value)} (${importanceMethodLabel(row.method)})`).join('；');
+    box.appendChild(node('p', 'muted mini', `${dialogText('按 |OAT 斜率| 浏览的 3 条（不可作为跨量纲重要性排名）：')}${top}`));
+  }
+  const low = finiteRows.filter(row => Math.abs(row.value) < 0.2 && row.method === 'spearman').length;
+  const lowSample = finiteRows.filter(row => row.method === 'spearman' && Number(row.n) < 20).length;
+  if (low) box.appendChild(node('p', 'muted mini', `${low}${dialogText(' 条 Spearman 结果属于很弱单调关系；优先复核样本数、参数范围和输出变量是否匹配。')}`));
+  if (lowSample) box.appendChild(node('p', 'warn mini', `${lowSample}${dialogText(' 条 Spearman 结果样本较少、排序不稳定；建议增加成功扰动成员后再解释排名。')}`));
+  if (unknown) box.appendChild(node('p', 'warn mini', `${unknown}${dialogText(' 条结果不可判定：有效成员不足、参数取值恒定或输出均值恒定。')}`));
+  box.appendChild(node('p', 'muted mini', dialogText('建议：只有在有独立证据支持时，才优先收窄高影响参数的取值范围或补充观测约束；低样本结果先增加成功成员数，不要把单次采样当成最终结论。')));
+  return box;
+}
+
 function importanceTable(rows) {
   const table = document.createElement('table');
   const head = document.createElement('tr');
-  ['站点', '变量', '参数', '方法', '影响', 'n'].forEach(label => head.appendChild(th(label)));
+  ['站点', '变量', '参数', '方法', '统计值（ρ / 斜率）', 'n', '解读'].forEach(label => head.appendChild(th(label)));
   table.appendChild(head);
-  for (const row of (rows || []).slice(0, 300)) {
+  for (const row of sortedImportanceRows(rows).slice(0, 300)) {
     const tr = document.createElement('tr');
-    tr.append(td(row.site), td(row.variable), td(fieldLabel(row.parameter, language())), td(row.method), td(metricText(row.value)), td(row.n));
+    tr.append(td(row.site), td(row.variable), td(fieldLabel(row.parameter, language())), td(importanceMethodLabel(row.method)), td(metricText(row.value)), td(row.n), td(importanceInterpretation(row)));
     table.appendChild(tr);
   }
   return table;
 }
 
+function envelopeExplanation(data = null) {
+  const box = node('div', 'result-empty');
+  if (!data) {
+    box.appendChild(node('p', '', dialogText('分位带说明：Baseline 是未扰动基准成员；P05/P50/P95 是当前成功扰动成员在每个时刻的 5%、50%、95% 样本分位数；n_eff 是该时刻参与分位数计算的有限成员数。有限样本分位带不是统计置信区间，也不代表真实概率分布。')));
+  } else {
+    const units = data.units || dialogText('同图单位');
+    const d = envelopeDiagnostics(data);
+    box.appendChild(node('p', 'muted mini', `${dialogText('当前图诊断：')}n_eff ${d.minNEff}–${d.maxNEff}；${dialogText('支持不足时刻数')} ${d.unsupported}；${dialogText('平均/最大 P95-P05 带宽')} ${metricText(d.meanWidth)} / ${metricText(d.maxWidth)} ${units}；${dialogText('P50 相对 baseline 平均绝对偏离')} ${metricText(d.meanMedianBaselineDiff)} ${units}${dialogText('。这些诊断只基于当前加载的一个站点和变量。')}`));
+  }
+  return box;
+}
+
 function renderEnvelopeChart(host, data) {
   host.textContent = '';
   const chart = node('div', 'chart');
-  const minNEff = Math.min(...(data.n_eff || []).filter(Number.isFinite));
-  host.append(node('p', 'muted mini', `${data.site} · ${data.variable} · ${data.interpretation || ''} · n_eff(min)=${Number.isFinite(minNEff) ? minNEff : 0}`), chart);
+  const diagnostics = envelopeDiagnostics(data);
+  host.append(node('p', 'muted mini', `${data.site} · ${data.variable} · n_eff(min)=${diagnostics.minNEff}`), envelopeExplanation(data), chart);
   const colors = chartColors();
   makeChart(chart, {
     title: `${data.site} · ${data.variable}`,
@@ -2454,8 +2598,11 @@ async function renderStudyResults(kind, envelopes) {
     const primary = kind === 'tuning' ? 'objectives.json' : 'importance.json';
     const data = files.has(primary) ? await studyResult(dir, primary) : null;
     const card = node('div', 'study-result-card');
-    card.append(node('h4', '', kind === 'tuning' ? '候选目标函数' : '参数影响排序'));
-    if (data) card.append(kind === 'tuning' ? resultObjectTable(data) : importanceTable(data));
+    card.append(node('h4', '', kind === 'tuning' ? '候选目标函数' : '参数影响诊断'));
+    if (data) {
+      if (kind === 'tuning') card.append(resultObjectTable(data));
+      else card.append(importanceGuide(data), importanceSummary(data), importanceTable(data));
+    }
     else card.append(node('div', 'muted mini', '运行完成后由后端生成。'));
     host.appendChild(card);
 
@@ -2468,7 +2615,7 @@ async function renderStudyResults(kind, envelopes) {
     if (kind === 'uq') {
       const paths = [...files].filter(path => /^envelopes\/.+\.json$/.test(path));
       const envelopeCard = node('div', 'study-result-card');
-      envelopeCard.append(node('h4', '', '样本分位带'));
+      envelopeCard.append(node('h4', '', '样本分位带'), envelopeExplanation());
       if (paths.length) {
         const select = node('select', 'select');
         for (const path of paths) { const option = document.createElement('option'); option.value = path; option.textContent = path.replace(/^envelopes\//, '').replace(/\.json$/, ''); select.appendChild(option); }
@@ -2644,22 +2791,26 @@ for (const kind of ['uq', 'tuning']) for (const action of ['pause', 'resume', 'c
 wireStudyButton('uq-export-study', () => exportStudy('uq'));
 wireStudyButton('tune-export-study', () => exportStudy('tuning'));
 wireStudyButton('tune-apply-best', applyBestCandidate);
-for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen', 'tune-seed']) if ($(id)) $(id).oninput = $(id).onchange = () => {
+for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen', 'tune-seed', 'tune-metric']) if ($(id)) $(id).oninput = $(id).onchange = () => {
+  const kind = id.startsWith('tune') ? 'tuning' : 'uq';
   if (id === 'uq-method') for (const target of ['uq-count', 'uq-seed']) $(target).disabled = $('uq-method').value === 'oat';
-  renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
+  invalidateActiveStudy(kind, kind === 'tuning' ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+  renderStudyBudget(kind);
 };
 bindStudyJobInputs('uq');
 bindStudyJobInputs('tuning');
-if ($('tune-site-mode')) $('tune-site-mode').onchange = () => renderTuningTargets().catch(e => status(e.message || e));
+if ($('tune-site-mode')) $('tune-site-mode').onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderTuningTargets().catch(e => status(e.message || e)); };
 if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;
+  invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
   renderStudyBudget('tuning');
 };
 for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).onchange = () => {
+  invalidateActiveStudy(id.startsWith('tune') ? 'tuning' : 'uq', id.startsWith('tune') ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
   renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
 };
 for (const id of ['tune-from', 'tune-to', 'tune-val-from', 'tune-val-to', 'tune-min-pairs']) if ($(id)) {
-  $(id).oninput = $(id).onchange = () => renderStudyReadiness(id.startsWith('tune') ? 'tuning' : 'uq');
+  $(id).oninput = $(id).onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderStudyReadiness('tuning'); };
 }
 for (const kind of ['uq', 'tuning']) {
   const prefix = kind === 'tuning' ? 'tune' : 'uq';

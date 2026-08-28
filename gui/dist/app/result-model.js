@@ -145,3 +145,51 @@ export function ranking(rows, key) {
     rankFraction: hi === lo ? 1 : 0.12 + 0.88 * (score(row) - lo) / (hi - lo),
   }));
 }
+
+const finiteNumber = value => typeof value === 'number' && Number.isFinite(value);
+const absInfluence = row => finiteNumber(row?.value) ? Math.abs(row.value) : -1;
+
+export function sortedImportanceRows(rows) {
+  return [...(rows || [])].sort((a, b) => absInfluence(b) - absInfluence(a));
+}
+
+export function envelopeDiagnostics(data) {
+  let minNEff = Infinity;
+  let maxNEff = -Infinity;
+  for (const value of data?.n_eff || []) {
+    if (!Number.isFinite(value)) continue;
+    if (value < minNEff) minNEff = value;
+    if (value > maxNEff) maxNEff = value;
+  }
+  let unsupported = 0;
+  for (const value of data?.stable || []) if (value === false) unsupported += 1;
+  let widthSum = 0;
+  let widthCount = 0;
+  let maxWidth = -Infinity;
+  for (let index = 0; index < (data?.p95 || []).length; index += 1) {
+    const hi = data.p95[index];
+    const lo = data?.p05?.[index];
+    if (!finiteNumber(hi) || !finiteNumber(lo)) continue;
+    const width = hi - lo;
+    widthSum += width;
+    widthCount += 1;
+    if (width > maxWidth) maxWidth = width;
+  }
+  let diffSum = 0;
+  let diffCount = 0;
+  for (let index = 0; index < (data?.p50 || []).length; index += 1) {
+    const median = data.p50[index];
+    const baseline = data?.baseline?.[index];
+    if (!finiteNumber(median) || !finiteNumber(baseline)) continue;
+    diffSum += Math.abs(median - baseline);
+    diffCount += 1;
+  }
+  return {
+    minNEff: Number.isFinite(minNEff) ? minNEff : 0,
+    maxNEff: Number.isFinite(maxNEff) ? maxNEff : 0,
+    unsupported,
+    meanWidth: widthCount ? widthSum / widthCount : null,
+    maxWidth: Number.isFinite(maxWidth) ? maxWidth : null,
+    meanMedianBaselineDiff: diffCount ? diffSum / diffCount : null,
+  };
+}

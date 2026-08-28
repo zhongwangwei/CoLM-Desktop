@@ -102,6 +102,23 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
             &parameter_names,
             &kernel_macros,
         )?;
+        let study_parameters = spec
+            .parameters
+            .iter()
+            .map(|p| colm_case::tuning::StudyParameter {
+                name: p.name.as_str(),
+                sample_min: p.sample_min,
+                sample_max: p.sample_max,
+                scale: match p.scale.unwrap_or(spec::ScaleSpec::Linear) {
+                    spec::ScaleSpec::Linear => colm_case::tuning::Scale::Linear,
+                    spec::ScaleSpec::Log => colm_case::tuning::Scale::Log,
+                },
+            })
+            .collect::<Vec<_>>();
+        colm_case::tuning::validate_case_parameter_ranges(
+            &case.join("case.nml"),
+            &study_parameters,
+        )?;
     }
     let baseline = baseline(&base_cases, &spec)?;
     let members = sample::design(&spec, &baseline)?;

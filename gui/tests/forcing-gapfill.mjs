@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const frontend = await readFile(new URL('../dist/app/forcing.js', import.meta.url), 'utf8');
+const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
 for (const command of [
   'probe_forcing_table',
   'convert_forcing_table',
@@ -50,6 +51,11 @@ const interpolatedHtml = (frontend.match(/innerHTML\s*=\s*`[\s\S]*?`/g) ?? [])
 assert.deepEqual(interpolatedHtml, [], 'forcing UI must render probe/report values with textContent, not template HTML');
 assert.match(frontend, /header: true, text: 'UTC 偏移'/);
 assert.match(frontend, /\{ text: row\.variable \}/);
+assert.match(html, /id="era5land-guide"/);
+assert.doesNotMatch(html, /ERA5-Land 没有被删除/);
+assert.match(html, /软件会取最近的 0\.1° 格点/);
+assert.match(html, /只有发现长缺口时才需要 ERA5-Land/);
+assert.match(html, /~\/.cdsapirc/);
 
 const backend = await readFile(new URL('../src-tauri/src/forcing.rs', import.meta.url), 'utf8');
 for (const command of [

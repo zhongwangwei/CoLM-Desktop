@@ -116,11 +116,13 @@ export function aggregateStudy(study = {}) {
   const running = members.filter(x => x.status === 'Running').length;
   const done = succeeded + failed + cancelled;
   const review = members.some(x => x.status === 'NeedsReview');
-  const status = running ? 'Running'
-    : review ? 'NeedsReview'
-    : failed ? 'CompletedWithFailures'
-      : cancelled || canonicalStatus(study.status ?? 'Draft') === 'Cancelled' ? 'Cancelled'
-      : done === total && total ? 'Completed' : canonicalStatus(study.status ?? 'Draft');
+  const explicit = canonicalStatus(study.status ?? 'Draft');
+  const status = running || explicit === 'Running' ? 'Running'
+    : review || explicit === 'NeedsReview' ? 'NeedsReview'
+      : explicit === 'Paused' ? 'Paused'
+        : explicit === 'Cancelled' || cancelled ? 'Cancelled'
+          : failed ? 'CompletedWithFailures'
+            : done === total && total ? 'Completed' : explicit;
   return { ...study, members, status, counts, total, succeeded, failed, cancelled, running, done, progress: total ? done / total : 0 };
 }
 
@@ -143,7 +145,7 @@ export function studyActionState(status = 'Draft', hasTask = false, localRunning
 
 export function aggregateStudyStatuses(values = []) {
   const statuses = values.filter(Boolean).map(canonicalStatus);
-  return ['Running', 'NeedsReview', 'Paused', 'CompletedWithFailures', 'Ready', 'Cancelled', 'Completed']
+  return ['Running', 'NeedsReview', 'Paused', 'Cancelled', 'CompletedWithFailures', 'Ready', 'Completed']
     .find(status => statuses.includes(status)) || 'Draft';
 }
 

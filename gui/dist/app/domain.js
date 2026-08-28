@@ -311,7 +311,8 @@ function finish() {
   state.text = '';
   state.prepArtifacts = {
     siteStem: null, siteFile: null, siteDir: null, siteReport: null,
-    rawdataDir: null, forcingFile: null, forcingDir: null, batchSites: [],
+    rawdataDir: null, forcingFile: null, forcingDir: null,
+    observationFile: null, observationDir: null, batchSites: [],
   };
   state.domain = picked.domain;
   state.subgrid = picked.subgrid;

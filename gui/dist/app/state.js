@@ -17,6 +17,9 @@ export const state = {
     rawdataDir: null,
     forcingFile: null,
     forcingDir: null,
+    /** 可选验证数据；不参与站点与强迫场的运行就绪门槛。 */
+    observationFile: null,
+    observationDir: null,
     /** CSV/TXT 批处理产物；单文件路径字段仍只用于单站交接。 */
     batchSites: [],
   },

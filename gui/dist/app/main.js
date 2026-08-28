@@ -13,6 +13,8 @@ import { initI18n } from './i18n.js';
 // 模块内部的闭包变量，没有别的模块要用它们的导出。
 import './forcing.js';
 import './sitedata.js';
+import './prep-examples.js';
+import './validation.js';
 
 initI18n();
 initShell();

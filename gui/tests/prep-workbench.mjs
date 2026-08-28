@@ -31,6 +31,8 @@ assert.equal(landCoverLabel(usgs[0], 'zh'), '1 · 城市与建成区');
 
 const state = await readFile(new URL('../dist/app/state.js', import.meta.url), 'utf8');
 assert.match(state, /prepArtifacts:\s*\{/);
+assert.match(state, /observationFile: null/);
+assert.match(state, /observationDir: null/);
 
 const site = await readFile(new URL('../dist/app/sitedata.js', import.meta.url), 'utf8');
 assert.match(site, /adoptPreparedSite/);
@@ -49,6 +51,43 @@ assert.match(html, /<select class="input" id="slandtype"/);
 assert.doesNotMatch(html, /id="slandtype"[^>]*type="number"/);
 assert.match(html, /data-file="nc,nc4,csv,txt,tsv"/);
 assert.match(html, /单站或多站/);
+for (const id of [
+  'single-site-example',
+  'forcing-table-example',
+  'era5land-guide',
+  'vsrc',
+  'vprobe',
+  'validation-table-example',
+  'validation-cards',
+]) {
+  assert.match(html, new RegExp(`id="${id}"`), `preprocessing UI must expose ${id}`);
+}
+assert.match(html, /验证数据不参与 mksrfdata、mkinidata 或 colm 运行/);
+assert.match(html, /缺少验证数据只会限制后续评估与调优/);
+assert.match(html, /时间标签保持原样，必须与对应强迫场一致/);
+assert.doesNotMatch(html, /时间会统一换算为 UTC/);
+
+const examples = await readFile(new URL('../dist/app/prep-examples.js', import.meta.url), 'utf8');
+assert.match(examples, /function forcingTableExample/);
+assert.match(examples, /time,site,latitude,longitude,landtype,utc_offset/);
+assert.match(examples, /new Blob/);
+
+const validation = await readFile(new URL('../dist/app/validation.js', import.meta.url), 'utf8');
+assert.match(validation, /invoke\('probe_observation_table'/);
+assert.match(validation, /invoke\('convert_observation_table'/);
+assert.match(validation, /dstDir: settings\.dst\.trim\(\)/);
+assert.match(validation, /time_column: settings\.time/);
+assert.match(validation, /site_column: settings\.site \|\| null/);
+assert.match(validation, /qc_column: choice\.qc \|\| null/);
+assert.match(validation, /go\('prep-ready'\)/, 'validation data must be skippable');
+assert.match(validation, /observationFile/);
+assert.match(validation, /dst\.readOnly = true/);
+assert.doesNotMatch(validation, /utc_offset|utcOffset/,
+  'validation import must preserve the paired forcing clock instead of shifting timestamps');
+assert.doesNotMatch(validation, /key: 'validation-output'/,
+  'validation output must stay in the sibling Observation directory so scan can auto-pair it');
+assert.doesNotMatch(validation, /innerHTML\s*=\s*`[\s\S]*?\$\{/,
+  'validation reports must not interpolate paths or source fields into HTML');
 
 const forcing = await readFile(new URL('../dist/app/forcing.js', import.meta.url), 'utf8');
 assert.match(forcing, /missingForcingHeights\(heights\)/);
@@ -60,7 +99,7 @@ const dynamicForcingHtml = (forcing.match(/innerHTML\s*=\s*`[\s\S]*?`/g) ?? [])
 assert.deepEqual(dynamicForcingHtml, [], 'forcing reports must not interpolate probe/report fields into HTML');
 
 const shell = await readFile(new URL('../dist/app/shell.js', import.meta.url), 'utf8');
-for (const id of ['prep-site', 'prep-forcing', 'prep-ready']) {
+for (const id of ['prep-site', 'prep-forcing', 'prep-validation', 'prep-ready']) {
   assert.match(shell, new RegExp(`id: '${id}'`), `workflow must expose ${id}`);
 }
 

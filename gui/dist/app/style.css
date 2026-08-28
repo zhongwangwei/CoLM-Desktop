@@ -140,6 +140,10 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .card .ch { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
 .fold-card > summary { cursor: pointer; font-size: 14px; font-weight: 650; }
 .fold-card[open] > summary { margin-bottom: 10px; }
+.example-data { max-height: 230px; margin: 10px 0; padding: 10px 12px; overflow: auto;
+                border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg);
+                color: var(--muted); white-space: pre; font: 11px/1.55 var(--mono); }
+.guidance-list { margin: 8px 0 10px; padding-left: 20px; color: var(--muted); line-height: 1.65; }
 .field { margin-bottom: 13px; }
 .field:last-child { margin-bottom: 0; }
 .field label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 5px; }
@@ -604,3 +608,5 @@ body.resizing-live { user-select: none; }
   .study-primary-action, .study-launch-panel { align-items: stretch; flex-direction: column; }
   .study-parallel-setting { flex-basis: auto; }
 }
+.sample-pre{white-space:pre;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--bg-soft);font-size:12px;line-height:1.45}
+.example-box>summary{cursor:pointer;font-weight:650}

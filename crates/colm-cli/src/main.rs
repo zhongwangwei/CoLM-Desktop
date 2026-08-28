@@ -42,6 +42,7 @@
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod fingerprint;
+mod observation_table;
 mod study;
 
 use std::path::{Path, PathBuf};
@@ -119,6 +120,12 @@ usage:
                    # 读取并校验单个成员结果
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
+  colm-cli observation-table-probe <obs.csv|txt|tsv> [--json 1]
+                           # 探测可选验证数据，自动识别站点/时间/评估变量
+  colm-cli observation-table-convert <obs.csv|txt|tsv> <Observation-dir>
+                           --time-column COLUMN [--site-column COLUMN|--site-name NAME]
+                           [--variable VAR=column[:qc_column] ...] [--json 1]
+                           # 输出 <site>_Flux.nc；缺 QC 时有限值=0/缺失=1
   colm-cli forcing-probe   <met.nc> [--json 1]
   colm-cli forcing-table-probe <forcing.csv|txt|tsv> [--json 1]
                            # 自动识别分隔符、站点/时间/经纬度列与变量候选
@@ -363,6 +370,35 @@ fn main() -> Result<()> {
                 None => println!("no --obs given; skipping the metrics table"),
             }
         }
+        "observation-table-probe" => {
+            let result =
+                observation_table::probe(&opts.positional_at(0, "an observation CSV/TXT file")?)?;
+            if opts.get("--json").is_some() {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{} row(s), {} site(s)", result.rows, result.sites.len());
+            }
+        }
+        "observation-table-convert" => {
+            let opts2 = observation_convert_options(&opts)?;
+            let result = observation_table::convert(
+                &opts.positional_at(0, "an observation CSV/TXT file")?,
+                &opts.positional_at(1, "an Observation destination directory")?,
+                &opts2,
+            )?;
+            if opts.get("--json").is_some() {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                for site in result {
+                    println!(
+                        "{}: {} row(s) -> {}",
+                        site.site,
+                        site.rows,
+                        site.path.display()
+                    );
+                }
+            }
+        }
         "forcing-probe" => {
             cmd_forcing_probe(
                 &opts.positional_at(0, "a forcing file")?,
@@ -432,6 +468,33 @@ fn main() -> Result<()> {
 }
 
 // ---------------------------------------------------------------- 参数
+
+fn observation_convert_options(opts: &Opts) -> Result<observation_table::ConvertOptions> {
+    let variables = opts
+        .get_all("--variable")
+        .into_iter()
+        .map(|spec| {
+            let (name, rest) = spec
+                .split_once('=')
+                .with_context(|| format!("--variable {spec:?} must be VAR=column[:qc_column]"))?;
+            let (column, qc_column) = rest
+                .split_once(':')
+                .map(|(a, b)| (a.to_string(), Some(b.to_string())))
+                .unwrap_or_else(|| (rest.to_string(), None));
+            Ok(observation_table::VariableChoice {
+                name: name.to_string(),
+                column,
+                qc_column,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(observation_table::ConvertOptions {
+        time_column: opts.need_str("--time-column")?,
+        site_column: opts.get("--site-column"),
+        site_name: opts.get("--site-name"),
+        variables,
+    })
+}
 
 struct Opts {
     flags: Vec<(String, String)>,
@@ -2771,6 +2834,53 @@ fn validate_pair_vars(pair_vars: &[String]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn observation_usable_count(
+    obs_path: &Path,
+    variable_name: &str,
+    from: i64,
+    to: i64,
+) -> Result<usize> {
+    if from >= to {
+        bail!("observation window is empty");
+    }
+    validate_pair_vars(&[variable_name.to_string()])?;
+    let obs_file =
+        netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
+    let variable = colm_hist::obs::EVALUATION_VARIABLES
+        .iter()
+        .find(|variable| variable.observation.eq_ignore_ascii_case(variable_name))
+        .with_context(|| format!("unknown evaluation target {variable_name}"))?;
+    let Some(obs_data) = observation_values(&obs_file, obs_path, variable, false)? else {
+        bail!(
+            "observation target {variable_name} is unavailable in {}",
+            obs_path.display()
+        );
+    };
+    let obs_time = read_file_1d(&obs_file, obs_path, "time")?;
+    if obs_time.len() != obs_data.values.len() || obs_data.qc.len() != obs_data.values.len() {
+        bail!("observation target {variable_name} has inconsistent time/value/QC lengths");
+    }
+    let units = variable_units(&obs_file, "time")
+        .with_context(|| format!("time:units in {} is not a string", obs_path.display()))?;
+    let epoch_minutes = colm_hist::time::minutes_from_1900(1970) as f64;
+    let epoch_in_obs_seconds = colm_hist::time::model_seconds_from_units(&[epoch_minutes], &units)
+        .and_then(|values| values.into_iter().next())
+        .with_context(|| format!("unsupported observation time units {units:?}"))?;
+    let origin_unix = -epoch_in_obs_seconds;
+    Ok(obs_time
+        .iter()
+        .zip(obs_data.values.iter().zip(&obs_data.qc))
+        .filter(|(seconds, (value, qc))| {
+            let unix = origin_unix + **seconds;
+            unix >= from as f64
+                && unix < to as f64
+                && **qc == colm_hist::pair::QC_MEASURED
+                && value.is_finite()
+                && **value > colm_hist::pair::FILL_VALUE + 1.0
+        })
+        .count())
 }
 
 fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {

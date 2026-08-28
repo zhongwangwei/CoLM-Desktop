@@ -122,6 +122,8 @@ function invalidateSite() {
     siteReport: null,
     forcingFile: null,
     forcingDir: null,
+    observationFile: null,
+    observationDir: null,
     batchSites: [],
   });
   globalThis.dispatchEvent?.(new Event('colm:prep-site-invalidated'));
@@ -210,6 +212,10 @@ export async function adoptPreparedSite(report = state.prepArtifacts.siteReport)
     state.prepArtifacts.forcingFile = selected.met_file;
     state.prepArtifacts.forcingDir = parentDirectory(selected.met_file);
     $('forcingdir').value = state.prepArtifacts.forcingDir;
+  }
+  if (selected?.obs_file && !state.prepArtifacts.observationFile) {
+    state.prepArtifacts.observationFile = selected.obs_file;
+    state.prepArtifacts.observationDir = parentDirectory(selected.obs_file);
   }
   renderPrepReady();
   return selected;
@@ -322,17 +328,18 @@ export function renderPrepReady() {
       && item.siteReport.readiness !== 'blocked'
       && item.forcingFile);
     const table = document.createElement('table');
-    table.innerHTML = '<tr><th>批量站点</th><th>站点文件</th><th>强迫场</th><th>运行契约</th></tr>';
+    table.innerHTML = '<tr><th>批量站点</th><th>站点文件</th><th>强迫场</th><th>验证数据（可选）</th><th>运行契约</th></tr>';
     for (const item of batch) {
       const row = document.createElement('tr');
-      row.innerHTML = '<td></td><td></td><td></td><td></td>';
+      row.innerHTML = '<td></td><td></td><td></td><td></td><td></td>';
       row.children[0].textContent = item.site;
       row.children[1].textContent = item.siteFile ?? '—';
       row.children[2].textContent = item.forcingFile ?? '—';
-      row.children[3].textContent = item.error
+      row.children[3].textContent = item.observationFile ?? '—';
+      row.children[4].textContent = item.error
         ? `失败：${item.error}`
         : (item.siteReport?.readiness ?? '未生成');
-      if (item.error || item.siteReport?.readiness === 'blocked') row.children[3].className = 'fail';
+      if (item.error || item.siteReport?.readiness === 'blocked') row.children[4].className = 'fail';
       table.appendChild(row);
     }
     box.appendChild(table);
@@ -349,6 +356,7 @@ export function renderPrepReady() {
   const rows = [
     ['站点文件', a.siteFile, a.siteReport?.readiness ?? '未生成'],
     ['强迫场', a.forcingFile, a.forcingFile ? '已匹配标准文件' : '未准备'],
+    ['验证数据（可选）', a.observationFile, a.observationFile ? '已准备，可用于结果评估与调优' : '未准备，不影响模型运行'],
     ['rawdata', a.rawdataDir, a.rawdataDir ? '已选择' : '未选择'],
   ];
   const table = document.createElement('table');

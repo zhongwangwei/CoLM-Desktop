@@ -11,7 +11,7 @@ await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 
 const {
-  LruCache, boundedMap, metricKey, resultCases, rowsToCsv,
+  LruCache, boundedMap, envelopeDiagnostics, metricKey, resultCases, rowsToCsv, sortedImportanceRows,
 } = await import(moduleUrl('result-model.js'));
 const { WORKFLOW, nextOf } = await import(moduleUrl('shell.js'));
 const { state } = await import(moduleUrl('state.js'));
@@ -95,6 +95,33 @@ if (metricKey({ caseDir: '/a', obs: '/o', pairVars: ['Qle', 'Rnet'] })
 const csv = rowsToCsv([{ site: 'A,1', note: 'line\n"two"' }], ['site', 'note']);
 if (!csv.includes('"A,1"') || !csv.includes('"line\n""two"""')) {
   throw new Error('result CSV export does not quote delimiters and newlines safely');
+}
+
+const influenceRows = sortedImportanceRows([
+  { parameter: 'low', value: -0.220, method: 'spearman', n: 12 },
+  { parameter: 'missing', value: null, method: 'spearman', n: 0 },
+  { parameter: 'top', value: 1.00, method: 'spearman', n: 30 },
+  { parameter: 'mid', value: -0.5, method: 'oat_finite_difference_slope', n: 2 },
+]);
+if (influenceRows.map(row => row.parameter).join('|') !== 'top|mid|low|missing') {
+  throw new Error('uncertainty influence rows must sort by absolute finite value and keep null last');
+}
+const envelopeStats = envelopeDiagnostics({
+  n_eff: [3, 5, null, 4],
+  stable: [true, false, true, false],
+  p05: [1, 2, null, 4],
+  p50: [2, 4, 6, null],
+  p95: [5, 8, 9, 10],
+  baseline: [1, 1, 10, 0],
+});
+if (envelopeStats.minNEff !== 3 || envelopeStats.maxNEff !== 5 || envelopeStats.unsupported !== 2
+    || envelopeStats.meanWidth !== 5.333333333333333 || envelopeStats.maxWidth !== 6
+    || envelopeStats.meanMedianBaselineDiff !== 2.6666666666666665) {
+  throw new Error(`uncertainty envelope diagnostics are wrong: ${JSON.stringify(envelopeStats)}`);
+}
+const hugeEnvelopeStats = envelopeDiagnostics({ n_eff: Array.from({ length: 120000 }, (_, i) => i % 7), stable: [] });
+if (hugeEnvelopeStats.minNEff !== 0 || hugeEnvelopeStats.maxNEff !== 6) {
+  throw new Error('uncertainty envelope diagnostics must handle large arrays without spread-based min/max');
 }
 
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
@@ -244,6 +271,60 @@ if (!resultUi.includes('const studyResultsReady = view =>')
     || !resultUi.includes('renderStudyWizard(flowKind);')
     || !resultUi.includes('分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。')) {
   throw new Error('Study results must stay gated until the run reaches a result-bearing terminal state');
+}
+
+if (!resultUi.includes('参数影响诊断')
+    || !resultUi.includes('sortedImportanceRows(rows).slice(0, 300)')
+    || !resultUi.includes('统计值（ρ / 斜率）')
+    || !resultUi.includes('Spearman ρ 的范围是 -1 到 1：1.00 表示完全正单调关系，-0.220 表示弱负单调关系')
+    || !resultUi.includes('它不是百分比，也不证明因果')
+    || !resultUi.includes('OAT 有限差分斜率表示“输出均值变化 / 参数变化”')
+    || !resultUi.includes('不能直接横向比较')
+    || !resultUi.includes('结果摘要与下一步')
+    || !resultUi.includes('Top 3 按 |Spearman ρ|')
+    || !resultUi.includes('样本较少、排序不稳定')
+    || !resultUi.includes('只有在有独立证据支持时')
+    || !resultUi.includes('按 |OAT 斜率| 浏览的 3 条（不可作为跨量纲重要性排名）')
+    || !resultUi.includes('输出均值随参数增加而降低')
+    || resultUi.includes('这么多输出单位')
+    || !resultUi.includes('不可判定：有效成员不足、参数取值恒定或输出均值恒定。')) {
+  throw new Error('uncertainty influence results must explain Spearman/OAT values, sorting, n, and non-causal/non-percent meaning');
+}
+if (!resultUi.includes('分位带说明：Baseline 是未扰动基准成员；P05/P50/P95')
+    || !resultUi.includes('n_eff 是该时刻参与分位数计算的有限成员数')
+    || !resultUi.includes('有限样本分位带不是统计置信区间')
+    || !resultUi.includes("envelopeCard.append(node('h4', '', '样本分位带'), envelopeExplanation())")
+    || !resultUi.includes('const diagnostics = envelopeDiagnostics(data)')
+    || resultUi.includes('Math.min(...(data.n_eff')
+    || !resultUi.includes('支持不足时刻数')
+    || !resultUi.includes('平均/最大 P95-P05 带宽')
+    || !resultUi.includes('P50 相对 baseline 平均绝对偏离')
+    || !resultUi.includes('这些诊断只基于当前加载的一个站点和变量')) {
+  throw new Error('uncertainty envelope chart must explain n_eff before loading and show per-chart diagnostics after loading');
+}
+if (!resultUi.includes('function invalidateActiveStudy(kind, reason)')
+    || !resultUi.includes('const studyDirScopes = { uq: {}, tuning: {} }')
+    || !resultUi.includes('const studyDirDesignKeys = { uq: {}, tuning: {} }')
+    || !resultUi.includes("localStorage.setItem('colm.studyDirScopes'")
+    || !resultUi.includes("localStorage.setItem('colm.studyDirDesignKeys'")
+    || !resultUi.includes('studyDirScopes[kind][dir] = studyScopeKey()')
+    || !resultUi.includes('studyDirDesignKeys[kind][dir] = designKeys[index]')
+    || !resultUi.includes('function stableStudySpecKey(specJson)')
+    || !resultUi.includes('if (spec.budget) delete spec.budget.jobs')
+    || !resultUi.includes('const currentKeys = new Set(studyDesignKeys(kind))')
+    || !resultUi.includes('currentKeys.has(studyDirDesignKeys[kind]?.[dir])')
+    || !resultUi.includes('const studyScopeKey = () => `${currentKernel()}')
+    || !resultUi.includes('invalidateActiveStudy(kind,')
+    || !resultUi.includes("invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。')")
+    || !resultUi.includes("invalidateActiveStudy(id.startsWith('tune') ? 'tuning' : 'uq'")
+    || !resultUi.includes("step.inert = current === 'Running'")
+    || !resultUi.includes('setActiveStudyDirs(kind, [])')) {
+  throw new Error('Study design edits must invalidate the previously generated task registration');
+}
+if (!resultUi.includes("invoke('read_timing', { dirs: [c.dir] })")
+    || !resultUi.includes('initializeTuningDates(rows.map(row => ({')
+    || !resultUi.includes('运行时先用基准成员复核真实模型—观测配对数')) {
+  throw new Error('Multi-site tuning must use the shared date overlap and explain the real-pair baseline gate');
 }
 if (!resultUi.includes('const studyAsyncRequests =')
     || !resultUi.includes('async function loadStudyParams(stillCurrent = () => true)')

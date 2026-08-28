@@ -326,6 +326,48 @@ pub fn validate_study_parameters(params: &[StudyParameter<'_>]) -> Result<()> {
     Ok(())
 }
 
+/// Validate sampled ranges against fixed paired bounds in a concrete case.
+/// This catches designs such as sampling SMPMIN above the case's fixed SMPMAX
+/// before member materialization starts.
+pub fn validate_case_parameter_ranges(
+    case_nml: &Path,
+    params: &[StudyParameter<'_>],
+) -> Result<()> {
+    let text = std::fs::read_to_string(case_nml)
+        .map_err(|error| anyhow!("cannot read {}: {error}", case_nml.display()))?;
+    let doc = colm_namelist::parse(&text)?;
+    let ranges = params
+        .iter()
+        .map(|p| (p.name.to_ascii_uppercase(), (p.sample_min, p.sample_max)))
+        .collect::<BTreeMap<_, _>>();
+    for (min_name, max_name, allow_equal) in [
+        ("DEF_TUNING_SMPMIN", "DEF_TUNING_SMPMAX", false),
+        ("DEF_TUNING_SMPMIN_HR", "DEF_TUNING_SMPMAX_HR", false),
+        (
+            "DEF_TUNING_IRRIGATION_MIN_CPHASE",
+            "DEF_TUNING_IRRIGATION_MAX_CPHASE",
+            false,
+        ),
+    ] {
+        match (ranges.get(min_name), ranges.get(max_name)) {
+            (Some((_, min_hi)), None) => {
+                let fixed_max = real(&doc, max_name)?;
+                if *min_hi > fixed_max || (!allow_equal && *min_hi == fixed_max) {
+                    bail!("{min_name} sample_max must stay below fixed {max_name}");
+                }
+            }
+            (None, Some((max_lo, _))) => {
+                let fixed_min = real(&doc, min_name)?;
+                if fixed_min > *max_lo || (!allow_equal && fixed_min == *max_lo) {
+                    bail!("{max_name} sample_min must stay above fixed {min_name}");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Reject parameters that the selected case would not actually use. Sentinel
 /// baselines remain valid: Study bounds are checked separately and every
 /// sampled candidate receives an explicit value.
@@ -556,5 +598,43 @@ fn character(doc: &colm_namelist::Document, name: &str) -> String {
             Some(Default::Str(value)) => value.to_string(),
             _ => String::new(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_case(name: &str, nml: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-case-tuning-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("case.nml"), nml).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sampling_smpmin_must_respect_fixed_smpmax() {
+        let dir = temp_case("smpmin", "&nl_colm\n DEF_TUNING_SMPMAX = -50.0\n/\n");
+        let params = [StudyParameter {
+            name: "DEF_TUNING_SMPMIN",
+            sample_min: -100.0,
+            sample_max: -10.0,
+            scale: Scale::Linear,
+        }];
+        let error = validate_case_parameter_ranges(&dir.join("case.nml"), &params)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("SMPMIN") && error.contains("SMPMAX"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
