@@ -17,6 +17,9 @@ if (metricText(null) !== '—' || metricText(Number.NaN) !== '—') {
 if (metricText(0.125, 2, true) !== '+0.13' || metricText(-0.125, 2, true) !== '-0.13') {
   throw new Error('finite metric formatting changed');
 }
+if (metricText(0.123456789) !== '0.123457' || metricText(0.0000001234, 4) !== '0.000000123') {
+  throw new Error('result metrics must retain enough precision to distinguish small non-zero values from zero');
+}
 if (progressText({ step: 12, total_steps: 48, date: '2008-01-01-21600' })
     !== '第 12/48 步 · 2008-01-01-21600') {
   throw new Error('per-site progress text lost its exact step count');

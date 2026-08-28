@@ -31,7 +31,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1494,6 +1494,19 @@ fn should_forward_study_task_log(last: &mut Option<Instant>, now: Instant) -> bo
     }
 }
 
+fn append_study_event(study_dir: &str, payload: &serde_json::Value) {
+    let Ok(line) = serde_json::to_string(payload) else {
+        return;
+    };
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(PathBuf::from(study_dir).join("study.log"))
+    {
+        let _ = writeln!(log, "{line}");
+    }
+}
+
 fn study_run_blocking(
     app: tauri::AppHandle,
     processes: RunProcesses,
@@ -1556,6 +1569,7 @@ fn study_run_blocking(
             "study_dir":study_dir,
             "reason":reason
         });
+        append_study_event(&study_dir, &payload);
         let _ = app.emit("study://event", payload.clone());
         return Err(serde_json::to_string(&payload).unwrap_or(reason));
     }

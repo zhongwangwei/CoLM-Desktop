@@ -65,7 +65,7 @@ fn sequences(dir: &Path) -> Result<Vec<u64>> {
 fn read_one<T: DeserializeOwned + Serialize>(dir: &Path, sequence: u64) -> Result<Loaded<T>> {
     let path = final_path(dir, sequence);
     let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    let envelope: Envelope<T> = serde_json::from_slice(&bytes)
+    let envelope: Envelope<serde_json::Value> = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid checkpoint {}", path.display()))?;
     if envelope.schema_version != SCHEMA_VERSION {
         bail!(
@@ -80,8 +80,12 @@ fn read_one<T: DeserializeOwned + Serialize>(dir: &Path, sequence: u64) -> Resul
             envelope.sequence
         );
     }
-    let payload = serde_json::to_vec(&envelope.payload)?;
-    if sha256(&payload) != envelope.payload_sha256 {
+    let payload: T = serde_json::from_value(envelope.payload.clone())
+        .with_context(|| format!("invalid checkpoint payload in {}", path.display()))?;
+    let value_hash = sha256(&serde_json::to_vec(&envelope.payload)?);
+    // Checkpoints created before payload normalization hashed the typed value.
+    let legacy_hash = sha256(&serde_json::to_vec(&payload)?);
+    if envelope.payload_sha256 != value_hash && envelope.payload_sha256 != legacy_hash {
         bail!("checkpoint payload hash mismatch in {}", path.display());
     }
     if let Some(previous) = envelope.previous_sha256.as_deref() {
@@ -101,7 +105,7 @@ fn read_one<T: DeserializeOwned + Serialize>(dir: &Path, sequence: u64) -> Resul
     Ok(Loaded {
         sequence,
         file_sha256: sha256(&bytes),
-        payload: envelope.payload,
+        payload,
     })
 }
 
@@ -137,7 +141,12 @@ where
         bail!("checkpoint {} already exists", final_path.display());
     }
 
-    let payload_bytes = serde_json::to_vec(payload)?;
+    // Hash the same JSON value that is embedded in the envelope. Hashing the
+    // Rust value first is not stable for every f64: serde_json can normalize
+    // the last decimal digit when that value is parsed back from the file.
+    let payload = serde_json::to_value(payload)?;
+    let payload: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&payload)?)?;
+    let payload_bytes = serde_json::to_vec(&payload)?;
     let envelope = Envelope {
         schema_version: SCHEMA_VERSION,
         sequence,
@@ -190,6 +199,11 @@ mod tests {
         done: usize,
     }
 
+    #[derive(Debug, Deserialize, PartialEq, Serialize)]
+    struct FloatState {
+        score: f64,
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "colm-study-checkpoint-{name}-{}-{}",
@@ -212,6 +226,41 @@ mod tests {
         }
         assert_eq!(sequences(&dir).unwrap(), vec![2, 3]);
         assert_eq!(load_latest::<State>(&dir).unwrap().unwrap().payload.done, 3);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn float_payload_checksum_survives_json_round_trip() {
+        let dir = temp("float-round-trip");
+        let state = FloatState {
+            score: 15.272157181227467,
+        };
+        write_next(&dir, &state).unwrap();
+        let loaded = load_latest::<FloatState>(&dir).unwrap().unwrap().payload;
+        assert!((loaded.score - state.score).abs() <= f64::EPSILON * state.score.abs());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reads_legacy_typed_payload_hashes() {
+        let dir = temp("legacy-float-hash");
+        let state = FloatState {
+            score: 26.40812929083503,
+        };
+        let payload_bytes = serde_json::to_vec(&state).unwrap();
+        let envelope = Envelope {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            previous_sha256: None,
+            payload_sha256: sha256(&payload_bytes),
+            payload: &state,
+        };
+        fs::write(
+            final_path(&dir, 1),
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+        assert!(read_one::<FloatState>(&dir, 1).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
 

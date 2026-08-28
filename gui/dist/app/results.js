@@ -11,7 +11,7 @@ import { go, renderSteps } from './shell.js';
 import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { fieldLabel } from './param-presentation.js';
-import { aggregateStudy, aggregateStudyStatuses, MAX_STUDY_CANDIDATES, paginate, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId } from './study-model.js';
+import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId } from './study-model.js';
 import {
   LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
   rowsToCsv, seriesKey, seriesStats, sortedImportanceRows,
@@ -1531,6 +1531,7 @@ addEventListener('colm:theme', () => {
 let studyParamCatalog = [];
 let studyParamCasesKey = '';
 let tuningDatesInitialized = '';
+let tuningCasePeriods = new Map();
 const studyDirs = { uq: [], tuning: [] };
 const studyDirScopes = { uq: {}, tuning: {} };
 const studyDirDesignKeys = { uq: {}, tuning: {} };
@@ -1592,7 +1593,7 @@ const activeStudyDirs = kind => {
     .filter(dir => currentKeys.has(studyDirDesignKeys[kind]?.[dir]));
 };
 const studyResultsReady = view => ['Completed', 'CompletedWithFailures']
-  .includes(aggregateStudy(view?.state || view?.manifest || view || {}).status);
+  .includes(aggregateStudy(view || {}).status);
 const setActiveStudyDirs = (kind, dirs) => {
   const scoped = scopedCurrentStudyDirs(kind);
   studyDirs[kind] = replaceScopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir), dirs);
@@ -1636,7 +1637,7 @@ function renderStudyActions(kind) {
   const tuning = kind === 'tuning';
   const prefix = tuning ? 'tune' : 'uq';
   const hasTask = activeStudyDirs(kind).length > 0;
-  const summary = aggregateStudy(studyViews[kind]?.state || studyViews[kind]?.manifest || studyViews[kind] || {});
+  const summary = aggregateStudy(studyViews[kind] || {});
   const actions = studyActionState(summary.status, hasTask, studyRunning[kind]);
   const create = $(`${prefix}-create`);
   if (create) create.textContent = dialogText(hasTask
@@ -1666,16 +1667,17 @@ function renderStudyActions(kind) {
               : current === 'Cancelled'
                 ? ['任务已停止', '未运行成员不会继续派发；如需重做，请返回第 5 页重新生成。', '任务已停止']
                 : current === 'NeedsReview'
-                  ? ['任务需要检查', '检测到无法确认的旧进程状态，确认后可重试。', '需要检查']
+                  ? ['任务需要检查', '上次调度进程已退出，部分成员没来得及回报最终状态。确认原进程已退出后可继续；已完成的 mksrfdata、mkinidata、colm 会按输入指纹跳过。', '确认并继续']
                   : current === 'Failed'
                     ? ['无法读取任务状态', '请先手动刷新；若仍失败，请检查技术详情。', '状态异常']
                     : ['正在读取任务状态', '请稍候，或点击“手动刷新”从磁盘读取最新状态。', '正在读取…'];
   if (heading) heading.textContent = dialogText(copy[0]);
   if (detail) detail.textContent = dialogText(copy[1]);
   if (run) {
+    const primaryEnabled = actions.run || (hasTask && current === 'NeedsReview');
     run.textContent = dialogText(copy[2]);
-    run.disabled = !actions.run;
-    run.title = actions.run ? '' : dialogText(hasTask ? '当前任务状态不能开始新的计算。' : '请先生成任务。');
+    run.disabled = !primaryEnabled;
+    run.title = primaryEnabled ? '' : dialogText(hasTask ? '当前任务状态不能开始新的计算。' : '请先生成任务。');
   }
   for (const input of jobInputs) {
     input.disabled = current === 'Running';
@@ -1684,7 +1686,7 @@ function renderStudyActions(kind) {
 
   const controls = {
     status: [actions.refresh, '请先生成任务。'],
-    retry: [actions.retry, '当前没有可重试的失败项。'],
+    retry: [actions.retry, current === 'NeedsReview' ? '当前没有需要检查的成员。' : '当前没有可重试的失败项。'],
     pause: [actions.pause, '只有运行中的任务可以暂停。'],
     resume: [actions.resume, '只有已暂停的任务可以继续。'],
     cancel: [actions.cancel, '只有运行中、已暂停或需要检查的任务可以终止。'],
@@ -1913,15 +1915,21 @@ async function plannedHistoryCatalog(c) {
 }
 
 async function initializeTuningDatesFromCases(cases, isCurrent = () => true) {
-  if (!cases.length || tuningDatesInitialized === studyScopeKey()) return;
+  tuningCasePeriods = new Map();
+  if (!cases.length) return;
   try {
     const rows = await boundedMap(cases, Math.min(4, cases.length), c => invoke('read_timing', { dirs: [c.dir] }));
-    if (!isCurrent() || rows.some(row => !row.ok)) return;
-    initializeTuningDates(rows.map(row => ({
+    if (!isCurrent()) return;
+    if (rows.some(row => !row.ok)) return renderTuningWindowPreview(cases);
+    const periods = rows.map((row, index) => ({
+      site: studySiteId(cases[index]),
       start: Date.parse(`${row.value.output_start || row.value.start}T00:00:00Z`) / 1000,
       end: Date.parse(`${row.value.end}T00:00:00Z`) / 1000,
-    })));
-  } catch {}
+    })).filter(p => p.site && Number.isFinite(p.start) && Number.isFinite(p.end) && p.end > p.start);
+    tuningCasePeriods = new Map(periods.map(p => [p.site, p]));
+    initializeTuningDates(periods);
+    renderTuningWindowPreview(cases);
+  } catch { renderTuningWindowPreview(cases); }
 }
 
 function renderStudyParams(hostId) {
@@ -2113,26 +2121,59 @@ async function renderTuningTargets(stillCurrent = () => true) {
   renderStudyBudget('tuning');
 }
 
-function unixDate(id, message = '日期窗口需要开始和结束日期。') {
-  const value = $(id)?.value;
-  if (!value) throw new Error(message);
-  return Math.trunc(new Date(`${value}T00:00:00Z`).getTime() / 1000);
+function percentValue(id, message = '窗口需要开始和结束百分比。') {
+  const text = $(id)?.value;
+  const value = Number(text);
+  if (text === '' || !Number.isFinite(value) || value < 0 || value > 100) throw new Error(message);
+  return value;
 }
 
-function dateValue(unix) { return new Date(unix * 1000).toISOString().slice(0, 10); }
+function tuningWindowForCase(c, fromPct, toPct) {
+  const site = studySiteId(c);
+  const p = tuningCasePeriods.get(site);
+  if (!p) throw new Error(`${caseName(c)} 缺少可换算百分比窗口的时间范围。`);
+  try { return percentageWindow(p.start, p.end, fromPct, toPct, oneDay); }
+  catch { throw new Error(`${caseName(c)} 的百分比窗口过短。`); }
+}
+
+const tuningDateText = unix => new Date(unix * 1000).toISOString().slice(0, 10);
+
+function renderTuningWindowPreview(cases = studyScope()) {
+  const host = $('tune-window-preview');
+  if (!host) return;
+  host.textContent = '';
+  try {
+    const fromPct = percentValue('tune-from');
+    const toPct = percentValue('tune-to');
+    const useValidation = $('tune-validation')?.checked !== false;
+    const validationFromPct = useValidation ? percentValue('tune-val-from') : null;
+    const validationToPct = useValidation ? percentValue('tune-val-to') : null;
+    if (fromPct >= toPct || (useValidation && validationFromPct >= validationToPct)) throw new Error('开始百分比必须小于结束百分比。');
+    if (useValidation && !(validationToPct <= fromPct || validationFromPct >= toPct)) throw new Error('校准与验证百分比窗口不能重叠。');
+    for (const c of cases) {
+      const calibration = tuningWindowForCase(c, fromPct, toPct);
+      const text = [`${caseName(c)}：校准 ${fromPct}–${toPct}% → ${tuningDateText(calibration.from)} 至 ${tuningDateText(calibration.to)}（结束时刻不含）`];
+      if (useValidation) {
+        const validation = tuningWindowForCase(c, validationFromPct, validationToPct);
+        text.push(`验证 ${validationFromPct}–${validationToPct}% → ${tuningDateText(validation.from)} 至 ${tuningDateText(validation.to)}（结束时刻不含）`);
+      }
+      host.appendChild(node('div', 'muted mini', text.join('；')));
+    }
+    if (cases.length > 1) host.appendChild(node('div', 'muted mini', '百分比会分别换算到每个站点自己的正式输出时段，因此记录起止日期不同也能使用同一分割规则。'));
+  } catch (error) {
+    host.appendChild(node('div', 'warn mini', error?.message || String(error)));
+  }
+}
 
 function initializeTuningDates(catalogs) {
   const scopeKey = studyScopeKey();
   if (tuningDatesInitialized === scopeKey || !catalogs.length) return;
-  const start = Math.max(...catalogs.map(c => Number(c.start)).filter(Number.isFinite));
-  const last = Math.min(...catalogs.map(c => Number(c.end)).filter(Number.isFinite));
-  if (!Number.isFinite(start) || !Number.isFinite(last) || start >= last) return;
-  const end = last + oneDay;
-  const split = Math.trunc(start + (end - start) * 0.75);
-  $('tune-from').value = dateValue(start);
-  $('tune-to').value = dateValue(split);
-  $('tune-val-from').value = dateValue(split);
-  $('tune-val-to').value = dateValue(end);
+  const ok = catalogs.every(c => Number.isFinite(c.start) && Number.isFinite(c.end) && c.start < c.end);
+  if (!ok) return;
+  $('tune-from').value = '0';
+  $('tune-to').value = '75';
+  $('tune-val-from').value = '75';
+  $('tune-val-to').value = '100';
   tuningDatesInitialized = scopeKey;
 }
 
@@ -2174,7 +2215,16 @@ function renderStudyReadiness(kind) {
   const dateValues = tuning
     ? ['tune-from', 'tune-to', ...($('tune-validation')?.checked === false ? [] : ['tune-val-from', 'tune-val-to'])]
     : [];
-  const datesReady = dateValues.every(id => $(id)?.value);
+  let datesReady = dateValues.every(id => $(id)?.value);
+  if (tuning && datesReady) {
+    try {
+      const design = studyDesign('tuning');
+      for (const c of cases) {
+        tuningWindowForCase(c, design.fromPct, design.toPct);
+        if (design.validationFromPct != null) tuningWindowForCase(c, design.validationFromPct, design.validationToPct);
+      }
+    } catch { datesReady = false; }
+  }
   const checks = [
     { ok: cases.length > 0, text: cases.length ? (en ? `${cases.length} base case(s) selected` : `已选择 ${cases.length} 个基础算例`) : (en ? 'Create a case in Basic setup / Files and directories first' : '先在“基本设定 / 文件与目录”创建算例') },
     { ok: roots.size === 1, text: roots.size === 1 ? (en ? 'Cases share one project directory' : '算例位于同一个项目目录') : (en ? 'Analysis cases must share one project directory' : '分析任务中的算例必须位于同一个项目目录') },
@@ -2193,7 +2243,7 @@ function renderStudyReadiness(kind) {
       : selectionCount ? (en ? `${selectionCount} ${tuning ? 'target(s)' : 'output variable(s)'} selected` : `已选择 ${selectionCount} 个${tuning ? '目标' : '输出变量'}`) : (en ? `Select at least one ${tuning ? 'evaluable target' : 'output variable'}` : `至少选择一个${tuning ? '可评估目标' : '输出变量'}`) },
     { ok: confirmed, text: confirmed ? (en ? 'Sampling-range responsibility confirmed' : '已确认采样范围责任') : (en ? 'Review the ranges and confirm responsibility' : '检查范围后勾选责任确认') },
   );
-  if (tuning) checks.push({ ok: datesReady, text: datesReady ? (en ? 'Calibration/validation windows are filled' : '校准/验证窗口已填写') : (en ? 'Fill the calibration period and any enabled validation period' : '填写校准期及启用的验证期') });
+  if (tuning) checks.push({ ok: datesReady, text: datesReady ? (en ? 'Calibration/validation percentages map to every site' : '校准/验证百分比已换算到全部站点') : (en ? 'Enter valid percentages after site timing is loaded' : '读取站点时间后填写有效的校准/验证百分比') });
   host.replaceChildren(...checks.map(check => node('div', `study-ready-item ${check.ok ? 'pass' : 'warn'}`, check.text)));
   const create = $(`${prefix}-create`);
   if (create) create.disabled = checks.some(check => !check.ok);
@@ -2203,13 +2253,13 @@ function renderStudyReadiness(kind) {
 
 function studyDesign(kind) {
   if (kind === 'tuning') {
-    const from = unixDate('tune-from', '调优目标需要校准期开始和结束日期。');
-    const to = unixDate('tune-to', '调优目标需要校准期开始和结束日期。');
+    const fromPct = percentValue('tune-from', '调优目标需要校准期开始和结束百分比。');
+    const toPct = percentValue('tune-to', '调优目标需要校准期开始和结束百分比。');
     const useValidation = $('tune-validation')?.checked !== false;
-    const validation_from = useValidation ? unixDate('tune-val-from', '调优目标需要验证期开始和结束日期。') : undefined;
-    const validation_to = useValidation ? unixDate('tune-val-to', '调优目标需要验证期开始和结束日期。') : undefined;
-    if (from >= to || (useValidation && validation_from >= validation_to)) throw new Error('校准期/验证期必须满足开始 < 结束。');
-    if (useValidation && !(validation_to <= from || validation_from >= to)) throw new Error('校准期与验证期不能重叠。');
+    const validationFromPct = useValidation ? percentValue('tune-val-from', '调优目标需要验证期开始和结束百分比。') : undefined;
+    const validationToPct = useValidation ? percentValue('tune-val-to', '调优目标需要验证期开始和结束百分比。') : undefined;
+    if (fromPct >= toPct || (useValidation && validationFromPct >= validationToPct)) throw new Error('校准期/验证期必须满足开始百分比 < 结束百分比。');
+    if (useValidation && !(validationToPct <= fromPct || validationFromPct >= toPct)) throw new Error('校准期与验证期不能重叠。');
     const minPairs = Number($('tune-min-pairs')?.value);
     if (!Number.isInteger(minPairs) || minPairs < 2) throw new Error('最少配对样本数必须是至少 2 的整数。');
     const population = Number($('tune-pop')?.value);
@@ -2222,7 +2272,7 @@ function studyDesign(kind) {
     if (!Number.isSafeInteger(population * (generations + 1)) || population * (generations + 1) > MAX_STUDY_CANDIDATES) {
       throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
     }
-    return { from, to, validation_from, validation_to, minPairs, population, generations, seed };
+    return { fromPct, toPct, validationFromPct, validationToPct, minPairs, population, generations, seed };
   }
   const method = $('uq-method')?.value || 'lhs';
   const candidate_count = method === 'lhs' ? Number($('uq-count')?.value) : undefined;
@@ -2251,8 +2301,16 @@ function studySpec(kind, cases, independent = false) {
         const name = input.dataset.tuneTarget;
         const weight = Number(document.querySelector(`[data-tune-weight="${CSS.escape(name)}"]`)?.value);
         if (!Number.isFinite(weight) || weight <= 0) throw new Error(`${name} 的权重必须是正数。`);
-        return { key: name, variable: name, metric: $('tune-metric')?.value || 'nrmse', weight, min_pairs: design.minPairs, from: design.from, to: design.to, validation_from: design.validation_from, validation_to: design.validation_to };
-      });
+        return cases.map(c => {
+          const site = studySiteId(c);
+          const calibration = tuningWindowForCase(c, design.fromPct, design.toPct);
+          const validation = design.validationFromPct == null ? {} : tuningWindowForCase(c, design.validationFromPct, design.validationToPct);
+          return {
+            key: cases.length > 1 ? `${name}@${site}` : name, site, variable: name, metric: $('tune-metric')?.value || 'nrmse', weight, min_pairs: design.minPairs,
+            from: calibration.from, to: calibration.to, validation_from: validation.from, validation_to: validation.to,
+          };
+        });
+      }).flat();
     if (!targets.length) throw new Error('参数调优至少选择一个目标变量。');
     return {
       kind: 'tuning', method: 'differential-evolution', seed: design.seed, kernel_dir,
@@ -2354,15 +2412,37 @@ function renderStudyEnvelope(kind, envelope) {
     ...previous,
     ...envelope,
     manifest: envelope.manifest || previous.manifest,
+    manifests: envelope.manifests || previous.manifests,
     state: envelope.state || previous.state,
     events: envelope.events || previous.events || studyEvents[flowKind],
     kind_hint: flowKind,
   };
   delete view.event_only;
   studyViews[flowKind] = view;
-  const summary = aggregateStudy(view.state || view.manifest || view);
+  const summary = aggregateStudy(view);
   const box = node('div', 'study-status-box');
-  box.append(resultKpi(studyStatusLabel(summary.status), '状态'), resultKpi(`${summary.done || 0}/${summary.total || 0}`, '成员'), resultKpi(`${Math.round((summary.progress || 0) * 100)}%`, '进度'));
+  if (flowKind === 'tuning') {
+    const manifests = view.manifests || (view.manifest ? [view.manifest] : []);
+    const baselines = Math.max(1, manifests.length);
+    const candidateTotal = Math.max(0, (summary.total || 0) - baselines);
+    const candidateDone = Math.min(candidateTotal, Math.max(Number(summary.completed_candidates) || 0, (summary.done || 0) - baselines));
+    const generations = Math.max(0, ...manifests.map(item => Number(item?.spec?.budget?.generations) || 0));
+    const generation = Math.min(generations, Number(summary.generation) || 0);
+    box.append(
+      resultKpi(studyStatusLabel(summary.status), '状态'),
+      resultKpi(`${candidateDone}/${candidateTotal}`, '已完成候选'),
+      resultKpi(`${generation}/${generations}`, '已完成代数/上限'),
+      resultKpi(`${Math.round((summary.progress || 0) * 100)}%`, '总体进度'),
+    );
+    if (summary.status === 'Running') box.appendChild(node('p', 'muted mini', summary.done === summary.total
+      ? '候选运行已结束，正在汇总并冻结最终结果；完成前不会显示 100%。'
+      : '候选成员按代生成；成员表、目标函数和临时最佳会继续更新，只有任务完成后结果才冻结。'));
+    else if (['Completed', 'CompletedWithFailures'].includes(summary.status) && candidateDone < candidateTotal) {
+      box.appendChild(node('p', 'muted mini', '流程已经结束，但没有用完候选上限（可能提前收敛、被失败阻断或触发停止条件）；100% 表示流程已结束，不表示全部预算都已运行。'));
+    }
+  } else {
+    box.append(resultKpi(studyStatusLabel(summary.status), '状态'), resultKpi(`${summary.done || 0}/${summary.total || 0}`, '成员'), resultKpi(`${Math.round((summary.progress || 0) * 100)}%`, '进度'));
+  }
   const filters = studyLogFilters[flowKind];
   const eventRows = view.events || [];
   const filterBar = node('div', 'result-tools study-log-filters');
@@ -2421,22 +2501,38 @@ function renderStudyEnvelope(kind, envelope) {
 function mergeStudyEvent(kind, payload) {
   const view = studyViews[kind];
   const tasks = view?.state?.tasks;
+  const eventKind = payload.kind || payload.type;
+  const statusByEvent = { task_started: 'running', task_done: 'succeeded', task_failed: 'failed' };
   if (tasks && payload.member && payload.site) {
-    const statusByEvent = { task_started: 'running', task_done: 'succeeded', task_failed: 'failed' };
+    let matched = false;
     for (const task of Object.values(tasks)) {
       if (task.member !== payload.member || task.site !== payload.site) continue;
       if (payload.study_dir && task.study_dir && payload.study_dir !== task.study_dir) continue;
+      matched = true;
       task.status = statusByEvent[payload.kind || payload.type] || task.status;
       if (payload.stage) task.stage = payload.stage;
       if (payload.reason) task.reason = payload.reason;
       if (payload.objective != null) task.objective = payload.objective;
     }
+    if (!matched && statusByEvent[eventKind]) {
+      const studyKey = payload.study_dir || '';
+      const id = `${studyKey}\u001f${payload.member}\u001f${payload.site}`;
+      tasks[id] = {
+        member: payload.member, site: payload.site, study_dir: studyKey, study_key: studyKey,
+        status: statusByEvent[eventKind], stage: payload.stage, reason: payload.reason, objective: payload.objective,
+      };
+    }
   }
-  const eventKind = payload.kind || payload.type;
+  if (view?.state && eventKind === 'generation_done') {
+    view.state.generation = Number(payload.generation) || view.state.generation;
+    view.state.best_member = payload.best_member || view.state.best_member;
+    view.state.best_objective = payload.best_objective ?? view.state.best_objective;
+  }
   if (view?.state && eventKind === 'study_done' && payload.status) view.state.status = payload.status;
   if (view?.state && eventKind === 'study_cancelled') view.state.status = 'cancelled';
   if (view?.state && eventKind === 'study_failed') view.state.status = 'failed';
   renderStudyEnvelope(kind, { ...(view || {}), events: studyEvents[kind], kind_hint: kind, event_only: true });
+  if (eventKind === 'generation_done') refreshStudy(kind).catch(error => status(error?.message || error));
 }
 
 async function studyResultText(dir, path) {
@@ -2452,14 +2548,122 @@ async function studyResult(dir, path) {
 
 const studyResultPaths = envelope => new Set((envelope.results || []).map(file => typeof file === 'string' ? file : file.path).filter(Boolean));
 
-function resultObjectTable(value) {
+function tuningImprovement(best, base) {
+  if (!Number.isFinite(best) || !Number.isFinite(base)) return '—';
+  const delta = base - best;
+  const pct = base !== 0 ? ` (${metricText(delta / Math.abs(base) * 100)}%)` : '';
+  return `${metricText(delta)}${pct}`;
+}
+
+function parameterRangeText(manifest, field, value) {
+  const spec = manifest?.spec?.parameters?.find(parameter => parameter.name === field);
+  if (!spec || !Number.isFinite(value)) return '—';
+  const min = Number(spec.sample_min);
+  const max = Number(spec.sample_max);
+  const position = spec.scale === 'log'
+    ? (Math.log(value) - Math.log(min)) / (Math.log(max) - Math.log(min))
+    : (value - min) / (max - min);
+  if (!Number.isFinite(position)) return '—';
+  const pct = Math.max(0, Math.min(100, position * 100));
+  return `${metricText(pct)}%${pct <= 5 ? ' · 接近下界' : pct >= 95 ? ' · 接近上界' : ''}`;
+}
+
+function parseMetricCsv(text) {
+  const lines = String(text || '').trim().split(/\r?\n/).filter(Boolean);
+  const header = lines.shift()?.split(',') || [];
+  const numeric = new Set(['weight', 'min_pairs', 'pairs', 'value', 'observation_sd', 'loss', 'model_mean', 'observation_mean']);
+  return lines.map(line => Object.fromEntries(line.split(',').map((value, index) => {
+    const key = header[index];
+    return [key, numeric.has(key) && value !== '' ? Number(value) : value];
+  })));
+}
+
+async function tuningMetricRows(dir, files) {
+  if (files.has('metrics.json')) return await studyResult(dir, 'metrics.json') || [];
+  return files.has('metrics.csv') ? parseMetricCsv(await studyResultText(dir, 'metrics.csv')) : [];
+}
+
+async function renderBestTuningCard(envelope, dir, metricRows = []) {
+  const summary = bestTuningSummary(envelope);
+  const card = node('div', 'study-result-card');
+  card.appendChild(node('h4', '', '最优方案摘要'));
+  if (!summary.member) {
+    card.appendChild(node('div', 'result-empty', '还没有可行的最优候选。请检查成员失败原因、目标变量配对数和参数范围。'));
+    return card;
+  }
+  const kpis = node('div', 'result-kpis');
+  kpis.append(
+    resultKpi(summary.member, '最优成员'),
+    resultKpi(summary.generation ?? '—', '所在代数'),
+    resultKpi(metricText(summary.calibration), '校准目标函数'),
+    resultKpi(metricText(summary.validation), '验证目标函数'),
+    resultKpi(tuningImprovement(summary.calibration, summary.baselineCalibration), '校准较 baseline 改进'),
+    resultKpi(tuningImprovement(summary.validation, summary.baselineValidation), '验证较 baseline 改进'),
+  );
+  card.appendChild(kpis);
+  card.appendChild(node('p', 'muted mini', '目标函数越小越好；改进 = baseline 分数 − 最优分数，正值更好、负值更差。验证分数不参与搜索，只检验参数能否泛化到未参与优化的时段。'));
+  const spec = envelope.manifest?.spec || {};
+  card.appendChild(node('p', 'muted mini', `搜索证据：随机种子 ${spec.seed ?? '—'} · 种群 ${spec.budget?.population ?? '—'} · 代数 ${spec.budget?.generations ?? '—'} · 设计并行数 ${spec.budget?.jobs ?? '—'} · 站点方式 ${spec.site_mode === 'independent' ? '单站独立' : '多站点共享'} · 参数 ${spec.parameters?.length || 0} · 目标 ${spec.targets?.length || 0}`));
+  if (summary.validation == null) card.appendChild(node('p', 'warn mini', '本次未配置独立验证，无法判断最优参数是否具有时段外泛化能力。'));
+
+  let previewRows = [];
+  try { previewRows = JSON.parse(await invoke('study_apply_preview', { studyDir: dir, member: summary.member })); }
+  catch (error) { card.appendChild(node('p', 'warn mini', `无法读取最优参数：${error?.message || error}`)); }
+  if (previewRows.length) {
+    const table = document.createElement('table');
+    const head = document.createElement('tr');
+    ['站点', '参数', 'baseline', '最优值', '变化量', '搜索范围位置'].forEach(label => head.appendChild(th(label)));
+    table.appendChild(head);
+    for (const row of previewRows) {
+      const oldValue = finite(row.old);
+      const value = finite(row.new);
+      const tr = document.createElement('tr');
+      tr.append(td(row.site), td(fieldLabel(row.field, language())), td(oldValue == null ? row.old : metricText(oldValue)), td(metricText(value)), td(oldValue == null || value == null ? '—' : metricText(value - oldValue)), td(parameterRangeText(envelope.manifest, row.field, value)));
+      table.appendChild(tr);
+    }
+    const wrap = node('div', 'result-table-wrap'); wrap.appendChild(table);
+    card.append(node('h5', '', '最优参数改动'), wrap);
+  }
+
+  const rows = (metricRows || []).filter(row => row.member === summary.member);
+  const baseline = new Map((metricRows || []).filter(row => row.member === 'm000000')
+    .map(row => [`${row.site}\u001f${row.period}\u001f${row.variable}`, row]));
+  if (rows.length) {
+    card.appendChild(node('h5', '', '按站点、目标与时段分解'));
+    card.appendChild(node('p', 'muted mini', '有效配对必须达到门槛；改进为 baseline 损失 − 最优损失，正值更好、负值更差。'));
+    const metrics = document.createElement('table');
+    const mh = document.createElement('tr');
+    ['站点', '时段', '目标 / 变量', '指标', '权重', '指标值', '目标损失', 'baseline 损失', '改进', '有效配对', '观测标准差', '模型均值', '观测均值'].forEach(label => mh.appendChild(th(label)));
+    metrics.appendChild(mh);
+    for (const row of rows.slice(0, 80)) {
+      const base = baseline.get(`${row.site}\u001f${row.period}\u001f${row.variable}`);
+      const tr = document.createElement('tr');
+      tr.append(td(row.site), td(row.period === 'validation' ? '独立验证' : '校准'), td(`${row.target || row.key || row.variable} / ${row.variable}`), td(String(row.metric || '').toUpperCase()), td(metricText(finite(row.weight))), td(metricText(finite(row.value))), td(metricText(finite(row.loss))), td(metricText(finite(base?.loss))), td(tuningImprovement(finite(row.loss), finite(base?.loss))), td(`${row.pairs ?? '—'}/${row.min_pairs ?? '—'}`), td(metricText(finite(row.observation_sd))), td(metricText(finite(row.model_mean))), td(metricText(finite(row.observation_mean))));
+      metrics.appendChild(tr);
+    }
+    const wrap = node('div', 'result-table-wrap'); wrap.appendChild(metrics); card.appendChild(wrap);
+  }
+  for (const warning of envelope.state?.warnings || []) card.appendChild(node('p', 'warn mini', warning.startsWith('overfitting:') ? '过拟合警告：校准期变好但验证期变差。' : warning));
+  if (summary.reason) card.appendChild(node('p', 'warn mini', summary.reason));
+  return card;
+}
+
+function sortedObjectiveEntries(value) {
+  return Object.entries(value || {}).sort((a, b) => {
+    const av = Number.isFinite(a[1]?.calibration) ? a[1].calibration : Infinity;
+    const bv = Number.isFinite(b[1]?.calibration) ? b[1].calibration : Infinity;
+    return av - bv || a[0].localeCompare(b[0]);
+  });
+}
+
+function resultObjectTable(value, bestMember = '') {
   const table = document.createElement('table');
   const head = document.createElement('tr');
-  ['成员', '可行', '校准', '验证', '说明'].forEach(label => head.appendChild(th(label)));
+  ['排名', '成员', '可行', '校准', '验证', '说明'].forEach(label => head.appendChild(th(label)));
   table.appendChild(head);
-  for (const [member, row] of Object.entries(value || {}).slice(0, 200)) {
+  for (const [index, [member, row]] of sortedObjectiveEntries(value).slice(0, 200).entries()) {
     const tr = document.createElement('tr');
-    tr.append(td(member), td(row.feasible ? '✓' : '—'), td(metricText(row.calibration)), td(metricText(row.validation)), td(row.reason || ''));
+    tr.append(td(index + 1), td(member === bestMember ? `★ ${member}` : member), td(row.feasible ? '✓' : '—'), td(metricText(row.calibration)), td(metricText(row.validation)), td(row.reason || ''));
     table.appendChild(tr);
   }
   return table;
@@ -2597,20 +2801,26 @@ async function renderStudyResults(kind, envelopes) {
 
     const primary = kind === 'tuning' ? 'objectives.json' : 'importance.json';
     const data = files.has(primary) ? await studyResult(dir, primary) : null;
+    const metricRows = kind === 'tuning' ? await tuningMetricRows(dir, files) : [];
+    if (kind === 'tuning') host.appendChild(await renderBestTuningCard(envelope, dir, metricRows));
+
     const card = node('div', 'study-result-card');
-    card.append(node('h4', '', kind === 'tuning' ? '候选目标函数' : '参数影响诊断'));
+    card.append(node('h4', '', kind === 'tuning' ? '候选目标函数排名' : '参数影响诊断'));
     if (data) {
-      if (kind === 'tuning') card.append(resultObjectTable(data));
+      if (kind === 'tuning') card.append(resultObjectTable(data, envelope.state?.best_member));
       else card.append(importanceGuide(data), importanceSummary(data), importanceTable(data));
     }
     else card.append(node('div', 'muted mini', '运行完成后由后端生成。'));
     host.appendChild(card);
 
-    const members = files.has('members.csv') ? await studyResultText(dir, 'members.csv') : null;
-    const memberCard = node('details', 'study-result-card');
-    memberCard.append(node('summary', '', '成员表（CSV 预览）'));
-    memberCard.append(node('pre', 'report-preview', members ? members.split('\n').slice(0, 62).join('\n') : '运行完成后由后端生成。'));
-    host.appendChild(memberCard);
+    const tablePath = kind === 'tuning' ? 'objectives.csv' : 'members.csv';
+    const tableText = files.has(tablePath) ? await studyResultText(dir, tablePath) : null;
+    if (tableText) {
+      const memberCard = node('details', 'study-result-card');
+      memberCard.append(node('summary', '', kind === 'tuning' ? '完整候选记录（CSV 预览）' : '成员表（CSV 预览）'));
+      memberCard.append(node('pre', 'report-preview', tableText.split('\n').slice(0, 62).join('\n')));
+      host.appendChild(memberCard);
+    }
 
     if (kind === 'uq') {
       const paths = [...files].filter(path => /^envelopes\/.+\.json$/.test(path));
@@ -2653,13 +2863,16 @@ async function refreshStudy(kind) {
     const candidates = Object.fromEntries(envelopes.flatMap((envelope, studyIndex) => Object.entries(envelope.state?.candidates || {}).map(([member, candidate]) => [`${dirs[studyIndex]}\u001f${member}`, candidate])));
     const events = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] })));
     const status = aggregateStudyStatuses(envelopes.map(envelope => envelope.state?.status));
-    renderStudyEnvelope(kind, { state: { status, tasks, candidates }, events, kind_hint: kind });
+    const completed_candidates = envelopes.reduce((sum, envelope) => sum + (Number(envelope.state?.completed_candidates) || 0), 0);
+    const generation = Math.min(...envelopes.map(envelope => Math.max(0, Number(envelope.state?.generation) || 0)));
+    renderStudyEnvelope(kind, { manifests: envelopes.map(envelope => envelope.manifest).filter(Boolean), state: { status, tasks, candidates, completed_candidates, generation }, events, kind_hint: kind });
   }
   studyEvents[kind] = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] }))).slice(-300);
   await renderStudyResults(kind, envelopes);
 }
 
 async function runStudy(kind) {
+  if (aggregateStudy(studyViews[kind] || {}).status === 'NeedsReview') return retryStudy(kind);
   const dirs = activeStudyDirs(kind);
   const kernel = currentKernel();
   if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
@@ -2803,6 +3016,7 @@ if ($('tune-site-mode')) $('tune-site-mode').onchange = () => { invalidateActive
 if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;
   invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
+  renderTuningWindowPreview();
   renderStudyBudget('tuning');
 };
 for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).onchange = () => {
@@ -2810,7 +3024,11 @@ for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).on
   renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
 };
 for (const id of ['tune-from', 'tune-to', 'tune-val-from', 'tune-val-to', 'tune-min-pairs']) if ($(id)) {
-  $(id).oninput = $(id).onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderStudyReadiness('tuning'); };
+  $(id).oninput = $(id).onchange = () => {
+    invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
+    renderTuningWindowPreview();
+    renderStudyReadiness('tuning');
+  };
 }
 for (const kind of ['uq', 'tuning']) {
   const prefix = kind === 'tuning' ? 'tune' : 'uq';

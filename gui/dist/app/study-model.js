@@ -7,6 +7,7 @@ export const TERMINAL_STATUSES = new Set(['Succeeded', 'Failed', 'Interrupted', 
 export const SUCCESS_STATUSES = new Set(['Succeeded', 'Completed']);
 export const FAILURE_STATUSES = new Set(['Failed', 'Interrupted', 'NeedsReview']);
 export const ACTIVE_STATUSES = new Set(['Running', 'Evaluating', 'Reconcile']);
+const COMPLETED_STUDY_STATUSES = new Set(['Completed', 'CompletedWithFailures']);
 
 export function canonicalStatus(value = 'Pending') {
   return String(value || 'Pending').replace(/([a-z0-9])([A-Z])/g, '$1_$2').split('_')
@@ -96,9 +97,13 @@ export function aggregateMember(member = {}) {
 }
 
 export function aggregateStudy(study = {}) {
+  const envelope = study?.state || study?.manifest ? study : null;
+  const state = envelope?.state || study || {};
+  const manifest = envelope?.manifest || null;
+  const manifests = envelope?.manifests || (manifest ? [manifest] : []);
   const grouped = new Map();
-  if (!Array.isArray(study.members) && study.tasks) {
-    const tasks = Array.isArray(study.tasks) ? study.tasks : Object.values(study.tasks);
+  if (!Array.isArray(state.members) && state.tasks) {
+    const tasks = Array.isArray(state.tasks) ? state.tasks : Object.values(state.tasks);
     for (const task of tasks) {
       const studyKey = task.study_key || task.study_dir || task.studyDir || '';
       const member = task.member || String(task.id || '').split('/')[0] || 'unknown';
@@ -107,7 +112,7 @@ export function aggregateStudy(study = {}) {
       grouped.get(key).sites.push({ name: task.site, ...task });
     }
   }
-  const members = (Array.isArray(study.members) ? study.members : [...grouped.values()]).map(aggregateMember);
+  const members = (Array.isArray(state.members) ? state.members : [...grouped.values()]).map(aggregateMember);
   const counts = countStatuses(members);
   const total = members.length;
   const succeeded = members.filter(x => x.status === 'Succeeded').length;
@@ -116,22 +121,67 @@ export function aggregateStudy(study = {}) {
   const running = members.filter(x => x.status === 'Running').length;
   const done = succeeded + failed + cancelled;
   const review = members.some(x => x.status === 'NeedsReview');
-  const explicit = canonicalStatus(study.status ?? 'Draft');
+  const explicit = canonicalStatus(state.status ?? 'Draft');
   const status = running || explicit === 'Running' ? 'Running'
     : review || explicit === 'NeedsReview' ? 'NeedsReview'
       : explicit === 'Paused' ? 'Paused'
         : explicit === 'Cancelled' || cancelled ? 'Cancelled'
           : failed ? 'CompletedWithFailures'
             : done === total && total ? 'Completed' : explicit;
-  return { ...study, members, status, counts, total, succeeded, failed, cancelled, running, done, progress: total ? done / total : 0 };
+  const deTotal = manifests.reduce((sum, item) => {
+    const budget = item?.spec?.budget || {};
+    return sum + (item?.spec?.kind === 'tuning' && item?.spec?.method === 'differential-evolution'
+      ? 1 + Math.max(0, Math.trunc(Number(budget.population) || 0)) * (Math.max(0, Math.trunc(Number(budget.generations) || 0)) + 1)
+      : 0);
+  }, 0);
+  const candidateDone = Math.max(0, Math.trunc(Number(state.completed_candidates) || 0));
+  const baselineDone = members.filter(m => m.member === 'm000000' && m.status === 'Succeeded').length;
+  const displayTotal = deTotal || total;
+  const displayDone = deTotal ? Math.min(displayTotal, Math.max(done, candidateDone + baselineDone)) : done;
+  const finished = COMPLETED_STUDY_STATUSES.has(status);
+  const progress = displayTotal ? (finished ? 1 : Math.min(displayDone / displayTotal, 0.99)) : 0;
+  return { ...state, members, status, counts, currentTotal: total, currentDone: done, total: displayTotal, succeeded, failed, cancelled, running, done: displayDone, progress };
 }
+
+export function percentageWindow(start, end, fromPercent, toPercent, quantum = 1) {
+  if (![start, end, fromPercent, toPercent, quantum].every(Number.isFinite)
+      || start >= end || quantum <= 0 || fromPercent < 0 || toPercent > 100 || fromPercent >= toPercent) {
+    throw new Error('invalid percentage window');
+  }
+  const point = percent => start + Math.round((end - start) * percent / 100 / quantum) * quantum;
+  const from = point(fromPercent);
+  const to = point(toPercent);
+  if (from >= to) throw new Error('percentage window is shorter than the output resolution');
+  return { from, to };
+}
+
+export function bestTuningSummary(envelope = {}) {
+  const state = envelope.state || {};
+  const candidates = state.candidates || {};
+  const bestMember = state.best_member || Object.entries(candidates)
+    .filter(([, c]) => c?.feasible && Number.isFinite(c.calibration))
+    .sort((a, b) => a[1].calibration - b[1].calibration)[0]?.[0] || '';
+  const best = bestMember ? candidates[bestMember] : null;
+  const baseline = candidates.m000000 || null;
+  return {
+    member: bestMember,
+    generation: best?.generation ?? null,
+    calibration: best?.calibration ?? state.best_objective ?? null,
+    validation: best?.validation ?? null,
+    baselineCalibration: baseline?.calibration ?? null,
+    baselineValidation: baseline?.validation ?? null,
+    feasible: best?.feasible ?? false,
+    reason: best?.reason || '',
+  };
+}
+
 
 export function studyActionState(status = 'Draft', hasTask = false, localRunning = false) {
   const current = canonicalStatus(localRunning ? 'Running' : status);
   const running = hasTask && current === 'Running';
   const results = hasTask && ['Completed', 'CompletedWithFailures'].includes(current);
   return {
-    run: hasTask && current === 'Ready',
+    run: hasTask && ['Ready', 'NeedsReview'].includes(current),
     refresh: hasTask,
     retry: hasTask && ['CompletedWithFailures', 'NeedsReview', 'Failed'].includes(current),
     pause: running,

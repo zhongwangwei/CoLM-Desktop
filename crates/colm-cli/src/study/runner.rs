@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use colm_namelist::Value;
@@ -31,7 +32,18 @@ struct StudyRunLock {
 
 const RUN_LOCK_HEARTBEAT_SECONDS: u64 = 10;
 const RUN_LOCK_STALE_SECONDS: i64 = 60;
+const TASK_LOG_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const NON_SCALAR_UQ_OUTPUTS: &[&str] = &["f_t_soisno", "f_wliq_soisno", "f_wice_soisno"];
+
+fn should_emit_task_log(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_none_or(|previous| now.saturating_duration_since(previous) >= TASK_LOG_EMIT_INTERVAL)
+    {
+        *last = Some(now);
+        true
+    } else {
+        false
+    }
+}
 
 impl StudyRunLock {
     fn acquire(study_dir: &Path) -> Result<Self> {
@@ -183,6 +195,24 @@ struct TaskResult {
     calibration: Vec<TargetResult>,
     #[serde(default)]
     validation: Vec<TargetResult>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ObjectiveMetricRow {
+    member: String,
+    site: String,
+    period: String,
+    target: String,
+    variable: String,
+    metric: ObjectiveMetric,
+    weight: f64,
+    min_pairs: usize,
+    pairs: usize,
+    value: f64,
+    observation_sd: Option<f64>,
+    loss: f64,
+    model_mean: f64,
+    observation_mean: f64,
 }
 
 enum WorkerEvent {
@@ -884,6 +914,7 @@ fn run_members(
                 let event_tx = tx.clone();
                 let event_member = member.clone();
                 let event_site = site.clone();
+                let mut last_task_log_emit = None;
                 let result = crate::run_case(
                     &case_dir,
                     &kernel_dir,
@@ -909,14 +940,27 @@ fn run_members(
                                 line: None,
                                 ok: Some(true),
                             },
-                            RunNotice::Log { stage, line } => WorkerEvent::Notice {
-                                member: event_member.clone(),
-                                site: event_site.clone(),
-                                kind: "task_log".into(),
-                                stage: stage.into(),
-                                line: Some(line.into()),
-                                ok: None,
-                            },
+                            RunNotice::Log { stage, line } => {
+                                // The complete member log is already on disk. Sampling here,
+                                // before the unbounded scheduler channel, prevents parallel
+                                // CoLM chatter from exhausting memory while preserving live logs.
+                                if line.trim().is_empty()
+                                    || !should_emit_task_log(
+                                        &mut last_task_log_emit,
+                                        Instant::now(),
+                                    )
+                                {
+                                    return;
+                                }
+                                WorkerEvent::Notice {
+                                    member: event_member.clone(),
+                                    site: event_site.clone(),
+                                    kind: "task_log".into(),
+                                    stage: stage.into(),
+                                    line: Some(line.into()),
+                                    ok: None,
+                                }
+                            }
                             RunNotice::StageDone { stage, ok } => WorkerEvent::Notice {
                                 member: event_member.clone(),
                                 site: event_site.clone(),
@@ -1801,7 +1845,8 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
         ));
     }
     write_bytes(&results.join("objectives.csv"), objectives.as_bytes())?;
-    let mut metrics = String::from("member,site,period,target,variable,metric,weight,pairs,value,loss,model_mean,observation_mean\n");
+    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean\n");
+    let mut metric_rows = Vec::new();
     for task in state
         .tasks
         .values()
@@ -1812,7 +1857,7 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
         };
         for row in result.calibration.iter().chain(&result.validation) {
             metrics.push_str(&format!(
-                "{},{},{},{},{},{:?},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}\n",
                 task.member,
                 row.site,
                 row.period,
@@ -1820,15 +1865,36 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
                 row.variable,
                 row.metric,
                 row.weight,
+                row.min_pairs,
                 row.pairs,
                 row.value,
+                row.observation_sd
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
                 row.loss,
                 row.model_mean,
                 row.observation_mean
             ));
+            metric_rows.push(ObjectiveMetricRow {
+                member: task.member.clone(),
+                site: row.site.clone(),
+                period: row.period.clone(),
+                target: row.key.clone(),
+                variable: row.variable.clone(),
+                metric: row.metric,
+                weight: row.weight,
+                min_pairs: row.min_pairs,
+                pairs: row.pairs,
+                value: row.value,
+                observation_sd: row.observation_sd,
+                loss: row.loss,
+                model_mean: row.model_mean,
+                observation_mean: row.observation_mean,
+            });
         }
     }
-    write_bytes(&results.join("metrics.csv"), metrics.as_bytes())
+    write_bytes(&results.join("metrics.csv"), metrics.as_bytes())?;
+    write_json(&results.join("metrics.json"), &metric_rows)
 }
 
 pub fn retry(study_dir: &Path, include_review: bool) -> Result<StudyState> {
@@ -2346,6 +2412,21 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_logs_are_sampled_before_entering_the_scheduler_channel() {
+        let start = Instant::now();
+        let mut last = None;
+        assert!(should_emit_task_log(&mut last, start));
+        assert!(!should_emit_task_log(
+            &mut last,
+            start + TASK_LOG_EMIT_INTERVAL / 2
+        ));
+        assert!(should_emit_task_log(
+            &mut last,
+            start + TASK_LOG_EMIT_INTERVAL
+        ));
+    }
 
     #[test]
     fn trial_selection_never_prefers_failed_candidate() {
@@ -3005,6 +3086,103 @@ mod tests {
             "{error}"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn objective_tables_write_parseable_metrics_json_result_file() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-metrics-json-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manifest = Manifest {
+            schema_version: 1,
+            id: "s".into(),
+            root: root.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec: StudySpec {
+                kind: StudyKind::Tuning,
+                method: StudyMethod::DifferentialEvolution,
+                seed: 0,
+                kernel_dir: None,
+                base_cases: vec!["site".into()],
+                observations: BTreeMap::new(),
+                site_mode: super::super::spec::SiteMode::Shared,
+                parameters: Vec::new(),
+                outputs: Vec::new(),
+                analysis_from: None,
+                analysis_to: None,
+                targets: Vec::new(),
+                budget: Default::default(),
+            },
+            members: Vec::new(),
+            provenance: Default::default(),
+        };
+        let mut state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: String::new(),
+                status: TaskStatus::Succeeded,
+                stage: None,
+                reason: None,
+                objective: Some(0.25),
+                validation_objective: Some(0.3),
+                process: None,
+            }],
+        )
+        .unwrap();
+        state.candidates.insert(
+            "m000001".into(),
+            CandidateState {
+                generation: 0,
+                feasible: true,
+                calibration: Some(0.25),
+                validation: Some(0.3),
+                reason: None,
+            },
+        );
+        write_json(
+            &task_result_path(&manifest, "m000001", "site"),
+            &TaskResult {
+                member: "m000001".into(),
+                site: "site".into(),
+                outputs: Vec::new(),
+                calibration: vec![TargetResult {
+                    key: "Qle".into(),
+                    site: "site".into(),
+                    variable: "Qle".into(),
+                    period: "calibration".into(),
+                    metric: ObjectiveMetric::Nrmse,
+                    weight: 1.0,
+                    min_pairs: 2,
+                    pairs: 12,
+                    value: 0.4,
+                    observation_sd: Some(2.0),
+                    loss: 0.2,
+                    model_mean: 5.0,
+                    observation_mean: 4.5,
+                }],
+                validation: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        write_objective_tables(&manifest, &state).unwrap();
+        let files = result_files(&root).unwrap();
+        assert!(files.iter().any(|file| file.path == "metrics.json"));
+        let rows: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("results/metrics.json")).unwrap())
+                .unwrap();
+        assert_eq!(rows[0]["member"], "m000001");
+        assert_eq!(rows[0]["target"], "Qle");
+        assert_eq!(rows[0]["min_pairs"], 2);
+        assert_eq!(rows[0]["observation_sd"], 2.0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

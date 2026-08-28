@@ -17,8 +17,10 @@ const {
   aggregateMember,
   aggregateStudy,
   aggregateStudyStatuses,
+  bestTuningSummary,
   aggregateStages,
   paginate,
+  percentageWindow,
   replaceScopedStudyDirs,
   scopedStudyDirs,
   studyBudget,
@@ -92,6 +94,37 @@ assert.equal(aggregateStudy({
     'm2/A': { member: 'm2', site: 'A', status: 'queued' },
   },
 }).status, 'Paused');
+const deManifest = { spec: { kind: 'tuning', method: 'differential-evolution', budget: { population: 4, generations: 2 } } };
+const deTasks = Object.fromEntries(['m000000', 'm000001', 'm000002', 'm000003', 'm000004']
+  .map(member => [`${member}/A`, { member, site: 'A', status: 'succeeded' }]));
+const runningDe = aggregateStudy({
+  manifest: deManifest,
+  state: {
+    status: 'running',
+    completed_candidates: 4,
+    candidates: { m000000: { feasible: true, calibration: 1 } },
+    tasks: deTasks,
+  },
+});
+assert.equal(runningDe.status, 'Running');
+assert.equal(runningDe.done, 5);
+assert.equal(runningDe.total, 13);
+assert.ok(runningDe.progress < 1, 'DE progress must not reach 100% before future generations are done');
+const endedEarlyDe = aggregateStudy({ manifest: deManifest, state: { status: 'completed', completed_candidates: 4, tasks: deTasks } });
+assert.deepEqual({ done: endedEarlyDe.done, total: endedEarlyDe.total, progress: endedEarlyDe.progress }, { done: 5, total: 13, progress: 1 });
+assert.deepEqual(percentageWindow(0, 8 * 86400, 0, 75, 86400), { from: 0, to: 6 * 86400 });
+assert.deepEqual(percentageWindow(0, 8 * 86400, 75, 100, 86400), { from: 6 * 86400, to: 8 * 86400 });
+assert.throws(() => percentageWindow(0, 86400, 0, 1, 86400), /shorter/);
+const best = bestTuningSummary({
+  state: {
+    best_member: 'm000001',
+    candidates: {
+      m000000: { generation: 0, feasible: true, calibration: 2, validation: 3 },
+      m000001: { generation: 1, feasible: true, calibration: 1, validation: 2.5 },
+    },
+  },
+});
+assert.deepEqual({ member: best.member, generation: best.generation, calibration: best.calibration }, { member: 'm000001', generation: 1, calibration: 1 });
 assert.equal(aggregateStudy({
   status: 'cancelled',
   tasks: {
@@ -115,6 +148,7 @@ assert.deepEqual(studyActionState('paused', true), {
   run: false, refresh: true, retry: false, pause: false, resume: true,
   cancel: true, export: true, apply: false, results: false,
 });
+assert.equal(studyActionState('needs_review', true).run, true);
 assert.equal(studyActionState('needs_review', true).cancel, true);
 assert.deepEqual(studyActionState('completed_with_failures', true), {
   run: false, refresh: true, retry: true, pause: false, resume: false,

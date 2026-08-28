@@ -247,6 +247,13 @@ if (resultUi.includes("node('label', 'evaluation-variable study-param-option')")
 if (!resultCss.includes('#uq-params, #tune-params { grid-template-columns: minmax(0, 1fr); }')) {
   throw new Error('Study parameter ranges must use full-width rows so lower/upper inputs cannot overlap neighboring parameters');
 }
+if (!html.includes('<div class="study-control-row study-window-controls">\n                <label for="tune-from">')
+    || !resultCss.includes('.study-window-controls label.check { grid-column: 1 / -1; }')) {
+  throw new Error('the independent-validation toggle must span both columns so validation start/end stay on one row');
+}
+if (!html.includes('DE/rand/1/bin') || !html.includes('10.1023/A:1008202821328')) {
+  throw new Error('the tuning design must identify its differential-evolution variant and foundational reference');
+}
 if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes('function renderStudyWizard(kind)')
     || !resultUi.includes('function setStudyWizardPage(kind, page)')
@@ -321,10 +328,28 @@ if (!resultUi.includes('function invalidateActiveStudy(kind, reason)')
     || !resultUi.includes('setActiveStudyDirs(kind, [])')) {
   throw new Error('Study design edits must invalidate the previously generated task registration');
 }
-if (!resultUi.includes("invoke('read_timing', { dirs: [c.dir] })")
-    || !resultUi.includes('initializeTuningDates(rows.map(row => ({')
+const tuningTimingLoader = resultUi.slice(resultUi.indexOf('async function initializeTuningDatesFromCases'), resultUi.indexOf('function renderStudyParams'));
+if (!tuningTimingLoader.includes("invoke('read_timing', { dirs: [c.dir] })")
+    || tuningTimingLoader.indexOf('tuningCasePeriods = new Map();') > tuningTimingLoader.indexOf("invoke('read_timing'")
+    || !tuningTimingLoader.includes('catch { renderTuningWindowPreview(cases); }')
+    || !resultUi.includes('tuningCasePeriods = new Map(periods.map')
+    || !resultUi.includes('tuningWindowForCase(c, design.fromPct, design.toPct)')
+    || resultUi.includes('if (tuningDatesInitialized === studyScopeKey())')
     || !resultUi.includes('运行时先用基准成员复核真实模型—观测配对数')) {
-  throw new Error('Multi-site tuning must use the shared date overlap and explain the real-pair baseline gate');
+  throw new Error('Multi-site tuning must map percentage windows per site and explain the real-pair baseline gate');
+}
+if (!resultUi.includes('bestTuningSummary(envelope)')
+    || !resultUi.includes('最优方案摘要')
+    || !resultUi.includes('候选目标函数排名')
+    || !resultUi.includes("invoke('study_apply_preview'")
+    || !resultUi.includes('按站点、目标与时段分解')
+    || !resultUi.includes('观测标准差')
+    || !resultUi.includes('较 baseline 改进')) {
+  throw new Error('Tuning results must show the actual best member, parameters, and ranked objectives');
+}
+if (!resultUi.includes('if (!matched && statusByEvent[eventKind])')
+    || !resultUi.includes('候选成员按代生成；成员表、目标函数和临时最佳会继续更新')) {
+  throw new Error('New DE generation members and their changing provisional results must appear during the run');
 }
 if (!resultUi.includes('const studyAsyncRequests =')
     || !resultUi.includes('async function loadStudyParams(stillCurrent = () => true)')
@@ -436,6 +461,9 @@ if (!resultUi.includes("label: `${meta.label} · ${variable}`")
     || !resultUi.includes("dialogText('导出目录')")
     || !resultUi.includes("dialogText('另存为算例目录')")
     || !resultUi.includes("dialogText('存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？')")
+    || !resultUi.includes("'确认并继续'")
+    || !resultUi.includes("const primaryEnabled = actions.run || (hasTask && current === 'NeedsReview')")
+    || !resultUi.includes('按输入指纹跳过')
     || !resultUi.includes("dialogText('即将应用以下参数改动：')")
     || !resultUi.includes("if (hasBackend) await invoke('print_report')")
     || !resultUi.includes('else if (typeof window.print')

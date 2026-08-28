@@ -699,7 +699,7 @@
           </div>
           <div class="result-tools result-tools-wide study-runtime-actions">
             <button class="btn-ghost" id="uq-status" disabled>手动刷新</button>
-            <button class="btn-ghost" id="uq-retry" disabled hidden>重试失败项</button>
+            <button class="btn-ghost" id="uq-retry" disabled hidden>重试失败/需检查成员</button>
             <button class="btn-ghost" id="uq-pause" disabled hidden>暂停新任务</button>
             <button class="btn-ghost" id="uq-resume" disabled hidden>继续计算</button>
             <button class="btn-ghost btn-stop" id="uq-cancel" disabled>终止运行</button>
@@ -728,12 +728,12 @@
           <div>
             <h3>先设计，再准备任务，最后开始搜索</h3>
             <div class="study-lifecycle">
-              <div><strong>1 · 设计</strong><span>定义优化目标、观测配对门槛、spin-up、校准/验证窗口、参数范围和搜索预算。</span></div>
+              <div><strong>1 · 设计</strong><span>定义优化目标、观测配对门槛、spin-up、校准/验证百分比窗口、参数范围和搜索预算。</span></div>
               <div><strong>2 · 准备任务</strong><span>冻结目标函数、观测文件、基础算例和内核指纹，生成基准成员与初始种群；这个阶段不运行模型。</span></div>
               <div><strong>3 · 开始搜索</strong><span>运行基准成员和候选成员，按代更新目标函数、最佳参数、日志和可重试失败项；原算例保持不变。</span></div>
             </div>
             <div class="study-step-explain" aria-live="polite">
-              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、spin-up、校准/验证时段、种群、代数、随机种子和并行数。</span></div>
+              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、spin-up、校准/验证百分比窗口、种群、代数、随机种子和并行数。</span></div>
               <div><strong>为什么需要</strong><span id="tune-step-why">这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。</span></div>
             </div>
           </div>
@@ -742,7 +742,8 @@
         <div class="study-wizard-progress" aria-live="polite"><span id="tune-step-progress">第 1/7 页 · 优化设计</span></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="0">
           <h3>1 · 优化设计</h3>
-          <div class="ch">选择目标指标、校准/验证窗口和差分进化预算。尚未运行过原算例也可以准备；调优任务会自行运行基准成员和候选成员。</div>
+          <div class="ch">选择目标指标、校准/验证百分比窗口和差分进化预算。尚未运行过原算例也可以准备；调优任务会自行运行基准成员和候选成员。</div>
+          <p class="muted mini">算法实现为确定性 DE/rand/1/bin。奠基文献：Storn, R. and Price, K. (1997), Differential Evolution – A Simple and Efficient Heuristic for Global Optimization over Continuous Spaces, Journal of Global Optimization, 11(4), 341–359. DOI: 10.1023/A:1008202821328。</p>
           <div class="study-design-grid">
             <section class="study-design-field">
               <label for="tune-metric">指标</label>
@@ -787,19 +788,20 @@
               <p class="muted mini">内核自动沿用基本设定，创建时记录指纹；调优不需要也不显示额外运行目录。</p>
             </section>
             <section class="study-design-field study-design-field-wide">
-              <span class="study-field-label">校准与独立验证窗口</span>
-              <div class="study-control-row">
-                <label for="tune-from">校准开始 <input class="input" id="tune-from" type="date" aria-describedby="tune-window-help"></label>
-                <label for="tune-to">校准结束 <input class="input" id="tune-to" type="date" aria-describedby="tune-window-help"></label>
+              <span class="study-field-label">校准与独立验证窗口（按各站点时段百分比）</span>
+              <div class="study-control-row study-window-controls">
+                <label for="tune-from">校准开始（%） <input class="input" id="tune-from" type="number" min="0" max="100" step="1" value="0" aria-describedby="tune-window-help"></label>
+                <label for="tune-to">校准结束（%） <input class="input" id="tune-to" type="number" min="0" max="100" step="1" value="75" aria-describedby="tune-window-help"></label>
                 <label class="check"><input id="tune-validation" type="checkbox" checked> 独立验证</label>
-                <label for="tune-val-from">验证开始 <input class="input" id="tune-val-from" type="date" aria-describedby="tune-window-help"></label>
-                <label for="tune-val-to">验证结束 <input class="input" id="tune-val-to" type="date" aria-describedby="tune-window-help"></label>
+                <label for="tune-val-from">验证开始（%） <input class="input" id="tune-val-from" type="number" min="0" max="100" step="1" value="75" aria-describedby="tune-window-help"></label>
+                <label for="tune-val-to">验证结束（%） <input class="input" id="tune-val-to" type="number" min="0" max="100" step="1" value="100" aria-describedby="tune-window-help"></label>
               </div>
               <dl class="study-field-help" id="tune-window-help">
-                <div><dt>是什么</dt><dd>校准窗口用于搜索参数；验证窗口只用于搜索结束后评估，不参与优化。</dd></div>
-                <div><dt>怎么选</dt><dd>校准期应覆盖目标过程的典型变化；验证期应与校准期不重叠，最好覆盖不同季节或年份。</dd></div>
-                <div><dt>选择后果</dt><dd>窗口太短容易过拟合；关闭独立验证会更快，但无法判断最佳参数是否能泛化到未参与搜索的数据。</dd></div>
+                <div><dt>是什么</dt><dd>校准窗口用于搜索参数；验证窗口只用于搜索结束后评估，不参与优化。这里填 0–100%，软件会按每个站点自己的正式输出时段换算成日期。</dd></div>
+                <div><dt>怎么选</dt><dd>默认 0–75% 用于校准、75–100% 用于验证；多站点记录长短不同时仍按各站点自身时段切分。</dd></div>
+                <div><dt>选择后果</dt><dd>窗口百分比太窄会导致有效配对不足或过拟合；关闭独立验证会更快，但无法判断最佳参数是否能泛化到未参与搜索的数据。</dd></div>
               </dl>
+              <div id="tune-window-preview" class="result-empty" aria-live="polite">读取算例时间后显示各站点实际日期。</div>
             </section>
             <section class="study-design-field">
               <label for="tune-pop">种群</label>
@@ -884,7 +886,7 @@
           </div>
           <div class="result-tools result-tools-wide study-runtime-actions">
             <button class="btn-ghost" id="tune-status" disabled>手动刷新</button>
-            <button class="btn-ghost" id="tune-retry" disabled hidden>重试失败项</button>
+            <button class="btn-ghost" id="tune-retry" disabled hidden>重试失败/需检查成员</button>
             <button class="btn-ghost" id="tune-pause" disabled hidden>暂停新任务</button>
             <button class="btn-ghost" id="tune-resume" disabled hidden>继续搜索</button>
             <button class="btn-ghost btn-stop" id="tune-cancel" disabled>终止运行</button>

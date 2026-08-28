@@ -396,6 +396,31 @@ fn study_process_keys_normalize_equivalent_paths() {
 }
 
 #[test]
+fn sidecar_failures_are_persisted_in_the_study_log() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-study-sidecar-log-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    append_study_event(
+        root.to_str().unwrap(),
+        &serde_json::json!({"kind":"study_failed","reason":"signal: 9"}),
+    );
+    let event: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(root.join("study.log"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(event["reason"], "signal: 9");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cancelling_a_finished_case_does_not_poison_its_next_run() {
     let processes = RunProcesses::default();
     let case = "/tmp/finished".to_string();
