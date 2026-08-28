@@ -649,11 +649,24 @@
         <div class="work-head"><span class="kicker">第 7 步 · 参数调优</span></div>
         <h1>参数调优</h1>
         <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立调优任务中搜索参数，不覆盖原算例。</p>
+        <div class="card study-purpose" id="tune-purpose">
+          <h3>参数调优要回答什么？</h3>
+          <p>参数调优会把模型输出与观测配对，自动搜索一组让目标函数更小的参数。它用于校准当前算例的可调参数，并用独立验证期检查这组参数是否只是在校准期“凑巧变好”。</p>
+          <div class="study-purpose-grid">
+            <div><strong>可以回答</strong><span>在给定参数范围、目标变量和观测证据下，哪组参数让校准期误差最低，以及这组参数在验证期是否仍然表现稳定。</span></div>
+            <div><strong>不能直接回答</strong><span>最优参数不是唯一真值；观测误差、未调参数、错误物理方案或过短验证期都会让“最优”只对当前设置成立。</span></div>
+          </div>
+        </div>
         <div class="card study-guide">
           <div>
-            <h3>先确认观测与目标，再开始搜索</h3>
+            <h3>先设计，再准备任务，最后开始搜索</h3>
+            <div class="study-lifecycle">
+              <div><strong>1 · 设计</strong><span>定义优化目标、观测配对门槛、spin-up、校准/验证窗口、参数范围和搜索预算。</span></div>
+              <div><strong>2 · 准备任务</strong><span>冻结目标函数、观测文件、基础算例和内核指纹，生成基准成员与初始种群；这个阶段不运行模型。</span></div>
+              <div><strong>3 · 开始搜索</strong><span>运行基准成员和候选成员，按代更新目标函数、最佳参数、日志和可重试失败项；原算例保持不变。</span></div>
+            </div>
             <div class="study-step-explain" aria-live="polite">
-              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群、代数和并行数。</span></div>
+              <div><strong>本页做什么</strong><span id="tune-step-do">选择目标指标、最少有效配对数、站点组织方式、spin-up、校准/验证时段、种群、代数、随机种子和并行数。</span></div>
               <div><strong>为什么需要</strong><span id="tune-step-why">这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。</span></div>
             </div>
           </div>
@@ -663,25 +676,109 @@
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="0">
           <h3>1 · 优化设计</h3>
           <div class="ch">选择目标指标、校准/验证窗口和差分进化预算。尚未运行过原算例也可以准备；调优任务会自行运行基准成员和候选成员。</div>
-          <div class="result-tools result-tools-wide">
-            <label>指标 <select class="select" id="tune-metric"><option value="nrmse">NRMSE</option><option value="mae">MAE</option><option value="abs_bias">|Bias|</option><option value="nse">1-NSE</option><option value="kge">1-KGE</option><option value="r2">1-R²</option><option value="r">1-R</option></select></label>
-            <label>最少配对 <input class="input" id="tune-min-pairs" type="number" min="2" value="30"></label>
-            <label>站点方式 <select class="select" id="tune-site-mode"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独调优任务</option></select></label>
-            <label>校准开始 <input class="input" id="tune-from" type="date"></label>
-            <label>校准结束 <input class="input" id="tune-to" type="date"></label>
-            <label class="check"><input id="tune-validation" type="checkbox" checked> 独立验证</label>
-            <label>验证开始 <input class="input" id="tune-val-from" type="date"></label>
-            <label>验证结束 <input class="input" id="tune-val-to" type="date"></label>
-            <label>种群 <input class="input" id="tune-pop" type="number" min="4" max="1000" value="12"></label>
-            <label>代数 <input class="input" id="tune-gen" type="number" min="1" value="5"></label>
-            <label>随机种子 <input class="input" id="tune-seed" type="number" value="1"></label>
-            <label>同时运行数（并行） <input class="input" id="tune-jobs" type="number" min="1" step="1" value="1"></label>
-            <label>内核目录 <input class="input" id="tune-kernel-dir" readonly placeholder="使用当前内核"></label>
-            <button class="btn-ghost" id="tune-refresh-params">读取参数</button>
+          <div class="study-design-grid">
+            <section class="study-design-field">
+              <label for="tune-metric">指标</label>
+              <select class="select" id="tune-metric" aria-describedby="tune-metric-help"><option value="nrmse">NRMSE</option><option value="mae">MAE</option><option value="abs_bias">|Bias|</option><option value="nse">1-NSE</option><option value="kge">1-KGE</option><option value="r2">1-R²</option><option value="r">1-R</option></select>
+              <dl class="study-field-help" id="tune-metric-help">
+                <div><dt>是什么</dt><dd>目标函数把模型与观测的差异压缩成一个要最小化的数；不同指标强调误差大小、偏差、相关性或综合形状。</dd></div>
+                <div><dt>怎么选</dt><dd>默认 NRMSE 适合不同量纲变量；关注绝对误差用 MAE，关注系统偏差用 |Bias|，关注水文过程形状可试 1-NSE 或 1-KGE。</dd></div>
+                <div><dt>选择后果</dt><dd>优化器只会优化你选的指标；换指标可能得到不同参数，因此结果解释必须写清楚目标函数。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="tune-min-pairs">最少配对</label>
+              <input class="input" id="tune-min-pairs" type="number" min="2" value="30" aria-describedby="tune-min-pairs-help">
+              <dl class="study-field-help" id="tune-min-pairs-help">
+                <div><dt>是什么</dt><dd>模型 history 与观测在同一时间上同时有效的最少样本数；低于该数的变量或站点不会进入目标函数。</dd></div>
+                <div><dt>怎么选</dt><dd>流程测试可临时调低；正式校准应高于一个短期天气事件，通常至少几十到上百个有效点。</dd></div>
+                <div><dt>选择后果</dt><dd>设得太低会让少量偶然点主导参数；设得太高会排除缺测多或时段短的目标。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="tune-site-mode">站点方式</label>
+              <select class="select" id="tune-site-mode" aria-describedby="tune-site-mode-help"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独调优任务</option></select>
+              <dl class="study-field-help" id="tune-site-mode-help">
+                <div><dt>是什么</dt><dd>决定多个站点是共用一组参数，还是每个站点各自搜索一组参数。</dd></div>
+                <div><dt>怎么选</dt><dd>默认共享参数，适合寻找跨站点更稳健的参数；只有明确研究站点差异时才用单站独立调优。</dd></div>
+                <div><dt>选择后果</dt><dd>共享参数更难但更不容易过拟合单站；独立调优可能提升单站指标，但任务量和解释复杂度都会增加。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field study-design-field-wide">
+              <span class="study-field-label">模型预热（spin-up）</span>
+              <div class="study-control-row">
+                <label for="tune-spinup-years">每轮预热年数 <input class="input" id="tune-spinup-years" type="number" min="0" step="1" value="0" aria-describedby="tune-spinup-help"></label>
+                <label for="tune-spinup-repeat">重复轮数 <input class="input" id="tune-spinup-repeat" type="number" min="0" step="1" value="0" aria-describedby="tune-spinup-help"></label>
+                <button class="btn-ghost" id="tune-spinup-apply" type="button">应用到当前算例</button>
+              </div>
+              <dl class="study-field-help" id="tune-spinup-help">
+                <div><dt>是什么</dt><dd>与基本设定里的预热相同：正式校准前先运行若干轮，让慢变量接近平衡；预热期不参与目标函数。</dd></div>
+                <div><dt>怎么选</dt><dd>任一格为 0 就是不预热。输入没变时可沿用基本设定；土壤水热或碳库初值敏感时增加预热。</dd></div>
+                <div><dt>选择后果</dt><dd>预热会增加每个候选成员耗时，但能降低初值影响；点击应用才会同步当前基础算例。</dd></div>
+              </dl>
+              <p class="muted mini" id="tune-spinup-note">读取当前算例预热设置后显示。</p>
+              <p class="muted mini">内核自动沿用基本设定，创建时记录指纹；调优不需要也不显示额外运行目录。</p>
+            </section>
+            <section class="study-design-field study-design-field-wide">
+              <span class="study-field-label">校准与独立验证窗口</span>
+              <div class="study-control-row">
+                <label for="tune-from">校准开始 <input class="input" id="tune-from" type="date" aria-describedby="tune-window-help"></label>
+                <label for="tune-to">校准结束 <input class="input" id="tune-to" type="date" aria-describedby="tune-window-help"></label>
+                <label class="check"><input id="tune-validation" type="checkbox" checked> 独立验证</label>
+                <label for="tune-val-from">验证开始 <input class="input" id="tune-val-from" type="date" aria-describedby="tune-window-help"></label>
+                <label for="tune-val-to">验证结束 <input class="input" id="tune-val-to" type="date" aria-describedby="tune-window-help"></label>
+              </div>
+              <dl class="study-field-help" id="tune-window-help">
+                <div><dt>是什么</dt><dd>校准窗口用于搜索参数；验证窗口只用于搜索结束后评估，不参与优化。</dd></div>
+                <div><dt>怎么选</dt><dd>校准期应覆盖目标过程的典型变化；验证期应与校准期不重叠，最好覆盖不同季节或年份。</dd></div>
+                <div><dt>选择后果</dt><dd>窗口太短容易过拟合；关闭独立验证会更快，但无法判断最佳参数是否能泛化到未参与搜索的数据。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="tune-pop">种群</label>
+              <input class="input" id="tune-pop" type="number" min="4" max="1000" value="12" aria-describedby="tune-pop-help">
+              <dl class="study-field-help" id="tune-pop-help">
+                <div><dt>是什么</dt><dd>每一代同时保留和比较的候选参数向量数量。</dd></div>
+                <div><dt>怎么选</dt><dd>参数少时 8–12 可试跑；参数多或范围宽时增加种群以提高覆盖。</dd></div>
+                <div><dt>选择后果</dt><dd>种群越大越稳但更慢；每增加 1 个种群成员，通常每代多运行 1 个候选。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="tune-gen">代数</label>
+              <input class="input" id="tune-gen" type="number" min="1" value="5" aria-describedby="tune-gen-help">
+              <dl class="study-field-help" id="tune-gen-help">
+                <div><dt>是什么</dt><dd>差分进化迭代轮数；每代会根据上一代结果产生新的候选参数。</dd></div>
+                <div><dt>怎么选</dt><dd>5 代适合确认流程；正式搜索需要结合收敛情况和预算增加。</dd></div>
+                <div><dt>选择后果</dt><dd>代数越多越有机会改进目标函数，也会线性增加运行次数和等待时间。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="tune-seed">随机种子</label>
+              <input class="input" id="tune-seed" type="number" min="0" max="9007199254740991" step="1" value="1" aria-describedby="tune-seed-help">
+              <dl class="study-field-help" id="tune-seed-help">
+                <div><dt>是什么</dt><dd>控制初始种群和候选扰动的整数，让同一设计可以复现。</dd></div>
+                <div><dt>怎么选</dt><dd>需要复现时保持不变；想检查搜索偶然性时换种子重新生成调优任务。</dd></div>
+                <div><dt>选择后果</dt><dd>不同种子可能找到不同局部最优；如果结果对种子很敏感，说明预算或参数约束还不够稳。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <label for="tune-jobs">同时运行数（并行）</label>
+              <input class="input" id="tune-jobs" type="number" min="1" step="1" value="1" aria-describedby="tune-jobs-help">
+              <dl class="study-field-help" id="tune-jobs-help">
+                <div><dt>是什么</dt><dd>同时派发的候选成员/站点任务数，上限为本机检测到的逻辑 CPU。</dd></div>
+                <div><dt>怎么选</dt><dd>普通笔记本先用 1–2；确认 CPU、内存和磁盘余量充足后再增加。</dd></div>
+                <div><dt>选择后果</dt><dd>并发只影响墙钟时间，不改变搜索定义；过高会造成资源争用，可能反而变慢或增加失败。</dd></div>
+              </dl>
+            </section>
+            <section class="study-design-field">
+              <span class="study-field-label">可调参数</span>
+              <div class="ch">参数列表来自当前方案、内核和算例；更换物理方案或内核请回到基本设定。</div>
+              <button class="btn-ghost" id="tune-refresh-params">读取参数</button>
+            </section>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点还会乘以站点数。</div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。</div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点独立调优还会乘以站点数。预算页用于在真正生成任务前确认运行规模。</div><div class="study-scale-guide"><p><strong>预算公式：</strong>大致运行次数 =（1 个基准成员 + 种群 ×（代数 + 1））× 目标站点数。并行数只能缩短墙钟时间，不能减少总运行次数；spin-up 会叠加到每个成员。</p></div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。只有模型 history 与观测在校准窗口内达到最少配对数的变量，才会进入目标函数。</div><div class="study-scale-guide"><p><strong>目标权重：</strong>权重决定多个目标如何合成为一个总分。权重大表示优化器更重视该变量；权重必须大于 0，不参与请取消勾选。正式结果需说明使用了哪些目标、权重和有效配对数。</p></div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden>
           <h3>3 · 参数范围</h3>
           <div class="ch">只调当前方案真正会读取的参数；切换物理方案后列表会重新计算。</div>
@@ -729,7 +826,7 @@
           <div id="tune-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始搜索后会自动显示。</div></details></div>
           <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="tune-preview" class="report-preview">尚未生成调优任务。</pre></details>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="ch">先比较校准期和验证期：如果校准明显变好但验证变差，通常表示过拟合、目标窗口太短或参数范围过宽。最佳方案默认只读展示；点击另存会创建新算例，不覆盖原算例。</div><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div></div>
         <div class="study-wizard-foot"><button class="btn-ghost" id="tune-step-prev">← 上一步</button><span class="study-wizard-note" id="tune-step-note"></span><button class="btn-next" id="tune-step-next">下一步 →</button></div>
       </div>
 

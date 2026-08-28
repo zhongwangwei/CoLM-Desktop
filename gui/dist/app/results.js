@@ -1393,13 +1393,14 @@ async function prepareActivePane() {
     const kind = step === 'result-tuning' ? 'tuning' : 'uq';
     const scopeKey = studyScopeKey();
     const isCurrent = () => token === activePaneRequest && state.step === step && studyScopeKey() === scopeKey;
-    syncStudyKernelLabels();
     renderStudyWizard(kind);
     try {
       await loadStudyParams(isCurrent);
       if (!isCurrent()) return;
+      await renderStudySpinup(kind, isCurrent);
+      if (!isCurrent()) return;
       if (kind === 'tuning') await renderTuningTargets(isCurrent);
-      else { await renderUqSpinup(isCurrent); await renderStudyOutputs(isCurrent); }
+      else await renderStudyOutputs(isCurrent);
       if (!isCurrent()) return;
       if (activeStudyDirs(kind).length) await refreshStudy(kind);
     } catch (error) {
@@ -1549,7 +1550,7 @@ const studyWizardHelp = {
     ['查看输出分位数包络、参数影响排序和成员明细，并按站点与变量加载图表。', '这些结果用于判断预测区间、主要不确定性来源，以及下一步应优先约束哪些参数。'],
   ],
   tuning: [
-    ['选择目标指标、最少有效配对数、站点组织方式、校准/验证时段、种群、代数和并行数。', '这些设置定义优化问题、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。'],
+    ['选择目标指标、最少有效配对数、站点组织方式、模型预热、校准/验证时段、种群、代数、随机种子和并行数。', '这些设置共同定义优化问题、初始状态、数据证据门槛和搜索成本；验证期独立检验参数泛化能力。'],
     ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
     ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
     ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '调优成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
@@ -1581,7 +1582,7 @@ const setActiveStudyDirs = (kind, dirs) => {
   studyDirs[kind] = replaceScopedStudyDirs(studyDirs[kind] || [], studyScope().map(item => item.dir), dirs);
 };
 const currentKernel = () => $('kernel')?.value || '';
-const uqSpinupTarget = () => studyScope().map(c => c.dir);
+const studySpinupTarget = () => studyScope().map(c => c.dir);
 const setPreview = (kind, text) => { const el = $(kind === 'tuning' ? 'tune-preview' : 'uq-preview'); if (el) el.textContent = text; };
 const studyStatusLabel = value => dialogText({
   Draft: '尚未生成', Ready: '待开始', Pending: '等待中', Materialized: '已准备', Queued: '等待运行',
@@ -1673,12 +1674,13 @@ function renderStudyActions(kind) {
   }
 }
 
-async function renderUqSpinup(stillCurrent = () => true) {
-  const note = $('uq-spinup-note');
-  const dirs = uqSpinupTarget();
+async function renderStudySpinup(kind, stillCurrent = () => true) {
+  const prefix = kind === 'tuning' ? 'tune' : 'uq';
+  const note = $(`${prefix}-spinup-note`);
+  const dirs = studySpinupTarget();
   if (!note) return;
   if (!dirs.length) {
-    for (const id of ['uq-spinup-years', 'uq-spinup-repeat']) if ($(id)) $(id).value = '0';
+    for (const name of ['years', 'repeat']) if ($(`${prefix}-spinup-${name}`)) $(`${prefix}-spinup-${name}`).value = '0';
     note.textContent = '创建算例后显示预热设置。';
     return;
   }
@@ -1686,26 +1688,27 @@ async function renderUqSpinup(stillCurrent = () => true) {
   try {
     const t = await invoke('read_timing', { dirs });
     if (!stillCurrent()) return;
-    if ($('uq-spinup-years')) $('uq-spinup-years').value = String(Math.max(0, Number(t.spinup_years) || 0));
-    if ($('uq-spinup-repeat')) $('uq-spinup-repeat').value = String(Math.max(0, Number(t.spinup_repeat) || 0));
+    if ($(`${prefix}-spinup-years`)) $(`${prefix}-spinup-years`).value = String(Math.max(0, Number(t.spinup_years) || 0));
+    if ($(`${prefix}-spinup-repeat`)) $(`${prefix}-spinup-repeat`).value = String(Math.max(0, Number(t.spinup_repeat) || 0));
     note.textContent = t.spinup_varies
       ? `这 ${t.count} 个算例的预热设置不一致；应用后会统一。`
       : (t.spinup_repeat ? `当前：每轮 ${t.spinup_years} 年，重复 ${t.spinup_repeat} 轮；预热期不写 history。` : '当前未启用模型预热。');
   } catch (error) { if (stillCurrent()) note.textContent = `无法读取预热设置：${error?.message || error}`; }
 }
 
-async function applyUqSpinup() {
-  const dirs = uqSpinupTarget();
+async function applyStudySpinup(kind) {
+  const prefix = kind === 'tuning' ? 'tune' : 'uq';
+  const dirs = studySpinupTarget();
   if (!dirs.length) return status('没有已建算例可设置预热。');
-  const years = Number($('uq-spinup-years')?.value);
-  const repeat = Number($('uq-spinup-repeat')?.value);
+  const years = Number($(`${prefix}-spinup-years`)?.value);
+  const repeat = Number($(`${prefix}-spinup-repeat`)?.value);
   if (!Number.isSafeInteger(years) || years < 0 || !Number.isSafeInteger(repeat) || repeat < 0) {
     throw new Error('预热年数和重复轮数必须是非负整数。');
   }
   const r = await invoke('set_spinup', { dirs, years, repeat, kernelDir: currentKernel() });
   state.text = r.text;
   await markResultsStale(dirs);
-  await renderUqSpinup();
+  await renderStudySpinup(kind);
   status(repeat > 0 && years > 0 ? `预热：每轮 ${years} 年，共重复 ${repeat} 轮` : '已关闭预热');
 }
 
@@ -2171,12 +2174,15 @@ function studyDesign(kind) {
     if (!Number.isInteger(minPairs) || minPairs < 2) throw new Error('最少配对样本数必须是至少 2 的整数。');
     const population = Number($('tune-pop')?.value);
     const generations = Number($('tune-gen')?.value);
+    const seedText = $('tune-seed')?.value.trim() || '';
+    const seed = Number(seedText);
     if (!Number.isInteger(population) || population < 4) throw new Error('种群必须是至少 4 的整数。');
     if (!Number.isInteger(generations) || generations < 1) throw new Error('代数必须是至少 1 的整数。');
+    if (!seedText || !Number.isSafeInteger(seed) || seed < 0) throw new Error('随机种子必须是非负安全整数。');
     if (!Number.isSafeInteger(population * (generations + 1)) || population * (generations + 1) > MAX_STUDY_CANDIDATES) {
       throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
     }
-    return { from, to, validation_from, validation_to, minPairs, population, generations };
+    return { from, to, validation_from, validation_to, minPairs, population, generations, seed };
   }
   const method = $('uq-method')?.value || 'lhs';
   const candidate_count = method === 'lhs' ? Number($('uq-count')?.value) : undefined;
@@ -2209,7 +2215,7 @@ function studySpec(kind, cases, independent = false) {
       });
     if (!targets.length) throw new Error('参数调优至少选择一个目标变量。');
     return {
-      kind: 'tuning', method: 'differential-evolution', seed: Number($('tune-seed')?.value || 1), kernel_dir,
+      kind: 'tuning', method: 'differential-evolution', seed: design.seed, kernel_dir,
       base_cases: cases.map(c => c.dir), observations, parameters, site_mode: independent ? 'independent' : 'shared',
       targets,
       budget: { population: design.population, generations: design.generations, jobs: studyJobCount('tuning') },
@@ -2607,10 +2613,6 @@ async function applyBestCandidate() {
   setPreview('tuning', created.join('\n'));
 }
 
-function syncStudyKernelLabels() {
-  if ($('tune-kernel-dir')) $('tune-kernel-dir').value = currentKernel();
-}
-
 function wireStudyButton(id, fn) { const el = $(id); if (el) el.onclick = () => fn().catch(e => status(e.message || e)); }
 if (listen) listen('study://event', event => {
   const payload = event.payload || {};
@@ -2627,8 +2629,9 @@ if (listen) listen('study://event', event => {
   }
 });
 wireStudyButton('uq-refresh-params', async () => { await loadStudyParams(); await renderStudyOutputs(); });
-wireStudyButton('uq-spinup-apply', applyUqSpinup);
+wireStudyButton('uq-spinup-apply', () => applyStudySpinup('uq'));
 wireStudyButton('tune-refresh-params', async () => { await loadStudyParams(); await renderTuningTargets(); });
+wireStudyButton('tune-spinup-apply', () => applyStudySpinup('tuning'));
 wireStudyButton('uq-create', () => createStudy('uq'));
 wireStudyButton('tune-create', () => createStudy('tuning'));
 wireStudyButton('uq-run', () => runStudy('uq'));
@@ -2641,7 +2644,7 @@ for (const kind of ['uq', 'tuning']) for (const action of ['pause', 'resume', 'c
 wireStudyButton('uq-export-study', () => exportStudy('uq'));
 wireStudyButton('tune-export-study', () => exportStudy('tuning'));
 wireStudyButton('tune-apply-best', applyBestCandidate);
-for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen']) if ($(id)) $(id).oninput = $(id).onchange = () => {
+for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen', 'tune-seed']) if ($(id)) $(id).oninput = $(id).onchange = () => {
   if (id === 'uq-method') for (const target of ['uq-count', 'uq-seed']) $(target).disabled = $('uq-method').value === 'oat';
   renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
 };
@@ -2672,5 +2675,4 @@ addEventListener('colm:mode', () => {
   studyParamCasesKey = '';
   if (state.step === 'result-uncertainty' || state.step === 'result-tuning') prepareActivePane();
 });
-syncStudyKernelLabels();
 refreshVars();

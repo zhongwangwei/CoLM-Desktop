@@ -130,7 +130,7 @@ for (const kind of ['uq', 'tuning']) {
     .map(match => Number(match[1])).sort((a, b) => a - b);
   if (steps.join(',') !== '0,1,2,3,4,5,6') throw new Error(`${kind} must remain a seven-page guided analysis workflow`);
 }
-for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以准备', '先设计，再准备任务，最后开始计算', '先确认观测与目标，再开始搜索']) {
+for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以准备', '先设计，再准备任务，最后开始计算', '先设计，再准备任务，最后开始搜索']) {
   if (!html.includes(text)) throw new Error(`Study guidance is missing: ${text}`);
 }
 for (const text of [
@@ -170,6 +170,19 @@ for (const text of ['创建 Study', '运行 Study', '导出 Study']) {
 for (const hidden of ['uq-site-mode', 'uq-from', 'uq-to', 'uq-kernel-dir', 'uq-site-mode-help', 'uq-window-help', 'uq-kernel-help']) {
   if (html.includes(`id="${hidden}"`)) throw new Error(`uncertainty design should not expose ${hidden}`);
 }
+if (html.includes('id="tune-kernel-dir"')) {
+  throw new Error('tuning must inherit the current kernel instead of exposing a fake runtime-directory choice');
+}
+for (const id of [
+  'tune-purpose', 'tune-metric-help', 'tune-min-pairs-help', 'tune-site-mode-help',
+  'tune-spinup-years', 'tune-spinup-repeat', 'tune-spinup-apply', 'tune-spinup-note',
+  'tune-window-help', 'tune-pop-help', 'tune-gen-help', 'tune-seed-help', 'tune-jobs-help',
+]) {
+  if (!html.includes(`id="${id}"`)) throw new Error(`tuning guidance is missing ${id}`);
+}
+for (const text of ['参数调优要回答什么？', '先设计，再准备任务，最后开始搜索', '目标权重：', '权重必须大于 0', '如果校准明显变好但验证变差']) {
+  if (!html.includes(text)) throw new Error(`tuning scientific guidance is missing: ${text}`);
+}
 for (const metric of ['abs_bias', 'nse', 'r']) {
   if (!html.includes(`value="${metric}"`)) throw new Error(`tuning metric selector is missing ${metric}`);
 }
@@ -184,13 +197,18 @@ if (!resultUi.includes("site_mode: 'shared'")
 }
 if (!resultUi.includes("invoke('read_timing'")
     || !resultUi.includes("invoke('set_spinup'")
-    || !resultUi.includes("uqSpinupTarget")
-    || !resultUi.includes("renderUqSpinup")
+    || !resultUi.includes("studySpinupTarget")
+    || !resultUi.includes("renderStudySpinup")
+    || !resultUi.includes("wireStudyButton('tune-spinup-apply', () => applyStudySpinup('tuning'))")
     || !resultUi.includes('state.text = r.text;')
     || !resultUi.includes('预热年数和重复轮数必须是非负整数。')
     || !resultUi.includes('创建算例后显示预热设置。')
     || !resultUi.includes("const independent = kind === 'tuning' && $('tune-site-mode')?.value === 'independent'")) {
   throw new Error('uncertainty design must expose and apply model spin-up settings from the base cases');
+}
+if (!resultUi.includes("const seedText = $('tune-seed')?.value.trim() || ''")
+    || !resultUi.includes('seed: design.seed')) {
+  throw new Error('tuning random seeds must be validated and frozen like uncertainty seeds');
 }
 if (resultUi.includes("node('label', 'evaluation-variable study-param-option')")
     || !resultUi.includes("node('div', 'evaluation-variable study-param-option')")
