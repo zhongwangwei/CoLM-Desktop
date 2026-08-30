@@ -32,7 +32,7 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
    USE MOD_Namelist, only: DEF_Srfdata_CompressLevel, DEF_USE_RangeCheck
 #ifdef USEMPI
    USE MOD_SPMD_Task, only: p_comm_glb, p_err, p_is_master, p_is_io, p_is_worker, &
-      p_address_master, p_np_worker, p_np_io, p_address_worker, p_address_io, &
+      p_address_master, p_np_glb, p_np_worker, p_np_io, p_address_worker, p_address_io, &
       p_stat, mpi_tag_data, MPI_LOGICAL, MPI_INTEGER, MPI_REAL8, MPI_SUM, CoLM_Stop
 #else
    USE MOD_SPMD_Task, only: p_is_master, p_is_io, p_is_worker, p_np_worker, p_np_io, CoLM_Stop
@@ -382,6 +382,37 @@ CONTAINS
       real(r8) :: sum_h_activity_area, valid_area_depth, value, area, depth_weight
       real(r8), allocatable :: grid_values(:), grid_weights(:)
       type(pointer_real8_1d), allocatable :: recv_values(:), recv_weights(:)
+#ifdef FLAT_SPMD
+      integer, allocatable :: sendcounts(:), recvcounts(:), sdisps(:), rdisps(:)
+      real(r8), allocatable :: send_values(:), send_weights(:), received_values(:), received_weights(:)
+#endif
+
+#ifdef FLAT_SPMD
+      IF (p_np_io /= p_np_glb .or. p_np_worker /= p_np_glb .or. &
+          .not. allocated(mapping%glist) .or. .not. allocated(mapping%io_glist)) &
+         CALL CoLM_Stop (' ***** ERROR: invalid flat methane pH mapping')
+
+      allocate(sendcounts(0:p_np_glb-1), recvcounts(0:p_np_glb-1))
+      allocate(sdisps(0:p_np_glb-1), rdisps(0:p_np_glb-1))
+      DO iproc = 0, p_np_glb-1
+         sendcounts(iproc) = mapping%io_glist(iproc)%ng
+      ENDDO
+      CALL mpi_alltoall(sendcounts, 1, MPI_INTEGER, recvcounts, 1, MPI_INTEGER, &
+         p_comm_glb, p_err)
+      DO iproc = 0, p_np_glb-1
+         IF (recvcounts(iproc) /= mapping%glist(iproc)%ng) &
+            CALL CoLM_Stop (' ***** ERROR: inconsistent flat methane pH request counts')
+      ENDDO
+
+      sdisps(0) = 0
+      rdisps(0) = 0
+      DO iproc = 1, p_np_glb-1
+         sdisps(iproc) = sdisps(iproc-1) + sendcounts(iproc-1)
+         rdisps(iproc) = rdisps(iproc-1) + recvcounts(iproc-1)
+      ENDDO
+      allocate(send_values(max(1,sum(sendcounts))), send_weights(max(1,sum(sendcounts))))
+      allocate(received_values(max(1,sum(recvcounts))), received_weights(max(1,sum(recvcounts))))
+#endif
 
       IF (p_is_io) THEN
          ierr_loc = nf90_open(trim(rawfile), NF90_NOWRITE, ncid_loc)
@@ -393,6 +424,14 @@ CONTAINS
          IF (ierr_loc /= NF90_NOERR) CALL CoLM_Stop (' ***** ERROR: PHH2O variable is missing on I/O rank')
 
          DO iproc = 0, p_np_worker-1
+#ifdef FLAT_SPMD
+            ng = sendcounts(iproc)
+            IF (ng <= 0) CYCLE
+            CALL read_ph_runs(ncid_loc, vid_loc, nlat, nlon, ndepth, layer_weight, &
+               mapping%io_glist(iproc)%ilon, mapping%io_glist(iproc)%ilat, &
+               send_values(sdisps(iproc)+1:sdisps(iproc)+ng), &
+               send_weights(sdisps(iproc)+1:sdisps(iproc)+ng))
+#else
             ng = mapping%glist(iproc)%ng
             IF (ng <= 0) CYCLE
             allocate(grid_values(ng), grid_weights(ng))
@@ -405,12 +444,20 @@ CONTAINS
                mpi_tag_data, p_comm_glb, p_err)
             deallocate(grid_values, grid_weights)
 #endif
+#endif
          ENDDO
 
          ierr_loc = nf90_close(ncid_loc)
          IF (ierr_loc /= NF90_NOERR) CALL CoLM_Stop (' ***** ERROR: cannot close PHH2O on I/O rank')
       ENDIF
 
+#ifdef FLAT_SPMD
+      CALL mpi_alltoallv(send_values, sendcounts, sdisps, MPI_REAL8, &
+         received_values, recvcounts, rdisps, MPI_REAL8, p_comm_glb, p_err)
+      CALL mpi_alltoallv(send_weights, sendcounts, sdisps, MPI_REAL8, &
+         received_weights, recvcounts, rdisps, MPI_REAL8, p_comm_glb, p_err)
+      deallocate(sendcounts, recvcounts, sdisps, send_values, send_weights)
+#else
       IF (p_is_worker) THEN
          allocate(recv_values(0:p_np_io-1), recv_weights(0:p_np_io-1))
          DO iproc = 0, p_np_io-1
@@ -428,15 +475,23 @@ CONTAINS
             deallocate(grid_values, grid_weights)
 #endif
          ENDDO
+      ENDIF
+#endif
 
+      IF (p_is_worker) THEN
          DO iset = 1, numpatch
             sum_h_activity_area = 0._r8
             valid_area_depth = 0._r8
             DO ipart = 1, mapping%npart(iset)
                iproc = mapping%address(iset)%val(1,ipart)
                iloc = mapping%address(iset)%val(2,ipart)
+#ifdef FLAT_SPMD
+               value = received_values(rdisps(iproc)+iloc)
+               depth_weight = received_weights(rdisps(iproc)+iloc)
+#else
                value = recv_values(iproc)%val(iloc)
                depth_weight = recv_weights(iproc)%val(iloc)
+#endif
                area = mapping%areapart(iset)%val(ipart)
                IF (value < 2._r8 .or. value > 10._r8 .or. area <= 0._r8 .or. depth_weight <= 0._r8) CYCLE
                sum_h_activity_area = sum_h_activity_area + 10._r8 ** (-value) * area * depth_weight
@@ -460,11 +515,15 @@ CONTAINS
             ENDDO
          ENDIF
 
+#ifdef FLAT_SPMD
+         deallocate(rdisps, received_values, received_weights)
+#else
          DO iproc = 0, p_np_io-1
             IF (allocated(recv_values(iproc)%val)) deallocate(recv_values(iproc)%val)
             IF (allocated(recv_weights(iproc)%val)) deallocate(recv_weights(iproc)%val)
          ENDDO
          deallocate(recv_values, recv_weights)
+#endif
       ENDIF
    END SUBROUTINE aggregate_sparse_ph
 
