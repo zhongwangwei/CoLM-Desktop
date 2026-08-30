@@ -80,9 +80,16 @@ CONTAINS
          allocate (elm_data_address(0:p_np_glb-1))
          DO iwork = 0, p_np_glb-1
             allocate (elm_data_address(iwork)%val(numelm_worker(iwork)))
-            elm_data_address(iwork)%val = &
-               (/ (vec_worker_dsp(iwork)+i, i=1,numelm_worker(iwork)) /)
          ENDDO
+
+         allocate (order(totalnumelm))
+         order = (/ (i, i=1,totalnumelm) /)
+         CALL quicksort (totalnumelm, eindex_glb, order)
+         DO i = 1, totalnumelm
+            iwork = findloc_ud(order(i) > vec_worker_dsp, back=.true.) - 1
+            elm_data_address(iwork)%val(order(i)-vec_worker_dsp(iwork)) = i
+         ENDDO
+         deallocate (order)
       ENDIF
 
       deallocate (numelm_worker, vec_worker_dsp)

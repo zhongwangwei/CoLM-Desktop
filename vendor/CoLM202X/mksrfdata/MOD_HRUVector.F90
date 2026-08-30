@@ -51,6 +51,8 @@ CONTAINS
    integer, allocatable :: rbuff (:)
 
    integer, allocatable :: hru_dsp_glb (:)
+   integer, allocatable :: numelm_worker(:), numhru_worker(:)
+   integer, allocatable :: vec_worker_dsp(:), hru_rank_dsp(:), sendbuf(:)
    integer :: ielm, i, ielm_glb
 
    integer :: nhru, nelm, hru_dsp_loc
@@ -65,6 +67,99 @@ CONTAINS
             allocate (nhru_bsn (numelm))
             nhru_bsn = elm_hru%subend - elm_hru%substt + 1
          ENDIF
+
+#ifdef FLAT_SPMD
+         allocate (numelm_worker(0:p_np_glb-1), vec_worker_dsp(0:p_np_glb-1))
+         CALL mpi_allgather (numelm, 1, MPI_INTEGER, numelm_worker, 1, MPI_INTEGER, p_comm_glb, p_err)
+         vec_worker_dsp(0) = 0
+         DO iwork = 1, p_np_glb-1
+            vec_worker_dsp(iwork) = vec_worker_dsp(iwork-1) + numelm_worker(iwork-1)
+         ENDDO
+
+         allocate (sendbuf(max(1,numelm)))
+         IF (numelm > 0) sendbuf(1:numelm) = nhru_bsn
+         IF (p_is_master) THEN
+            allocate (rbuff(max(1,totalnumelm)))
+         ELSE
+            allocate (rbuff(1))
+         ENDIF
+         CALL mpi_gatherv (sendbuf, numelm, MPI_INTEGER, rbuff, numelm_worker, &
+            vec_worker_dsp, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         deallocate (sendbuf)
+
+         IF (p_is_master) THEN
+            allocate (nhru_bsn_glb(totalnumelm))
+            DO iwork = 0, p_np_glb-1
+               IF (numelm_worker(iwork) > 0) THEN
+                  nhru_bsn_glb(elm_data_address(iwork)%val) = &
+                     rbuff(vec_worker_dsp(iwork)+1:vec_worker_dsp(iwork)+numelm_worker(iwork))
+               ENDIF
+            ENDDO
+            totalnumhru = sum(nhru_bsn_glb)
+
+            allocate (hru_dsp_glb(totalnumelm))
+            IF (totalnumelm > 0) hru_dsp_glb(1) = 0
+            DO ielm = 2, totalnumelm
+               hru_dsp_glb(ielm) = hru_dsp_glb(ielm-1) + nhru_bsn_glb(ielm-1)
+            ENDDO
+
+            allocate (hru_data_address(0:p_np_glb-1))
+            DO iwork = 0, p_np_glb-1
+               nhru = sum(nhru_bsn_glb(elm_data_address(iwork)%val))
+               IF (nhru > 0) allocate (hru_data_address(iwork)%val(nhru))
+               hru_dsp_loc = 0
+               DO ielm = 1, numelm_worker(iwork)
+                  ielm_glb = elm_data_address(iwork)%val(ielm)
+                  nhru = nhru_bsn_glb(ielm_glb)
+                  IF (nhru > 0) THEN
+                     hru_data_address(iwork)%val(hru_dsp_loc+1:hru_dsp_loc+nhru) = &
+                        (/ (i, i=hru_dsp_glb(ielm_glb)+1,hru_dsp_glb(ielm_glb)+nhru) /)
+                     hru_dsp_loc = hru_dsp_loc + nhru
+                  ENDIF
+               ENDDO
+            ENDDO
+         ENDIF
+         deallocate (rbuff)
+
+         allocate (numhru_worker(0:p_np_glb-1), hru_rank_dsp(0:p_np_glb-1))
+         CALL mpi_allgather (numhru, 1, MPI_INTEGER, numhru_worker, 1, MPI_INTEGER, p_comm_glb, p_err)
+         hru_rank_dsp(0) = 0
+         DO iwork = 1, p_np_glb-1
+            hru_rank_dsp(iwork) = hru_rank_dsp(iwork-1) + numhru_worker(iwork-1)
+         ENDDO
+
+         allocate (sendbuf(max(1,numhru)))
+         IF (numhru > 0) sendbuf(1:numhru) = landhru%settyp
+         IF (p_is_master) THEN
+            allocate (rbuff(max(1,sum(numhru_worker))))
+         ELSE
+            allocate (rbuff(1))
+         ENDIF
+         CALL mpi_gatherv (sendbuf, numhru, MPI_INTEGER, rbuff, numhru_worker, &
+            hru_rank_dsp, MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+         IF (p_is_master) THEN
+            allocate (eindx_hru(totalnumhru), htype_hru(totalnumhru))
+            DO ielm = 1, totalnumelm
+               nhru = nhru_bsn_glb(ielm)
+               IF (nhru > 0) eindx_hru(hru_dsp_glb(ielm)+1:hru_dsp_glb(ielm)+nhru) = eindex_glb(ielm)
+            ENDDO
+            DO iwork = 0, p_np_glb-1
+               IF (numhru_worker(iwork) > 0) THEN
+                  htype_hru(hru_data_address(iwork)%val) = &
+                     rbuff(hru_rank_dsp(iwork)+1:hru_rank_dsp(iwork)+numhru_worker(iwork))
+               ENDIF
+            ENDDO
+            htype_hru = abs(htype_hru)
+         ENDIF
+
+         CALL mpi_bcast (totalnumhru, 1, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         deallocate (numelm_worker, numhru_worker, vec_worker_dsp, hru_rank_dsp, sendbuf, rbuff)
+         IF (allocated(nhru_bsn)) deallocate (nhru_bsn)
+         IF (allocated(nhru_bsn_glb)) deallocate (nhru_bsn_glb)
+         IF (allocated(hru_dsp_glb)) deallocate (hru_dsp_glb)
+         RETURN
+#endif
 
 #ifdef USEMPI
          mesg = (/p_iam_glb, numelm/)
