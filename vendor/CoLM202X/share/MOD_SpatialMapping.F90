@@ -449,7 +449,8 @@ CONTAINS
 
       ENDIF
 
-#ifdef USEMPI
+      ! FLAT_SPMD keeps this worker-oriented list; active grid blocks are replicated.
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iproc = 0, p_np_io-1
@@ -784,7 +785,7 @@ CONTAINS
 #endif
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
          DO iproc = 0, p_np_io-1
             idest = p_address_io(iproc)
@@ -1010,6 +1011,7 @@ CONTAINS
 
       IF (p_is_io) THEN
 
+#ifndef FLAT_SPMD
          DO iproc = 0, p_np_worker-1
             IF (this%glist(iproc)%ng > 0) THEN
 
@@ -1036,6 +1038,7 @@ CONTAINS
 #endif
             ENDIF
          ENDDO
+#endif
 
          DO iblkme = 1, gblock%nblkme
             xblk = gblock%xblkme(iblkme)
@@ -1057,7 +1060,17 @@ CONTAINS
 
                allocate (pbuff(iproc)%val (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               DO ig = 1, this%glist(iproc)%ng
+                  ilon = this%glist(iproc)%ilon(ig)
+                  ilat = this%glist(iproc)%ilat(ig)
+                  xblk = this%grid%xblk (ilon)
+                  yblk = this%grid%yblk (ilat)
+                  xloc = this%grid%xloc (ilon)
+                  yloc = this%grid%yloc (ilat)
+                  pbuff(iproc)%val(ig) = gdata%blk(xblk,yblk)%val(xloc,yloc)
+               ENDDO
+#elif defined(USEMPI)
                isrc = p_address_io(iproc)
                CALL mpi_recv (pbuff(iproc)%val, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -1183,7 +1196,7 @@ CONTAINS
             ENDDO
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iproc = 0, p_np_io-1
             IF (this%glist(iproc)%ng > 0) THEN
                idest = p_address_io(iproc)
@@ -1208,7 +1221,9 @@ CONTAINS
 
                allocate (gbuff (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                isrc = p_address_worker(iproc)
                CALL mpi_recv (gbuff, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -1250,6 +1265,13 @@ CONTAINS
             ENDIF
          ENDDO
 
+#ifdef FLAT_SPMD
+         IF (present(spv)) THEN
+            CALL flat_sum_block_2d(gdata, spv)
+         ELSE
+            CALL flat_sum_block_2d(gdata)
+         ENDIF
+#endif
       ENDIF
 
       IF (p_is_worker) THEN
@@ -1338,7 +1360,7 @@ CONTAINS
             ENDDO
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iproc = 0, p_np_io-1
             IF (this%glist(iproc)%ng > 0) THEN
                idest = p_address_io(iproc)
@@ -1368,7 +1390,9 @@ CONTAINS
 
                allocate (gbuff (lb1:ub1, this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                isrc = p_address_worker(iproc)
                CALL mpi_recv (gbuff, &
                   (ub1-lb1+1) * this%glist(iproc)%ng, MPI_REAL8, &
@@ -1407,6 +1431,13 @@ CONTAINS
 
          ENDDO
 
+#ifdef FLAT_SPMD
+         IF (present(spv)) THEN
+            CALL flat_sum_block_3d(gdata, spv)
+         ELSE
+            CALL flat_sum_block_3d(gdata)
+         ENDIF
+#endif
       ENDIF
 
       IF (p_is_worker) THEN
@@ -1500,7 +1531,7 @@ CONTAINS
             ENDDO
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iproc = 0, p_np_io-1
             IF (this%glist(iproc)%ng > 0) THEN
                idest = p_address_io(iproc)
@@ -1533,7 +1564,9 @@ CONTAINS
 
                allocate (gbuff (lb1:ub1, lb2:ub2, this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                isrc = p_address_worker(iproc)
                CALL mpi_recv (gbuff, ndim1 * ndim2 * this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -1571,6 +1604,13 @@ CONTAINS
                deallocate (gbuff)
             ENDIF
          ENDDO
+#ifdef FLAT_SPMD
+         IF (present(spv)) THEN
+            CALL flat_sum_block_4d(gdata, spv)
+         ELSE
+            CALL flat_sum_block_4d(gdata)
+         ENDIF
+#endif
       ENDIF
 
       IF (p_is_worker) THEN
@@ -1642,7 +1682,7 @@ CONTAINS
             ENDDO
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iproc = 0, p_np_io-1
             IF (this%glist(iproc)%ng > 0) THEN
                idest = p_address_io(iproc)
@@ -1663,7 +1703,9 @@ CONTAINS
 
                allocate (gbuff (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                isrc = p_address_worker(iproc)
                CALL mpi_recv (gbuff, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -1693,6 +1735,9 @@ CONTAINS
             ENDIF
          ENDDO
 
+#ifdef FLAT_SPMD
+         CALL flat_max_block_2d(gdata, spval)
+#endif
       ENDIF
 
       IF (p_is_worker) THEN
@@ -1774,7 +1819,7 @@ CONTAINS
                ENDIF
             ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
             DO iproc = 0, p_np_io-1
                IF (this%glist(iproc)%ng > 0) THEN
                   idest = p_address_io(iproc)
@@ -1793,7 +1838,9 @@ CONTAINS
 
                   allocate (gbuff (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+                  gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                   isrc = p_address_worker(iproc)
                   CALL mpi_recv (gbuff, this%glist(iproc)%ng, MPI_REAL8, &
                      isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -1830,6 +1877,10 @@ CONTAINS
          CALL mpi_barrier (p_comm_glb, p_err)
 #endif
       ENDDO
+
+#ifdef FLAT_SPMD
+      IF (p_is_io) CALL flat_sum_block_3d(gdata, spv)
+#endif
 
       IF (p_is_worker) THEN
          DO iproc = 0, p_np_io-1
@@ -1887,7 +1938,7 @@ CONTAINS
             ENDDO
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iproc = 0, p_np_io-1
             IF (this%glist(iproc)%ng > 0) THEN
                idest = p_address_io(iproc)
@@ -1908,7 +1959,9 @@ CONTAINS
 
                allocate (gbuff (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                isrc = p_address_worker(iproc)
                CALL mpi_recv (gbuff, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -1932,6 +1985,9 @@ CONTAINS
             ENDIF
          ENDDO
 
+#ifdef FLAT_SPMD
+         CALL flat_sum_block_2d(sumarea)
+#endif
       ENDIF
 
       IF (p_is_worker) THEN
@@ -1968,6 +2024,7 @@ CONTAINS
    real(r8), allocatable :: gbuff(:)
    type(pointer_real8_1d), allocatable :: pbuff(:)
 
+#ifndef FLAT_SPMD
       IF (p_is_io) THEN
 
          DO iproc = 0, p_np_worker-1
@@ -1998,6 +2055,7 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
       IF (p_is_worker) THEN
 
@@ -2008,7 +2066,17 @@ CONTAINS
 
                allocate (pbuff(iproc)%val (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               DO ig = 1, this%glist(iproc)%ng
+                  ilon = this%glist(iproc)%ilon(ig)
+                  ilat = this%glist(iproc)%ilat(ig)
+                  xblk = this%grid%xblk (ilon)
+                  yblk = this%grid%yblk (ilat)
+                  xloc = this%grid%xloc (ilon)
+                  yloc = this%grid%yloc (ilat)
+                  pbuff(iproc)%val(ig) = gdata%blk(xblk,yblk)%val(xloc,yloc)
+               ENDDO
+#elif defined(USEMPI)
                isrc = p_address_io(iproc)
                CALL mpi_recv (pbuff(iproc)%val, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -2079,6 +2147,7 @@ CONTAINS
    type(pointer_real8_2d), allocatable :: pbuff(:)
 
 
+#ifndef FLAT_SPMD
       IF (p_is_io) THEN
 
          DO iproc = 0, p_np_worker-1
@@ -2108,6 +2177,7 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
       IF (p_is_worker) THEN
 
@@ -2118,7 +2188,17 @@ CONTAINS
 
                allocate (pbuff(iproc)%val (ndim1, this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               DO ig = 1, this%glist(iproc)%ng
+                  ilon = this%glist(iproc)%ilon(ig)
+                  ilat = this%glist(iproc)%ilat(ig)
+                  xblk = this%grid%xblk (ilon)
+                  yblk = this%grid%yblk (ilat)
+                  xloc = this%grid%xloc (ilon)
+                  yloc = this%grid%yloc (ilat)
+                  pbuff(iproc)%val(:,ig) = gdata%blk(xblk,yblk)%val(:,xloc,yloc)
+               ENDDO
+#elif defined(USEMPI)
                isrc = p_address_io(iproc)
                CALL mpi_recv (pbuff(iproc)%val, ndim1 * this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -2188,6 +2268,7 @@ CONTAINS
    integer, allocatable :: gbuff(:)
    type(pointer_int32_1d), allocatable :: pbuff(:)
 
+#ifndef FLAT_SPMD
       IF (p_is_io) THEN
 
          DO iproc = 0, p_np_worker-1
@@ -2218,6 +2299,7 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
       IF (p_is_worker) THEN
 
@@ -2228,7 +2310,17 @@ CONTAINS
 
                allocate (pbuff(iproc)%val (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               DO ig = 1, this%glist(iproc)%ng
+                  ilon = this%glist(iproc)%ilon(ig)
+                  ilat = this%glist(iproc)%ilat(ig)
+                  xblk = this%grid%xblk (ilon)
+                  yblk = this%grid%yblk (ilat)
+                  xloc = this%grid%xloc (ilon)
+                  yloc = this%grid%yloc (ilat)
+                  pbuff(iproc)%val(ig) = gdata%blk(xblk,yblk)%val(xloc,yloc)
+               ENDDO
+#elif defined(USEMPI)
                isrc = p_address_io(iproc)
                CALL mpi_recv (pbuff(iproc)%val, this%glist(iproc)%ng, MPI_INTEGER, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -2286,6 +2378,7 @@ CONTAINS
    type(pointer_real8_1d), allocatable :: pbuff(:)
    real(r8), allocatable :: pdata_tem(:)
 
+#ifndef FLAT_SPMD
       IF (p_is_io) THEN
 
          DO iproc = 0, p_np_worker-1
@@ -2316,6 +2409,7 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
       IF (p_is_worker) THEN
 
@@ -2327,7 +2421,17 @@ CONTAINS
 
                allocate (pbuff(iproc)%val (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               DO ig = 1, this%glist(iproc)%ng
+                  ilon = this%glist(iproc)%ilon(ig)
+                  ilat = this%glist(iproc)%ilat(ig)
+                  xblk = this%grid%xblk (ilon)
+                  yblk = this%grid%yblk (ilat)
+                  xloc = this%grid%xloc (ilon)
+                  yloc = this%grid%yloc (ilat)
+                  pbuff(iproc)%val(ig) = gdata%blk(xblk,yblk)%val(xloc,yloc)
+               ENDDO
+#elif defined(USEMPI)
                isrc = p_address_io(iproc)
                CALL mpi_recv (pbuff(iproc)%val, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -2397,6 +2501,7 @@ CONTAINS
    real(r8), allocatable :: gbuff(:)
    type(pointer_real8_1d), allocatable :: pbuff(:)
 
+#ifndef FLAT_SPMD
       IF (p_is_io) THEN
 
          DO iproc = 0, p_np_worker-1
@@ -2427,6 +2532,7 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
       IF (p_is_worker) THEN
 
@@ -2437,7 +2543,17 @@ CONTAINS
 
                allocate (pbuff(iproc)%val (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               DO ig = 1, this%glist(iproc)%ng
+                  ilon = this%glist(iproc)%ilon(ig)
+                  ilat = this%glist(iproc)%ilat(ig)
+                  xblk = this%grid%xblk (ilon)
+                  yblk = this%grid%yblk (ilat)
+                  xloc = this%grid%xloc (ilon)
+                  yloc = this%grid%yloc (ilat)
+                  pbuff(iproc)%val(ig) = gdata%blk(xblk,yblk)%val(xloc,yloc)
+               ENDDO
+#elif defined(USEMPI)
                isrc = p_address_io(iproc)
                CALL mpi_recv (pbuff(iproc)%val, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -2512,7 +2628,7 @@ CONTAINS
             ENDDO
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iproc = 0, p_np_io-1
             IF (this%glist(iproc)%ng > 0) THEN
                idest = p_address_io(iproc)
@@ -2533,7 +2649,9 @@ CONTAINS
 
                allocate (gbuff (this%glist(iproc)%ng))
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+               gbuff = pbuff(iproc)%val
+#elif defined(USEMPI)
                isrc = p_address_worker(iproc)
                CALL mpi_recv (gbuff, this%glist(iproc)%ng, MPI_REAL8, &
                   isrc, mpi_tag_data, p_comm_glb, p_stat, p_err)
@@ -2557,6 +2675,9 @@ CONTAINS
             ENDIF
          ENDDO
 
+#ifdef FLAT_SPMD
+         CALL flat_sum_block_2d(gdata)
+#endif
          DO iblkme = 1, gblock%nblkme
             xblk = gblock%xblkme(iblkme)
             yblk = gblock%yblkme(iblkme)
@@ -2852,5 +2973,137 @@ CONTAINS
       ENDIF
 
    END SUBROUTINE forc_free_mem_spatial_mapping
+
+#if defined(USEMPI) && defined(FLAT_SPMD)
+   SUBROUTINE flat_sum_block_2d (gdata, missing_value)
+
+   USE MOD_Block, only: gblock
+   USE MOD_DataType, only: block_data_real8_2d
+   USE MOD_SPMD_Task, only: MPI_IN_PLACE, MPI_LOGICAL, MPI_LOR, MPI_REAL8, MPI_SUM, &
+      p_comm_glb, p_err
+   IMPLICIT NONE
+
+   type(block_data_real8_2d), intent(inout) :: gdata
+   real(r8), intent(in), optional :: missing_value
+
+   integer :: iblkme, xblk, yblk
+   logical, allocatable :: valid(:,:)
+
+      DO iblkme = 1, gblock%nblkme
+         xblk = gblock%xblkme(iblkme)
+         yblk = gblock%yblkme(iblkme)
+         IF (present(missing_value)) THEN
+            allocate(valid(size(gdata%blk(xblk,yblk)%val,1), size(gdata%blk(xblk,yblk)%val,2)))
+            valid = gdata%blk(xblk,yblk)%val /= missing_value
+            WHERE (.not. valid) gdata%blk(xblk,yblk)%val = 0._r8
+         ENDIF
+         CALL mpi_allreduce(MPI_IN_PLACE, gdata%blk(xblk,yblk)%val, &
+            size(gdata%blk(xblk,yblk)%val), MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
+         IF (present(missing_value)) THEN
+            CALL mpi_allreduce(MPI_IN_PLACE, valid, size(valid), MPI_LOGICAL, MPI_LOR, p_comm_glb, p_err)
+            WHERE (.not. valid) gdata%blk(xblk,yblk)%val = missing_value
+            deallocate(valid)
+         ENDIF
+      ENDDO
+
+   END SUBROUTINE flat_sum_block_2d
+
+   SUBROUTINE flat_sum_block_3d (gdata, missing_value)
+
+   USE MOD_Block, only: gblock
+   USE MOD_DataType, only: block_data_real8_3d
+   USE MOD_SPMD_Task, only: MPI_IN_PLACE, MPI_LOGICAL, MPI_LOR, MPI_REAL8, MPI_SUM, &
+      p_comm_glb, p_err
+   IMPLICIT NONE
+
+   type(block_data_real8_3d), intent(inout) :: gdata
+   real(r8), intent(in), optional :: missing_value
+
+   integer :: iblkme, xblk, yblk
+   logical, allocatable :: valid(:,:,:)
+
+      DO iblkme = 1, gblock%nblkme
+         xblk = gblock%xblkme(iblkme)
+         yblk = gblock%yblkme(iblkme)
+         IF (present(missing_value)) THEN
+            allocate(valid(size(gdata%blk(xblk,yblk)%val,1), size(gdata%blk(xblk,yblk)%val,2), &
+               size(gdata%blk(xblk,yblk)%val,3)))
+            valid = gdata%blk(xblk,yblk)%val /= missing_value
+            WHERE (.not. valid) gdata%blk(xblk,yblk)%val = 0._r8
+         ENDIF
+         CALL mpi_allreduce(MPI_IN_PLACE, gdata%blk(xblk,yblk)%val, &
+            size(gdata%blk(xblk,yblk)%val), MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
+         IF (present(missing_value)) THEN
+            CALL mpi_allreduce(MPI_IN_PLACE, valid, size(valid), MPI_LOGICAL, MPI_LOR, p_comm_glb, p_err)
+            WHERE (.not. valid) gdata%blk(xblk,yblk)%val = missing_value
+            deallocate(valid)
+         ENDIF
+      ENDDO
+
+   END SUBROUTINE flat_sum_block_3d
+
+   SUBROUTINE flat_sum_block_4d (gdata, missing_value)
+
+   USE MOD_Block, only: gblock
+   USE MOD_DataType, only: block_data_real8_4d
+   USE MOD_SPMD_Task, only: MPI_IN_PLACE, MPI_LOGICAL, MPI_LOR, MPI_REAL8, MPI_SUM, &
+      p_comm_glb, p_err
+   IMPLICIT NONE
+
+   type(block_data_real8_4d), intent(inout) :: gdata
+   real(r8), intent(in), optional :: missing_value
+
+   integer :: iblkme, xblk, yblk
+   logical, allocatable :: valid(:,:,:,:)
+
+      DO iblkme = 1, gblock%nblkme
+         xblk = gblock%xblkme(iblkme)
+         yblk = gblock%yblkme(iblkme)
+         IF (present(missing_value)) THEN
+            allocate(valid(size(gdata%blk(xblk,yblk)%val,1), size(gdata%blk(xblk,yblk)%val,2), &
+               size(gdata%blk(xblk,yblk)%val,3), size(gdata%blk(xblk,yblk)%val,4)))
+            valid = gdata%blk(xblk,yblk)%val /= missing_value
+            WHERE (.not. valid) gdata%blk(xblk,yblk)%val = 0._r8
+         ENDIF
+         CALL mpi_allreduce(MPI_IN_PLACE, gdata%blk(xblk,yblk)%val, &
+            size(gdata%blk(xblk,yblk)%val), MPI_REAL8, MPI_SUM, p_comm_glb, p_err)
+         IF (present(missing_value)) THEN
+            CALL mpi_allreduce(MPI_IN_PLACE, valid, size(valid), MPI_LOGICAL, MPI_LOR, p_comm_glb, p_err)
+            WHERE (.not. valid) gdata%blk(xblk,yblk)%val = missing_value
+            deallocate(valid)
+         ENDIF
+      ENDDO
+
+   END SUBROUTINE flat_sum_block_4d
+
+   SUBROUTINE flat_max_block_2d (gdata, missing_value)
+
+   USE MOD_Block, only: gblock
+   USE MOD_DataType, only: block_data_real8_2d
+   USE MOD_SPMD_Task, only: MPI_IN_PLACE, MPI_LOGICAL, MPI_LOR, MPI_MAX, MPI_REAL8, &
+      p_comm_glb, p_err
+   IMPLICIT NONE
+
+   type(block_data_real8_2d), intent(inout) :: gdata
+   real(r8), intent(in) :: missing_value
+
+   integer :: iblkme, xblk, yblk
+   logical, allocatable :: valid(:,:)
+
+      DO iblkme = 1, gblock%nblkme
+         xblk = gblock%xblkme(iblkme)
+         yblk = gblock%yblkme(iblkme)
+         allocate(valid(size(gdata%blk(xblk,yblk)%val,1), size(gdata%blk(xblk,yblk)%val,2)))
+         valid = gdata%blk(xblk,yblk)%val /= missing_value
+         WHERE (.not. valid) gdata%blk(xblk,yblk)%val = -huge(0._r8)
+         CALL mpi_allreduce(MPI_IN_PLACE, gdata%blk(xblk,yblk)%val, &
+            size(gdata%blk(xblk,yblk)%val), MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
+         CALL mpi_allreduce(MPI_IN_PLACE, valid, size(valid), MPI_LOGICAL, MPI_LOR, p_comm_glb, p_err)
+         WHERE (.not. valid) gdata%blk(xblk,yblk)%val = missing_value
+         deallocate(valid)
+      ENDDO
+
+   END SUBROUTINE flat_max_block_2d
+#endif
 
 END MODULE MOD_SpatialMapping
