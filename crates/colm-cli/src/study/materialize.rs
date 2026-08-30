@@ -61,11 +61,49 @@ pub fn member_case(
     )?;
     copy_process_parameters(&mut document, &baseline, &destination)?;
 
+    let mut case_scalars = Vec::new();
+    for (name, value) in parameters {
+        if let Some((base, _)) = colm_case::pft::override_instance(name) {
+            colm_case::pft::validate_override(base, *value)?;
+            let meta = colm_case::pft::parameter(base).expect("override_instance validated base");
+            document.insert(name, pft_value(meta, *value), "nl_colm")?;
+        } else if colm_case::land_cover::is_parameter(name) {
+            colm_case::land_cover::validate_override(name, *value)?;
+            let field = colm_schema::find(name)
+                .with_context(|| format!("{name} is missing from the generated schema"))?;
+            let group = field
+                .group
+                .with_context(|| format!("{name} is not writable from a namelist"))?;
+            document.insert(name, schema_value(field, *value), group)?;
+        } else {
+            case_scalars.push((name.clone(), *value));
+        }
+    }
+    colm_case::tuning::validate_values(&case_scalars)?;
+
     let member_nml = destination.join("case.nml");
     std::fs::write(&member_nml, document.to_string())
         .with_context(|| format!("cannot write {}", member_nml.display()))?;
-    colm_case::tuning::apply_case_values(&member_nml, parameters)?;
+    colm_case::tuning::apply_case_values(&member_nml, &case_scalars)?;
     Ok(destination)
+}
+
+fn pft_value(meta: &colm_case::pft::ParameterMeta, value: f64) -> Value {
+    match meta.kind {
+        colm_case::pft::Kind::Integer => Value::Int(value as i64),
+        colm_case::pft::Kind::Real => Value::Real {
+            text: format!("{value:.17e}"),
+        },
+    }
+}
+
+fn schema_value(field: &colm_schema::Field, value: f64) -> Value {
+    match field.kind {
+        colm_schema::FieldKind::Integer => Value::Int(value as i64),
+        _ => Value::Real {
+            text: format!("{value:.17e}"),
+        },
+    }
 }
 
 pub fn write_sample_stamp(destination: &Path, member: &MemberPlan) -> Result<()> {
@@ -300,6 +338,50 @@ mod tests {
         assert!(member.join("forcing.nml").is_file());
         assert!(member.join("standard_ch4_parameter.nml").is_file());
         assert!(member.join("unused_parameter.nml").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materializes_only_the_selected_pft_slots() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-member-pft-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let baseline = root.join("base");
+        let member = root.join("study/members/m000001/site");
+        std::fs::create_dir_all(&baseline).unwrap();
+        std::fs::write(baseline.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let original = "&nl_colm\n DEF_CASE_NAME='base'\n DEF_dir_output='out'\n DEF_forcing_namelist='forcing.nml'\n/\n";
+        std::fs::write(baseline.join("case.nml"), original).unwrap();
+
+        member_case(
+            &baseline,
+            &member,
+            "m000001",
+            "site",
+            &[
+                ("DEF_PFT_VMAX25(2)".into(), 40.0),
+                ("DEF_PFT_VMAX25(3)".into(), 50.0),
+            ],
+        )
+        .unwrap();
+        let document =
+            colm_namelist::parse(&std::fs::read_to_string(member.join("case.nml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            document.get("DEF_PFT_VMAX25(2)").and_then(Value::as_f64),
+            Some(40.0)
+        );
+        assert_eq!(
+            document.get("DEF_PFT_VMAX25(3)").and_then(Value::as_f64),
+            Some(50.0)
+        );
+        assert!(document.get("DEF_PFT_VMAX25(4)").is_none());
+        assert_eq!(
+            std::fs::read_to_string(baseline.join("case.nml")).unwrap(),
+            original
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

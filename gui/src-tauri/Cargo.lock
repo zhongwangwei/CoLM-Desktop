@@ -516,6 +516,8 @@ dependencies = [
  "anyhow",
  "colm-namelist",
  "colm-schema",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

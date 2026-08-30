@@ -1223,6 +1223,14 @@ pub fn is_override_path(name: &str) -> bool {
     override_path(name).is_some_and(|(base, index)| index < PFT_LEN && is_parameter(base))
 }
 
+/// Parse a sparse `DEF_PFT_*(Fortran slot)` path into its base key and
+/// zero-based PFT/CFT type used by the Rust/UI APIs.
+pub fn override_instance(name: &str) -> Option<(&str, u8)> {
+    override_path(name).and_then(|(base, index)| {
+        (index < PFT_LEN && is_parameter(base)).then_some((base, index as u8))
+    })
+}
+
 pub fn default_literal(
     name: &str,
     pft_type: u8,

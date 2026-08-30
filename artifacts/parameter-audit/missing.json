@@ -1,0 +1,82 @@
+[
+  {
+    "raw_key": "fveg0_p",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "sai0_p",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "z0mr_p",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "displar_p",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "respcp_p",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "roota",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "rootb",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  },
+  {
+    "raw_key": "dsladlai",
+    "reason": "The Fortran constant has no reviewed sparse runtime override, validation, and real-regression path yet.",
+    "reason_code": "missing_validation_contract",
+    "reason_codes": [
+      "missing_validation_contract",
+      "missing_regression_case"
+    ],
+    "status": "blocked-pending-hook"
+  }
+]

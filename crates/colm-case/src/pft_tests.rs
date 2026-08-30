@@ -169,6 +169,15 @@ fn validates_ranges_and_override_paths() {
 }
 
 #[test]
+fn sparse_override_paths_keep_the_fortran_slot_but_expose_zero_based_types() {
+    assert_eq!(
+        super::pft::override_instance("DEF_PFT_VMAX25(5)"),
+        Some(("DEF_PFT_VMAX25", 4))
+    );
+    assert_eq!(super::pft::override_instance("DEF_PFT_VMAX25(80)"), None);
+}
+
+#[test]
 fn exposes_first_and_last_pft_names() {
     assert_eq!(pft_name(0).unwrap().en, "not vegetated");
     assert_eq!(pft_name(78).unwrap().en, "irrigated tropical soybean");

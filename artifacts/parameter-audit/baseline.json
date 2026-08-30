@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-30T01:04:00+08:00",
+  "git_commit": "d6850d32e0a897fcfe7df3afa2487c9ab955eb91",
+  "branch": "main",
+  "hashes": {
+    "Cargo.lock": "34e3ce8f3049970373a59c9d49d7a0e0d0c83a609d5ff9016ec2578fca26acd5",
+    "oracle/golden/kernel-manifest.json": "becf8d40aa68261145bd47c667655b7668baaf274fd4fcb4529451944db2dba4",
+    "oracle/fixtures/inputs.sha256": "dc62c951e0f8b985862cade203ddac051663da30eb2fd8ff2d6b1ce7f8694321",
+    "vendor/CoLM202X/main/MOD_Const_LC.F90": "b0f7db37a25717e6cbd2c2eef3d386edcdbb15e0d5e72fb0c61ad7c11189677e",
+    "vendor/CoLM202X/main/MOD_Const_PFT.F90": "bd04bd65683a50e4a63907ca22b350669f1d0abc9ee761c43aa5d6a834599cf0",
+    "vendor/CoLM202X/include/pft_override_fields.inc": "861cdaf08c5fe4cfd28c1201d142a39b6380ea0cc4b84eaf6dbc4836bee27d6f"
+  },
+  "parameter_sources": {
+    "schema_fields": 832,
+    "land_cover_catalog_fields": 44,
+    "land_cover_reviewed_constants": 39,
+    "pft_pc_fields": 87,
+    "process_fields": 170,
+    "case_tuning_fields": 44
+  },
+  "checks": [
+    { "command": "cargo fmt --all --check", "status": "passed" },
+    { "command": "cargo test --workspace --lib --bins", "status": "passed" },
+    { "command": "cargo clippy --workspace --all-targets -- -D warnings", "status": "passed" },
+    { "command": "cargo run -q -p xtask -- check-gui", "status": "passed", "detail": "64 commands registered, 64 called, 6 events listened for" },
+    { "command": "for test in gui/tests/*.mjs; do node \"$test\"; done", "status": "passed" },
+    { "command": "cargo test --manifest-path gui/src-tauri/Cargo.toml", "status": "passed", "detail": "142 tests" },
+    { "command": "cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings", "status": "passed" },
+    { "command": "cargo test -p oracle --tests", "status": "passed", "detail": "all non-ignored tests passed; 3 real-run tests remain repository-ignored" },
+    { "command": "cargo run -q -p xtask -- parameter-audit", "status": "missing", "detail": "command not implemented at baseline" }
+  ],
+  "worktree_note": "The pre-existing .gitignore modification is user-owned and was not changed by the audit."
+}

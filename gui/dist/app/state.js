@@ -86,10 +86,21 @@ export const state = {
   irrelevant: new Set(),
   /** 当前内核 + case.nml 的统一字段交互状态。 */
   fieldStates: new Map(),
+  /** Rust 统一参数目录；只读加载，搜索和 Study 共用稳定 ID。 */
+  parameterCatalog: [],
+  parameterSearch: '',
+  parameterStatusFilter: 'all',
+  /** 当前站点实际包含的 PFT/PC 组分，供搜索结果展开作用域。 */
+  parameterPftContexts: [],
+  parameterPftStates: new Map(),
+  /** 当前批次逐算例的 IGBP/USGS 地类，供同地类批量范围与上下文卡片使用。 */
+  parameterLctContexts: [],
   /** 过程参数当前站点；专家外部参数文件与 case.nml 共用这一选择。 */
   expert: false,
   expertCaseDir: null,
   expertPftType: null,
+  parameterPftView: 'single',
+  parameterPftGroup: null,
   /** 结果分析默认收起右侧运行监视器；用户在结果区手动切换后保持到离开结果区。 */
   liveCollapsed: false,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */
