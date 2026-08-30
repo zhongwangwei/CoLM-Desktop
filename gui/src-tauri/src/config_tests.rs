@@ -1880,7 +1880,28 @@ fn all_sites_keeps_land_cover_defaults_editable_but_marks_different_tables() {
         "different defaults are not applicability conflicts"
     );
     assert!(height.default_mixed);
+    assert!(height.context_default.is_none());
+    assert!(height.built_in_default.is_none());
+    assert!(height.effective_value.is_none());
     assert!(!runtime_state(&merged, "DEF_LC_Z0MR").default_mixed);
+}
+
+#[test]
+fn land_cover_contexts_keep_each_case_class_instead_of_flattening_the_batch() {
+    let dirs = batch(
+        "lc-contexts",
+        &[
+            "&nl_colm\n DEF_USE_LCT=.true.\n SITE_landtype=1\n/\n",
+            "&nl_colm\n DEF_USE_LCT=.true.\n SITE_landtype=2\n/\n",
+        ],
+    );
+    let kernel = pft_test_kernel("lc-contexts");
+    let contexts = land_cover_contexts(dirs.clone(), kernel.display().to_string()).unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts[0].dir, dirs[0]);
+    assert_eq!(contexts[0].scheme, "IGBP");
+    assert_eq!(contexts[0].class_index, 1);
+    assert_eq!(contexts[1].class_index, 2);
 }
 
 #[test]
@@ -2558,4 +2579,143 @@ fn batch_runtime_choices_are_intersected_and_empty_intersections_are_locked() {
     assert!(wuest.allowed_values.is_empty());
     assert!(wuest.mixed);
     assert!(wuest.reason.unwrap().contains("没有共同合法值"));
+}
+
+#[test]
+fn explicit_override_export_import_round_trip_omits_inherited_defaults() {
+    let dirs = batch(
+        "parameter-override-roundtrip",
+        &["&nl_colm\n DEF_CASE_NAME='case0'\n DEF_TUNING_ZLND=0.02\n/\n"],
+    );
+    let bundle = export_parameter_overrides(dirs.clone(), None).unwrap();
+    let records = &bundle.cases[0].records;
+    assert!(records.iter().any(|record| {
+        record.parameter_id == "case:DEF_TUNING_ZLND" && record.value == "0.02"
+    }));
+    assert!(!records
+        .iter()
+        .any(|record| record.raw_key == "DEF_TUNING_CAPR"));
+
+    reset_field_batch(
+        dirs.clone(),
+        "DEF_TUNING_ZLND".into(),
+        None,
+    )
+    .unwrap();
+    let json = serde_json::to_string(&bundle).unwrap();
+    let preview = preview_import_parameter_overrides(dirs.clone(), json.clone(), None).unwrap();
+    assert!(preview.can_apply, "{:#?}", preview.items);
+    let before = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    assert!(apply_import_parameter_overrides(
+        dirs.clone(),
+        json.clone(),
+        "stale-preview-token".into(),
+        None,
+    )
+    .is_err());
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap(),
+        before
+    );
+    let applied = apply_import_parameter_overrides(
+        dirs.clone(),
+        json,
+        preview.version_token,
+        None,
+    )
+    .unwrap();
+    assert_eq!(applied.changed, 1);
+    let text = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    let doc = colm_namelist::parse(&text).unwrap();
+    assert_eq!(
+        doc.get("DEF_TUNING_ZLND").map(ToString::to_string),
+        Some("0.02".into())
+    );
+}
+
+#[test]
+fn process_export_omits_present_values_equal_to_fortran_code_defaults() {
+    let dirs = batch(
+        "parameter-process-default-export",
+        &["&nl_colm\n DEF_CASE_NAME='case0'\n/\n"],
+    );
+    std::fs::write(
+        std::path::Path::new(&dirs[0]).join("methane_parameter.nml"),
+        "&nl_colm_methane_parameter\n DEF_METHANE%q10methane=2.\n DEF_METHANE%f_methane=0.25\n/\n",
+    )
+    .unwrap();
+    let bundle = export_parameter_overrides(dirs, None).unwrap();
+    let records = &bundle.cases[0].records;
+    assert!(!records
+        .iter()
+        .any(|record| record.raw_key == "DEF_METHANE%q10methane"));
+    assert!(records.iter().any(|record| {
+        record.raw_key == "DEF_METHANE%f_methane" && record.value == "0.25"
+    }));
+}
+
+#[test]
+fn parameter_import_refuses_igbp_to_usgs_numeric_index_copy() {
+    let source = batch(
+        "parameter-export-igbp",
+        &["&nl_colm\n DEF_CASE_NAME='case0'\n DEF_USE_LCT=.true.\n DEF_USE_USGS=.false.\n SITE_landtype=5\n DEF_LC_VMAX25=40.\n/\n"],
+    );
+    let bundle = export_parameter_overrides(source, None).unwrap();
+    let target = batch(
+        "parameter-import-usgs",
+        &["&nl_colm\n DEF_CASE_NAME='case0'\n DEF_USE_LCT=.true.\n DEF_USE_USGS=.true.\n SITE_landtype=5\n/\n"],
+    );
+    let before = std::fs::read_to_string(std::path::Path::new(&target[0]).join("case.nml"))
+        .unwrap();
+    let preview = preview_import_parameter_overrides(
+        target.clone(),
+        serde_json::to_string(&bundle).unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(!preview.can_apply);
+    assert!(preview.items.iter().any(|item| item
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("IGBP 与 USGS"))));
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&target[0]).join("case.nml")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn pft_matrix_multi_cell_write_is_one_atomic_case_batch() {
+    let dirs = batch(
+        "pft-matrix-atomic",
+        &[
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n SITE_landtype=5\n/\n",
+            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n SITE_landtype=5\n/\n",
+        ],
+    );
+    let kernel = pft_test_kernel("matrix-atomic");
+    let result = set_pft_parameters_batch(
+        vec![
+            PftBatchChange {
+                dirs: dirs.clone(),
+                pft_type: 13,
+                name: "DEF_PFT_VMAX25".into(),
+                value: Some("55".into()),
+            },
+            PftBatchChange {
+                dirs: dirs.clone(),
+                pft_type: 14,
+                name: "DEF_PFT_VMAX25".into(),
+                value: Some("65".into()),
+            },
+        ],
+        kernel.display().to_string(),
+    )
+    .unwrap();
+    assert_eq!(result.changed, 2);
+    for dir in dirs {
+        let text = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap();
+        assert!(text.contains("DEF_PFT_VMAX25(14) = 55"));
+        assert!(text.contains("DEF_PFT_VMAX25(15) = 65"));
+    }
 }

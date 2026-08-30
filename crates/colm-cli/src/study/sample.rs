@@ -3,11 +3,13 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use super::spec::{default_candidate_count, MemberPlan, ScaleSpec, StudyMethod, StudySpec};
+use super::spec::{
+    default_candidate_count, MemberPlan, ParameterSpec, ScaleSpec, StudyMethod, StudySpec,
+};
 
 pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<MemberPlan>> {
     let design_params = sorted_parameters(spec);
-    validate_vector(baseline)?;
+    validate_vector(spec, baseline)?;
     let mut out = vec![MemberPlan {
         id: "m000000".into(),
         generation: 0,
@@ -22,8 +24,8 @@ pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<
             for p in &design_params {
                 for value in [p.sample_min, p.sample_max] {
                     let mut parameters = baseline.clone();
-                    parameters.insert(p.name.clone(), value);
-                    validate_vector(&parameters)?;
+                    parameters.insert(p.member_key(), value);
+                    validate_vector(spec, &parameters)?;
                     out.push(MemberPlan {
                         id: format!("m{n:06}"),
                         generation: 0,
@@ -71,7 +73,7 @@ fn lhs_member(
             let u =
                 (permutations[j][index] as f64 + jitter(spec.seed, j, jitter_index)) / count as f64;
             parameters.insert(
-                p.name.clone(),
+                p.member_key(),
                 map_sample(
                     p.sample_min,
                     p.sample_max,
@@ -80,32 +82,47 @@ fn lhs_member(
                 ),
             );
         }
-        if validate_vector(&parameters).is_ok() {
+        if validate_vector(spec, &parameters).is_ok() {
             return Ok(parameters);
         }
     }
     anyhow::bail!("cannot sample a valid parameter vector after 1000 deterministic retries")
 }
 
-fn validate_vector(values: &BTreeMap<String, f64>) -> Result<()> {
-    colm_case::tuning::validate_values(
-        &values
-            .iter()
-            .map(|(name, value)| (name.clone(), *value))
-            .collect::<Vec<_>>(),
-    )
+pub(super) fn validate_vector(spec: &StudySpec, values: &BTreeMap<String, f64>) -> Result<()> {
+    let mut case_scalars = Vec::new();
+    for parameter in &spec.parameters {
+        let key = parameter.member_key();
+        let value = *values
+            .get(&key)
+            .ok_or_else(|| anyhow::anyhow!("sample is missing {key}"))?;
+        match parameter.descriptor()?.scope {
+            colm_case::parameters::ParameterScope::CaseScalar => {
+                case_scalars.push((parameter.name.clone(), value));
+            }
+            colm_case::parameters::ParameterScope::LandCoverClass => {
+                colm_case::land_cover::validate_override(&parameter.name, value)?;
+            }
+            colm_case::parameters::ParameterScope::PftType
+            | colm_case::parameters::ParameterScope::PcPftComponent => {
+                colm_case::pft::validate_override(&parameter.name, value)?;
+            }
+            _ => anyhow::bail!("{} scope is not implemented by Study", parameter.name),
+        }
+    }
+    colm_case::tuning::validate_values(&case_scalars)
 }
 
 pub fn sorted_parameter_names(spec: &StudySpec) -> Vec<String> {
     sorted_parameters(spec)
         .into_iter()
-        .map(|p| p.name.clone())
+        .map(ParameterSpec::member_key)
         .collect()
 }
 
 fn sorted_parameters(spec: &StudySpec) -> Vec<&super::spec::ParameterSpec> {
     let mut parameters = spec.parameters.iter().collect::<Vec<_>>();
-    parameters.sort_by_key(|p| p.name.to_ascii_lowercase());
+    parameters.sort_by_key(|p| p.member_key().to_ascii_lowercase());
     parameters
 }
 
@@ -167,7 +184,8 @@ fn unit_u64(seed: u64, a: usize, b: usize, nonce: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::study::spec::{
-        ParameterSpec, SiteMode, StudyBudget, StudyKind, StudyMethod, StudySpec,
+        ParameterScopeInstance, ParameterScopeKind, ParameterSpec, SiteMode, StudyBudget,
+        StudyKind, StudyMethod, StudySpec,
     };
 
     #[test]
@@ -182,6 +200,8 @@ mod tests {
             site_mode: SiteMode::Shared,
             parameters: vec![ParameterSpec {
                 name: "DEF_TUNING_CNFAC".into(),
+                parameter_id: None,
+                scope_instance: None,
                 sample_min: 0.1,
                 sample_max: 0.9,
                 scale: Some(ScaleSpec::Linear),
@@ -207,5 +227,50 @@ mod tests {
             let v = row.parameters["DEF_TUNING_CNFAC"];
             assert!((0.1..=0.9).contains(&v));
         }
+    }
+
+    #[test]
+    fn pft_slots_do_not_collapse_into_one_dimension() {
+        let mut spec = StudySpec {
+            kind: StudyKind::Uncertainty,
+            method: StudyMethod::Oat,
+            seed: 1,
+            kernel_dir: None,
+            base_cases: vec!["x".into()],
+            observations: BTreeMap::new(),
+            site_mode: SiteMode::Shared,
+            parameters: Vec::new(),
+            outputs: vec!["f_qle".into()],
+            analysis_from: None,
+            analysis_to: None,
+            targets: vec![],
+            budget: StudyBudget::default(),
+        };
+        spec.parameters = [1, 2]
+            .into_iter()
+            .map(|index| ParameterSpec {
+                name: "DEF_PFT_VMAX25".into(),
+                parameter_id: Some("pft:DEF_PFT_VMAX25".into()),
+                scope_instance: Some(ParameterScopeInstance {
+                    kind: ParameterScopeKind::PftType,
+                    scheme: None,
+                    index: Some(index),
+                    type_name: None,
+                }),
+                sample_min: 10.0,
+                sample_max: 100.0,
+                scale: Some(ScaleSpec::Linear),
+            })
+            .collect();
+        let baseline = BTreeMap::from([
+            ("DEF_PFT_VMAX25(2)".into(), 40.0),
+            ("DEF_PFT_VMAX25(3)".into(), 50.0),
+        ]);
+        let members = design(&spec, &baseline).unwrap();
+        assert_eq!(members.len(), 5);
+        assert_eq!(members[1].parameters["DEF_PFT_VMAX25(2)"], 10.0);
+        assert_eq!(members[1].parameters["DEF_PFT_VMAX25(3)"], 50.0);
+        assert_eq!(members[3].parameters["DEF_PFT_VMAX25(2)"], 40.0);
+        assert_eq!(members[3].parameters["DEF_PFT_VMAX25(3)"], 10.0);
     }
 }

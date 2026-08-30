@@ -82,6 +82,8 @@ jobs:
       - name: GUI interface
         shell: bash
         run: |
+          cargo run -q -p xtask -- parameter-audit
+          git diff --exit-code -- artifacts/parameter-audit
           cargo run -q -p xtask -- check-gui
           node gui/tests/domain.mjs
           node gui/tests/batch.mjs

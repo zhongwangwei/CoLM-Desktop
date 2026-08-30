@@ -13,6 +13,8 @@ publish.workspace = true
 colm-namelist = { path = "../colm-namelist" }
 colm-schema = { path = "../colm-schema" }
 anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

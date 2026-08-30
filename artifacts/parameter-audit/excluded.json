@@ -1,0 +1,182 @@
+[
+  {
+    "candidate_class": "compile-time dimensions",
+    "reason_code": "compile_time_dimension",
+    "status": "excluded-internal"
+  },
+  {
+    "candidate_class": "universal physical constants",
+    "reason_code": "universal_constant",
+    "status": "excluded-internal"
+  },
+  {
+    "candidate_class": "missing-value sentinels",
+    "reason_code": "missing_value_sentinel",
+    "status": "excluded-internal"
+  },
+  {
+    "candidate_class": "solver safety thresholds",
+    "reason_code": "solver_guard",
+    "status": "excluded-internal"
+  },
+  {
+    "candidate_class": "prognostic state variables",
+    "reason_code": "state_variable",
+    "status": "excluded-internal"
+  },
+  {
+    "candidate_class": "diagnostic-only variables",
+    "reason_code": "diagnostic_only",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "canlay_p",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:152",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "rhol_vis_p_pc",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:255",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "rhol_vis_p_default",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:269",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "rhol_nir_p_pc",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:303",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "rhol_nir_p_default",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:317",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "taul_vis_p_pc",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:351",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "taul_vis_p_default",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:365",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "taul_nir_p_pc",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:399",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "taul_nir_p_default",
+    "reason_code": "default_provider_table",
+    "source_location": "MOD_Const_PFT.F90:413",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "woody",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:665",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isshrub",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:733",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isgrass",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:748",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isbetr",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:764",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isbdtr",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:780",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isevg",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:795",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "issed",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:811",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isstd",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:826",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isbare",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:841",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "iscrop",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:856",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "isnatveg",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:871",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "declfact",
+    "reason_code": "diagnostic_only",
+    "source_location": "MOD_Const_PFT.F90:1448",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "allconsl",
+    "reason_code": "diagnostic_only",
+    "source_location": "MOD_Const_PFT.F90:1478",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "mergetoclmpft",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:1554",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "irrig_crop",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_PFT.F90:1710",
+    "status": "excluded-internal"
+  },
+  {
+    "raw_key": "patchtypes",
+    "reason_code": "structural_switch_not_continuous",
+    "source_location": "MOD_Const_LC.F90:84,398",
+    "status": "excluded-internal"
+  }
+]

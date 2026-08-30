@@ -1,0 +1,46 @@
+{
+  "MOD_Const_LC.F90": {
+    "blocked": [
+      "roota",
+      "rootb"
+    ],
+    "classified_arrays": 47,
+    "editable_base_parameters": 44,
+    "excluded": [
+      "patchtypes"
+    ]
+  },
+  "MOD_Const_PFT.F90": {
+    "blocked": [
+      "fveg0_p",
+      "sai0_p",
+      "z0mr_p",
+      "displar_p",
+      "respcp_p",
+      "roota",
+      "rootb",
+      "dsladlai"
+    ],
+    "classified_parameter_declarations": 32
+  },
+  "MOD_Namelist.F90": {
+    "case_tuning_fields": 44,
+    "catalog_descriptors": 876,
+    "schema_fields": 832
+  },
+  "high_confidence_packages": {
+    "bgc_fire_phenology_crop": "covered only where pft_override_fields.inc supplies a reviewed hook",
+    "routing_urban_assimilation_downscaling": "schema/process fields catalogued; remaining coefficients excluded or pending package review",
+    "water_thermal": "classified as future package; no safe runtime hook added"
+  },
+  "pft_override_fields.inc": {
+    "catalog_fields": 87,
+    "override_fields": 87
+  },
+  "process_type_defaults": {
+    "MOD_Tracer_Defs.F90": 10,
+    "MOD_Tracer_ForcingInput.F90": 8,
+    "MOD_Tracer_Particle_Sediment.F90": 18,
+    "MOD_Tracer_Reactive_Methane_Const.F90": 134
+  }
+}

@@ -66,6 +66,7 @@ async function boot() {
   try {
     setStatus(await invoke('backend_ready'));
     state.fields = await invoke('describe_fields');
+    state.parameterCatalog = await invoke('parameter_catalog');
     await refreshKernels();
     await restoreRecent();
     // `restoreRecent` 对文本框只赋值、不派发 `change`（见那里的注释），

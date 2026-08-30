@@ -1366,6 +1366,285 @@ pub async fn study_params() -> Result<String, String> {
     capture_async(vec!["study-params".to_string()]).await
 }
 
+#[derive(Serialize)]
+pub struct StudyParameterContextRow {
+    name: String,
+    id: String,
+    scope: &'static str,
+    scope_instance: crate::config::ParameterScopeInstance,
+    catalog_version: u32,
+    default: f64,
+    default_provider: String,
+    label_zh: String,
+    label_en: String,
+    scale: String,
+    review: &'static str,
+    min: Option<f64>,
+    min_inclusive: Option<bool>,
+    max: Option<f64>,
+    max_inclusive: Option<bool>,
+    sentinel: Option<f64>,
+    sentinel_meaning: Option<&'static str>,
+}
+
+/// Contextual Study selector rows derived from the same catalog and value
+/// readers used by manual editing. Indexed rows are emitted only when every
+/// selected case shares that exact LCT class or PFT/PC component.
+#[tauri::command]
+pub async fn study_parameter_contexts(
+    dirs: Vec<String>,
+    kernel_dir: String,
+) -> Result<Vec<StudyParameterContextRow>, String> {
+    if dirs.is_empty() {
+        return Err("没有可配置的算例".into());
+    }
+    let field_states = crate::config::field_states_batch(dirs.clone(), kernel_dir.clone())?;
+    let fields = field_states
+        .iter()
+        .map(|state| (state.name.to_ascii_lowercase(), state))
+        .collect::<HashMap<_, _>>();
+    let mut rows = Vec::new();
+    for descriptor in colm_case::parameters::all().iter().filter(|descriptor| {
+        descriptor.calibration_eligible
+            && !descriptor.structural_parameter
+            && matches!(
+                descriptor.scope,
+                colm_case::parameters::ParameterScope::CaseScalar
+            )
+    }) {
+        let Some(state) = fields.get(&descriptor.raw_key.to_ascii_lowercase()) else {
+            continue;
+        };
+        if !matches!(state.mode, crate::config::FieldMode::Editable)
+            || state.mixed
+            || state.effective_mixed
+        {
+            continue;
+        }
+        let Some(default) = state.effective_value.as_deref().and_then(parse_number) else {
+            continue;
+        };
+        rows.push(study_row(
+            descriptor,
+            "case-scalar",
+            crate::config::ParameterScopeInstance {
+                kind: "case-scalar".into(),
+                scheme: None,
+                index: None,
+                type_name: None,
+                process_file: None,
+            },
+            default,
+        )?);
+    }
+
+    let lct = crate::config::land_cover_contexts(dirs.clone(), kernel_dir.clone())?;
+    if lct.len() == dirs.len()
+        && lct
+            .iter()
+            .all(|context| context.scheme == lct[0].scheme && context.class_index == lct[0].class_index)
+    {
+        let context = &lct[0];
+        for descriptor in colm_case::parameters::land_cover_descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.calibration_eligible
+                    && descriptor
+                        .id
+                        .split(':')
+                        .nth(1)
+                        .is_some_and(|scheme| scheme == context.scheme)
+            })
+        {
+            let Some(state) = fields.get(&descriptor.raw_key.to_ascii_lowercase()) else {
+                continue;
+            };
+            if !matches!(state.mode, crate::config::FieldMode::Editable)
+                || state.mixed
+                || state.default_mixed
+                || state.effective_mixed
+            {
+                continue;
+            }
+            let Some(default) = state.effective_value.as_deref().and_then(parse_number) else {
+                continue;
+            };
+            rows.push(study_row(
+                descriptor,
+                "land-cover-class",
+                crate::config::ParameterScopeInstance {
+                    kind: "land-cover-class".into(),
+                    scheme: Some(context.scheme.into()),
+                    index: Some(context.class_index),
+                    type_name: None,
+                    process_file: None,
+                },
+                default,
+            )?);
+        }
+    }
+
+    let mut common_pfts: Option<HashMap<u8, crate::sitedata::PftComponentReport>> = None;
+    for dir in &dirs {
+        let components = match crate::sitedata::site_pfts(dir.clone(), kernel_dir.clone()).await {
+            Ok(components) => components,
+            Err(_) => {
+                common_pfts = None;
+                break;
+            }
+        };
+        let current = components
+            .into_iter()
+            .filter(|component| component.pft_type != 0)
+            .map(|component| (component.pft_type, component))
+            .collect::<HashMap<_, _>>();
+        match &mut common_pfts {
+            Some(common) => common.retain(|pft, _| current.contains_key(pft)),
+            None => common_pfts = Some(current),
+        }
+    }
+    if let Some(common_pfts) = common_pfts {
+        let mut pft_types = common_pfts.keys().copied().collect::<Vec<_>>();
+        pft_types.sort_unstable();
+        for pft_type in pft_types {
+            let states = crate::config::pft_parameter_states(
+                dirs.clone(),
+                pft_type,
+                kernel_dir.clone(),
+            )?;
+            for state in states
+                .into_iter()
+                .filter(|state| !state.default_mixed && !state.mixed)
+            {
+                let scope = if state.scope_kind == "pc-pft" {
+                    colm_case::parameters::ParameterScope::PcPftComponent
+                } else {
+                    colm_case::parameters::ParameterScope::PftType
+                };
+                let Some(descriptor) = colm_case::parameters::all().iter().find(|descriptor| {
+                    descriptor.raw_key.eq_ignore_ascii_case(state.name)
+                        && descriptor.scope == scope
+                        && descriptor.calibration_eligible
+                        && !descriptor.structural_parameter
+                }) else {
+                    continue;
+                };
+                let Some(default) = parse_number(&state.effective_value) else {
+                    continue;
+                };
+                let component = &common_pfts[&pft_type];
+                rows.push(study_row(
+                    descriptor,
+                    if state.scope_kind == "pc-pft" {
+                        "pc-pft-component"
+                    } else {
+                        "pft-type"
+                    },
+                    crate::config::ParameterScopeInstance {
+                        kind: if state.scope_kind == "pc-pft" {
+                            "pc-pft-component"
+                        } else {
+                            "pft-type"
+                        }
+                        .into(),
+                        scheme: None,
+                        index: Some(pft_type),
+                        type_name: Some(component.name_en.clone()),
+                        process_file: None,
+                    },
+                    default,
+                )?);
+            }
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.scope_instance.index.cmp(&right.scope_instance.index))
+    });
+    Ok(rows)
+}
+
+fn study_row(
+    descriptor: &colm_case::parameters::ParameterDescriptor,
+    scope: &'static str,
+    scope_instance: crate::config::ParameterScopeInstance,
+    default: f64,
+) -> Result<StudyParameterContextRow, String> {
+    let tuning = colm_case::tuning::find(&descriptor.raw_key)
+        .map_err(|error| format!("{error:#}"))?;
+    let pft = colm_case::pft::parameter(&descriptor.raw_key);
+    let lc = colm_case::land_cover::parameter(&descriptor.raw_key);
+    let min = tuning.and_then(|meta| meta.min.map(|bound| bound.value))
+        .or_else(|| pft.and_then(|meta| meta.min))
+        .or_else(|| lc.and_then(|meta| meta.min));
+    let max = tuning.and_then(|meta| meta.max.map(|bound| bound.value))
+        .or_else(|| pft.and_then(|meta| meta.max))
+        .or_else(|| lc.and_then(|meta| meta.max));
+    let min_inclusive = min.map(|bound| {
+        tuning
+            .and_then(|meta| meta.min.map(|value| value.inclusive))
+            .unwrap_or_else(|| validate_bound(descriptor, bound))
+    });
+    let max_inclusive = max.map(|bound| {
+        tuning
+            .and_then(|meta| meta.max.map(|value| value.inclusive))
+            .unwrap_or_else(|| validate_bound(descriptor, bound))
+    });
+    let sentinel = tuning
+        .and_then(|meta| meta.sentinel.map(|value| value.value))
+        .or_else(|| lc.map(|meta| meta.sentinel));
+    let sentinel_meaning = tuning
+        .and_then(|meta| meta.sentinel.map(|value| value.meaning))
+        .or_else(|| lc.map(|_| "inherit contextual default"));
+    Ok(StudyParameterContextRow {
+        name: descriptor.raw_key.clone(),
+        id: descriptor.id.clone(),
+        scope,
+        scope_instance,
+        catalog_version: descriptor.catalog_version,
+        default,
+        default_provider: descriptor.default_provider.clone(),
+        label_zh: descriptor.label_zh.clone(),
+        label_en: descriptor.label_en.clone(),
+        scale: descriptor
+            .recommended_scale
+            .clone()
+            .unwrap_or_else(|| "linear".into()),
+        review: "expert_range_only",
+        min,
+        min_inclusive,
+        max,
+        max_inclusive,
+        sentinel,
+        sentinel_meaning,
+    })
+}
+
+fn validate_bound(descriptor: &colm_case::parameters::ParameterDescriptor, value: f64) -> bool {
+    match descriptor.scope {
+        colm_case::parameters::ParameterScope::LandCoverClass => {
+            colm_case::land_cover::validate_override(&descriptor.raw_key, value).is_ok()
+        }
+        colm_case::parameters::ParameterScope::PftType
+        | colm_case::parameters::ParameterScope::PcPftComponent => {
+            colm_case::pft::validate_override(&descriptor.raw_key, value).is_ok()
+        }
+        _ => true,
+    }
+}
+
+fn parse_number(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .split('_')
+        .next()
+        .unwrap_or(value)
+        .replace(['d', 'D'], "e")
+        .parse()
+        .ok()
+}
+
 #[tauri::command]
 pub async fn study_create_json(case_root: String, spec_json: String) -> Result<String, String> {
     capture_study_spec("study-create", case_root, spec_json).await

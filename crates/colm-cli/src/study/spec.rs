@@ -91,10 +91,162 @@ impl Default for StudyBudget {
 #[serde(deny_unknown_fields)]
 pub struct ParameterSpec {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_instance: Option<ParameterScopeInstance>,
     pub sample_min: f64,
     pub sample_max: f64,
     #[serde(default)]
     pub scale: Option<ScaleSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterScopeInstance {
+    pub kind: ParameterScopeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParameterScopeKind {
+    CaseScalar,
+    LandCoverClass,
+    PftType,
+    PcPftComponent,
+    SoilLayer,
+}
+
+impl ParameterSpec {
+    pub fn descriptor(&self) -> Result<&'static colm_case::parameters::ParameterDescriptor> {
+        let descriptor = if let Some(id) = self.parameter_id.as_deref() {
+            colm_case::parameters::all()
+                .iter()
+                .find(|candidate| candidate.id.eq_ignore_ascii_case(id))
+        } else if let Some(scope) = &self.scope_instance {
+            colm_case::parameters::all().iter().find(|candidate| {
+                candidate.raw_key.eq_ignore_ascii_case(&self.name)
+                    && scope_matches(candidate, scope)
+            })
+        } else {
+            colm_case::parameters::all().iter().find(|candidate| {
+                candidate.raw_key.eq_ignore_ascii_case(&self.name)
+                    && matches!(
+                        candidate.scope,
+                        colm_case::parameters::ParameterScope::CaseScalar
+                    )
+                    && matches!(candidate.storage, colm_case::parameters::Storage::CaseNml)
+            })
+        }
+        .with_context(|| format!("{} is not a registered Study parameter", self.name))?;
+        if !descriptor.raw_key.eq_ignore_ascii_case(&self.name) {
+            bail!(
+                "parameter ID {} names {}, not {}",
+                descriptor.id,
+                descriptor.raw_key,
+                self.name
+            );
+        }
+        if let Some(scope) = &self.scope_instance {
+            if !scope_matches(descriptor, scope) {
+                bail!("{} scope does not match {}", self.name, descriptor.id);
+            }
+        } else if !matches!(
+            descriptor.scope,
+            colm_case::parameters::ParameterScope::CaseScalar
+        ) {
+            bail!("{} requires an explicit Study scope_instance", self.name);
+        }
+        Ok(descriptor)
+    }
+
+    /// Stable sample/member key. Legacy case scalars keep their old raw key;
+    /// indexed PFT dimensions use the exact sparse Fortran override path.
+    pub fn member_key(&self) -> String {
+        if let Some(scope) = &self.scope_instance {
+            if matches!(
+                scope.kind,
+                ParameterScopeKind::PftType | ParameterScopeKind::PcPftComponent
+            ) {
+                if let Some(index) = scope.index {
+                    return format!("{}({})", self.name, usize::from(index) + 1);
+                }
+            }
+        }
+        self.name.clone()
+    }
+}
+
+fn scope_matches(
+    descriptor: &colm_case::parameters::ParameterDescriptor,
+    scope: &ParameterScopeInstance,
+) -> bool {
+    use colm_case::parameters::ParameterScope as CatalogScope;
+    let kind = matches!(
+        (scope.kind, &descriptor.scope),
+        (ParameterScopeKind::CaseScalar, CatalogScope::CaseScalar)
+            | (
+                ParameterScopeKind::LandCoverClass,
+                CatalogScope::LandCoverClass
+            )
+            | (ParameterScopeKind::PftType, CatalogScope::PftType)
+            | (
+                ParameterScopeKind::PcPftComponent,
+                CatalogScope::PcPftComponent
+            )
+            | (ParameterScopeKind::SoilLayer, CatalogScope::SoilLayer)
+    );
+    kind && (!matches!(scope.kind, ParameterScopeKind::LandCoverClass)
+        || scope.scheme.as_deref().is_some_and(|scheme| {
+            descriptor
+                .id
+                .split(':')
+                .nth(1)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(scheme))
+        }))
+}
+
+fn validate_land_cover_scope(parameter: &ParameterSpec) -> Result<()> {
+    let scope = parameter
+        .scope_instance
+        .as_ref()
+        .context("land-cover Study parameter needs scope_instance")?;
+    let scheme = scope
+        .scheme
+        .as_deref()
+        .context("land-cover Study scope needs scheme IGBP or USGS")?;
+    let max = if scheme.eq_ignore_ascii_case("IGBP") {
+        17
+    } else if scheme.eq_ignore_ascii_case("USGS") {
+        24
+    } else {
+        bail!("land-cover Study scheme must be IGBP or USGS");
+    };
+    let index = scope
+        .index
+        .context("land-cover Study scope needs a one-based class index")?;
+    if !(1..=max).contains(&index) {
+        bail!("{scheme} land-cover class must be in 1..={max}");
+    }
+    Ok(())
+}
+
+fn validate_pft_scope(parameter: &ParameterSpec) -> Result<()> {
+    let index = parameter
+        .scope_instance
+        .as_ref()
+        .and_then(|scope| scope.index)
+        .context("PFT Study scope needs a zero-based index")?;
+    if index >= 79 {
+        bail!("PFT Study index must be in 0..=78");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -188,6 +340,14 @@ pub struct ManifestProvenance {
     pub samples_sha256: String,
     pub required_targets_sha256: String,
     pub outputs_sha256: String,
+    #[serde(default)]
+    pub parameter_catalog_version: u32,
+    #[serde(default)]
+    pub parameter_catalog_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    pub parameter_default_providers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub parameter_source_sha256: BTreeMap<String, String>,
     pub base_case_fingerprints: BTreeMap<String, String>,
     pub observation_sha256: BTreeMap<String, String>,
 }
@@ -281,25 +441,69 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         }
     }
     let mut names = BTreeSet::new();
-    let params = spec
-        .parameters
-        .iter()
-        .map(|p| {
-            if !names.insert(p.name.to_ascii_lowercase()) {
-                bail!("duplicate sampled parameter {}", p.name);
+    let mut case_scalars = Vec::new();
+    for p in &spec.parameters {
+        let descriptor = p.descriptor()?;
+        let key = p.member_key();
+        if !names.insert(key.to_ascii_lowercase()) {
+            bail!("duplicate sampled parameter dimension {key}");
+        }
+        if !descriptor.calibration_eligible || descriptor.structural_parameter {
+            bail!(
+                "{} is not eligible for continuous Study sampling",
+                descriptor.id
+            );
+        }
+        if !p.sample_min.is_finite() || !p.sample_max.is_finite() || p.sample_min >= p.sample_max {
+            bail!(
+                "{} needs finite bounds with sample_min < sample_max",
+                descriptor.id
+            );
+        }
+        let scale = p.scale.unwrap_or(ScaleSpec::Linear);
+        if (scale == ScaleSpec::Linear && !descriptor.supports_linear_range)
+            || (scale == ScaleSpec::Log && !descriptor.supports_log_range)
+        {
+            bail!(
+                "{} does not support the requested sampling scale",
+                descriptor.id
+            );
+        }
+        if scale == ScaleSpec::Log && p.sample_min <= 0.0 {
+            bail!("{} log sampling requires positive bounds", descriptor.id);
+        }
+        match descriptor.scope {
+            colm_case::parameters::ParameterScope::CaseScalar => {
+                case_scalars.push(colm_case::tuning::StudyParameter {
+                    name: descriptor.raw_key.as_str(),
+                    sample_min: p.sample_min,
+                    sample_max: p.sample_max,
+                    scale: match scale {
+                        ScaleSpec::Linear => colm_case::tuning::Scale::Linear,
+                        ScaleSpec::Log => colm_case::tuning::Scale::Log,
+                    },
+                });
             }
-            Ok(colm_case::tuning::StudyParameter {
-                name: p.name.as_str(),
-                sample_min: p.sample_min,
-                sample_max: p.sample_max,
-                scale: match p.scale.unwrap_or(ScaleSpec::Linear) {
-                    ScaleSpec::Linear => colm_case::tuning::Scale::Linear,
-                    ScaleSpec::Log => colm_case::tuning::Scale::Log,
-                },
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    colm_case::tuning::validate_study_parameters(&params)?;
+            colm_case::parameters::ParameterScope::LandCoverClass => {
+                validate_land_cover_scope(p)?;
+                colm_case::land_cover::validate_override(&descriptor.raw_key, p.sample_min)?;
+                colm_case::land_cover::validate_override(&descriptor.raw_key, p.sample_max)?;
+                if colm_case::land_cover::parameter(&descriptor.raw_key).is_some_and(|meta| {
+                    p.sample_min == meta.sentinel || p.sample_max == meta.sentinel
+                }) {
+                    bail!("{} sentinel cannot be a sampled bound", descriptor.id);
+                }
+            }
+            colm_case::parameters::ParameterScope::PftType
+            | colm_case::parameters::ParameterScope::PcPftComponent => {
+                validate_pft_scope(p)?;
+                colm_case::pft::validate_override(&descriptor.raw_key, p.sample_min)?;
+                colm_case::pft::validate_override(&descriptor.raw_key, p.sample_max)?;
+            }
+            _ => bail!("{} scope is not implemented by Study", descriptor.id),
+        }
+    }
+    colm_case::tuning::validate_study_parameters(&case_scalars)?;
     let mut target_keys = BTreeSet::new();
     let mut validation_targets = 0usize;
     for target in &spec.targets {
@@ -421,6 +625,8 @@ mod tests {
             site_mode: SiteMode::Shared,
             parameters: vec![ParameterSpec {
                 name: "DEF_TUNING_CNFAC".into(),
+                parameter_id: None,
+                scope_instance: None,
                 sample_min: 0.1,
                 sample_max: 0.9,
                 scale: Some(ScaleSpec::Linear),
@@ -435,6 +641,36 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn indexed_pft_parameters_are_distinct_study_dimensions() {
+        let mut spec = tuning_spec(vec![tuning_target("qle", true)]);
+        spec.parameters = [1, 2]
+            .into_iter()
+            .map(|index| ParameterSpec {
+                name: "DEF_PFT_VMAX25".into(),
+                parameter_id: Some("pft:DEF_PFT_VMAX25".into()),
+                scope_instance: Some(ParameterScopeInstance {
+                    kind: ParameterScopeKind::PftType,
+                    scheme: None,
+                    index: Some(index),
+                    type_name: None,
+                }),
+                sample_min: 10.0,
+                sample_max: 100.0,
+                scale: Some(ScaleSpec::Linear),
+            })
+            .collect();
+        validate_spec(&spec).unwrap();
+        assert_eq!(spec.parameters[0].member_key(), "DEF_PFT_VMAX25(2)");
+        assert_eq!(spec.parameters[1].member_key(), "DEF_PFT_VMAX25(3)");
+
+        spec.parameters[0].scope_instance = None;
+        assert!(validate_spec(&spec)
+            .unwrap_err()
+            .to_string()
+            .contains("scope_instance"));
     }
 
     #[test]

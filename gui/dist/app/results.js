@@ -1874,17 +1874,13 @@ async function loadStudyParams(stillCurrent = () => true) {
     if (studyParamCasesKey && studyParamCasesKey !== key) {
       for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).checked = false;
     }
-    const catalog = JSON.parse(await invoke('study_params'));
+    const catalog = cases.length && currentKernel()
+      ? await invoke('study_parameter_contexts', {
+        dirs: cases.map(c => c.dir), kernelDir: currentKernel(),
+      })
+      : [];
     if (!current()) return studyParamCatalog;
-    let states = new Map();
-    if (cases.length && currentKernel()) {
-      const rows = await invoke('field_states_batch', { dirs: cases.map(c => c.dir), kernelDir: currentKernel() });
-      if (!current()) return studyParamCatalog;
-      states = new Map(rows.map(item => [item.name, item]));
-    }
     studyParamCatalog = catalog
-      .map(p => ({ ...p, state: states.get(p.name) }))
-      .filter(p => !p.state || (p.state.mode === 'editable' && !p.state.mixed))
       .filter(p => state.expert || p.review !== 'expert_range_only');
     studyParamCasesKey = key;
   }
@@ -1894,6 +1890,12 @@ async function loadStudyParams(stillCurrent = () => true) {
   renderStudyBudget('uq');
   renderStudyBudget('tuning');
   return studyParamCatalog;
+}
+
+function studyParameterKey(parameter) {
+  const index = parameter.scope_instance?.index;
+  return ['pft-type', 'pc-pft-component'].includes(parameter.scope) && Number.isInteger(index)
+    ? `${parameter.name}(${index + 1})` : parameter.name;
 }
 
 /**
@@ -1951,11 +1953,12 @@ function renderStudyParams(hostId) {
   };
   host.textContent = '';
   for (const p of studyParamCatalog) {
-    const saved = previous.get(p.name);
+    const parameterKey = studyParameterKey(p);
+    const saved = previous.get(parameterKey);
     const row = node('div', 'evaluation-variable study-param-option');
-    const label = fieldLabel(p.name, language());
+    const label = (language() === 'en' ? p.label_en : p.label_zh) || fieldLabel(p.name, language());
     const input = document.createElement('input');
-    input.type = 'checkbox'; input.dataset.studyParam = p.name;
+    input.type = 'checkbox'; input.dataset.studyParam = parameterKey;
     input.ariaLabel = label;
     input.checked = saved?.checked ?? false;
     input.onchange = invalidateConfirmation;
@@ -1963,10 +1966,15 @@ function renderStudyParams(hostId) {
     const lower = p.min == null ? '−∞' : `${p.min_inclusive ? '≥' : '>'} ${metricText(p.min)}`;
     const upper = p.max == null ? '+∞' : `${p.max_inclusive ? '≤' : '<'} ${metricText(p.max)}`;
     const sentinel = p.sentinel == null ? '' : ` · 哨兵 ${metricText(p.sentinel)}（${p.sentinel_meaning || '使用内核默认值'}，不可采样）`;
-    text.append(node('b', '', label), node('small', '', `${p.name} · 代码默认 ${metricText(p.default)} · 硬边界 ${lower}, ${upper}${sentinel} · 仅专家自定义范围`));
-    const min = node('input', 'input'); min.type = 'number'; min.step = 'any'; min.placeholder = '采样下界'; min.ariaLabel = `${label} 采样下界`; min.dataset.studyMin = p.name; min.value = saved?.min ?? '';
-    const max = node('input', 'input'); max.type = 'number'; max.step = 'any'; max.placeholder = '采样上界'; max.ariaLabel = `${label} 采样上界`; max.dataset.studyMax = p.name; max.value = saved?.max ?? '';
-    const scale = node('select', 'select'); scale.dataset.studyScale = p.name;
+    const scope = p.scope_instance?.scheme
+      ? `${p.scope_instance.scheme}-${p.scope_instance.index}`
+      : p.scope_instance?.type_name
+        ? `${p.scope_instance.kind} ${p.scope_instance.index}: ${p.scope_instance.type_name}`
+        : p.scope;
+    text.append(node('b', '', label), node('small', '', `${parameterKey} · ${scope} · 当前基线 ${metricText(p.default)} · 硬边界 ${lower}, ${upper}${sentinel} · 仅专家自定义范围`));
+    const min = node('input', 'input'); min.type = 'number'; min.step = 'any'; min.placeholder = '采样下界'; min.ariaLabel = `${label} 采样下界`; min.dataset.studyMin = parameterKey; min.value = saved?.min ?? '';
+    const max = node('input', 'input'); max.type = 'number'; max.step = 'any'; max.placeholder = '采样上界'; max.ariaLabel = `${label} 采样上界`; max.dataset.studyMax = parameterKey; max.value = saved?.max ?? '';
+    const scale = node('select', 'select'); scale.dataset.studyScale = parameterKey;
     scale.ariaLabel = `${label} ${dialogText('采样方式')}`;
     scale.title = '线性按相同绝对差值采样；对数按相同倍数采样且上下界必须大于 0。';
     for (const [value, label] of [['linear', '线性（等差）'], ['log', '对数（等比）']]) {
@@ -1984,22 +1992,30 @@ function renderStudyParams(hostId) {
 
 function selectedStudyParams(hostId) {
   return [...$(hostId).querySelectorAll('[data-study-param]:checked')].map(cb => {
-    const name = cb.dataset.studyParam;
-    const meta = studyParamCatalog.find(parameter => parameter.name === name);
-    const label = fieldLabel(name, language());
-    const minInput = $(hostId).querySelector(`[data-study-min="${CSS.escape(name)}"]`);
-    const maxInput = $(hostId).querySelector(`[data-study-max="${CSS.escape(name)}"]`);
+    const parameterKey = cb.dataset.studyParam;
+    const meta = studyParamCatalog.find(parameter => studyParameterKey(parameter) === parameterKey);
+    const name = meta?.name || parameterKey;
+    const label = (language() === 'en' ? meta?.label_en : meta?.label_zh) || fieldLabel(name, language());
+    const minInput = $(hostId).querySelector(`[data-study-min="${CSS.escape(parameterKey)}"]`);
+    const maxInput = $(hostId).querySelector(`[data-study-max="${CSS.escape(parameterKey)}"]`);
     if (!minInput?.value.trim() || !maxInput?.value.trim()) throw new Error(`${label} 需要填写上下界。`);
     const min = Number(minInput.value);
     const max = Number(maxInput.value);
     if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) throw new Error(`${label} 需要有限且 min < max 的范围。`);
-    const scale = $(hostId).querySelector(`[data-study-scale="${CSS.escape(name)}"]`)?.value || 'linear';
+    const scale = $(hostId).querySelector(`[data-study-scale="${CSS.escape(parameterKey)}"]`)?.value || 'linear';
     if (scale === 'log' && (min <= 0 || max <= 0)) throw new Error(`${label} 使用对数采样时上下界必须大于 0。`);
     const below = meta?.min != null && (min < meta.min || (!meta.min_inclusive && min === meta.min));
     const above = meta?.max != null && (max > meta.max || (!meta.max_inclusive && max === meta.max));
     if (below || above) throw new Error(`${label} 的采样范围超出代码硬边界。`);
     if (meta?.sentinel != null && (min === meta.sentinel || max === meta.sentinel)) throw new Error(`${label} 不能把哨兵值用作采样边界。`);
-    return { name, sample_min: min, sample_max: max, scale };
+    const scope = meta?.scope_instance;
+    return {
+      name, parameter_id: meta?.id,
+      scope_instance: scope ? {
+        kind: scope.kind, scheme: scope.scheme, index: scope.index, type_name: scope.type_name,
+      } : undefined,
+      sample_min: min, sample_max: max, scale,
+    };
   });
 }
 

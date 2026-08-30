@@ -341,8 +341,33 @@
       <p class="sub">按当前配置显示水热、生态生地化、河道水库、数据同化、示踪剂和城市过程；
         没有启用或没有可设置项的分栏会自动隐藏。</p>
 
+      <div class="card parameter-discovery">
+        <div class="parameter-search-row">
+          <label for="parameter-search">搜索全部可调参数</label>
+          <input class="input" id="parameter-search" type="search"
+            placeholder="中文、English、CoLM 键或别名，例如 vcmax / D50 / P50 / beta">
+          <label for="parameter-status-filter">状态</label>
+          <select class="select" id="parameter-status-filter">
+            <option value="all">全部</option>
+            <option value="modified">已显式修改</option>
+            <option value="inherited">继承内置值</option>
+            <option value="inactive">当前不生效</option>
+            <option value="tunable">可用于调优</option>
+            <option value="mixed">当前批量值不一致</option>
+          </select>
+        </div>
+        <div id="parameter-search-results" class="parameter-search-results" aria-live="polite">
+          输入名称或别名后显示所属分类、子组、作用域和当前状态。
+        </div>
+        <div class="parameter-transfer-actions">
+          <button type="button" class="btn-ghost" id="parameter-export">导出显式覆盖</button>
+          <button type="button" class="btn-ghost" id="parameter-import">预览并导入覆盖</button>
+          <span id="parameter-import-summary" class="muted" aria-live="polite"></span>
+        </div>
+      </div>
+
       <div class="expert-note" id="expert-placeholder" hidden>
-        专家模式会在各过程分栏显示不常用的 case.nml 参数和外部过程参数文件；多站点时先用下拉菜单选择要修改的站点。
+        专家模式会在各过程分栏显示可调参数和外部过程参数文件；多站点时先用下拉菜单选择要修改的站点。
         这里只列 CoLM 运行时真正读取的参数；数组尺寸、物理常数等编译期常量不会伪装成可编辑项。
       </div>
       <div id="unknown"></div>

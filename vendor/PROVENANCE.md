@@ -74,3 +74,9 @@ diff -ru /tmp/colm-upstream vendor/CoLM202X | less
 （那个脚本住在 `.github/workflows/` 下但不是工作流。副作用之一是
 GitHub 不许没有 `workflow` scope 的 OAuth token 推它 —— 提 PR #15 时
 只能走 SSH。）
+
+## 2026-08-30 参数目录工作
+
+本次统一参数目录、GUI 搜索和稀疏覆盖导入导出没有修改 `vendor/CoLM202X`
+中的 Fortran 数值代码。默认值继续从本目录源码解析；尚无验证与真实回归路径的
+PFT 常量保留为 `blocked-pending-hook`，没有为了数量指标运行时化。

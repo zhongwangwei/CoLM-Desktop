@@ -10,6 +10,7 @@ pub mod build;
 pub mod land_cover;
 pub mod layout;
 pub mod minimal;
+pub mod parameters;
 pub mod pft;
 mod result_state;
 pub mod tuning;
@@ -21,6 +22,8 @@ pub use result_state::{clear_results_stale, mark_results_stale, results_are_stal
 
 #[cfg(test)]
 mod land_cover_tests;
+#[cfg(test)]
+mod parameters_tests;
 #[cfg(test)]
 mod pft_tests;
 #[cfg(test)]

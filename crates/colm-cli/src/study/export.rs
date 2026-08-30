@@ -298,6 +298,8 @@ mod tests {
                 site_mode: SiteMode::Shared,
                 parameters: vec![ParameterSpec {
                     name: "DEF_TUNING_CNFAC".into(),
+                    parameter_id: None,
+                    scope_instance: None,
                     sample_min: 0.1,
                     sample_max: 0.9,
                     scale: Some(ScaleSpec::Linear),

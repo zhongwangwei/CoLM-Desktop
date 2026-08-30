@@ -252,7 +252,6 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         .iter()
         .map(|(_, path)| path.clone())
         .collect::<Vec<_>>();
-    super::engine::baseline(&base_case_paths, &spec)?;
     let site_names = sites
         .iter()
         .map(|(site, _)| site.clone())
@@ -265,23 +264,7 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         case_root.join(path)
     };
     let kernel_macros = colm_kernel::Kernel::open(&resolved)?.manifest.macros;
-    let parameter_names = spec
-        .parameters
-        .iter()
-        .map(|parameter| parameter.name.clone())
-        .collect::<Vec<_>>();
-    for (_, case) in &sites {
-        colm_case::tuning::validate_case_parameter_activity(
-            &case.join("case.nml"),
-            &parameter_names,
-            &kernel_macros,
-        )?;
-        let study_parameters = study_parameters(&spec);
-        colm_case::tuning::validate_case_parameter_ranges(
-            &case.join("case.nml"),
-            &study_parameters,
-        )?;
-    }
+    super::engine::baseline(&base_case_paths, &spec, &kernel_macros)?;
     if spec.kind == StudyKind::Uncertainty {
         for output in &spec.outputs {
             if NON_SCALAR_UQ_OUTPUTS.contains(&output.as_str()) {
@@ -798,21 +781,6 @@ fn preflight_observation_window(
         );
     }
     Ok(())
-}
-
-fn study_parameters(spec: &StudySpec) -> Vec<colm_case::tuning::StudyParameter<'_>> {
-    spec.parameters
-        .iter()
-        .map(|p| colm_case::tuning::StudyParameter {
-            name: p.name.as_str(),
-            sample_min: p.sample_min,
-            sample_max: p.sample_max,
-            scale: match p.scale.unwrap_or(super::spec::ScaleSpec::Linear) {
-                super::spec::ScaleSpec::Linear => colm_case::tuning::Scale::Linear,
-                super::spec::ScaleSpec::Log => colm_case::tuning::Scale::Log,
-            },
-        })
-        .collect()
 }
 
 fn push_warning_once(state: &mut StudyState, warning: String) {
@@ -1446,10 +1414,10 @@ fn run_de_generations(
                 let named = names
                     .into_iter()
                     .zip(values.iter().copied())
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeMap<_, _>>();
                 // Cross-field-invalid mutants fall back to their valid parent. This
                 // is deterministic and keeps the generation barrier recoverable.
-                if colm_case::tuning::validate_values(&named).is_ok() {
+                if super::sample::validate_vector(&manifest.spec, &named).is_ok() {
                     Ok(values)
                 } else {
                     super::generation::physical(manifest, &parent_vectors[index])
@@ -1707,6 +1675,7 @@ fn write_importance(
     for site in &manifest.spec.base_cases {
         for variable in &manifest.spec.outputs {
             for parameter in &manifest.spec.parameters {
+                let parameter_key = parameter.member_key();
                 match manifest.spec.method {
                     StudyMethod::Lhs => {
                         let pairs = members
@@ -1715,12 +1684,12 @@ fn write_importance(
                             .filter_map(|member| {
                                 means
                                     .get(&(member.id.clone(), site.clone(), variable.clone()))
-                                    .map(|mean| (member.parameters[&parameter.name], *mean))
+                                    .map(|mean| (member.parameters[&parameter_key], *mean))
                             })
                             .collect::<Vec<_>>();
                         let (x, y): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
                         rows.push(serde_json::json!({
-                            "site":site,"variable":variable,"parameter":parameter.name,
+                            "site":site,"variable":variable,"parameter":parameter_key,
                             "method":"spearman","value":super::science::spearman(&x,&y),"n":x.len()
                         }));
                     }
@@ -1731,7 +1700,7 @@ fn write_importance(
                             .context("OAT Study has no baseline member")?;
                         let parameter_index = super::sample::sorted_parameter_names(&manifest.spec)
                             .iter()
-                            .position(|name| name == &parameter.name)
+                            .position(|name| name == &parameter_key)
                             .context("OAT parameter is missing from the frozen design")?;
                         let candidate_indices = [2 * parameter_index + 1, 2 * parameter_index + 2];
                         let changed = members
@@ -1741,8 +1710,8 @@ fn write_importance(
                         if changed.len() == 2 {
                             let mut changed = changed;
                             changed.sort_by(|a, b| {
-                                a.parameters[&parameter.name]
-                                    .total_cmp(&b.parameters[&parameter.name])
+                                a.parameters[&parameter_key]
+                                    .total_cmp(&b.parameters[&parameter_key])
                             });
                             let low = changed[0];
                             let high = changed[1];
@@ -1751,10 +1720,10 @@ fn write_importance(
                                 means.get(&(high.id.clone(), site.clone(), variable.clone())),
                                 means.get(&(baseline.id.clone(), site.clone(), variable.clone())),
                             ) {
-                                let dx = high.parameters[&parameter.name]
-                                    - low.parameters[&parameter.name];
+                                let dx = high.parameters[&parameter_key]
+                                    - low.parameters[&parameter_key];
                                 rows.push(serde_json::json!({
-                                    "site":site,"variable":variable,"parameter":parameter.name,
+                                    "site":site,"variable":variable,"parameter":parameter_key,
                                     "method":"oat_finite_difference_slope","value":(*y_high-*y_low)/dx,
                                     "asymmetry":(*y_high-*y0)-(*y0-*y_low),"n":2
                                 }));
@@ -3479,6 +3448,8 @@ esac
             site_mode: super::super::spec::SiteMode::Shared,
             parameters: vec![super::super::spec::ParameterSpec {
                 name: "DEF_TUNING_CNFAC".into(),
+                parameter_id: None,
+                scope_instance: None,
                 sample_min: 0.1,
                 sample_max: 0.9,
                 scale: Some(super::super::spec::ScaleSpec::Linear),

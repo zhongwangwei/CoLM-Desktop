@@ -10,208 +10,7 @@ use serde::{Deserialize, Serialize};
 /// 返回 `None` 不是「其他」：测试要求当前 CoLM 源码里一个都不能剩。
 /// 上游新增字段时 CI 会报出名字，要求读过它的用途后再归类。
 pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
-    let n = name.to_ascii_uppercase();
-    let has = |parts: &[&str]| parts.iter().any(|p| n.contains(p));
-
-    if n.starts_with("DEF_HIST_VARS%") {
-        return Some("输出变量");
-    }
-    // 调试三件套（CoLMDEBUG / RangeCheck / SrfdataDiag）曾经是编译期宏，
-    // 现在是运行时开关（`MOD_Namelist.F90` 里的 `DEF_USE_*`，默认
-    // `.false.`）。三个都不属于任何单一物理过程，放在一起单独一栏，
-    // 别被 `SrfdataDiag` 的 "SRFDATA" 子串顺手分进下面的「地表数据」。
-    if n == "DEF_USE_COLMDEBUG" || n == "DEF_USE_RANGECHECK" || n == "DEF_USE_SRFDATADIAG" {
-        return Some("调试与诊断");
-    }
-    if n.starts_with("DEF_SIMULATION_TIME%") {
-        return Some("时间与预热");
-    }
-    if n.starts_with("DEF_LC_") {
-        return Some("生态与生地化");
-    }
-    if matches!(
-        n.as_str(),
-        "DEF_TUNING_CSOILC"
-            | "DEF_TUNING_DEWMX"
-            | "DEF_TUNING_TRSMX0"
-            | "DEF_TUNING_CROP_PLANTING_DAY"
-    ) || n.starts_with("DEF_TUNING_IRRIGATION_")
-    {
-        return Some("生态与生地化");
-    }
-    if let Some(parameter) = colm_case::land_cover::parameter(&n) {
-        return Some(parameter.section);
-    }
-    if n.starts_with("DEF_TUNING_") {
-        return Some("水热过程");
-    }
-    if n.starts_with("DEF_HIST")
-        || n.starts_with("DEF_WRST")
-        || n.starts_with("DEF_REST")
-        || n == "DEF_HISTORY_IN_VECTOR"
-        || n == "DEF_OUTPUT_2MWMO"
-        || n == "DEF_DIR_OUTPUT"
-        || n == "DEF_DIR_HISTORY"
-        || n == "DEF_DIR_RESTART"
-        || n == "USE_SITE_HISTWRITEBACK"
-    {
-        return Some("输出与重启");
-    }
-    // LAI feedback is a prognostic BGC process, not a surface-data source.
-    if n == "DEF_USE_LAIFEEDBACK" {
-        return Some("生态与生地化");
-    }
-    if group == Some("nl_colm_forcing")
-        || has(&[
-            "FORCING_INTERP",
-            "FORCING_DOWNSCALING",
-            "CLIMFORCING",
-            "DEF_DS_",
-            "CBL_HEIGHT",
-        ])
-    {
-        return Some("强迫场");
-    }
-    if has(&["URBAN", "CANYON_HWR"]) {
-        return Some("城市");
-    }
-    if n.starts_with("SITE_") || n.starts_with("USE_SITE_") {
-        return Some("站点");
-    }
-    if has(&["TRACER", "GIEMS", "WETLAND_FINUNDATION"]) {
-        return Some("示踪剂");
-    }
-    if n.starts_with("DEF_DA_") || n == "DEF_OPTIMIZE_BASEFLOW" {
-        return Some("数据同化");
-    }
-    if has(&[
-        "CAMA",
-        "ELEMENTNEIGHBOUR",
-        "UNITCATCHMENT",
-        "RESERVOIR",
-        "ROUTING",
-        "RIVERDEPTH",
-        "LEVEE",
-        "BIFURCATION",
-    ]) {
-        return Some("河道与水库");
-    }
-    if has(&[
-        "SOILINIT",
-        "SNOWINIT",
-        "CN_INIT",
-        "WATERTABLEINIT",
-        "FILE_WATERTABLE",
-    ]) {
-        return Some("初始场");
-    }
-    if n == "DEF_CASE_NAME" {
-        return Some("算例");
-    }
-    if n.starts_with("DEF_DOMAIN%")
-        || has(&[
-            "BLOCKINFO",
-            "AVERAGEELEMENTSIZE",
-            "NX_BLOCKS",
-            "NY_BLOCKS",
-            "PIO_GROUPSIZE",
-            "NIO_EQ_NBLOCK",
-            "FILE_MESH",
-            "GRIDBASED_LON",
-            "GRIDBASED_LAT",
-            "CATCHMENTMESH",
-            "MESH_FILTER",
-        ])
-    {
-        return Some("网格与并行");
-    }
-    if has(&[
-        "SRFDATA",
-        "DEF_LC_YEAR",
-        "DEF_USE_USGS",
-        "DEF_USE_IGBP",
-        "DEF_USE_LCT",
-        "DEF_USE_PFT",
-        "DEF_USE_PC",
-        "DEF_SOLO_PFT",
-        "DEF_FAST_PC",
-        "PC_CROP_SPLIT",
-        "SUBGRID_SCHEME",
-        "LANDONLY",
-        "DOMINANT_PATCHTYPE",
-        "SOILPAR_UPS_FIT",
-        "SOIL_REFL_SCHEME",
-        "ZIP_FOR_AGGREGATION",
-        "DEF_LAI_",
-        "LAIFEEDBACK",
-        "HIGHRESSOIL",
-        "HIGHRESVEG",
-        "LULCC_SCHEME",
-        "DEF_USE_LULCC",
-    ]) {
-        return Some("地表数据");
-    }
-    if has(&[
-        "INTERCEPTION",
-        "MATSIRO",
-        "THERMAL_CONDUCTIVITY",
-        "SUPERCOOL",
-        "RSS_SCHEME",
-        "RUNOFF_SCHEME",
-        "VIC_",
-        "TOPMOD",
-        "SPLIT_SOILSNOW",
-        "VARIABLYSATURATEDFLOW",
-        "CAMPBELL_SOIL_MODEL",
-        "BEDROCK",
-        "PRECIP_PHASE",
-        "DYNAMIC_LAKE",
-        "DYNAMIC_WETLAND",
-        "CHECKEQUILIBRIUM",
-    ]) {
-        return Some("水热过程");
-    }
-    if has(&[
-        "VEG_SNOW",
-        "OZONE",
-        "SNICAR",
-        "SNOWOPTICS",
-        "SNOWAGING",
-        "PROSPECT",
-        "AEROSOL",
-        "NDEP",
-        "DEF_SSP",
-        "IRRIGATION",
-        "NOSTRESSNITROGEN",
-        "DEF_RSTFAC",
-        "PLANTHYDRAULICS",
-        "DEF_PH_",
-        "BALL_BERRY",
-        "MEDLYNST",
-        "MEDLYN_",
-        "WUEST",
-        "WUE_LAMBDA",
-        "DEF_USE_SASU",
-        "DIAGMATRIX",
-        "DEF_USE_PN",
-        "DEF_USE_FERT",
-        "FERT_SOURCE",
-        "NITRIF",
-        "CNSOYFIXN",
-        "DEF_USE_FIRE",
-        "DEF_USE_BGC",
-        "DEF_USE_CROP",
-    ]) {
-        return Some("生态与生地化");
-    }
-    if n.starts_with("DEF_DIR")
-        || n.starts_with("DEF_FILE")
-        || n.ends_with("_FILE")
-        || n.ends_with("_NAMELIST")
-    {
-        return Some("文件与目录");
-    }
-    None
+    colm_case::parameters::field_section(name, group)
 }
 
 /// 页面加载时确认后端确实接上了。
@@ -303,6 +102,617 @@ pub fn describe_fields() -> Vec<Field> {
         .collect()
 }
 
+#[tauri::command]
+pub fn parameter_catalog() -> Vec<colm_case::parameters::ParameterDescriptor> {
+    colm_case::parameters::all().to_vec()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterScopeInstance {
+    pub kind: String,
+    pub scheme: Option<String>,
+    pub index: Option<u8>,
+    pub type_name: Option<String>,
+    pub process_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterOverrideRecord {
+    pub parameter_id: String,
+    pub raw_key: String,
+    pub scope_instance: ParameterScopeInstance,
+    pub value: String,
+    pub expected_old_value: Option<String>,
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseParameterOverrides {
+    pub source_case: String,
+    pub classification_scheme: Option<String>,
+    pub records: Vec<ParameterOverrideRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterOverrideBundle {
+    pub schema_version: u32,
+    pub catalog_version: u32,
+    pub kernel_identity: Option<String>,
+    pub created_unix: u64,
+    pub cases: Vec<CaseParameterOverrides>,
+}
+
+fn exported_record(
+    descriptor: &colm_case::parameters::ParameterDescriptor,
+    value: String,
+    scope_instance: ParameterScopeInstance,
+) -> ParameterOverrideRecord {
+    ParameterOverrideRecord {
+        parameter_id: descriptor.id.clone(),
+        raw_key: descriptor.raw_key.clone(),
+        scope_instance,
+        // The optimistic-concurrency value belongs to the import target and is
+        // captured by preview's required version token, not by the source case.
+        expected_old_value: None,
+        value,
+        unit: descriptor.unit.clone(),
+    }
+}
+
+/// Export only explicit overrides. Inherited defaults never enter this bundle.
+#[tauri::command]
+pub fn export_parameter_overrides(
+    dirs: Vec<String>,
+    kernel_dir: Option<String>,
+) -> Result<ParameterOverrideBundle, String> {
+    if dirs.is_empty() {
+        return Err("没有可导出的算例".into());
+    }
+    let kernel = kernel_dir
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            colm_kernel::Kernel::open(std::path::Path::new(path))
+                .map_err(|error| format!("{error:#}"))
+        })
+        .transpose()?;
+    let kernel_identity = kernel.as_ref().map(|kernel| kernel.manifest.identity());
+    let have = kernel
+        .as_ref()
+        .map(|kernel| kernel.manifest.macros.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    let mut cases = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let text = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml"))
+            .map_err(|error| format!("{dir}: {error}"))?;
+        let doc = colm_namelist::parse(&text).map_err(|error| format!("{dir}: {error:#}"))?;
+        let context = VisibilityContext::new(&doc, &have);
+        let usgs = if have.is_empty() {
+            logical(&doc, "DEF_USE_USGS")
+        } else {
+            context.usgs
+        };
+        let land_scheme = if usgs { "USGS" } else { "IGBP" }.to_string();
+        let scheme = context.lct.then(|| {
+            land_scheme.clone()
+        });
+        let mut records = Vec::new();
+        for path in doc.paths() {
+            let Some(value) = doc.get(&path).map(ToString::to_string) else {
+                continue;
+            };
+            if let Some((raw_key, pft_type)) = colm_case::pft::override_instance(&path) {
+                let id = format!(
+                    "{}:{raw_key}",
+                    if context.pc { "pc-pft" } else { "pft" }
+                );
+                let Some(descriptor) = colm_case::parameters::find(&id) else {
+                    continue;
+                };
+                let names = colm_case::pft::pft_name(pft_type);
+                records.push(exported_record(
+                    descriptor,
+                    value,
+                    ParameterScopeInstance {
+                        kind: if context.pc { "pc-pft" } else { "pft" }.into(),
+                        scheme: None,
+                        index: Some(pft_type),
+                        type_name: names.map(|name| name.en.to_string()),
+                        process_file: None,
+                    },
+                ));
+                continue;
+            }
+            let Some(field) = colm_schema::find(&path).filter(|field| field.group.is_some()) else {
+                continue;
+            };
+            let id = if colm_case::land_cover::is_parameter(field.name) {
+                format!("lct:{land_scheme}:{}", field.name)
+            } else {
+                format!("case:{}", field.name)
+            };
+            let Some(descriptor) = colm_case::parameters::find(&id) else {
+                continue;
+            };
+            records.push(exported_record(
+                descriptor,
+                value,
+                ParameterScopeInstance {
+                    kind: if colm_case::land_cover::is_parameter(field.name) {
+                        "land-cover-class"
+                    } else {
+                        "case-scalar"
+                    }
+                    .into(),
+                    scheme: colm_case::land_cover::is_parameter(field.name)
+                        .then(|| land_scheme.clone()),
+                    index: (context.lct && context.valid_landtype())
+                        .then_some(context.site_landtype as u8),
+                    type_name: None,
+                    process_file: None,
+                },
+            ));
+        }
+        for file in process_parameter_files(dir.clone())? {
+            for entry in file.entries.into_iter().filter(|entry| {
+                !entry.unset
+                    && !entry.default.as_deref().is_some_and(|default| {
+                        process_values_equal(entry.kind, &entry.value, default)
+                    })
+            }) {
+                let Some(descriptor) = colm_case::parameters::process_descriptors()
+                    .into_iter()
+                    .find(|item| item.raw_key.eq_ignore_ascii_case(&entry.path))
+                else {
+                    continue;
+                };
+                records.push(exported_record(
+                    descriptor,
+                    entry.value,
+                    ParameterScopeInstance {
+                        kind: "process-file".into(),
+                        scheme: None,
+                        index: None,
+                        type_name: None,
+                        process_file: Some(file.file.clone()),
+                    },
+                ));
+            }
+        }
+        records.sort_by(|left, right| {
+            left.parameter_id
+                .cmp(&right.parameter_id)
+                .then(left.scope_instance.index.cmp(&right.scope_instance.index))
+        });
+        cases.push(CaseParameterOverrides {
+            source_case: std::path::Path::new(&dir)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&dir)
+                .to_string(),
+            classification_scheme: scheme,
+            records,
+        });
+    }
+    Ok(ParameterOverrideBundle {
+        schema_version: 1,
+        catalog_version: colm_case::parameters::CATALOG_VERSION,
+        kernel_identity,
+        created_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        cases,
+    })
+}
+
+fn process_values_equal(kind: &str, left: &str, right: &str) -> bool {
+    match kind {
+        "logical" => logical_literal(left) == logical_literal(right),
+        "integer" => left.trim().parse::<i64>().ok() == right.trim().parse::<i64>().ok(),
+        "real" => match (parse_real(left), parse_real(right)) {
+            (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+            _ => false,
+        },
+        _ => left.trim().trim_matches(['\'', '"']) == right.trim().trim_matches(['\'', '"']),
+    }
+}
+
+fn logical_literal(raw: &str) -> Option<bool> {
+    match raw.trim().trim_matches('.').to_ascii_lowercase().as_str() {
+        "true" | "t" => Some(true),
+        "false" | "f" => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParameterImportItem {
+    pub target_case: String,
+    pub parameter_id: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub current_value: Option<String>,
+    pub new_value: String,
+    pub file: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParameterImportPreview {
+    pub can_apply: bool,
+    pub catalog_version_compatible: bool,
+    pub version_token: String,
+    pub items: Vec<ParameterImportItem>,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParameterImportResult {
+    pub records: usize,
+    pub changed: usize,
+    pub files: Vec<String>,
+}
+
+struct PreparedParameterImport {
+    preview: ParameterImportPreview,
+    writes: Vec<(std::path::PathBuf, String)>,
+}
+
+fn read_parameter_override_bundle(file: &str) -> Result<ParameterOverrideBundle, String> {
+    let text = if file.trim_start().starts_with('{') {
+        file.to_string()
+    } else {
+        std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?
+    };
+    serde_json::from_str(&text).map_err(|error| format!("参数覆盖文件无效：{error}"))
+}
+
+fn import_source_for<'a>(
+    bundle: &'a ParameterOverrideBundle,
+    target: &str,
+) -> Result<&'a CaseParameterOverrides, String> {
+    if bundle.cases.len() == 1 {
+        return Ok(&bundle.cases[0]);
+    }
+    bundle
+        .cases
+        .iter()
+        .find(|case| case.source_case == target)
+        .ok_or_else(|| format!("导入包有多个来源算例，但没有与 {target} 同名的记录"))
+}
+
+fn files_version(files: &[(std::path::PathBuf, String)]) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+    let mut paths = files.iter().map(|(path, _)| path).collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for path in paths {
+        path.hash(&mut hash);
+        std::fs::read(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?
+            .hash(&mut hash);
+    }
+    Ok(format!("{:016x}", hash.finish()))
+}
+
+fn prepare_parameter_import(
+    dirs: &[String],
+    file: &str,
+    kernel_dir: Option<&str>,
+) -> Result<PreparedParameterImport, String> {
+    if dirs.is_empty() {
+        return Err("没有可导入的算例".into());
+    }
+    let bundle = read_parameter_override_bundle(file)?;
+    let catalog_ok = bundle.catalog_version == colm_case::parameters::CATALOG_VERSION;
+    let kernel = kernel_dir
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            colm_kernel::Kernel::open(std::path::Path::new(path))
+                .map_err(|error| format!("{error:#}"))
+        })
+        .transpose()?;
+    let kernel_identity = kernel.as_ref().map(|kernel| kernel.manifest.identity());
+    let kernel_ok = bundle.kernel_identity.is_none() || bundle.kernel_identity == kernel_identity;
+    let have = kernel
+        .as_ref()
+        .map(|kernel| kernel.manifest.macros.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    let facts = kernel_facts(kernel_dir)?;
+    let mut items = Vec::new();
+    let mut writes = Vec::new();
+
+    for dir in dirs {
+        let target = std::path::Path::new(dir)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(dir);
+        let source = import_source_for(&bundle, target)?;
+        let case_file = std::path::Path::new(dir).join("case.nml");
+        let text = std::fs::read_to_string(&case_file)
+            .map_err(|error| format!("{}: {error}", case_file.display()))?;
+        let mut doc = colm_namelist::parse(&text)
+            .map_err(|error| format!("{}: {error:#}", case_file.display()))?;
+        let (context_lct, context_pft, context_pc, site_landtype, context_usgs) = {
+            let context =
+                VisibilityContext::new_at(&doc, &have, Some(std::path::Path::new(dir)));
+            (
+                context.lct,
+                context.pft,
+                context.pc,
+                context.site_landtype,
+                context.usgs,
+            )
+        };
+        let usgs = if have.is_empty() {
+            logical(&doc, "DEF_USE_USGS")
+        } else {
+            context_usgs
+        };
+        let target_scheme = if usgs { "USGS" } else { "IGBP" };
+        let mut changed_fields = Vec::new();
+        let mut process_docs = std::collections::BTreeMap::<
+            std::path::PathBuf,
+            colm_namelist::Document,
+        >::new();
+
+        for record in &source.records {
+            let mut item = ParameterImportItem {
+                target_case: target.to_string(),
+                parameter_id: record.parameter_id.clone(),
+                status: "incompatible".into(),
+                reason: None,
+                current_value: None,
+                new_value: record.value.clone(),
+                file: case_file.to_string_lossy().into_owned(),
+            };
+            let Some(descriptor) = colm_case::parameters::all()
+                .iter()
+                .find(|descriptor| descriptor.id == record.parameter_id)
+            else {
+                item.reason = Some("当前目录不存在这个稳定参数 ID".into());
+                items.push(item);
+                continue;
+            };
+            if !descriptor.raw_key.eq_ignore_ascii_case(&record.raw_key) {
+                item.reason = Some("稳定 ID 与原始 CoLM 键不匹配".into());
+                items.push(item);
+                continue;
+            }
+            if !catalog_ok {
+                item.reason = Some("参数目录版本不兼容".into());
+                items.push(item);
+                continue;
+            }
+            if !kernel_ok {
+                item.reason = Some("内核身份与导出包不一致".into());
+                items.push(item);
+                continue;
+            }
+
+            use colm_case::parameters::Storage;
+            let result: Result<(Option<String>, std::path::PathBuf), String> =
+                match descriptor.storage {
+                    Storage::CaseNml => {
+                        if matches!(
+                            descriptor.scope,
+                            colm_case::parameters::ParameterScope::LandCoverClass
+                        ) {
+                            if !context_lct {
+                                Err("目标算例当前不是 LCT 模式".into())
+                            } else if record.scope_instance.scheme.as_deref()
+                                != Some(target_scheme)
+                            {
+                                Err("禁止在 IGBP 与 USGS 之间按数字索引导入".into())
+                            } else if record.scope_instance.index.map(i64::from)
+                                != Some(site_landtype)
+                            {
+                                Err("目标算例地类与导出作用域不同".into())
+                            } else {
+                                let current = doc
+                                    .get(&record.raw_key)
+                                    .map(ToString::to_string);
+                                let value = typed(&record.raw_key, &record.value)?;
+                                put(&mut doc, &record.raw_key, value)?;
+                                changed_fields.push(FieldChange {
+                                    path: record.raw_key.clone(),
+                                    value: record.value.clone(),
+                                });
+                                Ok((current, case_file.clone()))
+                            }
+                        } else {
+                            let current = doc.get(&record.raw_key).map(ToString::to_string);
+                            let value = typed(&record.raw_key, &record.value)?;
+                            put(&mut doc, &record.raw_key, value)?;
+                            changed_fields.push(FieldChange {
+                                path: record.raw_key.clone(),
+                                value: record.value.clone(),
+                            });
+                            Ok((current, case_file.clone()))
+                        }
+                    }
+                    Storage::PftOverride | Storage::PcPftOverride => {
+                        let wants_pc = matches!(descriptor.storage, Storage::PcPftOverride);
+                        if context_pc != wants_pc || context_pft == wants_pc {
+                            Err("PFT 与 PC-PFT 作用域不匹配".into())
+                        } else if source.source_case != target {
+                            Err("PFT/PC 导入只允许回到同名算例，避免修改站点不存在的组分".into())
+                        } else {
+                            let pft_type = record
+                                .scope_instance
+                                .index
+                                .ok_or_else(|| "PFT/PC 导入缺少类型索引".to_string())?;
+                            let meta = colm_case::pft::parameter(&record.raw_key)
+                                .ok_or_else(|| format!("未知 PFT 参数：{}", record.raw_key))?;
+                            let applies = {
+                                let context = VisibilityContext::new_at(
+                                    &doc,
+                                    &have,
+                                    Some(std::path::Path::new(dir)),
+                                );
+                                pft_parameter_applies(meta, &context, pft_type)
+                                    && pft_parameter_has_default(meta, &context, pft_type)?
+                            };
+                            if !applies
+                            {
+                                Err("参数在目标 PFT/PC 上当前不生效".into())
+                            } else {
+                                let path = pft_override_path(meta.name, pft_type);
+                                let current = doc.get(&path).map(ToString::to_string);
+                                doc.insert(
+                                    &path,
+                                    typed_pft_value(meta, &record.value)?,
+                                    "nl_colm",
+                                )
+                                .map_err(|error| format!("{error:#}"))?;
+                                Ok((current, case_file.clone()))
+                            }
+                        }
+                    }
+                    Storage::ProcessParameterFile => {
+                        let file = record
+                            .scope_instance
+                            .process_file
+                            .as_deref()
+                            .ok_or_else(|| "过程参数缺少 case-local 文件名".to_string())?;
+                        let path = safe_process_file(std::path::Path::new(dir), file)?;
+                        if !process_docs.contains_key(&path) {
+                            let text = std::fs::read_to_string(&path)
+                                .map_err(|error| format!("{}: {error}", path.display()))?;
+                            process_docs.insert(
+                                path.clone(),
+                                colm_namelist::parse(&text)
+                                    .map_err(|error| format!("{}: {error:#}", path.display()))?,
+                            );
+                        }
+                        let process_doc = process_docs.get_mut(&path).expect("inserted above");
+                        let current = process_doc
+                            .get(&record.raw_key)
+                            .map(ToString::to_string);
+                        let code = process_code_defaults()
+                            .into_iter()
+                            .find(|field| field.path.eq_ignore_ascii_case(&record.raw_key))
+                            .ok_or_else(|| format!("未知过程参数：{}", record.raw_key))?;
+                        if let Some(existing) = process_doc.get(&record.raw_key).cloned() {
+                            process_doc
+                                .set(
+                                    &record.raw_key,
+                                    typed_process_known(code.kind, &existing, &record.value)?,
+                                )
+                                .map_err(|error| format!("{error:#}"))?;
+                        } else if code.insertable {
+                            process_doc
+                                .insert(
+                                    &record.raw_key,
+                                    typed_process(code.kind, &record.value)?,
+                                    code.group,
+                                )
+                                .map_err(|error| format!("{error:#}"))?;
+                        } else {
+                            return Err(format!(
+                                "{} 不是可安全新增的过程参数",
+                                record.raw_key
+                            ));
+                        }
+                        Ok((current, path))
+                    }
+                    Storage::ReadOnly => Err("只读参数不能导入".into()),
+                };
+            match result {
+                Ok((current, path)) => {
+                    item.current_value = current.clone();
+                    item.file = path.to_string_lossy().into_owned();
+                    item.status = if current.as_deref() == Some(record.value.as_str()) {
+                        "no-change"
+                    } else if current.is_some() {
+                        "overwrite"
+                    } else {
+                        "applicable"
+                    }
+                    .into();
+                }
+                Err(reason) => item.reason = Some(reason),
+            }
+            items.push(item);
+        }
+
+        if let Err(reason) = validate_runtime_contract(&doc, std::path::Path::new(dir), facts)
+            .and_then(|_| validate_changed_fields(&doc, &changed_fields))
+        {
+            items.push(ParameterImportItem {
+                target_case: target.to_string(),
+                parameter_id: "<batch>".into(),
+                status: "incompatible".into(),
+                reason: Some(reason),
+                current_value: None,
+                new_value: String::new(),
+                file: case_file.to_string_lossy().into_owned(),
+            });
+        }
+        writes.push((case_file, doc.to_string()));
+        writes.extend(
+            process_docs
+                .into_iter()
+                .map(|(path, doc)| (path, doc.to_string())),
+        );
+    }
+    writes.sort_by(|left, right| left.0.cmp(&right.0));
+    writes.dedup_by(|left, right| left.0 == right.0);
+    let version_token = files_version(&writes)?;
+    let can_apply = items.iter().all(|item| item.status != "incompatible");
+    let files = writes
+        .iter()
+        .filter(|(path, text)| {
+            std::fs::read_to_string(path)
+                .map(|current| current != *text)
+                .unwrap_or(true)
+        })
+        .map(|(path, _)| path.to_string_lossy().into_owned())
+        .collect();
+    Ok(PreparedParameterImport {
+        preview: ParameterImportPreview {
+            can_apply,
+            catalog_version_compatible: catalog_ok,
+            version_token,
+            items,
+            files,
+        },
+        writes,
+    })
+}
+
+#[tauri::command]
+pub fn preview_import_parameter_overrides(
+    dirs: Vec<String>,
+    file: String,
+    kernel_dir: Option<String>,
+) -> Result<ParameterImportPreview, String> {
+    Ok(prepare_parameter_import(&dirs, &file, kernel_dir.as_deref())?.preview)
+}
+
+#[tauri::command]
+pub fn apply_import_parameter_overrides(
+    dirs: Vec<String>,
+    file: String,
+    expected_version: String,
+    kernel_dir: Option<String>,
+) -> Result<ParameterImportResult, String> {
+    let prepared = prepare_parameter_import(&dirs, &file, kernel_dir.as_deref())?;
+    if !prepared.preview.can_apply {
+        return Err("导入预检失败；没有修改任何文件".into());
+    }
+    if expected_version != prepared.preview.version_token {
+        return Err("预检后配置已被外部修改；请重新预览导入".into());
+    }
+    let changed = write_files_atomic(&prepared.writes)?;
+    Ok(ParameterImportResult {
+        records: prepared.preview.items.len(),
+        changed,
+        files: prepared.preview.files,
+    })
+}
+
 /// 在给定内核下，哪些字段**用不上**。
 ///
 /// 判据是内核 `manifest.json` 里的 `macros` —— 那是**构建期就写下的事实**，
@@ -391,6 +801,21 @@ pub struct FieldState {
     /// 批量站点的内置地类默认值不同。仍允许 All 写同一个显式覆盖，但前端
     /// 必须先提醒用户，不能把第一个站点的值冒充整批默认值。
     pub default_mixed: bool,
+    /// 当前字段实际指向的类型/槽位。普通算例标量为空；LCT 参数例如
+    /// `IGBP-5` / `USGS-14`。前端只展示，不自行推断作用域。
+    pub scope_label: Option<String>,
+    /// 模型或类型表的内置值，与 case.nml 中是否显式设置分开。
+    pub built_in_default: Option<String>,
+    /// 当前文件中的显式覆盖；`None` 表示继承内置值。
+    pub override_value: Option<String>,
+    /// 当前运行实际使用的值。
+    pub effective_value: Option<String>,
+    /// 有效值来源，例如 `case.nml`、`MOD_Const_LC.F90` 或
+    /// `MOD_Namelist.F90`。
+    pub provenance: String,
+    /// 批量目标的显式覆盖或有效值是否不同。
+    pub override_mixed: bool,
+    pub effective_mixed: bool,
 }
 
 struct VisibilityContext<'a> {
@@ -1684,6 +2109,31 @@ fn field_states_for_at(
             } else {
                 None
             };
+            let override_value = doc.get(field.name).map(ToString::to_string);
+            let built_in_default = context_default
+                .clone()
+                .or_else(|| Some(default_literal(field.default)));
+            let effective_value = override_value
+                .clone()
+                .or_else(|| built_in_default.clone());
+            let is_land_cover = context.single
+                && context.lct
+                && context.valid_landtype()
+                && colm_case::land_cover::is_parameter(field.name);
+            let scope_label = is_land_cover.then(|| {
+                format!(
+                    "{}-{}",
+                    if context.usgs { "USGS" } else { "IGBP" },
+                    context.site_landtype
+                )
+            });
+            let provenance = if override_value.is_some() {
+                "case.nml"
+            } else if is_land_cover {
+                "MOD_Const_LC.F90"
+            } else {
+                "MOD_Namelist.F90"
+            };
             Ok(FieldState {
                 name: field.name.to_string(),
                 mode,
@@ -1692,6 +2142,13 @@ fn field_states_for_at(
                 mixed: false,
                 context_default,
                 default_mixed: false,
+                scope_label,
+                built_in_default,
+                override_value,
+                effective_value,
+                provenance: provenance.into(),
+                override_mixed: false,
+                effective_mixed: false,
             })
         })
         .collect()
@@ -1758,6 +2215,29 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
             let default_mixed = visible
                 .iter()
                 .any(|state| state.context_default != context_default);
+            let scope_label = visible.first().and_then(|state| state.scope_label.clone());
+            let scope_mixed = visible
+                .iter()
+                .any(|state| state.scope_label != scope_label);
+            let override_value = visible
+                .first()
+                .and_then(|state| state.override_value.clone());
+            let override_mixed = visible
+                .iter()
+                .any(|state| state.override_value != override_value);
+            let effective_value = visible
+                .first()
+                .and_then(|state| state.effective_value.clone());
+            let effective_mixed = visible
+                .iter()
+                .any(|state| state.effective_value != effective_value);
+            let provenance = visible
+                .first()
+                .map(|state| state.provenance.clone())
+                .unwrap_or_else(|| template.provenance.clone());
+            let provenance_mixed = visible
+                .iter()
+                .any(|state| state.provenance != provenance);
             if mixed
                 && matches!(
                     template.name.as_str(),
@@ -1783,8 +2263,25 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
                 reason,
                 allowed_values,
                 mixed,
-                context_default,
+                context_default: (!default_mixed).then_some(context_default).flatten(),
                 default_mixed,
+                scope_label: if scope_mixed {
+                    Some("mixed".into())
+                } else {
+                    scope_label
+                },
+                built_in_default: (!default_mixed)
+                    .then(|| visible.first().and_then(|state| state.built_in_default.clone()))
+                    .flatten(),
+                override_value: (!override_mixed).then_some(override_value).flatten(),
+                effective_value: (!effective_mixed).then_some(effective_value).flatten(),
+                provenance: if provenance_mixed {
+                    "mixed".into()
+                } else {
+                    provenance
+                },
+                override_mixed,
+                effective_mixed,
             }
         })
         .collect()
@@ -1814,6 +2311,49 @@ pub fn field_states_batch(
         })
         .collect::<Result<_, _>>()?;
     Ok(merge_field_states(&groups))
+}
+
+#[derive(Debug, Serialize)]
+pub struct LandCoverContext {
+    pub dir: String,
+    pub scheme: &'static str,
+    pub class_index: u8,
+}
+
+/// Return each case's actual LCT identity; PFT/PC cases are omitted rather than
+/// being assigned a fabricated global land-cover class.
+#[tauri::command]
+pub fn land_cover_contexts(
+    dirs: Vec<String>,
+    kernel_dir: String,
+) -> Result<Vec<LandCoverContext>, String> {
+    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+        .map_err(|error| format!("{error:#}"))?;
+    let have = kernel
+        .manifest
+        .macros
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    read_all(&dirs)?
+        .into_iter()
+        .filter_map(|(dir, text)| {
+            let doc = match colm_namelist::parse(&text) {
+                Ok(doc) => doc,
+                Err(error) => return Some(Err(format!("{dir}: {error:#}"))),
+            };
+            let context = VisibilityContext::new_at(
+                &doc,
+                &have,
+                Some(std::path::Path::new(&dir)),
+            );
+            (context.lct && context.valid_landtype()).then_some(Ok(LandCoverContext {
+                dir,
+                scheme: if context.usgs { "USGS" } else { "IGBP" },
+                class_index: context.site_landtype as u8,
+            }))
+        })
+        .collect()
 }
 
 /// 一份 namelist 文本里 `colm-schema` 不认识的字段。
@@ -1846,6 +2386,11 @@ pub struct PftParameterState {
     pub value: Option<String>,
     pub mixed: bool,
     pub allowed_values: Vec<&'static str>,
+    pub scope_kind: &'static str,
+    pub scope_label: String,
+    pub normal_pft_default: Option<String>,
+    pub effective_value: String,
+    pub provenance: &'static str,
 }
 
 fn pft_parameter_applies(
@@ -1946,6 +2491,15 @@ pub fn pft_parameter_states(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    let modes = docs
+        .iter()
+        .map(|doc| VisibilityContext::new(doc, &have).pc)
+        .collect::<Vec<_>>();
+    if modes.iter().any(|pc| pc != &modes[0]) {
+        return Err("不能在同一次批量编辑中混合普通 PFT 与 PC 组分；请缩小范围".into());
+    }
+    let pc_mode = modes[0];
+
     let mut out = Vec::new();
     for meta in colm_case::pft::all_parameters() {
         let contexts = docs
@@ -1978,6 +2532,18 @@ pub fn pft_parameter_states(
             .iter()
             .map(|doc| doc.get(&path).map(ToString::to_string))
             .collect::<Vec<_>>();
+        let normal_pft_default = if pc_mode {
+            colm_case::pft::default_literal(
+                meta.name,
+                pft_type,
+                logical(contexts[0].doc, "DEF_USE_Campbell_SOIL_MODEL"),
+                false,
+            )
+            .map_err(|error| format!("{}: {error:#}", meta.name))?
+        } else {
+            None
+        };
+        let effective_value = values[0].clone().unwrap_or_else(|| defaults[0].clone());
         out.push(PftParameterState {
             name: meta.name,
             label_zh: meta.label_zh,
@@ -1998,6 +2564,19 @@ pub fn pft_parameter_states(
             } else {
                 Vec::new()
             },
+            scope_kind: if pc_mode { "pc-pft" } else { "pft" },
+            scope_label: format!(
+                "{}-{}",
+                if pc_mode { "PC/PFT" } else { "PFT" },
+                pft_type
+            ),
+            normal_pft_default,
+            effective_value,
+            provenance: if values[0].is_some() {
+                "case.nml"
+            } else {
+                "MOD_Const_PFT.F90"
+            },
         });
     }
     Ok(out)
@@ -2011,65 +2590,104 @@ pub fn set_pft_parameter_batch(
     value: Option<String>,
     kernel_dir: String,
 ) -> Result<BatchWrite, String> {
-    if dirs.is_empty() {
-        return Err("没有可配置的算例".into());
+    set_pft_parameters_batch(
+        vec![PftBatchChange {
+            dirs,
+            pft_type,
+            name,
+            value,
+        }],
+        kernel_dir,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PftBatchChange {
+    pub dirs: Vec<String>,
+    pub pft_type: u8,
+    pub name: String,
+    pub value: Option<String>,
+}
+
+/// Validate every PFT/PC cell first, then commit every affected case.nml atomically.
+#[tauri::command]
+pub fn set_pft_parameters_batch(
+    changes: Vec<PftBatchChange>,
+    kernel_dir: String,
+) -> Result<BatchWrite, String> {
+    if changes.is_empty() || changes.iter().any(|change| change.dirs.is_empty()) {
+        return Err("没有可配置的 PFT/PC 单元格".into());
     }
-    let meta = colm_case::pft::parameter(&name).ok_or_else(|| format!("未知 PFT 参数：{name}"))?;
     let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
         .map_err(|error| format!("{error:#}"))?;
     let have: std::collections::BTreeSet<&str> =
         kernel.manifest.macros.iter().map(String::as_str).collect();
     let max = if have.contains("CROP") { 78 } else { 15 };
-    if pft_type > max {
-        return Err(format!("当前内核只支持 PFT 0..={max}，收到 {pft_type}"));
+    let mut by_dir = std::collections::BTreeMap::<String, Vec<&PftBatchChange>>::new();
+    for change in &changes {
+        if change.pft_type > max {
+            return Err(format!(
+                "当前内核只支持 PFT 0..={max}，收到 {}",
+                change.pft_type
+            ));
+        }
+        let meta = colm_case::pft::parameter(&change.name)
+            .ok_or_else(|| format!("未知 PFT 参数：{}", change.name))?;
+        if let Some(value) = change.value.as_deref() {
+            typed_pft_value(meta, value)?;
+        }
+        for dir in &change.dirs {
+            by_dir.entry(dir.clone()).or_default().push(change);
+        }
     }
-    let typed = value
-        .as_deref()
-        .map(|raw| {
-            let number = parse_real(raw).ok_or_else(|| format!("{name} 需要数值，收到 {raw:?}"))?;
-            colm_case::pft::validate_override(meta.name, number)
-                .map_err(|error| format!("{error:#}"))?;
-            Ok(match meta.kind {
-                colm_case::pft::Kind::Real => colm_namelist::Value::Real {
-                    text: raw.trim().to_string(),
-                },
-                colm_case::pft::Kind::Integer => {
-                    if number.fract() != 0.0 {
-                        return Err(format!("{name} 必须是整数"));
-                    }
-                    if !(i32::MIN as f64..=i32::MAX as f64).contains(&number) {
-                        return Err(format!("{name} 超出 Fortran 默认整数/i32 范围"));
-                    }
-                    colm_namelist::Value::Int(number as i64)
-                }
-            })
-        })
-        .transpose()?;
-    let path = pft_override_path(meta.name, pft_type);
     let kernel_facts = KernelFacts {
         single: have.contains("SinglePoint"),
         usgs: have.contains("LULC_USGS"),
         crop: have.contains("CROP"),
     };
-    let mut done = Vec::new();
-    for (dir, text) in read_all(&dirs)? {
-        let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
-        let context = VisibilityContext::new(&doc, &have);
-        if !(context.single && (context.pft || context.pc) && context.biological_land()) {
-            return Err(format!("{dir}: 当前算例不是可编辑的单点 PFT/PC 植被算例"));
-        }
-        if !pft_parameter_applies(meta, &context, pft_type) {
-            return Err(format!("{dir}: {} 在当前过程配置下不生效", meta.name));
-        }
-        if !pft_parameter_has_default(meta, &context, pft_type)? {
-            return Err(format!("{dir}: {} 没有可用的内置 PFT 参数", meta.name));
-        }
-        match &typed {
-            Some(value) => doc
-                .insert(&path, value.clone(), "nl_colm")
-                .map_err(|e| format!("{dir}: {e:#}"))?,
-            None => {
-                doc.remove(&path).map_err(|e| format!("{dir}: {e:#}"))?;
+    let dirs = by_dir.keys().cloned().collect::<Vec<_>>();
+    let texts = read_all(&dirs)?
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut done = Vec::with_capacity(by_dir.len());
+    let mut pc_mode = None;
+    for (dir, scoped_changes) in by_dir {
+        let text = texts.get(&dir).expect("read_all returned every requested case");
+        let mut doc = colm_namelist::parse(text).map_err(|e| format!("{dir}: {e:#}"))?;
+        for change in scoped_changes {
+            let meta = colm_case::pft::parameter(&change.name).expect("validated above");
+            let (valid_case, mode) = {
+                let context = VisibilityContext::new(&doc, &have);
+                (
+                    context.single
+                        && (context.pft || context.pc)
+                        && context.biological_land()
+                        && pft_parameter_applies(meta, &context, change.pft_type)
+                        && pft_parameter_has_default(meta, &context, change.pft_type)?,
+                    context.pc,
+                )
+            };
+            if !valid_case {
+                return Err(format!(
+                    "{dir}: {} 在当前 PFT/PC 或过程配置下不生效",
+                    meta.name
+                ));
+            }
+            if pc_mode.is_some_and(|current| current != mode) {
+                return Err(
+                    "不能在同一次批量编辑中混合普通 PFT 与 PC 组分；请缩小范围".into(),
+                );
+            }
+            pc_mode = Some(mode);
+            let path = pft_override_path(meta.name, change.pft_type);
+            match change.value.as_deref() {
+                Some(raw) => doc
+                    .insert(&path, typed_pft_value(meta, raw)?, "nl_colm")
+                    .map_err(|e| format!("{dir}: {e:#}"))?,
+                None => {
+                    doc.remove(&path).map_err(|e| format!("{dir}: {e:#}"))?;
+                }
             }
         }
         validate_runtime_contract(&doc, std::path::Path::new(&dir), Some(kernel_facts))
@@ -2077,6 +2695,28 @@ pub fn set_pft_parameter_batch(
         done.push((dir, doc.to_string()));
     }
     write_all(&done)
+}
+
+fn typed_pft_value(
+    meta: &colm_case::pft::ParameterMeta,
+    raw: &str,
+) -> Result<colm_namelist::Value, String> {
+    let number = parse_real(raw).ok_or_else(|| format!("{} 需要数值，收到 {raw:?}", meta.name))?;
+    colm_case::pft::validate_override(meta.name, number).map_err(|error| format!("{error:#}"))?;
+    Ok(match meta.kind {
+        colm_case::pft::Kind::Real => colm_namelist::Value::Real {
+            text: raw.trim().to_string(),
+        },
+        colm_case::pft::Kind::Integer => {
+            if number.fract() != 0.0 {
+                return Err(format!("{} 必须是整数", meta.name));
+            }
+            if !(i32::MIN as f64..=i32::MAX as f64).contains(&number) {
+                return Err(format!("{} 超出 Fortran 默认整数/i32 范围", meta.name));
+            }
+            colm_namelist::Value::Int(number as i64)
+        }
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -2098,15 +2738,7 @@ pub struct ProcessParamEntry {
     pub doc: Option<String>,
 }
 
-#[derive(Clone)]
-struct ProcessCodeDefault {
-    path: String,
-    value: String,
-    kind: &'static str,
-    group: &'static str,
-    doc: Option<String>,
-    insertable: bool,
-}
+type ProcessCodeDefault = colm_case::parameters::process::ProcessDefault;
 
 fn process_section(name: &str, groups: &std::collections::BTreeSet<String>) -> &'static str {
     let n = name.to_ascii_lowercase();
@@ -2261,163 +2893,8 @@ fn safe_process_file(case_dir: &std::path::Path, file: &str) -> Result<std::path
     Ok(canon)
 }
 
-fn process_decl_kind(decl: &str) -> Option<&'static str> {
-    let decl = decl.trim().to_ascii_lowercase();
-    if decl.starts_with("logical") {
-        Some("logical")
-    } else if decl.starts_with("integer") {
-        Some("integer")
-    } else if decl.starts_with("real") {
-        Some("real")
-    } else if decl.starts_with("character") {
-        Some("character")
-    } else {
-        None
-    }
-}
-
-fn process_code_value(kind: &str, raw: &str) -> String {
-    let clean = raw.trim().replace("_r8", "").replace("_R8", "");
-    match kind {
-        "logical" => {
-            let value = if clean.to_ascii_lowercase().contains("true") {
-                ".true."
-            } else {
-                ".false."
-            };
-            value.into()
-        }
-        "integer" => clean,
-        "real" => {
-            let normalized = clean.replace(['d', 'D'], "e");
-            if parse_real(&normalized).is_some() {
-                return normalized;
-            }
-            // A few CoLM defaults are literal ratios. Fold those so an HTML
-            // number input can display and later write the source default.
-            if let Some((left, right)) = normalized.split_once('/') {
-                if !right.contains('/') {
-                    if let (Some(a), Some(b)) = (parse_real(left.trim()), parse_real(right.trim()))
-                    {
-                        if b != 0.0 {
-                            let value = format!("{:.12}", a / b)
-                                .trim_end_matches('0')
-                                .trim_end_matches('.')
-                                .to_string();
-                            return value;
-                        }
-                    }
-                }
-            }
-            normalized
-        }
-        _ => clean,
-    }
-}
-
-fn process_type_defaults(
-    source: &str,
-    type_name: &str,
-    owner: &str,
-    group: &'static str,
-) -> Vec<ProcessCodeDefault> {
-    let type_name = type_name.to_ascii_lowercase();
-    let mut inside = false;
-    let mut fields = Vec::new();
-    for line in source.lines() {
-        let lower = line.trim().to_ascii_lowercase();
-        if !inside {
-            if lower == format!("type {type_name}") || lower == format!("type :: {type_name}") {
-                inside = true;
-            }
-            continue;
-        }
-        if lower.starts_with("end type") {
-            break;
-        }
-        let (declaration, comment) = line.split_once('!').unwrap_or((line, ""));
-        let Some((decl, assignment)) = declaration.split_once("::") else {
-            continue;
-        };
-        let Some(kind) = process_decl_kind(decl) else {
-            continue;
-        };
-        let Some((name, raw)) = assignment.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        let array = name.contains('(');
-        let name = name.split('(').next().unwrap_or(name).trim();
-        if name.is_empty() || name.contains(',') {
-            continue;
-        }
-        let value = process_code_value(kind, raw);
-        fields.push(ProcessCodeDefault {
-            path: format!("{owner}%{name}"),
-            value,
-            kind,
-            group,
-            doc: (!comment.trim().is_empty()).then(|| comment.trim().to_string()),
-            insertable: !array,
-        });
-    }
-    fields
-}
-
 fn process_code_defaults() -> Vec<ProcessCodeDefault> {
-    let mut defaults = process_type_defaults(
-        include_str!("../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Defs.F90"),
-        "tracer_parameter_type",
-        "DEF_TRACER",
-        "nl_colm_tracer_parameter",
-    );
-    let methane =
-        include_str!("../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Const.F90");
-    defaults.extend(process_type_defaults(
-        methane,
-        "Methane_type",
-        "DEF_METHANE",
-        "nl_colm_methane_parameter",
-    ));
-    defaults.extend(process_type_defaults(
-        methane,
-        "Methane_hydrology_type",
-        "DEF_METHANE_hydrology",
-        "nl_colm_methane_parameter",
-    ));
-    defaults.extend(process_type_defaults(
-        include_str!("../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Particle_Sediment.F90"),
-        "sediment_parameter_type",
-        "DEF_SEDIMENT",
-        "nl_colm_sediment_parameter",
-    ));
-    // MOD_Tracer_ForcingInput initializes these scratch variables immediately
-    // before reading &nl_colm_tracer_forcing. Array defaults apply to every slot.
-    for (path, value, kind, insertable) in [
-        ("forcing_num", "0", "integer", true),
-        ("forcing_role", "'none'", "character", false),
-        ("forcing_fprefix", "'null'", "character", false),
-        ("forcing_vname", "'null'", "character", false),
-        ("forcing_tintalgo", "'linear'", "character", false),
-        ("forcing_dtime", "21600", "integer", false),
-        ("forcing_offset", "0", "integer", false),
-        (
-            "forcing_input_mode",
-            "'normalized_over_total'",
-            "character",
-            false,
-        ),
-    ] {
-        defaults.push(ProcessCodeDefault {
-            path: path.into(),
-            value: value.into(),
-            kind,
-            group: "nl_colm_tracer_forcing",
-            doc: None,
-            insertable,
-        });
-    }
-    defaults
+    colm_case::parameters::process::code_defaults()
 }
 
 fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessParamFile, String> {
@@ -2545,57 +3022,154 @@ pub fn set_process_parameter_field_batch(
         }
         done.push((path_file, doc.to_string()));
     }
-    write_process_files(&done)?;
+    let changed = write_process_files(&done)?;
     Ok(BatchWrite {
         written: done.len(),
+        changed,
         text: std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml"))
             .unwrap_or_default(),
     })
 }
 
-fn write_process_files(done: &[(std::path::PathBuf, String)]) -> Result<(), String> {
-    // ponytail: process parameter edits are rare; one global lock is enough unless UI writes become concurrent-hot.
+/// 删除 case-local 过程参数显式覆盖，让模型重新使用 Fortran 代码默认值。
+#[tauri::command]
+pub fn reset_process_parameter_field_batch(
+    dirs: Vec<String>,
+    file: String,
+    path: String,
+) -> Result<BatchWrite, String> {
+    if dirs.is_empty() {
+        return Err("没有可配置的算例".into());
+    }
+    if !process_code_defaults()
+        .iter()
+        .any(|field| field.path.eq_ignore_ascii_case(&path))
+    {
+        return Err(format!("未知过程参数：{path}"));
+    }
+    let mut done = Vec::with_capacity(dirs.len());
+    for dir in &dirs {
+        let case_dir = std::path::Path::new(dir);
+        let parameter_file = safe_process_file(case_dir, &file)?;
+        let text = std::fs::read_to_string(&parameter_file)
+            .map_err(|e| format!("{}: {e}", parameter_file.display()))?;
+        let mut doc =
+            colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", parameter_file.display()))?;
+        doc.remove(&path)
+            .map_err(|e| format!("{}: {e:#}", parameter_file.display()))?;
+        done.push((parameter_file, doc.to_string()));
+    }
+    let changed = write_process_files(&done)?;
+    Ok(BatchWrite {
+        written: done.len(),
+        changed,
+        text: std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml"))
+            .unwrap_or_default(),
+    })
+}
+
+fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+    use std::io::Write as _;
+
+    fn replace(staged: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if target.exists() {
+            // ponytail: std has no ReplaceFileW; same-directory remove+rename avoids
+            // partial contents. Add a Windows syscall wrapper only if crash recovery
+            // during this tiny rename window becomes a measured requirement.
+            std::fs::remove_file(target)?;
+        }
+        std::fs::rename(staged, target)
+    }
+
+    // ponytail: edits are user-driven and rare; split this global lock only if measured contention appears.
     static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static BACKUP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let _guard = WRITE_LOCK
         .lock()
-        .map_err(|_| "过程参数写入锁已损坏；请重启 CoLM Desktop".to_string())?;
+        .map_err(|_| "配置写入锁已损坏；请重启 CoLM Desktop".to_string())?;
     let tag = format!(
         "{}.{}",
         std::process::id(),
         BACKUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let mut backups = Vec::with_capacity(done.len());
-    for (index, (path, _)) in done.iter().enumerate() {
-        let backup = path.with_file_name(format!(
-            ".{}.bak-{tag}-{index}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("process_parameter.nml")
-        ));
+    let changed = done
+        .iter()
+        .filter(|(path, text)| {
+            std::fs::read_to_string(path)
+                .map(|current| current != text.as_str())
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        return Ok(0);
+    }
+    for (path, _) in &changed {
+        if std::fs::metadata(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?
+            .permissions()
+            .readonly()
+        {
+            return Err(format!("{}: 文件为只读", path.display()));
+        }
+    }
+    let mut backups = Vec::with_capacity(changed.len());
+    let mut staged = Vec::with_capacity(changed.len());
+    for (index, (path, text)) in changed.iter().enumerate() {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("parameter.nml");
+        let backup = path.with_file_name(format!(".{name}.bak-{tag}-{index}"));
+        let temporary = path.with_file_name(format!(".{name}.tmp-{tag}-{index}"));
         if let Err(error) = std::fs::copy(path, &backup) {
             for backup in &backups {
                 let _ = std::fs::remove_file(backup);
             }
             return Err(format!("{}: {error}", backup.display()));
         }
-        backups.push(backup);
-    }
-    for (index, (path, text)) in done.iter().enumerate() {
-        if let Err(error) = std::fs::write(path, text) {
-            for ((prior, _), backup) in done.iter().zip(backups.iter()).take(index + 1) {
-                let _ = std::fs::copy(backup, prior);
+        let write = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.set_permissions(std::fs::metadata(path)?.permissions())?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })();
+        if let Err(error) = write {
+            let _ = std::fs::remove_file(&temporary);
+            for path in staged.iter().chain(backups.iter()) {
+                let _ = std::fs::remove_file(path);
             }
-            for backup in &backups {
-                let _ = std::fs::remove_file(backup);
+            return Err(format!("{}: {error}", temporary.display()));
+        }
+        backups.push(backup);
+        staged.push(temporary);
+    }
+    for (index, ((path, _), temporary)) in changed.iter().zip(staged.iter()).enumerate() {
+        if let Err(error) = replace(temporary, path) {
+            for ((prior, _), backup) in changed.iter().zip(backups.iter()).take(index + 1) {
+                let _ = replace(backup, prior);
+            }
+            for path in staged.iter().chain(backups.iter()) {
+                let _ = std::fs::remove_file(path);
             }
             return Err(format!("{}: {error}", path.display()));
         }
     }
-    for backup in &backups {
-        let _ = std::fs::remove_file(backup);
+    for path in staged.iter().chain(backups.iter()) {
+        let _ = std::fs::remove_file(path);
     }
-    Ok(())
+    for parent in changed
+        .iter()
+        .filter_map(|(path, _)| path.parent())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+    }
+    Ok(changed.len())
+}
+
+fn write_process_files(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+    write_files_atomic(done)
 }
 
 /// 一份 namelist 里的一个字段，交给前端渲染。
@@ -2784,6 +3358,8 @@ pub fn varying_fields(dirs: Vec<String>) -> Result<Vec<String>, String> {
 #[derive(Debug, serde::Serialize)]
 pub struct BatchWrite {
     pub written: usize,
+    /// 实际内容发生变化的文件数；0 表示没有写文件、时间戳和结果状态不应改变。
+    pub changed: usize,
     pub text: String,
 }
 
@@ -2859,6 +3435,31 @@ pub fn set_field_batch(
     set_fields_batch(dirs, vec![FieldChange { path, value }], kernel_dir)
 }
 
+/// 删除一个 case.nml 显式覆盖。恢复内置值必须走删除语义，不能把当前默认值
+/// 固化回文件；任一目标校验失败时整批保持不变。
+#[tauri::command]
+pub fn reset_field_batch(
+    dirs: Vec<String>,
+    path: String,
+    kernel_dir: Option<String>,
+) -> Result<BatchWrite, String> {
+    let field = colm_schema::find(&path).ok_or_else(|| format!("未知字段：{path}"))?;
+    if field.group.is_none() {
+        return Err(format!("{path} 是只读派生字段，不能重置"));
+    }
+    let kernel = kernel_facts(kernel_dir.as_deref())?;
+    let all = read_all(&dirs)?;
+    let mut done = Vec::with_capacity(all.len());
+    for (dir, text) in all {
+        let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
+        doc.remove(&path).map_err(|e| format!("{dir}: {e:#}"))?;
+        validate_runtime_contract(&doc, std::path::Path::new(&dir), kernel)
+            .map_err(|e| format!("{dir}: {e}"))?;
+        done.push((dir, doc.to_string()));
+    }
+    write_all(&done)
+}
+
 /// 把一组有关联的字段原子地写进整批算例。
 ///
 /// 用于“启用初始场并选择文件”和互斥开关：不能先把父开关写成 true，再因
@@ -2890,48 +3491,15 @@ pub fn set_fields_batch(
 }
 
 pub(crate) fn write_all(done: &[(String, String)]) -> Result<BatchWrite, String> {
-    // ponytail: GUI writes are rare; shard this global lock per case only if measured contention appears.
-    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static BACKUP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let _guard = WRITE_LOCK
-        .lock()
-        .map_err(|_| "配置写入锁已损坏；请重启 CoLM Desktop".to_string())?;
-    let tag = format!(
-        "{}.{}",
-        std::process::id(),
-        BACKUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let mut backups = Vec::with_capacity(done.len());
-    for (i, (d, _)) in done.iter().enumerate() {
-        let path = std::path::Path::new(d).join("case.nml");
-        let backup = std::path::Path::new(d).join(format!(".case.nml.bak-{tag}-{i}"));
-        if let Err(error) = std::fs::copy(&path, &backup) {
-            for (_, prior) in &backups {
-                let _ = std::fs::remove_file(prior);
-            }
-            return Err(format!("{}: {error}", backup.display()));
-        }
-        backups.push((path, backup));
-    }
-
-    for (index, (d, text)) in done.iter().enumerate() {
-        let p = std::path::Path::new(d).join("case.nml");
-        if let Err(error) = std::fs::write(&p, text) {
-            for (path, backup) in backups.iter().take(index + 1) {
-                let _ = std::fs::copy(backup, path);
-            }
-            for (_, backup) in &backups {
-                let _ = std::fs::remove_file(backup);
-            }
-            return Err(format!("{}: {error}", p.display()));
-        }
-    }
-    for (_, backup) in &backups {
-        let _ = std::fs::remove_file(backup);
-    }
+    let files = done
+        .iter()
+        .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone()))
+        .collect::<Vec<_>>();
+    let changed = write_files_atomic(&files)?;
     Ok(BatchWrite {
         written: done.len(),
-        text: done.first().map(|(_, t)| t.clone()).unwrap_or_default(),
+        changed,
+        text: done.first().map(|(_, text)| text.clone()).unwrap_or_default(),
     })
 }
 

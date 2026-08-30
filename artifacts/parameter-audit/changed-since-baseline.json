@@ -1,0 +1,32 @@
+{
+  "baseline_git_commit": "d6850d32e0a897fcfe7df3afa2487c9ab955eb91",
+  "baseline_source_counts": {
+    "case_tuning_fields": 44,
+    "land_cover_catalog_fields": 44,
+    "land_cover_reviewed_constants": 39,
+    "pft_pc_fields": 87,
+    "process_fields": 170,
+    "schema_fields": 832
+  },
+  "blocked_candidates": [
+    "fveg0_p",
+    "sai0_p",
+    "z0mr_p",
+    "displar_p",
+    "respcp_p",
+    "roota",
+    "rootb",
+    "dsladlai"
+  ],
+  "catalog_descriptors_added": 1220,
+  "catalog_version": 1,
+  "current_source_counts": {
+    "land_cover_base_parameters": 44,
+    "land_cover_scope_descriptors": 88,
+    "pc_pft_parameters": 87,
+    "pft_parameters": 87,
+    "process_parameters": 170,
+    "schema_fields": 832
+  },
+  "note": "Base IDs split LC into IGBP/USGS and PFT into PFT/PC scopes; descriptor count is therefore not a raw-source count."
+}

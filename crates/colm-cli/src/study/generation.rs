@@ -81,13 +81,7 @@ pub fn write_generation(
         })
         .collect::<Vec<_>>();
     for member in &members {
-        colm_case::tuning::validate_values(
-            &member
-                .parameters
-                .iter()
-                .map(|(name, value)| (name.clone(), *value))
-                .collect::<Vec<_>>(),
-        )?;
+        super::sample::validate_vector(&manifest.spec, &member.parameters)?;
     }
 
     let mut csv = String::from("member,baseline,generation,candidate");
@@ -179,11 +173,11 @@ pub fn reconcile_tasks(manifest: &Manifest, state: &mut StudyState) -> Result<Ve
 
 pub fn normalized(member: &MemberPlan, manifest: &Manifest) -> Result<Vec<f64>> {
     let mut parameters = manifest.spec.parameters.iter().collect::<Vec<_>>();
-    parameters.sort_by_key(|parameter| parameter.name.to_ascii_lowercase());
+    parameters.sort_by_key(|parameter| parameter.member_key().to_ascii_lowercase());
     parameters
         .into_iter()
         .map(|parameter| {
-            let value = member.parameters[&parameter.name];
+            let value = member.parameters[&parameter.member_key()];
             let u = match parameter.scale.unwrap_or(ScaleSpec::Linear) {
                 ScaleSpec::Linear => {
                     (value - parameter.sample_min) / (parameter.sample_max - parameter.sample_min)
@@ -204,7 +198,7 @@ pub fn normalized(member: &MemberPlan, manifest: &Manifest) -> Result<Vec<f64>> 
 
 pub fn physical(manifest: &Manifest, vector: &[f64]) -> Result<Vec<f64>> {
     let mut parameters = manifest.spec.parameters.iter().collect::<Vec<_>>();
-    parameters.sort_by_key(|parameter| parameter.name.to_ascii_lowercase());
+    parameters.sort_by_key(|parameter| parameter.member_key().to_ascii_lowercase());
     if vector.len() != parameters.len() {
         bail!("normalized vector has the wrong dimension");
     }
@@ -381,12 +375,16 @@ mod tests {
                 parameters: vec![
                     ParameterSpec {
                         name: "b".into(),
+                        parameter_id: None,
+                        scope_instance: None,
                         sample_min: 1.0,
                         sample_max: 100.0,
                         scale: Some(ScaleSpec::Log),
                     },
                     ParameterSpec {
                         name: "a".into(),
+                        parameter_id: None,
+                        scope_instance: None,
                         sample_min: 0.0,
                         sample_max: 10.0,
                         scale: Some(ScaleSpec::Linear),
@@ -512,6 +510,8 @@ mod tests {
                 site_mode: SiteMode::Shared,
                 parameters: vec![ParameterSpec {
                     name: "DEF_TUNING_ZLND".into(),
+                    parameter_id: None,
+                    scope_instance: None,
                     sample_min: 0.01,
                     sample_max: 0.1,
                     scale: Some(ScaleSpec::Linear),

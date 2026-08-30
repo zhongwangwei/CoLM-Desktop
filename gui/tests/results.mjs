@@ -470,7 +470,10 @@ if (!resultUi.includes("label: `${meta.label} · ${variable}`")
     || !resultUi.includes('printableReportHtml') || !resultUi.includes('requestAnimationFrame')) {
   throw new Error('chart legend or printable PDF report support regressed');
 }
-if (!resultUi.includes("invoke('field_states_batch'")
+if (!resultUi.includes("invoke('study_parameter_contexts'")
+    || !resultUi.includes('parameter_id: meta?.id')
+    || !resultUi.includes('scope_instance: scope ?')
+    || !resultUi.includes("['pft-type', 'pc-pft-component']")
     || !resultUi.includes("invoke('study_result'")
     || !resultUi.includes('validation_from')
     || !resultUi.includes('data-tune-weight')

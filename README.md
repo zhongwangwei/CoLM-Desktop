@@ -45,7 +45,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 |---|---|
 | 引导式建模 | 通过空间结构、地类、次网格和物理配置卡片确定模型约束 |
 | 站点与算例管理 | 扫描站点目录、自动匹配强迫场与观测、批量创建当前会话算例 |
-| 约束感知参数界面 | 只显示当前模型可用的分栏和字段；派生项、互斥项与不可用项明确标识 |
+| 约束感知参数界面 | 统一目录搜索、常用/专家分层、IGBP/USGS/PFT/PC 作用域、稀疏覆盖与安全导入导出 |
 | CSV/TXT 多站点前处理 | 自动识别逗号、制表符、分号或空白长表，按站点拆分并统一生成标准单站 NetCDF；可同步批量生成站点文件 |
 | 强迫场缺测修复 | 短缺口按变量物理含义插值；长缺口换算至 UTC 后匹配 ERA5-Land 最近格点，并基于重叠观测进行偏差订正与逐时 QC 留痕 |
 | 多站点并发 | 按 CPU 核数并发运行独立单点算例，逐站点显示进度、阶段和日志 |
@@ -54,6 +54,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 | 中英文界面 | 首页与主工作流均可切换中文/English，保留常规与专家模式入口 |
 
 当前配置体系覆盖 IGBP / USGS、PFT / PC、水热、BGC 与城市过程；GUI 会根据单点模式及过程约束自动隐藏河道、水库、示踪剂等不适用内容。
+参数目录与操作说明见 [`docs/parameter-catalog.md`](docs/parameter-catalog.md)、[`docs/parameter-gui-guide.md`](docs/parameter-gui-guide.md) 和 [`docs/parameter-default-preservation.md`](docs/parameter-default-preservation.md)。
 
 ## 使用流程
 

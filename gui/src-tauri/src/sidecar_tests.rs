@@ -666,3 +666,28 @@ fn study_spec_temp_names_are_unique_and_json_suffixed() {
     std::fs::remove_file(a).unwrap();
     std::fs::remove_file(b).unwrap();
 }
+
+#[test]
+fn contextual_study_rows_keep_catalog_id_and_pft_index() {
+    let descriptor = colm_case::parameters::all()
+        .iter()
+        .find(|descriptor| descriptor.id == "pft:DEF_PFT_VMAX25")
+        .unwrap();
+    let row = study_row(
+        descriptor,
+        "pft-type",
+        crate::config::ParameterScopeInstance {
+            kind: "pft-type".into(),
+            scheme: None,
+            index: Some(2),
+            type_name: Some("needleleaf evergreen temperate tree".into()),
+            process_file: None,
+        },
+        45.0,
+    )
+    .unwrap();
+    assert_eq!(row.id, "pft:DEF_PFT_VMAX25");
+    assert_eq!(row.scope_instance.index, Some(2));
+    assert_eq!(row.default, 45.0);
+    assert_eq!(row.min, Some(0.0));
+}
