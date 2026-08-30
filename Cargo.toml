@@ -7,7 +7,7 @@ members = ["crates/colm-case",
     "crates/colm-cli", "crates/colm-forcing", "crates/colm-hist", "crates/colm-kernel", "crates/colm-namelist", "crates/colm-schema", "crates/colm-srfdata", "oracle", "xtask"]
 
 [workspace.package]
-version = "0.2.0-beta.1"
+version = "0.2.0-beta.2"
 edition = "2021"
 # 用 MSRV 而不是 rustup 的工具链固定文件：本机 rust 由 Homebrew 安装，没有 rustup，
 # 那类文件会被静默忽略。rust-version 由 cargo 本体检查。
