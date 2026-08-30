@@ -301,6 +301,7 @@ CONTAINS
 #ifdef USEMPI
                CALL mpi_allreduce (MPI_IN_PLACE, totaldtws, 1, MPI_REAL8, MPI_SUM, p_comm_worker, p_err)
                CALL mpi_allreduce (MPI_IN_PLACE, totalprcp, 1, MPI_REAL8, MPI_SUM, p_comm_worker, p_err)
+#endif
 
                IF (totalprcp > 0.) THEN
                   pct_dtws_prcp = totaldtws/totalprcp
@@ -308,6 +309,7 @@ CONTAINS
                   pct_dtws_prcp = spval
                ENDIF
 
+#if defined(USEMPI) && !defined(FLAT_SPMD)
                IF (p_iam_worker == p_root) THEN
                   CALL mpi_send (pct_dtws_prcp, 1, MPI_REAL8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
                ENDIF
@@ -322,7 +324,7 @@ CONTAINS
                   write(timestr,'(I4.4)') idate(1)
                ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
                CALL mpi_recv (pct_dtws_prcp, 1, MPI_REAL8, p_address_worker(p_root), &
                   mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 #endif
@@ -506,6 +508,11 @@ CONTAINS
    integer :: iblkme, iblk, jblk, idata, ixseg, iyseg
    integer :: rmesg(3), smesg(3), isrc
    real(r8), allocatable :: rbuf(:,:), sbuf(:,:), vdata(:,:)
+#ifdef FLAT_SPMD
+   integer :: iproc, ipos, nsend
+   integer, allocatable :: recvcounts(:), displs(:), offsets(:)
+   real(r8), allocatable :: sendbuf(:), recvbuf(:)
+#endif
    logical :: amount
 
       IF (p_is_io) CALL allocate_block_data (gridcheck, data_xy_2d)
@@ -545,12 +552,79 @@ CONTAINS
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
+#ifdef FLAT_SPMD
+      nsend = 0
+      DO iyseg = 1, gcheck_concat%nyseg
+         DO ixseg = 1, gcheck_concat%nxseg
+            iblk = gcheck_concat%xsegs(ixseg)%blk
+            jblk = gcheck_concat%ysegs(iyseg)%blk
+            IF (gblock%pio(iblk,jblk) == p_iam_glb) THEN
+               nsend = nsend + gcheck_concat%xsegs(ixseg)%cnt * gcheck_concat%ysegs(iyseg)%cnt
+            ENDIF
+         ENDDO
+      ENDDO
+
+      allocate (sendbuf(max(1,nsend)))
+      ipos = 0
+      DO iyseg = 1, gcheck_concat%nyseg
+         DO ixseg = 1, gcheck_concat%nxseg
+            iblk = gcheck_concat%xsegs(ixseg)%blk
+            jblk = gcheck_concat%ysegs(iyseg)%blk
+            IF (gblock%pio(iblk,jblk) == p_iam_glb) THEN
+               xbdsp = gcheck_concat%xsegs(ixseg)%bdsp
+               ybdsp = gcheck_concat%ysegs(iyseg)%bdsp
+               xcnt  = gcheck_concat%xsegs(ixseg)%cnt
+               ycnt  = gcheck_concat%ysegs(iyseg)%cnt
+               sendbuf(ipos+1:ipos+xcnt*ycnt) = reshape( &
+                  data_xy_2d%blk(iblk,jblk)%val(xbdsp+1:xbdsp+xcnt,ybdsp+1:ybdsp+ycnt), &
+                  (/xcnt*ycnt/))
+               ipos = ipos + xcnt*ycnt
+            ENDIF
+         ENDDO
+      ENDDO
+
+      allocate (recvcounts(0:p_np_glb-1), displs(0:p_np_glb-1))
+      recvcounts = 0
+      displs = 0
+      CALL mpi_gather (nsend, 1, MPI_INTEGER, recvcounts, 1, MPI_INTEGER, &
+         p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         DO iproc = 1, p_np_glb-1
+            displs(iproc) = displs(iproc-1) + recvcounts(iproc-1)
+         ENDDO
+         allocate (recvbuf(max(1,sum(recvcounts))), offsets(0:p_np_glb-1))
+         offsets = 0
+      ELSE
+         allocate (recvbuf(1), offsets(0:0))
+      ENDIF
+
+      CALL mpi_gatherv (sendbuf, nsend, MPI_REAL8, recvbuf, recvcounts, displs, &
+         MPI_REAL8, p_root, p_comm_glb, p_err)
+#endif
+
       IF (p_is_master) THEN
 
          allocate (vdata (gcheck_concat%ginfo%nlon, gcheck_concat%ginfo%nlat))
          vdata(:,:) = spval
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+         DO iyseg = 1, gcheck_concat%nyseg
+            DO ixseg = 1, gcheck_concat%nxseg
+               iblk = gcheck_concat%xsegs(ixseg)%blk
+               jblk = gcheck_concat%ysegs(iyseg)%blk
+               iproc = gblock%pio(iblk,jblk)
+               xgdsp = gcheck_concat%xsegs(ixseg)%gdsp
+               ygdsp = gcheck_concat%ysegs(iyseg)%gdsp
+               xcnt  = gcheck_concat%xsegs(ixseg)%cnt
+               ycnt  = gcheck_concat%ysegs(iyseg)%cnt
+               ipos = displs(iproc) + offsets(iproc)
+               vdata (xgdsp+1:xgdsp+xcnt, ygdsp+1:ygdsp+ycnt) = &
+                  reshape(recvbuf(ipos+1:ipos+xcnt*ycnt), (/xcnt,ycnt/))
+               offsets(iproc) = offsets(iproc) + xcnt*ycnt
+            ENDDO
+         ENDDO
+#elif defined(USEMPI)
          DO idata = 1, gcheck_concat%ndatablk
             CALL mpi_recv (rmesg, 3, MPI_INTEGER, MPI_ANY_SOURCE, &
                check_data_id, p_comm_glb, p_stat, p_err)
@@ -610,7 +684,7 @@ CONTAINS
 
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_io) THEN
          DO iyseg = 1, gcheck_concat%nyseg
             DO ixseg = 1, gcheck_concat%nxseg
@@ -640,6 +714,10 @@ CONTAINS
             ENDDO
          ENDDO
       ENDIF
+#endif
+
+#ifdef FLAT_SPMD
+      deallocate (sendbuf, recvbuf, recvcounts, displs, offsets)
 #endif
 
 #ifdef USEMPI
