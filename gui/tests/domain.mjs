@@ -105,6 +105,8 @@ const choose = label => {
 };
 const next = () => foot('下一步').onclick();
 const previous = () => foot('上一步').onclick();
+const findNode = (root, predicate) => predicate(root) ? root
+  : root.children.map(child => findNode(child, predicate)).find(Boolean);
 
 showDomainGate();
 if (ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('page 1 missing');
@@ -120,6 +122,25 @@ for (const domain of ['流域', '区域', '全球']) {
     throw new Error(`${domain} must offer all three spatial grids`);
   }
   if (cards().some(c => c.disabled)) throw new Error(`${domain} unexpectedly disabled a grid choice`);
+}
+
+showDomainGate();
+choose('区域'); next(); choose('非结构网格'); next();
+if (ids.gatetitle.textContent !== '空间输入怎么准备？') throw new Error('spatial selections must collect domain and grid inputs');
+for (const [id, value] of Object.entries({
+  'spatial-west': '100', 'spatial-east': '110', 'spatial-south': '20', 'spatial-north': '30',
+})) {
+  const input = findNode(ids.gatecards, node => node.id === id);
+  if (!input) throw new Error(`missing ${id}`);
+  input.value = value;
+  input.oninput();
+}
+if (foot('下一步').disabled) throw new Error('valid regional bounds and default resolution must pass');
+next(); choose('IGBP'); next(); next(); next(); next();
+if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'unstructured'
+    || state.spatial?.grid?.dlon !== 0.5 || state.spatial?.grid?.nlon !== 720
+    || state.wizard?.spatial !== state.spatial) {
+  throw new Error(`spatial contract was not preserved: ${JSON.stringify(state.spatial)}`);
 }
 showDomainGate();
 choose('站点');
@@ -364,7 +385,9 @@ if (pcFieldsAfterUrban.DEF_USE_PC !== '.true.' || pcFieldsAfterUrban.DEF_USE_LCT
 
 // Spatial scope and computation grid are independent and survive the full wizard.
 showDomainGate();
-choose('流域'); next(); choose('经纬度网格'); next(); choose('IGBP'); next();
+choose('流域'); next(); choose('经纬度网格'); next();
+const shapefile = findNode(ids.gatecards, node => node.id === 'spatial-shapefile');
+shapefile.value = '/data/basin.shp'; shapefile.oninput(); next(); choose('IGBP'); next();
 choose('van Genuchten–Mualem（Ippisch 2006）'); next(); next(); next();
 if (state.domain !== 'watershed' || state.grid !== 'latlon' || state.wizard.grid !== 'latlon') {
   throw new Error(`spatial domain/grid state was lost: ${JSON.stringify(state.wizard)}`);

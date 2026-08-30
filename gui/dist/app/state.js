@@ -31,6 +31,8 @@ export const state = {
   domain: null,
   /** 空间计算网格。空间范围使用 'latlon' | 'unstructured' | 'catchment'；站点为 null。 */
   grid: null,
+  /** 空间范围边界与网格输入；站点任务为 null。 */
+  spatial: null,
   /** 次网格怎么分。'IGBP' | 'USGS' | 'PFT' | 'PC'，进门向导第 2 页设的。
    *
    *  USGS 仍需要单独的编译产物，界面会自动匹配；PFT/PC 是运行时选择。

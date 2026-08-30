@@ -515,6 +515,8 @@ body.resizing-live { user-select: none; }
 .domain-card .dsoon { font-size: 11px; color: var(--warn); margin-top: 4px; }
 /* 灰选项的约束原因用告警色；可回退的卡片会把来源页也写在这里。 */
 .domain-card .dwhy { font-size: 11px; color: var(--warn); margin-top: 4px; }
+.spatial-config { width: 100%; margin: 0; text-align: left; }
+.spatial-config h3:not(:first-child) { margin-top: 18px; }
 /* 没有本页提示时收掉外边距。 */
 #gateinfo { margin: 10px 0 0; }
 #gateinfo:empty { margin: 0; }
