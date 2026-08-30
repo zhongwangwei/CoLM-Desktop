@@ -1053,6 +1053,7 @@ CONTAINS
 
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
+   USE MOD_Vector_ReadWrite, only: vector_read_and_scatter, vector_read_matrix_and_scatter
    IMPLICIT NONE
 
    character(len=*), intent(in) :: parafile
@@ -1064,9 +1065,41 @@ CONTAINS
 
    ! Local Variables
    integer :: iworker, nucat, ndim1, i
+   integer, allocatable :: varsize (:)
    real(r8), allocatable :: rsend1d (:)
    real(r8), allocatable :: rsend2d (:,:)
    integer,  allocatable :: isend1d (:)
+
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      IF (present(rdata1d)) THEN
+         CALL vector_read_and_scatter (parafile, rdata1d, numucat, varname, ucat_data_address)
+      ENDIF
+
+      IF (present(rdata2d)) THEN
+         IF (p_is_master) THEN
+            CALL ncio_inquire_varsize (parafile, varname, varsize)
+            IF (size(varsize) /= 2) CALL CoLM_stop ('readin_riverlake_parameter: expected matrix')
+            ndim1 = varsize(1)
+            deallocate (varsize)
+         ENDIF
+         CALL mpi_bcast (ndim1, 1, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL vector_read_matrix_and_scatter (parafile, rdata2d, ndim1, numucat, &
+            varname, ucat_ucid, totalnumucat)
+      ENDIF
+
+      IF (present(idata1d)) THEN
+         IF (p_is_master) THEN
+            CALL ncio_read_serial (parafile, varname, idata1d)
+            CALL move_alloc (idata1d, isend1d)
+         ELSE
+            allocate (isend1d(totalnumucat))
+         ENDIF
+         CALL mpi_bcast (isend1d, totalnumucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         allocate (idata1d(numucat))
+         idata1d = isend1d(ucat_ucid)
+         deallocate (isend1d)
+      ENDIF
+#else
 
       IF (p_is_master) THEN
          IF (present(rdata1d))  CALL ncio_read_serial (parafile, varname, rdata1d)
@@ -1153,6 +1186,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #endif
 
    END SUBROUTINE readin_riverlake_parameter
