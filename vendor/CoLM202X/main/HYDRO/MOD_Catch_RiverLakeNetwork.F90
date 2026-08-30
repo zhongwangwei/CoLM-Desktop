@@ -135,6 +135,9 @@ CONTAINS
    integer , allocatable :: icache (:)
    real(r8), allocatable :: rcache (:)
    logical , allocatable :: lcache (:)
+   integer , allocatable :: counts(:), counts_data(:), disps(:), disps_data(:), irecvbuf(:)
+   real(r8), allocatable :: rrecvbuf(:)
+   logical , allocatable :: lrecvbuf(:)
 
    integer, allocatable :: bindex(:), addrbasin(:), addrdown(:)
    integer, allocatable :: basin_sorted(:), basin_order(:), order (:)
@@ -189,6 +192,108 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (numbasin, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iworker = 1, p_np_glb-1
+         disps(iworker) = disps(iworker-1) + counts(iworker-1)
+      ENDDO
+
+      IF (p_is_master) THEN
+         allocate (bindex(max(1,sum(counts))))
+      ELSE
+         allocate (bindex(1))
+      ENDIF
+      CALL mpi_gatherv (basinindex, numbasin, MPI_INTEGER, bindex, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         IF (sum(counts) /= totalnumbasin) &
+            CALL CoLM_stop ('river_lake_network_init: basin count mismatch')
+         allocate (addrbasin(totalnumbasin)); addrbasin = -1
+         DO iworker = 0, p_np_glb-1
+            IF (counts(iworker) > 0) addrbasin(bindex(disps(iworker)+1: &
+               disps(iworker)+counts(iworker))) = p_address_worker(iworker)
+         ENDDO
+
+         allocate (addrdown(totalnumbasin))
+         allocate (is_link(totalnumbasin)); is_link = .false.
+         DO ibasin = 1, totalnumbasin
+            IF (riverdown(ibasin) >= 1) THEN
+               addrdown(ibasin) = addrbasin(riverdown(ibasin))
+               IF (addrdown(ibasin) /= addrbasin(ibasin)) is_link(riverdown(ibasin)) = .true.
+            ELSE
+               addrdown(ibasin) = addrbasin(ibasin)
+            ENDIF
+         ENDDO
+
+         nblink_all = count(is_link)
+         IF (nblink_all > 0) THEN
+            allocate (linkbindex_all(nblink_all), linkrivmth_all(nblink_all))
+            linkbindex_all = pack((/(ibasin, ibasin = 1, totalnumbasin)/), mask = is_link)
+            linkrivmth_all = pack(rivermouth, mask = is_link)
+         ENDIF
+         deallocate (addrbasin, addrdown, is_link)
+         write(*,'(/,A,I5,A,/)') 'There are ', nblink_all, ' links between processors.'
+      ENDIF
+
+      IF (p_is_master) THEN
+         allocate (icache(max(1,sum(counts))), lcache(max(1,sum(counts))))
+         icache(1:sum(counts)) = riverdown(bindex(1:sum(counts)))
+         lcache(1:sum(counts)) = to_lake(bindex(1:sum(counts)))
+      ELSE
+         allocate (icache(1), lcache(1))
+      ENDIF
+      allocate (irecvbuf(max(1,numbasin)), lrecvbuf(max(1,numbasin)))
+      CALL mpi_scatterv (icache, counts, disps, MPI_INTEGER, irecvbuf, numbasin, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+      CALL mpi_scatterv (lcache, counts, disps, MPI_LOGICAL, lrecvbuf, numbasin, &
+         MPI_LOGICAL, p_root, p_comm_glb, p_err)
+
+      allocate (counts_data(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      counts_data = counts * 4
+      disps_data = disps * 4
+      IF (p_is_master) THEN
+         allocate (rcache(max(1,4*sum(counts))))
+         DO i = 1, sum(counts)
+            rcache(4*i-3) = riverlen (bindex(i))
+            rcache(4*i-2) = riverelv (bindex(i))
+            rcache(4*i-1) = riverdpth(bindex(i))
+            rcache(4*i  ) = basinelv (bindex(i))
+         ENDDO
+      ELSE
+         allocate (rcache(1))
+      ENDIF
+      allocate (rrecvbuf(max(1,4*numbasin)))
+      CALL mpi_scatterv (rcache, counts_data, disps_data, MPI_REAL8, rrecvbuf, &
+         4*numbasin, MPI_REAL8, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         deallocate (all_lake_id, riverdown, to_lake, riverlen, riverelv, riverdpth, basinelv)
+      ENDIF
+      allocate (riverdown(numbasin), to_lake(numbasin), riverlen(numbasin))
+      allocate (riverelv(numbasin), riverdpth(numbasin), basinelv(numbasin))
+      IF (numbasin > 0) THEN
+         riverdown = irecvbuf(1:numbasin)
+         to_lake = lrecvbuf(1:numbasin)
+         riverlen  = rrecvbuf(1:4*numbasin:4)
+         riverelv  = rrecvbuf(2:4*numbasin:4)
+         riverdpth = rrecvbuf(3:4*numbasin:4)
+         basinelv  = rrecvbuf(4:4*numbasin:4)
+      ENDIF
+
+      CALL mpi_bcast (nblink_all, 1, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      IF (nblink_all > 0) THEN
+         IF (.not. allocated(linkbindex_all)) allocate (linkbindex_all(nblink_all))
+         IF (.not. allocated(linkrivmth_all)) allocate (linkrivmth_all(nblink_all))
+         CALL mpi_bcast (linkbindex_all, nblink_all, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_bcast (linkrivmth_all, nblink_all, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      ENDIF
+
+      deallocate (bindex, counts, counts_data, disps, disps_data)
+      deallocate (icache, irecvbuf, lcache, lrecvbuf, rcache, rrecvbuf)
+#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -276,6 +381,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #else
       IF (numbasin > 0) THEN
 
@@ -290,6 +396,7 @@ CONTAINS
 #endif
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       ! get address of basins
       IF (p_is_master) THEN
 
@@ -366,6 +473,7 @@ CONTAINS
          CALL mpi_bcast (linkbindex_all, nblink_all, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
          CALL mpi_bcast (linkrivmth_all, nblink_all, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
       ENDIF
+#endif
 #endif
 
       IF (p_is_worker) THEN
