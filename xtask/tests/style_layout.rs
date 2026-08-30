@@ -97,7 +97,7 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
     let config = std::fs::read_to_string(root.join("gui/src-tauri/tauri.conf.json"))
         .expect("tauri.conf.json");
     for required in [
-        r#""version": "0.2.0-beta.1""#,
+        r#""version": "0.2.0-beta.2""#,
         "Zhongwang Wei (魏忠旺)",
         "CoLM LSM Development Team, School of Atmospheric Sciences, SYSU",
         "weizhw6@mail.sysu.edu.cn",
@@ -111,8 +111,8 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
         std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs")).expect("GUI backend");
     let html = std::fs::read_to_string(root.join("gui/dist/index.html")).expect("index.html");
     let frontend = std::fs::read_to_string(root.join("gui/dist/app/main.js")).expect("main.js");
-    assert!(workspace.contains("[workspace.package]\nversion = \"0.2.0-beta.1\""));
-    assert!(gui.contains("version = \"0.2.0-beta.1\""));
+    assert!(workspace.contains("[workspace.package]\nversion = \"0.2.0-beta.2\""));
+    assert!(gui.contains("version = \"0.2.0-beta.2\""));
     assert!(
         backend.contains("MenuItem::with_id")
             && backend.contains("\"about-colm\"")
