@@ -20,6 +20,26 @@ let fallbackRunSequence = 0;
 $('cpu-workers').max = String(cpuCapacity);
 $('cpu-workers').value = String(Math.min(cpuCapacity, Number($('cpu-workers').value) || 2));
 $('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
+$('mpi-ranks').max = String(cpuCapacity);
+
+function syncParallelMode() {
+  const spatial = !!state.domain && state.domain !== 'site';
+  $('mpi-ranks').disabled = !spatial;
+  if (!spatial) $('mpi-ranks').value = '1';
+  $('mpi-capacity').textContent = spatial
+    ? `最多 ${cpuCapacity} 个进程；批量并行数会按每算例 rank 数自动限额。`
+    : '站点算例固定使用 1 个进程。';
+  $('cpu-capacity').textContent = spatial
+    ? `检测到 ${cpuCapacity} 个逻辑 CPU；批量算例使用普通线程池调度。`
+    : `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
+}
+
+function requestedRanks() {
+  const n = Math.trunc(Number($('mpi-ranks').value));
+  const clamped = Math.max(1, Math.min(cpuCapacity, Number.isFinite(n) ? n : 1));
+  $('mpi-ranks').value = String(clamped);
+  return state.domain === 'site' ? 1 : clamped;
+}
 
 function requestedWorkers() {
   const n = Math.trunc(Number($('cpu-workers').value));
@@ -160,7 +180,7 @@ function updateOverallProgress() {
   $('progtext').textContent = dirs.length === 1
     ? progressText(state.runProgress[dirs[0]] ?? {}, state.runState[dirs[0]] ?? '待运行')
     : dirs.length
-      ? `批量总体：${finished}/${dirs.length} 个站点结束` + (total ? ` · 模型步 ${step}/${total}` : '')
+      ? `批量总体：${finished}/${dirs.length} 个算例结束` + (total ? ` · 模型步 ${step}/${total}` : '')
       : '\u00a0';
 }
 
@@ -232,7 +252,8 @@ async function applyKernel() {
   }
 }
 
-addEventListener('colm:wizard', () => { syncKernel(); });
+addEventListener('colm:wizard', () => { syncParallelMode(); syncKernel(); });
+syncParallelMode();
 
 const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null];
 const RUN_BUTTONS = ['run-mksrfdata', 'run-mkinidata', 'run-colm', 'runall'];
@@ -271,15 +292,16 @@ async function runRequested(stage) {
   const runId = resetRunView(dirs);
   renderCases();
   const force = stage !== null || $('force').checked;
+  const mpiRanks = requestedRanks();
   try {
     if (dirs.length === 1) {
       await invoke('run_case', {
-        runId, case: dirs[0], kernel: $('kernel').value, force, stage,
+        runId, case: dirs[0], kernel: $('kernel').value, force, stage, mpiRanks,
       });
     } else {
       await invoke('run_batch', {
         runId, cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
-        force, stage,
+        force, stage, mpiRanks,
       });
     }
   } catch (e) {

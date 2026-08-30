@@ -93,6 +93,125 @@ pub struct Dirs {
     pub forcing_namelist: String,
 }
 
+/// 空间算例的网格合同。三种模式都仍由同一份 `case.nml` 驱动；这里不写
+/// `SITE_*`，避免把流域、区域或全球算例伪装成单点站。
+pub enum SpatialGrid {
+    LatLon {
+        mesh_file: String,
+        dlon: f64,
+        dlat: f64,
+    },
+    Unstructured {
+        mesh_file: String,
+    },
+    Catchment {
+        mesh_file: String,
+    },
+}
+
+pub struct SpatialCaseSpec {
+    pub name: String,
+    pub grid: SpatialGrid,
+    pub window: Window,
+    pub timestep_seconds: f64,
+    pub dirs: Dirs,
+    pub domain: SpatialBounds,
+}
+
+pub struct SpatialBounds {
+    pub west: f64,
+    pub east: f64,
+    pub south: f64,
+    pub north: f64,
+}
+
+/// 生成流域、区域或全球算例所需的最小字段集合。
+pub fn spatial_fields(s: &SpatialCaseSpec) -> Vec<(String, Value)> {
+    let r = |x: f64| Value::Real {
+        text: format!("{x:?}"),
+    };
+    let mut out = vec![
+        ("DEF_CASE_NAME".into(), Value::Str(s.name.clone())),
+        ("DEF_simulation_time%greenwich".into(), Value::Bool(true)),
+        (
+            "DEF_simulation_time%start_year".into(),
+            Value::Int(s.window.start_year as i64),
+        ),
+        (
+            "DEF_simulation_time%start_month".into(),
+            Value::Int(s.window.start_month as i64),
+        ),
+        (
+            "DEF_simulation_time%start_day".into(),
+            Value::Int(s.window.start_day as i64),
+        ),
+        (
+            "DEF_simulation_time%start_sec".into(),
+            Value::Int(s.window.start_sec as i64),
+        ),
+        (
+            "DEF_simulation_time%end_year".into(),
+            Value::Int(s.window.end_year as i64),
+        ),
+        (
+            "DEF_simulation_time%end_month".into(),
+            Value::Int(s.window.end_month as i64),
+        ),
+        (
+            "DEF_simulation_time%end_day".into(),
+            Value::Int(s.window.end_day as i64),
+        ),
+        (
+            "DEF_simulation_time%end_sec".into(),
+            Value::Int(s.window.end_sec as i64),
+        ),
+        ("DEF_simulation_time%timestep".into(), r(s.timestep_seconds)),
+        ("DEF_dir_rawdata".into(), Value::Str(s.dirs.rawdata.clone())),
+        ("DEF_dir_runtime".into(), Value::Str(s.dirs.runtime.clone())),
+        ("DEF_dir_output".into(), Value::Str(s.dirs.output.clone())),
+        (
+            "DEF_forcing_namelist".into(),
+            Value::Str(s.dirs.forcing_namelist.clone()),
+        ),
+        ("DEF_USE_OZONESTRESS".into(), Value::Bool(false)),
+        ("DEF_USE_OZONEDATA".into(), Value::Bool(false)),
+        ("DEF_WRST_FREQ".into(), Value::Str("MONTHLY".into())),
+        ("DEF_HIST_FREQ".into(), Value::Str("HOURLY".into())),
+        ("DEF_domain%edgew".into(), r(s.domain.west)),
+        ("DEF_domain%edgee".into(), r(s.domain.east)),
+        ("DEF_domain%edges".into(), r(s.domain.south)),
+        ("DEF_domain%edgen".into(), r(s.domain.north)),
+    ];
+    out.extend(spinup_fields(
+        (
+            s.window.start_year,
+            s.window.start_month,
+            s.window.start_day,
+            s.window.start_sec,
+        ),
+        Spinup::OFF,
+    ));
+    match &s.grid {
+        SpatialGrid::LatLon {
+            mesh_file,
+            dlon,
+            dlat,
+        } => out.extend([
+            ("DEF_file_mesh".into(), Value::Str(mesh_file.clone())),
+            ("DEF_GRIDBASED_lon_res".into(), r(*dlon)),
+            ("DEF_GRIDBASED_lat_res".into(), r(*dlat)),
+        ]),
+        SpatialGrid::Unstructured { mesh_file } => {
+            out.push(("DEF_file_mesh".into(), Value::Str(mesh_file.clone())))
+        }
+        SpatialGrid::Catchment { mesh_file } => out.push((
+            "DEF_CatchmentMesh_data".into(),
+            Value::Str(mesh_file.clone()),
+        )),
+    }
+    out
+}
+
 /// 预热那五项，按写进 namelist 的顺序。
 ///
 /// `start` 是模拟窗口的起始时刻 —— 预热截止时刻是**它加上若干年**，

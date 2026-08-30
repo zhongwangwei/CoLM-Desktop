@@ -13,7 +13,7 @@
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
-//! colm-cli run       <算例目录> --kernel <目录> [--stream 1]
+//! colm-cli run       <算例目录> --kernel <目录> [--stream 1] [--ranks N]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
@@ -48,7 +48,10 @@ mod study;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use colm_case::{fields, minimal::required, render, CaseSpec, Dirs, Layout, Spinup, Window};
+use colm_case::{
+    fields, minimal::required, render, spatial_fields, CaseSpec, Dirs, Layout, SpatialBounds,
+    SpatialCaseSpec, SpatialGrid, Spinup, Window,
+};
 use colm_kernel::outcome::Stage;
 use colm_kernel::Kernel;
 
@@ -74,11 +77,12 @@ usage:
                    [--rawdata <dir>] [--runtime <dir>]
                    # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
-  colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1]
+  colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1] [--ranks N]
                    [--stage mksrfdata|mkinidata|colm]
                    # --force 忽略指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
+                   # --ranks 使用普通 MPI/SPMD 启动；默认 1，不使用进程角色
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -149,6 +153,11 @@ usage:
   colm-cli spatial-preflight --grid-kind latlon|unstructured|catchment --input <mesh.nc>
                     [--out manifest.json]
                     # 在启动 CoLM 前校验空间文件字段并记录 sha256
+  colm-cli spatial-new --grid-kind latlon|unstructured|catchment --mesh <mesh.nc>
+                    --out <case-dir> --forcing <forcing.nml> --rawdata <dir> --runtime <dir>
+                    --start YYYY-MM-DD --end YYYY-MM-DD --timestep <seconds>
+                    [--name N] [--dlon degrees --dlat degrees] [--mode igbp|usgs|pft|pc]
+                    # 创建不含 SITE_* 的空间算例；latlon 需要 dlon/dlat
   colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
                            # 与独立 bin forcing-convert 同样的行为，供 GUI 走
                            # sidecar 调用；没给 --slot 的槽位走自动匹配
@@ -211,6 +220,7 @@ fn main() -> Result<()> {
                 opts.get("--stream").is_some(),
                 opts.get("--force").is_some(),
                 requested_run_stage(opts.get("--stage").as_deref())?,
+                opts.count("--ranks", 1)? as usize,
             )?;
         }
         "metrics" => {
@@ -360,6 +370,7 @@ fn main() -> Result<()> {
                 // 这里传 false 与 true 等价，写 false 以免暗示它会跳过什么。
                 false,
                 None,
+                opts.count("--ranks", 1)? as usize,
             )?;
             match opts.get("--obs") {
                 Some(obs) => cmd_metrics(MetricsRequest {
@@ -433,6 +444,10 @@ fn main() -> Result<()> {
         }
         "mesh-new" => cmd_mesh_new(&opts)?,
         "spatial-preflight" => cmd_spatial_preflight(&opts)?,
+        "spatial-new" => {
+            let case = cmd_spatial_new(&opts)?;
+            println!("case ready: {}", case.display());
+        }
         "forcing-convert" => {
             cmd_forcing_convert(
                 &opts.positional_at(0, "a source forcing file")?,
@@ -1726,6 +1741,7 @@ fn cmd_run(
     stream: bool,
     force: bool,
     only_stage: Option<Stage>,
+    ranks: usize,
 ) -> Result<()> {
     run_case(
         case,
@@ -1733,17 +1749,20 @@ fn cmd_run(
         stream,
         force,
         only_stage,
+        ranks,
         false,
         &mut |_| {},
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_case(
     case: &Path,
     kernel_dir: &Path,
     stream: bool,
     force: bool,
     only_stage: Option<Stage>,
+    ranks: usize,
     quiet: bool,
     notice: &mut dyn FnMut(RunNotice<'_>),
 ) -> Result<()> {
@@ -1758,6 +1777,15 @@ fn run_case(
     let case = &colm_kernel::manifest::absolute(case)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
     let kernel = Kernel::open(kernel_dir)?;
+    if ranks == 0 {
+        bail!("--ranks must be at least 1");
+    }
+    if ranks > 1
+        && !(kernel.manifest.macros.iter().any(|m| m == "USEMPI")
+            && kernel.manifest.macros.iter().any(|m| m == "FLAT_SPMD"))
+    {
+        bail!("--ranks > 1 requires a USEMPI + FLAT_SPMD kernel");
+    }
     if !quiet {
         println!(
             "kernel: {} ({})",
@@ -1766,6 +1794,7 @@ fn run_case(
         );
     }
     let layout = Layout::new(case);
+    preflight_spatial_case(&layout.case_nml(), &kernel)?;
     let name = colm_case::case_name(&layout.case_nml())?;
     let out = layout.out().join(&name);
     let lc_year = land_cover_year(&layout.case_nml())?;
@@ -1876,12 +1905,13 @@ fn run_case(
                 let _ = o.flush();
             }
         };
-        let r = colm_kernel::run_stage_streaming(
+        let r = colm_kernel::run_stage_streaming_ranks(
             &kernel,
             *stage,
             &layout.case_nml(),
             case,
             artifacts,
+            ranks,
             &mut forward,
         )?;
         notice(RunNotice::StageDone {
@@ -1924,6 +1954,61 @@ fn run_case(
         if matches!(stage, Stage::Colm) {
             colm_case::clear_results_stale(case)
                 .with_context(|| format!("cannot mark {} results current", case.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_spatial_case(case_nml: &Path, kernel: &Kernel) -> Result<()> {
+    let grid_kind = if kernel.manifest.macros.iter().any(|m| m == "GRIDBASED") {
+        Some("latlon")
+    } else if kernel.manifest.macros.iter().any(|m| m == "UNSTRUCTURED") {
+        Some("unstructured")
+    } else if kernel.manifest.macros.iter().any(|m| m == "CATCHMENT") {
+        Some("catchment")
+    } else {
+        None
+    };
+    let Some(grid_kind) = grid_kind else {
+        return Ok(());
+    };
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let doc = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    let string = |name: &str| -> Result<PathBuf> {
+        match doc.get(name) {
+            Some(colm_namelist::Value::Str(value)) if !value.trim().is_empty() => {
+                Ok(PathBuf::from(value))
+            }
+            Some(other) => bail!("{name} must be a non-empty path string, got {other}"),
+            None => bail!("spatial case is missing {name}"),
+        }
+    };
+    let mesh_field = if grid_kind == "catchment" {
+        "DEF_CatchmentMesh_data"
+    } else {
+        "DEF_file_mesh"
+    };
+    let mesh = string(mesh_field)?;
+    colm_srfdata::mesh::inspect_spatial_input(&mesh, grid_kind)
+        .with_context(|| format!("spatial preflight failed for {}", mesh.display()))?;
+    for (field, directory) in [
+        ("DEF_dir_rawdata", true),
+        ("DEF_dir_runtime", true),
+        ("DEF_forcing_namelist", false),
+    ] {
+        let path = string(field)?;
+        let ready = if directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if !ready {
+            bail!(
+                "spatial preflight: {field} does not exist at {}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -3691,6 +3776,10 @@ fn cmd_spatial_preflight(opts: &Opts) -> Result<()> {
         "nlat": summary.nlat,
         "active_cells": summary.active_cells,
         "max_elmid": summary.max_elmid,
+        "west": summary.west,
+        "east": summary.east,
+        "south": summary.south,
+        "north": summary.north,
     });
     if let Some(output) = opts.get("--out") {
         std::fs::write(&output, serde_json::to_vec_pretty(&manifest)?)
@@ -3698,6 +3787,136 @@ fn cmd_spatial_preflight(opts: &Opts) -> Result<()> {
     }
     println!("{}", serde_json::to_string(&manifest)?);
     Ok(())
+}
+
+fn existing_absolute(opts: &Opts, name: &str, directory: bool) -> Result<PathBuf> {
+    let given = opts.need(name)?;
+    let path = given
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {name} {}", given.display()))?;
+    if directory && !path.is_dir() {
+        bail!("{name} is not a directory: {}", path.display());
+    }
+    if !directory && !path.is_file() {
+        bail!("{name} is not a file: {}", path.display());
+    }
+    Ok(path)
+}
+
+fn cmd_spatial_new(opts: &Opts) -> Result<PathBuf> {
+    let grid_kind = opts.need_str("--grid-kind")?;
+    let mesh = existing_absolute(opts, "--mesh", false)?;
+    let mesh_summary = colm_srfdata::mesh::inspect_spatial_input(&mesh, &grid_kind)?;
+    let forcing = existing_absolute(opts, "--forcing", false)?;
+    let forcing_text = std::fs::read_to_string(&forcing)
+        .with_context(|| format!("cannot read {}", forcing.display()))?;
+    colm_namelist::parse(&forcing_text)
+        .with_context(|| format!("cannot parse forcing namelist {}", forcing.display()))?;
+    let rawdata = existing_absolute(opts, "--rawdata", true)?;
+    let runtime = existing_absolute(opts, "--runtime", true)?;
+    let start = parse_date(&opts.need_str("--start")?)?;
+    let end = parse_date(&opts.need_str("--end")?)?;
+    if start > end {
+        bail!("--start {} is later than --end {}", ymd(start), ymd(end));
+    }
+    let timestep = opts
+        .need_str("--timestep")?
+        .parse::<f64>()
+        .context("--timestep must be a positive number")?;
+    if !timestep.is_finite() || timestep <= 0.0 {
+        bail!("--timestep must be a positive finite number");
+    }
+
+    let out = opts.need("--out")?;
+    if out.to_string_lossy().contains(' ') {
+        bail!(
+            "the case directory must not contain spaces: {}",
+            out.display()
+        );
+    }
+    std::fs::create_dir_all(&out).with_context(|| format!("cannot create {}", out.display()))?;
+    let out = colm_kernel::manifest::absolute(&out)
+        .with_context(|| format!("cannot resolve --out {}", out.display()))?;
+    let layout = Layout::new(&out);
+    std::fs::create_dir_all(layout.out())?;
+    let name = opts.get("--name").unwrap_or_else(|| {
+        out.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("spatial-case")
+            .to_string()
+    });
+    if name.trim().is_empty() {
+        bail!("--name must not be empty");
+    }
+    let real = |name: &str| -> Result<f64> {
+        let value = opts
+            .need_str(name)?
+            .parse::<f64>()
+            .with_context(|| format!("{name} must be a positive number"))?;
+        if !value.is_finite() || value <= 0.0 {
+            bail!("{name} must be a positive finite number");
+        }
+        Ok(value)
+    };
+    let grid = match grid_kind.as_str() {
+        "latlon" => SpatialGrid::LatLon {
+            mesh_file: text(&mesh),
+            dlon: real("--dlon")?,
+            dlat: real("--dlat")?,
+        },
+        "unstructured" => SpatialGrid::Unstructured {
+            mesh_file: text(&mesh),
+        },
+        "catchment" => SpatialGrid::Catchment {
+            mesh_file: text(&mesh),
+        },
+        other => bail!("--grid-kind must be latlon, unstructured, or catchment, got {other}"),
+    };
+    let subgrid = match opts
+        .get("--mode")
+        .unwrap_or_else(|| "igbp".into())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "igbp" | "usgs" => Subgrid::Lct,
+        "pft" => Subgrid::Pft,
+        "pc" => Subgrid::Pc,
+        other => bail!("spatial --mode must be igbp, usgs, pft, or pc, got {other}"),
+    };
+    let spec = SpatialCaseSpec {
+        name,
+        grid,
+        window: Window {
+            start_year: start.0,
+            start_month: start.1,
+            start_day: start.2,
+            start_sec: 0,
+            end_year: end.0,
+            end_month: end.1,
+            end_day: end.2,
+            end_sec: 86400,
+        },
+        timestep_seconds: timestep,
+        dirs: Dirs {
+            rawdata: slash(&rawdata),
+            runtime: slash(&runtime),
+            output: slash(&layout.out()),
+            forcing_namelist: text(&forcing),
+        },
+        domain: SpatialBounds {
+            west: mesh_summary.west,
+            east: mesh_summary.east,
+            south: mesh_summary.south,
+            north: mesh_summary.north,
+        },
+    };
+    let mut all = spatial_fields(&spec);
+    add_subgrid_fields(&mut all, subgrid);
+    add_inactive_process_fields(&mut all);
+    let req = required(&all);
+    std::fs::write(layout.case_nml(), render(&req))
+        .with_context(|| format!("cannot write {}", layout.case_nml().display()))?;
+    Ok(out)
 }
 
 /// 非有限数不能进 JSON，所以在这里显式转成 `Option`，交给 `serde` 序列化。

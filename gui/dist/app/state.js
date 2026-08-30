@@ -105,7 +105,7 @@ export const state = {
   parameterPftView: 'single',
   parameterPftGroup: null,
   /** 结果分析默认收起右侧运行监视器；用户在结果区手动切换后保持到离开结果区。 */
-  liveCollapsed: false,
+  liveCollapsed: true,
   /** 运行页输出变量的搜索词与「只看已勾选」。 */
   histFilter: '',
   histOnlyOn: false,

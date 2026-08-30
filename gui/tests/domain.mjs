@@ -15,6 +15,8 @@ class El {
     this.selectedIndex = -1;
     this.options = [];
     this._text = '';
+    this.id = '';
+    this.htmlFor = '';
   }
   get textContent() { return this._text; }
   set textContent(value) {
@@ -135,7 +137,16 @@ for (const [id, value] of Object.entries({
   input.value = value;
   input.oninput();
 }
-if (foot('下一步').disabled) throw new Error('valid regional bounds and default resolution must pass');
+if (!foot('下一步').disabled || !ids.gateinfo.textContent.includes('非海洋 mask')) {
+  throw new Error('latlon/unstructured spatial cases must require an explicit non-ocean mask');
+}
+const mask = findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask');
+if (!mask) throw new Error('missing non-ocean mask input');
+const maskLabel = findNode(ids.gatecards, node => node.htmlFor === mask.id);
+if (!maskLabel) throw new Error('spatial input labels must be associated with their controls');
+mask.value = '/data/non-ocean.nc';
+mask.oninput();
+if (foot('下一步').disabled) throw new Error('valid regional bounds, resolution, and mask must pass');
 next(); choose('IGBP'); next(); next(); next(); next();
 if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'unstructured'
     || state.spatial?.grid?.dlon !== 0.5 || state.spatial?.grid?.nlon !== 720

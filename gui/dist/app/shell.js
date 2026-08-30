@@ -120,9 +120,7 @@ export function go(id) {
   if (!step || (step.show && !step.show())) { setStatus(`当前配置没有这一步：${id}`); return; }
   const why = step.need();
   if (why) { setStatus(why); return; }
-  const previous = STEPS.find(s => s.id === state.step);
-  if (step.page === 'result' && previous?.page !== 'result') state.liveCollapsed = true;
-  if (step.page !== 'result') state.liveCollapsed = false;
+  state.liveCollapsed = step.page !== 'run';
   state.step = id;
   const group = WORKFLOW.find(g => g.steps.includes(step));
   if (group?.collapsible) state.expandedFlows.add(group.key);
@@ -233,6 +231,8 @@ export function initShell() {
     document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
     $('liveToggle').setAttribute('aria-pressed', String(state.liveCollapsed));
   };
+  document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
+  $('liveToggle').setAttribute('aria-pressed', String(state.liveCollapsed));
 
   for (const b of document.querySelectorAll('#modeSeg button')) {
     b.onclick = () => {

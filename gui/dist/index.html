@@ -88,26 +88,26 @@
           <div class="ch">站点名决定标准文件名；当前模式来自首页向导，站点文件会写入明确的自然 / 城市标记。</div>
           <div class="row">
             <div class="field">
-              <label>站点名</label>
+              <label for="sname">站点名</label>
               <input class="input" id="sname" placeholder="例如 AT-Neu">
             </div>
             <div class="field">
-              <label>当前数据契约</label>
+              <label for="smode">当前数据契约</label>
               <input class="input" id="smode" readonly value="IGBP 自然站点">
             </div>
           </div>
           <div class="row" style="margin-top:13px">
             <div class="field">
-              <label>经度（度）</label>
+              <label for="slon">经度（度）</label>
               <input class="input" id="slon" type="number" step="any" min="-180" max="180" placeholder="例如 11.70">
             </div>
             <div class="field">
-              <label>纬度（度）</label>
+              <label for="slat">纬度（度）</label>
               <input class="input" id="slat" type="number" step="any" min="-90" max="90" placeholder="例如 47.12">
             </div>
           </div>
           <div class="field" style="margin-top:13px">
-            <label id="slandtype-label">地表覆盖类型 <span class="hint">（可选；不确定时由 rawdata 提供）</span></label>
+            <label id="slandtype-label" for="slandtype">地表覆盖类型 <span class="hint">（可选；不确定时由 rawdata 提供）</span></label>
             <select class="input" id="slandtype"></select>
             <div class="muted mini" style="margin-top:5px">
               列表随 IGBP / USGS 方案切换并显示具体地类名称；不从经纬度猜测。城市模式固定显示“城市与建成区”。
@@ -120,18 +120,18 @@
           <div class="ch">输出统一命名为 <code>&lt;站点名&gt;_site.nc</code>。rawdata 可提供地类、植被和土壤栅格；
             未选择时仍可生成结构文件，但只有文件自身满足完整契约才会标为可运行。</div>
           <div class="field">
-            <label>站点数据目录</label>
+            <label for="soutdir">站点数据目录</label>
             <div class="browse">
               <input class="input" id="soutdir" placeholder="…/MyDataset/Sitedata">
               <button class="btn-ghost pick" data-for="soutdir">选择…</button>
             </div>
           </div>
           <div class="field" style="margin-top:10px">
-            <label>标准文件名</label>
+            <label for="soutname">标准文件名</label>
             <input class="input" id="soutname" readonly value="_site.nc">
           </div>
           <div class="field" style="margin-top:13px">
-            <label>CoLM rawdata 目录 <span class="hint">（缺少站点实测变量时需要）</span></label>
+            <label for="srawdata">CoLM rawdata 目录 <span class="hint">（缺少站点实测变量时需要）</span></label>
             <div class="browse">
               <input class="input" id="srawdata" placeholder="…/rawdata">
               <button class="btn-ghost pick" data-for="srawdata">选择…</button>
@@ -239,6 +239,7 @@
         过程参数留在下一步，避免同一个字段出现两次。</p>
 
       <div class="flow-pane" data-flow-pane="basic-files">
+        <div id="site-case-setup">
         <div class="card">
           <h3>文件与目录</h3>
           <div class="ch">先选站点数据和算例根目录，再在同一页建算例。</div>
@@ -247,7 +248,7 @@
             <span class="muted mini">CN-Cng 自然站、AT-Neu 甲烷站、US-Ne3 作物站或 AU-Preston 城市站</span>
           </div>
           <div class="field">
-            <label>站点目录</label>
+            <label for="sitedir">站点目录</label>
             <div class="browse">
               <input class="input" id="sitedir" placeholder="…/PLUMBER2s/Sitedata">
               <button class="btn-ghost pick" data-for="sitedir">选择…</button>
@@ -258,7 +259,7 @@
             </div>
           </div>
           <div class="field">
-            <label>强迫场目录 <span class="hint">（可选）</span></label>
+            <label for="forcingdir">强迫场目录 <span class="hint">（可选）</span></label>
             <div class="browse">
               <input class="input" id="forcingdir" placeholder="留空 = 使用站点目录旁的 ../Forcing/">
               <button class="btn-ghost pick" data-for="forcingdir">选择…</button>
@@ -268,13 +269,13 @@
             </div>
           </div>
           <div class="field">
-            <label>rawdata 目录 <span class="hint">（站点文件有缺项时需要）</span></label>
+            <label for="rawdata">rawdata 目录 <span class="hint">（站点文件有缺项时需要）</span></label>
             <div class="browse"><input class="input" id="rawdata" placeholder="完整站点文件可留空">
               <button class="btn-ghost pick" data-for="rawdata">选择…</button></div>
           </div>
           <div id="urbandirs" hidden>
             <div class="expert-note">本次配置会读取外部过程数据；BGC 默认需要 runtime 中的氮沉降与硝化数据。</div>
-            <div class="field"><label>runtime 目录 <span class="hint">（URBAN / BGC）</span></label>
+            <div class="field"><label for="runtime">runtime 目录 <span class="hint">（URBAN / BGC）</span></label>
               <div class="browse"><input class="input" id="runtime">
                 <button class="btn-ghost pick" data-for="runtime">选择…</button></div></div>
           </div>
@@ -297,7 +298,7 @@
           <h3>算例放哪</h3>
           <div class="ch">选择产物目录；上面“建算例”按钮会把选中的站点写到这里。</div>
           <div class="field">
-            <label>算例根目录</label>
+            <label for="root">算例根目录</label>
             <div class="browse">
               <input class="input" id="root" placeholder="…/colm-cases">
               <button class="btn-ghost pick" data-for="root">选择…</button>
@@ -308,6 +309,33 @@
             </p>
           </div>
           <div id="cases-built" class="listbox" style="margin-top:12px"></div>
+        </div>
+        </div>
+
+        <div id="spatial-case-setup" hidden>
+          <div class="card">
+            <h3>空间算例</h3>
+            <div class="ch" id="spatial-summary">向导中的范围、网格与 mask 会在这里生成网格并预检。</div>
+            <div class="field"><label for="spatial-rawdata">rawdata 目录</label>
+              <div class="browse"><input class="input" id="spatial-rawdata"><button class="btn-ghost pick" data-for="spatial-rawdata">选择…</button></div></div>
+            <div class="field"><label for="spatial-runtime">runtime 目录</label>
+              <div class="browse"><input class="input" id="spatial-runtime"><button class="btn-ghost pick" data-for="spatial-runtime">选择…</button></div></div>
+            <div class="field"><label for="spatial-forcing">空间强迫场 namelist</label>
+              <div class="browse"><input class="input" id="spatial-forcing" placeholder="…/forcing.nml"><button class="btn-ghost pick" data-for="spatial-forcing" data-file="nml">选择…</button></div></div>
+          </div>
+          <div class="card">
+            <h3>时间与输出</h3>
+            <div class="row">
+              <div class="field"><label for="spatial-start">开始日期</label><input class="input" id="spatial-start" type="date"></div>
+              <div class="field"><label for="spatial-end">结束日期</label><input class="input" id="spatial-end" type="date"></div>
+            </div>
+            <div class="field"><label for="spatial-timestep">时间步长（秒）</label><input class="input" id="spatial-timestep" type="number" min="1" step="1" value="1800"></div>
+            <div class="field"><label for="spatial-root">算例根目录</label>
+              <div class="browse"><input class="input" id="spatial-root" placeholder="…/colm-cases"><button class="btn-ghost pick" data-for="spatial-root">选择…</button></div></div>
+            <div class="field"><label for="spatial-name">算例名称</label><input class="input" id="spatial-name" value="spatial-case"></div>
+            <p class="fail mini" id="spatial-error" hidden></p>
+            <div class="pill-row"><button class="btn-next" id="make-spatial-case">生成网格、预检并建算例</button></div>
+          </div>
         </div>
       </div>
 
@@ -425,10 +453,18 @@
         <div class="run-parallel-setting">
           <div>
             <label for="cpu-workers">批量并行算例数</label>
-            <span>仅在同时运行多个算例时生效；每个算例使用 1 个 CPU 核，单个算例仍为串行。</span>
+            <span>仅在同时运行多个算例时生效；总并行度会结合下方每算例 MPI 进程数自动限额。</span>
           </div>
           <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
           <span class="muted mini" id="cpu-capacity"></span>
+        </div>
+        <div class="run-parallel-setting" id="mpi-setting">
+          <div>
+            <label for="mpi-ranks">每个算例的 MPI 进程数</label>
+            <span>普通 SPMD 并行；所有 rank 执行同一程序，不使用 master/io/worker 角色。</span>
+          </div>
+          <input class="input" id="mpi-ranks" type="number" min="1" step="1" value="1">
+          <span class="muted mini" id="mpi-capacity"></span>
         </div>
         <div class="pill-row" style="margin-top:14px">
           <button class="btn-ghost" id="run-mksrfdata" disabled>运行 mksrfdata</button>
@@ -452,9 +488,9 @@
         <div class="result-kpis" id="result-kpis"></div>
         <div class="card">
           <div class="result-card-head">
-            <div><h3>站点状态</h3><div class="ch">点击已完成站点进入时间序列；失败站点可返回日志定位原因。</div></div>
+            <div><h3>算例状态</h3><div class="ch">点击已完成算例进入时间序列；失败算例可返回日志定位原因。</div></div>
             <div class="result-tools">
-              <input class="input" id="result-case-search" placeholder="搜索站点…">
+              <input class="input" id="result-case-search" aria-label="搜索算例" placeholder="搜索算例…">
               <select class="select" id="result-status-filter" aria-label="筛选结果状态">
                 <option value="all">全部状态</option>
                 <option value="done">已完成</option>

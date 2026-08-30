@@ -165,17 +165,43 @@ fn crop_preset_is_real_cropon_kernel() {
 }
 
 #[test]
+fn spatial_presets_use_flat_spmd_and_keep_river_lake_routing() {
+    let script = read("oracle/scripts/build_kernel.sh");
+    for (preset, grid) in [
+        ("latlon", "GRID"),
+        ("unstructured", "UNSTRUCTURED"),
+        ("catchment", "CATCHMENT"),
+    ] {
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{preset})")))
+            .unwrap_or_else(|| panic!("missing {preset} build preset"));
+        assert!(
+            line.contains(&format!("ARGS=({grid} ")),
+            "{preset} must build its matching CoLM grid mode"
+        );
+    }
+    assert!(script.contains("#define FLAT_SPMD"));
+    assert!(script.contains("spatial kernel must enable USEMPI"));
+    assert!(script.contains("GRID/UNSTRUCTURED must enable GridRiverLakeFlow"));
+    assert!(script.contains("CATCHMENT must enable CatchLateralFlow"));
+}
+
+#[test]
 fn release_and_ci_cover_crop_kernel_bundle() {
     let release = read(".github/workflows/release.yml");
+    let release_presets = "default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop";
     assert!(
-        release.contains(
-            "for p in default usgs crop; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
-        ),
-        "release workflow must build default, usgs, and crop kernels"
+        release.contains(&format!(
+            "for p in {release_presets}; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
+        )),
+        "release workflow must build every selectable site and spatial kernel"
     );
     assert!(
-        release.contains("for p in default usgs crop; do\n            test -x \"$app/Contents/Resources/kernels/$p/colm.x\""),
-        "macOS bundle check must require the crop kernel"
+        release.contains(&format!(
+            "for p in {release_presets}; do\n            test -x \"$app/Contents/Resources/kernels/$p/colm.x\""
+        )),
+        "macOS bundle check must require every selectable kernel"
     );
 
     let crop_example = "US-Ne3_2002-2003_FLUXNET2015_CROP";
@@ -201,7 +227,9 @@ fn release_and_ci_cover_crop_kernel_bundle() {
 
     let windows = read(".github/workflows/windows-kernel.yml");
     assert!(
-        windows.contains("for p in default crop; do ./oracle/scripts/build_kernel.sh \"$p\"; done"),
-        "Windows kernel CI must compile the CROP kernel as well as default"
+        windows.contains(
+            "for p in default crop unstructured; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
+        ),
+        "Windows kernel CI must compile a flat-SPMD spatial kernel"
     );
 }

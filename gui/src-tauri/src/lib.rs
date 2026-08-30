@@ -117,6 +117,7 @@ pub fn run() {
             install_prepared_pair,
             site_pfts,
             new_case,
+            new_spatial_case,
             read_text,
             read_case,
             read_timing,

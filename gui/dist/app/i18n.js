@@ -3,6 +3,45 @@
 //! 同步翻译新节点，而不是要求每个 render 函数再维护一套 DOM。
 
 const ZH_EN = [
+  ['普通 SPMD 并行；所有 rank 执行同一程序，不使用 master/io/worker 角色。', 'Plain SPMD parallelism: every rank runs the same program, without master/io/worker roles.'],
+  ['仅在同时运行多个算例时生效；总并行度会结合下方每算例 MPI 进程数自动限额。', 'Applies only when multiple cases run together; total parallelism is capped using the MPI ranks per case below.'],
+  ['本次还没有要运行的算例；先在基本设定中创建算例。', 'There are no cases to run yet; create one in Basic settings first.'],
+  ['向导中的范围、网格与 mask 会在这里生成网格并预检。', 'The selected domain, grid, and mask are used here to generate and preflight the mesh.'],
+  ['点击已完成算例进入时间序列；失败算例可返回日志定位原因。', 'Open a completed case for time series; use its log to diagnose failures.'],
+  ['使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。', 'Use the global extent; the required non-ocean mask below removes ocean cells.'],
+  ['请选择非海洋 mask，避免把海洋格点激活为陆面单元', 'Select a non-ocean mask so ocean cells are not activated as land units'],
+  ['站点算例固定使用 1 个进程。', 'Site cases always use one process.'],
+  ['将预检已准备的 Catchment/HRU NetCDF。', 'The prepared Catchment/HRU NetCDF will be preflighted.'],
+  ['将按指定分辨率生成网格，以 mask 剔除海洋和范围外单元，并生成 int64 空间索引合同。', 'Generate the selected-resolution mesh, mask ocean and out-of-domain cells, and write the int64 spatial-index contract.'],
+  ['请选择 rawdata 目录', 'Select the rawdata directory'],
+  ['请选择 runtime 目录', 'Select the runtime directory'],
+  ['请选择空间强迫场 namelist', 'Select the spatial forcing namelist'],
+  ['请选择开始日期', 'Select the start date'],
+  ['请选择结束日期', 'Select the end date'],
+  ['请选择算例根目录', 'Select the case root directory'],
+  ['请输入算例名称', 'Enter a case name'],
+  ['算例路径不能含空格', 'The case path cannot contain spaces'],
+  ['开始日期不能晚于结束日期', 'The start date cannot be later than the end date'],
+  ['时间步长必须大于 0', 'The timestep must be greater than 0'],
+  ['正在生成并预检空间算例…', 'Generating and preflighting the spatial case…'],
+  ['算例已生成，但重新扫描时没有找到它', 'The case was generated but was not found during rescan'],
+  ['生成网格、预检并建算例', 'Generate grid, preflight, and create case'],
+  ['每个算例的 MPI 进程数', 'MPI ranks per case'],
+  ['空间强迫场 namelist', 'Spatial forcing namelist'],
+  ['搜索算例…', 'Search cases…'],
+  ['非海洋 mask（必需）', 'Non-ocean mask (required)'],
+  ['时间步长（秒）', 'Timestep (seconds)'],
+  ['算例根目录', 'Case root directory'],
+  ['rawdata 目录', 'rawdata directory'],
+  ['runtime 目录', 'runtime directory'],
+  ['空间算例', 'Spatial case'],
+  ['时间与输出', 'Time and output'],
+  ['开始日期', 'Start date'],
+  ['结束日期', 'End date'],
+  ['算例名称', 'Case name'],
+  ['搜索算例', 'Search cases'],
+  ['算例状态', 'Case status'],
+  ['非结构', 'Unstructured'],
   ['测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。', 'Beta release: features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.'],
   // Complete sentences come before short labels. This keeps prose grammatical and
   // prevents a label such as “运行” from creating half-translated paragraphs.
@@ -1825,6 +1864,9 @@ export function translateZh(text, target = 'en') {
     .replace(/^评估选中的\s*(\d+)\s*个已跑算例$/, 'Evaluate $1 selected completed cases')
     .replace(/^评估本次\s*(\d+)\s*个已跑算例$/, 'Evaluate $1 current completed cases')
     .replace(/^检测到\s*(\d+)\s*个逻辑 CPU；单个站点仍使用 1 核。$/, '$1 logical CPUs detected; each site still uses one core.')
+    .replace(/^检测到\s*(\d+)\s*个逻辑 CPU；批量算例使用普通线程池调度。$/, 'Detected $1 logical CPUs; batch cases use a normal thread pool.')
+    .replace(/^最多\s*(\d+)\s*个进程；批量并行数会按每算例 rank 数自动限额。$/, 'Up to $1 processes; batch concurrency is capped by ranks per case.')
+    .replace(/^空间算例\s*(.+)\s*已通过预检$/, 'Spatial case $1 passed preflight')
     .replace(/^开始运行\s*(\d+)\s*个算例$/, 'Starting $1 cases')
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行完成$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} completed`)
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行已取消$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} cancelled`)
@@ -1930,6 +1972,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^未知 Study 操作：(.+)$/, 'Unknown Study action: $1')
     .replace(/^未知任务操作：(.+)$/, 'Unknown task action: $1')
     .replace(/^批量总体：(\d+)\/(\d+)\s*个站点结束$/, 'Batch total: $1/$2 sites finished')
+    .replace(/^批量总体：(\d+)\/(\d+)\s*个算例结束(?:\s*·\s*模型步\s*(\d+)\/(\d+))?$/, (_, a, b, c, d) => `Batch total: ${a}/${b} cases finished${c ? ` · model steps ${c}/${d}` : ''}`)
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行失败（退出码\s*(-?\d+)）$/, (_, stage, code) => `${stage === '全部阶段' ? 'All stages' : stage} failed (exit code ${code})`)
     .replace(/^请选择有效的\s*(.+)\s*地表覆盖类型$/, 'Select a valid $1 land-cover type')
     .replace(/^已生成\s*(.+)，但当前模式还缺\s*(\d+)\s*项外部数据$/, 'Generated $1, but the current mode still needs $2 external data items')
@@ -1944,6 +1987,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^可行候选 (\d+)\/(\d+)$/, 'Feasible candidates $1/$2');
   for (const [zh, en] of ZH_EN) out = out.split(zh).join(en);
   out = out
+    .replace(/^选择(.+)$/, 'Select $1')
     .replace(/第\s*(\d+)\/(\d+)\s*page/g, 'Page $1/$2')
     .replace(/第\s*(\d+)\s*step/g, 'Step $1')
     .replace(/选中的\s*(\d+)\s*cases/g, '$1 selected cases')

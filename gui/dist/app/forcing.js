@@ -442,6 +442,8 @@ function tableColumnField(label, key, required = false) {
   lab.textContent = label;
   field.appendChild(lab);
   const select = document.createElement('select');
+  select.id = `forcing-table-${key}`;
+  lab.htmlFor = select.id;
   select.className = 'select';
   const empty = document.createElement('option');
   empty.value = '';
@@ -472,6 +474,8 @@ function tableNumberField(label, key, options = {}) {
   lab.textContent = label;
   field.appendChild(lab);
   const input = document.createElement('input');
+  input.id = `forcing-table-${key}`;
+  lab.htmlFor = input.id;
   input.className = 'input';
   input.type = 'number';
   input.step = options.step ?? 'any';
@@ -562,6 +566,8 @@ function tableStructureCard() {
     lab.textContent = label;
     field.appendChild(lab);
     const input = document.createElement('input');
+    input.id = `forcing-height-${key}`;
+    lab.htmlFor = input.id;
     input.className = 'input';
     input.type = 'number';
     input.step = 'any';
@@ -591,6 +597,8 @@ function tableStructureCard() {
     labelEl.textContent = label;
     field.appendChild(labelEl);
     const input = document.createElement('input');
+    input.id = `forcing-gap-${key}`;
+    labelEl.htmlFor = input.id;
     input.className = 'input';
     input.type = 'number';
     input.min = String(min);
@@ -678,7 +686,7 @@ function tableBatchCard() {
     <div class="ch">先把表格拆成每站一份暂存 NetCDF，再逐站点检查缺测。
       短缺口采用统计插值；长缺口需要 ERA5-Land 对应格点并做偏差订正。
       最终每个站点独立生成 <code>&lt;site-name&gt;_Met.nc</code> 和 QC 标记。</div>
-    <div class="field" style="margin-top:12px"><label>强迫场产物目录</label>
+    <div class="field" style="margin-top:12px"><label for="table-forcing-dir">强迫场产物目录</label>
       <div class="browse"><input class="input" id="table-forcing-dir" placeholder="…/Forcing"><button class="btn-ghost" id="table-forcing-pick">选择…</button></div>
     </div>
     <label class="check" style="margin-top:12px"><input type="checkbox" id="table-create-sites"> 同时批量生成或更新站点文件</label>
@@ -728,10 +736,10 @@ function tableBatchCard() {
 
 function renderTableSiteOptions(box) {
   box.innerHTML = `
-    <div class="field" style="margin-top:10px"><label>站点数据产物目录</label>
+    <div class="field" style="margin-top:10px"><label for="table-site-dir">站点数据产物目录</label>
       <div class="browse"><input class="input" id="table-site-dir" placeholder="…/Sitedata"><button class="btn-ghost" id="table-site-pick">选择…</button></div>
     </div>
-    <div class="field" style="margin-top:10px"><label>CoLM rawdata 目录（站点文件有缺项时需要）</label>
+    <div class="field" style="margin-top:10px"><label for="table-rawdata">CoLM rawdata 目录（站点文件有缺项时需要）</label>
       <div class="browse"><input class="input" id="table-rawdata" placeholder="…/rawdata"><button class="btn-ghost" id="table-rawdata-pick">选择…</button></div>
     </div>`;
   const siteDir = box.querySelector('#table-site-dir');
@@ -899,7 +907,7 @@ function renderTableBatchResult(box) {
     const field = document.createElement('div');
     field.className = 'field';
     field.style.marginTop = '12px';
-    field.innerHTML = '<label>全部站点共用的 ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="table-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="table-era5-pick">选择…</button></div>';
+    field.innerHTML = '<label for="table-era5">全部站点共用的 ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="table-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="table-era5-pick">选择…</button></div>';
     const input = field.querySelector('#table-era5');
     input.value = gapSettings.era5;
     input.onchange = () => {
@@ -1098,6 +1106,8 @@ function timingCard() {
     lab.textContent = label;
     f.appendChild(lab);
     const inp = document.createElement('input');
+    inp.id = `forcing-netcdf-height-${key}`;
+    lab.htmlFor = inp.id;
     inp.className = 'input';
     inp.type = 'number';
     inp.step = 'any';
@@ -1136,13 +1146,13 @@ function gapCard() {
       产物逐时记录观测、插值或 ERA5-Land 来源。</div>
     <p class="muted mini">QC 范围：气温 180–350 K、比湿 0–0.1 kg/kg、气压 30–110 kPa、降水 0–0.1 kg/m²/s、风速/分量不超过 100 m/s、短波 0–1800 W/m²、长波 0–800 W/m²。</p>
     <div class="row" style="margin-top:12px">
-      <div class="field"><label>短缺口上限（时间步）</label><input class="input" id="gap-short" type="number" min="0" step="1"></div>
-      <div class="field"><label>订正最少重叠样本</label><input class="input" id="gap-overlap" type="number" min="1" step="1"></div>
+      <div class="field"><label for="gap-short">短缺口上限（时间步）</label><input class="input" id="gap-short" type="number" min="0" step="1"></div>
+      <div class="field"><label for="gap-overlap">订正最少重叠样本</label><input class="input" id="gap-overlap" type="number" min="1" step="1"></div>
     </div>
     <div class="row" style="margin-top:10px">
-      <div class="field"><label>站点纬度</label><input class="input" id="gap-lat" type="number" min="-90" max="90" step="any" placeholder="优先读取文件"></div>
-      <div class="field"><label>站点经度</label><input class="input" id="gap-lon" type="number" min="-180" max="180" step="any" placeholder="优先读取文件"></div>
-      <div class="field"><label>人工 UTC 偏移（小时）</label><input class="input" id="gap-offset" type="number" min="-12" max="14" step="0.25" placeholder="自动判断"></div>
+      <div class="field"><label for="gap-lat">站点纬度</label><input class="input" id="gap-lat" type="number" min="-90" max="90" step="any" placeholder="优先读取文件"></div>
+      <div class="field"><label for="gap-lon">站点经度</label><input class="input" id="gap-lon" type="number" min="-180" max="180" step="any" placeholder="优先读取文件"></div>
+      <div class="field"><label for="gap-offset">人工 UTC 偏移（小时）</label><input class="input" id="gap-offset" type="number" min="-12" max="14" step="0.25" placeholder="自动判断"></div>
     </div>
     <div class="pill-row" style="margin-top:12px"><button class="btn-ghost" id="gap-probe">诊断缺测与时区</button></div>
     <div id="gap-result"></div>`;
@@ -1232,7 +1242,7 @@ function gapReportView() {
     const field = document.createElement('div');
     field.className = 'field';
     field.style.marginTop = '12px';
-    field.innerHTML = `<label>ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="gap-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="gap-era5-pick">选择…</button></div>`;
+    field.innerHTML = `<label for="gap-era5">ERA5-Land 缓存目录</label><div class="browse"><input class="input" id="gap-era5" placeholder="…/ERA5-Land"><button class="btn-ghost" id="gap-era5-pick">选择…</button></div>`;
     const input = field.querySelector('#gap-era5');
     if (!gapSettings.era5 && dstDir) gapSettings.era5 = joinPath(dstDir, '.era5land');
     input.value = gapSettings.era5;

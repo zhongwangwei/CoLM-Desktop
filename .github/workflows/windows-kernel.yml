@@ -93,10 +93,10 @@ jobs:
           }
           exit 0
 
-      - name: Build the default and crop kernels
+      - name: Build the default, crop, and unstructured kernels
         shell: msys2 {0}
         run: |
-          for p in default crop; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default crop unstructured; do ./oracle/scripts/build_kernel.sh "$p"; done
 
       - name: What came out
         shell: msys2 {0}

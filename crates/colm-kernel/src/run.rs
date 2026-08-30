@@ -142,15 +142,30 @@ pub fn run_stage_streaming(
     artifacts: &[PathBuf],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<StageReport> {
+    run_stage_streaming_ranks(kernel, stage, namelist, work, artifacts, 1, on_line)
+}
+
+/// 普通 MPI/SPMD 启动：每个 rank 执行同一个程序和同一份 namelist，不引入
+/// master/io/worker 角色。`ranks=1` 保持既有直接启动行为。
+pub fn run_stage_streaming_ranks(
+    kernel: &Kernel,
+    stage: Stage,
+    namelist: &Path,
+    work: &Path,
+    artifacts: &[PathBuf],
+    ranks: usize,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<StageReport> {
     let exe = kernel.program(stage.program());
-    let mut cmd = Command::new(&exe);
+    let (program, args) = launch_command(&exe, namelist, ranks)?;
+    let mut cmd = Command::new(&program);
     let mut child = no_console(&mut cmd)
-        .arg(namelist)
+        .args(args)
         .current_dir(work)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to spawn {}", exe.display()))?;
+        .with_context(|| format!("failed to spawn {}", program.display()))?;
 
     let mut err_pipe = child.stderr.take().context("no stderr pipe")?;
     let errs = std::thread::spawn(move || {
@@ -238,6 +253,28 @@ pub fn run_stage_streaming(
         log,
         overrides: extract(&text),
     })
+}
+
+fn launch_command(exe: &Path, namelist: &Path, ranks: usize) -> Result<(PathBuf, Vec<String>)> {
+    anyhow::ensure!(ranks > 0, "MPI rank count must be at least 1");
+    if ranks == 1 {
+        return Ok((
+            exe.to_path_buf(),
+            vec![namelist.to_string_lossy().into_owned()],
+        ));
+    }
+    let program = std::env::var_os("COLM_MPIEXEC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("mpiexec"));
+    Ok((
+        program,
+        vec![
+            "-n".into(),
+            ranks.to_string(),
+            exe.to_string_lossy().into_owned(),
+            namelist.to_string_lossy().into_owned(),
+        ],
+    ))
 }
 
 #[cfg(test)]

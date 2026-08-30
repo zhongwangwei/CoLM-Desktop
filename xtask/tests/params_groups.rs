@@ -22,14 +22,12 @@ fn repo() -> PathBuf {
 
 /// `field_section()` 可能返回的全部分类。
 ///
-/// 扫源码而不是调函数：`field_section` 住在 `gui/src-tauri`，那是**另一个
-/// workspace**（把 429 个 Tauri 依赖挡在引擎外面，见 design.md §4.1），
-/// xtask 依赖不到它。`xtask/src/gui.rs` 的静态检查用的是同一手法。
+/// 扫共享引擎源码而不是复制分类表；GUI 只转调这里。
 fn backend_sections() -> BTreeSet<String> {
-    let src =
-        std::fs::read_to_string(repo().join("gui/src-tauri/src/config.rs")).expect("config.rs");
+    let src = std::fs::read_to_string(repo().join("crates/colm-case/src/parameters/mod.rs"))
+        .expect("parameters/mod.rs");
     let start = src
-        .find("pub(crate) fn field_section")
+        .find("pub fn field_section")
         .expect("field_section 不见了");
     let end = src[start..]
         .find("\n#[")

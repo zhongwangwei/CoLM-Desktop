@@ -7,7 +7,7 @@
 # 因此版本握手靠构建期生成的 manifest.json + sha256，而不是问二进制。
 set -euo pipefail
 
-PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop|latlon|unstructured|catchment> [outdir]}"
+PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop|latlon[-usgs|-crop]|unstructured[-usgs|-crop]|catchment[-usgs|-crop]> [outdir]}"
 OUTDIR="${2:-kernels}"
 PROFILE="${COLM_KERNEL_PROFILE:-production}"
 case "$PROFILE" in

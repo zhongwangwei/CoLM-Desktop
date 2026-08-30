@@ -92,13 +92,17 @@ pub struct MeshSummary {
     pub max_elmid: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpatialInputSummary {
     pub schema: &'static str,
     pub nlon: usize,
     pub nlat: usize,
     pub active_cells: usize,
     pub max_elmid: i64,
+    pub west: f64,
+    pub east: f64,
+    pub south: f64,
+    pub north: f64,
 }
 
 /// Validate the exact NetCDF fields consumed by CoLM's three spatial modes.
@@ -130,6 +134,27 @@ fn inspect_equal_latlon(
         bail!("spatial grid edge arrays have inconsistent lengths");
     }
     let (nlon, nlat) = (lon_w.len(), lat_s.len());
+    if lat_s
+        .iter()
+        .zip(&lat_n)
+        .any(|(south, north)| south >= north)
+    {
+        bail!("spatial latitude cells must satisfy south < north");
+    }
+    let wrapped = lon_w
+        .iter()
+        .zip(&lon_e)
+        .enumerate()
+        .filter(|(_, (west, east))| east <= west)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if wrapped.len() > 1
+        || wrapped
+            .first()
+            .is_some_and(|index| *index != nlon - 1 || lon_e[*index] != -180.0)
+    {
+        bail!("spatial longitude cells contain an unsupported dateline crossing");
+    }
     let data = file
         .variable(variable)
         .with_context(|| format!("spatial input has no variable {variable}"))?;
@@ -146,6 +171,11 @@ fn inspect_equal_latlon(
             .checked_mul(i64::try_from(nlon)?)
             .context("GRIDBASED row-major element identity exceeds int64")?
     };
+    let east = if wrapped.is_empty() {
+        lon_e.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        180.0
+    };
     Ok(SpatialInputSummary {
         schema: if require_int64 {
             "equal-lat-lon-elmindex-v1"
@@ -156,6 +186,10 @@ fn inspect_equal_latlon(
         nlat,
         active_cells,
         max_elmid,
+        west: lon_w.iter().copied().fold(f64::INFINITY, f64::min),
+        east,
+        south: lat_s.iter().copied().fold(f64::INFINITY, f64::min),
+        north: lat_n.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     })
 }
 
@@ -216,12 +250,28 @@ fn inspect_catchment(file: &netcdf::File) -> Result<SpatialInputSummary> {
     if active_cells == 0 {
         bail!("catchment input has no active cells");
     }
+    let bounds = |values: &[f64], low: f64, high: f64| {
+        let pad = values
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f64, f64::max)
+            / 2.0;
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        ((min - pad).max(low), (max + pad).min(high))
+    };
+    let (west, east) = bounds(&lon, -180.0, 180.0);
+    let (south, north) = bounds(&lat, -90.0, 90.0);
     Ok(SpatialInputSummary {
         schema: "colm-catchment-input-v1",
         nlon,
         nlat,
         active_cells,
         max_elmid,
+        west,
+        east,
+        south,
+        north,
     })
 }
 
@@ -650,6 +700,10 @@ mod tests {
         assert_eq!(
             (regular.nlon, regular.nlat, regular.active_cells),
             (4, 2, 5)
+        );
+        assert_eq!(
+            (regular.west, regular.east, regular.south, regular.north),
+            (-180.0, 180.0, -90.0, 90.0)
         );
         let irregular = inspect_spatial_input(&unstructured, "unstructured").unwrap();
         assert_eq!((irregular.active_cells, irregular.max_elmid), (5, 8));

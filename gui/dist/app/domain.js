@@ -161,7 +161,7 @@ function renderSpatial() {
   } else {
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = '使用全球范围，不再填写边界。海洋仍由下方可选 mask 剔除。';
+    note.textContent = '使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。';
     panel.appendChild(note);
   }
 
@@ -181,7 +181,7 @@ function renderSpatial() {
       ? '按该全球格架生成 int64 elmindex；范围外与海洋单元写为 inactive。'
       : '按该全球格架生成 landmask，并以 GRIDBASED 模式运行。';
     panel.appendChild(note);
-    panel.appendChild(pathField('非海洋 mask（可选）', 'nonOceanMask', 'nc,nc4'));
+    panel.appendChild(pathField('非海洋 mask（必需）', 'nonOceanMask', 'nc,nc4'));
   }
   $('gatecards').appendChild(panel);
 }
@@ -193,6 +193,7 @@ function numberField(label, key, min, max) {
   caption.textContent = label;
   const input = document.createElement('input');
   input.id = `spatial-${key}`;
+  caption.htmlFor = input.id;
   input.className = 'input';
   input.type = 'number';
   input.step = 'any';
@@ -213,6 +214,7 @@ function pathField(label, key, filter) {
   browse.className = 'browse';
   const input = document.createElement('input');
   input.id = `spatial-${key}`;
+  caption.htmlFor = input.id;
   input.className = 'input';
   input.value = picked.spatial[key];
   input.oninput = () => updateSpatial(key, input.value);
@@ -220,6 +222,7 @@ function pathField(label, key, filter) {
   button.type = 'button';
   button.className = 'btn-ghost';
   button.textContent = '选择…';
+  button.setAttribute('aria-label', `选择${label}`);
   button.onclick = async () => {
     let value = null;
     try { value = await invoke?.('pick_file', { key: input.id, filter }); } catch { /* 可继续粘贴路径 */ }
@@ -258,6 +261,7 @@ function spatialIssue() {
   const [nlon, nlat] = [Math.round(360 / dlon), Math.round(180 / dlat)];
   if (!Number.isSafeInteger(nlon) || !Number.isSafeInteger(nlat)
       || !Number.isSafeInteger(nlon * nlat)) return '格点数量超过安全整数范围';
+  if (!s.nonOceanMask) return '请选择非海洋 mask，避免把海洋格点激活为陆面单元';
   return null;
 }
 
@@ -361,7 +365,10 @@ function toggleDebug(id) {
 function subgridBlock(item) {
   if (kernelForSubgrid(item.id, picked)) return null;
   const classification = item.id === 'USGS' ? 'USGS' : 'IGBP';
-  return { need: state.kernels.length ? `当前安装缺少 ${classification} 内核` : '正在检查可用内核' };
+  const grid = picked.domain === 'site' ? '站点'
+    : picked.grid === 'latlon' ? '经纬度'
+      : picked.grid === 'unstructured' ? '非结构' : '流域网格';
+  return { need: state.kernels.length ? `当前安装缺少 ${grid} + ${classification} 内核` : '正在检查可用内核' };
 }
 
 function physicsBlock(item) {

@@ -147,14 +147,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          for p in default usgs crop; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
 
       - name: Build release kernels (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          for p in default usgs crop; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
           # 动态链接 netcdff/netcdf，所以二进制要跟 MSYS2 的 DLL 一起走。
           # 实测：不带 DLL 时退出码 -1073741515（STATUS_DLL_NOT_FOUND），
@@ -231,7 +231,7 @@ jobs:
         working-directory: gui/src-tauri
         run: |
           app='target/release/bundle/macos/CoLM Desktop.app'
-          for p in default usgs crop; do
+          for p in default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop; do
             test -x "$app/Contents/Resources/kernels/$p/colm.x"
             test -f "$app/Contents/Resources/kernels/$p/manifest.json"
           done

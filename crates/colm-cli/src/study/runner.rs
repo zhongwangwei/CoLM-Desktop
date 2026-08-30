@@ -889,6 +889,7 @@ fn run_members(
                     stream,
                     false,
                     None,
+                    1,
                     true,
                     &mut |notice| {
                         let event = match notice {

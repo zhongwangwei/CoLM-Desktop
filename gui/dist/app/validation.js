@@ -18,6 +18,7 @@ let probe = null;
 let busy = false;
 let outputs = [];
 let settings = null;
+let fieldId = 0;
 
 function observationDirectory() {
   const dir = state.prepArtifacts.siteDir || state.prepArtifacts.forcingDir;
@@ -49,6 +50,8 @@ function field(label, control) {
   const wrap = document.createElement('div');
   wrap.className = 'field';
   const heading = document.createElement('label');
+  control.id ||= `validation-field-${++fieldId}`;
+  heading.htmlFor = control.id;
   heading.textContent = label;
   wrap.append(heading, control);
   return wrap;

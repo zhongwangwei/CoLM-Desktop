@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn mpi_uses_plain_spmd_launch_without_process_roles() {
+    let exe = Path::new("/kernel/colm.x");
+    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 4).expect("mpi");
+    assert_eq!(program, PathBuf::from("mpiexec"));
+    assert_eq!(args, ["-n", "4", "/kernel/colm.x", "/case/case.nml"]);
+    assert!(!args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "master" | "io" | "worker")));
+    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 1).expect("serial");
+    assert_eq!(program, exe);
+    assert_eq!(args, ["/case/case.nml"]);
+}
+
 /// 一个跑得起来的假内核：三个 `.x` 都是同一个 shell 脚本。
 ///
 /// `#[cfg(unix)]` 跟着两个使用者走 —— 它们都要 `#!/bin/sh` 与

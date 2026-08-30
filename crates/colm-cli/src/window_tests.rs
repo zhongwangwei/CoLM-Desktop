@@ -10,6 +10,58 @@ const FS: (i32, u32, u32, u32) = (2008, 1, 1, 0);
 const FE: (i32, u32, u32, u32) = (2010, 1, 1, 0);
 
 #[test]
+fn spatial_new_writes_a_non_site_case_after_mesh_preflight() {
+    let _guard = super::netcdf_test_guard();
+    let root = std::env::temp_dir().join(format!("colm-spatial-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let rawdata = root.join("rawdata");
+    let runtime = root.join("runtime");
+    std::fs::create_dir_all(&rawdata).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
+    let forcing = root.join("forcing.nml");
+    std::fs::write(&forcing, "&nl_colm_forcing\n/\n").unwrap();
+    let grid = colm_srfdata::Grid { nlon: 4, nlat: 2 };
+    let mesh = colm_srfdata::mesh::EqualLatLonMesh::all_active(
+        grid,
+        colm_srfdata::mesh::MeshWindow::new(grid, 2, 1, 1, 1).unwrap(),
+    )
+    .unwrap();
+    let mesh_file = root.join("mesh.nc");
+    mesh.write_netcdf(&mesh_file).unwrap();
+    let case = root.join("case");
+    let args = [
+        "--grid-kind",
+        "unstructured",
+        "--mesh",
+        mesh_file.to_str().unwrap(),
+        "--out",
+        case.to_str().unwrap(),
+        "--forcing",
+        forcing.to_str().unwrap(),
+        "--rawdata",
+        rawdata.to_str().unwrap(),
+        "--runtime",
+        runtime.to_str().unwrap(),
+        "--start",
+        "2001-01-01",
+        "--end",
+        "2001-01-02",
+        "--timestep",
+        "1800",
+        "--mode",
+        "igbp",
+    ]
+    .map(String::from);
+    let opts = super::Opts::parse(&args).unwrap();
+    super::cmd_spatial_new(&opts).unwrap();
+    let text = std::fs::read_to_string(case.join("case.nml")).unwrap();
+    assert!(text.contains("DEF_file_mesh"));
+    assert!(text.contains("DEF_domain%edgew"));
+    assert!(!text.contains("SITE_"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn a_window_inside_the_forcing_is_accepted() {
     check_window((2008, 6, 1, 0), (2009, 6, 1, 0), FS, FE).expect("窗口在范围内");
     // 边界本身算在范围内。

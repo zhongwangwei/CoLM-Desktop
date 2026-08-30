@@ -32,6 +32,112 @@ fn cn_cng() -> CaseSpec {
 }
 
 #[test]
+fn a_spatial_case_has_mesh_paths_without_single_point_fields() {
+    let spec = SpatialCaseSpec {
+        name: "basin".into(),
+        grid: SpatialGrid::Unstructured {
+            mesh_file: "/w/mesh.nc".into(),
+        },
+        window: Window {
+            start_year: 2001,
+            start_month: 1,
+            start_day: 1,
+            start_sec: 0,
+            end_year: 2001,
+            end_month: 12,
+            end_day: 31,
+            end_sec: 86400,
+        },
+        timestep_seconds: 1800.0,
+        dirs: Dirs {
+            rawdata: "/w/rawdata/".into(),
+            runtime: "/w/runtime/".into(),
+            output: "/w/out/".into(),
+            forcing_namelist: "/w/forcing.nml".into(),
+        },
+        domain: SpatialBounds {
+            west: 100.0,
+            east: 110.0,
+            south: 20.0,
+            north: 30.0,
+        },
+    };
+    let all = spatial_fields(&spec);
+    let names = all
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"DEF_file_mesh"));
+    for name in [
+        "DEF_domain%edgew",
+        "DEF_domain%edgee",
+        "DEF_domain%edges",
+        "DEF_domain%edgen",
+    ] {
+        assert!(names.contains(&name));
+    }
+    assert!(!names.iter().any(|name| name.starts_with("SITE_")));
+    assert!(!names.contains(&"DEF_CatchmentMesh_data"));
+    for (name, _) in all {
+        assert!(
+            colm_schema::find(&name).is_some(),
+            "schema does not know {name}"
+        );
+    }
+}
+
+#[test]
+fn a_catchment_case_uses_the_catchment_input_contract() {
+    let mut spec = SpatialCaseSpec {
+        name: "catchment".into(),
+        grid: SpatialGrid::Catchment {
+            mesh_file: "/w/catchment.nc".into(),
+        },
+        window: Window {
+            start_year: 2001,
+            start_month: 1,
+            start_day: 1,
+            start_sec: 0,
+            end_year: 2001,
+            end_month: 1,
+            end_day: 2,
+            end_sec: 86400,
+        },
+        timestep_seconds: 3600.0,
+        dirs: Dirs {
+            rawdata: "/w/rawdata/".into(),
+            runtime: "/w/runtime/".into(),
+            output: "/w/out/".into(),
+            forcing_namelist: "/w/forcing.nml".into(),
+        },
+        domain: SpatialBounds {
+            west: 100.0,
+            east: 110.0,
+            south: 20.0,
+            north: 30.0,
+        },
+    };
+    let names = spatial_fields(&spec)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"DEF_CatchmentMesh_data".into()));
+    assert!(!names.contains(&"DEF_file_mesh".into()));
+    spec.grid = SpatialGrid::LatLon {
+        mesh_file: "/w/landmask.nc".into(),
+        dlon: 0.5,
+        dlat: 0.25,
+    };
+    let names = spatial_fields(&spec)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"DEF_file_mesh".into()));
+    assert!(names.contains(&"DEF_GRIDBASED_lon_res".into()));
+    assert!(names.contains(&"DEF_GRIDBASED_lat_res".into()));
+}
+
+#[test]
 fn the_first_day_starts_where_the_forcing_starts() {
     let mut s = cn_cng();
     s.window.start_sec = 23 * 3600 + 30 * 60;

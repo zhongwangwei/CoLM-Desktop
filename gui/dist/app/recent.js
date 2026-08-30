@@ -16,8 +16,10 @@ const REMEMBERED = [
   'sitedir', 'root', 'obs',
   'fsrc', 'forcingdir',  // 前处理源文件，以及建算例时用于匹配的强迫场目录
   'cpu-workers',         // 批量运行同时占用的 CPU 核数
+  'mpi-ranks',
   'soutdir', 'srawdata', // 前处理：站点属性的产物目录与 rawdata
   'rawdata', 'runtime',  // 建例：自然/城市外部数据与城市运行时数据
+  'spatial-rawdata', 'spatial-runtime', 'spatial-forcing', 'spatial-root',
   // **经纬度不记。** 那是每个站点各不相同的东西，恢复上一个站点的坐标
   // 只会让人在没注意的情况下建出一份位置错的站点文件 —— 而位置错的
   // 站点文件跑得完，结果全错。目录不同：它是「我把东西放哪」，
