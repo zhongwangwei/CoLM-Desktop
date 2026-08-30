@@ -28,6 +28,7 @@ MODULE MOD_CatchmentDataReadin
 
    INTERFACE catchment_data_read
       MODULE procedure catchment_data_read_int32
+      MODULE procedure catchment_data_read_int64
       MODULE procedure catchment_data_read_real8
    END INTERFACE catchment_data_read
 
@@ -58,6 +59,30 @@ CONTAINS
    END SUBROUTINE catchment_data_read_int32
 
    ! -----
+   SUBROUTINE catchment_data_read_int64 (file_meshdata_in, dataname, grid, rdata_int64, spv)
+
+   USE MOD_Grid
+   USE MOD_DataType
+   IMPLICIT NONE
+
+   character (len=*), intent(in) :: file_meshdata_in
+   character (len=*), intent(in) :: dataname
+   type (grid_type),  intent(in) :: grid
+
+   type (block_data_int64_2d), intent(inout) :: rdata_int64
+   integer*8, intent(in), optional :: spv
+
+      IF (present(spv)) THEN
+         CALL catchment_data_read_general (file_meshdata_in, dataname, grid, &
+            rdata_int64 = rdata_int64, spv_i8 = spv)
+      ELSE
+         CALL catchment_data_read_general (file_meshdata_in, dataname, grid, &
+            rdata_int64 = rdata_int64)
+      ENDIF
+
+   END SUBROUTINE catchment_data_read_int64
+
+   ! -----
    SUBROUTINE catchment_data_read_real8 (file_meshdata_in, dataname, grid, rdata_real8, spv)
 
    USE MOD_Grid
@@ -83,7 +108,7 @@ CONTAINS
 
    ! -----
    SUBROUTINE catchment_data_read_general (file_meshdata_in, dataname, grid, &
-      rdata_int32, spv_i4, rdata_real8, spv_r8)
+      rdata_int32, spv_i4, rdata_int64, spv_i8, rdata_real8, spv_r8)
 
    USE MOD_SPMD_Task
    USE MOD_Block
@@ -100,6 +125,9 @@ CONTAINS
    type (block_data_int32_2d), intent(inout), optional :: rdata_int32
    integer,  intent(in), optional :: spv_i4
 
+   type (block_data_int64_2d), intent(inout), optional :: rdata_int64
+   integer*8, intent(in), optional :: spv_i8
+
    type (block_data_real8_2d), intent(inout), optional :: rdata_real8
    real(r8), intent(in), optional :: spv_r8
 
@@ -114,6 +142,7 @@ CONTAINS
    character(len=3)   :: pre1
    character(len=4)   :: pre2
    integer,  allocatable :: dcache_i4(:,:)
+   integer*8, allocatable :: dcache_i8(:,:)
    real(r8), allocatable :: dcache_r8(:,:)
    real(r8), allocatable :: latitude(:), longitude(:)
    logical :: fexists
@@ -162,6 +191,14 @@ CONTAINS
                      rdata_int32%blk(iblk,jblk)%val(:,:) = spv_i4
                   ELSE
                      rdata_int32%blk(iblk,jblk)%val(:,:) = 0
+                  ENDIF
+               ENDIF
+
+               IF (present(rdata_int64)) THEN
+                  IF (present(spv_i8)) THEN
+                     rdata_int64%blk(iblk,jblk)%val(:,:) = spv_i8
+                  ELSE
+                     rdata_int64%blk(iblk,jblk)%val(:,:) = 0_8
                   ENDIF
                ENDIF
 
@@ -216,6 +253,13 @@ CONTAINS
                      rdata_int32%blk(iblk,jblk)%val(il0:il1,jl0:jl1) = dcache_i4
                   ENDIF
 
+                  IF (present(rdata_int64)) THEN
+                     CALL ncio_read_part_serial (file_mesh, dataname, (/jf0,if0/), (/jf1,if1/), dcache_i8)
+                     dcache_i8 = transpose(dcache_i8)
+
+                     rdata_int64%blk(iblk,jblk)%val(il0:il1,jl0:jl1) = dcache_i8
+                  ENDIF
+
                   IF (present(rdata_real8)) THEN
                      CALL ncio_read_part_serial (file_mesh, dataname, (/jf0,if0/), (/jf1,if1/), dcache_r8)
                      dcache_r8 = transpose(dcache_r8)
@@ -248,6 +292,13 @@ CONTAINS
                         rdata_int32%blk(iblk,jblk)%val(il0:il1,jl0:jl1) = dcache_i4
                      ENDIF
 
+                     IF (present(rdata_int64)) THEN
+                        CALL ncio_read_part_serial (file_mesh, dataname, (/jf0,if0/), (/jf1,if1/), dcache_i8)
+                        dcache_i8 = transpose(dcache_i8)
+
+                        rdata_int64%blk(iblk,jblk)%val(il0:il1,jl0:jl1) = dcache_i8
+                     ENDIF
+
                      IF (present(rdata_real8)) THEN
                         CALL ncio_read_part_serial (file_mesh, dataname, (/jf0,if0/), (/jf1,if1/), dcache_r8)
                         dcache_r8 = transpose(dcache_r8)
@@ -273,6 +324,14 @@ CONTAINS
                      rdata_int32%blk(iblk,jblk)%val(:,:) = spv_i4
                   ELSE
                      rdata_int32%blk(iblk,jblk)%val(:,:) = 0
+                  ENDIF
+               ENDIF
+
+               IF (present(rdata_int64)) THEN
+                  IF (present(spv_i8)) THEN
+                     rdata_int64%blk(iblk,jblk)%val(:,:) = spv_i8
+                  ELSE
+                     rdata_int64%blk(iblk,jblk)%val(:,:) = 0_8
                   ENDIF
                ENDIF
 
@@ -344,6 +403,13 @@ CONTAINS
                         dcache_i4 = transpose(dcache_i4)
 
                         rdata_int32%blk(iblk,jblk)%val(il0:il1,jl0:jl1) = dcache_i4
+                     ENDIF
+
+                     IF (present(rdata_int64)) THEN
+                        CALL ncio_read_part_serial (file_mesh, dataname, (/j0,i0/), (/j1,i1/), dcache_i8)
+                        dcache_i8 = transpose(dcache_i8)
+
+                        rdata_int64%blk(iblk,jblk)%val(il0:il1,jl0:jl1) = dcache_i8
                      ENDIF
 
                      IF (present(rdata_real8)) THEN

@@ -1,10 +1,10 @@
-//! 等经纬度底板到 CoLM `UNSTRUCTURED` `elmindex` 文件。
+//! 等经纬度底板到 CoLM `GRIDBASED` landmask 或 `UNSTRUCTURED` elmindex 文件。
 
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::Grid;
+use crate::{shapefile::PolygonDomain, Grid};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeshWindow {
@@ -121,6 +121,77 @@ impl EqualLatLonMesh {
         })
     }
 
+    pub fn from_polygon(grid: Grid, domain: &PolygonDomain) -> Result<Self> {
+        let bounds = domain.bounds();
+        let window =
+            MeshWindow::covering_bbox(grid, bounds.west, bounds.east, bounds.south, bounds.north)?;
+        let len = window
+            .nlon
+            .checked_mul(window.nlat)
+            .context("mesh window cell count overflows usize")?;
+        let mut active = Vec::with_capacity(len);
+        // ponytail: P0 直接做 cells×vertices；实测成为流域大网格瓶颈时改扫描线分桶。
+        for j_local in 1..=window.nlat {
+            let (_, j_global) = window.global_indices(1, j_local)?;
+            let lat = grid.lat_center(j_global);
+            for i_local in 1..=window.nlon {
+                let (i_global, _) = window.global_indices(i_local, j_local)?;
+                active.push(domain.contains(grid.lon_center(i_global), lat));
+            }
+        }
+        Self::new(grid, window, active)
+    }
+
+    /// 叠加一份 1=land/inland-water、0=ocean 的同格架 NetCDF mask。
+    /// 变量可以是全球尺寸，也可以已裁到当前窗口。
+    pub fn with_non_ocean_mask(mut self, path: impl AsRef<Path>, variable: &str) -> Result<Self> {
+        let path = path.as_ref();
+        let file = netcdf::open(path)
+            .with_context(|| format!("cannot open non-ocean mask {}", path.display()))?;
+        let var = file.variable(variable).with_context(|| {
+            format!(
+                "non-ocean mask {} has no variable {variable}",
+                path.display()
+            )
+        })?;
+        let shape = var
+            .dimensions()
+            .iter()
+            .map(|dim| dim.len())
+            .collect::<Vec<_>>();
+        require_mask_attribute(&file, "global_nlon", self.grid.nlon)?;
+        require_mask_attribute(&file, "global_nlat", self.grid.nlat)?;
+        let values = if shape == [self.grid.nlat, self.grid.nlon] {
+            var.get_values::<f64, _>((
+                self.window.j0 - 1..self.window.j0 - 1 + self.window.nlat,
+                self.window.i0 - 1..self.window.i0 - 1 + self.window.nlon,
+            ))?
+        } else if shape == [self.window.nlat, self.window.nlon] {
+            require_mask_attribute(&file, "window_i0", self.window.i0)?;
+            require_mask_attribute(&file, "window_j0", self.window.j0)?;
+            var.get_values::<f64, _>(..)?
+        } else {
+            bail!(
+                "non-ocean mask {variable} has shape {:?}; expected global {}x{} or window {}x{} in latitude,longitude order",
+                shape,
+                self.grid.nlat,
+                self.grid.nlon,
+                self.window.nlat,
+                self.window.nlon
+            );
+        };
+        if values.len() != self.active.len() {
+            bail!("non-ocean mask returned an unexpected number of cells");
+        }
+        for (active, value) in self.active.iter_mut().zip(values) {
+            *active = *active && value.is_finite() && value > 0.0;
+        }
+        if !self.active.iter().any(|value| *value) {
+            bail!("domain and non-ocean mask have no active cells in common");
+        }
+        Ok(self)
+    }
+
     pub fn element_ids(&self) -> Result<Vec<i64>> {
         let mut ids = Vec::with_capacity(self.active.len());
         for j_local in 1..=self.window.nlat {
@@ -147,22 +218,51 @@ impl EqualLatLonMesh {
 
     pub fn write_netcdf(&self, path: impl AsRef<Path>) -> Result<MeshSummary> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("cannot create {}", parent.display()))?;
-        }
         let ids = self.element_ids()?;
         let summary = MeshSummary {
             active_cells: ids.iter().filter(|id| **id > 0).count(),
             max_elmid: ids.iter().copied().max().unwrap_or(0),
         };
 
+        let mut file = self.create_netcdf(path, "equal-lat-lon-elmindex-v1")?;
+        file.add_attribute("elmindex_type", "int64")?;
+        file.add_variable::<i64>("elmindex", &["nlat", "nlon"])?
+            .put_values(&ids, (.., ..))?;
+        file.close()?;
+        Ok(summary)
+    }
+
+    pub fn write_gridbased_netcdf(&self, path: impl AsRef<Path>) -> Result<MeshSummary> {
+        let path = path.as_ref();
+        let ids = self.element_ids()?;
+        let summary = MeshSummary {
+            active_cells: ids.iter().filter(|id| **id > 0).count(),
+            max_elmid: ids.iter().copied().max().unwrap_or(0),
+        };
+        let landmask = self
+            .active
+            .iter()
+            .map(|active| i32::from(*active))
+            .collect::<Vec<_>>();
+
+        let mut file = self.create_netcdf(path, "equal-lat-lon-landmask-v1")?;
+        file.add_attribute("element_id_type", "int64")?;
+        file.add_variable::<i32>("landmask", &["nlat", "nlon"])?
+            .put_values(&landmask, (.., ..))?;
+        file.close()?;
+        Ok(summary)
+    }
+
+    fn create_netcdf(&self, path: &Path, schema: &str) -> Result<netcdf::FileMut> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
         let mut file = netcdf::create(path)
             .with_context(|| format!("cannot create mesh file {}", path.display()))?;
         file.add_dimension("nlon", self.window.nlon)?;
         file.add_dimension("nlat", self.window.nlat)?;
-        file.add_attribute("colm_mesh_schema", "equal-lat-lon-elmindex-v1")?;
-        file.add_attribute("elmindex_type", "int64")?;
+        file.add_attribute("colm_mesh_schema", schema)?;
         file.add_attribute("global_nlon", i64::try_from(self.grid.nlon)?)?;
         file.add_attribute("global_nlat", i64::try_from(self.grid.nlat)?)?;
         file.add_attribute("window_i0", i64::try_from(self.window.i0)?)?;
@@ -185,10 +285,7 @@ impl EqualLatLonMesh {
         put_1d(&mut file, "lon_e", "nlon", &lon_e)?;
         put_1d(&mut file, "lat_s", "nlat", &lat_s)?;
         put_1d(&mut file, "lat_n", "nlat", &lat_n)?;
-        file.add_variable::<i64>("elmindex", &["nlat", "nlon"])?
-            .put_values(&ids, (.., ..))?;
-        file.close()?;
-        Ok(summary)
+        Ok(file)
     }
 }
 
@@ -205,6 +302,26 @@ fn element_id(grid: Grid, i_global: usize, j_global: usize) -> Result<i64> {
 fn put_1d(file: &mut netcdf::FileMut, name: &str, dim: &str, values: &[f64]) -> Result<()> {
     file.add_variable::<f64>(name, &[dim])?
         .put_values(values, ..)?;
+    Ok(())
+}
+
+fn require_mask_attribute(file: &netcdf::File, name: &str, expected: usize) -> Result<()> {
+    use netcdf::AttributeValue::{Int, Longlong, Uint, Ulonglong};
+
+    let value = file
+        .attribute(name)
+        .with_context(|| format!("non-ocean mask is missing attribute {name}"))?
+        .value()?;
+    let actual = match value {
+        Int(value) => i128::from(value),
+        Uint(value) => i128::from(value),
+        Longlong(value) => i128::from(value),
+        Ulonglong(value) => i128::from(value),
+        _ => bail!("non-ocean mask attribute {name} must be an integer"),
+    };
+    if actual != i128::try_from(expected)? {
+        bail!("non-ocean mask attribute {name}={actual}; expected {expected}");
+    }
     Ok(())
 }
 
@@ -283,6 +400,27 @@ mod tests {
     }
 
     #[test]
+    fn gridbased_file_reuses_the_mask_but_not_elmindex() {
+        let grid = Grid { nlon: 4, nlat: 2 };
+        let window = MeshWindow::new(grid, 2, 1, 2, 2).unwrap();
+        let mesh = EqualLatLonMesh::new(grid, window, vec![true, false, false, true]).unwrap();
+        let path = output("gridbased-landmask");
+        let summary = mesh.write_gridbased_netcdf(&path).unwrap();
+
+        let file = netcdf::open(&path).unwrap();
+        assert!(file.variable("elmindex").is_none());
+        assert_eq!(
+            file.variable("landmask")
+                .unwrap()
+                .get_values::<i32, _>(..)
+                .unwrap(),
+            vec![1, 0, 0, 1]
+        );
+        assert_eq!(summary.active_cells, 2);
+        assert_eq!(summary.max_elmid, 7);
+    }
+
+    #[test]
     fn bbox_window_is_on_the_global_lattice() {
         let grid = Grid { nlon: 8, nlat: 4 };
         let window = MeshWindow::covering_bbox(grid, -90.0, 0.0, 0.0, 45.0).unwrap();
@@ -294,5 +432,26 @@ mod tests {
         assert!(
             MeshWindow::covering_bbox(Grid { nlon: 0, nlat: 4 }, -90.0, 0.0, 0.0, 45.0).is_err()
         );
+    }
+
+    #[test]
+    fn global_non_ocean_mask_is_sliced_to_the_mesh_window() {
+        let grid = Grid { nlon: 4, nlat: 2 };
+        let window = MeshWindow::new(grid, 2, 2, 2, 1).unwrap();
+        let mesh = EqualLatLonMesh::all_active(grid, window).unwrap();
+        let path = output("non-ocean-mask");
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("nlat", 2).unwrap();
+        file.add_dimension("nlon", 4).unwrap();
+        file.add_attribute("global_nlat", 2_i64).unwrap();
+        file.add_attribute("global_nlon", 4_i64).unwrap();
+        file.add_variable::<i8>("non_ocean_mask", &["nlat", "nlon"])
+            .unwrap()
+            .put_values(&[0, 0, 0, 0, 0, 1, 0, 1], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+
+        let masked = mesh.with_non_ocean_mask(&path, "non_ocean_mask").unwrap();
+        assert_eq!(masked.element_ids().unwrap(), vec![6, 0]);
     }
 }

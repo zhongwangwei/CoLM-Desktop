@@ -1185,6 +1185,7 @@ function reportData() {
     copyright: 'CoLM LSM Development Team, School of Atmospheric Sciences, SYSU',
     settings: {
       domain: state.domain,
+      grid: state.grid,
       subgrid: state.subgrid,
       wizard: state.wizard,
       kernel: $('kernel')?.value || null,

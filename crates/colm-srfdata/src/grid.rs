@@ -78,6 +78,10 @@ impl Grid {
         }
     }
 
+    pub fn lon_center(&self, i: usize) -> f64 {
+        self.lon_w(i) + self.dlon() * 0.5
+    }
+
     /// 第 j 格的南边界（1-based），同上。纬度是降序的。
     pub fn lat_s(&self, j: usize) -> f64 {
         90.0 - self.dlat() * (j as f64)
@@ -86,6 +90,10 @@ impl Grid {
     /// 第 j 格的北边界（1-based）。
     pub fn lat_n(&self, j: usize) -> f64 {
         90.0 - self.dlat() * ((j - 1) as f64)
+    }
+
+    pub fn lat_center(&self, j: usize) -> f64 {
+        self.lat_s(j) + self.dlat() * 0.5
     }
 
     fn ilon(&self, lon: f64) -> usize {

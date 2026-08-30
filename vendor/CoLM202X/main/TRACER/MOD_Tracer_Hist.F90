@@ -1062,9 +1062,11 @@ CONTAINS
       USE MOD_Namelist, only: DEF_HIST_CompressLevel
 #ifdef CATCHMENT
       USE MOD_LandHRU
+      USE MOD_LandPatch, only: hru_patch
       USE MOD_HRUVector
 #else
       USE MOD_LandElm
+      USE MOD_LandPatch, only: elm_patch
       USE MOD_ElmVector
 #endif
       IMPLICIT NONE
@@ -1248,9 +1250,11 @@ CONTAINS
       USE MOD_Namelist, only: DEF_HIST_CompressLevel
 #ifdef CATCHMENT
       USE MOD_LandHRU
+      USE MOD_LandPatch, only: hru_patch
       USE MOD_HRUVector
 #else
       USE MOD_LandElm
+      USE MOD_LandPatch, only: elm_patch
       USE MOD_ElmVector
 #endif
       IMPLICIT NONE

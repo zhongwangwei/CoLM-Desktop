@@ -1,11 +1,17 @@
 //! 向导选配置，这里在后台匹配它需要的编译产物。
 
 import { state } from './state.js';
+
+const GRID_MACROS = { latlon: 'GRIDBASED', unstructured: 'UNSTRUCTURED', catchment: 'CATCHMENT' };
+
 /** USGS 与 CROP 仍需要不同编译产物；PFT/PC 是 IGBP 分类内的运行时结构。 */
 export function kernelForSubgrid(subgrid = state.subgrid ?? state.wizard?.subgrid, opts = state.wizard) {
   const want = subgrid === 'USGS' ? 'LULC_USGS' : 'LULC_IGBP';
-  const wantCrop = !!(opts?.physics?.crop ?? opts?.crop);
-  const matches = state.kernels.filter(k => k.macros?.includes(want) && !!k.macros?.includes('CROP') === wantCrop);
+  const grid = opts && Object.hasOwn(opts, 'grid') ? opts.grid : (state.wizard?.grid ?? state.grid);
+  const wantGrid = GRID_MACROS[grid] ?? 'SinglePoint';
+  const wantCrop = !!(opts?.crop ?? opts?.physics?.crop);
+  const matches = state.kernels.filter(k => k.macros?.includes(wantGrid)
+    && k.macros?.includes(want) && !!k.macros?.includes('CROP') === wantCrop);
   const preferred = wantCrop ? 'crop' : (subgrid === 'USGS' ? 'usgs' : 'default');
   return matches.find(k => k.preset === preferred) ?? matches[0] ?? null;
 }

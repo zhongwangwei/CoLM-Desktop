@@ -27,15 +27,16 @@ export const state = {
   availableFlows: new Set(['basic-files']),
   /** 原生折叠组默认收起；用户打开后跨重绘保持。 */
   expandedFlows: new Set(),
-  /** 这次要跑什么。'site' | 'region' | 'global'，进门向导第 1 页设的。
-   *  区域与全球还没有步骤链，现在只可能是 'site'。 */
+  /** 这次要跑什么。'site' | 'watershed' | 'region' | 'global'。 */
   domain: null,
+  /** 空间计算网格。空间范围使用 'latlon' | 'unstructured' | 'catchment'；站点为 null。 */
+  grid: null,
   /** 次网格怎么分。'IGBP' | 'USGS' | 'PFT' | 'PC'，进门向导第 2 页设的。
    *
    *  USGS 仍需要单独的编译产物，界面会自动匹配；PFT/PC 是运行时选择。
    *  新建算例时由 `domain.wizardFields()` 落到 case.nml。 */
   subgrid: null,
-  /** 五页向导的实际选择；不进 recent，每次启动重新问。 */
+  /** 向导的实际选择；不进 recent，每次启动重新问。 */
   wizard: null,
   cases: [],
   /** 本次向导中由界面新建的算例目录。root 里的历史算例仍用于避开重名，

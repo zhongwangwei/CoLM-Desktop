@@ -68,6 +68,9 @@ state.kernels = [
   { preset: 'default', dir: '/igbp', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'usgs', dir: '/usgs', generator_args: 'SinglePoint LULC_USGS CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_USGS', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'crop', dir: '/crop', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPON', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROP'] },
+  { preset: 'latlon', dir: '/latlon', generator_args: 'GRID LULC_IGBP CaMaOFF CROPOFF', macros: ['GRIDBASED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'unstructured', dir: '/unstructured', generator_args: 'UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF', macros: ['UNSTRUCTURED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'catchment', dir: '/catchment', generator_args: 'CATCHMENT LULC_IGBP CaMaOFF CROPOFF', macros: ['CATCHMENT', 'CatchLateralFlow', 'LULC_IGBP'] },
 ];
 if (kernelForSubgrid('PC')?.dir !== '/igbp' || kernelForSubgrid('USGS')?.dir !== '/usgs') {
   throw new Error('subgrid did not resolve to its compiled land classification');
@@ -79,6 +82,9 @@ state.kernels = [
   { preset: 'default', dir: '/igbp-real', generator_args: 'SinglePoint LULC_USGS CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'usgs', dir: '/usgs-real', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_USGS', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'crop', dir: '/crop-real', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPON', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROP'] },
+  { preset: 'latlon', dir: '/latlon-real', generator_args: 'GRID LULC_IGBP CaMaOFF CROPOFF', macros: ['GRIDBASED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'unstructured', dir: '/unstructured-real', generator_args: 'UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF', macros: ['UNSTRUCTURED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'catchment', dir: '/catchment-real', generator_args: 'CATCHMENT LULC_IGBP CaMaOFF CROPOFF', macros: ['CATCHMENT', 'CatchLateralFlow', 'LULC_IGBP'] },
 ];
 if (kernelForSubgrid('PC')?.dir !== '/igbp-real' || kernelForSubgrid('USGS')?.dir !== '/usgs-real') {
   throw new Error('kernel matching must prefer effective macros over requested generator_args');
@@ -105,9 +111,17 @@ if (ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('page
 if (cards().map(c => c.children[0].textContent).join('|') !== '站点|流域|区域|全球') {
   throw new Error('page 1 must list site, watershed, regional, and global in order');
 }
-if (card('流域').getAttribute('aria-disabled') !== 'true' || !card('流域').disabled) {
-  throw new Error('watershed must be visible but temporarily unavailable');
+for (const domain of ['流域', '区域', '全球']) {
+  showDomainGate();
+  choose(domain);
+  next();
+  if (ids.gatetitle.textContent !== '计算网格怎么组织？') throw new Error(`${domain} did not open the grid page`);
+  if (cards().map(c => c.children[0].textContent).join('|') !== '经纬度网格|非结构网格|流域网格') {
+    throw new Error(`${domain} must offer all three spatial grids`);
+  }
+  if (cards().some(c => c.disabled)) throw new Error(`${domain} unexpectedly disabled a grid choice`);
 }
+showDomainGate();
 choose('站点');
 next();
 if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('page 2 missing');
@@ -348,4 +362,19 @@ if (pcFieldsAfterUrban.DEF_USE_PC !== '.true.' || pcFieldsAfterUrban.DEF_USE_LCT
   throw new Error(`PC retained invalid urban state: ${JSON.stringify(pcFieldsAfterUrban)}`);
 }
 
-console.log('gate: five base pages plus conditional tracer page, constraints, finish state, and namelist fields resolve');
+// Spatial scope and computation grid are independent and survive the full wizard.
+showDomainGate();
+choose('流域'); next(); choose('经纬度网格'); next(); choose('IGBP'); next();
+choose('van Genuchten–Mualem（Ippisch 2006）'); next(); next(); next();
+if (state.domain !== 'watershed' || state.grid !== 'latlon' || state.wizard.grid !== 'latlon') {
+  throw new Error(`spatial domain/grid state was lost: ${JSON.stringify(state.wizard)}`);
+}
+if (kernelForSubgrid()?.dir !== '/latlon-real') throw new Error('latlon wizard did not select the GRIDBASED kernel');
+if (kernelForSubgrid('IGBP', { grid: 'unstructured' })?.dir !== '/unstructured-real') {
+  throw new Error('unstructured grid did not select the UNSTRUCTURED kernel');
+}
+if (kernelForSubgrid('IGBP', { grid: 'catchment' })?.dir !== '/catchment-real') {
+  throw new Error('watershed grid did not select the CATCHMENT kernel');
+}
+
+console.log('gate: domain/grid cards, five site pages, constraints, finish state, and namelist fields resolve');

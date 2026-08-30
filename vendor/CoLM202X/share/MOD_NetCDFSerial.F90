@@ -76,6 +76,7 @@ MODULE MOD_NetCDFSerial
 
    INTERFACE ncio_read_part_serial
       MODULE procedure ncio_read_part_serial_int32_2d
+      MODULE procedure ncio_read_part_serial_int64_2d
       MODULE procedure ncio_read_part_serial_real8_2d
    END INTERFACE ncio_read_part_serial
 
@@ -1089,6 +1090,31 @@ CONTAINS
       CALL nccheck( nf90_close(ncid) )
 
    END SUBROUTINE ncio_read_part_serial_int32_2d
+
+   !---------------------------------------------------------
+   SUBROUTINE ncio_read_part_serial_int64_2d (filename, dataname, datastt, dataend, rdata)
+
+   USE netcdf
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: filename
+   character(len=*), intent(in) :: dataname
+   integer, intent(in) :: datastt(2), dataend(2)
+   integer*8, allocatable, intent(out) :: rdata (:,:)
+
+   integer :: ncid, varid
+
+      CALL check_ncfile_exist (filename)
+
+      allocate (rdata (datastt(1):dataend(1), datastt(2):dataend(2)) )
+
+      CALL nccheck( nf90_open(trim(filename), NF90_NOWRITE, ncid) )
+      CALL nccheck( nf90_inq_varid(ncid, trim(dataname), varid), trim(dataname) )
+      CALL nccheck( nf90_get_var(ncid, varid, rdata, &
+         (/datastt(1),datastt(2)/), (/dataend(1)-datastt(1)+1, dataend(2)-datastt(2)+1/)) )
+      CALL nccheck( nf90_close(ncid) )
+
+   END SUBROUTINE ncio_read_part_serial_int64_2d
 
    !---------------------------------------------------------
    SUBROUTINE ncio_read_part_serial_real8_2d (filename, dataname, datastt, dataend, rdata)

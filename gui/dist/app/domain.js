@@ -1,4 +1,4 @@
-//! 进门向导。顺序按约束方向排：空间 → 次网格 → 土壤 → 物理 → 示踪剂 → 调试。
+//! 进门向导。顺序按约束方向排：空间 → 计算网格 → 次网格 → 土壤 → 物理 → 示踪剂 → 调试。
 //!
 //! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS 由向导
 //! 自动匹配专用编译产物；CROP 需要 CROP-enabled 内核。
@@ -10,9 +10,15 @@ import { kernelForSubgrid } from './kernel.js';
 
 const DOMAINS = [
   { id: 'site', t: '站点', d: '单点站点模拟', ready: true },
-  { id: 'watershed', t: '流域', d: '流域尺度模拟', ready: false, need: '流域步骤链尚未实现' },
-  { id: 'region', t: '区域', d: '有限范围网格', ready: false, need: '区域步骤链尚未实现' },
-  { id: 'global', t: '全球', d: '全球网格', ready: false, need: '全球步骤链尚未实现' },
+  { id: 'watershed', t: '流域', d: '按流域边界限定模拟范围' },
+  { id: 'region', t: '区域', d: '按经纬度范围限定模拟区域' },
+  { id: 'global', t: '全球', d: '覆盖全球陆地区域' },
+];
+
+const GRIDS = [
+  { id: 'latlon', t: '经纬度网格', d: '规则等经纬度网格（GRIDBASED）' },
+  { id: 'unstructured', t: '非结构网格', d: '由 elmindex 描述计算单元（UNSTRUCTURED）' },
+  { id: 'catchment', t: '流域网格', d: '集水区与 HRU 水文单元（CATCHMENT）' },
 ];
 
 const SUBGRIDS = [
@@ -51,12 +57,19 @@ const TRACERS = [
   { id: 'sediment', t: '泥沙', d: '颗粒泥沙输移', ready: false, need: '单点站点不可用；需要河道/流域输移链路' },
 ];
 
-const pages = () => ['domain', 'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []), 'debug'];
+const pages = () => [
+  'domain',
+  ...(picked.domain && picked.domain !== 'site' ? ['grid'] : []),
+  'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []), 'debug',
+];
+const pageIndex = page => pages().indexOf(page);
+const pageNumber = page => pageIndex(page) + 1;
 
 const emptyPhysics = () => ({ urban: false, lulcc: false, bgc: false, crop: false, tracer: false });
 const emptyDebug = () => ({ rangecheck: false, colmdebug: false, srfdatadiag: false });
 const emptyPicked = () => ({
   domain: null,
+  grid: null,
   subgrid: null,
   soil: 'vg',
   physics: emptyPhysics(),
@@ -79,7 +92,8 @@ function render() {
   if (pageIdx >= list.length) pageIdx = list.length - 1;
   const page = list[pageIdx];
   const copy = {
-    domain: ['这次要跑什么？', '空间结构先定；现在只有站点步骤链能跑。'],
+    domain: ['这次要跑什么？', '先选择模拟范围，再为流域、区域或全球选择计算网格。'],
+    grid: ['计算网格怎么组织？', '三种空间范围都可选择经纬度、非结构或流域网格。'],
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
@@ -93,6 +107,7 @@ function render() {
   const box = $('gatecards');
   box.textContent = '';
   if (page === 'domain') renderCards(DOMAINS, picked.domain, chooseDomain);
+  if (page === 'grid') renderCards(GRIDS, picked.grid, chooseGrid);
   if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid, subgridBlock);
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
@@ -157,6 +172,12 @@ function card(item, selected, choose, blocked, multi) {
 
 function chooseDomain(id) {
   picked.domain = id;
+  if (id === 'site') picked.grid = null;
+  render();
+}
+
+function chooseGrid(id) {
+  picked.grid = id;
   render();
 }
 
@@ -206,7 +227,7 @@ function toggleDebug(id) {
 }
 
 function subgridBlock(item) {
-  if (kernelForSubgrid(item.id)) return null;
+  if (kernelForSubgrid(item.id, picked)) return null;
   const classification = item.id === 'USGS' ? 'USGS' : 'IGBP';
   return { need: state.kernels.length ? `当前安装缺少 ${classification} 内核` : '正在检查可用内核' };
 }
@@ -215,7 +236,7 @@ function physicsBlock(item) {
   if (item.ready === false) return null;
   if (item.id === 'lulcc') {
     if (picked.subgrid === 'USGS') {
-      return { need: 'LULCC 不支持 USGS 次网格', cause: '第 2 页选了 USGS', page: 1 };
+      return { need: 'LULCC 不支持 USGS 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 USGS`, page: pageIndex('subgrid') };
     }
     if (picked.physics.bgc) return { need: 'LULCC 不能与 BGC 同时开启' };
     if (picked.domain === 'site') {
@@ -230,24 +251,24 @@ function physicsBlock(item) {
       return { need: '纯城市单点不运行 BGC', cause: '本页已开启 URBAN' };
     }
     if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-      return { need: '需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+      return { need: '需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
     }
   }
   if (item.id === 'crop') {
     if (picked.domain === 'site' && picked.physics.urban) return { need: '城市单点暂不支持 CROP', cause: '本页已开启 URBAN' };
-    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') return { need: 'CROP 需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') return { need: 'CROP 需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
     if (!picked.physics.bgc) return { need: 'CROP 需要同时开启 BGC' };
-    if (!kernelForSubgrid(picked.subgrid, { crop: true })) return { need: '当前安装缺少 CROP-enabled 内核' };
+    if (!kernelForSubgrid(picked.subgrid, { ...picked, crop: true })) return { need: '当前安装缺少 CROP-enabled 内核' };
   }
   if (item.id === 'tracer') {
     if (picked.domain === 'site' && picked.physics.urban) {
       return { need: '城市单点暂不支持甲烷示踪', cause: '本页已开启 URBAN' };
     }
     if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
     }
     if (picked.soil !== 'vg') {
-      return { need: '需要 van Genuchten 土壤水力', cause: '第 3 页选了 Campbell', page: 2 };
+      return { need: '需要 van Genuchten 土壤水力', cause: `第 ${pageNumber('soil')} 页选了 Campbell`, page: pageIndex('soil') };
     }
     if (!picked.physics.bgc) return { need: '甲烷示踪需要同时开启 BGC' };
   }
@@ -278,7 +299,7 @@ function renderFoot() {
 
   const list = pages();
   const page = list[pageIdx];
-  const required = { domain: picked.domain, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
+  const required = { domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = '下一步 →';
@@ -315,8 +336,10 @@ function finish() {
     observationFile: null, observationDir: null, batchSites: [],
   };
   state.domain = picked.domain;
+  state.grid = picked.grid;
   state.subgrid = picked.subgrid;
   state.wizard = {
+    grid: picked.grid,
     subgrid: picked.subgrid,
     soil: picked.soil,
     physics: { ...picked.physics },

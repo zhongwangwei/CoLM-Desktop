@@ -124,7 +124,7 @@ CONTAINS
    IMPLICIT NONE
 
    ! Local Variables
-#ifdef UNSTRUCTURED
+#if defined (UNSTRUCTURED) || defined (CATCHMENT)
    type(block_data_int64_2d) :: datamesh
 #else
    type(block_data_int32_2d) :: datamesh
@@ -171,7 +171,7 @@ CONTAINS
 #endif
 
 #ifdef CATCHMENT
-      CALL catchment_data_read (DEF_CatchmentMesh_data, 'icatchment2d', gridmesh, datamesh, spv = -1)
+      CALL catchment_data_read (DEF_CatchmentMesh_data, 'icatchment2d', gridmesh, datamesh, spv = -1_8)
 #endif
 
 #ifdef UNSTRUCTURED

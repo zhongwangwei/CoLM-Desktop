@@ -15,6 +15,7 @@ pub mod derive;
 pub mod grid;
 pub mod mesh;
 pub mod raster;
+pub mod shapefile;
 pub mod site;
 pub mod texture;
 pub mod urban_extra;

@@ -142,9 +142,10 @@ usage:
                            # 探测一份强迫场文件：八个槽位各猜到了什么变量，
                            # 猜不到就是 null；三个观测高度缺失时也是 null，
                            # 不是 NaN —— GUI 前处理页据此决定问不问用户
-  colm-cli mesh-new --out <mesh.nc> --nlon N --nlat N
-                    [--west W --east E --south S --north N]
-                    # 生成 int64 elmindex 等经纬度底板；不提供 bbox 时生成全球网格
+  colm-cli mesh-new --out <mesh.nc> --nlon N --nlat N [--grid-kind latlon|unstructured]
+                    [--west W --east E --south S --north N | --shp basin.shp]
+                    [--non-ocean-mask mask.nc --non-ocean-var non_ocean_mask]
+                    # 生成 GRIDBASED landmask 或 int64 UNSTRUCTURED elmindex；无 bbox/SHP 时为全球
   colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
                            # 与独立 bin forcing-convert 同样的行为，供 GUI 走
                            # sidecar 调用；没给 --slot 的槽位走自动匹配
@@ -3551,6 +3552,9 @@ fn cmd_netcdf_probe(file: &Path, json: bool) -> Result<()> {
 
 fn cmd_mesh_new(opts: &Opts) -> Result<()> {
     let output = opts.need("--out")?;
+    let grid_kind = opts
+        .get("--grid-kind")
+        .unwrap_or_else(|| "unstructured".to_string());
     let nlon = opts
         .need_str("--nlon")?
         .parse::<usize>()
@@ -3574,22 +3578,77 @@ fn cmd_mesh_new(opts: &Opts) -> Result<()> {
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
     let supplied = bbox.iter().filter(|value| value.is_some()).count();
-    let window = match supplied {
-        0 => colm_srfdata::mesh::MeshWindow::global(grid)?,
-        4 => colm_srfdata::mesh::MeshWindow::covering_bbox(
-            grid,
-            bbox[0].unwrap(),
-            bbox[1].unwrap(),
-            bbox[2].unwrap(),
-            bbox[3].unwrap(),
-        )?,
-        _ => bail!("--west/--east/--south/--north must be supplied together"),
+    let shapefile = opts.get("--shp").map(PathBuf::from);
+    if shapefile.is_some() && supplied > 0 {
+        bail!("--shp and --west/--east/--south/--north are mutually exclusive");
+    }
+    let (mut mesh, domain_kind) = match (shapefile.as_ref(), supplied) {
+        (Some(path), 0) => {
+            let domain = colm_srfdata::shapefile::PolygonDomain::read(path)?;
+            (
+                colm_srfdata::mesh::EqualLatLonMesh::from_polygon(grid, &domain)?,
+                "watershed",
+            )
+        }
+        (None, 0) => {
+            let window = colm_srfdata::mesh::MeshWindow::global(grid)?;
+            (
+                colm_srfdata::mesh::EqualLatLonMesh::all_active(grid, window)?,
+                "global",
+            )
+        }
+        (None, 4) => {
+            let window = colm_srfdata::mesh::MeshWindow::covering_bbox(
+                grid,
+                bbox[0].unwrap(),
+                bbox[1].unwrap(),
+                bbox[2].unwrap(),
+                bbox[3].unwrap(),
+            )?;
+            (
+                colm_srfdata::mesh::EqualLatLonMesh::all_active(grid, window)?,
+                "region",
+            )
+        }
+        (None, _) => bail!("--west/--east/--south/--north must be supplied together"),
+        (Some(_), _) => unreachable!(),
     };
-    let mesh = colm_srfdata::mesh::EqualLatLonMesh::all_active(grid, window)?;
-    let summary = mesh.write_netcdf(&output)?;
+    let non_ocean_mask = opts.get("--non-ocean-mask").map(PathBuf::from);
+    let non_ocean_var = opts
+        .get("--non-ocean-var")
+        .unwrap_or_else(|| "non_ocean_mask".to_string());
+    if opts.get("--non-ocean-var").is_some() && non_ocean_mask.is_none() {
+        bail!("--non-ocean-var requires --non-ocean-mask");
+    }
+    if let Some(path) = non_ocean_mask.as_ref() {
+        mesh = mesh.with_non_ocean_mask(path, &non_ocean_var)?;
+    }
+    let window = mesh.window;
+    let (summary, schema, colm_mode) = match grid_kind.as_str() {
+        "latlon" => (
+            mesh.write_gridbased_netcdf(&output)?,
+            "equal-lat-lon-landmask-v1",
+            "GRIDBASED",
+        ),
+        "unstructured" => (
+            mesh.write_netcdf(&output)?,
+            "equal-lat-lon-elmindex-v1",
+            "UNSTRUCTURED",
+        ),
+        "catchment" => bail!(
+            "mesh-new cannot synthesize CATCHMENT data; provide DEF_CatchmentMesh_data with catchment and HRU fields"
+        ),
+        other => bail!("--grid-kind must be latlon or unstructured, got {other}"),
+    };
     let manifest = serde_json::json!({
-        "schema": "equal-lat-lon-elmindex-v1",
-        "elmindex_type": "int64",
+        "schema": schema,
+        "grid_kind": grid_kind,
+        "colm_mode": colm_mode,
+        "element_id_type": "int64",
+        "domain_kind": domain_kind,
+        "shapefile": shapefile.as_ref().map(|path| path.display().to_string()),
+        "non_ocean_mask": non_ocean_mask.as_ref().map(|path| path.display().to_string()),
+        "non_ocean_var": non_ocean_mask.as_ref().map(|_| non_ocean_var),
         "output": output,
         "global_nlon": grid.nlon,
         "global_nlat": grid.nlat,
