@@ -53,6 +53,7 @@ MODULE MOD_NetCDFSerial
       MODULE procedure ncio_read_serial_int8_2d
       MODULE procedure ncio_read_serial_int16_2d
       MODULE procedure ncio_read_serial_int32_2d
+      MODULE procedure ncio_read_serial_int64_2d
       MODULE procedure ncio_read_serial_real4_2d
       MODULE procedure ncio_read_serial_real8_2d
       MODULE procedure ncio_read_serial_int32_3d
@@ -628,6 +629,34 @@ CONTAINS
       deallocate (varsize)
 
    END SUBROUTINE ncio_read_serial_int32_2d
+
+   !---------------------------------------------------------
+   SUBROUTINE ncio_read_serial_int64_2d (filename, dataname, rdata)
+
+   USE netcdf
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: filename
+   character(len=*), intent(in) :: dataname
+   integer*8, allocatable, intent(out) :: rdata (:,:)
+
+   ! Local variables
+   integer :: ncid, varid
+   integer, allocatable :: varsize(:)
+
+      CALL check_ncfile_exist (filename)
+
+      CALL ncio_inquire_varsize(filename, dataname, varsize)
+      allocate (rdata (varsize(1), varsize(2)) )
+
+      CALL nccheck( nf90_open(trim(filename), NF90_NOWRITE, ncid) )
+      CALL nccheck( nf90_inq_varid(ncid, trim(dataname), varid), trim(dataname) )
+      CALL nccheck( nf90_get_var(ncid, varid, rdata) )
+      CALL nccheck( nf90_close(ncid) )
+
+      deallocate (varsize)
+
+   END SUBROUTINE ncio_read_serial_int64_2d
 
    !---------------------------------------------------------
    SUBROUTINE ncio_read_serial_real4_2d (filename, dataname, rdata)

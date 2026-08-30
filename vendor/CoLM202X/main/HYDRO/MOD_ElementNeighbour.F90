@@ -79,16 +79,23 @@ CONTAINS
    integer :: nnb, nnbinq, inb, ndata
 
    integer :: maxnnb
-   integer , allocatable :: nnball   (:)
-   integer , allocatable :: idxnball (:,:)
+   integer  , allocatable :: nnball   (:)
+   integer*8, allocatable :: idxnball (:,:)
    real(r8), allocatable :: lenbdall (:,:)
 
    integer , allocatable :: addrelement(:)
 
    integer*8, allocatable :: eindex  (:)
+   integer*8, allocatable :: i8cache1(:)
    integer,   allocatable :: icache1 (:)
-   integer,   allocatable :: icache2 (:,:)
+   integer*8, allocatable :: icache2 (:,:)
    real(r8),  allocatable :: rcache2 (:,:)
+
+#ifdef FLAT_SPMD
+   integer, allocatable :: counts(:), counts_nb(:), disps(:), disps_nb(:)
+   integer, allocatable :: counts_query(:), disps_query(:), addrinq_all(:)
+   integer*8, allocatable :: eindex_all(:), idxinq_all(:)
+#endif
 
    integer*8, allocatable :: elm_sorted (:)
    integer,   allocatable :: order      (:)
@@ -131,6 +138,61 @@ CONTAINS
 
       CALL mpi_bcast (maxnnb, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
+#ifdef FLAT_SPMD
+      allocate (counts(0:p_np_glb-1), counts_nb(0:p_np_glb-1))
+      allocate (disps(0:p_np_glb-1), disps_nb(0:p_np_glb-1))
+      CALL mpi_allgather (numelm, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+      counts_nb = counts * maxnnb
+      disps_nb = disps * maxnnb
+
+      allocate (eindex(max(1,numelm)))
+      IF (numelm > 0) eindex(1:numelm) = landelm%eindex
+      IF (p_is_master) THEN
+         allocate (eindex_all(max(1,sum(counts))))
+      ELSE
+         allocate (eindex_all(1))
+      ENDIF
+      CALL mpi_gatherv (eindex, numelm, MPI_INTEGER8, eindex_all, counts, disps, &
+         MPI_INTEGER8, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         allocate (addrelement(size(nnball)))
+         addrelement(:) = -1
+         allocate (icache1(max(1,sum(counts))))
+         allocate (icache2(maxnnb,max(1,sum(counts))))
+         allocate (rcache2(maxnnb,max(1,sum(counts))))
+         DO iwork = 0, p_np_glb-1
+            DO irecv = disps(iwork)+1, disps(iwork)+counts(iwork)
+               IF (eindex_all(irecv) < 1 .or. eindex_all(irecv) > size(nnball)) &
+                  CALL CoLM_stop ('element_neighbour_init: element index out of range')
+               addrelement(eindex_all(irecv)) = iwork
+               icache1(irecv) = nnball(eindex_all(irecv))
+               icache2(:,irecv) = idxnball(:,eindex_all(irecv))
+               rcache2(:,irecv) = lenbdall(:,eindex_all(irecv))
+            ENDDO
+         ENDDO
+      ELSE
+         allocate (icache1(1), icache2(maxnnb,1), rcache2(maxnnb,1))
+      ENDIF
+
+      IF (allocated(nnball  )) deallocate (nnball  )
+      IF (allocated(idxnball)) deallocate (idxnball)
+      IF (allocated(lenbdall)) deallocate (lenbdall)
+      allocate (nnball(max(1,numelm)))
+      allocate (idxnball(maxnnb,max(1,numelm)))
+      allocate (lenbdall(maxnnb,max(1,numelm)))
+
+      CALL mpi_scatterv (icache1, counts, disps, MPI_INTEGER, nnball, numelm, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+      CALL mpi_scatterv (icache2, counts_nb, disps_nb, MPI_INTEGER8, idxnball, &
+         maxnnb*numelm, MPI_INTEGER8, p_root, p_comm_glb, p_err)
+      CALL mpi_scatterv (rcache2, counts_nb, disps_nb, MPI_REAL8, lenbdall, &
+         maxnnb*numelm, MPI_REAL8, p_root, p_comm_glb, p_err)
+#else
       IF (p_is_master) THEN
 
          allocate (addrelement (size(nnball)))
@@ -164,7 +226,7 @@ CONTAINS
                DO irecv = 1, nrecv
                   icache2(:,irecv) = idxnball(:,eindex(irecv))
                ENDDO
-               CALL mpi_send (icache2, maxnnb*nrecv, MPI_INTEGER, &
+               CALL mpi_send (icache2, maxnnb*nrecv, MPI_INTEGER8, &
                   idest, mpi_tag_data, p_comm_glb, p_err)
 
                DO irecv = 1, nrecv
@@ -182,15 +244,26 @@ CONTAINS
          ENDDO
       ENDIF
 #endif
+#endif
 
       IF (p_is_worker) THEN
 
+#ifdef USEMPI
+#ifndef FLAT_SPMD
          IF (numelm > 0) THEN
             allocate (eindex (numelm))
             eindex = landelm%eindex
          ENDIF
+#endif
+#else
+         IF (numelm > 0) THEN
+            allocate (eindex (numelm))
+            eindex = landelm%eindex
+         ENDIF
+#endif
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
          mesg(1:2) = (/p_iam_glb, numelm/)
          CALL mpi_send (mesg(1:2), 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
 
@@ -203,13 +276,14 @@ CONTAINS
                p_address_master, mpi_tag_data, p_comm_glb, p_stat, p_err)
 
             allocate (idxnball (maxnnb,numelm))
-            CALL mpi_recv (idxnball, maxnnb*numelm, MPI_INTEGER, &
+            CALL mpi_recv (idxnball, maxnnb*numelm, MPI_INTEGER8, &
                p_address_master, mpi_tag_data, p_comm_glb, p_stat, p_err)
 
             allocate (lenbdall (maxnnb,numelm))
             CALL mpi_recv (lenbdall, maxnnb*numelm, MPI_REAL8, &
                p_address_master, mpi_tag_data, p_comm_glb, p_stat, p_err)
          ENDIF
+#endif
 #else
          allocate (icache1 (numelm))
          allocate (icache2 (maxnnb,numelm))
@@ -255,6 +329,7 @@ CONTAINS
 #endif
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       IF (p_is_master) THEN
          DO iwork = 0, p_np_worker-1
 
@@ -281,6 +356,7 @@ CONTAINS
          ENDDO
       ENDIF
 #endif
+#endif
 
       IF (p_is_worker) THEN
 
@@ -294,7 +370,11 @@ CONTAINS
             CALL quicksort (numelm, elm_sorted, order)
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+            allocate(idxinq (max(1,numelm*maxnnb)))
+#else
             allocate(idxinq (numelm*maxnnb))
+#endif
 #endif
 
             nnbinq = 0
@@ -319,6 +399,34 @@ CONTAINS
          ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+         IF (.not. allocated(idxinq)) allocate (idxinq(1))
+         allocate (counts_query(0:p_np_glb-1), disps_query(0:p_np_glb-1))
+         CALL mpi_allgather (nnbinq, 1, MPI_INTEGER, counts_query, 1, MPI_INTEGER, &
+            p_comm_glb, p_err)
+         disps_query(0) = 0
+         DO iwork = 1, p_np_glb-1
+            disps_query(iwork) = disps_query(iwork-1) + counts_query(iwork-1)
+         ENDDO
+         IF (p_is_master) THEN
+            allocate (idxinq_all(max(1,sum(counts_query))))
+            allocate (addrinq_all(max(1,sum(counts_query))))
+         ELSE
+            allocate (idxinq_all(1), addrinq_all(1))
+         ENDIF
+         CALL mpi_gatherv (idxinq, nnbinq, MPI_INTEGER8, idxinq_all, counts_query, &
+            disps_query, MPI_INTEGER8, p_root, p_comm_glb, p_err)
+         IF (p_is_master) THEN
+            DO inb = 1, sum(counts_query)
+               IF (idxinq_all(inb) < 1 .or. idxinq_all(inb) > size(addrelement)) &
+                  CALL CoLM_stop ('element_neighbour_init: neighbour index out of range')
+               addrinq_all(inb) = addrelement(idxinq_all(inb))
+            ENDDO
+         ENDIF
+         allocate (addrinq(max(1,nnbinq)))
+         CALL mpi_scatterv (addrinq_all, counts_query, disps_query, MPI_INTEGER, &
+            addrinq, nnbinq, MPI_INTEGER, p_root, p_comm_glb, p_err)
+#else
          mesg(1:2) = (/p_iam_glb, nnbinq/)
          CALL mpi_send (mesg(1:2), 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
 
@@ -332,6 +440,7 @@ CONTAINS
                p_address_master, mpi_tag_data, p_comm_glb, p_stat, p_err)
 
          ENDIF
+#endif
 
          IF (nnbinq > 0) allocate(mask (nnbinq))
 
@@ -405,14 +514,14 @@ CONTAINS
          DO iwork = 0, p_np_worker-1
             IF (sendaddr(iwork)%ndata > 0) THEN
                IF (sendaddr(iwork)%ndata < size(sendaddr(iwork)%glbindex)) THEN
-                  allocate (icache1 (sendaddr(iwork)%ndata))
-                  icache1 = sendaddr(iwork)%glbindex(1:sendaddr(iwork)%ndata)
+                  allocate (i8cache1 (sendaddr(iwork)%ndata))
+                  i8cache1 = sendaddr(iwork)%glbindex(1:sendaddr(iwork)%ndata)
 
                   deallocate (sendaddr(iwork)%glbindex)
                   allocate (sendaddr(iwork)%glbindex (sendaddr(iwork)%ndata))
-                  sendaddr(iwork)%glbindex = icache1
+                  sendaddr(iwork)%glbindex = i8cache1
 
-                  deallocate (icache1)
+                  deallocate (i8cache1)
                ENDIF
             ENDIF
          ENDDO
@@ -436,6 +545,7 @@ CONTAINS
       IF (allocated(idxnball   ))   deallocate(idxnball   )
       IF (allocated(lenbdall   ))   deallocate(lenbdall   )
       IF (allocated(eindex     ))   deallocate(eindex     )
+      IF (allocated(i8cache1   ))   deallocate(i8cache1   )
       IF (allocated(icache1    ))   deallocate(icache1    )
       IF (allocated(icache2    ))   deallocate(icache2    )
       IF (allocated(rcache2    ))   deallocate(rcache2    )
@@ -443,6 +553,17 @@ CONTAINS
       IF (allocated(idxinq     ))   deallocate(idxinq     )
       IF (allocated(addrinq    ))   deallocate(addrinq    )
       IF (allocated(mask       ))   deallocate(mask       )
+#ifdef FLAT_SPMD
+      IF (allocated(counts      )) deallocate(counts      )
+      IF (allocated(counts_nb   )) deallocate(counts_nb   )
+      IF (allocated(disps       )) deallocate(disps       )
+      IF (allocated(disps_nb    )) deallocate(disps_nb    )
+      IF (allocated(counts_query)) deallocate(counts_query)
+      IF (allocated(disps_query )) deallocate(disps_query )
+      IF (allocated(addrinq_all )) deallocate(addrinq_all )
+      IF (allocated(eindex_all  )) deallocate(eindex_all  )
+      IF (allocated(idxinq_all  )) deallocate(idxinq_all  )
+#endif
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
