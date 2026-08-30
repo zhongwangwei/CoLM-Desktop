@@ -638,8 +638,30 @@ CONTAINS
          ENDIF
       ENDIF
 
+#ifdef FLAT_SPMD
+      IF (pixelset%nset > 0) THEN
+         allocate(msk(pixelset%nset))
+         msk = .false.
+         ie = 1
+         DO iset = 1, pixelset%nset
+            DO WHILE (ie <= numelm)
+               IF (mesh(ie)%indx >= pixelset%eindex(iset)) EXIT
+               ie = ie + 1
+            ENDDO
+            IF (ie <= numelm) THEN
+               IF (mesh(ie)%indx == pixelset%eindex(iset)) msk(iset) = .true.
+            ENDIF
+         ENDDO
+         nset = count(msk)
+         allocate(sbuff(nset))
+         IF (nset > 0) sbuff = pack(pixelset%eindex, msk)
+         deallocate(pixelset%eindex, msk)
+         CALL move_alloc(sbuff, pixelset%eindex)
+         pixelset%nset = nset
+      ENDIF
+#endif
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_io) THEN
          IF (pixelset%nset > 0) THEN
             allocate (iworker (pixelset%nset))
