@@ -1440,9 +1440,9 @@ pub async fn study_parameter_contexts(
 
     let lct = crate::config::land_cover_contexts(dirs.clone(), kernel_dir.clone())?;
     if lct.len() == dirs.len()
-        && lct
-            .iter()
-            .all(|context| context.scheme == lct[0].scheme && context.class_index == lct[0].class_index)
+        && lct.iter().all(|context| {
+            context.scheme == lct[0].scheme && context.class_index == lct[0].class_index
+        })
     {
         let context = &lct[0];
         for descriptor in colm_case::parameters::land_cover_descriptors()
@@ -1507,11 +1507,8 @@ pub async fn study_parameter_contexts(
         let mut pft_types = common_pfts.keys().copied().collect::<Vec<_>>();
         pft_types.sort_unstable();
         for pft_type in pft_types {
-            let states = crate::config::pft_parameter_states(
-                dirs.clone(),
-                pft_type,
-                kernel_dir.clone(),
-            )?;
+            let states =
+                crate::config::pft_parameter_states(dirs.clone(), pft_type, kernel_dir.clone())?;
             for state in states
                 .into_iter()
                 .filter(|state| !state.default_mixed && !state.mixed)
@@ -1571,14 +1568,16 @@ fn study_row(
     scope_instance: crate::config::ParameterScopeInstance,
     default: f64,
 ) -> Result<StudyParameterContextRow, String> {
-    let tuning = colm_case::tuning::find(&descriptor.raw_key)
-        .map_err(|error| format!("{error:#}"))?;
+    let tuning =
+        colm_case::tuning::find(&descriptor.raw_key).map_err(|error| format!("{error:#}"))?;
     let pft = colm_case::pft::parameter(&descriptor.raw_key);
     let lc = colm_case::land_cover::parameter(&descriptor.raw_key);
-    let min = tuning.and_then(|meta| meta.min.map(|bound| bound.value))
+    let min = tuning
+        .and_then(|meta| meta.min.map(|bound| bound.value))
         .or_else(|| pft.and_then(|meta| meta.min))
         .or_else(|| lc.and_then(|meta| meta.min));
-    let max = tuning.and_then(|meta| meta.max.map(|bound| bound.value))
+    let max = tuning
+        .and_then(|meta| meta.max.map(|bound| bound.value))
         .or_else(|| pft.and_then(|meta| meta.max))
         .or_else(|| lc.and_then(|meta| meta.max));
     let min_inclusive = min.map(|bound| {

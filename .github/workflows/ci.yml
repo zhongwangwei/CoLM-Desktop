@@ -69,7 +69,9 @@ jobs:
         # GitHub 的 bash 带 `set -eo pipefail`。
         shell: bash
         run: |
-          cargo test --workspace --lib --bins
+          cargo test --workspace --lib --bins --exclude colm-cli
+          # colm-cli tests share NetCDF/HDF5 process state; keep only this binary serial.
+          cargo test -p colm-cli --bin colm-cli -- --test-threads=1
           cargo test -p oracle --test judge
           cargo test -p colm-namelist --test roundtrip
           cargo test -p colm-schema --test drift
