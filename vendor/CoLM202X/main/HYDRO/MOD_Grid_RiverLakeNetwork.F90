@@ -14,6 +14,10 @@ MODULE MOD_Grid_RiverLakeNetwork
 #endif
    IMPLICIT NONE
 
+#ifdef FLAT_SPMD
+   PRIVATE :: scatter_ucat_integer_fields, scatter_ucat_real_fields
+#endif
+
    ! ----- River Lake network -----
 
    type(grid_type) :: griducat
@@ -133,6 +137,126 @@ MODULE MOD_Grid_RiverLakeNetwork
 
 CONTAINS
 
+#ifdef FLAT_SPMD
+   SUBROUTINE scatter_ucat_integer_fields (global_data, nfield, local_data)
+
+   USE MOD_SPMD_Task
+   IMPLICIT NONE
+
+   integer, allocatable, intent(inout) :: global_data(:)
+   integer, intent(in) :: nfield
+   integer, allocatable, intent(out) :: local_data(:)
+
+   integer :: iwork, iset, ndata, offset, source
+   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
+   integer, allocatable :: sendbuf(:), recvbuf(:)
+
+      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
+      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      CALL mpi_allgather (numucat, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+      counts_data = counts * nfield
+      disps_data = disps * nfield
+
+      IF (p_is_master) THEN
+         IF (.not. allocated(global_data)) &
+            CALL CoLM_stop ('scatter_ucat_integer_fields: missing global data')
+         IF (size(global_data) /= nfield*totalnumucat .or. sum(counts) /= totalnumucat) &
+            CALL CoLM_stop ('scatter_ucat_integer_fields: vector length mismatch')
+         allocate (sendbuf(max(1,nfield*totalnumucat)))
+         DO iwork = 0, p_np_glb-1
+            ndata = counts(iwork)
+            IF (ndata > 0) THEN
+               IF (.not. allocated(ucat_data_address(iwork)%val)) &
+                  CALL CoLM_stop ('scatter_ucat_integer_fields: missing data address')
+               IF (size(ucat_data_address(iwork)%val) /= ndata) &
+                  CALL CoLM_stop ('scatter_ucat_integer_fields: data address size mismatch')
+               DO iset = 1, ndata
+                  source = (ucat_data_address(iwork)%val(iset)-1)*nfield
+                  offset = disps_data(iwork) + (iset-1)*nfield
+                  sendbuf(offset+1:offset+nfield) = global_data(source+1:source+nfield)
+               ENDDO
+            ENDIF
+         ENDDO
+      ELSE
+         allocate (sendbuf(1))
+      ENDIF
+
+      allocate (recvbuf(max(1,nfield*numucat)))
+      CALL mpi_scatterv (sendbuf, counts_data, disps_data, MPI_INTEGER, recvbuf, &
+         nfield*numucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      allocate (local_data(nfield*numucat))
+      IF (numucat > 0) local_data = recvbuf(1:nfield*numucat)
+
+      IF (allocated(global_data)) deallocate (global_data)
+      deallocate (counts, counts_data, disps, disps_data, sendbuf, recvbuf)
+
+   END SUBROUTINE scatter_ucat_integer_fields
+
+
+   SUBROUTINE scatter_ucat_real_fields (global_data, nfield, local_data)
+
+   USE MOD_Precision
+   USE MOD_SPMD_Task
+   IMPLICIT NONE
+
+   real(r8), allocatable, intent(inout) :: global_data(:)
+   integer, intent(in) :: nfield
+   real(r8), allocatable, intent(out) :: local_data(:)
+
+   integer :: iwork, iset, ndata, offset, source
+   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
+   real(r8), allocatable :: sendbuf(:), recvbuf(:)
+
+      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
+      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      CALL mpi_allgather (numucat, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+      counts_data = counts * nfield
+      disps_data = disps * nfield
+
+      IF (p_is_master) THEN
+         IF (.not. allocated(global_data)) &
+            CALL CoLM_stop ('scatter_ucat_real_fields: missing global data')
+         IF (size(global_data) /= nfield*totalnumucat .or. sum(counts) /= totalnumucat) &
+            CALL CoLM_stop ('scatter_ucat_real_fields: vector length mismatch')
+         allocate (sendbuf(max(1,nfield*totalnumucat)))
+         DO iwork = 0, p_np_glb-1
+            ndata = counts(iwork)
+            IF (ndata > 0) THEN
+               IF (.not. allocated(ucat_data_address(iwork)%val)) &
+                  CALL CoLM_stop ('scatter_ucat_real_fields: missing data address')
+               IF (size(ucat_data_address(iwork)%val) /= ndata) &
+                  CALL CoLM_stop ('scatter_ucat_real_fields: data address size mismatch')
+               DO iset = 1, ndata
+                  source = (ucat_data_address(iwork)%val(iset)-1)*nfield
+                  offset = disps_data(iwork) + (iset-1)*nfield
+                  sendbuf(offset+1:offset+nfield) = global_data(source+1:source+nfield)
+               ENDDO
+            ENDIF
+         ENDDO
+      ELSE
+         allocate (sendbuf(1))
+      ENDIF
+
+      allocate (recvbuf(max(1,nfield*numucat)))
+      CALL mpi_scatterv (sendbuf, counts_data, disps_data, MPI_REAL8, recvbuf, &
+         nfield*numucat, MPI_REAL8, p_root, p_comm_glb, p_err)
+      allocate (local_data(nfield*numucat))
+      IF (numucat > 0) local_data = recvbuf(1:nfield*numucat)
+
+      IF (allocated(global_data)) deallocate (global_data)
+      deallocate (counts, counts_data, disps, disps_data, sendbuf, recvbuf)
+
+   END SUBROUTINE scatter_ucat_real_fields
+#endif
+
    ! ----------
    SUBROUTINE build_riverlake_network ()
 
@@ -143,6 +267,7 @@ CONTAINS
    USE MOD_Utils
    USE MOD_LandPatch
    USE MOD_Vars_Global, only: spval
+   USE MOD_Vector_ReadWrite, only: vector_gather_to_master
    IMPLICIT NONE
 
    ! Local Variables
@@ -163,8 +288,11 @@ CONTAINS
    integer,  allocatable :: grdindex(:)
 
 
-   integer,  allocatable :: idata1d(:), idata2d(:,:)
-   real(r8), allocatable :: rdata1d(:), rdata2d(:,:)
+   integer,  allocatable :: idata1d(:), idata2d(:,:), idata_recv(:)
+   real(r8), allocatable :: rdata1d(:), rdata2d(:,:), rdata_recv(:)
+
+   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
+   integer, allocatable :: ucat_next_all(:)
 
    integer,  allocatable :: allgrd_in_inp (:), nucat_g2d(:,:), iucat_g(:)
 
@@ -401,12 +529,33 @@ CONTAINS
             ENDIF
          ENDDO
 
+#ifndef FLAT_SPMD
          deallocate (ucat_ucid)
+#endif
       ENDIF
 
       CALL mpi_bcast (totalnumucat, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
       ! send unit catchment index to workers
+#ifdef FLAT_SPMD
+      IF (.not. allocated(numucat_wrk)) allocate (numucat_wrk(0:p_np_glb-1))
+      CALL mpi_scatter (numucat_wrk, 1, MPI_INTEGER, numucat, 1, MPI_INTEGER, &
+         p_root, p_comm_glb, p_err)
+
+      IF (.not. allocated(ucat_data_address)) allocate (ucat_data_address(0:p_np_glb-1))
+
+      IF (p_is_master) CALL move_alloc (ucat_ucid, idata1d)
+      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
+      CALL move_alloc (idata_recv, ucat_ucid)
+
+      IF (p_is_master) CALL move_alloc (x_ucat, idata1d)
+      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
+      CALL move_alloc (idata_recv, x_ucat)
+
+      IF (p_is_master) CALL move_alloc (y_ucat, idata1d)
+      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
+      CALL move_alloc (idata_recv, y_ucat)
+#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -462,6 +611,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #else
       numucat = totalnumucat
 
@@ -558,6 +708,84 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_bcast (inpn, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
+#ifdef FLAT_SPMD
+      IF (p_is_master) THEN
+         allocate (idata1d(inpn*totalnumucat))
+         idata1d = reshape(idmap_gd2uc, (/inpn*totalnumucat/))
+         deallocate (idmap_gd2uc)
+      ENDIF
+      CALL scatter_ucat_integer_fields (idata1d, inpn, idata_recv)
+      IF (numucat > 0) THEN
+         allocate (idmap_gd2uc(inpn,numucat))
+         idmap_gd2uc = reshape(idata_recv, shape(idmap_gd2uc))
+      ENDIF
+      deallocate (idata_recv)
+
+      IF (p_is_master) THEN
+         allocate (rdata1d(inpn*totalnumucat))
+         rdata1d = reshape(area_gd2uc, (/inpn*totalnumucat/))
+         deallocate (area_gd2uc)
+      ENDIF
+      CALL scatter_ucat_real_fields (rdata1d, inpn, rdata_recv)
+      IF (numucat > 0) THEN
+         allocate (area_gd2uc(inpn,numucat))
+         area_gd2uc = reshape(rdata_recv, shape(area_gd2uc))
+      ENDIF
+      deallocate (rdata_recv)
+
+      CALL mpi_bcast (nucpart, 1, mpi_integer, p_address_master, p_comm_glb, p_err)
+
+      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
+      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      CALL mpi_allgather (numinpm, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iworker = 1, p_np_glb-1
+         disps(iworker) = disps(iworker-1) + counts(iworker-1)
+      ENDDO
+
+      allocate (idata1d(max(1,numinpm)))
+      IF (numinpm > 0) idata1d(1:numinpm) = inpm_gdid
+      IF (p_is_master) THEN
+         allocate (grdindex(max(1,sum(counts))))
+      ELSE
+         allocate (grdindex(1))
+      ENDIF
+      CALL mpi_gatherv (idata1d, numinpm, MPI_INTEGER, grdindex, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+      deallocate (idata1d)
+
+      counts_data = counts * nucpart
+      disps_data = disps * nucpart
+      IF (p_is_master) THEN
+         allocate (idata_recv(max(1,nucpart*sum(counts))))
+         allocate (rdata_recv(max(1,nucpart*sum(counts))))
+         idata_recv = 0
+         rdata_recv = 0._r8
+         DO i = 1, sum(counts)
+            iloc = find_in_sorted_list1 (grdindex(i), ngrdall, allgrd_in_inp(1:ngrdall))
+            IF (iloc > 0) THEN
+               idata_recv((i-1)*nucpart+1:i*nucpart) = idmap_uc2gd_all(:,iloc)
+               rdata_recv((i-1)*nucpart+1:i*nucpart) = area_uc2gd_all(:,iloc)
+            ENDIF
+         ENDDO
+      ELSE
+         allocate (idata_recv(1), rdata_recv(1))
+      ENDIF
+
+      allocate (idata1d(max(1,nucpart*numinpm)), rdata1d(max(1,nucpart*numinpm)))
+      CALL mpi_scatterv (idata_recv, counts_data, disps_data, MPI_INTEGER, idata1d, &
+         nucpart*numinpm, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      CALL mpi_scatterv (rdata_recv, counts_data, disps_data, MPI_REAL8, rdata1d, &
+         nucpart*numinpm, MPI_REAL8, p_root, p_comm_glb, p_err)
+      IF (numinpm > 0) THEN
+         allocate (idmap_uc2gd(nucpart,numinpm), area_uc2gd(nucpart,numinpm))
+         idmap_uc2gd = reshape(idata1d(1:nucpart*numinpm), shape(idmap_uc2gd))
+         area_uc2gd = reshape(rdata1d(1:nucpart*numinpm), shape(area_uc2gd))
+      ENDIF
+
+      deallocate (counts, counts_data, disps, disps_data)
+      deallocate (grdindex, idata1d, rdata1d, idata_recv, rdata_recv)
+#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -664,6 +892,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #else
       allocate (idmap_uc2gd (nucpart,numinpm))
       allocate (area_uc2gd  (nucpart,numinpm))
@@ -724,6 +953,25 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_bcast (upnmax, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
+#ifdef FLAT_SPMD
+      IF (p_is_master) THEN
+         allocate (ucat_next_all(totalnumucat))
+         ucat_next_all = ucat_next
+         CALL move_alloc (ucat_next, idata1d)
+      ENDIF
+      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
+      CALL move_alloc (idata_recv, ucat_next)
+
+      IF (p_is_master) THEN
+         allocate (idata1d(upnmax*totalnumucat))
+         idata1d = reshape(ucat_ups, (/upnmax*totalnumucat/))
+         deallocate (ucat_ups)
+      ENDIF
+      CALL scatter_ucat_integer_fields (idata1d, upnmax, idata_recv)
+      allocate (ucat_ups(upnmax,numucat))
+      IF (numucat > 0) ucat_ups = reshape(idata_recv, shape(ucat_ups))
+      deallocate (idata_recv)
+#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -775,6 +1023,7 @@ CONTAINS
          IF (.not. allocated(wts_ups  )) allocate (wts_ups   (upnmax, 0))
       ENDIF
 #endif
+#endif
 
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
@@ -794,6 +1043,11 @@ CONTAINS
       ! ----- Part 3: river systems -----
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      IF (p_is_master) CALL move_alloc (rivermouth, idata1d)
+      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
+      CALL move_alloc (idata_recv, rivermouth)
+#else
       IF (p_is_master) THEN
          DO iworker = 0, p_np_worker-1
             nucat = numucat_wrk(iworker)
@@ -812,6 +1066,7 @@ CONTAINS
                mpi_tag_data, p_comm_glb, p_stat, p_err)
          ENDIF
       ENDIF
+#endif
 
       rivsys_by_multiple_procs = .false.
       IF (p_is_worker) THEN
@@ -966,6 +1221,10 @@ CONTAINS
 
       ! ----- Mask of Grids with all upstream area in the simulation region -----
 
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      CALL vector_gather_to_master (push_inpm2ucat%sum_area, numucat, totalnumucat, &
+         ucat_data_address, ucat_area_all)
+#else
       IF (p_is_master) allocate (ucat_area_all (totalnumucat))
 
 #ifdef USEMPI
@@ -995,6 +1254,7 @@ CONTAINS
 #else
       ucat_area_all = push_inpm2ucat%sum_area
 #endif
+#endif
 
       IF (p_is_master) THEN
 
@@ -1009,16 +1269,26 @@ CONTAINS
 
                   allups_mask_ucat(j) = 1
 
+#ifdef FLAT_SPMD
+                  IF (ucat_next_all(j) > 0) THEN
+                     iups_nst(ucat_next_all(j)) = iups_nst(ucat_next_all(j)) + 1
+                  ENDIF
+#else
                   IF (ucat_next(j) > 0) THEN
                      iups_nst(ucat_next(j)) = iups_nst(ucat_next(j)) + 1
                   ENDIF
+#endif
                ENDIF
             ENDIF
          ENDDO
 
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      IF (p_is_master) CALL move_alloc (allups_mask_ucat, rdata1d)
+      CALL scatter_ucat_real_fields (rdata1d, 1, rdata_recv)
+      CALL move_alloc (rdata_recv, allups_mask_ucat)
+#elif defined(USEMPI)
       IF (p_is_master) THEN
          DO iworker = 0, p_np_worker-1
             IF (numucat_wrk(iworker) > 0) THEN
@@ -1045,6 +1315,7 @@ CONTAINS
       IF (allocated (nups_nst     )) deallocate (nups_nst     )
       IF (allocated (iups_nst     )) deallocate (iups_nst     )
       IF (allocated (ucat_area_all)) deallocate (ucat_area_all)
+      IF (allocated (ucat_next_all)) deallocate (ucat_next_all)
 
    END SUBROUTINE build_riverlake_network
 
