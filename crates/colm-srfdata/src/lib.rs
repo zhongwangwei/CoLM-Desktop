@@ -13,6 +13,7 @@
 pub mod albedo;
 pub mod derive;
 pub mod grid;
+pub mod mesh;
 pub mod raster;
 pub mod site;
 pub mod texture;

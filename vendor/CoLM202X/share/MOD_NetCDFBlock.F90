@@ -27,6 +27,7 @@ MODULE MOD_NetCDFBlock
    ! PUBLIC subroutines
    INTERFACE ncio_read_block
       MODULE procedure ncio_read_block_int32_2d
+      MODULE procedure ncio_read_block_int64_2d
       MODULE procedure ncio_read_block_real8_2d
       MODULE procedure ncio_read_block_real8_3d
    END INTERFACE ncio_read_block
@@ -100,6 +101,65 @@ CONTAINS
       ENDIF
 
    END SUBROUTINE ncio_read_block_int32_2d
+
+   ! ----
+   SUBROUTINE ncio_read_block_int64_2d (filename, dataname, grid, rdata)
+
+   USE netcdf
+   USE MOD_Block
+   USE MOD_Grid
+   USE MOD_DataType
+   USE MOD_SPMD_Task
+   IMPLICIT NONE
+
+   character (len=*), intent(in) :: filename
+   character (len=*), intent(in) :: dataname
+   type (grid_type),  intent(in) :: grid
+
+   type (block_data_int64_2d), intent(inout) :: rdata
+
+   integer :: iblk, jblk, ndims(2), start2(2), count2(2), start_mem
+   integer :: ncid, varid
+   integer :: iblkme
+
+      IF (p_is_io) THEN
+
+         CALL check_ncfile_exist (filename)
+         CALL nccheck (nf90_open(trim(filename), NF90_NOWRITE, ncid) ,trace=trim(filename)//' cannot open')
+         CALL nccheck (nf90_inq_varid(ncid, trim(dataname), varid) ,trace=trim(dataname)//' in file '//trim(filename))
+
+         DO iblkme = 1, gblock%nblkme
+            iblk = gblock%xblkme(iblkme)
+            jblk = gblock%yblkme(iblkme)
+
+            ndims = (/grid%xcnt(iblk), grid%ycnt(jblk)/)
+            IF (any(ndims == 0)) CYCLE
+
+            start2 = (/grid%xdsp(iblk)+1, grid%ydsp(jblk)+1/)
+            count2(1) = min(grid%xcnt(iblk), grid%nlon-grid%xdsp(iblk))
+            count2(2) = grid%ycnt(jblk)
+
+            IF (count2(1) == grid%xcnt(iblk)) THEN
+               CALL nccheck (nf90_get_var(ncid, varid, rdata%blk(iblk,jblk)%val, &
+                  start2, count2) )
+            ELSE
+               CALL nccheck (nf90_get_var(ncid, varid, &
+                  rdata%blk(iblk,jblk)%val(1:count2(1),:), start2, count2) )
+
+               start2(1) = 1
+               start_mem = count2(1) + 1
+               count2(1) = grid%xdsp(iblk) + grid%xcnt(iblk) - grid%nlon
+               CALL nccheck (nf90_get_var(ncid, varid, &
+                  rdata%blk(iblk,jblk)%val(start_mem:ndims(1),:), start2, count2) )
+            ENDIF
+
+         ENDDO
+
+         CALL nccheck( nf90_close(ncid) )
+
+      ENDIF
+
+   END SUBROUTINE ncio_read_block_int64_2d
 
    ! ----
    SUBROUTINE ncio_read_block_real8_2d (filename, dataname, grid, rdata)

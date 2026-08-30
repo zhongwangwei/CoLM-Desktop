@@ -75,6 +75,19 @@ MODULE MOD_DataType
    END type block_data_int32_2d
 
    !-------
+   type :: pointer_int64_2d
+      integer*8, allocatable :: val (:,:)
+   CONTAINS
+      final :: pointer_int64_2d_free_mem
+   END type pointer_int64_2d
+
+   type :: block_data_int64_2d
+      type(pointer_int64_2d), allocatable :: blk (:,:)
+   CONTAINS
+      final :: block_data_int64_2d_free_mem
+   END type block_data_int64_2d
+
+   !-------
    type :: pointer_real8_2d
       real(r8), allocatable :: val (:,:)
    CONTAINS
@@ -119,6 +132,7 @@ MODULE MOD_DataType
    !------
    INTERFACE allocate_block_data
       MODULE procedure allocate_block_data_int32_2d
+      MODULE procedure allocate_block_data_int64_2d
       MODULE procedure allocate_block_data_real8_2d
       MODULE procedure allocate_block_data_real8_3d
       MODULE procedure allocate_block_data_real8_4d
@@ -127,6 +141,7 @@ MODULE MOD_DataType
    !------
    INTERFACE flush_block_data
       MODULE procedure flush_block_data_int32_2d
+      MODULE procedure flush_block_data_int64_2d
       MODULE procedure flush_block_data_real8_2d
       MODULE procedure flush_block_data_real8_3d
       MODULE procedure flush_block_data_real8_4d
@@ -266,6 +281,66 @@ CONTAINS
       ENDIF
 
    END SUBROUTINE block_data_int32_2d_free_mem
+
+   !------------------
+   SUBROUTINE pointer_int64_2d_free_mem (this)
+
+   IMPLICIT NONE
+
+   type(pointer_int64_2d) :: this
+
+      IF (allocated(this%val)) THEN
+         deallocate(this%val)
+      ENDIF
+
+   END SUBROUTINE pointer_int64_2d_free_mem
+
+   !------------------
+   SUBROUTINE allocate_block_data_int64_2d (grid, gdata)
+
+   USE MOD_Grid
+   USE MOD_Block
+   USE MOD_SPMD_Task
+   IMPLICIT NONE
+
+   type(grid_type), intent(in) :: grid
+   type(block_data_int64_2d), intent(out) :: gdata
+
+   integer :: iblkme, iblk, jblk
+
+      allocate (gdata%blk (gblock%nxblk,gblock%nyblk))
+
+      DO iblkme = 1, gblock%nblkme
+         iblk = gblock%xblkme(iblkme)
+         jblk = gblock%yblkme(iblkme)
+         allocate (gdata%blk(iblk,jblk)%val (grid%xcnt(iblk), grid%ycnt(jblk)))
+      ENDDO
+
+   END SUBROUTINE allocate_block_data_int64_2d
+
+   !------------------
+   SUBROUTINE block_data_int64_2d_free_mem (this)
+
+   USE MOD_Block
+   IMPLICIT NONE
+
+   type(block_data_int64_2d) :: this
+
+   integer :: iblk, jblk
+
+      IF (allocated (this%blk)) THEN
+         DO jblk = 1, gblock%nyblk
+            DO iblk = 1, gblock%nxblk
+               IF (allocated (this%blk(iblk,jblk)%val)) THEN
+                  deallocate (this%blk(iblk,jblk)%val)
+               ENDIF
+            ENDDO
+         ENDDO
+
+         deallocate (this%blk)
+      ENDIF
+
+   END SUBROUTINE block_data_int64_2d_free_mem
 
    !------------------
    SUBROUTINE pointer_real8_2d_free_mem (this)
@@ -525,6 +600,26 @@ CONTAINS
       ENDDO
 
    END SUBROUTINE flush_block_data_int32_2d
+
+   !------------------
+   SUBROUTINE flush_block_data_int64_2d (gdata, spval)
+
+   USE MOD_Block
+   USE MOD_SPMD_Task
+   IMPLICIT NONE
+
+   type(block_data_int64_2d), intent(inout) :: gdata
+   integer*8, intent(in) :: spval
+
+   integer :: iblkme, iblk, jblk
+
+      DO iblkme = 1, gblock%nblkme
+         iblk = gblock%xblkme(iblkme)
+         jblk = gblock%yblkme(iblkme)
+         gdata%blk(iblk,jblk)%val = spval
+      ENDDO
+
+   END SUBROUTINE flush_block_data_int64_2d
 
    !------------------
    SUBROUTINE flush_block_data_real8_3d (gdata, spval)

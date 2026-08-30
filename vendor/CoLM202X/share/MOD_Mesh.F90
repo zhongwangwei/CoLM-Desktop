@@ -124,7 +124,11 @@ CONTAINS
    IMPLICIT NONE
 
    ! Local Variables
+#ifdef UNSTRUCTURED
+   type(block_data_int64_2d) :: datamesh
+#else
    type(block_data_int32_2d) :: datamesh
+#endif
 
    integer  :: nelm, ie, je, dsp
    integer  :: iblkme, iblk, jblk, xloc, yloc, xg, yg, ixloc, iyloc
@@ -143,7 +147,8 @@ CONTAINS
    integer*8 :: elmid
    integer*8, allocatable :: elist(:), elist2(:,:), sbuf64(:), elist_recv(:)
 
-   integer, allocatable :: iaddr(:), elmindx  (:), order(:)
+   integer, allocatable :: iaddr(:), order(:)
+   integer*8, allocatable :: elmindx(:)
    integer, allocatable :: xlist(:), ylist    (:), npxl_(:), xlist_recv(:), ylist_recv(:), sbuf(:)
    logical, allocatable :: msk  (:), work_done(:)
 

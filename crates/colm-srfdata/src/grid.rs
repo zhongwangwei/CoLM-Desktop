@@ -65,13 +65,27 @@ impl Grid {
     }
 
     /// 第 i 格的西边界（1-based），与 `grid_define_by_ndims` 算法一致。
-    fn lon_w(&self, i: usize) -> f64 {
+    pub fn lon_w(&self, i: usize) -> f64 {
         -180.0 + self.dlon() * ((i - 1) as f64)
     }
 
+    /// 第 i 格的东边界；全球最后一格按 CoLM 规范化回 -180°。
+    pub fn lon_e(&self, i: usize) -> f64 {
+        if i == self.nlon {
+            -180.0
+        } else {
+            -180.0 + self.dlon() * (i as f64)
+        }
+    }
+
     /// 第 j 格的南边界（1-based），同上。纬度是降序的。
-    fn lat_s(&self, j: usize) -> f64 {
+    pub fn lat_s(&self, j: usize) -> f64 {
         90.0 - self.dlat() * (j as f64)
+    }
+
+    /// 第 j 格的北边界（1-based）。
+    pub fn lat_n(&self, j: usize) -> f64 {
+        90.0 - self.dlat() * ((j - 1) as f64)
     }
 
     fn ilon(&self, lon: f64) -> usize {

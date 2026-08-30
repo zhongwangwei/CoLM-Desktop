@@ -142,6 +142,9 @@ usage:
                            # 探测一份强迫场文件：八个槽位各猜到了什么变量，
                            # 猜不到就是 null；三个观测高度缺失时也是 null，
                            # 不是 NaN —— GUI 前处理页据此决定问不问用户
+  colm-cli mesh-new --out <mesh.nc> --nlon N --nlat N
+                    [--west W --east E --south S --north N]
+                    # 生成 int64 elmindex 等经纬度底板；不提供 bbox 时生成全球网格
   colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
                            # 与独立 bin forcing-convert 同样的行为，供 GUI 走
                            # sidecar 调用；没给 --slot 的槽位走自动匹配
@@ -424,6 +427,7 @@ fn main() -> Result<()> {
                 opts.get("--json").is_some(),
             )?;
         }
+        "mesh-new" => cmd_mesh_new(&opts)?,
         "forcing-convert" => {
             cmd_forcing_convert(
                 &opts.positional_at(0, "a source forcing file")?,
@@ -3542,6 +3546,64 @@ fn cmd_netcdf_probe(file: &Path, json: bool) -> Result<()> {
             println!("{} ({dimensions})", shape.name);
         }
     }
+    Ok(())
+}
+
+fn cmd_mesh_new(opts: &Opts) -> Result<()> {
+    let output = opts.need("--out")?;
+    let nlon = opts
+        .need_str("--nlon")?
+        .parse::<usize>()
+        .context("--nlon must be a positive integer")?;
+    let nlat = opts
+        .need_str("--nlat")?
+        .parse::<usize>()
+        .context("--nlat must be a positive integer")?;
+    let grid = colm_srfdata::Grid { nlon, nlat };
+
+    let bbox = ["--west", "--east", "--south", "--north"]
+        .map(|name| -> Result<Option<f64>> {
+            opts.get(name)
+                .map(|value| {
+                    value
+                        .parse::<f64>()
+                        .with_context(|| format!("{name} must be a finite number"))
+                })
+                .transpose()
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let supplied = bbox.iter().filter(|value| value.is_some()).count();
+    let window = match supplied {
+        0 => colm_srfdata::mesh::MeshWindow::global(grid)?,
+        4 => colm_srfdata::mesh::MeshWindow::covering_bbox(
+            grid,
+            bbox[0].unwrap(),
+            bbox[1].unwrap(),
+            bbox[2].unwrap(),
+            bbox[3].unwrap(),
+        )?,
+        _ => bail!("--west/--east/--south/--north must be supplied together"),
+    };
+    let mesh = colm_srfdata::mesh::EqualLatLonMesh::all_active(grid, window)?;
+    let summary = mesh.write_netcdf(&output)?;
+    let manifest = serde_json::json!({
+        "schema": "equal-lat-lon-elmindex-v1",
+        "elmindex_type": "int64",
+        "output": output,
+        "global_nlon": grid.nlon,
+        "global_nlat": grid.nlat,
+        "window_i0": window.i0,
+        "window_j0": window.j0,
+        "window_nlon": window.nlon,
+        "window_nlat": window.nlat,
+        "active_cells": summary.active_cells,
+        "max_elmid": summary.max_elmid,
+    });
+    let manifest_path = PathBuf::from(format!("{}.manifest.json", output.display()));
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)
+        .with_context(|| format!("cannot write {}", manifest_path.display()))?;
+    println!("{}", serde_json::to_string(&manifest)?);
     Ok(())
 }
 
