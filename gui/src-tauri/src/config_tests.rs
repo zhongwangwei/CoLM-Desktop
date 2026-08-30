@@ -2589,19 +2589,14 @@ fn explicit_override_export_import_round_trip_omits_inherited_defaults() {
     );
     let bundle = export_parameter_overrides(dirs.clone(), None).unwrap();
     let records = &bundle.cases[0].records;
-    assert!(records.iter().any(|record| {
-        record.parameter_id == "case:DEF_TUNING_ZLND" && record.value == "0.02"
-    }));
+    assert!(records
+        .iter()
+        .any(|record| { record.parameter_id == "case:DEF_TUNING_ZLND" && record.value == "0.02" }));
     assert!(!records
         .iter()
         .any(|record| record.raw_key == "DEF_TUNING_CAPR"));
 
-    reset_field_batch(
-        dirs.clone(),
-        "DEF_TUNING_ZLND".into(),
-        None,
-    )
-    .unwrap();
+    reset_field_batch(dirs.clone(), "DEF_TUNING_ZLND".into(), None).unwrap();
     let json = serde_json::to_string(&bundle).unwrap();
     let preview = preview_import_parameter_overrides(dirs.clone(), json.clone(), None).unwrap();
     assert!(preview.can_apply, "{:#?}", preview.items);
@@ -2617,13 +2612,8 @@ fn explicit_override_export_import_round_trip_omits_inherited_defaults() {
         std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap(),
         before
     );
-    let applied = apply_import_parameter_overrides(
-        dirs.clone(),
-        json,
-        preview.version_token,
-        None,
-    )
-    .unwrap();
+    let applied =
+        apply_import_parameter_overrides(dirs.clone(), json, preview.version_token, None).unwrap();
     assert_eq!(applied.changed, 1);
     let text = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
     let doc = colm_namelist::parse(&text).unwrap();
@@ -2649,9 +2639,9 @@ fn process_export_omits_present_values_equal_to_fortran_code_defaults() {
     assert!(!records
         .iter()
         .any(|record| record.raw_key == "DEF_METHANE%q10methane"));
-    assert!(records.iter().any(|record| {
-        record.raw_key == "DEF_METHANE%f_methane" && record.value == "0.25"
-    }));
+    assert!(records
+        .iter()
+        .any(|record| { record.raw_key == "DEF_METHANE%f_methane" && record.value == "0.25" }));
 }
 
 #[test]
@@ -2665,8 +2655,8 @@ fn parameter_import_refuses_igbp_to_usgs_numeric_index_copy() {
         "parameter-import-usgs",
         &["&nl_colm\n DEF_CASE_NAME='case0'\n DEF_USE_LCT=.true.\n DEF_USE_USGS=.true.\n SITE_landtype=5\n/\n"],
     );
-    let before = std::fs::read_to_string(std::path::Path::new(&target[0]).join("case.nml"))
-        .unwrap();
+    let before =
+        std::fs::read_to_string(std::path::Path::new(&target[0]).join("case.nml")).unwrap();
     let preview = preview_import_parameter_overrides(
         target.clone(),
         serde_json::to_string(&bundle).unwrap(),

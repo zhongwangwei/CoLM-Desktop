@@ -193,19 +193,14 @@ pub fn export_parameter_overrides(
             context.usgs
         };
         let land_scheme = if usgs { "USGS" } else { "IGBP" }.to_string();
-        let scheme = context.lct.then(|| {
-            land_scheme.clone()
-        });
+        let scheme = context.lct.then(|| land_scheme.clone());
         let mut records = Vec::new();
         for path in doc.paths() {
             let Some(value) = doc.get(&path).map(ToString::to_string) else {
                 continue;
             };
             if let Some((raw_key, pft_type)) = colm_case::pft::override_instance(&path) {
-                let id = format!(
-                    "{}:{raw_key}",
-                    if context.pc { "pc-pft" } else { "pft" }
-                );
+                let id = format!("{}:{raw_key}", if context.pc { "pc-pft" } else { "pft" });
                 let Some(descriptor) = colm_case::parameters::find(&id) else {
                     continue;
                 };
@@ -435,8 +430,7 @@ fn prepare_parameter_import(
         let mut doc = colm_namelist::parse(&text)
             .map_err(|error| format!("{}: {error:#}", case_file.display()))?;
         let (context_lct, context_pft, context_pc, site_landtype, context_usgs) = {
-            let context =
-                VisibilityContext::new_at(&doc, &have, Some(std::path::Path::new(dir)));
+            let context = VisibilityContext::new_at(&doc, &have, Some(std::path::Path::new(dir)));
             (
                 context.lct,
                 context.pft,
@@ -452,10 +446,8 @@ fn prepare_parameter_import(
         };
         let target_scheme = if usgs { "USGS" } else { "IGBP" };
         let mut changed_fields = Vec::new();
-        let mut process_docs = std::collections::BTreeMap::<
-            std::path::PathBuf,
-            colm_namelist::Document,
-        >::new();
+        let mut process_docs =
+            std::collections::BTreeMap::<std::path::PathBuf, colm_namelist::Document>::new();
 
         for record in &source.records {
             let mut item = ParameterImportItem {
@@ -492,35 +484,21 @@ fn prepare_parameter_import(
             }
 
             use colm_case::parameters::Storage;
-            let result: Result<(Option<String>, std::path::PathBuf), String> =
-                match descriptor.storage {
-                    Storage::CaseNml => {
-                        if matches!(
-                            descriptor.scope,
-                            colm_case::parameters::ParameterScope::LandCoverClass
-                        ) {
-                            if !context_lct {
-                                Err("目标算例当前不是 LCT 模式".into())
-                            } else if record.scope_instance.scheme.as_deref()
-                                != Some(target_scheme)
-                            {
-                                Err("禁止在 IGBP 与 USGS 之间按数字索引导入".into())
-                            } else if record.scope_instance.index.map(i64::from)
-                                != Some(site_landtype)
-                            {
-                                Err("目标算例地类与导出作用域不同".into())
-                            } else {
-                                let current = doc
-                                    .get(&record.raw_key)
-                                    .map(ToString::to_string);
-                                let value = typed(&record.raw_key, &record.value)?;
-                                put(&mut doc, &record.raw_key, value)?;
-                                changed_fields.push(FieldChange {
-                                    path: record.raw_key.clone(),
-                                    value: record.value.clone(),
-                                });
-                                Ok((current, case_file.clone()))
-                            }
+            let result: Result<(Option<String>, std::path::PathBuf), String> = match descriptor
+                .storage
+            {
+                Storage::CaseNml => {
+                    if matches!(
+                        descriptor.scope,
+                        colm_case::parameters::ParameterScope::LandCoverClass
+                    ) {
+                        if !context_lct {
+                            Err("目标算例当前不是 LCT 模式".into())
+                        } else if record.scope_instance.scheme.as_deref() != Some(target_scheme) {
+                            Err("禁止在 IGBP 与 USGS 之间按数字索引导入".into())
+                        } else if record.scope_instance.index.map(i64::from) != Some(site_landtype)
+                        {
+                            Err("目标算例地类与导出作用域不同".into())
                         } else {
                             let current = doc.get(&record.raw_key).map(ToString::to_string);
                             let value = typed(&record.raw_key, &record.value)?;
@@ -531,94 +509,94 @@ fn prepare_parameter_import(
                             });
                             Ok((current, case_file.clone()))
                         }
+                    } else {
+                        let current = doc.get(&record.raw_key).map(ToString::to_string);
+                        let value = typed(&record.raw_key, &record.value)?;
+                        put(&mut doc, &record.raw_key, value)?;
+                        changed_fields.push(FieldChange {
+                            path: record.raw_key.clone(),
+                            value: record.value.clone(),
+                        });
+                        Ok((current, case_file.clone()))
                     }
-                    Storage::PftOverride | Storage::PcPftOverride => {
-                        let wants_pc = matches!(descriptor.storage, Storage::PcPftOverride);
-                        if context_pc != wants_pc || context_pft == wants_pc {
-                            Err("PFT 与 PC-PFT 作用域不匹配".into())
-                        } else if source.source_case != target {
-                            Err("PFT/PC 导入只允许回到同名算例，避免修改站点不存在的组分".into())
-                        } else {
-                            let pft_type = record
-                                .scope_instance
-                                .index
-                                .ok_or_else(|| "PFT/PC 导入缺少类型索引".to_string())?;
-                            let meta = colm_case::pft::parameter(&record.raw_key)
-                                .ok_or_else(|| format!("未知 PFT 参数：{}", record.raw_key))?;
-                            let applies = {
-                                let context = VisibilityContext::new_at(
-                                    &doc,
-                                    &have,
-                                    Some(std::path::Path::new(dir)),
-                                );
-                                pft_parameter_applies(meta, &context, pft_type)
-                                    && pft_parameter_has_default(meta, &context, pft_type)?
-                            };
-                            if !applies
-                            {
-                                Err("参数在目标 PFT/PC 上当前不生效".into())
-                            } else {
-                                let path = pft_override_path(meta.name, pft_type);
-                                let current = doc.get(&path).map(ToString::to_string);
-                                doc.insert(
-                                    &path,
-                                    typed_pft_value(meta, &record.value)?,
-                                    "nl_colm",
-                                )
-                                .map_err(|error| format!("{error:#}"))?;
-                                Ok((current, case_file.clone()))
-                            }
-                        }
-                    }
-                    Storage::ProcessParameterFile => {
-                        let file = record
+                }
+                Storage::PftOverride | Storage::PcPftOverride => {
+                    let wants_pc = matches!(descriptor.storage, Storage::PcPftOverride);
+                    if context_pc != wants_pc || context_pft == wants_pc {
+                        Err("PFT 与 PC-PFT 作用域不匹配".into())
+                    } else if source.source_case != target {
+                        Err("PFT/PC 导入只允许回到同名算例，避免修改站点不存在的组分".into())
+                    } else {
+                        let pft_type = record
                             .scope_instance
-                            .process_file
-                            .as_deref()
-                            .ok_or_else(|| "过程参数缺少 case-local 文件名".to_string())?;
-                        let path = safe_process_file(std::path::Path::new(dir), file)?;
-                        if !process_docs.contains_key(&path) {
-                            let text = std::fs::read_to_string(&path)
-                                .map_err(|error| format!("{}: {error}", path.display()))?;
-                            process_docs.insert(
-                                path.clone(),
-                                colm_namelist::parse(&text)
-                                    .map_err(|error| format!("{}: {error:#}", path.display()))?,
+                            .index
+                            .ok_or_else(|| "PFT/PC 导入缺少类型索引".to_string())?;
+                        let meta = colm_case::pft::parameter(&record.raw_key)
+                            .ok_or_else(|| format!("未知 PFT 参数：{}", record.raw_key))?;
+                        let applies = {
+                            let context = VisibilityContext::new_at(
+                                &doc,
+                                &have,
+                                Some(std::path::Path::new(dir)),
                             );
-                        }
-                        let process_doc = process_docs.get_mut(&path).expect("inserted above");
-                        let current = process_doc
-                            .get(&record.raw_key)
-                            .map(ToString::to_string);
-                        let code = process_code_defaults()
-                            .into_iter()
-                            .find(|field| field.path.eq_ignore_ascii_case(&record.raw_key))
-                            .ok_or_else(|| format!("未知过程参数：{}", record.raw_key))?;
-                        if let Some(existing) = process_doc.get(&record.raw_key).cloned() {
-                            process_doc
-                                .set(
-                                    &record.raw_key,
-                                    typed_process_known(code.kind, &existing, &record.value)?,
-                                )
-                                .map_err(|error| format!("{error:#}"))?;
-                        } else if code.insertable {
-                            process_doc
-                                .insert(
-                                    &record.raw_key,
-                                    typed_process(code.kind, &record.value)?,
-                                    code.group,
-                                )
-                                .map_err(|error| format!("{error:#}"))?;
+                            pft_parameter_applies(meta, &context, pft_type)
+                                && pft_parameter_has_default(meta, &context, pft_type)?
+                        };
+                        if !applies {
+                            Err("参数在目标 PFT/PC 上当前不生效".into())
                         } else {
-                            return Err(format!(
-                                "{} 不是可安全新增的过程参数",
-                                record.raw_key
-                            ));
+                            let path = pft_override_path(meta.name, pft_type);
+                            let current = doc.get(&path).map(ToString::to_string);
+                            doc.insert(&path, typed_pft_value(meta, &record.value)?, "nl_colm")
+                                .map_err(|error| format!("{error:#}"))?;
+                            Ok((current, case_file.clone()))
                         }
-                        Ok((current, path))
                     }
-                    Storage::ReadOnly => Err("只读参数不能导入".into()),
-                };
+                }
+                Storage::ProcessParameterFile => {
+                    let file = record
+                        .scope_instance
+                        .process_file
+                        .as_deref()
+                        .ok_or_else(|| "过程参数缺少 case-local 文件名".to_string())?;
+                    let path = safe_process_file(std::path::Path::new(dir), file)?;
+                    if !process_docs.contains_key(&path) {
+                        let text = std::fs::read_to_string(&path)
+                            .map_err(|error| format!("{}: {error}", path.display()))?;
+                        process_docs.insert(
+                            path.clone(),
+                            colm_namelist::parse(&text)
+                                .map_err(|error| format!("{}: {error:#}", path.display()))?,
+                        );
+                    }
+                    let process_doc = process_docs.get_mut(&path).expect("inserted above");
+                    let current = process_doc.get(&record.raw_key).map(ToString::to_string);
+                    let code = process_code_defaults()
+                        .into_iter()
+                        .find(|field| field.path.eq_ignore_ascii_case(&record.raw_key))
+                        .ok_or_else(|| format!("未知过程参数：{}", record.raw_key))?;
+                    if let Some(existing) = process_doc.get(&record.raw_key).cloned() {
+                        process_doc
+                            .set(
+                                &record.raw_key,
+                                typed_process_known(code.kind, &existing, &record.value)?,
+                            )
+                            .map_err(|error| format!("{error:#}"))?;
+                    } else if code.insertable {
+                        process_doc
+                            .insert(
+                                &record.raw_key,
+                                typed_process(code.kind, &record.value)?,
+                                code.group,
+                            )
+                            .map_err(|error| format!("{error:#}"))?;
+                    } else {
+                        return Err(format!("{} 不是可安全新增的过程参数", record.raw_key));
+                    }
+                    Ok((current, path))
+                }
+                Storage::ReadOnly => Err("只读参数不能导入".into()),
+            };
             match result {
                 Ok((current, path)) => {
                     item.current_value = current.clone();
@@ -2113,9 +2091,7 @@ fn field_states_for_at(
             let built_in_default = context_default
                 .clone()
                 .or_else(|| Some(default_literal(field.default)));
-            let effective_value = override_value
-                .clone()
-                .or_else(|| built_in_default.clone());
+            let effective_value = override_value.clone().or_else(|| built_in_default.clone());
             let is_land_cover = context.single
                 && context.lct
                 && context.valid_landtype()
@@ -2216,9 +2192,7 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
                 .iter()
                 .any(|state| state.context_default != context_default);
             let scope_label = visible.first().and_then(|state| state.scope_label.clone());
-            let scope_mixed = visible
-                .iter()
-                .any(|state| state.scope_label != scope_label);
+            let scope_mixed = visible.iter().any(|state| state.scope_label != scope_label);
             let override_value = visible
                 .first()
                 .and_then(|state| state.override_value.clone());
@@ -2235,9 +2209,7 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
                 .first()
                 .map(|state| state.provenance.clone())
                 .unwrap_or_else(|| template.provenance.clone());
-            let provenance_mixed = visible
-                .iter()
-                .any(|state| state.provenance != provenance);
+            let provenance_mixed = visible.iter().any(|state| state.provenance != provenance);
             if mixed
                 && matches!(
                     template.name.as_str(),
@@ -2271,7 +2243,11 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
                     scope_label
                 },
                 built_in_default: (!default_mixed)
-                    .then(|| visible.first().and_then(|state| state.built_in_default.clone()))
+                    .then(|| {
+                        visible
+                            .first()
+                            .and_then(|state| state.built_in_default.clone())
+                    })
                     .flatten(),
                 override_value: (!override_mixed).then_some(override_value).flatten(),
                 effective_value: (!effective_mixed).then_some(effective_value).flatten(),
@@ -2342,11 +2318,7 @@ pub fn land_cover_contexts(
                 Ok(doc) => doc,
                 Err(error) => return Some(Err(format!("{dir}: {error:#}"))),
             };
-            let context = VisibilityContext::new_at(
-                &doc,
-                &have,
-                Some(std::path::Path::new(&dir)),
-            );
+            let context = VisibilityContext::new_at(&doc, &have, Some(std::path::Path::new(&dir)));
             (context.lct && context.valid_landtype()).then_some(Ok(LandCoverContext {
                 dir,
                 scheme: if context.usgs { "USGS" } else { "IGBP" },
@@ -2565,11 +2537,7 @@ pub fn pft_parameter_states(
                 Vec::new()
             },
             scope_kind: if pc_mode { "pc-pft" } else { "pft" },
-            scope_label: format!(
-                "{}-{}",
-                if pc_mode { "PC/PFT" } else { "PFT" },
-                pft_type
-            ),
+            scope_label: format!("{}-{}", if pc_mode { "PC/PFT" } else { "PFT" }, pft_type),
             normal_pft_default,
             effective_value,
             provenance: if values[0].is_some() {
@@ -2653,7 +2621,9 @@ pub fn set_pft_parameters_batch(
     let mut done = Vec::with_capacity(by_dir.len());
     let mut pc_mode = None;
     for (dir, scoped_changes) in by_dir {
-        let text = texts.get(&dir).expect("read_all returned every requested case");
+        let text = texts
+            .get(&dir)
+            .expect("read_all returned every requested case");
         let mut doc = colm_namelist::parse(text).map_err(|e| format!("{dir}: {e:#}"))?;
         for change in scoped_changes {
             let meta = colm_case::pft::parameter(&change.name).expect("validated above");
@@ -2675,9 +2645,7 @@ pub fn set_pft_parameters_batch(
                 ));
             }
             if pc_mode.is_some_and(|current| current != mode) {
-                return Err(
-                    "不能在同一次批量编辑中混合普通 PFT 与 PC 组分；请缩小范围".into(),
-                );
+                return Err("不能在同一次批量编辑中混合普通 PFT 与 PC 组分；请缩小范围".into());
             }
             pc_mode = Some(mode);
             let path = pft_override_path(meta.name, change.pft_type);
@@ -3053,8 +3021,8 @@ pub fn reset_process_parameter_field_batch(
         let parameter_file = safe_process_file(case_dir, &file)?;
         let text = std::fs::read_to_string(&parameter_file)
             .map_err(|e| format!("{}: {e}", parameter_file.display()))?;
-        let mut doc =
-            colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", parameter_file.display()))?;
+        let mut doc = colm_namelist::parse(&text)
+            .map_err(|e| format!("{}: {e:#}", parameter_file.display()))?;
         doc.remove(&path)
             .map_err(|e| format!("{}: {e:#}", parameter_file.display()))?;
         done.push((parameter_file, doc.to_string()));
@@ -3116,7 +3084,10 @@ fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, St
     let mut backups = Vec::with_capacity(changed.len());
     let mut staged = Vec::with_capacity(changed.len());
     for (index, (path, text)) in changed.iter().enumerate() {
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("parameter.nml");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("parameter.nml");
         let backup = path.with_file_name(format!(".{name}.bak-{tag}-{index}"));
         let temporary = path.with_file_name(format!(".{name}.tmp-{tag}-{index}"));
         if let Err(error) = std::fs::copy(path, &backup) {
@@ -3499,7 +3470,10 @@ pub(crate) fn write_all(done: &[(String, String)]) -> Result<BatchWrite, String>
     Ok(BatchWrite {
         written: done.len(),
         changed,
-        text: done.first().map(|(_, text)| text.clone()).unwrap_or_default(),
+        text: done
+            .first()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default(),
     })
 }
 
