@@ -248,7 +248,7 @@ CONTAINS
             nelm_worker(:) = 0
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iworker = 0, p_np_worker-1
             idest = p_address_worker(iworker)
             ! send(02)
