@@ -37,7 +37,8 @@ CONTAINS
 
    ! Local variables
    integer :: iwork, mesg(2), isrc, ndata
-   real(r8), allocatable :: rcache(:)
+   integer, allocatable :: counts(:), disps(:)
+   real(r8), allocatable :: rcache(:), sendbuf(:)
 
       IF (totalvlen <= 0) RETURN
 
@@ -46,7 +47,40 @@ CONTAINS
          wdata = spval
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (vlen, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+
+      allocate (sendbuf(max(1,vlen)))
+      IF (vlen > 0) sendbuf(1:vlen) = vector
+      IF (p_is_master) THEN
+         allocate (rcache(max(1,totalvlen)))
+      ELSE
+         allocate (rcache(1))
+      ENDIF
+      CALL mpi_gatherv (sendbuf, vlen, MPI_REAL8, rcache, counts, disps, &
+         MPI_REAL8, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         IF (sum(counts) /= totalvlen) &
+            CALL CoLM_stop ('vector_gather_to_master: vector length mismatch')
+         DO iwork = 0, p_np_glb-1
+            ndata = counts(iwork)
+            IF (ndata > 0) THEN
+               IF (.not. allocated(data_address(iwork)%val)) &
+                  CALL CoLM_stop ('vector_gather_to_master: missing data address')
+               IF (size(data_address(iwork)%val) /= ndata) &
+                  CALL CoLM_stop ('vector_gather_to_master: data address size mismatch')
+               wdata(data_address(iwork)%val) = rcache(disps(iwork)+1:disps(iwork)+ndata)
+            ENDIF
+         ENDDO
+      ENDIF
+      deallocate (counts, disps, rcache, sendbuf)
+#elif defined(USEMPI)
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, vlen/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -100,8 +134,9 @@ CONTAINS
    real(r8), allocatable, intent(inout) :: wdata (:,:)
 
    integer :: iwork, isrc, ndata, ipth, mesg(2)
-   integer, allocatable :: icache(:)
-   real(r8), allocatable :: rcache(:)
+   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
+   integer, allocatable :: icache(:), send_id(:)
+   real(r8), allocatable :: rcache(:), sendbuf(:)
 
       IF (nrow <= 0 .or. ncol_global <= 0) RETURN
 
@@ -116,7 +151,44 @@ CONTAINS
          wdata(:,:) = 0._r8
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
+      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      CALL mpi_allgather (ncol_local, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+      counts_data = counts * nrow
+      disps_data = disps * nrow
+
+      allocate (send_id(max(1,ncol_local)), sendbuf(max(1,nrow*ncol_local)))
+      IF (ncol_local > 0) THEN
+         send_id(1:ncol_local) = global_id
+         sendbuf(1:nrow*ncol_local) = reshape(matrix, (/nrow*ncol_local/))
+      ENDIF
+      IF (p_is_master) THEN
+         allocate (icache(max(1,sum(counts))))
+         allocate (rcache(max(1,nrow*sum(counts))))
+      ELSE
+         allocate (icache(1), rcache(1))
+      ENDIF
+      CALL mpi_gatherv (send_id, ncol_local, MPI_INTEGER, icache, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+      CALL mpi_gatherv (sendbuf, nrow*ncol_local, MPI_REAL8, rcache, counts_data, &
+         disps_data, MPI_REAL8, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         DO ipth = 1, sum(counts)
+            IF (icache(ipth) < 1 .or. icache(ipth) > ncol_global) THEN
+               CALL CoLM_stop ('vector_gather_matrix_to_master: global_id out of range')
+            ENDIF
+            wdata(:, icache(ipth)) = rcache((ipth-1)*nrow+1:ipth*nrow)
+         ENDDO
+      ENDIF
+      deallocate (counts, counts_data, disps, disps_data)
+      deallocate (icache, rcache, send_id, sendbuf)
+#elif defined(USEMPI)
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, ncol_local/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -324,7 +396,8 @@ CONTAINS
 
    ! Local variables
    integer :: iwork, ndata, expected_length
-   real(r8), allocatable :: rdata(:), rcache(:)
+   integer, allocatable :: counts(:), disps(:)
+   real(r8), allocatable :: rdata(:), rcache(:), recvbuf(:)
 
       IF (p_is_master) THEN
          CALL ncio_read_serial (filein, varname, rdata)
@@ -348,7 +421,38 @@ CONTAINS
          ENDDO
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (vlen, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+
+      IF (p_is_master) THEN
+         allocate (rcache(max(1,size(rdata))))
+         DO iwork = 0, p_np_glb-1
+            ndata = counts(iwork)
+            IF (ndata > 0) THEN
+               IF (.not. allocated(data_address(iwork)%val)) &
+                  CALL CoLM_stop ('vector_read_and_scatter: missing data address')
+               IF (size(data_address(iwork)%val) /= ndata) &
+                  CALL CoLM_stop ('vector_read_and_scatter: data address size mismatch')
+               rcache(disps(iwork)+1:disps(iwork)+ndata) = rdata(data_address(iwork)%val)
+            ENDIF
+         ENDDO
+      ELSE
+         allocate (rcache(1))
+      ENDIF
+      allocate (recvbuf(max(1,vlen)))
+      CALL mpi_scatterv (rcache, counts, disps, MPI_REAL8, recvbuf, vlen, &
+         MPI_REAL8, p_root, p_comm_glb, p_err)
+      IF (vlen > 0) THEN
+         IF (.not. allocated(vector)) allocate(vector(vlen))
+         vector = recvbuf(1:vlen)
+      ENDIF
+      deallocate (counts, disps, rcache, recvbuf)
+#elif defined(USEMPI)
       CALL mpi_barrier (p_comm_glb, p_err)
 
       IF (p_is_master) THEN
@@ -403,8 +507,9 @@ CONTAINS
    integer,                intent(in)    :: ncol_global
 
    integer :: iwork, isrc, ndata, ipth, mesg(2)
-   integer, allocatable :: icache(:)
-   real(r8), allocatable :: rdata(:,:), rcache(:)
+   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
+   integer, allocatable :: icache(:), send_id(:)
+   real(r8), allocatable :: rdata(:,:), rcache(:), recvbuf(:)
 
       IF (nrow <= 0 .or. ncol_global <= 0) RETURN
 
@@ -420,7 +525,48 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
+      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      CALL mpi_allgather (ncol_local, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iwork = 1, p_np_glb-1
+         disps(iwork) = disps(iwork-1) + counts(iwork-1)
+      ENDDO
+      counts_data = counts * nrow
+      disps_data = disps * nrow
+
+      allocate (send_id(max(1,ncol_local)))
+      IF (ncol_local > 0) send_id(1:ncol_local) = global_id
+      IF (p_is_master) THEN
+         allocate (icache(max(1,sum(counts))))
+      ELSE
+         allocate (icache(1))
+      ENDIF
+      CALL mpi_gatherv (send_id, ncol_local, MPI_INTEGER, icache, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         allocate (rcache(max(1,nrow*sum(counts))))
+         DO ipth = 1, sum(counts)
+            IF (icache(ipth) < 1 .or. icache(ipth) > ncol_global) THEN
+               CALL CoLM_stop ('vector_read_matrix_and_scatter: global_id out of range')
+            ENDIF
+            rcache((ipth-1)*nrow+1:ipth*nrow) = rdata(:, icache(ipth))
+         ENDDO
+      ELSE
+         allocate (rcache(1))
+      ENDIF
+      allocate (recvbuf(max(1,nrow*ncol_local)))
+      CALL mpi_scatterv (rcache, counts_data, disps_data, MPI_REAL8, recvbuf, &
+         nrow*ncol_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+      IF (ncol_local > 0) THEN
+         IF (.not. allocated(matrix)) allocate (matrix(nrow, ncol_local))
+         matrix = reshape(recvbuf(1:nrow*ncol_local), shape(matrix))
+      ENDIF
+      deallocate (counts, counts_data, disps, disps_data)
+      deallocate (icache, send_id, rcache, recvbuf)
+#elif defined(USEMPI)
       CALL mpi_barrier (p_comm_glb, p_err)
 
       IF (p_is_worker) THEN
