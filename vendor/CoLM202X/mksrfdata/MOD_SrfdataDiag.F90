@@ -273,7 +273,7 @@ ENDIF
             allocate (vdsum (srf_concat%ginfo%nlon, srf_concat%ginfo%nlat))
             vdsum(:,:) = spv
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
             DO idata = 1, srf_concat%ndatablk
 
                CALL mpi_recv (rmesg, 3, MPI_INTEGER, MPI_ANY_SOURCE, &
@@ -409,7 +409,7 @@ ENDIF
 
          ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          IF (p_is_io) THEN
 
             DO iyseg = 1, srf_concat%nyseg
@@ -450,7 +450,11 @@ ENDIF
 
       ELSEIF (trim(wmode) == 'block') THEN
 
+#ifdef FLAT_SPMD
+         IF (p_is_master) THEN
+#else
          IF (p_is_io) THEN
+#endif
 
             DO iblkme = 1, gblock%nblkme
                iblk = gblock%xblkme(iblkme)
