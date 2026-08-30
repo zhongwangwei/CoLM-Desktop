@@ -298,6 +298,22 @@ fn sample_file(path: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+pub fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 fn record_forcing_inventory(out: &mut BTreeMap<String, String>, forcing_nml: &Path) {
     let Ok(text) = std::fs::read_to_string(forcing_nml) else {
         return;

@@ -92,6 +92,218 @@ pub struct MeshSummary {
     pub max_elmid: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpatialInputSummary {
+    pub schema: &'static str,
+    pub nlon: usize,
+    pub nlat: usize,
+    pub active_cells: usize,
+    pub max_elmid: i64,
+}
+
+/// Validate the exact NetCDF fields consumed by CoLM's three spatial modes.
+pub fn inspect_spatial_input(
+    path: impl AsRef<Path>,
+    grid_kind: &str,
+) -> Result<SpatialInputSummary> {
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open spatial input {}", path.display()))?;
+    match grid_kind {
+        "latlon" => inspect_equal_latlon(&file, "landmask", false),
+        "unstructured" => inspect_equal_latlon(&file, "elmindex", true),
+        "catchment" => inspect_catchment(&file),
+        other => bail!("grid kind must be latlon, unstructured, or catchment, got {other}"),
+    }
+}
+
+fn inspect_equal_latlon(
+    file: &netcdf::File,
+    variable: &str,
+    require_int64: bool,
+) -> Result<SpatialInputSummary> {
+    let lon_w = coordinate(file, "lon_w")?;
+    let lon_e = coordinate(file, "lon_e")?;
+    let lat_s = coordinate(file, "lat_s")?;
+    let lat_n = coordinate(file, "lat_n")?;
+    if lon_w.len() != lon_e.len() || lat_s.len() != lat_n.len() {
+        bail!("spatial grid edge arrays have inconsistent lengths");
+    }
+    let (nlon, nlat) = (lon_w.len(), lat_s.len());
+    let data = file
+        .variable(variable)
+        .with_context(|| format!("spatial input has no variable {variable}"))?;
+    require_integer(&data, variable, require_int64)?;
+    require_2d_shape(&data, variable, nlat, nlon)?;
+    let (active_cells, max_stored) = scan_positive(&data, nlat, nlon)?;
+    if active_cells == 0 {
+        bail!("spatial input {variable} has no active cells");
+    }
+    let max_elmid = if require_int64 {
+        max_stored
+    } else {
+        i64::try_from(nlat)?
+            .checked_mul(i64::try_from(nlon)?)
+            .context("GRIDBASED row-major element identity exceeds int64")?
+    };
+    Ok(SpatialInputSummary {
+        schema: if require_int64 {
+            "equal-lat-lon-elmindex-v1"
+        } else {
+            "equal-lat-lon-landmask-v1"
+        },
+        nlon,
+        nlat,
+        active_cells,
+        max_elmid,
+    })
+}
+
+fn inspect_catchment(file: &netcdf::File) -> Result<SpatialInputSummary> {
+    let lon = coordinate(file, "lon")?;
+    let lat = coordinate(file, "lat")?;
+    let (nlon, nlat) = (lon.len(), lat.len());
+    if lat.windows(2).any(|pair| pair[0] <= pair[1]) {
+        bail!("catchment latitude must run from north to south");
+    }
+
+    let catchment = file
+        .variable("icatchment2d")
+        .context("catchment input has no variable icatchment2d")?;
+    let hru = file
+        .variable("ihydrounit2d")
+        .context("catchment input has no variable ihydrounit2d")?;
+    require_integer(&catchment, "icatchment2d", true)?;
+    require_integer(&hru, "ihydrounit2d", false)?;
+    require_2d_shape(&catchment, "icatchment2d", nlat, nlon)?;
+    require_2d_shape(&hru, "ihydrounit2d", nlat, nlon)?;
+
+    let basin_numhru = integer_vector(file, "basin_numhru")?;
+    let lake_id = integer_vector(file, "lake_id")?;
+    if basin_numhru.is_empty() || basin_numhru.len() != lake_id.len() {
+        bail!("basin_numhru and lake_id must have the same non-zero length");
+    }
+    if basin_numhru.iter().any(|value| *value <= 0) {
+        bail!("basin_numhru values must be positive");
+    }
+
+    let rows = rows_per_chunk(nlon);
+    let mut active_cells = 0_usize;
+    let mut max_elmid = 0_i64;
+    for start in (0..nlat).step_by(rows) {
+        let end = (start + rows).min(nlat);
+        let cats = catchment.get_values::<i64, _>((start..end, 0..nlon))?;
+        let hrus = hru.get_values::<i64, _>((start..end, 0..nlon))?;
+        for (cat, hydrounit) in cats.into_iter().zip(hrus) {
+            if cat <= 0 {
+                continue;
+            }
+            let basin = usize::try_from(cat - 1)
+                .context("catchment element identity cannot index basin metadata")?;
+            let Some(numhru) = basin_numhru.get(basin) else {
+                bail!(
+                    "icatchment2d element {cat} exceeds basin_numhru length {}",
+                    basin_numhru.len()
+                );
+            };
+            if hydrounit <= 0 || hydrounit > *numhru {
+                bail!("catchment element {cat} has invalid hydrounit {hydrounit}; expected 1..={numhru}");
+            }
+            active_cells += 1;
+            max_elmid = max_elmid.max(cat);
+        }
+    }
+    if active_cells == 0 {
+        bail!("catchment input has no active cells");
+    }
+    Ok(SpatialInputSummary {
+        schema: "colm-catchment-input-v1",
+        nlon,
+        nlat,
+        active_cells,
+        max_elmid,
+    })
+}
+
+fn coordinate(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("spatial input has no coordinate {name}"))?;
+    if variable.dimensions().len() != 1 || variable.len() == 0 {
+        bail!("spatial coordinate {name} must be a non-empty 1D variable");
+    }
+    let values = variable.get_values::<f64, _>(..)?;
+    if values.iter().any(|value| !value.is_finite()) {
+        bail!("spatial coordinate {name} contains a non-finite value");
+    }
+    Ok(values)
+}
+
+fn integer_vector(file: &netcdf::File, name: &str) -> Result<Vec<i64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("catchment input has no variable {name}"))?;
+    require_integer(&variable, name, false)?;
+    if variable.dimensions().len() != 1 {
+        bail!("catchment variable {name} must be 1D");
+    }
+    Ok(variable.get_values::<i64, _>(..)?)
+}
+
+fn require_integer(variable: &netcdf::Variable<'_>, name: &str, require_int64: bool) -> Result<()> {
+    use netcdf::types::{IntType, NcVariableType};
+
+    let kind = variable.vartype();
+    if require_int64 && kind != NcVariableType::Int(IntType::I64) {
+        bail!("spatial variable {name} must be signed int64, got {kind:?}");
+    }
+    if !matches!(kind, NcVariableType::Int(_)) {
+        bail!("spatial variable {name} must be integer, got {kind:?}");
+    }
+    Ok(())
+}
+
+fn require_2d_shape(
+    variable: &netcdf::Variable<'_>,
+    name: &str,
+    nlat: usize,
+    nlon: usize,
+) -> Result<()> {
+    let shape = variable
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.len())
+        .collect::<Vec<_>>();
+    if shape != [nlat, nlon] {
+        bail!("spatial variable {name} has shape {shape:?}; expected [{nlat}, {nlon}]");
+    }
+    Ok(())
+}
+
+fn scan_positive(
+    variable: &netcdf::Variable<'_>,
+    nlat: usize,
+    nlon: usize,
+) -> Result<(usize, i64)> {
+    let rows = rows_per_chunk(nlon);
+    let mut active = 0_usize;
+    let mut maximum = 0_i64;
+    for start in (0..nlat).step_by(rows) {
+        let end = (start + rows).min(nlat);
+        for value in variable.get_values::<i64, _>((start..end, 0..nlon))? {
+            if value > 0 {
+                active += 1;
+                maximum = maximum.max(value);
+            }
+        }
+    }
+    Ok((active, maximum))
+}
+
+fn rows_per_chunk(nlon: usize) -> usize {
+    (1_048_576 / nlon.max(1)).max(1)
+}
+
 impl EqualLatLonMesh {
     pub fn all_active(grid: Grid, window: MeshWindow) -> Result<Self> {
         let len = window
@@ -418,6 +630,64 @@ mod tests {
         );
         assert_eq!(summary.active_cells, 2);
         assert_eq!(summary.max_elmid, 7);
+    }
+
+    #[test]
+    fn spatial_preflight_covers_all_three_grid_contracts() {
+        let grid = Grid { nlon: 4, nlat: 2 };
+        let mesh = EqualLatLonMesh::new(
+            grid,
+            MeshWindow::global(grid).unwrap(),
+            vec![true, false, true, true, false, true, false, true],
+        )
+        .unwrap();
+        let latlon = output("preflight-latlon");
+        let unstructured = output("preflight-unstructured");
+        mesh.write_gridbased_netcdf(&latlon).unwrap();
+        mesh.write_netcdf(&unstructured).unwrap();
+
+        let regular = inspect_spatial_input(&latlon, "latlon").unwrap();
+        assert_eq!(
+            (regular.nlon, regular.nlat, regular.active_cells),
+            (4, 2, 5)
+        );
+        let irregular = inspect_spatial_input(&unstructured, "unstructured").unwrap();
+        assert_eq!((irregular.active_cells, irregular.max_elmid), (5, 8));
+
+        let catchment = output("preflight-catchment");
+        let mut file = netcdf::create(&catchment).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 3).unwrap();
+        file.add_dimension("basin", 2).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[1.5, 0.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[-1.5, -0.5, 0.5], ..)
+            .unwrap();
+        file.add_variable::<i64>("icatchment2d", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1, 1, 0, 2, 2, 2], (.., ..))
+            .unwrap();
+        file.add_variable::<i32>("ihydrounit2d", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1, 2, 0, 1, 2, 3], (.., ..))
+            .unwrap();
+        file.add_variable::<i32>("basin_numhru", &["basin"])
+            .unwrap()
+            .put_values(&[2, 3], ..)
+            .unwrap();
+        file.add_variable::<i32>("lake_id", &["basin"])
+            .unwrap()
+            .put_values(&[0, 1], ..)
+            .unwrap();
+        file.close().unwrap();
+
+        let catchment = inspect_spatial_input(&catchment, "catchment").unwrap();
+        assert_eq!((catchment.nlon, catchment.nlat), (3, 2));
+        assert_eq!((catchment.active_cells, catchment.max_elmid), (5, 2));
     }
 
     #[test]

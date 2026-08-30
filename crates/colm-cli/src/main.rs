@@ -146,6 +146,9 @@ usage:
                     [--west W --east E --south S --north N | --shp basin.shp]
                     [--non-ocean-mask mask.nc --non-ocean-var non_ocean_mask]
                     # 生成 GRIDBASED landmask 或 int64 UNSTRUCTURED elmindex；无 bbox/SHP 时为全球
+  colm-cli spatial-preflight --grid-kind latlon|unstructured|catchment --input <mesh.nc>
+                    [--out manifest.json]
+                    # 在启动 CoLM 前校验空间文件字段并记录 sha256
   colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
                            # 与独立 bin forcing-convert 同样的行为，供 GUI 走
                            # sidecar 调用；没给 --slot 的槽位走自动匹配
@@ -429,6 +432,7 @@ fn main() -> Result<()> {
             )?;
         }
         "mesh-new" => cmd_mesh_new(&opts)?,
+        "spatial-preflight" => cmd_spatial_preflight(&opts)?,
         "forcing-convert" => {
             cmd_forcing_convert(
                 &opts.positional_at(0, "a source forcing file")?,
@@ -3650,6 +3654,8 @@ fn cmd_mesh_new(opts: &Opts) -> Result<()> {
         "non_ocean_mask": non_ocean_mask.as_ref().map(|path| path.display().to_string()),
         "non_ocean_var": non_ocean_mask.as_ref().map(|_| non_ocean_var),
         "output": output,
+        "sha256": fingerprint::sha256_file(&output)?,
+        "bytes": std::fs::metadata(&output)?.len(),
         "global_nlon": grid.nlon,
         "global_nlat": grid.nlat,
         "window_i0": window.i0,
@@ -3662,6 +3668,34 @@ fn cmd_mesh_new(opts: &Opts) -> Result<()> {
     let manifest_path = PathBuf::from(format!("{}.manifest.json", output.display()));
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)
         .with_context(|| format!("cannot write {}", manifest_path.display()))?;
+    println!("{}", serde_json::to_string(&manifest)?);
+    Ok(())
+}
+
+fn cmd_spatial_preflight(opts: &Opts) -> Result<()> {
+    let input = opts.need("--input")?;
+    let input = input
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", input.display()))?;
+    let grid_kind = opts.need_str("--grid-kind")?;
+    let summary = colm_srfdata::mesh::inspect_spatial_input(&input, &grid_kind)?;
+    let manifest = serde_json::json!({
+        "schema": "colm-spatial-input-manifest-v1",
+        "grid_kind": grid_kind,
+        "input_schema": summary.schema,
+        "input": input,
+        "sha256": fingerprint::sha256_file(&input)?,
+        "bytes": std::fs::metadata(&input)?.len(),
+        "element_id_type": "int64",
+        "nlon": summary.nlon,
+        "nlat": summary.nlat,
+        "active_cells": summary.active_cells,
+        "max_elmid": summary.max_elmid,
+    });
+    if let Some(output) = opts.get("--out") {
+        std::fs::write(&output, serde_json::to_vec_pretty(&manifest)?)
+            .with_context(|| format!("cannot write {output}"))?;
+    }
     println!("{}", serde_json::to_string(&manifest)?);
     Ok(())
 }
