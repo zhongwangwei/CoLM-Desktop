@@ -1090,6 +1090,9 @@ CONTAINS
       real(r8), allocatable :: trc_local(:), water_local(:), out_vec(:)
       real(r8), allocatable :: trc_global(:), water_global(:)
       real(r8), allocatable :: send_pair(:,:), recv_pair(:,:)
+#ifdef FLAT_SPMD
+      real(r8), allocatable :: sendbuf(:), global_fields(:,:)
+#endif
       real(r8) :: delta_loc
 
       IF (p_is_worker) THEN
@@ -1134,7 +1137,26 @@ CONTAINS
             ENDDO
          ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+#ifdef CATCHMENT
+         totalnumset = totalnumhru
+#else
+         totalnumset = totalnumelm
+#endif
+         allocate(sendbuf(max(1,2*numset)))
+         IF (numset > 0) THEN
+            sendbuf(1:2*numset:2) = trc_local
+            sendbuf(2:2*numset:2) = water_local
+         ENDIF
+#ifdef CATCHMENT
+         CALL gather_history_fields (sendbuf, 2, numset, totalnumset, &
+            hru_data_address, global_fields)
+#else
+         CALL gather_history_fields (sendbuf, 2, numset, totalnumset, &
+            elm_data_address, global_fields)
+#endif
+         deallocate(sendbuf)
+#elif defined(USEMPI)
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -1159,7 +1181,10 @@ CONTAINS
          trc_global = 0._r8
          water_global = 0._r8
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+         trc_global = global_fields(1,:)
+         water_global = global_fields(2,:)
+#elif defined(USEMPI)
          DO iwork = 0, p_np_worker-1
             CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
@@ -1234,6 +1259,9 @@ CONTAINS
       IF (allocated(trc_global)) deallocate(trc_global)
       IF (allocated(water_local)) deallocate(water_local)
       IF (allocated(water_global)) deallocate(water_global)
+#ifdef FLAT_SPMD
+      IF (allocated(global_fields)) deallocate(global_fields)
+#endif
 
 #ifdef USEMPI
       ! Fixed tags are reused for every history field.  Keep a field-boundary
@@ -1277,6 +1305,9 @@ CONTAINS
       real(r8), allocatable :: trc_local(:,:), water_local(:,:), out_vec(:,:)
       real(r8), allocatable :: trc_global(:,:), water_global(:,:)
       real(r8), allocatable :: send_pair(:,:,:), recv_pair(:,:,:)
+#ifdef FLAT_SPMD
+      real(r8), allocatable :: sendbuf(:), global_fields(:,:)
+#endif
 
       ub1 = lb1 + ndim1 - 1
       IF (p_is_worker) THEN
@@ -1318,7 +1349,29 @@ CONTAINS
             ENDDO
          ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+#ifdef CATCHMENT
+         totalnumset = totalnumhru
+#else
+         totalnumset = totalnumelm
+#endif
+         allocate(sendbuf(max(1,2*ndim1*numset)))
+         IF (numset > 0) THEN
+            allocate(send_pair(2, ndim1, numset))
+            send_pair(1, :, :) = trc_local
+            send_pair(2, :, :) = water_local
+            sendbuf(1:2*ndim1*numset) = reshape(send_pair, (/2*ndim1*numset/))
+            deallocate(send_pair)
+         ENDIF
+#ifdef CATCHMENT
+         CALL gather_history_fields (sendbuf, 2*ndim1, numset, totalnumset, &
+            hru_data_address, global_fields)
+#else
+         CALL gather_history_fields (sendbuf, 2*ndim1, numset, totalnumset, &
+            elm_data_address, global_fields)
+#endif
+         deallocate(sendbuf)
+#elif defined(USEMPI)
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -1344,7 +1397,12 @@ CONTAINS
          trc_global = 0._r8
          water_global = 0._r8
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+         DO k = 1, ndim1
+            trc_global(k,:) = global_fields(2*k-1,:)
+            water_global(k,:) = global_fields(2*k,:)
+         ENDDO
+#elif defined(USEMPI)
          DO iwork = 0, p_np_worker-1
             CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
@@ -1417,6 +1475,9 @@ CONTAINS
       IF (allocated(trc_global)) deallocate(trc_global)
       IF (allocated(water_local)) deallocate(water_local)
       IF (allocated(water_global)) deallocate(water_global)
+#ifdef FLAT_SPMD
+      IF (allocated(global_fields)) deallocate(global_fields)
+#endif
 
 #ifdef USEMPI
       ! See the 2-D gather above: the trailing barrier separates messages

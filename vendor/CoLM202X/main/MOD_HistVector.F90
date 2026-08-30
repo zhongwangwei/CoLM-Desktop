@@ -32,7 +32,7 @@ MODULE MOD_HistVector
 #endif
 
 #ifdef FLAT_SPMD
-   PRIVATE :: gather_history_fields
+   PUBLIC :: gather_history_fields
 #endif
 
 CONTAINS
