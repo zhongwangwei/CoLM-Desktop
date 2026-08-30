@@ -26,6 +26,9 @@
 !       CHOOSE this implementation by "#define VectorInOneFile" in include/define.h
 !
 !  Created by Shupeng Zhang, May 2023
+!
+!  ponytail: FLAT_SPMD readers independently read each block; replace with
+!  collective block reads only if shared-filesystem pressure becomes limiting.
 !----------------------------------------------------------------------------------
 
 MODULE MOD_NetCDFVector
@@ -142,8 +145,13 @@ CONTAINS
                block_shape_ok = .false.
                IF (allocated(varsize)) THEN
                   IF (size(varsize) == expected_rank) THEN
+#ifdef FLAT_SPMD
+                     block_shape_ok = varsize(expected_rank) == &
+                        sum(pixelset%vecgs%vcnt(:,iblk,jblk))
+#else
                      block_shape_ok = &
                         varsize(expected_rank) == pixelset%vecgs%vlen(iblk,jblk)
+#endif
                      IF (block_shape_ok .and. present(expected_dim1)) &
                         block_shape_ok = varsize(1) == expected_dim1
                   ENDIF
@@ -374,7 +382,7 @@ CONTAINS
    integer, intent(in), optional :: defval
 
    ! Local variables
-   integer :: iblkgrp, iblk, jblk, istt, iend
+   integer :: iblkgrp, iblk, jblk, istt, iend, offset
    character(len=256) :: fileblock
    integer, allocatable :: sbuff(:), rbuff(:)
    logical :: any_data_exists
@@ -393,7 +401,11 @@ CONTAINS
             iblk = pixelset%xblkgrp(iblkgrp)
             jblk = pixelset%yblkgrp(iblkgrp)
 
+#ifdef FLAT_SPMD
+            allocate (sbuff (sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+#else
             allocate (sbuff (pixelset%vecgs%vlen(iblk,jblk)))
+#endif
             CALL get_filename_block (filename, iblk, jblk, fileblock)
 
             IF (ncio_var_exist(fileblock,dataname,readflag=.false.)) THEN
@@ -403,7 +415,14 @@ CONTAINS
                sbuff(:) = defval
             ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+            IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+               istt = pixelset%vecgs%vstt(iblk,jblk)
+               iend = pixelset%vecgs%vend(iblk,jblk)
+               offset = pixelset%vecgs%vdsp(p_iam_glb,iblk,jblk)
+               rdata(istt:iend) = sbuff(offset+1:offset+pixelset%vecgs%vlen(iblk,jblk))
+            ENDIF
+#elif defined(USEMPI)
             CALL mpi_scatterv ( &
                sbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
                pixelset%vecgs%vdsp(:,iblk,jblk), MPI_INTEGER, &
@@ -436,7 +455,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -487,7 +506,7 @@ CONTAINS
    integer, intent(in), optional :: defval
 
    ! Local variables
-   integer :: iblkgrp, iblk, jblk, istt, iend
+   integer :: iblkgrp, iblk, jblk, istt, iend, offset
    character(len=256) :: fileblock
    integer*8, allocatable :: sbuff(:), rbuff(:)
    logical :: any_data_exists
@@ -506,7 +525,11 @@ CONTAINS
             iblk = pixelset%xblkgrp(iblkgrp)
             jblk = pixelset%yblkgrp(iblkgrp)
 
+#ifdef FLAT_SPMD
+            allocate (sbuff (sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+#else
             allocate (sbuff (pixelset%vecgs%vlen(iblk,jblk)))
+#endif
             CALL get_filename_block (filename, iblk, jblk, fileblock)
 
             IF (ncio_var_exist(fileblock,dataname,readflag=.false.)) THEN
@@ -516,7 +539,14 @@ CONTAINS
                sbuff(:) = defval
             ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+            IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+               istt = pixelset%vecgs%vstt(iblk,jblk)
+               iend = pixelset%vecgs%vend(iblk,jblk)
+               offset = pixelset%vecgs%vdsp(p_iam_glb,iblk,jblk)
+               rdata(istt:iend) = sbuff(offset+1:offset+pixelset%vecgs%vlen(iblk,jblk))
+            ENDIF
+#elif defined(USEMPI)
             CALL mpi_scatterv ( &
                sbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
                pixelset%vecgs%vdsp(:,iblk,jblk), MPI_INTEGER8, &
@@ -549,7 +579,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -600,7 +630,7 @@ CONTAINS
    logical, intent(in), optional :: defval
 
    ! Local variables
-   integer :: iblkgrp, iblk, jblk, istt, iend
+   integer :: iblkgrp, iblk, jblk, istt, iend, offset
    character(len=256) :: fileblock
    integer(1), allocatable :: sbuff(:), rbuff(:)
    logical :: any_data_exists
@@ -619,7 +649,11 @@ CONTAINS
             iblk = pixelset%xblkgrp(iblkgrp)
             jblk = pixelset%yblkgrp(iblkgrp)
 
+#ifdef FLAT_SPMD
+            allocate (sbuff (sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+#else
             allocate (sbuff (pixelset%vecgs%vlen(iblk,jblk)))
+#endif
             CALL get_filename_block (filename, iblk, jblk, fileblock)
 
             IF (ncio_var_exist(fileblock,dataname,readflag=.false.)) THEN
@@ -633,7 +667,14 @@ CONTAINS
                ENDIF
             ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+            IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+               istt = pixelset%vecgs%vstt(iblk,jblk)
+               iend = pixelset%vecgs%vend(iblk,jblk)
+               offset = pixelset%vecgs%vdsp(p_iam_glb,iblk,jblk)
+               rdata(istt:iend) = (sbuff(offset+1:offset+pixelset%vecgs%vlen(iblk,jblk)) == 1)
+            ENDIF
+#elif defined(USEMPI)
             CALL mpi_scatterv ( &
                sbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
                pixelset%vecgs%vdsp(:,iblk,jblk), MPI_INTEGER1, &
@@ -666,7 +707,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -719,7 +760,7 @@ CONTAINS
    logical, intent(in), optional :: known_present
 
    ! Local variables
-   integer :: iblkgrp, iblk, jblk, istt, iend
+   integer :: iblkgrp, iblk, jblk, istt, iend, offset
    character(len=256) :: fileblock
    real(r8), allocatable :: sbuff(:), rbuff(:)
    logical :: any_data_exists
@@ -739,7 +780,11 @@ CONTAINS
             iblk = pixelset%xblkgrp(iblkgrp)
             jblk = pixelset%yblkgrp(iblkgrp)
 
+#ifdef FLAT_SPMD
+            allocate (sbuff (sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+#else
             allocate (sbuff (pixelset%vecgs%vlen(iblk,jblk)))
+#endif
             CALL get_filename_block (filename, iblk, jblk, fileblock)
 
             IF (present(known_present)) THEN
@@ -755,7 +800,14 @@ CONTAINS
                sbuff(:) = defval
             ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+            IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+               istt = pixelset%vecgs%vstt(iblk,jblk)
+               iend = pixelset%vecgs%vend(iblk,jblk)
+               offset = pixelset%vecgs%vdsp(p_iam_glb,iblk,jblk)
+               rdata(istt:iend) = sbuff(offset+1:offset+pixelset%vecgs%vlen(iblk,jblk))
+            ENDIF
+#elif defined(USEMPI)
             CALL mpi_scatterv ( &
                sbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
                pixelset%vecgs%vdsp(:,iblk,jblk), MPI_REAL8, &
@@ -790,7 +842,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1311,7 +1363,11 @@ CONTAINS
    integer :: iblkgrp, iblk, jblk
    character(len=256) :: fileblock
 
+#ifdef FLAT_SPMD
+      IF (p_iam_glb == p_root) THEN
+#else
       IF (p_is_io) THEN
+#endif
          DO iblkgrp = 1, pixelset%nblkgrp
             iblk = pixelset%xblkgrp(iblkgrp)
             jblk = pixelset%yblkgrp(iblkgrp)
@@ -1343,7 +1399,11 @@ CONTAINS
    character(len=256) :: fileblock
    logical :: fexists
 
+#ifdef FLAT_SPMD
+      IF (p_iam_glb == p_root) THEN
+#else
       IF (p_is_io) THEN
+#endif
          DO iblkgrp = 1, pixelset%nblkgrp
             iblk = pixelset%xblkgrp(iblkgrp)
             jblk = pixelset%yblkgrp(iblkgrp)
@@ -1357,8 +1417,13 @@ CONTAINS
             IF (present(dimlen)) THEN
                CALL ncio_define_dimension (fileblock, trim(dimname), dimlen)
             ELSE
+#ifdef FLAT_SPMD
+               CALL ncio_define_dimension (fileblock, trim(dimname), &
+                  sum(pixelset%vecgs%vcnt(:,iblk,jblk)))
+#else
                CALL ncio_define_dimension (fileblock, trim(dimname), &
                   pixelset%vecgs%vlen(iblk,jblk))
+#endif
             ENDIF
 
          ENDDO
@@ -1389,6 +1454,40 @@ CONTAINS
    character(len=256) :: fileblock
    integer, allocatable :: sbuff(:), rbuff(:)
 
+#ifdef FLAT_SPMD
+      DO iblkgrp = 1, pixelset%nblkgrp
+         iblk = pixelset%xblkgrp(iblkgrp)
+         jblk = pixelset%yblkgrp(iblkgrp)
+
+         allocate (sbuff(max(1,pixelset%vecgs%vlen(iblk,jblk))))
+         IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+            istt = pixelset%vecgs%vstt(iblk,jblk)
+            iend = pixelset%vecgs%vend(iblk,jblk)
+            sbuff(1:pixelset%vecgs%vlen(iblk,jblk)) = wdata(istt:iend)
+         ENDIF
+         IF (p_iam_glb == p_root) THEN
+            allocate (rbuff(sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+         ELSE
+            allocate (rbuff(1))
+         ENDIF
+
+         CALL mpi_gatherv (sbuff, pixelset%vecgs%vlen(iblk,jblk), MPI_INTEGER, &
+            rbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
+            pixelset%vecgs%vdsp(:,iblk,jblk), MPI_INTEGER, &
+            p_root, p_comm_glb, p_err)
+
+         IF (p_iam_glb == p_root) THEN
+            CALL get_filename_block (filename, iblk, jblk, fileblock)
+            IF (present(compress_level)) THEN
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname, &
+                  compress = compress_level)
+            ELSE
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname)
+            ENDIF
+         ENDIF
+         deallocate (sbuff, rbuff)
+      ENDDO
+#else
       IF (p_is_io) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1421,8 +1520,9 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1475,6 +1575,46 @@ CONTAINS
    character(len=256) :: fileblock
    integer(1), allocatable :: sbuff(:), rbuff(:)
 
+#ifdef FLAT_SPMD
+      DO iblkgrp = 1, pixelset%nblkgrp
+         iblk = pixelset%xblkgrp(iblkgrp)
+         jblk = pixelset%yblkgrp(iblkgrp)
+
+         allocate (sbuff(max(1,pixelset%vecgs%vlen(iblk,jblk))))
+         IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+            istt = pixelset%vecgs%vstt(iblk,jblk)
+            iend = pixelset%vecgs%vend(iblk,jblk)
+            DO i = istt, iend
+               IF (wdata(i)) THEN
+                  sbuff(i-istt+1) = 1
+               ELSE
+                  sbuff(i-istt+1) = 0
+               ENDIF
+            ENDDO
+         ENDIF
+         IF (p_iam_glb == p_root) THEN
+            allocate (rbuff(sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+         ELSE
+            allocate (rbuff(1))
+         ENDIF
+
+         CALL mpi_gatherv (sbuff, pixelset%vecgs%vlen(iblk,jblk), MPI_INTEGER1, &
+            rbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
+            pixelset%vecgs%vdsp(:,iblk,jblk), MPI_INTEGER1, &
+            p_root, p_comm_glb, p_err)
+
+         IF (p_iam_glb == p_root) THEN
+            CALL get_filename_block (filename, iblk, jblk, fileblock)
+            IF (present(compress_level)) THEN
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname, &
+                  compress = compress_level)
+            ELSE
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname)
+            ENDIF
+         ENDIF
+         deallocate (sbuff, rbuff)
+      ENDDO
+#else
       IF (p_is_io) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1513,8 +1653,9 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1662,6 +1803,40 @@ CONTAINS
    character(len=256) :: fileblock
    integer*8, allocatable :: sbuff(:), rbuff(:)
 
+#ifdef FLAT_SPMD
+      DO iblkgrp = 1, pixelset%nblkgrp
+         iblk = pixelset%xblkgrp(iblkgrp)
+         jblk = pixelset%yblkgrp(iblkgrp)
+
+         allocate (sbuff(max(1,pixelset%vecgs%vlen(iblk,jblk))))
+         IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+            istt = pixelset%vecgs%vstt(iblk,jblk)
+            iend = pixelset%vecgs%vend(iblk,jblk)
+            sbuff(1:pixelset%vecgs%vlen(iblk,jblk)) = wdata(istt:iend)
+         ENDIF
+         IF (p_iam_glb == p_root) THEN
+            allocate (rbuff(sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+         ELSE
+            allocate (rbuff(1))
+         ENDIF
+
+         CALL mpi_gatherv (sbuff, pixelset%vecgs%vlen(iblk,jblk), MPI_INTEGER8, &
+            rbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
+            pixelset%vecgs%vdsp(:,iblk,jblk), MPI_INTEGER8, &
+            p_root, p_comm_glb, p_err)
+
+         IF (p_iam_glb == p_root) THEN
+            CALL get_filename_block (filename, iblk, jblk, fileblock)
+            IF (present(compress_level)) THEN
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname, &
+                  compress = compress_level)
+            ELSE
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname)
+            ENDIF
+         ENDIF
+         deallocate (sbuff, rbuff)
+      ENDDO
+#else
       IF (p_is_io) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1694,8 +1869,9 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1749,6 +1925,40 @@ CONTAINS
    character(len=256) :: fileblock
    real(r8), allocatable :: sbuff(:), rbuff(:)
 
+#ifdef FLAT_SPMD
+      DO iblkgrp = 1, pixelset%nblkgrp
+         iblk = pixelset%xblkgrp(iblkgrp)
+         jblk = pixelset%yblkgrp(iblkgrp)
+
+         allocate (sbuff(max(1,pixelset%vecgs%vlen(iblk,jblk))))
+         IF (pixelset%vecgs%vlen(iblk,jblk) > 0) THEN
+            istt = pixelset%vecgs%vstt(iblk,jblk)
+            iend = pixelset%vecgs%vend(iblk,jblk)
+            sbuff(1:pixelset%vecgs%vlen(iblk,jblk)) = wdata(istt:iend)
+         ENDIF
+         IF (p_iam_glb == p_root) THEN
+            allocate (rbuff(sum(pixelset%vecgs%vcnt(:,iblk,jblk))))
+         ELSE
+            allocate (rbuff(1))
+         ENDIF
+
+         CALL mpi_gatherv (sbuff, pixelset%vecgs%vlen(iblk,jblk), MPI_REAL8, &
+            rbuff, pixelset%vecgs%vcnt(:,iblk,jblk), &
+            pixelset%vecgs%vdsp(:,iblk,jblk), MPI_REAL8, &
+            p_root, p_comm_glb, p_err)
+
+         IF (p_iam_glb == p_root) THEN
+            CALL get_filename_block (filename, iblk, jblk, fileblock)
+            IF (present(compress_level)) THEN
+               CALL ncio_write_serial (fileblock, dataname, rbuff, &
+                  dimname, compress = compress_level)
+            ELSE
+               CALL ncio_write_serial (fileblock, dataname, rbuff, dimname)
+            ENDIF
+         ENDIF
+         deallocate (sbuff, rbuff)
+      ENDDO
+#else
       IF (p_is_io) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -1780,8 +1990,9 @@ CONTAINS
          ENDDO
 
       ENDIF
+#endif
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          DO iblkgrp = 1, pixelset%nblkgrp
