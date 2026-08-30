@@ -855,6 +855,7 @@ CONTAINS
    USE MOD_LandElm
    USE MOD_LandPatch
    USE MOD_ElmVector
+   USE MOD_Vector_ReadWrite, only: vector_gather_to_master
    IMPLICIT NONE
 
    real(r8), intent(in) :: patcharea (:)
@@ -865,7 +866,7 @@ CONTAINS
    type(block_data_real8_2d)  :: f_rnof
    type(spatial_mapping_type) :: mg2p_rnof
 
-   real(r8), allocatable :: bsnrnof(:) , bsndis(:)
+   real(r8), allocatable :: bsnrnof(:), bsnrnof_all(:), bsndis(:)
    integer,  allocatable :: nups_riv(:), iups_riv(:), b_up2down(:)
 
    integer :: i, j, ithis, ib, jb, iblkme, ps, pe
@@ -922,6 +923,16 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 
+#ifdef FLAT_SPMD
+      allocate (rcache(max(1,numelm)))
+      IF (numelm > 0) rcache(1:numelm) = bsnrnof
+      CALL vector_gather_to_master (rcache, numelm, totalnumelm, elm_data_address, bsnrnof_all)
+      deallocate (rcache)
+      IF (p_is_master) THEN
+         IF (allocated(bsnrnof)) deallocate (bsnrnof)
+         CALL move_alloc (bsnrnof_all, bsnrnof)
+      ENDIF
+#else
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, numelm/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -954,6 +965,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #else
       bsnrnof(elm_data_address(0)%val) = bsnrnof
 #endif
