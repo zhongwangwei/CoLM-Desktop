@@ -59,6 +59,9 @@ CONTAINS
 
       filename = trim(dir_landdata) // '/mesh/' //trim(cyear) // '/mesh.nc'
 
+#ifdef FLAT_SPMD
+      CALL mesh_save_blocks_flat(filename)
+#else
       DO jblk = 1, gblock%nyblk
          DO iblk = 1, gblock%nxblk
 
@@ -202,6 +205,7 @@ CONTAINS
 #endif
          ENDDO
       ENDDO
+#endif
 
       IF (p_is_master) THEN
 
@@ -250,6 +254,101 @@ CONTAINS
       IF (p_is_master) write(*,*) 'SAVE land elements done.'
 
    END SUBROUTINE mesh_save_to_file
+
+#ifdef FLAT_SPMD
+   SUBROUTINE mesh_save_blocks_flat (filename)
+
+   USE MOD_SPMD_Task
+   USE MOD_NetCDFSerial
+   USE MOD_Mesh
+   USE MOD_Block
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: filename
+
+   character(len=256) :: fileblock
+   integer :: iblk, jblk, ie, je, iproc, nelm, nelm_glb, totlen, totlen_glb, ndsp
+   integer, allocatable :: nelm_rank(:), nelm_dsp(:), npix_rank(:), npix_dsp(:)
+   integer, allocatable :: npix_count(:), npix_dsp2(:), npxl_local(:), npxlall(:)
+   integer, allocatable :: elmpixels_local(:,:), elmpixels(:,:)
+   integer*8, allocatable :: elmindx_local(:), elmindx(:)
+
+      allocate(nelm_rank(0:p_np_glb-1), nelm_dsp(0:p_np_glb-1))
+      allocate(npix_rank(0:p_np_glb-1), npix_dsp(0:p_np_glb-1))
+      allocate(npix_count(0:p_np_glb-1), npix_dsp2(0:p_np_glb-1))
+
+      DO jblk = 1, gblock%nyblk
+         DO iblk = 1, gblock%nxblk
+            nelm = 0
+            totlen = 0
+            DO ie = 1, numelm
+               IF ((mesh(ie)%xblk == iblk) .and. (mesh(ie)%yblk == jblk)) THEN
+                  nelm = nelm + 1
+                  totlen = totlen + mesh(ie)%npxl
+               ENDIF
+            ENDDO
+
+            allocate(elmindx_local(max(1,nelm)), npxl_local(max(1,nelm)))
+            allocate(elmpixels_local(2,max(1,totlen)))
+            je = 0
+            ndsp = 0
+            DO ie = 1, numelm
+               IF ((mesh(ie)%xblk /= iblk) .or. (mesh(ie)%yblk /= jblk)) CYCLE
+               je = je + 1
+               elmindx_local(je) = mesh(ie)%indx
+               npxl_local(je) = mesh(ie)%npxl
+               elmpixels_local(1,ndsp+1:ndsp+mesh(ie)%npxl) = mesh(ie)%ilon
+               elmpixels_local(2,ndsp+1:ndsp+mesh(ie)%npxl) = mesh(ie)%ilat
+               ndsp = ndsp + mesh(ie)%npxl
+            ENDDO
+
+            CALL mpi_allgather(nelm, 1, MPI_INTEGER, nelm_rank, 1, MPI_INTEGER, p_comm_glb, p_err)
+            CALL mpi_allgather(totlen, 1, MPI_INTEGER, npix_rank, 1, MPI_INTEGER, p_comm_glb, p_err)
+            nelm_dsp(0) = 0
+            npix_dsp(0) = 0
+            DO iproc = 1, p_np_glb-1
+               nelm_dsp(iproc) = nelm_dsp(iproc-1) + nelm_rank(iproc-1)
+               npix_dsp(iproc) = npix_dsp(iproc-1) + npix_rank(iproc-1)
+            ENDDO
+            npix_count = 2 * npix_rank
+            npix_dsp2 = 2 * npix_dsp
+            nelm_glb = sum(nelm_rank)
+            totlen_glb = sum(npix_rank)
+
+            IF (p_is_master) THEN
+               allocate(elmindx(max(1,nelm_glb)), npxlall(max(1,nelm_glb)))
+               allocate(elmpixels(2,max(1,totlen_glb)))
+            ELSE
+               allocate(elmindx(1), npxlall(1), elmpixels(2,1))
+            ENDIF
+
+            CALL mpi_gatherv(elmindx_local, nelm, MPI_INTEGER8, elmindx, nelm_rank, nelm_dsp, &
+               MPI_INTEGER8, p_root, p_comm_glb, p_err)
+            CALL mpi_gatherv(npxl_local, nelm, MPI_INTEGER, npxlall, nelm_rank, nelm_dsp, &
+               MPI_INTEGER, p_root, p_comm_glb, p_err)
+            CALL mpi_gatherv(elmpixels_local, 2*totlen, MPI_INTEGER, elmpixels, npix_count, &
+               npix_dsp2, MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+            IF (p_is_master .and. nelm_glb > 0) THEN
+               CALL get_filename_block(filename, iblk, jblk, fileblock)
+               CALL ncio_create_file(fileblock)
+               CALL ncio_define_dimension(fileblock, 'element', nelm_glb)
+               CALL ncio_define_dimension(fileblock, 'ncoor', 2)
+               CALL ncio_define_dimension(fileblock, 'pixel', totlen_glb)
+               CALL ncio_write_serial(fileblock, 'elmindex', elmindx, 'element')
+               CALL ncio_write_serial(fileblock, 'elmnpxl', npxlall, 'element')
+               CALL ncio_write_serial(fileblock, 'elmpixels', elmpixels, 'ncoor', 'pixel', compress=1)
+            ENDIF
+
+            deallocate(elmindx_local, npxl_local, elmpixels_local)
+            deallocate(elmindx, npxlall, elmpixels)
+         ENDDO
+      ENDDO
+
+      deallocate(nelm_rank, nelm_dsp, npix_rank, npix_dsp, npix_count, npix_dsp2)
+
+   END SUBROUTINE mesh_save_blocks_flat
+#endif
 
    !------------------------------------
    SUBROUTINE mesh_load_from_file (dir_landdata, lc_year)
