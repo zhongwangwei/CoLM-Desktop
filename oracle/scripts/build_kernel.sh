@@ -121,6 +121,8 @@ rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 if [ "$SPATIAL" -eq 1 ]; then
+  # 空间版使用普通 SPMD；站点预设保持原有 Master/IO/Worker 路径。
+  printf '\n#define FLAT_SPMD\n' >> include/define.h
   # 空间版明确不编译 extends/interception；站点预设保持原行为。
   sed -i.bak 's/^#define extend_interception$/#undef extend_interception/' include/define.h
 fi
@@ -203,6 +205,7 @@ done
 
 if [ "$SPATIAL" -eq 1 ]; then
   is_effective USEMPI || { echo "spatial kernel must enable USEMPI" >&2; exit 3; }
+  is_effective FLAT_SPMD || { echo "spatial kernel must enable FLAT_SPMD" >&2; exit 3; }
   is_effective extend_interception && { echo "spatial kernel must disable extend_interception" >&2; exit 3; }
   is_effective CaMa_Flood && { echo "spatial kernel must disable CaMa_Flood" >&2; exit 3; }
   if [ "${ARGS[0]}" = CATCHMENT ]; then

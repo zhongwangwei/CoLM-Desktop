@@ -232,7 +232,7 @@ CONTAINS
                ENDDO
             ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
             DO iworker = 0, p_np_worker-1
                IF (nelm_worker(iworker) > 0) THEN
                   idest = p_address_worker(iworker)
@@ -266,7 +266,7 @@ CONTAINS
 
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
          nelm = 0
          allocate(work_done(0:p_np_io-1))
@@ -393,7 +393,7 @@ CONTAINS
                ENDDO
             ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
             allocate (sbuf (nxp*nyp))
             allocate (ipt2 (nxp,nyp))
 
@@ -484,7 +484,7 @@ CONTAINS
 
          ENDDO
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO iworker = 0, p_np_worker-1
             idest = p_address_worker(iworker)
             ! send(07)
@@ -496,7 +496,7 @@ CONTAINS
 
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
 
          allocate(work_done(0:p_np_io-1))
@@ -620,7 +620,7 @@ CONTAINS
          deallocate (npxl_blk)
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (.not. p_is_worker) THEN
          allocate (nelm_blk (gblock%nxblk,gblock%nyblk))
          nelm_blk(:,:) = 0
@@ -647,7 +647,11 @@ CONTAINS
                      jblk_p = jblk - 1
                   ENDIF
 
+#ifdef FLAT_SPMD
+                  IF (gblock%pio(iblk_p,jblk_p) >= 0) THEN
+#else
                   IF (gblock%pio(iblk_p,jblk_p) == p_iam_glb) THEN
+#endif
                      blkdsp(iblk,jblk) = blkdsp(iblk_p,jblk_p) + nelm_blk(iblk_p,jblk_p)
                   ELSE
                      blkdsp(iblk,jblk) = blkdsp(iblk_p,jblk_p)
@@ -658,7 +662,7 @@ CONTAINS
 
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_is_worker) THEN
          DO iblk = 1, gblock%nxblk
             DO jblk = 1, gblock%nyblk
@@ -871,15 +875,24 @@ CONTAINS
       ENDIF
 
       ! Step 5: IF MPI is used, scatter elms from IO to workers.
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       CALL scatter_mesh_from_io_to_worker ()
+#endif
+
+#ifdef FLAT_SPMD
+      CALL mesh_partition_spmd ()
 #endif
 
       IF (p_is_master) THEN
          write(*,'(A)') 'Making mesh elements:'
       ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+      CALL mpi_allreduce (numelm, nelm_glb, 1, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
+      IF (p_is_master) THEN
+         write(*,'(A,I12,A)') 'Total   : ', nelm_glb, ' elements.'
+      ENDIF
+#elif defined(USEMPI)
       CALL mpi_barrier (p_comm_glb, p_err)
 
       IF (p_is_io) THEN
@@ -1027,6 +1040,49 @@ CONTAINS
    END SUBROUTINE scatter_mesh_from_io_to_worker
 
 #endif
+
+   ! --------------------------------
+   SUBROUTINE mesh_partition_spmd ()
+
+   USE MOD_SPMD_Task
+   USE MOD_Utils
+   IMPLICIT NONE
+
+   integer :: ie, ifirst, ilast, nlocal
+   integer, allocatable :: order(:)
+   integer*8, allocatable :: elmindx(:)
+   type(irregular_elm_type), allocatable :: mesh_local(:)
+
+      IF (p_np_glb <= 1) RETURN
+
+      CALL spmd_partition_range (numelm, ifirst, ilast)
+      nlocal = ilast - ifirst + 1
+
+      allocate (mesh_local(nlocal))
+      IF (numelm > 0) THEN
+         allocate (elmindx(numelm), order(numelm))
+         DO ie = 1, numelm
+            elmindx(ie) = mesh(ie)%indx
+            order(ie) = ie
+         ENDDO
+         CALL quicksort (numelm, elmindx, order)
+
+         DO ie = ifirst, ilast
+            CALL copy_elm (mesh(order(ie)), mesh_local(ie-ifirst+1))
+         ENDDO
+
+         deallocate (elmindx, order)
+         DO ie = 1, numelm
+            IF (allocated(mesh(ie)%ilon)) deallocate (mesh(ie)%ilon)
+            IF (allocated(mesh(ie)%ilat)) deallocate (mesh(ie)%ilat)
+         ENDDO
+         deallocate (mesh)
+      ENDIF
+
+      CALL move_alloc (mesh_local, mesh)
+      numelm = nlocal
+
+   END SUBROUTINE mesh_partition_spmd
 
    ! --------------------------------
    SUBROUTINE mesh_free_mem ()

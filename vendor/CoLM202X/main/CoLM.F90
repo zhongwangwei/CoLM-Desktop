@@ -177,6 +177,7 @@ PROGRAM CoLM
 #endif
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       IF (DEF_HIST_WriteBack) THEN
          CALL spmd_assign_writeback ()
       ENDIF
@@ -184,6 +185,11 @@ PROGRAM CoLM
       IF (p_is_writeback) THEN
          CALL hist_writeback_daemon ()
       ELSE
+#else
+      IF (DEF_HIST_WriteBack .and. p_is_master) THEN
+         write(*,*) 'FLAT_SPMD ignores DEF_HIST_WriteBack; rank 0 participates in computation.'
+      ENDIF
+#endif
 #endif
 
       IF (p_is_master) THEN
@@ -728,11 +734,13 @@ PROGRAM CoLM
       103 format(/, 'Time elapsed : ', I3, ' seconds.')
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       ENDIF
 
       IF (DEF_HIST_WriteBack) THEN
          CALL hist_writeback_exit ()
       ENDIF
+#endif
 
       CALL spmd_exit
 #endif

@@ -56,6 +56,39 @@ CONTAINS
          CALL elm_patch%build (landelm, landpatch, use_frac = .true.)
       ENDIF
 
+#ifdef FLAT_SPMD
+      allocate (numelm_worker (0:p_np_glb-1))
+      CALL mpi_allgather (numelm, 1, MPI_INTEGER, numelm_worker, 1, MPI_INTEGER, p_comm_glb, p_err)
+
+      allocate (vec_worker_dsp (0:p_np_glb-1))
+      vec_worker_dsp(0) = 0
+      DO iwork = 1, p_np_glb-1
+         vec_worker_dsp(iwork) = vec_worker_dsp(iwork-1) + numelm_worker(iwork-1)
+      ENDDO
+      totalnumelm = sum(numelm_worker)
+
+      IF (p_is_master) THEN
+         allocate (eindex_glb(totalnumelm))
+         CALL mpi_gatherv (landelm%eindex, numelm, MPI_INTEGER8, eindex_glb, &
+            numelm_worker, vec_worker_dsp, MPI_INTEGER8, p_root, p_comm_glb, p_err)
+      ELSE
+         CALL mpi_gatherv (landelm%eindex, numelm, MPI_INTEGER8, MPI_INULL_P, &
+            MPI_INULL_P, MPI_INULL_P, MPI_INTEGER8, p_root, p_comm_glb, p_err)
+      ENDIF
+
+      IF (p_is_master) THEN
+         allocate (elm_data_address(0:p_np_glb-1))
+         DO iwork = 0, p_np_glb-1
+            allocate (elm_data_address(iwork)%val(numelm_worker(iwork)))
+            elm_data_address(iwork)%val = &
+               (/ (vec_worker_dsp(iwork)+i, i=1,numelm_worker(iwork)) /)
+         ENDDO
+      ENDIF
+
+      deallocate (numelm_worker, vec_worker_dsp)
+      RETURN
+#endif
+
       IF (p_is_worker) THEN
 #ifdef USEMPI
          IF (numelm > 0) THEN

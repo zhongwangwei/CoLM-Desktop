@@ -72,6 +72,7 @@ MODULE MOD_Block
       procedure, PRIVATE :: clip     => block_clip
       procedure, PRIVATE :: init_pio => block_init_pio
       procedure, PRIVATE :: read_pio => block_read_pio
+      procedure, PRIVATE :: set_local_blocks => block_set_local_blocks
 
       final :: block_free_mem
 
@@ -329,7 +330,6 @@ CONTAINS
    integer :: iblk, jblk, iproc
    integer :: iblk_south, iblk_north, iblk_west, iblk_east
    integer :: numblocks, ngrp
-   integer :: iblkme
 
       IF (p_is_master) THEN
          CALL this%clip (iblk_south, iblk_north, iblk_west, iblk_east, numblocks)
@@ -381,24 +381,7 @@ CONTAINS
          p_address_master, p_comm_glb, p_err)
 #endif
 
-      this%nblkme = 0
-      IF (p_is_io) THEN
-         this%nblkme = count(this%pio == p_iam_glb)
-         IF (this%nblkme > 0) THEN
-            iblkme = 0
-            allocate (this%xblkme(this%nblkme))
-            allocate (this%yblkme(this%nblkme))
-            DO iblk = 1, this%nxblk
-               DO jblk = 1, this%nyblk
-                  IF (p_iam_glb == this%pio(iblk,jblk)) THEN
-                     iblkme = iblkme + 1
-                     this%xblkme(iblkme) = iblk
-                     this%yblkme(iblkme) = jblk
-                  ENDIF
-               ENDDO
-            ENDDO
-         ENDIF
-      ENDIF
+      CALL this%set_local_blocks ()
 
    END SUBROUTINE block_init_pio
 
@@ -432,6 +415,9 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      ngrp = p_np_glb
+#else
       IF (p_is_master) THEN
 
          IF ((mod(p_np_glb,DEF_PIO_groupsize) == 0) .and. (DEF_PIO_groupsize > 2)) THEN
@@ -480,6 +466,7 @@ CONTAINS
             CALL CoLM_stop ('CoLM called STOP: Too many groups or Too few processors for this case.')
          ENDIF
       ENDIF
+#endif
 
 
       CALL mpi_bcast (numblocks, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
@@ -533,28 +520,52 @@ CONTAINS
          p_address_master, p_comm_glb, p_err)
 #endif
 
-      this%nblkme = 0
-      IF (p_is_io) THEN
-         this%nblkme = count(this%pio == p_iam_glb)
-         IF (this%nblkme > 0) THEN
-            iblkme = 0
-            allocate (this%xblkme(this%nblkme))
-            allocate (this%yblkme(this%nblkme))
-            DO iblk = 1, this%nxblk
-               DO jblk = 1, this%nyblk
-                  IF (p_iam_glb == this%pio(iblk,jblk)) THEN
-                     iblkme = iblkme + 1
-                     this%xblkme(iblkme) = iblk
-                     this%yblkme(iblkme) = jblk
-                  ENDIF
-               ENDDO
-            ENDDO
-         ENDIF
-      ENDIF
+      CALL this%set_local_blocks ()
 
       IF (allocated(nelmblk)) deallocate (nelmblk)
 
    END SUBROUTINE block_read_pio
+
+   ! --------------------------------
+   SUBROUTINE block_set_local_blocks (this)
+
+   USE MOD_SPMD_Task
+   IMPLICIT NONE
+
+   class (block_type) :: this
+   integer :: iblk, jblk, iblkme
+   logical :: is_local
+
+      this%nblkme = 0
+      IF (allocated(this%xblkme)) deallocate (this%xblkme)
+      IF (allocated(this%yblkme)) deallocate (this%yblkme)
+
+#ifdef FLAT_SPMD
+      ! ponytail: replicate active input blocks until collective reads are needed.
+      this%nblkme = count(this%pio >= 0)
+#else
+      IF (p_is_io) this%nblkme = count(this%pio == p_iam_glb)
+#endif
+      IF (this%nblkme <= 0) RETURN
+
+      allocate (this%xblkme(this%nblkme), this%yblkme(this%nblkme))
+      iblkme = 0
+      DO iblk = 1, this%nxblk
+         DO jblk = 1, this%nyblk
+#ifdef FLAT_SPMD
+            is_local = this%pio(iblk,jblk) >= 0
+#else
+            is_local = p_is_io .and. this%pio(iblk,jblk) == p_iam_glb
+#endif
+            IF (is_local) THEN
+               iblkme = iblkme + 1
+               this%xblkme(iblkme) = iblk
+               this%yblkme(iblkme) = jblk
+            ENDIF
+         ENDDO
+      ENDDO
+
+   END SUBROUTINE block_set_local_blocks
 
    ! --------------------------------
    SUBROUTINE block_free_mem (this)

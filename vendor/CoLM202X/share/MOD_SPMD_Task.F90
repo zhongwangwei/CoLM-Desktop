@@ -117,6 +117,27 @@ MODULE MOD_SPMD_Task
 
 CONTAINS
 
+   ! -----------------------------------------
+   SUBROUTINE spmd_partition_range (nitem, ifirst, ilast)
+
+   IMPLICIT NONE
+   integer, intent(in)  :: nitem
+   integer, intent(out) :: ifirst, ilast
+   integer :: nave, nres, nlocal
+
+      nave = nitem / p_np_glb
+      nres = mod(nitem, p_np_glb)
+      IF (p_iam_glb < nres) THEN
+         nlocal = nave + 1
+         ifirst = p_iam_glb * nlocal + 1
+      ELSE
+         nlocal = nave
+         ifirst = nres * (nave + 1) + (p_iam_glb - nres) * nave + 1
+      ENDIF
+      ilast = ifirst + nlocal - 1
+
+   END SUBROUTINE spmd_partition_range
+
 #ifdef USEMPI
    !-----------------------------------------
    SUBROUTINE spmd_init (MyComm_r)
@@ -141,7 +162,11 @@ CONTAINS
       CALL mpi_comm_rank (p_comm_glb, p_iam_glb, p_err)
       CALL mpi_comm_size (p_comm_glb, p_np_glb,  p_err)
 
+#ifdef FLAT_SPMD
+      p_address_master = p_root
+#else
       p_address_master = p_np_glb-1
+#endif
       p_is_master = (p_iam_glb == p_address_master)
 
       p_is_writeback = .false.
@@ -153,6 +178,9 @@ CONTAINS
 
    IMPLICIT NONE
 
+#ifdef FLAT_SPMD
+      CALL CoLM_stop ('FLAT_SPMD does not reserve a writeback rank; set DEF_HIST_WriteBack = .false.')
+#else
    integer :: p_np_glb_plus
 
       CALL MPI_Comm_dup  (p_comm_glb, p_comm_glb_plus, p_err)
@@ -179,6 +207,7 @@ CONTAINS
          CALL mpi_comm_split (p_comm_glb_plus, MPI_UNDEFINED, p_iam_glb_plus, p_comm_glb, p_err)
          p_is_master = .false.
       ENDIF
+#endif
 
    END SUBROUTINE spmd_assign_writeback
 
@@ -196,6 +225,38 @@ CONTAINS
    integer :: nave, nres, igrp, key, nwrt
    character(len=512) :: info
    character(len=5)   :: cnum
+
+#ifdef FLAT_SPMD
+      p_is_io = .true.
+      p_is_worker = .true.
+      p_my_group = 0
+
+      p_comm_io = p_comm_glb
+      p_iam_io = p_iam_glb
+      p_np_io = p_np_glb
+
+      p_comm_worker = p_comm_glb
+      p_iam_worker = p_iam_glb
+      p_np_worker = p_np_glb
+
+      p_comm_group = p_comm_glb
+      p_iam_group = p_iam_glb
+      p_np_group = p_np_glb
+
+      allocate (p_itis_io (0:p_np_glb-1), p_address_io (0:p_np_glb-1))
+      allocate (p_itis_worker (0:p_np_glb-1), p_address_worker (0:p_np_glb-1))
+      DO iproc = 0, p_np_glb-1
+         p_itis_io(iproc) = iproc
+         p_address_io(iproc) = iproc
+         p_itis_worker(iproc) = iproc
+         p_address_worker(iproc) = iproc
+      ENDDO
+
+      IF (p_is_master) THEN
+         write (*,'(A,I0,A)') '----- Flat SPMD: ', p_np_glb, ' computing ranks -----'
+      ENDIF
+      RETURN
+#endif
 
       ! 1. Determine number of groups
       IF (ngrp <= 0) THEN

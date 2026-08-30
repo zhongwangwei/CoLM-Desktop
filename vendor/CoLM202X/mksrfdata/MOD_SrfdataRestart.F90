@@ -286,7 +286,11 @@ CONTAINS
 
       IF (p_is_io) THEN
 
+#ifdef FLAT_SPMD
+         numelm = sum(nelm_blk, mask = gblock%pio >= 0)
+#else
          numelm = sum(nelm_blk, mask = gblock%pio == p_iam_glb)
+#endif
 
          IF (numelm > 0) THEN
 
@@ -349,7 +353,10 @@ CONTAINS
       IF (p_is_io) write(*,'(I10,A,I4)') numelm, ' elements on group ', p_iam_io
       ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+      CALL mesh_partition_spmd ()
+      CALL mpi_barrier (p_comm_glb, p_err)
+#elif defined(USEMPI)
       CALL scatter_mesh_from_io_to_worker
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
