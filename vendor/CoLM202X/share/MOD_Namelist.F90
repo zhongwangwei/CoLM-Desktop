@@ -2938,6 +2938,13 @@ CONTAINS
          ENDIF
       ENDIF
 
+#ifdef FLAT_SPMD
+      IF (DEF_HIST_WriteBack) THEN
+         IF (p_is_master) write(*,*) 'FLAT_SPMD disables DEF_HIST_WriteBack; rank 0 participates in computation.'
+         DEF_HIST_WriteBack = .false.
+      ENDIF
+#endif
+
       CALL sync_hist_vars (set_defaults = .false.)
 
    END SUBROUTINE read_namelist
