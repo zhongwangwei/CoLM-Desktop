@@ -62,7 +62,8 @@ esac
 # 不认这个选项。所以 Windows 用本仓库自带的那份，不复用上游的。
 OWN_MAKEOPTS=""
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64)  MAKEOPTS=Makeoptions.Mac-arm ;;
+  Darwin-arm64|Darwin-x86_64)
+                 MAKEOPTS=Makeoptions.Mac-arm ;;
   Linux-*)       MAKEOPTS=Makeoptions.github  ;;
   MINGW64_NT-*|MSYS_NT-*)
                  MAKEOPTS=Makeoptions.msys2
