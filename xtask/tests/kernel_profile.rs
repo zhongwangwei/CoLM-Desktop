@@ -205,3 +205,16 @@ fn release_and_ci_cover_crop_kernel_bundle() {
         "Windows kernel CI must compile the CROP kernel as well as default"
     );
 }
+
+#[test]
+fn release_builds_native_macos_installers_for_both_architectures() {
+    let release = read(".github/workflows/release.yml");
+    assert!(release.contains("os: macos-15-intel\n            label: macos-x86_64"));
+    assert!(release.contains("for suffix in _aarch64.dmg _x64.dmg"));
+
+    let script = read("oracle/scripts/build_kernel.sh");
+    assert!(script.contains("Darwin-arm64|Darwin-x86_64)"));
+
+    let makeoptions = read("vendor/CoLM202X/include/Makeoptions.Mac-arm");
+    assert!(makeoptions.contains("NETCDF_PREFIX ?= $(shell brew --prefix)"));
+}
