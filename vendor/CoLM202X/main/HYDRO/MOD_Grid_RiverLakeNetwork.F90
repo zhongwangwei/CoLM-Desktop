@@ -1704,6 +1704,8 @@ CONTAINS
    integer,  allocatable :: bif_inc_all   (:,:) ! global pathway IDs incoming to each ucat
    integer,  allocatable :: bif_inc_send  (:,:)
    real(r8), allocatable :: bif_wt_send   (:,:)
+   integer,  allocatable :: pth_count(:), pth_disp(:), pth_count_2d(:), pth_disp_2d(:)
+   integer,  allocatable :: ucat_count(:), ucat_disp(:), pack_cursor(:)
 
    integer :: iworker, nucat, npth, ip, i, j, iloc
    integer :: max_bif_inc_global
@@ -1714,6 +1716,10 @@ CONTAINS
    integer :: ib, ra, rb, k, nsys, ncomp_bif, max_sys_in_comp
 
 #ifdef USEMPI
+
+#ifdef FLAT_SPMD
+      allocate (npth_wrk (0:p_np_glb-1))
+#endif
 
       ! ================================================================
       ! Master: read NetCDF data and prepare for distribution
@@ -1805,7 +1811,9 @@ CONTAINS
 
          ! Assign each pathway to the worker that owns its upstream cell
          allocate (pth_owner (totalnpthout))
-         allocate (npth_wrk  (0:p_np_worker-1))
+#ifndef FLAT_SPMD
+         allocate (npth_wrk (0:p_np_worker-1))
+#endif
          npth_wrk(:) = 0
          DO ip = 1, totalnpthout
             pth_owner(ip) = iworker_of_ucat(bif_upst_all(ip))
@@ -1860,6 +1868,119 @@ CONTAINS
       ! ================================================================
       ! Distribute pathway data and reverse mapping to workers
       ! ================================================================
+#ifdef FLAT_SPMD
+      ! Every rank computes.  The root only prepares packed buffers; Scatterv
+      ! distributes each rank's ordinary SPMD slice without self-send traffic.
+      IF (p_is_master) THEN
+         allocate (pth_count(0:p_np_glb-1), pth_disp(0:p_np_glb-1))
+         allocate (pth_count_2d(0:p_np_glb-1), pth_disp_2d(0:p_np_glb-1))
+         allocate (pack_cursor(0:p_np_glb-1))
+         pth_count = npth_wrk
+         pth_disp(0) = 0
+         DO iworker = 1, p_np_glb-1
+            pth_disp(iworker) = pth_disp(iworker-1) + pth_count(iworker-1)
+         ENDDO
+         pth_count_2d = pth_count * npthlev_bif
+         pth_disp_2d = pth_disp * npthlev_bif
+         pack_cursor = pth_disp
+
+         allocate (pth_upst_send(totalnpthout), pth_down_send(totalnpthout))
+         allocate (pth_glid_send(totalnpthout), pth_dist_send(totalnpthout))
+         allocate (pth_elev_send(npthlev_bif,totalnpthout))
+         allocate (pth_wdth_send(npthlev_bif,totalnpthout))
+         DO ip = 1, totalnpthout
+            iworker = pth_owner(ip)
+            pack_cursor(iworker) = pack_cursor(iworker) + 1
+            j = pack_cursor(iworker)
+            pth_upst_send(j) = bif_upst_all(ip)
+            pth_down_send(j) = bif_down_all(ip)
+            pth_glid_send(j) = ip
+            pth_dist_send(j) = bif_dist_all(ip)
+            pth_elev_send(:,j) = bif_elev_all(:,ip)
+            pth_wdth_send(:,j) = bif_wdth_all(:,ip)
+         ENDDO
+      ENDIF
+
+      CALL mpi_scatter (npth_wrk, 1, MPI_INTEGER, npthout_local, 1, MPI_INTEGER, &
+         p_root, p_comm_glb, p_err)
+
+      allocate (pth_upst_local(npthout_local), pth_down_ucid(npthout_local))
+      allocate (pth_down_local(npthout_local), pth_global_id(npthout_local))
+      allocate (pth_dst(npthout_local))
+      allocate (pth_elv(npthlev_bif,npthout_local), pth_wth(npthlev_bif,npthout_local))
+
+      IF (p_is_master) THEN
+         CALL mpi_scatterv (pth_upst_send, pth_count, pth_disp, MPI_INTEGER, &
+            pth_upst_local, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (pth_down_send, pth_count, pth_disp, MPI_INTEGER, &
+            pth_down_ucid, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (pth_glid_send, pth_count, pth_disp, MPI_INTEGER, &
+            pth_global_id, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (pth_dist_send, pth_count, pth_disp, MPI_REAL8, &
+            pth_dst, npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (pth_elev_send, pth_count_2d, pth_disp_2d, MPI_REAL8, &
+            pth_elv, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (pth_wdth_send, pth_count_2d, pth_disp_2d, MPI_REAL8, &
+            pth_wth, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+      ELSE
+         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
+            pth_upst_local, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
+            pth_down_ucid, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
+            pth_global_id, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
+            pth_dst, npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
+            pth_elv, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+         CALL mpi_scatterv (MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
+            pth_wth, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
+      ENDIF
+
+      IF (npthout_local > 0) THEN
+         CALL localize_bifurcation_path_indices (pth_upst_local, pth_down_ucid, pth_down_local)
+      ENDIF
+
+      IF (p_is_master) THEN
+         allocate (ucat_count(0:p_np_glb-1), ucat_disp(0:p_np_glb-1))
+         ucat_count = numucat_wrk * max_bif_incoming
+         ucat_disp(0) = 0
+         DO iworker = 1, p_np_glb-1
+            ucat_disp(iworker) = ucat_disp(iworker-1) + ucat_count(iworker-1)
+         ENDDO
+         allocate (bif_inc_send(max_bif_incoming,totalnumucat))
+         j = 0
+         DO iworker = 0, p_np_glb-1
+            DO i = 1, numucat_wrk(iworker)
+               j = j + 1
+               bif_inc_send(:,j) = bif_inc_all(:,ucat_data_address(iworker)%val(i))
+            ENDDO
+         ENDDO
+      ENDIF
+
+      allocate (bif_incoming_pths(max_bif_incoming,numucat))
+      allocate (bif_incoming_wts(max_bif_incoming,numucat))
+      IF (p_is_master) THEN
+         CALL mpi_scatterv (bif_inc_send, ucat_count, ucat_disp, MPI_INTEGER, &
+            bif_incoming_pths, max_bif_incoming*numucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      ELSE
+         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
+            bif_incoming_pths, max_bif_incoming*numucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      ENDIF
+      bif_incoming_wts = 0._r8
+      WHERE (bif_incoming_pths > 0) bif_incoming_wts = 1._r8
+
+      IF (p_is_master) THEN
+         deallocate (pth_upst_send, pth_down_send, pth_glid_send, pth_dist_send)
+         deallocate (pth_elev_send, pth_wdth_send)
+         deallocate (pth_count, pth_disp, pth_count_2d, pth_disp_2d, pack_cursor)
+         deallocate (ucat_count, ucat_disp, bif_inc_send)
+         deallocate (bif_upst_all, bif_down_all, bif_dist_all, bif_elev_all, bif_wdth_all)
+         deallocate (iworker_of_ucat, pth_owner, bif_inc_cnt, bif_inc_all)
+      ENDIF
+      deallocate (npth_wrk)
+
+#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -2021,6 +2142,7 @@ CONTAINS
          allocate (bif_incoming_pths (max_bif_incoming, 0))
          allocate (bif_incoming_wts  (max_bif_incoming, 0))
       ENDIF
+#endif
 
 #else
       ! ================================================================

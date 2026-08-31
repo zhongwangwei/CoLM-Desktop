@@ -72,6 +72,7 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
+   USE MOD_SPMD_Task, only: CoLM_stop
    USE MOD_Const_Physical, only: hvap,hsub,rgas,cpair,stefnc,tfrz,cpliq,cpice
    USE MOD_FrictionVelocity
    USE MOD_Qsadv
@@ -326,7 +327,7 @@ CONTAINS
       IF(abs(errore)>.2)THEN
          write(6,*) 'GLACIER_TEMP.F90 : energy balance violation'
          write(6,100) errore,sabg,forc_frl,olrg,fsena,lfevpa,xmf,t_precip,t_icesno(lb)
-         STOP
+         CALL CoLM_stop ('GLACIER_TEMP: energy balance violation')
       ENDIF
 100   format(10(f7.3))
       ENDIF

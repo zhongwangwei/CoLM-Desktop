@@ -31,6 +31,8 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_Srfdata_CompressLevel, DEF_USE_RangeCheck
 #ifdef USEMPI
+   USE mpi, only: mpi_allreduce, mpi_alltoall, mpi_alltoallv, mpi_barrier, &
+      mpi_bcast, mpi_recv, mpi_send
    USE MOD_SPMD_Task, only: p_comm_glb, p_err, p_is_master, p_is_io, p_is_worker, &
       p_address_master, p_np_glb, p_np_worker, p_np_io, p_address_worker, p_address_io, &
       p_stat, mpi_tag_data, MPI_LOGICAL, MPI_INTEGER, MPI_REAL8, MPI_SUM, CoLM_Stop

@@ -15604,9 +15604,7 @@
     "value_kind": "logical",
     "unit": null,
     "visibility": "editable-common",
-    "activation": [
-      "USEMPI"
-    ],
+    "activation": [],
     "default": "false",
     "default_provider": "MOD_Namelist.F90 declaration",
     "validation": {

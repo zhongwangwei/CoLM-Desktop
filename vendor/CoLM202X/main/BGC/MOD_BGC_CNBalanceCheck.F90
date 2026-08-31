@@ -186,7 +186,7 @@ CONTAINS
          write(*,*)'grainc_to_cropprodc      = ',grainc_to_cropprodc(i)*deltim, grainc_to_food_p(ps)*deltim
          write(*,*)'-1*som_c_leached         = ',som_c_leached(i)*deltim
 #ifdef USEMPI
-         CALL mpi_abort (p_comm_glb, p_err)
+         CALL mpi_abort (p_comm_glb, 1, p_err)
 #else
          CALL abort
 #endif
@@ -260,7 +260,7 @@ CONTAINS
                       (wood_harvestn(i)+grainn_to_cropprodn(i))*deltim, - som_n_leached(i)
          ENDIF
 #ifdef USEMPI
-         CALL mpi_abort (p_comm_glb, p_err)
+         CALL mpi_abort (p_comm_glb, 1, p_err)
 #else
          CALL abort
 #endif

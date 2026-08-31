@@ -243,6 +243,10 @@ fn record_file(out: &mut BTreeMap<String, String>, path: PathBuf, kind: FileKind
 }
 
 fn directory_fingerprint(path: &Path) -> std::io::Result<String> {
+    // ponytail: directory trees use path/size/mtime only; reading samples from
+    // tens of thousands of rawdata files delayed every run before MPI started.
+    // Add a persisted content manifest only if silent same-size/mtime rewrites
+    // become a real input workflow.
     let mut hash = Sha256::new();
     hash_tree(path, path, &mut hash)?;
     Ok(format!("{:x}", hash.finalize()))
@@ -261,8 +265,6 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> std::io::Result<()>
         hash.update(b"\0");
         if metadata.is_dir() {
             hash_tree(root, &p, hash)?;
-        } else if metadata.is_file() {
-            hash.update(sample_file(&p)?.as_bytes());
         }
         hash.update(b"\n");
     }

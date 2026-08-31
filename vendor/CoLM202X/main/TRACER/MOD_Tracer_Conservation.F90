@@ -628,6 +628,7 @@ CONTAINS
       USE MOD_SPMD_Task, only: CoLM_stop
 #ifdef USEMPI
       USE MOD_SPMD_Task, only: p_comm_worker, p_iam_worker, p_err, p_is_worker
+      USE mpi
 #endif
       IMPLICIT NONE
       real(r8) :: worst_abs, reduced_abs
@@ -651,10 +652,6 @@ CONTAINS
       ! from the rank that owns the worst patch. Standard MPI_MAXLOC on
       ! real+int works with MPI_2DOUBLE_PRECISION wrapping (rank as real).
       real(r8) :: in_pair(2), out_pair(2)
-#ifdef USEMPI
-      include 'mpif.h'
-#endif
-
       IF (ntracers <= 0) RETURN
 
       worst_abs = abs(balance_worst_err)

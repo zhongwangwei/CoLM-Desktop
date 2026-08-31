@@ -871,6 +871,8 @@ MOD_Lulcc_MassEnergyConserve.o: MOD_GroundTemperature.o MOD_Lulcc_TransferTraceR
 MOD_Lulcc_Initialize.o: MOD_Lulcc_Vars_TimeVariables.o
 MOD_Lulcc_Driver.o: MOD_Lulcc_Initialize.o MOD_Lulcc_MassEnergyConserve.o
 CoLMDRIVER.o: $(CAMA_VARS_OBJ)
+CoLMDRIVER.o: MOD_Forcing.o
+MOD_Grid_RiverLakeNetwork.o: MOD_Vector_ReadWrite.o
 CoLMMAIN.o: $(CAMA_COUPLER_OBJ) MOD_Glacier.o MOD_Irrigation.o MOD_Lake.o MOD_LeafInterception.o \
 	MOD_NetSolar.o MOD_NetSolar_Hyper.o MOD_NewSnow.o MOD_RainSnowTemp.o MOD_SimpleOcean.o MOD_Thermal.o
 CoLM.o: $(CAMA_COUPLER_OBJ) MOD_Catch_LateralFlow.o MOD_CheckEquilibrium.o MOD_DA_Main.o \

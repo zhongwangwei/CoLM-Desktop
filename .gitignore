@@ -23,3 +23,10 @@ target/
 CLAUDE.local.md
 # Claude Code 的本机 hook 设置，不共享
 .claude/settings.local.json
+/tmp
+/.omx
+/.workbuddy
+/.claude
+/private
+CLAUDE.md
+/prompts

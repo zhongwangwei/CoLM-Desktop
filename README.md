@@ -34,6 +34,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
 | macOS | Apple Silicon | `.dmg` |
+| macOS | Intel x86_64 | `.dmg` |
 | Windows | x86_64 | `.msi` / `.exe` |
 | Linux | x86_64 | `.AppImage` / `.deb` / `.rpm` |
 

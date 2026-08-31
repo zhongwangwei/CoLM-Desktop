@@ -146,7 +146,7 @@ pub fn run_stage_streaming(
 }
 
 /// 普通 MPI/SPMD 启动：每个 rank 执行同一个程序和同一份 namelist，不引入
-/// master/io/worker 角色。`ranks=1` 保持既有直接启动行为。
+/// master/io/worker 角色。MPI 内核即使只有一个 rank 也必须经 launcher 启动。
 pub fn run_stage_streaming_ranks(
     kernel: &Kernel,
     stage: Stage,
@@ -157,8 +157,12 @@ pub fn run_stage_streaming_ranks(
     on_line: &mut dyn FnMut(&str),
 ) -> Result<StageReport> {
     let exe = kernel.program(stage.program());
-    let (program, args) = launch_command(&exe, namelist, ranks)?;
+    let uses_mpi = kernel.manifest.macros.iter().any(|item| item == "USEMPI");
+    let (program, args) = launch_command(&exe, namelist, ranks, uses_mpi)?;
     let mut cmd = Command::new(&program);
+    if uses_mpi {
+        configure_mpi_runtime(&mut cmd, &exe)?;
+    }
     let mut child = no_console(&mut cmd)
         .args(args)
         .current_dir(work)
@@ -255,9 +259,15 @@ pub fn run_stage_streaming_ranks(
     })
 }
 
-fn launch_command(exe: &Path, namelist: &Path, ranks: usize) -> Result<(PathBuf, Vec<String>)> {
+fn launch_command(
+    exe: &Path,
+    namelist: &Path,
+    ranks: usize,
+    uses_mpi: bool,
+) -> Result<(PathBuf, Vec<String>)> {
     anyhow::ensure!(ranks > 0, "MPI rank count must be at least 1");
-    if ranks == 1 {
+    if !uses_mpi {
+        anyhow::ensure!(ranks == 1, "non-MPI kernels only support one rank");
         return Ok((
             exe.to_path_buf(),
             vec![namelist.to_string_lossy().into_owned()],
@@ -265,16 +275,64 @@ fn launch_command(exe: &Path, namelist: &Path, ranks: usize) -> Result<(PathBuf,
     }
     let program = std::env::var_os("COLM_MPIEXEC")
         .map(PathBuf::from)
+        .or_else(|| bundled_mpi_root(exe).and_then(|root| bundled_mpiexec(&root)))
         .unwrap_or_else(|| PathBuf::from("mpiexec"));
-    Ok((
-        program,
-        vec![
-            "-n".into(),
-            ranks.to_string(),
-            exe.to_string_lossy().into_owned(),
-            namelist.to_string_lossy().into_owned(),
-        ],
-    ))
+    let mut args: Vec<String> = std::env::var("COLM_MPIEXEC_ARGS")
+        .ok()
+        .map(|value| value.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
+    args.extend([
+        "-n".into(),
+        ranks.to_string(),
+        exe.to_string_lossy().into_owned(),
+        namelist.to_string_lossy().into_owned(),
+    ]);
+    Ok((program, args))
+}
+
+fn bundled_mpi_root(exe: &Path) -> Option<PathBuf> {
+    let root = exe.parent()?.parent()?.join("_runtime");
+    root.is_dir().then_some(root)
+}
+
+fn bundled_mpiexec(root: &Path) -> Option<PathBuf> {
+    ["mpiexec", "mpiexec.exe"]
+        .into_iter()
+        .map(|name| root.join("bin").join(name))
+        .find(|path| path.is_file())
+}
+
+fn configure_mpi_runtime(cmd: &mut Command, exe: &Path) -> Result<()> {
+    let Some(root) = bundled_mpi_root(exe) else {
+        return Ok(());
+    };
+    let bin = root.join("bin");
+    let lib = root.join("lib");
+    prepend_env_path(cmd, "PATH", &bin)?;
+    #[cfg(target_os = "linux")]
+    prepend_env_path(cmd, "LD_LIBRARY_PATH", &lib)?;
+    #[cfg(target_os = "macos")]
+    {
+        prepend_env_path(cmd, "DYLD_LIBRARY_PATH", &lib)?;
+        prepend_env_path(cmd, "DYLD_FALLBACK_LIBRARY_PATH", &lib)?;
+    }
+    cmd.env("OPAL_PREFIX", &root)
+        .env("PRTE_PREFIX", &root)
+        .env("PMIX_PREFIX", &root)
+        .env("OMPI_MCA_component_path", lib.join("openmpi"));
+    Ok(())
+}
+
+fn prepend_env_path(cmd: &mut Command, name: &str, first: &Path) -> Result<()> {
+    let mut paths = vec![first.to_path_buf()];
+    if let Some(current) = std::env::var_os(name) {
+        paths.extend(std::env::split_paths(&current));
+    }
+    cmd.env(
+        name,
+        std::env::join_paths(paths).with_context(|| format!("cannot construct {name}"))?,
+    );
+    Ok(())
 }
 
 #[cfg(test)]

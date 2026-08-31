@@ -151,8 +151,11 @@ PROGRAM CoLM
 
 #ifdef USEMPI
 #ifdef USESplitAI
-      integer :: num_procs, my_rank, ierr, color, new_comm
-      CALL MPI_Init(ierr) ! Initialize MPI
+      integer :: num_procs, my_rank, ierr, color, new_comm = MPI_COMM_NULL
+      logical :: split_mpi_inited, split_mpi_owned = .false.
+      CALL MPI_Initialized(split_mpi_inited, ierr)
+      split_mpi_owned = .not. split_mpi_inited
+      IF (split_mpi_owned) CALL MPI_Init(ierr) ! Initialize MPI
       CALL MPI_Comm_size(MPI_COMM_WORLD, num_procs, ierr) ! Get the total number of processes
       CALL MPI_Comm_rank(MPI_COMM_WORLD, my_rank, ierr) ! Get the rank of the current process
       color = 1 ! The pyroot process will be in its own communicator
@@ -171,6 +174,12 @@ PROGRAM CoLM
       CALL getarg (1, nlfile)
 
       CALL read_namelist (nlfile)
+
+#ifndef SinglePoint
+      IF (trim(DEF_DS_precipitation_adjust_scheme) == 'III') THEN
+         CALL CoLM_stop ('Precipitation scheme III is unavailable: this build has no Python MPI server ranks.')
+      ENDIF
+#endif
 
 #ifdef EXTERNAL_LAKE
       CALL read_lake_namelist (nlfile)
@@ -743,6 +752,10 @@ PROGRAM CoLM
 #endif
 
       CALL spmd_exit
+#ifdef USESplitAI
+      IF (new_comm /= MPI_COMM_NULL) CALL MPI_Comm_free(new_comm, ierr)
+      IF (split_mpi_owned) CALL MPI_Finalize(ierr)
+#endif
 #endif
 
 END PROGRAM CoLM

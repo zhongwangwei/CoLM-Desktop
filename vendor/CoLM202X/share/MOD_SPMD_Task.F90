@@ -29,9 +29,10 @@ MODULE MOD_SPMD_Task
 !-----------------------------------------------------------------------------------------
 
    USE MOD_Precision
+#ifdef USEMPI
+   USE mpi
+#endif
    IMPLICIT NONE
-
-   include 'mpif.h'
 
 #ifndef USEMPI
 
@@ -54,45 +55,46 @@ MODULE MOD_SPMD_Task
 #else
    integer, parameter :: p_root = 0
 
-   logical :: p_is_master
-   logical :: p_is_io
-   logical :: p_is_worker
-   logical :: p_is_writeback
+   logical :: p_is_master = .false.
+   logical :: p_is_io = .false.
+   logical :: p_is_worker = .false.
+   logical :: p_is_writeback = .false.
+   logical :: p_mpi_owned = .false.
 
-   integer :: p_comm_glb_plus
-   integer :: p_iam_glb_plus
+   integer :: p_comm_glb_plus = MPI_COMM_NULL
+   integer :: p_iam_glb_plus = -1
 
    ! Global communicator
-   integer :: p_comm_glb
-   integer :: p_iam_glb
-   integer :: p_np_glb
+   integer :: p_comm_glb = MPI_COMM_NULL
+   integer :: p_iam_glb = -1
+   integer :: p_np_glb = 0
 
    ! Processes in the same working group
-   integer :: p_comm_group
-   integer :: p_iam_group
-   integer :: p_np_group
+   integer :: p_comm_group = MPI_COMM_NULL
+   integer :: p_iam_group = -1
+   integer :: p_np_group = 0
 
-   integer :: p_my_group
+   integer :: p_my_group = -1
 
-   integer :: p_address_master
+   integer :: p_address_master = -1
 
    ! Input/output processes
-   integer :: p_comm_io
-   integer :: p_iam_io
-   integer :: p_np_io
+   integer :: p_comm_io = MPI_COMM_NULL
+   integer :: p_iam_io = -1
+   integer :: p_np_io = 0
 
    integer, allocatable :: p_itis_io (:)
    integer, allocatable :: p_address_io (:)
 
    ! Processes carrying out computing work
-   integer :: p_comm_worker
-   integer :: p_iam_worker
-   integer :: p_np_worker
+   integer :: p_comm_worker = MPI_COMM_NULL
+   integer :: p_iam_worker = -1
+   integer :: p_np_worker = 0
 
    integer, allocatable :: p_itis_worker (:)
    integer, allocatable :: p_address_worker (:)
 
-   integer :: p_address_writeback
+   integer :: p_address_writeback = -1
 
    integer :: p_stat (MPI_STATUS_SIZE)
    integer :: p_err
@@ -147,10 +149,28 @@ CONTAINS
    logical mpi_inited
 
       CALL MPI_INITIALIZED (mpi_inited, p_err)
+      p_mpi_owned = .not. mpi_inited
 
-      IF ( .not. mpi_inited ) THEN
+      IF (p_mpi_owned) THEN
          CALL mpi_init (p_err)
       ENDIF
+
+      p_is_io = .false.
+      p_is_worker = .false.
+      p_is_writeback = .false.
+      p_comm_glb_plus = MPI_COMM_NULL
+      p_iam_glb_plus = -1
+      p_comm_group = MPI_COMM_NULL
+      p_iam_group = -1
+      p_np_group = 0
+      p_comm_io = MPI_COMM_NULL
+      p_iam_io = -1
+      p_np_io = 0
+      p_comm_worker = MPI_COMM_NULL
+      p_iam_worker = -1
+      p_np_worker = 0
+      p_my_group = -1
+      p_address_writeback = -1
 
       IF (present(MyComm_r)) THEN
          CALL MPI_Comm_dup (MyComm_r, p_comm_glb, p_err)
@@ -205,6 +225,9 @@ CONTAINS
 
       ELSE
          CALL mpi_comm_split (p_comm_glb_plus, MPI_UNDEFINED, p_iam_glb_plus, p_comm_glb, p_err)
+         p_comm_glb = MPI_COMM_NULL
+         p_iam_glb = -1
+         p_np_glb = 0
          p_is_master = .false.
       ENDIF
 #endif
@@ -378,11 +401,21 @@ CONTAINS
       IF (allocated(p_itis_worker   )) deallocate (p_itis_worker   )
       IF (allocated(p_address_worker)) deallocate (p_address_worker)
 
-      IF (.not. p_is_writeback) THEN
+      IF ((.not. p_is_writeback) .and. p_comm_glb /= MPI_COMM_NULL) THEN
          CALL mpi_barrier (p_comm_glb, p_err)
       ENDIF
 
-      CALL mpi_finalize(p_err)
+#ifdef FLAT_SPMD
+      IF (p_comm_glb /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_glb, p_err)
+#else
+      IF (p_comm_group /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_group, p_err)
+      IF (p_is_io .and. p_comm_io /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_io, p_err)
+      IF (p_is_worker .and. p_comm_worker /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_worker, p_err)
+      IF (p_comm_glb /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_glb, p_err)
+      IF (p_comm_glb_plus /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_glb_plus, p_err)
+#endif
+
+      IF (p_mpi_owned) CALL mpi_finalize(p_err)
 
    END SUBROUTINE spmd_exit
 

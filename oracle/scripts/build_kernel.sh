@@ -73,7 +73,8 @@ esac
 # 不认这个选项。所以 Windows 用本仓库自带的那份，不复用上游的。
 OWN_MAKEOPTS=""
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64)  MAKEOPTS=Makeoptions.Mac-arm ;;
+  Darwin-arm64|Darwin-x86_64)
+                 MAKEOPTS=Makeoptions.Mac-arm ;;
   Linux-*)       MAKEOPTS=Makeoptions.github  ;;
   MINGW64_NT-*|MSYS_NT-*)
                  MAKEOPTS=Makeoptions.msys2
@@ -326,24 +327,28 @@ if [ -n "$SWALLOWED" ]; then
   exit 3
 fi
 
-# MPI 的**头文件路径**。SinglePoint 产物不用 MPI，编译却仍然要它：
-# `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
-# 而 `#ifndef USEMPI` 从下一行才开始 —— SinglePoint 把 USEMPI 关掉了，
-# 头文件照样要找得到。
-#
-# 路径不写死：macOS 的 Homebrew 放在 /opt/homebrew/include（Makeoptions 已经带上），
+# MPI wrapper 与可选模块路径都不写死：macOS 的 Homebrew prefix 随架构变化
+# （Makeoptions 用 `brew --prefix` 获取），
 # 而 Ubuntu 的 libopenmpi-dev 放在 /usr/lib/x86_64-linux-gnu/openmpi/include，
-# 不在默认搜索路径上。问 mpif90 自己要 —— 它正是为此存在的包装器。
+# 不在默认搜索路径上。问 MPI Fortran wrapper 自己要 —— 它正是为此存在的。
 # `--showme:incdirs` 在 OpenMPI 5 上返回空（实测 5.0.9），所以解析 `-show`。
+find_mpi_fortran() {
+  for candidate in mpifort mpifort.openmpi mpif90 mpif90.openmpi; do
+    command -v "$candidate" >/dev/null 2>&1 && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+MPI_FC=$(find_mpi_fortran || true)
 MPI_INC=""
-if command -v mpif90 >/dev/null 2>&1; then
-  MPI_INC=$(mpif90 -show 2>/dev/null | tr ' ' '\n' | grep '^-I' | sort -u | tr '\n' ' ')
+if [ -n "$MPI_FC" ]; then
+  MPI_INC=$($MPI_FC -show 2>/dev/null | tr ' ' '\n' | grep '^-I' | sort -u | tr '\n' ' ')
 fi
 
-# SinglePoint 不白链 MPI；空间预设必须由 mpif90 同时提供头文件和链接参数。
+# SinglePoint 不白链 MPI；空间预设必须由 MPI Fortran wrapper 同时提供头文件和链接参数。
 if [ "$SPATIAL" -eq 1 ]; then
-  command -v mpif90 >/dev/null 2>&1 || { echo "spatial kernel build requires mpif90" >&2; exit 2; }
-  MAKE_FF="mpif90 -fopenmp"
+  [ -n "$MPI_FC" ] || { echo "spatial kernel build requires mpifort/mpif90" >&2; exit 2; }
+  MAKE_FF="$MPI_FC -fopenmp"
 else
   MAKE_FF="gfortran -fopenmp $MPI_INC"
 fi

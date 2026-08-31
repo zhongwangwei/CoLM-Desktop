@@ -1,11 +1,11 @@
 # =======================================================
-# macOS ARM64 / Homebrew gfortran + OpenMPI
+# macOS ARM64/x86_64 / Homebrew gfortran + OpenMPI
 # Local build options; keep Makeoptions.github Linux-only for CI.
 #
 
   FF = mpif90 -fopenmp
 
-  NETCDF_PREFIX ?= /opt/homebrew
+  NETCDF_PREFIX ?= $(shell brew --prefix)
   NETCDF_LIB = $(NETCDF_PREFIX)/lib
   NETCDF_INC = $(NETCDF_PREFIX)/include
 
@@ -41,7 +41,7 @@
 
 
 #============================================================
-# CaMa-Flood Mkinclude (macOS ARM64, gfortran)
+# CaMa-Flood Mkinclude (macOS Homebrew, gfortran)
 
 RM = /bin/rm -f
 CP = /bin/cp

@@ -22,7 +22,6 @@ MODULE MOD_HistGridded
    USE MOD_SpatialMapping
    USE MOD_Namelist
    USE MOD_NetCDFSerial
-   USE MOD_SPMD_Task
 #ifdef USEMPI
    USE MOD_HistWriteBack
 #endif
@@ -498,11 +497,15 @@ ENDIF
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
 
+         itime = 0
          IF (p_is_io) THEN
 
             DO iblkme = 1, gblock%nblkme
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
+#ifdef FLAT_SPMD
+               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
+#endif
                IF (ghist%ycnt(jblk) <= 0) CYCLE
                IF (ghist%xcnt(iblk) <= 0) CYCLE
 
@@ -521,7 +524,11 @@ ENDIF
 
          ENDIF
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+         CALL mpi_allreduce (MPI_IN_PLACE, itime, 1, MPI_INTEGER, MPI_MAX, p_comm_glb, p_err)
+#else
          IF (.not. p_is_master) CALL mpi_bcast (itime, 1, MPI_INTEGER, p_root, p_comm_group, p_err)
+#endif
 #endif
 
       ENDIF
@@ -734,6 +741,9 @@ ENDIF
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
+#ifdef FLAT_SPMD
+               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
+#endif
                IF ((grid%xcnt(iblk) == 0) .or. (grid%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)
@@ -966,6 +976,9 @@ ENDIF
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
+#ifdef FLAT_SPMD
+               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
+#endif
                IF ((grid%xcnt(iblk) == 0) .or. (grid%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)
@@ -1204,6 +1217,9 @@ ENDIF
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
+#ifdef FLAT_SPMD
+               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
+#endif
                IF ((grid%xcnt(iblk) == 0) .or. (grid%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)

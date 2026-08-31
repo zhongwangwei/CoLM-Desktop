@@ -28,7 +28,7 @@ def preprocess(grid: str) -> str:
         ).stdout
 
 
-def test_flat_spatial_mapping_uses_local_replicas_and_collectives() -> None:
+def test_flat_spatial_mapping_exchanges_data_with_block_owners() -> None:
     for grid in ("GRIDBASED", "UNSTRUCTURED", "CATCHMENT"):
         source = preprocess(grid)
         areal = source.split("SUBROUTINE spatial_mapping_build_arealweighted", 1)[1].split(
@@ -42,9 +42,12 @@ def test_flat_spatial_mapping_uses_local_replicas_and_collectives() -> None:
         assert "CALL mpi_recv" not in source
         assert areal.count("allocate (this%glist (0:p_np_io-1))") == 1
         assert bilinear.count("allocate (this%glist (0:p_np_io-1))") == 1
-        assert "pbuff(iproc)%val(ig) = gdata%blk" in source
-        assert "CALL flat_sum_block_2d" in source
-        assert "CALL flat_sum_block_3d" in source
-        assert "CALL flat_sum_block_4d" in source
-        assert "CALL flat_max_block_2d" in source
-        assert source.count("CALL mpi_allreduce") >= 8
+        assert source.count("CALL flat_transpose_grid_lists (this)") == 2
+        assert "allocate (this%io_glist(0:p_np_glb-1))" in source
+        assert "ASSOCIATE (owner_glist => this%io_glist)" in source
+        assert "CALL flat_grid_to_workers_real8_2d" in source
+        assert "CALL flat_grid_to_workers_real8_3d" in source
+        assert "CALL flat_grid_to_workers_integer_2d" in source
+        assert source.count("CALL mpi_alltoallv") >= 4
+        assert "flat_sum_block" not in source
+        assert "flat_max_block" not in source

@@ -44,6 +44,58 @@ MODULE MOD_SrfdataDiag
 
 CONTAINS
 
+#ifdef FLAT_SPMD
+   SUBROUTINE gather_srfdata_diag (local_data, nlocal, nfield, global_data)
+
+   USE MOD_SPMD_Task
+   USE MOD_Block
+   IMPLICIT NONE
+   real(r8), intent(in) :: local_data(:)
+   integer, intent(in) :: nlocal, nfield
+   real(r8), allocatable, intent(out) :: global_data(:,:,:)
+   integer :: iblk, jblk, ixseg, iyseg, iproc, ipos, nseg, xcnt, ycnt
+   integer, allocatable :: counts(:), disps(:), offsets(:)
+   real(r8), allocatable :: gathered(:)
+
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (nlocal, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iproc = 1, p_np_glb-1
+         disps(iproc) = disps(iproc-1) + counts(iproc-1)
+      ENDDO
+      IF (p_is_master) THEN
+         allocate (gathered(max(1,sum(counts))), offsets(0:p_np_glb-1))
+         allocate (global_data(nfield,srf_concat%ginfo%nlon,srf_concat%ginfo%nlat))
+         offsets = 0
+      ELSE
+         allocate (gathered(1), offsets(0:0))
+      ENDIF
+      CALL mpi_gatherv (local_data, nlocal, MPI_REAL8, gathered, counts, disps, &
+         MPI_REAL8, p_root, p_comm_glb, p_err)
+      IF (p_is_master) THEN
+         DO iyseg = 1, srf_concat%nyseg
+            DO ixseg = 1, srf_concat%nxseg
+               iblk = srf_concat%xsegs(ixseg)%blk
+               jblk = srf_concat%ysegs(iyseg)%blk
+               iproc = gblock%pio(iblk,jblk)
+               xcnt = srf_concat%xsegs(ixseg)%cnt
+               ycnt = srf_concat%ysegs(iyseg)%cnt
+               nseg = nfield * xcnt * ycnt
+               ipos = disps(iproc) + offsets(iproc)
+               global_data(:, &
+                  srf_concat%xsegs(ixseg)%gdsp+1:srf_concat%xsegs(ixseg)%gdsp+xcnt, &
+                  srf_concat%ysegs(iyseg)%gdsp+1:srf_concat%ysegs(iyseg)%gdsp+ycnt) = &
+                  reshape(gathered(ipos+1:ipos+nseg), [nfield,xcnt,ycnt])
+               offsets(iproc) = offsets(iproc) + nseg
+            ENDDO
+         ENDDO
+         IF (any(offsets /= counts)) CALL CoLM_stop ('gather_srfdata_diag: packed length mismatch')
+      ENDIF
+      deallocate (counts, disps, offsets, gathered)
+
+   END SUBROUTINE gather_srfdata_diag
+#endif
+
    ! ------ SUBROUTINE ------
    SUBROUTINE srfdata_diag_init (dir_landdata, lc_year)
 
@@ -172,6 +224,10 @@ ENDIF
    character(len=256) :: fileblock
    logical :: fexists, cmode
    integer :: ilastdim
+#ifdef FLAT_SPMD
+   integer :: nlocal, ipos, xloc, yloc
+   real(r8), allocatable :: local_fields(:), global_fields(:,:,:)
+#endif
 
       IF (present(write_mode)) THEN
          wmode = trim(write_mode)
@@ -265,6 +321,40 @@ ENDIF
 
       IF (trim(wmode) == 'one') THEN
 
+#ifdef FLAT_SPMD
+         nlocal = 0
+         DO iyseg = 1, srf_concat%nyseg
+            DO ixseg = 1, srf_concat%nxseg
+               iblk = srf_concat%xsegs(ixseg)%blk
+               jblk = srf_concat%ysegs(iyseg)%blk
+               IF (gblock%pio(iblk,jblk) == p_iam_glb) &
+                  nlocal = nlocal + (ntyps+1) * srf_concat%xsegs(ixseg)%cnt * srf_concat%ysegs(iyseg)%cnt
+            ENDDO
+         ENDDO
+         allocate (local_fields(max(1,nlocal)))
+         ipos = 0
+         DO iyseg = 1, srf_concat%nyseg
+            DO ixseg = 1, srf_concat%nxseg
+               iblk = srf_concat%xsegs(ixseg)%blk
+               jblk = srf_concat%ysegs(iyseg)%blk
+               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
+               xbdsp = srf_concat%xsegs(ixseg)%bdsp
+               ybdsp = srf_concat%ysegs(iyseg)%bdsp
+               xcnt = srf_concat%xsegs(ixseg)%cnt
+               ycnt = srf_concat%ysegs(iyseg)%cnt
+               DO yloc = ybdsp+1, ybdsp+ycnt
+                  DO xloc = xbdsp+1, xbdsp+xcnt
+                     local_fields(ipos+1:ipos+ntyps) = wdata%blk(iblk,jblk)%val(:,xloc,yloc)
+                     local_fields(ipos+ntyps+1) = wdsum%blk(iblk,jblk)%val(xloc,yloc)
+                     ipos = ipos + ntyps + 1
+                  ENDDO
+               ENDDO
+            ENDDO
+         ENDDO
+         CALL gather_srfdata_diag (local_fields, nlocal, ntyps+1, global_fields)
+         deallocate (local_fields)
+#endif
+
          IF (p_is_master) THEN
 
             allocate (vdata (srf_concat%ginfo%nlon, srf_concat%ginfo%nlat, ntyps))
@@ -273,7 +363,12 @@ ENDIF
             allocate (vdsum (srf_concat%ginfo%nlon, srf_concat%ginfo%nlat))
             vdsum(:,:) = spv
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef FLAT_SPMD
+            DO ityp = 1, ntyps
+               vdata(:,:,ityp) = global_fields(ityp,:,:)
+            ENDDO
+            vdsum = global_fields(ntyps+1,:,:)
+#elif defined(USEMPI)
             DO idata = 1, srf_concat%ndatablk
 
                CALL mpi_recv (rmesg, 3, MPI_INTEGER, MPI_ANY_SOURCE, &
@@ -409,6 +504,10 @@ ENDIF
 
          ENDIF
 
+#ifdef FLAT_SPMD
+         IF (allocated(global_fields)) deallocate (global_fields)
+#endif
+
 #if defined(USEMPI) && !defined(FLAT_SPMD)
          IF (p_is_io) THEN
 
@@ -450,16 +549,15 @@ ENDIF
 
       ELSEIF (trim(wmode) == 'block') THEN
 
-#ifdef FLAT_SPMD
-         IF (p_is_master) THEN
-#else
          IF (p_is_io) THEN
-#endif
 
             DO iblkme = 1, gblock%nblkme
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
+#ifdef FLAT_SPMD
+               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
+#endif
                IF ((gdiag%xcnt(iblk) == 0) .or. (gdiag%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)

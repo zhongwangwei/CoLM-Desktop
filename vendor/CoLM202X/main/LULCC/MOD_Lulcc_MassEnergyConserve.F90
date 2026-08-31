@@ -996,7 +996,7 @@ IF (DEF_URBAN_RUN) THEN
 
                         IF (u.le.0 .or. u_.le.0) THEN
                            print *, "Error in LuLccMassEnergyConserve URBAN_MODEL!"
-                           STOP
+                           CALL CoLM_stop ('LulccMassEnergyConserve: invalid urban mapping')
                         ENDIF
 
                         fwsun          (u) = fwsun_          (u_)

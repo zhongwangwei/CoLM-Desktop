@@ -541,7 +541,8 @@ CONTAINS
       IF (allocated(this%yblkme)) deallocate (this%yblkme)
 
 #ifdef FLAT_SPMD
-      ! ponytail: replicate active input blocks until collective reads are needed.
+      ! ponytail: replicate active input blocks so local patch loops never call
+      ! per-request global collectives.
       this%nblkme = count(this%pio >= 0)
 #else
       IF (p_is_io) this%nblkme = count(this%pio == p_iam_glb)

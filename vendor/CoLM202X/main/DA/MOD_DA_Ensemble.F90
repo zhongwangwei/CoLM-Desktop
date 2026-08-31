@@ -20,6 +20,7 @@ MODULE MOD_DA_Ensemble
    USE MOD_DA_Vars_TimeVariables
    USE MOD_Vars_1DForcing
    USE MOD_LandPatch
+   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
    SAVE
 
@@ -126,7 +127,7 @@ CONTAINS
       ENDDO
       IF (info /= 0) THEN
          print *, 'Error: Cholesky decomposition failed'
-         stop
+         CALL CoLM_stop ('Data assimilation Cholesky decomposition failed')
       ENDIF
 
       ! Generate ensemble samples for forcing variables

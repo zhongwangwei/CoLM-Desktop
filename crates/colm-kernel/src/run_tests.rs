@@ -3,15 +3,43 @@ use super::*;
 #[test]
 fn mpi_uses_plain_spmd_launch_without_process_roles() {
     let exe = Path::new("/kernel/colm.x");
-    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 4).expect("mpi");
+    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 4, true).expect("mpi");
     assert_eq!(program, PathBuf::from("mpiexec"));
     assert_eq!(args, ["-n", "4", "/kernel/colm.x", "/case/case.nml"]);
     assert!(!args
         .iter()
         .any(|arg| matches!(arg.as_str(), "master" | "io" | "worker")));
-    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 1).expect("serial");
+    let (program, args) =
+        launch_command(exe, Path::new("/case/case.nml"), 1, false).expect("serial");
     assert_eq!(program, exe);
     assert_eq!(args, ["/case/case.nml"]);
+
+    let (program, args) =
+        launch_command(exe, Path::new("/case/case.nml"), 1, true).expect("one MPI rank");
+    assert_eq!(program, PathBuf::from("mpiexec"));
+    assert_eq!(args, ["-n", "1", "/kernel/colm.x", "/case/case.nml"]);
+}
+
+#[test]
+fn mpi_prefers_the_runtime_bundled_beside_kernel_presets() {
+    let root = std::env::temp_dir().join(format!("colm-bundled-mpi-{}", std::process::id()));
+    let preset = root.join("kernels/unstructured");
+    let runtime_bin = root.join("kernels/_runtime/bin");
+    std::fs::create_dir_all(&preset).expect("preset");
+    std::fs::create_dir_all(&runtime_bin).expect("runtime");
+    let launcher = runtime_bin.join(if cfg!(windows) {
+        "mpiexec.exe"
+    } else {
+        "mpiexec"
+    });
+    std::fs::write(&launcher, b"").expect("launcher");
+
+    let exe = preset.join(if cfg!(windows) { "colm.exe" } else { "colm.x" });
+    let (program, args) = launch_command(&exe, Path::new("case.nml"), 2, true).expect("mpi launch");
+    assert_eq!(program, launcher);
+    assert_eq!(args[0..2], ["-n", "2"]);
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// 一个跑得起来的假内核：三个 `.x` 都是同一个 shell 脚本。
@@ -137,7 +165,9 @@ fn a_completed_mingw_stage_does_not_wait_for_broken_dll_cleanup() {
     let r = run_stage(&k, Stage::MkSrfData, Path::new("case.nml"), &work, &[]).expect("runs");
 
     assert!(r.succeeded());
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // The behavior under test is that we do not wait for the 30-second cleanup.
+    // Leave enough headroom for loaded CI hosts; a five-second wall-clock bound was flaky.
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
 }
 
 #[test]
@@ -191,8 +221,20 @@ fn a_real_kernel_can_actually_be_spawned() {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).expect("create workdir");
 
-    let r = run_stage(&k, Stage::Colm, Path::new("no-such.nml"), &work, &[])
-        .expect("the operating system launched the binary");
+    let ranks = std::env::var("COLM_KERNEL_RANKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let r = run_stage_streaming_ranks(
+        &k,
+        Stage::Colm,
+        Path::new("no-such.nml"),
+        &work,
+        &[],
+        ranks,
+        &mut |_| {},
+    )
+    .expect("the operating system launched the binary");
     assert!(!r.succeeded(), "没给 namelist 却成功了，判成败那一段有问题");
     // 顺带钉住实际用的文件名，免得将来后缀改了却没人发现。
     let name = k.program("colm");

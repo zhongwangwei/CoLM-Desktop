@@ -233,3 +233,46 @@ fn release_and_ci_cover_crop_kernel_bundle() {
         "Windows kernel CI must compile a flat-SPMD spatial kernel"
     );
 }
+
+#[test]
+fn kernel_build_uses_portable_mpi_fortran_wrapper_names() {
+    let script = read("oracle/scripts/build_kernel.sh");
+    assert!(script.contains("for candidate in mpifort mpifort.openmpi mpif90 mpif90.openmpi"));
+    assert!(script.contains("spatial kernel build requires mpifort/mpif90"));
+    assert!(script.contains("MAKE_FF=\"$MPI_FC -fopenmp\""));
+}
+
+#[test]
+fn mpi_runtime_staging_closes_macos_dependencies_and_refreshes_hashes() {
+    let script = read("oracle/scripts/stage_mpi_runtime.sh");
+    assert!(script.contains("root.glob('*/manifest.json')"));
+    assert!(script.contains("data['sha256'] = hashes"));
+    assert!(
+        script.contains("-name \"$base\""),
+        "@rpath deps like libgcc_s can live below lib/gcc/current, not only */lib"
+    );
+    assert!(script.contains("install_name_tool -change \"$dep\" \"@rpath/$base\""));
+}
+
+#[test]
+fn release_smokes_staged_flat_mpi_kernel_with_two_ranks() {
+    let release = read(".github/workflows/release.yml");
+    assert!(release
+        .contains("shell: msys2 {0}\n        run: ./oracle/scripts/stage_mpi_runtime.sh kernels"));
+    assert!(release.contains("COLM_KERNEL_DIR: ${{ github.workspace }}/kernels/latlon"));
+    assert!(release.contains("COLM_KERNEL_RANKS: 2"));
+    assert!(release.contains("cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned"));
+}
+
+#[test]
+fn release_builds_native_macos_installers_for_both_architectures() {
+    let release = read(".github/workflows/release.yml");
+    assert!(release.contains("os: macos-15-intel\n            label: macos-x86_64"));
+    assert!(release.contains("for suffix in _aarch64.dmg _x64.dmg"));
+
+    let script = read("oracle/scripts/build_kernel.sh");
+    assert!(script.contains("Darwin-arm64|Darwin-x86_64)"));
+
+    let makeoptions = read("vendor/CoLM202X/include/Makeoptions.Mac-arm");
+    assert!(makeoptions.contains("NETCDF_PREFIX ?= $(shell brew --prefix)"));
+}

@@ -41,3 +41,16 @@ def test_flat_pixelset_load_filters_int64_indices_locally() -> None:
         assert "sbuff = pack(pixelset%eindex, msk)" in body
         assert "CALL move_alloc(sbuff, pixelset%eindex)" in body
         assert "pixelset%nset = nset" in body
+
+
+def test_flat_mesh_load_replicates_saved_blocks_then_partitions_work() -> None:
+    for grid in ("GRIDBASED", "UNSTRUCTURED", "CATCHMENT"):
+        source = preprocess(grid)
+        body = source.split("SUBROUTINE mesh_load_from_file", 1)[1].split(
+            "END SUBROUTINE mesh_load_from_file", 1
+        )[0]
+
+        assert "CALL mesh_partition_spmd" in body
+        assert "DO iblkme = 1, gblock%nblkme" in body
+        assert "CALL mpi_send" not in body
+        assert "CALL mpi_recv" not in body

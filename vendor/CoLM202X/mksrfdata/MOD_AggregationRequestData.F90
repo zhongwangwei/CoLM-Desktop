@@ -13,8 +13,8 @@ MODULE MOD_AggregationRequestData
 !       data is returned from IO processes.
 !
 !  Created by Shupeng Zhang, May 2023
-!  ponytail: flat ranks use their replicated blocks directly; restore a data
-!  service only if block ownership stops being replicated.
+!  ponytail: flat ranks use replicated active blocks directly; add a data
+!  service only if active-block replication stops being acceptable.
 !-----------------------------------------------------------------------
 
    IMPLICIT NONE
@@ -641,6 +641,9 @@ CONTAINS
          ENDIF
 
       ENDDO
+
+      deallocate (xlist)
+      deallocate (ylist)
 
 #endif
 

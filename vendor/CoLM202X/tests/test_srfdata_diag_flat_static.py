@@ -28,7 +28,7 @@ def preprocess(grid: str) -> str:
         ).stdout
 
 
-def test_flat_surface_diagnostics_write_from_rank_zero_replicas() -> None:
+def test_flat_surface_diagnostics_gather_owned_blocks_for_single_file() -> None:
     for grid in ("GRIDBASED", "UNSTRUCTURED", "CATCHMENT"):
         source = preprocess(grid)
         body = source.split("SUBROUTINE srfdata_map_and_write", 1)[1].split(
@@ -37,7 +37,9 @@ def test_flat_surface_diagnostics_write_from_rank_zero_replicas() -> None:
 
         assert "CALL mpi_send" not in body
         assert "CALL mpi_recv" not in body
+        assert "CALL gather_srfdata_diag" in body
         assert "IF (p_is_master) THEN" in body
-        assert "vdata (xgdsp+1:xgdsp+xcnt" in body
+        assert "global_fields(ityp,:,:)" in body
         block = body.split("ELSEIF (trim(wmode) == 'block') THEN", 1)[1]
-        assert "IF (p_is_master) THEN" in block
+        assert "IF (p_is_io) THEN" in block
+        assert "IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE" in block

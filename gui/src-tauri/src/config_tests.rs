@@ -2515,6 +2515,20 @@ fn runtime_choices_prevent_invalid_singlepoint_combinations() {
 }
 
 #[test]
+fn spatial_runtime_does_not_offer_the_unlaunched_python_mpi_scheme() {
+    let states = runtime_states(
+        "&nl_colm\n\
+         DEF_USE_Forcing_Downscaling=.true.\n\
+         DEF_USE_Forcing_Downscaling_Simple=.false.\n/\n",
+        &["GRIDBASED", "FLAT_SPMD", "USEMPI"],
+    );
+    assert_eq!(
+        runtime_state(&states, "DEF_DS_precipitation_adjust_scheme").allowed_values,
+        ["I", "II"]
+    );
+}
+
+#[test]
 fn batch_visibility_uses_every_case_instead_of_a_representative() {
     let bgc_off = runtime_states(
         "&nl_colm\n\

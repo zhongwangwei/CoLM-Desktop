@@ -665,7 +665,7 @@ CONTAINS
 
    ! Local Variables
    logical, allocatable :: smask(:), rmask(:)
-   integer, allocatable :: req_send(:), req_recv(:)
+   integer, allocatable :: req_send(:), req_recv(:), req_wait(:)
    type(pointer_real8_1d), allocatable :: sbuff(:), rbuff(:)
    integer :: iwork, ielm, inb, iloc
 
@@ -718,7 +718,10 @@ CONTAINS
 
          IF (any(rmask)) THEN
 
-            CALL mpi_waitall(count(rmask), pack(req_recv,rmask), MPI_STATUSES_IGNORE, p_err)
+            allocate (req_wait(count(rmask)))
+            req_wait = pack(req_recv, rmask)
+            CALL mpi_waitall(size(req_wait), req_wait, MPI_STATUSES_IGNORE, p_err)
+            deallocate (req_wait)
 
             DO ielm = 1, numelm
                DO inb = 1, elementneighbour(ielm)%nnb
@@ -732,7 +735,10 @@ CONTAINS
          ENDIF
 
          IF (any(smask)) THEN
-            CALL mpi_waitall(count(smask), pack(req_send,smask), MPI_STATUSES_IGNORE, p_err)
+            allocate (req_wait(count(smask)))
+            req_wait = pack(req_send, smask)
+            CALL mpi_waitall(size(req_wait), req_wait, MPI_STATUSES_IGNORE, p_err)
+            deallocate (req_wait)
          ENDIF
 
          IF (allocated(smask)) deallocate(smask)

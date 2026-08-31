@@ -1827,8 +1827,8 @@ fn field_runtime_state(
         return hidden("土壤初始场已经包含地下水位初值");
     }
 
-    // 完整与简单降尺度共用数组，不能同时开启。子项关闭时不显示；降水方案
-    // III 的 MPI/Python 分支被 #ifndef SinglePoint 包围。
+    // 完整与简单降尺度共用数组，不能同时开启。方案 III 依赖仓库中不存在的
+    // Python MPI server launcher；内核会 fail-fast，界面只暴露可运行的 I/II。
     if name == "DEF_DS_HiresTopographyDataDir" && !c.downscale {
         return hidden("仅完整地形强迫降尺度需要外部高分辨率地形目录");
     }
@@ -1853,7 +1853,7 @@ fn field_runtime_state(
             vec![".false."],
         );
     }
-    if name == "DEF_DS_precipitation_adjust_scheme" && c.single {
+    if name == "DEF_DS_precipitation_adjust_scheme" {
         return (FieldMode::Editable, None, vec!["I", "II"]);
     }
     // 站点工作流生成的 forcing.nml 固定使用 POINT 数据集。POINT 的文件名
