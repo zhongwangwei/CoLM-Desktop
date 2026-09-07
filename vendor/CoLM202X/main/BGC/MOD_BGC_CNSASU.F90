@@ -30,6 +30,7 @@ MODULE MOD_BGC_CNSASU
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_SASU, DEF_USE_DiagMatrix
+   USE MOD_TimeManager, only: isendofyear
    USE MOD_BGC_Vars_TimeInvariants, only: &
        i_met_lit, i_cel_lit, i_lig_lit, i_cwd, i_soil1, i_soil2, i_soil3, floating_cn_ratio
  
@@ -271,7 +272,7 @@ CONTAINS
          ENDDO
       ENDIF
   
-      IF(idate(2) .eq. 365 .and. idate(3) .eq. 86400 - deltim)THEN
+      IF (isendofyear(idate, deltim)) THEN
          ! Copy C transfers from sparse matrix to 2D temporary variables tran_acc and tran_nacc
          ! Calculate the C and N transfer rate by dividing CN transfer by base value saved at begin of each year.
            

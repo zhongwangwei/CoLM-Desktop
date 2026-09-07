@@ -2081,7 +2081,9 @@ CONTAINS
 
    SUBROUTINE adjust_lake_layer (nl_lake, dz_lake, t_lake, lake_icefrac)
 
+   USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    USE MOD_Const_Physical
+   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
 
    integer,  intent(in)    :: nl_lake
@@ -2098,7 +2100,17 @@ CONTAINS
    real(r8) :: lake_icefrac_new (nl_lake)
    real(r8), parameter :: dzlak(10) = (/0.1, 1., 2., 3., 4., 5., 7., 7., 10.45, 10.45/)  ! m
 
+      IF (any(.not. ieee_is_finite(dz_lake))) THEN
+         CALL CoLM_stop ('Lake layer thickness must be finite')
+      ENDIF
+
+      IF (any(dz_lake < 0._r8)) THEN
+         CALL CoLM_stop ('Lake layer thickness must be non-negative')
+      ENDIF
+
       wdsrfm = sum(dz_lake)
+
+      IF (wdsrfm <= 0._r8) RETURN
 
       IF(wdsrfm > 1.)THEN
          depthratio = wdsrfm / sum(dzlak(1:nl_lake))
@@ -2120,7 +2132,8 @@ CONTAINS
          wliqsum = 0.
 
          resi = dz_lake_new(i)
-         DO WHILE (resi > 1.e-8)
+         ! olp=min(resi,resj) exhausts resi or advances j, so exact zero is the loop bound.
+         DO WHILE (resi > 0._r8)
 
             olp = min(resi, resj)
             ticesum = ticesum + olp * lake_icefrac(j) * t_lake(j)

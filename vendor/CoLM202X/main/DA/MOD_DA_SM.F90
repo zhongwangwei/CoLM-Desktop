@@ -275,7 +275,7 @@ MODULE MOD_DA_SM
    real(r8), allocatable :: synop_lon(:)                     ! longitude of all obs
    integer,  allocatable :: synop_id(:)                      ! global id of all obs
    real(r8), allocatable :: synop_tref(:)                    ! 2m temperature of all obs ([K])
-   integer,  allocatable :: synop_qref(:)                    ! 2m humidity of all obs ([K])
+   real(r8), allocatable :: synop_qref(:)                    ! 2m humidity of all obs
 
    ! observations around patch (dimensions changes with patch)
    integer :: num_synop_p
@@ -1773,6 +1773,7 @@ CONTAINS
       IF (allocated (qref_ens_o)) deallocate (qref_ens_o)
 
       IF (allocated (synop_idx)) deallocate (synop_idx)
+      IF (allocated (synop_lut)) deallocate (synop_lut)
       IF (allocated (site_id_worker)) deallocate (site_id_worker)
       IF (allocated (tref_ens_worker)) deallocate (tref_ens_worker)
       IF (allocated (qref_ens_worker)) deallocate (qref_ens_worker)

@@ -260,9 +260,8 @@ CONTAINS
 
             wat_this_m  = wat_this_m  / nac_grace_this
 
-            zwt_acc_prev_m = zwt_acc_prev_m / nac_grace_prev
-
             IF (has_prev_grace_obs) THEN
+               zwt_acc_prev_m = zwt_acc_prev_m / nac_grace_prev
                rnof_prev_m1 = rnof_prev_m1 / nac_grace_this
             ENDIF
 
@@ -367,7 +366,7 @@ CONTAINS
 
       IF (isendofmonth(idate, deltim)) THEN
          IF (p_is_worker .and. (numpatch > 0)) THEN
-            nextmonth = mod(month+1,12)+1
+            nextmonth = mod(month,12)+1
             fslp_k = fslp_k_mon(nextmonth,:)
          ENDIF
       ENDIF
@@ -388,6 +387,8 @@ CONTAINS
       IF (allocated(wat_this_m     )) deallocate(wat_this_m     )
       IF (allocated(rnof_acc_prev_m)) deallocate(rnof_acc_prev_m)
       IF (allocated(rnof_acc_this_m)) deallocate(rnof_acc_this_m)
+      IF (allocated(zwt_acc_prev_m )) deallocate(zwt_acc_prev_m )
+      IF (allocated(zwt_acc_this_m )) deallocate(zwt_acc_this_m )
       IF (allocated(rnof_prev_m0   )) deallocate(rnof_prev_m0   )
       IF (allocated(rnof_prev_m1   )) deallocate(rnof_prev_m1   )
       IF (allocated(rnof_this_m    )) deallocate(rnof_this_m    )
@@ -396,6 +397,8 @@ CONTAINS
       IF (allocated(fslp_k_mon)) deallocate(fslp_k_mon)
       IF (allocated(fslp_k)) deallocate(fslp_k)
 
+      IF (allocated(obsyear)) deallocate(obsyear)
+      IF (allocated(obsmonth)) deallocate(obsmonth)
       IF (allocated(longrace)) deallocate(longrace)
       IF (allocated(latgrace)) deallocate(latgrace)
 

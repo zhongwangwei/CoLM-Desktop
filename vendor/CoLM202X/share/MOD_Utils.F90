@@ -80,17 +80,26 @@ CONTAINS
    SUBROUTINE normalize_longitude (lon)
 
    USE MOD_Precision
+   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
    IMPLICIT NONE
 
    real(r8), intent(inout) :: lon
 
-      DO WHILE (lon >= 180.0)
-         lon = lon - 360.0
-      ENDDO
-
-      DO WHILE (lon < -180.0)
-         lon = lon + 360.0
-      ENDDO
+      IF (.NOT. ieee_is_finite(lon)) THEN
+         CALL CoLM_stop('***** ERROR: longitude must be finite')
+         RETURN
+      ENDIF
+      ! Missing-value sentinels such as -1e36 cannot even represent a 360-degree
+      ! change. The old repeated addition/subtraction never made progress.
+      IF (abs(lon) - 360.0_r8 == abs(lon)) THEN
+         CALL CoLM_stop('***** ERROR: longitude magnitude cannot resolve a full revolution')
+         RETURN
+      ENDIF
+      IF (lon >= 180.0_r8 .OR. lon < -180.0_r8) THEN
+         lon = modulo(lon, 360.0_r8)
+         IF (lon >= 180.0_r8) lon = lon - 360.0_r8
+      ENDIF
 
    END SUBROUTINE normalize_longitude
 
