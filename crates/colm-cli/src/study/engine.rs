@@ -433,6 +433,12 @@ pub(super) fn base_cases(case_root: &Path, spec: &StudySpec) -> Result<Vec<PathB
                 case_root.display()
             );
         }
+        let case_name = p
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("base case directory name is not UTF-8")?;
+        colm_case::validate_case_name(case_name)
+            .with_context(|| format!("invalid base case directory name {case_name:?}"))?;
         if !p.join("case.nml").is_file() {
             bail!("{} is not a case directory", p.display());
         }
@@ -1079,6 +1085,20 @@ mod tests {
         };
         fs::write(&path, serde_json::to_string(&spec).unwrap()).unwrap();
         path
+    }
+
+    #[test]
+    fn base_case_names_must_be_single_safe_components() {
+        let root = temp("bad-base-name");
+        let bad = root.join("bad:name");
+        fs::rename(root.join("caseA"), &bad).unwrap();
+        let mut spec: StudySpec =
+            serde_json::from_str(&fs::read_to_string(spec(&root)).unwrap()).unwrap();
+        spec.base_cases = vec!["bad:name".into()];
+        let error =
+            base_cases(&root, &spec).expect_err("Study base case names become member case names");
+        assert!(error.to_string().contains("base case"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

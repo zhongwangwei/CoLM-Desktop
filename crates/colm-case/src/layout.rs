@@ -70,8 +70,26 @@ pub fn case_name(nml: &Path) -> anyhow::Result<String> {
     let doc =
         colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
     match doc.get("DEF_CASE_NAME") {
-        Some(colm_namelist::Value::Str(s)) => Ok(s.clone()),
+        Some(colm_namelist::Value::Str(s)) => {
+            validate_case_name(s)?;
+            Ok(s.clone())
+        }
         Some(other) => bail!("DEF_CASE_NAME is {other:?}, not a string"),
         None => bail!("no DEF_CASE_NAME in {}", nml.display()),
     }
+}
+
+/// Case names are one path component, not paths. CoLM trims them and stores
+/// them in CHARACTER(256), so reject names that would change inside Fortran.
+pub fn validate_case_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name == name.trim()
+            && name.len() <= 256
+            && !matches!(name, "." | "..")
+            && !name.contains(['/', '\\', ':'])
+            && !name.chars().any(char::is_control),
+        "DEF_CASE_NAME must be a single non-empty name of at most 256 bytes, without path separators, colon, control characters, or leading/trailing whitespace"
+    );
+    Ok(())
 }

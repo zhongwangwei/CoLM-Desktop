@@ -43,7 +43,7 @@ pub struct Entry {
     pub text: String,
     /// 从行首到 `=` 之后的那一段原文（含缩进与对齐空格）
     pub prefix: String,
-    /// 值之后到行尾的原文（含空格与行尾注释）
+    /// 值之后到行尾的原文（含空格、注释与原始换行符）
     pub suffix: String,
 }
 
@@ -53,10 +53,10 @@ pub struct Document {
 }
 
 impl Document {
-    /// 按路径取值。路径写法与文件里一致，如 `DEF_forcing%fprefix(1)`。
+    /// 按路径取最后一次赋值，与 Fortran 一致。写法如 `DEF_forcing%fprefix(1)`。
     pub fn get(&self, path: &str) -> Option<&Value> {
         let want = Path::parse(path).ok()?;
-        self.items.iter().find_map(|i| match i {
+        self.items.iter().rev().find_map(|i| match i {
             Item::Entry(e) if e.path == want => Some(&e.value),
             _ => None,
         })
@@ -67,7 +67,7 @@ impl Document {
     /// 它要求调用方把组名说出来：插错组的字段 CoLM 根本不读。
     pub fn set(&mut self, path: &str, value: Value) -> Result<()> {
         let want = Path::parse(path)?;
-        for item in &mut self.items {
+        for item in self.items.iter_mut().rev() {
             if let Item::Entry(e) = item {
                 if e.path == want {
                     e.text = value.to_string();
@@ -91,32 +91,41 @@ impl Document {
         let want = Path::parse(path)?;
         let mut inside = false;
         let mut found_outside = false;
-        for item in &mut self.items {
+        let mut last_match = None;
+        for (index, item) in self.items.iter().enumerate() {
             match item {
                 Item::GroupStart(s) => {
-                    inside = s.trim().trim_start_matches('&').eq_ignore_ascii_case(group);
+                    inside = group_matches(s, group);
                 }
                 Item::GroupEnd(_) => inside = false,
                 Item::Entry(e) if e.path == want => {
                     if inside {
-                        e.text = value.to_string();
-                        e.value = value;
-                        return Ok(());
+                        last_match = Some(index);
+                    } else {
+                        found_outside = true;
                     }
-                    found_outside = true;
                 }
                 _ => {}
             }
+        }
+        if let Some(index) = last_match {
+            if let Item::Entry(e) = &mut self.items[index] {
+                e.text = value.to_string();
+                e.value = value;
+            }
+            return Ok(());
         }
         if found_outside {
             bail!("{path} already exists outside &{group}");
         }
         // 找那个组的 `/`。GroupStart 的原文形如 `&nl_colm`（可能带缩进）。
         let mut inside = false;
+        let mut newline = "\n";
         for (i, item) in self.items.iter().enumerate() {
             match item {
                 Item::GroupStart(s) => {
-                    inside = s.trim().trim_start_matches('&').eq_ignore_ascii_case(group);
+                    inside = group_matches(s, group);
+                    newline = if s.ends_with("\r\n") { "\r\n" } else { "\n" };
                 }
                 Item::GroupEnd(_) if inside => {
                     // 缩进跟着仓库风格（3 空格），与 `render` 写出来的一致。
@@ -127,7 +136,7 @@ impl Document {
                             text: value.to_string(),
                             value,
                             prefix: format!("   {path} = "),
-                            suffix: String::new(),
+                            suffix: newline.into(),
                         }),
                     );
                     return Ok(());
@@ -160,12 +169,22 @@ impl Document {
     }
 }
 
+fn group_matches(line: &str, group: &str) -> bool {
+    line.split('!')
+        .next()
+        .unwrap_or(line)
+        .trim()
+        .trim_start_matches('&')
+        .trim()
+        .eq_ignore_ascii_case(group)
+}
+
 impl std::fmt::Display for Document {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for item in &self.items {
             match item {
-                Item::Verbatim(s) | Item::GroupStart(s) | Item::GroupEnd(s) => writeln!(f, "{s}")?,
-                Item::Entry(e) => writeln!(f, "{}{}{}", e.prefix, e.text, e.suffix)?,
+                Item::Verbatim(s) | Item::GroupStart(s) | Item::GroupEnd(s) => write!(f, "{s}")?,
+                Item::Entry(e) => write!(f, "{}{}{}", e.prefix, e.text, e.suffix)?,
             }
         }
         Ok(())

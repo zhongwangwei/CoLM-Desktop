@@ -22,6 +22,7 @@ fn main() -> Result<()> {
     let case = args
         .next()
         .context("usage: golden-run <case-name> [--kernel <dir>] [--write-golden]")?;
+    colm_case::validate_case_name(&case)?;
     let mut kernel_dir = PathBuf::from("kernels/default");
     let mut write_golden = false;
     while let Some(a) = args.next() {
@@ -90,11 +91,11 @@ fn main() -> Result<()> {
     )?;
 
     let nml = work.join("case.nml");
-    let case_name = read_case_name(&nml)?;
+    let case_name = colm_case::case_name(&nml)?;
     let out = work.join("out").join(&case_name);
 
     // mkinidata 的产物必须列到**文件**，不能只列 restart/const 目录：
-    // adjudicate 用的是 Path::exists，而目录在 mkinidata 写任何东西之前就已存在，
+    // 目录在 mkinidata 写任何东西之前就已存在，
     // 于是「跑完了但什么都没写」——正是产物校验这条腿存在的理由——恰好抓不到。
     // 两个文件名见 design.md §6.2；block 后缀实测是 _w180_s90。
     let lc = land_cover_label(&nml)?;
@@ -273,19 +274,6 @@ fn land_cover_label(nml: &Path) -> Result<String> {
         bail!("DEF_LC_YEAR {year} cannot be formatted as a four-digit land-cover year");
     }
     Ok(format!("lc{year:04}"))
-}
-
-/// 算例名决定所有产物路径，所以取错了会一路错到「找不到 history」。
-/// 用真解析器而不是字符串查找：后者会被一行注释掉的 `DEF_CASE_NAME` 骗过去。
-fn read_case_name(nml: &Path) -> Result<String> {
-    let text = fs::read_to_string(nml).with_context(|| format!("cannot read {}", nml.display()))?;
-    let doc =
-        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
-    match doc.get("DEF_CASE_NAME") {
-        Some(colm_namelist::Value::Str(s)) => Ok(s.clone()),
-        Some(other) => bail!("DEF_CASE_NAME is {other:?}, not a string"),
-        None => bail!("no DEF_CASE_NAME in {}", nml.display()),
-    }
 }
 
 /// 校验外部 PLUMBER2 文件。换了份数据就该在这里炸，而不是等黄金文件对不上。

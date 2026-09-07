@@ -32,9 +32,7 @@ pub enum Segment {
 ///
 /// 用 `eq_ignore_ascii_case`：Fortran 标识符是 ASCII，且它不分配内存。
 ///
-/// 已知的病态情形：同一个文件里出现两个只有大小写不同的同名字段。
-/// 那样的文件本身就有歧义（Fortran 取最后一个），本模块取第一个。
-/// 上游语料里不存在这种文件。
+/// 重复赋值的生效顺序由 `Document` 处理：与 Fortran 一样取最后一个。
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -142,7 +140,7 @@ impl fmt::Display for Value {
             Value::Bool(false) => write!(f, ".false."),
             Value::Int(i) => write!(f, "{i}"),
             Value::Real { text } => write!(f, "{text}"),
-            Value::Str(s) => write!(f, "'{s}'"),
+            Value::Str(s) => write!(f, "'{}'", s.replace('\'', "''")),
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
                 write!(f, "{}", parts.join(" "))

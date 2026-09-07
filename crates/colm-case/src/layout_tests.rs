@@ -41,7 +41,7 @@ fn hourly_site() -> CaseSpec {
 fn every_written_field_reads_back_as_the_value_it_was_given() {
     // 渲染得好看没有用，CoLM 读的是解析结果。这条把生成的 case.nml
     // 原样喂回 `colm-namelist`，逐字段比对读回来的值。
-    let all = fields(&hourly_site());
+    let all = fields(&hourly_site()).expect("valid test spin-up");
     let req = required(&all);
     let text = render(&req);
     let doc = colm_namelist::parse(&text).expect("the generated case.nml must parse");
@@ -68,7 +68,7 @@ fn every_written_field_reads_back_as_the_value_it_was_given() {
 #[test]
 fn the_order_written_is_the_order_read_back() {
     // 字段顺序稳定，重生成的 diff 才只包含真正改了的行。
-    let all = fields(&hourly_site());
+    let all = fields(&hourly_site()).expect("valid test spin-up");
     let req = required(&all);
     let doc = colm_namelist::parse(&render(&req)).expect("parses");
     let written: Vec<&str> = req.iter().map(|(p, _)| p.as_str()).collect();
@@ -92,4 +92,34 @@ fn the_four_case_files_hang_off_the_case_root() {
     assert_eq!(l.forcing_nml(), PathBuf::from("/w/CN-Cng/forcing.nml"));
     assert_eq!(l.site_nc(), PathBuf::from("/w/CN-Cng/site.nc"));
     assert_eq!(l.out(), PathBuf::from("/w/CN-Cng/out"));
+}
+
+#[test]
+fn case_names_cannot_escape_the_output_directory_or_be_trimmed_by_fortran() {
+    assert!(super::validate_case_name(&"a".repeat(256)).is_ok());
+    assert!(super::validate_case_name(&"a".repeat(257)).is_err());
+    assert!(super::validate_case_name("a\0b").is_err());
+    let dir = std::env::temp_dir().join(format!("colm-case-name-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("case.nml");
+    for name in [
+        "",
+        ".",
+        "..",
+        "../other",
+        "/tmp/other",
+        "a/b",
+        "a\\b",
+        "C:other",
+        " padded",
+        "padded ",
+    ] {
+        std::fs::write(&path, format!("&nl_colm\n DEF_CASE_NAME = '{}'\n/\n", name)).unwrap();
+        assert!(super::case_name(&path).is_err(), "accepted {name:?}");
+    }
+    for name in ["CN-Cng", "my case", "站点_1", "v1.0"] {
+        std::fs::write(&path, format!("&nl_colm\n DEF_CASE_NAME = '{}'\n/\n", name)).unwrap();
+        assert_eq!(super::case_name(&path).unwrap(), name);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

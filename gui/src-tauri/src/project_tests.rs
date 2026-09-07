@@ -70,6 +70,23 @@ fn a_case_without_a_history_file_is_marked_as_not_run() {
 }
 
 #[test]
+fn a_path_like_case_name_cannot_escape_history_lookup() {
+    let root = tmp("escaped-history");
+    make_case(&root, "case", "../escape");
+    let outside = root.join("escape/history");
+    std::fs::create_dir_all(&outside).expect("mkdir outside history");
+    std::fs::write(outside.join("escape_hist_2008-01.nc"), b"not really netcdf").expect("write");
+
+    let cases = list_cases(root.to_string_lossy().into_owned()).expect("lists");
+    assert_eq!(cases[0].name, "case");
+    assert!(
+        !cases[0].has_history,
+        "invalid DEF_CASE_NAME must not read ../escape/history"
+    );
+    assert!(validate_case_name("../escape").is_err());
+}
+
+#[test]
 fn a_missing_directory_says_so_rather_than_returning_nothing() {
     // 返回空列表会被界面渲染成「这里没有算例」，而真相是路径写错了。
     let e = list_cases("/no/such/place/at/all".into()).unwrap_err();

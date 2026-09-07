@@ -145,7 +145,7 @@ fn the_first_day_starts_where_the_forcing_starts() {
         years: 1,
         repeat: 10,
     };
-    let all = fields(&s);
+    let all = fields(&s).expect("valid test spin-up");
     let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
     assert_eq!(by("DEF_simulation_time%start_sec"), Some(Value::Int(84600)));
     assert_eq!(
@@ -165,7 +165,7 @@ fn the_golden_case_needs_twenty_fields() {
     // 决定开不开预热的是 `ststamp < ptstamp`，而 year=0 与原来那版
     // （year 不写、同样是 0）一样让它为假。19 -> 20：臭氧胁迫本身也显式
     // 关闭，桌面端新算例不会再隐式套用固定 100 ppbv。
-    let all = fields(&cn_cng());
+    let all = fields(&cn_cng()).expect("valid test spin-up");
     let req = crate::minimal::required(&all);
     assert_eq!(
         req.len(),
@@ -184,7 +184,7 @@ fn spin_up_is_taken_off_the_front_of_the_window() {
         years: 1,
         repeat: 10,
     };
-    let all = fields(&s);
+    let all = fields(&s).expect("valid test spin-up");
     let by = |n: &str| {
         all.iter()
             .find(|(p, _)| p == n)
@@ -215,7 +215,7 @@ fn spin_up_is_taken_off_the_front_of_the_window() {
         years: 1,
         repeat: 0,
     };
-    let all = fields(&off);
+    let all = fields(&off).expect("valid test spin-up");
     let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
     assert_eq!(
         by("DEF_simulation_time%spinup_year"),
@@ -227,7 +227,7 @@ fn spin_up_is_taken_off_the_front_of_the_window() {
         years: 1,
         repeat: 1,
     };
-    let all = fields(&one);
+    let all = fields(&one).expect("valid test spin-up");
     let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
     assert_eq!(
         by("DEF_simulation_time%spinup_year"),
@@ -240,11 +240,63 @@ fn spin_up_is_taken_off_the_front_of_the_window() {
 }
 
 #[test]
+fn spinup_generation_rejects_nonexistent_cutoff_dates() {
+    let err = spinup_fields(
+        (2008, 2, 29, 0),
+        Spinup {
+            years: 1,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("2009-02-29"), "{err:#}");
+}
+
+#[test]
+fn spinup_generation_rejects_years_outside_i32() {
+    let err = spinup_fields(
+        (i32::MAX - 1, 1, 1, 0),
+        Spinup {
+            years: 2,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("i32"), "{err:#}");
+}
+
+#[test]
+fn spinup_generation_rejects_repeat_outside_fortran_integer() {
+    let err = spinup_fields(
+        (2008, 1, 1, 0),
+        Spinup {
+            years: 1,
+            repeat: i32::MAX as u32 + 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Fortran INTEGER"), "{err:#}");
+}
+
+#[test]
+fn spinup_generation_rejects_cutoff_seconds_outside_a_day() {
+    let err = spinup_fields(
+        (2008, 1, 1, 86_401),
+        Spinup {
+            years: 1,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("civil day"), "{err:#}");
+}
+
+#[test]
 fn a_half_hourly_site_omits_the_timestep_and_an_hourly_one_writes_it() {
     // 88/90 个站点是 1800 秒（等于默认，省略）；US-Ne3 与 US-MMS 是 3600，
     // 必须写出去。这条守住那两个站点不会被静默按 1800 秒跑。
     let has = |s: &CaseSpec| {
-        crate::minimal::required(&fields(s))
+        crate::minimal::required(&fields(s).expect("valid test spin-up"))
             .iter()
             .any(|(p, _)| p == "DEF_simulation_time%timestep")
     };
@@ -258,7 +310,7 @@ fn a_half_hourly_site_omits_the_timestep_and_an_hourly_one_writes_it() {
 fn a_real_renders_with_its_decimal_point() {
     // `{}` 会把 1800.0 印成 "1800"，而那在 namelist 里是**整数**，
     // 赋给 real 字段会让 CoLM 报类型错。里程碑 4 在 HEIGHT_* 上栽过一次。
-    let all = fields(&cn_cng());
+    let all = fields(&cn_cng()).expect("valid test spin-up");
     let ts = all
         .iter()
         .find(|(p, _)| p == "DEF_simulation_time%timestep")
@@ -272,7 +324,7 @@ fn a_real_renders_with_its_decimal_point() {
 fn every_generated_field_is_one_the_schema_knows() {
     // 生成一个 schema 不认识的字段名，说明我们拼错了 —— CoLM 会在
     // `Cannot match namelist object name` 上停，但那要等到跑起来才发现。
-    for (p, _) in fields(&cn_cng()) {
+    for (p, _) in fields(&cn_cng()).expect("valid test spin-up") {
         assert!(colm_schema::find(&p).is_some(), "schema does not know {p}");
     }
 }
@@ -282,7 +334,7 @@ fn every_generated_field_is_settable_from_the_main_namelist() {
     // 里程碑 5b 给每个字段记了它属于哪个 namelist 组。写进 case.nml 的
     // 必须全是 nl_colm 组的 —— 强迫场字段归 forcing.nml，输出变量开关
     // 归 history namelist，写错地方 CoLM 不会认。
-    for (p, _) in fields(&cn_cng()) {
+    for (p, _) in fields(&cn_cng()).expect("valid test spin-up") {
         let f = colm_schema::find(&p).unwrap();
         assert_eq!(f.group, Some("nl_colm"), "{p} belongs to {:?}", f.group);
     }
@@ -293,18 +345,21 @@ fn a_site_without_a_land_cover_class_writes_neither_landtype_field() {
     // 自然站没给地类时不猜。城市算例另有显式回落测试。
     let mut s = cn_cng();
     s.landtype = None;
-    let without = fields(&s);
+    let without = fields(&s).expect("valid test spin-up");
     let names: Vec<&str> = without.iter().map(|(p, _)| p.as_str()).collect();
     assert!(!names.contains(&"SITE_landtype"));
     assert!(!names.contains(&"USE_SITE_landtype"));
     // 其余字段一个不少
-    assert_eq!(fields(&cn_cng()).len() - without.len(), 2);
+    assert_eq!(
+        fields(&cn_cng()).expect("valid test spin-up").len() - without.len(),
+        2
+    );
 }
 
 #[test]
 fn the_land_cover_fields_sit_right_after_the_coordinates() {
     // 顺序稳定，否则每次重生成都是一个大 diff。
-    let all = fields(&cn_cng());
+    let all = fields(&cn_cng()).expect("valid test spin-up");
     let names: Vec<&str> = all.iter().map(|(p, _)| p.as_str()).collect();
     let i = names
         .iter()
@@ -321,7 +376,7 @@ fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
     let mut s = cn_cng();
     s.landtype = None;
     s.urban = true;
-    let all = fields(&s);
+    let all = fields(&s).expect("valid test spin-up");
     let req = crate::minimal::required(&all);
     let names: Vec<&str> = req.iter().map(|(p, _)| p.as_str()).collect();
     assert!(names.contains(&"SITE_landtype"));
@@ -339,7 +394,7 @@ fn an_usgs_urban_case_declares_usgs_urban_land_cover() {
     let mut s = cn_cng();
     s.landtype = Some(crate::build::URBAN_LANDTYPE_USGS);
     s.urban = true;
-    let all = fields(&s);
+    let all = fields(&s).expect("valid test spin-up");
     let req = crate::minimal::required(&all);
     let value = &req
         .iter()
@@ -359,7 +414,11 @@ fn an_urban_case_leaves_the_three_use_site_switches_at_their_defaults() {
     let mut s = cn_cng();
     s.landtype = None;
     s.urban = true;
-    let names: Vec<String> = fields(&s).into_iter().map(|(p, _)| p).collect();
+    let names: Vec<String> = fields(&s)
+        .expect("valid test spin-up")
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
     for n in [
         "USE_SITE_soilparameters",
         "USE_SITE_lakedepth",
@@ -373,7 +432,11 @@ fn an_urban_case_leaves_the_three_use_site_switches_at_their_defaults() {
 fn a_non_urban_case_says_nothing_about_urban() {
     // 不跑城市就一个城市字段都不该出现 —— 写一个用不上的开关，
     // 下一个读配置的人会以为它有意义。
-    let names: Vec<String> = fields(&cn_cng()).into_iter().map(|(p, _)| p).collect();
+    let names: Vec<String> = fields(&cn_cng())
+        .expect("valid test spin-up")
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
     assert!(!names.iter().any(|n| n.contains("URBAN")));
     assert!(!names.iter().any(|n| n.contains("urban")));
 }
@@ -386,7 +449,7 @@ fn the_last_day_stops_where_the_forcing_stops() {
     // —— 那时前两段已经白跑了。
     let mut s = cn_cng();
     s.window.end_sec = 0;
-    let all = fields(&s);
+    let all = fields(&s).expect("valid test spin-up");
     let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
     assert_eq!(
         by("DEF_simulation_time%end_sec"),
@@ -396,7 +459,7 @@ fn the_last_day_stops_where_the_forcing_stops() {
     // 给整天时仍然是 86400 —— 这条与上一条成对，
     // 只验一个方向的话，「永远写 0」也能过。
     s.window.end_sec = 86400;
-    let all = fields(&s);
+    let all = fields(&s).expect("valid test spin-up");
     let by = |n: &str| all.iter().find(|(p, _)| p == n).map(|(_, v)| v.clone());
     assert_eq!(
         by("DEF_simulation_time%end_sec"),
