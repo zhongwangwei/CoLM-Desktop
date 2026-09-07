@@ -132,7 +132,22 @@ pub fn compare(a_path: &Path, b_path: &Path) -> Result<Report> {
             &mut problems,
         );
 
-        // 全部按 f64 读出后逐位比较。NaN 视为相等（两边都 NaN 才算相等）。
+        // 整数不能经 f64：相邻的 64 位 ID 在超过 2^53 后会舍入成同一个值。
+        if matches!(va.vartype(), netcdf::types::NcVariableType::Int(_)) {
+            let xa = va
+                .get_raw_values(netcdf::Extents::All)
+                .with_context(|| format!("cannot read golden {name}"))?;
+            let xb = vb
+                .get_raw_values(netcdf::Extents::All)
+                .with_context(|| format!("cannot read produced {name}"))?;
+            if xa != xb {
+                problems.push(format!("{name}: integer values differ"));
+            }
+            compared += 1;
+            continue;
+        }
+
+        // 浮点数按 f64 逐位比较。NaN 视为相等（两边都 NaN 才算相等）。
         let xa: Vec<f64> = va
             .get_values(netcdf::Extents::All)
             .with_context(|| format!("cannot read golden {name}"))?;
