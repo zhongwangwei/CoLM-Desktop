@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_SrfdataDiag
+   USE MOD_Filesystem, ONLY: make_directory
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
 !
@@ -71,7 +72,7 @@ CONTAINS
 
       landdir = trim(dir_landdata) // '/diag/'
       IF (p_is_master) THEN
-         CALL system('mkdir -p ' // trim(adjustl(landdir)))
+         CALL make_directory(trim(adjustl(landdir)))
       ENDIF
 
       CALL srf_concat%set (gdiag)

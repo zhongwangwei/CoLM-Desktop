@@ -1,4 +1,10 @@
 # Makefile for preprocess programs
+# WARNING: obsolete standalone recipe.
+# This Makefile references removed/renamed shared objects
+# (../share/precision.o, ../io/spmd_task.o, ../io/ncio_serial.o) and is not
+# a supported build path. The shared MOD_Filesystem imports used by current
+# sources do not make this legacy recipe runnable; use the top-level Makefile
+# unless the preprocessing data tooling is deliberately rebuilt.
 
 include ../include/Makeoptions
 

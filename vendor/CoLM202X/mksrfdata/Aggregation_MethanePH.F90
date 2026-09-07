@@ -28,6 +28,7 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
 !    exposes its dimension IDs and start/count vectors as (lon,lat,depth).
 !-----------------------------------------------------------------------
 
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_Srfdata_CompressLevel, DEF_USE_RangeCheck
 #ifdef USEMPI
@@ -82,7 +83,7 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate methane soil pH patches ...'
-         CALL system('mkdir -p ' // trim(adjustl(landdir)))
+         CALL make_directory(trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)

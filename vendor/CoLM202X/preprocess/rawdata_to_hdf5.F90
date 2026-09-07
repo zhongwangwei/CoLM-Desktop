@@ -1,5 +1,6 @@
 PROGRAM bin_to_hdf5
 
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE colm_io_serial
    IMPLICIT NONE
@@ -82,7 +83,7 @@ PROGRAM bin_to_hdf5
    allocate (a_chr1 (nlon,nlat))
    allocate (a_int8 (nlon, nlat))
 
-   CALL execute_command_line ('mkdir -p ' // trim(h5dir) // '/lai/global_30s_10_year_avg')
+   CALL make_directory(trim(h5dir) // '/lai/global_30s_10_year_avg')
 
    DO n8 = 1, 46
       Julian_day = 1 + (N8-1)*8
@@ -210,7 +211,7 @@ PROGRAM bin_to_hdf5
    !-------------------------------
    allocate (a_real8 (nlon,nlat))
 
-   CALL execute_command_line ('mkdir -p ' // trim(h5dir) // '/soil')
+   CALL make_directory(trim(h5dir) // '/soil')
 
    lndname = trim(h5dir) // 'soil/theta_s.h5'
    CALL colm_create_file (lndname)

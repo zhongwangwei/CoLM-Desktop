@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_Lulcc_TransferTrace
+   USE MOD_Filesystem, ONLY: make_directory
 
 !------------------------------------------------------------------------
 !
@@ -226,7 +227,7 @@ CONTAINS
       ENDIF
 
       dir_landdata = DEF_dir_landdata
-      CALL system('mkdir -p ' // trim(dir_landdata) // '/lulcc/' // trim(thisyr))
+      CALL make_directory(trim(dir_landdata) // '/lulcc/' // trim(thisyr))
       DO ilc = 0, N_land_classification
          write(c2, '(i2.2)') ilc
          lndname = trim(dir_landdata)//'/lulcc/'//trim(thisyr)//&

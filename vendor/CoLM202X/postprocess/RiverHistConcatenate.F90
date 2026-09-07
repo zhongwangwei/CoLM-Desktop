@@ -31,6 +31,7 @@ PROGRAM river_hist_concatenate
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Namelist
+   USE MOD_Filesystem, ONLY: list_matching_paths, move_file
    USE MOD_NetCDFSerial
    USE netcdf
 
@@ -61,12 +62,9 @@ PROGRAM river_hist_concatenate
    integer,  allocatable :: vals_i(:)
    logical :: ok
 
+#ifdef USEMPI
       CALL spmd_init
-
-      IF (.not. p_is_master) THEN
-         CALL spmd_exit
-         STOP
-      ENDIF
+#endif
 
       CALL getarg (1, nlfile)
       CALL getarg (2, filetarget)
@@ -76,16 +74,16 @@ PROGRAM river_hist_concatenate
          CALL CoLM_stop ('river_hist_concatenate: missing arguments')
       ENDIF
 
-      ! BEFORE anything shells out. scan_shards builds an ls command with the
-      ! target single-quoted, and a single quote is the one character single
-      ! quotes cannot contain -- a target of  x'; rm -rf ~; #.nc  closes the
-      ! quote and the rest runs as commands. Checking this inside rename_file
-      ! was useless: that runs at the very end, long after the injected
-      ! command has executed.
-      CALL reject_unquotable (nlfile,     'namelist')
-      CALL reject_unquotable (filetarget, 'target')
-
+      ! read_namelist contains MPI broadcasts; every rank must participate before
+      ! non-master ranks leave the postprocess-only program.
       CALL read_namelist (nlfile)
+
+#ifdef USEMPI
+      IF (.not. p_is_master) THEN
+         CALL spmd_exit
+         STOP
+      ENDIF
+#endif
 
       filetmp  = trim(filetarget) // '.tmp'
       filedone = trim(filetarget) // '.complete'
@@ -96,26 +94,11 @@ PROGRAM river_hist_concatenate
       CALL build_output ()
       CALL verify_and_promote ()
 
+#ifdef USEMPI
       CALL spmd_exit
+#endif
 
 CONTAINS
-
-   !> Refuse a path that cannot be safely single-quoted in a shell command.
-   !!
-   !! Every other metacharacter -- space, $, ;, &, backtick, newline -- is
-   !! inert inside single quotes. A single quote is not: it ends the quoted
-   !! string and hands the remainder to the shell. Rather than attempt to
-   !! escape it, refuse the path. This must run before the first shell
-   !! command, not before the last one.
-   SUBROUTINE reject_unquotable (path, what)
-   character(len=*), intent(in) :: path, what
-      IF (index(path, "'") > 0) THEN
-         write(*,'(4A)') 'ERROR: the ', trim(what), ' path contains a single quote, ', &
-            'which cannot be passed safely to the shell:'
-         write(*,'(2A)') '       ', trim(path)
-         CALL CoLM_stop ('river_hist_concatenate: unsupported path')
-      ENDIF
-   END SUBROUTINE reject_unquotable
 
    !> Discover every run segment of this period and check identity agreement.
    !!
@@ -130,15 +113,10 @@ CONTAINS
    real(r8), allocatable :: tref(:), tcmp(:)
    logical :: fexists
 
-      ! Enumerate segments from the shard-0 files on disk. Fortran has no
-      ! portable directory listing, and the segment id is a timestamp that
-      ! cannot be guessed, so shell out once.
+      ! Enumerate segments from the shard-0 files on disk. The segment id is a
+      ! timestamp that cannot be guessed, so list literal path matches natively.
       listfile = trim(filetarget) // '.segments.tmp'
-      ! Single-quote both paths: they come from the command line, so a space
-      ! would split the argument and a metacharacter would be interpreted.
-      ! The glob must stay outside the quotes to remain a glob.
-      CALL system ("ls '" // trim(stem()) // "'_seg*_shard00000.nc 2>/dev/null > '" &
-         // trim(listfile) // "'")
+      CALL list_matching_paths(trim(stem()) // '_seg', '_shard00000.nc', trim(listfile))
 
       nseg = 0
       OPEN (newunit=u, file=trim(listfile), status='old', action='read', iostat=ierr)
@@ -889,42 +867,11 @@ CONTAINS
    !! tells an operator the aggregate is trustworthy.
    SUBROUTINE rename_file (src, dst)
    character(len=*), intent(in) :: src, dst
-   integer :: u, estat, cstat
    logical :: fexists
-   character(len=256) :: cmsg
 
-      ! Both paths come from the command line. Unquoted, a path containing a
-      ! space was split into separate mv arguments -- observed moving the file
-      ! to a truncated name, or failing outright. Single quotes handle every
-      ! shell metacharacter except a single quote itself, which cannot be
-      ! escaped inside them, so that case is refused rather than mangled.
-      ! Defence in depth; the real gate is reject_unquotable at startup.
-      CALL reject_unquotable (src, 'source')
-      CALL reject_unquotable (dst, 'destination')
+      CALL move_file(trim(src), trim(dst))
 
-      inquire (file=trim(dst), exist=fexists)
-      IF (fexists) THEN
-         OPEN (newunit=u, file=trim(dst), status='old'); CLOSE (u, status='delete')
-      ENDIF
-
-      ! execute_command_line, not system: it is standard Fortran and it reports
-      ! the exit status. system() gave none, so mv could fail and the program
-      ! carried on to write the success marker.
-      cmsg = ''
-      CALL execute_command_line ("mv '" // trim(src) // "' '" // trim(dst) // "'", &
-         wait = .true., exitstat = estat, cmdstat = cstat, cmdmsg = cmsg)
-
-      IF (cstat /= 0) THEN
-         write(*,'(A,I0,2A)') 'ERROR: could not run mv (cmdstat=', cstat, '): ', trim(cmsg)
-         CALL CoLM_stop ('river_hist_concatenate: rename failed')
-      ENDIF
-      IF (estat /= 0) THEN
-         write(*,'(A,I0)') 'ERROR: mv exited with status ', estat
-         write(*,'(4A)') '       ', trim(src), ' -> ', trim(dst)
-         CALL CoLM_stop ('river_hist_concatenate: rename failed')
-      ENDIF
-
-      ! A zero exit status is not proof the file arrived. Check the filesystem.
+      ! A zero status is not proof the file arrived. Check the filesystem.
       inquire (file=trim(dst), exist=fexists)
       IF (.not. fexists) THEN
          write(*,'(2A)') 'ERROR: rename reported success but the target is absent: ', trim(dst)

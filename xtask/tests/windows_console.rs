@@ -95,20 +95,32 @@ fn the_frontend_does_not_assume_forward_slashes() {
 }
 
 #[test]
-fn the_kernel_build_quotes_the_paths_it_hands_to_cmd() {
-    // cmd 在**未加引号**的参数里把 `/` 当开关前缀，而 CoLM 自己就会拼出
-    // `DEF_dir_output // '/' // …`（MOD_Namelist.F90:1403）—— 我们在
-    // namelist 里改不掉那一半，只能加引号。CI 的探针量过：
-    // 引号+正斜杠退出码 0，不加引号退出码 1 且目录没建。
+fn the_kernel_creates_directories_without_cmd_expansion() {
     let sh = read("oracle/scripts/build_kernel.sh");
+    assert!(sh.contains("tar -h --exclude=.git -cf - ."));
     assert!(
-        sh.contains("tar -h --exclude=.git -cf - ."),
-        "构建源码归档必须解引用符号链接，否则 MSYS2 会按归档顺序随机失败"
+        !sh.contains("has upstream changed?"),
+        "obsolete mkdir rewrite must be removed"
     );
-    assert!(
-        sh.contains("mkdir \\\"' //"),
-        "构建脚本没有给 mkdir 的路径加引号"
-    );
-    // 改不到任何一行就该停 —— 静默跳过会产出一个跑到一半才死的内核。
-    assert!(sh.contains("has upstream changed?"), "重写没有失败时的守卫");
+    let helper = read("vendor/CoLM202X/share/CoLM_Mkdir.c");
+    assert!(helper.contains("_mkdir(path)"));
+    assert!(helper.contains("mkdir(path, 0777)"));
+    assert!(helper.contains("FindFirstFileA"));
+    assert!(helper
+        .contains("if (dir_len == 2 && prefix[1] == ':' && is_separator(prefix[2])) dir_len = 3;"));
+    assert!(helper.contains("return c == '/';"));
+    assert!(helper.contains("colm_same_file"));
+    assert!(helper.contains("GetFileInformationByHandle"));
+    assert!(helper.contains("MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING)"));
+    assert!(!helper.contains("remove(dst)"));
+    assert!(helper.contains("st_dev == b.st_dev && a.st_ino == b.st_ino"));
+    assert!(helper.contains("rename(src, dst)"));
+    assert!(!helper.contains("system("));
+    let module = read("vendor/CoLM202X/share/MOD_Filesystem.F90");
+    assert!(module.contains("PUBLIC :: make_directory, copy_file, list_matching_paths, move_file"));
+    assert!(module.contains("SUBROUTINE copy_file"));
+    assert!(module.contains("Refusing to copy file onto itself"));
+    let makefile = read("vendor/CoLM202X/Makefile");
+    assert!(makefile.contains("CoLM_Mkdir.o: share/CoLM_Mkdir.c"));
+    assert!(makefile.contains("MOD_Namelist.o: MOD_SPMD_Task.o MOD_Filesystem.o"));
 }

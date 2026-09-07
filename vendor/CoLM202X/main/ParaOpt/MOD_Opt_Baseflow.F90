@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_Opt_Baseflow
+   USE MOD_Filesystem, ONLY: make_directory
 
    USE MOD_Precision
    USE MOD_SPMD_Task
@@ -34,7 +35,7 @@ CONTAINS
       CALL ncio_read_vector (file_restart, 'scale_baseflow', landpatch, scale_baseflow, defval = 1.)
 
       IF (p_is_master) THEN
-         CALL system('mkdir -p ' // trim(DEF_dir_restart)//'/ParaOpt')
+         CALL make_directory(trim(DEF_dir_restart)//'/ParaOpt')
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -103,7 +104,7 @@ CONTAINS
 
             write(strcyc,'(A1,I4.4)') 'c', iter_bf_opt
             IF (p_is_master) THEN
-               CALL system('mkdir -p ' // trim(DEF_dir_restart)//'/ParaOpt/'//strcyc)
+               CALL make_directory(trim(DEF_dir_restart)//'/ParaOpt/'//strcyc)
             ENDIF
 #ifdef USEMPI
             CALL mpi_barrier (p_comm_glb, p_err)

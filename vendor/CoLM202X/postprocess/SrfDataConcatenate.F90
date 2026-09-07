@@ -1,13 +1,14 @@
 PROGRAM srfdata_concatenate
 
    USE MOD_NetCDFSerial
+   USE MOD_Filesystem, ONLY: list_matching_paths
    USE MOD_Utils
    IMPLICIT NONE
 
    ! Local variables 
    character(len=256) :: dirlanddata, dirvar, prefix, varname    
    character(len=256) :: level, typefilter, output, rshp
-   character(len=256) :: tmpfile, file_list_cmd
+   character(len=256) :: tmpfile
    integer :: timevals (8)
 
    logical   :: dim1to2
@@ -73,9 +74,8 @@ PROGRAM srfdata_concatenate
    CALL date_and_time (values = timevals)
    write(tmpfile,'("temp_", I4.4,5I2.2,I3.3, ".txt")') timevals(1:3), timevals(5:8)
 
-   file_list_cmd = 'ls ' // trim(dirlanddata) // '/' // trim(dirvar) &
-      // '/' // trim(prefix) // '*.nc > ' // trim(tmpfile)
-   CALL system(file_list_cmd)
+   CALL list_matching_paths(trim(dirlanddata) // '/' // trim(dirvar) // '/' // trim(prefix), &
+      '.nc', trim(tmpfile))
    
    nfile = 0
    open(unit=10, file=trim(tmpfile))
@@ -124,7 +124,7 @@ PROGRAM srfdata_concatenate
       ENDIF
 
    ENDDO
-   close(10)
+   close(10, status='delete')
 
    ntotal = 0
    bsnmax = -1
@@ -243,7 +243,5 @@ PROGRAM srfdata_concatenate
    IF (allocated(settyp )) deallocate(settyp )
    IF (allocated(order  )) deallocate(order  )
 
-   file_list_cmd = 'rm ' // tmpfile
-   CALL system(file_list_cmd)
 
 END PROGRAM srfdata_concatenate
