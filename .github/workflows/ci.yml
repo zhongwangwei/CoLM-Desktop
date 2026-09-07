@@ -6,6 +6,20 @@ on:
     branches: [main]
 
 jobs:
+  kernel-filesystem:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the kernel compiler
+        run: sudo apt-get update && sudo apt-get install -y gfortran
+      - name: Check literal filesystem paths
+        run: |
+          python3 oracle/scripts/test_kernel_filesystem.py
+          python3 oracle/scripts/test_longitude_normalization.py
+          python3 oracle/scripts/test_physics_audit.py
+          python3 oracle/scripts/test_cama_finite.py
+          python3 oracle/scripts/test_postprocess_startup.py
+
   # 每个 PR 都跑：纯 Rust 侧
   rust:
     strategy:
@@ -73,11 +87,14 @@ jobs:
           # colm-cli tests share NetCDF/HDF5 process state; keep only this binary serial.
           cargo test -p colm-cli --bin colm-cli -- --test-threads=1
           cargo test -p oracle --test judge
+          cargo test -p oracle --test golden_run
           cargo test -p colm-namelist --test roundtrip
           cargo test -p colm-schema --test drift
           cargo test -p oracle --test histmap
           cargo test -p colm-hist --test drift
           cargo test -p xtask --test kernel_profile
+          cargo test -p xtask --test windows_console
+          cargo test -p xtask --test ci_golden_status
           bash vendor/CoLM202X/run/scripts/test_create_newcase_runtime_contract.sh
       # GUI 的前端是纯静态 JS，没有类型检查器 —— 一个拼错的命令名要等到
       # 点下去才会以「command not found」暴露。这条把它提前到 CI。
@@ -90,6 +107,7 @@ jobs:
           node gui/tests/domain.mjs
           node gui/tests/batch.mjs
           node gui/tests/params.mjs
+          node gui/tests/params-race.mjs
           node gui/tests/runview.mjs
           node gui/tests/i18n.mjs
           node gui/tests/sitepaths.mjs
@@ -253,14 +271,17 @@ jobs:
 
   # 让「黄金回归没跑」这件事在 PR 界面上可见，而不是静默缺席。
   golden-status:
+    if: always()
     runs-on: ubuntu-latest
-    needs: rust
+    needs: [rust, golden]
     steps:
       - name: Report golden-regression coverage
+        env:
+          GOLDEN_RESULT: ${{ needs.golden.result }}
         run: |
-          if [ "${{ vars.HAS_PLUMBER2 }}" = "true" ]; then
-            echo "Golden regression ran on the self-hosted runner."
+          if [ "$GOLDEN_RESULT" = "success" ]; then
+            echo "Golden regression passed on the self-hosted runner."
           else
-            echo "::warning::Golden regression was NOT run: no PLUMBER2 data on this runner."
+            echo "::warning::Golden regression did NOT pass: job result is $GOLDEN_RESULT."
             echo "::warning::Green CI here does not mean the numerics are unchanged."
           fi
