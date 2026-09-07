@@ -144,3 +144,19 @@ fn a_directory_without_a_trailing_slash_still_works() {
         "'/data/PLUMBER2s/Forcing/'"
     );
 }
+
+#[test]
+fn paths_escape_fortran_single_quotes() {
+    let mut s = spec();
+    s.dir = "/data/O'Brien/Forcing".into();
+    s.file = "O'Brien_Met.nc".into();
+    let text = render(&s);
+    assert!(
+        text.contains("DEF_dir_forcing              = '/data/O''Brien/Forcing/'"),
+        "{text}"
+    );
+    assert!(
+        text.contains("DEF_forcing%fprefix(1)       = 'O''Brien_Met.nc'"),
+        "{text}"
+    );
+}

@@ -103,21 +103,22 @@ pub fn pair_with_time_in_window(
         .filter(|step| *step > 1.0)
         .fold(f64::INFINITY, f64::min);
     let one_observation_per_label = shortest_model_step <= 1801.0;
-    for k in spinup..model_seconds.len() {
-        if window.is_some_and(|window| !window.contains(model_seconds[k])) {
+    for (k, &model_second) in model_seconds.iter().enumerate().skip(spinup) {
+        if window.is_some_and(|window| !window.contains(model_second)) {
             continue;
         }
         // 派生碳通量与原始 history 都可能遇到非有限值或 CoLM 的巨大负填充值。
         // 这种记录不能进入指标，否则一项缺测就会把整行 RMSE/KGE 变成 NaN。
-        if !model_values[k].is_finite() || model_values[k] <= -1.0e30 {
+        let model_value = model_values[k];
+        if !model_value.is_finite() || model_value <= -1.0e30 {
             continue;
         }
         let mut acc = 0.0;
         let mut n = 0;
         let slots = if one_observation_per_label {
-            [model_seconds[k], model_seconds[k]]
+            [model_second, model_second]
         } else {
-            observation_slots(model_seconds[k])
+            observation_slots(model_second)
         };
         let slot_count = if one_observation_per_label { 1 } else { 2 };
         for want in slots.into_iter().take(slot_count) {
@@ -125,13 +126,16 @@ pub fn pair_with_time_in_window(
             let Some(i) = observation_index(obs.seconds, want, observation_time_is_sorted) else {
                 continue;
             };
-            if obs.qc[i] == QC_MEASURED && obs.values[i] > FILL_VALUE + 1.0 {
+            if obs.qc[i] == QC_MEASURED
+                && obs.values[i].is_finite()
+                && obs.values[i] > FILL_VALUE + 1.0
+            {
                 acc += obs.values[i];
                 n += 1;
             }
         }
         if n >= 1 {
-            out.push((model_seconds[k], model_values[k], acc / n as f64));
+            out.push((model_second, model_value, acc / n as f64));
         }
     }
     out

@@ -975,6 +975,9 @@ fn consistent_integer(rows: &[&Row], index: Option<usize>, label: &str) -> Resul
     let value = consistent_number(rows, index, label)?;
     match value {
         Some(value) if value.fract() != 0.0 => bail!("{label} {value} is not an integer"),
+        Some(value) if value < i32::MIN as f64 || value > i32::MAX as f64 => {
+            bail!("{label} {value} is outside the i32 range")
+        }
         Some(value) => Ok(Some(value as i32)),
         None => Ok(None),
     }

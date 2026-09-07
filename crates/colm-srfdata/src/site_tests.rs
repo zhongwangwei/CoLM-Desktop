@@ -1226,3 +1226,47 @@ fn fill_never_overwrites_a_site_files_own_canopy_height() {
     assert_eq!(x[0], 12.34, "站点自己的值不该被查表结果覆盖");
     assert!(!rep.from_lookup.contains(&"canopy_height".to_string()));
 }
+
+#[test]
+fn landtype_readers_reject_non_integer_or_out_of_range_values() {
+    fn site_with_landtype(path: &std::path::Path, name: &str, value: f64) {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(path).unwrap();
+        for (var, val) in [("longitude", 123.0), ("latitude", 45.0), (name, value)] {
+            file.add_variable::<f64>(var, &[])
+                .unwrap()
+                .put_value(val, ())
+                .unwrap();
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("colm-site-bad-landtype-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let noninteger = dir.join("noninteger.nc");
+    site_with_landtype(&noninteger, "IGBP_classification", 12.5);
+    let err = super::location(&noninteger).unwrap_err();
+    assert!(err.to_string().contains("IGBP_classification"), "{err:#}");
+    let err = super::landtype_for_mode(&noninteger, super::SiteMode::Igbp).unwrap_err();
+    assert!(err.to_string().contains("non-integer"), "{err:#}");
+
+    let out_of_range = dir.join("out-of-range.nc");
+    site_with_landtype(&out_of_range, "USGS_classification", 25.0);
+    let err = super::landtype_for_mode(&out_of_range, super::SiteMode::Usgs).unwrap_err();
+    assert!(err.to_string().contains("outside 1..=24"), "{err:#}");
+
+    let rejected = dir.join("rejected.nc");
+    let err = super::skeleton_with_mode(
+        &rejected,
+        123.0,
+        45.0,
+        Some(25),
+        super::SiteKind::Natural,
+        super::SiteMode::Usgs,
+        false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("1..=24"), "{err:#}");
+    assert!(!rejected.exists());
+}
