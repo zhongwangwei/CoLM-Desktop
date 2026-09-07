@@ -180,7 +180,7 @@ fn is_benign(line: &str) -> bool {
 }
 
 fn path_is_present(path: &Path) -> bool {
-    path.exists()
+    path.is_file()
 }
 
 fn last_nonempty_line(stdout: &str) -> &str {

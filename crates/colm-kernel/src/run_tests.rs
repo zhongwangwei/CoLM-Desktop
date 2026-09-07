@@ -161,13 +161,25 @@ fn a_completed_mingw_stage_does_not_wait_for_broken_dll_cleanup() {
     );
     k.manifest.platform = "MINGW64_NT-test-x86_64".into();
 
-    let started = std::time::Instant::now();
-    let r = run_stage(&k, Stage::MkSrfData, Path::new("case.nml"), &work, &[]).expect("runs");
+    let mut completed = None;
+    let r = run_stage_streaming(
+        &k,
+        Stage::MkSrfData,
+        Path::new("case.nml"),
+        &work,
+        &[],
+        &mut |line| {
+            if line.contains(Stage::MkSrfData.success_marker()) {
+                completed = Some(std::time::Instant::now());
+            }
+        },
+    )
+    .expect("runs");
 
     assert!(r.succeeded());
-    // The behavior under test is that we do not wait for the 30-second cleanup.
-    // Leave enough headroom for loaded CI hosts; a five-second wall-clock bound was flaky.
-    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    // Bound DLL cleanup, not OS executable verification before the child starts.
+    // Removing early termination must still wait 30 seconds and fail this check.
+    assert!(completed.expect("success marker").elapsed() < std::time::Duration::from_secs(15));
 }
 
 #[test]
