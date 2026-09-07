@@ -196,7 +196,11 @@ pub fn pft_components(
             .variable("IGBP_classification")
             .map(|variable| -> Result<Option<i32>> {
                 let values = variable.get_values::<f64, _>(netcdf::Extents::All)?;
-                Ok(values.first().copied().map(|value| value as i32))
+                values
+                    .first()
+                    .copied()
+                    .map(|value| classification_value(file, "IGBP_classification", value, 1..=17))
+                    .transpose()
             })
             .transpose()?
             .flatten(),
@@ -253,6 +257,27 @@ pub fn pft_components(
         component.fraction /= total;
     }
     Ok(out)
+}
+
+fn classification_value(
+    file: &Path,
+    name: &str,
+    value: f64,
+    range: std::ops::RangeInclusive<i32>,
+) -> Result<i32> {
+    let rounded = value.round();
+    if !value.is_finite() || (value - rounded).abs() > 1e-9 {
+        bail!("{} has non-integer {name} {value}", file.display());
+    }
+    if rounded < *range.start() as f64 || rounded > *range.end() as f64 {
+        bail!(
+            "{} has {name} {value} outside {}..={}",
+            file.display(),
+            range.start(),
+            range.end()
+        );
+    }
+    Ok(rounded as i32)
 }
 
 fn string_attribute(file: &netcdf::File, name: &str) -> Option<String> {
@@ -752,9 +777,17 @@ pub fn location(file: &Path) -> Result<Location> {
         // 城市站点文件不带这一项 —— Urban-PLUMBER 的 21 个站一个都没有。
         // 建算例时按内核分类显式写 USGS=1 或 IGBP/PFT/PC=13；这里缺了不是错，
         // 只是「这份文件本身不声明地类体系」。
-        landtype: first("IGBP_classification")?
-            .or(first("USGS_classification")?)
-            .map(|x| x as i32),
+        landtype: match first("IGBP_classification")? {
+            Some(value) => Some(classification_value(
+                file,
+                "IGBP_classification",
+                value,
+                1..=17,
+            )?),
+            None => first("USGS_classification")?
+                .map(|value| classification_value(file, "USGS_classification", value, 1..=24))
+                .transpose()?,
+        },
     })
 }
 
@@ -775,12 +808,16 @@ pub fn landtype_for_mode(file: &Path, mode: SiteMode) -> Result<Option<i32>> {
         return Ok(None);
     };
     let values: Vec<f64> = v.get_values(netcdf::Extents::All)?;
-    Ok(Some(
-        values
-            .first()
-            .copied()
-            .with_context(|| format!("{name} is empty in {}", file.display()))? as i32,
-    ))
+    let value = values
+        .first()
+        .copied()
+        .with_context(|| format!("{name} is empty in {}", file.display()))?;
+    let range = if mode == SiteMode::Usgs {
+        1..=24
+    } else {
+        1..=17
+    };
+    Ok(Some(classification_value(file, name, value, range)?))
 }
 
 /// 从经纬度写出一份最小的站点文件，交给 [`fill`] 补齐。
@@ -830,6 +867,21 @@ pub fn skeleton_with_mode(
     }
     if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
         bail!("site latitude must be finite and within -90..=90, got {lat}");
+    }
+    if let Some(value) = landtype {
+        let range = if mode == SiteMode::Usgs {
+            1..=24
+        } else {
+            1..=17
+        };
+        if !range.contains(&value) {
+            bail!(
+                "site landtype must be within {}..={} for {} mode, got {value}",
+                range.start(),
+                range.end(),
+                mode.as_str()
+            );
+        }
     }
     if crop {
         if !matches!(mode, SiteMode::Pft | SiteMode::Pc) {
@@ -1313,11 +1365,24 @@ fn read_inputs(file: &Path) -> Result<Inputs> {
     {
         Some(v) => {
             let x: Vec<f64> = v.get_values(netcdf::Extents::All)?;
-            Some(
+            let name = if f.variable("IGBP_classification").is_some() {
+                "IGBP_classification"
+            } else {
+                "USGS_classification"
+            };
+            let range = if name == "USGS_classification" {
+                1..=24
+            } else {
+                1..=17
+            };
+            Some(classification_value(
+                file,
+                name,
                 x.first()
                     .copied()
-                    .context("land-cover classification is empty")? as i32,
-            )
+                    .context("land-cover classification is empty")?,
+                range,
+            )?)
         }
         None => None,
     };

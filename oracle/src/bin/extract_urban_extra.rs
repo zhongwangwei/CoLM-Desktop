@@ -154,7 +154,7 @@ fn read_lai_points(file: &Path, sites: &[Site], raw: &Path) -> Result<Points> {
             .get("block")
             .and_then(|v| v.as_str())
             .with_context(|| format!("{}: no block name", s.name))?;
-        let (probe, _, _) = tile_5x5_path(&raw.join("urban_lai_500m"), "URBLAI_0000", lon, lat);
+        let (probe, _, _) = tile_5x5_path(&raw.join("urban_lai_500m"), "URBLAI_0000", lon, lat)?;
         let mine = probe
             .file_name()
             .and_then(|n| n.to_str())
@@ -238,7 +238,7 @@ fn common_lai_years(sites: &[Site], raw: &Path) -> Result<Vec<i32>> {
     let mut common: Option<BTreeSet<i32>> = None;
     let mut first = String::new();
     for s in sites {
-        let (probe, _, _) = tile_5x5_path(&dir, "URBLAI_0000", s.lon, s.lat);
+        let (probe, _, _) = tile_5x5_path(&dir, "URBLAI_0000", s.lon, s.lat)?;
         let stem = probe
             .file_name()
             .and_then(|n| n.to_str())
