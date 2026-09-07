@@ -223,6 +223,7 @@ ENDIF
                               IF (.not.(FOUND)) THEN
                                  PRINT*, 'source patch not found, np', np, 'patchclass_', &
                                     patchclass_(grid_patch_s_(j):grid_patch_e_(j))
+                                 CALL CoLM_stop ('LULCC source patch not found')
                               ENDIF
                            ELSE
                              CYCLE

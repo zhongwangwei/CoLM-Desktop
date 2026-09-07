@@ -88,6 +88,10 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
+      IF (mod(DEF_DA_ENS_NUM, 2) /= 0) THEN
+         CALL CoLM_stop ('Data assimilation DEF_DA_ENS_NUM must be even')
+      ENDIF
+
       ! initialize persistent variables
       IF (.not. initialized) THEN
          allocate(r_prev(numpatch, nvar, DEF_DA_ENS_NUM))
