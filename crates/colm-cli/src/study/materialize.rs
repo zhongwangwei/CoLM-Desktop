@@ -20,6 +20,7 @@ pub fn member_case(
 ) -> Result<PathBuf> {
     validate_component(member_id, "member id")?;
     validate_component(site_id, "site id")?;
+    colm_case::validate_case_name(&format!("{member_id}-{site_id}"))?;
     let baseline = colm_kernel::manifest::absolute(baseline)
         .with_context(|| format!("cannot resolve baseline case {}", baseline.display()))?;
     let source_nml = baseline.join("case.nml");

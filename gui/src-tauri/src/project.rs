@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+pub(crate) fn validate_case_name(name: &str) -> Result<(), String> {
+    colm_case::validate_case_name(name).map_err(|error| format!("{error:#}"))
+}
+
 #[derive(Debug, Serialize)]
 pub struct CaseEntry {
     pub name: String,
@@ -26,12 +30,15 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
         if !d.join("case.nml").is_file() {
             continue;
         }
-        let name = colm_case::case_name(&d.join("case.nml")).unwrap_or_else(|_| {
-            d.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
+        let name = colm_case::case_name(&d.join("case.nml"))
+            .ok()
+            .filter(|name| validate_case_name(name).is_ok())
+            .unwrap_or_else(|| {
+                d.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
         out.push(CaseEntry {
             has_history: history_of(&d, &name).is_some() && !colm_case::results_are_stale(&d),
             dir: d.to_string_lossy().into_owned(),
@@ -60,6 +67,7 @@ pub fn mark_results_stale(dirs: Vec<String>) -> Result<(), String> {
 
 /// 算例里那个唯一的 `*_hist_*.nc`，没有就是没跑过。
 fn history_of(case: &Path, name: &str) -> Option<PathBuf> {
+    validate_case_name(name).ok()?;
     let dir = case.join("out").join(name).join("history");
     let mut h: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?

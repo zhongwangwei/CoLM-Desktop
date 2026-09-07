@@ -153,7 +153,25 @@ fn a_string_longer_than_the_declared_length_is_refused() {
     // 于是产物目录名与用户以为的不同 —— 在这里拦下说得清楚得多。
     let long = "x".repeat(300);
     let e = set_field(SAMPLE.into(), "DEF_CASE_NAME".into(), long).unwrap_err();
-    assert!(e.contains("256") && e.contains("300"), "{e}");
+    assert!(e.contains("256"), "{e}");
+}
+
+#[test]
+fn case_name_must_not_be_a_path() {
+    let too_long = "界".repeat(86);
+    for name in [
+        "../escape",
+        "/tmp/escape",
+        "C:\\escape",
+        "nested/case",
+        " case",
+        "case ",
+        "bad\ncase",
+        too_long.as_str(),
+    ] {
+        let e = set_field(SAMPLE.into(), "def_case_name".into(), name.into()).unwrap_err();
+        assert!(e.contains("DEF_CASE_NAME"), "{name:?}: {e}");
+    }
 }
 
 #[test]
@@ -1013,6 +1031,25 @@ fn process_group_not_filename_decides_the_expert_page() {
 }
 
 #[test]
+fn process_group_comments_do_not_hide_insertable_defaults() {
+    let dir = batch("expert-group-comment", &[SAMPLE]).remove(0);
+    let path = std::path::Path::new(&dir).join("commented_parameter.nml");
+    std::fs::write(
+        &path,
+        "&nl_colm_methane_parameter ! user note\n DEF_METHANE%q10methane=2.0\n/ ! done\n",
+    )
+    .unwrap();
+    let file = super::process_entries(&path, "commented_parameter.nml".into()).unwrap();
+    assert_eq!(file.section, "示踪剂");
+    assert!(
+        file.entries
+            .iter()
+            .any(|entry| entry.path == "DEF_METHANE%f_methane" && entry.unset),
+        "commented group start must still receive known insertable defaults"
+    );
+}
+
+#[test]
 fn process_writes_validate_the_fortran_type_not_a_malformed_file_value() {
     let dir = batch("expert-code-type", &[SAMPLE]).remove(0);
     super::apply_fields(
@@ -1157,6 +1194,60 @@ fn spinup_that_covers_the_whole_window_is_rejected_without_erasing_the_old_value
     let err = set_test_spinup(dirs, 3, 10).unwrap_err();
     assert!(err.contains("预热截止时间必须早于模拟结束时间"), "{err}");
     assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+}
+
+#[test]
+fn spinup_rejects_a_leap_day_cutoff_that_does_not_exist() {
+    let dirs = batch(
+        "spinup-leap-day",
+        &["&nl_colm\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n DEF_simulation_time%end_year=2011\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n/\n"],
+    );
+    let path = std::path::Path::new(&dirs[0]).join("case.nml");
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let err = set_test_spinup(dirs, 1, 1).unwrap_err();
+    assert!(
+        err.contains("spin-up cutoff date is invalid") && err.contains("2009-02-29"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+}
+
+#[test]
+fn spinup_rejects_a_repeat_outside_fortran_integer() {
+    let dirs = batch("spinup-repeat-overflow", &[NML_A]);
+    let err = set_test_spinup(dirs, 1, i32::MAX as u32 + 1).unwrap_err();
+    assert!(err.contains("Fortran INTEGER"), "{err}");
+}
+
+#[test]
+fn spinup_rejects_a_cutoff_second_outside_a_day() {
+    let dirs = batch(
+        "spinup-second-overflow",
+        &["&nl_colm
+ DEF_simulation_time%start_year=2008
+ DEF_simulation_time%start_sec=86401
+ DEF_simulation_time%end_year=2010
+ DEF_simulation_time%end_month=1
+ DEF_simulation_time%end_day=1
+/
+"],
+    );
+    let err = set_test_spinup(dirs, 1, 1).unwrap_err();
+    assert!(err.contains("civil day"), "{err}");
+}
+
+#[test]
+fn spinup_rejects_a_cutoff_year_outside_i32() {
+    let dirs = batch(
+        "spinup-overflow",
+        &["&nl_colm\n DEF_simulation_time%start_year=2147483640\n DEF_simulation_time%end_year=2147483647\n/\n"],
+    );
+    let err = set_test_spinup(dirs, 10, 1).unwrap_err();
+    assert!(
+        err.contains("spin-up cutoff year is outside the supported i32 range"),
+        "{err}"
+    );
 }
 
 #[test]

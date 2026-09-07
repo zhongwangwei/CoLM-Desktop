@@ -1993,6 +1993,7 @@ pub fn apply(
             } else {
                 format!("{site}-tuned")
             };
+            colm_case::validate_case_name(&case_name)?;
             super::materialize::member_case(
                 &baseline,
                 staged,

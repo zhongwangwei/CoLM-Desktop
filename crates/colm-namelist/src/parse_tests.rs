@@ -181,3 +181,45 @@ fn rejects_a_group_that_is_never_closed() {
     let e = parse("&nl_colm\n   a = 1\n").unwrap_err();
     assert!(format!("{e:#}").contains("unterminated"), "{e:#}");
 }
+
+#[test]
+fn quoted_paths_decode_and_reencode_fortran_escaped_delimiters() {
+    for (literal, value) in [
+        ("'O''Brien/it''s!data.nc'", "O'Brien/it's!data.nc"),
+        ("\"a\"\"quoted\"\"/data.nc\"", "a\"quoted\"/data.nc"),
+        ("''''", "'"),
+    ] {
+        let src = format!("&nl_colm\n path = {literal} ! preserved\n/\n");
+        let mut d = doc(&src);
+        assert_eq!(d.get("path"), Some(&Value::Str(value.into())));
+        assert_eq!(d.to_string(), src);
+        d.set("path", Value::Str(value.into())).unwrap();
+        assert_eq!(doc(&d.to_string()).get("path"), d.get("path"));
+        assert!(d.to_string().contains(" ! preserved"));
+    }
+    assert_eq!(Value::Str("O'Brien".into()).to_string(), "'O''Brien'");
+}
+
+#[test]
+fn edits_preserve_line_endings_and_the_absence_of_a_final_newline() {
+    for src in [
+        "&nl_colm\r\n a = 1 ! comment\r\n/\r\n",
+        "&nl_colm\n a = 1 ! comment\n/",
+        "&nl_colm\r\n a = 1 ! comment\n/\r\n",
+    ] {
+        let mut d = doc(src);
+        assert_eq!(d.to_string(), src);
+        d.set("a", Value::Int(2)).unwrap();
+        assert_eq!(d.to_string(), src.replace("a = 1", "a = 2"));
+    }
+    let mut d = doc("&nl_colm\r\n/\r\n");
+    d.insert("a", Value::Int(1), "nl_colm").unwrap();
+    assert_eq!(d.to_string(), "&nl_colm\r\n   a = 1\r\n/\r\n");
+}
+
+#[test]
+fn assignments_and_terminators_must_belong_to_a_group() {
+    for src in ["a = 1\n", "/\n", "&nl_colm\n/\na = 1\n"] {
+        assert!(parse(src).is_err(), "accepted invalid namelist {src:?}");
+    }
+}

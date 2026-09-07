@@ -46,6 +46,136 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 #[test]
+fn cli_case_name_inputs_use_the_shared_single_component_rule() {
+    assert_eq!(
+        super::validated_case_name("AT-Neu tuned".into()).unwrap(),
+        "AT-Neu tuned"
+    );
+    for name in [
+        "",
+        " ../escape",
+        "../escape",
+        "C:bad",
+        "bad/name",
+        "bad\\name",
+    ] {
+        assert!(
+            super::validated_case_name(name.into()).is_err(),
+            "accepted {name:?}"
+        );
+    }
+}
+
+#[test]
+fn metric_pairing_rejects_mismatched_lengths_before_pairing() {
+    let model_error = super::ensure_metric_pair_lengths("f_bad", 3, 4, "Rnet", 3, 3, 3)
+        .expect_err("profile-shaped model variables must not become partial metrics");
+    assert!(
+        model_error
+            .to_string()
+            .contains("4 values for 3 time steps"),
+        "{model_error}"
+    );
+    let obs_error = super::ensure_metric_pair_lengths("f_rnet", 3, 3, "Rnet", 3, 2, 3)
+        .expect_err("observation arrays must have matching lengths");
+    assert!(
+        obs_error.to_string().contains("inconsistent"),
+        "{obs_error}"
+    );
+}
+
+#[test]
+fn output_dir_normalization_handles_root_current_dir_and_trailing_slashes() {
+    let case_nml = PathBuf::from("/tmp/case/case.nml");
+    assert_eq!(
+        super::normalize_output_dir(&case_nml, "out/"),
+        PathBuf::from("/tmp/case/out")
+    );
+    assert_eq!(
+        super::normalize_output_dir(&case_nml, "./out"),
+        PathBuf::from("/tmp/case/out")
+    );
+    assert_eq!(
+        super::normalize_output_dir(&case_nml, "/"),
+        PathBuf::from("/")
+    );
+}
+#[test]
+fn run_rejects_custom_output_dirs_before_using_cli_history_paths() {
+    let d = tmp("custom-output");
+    let case = d.parent().unwrap().join("Case");
+    std::fs::create_dir_all(&case).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'Case'\n DEF_dir_output = 'elsewhere'\n/\n",
+    )
+    .unwrap();
+    let error = super::ensure_cli_output_dir(&case.join("case.nml"), &case.join("out"))
+        .expect_err("custom output roots would split CLI cleanup from Fortran output");
+    assert!(error.to_string().contains("custom output"), "{error}");
+
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'Case'\n DEF_dir_output = 'out/'\n/\n",
+    )
+    .unwrap();
+    super::ensure_cli_output_dir(&case.join("case.nml"), &case.join("out")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn clear_history_refuses_a_symlinked_history_directory() {
+    use std::os::unix::fs::symlink;
+
+    let d = tmp("history-symlink");
+    let out = d.parent().unwrap().to_path_buf();
+    std::fs::remove_dir(&d).unwrap();
+    let external = out.with_file_name(format!(
+        "external-history-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(&external).unwrap();
+    let victim = external.join("Case_hist_2001-01.nc");
+    std::fs::write(&victim, "keep").unwrap();
+    symlink(&external, &d).unwrap();
+
+    let error = super::clear_history(&out).expect_err("must not delete through history symlink");
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert!(victim.is_file(), "external history must not be removed");
+    let _ = std::fs::remove_file(&d);
+    let _ = std::fs::remove_dir_all(&external);
+}
+
+#[cfg(unix)]
+#[test]
+fn clear_history_refuses_a_symlinked_output_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let d = tmp("out-symlink");
+    let case_root = d.parent().unwrap().to_path_buf();
+    let _ = std::fs::remove_dir_all(case_root.join("out"));
+    let external = case_root.with_file_name(format!(
+        "external-out-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(external.join("Case/history")).unwrap();
+    let victim = external.join("Case/history/Case_hist_2001-01.nc");
+    std::fs::write(&victim, "keep").unwrap();
+    symlink(&external, case_root.join("out")).unwrap();
+
+    let error = super::clear_history(&case_root.join("out/Case"))
+        .expect_err("must not delete through case/out symlink");
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert!(victim.is_file(), "external history must not be removed");
+    let _ = std::fs::remove_file(case_root.join("out"));
+    let _ = std::fs::remove_dir_all(&external);
+}
+
+#[test]
 fn all_history_files_are_returned_in_time_order() {
     let d = tmp("all");
     // 故意乱序创建，且跨年 —— 字典序必须仍然等于时间序。
@@ -89,6 +219,12 @@ fn a_time_axis_that_does_not_increase_is_refused() {
     assert!(e.to_string().contains("index 1"), "{e}");
     let e = super::check_increasing(&[1.0, 2.0, 2.0]).expect_err("重复该报错");
     assert!(e.to_string().contains("index 1"), "{e}");
+    let e = super::check_increasing(&[1.0, f64::NAN, 3.0])
+        .expect_err("非有限 history time 不能进结果页");
+    assert!(e.to_string().contains("finite"), "{e}");
+    let e =
+        super::check_increasing(&[1.0, f64::INFINITY]).expect_err("Inf history time 不能进结果页");
+    assert!(e.to_string().contains("finite"), "{e}");
     // 空与单点都是合法的（一个刚跑完第一步的算例）。
     super::check_increasing(&[]).unwrap();
     super::check_increasing(&[7.0]).unwrap();

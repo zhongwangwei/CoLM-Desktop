@@ -13,12 +13,12 @@ pub fn parse(src: &str) -> Result<Document> {
     let mut items = Vec::new();
     let mut in_group = false;
 
-    for (lineno, raw) in src.lines().enumerate() {
-        let line = raw.trim_end_matches('\r');
-        let t = line.trim();
+    for (lineno, raw) in src.split_inclusive('\n').enumerate() {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        let t = line[..comment_start(line).unwrap_or(line.len())].trim();
 
-        if t.is_empty() || t.starts_with('!') {
-            items.push(Item::Verbatim(line.to_string()));
+        if t.is_empty() {
+            items.push(Item::Verbatim(raw.to_string()));
             continue;
         }
         if t.starts_with('&') {
@@ -26,15 +26,21 @@ pub fn parse(src: &str) -> Result<Document> {
                 bail!("line {}: group opened inside a group", lineno + 1);
             }
             in_group = true;
-            items.push(Item::GroupStart(line.to_string()));
+            items.push(Item::GroupStart(raw.to_string()));
             continue;
+        }
+        if !in_group {
+            bail!(
+                "line {}: expected a namelist group before {t:?}",
+                lineno + 1
+            );
         }
         if t == "/" {
             in_group = false;
-            items.push(Item::GroupEnd(line.to_string()));
+            items.push(Item::GroupEnd(raw.to_string()));
             continue;
         }
-        if line.trim_end().ends_with('&') {
+        if t.ends_with('&') {
             bail!("line {}: continuation lines are not supported", lineno + 1);
         }
 
@@ -61,7 +67,7 @@ pub fn parse(src: &str) -> Result<Document> {
             value,
             text: text.to_string(),
             prefix: format!("{}={}", &line[..eq], &rest[..lead]),
-            suffix: rest[lead + text.len()..].to_string(),
+            suffix: raw[eq + 1 + lead + text.len()..].to_string(),
         }));
     }
 
@@ -163,7 +169,10 @@ fn parse_scalar(s: &str) -> Result<Value> {
     if (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
         || (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
     {
-        return Ok(Value::Str(s[1..s.len() - 1].to_string()));
+        let delimiter = &s[..1];
+        return Ok(Value::Str(
+            s[1..s.len() - 1].replace(&delimiter.repeat(2), delimiter),
+        ));
     }
     if s.contains('*') {
         bail!("repeat counts are not supported: {s}");

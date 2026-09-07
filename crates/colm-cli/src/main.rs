@@ -613,6 +613,58 @@ impl Opts {
     }
 }
 
+fn validated_case_name(name: String) -> Result<String> {
+    colm_case::validate_case_name(&name)?;
+    Ok(name)
+}
+
+fn normalize_output_dir(case_nml: &Path, raw: &str) -> PathBuf {
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    let raw = if trimmed.is_empty() { raw } else { trimmed };
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_nml
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+    };
+    normalize_path_components(&joined)
+}
+
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => out.push(".."),
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn ensure_cli_output_dir(case_nml: &Path, expected: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let doc = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    let Some(colm_namelist::Value::Str(raw)) = doc.get("DEF_dir_output") else {
+        return Ok(());
+    };
+    let actual = normalize_output_dir(case_nml, raw);
+    let expected = normalize_output_dir(case_nml, &expected.to_string_lossy());
+    if actual != expected {
+        bail!(
+            "DEF_dir_output {} does not match CLI-managed output directory {}; custom output directories are not supported by colm-cli run",
+            actual.display(),
+            expected.display()
+        );
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------- site-new
 
 /// `colm-cli site-new`：从站点身份与经纬度建立标准命名的 site.nc。
@@ -1126,6 +1178,14 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             .with_context(|| format!("cannot resolve --site {}", given.display()))?
     };
     let out = o.need("--out")?;
+    let name = validated_case_name(o.get("--name").unwrap_or_else(|| {
+        site_raw
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split('_').next())
+            .unwrap_or("case")
+            .to_string()
+    }))?;
     // CoLM 有 55 处不加引号的 `CALL system('mkdir -p ' // trim(dir))`，
     // 路径含空格会被 shell 拆成两个参数 —— 建出一棵影子目录树，而报出来的
     // 是 netCDF 的 `Permission denied`，指向完全错误的方向。
@@ -1358,15 +1418,12 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
     };
     // 预热周期盖过整个窗口时，输出会是空的 —— 而空输出与"跑失败了"在
     // 界面上长得一样。宁可不预热，也不能交出一个没有 history 的算例。
-    if spinup.is_on() && (start.0 + spin_years as i32, start.1, start.2) >= end {
+    if let Some(cutoff) =
+        spinup_cutoff_at_or_after_window_end((start.0, start.1, start.2, start_sec), end, spinup)?
+    {
         eprintln!(
             "warning: spin-up would end at {}-{:02}-{:02}, at or past the window's end              {}-{:02}-{:02} — history is only written after spin-up, so this case would              produce nothing. Spin-up disabled; pass --spinup-years with a shorter period              to keep it.",
-            start.0 + spin_years as i32,
-            start.1,
-            start.2,
-            end.0,
-            end.1,
-            end.2
+            cutoff.0, cutoff.1, cutoff.2, end.0, end.1, end.2
         );
         spinup = Spinup::OFF;
     }
@@ -1378,15 +1435,6 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             &layout.site_nc(),
             mode,
         )?);
-    let name = o.get("--name").unwrap_or_else(|| {
-        site_raw
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.split('_').next())
-            .unwrap_or("case")
-            .to_string()
-    });
-
     // 全球栅格目录。自包含站点一个字节都不读它，因此未传 rawdata 时故意指向
     // 不存在的目录；需要外部地类、LAI/SAI 或土壤变量的站点已由上面的审计
     // 强制要求 `--rawdata`，这里必须原样保留该路径。
@@ -1475,7 +1523,7 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             forcing_namelist: text(&layout.forcing_nml()),
         },
     };
-    let mut all = fields(&spec);
+    let mut all = fields(&spec)?;
     add_subgrid_fields(&mut all, new_mode.subgrid);
     if o.get("--crop").is_some() {
         add_crop_fields(&mut all);
@@ -1492,6 +1540,18 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         all.len() - req.len()
     );
     Ok(out)
+}
+
+fn spinup_cutoff_at_or_after_window_end(
+    start: (i32, u32, u32, u32),
+    end: (i32, u32, u32),
+    spinup: Spinup,
+) -> Result<Option<(i32, u32, u32)>> {
+    if !spinup.is_on() {
+        return Ok(None);
+    }
+    let cutoff = colm_case::spinup_cutoff(start, spinup)?;
+    Ok(((cutoff.0, cutoff.1, cutoff.2) >= end).then_some((cutoff.0, cutoff.1, cutoff.2)))
 }
 
 fn parse_date(s: &str) -> Result<(i32, u32, u32)> {
@@ -1757,6 +1817,7 @@ fn run_case(
         );
     }
     let layout = Layout::new(case);
+    ensure_cli_output_dir(&layout.case_nml(), &layout.out())?;
     let name = colm_case::case_name(&layout.case_nml())?;
     let out = layout.out().join(&name);
     let lc_year = land_cover_year(&layout.case_nml())?;
@@ -2589,6 +2650,26 @@ fn normalized_metric_window(
     }))
 }
 
+fn ensure_metric_pair_lengths(
+    source_label: &str,
+    model_time_len: usize,
+    model_value_len: usize,
+    obs_label: &str,
+    obs_time_len: usize,
+    obs_value_len: usize,
+    obs_qc_len: usize,
+) -> Result<()> {
+    if model_value_len != model_time_len {
+        bail!(
+            "model history source {source_label} has {model_value_len} values for {model_time_len} time steps"
+        );
+    }
+    if obs_value_len != obs_time_len || obs_qc_len != obs_time_len {
+        bail!("observation target {obs_label} has inconsistent time/value/QC lengths");
+    }
+    Ok(())
+}
+
 fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     let MetricsRequest {
         case,
@@ -2677,6 +2758,15 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                 source.label()
             )
         })?;
+        ensure_metric_pair_lengths(
+            &source.label(),
+            m_sec.len(),
+            m_v.len(),
+            &obs_data.label,
+            o_t.len(),
+            obs_data.values.len(),
+            obs_data.qc.len(),
+        )?;
         let s = colm_hist::pair::Series {
             seconds: &o_t,
             values: &obs_data.values,
@@ -4194,6 +4284,20 @@ finally:
 /// 目录不存在（第一次跑）返回 0，不报错。
 fn clear_history(out: &Path) -> Result<usize> {
     let dir = out.join("history");
+    for path in [out.parent(), Some(out), Some(dir.as_path())]
+        .into_iter()
+        .flatten()
+    {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing to clear history through symlink {}",
+                path.display()
+            );
+        }
+    }
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return Ok(0);
     };
@@ -4420,6 +4524,11 @@ fn read_history_many(
 /// 相等也不行：两个文件的时间重叠说明同一时刻被写了两次，
 /// 而配对会把其中一个悄悄丢掉。
 fn check_increasing(t: &[f64]) -> Result<()> {
+    for (i, value) in t.iter().enumerate() {
+        if !value.is_finite() {
+            bail!("time at index {i} is not finite: {value}");
+        }
+    }
     for (i, w) in t.windows(2).enumerate() {
         if w[1] <= w[0] {
             bail!("time goes from {} to {} at index {}", w[0], w[1], i);

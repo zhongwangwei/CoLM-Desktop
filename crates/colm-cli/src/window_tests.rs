@@ -10,6 +10,64 @@ const FS: (i32, u32, u32, u32) = (2008, 1, 1, 0);
 const FE: (i32, u32, u32, u32) = (2010, 1, 1, 0);
 
 #[test]
+fn cli_spinup_window_check_uses_shared_date_validation() {
+    let err = super::spinup_cutoff_at_or_after_window_end(
+        (2008, 2, 29, 0),
+        (2011, 1, 1),
+        colm_case::Spinup {
+            years: 1,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("2009-02-29"), "{err:#}");
+}
+
+#[test]
+fn cli_spinup_window_check_does_not_i32_truncate_huge_years() {
+    let err = super::spinup_cutoff_at_or_after_window_end(
+        (2008, 1, 1, 0),
+        (2010, 1, 1),
+        colm_case::Spinup {
+            years: u32::MAX,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("i32"), "{err:#}");
+}
+
+#[test]
+fn cli_spinup_window_check_rejects_huge_repeat() {
+    let err = super::spinup_cutoff_at_or_after_window_end(
+        (2008, 1, 1, 0),
+        (2010, 1, 1),
+        colm_case::Spinup {
+            years: 1,
+            repeat: i32::MAX as u32 + 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Fortran INTEGER"), "{err:#}");
+}
+
+#[test]
+fn cli_spinup_window_check_still_disables_periods_that_cover_the_window() {
+    assert_eq!(
+        super::spinup_cutoff_at_or_after_window_end(
+            (2008, 1, 1, 0),
+            (2009, 1, 1),
+            colm_case::Spinup {
+                years: 1,
+                repeat: 1
+            },
+        )
+        .unwrap(),
+        Some((2009, 1, 1))
+    );
+}
+
+#[test]
 fn a_window_inside_the_forcing_is_accepted() {
     check_window((2008, 6, 1, 0), (2009, 6, 1, 0), FS, FE).expect("窗口在范围内");
     // 边界本身算在范围内。
