@@ -1,7 +1,7 @@
 #include <define.h>
 
 MODULE MOD_Namelist
-
+   USE MOD_Filesystem, ONLY: make_directory
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
 !
@@ -1710,10 +1710,10 @@ CONTAINS
          DEF_dir_restart  = trim(DEF_dir_output) // '/' // trim(adjustl(DEF_CASE_NAME)) // '/restart'
          DEF_dir_history  = trim(DEF_dir_output) // '/' // trim(adjustl(DEF_CASE_NAME)) // '/history'
 
-         CALL system('mkdir -p ' // trim(adjustl(DEF_dir_output  )))
-         CALL system('mkdir -p ' // trim(adjustl(DEF_dir_landdata)))
-         CALL system('mkdir -p ' // trim(adjustl(DEF_dir_restart )))
-         CALL system('mkdir -p ' // trim(adjustl(DEF_dir_history )))
+         CALL make_directory(trim(adjustl(DEF_dir_output  )))
+         CALL make_directory(trim(adjustl(DEF_dir_landdata)))
+         CALL make_directory(trim(adjustl(DEF_dir_restart )))
+         CALL make_directory(trim(adjustl(DEF_dir_history )))
 
 #ifdef SinglePoint
          DEF_nx_blocks = 360

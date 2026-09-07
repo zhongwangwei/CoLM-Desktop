@@ -231,53 +231,8 @@ if ! is_effective URBAN_MODEL; then
   exit 3
 fi
 
-# Windows 上给 CoLM 建目录的路径**加引号**。
-#
-# CoLM 在 55 处用 `CALL system('mkdir -p ' // 路径)`。`system()` 在 MinGW 上
-# 走 `cmd.exe /c`，而 cmd 在**未加引号**的参数里把 `/` 当开关前缀 ——
-# 于是 `mkdir D:\x\out/CN-Cng/landdata` 报
-# `The syntax of the command is incorrect.`，模型随后往不存在的目录里写。
-#
-# CI 的探针把这件事量清楚了（见 windows-kernel.yml）：
-#
-#   mkdir -p <反斜杠嵌套>   退出码 0   目录建了
-#   mkdir    <尾正斜杠>     退出码 1   目录没建
-#   mkdir    <全正斜杠>     退出码 1   目录没建
-#
-# 所以**问题不在 `-p`**（cmd 把它当成另一个目录名，无害），在斜杠。
-# 而斜杠有一半是上游自己拼的（`DEF_dir_output // '/' // ...`，
-# `MOD_Namelist.F90:1403`），我们在 namelist 里改不掉。加引号能一并挡住
-# 两边的来源：Win32 的 CreateDirectory 本来就认正斜杠，只有 cmd 的**解析器**
-# 不认，而引号正是绕过解析器的办法。
-#
-# **改的是构建出来的那一份源码，不是仓库里的。** `build_kernel.sh` 已经
-# 在改 `include/Makeoptions` 与 `include/define.h` 了，这一处同理；
-# 上游的写法在 Linux/macOS 上完全正确，不该为 Windows 去改它。
-#
-# 顺带说明为什么只处理 mkdir：三个二进制里另有 3 处 `cp`
-# （`MOD_RegionClip.F90`），但它在 `USE_srfdata_from_larger_region` 分支里，
-# 而 SinglePoint 在到达那里之前就 `CoLM_stop` 了（`MKSRFDATA.F90:149`）。
-# `postprocess/` 里的 `mv` 与文件列举也不在这三个二进制内。
-if [ -n "$OWN_MAKEOPTS" ]; then
-  # `|| true` 不是保险，是必需：脚本开着 `set -euo pipefail`，而 grep
-  # 找不到东西时返回 1 —— 下面那次核对**恰恰期望找不到**（都改完了），
-  # 于是「改对了」会让构建以退出码 1 结束，且一个字都不打。实测踩过。
-  files=$(grep -rl "mkdir -p " --include='*.F90' . | grep -vE '/preprocess/|/extends/CaMa/' || true)
-  n=$(echo "$files" | grep -c . || true)
-  # 一处都没有就是这个假设过期了 —— 静默跳过会让 Windows 再次在运行到
-  # 一半时死掉，而构建看上去一切正常。
-  if [ "$n" = "0" ]; then
-    echo "no 'mkdir -p' in the Fortran sources -- has upstream changed?" >&2
-    exit 3
-  fi
-  echo "$files" | xargs sed -i -E "s|CALL system\('mkdir -p ' // (.*)\)[[:space:]]*\$|CALL system('mkdir \"' // \1 // '\"')|"
-  left=$(grep -r "mkdir -p " --include='*.F90' . 2>/dev/null | grep -vE '/preprocess/|/extends/CaMa/' | wc -l | tr -d ' ' || true)
-  echo "Windows: $n 个文件里的 mkdir 路径已加引号，剩余未改 $left 处"
-  if [ "$left" != "0" ]; then
-    echo "some 'mkdir -p' lines did not match the rewrite -- they would fail at run time" >&2
-    exit 3
-  fi
-fi
+# Directory creation uses MOD_Filesystem and native mkdir APIs on every platform.
+# Do not rewrite Fortran commands through cmd.exe: quoting still expands %variables%.
 
 # 注释里的 `/` 紧跟 `*` 会让 cpp 从那里开始**吞代码**。
 #

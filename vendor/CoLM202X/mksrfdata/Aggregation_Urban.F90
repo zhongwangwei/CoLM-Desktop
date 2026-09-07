@@ -20,6 +20,7 @@
 SUBROUTINE Aggregation_Urban (dir_rawdata, dir_srfdata, lc_year, &
                               grid_urban_5km, grid_urban_500m)
 
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -176,7 +177,7 @@ SUBROUTINE Aggregation_Urban (dir_rawdata, dir_srfdata, lc_year, &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Making urban data ('//trim(cyear)//') ...'
-         CALL system('mkdir -p ' // trim(adjustl(landsrfdir)))
+         CALL make_directory(trim(adjustl(landsrfdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -507,7 +508,7 @@ ENDIF
          ENDIF
 
          landsrfdir = trim(dir_srfdata) // '/urban/' // trim(iyear) // '/LAI'
-         CALL system('mkdir -p ' // trim(adjustl(landsrfdir)))
+         CALL make_directory(trim(adjustl(landsrfdir)))
 
          ! allocate and read grided LSAI raw data
          landdir = trim(dir_rawdata)//'/urban_lai_500m/'

@@ -7,6 +7,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
 !
 !  Created by Sisi Chen, Lu Li, 06/2024
 !-----------------------------------------------------------------------
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -106,7 +107,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
 #endif
    IF (p_is_master) THEN
       write(*,'(/, A)') 'Aggregate topography factor ...'
-      CALL system('mkdir -p ' // trim(adjustl(landdir)))
+      CALL make_directory(trim(adjustl(landdir)))
    ENDIF
 #ifdef USEMPI
    CALL mpi_barrier (p_comm_glb, p_err)

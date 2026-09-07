@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_SrfdataRestart
+   USE MOD_Filesystem, ONLY: make_directory
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
 !
@@ -51,7 +52,7 @@ CONTAINS
 #endif
       IF (p_is_master) THEN
          write(*,*) 'Saving land elements ...'
-         CALL system('mkdir -p ' // trim(dir_landdata) // '/mesh/' // trim(cyear))
+         CALL make_directory(trim(dir_landdata) // '/mesh/' // trim(cyear))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -490,7 +491,7 @@ CONTAINS
 #endif
       IF (p_is_master) THEN
          write(*,*) 'Saving Pixel Sets ' // trim(psetname) // ' ...'
-         CALL system('mkdir -p ' // trim(dir_landdata) // '/' // trim(psetname) // '/' // trim(cyear))
+         CALL make_directory(trim(dir_landdata) // '/' // trim(psetname) // '/' // trim(cyear))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)

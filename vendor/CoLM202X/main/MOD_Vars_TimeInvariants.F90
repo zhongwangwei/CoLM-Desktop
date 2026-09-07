@@ -156,6 +156,7 @@ CONTAINS
 END MODULE MOD_Vars_PFTimeInvariants
 
 MODULE MOD_Vars_TimeInvariants
+   USE MOD_Filesystem, ONLY: make_directory
 ! -------------------------------
 ! Created by Yongjiu Dai, 03/2014
 ! -------------------------------
@@ -648,7 +649,7 @@ ENDIF
       write(cyear,'(i4.4)') lc_year
 
       IF (p_is_master) THEN
-         CALL system('mkdir -p ' // trim(dir_restart)//'/const')
+         CALL make_directory(trim(dir_restart)//'/const')
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)

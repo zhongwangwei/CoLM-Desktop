@@ -51,6 +51,8 @@ mkdir_build :
 OBJS_SHARED =    \
 				  MOD_Precision.o              \
 				  MOD_SPMD_Task.o              \
+				  MOD_Filesystem.o             \
+				  CoLM_Mkdir.o                 \
 				  MOD_Namelist.o               \
 				  MOD_Vars_Global.o            \
 				  MOD_Const_Physical.o         \
@@ -93,8 +95,11 @@ OBJS_SHARED =    \
 				  MOD_MeshFilter.o             \
 				  MOD_RegionClip.o
 
-${OBJS_SHARED} : %.o : %.F90 ${HEADER} | mkdir_build
+$(filter-out CoLM_Mkdir.o,${OBJS_SHARED}) : %.o : %.F90 ${HEADER} | mkdir_build
 	${FF} -c ${FOPTS} $(INCLUDE_DIR) -o .bld/$@ $< ${MOD_CMD} .bld
+
+CoLM_Mkdir.o: share/CoLM_Mkdir.c | mkdir_build
+	${CC} ${CFLAGS} -c -o .bld/$@ $<
 
 OBJS_SHARED_T = $(addprefix .bld/,${OBJS_SHARED})
 
@@ -709,11 +714,12 @@ $(OBJS_POST3):%.o:%.F90 ${HEADER} ${OBJS_SHARED} | mkdir_build
 # edges preserve only the remaining MODULE/USE ordering and leave unrelated
 # objects available to a parallel make.
 MOD_SPMD_Task.o: MOD_Precision.o
-MOD_Namelist.o: MOD_SPMD_Task.o
+MOD_Filesystem.o: MOD_SPMD_Task.o
+MOD_Namelist.o: MOD_SPMD_Task.o MOD_Filesystem.o
 MOD_Vars_Global.o: MOD_Namelist.o
 MOD_Const_Physical.o: MOD_Precision.o
 MOD_Const_LC.o: MOD_Vars_Global.o
-MOD_Utils.o: MOD_Precision.o
+MOD_Utils.o: MOD_Precision.o MOD_SPMD_Task.o
 MOD_UserDefFun.o: MOD_Precision.o
 MOD_TimeManager.o: MOD_UserDefFun.o
 MOD_Const_PFT.o: MOD_TimeManager.o MOD_Vars_Global.o
