@@ -11,12 +11,13 @@ import { markResultsStale } from './results.js';
 import { editTarget } from './batch.js';
 import { $, status } from './ui.js';
 
-export async function renderHistVars(box) {
+export async function renderHistVars(box, stillCurrent = () => true) {
   const kernel = $('kernel').value;
   if (!kernel) { box.innerHTML = '<p class="muted">当前安装缺少与向导配置匹配的运行产物</p>'; return; }
   let vars;
   try { vars = await invoke('hist_vars', { text: state.text, kernelDir: kernel }); }
-  catch (e) { box.textContent = String(e); return; }
+  catch (e) { if (stillCurrent()) box.textContent = String(e); return; }
+  if (!stillCurrent()) return;
 
   const n = { on: 0, blocked: 0, unknown: 0 };
   for (const v of vars) {

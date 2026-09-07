@@ -417,7 +417,11 @@ function renderScope(box, dirs = editTarget()) {
   box.appendChild(bar);
 }
 
-export async function renderFields() {
+let renderFieldsGeneration = 0;
+
+export async function renderFields(externalStillCurrent = () => true) {
+  const generation = ++renderFieldsGeneration;
+  const stillCurrent = () => generation === renderFieldsGeneration && externalStillCurrent();
   wireParameterSearch();
   wireParameterTransfer();
   renderParameterSearch();
@@ -433,7 +437,8 @@ export async function renderFields() {
   for (const [, basic] of basics) basic.textContent = '';
   for (const [, process] of processes) process.textContent = '';
   // 时间在基本设定，输出在运行页，但仍写回同一份 case.nml。
-  await renderTiming();
+  await renderTiming(stillCurrent);
+  if (!stillCurrent()) return;
   if (!state.text) {
     output.innerHTML = '<p class="muted">先选一个算例</p>';
     for (const [, basic] of basics) {
@@ -447,12 +452,22 @@ export async function renderFields() {
   }
   // 批量写命令返回批次第一份文本；基本设定仍应显示算例列表当前站点。
   if (state.selected) {
-    try { state.text = await invoke('read_text', { path: state.selected.dir + '/case.nml' }); }
-    catch (e) { status(e); return; }
+    const selectedDir = state.selected.dir;
+    try {
+      const text = await invoke('read_text', { path: selectedDir + '/case.nml' });
+      if (!stillCurrent() || state.selected?.dir !== selectedDir) return;
+      state.text = text;
+    }
+    catch (e) { if (stillCurrent() && state.selected?.dir === selectedDir) status(e); return; }
   }
   let entries;
-  try { entries = await invoke('read_case', { text: state.text }); }
+  try {
+    const text = state.text;
+    entries = await invoke('read_case', { text });
+    if (!stillCurrent() || state.text !== text) return;
+  }
   catch (e) {
+    if (!stillCurrent()) return;
     for (const [, target] of basics.concat(processes)) target.textContent = String(e);
     status(e);
     publishFlows(flows);
@@ -480,11 +495,14 @@ export async function renderFields() {
   const batchDirs = editTarget();
   const kernelDir = $('kernel').value;
   try {
-    state.parameterLctContexts = kernelDir
+    const contexts = kernelDir
       ? await invoke('land_cover_contexts', {
         dirs: parameterCases.map(item => item.dir), kernelDir,
       }) : [];
+    if (!stillCurrent()) return;
+    state.parameterLctContexts = contexts;
   } catch (error) {
+    if (!stillCurrent()) return;
     state.parameterLctContexts = [];
     status(error);
   }
@@ -492,23 +510,29 @@ export async function renderFields() {
   const processDirs = expertDirs();
   // 只在明确选择多站点时提示差异；单站编辑不需要拿其他站点的值干扰当前行。
   try {
-    state.varies = new Set(await invoke('varying_fields', {
+    const varies = await invoke('varying_fields', {
       dirs: [...new Set(batchDirs.concat(processDirs))],
-    }));
-  } catch (e) { state.varies = new Set(); status(e); }
+    });
+    if (!stillCurrent()) return;
+    state.varies = new Set(varies);
+  } catch (e) { if (!stillCurrent()) return; state.varies = new Set(); status(e); }
   const representativeDir = selectedProcessCase?.dir ?? processDirs[0];
   let processInGroup = inGroup;
   if (representativeDir && representativeDir !== state.selected?.dir) {
     try {
       const text = await invoke('read_text', { path: representativeDir + '/case.nml' });
-      processInGroup = complete(await invoke('read_case', { text }));
-    } catch (e) { status(e); return; }
+      if (!stillCurrent()) return;
+      const processEntries = await invoke('read_case', { text });
+      if (!stillCurrent()) return;
+      processInGroup = complete(processEntries);
+    } catch (e) { if (stillCurrent()) status(e); return; }
   }
   let fieldStates = new Map();
   let processFieldStates = new Map();
   try {
     if (!kernelDir) throw new Error('请先选择或安装 CoLM 内核');
     const runtimeStates = await invoke('field_states_batch', { dirs: batchDirs, kernelDir });
+    if (!stillCurrent()) return;
     fieldStates = new Map(runtimeStates.map(item => [item.name, item]));
     if (fieldStates.size !== state.fields.length) {
       throw new Error(`字段状态不完整：后端返回 ${fieldStates.size}/${state.fields.length}`);
@@ -518,12 +542,14 @@ export async function renderFields() {
       processFieldStates = fieldStates;
     } else {
       const processStates = await invoke('field_states_batch', { dirs: processDirs, kernelDir });
+      if (!stillCurrent()) return;
       processFieldStates = new Map(processStates.map(item => [item.name, item]));
       if (processFieldStates.size !== state.fields.length) {
         throw new Error(`过程字段状态不完整：后端返回 ${processFieldStates.size}/${state.fields.length}`);
       }
     }
   } catch (e) {
+    if (!stillCurrent()) return;
     // 运行时规则拿不到时必须 fail closed。退回编译期过滤会把 SinglePoint、
     // 城市或 BGC 下无效的参数重新露出来，让用户以为它们会生效。
     const message = `无法核实当前配置下哪些参数有效：${e}`;
@@ -543,6 +569,7 @@ export async function renderFields() {
     publishFlows(flows);
     return;
   }
+  if (!stillCurrent()) return;
   state.fieldStates = fieldStates;
   renderParameterSearch();
   const withContextDefaults = (items, states) => items.map(e => {
@@ -609,8 +636,10 @@ export async function renderFields() {
     }
   }
   if (state.expert) {
-    await renderExpertProcessFiles(processes, flows);
-    await renderPftParameters(processes, flows);
+    await renderExpertProcessFiles(processes, flows, stillCurrent);
+    if (!stillCurrent()) return;
+    await renderPftParameters(processes, flows, stillCurrent);
+    if (!stillCurrent()) return;
   }
 
   if (outputFields.length) {
@@ -626,7 +655,9 @@ export async function renderFields() {
     output.innerHTML = '<p class="muted">当前配置没有可配置的输出参数。</p>';
   }
   publishFlows(flows);
-  await renderHistVars(hist);
+  if (!stillCurrent()) return;
+  await renderHistVars(hist, stillCurrent);
+  if (!stillCurrent()) return;
   renderParameterSearch();
 }
 
@@ -921,16 +952,17 @@ function renderExpertTable(file, dirs) {
   return wrap;
 }
 
-async function renderExpertProcessFiles(processes, flows) {
+async function renderExpertProcessFiles(processes, flows, stillCurrent = () => true) {
   const cases = expertCases();
   const dirs = expertDirs();
   if (!dirs.length) return;
   let files = [];
   try {
     const lists = await Promise.all(dirs.map(dir => invoke('process_parameter_files', { dir })));
+    if (!stillCurrent()) return;
     files = commonProcessFiles(lists);
   } catch (e) {
-    status(e);
+    if (stillCurrent()) status(e);
     return;
   }
   for (const [page, target] of processes) {
@@ -1304,7 +1336,7 @@ async function renderPftParameterMatrix(target, types, ids, group) {
   target.appendChild(details);
 }
 
-async function renderPftParameters(processes, flows) {
+async function renderPftParameters(processes, flows, stillCurrent = () => true) {
   const eco = processes.find(([page]) => page.id === 'params-eco');
   if (!eco) return;
   const [, target] = eco;
@@ -1315,8 +1347,9 @@ async function renderPftParameters(processes, flows) {
   let usable;
   try {
     usable = await pftSites(selectedCases);
+    if (!stillCurrent()) return;
   } catch (error) {
-    status(error);
+    if (stillCurrent()) status(error);
     return;
   }
 
@@ -1346,8 +1379,9 @@ async function renderPftParameters(processes, flows) {
     parameters = await invoke('pft_parameter_states', {
       dirs, pftType: Number(state.expertPftType), kernelDir: $('kernel').value,
     });
+    if (!stillCurrent()) return;
   } catch (error) {
-    status(error);
+    if (stillCurrent()) status(error);
     return;
   }
   if (!parameters.length) return;

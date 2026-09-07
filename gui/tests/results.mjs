@@ -379,6 +379,10 @@ if (!resultUi.includes('const cached = maxPoints === null ? undefined : seriesCa
 }
 const paramsUi = await readFile(join(root, 'dist', 'app', 'params.js'), 'utf8');
 const timingUi = await readFile(join(root, 'dist', 'app', 'timing.js'), 'utf8');
+if (!timingUi.includes('Number.isSafeInteger(years)')
+    || timingUi.includes("+$('tm-years').value | 0")) {
+  throw new Error('basic spinup inputs must not use 32-bit truncation');
+}
 if (!resultUi.includes('summaryOnly') || !resultUi.includes('pairVars')
     || !resultUi.includes('false, [summaryRow.name], 2400')
     || !resultUi.includes("$('evaluation-chart-refresh').onclick")) {

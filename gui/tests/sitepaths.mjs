@@ -47,6 +47,17 @@ assert.match(
   'urban case creation must preserve the selected USGS/IGBP classification',
 );
 
+assert.match(
+  sites,
+  /const token = \+\+activeCaseSelection[\s\S]*const isCurrent = \(\) => token === activeCaseSelection && state\.selected\?\.dir === c\.dir[\s\S]*if \(!isCurrent\(\)\) return;[\s\S]*catch \(e\) \{ if \(isCurrent\(\)\)/,
+  'case selection must ignore stale read_text/unknown_fields responses',
+);
+assert.match(
+  sites,
+  /let siteScanPending = false[\s\S]*if \(\$\('scan'\)\.disabled\) \{[\s\S]*siteScanPending = true[\s\S]*scanPreparedSites\(\)[\s\S]*\$\('sitedir'\)\.value\.trim\(\) !== dir \|\| \$\('forcingdir'\)\.value\.trim\(\) !== forcingDir[\s\S]*scheduleSiteScan\(\)/,
+  'site scanning must drop stale directory responses and rescan after changes made while disabled',
+);
+
 const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
 assert.match(
   html,
