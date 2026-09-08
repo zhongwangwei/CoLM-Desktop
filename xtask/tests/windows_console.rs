@@ -106,8 +106,9 @@ fn the_kernel_creates_directories_without_cmd_expansion() {
     assert!(helper.contains("_mkdir(path)"));
     assert!(helper.contains("mkdir(path, 0777)"));
     assert!(helper.contains("FindFirstFileA"));
-    assert!(helper
-        .contains("if (dir_len == 2 && prefix[1] == ':' && is_separator(prefix[2])) dir_len = 3;"));
+    assert!(helper.contains(
+        "if (dir_len == 2 && prefix[1] == ':' && colm_is_separator(prefix[2])) dir_len = 3;"
+    ));
     assert!(helper.contains("return c == '/';"));
     assert!(helper.contains("colm_same_file"));
     assert!(helper.contains("GetFileInformationByHandle"));
@@ -117,6 +118,10 @@ fn the_kernel_creates_directories_without_cmd_expansion() {
     assert!(helper.contains("rename(src, dst)"));
     assert!(!helper.contains("system("));
     let module = read("vendor/CoLM202X/share/MOD_Filesystem.F90");
+    assert!(module.contains("BIND(C, name=\"colm_is_separator\")"));
+    assert!(module
+        .contains("is_separator = separator_native(iachar(character, kind=c_int)) /= 0_c_int"));
+    assert!(!module.contains("#ifdef _WIN32"));
     assert!(module.contains("PUBLIC :: make_directory, copy_file, list_matching_paths, move_file"));
     assert!(module.contains("SUBROUTINE copy_file"));
     assert!(module.contains("Refusing to copy file onto itself"));
