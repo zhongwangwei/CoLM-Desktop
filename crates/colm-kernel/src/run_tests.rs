@@ -318,18 +318,19 @@ fn a_muted_run_says_how_many_lines_it_dropped() {
 #[cfg(unix)]
 #[test]
 fn a_top_level_sidecar_leads_its_own_process_group() {
-    let mut child = super::top_level_sidecar(&mut std::process::Command::new("sh"))
-        .args(["-c", "sleep 30"])
+    let mut child = super::top_level_sidecar(&mut std::process::Command::new("sleep"))
+        .arg("30")
         .spawn()
         .expect("spawn probe");
-    let group = format!("-{}", child.id());
-    let exists = std::process::Command::new("kill")
-        .args(["-0", group.as_str()])
-        .status()
-        .expect("probe process group");
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", group.as_str()])
-        .status();
+    let pid = child.id().to_string();
+    let group = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid])
+        .output();
+    // Inspect the group without sending group signals into the CI runner.
+    // Spawn sleep directly so PID-only cleanup cannot orphan a shell child.
+    let _ = child.kill();
     let _ = child.wait();
-    assert!(exists.success(), "sidecar must be its process-group leader");
+    let group = group.expect("probe process group");
+    assert!(group.status.success(), "process must be visible to ps");
+    assert_eq!(String::from_utf8_lossy(&group.stdout).trim(), pid);
 }
