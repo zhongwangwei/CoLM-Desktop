@@ -185,6 +185,13 @@ fn spatial_presets_use_flat_spmd_and_keep_river_lake_routing() {
     assert!(script.contains("spatial kernel must enable USEMPI"));
     assert!(script.contains("GRID/UNSTRUCTURED must enable GridRiverLakeFlow"));
     assert!(script.contains("CATCHMENT must enable CatchLateralFlow"));
+
+    let pushdata = read("vendor/CoLM202X/share/MOD_WorkerPushData.F90");
+    for request in 1..=3 {
+        assert!(pushdata.contains(&format!(
+            "CALL mpi_wait(request({request}), MPI_STATUS_IGNORE, p_err)"
+        )));
+    }
 }
 
 #[test]
@@ -247,6 +254,11 @@ fn mpi_runtime_staging_closes_macos_dependencies_and_refreshes_hashes() {
     let script = read("oracle/scripts/stage_mpi_runtime.sh");
     assert!(script.contains("root.glob('*/manifest.json')"));
     assert!(script.contains("data['sha256'] = hashes"));
+    let darwin = script.split("  Linux)").next().unwrap();
+    assert!(darwin.contains("    refresh_manifests\n"));
+    assert!(!script.contains("\nrefresh_manifests\n"));
+    assert!(!script.contains("codesign --remove-signature"));
+    assert!(script.contains("codesign --force --sign - \"$file\""));
     assert!(
         script.contains("-name \"$base\""),
         "@rpath deps like libgcc_s can live below lib/gcc/current, not only */lib"
@@ -262,6 +274,24 @@ fn release_smokes_staged_flat_mpi_kernel_with_two_ranks() {
     assert!(release.contains("COLM_KERNEL_DIR: ${{ github.workspace }}/kernels/latlon"));
     assert!(release.contains("COLM_KERNEL_RANKS: 2"));
     assert!(release.contains("cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned"));
+}
+
+#[test]
+fn release_installs_the_official_windows_mpi_runtime() {
+    let release = read(".github/workflows/release.yml");
+    let install = release
+        .split("- name: Microsoft MPI launcher (Windows)")
+        .nth(1)
+        .expect("Windows MPI install step")
+        .split("- name:")
+        .next()
+        .unwrap();
+    assert!(!install.contains("choco install msmpi"));
+    assert!(install.contains("https://download.microsoft.com/download/"));
+    assert!(install.contains("Get-FileHash") && install.contains("SHA256"));
+    assert!(install.contains("Start-Process") && install.contains("-Wait -PassThru"));
+    assert!(install.contains("ExitCode") && install.contains("throw"));
+    assert!(install.contains("Test-Path") && install.contains("mpiexec.exe"));
 }
 
 #[test]

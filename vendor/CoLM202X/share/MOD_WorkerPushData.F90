@@ -240,8 +240,8 @@ CONTAINS
             ENDIF
 
             CALL mpi_wait(request(1), MPI_STATUS_IGNORE, p_err)
-            IF (n_req_uniq  > 0) CALL mpi_wait(request(2), MPI_STATUSES_IGNORE, p_err)
-            IF (n_req_other > 0) CALL mpi_wait(request(3), MPI_STATUSES_IGNORE, p_err)
+            IF (n_req_uniq  > 0) CALL mpi_wait(request(2), MPI_STATUS_IGNORE, p_err)
+            IF (n_req_other > 0) CALL mpi_wait(request(3), MPI_STATUS_IGNORE, p_err)
 
             IF (allocated(ids        )) deallocate(ids        )
             IF (allocated(loc_from_me)) deallocate(loc_from_me)

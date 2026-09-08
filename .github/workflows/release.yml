@@ -156,7 +156,19 @@ jobs:
       - name: Microsoft MPI launcher (Windows)
         if: runner.os == 'Windows'
         shell: powershell
-        run: choco install msmpi --yes --no-progress
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # MS-MPI 10.1.3: https://www.microsoft.com/download/details.aspx?id=105289
+          $installer = Join-Path $env:RUNNER_TEMP 'msmpisetup.exe'
+          Invoke-WebRequest -UseBasicParsing 'https://download.microsoft.com/download/7/2/7/72731ebb-b63c-4170-ade7-836966263a8f/msmpisetup.exe' -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne '47443829114d8d8670f77af98939fe876d33eceb35d0ce4e0e85efeec4d87213') {
+            throw 'MS-MPI installer checksum mismatch'
+          }
+          $process = Start-Process $installer -ArgumentList '-unattend', '-force' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "MS-MPI installer exited $($process.ExitCode)" }
+          foreach ($file in @("$env:ProgramFiles\Microsoft MPI\Bin\mpiexec.exe", "$env:ProgramFiles\Microsoft MPI\Bin\smpd.exe", "$env:WINDIR\System32\msmpi.dll")) {
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "MS-MPI runtime missing: $file" }
+          }
 
       # ---- 发布编译期内核 ----
       # PFT/PC/BGC/URBAN 已是运行时选择；IGBP/USGS 与 CROP 数组尺寸仍需产物。

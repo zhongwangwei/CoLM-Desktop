@@ -87,7 +87,7 @@ case "$(uname -s)" in
     while IFS= read -r file; do
       file "$file" | grep -q 'Mach-O' || continue
       chmod u+w "$file"
-      codesign --remove-signature "$file" >/dev/null 2>&1 || true
+      # Preserve the signature layout until rewriting is complete, then re-sign.
       if test -n "$(otool -D "$file" | tail -n +2)"; then
         install_name_tool -id "@rpath/$(basename "$file")" "$file"
       fi
@@ -108,6 +108,8 @@ case "$(uname -s)" in
       esac
       codesign --force --sign - "$file" >/dev/null 2>&1 || true
     done < <(find "$KERNELS" -type f)
+    # Only Darwin rewrites kernel bytes; Linux/Windows just copy runtime files.
+    refresh_manifests
     ;;
 
   Linux)
@@ -173,5 +175,4 @@ case "$(uname -s)" in
 esac
 
 test -f "$RUNTIME/bin/mpiexec" || test -f "$RUNTIME/bin/mpiexec.exe"
-refresh_manifests
 echo "staged MPI runtime -> $RUNTIME"
