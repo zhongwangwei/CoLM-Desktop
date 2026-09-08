@@ -127,6 +127,31 @@ fn identical_files_have_no_problems() {
 }
 
 #[test]
+fn adjacent_64_bit_integers_must_not_collapse_through_f64() {
+    let dir = workdir("int64-precision");
+    let a = dir.join("golden.nc");
+    let b = dir.join("produced.nc");
+    {
+        let _guard = netcdf_write_lock().lock().unwrap();
+        for (path, delta) in [(&a, 0), (&b, 1)] {
+            let mut file = netcdf::create(path).unwrap();
+            file.add_variable::<i64>("signed_id", &[])
+                .unwrap()
+                .put_value(9_007_199_254_740_992_i64 + delta, ())
+                .unwrap();
+            file.add_variable::<u64>("unsigned_id", &[])
+                .unwrap()
+                .put_value(9_007_199_254_740_992_u64 + delta as u64, ())
+                .unwrap();
+        }
+    }
+    assert!(compare(&a, &a).unwrap().is_identical());
+    let report = compare(&a, &b).unwrap();
+    assert_eq!(report.problems.len(), 2, "{report:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn changed_value_is_reported_with_variable_and_index() {
     let p = problems("value", |o| o.third_value = 3.5);
     assert_eq!(p.len(), 1, "{p:?}");

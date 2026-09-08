@@ -16,14 +16,15 @@ import { editTarget } from './batch.js';
 import { markResultsStale } from './results.js';
 
 /** 画卡片。`box` 是 `#timing`。 */
-export async function renderTiming() {
+export async function renderTiming(stillCurrent = () => true) {
   const box = $('timing');
   box.textContent = '';
   const dirs = editTarget();
   if (!dirs.length) return;
   let t;
   try { t = await invoke('read_timing', { dirs }); }
-  catch (e) { box.textContent = String(e); return; }
+  catch (e) { if (stillCurrent()) box.textContent = String(e); return; }
+  if (!stillCurrent()) return;
 
   const card = document.createElement('div');
   card.className = 'card';
@@ -45,8 +46,12 @@ export async function renderTiming() {
 
   note(t);
   const apply = async () => {
-    const years = Math.max(0, +$('tm-years').value | 0);
-    const repeat = Math.max(0, +$('tm-repeat').value | 0);
+    const years = Number($('tm-years').value);
+    const repeat = Number($('tm-repeat').value);
+    if (!Number.isSafeInteger(years) || years < 0 || !Number.isSafeInteger(repeat) || repeat < 0) {
+      status('预热年数和重复轮数必须是非负整数。');
+      return;
+    }
     try {
       const r = await invoke('set_spinup', {
         dirs, years, repeat, kernelDir: $('kernel').value,
@@ -58,7 +63,7 @@ export async function renderTiming() {
         : '已关闭预热';
       status(r.written > 1 ? `${what}（${r.written} 个算例）` : what);
       // 重画自己：输出起始日跟着变，而那正是这个开关的代价所在。
-      await renderTiming();
+      await renderTiming(stillCurrent);
     } catch (e) { status(e); }
   };
   // 两个数是一项配置，必须成组提交。逐格 onchange 会在第一格改完、第二格

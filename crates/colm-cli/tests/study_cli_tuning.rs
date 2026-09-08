@@ -26,7 +26,8 @@ fn temp_root(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("colm-cli-{name}-{}-{nanos}", std::process::id()));
+    let label = name.chars().take(6).collect::<String>();
+    let root = std::env::temp_dir().join(format!("ct-{label}-{}-{nanos:x}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     root
 }

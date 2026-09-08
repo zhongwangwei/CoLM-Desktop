@@ -25,7 +25,9 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 > **This is the `0.2.0-beta.2` prerelease.** Features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.
 
 > [!IMPORTANT]
-> 当前稳定工作流面向**单点站点模拟**，支持把多个站点作为独立算例并发运行。流域、区域和全球模式仍显示为“暂不可用”，不会进入不完整流程。
+> 推荐工作流仍为**单点站点模拟**，支持把多个站点作为独立算例并发运行。当前源码已整合空间功能，但流域、区域、全球以及经纬度、非结构和流域网格的所有空间选项均为 **early state（早期阶段，不建议使用）**。选择空间模式后，**参数调优和不确定性分析不可用**；切回站点模式后恢复。早期空间功能不代表现有 Beta 安装包已更新，也不代表科学结果已经验证。
+>
+> All spatial options are **early state — not recommended for use**. Parameter tuning and uncertainty analysis are disabled in spatial mode; single-point workflows remain the recommended path.
 
 ## 下载
 

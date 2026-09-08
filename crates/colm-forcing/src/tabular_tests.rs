@@ -87,6 +87,24 @@ fn land_cover_class_is_validated_for_the_selected_scheme() {
 }
 
 #[test]
+fn land_cover_class_must_fit_before_scheme_validation() {
+    let root = temp("land-cover-i32");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 00:00,50,10,3000000000,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 01:00,50,10,3000000000,281,.006,100010,0,2,20,301\n",
+    );
+    let err = super::probe_table(&src).unwrap_err();
+    assert!(format!("{err:#}").contains("i32"), "{err:#}");
+
+    let err = super::import_table(&src, &root.join("Forcing"), &plan()).unwrap_err();
+    assert!(format!("{err:#}").contains("i32"), "{err:#}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn import_rejects_cadences_the_model_cannot_run() {
     let root = temp("bad-cadence");
     let src = root.join("site.csv");

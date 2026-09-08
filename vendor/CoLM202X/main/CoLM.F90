@@ -151,8 +151,11 @@ PROGRAM CoLM
 
 #ifdef USEMPI
 #ifdef USESplitAI
-      integer :: num_procs, my_rank, ierr, color, new_comm
-      CALL MPI_Init(ierr) ! Initialize MPI
+      integer :: num_procs, my_rank, ierr, color, new_comm = MPI_COMM_NULL
+      logical :: split_mpi_inited, split_mpi_owned = .false.
+      CALL MPI_Initialized(split_mpi_inited, ierr)
+      split_mpi_owned = .not. split_mpi_inited
+      IF (split_mpi_owned) CALL MPI_Init(ierr) ! Initialize MPI
       CALL MPI_Comm_size(MPI_COMM_WORLD, num_procs, ierr) ! Get the total number of processes
       CALL MPI_Comm_rank(MPI_COMM_WORLD, my_rank, ierr) ! Get the rank of the current process
       color = 1 ! The pyroot process will be in its own communicator
@@ -172,11 +175,18 @@ PROGRAM CoLM
 
       CALL read_namelist (nlfile)
 
+#ifndef SinglePoint
+      IF (trim(DEF_DS_precipitation_adjust_scheme) == 'III') THEN
+         CALL CoLM_stop ('Precipitation scheme III is unavailable: this build has no Python MPI server ranks.')
+      ENDIF
+#endif
+
 #ifdef EXTERNAL_LAKE
       CALL read_lake_namelist (nlfile)
 #endif
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       IF (DEF_HIST_WriteBack) THEN
          CALL spmd_assign_writeback ()
       ENDIF
@@ -184,6 +194,11 @@ PROGRAM CoLM
       IF (p_is_writeback) THEN
          CALL hist_writeback_daemon ()
       ELSE
+#else
+      IF (DEF_HIST_WriteBack .and. p_is_master) THEN
+         write(*,*) 'FLAT_SPMD ignores DEF_HIST_WriteBack; rank 0 participates in computation.'
+      ENDIF
+#endif
 #endif
 
       IF (p_is_master) THEN
@@ -728,13 +743,19 @@ PROGRAM CoLM
       103 format(/, 'Time elapsed : ', I3, ' seconds.')
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       ENDIF
 
       IF (DEF_HIST_WriteBack) THEN
          CALL hist_writeback_exit ()
       ENDIF
+#endif
 
       CALL spmd_exit
+#ifdef USESplitAI
+      IF (new_comm /= MPI_COMM_NULL) CALL MPI_Comm_free(new_comm, ierr)
+      IF (split_mpi_owned) CALL MPI_Finalize(ierr)
+#endif
 #endif
 
 END PROGRAM CoLM

@@ -165,17 +165,43 @@ fn crop_preset_is_real_cropon_kernel() {
 }
 
 #[test]
+fn spatial_presets_use_flat_spmd_and_keep_river_lake_routing() {
+    let script = read("oracle/scripts/build_kernel.sh");
+    for (preset, grid) in [
+        ("latlon", "GRID"),
+        ("unstructured", "UNSTRUCTURED"),
+        ("catchment", "CATCHMENT"),
+    ] {
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{preset})")))
+            .unwrap_or_else(|| panic!("missing {preset} build preset"));
+        assert!(
+            line.contains(&format!("ARGS=({grid} ")),
+            "{preset} must build its matching CoLM grid mode"
+        );
+    }
+    assert!(script.contains("#define FLAT_SPMD"));
+    assert!(script.contains("spatial kernel must enable USEMPI"));
+    assert!(script.contains("GRID/UNSTRUCTURED must enable GridRiverLakeFlow"));
+    assert!(script.contains("CATCHMENT must enable CatchLateralFlow"));
+}
+
+#[test]
 fn release_and_ci_cover_crop_kernel_bundle() {
     let release = read(".github/workflows/release.yml");
+    let release_presets = "default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop";
     assert!(
-        release.contains(
-            "for p in default usgs crop; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
-        ),
-        "release workflow must build default, usgs, and crop kernels"
+        release.contains(&format!(
+            "for p in {release_presets}; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
+        )),
+        "release workflow must build every selectable site and spatial kernel"
     );
     assert!(
-        release.contains("for p in default usgs crop; do\n            test -x \"$app/Contents/Resources/kernels/$p/colm.x\""),
-        "macOS bundle check must require the crop kernel"
+        release.contains(&format!(
+            "for p in {release_presets}; do\n            test -x \"$app/Contents/Resources/kernels/$p/colm.x\""
+        )),
+        "macOS bundle check must require every selectable kernel"
     );
 
     let crop_example = "US-Ne3_2002-2003_FLUXNET2015_CROP";
@@ -201,9 +227,41 @@ fn release_and_ci_cover_crop_kernel_bundle() {
 
     let windows = read(".github/workflows/windows-kernel.yml");
     assert!(
-        windows.contains("for p in default crop; do ./oracle/scripts/build_kernel.sh \"$p\"; done"),
-        "Windows kernel CI must compile the CROP kernel as well as default"
+        windows.contains(
+            "for p in default crop unstructured; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
+        ),
+        "Windows kernel CI must compile a flat-SPMD spatial kernel"
     );
+}
+
+#[test]
+fn kernel_build_uses_portable_mpi_fortran_wrapper_names() {
+    let script = read("oracle/scripts/build_kernel.sh");
+    assert!(script.contains("for candidate in mpifort mpifort.openmpi mpif90 mpif90.openmpi"));
+    assert!(script.contains("spatial kernel build requires mpifort/mpif90"));
+    assert!(script.contains("MAKE_FF=\"$MPI_FC -fopenmp\""));
+}
+
+#[test]
+fn mpi_runtime_staging_closes_macos_dependencies_and_refreshes_hashes() {
+    let script = read("oracle/scripts/stage_mpi_runtime.sh");
+    assert!(script.contains("root.glob('*/manifest.json')"));
+    assert!(script.contains("data['sha256'] = hashes"));
+    assert!(
+        script.contains("-name \"$base\""),
+        "@rpath deps like libgcc_s can live below lib/gcc/current, not only */lib"
+    );
+    assert!(script.contains("install_name_tool -change \"$dep\" \"@rpath/$base\""));
+}
+
+#[test]
+fn release_smokes_staged_flat_mpi_kernel_with_two_ranks() {
+    let release = read(".github/workflows/release.yml");
+    assert!(release
+        .contains("shell: msys2 {0}\n        run: ./oracle/scripts/stage_mpi_runtime.sh kernels"));
+    assert!(release.contains("COLM_KERNEL_DIR: ${{ github.workspace }}/kernels/latlon"));
+    assert!(release.contains("COLM_KERNEL_RANKS: 2"));
+    assert!(release.contains("cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned"));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_RegionClip
+   USE MOD_Filesystem, ONLY: make_directory, copy_file
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
 !
@@ -65,7 +66,7 @@ CONTAINS
             CALL EXIT(1)
 #endif
          ELSE
-            CALL system('mkdir -p ' // trim(dir_landdata_out))
+            CALL make_directory(trim(dir_landdata_out))
          ENDIF
       ENDIF
 
@@ -94,17 +95,18 @@ CONTAINS
 
       IF (p_is_master) THEN
 
+         CALL make_directory(trim(dir_landdata_out) // '/mesh')
          file_in  = trim(dir_landdata_in ) // '/mesh/mesh.nc'
          file_out = trim(dir_landdata_out) // '/mesh/mesh.nc'
-         CALL system('cp ' // trim(file_in) // ' ' // trim(file_out))
+         CALL copy_file(trim(file_in), trim(file_out))
 
          file_in  = trim(dir_landdata_in ) // '/pixel.nc'
          file_out = trim(dir_landdata_out) // '/pixel.nc'
-         CALL system('cp ' // trim(file_in) // ' ' // trim(file_out))
+         CALL copy_file(trim(file_in), trim(file_out))
 
          file_in  = trim(dir_landdata_in ) // '/block.nc'
          file_out = trim(dir_landdata_out) // '/block.nc'
-         CALL system('cp ' // trim(file_in) // ' ' // trim(file_out))
+         CALL copy_file(trim(file_in), trim(file_out))
 
       ENDIF
 
@@ -190,14 +192,14 @@ CONTAINS
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                   CALL clip_pixelset (dir_landdata_in, 'landpft'  , iblk, jblk, elmmask, elmindex, pftmask  )
 ENDIF
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/mesh')
+                  CALL make_directory(trim(dir_landdata_out) // '/mesh')
                   file_in  = trim(dir_landdata_in)  // '/mesh/mesh.nc'
                   file_out = trim(dir_landdata_out) // '/mesh/mesh.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'elmindex' , elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'elmnpxl'  , elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'elmpixels', elmmask)
 
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/landelm')
+                  CALL make_directory(trim(dir_landdata_out) // '/landelm')
                   file_in  = trim(dir_landdata_in)  // '/landelm/landelm.nc'
                   file_out = trim(dir_landdata_out) // '/landelm/landelm.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', elmmask)
@@ -205,7 +207,7 @@ ENDIF
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', elmmask)
 
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/landpatch')
+                  CALL make_directory(trim(dir_landdata_out) // '/landpatch')
                   file_in  = trim(dir_landdata_in)  // '/landpatch/landpatch.nc'
                   file_out = trim(dir_landdata_out) // '/landpatch/landpatch.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', patchmask)
@@ -218,7 +220,7 @@ ENDIF
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'patchfrac_elm', patchmask)
 
 #ifdef CATCHMENT
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/landhru')
+                  CALL make_directory(trim(dir_landdata_out) // '/landhru')
                   file_in  = trim(dir_landdata_in)  // '/landhru/landhru.nc'
                   file_out = trim(dir_landdata_out) // '/landhru/landhru.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', hrumask)
@@ -232,7 +234,7 @@ ENDIF
 #endif
 
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/landpft')
+                  CALL make_directory(trim(dir_landdata_out) // '/landpft')
                   file_in  = trim(dir_landdata_in)  // '/landpft/landpft.nc'
                   file_out = trim(dir_landdata_out) // '/landpft/landpft.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', pftmask)
@@ -243,7 +245,7 @@ ENDIF
                ENDIF
 
                ! Leaf Area Index
-               CALL system('mkdir -p ' // trim(dir_landdata_out) // '/LAI')
+               CALL make_directory(trim(dir_landdata_out) // '/LAI')
 
                IF (DEF_LAI_CHANGE_YEARLY) THEN
                   start_year = DEF_simulation_time%start_year
@@ -256,7 +258,7 @@ ENDIF
                DO YY = start_year, end_year
 
                   write(cyear,'(i4.4)') YY
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/LAI/' // trim(cyear))
+                  CALL make_directory(trim(dir_landdata_out) // '/LAI/' // trim(cyear))
 
                   IF (DEF_LAI_MONTHLY) THEN
                      DO month = 1, 12
@@ -298,14 +300,14 @@ ENDIF
 
                ! depth to bedrock
                IF(DEF_USE_BEDROCK)THEN
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/dbedrock')
+                  CALL make_directory(trim(dir_landdata_out) // '/dbedrock')
                   file_in  = trim(dir_landdata_in)  // '/dbedrock/dbedrock_patches.nc'
                   file_out = trim(dir_landdata_out) // '/dbedrock/dbedrock_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'dbedrock_patches', patchmask)
                ENDIF
 
                ! forest height
-               CALL system('mkdir -p ' // trim(dir_landdata_out) // '/htop')
+               CALL make_directory(trim(dir_landdata_out) // '/htop')
                file_in  = trim(dir_landdata_in)  // '/htop/htop_patches.nc'
                file_out = trim(dir_landdata_out) // '/htop/htop_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'htop_patches', patchmask)
@@ -316,13 +318,13 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 ENDIF
 
                ! lake depth
-               CALL system('mkdir -p ' // trim(dir_landdata_out) // '/lakedepth')
+               CALL make_directory(trim(dir_landdata_out) // '/lakedepth')
                file_in  = trim(dir_landdata_in)  // '/lakedepth/lakedepth_patches.nc'
                file_out = trim(dir_landdata_out) // '/lakedepth/lakedepth_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'lakedepth_patches', patchmask)
 
                ! plant function type percentage
-               CALL system('mkdir -p ' // trim(dir_landdata_out) // '/pctpft')
+               CALL make_directory(trim(dir_landdata_out) // '/pctpft')
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                file_in  = trim(dir_landdata_in)  // '/pctpft/pct_pfts.nc'
                file_out = trim(dir_landdata_out) // '/pctpft/pct_pfts.nc'
@@ -335,7 +337,7 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 ENDIF
 
                ! soil
-               CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil')
+               CALL make_directory(trim(dir_landdata_out) // '/soil')
 
 IF (DEF_USE_BGC) THEN
                write(cyear,'(i4.4)') DEF_LC_YEAR
@@ -344,7 +346,7 @@ IF (DEF_USE_BGC) THEN
                CALL get_filename_block (file_in, iblk, jblk, fileblock)
                inquire (file=trim(fileblock), exist=fexists)
                IF (fexists) THEN
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil/' // trim(cyear))
+                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // trim(cyear))
                   file_out = trim(dir_landdata_out) // '/soil/' // trim(cyear) // '/lake_soilc_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'lake_soilc_patches', patchmask)
                ENDIF
@@ -353,7 +355,7 @@ IF (DEF_USE_BGC) THEN
                CALL get_filename_block (file_in, iblk, jblk, fileblock)
                inquire (file=trim(fileblock), exist=fexists)
                IF (fexists) THEN
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil/' // trim(cyear))
+                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // trim(cyear))
                   file_out = trim(dir_landdata_out) // '/soil/' // trim(cyear) // '/methane_ph_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'methane_ph_patches', patchmask)
                ENDIF
@@ -529,7 +531,7 @@ ENDIF
                ENDDO
 
                ! topography
-               CALL system('mkdir -p ' // trim(dir_landdata_out) // '/topography')
+               CALL make_directory(trim(dir_landdata_out) // '/topography')
                file_in  = trim(dir_landdata_in)  // '/topography/topography_patches.nc'
                file_out = trim(dir_landdata_out) // '/topography/topography_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'topography_patches', patchmask)

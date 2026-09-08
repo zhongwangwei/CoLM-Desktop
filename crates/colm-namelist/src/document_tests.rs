@@ -70,3 +70,24 @@ fn removes_only_the_requested_subscripted_assignment() {
     assert!(d.get("DEF_PFT_HTOP0(2)").is_none());
     assert!(d.get("DEF_PFT_HTOP0(3)").is_some());
 }
+
+#[test]
+fn reads_and_updates_the_last_assignment_like_fortran() {
+    let src = "&nl_colm\n a = 1 ! earlier\n A = 2 ! effective\n/\n";
+    let mut d = crate::parse(src).unwrap();
+    assert_eq!(d.get("a"), Some(&crate::Value::Int(2)));
+    d.set("a", crate::Value::Int(3)).unwrap();
+    assert_eq!(d.to_string(), src.replace("A = 2", "A = 3"));
+    d.insert("a", crate::Value::Int(4), "nl_colm").unwrap();
+    assert_eq!(d.to_string(), src.replace("A = 2", "A = 4"));
+    assert_eq!(d.get("a"), Some(&crate::Value::Int(4)));
+}
+
+#[test]
+fn insertion_accepts_comments_on_group_delimiters() {
+    let src = "&nl_colm ! case settings\n a = 1 ! comment ending in &\n/ ! end\n";
+    let mut d = crate::parse(src).unwrap();
+    assert_eq!(d.to_string(), src);
+    d.insert("b", crate::Value::Int(2), "nl_colm").unwrap();
+    assert_eq!(d.to_string(), src.replace("/ ! end", "   b = 2\n/ ! end"));
+}

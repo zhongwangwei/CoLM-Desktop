@@ -3,6 +3,7 @@
 //! 输出是有序的 `(路径, 值)` 列表，交给 `minimal::required` 过滤之后再序列化。
 //! 顺序固定，否则每次重生成都是一个大 diff。
 
+use anyhow::{bail, Result};
 use colm_namelist::Value;
 
 /// 造一个算例需要知道的全部东西。
@@ -93,21 +94,187 @@ pub struct Dirs {
     pub forcing_namelist: String,
 }
 
+/// 空间算例的网格合同。三种模式都仍由同一份 `case.nml` 驱动；这里不写
+/// `SITE_*`，避免把流域、区域或全球算例伪装成单点站。
+pub enum SpatialGrid {
+    LatLon {
+        mesh_file: String,
+        dlon: f64,
+        dlat: f64,
+    },
+    Unstructured {
+        mesh_file: String,
+    },
+    Catchment {
+        mesh_file: String,
+    },
+}
+
+pub struct SpatialCaseSpec {
+    pub name: String,
+    pub grid: SpatialGrid,
+    pub window: Window,
+    pub timestep_seconds: f64,
+    pub dirs: Dirs,
+    pub domain: SpatialBounds,
+}
+
+pub struct SpatialBounds {
+    pub west: f64,
+    pub east: f64,
+    pub south: f64,
+    pub north: f64,
+}
+
+/// 生成流域、区域或全球算例所需的最小字段集合。
+pub fn spatial_fields(s: &SpatialCaseSpec) -> Vec<(String, Value)> {
+    let r = |x: f64| Value::Real {
+        text: format!("{x:?}"),
+    };
+    let mut out = vec![
+        ("DEF_CASE_NAME".into(), Value::Str(s.name.clone())),
+        ("DEF_simulation_time%greenwich".into(), Value::Bool(true)),
+        (
+            "DEF_simulation_time%start_year".into(),
+            Value::Int(s.window.start_year as i64),
+        ),
+        (
+            "DEF_simulation_time%start_month".into(),
+            Value::Int(s.window.start_month as i64),
+        ),
+        (
+            "DEF_simulation_time%start_day".into(),
+            Value::Int(s.window.start_day as i64),
+        ),
+        (
+            "DEF_simulation_time%start_sec".into(),
+            Value::Int(s.window.start_sec as i64),
+        ),
+        (
+            "DEF_simulation_time%end_year".into(),
+            Value::Int(s.window.end_year as i64),
+        ),
+        (
+            "DEF_simulation_time%end_month".into(),
+            Value::Int(s.window.end_month as i64),
+        ),
+        (
+            "DEF_simulation_time%end_day".into(),
+            Value::Int(s.window.end_day as i64),
+        ),
+        (
+            "DEF_simulation_time%end_sec".into(),
+            Value::Int(s.window.end_sec as i64),
+        ),
+        ("DEF_simulation_time%timestep".into(), r(s.timestep_seconds)),
+        ("DEF_dir_rawdata".into(), Value::Str(s.dirs.rawdata.clone())),
+        ("DEF_dir_runtime".into(), Value::Str(s.dirs.runtime.clone())),
+        ("DEF_dir_output".into(), Value::Str(s.dirs.output.clone())),
+        (
+            "DEF_forcing_namelist".into(),
+            Value::Str(s.dirs.forcing_namelist.clone()),
+        ),
+        ("DEF_USE_OZONESTRESS".into(), Value::Bool(false)),
+        ("DEF_USE_OZONEDATA".into(), Value::Bool(false)),
+        ("DEF_WRST_FREQ".into(), Value::Str("MONTHLY".into())),
+        ("DEF_HIST_FREQ".into(), Value::Str("HOURLY".into())),
+        ("DEF_domain%edgew".into(), r(s.domain.west)),
+        ("DEF_domain%edgee".into(), r(s.domain.east)),
+        ("DEF_domain%edges".into(), r(s.domain.south)),
+        ("DEF_domain%edgen".into(), r(s.domain.north)),
+    ];
+    out.extend(
+        spinup_fields(
+            (
+                s.window.start_year,
+                s.window.start_month,
+                s.window.start_day,
+                s.window.start_sec,
+            ),
+            Spinup::OFF,
+        )
+        .expect("Spinup::OFF always maps to the fixed 0000-01-01 cutoff"),
+    );
+    match &s.grid {
+        SpatialGrid::LatLon {
+            mesh_file,
+            dlon,
+            dlat,
+        } => out.extend([
+            ("DEF_file_mesh".into(), Value::Str(mesh_file.clone())),
+            ("DEF_GRIDBASED_lon_res".into(), r(*dlon)),
+            ("DEF_GRIDBASED_lat_res".into(), r(*dlat)),
+        ]),
+        SpatialGrid::Unstructured { mesh_file } => {
+            out.push(("DEF_file_mesh".into(), Value::Str(mesh_file.clone())))
+        }
+        SpatialGrid::Catchment { mesh_file } => out.push((
+            "DEF_CatchmentMesh_data".into(),
+            Value::Str(mesh_file.clone()),
+        )),
+    }
+    out
+}
+
+fn leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn valid_date(year: i32, month: u32, day: u32) -> bool {
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year(year) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+pub fn spinup_cutoff(start: (i32, u32, u32, u32), sp: Spinup) -> Result<(i32, u32, u32, u32)> {
+    if !sp.is_on() {
+        return Ok((0, 1, 1, 0));
+    }
+    if sp.repeat > i32::MAX as u32 {
+        bail!(
+            "spin-up repeat is outside the supported Fortran INTEGER range: {}",
+            sp.repeat
+        );
+    }
+    if start.3 > 86_400 {
+        bail!("spin-up cutoff second is outside a civil day: {}", start.3);
+    }
+    let year = i64::from(start.0)
+        .checked_add(i64::from(sp.years))
+        .and_then(|year| i32::try_from(year).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "spin-up cutoff year is outside the supported i32 range: start {} + {} years",
+                start.0,
+                sp.years
+            )
+        })?;
+    if !valid_date(year, start.1, start.2) {
+        bail!(
+            "spin-up cutoff date is invalid: {year:04}-{:02}-{:02}",
+            start.1,
+            start.2
+        );
+    }
+    Ok((year, start.1, start.2, start.3))
+}
+
 /// 预热那五项，按写进 namelist 的顺序。
 ///
 /// `start` 是模拟窗口的起始时刻 —— 预热截止时刻是**它加上若干年**，
 /// 月日秒照抄。只改年而让其余部分留在 CoLM 的默认值上，
 /// 会让截止时刻落在窗口之外，而窗口未必从 1 月 1 日开始。
-pub fn spinup_fields(start: (i32, u32, u32, u32), sp: Spinup) -> Vec<(String, Value)> {
+pub fn spinup_fields(start: (i32, u32, u32, u32), sp: Spinup) -> Result<Vec<(String, Value)>> {
     // 关掉时写 year=0：`is_spinup = (ststamp < ptstamp)`（`CoLM.F90:300`），
     // 0 年早于任何真实起始时刻，判据为假。**这比 repeat=0 更可靠** ——
     // repeat 会被 `max(n,1)` 提成 1，真正决定开关的是那个比较。
-    let (y, m, d, sec) = if sp.is_on() {
-        (start.0 + sp.years as i32, start.1, start.2, start.3)
-    } else {
-        (0, 1, 1, 0)
-    };
-    vec![
+    let (y, m, d, sec) = spinup_cutoff(start, sp)?;
+    Ok(vec![
         (
             "DEF_simulation_time%spinup_year".into(),
             Value::Int(y as i64),
@@ -128,12 +295,12 @@ pub fn spinup_fields(start: (i32, u32, u32, u32), sp: Spinup) -> Vec<(String, Va
             "DEF_simulation_time%spinup_repeat".into(),
             Value::Int(if sp.is_on() { sp.repeat as i64 } else { 0 }),
         ),
-    ]
+    ])
 }
 
 /// 造出字段集合。**不做过滤** —— 过滤是 `minimal::required` 的事，
 /// 分开是为了让「本来会写什么」与「实际写了什么」都能被看到。
-pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
+pub fn fields(s: &CaseSpec) -> Result<Vec<(String, Value)>> {
     let r = |x: f64| Value::Real {
         text: format!("{x:?}"),
     };
@@ -195,7 +362,7 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
             s.window.start_sec,
         ),
         s.spinup,
-    ));
+    )?);
     out.extend([
         // ---- 路径 ----
         ("DEF_dir_rawdata".into(), Value::Str(s.dirs.rawdata.clone())),
@@ -255,7 +422,7 @@ pub fn fields(s: &CaseSpec) -> Vec<(String, Value)> {
         // 而预抽表里只有土壤剖面），于是 `ncio_var_exist` 为假、CoLM 照旧
         // 回落到 `lake_depth.nc` 与 `soil_brightness.nc`。行为与先前逐位相同。
     }
-    out
+    Ok(out)
 }
 
 /// USGS 的「城市与建成区」。

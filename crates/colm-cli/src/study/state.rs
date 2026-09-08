@@ -207,6 +207,8 @@ pub fn request_pause(study_dir: &Path) -> Result<()> {
 }
 
 pub fn resume(study_dir: &Path) -> Result<()> {
+    let manifest = super::engine::status(study_dir)?;
+    super::engine::ensure_supported_study_manifest(&manifest, None)?;
     remove_if_present(&study_dir.join("pause.request"))
 }
 

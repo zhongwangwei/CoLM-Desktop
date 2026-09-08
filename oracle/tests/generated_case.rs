@@ -104,7 +104,7 @@ fn a_generated_case_reproduces_the_golden_history() {
         },
     };
 
-    let all = fields(&spec);
+    let all = fields(&spec).expect("valid test spin-up");
     let req = required(&all);
     // 20 而不是 22：预热关掉时截止时刻的年月日秒都落回 CoLM 的默认值而被剪掉。
     // Desktop 还会显式关闭臭氧胁迫与臭氧数据读取，避免新算例隐式依赖

@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_LandPatch
+   USE MOD_Filesystem, ONLY: make_directory
 
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -300,7 +301,7 @@ ENDIF
    character(len=256) :: lndname, cyear
 
       write(cyear,'(i4.4)') lc_year
-      CALL system('mkdir -p ' // trim(dir_landdata) // '/landpatch/' // trim(cyear))
+      CALL make_directory(trim(dir_landdata) // '/landpatch/' // trim(cyear))
 
       lndname = trim(dir_landdata)//'/landpatch/'//trim(cyear)//'/patchfrac_elm.nc'
       CALL ncio_create_file_vector (lndname, landpatch)

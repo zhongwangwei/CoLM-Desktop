@@ -1,5 +1,6 @@
 #include <define.h>
 MODULE MOD_CaMa_colmCaMa
+   USE MOD_Filesystem, ONLY: make_directory
 #if(defined CaMa_Flood)
 !DESCRIPTION
 !===========
@@ -96,7 +97,7 @@ CONTAINS
          EHOUR    = DEF_simulation_time%end_sec/3600                           ! end hour
          LLEAPYR  = DEF_forcing%leapyear                                       ! leap year flag
       
-         CALL system('mkdir -p ' // trim(DEF_dir_restart)//'/CaMa')
+         CALL make_directory(trim(DEF_dir_restart)//'/CaMa')
 
 
          !----------------------- Dummy argument --------------------------------
@@ -558,7 +559,7 @@ CONTAINS
       write(cyear,'(i4.4)') lc_year
       write(cdate,'(i4.4,"-",i3.3,"-",i5.5)') idate(1), idate(2), idate(3)
       CRESTDIR =    trim(DEF_dir_restart)// '/CaMa'//'/'//trim(cdate)//'/'
-      CALL system('mkdir -p ' // trim(CRESTDIR))
+      CALL make_directory(trim(CRESTDIR))
       CALL CMF_RESTART_WRITE()
       IF (LSEDIMENT) THEN
          CALL CMF_SED_RESTART_WRITE()

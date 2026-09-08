@@ -2,6 +2,7 @@
 
 #ifdef DataAssimilation
 MODULE MOD_DA_Vars_TimeVariables
+   USE MOD_Filesystem, ONLY: make_directory
 !-----------------------------------------------------------------------------
 ! DESCRIPTION:
 !    Process time-varying state variables for data assimilation
@@ -489,7 +490,7 @@ CONTAINS
       write(cdate,'(i4.4,"-",i3.3,"-",i5.5)') idate(1), idate(2), idate(3)
 
       IF (p_is_master) THEN
-         CALL system('mkdir -p ' // trim(dir_restart)//'/'//trim(cdate))
+         CALL make_directory(trim(dir_restart)//'/'//trim(cdate))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)

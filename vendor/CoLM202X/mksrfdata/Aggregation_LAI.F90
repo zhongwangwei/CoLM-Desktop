@@ -22,6 +22,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 !  Hua Yuan,      05/2023: TODO
 !-----------------------------------------------------------------------
 
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Namelist
@@ -96,7 +97,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate LAI ...'
-         CALL system('mkdir -p ' // trim(adjustl(landdir)))
+         CALL make_directory(trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -176,7 +177,7 @@ ENDIF
          DO iy = start_year, end_year
 
             write(cyear,'(i4.4)') iy
-            CALL system('mkdir -p ' // trim(landdir) // trim(cyear))
+            CALL make_directory(trim(landdir) // trim(cyear))
 
             ! loop for month or 8-day
             DO itime = 1, ntime
@@ -415,7 +416,7 @@ ENDIF
       dir_5x5 = trim(dir_rawdata) // '/plant_15s'
       DO iy = start_year, end_year
          write(cyear,'(i4.4)') iy
-         CALL system('mkdir -p ' // trim(landdir) // trim(cyear))
+         CALL make_directory(trim(landdir) // trim(cyear))
 
          IF (iy < 2000) THEN
             write(cyear_bk,'(i4.4)') (iy / 5) * 5

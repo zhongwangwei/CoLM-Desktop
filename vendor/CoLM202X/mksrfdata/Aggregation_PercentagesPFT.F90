@@ -12,6 +12,7 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 !  Shupeng Zhang, 01/2022: porting codes to MPI parallel version
 !-----------------------------------------------------------------------
 
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Namelist
@@ -69,7 +70,7 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A43)') 'Aggregate plant function type fractions ...'
-         CALL system('mkdir -p ' // trim(adjustl(landdir)))
+         CALL make_directory(trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)

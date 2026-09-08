@@ -10,6 +10,116 @@ const FS: (i32, u32, u32, u32) = (2008, 1, 1, 0);
 const FE: (i32, u32, u32, u32) = (2010, 1, 1, 0);
 
 #[test]
+fn spatial_new_writes_a_non_site_case_after_mesh_preflight() {
+    let _guard = super::netcdf_test_guard();
+    let root = std::env::temp_dir().join(format!("colm-spatial-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let rawdata = root.join("rawdata");
+    let runtime = root.join("runtime");
+    std::fs::create_dir_all(&rawdata).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
+    let forcing = root.join("forcing.nml");
+    std::fs::write(&forcing, "&nl_colm_forcing\n/\n").unwrap();
+    let grid = colm_srfdata::Grid { nlon: 4, nlat: 2 };
+    let mesh = colm_srfdata::mesh::EqualLatLonMesh::all_active(
+        grid,
+        colm_srfdata::mesh::MeshWindow::new(grid, 2, 1, 1, 1).unwrap(),
+    )
+    .unwrap();
+    let mesh_file = root.join("mesh.nc");
+    mesh.write_netcdf(&mesh_file).unwrap();
+    let case = root.join("case");
+    let args = [
+        "--grid-kind",
+        "unstructured",
+        "--mesh",
+        mesh_file.to_str().unwrap(),
+        "--out",
+        case.to_str().unwrap(),
+        "--forcing",
+        forcing.to_str().unwrap(),
+        "--rawdata",
+        rawdata.to_str().unwrap(),
+        "--runtime",
+        runtime.to_str().unwrap(),
+        "--start",
+        "2001-01-01",
+        "--end",
+        "2001-01-02",
+        "--timestep",
+        "1800",
+        "--mode",
+        "igbp",
+    ]
+    .map(String::from);
+    let opts = super::Opts::parse(&args).unwrap();
+    super::cmd_spatial_new(&opts).unwrap();
+    let text = std::fs::read_to_string(case.join("case.nml")).unwrap();
+    assert!(text.contains("DEF_file_mesh"));
+    assert!(text.contains("DEF_domain%edgew"));
+    assert!(!text.contains("SITE_"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cli_spinup_window_check_uses_shared_date_validation() {
+    let err = super::spinup_cutoff_at_or_after_window_end(
+        (2008, 2, 29, 0),
+        (2011, 1, 1),
+        colm_case::Spinup {
+            years: 1,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("2009-02-29"), "{err:#}");
+}
+
+#[test]
+fn cli_spinup_window_check_does_not_i32_truncate_huge_years() {
+    let err = super::spinup_cutoff_at_or_after_window_end(
+        (2008, 1, 1, 0),
+        (2010, 1, 1),
+        colm_case::Spinup {
+            years: u32::MAX,
+            repeat: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("i32"), "{err:#}");
+}
+
+#[test]
+fn cli_spinup_window_check_rejects_huge_repeat() {
+    let err = super::spinup_cutoff_at_or_after_window_end(
+        (2008, 1, 1, 0),
+        (2010, 1, 1),
+        colm_case::Spinup {
+            years: 1,
+            repeat: i32::MAX as u32 + 1,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Fortran INTEGER"), "{err:#}");
+}
+
+#[test]
+fn cli_spinup_window_check_still_disables_periods_that_cover_the_window() {
+    assert_eq!(
+        super::spinup_cutoff_at_or_after_window_end(
+            (2008, 1, 1, 0),
+            (2009, 1, 1),
+            colm_case::Spinup {
+                years: 1,
+                repeat: 1
+            },
+        )
+        .unwrap(),
+        Some((2009, 1, 1))
+    );
+}
+
+#[test]
 fn a_window_inside_the_forcing_is_accepted() {
     check_window((2008, 6, 1, 0), (2009, 6, 1, 0), FS, FE).expect("窗口在范围内");
     // 边界本身算在范围内。

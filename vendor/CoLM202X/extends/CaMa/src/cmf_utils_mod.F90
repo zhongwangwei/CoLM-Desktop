@@ -567,13 +567,14 @@ END SUBROUTINE NCERROR
 
 !####################################################################
 FUNCTION CMF_CheckNanB(VAR,zero) RESULT(FLAG)  !! check UndefinedValue function
+  USE, INTRINSIC :: IEEE_ARITHMETIC, ONLY: IEEE_IS_FINITE
   implicit none
   REAL(KIND=JPRB)      :: VAR, zero
   LOGICAL              :: FLAG
-  FLAG = .false.
-  if( VAR*zero/=zero)then   !! if VAR is NaN (Not a number), VAR*zero is not zero
-    FLAG = .true.
-  endif
+  ! Keep the historical two-argument ABI. All shipped callers pass zero=0._JPRB;
+  ! the old VAR*zero test classified NaN and +/-Inf as bad, but raised invalid
+  ! floating-point exceptions for infinities when traps were enabled.
+  FLAG = .not. IEEE_IS_FINITE(VAR)
 END FUNCTION CMF_CheckNanB
 !####################################################################
 

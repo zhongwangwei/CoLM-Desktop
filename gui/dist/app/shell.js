@@ -14,7 +14,11 @@ const hasMultipleResults = () => completedResults().length > 1;
 const resultsReady = () => ready() ?? (hasResults() ? null : '先运行完成至少一个算例');
 // Study 会自己运行 baseline 和候选成员；已有 history 不是入口前提。
 // 只要基本设定已经落成一份算例，就可以先配置可选的研究流程。
-const studyReady = () => ready();
+const spatialCaseEntry = c => c?.spatial === true;
+const spatialStudyDisabled = () => !!(state.domain && state.domain !== 'site')
+  || state.cases.some(c => state.createdCases.has(c.dir) && spatialCaseEntry(c));
+const spatialStudyMessage = '空间功能仍处于 early state，不建议使用；选择空间后参数调优和不确定性分析暂不可用。';
+const studyReady = () => ready() ?? (spatialStudyDisabled() ? spatialStudyMessage : null);
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
@@ -120,9 +124,7 @@ export function go(id) {
   if (!step || (step.show && !step.show())) { setStatus(`当前配置没有这一步：${id}`); return; }
   const why = step.need();
   if (why) { setStatus(why); return; }
-  const previous = STEPS.find(s => s.id === state.step);
-  if (step.page === 'result' && previous?.page !== 'result') state.liveCollapsed = true;
-  if (step.page !== 'result') state.liveCollapsed = false;
+  state.liveCollapsed = step.page !== 'run';
   state.step = id;
   const group = WORKFLOW.find(g => g.steps.includes(step));
   if (group?.collapsible) state.expandedFlows.add(group.key);
@@ -233,6 +235,8 @@ export function initShell() {
     document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
     $('liveToggle').setAttribute('aria-pressed', String(state.liveCollapsed));
   };
+  document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
+  $('liveToggle').setAttribute('aria-pressed', String(state.liveCollapsed));
 
   for (const b of document.querySelectorAll('#modeSeg button')) {
     b.onclick = () => {

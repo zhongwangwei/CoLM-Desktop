@@ -15,6 +15,7 @@ import './forcing.js';
 import './sitedata.js';
 import './prep-examples.js';
 import './validation.js';
+import './spatial.js';
 
 initI18n();
 initShell();
@@ -22,7 +23,7 @@ initShell();
 function beginLiveResize(e) {
   const live = document.querySelector('.live');
   if (!live || document.querySelector('.app')?.classList.contains('live-collapsed')) return;
-  const stacked = innerWidth <= 1240;
+  const stacked = innerWidth < 1240;
   const apply = ev => {
     const size = stacked
       ? Math.min(innerHeight - 220, Math.max(160, innerHeight - 34 - ev.clientY))

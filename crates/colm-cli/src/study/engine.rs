@@ -161,6 +161,53 @@ pub fn parameters_json() -> Result<String> {
     Ok(String::from_utf8(buf)?)
 }
 
+pub(super) fn ensure_supported_study_inputs(
+    base_cases: &[PathBuf],
+    kernel_macros: &[String],
+) -> Result<()> {
+    if !kernel_macros.is_empty() && !kernel_macros.iter().any(|name| name == "SinglePoint") {
+        bail!("Study currently supports SinglePoint kernels only; spatial kernels cannot run tuning or uncertainty Studies yet");
+    }
+    for case in base_cases {
+        reject_spatial_study_case(case)?;
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_supported_study_manifest(
+    manifest: &Manifest,
+    kernel_macros: Option<&[String]>,
+) -> Result<()> {
+    if let Some(kernel_macros) = kernel_macros {
+        ensure_supported_study_inputs(&[], kernel_macros)?;
+    }
+    if let Some(kernel_dir) = manifest.spec.kernel_dir.as_deref() {
+        let kernel = colm_kernel::Kernel::open(Path::new(kernel_dir))
+            .with_context(|| format!("cannot inspect Study kernel {}", kernel_dir))?;
+        ensure_supported_study_inputs(&[], &kernel.manifest.macros)?;
+    }
+    let case_root = Path::new(&manifest.root)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .context("Study directory is not under <case-root>/.colm/studies")?;
+    for site in &manifest.spec.base_cases {
+        reject_spatial_study_case(&case_root.join(site))?;
+    }
+    Ok(())
+}
+
+fn reject_spatial_study_case(case: &Path) -> Result<()> {
+    let case_nml = case.join("case.nml");
+    if colm_case::is_spatial_case(&case_nml)? {
+        bail!(
+            "Study currently supports SinglePoint cases only; spatial mesh is present in {}",
+            case_nml.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
     let case_root = colm_kernel::manifest::absolute(case_root)
         .with_context(|| format!("cannot resolve {}", case_root.display()))?;
@@ -196,6 +243,7 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
         .transpose()?
         .map(|kernel| kernel.manifest.macros)
         .unwrap_or_default();
+    ensure_supported_study_inputs(&base_cases, &kernel_macros)?;
     let baseline = baseline(&base_cases, &spec, &kernel_macros)?;
     let members = sample::design(&spec, &baseline)?;
     let studies_root = case_root.join(".colm/studies");
@@ -433,6 +481,12 @@ pub(super) fn base_cases(case_root: &Path, spec: &StudySpec) -> Result<Vec<PathB
                 case_root.display()
             );
         }
+        let case_name = p
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("base case directory name is not UTF-8")?;
+        colm_case::validate_case_name(case_name)
+            .with_context(|| format!("invalid base case directory name {case_name:?}"))?;
         if !p.join("case.nml").is_file() {
             bail!("{} is not a case directory", p.display());
         }
@@ -1033,7 +1087,7 @@ mod tests {
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "colm-study-engine-{name}-{}",
+            "cs-{name}-{:x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1079,6 +1133,27 @@ mod tests {
         };
         fs::write(&path, serde_json::to_string(&spec).unwrap()).unwrap();
         path
+    }
+
+    #[test]
+    fn base_case_names_must_be_single_safe_components() {
+        let root = colm_kernel::manifest::absolute(&temp("bad-base-name")).unwrap();
+        // Leading whitespace is valid on each host filesystem, but not for CoLM.
+        let bad_name = " bad-name";
+        let bad = root.join(bad_name);
+        fs::rename(root.join("caseA"), &bad).unwrap();
+        let mut spec: StudySpec =
+            serde_json::from_str(&fs::read_to_string(spec(&root)).unwrap()).unwrap();
+        spec.base_cases = vec![bad_name.into()];
+        let error =
+            base_cases(&root, &spec).expect_err("Study base case names become member case names");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid base case directory name"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

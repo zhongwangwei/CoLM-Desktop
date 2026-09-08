@@ -1,5 +1,47 @@
 use super::*;
 
+#[test]
+fn mpi_uses_plain_spmd_launch_without_process_roles() {
+    let exe = Path::new("/kernel/colm.x");
+    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 4, true).expect("mpi");
+    assert_eq!(program, PathBuf::from("mpiexec"));
+    assert_eq!(args, ["-n", "4", "/kernel/colm.x", "/case/case.nml"]);
+    assert!(!args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "master" | "io" | "worker")));
+    let (program, args) =
+        launch_command(exe, Path::new("/case/case.nml"), 1, false).expect("serial");
+    assert_eq!(program, exe);
+    assert_eq!(args, ["/case/case.nml"]);
+
+    let (program, args) =
+        launch_command(exe, Path::new("/case/case.nml"), 1, true).expect("one MPI rank");
+    assert_eq!(program, PathBuf::from("mpiexec"));
+    assert_eq!(args, ["-n", "1", "/kernel/colm.x", "/case/case.nml"]);
+}
+
+#[test]
+fn mpi_prefers_the_runtime_bundled_beside_kernel_presets() {
+    let root = std::env::temp_dir().join(format!("colm-bundled-mpi-{}", std::process::id()));
+    let preset = root.join("kernels/unstructured");
+    let runtime_bin = root.join("kernels/_runtime/bin");
+    std::fs::create_dir_all(&preset).expect("preset");
+    std::fs::create_dir_all(&runtime_bin).expect("runtime");
+    let launcher = runtime_bin.join(if cfg!(windows) {
+        "mpiexec.exe"
+    } else {
+        "mpiexec"
+    });
+    std::fs::write(&launcher, b"").expect("launcher");
+
+    let exe = preset.join(if cfg!(windows) { "colm.exe" } else { "colm.x" });
+    let (program, args) = launch_command(&exe, Path::new("case.nml"), 2, true).expect("mpi launch");
+    assert_eq!(program, launcher);
+    assert_eq!(args[0..2], ["-n", "2"]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// 一个跑得起来的假内核：三个 `.x` 都是同一个 shell 脚本。
 ///
 /// `#[cfg(unix)]` 跟着两个使用者走 —— 它们都要 `#!/bin/sh` 与
@@ -119,11 +161,25 @@ fn a_completed_mingw_stage_does_not_wait_for_broken_dll_cleanup() {
     );
     k.manifest.platform = "MINGW64_NT-test-x86_64".into();
 
-    let started = std::time::Instant::now();
-    let r = run_stage(&k, Stage::MkSrfData, Path::new("case.nml"), &work, &[]).expect("runs");
+    let mut completed = None;
+    let r = run_stage_streaming(
+        &k,
+        Stage::MkSrfData,
+        Path::new("case.nml"),
+        &work,
+        &[],
+        &mut |line| {
+            if line.contains(Stage::MkSrfData.success_marker()) {
+                completed = Some(std::time::Instant::now());
+            }
+        },
+    )
+    .expect("runs");
 
     assert!(r.succeeded());
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // Bound DLL cleanup, not OS executable verification before the child starts.
+    // Removing early termination must still wait 30 seconds and fail this check.
+    assert!(completed.expect("success marker").elapsed() < std::time::Duration::from_secs(15));
 }
 
 #[test]
@@ -177,8 +233,20 @@ fn a_real_kernel_can_actually_be_spawned() {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).expect("create workdir");
 
-    let r = run_stage(&k, Stage::Colm, Path::new("no-such.nml"), &work, &[])
-        .expect("the operating system launched the binary");
+    let ranks = std::env::var("COLM_KERNEL_RANKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let r = run_stage_streaming_ranks(
+        &k,
+        Stage::Colm,
+        Path::new("no-such.nml"),
+        &work,
+        &[],
+        ranks,
+        &mut |_| {},
+    )
+    .expect("the operating system launched the binary");
     assert!(!r.succeeded(), "没给 namelist 却成功了，判成败那一段有问题");
     // 顺带钉住实际用的文件名，免得将来后缀改了却没人发现。
     let name = k.program("colm");
@@ -250,18 +318,19 @@ fn a_muted_run_says_how_many_lines_it_dropped() {
 #[cfg(unix)]
 #[test]
 fn a_top_level_sidecar_leads_its_own_process_group() {
-    let mut child = super::top_level_sidecar(&mut std::process::Command::new("sh"))
-        .args(["-c", "sleep 30"])
+    let mut child = super::top_level_sidecar(&mut std::process::Command::new("sleep"))
+        .arg("30")
         .spawn()
         .expect("spawn probe");
-    let group = format!("-{}", child.id());
-    let exists = std::process::Command::new("kill")
-        .args(["-0", group.as_str()])
-        .status()
-        .expect("probe process group");
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", group.as_str()])
-        .status();
+    let pid = child.id().to_string();
+    let group = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid])
+        .output();
+    // Inspect the group without sending group signals into the CI runner.
+    // Spawn sleep directly so PID-only cleanup cannot orphan a shell child.
+    let _ = child.kill();
     let _ = child.wait();
-    assert!(exists.success(), "sidecar must be its process-group leader");
+    let group = group.expect("probe process group");
+    assert!(group.status.success(), "process must be visible to ps");
+    assert_eq!(String::from_utf8_lossy(&group.stdout).trim(), pid);
 }

@@ -1,0 +1,57 @@
+# Physics/runtime audit report: BGC / URBAN / LULCC / DA / Lake (2026-09-08)
+
+Scope: `vendor/CoLM202X/main/{BGC,URBAN,LULCC,DA}` plus the requested read-only follow-up over remaining main physical drivers/radiation/snow-soil/lake modules outside `HYDRO`, `TRACER`, and `CaMa`. This is an implementation audit only; it does **not** validate new physical parameterizations or claim all CoLM physics is scientifically correct.
+
+## Source fixes applied and now frozen from this agent
+
+| Area | Severity | Reproduction / symptom | Root cause | Minimal fix applied | Evidence |
+|---|---:|---|---|---|---|
+| DA GRACE monthly runoff scaling | S2 | Extracted production assignment previously mapped January to March and December to February: `mod(month+1,12)+1` gives `1 -> 3`, `12 -> 2`. | `vendor/CoLM202X/main/DA/MOD_DA_TWS.F90:367-370` selected `fslp_k_mon(nextmonth,:)` using a double-incremented month. | Changed to `nextmonth = mod(month,12)+1` at `vendor/CoLM202X/main/DA/MOD_DA_TWS.F90:367-370`. | `oracle/scripts/test_physics_audit.py:66-85` extracts the real RHS and compiles/runs a Fortran probe for all 12 months. |
+| DA GRACE first-observation FPE | S2 | Reproduced before the fix with a `gfortran -ffpe-trap=zero,invalid,overflow -fcheck=all` probe extracting `zwt_acc_prev_m = zwt_acc_prev_m / nac_grace_prev`; with `nac_grace_prev=0`, it terminated by signal. | `vendor/CoLM202X/main/DA/MOD_DA_TWS.F90:261-266` divided the previous groundwater accumulator even when `has_prev_grace_obs=.false.` and `nac_grace_prev=0`. | Moved the groundwater-depth previous-month division under the existing `IF (has_prev_grace_obs)` block at `vendor/CoLM202X/main/DA/MOD_DA_TWS.F90:263-266`. | `oracle/scripts/test_physics_audit.py:189-217` extracts the guarded production block and verifies the first-observation path no longer divides by zero under FPE flags. |
+| DA SYNOP humidity assimilation | S2 | With `DEF_DA_SM_SYNOP`, fractional `qref` observations were read into an integer array before packing into real observation vectors. | `vendor/CoLM202X/main/DA/MOD_DA_SM.F90:274-278` declared `synop_qref` as integer while `qref` is later read, packed, and assimilated as humidity. | Changed `synop_qref` to `real(r8), allocatable :: synop_qref(:)` at `vendor/CoLM202X/main/DA/MOD_DA_SM.F90:274-278`. | `oracle/scripts/test_physics_audit.py:122-142` extracts the production declaration into a compiled probe and verifies `0.0123456789_r8` is preserved. |
+| BGC SASU leap-year gate | S2 | The old day-365 gate would skip actual leap-year end. Follow-up probe uses the actual production `MOD_TimeManager:isendofyear` convention: final steps are `idate(3)=86400`, not `86400-deltim`. | `vendor/CoLM202X/main/BGC/MOD_BGC_CNSASU.F90:31-33,275` used an explicit day-of-year boundary instead of the shared time helper used by neighboring annual update. | Imported `MOD_TimeManager:isendofyear` and replaced the hard-coded day-365 expression at `vendor/CoLM202X/main/BGC/MOD_BGC_CNSASU.F90:31-33,275`. | `oracle/scripts/test_physics_audit.py:88-110` compiles production `MOD_Precision`, `MOD_UserDefFun`, and `MOD_TimeManager`, then verifies common-year final, leap-year final, and leap day 365 not-final behavior. |
+| DA ensemble perturbations with odd counts | S3 | Odd `DEF_DA_ENS_NUM` leaves the last Box-Muller sample column uninitialized before normalization/BLAS use; no even-count caller/config contract was found. | `vendor/CoLM202X/main/DA/MOD_DA_Ensemble.F90:92-94,137-170,217-224` sizes arrays to all ensemble columns but fills samples only in pairs. | Added a fail-fast guard before random pair generation at `vendor/CoLM202X/main/DA/MOD_DA_Ensemble.F90:92-94`; this rejects odd counts rather than silently reducing or inventing a sampling policy. | `oracle/scripts/test_physics_audit.py:151-186` extracts the production guard and compiles odd/even probes: odd stops, even passes. |
+| DA lifecycle leaks | S3 | Repeated initialize/end cycles left owned DA arrays allocated. | GRACE allocated `obsyear`, `obsmonth`, `zwt_acc_prev_m`, `zwt_acc_this_m`; SYNOP allocated `synop_lut`. | Added guarded deallocations in `end_DA_GRACE` at `vendor/CoLM202X/main/DA/MOD_DA_TWS.F90:382-402` and in `end_DA_SM` at `vendor/CoLM202X/main/DA/MOD_DA_SM.F90:1768-1777`. | Regression checks all four GRACE arrays and specifically checks `synop_lut` inside `end_DA_SM`, not the per-run cleanup. |
+| LULCC missing source class | S2 | Extracted production source-class loop with `lccpct_np(1)=0.5`, `lccpct_np(2)=0.5`, and previous-year `patchclass_=(/1,3/)` reaches the diagnostic branch for missing class 2. Before the fix it only printed and left an `frnp_` slot unset for later use. | `vendor/CoLM202X/main/LULCC/MOD_Lulcc_MassEnergyConserve.F90:203-226` did not stop after failing to find a required source patch class. | Kept the existing diagnostic and added `CALL CoLM_stop ('LULCC source patch not found')` before any later `frnp_` dereference at `vendor/CoLM202X/main/LULCC/MOD_Lulcc_MassEnergyConserve.F90:223-226`. | `oracle/scripts/test_physics_audit.py:246-288` extracts the real production loop; positive control `patchclass_=(/1,2/)` maps both sources, and missing class stops. |
+| Dynamic lake layer adjustment | S2 | Extracted the actual `adjust_lake_layer` routine and ran it with FPE/uninitialized-real flags. Zero total depth previously read uninitialized `_new` arrays; tiny positive layers (`sum=1e-20`) previously skipped the overlap loop because `1.e-8` exceeded the new layer thickness. | `vendor/CoLM202X/main/MOD_Lake.F90:2102-2130,2176-2182` initialized new layer arrays only for positive totals, then used a fixed absolute overlap tolerance that could leave tiny positive remaps without temperature/ice sums. | Reject non-finite and negative layer thickness, return unchanged for valid zero-depth dry states, and use the bounded positive-overlap loop (`resi > 0._r8`) in `vendor/CoLM202X/main/MOD_Lake.F90:2084-2136`. This preserves the intended remap for positive depths without inventing temperatures. | `oracle/scripts/test_physics_audit.py:291-403` compiles the extracted production routine and verifies normal positive, mixed ice/liquid, `1e-20` tiny positive, zero-depth dry no-op, negative reject, and NaN reject cases; positive/tiny/zero paths run under `-finit-real=snan -ffpe-trap=zero,invalid,overflow`. |
+
+Source freeze from this agent after the latest LULCC/Lake edits: `MOD_DA_TWS.F90`, `MOD_DA_SM.F90`, `MOD_DA_Ensemble.F90`, `MOD_BGC_CNSASU.F90`, `MOD_Lulcc_MassEnergyConserve.F90`, `MOD_Lake.F90`, `oracle/scripts/test_physics_audit.py`, and this report. I did not rerun a full default build after the final Lake/LULCC changes because root requested final builds be handled centrally.
+
+## LULCC conditional risk not fixed
+
+| Area | Status | Evidence | Recommendation |
+|---|---|---|---|
+| Empty element patch ranges / sentinel overwrite | Not fixed; not a confirmed valid-generated-data crash. | Production assigns `grid_patch_s/e` from `minval/maxval(locpxl)` after `allocate(locpxl(numpxl))` in `vendor/CoLM202X/main/LULCC/MOD_Lulcc_MassEnergyConserve.F90:131-157` and `vendor/CoLM202X/main/LULCC/MOD_Lulcc_Vars_TimeVariables.F90:651-679`. A standalone inconsistent-input probe showed the sentinel can be overwritten to max/min values, but generated `landpatch` creation iterates every `landelm`/`numset` and emits at least one patch per set in `vendor/CoLM202X/mksrfdata/MOD_LandPatch.F90:128-226`; the downstream loop does not enter for the max/min pair. | Treat as input-integrity hardening, not a confirmed physics/runtime fix for valid generated files. If LULCC files can be externally edited, add `numpxl > 0` guards or stop on inconsistent `landelm`/`landpatch` files. |
+| Conditional empty-patch sentinel absent valid impact | Not fixed by instruction. | I did not find reachable valid-input evidence requiring a science/runtime source change in this slice. | Leave unchanged unless root supplies a valid generated-data reproducer. |
+
+## Lake caller contract traced
+
+`adjust_lake_layer` has five call sites:
+
+- `vendor/CoLM202X/main/MOD_Lake.F90:230-237` (`newsnow_lake`) adjusts after dynamic precipitation updates.
+- `vendor/CoLM202X/main/MOD_Lake.F90:1863-1898` (`snowwater_lake`) can consume lake water via soil/snow exchange and then adjusts; this path explicitly zeros exhausted layers.
+- `vendor/CoLM202X/main/CoLMMAIN.F90:1483-1494` initializes dry dynamic lakes from `wdsrf`; it adjusts only when `wdsrf >= 100.`.
+- `vendor/CoLM202X/main/CoLMMAIN.F90:1937-1944` clamps overflow to `lakedepth`; if `lakedepth` is zero while `wdsrf > 0`, the scale operation can produce zero thickness before adjustment.
+- `vendor/CoLM202X/main/HYDRO/MOD_Catch_LateralFlow.F90:394-411` adjusts after lateral-flow water-depth updates only for `wdsrf(i) >= 100.`.
+
+`nl_lake` is fixed by the global model contract as `integer, parameter :: nl_lake = 10` in `vendor/CoLM202X/main/MOD_Vars_Global.F90:57`, matching the ten-entry `dzlak` profile; I did not expand scope to add a variable-size index guard.
+
+The chosen fix treats all-zero total lake thickness as an existing dry-state no-op because dry dynamic lakes are modeled by `is_dry_lake = DEF_USE_Dynamic_Lake .and. (patchtype == 4) .and. ((wdsrf < 100.) .or. (zwt > 0.))` at `vendor/CoLM202X/main/CoLMMAIN.F90:802-803`. Negative thickness remains invalid geometry and now stops immediately.
+
+## Read-only coverage notes for remaining main physical modules
+
+Reviewed source/control patterns in the main drivers and representative radiation/snow-soil/lake/urban modules outside `HYDRO`, `TRACER`, and `CaMa`: `CoLM.F90`, `CoLMDRIVER.F90`, `CoLMMAIN.F90`, `MOD_NetSolar*.F90`, `MOD_Albedo*.F90`, `MOD_SnowSnicar*.F90`, `MOD_SnowLayersCombineDivide.F90`, `MOD_SoilSnowHydrology.F90`, `MOD_GroundTemperature.F90`, `MOD_GroundFluxes.F90`, `MOD_Thermal.F90`, `MOD_LeafTemperature*.F90`, `MOD_Lake.F90`, `MOD_Glacier.F90`, `MOD_SimpleOcean.F90`, and `main/URBAN/*.F90`. I scanned for discrete implementation hazards: date gates, zero/empty reductions, unguarded division, lifecycle imbalance, and conditional allocation/deallocation mismatches. Aside from the fixed Lake item above, I did not confirm another minimal reproducible implementation bug in this bounded pass. This is not a scientific validation of radiation, snow, soil, lake, or urban physics.
+
+## Validation evidence
+
+- `python3 oracle/scripts/test_physics_audit.py` → `physics audit regressions PASS`.
+- `python3 oracle/scripts/test_kernel_filesystem.py` → `kernel filesystem: mkdir, copy, list, rename literal paths PASS`.
+- `git diff --check -- vendor/CoLM202X/main/DA/MOD_DA_TWS.F90 vendor/CoLM202X/main/DA/MOD_DA_SM.F90 vendor/CoLM202X/main/DA/MOD_DA_Ensemble.F90 vendor/CoLM202X/main/BGC/MOD_BGC_CNSASU.F90 vendor/CoLM202X/main/LULCC/MOD_Lulcc_MassEnergyConserve.F90 vendor/CoLM202X/main/MOD_Lake.F90 oracle/scripts/test_physics_audit.py docs/audit-2026-09-08-physics.md` → no whitespace errors.
+- Old-pattern scan for `mod(month+1,12)+1`, hard `idate(2) .eq. 365`, integer `synop_qref`, and print-only LULCC missing source branch returned no remaining matches in the owned areas.
+
+## Boundaries
+
+- No new dependencies.
+- No changes to physical parameterizations or broad scientific algorithms.
+- No speculative LULCC sentinel fix without valid-input impact.
+- No long physical validation, multi-year BGC/DA/LULCC science cases, or final default build claim after the latest source edits.

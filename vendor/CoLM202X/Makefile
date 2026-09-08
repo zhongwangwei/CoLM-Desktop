@@ -51,6 +51,8 @@ mkdir_build :
 OBJS_SHARED =    \
 				  MOD_Precision.o              \
 				  MOD_SPMD_Task.o              \
+				  MOD_Filesystem.o             \
+				  CoLM_Mkdir.o                 \
 				  MOD_Namelist.o               \
 				  MOD_Vars_Global.o            \
 				  MOD_Const_Physical.o         \
@@ -93,8 +95,11 @@ OBJS_SHARED =    \
 				  MOD_MeshFilter.o             \
 				  MOD_RegionClip.o
 
-${OBJS_SHARED} : %.o : %.F90 ${HEADER} | mkdir_build
+$(filter-out CoLM_Mkdir.o,${OBJS_SHARED}) : %.o : %.F90 ${HEADER} | mkdir_build
 	${FF} -c ${FOPTS} $(INCLUDE_DIR) -o .bld/$@ $< ${MOD_CMD} .bld
+
+CoLM_Mkdir.o: share/CoLM_Mkdir.c | mkdir_build
+	${CC} ${CFLAGS} -c -o .bld/$@ $<
 
 OBJS_SHARED_T = $(addprefix .bld/,${OBJS_SHARED})
 
@@ -452,6 +457,9 @@ CaMa = $(shell \
 	if [ $$CAMA_INIT -eq 0 ]; then echo NO; elif [ $$SP -eq 1 ] || [ $$MP -eq 0 ]; then echo NO; else echo YES; fi)
 ifeq (${CaMa},YES)# Compile CoLM decoupled with river routing scheme (CaMa-Flood)
 #
+CAMA_VARS_OBJ=MOD_CaMa_Vars.o
+CAMA_COUPLER_OBJ=MOD_CaMa_colmCaMa.o
+CAMA_INTERFACE_OBJS=$(CAMA_VARS_OBJ) $(CAMA_COUPLER_OBJ)
 OBJECTS_CAMA=\
 				  parkind1.o              \
 				  yos_cmf_input.o         \
@@ -488,6 +496,10 @@ $(OBJECTS_CAMA) : %.o : %.F90 ${HEADER} ${OBJS_SHARED} | mkdir_build
 
 OBJS_CAMA_T = $(addprefix .bld/,${OBJECTS_CAMA})
 
+else
+CAMA_VARS_OBJ=
+CAMA_COUPLER_OBJ=
+CAMA_INTERFACE_OBJS=
 endif
 
 OBJS_MAIN = \
@@ -573,14 +585,13 @@ OBJS_MAIN = \
 				MOD_HistVector.o                          \
 				MOD_HistSingle.o                          \
 				$(TRACER_MAIN_POST_HISTORY_OBJS)          \
-				MOD_CaMa_Vars.o                           \
+				$(CAMA_INTERFACE_OBJS)                    \
 				MOD_Irrigation.o                          \
 				MOD_BGC_driver.o                          \
 				MOD_Grid_RiverLakeHist.o                  \
 				MOD_Hist.o                                \
 				MOD_CheckEquilibrium.o                    \
 				MOD_LightningData.o                       \
-				MOD_CaMa_colmCaMa.o                       \
 				MOD_Catch_LateralFlow.o                   \
 				MOD_Grid_RiverLakeFlow.o                  \
 				MOD_Urban_Longwave.o                      \
@@ -703,11 +714,12 @@ $(OBJS_POST3):%.o:%.F90 ${HEADER} ${OBJS_SHARED} | mkdir_build
 # edges preserve only the remaining MODULE/USE ordering and leave unrelated
 # objects available to a parallel make.
 MOD_SPMD_Task.o: MOD_Precision.o
-MOD_Namelist.o: MOD_SPMD_Task.o
+MOD_Filesystem.o: MOD_SPMD_Task.o
+MOD_Namelist.o: MOD_SPMD_Task.o MOD_Filesystem.o
 MOD_Vars_Global.o: MOD_Namelist.o
 MOD_Const_Physical.o: MOD_Precision.o
 MOD_Const_LC.o: MOD_Vars_Global.o
-MOD_Utils.o: MOD_Precision.o
+MOD_Utils.o: MOD_Precision.o MOD_SPMD_Task.o
 MOD_UserDefFun.o: MOD_Precision.o
 MOD_TimeManager.o: MOD_UserDefFun.o
 MOD_Const_PFT.o: MOD_TimeManager.o MOD_Vars_Global.o
@@ -829,7 +841,7 @@ MOD_HistGridded.o: MOD_HistWriteBack.o MOD_Vars_1DAccFluxes.o
 MOD_HistVector.o: MOD_Vars_1DAccFluxes.o
 MOD_HistSingle.o: MOD_Vars_1DAccFluxes.o
 MOD_CaMa_Vars.o: MOD_Forcing.o
-MOD_Irrigation.o: MOD_CaMa_Vars.o
+MOD_Irrigation.o: $(CAMA_VARS_OBJ)
 MOD_BGC_driver.o: MOD_BGC_CNAnnualUpdate.o MOD_BGC_CNBalanceCheck.o MOD_BGC_CNCStateUpdate1.o \
 	MOD_BGC_CNCStateUpdate2.o MOD_BGC_CNCStateUpdate3.o MOD_BGC_CNNStateUpdate1.o MOD_BGC_CNNStateUpdate2.o \
 	MOD_BGC_CNNStateUpdate3.o MOD_BGC_CNSASU.o MOD_BGC_CNZeroFluxes.o MOD_BGC_Soil_BiogeochemCompetition.o \
@@ -841,7 +853,7 @@ MOD_BGC_driver.o: MOD_BGC_CNAnnualUpdate.o MOD_BGC_CNBalanceCheck.o MOD_BGC_CNCS
 	MOD_BGC_Veg_CNNDynamics.o MOD_BGC_Veg_CNPhenology.o MOD_BGC_Veg_CNVegStructUpdate.o \
 	MOD_BGC_Veg_NutrientCompetition.o MOD_Irrigation.o
 MOD_Grid_RiverLakeHist.o: MOD_HistGridded.o MOD_HistVector.o
-MOD_Hist.o: MOD_CaMa_Vars.o MOD_DA_TWS.o MOD_Grid_RiverLakeHist.o MOD_HistSingle.o
+MOD_Hist.o: $(CAMA_VARS_OBJ) MOD_DA_TWS.o MOD_Grid_RiverLakeHist.o MOD_HistSingle.o
 MOD_CheckEquilibrium.o: MOD_Forcing.o
 MOD_CaMa_colmCaMa.o: MOD_CaMa_Vars.o MOD_FrictionVelocity.o MOD_TurbulenceLEddy.o
 MOD_Catch_LateralFlow.o: MOD_Catch_HillslopeFlow.o MOD_Catch_RiverLakeFlow.o MOD_Catch_WriteParameters.o \
@@ -864,10 +876,12 @@ MOD_Lulcc_MassEnergyConserve.o: MOD_GroundTemperature.o MOD_Lulcc_TransferTraceR
 	MOD_Lulcc_Vars_TimeVariables.o
 MOD_Lulcc_Initialize.o: MOD_Lulcc_Vars_TimeVariables.o
 MOD_Lulcc_Driver.o: MOD_Lulcc_Initialize.o MOD_Lulcc_MassEnergyConserve.o
-CoLMDRIVER.o: MOD_CaMa_Vars.o
-CoLMMAIN.o: MOD_CaMa_colmCaMa.o MOD_Glacier.o MOD_Irrigation.o MOD_Lake.o MOD_LeafInterception.o \
+CoLMDRIVER.o: $(CAMA_VARS_OBJ)
+CoLMDRIVER.o: MOD_Forcing.o
+MOD_Grid_RiverLakeNetwork.o: MOD_Vector_ReadWrite.o
+CoLMMAIN.o: $(CAMA_COUPLER_OBJ) MOD_Glacier.o MOD_Irrigation.o MOD_Lake.o MOD_LeafInterception.o \
 	MOD_NetSolar.o MOD_NetSolar_Hyper.o MOD_NewSnow.o MOD_RainSnowTemp.o MOD_SimpleOcean.o MOD_Thermal.o
-CoLM.o: MOD_CaMa_colmCaMa.o MOD_Catch_LateralFlow.o MOD_CheckEquilibrium.o MOD_DA_Main.o \
+CoLM.o: $(CAMA_COUPLER_OBJ) MOD_Catch_LateralFlow.o MOD_CheckEquilibrium.o MOD_DA_Main.o \
 	MOD_Grid_RiverLakeFlow.o MOD_Hist.o MOD_LightningData.o MOD_Lulcc_Driver.o MOD_Ozone.o \
 	MOD_ParameterOptimization.o
 HistConcatenate.o: MOD_Concatenate.o

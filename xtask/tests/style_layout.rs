@@ -52,7 +52,7 @@ fn the_layout_has_all_three_breakpoints() {
     // 三档：三栏 / 两栏 / 单栏。少一档就会在某个宽度上挤成一团，
     // 而那个宽度未必是开发机的宽度 —— 所以靠测试而不是靠看。
     let t = css();
-    assert!(t.contains("max-width: 1240px"), "缺中等宽度那一档");
+    assert!(t.contains("max-width: 1239px"), "缺中等宽度那一档");
     assert!(t.contains("max-width: 900px"), "缺窄屏那一档");
     // 命名区域而不是列数：折叠时是「某一块换个位置」，不是「几列挤成一列」。
     // `grid-template` 简写里区域字符串与行列一起写，所以数它。

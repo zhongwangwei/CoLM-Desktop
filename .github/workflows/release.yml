@@ -16,8 +16,11 @@ on:
     tags: ["v*"]
     paths:
       - Cargo.toml
-      - gui/src-tauri/Cargo.toml
-      - gui/src-tauri/tauri.conf.json
+      - Cargo.lock
+      - crates/**
+      - gui/**
+      - oracle/scripts/**
+      - vendor/CoLM202X/**
       - .github/workflows/release.yml
   workflow_dispatch:
 
@@ -102,8 +105,10 @@ jobs:
             arch: x86_64
           - os: ubuntu-latest
             label: linux-x86_64
+            arch: x86_64
           - os: windows-latest
             label: windows-x86_64
+            arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Keep line endings as committed
@@ -114,17 +119,14 @@ jobs:
         with:
           workspaces: gui/src-tauri
 
-      - name: Verify macOS runner architecture
-        if: runner.os == 'macOS'
+      - name: Verify runner architecture
+        if: runner.os != 'Windows'
         shell: bash
         run: test "$(uname -m)" = "${{ matrix.arch }}"
 
       # ---- Fortran 工具链，三个平台三种装法 ----
-      # open-mpi 是**必须的，哪怕 SinglePoint 产物不用 MPI**：
-      # `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
-      # 而 `#ifndef USEMPI` 从下一行才开始 —— 所以 SinglePoint 把 USEMPI
-      # 关掉了，头文件照样要找得到。Windows 那步早就装了 msmpi，
-      # 两个 unix 步骤漏了，于是三平台构建在第二个 .o 上就停了。
+      # 空间内核是普通 MPI/SPMD，并把所用 MPI 运行时一起装进安装包；
+      # SinglePoint 本身仍是非 MPI 产物。
       - name: Fortran toolchain (macOS)
         if: runner.os == 'macOS'
         run: brew install gcc netcdf-fortran lapack open-mpi
@@ -151,20 +153,25 @@ jobs:
             mingw-w64-x86_64-lapack
             mingw-w64-x86_64-msmpi
 
+      - name: Microsoft MPI launcher (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: choco install msmpi --yes --no-progress
+
       # ---- 发布编译期内核 ----
       # PFT/PC/BGC/URBAN 已是运行时选择；IGBP/USGS 与 CROP 数组尺寸仍需产物。
       - name: Build release kernels (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          for p in default usgs crop; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
 
       - name: Build release kernels (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          for p in default usgs crop; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop; do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
           # 动态链接 netcdff/netcdf，所以二进制要跟 MSYS2 的 DLL 一起走。
           # 实测：不带 DLL 时退出码 -1073741515（STATUS_DLL_NOT_FOUND），
@@ -190,6 +197,24 @@ jobs:
               exit 1
             }
           done
+
+      - name: Bundle the MPI runtime used by spatial kernels (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./oracle/scripts/stage_mpi_runtime.sh kernels
+
+      - name: Bundle the MPI runtime used by spatial kernels (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: ./oracle/scripts/stage_mpi_runtime.sh kernels
+
+      - name: Smoke staged MPI runtime
+        shell: bash
+        timeout-minutes: 3
+        env:
+          COLM_KERNEL_DIR: ${{ github.workspace }}/kernels/latlon
+          COLM_KERNEL_RANKS: 2
+        run: cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned -- --nocapture
 
       - name: Bundle
         shell: bash
@@ -241,10 +266,11 @@ jobs:
         working-directory: gui/src-tauri
         run: |
           app='target/release/bundle/macos/CoLM Desktop.app'
-          for p in default usgs crop; do
+          for p in default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop; do
             test -x "$app/Contents/Resources/kernels/$p/colm.x"
             test -f "$app/Contents/Resources/kernels/$p/manifest.json"
           done
+          test -x "$app/Contents/Resources/kernels/_runtime/bin/mpiexec"
           test -x "$app/Contents/MacOS/colm-cli"
           # 示例站点也必须在里面：少了它，一个刚装好程序的人手上没有任何
           # 数据，连「这程序能不能用」都判断不了。三件套缺一不可 ——

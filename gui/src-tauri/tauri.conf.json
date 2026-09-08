@@ -35,7 +35,7 @@
     "copyright": "Copyright © 2026 CoLM LSM Development Team, School of Atmospheric Sciences, SYSU\nContact: Zhongwang Wei (魏忠旺)\nweizhw6@mail.sysu.edu.cn",
     "homepage": "https://github.com/zhongwangwei/CoLM-Desktop",
     "license": "MIT OR Apache-2.0",
-    "shortDescription": "CoLM single-site simulation and evaluation desktop application",
+    "shortDescription": "CoLM site, watershed, regional, and global simulation desktop application",
     "longDescription": "CoLM Desktop is developed and maintained by the CoLM LSM Development Team, School of Atmospheric Sciences, SYSU. Contact: Zhongwang Wei (魏忠旺), weizhw6@mail.sysu.edu.cn.",
     "icon": [
       "icons/32x32.png",

@@ -31,6 +31,7 @@ SUBROUTINE Aggregation_SoilParameters ( &
 !  01/2022, Shupeng Zhang and Nan Wei: porting codes to MPI parallel version.
 !-----------------------------------------------------------------------
 
+   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Namelist
@@ -223,7 +224,7 @@ SUBROUTINE Aggregation_SoilParameters ( &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A29)') 'Aggregate Soil Parameters ...'
-         CALL system('mkdir -p ' // trim(adjustl(landdir)))
+         CALL make_directory(trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)

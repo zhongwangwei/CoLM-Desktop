@@ -75,7 +75,24 @@ CONTAINS
          CALL ncio_read_serial (DEF_CatchmentMesh_data, 'lake_id', lakeid)
       ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+      IF (p_is_master) ncat = size(numhru_all_g)
+      CALL mpi_bcast (ncat, 1, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      IF (.not. p_is_master) allocate (numhru_all_g(ncat), lakeid(ncat))
+      CALL mpi_bcast (numhru_all_g, ncat, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      CALL mpi_bcast (lakeid, ncat, MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      IF (numelm > 0) THEN
+         numhru = sum(numhru_all_g(landelm%eindex))
+         allocate (ibuff(numelm))
+         ibuff = lakeid(landelm%eindex)
+         deallocate (lakeid)
+         CALL move_alloc (ibuff, lakeid)
+      ELSE
+         numhru = 0
+         deallocate (lakeid)
+      ENDIF
+#elif defined(USEMPI)
       IF (p_is_master) THEN
          DO iwork = 0, p_np_worker-1
 
@@ -118,9 +135,13 @@ CONTAINS
       numhru = sum(numhru_all_g)
 #endif
 
+#ifdef FLAT_SPMD
+      IF (allocated(numhru_all_g)) deallocate(numhru_all_g)
+#else
       IF (p_is_master) THEN
          IF (allocated(numhru_all_g)) deallocate(numhru_all_g)
       ENDIF
+#endif
 
       IF (p_is_io) CALL allocate_block_data (grid_hru, hrudata)
       CALL catchment_data_read (DEF_CatchmentMesh_data, 'ihydrounit2d', grid_hru, hrudata)
@@ -201,7 +222,11 @@ CONTAINS
       landhru%nset = numhru
       CALL landhru%set_vecgs
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+      CALL mpi_reduce (numhru, nhru_glb, 1, MPI_INTEGER, MPI_SUM, p_root, p_comm_glb, p_err)
+      IF (p_is_master) write(*,'(A,I12,A)') 'Total: ', nhru_glb, ' hydro units.'
+      CALL mpi_barrier (p_comm_glb, p_err)
+#elif defined(USEMPI)
       IF (p_is_worker) THEN
          CALL mpi_reduce (numhru, nhru_glb, 1, MPI_INTEGER, MPI_SUM, p_root, p_comm_worker, p_err)
          IF (p_iam_worker == 0) THEN

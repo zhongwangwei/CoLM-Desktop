@@ -70,8 +70,50 @@ fn a_case_without_a_history_file_is_marked_as_not_run() {
 }
 
 #[test]
+fn a_path_like_case_name_cannot_escape_history_lookup() {
+    let root = tmp("escaped-history");
+    make_case(&root, "case", "../escape");
+    let outside = root.join("escape/history");
+    std::fs::create_dir_all(&outside).expect("mkdir outside history");
+    std::fs::write(outside.join("escape_hist_2008-01.nc"), b"not really netcdf").expect("write");
+
+    let cases = list_cases(root.to_string_lossy().into_owned()).expect("lists");
+    assert_eq!(cases[0].name, "case");
+    assert!(
+        !cases[0].has_history,
+        "invalid DEF_CASE_NAME must not read ../escape/history"
+    );
+    assert!(validate_case_name("../escape").is_err());
+}
+
+#[test]
 fn a_missing_directory_says_so_rather_than_returning_nothing() {
     // 返回空列表会被界面渲染成「这里没有算例」，而真相是路径写错了。
     let e = list_cases("/no/such/place/at/all".into()).unwrap_err();
     assert!(e.contains("/no/such/place"), "{e}");
+}
+
+#[test]
+fn spatial_metadata_uses_real_mesh_paths_not_site_template_defaults() {
+    let root = tmp("spatial-metadata");
+    for (name, fields, expected) in [
+        ("site", "SITE_fsrfdata = 'site.nc'\n DEF_domain%edgew = -180\n DEF_file_mesh = ''\n DEF_CatchmentMesh_data = ' NuLl '\n ! DEF_file_mesh = 'comment.nc'", false),
+        ("template", "SITE_fsrfdata = 'site.nc'\n DEF_file_mesh = 'path/to/mesh/file'\n DEF_CatchmentMesh_data = 'path/to/catchment/data'", false),
+        ("region", "DEF_file_mesh = 'mesh.nc'", true),
+        ("catchment", "DEF_CatchmentMesh_data = 'catchment.nc'", true),
+    ] {
+        let case = make_case(&root, name, name);
+        std::fs::write(case.join("case.nml"), format!("&nl_colm\n DEF_CASE_NAME = '{name}'\n {fields}\n/\n")).unwrap();
+        assert_eq!(colm_case::is_spatial_case(&case.join("case.nml")).unwrap(), expected);
+    }
+    let entries = list_cases(root.to_string_lossy().into_owned()).unwrap();
+    for entry in entries {
+        assert_eq!(
+            entry.spatial,
+            matches!(entry.name.as_str(), "region" | "catchment"),
+            "{}",
+            entry.name
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

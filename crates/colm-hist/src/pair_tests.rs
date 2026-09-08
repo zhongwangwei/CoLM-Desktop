@@ -176,6 +176,22 @@ fn nonfinite_and_model_fill_values_never_enter_metrics() {
 }
 
 #[test]
+fn nonfinite_observations_never_enter_metrics() {
+    let model_t = [0.0, 1800.0, 3600.0];
+    let model_v = [1.0, 2.0, 3.0];
+    let obs_t = model_t;
+    let obs_v = [1.0, f64::INFINITY, 3.0];
+    let qc = [0.0; 3];
+    let obs = super::Series {
+        seconds: &obs_t,
+        values: &obs_v,
+        qc: &qc,
+    };
+    let paired = super::pair_with_time(&model_t, &model_v, &obs, 0);
+    assert_eq!(paired, [(0.0, 1.0, 1.0), (3600.0, 3.0, 3.0)]);
+}
+
+#[test]
 fn window_keeps_from_and_excludes_to() {
     let (ms, mv) = model();
     let (os, ov, oq) = obs_all_good();

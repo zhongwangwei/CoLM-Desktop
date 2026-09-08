@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 从 vendor/CoLM202X 构建一个 SinglePoint 物理预设，并写出内核清单。
+# 从 vendor/CoLM202X 构建一个站点或空间预设，并写出内核清单。
 # 默认是 production (-O2)；定位编译期越界时用
 # `COLM_KERNEL_PROFILE=debug ./oracle/scripts/build_kernel.sh ...`。
 #
@@ -7,7 +7,7 @@
 # 因此版本握手靠构建期生成的 manifest.json + sha256，而不是问二进制。
 set -euo pipefail
 
-PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop> [outdir]}"
+PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop|latlon[-usgs|-crop]|unstructured[-usgs|-crop]|catchment[-usgs|-crop]> [outdir]}"
 OUTDIR="${2:-kernels}"
 PROFILE="${COLM_KERNEL_PROFILE:-production}"
 case "$PROFILE" in
@@ -47,13 +47,24 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # URBANON/OFF and BGCON/OFF argument slots are gone entirely.
 #
 # default/bgc/urban 编成同一份 IGBP 产物；bgc/urban 只为旧测试名保留别名。
-# usgs 是地类分类编译组合；crop 仍需要 CROPON，因为 CFT 数组尺寸不同。
+# 空间预设也按 IGBP / USGS / CROP 三种编译能力展开；范围（流域/区域/全球）
+# 是运行时 domain mask，不产生九份重复内核。
+SPATIAL=0
 case "$PRESET" in
   default) ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   usgs)    ARGS=(SinglePoint LULC_USGS CaMaOFF CROPOFF) ;;
   bgc)     ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   urban)   ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   crop)    ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPON) ;;
+  latlon)              ARGS=(GRID LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1 ;;
+  latlon-usgs)         ARGS=(GRID LULC_USGS CaMaOFF CROPOFF); SPATIAL=1 ;;
+  latlon-crop)         ARGS=(GRID LULC_IGBP CaMaOFF CROPON);  SPATIAL=1 ;;
+  unstructured)        ARGS=(UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1 ;;
+  unstructured-usgs)   ARGS=(UNSTRUCTURED LULC_USGS CaMaOFF CROPOFF); SPATIAL=1 ;;
+  unstructured-crop)   ARGS=(UNSTRUCTURED LULC_IGBP CaMaOFF CROPON);  SPATIAL=1 ;;
+  catchment)           ARGS=(CATCHMENT LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1 ;;
+  catchment-usgs)      ARGS=(CATCHMENT LULC_USGS CaMaOFF CROPOFF); SPATIAL=1 ;;
+  catchment-crop)      ARGS=(CATCHMENT LULC_IGBP CaMaOFF CROPON);  SPATIAL=1 ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
@@ -110,6 +121,12 @@ fi
 rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
+if [ "$SPATIAL" -eq 1 ]; then
+  # 空间版使用普通 SPMD；站点预设保持原有 Master/IO/Worker 路径。
+  printf '\n#define FLAT_SPMD\n' >> include/define.h
+  # 空间版明确不编译 extends/interception；站点预设保持原行为。
+  sed -i.bak 's/^#define extend_interception$/#undef extend_interception/' include/define.h
+fi
 
 # 自检：ARGS 里「要求打开」的宏，预处理之后是不是真的打开了。
 #
@@ -187,6 +204,20 @@ for arg in "${ARGS[@]}"; do
   fi
 done
 
+if [ "$SPATIAL" -eq 1 ]; then
+  is_effective USEMPI || { echo "spatial kernel must enable USEMPI" >&2; exit 3; }
+  is_effective FLAT_SPMD || { echo "spatial kernel must enable FLAT_SPMD" >&2; exit 3; }
+  is_effective extend_interception && { echo "spatial kernel must disable extend_interception" >&2; exit 3; }
+  is_effective CaMa_Flood && { echo "spatial kernel must disable CaMa_Flood" >&2; exit 3; }
+  if [ "${ARGS[0]}" = CATCHMENT ]; then
+    is_effective CatchLateralFlow || { echo "CATCHMENT must enable CatchLateralFlow" >&2; exit 3; }
+    is_effective GridRiverLakeFlow && { echo "CATCHMENT must disable GridRiverLakeFlow" >&2; exit 3; }
+  else
+    is_effective GridRiverLakeFlow || { echo "GRID/UNSTRUCTURED must enable GridRiverLakeFlow" >&2; exit 3; }
+    is_effective CatchLateralFlow && { echo "GRID/UNSTRUCTURED must disable CatchLateralFlow" >&2; exit 3; }
+  fi
+fi
+
 # BGC / LULCC no longer appear in $EFFECTIVE at all; URBAN_MODEL is instead
 # unconditionally defined by create_defineh.bash. This
 # self-check used to also confirm URBAN_MODEL/BGC took effect for the
@@ -200,53 +231,8 @@ if ! is_effective URBAN_MODEL; then
   exit 3
 fi
 
-# Windows 上给 CoLM 建目录的路径**加引号**。
-#
-# CoLM 在 55 处用 `CALL system('mkdir -p ' // 路径)`。`system()` 在 MinGW 上
-# 走 `cmd.exe /c`，而 cmd 在**未加引号**的参数里把 `/` 当开关前缀 ——
-# 于是 `mkdir D:\x\out/CN-Cng/landdata` 报
-# `The syntax of the command is incorrect.`，模型随后往不存在的目录里写。
-#
-# CI 的探针把这件事量清楚了（见 windows-kernel.yml）：
-#
-#   mkdir -p <反斜杠嵌套>   退出码 0   目录建了
-#   mkdir    <尾正斜杠>     退出码 1   目录没建
-#   mkdir    <全正斜杠>     退出码 1   目录没建
-#
-# 所以**问题不在 `-p`**（cmd 把它当成另一个目录名，无害），在斜杠。
-# 而斜杠有一半是上游自己拼的（`DEF_dir_output // '/' // ...`，
-# `MOD_Namelist.F90:1403`），我们在 namelist 里改不掉。加引号能一并挡住
-# 两边的来源：Win32 的 CreateDirectory 本来就认正斜杠，只有 cmd 的**解析器**
-# 不认，而引号正是绕过解析器的办法。
-#
-# **改的是构建出来的那一份源码，不是仓库里的。** `build_kernel.sh` 已经
-# 在改 `include/Makeoptions` 与 `include/define.h` 了，这一处同理；
-# 上游的写法在 Linux/macOS 上完全正确，不该为 Windows 去改它。
-#
-# 顺带说明为什么只处理 mkdir：三个二进制里另有 3 处 `cp`
-# （`MOD_RegionClip.F90`），但它在 `USE_srfdata_from_larger_region` 分支里，
-# 而 SinglePoint 在到达那里之前就 `CoLM_stop` 了（`MKSRFDATA.F90:149`）。
-# `postprocess/` 里的 `mv` 与文件列举也不在这三个二进制内。
-if [ -n "$OWN_MAKEOPTS" ]; then
-  # `|| true` 不是保险，是必需：脚本开着 `set -euo pipefail`，而 grep
-  # 找不到东西时返回 1 —— 下面那次核对**恰恰期望找不到**（都改完了），
-  # 于是「改对了」会让构建以退出码 1 结束，且一个字都不打。实测踩过。
-  files=$(grep -rl "mkdir -p " --include='*.F90' . | grep -vE '/preprocess/|/extends/CaMa/' || true)
-  n=$(echo "$files" | grep -c . || true)
-  # 一处都没有就是这个假设过期了 —— 静默跳过会让 Windows 再次在运行到
-  # 一半时死掉，而构建看上去一切正常。
-  if [ "$n" = "0" ]; then
-    echo "no 'mkdir -p' in the Fortran sources -- has upstream changed?" >&2
-    exit 3
-  fi
-  echo "$files" | xargs sed -i -E "s|CALL system\('mkdir -p ' // (.*)\)[[:space:]]*\$|CALL system('mkdir \"' // \1 // '\"')|"
-  left=$(grep -r "mkdir -p " --include='*.F90' . 2>/dev/null | grep -vE '/preprocess/|/extends/CaMa/' | wc -l | tr -d ' ' || true)
-  echo "Windows: $n 个文件里的 mkdir 路径已加引号，剩余未改 $left 处"
-  if [ "$left" != "0" ]; then
-    echo "some 'mkdir -p' lines did not match the rewrite -- they would fail at run time" >&2
-    exit 3
-  fi
-fi
+# Directory creation uses MOD_Filesystem and native mkdir APIs on every platform.
+# Do not rewrite Fortran commands through cmd.exe: quoting still expands %variables%.
 
 # 注释里的 `/` 紧跟 `*` 会让 cpp 从那里开始**吞代码**。
 #
@@ -296,24 +282,32 @@ if [ -n "$SWALLOWED" ]; then
   exit 3
 fi
 
-# MPI 的**头文件路径**。SinglePoint 产物不用 MPI，编译却仍然要它：
-# `MOD_SPMD_Task.F90:34` 的 `include 'mpif.h'` 在任何 `#ifdef` 之外，
-# 而 `#ifndef USEMPI` 从下一行才开始 —— SinglePoint 把 USEMPI 关掉了，
-# 头文件照样要找得到。
-#
-# 路径不写死：macOS 的 Homebrew 放在 /opt/homebrew/include（Makeoptions 已经带上），
+# MPI wrapper 与可选模块路径都不写死：macOS 的 Homebrew prefix 随架构变化
+# （Makeoptions 用 `brew --prefix` 获取），
 # 而 Ubuntu 的 libopenmpi-dev 放在 /usr/lib/x86_64-linux-gnu/openmpi/include，
-# 不在默认搜索路径上。问 mpif90 自己要 —— 它正是为此存在的包装器。
+# 不在默认搜索路径上。问 MPI Fortran wrapper 自己要 —— 它正是为此存在的。
 # `--showme:incdirs` 在 OpenMPI 5 上返回空（实测 5.0.9），所以解析 `-show`。
+find_mpi_fortran() {
+  for candidate in mpifort mpifort.openmpi mpif90 mpif90.openmpi; do
+    command -v "$candidate" >/dev/null 2>&1 && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+MPI_FC=$(find_mpi_fortran || true)
 MPI_INC=""
-if command -v mpif90 >/dev/null 2>&1; then
-  MPI_INC=$(mpif90 -show 2>/dev/null | tr ' ' '\n' | grep '^-I' | sort -u | tr '\n' ' ')
+if [ -n "$MPI_FC" ]; then
+  MPI_INC=$($MPI_FC -show 2>/dev/null | tr ' ' '\n' | grep '^-I' | sort -u | tr '\n' ' ')
 fi
 
-# FF=gfortran 而非 mpif90：SinglePoint 已 #undef USEMPI，用 mpif90 只会白链 4 个 MPI 库。
-# 实测去掉后依赖只剩 netcdff/netcdf/LAPACK/BLAS/libgfortran/libgomp/libquadmath。
-# 只借它的 -I，不借它的 -l。
-make FF="gfortran -fopenmp $MPI_INC" COLM_KERNEL_PROFILE="$PROFILE" \
+# SinglePoint 不白链 MPI；空间预设必须由 MPI Fortran wrapper 同时提供头文件和链接参数。
+if [ "$SPATIAL" -eq 1 ]; then
+  [ -n "$MPI_FC" ] || { echo "spatial kernel build requires mpifort/mpif90" >&2; exit 2; }
+  MAKE_FF="$MPI_FC -fopenmp"
+else
+  MAKE_FF="gfortran -fopenmp $MPI_INC"
+fi
+make FF="$MAKE_FF" COLM_KERNEL_PROFILE="$PROFILE" \
   mksrfdata.x mkinidata.x colm.x
 
 DEST="$OUT_BASE/$PRESET"

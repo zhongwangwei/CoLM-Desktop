@@ -241,7 +241,7 @@ fn a_converted_forcing_reproduces_the_golden_history() {
         },
     };
 
-    let all = fields(&spec);
+    let all = fields(&spec).expect("valid test spin-up");
     let req = required(&all);
     std::fs::write(layout.case_nml(), render(&req)).expect("write case.nml");
 

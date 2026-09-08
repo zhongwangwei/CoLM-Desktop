@@ -97,6 +97,20 @@ fn missing_artifact_is_a_failure_even_with_success_marker() {
 }
 
 #[test]
+fn a_directory_cannot_satisfy_a_required_output_file() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(
+        adjudicate(
+            Stage::Colm,
+            Some(0),
+            Stage::Colm.success_marker(),
+            std::slice::from_ref(&path)
+        ),
+        Outcome::Failed(Failure::MissingArtifact(path))
+    );
+}
+
+#[test]
 fn nonzero_exit_is_a_failure() {
     // 实测：namelist 文件本身不存在 -> gfortran runtime error -> 退出码 2
     let stdout = "Fortran runtime error: Cannot open file '': No such file or directory\n";

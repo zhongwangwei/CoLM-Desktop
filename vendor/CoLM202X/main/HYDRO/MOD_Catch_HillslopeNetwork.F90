@@ -50,7 +50,7 @@ CONTAINS
    ! Local Variables
    character(len=256) :: hillslope_network_file
 
-   integer :: maxnumhru, ie, nhru, hs, i, j
+   integer :: maxnumhru, ie, nhru, hs, i, j, offset, nfield_i, nfield_r
    integer :: iworker, mesg(2), nrecv, irecv, isrc, idest
 
    integer , allocatable :: eid (:)
@@ -67,6 +67,9 @@ CONTAINS
 
    integer , allocatable :: icache (:,:)
    real(r8), allocatable :: rcache (:,:), rcache2(:,:,:)
+   integer , allocatable :: counts(:), counts_i(:), counts_r(:)
+   integer , allocatable :: disps(:), disps_i(:), disps_r(:), send_i(:), recv_i(:)
+   real(r8), allocatable :: send_r(:), recv_r(:)
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -96,6 +99,104 @@ CONTAINS
 
       hillslope_network => null()
 
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (ne, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iworker = 1, p_np_glb-1
+         disps(iworker) = disps(iworker-1) + counts(iworker-1)
+      ENDDO
+
+      IF (p_is_master) THEN
+         allocate (eid(max(1,sum(counts))))
+      ELSE
+         allocate (eid(1))
+      ENDIF
+      CALL mpi_gatherv (elmindex, ne, MPI_INTEGER, eid, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      nfield_i = 1 + 2*maxnumhru
+      allocate (counts_i(0:p_np_glb-1), disps_i(0:p_np_glb-1))
+      counts_i = counts * nfield_i
+      disps_i = disps * nfield_i
+      IF (p_is_master) THEN
+         allocate (send_i(max(1,nfield_i*sum(counts))))
+         DO irecv = 1, sum(counts)
+            IF (eid(irecv) < 1 .or. eid(irecv) > size(nhru_all)) &
+               CALL CoLM_stop ('hillslope_network_init: basin index out of range')
+            offset = (irecv-1)*nfield_i
+            send_i(offset+1) = nhru_all(eid(irecv))
+            send_i(offset+2:offset+1+maxnumhru) = indxhru(:,eid(irecv))
+            send_i(offset+2+maxnumhru:offset+nfield_i) = nexthru(:,eid(irecv))
+         ENDDO
+      ELSE
+         allocate (send_i(1))
+      ENDIF
+      allocate (recv_i(max(1,nfield_i*ne)))
+      CALL mpi_scatterv (send_i, counts_i, disps_i, MPI_INTEGER, recv_i, &
+         nfield_i*ne, MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      nfield_r = maxnumhru * (4 + nfldstep)
+      allocate (counts_r(0:p_np_glb-1), disps_r(0:p_np_glb-1))
+      counts_r = counts * nfield_r
+      disps_r = disps * nfield_r
+      IF (p_is_master) THEN
+         allocate (send_r(max(1,nfield_r*sum(counts))))
+         DO irecv = 1, sum(counts)
+            offset = (irecv-1)*nfield_r
+            send_r(offset+1:offset+maxnumhru) = handhru(:,eid(irecv))
+            offset = offset + maxnumhru
+            send_r(offset+1:offset+maxnumhru) = elvahru(:,eid(irecv))
+            offset = offset + maxnumhru
+            send_r(offset+1:offset+maxnumhru) = plenhru(:,eid(irecv))
+            offset = offset + maxnumhru
+            send_r(offset+1:offset+maxnumhru) = lfachru(:,eid(irecv))
+            offset = offset + maxnumhru
+            send_r(offset+1:offset+nfldstep*maxnumhru) = &
+               reshape(fldstep(:,:,eid(irecv)), (/nfldstep*maxnumhru/))
+         ENDDO
+      ELSE
+         allocate (send_r(1))
+      ENDIF
+      allocate (recv_r(max(1,nfield_r*ne)))
+      CALL mpi_scatterv (send_r, counts_r, disps_r, MPI_REAL8, recv_r, &
+         nfield_r*ne, MPI_REAL8, p_root, p_comm_glb, p_err)
+
+      IF (allocated(nhru_all)) deallocate (nhru_all)
+      IF (allocated(indxhru )) deallocate (indxhru )
+      IF (allocated(nexthru )) deallocate (nexthru )
+      IF (allocated(handhru )) deallocate (handhru )
+      IF (allocated(elvahru )) deallocate (elvahru )
+      IF (allocated(plenhru )) deallocate (plenhru )
+      IF (allocated(lfachru )) deallocate (lfachru )
+      IF (allocated(fldstep )) deallocate (fldstep )
+
+      allocate (nhru_in_bsn(ne), indxhru(maxnumhru,ne), nexthru(maxnumhru,ne))
+      allocate (handhru(maxnumhru,ne), elvahru(maxnumhru,ne))
+      allocate (plenhru(maxnumhru,ne), lfachru(maxnumhru,ne))
+      allocate (fldstep(nfldstep,maxnumhru,ne))
+      DO ie = 1, ne
+         offset = (ie-1)*nfield_i
+         nhru_in_bsn(ie) = recv_i(offset+1)
+         indxhru(:,ie) = recv_i(offset+2:offset+1+maxnumhru)
+         nexthru(:,ie) = recv_i(offset+2+maxnumhru:offset+nfield_i)
+
+         offset = (ie-1)*nfield_r
+         handhru(:,ie) = recv_r(offset+1:offset+maxnumhru)
+         offset = offset + maxnumhru
+         elvahru(:,ie) = recv_r(offset+1:offset+maxnumhru)
+         offset = offset + maxnumhru
+         plenhru(:,ie) = recv_r(offset+1:offset+maxnumhru)
+         offset = offset + maxnumhru
+         lfachru(:,ie) = recv_r(offset+1:offset+maxnumhru)
+         offset = offset + maxnumhru
+         fldstep(:,:,ie) = reshape(recv_r(offset+1:offset+nfldstep*maxnumhru), &
+            shape(fldstep(:,:,ie)))
+      ENDDO
+
+      deallocate (eid, counts, counts_i, counts_r, disps, disps_i, disps_r)
+      deallocate (send_i, recv_i, send_r, recv_r)
+#else
       IF (p_is_master) THEN
 #ifdef USEMPI
          DO iworker = 1, p_np_worker
@@ -217,10 +318,11 @@ CONTAINS
          ENDIF
 #endif
       ENDIF
+#endif
 
       IF (p_is_worker) THEN
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          mesg(1:2) = (/p_iam_glb, ne/)
          CALL mpi_send (mesg(1:2), 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
 

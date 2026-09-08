@@ -32,6 +32,13 @@ CONTAINS
    USE MOD_Block
    USE MOD_Mesh
    USE MOD_LandElm
+#if defined (UNSTRUCTURED) || defined (CATCHMENT)
+   USE MOD_ElmVector, only: elm_vector_init
+#endif
+#ifdef CATCHMENT
+   USE MOD_LandHRU
+   USE MOD_HRUVector, only: hru_vector_init
+#endif
    USE MOD_LandPatch
    USE MOD_LandPFT
    USE MOD_LandUrban

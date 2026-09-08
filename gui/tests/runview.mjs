@@ -62,6 +62,15 @@ if (!mainJs.includes("stacked ? '--live-h' : '--live-w'")
 if (!/catch \(e\) \{\s*setStatus\('后端出错：' \+ e\);\s*throw e;/s.test(mainJs)) {
   throw new Error('a failed backend boot must keep the loading gate visible');
 }
+
+const spatialJs = await readFile(join(root, 'dist', 'app', 'spatial.js'), 'utf8');
+if (!spatialJs.includes("root: $('spatial-root')?.value.trim()")
+    || !spatialJs.includes('wizard: state.wizard')
+    || !spatialJs.includes('const context = spatialContext()')
+    || !spatialJs.includes('当前已切换工作流，未加入本次算例列表')
+    || spatialJs.indexOf('state.createdCases.add(out)') < spatialJs.indexOf("const cases = await invoke('list_cases'")) {
+  throw new Error('late spatial case creation must capture full context and avoid state writes before the current check');
+}
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 const outputVariables = html.indexOf('输出变量（按需展开）');
 const startRun = html.indexOf('<h3>开始运行</h3>');
@@ -86,6 +95,20 @@ for (const [id, label] of expectedRunButtons) {
   if (!new RegExp(`<button[^>]+id="${id}"[^>]*>[^<]*${label}`).test(runSection)) {
     throw new Error(`start-run card is missing ${label}`);
   }
+}
+const resultsJs = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
+if (resultsJs.includes('/DEF_domain%|DEF_file_mesh')
+    || !resultsJs.includes('const spatialCaseEntry = c => c?.spatial === true')) {
+  throw new Error('Study blocking must rely on authoritative case.spatial metadata, not raw case.nml text or aliases');
+}
+const controlStudy = resultsJs.slice(resultsJs.indexOf('async function controlStudy('), resultsJs.indexOf('\nasync function exportStudy('));
+if (!controlStudy.includes("action === 'resume' ? spatialStudyReason() : ''")
+    || /if \(spatialStudyReason\(\)\)/.test(controlStudy)) {
+  throw new Error('pause/cancel controls must stay usable; only resume is spatial-blocked');
+}
+
+if (!runner.includes("（early state，不建议使用）") || !runner.includes("GRIDBASED") || !runner.includes("UNSTRUCTURED") || !runner.includes("CATCHMENT")) {
+  throw new Error('spatial kernel presets must be labeled early state');
 }
 if (!runner.includes("const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null]")) {
   throw new Error('the four run buttons must map to three individual stages and the full workflow');

@@ -9,6 +9,8 @@ use super::spec::{
 
 pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<MemberPlan>> {
     let design_params = sorted_parameters(spec);
+    let k = design_params.len();
+    let count = default_candidate_count(&spec.method, k, &spec.budget)?;
     validate_vector(spec, baseline)?;
     let mut out = vec![MemberPlan {
         id: "m000000".into(),
@@ -17,7 +19,6 @@ pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<
         baseline: true,
         parameters: baseline.clone(),
     }];
-    let k = design_params.len();
     match spec.method {
         StudyMethod::Oat => {
             let mut n = 1;
@@ -38,7 +39,6 @@ pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<
             }
         }
         StudyMethod::Lhs | StudyMethod::DifferentialEvolution => {
-            let count = default_candidate_count(&spec.method, k, &spec.budget);
             let permutations = lhs_permutations(spec.seed, k, count);
             for i in 0..count {
                 let parameters = lhs_member(spec, &design_params, &permutations, i, count)?;
@@ -189,7 +189,7 @@ mod tests {
     };
 
     #[test]
-    fn lhs_is_deterministic_and_inside_bounds() {
+    fn lhs_is_deterministic_stratified_and_inside_bounds() {
         let spec = StudySpec {
             kind: StudyKind::Uncertainty,
             method: StudyMethod::Lhs,
@@ -223,9 +223,43 @@ mod tests {
             serde_json::to_string(&b).unwrap()
         );
         assert_eq!(a.len(), 6);
-        for row in a.iter().skip(1) {
-            let v = row.parameters["DEF_TUNING_CNFAC"];
-            assert!((0.1..=0.9).contains(&v));
+        assert!(a[0].baseline);
+        assert_eq!(a[0].parameters, baseline);
+        for scale in [ScaleSpec::Linear, ScaleSpec::Log] {
+            let mut spec = spec.clone();
+            spec.parameters[0].scale = Some(scale);
+            let mut second = spec.parameters[0].clone();
+            second.name = "DEF_TUNING_ZLND".into();
+            second.sample_min = 0.001;
+            second.sample_max = 0.1;
+            spec.parameters.push(second);
+            let mut baseline = baseline.clone();
+            baseline.insert("DEF_TUNING_ZLND".into(), 0.01);
+            let members = design(&spec, &baseline).unwrap();
+            for parameter in &spec.parameters {
+                let mut strata = members
+                    .iter()
+                    .skip(1)
+                    .map(|member| {
+                        assert!(!member.baseline);
+                        let value = member.parameters[&parameter.member_key()];
+                        let (value, lo, hi) = match scale {
+                            ScaleSpec::Linear => {
+                                (value, parameter.sample_min, parameter.sample_max)
+                            }
+                            ScaleSpec::Log => (
+                                value.ln(),
+                                parameter.sample_min.ln(),
+                                parameter.sample_max.ln(),
+                            ),
+                        };
+                        assert!(value >= lo && value < hi);
+                        ((value - lo) / (hi - lo) * 5.0).floor() as usize
+                    })
+                    .collect::<Vec<_>>();
+                strata.sort_unstable();
+                assert_eq!(strata, vec![0, 1, 2, 3, 4]);
+            }
         }
     }
 

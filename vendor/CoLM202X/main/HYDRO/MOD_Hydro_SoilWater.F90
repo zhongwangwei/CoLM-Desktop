@@ -3609,6 +3609,7 @@ CONTAINS
             count_wet2dry_accum  = count_wet2dry_accum  + count_wet2dry
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
             CALL mpi_send (count_implicit,       1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (count_explicit,       1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (count_wet2dry,        1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -3616,12 +3617,14 @@ CONTAINS
             CALL mpi_send (count_explicit_accum, 1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (count_wet2dry_accum,  1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
 #endif
+#endif
          ENDIF
       ENDIF
 
       IF (p_is_master) THEN
 
 #ifdef USEMPI
+#ifndef FLAT_SPMD
          iwork = p_address_worker(p_root)
          CALL mpi_recv (count_implicit,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (count_explicit,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
@@ -3629,6 +3632,7 @@ CONTAINS
          CALL mpi_recv (count_implicit_accum, 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (count_explicit_accum, 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (count_wet2dry_accum , 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+#endif
 #endif
 
          write(*,"(/,A,I13,A,I13,A,I13,A)") 'VSF scheme this step: ',    &

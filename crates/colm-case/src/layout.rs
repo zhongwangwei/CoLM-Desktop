@@ -70,8 +70,51 @@ pub fn case_name(nml: &Path) -> anyhow::Result<String> {
     let doc =
         colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
     match doc.get("DEF_CASE_NAME") {
-        Some(colm_namelist::Value::Str(s)) => Ok(s.clone()),
+        Some(colm_namelist::Value::Str(s)) => {
+            validate_case_name(s)?;
+            Ok(s.clone())
+        }
         Some(other) => bail!("DEF_CASE_NAME is {other:?}, not a string"),
         None => bail!("no DEF_CASE_NAME in {}", nml.display()),
     }
+}
+
+/// Spatial cases provide a mesh path; comments, default bounds and blank/null
+/// mesh fields in full SinglePoint templates do not make a case spatial.
+pub fn is_spatial_case(nml: &Path) -> anyhow::Result<bool> {
+    use anyhow::{bail, Context};
+    let text =
+        std::fs::read_to_string(nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let doc =
+        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", nml.display()))?;
+    let mut spatial = false;
+    for field in ["DEF_file_mesh", "DEF_CatchmentMesh_data"] {
+        match doc.get(field) {
+            Some(colm_namelist::Value::Str(value)) => {
+                let value = value.trim();
+                spatial |= !value.is_empty()
+                    && !value.eq_ignore_ascii_case("null")
+                    && crate::is_default(field, &colm_namelist::Value::Str(value.into()))
+                        != Some(true);
+            }
+            None => {}
+            Some(other) => bail!("{field} must be a path string, got {other}"),
+        }
+    }
+    Ok(spatial)
+}
+
+/// Case names are one path component, not paths. CoLM trims them and stores
+/// them in CHARACTER(256), so reject names that would change inside Fortran.
+pub fn validate_case_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name == name.trim()
+            && name.len() <= 256
+            && !matches!(name, "." | "..")
+            && !name.contains(['/', '\\', ':'])
+            && !name.chars().any(char::is_control),
+        "DEF_CASE_NAME must be a single non-empty name of at most 256 bytes, without path separators, colon, control characters, or leading/trailing whitespace"
+    );
+    Ok(())
 }

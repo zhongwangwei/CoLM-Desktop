@@ -73,7 +73,7 @@ function renderCasesInto(box) {
   const cases = box.id === 'cases-run' ? batchTarget() : currentCases();
   if (!cases.length) {
     box.innerHTML = box.id === 'cases-run'
-      ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在前面选站点并建算例。</p>'
+      ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在基本设定中创建算例。</p>'
       : '<p class="muted" style="font-size:11px">本次还没有创建算例；root 里的旧算例不会显示。</p>';
     return;
   }
@@ -122,7 +122,9 @@ export function renderCases() {
   updateCaseBatchButtons();
 }
 
-async function selectCase(c) {
+export async function selectCase(c) {
+  const token = ++activeCaseSelection;
+  const isCurrent = () => token === activeCaseSelection && state.selected?.dir === c.dir;
   state.selected = c;
   state.expertCaseDir = c.dir;
   // 从算例列表点进来的是**单个**算例。不重置的话，上一次批量选中的
@@ -131,8 +133,11 @@ async function selectCase(c) {
   renderSteps();
   renderCases();
   try {
-    state.text = await invoke('read_text', { path: c.dir + '/case.nml' });
-    const unknown = await invoke('unknown_fields', { text: state.text });
+    const text = await invoke('read_text', { path: c.dir + '/case.nml' });
+    if (!isCurrent()) return;
+    const unknown = await invoke('unknown_fields', { text });
+    if (!isCurrent()) return;
+    state.text = text;
     const u = $('unknown');
     u.textContent = '';
     if (unknown.length) {
@@ -146,9 +151,10 @@ async function selectCase(c) {
         unknown.join('、');
       u.appendChild(p);
     }
-    renderFields();
+    await renderFields(isCurrent);
+    if (!isCurrent()) return;
     refreshVars();
-  } catch (e) { $('status').textContent = String(e); }
+  } catch (e) { if (isCurrent()) $('status').textContent = String(e); }
 }
 
 /** 选一个站点：**算例按需建**。
@@ -247,6 +253,8 @@ export function assignCaseNames(sites) {
 }
 
 let scanTimer = null;
+let activeCaseSelection = 0;
+let siteScanPending = false;
 
 /** 目录选择器连续更新站点、强迫场和算例路径时，只在本轮末尾扫描一次。 */
 function scheduleSiteScan() {
@@ -254,7 +262,11 @@ function scheduleSiteScan() {
   if (scanTimer !== null) clearTimeout(scanTimer);
   scanTimer = setTimeout(() => {
     scanTimer = null;
-    $('scan').click();
+    if ($('scan').disabled) {
+      siteScanPending = true;
+      return;
+    }
+    scanPreparedSites();
   }, 0);
 }
 
@@ -324,13 +336,19 @@ async function ensureCase(s) {
 export async function scanPreparedSites(selectFile = null) {
   const dir = $('sitedir').value.trim();
   if (!dir) { status('要先填 Sitedata 目录'); return null; }
+  const forcingDir = $('forcingdir').value.trim();
+  siteScanPending = false;
   $('scan').disabled = true;
   try {
     // quick: 只读站点文件。实测 90 站 0.07 秒，而完整读要 0.35 秒 ——
     // 第一屏只要经纬度与地类，强迫场的时间范围等选中了再补。
     const r = await invoke('scan_sites', {
-      dir, forcingDir: $('forcingdir').value.trim() || null, quick: true,
+      dir, forcingDir: forcingDir || null, quick: true,
     });
+    if ($('sitedir').value.trim() !== dir || $('forcingdir').value.trim() !== forcingDir) {
+      siteScanPending = true;
+      return null;
+    }
     // 算例目录也别问 —— 默认放在站点数据旁边。**显示出来且可改**，
     // 不是偷偷决定：产物落在哪儿是用户该看得见的事。
     if (!$('root').value.trim()) {
@@ -356,8 +374,18 @@ export async function scanPreparedSites(selectFile = null) {
     renderSites(r);
     renderSteps();
     return state.pickedSite;
-  } catch (e) { status(e); return null; }
-  finally { $('scan').disabled = false; }
+  } catch (e) {
+    if ($('sitedir').value.trim() === dir && $('forcingdir').value.trim() === forcingDir) status(e);
+    else siteScanPending = true;
+    return null;
+  }
+  finally {
+    $('scan').disabled = false;
+    if (siteScanPending) {
+      siteScanPending = false;
+      scheduleSiteScan();
+    }
+  }
 }
 
 $('scan').onclick = () => scanPreparedSites();

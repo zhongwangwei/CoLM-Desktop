@@ -89,6 +89,18 @@ CONTAINS
 
       layout%nlocal = nlocal
 
+#ifdef FLAT_SPMD
+      ! Every flat rank already owns its local route vectors and has a unique
+      ! shard index, so writing one shard per rank needs no MPI redistribution.
+      layout%ntotal = nlocal
+      allocate (layout%cnt (0:0)); layout%cnt(0) = nlocal
+      allocate (layout%dsp (0:0)); layout%dsp(0) = 0
+      allocate (layout%gid (max(nlocal,1))); layout%gid(:) = 0
+      IF (nlocal > 0) layout%gid(1:nlocal) = gid_local(1:nlocal)
+      layout%built = .true.
+      RETURN
+#endif
+
 #ifdef USEMPI
       IF (p_is_io) THEN
          allocate (layout%cnt (0:p_np_group-1))
@@ -197,6 +209,10 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      allocate (rbuff (max(layout%ntotal,1))); rbuff = spval
+      IF (layout%ntotal > 0) rbuff(1:layout%ntotal) = sbuff(1:layout%ntotal)
+#else
       IF (p_is_io) THEN
          allocate (rbuff (max(layout%ntotal,1))); rbuff = spval
          CALL mpi_gatherv (MPI_IN_PLACE, 0, MPI_REAL8, &
@@ -207,6 +223,7 @@ CONTAINS
             MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
             p_root, p_comm_group, p_err)
       ENDIF
+#endif
 #else
       allocate (rbuff (max(layout%ntotal,1))); rbuff = spval
       IF (layout%ntotal > 0) rbuff(1:layout%ntotal) = sbuff(1:layout%ntotal)
@@ -278,6 +295,10 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      allocate (rbuff (nrow, max(layout%ntotal,1))); rbuff = spval
+      IF (layout%ntotal > 0) rbuff(:,1:layout%ntotal) = sbuff(:,1:layout%ntotal)
+#else
       IF (p_is_io) THEN
          ! Element counts scale by the row dimension; the column layout is
          ! exactly the one already collected for the vector case.
@@ -296,6 +317,7 @@ CONTAINS
             MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
             p_root, p_comm_group, p_err)
       ENDIF
+#endif
 #else
       allocate (rbuff (nrow, max(layout%ntotal,1))); rbuff = spval
       IF (layout%ntotal > 0) rbuff(:,1:layout%ntotal) = sbuff(:,1:layout%ntotal)

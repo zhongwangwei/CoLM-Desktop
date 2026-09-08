@@ -1827,8 +1827,8 @@ fn field_runtime_state(
         return hidden("土壤初始场已经包含地下水位初值");
     }
 
-    // 完整与简单降尺度共用数组，不能同时开启。子项关闭时不显示；降水方案
-    // III 的 MPI/Python 分支被 #ifndef SinglePoint 包围。
+    // 完整与简单降尺度共用数组，不能同时开启。方案 III 依赖仓库中不存在的
+    // Python MPI server launcher；内核会 fail-fast，界面只暴露可运行的 I/II。
     if name == "DEF_DS_HiresTopographyDataDir" && !c.downscale {
         return hidden("仅完整地形强迫降尺度需要外部高分辨率地形目录");
     }
@@ -1853,7 +1853,7 @@ fn field_runtime_state(
             vec![".false."],
         );
     }
-    if name == "DEF_DS_precipitation_adjust_scheme" && c.single {
+    if name == "DEF_DS_precipitation_adjust_scheme" {
         return (FieldMode::Editable, None, vec!["I", "II"]);
     }
     // 站点工作流生成的 forcing.nml 固定使用 POINT 数据集。POINT 的文件名
@@ -2885,7 +2885,13 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
     for item in &doc.items {
         match item {
             colm_namelist::document::Item::GroupStart(line) => {
-                group = line.trim().trim_start_matches('&').to_string();
+                group = line
+                    .split_once('!')
+                    .map_or(line.as_str(), |(head, _)| head)
+                    .trim()
+                    .trim_start_matches('&')
+                    .trim()
+                    .to_string();
                 groups.insert(group.to_ascii_lowercase());
             }
             colm_namelist::document::Item::Entry(entry) => {
@@ -3238,6 +3244,9 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
             })
         }
         K::Character { len } => {
+            if f.name.eq_ignore_ascii_case("DEF_CASE_NAME") {
+                crate::project::validate_case_name(raw.trim_matches(|c| c == '\'' || c == '"'))?;
+            }
             if bare.len() > len {
                 return Err(format!(
                     "{path} holds character(len={len}); {:?} is {} characters",
@@ -3654,25 +3663,29 @@ pub fn set_spinup(
             }
         };
         let start = (
-            int("DEF_simulation_time%start_year") as i32,
+            i32::try_from(int("DEF_simulation_time%start_year"))
+                .map_err(|_| format!("{d}: 起始年份超出支持范围"))?,
             int("DEF_simulation_time%start_month") as u32,
             int("DEF_simulation_time%start_day") as u32,
             int("DEF_simulation_time%start_sec") as u32,
         );
+        let spinup = colm_case::Spinup { years, repeat };
+        let cutoff = colm_case::spinup_cutoff(start, spinup).map_err(|e| format!("{d}: {e:#}"))?;
         let end_stamp = simulation_stamp(&doc, "DEF_simulation_time%end_");
         let spinup_end = civil_stamp(
-            start.0 as i64 + years as i64,
-            start.1 as i64,
-            start.2 as i64,
-            start.3 as i64,
+            cutoff.0 as i64,
+            cutoff.1 as i64,
+            cutoff.2 as i64,
+            cutoff.3 as i64,
         );
         if years > 0 && repeat > 0 && spinup_end >= end_stamp {
             return Err(format!(
                 "{d}: 预热截止时间必须早于模拟结束时间；请缩短预热年数或延长模拟窗口"
             ));
         }
-        let spinup = colm_case::Spinup { years, repeat };
-        for (path, v) in colm_case::spinup_fields(start, spinup) {
+        for (path, v) in
+            colm_case::spinup_fields(start, spinup).map_err(|e| format!("{d}: {e:#}"))?
+        {
             put(&mut doc, &path, v).map_err(|e| format!("{d}: {e}"))?;
         }
         validate_runtime_contract(&doc, std::path::Path::new(&d), kernel)
