@@ -517,22 +517,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     }
 
     if manifest.spec.kind == StudyKind::Uncertainty {
-        if baseline_tasks_succeeded(&manifest, &state) {
-            if let Err(error) = write_uncertainty_results(&manifest, &members, &mut state) {
-                push_warning_once(
-                    &mut state,
-                    format!("uncertainty result aggregation failed: {error}"),
-                );
-                if state.status == StudyStatus::Completed {
-                    state.status = StudyStatus::CompletedWithFailures;
-                }
-            }
-        } else {
-            push_warning_once(
-                &mut state,
-                "uncertainty results are unavailable until every baseline task succeeds".into(),
-            );
-        }
+        update_uncertainty_outputs(&manifest, &members, &mut state);
     }
     if let Err(error) = write_objective_tables(&manifest, &state) {
         push_warning_once(
@@ -568,6 +553,14 @@ pub fn status_state(study_dir: &Path) -> Result<Option<StudyState>> {
     else {
         return Ok(None);
     };
+    let manifest = super::engine::status(&study_dir)?;
+    if state.study_id != manifest.id {
+        bail!(
+            "Study checkpoint id {} does not match manifest {}",
+            state.study_id,
+            manifest.id
+        );
+    }
     if scheduler_is_live(&study_dir)? {
         return Ok(Some(state));
     }
@@ -581,25 +574,32 @@ fn scheduler_is_live(study_dir: &Path) -> Result<bool> {
     let Some(owner) = run_lock_owner(&study_dir.join("run.lock"))? else {
         return Ok(false);
     };
-    Ok(
-        unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS
-            || scheduler_process_alive(owner.pid)?,
-    )
+    Ok(unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS)
 }
 
 fn mark_exited_active_tasks_for_review(state: &mut StudyState) -> Result<bool> {
     let mut changed = false;
     for task in state.tasks.values_mut() {
         if matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating) {
-            let reason = match &task.process {
-                Some(process) if scheduler_process_alive(process.pid)? => continue,
-                Some(_) => "previous Study worker exited before reporting a final status",
-                None => "previous Study worker has no verifiable process identity",
+            let process_alive = match &task.process {
+                Some(process) => scheduler_process_alive(process.pid)?,
+                None => false,
             };
             task.status = TaskStatus::NeedsReview;
             task.stage = None;
-            task.reason = Some(reason.into());
-            task.process = None;
+            task.reason = Some(
+                if process_alive {
+                    "previous Study scheduler ownership could not be verified"
+                } else if task.process.is_some() {
+                    "previous Study worker exited before reporting a final status"
+                } else {
+                    "previous Study worker has no verifiable process identity"
+                }
+                .into(),
+            );
+            if !process_alive {
+                task.process = None;
+            }
             changed = true;
         }
     }
@@ -653,6 +653,13 @@ fn finalize_cancel_impl(study_dir: &Path, expected_pid: Option<u32>) -> Result<S
             if scheduler_process_alive(process.pid)? {
                 bail!("Study worker PID {} is still running", process.pid);
             }
+        } else if task.status == TaskStatus::NeedsReview
+            && task
+                .process
+                .as_ref()
+                .is_some_and(|process| scheduler_process_alive(process.pid).unwrap_or(true))
+        {
+            bail!("Study has a review task with a live unverified process");
         }
         if matches!(
             task.status,
@@ -787,6 +794,64 @@ fn push_warning_once(state: &mut StudyState, warning: String) {
     if !state.warnings.contains(&warning) {
         state.warnings.push(warning);
     }
+}
+
+fn update_uncertainty_outputs(manifest: &Manifest, members: &[MemberPlan], state: &mut StudyState) {
+    clear_uncertainty_aggregation_warnings(state);
+    if let Err(error) = clear_uncertainty_summary_outputs(manifest) {
+        push_warning_once(
+            state,
+            format!("uncertainty result aggregation failed: {error}"),
+        );
+        if state.status == StudyStatus::Completed {
+            state.status = StudyStatus::CompletedWithFailures;
+        }
+        return;
+    }
+    if baseline_tasks_succeeded(manifest, state) {
+        if let Err(error) = write_uncertainty_results(manifest, members, state) {
+            push_warning_once(
+                state,
+                format!("uncertainty result aggregation failed: {error}"),
+            );
+            if state.status == StudyStatus::Completed {
+                state.status = StudyStatus::CompletedWithFailures;
+            }
+        }
+    } else {
+        push_warning_once(
+            state,
+            "uncertainty results are unavailable until every baseline task succeeds".into(),
+        );
+    }
+}
+
+fn clear_uncertainty_aggregation_warnings(state: &mut StudyState) {
+    state.warnings.retain(|warning| {
+        warning != "uncertainty results are unavailable until every baseline task succeeds"
+            && !warning.starts_with("uncertainty result aggregation failed:")
+            && !warning.contains(" timestamps have insufficient ensemble support")
+            && !warning.contains(" has a different time axis and was excluded")
+            && !warning.contains(" was excluded:")
+    });
+}
+
+fn clear_uncertainty_summary_outputs(manifest: &Manifest) -> Result<()> {
+    let results = Path::new(&manifest.root).join("results");
+    remove_path_if_present(&results.join("envelopes"))?;
+    remove_path_if_present(&results.join("importance.json"))?;
+    remove_path_if_present(&results.join("members.csv"))?;
+    Ok(())
+}
+
+fn remove_path_if_present(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,11 +1167,13 @@ fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> 
                 if finite.is_empty() {
                     bail!("{variable} has no finite values in the analysis window");
                 }
+                let mean = super::science::finite_mean(&finite)
+                    .with_context(|| format!("{variable} mean is not finite"))?;
                 result.outputs.push(OutputSummary {
                     variable: variable.clone(),
                     units,
                     count: finite.len(),
-                    mean: finite.iter().sum::<f64>() / finite.len() as f64,
+                    mean,
                     min: finite.iter().copied().fold(f64::INFINITY, f64::min),
                     max: finite.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 });
@@ -1543,13 +1610,17 @@ fn write_uncertainty_results(
             {
                 continue;
             }
-            if let Ok(result) = read_task_result(manifest, &member.id, site) {
-                for output in result.outputs {
-                    means.insert(
-                        (member.id.clone(), site.clone(), output.variable),
-                        output.mean,
-                    );
-                }
+            let result = read_task_result(manifest, &member.id, site).with_context(|| {
+                format!(
+                    "cannot read succeeded Study task result for {} / {site}",
+                    member.id
+                )
+            })?;
+            for output in result.outputs {
+                means.insert(
+                    (member.id.clone(), site.clone(), output.variable),
+                    output.mean,
+                );
             }
         }
     }
@@ -1822,9 +1893,12 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
         .values()
         .filter(|task| task.status == TaskStatus::Succeeded)
     {
-        let Ok(result) = read_task_result(manifest, &task.member, &task.site) else {
-            continue;
-        };
+        let result = read_task_result(manifest, &task.member, &task.site).with_context(|| {
+            format!(
+                "cannot read succeeded Study task result for {} / {}",
+                task.member, task.site
+            )
+        })?;
         for row in result.calibration.iter().chain(&result.validation) {
             metrics.push_str(&format!(
                 "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}\n",
@@ -1873,10 +1947,19 @@ pub fn retry(study_dir: &Path, include_review: bool) -> Result<StudyState> {
         clear_stale_run_lock(&study_dir)?;
     }
     let _retry_lock = StudyRunLock::acquire(&study_dir)?;
+    let manifest = super::engine::status(&study_dir)?;
+    super::engine::verify_frozen_inputs(&manifest)?;
     let checkpoint_dir = study_dir.join("checkpoints/state");
     let mut state = super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?
         .map(|loaded| loaded.payload)
         .with_context(|| format!("{} has no Study state checkpoint", study_dir.display()))?;
+    if state.study_id != manifest.id {
+        bail!(
+            "Study checkpoint id {} does not match manifest {}",
+            state.study_id,
+            manifest.id
+        );
+    }
     for task in state.tasks.values_mut() {
         if matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted)
             || (include_review
@@ -2527,6 +2610,374 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn write_history_nc(path: &Path, vars: &[(&str, &[f64])]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = netcdf::create(path).unwrap();
+        let n = vars
+            .iter()
+            .find(|(name, _)| *name == "time")
+            .map(|(_, values)| values.len())
+            .unwrap_or_else(|| vars.first().map(|(_, values)| values.len()).unwrap_or(0));
+        file.add_dimension("time", n).unwrap();
+        for (name, values) in vars {
+            file.add_variable::<f64>(name, &["time"])
+                .unwrap()
+                .put_values(values, ..)
+                .unwrap();
+        }
+    }
+
+    fn minimal_uncertainty_manifest(root: &Path, outputs: Vec<String>) -> Manifest {
+        Manifest {
+            schema_version: 1,
+            id: "s".into(),
+            root: root.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec: StudySpec {
+                kind: StudyKind::Uncertainty,
+                method: StudyMethod::Lhs,
+                seed: 0,
+                kernel_dir: None,
+                base_cases: vec!["site".into()],
+                observations: BTreeMap::new(),
+                site_mode: super::super::spec::SiteMode::Shared,
+                parameters: Vec::new(),
+                outputs,
+                analysis_from: None,
+                analysis_to: None,
+                targets: Vec::new(),
+                budget: Default::default(),
+            },
+            members: Vec::new(),
+            provenance: Default::default(),
+        }
+    }
+
+    fn write_status_manifest(dir: &Path, id: &str) {
+        let mut manifest = minimal_uncertainty_manifest(dir, Vec::new());
+        manifest.id = id.into();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn uncertainty_output_mean_does_not_overflow_after_history_read() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-mean-overflow-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let case = root.join("case");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n/\n",
+        )
+        .unwrap();
+        write_history_nc(
+            &case.join("out/site/history/site_hist_2000-01.nc"),
+            &[("time", &[0.0, 1800.0]), ("f_qle", &[1.0e308, 1.0e308])],
+        );
+        let manifest = minimal_uncertainty_manifest(&root, vec!["f_qle".into()]);
+
+        let result = evaluate_task(&manifest, "m000001", "site", &case).unwrap();
+        assert_eq!(result.outputs[0].count, 2);
+        assert!(result.outputs[0].mean.is_finite());
+        assert!((result.outputs[0].mean - 1.0e308).abs() < 1.0e292);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uncertainty_envelope_excludes_baseline_mismatched_time_and_low_support() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-envelope-support-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let study = root.join("study");
+        let mut manifest = minimal_uncertainty_manifest(&study, vec!["f_qle".into()]);
+        let mut members = vec![MemberPlan {
+            id: "m000000".into(),
+            generation: 0,
+            candidate_index: 0,
+            baseline: true,
+            parameters: BTreeMap::new(),
+        }];
+        members.extend((1..=21).map(|index| MemberPlan {
+            id: format!("m{index:06}"),
+            generation: 0,
+            candidate_index: index,
+            baseline: false,
+            parameters: BTreeMap::new(),
+        }));
+        manifest.members = members.clone();
+        let tasks = members.iter().map(|member| crate::study::state::TaskState {
+            member: member.id.clone(),
+            site: "site".into(),
+            case_dir: study
+                .join("members")
+                .join(&member.id)
+                .join("site")
+                .to_string_lossy()
+                .into_owned(),
+            status: TaskStatus::Succeeded,
+            stage: None,
+            reason: None,
+            objective: None,
+            validation_objective: None,
+            process: None,
+        });
+        let mut state = StudyState::new("s".into(), tasks).unwrap();
+        state.warnings.push("keep unrelated warning".into());
+        state
+            .warnings
+            .push("uncertainty results are unavailable until every baseline task succeeds".into());
+
+        for member in &members {
+            let case = study.join("members").join(&member.id).join("site");
+            std::fs::create_dir_all(&case).unwrap();
+            std::fs::write(
+                case.join("case.nml"),
+                "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n/\n",
+            )
+            .unwrap();
+            let index = member.candidate_index as f64;
+            let (time, values): (&[f64], &[f64]) = if member.baseline {
+                (&[0.0, 1800.0], &[999.0, 999.0])
+            } else if member.id == "m000021" {
+                (&[0.0, 3600.0], &[21.0, 21.0])
+            } else if member.id == "m000020" {
+                (&[0.0, 1800.0], &[20.0, f64::NAN])
+            } else {
+                (&[0.0, 1800.0], &[index, index])
+            };
+            write_history_nc(
+                &case.join("out/site/history/site_hist_2000-01.nc"),
+                &[("time", time), ("f_qle", values)],
+            );
+            write_json(
+                &task_result_path(&manifest, &member.id, "site"),
+                &TaskResult {
+                    member: member.id.clone(),
+                    site: "site".into(),
+                    outputs: vec![OutputSummary {
+                        variable: "f_qle".into(),
+                        units: None,
+                        count: values.iter().filter(|value| value.is_finite()).count(),
+                        mean: super::super::science::finite_mean(values).unwrap(),
+                        min: values.iter().copied().fold(f64::INFINITY, f64::min),
+                        max: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    }],
+                    calibration: Vec::new(),
+                    validation: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        update_uncertainty_outputs(&manifest, &members, &mut state);
+
+        let envelope: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(study.join("results/envelopes/site/f_qle.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["members"], 20);
+        assert_eq!(envelope["n_eff"], serde_json::json!([20, 19]));
+        assert_eq!(envelope["stable"], serde_json::json!([true, false]));
+        assert_eq!(envelope["baseline"], serde_json::json!([999.0, 999.0]));
+        assert_eq!(envelope["p50"], serde_json::json!([10.5, null]));
+        assert!(!state
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unavailable until every baseline task succeeds")));
+        assert!(state.warnings.contains(&"keep unrelated warning".into()));
+        assert!(state
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("different time axis")));
+        assert!(state
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("insufficient ensemble support")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uncertainty_aggregation_rejects_missing_succeeded_task_results() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-missing-result-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let study = root.join("study");
+        let mut manifest = minimal_uncertainty_manifest(&study, vec!["f_qle".into()]);
+        let members = vec![
+            MemberPlan {
+                id: "m000000".into(),
+                generation: 0,
+                candidate_index: 0,
+                baseline: true,
+                parameters: BTreeMap::new(),
+            },
+            MemberPlan {
+                id: "m000001".into(),
+                generation: 0,
+                candidate_index: 1,
+                baseline: false,
+                parameters: BTreeMap::new(),
+            },
+        ];
+        manifest.members = members.clone();
+        let tasks = members.iter().map(|member| crate::study::state::TaskState {
+            member: member.id.clone(),
+            site: "site".into(),
+            case_dir: study
+                .join("members")
+                .join(&member.id)
+                .join("site")
+                .to_string_lossy()
+                .into_owned(),
+            status: TaskStatus::Succeeded,
+            stage: None,
+            reason: None,
+            objective: None,
+            validation_objective: None,
+            process: None,
+        });
+        let mut state = StudyState::new("s".into(), tasks).unwrap();
+        for member in &members {
+            let case = study.join("members").join(&member.id).join("site");
+            std::fs::create_dir_all(&case).unwrap();
+            std::fs::write(
+                case.join("case.nml"),
+                "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n/\n",
+            )
+            .unwrap();
+            write_history_nc(
+                &case.join("out/site/history/site_hist_2000-01.nc"),
+                &[("time", &[0.0]), ("f_qle", &[1.0])],
+            );
+        }
+        write_json(
+            &task_result_path(&manifest, "m000000", "site"),
+            &TaskResult {
+                member: "m000000".into(),
+                site: "site".into(),
+                outputs: vec![OutputSummary {
+                    variable: "f_qle".into(),
+                    units: None,
+                    count: 1,
+                    mean: 1.0,
+                    min: 1.0,
+                    max: 1.0,
+                }],
+                calibration: Vec::new(),
+                validation: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        write_json(
+            &task_result_path(&manifest, "m000001", "site"),
+            &TaskResult {
+                member: "m000001".into(),
+                site: "site".into(),
+                outputs: vec![OutputSummary {
+                    variable: "f_qle".into(),
+                    units: None,
+                    count: 1,
+                    mean: 1.0,
+                    min: 1.0,
+                    max: 1.0,
+                }],
+                calibration: Vec::new(),
+                validation: Vec::new(),
+            },
+        )
+        .unwrap();
+        update_uncertainty_outputs(&manifest, &members, &mut state);
+        assert!(study.join("results/envelopes/site/f_qle.json").is_file());
+        assert!(study.join("results/importance.json").is_file());
+        assert!(study.join("results/members.csv").is_file());
+
+        std::fs::remove_file(task_result_path(&manifest, "m000001", "site")).unwrap();
+        update_uncertainty_outputs(&manifest, &members, &mut state);
+        assert!(!study.join("results/envelopes").exists());
+        assert!(!study.join("results/importance.json").exists());
+        assert!(!study.join("results/members.csv").exists());
+        assert!(state.warnings.iter().any(|warning| {
+            warning.contains("uncertainty result aggregation failed")
+                && warning.contains("cannot read succeeded Study task result for m000001 / site")
+        }));
+        assert!(task_result_path(&manifest, "m000000", "site").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn status_marks_active_tasks_for_review_without_a_verified_scheduler_lock() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-status-unowned-live-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        write_status_manifest(&dir, &id);
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut process = supervisor_identity();
+        process.executable = "not-the-recorded-scheduler".into();
+        process.argv_sha256 = "wrong".into();
+        let state = StudyState::new(
+            id,
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: Some(process),
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+
+        let recovered = status_state(&dir).unwrap().unwrap();
+        let task = &recovered.tasks["m000001/site"];
+        assert_eq!(recovered.status, StudyStatus::NeedsReview);
+        assert_eq!(task.status, TaskStatus::NeedsReview);
+        assert!(task.process.is_some());
+        assert!(task
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("ownership could not be verified"));
+        let error = finalize_idle_cancel(&dir).unwrap_err().to_string();
+        assert!(error.contains("live unverified process"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn quantile_bands_require_twenty_and_eighty_percent_support() {
         assert_eq!(required_ensemble_support(10), 20);
@@ -2578,7 +3029,7 @@ mod tests {
 
     #[test]
     fn confirmed_retry_refuses_a_live_lock_and_clears_a_stale_one() {
-        let dir = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!(
             "colm-study-retry-lock-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -2586,8 +3037,38 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        let dir = root.join(".colm/studies/s");
         let checkpoint = dir.join("checkpoints/state");
-        std::fs::create_dir_all(&checkpoint).unwrap();
+        std::fs::create_dir_all(dir.join("samples")).unwrap();
+        std::fs::write(dir.join("samples/design.csv"), "member,site\n").unwrap();
+        let manifest = Manifest {
+            schema_version: 1,
+            id: "s".into(),
+            root: dir.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec: StudySpec {
+                kind: StudyKind::Uncertainty,
+                method: StudyMethod::Lhs,
+                seed: 0,
+                kernel_dir: None,
+                base_cases: vec!["site".into()],
+                observations: BTreeMap::new(),
+                site_mode: super::super::spec::SiteMode::Shared,
+                parameters: Vec::new(),
+                outputs: Vec::new(),
+                analysis_from: None,
+                analysis_to: None,
+                targets: Vec::new(),
+                budget: Default::default(),
+            },
+            members: Vec::new(),
+            provenance: Default::default(),
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
         let state = StudyState::new(
             "s".into(),
             [crate::study::state::TaskState {
@@ -2618,7 +3099,119 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Queued);
         assert!(task.process.is_none());
         assert!(!dir.join("run.lock").exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retry_validates_frozen_manifest_before_changing_requests_or_checkpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "cs-rf-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_kernel(&root);
+        let case = root.join("site");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_TUNING_CNFAC = 0.5\n/\n",
+        )
+        .unwrap();
+        std::fs::write(case.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let spec = root.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "uncertainty",
+                "method": "lhs",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.1,"sample_max":0.9}],
+                "outputs": ["Qle"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let manifest = super::super::engine::create(&root, &spec).unwrap();
+        let study = PathBuf::from(&manifest.root);
+        let checkpoint = study.join("checkpoints/state");
+        let mut state = super::super::checkpoint::load_latest::<StudyState>(&checkpoint)
+            .unwrap()
+            .unwrap()
+            .payload;
+        state.tasks.values_mut().next().unwrap().status = TaskStatus::Failed;
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        std::fs::write(study.join("pause.request"), "pause").unwrap();
+        std::fs::write(study.join("cancel.request"), "cancel").unwrap();
+        std::fs::write(study.join("samples/design.csv"), "tampered\n").unwrap();
+
+        let error = retry(&study, false).unwrap_err().to_string();
+        assert!(error.contains("initial sample design changed"), "{error}");
+        assert!(study.join("pause.request").is_file());
+        assert!(study.join("cancel.request").is_file());
+        let latest = super::super::checkpoint::load_latest::<StudyState>(&checkpoint)
+            .unwrap()
+            .unwrap()
+            .payload;
+        assert_eq!(
+            latest.tasks.values().next().unwrap().status,
+            TaskStatus::Failed
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retry_rejects_a_checkpoint_for_another_study_id() {
+        let root = std::env::temp_dir().join(format!(
+            "cs-ri-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_kernel(&root);
+        let case = root.join("site");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_TUNING_CNFAC = 0.5\n/\n",
+        )
+        .unwrap();
+        std::fs::write(case.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let spec = root.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "uncertainty",
+                "method": "lhs",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.1,"sample_max":0.9}],
+                "outputs": ["Qle"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let manifest = super::super::engine::create(&root, &spec).unwrap();
+        let study = PathBuf::from(&manifest.root);
+        let checkpoint = study.join("checkpoints/state");
+        let mut state = super::super::checkpoint::load_latest::<StudyState>(&checkpoint)
+            .unwrap()
+            .unwrap()
+            .payload;
+        state.study_id = "other".into();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+
+        let error = retry(&study, false).unwrap_err().to_string();
+        assert!(
+            error.contains("checkpoint id other does not match manifest"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2680,11 +3273,13 @@ mod tests {
                 .as_nanos()
         ));
         let checkpoint = dir.join("checkpoints/state");
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        write_status_manifest(&dir, &id);
         std::fs::create_dir_all(&checkpoint).unwrap();
         let mut process = supervisor_identity();
         process.pid = exited_pid;
         let state = StudyState::new(
-            "s".into(),
+            id,
             [
                 crate::study::state::TaskState {
                     member: "m000001".into(),
@@ -2726,6 +3321,109 @@ mod tests {
     }
 
     #[test]
+    fn status_rejects_wrong_study_id_before_recovering_active_tasks() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-status-wrong-id-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join(".colm/studies/s");
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(dir.join("samples")).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&minimal_uncertainty_manifest(&dir, Vec::new())).unwrap(),
+        )
+        .unwrap();
+        let state = StudyState::new(
+            "other".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+
+        let error = status_state(&dir).unwrap_err().to_string();
+        assert!(
+            error.contains("checkpoint id other does not match manifest s"),
+            "{error}"
+        );
+        let latest = super::super::checkpoint::load_latest::<StudyState>(&checkpoint)
+            .unwrap()
+            .unwrap()
+            .payload;
+        assert_eq!(latest.tasks["m000001/site"].status, TaskStatus::Running);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn status_treats_stale_lock_with_reused_pid_as_unverified_review() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-status-stale-reused-pid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        write_status_manifest(&dir, &id);
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut process = supervisor_identity();
+        process.executable = "not-the-recorded-scheduler".into();
+        process.argv_sha256 = "wrong".into();
+        let state = StudyState::new(
+            id,
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: Some(process),
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        let mut owner = supervisor_identity();
+        owner.executable = "not-the-recorded-scheduler".into();
+        owner.argv_sha256 = "wrong".into();
+        owner.heartbeat_unix = 0;
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
+
+        let recovered = status_state(&dir).unwrap().unwrap();
+        let task = &recovered.tasks["m000001/site"];
+        assert_eq!(recovered.status, StudyStatus::NeedsReview);
+        assert_eq!(task.status, TaskStatus::NeedsReview);
+        assert!(task.process.is_some());
+        assert!(task
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("ownership could not be verified"));
+        assert!(retry(&dir, true).is_err());
+        let error = finalize_idle_cancel(&dir).unwrap_err().to_string();
+        assert!(error.contains("still running"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn status_does_not_recover_while_scheduler_lock_is_live() {
         let exited_pid = exited_child_pid();
         let dir = std::env::temp_dir().join(format!(
@@ -2737,11 +3435,13 @@ mod tests {
                 .as_nanos()
         ));
         let checkpoint = dir.join("checkpoints/state");
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        write_status_manifest(&dir, &id);
         std::fs::create_dir_all(&checkpoint).unwrap();
         let mut process = supervisor_identity();
         process.pid = exited_pid;
         let state = StudyState::new(
-            "s".into(),
+            id,
             [crate::study::state::TaskState {
                 member: "m000001".into(),
                 site: "site".into(),
@@ -3424,7 +4124,7 @@ esac
 
     fn preview_fixture() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "colm-study-preview-{}-{}",
+            "cs-pv-{}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3472,7 +4172,7 @@ esac
 
     fn multi_site_apply_fixture() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "colm-study-apply-multi-{}-{}",
+            "cs-am-{}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

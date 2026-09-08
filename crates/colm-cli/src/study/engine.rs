@@ -1039,7 +1039,7 @@ mod tests {
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "colm-study-engine-{name}-{}",
+            "cs-{name}-{:x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
