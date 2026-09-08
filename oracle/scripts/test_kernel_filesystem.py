@@ -64,7 +64,7 @@ def main():
         for path in paths:
             for _ in range(2):
                 result = subprocess.run([str(executable), "mkdir", path], cwd=work, env=env, capture_output=True, timeout=300)
-                assert result.returncode == 0, (path, result.stderr)
+                assert result.returncode == 0, (path, result.stdout, result.stderr)
                 assert (work / path).is_dir(), f"directory was not created literally: {path!r}"
                 assert not (work / "INJECTED").exists(), "path executed as a shell command"
         (work / "file").write_text("do not replace")

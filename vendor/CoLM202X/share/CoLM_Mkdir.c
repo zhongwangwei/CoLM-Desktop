@@ -35,7 +35,7 @@ int colm_mkdir_one(const char *path)
     return error;
 }
 
-static int is_separator(char c)
+int colm_is_separator(int c)
 {
 #ifdef _WIN32
     return c == '/' || c == '\\';
@@ -92,7 +92,7 @@ static int append_match(char ***matches, size_t *count, size_t *capacity,
 
     size_t dir_len = strlen(directory);
     size_t name_len = strlen(name);
-    int needs_sep = dir_len > 0 && strcmp(directory, ".") != 0 && !is_separator(directory[dir_len - 1]);
+    int needs_sep = dir_len > 0 && strcmp(directory, ".") != 0 && !colm_is_separator(directory[dir_len - 1]);
     size_t total = dir_len + (needs_sep ? 1u : 0u) + name_len + 1u;
     char *path = (char *)malloc(total);
     if (!path) return ENOMEM;
@@ -112,7 +112,7 @@ static int split_prefix(const char *prefix, char **directory, const char **name_
 {
     const char *last = NULL;
     for (const char *p = prefix; *p; ++p) {
-        if (is_separator(*p)) last = p;
+        if (colm_is_separator(*p)) last = p;
     }
 
     if (!last) {
@@ -124,7 +124,7 @@ static int split_prefix(const char *prefix, char **directory, const char **name_
     size_t dir_len = (size_t)(last - prefix);
     if (dir_len == 0) dir_len = 1; /* root directory */
 #ifdef _WIN32
-    if (dir_len == 2 && prefix[1] == ':' && is_separator(prefix[2])) dir_len = 3;
+    if (dir_len == 2 && prefix[1] == ':' && colm_is_separator(prefix[2])) dir_len = 3;
 #endif
     *directory = (char *)malloc(dir_len + 1u);
     if (!*directory) return ENOMEM;

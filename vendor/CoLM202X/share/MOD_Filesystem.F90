@@ -7,6 +7,12 @@ MODULE MOD_Filesystem
    PUBLIC :: make_directory, copy_file, list_matching_paths, move_file
 
    INTERFACE
+      FUNCTION separator_native(code) BIND(C, name="colm_is_separator") RESULT(separator)
+         IMPORT c_int
+         INTEGER(c_int), VALUE :: code
+         INTEGER(c_int) :: separator
+      END FUNCTION separator_native
+
       FUNCTION mkdir_one(path) BIND(C, name="colm_mkdir_one") RESULT(status)
          IMPORT c_char, c_int
          CHARACTER(kind=c_char), INTENT(in) :: path(*)
@@ -167,9 +173,7 @@ CONTAINS
 
    LOGICAL FUNCTION is_separator(character)
       CHARACTER(len=1), INTENT(in) :: character
-      is_separator = character == '/'
-#ifdef _WIN32
-      is_separator = is_separator .OR. character == achar(92)
-#endif
+      ! Use the C platform contract; Fortran need not define the same OS macros.
+      is_separator = separator_native(iachar(character, kind=c_int)) /= 0_c_int
    END FUNCTION is_separator
 END MODULE MOD_Filesystem
