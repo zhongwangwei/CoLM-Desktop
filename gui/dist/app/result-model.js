@@ -184,12 +184,31 @@ export function envelopeDiagnostics(data) {
     diffSum += Math.abs(median - baseline);
     diffCount += 1;
   }
+  let meanWidth = widthCount ? widthSum / widthCount : null;
+  let meanMedianBaselineDiff = diffCount ? diffSum / diffCount : null;
+  // A sum or subtraction may overflow even when its mean is representable.
+  if (widthCount && !finiteNumber(meanWidth)) {
+    meanWidth = 0;
+    for (let index = 0; index < data.p95.length; index += 1) {
+      const hi = data.p95[index], lo = data.p05?.[index];
+      if (finiteNumber(hi) && finiteNumber(lo)) meanWidth += hi / widthCount - lo / widthCount;
+    }
+  }
+  if (diffCount && !finiteNumber(meanMedianBaselineDiff)) {
+    meanMedianBaselineDiff = 0;
+    for (let index = 0; index < data.p50.length; index += 1) {
+      const median = data.p50[index], baseline = data.baseline?.[index];
+      if (finiteNumber(median) && finiteNumber(baseline)) {
+        meanMedianBaselineDiff += Math.abs(median / diffCount - baseline / diffCount);
+      }
+    }
+  }
   return {
     minNEff: Number.isFinite(minNEff) ? minNEff : 0,
     maxNEff: Number.isFinite(maxNEff) ? maxNEff : 0,
     unsupported,
-    meanWidth: widthCount ? widthSum / widthCount : null,
+    meanWidth: finiteNumber(meanWidth) ? meanWidth : null,
     maxWidth: Number.isFinite(maxWidth) ? maxWidth : null,
-    meanMedianBaselineDiff: diffCount ? diffSum / diffCount : null,
+    meanMedianBaselineDiff: finiteNumber(meanMedianBaselineDiff) ? meanMedianBaselineDiff : null,
   };
 }
