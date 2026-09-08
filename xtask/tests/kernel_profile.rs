@@ -254,6 +254,11 @@ fn mpi_runtime_staging_closes_macos_dependencies_and_refreshes_hashes() {
     let script = read("oracle/scripts/stage_mpi_runtime.sh");
     assert!(script.contains("root.glob('*/manifest.json')"));
     assert!(script.contains("data['sha256'] = hashes"));
+    let darwin = script.split("  Linux)").next().unwrap();
+    assert!(darwin.contains("    refresh_manifests\n"));
+    assert!(!script.contains("\nrefresh_manifests\n"));
+    assert!(!script.contains("codesign --remove-signature"));
+    assert!(script.contains("codesign --force --sign - \"$file\""));
     assert!(
         script.contains("-name \"$base\""),
         "@rpath deps like libgcc_s can live below lib/gcc/current, not only */lib"
