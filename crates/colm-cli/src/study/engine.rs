@@ -1089,15 +1089,22 @@ mod tests {
 
     #[test]
     fn base_case_names_must_be_single_safe_components() {
-        let root = temp("bad-base-name");
-        let bad = root.join("bad:name");
+        let root = colm_kernel::manifest::absolute(&temp("bad-base-name")).unwrap();
+        // Leading whitespace is valid on each host filesystem, but not for CoLM.
+        let bad_name = " bad-name";
+        let bad = root.join(bad_name);
         fs::rename(root.join("caseA"), &bad).unwrap();
         let mut spec: StudySpec =
             serde_json::from_str(&fs::read_to_string(spec(&root)).unwrap()).unwrap();
-        spec.base_cases = vec!["bad:name".into()];
+        spec.base_cases = vec![bad_name.into()];
         let error =
             base_cases(&root, &spec).expect_err("Study base case names become member case names");
-        assert!(error.to_string().contains("base case"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid base case directory name"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
