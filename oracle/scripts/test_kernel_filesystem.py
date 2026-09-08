@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile the production filesystem helper; never run paths through a test shell."""
 from pathlib import Path
+import ntpath
 import os
 import re
 import shutil
@@ -112,7 +113,13 @@ def main():
             cwd=work, capture_output=True, timeout=300,
         )
         assert result.returncode == 0, result.stderr
-        assert list_file.read_text().splitlines() == [str(list_dir / "LAI_0001.nc"), str(list_dir / "LAI_0002.nc")]
+        listed = list_file.read_text().splitlines()
+        expected = [str(list_dir / "LAI_0001.nc"), str(list_dir / "LAI_0002.nc")]
+        if os.name == "nt":
+            # MSYS2 Python and native C may spell the same Windows path differently.
+            listed = [ntpath.normpath(path) for path in listed]
+            expected = [ntpath.normpath(path) for path in expected]
+        assert listed == expected, (listed, expected)
         result = subprocess.run(
             [str(executable), "list", str(Path(work.anchor) / "colm_missing_532d0cae_"), ".nc", str(list_file)],
             cwd=work, capture_output=True, timeout=300,
