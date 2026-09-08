@@ -270,6 +270,7 @@ for (const delayedStage of ['metadata', 'metadata-design', 'outputs', 'outputs-d
       return ['create', 'unchanged'].includes(delayedStage) ? delay() : '/cases/.colm/studies/old';
     },
     setActiveStudyDirs: () => { registrations++; },
+    spatialStudyReason: () => '', blockSpatialStudy: () => false,
     studyDirScopes: { uq: {} }, studyDirDesignKeys: { uq: {} },
     saveStudyDirs() {}, setPreview() {}, refreshStudy: async () => {},
     setStudyWizardPage() {}, renderStudyReadiness() {}, status() {},
@@ -797,3 +798,120 @@ if (!capability.includes('core:webview:allow-print')) {
 }
 
 console.log('results: scope, Study controls, bounded loading, PDF, and nine panes are present');
+
+// Delayed Study mutations must re-check the current non-spatial scope before each mutating IPC.
+{
+  const helper = resultUi.slice(
+    resultUi.indexOf('const studyMutationGuard ='),
+    resultUi.indexOf('const studyScopeKey ='),
+  );
+  let spatial = false;
+  let runs = 0;
+  const runStudy = runInNewContext(helper + resultUi.slice(
+    resultUi.indexOf('async function runStudy('),
+    resultUi.indexOf('\nasync function retryStudy('),
+  ) + '\nrunStudy;', {
+    spatialStudyReason: () => spatial ? 'spatial disabled' : '',
+    studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a', '/studies/b'], currentKernel: () => '/kernel',
+    aggregateStudy: () => ({ status: 'Ready' }), studyViews: { uq: {} }, status() {}, renderStudyReadiness() {},
+    studyRunning: { uq: false }, studyJobCount: () => 1, renderStudyActions() {}, setStudyWizardPage() {},
+    boundedMap: async (items, _limit, fn) => {
+      const out = [];
+      for (const item of items) {
+        try { out.push({ ok: true, value: await fn(item) }); }
+        catch (error) { out.push({ ok: false, error }); }
+        spatial = true;
+      }
+      return out;
+    },
+    invoke: async command => { if (command === 'study_run') runs++; return 'ok'; },
+    refreshStudy: async () => {}, setPreview() {}, renderStudyWizard() {},
+  });
+  await runStudy('uq').catch(() => {});
+  if (runs !== 1) throw new Error('spatial switch must stop queued Study runs without killing the already-started one');
+}
+
+{
+  const helper = resultUi.slice(
+    resultUi.indexOf('const studyMutationGuard ='),
+    resultUi.indexOf('const studyScopeKey ='),
+  );
+  let spatial = false;
+  let retries = 0;
+  let statusReads = 0;
+  let failure;
+  const retryStudy = runInNewContext(helper + resultUi.slice(
+    resultUi.indexOf('async function retryStudy('),
+    resultUi.indexOf('\nasync function controlStudy('),
+  ) + '\nretryStudy;', {
+    spatialStudyReason: () => spatial ? 'spatial disabled' : '',
+    studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a'], currentKernel: () => '/kernel',
+    status() {}, renderStudyReadiness() {}, studyRunning: { uq: false }, dialogText: x => x,
+    globalThis: { confirm: () => true }, runStudy: async () => {},
+    invoke: async command => {
+      if (command === 'study_status') { statusReads++; spatial = true; return JSON.stringify({ state: { tasks: {} } }); }
+      if (command === 'study_retry') retries++;
+      return '';
+    },
+  });
+  await retryStudy('uq').catch(error => { failure = error; });
+  if (statusReads !== 1 || !failure?.message.includes('分析设计已修改')) throw new Error('retry must reach delayed status and fail at the scope guard');
+  if (retries !== 0) throw new Error('spatial switch after Study status must stop retry mutation');
+}
+
+{
+  const helper = resultUi.slice(
+    resultUi.indexOf('const studyMutationGuard ='),
+    resultUi.indexOf('const studyScopeKey ='),
+  );
+  let spatial = false;
+  let applies = 0;
+  let previews = 0;
+  let failure;
+  const applyBestCandidate = runInNewContext(helper + resultUi.slice(
+    resultUi.indexOf('async function applyBestCandidate('),
+    resultUi.indexOf('\nfunction wireStudyButton('),
+  ) + '\napplyBestCandidate;', {
+    spatialStudyReason: () => spatial ? 'spatial disabled' : '',
+    studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a'], currentKernel: () => '/kernel',
+    status() {}, renderStudyReadiness() {}, dialogText: x => x, studySiteId: ({ dir }) => dir.split('/').pop(),
+    parentDir: () => '/cases', studyScope: () => [{ dir: '/cases/site' }], setPreview() {},
+    globalThis: { confirm: () => true }, window: { prompt: () => '/cases/tuned' },
+    invoke: async command => {
+      if (command === 'study_status') return JSON.stringify({ manifest: { spec: { base_cases: ['/cases/site'] } }, state: { best_member: 'm000001' } });
+      if (command === 'study_apply_preview') { previews++; spatial = true; return JSON.stringify([{ site: 'site', field: 'p', old: 1, new: 2 }]); }
+      if (command === 'study_apply') applies++;
+      return '';
+    },
+  });
+  await applyBestCandidate().catch(error => { failure = error; });
+  if (previews !== 1 || !failure?.message.includes('调优设计已修改')) throw new Error('apply must reach delayed preview and fail at the scope guard');
+  if (applies !== 0) throw new Error('spatial switch before apply prompt/output must stop tuning apply mutation');
+}
+
+// A delayed final retry/resume must not start a new scope's Study as its tail action.
+for (const action of ['retry', 'resume']) {
+  for (const switchScope of [false, true]) {
+    let scope = 'old';
+    let mutations = 0;
+    let runs = 0;
+    let caught;
+    const helper = resultUi.slice(resultUi.indexOf('const studyMutationGuard ='), resultUi.indexOf('const studyScopeKey ='));
+    const name = action === 'retry' ? 'retryStudy' : 'controlStudy';
+    const end = action === 'retry' ? '\nasync function controlStudy(' : '\nasync function exportStudy(';
+    const fn = runInNewContext(helper + resultUi.slice(resultUi.indexOf(`async function ${name}(`), resultUi.indexOf(end)) + `\n${name};`, {
+      spatialStudyReason: () => '', studyScopeKey: () => scope,
+      activeStudyDirs: () => [scope === 'old' ? '/old-study' : '/new-study'], currentKernel: () => '/kernel',
+      status() {}, renderStudyReadiness() {}, studyRunning: { uq: false }, dialogText: x => x,
+      globalThis: { confirm: () => true }, runStudy: async () => { runs++; }, refreshStudy: async () => {},
+      invoke: async command => {
+        if (command === 'study_status') return JSON.stringify({ state: { tasks: {} } });
+        if (command === `study_${action}`) { mutations++; if (switchScope) scope = 'new'; return 'ok'; }
+        throw new Error(`unexpected IPC ${command}`);
+      },
+    });
+    try { await fn('uq', action); } catch (error) { caught = error; }
+    if (mutations !== 1 || runs !== (switchScope ? 0 : 1)) throw new Error(`delayed ${action} must only launch the original unchanged site scope`);
+    if (switchScope ? !caught?.message.includes('分析设计已修改') : caught) throw new Error(`unexpected ${action} result: ${caught}`);
+  }
+}

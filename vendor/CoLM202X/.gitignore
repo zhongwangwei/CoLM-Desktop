@@ -20,6 +20,10 @@ docs/superpowers/
 /tests
 /tests
 /run/aas_riverlake
+# Keep the vendored scratch suite ignored, except for this lifecycle regression.
+!/tests/
+/tests/*
+!/tests/test_spmd_lifecycle_static.py
 # Working documents, not model source. Kept narrow on purpose: an
 # outright /docs would also hide review notes that belong in git.
 docs/*.docx

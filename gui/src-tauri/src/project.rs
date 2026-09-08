@@ -17,6 +17,8 @@ pub struct CaseEntry {
     pub dir: String,
     /// 跑过没有 —— 有 history 文件就算跑过
     pub has_history: bool,
+    /// Read from the namelist, not inferred from the selected wizard or comments.
+    pub spatial: bool,
 }
 
 /// 扫一个目录下的算例（只看一层，不递归）。
@@ -40,6 +42,9 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
                     .into_owned()
             });
         out.push(CaseEntry {
+            // Keep malformed cases discoverable for repair; Study validation
+            // reports their parse errors before any model can be launched.
+            spatial: colm_case::is_spatial_case(&d.join("case.nml")).unwrap_or(false),
             has_history: history_of(&d, &name).is_some() && !colm_case::results_are_stale(&d),
             dir: d.to_string_lossy().into_owned(),
             name,

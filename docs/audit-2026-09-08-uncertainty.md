@@ -4,6 +4,8 @@
 不把参数情景分位数解释成置信区间；不扩展 Sobol、MCMC 或新的调优算法。
 main 与 `colm-destop-spatial` 独立发展，共用修复分别提交 PR，不合并两条分支历史。
 
+> 后续范围更新：用户在本审计完成后明确授权 spatial 合入 main。原审计的独立分支记录保留作历史；整合版本的空间功能标记为 **early state、不建议使用**，空间模式禁用参数调优与不确定性分析，站点模式继续受回归验证保护。
+
 ## 算法依据
 
 - [SciPy LatinHypercube](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.qmc.LatinHypercube.html)：每个维度的每个分层恰有一个样本；检查固定 seed、线性/对数映射及基准成员分离。

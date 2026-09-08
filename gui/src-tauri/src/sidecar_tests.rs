@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn run_arguments_forward_plain_mpi_rank_count() {
+    let args = run_args("/case", "/kernel", false, None, 8).expect("args");
+    assert_eq!(
+        args.windows(2).find(|pair| pair[0] == "--ranks"),
+        Some(&["--ranks".into(), "8".into()][..])
+    );
+    assert!(!args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "master" | "io" | "worker")));
+}
+
+#[test]
+fn batch_parallelism_accounts_for_ranks_per_case() {
+    assert_eq!(batch_width(8, 12, 4), 3);
+    assert_eq!(batch_width(8, 12, 1), 8);
+}
+
+#[test]
+fn spatial_grid_dimensions_reject_partial_global_cells() {
+    assert_eq!(grid_dimensions(0.5, 0.25).unwrap(), (720, 720));
+    assert!(grid_dimensions(7.0, 0.5).is_err());
+    assert!(grid_dimensions(0.0, 0.5).is_err());
+    assert!(grid_dimensions(f64::MIN_POSITIVE, 0.5).is_err());
+}
+
+#[test]
 fn development_prefers_the_workspace_cli_over_a_stale_staged_sidecar() {
     let sibling = std::path::PathBuf::from("/app");
     let candidates = cli_candidates(Some(sibling.clone()));
@@ -471,10 +497,10 @@ fn a_failed_run_says_why_not_just_the_exit_code() {
 
 #[test]
 fn requested_batch_cpu_count_is_bounded_by_the_machine() {
-    assert_eq!(batch_width(0, 8), 1);
-    assert_eq!(batch_width(4, 8), 4);
-    assert_eq!(batch_width(99, 8), 8);
-    assert_eq!(batch_width(4, 0), 1);
+    assert_eq!(batch_width(0, 8, 1), 1);
+    assert_eq!(batch_width(4, 8, 1), 4);
+    assert_eq!(batch_width(99, 8, 1), 8);
+    assert_eq!(batch_width(4, 0, 1), 1);
 }
 
 #[test]
@@ -544,7 +570,7 @@ fn batch_summary_distinguishes_success_from_attempted() {
 #[test]
 fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
     assert_eq!(
-        run_args("/case", "/kernel", false, Some("mksrfdata")).unwrap(),
+        run_args("/case", "/kernel", false, Some("mksrfdata"), 1).unwrap(),
         [
             "run",
             "/case",
@@ -552,15 +578,17 @@ fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
             "/kernel",
             "--stream",
             "1",
+            "--ranks",
+            "1",
             "--stage",
             "mksrfdata",
         ]
     );
     assert_eq!(
-        run_args("/case", "/kernel", true, None).unwrap(),
-        ["run", "/case", "--kernel", "/kernel", "--stream", "1", "--force", "1",]
+        run_args("/case", "/kernel", true, None, 1).unwrap(),
+        ["run", "/case", "--kernel", "/kernel", "--stream", "1", "--ranks", "1", "--force", "1",]
     );
-    assert!(run_args("/case", "/kernel", false, Some("unknown")).is_err());
+    assert!(run_args("/case", "/kernel", false, Some("unknown"), 1).is_err());
 }
 
 #[test]

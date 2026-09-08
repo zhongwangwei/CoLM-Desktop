@@ -264,6 +264,7 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         case_root.join(path)
     };
     let kernel_macros = colm_kernel::Kernel::open(&resolved)?.manifest.macros;
+    super::engine::ensure_supported_study_inputs(&base_case_paths, &kernel_macros)?;
     super::engine::baseline(&base_case_paths, &spec, &kernel_macros)?;
     if spec.kind == StudyKind::Uncertainty {
         for output in &spec.outputs {
@@ -371,6 +372,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         kernel.manifest.platform
     );
     let kernel_id = kernel.manifest.stage_fingerprint_identity();
+    super::engine::ensure_supported_study_manifest(&manifest, Some(&kernel.manifest.macros))?;
     if manifest.spec.kernel_dir.is_none() || manifest.provenance.kernel_id.is_empty() {
         bail!("Study has no frozen kernel identity; create a new Study");
     }
@@ -954,6 +956,7 @@ fn run_members(
                     stream,
                     false,
                     None,
+                    1,
                     true,
                     &mut |notice| {
                         let event = match notice {
@@ -1947,6 +1950,7 @@ pub fn retry(study_dir: &Path, include_review: bool) -> Result<StudyState> {
     }
     let _retry_lock = StudyRunLock::acquire(&study_dir)?;
     let manifest = super::engine::status(&study_dir)?;
+    super::engine::ensure_supported_study_manifest(&manifest, None)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let checkpoint_dir = study_dir.join("checkpoints/state");
     let mut state = super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?
@@ -1995,6 +1999,7 @@ pub fn apply(
     clear_stale_run_lock(&study_dir)?;
     let _apply_lock = StudyRunLock::acquire(&study_dir)?;
     let manifest = super::engine::status(&study_dir)?;
+    super::engine::ensure_supported_study_manifest(&manifest, None)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let member = resolve_apply_member(&study_dir, &manifest, member_id)?;
     let case_root = study_case_root(&manifest)?;
@@ -2140,6 +2145,7 @@ pub fn apply(
 pub fn apply_preview(study_dir: &Path, member_id: &str) -> Result<Vec<ApplyPreviewRow>> {
     ensure_scheduler_idle(study_dir)?;
     let manifest = super::engine::status(study_dir)?;
+    super::engine::ensure_supported_study_manifest(&manifest, None)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let member = resolve_apply_member(study_dir, &manifest, member_id)?;
     let case_root = study_case_root(&manifest)?;
@@ -3038,6 +3044,13 @@ mod tests {
         ));
         let dir = root.join(".colm/studies/s");
         let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(root.join("site")).unwrap();
+        std::fs::write(
+            root.join("site/case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n/\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("site/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
         std::fs::create_dir_all(dir.join("samples")).unwrap();
         std::fs::write(dir.join("samples/design.csv"), "member,site\n").unwrap();
         let manifest = Manifest {
@@ -3658,6 +3671,253 @@ mod tests {
         )
         .unwrap();
         kernel
+    }
+
+    fn write_fake_spatial_kernel(root: &Path) -> PathBuf {
+        let kernel = root.join("spatial-kernel");
+        std::fs::create_dir_all(&kernel).unwrap();
+        let body = b"#!/bin/sh\nexit 0\n";
+        let mut hashes = serde_json::Map::new();
+        for program in colm_kernel::PROGRAMS {
+            let path = kernel.join(colm_kernel::program_file(program));
+            std::fs::write(&path, body).unwrap();
+            hashes.insert(program.into(), serde_json::Value::String(sha256(body)));
+        }
+        std::fs::write(
+            kernel.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "preset": "study-spatial-test",
+                "platform": "test",
+                "colm_git_sha": "deadbeef",
+                "generator_args": "GRIDBASED LULC_IGBP",
+                "macros": ["GRIDBASED", "LULC_IGBP"],
+                "built_with": "test",
+                "netcdf_c": "test",
+                "netcdf_fortran": "test",
+                "hdf5": "test",
+                "sha256": hashes,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        kernel
+    }
+
+    fn write_study_spec(root: &Path, kernel: &Path) -> PathBuf {
+        let spec = root.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "uncertainty",
+                "method": "lhs",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.1,"sample_max":0.9}],
+                "outputs": ["Qle"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        spec
+    }
+
+    #[test]
+    fn study_create_rejects_spatial_case_namelist() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-spatial-case-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_kernel(&root);
+        std::fs::create_dir_all(root.join("site")).unwrap();
+        std::fs::write(
+            root.join("site/case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_file_mesh = 'mesh.nc'\n DEF_TUNING_CNFAC = 0.5\n/\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("site/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let spec = write_study_spec(&root, &kernel);
+        let error = super::super::engine::create(&root, &spec)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SinglePoint cases only"), "{error}");
+        assert!(!root.join(".colm/studies").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn study_preflight_rejects_non_singlepoint_kernel() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-spatial-kernel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_spatial_kernel(&root);
+        std::fs::create_dir_all(root.join("site")).unwrap();
+        std::fs::write(
+            root.join("site/case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'site'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_TUNING_CNFAC = 0.5\n/\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("site/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let spec = write_study_spec(&root, &kernel);
+        let error = preflight_create(&root, &spec).unwrap_err().to_string();
+        assert!(error.contains("SinglePoint kernels only"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_study_without_kernel_path_can_still_preview_singlepoint_case() {
+        let (root, study) = preview_fixture();
+        let rows = apply_preview(&study, "m000001").unwrap();
+        assert!(!rows.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn checkpoint_count(study: &Path) -> usize {
+        std::fs::read_dir(study.join("checkpoints/state"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .count()
+    }
+
+    fn mark_baseline_case_spatial(root: &Path) {
+        std::fs::write(
+            root.join("caseA/case.nml"),
+            "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_dir_output = 'out'\n   DEF_forcing_namelist = 'forcing.nml'\n   DEF_CatchmentMesh_data = 'catchment.nc'\n   DEF_TUNING_CNFAC = 0.5\n/\n",
+        )
+        .unwrap();
+    }
+
+    fn set_stored_kernel(study: &Path, kernel: &Path) {
+        let mut manifest = super::super::engine::status(study).unwrap();
+        manifest.spec.kernel_dir = Some(kernel.to_string_lossy().into_owned());
+        write_json(&study.join("manifest.json"), &manifest).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_study_actions_reject_before_mutation() {
+        let (root, study) = preview_fixture();
+        let kernel = write_fake_kernel(&root);
+        mark_baseline_case_spatial(&root);
+        std::fs::write(study.join("pause.request"), "pause\n").unwrap();
+        std::fs::write(study.join("cancel.request"), "cancel\n").unwrap();
+        let checkpoints = checkpoint_count(&study);
+        let output = root.join("applied-spatial");
+
+        let run_error = run(
+            &study,
+            RunOptions {
+                kernel_dir: &kernel,
+                jobs: 1,
+                stream: false,
+                retry_failed: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(run_error.contains("SinglePoint cases only"), "{run_error}");
+        assert_eq!(checkpoint_count(&study), checkpoints);
+
+        let retry_error = retry(&study, false).unwrap_err().to_string();
+        assert!(
+            retry_error.contains("SinglePoint cases only"),
+            "{retry_error}"
+        );
+        assert_eq!(checkpoint_count(&study), checkpoints);
+        assert!(study.join("pause.request").is_file());
+        assert!(study.join("cancel.request").is_file());
+
+        let apply_error = apply(&study, "m000001", &output, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            apply_error.contains("SinglePoint cases only"),
+            "{apply_error}"
+        );
+        assert!(!output.exists());
+
+        let preview_error = apply_preview(&study, "m000001").unwrap_err().to_string();
+        assert!(
+            preview_error.contains("SinglePoint cases only"),
+            "{preview_error}"
+        );
+
+        let resume_error = super::super::state::resume(&study).unwrap_err().to_string();
+        assert!(
+            resume_error.contains("SinglePoint cases only"),
+            "{resume_error}"
+        );
+        assert!(study.join("pause.request").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stored_spatial_kernel_study_actions_reject_site_shaped_cases() {
+        let (root, study) = preview_fixture();
+        let spatial_kernel = write_fake_spatial_kernel(&root);
+        set_stored_kernel(&study, &spatial_kernel);
+        std::fs::write(study.join("pause.request"), "pause\n").unwrap();
+        std::fs::write(study.join("cancel.request"), "cancel\n").unwrap();
+        let checkpoints = checkpoint_count(&study);
+        let output = root.join("applied-spatial-kernel");
+
+        let run_error = run(
+            &study,
+            RunOptions {
+                kernel_dir: &spatial_kernel,
+                jobs: 1,
+                stream: false,
+                retry_failed: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            run_error.contains("SinglePoint kernels only"),
+            "{run_error}"
+        );
+        assert_eq!(checkpoint_count(&study), checkpoints);
+
+        let retry_error = retry(&study, false).unwrap_err().to_string();
+        assert!(
+            retry_error.contains("SinglePoint kernels only"),
+            "{retry_error}"
+        );
+        assert_eq!(checkpoint_count(&study), checkpoints);
+        assert!(study.join("pause.request").is_file());
+        assert!(study.join("cancel.request").is_file());
+
+        let apply_error = apply(&study, "m000001", &output, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            apply_error.contains("SinglePoint kernels only"),
+            "{apply_error}"
+        );
+        assert!(!output.exists());
+
+        let preview_error = apply_preview(&study, "m000001").unwrap_err().to_string();
+        assert!(
+            preview_error.contains("SinglePoint kernels only"),
+            "{preview_error}"
+        );
+
+        let resume_error = super::super::state::resume(&study).unwrap_err().to_string();
+        assert!(
+            resume_error.contains("SinglePoint kernels only"),
+            "{resume_error}"
+        );
+        assert!(study.join("pause.request").is_file());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

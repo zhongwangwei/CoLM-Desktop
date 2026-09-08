@@ -15,8 +15,11 @@ pub mod pft;
 mod result_state;
 pub mod tuning;
 
-pub use build::{fields, spinup_cutoff, spinup_fields, CaseSpec, Dirs, Spinup, Window};
-pub use layout::{case_name, render, validate_case_name, Layout};
+pub use build::{
+    fields, spatial_fields, spinup_cutoff, spinup_fields, CaseSpec, Dirs, SpatialBounds,
+    SpatialCaseSpec, SpatialGrid, Spinup, Window,
+};
+pub use layout::{case_name, is_spatial_case, render, validate_case_name, Layout};
 pub use minimal::{is_default, required};
 pub use result_state::{clear_results_stale, mark_results_stale, results_are_stale};
 

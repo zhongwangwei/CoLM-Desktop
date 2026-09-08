@@ -32,6 +32,9 @@ MODULE MOD_Tracer_Reactive_Methane_PHMapping
 
    type, PUBLIC :: methane_ph_mapping_type
       type(grid_list_type), allocatable :: glist(:)
+#ifdef FLAT_SPMD
+      type(grid_list_type), allocatable :: io_glist(:)
+#endif
       integer, allocatable :: npart(:)
       type(pointer_int32_2d), allocatable :: address(:)
       type(pointer_real8_1d), allocatable :: areapart(:)
@@ -51,9 +54,14 @@ CONTAINS
          find_nearest_east, find_nearest_north, find_nearest_south, find_nearest_west, &
          insert_into_sorted_list1, insert_into_sorted_list2, lon_between_ceil, lon_between_floor
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      USE MOD_SPMD_Task, only: p_address_io, p_comm_glb, p_err, p_is_io, p_is_master, &
+         p_is_worker, p_itis_io, p_np_glb, p_np_io, p_np_worker, MPI_INTEGER, CoLM_Stop
+#else
       USE MOD_SPMD_Task, only: p_address_io, p_comm_glb, p_err, p_iam_glb, p_is_io, &
          p_is_master, p_is_worker, p_itis_io, p_itis_worker, p_np_io, p_np_worker, &
          p_stat, mpi_tag_data, mpi_tag_mesg, MPI_ANY_SOURCE, MPI_INTEGER, CoLM_Stop
+#endif
 #else
       USE MOD_SPMD_Task, only: p_is_io, p_is_master, p_is_worker, p_np_io, p_np_worker, CoLM_Stop
 #endif
@@ -71,12 +79,18 @@ CONTAINS
 #ifdef USEMPI
       integer, allocatable :: ipt(:)
       logical, allocatable :: msk(:)
+#ifdef FLAT_SPMD
+      integer, allocatable :: sendcounts(:), recvcounts(:), sdisps(:), rdisps(:)
+      integer, allocatable :: send_lon(:), send_lat(:), recv_lon(:), recv_lat(:)
+#endif
 #endif
       integer :: ie, iset, ng, ig, ng_all, iloc, npxl, capacity
       integer :: ipxl, ilat, ilon, iworker, iproc, idest, isrc, nrecv
       integer :: iy, ix, xblk, yblk, ipxstt, ipxend
 #ifdef USEMPI
+#ifndef FLAT_SPMD
       integer :: rmesg(2), smesg(2)
+#endif
 #endif
       real(r8) :: lat_s, lat_n, lon_w, lon_e, area
       logical :: skip, is_new
@@ -88,6 +102,10 @@ CONTAINS
       IF (allocated(this%glist) .or. allocated(this%npart) .or. &
           allocated(this%address) .or. allocated(this%areapart)) &
          CALL CoLM_Stop(' ***** ERROR: methane pH mapping object cannot be rebuilt')
+#ifdef FLAT_SPMD
+      IF (allocated(this%io_glist)) &
+         CALL CoLM_Stop(' ***** ERROR: methane pH mapping object cannot be rebuilt')
+#endif
 
       IF (p_is_master) THEN
          write(*,"(A, I0, A, I0, A)") &
@@ -316,6 +334,49 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      IF (p_np_io /= p_np_glb .or. p_np_worker /= p_np_glb) &
+         CALL CoLM_Stop(' ***** ERROR: flat methane pH mapping requires all ranks')
+
+      allocate(sendcounts(0:p_np_glb-1), recvcounts(0:p_np_glb-1))
+      allocate(sdisps(0:p_np_glb-1), rdisps(0:p_np_glb-1))
+      DO iproc = 0, p_np_glb-1
+         sendcounts(iproc) = this%glist(iproc)%ng
+      ENDDO
+      CALL mpi_alltoall(sendcounts, 1, MPI_INTEGER, recvcounts, 1, MPI_INTEGER, &
+         p_comm_glb, p_err)
+
+      sdisps(0) = 0
+      rdisps(0) = 0
+      DO iproc = 1, p_np_glb-1
+         sdisps(iproc) = sdisps(iproc-1) + sendcounts(iproc-1)
+         rdisps(iproc) = rdisps(iproc-1) + recvcounts(iproc-1)
+      ENDDO
+      allocate(send_lon(max(1,sum(sendcounts))), send_lat(max(1,sum(sendcounts))))
+      allocate(recv_lon(max(1,sum(recvcounts))), recv_lat(max(1,sum(recvcounts))))
+      DO iproc = 0, p_np_glb-1
+         ng = sendcounts(iproc)
+         IF (ng <= 0) CYCLE
+         send_lon(sdisps(iproc)+1:sdisps(iproc)+ng) = this%glist(iproc)%ilon
+         send_lat(sdisps(iproc)+1:sdisps(iproc)+ng) = this%glist(iproc)%ilat
+      ENDDO
+      CALL mpi_alltoallv(send_lon, sendcounts, sdisps, MPI_INTEGER, &
+         recv_lon, recvcounts, rdisps, MPI_INTEGER, p_comm_glb, p_err)
+      CALL mpi_alltoallv(send_lat, sendcounts, sdisps, MPI_INTEGER, &
+         recv_lat, recvcounts, rdisps, MPI_INTEGER, p_comm_glb, p_err)
+
+      allocate(this%io_glist(0:p_np_glb-1))
+      this%io_glist(:)%ng = 0
+      DO iproc = 0, p_np_glb-1
+         ng = recvcounts(iproc)
+         this%io_glist(iproc)%ng = ng
+         IF (ng <= 0) CYCLE
+         allocate(this%io_glist(iproc)%ilon(ng), this%io_glist(iproc)%ilat(ng))
+         this%io_glist(iproc)%ilon = recv_lon(rdisps(iproc)+1:rdisps(iproc)+ng)
+         this%io_glist(iproc)%ilat = recv_lat(rdisps(iproc)+1:rdisps(iproc)+ng)
+      ENDDO
+      deallocate(sendcounts, recvcounts, sdisps, rdisps, send_lon, send_lat, recv_lon, recv_lat)
+#else
       IF (p_is_worker) THEN
          DO iproc = 0, p_np_io-1
             idest = p_address_io(iproc)
@@ -351,6 +412,7 @@ CONTAINS
             ENDIF
          ENDDO
       ENDIF
+#endif
 #endif
 
    END SUBROUTINE build_methane_ph_areal_mapping

@@ -3,6 +3,64 @@
 //! 同步翻译新节点，而不是要求每个 render 函数再维护一套 DOM。
 
 const ZH_EN = [
+  ['普通 SPMD 并行；所有 rank 执行同一程序，不使用 master/io/worker 角色。', 'Plain SPMD parallelism: every rank runs the same program, without master/io/worker roles.'],
+  ['仅在同时运行多个算例时生效；总并行度会结合下方每算例 MPI 进程数自动限额。', 'Applies only when multiple cases run together; total parallelism is capped using the MPI ranks per case below.'],
+  ['本次还没有要运行的算例；先在基本设定中创建算例。', 'There are no cases to run yet; create one in Basic settings first.'],
+  ['向导中的范围、网格与 mask 会在这里生成网格并预检。', 'The selected domain, grid, and mask are used here to generate and preflight the mesh.'],
+  ['空间功能仍处于 early state，不建议正式使用；选择空间后参数调优和不确定性分析会失效。', 'Spatial features are still in an early state and are not recommended for production use; choosing spatial disables parameter tuning and uncertainty analysis.'],
+  ['空间功能仍处于 early state，不建议使用；选择空间后参数调优和不确定性分析暂不可用。', 'Spatial features are still in an early state and are not recommended; parameter tuning and uncertainty analysis are unavailable for spatial cases.'],
+  ['空间算例仍处于 early state，不建议使用；参数调优和不确定性分析暂不可用。', 'Spatial cases are still in an early state and are not recommended; parameter tuning and uncertainty analysis are unavailable.'],
+  ['空间内核仍处于 early state，不建议正式使用', 'Spatial kernels are still in an early state and are not recommended for production use'],
+  ['NAME（early state，不建议使用）', 'NAME (early state, not recommended)'],
+  ['3 · NAME · early state，不建议使用。', '3 · NAME · early state, not recommended.'],
+  ['空间算例 NAME 已生成；当前已切换工作流，未加入本次算例列表', 'Spatial case NAME was created; the workflow changed, so it was not added to the current case list'],
+  ['流域（early state，不建议使用）', 'Watershed (early state, not recommended)'],
+  ['区域（early state，不建议使用）', 'Region (early state, not recommended)'],
+  ['全球（early state，不建议使用）', 'Global (early state, not recommended)'],
+  ['经纬度网格（early state，不建议使用）', 'Latitude-longitude grid (early state, not recommended)'],
+  ['非结构网格（early state，不建议使用）', 'Unstructured grid (early state, not recommended)'],
+  ['流域网格（early state，不建议使用）', 'Catchment grid (early state, not recommended)'],
+  ['按流域边界限定模拟范围；空间功能仍处于 early state，不建议正式使用', 'Limit the simulation extent with a watershed boundary; spatial features are still in an early state and are not recommended for production use'],
+  ['按经纬度范围限定模拟区域；空间功能仍处于 early state，不建议正式使用', 'Limit the simulation region with longitude and latitude bounds; spatial features are still in an early state and are not recommended for production use'],
+  ['覆盖全球陆地区域；空间功能仍处于 early state，不建议正式使用', 'Cover global land areas; spatial features are still in an early state and are not recommended for production use'],
+  ['规则等经纬度网格（GRIDBASED）；空间网格仍处于 early state，不建议正式使用', 'Regular equal-angle grid (GRIDBASED); spatial grids are still in an early state and are not recommended for production use'],
+  ['由 elmindex 描述计算单元（UNSTRUCTURED）；空间网格仍处于 early state，不建议正式使用', 'Computational elements described by elmindex (UNSTRUCTURED); spatial grids are still in an early state and are not recommended for production use'],
+  ['集水区与 HRU 水文单元（CATCHMENT）；空间网格仍处于 early state，不建议正式使用', 'Catchment and HRU hydrologic units (CATCHMENT); spatial grids are still in an early state and are not recommended for production use'],
+  ['点击已完成算例进入时间序列；失败算例可返回日志定位原因。', 'Open a completed case for time series; use its log to diagnose failures.'],
+  ['使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。', 'Use the global extent; the required non-ocean mask below removes ocean cells.'],
+  ['请选择非海洋 mask，避免把海洋格点激活为陆面单元', 'Select a non-ocean mask so ocean cells are not activated as land units'],
+  ['站点算例固定使用 1 个进程。', 'Site cases always use one process.'],
+  ['将预检已准备的 Catchment/HRU NetCDF。', 'The prepared Catchment/HRU NetCDF will be preflighted.'],
+  ['将按指定分辨率生成网格，以 mask 剔除海洋和范围外单元，并生成 int64 空间索引合同。', 'Generate the selected-resolution mesh, mask ocean and out-of-domain cells, and write the int64 spatial-index contract.'],
+  ['请选择 rawdata 目录', 'Select the rawdata directory'],
+  ['请选择 runtime 目录', 'Select the runtime directory'],
+  ['请选择空间强迫场 namelist', 'Select the spatial forcing namelist'],
+  ['请选择开始日期', 'Select the start date'],
+  ['请选择结束日期', 'Select the end date'],
+  ['请选择算例根目录', 'Select the case root directory'],
+  ['请输入算例名称', 'Enter a case name'],
+  ['算例路径不能含空格', 'The case path cannot contain spaces'],
+  ['开始日期不能晚于结束日期', 'The start date cannot be later than the end date'],
+  ['时间步长必须大于 0', 'The timestep must be greater than 0'],
+  ['正在生成并预检空间算例…', 'Generating and preflighting the spatial case…'],
+  ['算例已生成，但重新扫描时没有找到它', 'The case was generated but was not found during rescan'],
+  ['生成网格、预检并建算例', 'Generate grid, preflight, and create case'],
+  ['每个算例的 MPI 进程数', 'MPI ranks per case'],
+  ['空间强迫场 namelist', 'Spatial forcing namelist'],
+  ['搜索算例…', 'Search cases…'],
+  ['非海洋 mask（必需）', 'Non-ocean mask (required)'],
+  ['时间步长（秒）', 'Timestep (seconds)'],
+  ['算例根目录', 'Case root directory'],
+  ['rawdata 目录', 'rawdata directory'],
+  ['runtime 目录', 'runtime directory'],
+  ['空间算例', 'Spatial case'],
+  ['时间与输出', 'Time and output'],
+  ['开始日期', 'Start date'],
+  ['结束日期', 'End date'],
+  ['算例名称', 'Case name'],
+  ['搜索算例', 'Search cases'],
+  ['算例状态', 'Case status'],
+  ['非结构', 'Unstructured'],
   ['测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。', 'Beta release: features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.'],
   // Complete sentences come before short labels. This keeps prose grammatical and
   // prevents a label such as “运行” from creating half-translated paragraphs.
@@ -710,7 +768,35 @@ const ZH_EN = [
   ['留空 = 使用站点目录旁的 ../Forcing/', 'Leave empty = use ../Forcing/ beside the site directory'],
   ['中文', '中文'],
   ['这次要跑什么？', 'What would you like to run?'],
-  ['空间结构先定；现在只有站点步骤链能跑。', 'Choose the spatial structure first; only the site workflow is available for now.'],
+  ['先选择模拟范围，再为流域、区域或全球选择计算网格。', 'Choose the simulation extent, then choose a computational grid for watershed, regional, or global runs.'],
+  ['先选择模拟范围，再选择计算网格与物理配置。', 'Choose the simulation extent, computational grid, and physics configuration.'],
+  ['计算网格怎么组织？', 'How should the computational grid be organized?'],
+  ['三种空间范围都可选择经纬度、非结构或流域网格。', 'Each spatial extent can use a latitude-longitude, unstructured, or catchment grid.'],
+  ['空间输入怎么准备？', 'How should the spatial inputs be prepared?'],
+  ['范围只决定 mask；网格类型决定 CoLM 的运行模式与输入合同。', 'The extent only defines the mask; the grid type defines the CoLM mode and input contract.'],
+  ['✓ 空间输入参数完整；文件内容会在启动长任务前预检', '✓ Spatial input parameters are complete; file contents will be checked before a long run starts'],
+  ['使用全球范围，不再填写边界。海洋仍由下方可选 mask 剔除。', 'Use the global extent without additional bounds. Oceans may still be removed by the optional mask below.'],
+  ['按该全球格架生成 int64 elmindex；范围外与海洋单元写为 inactive。', 'Generate int64 elmindex on this global lattice; cells outside the extent or in the ocean are inactive.'],
+  ['按该全球格架生成 landmask，并以 GRIDBASED 模式运行。', 'Generate landmask on this global lattice and run in GRIDBASED mode.'],
+  ['区域边界必须位于 WGS84 范围，并满足西 < 东、南 < 北', 'Regional bounds must lie within WGS84 and satisfy west < east and south < north'],
+  ['分辨率必须整除全球 360°×180° 格架', 'Resolution must divide the global 360° × 180° lattice evenly'],
+  ['格点数量超过安全整数范围', 'The grid-cell count exceeds the safe integer range'],
+  ['经纬度分辨率必须大于 0', 'Longitude and latitude resolutions must be greater than 0'],
+  ['请选择流域 Shapefile', 'Choose a watershed Shapefile'],
+  ['请填写完整的区域边界', 'Enter all regional bounds'],
+  ['请选择 Catchment NetCDF', 'Choose a Catchment NetCDF file'],
+  ['非海洋 mask（可选）', 'Non-ocean mask (optional)'],
+  ['经度分辨率（度）', 'Longitude resolution (degrees)'],
+  ['纬度分辨率（度）', 'Latitude resolution (degrees)'],
+  ['流域网格数据', 'Catchment-grid data'],
+  ['等经纬度底板', 'Equal latitude-longitude lattice'],
+  ['流域边界', 'Watershed boundary'],
+  ['区域边界', 'Regional bounds'],
+  ['全球范围', 'Global extent'],
+  ['西边界', 'West'],
+  ['东边界', 'East'],
+  ['南边界', 'South'],
+  ['北边界', 'North'],
   ['次网格怎么分？', 'How should the subgrid be represented?'],
   ['次网格方案决定 BGC 是否可用，也决定站点数据要求。', 'The subgrid scheme controls BGC availability and site-data requirements.'],
   ['土壤水力用哪套？', 'Which soil-hydraulics scheme?'],
@@ -720,9 +806,15 @@ const ZH_EN = [
   ['要打开调试吗？', 'Enable debugging?'],
   ['可全部不选；这些开关只增加检查与日志，不改变页间约束。', 'All may stay off; these switches only add checks and logs.'],
   ['单点站点模拟', 'Single-point site simulation'],
-  ['流域尺度模拟', 'Watershed-scale simulation'],
-  ['有限范围网格', 'Limited-area grid'],
-  ['全球网格', 'Global grid'],
+  ['按流域边界限定模拟范围', 'Limit the simulation extent with a watershed boundary'],
+  ['按经纬度范围限定模拟区域', 'Limit the simulation region with longitude and latitude bounds'],
+  ['覆盖全球陆地区域', 'Cover global land areas'],
+  ['经纬度网格', 'Latitude-longitude grid'],
+  ['规则等经纬度网格（GRIDBASED）', 'Regular equal-angle grid (GRIDBASED)'],
+  ['非结构网格', 'Unstructured grid'],
+  ['由 elmindex 描述计算单元（UNSTRUCTURED）', 'Computational elements described by elmindex (UNSTRUCTURED)'],
+  ['流域网格', 'Catchment grid'],
+  ['集水区与 HRU 水文单元（CATCHMENT）', 'Catchment and HRU hydrologic units (CATCHMENT)'],
   ['流域步骤链尚未实现', 'Watershed workflow is not implemented yet'],
   ['区域步骤链尚未实现', 'Regional workflow is not implemented yet'],
   ['全球步骤链尚未实现', 'Global workflow is not implemented yet'],
@@ -1795,6 +1887,9 @@ export function translateZh(text, target = 'en') {
     .replace(/^评估选中的\s*(\d+)\s*个已跑算例$/, 'Evaluate $1 selected completed cases')
     .replace(/^评估本次\s*(\d+)\s*个已跑算例$/, 'Evaluate $1 current completed cases')
     .replace(/^检测到\s*(\d+)\s*个逻辑 CPU；单个站点仍使用 1 核。$/, '$1 logical CPUs detected; each site still uses one core.')
+    .replace(/^检测到\s*(\d+)\s*个逻辑 CPU；批量算例使用普通线程池调度。$/, 'Detected $1 logical CPUs; batch cases use a normal thread pool.')
+    .replace(/^最多\s*(\d+)\s*个进程；批量并行数会按每算例 rank 数自动限额。$/, 'Up to $1 processes; batch concurrency is capped by ranks per case.')
+    .replace(/^空间算例\s*(.+)\s*已通过预检$/, 'Spatial case $1 passed preflight')
     .replace(/^开始运行\s*(\d+)\s*个算例$/, 'Starting $1 cases')
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行完成$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} completed`)
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行已取消$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} cancelled`)
@@ -1900,6 +1995,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^未知 Study 操作：(.+)$/, 'Unknown Study action: $1')
     .replace(/^未知任务操作：(.+)$/, 'Unknown task action: $1')
     .replace(/^批量总体：(\d+)\/(\d+)\s*个站点结束$/, 'Batch total: $1/$2 sites finished')
+    .replace(/^批量总体：(\d+)\/(\d+)\s*个算例结束(?:\s*·\s*模型步\s*(\d+)\/(\d+))?$/, (_, a, b, c, d) => `Batch total: ${a}/${b} cases finished${c ? ` · model steps ${c}/${d}` : ''}`)
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行失败（退出码\s*(-?\d+)）$/, (_, stage, code) => `${stage === '全部阶段' ? 'All stages' : stage} failed (exit code ${code})`)
     .replace(/^请选择有效的\s*(.+)\s*地表覆盖类型$/, 'Select a valid $1 land-cover type')
     .replace(/^已生成\s*(.+)，但当前模式还缺\s*(\d+)\s*项外部数据$/, 'Generated $1, but the current mode still needs $2 external data items')
@@ -1914,6 +2010,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^可行候选 (\d+)\/(\d+)$/, 'Feasible candidates $1/$2');
   for (const [zh, en] of ZH_EN) out = out.split(zh).join(en);
   out = out
+    .replace(/^选择(.+)$/, 'Select $1')
     .replace(/第\s*(\d+)\/(\d+)\s*page/g, 'Page $1/$2')
     .replace(/第\s*(\d+)\s*step/g, 'Step $1')
     .replace(/选中的\s*(\d+)\s*cases/g, '$1 selected cases')

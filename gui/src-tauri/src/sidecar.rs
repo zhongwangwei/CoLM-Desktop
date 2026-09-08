@@ -654,8 +654,12 @@ fn run_args(
     kernel: &str,
     force: bool,
     stage: Option<&str>,
+    mpi_ranks: usize,
 ) -> Result<Vec<String>, String> {
     validate_run_stage(stage)?;
+    if mpi_ranks == 0 {
+        return Err("mpiRanks must be at least 1".into());
+    }
     let mut args = vec![
         "run".to_string(),
         case.to_string(),
@@ -663,6 +667,8 @@ fn run_args(
         kernel.to_string(),
         "--stream".to_string(),
         "1".to_string(),
+        "--ranks".to_string(),
+        mpi_ranks.to_string(),
     ];
     if let Some(stage) = stage {
         args.extend(["--stage".to_string(), stage.to_string()]);
@@ -675,6 +681,7 @@ fn run_args(
 
 /// 跑一个算例。返回子进程的退出码。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_case(
     app: tauri::AppHandle,
     processes: tauri::State<'_, RunProcesses>,
@@ -683,11 +690,14 @@ pub async fn run_case(
     kernel: String,
     force: bool,
     stage: Option<String>,
+    mpi_ranks: usize,
 ) -> Result<i32, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        run_case_blocking(app, processes, run_id, case, kernel, force, stage)
+        run_case_blocking(
+            app, processes, run_id, case, kernel, force, stage, mpi_ranks,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -823,8 +833,28 @@ fn pump(
 
 /// 同时最多跑几个算例。
 ///
-fn batch_width(requested: usize, available: usize) -> usize {
-    requested.clamp(1, available.max(1))
+fn batch_width(requested: usize, available: usize, ranks_per_case: usize) -> usize {
+    requested.clamp(1, (available / ranks_per_case.max(1)).max(1))
+}
+
+fn grid_dimensions(dlon: f64, dlat: f64) -> Result<(usize, usize), String> {
+    if !dlon.is_finite() || !dlat.is_finite() || dlon <= 0.0 || dlat <= 0.0 {
+        return Err("dlon and dlat must be positive finite numbers".into());
+    }
+    let (nlon, nlat) = (360.0 / dlon, 180.0 / dlat);
+    if (nlon - nlon.round()).abs() > 1e-9 || (nlat - nlat.round()).abs() > 1e-9 {
+        return Err("dlon and dlat must divide the global 360° × 180° grid".into());
+    }
+    if nlon > usize::MAX as f64 || nlat > usize::MAX as f64 {
+        return Err("grid dimensions exceed this platform's address space".into());
+    }
+    let dimensions = (nlon.round() as usize, nlat.round() as usize);
+    let cells = dimensions
+        .0
+        .checked_mul(dimensions.1)
+        .ok_or_else(|| "grid cell count overflows this platform".to_string())?;
+    i64::try_from(cells).map_err(|_| "grid element identity exceeds int64".to_string())?;
+    Ok(dimensions)
 }
 
 #[derive(Debug, Serialize)]
@@ -851,6 +881,7 @@ pub async fn run_batch(
     max_concurrent: usize,
     force: bool,
     stage: Option<String>,
+    mpi_ranks: usize,
 ) -> Result<BatchSummary, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -864,6 +895,7 @@ pub async fn run_batch(
             max_concurrent,
             force,
             stage,
+            mpi_ranks,
         )
     })
     .await
@@ -881,14 +913,18 @@ fn run_batch_blocking(
     max_concurrent: usize,
     force: bool,
     stage: Option<String>,
+    mpi_ranks: usize,
 ) -> Result<BatchSummary, String> {
     validate_run_stage(stage.as_deref())?;
+    if mpi_ranks == 0 {
+        return Err("mpiRanks must be at least 1".into());
+    }
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
     let total = cases.len();
     processes.prepare(&cases)?;
-    let width = batch_width(max_concurrent, available).min(total.max(1));
+    let width = batch_width(max_concurrent, available, mpi_ranks).min(total.max(1));
     let queue = Arc::new(Mutex::new(VecDeque::from(cases)));
     let succeeded = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(width);
@@ -911,7 +947,16 @@ fn run_batch_blocking(
                 .pop_front();
             let Some(case) = case else { break };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_one(&a, &p, &r, &case, &k, force, requested_stage.as_deref())
+                run_one(
+                    &a,
+                    &p,
+                    &r,
+                    &case,
+                    &k,
+                    force,
+                    requested_stage.as_deref(),
+                    mpi_ranks,
+                )
             }));
             match outcome {
                 Ok(Ok(0)) => {
@@ -968,6 +1013,7 @@ fn run_batch_blocking(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_case_blocking(
     app: tauri::AppHandle,
     processes: RunProcesses,
@@ -976,6 +1022,7 @@ fn run_case_blocking(
     kernel: String,
     force: bool,
     stage: Option<String>,
+    mpi_ranks: usize,
 ) -> Result<i32, String> {
     processes.prepare(std::slice::from_ref(&case))?;
     run_one(
@@ -986,10 +1033,12 @@ fn run_case_blocking(
         &kernel,
         force,
         stage.as_deref(),
+        mpi_ranks,
     )
 }
 
 /// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
+#[allow(clippy::too_many_arguments)]
 fn run_one(
     app: &tauri::AppHandle,
     processes: &RunProcesses,
@@ -998,6 +1047,7 @@ fn run_one(
     kernel: &str,
     force: bool,
     stage: Option<&str>,
+    mpi_ranks: usize,
 ) -> Result<i32, String> {
     if processes.take_cancelled(case)? {
         let _ = app.emit(
@@ -1017,7 +1067,7 @@ fn run_one(
     }
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
-    let args = run_args(case, kernel, force, stage)?;
+    let args = run_args(case, kernel, force, stage, mpi_ranks)?;
     let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -1145,6 +1195,217 @@ pub async fn new_case(
         }
         return Err(error);
     }
+    Ok(output)
+}
+
+struct SpatialCaseRequest {
+    domain: String,
+    grid_kind: String,
+    shapefile: Option<String>,
+    west: Option<f64>,
+    east: Option<f64>,
+    south: Option<f64>,
+    north: Option<f64>,
+    dlon: Option<f64>,
+    dlat: Option<f64>,
+    non_ocean_mask: Option<String>,
+    catchment_file: Option<String>,
+    out: String,
+    name: String,
+    forcing: String,
+    rawdata: String,
+    runtime: String,
+    start: String,
+    end: String,
+    timestep: f64,
+    mode: String,
+    fields: Vec<crate::config::FieldChange>,
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn new_spatial_case(
+    domain: String,
+    grid_kind: String,
+    shapefile: Option<String>,
+    west: Option<f64>,
+    east: Option<f64>,
+    south: Option<f64>,
+    north: Option<f64>,
+    dlon: Option<f64>,
+    dlat: Option<f64>,
+    non_ocean_mask: Option<String>,
+    catchment_file: Option<String>,
+    out: String,
+    name: String,
+    forcing: String,
+    rawdata: String,
+    runtime: String,
+    start: String,
+    end: String,
+    timestep: f64,
+    mode: String,
+    fields: Vec<crate::config::FieldChange>,
+) -> Result<String, String> {
+    let request = SpatialCaseRequest {
+        domain,
+        grid_kind,
+        shapefile,
+        west,
+        east,
+        south,
+        north,
+        dlon,
+        dlat,
+        non_ocean_mask,
+        catchment_file,
+        out,
+        name,
+        forcing,
+        rawdata,
+        runtime,
+        start,
+        end,
+        timestep,
+        mode,
+        fields,
+    };
+    validate_bgc_runtime(Some(&request.runtime), &request.fields)?;
+    if !matches!(request.domain.as_str(), "watershed" | "region" | "global") {
+        return Err("domain must be watershed, region, or global".into());
+    }
+    if !matches!(
+        request.grid_kind.as_str(),
+        "latlon" | "unstructured" | "catchment"
+    ) {
+        return Err("gridKind must be latlon, unstructured, or catchment".into());
+    }
+    let case_dir = PathBuf::from(&request.out);
+    if case_dir.exists() {
+        return Err(format!(
+            "case directory already exists; choose a new case name: {}",
+            case_dir.display()
+        ));
+    }
+    std::fs::create_dir_all(&case_dir)
+        .map_err(|e| format!("cannot create {}: {e}", case_dir.display()))?;
+    let cleanup = |error: String| {
+        let _ = std::fs::remove_dir_all(&case_dir);
+        error
+    };
+    let mesh = if request.grid_kind == "catchment" {
+        request
+            .catchment_file
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| cleanup("catchmentFile is required".into()))?
+    } else {
+        let mask = request
+            .non_ocean_mask
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| cleanup("nonOceanMask is required".into()))?;
+        let dlon = request
+            .dlon
+            .ok_or_else(|| cleanup("dlon is required".into()))?;
+        let dlat = request
+            .dlat
+            .ok_or_else(|| cleanup("dlat is required".into()))?;
+        let (nlon, nlat) = grid_dimensions(dlon, dlat).map_err(&cleanup)?;
+        let mesh = case_dir.join("mesh.nc").to_string_lossy().into_owned();
+        let mut args = vec![
+            "mesh-new".into(),
+            "--out".into(),
+            mesh.clone(),
+            "--grid-kind".into(),
+            request.grid_kind.clone(),
+            "--nlon".into(),
+            nlon.to_string(),
+            "--nlat".into(),
+            nlat.to_string(),
+            "--non-ocean-mask".into(),
+            mask,
+        ];
+        match request.domain.as_str() {
+            "watershed" => {
+                let shp = request
+                    .shapefile
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| cleanup("shapefile is required".into()))?;
+                args.extend(["--shp".into(), shp]);
+            }
+            "region" => {
+                for (flag, value) in [
+                    ("--west", request.west),
+                    ("--east", request.east),
+                    ("--south", request.south),
+                    ("--north", request.north),
+                ] {
+                    args.extend([
+                        flag.into(),
+                        value
+                            .ok_or_else(|| cleanup(format!("{flag} is required")))?
+                            .to_string(),
+                    ]);
+                }
+            }
+            "global" => {}
+            _ => unreachable!(),
+        }
+        capture_async(args).await.map_err(&cleanup)?;
+        mesh
+    };
+    let manifest = case_dir
+        .join("spatial-input.manifest.json")
+        .to_string_lossy()
+        .into_owned();
+    capture_async(vec![
+        "spatial-preflight".into(),
+        "--grid-kind".into(),
+        request.grid_kind.clone(),
+        "--input".into(),
+        mesh.clone(),
+        "--out".into(),
+        manifest,
+    ])
+    .await
+    .map_err(&cleanup)?;
+    let mut args = vec![
+        "spatial-new".into(),
+        "--grid-kind".into(),
+        request.grid_kind.clone(),
+        "--mesh".into(),
+        mesh,
+        "--out".into(),
+        request.out.clone(),
+        "--name".into(),
+        request.name,
+        "--forcing".into(),
+        request.forcing,
+        "--rawdata".into(),
+        request.rawdata,
+        "--runtime".into(),
+        request.runtime,
+        "--start".into(),
+        request.start,
+        "--end".into(),
+        request.end,
+        "--timestep".into(),
+        request.timestep.to_string(),
+        "--mode".into(),
+        request.mode,
+    ];
+    if request.grid_kind == "latlon" {
+        args.extend([
+            "--dlon".into(),
+            request.dlon.expect("validated above").to_string(),
+            "--dlat".into(),
+            request.dlat.expect("validated above").to_string(),
+        ]);
+    }
+    let output = capture_async(args).await.map_err(&cleanup)?;
+    crate::config::apply_fields(&request.out, &request.fields).map_err(&cleanup)?;
     Ok(output)
 }
 

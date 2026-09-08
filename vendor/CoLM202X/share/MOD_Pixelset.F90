@@ -366,7 +366,7 @@ CONTAINS
 
          this%vecgs%vlen = this%vecgs%vend - this%vecgs%vstt + 1
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          DO jblk = 1, gblock%nyblk
             DO iblk = 1, gblock%nxblk
                IF (gblock%pio(iblk,jblk) == p_address_io(p_my_group)) THEN
@@ -381,7 +381,24 @@ CONTAINS
 #endif
       ENDIF
 
-#ifdef USEMPI
+#ifdef FLAT_SPMD
+      IF (.not. allocated(this%vecgs%vcnt)) THEN
+         allocate (this%vecgs%vcnt (0:p_np_glb-1,gblock%nxblk,gblock%nyblk))
+         allocate (this%vecgs%vdsp (0:p_np_glb-1,gblock%nxblk,gblock%nyblk))
+      ENDIF
+      DO jblk = 1, gblock%nyblk
+         DO iblk = 1, gblock%nxblk
+            scnt = this%vecgs%vlen(iblk,jblk)
+            CALL mpi_allgather (scnt, 1, MPI_INTEGER, this%vecgs%vcnt(:,iblk,jblk), &
+               1, MPI_INTEGER, p_comm_glb, p_err)
+            this%vecgs%vdsp(0,iblk,jblk) = 0
+            DO iproc = 1, p_np_glb-1
+               this%vecgs%vdsp(iproc,iblk,jblk) = this%vecgs%vdsp(iproc-1,iblk,jblk) &
+                  + this%vecgs%vcnt(iproc-1,iblk,jblk)
+            ENDDO
+         ENDDO
+      ENDDO
+#elif defined(USEMPI)
       IF (p_is_io) THEN
 
          IF (.not. allocated(this%vecgs%vcnt)) THEN

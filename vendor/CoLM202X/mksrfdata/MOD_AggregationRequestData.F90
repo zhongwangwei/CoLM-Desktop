@@ -13,6 +13,8 @@ MODULE MOD_AggregationRequestData
 !       data is returned from IO processes.
 !
 !  Created by Shupeng Zhang, May 2023
+!  ponytail: flat ranks use replicated active blocks directly; add a data
+!  service only if active-block replication stops being acceptable.
 !-----------------------------------------------------------------------
 
    IMPLICIT NONE
@@ -71,6 +73,10 @@ CONTAINS
    integer , allocatable :: sbuf_i4_1d(:)
 
    logical,  allocatable :: worker_done (:)
+
+#ifdef FLAT_SPMD
+      RETURN
+#endif
 
       IF (p_is_io) THEN
 
@@ -465,7 +471,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
 
       allocate (ipt (totalreq))
       allocate (msk (totalreq))
@@ -636,6 +642,9 @@ CONTAINS
 
       ENDDO
 
+      deallocate (xlist)
+      deallocate (ylist)
+
 #endif
 
    END SUBROUTINE aggregation_request_data
@@ -649,6 +658,10 @@ CONTAINS
    IMPLICIT NONE
 
    integer :: smesg(2), iproc, idest
+
+#ifdef FLAT_SPMD
+      RETURN
+#endif
 
       IF (p_is_worker) THEN
          DO iproc = 0, p_np_io-1

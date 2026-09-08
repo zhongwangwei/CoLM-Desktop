@@ -77,6 +77,9 @@ CONTAINS
 
    real(r8), allocatable :: rcache(:)
    integer,  allocatable :: icache(:)
+   integer,  allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
+   integer,  allocatable :: send_ids(:), resv_bsn_all(:), irecvbuf(:)
+   real(r8), allocatable :: rrecvbuf(:)
    integer :: nbasin, ibasin, irsv, nrecv, nrsv, iloc
 
 
@@ -182,6 +185,62 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (numresv, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iworker = 1, p_np_glb-1
+         disps(iworker) = disps(iworker-1) + counts(iworker-1)
+      ENDDO
+
+      allocate (send_ids(max(1,numresv)))
+      IF (numresv > 0) send_ids(1:numresv) = resv_bsn_id
+      IF (p_is_master) THEN
+         allocate (resv_bsn_all(max(1,sum(counts))))
+      ELSE
+         allocate (resv_bsn_all(1))
+      ENDIF
+      CALL mpi_gatherv (send_ids, numresv, MPI_INTEGER, resv_bsn_all, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      IF (p_is_master) THEN
+         allocate (icache(max(1,sum(counts))))
+         IF (sum(counts) > 0) icache(1:sum(counts)) = all_year_basin(resv_bsn_all(1:sum(counts)))
+      ELSE
+         allocate (icache(1))
+      ENDIF
+      allocate (irecvbuf(max(1,numresv)))
+      CALL mpi_scatterv (icache, counts, disps, MPI_INTEGER, irecvbuf, numresv, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      allocate (counts_data(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      counts_data = counts * 4
+      disps_data = disps * 4
+      IF (p_is_master) THEN
+         allocate (rcache(max(1,4*sum(counts))))
+         DO irsv = 1, sum(counts)
+            rcache(4*irsv-3) = all_vol_basin   (resv_bsn_all(irsv))
+            rcache(4*irsv-2) = all_qmean_basin (resv_bsn_all(irsv))
+            rcache(4*irsv-1) = all_qflood_basin(resv_bsn_all(irsv))
+            rcache(4*irsv  ) = all_dhgt_basin  (resv_bsn_all(irsv))
+         ENDDO
+      ELSE
+         allocate (rcache(1))
+      ENDIF
+      allocate (rrecvbuf(max(1,4*numresv)))
+      CALL mpi_scatterv (rcache, counts_data, disps_data, MPI_REAL8, rrecvbuf, &
+         4*numresv, MPI_REAL8, p_root, p_comm_glb, p_err)
+
+      IF (numresv > 0) THEN
+         dam_build_year = irecvbuf(1:numresv)
+         volresv_total = rrecvbuf(1:4*numresv:4)
+         qresv_mean    = rrecvbuf(2:4*numresv:4)
+         qresv_flood   = rrecvbuf(3:4*numresv:4)
+         dam_height    = rrecvbuf(4:4*numresv:4)
+      ENDIF
+      deallocate (counts, counts_data, disps, disps_data, send_ids, resv_bsn_all)
+      deallocate (icache, irecvbuf, rcache, rrecvbuf)
+#else
       IF (p_is_master) THEN
          DO iworker = 0, p_np_worker-1
 
@@ -248,6 +307,7 @@ CONTAINS
                p_address_master, mpi_tag_data, p_comm_glb, p_stat, p_err)
          ENDIF
       ENDIF
+#endif
 #else
       IF (numresv > 0) THEN
          volresv_total  = all_vol_basin   (resv_bsn_id)
@@ -448,7 +508,7 @@ CONTAINS
 #endif
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
       IF (p_iam_worker == p_root) THEN
          CALL mpi_send (varout, numresv_uniq, MPI_REAL8, p_address_master, &
             mpi_tag_data, p_comm_glb, p_err)

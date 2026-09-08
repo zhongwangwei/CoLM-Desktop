@@ -105,6 +105,17 @@ if (translateZh('开发与维护团队') !== 'Development and maintenance team'
 if (translateZh('下一步：站点信息 →') !== 'Next: Site information →') {
   throw new Error('dynamic workflow navigation is not translated');
 }
+if (CHINESE.test(translateZh('选择流域 Shapefile（WGS84）'))
+    || CHINESE.test(translateZh('选择非海洋 mask（必需）'))) {
+  throw new Error('dynamic spatial file-picker labels are not translated');
+}
+for (const message of [
+  '请选择 rawdata 目录', '请选择 runtime 目录', '请选择空间强迫场 namelist',
+  '请选择开始日期', '请选择结束日期', '请选择算例根目录', '请输入算例名称',
+  '开始日期不能晚于结束日期', '正在生成并预检空间算例…',
+]) {
+  if (CHINESE.test(translateZh(message))) throw new Error(`spatial message is only partly translated: ${message}`);
+}
 if (translateZh('第 12/48 步 · 2008-01-01') !== 'Step 12/48 · 2008-01-01') {
   throw new Error('dynamic per-site progress is not translated');
 }
@@ -120,6 +131,16 @@ if (translateZh('站点、路径、预热和建例所需的数据设置都收在
 if (translateZh('检测到 8 个逻辑 CPU；单个站点仍使用 1 核。')
     !== '8 logical CPUs detected; each site still uses one core.') {
   throw new Error('dynamic CPU guidance is not translated');
+}
+if (translateZh('检测到 12 个逻辑 CPU；批量算例使用普通线程池调度。')
+      !== 'Detected 12 logical CPUs; batch cases use a normal thread pool.'
+    || translateZh('最多 8 个进程；批量并行数会按每算例 rank 数自动限额。')
+      !== 'Up to 8 processes; batch concurrency is capped by ranks per case.'
+    || translateZh('批量总体：3/8 个算例结束 · 模型步 7/20')
+      !== 'Batch total: 3/8 cases finished · model steps 7/20'
+    || translateZh('空间算例 yangtze 已通过预检')
+      !== 'Spatial case yangtze passed preflight') {
+  throw new Error('dynamic spatial-run guidance is not translated');
 }
 if (translateZh('参数调优任务已生成。') !== 'Parameter-tuning task prepared.'
     || translateZh('Qle 的权重必须是正数。') !== 'Qle weight must be positive.'

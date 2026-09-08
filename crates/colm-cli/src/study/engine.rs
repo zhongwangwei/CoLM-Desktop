@@ -161,6 +161,53 @@ pub fn parameters_json() -> Result<String> {
     Ok(String::from_utf8(buf)?)
 }
 
+pub(super) fn ensure_supported_study_inputs(
+    base_cases: &[PathBuf],
+    kernel_macros: &[String],
+) -> Result<()> {
+    if !kernel_macros.is_empty() && !kernel_macros.iter().any(|name| name == "SinglePoint") {
+        bail!("Study currently supports SinglePoint kernels only; spatial kernels cannot run tuning or uncertainty Studies yet");
+    }
+    for case in base_cases {
+        reject_spatial_study_case(case)?;
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_supported_study_manifest(
+    manifest: &Manifest,
+    kernel_macros: Option<&[String]>,
+) -> Result<()> {
+    if let Some(kernel_macros) = kernel_macros {
+        ensure_supported_study_inputs(&[], kernel_macros)?;
+    }
+    if let Some(kernel_dir) = manifest.spec.kernel_dir.as_deref() {
+        let kernel = colm_kernel::Kernel::open(Path::new(kernel_dir))
+            .with_context(|| format!("cannot inspect Study kernel {}", kernel_dir))?;
+        ensure_supported_study_inputs(&[], &kernel.manifest.macros)?;
+    }
+    let case_root = Path::new(&manifest.root)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .context("Study directory is not under <case-root>/.colm/studies")?;
+    for site in &manifest.spec.base_cases {
+        reject_spatial_study_case(&case_root.join(site))?;
+    }
+    Ok(())
+}
+
+fn reject_spatial_study_case(case: &Path) -> Result<()> {
+    let case_nml = case.join("case.nml");
+    if colm_case::is_spatial_case(&case_nml)? {
+        bail!(
+            "Study currently supports SinglePoint cases only; spatial mesh is present in {}",
+            case_nml.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
     let case_root = colm_kernel::manifest::absolute(case_root)
         .with_context(|| format!("cannot resolve {}", case_root.display()))?;
@@ -196,6 +243,7 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
         .transpose()?
         .map(|kernel| kernel.manifest.macros)
         .unwrap_or_default();
+    ensure_supported_study_inputs(&base_cases, &kernel_macros)?;
     let baseline = baseline(&base_cases, &spec, &kernel_macros)?;
     let members = sample::design(&spec, &baseline)?;
     let studies_root = case_root.join(".colm/studies");

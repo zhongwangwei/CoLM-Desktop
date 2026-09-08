@@ -15,6 +15,8 @@ class El {
     this.selectedIndex = -1;
     this.options = [];
     this._text = '';
+    this.id = '';
+    this.htmlFor = '';
   }
   get textContent() { return this._text; }
   set textContent(value) {
@@ -68,6 +70,9 @@ state.kernels = [
   { preset: 'default', dir: '/igbp', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'usgs', dir: '/usgs', generator_args: 'SinglePoint LULC_USGS CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_USGS', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'crop', dir: '/crop', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPON', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROP'] },
+  { preset: 'latlon', dir: '/latlon', generator_args: 'GRID LULC_IGBP CaMaOFF CROPOFF', macros: ['GRIDBASED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'unstructured', dir: '/unstructured', generator_args: 'UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF', macros: ['UNSTRUCTURED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'catchment', dir: '/catchment', generator_args: 'CATCHMENT LULC_IGBP CaMaOFF CROPOFF', macros: ['CATCHMENT', 'CatchLateralFlow', 'LULC_IGBP'] },
 ];
 if (kernelForSubgrid('PC')?.dir !== '/igbp' || kernelForSubgrid('USGS')?.dir !== '/usgs') {
   throw new Error('subgrid did not resolve to its compiled land classification');
@@ -79,6 +84,9 @@ state.kernels = [
   { preset: 'default', dir: '/igbp-real', generator_args: 'SinglePoint LULC_USGS CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'usgs', dir: '/usgs-real', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPOFF', macros: ['SinglePoint', 'LULC_USGS', 'CaMaOFF', 'CROPOFF'] },
   { preset: 'crop', dir: '/crop-real', generator_args: 'SinglePoint LULC_IGBP CaMaOFF CROPON', macros: ['SinglePoint', 'LULC_IGBP', 'CaMaOFF', 'CROP'] },
+  { preset: 'latlon', dir: '/latlon-real', generator_args: 'GRID LULC_IGBP CaMaOFF CROPOFF', macros: ['GRIDBASED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'unstructured', dir: '/unstructured-real', generator_args: 'UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF', macros: ['UNSTRUCTURED', 'GridRiverLakeFlow', 'LULC_IGBP'] },
+  { preset: 'catchment', dir: '/catchment-real', generator_args: 'CATCHMENT LULC_IGBP CaMaOFF CROPOFF', macros: ['CATCHMENT', 'CatchLateralFlow', 'LULC_IGBP'] },
 ];
 if (kernelForSubgrid('PC')?.dir !== '/igbp-real' || kernelForSubgrid('USGS')?.dir !== '/usgs-real') {
   throw new Error('kernel matching must prefer effective macros over requested generator_args');
@@ -99,15 +107,56 @@ const choose = label => {
 };
 const next = () => foot('下一步').onclick();
 const previous = () => foot('上一步').onclick();
+const findNode = (root, predicate) => predicate(root) ? root
+  : root.children.map(child => findNode(child, predicate)).find(Boolean);
 
 showDomainGate();
 if (ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('page 1 missing');
-if (cards().map(c => c.children[0].textContent).join('|') !== '站点|流域|区域|全球') {
+if (cards().map(c => c.children[0].textContent).join('|') !== '站点|流域（early state，不建议使用）|区域（early state，不建议使用）|全球（early state，不建议使用）') {
   throw new Error('page 1 must list site, watershed, regional, and global in order');
 }
-if (card('流域').getAttribute('aria-disabled') !== 'true' || !card('流域').disabled) {
-  throw new Error('watershed must be visible but temporarily unavailable');
+for (const domain of ['流域（early state，不建议使用）', '区域（early state，不建议使用）', '全球（early state，不建议使用）']) {
+  showDomainGate();
+  choose(domain);
+  next();
+  if (ids.gatetitle.textContent !== '计算网格怎么组织？') throw new Error(`${domain} did not open the grid page`);
+  if (cards().map(c => c.children[0].textContent).join('|') !== '经纬度网格（early state，不建议使用）|非结构网格（early state，不建议使用）|流域网格（early state，不建议使用）') {
+    throw new Error(`${domain} must offer all three spatial grids`);
+  }
+  if (cards().some(c => c.disabled)) throw new Error(`${domain} unexpectedly disabled a grid choice`);
 }
+
+showDomainGate();
+choose('区域（early state，不建议使用）'); next(); choose('非结构网格（early state，不建议使用）'); next();
+if (ids.gatetitle.textContent !== '空间输入怎么准备？') throw new Error('spatial selections must collect domain and grid inputs');
+if (!nodeText(ids.gatecards).includes('early state') || !nodeText(ids.gatecards).includes('参数调优和不确定性分析会失效')) {
+  throw new Error('spatial setup must keep a persistent early-state warning');
+}
+for (const [id, value] of Object.entries({
+  'spatial-west': '100', 'spatial-east': '110', 'spatial-south': '20', 'spatial-north': '30',
+})) {
+  const input = findNode(ids.gatecards, node => node.id === id);
+  if (!input) throw new Error(`missing ${id}`);
+  input.value = value;
+  input.oninput();
+}
+if (!foot('下一步').disabled || !ids.gateinfo.textContent.includes('非海洋 mask')) {
+  throw new Error('latlon/unstructured spatial cases must require an explicit non-ocean mask');
+}
+const mask = findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask');
+if (!mask) throw new Error('missing non-ocean mask input');
+const maskLabel = findNode(ids.gatecards, node => node.htmlFor === mask.id);
+if (!maskLabel) throw new Error('spatial input labels must be associated with their controls');
+mask.value = '/data/non-ocean.nc';
+mask.oninput();
+if (foot('下一步').disabled) throw new Error('valid regional bounds, resolution, and mask must pass');
+next(); choose('IGBP'); next(); next(); next(); next();
+if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'unstructured'
+    || state.spatial?.grid?.dlon !== 0.5 || state.spatial?.grid?.nlon !== 720
+    || state.wizard?.spatial !== state.spatial) {
+  throw new Error(`spatial contract was not preserved: ${JSON.stringify(state.spatial)}`);
+}
+showDomainGate();
 choose('站点');
 next();
 if (ids.gatetitle.textContent !== '次网格怎么分？') throw new Error('page 2 missing');
@@ -348,4 +397,47 @@ if (pcFieldsAfterUrban.DEF_USE_PC !== '.true.' || pcFieldsAfterUrban.DEF_USE_LCT
   throw new Error(`PC retained invalid urban state: ${JSON.stringify(pcFieldsAfterUrban)}`);
 }
 
-console.log('gate: five base pages plus conditional tracer page, constraints, finish state, and namelist fields resolve');
+// Spatial scope and computation grid are independent and survive the full wizard.
+showDomainGate();
+choose('流域（early state，不建议使用）'); next(); choose('经纬度网格（early state，不建议使用）'); next();
+const shapefile = findNode(ids.gatecards, node => node.id === 'spatial-shapefile');
+shapefile.value = '/data/basin.shp'; shapefile.oninput(); next(); choose('IGBP'); next();
+choose('van Genuchten–Mualem（Ippisch 2006）'); next(); next(); next();
+if (state.domain !== 'watershed' || state.grid !== 'latlon' || state.wizard.grid !== 'latlon') {
+  throw new Error(`spatial domain/grid state was lost: ${JSON.stringify(state.wizard)}`);
+}
+if (kernelForSubgrid()?.dir !== '/latlon-real') throw new Error('latlon wizard did not select the GRIDBASED kernel');
+if (kernelForSubgrid('IGBP', { grid: 'unstructured' })?.dir !== '/unstructured-real') {
+  throw new Error('unstructured grid did not select the UNSTRUCTURED kernel');
+}
+if (kernelForSubgrid('IGBP', { grid: 'catchment' })?.dir !== '/catchment-real') {
+  throw new Error('watershed grid did not select the CATCHMENT kernel');
+}
+
+console.log('gate: domain/grid cards, five site pages, constraints, finish state, and namelist fields resolve');
+
+const { go } = await import(moduleUrl('shell.js'));
+state.domain = 'region';
+state.selected = { name: 'spatial', dir: '/cases/spatial' };
+state.cases = [state.selected];
+state.createdCases.add('/cases/spatial');
+state.step = 'basic-files';
+go('result-uncertainty');
+if (state.step === 'result-uncertainty' || !ids.status.textContent.includes('参数调优和不确定性分析暂不可用')) {
+  throw new Error('spatial workflow must disable uncertainty-analysis navigation');
+}
+state.domain = 'site';
+state.cases.push({ name: 'old-spatial', dir: '/cases/old-spatial', spatial: true });
+state.text = '&nl_colm\n DEF_domain%edgew = -180.0 ! default site-template bound\n DEF_file_mesh = \"\"\n DEF_CatchmentMesh_data = \"\"\n/';
+go('result-uncertainty');
+if (state.step !== 'result-uncertainty') {
+  throw new Error('switching back to site mode must re-enable Study navigation');
+}
+state.step = 'basic-files';
+state.selected = { name: 'imported-spatial', dir: '/cases/imported-spatial', spatial: true };
+state.cases = [state.selected];
+state.createdCases = new Set(['/cases/imported-spatial']);
+go('result-tuning');
+if (state.step === 'result-tuning' || !ids.status.textContent.includes('参数调优和不确定性分析暂不可用')) {
+  throw new Error('imported spatial case metadata must disable tuning navigation');
+}

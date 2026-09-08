@@ -64,6 +64,7 @@ CONTAINS
    character(len=256) :: parafile
 
    integer,  allocatable :: dam_seq(:), order(:), loc2all(:), ordinal_count(:)
+   integer,  allocatable :: counts(:), disps(:), resv_ids(:)
    real(r8), allocatable :: rcache (:)
    integer,  allocatable :: icache (:)
 
@@ -141,6 +142,37 @@ CONTAINS
       deallocate (ordinal_count)
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      CALL mpi_allgather (numresv, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iworker = 1, p_np_glb-1
+         disps(iworker) = disps(iworker-1) + counts(iworker-1)
+      ENDDO
+
+      allocate (icache(max(1,numresv)))
+      IF (numresv > 0) icache(1:numresv) = loc2all(1:numresv)
+      IF (p_is_master) THEN
+         allocate (resv_ids(max(1,sum(counts))))
+      ELSE
+         allocate (resv_ids(1))
+      ENDIF
+      CALL mpi_gatherv (icache, numresv, MPI_INTEGER, resv_ids, counts, disps, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+
+      allocate (resv_data_address(0:p_np_glb-1))
+      IF (p_is_master) THEN
+         DO iworker = 0, p_np_glb-1
+            nresv = counts(iworker)
+            IF (nresv > 0) THEN
+               allocate (resv_data_address(iworker)%val(nresv))
+               resv_data_address(iworker)%val = &
+                  resv_ids(disps(iworker)+1:disps(iworker)+nresv)
+            ENDIF
+         ENDDO
+      ENDIF
+      deallocate (counts, disps, resv_ids, icache)
+#else
       IF (p_is_master) THEN
 
          allocate (resv_data_address (0:p_np_worker-1))
@@ -172,6 +204,7 @@ CONTAINS
       IF (p_is_io .and. .not. allocated(resv_data_address)) THEN
          allocate (resv_data_address (0:-1))  ! zero-size
       ENDIF
+#endif
 #else
       IF (numresv > 0) THEN
          allocate (resv_data_address (0:0))

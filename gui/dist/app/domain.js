@@ -1,4 +1,4 @@
-//! 进门向导。顺序按约束方向排：空间 → 次网格 → 土壤 → 物理 → 示踪剂 → 调试。
+//! 进门向导。顺序按约束方向排：空间 → 计算网格 → 次网格 → 土壤 → 物理 → 示踪剂 → 调试。
 //!
 //! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS 由向导
 //! 自动匹配专用编译产物；CROP 需要 CROP-enabled 内核。
@@ -7,12 +7,19 @@ import { state } from './state.js';
 import { $ } from './ui.js';
 import { go } from './shell.js';
 import { kernelForSubgrid } from './kernel.js';
+import { invoke } from './ipc.js';
 
 const DOMAINS = [
   { id: 'site', t: '站点', d: '单点站点模拟', ready: true },
-  { id: 'watershed', t: '流域', d: '流域尺度模拟', ready: false, need: '流域步骤链尚未实现' },
-  { id: 'region', t: '区域', d: '有限范围网格', ready: false, need: '区域步骤链尚未实现' },
-  { id: 'global', t: '全球', d: '全球网格', ready: false, need: '全球步骤链尚未实现' },
+  { id: 'watershed', t: '流域（early state，不建议使用）', d: '按流域边界限定模拟范围；空间功能仍处于 early state，不建议正式使用' },
+  { id: 'region', t: '区域（early state，不建议使用）', d: '按经纬度范围限定模拟区域；空间功能仍处于 early state，不建议正式使用' },
+  { id: 'global', t: '全球（early state，不建议使用）', d: '覆盖全球陆地区域；空间功能仍处于 early state，不建议正式使用' },
+];
+
+const GRIDS = [
+  { id: 'latlon', t: '经纬度网格（early state，不建议使用）', d: '规则等经纬度网格（GRIDBASED）；空间网格仍处于 early state，不建议正式使用' },
+  { id: 'unstructured', t: '非结构网格（early state，不建议使用）', d: '由 elmindex 描述计算单元（UNSTRUCTURED）；空间网格仍处于 early state，不建议正式使用' },
+  { id: 'catchment', t: '流域网格（early state，不建议使用）', d: '集水区与 HRU 水文单元（CATCHMENT）；空间网格仍处于 early state，不建议正式使用' },
 ];
 
 const SUBGRIDS = [
@@ -51,12 +58,23 @@ const TRACERS = [
   { id: 'sediment', t: '泥沙', d: '颗粒泥沙输移', ready: false, need: '单点站点不可用；需要河道/流域输移链路' },
 ];
 
-const pages = () => ['domain', 'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []), 'debug'];
+const pages = () => [
+  'domain',
+  ...(picked.domain && picked.domain !== 'site' ? ['grid', 'spatial'] : []),
+  'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []), 'debug',
+];
+const pageIndex = page => pages().indexOf(page);
+const pageNumber = page => pageIndex(page) + 1;
 
 const emptyPhysics = () => ({ urban: false, lulcc: false, bgc: false, crop: false, tracer: false });
 const emptyDebug = () => ({ rangecheck: false, colmdebug: false, srfdatadiag: false });
 const emptyPicked = () => ({
   domain: null,
+  grid: null,
+  spatial: {
+    shapefile: '', west: '', east: '', south: '', north: '',
+    dlon: '0.5', dlat: '0.5', catchmentFile: '', nonOceanMask: '',
+  },
   subgrid: null,
   soil: 'vg',
   physics: emptyPhysics(),
@@ -79,7 +97,9 @@ function render() {
   if (pageIdx >= list.length) pageIdx = list.length - 1;
   const page = list[pageIdx];
   const copy = {
-    domain: ['这次要跑什么？', '空间结构先定；现在只有站点步骤链能跑。'],
+    domain: ['这次要跑什么？', '先选择模拟范围，再为流域、区域或全球选择计算网格。'],
+    grid: ['计算网格怎么组织？', '三种空间范围都可选择经纬度、非结构或流域网格。'],
+    spatial: ['空间输入怎么准备？', '范围只决定 mask；网格类型决定 CoLM 的运行模式与输入合同。'],
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
@@ -93,6 +113,8 @@ function render() {
   const box = $('gatecards');
   box.textContent = '';
   if (page === 'domain') renderCards(DOMAINS, picked.domain, chooseDomain);
+  if (page === 'grid') renderCards(GRIDS, picked.grid, chooseGrid);
+  if (page === 'spatial') renderSpatial();
   if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid, subgridBlock);
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
@@ -102,6 +124,10 @@ function render() {
 }
 
 function pageInfo(page) {
+  if (page === 'spatial') {
+    const issue = spatialIssue();
+    return issue ? `ⓘ ${issue}` : '✓ 空间输入参数完整；文件内容会在启动长任务前预检';
+  }
   if (page === 'subgrid') {
     if (picked.subgrid === 'PFT' || picked.subgrid === 'PC') {
       return 'ⓘ 站点文件最好提供 pfttyp 与 pctpfts；缺少时会回落到 rawdata/plant_15s';
@@ -112,6 +138,140 @@ function pageInfo(page) {
   if (page === 'tracer') return 'ⓘ 甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例';
   if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
   return '';
+}
+
+function renderSpatial() {
+  const panel = document.createElement('div');
+  panel.className = 'card spatial-config';
+  const title = document.createElement('h3');
+  title.textContent = picked.domain === 'watershed' ? '流域边界'
+    : picked.domain === 'region' ? '区域边界' : '全球范围';
+  panel.appendChild(title);
+  panel.appendChild(spatialEarlyWarning());
+
+  if (picked.domain === 'watershed') {
+    panel.appendChild(pathField('流域 Shapefile（WGS84）', 'shapefile', 'shp'));
+  } else if (picked.domain === 'region') {
+    const row1 = document.createElement('div');
+    row1.className = 'row';
+    row1.append(numberField('西边界', 'west', -180, 180), numberField('东边界', 'east', -180, 180));
+    const row2 = document.createElement('div');
+    row2.className = 'row';
+    row2.append(numberField('南边界', 'south', -90, 90), numberField('北边界', 'north', -90, 90));
+    panel.append(row1, row2);
+  } else {
+    const note = document.createElement('p');
+    note.className = 'muted mini';
+    note.textContent = '使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。';
+    panel.appendChild(note);
+  }
+
+  const gridTitle = document.createElement('h3');
+  gridTitle.textContent = picked.grid === 'catchment' ? '流域网格数据' : '等经纬度底板';
+  panel.appendChild(gridTitle);
+  if (picked.grid === 'catchment') {
+    panel.appendChild(pathField('Catchment NetCDF', 'catchmentFile', 'nc,nc4'));
+  } else {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.append(numberField('经度分辨率（度）', 'dlon', 0, 360), numberField('纬度分辨率（度）', 'dlat', 0, 180));
+    panel.appendChild(row);
+    const note = document.createElement('p');
+    note.className = 'muted mini';
+    note.textContent = picked.grid === 'unstructured'
+      ? '按该全球格架生成 int64 elmindex；范围外与海洋单元写为 inactive。'
+      : '按该全球格架生成 landmask，并以 GRIDBASED 模式运行。';
+    panel.appendChild(note);
+    panel.appendChild(pathField('非海洋 mask（必需）', 'nonOceanMask', 'nc,nc4'));
+  }
+  $('gatecards').appendChild(panel);
+}
+
+
+function spatialEarlyWarning() {
+  const warning = document.createElement('p');
+  warning.className = 'warn mini';
+  warning.textContent = '空间功能仍处于 early state，不建议正式使用；选择空间后参数调优和不确定性分析会失效。';
+  return warning;
+}
+
+function numberField(label, key, min, max) {
+  const field = document.createElement('div');
+  field.className = 'field';
+  const caption = document.createElement('label');
+  caption.textContent = label;
+  const input = document.createElement('input');
+  input.id = `spatial-${key}`;
+  caption.htmlFor = input.id;
+  input.className = 'input';
+  input.type = 'number';
+  input.step = 'any';
+  input.min = String(min);
+  input.max = String(max);
+  input.value = picked.spatial[key];
+  input.oninput = () => updateSpatial(key, input.value);
+  field.append(caption, input);
+  return field;
+}
+
+function pathField(label, key, filter) {
+  const field = document.createElement('div');
+  field.className = 'field';
+  const caption = document.createElement('label');
+  caption.textContent = label;
+  const browse = document.createElement('div');
+  browse.className = 'browse';
+  const input = document.createElement('input');
+  input.id = `spatial-${key}`;
+  caption.htmlFor = input.id;
+  input.className = 'input';
+  input.value = picked.spatial[key];
+  input.oninput = () => updateSpatial(key, input.value);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn-ghost';
+  button.textContent = '选择…';
+  button.setAttribute('aria-label', `选择${label}`);
+  button.onclick = async () => {
+    let value = null;
+    try { value = await invoke?.('pick_file', { key: input.id, filter }); } catch { /* 可继续粘贴路径 */ }
+    if (value) { input.value = value; input.oninput(); }
+  };
+  browse.append(input, button);
+  field.append(caption, browse);
+  return field;
+}
+
+function updateSpatial(key, value) {
+  picked.spatial[key] = String(value).trim();
+  $('gateinfo').textContent = pageInfo('spatial');
+  renderFoot();
+}
+
+function spatialIssue() {
+  const s = picked.spatial;
+  if (picked.domain === 'watershed' && !s.shapefile) return '请选择流域 Shapefile';
+  if (picked.domain === 'region') {
+    if ([s.west, s.east, s.south, s.north].some(value => value === '')) return '请填写完整的区域边界';
+    const [west, east, south, north] = [s.west, s.east, s.south, s.north].map(Number);
+    if (![west, east, south, north].every(Number.isFinite)) return '请填写完整的区域边界';
+    if (west < -180 || east > 180 || south < -90 || north > 90 || west >= east || south >= north) {
+      return '区域边界必须位于 WGS84 范围，并满足西 < 东、南 < 北';
+    }
+  }
+  if (picked.grid === 'catchment') return s.catchmentFile ? null : '请选择 Catchment NetCDF';
+  const dlon = Number(s.dlon);
+  const dlat = Number(s.dlat);
+  if (!(dlon > 0) || !(dlat > 0)) return '经纬度分辨率必须大于 0';
+  const divides = (span, step) => Math.abs(span / step - Math.round(span / step)) < 1e-9;
+  if (!divides(360, dlon) || !divides(180, dlat)) {
+    return '分辨率必须整除全球 360°×180° 格架';
+  }
+  const [nlon, nlat] = [Math.round(360 / dlon), Math.round(180 / dlat)];
+  if (!Number.isSafeInteger(nlon) || !Number.isSafeInteger(nlat)
+      || !Number.isSafeInteger(nlon * nlat)) return '格点数量超过安全整数范围';
+  if (!s.nonOceanMask) return '请选择非海洋 mask，避免把海洋格点激活为陆面单元';
+  return null;
 }
 
 function renderCards(items, selected, choose, blocker = null, multi = false) {
@@ -157,6 +317,12 @@ function card(item, selected, choose, blocked, multi) {
 
 function chooseDomain(id) {
   picked.domain = id;
+  if (id === 'site') picked.grid = null;
+  render();
+}
+
+function chooseGrid(id) {
+  picked.grid = id;
   render();
 }
 
@@ -206,16 +372,19 @@ function toggleDebug(id) {
 }
 
 function subgridBlock(item) {
-  if (kernelForSubgrid(item.id)) return null;
+  if (kernelForSubgrid(item.id, picked)) return null;
   const classification = item.id === 'USGS' ? 'USGS' : 'IGBP';
-  return { need: state.kernels.length ? `当前安装缺少 ${classification} 内核` : '正在检查可用内核' };
+  const grid = picked.domain === 'site' ? '站点'
+    : picked.grid === 'latlon' ? '经纬度'
+      : picked.grid === 'unstructured' ? '非结构' : '流域网格';
+  return { need: state.kernels.length ? `当前安装缺少 ${grid} + ${classification} 内核` : '正在检查可用内核' };
 }
 
 function physicsBlock(item) {
   if (item.ready === false) return null;
   if (item.id === 'lulcc') {
     if (picked.subgrid === 'USGS') {
-      return { need: 'LULCC 不支持 USGS 次网格', cause: '第 2 页选了 USGS', page: 1 };
+      return { need: 'LULCC 不支持 USGS 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 USGS`, page: pageIndex('subgrid') };
     }
     if (picked.physics.bgc) return { need: 'LULCC 不能与 BGC 同时开启' };
     if (picked.domain === 'site') {
@@ -230,24 +399,24 @@ function physicsBlock(item) {
       return { need: '纯城市单点不运行 BGC', cause: '本页已开启 URBAN' };
     }
     if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-      return { need: '需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+      return { need: '需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
     }
   }
   if (item.id === 'crop') {
     if (picked.domain === 'site' && picked.physics.urban) return { need: '城市单点暂不支持 CROP', cause: '本页已开启 URBAN' };
-    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') return { need: 'CROP 需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') return { need: 'CROP 需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
     if (!picked.physics.bgc) return { need: 'CROP 需要同时开启 BGC' };
-    if (!kernelForSubgrid(picked.subgrid, { crop: true })) return { need: '当前安装缺少 CROP-enabled 内核' };
+    if (!kernelForSubgrid(picked.subgrid, { ...picked, crop: true })) return { need: '当前安装缺少 CROP-enabled 内核' };
   }
   if (item.id === 'tracer') {
     if (picked.domain === 'site' && picked.physics.urban) {
       return { need: '城市单点暂不支持甲烷示踪', cause: '本页已开启 URBAN' };
     }
     if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 2 页选了 ${picked.subgrid}`, page: 1 };
+      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
     }
     if (picked.soil !== 'vg') {
-      return { need: '需要 van Genuchten 土壤水力', cause: '第 3 页选了 Campbell', page: 2 };
+      return { need: '需要 van Genuchten 土壤水力', cause: `第 ${pageNumber('soil')} 页选了 Campbell`, page: pageIndex('soil') };
     }
     if (!picked.physics.bgc) return { need: '甲烷示踪需要同时开启 BGC' };
   }
@@ -278,11 +447,11 @@ function renderFoot() {
 
   const list = pages();
   const page = list[pageIdx];
-  const required = { domain: picked.domain, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
+  const required = { domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = '下一步 →';
-  next.disabled = Object.hasOwn(required, page) && !required[page];
+  next.disabled = (Object.hasOwn(required, page) && !required[page]) || (page === 'spatial' && !!spatialIssue());
   next.onclick = () => {
     if (pageIdx === list.length - 1) finish();
     else { pageIdx += 1; render(); }
@@ -315,8 +484,31 @@ function finish() {
     observationFile: null, observationDir: null, batchSites: [],
   };
   state.domain = picked.domain;
+  state.grid = picked.grid;
+  state.spatial = picked.domain === 'site' ? null : {
+    domain: picked.domain === 'watershed'
+      ? { kind: picked.domain, shapefile: picked.spatial.shapefile }
+      : picked.domain === 'region'
+        ? {
+          kind: picked.domain,
+          west: Number(picked.spatial.west), east: Number(picked.spatial.east),
+          south: Number(picked.spatial.south), north: Number(picked.spatial.north),
+        }
+        : { kind: picked.domain },
+    grid: picked.grid === 'catchment'
+      ? { kind: picked.grid, input: picked.spatial.catchmentFile }
+      : {
+        kind: picked.grid,
+        dlon: Number(picked.spatial.dlon), dlat: Number(picked.spatial.dlat),
+        nlon: Math.round(360 / Number(picked.spatial.dlon)),
+        nlat: Math.round(180 / Number(picked.spatial.dlat)),
+        nonOceanMask: picked.spatial.nonOceanMask || null,
+      },
+  };
   state.subgrid = picked.subgrid;
   state.wizard = {
+    grid: picked.grid,
+    spatial: state.spatial,
     subgrid: picked.subgrid,
     soil: picked.soil,
     physics: { ...picked.physics },

@@ -73,7 +73,7 @@ function renderCasesInto(box) {
   const cases = box.id === 'cases-run' ? batchTarget() : currentCases();
   if (!cases.length) {
     box.innerHTML = box.id === 'cases-run'
-      ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在前面选站点并建算例。</p>'
+      ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在基本设定中创建算例。</p>'
       : '<p class="muted" style="font-size:11px">本次还没有创建算例；root 里的旧算例不会显示。</p>';
     return;
   }
@@ -122,7 +122,7 @@ export function renderCases() {
   updateCaseBatchButtons();
 }
 
-async function selectCase(c) {
+export async function selectCase(c) {
   const token = ++activeCaseSelection;
   const isCurrent = () => token === activeCaseSelection && state.selected?.dir === c.dir;
   state.selected = c;

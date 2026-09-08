@@ -65,6 +65,7 @@ CONTAINS
    real(r8) :: sumwt
 
    integer, allocatable :: bindex(:), addrbasin(:), elmindex(:)
+   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:), recvbuf(:)
 
    ! lake and reservoir
    character(len=256)   :: lake_info_file
@@ -267,6 +268,38 @@ CONTAINS
 
 
       ! send basin index to workers
+#ifdef FLAT_SPMD
+      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
+      IF (p_is_master) THEN
+         allocate (basinindex(totalnumbasin))
+         basinindex = (/(i, i = 1, totalnumbasin)/)
+         DO iworker = 0, p_np_glb-1
+            counts(iworker) = count(addrbasin == p_address_worker(iworker))
+         ENDDO
+         disps(0) = 0
+         DO iworker = 1, p_np_glb-1
+            disps(iworker) = disps(iworker-1) + counts(iworker-1)
+         ENDDO
+         allocate (bindex(max(1,totalnumbasin)))
+         DO iworker = 0, p_np_glb-1
+            nbasin = counts(iworker)
+            IF (nbasin > 0) bindex(disps(iworker)+1:disps(iworker)+nbasin) = &
+               pack(basinindex, mask = (addrbasin == p_address_worker(iworker)))
+         ENDDO
+      ELSE
+         allocate (bindex(1))
+      ENDIF
+
+      CALL mpi_scatter (counts, 1, MPI_INTEGER, numbasin, 1, MPI_INTEGER, &
+         p_root, p_comm_glb, p_err)
+      allocate (recvbuf(max(1,numbasin)))
+      CALL mpi_scatterv (bindex, counts, disps, MPI_INTEGER, recvbuf, numbasin, &
+         MPI_INTEGER, p_root, p_comm_glb, p_err)
+      IF (allocated(basinindex)) deallocate (basinindex)
+      allocate (basinindex(numbasin))
+      IF (numbasin > 0) basinindex = recvbuf(1:numbasin)
+      deallocate (recvbuf)
+#else
       IF (p_is_master) THEN
 
          allocate(basinindex (totalnumbasin))
@@ -306,6 +339,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #else
       numbasin = totalnumbasin
       allocate(basinindex (totalnumbasin))
@@ -382,6 +416,34 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 
+#ifdef FLAT_SPMD
+      CALL mpi_allgather (numbasin, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
+      disps(0) = 0
+      DO iworker = 1, p_np_glb-1
+         disps(iworker) = disps(iworker-1) + counts(iworker-1)
+      ENDDO
+      allocate (counts_data(0:p_np_glb-1), disps_data(0:p_np_glb-1))
+      counts_data = counts * 2
+      disps_data = disps * 2
+
+      IF (p_is_master) THEN
+         allocate (icache(max(1,2*sum(counts))))
+         DO i = 1, sum(counts)
+            icache(2*i-1) = all_lake_id(bindex(i))
+            icache(2*i)   = all_lake_type(bindex(i))
+         ENDDO
+      ELSE
+         allocate (icache(1))
+      ENDIF
+      allocate (recvbuf(max(1,2*numbasin)))
+      CALL mpi_scatterv (icache, counts_data, disps_data, MPI_INTEGER, recvbuf, &
+         2*numbasin, MPI_INTEGER, p_root, p_comm_glb, p_err)
+      IF (numbasin > 0) THEN
+         lake_id   = recvbuf(1:2*numbasin:2)
+         lake_type = recvbuf(2:2*numbasin:2)
+      ENDIF
+      deallocate (bindex, counts, counts_data, disps, disps_data, icache, recvbuf)
+#else
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, numbasin/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, &
@@ -431,6 +493,7 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 #else
       lake_id   = all_lake_id  (basinindex)
       lake_type = all_lake_type(basinindex)
