@@ -84,6 +84,24 @@ pub fn objective_loss(term: &ObjectiveTerm, min_pairs: usize) -> std::result::Re
         .ok_or_else(|| "produced a non-finite loss".into())
 }
 
+pub fn finite_mean(values: &[f64]) -> Option<f64> {
+    let finite = values.iter().copied().filter(|value| value.is_finite());
+    let count = finite.clone().count();
+    if count == 0 {
+        return None;
+    }
+    let scale = count as f64;
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for value in finite {
+        let y = value / scale - correction;
+        let next = sum + y;
+        correction = (next - sum) - y;
+        sum = next;
+    }
+    sum.is_finite().then_some(sum)
+}
+
 /// Hyndman-Fan type-7 quantile, matching R/NumPy's common linear default.
 pub fn type7_quantile(mut values: Vec<f64>, probability: f64) -> Result<Option<f64>> {
     if !(0.0..=1.0).contains(&probability) || !probability.is_finite() {
@@ -99,7 +117,7 @@ pub fn type7_quantile(mut values: Vec<f64>, probability: f64) -> Result<Option<f
     let fraction = position - lower as f64;
     let upper = (lower + 1).min(values.len() - 1);
     Ok(Some(
-        values[lower] + fraction * (values[upper] - values[lower]),
+        (1.0 - fraction) * values[lower] + fraction * values[upper],
     ))
 }
 
@@ -161,6 +179,24 @@ fn pearson(x: &[f64], y: &[f64]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finite_mean_scales_before_summing_to_avoid_overflow() {
+        let mean = finite_mean(&[1.0e308, 1.0e308, f64::NAN]).unwrap();
+        assert!(mean.is_finite());
+        assert!((mean - 1.0e308).abs() < 1.0e292);
+    }
+
+    #[test]
+    fn type7_quantiles_do_not_overflow_for_finite_extremes() {
+        let values = vec![-1.0e308, 1.0e308];
+        for (probability, expected) in [(0.0, -1.0e308), (0.5, 0.0), (1.0, 1.0e308)] {
+            assert_eq!(
+                type7_quantile(values.clone(), probability).unwrap(),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn type7_quantiles_match_hand_calculation_and_ignore_failed_members() {

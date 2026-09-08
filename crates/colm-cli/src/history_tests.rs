@@ -786,3 +786,19 @@ fn urban_plumber_rnet_observation_values_drop_component_qc_and_fill_samples() {
     );
     assert_eq!(data.qc, [0.0, 1.0, 1.0]);
 }
+
+#[test]
+fn native_restart_path_guard_checks_bytes_at_the_buffer_boundary() {
+    let suffix =
+        "out/n/restart/9999-366-86400/n_restart_gridriver_9999-366-86400_lc9999_w180_s90.nc";
+    let prefix_len = 256 - 1 - suffix.len();
+    super::validate_native_case_paths(&PathBuf::from("a".repeat(prefix_len)), "n").unwrap();
+    assert!(
+        super::validate_native_case_paths(&PathBuf::from("a".repeat(prefix_len + 1)), "n").is_err()
+    );
+    assert!(super::validate_native_case_paths(
+        &PathBuf::from("界".repeat(prefix_len / 3 + 1)),
+        "n"
+    )
+    .is_err());
+}

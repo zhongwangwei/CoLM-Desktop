@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), 'colm-results-'));
@@ -13,6 +14,7 @@ const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 const {
   LruCache, boundedMap, envelopeDiagnostics, metricKey, resultCases, rowsToCsv, sortedImportanceRows,
 } = await import(moduleUrl('result-model.js'));
+const { aggregateStudy, aggregateStudyStatuses, studyWarnings } = await import(moduleUrl('study-model.js'));
 const { WORKFLOW, nextOf } = await import(moduleUrl('shell.js'));
 const { state } = await import(moduleUrl('state.js'));
 
@@ -215,6 +217,250 @@ for (const metric of ['abs_bias', 'nse', 'r']) {
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
 const resultCss = await readFile(join(root, 'dist', 'app', 'style.css'), 'utf8');
+
+// A metadata refresh must not erase the selected output while its own guard is awaiting IPC.
+{
+  let selected = true;
+  let appended = 0;
+  const host = {
+    querySelectorAll: () => selected ? [{ dataset: { uqOutput: 'f_rnet' } }] : [],
+    querySelector: () => selected ? {} : null,
+    set textContent(_) { selected = false; },
+    appendChild() { appended++; selected = true; },
+  };
+  const render = runInNewContext(resultUi.slice(
+    resultUi.indexOf('async function renderStudyOutputs('),
+    resultUi.indexOf('\nasync function renderTuningTargets('),
+  ) + '\nrenderStudyOutputs;', {
+    $: () => host, studyAsyncRequests: { outputs: 0 }, studyScopeKey: () => 'same',
+    studyScope: () => [{ dir: '/cases/site', has_history: false }],
+    plannedHistoryCatalog: async () => ({ variables: [{ name: 'f_rnet', kind: 'series' }] }),
+    studySiteId: () => 'site', COMMON_VARIABLES: { f_rnet: [] }, variableMeta: () => ({}),
+    node: () => ({ append() {} }), document: { createElement: () => ({ dataset: {} }) },
+  });
+  await render(() => selected);
+  if (!selected || appended !== 1) throw new Error('output refresh invalidated its own creation/design guard');
+}
+
+for (const delayedStage of ['metadata', 'metadata-design', 'outputs', 'outputs-design', 'preflight', 'design', 'create', 'unchanged']) {
+  let scope = 'original';
+  let design = 'original';
+  let resolve;
+  let creates = 0;
+  let registrations = 0;
+  const creating = { uq: false, tuning: false };
+  const plans = () => [{ caseRoot: '/cases', specJson: JSON.stringify({
+    budget: { candidate_count: 2 }, parameters: [{ name: design }],
+  }) }];
+  const delay = () => new Promise(done => { resolve = done; });
+  const create = runInNewContext(resultUi.slice(
+    resultUi.indexOf('async function createStudy('),
+    resultUi.indexOf('\nfunction renderStudyEnvelope('),
+  ) + '\ncreateStudy;', {
+    studyScope: () => [{ dir: '/cases/site' }], studyScopeKey: () => scope,
+    parentDir: () => '/cases', $: () => ({}), dialogText: value => value,
+    studyCreating: creating,
+    loadStudyParams: () => delayedStage.startsWith('metadata') ? delay() : Promise.resolve(),
+    renderStudyOutputs: () => delayedStage.startsWith('outputs') ? delay() : Promise.resolve(), studyPlans: plans,
+    studyDesignKeys: () => plans().map(plan => plan.specJson), stableStudySpecKey: value => value,
+    MAX_STUDY_CANDIDATES: 1000,
+    invoke: async command => {
+      if (command === 'study_preflight_json') return ['preflight', 'design'].includes(delayedStage) ? delay() : '';
+      creates++;
+      return ['create', 'unchanged'].includes(delayedStage) ? delay() : '/cases/.colm/studies/old';
+    },
+    setActiveStudyDirs: () => { registrations++; },
+    studyDirScopes: { uq: {} }, studyDirDesignKeys: { uq: {} },
+    saveStudyDirs() {}, setPreview() {}, refreshStudy: async () => {},
+    setStudyWizardPage() {}, renderStudyReadiness() {}, status() {},
+  });
+  const running = create('uq');
+  for (let i = 0; !resolve && i < 20; i++) await Promise.resolve();
+  if (!resolve) throw new Error(`create never reached ${delayedStage}`);
+  if (!creating.uq) throw new Error('Study creation did not remain busy during IPC');
+  await create('uq');
+  if (['design', 'metadata-design', 'outputs-design'].includes(delayedStage)) design = 'changed';
+  else if (delayedStage !== 'unchanged') scope = 'changed';
+  resolve('/cases/.colm/studies/old');
+  await running.catch(() => {});
+  if (creating.uq) throw new Error('Study creation stayed busy after rejection');
+  if (registrations !== Number(delayedStage === 'unchanged')
+      || (['create', 'unchanged'].includes(delayedStage) ? creates !== 1 : creates !== 0)) {
+    throw new Error(`Study creation crossed the project boundary after ${delayedStage}`);
+  }
+}
+
+// Exercise the real async refresh orchestration with delayed IPC, not a source-string guard.
+{
+  let dirs = ['/cases/a/.colm/studies/one'];
+  let scope = 'a';
+  const pending = [];
+  const rendered = [];
+  const context = {
+    activeStudyDirs: () => dirs,
+    studyScopeKey: () => scope,
+    studyRefreshRequests: { uq: 0, tuning: 0 },
+    studyEvents: { uq: [], tuning: [] },
+    invoke: () => new Promise(resolve => pending.push(resolve)),
+    renderStudyEnvelope: (_, envelope) => rendered.push(envelope.manifest.id),
+    renderStudyResults: async () => {},
+    status: () => {},
+  };
+  const refresh = runInNewContext(resultUi.slice(
+    resultUi.indexOf('async function refreshStudy('),
+    resultUi.indexOf('\nasync function runStudy('),
+  ) + '\nrefreshStudy;', context);
+  const reply = id => JSON.stringify({ manifest: { id }, state: { status: 'ready' }, events: [] });
+  const old = refresh('uq');
+  const latest = refresh('uq');
+  pending[1](reply('latest'));
+  await latest;
+  pending[0](reply('old'));
+  await old;
+  if (rendered.join('|') !== 'latest') throw new Error('old Study status overwrote the latest refresh');
+
+  const changed = refresh('uq');
+  scope = 'b';
+  dirs = ['/cases/b/.colm/studies/two'];
+  pending[2](reply('wrong-project'));
+  await changed;
+  if (rendered.join('|') !== 'latest') throw new Error('Study refresh crossed the current project boundary');
+
+  dirs = ['/cases/b/.colm/studies/one', '/cases/b/.colm/studies/two'];
+  context.aggregateStudyStatuses = () => 'completed';
+  context.renderStudyEnvelope = (_, envelope) => rendered.push(envelope.state.warnings);
+  context.invoke = async (_, { studyDir }) => JSON.stringify({ manifest: { id: studyDir.split('/').pop() }, state: { warnings: ['insufficient support'] } });
+  await refresh('uq');
+  if (rendered.at(-1).join('|') !== 'one: insufficient support|two: insufficient support') {
+    throw new Error('multi-Study refresh lost warning provenance');
+  }
+  context.aggregateStudyStatuses = aggregateStudyStatuses;
+  context.invoke = async (_, { studyDir }) => {
+    if (studyDir.endsWith('two')) throw new Error('status unavailable');
+    return JSON.stringify({ manifest: { id: 'one' }, state: { status: 'completed', tasks: { 'm000001/site': { member: 'm000001', site: 'site', status: 'succeeded' } } } });
+  };
+  context.renderStudyEnvelope = (_, envelope) => {
+    if (aggregateStudy(envelope).status !== 'CompletedWithFailures'
+        || !envelope.events.some(event => event.kind === 'study_error' && event.study_dir.endsWith('two'))) {
+      throw new Error('failed Study status retrieval was hidden by the successful Study');
+    }
+  };
+  context.renderStudyResults = async (_, envelopes) => {
+    if (envelopes[0].manifest.id !== 'one' || !envelopes[1].error) throw new Error('mixed Study result envelopes lost their identities');
+  };
+  await refresh('uq');
+}
+
+// Backend diagnostics must be visible without loading a chart, with candidate/member denominators.
+{
+  const elements = [];
+  const node = (tag, className, textContent = '') => {
+    const element = { tag, className, textContent, append() {}, appendChild() {} };
+    elements.push(element);
+    return element;
+  };
+  const helpers = resultUi.includes('function renderUncertaintyDiagnostics(')
+    ? resultUi.slice(resultUi.indexOf('function renderUncertaintyDiagnostics('), resultUi.indexOf('\nfunction renderStudyEnvelope(')) : '';
+  const render = runInNewContext(helpers + resultUi.slice(
+    resultUi.indexOf('async function renderStudyResults('),
+    resultUi.indexOf('\nasync function refreshStudy('),
+  ) + '\nrenderStudyResults;', {
+    $: () => node('host'), node, aggregateStudy, studyWarnings,
+    document: { createDocumentFragment: () => node('fragment') },
+    resultKpi: (value, label) => node('kpi', '', `${label}: ${value}`),
+    activeStudyDirs: () => ['/cases/.colm/studies/one'],
+    studyResultsReady: () => true, studyResultPaths: () => new Set(),
+    destroyChartsInside() {}, envelopeExplanation() {},
+  });
+  const tasks = Object.fromEntries([
+    ['m000000', 'a', 'failed'], ['m000000', 'b', 'failed'],
+    ['m000001', 'a', 'succeeded'], ['m000001', 'b', 'interrupted'],
+    ['m000002', 'a', 'succeeded'], ['m000002', 'b', 'succeeded'],
+    ['m000003', 'a', 'cancelled'], ['m000003', 'b', 'cancelled'],
+    ['m000004', 'a', 'needs_review'], ['m000004', 'b', 'needs_review'],
+    ['study', 'status-fetch-error', 'failed'],
+  ].map(([member, site, status]) => [`${member}/${site}`, { member, site, status }]));
+  await render('uq', [{ state: { status: 'completed_with_failures', tasks, warnings: ['site/f_lfevpa: insufficient support'] } }]);
+  const text = elements.map(element => element.textContent).join('\n');
+  if (!text.includes('site/f_lfevpa: insufficient support')) throw new Error('UQ backend warnings are hidden before loading a chart');
+  if (!text.includes('成功候选: 1/4') || !text.includes('失败候选比例: 25.0% (1/4)')) {
+    throw new Error(`UQ failure counts must exclude baseline, count members not sites, and not classify review/cancel as execution failure: ${text}`);
+  }
+  if (!elements.some(element => element.className === 'warn mini' && element.textContent.includes('20%'))) {
+    throw new Error('UQ high-failure warning is missing');
+  }
+}
+
+for (const delayedFile of ['importance.json', 'members.csv']) {
+  let current = true;
+  let resolve;
+  const host = { children: [], appendChild(child) { this.children.push(child); } };
+  const delayed = () => new Promise(done => { resolve = done; });
+  const context = {
+    $: () => host,
+    activeStudyDirs: () => ['/cases/.colm/studies/old'],
+    studyResultsReady: () => true,
+    studyResultPaths: () => new Set([delayedFile]),
+    studyResult: delayed,
+    studyResultText: delayed,
+    destroyChartsInside: () => {}, renderUncertaintyDiagnostics: () => ({}),
+    node: () => ({ append() {}, appendChild() {} }),
+    document: { createDocumentFragment: () => ({ appendChild() {} }) },
+    envelopeExplanation: () => ({}),
+  };
+  const render = runInNewContext(resultUi.slice(
+    resultUi.indexOf('async function renderStudyResults('),
+    resultUi.indexOf('\nasync function refreshStudy('),
+  ) + '\nrenderStudyResults;', context);
+  const old = render('uq', [{}], () => current);
+  for (let i = 0; !resolve && i < 10; i++) await Promise.resolve();
+  if (!resolve) throw new Error(`result renderer never requested ${delayedFile}`);
+  current = false;
+  resolve(delayedFile.endsWith('.csv') ? 'member,status\nm1,succeeded' : null);
+  await old;
+  if (host.children.length) throw new Error(`stale ${delayedFile} appended to the current Study results`);
+}
+
+{
+  let current = true;
+  const elements = [];
+  const pending = [];
+  const rendered = [];
+  const node = tag => {
+    const element = { tag, value: '', append() {}, appendChild() {} };
+    elements.push(element);
+    return element;
+  };
+  const render = runInNewContext(resultUi.slice(
+    resultUi.indexOf('async function renderStudyResults('),
+    resultUi.indexOf('\nasync function refreshStudy('),
+  ) + '\nrenderStudyResults;', {
+    $: () => node('host'), node, document: { createElement: node, createDocumentFragment: () => node('fragment') },
+    activeStudyDirs: () => ['/cases/.colm/studies/one'],
+    studyResultsReady: () => true,
+    studyResultPaths: () => new Set(['envelopes/site/a.json', 'envelopes/site/b.json']),
+    studyResult: (_, path) => new Promise(resolve => pending.push({ path, resolve })),
+    renderEnvelopeChart: (_, result) => rendered.push(result.variable),
+    destroyChartsInside() {}, envelopeExplanation() {}, renderUncertaintyDiagnostics: () => ({}),
+  });
+  await render('uq', [{}], () => current);
+  const select = elements.find(element => element.tag === 'select');
+  const button = elements.find(element => element.tag === 'button');
+  select.value = 'envelopes/site/a.json';
+  const a = button.onclick();
+  select.value = 'envelopes/site/b.json';
+  const b = button.onclick();
+  pending[1].resolve({ variable: 'b' });
+  await b;
+  pending[0].resolve({ variable: 'a' });
+  await a;
+  if (rendered.join('|') !== 'b') throw new Error('old envelope chart replaced the selected variable');
+  const stale = button.onclick();
+  current = false;
+  pending[2].resolve({ variable: 'stale' });
+  await stale;
+  if (rendered.join('|') !== 'b') throw new Error('detached Study results still rendered a chart');
+}
 
 if (!resultUi.includes("site_mode: 'shared'")
     || resultUi.includes("analysis_from: design.from")

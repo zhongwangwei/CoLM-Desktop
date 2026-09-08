@@ -11,7 +11,7 @@ import { go, renderSteps } from './shell.js';
 import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { fieldLabel } from './param-presentation.js';
-import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId } from './study-model.js';
+import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
   LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
   rowsToCsv, seriesKey, seriesStats, sortedImportanceRows,
@@ -1537,10 +1537,12 @@ const studyDirScopes = { uq: {}, tuning: {} };
 const studyDirDesignKeys = { uq: {}, tuning: {} };
 const studyEvents = { uq: [], tuning: [] };
 const studyRunning = { uq: false, tuning: false };
+const studyCreating = { uq: false, tuning: false };
 const studyViews = { uq: null, tuning: null };
 const studyPages = { uq: 1, tuning: 1 };
 const studyWizardPages = { uq: 0, tuning: 0 };
 const studyAsyncRequests = { params: 0, outputs: 0, targets: 0 };
+const studyRefreshRequests = { uq: 0, tuning: 0 };
 const studyWizardTitles = {
   uq: ['方法与预热', '输出变量', '参数范围', '预算确认', '生成分析任务', '开始计算与监控', '查看结果'],
   tuning: ['目标与搜索', '目标变量', '参数范围', '预算确认', '生成调优任务', '开始搜索与监控', '查看最优结果'],
@@ -1640,7 +1642,7 @@ function renderStudyActions(kind) {
   const summary = aggregateStudy(studyViews[kind] || {});
   const actions = studyActionState(summary.status, hasTask, studyRunning[kind]);
   const create = $(`${prefix}-create`);
-  if (create) create.textContent = dialogText(hasTask
+  if (create) create.textContent = dialogText(studyCreating[kind] ? '正在生成任务…' : hasTask
     ? (tuning ? '重新生成调优任务' : '重新生成分析任务')
     : (tuning ? '生成调优任务' : '生成分析任务'));
 
@@ -1866,7 +1868,8 @@ function kindForStudyDir(dir) {
 
 async function loadStudyParams(stillCurrent = () => true) {
   const request = ++studyAsyncRequests.params;
-  const current = () => request === studyAsyncRequests.params && stillCurrent();
+  const scope = studyScopeKey();
+  const current = () => request === studyAsyncRequests.params && scope === studyScopeKey() && stillCurrent();
   if (!hasBackend) throw new Error('后端未连接');
   const cases = studyScope();
   const key = cases.map(c => c.dir).join('\u001f') + '\u001e' + currentKernel() + `\u001e${state.expert}`;
@@ -2021,12 +2024,12 @@ function selectedStudyParams(hostId) {
 
 async function renderStudyOutputs(stillCurrent = () => true) {
   const request = ++studyAsyncRequests.outputs;
-  const current = () => request === studyAsyncRequests.outputs && stillCurrent();
+  const scope = studyScopeKey();
+  const current = () => request === studyAsyncRequests.outputs && scope === studyScopeKey() && stillCurrent();
   const host = $('uq-outputs');
   if (!host) return;
   const previous = new Set([...host.querySelectorAll('[data-uq-output]:checked')].map(input => input.dataset.uqOutput));
   const hadSelection = host.querySelector('[data-uq-output]') !== null;
-  host.textContent = '';
   const byName = new Map();
   const failures = [];
   const cases = studyScope();
@@ -2050,6 +2053,7 @@ async function renderStudyOutputs(stillCurrent = () => true) {
   const rows = [...byName.values()]
     .filter(row => row.n === cases.length)
     .sort((a, b) => Number(!COMMON_VARIABLES[a.variable.name]) - Number(!COMMON_VARIABLES[b.variable.name]) || a.variable.name.localeCompare(b.variable.name));
+  host.textContent = '';
   for (const { variable: v, n, sites, planned } of rows) {
     const meta = variableMeta(v.name, v.units);
     const row = node('label', 'evaluation-variable');
@@ -2069,7 +2073,8 @@ async function renderStudyOutputs(stillCurrent = () => true) {
 
 async function renderTuningTargets(stillCurrent = () => true) {
   const request = ++studyAsyncRequests.targets;
-  const current = () => request === studyAsyncRequests.targets && stillCurrent();
+  const scope = studyScopeKey();
+  const current = () => request === studyAsyncRequests.targets && scope === studyScopeKey() && stillCurrent();
   const host = $('tune-targets');
   if (!host) return;
   const previous = new Map([...host.querySelectorAll('[data-tune-target]')].map(input => [input.dataset.tuneTarget, {
@@ -2262,7 +2267,7 @@ function renderStudyReadiness(kind) {
   if (tuning) checks.push({ ok: datesReady, text: datesReady ? (en ? 'Calibration/validation percentages map to every site' : '校准/验证百分比已换算到全部站点') : (en ? 'Enter valid percentages after site timing is loaded' : '读取站点时间后填写有效的校准/验证百分比') });
   host.replaceChildren(...checks.map(check => node('div', `study-ready-item ${check.ok ? 'pass' : 'warn'}`, check.text)));
   const create = $(`${prefix}-create`);
-  if (create) create.disabled = checks.some(check => !check.ok);
+  if (create) create.disabled = studyCreating[kind] || checks.some(check => !check.ok);
   renderStudyActions(kind);
   renderStudyWizard(kind);
 }
@@ -2371,17 +2376,28 @@ function studyDesignKeys(kind, cases = studyScope()) {
 }
 
 async function createStudy(kind) {
+  if (studyCreating[kind]) return;
+  const scope = studyScopeKey();
   const cases = studyScope();
   if (!cases.length) return status('没有已建算例可用于生成分析任务。');
   const roots = new Set(cases.map(c => parentDir(c.dir)));
   if (roots.size !== 1) return status('分析任务要求所有算例位于同一个项目目录。');
+  const designKeys = studyDesignKeys(kind, cases);
+  const isCurrent = () => scope === studyScopeKey()
+    && JSON.stringify(designKeys) === JSON.stringify(studyDesignKeys(kind));
+  const ensureCurrent = () => {
+    if (!isCurrent()) throw new Error(kind === 'tuning'
+      ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+  };
+  studyCreating[kind] = true;
   const create = $(kind === 'tuning' ? 'tune-create' : 'uq-create');
   if (create) { create.disabled = true; create.textContent = dialogText('正在生成任务…'); }
   try {
-    await loadStudyParams();
-    if (kind === 'tuning') await renderTuningTargets(); else await renderStudyOutputs();
+    await loadStudyParams(isCurrent);
+    ensureCurrent();
+    if (kind === 'tuning') await renderTuningTargets(isCurrent); else await renderStudyOutputs(isCurrent);
+    ensureCurrent();
     const plans = studyPlans(kind, cases);
-    const designKeys = plans.map(plan => stableStudySpecKey(plan.specJson));
     const candidateCounts = plans.map(plan => {
       const spec = JSON.parse(plan.specJson);
       return spec.method === 'differential-evolution'
@@ -2394,12 +2410,16 @@ async function createStudy(kind) {
       throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
     }
     if (totalCandidates > 200 && !globalThis.confirm?.(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)) return;
-    for (const plan of plans) await invoke('study_preflight_json', plan);
+    for (const plan of plans) {
+      await invoke('study_preflight_json', plan);
+      ensureCurrent();
+    }
     const dirs = [];
     try {
       for (const plan of plans) {
         const out = await invoke('study_create_json', plan);
         dirs.push(out.trim());
+        ensureCurrent();
       }
     } catch (error) {
       const unregistered = kind === 'tuning' ? '已生成但未登记的调优任务：' : '已生成但未登记的分析任务：';
@@ -2414,11 +2434,32 @@ async function createStudy(kind) {
     saveStudyDirs();
     setPreview(kind, dirs.join('\n'));
     await refreshStudy(kind);
+    if (!isCurrent()) return;
     setStudyWizardPage(kind, 5);
     status(kind === 'tuning' ? '参数调优任务已生成。' : '不确定性分析任务已生成。');
   } finally {
+    studyCreating[kind] = false;
     renderStudyReadiness(kind);
   }
+}
+
+function renderUncertaintyDiagnostics(envelope) {
+  const summary = aggregateStudy(envelope);
+  const members = summary.members.filter(member => member.member !== 'm000000' && member.member !== 'study');
+  const succeeded = members.filter(member => member.status === 'Succeeded').length;
+  const failed = members.filter(member => member.sites.some(site => ['Failed', 'Interrupted'].includes(site.status))).length;
+  const total = members.length;
+  const card = node('div', 'study-result-card');
+  card.append(
+    resultKpi(`${succeeded}/${total}`, '成功候选'),
+    resultKpi(total ? `${(100 * failed / total).toFixed(1)}% (${failed}/${total})` : '—', '失败候选比例'),
+    node('p', 'muted mini', '按候选成员计数，不含基准成员；任一站点执行失败或中断即计为失败，取消和待复核不计为执行失败。有效样本数按站点、变量和时刻单独统计。'),
+  );
+  for (const warning of studyWarnings({ total, failed })) {
+    if (warning.type === 'failure-rate') card.appendChild(node('p', 'warn mini', '失败候选超过 20%；成功样本可能有选择偏差，不能代表完整采样范围。'));
+  }
+  for (const warning of envelope.state?.warnings || []) card.appendChild(node('p', 'warn mini', warning));
+  return card;
 }
 
 function renderStudyEnvelope(kind, envelope) {
@@ -2507,7 +2548,7 @@ function renderStudyEnvelope(kind, envelope) {
     pager.append(previousButton, node('span', 'muted mini', `${page.page}/${page.pages}`), nextButton);
   }
   const host = $(flowKind === 'tuning' ? 'tune-study-view' : 'uq-study-view');
-  host?.replaceChildren(box, logPanel, table, pager);
+  host?.replaceChildren(box, ...(flowKind === 'uq' ? [renderUncertaintyDiagnostics(view)] : []), logPanel, table, pager);
   log.scrollTop = log.scrollHeight;
   if (!envelope.event_only) setPreview(flowKind, JSON.stringify(view, null, 2));
   renderStudyActions(flowKind);
@@ -2779,6 +2820,7 @@ function envelopeExplanation(data = null) {
 }
 
 function renderEnvelopeChart(host, data) {
+  destroyChartsInside(host);
   host.textContent = '';
   const chart = node('div', 'chart');
   const diagnostics = envelopeDiagnostics(data);
@@ -2797,9 +2839,11 @@ function renderEnvelopeChart(host, data) {
   }, [data.time || [], data.baseline || [], data.p05 || [], data.p50 || [], data.p95 || []], 280);
 }
 
-async function renderStudyResults(kind, envelopes) {
+async function renderStudyResults(kind, envelopes, isCurrent = () => true) {
+  if (!isCurrent()) return;
   const host = $(kind === 'tuning' ? 'tune-results' : 'uq-results');
   if (!host) return;
+  destroyChartsInside(host);
   host.textContent = '';
   const dirs = activeStudyDirs(kind);
   if (!dirs.length) return host.appendChild(node('div', 'result-empty', kind === 'tuning' ? '尚未生成调优任务。' : '尚未生成分析任务。'));
@@ -2808,17 +2852,25 @@ async function renderStudyResults(kind, envelopes) {
       ? '调优任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
       : '分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。'));
   }
+  const content = document.createDocumentFragment();
   for (let index = 0; index < dirs.length; index += 1) {
     const dir = dirs[index];
     const envelope = envelopes[index] || {};
     const files = studyResultPaths(envelope);
     const title = envelope.manifest?.id || dir.split(/[\\/]/).pop();
-    if (dirs.length > 1) host.appendChild(node('h3', '', title));
+    if (dirs.length > 1) content.appendChild(node('h3', '', title));
+    if (kind === 'uq') content.appendChild(renderUncertaintyDiagnostics(envelope));
 
     const primary = kind === 'tuning' ? 'objectives.json' : 'importance.json';
     const data = files.has(primary) ? await studyResult(dir, primary) : null;
+    if (!isCurrent()) return;
     const metricRows = kind === 'tuning' ? await tuningMetricRows(dir, files) : [];
-    if (kind === 'tuning') host.appendChild(await renderBestTuningCard(envelope, dir, metricRows));
+    if (!isCurrent()) return;
+    if (kind === 'tuning') {
+      const best = await renderBestTuningCard(envelope, dir, metricRows);
+      if (!isCurrent()) return;
+      content.appendChild(best);
+    }
 
     const card = node('div', 'study-result-card');
     card.append(node('h4', '', kind === 'tuning' ? '候选目标函数排名' : '参数影响诊断'));
@@ -2827,15 +2879,16 @@ async function renderStudyResults(kind, envelopes) {
       else card.append(importanceGuide(data), importanceSummary(data), importanceTable(data));
     }
     else card.append(node('div', 'muted mini', '运行完成后由后端生成。'));
-    host.appendChild(card);
+    content.appendChild(card);
 
     const tablePath = kind === 'tuning' ? 'objectives.csv' : 'members.csv';
     const tableText = files.has(tablePath) ? await studyResultText(dir, tablePath) : null;
+    if (!isCurrent()) return;
     if (tableText) {
       const memberCard = node('details', 'study-result-card');
       memberCard.append(node('summary', '', kind === 'tuning' ? '完整候选记录（CSV 预览）' : '成员表（CSV 预览）'));
       memberCard.append(node('pre', 'report-preview', tableText.split('\n').slice(0, 62).join('\n')));
-      host.appendChild(memberCard);
+      content.appendChild(memberCard);
     }
 
     if (kind === 'uq') {
@@ -2847,22 +2900,32 @@ async function renderStudyResults(kind, envelopes) {
         for (const path of paths) { const option = document.createElement('option'); option.value = path; option.textContent = path.replace(/^envelopes\//, '').replace(/\.json$/, ''); select.appendChild(option); }
         const button = node('button', 'btn-ghost', '加载图表');
         const chartHost = node('div', 'study-envelope-view');
+        let chartRequest = 0;
         button.onclick = async () => {
-          const result = await studyResult(dir, select.value);
-          if (result) renderEnvelopeChart(chartHost, result);
+          const request = ++chartRequest;
+          const path = select.value;
+          const result = await studyResult(dir, path);
+          if (result && isCurrent() && request === chartRequest && path === select.value) {
+            renderEnvelopeChart(chartHost, result);
+          }
         };
         envelopeCard.append(select, button, chartHost);
       } else envelopeCard.append(node('div', 'muted mini', '运行完成后可按站点和变量加载，不会一次读取全部成员 history。'));
-      host.appendChild(envelopeCard);
+      content.appendChild(envelopeCard);
     } else {
       const candidates = Object.values(envelope.state?.candidates || {});
-      if (candidates.length) host.appendChild(node('div', 'muted mini', `可行候选 ${candidates.filter(candidate => candidate.feasible).length}/${candidates.length}`));
+      if (candidates.length) content.appendChild(node('div', 'muted mini', `可行候选 ${candidates.filter(candidate => candidate.feasible).length}/${candidates.length}`));
     }
   }
+  if (isCurrent()) host.appendChild(content);
 }
 
 async function refreshStudy(kind) {
+  const request = ++studyRefreshRequests[kind];
+  const scope = studyScopeKey();
   const dirs = activeStudyDirs(kind);
+  const isCurrent = () => request === studyRefreshRequests[kind] && scope === studyScopeKey()
+    && JSON.stringify(dirs) === JSON.stringify(activeStudyDirs(kind));
   if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
   const envelopes = [];
   for (const dir of dirs) {
@@ -2872,6 +2935,7 @@ async function refreshStudy(kind) {
       const reason = error?.message || String(error);
       envelopes.push({ error: reason, study_dir: dir, state: { status: 'failed', tasks: { error: { member: 'study', site: dir.split(/[\\/]/).pop(), status: 'failed', reason } } }, events: [{ study_dir: dir, study_key: dir, kind: 'study_error', reason }] });
     }
+    if (!isCurrent()) return;
   }
   if (envelopes.length === 1 && !envelopes[0].error) renderStudyEnvelope(kind, { ...envelopes[0], kind_hint: kind });
   else {
@@ -2879,12 +2943,13 @@ async function refreshStudy(kind) {
     const candidates = Object.fromEntries(envelopes.flatMap((envelope, studyIndex) => Object.entries(envelope.state?.candidates || {}).map(([member, candidate]) => [`${dirs[studyIndex]}\u001f${member}`, candidate])));
     const events = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] })));
     const status = aggregateStudyStatuses(envelopes.map(envelope => envelope.state?.status));
+    const warnings = envelopes.flatMap((envelope, index) => (envelope.state?.warnings || []).map(warning => `${envelope.manifest?.id || dirs[index]}: ${warning}`));
     const completed_candidates = envelopes.reduce((sum, envelope) => sum + (Number(envelope.state?.completed_candidates) || 0), 0);
     const generation = Math.min(...envelopes.map(envelope => Math.max(0, Number(envelope.state?.generation) || 0)));
-    renderStudyEnvelope(kind, { manifests: envelopes.map(envelope => envelope.manifest).filter(Boolean), state: { status, tasks, candidates, completed_candidates, generation }, events, kind_hint: kind });
+    renderStudyEnvelope(kind, { manifests: envelopes.map(envelope => envelope.manifest).filter(Boolean), state: { status, tasks, candidates, completed_candidates, generation, warnings }, events, kind_hint: kind });
   }
   studyEvents[kind] = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] }))).slice(-300);
-  await renderStudyResults(kind, envelopes);
+  await renderStudyResults(kind, envelopes, isCurrent);
 }
 
 async function runStudy(kind) {

@@ -13,10 +13,18 @@ pub fn export(study_dir: &Path, output_dir: &Path) -> Result<()> {
     let manifest = super::engine::status(study_dir)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let study_dir = Path::new(&manifest.root);
-    let output_dir = prepare_output_dir(study_dir, output_dir)?;
     let manifest_path = study_dir.join("manifest.json");
-    let state = super::checkpoint::load_latest::<StudyState>(&study_dir.join("checkpoints/state"))?
-        .map(|loaded| loaded.payload);
+    let state = super::runner::status_state(study_dir)?;
+    if state.is_none() {
+        bail!("Study has no valid state checkpoint; cannot export a current snapshot");
+    }
+    if state
+        .as_ref()
+        .is_some_and(|state| state.study_id != manifest.id)
+    {
+        bail!("Study checkpoint id does not match manifest");
+    }
+    let output_dir = prepare_output_dir(study_dir, output_dir)?;
     fs::copy(&manifest_path, output_dir.join("manifest.json"))?;
     flatten_samples(&study_dir.join("samples"), &output_dir.join("samples.csv"))?;
     if let Some(state) = &state {
@@ -149,10 +157,15 @@ fn report_markdown(manifest: &Manifest, state: Option<&StudyState>) -> String {
         let failed = state
             .tasks
             .values()
-            .filter(|task| task.status == TaskStatus::Failed)
+            .filter(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted))
+            .count();
+        let non_success = state
+            .tasks
+            .values()
+            .filter(|task| task.status != TaskStatus::Succeeded)
             .count();
         report.push_str(&format!(
-            "- Status: `{:?}`\n- Tasks succeeded/failed/total: {succeeded}/{failed}/{}\n",
+            "- Status: `{:?}`\n- Tasks succeeded/execution-failed/non-success/total: {succeeded}/{failed}/{non_success}/{}\n",
             state.status,
             state.tasks.len()
         ));
@@ -235,6 +248,165 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    fn minimal_manifest(study: &Path) -> Manifest {
+        Manifest {
+            schema_version: 1,
+            id: study.file_name().unwrap().to_string_lossy().into_owned(),
+            root: study.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec: StudySpec {
+                kind: StudyKind::Uncertainty,
+                method: StudyMethod::Lhs,
+                seed: 1,
+                kernel_dir: None,
+                base_cases: vec!["site".into()],
+                observations: Default::default(),
+                site_mode: SiteMode::Shared,
+                parameters: vec![ParameterSpec {
+                    name: "DEF_TUNING_CNFAC".into(),
+                    parameter_id: None,
+                    scope_instance: None,
+                    sample_min: 0.1,
+                    sample_max: 0.9,
+                    scale: Some(ScaleSpec::Linear),
+                }],
+                outputs: vec!["Qle".into()],
+                analysis_from: None,
+                analysis_to: None,
+                targets: vec![],
+                budget: StudyBudget::default(),
+            },
+            members: Vec::new(),
+            provenance: Default::default(),
+        }
+    }
+
+    fn write_minimal_study(study: &Path, state: &StudyState) {
+        fs::create_dir_all(study.join("samples")).unwrap();
+        fs::write(study.join("samples/design.csv"), "member,site\n").unwrap();
+        fs::write(
+            study.join("manifest.json"),
+            serde_json::to_vec_pretty(&minimal_manifest(study)).unwrap(),
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&study.join("checkpoints/state"), state).unwrap();
+    }
+
+    #[test]
+    fn export_reconciles_abandoned_running_tasks_before_writing_status() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-export-recover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let study = root.join("study-a");
+        let output = root.join("export");
+        let state = StudyState::new(
+            "study-a".into(),
+            [super::super::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        write_minimal_study(&study, &state);
+
+        export(&study, &output).unwrap();
+        let exported: StudyState =
+            serde_json::from_str(&fs::read_to_string(output.join("status.json")).unwrap()).unwrap();
+        assert_eq!(
+            exported.status,
+            super::super::state::StudyStatus::NeedsReview
+        );
+        assert_eq!(
+            exported.tasks["m000001/site"].status,
+            TaskStatus::NeedsReview
+        );
+        assert!(fs::read_to_string(output.join("report.md"))
+            .unwrap()
+            .contains("succeeded/execution-failed/non-success/total: 0/0/1/1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_without_a_valid_checkpoint_preserves_the_previous_snapshot() {
+        let root =
+            std::env::temp_dir().join(format!("colm-study-export-no-state-{}", std::process::id()));
+        let study = root.join("study-a");
+        let output = root.join("export");
+        write_minimal_study(&study, &StudyState::new("study-a".into(), []).unwrap());
+        export(&study, &output).unwrap();
+        fs::write(output.join("user-note.txt"), "not owned by export").unwrap();
+        let before = fs::read(output.join("status.json")).unwrap();
+        fs::remove_dir_all(study.join("checkpoints/state")).unwrap();
+        let error =
+            export(&study, &output).expect_err("missing state cannot produce a current snapshot");
+        assert!(error.to_string().contains("checkpoint"), "{error}");
+        assert_eq!(fs::read(output.join("status.json")).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(output.join("user-note.txt")).unwrap(),
+            "not owned by export"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn report_counts_execution_failures_separately_from_review_and_cancelled() {
+        let study = PathBuf::from("study-a");
+        let manifest = minimal_manifest(&study);
+        let state = StudyState::new(
+            "study-a".into(),
+            [
+                super::super::state::TaskState {
+                    member: "m000001".into(),
+                    site: "site".into(),
+                    case_dir: "/case".into(),
+                    status: TaskStatus::Failed,
+                    stage: None,
+                    reason: None,
+                    objective: None,
+                    validation_objective: None,
+                    process: None,
+                },
+                super::super::state::TaskState {
+                    member: "m000002".into(),
+                    site: "site".into(),
+                    case_dir: "/case".into(),
+                    status: TaskStatus::NeedsReview,
+                    stage: None,
+                    reason: None,
+                    objective: None,
+                    validation_objective: None,
+                    process: None,
+                },
+                super::super::state::TaskState {
+                    member: "m000003".into(),
+                    site: "site".into(),
+                    case_dir: "/case".into(),
+                    status: TaskStatus::Cancelled,
+                    stage: None,
+                    reason: None,
+                    objective: None,
+                    validation_objective: None,
+                    process: None,
+                },
+            ],
+        )
+        .unwrap();
+        let report = report_markdown(&manifest, Some(&state));
+        assert!(report.contains("succeeded/execution-failed/non-success/total: 0/1/3/3"));
+    }
+
     #[test]
     fn export_destination_cannot_be_nested_inside_the_study() {
         let root =
@@ -271,7 +443,7 @@ mod tests {
     #[test]
     fn export_rejects_a_manifest_redirected_to_another_directory() {
         let root = std::env::temp_dir().join(format!(
-            "colm-study-export-manifest-{}-{}",
+            "cs-em-{}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

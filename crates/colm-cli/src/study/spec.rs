@@ -404,10 +404,8 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         if count == 0 {
             bail!("candidate_count must be at least one");
         }
-        if matches!(spec.method, StudyMethod::Lhs) && count > MAX_STUDY_CANDIDATES {
-            bail!("candidate_count must be <= {MAX_STUDY_CANDIDATES}");
-        }
     }
+    default_candidate_count(&spec.method, spec.parameters.len(), &spec.budget)?;
     if matches!(spec.method, StudyMethod::DifferentialEvolution) {
         let population = spec.budget.population.unwrap_or(0);
         let generations = spec.budget.generations.unwrap_or(0);
@@ -580,17 +578,36 @@ pub fn study_id(spec: &StudySpec) -> Result<String> {
     Ok(format!("s-{}", &hash[..12]))
 }
 
-pub fn default_candidate_count(method: &StudyMethod, k: usize, budget: &StudyBudget) -> usize {
-    match method {
-        StudyMethod::Oat => 2 * k,
-        StudyMethod::Lhs => budget.candidate_count.unwrap_or((10 * k).max(40)),
+pub fn default_candidate_count(
+    method: &StudyMethod,
+    k: usize,
+    budget: &StudyBudget,
+) -> Result<usize> {
+    let count = match method {
+        StudyMethod::Oat => k.checked_mul(2).context("OAT candidate budget overflow")?,
+        StudyMethod::Lhs => match budget.candidate_count {
+            Some(count) => count,
+            None => k
+                .checked_mul(10)
+                .context("LHS candidate budget overflow")?
+                .max(40),
+        },
         StudyMethod::DifferentialEvolution => {
-            let pop = budget.population.unwrap_or((10 * k).max(4));
             // Only the initial population is immutable at create time. Later DE
             // generations are written as samples/gXXXXXX.csv after selection.
-            pop
+            match budget.population {
+                Some(population) => population,
+                None => k
+                    .checked_mul(10)
+                    .context("DE candidate budget overflow")?
+                    .max(4),
+            }
         }
+    };
+    if count == 0 || count > MAX_STUDY_CANDIDATES {
+        bail!("candidate count must be in 1..={MAX_STUDY_CANDIDATES}");
     }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -734,6 +751,62 @@ mod tests {
         de.budget.population = Some(MAX_STUDY_CANDIDATES);
         de.budget.generations = Some(usize::MAX);
         assert!(validate_spec(&de).is_err());
+    }
+
+    fn many_pft_dimensions(method: StudyMethod, count: usize) -> StudySpec {
+        let mut spec = tuning_spec(Vec::new());
+        spec.kind = StudyKind::Uncertainty;
+        spec.method = method;
+        spec.observations.clear();
+        spec.outputs = vec!["f_lfevpa".into()];
+        spec.budget = StudyBudget::default();
+        spec.parameters = [
+            "DEF_PFT_HTOP0",
+            "DEF_PFT_HBOT0",
+            "DEF_PFT_SQRTDI",
+            "DEF_PFT_CHIL",
+            "DEF_PFT_RHOL_VIS",
+            "DEF_PFT_RHOL_NIR",
+            "DEF_PFT_TAUL_VIS",
+        ]
+        .into_iter()
+        .flat_map(|name| {
+            (1..=78).map(move |index| ParameterSpec {
+                name: name.into(),
+                parameter_id: None,
+                scope_instance: Some(ParameterScopeInstance {
+                    kind: ParameterScopeKind::PftType,
+                    scheme: None,
+                    index: Some(index),
+                    type_name: None,
+                }),
+                sample_min: 0.1,
+                sample_max: 0.9,
+                scale: Some(ScaleSpec::Linear),
+            })
+        })
+        .take(count)
+        .collect();
+        assert_eq!(spec.parameters.len(), count);
+        spec
+    }
+
+    #[test]
+    fn default_lhs_budget_cannot_exceed_the_candidate_limit() {
+        let count = MAX_STUDY_CANDIDATES / 10;
+        validate_spec(&many_pft_dimensions(StudyMethod::Lhs, count)).unwrap();
+        let error = validate_spec(&many_pft_dimensions(StudyMethod::Lhs, count + 1))
+            .expect_err("implicit LHS budgets have the same limit as explicit budgets");
+        assert!(error.to_string().contains("candidate"), "{error}");
+    }
+
+    #[test]
+    fn oat_budget_cannot_exceed_the_candidate_limit() {
+        let count = MAX_STUDY_CANDIDATES / 2;
+        validate_spec(&many_pft_dimensions(StudyMethod::Oat, count)).unwrap();
+        let error = validate_spec(&many_pft_dimensions(StudyMethod::Oat, count + 1))
+            .expect_err("OAT budgets have the same candidate limit as LHS");
+        assert!(error.to_string().contains("candidate"), "{error}");
     }
 
     #[test]

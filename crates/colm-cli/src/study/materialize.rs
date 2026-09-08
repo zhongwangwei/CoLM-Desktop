@@ -33,6 +33,8 @@ pub fn member_case(
     let destination = colm_kernel::manifest::absolute(destination)
         .with_context(|| format!("cannot resolve {}", destination.display()))?;
 
+    crate::validate_native_case_paths(&destination, &format!("{member_id}-{site_id}"))?;
+
     // Relative paths in the baseline are relative to its working directory.
     // Make them explicit before the working directory changes to the member.
     absolutize_existing_paths(&mut document, &baseline)?;
@@ -353,8 +355,60 @@ mod tests {
         let member = root.join("study/members/m000001/site");
         std::fs::create_dir_all(&baseline).unwrap();
         std::fs::write(baseline.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
-        let original = "&nl_colm\n DEF_CASE_NAME='base'\n DEF_dir_output='out'\n DEF_forcing_namelist='forcing.nml'\n/\n";
+        {
+            let mut site = netcdf::create(baseline.join("site.nc")).unwrap();
+            site.add_dimension("pft", 2).unwrap();
+            site.add_variable::<i32>("pfttyp", &["pft"])
+                .unwrap()
+                .put_values(&[1, 2], ..)
+                .unwrap();
+            site.add_variable::<f64>("pctpfts", &["pft"])
+                .unwrap()
+                .put_values(&[0.4, 0.6], ..)
+                .unwrap();
+        }
+        let original = "&nl_colm\n DEF_CASE_NAME='base'\n DEF_dir_output='out'\n DEF_forcing_namelist='forcing.nml'\n SITE_fsitedata='site.nc'\n SITE_landtype=1\n DEF_USE_PFT=.true.\n DEF_USE_LCT=.false.\n DEF_USE_CROP=.false.\n/\n";
         std::fs::write(baseline.join("case.nml"), original).unwrap();
+
+        let spec: crate::study::spec::StudySpec = serde_json::from_value(serde_json::json!({
+            "kind": "uncertainty", "method": "oat", "seed": 1,
+            "base_cases": [baseline], "site_mode": "shared", "outputs": ["f_lfevpa"],
+            "parameters": ([1, 2].map(|index| serde_json::json!({
+                "name": "DEF_PFT_VMAX25", "parameter_id": "pft:DEF_PFT_VMAX25",
+                "scope_instance": { "kind": "pft-type", "index": index },
+                "sample_min": 10.0, "sample_max": 100.0, "scale": "linear"
+            })))
+        }))
+        .unwrap();
+        crate::study::spec::validate_spec(&spec).unwrap();
+        let values =
+            crate::study::engine::baseline(std::slice::from_ref(&baseline), &spec, &[]).unwrap();
+        assert_eq!(values.len(), 2);
+        let samples = crate::study::sample::design(&spec, &values).unwrap();
+        assert_eq!(samples.len(), 5);
+        for sample in &samples {
+            let target = root.join("samples").join(&sample.id);
+            member_case(
+                &baseline,
+                &target,
+                &sample.id,
+                "site",
+                &sample
+                    .parameters
+                    .iter()
+                    .map(|(key, value)| (key.clone(), *value))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let doc =
+                colm_namelist::parse(&std::fs::read_to_string(target.join("case.nml")).unwrap())
+                    .unwrap();
+            for (key, value) in &sample.parameters {
+                assert_eq!(doc.get(key).and_then(Value::as_f64), Some(*value));
+            }
+            assert!(doc.get("DEF_PFT_VMAX25(1)").is_none());
+            assert!(doc.get("DEF_PFT_VMAX25(4)").is_none());
+        }
 
         member_case(
             &baseline,
@@ -384,6 +438,28 @@ mod tests {
             original
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_member_paths_that_would_truncate_native_restart_names() {
+        let root = std::env::temp_dir().join(format!("colm-member-long-{}", std::process::id()));
+        let baseline = root.join("base");
+        std::fs::create_dir_all(&baseline).unwrap();
+        std::fs::write(baseline.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let original = "&nl_colm\n DEF_CASE_NAME='base'\n DEF_dir_output='out'\n DEF_forcing_namelist='forcing.nml'\n/\n";
+        std::fs::write(baseline.join("case.nml"), original).unwrap();
+        let member = root
+            .join("a".repeat(100))
+            .join(".colm/studies/s-000000000000/members/m000001/site");
+        let error = member_case(&baseline, &member, "m000001", "site", &[])
+            .expect_err("native restart truncation must be blocked before execution");
+        assert!(error.to_string().contains("256-byte"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(baseline.join("case.nml")).unwrap(),
+            original
+        );
+        assert!(!member.join("case.nml").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1819,6 +1819,7 @@ fn run_case(
     let layout = Layout::new(case);
     ensure_cli_output_dir(&layout.case_nml(), &layout.out())?;
     let name = colm_case::case_name(&layout.case_nml())?;
+    validate_native_case_paths(case, &name)?;
     let out = layout.out().join(&name);
     let lc_year = land_cover_year(&layout.case_nml())?;
     // 产物必须列到**文件**：目录在程序写任何东西之前就已存在，
@@ -1998,6 +1999,29 @@ fn land_cover_year(case_nml: &Path) -> Result<i32> {
         bail!("DEF_LC_YEAR {year} cannot be formatted as a four-digit land-cover year");
     }
     Ok(year as i32)
+}
+
+fn validate_native_case_paths(case: &Path, name: &str) -> Result<()> {
+    // Native file_restart/fileblock buffers are character(len=256). A truncated
+    // extension makes MOD_Block find the dot in /.colm instead, aliasing members.
+    // Reserve the longest common restart variant plus the vector block suffix.
+    let restart = case
+        .join("out")
+        .join(name)
+        .join("restart/9999-366-86400")
+        .join(format!(
+            "{name}_restart_gridriver_9999-366-86400_lc9999_w180_s90.nc"
+        ));
+    for path in [case.join("case.nml"), restart] {
+        let bytes = path.to_string_lossy().len();
+        if bytes > 256 {
+            bail!(
+                "native CoLM path exceeds the 256-byte limit ({bytes} bytes): {}\nuse a shorter project directory or case name; truncated restart paths can overwrite another member's output",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn stage_artifacts(out: &Path, name: &str, lc_year: i32) -> [(Stage, Vec<PathBuf>); 3] {
