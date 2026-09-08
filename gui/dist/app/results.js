@@ -1705,7 +1705,7 @@ function renderStudyActions(kind) {
   if (heading) heading.textContent = dialogText(copy[0]);
   if (detail) detail.textContent = dialogText(copy[1]);
   if (run) {
-    const primaryEnabled = actions.run || (hasTask && current === 'NeedsReview');
+    const primaryEnabled = actions.run;
     run.textContent = dialogText(copy[2]);
     run.disabled = !primaryEnabled;
     run.title = primaryEnabled ? '' : dialogText(disabledReason || (hasTask ? '当前任务状态不能开始新的计算。' : '请先生成任务。'));
@@ -2635,13 +2635,16 @@ function mergeStudyEvent(kind, payload) {
 
 async function studyResultText(dir, path) {
   try { return await invoke('study_result', { studyDir: dir, path }); }
-  catch { return null; }
+  catch (error) { throw new Error(`${dir}/${path}: ${error?.message || error}`); }
 }
 
 async function studyResult(dir, path) {
   const text = await studyResultText(dir, path);
-  try { return text == null ? null : JSON.parse(text); }
-  catch { return null; }
+  try {
+    const value = JSON.parse(text);
+    if (value == null) throw new Error('empty Study result');
+    return value;
+  } catch (error) { throw new Error(`${dir}/${path}: ${error?.message || error}`); }
 }
 
 const studyResultPaths = envelope => new Set((envelope.results || []).map(file => typeof file === 'string' ? file : file.path).filter(Boolean));
@@ -2945,9 +2948,16 @@ async function renderStudyResults(kind, envelopes, isCurrent = () => true) {
         button.onclick = async () => {
           const request = ++chartRequest;
           const path = select.value;
-          const result = await studyResult(dir, path);
-          if (result && isCurrent() && request === chartRequest && path === select.value) {
-            renderEnvelopeChart(chartHost, result);
+          try {
+            const result = await studyResult(dir, path);
+            if (result && isCurrent() && request === chartRequest && path === select.value) {
+              renderEnvelopeChart(chartHost, result);
+            }
+          } catch (error) {
+            if (!isCurrent() || request !== chartRequest || path !== select.value) return;
+            destroyChartsInside(chartHost);
+            chartHost.textContent = '';
+            chartHost.appendChild(node('div', 'warn mini', error?.message || String(error)));
           }
         };
         envelopeCard.append(select, button, chartHost);
@@ -2990,7 +3000,12 @@ async function refreshStudy(kind) {
     renderStudyEnvelope(kind, { manifests: envelopes.map(envelope => envelope.manifest).filter(Boolean), state: { status, tasks, candidates, completed_candidates, generation, warnings }, events, kind_hint: kind });
   }
   studyEvents[kind] = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] }))).slice(-300);
-  await renderStudyResults(kind, envelopes, isCurrent);
+  try { await renderStudyResults(kind, envelopes, isCurrent); }
+  catch (error) {
+    if (!isCurrent()) return;
+    $(kind === 'tuning' ? 'tune-results' : 'uq-results')
+      ?.appendChild(node('div', 'warn mini', error?.message || String(error)));
+  }
 }
 
 async function runStudy(kind) {

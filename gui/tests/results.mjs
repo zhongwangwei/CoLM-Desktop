@@ -14,7 +14,7 @@ const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 const {
   LruCache, boundedMap, envelopeDiagnostics, metricKey, resultCases, rowsToCsv, sortedImportanceRows,
 } = await import(moduleUrl('result-model.js'));
-const { aggregateStudy, aggregateStudyStatuses, studyWarnings } = await import(moduleUrl('study-model.js'));
+const { aggregateStudy, aggregateStudyStatuses, studyActionState, studyWarnings } = await import(moduleUrl('study-model.js'));
 const { WORKFLOW, nextOf } = await import(moduleUrl('shell.js'));
 const { state } = await import(moduleUrl('state.js'));
 
@@ -125,6 +125,22 @@ const hugeEnvelopeStats = envelopeDiagnostics({ n_eff: Array.from({ length: 1200
 if (hugeEnvelopeStats.minNEff !== 0 || hugeEnvelopeStats.maxNEff !== 6) {
   throw new Error('uncertainty envelope diagnostics must handle large arrays without spread-based min/max');
 }
+for (const [high, low] of [
+  [[1e308, 1e308, null], [0, 0, 1]],
+  [[1e308, 0], [-1e308, 0]],
+]) {
+  const diagnostics = envelopeDiagnostics({ p95: high, p05: low, p50: high, baseline: low });
+  for (const key of ['meanWidth', 'meanMedianBaselineDiff']) {
+    if (!Number.isFinite(diagnostics[key]) || Math.abs(diagnostics[key] / 1e308 - 1) > 1e-15) {
+      throw new Error(`${key} overflowed although the mean is finite: ${diagnostics[key]}`);
+    }
+  }
+}
+const unrepresentable = envelopeDiagnostics({ p95: [1e308], p05: [-1e308], p50: [1e308], baseline: [-1e308] });
+if (unrepresentable.meanWidth !== null || unrepresentable.maxWidth !== null
+    || unrepresentable.meanMedianBaselineDiff !== null) {
+  throw new Error('unrepresentable envelope diagnostics must be unavailable, not infinite');
+}
 
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 for (const pane of [
@@ -217,6 +233,90 @@ for (const metric of ['abs_bias', 'nse', 'r']) {
 }
 const resultUi = await readFile(join(root, 'dist', 'app', 'results.js'), 'utf8');
 const resultCss = await readFile(join(root, 'dist', 'app', 'style.css'), 'utf8');
+
+// Listed results must expose read/parse failures without leaking stale-scope errors.
+for (const [path, failure] of [
+  ['importance.json', 'ipc'], ['importance.json', 'json'], ['importance.json', 'null'],
+  ['members.csv', 'ipc'], ['envelopes/site/a.json', 'ipc'], ['envelopes/site/a.json', 'json'],
+]) {
+  for (const stale of [false, true]) {
+    let scope = 'original';
+    const elements = [];
+    const node = (tag, className = '', textContent = '') => {
+      const element = { tag, className, textContent, children: [], value: '',
+        append(...children) { this.children.push(...children); },
+        appendChild(child) { this.children.push(child); },
+      };
+      elements.push(element);
+      return element;
+    };
+    const host = node('host');
+    const source = resultUi.slice(resultUi.indexOf('async function studyResultText('), resultUi.indexOf('\nconst studyResultPaths'))
+      + resultUi.slice(resultUi.indexOf('async function renderStudyResults('), resultUi.indexOf('\nasync function runStudy('));
+    const refresh = runInNewContext(source + '\nrefreshStudy;', {
+      $: () => host, node, document: { createElement: node, createDocumentFragment: () => node('fragment') },
+      activeStudyDirs: () => ['/cases/.colm/studies/one'], studyScopeKey: () => scope,
+      studyRefreshRequests: { uq: 0 }, studyEvents: { uq: [] },
+      studyResultsReady: () => true, studyResultPaths: () => new Set([path]),
+      destroyChartsInside() {}, renderUncertaintyDiagnostics: () => node('diagnostics'),
+      renderStudyEnvelope() {}, envelopeExplanation: () => node('explanation'),
+      renderEnvelopeChart() { throw new Error('invalid chart result was rendered'); },
+      status() {},
+      invoke: async command => {
+        if (command === 'study_status') return JSON.stringify({ manifest: { id: 'one' }, state: { status: 'completed' }, events: [] });
+        if (stale) scope = 'changed';
+        if (failure === 'ipc') throw new Error('permission denied');
+        return failure === 'null' ? 'null' : '{invalid';
+      },
+    });
+    await refresh('uq');
+    if (path.startsWith('envelopes/')) {
+      elements.find(element => element.tag === 'select').value = path;
+      await elements.find(element => element.tag === 'button').onclick();
+    }
+    const errors = elements.filter(element => element.className === 'warn mini');
+    if (errors.length !== Number(!stale) || (!stale && !errors[0].textContent.includes(path))) {
+      throw new Error(`listed ${path} ${failure} failure was hidden or crossed scope (stale=${stale})`);
+    }
+  }
+}
+
+// The NeedsReview recovery path must not undo the spatial mutation guard.
+for (const kind of ['uq', 'tuning']) {
+  for (const current of ['Ready', 'NeedsReview', 'Running', 'Paused', 'Completed']) {
+    for (const spatial of [false, true]) {
+      const elements = new Map();
+      const element = id => {
+        if (!elements.has(id)) elements.set(id, {});
+        return elements.get(id);
+      };
+      const render = runInNewContext(resultUi.slice(
+        resultUi.indexOf('function renderStudyActions('),
+        resultUi.indexOf('\nasync function renderStudySpinup('),
+      ) + '\nrenderStudyActions;', {
+        $: element, document: { querySelectorAll: () => [] },
+        spatialStudyReason: () => spatial ? 'early state' : '',
+        activeStudyDirs: () => ['/cases/.colm/studies/one'],
+        studyViews: { [kind]: { state: { status: current } } },
+        studyRunning: { [kind]: false }, studyCreating: { [kind]: false },
+        aggregateStudy, studyActionState, studyJobInputs: () => [], dialogText: text => text,
+      });
+      render(kind);
+      const prefix = kind === 'uq' ? 'uq' : 'tune';
+      const actions = studyActionState(current, true);
+      for (const action of ['run', 'retry', 'resume']) {
+        if (element(`${prefix}-${action}`).disabled !== (spatial || !actions[action])) {
+          throw new Error(`${kind} ${current}: spatial=${spatial} incorrectly enables ${action}`);
+        }
+      }
+      for (const action of ['pause', 'cancel']) {
+        if (element(`${prefix}-${action}`).disabled !== !actions[action]) {
+          throw new Error(`${kind} ${current}: spatial must preserve ${action}`);
+        }
+      }
+    }
+  }
+}
 
 // A metadata refresh must not erase the selected output while its own guard is awaiting IPC.
 {
@@ -713,7 +813,6 @@ if (!resultUi.includes("label: `${meta.label} · ${variable}`")
     || !resultUi.includes("dialogText('另存为算例目录')")
     || !resultUi.includes("dialogText('存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？')")
     || !resultUi.includes("'确认并继续'")
-    || !resultUi.includes("const primaryEnabled = actions.run || (hasTask && current === 'NeedsReview')")
     || !resultUi.includes('按输入指纹跳过')
     || !resultUi.includes("dialogText('即将应用以下参数改动：')")
     || !resultUi.includes("if (hasBackend) await invoke('print_report')")

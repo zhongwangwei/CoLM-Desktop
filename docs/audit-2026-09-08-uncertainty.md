@@ -62,3 +62,26 @@ main 与 `colm-destop-spatial` 独立发展，共用修复分别提交 PR，不�
 
 先前子代理对 `engine.rs` 添加“路径不存在时跳过 canonicalize”，并删除真实目录名称测试 fixture。操作日志确认其来自本会话，不是用户编辑；没有证实的业务故障，已撤销，保留原有严格路径解析。`engine.rs` 最终只调整测试临时目录标签，以适应已证实的 native 路径上限。
 不添加重复 manifest 身份别名，不为旧草案中的字段命名制造协议迁移。
+
+## 合入 main 后的目标完成复核
+
+以 main `447eca2` 为基线重新核对全部八个验收领域，而非仅复核 spatial 合并差异。独立后端复核确认规格、采样、冻结、恢复、统计和导出符合上述合同；GUI 又发现并通过失败回归确认三处遗漏：
+
+- **空间 NeedsReview 按钮误启用**：空间限制之后，冗余的 NeedsReview 条件重新启用了启动按钮。删除该条件，复用既有 `studyActionState`；站点恢复入口、暂停和取消不变。
+- **图表诊断均值溢出**：带宽/中位数偏离的累加或相减可能先溢出，即使最终均值可表示。仅在溢出时先缩放再累加；确实不可表示的诊断返回 null，不展示 Infinity，也不改变普通数值结果。
+- **结果读取失败被隐藏**：已列出的 JSON/CSV 读取失败或 JSON 损坏曾被当成“尚未生成”，图表加载则无反应。现在保留文件路径和错误，显示当前结果页/图表的警告；过期项目、请求或变量选择的错误不污染新界面。
+
+| 验收领域 | 当前直接证据 |
+|---|---|
+| 1. 规格/参数 | `spec.rs` 的隐式 LHS、OAT 及显式预算上限、PFT scope、输出路径回归 |
+| 2. 采样 | `sample.rs` 固定 seed、多维线性/对数分层和 PFT 独立维度测试；OAT 每维双端实现 |
+| 3. 创建/物化/冻结 | `engine.rs` 冻结内容/目录身份回归；`materialize.rs` 私有文件、实际 NetCDF PFT 槽位、长路径拒绝回归 |
+| 4. 调度/恢复 | `checkpoint.rs` 损坏回退/校验和；`runner.rs` 单写者、并发上限、活 PID/过期心跳、取消及重试前校验回归 |
+| 5. 统计 | `science.rs` Type-7/均值极值/并列秩；`runner.rs` 实际 history 归约、基准排除、错位时间轴和支持不足回归 |
+| 6. GUI/Tauri | 全部 11 个 Node 文件；生产函数 VM 的创建/刷新/结果/队列竞态，以及本补遗三项反例；10 个 Tauri Study 测试、IPC 检查 |
+| 7. 导出 | `export.rs` 无 checkpoint 拒绝、状态协调、重复快照、失败/取消/待复核区分、非自有文件保留回归 |
+| 8. 端到端 | `runner.rs` 故障/恢复 fixture；固定 CLI/default 内核的真实 LHS20+基线 21/21 成功、48 时点、注入/分层/包络/34 文件导出证据 |
+
+本次重新运行 92 个后端 Study 测试；JS 语法检查、全部 Node 测试、Tauri Study 测试、workspace fmt/Clippy 和 GUI IPC 均通过。反例与复验日志位于 `tmp/uq-completion-20260908/`。本补遗只修改 GUI 和回归，不修改 Rust、Fortran、采样算法或原始数据；固定原生证据仍为 `/private/tmp/cfi-103532-57586`（CLI SHA256 `b94ae7942ad51c5bdbf83246aaf9042e789872c1492fe515afb50ef16942451c`），不冒充新增的多年或多预设试验。当前补遗提交的远程 CI 以关联 PR 实际结果为准。
+
+再次核查上文官方算法资料，并补查 [SciPy rankdata 的 average 并列秩定义](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.rankdata.html)。这些资料用于核对数学合同，不是新增依赖；SciPy `seed` 参数更名为 `rng` 不影响本项目自有 Rust 采样器的固定整数 seed 合同。此前列明的科学验证边界保持不变。
