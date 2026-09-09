@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.2.0-beta.3"><img src="https://img.shields.io/badge/version-v0.2.0--beta.3-orange" alt="Current beta version: v0.2.0-beta.3"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.2.0-beta.4"><img src="https://img.shields.io/badge/version-v0.2.0--beta.4-orange" alt="Current beta version: v0.2.0-beta.4"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -20,9 +20,9 @@
 CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结果评估整合到一个图形界面中。发行包内置运行所需的 `colm-cli`、Fortran 内核和示例数据，普通用户无需安装 Rust、Fortran、MPI 或 NetCDF 编译环境。
 
 > [!WARNING]
-> **当前版本为 `0.2.0-beta.3` 测试版。** 功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
+> **当前版本为 `0.2.0-beta.4` 测试版。** 功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
 >
-> **This is the `0.2.0-beta.3` prerelease.** Features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.
+> **This is the `0.2.0-beta.4` prerelease.** Features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.
 
 > [!IMPORTANT]
 > 推荐工作流仍为**单点站点模拟**，支持把多个站点作为独立算例并发运行。本版本已整合空间功能，但流域、区域、全球以及经纬度、非结构和流域网格的所有空间选项均为 **early state（早期阶段，不建议使用）**。选择空间模式后，**参数调优和不确定性分析不可用**；切回站点模式后恢复。空间功能的科学结果尚未完成验证。
@@ -31,7 +31,7 @@ CoLM Desktop 将 CoLM202X 的站点建例、参数约束、三阶段运行和结
 
 ## 下载
 
-前往 [v0.2.0-beta.3 Beta Release](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.2.0-beta.3) 下载对应平台的安装包：
+前往 [v0.2.0-beta.4 Beta Release](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.2.0-beta.4) 下载对应平台的安装包：
 
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
