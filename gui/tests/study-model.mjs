@@ -125,6 +125,26 @@ const best = bestTuningSummary({
   },
 });
 assert.deepEqual({ member: best.member, generation: best.generation, calibration: best.calibration }, { member: 'm000001', generation: 1, calibration: 1 });
+const staleBest = bestTuningSummary({
+  state: {
+    best_member: 'm999999',
+    candidates: {
+      m000000: { feasible: true, calibration: 2 },
+      m000001: { generation: 1, feasible: true, calibration: 0.8, validation: 1.2 },
+      m999999: { generation: 2, feasible: false, calibration: 0.1, reason: 'infeasible target' },
+    },
+  },
+});
+assert.deepEqual(
+  { member: staleBest.member, feasible: staleBest.feasible, calibration: staleBest.calibration },
+  { member: 'm000001', feasible: true, calibration: 0.8 },
+  'stale or infeasible best_member must not be displayed/applied as the tuning winner',
+);
+assert.equal(
+  bestTuningSummary({ state: { candidates: { m000000: { feasible: true, calibration: 0.2 } } } }).member,
+  '',
+  'baseline is comparison evidence, not an applyable best tuning candidate',
+);
 assert.equal(aggregateStudy({
   status: 'cancelled',
   tasks: {

@@ -21,6 +21,42 @@ fn descriptor_ids_are_unique() {
 }
 
 #[test]
+fn continuous_study_ranges_match_runtime_parameter_domains() {
+    let descriptor = |name: &str| {
+        parameters::all()
+            .iter()
+            .find(|descriptor| descriptor.raw_key == name)
+            .unwrap()
+    };
+    for name in [
+        "DEF_TUNING_CNFAC",
+        "DEF_TUNING_ZLND",
+        "DEF_MEDLYN_G1",
+        "DEF_LC_CHIL",
+        "DEF_PFT_CHIL",
+    ] {
+        let parameter = descriptor(name);
+        assert!(parameter.calibration_eligible, "{name}");
+        assert!(
+            parameter.supports_log_range,
+            "{name} accepts positive log bounds"
+        );
+    }
+    assert!(!descriptor("DEF_TUNING_SMPMIN").supports_log_range);
+    let planting = descriptor("DEF_TUNING_CROP_PLANTING_DAY");
+    assert!(
+        !planting.calibration_eligible,
+        "planting day is integer-valued"
+    );
+    assert!(!planting.supports_linear_range && !planting.supports_log_range);
+    assert_eq!(planting.visibility, parameters::Visibility::EditableExpert);
+    crate::tuning::validate_value(&planting.raw_key, 120.0).unwrap();
+    for descriptor in parameters::all().iter().filter(|d| d.calibration_eligible) {
+        assert_eq!(descriptor.value_kind, "real", "{}", descriptor.id);
+    }
+}
+
+#[test]
 fn every_descriptor_has_complete_display_and_write_metadata() {
     use super::parameters::{Storage, Visibility};
     for descriptor in parameters::all() {

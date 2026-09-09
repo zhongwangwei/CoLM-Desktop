@@ -173,6 +173,8 @@ struct TargetResult {
     loss: f64,
     model_mean: f64,
     observation_mean: f64,
+    #[serde(default)]
+    support_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -195,6 +197,17 @@ struct TaskResult {
     calibration: Vec<TargetResult>,
     #[serde(default)]
     validation: Vec<TargetResult>,
+    #[serde(default)]
+    validation_errors: Vec<TargetError>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TargetError {
+    key: String,
+    site: String,
+    variable: String,
+    period: String,
+    reason: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -213,6 +226,8 @@ struct ObjectiveMetricRow {
     loss: f64,
     model_mean: f64,
     observation_mean: f64,
+    #[serde(default)]
+    support_hash: String,
 }
 
 enum WorkerEvent {
@@ -870,6 +885,17 @@ fn run_members(
     generation: Option<usize>,
 ) -> Result<()> {
     let members = super::generation::load_members(manifest)?;
+    let members_by_id = if manifest.spec.kind == StudyKind::Tuning
+        && manifest.spec.method == StudyMethod::DifferentialEvolution
+    {
+        members
+            .iter()
+            .cloned()
+            .map(|member| (member.id.clone(), member))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
     let generation_members = generation.map(|generation| {
         members
             .iter()
@@ -877,6 +903,33 @@ fn run_members(
             .map(|member| member.id.clone())
             .collect::<BTreeSet<_>>()
     });
+    let closed_generation = state.generation;
+    let population = state.population.clone();
+    if manifest.spec.kind == StudyKind::Tuning
+        && manifest.spec.method == StudyMethod::DifferentialEvolution
+    {
+        for task in state.tasks.values_mut() {
+            let stale_success = task.status == TaskStatus::Succeeded
+                && !crate::case_is_current(Path::new(&task.case_dir), kernel_id).unwrap_or(false);
+            if stale_success
+                && !retryable_task(
+                    manifest,
+                    closed_generation,
+                    &population,
+                    &members_by_id,
+                    &task.member,
+                )
+            {
+                task.status = TaskStatus::Failed;
+                task.objective = None;
+                task.validation_objective = None;
+                task.reason = Some(format!(
+                    "cannot rerun closed DE generation for {}; create a new Study",
+                    task.member
+                ));
+            }
+        }
+    }
     let mut runnable = VecDeque::new();
     for task in state.tasks.values() {
         if generation_members
@@ -890,13 +943,21 @@ fn run_members(
         let waiting_for_tuning_baseline = manifest.spec.kind == StudyKind::Tuning
             && !baseline_tasks_succeeded(manifest, state)
             && task.member != "m000000";
+        let retry_allowed = retry_failed
+            && matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted)
+            && retryable_task(
+                manifest,
+                state.generation,
+                &state.population,
+                &members_by_id,
+                &task.member,
+            );
         let allowed = !waiting_for_tuning_baseline
             && (matches!(
                 task.status,
                 TaskStatus::Pending | TaskStatus::Materialized | TaskStatus::Queued
             ) || stale_success
-                || (retry_failed
-                    && matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted)));
+                || retry_allowed);
         if allowed {
             runnable.push_back((
                 task.member.clone(),
@@ -1152,6 +1213,7 @@ fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> 
         outputs: Vec::new(),
         calibration: Vec::new(),
         validation: Vec::new(),
+        validation_errors: Vec::new(),
     };
     match manifest.spec.kind {
         StudyKind::Uncertainty => {
@@ -1204,14 +1266,23 @@ fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> 
                     manifest.spec.base_cases.len(),
                 )?);
                 if target.validation_from.is_some() {
-                    result.validation.push(target_result(
+                    match target_result(
                         case,
                         &observation,
                         site,
                         target,
                         true,
                         manifest.spec.base_cases.len(),
-                    )?);
+                    ) {
+                        Ok(row) => result.validation.push(row),
+                        Err(error) => result.validation_errors.push(TargetError {
+                            key: target.key.clone(),
+                            site: site.into(),
+                            variable: target.variable.clone(),
+                            period: "validation".into(),
+                            reason: error.to_string(),
+                        }),
+                    }
                 }
             }
             if result.calibration.is_empty() {
@@ -1246,7 +1317,7 @@ fn target_result(
         spinup: 0,
         json: true,
         corrected: false,
-        summary_only: true,
+        summary_only: false,
         pair_vars: vec![target.variable.clone()],
         pair_max_points: None,
         from: Some(from),
@@ -1261,6 +1332,27 @@ fn target_result(
                 target.key, target.variable
             )
         })?;
+    let time = row.time.as_ref().with_context(|| {
+        format!(
+            "target {} ({}) did not return full pair support",
+            target.key, target.variable
+        )
+    })?;
+    let obs = row.obs.as_ref().with_context(|| {
+        format!(
+            "target {} ({}) did not return full paired observations",
+            target.key, target.variable
+        )
+    })?;
+    if time.len() != row.n || obs.len() != row.n {
+        bail!(
+            "target {} ({}) returned incomplete support for {} pairs",
+            target.key,
+            target.variable,
+            row.n
+        );
+    }
+    let support_hash = pair_support_hash(time, obs);
     let value = metric_value(&row, target.metric);
     let weight = if target.site.is_none() {
         target.weight / site_count.max(1) as f64
@@ -1290,6 +1382,7 @@ fn target_result(
         loss,
         model_mean: row.model_mean,
         observation_mean: row.obs_mean,
+        support_hash,
     })
 }
 
@@ -1305,20 +1398,230 @@ fn metric_value(row: &VarMetrics, metric: ObjectiveMetric) -> f64 {
     }
 }
 
+fn pair_support_hash(time: &[i64], obs: &[f64]) -> String {
+    let mut hash = Sha256::new();
+    for (time, obs) in time.iter().zip(obs) {
+        hash.update(time.to_le_bytes());
+        hash.update(obs.to_bits().to_le_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
 fn fixed_score(results: &[TargetResult]) -> Option<f64> {
     if results.is_empty() {
         return None;
     }
-    let weight = results.iter().map(|result| result.weight).sum::<f64>();
-    (weight.is_finite() && weight > 0.0)
-        .then(|| {
-            results
-                .iter()
-                .map(|result| result.weight * result.loss)
-                .sum::<f64>()
-                / weight
+    let scale = results
+        .iter()
+        .map(|result| result.weight.abs())
+        .fold(0.0, f64::max);
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let mut weight = 0.0;
+    for result in results {
+        let normalized = result.weight / scale;
+        if !normalized.is_finite()
+            || normalized < 0.0
+            || !result.loss.is_finite()
+            || result.loss < 0.0
+        {
+            return None;
+        }
+        weight += normalized;
+    }
+    if !weight.is_finite() || weight <= 0.0 {
+        return None;
+    }
+    let mut score = 0.0;
+    for result in results {
+        score += (result.weight / scale / weight) * result.loss;
+    }
+    score.is_finite().then_some(score)
+}
+
+fn expected_target_results<'a>(
+    manifest: &'a Manifest,
+    site: &'a str,
+) -> impl Iterator<Item = (&'a TargetSpec, &'static str)> + 'a {
+    manifest
+        .spec
+        .targets
+        .iter()
+        .filter(move |target| target.site.as_deref().is_none_or(|wanted| wanted == site))
+        .flat_map(|target| {
+            std::iter::once((target, "calibration")).chain(
+                target
+                    .validation_from
+                    .is_some()
+                    .then_some((target, "validation")),
+            )
         })
-        .filter(|score| score.is_finite())
+}
+
+fn validate_task_result(
+    manifest: &Manifest,
+    member: &str,
+    site: &str,
+    result: &TaskResult,
+) -> Result<()> {
+    if result.member != member || result.site != site {
+        bail!(
+            "task result identity mismatch: expected {member}/{site}, found {}/{}",
+            result.member,
+            result.site
+        );
+    }
+    if manifest.spec.kind != StudyKind::Tuning {
+        return Ok(());
+    }
+    let mut rows = BTreeMap::new();
+    let mut validation_errors = BTreeMap::new();
+    for error in &result.validation_errors {
+        if error.site != site
+            || error.period != "validation"
+            || error.reason.trim().is_empty()
+            || !manifest.spec.targets.iter().any(|target| {
+                target.key == error.key
+                    && target.variable == error.variable
+                    && target.validation_from.is_some()
+                    && target.site.as_deref().is_none_or(|wanted| wanted == site)
+            })
+        {
+            bail!("invalid validation error for target {}", error.key);
+        }
+        if validation_errors.insert(error.key.clone(), error).is_some() {
+            bail!("duplicate validation error for target {}", error.key);
+        }
+    }
+    for (stored_period, row) in result
+        .calibration
+        .iter()
+        .map(|row| ("calibration", row))
+        .chain(result.validation.iter().map(|row| ("validation", row)))
+    {
+        if row.period != stored_period {
+            bail!(
+                "target {} is stored in {stored_period} but declares {}",
+                row.key,
+                row.period
+            );
+        }
+        if row.site != site {
+            bail!("target {} belongs to {}, not {site}", row.key, row.site);
+        }
+        if !row.weight.is_finite()
+            || !row.value.is_finite()
+            || !row.loss.is_finite()
+            || row.loss < 0.0
+            || !row.model_mean.is_finite()
+            || !row.observation_mean.is_finite()
+            || row.observation_sd.is_some_and(|value| !value.is_finite())
+        {
+            bail!("target {} has a non-finite score field", row.key);
+        }
+        if row.support_hash.is_empty() || row.pairs == 0 {
+            bail!("target {} has missing pair support", row.key);
+        }
+        let expected_loss = super::science::objective_loss(
+            &ObjectiveTerm {
+                metric: row.metric,
+                value: row.value,
+                observation_sd: row.observation_sd,
+                weight: row.weight,
+                pairs: row.pairs,
+            },
+            row.min_pairs,
+        )
+        .map_err(|reason| anyhow::anyhow!("target {} {reason}", row.key))?;
+        if (row.loss - expected_loss).abs() > 1e-12 {
+            bail!("target {} loss does not match its metric fields", row.key);
+        }
+        let id = (row.period.clone(), row.key.clone());
+        if rows.insert(id, row).is_some() {
+            bail!("duplicate target result {} / {}", row.period, row.key);
+        }
+    }
+    for (target, period) in expected_target_results(manifest, site) {
+        let Some(row) = rows.remove(&(period.into(), target.key.clone())) else {
+            if period == "validation" && validation_errors.remove(&target.key).is_some() {
+                continue;
+            }
+            bail!(
+                "missing required target {} in {period} for {site}",
+                target.key
+            );
+        };
+        if period == "validation" && validation_errors.contains_key(&target.key) {
+            bail!("target {} has both validation result and error", target.key);
+        }
+        if row.variable != target.variable
+            || row.metric != target.metric
+            || row.min_pairs != target.min_pairs
+        {
+            bail!(
+                "target {} metadata does not match the frozen Study spec",
+                target.key
+            );
+        }
+        let expected_weight = if target.site.is_none() {
+            target.weight / manifest.spec.base_cases.len().max(1) as f64
+        } else {
+            target.weight
+        };
+        if row.weight != expected_weight {
+            bail!(
+                "target {} weight does not match the frozen Study spec",
+                target.key
+            );
+        }
+    }
+    if !rows.is_empty() {
+        bail!("task result contains target rows outside the frozen Study spec");
+    }
+    if !validation_errors.is_empty() {
+        bail!("task result contains validation errors outside the frozen Study spec");
+    }
+    Ok(())
+}
+
+fn comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResult) -> Result<()> {
+    let mut baseline_rows = BTreeMap::new();
+    for row in &baseline.calibration {
+        baseline_rows.insert((row.period.as_str(), row.key.as_str()), row);
+    }
+    for row in &candidate.calibration {
+        let base = baseline_rows
+            .get(&(row.period.as_str(), row.key.as_str()))
+            .with_context(|| format!("baseline missing target {} / {}", row.period, row.key))?;
+        if row.pairs != base.pairs || row.support_hash != base.support_hash {
+            bail!(
+                "target {} / {} uses different model-observation support than baseline",
+                row.period,
+                row.key
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validation_comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResult) -> Result<()> {
+    let mut baseline_rows = BTreeMap::new();
+    for row in &baseline.validation {
+        baseline_rows.insert(row.key.as_str(), row);
+    }
+    for row in &candidate.validation {
+        let base = baseline_rows
+            .get(row.key.as_str())
+            .with_context(|| format!("baseline missing validation target {}", row.key))?;
+        if row.pairs != base.pairs || row.support_hash != base.support_hash {
+            bail!(
+                "validation target {} uses different model-observation support than baseline",
+                row.key
+            );
+        }
+    }
+    Ok(())
 }
 
 fn refresh_candidates(
@@ -1346,6 +1649,7 @@ fn refresh_candidates(
         }
         let mut calibration = Vec::new();
         let mut validation = Vec::new();
+        let mut validation_failed = false;
         let mut reason = tasks
             .iter()
             .find(|task| task.status != TaskStatus::Succeeded)
@@ -1360,6 +1664,38 @@ fn refresh_candidates(
             for site in &manifest.spec.base_cases {
                 match read_task_result(manifest, &member.id, site) {
                     Ok(result) => {
+                        let baseline = (manifest.spec.kind == StudyKind::Tuning
+                            && member.id != "m000000")
+                            .then(|| read_task_result(manifest, "m000000", site))
+                            .transpose()?;
+                        if manifest.spec.kind == StudyKind::Tuning && member.id != "m000000" {
+                            let baseline = baseline.as_ref().expect("baseline loaded");
+                            if let Err(error) = comparable_to_baseline(&result, baseline) {
+                                reason = Some(error.to_string());
+                                break;
+                            }
+                            if let Err(error) = validation_comparable_to_baseline(&result, baseline)
+                            {
+                                validation_failed = true;
+                                push_warning_once(
+                                    state,
+                                    format!(
+                                        "{} / {} validation unavailable: {}",
+                                        member.id, site, error
+                                    ),
+                                );
+                            }
+                        }
+                        for error in &result.validation_errors {
+                            validation_failed = true;
+                            push_warning_once(
+                                state,
+                                format!(
+                                    "{} / {} validation target {} unavailable: {}",
+                                    member.id, site, error.key, error.reason
+                                ),
+                            );
+                        }
                         calibration.extend(result.calibration);
                         validation.extend(result.validation);
                     }
@@ -1371,7 +1707,11 @@ fn refresh_candidates(
             }
         }
         let calibration_score = fixed_score(&calibration);
-        let validation_score = fixed_score(&validation);
+        let validation_score = if validation_failed {
+            None
+        } else {
+            fixed_score(&validation)
+        };
         let feasible = reason.is_none()
             && (manifest.spec.kind == StudyKind::Uncertainty || calibration_score.is_some());
         if !feasible && reason.is_none() {
@@ -1409,6 +1749,31 @@ fn refresh_candidates(
     state.best_objective = best.map(|best| best.1);
     update_overfit_warning(state);
     Ok(())
+}
+
+pub(super) fn refresh_tuning_state(manifest: &Manifest, state: &mut StudyState) -> Result<()> {
+    if manifest.spec.kind != StudyKind::Tuning {
+        return Ok(());
+    }
+    let members = super::generation::load_members(manifest)?;
+    for task in state.tasks.values_mut() {
+        if task.status != TaskStatus::Succeeded {
+            continue;
+        }
+        let result = read_task_result(manifest, &task.member, &task.site).with_context(|| {
+            format!(
+                "cannot validate succeeded Study task result for {} / {}",
+                task.member, task.site
+            )
+        })?;
+        task.objective = fixed_score(&result.calibration);
+        task.validation_objective = result
+            .validation_errors
+            .is_empty()
+            .then(|| fixed_score(&result.validation))
+            .flatten();
+    }
+    refresh_candidates(manifest, &members, state)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1453,7 +1818,7 @@ fn run_de_generations(
         {
             break;
         }
-        let before = state.best_objective;
+        let before = population_score(state);
         let parents = state
             .population
             .iter()
@@ -1529,11 +1894,11 @@ fn run_de_generations(
         state.population = selected;
         state.generation = generation;
         refresh_candidates(manifest, members, state)?;
-        let improved = match (before, state.best_objective) {
-            (None, Some(_)) => true,
-            (Some(before), Some(after)) => before - after >= manifest.spec.budget.min_improvement,
-            _ => false,
-        };
+        let improved = generation_improved(
+            before,
+            population_score(state),
+            manifest.spec.budget.min_improvement,
+        );
         state.no_improvement_generations = if improved {
             0
         } else {
@@ -1588,6 +1953,35 @@ fn trial_wins(state: &StudyState, parent: &str, trial: &str) -> bool {
     match (score(parent), score(trial)) {
         (Some(parent), Some(trial)) => trial <= parent,
         (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn population_score(state: &StudyState) -> Option<f64> {
+    state
+        .population
+        .iter()
+        .filter_map(|member| {
+            state
+                .candidates
+                .get(member)
+                .filter(|candidate| candidate.feasible)
+                .and_then(|candidate| candidate.calibration)
+        })
+        .min_by(f64::total_cmp)
+}
+
+fn generation_improved(before: Option<f64>, after: Option<f64>, min_improvement: f64) -> bool {
+    match (before, after) {
+        (None, Some(_)) => true,
+        (Some(before), Some(after)) => {
+            let gain = before - after;
+            if min_improvement == 0.0 {
+                gain > 0.0
+            } else {
+                gain >= min_improvement
+            }
+        }
         _ => false,
     }
 }
@@ -1867,7 +2261,14 @@ fn write_member_table(
 }
 
 fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()> {
-    let results = Path::new(&manifest.root).join("results");
+    write_objective_tables_to(manifest, state, &Path::new(&manifest.root).join("results"))
+}
+
+pub(super) fn write_objective_tables_to(
+    manifest: &Manifest,
+    state: &StudyState,
+    results: &Path,
+) -> Result<()> {
     write_json(&results.join("objectives.json"), &state.candidates)?;
     let mut objectives = String::from("member,generation,feasible,calibration,validation,reason\n");
     for (member, candidate) in &state.candidates {
@@ -1904,11 +2305,11 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
         for row in result.calibration.iter().chain(&result.validation) {
             metrics.push_str(&format!(
                 "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}\n",
-                task.member,
-                row.site,
-                row.period,
-                row.key,
-                row.variable,
+                csv_cell(&task.member),
+                csv_cell(&row.site),
+                csv_cell(&row.period),
+                csv_cell(&row.key),
+                csv_cell(&row.variable),
                 row.metric,
                 row.weight,
                 row.min_pairs,
@@ -1936,6 +2337,7 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
                 loss: row.loss,
                 model_mean: row.model_mean,
                 observation_mean: row.observation_mean,
+                support_hash: row.support_hash.clone(),
             });
         }
     }
@@ -1963,6 +2365,19 @@ pub fn retry(study_dir: &Path, include_review: bool) -> Result<StudyState> {
             manifest.id
         );
     }
+    let members = if manifest.spec.kind == StudyKind::Tuning
+        && manifest.spec.method == StudyMethod::DifferentialEvolution
+    {
+        super::generation::load_members(&manifest)?
+            .into_iter()
+            .map(|member| (member.id.clone(), member))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let closed_generation = state.generation;
+    let population = state.population.clone();
+    let mut reopened = false;
     for task in state.tasks.values_mut() {
         if matches!(task.status, TaskStatus::Failed | TaskStatus::Interrupted)
             || (include_review
@@ -1971,19 +2386,58 @@ pub fn retry(study_dir: &Path, include_review: bool) -> Result<StudyState> {
                     TaskStatus::NeedsReview | TaskStatus::Running | TaskStatus::Evaluating
                 ))
         {
+            if !retryable_task(
+                &manifest,
+                closed_generation,
+                &population,
+                &members,
+                &task.member,
+            ) {
+                task.reason = Some(format!(
+                    "cannot retry closed DE generation for {}; create a new Study to rerun it",
+                    task.member
+                ));
+                continue;
+            }
             task.status = TaskStatus::Queued;
             task.reason = None;
             task.stage = None;
             task.objective = None;
             task.validation_objective = None;
             task.process = None;
+            reopened = true;
         }
+    }
+    if !reopened {
+        bail!("Study has no retryable failed tasks; closed DE generations are immutable");
     }
     state.status = StudyStatus::Ready;
     super::state::resume(&study_dir)?;
     super::state::clear_cancel(&study_dir)?;
     super::checkpoint::write_next(&checkpoint_dir, &state)?;
     Ok(state)
+}
+
+fn retryable_task(
+    manifest: &Manifest,
+    closed_generation: usize,
+    population: &[String],
+    members: &BTreeMap<String, MemberPlan>,
+    member: &str,
+) -> bool {
+    if manifest.spec.kind != StudyKind::Tuning
+        || manifest.spec.method != StudyMethod::DifferentialEvolution
+        || member == "m000000"
+    {
+        return true;
+    }
+    let Some(plan) = members.get(member) else {
+        return false;
+    };
+    plan.generation > closed_generation
+        || (plan.generation == 0
+            && closed_generation == 0
+            && (population.is_empty() || population.iter().any(|id| id == member)))
 }
 
 pub fn apply(
@@ -2174,8 +2628,22 @@ fn resolve_apply_member(
     manifest: &Manifest,
     member_id: &str,
 ) -> Result<MemberPlan> {
-    let state = super::checkpoint::load_latest::<StudyState>(&study_dir.join("checkpoints/state"))?
-        .map(|loaded| loaded.payload);
+    let mut state =
+        super::checkpoint::load_latest::<StudyState>(&study_dir.join("checkpoints/state"))?
+            .map(|loaded| loaded.payload);
+    if let Some(state) = &state {
+        if state.study_id != manifest.id {
+            bail!(
+                "Study checkpoint id {} does not match manifest {}",
+                state.study_id,
+                manifest.id
+            );
+        }
+    }
+    let members = super::generation::load_members(manifest)?;
+    if let Some(state) = state.as_mut() {
+        refresh_tuning_state(manifest, state)?;
+    }
     let member_id = if member_id == "best" {
         state
             .as_ref()
@@ -2197,7 +2665,10 @@ fn resolve_apply_member(
             .get(&member_id)
             .with_context(|| format!("Study member {member_id} has no objective result"))?;
         if !candidate.feasible {
-            bail!("Study member {member_id} is not feasible and cannot be applied");
+            bail!(
+                "Study member {member_id} is not feasible and cannot be applied: {}",
+                candidate.reason.as_deref().unwrap_or("no objective result")
+            );
         }
         for site in &manifest.spec.base_cases {
             let task = state
@@ -2209,7 +2680,7 @@ fn resolve_apply_member(
             }
         }
     }
-    super::generation::load_members(manifest)?
+    members
         .into_iter()
         .find(|member| member.id == member_id)
         .with_context(|| format!("unknown Study member {member_id}"))
@@ -2268,8 +2739,11 @@ fn task_result_path(manifest: &Manifest, member: &str, site: &str) -> PathBuf {
 
 fn read_task_result(manifest: &Manifest, member: &str, site: &str) -> Result<TaskResult> {
     let path = task_result_path(manifest, member, site);
-    serde_json::from_slice(&fs::read(&path)?)
-        .with_context(|| format!("cannot parse {}", path.display()))
+    let result: TaskResult = serde_json::from_slice(&fs::read(&path)?)
+        .with_context(|| format!("cannot parse {}", path.display()))?;
+    validate_task_result(manifest, member, site, &result)
+        .with_context(|| format!("invalid {}", path.display()))?;
+    Ok(result)
 }
 
 fn model_series(
@@ -2435,7 +2909,7 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn csv_cell(value: &str) -> String {
-    if value.contains([',', '"', '\n']) {
+    if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.into()
@@ -2522,6 +2996,252 @@ mod tests {
         );
         assert!(!trial_wins(&state, "parent", "failed"));
         assert!(trial_wins(&state, "parent", "better"));
+    }
+
+    #[test]
+    fn trial_selection_tie_wins_but_patience_tie_is_not_improvement() {
+        let mut state = StudyState::new("s".into(), []).unwrap();
+        for member in ["parent", "trial"] {
+            state.candidates.insert(
+                member.into(),
+                CandidateState {
+                    generation: 0,
+                    feasible: true,
+                    calibration: Some(1.0),
+                    validation: None,
+                    reason: None,
+                },
+            );
+        }
+        assert!(trial_wins(&state, "parent", "trial"));
+        assert!(!generation_improved(Some(1.0), Some(1.0), 0.0));
+        assert!(generation_improved(Some(1.0), Some(0.99), 0.0));
+        assert!(!generation_improved(Some(1.0), Some(0.99), 0.02));
+        assert!(generation_improved(Some(1.0), Some(0.98), 0.02));
+    }
+
+    fn tuning_manifest(root: &Path) -> Manifest {
+        Manifest {
+            schema_version: 1,
+            id: "s".into(),
+            root: root.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec: StudySpec {
+                kind: StudyKind::Tuning,
+                method: StudyMethod::DifferentialEvolution,
+                seed: 0,
+                kernel_dir: None,
+                base_cases: vec!["site".into()],
+                observations: BTreeMap::new(),
+                site_mode: super::super::spec::SiteMode::Shared,
+                parameters: Vec::new(),
+                outputs: Vec::new(),
+                analysis_from: None,
+                analysis_to: None,
+                targets: vec![TargetSpec {
+                    key: "Qle".into(),
+                    site: None,
+                    variable: "Qle".into(),
+                    metric: ObjectiveMetric::Nrmse,
+                    weight: 1.0,
+                    from: 0,
+                    to: 10,
+                    validation_from: Some(10),
+                    validation_to: Some(20),
+                    min_pairs: 2,
+                }],
+                budget: Default::default(),
+            },
+            members: Vec::new(),
+            provenance: Default::default(),
+        }
+    }
+
+    fn target_row(period: &str, support: Vec<i64>) -> TargetResult {
+        target_row_with_obs(
+            period,
+            support.clone(),
+            support.iter().map(|v| *v as f64).collect(),
+        )
+    }
+
+    fn target_row_with_obs(period: &str, support: Vec<i64>, obs: Vec<f64>) -> TargetResult {
+        TargetResult {
+            key: "Qle".into(),
+            site: "site".into(),
+            variable: "Qle".into(),
+            period: period.into(),
+            metric: ObjectiveMetric::Nrmse,
+            weight: 1.0,
+            min_pairs: 2,
+            pairs: support.len(),
+            value: 0.4,
+            observation_sd: Some(2.0),
+            loss: 0.2,
+            model_mean: 5.0,
+            observation_mean: 4.5,
+            support_hash: pair_support_hash(&support, &obs),
+        }
+    }
+
+    #[test]
+    fn fixed_score_is_invariant_to_large_common_weight_scale() {
+        let mut a = target_row("calibration", vec![1, 2]);
+        a.weight = 1e308;
+        a.loss = 2.0;
+        let mut b = target_row("validation", vec![3, 4]);
+        b.weight = 1e308;
+        b.loss = 4.0;
+        assert_eq!(fixed_score(&[a, b]), Some(3.0));
+
+        let mut a = target_row("calibration", vec![1, 2]);
+        a.loss = 1e308;
+        let mut b = target_row("validation", vec![3, 4]);
+        b.loss = 1e308;
+        assert_eq!(fixed_score(&[a, b]), Some(1e308));
+    }
+
+    #[test]
+    fn cached_tuning_results_must_match_frozen_target_set_and_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-result-validate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manifest = tuning_manifest(&root);
+        let mut ok = TaskResult {
+            member: "m000001".into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration: vec![target_row("calibration", vec![1, 2])],
+            validation: vec![target_row("validation", vec![3, 4])],
+            validation_errors: Vec::new(),
+        };
+        validate_task_result(&manifest, "m000001", "site", &ok).unwrap();
+
+        ok.site = "other".into();
+        assert!(validate_task_result(&manifest, "m000001", "site", &ok)
+            .unwrap_err()
+            .to_string()
+            .contains("identity"));
+        ok.site = "site".into();
+        ok.validation.clear();
+        assert!(validate_task_result(&manifest, "m000001", "site", &ok)
+            .unwrap_err()
+            .to_string()
+            .contains("missing required target"));
+        ok.validation = vec![target_row("validation", vec![])];
+        assert!(validate_task_result(&manifest, "m000001", "site", &ok)
+            .unwrap_err()
+            .to_string()
+            .contains("missing pair support"));
+        ok.validation = vec![target_row("calibration", vec![3, 4])];
+        assert!(validate_task_result(&manifest, "m000001", "site", &ok)
+            .unwrap_err()
+            .to_string()
+            .contains("stored in validation"));
+        ok.validation = vec![target_row("validation", vec![3, 4])];
+        ok.validation[0].loss = 123.0;
+        assert!(validate_task_result(&manifest, "m000001", "site", &ok)
+            .unwrap_err()
+            .to_string()
+            .contains("loss does not match"));
+        ok.validation.clear();
+        ok.validation_errors = vec![TargetError {
+            key: "Qle".into(),
+            site: "site".into(),
+            variable: "Qle".into(),
+            period: "validation".into(),
+            reason: "no validation pairs".into(),
+        }];
+        validate_task_result(&manifest, "m000001", "site", &ok).unwrap();
+    }
+
+    #[test]
+    fn candidate_support_must_match_baseline_support() {
+        let baseline = TaskResult {
+            member: "m000000".into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration: vec![target_row("calibration", vec![1, 2, 3])],
+            validation: Vec::new(),
+            validation_errors: Vec::new(),
+        };
+        let same_len_wrong_time = TaskResult {
+            member: "m000001".into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration: vec![target_row("calibration", vec![1, 2, 4])],
+            validation: Vec::new(),
+            validation_errors: Vec::new(),
+        };
+        assert!(comparable_to_baseline(&same_len_wrong_time, &baseline)
+            .unwrap_err()
+            .to_string()
+            .contains("different model-observation support"));
+        let wrong_observation = TaskResult {
+            member: "m000001".into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration: vec![target_row_with_obs(
+                "calibration",
+                vec![1, 2, 3],
+                vec![1.0, 99.0, 3.0],
+            )],
+            validation: Vec::new(),
+            validation_errors: Vec::new(),
+        };
+        assert!(comparable_to_baseline(&wrong_observation, &baseline)
+            .unwrap_err()
+            .to_string()
+            .contains("different model-observation support"));
+        let mut validation_mismatch = wrong_observation.clone();
+        validation_mismatch.calibration = baseline.calibration.clone();
+        validation_mismatch.validation = vec![target_row_with_obs(
+            "validation",
+            vec![1, 2, 3],
+            vec![1.0, 99.0, 3.0],
+        )];
+        assert!(comparable_to_baseline(&validation_mismatch, &baseline).is_ok());
+    }
+
+    #[test]
+    fn retry_leaves_closed_de_generation_failed() {
+        let manifest = tuning_manifest(Path::new("/unused"));
+        let mut members = BTreeMap::new();
+        members.insert(
+            "m000005".into(),
+            MemberPlan {
+                id: "m000005".into(),
+                generation: 1,
+                candidate_index: 5,
+                baseline: false,
+                parameters: BTreeMap::new(),
+            },
+        );
+        assert!(!retryable_task(&manifest, 1, &[], &members, "m000005"));
+        assert!(retryable_task(&manifest, 0, &[], &members, "m000005"));
+        assert!(retryable_task(&manifest, 1, &[], &members, "m000000"));
+        members.insert(
+            "m000001".into(),
+            MemberPlan {
+                id: "m000001".into(),
+                generation: 0,
+                candidate_index: 1,
+                baseline: false,
+                parameters: BTreeMap::new(),
+            },
+        );
+        assert!(!retryable_task(
+            &manifest,
+            1,
+            &["m000001".into()],
+            &members,
+            "m000001"
+        ));
     }
 
     #[test]
@@ -2787,6 +3507,7 @@ mod tests {
                     }],
                     calibration: Vec::new(),
                     validation: Vec::new(),
+                    validation_errors: Vec::new(),
                 },
             )
             .unwrap();
@@ -2894,6 +3615,7 @@ mod tests {
                 }],
                 calibration: Vec::new(),
                 validation: Vec::new(),
+                validation_errors: Vec::new(),
             },
         )
         .unwrap();
@@ -2913,6 +3635,7 @@ mod tests {
                 }],
                 calibration: Vec::new(),
                 validation: Vec::new(),
+                validation_errors: Vec::new(),
             },
         )
         .unwrap();
@@ -3052,7 +3775,11 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("site/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
         std::fs::create_dir_all(dir.join("samples")).unwrap();
-        std::fs::write(dir.join("samples/design.csv"), "member,site\n").unwrap();
+        std::fs::write(
+            dir.join("samples/design.csv"),
+            "member,baseline,generation,candidate,DEF_TUNING_CNFAC\nm000001,false,0,1,0.5\n",
+        )
+        .unwrap();
         let manifest = Manifest {
             schema_version: 1,
             id: "s".into(),
@@ -3066,8 +3793,15 @@ mod tests {
                 base_cases: vec!["site".into()],
                 observations: BTreeMap::new(),
                 site_mode: super::super::spec::SiteMode::Shared,
-                parameters: Vec::new(),
-                outputs: Vec::new(),
+                parameters: vec![super::super::spec::ParameterSpec {
+                    name: "DEF_TUNING_CNFAC".into(),
+                    parameter_id: None,
+                    scope_instance: None,
+                    sample_min: 0.1,
+                    sample_max: 0.9,
+                    scale: None,
+                }],
+                outputs: vec!["f_lfevpa".into()],
                 analysis_from: None,
                 analysis_to: None,
                 targets: Vec::new(),
@@ -4028,6 +4762,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        let target_key = "Qle,\r\nquoted\"key";
         let manifest = Manifest {
             schema_version: 1,
             id: "s".into(),
@@ -4045,7 +4780,18 @@ mod tests {
                 outputs: Vec::new(),
                 analysis_from: None,
                 analysis_to: None,
-                targets: Vec::new(),
+                targets: vec![TargetSpec {
+                    key: target_key.into(),
+                    site: None,
+                    variable: "Qle".into(),
+                    metric: ObjectiveMetric::Nrmse,
+                    weight: 1.0,
+                    from: 0,
+                    to: 10,
+                    validation_from: None,
+                    validation_to: None,
+                    min_pairs: 2,
+                }],
                 budget: Default::default(),
             },
             members: Vec::new(),
@@ -4083,7 +4829,7 @@ mod tests {
                 site: "site".into(),
                 outputs: Vec::new(),
                 calibration: vec![TargetResult {
-                    key: "Qle".into(),
+                    key: target_key.into(),
                     site: "site".into(),
                     variable: "Qle".into(),
                     period: "calibration".into(),
@@ -4096,8 +4842,13 @@ mod tests {
                     loss: 0.2,
                     model_mean: 5.0,
                     observation_mean: 4.5,
+                    support_hash: pair_support_hash(
+                        &(0..12).collect::<Vec<_>>(),
+                        &(0..12).map(|v| v as f64).collect::<Vec<_>>(),
+                    ),
                 }],
                 validation: Vec::new(),
+                validation_errors: Vec::new(),
             },
         )
         .unwrap();
@@ -4109,7 +4860,9 @@ mod tests {
             serde_json::from_slice(&std::fs::read(root.join("results/metrics.json")).unwrap())
                 .unwrap();
         assert_eq!(rows[0]["member"], "m000001");
-        assert_eq!(rows[0]["target"], "Qle");
+        assert_eq!(rows[0]["target"], target_key);
+        let csv = std::fs::read_to_string(root.join("results/metrics.csv")).unwrap();
+        assert!(csv.contains("\"Qle,\r\nquoted\"\"key\""), "{csv:?}");
         assert_eq!(rows[0]["min_pairs"], 2);
         assert_eq!(rows[0]["observation_sd"], 2.0);
         std::fs::remove_dir_all(root).unwrap();

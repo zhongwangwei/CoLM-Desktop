@@ -44,6 +44,13 @@ pub struct Parameter {
     pub sentinel: Option<Sentinel>,
 }
 
+impl Parameter {
+    pub fn supports_continuous_sampling(&self) -> bool {
+        // This real-valued namelist field is restricted to whole days by CoLM.
+        self.name != "DEF_TUNING_CROP_PLANTING_DAY"
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StudyParameter<'a> {
     pub name: &'a str,
@@ -289,6 +296,12 @@ pub fn validate_study_parameters(params: &[StudyParameter<'_>]) -> Result<()> {
         else {
             bail!("{} is not a registered tuning parameter", p.name);
         };
+        if !meta.supports_continuous_sampling() {
+            bail!(
+                "{} is not eligible for continuous Study sampling",
+                meta.name
+            );
+        }
         if !p.sample_min.is_finite() || !p.sample_max.is_finite() {
             bail!("{} sample_min/sample_max must be finite", meta.name);
         }
@@ -340,6 +353,13 @@ pub fn validate_case_parameter_ranges(
         .iter()
         .map(|p| (p.name.to_ascii_uppercase(), (p.sample_min, p.sample_max)))
         .collect::<BTreeMap<_, _>>();
+    if let Some((duration_min, _)) = ranges.get("DEF_TUNING_IRRIGATION_DURATION_SEC") {
+        if *duration_min < real(&doc, "DEF_simulation_time%timestep")? {
+            bail!(
+                "DEF_TUNING_IRRIGATION_DURATION_SEC sample_min must be at least one model timestep"
+            );
+        }
+    }
     for (min_name, max_name, allow_equal) in [
         ("DEF_TUNING_SMPMIN", "DEF_TUNING_SMPMAX", false),
         ("DEF_TUNING_SMPMIN_HR", "DEF_TUNING_SMPMAX_HR", false),
@@ -370,11 +390,13 @@ pub fn validate_case_parameter_ranges(
 
 /// Reject parameters that the selected case would not actually use. Sentinel
 /// baselines remain valid: Study bounds are checked separately and every
-/// sampled candidate receives an explicit value.
+/// sampled candidate receives an explicit value. The caller supplies the runtime
+/// land type when the namelist inherits it from site data or global rawdata.
 pub fn validate_case_parameter_activity(
     case_nml: &Path,
     names: &[String],
     kernel_macros: &[String],
+    resolved_landtype: Option<i64>,
 ) -> Result<()> {
     let text = std::fs::read_to_string(case_nml)
         .map_err(|error| anyhow!("cannot read {}: {error}", case_nml.display()))?;
@@ -383,7 +405,7 @@ pub fn validate_case_parameter_activity(
     let single = has("SinglePoint");
     let usgs = has("LULC_USGS");
     let crop = has("CROP");
-    let landtype = integer(&doc, "SITE_landtype");
+    let landtype = resolved_landtype.unwrap_or_else(|| integer(&doc, "SITE_landtype"));
     let waterbody = landtype == if usgs { 16 } else { 17 };
     let wetland = landtype == if usgs { 17 } else { 11 };
     let urban_land = landtype == if usgs { 1 } else { 13 };

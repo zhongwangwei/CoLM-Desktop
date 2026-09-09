@@ -158,9 +158,13 @@ export function percentageWindow(start, end, fromPercent, toPercent, quantum = 1
 export function bestTuningSummary(envelope = {}) {
   const state = envelope.state || {};
   const candidates = state.candidates || {};
-  const bestMember = state.best_member || Object.entries(candidates)
-    .filter(([, c]) => c?.feasible && Number.isFinite(c.calibration))
-    .sort((a, b) => a[1].calibration - b[1].calibration)[0]?.[0] || '';
+  const explicit = candidates[state.best_member];
+  const bestMember = state.best_member !== 'm000000' && explicit?.feasible && Number.isFinite(explicit.calibration)
+    ? state.best_member
+    : Object.entries(candidates)
+      .filter(([member]) => member !== 'm000000')
+      .filter(([, c]) => c?.feasible && Number.isFinite(c.calibration))
+      .sort((a, b) => a[1].calibration - b[1].calibration)[0]?.[0] || '';
   const best = bestMember ? candidates[bestMember] : null;
   const baseline = candidates.m000000 || null;
   return {

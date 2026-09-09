@@ -661,6 +661,30 @@ mod tests {
     }
 
     #[test]
+    fn tuning_accepts_positive_scalar_log_ranges() {
+        let mut spec = tuning_spec(vec![tuning_target("qle", true)]);
+        spec.parameters[0].scale = Some(ScaleSpec::Log);
+        validate_spec(&spec).unwrap();
+        spec.parameters[0].sample_min = 0.0;
+        assert!(validate_spec(&spec)
+            .unwrap_err()
+            .to_string()
+            .contains("positive bounds"));
+    }
+
+    #[test]
+    fn tuning_rejects_integer_crop_calendar_before_sampling() {
+        let mut spec = tuning_spec(vec![tuning_target("qle", true)]);
+        spec.parameters[0].name = "DEF_TUNING_CROP_PLANTING_DAY".into();
+        spec.parameters[0].sample_min = 100.0;
+        spec.parameters[0].sample_max = 200.0;
+        assert!(validate_spec(&spec)
+            .unwrap_err()
+            .to_string()
+            .contains("not eligible for continuous Study sampling"));
+    }
+
+    #[test]
     fn indexed_pft_parameters_are_distinct_study_dimensions() {
         let mut spec = tuning_spec(vec![tuning_target("qle", true)]);
         spec.parameters = [1, 2]

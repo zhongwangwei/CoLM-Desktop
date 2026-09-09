@@ -329,6 +329,7 @@ pub fn status(study_dir: &Path) -> Result<Manifest> {
 }
 
 pub(super) fn verify_frozen_inputs(manifest: &Manifest) -> Result<()> {
+    spec::validate_spec(&manifest.spec).context("Study spec is no longer supported")?;
     if manifest.provenance.parameter_catalog_version != 0
         && manifest.provenance.parameter_catalog_version != colm_case::parameters::CATALOG_VERSION
     {
@@ -593,12 +594,48 @@ pub(super) fn validate_case_parameters(
             })
         })
         .collect::<Vec<_>>();
+    let has = |name: &str| kernel_macros.iter().any(|item| item == name);
+    // DEF_USE_USGS/CROP are read-only reflections overwritten by MOD_Namelist.
+    let usgs = has("LULC_USGS");
+    let crop = has("CROP");
+    let lct = logical(&doc, "DEF_USE_LCT");
+    let pft = logical(&doc, "DEF_USE_PFT");
+    let pc = logical(&doc, "DEF_USE_PC");
+    let needs_type_context = spec.parameters.iter().any(|parameter| {
+        parameter
+            .scope_instance
+            .as_ref()
+            .is_some_and(|scope| !matches!(scope.kind, ParameterScopeKind::CaseScalar))
+    });
+    let landtype = if needs_type_context
+        || (has("SinglePoint") && !case_scalars.is_empty() && doc.get("SITE_fsitedata").is_some())
+    {
+        site_landtype(case, &doc, usgs)?
+    } else {
+        integer(&doc, "SITE_landtype")
+    };
+    // Stomatal scalar overrides are catalogued as land-cover parameters too;
+    // their activity guards must not depend on the UI/catalog scope label.
+    let names = spec
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            colm_case::tuning::find(&parameter.name)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .map(|parameter| parameter.name.clone())
+        .collect::<Vec<_>>();
+    if !names.is_empty() {
+        colm_case::tuning::validate_case_parameter_activity(
+            &case_nml,
+            &names,
+            kernel_macros,
+            Some(landtype),
+        )?;
+    }
     if !case_scalars.is_empty() {
-        let names = case_scalars
-            .iter()
-            .map(|parameter| parameter.name.clone())
-            .collect::<Vec<_>>();
-        colm_case::tuning::validate_case_parameter_activity(&case_nml, &names, kernel_macros)?;
         let ranges = case_scalars
             .iter()
             .map(|p| colm_case::tuning::StudyParameter {
@@ -614,23 +651,6 @@ pub(super) fn validate_case_parameters(
         colm_case::tuning::validate_case_parameter_ranges(&case_nml, &ranges)?;
     }
 
-    let has = |name: &str| kernel_macros.iter().any(|item| item == name);
-    let usgs = has("LULC_USGS") || logical(&doc, "DEF_USE_USGS");
-    let crop = has("CROP") || logical(&doc, "DEF_USE_CROP");
-    let lct = logical(&doc, "DEF_USE_LCT");
-    let pft = logical(&doc, "DEF_USE_PFT");
-    let pc = logical(&doc, "DEF_USE_PC");
-    let needs_type_context = spec.parameters.iter().any(|parameter| {
-        parameter
-            .scope_instance
-            .as_ref()
-            .is_some_and(|scope| !matches!(scope.kind, ParameterScopeKind::CaseScalar))
-    });
-    let landtype = if needs_type_context {
-        site_landtype(case, &doc, usgs)?
-    } else {
-        integer(&doc, "SITE_landtype")
-    };
     for parameter in &spec.parameters {
         let descriptor = parameter.descriptor()?;
         let Some(scope) = parameter.scope_instance.as_ref() else {
@@ -641,6 +661,11 @@ pub(super) fn validate_case_parameters(
             ParameterScopeKind::LandCoverClass => {
                 if !lct {
                     bail!("{} requires an LCT base case", descriptor.id);
+                }
+                if colm_case::land_cover::needs_plant_hydraulics(&parameter.name)
+                    && !logical(&doc, "DEF_USE_PLANTHYDRAULICS")
+                {
+                    bail!("{} is inactive without plant hydraulics", descriptor.id);
                 }
                 let scoped_usgs = scope
                     .scheme
@@ -761,7 +786,7 @@ fn pft_parameter_applies(
 
 fn site_landtype(case: &Path, doc: &colm_namelist::Document, usgs: bool) -> Result<i64> {
     let explicit = integer(doc, "SITE_landtype");
-    if explicit > 0 {
+    if explicit >= 0 {
         return Ok(explicit);
     }
     let site = site_file(case, doc)?;
@@ -770,9 +795,76 @@ fn site_landtype(case: &Path, doc: &colm_namelist::Document, usgs: bool) -> Resu
     } else {
         colm_srfdata::site::SiteMode::Igbp
     };
-    Ok(colm_srfdata::site::landtype_for_mode(&site, mode)?
-        .map(i64::from)
-        .unwrap_or(explicit))
+    if logical(doc, "USE_SITE_landtype") {
+        if let Some(value) = colm_srfdata::site::landtype_for_mode(&site, mode)? {
+            return Ok(i64::from(value));
+        }
+    }
+    // Match MOD_SingleSrfdata: an unselected/missing site classification falls
+    // back to rawdata, using file coordinates in preference to namelist values.
+    let file = netcdf::open(&site)?;
+    let coordinate = |variable: &str, field: &str| -> Result<f64> {
+        if file.variable(variable).is_some() {
+            crate::read_file_1d(&file, &site, variable)?
+                .first()
+                .copied()
+                .with_context(|| format!("{} has no {variable} value", site.display()))
+        } else {
+            Ok(real(doc, field))
+        }
+    };
+    let mut lon = coordinate("longitude", "SITE_lon_location")?;
+    // MOD_Utils normalizes finite longitudes, but rejects unresolved sentinels.
+    if !lon.is_finite() || lon.abs() - 360.0 == lon.abs() {
+        bail!("site longitude is non-finite or cannot resolve a full revolution");
+    }
+    if !(-180.0..180.0).contains(&lon) {
+        lon = lon.rem_euclid(360.0);
+        if lon >= 180.0 {
+            lon -= 360.0;
+        }
+    }
+    let lat = coordinate("latitude", "SITE_lat_location")?;
+    let raw = match doc.get("DEF_dir_rawdata") {
+        Some(Value::Str(path)) if !path.trim().is_empty() => PathBuf::from(path),
+        _ => bail!(
+            "{} needs DEF_dir_rawdata to resolve SITE_landtype",
+            case.display()
+        ),
+    };
+    let raw = if raw.is_absolute() {
+        raw
+    } else {
+        case.join(raw)
+    };
+    let (grid, name) = if usgs {
+        (
+            colm_srfdata::grid::Grid {
+                nlon: 43200,
+                nlat: 21600,
+            },
+            "landtype-usgs-update.nc".to_string(),
+        )
+    } else {
+        (
+            colm_srfdata::grid::COLM_500M,
+            format!("landtype-igbp-modis-{:04}.nc", integer(doc, "DEF_LC_YEAR")),
+        )
+    };
+    let value = colm_srfdata::raster::point_f64_on(
+        grid,
+        &raw.join("landtypes").join(name),
+        "landtype",
+        lon,
+        lat,
+    )?;
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || !(0.0..=if usgs { 24.0 } else { 17.0 }).contains(&value)
+    {
+        bail!("rawdata landtype {value} is outside the selected classification");
+    }
+    Ok(value as i64)
 }
 
 fn site_file(case: &Path, doc: &colm_namelist::Document) -> Result<PathBuf> {
@@ -1157,6 +1249,113 @@ mod tests {
     }
 
     #[test]
+    fn scalar_activity_uses_the_same_landtype_source_as_the_kernel() {
+        for (usgs, wetland) in [(false, 11), (true, 17)] {
+            let root = temp("activity-landtype");
+            let case = root.join("caseA");
+            fs::remove_file(case.join("site.nc")).unwrap();
+            colm_srfdata::site::skeleton_with_mode(
+                &case.join("site.nc"),
+                -179.999,
+                89.999,
+                Some(wetland),
+                colm_srfdata::site::SiteKind::Natural,
+                if usgs {
+                    colm_srfdata::site::SiteMode::Usgs
+                } else {
+                    colm_srfdata::site::SiteMode::Igbp
+                },
+                false,
+            )
+            .unwrap();
+            fs::create_dir_all(case.join("rawdata/landtypes")).unwrap();
+            let raw = case.join(if usgs {
+                "rawdata/landtypes/landtype-usgs-update.nc"
+            } else {
+                "rawdata/landtypes/landtype-igbp-modis-2010.nc"
+            });
+            {
+                let mut file = netcdf::create(raw).unwrap();
+                file.add_dimension("lat", 1).unwrap();
+                file.add_dimension("lon", 1).unwrap();
+                file.add_variable::<i32>("landtype", &["lat", "lon"])
+                    .unwrap()
+                    .put_values(&[10], ..)
+                    .unwrap();
+            }
+            let mut spec: StudySpec =
+                serde_json::from_str(&fs::read_to_string(spec(&root)).unwrap()).unwrap();
+            spec.parameters[0].name = "DEF_TUNING_WETWATMAX".into();
+            spec.parameters[0].sample_min = 100.0;
+            spec.parameters[0].sample_max = 200.0;
+            let macros = vec![
+                "SinglePoint".into(),
+                if usgs { "LULC_USGS" } else { "LULC_IGBP" }.into(),
+            ];
+            for (use_site, explicit, active) in
+                [(true, -1, true), (false, -1, false), (false, wetland, true)]
+            {
+                let original = format!("&nl_colm\n SITE_fsitedata='site.nc'\n SITE_landtype={explicit}\n USE_SITE_landtype={}\n DEF_USE_USGS={}\n DEF_dir_rawdata='rawdata/'\n DEF_LC_YEAR=2010\n/\n", if use_site { ".true." } else { ".false." }, if usgs { ".false." } else { ".true." });
+                fs::write(case.join("case.nml"), &original).unwrap();
+                let result = validate_case_parameters(&case, &spec, &macros);
+                assert_eq!(
+                    result.is_ok(),
+                    active,
+                    "USGS={usgs} use_site={use_site} explicit={explicit}: {result:?}"
+                );
+                assert_eq!(fs::read_to_string(case.join("case.nml")).unwrap(), original);
+            }
+            let doc = colm_namelist::parse("&nl_colm\n SITE_fsitedata='site.nc'\n SITE_landtype=-1\n USE_SITE_landtype=.false.\n DEF_dir_rawdata='rawdata/'\n DEF_LC_YEAR=2010\n/\n").unwrap();
+            for lon in [180.001, -539.999, f64::NAN, -1e36] {
+                {
+                    let mut file = netcdf::append(case.join("site.nc")).unwrap();
+                    file.variable_mut("longitude")
+                        .unwrap()
+                        .put_values(&[lon], ..)
+                        .unwrap();
+                }
+                let result = site_landtype(&case, &doc, usgs);
+                if lon.is_finite() && lon.abs() < 1000.0 {
+                    assert_eq!(result.unwrap(), 10, "USGS={usgs}, longitude={lon}");
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "missing/invalid longitude is not a location"
+                    );
+                }
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn lct_study_parameters_require_their_active_process() {
+        let root = temp("lct-activity");
+        let case = root.join("caseA");
+        let mut spec: StudySpec =
+            serde_json::from_str(&fs::read_to_string(spec(&root)).unwrap()).unwrap();
+        spec.parameters[0].scope_instance = Some(
+            serde_json::from_value(serde_json::json!({
+                "kind": "land-cover-class", "scheme": "IGBP", "index": 10
+            }))
+            .unwrap(),
+        );
+        let macros = vec!["SinglePoint".into(), "LULC_IGBP".into()];
+        for (name, flag) in [
+            ("DEF_MEDLYN_G1", "DEF_USE_MEDLYNST"),
+            ("DEF_LC_KMAX_SUN", "DEF_USE_PLANTHYDRAULICS"),
+        ] {
+            spec.parameters[0].name = name.into();
+            for active in [false, true] {
+                fs::write(case.join("case.nml"), format!("&nl_colm\n SITE_landtype=10\n DEF_USE_LCT=.true.\n DEF_USE_WUEST=.false.\n {flag}={}\n/\n", if active { ".true." } else { ".false." })).unwrap();
+                let result = validate_case_parameters(&case, &spec, &macros);
+                assert_eq!(result.is_ok(), active, "{name} active={active}: {result:?}");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn study_parameter_catalog_uses_core_stable_ids() {
         let json = parameters_json().unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1269,10 +1468,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_provenance_does_not_bypass_current_sampling_validation() {
+        let root = temp("legacy-invalid-range");
+        let mut manifest = create(&root, &spec(&root)).unwrap();
+        manifest.provenance = Default::default();
+        manifest.spec.parameters[0].name = "DEF_TUNING_CROP_PLANTING_DAY".into();
+        manifest.spec.parameters[0].sample_min = 100.0;
+        manifest.spec.parameters[0].sample_max = 200.0;
+        let error = verify_frozen_inputs(&manifest).unwrap_err();
+        assert!(format!("{error:#}").contains("continuous"), "{error:#}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn frozen_catalog_identity_is_verified_but_legacy_manifests_still_open() {
         let root = temp("frozen-catalog");
         let manifest = create(&root, &spec(&root)).unwrap();
         verify_frozen_inputs(&manifest).unwrap();
+
+        let mut previous = manifest.clone();
+        previous.provenance.parameter_catalog_version = 1;
+        assert!(verify_frozen_inputs(&previous)
+            .unwrap_err()
+            .to_string()
+            .contains("catalog version"));
 
         let mut changed = manifest.clone();
         changed.provenance.parameter_catalog_version += 1;
