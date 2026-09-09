@@ -103,3 +103,5 @@ cargo fmt --all --check
 ```
 
 Tauri 的独立 clippy/format、CI 所列的 golden/roundtrip/drift/kernel-profile 等 38 个集成测试和 native 脚本也已执行通过。本次不增加依赖、优化器、数据库或通用框架，不修改 Fortran、既有 golden、参数审计 baseline 或已发布安装包。
+
+首轮 PR CI 在 Windows 暴露一个测试期望错误：导出路径使用已有 `colm_kernel::manifest::absolute` 去除 `\\?\` 前缀，而断言直接使用 `canonicalize`。已让断言复用同一跨平台路径合同；未改变产品路径处理或跳过 Windows 测试。本地 15 个导出测试及 CLI clippy/format 复验通过，远端最终结果见 PR checks。

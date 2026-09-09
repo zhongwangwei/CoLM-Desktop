@@ -697,7 +697,7 @@ mod tests {
 
         assert_eq!(
             prepare_output_dir(&manifest, &output).unwrap(),
-            output.canonicalize().unwrap()
+            colm_kernel::manifest::absolute(&output).unwrap()
         );
         assert_eq!(
             fs::read_to_string(output.join("user-note.txt")).unwrap(),
