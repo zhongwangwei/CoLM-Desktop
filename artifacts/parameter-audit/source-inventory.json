@@ -24,7 +24,7 @@
     "classified_parameter_declarations": 32
   },
   "MOD_Namelist.F90": {
-    "case_tuning_fields": 44,
+    "case_tuning_fields": 43,
     "catalog_descriptors": 876,
     "schema_fields": 832
   },

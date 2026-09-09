@@ -63,21 +63,38 @@ pub fn objective_loss(term: &ObjectiveTerm, min_pairs: usize) -> std::result::Re
     if !term.value.is_finite() || !term.weight.is_finite() || term.weight < 0.0 {
         return Err("is not finite".into());
     }
+    // Correlation/efficiency arithmetic can round just beyond a perfect score.
+    let tolerance = 1e-12;
+    let valid_domain = match term.metric {
+        ObjectiveMetric::Nrmse | ObjectiveMetric::Mae => term.value >= 0.0,
+        ObjectiveMetric::AbsBias => true,
+        ObjectiveMetric::R => (-1.0 - tolerance..=1.0 + tolerance).contains(&term.value),
+        ObjectiveMetric::R2 => (-tolerance..=1.0 + tolerance).contains(&term.value),
+        ObjectiveMetric::Nse | ObjectiveMetric::Kge => term.value <= 1.0 + tolerance,
+    };
+    if !valid_domain {
+        return Err(format!(
+            "{:?} value {} is outside its metric domain",
+            term.metric, term.value
+        ));
+    }
     let loss = match term.metric {
         ObjectiveMetric::Nrmse => {
             let sd = term
                 .observation_sd
                 .ok_or_else(|| "has no observation standard deviation".to_string())?;
-            if !sd.is_finite() || sd.abs() <= f64::EPSILON {
-                return Err("has a constant observation".into());
+            if !sd.is_finite() || sd <= f64::EPSILON {
+                return Err(
+                    "has a constant observation or invalid observation standard deviation".into(),
+                );
             }
-            term.value / sd.abs()
+            term.value / sd
         }
         ObjectiveMetric::Mae => term.value,
         ObjectiveMetric::AbsBias => term.value.abs(),
-        ObjectiveMetric::Nse | ObjectiveMetric::Kge | ObjectiveMetric::R2 | ObjectiveMetric::R => {
-            1.0 - term.value
-        }
+        ObjectiveMetric::R => 1.0 - term.value.clamp(-1.0, 1.0),
+        ObjectiveMetric::R2 => 1.0 - term.value.clamp(0.0, 1.0),
+        ObjectiveMetric::Nse | ObjectiveMetric::Kge => (1.0 - term.value).max(0.0),
     };
     loss.is_finite()
         .then_some(loss)
@@ -179,6 +196,53 @@ fn pearson(x: &[f64], y: &[f64]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn objective_metrics_reject_impossible_domains_but_allow_roundoff() {
+        let term = |metric, value| ObjectiveTerm {
+            metric,
+            value,
+            observation_sd: Some(2.0),
+            weight: 1.0,
+            pairs: 30,
+        };
+        for (metric, value) in [
+            (ObjectiveMetric::Nrmse, -1.0),
+            (ObjectiveMetric::Mae, -1.0),
+            (ObjectiveMetric::R, 1.01),
+            (ObjectiveMetric::R, -1.01),
+            (ObjectiveMetric::R2, 2.0),
+            (ObjectiveMetric::R2, -0.1),
+            (ObjectiveMetric::Nse, 1.1),
+            (ObjectiveMetric::Kge, 1.1),
+        ] {
+            assert!(
+                objective_loss(&term(metric, value), 30).is_err(),
+                "{metric:?}={value}"
+            );
+        }
+        let mut negative_sd = term(ObjectiveMetric::Nrmse, 1.0);
+        negative_sd.observation_sd = Some(-2.0);
+        assert!(objective_loss(&negative_sd, 30).is_err());
+        for metric in [
+            ObjectiveMetric::R,
+            ObjectiveMetric::R2,
+            ObjectiveMetric::Nse,
+            ObjectiveMetric::Kge,
+        ] {
+            assert_eq!(
+                objective_loss(&term(metric, 1.0 + f64::EPSILON), 30).unwrap(),
+                0.0
+            );
+        }
+        for metric in [ObjectiveMetric::Nse, ObjectiveMetric::Kge] {
+            assert_eq!(objective_loss(&term(metric, -10.0), 30).unwrap(), 11.0);
+        }
+        assert_eq!(
+            objective_loss(&term(ObjectiveMetric::AbsBias, -2.0), 30).unwrap(),
+            2.0
+        );
+    }
 
     #[test]
     fn finite_mean_scales_before_summing_to_avoid_overflow() {

@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -85,6 +86,19 @@ fn wait_for_dispatch_window(study: &str) {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn wait_for_task_state(study: &str, member: &str, wanted: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(status) = status_json(study) {
+            if status["state"]["tasks"][format!("{member}/siteA")]["status"] == wanted {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("{member} never reached {wanted}");
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -197,6 +211,112 @@ fn write_obs_with_offset(path: &Path, good_pairs: usize, offset: f64) {
         .unwrap();
 }
 
+fn write_simple_history(path: &Path, values: &[f64]) {
+    let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../oracle/golden/CN-Cng_hist_2008-01.nc")
+        .canonicalize()
+        .unwrap();
+    let source = netcdf::open(golden).unwrap();
+    let time: Vec<i32> = source.variable("time").unwrap().get_values(..).unwrap();
+    let n = values.len();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", n).unwrap();
+    file.add_variable::<i32>("time", &["time"])
+        .unwrap()
+        .put_values(&time[..n], ..)
+        .unwrap();
+    file.add_variable::<f64>("f_lfevpa", &["time"])
+        .unwrap()
+        .put_values(values, ..)
+        .unwrap();
+}
+
+fn write_obs_values(path: &Path, values: &[f64]) {
+    let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../oracle/golden/CN-Cng_hist_2008-01.nc")
+        .canonicalize()
+        .unwrap();
+    let source = netcdf::open(golden).unwrap();
+    let time: Vec<i32> = source.variable("time").unwrap().get_values(..).unwrap();
+    let n = values.len();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", n).unwrap();
+    let mut t = file.add_variable::<f64>("time", &["time"]).unwrap();
+    t.put_attribute("units", "seconds since 1900-01-01 00:00:00")
+        .unwrap();
+    let seconds = time[..n]
+        .iter()
+        .map(|v| *v as f64 * 60.0)
+        .collect::<Vec<_>>();
+    t.put_values(&seconds, ..).unwrap();
+    file.add_variable::<f64>("Qle", &["time"])
+        .unwrap()
+        .put_values(values, ..)
+        .unwrap();
+    file.add_variable::<f64>("Qle_qc", &["time"])
+        .unwrap()
+        .put_values(&vec![0.0; n], ..)
+        .unwrap();
+}
+
+#[cfg(unix)]
+fn parameterized_fake_kernel(root: &Path, low: &Path, high: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let kernel = root.join("param-kernel");
+    fs::create_dir_all(&kernel).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+nml="$1"
+case_name=$(sed -n "s/^[[:space:]]*DEF_CASE_NAME[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" "$nml")
+output_root=$(sed -n "s/^[[:space:]]*DEF_dir_output[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" "$nml")
+cnfac=$(sed -n "s/^[[:space:]]*DEF_TUNING_CNFAC[[:space:]]*=[[:space:]]*\([-+0-9.eE]*\).*/\1/p" "$nml")
+cnfac=${{cnfac:-0.4}}
+out="$output_root/$case_name"
+program=$(basename "$0")
+case "$program" in
+  mksrfdata*) mkdir -p "$out/landdata"; : > "$out/landdata/srfdata.nc"; echo 'Successful in surface data making.' ;;
+  mkinidata*) mkdir -p "$out/restart/const"; : > "$out/restart/const/${{case_name}}_restart_const_lc2010_w180_s90.nc"; : > "$out/restart/const/${{case_name}}_restart_const_lc2010.nc"; echo 'CoLM Initialization Execution Completed' ;;
+  colm*) if [ -f '{slow}' ]; then sleep 0.08; fi; if [ -f '{fail_trial}' ] && printf '%s' "$case_name" | grep -q '^m000005-'; then echo 'trial forced failure' >&2; exit 9; fi; mkdir -p "$out/history"; threshold=0.4000001
+[ -f '{threshold}' ] && threshold=$(cat '{threshold}')
+if awk -v x="$cnfac" -v t="$threshold" 'BEGIN {{ exit !(x > t) }}'; then cp '{}' "$out/history/${{case_name}}_hist_2008-01.nc"; else cp '{}' "$out/history/${{case_name}}_hist_2008-01.nc"; fi; echo 'CoLM Execution Completed.' ;;
+esac
+"#,
+        high.display(),
+        low.display(),
+        fail_trial = root.join("fail-m000005").display(),
+        slow = root.join("slow-kernel").display(),
+        threshold = root.join("threshold").display()
+    );
+    let mut hashes = serde_json::Map::new();
+    for program in colm_kernel::PROGRAMS {
+        let path = kernel.join(colm_kernel::program_file(program));
+        fs::write(&path, &script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        hashes.insert(program.into(), Value::String(sha256(script.as_bytes())));
+    }
+    fs::write(
+        kernel.join("manifest.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": 1,
+            "preset": "cli-study-parameterized-test",
+            "platform": "test",
+            "colm_git_sha": "deadbeef",
+            "generator_args": "SinglePoint LULC_IGBP",
+            "macros": ["SinglePoint", "LULC_IGBP"],
+            "built_with": "test",
+            "netcdf_c": "test",
+            "netcdf_fortran": "test",
+            "hdf5": "test",
+            "sha256": hashes,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    kernel
+}
+
 fn write_tuning_spec(root: &Path, kernel: &Path, min_pairs: usize) -> PathBuf {
     write_tuning_spec_for_sites(root, kernel, min_pairs, &["siteA", "siteB"])
 }
@@ -296,6 +416,430 @@ fn multi_site_tuning_runs_and_applies_best_member() {
         assert!(saved.contains(row["new"].as_str().unwrap()), "{saved}");
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+fn parameter_study(
+    root: &Path,
+    generations: usize,
+    jobs: usize,
+    patience: usize,
+) -> (PathBuf, PathBuf) {
+    let values = (0..24).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+    let bad = values.iter().map(|value| value + 50.0).collect::<Vec<_>>();
+    let low = root.join("low.nc");
+    let high = root.join("high.nc");
+    write_simple_history(&low, &bad);
+    write_simple_history(&high, &values);
+    let kernel = parameterized_fake_kernel(root, &low, &high);
+    fs::create_dir_all(root.join("siteA")).unwrap();
+    fs::write(
+        root.join("siteA/case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
+    )
+    .unwrap();
+    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_obs_values(&root.join("siteA-obs.nc"), &values);
+    let spec = root.join("param-study.json");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "seed": 11,
+            "kernel_dir": kernel,
+            "base_cases": ["siteA"],
+            "observations": {"siteA": root.join("siteA-obs.nc")},
+            "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199232000,"min_pairs":10}],
+            "budget": {"population":4,"generations":generations,"jobs":jobs,"patience":patience}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (kernel, spec)
+}
+
+#[cfg(unix)]
+#[test]
+fn tuning_prefers_parameter_dependent_candidate_over_baseline() {
+    let _guard = netcdf_lock();
+    let root = temp_root("param-opt");
+    let values = (0..24).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+    let bad = values.iter().map(|value| value + 50.0).collect::<Vec<_>>();
+    let low = root.join("low.nc");
+    let high = root.join("high.nc");
+    write_simple_history(&low, &bad);
+    write_simple_history(&high, &values);
+    let kernel = parameterized_fake_kernel(&root, &low, &high);
+    fs::create_dir_all(root.join("siteA")).unwrap();
+    fs::write(
+        root.join("siteA/case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
+    )
+    .unwrap();
+    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_obs_values(&root.join("siteA-obs.nc"), &values);
+    let spec = root.join("param-tuning.json");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "seed": 11,
+            "kernel_dir": kernel,
+            "base_cases": ["siteA"],
+            "observations": {"siteA": root.join("siteA-obs.nc")},
+            "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199232000,"min_pairs":10}],
+            "budget": {"population":4,"generations":1,"jobs":2}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let study = run_ok(&[
+        "study-create",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let state: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &study,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+    ]))
+    .unwrap();
+    assert_eq!(state["status"], "completed");
+    let best = state["best_member"].as_str().unwrap();
+    assert_ne!(best, "m000000");
+    let baseline = state["candidates"]["m000000"]["calibration"]
+        .as_f64()
+        .unwrap();
+    let best_score = state["candidates"][best]["calibration"].as_f64().unwrap();
+    assert!(
+        best_score < baseline,
+        "best={best_score} baseline={baseline}"
+    );
+    let task_result = Path::new(&study)
+        .join("results/tasks")
+        .join(best)
+        .join("siteA.json");
+    let mut cached: Value = serde_json::from_slice(&fs::read(&task_result).unwrap()).unwrap();
+    cached["calibration"][0]["support_hash"] = serde_json::json!("");
+    fs::write(&task_result, serde_json::to_vec_pretty(&cached).unwrap()).unwrap();
+    let error = run_fail(&["study-apply-preview", &study, "--member", best]);
+    assert!(
+        error.contains("not feasible") || error.contains("missing pair support"),
+        "{error}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn tuning_validation_failure_warns_without_breaking_calibration_selection() {
+    let _guard = netcdf_lock();
+    let root = temp_root("val-warn");
+    let calibration = (0..24).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+    let mut observation = calibration.clone();
+    observation.extend((0..24).map(|i| 100.0 + i as f64));
+    let low = root.join("low.nc");
+    let high = root.join("high.nc");
+    write_simple_history(
+        &low,
+        &calibration
+            .iter()
+            .map(|value| value + 50.0)
+            .collect::<Vec<_>>(),
+    );
+    write_simple_history(&high, &calibration);
+    let kernel = parameterized_fake_kernel(&root, &low, &high);
+    fs::create_dir_all(root.join("siteA")).unwrap();
+    fs::write(
+        root.join("siteA/case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
+    )
+    .unwrap();
+    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_obs_values(&root.join("siteA-obs.nc"), &observation);
+    let spec = root.join("validation-warning.json");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "seed": 11,
+            "kernel_dir": kernel,
+            "base_cases": ["siteA"],
+            "observations": {"siteA": root.join("siteA-obs.nc")},
+            "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199232000,"validation_from":1199232000,"validation_to":1199318400,"min_pairs":10}],
+            "budget": {"population":4,"generations":1,"jobs":2}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let study = run_ok(&[
+        "study-create",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let state: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &study,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+    ]))
+    .unwrap();
+    assert_eq!(state["status"], "completed");
+    assert!(state["best_member"].as_str().is_some());
+    assert!(state["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains("validation target Qle unavailable"))
+    }));
+    let best = state["best_member"].as_str().unwrap();
+    assert!(state["candidates"][best]["calibration"].as_f64().is_some());
+    assert!(state["candidates"][best]["validation"].is_null());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn retry_failed_does_not_reopen_closed_de_generation() {
+    let _guard = netcdf_lock();
+    let root = temp_root("closed-retry");
+    let values = (0..24).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+    let bad = values.iter().map(|value| value + 50.0).collect::<Vec<_>>();
+    let low = root.join("low.nc");
+    let high = root.join("high.nc");
+    write_simple_history(&low, &bad);
+    write_simple_history(&high, &values);
+    fs::write(root.join("fail-m000005"), b"fail").unwrap();
+    let kernel = parameterized_fake_kernel(&root, &low, &high);
+    fs::create_dir_all(root.join("siteA")).unwrap();
+    fs::write(
+        root.join("siteA/case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
+    )
+    .unwrap();
+    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_obs_values(&root.join("siteA-obs.nc"), &values);
+    let spec = root.join("closed-retry.json");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "seed": 11,
+            "kernel_dir": kernel,
+            "base_cases": ["siteA"],
+            "observations": {"siteA": root.join("siteA-obs.nc")},
+            "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199232000,"min_pairs":10}],
+            "budget": {"population":4,"generations":1,"jobs":2}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let study = run_ok(&[
+        "study-create",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let failed: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &study,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+    ]))
+    .unwrap();
+    assert_eq!(failed["generation"], 1);
+    assert_eq!(failed["tasks"]["m000005/siteA"]["status"], "failed");
+    fs::remove_file(root.join("fail-m000005")).unwrap();
+    let retry: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &study,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+        "--retry-failed",
+        "1",
+    ]))
+    .unwrap();
+    assert_eq!(retry["tasks"]["m000005/siteA"]["status"], "failed");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_success_in_closed_de_generation_is_failed_without_rerun() {
+    let _guard = netcdf_lock();
+    let root = temp_root("stale-closed");
+    let (kernel, spec) = parameter_study(&root, 1, 2, 3);
+    let study = run_ok(&[
+        "study-create",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let completed: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &study,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+    ]))
+    .unwrap();
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["tasks"]["m000005/siteA"]["status"], "succeeded");
+
+    let forcing_path = Path::new(&study).join("members/m000005/siteA/forcing.nml");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&forcing_path)
+        .unwrap()
+        .write_all(b"\n! stale closed generation\n")
+        .unwrap();
+
+    let rerun: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &study,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+    ]))
+    .unwrap();
+    let task = &rerun["tasks"]["m000005/siteA"];
+    assert_eq!(task["status"], "failed");
+    assert!(task["objective"].is_null());
+    assert!(task["validation_objective"].is_null());
+    let reason = task["reason"].as_str().unwrap();
+    assert!(reason.contains("closed DE generation"), "{reason}");
+    assert!(reason.contains("create a new Study"), "{reason}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn pause_resume_keeps_open_de_generation_selection_and_patience_stable() {
+    let _guard = netcdf_lock();
+    let completed_root = temp_root("resume-full");
+    fs::write(completed_root.join("threshold"), b"0.59").unwrap();
+    let (completed_kernel, completed_spec) = parameter_study(&completed_root, 2, 1, 1);
+    let completed_study = run_ok(&[
+        "study-create",
+        completed_root.to_str().unwrap(),
+        "--spec",
+        completed_spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let completed: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &completed_study,
+        "--kernel",
+        completed_kernel.to_str().unwrap(),
+        "--jobs",
+        "1",
+    ]))
+    .unwrap();
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["generation"], 2);
+
+    let paused_root = temp_root("resume-pause");
+    fs::write(paused_root.join("threshold"), b"0.59").unwrap();
+    fs::write(paused_root.join("slow-kernel"), b"slow").unwrap();
+    let (paused_kernel, paused_spec) = parameter_study(&paused_root, 2, 1, 1);
+    let paused_study = run_ok(&[
+        "study-create",
+        paused_root.to_str().unwrap(),
+        "--spec",
+        paused_spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let child = Command::new(bin())
+        .args([
+            "study-run",
+            &paused_study,
+            "--kernel",
+            paused_kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_task_state(&paused_study, "m000005", "running");
+    run_ok(&["study-pause", &paused_study]);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_file(paused_root.join("slow-kernel")).unwrap();
+    run_ok(&["study-resume", &paused_study]);
+    let resumed: Value = serde_json::from_str(&run_ok(&[
+        "study-run",
+        &paused_study,
+        "--kernel",
+        paused_kernel.to_str().unwrap(),
+        "--jobs",
+        "1",
+    ]))
+    .unwrap();
+    assert_eq!(resumed["status"], "completed");
+    assert_eq!(resumed["generation"], completed["generation"]);
+    assert_eq!(resumed["population"], completed["population"]);
+    assert_eq!(resumed["best_member"], completed["best_member"]);
+    assert_eq!(resumed["best_objective"], completed["best_objective"]);
+    for sample in ["g000000.csv", "g000001.csv", "g000002.csv"] {
+        let completed_sample =
+            fs::read(Path::new(&completed_study).join("samples").join(sample)).unwrap();
+        let resumed_sample =
+            fs::read(Path::new(&paused_study).join("samples").join(sample)).unwrap();
+        assert_eq!(resumed_sample, completed_sample, "{sample}");
+    }
+    assert_eq!(
+        resumed["no_improvement_generations"],
+        completed["no_improvement_generations"]
+    );
+    let initial_best = resumed["candidates"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|candidate| {
+            candidate["generation"] == 0 && candidate["calibration"].as_f64().is_some()
+        })
+        .filter_map(|candidate| candidate["calibration"].as_f64())
+        .fold(f64::INFINITY, f64::min);
+    let best = resumed["best_objective"].as_f64().unwrap();
+    assert!(best < initial_best, "best={best} initial={initial_best}");
+    fs::remove_dir_all(completed_root).unwrap();
+    fs::remove_dir_all(paused_root).unwrap();
 }
 
 #[cfg(unix)]

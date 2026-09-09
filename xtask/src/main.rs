@@ -110,6 +110,7 @@ fn parameter_audit() -> Result<()> {
 
     let tuning_names = colm_case::tuning::all()?
         .into_iter()
+        .filter(|parameter| parameter.supports_continuous_sampling())
         .map(|parameter| parameter.name.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     let catalog_tuning_names = catalog

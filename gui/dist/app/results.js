@@ -1665,6 +1665,7 @@ function renderStudyActions(kind) {
   const hasTask = activeStudyDirs(kind).length > 0;
   const summary = aggregateStudy(studyViews[kind] || {});
   const actions = studyActionState(summary.status, hasTask, studyRunning[kind]);
+  if (tuning && !bestTuningSummary(studyViews[kind] || {}).member) actions.apply = false;
   if (disabledReason) { actions.run = false; actions.resume = false; actions.retry = false; actions.apply = false; }
   const create = $(`${prefix}-create`);
   if (create) {
@@ -3119,7 +3120,7 @@ async function applyBestCandidate() {
   for (const dir of dirs) {
     const envelope = JSON.parse(await invoke('study_status', { studyDir: dir }));
     ensureStudyMutationCurrent('tuning', isCurrent);
-    const member = envelope.state?.best_member;
+    const member = bestTuningSummary(envelope).member;
     if (!member) throw new Error(`${envelope.manifest?.id || dir} 还没有可应用的最佳候选。`);
     const baseCase = envelope.manifest?.spec?.base_cases?.[0] || member;
     const site = studySiteId({ dir: baseCase });

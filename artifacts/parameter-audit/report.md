@@ -1,6 +1,6 @@
 # Parameter audit
 
-Catalog version: 1
+Catalog version: 2
 
 - eligible_total: 1220
 - editable_total: 1213

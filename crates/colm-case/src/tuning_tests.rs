@@ -182,6 +182,38 @@ fn applies_runtime_values_without_touching_the_source_on_error() {
 }
 
 #[test]
+fn irrigation_study_ranges_respect_the_fixed_model_timestep() {
+    let root = std::env::temp_dir().join(format!("colm-tuning-duration-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("case.nml");
+    std::fs::write(&path, "&nl_colm\n DEF_simulation_time%timestep=1800.\n/\n").unwrap();
+    let mut range = tuning::StudyParameter {
+        name: "DEF_TUNING_IRRIGATION_DURATION_SEC",
+        sample_min: 1.0,
+        sample_max: 3600.0,
+        scale: tuning::Scale::Linear,
+    };
+    let error = tuning::validate_case_parameter_ranges(&path, &[range]).unwrap_err();
+    assert!(error.to_string().contains("timestep"), "{error}");
+    range.sample_min = 1800.0;
+    tuning::validate_case_parameter_ranges(&path, &[range]).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn integer_calendar_ranges_are_rejected_by_the_shared_study_validator() {
+    let error = tuning::validate_study_parameters(&[tuning::StudyParameter {
+        name: "DEF_TUNING_CROP_PLANTING_DAY",
+        sample_min: 100.0,
+        sample_max: 200.0,
+        scale: tuning::Scale::Linear,
+    }])
+    .unwrap_err();
+    assert!(error.to_string().contains("continuous"), "{error}");
+    tuning::validate_value("DEF_TUNING_CROP_PLANTING_DAY", 120.0).unwrap();
+}
+
+#[test]
 fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
     let root = std::env::temp_dir().join(format!("colm-tuning-active-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
@@ -195,12 +227,14 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_WUE_LAMBDA".into()],
         &["SinglePoint".into()],
+        None,
     )
     .unwrap();
     assert!(tuning::validate_case_parameter_activity(
         &path,
         &["DEF_BALL_BERRY_GRADM".into()],
-        &["SinglePoint".into()]
+        &["SinglePoint".into()],
+        None,
     )
     .is_err());
     std::fs::write(
@@ -212,6 +246,7 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_MEDLYN_G1".into()],
         &["SinglePoint".into()],
+        None,
     )
     .unwrap();
 
@@ -224,6 +259,7 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_TUNING_IRRIGATION_START_SEC".into()],
         &["SinglePoint".into(), "LULC_IGBP".into(), "CROP".into()],
+        None,
     )
     .unwrap();
     std::fs::write(
@@ -235,12 +271,14 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_TUNING_CROP_PLANTING_DAY".into()],
         &["SinglePoint".into(), "LULC_IGBP".into(), "CROP".into()],
+        None,
     )
     .unwrap();
     assert!(tuning::validate_case_parameter_activity(
         &path,
         &["DEF_TUNING_CROP_PLANTING_DAY".into()],
         &["SinglePoint".into(), "LULC_IGBP".into()],
+        None,
     )
     .is_err());
 
@@ -253,6 +291,7 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_TUNING_TOPMOD_DECAY".into()],
         &["SinglePoint".into(), "LULC_IGBP".into()],
+        None,
     )
     .is_err());
     std::fs::write(
@@ -264,6 +303,7 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_TUNING_TOPMOD_DECAY".into()],
         &["SinglePoint".into(), "LULC_IGBP".into()],
+        None,
     )
     .unwrap();
     std::fs::write(&path, "&nl_colm\n SITE_landtype=17\n/\n").unwrap();
@@ -271,6 +311,7 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_TUNING_SMPMIN".into()],
         &["SinglePoint".into(), "LULC_IGBP".into()],
+        None,
     )
     .is_err());
     std::fs::write(
@@ -282,6 +323,7 @@ fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
         &path,
         &["DEF_TUNING_SOIL_ICE_IMPEDANCE".into()],
         &["SinglePoint".into(), "LULC_IGBP".into()],
+        None,
     )
     .unwrap();
     let _ = std::fs::remove_dir_all(root);

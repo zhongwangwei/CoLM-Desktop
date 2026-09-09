@@ -86,6 +86,9 @@ jobs:
           cargo test --workspace --lib --bins --exclude colm-cli
           # colm-cli tests share NetCDF/HDF5 process state; keep only this binary serial.
           cargo test -p colm-cli --bin colm-cli -- --test-threads=1
+          # Exercise the actual CLI scheduler/DE path, not just test-only reducers.
+          # The fake-kernel shell harness runs on Unix; Windows uses unit/native jobs.
+          cargo test -p colm-cli --test study_cli_tuning -- --test-threads=1
           cargo test -p oracle --test judge
           cargo test -p oracle --test golden_run
           cargo test -p colm-namelist --test roundtrip

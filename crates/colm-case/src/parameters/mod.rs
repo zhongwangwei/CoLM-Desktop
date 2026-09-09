@@ -5,7 +5,7 @@ use serde::Serialize;
 
 pub mod process;
 
-pub const CATALOG_VERSION: u32 = 1;
+pub const CATALOG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -165,6 +165,7 @@ fn schema_descriptor(
     land_cover_scheme: Option<&str>,
 ) -> ParameterDescriptor {
     let lc = crate::land_cover::parameter(field.name);
+    let tuning = crate::tuning::find(field.name).ok().flatten();
     let aliases = aliases(field.name);
     let section = field_section(field.name, field.group).unwrap_or("未分类");
     let (label_zh, label_en, subgroup, unit) = if let Some(meta) = lc {
@@ -193,8 +194,9 @@ fn schema_descriptor(
         field.kind,
         colm_schema::FieldKind::Logical | colm_schema::FieldKind::Character { .. }
     ) || !field.values.is_empty();
-    let calibration_eligible = (crate::tuning::find(field.name).ok().flatten().is_some()
+    let calibration_eligible = (tuning.is_some_and(|meta| meta.supports_continuous_sampling())
         || lc.is_some())
+        && matches!(field.kind, colm_schema::FieldKind::Real)
         && !structural_parameter;
     let source_location = format!("MOD_Namelist.F90:{}", field.line);
     let doc = field.doc.map(str::to_string);
@@ -221,7 +223,7 @@ fn schema_descriptor(
         value_kind: schema_kind(field.kind),
         unit,
         visibility: if field.group.is_some() {
-            if crate::tuning::find(field.name).ok().flatten().is_some() || lc.is_some() {
+            if tuning.is_some() || lc.is_some() {
                 Visibility::EditableExpert
             } else {
                 Visibility::EditableCommon
@@ -252,7 +254,8 @@ fn schema_descriptor(
         supports_linear_range: calibration_eligible && !structural_parameter,
         supports_log_range: calibration_eligible
             && !structural_parameter
-            && lc.and_then(|meta| meta.min).is_some_and(|min| min >= 0.0),
+            && (tuning.is_some_and(|meta| meta.max.is_none_or(|max| max.value > 0.0))
+                || lc.is_some_and(|meta| meta.max.is_none_or(|max| max > 0.0))),
         structural_parameter,
         recommended_scale: None,
         source_location,
@@ -319,7 +322,7 @@ fn pft_descriptor(meta: &crate::pft::ParameterMeta, pc: bool) -> ParameterDescri
         calibration_eligible: !matches!(meta.kind, crate::pft::Kind::Integer),
         supports_linear_range: !matches!(meta.kind, crate::pft::Kind::Integer),
         supports_log_range: !matches!(meta.kind, crate::pft::Kind::Integer)
-            && meta.min.is_some_and(|min| min >= 0.0),
+            && meta.max.is_none_or(|max| max > 0.0),
         structural_parameter: matches!(meta.kind, crate::pft::Kind::Integer),
         recommended_scale: None,
         source_location: "MOD_Const_PFT.F90 + include/pft_override_fields.inc".into(),

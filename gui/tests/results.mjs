@@ -14,7 +14,7 @@ const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 const {
   LruCache, boundedMap, envelopeDiagnostics, metricKey, resultCases, rowsToCsv, sortedImportanceRows,
 } = await import(moduleUrl('result-model.js'));
-const { aggregateStudy, aggregateStudyStatuses, studyActionState, studyWarnings } = await import(moduleUrl('study-model.js'));
+const { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, studyActionState, studyWarnings } = await import(moduleUrl('study-model.js'));
 const { WORKFLOW, nextOf } = await import(moduleUrl('shell.js'));
 const { state } = await import(moduleUrl('state.js'));
 
@@ -299,7 +299,7 @@ for (const kind of ['uq', 'tuning']) {
         activeStudyDirs: () => ['/cases/.colm/studies/one'],
         studyViews: { [kind]: { state: { status: current } } },
         studyRunning: { [kind]: false }, studyCreating: { [kind]: false },
-        aggregateStudy, studyActionState, studyJobInputs: () => [], dialogText: text => text,
+        aggregateStudy, bestTuningSummary, studyActionState, studyJobInputs: () => [], dialogText: text => text,
       });
       render(kind);
       const prefix = kind === 'uq' ? 'uq' : 'tune';
@@ -316,6 +316,25 @@ for (const kind of ['uq', 'tuning']) {
       }
     }
   }
+}
+{
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {});
+    return elements.get(id);
+  };
+  const render = runInNewContext(resultUi.slice(
+    resultUi.indexOf('function renderStudyActions('),
+    resultUi.indexOf('\nasync function renderStudySpinup('),
+  ) + '\nrenderStudyActions;', {
+    $: element, document: { querySelectorAll: () => [] },
+    spatialStudyReason: () => '', activeStudyDirs: () => ['/cases/.colm/studies/tuning'],
+    studyViews: { tuning: { state: { status: 'Completed', best_member: 'm999999', candidates: { m999999: { feasible: false, calibration: 0.1 } } } } },
+    studyRunning: { tuning: false }, studyCreating: { tuning: false },
+    aggregateStudy, bestTuningSummary, studyActionState, studyJobInputs: () => [], dialogText: text => text,
+  });
+  render('tuning');
+  if (element('tune-apply-best').disabled !== true) throw new Error('tuning apply button must stay disabled without a feasible best candidate');
 }
 
 // A metadata refresh must not erase the selected output while its own guard is awaiting IPC.
@@ -976,8 +995,9 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     status() {}, renderStudyReadiness() {}, dialogText: x => x, studySiteId: ({ dir }) => dir.split('/').pop(),
     parentDir: () => '/cases', studyScope: () => [{ dir: '/cases/site' }], setPreview() {},
     globalThis: { confirm: () => true }, window: { prompt: () => '/cases/tuned' },
+    bestTuningSummary,
     invoke: async command => {
-      if (command === 'study_status') return JSON.stringify({ manifest: { spec: { base_cases: ['/cases/site'] } }, state: { best_member: 'm000001' } });
+      if (command === 'study_status') return JSON.stringify({ manifest: { spec: { base_cases: ['/cases/site'] } }, state: { best_member: 'm000001', candidates: { m000001: { feasible: true, calibration: 1 } } } });
       if (command === 'study_apply_preview') { previews++; spatial = true; return JSON.stringify([{ site: 'site', field: 'p', old: 1, new: 2 }]); }
       if (command === 'study_apply') applies++;
       return '';
@@ -986,6 +1006,43 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
   await applyBestCandidate().catch(error => { failure = error; });
   if (previews !== 1 || !failure?.message.includes('调优设计已修改')) throw new Error('apply must reach delayed preview and fail at the scope guard');
   if (applies !== 0) throw new Error('spatial switch before apply prompt/output must stop tuning apply mutation');
+}
+
+{
+  const helper = resultUi.slice(
+    resultUi.indexOf('const studyMutationGuard ='),
+    resultUi.indexOf('const studyScopeKey ='),
+  );
+  let previewMember = '';
+  const applyBestCandidate = runInNewContext(helper + resultUi.slice(
+    resultUi.indexOf('async function applyBestCandidate('),
+    resultUi.indexOf('\nfunction wireStudyButton('),
+  ) + '\napplyBestCandidate;', {
+    spatialStudyReason: () => '', studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a'], currentKernel: () => '/kernel',
+    status() {}, renderStudyReadiness() {}, dialogText: x => x, studySiteId: ({ dir }) => dir.split('/').pop(),
+    parentDir: () => '/cases', studyScope: () => [{ dir: '/cases/site' }], setPreview() {},
+    globalThis: { confirm: () => false }, window: { prompt: () => { throw new Error('prompt should not run'); } },
+    bestTuningSummary,
+    invoke: async (command, args) => {
+      if (command === 'study_status') return JSON.stringify({
+        manifest: { spec: { base_cases: ['/cases/site'] } },
+        state: {
+          best_member: 'm999999',
+          candidates: {
+            m000001: { feasible: true, calibration: 0.8 },
+            m999999: { feasible: false, calibration: 0.1, reason: 'infeasible target' },
+          },
+        },
+      });
+      if (command === 'study_apply_preview') {
+        previewMember = args.member;
+        return JSON.stringify([{ site: 'site', field: 'p', old: 1, new: 2 }]);
+      }
+      throw new Error(`unexpected IPC ${command}`);
+    },
+  });
+  await applyBestCandidate();
+  if (previewMember !== 'm000001') throw new Error('apply preview used stale/infeasible state.best_member instead of the feasible tuning winner');
 }
 
 // A delayed final retry/resume must not start a new scope's Study as its tail action.
