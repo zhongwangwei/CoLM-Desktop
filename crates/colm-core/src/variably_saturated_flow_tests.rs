@@ -342,6 +342,24 @@ fn vsf_perturbations_match_current_fortran() {
     assert!(drainage.active);
 }
 
+#[test]
+fn vsf_active_least_squares_matches_current_fortran() {
+    let jacobian = &[3.0, 1.0, 2.0, 4.0, 2.0, 0.0, 1.0, 0.0, 1.0];
+    let all =
+        solve_variable_saturated_least_squares(jacobian, &[true, true, true], &[5.0, 6.0, 3.0])
+            .unwrap();
+    close(all[0], 4.0, 1.0e-14);
+    close(all[1], -5.0, 1.0e-14);
+    close(all[2], -1.0, 1.0e-14);
+
+    let sparse =
+        solve_variable_saturated_least_squares(jacobian, &[true, false, true], &[5.0, 6.0, 3.0])
+            .unwrap();
+    close(sparse[0], 1.105_263_157_894_737, 1.0e-14);
+    close(sparse[1], 0.0, 1.0e-14);
+    close(sparse[2], 1.894_736_842_105_263, 1.0e-14);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,

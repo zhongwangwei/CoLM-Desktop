@@ -417,6 +417,79 @@ pub fn perturb_variable_saturated_drainage(
     }
 }
 
+/// Port of `MOD_Hydro_SoilWater:solve_least_squares_problem`.
+///
+/// `jacobian_row_major` is the square `dr_dv` matrix; inactive coordinates
+/// retain the source zero update.
+pub fn solve_variable_saturated_least_squares(
+    jacobian_row_major: &[f64],
+    active: &[bool],
+    rhs: &[f64],
+) -> Result<Vec<f64>> {
+    let dimension = active.len();
+    ensure!(
+        dimension > 0
+            && jacobian_row_major.len() == dimension * dimension
+            && rhs.len() == dimension
+            && jacobian_row_major.iter().all(|value| value.is_finite())
+            && rhs.iter().all(|value| value.is_finite()),
+        "VSF least-squares inputs are invalid"
+    );
+    let mut matrix = jacobian_row_major.to_vec();
+    let mut residual = rhs.to_vec();
+    for (row, &row_active) in active.iter().enumerate() {
+        if row_active {
+            for lower_row in row + 1..dimension {
+                let lower = lower_row * dimension + row;
+                let diagonal = row * dimension + row;
+                if matrix[lower] != 0.0 {
+                    let (cosine, sine) = if matrix[lower].abs() > matrix[diagonal].abs() {
+                        let tangent = matrix[diagonal] / matrix[lower];
+                        let sine = 1.0 / (1.0 + tangent.powi(2)).sqrt();
+                        (sine * tangent, sine)
+                    } else {
+                        let tangent = matrix[lower] / matrix[diagonal];
+                        let cosine = 1.0 / (1.0 + tangent.powi(2)).sqrt();
+                        (cosine, cosine * tangent)
+                    };
+                    matrix[diagonal] = cosine * matrix[diagonal] + sine * matrix[lower];
+                    matrix[lower] = 0.0;
+                    for (column, &column_active) in active.iter().enumerate().skip(row + 1) {
+                        if column_active {
+                            let upper = row * dimension + column;
+                            let lower = lower_row * dimension + column;
+                            let value = cosine * matrix[upper] + sine * matrix[lower];
+                            matrix[lower] = -sine * matrix[upper] + cosine * matrix[lower];
+                            matrix[upper] = value;
+                        }
+                    }
+                    let value = cosine * residual[row] + sine * residual[lower_row];
+                    residual[lower_row] = -sine * residual[row] + cosine * residual[lower_row];
+                    residual[row] = value;
+                }
+            }
+        }
+    }
+    let mut update = vec![0.0; dimension];
+    for (row, &row_active) in active.iter().enumerate().rev() {
+        if row_active {
+            let diagonal = matrix[row * dimension + row];
+            ensure!(
+                diagonal != 0.0 && diagonal.is_finite(),
+                "VSF least-squares Jacobian is singular"
+            );
+            update[row] = residual[row];
+            for (column, &column_active) in active.iter().enumerate().skip(row + 1) {
+                if column_active {
+                    update[row] -= matrix[row * dimension + column] * update[column];
+                }
+            }
+            update[row] /= diagonal;
+        }
+    }
+    Ok(update)
+}
+
 /// Port of `MOD_Hydro_SoilWater:water_balance`.
 pub fn variable_saturated_water_balance(
     input: VariableSaturatedWaterBalanceInput<'_>,
