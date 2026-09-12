@@ -260,12 +260,14 @@ pub fn normalize_soil_texture(texture: &mut [i32]) {
 
 /// Converts eight landdata soil layers to CoLM's full soil column.
 ///
-/// `source` is `source_layer * patches + patch`; `patch_type == 0` denotes ocean.
-/// As in the reference code, layer 1 is duplicated into layer 2, layer 8 is copied into
-/// layer 9, and layer 9 is repeated through the configured model bottom.
+/// `source` is `source_layer * patches + patch`.  The upstream soil reader fills every
+/// land-patch vector entry, including patch type zero (natural soil); patch type is kept in
+/// this API solely to establish the patch count.  As in the reference code, layer 1 is
+/// duplicated into layer 2, layer 8 is copied into layer 9, and layer 9 is repeated through
+/// the configured model bottom.
 pub fn derive_soil_parameters(
     source: &[SoilLayerInput],
-    patch_type: &[i32],
+    patch_types: &[i32],
     layers: usize,
     hydraulic_model: HydraulicModel,
 ) -> Result<SoilState> {
@@ -273,7 +275,7 @@ pub fn derive_soil_parameters(
         layers >= 9,
         "CoLM soil state needs at least nine layers, got {layers}"
     );
-    let patches = patch_type.len();
+    let patches = patch_types.len();
     ensure!(
         source.len() == SOURCE_SOIL_LAYERS * patches,
         "soil source has {} values; expected {} layers x {} patches",
@@ -287,9 +289,6 @@ pub fn derive_soil_parameters(
     for layer in 0..layers {
         let source_layer = layer.saturating_sub(1).min(SOURCE_SOIL_LAYERS - 1);
         for patch in 0..patches {
-            if patch_type[patch] == 0 {
-                continue;
-            }
             let input = source[source_layer * patches + patch];
             let index = layer * patches + patch;
             let field_capacity = match hydraulic_model {

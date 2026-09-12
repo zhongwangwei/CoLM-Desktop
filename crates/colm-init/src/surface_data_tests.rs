@@ -136,3 +136,121 @@ fn temp_file(label: &str) -> PathBuf {
     let _ = std::fs::remove_file(&path);
     path
 }
+
+#[test]
+#[ignore = "requires the locally generated upstream CN-Cng surface and restart artifacts"]
+fn single_point_static_kernels_match_the_upstream_fortran_reference() {
+    use crate::{derive_igbp_canopy, derive_lake_layers, derive_soil_parameters, SoilField};
+
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../oracle/work/generated/out/CN-Cng");
+    let surface = read_single_point_surface(
+        root.join("landdata/srfdata.nc"),
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    )
+    .unwrap();
+    let soil = derive_soil_parameters(&surface.soil_layers, &[0], 10, HydraulicModel::VanGenuchten)
+        .unwrap();
+    let lake = derive_lake_layers(&[surface.lake_depth_m], 10).unwrap();
+    let canopy = derive_igbp_canopy(
+        &[surface.land_class],
+        &[0],
+        &[surface.canopy_height_m],
+        &[
+            0.0, 17.0, 35.0, 17.0, 20.0, 20.0, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5,
+            0.5, 0.5,
+        ],
+        &[
+            0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0,
+        ],
+        None,
+    )
+    .unwrap();
+    let reference =
+        netcdf::open(root.join("restart/const/CN-Cng_restart_const_lc2005_w180_s90.nc")).unwrap();
+
+    for (field, name) in [
+        (SoilField::VfQuartz, "vf_quartz"),
+        (SoilField::VfGravels, "vf_gravels"),
+        (SoilField::VfOm, "vf_om"),
+        (SoilField::VfSand, "vf_sand"),
+        (SoilField::VfClay, "vf_clay"),
+        (SoilField::WfGravels, "wf_gravels"),
+        (SoilField::WfSand, "wf_sand"),
+        (SoilField::WfClay, "wf_clay"),
+        (SoilField::WfOm, "wf_om"),
+        (SoilField::OmDensity, "OM_density"),
+        (SoilField::BulkDensity, "BD_all"),
+        (SoilField::FieldCapacity, "wfc"),
+        (SoilField::Porosity, "porsl"),
+        (SoilField::Psi0, "psi0"),
+        (SoilField::Bsw, "bsw"),
+        (SoilField::ThetaR, "theta_r"),
+        (SoilField::AlphaVgm, "alpha_vgm"),
+        (SoilField::LVgm, "L_vgm"),
+        (SoilField::NVgm, "n_vgm"),
+        (SoilField::ScVgm, "sc_vgm"),
+        (SoilField::FcVgm, "fc_vgm"),
+        (SoilField::HydraulicConductivity, "hksati"),
+        (SoilField::HeatCapacity, "csol"),
+        (SoilField::SolidThermalConductivity, "k_solids"),
+        (SoilField::SaturatedUnfrozenConductivity, "dksatu"),
+        (SoilField::SaturatedFrozenConductivity, "dksatf"),
+        (SoilField::DryConductivity, "dkdry"),
+        (SoilField::BaAlpha, "BA_alpha"),
+        (SoilField::BaBeta, "BA_beta"),
+    ] {
+        let expected = reference
+            .variable(name)
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_close(name, soil.field(field), &expected);
+    }
+    assert_close(
+        "lakedepth",
+        &lake.depth_m,
+        &read_f64(&reference, "lakedepth"),
+    );
+    assert_close(
+        "dz_lake",
+        &lake.thickness_m,
+        &read_f64(&reference, "dz_lake"),
+    );
+    assert_close("htop", &canopy.patch_top_m, &read_f64(&reference, "htop"));
+    assert_close(
+        "hbot",
+        &canopy.patch_bottom_m,
+        &read_f64(&reference, "hbot"),
+    );
+    assert_close(
+        "patchlonr",
+        &[surface.longitude_degrees.to_radians()],
+        &read_f64(&reference, "patchlonr"),
+    );
+    assert_close(
+        "patchlatr",
+        &[surface.latitude_degrees.to_radians()],
+        &read_f64(&reference, "patchlatr"),
+    );
+}
+
+fn read_f64(file: &netcdf::File, name: &str) -> Vec<f64> {
+    file.variable(name)
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap()
+}
+
+fn assert_close(name: &str, actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len(), "{name} length");
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        let tolerance = 1e-10_f64.max(expected.abs() * 1e-10);
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{name}[{index}] = {actual}, expected {expected}, tolerance {tolerance}"
+        );
+    }
+}

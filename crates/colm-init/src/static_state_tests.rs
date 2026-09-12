@@ -68,7 +68,7 @@ fn soil_texture_clamps_fortrans_out_of_range_classes_to_zero() {
 }
 
 #[test]
-fn soil_conversion_expands_eight_layers_and_keeps_ocean_missing() {
+fn soil_conversion_expands_every_patch_including_natural_soil_type_zero() {
     let source = (1..=8)
         .flat_map(|layer| [soil(layer as f64), soil(100.0 + layer as f64)])
         .collect::<Vec<_>>();
@@ -81,9 +81,7 @@ fn soil_conversion_expands_eight_layers_and_keeps_ocean_missing() {
             .collect::<Vec<_>>(),
         vec![1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 8.0, 8.0]
     );
-    for field in SoilField::ALL {
-        assert_eq!(state.get(field, 4, 1), MISSING, "{field:?}");
-    }
+    assert_eq!(state.get(SoilField::VfQuartz, 4, 1), 104.0);
     assert_eq!(state.get(SoilField::Psi0, 0, 0), -100.0);
     assert_eq!(state.get(SoilField::ThetaR, 0, 0), 0.0);
     assert_eq!(state.get(SoilField::AlphaVgm, 0, 0), MISSING);
