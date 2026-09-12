@@ -25,7 +25,7 @@ pub struct SinglePointSurfaceData {
     pub elevation_m: f64,
     pub elevation_std_m: f64,
     pub slope_ratio: f64,
-    /// Exactly eight source layers, from top to bottom.
+    /// The first eight CoLM soil layers, from top to bottom.
     pub soil_layers: Vec<SoilLayerInput>,
 }
 
@@ -335,8 +335,8 @@ impl SoilSourceFields {
             ("soil_BA_beta", &self.ba_beta),
         ] {
             ensure!(
-                values.len() == SOURCE_SOIL_LAYERS,
-                "{name} has {} values; expected {SOURCE_SOIL_LAYERS} source soil layers",
+                values.len() >= SOURCE_SOIL_LAYERS,
+                "{name} has {} values; expected at least {SOURCE_SOIL_LAYERS} source soil layers",
                 values.len()
             );
         }
@@ -344,6 +344,8 @@ impl SoilSourceFields {
     }
 
     fn into_layers(self) -> Vec<SoilLayerInput> {
+        // PLUMBER site files carry ten physical layers while CoLM's land
+        // initialization consumes its documented first eight layers.
         (0..SOURCE_SOIL_LAYERS)
             .map(|layer| SoilLayerInput {
                 vf_quartz: self.vf_quartz[layer],

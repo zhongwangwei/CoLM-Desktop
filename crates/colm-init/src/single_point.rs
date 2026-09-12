@@ -7,20 +7,25 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_case::pft::{
+    default_value as pft_default_value, validate_override as validate_pft_override,
+};
 use colm_namelist::{parse, Value};
 
 use crate::{
     cold_start_broadband_radiation_with_snow, derive_igbp_canopy, derive_initial_soil_hydraulics,
-    derive_lake_layers, derive_snow_cover, derive_soil_parameters, derive_usgs_canopy,
-    equilibrium_water_state, initialize_cold_soil, initialize_profile_soil, initialize_snow_layers,
-    leaf_optics_from_land_cover, normalize_soil_texture, read_single_point_monthly_vegetation,
-    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_surface,
-    read_single_point_water_table, write_constant_restart, write_time_restart, ColdSoilState,
-    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
-    LandCoverScheme, OzoneFields, PlantHydraulicFields, RestartDate, RestartDimensions,
-    RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo,
-    SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
-    TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    derive_lake_layers, derive_pft_snow_cover, derive_snow_cover, derive_soil_parameters,
+    derive_usgs_canopy, equilibrium_water_state, initialize_cold_soil, initialize_profile_soil,
+    initialize_snow_layers, leaf_optics_from_land_cover, normalize_soil_texture,
+    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
+    read_single_point_soil_profile, read_single_point_surface, read_single_point_water_table,
+    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    ColdSoilState, ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
+    LandCoverScheme, LeafOptics, OzoneFields, PftConstantRestartInput, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
+    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
+    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
+    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -70,15 +75,38 @@ pub struct SinglePointStaticRun {
     pub hydraulic_model: HydraulicModel,
 }
 
-/// A namelist-resolved native cold start for the standard LCT single-point path.
+/// Runtime subgrid representation selected by CoLM's mutually exclusive flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinglePointSubgrid {
+    Lct,
+    Pft,
+}
+
+/// Common and optional PFT constant restart files written for a cold start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinglePointConstantRestartFiles {
+    pub common: ConstantRestartFiles,
+    pub pft: Option<PathBuf>,
+}
+
+/// Common and optional PFT time restart files written for a cold start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinglePointTimeRestartFiles {
+    pub common: TimeRestartFile,
+    pub pft: Option<PathBuf>,
+}
+
+/// A namelist-resolved native cold start for the LCT or non-CROP PFT single-point path.
 ///
-/// Feature-specific PFT/PC, BGC, urban, and SNICAR paths use separate restart
-/// families and are rejected during resolution until their native orchestration is
-/// complete.  Soil, snow, and water-table state files are part of the common LCT
-/// restart family and therefore travel with this run description.
+/// PC, BGC, urban, CROP, and SNICAR paths use additional restart families and are
+/// rejected during resolution until their native orchestration is complete. Soil,
+/// snow, and water-table state files are part of both supported restart families.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointColdStartRun {
+    /// Source used to resolve PFT-specific expert parameter overrides at write time.
+    pub namelist: PathBuf,
     pub static_run: SinglePointStaticRun,
+    pub subgrid: SinglePointSubgrid,
     pub date: RestartDate,
     pub greenwich: bool,
     pub use_site_lai: bool,
@@ -93,6 +121,7 @@ pub struct SinglePointColdStartRun {
     pub water_table_initial_state: Option<PathBuf>,
     pub variably_saturated_flow: bool,
     pub snow_cover_exponent: f64,
+    pub vegetation_snow: bool,
 }
 
 impl SinglePointStaticRun {
@@ -134,7 +163,10 @@ pub fn single_point_static_run_from_namelist(
     };
     let case_dir = output.join(&case_name);
     let surface = case_dir.join("landdata/srfdata.nc");
-    let land_cover = land_cover_override.unwrap_or(detect_land_cover(&surface)?);
+    let land_cover = match land_cover_override {
+        Some(land_cover) => land_cover,
+        None => detect_land_cover(&surface)?,
+    };
     let block_label = block_override
         .map(str::to_owned)
         .unwrap_or_else(|| "w180_s90".to_owned());
@@ -167,7 +199,8 @@ pub fn single_point_cold_start_run_from_namelist(
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    reject_unsupported_cold_start_features(&document)?;
+    let subgrid = single_point_subgrid(&document)?;
+    reject_unsupported_cold_start_features(&document, subgrid)?;
     let year = optional_i32(&document, "DEF_simulation_time%start_year")?.unwrap_or(2000);
     let month = optional_i32(&document, "DEF_simulation_time%start_month")?.unwrap_or(1);
     let day = optional_i32(&document, "DEF_simulation_time%start_day")?.unwrap_or(1);
@@ -184,7 +217,9 @@ pub fn single_point_cold_start_run_from_namelist(
         "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
     );
     Ok(SinglePointColdStartRun {
+        namelist: namelist.to_owned(),
         static_run,
+        subgrid,
         date: normalize_date(RestartDate {
             year,
             julian_day,
@@ -219,6 +254,7 @@ pub fn single_point_cold_start_run_from_namelist(
             true,
         )?,
         snow_cover_exponent: optional_f64_or(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
+        vegetation_snow: optional_bool_or(&document, "DEF_VEG_SNOW", true)?,
     })
 }
 
@@ -232,6 +268,67 @@ pub fn write_single_point_constant_restart(
     surface: impl AsRef<Path>,
     restart_dir: impl AsRef<Path>,
     config: SinglePointStaticConfig<'_>,
+) -> Result<ConstantRestartFiles> {
+    write_single_point_constant_restart_with_canopy(surface, restart_dir, config, None)
+}
+
+/// Writes all constant restart families selected by a resolved cold-start namelist.
+pub fn write_single_point_constant_restarts(
+    run: &SinglePointColdStartRun,
+) -> Result<SinglePointConstantRestartFiles> {
+    if run.subgrid == SinglePointSubgrid::Lct {
+        return Ok(SinglePointConstantRestartFiles {
+            common: write_single_point_constant_restart(
+                &run.static_run.surface,
+                &run.static_run.restart_dir,
+                run.static_run.static_config(),
+            )?,
+            pft: None,
+        });
+    }
+
+    let document = read_run_namelist(run)?;
+    let surface = read_single_point_surface(
+        &run.static_run.surface,
+        run.static_run.land_cover,
+        run.static_run.hydraulic_model,
+    )?;
+    ensure!(
+        patch_type(run.static_run.land_cover, surface.land_class)? == 0,
+        "DEF_USE_PFT single-point cold starts require a natural-soil patch"
+    );
+    let pft = read_single_point_pft_data(&run.static_run.surface)?;
+    let canopy = pft_canopy(&document, &pft)?;
+    let common = write_single_point_constant_restart_with_canopy(
+        &run.static_run.surface,
+        &run.static_run.restart_dir,
+        run.static_run.static_config(),
+        Some((canopy.patch_top_m, canopy.patch_bottom_m)),
+    )?;
+    let pft_file = write_pft_constant_restart(
+        &run.static_run.restart_dir,
+        &run.static_run.case_name,
+        run.static_run.land_cover_year,
+        &run.static_run.block_label,
+        PftConstantRestartInput {
+            class: &pft.class,
+            fraction: &pft.fraction,
+            canopy_top_m: &canopy.top_m,
+            canopy_bottom_m: &canopy.bottom_m,
+            crop_fraction: None,
+        },
+    )?;
+    Ok(SinglePointConstantRestartFiles {
+        common,
+        pft: Some(pft_file),
+    })
+}
+
+fn write_single_point_constant_restart_with_canopy(
+    surface: impl AsRef<Path>,
+    restart_dir: impl AsRef<Path>,
+    config: SinglePointStaticConfig<'_>,
+    canopy_override: Option<(f64, f64)>,
 ) -> Result<ConstantRestartFiles> {
     let surface = read_single_point_surface(surface, config.land_cover, config.hydraulic_model)?;
     let class = [surface.land_class];
@@ -247,12 +344,16 @@ pub fn write_single_point_constant_restart(
         config.hydraulic_model,
     )?;
     let observed_top = [surface.canopy_height_m];
-    let canopy = match config.land_cover {
+    let mut canopy = match config.land_cover {
         LandCoverScheme::Igbp => {
             derive_igbp_canopy(&class, &kind, &observed_top, &IGBP_TOP, &IGBP_BOTTOM, None)?
         }
         LandCoverScheme::Usgs => derive_usgs_canopy(&class, &USGS_TOP, &USGS_BOTTOM)?,
     };
+    if let Some((top, bottom)) = canopy_override {
+        canopy.patch_top_m[0] = top;
+        canopy.patch_bottom_m[0] = bottom;
+    }
     let mut texture = [surface.soil_texture];
     normalize_soil_texture(&mut texture);
     let bvic = [BVIC_USDA[texture[0] as usize]];
@@ -310,11 +411,22 @@ pub fn write_single_point_constant_restart(
 
 /// Writes the standard no-observation cold time restart for a resolved single point.
 ///
-/// The output is the native `MOD_Initialize` LCT cold branch: site monthly LAI/SAI,
-/// optional soil/snow/water-table observations, and the normal broadband albedo state.
+/// The output includes the native common restart, plus PFT vectors when selected:
+/// site monthly LAI/SAI, optional soil/snow/water-table observations, and broadband
+/// albedo state.
 pub fn write_single_point_cold_time_restart(
     run: &SinglePointColdStartRun,
 ) -> Result<TimeRestartFile> {
+    Ok(write_single_point_cold_time_restarts(run)?.common)
+}
+
+/// Writes the common time restart and, for `DEF_USE_PFT`, its PFT vector restart.
+pub fn write_single_point_cold_time_restarts(
+    run: &SinglePointColdStartRun,
+) -> Result<SinglePointTimeRestartFiles> {
+    if run.subgrid == SinglePointSubgrid::Pft {
+        return write_single_point_pft_cold_time_restarts(run);
+    }
     let config = run.static_run.static_config();
     let surface = read_single_point_surface(
         &run.static_run.surface,
@@ -429,7 +541,7 @@ pub fn write_single_point_cold_time_restart(
         snow_cover.ground_snow_fraction,
         cold_soil.temperature_k[0],
     )?;
-    write_cold_time_restart(
+    let common = write_cold_time_restart(
         run,
         kind,
         &surface,
@@ -454,7 +566,401 @@ pub fn write_single_point_cold_time_restart(
         snow_depth_m,
         snow_water_equivalent_mm,
         snow_cover.ground_snow_fraction,
-    )
+        roughness,
+    )?;
+    Ok(SinglePointTimeRestartFiles { common, pft: None })
+}
+
+fn write_single_point_pft_cold_time_restarts(
+    run: &SinglePointColdStartRun,
+) -> Result<SinglePointTimeRestartFiles> {
+    let config = run.static_run.static_config();
+    let document = read_run_namelist(run)?;
+    let surface = read_single_point_surface(
+        &run.static_run.surface,
+        config.land_cover,
+        config.hydraulic_model,
+    )?;
+    let kind = patch_type(config.land_cover, surface.land_class)?;
+    ensure!(
+        kind == 0,
+        "DEF_USE_PFT single-point cold starts require a natural-soil patch"
+    );
+    let pft = read_single_point_pft_data(&run.static_run.surface)?;
+    let canopy = pft_canopy(&document, &pft)?;
+    let dimensions = TimeRestartDimensions::default();
+    let soil = derive_soil_parameters(
+        &surface.soil_layers,
+        &[kind],
+        dimensions.soil_layers,
+        config.hydraulic_model,
+    )?;
+    let lake = derive_lake_layers(&[surface.lake_depth_m], dimensions.lake_layers)?;
+    let (node_depth, thickness, interface_mm) = soil_grid(dimensions.soil_layers)?;
+    let porosity = soil.field(SoilField::Porosity).to_vec();
+    let residual_water = soil.field(SoilField::ThetaR).to_vec();
+    let psi0 = soil.field(SoilField::Psi0).to_vec();
+    let conductivity = soil.field(SoilField::HydraulicConductivity).to_vec();
+    let hydraulic_model = soil_hydraulic_models(&soil, config.hydraulic_model)?;
+    let month = month_from_julian(run.date.year, run.date.julian_day)?;
+    let cold_soil = initial_soil_state(
+        run,
+        &surface,
+        kind,
+        &porosity,
+        &residual_water,
+        &psi0,
+        &conductivity,
+        &hydraulic_model,
+        &node_depth,
+        &thickness,
+        &interface_mm[1..],
+    )?;
+    let hydraulic = derive_initial_soil_hydraulics(
+        kind,
+        &cold_soil.temperature_k,
+        &cold_soil.liquid_water_kg_m2,
+        &interface_mm,
+        &porosity,
+        &residual_water,
+        &psi0,
+        &conductivity,
+        &hydraulic_model,
+    )?;
+    let vegetation_year = if run.lai_change_yearly {
+        run.date.year
+    } else {
+        run.static_run.land_cover_year
+    };
+    let (total_lai_p, total_sai_p) = pft.monthly.for_year(
+        vegetation_year,
+        month,
+        run.use_site_lai,
+        run.lai_start_year,
+        run.lai_end_year,
+    )?;
+    let snow_depth_m = initial_snow_depth(run, &surface, month)?;
+    let snow_water_equivalent_mm = snow_depth_m * 250.0;
+    let roughness = canopy.patch_top_m * 0.1;
+    let roughness_p = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
+    let pft_snow = if snow_depth_m > 0.0 {
+        derive_pft_snow_cover(
+            &pft.class,
+            &pft.fraction,
+            &total_lai_p,
+            &total_sai_p,
+            &roughness_p,
+            &canopy.bottom_m,
+            &canopy.top_m,
+            config.tuning.zlnd,
+            snow_water_equivalent_mm,
+            snow_depth_m,
+            run.snow_cover_exponent,
+            run.vegetation_snow,
+        )?
+    } else {
+        crate::PftSnowCover {
+            patch: crate::SnowCover {
+                vegetation_burial_fraction: 0.0,
+                snow_free_vegetation_fraction: 1.0,
+                ground_snow_fraction: 0.0,
+            },
+            pft_snow_free_vegetation_fraction: vec![1.0; pft.class.len()],
+        }
+    };
+    let sai_p = total_sai_p
+        .iter()
+        .zip(&pft_snow.pft_snow_free_vegetation_fraction)
+        .map(|(sai, sigf)| sai * sigf)
+        .collect::<Vec<_>>();
+    let total_lai = weighted_sum(&total_lai_p, &pft.fraction)?;
+    let total_sai = weighted_sum(&total_sai_p, &pft.fraction)?;
+    let sai = weighted_sum(&sai_p, &pft.fraction)?;
+    let calendar_day = calendar_day(run.date, run.greenwich, surface.longitude_degrees)?;
+    let cosine_zenith = orbital_cosine_zenith(
+        calendar_day,
+        surface.longitude_degrees.to_radians(),
+        surface.latitude_degrees.to_radians(),
+    );
+    let radiation_p = pft
+        .class
+        .iter()
+        .zip(total_lai_p.iter().zip(sai_p.iter()))
+        .map(|(&class, (&lai, &sai))| {
+            cold_start_broadband_radiation_with_snow(
+                kind,
+                surface.albedo,
+                cold_soil.liquid_water_kg_m2[0],
+                thickness[0],
+                pft_leaf_optics(&document, class, config.hydraulic_model)?,
+                lai,
+                sai,
+                0.0,
+                cosine_zenith.max(0.001),
+                true,
+                false,
+                run.vegetation_snow,
+                snow_depth_m,
+                pft_snow.patch.ground_snow_fraction,
+                cold_soil.temperature_k[0],
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let radiation = aggregate_pft_radiation(&radiation_p, &pft.fraction, total_lai + sai)?;
+    let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
+    let common = write_cold_time_restart(
+        run,
+        kind,
+        &surface,
+        &lake,
+        &cold_soil.temperature_k,
+        &cold_soil.liquid_water_kg_m2,
+        &cold_soil.ice_water_kg_m2,
+        &hydraulic.matric_potential_mm,
+        &hydraulic.hydraulic_conductivity_mm_s,
+        cold_soil.water_table_depth_m,
+        cold_soil.aquifer_water_mm,
+        total_lai,
+        total_sai,
+        1.0,
+        1.0,
+        pft_snow.patch.snow_free_vegetation_fraction,
+        total_lai,
+        sai,
+        cosine_zenith,
+        &radiation,
+        &snow,
+        snow_depth_m,
+        snow_water_equivalent_mm,
+        pft_snow.patch.ground_snow_fraction,
+        roughness,
+    )?;
+    let pft_time = write_pft_time_restart(
+        &run.static_run.restart_dir,
+        &run.static_run.case_name,
+        run.static_run.land_cover_year,
+        run.date,
+        &run.static_run.block_label,
+        PftTimeRestartInput {
+            fields: PftTimeFields {
+                leaf_temperature_k: &vec![cold_soil.temperature_k[0]; pft.class.len()],
+                canopy_water_mm: &vec![0.0; pft.class.len()],
+                canopy_rain_mm: &vec![0.0; pft.class.len()],
+                canopy_snow_mm: &vec![0.0; pft.class.len()],
+                wet_snow_fraction: &vec![0.0; pft.class.len()],
+                vegetation_fraction: &pft_snow.pft_snow_free_vegetation_fraction,
+                total_lai: &total_lai_p,
+                lai: &total_lai_p,
+                total_sai: &total_sai_p,
+                sai: &sai_p,
+                sunlit_absorption: &pft_radiation_values(&radiation_p, |state| {
+                    state.sunlit_absorption
+                }),
+                shaded_absorption: &pft_radiation_values(&radiation_p, |state| {
+                    state.shaded_absorption
+                }),
+                thermal_gap_fraction: &radiation_p
+                    .iter()
+                    .map(|state| state.thermal_gap_fraction)
+                    .collect::<Vec<_>>(),
+                shade_fraction: &vec![MISSING; pft.class.len()],
+                direct_extinction: &radiation_p
+                    .iter()
+                    .map(|state| state.direct_extinction)
+                    .collect::<Vec<_>>(),
+                diffuse_extinction: &radiation_p
+                    .iter()
+                    .map(|state| state.diffuse_extinction)
+                    .collect::<Vec<_>>(),
+                reference_temperature_k: &vec![cold_soil.temperature_k[0]; pft.class.len()],
+                reference_humidity: &vec![0.3; pft.class.len()],
+                stomatal_resistance_s_m: &vec![MISSING; pft.class.len()],
+                roughness_length_m: &roughness_p,
+            },
+            hyperspectral: None,
+            plant_hydraulics: run.plant_hydraulics.then_some(PftPlantHydraulicFields {
+                water_potential_mm: &vec![-25_000.0; 4 * pft.class.len()],
+                sunlit_stomatal_conductance: &vec![10_000.0; pft.class.len()],
+                shaded_stomatal_conductance: &vec![10_000.0; pft.class.len()],
+                vegetation_nodes: 4,
+            }),
+            ozone: run.ozone_stress.then_some(PftOzoneFields {
+                lai_old: &total_lai_p,
+                sunlit_uptake: &vec![0.0; pft.class.len()],
+                shaded_uptake: &vec![0.0; pft.class.len()],
+            }),
+            irrigation_method: None,
+        },
+    )?;
+    Ok(SinglePointTimeRestartFiles {
+        common,
+        pft: Some(pft_time),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PftCanopy {
+    top_m: Vec<f64>,
+    bottom_m: Vec<f64>,
+    patch_top_m: f64,
+    patch_bottom_m: f64,
+}
+
+fn read_run_namelist(run: &SinglePointColdStartRun) -> Result<colm_namelist::Document> {
+    let text = std::fs::read_to_string(&run.namelist)
+        .with_context(|| format!("cannot read case namelist {}", run.namelist.display()))?;
+    parse(&text).with_context(|| format!("cannot parse case namelist {}", run.namelist.display()))
+}
+
+fn pft_canopy(
+    document: &colm_namelist::Document,
+    pft: &crate::SinglePointPftData,
+) -> Result<PftCanopy> {
+    let campbell = optional_bool_or(document, "DEF_USE_Campbell_SOIL_MODEL", false)?;
+    let mut top_m = Vec::with_capacity(pft.class.len());
+    let mut bottom_m = Vec::with_capacity(pft.class.len());
+    for (&class, &observed_top_m) in pft.class.iter().zip(&pft.canopy_height_m) {
+        let default_top_m = pft_parameter(document, "DEF_PFT_HTOP0", class, campbell)?;
+        let default_bottom_m = pft_parameter(document, "DEF_PFT_HBOT0", class, campbell)?;
+        let (top, bottom) = if (1..=8).contains(&class) {
+            (
+                observed_top_m.max(2.0),
+                (observed_top_m * default_bottom_m / default_top_m).max(1.0),
+            )
+        } else {
+            (default_top_m, default_bottom_m)
+        };
+        top_m.push(top);
+        bottom_m.push(bottom);
+    }
+    Ok(PftCanopy {
+        patch_top_m: weighted_sum(&top_m, &pft.fraction)?,
+        patch_bottom_m: weighted_sum(&bottom_m, &pft.fraction)?,
+        top_m,
+        bottom_m,
+    })
+}
+
+fn pft_leaf_optics(
+    document: &colm_namelist::Document,
+    class: i32,
+    hydraulic_model: HydraulicModel,
+) -> Result<LeafOptics> {
+    let campbell = hydraulic_model == HydraulicModel::Campbell;
+    Ok(LeafOptics {
+        chil: pft_parameter(document, "DEF_PFT_CHIL", class, campbell)?,
+        reflectance: [
+            [
+                pft_parameter(document, "DEF_PFT_RHOL_VIS", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_RHOS_VIS", class, campbell)?,
+            ],
+            [
+                pft_parameter(document, "DEF_PFT_RHOL_NIR", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_RHOS_NIR", class, campbell)?,
+            ],
+        ],
+        transmittance: [
+            [
+                pft_parameter(document, "DEF_PFT_TAUL_VIS", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_TAUS_VIS", class, campbell)?,
+            ],
+            [
+                pft_parameter(document, "DEF_PFT_TAUL_NIR", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_TAUS_NIR", class, campbell)?,
+            ],
+        ],
+    })
+}
+
+fn pft_parameter(
+    document: &colm_namelist::Document,
+    name: &str,
+    class: i32,
+    campbell: bool,
+) -> Result<f64> {
+    let class = u8::try_from(class).context("PFT class must be nonnegative")?;
+    let fallback = pft_default_value(name, class, campbell, false)?
+        .with_context(|| format!("{name} has no native PFT default"))?;
+    let field = format!("{name}({})", usize::from(class) + 1);
+    match document.get(&field) {
+        Some(value) => {
+            let value = value
+                .as_f64()
+                .with_context(|| format!("{field} must be a real value"))?;
+            validate_pft_override(&field, value)?;
+            Ok(value)
+        }
+        None => Ok(fallback),
+    }
+}
+
+fn weighted_sum(values: &[f64], weights: &[f64]) -> Result<f64> {
+    ensure!(
+        !values.is_empty()
+            && values.len() == weights.len()
+            && values.iter().chain(weights).all(|value| value.is_finite()),
+        "PFT weighted fields must be nonempty, finite, and have matching lengths"
+    );
+    Ok(values
+        .iter()
+        .zip(weights)
+        .map(|(value, weight)| value * weight)
+        .sum())
+}
+
+fn pft_radiation_values(
+    states: &[ColdStartRadiation],
+    select: fn(&ColdStartRadiation) -> [[f64; 2]; 2],
+) -> Vec<f64> {
+    let mut values = vec![0.0; 4 * states.len()];
+    for (pft, state) in states.iter().enumerate() {
+        for band in 0..2 {
+            for radiation_type in 0..2 {
+                values[(band * 2 + radiation_type) * states.len() + pft] =
+                    select(state)[band][radiation_type];
+            }
+        }
+    }
+    values
+}
+
+fn aggregate_pft_radiation(
+    states: &[ColdStartRadiation],
+    fraction: &[f64],
+    leaf_stem_area: f64,
+) -> Result<ColdStartRadiation> {
+    ensure!(
+        !states.is_empty() && states.len() == fraction.len(),
+        "PFT radiation states and fractions must be nonempty and have matching lengths"
+    );
+    let aggregate = |select: fn(&ColdStartRadiation) -> [[f64; 2]; 2]| {
+        std::array::from_fn(|band| {
+            std::array::from_fn(|radiation_type| {
+                states
+                    .iter()
+                    .zip(fraction)
+                    .map(|(state, fraction)| select(state)[band][radiation_type] * fraction)
+                    .sum()
+            })
+        })
+    };
+    Ok(ColdStartRadiation {
+        albedo: aggregate(|state| state.albedo),
+        sunlit_absorption: aggregate(|state| state.sunlit_absorption),
+        shaded_absorption: aggregate(|state| state.shaded_absorption),
+        soil_absorption: aggregate(|state| state.soil_absorption),
+        snow_absorption: aggregate(|state| state.snow_absorption),
+        snow_age: states[0].snow_age,
+        // `albland` leaves this common field untouched for leafy PFT patches;
+        // only the PFT-vector thermal gap is a live initial state.
+        thermal_gap_fraction: if leaf_stem_area <= 1.0e-6 {
+            1.0
+        } else {
+            MISSING
+        },
+        direct_extinction: 1.0,
+        diffuse_extinction: 0.718,
+    })
 }
 
 fn initial_snow_depth(
@@ -621,6 +1127,7 @@ fn write_cold_time_restart(
     snow_depth_m: f64,
     snow_water_equivalent_mm: f64,
     ground_snow_fraction: f64,
+    roughness: f64,
 ) -> Result<TimeRestartFile> {
     let dimensions = TimeRestartDimensions::default();
     let snow_temperature = snow
@@ -660,11 +1167,6 @@ fn write_cold_time_restart(
         0.0
     };
     let wetland_water = if patch_type == 2 { 200.0 } else { 0.0 };
-    let roughness = canopy_top(
-        run.static_run.land_cover,
-        surface.land_class,
-        surface.canopy_height_m,
-    )? * 0.1;
     let plant_water = vec![-25_000.0; 4];
     let ozone_lai = one(lai);
     let ozone_zero = one(0.0);
@@ -788,13 +1290,30 @@ fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {
     Ok(types[index])
 }
 
-fn reject_unsupported_cold_start_features(document: &colm_namelist::Document) -> Result<()> {
+fn single_point_subgrid(document: &colm_namelist::Document) -> Result<SinglePointSubgrid> {
+    let lct = optional_bool_or(document, "DEF_USE_LCT", true)?;
+    let pft = optional_bool_or(document, "DEF_USE_PFT", false)?;
+    let pc = optional_bool_or(document, "DEF_USE_PC", false)?;
     ensure!(
-        optional_bool_or(document, "DEF_USE_LCT", true)?,
-        "native cold single-point restart currently requires DEF_USE_LCT = .true."
+        [lct, pft, pc]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count()
+            == 1,
+        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
     );
+    match (lct, pft) {
+        (true, false) => Ok(SinglePointSubgrid::Lct),
+        (false, true) => Ok(SinglePointSubgrid::Pft),
+        _ => bail!("native cold single-point restart does not yet support DEF_USE_PC = .true."),
+    }
+}
+
+fn reject_unsupported_cold_start_features(
+    document: &colm_namelist::Document,
+    subgrid: SinglePointSubgrid,
+) -> Result<()> {
     for field in [
-        "DEF_USE_PFT",
         "DEF_USE_PC",
         "DEF_USE_BGC",
         "DEF_URBAN_RUN",
@@ -807,6 +1326,10 @@ fn reject_unsupported_cold_start_features(document: &colm_namelist::Document) ->
             "native cold single-point restart does not yet support {field} = .true."
         );
     }
+    ensure!(
+        subgrid != SinglePointSubgrid::Pft || !optional_bool_or(document, "DEF_USE_LCT", true)?,
+        "DEF_USE_PFT requires DEF_USE_LCT = .false."
+    );
     ensure!(
         optional_bool_or(document, "DEF_LAI_MONTHLY", true)?,
         "native cold single-point restart requires DEF_LAI_MONTHLY = .true."

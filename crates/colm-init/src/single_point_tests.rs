@@ -24,6 +24,10 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
         .unwrap()
         .put_values(&[10], ..)
         .unwrap();
+    file.add_variable::<i32>("USGS_classification", &[])
+        .unwrap()
+        .put_values(&[19], ..)
+        .unwrap();
     file.close().unwrap();
     let namelist = directory.join("case.nml");
     std::fs::write(
@@ -35,7 +39,9 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
     )
     .unwrap();
 
-    let run = single_point_static_run_from_namelist(&namelist, None, None).unwrap();
+    assert!(single_point_static_run_from_namelist(&namelist, None, None).is_err());
+    let run = single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+        .unwrap();
     assert_eq!(run.surface, surface);
     assert_eq!(run.restart_dir, directory.join("output/CN-Cng/restart"));
     assert_eq!(run.case_name, "CN-Cng");
@@ -44,6 +50,20 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
     assert_eq!(run.land_cover, LandCoverScheme::Igbp);
     assert_eq!(run.hydraulic_model, HydraulicModel::VanGenuchten);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn pft_optics_honor_the_native_indexed_namelist_override() {
+    let document = parse("&nl_colm\n DEF_PFT_CHIL(2) = 0.25\n /\n").unwrap();
+    let optics = pft_leaf_optics(&document, 1, HydraulicModel::VanGenuchten).unwrap();
+    assert_eq!(optics.chil, 0.25);
+    assert_eq!(optics.reflectance[0][0], 0.07);
+    assert!(pft_leaf_optics(
+        &parse("&nl_colm\n DEF_PFT_CHIL(2) = 1.1\n /\n").unwrap(),
+        1,
+        HydraulicModel::VanGenuchten,
+    )
+    .is_err());
 }
 
 #[test]

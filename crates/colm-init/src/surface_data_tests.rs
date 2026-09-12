@@ -25,6 +25,18 @@ fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
 }
 
 #[test]
+fn reader_uses_the_first_eight_layers_of_a_ten_layer_site_profile() {
+    let path = temp_file("ten-layer");
+    write_surface(&path, 10, true, true);
+    let data =
+        read_single_point_surface(&path, LandCoverScheme::Igbp, HydraulicModel::VanGenuchten)
+            .unwrap();
+    assert_eq!(data.soil_layers.len(), 8);
+    assert_eq!(data.soil_layers[7].vf_quartz, 8.0);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn campbell_does_not_require_van_genuchten_surface_variables() {
     let path = temp_file("campbell");
     write_surface(&path, 8, false, true);

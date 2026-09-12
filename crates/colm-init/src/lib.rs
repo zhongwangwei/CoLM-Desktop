@@ -44,8 +44,10 @@ pub use runtime::{
 };
 pub use single_point::{
     single_point_cold_start_run_from_namelist, single_point_static_run_from_namelist,
-    write_single_point_cold_time_restart, write_single_point_constant_restart,
-    SinglePointColdStartRun, SinglePointStaticConfig, SinglePointStaticRun,
+    write_single_point_cold_time_restart, write_single_point_cold_time_restarts,
+    write_single_point_constant_restart, write_single_point_constant_restarts,
+    SinglePointColdStartRun, SinglePointConstantRestartFiles, SinglePointStaticConfig,
+    SinglePointStaticRun, SinglePointSubgrid, SinglePointTimeRestartFiles,
 };
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
@@ -62,7 +64,7 @@ pub use time_restart::{
     TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
 pub use time_state::{
-    derive_initial_soil_hydraulics, derive_snow_cover, initialize_cold_soil,
+    derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, interpolate_profile, ColdSoilState,
     PftSnowCover, SnowCover, SnowState, SoilHydraulicState,
 };
