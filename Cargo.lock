@@ -104,6 +104,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-init"
+version = "0.2.0-beta.4"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "colm-kernel"
 version = "0.2.0-beta.4"
 dependencies = [
