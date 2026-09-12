@@ -26,6 +26,9 @@ pub mod ground_thermal_step {
 pub mod linear {
     pub use colm_core::linear::*;
 }
+pub mod lake {
+    pub use colm_core::lake::*;
+}
 pub mod monin_obukhov {
     pub use colm_core::monin_obukhov::*;
 }
@@ -74,6 +77,7 @@ pub mod vegetation {
 
 pub use colm_core::update_snow_age;
 pub use colm_core::SoilSurfaceResistanceInput;
+pub use colm_core::{adjust_lake_layers, LakeColumn};
 pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,

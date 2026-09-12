@@ -14,6 +14,7 @@ pub mod ground_temperature;
 pub mod ground_thermal_step;
 pub mod hydrology;
 pub mod interception;
+pub mod lake;
 pub mod linear;
 pub mod monin_obukhov;
 pub mod net_solar;
@@ -68,6 +69,7 @@ pub use interception::{
     canopy_wetness, intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput,
     CanopyWater, CanopyWetness,
 };
+pub use lake::{adjust_lake_layers, LakeColumn};
 pub use monin_obukhov::{
     canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,
     integrated_monin_obukhov_diffusivity, monin_obukhov, monin_obukhov_diffusivity,
