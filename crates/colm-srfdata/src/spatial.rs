@@ -206,6 +206,127 @@ pub fn build_spatial_topology(
     })
 }
 
+/// Read one aligned land-cover raster and build CoLM's LCT patch partition.
+///
+/// The raster is read one latitude strip at a time, with a split read at the
+/// dateline, so a regional case never materializes the global landtype field.
+/// PFT/PC, crop, and urban refine this LCT topology in their own feature paths.
+pub fn build_lct_land_patches_from_raster(
+    mut topology: SpatialTopology,
+    raster: impl AsRef<Path>,
+    variable: &str,
+    raw_grid: Grid,
+    dominant_type: bool,
+) -> Result<(SpatialTopology, FlatLandPatches)> {
+    let types = read_mesh_raster_i32(
+        raster.as_ref(),
+        variable,
+        &topology.mesh,
+        &topology.pixel,
+        raw_grid,
+    )?;
+    let (mesh, patches) = topology.mesh.into_land_patches(&types, dominant_type)?;
+    topology.land_elements = mesh.land_elements();
+    topology.mesh = mesh;
+    Ok((topology, patches))
+}
+
+/// Read raster classes in the exact flattened mesh-pixel order.
+pub fn read_mesh_raster_i32(
+    raster: &Path,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<i32>> {
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let shape = source
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.len())
+        .collect::<Vec<_>>();
+    ensure!(
+        shape == [raw_grid.nlat, raw_grid.nlon],
+        "{variable} has shape {shape:?}; expected raw latitude,longitude [{}, {}]",
+        raw_grid.nlat,
+        raw_grid.nlon
+    );
+    let longitude = pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&west, &east)| raw_grid.index_of(midpoint_longitude(west, east), 0.0).0)
+        .collect::<Vec<_>>();
+    let latitude = pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| raw_grid.index_of(0.0, (south + north) * 0.5).1)
+        .collect::<Vec<_>>();
+    let mut pixel_values = vec![0_i32; pixel.lon_w.len() * pixel.lat_s.len()];
+    for (local_y, global_y) in latitude.into_iter().enumerate() {
+        let row = read_raster_row(&source, global_y, &longitude, raw_grid.nlon)?;
+        let start = local_y * pixel.lon_w.len();
+        pixel_values[start..start + row.len()].copy_from_slice(&row);
+    }
+    let mut values = Vec::new();
+    for element in 0..mesh.len() {
+        let (xs, ys) = mesh.pixels(element)?;
+        for (&x, &y) in xs.iter().zip(ys) {
+            let x = usize::try_from(x)?
+                .checked_sub(1)
+                .context("mesh longitude is zero")?;
+            let y = usize::try_from(y)?
+                .checked_sub(1)
+                .context("mesh latitude is zero")?;
+            values.push(
+                *pixel_values
+                    .get(y * pixel.lon_w.len() + x)
+                    .context("mesh pixel lies outside the spatial pixel grid")?,
+            );
+        }
+    }
+    Ok(values)
+}
+
+fn read_raster_row(
+    source: &netcdf::Variable<'_>,
+    global_y: usize,
+    longitude: &[usize],
+    nlon: usize,
+) -> Result<Vec<i32>> {
+    ensure!(global_y > 0, "raw raster latitude indices are one-based");
+    let first = *longitude
+        .first()
+        .context("spatial pixel longitude is empty")?;
+    ensure!(
+        longitude
+            .iter()
+            .enumerate()
+            .all(|(offset, index)| *index == (first + offset - 1) % nlon + 1),
+        "spatial pixel longitudes must be contiguous in raw-grid order"
+    );
+    let width = longitude.len();
+    let start = first - 1;
+    let mut out = if start + width <= nlon {
+        source.get_values::<i32, _>((global_y - 1..global_y, start..start + width))?
+    } else {
+        let mut values = source.get_values::<i32, _>((global_y - 1..global_y, start..nlon))?;
+        values.extend(
+            source.get_values::<i32, _>((global_y - 1..global_y, 0..width - (nlon - start)))?,
+        );
+        values
+    };
+    ensure!(
+        out.len() == width,
+        "raw raster row returned an unexpected length"
+    );
+    Ok(std::mem::take(&mut out))
+}
+
 /// Write the common topology artifacts expected by `mkinidata` and `colm`.
 ///
 /// `landpatch` must be constructed from real land-cover data before this call;

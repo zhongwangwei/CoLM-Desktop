@@ -46,6 +46,18 @@ fn write_mesh(path: &std::path::Path, variable: &str, values: &[i64]) {
     file.close().unwrap();
 }
 
+fn write_landtype(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    file.add_variable::<i32>("landtype", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[8, 9, 10, 11, 12, 13, 14, 15], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
 fn dim_names(file: &netcdf::File, variable: &str) -> Vec<String> {
     file.variable(variable)
         .unwrap()
@@ -93,6 +105,35 @@ fn unstructured_mesh_keeps_one_element_across_multiple_input_cells() {
     assert_eq!(topology.mesh.len(), 1);
     assert_eq!(topology.mesh.element_id(0).unwrap(), 77);
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 8);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
+    let directory = temporary("landtype");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("landtype.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_landtype(&raster);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    let (topology, patches) = build_lct_land_patches_from_raster(
+        topology,
+        &raster,
+        "landtype",
+        Grid { nlon: 4, nlat: 2 },
+        false,
+    )
+    .unwrap();
+    assert_eq!(patches.element_ids, vec![1, 1, 1, 1, 2, 2, 2, 2]);
+    assert_eq!(patches.set_type, vec![8, 9, 12, 13, 10, 11, 14, 15]);
+    assert_eq!(topology.mesh.pixels(0).unwrap().0, &[1, 2, 1, 2]);
+    assert_eq!(topology.mesh.pixels(0).unwrap().1, &[2, 2, 1, 1]);
 
     std::fs::remove_dir_all(directory).unwrap();
 }
