@@ -100,7 +100,7 @@ pub fn cold_start_pc_broadband_radiation_with_snow(
         snow_depth_m,
         ground_snow_fraction,
         ground_temperature_k,
-    );
+    )?;
     let core = three_d_canopy(pfts, &fractions, cosine_zenith, ground)?;
     let pft = (0..pfts.len())
         .map(|index| PcPftRadiation {
@@ -915,21 +915,21 @@ fn ground_albedos(
     snow_depth: f64,
     snow_fraction: f64,
     temperature: f64,
-) -> (
+) -> Result<(
     [[f64; RTYPES]; BANDS],
     [[f64; RTYPES]; BANDS],
     [[f64; RTYPES]; BANDS],
     f64,
-) {
+)> {
     let wetness = (1.0e-3 * liquid_water / thickness).min(1.0);
     let increase = (0.11 - 0.40 * wetness).max(0.0);
     let soil_ground = [
         [(soil.saturated_visible + increase).min(soil.dry_visible); RTYPES],
         [(soil.saturated_near_infrared + increase).min(soil.dry_near_infrared); RTYPES],
     ];
-    let (snow, snow_age) = generic_snow_albedo(snow_depth * 250.0, temperature, cosine_zenith);
+    let (snow, snow_age) = generic_snow_albedo(snow_depth * 250.0, temperature, cosine_zenith)?;
     let ground = mix_ground_albedo(soil_ground, snow, snow_fraction);
-    (soil_ground, snow, ground, snow_age)
+    Ok((soil_ground, snow, ground, snow_age))
 }
 
 #[cfg(test)]

@@ -5,6 +5,9 @@ use anyhow::{ensure, Result};
 use crate::FREEZING_K;
 
 const MAX_SNOW_LAYERS: usize = 5;
+// `MOD_Const_Physical:tfrz`, compiled by the Desktop reference with
+// `-fdefault-real-8`.
+const SNOW_AGE_FREEZING_K: f64 = 273.16;
 
 const fn f77(value: f32) -> f64 {
     value as f64
@@ -75,6 +78,39 @@ pub struct NewSnowInput {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NewSnowOutcome {
     pub wetland_water_added_mm: f64,
+}
+
+/// Ports `MOD_Albedo:snowage` for the non-SNICAR broadband path.
+///
+/// `snow_water_equivalent_mm` and `previous_snow_water_equivalent_mm` are
+/// CoLM's `scv` and `scvold`; the returned value is the next `sag` state.
+pub fn update_snow_age(
+    time_step_seconds: f64,
+    ground_temperature_k: f64,
+    snow_water_equivalent_mm: f64,
+    previous_snow_water_equivalent_mm: f64,
+    snow_age: f64,
+) -> Result<f64> {
+    ensure!(
+        time_step_seconds.is_finite()
+            && time_step_seconds > 0.0
+            && ground_temperature_k.is_finite()
+            && snow_water_equivalent_mm.is_finite()
+            && snow_water_equivalent_mm >= 0.0
+            && previous_snow_water_equivalent_mm.is_finite()
+            && previous_snow_water_equivalent_mm >= 0.0
+            && snow_age.is_finite()
+            && snow_age >= 0.0,
+        "snow-age inputs are invalid"
+    );
+    if snow_water_equivalent_mm == 0.0 || snow_water_equivalent_mm > 800.0 {
+        return Ok(0.0);
+    }
+    let argument = 5.0e3 * (1.0 / SNOW_AGE_FREEZING_K - 1.0 / ground_temperature_k);
+    let aging =
+        1.0e-6 * time_step_seconds * (argument.exp() + (10.0 * argument).min(0.0).exp() + 0.3);
+    let fresh_snow = 0.1 * (snow_water_equivalent_mm - previous_snow_water_equivalent_mm).max(0.0);
+    Ok(((snow_age + aging) * (1.0 - fresh_snow)).max(0.0))
 }
 
 /// Port of MOD_NewSnow.F90:newsnow.

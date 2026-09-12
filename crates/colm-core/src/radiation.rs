@@ -5,7 +5,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::{LandCoverScheme, SoilReflectance};
+use crate::{update_snow_age, LandCoverScheme, SoilReflectance};
 
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
@@ -322,7 +322,7 @@ fn cold_start_broadband_radiation_with_snow_using(
         soil_ground = [[albedo_water, 0.1], [albedo_water, 0.1]];
     }
     let (snow, snow_age) =
-        generic_snow_albedo(snow_depth_m * 250.0, ground_temperature_k, cosine_zenith);
+        generic_snow_albedo(snow_depth_m * 250.0, ground_temperature_k, cosine_zenith)?;
     let ground = mix_ground_albedo(soil_ground, snow, ground_snow_fraction);
     let mut albedo = ground;
 
@@ -399,17 +399,17 @@ pub(crate) fn generic_snow_albedo(
     snow_water_equivalent_mm: f64,
     ground_temperature_k: f64,
     cosine_zenith: f64,
-) -> ([[f64; RADIATION_TYPES]; BANDS], f64) {
+) -> Result<([[f64; RADIATION_TYPES]; BANDS], f64)> {
     if snow_water_equivalent_mm <= 0.0 {
-        return ([[1.0; RADIATION_TYPES]; BANDS], 0.0);
+        return Ok(([[1.0; RADIATION_TYPES]; BANDS], 0.0));
     }
-    let snow_age = if snow_water_equivalent_mm > 800.0 {
-        0.0
-    } else {
-        let argument = 5_000.0 * (1.0 / 273.16 - 1.0 / ground_temperature_k);
-        1.0e-6 * 1800.0 * (argument.exp() + (10.0 * argument).min(0.0).exp() + 0.3)
-    }
-    .max(0.0);
+    let snow_age = update_snow_age(
+        1800.0,
+        ground_temperature_k,
+        snow_water_equivalent_mm,
+        snow_water_equivalent_mm,
+        0.0,
+    )?;
     let age = 1.0 - 1.0 / (1.0 + snow_age);
     let direct_correction = ((1.5 / (1.0 + 4.0 * cosine_zenith)) - 0.5).max(0.0);
     let snow_band = |new_snow_albedo: f64, age_factor: f64| {
@@ -417,7 +417,7 @@ pub(crate) fn generic_snow_albedo(
         let direct = diffuse + 0.4 * direct_correction * (1.0 - diffuse);
         [direct, diffuse]
     };
-    ([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age)
+    Ok(([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age))
 }
 
 struct TwoStreamRadiation {

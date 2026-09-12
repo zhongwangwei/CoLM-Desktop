@@ -72,6 +72,7 @@ pub mod vegetation {
     pub use colm_core::vegetation::*;
 }
 
+pub use colm_core::update_snow_age;
 pub use colm_core::SoilSurfaceResistanceInput;
 pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,

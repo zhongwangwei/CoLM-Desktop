@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn snow_age_matches_mod_albedo_and_resets_for_no_or_antarctic_snow() {
+    // Standalone gfortran reference from MOD_Albedo:snowage.
+    assert!(
+        (update_snow_age(1800.0, 270.0, 25.0, 25.0, 0.0).unwrap() - 0.002_204_192_232_638_983)
+            .abs()
+            < 1.0e-15
+    );
+    assert!(
+        (update_snow_age(3600.0, 268.0, 12.0, 10.0, 0.4).unwrap() - 0.322_973_468_400_602_3).abs()
+            < 1.0e-14
+    );
+    assert_eq!(update_snow_age(1800.0, 270.0, 0.0, 10.0, 0.9).unwrap(), 0.0);
+    assert_eq!(
+        update_snow_age(1800.0, 270.0, 801.0, 800.0, 0.9).unwrap(),
+        0.0
+    );
+    assert!(update_snow_age(0.0, 270.0, 1.0, 1.0, 0.0).is_err());
+}
+
 fn input() -> NewSnowInput {
     NewSnowInput {
         patch_type: 0,
