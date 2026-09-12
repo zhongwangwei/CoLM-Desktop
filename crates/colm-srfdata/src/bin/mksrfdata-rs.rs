@@ -3,6 +3,10 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use colm_srfdata::soil::{
+    aggregate_balland_arp, aggregate_campbell, aggregate_soil_field, aggregate_vgm, CampbellFills,
+    CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
+};
 use colm_srfdata::{
     aggregate_pft_fractions, build_lct_land_patches_from_raster,
     build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
@@ -11,10 +15,11 @@ use colm_srfdata::{
     read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
     read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
     write_landpatch_vector, write_spatial_pft_topology, write_spatial_topology, BlockLayout,
-    PftFractionInput, SiteMode, SpatialInputKind, COLM_1KM, COLM_500M,
+    FlatLandPatches, PftFractionInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM,
+    COLM_500M,
 };
 
-const SOIL_LAYERS: usize = 10;
+const LAKE_SOIL_LAYERS: usize = 10;
 const MODIS_PFT_CLASSES: usize = 16;
 const NATURAL_PFT_CLASSES: usize = 15;
 
@@ -45,6 +50,8 @@ struct SpatialLctArgs {
     lake_depth: Option<PathBuf>,
     lake_soil_carbon: Option<PathBuf>,
     soil_texture: Option<PathBuf>,
+    soil_dir: Option<PathBuf>,
+    soil_model: SoilModel,
     soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
     bedrock: Option<PathBuf>,
@@ -52,6 +59,12 @@ struct SpatialLctArgs {
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
     soil_hyper_albedo_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoilModel {
+    Vgm,
+    Campbell,
 }
 
 struct SpatialPftArgs {
@@ -217,13 +230,13 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         let raw = read_mesh_raster_layers_f64(
             path,
             "lake_soilc",
-            SOIL_LAYERS,
+            LAKE_SOIL_LAYERS,
             &topology.mesh,
             &topology.pixel,
             COLM_500M,
         )?;
         let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
-        Some(layout.aggregate_lake_soil_carbon(&raw, SOIL_LAYERS, &area, waterbody)?)
+        Some(layout.aggregate_lake_soil_carbon(&raw, LAKE_SOIL_LAYERS, &area, waterbody)?)
     } else {
         None
     };
@@ -290,6 +303,29 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         None
     };
     write_spatial_topology(&args.landdata, args.year, &topology, &patches, &args.blocks)?;
+    if let Some(directory) = &args.soil_dir {
+        let classes = match args.land_cover {
+            SiteMode::Igbp => SoilPatchClasses {
+                water: 17,
+                glacier: 15,
+            },
+            SiteMode::Usgs => SoilPatchClasses {
+                water: 16,
+                glacier: 24,
+            },
+            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
+        };
+        materialize_spatial_soil(
+            directory,
+            &args.landdata,
+            args.year,
+            &topology,
+            &patches,
+            &args.blocks,
+            classes,
+            args.soil_model,
+        )?;
+    }
     if let Some(lake_depth) = lake_depth {
         write_landpatch_scalar(
             &args.landdata,
@@ -313,7 +349,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             "lake_soilc_patches",
             "lake_soilc_patches",
             "soil",
-            SOIL_LAYERS,
+            LAKE_SOIL_LAYERS,
             &lake_soil_carbon,
         )?;
     }
@@ -493,6 +529,285 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn materialize_spatial_soil(
+    directory: &std::path::Path,
+    landdata: &std::path::Path,
+    year: i32,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    classes: SoilPatchClasses,
+    model: SoilModel,
+) -> Result<()> {
+    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    for layer in 1..=SOIL_LAYERS {
+        let quartz = read_soil_raw(
+            directory,
+            "vf_quartz_mineral_s.nc",
+            "vf_quartz_mineral_s",
+            layer,
+            topology,
+        )?;
+        let gravel = read_soil_raw(
+            directory,
+            "vf_gravels_s.nc",
+            "vf_gravels_s",
+            layer,
+            topology,
+        )?;
+        let sand = read_soil_raw(directory, "vf_sand_s.nc", "vf_sand_s", layer, topology)?;
+        let organic = read_soil_raw(directory, "vf_om_s.nc", "vf_om_s", layer, topology)?;
+        for (name, raw, fill) in [
+            ("vf_quartz_mineral_s", &quartz, 0.1),
+            ("vf_gravels_s", &gravel, 0.0),
+            ("vf_sand_s", &sand, 0.09),
+            ("vf_om_s", &organic, 0.102),
+        ] {
+            write_soil_layer(
+                landdata,
+                year,
+                topology,
+                patches,
+                blocks,
+                name,
+                layer,
+                &aggregate_soil_field(
+                    &layout,
+                    raw,
+                    &area,
+                    classes,
+                    SoilField {
+                        statistic: SoilStatistic::AreaMean,
+                        fill,
+                    },
+                )?,
+            )?;
+        }
+        let (ba_alpha, ba_beta) = aggregate_balland_arp(&layout, &gravel, &sand, &area, classes)?;
+        write_soil_layer(
+            landdata, year, topology, patches, blocks, "BA_alpha", layer, &ba_alpha,
+        )?;
+        write_soil_layer(
+            landdata, year, topology, patches, blocks, "BA_beta", layer, &ba_beta,
+        )?;
+
+        for (file, source, output, statistic, fill) in [
+            (
+                "wf_gravels_s.nc",
+                "wf_gravels_s",
+                "wf_gravels_s",
+                SoilStatistic::AreaMean,
+                0.0,
+            ),
+            (
+                "wf_sand_s.nc",
+                "wf_sand_s",
+                "wf_sand_s",
+                SoilStatistic::AreaMean,
+                0.1,
+            ),
+        ] {
+            let raw = read_soil_raw(directory, file, source, layer, topology)?;
+            let values =
+                aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
+            write_soil_layer(
+                landdata, year, topology, patches, blocks, output, layer, &values,
+            )?;
+        }
+
+        match model {
+            SoilModel::Vgm => {
+                let output = aggregate_vgm(
+                    &layout,
+                    VgmInputs {
+                        l: &read_soil_raw(directory, "VGM_L.nc", "VGM_L", layer, topology)?,
+                        theta_r: &read_soil_raw(
+                            directory,
+                            "VGM_theta_r.nc",
+                            "VGM_theta_r",
+                            layer,
+                            topology,
+                        )?,
+                        alpha: &read_soil_raw(
+                            directory,
+                            "VGM_alpha.nc",
+                            "VGM_alpha",
+                            layer,
+                            topology,
+                        )?,
+                        n: &read_soil_raw(directory, "VGM_n.nc", "VGM_n", layer, topology)?,
+                        theta_s: &read_soil_raw(
+                            directory,
+                            "theta_s.nc",
+                            "theta_s",
+                            layer,
+                            topology,
+                        )?,
+                        k_s: &read_soil_raw(directory, "k_s.nc", "k_s", layer, topology)?,
+                    },
+                    &area,
+                    classes,
+                    VgmFills::default(),
+                    true,
+                )?;
+                for (name, values) in [
+                    ("theta_r", output.theta_r),
+                    ("alpha_vgm", output.alpha),
+                    ("n_vgm", output.n),
+                    ("theta_s", output.theta_s),
+                    ("k_s", output.k_s),
+                    ("L_vgm", output.l),
+                ] {
+                    write_soil_layer(
+                        landdata, year, topology, patches, blocks, name, layer, &values,
+                    )?;
+                }
+            }
+            SoilModel::Campbell => {
+                let output = aggregate_campbell(
+                    &layout,
+                    CampbellInputs {
+                        theta_s: &read_soil_raw(
+                            directory,
+                            "theta_s.nc",
+                            "theta_s",
+                            layer,
+                            topology,
+                        )?,
+                        k_s: &read_soil_raw(directory, "k_s.nc", "k_s", layer, topology)?,
+                        psi_s: &read_soil_raw(directory, "psi_s.nc", "psi_s", layer, topology)?,
+                        lambda: &read_soil_raw(directory, "lambda.nc", "lambda", layer, topology)?,
+                    },
+                    &area,
+                    classes,
+                    CampbellFills::default(),
+                    true,
+                )?;
+                for (name, values) in [
+                    ("theta_s", output.theta_s),
+                    ("k_s", output.k_s),
+                    ("psi_s", output.psi_s),
+                    ("lambda", output.lambda),
+                ] {
+                    write_soil_layer(
+                        landdata, year, topology, patches, blocks, name, layer, &values,
+                    )?;
+                }
+            }
+        }
+
+        for (file, source, output, statistic, fill) in [
+            ("csol.nc", "csol", "csol", SoilStatistic::AreaMean, 1.102e6),
+            (
+                "tksatu.nc",
+                "tksatu",
+                "tksatu",
+                SoilStatistic::GeometricMean,
+                1.145,
+            ),
+            (
+                "tksatf.nc",
+                "tksatf",
+                "tksatf",
+                SoilStatistic::GeometricMean,
+                2.401,
+            ),
+            (
+                "tkdry.nc",
+                "tkdry",
+                "tkdry",
+                SoilStatistic::GeometricMean,
+                0.136,
+            ),
+            (
+                "k_solids.nc",
+                "k_solids",
+                "k_solids",
+                SoilStatistic::GeometricMean,
+                1.545,
+            ),
+            (
+                "OM_density_s.nc",
+                "OM_density_s",
+                "OM_density_s",
+                SoilStatistic::AreaMean,
+                62.064,
+            ),
+            (
+                "BD_all_s.nc",
+                "BD_all_s",
+                "BD_all_s",
+                SoilStatistic::AreaMean,
+                1200.0,
+            ),
+            (
+                "vf_clay_s.nc",
+                "vf_clay_s",
+                "vf_clay_s",
+                SoilStatistic::AreaMean,
+                0.189,
+            ),
+            (
+                "wf_om_s.nc",
+                "wf_om_s",
+                "wf_om_s",
+                SoilStatistic::AreaMean,
+                0.1,
+            ),
+            (
+                "wf_clay_s.nc",
+                "wf_clay_s",
+                "wf_clay_s",
+                SoilStatistic::AreaMean,
+                0.2,
+            ),
+        ] {
+            let raw = read_soil_raw(directory, file, source, layer, topology)?;
+            let values =
+                aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
+            write_soil_layer(
+                landdata, year, topology, patches, blocks, output, layer, &values,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn read_soil_raw(
+    directory: &std::path::Path,
+    file: &str,
+    variable: &str,
+    layer: usize,
+    topology: &SpatialTopology,
+) -> Result<Vec<f64>> {
+    read_mesh_raster_f64(
+        &directory.join(file),
+        &format!("{variable}_l{layer}"),
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_soil_layer(
+    landdata: &std::path::Path,
+    year: i32,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    name: &str,
+    layer: usize,
+    values: &[f64],
+) -> Result<()> {
+    let name = format!("{name}_l{layer}_patches");
+    write_landpatch_scalar(
+        landdata, year, topology, patches, blocks, "soil", &name, values,
+    )
+}
+
 fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     if args.len() < 5 {
         bail!("{}", usage());
@@ -511,6 +826,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut lake_depth = None;
     let mut lake_soil_carbon = None;
     let mut soil_texture = None;
+    let mut soil_dir = None;
+    let mut soil_model = SoilModel::Vgm;
     let mut soil_brightness = None;
     let mut topography = None;
     let mut bedrock = None;
@@ -565,6 +882,25 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                     args.get(index + 1)
                         .context("--soil-texture needs a NetCDF path")?,
                 ));
+                index += 2;
+            }
+            "--soil-dir" => {
+                soil_dir = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-dir needs the rawdata soil directory")?,
+                ));
+                index += 2;
+            }
+            "--soil-model" => {
+                soil_model = match args
+                    .get(index + 1)
+                    .context("--soil-model needs vgm or campbell")?
+                    .as_str()
+                {
+                    "vgm" => SoilModel::Vgm,
+                    "campbell" => SoilModel::Campbell,
+                    other => bail!("--soil-model must be vgm or campbell, got {other:?}"),
+                };
                 index += 2;
             }
             "--soil-brightness" => {
@@ -639,6 +975,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         lake_depth,
         lake_soil_carbon,
         soil_texture,
+        soil_dir,
+        soil_model,
         soil_brightness,
         topography,
         bedrock,
@@ -803,7 +1141,7 @@ fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant]"
 }
 
 #[cfg(test)]
@@ -830,6 +1168,10 @@ mod tests {
             "lake_soilc.nc".into(),
             "--soil-texture".into(),
             "soiltexture.nc".into(),
+            "--soil-dir".into(),
+            "rawdata/soil".into(),
+            "--soil-model".into(),
+            "campbell".into(),
             "--soil-brightness".into(),
             "soil_brightness.nc".into(),
             "--topography".into(),
@@ -855,6 +1197,8 @@ mod tests {
             Some(PathBuf::from("lake_soilc.nc"))
         );
         assert_eq!(parsed.soil_texture, Some(PathBuf::from("soiltexture.nc")));
+        assert_eq!(parsed.soil_dir, Some(PathBuf::from("rawdata/soil")));
+        assert_eq!(parsed.soil_model, SoilModel::Campbell);
         assert_eq!(
             parsed.soil_brightness,
             Some(PathBuf::from("soil_brightness.nc"))

@@ -709,6 +709,10 @@ impl FlatPatches {
         self.wmo_source[patch]
     }
 
+    pub(crate) fn patch_type_for(&self, patch: usize) -> i32 {
+        self.patch_types[patch]
+    }
+
     fn gather<T: Copy>(&self, source: &[T], patch: usize, out: &mut Vec<T>) -> Result<()> {
         let range = self.cells_for(patch);
         out.reserve(range.len());
