@@ -52,7 +52,8 @@ pub use static_state::{
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState, MISSING,
 };
 pub use surface_data::{
-    read_single_point_monthly_vegetation, read_single_point_surface, SinglePointMonthlyVegetation,
+    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_surface,
+    SinglePointMonthlyVegetation, SinglePointPftData, SinglePointPftMonthlyVegetation,
     SinglePointSurfaceData,
 };
 pub use time_restart::{

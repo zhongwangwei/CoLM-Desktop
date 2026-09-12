@@ -40,6 +40,27 @@ pub struct SinglePointMonthlyVegetation {
     pub sai: Vec<f64>,
 }
 
+/// The positive PFT tiles and monthly state used by a non-CROP single-point run.
+///
+/// `MOD_SingleSrfdata` packs only positive `SITE_pctpfts` entries into `landpft`.
+/// Keeping that compact order here lets the PFT restart vectors use the same order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinglePointPftData {
+    pub class: Vec<i32>,
+    pub fraction: Vec<f64>,
+    pub canopy_height_m: Vec<f64>,
+    pub monthly: SinglePointPftMonthlyVegetation,
+}
+
+/// PFT-resolved monthly LAI and SAI in compact `landpft` order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinglePointPftMonthlyVegetation {
+    pub years: Vec<i32>,
+    pub lai: Vec<f64>,
+    pub sai: Vec<f64>,
+    pfts: usize,
+}
+
 impl SinglePointMonthlyVegetation {
     /// Resolves the selected one-based calendar month exactly as `LAI_readin` does.
     pub fn for_year(
@@ -76,6 +97,43 @@ impl SinglePointMonthlyVegetation {
     }
 }
 
+impl SinglePointPftMonthlyVegetation {
+    /// Resolves a calendar month with the same site-year selection as `LAI_readin`.
+    pub fn for_year(
+        &self,
+        target_year: i32,
+        month: u8,
+        use_site_lai: bool,
+        configured_start_year: i32,
+        configured_end_year: i32,
+    ) -> Result<(Vec<f64>, Vec<f64>)> {
+        ensure!((1..=12).contains(&month), "month must be in 1..=12");
+        ensure!(
+            configured_start_year <= configured_end_year,
+            "LAI configured start year exceeds end year"
+        );
+        let selected_year = if use_site_lai {
+            *self
+                .years
+                .iter()
+                .min_by_key(|&&year| (i64::from(year) - i64::from(target_year)).abs())
+                .context("single-point surface has no LAI years")?
+        } else {
+            target_year.clamp(configured_start_year, configured_end_year)
+        };
+        let year_index = self
+            .years
+            .iter()
+            .position(|&year| year == selected_year)
+            .with_context(|| {
+                format!("single-point surface has no LAI record for {selected_year}")
+            })?;
+        let start = (year_index * 12 + usize::from(month - 1)) * self.pfts;
+        let end = start + self.pfts;
+        Ok((self.lai[start..end].to_vec(), self.sai[start..end].to_vec()))
+    }
+}
+
 /// Reads the `LAI_year`, `LAI_monthly`, and `SAI_monthly` single-point contract.
 pub fn read_single_point_monthly_vegetation(
     path: impl AsRef<Path>,
@@ -84,16 +142,74 @@ pub fn read_single_point_monthly_vegetation(
     let file = netcdf::open(path)
         .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
     let years = vector_i32(&file, "LAI_year")?;
-    ensure!(!years.is_empty(), "LAI_year must not be empty");
-    for window in years.windows(2) {
-        ensure!(
-            window[0] < window[1],
-            "LAI_year must be strictly increasing"
-        );
-    }
+    validate_lai_years(&years)?;
     let lai = monthly_vector(&file, "LAI_monthly", years.len())?;
     let sai = monthly_vector(&file, "SAI_monthly", years.len())?;
     Ok(SinglePointMonthlyVegetation { years, lai, sai })
+}
+
+/// Reads the PFT composition and monthly PFT LAI/SAI single-point contract.
+///
+/// This is the non-CROP `SITE_pfttyp`/`SITE_pctpfts` path.  CROP owns a
+/// different `croptyp`/`pctcrop` contract and remains a separate restart family.
+pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointPftData> {
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
+    let years = vector_i32(&file, "LAI_year")?;
+    validate_lai_years(&years)?;
+    let class = vector_i32(&file, "pfttyp")?;
+    let fraction = vector(&file, "pctpfts")?;
+    let canopy_height_m = vector(&file, "canopy_height_pfts")?;
+    ensure!(
+        !class.is_empty() && class.len() == fraction.len() && class.len() == canopy_height_m.len(),
+        "pfttyp, pctpfts, and canopy_height_pfts must be nonempty equal-length vectors"
+    );
+    ensure!(
+        class.iter().all(|class| (0..=15).contains(class))
+            && fraction
+                .iter()
+                .all(|fraction| fraction.is_finite() && *fraction >= 0.0)
+            && canopy_height_m
+                .iter()
+                .all(|height| height.is_finite() && *height >= 0.0),
+        "single-point PFT classes, fractions, or canopy heights are invalid"
+    );
+    let indices = fraction
+        .iter()
+        .enumerate()
+        .filter_map(|(index, fraction)| (*fraction > 0.0).then_some(index))
+        .collect::<Vec<_>>();
+    ensure!(
+        !indices.is_empty(),
+        "single-point surface has no positive PFT fractions"
+    );
+    let fraction = indices
+        .iter()
+        .map(|&index| fraction[index])
+        .collect::<Vec<_>>();
+    let total: f64 = fraction.iter().sum();
+    ensure!(
+        (total - 1.0).abs() <= 1.0e-6,
+        "positive single-point PFT fractions must sum to one, got {total}"
+    );
+    let raw_pfts = class.len();
+    let lai = pft_monthly_vector(&file, "LAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
+    let sai = pft_monthly_vector(&file, "SAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
+    Ok(SinglePointPftData {
+        class: indices.iter().map(|&index| class[index]).collect(),
+        fraction,
+        canopy_height_m: indices
+            .iter()
+            .map(|&index| canopy_height_m[index])
+            .collect(),
+        monthly: SinglePointPftMonthlyVegetation {
+            years,
+            lai,
+            sai,
+            pfts: indices.len(),
+        },
+    })
 }
 
 /// Reads the static single-point contract produced by `MOD_SingleSrfdata.F90`.
@@ -330,6 +446,52 @@ fn monthly_vector(file: &netcdf::File, name: &str, years: usize) -> Result<Vec<f
         values.len() == years * 12 && values.iter().all(|value| value.is_finite()),
         "{name} must contain finite monthly values for every LAI year"
     );
+    Ok(values)
+}
+
+fn validate_lai_years(years: &[i32]) -> Result<()> {
+    ensure!(!years.is_empty(), "LAI_year must not be empty");
+    for window in years.windows(2) {
+        ensure!(
+            window[0] < window[1],
+            "LAI_year must be strictly increasing"
+        );
+    }
+    Ok(())
+}
+
+fn pft_monthly_vector(
+    file: &netcdf::File,
+    name: &str,
+    years: usize,
+    raw_pfts: usize,
+    indices: &[usize],
+) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    let dimensions = variable.dimensions();
+    ensure!(
+        dimensions.len() == 3
+            && dimensions[0].name() == "LAI_year"
+            && dimensions[0].len() == years
+            && dimensions[1].name() == "month"
+            && dimensions[1].len() == 12
+            && dimensions[2].name() == "pft"
+            && dimensions[2].len() == raw_pfts,
+        "{name} must have dimensions (LAI_year, month=12, pft)"
+    );
+    let raw = variable
+        .get_values::<f64, _>(..)
+        .with_context(|| format!("cannot read {name}"))?;
+    ensure!(
+        raw.len() == years * 12 * raw_pfts && raw.iter().all(|value| value.is_finite()),
+        "{name} must contain finite monthly values for every LAI year and PFT"
+    );
+    let mut values = Vec::with_capacity(years * 12 * indices.len());
+    for record in 0..years * 12 {
+        values.extend(indices.iter().map(|&index| raw[record * raw_pfts + index]));
+    }
     Ok(values)
 }
 

@@ -101,6 +101,54 @@ fn monthly_vegetation_uses_the_single_point_year_selection_contract() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[test]
+fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
+    let path = temp_file("pft-monthly");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("LAI_year", 2).unwrap();
+    file.add_dimension("month", 12).unwrap();
+    file.add_dimension("pft", 3).unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2008, 2010], ..)
+        .unwrap();
+    file.add_variable::<i32>("pfttyp", &["pft"])
+        .unwrap()
+        .put_values(&[0, 13, 14], ..)
+        .unwrap();
+    file.add_variable::<f64>("pctpfts", &["pft"])
+        .unwrap()
+        .put_values(&[0.0, 0.4, 0.6], ..)
+        .unwrap();
+    file.add_variable::<f64>("canopy_height_pfts", &["pft"])
+        .unwrap()
+        .put_values(&[0.0, 0.5, 0.8], ..)
+        .unwrap();
+    let lai = (0..24)
+        .flat_map(|record| (0..3).map(move |pft| (record * 10 + pft) as f64))
+        .collect::<Vec<_>>();
+    file.add_variable::<f64>("LAI_pfts_monthly", &["LAI_year", "month", "pft"])
+        .unwrap()
+        .put_values(&lai, (.., .., ..))
+        .unwrap();
+    let sai = lai.iter().map(|value| value + 1000.0).collect::<Vec<_>>();
+    file.add_variable::<f64>("SAI_pfts_monthly", &["LAI_year", "month", "pft"])
+        .unwrap()
+        .put_values(&sai, (.., .., ..))
+        .unwrap();
+    file.close().unwrap();
+
+    let values = read_single_point_pft_data(&path).unwrap();
+    assert_eq!(values.class, [13, 14]);
+    assert_eq!(values.fraction, [0.4, 0.6]);
+    assert_eq!(values.canopy_height_m, [0.5, 0.8]);
+    assert_eq!(
+        values.monthly.for_year(2010, 2, true, 2000, 2020).unwrap(),
+        (vec![131.0, 132.0], vec![1131.0, 1132.0])
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
 fn write_surface(path: &Path, layers: usize, vgm: bool, with_ba_beta: bool) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("soil", layers).unwrap();
