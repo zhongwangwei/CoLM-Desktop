@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use colm_srfdata::{
     build_lct_land_patches_from_raster, build_spatial_topology, materialize_single_point_surface,
-    materialize_single_point_surface_from_namelist, read_mesh_raster_f64,
-    write_landpatch_scalar_f64, write_spatial_topology, BlockLayout, SiteMode, SpatialInputKind,
+    materialize_single_point_surface_from_namelist, read_mesh_raster_f64, read_mesh_raster_i32,
+    write_landpatch_scalar, write_spatial_topology, BlockLayout, SiteMode, SpatialInputKind,
     COLM_1KM, COLM_500M,
 };
 
@@ -32,6 +32,7 @@ struct SpatialLctArgs {
     dominant: bool,
     land_cover: SiteMode,
     lake_depth: Option<PathBuf>,
+    soil_texture: Option<PathBuf>,
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
@@ -71,9 +72,22 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     } else {
         None
     };
+    let soil_texture = if let Some(path) = &args.soil_texture {
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        let raw = read_mesh_raster_i32(
+            path,
+            "soiltexture",
+            &topology.mesh,
+            &topology.pixel,
+            COLM_500M,
+        )?;
+        Some(layout.aggregate_soil_texture(&raw)?)
+    } else {
+        None
+    };
     write_spatial_topology(&args.landdata, args.year, &topology, &patches, &args.blocks)?;
     if let Some(lake_depth) = lake_depth {
-        write_landpatch_scalar_f64(
+        write_landpatch_scalar(
             &args.landdata,
             args.year,
             &topology,
@@ -82,6 +96,18 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             "lakedepth",
             "lakedepth_patches",
             &lake_depth,
+        )?;
+    }
+    if let Some(soil_texture) = soil_texture {
+        write_landpatch_scalar(
+            &args.landdata,
+            args.year,
+            &topology,
+            &patches,
+            &args.blocks,
+            "soil",
+            "soiltext_patches",
+            &soil_texture,
         )?;
     }
     println!(
@@ -109,6 +135,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut dominant = false;
     let mut land_cover = None;
     let mut lake_depth = None;
+    let mut soil_texture = None;
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -144,6 +171,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--soil-texture" => {
+                soil_texture = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-texture needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
             other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
         }
     }
@@ -157,6 +191,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         dominant,
         land_cover: land_cover.context("spatial-lct requires --land-cover igbp or usgs")?,
         lake_depth,
+        soil_texture,
     })
 }
 
@@ -243,7 +278,7 @@ fn parse_land_cover(value: &str) -> Result<SiteMode> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc]"
 }
 
 #[cfg(test)]
@@ -266,12 +301,15 @@ mod tests {
             "igbp".into(),
             "--lake-depth".into(),
             "lake_depth.nc".into(),
+            "--soil-texture".into(),
+            "soiltexture.nc".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Unstructured);
         assert!(parsed.dominant);
         assert_eq!(parsed.land_cover, SiteMode::Igbp);
         assert_eq!(parsed.lake_depth, Some(PathBuf::from("lake_depth.nc")));
+        assert_eq!(parsed.soil_texture, Some(PathBuf::from("soiltexture.nc")));
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
         assert!(parse_spatial_lct(&[

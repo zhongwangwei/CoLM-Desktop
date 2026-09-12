@@ -185,7 +185,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         element_index: vec![1, 2],
     };
     let landdata = directory.join("landdata");
-    write_landpatch_scalar_f64(
+    write_landpatch_scalar(
         &landdata,
         2005,
         &topology,
@@ -206,6 +206,26 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             .get_values::<f64, _>(..)
             .unwrap(),
         vec![12.5, -1.0e36]
+    );
+    write_landpatch_scalar(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "soil",
+        "soiltext_patches",
+        &[3_i32, 7],
+    )
+    .unwrap();
+    assert_eq!(
+        netcdf::open(landdata.join("soil/2005/soiltext_patches_w180_s90.nc"))
+            .unwrap()
+            .variable("soiltext_patches")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        vec![3, 7]
     );
 
     std::fs::remove_dir_all(directory).unwrap();

@@ -363,7 +363,7 @@ fn read_raster_row<T: NcTypeDescriptor + Copy>(
 /// Write one scalar LCT-patch vector in the same per-block files as
 /// `ncio_write_vector(..., landpatch, ...)`.
 #[allow(clippy::too_many_arguments)]
-pub fn write_landpatch_scalar_f64(
+pub fn write_landpatch_scalar<T: NcTypeDescriptor + Copy>(
     landdata: impl AsRef<Path>,
     land_cover_year: i32,
     topology: &SpatialTopology,
@@ -371,7 +371,7 @@ pub fn write_landpatch_scalar_f64(
     blocks: &BlockLayout,
     directory: &str,
     variable: &str,
-    values: &[f64],
+    values: &[T],
 ) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     ensure!(
@@ -411,7 +411,8 @@ pub fn write_landpatch_scalar_f64(
             .collect::<Vec<_>>();
         let mut file = netcdf::create(output.join(block_filename(variable, x, y, blocks)?))?;
         file.add_dimension("patch", output_values.len())?;
-        put_f64(&mut file, variable, &["patch"], &output_values)?;
+        file.add_variable::<T>(variable, &["patch"])?
+            .put_values(&output_values, ..)?;
         file.close()?;
     }
     Ok(())
