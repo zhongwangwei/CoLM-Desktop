@@ -100,7 +100,7 @@ fn pft_optics_honor_the_native_indexed_namelist_override() {
 }
 
 #[test]
-fn cold_namelist_keeps_existing_soil_and_water_table_sources() {
+fn cold_namelist_accepts_snicar_and_keeps_existing_state_sources() {
     let directory =
         std::env::temp_dir().join(format!("colm-init-namelist-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -122,7 +122,7 @@ fn cold_namelist_keeps_existing_soil_and_water_table_sources() {
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_SoilInit=.true.\n DEF_file_SoilInit='{}'\n DEF_USE_SnowInit=.true.\n DEF_file_SnowInit='{}'\n DEF_TUNING_SNOW_COVER_EXPONENT=.75\n DEF_USE_WaterTableInit=.true.\n DEF_file_WaterTable='{}'\n /\n",
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_SNICAR=.true.\n DEF_USE_SoilInit=.true.\n DEF_file_SoilInit='{}'\n DEF_USE_SnowInit=.true.\n DEF_file_SnowInit='{}'\n DEF_TUNING_SNOW_COVER_EXPONENT=.75\n DEF_USE_WaterTableInit=.true.\n DEF_file_WaterTable='{}'\n /\n",
             directory.join("output").display(),
             soil.display(),
             snow.display(),

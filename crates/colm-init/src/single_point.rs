@@ -102,9 +102,9 @@ pub struct SinglePointTimeRestartFiles {
 
 /// A namelist-resolved native cold start for the LCT, PFT, or non-CROP PC single-point path.
 ///
-/// BGC, urban, CROP, and SNICAR paths use additional restart families and are
-/// rejected during resolution until their native orchestration is complete. Soil,
-/// snow, and water-table state files are part of both supported restart families.
+/// BGC, urban, and CROP paths use additional restart families and are rejected
+/// during resolution until their native orchestration is complete. Soil, snow, and
+/// water-table state files are part of both supported restart families.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointColdStartRun {
     /// Source used to resolve PFT-specific expert parameter overrides at write time.
@@ -1442,7 +1442,6 @@ fn reject_unsupported_cold_start_features(
     for field in [
         "DEF_USE_BGC",
         "DEF_URBAN_RUN",
-        "DEF_USE_SNICAR",
         "DEF_USE_LULCC",
         "DEF_USE_IRRIGATION",
     ] {
