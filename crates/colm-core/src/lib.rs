@@ -31,6 +31,7 @@ pub mod runtime_forcing;
 pub mod snow;
 pub mod soil_surface_resistance;
 pub mod soil_water;
+pub mod standard_lct_step;
 pub mod static_state;
 pub mod thermal_properties;
 pub mod time_state;
@@ -127,6 +128,10 @@ pub use snow::{
 pub use soil_surface_resistance::{soil_surface_resistance, SoilSurfaceResistanceInput};
 pub use soil_water::{solve_campbell_soil_water, CampbellSoilWaterInput, CampbellSoilWaterState};
 
+pub use standard_lct_step::{
+    standard_lct_energy_step, StandardLctEnergyInput, StandardLctEnergyOutput,
+    StandardLctEnergyState,
+};
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,
     derive_spatial_soil_parameters, normalize_soil_texture, BedrockState, HydraulicModel,
