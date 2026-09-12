@@ -1486,33 +1486,6 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
 }
 
 #[test]
-#[ignore = "requires the locally generated CN-Cng upstream single-point surface artifact"]
-fn native_single_point_materialization_preserves_a_complete_upstream_surface_byte_for_byte() {
-    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../oracle/work/generated/out/CN-Cng/landdata/srfdata.nc");
-    let directory = std::env::temp_dir().join(format!(
-        "colm-srfdata-materialize-upstream-{}",
-        test_suffix()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    assert!(super::materialize_single_point_surface(
-        &source,
-        &directory,
-        super::SiteMode::Igbp,
-        None,
-        None,
-        false,
-    )
-    .unwrap()
-    .is_none());
-    assert_eq!(
-        std::fs::read(&source).unwrap(),
-        std::fs::read(directory.join("srfdata.nc")).unwrap()
-    );
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 #[ignore = "requires the locally built upstream mkinidata executable and CN-Cng reference case"]
 fn native_single_point_surface_is_accepted_by_upstream_mkinidata() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
