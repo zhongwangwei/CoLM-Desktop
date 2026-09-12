@@ -67,3 +67,39 @@ fn close(actual: f64, expected: f64) {
         "got {actual:.17e}, expected {expected:.17e}"
     );
 }
+
+#[test]
+fn compaction_matches_current_fortran_destructive_melt_and_wind_terms() {
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -3;
+    for (fortran_layer, temperature, liquid, ice, thickness) in [
+        (-2, 267.0, 1.0, 20.0, 0.12),
+        (-1, 270.0, 3.0, 30.0, 0.08),
+        (0, 273.0, 0.5, 15.0, 0.04),
+    ] {
+        let slot = layer_slot(fortran_layer);
+        state.temperature_k[slot] = temperature;
+        state.liquid_water_kg_m2[slot] = liquid;
+        state.ice_water_kg_m2[slot] = ice;
+        state.thickness_m[slot] = thickness;
+        state.previous_ice_fraction[slot] = 0.95;
+    }
+
+    compact_snow_layers(&mut state, 1800.0, 8.0, 2.0, &[true, false, true]).unwrap();
+
+    close(state.thickness_m[layer_slot(-2)], 0.117_264_732_760_447_15);
+    close(state.thickness_m[layer_slot(-1)], 0.079_999_907_315_791_97);
+    close(state.thickness_m[layer_slot(0)], 0.039_999_944_612_725_19);
+}
+
+#[test]
+fn compaction_rejects_mismatched_flags_and_zero_previous_melt_fraction() {
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -1;
+    let slot = layer_slot(0);
+    state.thickness_m[slot] = 0.04;
+    state.temperature_k[slot] = 270.0;
+    state.ice_water_kg_m2[slot] = 4.0;
+    assert!(compact_snow_layers(&mut state, 1800.0, 0.0, 0.0, &[]).is_err());
+    assert!(compact_snow_layers(&mut state, 1800.0, 0.0, 0.0, &[true]).is_err());
+}

@@ -135,6 +135,168 @@ pub fn add_new_snow(input: NewSnowInput, state: &mut RuntimeSnowColumn) -> Resul
     })
 }
 
+/// Applies MOD_SnowLayersCombineDivide:snowcompaction to the active snow layers.
+///
+/// Melt flags are ordered from the snow surface to its base, matching the active
+/// Fortran range layer_count + 1 through 0.
+pub fn compact_snow_layers(
+    state: &mut RuntimeSnowColumn,
+    time_step_seconds: f64,
+    eastward_wind_m_s: f64,
+    northward_wind_m_s: f64,
+    melted: &[bool],
+) -> Result<()> {
+    validate_compaction(
+        state,
+        time_step_seconds,
+        eastward_wind_m_s,
+        northward_wind_m_s,
+        melted,
+    )?;
+    if state.layer_count == 0 {
+        return Ok(());
+    }
+
+    let mut burden = 0.0;
+    let mut pseudo_depth = 0.0;
+    let mut mobile = true;
+    let wind_speed = eastward_wind_m_s.hypot(northward_wind_m_s);
+    for fortran_layer in state.layer_count + 1..=0 {
+        let slot = layer_slot(fortran_layer);
+        let water_mass = state.ice_water_kg_m2[slot] + state.liquid_water_kg_m2[slot];
+        let void_fraction = 1.0
+            - (state.ice_water_kg_m2[slot] / f77(917.0)
+                + state.liquid_water_kg_m2[slot] / f77(1000.0))
+                / state.thickness_m[slot];
+        if void_fraction <= f77(0.001) || state.ice_water_kg_m2[slot] <= f77(0.1) {
+            burden += water_mass;
+            mobile = false;
+            continue;
+        }
+
+        let ice_density = state.ice_water_kg_m2[slot] / state.thickness_m[slot];
+        let ice_fraction = state.ice_water_kg_m2[slot] / water_mass;
+        let temperature_deficit = FREEZING_K - state.temperature_k[slot];
+        let mut destructive = -f77(2.777e-6) * (-f77(0.04) * temperature_deficit).exp();
+        if ice_density > f77(100.0) {
+            destructive *= (-f77(46.0e-3) * (ice_density - f77(100.0))).exp();
+        }
+        if state.liquid_water_kg_m2[slot] > f77(0.01) * state.thickness_m[slot] {
+            destructive *= f77(2.0);
+        }
+
+        let liquid_factor = 1.0
+            / (1.0
+                + f77(60.0) * state.liquid_water_kg_m2[slot]
+                    / (f77(1000.0) * state.thickness_m[slot]));
+        let viscosity = liquid_factor
+            * f77(4.0)
+            * (ice_density / f77(450.0))
+            * (f77(0.1) * temperature_deficit + f77(23.0e-3) * ice_density).exp()
+            * f77(7.62237e6);
+        let overburden = -(burden + water_mass / f77(2.0)) / viscosity;
+        let relative = (fortran_layer - (state.layer_count + 1)) as usize;
+        let melt = if melted[relative] {
+            -((state.previous_ice_fraction[slot] - ice_fraction)
+                / state.previous_ice_fraction[slot])
+                .max(0.0)
+                / time_step_seconds
+        } else {
+            0.0
+        };
+        let wind = wind_drift_compaction(
+            ice_density,
+            wind_speed,
+            state.thickness_m[slot],
+            &mut pseudo_depth,
+            &mut mobile,
+        );
+        let compaction_rate = destructive + overburden + melt + wind;
+        let minimum_thickness =
+            state.ice_water_kg_m2[slot] / f77(917.0) + state.liquid_water_kg_m2[slot] / f77(1000.0);
+        state.thickness_m[slot] = (state.thickness_m[slot]
+            * (1.0 + compaction_rate * time_step_seconds))
+            .max(minimum_thickness);
+        burden += water_mass;
+    }
+    Ok(())
+}
+
+fn wind_drift_compaction(
+    ice_density_kg_m3: f64,
+    wind_speed_m_s: f64,
+    thickness_m: f64,
+    pseudo_depth_m: &mut f64,
+    mobile: &mut bool,
+) -> f64 {
+    if !*mobile {
+        return 0.0;
+    }
+    let density_factor = 1.25 - 0.0042 * (ice_density_kg_m3.max(50.0) - 50.0);
+    let mobility_index = 0.34 * (-0.583 * 0.35e-3 - 0.833 * 1.0 + 0.833) + 0.66 * density_factor;
+    let mut driftability = -2.868 * (-0.085 * wind_speed_m_s).exp() + 1.0 + mobility_index;
+    if driftability <= 0.0 {
+        *mobile = false;
+        return 0.0;
+    }
+    driftability = driftability.min(3.25);
+    *pseudo_depth_m += 0.5 * thickness_m * (3.25 - driftability);
+    let rate = -((350.0 - ice_density_kg_m3).max(0.0))
+        * (driftability * (-*pseudo_depth_m / 0.1).exp() / (48.0 * 3600.0));
+    *pseudo_depth_m += 0.5 * thickness_m * (3.25 - driftability);
+    rate
+}
+
+fn validate_compaction(
+    state: &RuntimeSnowColumn,
+    time_step_seconds: f64,
+    eastward_wind_m_s: f64,
+    northward_wind_m_s: f64,
+    melted: &[bool],
+) -> Result<()> {
+    validate(
+        NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1.0,
+            ground_temperature_k: FREEZING_K,
+            ground_snowfall_kg_m2_s: 0.0,
+            new_snow_bulk_density_kg_m3: 1.0,
+            precipitation_temperature_k: FREEZING_K,
+            variably_saturated_flow: false,
+        },
+        state,
+    )?;
+    ensure!(
+        time_step_seconds.is_finite()
+            && time_step_seconds > 0.0
+            && eastward_wind_m_s.is_finite()
+            && northward_wind_m_s.is_finite()
+            && melted.len() == state.layer_count.unsigned_abs() as usize,
+        "snow-compaction inputs do not match the active snow column"
+    );
+    for fortran_layer in state.layer_count + 1..=0 {
+        let slot = layer_slot(fortran_layer);
+        ensure!(
+            state.thickness_m[slot].is_finite()
+                && state.thickness_m[slot] > 0.0
+                && state.temperature_k[slot].is_finite()
+                && state.liquid_water_kg_m2[slot].is_finite()
+                && state.liquid_water_kg_m2[slot] >= 0.0
+                && state.ice_water_kg_m2[slot].is_finite()
+                && state.ice_water_kg_m2[slot] >= 0.0
+                && state.previous_ice_fraction[slot].is_finite()
+                && state.previous_ice_fraction[slot] >= 0.0,
+            "active snow layer is invalid"
+        );
+        let relative = (fortran_layer - (state.layer_count + 1)) as usize;
+        ensure!(
+            !melted[relative] || state.previous_ice_fraction[slot] > 0.0,
+            "melting snow layer requires a positive previous ice fraction"
+        );
+    }
+    Ok(())
+}
+
 fn validate(input: NewSnowInput, state: &RuntimeSnowColumn) -> Result<()> {
     ensure!(
         input.patch_type >= 0
