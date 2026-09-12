@@ -13,6 +13,7 @@ pub mod pc_radiation;
 pub mod radiation;
 pub mod snow;
 pub mod static_state;
+pub mod thermal_properties;
 pub mod time_state;
 pub mod urban;
 pub mod vegetation;
@@ -51,6 +52,9 @@ pub use snow::{
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState,
+};
+pub use thermal_properties::{
+    soil_thermal_properties, SoilThermalInput, SoilThermalProperties, ThermalConductivityScheme,
 };
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
