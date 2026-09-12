@@ -69,6 +69,45 @@ fn pft_fractions_reject_an_out_of_range_class() {
 }
 
 #[test]
+fn landpft_keeps_positive_natural_classes_and_skips_non_soil_patches() {
+    let layout =
+        FlatPatches::new(vec![1, 17], vec![0, 2, 3], vec![0, 1, 2], vec![None; 2]).unwrap();
+    let land_patches = crate::topology::FlatLandPatches {
+        element_ids: vec![8, 9],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![2, 1],
+        set_type: vec![1, 17],
+        element_index: vec![1, 2],
+    };
+    let topology = build_pft_topology(
+        &land_patches,
+        &layout,
+        3,
+        2,
+        &[20.0, 0.0, 100.0, 80.0, 0.0, 0.0, 50.0, 0.0, 0.0],
+        &[1.0, 3.0, 2.0],
+    )
+    .unwrap();
+
+    assert_eq!(topology.patch_offsets, [0, 2, 2]);
+    assert_eq!(topology.pft_classes, [0, 1]);
+    assert_eq!(
+        topology.land_pfts,
+        crate::topology::FlatLandPatches {
+            element_ids: vec![8, 8],
+            pixel_start: vec![1, 1],
+            pixel_end: vec![2, 2],
+            set_type: vec![0, 1],
+            element_index: vec![1, 1],
+        }
+    );
+    assert_eq!(
+        topology.patch_kind,
+        [PftPatchKind::Natural, PftPatchKind::Other]
+    );
+}
+
+#[test]
 fn pft_index_matches_lai_weighting_crop_and_wmo_paths() {
     let layout = FlatPatches::new(
         vec![1, 1, 12],

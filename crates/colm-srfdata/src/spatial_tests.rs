@@ -230,6 +230,34 @@ fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
 }
 
 #[test]
+fn pft_patch_builder_merges_only_igbp_soil_ground() {
+    let directory = temporary("pft-landtype");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("landtype.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_landtype(&raster);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    let (_, patches) = build_pft_land_patches_from_raster(
+        topology,
+        &raster,
+        "landtype",
+        Grid { nlon: 4, nlat: 2 },
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(patches.element_ids, vec![1, 1, 2, 2, 2]);
+    assert_eq!(patches.set_type, vec![1, 13, 1, 11, 15]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
     let directory = temporary("five-degree-tile");
     let mesh_file = directory.join("mesh.nc");
@@ -495,6 +523,21 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &BlockLayout::regular(1, 1).unwrap(),
     )
     .unwrap();
+    let land_pfts = FlatLandPatches {
+        element_ids: vec![1, 1, 2],
+        pixel_start: vec![1, 1, 1],
+        pixel_end: vec![4, 4, 4],
+        set_type: vec![0, 1, 12],
+        element_index: vec![1, 1, 2],
+    };
+    write_spatial_pft_topology(
+        &landdata,
+        2005,
+        &topology,
+        &land_pfts,
+        &BlockLayout::regular(1, 1).unwrap(),
+    )
+    .unwrap();
 
     let block = netcdf::open(landdata.join("block.nc")).unwrap();
     assert_eq!(block.dimension("longitude").unwrap().len(), 1);
@@ -549,6 +592,15 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
             .get_values::<i32, _>(..)
             .unwrap(),
         vec![10, 12]
+    );
+    let landpft = netcdf::open(landdata.join("landpft/2005/landpft_w180_s90.nc")).unwrap();
+    assert_eq!(
+        landpft
+            .variable("settyp")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        vec![0, 1, 12]
     );
 
     std::fs::remove_dir_all(directory).unwrap();

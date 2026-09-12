@@ -4,21 +4,28 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use colm_srfdata::{
-    build_lct_land_patches_from_raster, build_spatial_topology, materialize_single_point_surface,
-    materialize_single_point_surface_from_namelist, mesh_cell_area_weights, read_mesh_raster_f64,
-    read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64,
+    aggregate_pft_fractions, build_lct_land_patches_from_raster,
+    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
+    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
+    mesh_cell_area_weights, read_mesh_raster_f64, read_mesh_raster_i32,
+    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
     read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
-    write_landpatch_vector, write_spatial_topology, BlockLayout, SiteMode, SpatialInputKind,
-    COLM_1KM, COLM_500M,
+    write_landpatch_vector, write_spatial_pft_topology, write_spatial_topology, BlockLayout,
+    PftFractionInput, SiteMode, SpatialInputKind, COLM_1KM, COLM_500M,
 };
 
 const SOIL_LAYERS: usize = 10;
+const MODIS_PFT_CLASSES: usize = 16;
+const NATURAL_PFT_CLASSES: usize = 15;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let first = args.first().context(usage())?;
     if first == "spatial-lct" {
         return materialize_spatial_lct(&args[1..]);
+    }
+    if first == "spatial-pft" {
+        return materialize_spatial_pft(&args[1..]);
     }
     if first.ends_with(".nml") {
         return materialize_case(&args);
@@ -45,6 +52,86 @@ struct SpatialLctArgs {
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
     soil_hyper_albedo_dir: Option<PathBuf>,
+}
+
+struct SpatialPftArgs {
+    kind: SpatialInputKind,
+    mesh: PathBuf,
+    landtype: PathBuf,
+    landdata: PathBuf,
+    year: i32,
+    blocks: BlockLayout,
+    dominant: bool,
+    plant_tiles: PathBuf,
+}
+
+fn materialize_spatial_pft(args: &[String]) -> Result<()> {
+    let args = parse_spatial_pft(args)?;
+    let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
+    let (topology, patches) = build_pft_land_patches_from_raster(
+        topology,
+        &args.landtype,
+        "landtype",
+        COLM_500M,
+        args.dominant,
+    )?;
+    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    let raw_percent = read_mesh_tiled_raster_pft_f64(
+        &args.plant_tiles,
+        &format!("MOD{:04}", args.year),
+        "PCT_PFT",
+        MODIS_PFT_CLASSES,
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let pfts = build_pft_topology(
+        &patches,
+        &layout,
+        MODIS_PFT_CLASSES,
+        NATURAL_PFT_CLASSES,
+        &raw_percent,
+        &area,
+    )?;
+    let fractions = aggregate_pft_fractions(
+        &layout,
+        PftFractionInput {
+            pft_offsets: &pfts.patch_offsets,
+            pft_classes: &pfts.pft_classes,
+            patch_kind: &pfts.patch_kind,
+            raw_class_count: MODIS_PFT_CLASSES,
+            raw_percent: &raw_percent,
+            land_area: &area,
+            crop_excluded_class: None,
+        },
+    )?;
+    write_spatial_topology(&args.landdata, args.year, &topology, &patches, &args.blocks)?;
+    write_spatial_pft_topology(
+        &args.landdata,
+        args.year,
+        &topology,
+        &pfts.land_pfts,
+        &args.blocks,
+    )?;
+    write_landpatch_scalar(
+        &args.landdata,
+        args.year,
+        &topology,
+        &pfts.land_pfts,
+        &args.blocks,
+        "pctpft",
+        "pct_pfts",
+        &fractions,
+    )?;
+    println!(
+        "wrote {} spatial land elements, {} land patches, and {} PFT tiles to {}",
+        topology.land_elements.element_ids.len(),
+        patches.len(),
+        pfts.land_pfts.len(),
+        args.landdata.display()
+    );
+    Ok(())
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
@@ -562,6 +649,64 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     })
 }
 
+fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
+    if args.len() < 5 {
+        bail!("{}", usage());
+    }
+    let kind = match args[0].as_str() {
+        "latlon" => SpatialInputKind::GridBased,
+        "unstructured" => SpatialInputKind::Unstructured,
+        other => bail!("spatial-pft mesh kind must be latlon or unstructured, got {other:?}"),
+    };
+    let year = args[4]
+        .parse::<i32>()
+        .with_context(|| format!("invalid land-cover year {:?}", args[4]))?;
+    let mut blocks = BlockLayout::regular(1, 1)?;
+    let mut dominant = false;
+    let mut plant_tiles = None;
+    let mut index = 5;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--blocks" => {
+                let nx = args
+                    .get(index + 1)
+                    .context("--blocks needs longitude and latitude block counts")?
+                    .parse::<usize>()
+                    .context("invalid longitude block count")?;
+                let ny = args
+                    .get(index + 2)
+                    .context("--blocks needs longitude and latitude block counts")?
+                    .parse::<usize>()
+                    .context("invalid latitude block count")?;
+                blocks = BlockLayout::regular(nx, ny)?;
+                index += 3;
+            }
+            "--dominant" => {
+                dominant = true;
+                index += 1;
+            }
+            "--plant-tiles" => {
+                plant_tiles = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--plant-tiles needs the plant_15s directory")?,
+                ));
+                index += 2;
+            }
+            other => bail!("unknown spatial-pft option {other:?}\n{}", usage()),
+        }
+    }
+    Ok(SpatialPftArgs {
+        kind,
+        mesh: PathBuf::from(&args[1]),
+        landtype: PathBuf::from(&args[2]),
+        landdata: PathBuf::from(&args[3]),
+        year,
+        blocks,
+        dominant,
+        plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
+    })
+}
+
 fn materialize_case(args: &[String]) -> Result<()> {
     let namelist = PathBuf::from(args.first().expect("nonempty args"));
     let mut lct_mode = None;
@@ -658,7 +803,7 @@ fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]..."
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant]"
 }
 
 #[cfg(test)]
@@ -745,6 +890,35 @@ mod tests {
             "plant_15s".into(),
             "--usgs-forest-height".into(),
             "Forest_Height.nc".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn spatial_pft_parser_requires_native_plant_tiles() {
+        let parsed = parse_spatial_pft(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+            "--blocks".into(),
+            "2".into(),
+            "3".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.kind, SpatialInputKind::GridBased);
+        assert_eq!(parsed.plant_tiles, PathBuf::from("plant_15s"));
+        assert_eq!(parsed.blocks.lon_w.len(), 2);
+        assert_eq!(parsed.blocks.lat_s.len(), 3);
+        assert!(parse_spatial_pft(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
         ])
         .is_err());
     }

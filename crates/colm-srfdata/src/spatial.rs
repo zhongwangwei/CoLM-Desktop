@@ -232,6 +232,43 @@ pub fn build_lct_land_patches_from_raster(
     Ok((topology, patches))
 }
 
+/// Build the IGBP patch partition used by non-solo PFT runs.
+///
+/// `MOD_LandPatch` merges every IGBP soil-ground class into class one before
+/// it partitions the mesh for PFTs.  Urban, wetland, ice, lake, and ocean
+/// remain distinct so their downstream non-PFT initialization stays intact.
+pub fn build_pft_land_patches_from_raster(
+    mut topology: SpatialTopology,
+    raster: impl AsRef<Path>,
+    variable: &str,
+    raw_grid: Grid,
+    dominant_type: bool,
+) -> Result<(SpatialTopology, FlatLandPatches)> {
+    const IGBP_PATCH_TYPES: [i32; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+    let mut types = read_mesh_raster_i32(
+        raster.as_ref(),
+        variable,
+        &topology.mesh,
+        &topology.pixel,
+        raw_grid,
+    )?;
+    for kind in &mut types {
+        let index =
+            usize::try_from(*kind).with_context(|| format!("IGBP land type {kind} is negative"))?;
+        ensure!(
+            index < IGBP_PATCH_TYPES.len(),
+            "IGBP land type {kind} is outside 0..=17"
+        );
+        if index > 0 && IGBP_PATCH_TYPES[index] == 0 {
+            *kind = 1;
+        }
+    }
+    let (mesh, patches) = topology.mesh.into_land_patches(&types, dominant_type)?;
+    topology.land_elements = mesh.land_elements();
+    topology.mesh = mesh;
+    Ok((topology, patches))
+}
+
 /// Read raster classes in the exact flattened mesh-pixel order.
 pub fn read_mesh_raster_i32(
     raster: &Path,
@@ -1183,6 +1220,30 @@ pub fn write_spatial_topology(
         &assignments,
     )?;
     Ok(())
+}
+
+/// Write the PFT refinement pixelset alongside an already-written topology.
+pub fn write_spatial_pft_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_pfts: &FlatLandPatches,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    validate_patches(&topology.mesh, land_pfts)?;
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    write_pixelset(
+        landdata.as_ref(),
+        "landpft",
+        &format!("{land_cover_year:04}"),
+        &land_pfts.element_ids,
+        &land_pfts.pixel_start,
+        &land_pfts.pixel_end,
+        &land_pfts.set_type,
+        blocks,
+        &assignments,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

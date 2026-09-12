@@ -2,7 +2,7 @@
 
 use anyhow::{ensure, Context, Result};
 
-use crate::surface::FlatPatches;
+use crate::{surface::FlatPatches, topology::FlatLandPatches};
 
 /// The branch chosen by `Aggregation_PercentagesPFT` for one land patch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +10,122 @@ pub enum PftPatchKind {
     Natural,
     Crop,
     Other,
+}
+
+/// The `landpft` pixelset and its mapping back to `landpatch`.
+///
+/// `patch_offsets` partitions `pft_classes` once for every land patch.  The
+/// structural vectors use the same one-based pixel ranges as CoLM's saved
+/// `landpft` pixelset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PftTopology {
+    pub land_pfts: FlatLandPatches,
+    pub patch_offsets: Vec<usize>,
+    pub pft_classes: Vec<usize>,
+    pub patch_kind: Vec<PftPatchKind>,
+}
+
+/// Build CoLM's non-CROP `landpft` partition from class-major PFT fractions.
+///
+/// PFT land patches are created only for the merged natural land-cover type
+/// (`settyp == 1`).  The weighted positive-class test and bare-soil fallback
+/// are the `MOD_LandPFT::landpft_build` rules. `pft_class_count` permits
+/// CoLM's 16-class MODIS source to retain only its 15 natural PFT types; the
+/// actual percentages remain the responsibility of [`aggregate_pft_fractions`].
+pub fn build_pft_topology(
+    land_patches: &FlatLandPatches,
+    patches: &FlatPatches,
+    raw_class_count: usize,
+    pft_class_count: usize,
+    raw_percent: &[f64],
+    land_area: &[f64],
+) -> Result<PftTopology> {
+    ensure!(
+        raw_class_count > 0
+            && pft_class_count > 0
+            && pft_class_count <= raw_class_count
+            && raw_percent.len() == raw_class_count * land_area.len(),
+        "raw PFT percentages must be raw_class_count x raw cell count"
+    );
+    ensure!(
+        land_patches.len() == patches.len(),
+        "landpft needs matching structural and aggregation patch layouts"
+    );
+    ensure!(
+        land_area
+            .iter()
+            .all(|area| area.is_finite() && *area >= 0.0)
+            && raw_percent.iter().all(|value| value.is_finite()),
+        "landpft inputs must be finite and land areas non-negative"
+    );
+
+    let mut element_ids = Vec::new();
+    let mut pixel_start = Vec::new();
+    let mut pixel_end = Vec::new();
+    let mut set_type = Vec::new();
+    let mut element_index = Vec::new();
+    let mut patch_offsets = Vec::with_capacity(land_patches.len() + 1);
+    let mut pft_classes = Vec::new();
+    let mut patch_kind = Vec::with_capacity(land_patches.len());
+    patch_offsets.push(0);
+
+    for patch in 0..land_patches.len() {
+        ensure!(
+            patches.wmo_source_for(patch).is_none(),
+            "landpft WMO sharing needs the upstream land2mWMO topology"
+        );
+        let kind = if land_patches.set_type[patch] == 1 {
+            PftPatchKind::Natural
+        } else {
+            PftPatchKind::Other
+        };
+        patch_kind.push(kind);
+        if kind == PftPatchKind::Natural {
+            let mut weighted = vec![0.0; raw_class_count];
+            let mut total = 0.0;
+            for &cell in patches.raw_cells(patch) {
+                let area = land_area[cell];
+                let mut sum = 0.0;
+                for class in 0..raw_class_count {
+                    let value = raw_percent[class * land_area.len() + cell];
+                    sum += value;
+                    weighted[class] += value * area;
+                }
+                total += area * sum;
+            }
+            let classes = if total > 0.0 {
+                weighted
+                    .iter()
+                    .take(pft_class_count)
+                    .enumerate()
+                    .filter_map(|(class, value)| (value / total > 0.0).then_some(class))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![0]
+            };
+            for class in classes {
+                element_ids.push(land_patches.element_ids[patch]);
+                pixel_start.push(land_patches.pixel_start[patch]);
+                pixel_end.push(land_patches.pixel_end[patch]);
+                set_type.push(i32::try_from(class)?);
+                element_index.push(land_patches.element_index[patch]);
+                pft_classes.push(class);
+            }
+        }
+        patch_offsets.push(pft_classes.len());
+    }
+    Ok(PftTopology {
+        land_pfts: FlatLandPatches {
+            element_ids,
+            pixel_start,
+            pixel_end,
+            set_type,
+            element_index,
+        },
+        patch_offsets,
+        pft_classes,
+        patch_kind,
+    })
 }
 
 /// PFT topology and raw PFT-percentage fields.
