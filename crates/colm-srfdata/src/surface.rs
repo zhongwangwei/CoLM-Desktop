@@ -60,6 +60,18 @@ pub struct TopographicWetness {
     pub mu_twi: f64,
 }
 
+/// Patch outputs from `Aggregation_TopographyFactors_Simple`.
+///
+/// Type fields use `type * patches + patch` layout, matching Fortran's
+/// `(slope_type, patch)` arrays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimpleTopographyFactors {
+    pub curvature: Vec<f64>,
+    pub slope_by_aspect: Vec<f64>,
+    pub aspect_by_aspect: Vec<f64>,
+    pub aspect_types: usize,
+}
+
 /// Calculates the valid-sample branch of `Aggregation_TopoWetness`.
 ///
 /// Callers gather all 25 raw TWI depths for one patch or element first.  A
@@ -359,6 +371,74 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Port of `Aggregation_TopographyFactors_Simple`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn aggregate_simple_topography_factors(
+        &self,
+        curvature: &[f64],
+        slope_by_aspect: &[f64],
+        aspect_by_aspect: &[f64],
+        aspect_types: usize,
+        landarea: &[f64],
+    ) -> Result<SimpleTopographyFactors> {
+        ensure!(
+            aspect_types > 0
+                && curvature.len() == landarea.len()
+                && slope_by_aspect.len() == aspect_types * landarea.len()
+                && aspect_by_aspect.len() == aspect_types * landarea.len(),
+            "simple topography fields must be type-major and match raw cell count"
+        );
+        ensure!(
+            landarea.iter().all(|area| area.is_finite() && *area >= 0.0),
+            "simple topography land area must be finite and non-negative"
+        );
+        let mut output = SimpleTopographyFactors {
+            curvature: vec![SURFACE_MISSING; self.len()],
+            slope_by_aspect: vec![SURFACE_MISSING; aspect_types * self.len()],
+            aspect_by_aspect: vec![SURFACE_MISSING; aspect_types * self.len()],
+            aspect_types,
+        };
+        for patch in 0..self.len() {
+            if let Some(source) = self.wmo_source[patch] {
+                output.curvature[patch] = output.curvature[source];
+                for aspect in 0..aspect_types {
+                    output.slope_by_aspect[aspect * self.len() + patch] =
+                        output.slope_by_aspect[aspect * self.len() + source];
+                    output.aspect_by_aspect[aspect * self.len() + patch] =
+                        output.aspect_by_aspect[aspect * self.len() + source];
+                }
+                continue;
+            }
+            output.curvature[patch] = weighted_not_missing(
+                self.raw_cells(patch),
+                curvature,
+                landarea,
+                0,
+                patch,
+                "curvature",
+            )?;
+            for aspect in 0..aspect_types {
+                output.slope_by_aspect[aspect * self.len() + patch] = weighted_not_missing(
+                    self.raw_cells(patch),
+                    slope_by_aspect,
+                    landarea,
+                    aspect,
+                    patch,
+                    "slope",
+                )?;
+                output.aspect_by_aspect[aspect * self.len() + patch] = weighted_not_missing(
+                    self.raw_cells(patch),
+                    aspect_by_aspect,
+                    landarea,
+                    aspect,
+                    patch,
+                    "aspect",
+                )?;
+            }
+        }
+        Ok(output)
+    }
+
     /// Port of `Aggregation_DBedrock`.
     ///
     /// The raw field has no fill-value masking in the Fortran routine, so this
@@ -650,6 +730,42 @@ fn value(source: &[f64], cell: usize, name: &str, patch: usize) -> Result<f64> {
             "{name} patch {patch} references raw cell {cell}, but input has {} cells",
             source.len()
         )
+    })
+}
+
+fn weighted_not_missing(
+    cells: &[usize],
+    source: &[f64],
+    landarea: &[f64],
+    component: usize,
+    patch: usize,
+    name: &str,
+) -> Result<f64> {
+    let raw_cells = landarea.len();
+    let mut area_sum = 0.0;
+    let mut value_sum = 0.0;
+    for &cell in cells {
+        let value = source
+            .get(component * raw_cells + cell)
+            .copied()
+            .with_context(|| {
+                format!("{name} patch {patch} references raw component {component}, cell {cell}")
+            })?;
+        if value == -9999.0 {
+            continue;
+        }
+        ensure!(
+            value.is_finite(),
+            "{name} patch {patch} contains a non-finite value"
+        );
+        let area = landarea[cell];
+        area_sum += area;
+        value_sum += value * area;
+    }
+    Ok(if area_sum > 0.0 {
+        value_sum / area_sum
+    } else {
+        SURFACE_MISSING
     })
 }
 

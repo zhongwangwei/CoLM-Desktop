@@ -107,6 +107,32 @@ fn topographic_wetness_matches_threshold_fit_and_short_sample_fallback() {
 }
 
 #[test]
+fn simple_topography_factors_mask_missing_values_and_share_wmo_results() {
+    let layout = FlatPatches::new(
+        vec![1, 1],
+        vec![0, 2, 3],
+        vec![0, 1, 2],
+        vec![None, Some(0)],
+    )
+    .unwrap();
+    let output = layout
+        .aggregate_simple_topography_factors(
+            &[1.0, -9999.0, 99.0],
+            &[10.0, 30.0, 99.0, -9999.0, 40.0, 99.0],
+            &[100.0, 300.0, 99.0, -9999.0, -9999.0, 99.0],
+            2,
+            &[1.0, 3.0, 1.0],
+        )
+        .unwrap();
+    assert_eq!(output.curvature, [1.0, 1.0]);
+    assert_eq!(output.slope_by_aspect, [25.0, 25.0, 40.0, 40.0]);
+    assert_eq!(
+        output.aspect_by_aspect,
+        [250.0, 250.0, SURFACE_MISSING, SURFACE_MISSING]
+    );
+}
+
+#[test]
 fn bedrock_is_area_weighted_and_wmo_patches_reuse_the_prior_value() {
     let layout = FlatPatches::new(
         vec![1, 1],

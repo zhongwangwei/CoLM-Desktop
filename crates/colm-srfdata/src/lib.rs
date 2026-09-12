@@ -35,8 +35,8 @@ pub use pft::{
     PftPatchKind,
 };
 pub use surface::{
-    derive_topographic_wetness, FlatPatches, SoilBrightness, TopographicWetness, Topography,
-    SURFACE_MISSING,
+    derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,
+    TopographicWetness, Topography, SURFACE_MISSING,
 };
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandPatches, FlatMesh};
