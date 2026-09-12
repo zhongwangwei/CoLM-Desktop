@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
-use netcdf::NcTypeDescriptor;
+use netcdf::{Extent, NcTypeDescriptor};
 
 use crate::{mesh::inspect_spatial_input, FlatLandElements, FlatLandPatches, FlatMesh, Grid};
 
@@ -254,6 +254,53 @@ pub fn read_mesh_raster_f64(
     read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
 }
 
+/// Read leading layers of a named `(soil, lat, lon)` raster in mesh-pixel order.
+///
+/// The return layout is `layer * raw_mesh_pixels + mesh_pixel`, which is the
+/// layout used by the aggregation kernels and mirrors CoLM's first-indexed
+/// Fortran layer arrays.  Only requested regional rows are read.
+pub fn read_mesh_raster_layers_f64(
+    raster: &Path,
+    variable: &str,
+    layers: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    ensure!(layers > 0, "layered raster needs at least one layer");
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = raster_layer_axes(&source, raw_grid, raster)?;
+    ensure!(
+        layers <= source.dimensions()[axes.layer].len(),
+        "{variable} in {} has fewer than {layers} layers",
+        raster.display()
+    );
+    let longitude = raw_longitudes(pixel, raw_grid);
+    let latitude = raw_latitudes(pixel, raw_grid);
+    let mesh_pixels = (0..mesh.len())
+        .map(|element| mesh.pixel_count(element))
+        .sum::<Result<usize>>()?;
+    let mut output = Vec::with_capacity(layers * mesh_pixels);
+    for layer in 0..layers {
+        let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
+        for global_y in &latitude {
+            pixels.extend(read_layer_raster_row(
+                &source,
+                axes,
+                layer,
+                *global_y,
+                &longitude,
+                raw_grid.nlon,
+            )?);
+        }
+        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+    }
+    Ok(output)
+}
+
 /// Read a CoLM 5°×5° tile variable in flattened mesh-pixel order.
 ///
 /// `MOD_5x5DataReadin.F90` partitions the global grid into 72 longitude by
@@ -387,6 +434,99 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
         pixel_values.extend(row);
     }
     mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RasterLayerAxes {
+    layer: usize,
+    latitude: usize,
+    longitude: usize,
+}
+
+fn raster_layer_axes(
+    source: &netcdf::Variable<'_>,
+    raw_grid: Grid,
+    path: &Path,
+) -> Result<RasterLayerAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "{} in {} must have layer, latitude, and longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    let axis = |labels: &[&str]| {
+        dimensions
+            .iter()
+            .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
+    };
+    let layer = axis(&["soil", "layer", "depth"])
+        .context("layered raster has no soil/layer/depth dimension")?;
+    let latitude =
+        axis(&["lat", "latitude"]).context("layered raster has no latitude dimension")?;
+    let longitude =
+        axis(&["lon", "longitude"]).context("layered raster has no longitude dimension")?;
+    ensure!(
+        layer != latitude && layer != longitude && latitude != longitude,
+        "layered raster dimensions must use distinct layer, latitude, and longitude names"
+    );
+    ensure!(
+        dimensions[latitude].len() == raw_grid.nlat && dimensions[longitude].len() == raw_grid.nlon,
+        "{} in {} has incompatible latitude/longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    Ok(RasterLayerAxes {
+        layer,
+        latitude,
+        longitude,
+    })
+}
+
+fn read_layer_raster_row(
+    source: &netcdf::Variable<'_>,
+    axes: RasterLayerAxes,
+    layer: usize,
+    global_y: usize,
+    longitude: &[usize],
+    nlon: usize,
+) -> Result<Vec<f64>> {
+    ensure!(global_y > 0, "raw raster latitude indices are one-based");
+    let first = *longitude
+        .first()
+        .context("spatial pixel longitude is empty")?;
+    ensure!(
+        longitude
+            .iter()
+            .enumerate()
+            .all(|(offset, index)| *index == (first + offset - 1) % nlon + 1),
+        "spatial pixel longitudes must be contiguous in raw-grid order"
+    );
+    let read = |start: usize, count: usize| -> Result<Vec<f64>> {
+        let mut extents = vec![Extent::Index(0); 3];
+        extents[axes.layer] = Extent::Index(layer);
+        extents[axes.latitude] = Extent::Index(global_y - 1);
+        extents[axes.longitude] = Extent::SliceCount {
+            start,
+            count,
+            stride: 1,
+        };
+        Ok(source.get_values::<f64, _>(extents)?)
+    };
+    let start = first - 1;
+    let width = longitude.len();
+    let values = if start + width <= nlon {
+        read(start, width)?
+    } else {
+        let mut values = read(start, nlon - start)?;
+        values.extend(read(0, width - (nlon - start))?);
+        values
+    };
+    ensure!(
+        values.len() == width,
+        "layered raster row returned an unexpected length"
+    );
+    Ok(values)
 }
 
 fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
