@@ -360,6 +360,33 @@ pub fn derive_soil_parameters(
     })
 }
 
+/// Applies the spatial `MOD_SoilParametersReadin.F90` ocean branch after the
+/// shared non-ocean soil expansion.  `land_class == 0` is ocean; it is distinct
+/// from the valid natural-soil `patch_type == 0`.
+pub fn derive_spatial_soil_parameters(
+    source: &[SoilLayerInput],
+    land_class: &[i32],
+    patch_type: &[i32],
+    layers: usize,
+    hydraulic_model: HydraulicModel,
+) -> Result<SoilState> {
+    ensure!(
+        land_class.len() == patch_type.len(),
+        "land classes and patch types must have equal lengths"
+    );
+    let mut state = derive_soil_parameters(source, patch_type, layers, hydraulic_model)?;
+    for (patch, &class) in land_class.iter().enumerate() {
+        if class == 0 {
+            for field in &mut state.values {
+                for layer in 0..layers {
+                    field[layer * state.patches + patch] = MISSING;
+                }
+            }
+        }
+    }
+    Ok(state)
+}
+
 #[cfg(test)]
 #[path = "static_state_tests.rs"]
 mod static_state_tests;

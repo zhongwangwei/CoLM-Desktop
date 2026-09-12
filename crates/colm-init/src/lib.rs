@@ -21,6 +21,7 @@ pub mod radiation {
 pub mod restart;
 pub mod runtime;
 pub mod single_point;
+pub mod spatial_static;
 pub mod static_state {
     pub use colm_core::static_state::*;
 }
@@ -72,9 +73,11 @@ pub use single_point::{
     SinglePointColdStartRun, SinglePointConstantRestartFiles, SinglePointStaticConfig,
     SinglePointStaticRun, SinglePointSubgrid, SinglePointTimeRestartFiles,
 };
+pub use spatial_static::{write_spatial_lct_constant_restart, SpatialLctStaticConfig};
 pub use static_state::{
-    derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
-    BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState,
+    derive_bedrock, derive_lake_layers, derive_soil_parameters, derive_spatial_soil_parameters,
+    normalize_soil_texture, BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput,
+    SoilState,
 };
 pub use surface_data::{
     read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_surface,

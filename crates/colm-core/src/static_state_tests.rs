@@ -113,3 +113,17 @@ fn soil_conversion_rejects_a_non_fortran_source_shape() {
         derive_soil_parameters(&vec![soil(1.0); 8], &[1], 8, HydraulicModel::Campbell).is_err()
     );
 }
+
+#[test]
+fn spatial_soil_marks_only_ocean_classes_missing() {
+    let source = (1..=8)
+        .flat_map(|layer| [soil(layer as f64), soil(100.0 + layer as f64)])
+        .collect::<Vec<_>>();
+    let state =
+        derive_spatial_soil_parameters(&source, &[0, 1], &[0, 0], 10, HydraulicModel::Campbell)
+            .unwrap();
+    assert_eq!(state.get(SoilField::VfQuartz, 0, 0), MISSING);
+    assert_eq!(state.get(SoilField::VfQuartz, 0, 1), 101.0);
+    assert_eq!(state.get(SoilField::FieldCapacity, 0, 0), MISSING);
+    assert_ne!(state.get(SoilField::FieldCapacity, 0, 1), MISSING);
+}

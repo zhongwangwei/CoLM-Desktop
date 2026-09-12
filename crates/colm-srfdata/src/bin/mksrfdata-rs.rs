@@ -752,6 +752,24 @@ fn materialize_spatial_soil(
                         landdata, year, topology, patches, blocks, name, layer, &values,
                     )?;
                 }
+                // The VGM initialization branch still writes Campbell's `bsw`,
+                // so `MOD_SoilParametersReadin.F90` requires these two inputs.
+                for (file, source) in [("psi_s.nc", "psi_s"), ("lambda.nc", "lambda")] {
+                    let raw = read_soil_raw(directory, file, source, layer, topology)?;
+                    let values = aggregate_soil_field(
+                        &layout,
+                        &raw,
+                        &area,
+                        classes,
+                        SoilField {
+                            statistic: SoilStatistic::AreaMean,
+                            fill: 0.0,
+                        },
+                    )?;
+                    write_soil_layer(
+                        landdata, year, topology, patches, blocks, source, layer, &values,
+                    )?;
+                }
             }
             SoilModel::Campbell => {
                 let output = aggregate_campbell(

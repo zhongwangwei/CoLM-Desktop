@@ -1383,7 +1383,7 @@ fn write_cold_time_restart(
     )
 }
 
-fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {
+pub(crate) fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {
     let types = match land_cover {
         LandCoverScheme::Igbp => &IGBP_PATCH_TYPE[..],
         LandCoverScheme::Usgs => &USGS_PATCH_TYPE[..],
@@ -1719,25 +1719,26 @@ fn detect_land_cover(surface: &Path) -> Result<LandCoverScheme> {
 
 // `main/MOD_Const_LC.F90`.  Index zero is deliberately unused because CoLM's land
 // classifications are one-based, unlike its `patchtype` values.
-const IGBP_PATCH_TYPE: [i32; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
-const USGS_PATCH_TYPE: [i32; 25] = [
+pub(crate) const IGBP_PATCH_TYPE: [i32; 18] =
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+pub(crate) const USGS_PATCH_TYPE: [i32; 25] = [
     0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 2, 2, 0, 0, 0, 0, 0, 3,
 ];
-const IGBP_TOP: [f64; 18] = [
+pub(crate) const IGBP_TOP: [f64; 18] = [
     0.0, 17.0, 35.0, 17.0, 20.0, 20.0, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5,
 ];
-const IGBP_BOTTOM: [f64; 18] = [
+pub(crate) const IGBP_BOTTOM: [f64; 18] = [
     0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 ];
-const USGS_TOP: [f64; 25] = [
+pub(crate) const USGS_TOP: [f64; 25] = [
     0.0, 1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 20.0, 17.0, 35.0, 17.0, 20.0, 0.5, 0.5,
     17.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
 ];
-const USGS_BOTTOM: [f64; 25] = [
+pub(crate) const USGS_BOTTOM: [f64; 25] = [
     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0,
     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 ];
-const BVIC_USDA: [f64; 13] = [
+pub(crate) const BVIC_USDA: [f64; 13] = [
     1.0, 0.300, 0.280, 0.250, 0.230, 0.220, 0.200, 0.180, 0.100, 0.090, 0.150, 0.080, 0.050,
 ];
 

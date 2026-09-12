@@ -53,8 +53,9 @@ pub use snow::{
     NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
 };
 pub use static_state::{
-    derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
-    BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState,
+    derive_bedrock, derive_lake_layers, derive_soil_parameters, derive_spatial_soil_parameters,
+    normalize_soil_texture, BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput,
+    SoilState,
 };
 pub use thermal_properties::{
     soil_thermal_properties, SoilThermalInput, SoilThermalProperties, ThermalConductivityScheme,
