@@ -17,6 +17,7 @@ pub mod net_solar;
 pub mod pc_radiation;
 pub mod phase_change;
 pub mod radiation;
+pub mod root_uptake;
 pub mod snow;
 pub mod soil_surface_resistance;
 pub mod soil_water;
@@ -68,6 +69,7 @@ pub use radiation::{
     cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,
     LeafOptics,
 };
+pub use root_uptake::{root_uptake, RootUptakeInput, RootUptakeState};
 pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, NewSnowInput,
     NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,

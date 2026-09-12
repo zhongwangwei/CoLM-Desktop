@@ -33,6 +33,9 @@ pub mod pft_restart;
 pub mod radiation {
     pub use colm_core::radiation::*;
 }
+pub mod root_uptake {
+    pub use colm_core::root_uptake::*;
+}
 pub mod restart;
 pub mod runtime;
 pub mod single_point;
@@ -79,6 +82,7 @@ pub use colm_core::{
 pub use colm_core::{GroundFluxInput, GroundFluxState};
 pub use colm_core::{GroundTemperatureInput, GroundTemperatureState};
 pub use colm_core::{GroundThermalStepInput, GroundThermalStepState};
+pub use colm_core::{RootUptakeInput, RootUptakeState};
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
     write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
