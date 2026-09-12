@@ -8,6 +8,7 @@ pub mod albedo;
 pub mod atmosphere;
 pub mod ground_fluxes;
 pub mod ground_temperature;
+pub mod ground_thermal_step;
 pub mod hydrology;
 pub mod interception;
 pub mod linear;
@@ -36,6 +37,9 @@ pub use atmosphere::{
 };
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_temperature::{ground_temperature, GroundTemperatureInput, GroundTemperatureState};
+pub use ground_thermal_step::{
+    ground_thermal_step, GroundThermalStepInput, GroundThermalStepState,
+};
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
