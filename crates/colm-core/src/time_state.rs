@@ -1,6 +1,8 @@
 //! Time-varying cold-start kernels from `MOD_IniTimeVariable.F90`.
 
-use crate::{soil_vliq_from_psi, SoilHydraulicModel};
+use crate::{
+    soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel,
+};
 use anyhow::{ensure, Result};
 
 const MAX_SNOW_LAYERS: usize = 5;
@@ -81,7 +83,7 @@ pub fn derive_initial_soil_hydraulics(
             hydraulic_conductivity_mm_s.push(0.0);
         } else {
             let vliq = liquid_water_kg_m2[layer] / (interface_mm[layer + 1] - interface_mm[layer]);
-            let psi = crate::soil_psi_from_vliq(
+            let psi = soil_psi_from_vliq(
                 vliq,
                 porosity[layer],
                 residual_water[layer],
@@ -89,7 +91,7 @@ pub fn derive_initial_soil_hydraulics(
                 model[layer],
             );
             matric_potential_mm.push(psi);
-            hydraulic_conductivity_mm_s.push(crate::soil_hydraulic_conductivity(
+            hydraulic_conductivity_mm_s.push(soil_hydraulic_conductivity(
                 psi,
                 psi_s_mm[layer],
                 saturated_conductivity_mm_s[layer],

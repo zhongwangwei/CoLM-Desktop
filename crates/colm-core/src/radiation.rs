@@ -381,7 +381,7 @@ fn cold_start_broadband_radiation_with_snow_using(
     })
 }
 
-fn mix_ground_albedo(
+pub(crate) fn mix_ground_albedo(
     soil: [[f64; RADIATION_TYPES]; BANDS],
     snow: [[f64; RADIATION_TYPES]; BANDS],
     snow_fraction: f64,
@@ -395,7 +395,7 @@ fn mix_ground_albedo(
 }
 
 /// `albland`'s non-SNICAR snow-age/albedo branch for a freshly initialized column.
-fn generic_snow_albedo(
+pub(crate) fn generic_snow_albedo(
     snow_water_equivalent_mm: f64,
     ground_temperature_k: f64,
     cosine_zenith: f64,

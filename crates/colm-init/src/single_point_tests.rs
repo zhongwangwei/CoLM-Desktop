@@ -53,6 +53,39 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
 }
 
 #[test]
+fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
+    let document = parse(
+        "&nl_colm
+ DEF_USE_LCT = .false.
+ DEF_USE_PFT = .false.
+ DEF_USE_PC = .true.
+ /
+",
+    )
+    .unwrap();
+    assert_eq!(
+        single_point_subgrid(&document).unwrap(),
+        SinglePointSubgrid::Pc
+    );
+    assert_eq!(pc_canopy_layer(1).unwrap(), 2);
+    assert_eq!(pc_canopy_layer(8).unwrap(), 2);
+    assert_eq!(pc_canopy_layer(9).unwrap(), 1);
+    assert_eq!(pc_canopy_layer(15).unwrap(), 1);
+    assert!(pc_canopy_layer(16).is_err());
+    assert!(single_point_subgrid(
+        &parse(
+            "&nl_colm
+ DEF_USE_LCT=.true.
+ DEF_USE_PC=.true.
+ /
+"
+        )
+        .unwrap()
+    )
+    .is_err());
+}
+
+#[test]
 fn pft_optics_honor_the_native_indexed_namelist_override() {
     let document = parse("&nl_colm\n DEF_PFT_CHIL(2) = 0.25\n /\n").unwrap();
     let optics = pft_leaf_optics(&document, 1, HydraulicModel::VanGenuchten).unwrap();

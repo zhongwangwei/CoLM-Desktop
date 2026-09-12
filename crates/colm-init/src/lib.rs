@@ -1,37 +1,50 @@
-//! Pure, testable initialization kernels for CoLM's `mkinidata` stage.
+//! NetCDF-backed `mkinidata` orchestration and restart serialization.
 //!
-//! NetCDF and MPI adapters deliberately sit outside these kernels: their output is the
-//! same flat, layer-major state that the eventual restart writer serializes.
+//! Physics lives in `colm-core`, shared unchanged with the Rust runtime.
 
-pub mod albedo;
-pub mod hydrology;
+pub mod albedo {
+    pub use colm_core::albedo::*;
+}
+pub mod hydrology {
+    pub use colm_core::hydrology::*;
+}
+pub mod pc_radiation {
+    pub use colm_core::pc_radiation::*;
+}
 pub mod pft_restart;
-pub mod radiation;
+pub mod radiation {
+    pub use colm_core::radiation::*;
+}
 pub mod restart;
 pub mod runtime;
 pub mod single_point;
-pub mod static_state;
+pub mod static_state {
+    pub use colm_core::static_state::*;
+}
 pub mod surface_data;
 pub mod time_restart;
-pub mod time_state;
+pub mod time_state {
+    pub use colm_core::time_state::*;
+}
 pub mod urban;
 pub mod urban_restart;
-pub mod vegetation;
+pub mod vegetation {
+    pub use colm_core::vegetation::*;
+}
 
-pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
-pub use hydrology::{
-    equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
-    EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
+pub use colm_core::{
+    cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
+    cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
+    derive_igbp_canopy, derive_usgs_canopy, equilibrium_water_state, land_cover_soil_reflectance,
+    leaf_optics_from_land_cover, soil_hydraulic_conductivity, soil_psi_from_vliq,
+    soil_vliq_from_psi, CanopyState, ColdStartRadiation, EquilibriumWaterState, LandCoverScheme,
+    LeafOptics, PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput, SoilHydraulicModel,
+    SoilReflectance, MIN_SOIL_PSI, MISSING,
 };
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
     write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
     PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
-};
-pub use radiation::{
-    cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,
-    LeafOptics,
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
@@ -52,7 +65,7 @@ pub use single_point::{
 };
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
-    BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState, MISSING,
+    BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState,
 };
 pub use surface_data::{
     read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_surface,
@@ -78,4 +91,3 @@ pub use urban_restart::{
     write_urban_time_restart_block, UrbanConstantRestartInput, UrbanNamedField, UrbanThermalFields,
     UrbanTimeRestartDimensions, UrbanTimeRestartInput,
 };
-pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};

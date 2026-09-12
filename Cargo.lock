@@ -87,6 +87,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-core"
+version = "0.2.0-beta.4"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "colm-forcing"
 version = "0.2.0-beta.4"
 dependencies = [
@@ -109,6 +116,7 @@ version = "0.2.0-beta.4"
 dependencies = [
  "anyhow",
  "colm-case",
+ "colm-core",
  "colm-namelist",
  "netcdf",
 ]

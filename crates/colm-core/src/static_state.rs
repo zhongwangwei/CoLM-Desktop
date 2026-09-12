@@ -8,8 +8,7 @@
 
 use anyhow::{ensure, Result};
 
-/// CoLM's landdata missing marker.
-pub const MISSING: f64 = -1.0e36;
+use crate::MISSING;
 
 const SOURCE_SOIL_LAYERS: usize = 8;
 const DEFAULT_LAKE_LAYERS: usize = 10;
