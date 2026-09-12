@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
+use netcdf::NcTypeDescriptor;
 
 use crate::{mesh::inspect_spatial_input, FlatLandElements, FlatLandPatches, FlatMesh, Grid};
 
@@ -239,6 +240,27 @@ pub fn read_mesh_raster_i32(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<i32>> {
+    read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
+}
+
+/// Read floating point raw data in the exact flattened mesh-pixel order.
+pub fn read_mesh_raster_f64(
+    raster: &Path,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
+}
+
+fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
+    raster: &Path,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<T>> {
     let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
     let source = file
         .variable(variable)
@@ -254,23 +276,16 @@ pub fn read_mesh_raster_i32(
         raw_grid.nlat,
         raw_grid.nlon
     );
-    let longitude = pixel
-        .lon_w
-        .iter()
-        .zip(&pixel.lon_e)
-        .map(|(&west, &east)| raw_grid.index_of(midpoint_longitude(west, east), 0.0).0)
-        .collect::<Vec<_>>();
-    let latitude = pixel
-        .lat_s
-        .iter()
-        .zip(&pixel.lat_n)
-        .map(|(&south, &north)| raw_grid.index_of(0.0, (south + north) * 0.5).1)
-        .collect::<Vec<_>>();
-    let mut pixel_values = vec![0_i32; pixel.lon_w.len() * pixel.lat_s.len()];
+    let longitude = raw_longitudes(pixel, raw_grid);
+    let latitude = raw_latitudes(pixel, raw_grid);
+    let mut pixel_values = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
     for (local_y, global_y) in latitude.into_iter().enumerate() {
-        let row = read_raster_row(&source, global_y, &longitude, raw_grid.nlon)?;
-        let start = local_y * pixel.lon_w.len();
-        pixel_values[start..start + row.len()].copy_from_slice(&row);
+        let row = read_raster_row::<T>(&source, global_y, &longitude, raw_grid.nlon)?;
+        ensure!(
+            row.len() == pixel.lon_w.len(),
+            "raw raster row {local_y} has an unexpected length"
+        );
+        pixel_values.extend(row);
     }
     let mut values = Vec::new();
     for element in 0..mesh.len() {
@@ -292,12 +307,30 @@ pub fn read_mesh_raster_i32(
     Ok(values)
 }
 
-fn read_raster_row(
+fn raw_longitudes(pixel: &PixelAxes, raw_grid: Grid) -> Vec<usize> {
+    pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&west, &east)| raw_grid.index_of(midpoint_longitude(west, east), 0.0).0)
+        .collect()
+}
+
+fn raw_latitudes(pixel: &PixelAxes, raw_grid: Grid) -> Vec<usize> {
+    pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| raw_grid.index_of(0.0, (south + north) * 0.5).1)
+        .collect()
+}
+
+fn read_raster_row<T: NcTypeDescriptor + Copy>(
     source: &netcdf::Variable<'_>,
     global_y: usize,
     longitude: &[usize],
     nlon: usize,
-) -> Result<Vec<i32>> {
+) -> Result<Vec<T>> {
     ensure!(global_y > 0, "raw raster latitude indices are one-based");
     let first = *longitude
         .first()
@@ -311,12 +344,12 @@ fn read_raster_row(
     );
     let width = longitude.len();
     let start = first - 1;
-    let mut out = if start + width <= nlon {
-        source.get_values::<i32, _>((global_y - 1..global_y, start..start + width))?
+    let out = if start + width <= nlon {
+        source.get_values::<T, _>((global_y - 1..global_y, start..start + width))?
     } else {
-        let mut values = source.get_values::<i32, _>((global_y - 1..global_y, start..nlon))?;
+        let mut values = source.get_values::<T, _>((global_y - 1..global_y, start..nlon))?;
         values.extend(
-            source.get_values::<i32, _>((global_y - 1..global_y, 0..width - (nlon - start)))?,
+            source.get_values::<T, _>((global_y - 1..global_y, 0..width - (nlon - start)))?,
         );
         values
     };
@@ -324,7 +357,64 @@ fn read_raster_row(
         out.len() == width,
         "raw raster row returned an unexpected length"
     );
-    Ok(std::mem::take(&mut out))
+    Ok(out)
+}
+
+/// Write one scalar LCT-patch vector in the same per-block files as
+/// `ncio_write_vector(..., landpatch, ...)`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_landpatch_scalar_f64(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    directory: &str,
+    variable: &str,
+    values: &[f64],
+) -> Result<()> {
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    ensure!(
+        !directory.is_empty() && !directory.contains('/'),
+        "land-patch output directory must be one path component"
+    );
+    ensure!(
+        !variable.is_empty() && !variable.contains('/'),
+        "land-patch output variable must be one NetCDF name"
+    );
+    validate_patches(&topology.mesh, land_patches)?;
+    ensure!(
+        values.len() == land_patches.len(),
+        "{variable} has {} values for {} land patches",
+        values.len(),
+        land_patches.len()
+    );
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let year = format!("{land_cover_year:04}");
+    let output = landdata.as_ref().join(directory).join(year);
+    std::fs::create_dir_all(&output)?;
+    let mut grouped = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (patch, element) in land_patches.element_ids.iter().enumerate() {
+        grouped
+            .entry(
+                *assignments
+                    .get(element)
+                    .with_context(|| format!("land patch {patch} references unknown element"))?,
+            )
+            .or_default()
+            .push(patch);
+    }
+    for ((x, y), patches) in grouped {
+        let output_values = patches
+            .iter()
+            .map(|patch| values[*patch])
+            .collect::<Vec<_>>();
+        let mut file = netcdf::create(output.join(block_filename(variable, x, y, blocks)?))?;
+        file.add_dimension("patch", output_values.len())?;
+        put_f64(&mut file, variable, &["patch"], &output_values)?;
+        file.close()?;
+    }
+    Ok(())
 }
 
 /// Write the common topology artifacts expected by `mkinidata` and `colm`.

@@ -58,6 +58,21 @@ fn write_landtype(path: &std::path::Path) {
     file.close().unwrap();
 }
 
+fn write_lake_depth(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    file.add_variable::<f64>("lake_depth", &["lat", "lon"])
+        .unwrap()
+        .put_values(
+            &[80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0],
+            (.., ..),
+        )
+        .unwrap();
+    file.close().unwrap();
+}
+
 fn dim_names(file: &netcdf::File, variable: &str) -> Vec<String> {
     file.variable(variable)
         .unwrap()
@@ -134,6 +149,64 @@ fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
     assert_eq!(patches.set_type, vec![8, 9, 12, 13, 10, 11, 14, 15]);
     assert_eq!(topology.mesh.pixels(0).unwrap().0, &[1, 2, 1, 2]);
     assert_eq!(topology.mesh.pixels(0).unwrap().1, &[2, 2, 1, 1]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
+    let directory = temporary("lake-depth");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("lake_depth.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_lake_depth(&raster);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    assert_eq!(
+        read_mesh_raster_f64(
+            &raster,
+            "lake_depth",
+            &topology.mesh,
+            &topology.pixel,
+            Grid { nlon: 4, nlat: 2 },
+        )
+        .unwrap(),
+        vec![120.0, 130.0, 80.0, 90.0, 140.0, 150.0, 100.0, 110.0]
+    );
+    let patches = FlatLandPatches {
+        element_ids: vec![1, 2],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![4, 4],
+        set_type: vec![17, 1],
+        element_index: vec![1, 2],
+    };
+    let landdata = directory.join("landdata");
+    write_landpatch_scalar_f64(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "lakedepth",
+        "lakedepth_patches",
+        &[12.5, -1.0e36],
+    )
+    .unwrap();
+    let output =
+        netcdf::open(landdata.join("lakedepth/2005/lakedepth_patches_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&output, "lakedepth_patches"), ["patch"]);
+    assert_eq!(
+        output
+            .variable("lakedepth_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![12.5, -1.0e36]
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }
