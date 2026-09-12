@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use colm_srfdata::{
     build_lct_land_patches_from_raster, build_spatial_topology, materialize_single_point_surface,
-    materialize_single_point_surface_from_namelist, write_spatial_topology, BlockLayout, SiteMode,
-    SpatialInputKind, COLM_500M,
+    materialize_single_point_surface_from_namelist, read_mesh_raster_f64,
+    write_landpatch_scalar_f64, write_spatial_topology, BlockLayout, SiteMode, SpatialInputKind,
+    COLM_500M,
 };
 
 fn main() -> Result<()> {
@@ -29,6 +30,8 @@ struct SpatialLctArgs {
     year: i32,
     blocks: BlockLayout,
     dominant: bool,
+    land_cover: Option<SiteMode>,
+    lake_depth: Option<PathBuf>,
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
@@ -41,7 +44,42 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         COLM_500M,
         args.dominant,
     )?;
+    let lake_depth = if let Some(path) = &args.lake_depth {
+        let waterbody = match args
+            .land_cover
+            .context("--lake-depth requires --land-cover igbp or usgs")?
+        {
+            SiteMode::Igbp => 17,
+            SiteMode::Usgs => 16,
+            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
+                bail!("--lake-depth supports only LCT IGBP or USGS land cover")
+            }
+        };
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        let raw = read_mesh_raster_f64(
+            path,
+            "lake_depth",
+            &topology.mesh,
+            &topology.pixel,
+            COLM_500M,
+        )?;
+        Some(layout.aggregate_lake_depth(&raw, waterbody)?)
+    } else {
+        None
+    };
     write_spatial_topology(&args.landdata, args.year, &topology, &patches, &args.blocks)?;
+    if let Some(lake_depth) = lake_depth {
+        write_landpatch_scalar_f64(
+            &args.landdata,
+            args.year,
+            &topology,
+            &patches,
+            &args.blocks,
+            "lakedepth",
+            "lakedepth_patches",
+            &lake_depth,
+        )?;
+    }
     println!(
         "wrote {} spatial land elements and {} LCT patches to {}",
         topology.land_elements.element_ids.len(),
@@ -65,6 +103,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         .with_context(|| format!("invalid land-cover year {:?}", args[4]))?;
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut dominant = false;
+    let mut land_cover = None;
+    let mut lake_depth = None;
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -86,6 +126,20 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 dominant = true;
                 index += 1;
             }
+            "--land-cover" => {
+                land_cover = Some(parse_land_cover(
+                    args.get(index + 1)
+                        .context("--land-cover needs igbp or usgs")?,
+                )?);
+                index += 2;
+            }
+            "--lake-depth" => {
+                lake_depth = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--lake-depth needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
             other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
         }
     }
@@ -97,6 +151,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         year,
         blocks,
         dominant,
+        land_cover,
+        lake_depth,
     })
 }
 
@@ -109,14 +165,10 @@ fn materialize_case(args: &[String]) -> Result<()> {
     while index < args.len() {
         match args[index].as_str() {
             "--land-cover" => {
-                let value = args
-                    .get(index + 1)
-                    .context("--land-cover needs igbp or usgs")?;
-                lct_mode = Some(match value.as_str() {
-                    "igbp" => SiteMode::Igbp,
-                    "usgs" => SiteMode::Usgs,
-                    _ => bail!("--land-cover must be igbp or usgs"),
-                });
+                lct_mode = Some(parse_land_cover(
+                    args.get(index + 1)
+                        .context("--land-cover needs igbp or usgs")?,
+                )?);
                 index += 2;
             }
             "--crop" => {
@@ -178,8 +230,16 @@ fn print_result(report: Option<colm_srfdata::site::Report>, landdata: &std::path
     }
 }
 
+fn parse_land_cover(value: &str) -> Result<SiteMode> {
+    match value {
+        "igbp" => Ok(SiteMode::Igbp),
+        "usgs" => Ok(SiteMode::Usgs),
+        _ => bail!("--land-cover must be igbp or usgs"),
+    }
+}
+
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> [--blocks nx ny] [--dominant]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc --land-cover igbp|usgs]"
 }
 
 #[cfg(test)]
@@ -198,10 +258,16 @@ mod tests {
             "4".into(),
             "2".into(),
             "--dominant".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--lake-depth".into(),
+            "lake_depth.nc".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Unstructured);
         assert!(parsed.dominant);
+        assert_eq!(parsed.land_cover, Some(SiteMode::Igbp));
+        assert_eq!(parsed.lake_depth, Some(PathBuf::from("lake_depth.nc")));
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
     }
