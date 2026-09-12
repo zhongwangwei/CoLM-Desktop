@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
-    write_spatial_lct_constant_restart, write_spatial_pft_constant_restart, HydraulicModel,
+    write_spatial_lct_constant_restart, write_spatial_pft_constant_restarts, HydraulicModel,
     LandCoverScheme, SinglePointStaticConfig, SpatialLctStaticConfig, SpatialPftStaticConfig,
 };
 
@@ -136,18 +136,30 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         .parse()
         .context("land-cover year must be an integer")?;
     let block = args.next().context("missing CoLM block label")?;
-    if let Some(value) = args.next() {
-        bail!("unexpected argument {value}");
+    let mut use_bedrock = false;
+    let mut use_hyperspectral = false;
+    for value in args {
+        match value.as_str() {
+            "--bedrock" => use_bedrock = true,
+            "--hyperspectral" => use_hyperspectral = true,
+            _ => bail!("unexpected argument {value}"),
+        }
     }
-    let path = write_spatial_pft_constant_restart(SpatialPftStaticConfig::new(
-        &namelist,
-        &landdata,
-        &restart,
-        &case_name,
-        land_cover_year,
-        &block,
-    ))?;
-    println!("wrote {}", path.display());
+    let files = write_spatial_pft_constant_restarts(
+        SpatialPftStaticConfig::new(
+            &namelist,
+            &landdata,
+            &restart,
+            &case_name,
+            land_cover_year,
+            &block,
+        ),
+        use_bedrock,
+        use_hyperspectral,
+    )?;
+    println!("wrote {}", files.common.constants.display());
+    println!("wrote {}", files.common.block.display());
+    println!("wrote {}", files.pft.display());
     Ok(())
 }
 
@@ -161,7 +173,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
 }
 
 const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>
-       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block>";
+       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral]";
 
 fn parse_land_cover(value: &str) -> Result<LandCoverScheme> {
     match value {

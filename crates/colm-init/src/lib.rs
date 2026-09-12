@@ -74,7 +74,10 @@ pub use single_point::{
     SinglePointColdStartRun, SinglePointConstantRestartFiles, SinglePointStaticConfig,
     SinglePointStaticRun, SinglePointSubgrid, SinglePointTimeRestartFiles,
 };
-pub use spatial_pft::{write_spatial_pft_constant_restart, SpatialPftStaticConfig};
+pub use spatial_pft::{
+    write_spatial_pft_constant_restart, write_spatial_pft_constant_restarts,
+    SpatialPftConstantRestartFiles, SpatialPftStaticConfig,
+};
 pub use spatial_static::{write_spatial_lct_constant_restart, SpatialLctStaticConfig};
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,

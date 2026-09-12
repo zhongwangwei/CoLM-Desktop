@@ -6,12 +6,17 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
-use colm_namelist::parse;
+use anyhow::{bail, ensure, Context, Result};
+use colm_namelist::{parse, Value};
 
 use crate::single_point::pft_canopy;
-use crate::spatial_static::{block_path, values_f64, values_i32};
-use crate::{write_pft_constant_restart, PftConstantRestartInput};
+use crate::spatial_static::{
+    block_path, values_f64, values_i32, write_spatial_lct_constant_restart, SpatialLctStaticConfig,
+};
+use crate::{
+    write_pft_constant_restart, ConstantRestartFiles, HydraulicModel, LandCoverScheme,
+    PftConstantRestartInput,
+};
 
 /// Arguments for one already-addressed spatial `landpft` block.
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +28,13 @@ pub struct SpatialPftStaticConfig<'a> {
     pub land_cover_year: i32,
     /// CoLM suffix without the leading underscore, e.g. `w180_s90`.
     pub block_label: &'a str,
+}
+
+/// The common and PFT-specific constant restart blocks for one spatial PFT case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpatialPftConstantRestartFiles {
+    pub common: ConstantRestartFiles,
+    pub pft: PathBuf,
 }
 
 impl<'a> SpatialPftStaticConfig<'a> {
@@ -95,6 +107,46 @@ pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) ->
             crop_fraction: None,
         },
     )
+}
+
+/// Writes both restart families required by a spatial PFT cold start.
+///
+/// PFT landpatches retain IGBP's water and glacier classes, so the common
+/// restart uses the IGBP static adapter rather than duplicating its soil,
+/// lake, and terrain mapping.  The soil model is read from the same case
+/// namelist that supplies PFT canopy overrides.
+pub fn write_spatial_pft_constant_restarts(
+    config: SpatialPftStaticConfig<'_>,
+    use_bedrock: bool,
+    use_hyperspectral: bool,
+) -> Result<SpatialPftConstantRestartFiles> {
+    let hydraulic_model = pft_hydraulic_model(config.namelist)?;
+    let mut common = SpatialLctStaticConfig::new(
+        config.landdata,
+        config.restart_dir,
+        config.case_name,
+        config.land_cover_year,
+        config.block_label,
+        LandCoverScheme::Igbp,
+        hydraulic_model,
+    );
+    common.use_bedrock = use_bedrock;
+    common.use_hyperspectral = use_hyperspectral;
+    let common = write_spatial_lct_constant_restart(common)?;
+    let pft = write_spatial_pft_constant_restart(config)?;
+    Ok(SpatialPftConstantRestartFiles { common, pft })
+}
+
+fn pft_hydraulic_model(namelist: &Path) -> Result<HydraulicModel> {
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    match document.get("DEF_USE_Campbell_SOIL_MODEL") {
+        Some(Value::Bool(true)) => Ok(HydraulicModel::Campbell),
+        Some(Value::Bool(false)) | None => Ok(HydraulicModel::VanGenuchten),
+        Some(_) => bail!("DEF_USE_Campbell_SOIL_MODEL must be a logical value"),
+    }
 }
 
 fn read_i32(

@@ -88,6 +88,55 @@ fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
+    let root = temp_dir("pft-common");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_i32(
+        &landdata, "landpft", "landpft", "settyp", 2005, "w180_s90", 1,
+    );
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n/\n",
+    )
+    .unwrap();
+
+    let files = crate::write_spatial_pft_constant_restarts(
+        crate::SpatialPftStaticConfig::new(
+            &namelist,
+            &landdata,
+            &root.join("restart"),
+            "test",
+            2005,
+            "w180_s90",
+        ),
+        false,
+        false,
+    )
+    .unwrap();
+
+    let common = netcdf::open(files.common.block).unwrap();
+    assert!(common.variable("alpha_vgm").is_none());
+    let pft = netcdf::open(files.pft).unwrap();
+    assert_eq!(values_i32(&pft, "pftclass").unwrap(), [1]);
+    assert_eq!(values_f64(&pft, "htop_p").unwrap(), [20.0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn write_landdata(landdata: &Path, year: i32, block: &str) {
     std::fs::create_dir_all(landdata).unwrap();
     let mut pixel = netcdf::create(landdata.join("pixel.nc")).unwrap();
