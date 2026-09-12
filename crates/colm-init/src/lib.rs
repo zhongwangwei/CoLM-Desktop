@@ -6,6 +6,7 @@
 pub mod albedo;
 pub mod hydrology;
 pub mod pft_restart;
+pub mod radiation;
 pub mod restart;
 pub mod single_point;
 pub mod static_state;
@@ -26,6 +27,7 @@ pub use pft_restart::{
     write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
     PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
 };
+pub use radiation::{cold_start_broadband_radiation, ColdStartRadiation, LeafOptics};
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
     ConstantRestartFiles, ConstantRestartInput, RestartDimensions, RestartPatchFields,
