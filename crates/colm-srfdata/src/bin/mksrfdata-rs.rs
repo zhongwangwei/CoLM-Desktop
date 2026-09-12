@@ -44,6 +44,7 @@ struct SpatialLctArgs {
     plant_tiles: Option<PathBuf>,
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
+    soil_hyper_albedo_dir: Option<PathBuf>,
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
@@ -290,6 +291,37 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &bedrock,
         )?;
     }
+    if let Some(directory) = &args.soil_hyper_albedo_dir {
+        let (waterbody, ice) = match args.land_cover {
+            SiteMode::Igbp => (17, 15),
+            SiteMode::Usgs => (16, 24),
+            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
+                bail!("--soil-hyper-albedo-dir supports only LCT IGBP or USGS land cover")
+            }
+        };
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        for wavelength in (400..=2500).step_by(10) {
+            let raw = read_mesh_raster_f64(
+                &directory.join(format!("colm_soil_albedo_{wavelength}nm.nc")),
+                "albedo",
+                &topology.mesh,
+                &topology.pixel,
+                COLM_500M,
+            )?;
+            let values = layout.aggregate_soil_hyper_albedo(&raw, waterbody, ice)?;
+            let stem = format!("soil_hyper_alb_{wavelength}nm_patches");
+            write_landpatch_scalar(
+                &args.landdata,
+                args.year,
+                &topology,
+                &patches,
+                &args.blocks,
+                "HyperAlbedo",
+                &stem,
+                &values,
+            )?;
+        }
+    }
     if let Some(forest_height) = forest_height {
         write_landpatch_scalar(
             &args.landdata,
@@ -397,6 +429,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut bedrock = None;
     let mut plant_tiles = None;
     let mut usgs_forest_height = None;
+    let mut soil_hyper_albedo_dir = None;
     let mut monthly_vegetation_years = Vec::new();
     let mut index = 5;
     while index < args.len() {
@@ -494,6 +527,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--soil-hyper-albedo-dir" => {
+                soil_hyper_albedo_dir = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-hyper-albedo-dir needs colm_input_ghsad")?,
+                ));
+                index += 2;
+            }
             other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
         }
     }
@@ -518,6 +558,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         plant_tiles,
         usgs_forest_height,
         monthly_vegetation_years,
+        soil_hyper_albedo_dir,
     })
 }
 
@@ -617,7 +658,7 @@ fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]..."
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -656,6 +697,8 @@ mod tests {
             "1999".into(),
             "--monthly-vegetation-year".into(),
             "2005".into(),
+            "--soil-hyper-albedo-dir".into(),
+            "colm_input_ghsad".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Unstructured);
@@ -676,6 +719,10 @@ mod tests {
         assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
         assert_eq!(parsed.usgs_forest_height, None);
+        assert_eq!(
+            parsed.soil_hyper_albedo_dir,
+            Some(PathBuf::from("colm_input_ghsad"))
+        );
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
         assert!(parse_spatial_lct(&[
