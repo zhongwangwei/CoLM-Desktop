@@ -21,6 +21,34 @@ pub struct RuntimeSoilProfile {
     pub valid: bool,
 }
 
+/// Carbon pools that `cnsteadystate.nc` supplies at one source grid cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeCnVegetationCarbon {
+    pub leaf_g_m2: f64,
+    pub leaf_storage_g_m2: f64,
+    pub fine_root_g_m2: f64,
+    pub fine_root_storage_g_m2: f64,
+    pub live_stem_g_m2: f64,
+    pub dead_stem_g_m2: f64,
+    pub live_coarse_root_g_m2: f64,
+    pub dead_coarse_root_g_m2: f64,
+}
+
+/// Carbon and nitrogen state selected from CoLM's steady-state BGC runtime file.
+///
+/// The decomposition vectors retain Fortran `(soil, pool)` storage: values for
+/// one pool's complete soil profile are contiguous.  Pool order is metabolic
+/// litter, cellulose litter, lignin litter, coarse woody debris, soil 1, soil 2,
+/// and soil 3.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeCnState {
+    pub decomposition_carbon_g_m3: Vec<f64>,
+    pub decomposition_nitrogen_g_m3: Vec<f64>,
+    pub ammonium_g_m3: Vec<f64>,
+    pub nitrate_g_m3: Vec<f64>,
+    pub vegetation_carbon: RuntimeCnVegetationCarbon,
+}
+
 /// Read `soilstate.nc` at a single surface coordinate and one-based month.
 pub fn read_single_point_soil_profile(
     path: impl AsRef<Path>,
@@ -72,6 +100,87 @@ pub fn read_single_point_water_table(
     Ok(valid_value(&file, "wtd", value).then_some(value))
 }
 
+/// Read one spatial sample from `cnsteadystate.nc` for the BGC cold-start path.
+///
+/// CoLM initializes seven carbon and seven nitrogen decomposition pools from this
+/// source, then derives total mineral nitrogen from the ammonium and nitrate
+/// profiles.  Missing values are rejected rather than turned into a plausible but
+/// scientifically false BGC restart.
+pub fn read_single_point_cn_state(
+    path: impl AsRef<Path>,
+    latitude_degrees: f64,
+    longitude_degrees: f64,
+) -> Result<RuntimeCnState> {
+    const CARBON: [&str; 7] = [
+        "litr1c_vr",
+        "litr2c_vr",
+        "litr3c_vr",
+        "cwdc_vr",
+        "soil1c_vr",
+        "soil2c_vr",
+        "soil3c_vr",
+    ];
+    const NITROGEN: [&str; 7] = [
+        "litr1n_vr",
+        "litr2n_vr",
+        "litr3n_vr",
+        "cwdn_vr",
+        "soil1n_vr",
+        "soil2n_vr",
+        "soil3n_vr",
+    ];
+
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open BGC initial state {}", path.display()))?;
+    let (latitude, longitude) = cell_indices_f32(&file, latitude_degrees, longitude_degrees)?;
+    let layers = file
+        .dimension("soil")
+        .context("BGC runtime file has no soil dimension")?
+        .len();
+    ensure!(
+        layers == 10,
+        "BGC runtime must contain CoLM's ten soil layers"
+    );
+    let profiles = |names: &[&str]| -> Result<Vec<f64>> {
+        let mut values = Vec::with_capacity(names.len() * layers);
+        for &name in names {
+            let profile = profile_3d_f32(&file, name, latitude, longitude, layers)?;
+            validate_variable_values(&file, name, &profile)?;
+            values.extend(profile);
+        }
+        Ok(values)
+    };
+    let scalar = |name| {
+        let value = scalar_2d_f32(&file, name, latitude, longitude)?;
+        ensure!(
+            valid_value(&file, name, value),
+            "BGC runtime {name} contains a missing value"
+        );
+        Ok(value)
+    };
+    let ammonium_g_m3 = profile_3d_f32(&file, "smin_nh4_vr", latitude, longitude, layers)?;
+    validate_variable_values(&file, "smin_nh4_vr", &ammonium_g_m3)?;
+    let nitrate_g_m3 = profile_3d_f32(&file, "smin_no3_vr", latitude, longitude, layers)?;
+    validate_variable_values(&file, "smin_no3_vr", &nitrate_g_m3)?;
+    Ok(RuntimeCnState {
+        decomposition_carbon_g_m3: profiles(&CARBON)?,
+        decomposition_nitrogen_g_m3: profiles(&NITROGEN)?,
+        ammonium_g_m3,
+        nitrate_g_m3,
+        vegetation_carbon: RuntimeCnVegetationCarbon {
+            leaf_g_m2: scalar("leafc")?,
+            leaf_storage_g_m2: scalar("leafc_storage")?,
+            fine_root_g_m2: scalar("frootc")?,
+            fine_root_storage_g_m2: scalar("frootc_storage")?,
+            live_stem_g_m2: scalar("livestemc")?,
+            dead_stem_g_m2: scalar("deadstemc")?,
+            live_coarse_root_g_m2: scalar("livecrootc")?,
+            dead_coarse_root_g_m2: scalar("deadcrootc")?,
+        },
+    })
+}
+
 /// Read an optional standalone monthly `snowdepth` source.
 pub fn read_single_point_snow_depth(
     path: impl AsRef<Path>,
@@ -100,6 +209,19 @@ fn cell_indices(file: &netcdf::File, latitude: f64, longitude: f64) -> Result<(u
     );
     let latitudes = values_1d(file, "lat")?;
     let longitudes = values_1d(file, "lon")?;
+    Ok((
+        nearest_index(&latitudes, latitude, false)?,
+        nearest_index(&longitudes, longitude, true)?,
+    ))
+}
+
+fn cell_indices_f32(file: &netcdf::File, latitude: f64, longitude: f64) -> Result<(usize, usize)> {
+    ensure!(
+        latitude.is_finite() && longitude.is_finite(),
+        "surface coordinate must be finite"
+    );
+    let latitudes = values_1d_f32(file, "lat")?;
+    let longitudes = values_1d_f32(file, "lon")?;
     Ok((
         nearest_index(&latitudes, latitude, false)?,
         nearest_index(&longitudes, longitude, true)?,
@@ -140,6 +262,21 @@ fn values_1d(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
         "runtime {name} must be one-dimensional"
     );
     Ok(variable.get_values::<f64, _>(..)?)
+}
+
+fn values_1d_f32(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("runtime file has no {name}"))?;
+    ensure!(
+        variable.dimensions().len() == 1,
+        "runtime {name} must be one-dimensional"
+    );
+    Ok(variable
+        .get_values::<f32, _>(..)?
+        .into_iter()
+        .map(f64::from)
+        .collect())
 }
 
 fn profile_4d(
@@ -194,6 +331,46 @@ fn scalar_3d(
         .into_iter()
         .next()
         .context("runtime scalar selection returned no value")
+}
+
+fn profile_3d_f32(
+    file: &netcdf::File,
+    name: &str,
+    latitude: usize,
+    longitude: usize,
+    layers: usize,
+) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("runtime file has no {name}"))?;
+    require_dimensions(&variable, name, &["lat", "lon", "soil"])?;
+    ensure!(
+        variable.dimensions()[2].len() == layers,
+        "runtime {name} layer count differs from soil"
+    );
+    Ok(variable
+        .get_values::<f32, _>((latitude..latitude + 1, longitude..longitude + 1, 0..layers))?
+        .into_iter()
+        .map(f64::from)
+        .collect())
+}
+
+fn scalar_2d_f32(
+    file: &netcdf::File,
+    name: &str,
+    latitude: usize,
+    longitude: usize,
+) -> Result<f64> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("runtime file has no {name}"))?;
+    require_dimensions(&variable, name, &["lat", "lon"])?;
+    variable
+        .get_values::<f32, _>((latitude..latitude + 1, longitude..longitude + 1))?
+        .into_iter()
+        .next()
+        .map(f64::from)
+        .context("BGC runtime scalar selection returned no value")
 }
 
 fn optional_scalar_3d(

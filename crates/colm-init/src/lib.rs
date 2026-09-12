@@ -39,8 +39,8 @@ pub use restart::{
     TopmodelFields,
 };
 pub use runtime::{
-    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_water_table,
-    RuntimeSoilProfile,
+    read_single_point_cn_state, read_single_point_snow_depth, read_single_point_soil_profile,
+    read_single_point_water_table, RuntimeCnState, RuntimeCnVegetationCarbon, RuntimeSoilProfile,
 };
 pub use single_point::{
     single_point_cold_start_run_from_namelist, single_point_static_run_from_namelist,
