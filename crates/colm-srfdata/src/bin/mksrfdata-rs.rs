@@ -78,6 +78,15 @@ struct SpatialPftArgs {
     dominant: bool,
     plant_tiles: PathBuf,
     monthly_vegetation_years: Vec<i32>,
+    lake_depth: Option<PathBuf>,
+    lake_soil_carbon: Option<PathBuf>,
+    soil_texture: Option<PathBuf>,
+    soil_dir: Option<PathBuf>,
+    soil_model: SoilModel,
+    soil_brightness: Option<PathBuf>,
+    topography: Option<PathBuf>,
+    bedrock: Option<PathBuf>,
+    soil_hyper_albedo_dir: Option<PathBuf>,
 }
 
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
@@ -121,7 +130,38 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             crop_excluded_class: None,
         },
     )?;
-    write_spatial_topology(&args.landdata, args.year, &topology, &patches, &args.blocks)?;
+    let forest_height = read_mesh_tiled_raster_f64(
+        &args.plant_tiles,
+        &format!("MOD{:04}", args.year),
+        "HTOP",
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let patch_height = layout.aggregate_igbp_forest_height(&forest_height, &area)?;
+    let common = SpatialLctArgs {
+        kind: args.kind,
+        mesh: args.mesh.clone(),
+        landtype: args.landtype.clone(),
+        landdata: args.landdata.clone(),
+        year: args.year,
+        blocks: args.blocks.clone(),
+        dominant: args.dominant,
+        land_cover: SiteMode::Igbp,
+        lake_depth: args.lake_depth.clone(),
+        lake_soil_carbon: args.lake_soil_carbon.clone(),
+        soil_texture: args.soil_texture.clone(),
+        soil_dir: args.soil_dir.clone(),
+        soil_model: args.soil_model,
+        soil_brightness: args.soil_brightness.clone(),
+        topography: args.topography.clone(),
+        bedrock: args.bedrock.clone(),
+        plant_tiles: Some(args.plant_tiles.clone()),
+        usgs_forest_height: None,
+        monthly_vegetation_years: Vec::new(),
+        soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
+    };
+    materialize_spatial_common_fields(&common, &topology, &patches, Some(&patch_height))?;
     write_spatial_pft_topology(
         &args.landdata,
         args.year,
@@ -138,25 +178,6 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "pctpft",
         "pct_pfts",
         &fractions,
-    )?;
-    let forest_height = read_mesh_tiled_raster_f64(
-        &args.plant_tiles,
-        &format!("MOD{:04}", args.year),
-        "HTOP",
-        &topology.mesh,
-        &topology.pixel,
-        COLM_500M,
-    )?;
-    let patch_height = layout.aggregate_igbp_forest_height(&forest_height, &area)?;
-    write_landpatch_scalar(
-        &args.landdata,
-        args.year,
-        &topology,
-        &patches,
-        &args.blocks,
-        "htop",
-        "htop_patches",
-        &patch_height,
     )?;
     let pft_height = aggregate_pft_height(
         &layout,
@@ -294,39 +315,60 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         lct_grid,
         args.dominant,
     )?;
-    let forest_height = match (&args.plant_tiles, &args.usgs_forest_height) {
-        (Some(path), None) => {
-            if args.land_cover != SiteMode::Igbp {
-                bail!("--plant-tiles currently supports IGBP only; USGS uses Forest_Height.nc")
+    materialize_spatial_common_fields(&args, &topology, &patches, None)?;
+    println!(
+        "wrote {} spatial land elements and {} LCT patches to {}",
+        topology.land_elements.element_ids.len(),
+        patches.set_type.len(),
+        args.landdata.display()
+    );
+    Ok(())
+}
+
+fn materialize_spatial_common_fields(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    forest_height_override: Option<&[f64]>,
+) -> Result<()> {
+    let forest_height = match forest_height_override {
+        Some(values) => Some(values.to_vec()),
+        None => match (&args.plant_tiles, &args.usgs_forest_height) {
+            (Some(path), None) => {
+                if args.land_cover != SiteMode::Igbp {
+                    bail!("--plant-tiles currently supports IGBP only; USGS uses Forest_Height.nc")
+                }
+                let layout =
+                    patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+                let raw = read_mesh_tiled_raster_f64(
+                    path,
+                    &format!("MOD{:04}", args.year),
+                    "HTOP",
+                    &topology.mesh,
+                    &topology.pixel,
+                    COLM_500M,
+                )?;
+                let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+                Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
             }
-            let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-            let raw = read_mesh_tiled_raster_f64(
-                path,
-                &format!("MOD{:04}", args.year),
-                "HTOP",
-                &topology.mesh,
-                &topology.pixel,
-                COLM_500M,
-            )?;
-            let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
-            Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
-        }
-        (None, Some(path)) => {
-            if args.land_cover != SiteMode::Usgs {
-                bail!("--usgs-forest-height supports USGS only")
+            (None, Some(path)) => {
+                if args.land_cover != SiteMode::Usgs {
+                    bail!("--usgs-forest-height supports USGS only")
+                }
+                let layout =
+                    patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+                let raw = read_mesh_raster_f64(
+                    path,
+                    "forest_height",
+                    &topology.mesh,
+                    &topology.pixel,
+                    COLM_1KM,
+                )?;
+                Some(layout.aggregate_usgs_forest_height(&raw, 1, 16, 24)?)
             }
-            let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-            let raw = read_mesh_raster_f64(
-                path,
-                "forest_height",
-                &topology.mesh,
-                &topology.pixel,
-                COLM_1KM,
-            )?;
-            Some(layout.aggregate_usgs_forest_height(&raw, 1, 16, 24)?)
-        }
-        (None, None) => None,
-        (Some(_), Some(_)) => bail!("choose one forest-height source"),
+            (None, None) => None,
+            (Some(_), Some(_)) => bail!("choose one forest-height source"),
+        },
     };
     let lake_depth = if let Some(path) = &args.lake_depth {
         let waterbody = match args.land_cover {
@@ -432,7 +474,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     } else {
         None
     };
-    write_spatial_topology(&args.landdata, args.year, &topology, &patches, &args.blocks)?;
+    write_spatial_topology(&args.landdata, args.year, topology, patches, &args.blocks)?;
     if let Some(directory) = &args.soil_dir {
         let classes = match args.land_cover {
             SiteMode::Igbp => SoilPatchClasses {
@@ -449,8 +491,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             directory,
             &args.landdata,
             args.year,
-            &topology,
-            &patches,
+            topology,
+            patches,
             &args.blocks,
             classes,
             args.soil_model,
@@ -460,8 +502,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         write_landpatch_scalar(
             &args.landdata,
             args.year,
-            &topology,
-            &patches,
+            topology,
+            patches,
             &args.blocks,
             "lakedepth",
             "lakedepth_patches",
@@ -472,8 +514,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         write_landpatch_layered_vector(
             &args.landdata,
             args.year,
-            &topology,
-            &patches,
+            topology,
+            patches,
             &args.blocks,
             "soil",
             "lake_soilc_patches",
@@ -487,8 +529,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         write_landpatch_scalar(
             &args.landdata,
             args.year,
-            &topology,
-            &patches,
+            topology,
+            patches,
             &args.blocks,
             "soil",
             "soiltext_patches",
@@ -505,8 +547,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             write_landpatch_scalar(
                 &args.landdata,
                 args.year,
-                &topology,
-                &patches,
+                topology,
+                patches,
                 &args.blocks,
                 "soil",
                 variable,
@@ -523,8 +565,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             write_landpatch_scalar(
                 &args.landdata,
                 args.year,
-                &topology,
-                &patches,
+                topology,
+                patches,
                 &args.blocks,
                 "topography",
                 variable,
@@ -536,8 +578,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         write_landpatch_scalar(
             &args.landdata,
             args.year,
-            &topology,
-            &patches,
+            topology,
+            patches,
             &args.blocks,
             "dbedrock",
             "dbedrock_patches",
@@ -566,8 +608,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             write_landpatch_scalar(
                 &args.landdata,
                 args.year,
-                &topology,
-                &patches,
+                topology,
+                patches,
                 &args.blocks,
                 "HyperAlbedo",
                 &stem,
@@ -579,8 +621,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         write_landpatch_scalar(
             &args.landdata,
             args.year,
-            &topology,
-            &patches,
+            topology,
+            patches,
             &args.blocks,
             "htop",
             "htop_patches",
@@ -628,8 +670,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 write_landpatch_vector(
                     &args.landdata,
                     year,
-                    &topology,
-                    &patches,
+                    topology,
+                    patches,
                     &args.blocks,
                     "LAI",
                     &format!("LAI_patches{month:02}"),
@@ -639,8 +681,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 write_landpatch_vector(
                     &args.landdata,
                     year,
-                    &topology,
-                    &patches,
+                    topology,
+                    patches,
                     &args.blocks,
                     "LAI",
                     &format!("SAI_patches{month:02}"),
@@ -650,12 +692,6 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             }
         }
     }
-    println!(
-        "wrote {} spatial land elements and {} LCT patches to {}",
-        topology.land_elements.element_ids.len(),
-        patches.set_type.len(),
-        args.landdata.display()
-    );
     Ok(())
 }
 
@@ -1151,6 +1187,15 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut dominant = false;
     let mut plant_tiles = None;
     let mut monthly_vegetation_years = Vec::new();
+    let mut lake_depth = None;
+    let mut lake_soil_carbon = None;
+    let mut soil_texture = None;
+    let mut soil_dir = None;
+    let mut soil_model = SoilModel::Vgm;
+    let mut soil_brightness = None;
+    let mut topography = None;
+    let mut bedrock = None;
+    let mut soil_hyper_albedo_dir = None;
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -1179,6 +1224,74 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 ));
                 index += 2;
             }
+            "--lake-depth" => {
+                lake_depth = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--lake-depth needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
+            "--lake-soil-carbon" => {
+                lake_soil_carbon = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--lake-soil-carbon needs lake_soilc.nc")?,
+                ));
+                index += 2;
+            }
+            "--soil-texture" => {
+                soil_texture = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-texture needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
+            "--soil-dir" => {
+                soil_dir = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-dir needs the rawdata soil directory")?,
+                ));
+                index += 2;
+            }
+            "--soil-model" => {
+                soil_model = match args
+                    .get(index + 1)
+                    .context("--soil-model needs vgm or campbell")?
+                    .as_str()
+                {
+                    "vgm" => SoilModel::Vgm,
+                    "campbell" => SoilModel::Campbell,
+                    other => bail!("--soil-model must be vgm or campbell, got {other:?}"),
+                };
+                index += 2;
+            }
+            "--soil-brightness" => {
+                soil_brightness = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-brightness needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
+            "--topography" => {
+                topography = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--topography needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
+            "--bedrock" => {
+                bedrock = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--bedrock needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
+            "--soil-hyper-albedo-dir" => {
+                soil_hyper_albedo_dir = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-hyper-albedo-dir needs colm_input_ghsad")?,
+                ));
+                index += 2;
+            }
             "--monthly-vegetation-year" => {
                 let year = args
                     .get(index + 1)
@@ -1204,6 +1317,15 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         dominant,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         monthly_vegetation_years,
+        lake_depth,
+        lake_soil_carbon,
+        soil_texture,
+        soil_dir,
+        soil_model,
+        soil_brightness,
+        topography,
+        bedrock,
+        soil_hyper_albedo_dir,
     })
 }
 
@@ -1317,7 +1439,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant] [--monthly-vegetation-year year]..."
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -1431,6 +1553,24 @@ mod tests {
             "1999".into(),
             "--monthly-vegetation-year".into(),
             "2005".into(),
+            "--lake-depth".into(),
+            "lake_depth.nc".into(),
+            "--lake-soil-carbon".into(),
+            "lake_soilc.nc".into(),
+            "--soil-texture".into(),
+            "soiltexture.nc".into(),
+            "--soil-dir".into(),
+            "rawdata/soil".into(),
+            "--soil-model".into(),
+            "campbell".into(),
+            "--soil-brightness".into(),
+            "soil_brightness.nc".into(),
+            "--topography".into(),
+            "topography.nc".into(),
+            "--bedrock".into(),
+            "bedrock.nc".into(),
+            "--soil-hyper-albedo-dir".into(),
+            "colm_input_ghsad".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::GridBased);
@@ -1438,6 +1578,24 @@ mod tests {
         assert_eq!(parsed.blocks.lon_w.len(), 2);
         assert_eq!(parsed.blocks.lat_s.len(), 3);
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
+        assert_eq!(parsed.lake_depth, Some(PathBuf::from("lake_depth.nc")));
+        assert_eq!(
+            parsed.lake_soil_carbon,
+            Some(PathBuf::from("lake_soilc.nc"))
+        );
+        assert_eq!(parsed.soil_texture, Some(PathBuf::from("soiltexture.nc")));
+        assert_eq!(parsed.soil_dir, Some(PathBuf::from("rawdata/soil")));
+        assert_eq!(parsed.soil_model, SoilModel::Campbell);
+        assert_eq!(
+            parsed.soil_brightness,
+            Some(PathBuf::from("soil_brightness.nc"))
+        );
+        assert_eq!(parsed.topography, Some(PathBuf::from("topography.nc")));
+        assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
+        assert_eq!(
+            parsed.soil_hyper_albedo_dir,
+            Some(PathBuf::from("colm_input_ghsad"))
+        );
         assert!(parse_spatial_pft(&[
             "latlon".into(),
             "mesh.nc".into(),
