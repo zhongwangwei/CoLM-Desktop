@@ -5,6 +5,7 @@
 //! share one physical implementation instead of becoming two diverging translations.
 
 pub mod albedo;
+pub mod atmosphere;
 pub mod hydrology;
 pub mod pc_radiation;
 pub mod radiation;
@@ -16,6 +17,11 @@ pub mod vegetation;
 pub const MISSING: f64 = -1.0e36;
 
 pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
+pub use atmosphere::{
+    hydrometeor_temperature, new_snow_bulk_density, orbital_cosine_zenith, partition_precipitation,
+    saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
+    PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
+};
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,

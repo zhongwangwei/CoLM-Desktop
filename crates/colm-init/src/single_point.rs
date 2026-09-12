@@ -18,16 +18,16 @@ use crate::{
     derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover, derive_snow_cover,
     derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, leaf_optics_from_land_cover,
-    normalize_soil_texture, read_single_point_monthly_vegetation, read_single_point_pft_data,
-    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_surface,
-    read_single_point_water_table, write_constant_restart, write_pft_constant_restart,
-    write_pft_time_restart, write_time_restart, ColdSoilState, ColdStartRadiation,
-    ConstantRestartFiles, ConstantRestartInput, HydraulicModel, LandCoverScheme, LeafOptics,
-    OzoneFields, PcPftInput, PftConstantRestartInput, PftOzoneFields, PftPlantHydraulicFields,
-    PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate, RestartDimensions,
-    RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo,
-    SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
-    TimeRestartDimensions, TimeRestartFile, TimeRestartInput, MISSING,
+    normalize_soil_texture, orbital_cosine_zenith, read_single_point_monthly_vegetation,
+    read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
+    read_single_point_surface, read_single_point_water_table, write_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, write_time_restart, ColdSoilState,
+    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
+    LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftConstantRestartInput, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
+    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
+    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
+    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -1517,26 +1517,6 @@ fn calendar_day(date: RestartDate, greenwich: bool, longitude_degrees: f64) -> R
     }
     let _ = year; // CoLM's orbital routine uses only the shifted calendar day.
     Ok(f64::from(day) + f64::from(seconds) / 86_400.0)
-}
-
-fn orbital_cosine_zenith(calendar_day: f64, longitude_radians: f64, latitude_radians: f64) -> f64 {
-    let pi = std::f64::consts::PI;
-    let mean_longitude = -3.262_536_6e-2 + (calendar_day - 80.5) * 2.0 * pi / 365.0;
-    let longitude_from_perihelion = mean_longitude - 4.922_510_15;
-    let eccentricity = 1.672_393_084e-2;
-    let longitude = mean_longitude
-        + eccentricity
-            * (2.0 * longitude_from_perihelion.sin()
-                + eccentricity
-                    * (1.25 * (2.0 * longitude_from_perihelion).sin()
-                        + eccentricity
-                            * ((13.0 / 12.0) * (3.0 * longitude_from_perihelion).sin()
-                                - 0.25 * longitude_from_perihelion.sin())));
-    let declination = (0.409_214_646_f64.sin() * longitude.sin()).asin();
-    latitude_radians.sin() * declination.sin()
-        - latitude_radians.cos()
-            * declination.cos()
-            * (calendar_day * 2.0 * pi + longitude_radians).cos()
 }
 
 fn soil_grid(layers: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {

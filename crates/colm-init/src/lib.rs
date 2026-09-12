@@ -36,10 +36,10 @@ pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
     derive_igbp_canopy, derive_usgs_canopy, equilibrium_water_state, land_cover_soil_reflectance,
-    leaf_optics_from_land_cover, soil_hydraulic_conductivity, soil_psi_from_vliq,
-    soil_vliq_from_psi, CanopyState, ColdStartRadiation, EquilibriumWaterState, LandCoverScheme,
-    LeafOptics, PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput, SoilHydraulicModel,
-    SoilReflectance, MIN_SOIL_PSI, MISSING,
+    leaf_optics_from_land_cover, orbital_cosine_zenith, soil_hydraulic_conductivity,
+    soil_psi_from_vliq, soil_vliq_from_psi, CanopyState, ColdStartRadiation, EquilibriumWaterState,
+    LandCoverScheme, LeafOptics, PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput,
+    SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
 };
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
