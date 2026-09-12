@@ -342,6 +342,70 @@ pub fn read_mesh_tiled_raster_time_f64(
     )
 }
 
+/// Read a class-major PFT field from CoLM 5°×5° tiles in mesh-pixel order.
+///
+/// Each class is streamed separately from a tile, avoiding a full
+/// `tile_lon * tile_lat * pft` allocation.  The output is compatible with
+/// `PftFractionInput::raw_percent`: `pft * mesh_pixels + mesh_pixel`.
+pub fn read_mesh_tiled_raster_pft_f64(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    pft_count: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    ensure!(pft_count > 0, "PFT tile needs at least one PFT class");
+    ensure!(
+        raw_grid.nlon % 72 == 0 && raw_grid.nlat % 36 == 0,
+        "5 degree tiling requires a global grid divisible by 72x36"
+    );
+    ensure!(!suffix.is_empty(), "5 degree tile suffix must not be empty");
+    let tile_nlon = raw_grid.nlon / 72;
+    let tile_nlat = raw_grid.nlat / 36;
+    let longitude = raw_longitudes(pixel, raw_grid);
+    let latitude = raw_latitudes(pixel, raw_grid);
+    let x_tiles = tile_axis(&longitude, tile_nlon);
+    let y_tiles = tile_axis(&latitude, tile_nlat);
+    let pixel_count = pixel.lon_w.len() * pixel.lat_s.len();
+    let mut pixels = vec![vec![None; pixel_count]; pft_count];
+    for (&tile_y, rows) in &y_tiles {
+        for (&tile_x, columns) in &x_tiles {
+            let path = directory.join(tile_filename(tile_x, tile_y, suffix));
+            let file = netcdf::open(&path)
+                .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?;
+            let source = file
+                .variable(variable)
+                .with_context(|| format!("{variable} is absent from {}", path.display()))?;
+            let axes = pft_tile_axes(&source, pft_count, tile_nlon, tile_nlat, &path)?;
+            for (pft, class_pixels) in pixels.iter_mut().enumerate() {
+                let values = read_pft_tile(&source, axes, pft, tile_nlon, tile_nlat)?;
+                for &(local_y, source_y) in rows {
+                    for &(local_x, source_x) in columns {
+                        let offset =
+                            pft_tile_offset(axes, source_x, source_y, tile_nlon, tile_nlat);
+                        class_pixels[local_y * pixel.lon_w.len() + local_x] = Some(
+                            *values
+                                .get(offset)
+                                .context("5 degree PFT tile pixel is outside its variable")?,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut output = Vec::new();
+    for pft in pixels {
+        let pixels = pft
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .context("5 degree PFT tiles did not cover the spatial pixel window")?;
+        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+    }
+    Ok(output)
+}
+
 /// Relative spherical areas in flattened mesh-pixel order.
 ///
 /// CoLM uses physical grid-cell areas for area-weighted aggregation.  The
@@ -652,6 +716,121 @@ fn tile_values<T: NcTypeDescriptor + Copy>(
 enum TileAxes {
     LatLon,
     LonLat,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PftTileAxes {
+    pft: usize,
+    latitude: usize,
+    longitude: usize,
+}
+
+fn pft_tile_axes(
+    source: &netcdf::Variable<'_>,
+    pft_count: usize,
+    tile_nlon: usize,
+    tile_nlat: usize,
+    path: &Path,
+) -> Result<PftTileAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "{} in {} must have longitude, latitude, and PFT dimensions",
+        source.name(),
+        path.display()
+    );
+    let axis = |labels: &[&str]| {
+        dimensions
+            .iter()
+            .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
+    };
+    let named = (
+        axis(&["pft"]),
+        axis(&["lat", "latitude"]),
+        axis(&["lon", "longitude"]),
+    );
+    let (pft, latitude, longitude) = match named {
+        (Some(pft), Some(latitude), Some(longitude)) => (pft, latitude, longitude),
+        (None, None, None)
+            if dimensions[0].len() == tile_nlon
+                && dimensions[1].len() == tile_nlat
+                && dimensions[2].len() == pft_count =>
+        {
+            (2, 1, 0)
+        }
+        _ => bail!(
+            "PFT tile {} must use named pft/lat/lon dimensions or native lon/lat/pft order",
+            path.display()
+        ),
+    };
+    ensure!(
+        pft != latitude && pft != longitude && latitude != longitude,
+        "PFT tile {} dimension names are ambiguous",
+        path.display()
+    );
+    ensure!(
+        dimensions[pft].len() == pft_count
+            && dimensions[latitude].len() == tile_nlat
+            && dimensions[longitude].len() == tile_nlon,
+        "PFT tile {} dimensions do not match {pft_count} PFTs and a {tile_nlat}x{tile_nlon} tile",
+        path.display()
+    );
+    Ok(PftTileAxes {
+        pft,
+        latitude,
+        longitude,
+    })
+}
+
+fn read_pft_tile(
+    source: &netcdf::Variable<'_>,
+    axes: PftTileAxes,
+    pft: usize,
+    tile_nlon: usize,
+    tile_nlat: usize,
+) -> Result<Vec<f64>> {
+    let mut extents = vec![Extent::Index(0); 3];
+    extents[axes.pft] = Extent::Index(pft);
+    extents[axes.latitude] = Extent::SliceCount {
+        start: 0,
+        count: tile_nlat,
+        stride: 1,
+    };
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: tile_nlon,
+        stride: 1,
+    };
+    let values = source.get_values::<f64, _>(extents)?;
+    ensure!(
+        values.len() == tile_nlon * tile_nlat,
+        "PFT tile class has {} values; expected {}x{}",
+        values.len(),
+        tile_nlat,
+        tile_nlon
+    );
+    Ok(values)
+}
+
+fn pft_tile_offset(
+    axes: PftTileAxes,
+    longitude: usize,
+    latitude: usize,
+    tile_nlon: usize,
+    tile_nlat: usize,
+) -> usize {
+    let mut dimensions = [1_usize; 3];
+    dimensions[axes.latitude] = tile_nlat;
+    dimensions[axes.longitude] = tile_nlon;
+    let mut coordinates = [0_usize; 3];
+    coordinates[axes.longitude] = longitude;
+    coordinates[axes.latitude] = latitude;
+    dimensions
+        .into_iter()
+        .zip(coordinates)
+        .fold(0, |offset, (dimension, coordinate)| {
+            offset * dimension + coordinate
+        })
 }
 
 fn tile_axis(indices: &[usize], tile_len: usize) -> BTreeMap<usize, Vec<(usize, usize)>> {
