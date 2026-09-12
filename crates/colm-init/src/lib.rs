@@ -14,6 +14,9 @@ pub mod linear {
 pub mod pc_radiation {
     pub use colm_core::pc_radiation::*;
 }
+pub mod phase_change {
+    pub use colm_core::phase_change::*;
+}
 pub mod pft_restart;
 pub mod radiation {
     pub use colm_core::radiation::*;
@@ -46,7 +49,8 @@ pub use colm_core::{
     leaf_optics_from_land_cover, orbital_cosine_zenith, soil_hydraulic_conductivity,
     soil_psi_from_vliq, soil_vliq_from_psi, solve_tridiagonal, CanopyState, ColdStartRadiation,
     EquilibriumWaterState, LandCoverScheme, LeafOptics, PcCanopyRadiation, PcPftInput,
-    PcPftRadiation, PftCanopyInput, SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
+    PcPftRadiation, PftCanopyInput, PhaseChangeInput, PhaseChangeState, SoilHydraulicModel,
+    SoilReflectance, MIN_SOIL_PSI, MISSING,
 };
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,

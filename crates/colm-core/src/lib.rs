@@ -11,6 +11,7 @@ pub mod interception;
 pub mod linear;
 pub mod net_solar;
 pub mod pc_radiation;
+pub mod phase_change;
 pub mod radiation;
 pub mod snow;
 pub mod soil_water;
@@ -44,6 +45,7 @@ pub use net_solar::{
 pub use pc_radiation::{
     cold_start_pc_broadband_radiation_with_snow, PcCanopyRadiation, PcPftInput, PcPftRadiation,
 };
+pub use phase_change::{phase_change, PhaseChangeInput, PhaseChangeState};
 pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,
