@@ -51,7 +51,8 @@ pub use urban::{
     UrbanLucyState, UrbanState,
 };
 pub use urban_restart::{
-    write_urban_constant_restart, write_urban_constant_restart_block, UrbanConstantRestartInput,
-    UrbanThermalFields,
+    write_urban_constant_restart, write_urban_constant_restart_block, write_urban_time_restart,
+    write_urban_time_restart_block, UrbanConstantRestartInput, UrbanNamedField, UrbanThermalFields,
+    UrbanTimeRestartDimensions, UrbanTimeRestartInput,
 };
 pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};

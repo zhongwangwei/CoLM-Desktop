@@ -200,7 +200,13 @@ pub fn write_urban_constant_restart_block(
         ("ALB_IMPROAD", input.thermal.impervious_albedo),
         ("ALB_PERROAD", input.thermal.pervious_albedo),
     ] {
-        put_urban_last_3d(&mut file, name, urban, values)?;
+        put_urban_last_3d(
+            &mut file,
+            name,
+            [("numsolar", NUM_SOLAR), ("numrad", NUM_RAD)],
+            urban,
+            values,
+        )?;
     }
     Ok(())
 }
@@ -370,18 +376,19 @@ fn put_axis_major(
 fn put_urban_last_3d(
     file: &mut netcdf::FileMut,
     name: &str,
+    [(first_name, first), (second_name, second)]: [(&str, usize); 2],
     urban: usize,
     values: &[f64],
 ) -> Result<()> {
     let mut on_disk = Vec::with_capacity(values.len());
     for patch in 0..urban {
-        for rad in 0..NUM_RAD {
-            for solar in 0..NUM_SOLAR {
-                on_disk.push(values[(solar * NUM_RAD + rad) * urban + patch]);
+        for second_index in 0..second {
+            for first_index in 0..first {
+                on_disk.push(values[(first_index * second + second_index) * urban + patch]);
             }
         }
     }
-    file.add_variable::<f64>(name, &["urban", "numrad", "numsolar"])?
+    file.add_variable::<f64>(name, &["urban", second_name, first_name])?
         .put_values(&on_disk, (.., .., ..))?;
     Ok(())
 }
@@ -389,3 +396,292 @@ fn put_urban_last_3d(
 #[cfg(test)]
 #[path = "urban_restart_tests.rs"]
 mod urban_restart_tests;
+
+/// Dimensions written by `WRITE_UrbanTimeVariables` for one urban vector block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UrbanTimeRestartDimensions {
+    pub urban_count: usize,
+    pub snow_layers: usize,
+    pub soil_layers: usize,
+    pub roof_layers: usize,
+    pub wall_layers: usize,
+}
+
+/// A named Fortran-layout input array for the urban time-restart schema.
+#[derive(Debug, Clone, Copy)]
+pub struct UrbanNamedField<'a> {
+    pub name: &'a str,
+    pub values: &'a [f64],
+}
+
+/// All urban time state. Every required upstream field must occur exactly once
+/// in its corresponding group; unknown, missing, and duplicate names are rejected.
+#[derive(Debug, Clone, Copy)]
+pub struct UrbanTimeRestartInput<'a> {
+    pub dimensions: UrbanTimeRestartDimensions,
+    /// Required one-value-per-urban fields.
+    pub scalar_fields: &'a [UrbanNamedField<'a>],
+    /// Required `band * rtyp * urban` fields.
+    pub radiative_fields: &'a [UrbanNamedField<'a>],
+    /// Required layer-major fields. Their layer family is selected by field name.
+    pub layer_fields: &'a [UrbanNamedField<'a>],
+}
+
+/// Writes the timestamped urban vector block in CoLM's restart tree.
+pub fn write_urban_time_restart(
+    restart_dir: impl AsRef<Path>,
+    case_name: &str,
+    land_cover_year: i32,
+    date: crate::RestartDate,
+    block_label: &str,
+    input: UrbanTimeRestartInput<'_>,
+) -> Result<PathBuf> {
+    validate_name(case_name, "case name")?;
+    validate_name(block_label, "block label")?;
+    ensure!(
+        (0..=9999).contains(&land_cover_year)
+            && (0..=9999).contains(&date.year)
+            && (1..=366).contains(&date.julian_day)
+            && date.seconds < 86_400,
+        "restart date is not a valid CoLM year, Julian day, and seconds-of-day"
+    );
+    let date = format!(
+        "{:04}-{:03}-{:05}",
+        date.year, date.julian_day, date.seconds
+    );
+    let path = restart_dir.as_ref().join(&date).join(format!(
+        "{case_name}_restart_urban_{date}_lc{land_cover_year:04}_{block_label}.nc"
+    ));
+    write_urban_time_restart_block(&path, input)?;
+    Ok(path)
+}
+
+/// Writes one already-addressed urban time-restart vector block.
+pub fn write_urban_time_restart_block(
+    path: impl AsRef<Path>,
+    input: UrbanTimeRestartInput<'_>,
+) -> Result<()> {
+    validate_time_input(input)?;
+    let dimensions = input.dimensions;
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    let mut file = netcdf::create(path)
+        .with_context(|| format!("cannot create urban time restart {}", path.display()))?;
+    for (name, length) in [
+        ("urban", dimensions.urban_count),
+        ("snow", dimensions.snow_layers),
+        ("soil", dimensions.soil_layers),
+        ("roof", dimensions.roof_layers),
+        ("wall", dimensions.wall_layers),
+        ("soilsnow", dimensions.soil_layers + dimensions.snow_layers),
+        ("roofsnow", dimensions.roof_layers + dimensions.snow_layers),
+        ("wallsnow", dimensions.wall_layers + dimensions.snow_layers),
+        ("band", NUM_SOLAR),
+        ("rtyp", NUM_RAD),
+    ] {
+        file.add_dimension(name, length)?;
+    }
+    for name in URBAN_TIME_SCALARS {
+        put_urban_values(&mut file, name, named(input.scalar_fields, name)?.values)?;
+    }
+    for name in URBAN_TIME_RADIATIVE {
+        put_urban_last_3d(
+            &mut file,
+            name,
+            [("band", NUM_SOLAR), ("rtyp", NUM_RAD)],
+            dimensions.urban_count,
+            named(input.radiative_fields, name)?.values,
+        )?;
+    }
+    for (name, axis_name, axis) in urban_layer_schema(dimensions) {
+        put_axis_major(
+            &mut file,
+            name,
+            (axis_name, axis),
+            dimensions.urban_count,
+            named(input.layer_fields, name)?.values,
+        )?;
+    }
+    Ok(())
+}
+
+const URBAN_TIME_RADIATIVE: [&str; 6] = ["sroof", "swsun", "swsha", "sgimp", "sgper", "slake"];
+
+const URBAN_TIME_SCALARS: [&str; 40] = [
+    "fwsun",
+    "dfwsun",
+    "lwsun",
+    "lwsha",
+    "lgimp",
+    "lgper",
+    "lveg",
+    "troof_inner",
+    "twsun_inner",
+    "twsha_inner",
+    "sag_roof",
+    "sag_gimp",
+    "sag_gper",
+    "sag_lake",
+    "scv_roof",
+    "scv_gimp",
+    "scv_gper",
+    "scv_lake",
+    "fsno_roof",
+    "fsno_gimp",
+    "fsno_gper",
+    "fsno_lake",
+    "snowdp_roof",
+    "snowdp_gimp",
+    "snowdp_gper",
+    "snowdp_lake",
+    "t_room",
+    "t_roof",
+    "t_wall",
+    "tafu",
+    "Fhac",
+    "Fwst",
+    "Fach",
+    "Fahe",
+    "Fhah",
+    "vehc",
+    "meta",
+    "tree_lai",
+    "tree_sai",
+    "urb_green",
+];
+
+fn urban_layer_schema(
+    dimensions: UrbanTimeRestartDimensions,
+) -> Vec<(&'static str, &'static str, usize)> {
+    let snow = dimensions.snow_layers;
+    let soil_snow = dimensions.soil_layers + snow;
+    let roof_snow = dimensions.roof_layers + snow;
+    let wall_snow = dimensions.wall_layers + snow;
+    let mut fields = Vec::with_capacity(30);
+    for name in [
+        "z_sno_roof",
+        "z_sno_gimp",
+        "z_sno_gper",
+        "z_sno_lake",
+        "dz_sno_roof",
+        "dz_sno_gimp",
+        "dz_sno_gper",
+        "dz_sno_lake",
+    ] {
+        fields.push((name, "snow", snow));
+    }
+    fields.extend([
+        ("t_roofsno", "roofsnow", roof_snow),
+        ("t_wallsun", "wallsnow", wall_snow),
+        ("t_wallsha", "wallsnow", wall_snow),
+        ("t_gimpsno", "soilsnow", soil_snow),
+        ("t_gpersno", "soilsnow", soil_snow),
+        ("t_lakesno", "soilsnow", soil_snow),
+        ("wliq_roofsno", "roofsnow", roof_snow),
+        ("wliq_gimpsno", "soilsnow", soil_snow),
+        ("wliq_gpersno", "soilsnow", soil_snow),
+        ("wliq_lakesno", "soilsnow", soil_snow),
+        ("wice_roofsno", "roofsnow", roof_snow),
+        ("wice_gimpsno", "soilsnow", soil_snow),
+        ("wice_gpersno", "soilsnow", soil_snow),
+        ("wice_lakesno", "soilsnow", soil_snow),
+    ]);
+    fields
+}
+
+fn validate_time_input(input: UrbanTimeRestartInput<'_>) -> Result<()> {
+    let dimensions = input.dimensions;
+    for (name, size) in [
+        ("urban", dimensions.urban_count),
+        ("snow", dimensions.snow_layers),
+        ("soil", dimensions.soil_layers),
+        ("roof", dimensions.roof_layers),
+        ("wall", dimensions.wall_layers),
+    ] {
+        ensure!(
+            size > 0,
+            "urban time restart dimension {name} must be positive"
+        );
+    }
+    validate_named_group(
+        "urban scalar",
+        input.scalar_fields,
+        &URBAN_TIME_SCALARS,
+        dimensions.urban_count,
+    )?;
+    validate_named_group(
+        "urban radiative",
+        input.radiative_fields,
+        &URBAN_TIME_RADIATIVE,
+        NUM_SOLAR * NUM_RAD * dimensions.urban_count,
+    )?;
+    let schema = urban_layer_schema(dimensions);
+    validate_named_group_shapes(
+        "urban layer",
+        input.layer_fields,
+        &schema,
+        dimensions.urban_count,
+    )?;
+    Ok(())
+}
+
+fn validate_named_group(
+    group: &str,
+    fields: &[UrbanNamedField<'_>],
+    expected: &[&str],
+    length: usize,
+) -> Result<()> {
+    ensure!(
+        fields.len() == expected.len(),
+        "{group} fields have {} entries; expected {}",
+        fields.len(),
+        expected.len()
+    );
+    for name in expected {
+        let field = named(fields, name)?;
+        ensure!(
+            field.values.len() == length,
+            "{group} field {name} has {} entries; expected {length}",
+            field.values.len()
+        );
+    }
+    Ok(())
+}
+
+fn validate_named_group_shapes(
+    group: &str,
+    fields: &[UrbanNamedField<'_>],
+    expected: &[(&str, &str, usize)],
+    urban: usize,
+) -> Result<()> {
+    ensure!(
+        fields.len() == expected.len(),
+        "{group} fields have {} entries; expected {}",
+        fields.len(),
+        expected.len()
+    );
+    for (name, _, axis) in expected {
+        let field = named(fields, name)?;
+        ensure!(
+            field.values.len() == axis * urban,
+            "{group} field {name} has {} entries; expected {axis} x {urban}",
+            field.values.len()
+        );
+    }
+    Ok(())
+}
+
+fn named<'a>(fields: &'a [UrbanNamedField<'a>], name: &str) -> Result<&'a UrbanNamedField<'a>> {
+    let mut found = fields.iter().filter(|field| field.name == name);
+    let value = found
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing urban restart field {name}"))?;
+    ensure!(
+        found.next().is_none(),
+        "urban restart field {name} occurs more than once"
+    );
+    Ok(value)
+}
