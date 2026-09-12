@@ -544,6 +544,46 @@ fn vsf_bottom_transitive_flux_matches_current_fortran() {
     close(flux.saturated_flux_mm_s[1], 0.019, 1.0e-14);
 }
 
+#[test]
+fn vsf_two_sided_transitive_flux_matches_current_fortran() {
+    let model = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.02,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    let flux = flux_variable_saturated_both_transition(VariableSaturatedBothTransitiveFluxInput {
+        upper_saturated_potential_mm: -100.0,
+        upper_saturated_hydraulic_conductivity_mm_s: 0.01,
+        upper_hydraulic_model: model,
+        upper_unsaturated_distance_mm: 50.0,
+        upper_unsaturated_pressure_head_mm: -120.0,
+        upper_unsaturated_hydraulic_conductivity_mm_s: soil_hydraulic_conductivity(
+            -120.0, -100.0, 0.01, model,
+        ),
+        lower_saturated_potential_mm: -150.0,
+        lower_saturated_hydraulic_conductivity_mm_s: 0.01,
+        lower_hydraulic_model: model,
+        lower_unsaturated_distance_mm: 50.0,
+        lower_unsaturated_pressure_head_mm: -180.0,
+        lower_unsaturated_hydraulic_conductivity_mm_s: soil_hydraulic_conductivity(
+            -180.0, -150.0, 0.01, model,
+        ),
+        saturated_thickness_mm: &[100.0, 200.0],
+        saturated_potential_mm: &[-110.0, -130.0],
+        saturated_hydraulic_conductivity_mm_s: &[0.005, 0.02],
+        flux_tolerance_mm_s: 1.0e-10,
+        depth_tolerance_mm: 1.0e-10,
+        pressure_tolerance_mm: 1.0e-10,
+    })
+    .unwrap();
+    close(flux.upper_flux_mm_s, 8.108007296502483e-5, 1.0e-15);
+    close(flux.lower_flux_mm_s, 0.010_998_656_453_393_225, 1.0e-15);
+    close(flux.saturated_flux_mm_s[0], 0.005, 1.0e-14);
+    close(flux.saturated_flux_mm_s[1], 0.022, 1.0e-14);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,

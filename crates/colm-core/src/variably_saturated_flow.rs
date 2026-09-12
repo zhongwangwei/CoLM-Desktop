@@ -593,6 +593,37 @@ pub struct VariableSaturatedBottomTransitiveFlux {
     pub saturated_flux_mm_s: Vec<f64>,
 }
 
+/// Inputs to `flux_both_transitive_interface`.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedBothTransitiveFluxInput<'a> {
+    pub upper_saturated_potential_mm: f64,
+    pub upper_saturated_hydraulic_conductivity_mm_s: f64,
+    pub upper_hydraulic_model: SoilHydraulicModel,
+    pub upper_unsaturated_distance_mm: f64,
+    pub upper_unsaturated_pressure_head_mm: f64,
+    pub upper_unsaturated_hydraulic_conductivity_mm_s: f64,
+    pub lower_saturated_potential_mm: f64,
+    pub lower_saturated_hydraulic_conductivity_mm_s: f64,
+    pub lower_hydraulic_model: SoilHydraulicModel,
+    pub lower_unsaturated_distance_mm: f64,
+    pub lower_unsaturated_pressure_head_mm: f64,
+    pub lower_unsaturated_hydraulic_conductivity_mm_s: f64,
+    pub saturated_thickness_mm: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub flux_tolerance_mm_s: f64,
+    pub depth_tolerance_mm: f64,
+    pub pressure_tolerance_mm: f64,
+}
+
+/// Coupled fluxes around a saturated zone with both ends unsaturated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedBothTransitiveFlux {
+    pub upper_flux_mm_s: f64,
+    pub lower_flux_mm_s: f64,
+    pub saturated_flux_mm_s: Vec<f64>,
+}
+
 /// Port of `MOD_Hydro_SoilWater:flux_top_transitive_interface`.
 pub fn flux_variable_saturated_top_transition(
     input: VariableSaturatedTopTransitiveFluxInput<'_>,
@@ -722,6 +753,85 @@ pub fn flux_variable_saturated_bottom_transition(
     let mut last_flux = right_flux;
     for _ in 0..50 {
         let flux = bottom_transition_flux_at(input, interface_pressure_head_mm)?;
+        let residual_mm_s = flux.lower_flux_mm_s - flux.saturated_flux_mm_s[bottom];
+        if residual_mm_s.abs() < input.flux_tolerance_mm_s
+            || right - left < input.pressure_tolerance_mm
+        {
+            return Ok(flux);
+        }
+        last_flux = flux;
+        bounded_secant_iteration(
+            residual_mm_s,
+            &mut previous_residual_mm_s,
+            &mut interface_pressure_head_mm,
+            &mut previous_pressure_head_mm,
+            &mut left,
+            &mut right,
+        );
+    }
+    Ok(last_flux)
+}
+
+/// Port of `MOD_Hydro_SoilWater:flux_both_transitive_interface`.
+pub fn flux_variable_saturated_both_transition(
+    input: VariableSaturatedBothTransitiveFluxInput<'_>,
+) -> Result<VariableSaturatedBothTransitiveFlux> {
+    validate_both_transition(input)?;
+    let bottom = input.saturated_thickness_mm.len() - 1;
+    if input.upper_saturated_potential_mm <= input.saturated_potential_mm[0]
+        || input.upper_unsaturated_distance_mm < input.depth_tolerance_mm
+    {
+        let interface_pressure_head_mm = input
+            .upper_saturated_potential_mm
+            .max(input.saturated_potential_mm[0]);
+        let bottom_flux =
+            both_bottom_transition(input, interface_pressure_head_mm, input.flux_tolerance_mm_s)?;
+        let upper_flux_mm_s = if input.upper_unsaturated_distance_mm < input.depth_tolerance_mm {
+            bottom_flux.lower_flux_mm_s
+        } else {
+            both_upper_saturated_boundary_flux(input)?
+        };
+        return Ok(VariableSaturatedBothTransitiveFlux {
+            upper_flux_mm_s,
+            lower_flux_mm_s: bottom_flux.lower_flux_mm_s,
+            saturated_flux_mm_s: bottom_flux.saturated_flux_mm_s,
+        });
+    }
+    if input.lower_saturated_potential_mm <= input.saturated_potential_mm[bottom]
+        || input.lower_unsaturated_distance_mm < input.depth_tolerance_mm
+    {
+        let interface_pressure_head_mm =
+            input.saturated_potential_mm[bottom].max(input.lower_saturated_potential_mm);
+        let top_flux =
+            both_top_transition(input, interface_pressure_head_mm, input.flux_tolerance_mm_s)?;
+        let lower_flux_mm_s = if input.lower_unsaturated_distance_mm < input.depth_tolerance_mm {
+            top_flux.upper_flux_mm_s
+        } else {
+            both_lower_saturated_boundary_flux(input)?
+        };
+        return Ok(VariableSaturatedBothTransitiveFlux {
+            upper_flux_mm_s: top_flux.upper_flux_mm_s,
+            lower_flux_mm_s,
+            saturated_flux_mm_s: top_flux.saturated_flux_mm_s,
+        });
+    }
+    let mut left = input.saturated_potential_mm[bottom];
+    let left_flux = both_transition_flux_at(input, left)?;
+    if left_flux.saturated_flux_mm_s[bottom] <= left_flux.lower_flux_mm_s {
+        return Ok(left_flux);
+    }
+    let mut right = input.lower_saturated_potential_mm;
+    let right_flux = both_transition_flux_at(input, right)?;
+    if right_flux.saturated_flux_mm_s[bottom] >= right_flux.lower_flux_mm_s {
+        return Ok(right_flux);
+    }
+    let mut interface_pressure_head_mm = (left + right) * 0.5;
+    let mut previous_pressure_head_mm = right;
+    let mut previous_residual_mm_s =
+        right_flux.lower_flux_mm_s - right_flux.saturated_flux_mm_s[bottom];
+    let mut last_flux = right_flux;
+    for _ in 0..50 {
+        let flux = both_transition_flux_at(input, interface_pressure_head_mm)?;
         let residual_mm_s = flux.lower_flux_mm_s - flux.saturated_flux_mm_s[bottom];
         if residual_mm_s.abs() < input.flux_tolerance_mm_s
             || right - left < input.pressure_tolerance_mm
@@ -1782,6 +1892,121 @@ fn bottom_transition_flux_at(
     })
 }
 
+fn both_top_transition(
+    input: VariableSaturatedBothTransitiveFluxInput<'_>,
+    bottom_pressure_head_mm: f64,
+    flux_tolerance_mm_s: f64,
+) -> Result<VariableSaturatedTopTransitiveFlux> {
+    flux_variable_saturated_top_transition(VariableSaturatedTopTransitiveFluxInput {
+        upper_saturated_potential_mm: input.upper_saturated_potential_mm,
+        upper_saturated_hydraulic_conductivity_mm_s: input
+            .upper_saturated_hydraulic_conductivity_mm_s,
+        upper_hydraulic_model: input.upper_hydraulic_model,
+        upper_unsaturated_distance_mm: input.upper_unsaturated_distance_mm,
+        upper_unsaturated_pressure_head_mm: input.upper_unsaturated_pressure_head_mm,
+        upper_unsaturated_hydraulic_conductivity_mm_s: input
+            .upper_unsaturated_hydraulic_conductivity_mm_s,
+        saturated_thickness_mm: input.saturated_thickness_mm,
+        saturated_potential_mm: input.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+        bottom_pressure_head_mm,
+        bottom_flux_mm_s: None,
+        flux_tolerance_mm_s,
+        depth_tolerance_mm: input.depth_tolerance_mm,
+        pressure_tolerance_mm: input.pressure_tolerance_mm,
+    })
+}
+
+fn both_bottom_transition(
+    input: VariableSaturatedBothTransitiveFluxInput<'_>,
+    top_pressure_head_mm: f64,
+    flux_tolerance_mm_s: f64,
+) -> Result<VariableSaturatedBottomTransitiveFlux> {
+    flux_variable_saturated_bottom_transition(VariableSaturatedBottomTransitiveFluxInput {
+        lower_saturated_potential_mm: input.lower_saturated_potential_mm,
+        lower_saturated_hydraulic_conductivity_mm_s: input
+            .lower_saturated_hydraulic_conductivity_mm_s,
+        lower_hydraulic_model: input.lower_hydraulic_model,
+        lower_unsaturated_distance_mm: input.lower_unsaturated_distance_mm,
+        lower_unsaturated_pressure_head_mm: input.lower_unsaturated_pressure_head_mm,
+        lower_unsaturated_hydraulic_conductivity_mm_s: input
+            .lower_unsaturated_hydraulic_conductivity_mm_s,
+        saturated_thickness_mm: input.saturated_thickness_mm,
+        saturated_potential_mm: input.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+        top_pressure_head_mm,
+        top_flux_mm_s: None,
+        flux_tolerance_mm_s,
+        depth_tolerance_mm: input.depth_tolerance_mm,
+        pressure_tolerance_mm: input.pressure_tolerance_mm,
+    })
+}
+
+fn both_upper_saturated_boundary_flux(
+    input: VariableSaturatedBothTransitiveFluxInput<'_>,
+) -> Result<f64> {
+    flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+        saturated_potential_mm: input.upper_saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: input.upper_saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: input.upper_hydraulic_model,
+        distance_mm: input.upper_unsaturated_distance_mm,
+        upper_pressure_head_mm: input.upper_unsaturated_pressure_head_mm,
+        lower_pressure_head_mm: input.upper_saturated_potential_mm,
+        upper_hydraulic_conductivity_mm_s: input.upper_unsaturated_hydraulic_conductivity_mm_s,
+        lower_hydraulic_conductivity_mm_s: input.upper_saturated_hydraulic_conductivity_mm_s,
+    })
+}
+
+fn both_lower_saturated_boundary_flux(
+    input: VariableSaturatedBothTransitiveFluxInput<'_>,
+) -> Result<f64> {
+    flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+        saturated_potential_mm: input.lower_saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: input.lower_saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: input.lower_hydraulic_model,
+        distance_mm: input.lower_unsaturated_distance_mm,
+        upper_pressure_head_mm: input.lower_saturated_potential_mm,
+        lower_pressure_head_mm: input.lower_unsaturated_pressure_head_mm,
+        upper_hydraulic_conductivity_mm_s: input.lower_saturated_hydraulic_conductivity_mm_s,
+        lower_hydraulic_conductivity_mm_s: input.lower_unsaturated_hydraulic_conductivity_mm_s,
+    })
+}
+
+fn both_transition_flux_at(
+    input: VariableSaturatedBothTransitiveFluxInput<'_>,
+    interface_pressure_head_mm: f64,
+) -> Result<VariableSaturatedBothTransitiveFlux> {
+    let top_flux = both_top_transition(
+        input,
+        interface_pressure_head_mm,
+        input.flux_tolerance_mm_s * 0.5,
+    )?;
+    let lower_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+        interface_pressure_head_mm,
+        input.lower_saturated_potential_mm,
+        input.lower_saturated_hydraulic_conductivity_mm_s,
+        input.lower_hydraulic_model,
+    );
+    Ok(VariableSaturatedBothTransitiveFlux {
+        upper_flux_mm_s: top_flux.upper_flux_mm_s,
+        lower_flux_mm_s: flux_inside_variable_saturated_soil(
+            VariableSaturatedHomogeneousFluxInput {
+                saturated_potential_mm: input.lower_saturated_potential_mm,
+                saturated_hydraulic_conductivity_mm_s: input
+                    .lower_saturated_hydraulic_conductivity_mm_s,
+                hydraulic_model: input.lower_hydraulic_model,
+                distance_mm: input.lower_unsaturated_distance_mm,
+                upper_pressure_head_mm: interface_pressure_head_mm,
+                lower_pressure_head_mm: input.lower_unsaturated_pressure_head_mm,
+                upper_hydraulic_conductivity_mm_s: lower_hydraulic_conductivity_mm_s,
+                lower_hydraulic_conductivity_mm_s: input
+                    .lower_unsaturated_hydraulic_conductivity_mm_s,
+            },
+        )?,
+        saturated_flux_mm_s: top_flux.saturated_flux_mm_s,
+    })
+}
+
 fn interface_fluxes(
     input: VariableSaturatedInterfaceFluxInput,
     interface_pressure_head_mm: f64,
@@ -1981,6 +2206,48 @@ fn validate_bottom_transition(input: VariableSaturatedBottomTransitiveFluxInput<
             && input.depth_tolerance_mm > 0.0
             && input.pressure_tolerance_mm > 0.0,
         "VSF bottom-transition inputs are invalid"
+    );
+    Ok(())
+}
+
+fn validate_both_transition(input: VariableSaturatedBothTransitiveFluxInput<'_>) -> Result<()> {
+    validate_saturated_zone_flux(VariableSaturatedSaturatedZoneFluxInput {
+        thickness_mm: input.saturated_thickness_mm,
+        saturated_potential_mm: input.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+        top_pressure_head_mm: input.upper_saturated_potential_mm,
+        bottom_pressure_head_mm: input.lower_saturated_potential_mm,
+        top_flux_mm_s: None,
+        bottom_flux_mm_s: None,
+    })?;
+    ensure!(
+        [
+            input.upper_saturated_potential_mm,
+            input.upper_saturated_hydraulic_conductivity_mm_s,
+            input.upper_unsaturated_distance_mm,
+            input.upper_unsaturated_pressure_head_mm,
+            input.upper_unsaturated_hydraulic_conductivity_mm_s,
+            input.lower_saturated_potential_mm,
+            input.lower_saturated_hydraulic_conductivity_mm_s,
+            input.lower_unsaturated_distance_mm,
+            input.lower_unsaturated_pressure_head_mm,
+            input.lower_unsaturated_hydraulic_conductivity_mm_s,
+            input.flux_tolerance_mm_s,
+            input.depth_tolerance_mm,
+            input.pressure_tolerance_mm,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && input.upper_saturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.upper_unsaturated_distance_mm >= 0.0
+            && input.upper_unsaturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.lower_saturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.lower_unsaturated_distance_mm >= 0.0
+            && input.lower_unsaturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.flux_tolerance_mm_s > 0.0
+            && input.depth_tolerance_mm > 0.0
+            && input.pressure_tolerance_mm > 0.0,
+        "VSF two-sided transition inputs are invalid"
     );
     Ok(())
 }
