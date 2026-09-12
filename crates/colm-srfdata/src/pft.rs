@@ -28,6 +28,29 @@ pub struct PftFractionInput<'a> {
     pub crop_excluded_class: Option<usize>,
 }
 
+/// Raw PFT abundance and a monthly PFT LAI or SAI field.
+///
+/// Both raw fields are class-major: `raw_class * raw_cells + raw_cell`.
+/// This is the computational portion shared by the PFT/PC LAI and SAI loops
+/// in `Aggregation_LAI.F90`.
+#[derive(Debug, Clone, Copy)]
+pub struct PftIndexInput<'a> {
+    pub pft_offsets: &'a [usize],
+    pub pft_classes: &'a [usize],
+    pub patch_kind: &'a [PftPatchKind],
+    pub raw_class_count: usize,
+    pub raw_percent: &'a [f64],
+    pub raw_index: &'a [f64],
+    pub land_area: &'a [f64],
+}
+
+/// Patch and PFT vectors written by one monthly PFT/PC LAI or SAI step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PftIndexState {
+    pub patch_index: Vec<f64>,
+    pub pft_index: Vec<f64>,
+}
+
 /// Applies the computational part of `Aggregation_PercentagesPFT`.
 pub fn aggregate_pft_fractions(
     patches: &FlatPatches,
@@ -50,6 +73,64 @@ pub fn aggregate_pft_fractions(
                 aggregate_natural_patch(patches.raw_cells(patch), range, input, &mut output, patch)?
             }
             PftPatchKind::Crop => output[range].fill(1.0),
+            PftPatchKind::Other => {}
+        }
+    }
+    Ok(output)
+}
+
+/// Applies the PFT/PC branch of `Aggregation_LAI` to one LAI or SAI field.
+pub fn aggregate_pft_index(
+    patches: &FlatPatches,
+    input: PftIndexInput<'_>,
+) -> Result<PftIndexState> {
+    validate_index_input(patches, input)?;
+    let mut output = PftIndexState {
+        patch_index: vec![0.0; patches.len()],
+        pft_index: vec![0.0; input.pft_classes.len()],
+    };
+    for patch in 0..patches.len() {
+        let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+        let first = range
+            .clone()
+            .next()
+            .with_context(|| format!("PFT/PC patch {patch} has no PFT"))?;
+        if let Some(source) = patches.wmo_source_for(patch) {
+            let class = input.pft_classes[first];
+            if (12..=14).contains(&class) {
+                let source_range = input.pft_offsets[source]..input.pft_offsets[source + 1];
+                if let Some(source_pft) = source_range
+                    .clone()
+                    .find(|&pft| input.pft_classes[pft] == class)
+                {
+                    output.pft_index[first] = output.pft_index[source_pft];
+                }
+            }
+            output.patch_index[patch] = output.pft_index[first];
+            continue;
+        }
+
+        let (patch_index, area_sum) =
+            aggregate_patch_index(patches.raw_cells(patch), input, patch)?;
+        output.patch_index[patch] = patch_index / area_sum;
+        match input.patch_kind[patch] {
+            PftPatchKind::Natural => {
+                for pft in range {
+                    let class = input.pft_classes[pft];
+                    let mut weighted_area = 0.0;
+                    let mut weighted_index = 0.0;
+                    for &cell in patches.raw_cells(patch) {
+                        let percent = percentage_index(input, class, cell, patch)?.max(0.0);
+                        let area = area(input.land_area, cell, patch)?;
+                        weighted_area += percent * area;
+                        weighted_index += index(input, class, cell, patch)? * percent * area;
+                    }
+                    if weighted_area > 0.0 {
+                        output.pft_index[pft] = weighted_index / weighted_area;
+                    }
+                }
+            }
+            PftPatchKind::Crop => output.pft_index[first] = output.patch_index[patch],
             PftPatchKind::Other => {}
         }
     }
@@ -87,6 +168,75 @@ fn validate_input(patches: &FlatPatches, input: PftFractionInput<'_>) -> Result<
         "excluded crop PFT class is outside the raw PFT class range"
     );
     Ok(())
+}
+
+fn validate_index_input(patches: &FlatPatches, input: PftIndexInput<'_>) -> Result<()> {
+    ensure!(
+        input.pft_offsets.len() == patches.len() + 1
+            && input.pft_offsets.first() == Some(&0)
+            && input.pft_offsets.windows(2).all(|pair| pair[0] <= pair[1])
+            && input.pft_offsets.last() == Some(&input.pft_classes.len()),
+        "PFT offsets must partition the PFT vector once per patch"
+    );
+    ensure!(
+        input.patch_kind.len() == patches.len(),
+        "PFT patch kinds must have one entry per patch"
+    );
+    ensure!(
+        input.raw_class_count > 0
+            && input.raw_percent.len() == input.raw_class_count * input.land_area.len()
+            && input.raw_index.len() == input.raw_class_count * input.land_area.len(),
+        "raw PFT percentage and index fields must be raw_class_count x raw cell count"
+    );
+    ensure!(
+        input
+            .pft_classes
+            .iter()
+            .all(|&class| class < input.raw_class_count),
+        "a PFT class is outside the raw PFT class range"
+    );
+    ensure!(
+        input
+            .land_area
+            .iter()
+            .all(|area| area.is_finite() && *area >= 0.0),
+        "PFT land area must be finite and non-negative"
+    );
+    ensure!(
+        input
+            .raw_percent
+            .iter()
+            .chain(input.raw_index)
+            .all(|value| value.is_finite()),
+        "PFT percentage and LAI/SAI inputs must be finite"
+    );
+    Ok(())
+}
+
+fn aggregate_patch_index(
+    cells: &[usize],
+    input: PftIndexInput<'_>,
+    patch: usize,
+) -> Result<(f64, f64)> {
+    let mut area_sum = 0.0;
+    let mut index_sum = 0.0;
+    for &cell in cells {
+        let area = area(input.land_area, cell, patch)?;
+        let mut percent_sum = 0.0;
+        let mut value_sum = 0.0;
+        for class in 0..input.raw_class_count {
+            let percent = percentage_index(input, class, cell, patch)?.max(0.0);
+            percent_sum += percent;
+            value_sum += index(input, class, cell, patch)? * percent;
+        }
+        index_sum += value_sum / percent_sum.max(1.0e-6) * area;
+        area_sum += area;
+    }
+    ensure!(
+        area_sum > 0.0 && area_sum.is_finite(),
+        "PFT/PC patch {patch} has zero or non-finite land area"
+    );
+    Ok((index_sum, area_sum))
 }
 
 fn aggregate_natural_patch(
@@ -156,6 +306,29 @@ fn percentage(input: PftFractionInput<'_>, class: usize, cell: usize, patch: usi
     input.raw_percent.get(index).copied().with_context(|| {
         format!(
             "PFT patch {patch} references raw class {class}, cell {cell}, outside the raw percentage field"
+        )
+    })
+}
+
+fn percentage_index(
+    input: PftIndexInput<'_>,
+    class: usize,
+    cell: usize,
+    patch: usize,
+) -> Result<f64> {
+    let index = class * input.land_area.len() + cell;
+    input.raw_percent.get(index).copied().with_context(|| {
+        format!(
+            "PFT/PC patch {patch} references raw class {class}, cell {cell}, outside the raw percentage field"
+        )
+    })
+}
+
+fn index(input: PftIndexInput<'_>, class: usize, cell: usize, patch: usize) -> Result<f64> {
+    let offset = class * input.land_area.len() + cell;
+    input.raw_index.get(offset).copied().with_context(|| {
+        format!(
+            "PFT/PC patch {patch} references raw class {class}, cell {cell}, outside the raw LAI/SAI field"
         )
     })
 }

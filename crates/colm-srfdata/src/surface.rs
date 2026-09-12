@@ -204,6 +204,42 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Area-weighted patch LAI or SAI from `Aggregation_LAI`'s LCT path.
+    ///
+    /// This deliberately does not share WMO values: the corresponding
+    /// Fortran branch requests each patch's cells independently.
+    pub fn aggregate_patch_vegetation_index(
+        &self,
+        raw_index: &[f64],
+        landarea: &[f64],
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            raw_index.len() == landarea.len(),
+            "vegetation index and landarea must have the same raw cell count"
+        );
+        let mut result = vec![0.0; self.len()];
+        for (patch, output) in result.iter_mut().enumerate() {
+            let mut area_sum = 0.0;
+            let mut index_sum = 0.0;
+            for &cell in &self.cells[self.cells_for(patch)] {
+                let index = value(raw_index, cell, "vegetation index", patch)?;
+                let area = value(landarea, cell, "landarea", patch)?;
+                ensure!(
+                    index.is_finite() && area.is_finite() && area >= 0.0,
+                    "vegetation-index patch {patch} has a non-finite value or invalid land area"
+                );
+                area_sum += area;
+                index_sum += index * area;
+            }
+            ensure!(
+                area_sum > 0.0 && area_sum.is_finite(),
+                "vegetation-index patch {patch} has zero or non-finite land area"
+            );
+            *output = index_sum / area_sum;
+        }
+        Ok(result)
+    }
+
     /// Port of `Aggregation_DBedrock`.
     ///
     /// The raw field has no fill-value masking in the Fortran routine, so this

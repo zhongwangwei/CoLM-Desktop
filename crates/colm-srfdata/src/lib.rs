@@ -30,7 +30,10 @@ pub use derive::{
     depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
 };
 pub use grid::{Grid, COLM_500M};
-pub use pft::{aggregate_pft_fractions, PftFractionInput, PftPatchKind};
+pub use pft::{
+    aggregate_pft_fractions, aggregate_pft_index, PftFractionInput, PftIndexInput, PftIndexState,
+    PftPatchKind,
+};
 pub use surface::{FlatPatches, SoilBrightness, Topography, SURFACE_MISSING};
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandPatches, FlatMesh};

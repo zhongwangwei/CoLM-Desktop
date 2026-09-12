@@ -57,6 +57,23 @@ fn lake_soil_carbon_masks_missing_values_and_keeps_non_lake_patches_zero() {
 }
 
 #[test]
+fn lct_lai_and_sai_are_area_weighted_without_wmo_sharing() {
+    let layout = FlatPatches::new(
+        vec![1, 1],
+        vec![0, 2, 3],
+        vec![0, 1, 2],
+        vec![None, Some(0)],
+    )
+    .unwrap();
+    assert_eq!(
+        layout
+            .aggregate_patch_vegetation_index(&[1.0, 4.0, 100.0], &[3.0, 1.0, 1.0])
+            .unwrap(),
+        [1.75, 100.0]
+    );
+}
+
+#[test]
 fn bedrock_is_area_weighted_and_wmo_patches_reuse_the_prior_value() {
     let layout = FlatPatches::new(
         vec![1, 1],
