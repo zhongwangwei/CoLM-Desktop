@@ -141,6 +141,98 @@ pub struct VariableSaturatedSublevelState {
     pub hydraulic_conductivity_mm_s: Vec<f64>,
 }
 
+/// Inputs to `MOD_Hydro_SoilWater:water_balance`.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedWaterBalanceInput<'a> {
+    pub time_step_seconds: f64,
+    pub interface_depth_mm: &'a [f64],
+    pub saturated: &'a [bool],
+    pub porosity: &'a [f64],
+    pub interface_flux_mm_s: &'a [f64],
+    pub upper_boundary: VariableSaturatedBoundary,
+    pub lower_boundary: VariableSaturatedBoundary,
+    pub wetting_front_mm: &'a [f64],
+    pub liquid_water: &'a [f64],
+    pub water_table_thickness_mm: &'a [f64],
+    pub ponding_depth_mm: f64,
+    pub aquifer_water_mm: f64,
+    pub previous_wetting_front_mm: &'a [f64],
+    pub previous_liquid_water: &'a [f64],
+    pub previous_water_table_thickness_mm: &'a [f64],
+    pub previous_ponding_depth_mm: f64,
+    pub previous_aquifer_water_mm: f64,
+    pub tolerance_mm: f64,
+}
+
+/// Residuals for surface, soil layers, and aquifer, in that order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedWaterBalance {
+    pub residual_mm: Vec<f64>,
+    pub solvable: bool,
+}
+
+/// Port of `MOD_Hydro_SoilWater:water_balance`.
+pub fn variable_saturated_water_balance(
+    input: VariableSaturatedWaterBalanceInput<'_>,
+) -> Result<VariableSaturatedWaterBalance> {
+    let layers = validate_water_balance(input)?;
+    let thickness = input
+        .interface_depth_mm
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    let mut residual_mm = vec![0.0; layers + 2];
+    if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
+        let mass_change =
+            input.ponding_depth_mm.max(0.0) - input.previous_ponding_depth_mm.max(0.0);
+        let flux_sum = input.upper_boundary.value - input.interface_flux_mm_s[0];
+        residual_mm[0] = mass_change - flux_sum * input.time_step_seconds;
+    }
+    let mut active = 0usize;
+    for (layer, thickness) in thickness.iter().copied().enumerate() {
+        let mass_change = (input.porosity[layer] - input.previous_liquid_water[layer])
+            * (input.wetting_front_mm[layer] - input.previous_wetting_front_mm[layer])
+            + (input.porosity[layer] - input.previous_liquid_water[layer])
+                * (input.water_table_thickness_mm[layer]
+                    - input.previous_water_table_thickness_mm[layer])
+            + (thickness - input.water_table_thickness_mm[layer] - input.wetting_front_mm[layer])
+                * (input.liquid_water[layer] - input.previous_liquid_water[layer]);
+        let flux_sum = input.interface_flux_mm_s[layer] - input.interface_flux_mm_s[layer + 1];
+        if !input.saturated[layer] {
+            active = layer + 1;
+            if input.upper_boundary.kind != VariableSaturatedBoundaryKind::Rainfall
+                && residual_mm[0] != 0.0
+            {
+                residual_mm[active] += residual_mm[0];
+                residual_mm[0] = 0.0;
+            }
+        }
+        residual_mm[active] += mass_change - flux_sum * input.time_step_seconds;
+    }
+    if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
+        if input.aquifer_water_mm == 0.0 && input.interface_flux_mm_s[layers] >= 0.0 {
+            residual_mm[active] -= input.previous_aquifer_water_mm
+                + input.interface_flux_mm_s[layers] * input.time_step_seconds;
+        } else {
+            residual_mm[layers + 1] = input.aquifer_water_mm
+                - input.previous_aquifer_water_mm
+                - input.interface_flux_mm_s[layers] * input.time_step_seconds;
+            if input.upper_boundary.kind != VariableSaturatedBoundaryKind::Rainfall
+                && residual_mm[0] != 0.0
+            {
+                residual_mm[layers + 1] += residual_mm[0];
+                residual_mm[0] = 0.0;
+            }
+        }
+    }
+    let solvable = input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall
+        || residual_mm[0] < input.tolerance_mm;
+    Ok(VariableSaturatedWaterBalance {
+        residual_mm,
+        solvable,
+    })
+}
+
 /// Port of `MOD_Hydro_SoilWater:initialize_sublevel_structure`.
 pub fn initialize_variable_saturated_sublevels(
     input: VariableSaturatedSublevelInput<'_>,
@@ -855,6 +947,85 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                 && input.liquid_water[layer] >= 0.0
                 && input.liquid_water[layer] <= input.porosity[layer],
             "VSF sublevel layer inputs are invalid"
+        );
+    }
+    Ok(layers)
+}
+
+fn validate_water_balance(input: VariableSaturatedWaterBalanceInput<'_>) -> Result<usize> {
+    let layers = input.porosity.len();
+    ensure!(layers > 0, "VSF water balance needs soil layers");
+    for values in [
+        input.wetting_front_mm,
+        input.liquid_water,
+        input.water_table_thickness_mm,
+        input.previous_wetting_front_mm,
+        input.previous_liquid_water,
+        input.previous_water_table_thickness_mm,
+    ] {
+        ensure!(
+            values.len() == layers,
+            "VSF water-balance layer vectors have incompatible dimensions"
+        );
+    }
+    ensure!(
+        input.interface_depth_mm.len() == layers + 1
+            && input.saturated.len() == layers
+            && input.interface_flux_mm_s.len() == layers + 1,
+        "VSF water-balance vectors have incompatible dimensions"
+    );
+    ensure!(
+        input
+            .interface_depth_mm
+            .iter()
+            .all(|value| value.is_finite())
+            && input
+                .interface_depth_mm
+                .windows(2)
+                .all(|pair| pair[1] > pair[0])
+            && input
+                .interface_flux_mm_s
+                .iter()
+                .all(|value| value.is_finite())
+            && [
+                input.time_step_seconds,
+                input.upper_boundary.value,
+                input.lower_boundary.value,
+                input.ponding_depth_mm,
+                input.aquifer_water_mm,
+                input.previous_ponding_depth_mm,
+                input.previous_aquifer_water_mm,
+                input.tolerance_mm,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+            && input.time_step_seconds > 0.0
+            && input.ponding_depth_mm >= 0.0
+            && input.previous_ponding_depth_mm >= 0.0
+            && input.tolerance_mm >= 0.0,
+        "VSF water-balance scalar inputs are invalid"
+    );
+    for layer in 0..layers {
+        let thickness = input.interface_depth_mm[layer + 1] - input.interface_depth_mm[layer];
+        ensure!(
+            input.porosity[layer].is_finite()
+                && input.wetting_front_mm[layer].is_finite()
+                && input.liquid_water[layer].is_finite()
+                && input.water_table_thickness_mm[layer].is_finite()
+                && input.previous_wetting_front_mm[layer].is_finite()
+                && input.previous_liquid_water[layer].is_finite()
+                && input.previous_water_table_thickness_mm[layer].is_finite()
+                && input.porosity[layer] > 0.0
+                && (0.0..=thickness).contains(&input.wetting_front_mm[layer])
+                && (0.0..=thickness).contains(&input.water_table_thickness_mm[layer])
+                && input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
+                    <= thickness
+                && (0.0..=thickness).contains(&input.previous_wetting_front_mm[layer])
+                && (0.0..=thickness).contains(&input.previous_water_table_thickness_mm[layer])
+                && input.previous_wetting_front_mm[layer]
+                    + input.previous_water_table_thickness_mm[layer]
+                    <= thickness,
+            "VSF water-balance layer inputs are invalid"
         );
     }
     Ok(layers)

@@ -188,6 +188,43 @@ fn sublevel_initialization_matches_current_fortran() {
     close(state.hydraulic_conductivity_mm_s[2], 0.01, 1.0e-18);
 }
 
+#[test]
+fn vsf_water_balance_matches_current_fortran() {
+    let state = variable_saturated_water_balance(VariableSaturatedWaterBalanceInput {
+        time_step_seconds: 1800.0,
+        interface_depth_mm: &[0.0, 100.0, 400.0, 1000.0],
+        saturated: &[false, false, false],
+        porosity: &[0.45, 0.45, 0.45],
+        interface_flux_mm_s: &[0.001, 0.0005, 0.0002, 0.0001],
+        upper_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.001,
+        },
+        lower_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Drainage,
+            value: 0.0,
+        },
+        wetting_front_mm: &[0.0, 0.0, 0.0],
+        liquid_water: &[0.25, 0.3, 0.35],
+        water_table_thickness_mm: &[0.0, 0.0, 0.0],
+        ponding_depth_mm: 5.0,
+        aquifer_water_mm: -99.82,
+        previous_wetting_front_mm: &[0.0, 0.0, 0.0],
+        previous_liquid_water: &[0.25, 0.3, 0.35],
+        previous_water_table_thickness_mm: &[0.0, 0.0, 0.0],
+        previous_ponding_depth_mm: 5.0,
+        previous_aquifer_water_mm: -100.0,
+        tolerance_mm: 1.0e-6,
+    })
+    .unwrap();
+    assert!(state.solvable);
+    close(state.residual_mm[0], 0.0, 1.0e-14);
+    close(state.residual_mm[1], -0.9, 1.0e-14);
+    close(state.residual_mm[2], -0.54, 1.0e-14);
+    close(state.residual_mm[3], -0.18, 1.0e-14);
+    close(state.residual_mm[4], 6.821210263296962e-15, 1.0e-16);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
