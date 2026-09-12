@@ -37,6 +37,7 @@ pub mod static_state;
 pub mod thermal_properties;
 pub mod time_state;
 pub mod urban;
+pub mod variably_saturated_flow;
 pub mod vegetation;
 pub mod vic;
 
@@ -154,6 +155,10 @@ pub use time_state::{
 pub use urban::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
+};
+pub use variably_saturated_flow::{
+    exchange_soil_water_with_aquifer, water_table_from_aquifer, VariableSaturatedAquiferInput,
+    VariableSaturatedAquiferState,
 };
 pub use vegetation::{
     derive_igbp_canopy, derive_usgs_canopy, empirical_lai, CanopyState, EmpiricalLandCover,
