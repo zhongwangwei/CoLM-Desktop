@@ -17,6 +17,7 @@ pub mod pc_radiation;
 pub mod phase_change;
 pub mod radiation;
 pub mod snow;
+pub mod soil_surface_resistance;
 pub mod soil_water;
 pub mod static_state;
 pub mod thermal_properties;
@@ -67,6 +68,7 @@ pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, NewSnowInput,
     NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
 };
+pub use soil_surface_resistance::{soil_surface_resistance, SoilSurfaceResistanceInput};
 pub use soil_water::{solve_campbell_soil_water, CampbellSoilWaterInput, CampbellSoilWaterState};
 
 pub use static_state::{

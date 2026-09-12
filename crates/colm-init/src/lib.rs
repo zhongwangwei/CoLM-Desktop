@@ -38,6 +38,9 @@ pub mod spatial_static;
 pub mod static_state {
     pub use colm_core::static_state::*;
 }
+pub mod soil_surface_resistance {
+    pub use colm_core::soil_surface_resistance::*;
+}
 pub mod surface_data;
 pub mod time_restart;
 pub mod time_state {
@@ -51,6 +54,7 @@ pub mod vegetation {
     pub use colm_core::vegetation::*;
 }
 
+pub use colm_core::SoilSurfaceResistanceInput;
 pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
