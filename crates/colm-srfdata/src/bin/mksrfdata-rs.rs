@@ -147,6 +147,17 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &topology.pixel,
         COLM_500M,
     )?;
+    let patch_height = layout.aggregate_igbp_forest_height(&forest_height, &area)?;
+    write_landpatch_scalar(
+        &args.landdata,
+        args.year,
+        &topology,
+        &patches,
+        &args.blocks,
+        "htop",
+        "htop_patches",
+        &patch_height,
+    )?;
     let pft_height = aggregate_pft_height(
         &layout,
         PftFractionInput {
