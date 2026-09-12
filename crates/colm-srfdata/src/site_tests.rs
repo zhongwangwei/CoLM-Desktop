@@ -1457,6 +1457,31 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
             .unwrap()[..4],
         [0.0, 2.0, 3.0, 5.0]
     );
+    let attribute = |variable: &str, name: &str| match file
+        .variable(variable)
+        .unwrap()
+        .attribute(name)
+        .unwrap()
+        .value()
+        .unwrap()
+    {
+        netcdf::AttributeValue::Str(value) => value,
+        value => panic!("{variable}:{name} must be a string, got {value:?}"),
+    };
+    for name in file
+        .variables()
+        .map(|variable| variable.name())
+        .filter(|name| !["latitude", "longitude", "LAI_year"].contains(&name.as_str()))
+    {
+        assert_eq!(attribute(&name, "source"), "SITE", "{name}");
+    }
+    assert_eq!(attribute("latitude", "units"), "degrees_north");
+    assert_eq!(attribute("pfttyp", "long_name"), "plant functional type");
+    assert_eq!(
+        attribute("LAI_pfts_monthly", "long_name"),
+        "monthly leaf area index associated with PFT"
+    );
+    assert_eq!(attribute("soil_tkdry", "units"), "W/(m-K)");
     std::fs::remove_dir_all(directory).unwrap();
 }
 

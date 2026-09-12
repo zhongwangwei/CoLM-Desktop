@@ -1469,9 +1469,12 @@ fn write_single_point_surface(
         SiteMode::Usgs => "USGS_classification",
         _ => "IGBP_classification",
     };
-    output
-        .add_variable::<i32>(classification, &[])?
-        .put_values(&[scalar_i32(&input, classification)?], ..)?;
+    emit_i32(
+        &mut output,
+        classification,
+        &[],
+        &[scalar_i32(&input, classification)?],
+    )?;
     if let Some(pfts) = &pfts {
         emit_i32(
             &mut output,
@@ -1528,9 +1531,7 @@ fn write_single_point_surface(
             &select_pft_values(&input, "canopy_height_pfts", indices, pfts.len())?,
         )?;
     }
-    output
-        .add_variable::<i32>("LAI_year", &["LAI_year"])?
-        .put_values(&years, ..)?;
+    emit_i32(&mut output, "LAI_year", &["LAI_year"], &years)?;
     if let (Some(pfts), Some(indices)) = (&pfts, &pft_indices) {
         for name in ["LAI_pfts_monthly", "SAI_pfts_monthly"] {
             emit_f64(
@@ -1567,9 +1568,12 @@ fn write_single_point_surface(
         );
         emit_f64(&mut output, name, &["soil"], &values[..8])?;
     }
-    output
-        .add_variable::<i32>("soil_texture", &[])?
-        .put_values(&[scalar_i32(&input, "soil_texture")?], ..)?;
+    emit_i32(
+        &mut output,
+        "soil_texture",
+        &[],
+        &[scalar_i32(&input, "soil_texture")?],
+    )?;
     for name in ["elevation", "elvstd", "sloperatio"] {
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }
@@ -1716,9 +1720,139 @@ fn pft_monthly_values(
     Ok(output)
 }
 
+/// `MOD_SingleSrfdata.F90:2838-3085` writes these attributes with the same
+/// spelling for every single-point product.  Keep that contract here rather
+/// than leaking source-site metadata through the projected artifact: after
+/// projection each value is a field in the CoLM site input, i.e. `SITE`.
+fn write_surface_metadata(variable: &mut netcdf::VariableMut<'_>, name: &str) -> Result<()> {
+    let (source, long_name, units) = match name {
+        "latitude" => (false, None, Some("degrees_north")),
+        "longitude" => (false, None, Some("degrees_east")),
+        "LAI_year" => (false, None, None),
+        "IGBP_classification" => (true, Some("MODIS IGBP Land Use/Land Cover"), None),
+        "USGS_classification" => (true, Some("GLCC USGS Land Use/Land Cover"), None),
+        "pfttyp" => (true, Some("plant functional type"), None),
+        "pctpfts" => (true, Some("fraction of plant functional type"), None),
+        "croptyp" => (true, Some("crop type"), None),
+        "pctcrop" => (true, Some("fraction of crop type"), None),
+        "canopy_height" | "canopy_height_pfts" => (true, Some("canopy height"), Some("m")),
+        "LAI_monthly" => (true, Some("monthly leaf area index"), None),
+        "SAI_monthly" => (true, Some("monthly stem area index"), None),
+        "LAI_pfts_monthly" => (
+            true,
+            Some("monthly leaf area index associated with PFT"),
+            None,
+        ),
+        "SAI_pfts_monthly" => (
+            true,
+            Some("monthly stem area index associated with PFT"),
+            None,
+        ),
+        "lakedepth" => (true, Some("lake depth"), Some("m")),
+        "soil_s_v_alb" => (true, Some("albedo of visible of the saturated soil"), None),
+        "soil_d_v_alb" => (true, Some("albedo of visible of the dry soil"), None),
+        "soil_s_n_alb" => (
+            true,
+            Some("albedo of near infrared of the saturated soil"),
+            None,
+        ),
+        "soil_d_n_alb" => (true, Some("albedo of near infrared of the dry soil"), None),
+        "soil_vf_quartz_mineral" => (
+            true,
+            Some("volumetric fraction of quartz within mineral soil"),
+            None,
+        ),
+        "soil_vf_gravels" => (true, Some("volumetric fraction of gravels"), None),
+        "soil_vf_sand" => (true, Some("volumetric fraction of sand"), None),
+        "soil_vf_clay" => (true, Some("volumetric fraction of clay"), None),
+        "soil_vf_om" => (true, Some("volumetric fraction of organic matter"), None),
+        "soil_wf_gravels" => (true, Some("gravimetric fraction of gravels"), None),
+        "soil_wf_sand" => (true, Some("gravimetric fraction of sand"), None),
+        "soil_wf_clay" => (true, Some("gravimetric fraction of clay"), None),
+        "soil_wf_om" => (true, Some("gravimetric fraction of om"), None),
+        "soil_OM_density" => (true, Some("OM density"), Some("kg/m3")),
+        "soil_BD_all" => (
+            true,
+            Some("bulk density of soil (GRAVELS + OM + mineral soils)"),
+            Some("kg/m3"),
+        ),
+        "soil_theta_s" => (true, Some("saturated water content"), Some("cm3/cm3")),
+        "soil_k_s" => (
+            true,
+            Some("saturated hydraulic conductivity"),
+            Some("cm/day"),
+        ),
+        "soil_csol" => (true, Some("heat capacity of soil solids"), Some("J/(m3 K)")),
+        "soil_tksatu" => (
+            true,
+            Some("thermal conductivity of saturated unfrozen soil"),
+            Some("W/m-K"),
+        ),
+        "soil_tksatf" => (
+            true,
+            Some("thermal conductivity of saturated frozen soil"),
+            Some("W/m-K"),
+        ),
+        "soil_tkdry" => (
+            true,
+            Some("thermal conductivity for dry soil"),
+            Some("W/(m-K)"),
+        ),
+        "soil_k_solids" => (
+            true,
+            Some("thermal conductivity of minerals soil"),
+            Some("W/m-K"),
+        ),
+        "soil_lambda" => (
+            true,
+            Some("pore size distribution index (dimensionless)"),
+            None,
+        ),
+        "soil_psi_s" => (true, Some("matric potential at saturation"), Some("cm")),
+        "soil_theta_r" => (true, Some("residual water content"), Some("cm3/cm3")),
+        "soil_alpha_vgm" => (
+            true,
+            Some("a parameter corresponding approximately to the inverse of the air-entry value"),
+            None,
+        ),
+        "soil_L_vgm" => (
+            true,
+            Some("pore-connectivity parameter [dimensionless]"),
+            None,
+        ),
+        "soil_n_vgm" => (true, Some("a shape parameter [dimensionless]"), None),
+        "soil_BA_alpha" => (
+            true,
+            Some("alpha in Balland and Arp(2005) thermal conductivity scheme"),
+            None,
+        ),
+        "soil_BA_beta" => (
+            true,
+            Some("beta in Balland and Arp(2005) thermal conductivity scheme"),
+            None,
+        ),
+        "soil_texture" => (true, Some("USDA soil texture"), None),
+        "elevation" => (true, None, None),
+        "elvstd" => (true, Some("standard deviation of elevation"), None),
+        "sloperatio" => (true, Some("slope ratio"), None),
+        _ => return Ok(()),
+    };
+    if source {
+        variable.put_attribute("source", "SITE")?;
+    }
+    if let Some(value) = long_name {
+        variable.put_attribute("long_name", value)?;
+    }
+    if let Some(value) = units {
+        variable.put_attribute("units", value)?;
+    }
+    Ok(())
+}
+
 fn emit_scalar(file: &mut netcdf::FileMut, name: &str, value: f64) -> Result<()> {
-    file.add_variable::<f64>(name, &[])?
-        .put_values(&[value], ..)?;
+    let mut variable = file.add_variable::<f64>(name, &[])?;
+    write_surface_metadata(&mut variable, name)?;
+    variable.put_values(&[value], ..)?;
     Ok(())
 }
 
@@ -1728,8 +1862,9 @@ fn emit_f64(
     dimensions: &[&str],
     values: &[f64],
 ) -> Result<()> {
-    file.add_variable::<f64>(name, dimensions)?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<f64>(name, dimensions)?;
+    write_surface_metadata(&mut variable, name)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
@@ -1739,8 +1874,9 @@ fn emit_i32(
     dimensions: &[&str],
     values: &[i32],
 ) -> Result<()> {
-    file.add_variable::<i32>(name, dimensions)?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<i32>(name, dimensions)?;
+    write_surface_metadata(&mut variable, name)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 

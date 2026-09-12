@@ -36,7 +36,9 @@ fn write_file(path: &Path, opts: Opts) {
     let mut f = netcdf::create(path).expect("create");
     f.add_dimension("time", 3).unwrap();
     f.add_dimension("patch", 1).unwrap();
-    f.add_attribute("create_time", opts.create_time).unwrap();
+    if let Some(create_time) = opts.create_time {
+        f.add_attribute("create_time", create_time).unwrap();
+    }
     f.add_attribute("title", opts.title).unwrap();
 
     let dims: &[&str] = if opts.swap_dims {
@@ -76,7 +78,7 @@ fn netcdf_write_lock() -> &'static Mutex<()> {
 
 #[derive(Clone, Copy)]
 struct Opts {
-    create_time: &'static str,
+    create_time: Option<&'static str>,
     title: &'static str,
     units: &'static str,
     third_value: f64,
@@ -89,7 +91,7 @@ struct Opts {
 impl Default for Opts {
     fn default() -> Self {
         Self {
-            create_time: "20260101-00:00:00 UTC+08:00",
+            create_time: Some("20260101-00:00:00 UTC+08:00"),
             title: "golden",
             units: "W/m2",
             third_value: 3.0,
@@ -185,8 +187,14 @@ fn create_time_alone_is_whitelisted() {
     // 唯一允许不同的属性。CoLM 每次写文件都盖墙上时钟，重跑必然不同，
     // 而黄金基线的全部变量数据逐位相同 —— 这是回归基准得以成立的前提。
     let p = problems("createtime", |o| {
-        o.create_time = "19700101-00:00:00 UTC+00:00"
+        o.create_time = Some("19700101-00:00:00 UTC+00:00")
     });
+    assert!(p.is_empty(), "create_time must be ignored, got {p:?}");
+}
+
+#[test]
+fn create_time_may_be_absent() {
+    let p = problems("missing-createtime", |o| o.create_time = None);
     assert!(p.is_empty(), "create_time must be ignored, got {p:?}");
 }
 

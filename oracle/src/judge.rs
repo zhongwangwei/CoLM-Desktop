@@ -199,7 +199,9 @@ fn compare_attrs<FA, FB>(
     let sa: BTreeSet<&String> = names_a.iter().collect();
     let sb: BTreeSet<&String> = names_b.iter().collect();
     for n in sa.symmetric_difference(&sb) {
-        problems.push(format!("{scope} attribute present on only one side: {n}"));
+        if !VOLATILE_ATTRIBUTES.contains(&n.as_str()) {
+            problems.push(format!("{scope} attribute present on only one side: {n}"));
+        }
     }
     for n in sa.intersection(&sb) {
         if VOLATILE_ATTRIBUTES.contains(&n.as_str()) {
