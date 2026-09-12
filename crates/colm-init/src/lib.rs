@@ -102,6 +102,7 @@ pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
 };
+pub use colm_core::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use colm_core::{is_leap_year, month_lengths, CalendarTime};
 pub use colm_core::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 pub use colm_core::{

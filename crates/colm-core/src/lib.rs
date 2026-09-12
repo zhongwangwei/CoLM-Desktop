@@ -9,6 +9,7 @@ pub mod atmosphere;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;
+pub mod glacier;
 pub mod ground_fluxes;
 pub mod ground_temperature;
 pub mod ground_thermal_step;
@@ -54,6 +55,7 @@ pub use canopy_layer_profile::{
     CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyWindProfileInput,
 };
 pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
+pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_temperature::{ground_temperature, GroundTemperatureInput, GroundTemperatureState};
 pub use ground_thermal_step::{
