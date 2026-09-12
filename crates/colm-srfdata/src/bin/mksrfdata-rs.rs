@@ -6,8 +6,8 @@ use anyhow::{bail, Context, Result};
 use colm_srfdata::{
     build_lct_land_patches_from_raster, build_spatial_topology, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights, read_mesh_raster_f64,
-    read_mesh_raster_i32, write_landpatch_scalar, write_spatial_topology, BlockLayout, SiteMode,
-    SpatialInputKind, COLM_1KM, COLM_500M,
+    read_mesh_raster_i32, read_mesh_tiled_raster_f64, write_landpatch_scalar,
+    write_spatial_topology, BlockLayout, SiteMode, SpatialInputKind, COLM_1KM, COLM_500M,
 };
 
 fn main() -> Result<()> {
@@ -36,6 +36,7 @@ struct SpatialLctArgs {
     soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
     bedrock: Option<PathBuf>,
+    plant_tiles: Option<PathBuf>,
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
@@ -55,6 +56,24 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         lct_grid,
         args.dominant,
     )?;
+    let forest_height = if let Some(path) = &args.plant_tiles {
+        if args.land_cover != SiteMode::Igbp {
+            bail!("--plant-tiles currently supports IGBP only; USGS uses Forest_Height.nc")
+        }
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        let raw = read_mesh_tiled_raster_f64(
+            path,
+            &format!("MOD{:04}", args.year),
+            "HTOP",
+            &topology.mesh,
+            &topology.pixel,
+            COLM_500M,
+        )?;
+        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
+    } else {
+        None
+    };
     let lake_depth = if let Some(path) = &args.lake_depth {
         let waterbody = match args.land_cover {
             SiteMode::Igbp => 17,
@@ -211,6 +230,18 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &bedrock,
         )?;
     }
+    if let Some(forest_height) = forest_height {
+        write_landpatch_scalar(
+            &args.landdata,
+            args.year,
+            &topology,
+            &patches,
+            &args.blocks,
+            "htop",
+            "htop_patches",
+            &forest_height,
+        )?;
+    }
     println!(
         "wrote {} spatial land elements and {} LCT patches to {}",
         topology.land_elements.element_ids.len(),
@@ -240,6 +271,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut soil_brightness = None;
     let mut topography = None;
     let mut bedrock = None;
+    let mut plant_tiles = None;
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -303,6 +335,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--plant-tiles" => {
+                plant_tiles = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--plant-tiles needs the plant_15s directory")?,
+                ));
+                index += 2;
+            }
             other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
         }
     }
@@ -320,6 +359,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         soil_brightness,
         topography,
         bedrock,
+        plant_tiles,
     })
 }
 
@@ -406,7 +446,7 @@ fn parse_land_cover(value: &str) -> Result<SiteMode> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s]"
 }
 
 #[cfg(test)]
@@ -437,6 +477,8 @@ mod tests {
             "topography.nc".into(),
             "--bedrock".into(),
             "bedrock.nc".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Unstructured);
@@ -450,6 +492,7 @@ mod tests {
         );
         assert_eq!(parsed.topography, Some(PathBuf::from("topography.nc")));
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
+        assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
         assert!(parse_spatial_lct(&[
