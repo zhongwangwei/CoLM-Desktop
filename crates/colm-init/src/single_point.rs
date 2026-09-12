@@ -4,9 +4,10 @@
 //! field missing from landdata is an error here; the Rust `mksrfdata` path owns rawdata
 //! completion before this stage runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
+use colm_namelist::{parse, Value};
 
 use crate::{
     derive_igbp_canopy, derive_lake_layers, derive_soil_parameters, derive_usgs_canopy,
@@ -44,6 +45,81 @@ impl<'a> SinglePointStaticConfig<'a> {
             tuning: RestartTuning::default(),
         }
     }
+}
+
+/// Resolved paths and options for the native single-point static initializer.
+///
+/// The source namelist derives `landdata` and `restart` from `DEF_dir_output` and
+/// `DEF_CASE_NAME`; keeping that derivation here prevents the two executables from
+/// disagreeing about where a case lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinglePointStaticRun {
+    pub surface: PathBuf,
+    pub restart_dir: PathBuf,
+    pub case_name: String,
+    pub land_cover_year: i32,
+    pub block_label: String,
+    pub land_cover: LandCoverScheme,
+    pub hydraulic_model: HydraulicModel,
+}
+
+impl SinglePointStaticRun {
+    /// Borrows the fields in the form consumed by the restart initializer.
+    pub fn static_config(&self) -> SinglePointStaticConfig<'_> {
+        SinglePointStaticConfig::new(
+            &self.case_name,
+            self.land_cover_year,
+            &self.block_label,
+            self.land_cover,
+            self.hydraulic_model,
+        )
+    }
+}
+
+/// Resolves the common static single-point initialization contract from `case.nml`.
+///
+/// This is deliberately limited to the common, non-PFT/non-urban static restart
+/// family.  It parses the same three namelist fields used by `read_namelist`, uses
+/// CoLM's defaults when they are absent, and detects the land-cover classification
+/// from the completed `srfdata.nc` contract.  A caller can override that detection
+/// only for an intentionally dual-classification surface.
+pub fn single_point_static_run_from_namelist(
+    namelist: impl AsRef<Path>,
+    land_cover_override: Option<LandCoverScheme>,
+    block_override: Option<&str>,
+) -> Result<SinglePointStaticRun> {
+    let namelist = namelist.as_ref();
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let case_name = required_string(&document, "DEF_CASE_NAME")?;
+    let output = PathBuf::from(required_string(&document, "DEF_dir_output")?);
+    let land_cover_year = optional_i32(&document, "DEF_LC_YEAR")?.unwrap_or(2005);
+    let hydraulic_model = match optional_bool(&document, "DEF_USE_Campbell_SOIL_MODEL")? {
+        true => HydraulicModel::Campbell,
+        false => HydraulicModel::VanGenuchten,
+    };
+    let case_dir = output.join(&case_name);
+    let surface = case_dir.join("landdata/srfdata.nc");
+    let land_cover = land_cover_override.unwrap_or(detect_land_cover(&surface)?);
+    let block_label = block_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| "w180_s90".to_owned());
+    ensure!(
+        !block_label.is_empty(),
+        "CoLM block label must not be empty"
+    );
+
+    Ok(SinglePointStaticRun {
+        surface,
+        restart_dir: case_dir.join("restart"),
+        case_name,
+        land_cover_year,
+        block_label,
+        land_cover,
+        hydraulic_model,
+    })
 }
 
 /// Writes the common constant restart pair for one self-contained `srfdata.nc` file.
@@ -144,6 +220,57 @@ fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {
         "land class {class} is outside the selected CoLM land-cover table"
     );
     Ok(types[index])
+}
+
+fn required_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
+    match document.get(field) {
+        Some(Value::Str(value)) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
+        Some(Value::Str(_)) => bail!("{field} must not be empty"),
+        Some(_) => bail!("{field} must be a quoted string"),
+        None => bail!("case namelist is missing required field {field}"),
+    }
+}
+
+fn optional_i32(document: &colm_namelist::Document, field: &str) -> Result<Option<i32>> {
+    match document.get(field) {
+        Some(Value::Int(value)) => i32::try_from(*value)
+            .map(Some)
+            .with_context(|| format!("{field} is outside CoLM's 32-bit integer range")),
+        Some(_) => bail!("{field} must be an integer"),
+        None => Ok(None),
+    }
+}
+
+fn optional_bool(document: &colm_namelist::Document, field: &str) -> Result<bool> {
+    match document.get(field) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => bail!("{field} must be a logical value"),
+        None => Ok(false),
+    }
+}
+
+fn detect_land_cover(surface: &Path) -> Result<LandCoverScheme> {
+    let file = netcdf::open(surface).with_context(|| {
+        format!(
+            "cannot open single-point surface data {}",
+            surface.display()
+        )
+    })?;
+    match (
+        file.variable("IGBP_classification").is_some(),
+        file.variable("USGS_classification").is_some(),
+    ) {
+        (true, false) => Ok(LandCoverScheme::Igbp),
+        (false, true) => Ok(LandCoverScheme::Usgs),
+        (false, false) => bail!(
+            "{} has neither IGBP_classification nor USGS_classification",
+            surface.display()
+        ),
+        (true, true) => bail!(
+            "{} has both land-cover classifications; select --land-cover explicitly",
+            surface.display()
+        ),
+    }
 }
 
 // `main/MOD_Const_LC.F90`.  Index zero is deliberately unused because CoLM's land

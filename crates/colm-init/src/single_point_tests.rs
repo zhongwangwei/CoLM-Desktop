@@ -13,6 +13,40 @@ fn static_config_uses_the_upstream_namelist_defaults() {
 }
 
 #[test]
+fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-namelist-static-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let surface = directory.join("output/CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(&surface).unwrap();
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_values(&[10], ..)
+        .unwrap();
+    file.close().unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME = 'CN-Cng'\n DEF_dir_output = '{}'\n /\n",
+            directory.join("output").display()
+        ),
+    )
+    .unwrap();
+
+    let run = single_point_static_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(run.surface, surface);
+    assert_eq!(run.restart_dir, directory.join("output/CN-Cng/restart"));
+    assert_eq!(run.case_name, "CN-Cng");
+    assert_eq!(run.land_cover_year, 2005);
+    assert_eq!(run.block_label, "w180_s90");
+    assert_eq!(run.land_cover, LandCoverScheme::Igbp);
+    assert_eq!(run.hydraulic_model, HydraulicModel::VanGenuchten);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
 fn native_single_point_static_restart_matches_the_upstream_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
