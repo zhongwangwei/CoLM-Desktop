@@ -31,6 +31,7 @@ pub mod thermal_properties;
 pub mod time_state;
 pub mod urban;
 pub mod vegetation;
+pub mod vic;
 
 /// CoLM's landdata/restart missing marker.
 pub const MISSING: f64 = -1.0e36;
@@ -123,3 +124,4 @@ pub use urban::{
     UrbanLucyState, UrbanState,
 };
 pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};
+pub use vic::{vic_runoff, VicRunoffInput, VicRunoffState};
