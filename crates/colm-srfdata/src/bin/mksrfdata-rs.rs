@@ -38,6 +38,7 @@ struct SpatialLctArgs {
     topography: Option<PathBuf>,
     bedrock: Option<PathBuf>,
     plant_tiles: Option<PathBuf>,
+    usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
 }
 
@@ -58,23 +59,39 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         lct_grid,
         args.dominant,
     )?;
-    let forest_height = if let Some(path) = &args.plant_tiles {
-        if args.land_cover != SiteMode::Igbp {
-            bail!("--plant-tiles currently supports IGBP only; USGS uses Forest_Height.nc")
+    let forest_height = match (&args.plant_tiles, &args.usgs_forest_height) {
+        (Some(path), None) => {
+            if args.land_cover != SiteMode::Igbp {
+                bail!("--plant-tiles currently supports IGBP only; USGS uses Forest_Height.nc")
+            }
+            let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+            let raw = read_mesh_tiled_raster_f64(
+                path,
+                &format!("MOD{:04}", args.year),
+                "HTOP",
+                &topology.mesh,
+                &topology.pixel,
+                COLM_500M,
+            )?;
+            let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+            Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
         }
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let raw = read_mesh_tiled_raster_f64(
-            path,
-            &format!("MOD{:04}", args.year),
-            "HTOP",
-            &topology.mesh,
-            &topology.pixel,
-            COLM_500M,
-        )?;
-        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
-        Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
-    } else {
-        None
+        (None, Some(path)) => {
+            if args.land_cover != SiteMode::Usgs {
+                bail!("--usgs-forest-height supports USGS only")
+            }
+            let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+            let raw = read_mesh_raster_f64(
+                path,
+                "forest_height",
+                &topology.mesh,
+                &topology.pixel,
+                COLM_1KM,
+            )?;
+            Some(layout.aggregate_usgs_forest_height(&raw, 1, 16, 24)?)
+        }
+        (None, None) => None,
+        (Some(_), Some(_)) => bail!("choose one forest-height source"),
     };
     let lake_depth = if let Some(path) = &args.lake_depth {
         let waterbody = match args.land_cover {
@@ -337,6 +354,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut topography = None;
     let mut bedrock = None;
     let mut plant_tiles = None;
+    let mut usgs_forest_height = None;
     let mut monthly_vegetation_years = Vec::new();
     let mut index = 5;
     while index < args.len() {
@@ -420,8 +438,18 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 monthly_vegetation_years.push(year);
                 index += 2;
             }
+            "--usgs-forest-height" => {
+                usgs_forest_height = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--usgs-forest-height needs Forest_Height.nc")?,
+                ));
+                index += 2;
+            }
             other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
         }
+    }
+    if plant_tiles.is_some() && usgs_forest_height.is_some() {
+        bail!("--plant-tiles and --usgs-forest-height are mutually exclusive")
     }
     Ok(SpatialLctArgs {
         kind,
@@ -438,6 +466,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         topography,
         bedrock,
         plant_tiles,
+        usgs_forest_height,
         monthly_vegetation_years,
     })
 }
@@ -538,7 +567,7 @@ fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--monthly-vegetation-year year]..."
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -590,6 +619,7 @@ mod tests {
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
         assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
+        assert_eq!(parsed.usgs_forest_height, None);
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
         assert!(parse_spatial_lct(&[
@@ -598,6 +628,20 @@ mod tests {
             "landtype.nc".into(),
             "landdata".into(),
             "2005".into(),
+        ])
+        .is_err());
+        assert!(parse_spatial_lct(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--land-cover".into(),
+            "usgs".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+            "--usgs-forest-height".into(),
+            "Forest_Height.nc".into(),
         ])
         .is_err());
     }
