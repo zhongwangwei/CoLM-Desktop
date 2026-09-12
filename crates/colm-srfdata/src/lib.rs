@@ -17,7 +17,9 @@ pub mod mesh;
 pub mod raster;
 pub mod shapefile;
 pub mod site;
+pub mod surface;
 pub mod texture;
+pub mod topology;
 pub mod urban_extra;
 pub mod urban_runtime;
 pub mod urban_soil;
@@ -27,4 +29,6 @@ pub use derive::{
     depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
 };
 pub use grid::{Grid, COLM_500M};
+pub use surface::{FlatPatches, SoilBrightness, Topography, SURFACE_MISSING};
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
+pub use topology::{FlatLandElements, FlatLandPatches, FlatMesh};
