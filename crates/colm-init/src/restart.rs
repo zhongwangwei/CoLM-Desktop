@@ -95,6 +95,31 @@ pub struct RestartTuning {
     pub wetwatmax: f64,
 }
 
+impl Default for RestartTuning {
+    fn default() -> Self {
+        // `share/MOD_Namelist.F90`: the expert-mode defaults consumed by
+        // `mkinidata/MOD_Initialize.F90` before it writes this file.
+        Self {
+            zlnd: 0.01,
+            zsno: 0.0024,
+            csoilc: 0.004,
+            dewmx: 0.1,
+            capr: 0.34,
+            cnfac: 0.5,
+            ssi: 0.033,
+            wimp: 0.05,
+            pondmx: 10.0,
+            smpmax: -1.5e5,
+            smpmin: -1.0e8,
+            smpmax_hr: -2.0e2,
+            smpmin_hr: -2.0e5,
+            trsmx0: 2.0e-4,
+            tcrit: 2.5,
+            wetwatmax: 200.0,
+        }
+    }
+}
+
 /// Inputs emitted only for `DEF_Runoff_SCHEME == 0`.
 #[derive(Debug, Clone, Copy)]
 pub struct TopmodelFields<'a> {

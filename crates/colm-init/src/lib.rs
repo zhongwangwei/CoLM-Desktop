@@ -7,6 +7,7 @@ pub mod albedo;
 pub mod hydrology;
 pub mod pft_restart;
 pub mod restart;
+pub mod single_point;
 pub mod static_state;
 pub mod surface_data;
 pub mod time_restart;
@@ -31,6 +32,7 @@ pub use restart::{
     RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields, TerrainRadiation,
     TopmodelFields,
 };
+pub use single_point::{write_single_point_constant_restart, SinglePointStaticConfig};
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState, MISSING,
