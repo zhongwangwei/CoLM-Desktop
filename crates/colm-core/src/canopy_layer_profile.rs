@@ -527,8 +527,8 @@ fn validate_wind_profile(input: CanopyWindProfileInput, height_m: f64) -> Result
             && input.ground_momentum_roughness_m > 0.0
             && input.attenuation_coefficient > 0.0
             && input.canopy_top_height_m > input.canopy_bottom_height_m
-            && input.canopy_bottom_height_m > input.ground_momentum_roughness_m
-            && height_m > input.ground_momentum_roughness_m,
+            && input.canopy_bottom_height_m >= input.ground_momentum_roughness_m
+            && height_m >= input.ground_momentum_roughness_m,
         "canopy wind profile inputs are invalid"
     );
     Ok(())

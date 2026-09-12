@@ -67,6 +67,13 @@ fn wind_profile_matches_mod_canopy_layer_profile() {
 }
 
 #[test]
+fn wind_profile_accepts_the_upstream_z0_bottom_boundary() {
+    let mut input = wind();
+    input.canopy_bottom_height_m = input.ground_momentum_roughness_m;
+    assert!(effective_canopy_wind(input).unwrap().is_finite());
+}
+
+#[test]
 fn diffusivity_profile_matches_mod_canopy_layer_profile() {
     let input = diffusivity();
     close(canopy_diffusivity(input, 6.5).unwrap(), 0.28662747804061406);

@@ -17,6 +17,7 @@ pub mod high_res_parameters;
 pub mod hydrology;
 pub mod interception;
 pub mod lake;
+pub mod leaf_temperature;
 pub mod linear;
 pub mod monin_obukhov;
 pub mod net_solar;
@@ -81,6 +82,10 @@ pub use lake::{
     lake_thermal_conductivity, LakeColumn, LakeConductivity, LakeConductivityInput,
     LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
     LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
+};
+pub use leaf_temperature::{
+    leaf_temperature, LeafTemperatureInput, LeafTemperatureOptions, LeafTemperatureOutput,
+    LeafTemperatureState, ObservationHeightMode,
 };
 pub use monin_obukhov::{
     canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,
