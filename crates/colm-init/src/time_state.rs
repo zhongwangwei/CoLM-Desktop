@@ -14,6 +14,21 @@ pub struct SnowState {
     pub thickness_m: Vec<f64>,
 }
 
+/// Vegetation burial and ground snow coverage from `MOD_SnowFraction`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnowCover {
+    pub vegetation_burial_fraction: f64,
+    pub snow_free_vegetation_fraction: f64,
+    pub ground_snow_fraction: f64,
+}
+
+/// PFT/PC snow-cover result from `snowfraction_pftwrap`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PftSnowCover {
+    pub patch: SnowCover,
+    pub pft_snow_free_vegetation_fraction: Vec<f64>,
+}
+
 /// Soil and aquifer variables created by the `IniTimeVar` cold-start branch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColdSoilState {
@@ -384,6 +399,145 @@ pub fn initialize_snow_layers(
         zi = -zi - state.thickness_m[index];
     }
     Ok(state)
+}
+
+/// Applies `snowfraction` for the non-PFT/PC initialization path.
+pub fn derive_snow_cover(
+    lai: f64,
+    sai: f64,
+    z0m_m: f64,
+    soil_roughness_m: f64,
+    snow_water_equivalent_kg_m2: f64,
+    snow_depth_m: f64,
+    snow_cover_exponent: f64,
+) -> Result<SnowCover> {
+    ensure!(
+        lai.is_finite()
+            && sai.is_finite()
+            && z0m_m.is_finite()
+            && soil_roughness_m.is_finite()
+            && snow_water_equivalent_kg_m2.is_finite()
+            && snow_depth_m.is_finite()
+            && snow_cover_exponent.is_finite(),
+        "snow-fraction inputs must be finite"
+    );
+    let (vegetation_burial_fraction, snow_free_vegetation_fraction) = if lai + sai > 1.0e-6 {
+        ensure!(z0m_m > 0.0, "vegetated snow fraction requires positive z0m");
+        let burial = 0.1 * snow_depth_m / z0m_m;
+        let burial = burial / (1.0 + burial);
+        (burial, 1.0 - burial)
+    } else {
+        (0.0, 1.0)
+    };
+    let ground_snow_fraction = if snow_depth_m > 0.0 {
+        ensure!(
+            soil_roughness_m > 0.0,
+            "snow-covered ground requires positive soil roughness"
+        );
+        let melt_factor =
+            (snow_water_equivalent_kg_m2 / snow_depth_m / 100.0).powf(snow_cover_exponent);
+        ensure!(
+            melt_factor.is_finite() && melt_factor != 0.0,
+            "snow cover melt factor must be finite and nonzero"
+        );
+        (snow_depth_m / (2.5 * soil_roughness_m * melt_factor)).tanh()
+    } else {
+        0.0
+    };
+    Ok(SnowCover {
+        vegetation_burial_fraction,
+        snow_free_vegetation_fraction,
+        ground_snow_fraction,
+    })
+}
+
+/// Applies `snowfraction_pftwrap` to one patch's PFTs.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_pft_snow_cover(
+    pft_class: &[i32],
+    pft_fraction: &[f64],
+    lai: &[f64],
+    sai: &[f64],
+    z0m_m: &[f64],
+    canopy_bottom_m: &[f64],
+    canopy_top_m: &[f64],
+    soil_roughness_m: f64,
+    snow_water_equivalent_kg_m2: f64,
+    snow_depth_m: f64,
+    snow_cover_exponent: f64,
+    vegetation_snow_enabled: bool,
+) -> Result<PftSnowCover> {
+    let pfts = pft_class.len();
+    ensure!(
+        pfts > 0
+            && pft_fraction.len() == pfts
+            && lai.len() == pfts
+            && sai.len() == pfts
+            && z0m_m.len() == pfts
+            && canopy_bottom_m.len() == pfts
+            && canopy_top_m.len() == pfts,
+        "PFT snow-cover fields must be nonempty and have matching lengths"
+    );
+    ensure!(
+        pft_fraction
+            .iter()
+            .chain(lai)
+            .chain(sai)
+            .chain(z0m_m)
+            .chain(canopy_bottom_m)
+            .chain(canopy_top_m)
+            .all(|value| value.is_finite()),
+        "PFT snow-cover fields must be finite"
+    );
+    let mut pft_snow_free_vegetation_fraction = Vec::with_capacity(pfts);
+    let mut vegetation_burial_fraction = 0.0;
+    for pft in 0..pfts {
+        let vegetated = lai[pft] + sai[pft] > 1.0e-6;
+        let mut burial = if vegetated {
+            ensure!(
+                z0m_m[pft] > 0.0,
+                "vegetated PFT {pft} requires positive z0m"
+            );
+            let burial = 0.1 * snow_depth_m / z0m_m[pft];
+            burial / (1.0 + burial)
+        } else {
+            0.0
+        };
+        if vegetation_snow_enabled && vegetated && (1..=8).contains(&pft_class[pft]) {
+            ensure!(
+                canopy_top_m[pft] > canopy_bottom_m[pft],
+                "tree PFT {pft} requires canopy top greater than canopy bottom"
+            );
+            burial = ((snow_depth_m - canopy_bottom_m[pft]).max(0.0)
+                / (canopy_top_m[pft] - canopy_bottom_m[pft]))
+                .min(1.0);
+        }
+        pft_snow_free_vegetation_fraction.push(1.0 - burial);
+        vegetation_burial_fraction += burial * pft_fraction[pft];
+    }
+    let snow_free_vegetation_fraction = pft_snow_free_vegetation_fraction
+        .iter()
+        .zip(pft_fraction)
+        .map(|(snow_free, fraction)| snow_free * fraction)
+        .sum();
+    let ground_snow_fraction = derive_snow_cover(
+        0.0,
+        0.0,
+        1.0,
+        soil_roughness_m,
+        snow_water_equivalent_kg_m2,
+        snow_depth_m,
+        snow_cover_exponent,
+    )?
+    .ground_snow_fraction;
+    Ok(PftSnowCover {
+        patch: SnowCover {
+            vegetation_burial_fraction,
+            snow_free_vegetation_fraction,
+            ground_snow_fraction,
+        },
+        pft_snow_free_vegetation_fraction,
+    })
 }
 
 fn slot(fortran_layer: i32) -> usize {

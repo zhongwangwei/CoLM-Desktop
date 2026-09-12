@@ -46,6 +46,51 @@ fn snow_initializer_rejects_a_non_fortran_snow_column_size() {
 }
 
 #[test]
+fn snow_cover_matches_vegetation_burial_and_ground_fraction() {
+    let cover = derive_snow_cover(2.0, 1.0, 0.5, 0.05, 100.0, 0.2, 0.5).unwrap();
+    let burial = 0.04 / 1.04;
+    assert_close(&[cover.vegetation_burial_fraction], &[burial]);
+    assert_close(&[cover.snow_free_vegetation_fraction], &[1.0 - burial]);
+    assert_close(
+        &[cover.ground_snow_fraction],
+        &[(0.2 / (2.5 * 0.05 * (100.0_f64 / 0.2 / 100.0).sqrt())).tanh()],
+    );
+
+    let bare = derive_snow_cover(0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.5).unwrap();
+    assert_eq!(bare.vegetation_burial_fraction, 0.0);
+    assert_eq!(bare.snow_free_vegetation_fraction, 1.0);
+    assert_eq!(bare.ground_snow_fraction, 0.0);
+}
+
+#[test]
+fn pft_snow_cover_uses_tree_geometry_when_enabled() {
+    let cover = derive_pft_snow_cover(
+        &[2, 10],
+        &[0.25, 0.75],
+        &[1.0, 1.0],
+        &[0.0, 0.0],
+        &[0.1, 0.2],
+        &[1.0, 0.0],
+        &[5.0, 2.0],
+        0.05,
+        100.0,
+        3.0,
+        0.5,
+        true,
+    )
+    .unwrap();
+    assert_close(&cover.pft_snow_free_vegetation_fraction, &[0.5, 0.4]);
+    assert_close(
+        &[cover.patch.vegetation_burial_fraction],
+        &[0.25 * 0.5 + 0.75 * 0.6],
+    );
+    assert_close(
+        &[cover.patch.snow_free_vegetation_fraction],
+        &[0.25 * 0.5 + 0.75 * 0.4],
+    );
+}
+
+#[test]
 fn cold_soil_matches_ice_and_aquifer_initialization_branches() {
     let soil = initialize_cold_soil(
         0,
