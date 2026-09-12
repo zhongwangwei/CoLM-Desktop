@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn leaf_optics_are_the_native_land_cover_constants() {
+    assert_eq!(
+        leaf_optics_from_land_cover(LandCoverScheme::Igbp, 10).unwrap(),
+        LeafOptics {
+            chil: -0.3,
+            reflectance: [[0.105, 0.360], [0.580, 0.580]],
+            transmittance: [[0.070, 0.220], [0.250, 0.380]],
+        }
+    );
+    assert_eq!(
+        leaf_optics_from_land_cover(LandCoverScheme::Usgs, 12).unwrap(),
+        LeafOptics {
+            chil: 0.01,
+            reflectance: [[0.070, 0.160], [0.350, 0.390]],
+            transmittance: [[0.050, 0.001], [0.100, 0.001]],
+        }
+    );
+    assert!(leaf_optics_from_land_cover(LandCoverScheme::Igbp, 0).is_err());
+    assert!(leaf_optics_from_land_cover(LandCoverScheme::Usgs, 25).is_err());
+}
+
+#[test]
 fn cold_start_radiation_matches_the_upstream_cn_cng_broadband_restart() {
     let output = cold_start_broadband_radiation(
         0,

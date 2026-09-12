@@ -113,6 +113,63 @@ fn native_single_point_static_restart_matches_the_upstream_reference() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+#[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
+fn native_single_point_cold_time_restart_matches_the_upstream_reference() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let reference = root.join(
+        "oracle/work/generated/out/CN-Cng/restart/2008-001-00000/CN-Cng_restart_2008-001-00000_lc2005_w180_s90.nc",
+    );
+    let directory = std::env::temp_dir().join(format!(
+        "colm-init-single-point-cold-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let output = directory.join("output");
+    let surface = output.join("CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    std::fs::copy(
+        root.join("oracle/work/generated/out/CN-Cng/landdata/srfdata.nc"),
+        &surface,
+    )
+    .unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\nDEF_CASE_NAME='CN-Cng'\nDEF_dir_output='{}'\nDEF_simulation_time%greenwich=.false.\nDEF_simulation_time%start_year=2008\nDEF_USE_OZONESTRESS=.false.\n/\n",
+            output.display()
+        ),
+    )
+    .unwrap();
+
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    let actual_path = write_single_point_cold_time_restart(&run).unwrap().block;
+    let expected = netcdf::open(reference).unwrap();
+    let actual = netcdf::open(actual_path).unwrap();
+    assert_eq!(
+        ordered_dimension_lengths(&actual),
+        ordered_dimension_lengths(&expected)
+    );
+    assert_eq!(
+        ordered_variable_names(&actual),
+        ordered_variable_names(&expected)
+    );
+    for name in ordered_variable_names(&expected) {
+        let expected = values_f64(&expected, &name);
+        let actual = values_f64(&actual, &name);
+        assert_eq!(actual.len(), expected.len(), "{name}");
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            let tolerance = 1.0e-10 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "{name}[{index}]: got {actual:.17e}, expected {expected:.17e}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 const F64_FIELDS: &[&str] = &[
     "patchlonr",
     "patchlatr",
@@ -190,6 +247,16 @@ fn dimension_lengths(file: &netcdf::File) -> Vec<(String, usize)> {
     file.dimensions()
         .map(|dimension| (dimension.name(), dimension.len()))
         .collect()
+}
+
+fn ordered_dimension_lengths(file: &netcdf::File) -> Vec<(String, usize)> {
+    file.dimensions()
+        .map(|dimension| (dimension.name(), dimension.len()))
+        .collect()
+}
+
+fn ordered_variable_names(file: &netcdf::File) -> Vec<String> {
+    file.variables().map(|variable| variable.name()).collect()
 }
 
 fn values_f64(file: &netcdf::File, name: &str) -> Vec<f64> {

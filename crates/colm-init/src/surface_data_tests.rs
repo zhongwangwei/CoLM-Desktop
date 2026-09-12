@@ -61,6 +61,46 @@ fn reader_rejects_missing_or_wrong_sized_scientific_inputs() {
     std::fs::remove_file(missing).unwrap();
 }
 
+#[test]
+fn monthly_vegetation_uses_the_single_point_year_selection_contract() {
+    let path = temp_file("monthly");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("LAI_year", 2).unwrap();
+    file.add_dimension("month", 12).unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2008, 2010], ..)
+        .unwrap();
+    file.add_variable::<f64>("LAI_monthly", &["LAI_year", "month"])
+        .unwrap()
+        .put_values(&(0..24).map(|value| value as f64).collect::<Vec<_>>(), ..)
+        .unwrap();
+    file.add_variable::<f64>("SAI_monthly", &["LAI_year", "month"])
+        .unwrap()
+        .put_values(
+            &(100..124).map(|value| value as f64).collect::<Vec<_>>(),
+            ..,
+        )
+        .unwrap();
+    file.close().unwrap();
+
+    let values = read_single_point_monthly_vegetation(&path).unwrap();
+    assert_eq!(
+        values.for_year(2009, 1, true, 2000, 2020).unwrap(),
+        (0.0, 100.0)
+    );
+    assert_eq!(
+        values.for_year(2010, 12, true, 2000, 2020).unwrap(),
+        (23.0, 123.0)
+    );
+    assert_eq!(
+        values.for_year(2006, 2, false, 2008, 2010).unwrap(),
+        (1.0, 101.0)
+    );
+    assert!(values.for_year(2009, 1, false, 2000, 2020).is_err());
+    std::fs::remove_file(path).unwrap();
+}
+
 fn write_surface(path: &Path, layers: usize, vgm: bool, with_ba_beta: bool) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("soil", layers).unwrap();

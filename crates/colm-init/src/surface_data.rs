@@ -29,6 +29,73 @@ pub struct SinglePointSurfaceData {
     pub soil_layers: Vec<SoilLayerInput>,
 }
 
+/// Site monthly vegetation records stored alongside single-point surface data.
+///
+/// Values retain the NetCDF `(LAI_year, month)` order.  This is the source order
+/// exposed by `MOD_SingleSrfdata.F90`, not a Rust-specific transpose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinglePointMonthlyVegetation {
+    pub years: Vec<i32>,
+    pub lai: Vec<f64>,
+    pub sai: Vec<f64>,
+}
+
+impl SinglePointMonthlyVegetation {
+    /// Resolves the selected one-based calendar month exactly as `LAI_readin` does.
+    pub fn for_year(
+        &self,
+        target_year: i32,
+        month: u8,
+        use_site_lai: bool,
+        configured_start_year: i32,
+        configured_end_year: i32,
+    ) -> Result<(f64, f64)> {
+        ensure!((1..=12).contains(&month), "month must be in 1..=12");
+        ensure!(
+            configured_start_year <= configured_end_year,
+            "LAI configured start year exceeds end year"
+        );
+        let selected_year = if use_site_lai {
+            *self
+                .years
+                .iter()
+                .min_by_key(|&&year| (i64::from(year) - i64::from(target_year)).abs())
+                .context("single-point surface has no LAI years")?
+        } else {
+            target_year.clamp(configured_start_year, configured_end_year)
+        };
+        let year_index = self
+            .years
+            .iter()
+            .position(|&year| year == selected_year)
+            .with_context(|| {
+                format!("single-point surface has no LAI record for {selected_year}")
+            })?;
+        let index = year_index * 12 + usize::from(month - 1);
+        Ok((self.lai[index], self.sai[index]))
+    }
+}
+
+/// Reads the `LAI_year`, `LAI_monthly`, and `SAI_monthly` single-point contract.
+pub fn read_single_point_monthly_vegetation(
+    path: impl AsRef<Path>,
+) -> Result<SinglePointMonthlyVegetation> {
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
+    let years = vector_i32(&file, "LAI_year")?;
+    ensure!(!years.is_empty(), "LAI_year must not be empty");
+    for window in years.windows(2) {
+        ensure!(
+            window[0] < window[1],
+            "LAI_year must be strictly increasing"
+        );
+    }
+    let lai = monthly_vector(&file, "LAI_monthly", years.len())?;
+    let sai = monthly_vector(&file, "SAI_monthly", years.len())?;
+    Ok(SinglePointMonthlyVegetation { years, lai, sai })
+}
+
 /// Reads the static single-point contract produced by `MOD_SingleSrfdata.F90`.
 pub fn read_single_point_surface(
     path: impl AsRef<Path>,
@@ -216,18 +283,22 @@ fn scalar(file: &netcdf::File, name: &str) -> Result<f64> {
 }
 
 fn scalar_i32(file: &netcdf::File, name: &str) -> Result<i32> {
-    let variable = file
-        .variable(name)
-        .with_context(|| format!("single-point surface data is missing {name}"))?;
-    let values = variable
-        .get_values::<i32, _>(..)
-        .with_context(|| format!("cannot read {name}"))?;
+    let values = vector_i32(file, name)?;
     ensure!(
         values.len() == 1,
         "{name} must be scalar, got {} values",
         values.len()
     );
     Ok(values[0])
+}
+
+fn vector_i32(file: &netcdf::File, name: &str) -> Result<Vec<i32>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    variable
+        .get_values::<i32, _>(..)
+        .with_context(|| format!("cannot read {name}"))
 }
 
 fn vector(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
@@ -237,6 +308,29 @@ fn vector(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
     variable
         .get_values::<f64, _>(..)
         .with_context(|| format!("cannot read {name}"))
+}
+
+fn monthly_vector(file: &netcdf::File, name: &str, years: usize) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    let dimensions = variable.dimensions();
+    ensure!(
+        dimensions.len() == 2
+            && dimensions[0].name() == "LAI_year"
+            && dimensions[0].len() == years
+            && dimensions[1].name() == "month"
+            && dimensions[1].len() == 12,
+        "{name} must have dimensions (LAI_year, month=12)"
+    );
+    let values = variable
+        .get_values::<f64, _>(..)
+        .with_context(|| format!("cannot read {name}"))?;
+    ensure!(
+        values.len() == years * 12 && values.iter().all(|value| value.is_finite()),
+        "{name} must contain finite monthly values for every LAI year"
+    );
+    Ok(values)
 }
 
 #[cfg(test)]

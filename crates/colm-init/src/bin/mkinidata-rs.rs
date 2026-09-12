@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use colm_init::{
-    single_point_static_run_from_namelist, write_single_point_constant_restart, HydraulicModel,
-    LandCoverScheme, SinglePointStaticConfig,
+    single_point_cold_start_run_from_namelist, write_single_point_cold_time_restart,
+    write_single_point_constant_restart, HydraulicModel, LandCoverScheme, SinglePointStaticConfig,
 };
 
 fn main() -> Result<()> {
@@ -37,11 +37,16 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             value => bail!("unknown mkinidata-rs option {value}"),
         }
     }
-    let run = single_point_static_run_from_namelist(&namelist, land_cover, block.as_deref())?;
-    let files =
-        write_single_point_constant_restart(&run.surface, &run.restart_dir, run.static_config())?;
+    let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
+    let files = write_single_point_constant_restart(
+        &run.static_run.surface,
+        &run.static_run.restart_dir,
+        run.static_run.static_config(),
+    )?;
+    let time = write_single_point_cold_time_restart(&run)?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
+    println!("wrote {}", time.block.display());
     Ok(())
 }
 

@@ -27,7 +27,9 @@ pub use pft_restart::{
     write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
     PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
 };
-pub use radiation::{cold_start_broadband_radiation, ColdStartRadiation, LeafOptics};
+pub use radiation::{
+    cold_start_broadband_radiation, leaf_optics_from_land_cover, ColdStartRadiation, LeafOptics,
+};
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
     ConstantRestartFiles, ConstantRestartInput, RestartDimensions, RestartPatchFields,
@@ -35,14 +37,18 @@ pub use restart::{
     TopmodelFields,
 };
 pub use single_point::{
-    single_point_static_run_from_namelist, write_single_point_constant_restart,
-    SinglePointStaticConfig, SinglePointStaticRun,
+    single_point_cold_start_run_from_namelist, single_point_static_run_from_namelist,
+    write_single_point_cold_time_restart, write_single_point_constant_restart,
+    SinglePointColdStartRun, SinglePointStaticConfig, SinglePointStaticRun,
 };
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState, MISSING,
 };
-pub use surface_data::{read_single_point_surface, SinglePointSurfaceData};
+pub use surface_data::{
+    read_single_point_monthly_vegetation, read_single_point_surface, SinglePointMonthlyVegetation,
+    SinglePointSurfaceData,
+};
 pub use time_restart::{
     write_time_restart, write_time_restart_block, IrrigationFields, OzoneFields,
     PlantHydraulicFields, RestartDate, SnowAerosolFields, SnowSoilRestartFields, TimeLakeFields,

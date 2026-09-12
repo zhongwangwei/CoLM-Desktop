@@ -322,7 +322,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         )?;
     }
 
-    put_patch_values(&mut file, patch_entries(input.patch))?;
+    put_patch_values(&mut file, pre_radiation_patch_entries(input.patch))?;
     for (name, values) in [
         ("alb", input.radiation.albedo),
         ("ssun", input.radiation.sunlit_absorption),
@@ -339,6 +339,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             values,
         )?;
     }
+    put_patch_values(&mut file, post_radiation_patch_entries(input.patch))?;
     put_axis_major(
         &mut file,
         "t_lake",
@@ -365,6 +366,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             values,
         )?;
     }
+    put_patch_values(&mut file, [("savedtke1", input.patch.saved_tke)])?;
     for (name, values) in snow_aerosol_entries(input.snow_aerosol) {
         put_axis_major(
             &mut file,
@@ -384,6 +386,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         patches,
         input.radiation.snow_layer_absorption,
     )?;
+    put_patch_values(&mut file, regional_patch_entries(input.patch))?;
     if let Some(irrigation) = input.irrigation {
         put_patch_values(&mut file, irrigation_entries(irrigation))?;
     }
@@ -421,6 +424,61 @@ fn patch_entries(fields: TimePatchFields<'_>) -> [(&str, &[f64]); 41] {
         ("wdsrf", fields.surface_water_mm),
         ("rss", fields.soil_surface_resistance_s_m),
         ("savedtke1", fields.saved_tke),
+        ("trad", fields.radiative_temperature_k),
+        ("tref", fields.reference_temperature_k),
+        ("qref", fields.reference_humidity),
+        ("rst", fields.stomatal_resistance_s_m),
+        ("emis", fields.emissivity),
+        ("z0m", fields.roughness_length_m),
+        ("zol", fields.monin_obukhov_height),
+        ("rib", fields.bulk_richardson),
+        ("ustar", fields.friction_velocity),
+        ("qstar", fields.humidity_scale),
+        ("tstar", fields.temperature_scale_k),
+        ("fm", fields.momentum_integral),
+        ("fh", fields.heat_integral),
+        ("fq", fields.moisture_integral),
+    ]
+}
+
+fn pre_radiation_patch_entries(fields: TimePatchFields<'_>) -> [(&str, &[f64]); 18] {
+    [
+        ("t_grnd", fields.ground_temperature_k),
+        ("tleaf", fields.leaf_temperature_k),
+        ("ldew", fields.canopy_water_mm),
+        ("ldew_rain", fields.canopy_rain_mm),
+        ("ldew_snow", fields.canopy_snow_mm),
+        ("fwet_snow", fields.wet_snow_fraction),
+        ("sag", fields.snow_age),
+        ("scv", fields.snow_water_equivalent_mm),
+        ("snowdp", fields.snow_depth_m),
+        ("fveg", fields.vegetation_fraction),
+        ("fsno", fields.ground_snow_fraction),
+        ("sigf", fields.snow_free_vegetation_fraction),
+        ("green", fields.greenness),
+        ("lai", fields.lai),
+        ("tlai", fields.total_lai),
+        ("sai", fields.sai),
+        ("tsai", fields.total_sai),
+        ("coszen", fields.cosine_zenith),
+    ]
+}
+
+fn post_radiation_patch_entries(fields: TimePatchFields<'_>) -> [(&str, &[f64]); 8] {
+    [
+        ("thermk", fields.thermal_gap_fraction),
+        ("extkb", fields.direct_extinction),
+        ("extkd", fields.diffuse_extinction),
+        ("zwt", fields.water_table_depth_m),
+        ("wa", fields.aquifer_water_mm),
+        ("wetwat", fields.wetland_water_mm),
+        ("wdsrf", fields.surface_water_mm),
+        ("rss", fields.soil_surface_resistance_s_m),
+    ]
+}
+
+fn regional_patch_entries(fields: TimePatchFields<'_>) -> [(&str, &[f64]); 14] {
+    [
         ("trad", fields.radiative_temperature_k),
         ("tref", fields.reference_temperature_k),
         ("qref", fields.reference_humidity),
@@ -656,13 +714,17 @@ fn define_dimensions(
         ("soilsnow", dimensions.soil_layers + dimensions.snow_layers),
         ("soil", dimensions.soil_layers),
         ("lake", dimensions.lake_layers),
-        ("band", dimensions.bands),
-        ("rtyp", dimensions.radiation_types),
     ] {
         file.add_dimension(name, length)?;
     }
     if let Some(plant) = plant {
         file.add_dimension("vegnodes", plant.vegetation_nodes)?;
+    }
+    for (name, length) in [
+        ("band", dimensions.bands),
+        ("rtyp", dimensions.radiation_types),
+    ] {
+        file.add_dimension(name, length)?;
     }
     Ok(())
 }

@@ -5,7 +5,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::SoilReflectance;
+use crate::{LandCoverScheme, SoilReflectance};
 
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
@@ -19,6 +19,91 @@ pub struct LeafOptics {
     /// `[band][green leaf, dead stem]`.
     pub transmittance: [[f64; BANDS]; BANDS],
 }
+
+/// Looks up CoLM's native broadband leaf optical constants for one land class.
+///
+/// This is the `rho`/`tau` assignment in `MOD_Const_LC.F90`; it deliberately
+/// keeps classes one-based, as does the Fortran land-cover contract.
+pub fn leaf_optics_from_land_cover(scheme: LandCoverScheme, land_class: i32) -> Result<LeafOptics> {
+    let index = usize::try_from(land_class)
+        .map_err(|_| anyhow::anyhow!("land class {land_class} is negative"))?
+        .checked_sub(1)
+        .ok_or_else(|| anyhow::anyhow!("land class must start at one"))?;
+    let table = match scheme {
+        LandCoverScheme::Igbp => &IGBP_LEAF_OPTICS[..],
+        LandCoverScheme::Usgs => &USGS_LEAF_OPTICS[..],
+    };
+    table.get(index).copied().ok_or_else(|| {
+        anyhow::anyhow!("land class {land_class} is outside the selected CoLM optical table")
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+const fn optics(
+    chil: f64,
+    rhol_vis: f64,
+    rhos_vis: f64,
+    rhol_nir: f64,
+    rhos_nir: f64,
+    taul_vis: f64,
+    taus_vis: f64,
+    taul_nir: f64,
+    taus_nir: f64,
+) -> LeafOptics {
+    LeafOptics {
+        chil,
+        reflectance: [[rhol_vis, rhos_vis], [rhol_nir, rhos_nir]],
+        transmittance: [[taul_vis, taus_vis], [taul_nir, taus_nir]],
+    }
+}
+
+// `main/MOD_Const_LC.F90`, listed one class per row to avoid transposition bugs.
+const IGBP_LEAF_OPTICS: [LeafOptics; 17] = [
+    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
+    optics(0.10, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
+    optics(0.25, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.125, 0.07, 0.16, 0.40, 0.39, 0.05, 0.001, 0.15, 0.001),
+    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.105, 0.16, 0.58, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.105, 0.16, 0.58, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(0.10, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.105, 0.16, 0.58, 0.39, 0.05, 0.001, 0.25, 0.001),
+];
+
+const USGS_LEAF_OPTICS: [LeafOptics; 24] = [
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(0.01, 0.10, 0.16, 0.45, 0.39, 0.07, 0.001, 0.25, 0.001),
+    optics(0.01, 0.10, 0.16, 0.45, 0.39, 0.07, 0.001, 0.25, 0.001),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(0.25, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
+    optics(0.10, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
+    optics(0.125, 0.07, 0.16, 0.40, 0.39, 0.05, 0.001, 0.15, 0.001),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(0.10, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
+    optics(0.01, 0.10, 0.16, 0.45, 0.39, 0.07, 0.001, 0.25, 0.001),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
+];
 
 /// Broadband arrays produced by the snow-free cold-start `albland` path.
 #[derive(Debug, Clone, PartialEq)]
