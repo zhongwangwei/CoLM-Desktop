@@ -34,6 +34,7 @@ pub use pft::{
     aggregate_pft_fractions, aggregate_pft_index, PftFractionInput, PftIndexInput, PftIndexState,
     PftPatchKind,
 };
+pub use site::{materialize_single_point_surface, SiteMode};
 pub use surface::{
     derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,
     TopographicWetness, Topography, SURFACE_MISSING,

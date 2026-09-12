@@ -1270,3 +1270,30 @@ fn landtype_readers_reject_non_integer_or_out_of_range_values() {
     assert!(err.to_string().contains("1..=24"), "{err:#}");
     assert!(!rejected.exists());
 }
+
+#[test]
+#[ignore = "requires the locally generated CN-Cng upstream single-point surface artifact"]
+fn native_single_point_materialization_preserves_a_complete_upstream_surface_byte_for_byte() {
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../oracle/work/generated/out/CN-Cng/landdata/srfdata.nc");
+    let directory = std::env::temp_dir().join(format!(
+        "colm-srfdata-materialize-upstream-{}",
+        test_suffix()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    assert!(super::materialize_single_point_surface(
+        &source,
+        &directory,
+        super::SiteMode::Igbp,
+        None,
+        None,
+        false,
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        std::fs::read(directory.join("srfdata.nc")).unwrap()
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}

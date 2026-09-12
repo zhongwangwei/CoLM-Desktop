@@ -1205,6 +1205,54 @@ pub fn fill(
     Ok(report)
 }
 
+/// Materialize the single-point `landdata/srfdata.nc` consumed by `mkinidata`.
+///
+/// A fully populated site file already has CoLM's single-point surface contract, so
+/// copying it is the exact and lossless Rust replacement for the final Fortran
+/// single-point write.  Incomplete inputs take the existing strict [`fill`] path;
+/// the result is accepted only when it no longer needs a later CoLM/rawdata fallback.
+pub fn materialize_single_point_surface(
+    source: &Path,
+    landdata_dir: &Path,
+    mode: SiteMode,
+    rawdata: Option<&Path>,
+    observation: Option<&Path>,
+    crop_enabled: bool,
+) -> Result<Option<Report>> {
+    std::fs::create_dir_all(landdata_dir)
+        .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
+    let target = landdata_dir.join("srfdata.nc");
+    let readiness = audit(source, mode, None, crop_enabled)?;
+    if readiness.self_contained() {
+        std::fs::copy(source, &target).with_context(|| {
+            format!(
+                "cannot materialize self-contained {} as {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+        return Ok(None);
+    }
+
+    let temporary = landdata_dir.join(format!(".srfdata-rs-{}.nc", std::process::id()));
+    let report = fill(source, &temporary, rawdata, observation)?;
+    let readiness = audit(&temporary, mode, None, crop_enabled)?;
+    if !readiness.self_contained() {
+        return Err(anyhow::anyhow!(
+            "Rust single-point surface output still requires external data: {}",
+            readiness.needs_external.join(", ")
+        ));
+    }
+    std::fs::rename(&temporary, &target).with_context(|| {
+        format!(
+            "cannot publish materialized surface {} as {}",
+            temporary.display(),
+            target.display()
+        )
+    })?;
+    Ok(Some(report))
+}
+
 /// CoLM 自己的 IGBP 冠层顶高查表（`MOD_Const_LC.F90:406-411`，`htop0_igbp`）。
 /// 索引是 0-based，对应 IGBP 类别 1..=17（`HTOP0_IGBP[(lt - 1) as usize]`）。
 ///
