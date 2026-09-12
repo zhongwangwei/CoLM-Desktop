@@ -6,6 +6,7 @@
 
 pub mod albedo;
 pub mod atmosphere;
+pub mod canopy_roughness;
 pub mod ground_fluxes;
 pub mod ground_temperature;
 pub mod ground_thermal_step;
@@ -36,6 +37,7 @@ pub use atmosphere::{
     saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
     PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
 };
+pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_temperature::{ground_temperature, GroundTemperatureInput, GroundTemperatureState};
 pub use ground_thermal_step::{
