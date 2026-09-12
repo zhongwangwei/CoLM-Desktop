@@ -7,6 +7,7 @@ pub mod albedo;
 pub mod hydrology;
 pub mod restart;
 pub mod static_state;
+pub mod time_restart;
 pub mod time_state;
 pub mod urban;
 pub mod vegetation;
@@ -25,6 +26,11 @@ pub use restart::{
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState, MISSING,
+};
+pub use time_restart::{
+    write_time_restart, write_time_restart_block, IrrigationFields, OzoneFields,
+    PlantHydraulicFields, RestartDate, SnowAerosolFields, SnowSoilRestartFields, TimeLakeFields,
+    TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_snow_cover, initialize_cold_soil,
