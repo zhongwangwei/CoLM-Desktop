@@ -10,6 +10,7 @@ pub mod hydrology;
 pub mod net_solar;
 pub mod pc_radiation;
 pub mod radiation;
+pub mod snow;
 pub mod static_state;
 pub mod time_state;
 pub mod urban;
@@ -39,6 +40,7 @@ pub use radiation::{
     cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,
     LeafOptics,
 };
+pub use snow::{add_new_snow, NewSnowInput, NewSnowOutcome, RuntimeSnowColumn};
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState,
