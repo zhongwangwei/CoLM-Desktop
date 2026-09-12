@@ -71,3 +71,34 @@ fn canopy_rejects_invalid_land_or_pft_topology() {
     )
     .is_err());
 }
+
+#[test]
+fn empirical_lai_matches_the_igbp_temperature_and_root_depth_rule() {
+    let vegetation = empirical_lai(
+        EmpiricalLandCover::Igbp,
+        12,
+        &[0.5, 0.41, 0.09],
+        &[300.0, 288.0, 270.0],
+    )
+    .unwrap();
+    assert!((vegetation.leaf_area_index - 4.18).abs() < 1.0e-12);
+    assert_eq!(vegetation.stem_area_index, 0.4);
+    assert_eq!(vegetation.vegetation_fraction, 1.0);
+    assert_eq!(vegetation.greenness, 1.0);
+}
+
+#[test]
+fn empirical_lai_keeps_all_upstream_land_cover_tables_and_rejects_bad_inputs() {
+    let water = empirical_lai(EmpiricalLandCover::Usgs, 16, &[1.0], &[280.0]).unwrap();
+    assert_eq!(
+        water,
+        EmpiricalVegetation {
+            leaf_area_index: 0.0,
+            stem_area_index: 0.0,
+            vegetation_fraction: 0.0,
+            greenness: 0.0,
+        }
+    );
+    assert!(empirical_lai(EmpiricalLandCover::Igbp, 18, &[1.0], &[280.0]).is_err());
+    assert!(empirical_lai(EmpiricalLandCover::Igbp, 1, &[1.0], &[]).is_err());
+}

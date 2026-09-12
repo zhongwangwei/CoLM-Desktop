@@ -135,5 +135,8 @@ pub use urban::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
 };
-pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};
+pub use vegetation::{
+    derive_igbp_canopy, derive_usgs_canopy, empirical_lai, CanopyState, EmpiricalLandCover,
+    EmpiricalVegetation, PftCanopyInput,
+};
 pub use vic::{vic_runoff, VicRunoffInput, VicRunoffState};

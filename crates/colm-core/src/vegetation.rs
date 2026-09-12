@@ -23,6 +23,149 @@ pub struct CanopyState {
     pub pft_bottom_m: Vec<f64>,
 }
 
+/// Compile-time land-cover tables supported by `MOD_LAIEmpirical.F90`.
+///
+/// CoLM's current default desktop kernel is [`Self::Igbp`].  The other three
+/// tables are retained because they are complete upstream branches, not a
+/// second implementation of the calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmpiricalLandCover {
+    Igbp,
+    Usgs,
+    Sib2,
+    Bats,
+}
+
+/// Vegetation state derived by `MOD_LAIEmpirical:LAI_empirical`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmpiricalVegetation {
+    pub leaf_area_index: f64,
+    pub stem_area_index: f64,
+    pub vegetation_fraction: f64,
+    pub greenness: f64,
+}
+
+/// Port of `MOD_LAIEmpirical:LAI_empirical`.
+///
+/// `land_class` uses CoLM's one-based class numbering.  The routine finds the
+/// first soil layer containing more than 90% of roots, then derives seasonal
+/// LAI from that layer's temperature.  It is a pure shared kernel: the native
+/// runtime owns the evolving soil state while initialization only supplies it.
+pub fn empirical_lai(
+    scheme: EmpiricalLandCover,
+    land_class: i32,
+    root_fraction: &[f64],
+    soil_temperature_k: &[f64],
+) -> Result<EmpiricalVegetation> {
+    ensure!(
+        !root_fraction.is_empty()
+            && root_fraction.len() == soil_temperature_k.len()
+            && root_fraction
+                .iter()
+                .chain(soil_temperature_k)
+                .all(|value| value.is_finite()),
+        "root fractions and soil temperatures must be finite, nonempty, and equally sized"
+    );
+    let (vegetation_cover, maximum_lai, minimum_lai, stem_area) = empirical_table(scheme);
+    let class = usize::try_from(land_class)
+        .map_err(|_| anyhow::anyhow!("land class {land_class} is negative"))?;
+    ensure!(
+        (1..=vegetation_cover.len()).contains(&class),
+        "land class {land_class} is outside the {:?} empirical-LAI table",
+        scheme
+    );
+    let root_layer = root_fraction
+        .iter()
+        .scan(0.0, |sum, fraction| {
+            *sum += fraction;
+            Some(*sum)
+        })
+        .position(|sum| sum > 0.9)
+        .unwrap_or(0);
+    let seasonal =
+        (1.0 - 0.0016 * (298.0 - soil_temperature_k[root_layer]).max(0.0).powi(2)).max(0.0);
+    let index = class - 1;
+    let vegetation_fraction = vegetation_cover[index];
+    Ok(EmpiricalVegetation {
+        leaf_area_index: maximum_lai[index]
+            + (minimum_lai[index] - maximum_lai[index]) * (1.0 - seasonal),
+        stem_area_index: stem_area[index],
+        vegetation_fraction,
+        greenness: f64::from(vegetation_fraction > 0.0),
+    })
+}
+
+fn empirical_table(
+    scheme: EmpiricalLandCover,
+) -> (
+    &'static [f64],
+    &'static [f64],
+    &'static [f64],
+    &'static [f64],
+) {
+    match scheme {
+        EmpiricalLandCover::Igbp => (
+            &[
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0,
+            ],
+            &[
+                4.8, 5.4, 4.8, 4.8, 4.7, 4.7, 1.6, 4.7, 4.8, 1.7, 4.6, 4.9, 3.8, 4.8, 0.0, 0.06,
+                0.0,
+            ],
+            &[
+                4.0, 4.5, 0.8, 0.8, 2.2, 1.6, 0.15, 1.8, 0.9, 0.4, 0.4, 0.4, 0.9, 2.0, 0.0, 0.006,
+                0.0,
+            ],
+            &[
+                1.6, 1.8, 1.6, 1.6, 1.5, 1.5, 0.45, 1.4, 1.6, 3.1, 1.6, 0.4, 1.1, 1.3, 0.0, 0.14,
+                0.0,
+            ],
+        ),
+        EmpiricalLandCover::Usgs => (
+            &[
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
+                1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0,
+            ],
+            &[
+                1.5, 3.29, 4.18, 3.5, 2.5, 3.6, 2.02, 1.53, 2.0, 0.85, 4.43, 4.42, 4.56, 3.95, 4.5,
+                0.0, 4.0, 3.63, 0.0, 0.64, 1.6, 1.0, 0.0, 0.0,
+            ],
+            &[
+                1.0, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5, 0.3, 0.5, 0.5, 4.0, 4.0, 4.0, 0.0,
+                3.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            &[
+                0.2, 0.2, 0.3, 0.3, 0.5, 0.5, 1.0, 0.5, 1.0, 0.5, 2.0, 2.0, 2.0, 2.0, 2.0, 0.0,
+                2.0, 2.0, 0.0, 0.1, 0.1, 0.1, 0.0, 0.0,
+            ],
+        ),
+        EmpiricalLandCover::Sib2 => (
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+            &[4.8, 3.9, 5.6, 5.5, 4.6, 1.7, 1.3, 2.1, 3.6, 0.0, 0.0],
+            &[4.0, 0.6, 0.5, 5.0, 0.5, 0.3, 0.6, 0.4, 0.2, 0.0, 0.0],
+            &[1.6, 1.8, 1.6, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0],
+        ),
+        EmpiricalLandCover::Bats => (
+            &[
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+                1.0, 1.0, 1.0,
+            ],
+            &[
+                5.1, 1.6, 4.8, 4.8, 4.8, 5.4, 4.8, 0.0, 3.6, 4.8, 0.6, 0.0, 4.8, 0.0, 0.0, 4.8,
+                4.8, 4.8, 4.8,
+            ],
+            &[
+                0.425, 0.4, 4.0, 0.8, 0.8, 4.5, 0.4, 0.0, 0.3, 0.4, 0.05, 0.0, 0.4, 0.0, 0.0, 4.0,
+                0.8, 2.4, 2.4,
+            ],
+            &[
+                0.425, 3.2, 1.6, 1.6, 1.6, 1.8, 1.6, 0.0, 0.3, 0.4, 0.2, 0.0, 1.6, 0.0, 0.0, 1.6,
+                1.6, 1.6, 1.6,
+            ],
+        ),
+    }
+}
+
 /// Applies the USGS portion of `HTOP_readin`.
 ///
 /// Unlike IGBP, this branch uses only the class defaults and has no PFT override.
