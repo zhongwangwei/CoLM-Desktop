@@ -13,6 +13,7 @@ pub mod net_solar;
 pub mod pc_radiation;
 pub mod radiation;
 pub mod snow;
+pub mod soil_water;
 pub mod static_state;
 pub mod thermal_properties;
 pub mod time_state;
@@ -52,6 +53,8 @@ pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, NewSnowInput,
     NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
 };
+pub use soil_water::{solve_campbell_soil_water, CampbellSoilWaterInput, CampbellSoilWaterState};
+
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, derive_spatial_soil_parameters,
     normalize_soil_texture, BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput,
