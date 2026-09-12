@@ -42,6 +42,9 @@ pub mod pft_restart;
 pub mod radiation {
     pub use colm_core::radiation::*;
 }
+pub mod runtime_forcing {
+    pub use colm_core::runtime_forcing::*;
+}
 pub mod root_uptake {
     pub use colm_core::root_uptake::*;
 }
@@ -85,6 +88,7 @@ pub use colm_core::{
     UrbanLucyState, UrbanState,
 };
 pub use colm_core::{is_leap_year, month_lengths, CalendarTime};
+pub use colm_core::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 pub use colm_core::{
     CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyRoughness, CanopyWetness,
     CanopyWindProfileInput, LeafBiochemistry, LeafPhotosynthesisInput, PhotosynthesisParameters,

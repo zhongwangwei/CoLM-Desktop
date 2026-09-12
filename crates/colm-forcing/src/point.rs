@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_core::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 
 use crate::{canonical_units, check, resolve, summarize, MetSummary};
 
@@ -143,6 +144,35 @@ impl PointForcingSeries {
                 lower_weight,
                 upper_weight,
             ),
+        })
+    }
+
+    /// Samples and prepares one point record for CoLM's physical runtime.
+    ///
+    /// This is deliberately an adapter: scalar-wind expansion, precipitation
+    /// splitting, and broadband shortwave partition all remain in `colm-core`
+    /// so `colm-init` and the native driver use the same physics hand-off.
+    pub fn runtime_at_seconds(
+        &self,
+        time_seconds: f64,
+        calendar_day: f64,
+        longitude_radians: f64,
+        latitude_radians: f64,
+    ) -> Result<RuntimeForcing> {
+        let frame = self.sample_at_seconds(time_seconds)?;
+        prepare_runtime_forcing(RuntimeForcingInput {
+            air_temperature_k: frame.air_temperature_k,
+            specific_humidity: frame.specific_humidity,
+            surface_pressure_pa: frame.surface_pressure_pa,
+            precipitation_kg_m2_s: frame.precipitation_kg_m2_s,
+            eastward_wind_m_s: frame.eastward_wind_m_s,
+            northward_or_scalar_wind_m_s: frame.northward_or_scalar_wind_m_s,
+            wind_is_vector: self.wind_is_vector,
+            downward_shortwave_w_m2: frame.downward_shortwave_w_m2,
+            downward_longwave_w_m2: frame.downward_longwave_w_m2,
+            calendar_day,
+            longitude_radians,
+            latitude_radians,
         })
     }
 }
