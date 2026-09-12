@@ -74,16 +74,17 @@ pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
     derive_igbp_canopy, derive_usgs_canopy, equilibrium_water_state, land_cover_soil_reflectance,
-    leaf_optics_from_land_cover, orbital_cosine_zenith, soil_hydraulic_conductivity,
-    soil_psi_from_vliq, soil_vliq_from_psi, solve_tridiagonal, CanopyState, ColdStartRadiation,
-    EquilibriumWaterState, LandCoverScheme, LeafOptics, PcCanopyRadiation, PcPftInput,
-    PcPftRadiation, PftCanopyInput, PhaseChangeInput, PhaseChangeState, SoilHydraulicModel,
-    SoilReflectance, MIN_SOIL_PSI, MISSING,
+    leaf_optics_from_land_cover, orbital_calendar_day, orbital_cosine_zenith,
+    soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, solve_tridiagonal,
+    CanopyState, ColdStartRadiation, EquilibriumWaterState, LandCoverScheme, LeafOptics,
+    PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput, PhaseChangeInput,
+    PhaseChangeState, SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
 };
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
 };
+pub use colm_core::{is_leap_year, month_lengths, CalendarTime};
 pub use colm_core::{
     CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyRoughness, CanopyWetness,
     CanopyWindProfileInput, LeafBiochemistry, LeafPhotosynthesisInput, PhotosynthesisParameters,

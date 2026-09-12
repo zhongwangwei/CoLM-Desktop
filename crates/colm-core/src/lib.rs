@@ -6,6 +6,7 @@
 
 pub mod albedo;
 pub mod atmosphere;
+pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;
 pub mod ground_fluxes;
@@ -39,6 +40,7 @@ pub use atmosphere::{
     saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
     PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
 };
+pub use calendar::{is_leap_year, month_lengths, orbital_calendar_day, CalendarTime};
 pub use canopy_layer_profile::{
     canopy_diffusivity, canopy_diffusivity_difference, canopy_diffusivity_profile_integral,
     canopy_diffusivity_resistance, canopy_diffusivity_resistance_analytic,

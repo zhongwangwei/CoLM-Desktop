@@ -17,17 +17,18 @@ use crate::{
     cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_igbp_canopy,
     derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover, derive_snow_cover,
     derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state, initialize_cold_soil,
-    initialize_profile_soil, initialize_snow_layers, leaf_optics_from_land_cover,
-    normalize_soil_texture, orbital_cosine_zenith, read_single_point_monthly_vegetation,
-    read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
-    read_single_point_surface, read_single_point_water_table, write_constant_restart,
-    write_pft_constant_restart, write_pft_time_restart, write_time_restart, ColdSoilState,
-    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
-    LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftConstantRestartInput, PftOzoneFields,
-    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
-    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
-    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
-    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, MISSING,
+    initialize_profile_soil, initialize_snow_layers, is_leap_year, leaf_optics_from_land_cover,
+    month_lengths, normalize_soil_texture, orbital_calendar_day, orbital_cosine_zenith,
+    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
+    read_single_point_soil_profile, read_single_point_surface, read_single_point_water_table,
+    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    CalendarTime, ColdSoilState, ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput,
+    HydraulicModel, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftConstantRestartInput,
+    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
+    PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields, RestartTuning,
+    SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField, SoilHydraulicModel,
+    TimeLakeFields, TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile,
+    TimeRestartInput, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -531,7 +532,15 @@ pub fn write_single_point_cold_time_restarts(
     };
     let lai = total_lai;
     let sai = total_sai * sigf;
-    let calendar_day = calendar_day(run.date, run.greenwich, surface.longitude_degrees)?;
+    let calendar_day = orbital_calendar_day(
+        CalendarTime {
+            year: run.date.year,
+            julian_day: run.date.julian_day,
+            seconds: run.date.seconds,
+        },
+        run.greenwich,
+        surface.longitude_degrees,
+    )?;
     let cosine_zenith = orbital_cosine_zenith(
         calendar_day,
         surface.longitude_degrees.to_radians(),
@@ -693,7 +702,15 @@ fn write_single_point_pft_cold_time_restarts(
     let total_lai = weighted_sum(&total_lai_p, &pft.fraction)?;
     let total_sai = weighted_sum(&total_sai_p, &pft.fraction)?;
     let sai = weighted_sum(&sai_p, &pft.fraction)?;
-    let calendar_day = calendar_day(run.date, run.greenwich, surface.longitude_degrees)?;
+    let calendar_day = orbital_calendar_day(
+        CalendarTime {
+            year: run.date.year,
+            julian_day: run.date.julian_day,
+            seconds: run.date.seconds,
+        },
+        run.greenwich,
+        surface.longitude_degrees,
+    )?;
     let cosine_zenith = orbital_cosine_zenith(
         calendar_day,
         surface.longitude_degrees.to_radians(),
@@ -1489,37 +1506,6 @@ fn month_from_julian(year: i32, day: u16) -> Result<u8> {
     unreachable!("validated Julian day fits the calendar year")
 }
 
-fn calendar_day(date: RestartDate, greenwich: bool, longitude_degrees: f64) -> Result<f64> {
-    ensure!(
-        longitude_degrees.is_finite(),
-        "single-point longitude must be finite"
-    );
-    let mut year = date.year;
-    let mut day = i32::from(date.julian_day);
-    let mut seconds = date.seconds as i32;
-    if !greenwich {
-        seconds -= (longitude_degrees / 15.0 * 3600.0) as i32;
-        if seconds < 0 {
-            seconds += 86_400;
-            day -= 1;
-            if day < 1 {
-                year -= 1;
-                day = if is_leap_year(year) { 366 } else { 365 };
-            }
-        } else if seconds > 86_400 {
-            seconds -= 86_400;
-            day += 1;
-            let maximum = if is_leap_year(year) { 366 } else { 365 };
-            if day > maximum {
-                year += 1;
-                day = 1;
-            }
-        }
-    }
-    let _ = year; // CoLM's orbital routine uses only the shifted calendar day.
-    Ok(f64::from(day) + f64::from(seconds) / 86_400.0)
-}
-
 fn soil_grid(layers: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     ensure!(
         layers == 10,
@@ -1592,27 +1578,6 @@ fn canopy_top(land_cover: LandCoverScheme, class: i32, observed_top: f64) -> Res
 fn is_water_class(land_cover: LandCoverScheme, class: i32) -> bool {
     matches!(land_cover, LandCoverScheme::Igbp) && class == 17
         || matches!(land_cover, LandCoverScheme::Usgs) && class == 16
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn month_lengths(year: i32) -> [i32; 12] {
-    [
-        31,
-        if is_leap_year(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ]
 }
 
 fn required_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
