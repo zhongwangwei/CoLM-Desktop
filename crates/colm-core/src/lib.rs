@@ -158,16 +158,18 @@ pub use urban::{
 };
 pub use variably_saturated_flow::{
     apply_variable_saturated_explicit_step, exchange_soil_water_with_aquifer,
+    flux_at_variable_saturated_interface, flux_inside_variable_saturated_soil,
     initialize_variable_saturated_sublevels, perturb_variable_saturated_drainage,
     perturb_variable_saturated_level, perturb_variable_saturated_rainfall,
     solve_variable_saturated_least_squares, variable_saturated_water_balance,
     water_table_from_aquifer, VariableSaturatedAquiferInput, VariableSaturatedAquiferState,
     VariableSaturatedBoundary, VariableSaturatedBoundaryKind,
     VariableSaturatedDrainagePerturbation, VariableSaturatedExplicitInput,
-    VariableSaturatedExplicitState, VariableSaturatedLevelCoordinate,
-    VariableSaturatedLevelPerturbation, VariableSaturatedLevelPerturbationInput,
-    VariableSaturatedRainfallPerturbation, VariableSaturatedSublevelInput,
-    VariableSaturatedSublevelState, VariableSaturatedWaterBalance,
+    VariableSaturatedExplicitState, VariableSaturatedHomogeneousFluxInput,
+    VariableSaturatedInterfaceFlux, VariableSaturatedInterfaceFluxInput,
+    VariableSaturatedLevelCoordinate, VariableSaturatedLevelPerturbation,
+    VariableSaturatedLevelPerturbationInput, VariableSaturatedRainfallPerturbation,
+    VariableSaturatedSublevelInput, VariableSaturatedSublevelState, VariableSaturatedWaterBalance,
     VariableSaturatedWaterBalanceInput,
 };
 pub use vegetation::{

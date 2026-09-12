@@ -490,6 +490,200 @@ pub fn solve_variable_saturated_least_squares(
     Ok(update)
 }
 
+/// Inputs to `flux_at_unsaturated_interface`.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedInterfaceFluxInput {
+    pub upper_saturated_potential_mm: f64,
+    pub upper_saturated_hydraulic_conductivity_mm_s: f64,
+    pub upper_hydraulic_model: SoilHydraulicModel,
+    pub upper_distance_mm: f64,
+    pub upper_pressure_head_mm: f64,
+    pub upper_hydraulic_conductivity_mm_s: f64,
+    pub lower_saturated_potential_mm: f64,
+    pub lower_saturated_hydraulic_conductivity_mm_s: f64,
+    pub lower_hydraulic_model: SoilHydraulicModel,
+    pub lower_distance_mm: f64,
+    pub lower_pressure_head_mm: f64,
+    pub lower_hydraulic_conductivity_mm_s: f64,
+    pub flux_tolerance_mm_s: f64,
+    pub pressure_tolerance_mm: f64,
+}
+
+/// Matched upper and lower fluxes at a VSF unsaturated interface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VariableSaturatedInterfaceFlux {
+    pub upper_flux_mm_s: f64,
+    pub lower_flux_mm_s: f64,
+}
+
+/// Inputs to `flux_inside_hm_soil` for one homogeneous soil segment.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedHomogeneousFluxInput {
+    pub saturated_potential_mm: f64,
+    pub saturated_hydraulic_conductivity_mm_s: f64,
+    pub hydraulic_model: SoilHydraulicModel,
+    pub distance_mm: f64,
+    pub upper_pressure_head_mm: f64,
+    pub lower_pressure_head_mm: f64,
+    pub upper_hydraulic_conductivity_mm_s: f64,
+    pub lower_hydraulic_conductivity_mm_s: f64,
+}
+
+/// Port of `MOD_Hydro_SoilWater:flux_inside_hm_soil`.
+pub fn flux_inside_variable_saturated_soil(
+    input: VariableSaturatedHomogeneousFluxInput,
+) -> Result<f64> {
+    ensure!(
+        [
+            input.saturated_potential_mm,
+            input.saturated_hydraulic_conductivity_mm_s,
+            input.distance_mm,
+            input.upper_pressure_head_mm,
+            input.lower_pressure_head_mm,
+            input.upper_hydraulic_conductivity_mm_s,
+            input.lower_hydraulic_conductivity_mm_s,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && input.saturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.distance_mm > 0.0
+            && input.upper_hydraulic_conductivity_mm_s >= 0.0
+            && input.lower_hydraulic_conductivity_mm_s >= 0.0,
+        "VSF homogeneous flux inputs are invalid"
+    );
+    let gradient =
+        1.0 - (input.lower_pressure_head_mm - input.upper_pressure_head_mm) / input.distance_mm;
+    let exponent = match input.hydraulic_model {
+        SoilHydraulicModel::Campbell { bsw } => 1.0 / (3.0 / bsw + 2.0),
+        SoilHydraulicModel::VanGenuchten { n_vgm, l_vgm, .. } => {
+            1.0 / (l_vgm * (n_vgm - 1.0) + n_vgm * 2.0)
+        }
+    };
+    let flux = if gradient < 0.0 {
+        let middle_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+            input.lower_pressure_head_mm - input.distance_mm,
+            input.saturated_potential_mm,
+            input.saturated_hydraulic_conductivity_mm_s,
+            input.hydraulic_model,
+        );
+        input.upper_hydraulic_conductivity_mm_s.powf(exponent)
+            * middle_hydraulic_conductivity_mm_s.powf(1.0 - exponent)
+            * gradient
+    } else if gradient == 0.0 {
+        0.0
+    } else if gradient < 1.0 {
+        let weight =
+            (1.0 + exponent * input.lower_pressure_head_mm / input.distance_mm).max(1.0 - exponent);
+        input.upper_hydraulic_conductivity_mm_s.powf(weight)
+            * input.lower_hydraulic_conductivity_mm_s.powf(1.0 - weight)
+            * gradient
+    } else if gradient == 1.0 {
+        input.upper_hydraulic_conductivity_mm_s
+    } else {
+        input.upper_hydraulic_conductivity_mm_s
+            + (input.upper_pressure_head_mm - input.lower_pressure_head_mm) / input.distance_mm
+                * input.upper_hydraulic_conductivity_mm_s.powf(1.0 - exponent)
+                * input.lower_hydraulic_conductivity_mm_s.powf(exponent)
+    };
+    Ok(flux)
+}
+
+/// Port of `MOD_Hydro_SoilWater:flux_at_unsaturated_interface`.
+pub fn flux_at_variable_saturated_interface(
+    input: VariableSaturatedInterfaceFluxInput,
+) -> Result<VariableSaturatedInterfaceFlux> {
+    validate_interface_flux(input)?;
+    let mut right = (input.upper_pressure_head_mm + input.upper_distance_mm)
+        .max(input.lower_pressure_head_mm - input.lower_distance_mm);
+    let mut left = (input.upper_pressure_head_mm + input.upper_distance_mm)
+        .min(input.lower_pressure_head_mm - input.lower_distance_mm);
+    let minimum_saturated_potential_mm = input
+        .upper_saturated_potential_mm
+        .min(input.lower_saturated_potential_mm);
+    if right > minimum_saturated_potential_mm {
+        let upper_interface_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+            minimum_saturated_potential_mm,
+            input.upper_saturated_potential_mm,
+            input.upper_saturated_hydraulic_conductivity_mm_s,
+            input.upper_hydraulic_model,
+        );
+        let lower_interface_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+            minimum_saturated_potential_mm,
+            input.lower_saturated_potential_mm,
+            input.lower_saturated_hydraulic_conductivity_mm_s,
+            input.lower_hydraulic_model,
+        );
+        let upper_flux_mm_s =
+            flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+                saturated_potential_mm: input.upper_saturated_potential_mm,
+                saturated_hydraulic_conductivity_mm_s: input
+                    .upper_saturated_hydraulic_conductivity_mm_s,
+                hydraulic_model: input.upper_hydraulic_model,
+                distance_mm: input.upper_distance_mm,
+                upper_pressure_head_mm: input.upper_pressure_head_mm,
+                lower_pressure_head_mm: minimum_saturated_potential_mm,
+                upper_hydraulic_conductivity_mm_s: input.upper_hydraulic_conductivity_mm_s,
+                lower_hydraulic_conductivity_mm_s: upper_interface_hydraulic_conductivity_mm_s,
+            })?;
+        let lower_flux_mm_s =
+            flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+                saturated_potential_mm: input.lower_saturated_potential_mm,
+                saturated_hydraulic_conductivity_mm_s: input
+                    .lower_saturated_hydraulic_conductivity_mm_s,
+                hydraulic_model: input.lower_hydraulic_model,
+                distance_mm: input.lower_distance_mm,
+                upper_pressure_head_mm: minimum_saturated_potential_mm,
+                lower_pressure_head_mm: input.lower_pressure_head_mm,
+                upper_hydraulic_conductivity_mm_s: lower_interface_hydraulic_conductivity_mm_s,
+                lower_hydraulic_conductivity_mm_s: input.lower_hydraulic_conductivity_mm_s,
+            })?;
+        if upper_flux_mm_s >= lower_flux_mm_s {
+            return Ok(VariableSaturatedInterfaceFlux {
+                upper_flux_mm_s,
+                lower_flux_mm_s,
+            });
+        }
+        right = minimum_saturated_potential_mm;
+    }
+    let mut interface_pressure_head_mm = (input.lower_distance_mm * input.upper_pressure_head_mm
+        + input.upper_distance_mm * input.lower_pressure_head_mm)
+        / (input.upper_distance_mm + input.lower_distance_mm);
+    if interface_pressure_head_mm < left || interface_pressure_head_mm > right {
+        interface_pressure_head_mm = (right + left) * 0.5;
+    }
+    let mut previous_pressure_head_mm = 0.0;
+    let mut previous_residual_mm_s = 0.0;
+    for iteration in 0..50 {
+        let flux = interface_fluxes(input, interface_pressure_head_mm)?;
+        let residual_mm_s = flux.lower_flux_mm_s - flux.upper_flux_mm_s;
+        if residual_mm_s.abs() < input.flux_tolerance_mm_s
+            || right - left < input.pressure_tolerance_mm
+        {
+            return Ok(flux);
+        }
+        if iteration == 0 {
+            if residual_mm_s < 0.0 {
+                left = interface_pressure_head_mm;
+            } else {
+                right = interface_pressure_head_mm;
+            }
+            previous_pressure_head_mm = interface_pressure_head_mm;
+            previous_residual_mm_s = residual_mm_s;
+            interface_pressure_head_mm = (right + left) * 0.5;
+        } else {
+            bounded_secant_iteration(
+                residual_mm_s,
+                &mut previous_residual_mm_s,
+                &mut interface_pressure_head_mm,
+                &mut previous_pressure_head_mm,
+                &mut left,
+                &mut right,
+            );
+        }
+    }
+    interface_fluxes(input, interface_pressure_head_mm)
+}
+
 /// Port of `MOD_Hydro_SoilWater:water_balance`.
 pub fn variable_saturated_water_balance(
     input: VariableSaturatedWaterBalanceInput<'_>,
@@ -1199,6 +1393,111 @@ fn check_and_update_variable_saturated_level(
         *pressure_head_mm = saturated_potential_mm;
         *hydraulic_conductivity_mm_s = saturated_hydraulic_conductivity_mm_s;
     }
+}
+
+fn interface_fluxes(
+    input: VariableSaturatedInterfaceFluxInput,
+    interface_pressure_head_mm: f64,
+) -> Result<VariableSaturatedInterfaceFlux> {
+    let upper_interface_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+        interface_pressure_head_mm,
+        input.upper_saturated_potential_mm,
+        input.upper_saturated_hydraulic_conductivity_mm_s,
+        input.upper_hydraulic_model,
+    );
+    let lower_interface_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+        interface_pressure_head_mm,
+        input.lower_saturated_potential_mm,
+        input.lower_saturated_hydraulic_conductivity_mm_s,
+        input.lower_hydraulic_model,
+    );
+    Ok(VariableSaturatedInterfaceFlux {
+        upper_flux_mm_s: flux_inside_variable_saturated_soil(
+            VariableSaturatedHomogeneousFluxInput {
+                saturated_potential_mm: input.upper_saturated_potential_mm,
+                saturated_hydraulic_conductivity_mm_s: input
+                    .upper_saturated_hydraulic_conductivity_mm_s,
+                hydraulic_model: input.upper_hydraulic_model,
+                distance_mm: input.upper_distance_mm,
+                upper_pressure_head_mm: input.upper_pressure_head_mm,
+                lower_pressure_head_mm: interface_pressure_head_mm,
+                upper_hydraulic_conductivity_mm_s: input.upper_hydraulic_conductivity_mm_s,
+                lower_hydraulic_conductivity_mm_s: upper_interface_hydraulic_conductivity_mm_s,
+            },
+        )?,
+        lower_flux_mm_s: flux_inside_variable_saturated_soil(
+            VariableSaturatedHomogeneousFluxInput {
+                saturated_potential_mm: input.lower_saturated_potential_mm,
+                saturated_hydraulic_conductivity_mm_s: input
+                    .lower_saturated_hydraulic_conductivity_mm_s,
+                hydraulic_model: input.lower_hydraulic_model,
+                distance_mm: input.lower_distance_mm,
+                upper_pressure_head_mm: interface_pressure_head_mm,
+                lower_pressure_head_mm: input.lower_pressure_head_mm,
+                upper_hydraulic_conductivity_mm_s: lower_interface_hydraulic_conductivity_mm_s,
+                lower_hydraulic_conductivity_mm_s: input.lower_hydraulic_conductivity_mm_s,
+            },
+        )?,
+    })
+}
+
+fn bounded_secant_iteration(
+    residual: f64,
+    previous_residual: &mut f64,
+    value: &mut f64,
+    previous_value: &mut f64,
+    left: &mut f64,
+    right: &mut f64,
+) {
+    if residual > 0.0 {
+        *right = *value;
+    } else {
+        *left = *value;
+    }
+    let residual_before_previous = *previous_residual;
+    *previous_residual = residual;
+    let value_before_previous = *previous_value;
+    *previous_value = *value;
+    if *previous_residual == residual_before_previous {
+        *value = (*left + *right) * 0.5;
+    } else {
+        *value = (*previous_residual * value_before_previous
+            - residual_before_previous * *previous_value)
+            / (*previous_residual - residual_before_previous);
+        *value = (*value).max(*left * 0.9 + *right * 0.1);
+        *value = (*value).min(*left * 0.1 + *right * 0.9);
+    }
+}
+
+fn validate_interface_flux(input: VariableSaturatedInterfaceFluxInput) -> Result<()> {
+    ensure!(
+        [
+            input.upper_saturated_potential_mm,
+            input.upper_saturated_hydraulic_conductivity_mm_s,
+            input.upper_distance_mm,
+            input.upper_pressure_head_mm,
+            input.upper_hydraulic_conductivity_mm_s,
+            input.lower_saturated_potential_mm,
+            input.lower_saturated_hydraulic_conductivity_mm_s,
+            input.lower_distance_mm,
+            input.lower_pressure_head_mm,
+            input.lower_hydraulic_conductivity_mm_s,
+            input.flux_tolerance_mm_s,
+            input.pressure_tolerance_mm,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && input.upper_saturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.upper_distance_mm > 0.0
+            && input.upper_hydraulic_conductivity_mm_s >= 0.0
+            && input.lower_saturated_hydraulic_conductivity_mm_s >= 0.0
+            && input.lower_distance_mm > 0.0
+            && input.lower_hydraulic_conductivity_mm_s >= 0.0
+            && input.flux_tolerance_mm_s > 0.0
+            && input.pressure_tolerance_mm > 0.0,
+        "VSF interface-flux inputs are invalid"
+    );
+    Ok(())
 }
 
 fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize> {

@@ -360,6 +360,56 @@ fn vsf_active_least_squares_matches_current_fortran() {
     close(sparse[2], 1.894_736_842_105_263, 1.0e-14);
 }
 
+#[test]
+fn vsf_interface_fluxes_match_current_fortran() {
+    let model = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.02,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    let upper_hydraulic_conductivity_mm_s =
+        soil_hydraulic_conductivity(-150.0, -100.0, 0.01, model);
+    let lower_hydraulic_conductivity_mm_s =
+        soil_hydraulic_conductivity(-250.0, -200.0, 0.005, model);
+    close(
+        flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+            saturated_potential_mm: -100.0,
+            saturated_hydraulic_conductivity_mm_s: 0.01,
+            hydraulic_model: model,
+            distance_mm: 50.0,
+            upper_pressure_head_mm: -150.0,
+            lower_pressure_head_mm: -250.0,
+            upper_hydraulic_conductivity_mm_s,
+            lower_hydraulic_conductivity_mm_s,
+        })
+        .unwrap(),
+        1.0089868110947617e-4,
+        1.0e-17,
+    );
+
+    let flux = flux_at_variable_saturated_interface(VariableSaturatedInterfaceFluxInput {
+        upper_saturated_potential_mm: -100.0,
+        upper_saturated_hydraulic_conductivity_mm_s: 0.01,
+        upper_hydraulic_model: model,
+        upper_distance_mm: 50.0,
+        upper_pressure_head_mm: -120.0,
+        upper_hydraulic_conductivity_mm_s: soil_hydraulic_conductivity(-120.0, -100.0, 0.01, model),
+        lower_saturated_potential_mm: -100.0,
+        lower_saturated_hydraulic_conductivity_mm_s: 0.01,
+        lower_hydraulic_model: model,
+        lower_distance_mm: 75.0,
+        lower_pressure_head_mm: -140.0,
+        lower_hydraulic_conductivity_mm_s: soil_hydraulic_conductivity(-140.0, -100.0, 0.01, model),
+        flux_tolerance_mm_s: 1.0e-10,
+        pressure_tolerance_mm: 1.0e-10,
+    })
+    .unwrap();
+    close(flux.upper_flux_mm_s, 1.018801458919464e-4, 1.0e-15);
+    close(flux.lower_flux_mm_s, 1.018801708402311e-4, 1.0e-15);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
