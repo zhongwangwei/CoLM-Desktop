@@ -475,7 +475,13 @@ fn read_f64(
     Ok(values)
 }
 
-fn block_path(landdata: &Path, directory: &str, stem: &str, year: i32, block: &str) -> PathBuf {
+pub(crate) fn block_path(
+    landdata: &Path,
+    directory: &str,
+    stem: &str,
+    year: i32,
+    block: &str,
+) -> PathBuf {
     landdata
         .join(directory)
         .join(format!("{year:04}"))
@@ -614,14 +620,14 @@ fn normalize_longitude(value: f64) -> f64 {
     value
 }
 
-fn values_f64(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+pub(crate) fn values_f64(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
     file.variable(name)
         .with_context(|| format!("NetCDF file is missing {name}"))?
         .get_values(..)
         .with_context(|| format!("cannot read {name}"))
 }
 
-fn values_i32(file: &netcdf::File, name: &str) -> Result<Vec<i32>> {
+pub(crate) fn values_i32(file: &netcdf::File, name: &str) -> Result<Vec<i32>> {
     file.variable(name)
         .with_context(|| format!("NetCDF file is missing {name}"))?
         .get_values(..)

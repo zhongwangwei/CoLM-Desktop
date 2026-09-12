@@ -301,12 +301,15 @@ pub fn write_single_point_constant_restarts(
         "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
     );
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
-    let canopy = pft_canopy(&document, &pft)?;
+    let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
     let common = write_single_point_constant_restart_with_canopy(
         &run.static_run.surface,
         &run.static_run.restart_dir,
         run.static_run.static_config(),
-        Some((canopy.patch_top_m, canopy.patch_bottom_m)),
+        Some((
+            weighted_sum(&canopy.top_m, &pft.fraction)?,
+            weighted_sum(&canopy.bottom_m, &pft.fraction)?,
+        )),
     )?;
     let pft_file = write_pft_constant_restart(
         &run.static_run.restart_dir,
@@ -597,7 +600,7 @@ fn write_single_point_pft_cold_time_restarts(
         "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
     );
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
-    let canopy = pft_canopy(&document, &pft)?;
+    let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
     let dimensions = TimeRestartDimensions::default();
     let soil = derive_soil_parameters(
         &surface.soil_layers,
@@ -655,7 +658,7 @@ fn write_single_point_pft_cold_time_restarts(
     )?;
     let snow_depth_m = initial_snow_depth(run, &surface, month)?;
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
-    let roughness = canopy.patch_top_m * 0.1;
+    let roughness = weighted_sum(&canopy.top_m, &pft.fraction)? * 0.1;
     let roughness_p = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
     let pft_snow = if snow_depth_m > 0.0 {
         derive_pft_snow_cover(
@@ -882,11 +885,9 @@ struct PftColdStartRadiation {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct PftCanopy {
-    top_m: Vec<f64>,
-    bottom_m: Vec<f64>,
-    patch_top_m: f64,
-    patch_bottom_m: f64,
+pub(crate) struct PftCanopy {
+    pub(crate) top_m: Vec<f64>,
+    pub(crate) bottom_m: Vec<f64>,
 }
 
 fn read_run_namelist(run: &SinglePointColdStartRun) -> Result<colm_namelist::Document> {
@@ -895,14 +896,19 @@ fn read_run_namelist(run: &SinglePointColdStartRun) -> Result<colm_namelist::Doc
     parse(&text).with_context(|| format!("cannot parse case namelist {}", run.namelist.display()))
 }
 
-fn pft_canopy(
+pub(crate) fn pft_canopy(
     document: &colm_namelist::Document,
-    pft: &crate::SinglePointPftData,
+    class: &[i32],
+    canopy_height_m: &[f64],
 ) -> Result<PftCanopy> {
+    ensure!(
+        !class.is_empty() && class.len() == canopy_height_m.len(),
+        "PFT class and canopy-height vectors must be nonempty and have matching lengths"
+    );
     let campbell = optional_bool_or(document, "DEF_USE_Campbell_SOIL_MODEL", false)?;
-    let mut top_m = Vec::with_capacity(pft.class.len());
-    let mut bottom_m = Vec::with_capacity(pft.class.len());
-    for (&class, &observed_top_m) in pft.class.iter().zip(&pft.canopy_height_m) {
+    let mut top_m = Vec::with_capacity(class.len());
+    let mut bottom_m = Vec::with_capacity(class.len());
+    for (&class, &observed_top_m) in class.iter().zip(canopy_height_m) {
         let default_top_m = pft_parameter(document, "DEF_PFT_HTOP0", class, campbell)?;
         let default_bottom_m = pft_parameter(document, "DEF_PFT_HBOT0", class, campbell)?;
         let (top, bottom) = if (1..=8).contains(&class) {
@@ -916,12 +922,7 @@ fn pft_canopy(
         top_m.push(top);
         bottom_m.push(bottom);
     }
-    Ok(PftCanopy {
-        patch_top_m: weighted_sum(&top_m, &pft.fraction)?,
-        patch_bottom_m: weighted_sum(&bottom_m, &pft.fraction)?,
-        top_m,
-        bottom_m,
-    })
+    Ok(PftCanopy { top_m, bottom_m })
 }
 
 fn pft_leaf_optics(

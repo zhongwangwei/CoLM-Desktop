@@ -9,8 +9,8 @@ use anyhow::{bail, Context, Result};
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
-    write_spatial_lct_constant_restart, HydraulicModel, LandCoverScheme, SinglePointStaticConfig,
-    SpatialLctStaticConfig,
+    write_spatial_lct_constant_restart, write_spatial_pft_constant_restart, HydraulicModel,
+    LandCoverScheme, SinglePointStaticConfig, SpatialLctStaticConfig, SpatialPftStaticConfig,
 };
 
 fn main() -> Result<()> {
@@ -18,6 +18,9 @@ fn main() -> Result<()> {
     let first = required(&mut args, "case namelist, surface, or spatial-lct")?;
     if first.as_os_str() == "spatial-lct" {
         return run_spatial_lct(args);
+    }
+    if first.as_os_str() == "spatial-pft" {
+        return run_spatial_pft(args);
     }
     if first
         .extension()
@@ -122,6 +125,32 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
+fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let namelist = required(&mut args, "case namelist")?;
+    let landdata = required(&mut args, "landdata directory")?;
+    let restart = required(&mut args, "restart directory")?;
+    let case_name = args.next().context("missing case name")?;
+    let land_cover_year = args
+        .next()
+        .context("missing land-cover year")?
+        .parse()
+        .context("land-cover year must be an integer")?;
+    let block = args.next().context("missing CoLM block label")?;
+    if let Some(value) = args.next() {
+        bail!("unexpected argument {value}");
+    }
+    let path = write_spatial_pft_constant_restart(SpatialPftStaticConfig::new(
+        &namelist,
+        &landdata,
+        &restart,
+        &case_name,
+        land_cover_year,
+        &block,
+    ))?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
 fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     match value {
         Some("campbell") => Ok(HydraulicModel::Campbell),
@@ -132,7 +161,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
 }
 
 const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>
-       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral]";
+       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block>";
 
 fn parse_land_cover(value: &str) -> Result<LandCoverScheme> {
     match value {
