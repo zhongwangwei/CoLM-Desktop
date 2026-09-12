@@ -34,8 +34,8 @@ pub use derive::{
 };
 pub use grid::{Grid, COLM_1KM, COLM_500M};
 pub use pft::{
-    aggregate_pft_fractions, aggregate_pft_index, build_pft_topology, PftFractionInput,
-    PftIndexInput, PftIndexState, PftPatchKind, PftTopology,
+    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_pft_topology,
+    PftFractionInput, PftIndexInput, PftIndexState, PftPatchKind, PftTopology,
 };
 pub use site::{
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,

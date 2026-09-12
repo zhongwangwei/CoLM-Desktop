@@ -8,16 +8,16 @@ use colm_srfdata::soil::{
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
 use colm_srfdata::{
-    aggregate_pft_fractions, aggregate_pft_index, build_lct_land_patches_from_raster,
-    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
-    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
-    mesh_cell_area_weights, read_mesh_raster_f64, read_mesh_raster_i32,
-    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
-    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
-    write_spatial_pft_topology, write_spatial_topology, BlockLayout, FlatLandPatches,
-    PftFractionInput, PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM,
-    COLM_500M,
+    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index,
+    build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_pft_topology,
+    build_spatial_topology, materialize_single_point_surface,
+    materialize_single_point_surface_from_namelist, mesh_cell_area_weights, read_mesh_raster_f64,
+    read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64,
+    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
+    read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
+    write_landpatch_vector, write_spatial_pft_topology, write_spatial_topology, BlockLayout,
+    FlatLandPatches, PftFractionInput, PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology,
+    COLM_1KM, COLM_500M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -138,6 +138,37 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "pctpft",
         "pct_pfts",
         &fractions,
+    )?;
+    let forest_height = read_mesh_tiled_raster_f64(
+        &args.plant_tiles,
+        &format!("MOD{:04}", args.year),
+        "HTOP",
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let pft_height = aggregate_pft_height(
+        &layout,
+        PftFractionInput {
+            pft_offsets: &pfts.patch_offsets,
+            pft_classes: &pfts.pft_classes,
+            patch_kind: &pfts.patch_kind,
+            raw_class_count: MODIS_PFT_CLASSES,
+            raw_percent: &raw_percent,
+            land_area: &area,
+            crop_excluded_class: None,
+        },
+        &forest_height,
+    )?;
+    write_landpatch_scalar(
+        &args.landdata,
+        args.year,
+        &topology,
+        &pfts.land_pfts,
+        &args.blocks,
+        "htop",
+        "htop_pfts",
+        &pft_height,
     )?;
     for &year in &args.monthly_vegetation_years {
         let (suffix, lai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_LAI", year)?;

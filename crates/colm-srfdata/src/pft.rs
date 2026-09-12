@@ -195,6 +195,71 @@ pub fn aggregate_pft_fractions(
     Ok(output)
 }
 
+/// Port of the PFT-specific branch of `Aggregation_ForestHeight`.
+///
+/// Each PFT receives a PFT-percentage- and area-weighted canopy height.  If a
+/// retained PFT has no positive source weight, CoLM falls back to the
+/// area-weighted height of its land patch.
+pub fn aggregate_pft_height(
+    patches: &FlatPatches,
+    input: PftFractionInput<'_>,
+    raw_height_m: &[f64],
+) -> Result<Vec<f64>> {
+    validate_input(patches, input)?;
+    ensure!(
+        raw_height_m.len() == input.land_area.len()
+            && raw_height_m.iter().all(|value| value.is_finite()),
+        "PFT forest height must be one finite value per raw cell"
+    );
+    let mut output = vec![0.0; input.pft_classes.len()];
+    for patch in 0..patches.len() {
+        let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+        if range.is_empty() || input.patch_kind[patch] == PftPatchKind::Other {
+            continue;
+        }
+        ensure!(
+            patches.wmo_source_for(patch).is_none(),
+            "PFT forest height needs the upstream land2mWMO topology"
+        );
+        let cells = patches.raw_cells(patch);
+        let mut patch_area = 0.0;
+        let mut patch_height = 0.0;
+        for &cell in cells {
+            let area = area(input.land_area, cell, patch)?;
+            patch_area += area;
+            patch_height += raw_height_m[cell] * area;
+        }
+        ensure!(
+            patch_area > 0.0 && patch_area.is_finite(),
+            "PFT forest-height patch {patch} has zero or non-finite land area"
+        );
+        let patch_height = patch_height / patch_area;
+        match input.patch_kind[patch] {
+            PftPatchKind::Natural => {
+                for pft in range {
+                    let class = input.pft_classes[pft];
+                    let mut weighted_area = 0.0;
+                    let mut weighted_height = 0.0;
+                    for &cell in cells {
+                        let weight = percentage(input, class, cell, patch)?.max(0.0)
+                            * area(input.land_area, cell, patch)?;
+                        weighted_area += weight;
+                        weighted_height += raw_height_m[cell] * weight;
+                    }
+                    output[pft] = if weighted_area > 0.0 {
+                        weighted_height / weighted_area
+                    } else {
+                        patch_height
+                    };
+                }
+            }
+            PftPatchKind::Crop => output[range.start] = patch_height,
+            PftPatchKind::Other => unreachable!(),
+        }
+    }
+    Ok(output)
+}
+
 /// Applies the PFT/PC branch of `Aggregation_LAI` to one LAI or SAI field.
 pub fn aggregate_pft_index(
     patches: &FlatPatches,

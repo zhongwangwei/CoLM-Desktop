@@ -168,3 +168,23 @@ fn pft_index_keeps_non_pft_land_patches_at_zero() {
     assert_eq!(state.patch_index, [3.0, 0.0]);
     assert_eq!(state.pft_index, [3.0]);
 }
+
+#[test]
+fn pft_height_uses_pft_weights_and_patch_mean_fallback() {
+    let layout = FlatPatches::new(vec![1], vec![0, 2], vec![0, 1], vec![None]).unwrap();
+    let height = aggregate_pft_height(
+        &layout,
+        PftFractionInput {
+            pft_offsets: &[0, 3],
+            pft_classes: &[0, 1, 2],
+            patch_kind: &[PftPatchKind::Natural],
+            raw_class_count: 3,
+            raw_percent: &[25.0, 50.0, 75.0, 50.0, 0.0, 0.0],
+            land_area: &[1.0, 3.0],
+            crop_excluded_class: None,
+        },
+        &[10.0, 20.0],
+    )
+    .unwrap();
+    assert_eq!(height, [130.0 / 7.0, 50.0 / 3.0, 17.5]);
+}
