@@ -73,6 +73,50 @@ fn write_lake_depth(path: &std::path::Path) {
     file.close().unwrap();
 }
 
+fn write_five_degree_mesh(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("nlat", 1).unwrap();
+    file.add_dimension("nlon", 2).unwrap();
+    file.add_variable::<f64>("lon_w", &["nlon"])
+        .unwrap()
+        .put_values(&[-180.0, -177.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon_e", &["nlon"])
+        .unwrap()
+        .put_values(&[-177.5, -175.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat_s", &["nlat"])
+        .unwrap()
+        .put_values(&[85.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat_n", &["nlat"])
+        .unwrap()
+        .put_values(&[90.0], ..)
+        .unwrap();
+    file.add_variable::<i64>("landmask", &["nlat", "nlon"])
+        .unwrap()
+        .put_values(&[1, 1], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_five_degree_tile(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_variable::<f64>("HTOP", &["lon", "lat"])
+        .unwrap()
+        .put_values(&[12.5, 15.0], (.., ..))
+        .unwrap();
+    file.add_variable::<f64>("LAT_FIRST", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[42.0, 84.0], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
 fn dim_names(file: &netcdf::File, variable: &str) -> Vec<String> {
     file.variable(variable)
         .unwrap()
@@ -152,6 +196,58 @@ fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
     assert_eq!(patches.set_type, vec![8, 9, 12, 13, 10, 11, 14, 15]);
     assert_eq!(topology.mesh.pixels(0).unwrap().0, &[1, 2, 1, 2]);
     assert_eq!(topology.mesh.pixels(0).unwrap().1, &[2, 2, 1, 1]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
+    let directory = temporary("five-degree-tile");
+    let mesh_file = directory.join("mesh.nc");
+    write_five_degree_mesh(&mesh_file);
+    let tile_dir = directory.join("plant_15s");
+    std::fs::create_dir(&tile_dir).unwrap();
+    write_five_degree_tile(&tile_dir.join("RG_90_-180_85_-175.MOD2005.nc"));
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid {
+            nlon: 144,
+            nlat: 36,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        read_mesh_tiled_raster_f64(
+            &tile_dir,
+            "MOD2005",
+            "HTOP",
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36
+            },
+        )
+        .unwrap(),
+        vec![12.5, 15.0]
+    );
+    assert_eq!(
+        read_mesh_tiled_raster_f64(
+            &tile_dir,
+            "MOD2005",
+            "LAT_FIRST",
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36
+            },
+        )
+        .unwrap(),
+        vec![42.0, 84.0]
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }

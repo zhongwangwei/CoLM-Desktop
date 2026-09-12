@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use netcdf::NcTypeDescriptor;
 
 use crate::{mesh::inspect_spatial_input, FlatLandElements, FlatLandPatches, FlatMesh, Grid};
@@ -254,6 +254,22 @@ pub fn read_mesh_raster_f64(
     read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
 }
 
+/// Read a CoLM 5°×5° tile variable in flattened mesh-pixel order.
+///
+/// `MOD_5x5DataReadin.F90` partitions the global grid into 72 longitude by
+/// 36 latitude tiles.  Reading only the intersecting tiles preserves the raw
+/// source contract used by IGBP forest-height and vegetation products.
+pub fn read_mesh_tiled_raster_f64(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    read_mesh_tiled_raster(directory, suffix, variable, mesh, pixel, raw_grid)
+}
+
 /// Relative spherical areas in flattened mesh-pixel order.
 ///
 /// CoLM uses physical grid-cell areas for area-weighted aggregation.  The
@@ -345,6 +361,136 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
         );
         pixel_values.extend(row);
     }
+    mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+}
+
+fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<T>> {
+    ensure!(
+        raw_grid.nlon % 72 == 0 && raw_grid.nlat % 36 == 0,
+        "5 degree tiling requires a global grid divisible by 72x36"
+    );
+    ensure!(!suffix.is_empty(), "5 degree tile suffix must not be empty");
+    let tile_nlon = raw_grid.nlon / 72;
+    let tile_nlat = raw_grid.nlat / 36;
+    let longitude = raw_longitudes(pixel, raw_grid);
+    let latitude = raw_latitudes(pixel, raw_grid);
+    let x_tiles = tile_axis(&longitude, tile_nlon);
+    let y_tiles = tile_axis(&latitude, tile_nlat);
+    let mut pixels = vec![None; pixel.lon_w.len() * pixel.lat_s.len()];
+    for (&tile_y, rows) in &y_tiles {
+        for (&tile_x, columns) in &x_tiles {
+            let path = directory.join(tile_filename(tile_x, tile_y, suffix));
+            let file = netcdf::open(&path)
+                .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?;
+            let source = file
+                .variable(variable)
+                .with_context(|| format!("{variable} is absent from {}", path.display()))?;
+            let dimensions = source.dimensions();
+            ensure!(
+                dimensions.len() == 2,
+                "{variable} in {} must be a two-dimensional tile",
+                path.display()
+            );
+            let values = source.get_values::<T, _>(..)?;
+            let shape = dimensions
+                .iter()
+                .map(|dimension| dimension.len())
+                .collect::<Vec<_>>();
+            ensure!(
+                values.len() == tile_nlon * tile_nlat,
+                "{variable} in {} has {} values; expected {}x{} tile",
+                path.display(),
+                values.len(),
+                tile_nlat,
+                tile_nlon
+            );
+            let axes = tile_axes(dimensions, tile_nlon, tile_nlat, &path)?;
+            for &(local_y, source_y) in rows {
+                for &(local_x, source_x) in columns {
+                    let offset = match axes {
+                        TileAxes::LatLon => source_y * shape[1] + source_x,
+                        TileAxes::LonLat => source_x * shape[1] + source_y,
+                    };
+                    pixels[local_y * pixel.lon_w.len() + local_x] = Some(
+                        *values
+                            .get(offset)
+                            .context("5 degree tile pixel is outside its variable")?,
+                    );
+                }
+            }
+        }
+    }
+    let pixels = pixels
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .context("5 degree tiles did not cover the spatial pixel window")?;
+    mesh_order(mesh, pixel.lon_w.len(), &pixels)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TileAxes {
+    LatLon,
+    LonLat,
+}
+
+fn tile_axis(indices: &[usize], tile_len: usize) -> BTreeMap<usize, Vec<(usize, usize)>> {
+    let mut tiles = BTreeMap::new();
+    for (local, index) in indices.iter().copied().enumerate() {
+        let index = index - 1;
+        tiles
+            .entry(index / tile_len)
+            .or_insert_with(Vec::new)
+            .push((local, index % tile_len));
+    }
+    tiles
+}
+
+fn tile_filename(x: usize, y: usize, suffix: &str) -> String {
+    let north = 90 - i32::try_from(y).expect("tile index fits i32") * 5;
+    let west = -180 + i32::try_from(x).expect("tile index fits i32") * 5;
+    format!("RG_{north}_{west}_{}_{}.{suffix}.nc", north - 5, west + 5)
+}
+
+fn tile_axes(
+    dimensions: &[netcdf::Dimension<'_>],
+    tile_nlon: usize,
+    tile_nlat: usize,
+    path: &Path,
+) -> Result<TileAxes> {
+    let is_lat = |name: String| matches!(name.to_ascii_lowercase().as_str(), "lat" | "latitude");
+    let is_lon = |name: String| matches!(name.to_ascii_lowercase().as_str(), "lon" | "longitude");
+    let names = dimensions
+        .iter()
+        .map(netcdf::Dimension::name)
+        .collect::<Vec<_>>();
+    match (is_lat(names[0].clone()), is_lon(names[1].clone())) {
+        (true, true) if dimensions[0].len() == tile_nlat && dimensions[1].len() == tile_nlon => {
+            Ok(TileAxes::LatLon)
+        }
+        _ if is_lon(names[0].clone())
+            && is_lat(names[1].clone())
+            && dimensions[0].len() == tile_nlon
+            && dimensions[1].len() == tile_nlat =>
+        {
+            Ok(TileAxes::LonLat)
+        }
+        _ => bail!(
+            "5 degree tile {} must use lat/lon or lon/lat dimensions of {}x{}",
+            path.display(),
+            tile_nlat,
+            tile_nlon
+        ),
+    }
+}
+
+fn mesh_order<T: Copy>(mesh: &FlatMesh, width: usize, pixel_values: &[T]) -> Result<Vec<T>> {
     let mut values = Vec::new();
     for element in 0..mesh.len() {
         let (xs, ys) = mesh.pixels(element)?;
@@ -357,7 +503,7 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
                 .context("mesh latitude is zero")?;
             values.push(
                 *pixel_values
-                    .get(y * pixel.lon_w.len() + x)
+                    .get(y * width + x)
                     .context("mesh pixel lies outside the spatial pixel grid")?,
             );
         }
