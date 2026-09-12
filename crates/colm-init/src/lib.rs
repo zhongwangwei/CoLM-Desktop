@@ -8,6 +8,9 @@ pub mod albedo {
 pub mod hydrology {
     pub use colm_core::hydrology::*;
 }
+pub mod linear {
+    pub use colm_core::linear::*;
+}
 pub mod pc_radiation {
     pub use colm_core::pc_radiation::*;
 }
@@ -39,9 +42,9 @@ pub use colm_core::{
     cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
     derive_igbp_canopy, derive_usgs_canopy, equilibrium_water_state, land_cover_soil_reflectance,
     leaf_optics_from_land_cover, orbital_cosine_zenith, soil_hydraulic_conductivity,
-    soil_psi_from_vliq, soil_vliq_from_psi, CanopyState, ColdStartRadiation, EquilibriumWaterState,
-    LandCoverScheme, LeafOptics, PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput,
-    SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
+    soil_psi_from_vliq, soil_vliq_from_psi, solve_tridiagonal, CanopyState, ColdStartRadiation,
+    EquilibriumWaterState, LandCoverScheme, LeafOptics, PcCanopyRadiation, PcPftInput,
+    PcPftRadiation, PftCanopyInput, SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
 };
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
