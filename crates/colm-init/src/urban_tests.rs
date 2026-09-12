@@ -1,5 +1,55 @@
 use super::*;
 
+#[test]
+fn urban_lucy_copies_each_region_into_its_urban_patch_layout() {
+    let source = UrbanLucyInput {
+        region_id: &[2, 1],
+        population_density: &[12.0, 34.0],
+        region_count: 2,
+        vehicles_per_thousand: &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        week_holiday: &[1.0; 14],
+        weekend_traffic_profile: &[2.0; 48],
+        weekday_traffic_profile: &[3.0; 48],
+        human_metabolic_profile: &[4.0; 48],
+        fixed_holiday: &[5.0; 730],
+    };
+    let state = derive_urban_lucy(source, true).unwrap();
+    assert_eq!(state.population_density, [12.0, 34.0]);
+    assert_eq!(state.vehicles_per_thousand, [4.0, 1.0, 5.0, 2.0, 6.0, 3.0]);
+    assert_eq!(state.week_holiday, vec![1.0; 14]);
+    assert_eq!(state.fixed_holiday, vec![5.0; 730]);
+    assert!(derive_urban_lucy(
+        UrbanLucyInput {
+            region_id: &[0],
+            population_density: &[1.0],
+            ..source
+        },
+        true
+    )
+    .is_err());
+}
+
+#[test]
+fn disabled_urban_lucy_needs_no_runtime_table_and_zeros_all_outputs() {
+    let state = derive_urban_lucy(
+        UrbanLucyInput {
+            region_id: &[0],
+            population_density: &[12.0],
+            region_count: 0,
+            vehicles_per_thousand: &[],
+            week_holiday: &[],
+            weekend_traffic_profile: &[],
+            weekday_traffic_profile: &[],
+            human_metabolic_profile: &[],
+            fixed_holiday: &[],
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(state.population_density, [0.0]);
+    assert!(state.fixed_holiday.iter().all(|&value| value == 0.0));
+}
+
 fn input() -> UrbanInput<'static> {
     UrbanInput {
         urban_to_patch: &[1, 0],

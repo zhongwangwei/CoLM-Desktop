@@ -23,5 +23,8 @@ pub use time_state::{
     derive_initial_soil_hydraulics, initialize_cold_soil, initialize_profile_soil,
     initialize_snow_layers, interpolate_profile, ColdSoilState, SnowState, SoilHydraulicState,
 };
-pub use urban::{derive_urban_geometry, UrbanConfig, UrbanInput, UrbanState};
+pub use urban::{
+    derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
+    UrbanLucyState, UrbanState,
+};
 pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};

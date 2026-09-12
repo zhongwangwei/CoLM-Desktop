@@ -10,6 +10,147 @@ pub struct UrbanConfig {
     pub building_energy_model: bool,
 }
 
+/// Region-indexed LUCY inputs from `LUCY_rawdata.nc`.
+///
+/// Source fields are `region * components + component`, matching the Fortran
+/// `l... (region, :)` reads.  Output fields are component-major because CoLM
+/// stores `component, urban_patch` arrays.
+#[derive(Debug, Clone, Copy)]
+pub struct UrbanLucyInput<'a> {
+    pub region_id: &'a [i32],
+    pub population_density: &'a [f64],
+    pub region_count: usize,
+    pub vehicles_per_thousand: &'a [f64],
+    pub week_holiday: &'a [f64],
+    pub weekend_traffic_profile: &'a [f64],
+    pub weekday_traffic_profile: &'a [f64],
+    pub human_metabolic_profile: &'a [f64],
+    pub fixed_holiday: &'a [f64],
+}
+
+/// Per-urban-patch LUCY state ready for the time-invariant restart writer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UrbanLucyState {
+    pub population_density: Vec<f64>,
+    pub vehicles_per_thousand: Vec<f64>,
+    pub week_holiday: Vec<f64>,
+    pub weekend_traffic_profile: Vec<f64>,
+    pub weekday_traffic_profile: Vec<f64>,
+    pub human_metabolic_profile: Vec<f64>,
+    pub fixed_holiday: Vec<f64>,
+}
+
+/// Applies the LUCY section of `Urban_readin`.
+///
+/// `region_id` is one-based, as it is in the NetCDF landdata.  The Fortran
+/// implementation leaves an enabled zero region uninitialized; Rust rejects
+/// that malformed landdata instead of serializing an indeterminate restart.
+pub fn derive_urban_lucy(input: UrbanLucyInput<'_>, enabled: bool) -> Result<UrbanLucyState> {
+    let urban_count = input.region_id.len();
+    ensure!(
+        input.population_density.len() == urban_count,
+        "LUCY population density must have one value per urban patch"
+    );
+    if !enabled {
+        return Ok(empty_lucy_state(urban_count));
+    }
+    ensure!(
+        input.region_count > 0,
+        "enabled LUCY needs at least one region"
+    );
+    validate_lucy_source(input)?;
+    for &region_id in input.region_id {
+        ensure!(
+            region_id > 0 && (region_id as usize) <= input.region_count,
+            "enabled LUCY region id {region_id} is outside 1..={}",
+            input.region_count
+        );
+    }
+    Ok(UrbanLucyState {
+        population_density: input.population_density.to_vec(),
+        vehicles_per_thousand: copy_lucy_field(
+            input.vehicles_per_thousand,
+            input.region_id,
+            input.region_count,
+            3,
+        ),
+        week_holiday: copy_lucy_field(input.week_holiday, input.region_id, input.region_count, 7),
+        weekend_traffic_profile: copy_lucy_field(
+            input.weekend_traffic_profile,
+            input.region_id,
+            input.region_count,
+            24,
+        ),
+        weekday_traffic_profile: copy_lucy_field(
+            input.weekday_traffic_profile,
+            input.region_id,
+            input.region_count,
+            24,
+        ),
+        human_metabolic_profile: copy_lucy_field(
+            input.human_metabolic_profile,
+            input.region_id,
+            input.region_count,
+            24,
+        ),
+        fixed_holiday: copy_lucy_field(
+            input.fixed_holiday,
+            input.region_id,
+            input.region_count,
+            365,
+        ),
+    })
+}
+
+fn empty_lucy_state(urban_count: usize) -> UrbanLucyState {
+    UrbanLucyState {
+        population_density: vec![0.0; urban_count],
+        vehicles_per_thousand: vec![0.0; 3 * urban_count],
+        week_holiday: vec![0.0; 7 * urban_count],
+        weekend_traffic_profile: vec![0.0; 24 * urban_count],
+        weekday_traffic_profile: vec![0.0; 24 * urban_count],
+        human_metabolic_profile: vec![0.0; 24 * urban_count],
+        fixed_holiday: vec![0.0; 365 * urban_count],
+    }
+}
+
+fn validate_lucy_source(input: UrbanLucyInput<'_>) -> Result<()> {
+    for (name, source, components) in [
+        ("vehicles", input.vehicles_per_thousand, 3),
+        ("week holidays", input.week_holiday, 7),
+        ("weekend traffic profile", input.weekend_traffic_profile, 24),
+        ("weekday traffic profile", input.weekday_traffic_profile, 24),
+        ("human metabolic profile", input.human_metabolic_profile, 24),
+        ("fixed holidays", input.fixed_holiday, 365),
+    ] {
+        ensure!(
+            source.len() == input.region_count * components,
+            "LUCY {name} has {} values; expected {} regions x {components}",
+            source.len(),
+            input.region_count
+        );
+    }
+    Ok(())
+}
+
+fn copy_lucy_field(
+    source: &[f64],
+    region_id: &[i32],
+    region_count: usize,
+    components: usize,
+) -> Vec<f64> {
+    let urban_count = region_id.len();
+    let mut output = vec![0.0; components * urban_count];
+    for (urban, &id) in region_id.iter().enumerate() {
+        let region = id as usize - 1;
+        debug_assert!(region < region_count);
+        for component in 0..components {
+            output[component * urban_count + urban] = source[region * components + component];
+        }
+    }
+    output
+}
+
 /// Layer-major urban landdata supplied by the future NetCDF adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct UrbanInput<'a> {
