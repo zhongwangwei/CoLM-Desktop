@@ -307,3 +307,59 @@ fn lake_new_snow_matches_mod_lake_phase_exchange_and_shared_snow_column() {
     close(existing_snow.thickness_m[top], 0.086);
     close(existing_snow.node_depth_m[top], -0.043);
 }
+
+#[test]
+fn lake_snow_water_matches_dynamic_bed_saturation_and_surface_budget() {
+    // Standalone gfortran reference from MOD_Lake:snowwater_lake.
+    let mut lake = LakeColumn {
+        thickness_m: vec![1.0; 10],
+        temperature_k: vec![280.0; 10],
+        ice_fraction: vec![0.0; 10],
+    };
+    let mut snow = RuntimeSnowColumn::empty();
+    let mut soil = LakeSnowWaterSoil {
+        thickness_m: vec![0.5],
+        porosity: vec![0.4],
+        liquid_water_kg_m2: vec![100.0],
+        ice_water_kg_m2: vec![0.0],
+    };
+    let mut fluxes = LakeSnowWaterFluxes {
+        sensible_heat_w_m2: 2.0,
+        ground_heat_w_m2: 3.0,
+        snow_melt_kg_m2_s: 0.0005,
+    };
+    let outcome = lake_snow_water(
+        LakeSnowWaterInput {
+            use_dynamic_lake: true,
+            time_step_seconds: 1800.0,
+            irreducible_saturation: 0.033,
+            impermeable_porosity: 0.05,
+            rainfall_kg_m2_s: 0.001,
+            evaporation_kg_m2_s: 0.0002,
+            sublimation_kg_m2_s: 0.0001,
+            dew_kg_m2_s: 0.001,
+            frost_kg_m2_s: 0.0003,
+            eastward_wind_m_s: 0.0,
+            northward_wind_m_s: 0.0,
+            melted: &[],
+        },
+        &mut snow,
+        &mut lake,
+        &mut soil,
+        &mut fluxes,
+    )
+    .unwrap();
+
+    close(outcome.bottom_drainage_kg_m2_s, 0.0);
+    close(fluxes.sensible_heat_w_m2, 2.0);
+    close(fluxes.ground_heat_w_m2, 3.0);
+    close(fluxes.snow_melt_kg_m2_s, 0.0005);
+    close(soil.liquid_water_kg_m2[0], 200.0);
+    close(soil.ice_water_kg_m2[0], 0.0);
+    close(lake.thickness_m.iter().sum(), 9.9027);
+    close(lake.thickness_m[0], 0.1);
+    close(lake.temperature_k[0], 279.970_186_759_943);
+    close(lake.ice_fraction[0], 0.0);
+    close(lake.thickness_m[9], 1.989_469_7);
+    close(lake.temperature_k[9], 280.0);
+}

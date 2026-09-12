@@ -70,9 +70,10 @@ pub use interception::{
     CanopyWater, CanopyWetness,
 };
 pub use lake::{
-    add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_thermal_conductivity, LakeColumn,
-    LakeConductivity, LakeConductivityInput, LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness,
-    LakeRoughnessInput,
+    add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_snow_water,
+    lake_thermal_conductivity, LakeColumn, LakeConductivity, LakeConductivityInput,
+    LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
+    LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
 };
 pub use monin_obukhov::{
     canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,

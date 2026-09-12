@@ -332,6 +332,8 @@ pub fn combine_snow_layers(
     }
     state.layer_count = layer_count;
     if layer_count == 0 {
+        state.water_equivalent_kg_m2 = 0.0;
+        state.depth_m = 0.0;
         clear_snow_layers(state);
         return Ok(());
     }

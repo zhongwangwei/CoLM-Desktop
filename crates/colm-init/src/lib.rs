@@ -78,9 +78,10 @@ pub mod vegetation {
 pub use colm_core::update_snow_age;
 pub use colm_core::SoilSurfaceResistanceInput;
 pub use colm_core::{
-    add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_thermal_conductivity, LakeColumn,
-    LakeConductivity, LakeConductivityInput, LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness,
-    LakeRoughnessInput,
+    add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_snow_water,
+    lake_thermal_conductivity, LakeColumn, LakeConductivity, LakeConductivityInput,
+    LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
+    LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
 };
 pub use colm_core::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water,

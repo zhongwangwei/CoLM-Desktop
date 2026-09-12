@@ -3,7 +3,10 @@
 use anyhow::{ensure, Result};
 
 use crate::snow::{snow_interface_slot, snow_layer_slot, validate_runtime_snow_column};
-use crate::RuntimeSnowColumn;
+use crate::{
+    combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water, RuntimeSnowColumn,
+    SnowToSoilTransfer, SnowWaterInput,
+};
 
 const LAKE_LAYERS: usize = 10;
 const DEFAULT_THICKNESS_M: [f64; LAKE_LAYERS] =
@@ -41,6 +44,47 @@ pub struct LakeNewSnowInput {
 pub struct LakeNewSnowOutcome {
     pub rainfall_kg_m2_s: f64,
     pub snowfall_kg_m2_s: f64,
+}
+
+/// Mutable soil state below a lake used by `MOD_Lake:snowwater_lake`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LakeSnowWaterSoil {
+    pub thickness_m: Vec<f64>,
+    pub porosity: Vec<f64>,
+    pub liquid_water_kg_m2: Vec<f64>,
+    pub ice_water_kg_m2: Vec<f64>,
+}
+
+/// In/out surface fluxes used by `MOD_Lake:snowwater_lake`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LakeSnowWaterFluxes {
+    pub sensible_heat_w_m2: f64,
+    pub ground_heat_w_m2: f64,
+    pub snow_melt_kg_m2_s: f64,
+}
+
+/// Inputs to `MOD_Lake:snowwater_lake` after `newsnow_lake` has partitioned precipitation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LakeSnowWaterInput<'a> {
+    pub use_dynamic_lake: bool,
+    pub time_step_seconds: f64,
+    pub irreducible_saturation: f64,
+    pub impermeable_porosity: f64,
+    pub rainfall_kg_m2_s: f64,
+    pub evaporation_kg_m2_s: f64,
+    pub sublimation_kg_m2_s: f64,
+    pub dew_kg_m2_s: f64,
+    pub frost_kg_m2_s: f64,
+    pub eastward_wind_m_s: f64,
+    pub northward_wind_m_s: f64,
+    /// CoLM `imelt` over the currently active snow layers, surface first.
+    pub melted: &'a [bool],
+}
+
+/// Water drained from the snow bottom during the lake hydrology step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LakeSnowWaterOutcome {
+    pub bottom_drainage_kg_m2_s: f64,
 }
 
 /// Inputs to `MOD_Lake:roughness_lake` for one lake surface.
@@ -356,6 +400,293 @@ fn exchange_precipitation_with_lake(
     }
 }
 
+/// Ports `MOD_Lake:snowwater_lake` without SNICAR aerosols.
+///
+/// It reuses the common snow percolation, compaction, combining, and division
+/// kernels, then applies only the lake-specific melting and saturated-bed rules.
+pub fn lake_snow_water(
+    input: LakeSnowWaterInput<'_>,
+    snow: &mut RuntimeSnowColumn,
+    lake: &mut LakeColumn,
+    soil: &mut LakeSnowWaterSoil,
+    fluxes: &mut LakeSnowWaterFluxes,
+) -> Result<LakeSnowWaterOutcome> {
+    validate(lake)?;
+    validate_lake_soil(soil)?;
+    ensure!(
+        input.time_step_seconds.is_finite()
+            && input.time_step_seconds > 0.0
+            && input.irreducible_saturation.is_finite()
+            && (0.0..=1.0).contains(&input.irreducible_saturation)
+            && input.impermeable_porosity.is_finite()
+            && input.impermeable_porosity >= 0.0
+            && input.rainfall_kg_m2_s.is_finite()
+            && input.evaporation_kg_m2_s.is_finite()
+            && input.sublimation_kg_m2_s.is_finite()
+            && input.dew_kg_m2_s.is_finite()
+            && input.frost_kg_m2_s.is_finite()
+            && input.eastward_wind_m_s.is_finite()
+            && input.northward_wind_m_s.is_finite()
+            && fluxes.sensible_heat_w_m2.is_finite()
+            && fluxes.ground_heat_w_m2.is_finite()
+            && fluxes.snow_melt_kg_m2_s.is_finite(),
+        "lake snow-water inputs are invalid"
+    );
+    let had_snow = snow.layer_count < 0;
+    ensure!(
+        input.melted.len()
+            == if had_snow {
+                snow.layer_count.unsigned_abs() as usize
+            } else {
+                0
+            },
+        "lake snow-water melt flags do not match the snow column"
+    );
+    let mut bottom_drainage = 0.0;
+
+    if had_snow {
+        bottom_drainage = snow_water(
+            SnowWaterInput {
+                time_step_seconds: input.time_step_seconds,
+                irreducible_saturation: input.irreducible_saturation,
+                impermeable_porosity: input.impermeable_porosity,
+                rainfall_kg_m2_s: input.rainfall_kg_m2_s,
+                evaporation_kg_m2_s: input.evaporation_kg_m2_s,
+                dew_kg_m2_s: input.dew_kg_m2_s,
+                sublimation_kg_m2_s: input.sublimation_kg_m2_s,
+                frost_kg_m2_s: input.frost_kg_m2_s,
+            },
+            snow,
+        )?
+        .bottom_drainage_kg_m2_s;
+        compact_snow_layers(
+            snow,
+            input.time_step_seconds,
+            input.eastward_wind_m_s,
+            input.northward_wind_m_s,
+            input.melted,
+        )?;
+        let mut lake_surface = SnowToSoilTransfer {
+            liquid_water_kg_m2: soil.liquid_water_kg_m2[0],
+            ice_water_kg_m2: soil.ice_water_kg_m2[0],
+        };
+        combine_snow_layers(snow, &mut lake_surface)?;
+        soil.liquid_water_kg_m2[0] = lake_surface.liquid_water_kg_m2;
+        soil.ice_water_kg_m2[0] = lake_surface.ice_water_kg_m2;
+        if snow.layer_count < 0 {
+            divide_snow_layers(snow)?;
+        }
+        remove_all_liquid_snow(snow, fluxes, input.time_step_seconds, &mut bottom_drainage);
+    }
+
+    melt_snow_into_unfrozen_lake(
+        snow,
+        lake,
+        fluxes,
+        input.time_step_seconds,
+        &mut bottom_drainage,
+    );
+    let soil_water_change = saturate_lake_soil(soil);
+    if input.use_dynamic_lake {
+        adjust_dynamic_lake_water(
+            had_snow,
+            input,
+            bottom_drainage,
+            soil_water_change,
+            lake,
+            fluxes,
+        )?;
+    }
+    Ok(LakeSnowWaterOutcome {
+        bottom_drainage_kg_m2_s: bottom_drainage,
+    })
+}
+
+fn remove_all_liquid_snow(
+    snow: &mut RuntimeSnowColumn,
+    fluxes: &mut LakeSnowWaterFluxes,
+    time_step_seconds: f64,
+    bottom_drainage: &mut f64,
+) {
+    if snow.layer_count != -1 || snow.ice_water_kg_m2[snow_layer_slot(0)] != 0.0 {
+        return;
+    }
+    let top = snow_layer_slot(0);
+    let heat = LIQUID_HEAT_CAPACITY_J_KG_K
+        * snow.liquid_water_kg_m2[top]
+        * (snow.temperature_k[top] - FREEZING_K);
+    fluxes.sensible_heat_w_m2 += heat / time_step_seconds;
+    fluxes.ground_heat_w_m2 -= heat / time_step_seconds;
+    *bottom_drainage += snow.liquid_water_kg_m2[top] / time_step_seconds;
+    snow.layer_count = 0;
+    snow.water_equivalent_kg_m2 = 0.0;
+    snow.depth_m = 0.0;
+    snow.liquid_water_kg_m2[top] = 0.0;
+}
+
+fn melt_snow_into_unfrozen_lake(
+    snow: &mut RuntimeSnowColumn,
+    lake: &mut LakeColumn,
+    fluxes: &mut LakeSnowWaterFluxes,
+    time_step_seconds: f64,
+    bottom_drainage: &mut f64,
+) {
+    if snow.layer_count >= 0 || lake.temperature_k[0] <= FREEZING_K || lake.ice_fraction[0] >= 0.001
+    {
+        return;
+    }
+    let mut ice = 0.0;
+    let mut liquid = 0.0;
+    let mut cooling = 0.0;
+    for layer in snow.layer_count + 1..=0 {
+        let slot = snow_layer_slot(layer);
+        ice += snow.ice_water_kg_m2[slot];
+        liquid += snow.liquid_water_kg_m2[slot];
+        cooling += snow.ice_water_kg_m2[slot]
+            * ICE_HEAT_CAPACITY_J_KG_K
+            * (FREEZING_K - snow.temperature_k[slot])
+            + snow.liquid_water_kg_m2[slot]
+                * LIQUID_HEAT_CAPACITY_J_KG_K
+                * (FREEZING_K - snow.temperature_k[slot]);
+    }
+    let melt_energy = cooling + ice * FUSION_HEAT_J_KG;
+    let lake_warming = (lake.temperature_k[0] - FREEZING_K)
+        * LIQUID_HEAT_CAPACITY_J_KG_K
+        * 1000.0
+        * lake.thickness_m[0];
+    let lake_freezing = 1000.0 * lake.thickness_m[0] * FUSION_HEAT_J_KG;
+    if lake_warming < melt_energy && lake_warming + lake_freezing < melt_energy {
+        return;
+    }
+    if lake_warming >= melt_energy {
+        lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
+            * (1000.0 * lake.thickness_m[0] * lake.temperature_k[0] + (ice + liquid) * FREEZING_K)
+            - cooling
+            - ice * FUSION_HEAT_J_KG)
+            / (LIQUID_HEAT_CAPACITY_J_KG_K * (1000.0 * lake.thickness_m[0] + ice + liquid));
+    } else {
+        lake.temperature_k[0] = FREEZING_K;
+        lake.ice_fraction[0] = (melt_energy - lake_warming) / lake_freezing;
+    }
+    fluxes.snow_melt_kg_m2_s += snow.water_equivalent_kg_m2 / time_step_seconds;
+    *bottom_drainage += snow.water_equivalent_kg_m2 / time_step_seconds;
+    snow.layer_count = 0;
+    snow.water_equivalent_kg_m2 = 0.0;
+    snow.depth_m = 0.0;
+}
+
+fn validate_lake_soil(soil: &LakeSnowWaterSoil) -> Result<()> {
+    ensure!(
+        !soil.thickness_m.is_empty()
+            && soil.thickness_m.len() == soil.porosity.len()
+            && soil.thickness_m.len() == soil.liquid_water_kg_m2.len()
+            && soil.thickness_m.len() == soil.ice_water_kg_m2.len()
+            && soil
+                .thickness_m
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && soil
+                .porosity
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            && soil
+                .liquid_water_kg_m2
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+            && soil
+                .ice_water_kg_m2
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "lake soil state is invalid"
+    );
+    Ok(())
+}
+
+fn saturate_lake_soil(soil: &mut LakeSnowWaterSoil) -> f64 {
+    let mut water_change = 0.0;
+    for layer in 0..soil.thickness_m.len() {
+        let thickness = soil.thickness_m[layer];
+        let before = soil.liquid_water_kg_m2[layer] + soil.ice_water_kg_m2[layer];
+        let saturation = soil.liquid_water_kg_m2[layer] / (thickness * 1000.0)
+            + soil.ice_water_kg_m2[layer] / (thickness * 917.0);
+        if saturation < soil.porosity[layer] {
+            soil.liquid_water_kg_m2[layer] =
+                (soil.porosity[layer] * thickness - soil.ice_water_kg_m2[layer] / 917.0).max(0.0)
+                    * 1000.0;
+            soil.ice_water_kg_m2[layer] = (soil.porosity[layer] * thickness
+                - soil.liquid_water_kg_m2[layer] / 1000.0)
+                .max(0.0)
+                * 917.0;
+        } else {
+            soil.liquid_water_kg_m2[layer] = (soil.liquid_water_kg_m2[layer]
+                - (saturation - soil.porosity[layer]) * 1000.0 * thickness)
+                .max(0.0);
+            soil.ice_water_kg_m2[layer] = (soil.porosity[layer] * thickness
+                - soil.liquid_water_kg_m2[layer] / 1000.0)
+                .max(0.0)
+                * 917.0;
+        }
+        if soil.liquid_water_kg_m2[layer] > soil.porosity[layer] * 1000.0 * thickness {
+            soil.liquid_water_kg_m2[layer] = soil.porosity[layer] * 1000.0 * thickness;
+            soil.ice_water_kg_m2[layer] = 0.0;
+        }
+        water_change += before - soil.liquid_water_kg_m2[layer] - soil.ice_water_kg_m2[layer];
+    }
+    water_change
+}
+
+fn adjust_dynamic_lake_water(
+    had_snow: bool,
+    input: LakeSnowWaterInput<'_>,
+    bottom_drainage: f64,
+    soil_water_change: f64,
+    lake: &mut LakeColumn,
+    fluxes: &LakeSnowWaterFluxes,
+) -> Result<()> {
+    let (mut liquid_depth, mut ice_depth) = if had_snow {
+        (
+            lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
+                + bottom_drainage * input.time_step_seconds * 1.0e-3,
+            lake.thickness_m[0] * lake.ice_fraction[0],
+        )
+    } else {
+        (
+            lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
+                + (fluxes.snow_melt_kg_m2_s + input.dew_kg_m2_s - input.evaporation_kg_m2_s)
+                    * input.time_step_seconds
+                    * 1.0e-3,
+            lake.thickness_m[0] * lake.ice_fraction[0]
+                + (input.frost_kg_m2_s - input.sublimation_kg_m2_s)
+                    * input.time_step_seconds
+                    * 1.0e-3,
+        )
+    };
+    if liquid_depth < 0.0 {
+        ice_depth += liquid_depth;
+        liquid_depth = 0.0;
+    }
+    if ice_depth < 0.0 {
+        liquid_depth += ice_depth;
+        ice_depth = 0.0;
+    }
+    lake.thickness_m[0] = (liquid_depth + ice_depth).max(1.0e-6);
+    lake.ice_fraction[0] = (ice_depth / lake.thickness_m[0]).clamp(0.0, 1.0);
+    let bottom = lake.thickness_m.len() - 1;
+    lake.thickness_m[bottom] += soil_water_change * 1.0e-3;
+    let mut layer = bottom;
+    while lake.thickness_m[layer] < 0.0 {
+        if layer > 0 {
+            lake.thickness_m[layer - 1] += lake.thickness_m[layer];
+        }
+        lake.thickness_m[layer] = 0.0;
+        if layer == 0 {
+            break;
+        }
+        layer -= 1;
+    }
+    adjust_lake_layers(lake)
+}
+
 /// Ports `MOD_Lake:roughness_lake`.
 pub fn lake_roughness(input: LakeRoughnessInput) -> Result<LakeRoughness> {
     ensure!(
@@ -546,10 +877,12 @@ pub fn adjust_lake_layers(column: &mut LakeColumn) -> Result<()> {
         let mut liquid_mass = 0.0;
         while target_remaining_m > 0.0 {
             if source_remaining_m == 0.0 {
-                ensure!(
-                    source_layer + 1 < LAKE_LAYERS,
-                    "lake remap exhausted source thickness before target layer"
-                );
+                if source_layer + 1 == LAKE_LAYERS {
+                    // MOD_Lake exits its overlap loop at the final source layer.
+                    // Preserve that behavior when binary roundoff leaves only a
+                    // sub-ulp target remainder after the conserved remap.
+                    break;
+                }
                 source_layer += 1;
                 source_remaining_m = column.thickness_m[source_layer];
                 continue;

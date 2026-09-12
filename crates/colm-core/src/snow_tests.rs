@@ -275,3 +275,25 @@ fn snow_water_matches_current_fortran_percolation_and_surface_fluxes() {
     close(outcome.layer_drainage_kg_m2[1], 8.859_214_830_970_556);
     close(outcome.bottom_drainage_kg_m2_s, 0.004_921_786_017_205_864);
 }
+
+#[test]
+fn combining_exhausted_snow_resets_aggregate_state_like_fortran() {
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -1;
+    state.water_equivalent_kg_m2 = 0.4;
+    state.depth_m = 0.02;
+    let top = layer_slot(0);
+    state.thickness_m[top] = 0.02;
+    state.temperature_k[top] = 270.0;
+    state.ice_water_kg_m2[top] = 0.1;
+    state.liquid_water_kg_m2[top] = 0.3;
+    let mut lake_surface = SnowToSoilTransfer::default();
+
+    combine_snow_layers(&mut state, &mut lake_surface).unwrap();
+
+    assert_eq!(state.layer_count, 0);
+    close(state.water_equivalent_kg_m2, 0.0);
+    close(state.depth_m, 0.0);
+    close(lake_surface.ice_water_kg_m2, 0.1);
+    close(lake_surface.liquid_water_kg_m2, 0.3);
+}
