@@ -7,6 +7,7 @@
 pub mod albedo;
 pub mod atmosphere;
 pub mod hydrology;
+pub mod interception;
 pub mod net_solar;
 pub mod pc_radiation;
 pub mod radiation;
@@ -28,6 +29,9 @@ pub use atmosphere::{
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
+};
+pub use interception::{
+    intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput, CanopyWater,
 };
 pub use net_solar::{
     net_solar, LocalNoonShortwave, NetSolarFluxes, NetSolarInput, ShortwaveForcing,
