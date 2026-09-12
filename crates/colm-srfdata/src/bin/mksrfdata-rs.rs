@@ -33,6 +33,7 @@ struct SpatialLctArgs {
     land_cover: SiteMode,
     lake_depth: Option<PathBuf>,
     soil_texture: Option<PathBuf>,
+    soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
 }
 
@@ -86,6 +87,29 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     } else {
         None
     };
+    let soil_brightness = if let Some(path) = &args.soil_brightness {
+        let (waterbody, ice) = match args.land_cover {
+            SiteMode::Igbp => (17, 15),
+            SiteMode::Usgs => (16, 24),
+            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
+                bail!("--soil-brightness supports only LCT IGBP or USGS land cover")
+            }
+        };
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        Some(layout.aggregate_soil_brightness(
+            &read_mesh_raster_i32(
+                path,
+                "soil_brightness",
+                &topology.mesh,
+                &topology.pixel,
+                COLM_500M,
+            )?,
+            waterbody,
+            ice,
+        )?)
+    } else {
+        None
+    };
     let topography = if let Some(path) = &args.topography {
         let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         Some(layout.aggregate_topography(
@@ -127,6 +151,25 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             "soiltext_patches",
             &soil_texture,
         )?;
+    }
+    if let Some(soil_brightness) = soil_brightness {
+        for (variable, values) in [
+            ("soil_s_v_alb", &soil_brightness.saturated_visible),
+            ("soil_d_v_alb", &soil_brightness.dry_visible),
+            ("soil_s_n_alb", &soil_brightness.saturated_near_infrared),
+            ("soil_d_n_alb", &soil_brightness.dry_near_infrared),
+        ] {
+            write_landpatch_scalar(
+                &args.landdata,
+                args.year,
+                &topology,
+                &patches,
+                &args.blocks,
+                "soil",
+                variable,
+                values,
+            )?;
+        }
     }
     if let Some(topography) = topography {
         for (variable, values) in [
@@ -172,6 +215,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut land_cover = None;
     let mut lake_depth = None;
     let mut soil_texture = None;
+    let mut soil_brightness = None;
     let mut topography = None;
     let mut index = 5;
     while index < args.len() {
@@ -215,6 +259,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--soil-brightness" => {
+                soil_brightness = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-brightness needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
             "--topography" => {
                 topography = Some(PathBuf::from(
                     args.get(index + 1)
@@ -236,6 +287,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         land_cover: land_cover.context("spatial-lct requires --land-cover igbp or usgs")?,
         lake_depth,
         soil_texture,
+        soil_brightness,
         topography,
     })
 }
@@ -323,7 +375,7 @@ fn parse_land_cover(value: &str) -> Result<SiteMode> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--topography topography.nc]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc]"
 }
 
 #[cfg(test)]
@@ -348,6 +400,8 @@ mod tests {
             "lake_depth.nc".into(),
             "--soil-texture".into(),
             "soiltexture.nc".into(),
+            "--soil-brightness".into(),
+            "soil_brightness.nc".into(),
             "--topography".into(),
             "topography.nc".into(),
         ])
@@ -357,6 +411,10 @@ mod tests {
         assert_eq!(parsed.land_cover, SiteMode::Igbp);
         assert_eq!(parsed.lake_depth, Some(PathBuf::from("lake_depth.nc")));
         assert_eq!(parsed.soil_texture, Some(PathBuf::from("soiltexture.nc")));
+        assert_eq!(
+            parsed.soil_brightness,
+            Some(PathBuf::from("soil_brightness.nc"))
+        );
         assert_eq!(parsed.topography, Some(PathBuf::from("topography.nc")));
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
