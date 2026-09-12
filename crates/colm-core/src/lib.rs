@@ -6,6 +6,7 @@
 
 pub mod albedo;
 pub mod atmosphere;
+pub mod ground_fluxes;
 pub mod ground_temperature;
 pub mod hydrology;
 pub mod interception;
@@ -32,6 +33,7 @@ pub use atmosphere::{
     saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
     PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
 };
+pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_temperature::{ground_temperature, GroundTemperatureInput, GroundTemperatureState};
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,

@@ -11,6 +11,9 @@ pub mod hydrology {
 pub mod ground_temperature {
     pub use colm_core::ground_temperature::*;
 }
+pub mod ground_fluxes {
+    pub use colm_core::ground_fluxes::*;
+}
 pub mod linear {
     pub use colm_core::linear::*;
 }
@@ -66,6 +69,7 @@ pub use colm_core::{
     CanopyMoninObukhovInput, CanopyMoninObukhovState, MoninObukhovInitialInput,
     MoninObukhovInitialState, MoninObukhovInput, MoninObukhovState, SurfaceLayerScheme,
 };
+pub use colm_core::{GroundFluxInput, GroundFluxState};
 pub use colm_core::{GroundTemperatureInput, GroundTemperatureState};
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
