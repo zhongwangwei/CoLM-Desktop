@@ -1045,12 +1045,9 @@ CONTAINS
    SUBROUTINE mesh_partition_spmd ()
 
    USE MOD_SPMD_Task
-   USE MOD_Utils
    IMPLICIT NONE
 
    integer :: ie, ifirst, ilast, nlocal
-   integer, allocatable :: order(:)
-   integer*8, allocatable :: elmindx(:)
    type(irregular_elm_type), allocatable :: mesh_local(:)
 
       IF (p_np_glb <= 1) RETURN
@@ -1060,18 +1057,13 @@ CONTAINS
 
       allocate (mesh_local(nlocal))
       IF (numelm > 0) THEN
-         allocate (elmindx(numelm), order(numelm))
-         DO ie = 1, numelm
-            elmindx(ie) = mesh(ie)%indx
-            order(ie) = ie
-         ENDDO
-         CALL quicksort (numelm, elmindx, order)
-
+         ! Vector restart files are ordered by block.  Keep that order here:
+         ! pixelset loading and block-vector I/O rely on matching contiguous
+         ! block spans, while element-ID sorting breaks that correspondence.
          DO ie = ifirst, ilast
-            CALL copy_elm (mesh(order(ie)), mesh_local(ie-ifirst+1))
+            CALL copy_elm (mesh(ie), mesh_local(ie-ifirst+1))
          ENDDO
 
-         deallocate (elmindx, order)
          DO ie = 1, numelm
             IF (allocated(mesh(ie)%ilon)) deallocate (mesh(ie)%ilon)
             IF (allocated(mesh(ie)%ilat)) deallocate (mesh(ie)%ilat)

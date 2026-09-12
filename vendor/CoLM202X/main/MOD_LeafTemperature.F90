@@ -262,12 +262,14 @@ CONTAINS
         cgrnds,     &! deriv of soil latent heat flux wrt soil temp [w/m**2/k]
         tref,       &! 2 m height air temperature (kelvin)
         qref,       &! 2 m height air specific humidity
-        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
-        rstfacsha,  &! factor of soil water stress to transpiration on shaded leaf
         gssun,      &! stomata conductance of sunlit leaf
         gssha,      &! stomata conductance of shaded leaf
         rootflux(1:nl_soil)  ! root water uptake from different layers
 
+   ! Read the caller's soil water stress factors; plant hydraulics may update them.
+   real(r8), intent(inout) :: &
+        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
+        rstfacsha    ! factor of soil water stress to transpiration on shaded leaf
    real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow->rain mass [mm]
    real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy rain->snow mass [mm]
    real(r8), intent(out), optional :: raw_trc_out            ! reference-to-canopy moisture resistance [s/m]
@@ -441,6 +443,19 @@ CONTAINS
 
       dtl(0) = 0.
       fevpl_bef = 0.
+
+! ==== FIX 2026-08-16 #4b BEGIN: same ozone-off issue as in MOD_LeafTemperaturePC.
+! When DEF_USE_OZONESTRESS is off, o3coefv/o3coefg are used INSIDE the stability
+! iteration (gs0sun at line ~707) but were only set to 1.0 AFTER the iteration
+! (ELSE branch below), leaving spval at the first step after restart. Set them
+! to 1.0 BEFORE the iteration loop. ====
+      IF (.not. DEF_USE_OZONESTRESS) THEN
+         o3coefv_sun = 1.0_r8
+         o3coefg_sun = 1.0_r8
+         o3coefv_sha = 1.0_r8
+         o3coefg_sha = 1.0_r8
+      ENDIF
+! ==== FIX 2026-08-16 #4b END ====
 
       fht  = 0.     !integral of profile function for heat
       fqt  = 0.     !integral of profile function for moisture
@@ -1016,6 +1031,17 @@ ENDIF
 ! ======================================================================
 !     END stability iteration
 ! ======================================================================
+
+      ! Diagnose canopy conductance (mol m-2 s-1) from the resistances used
+      ! by the final iteration, also when plant hydraulics is disabled.
+      ! rssun/rssha are now leaf-scale; tlbef is the temperature at which
+      ! they were evaluated. Do not change the resistances or the solver.
+      gssun = 0._r8
+      gssha = 0._r8
+      IF (lai > 0.001_r8) THEN
+         gssun = (laisun / rssun) * (tprcor / tlbef)
+         gssha = (laisha / rssha) * (tprcor / tlbef)
+      ENDIF
 
       z0m = z0mv
       zol = zeta

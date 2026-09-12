@@ -41,12 +41,17 @@ MODULE MOD_Grid_RiverLakeHistRoute
    USE MOD_Grid_RiverLakeHistShard
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       ucat_ucid, x_ucat, y_ucat, griducat
-   USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_data_address, dam_GRAND_ID
+#ifdef FLAT_SPMD
+   USE MOD_Grid_RiverLakeNetwork, only: x_ucat_global, y_ucat_global
+#endif
+   USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_global_id, &
+      resv_data_address, dam_GRAND_ID
 
    IMPLICIT NONE
 
    PUBLIC :: route_hist_begin
    PUBLIC :: route_hist_end
+   PUBLIC :: route_hist_final
    PUBLIC :: route_hist_write_ucat
    PUBLIC :: route_hist_write_resv
    PUBLIC :: route_hist_write_bif_matrix
@@ -263,6 +268,26 @@ CONTAINS
 
    END SUBROUTINE route_hist_end
 
+   SUBROUTINE route_hist_final ()
+
+      CALL route_shard_layout_free (rh_ucat_layout)
+      CALL route_shard_layout_free (rh_resv_layout)
+      CALL route_shard_layout_free (rh_bif_layout)
+      IF (allocated(rh_lon_cache)) deallocate (rh_lon_cache)
+      IF (allocated(rh_lat_cache)) deallocate (rh_lat_cache)
+      rh_active = .false.
+      rh_block = .false.
+      rh_first = .false.
+      rh_bif_layout_built = .false.
+      rh_seg_set = .false.
+      rh_seg_date = 0
+      rh_segment_id = ''
+      rh_file_one = ''
+      rh_file_shard = ''
+      rh_itime = 0
+
+   END SUBROUTINE route_hist_final
+
    ! ------------------------------------------------------------------
    !> One unit-catchment field. In 'one' mode this is the existing
    !! gather-to-master + regrid + serial write; in 'block' mode it is a
@@ -290,6 +315,17 @@ CONTAINS
                varname, 'unitcat_local', longname=longname, units=units)
          ENDIF
       ELSE
+#ifdef FLAT_SPMD
+         IF (with_time) THEN
+            CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
+               ucat_data_address, griducat%nlon, x_ucat_global, griducat%nlat, y_ucat_global, &
+               trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat', rh_itime, longname, units)
+         ELSE
+            CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
+               ucat_data_address, griducat%nlon, x_ucat_global, griducat%nlat, y_ucat_global, &
+               trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat', longname=longname, units=units)
+         ENDIF
+#else
          IF (with_time) THEN
             CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
                ucat_data_address, griducat%nlon, x_ucat, griducat%nlat, y_ucat,   &
@@ -301,6 +337,7 @@ CONTAINS
                trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat',                &
                longname=longname, units=units)
          ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE route_hist_write_ucat
@@ -393,13 +430,13 @@ CONTAINS
       IF (p_is_worker) local_resv_count = numresv
    END FUNCTION local_resv_count
 
-   !> Reservoirs carry no separate stable id array, so the global index the
-   !! 'one' path already uses is reconstructed from the scatter address book.
+   !> The worker-local dense global state IDs are the same IDs used by the
+   !! one-file gather and restart identity paths.
    FUNCTION local_resv_ids () RESULT (ids)
    integer, allocatable :: ids(:)
-      IF (p_is_worker .and. numresv > 0 .and. allocated(resv_data_address)) THEN
+      IF (p_is_worker .and. numresv > 0 .and. allocated(resv_global_id)) THEN
          allocate (ids(numresv))
-         ids = resv_data_address(p_iam_worker)%val(1:numresv)
+         ids = resv_global_id
       ELSE
          allocate (ids(1)); ids = 0
       ENDIF

@@ -873,7 +873,7 @@ SUBROUTINE CoLMMAIN ( &
          canopy_phase_heat = 0._r8
          canopy_smelt_mass_th = 0._r8
          canopy_frzc_mass_th  = 0._r8
-         IF (patchtype == 0) THEN
+         IF (patchtype == 0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
             allocate(canopy_phase_heat_p(ps:pe))

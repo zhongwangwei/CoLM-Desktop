@@ -530,6 +530,7 @@ CONTAINS
    USE MOD_NetCDFVector
    USE MOD_Mesh
    USE MOD_Pixelset
+   USE MOD_Utils, only: quicksort
    IMPLICIT NONE
 
    integer         ,    intent(in) :: lc_year
@@ -541,9 +542,10 @@ CONTAINS
    ! Local variables
    character(len=256) :: filename, fileblock, blockname, cyear
    integer :: iset, nset, ndsp, iblkme, iblk, jblk, ie, je, nave, nres, left, iproc
+   integer :: lower, upper, middle
    integer :: nsend, nrecv
-   integer*8, allocatable :: rbuff(:), sbuff(:)
-   integer,   allocatable :: iworker(:)
+   integer*8, allocatable :: rbuff(:), sbuff(:), elmindx(:)
+   integer,   allocatable :: iworker(:), order(:)
    logical,   allocatable :: msk(:)
    logical :: fexists, fexists_any
 
@@ -643,16 +645,30 @@ CONTAINS
       IF (pixelset%nset > 0) THEN
          allocate(msk(pixelset%nset))
          msk = .false.
-         ie = 1
-         DO iset = 1, pixelset%nset
-            DO WHILE (ie <= numelm)
-               IF (mesh(ie)%indx >= pixelset%eindex(iset)) EXIT
-               ie = ie + 1
+         IF (numelm > 0) THEN
+            allocate(elmindx(numelm), order(numelm))
+            DO ie = 1, numelm
+               elmindx(ie) = mesh(ie)%indx
+               order(ie) = ie
             ENDDO
-            IF (ie <= numelm) THEN
-               IF (mesh(ie)%indx == pixelset%eindex(iset)) msk(iset) = .true.
-            ENDIF
+            CALL quicksort (numelm, elmindx, order)
+         ENDIF
+         DO iset = 1, pixelset%nset
+            lower = 1
+            upper = numelm
+            DO WHILE (lower <= upper)
+               middle = (lower + upper) / 2
+               IF (elmindx(middle) == pixelset%eindex(iset)) THEN
+                  msk(iset) = .true.
+                  EXIT
+               ELSEIF (elmindx(middle) < pixelset%eindex(iset)) THEN
+                  lower = middle + 1
+               ELSE
+                  upper = middle - 1
+               ENDIF
+            ENDDO
          ENDDO
+         IF (allocated(elmindx)) deallocate(elmindx, order)
          nset = count(msk)
          allocate(sbuff(nset))
          IF (nset > 0) sbuff = pack(pixelset%eindex, msk)

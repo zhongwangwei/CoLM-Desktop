@@ -463,6 +463,7 @@ CONTAINS
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       totalnpthout, npthlev_bif
    USE MOD_Grid_Reservoir,        only: numresv, resv_data_address, totalnumresv
+   USE MOD_Vars_Global,           only: spval
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    IMPLICIT NONE
 
@@ -621,10 +622,12 @@ CONTAINS
          ENDIF
       ENDDO
       IF (DEF_Reservoir_Method > 0 .and. totalnumresv > 0 .and. base_var_flags(6) == 1) THEN
+         ! mkinidata uses spval for unbuilt reservoirs; routing restores volume
+         ! from stage when they become active. Preserve this exact sentinel.
          DO i = 1, size(volresv)
             IF (.not. ieee_is_finite(volresv(i))) THEN
                invalid_base_count = invalid_base_count + 1
-            ELSEIF (volresv(i) < 0._r8) THEN
+            ELSEIF (volresv(i) < 0._r8 .and. volresv(i) /= spval) THEN
                invalid_base_count = invalid_base_count + 1
             ENDIF
          ENDDO

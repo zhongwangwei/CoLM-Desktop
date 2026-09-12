@@ -115,7 +115,7 @@ CONTAINS
             CALL read_bifurcation_restart(gridriver_restart_file, &
                wdsrf_ucat_prev_restart_found, bif_restart_loaded, &
                restart_transaction_validated, restart_feature_manifest_present, &
-               restart_bifurcation_enabled)
+               restart_bifurcation_enabled, restart_levee_enabled)
             IF (.not. bif_restart_loaded) THEN
                ! Previous depth and pathway momentum form one numerical state
                ! unit. If either half is absent, cold-start both together.
@@ -226,6 +226,7 @@ CONTAINS
    real(r8) :: bedelv_fc, height_up, height_dn
    real(r8) :: vwave_up, vwave_dn, hflux_up, hflux_dn, mflux_up, mflux_dn
    real(r8) :: volwater, friction, floodarea
+   real(r8) :: rivsto_hist
    real(r8) :: visible_hflux, protected_hflux, protected_clip
    real(r8) :: fldfrc_levee
    real(r8) :: vis_vol_bef_lv, levsto_bef_lv
@@ -639,6 +640,13 @@ CONTAINS
 
             ntimestep = ntimestep + 1
 
+            ! River systems can finish at different substeps. Inactive cells
+            ! are skipped below but still participate in the unfiltered MPI
+            ! push, so clear last-substep fluxes before rebuilding active ones.
+            hflux_fc = 0._r8
+            mflux_fc = 0._r8
+            zgrad_dn = 0._r8
+
             ! Water depth and velocity use the same one-to-one downstream
             ! mapping.  Pack them into one peer message per routing substep.
             CALL worker_push_data (push_next2ucat, downstream_state_fields)
@@ -814,12 +822,12 @@ CONTAINS
             ! reservoir operation.
             IF (DEF_Reservoir_Method > 0) THEN
 
+               hflux_resv = 0._r8
+               mflux_resv = 0._r8
+
                DO i = 1, numucat
 
                   IF ((.not. ucatfilter(i)) .or. (ucat_next(i) == -10)) CYCLE
-
-                  hflux_resv(i) = 0.
-                  mflux_resv(i) = 0.
 
                   IF (is_built_resv(i)) THEN
 
@@ -1173,8 +1181,10 @@ CONTAINS
                   ENDIF
 
                   ! River/floodplain storage separation, total storage, surface elevation
-                  ! rivsto = rivare * wdsrf (matches CaMa-Flood: P2RIVSTO = RIVLEN*RIVWTH*RIVDPH)
-                  ! fldsto = total_volume - rivsto
+                  ! Partition the actual visible volume at bankfull capacity.
+                  ! Above bankfull, the volume-depth curve need not contain
+                  ! rivare*wdsrf; using that rectangle can exceed total storage.
+                  ! rivsto = below-bank storage; fldsto = visible overbank storage
                   ! flddph = max(wdsrf - rivhgt, 0) (depth above channel banks)
                   ! storge = total_volume (+ levsto if levee enabled)
                   ! sfcelv = bed_elevation + wdsrf (matches CaMa: D2RIVELV + D2RIVDPH)
@@ -1183,9 +1193,10 @@ CONTAINS
                      ELSE
                         volwater = volwater_ucat(i)
                      ENDIF
-                  a_rivsto(i) = a_rivsto(i) + floodplain_curve(i)%rivare * wdsrf_ucat(i) * dt_all(irivsys(i))
+                  rivsto_hist = min(volwater, floodplain_curve(i)%rivstomax)
+                  a_rivsto(i) = a_rivsto(i) + rivsto_hist * dt_all(irivsys(i))
                   a_fldsto(i) = a_fldsto(i) &
-                     + max(volwater - floodplain_curve(i)%rivare * wdsrf_ucat(i), 0._r8) * dt_all(irivsys(i))
+                     + (volwater - rivsto_hist) * dt_all(irivsys(i))
                   a_flddph(i) = a_flddph(i) &
                      + max(wdsrf_ucat(i) - floodplain_curve(i)%rivhgt, 0._r8) * dt_all(irivsys(i))
                   IF (DEF_USE_LEVEE .and. has_levee(i) .and. (.not. is_built_resv(i))) THEN
@@ -1409,9 +1420,9 @@ CONTAINS
 
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
-            acc_trc_inp = 0._r8
-            acc_rnof_ref = 0._r8
-            trc_dry_drain = 0._r8
+            IF (allocated(acc_trc_inp)) acc_trc_inp = 0._r8
+            IF (allocated(acc_rnof_ref)) acc_rnof_ref = 0._r8
+            IF (allocated(trc_dry_drain)) trc_dry_drain = 0._r8
          ENDIF
       END IF
 

@@ -349,10 +349,9 @@ MODULE MOD_Namelist
 
    ! ----- Ozone stress -----
    ! Ozone stress is an optional leaf-physiology process, not a BGC switch.
-   ! Keep upstream defaults for old scientific cases; CoLM Desktop writes
-   ! both switches false for new cases and requires a selected file to enable.
-   logical :: DEF_USE_OZONESTRESS = .true.
-   logical :: DEF_USE_OZONEDATA   = .true.
+   ! Default off; CoLM Desktop requires an explicit selected file to enable it.
+   logical :: DEF_USE_OZONESTRESS = .false.
+   logical :: DEF_USE_OZONEDATA   = .false.
    character(len=256) :: DEF_file_Ozone = 'null'
 
    ! ----- SNICAR model related -----

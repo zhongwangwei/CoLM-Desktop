@@ -27,6 +27,13 @@ MODULE MOD_Grid_RiverLakeNetwork
    integer, allocatable :: ucat_ucid (:)   ! index in unit catchment numbering
    integer, allocatable :: x_ucat    (:)   !
    integer, allocatable :: y_ucat    (:)   !
+#ifdef FLAT_SPMD
+   ! The worker vectors above are scattered in Flat SPMD.  Route-history
+   ! gathering still maps the reconstructed global vector by global ucat ID,
+   ! so the master must retain the matching global grid coordinates.
+   integer, allocatable :: x_ucat_global (:)
+   integer, allocatable :: y_ucat_global (:)
+#endif
    integer, allocatable :: ucat_gdid (:)   !
 
    integer, allocatable :: numucat_wrk (:)
@@ -543,6 +550,16 @@ CONTAINS
          p_root, p_comm_glb, p_err)
 
       IF (.not. allocated(ucat_data_address)) allocate (ucat_data_address(0:p_np_glb-1))
+
+      IF (p_is_master) THEN
+         allocate (x_ucat_global(totalnumucat))
+         allocate (y_ucat_global(totalnumucat))
+         x_ucat_global = x_ucat
+         y_ucat_global = y_ucat
+      ELSE
+         allocate (x_ucat_global(0))
+         allocate (y_ucat_global(0))
+      ENDIF
 
       IF (p_is_master) CALL move_alloc (ucat_ucid, idata1d)
       CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
@@ -1611,6 +1628,10 @@ CONTAINS
 
       IF (allocated(x_ucat           )) deallocate(x_ucat           )
       IF (allocated(y_ucat           )) deallocate(y_ucat           )
+#ifdef FLAT_SPMD
+      IF (allocated(x_ucat_global    )) deallocate(x_ucat_global    )
+      IF (allocated(y_ucat_global    )) deallocate(y_ucat_global    )
+#endif
 
       IF (allocated(ucat_ucid        )) deallocate(ucat_ucid        )
       IF (allocated(ucat_gdid        )) deallocate(ucat_gdid        )
@@ -2263,7 +2284,7 @@ CONTAINS
    real(r8), allocatable, intent(out) :: bif_elev_all  (:,:)
    real(r8), allocatable, intent(out) :: bif_wdth_all  (:,:)
    real(r8), allocatable, intent(out) :: bif_mann_all  (:)
-   integer :: ip, ilev
+   integer :: ip, ilev, prev_active_lev
 
       CALL ncio_inquire_length (parafile, 'bifurcation_upst',    totalnpthout)
       CALL ncio_inquire_length (parafile, 'bifurcation_manning', npthlev_bif)
@@ -2316,16 +2337,19 @@ CONTAINS
          IF (.not. any(bif_wdth_all(:, ip) > 0._r8)) THEN
             CALL CoLM_stop ('bifurcation pathway has no active positive-width layer')
          ENDIF
-         DO ilev = 2, npthlev_bif
-            IF (bif_wdth_all(ilev, ip) > 0._r8) THEN
-               IF (bif_wdth_all(ilev-1, ip) <= 0._r8) THEN
-                  CALL CoLM_stop ('active bifurcation layers must be contiguous from layer 1')
-               ENDIF
-               IF (bif_elev_all(ilev, ip) < bif_elev_all(ilev-1, ip)) THEN
+         ! Zero-width layers are inactive, including leading or interior gaps.
+         ! Their elevations may be sentinels; compare only active sills without
+         ! renumbering layers (layer 1 is channel flow, layers 2+ are overland).
+         prev_active_lev = 0
+         DO ilev = 1, npthlev_bif
+            IF (bif_wdth_all(ilev, ip) <= 0._r8) CYCLE
+            IF (prev_active_lev > 0) THEN
+               IF (bif_elev_all(ilev, ip) < bif_elev_all(prev_active_lev, ip)) THEN
                   CALL CoLM_stop ( &
-                     'active bifurcation layer elevation must be non-decreasing from layer 1')
+                     'active bifurcation layer elevation must be non-decreasing')
                ENDIF
             ENDIF
+            prev_active_lev = ilev
          ENDDO
       ENDDO
 

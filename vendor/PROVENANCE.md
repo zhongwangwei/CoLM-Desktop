@@ -59,6 +59,17 @@ diff -ru /tmp/colm-upstream vendor/CoLM202X | less
 **逐处判断**，因为我们这边会有大量有意的改动。上面那个 commit 号是
 分叉点 —— 上游从那之后的改动才需要看。
 
+## 2026-09-11：同步至 `f48fbf9`
+
+按三方合并选择性带入上游的运行时代码：区域水库目录与重启身份、稀疏
+CaMa 分汊层、跨子步通量清零、河网历史收尾，以及臭氧冷启动、默认关闭
+臭氧胁迫/数据、PC 植被初始值和叶片/河道诊断修复。`f48fbf9` 的分汊限流改为先比较再相除，避免微小传输
+触发溢出；河道历史存储按满岸容量分割。
+
+未带入上游的 LAI 缺失文件“警告后继续”策略：桌面端继续用
+`ncio_read_vector_complete` 拒绝不完整块集，避免未初始化 LAI/SAI 进入模拟。
+`run/scripts` 的建例脚本与上游 MPI harness 也不属于桌面端发行时路径。
+
 ## 编译时真正被读的是哪份 `define.h`
 
 **不是 `include/define.h`。** `oracle/scripts/build_kernel.sh` 调用
