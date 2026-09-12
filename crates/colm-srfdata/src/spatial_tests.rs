@@ -106,6 +106,7 @@ fn write_five_degree_tile(path: &std::path::Path) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("lat", 1).unwrap();
     file.add_dimension("lon", 2).unwrap();
+    file.add_dimension("time", 2).unwrap();
     file.add_variable::<f64>("HTOP", &["lon", "lat"])
         .unwrap()
         .put_values(&[12.5, 15.0], (.., ..))
@@ -113,6 +114,10 @@ fn write_five_degree_tile(path: &std::path::Path) {
     file.add_variable::<f64>("LAT_FIRST", &["lat", "lon"])
         .unwrap()
         .put_values(&[42.0, 84.0], (.., ..))
+        .unwrap();
+    file.add_variable::<f64>("MONTHLY_LC_LAI", &["lon", "lat", "time"])
+        .unwrap()
+        .put_values(&[1.0, 10.0, 2.0, 20.0], (.., .., ..))
         .unwrap();
     file.close().unwrap();
 }
@@ -247,6 +252,22 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
         )
         .unwrap(),
         vec![42.0, 84.0]
+    );
+    assert_eq!(
+        read_mesh_tiled_raster_time_f64(
+            &tile_dir,
+            "MOD2005",
+            "MONTHLY_LC_LAI",
+            2,
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36,
+            },
+        )
+        .unwrap(),
+        vec![10.0, 20.0]
     );
 
     std::fs::remove_dir_all(directory).unwrap();

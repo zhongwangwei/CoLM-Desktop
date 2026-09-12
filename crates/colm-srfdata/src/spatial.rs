@@ -270,6 +270,31 @@ pub fn read_mesh_tiled_raster_f64(
     read_mesh_tiled_raster(directory, suffix, variable, mesh, pixel, raw_grid)
 }
 
+/// Read one one-based time slice of a CoLM 5°×5° tile variable.
+///
+/// `read_5x5_data_time` reads the native `(lon, lat, time)` variable order;
+/// retaining that positional contract also works with historical files whose
+/// dimensions have no coordinate-style names.
+pub fn read_mesh_tiled_raster_time_f64(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    time: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    read_mesh_tiled_raster_at_time(
+        directory,
+        suffix,
+        variable,
+        Some(time),
+        mesh,
+        pixel,
+        raw_grid,
+    )
+}
+
 /// Relative spherical areas in flattened mesh-pixel order.
 ///
 /// CoLM uses physical grid-cell areas for area-weighted aggregation.  The
@@ -372,6 +397,18 @@ fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<T>> {
+    read_mesh_tiled_raster_at_time(directory, suffix, variable, None, mesh, pixel, raw_grid)
+}
+
+fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    time: Option<usize>,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<T>> {
     ensure!(
         raw_grid.nlon % 72 == 0 && raw_grid.nlat % 36 == 0,
         "5 degree tiling requires a global grid divisible by 72x36"
@@ -392,31 +429,12 @@ fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
             let source = file
                 .variable(variable)
                 .with_context(|| format!("{variable} is absent from {}", path.display()))?;
-            let dimensions = source.dimensions();
-            ensure!(
-                dimensions.len() == 2,
-                "{variable} in {} must be a two-dimensional tile",
-                path.display()
-            );
-            let values = source.get_values::<T, _>(..)?;
-            let shape = dimensions
-                .iter()
-                .map(|dimension| dimension.len())
-                .collect::<Vec<_>>();
-            ensure!(
-                values.len() == tile_nlon * tile_nlat,
-                "{variable} in {} has {} values; expected {}x{} tile",
-                path.display(),
-                values.len(),
-                tile_nlat,
-                tile_nlon
-            );
-            let axes = tile_axes(dimensions, tile_nlon, tile_nlat, &path)?;
+            let (values, axes) = tile_values(&source, time, tile_nlon, tile_nlat, &path)?;
             for &(local_y, source_y) in rows {
                 for &(local_x, source_x) in columns {
                     let offset = match axes {
-                        TileAxes::LatLon => source_y * shape[1] + source_x,
-                        TileAxes::LonLat => source_x * shape[1] + source_y,
+                        TileAxes::LatLon => source_y * tile_nlon + source_x,
+                        TileAxes::LonLat => source_x * tile_nlat + source_y,
                     };
                     pixels[local_y * pixel.lon_w.len() + local_x] = Some(
                         *values
@@ -432,6 +450,62 @@ fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
         .collect::<Option<Vec<_>>>()
         .context("5 degree tiles did not cover the spatial pixel window")?;
     mesh_order(mesh, pixel.lon_w.len(), &pixels)
+}
+
+fn tile_values<T: NcTypeDescriptor + Copy>(
+    source: &netcdf::Variable<'_>,
+    time: Option<usize>,
+    tile_nlon: usize,
+    tile_nlat: usize,
+    path: &Path,
+) -> Result<(Vec<T>, TileAxes)> {
+    let dimensions = source.dimensions();
+    let (values, axes) = match time {
+        None => {
+            ensure!(
+                dimensions.len() == 2,
+                "{} in {} must be a two-dimensional tile",
+                source.name(),
+                path.display()
+            );
+            (
+                source.get_values::<T, _>(..)?,
+                tile_axes(dimensions, tile_nlon, tile_nlat, path)?,
+            )
+        }
+        Some(time) => {
+            ensure!(time > 0, "5 degree tile time is one-based");
+            ensure!(
+                dimensions.len() == 3,
+                "{} in {} must have (lon, lat, time) dimensions",
+                source.name(),
+                path.display()
+            );
+            ensure!(
+                time <= dimensions[2].len(),
+                "5 degree tile {} has only {} time slices",
+                path.display(),
+                dimensions[2].len()
+            );
+            let axes = tile_axes(&dimensions[..2], tile_nlon, tile_nlat, path)?;
+            let values = source.get_values::<T, _>((
+                0..dimensions[0].len(),
+                0..dimensions[1].len(),
+                time - 1..time,
+            ))?;
+            (values, axes)
+        }
+    };
+    ensure!(
+        values.len() == tile_nlon * tile_nlat,
+        "{} in {} has {} values; expected {}x{} tile",
+        source.name(),
+        path.display(),
+        values.len(),
+        tile_nlat,
+        tile_nlon
+    );
+    Ok((values, axes))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -479,6 +553,9 @@ fn tile_axes(
             && dimensions[0].len() == tile_nlon
             && dimensions[1].len() == tile_nlat =>
         {
+            Ok(TileAxes::LonLat)
+        }
+        _ if dimensions[0].len() == tile_nlon && dimensions[1].len() == tile_nlat => {
             Ok(TileAxes::LonLat)
         }
         _ => bail!(
