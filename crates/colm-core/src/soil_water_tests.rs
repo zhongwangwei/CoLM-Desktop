@@ -92,3 +92,52 @@ fn soilwater_rejects_a_single_layer_that_the_fortran_stencil_cannot_solve() {
     bad.root_flux_mm_s = &[0.0];
     assert!(solve_campbell_soil_water(bad).is_err());
 }
+
+fn groundwater_input() -> GroundwaterInput<'static> {
+    GroundwaterInput {
+        time_step_seconds: 10.0,
+        ponding_limit_mm: 5.0,
+        effective_porosity: &[0.4, 0.4, 0.4],
+        layer_thickness_m: &[0.1, 0.2, 0.3],
+        interface_depth_m: &[0.0, 0.1, 0.3, 0.6],
+        ice_water_kg_m2: &[0.0, 0.0, 0.0],
+        liquid_water_kg_m2: &[20.0, 30.0, 40.0],
+        porosity: &[0.4, 0.4, 0.4],
+        saturated_potential_mm: &[-100.0, -100.0, -100.0],
+        clapp_hornberger_b: &[4.0, 4.0, 4.0],
+        water_table_depth_m: 1.0,
+        aquifer_water_mm: 100.0,
+        recharge_mm_s: 0.01,
+        subsurface_runoff_mm_s: 0.0,
+    }
+}
+
+#[test]
+fn groundwater_updates_aquifer_and_water_table_below_the_soil_column() {
+    let state = update_groundwater(groundwater_input()).unwrap();
+    assert_eq!(state.aquifer_water_mm, 100.1);
+    let yield_ = 0.4 * (1.0 - (1.0_f64 + 10.0).powf(-0.25));
+    assert!((state.water_table_depth_m - (1.0 - 0.1 / 1000.0 / yield_)).abs() < 1.0e-14);
+    assert_eq!(state.liquid_water_kg_m2, [20.0, 30.0, 40.0]);
+}
+
+#[test]
+fn groundwater_cascades_excess_upward_then_routes_top_excess_to_runoff() {
+    let mut wet = groundwater_input();
+    wet.liquid_water_kg_m2 = &[55.0, 60.0, 150.0];
+    wet.recharge_mm_s = 0.0;
+    let state = update_groundwater(wet).unwrap();
+    assert_eq!(state.liquid_water_kg_m2, [45.0, 80.0, 120.0]);
+    assert_eq!(state.subsurface_runoff_mm_s, 2.0);
+}
+
+#[test]
+fn groundwater_uses_the_aquifer_to_cancel_a_negative_runoff_correction() {
+    let mut dry = groundwater_input();
+    dry.liquid_water_kg_m2 = &[-2.0, 0.0, 0.0];
+    dry.recharge_mm_s = 0.0;
+    let state = update_groundwater(dry).unwrap();
+    assert_eq!(state.liquid_water_kg_m2, [0.0, 0.0, 0.0]);
+    assert_eq!(state.subsurface_runoff_mm_s, 0.0);
+    assert_eq!(state.aquifer_water_mm, 98.0);
+}

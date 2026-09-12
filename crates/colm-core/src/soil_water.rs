@@ -299,3 +299,257 @@ fn validate(input: CampbellSoilWaterInput<'_>) -> Result<usize> {
 #[cfg(test)]
 #[path = "soil_water_tests.rs"]
 mod soil_water_tests;
+
+/// The post-Richards aquifer and excess-water update from `groundwater`.
+#[derive(Debug, Clone, Copy)]
+pub struct GroundwaterInput<'a> {
+    pub time_step_seconds: f64,
+    pub ponding_limit_mm: f64,
+    pub effective_porosity: &'a [f64],
+    pub layer_thickness_m: &'a [f64],
+    /// Soil interfaces, including the zero-depth top interface.
+    pub interface_depth_m: &'a [f64],
+    pub ice_water_kg_m2: &'a [f64],
+    pub liquid_water_kg_m2: &'a [f64],
+    pub porosity: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub clapp_hornberger_b: &'a [f64],
+    pub water_table_depth_m: f64,
+    pub aquifer_water_mm: f64,
+    pub recharge_mm_s: f64,
+    /// The active runoff scheme's already-resolved subsurface runoff.
+    pub subsurface_runoff_mm_s: f64,
+}
+
+/// State returned by `groundwater`, including its nonphysical excess-water
+/// corrections that are part of the upstream model contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroundwaterState {
+    pub liquid_water_kg_m2: Vec<f64>,
+    pub water_table_depth_m: f64,
+    pub aquifer_water_mm: f64,
+    pub subsurface_runoff_mm_s: f64,
+}
+
+/// Ports `MOD_SoilSnowHydrology.F90:groundwater` after TOPMODEL/CaMa has
+/// resolved the supplied subsurface runoff flux.
+pub fn update_groundwater(input: GroundwaterInput<'_>) -> Result<GroundwaterState> {
+    let layers = validate_groundwater(input)?;
+    let thickness_mm = input
+        .layer_thickness_m
+        .iter()
+        .map(|thickness| thickness * 1000.0)
+        .collect::<Vec<_>>();
+    let mut liquid_water_kg_m2 = input.liquid_water_kg_m2.to_vec();
+    let mut water_table_depth_m = input.water_table_depth_m;
+    let mut aquifer_water_mm = input.aquifer_water_mm;
+    let initial_water_table_layer = water_table_layer(water_table_depth_m, input.interface_depth_m);
+    let lower_specific_yield = specific_yield(
+        input.porosity[layers - 1],
+        water_table_depth_m,
+        input.saturated_potential_mm[layers - 1],
+        input.clapp_hornberger_b[layers - 1],
+    );
+
+    aquifer_water_mm += input.recharge_mm_s * input.time_step_seconds;
+    if initial_water_table_layer == layers {
+        water_table_depth_m = (water_table_depth_m
+            - input.recharge_mm_s * input.time_step_seconds / 1000.0 / lower_specific_yield)
+            .max(0.0);
+    } else {
+        let mut recharge = input.recharge_mm_s * input.time_step_seconds;
+        if recharge > 0.0 {
+            for layer in (0..=initial_water_table_layer).rev() {
+                let yield_ = specific_yield(
+                    input.porosity[layer],
+                    water_table_depth_m,
+                    input.saturated_potential_mm[layer],
+                    input.clapp_hornberger_b[layer],
+                );
+                let transferred = recharge
+                    .min(yield_ * (water_table_depth_m - input.interface_depth_m[layer]) * 1000.0)
+                    .max(0.0);
+                water_table_depth_m =
+                    (water_table_depth_m - transferred / yield_ / 1000.0).max(0.0);
+                recharge -= transferred;
+                if recharge <= 0.0 {
+                    break;
+                }
+            }
+        } else {
+            for layer in initial_water_table_layer..layers {
+                let yield_ = specific_yield(
+                    input.porosity[layer],
+                    water_table_depth_m,
+                    input.saturated_potential_mm[layer],
+                    input.clapp_hornberger_b[layer],
+                );
+                let transferred = recharge
+                    .max(
+                        -yield_
+                            * (input.interface_depth_m[layer + 1] - water_table_depth_m)
+                            * 1000.0,
+                    )
+                    .min(0.0);
+                recharge -= transferred;
+                if recharge >= 0.0 {
+                    water_table_depth_m =
+                        (water_table_depth_m - transferred / yield_ / 1000.0).max(0.0);
+                    break;
+                }
+                water_table_depth_m = input.interface_depth_m[layer + 1];
+            }
+            if recharge > 0.0 {
+                water_table_depth_m =
+                    (water_table_depth_m - recharge / 1000.0 / lower_specific_yield).max(0.0);
+            }
+        }
+    }
+
+    let drainage_mm_s = input.subsurface_runoff_mm_s;
+    if initial_water_table_layer == layers {
+        aquifer_water_mm -= drainage_mm_s * input.time_step_seconds;
+        water_table_depth_m = (water_table_depth_m
+            + drainage_mm_s * input.time_step_seconds / 1000.0 / lower_specific_yield)
+            .max(0.0);
+        liquid_water_kg_m2[layers - 1] += (aquifer_water_mm - 5000.0).max(0.0);
+        aquifer_water_mm = aquifer_water_mm.min(5000.0);
+    } else {
+        let mut drainage = -drainage_mm_s * input.time_step_seconds;
+        for (layer, liquid_water) in liquid_water_kg_m2
+            .iter_mut()
+            .enumerate()
+            .skip(initial_water_table_layer)
+        {
+            let yield_ = specific_yield(
+                input.porosity[layer],
+                water_table_depth_m,
+                input.saturated_potential_mm[layer],
+                input.clapp_hornberger_b[layer],
+            );
+            let transferred = drainage
+                .max(-yield_ * (input.interface_depth_m[layer + 1] - water_table_depth_m) * 1000.0)
+                .min(0.0);
+            *liquid_water += transferred;
+            drainage -= transferred;
+            if drainage >= 0.0 {
+                water_table_depth_m =
+                    (water_table_depth_m - transferred / yield_ / 1000.0).max(0.0);
+                break;
+            }
+            water_table_depth_m = input.interface_depth_m[layer + 1];
+        }
+        water_table_depth_m =
+            (water_table_depth_m - drainage / 1000.0 / lower_specific_yield).max(0.0);
+        aquifer_water_mm += drainage;
+    }
+
+    water_table_depth_m = water_table_depth_m.clamp(0.0, 80.0);
+    let mut subsurface_runoff_mm_s = drainage_mm_s;
+    for layer in (1..layers).rev() {
+        let capacity = input.effective_porosity[layer] * thickness_mm[layer];
+        let excess = (liquid_water_kg_m2[layer] - capacity).max(0.0);
+        liquid_water_kg_m2[layer] = liquid_water_kg_m2[layer].min(capacity);
+        liquid_water_kg_m2[layer - 1] += excess;
+    }
+    let top_capacity =
+        input.ponding_limit_mm + input.porosity[0] * thickness_mm[0] - input.ice_water_kg_m2[0];
+    let excess_top = (liquid_water_kg_m2[0] - top_capacity).max(0.0);
+    liquid_water_kg_m2[0] = liquid_water_kg_m2[0].min(top_capacity);
+    subsurface_runoff_mm_s += excess_top / input.time_step_seconds;
+
+    let mut deficit = 0.0;
+    for value in &mut liquid_water_kg_m2 {
+        if *value < 0.0 {
+            deficit += *value;
+            *value = 0.0;
+        }
+    }
+    subsurface_runoff_mm_s += deficit / input.time_step_seconds;
+    if subsurface_runoff_mm_s < 0.0 {
+        aquifer_water_mm += subsurface_runoff_mm_s * input.time_step_seconds;
+        subsurface_runoff_mm_s = 0.0;
+    }
+    ensure!(
+        liquid_water_kg_m2.iter().all(|value| value.is_finite())
+            && aquifer_water_mm.is_finite()
+            && subsurface_runoff_mm_s.is_finite(),
+        "groundwater update produced a non-finite state"
+    );
+    Ok(GroundwaterState {
+        liquid_water_kg_m2,
+        water_table_depth_m,
+        aquifer_water_mm,
+        subsurface_runoff_mm_s,
+    })
+}
+
+fn water_table_layer(water_table_depth_m: f64, interfaces: &[f64]) -> usize {
+    interfaces[1..]
+        .iter()
+        .position(|depth| water_table_depth_m <= *depth)
+        .unwrap_or(interfaces.len() - 1)
+}
+
+fn specific_yield(porosity: f64, water_table_depth_m: f64, psi0_mm: f64, bsw: f64) -> f64 {
+    (porosity * (1.0 - (1.0 - 1.0e3 * water_table_depth_m / psi0_mm).powf(-1.0 / bsw))).max(0.02)
+}
+
+fn validate_groundwater(input: GroundwaterInput<'_>) -> Result<usize> {
+    let layers = input.layer_thickness_m.len();
+    ensure!(layers > 0, "groundwater needs at least one soil layer");
+    ensure!(
+        input.interface_depth_m.len() == layers + 1,
+        "groundwater needs one more interface than soil layers"
+    );
+    for values in [
+        input.effective_porosity,
+        input.ice_water_kg_m2,
+        input.liquid_water_kg_m2,
+        input.porosity,
+        input.saturated_potential_mm,
+        input.clapp_hornberger_b,
+    ] {
+        ensure!(
+            values.len() == layers,
+            "groundwater vectors must have equal lengths"
+        );
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "groundwater vectors must be finite"
+        );
+    }
+    ensure!(
+        input.time_step_seconds.is_finite()
+            && input.time_step_seconds > 0.0
+            && input.ponding_limit_mm.is_finite()
+            && input.ponding_limit_mm >= 0.0
+            && input.water_table_depth_m.is_finite()
+            && input.water_table_depth_m >= 0.0
+            && input.aquifer_water_mm.is_finite()
+            && input.recharge_mm_s.is_finite()
+            && input.subsurface_runoff_mm_s.is_finite(),
+        "groundwater scalar inputs are invalid"
+    );
+    ensure!(
+        input.interface_depth_m[0] == 0.0
+            && input
+                .interface_depth_m
+                .windows(2)
+                .all(|pair| pair[1].is_finite() && pair[1] > pair[0]),
+        "groundwater interfaces must start at zero and increase"
+    );
+    for layer in 0..layers {
+        ensure!(
+            input.layer_thickness_m[layer] > 0.0
+                && input.effective_porosity[layer] >= 0.0
+                && input.effective_porosity[layer] <= input.porosity[layer]
+                && input.porosity[layer] >= 0.0
+                && input.ice_water_kg_m2[layer] >= 0.0
+                && input.saturated_potential_mm[layer] < 0.0
+                && input.clapp_hornberger_b[layer] > 0.0,
+            "groundwater layer inputs are invalid"
+        );
+    }
+    Ok(layers)
+}
