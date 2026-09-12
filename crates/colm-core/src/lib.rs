@@ -6,6 +6,7 @@
 
 pub mod albedo;
 pub mod atmosphere;
+pub mod canopy_layer_profile;
 pub mod canopy_roughness;
 pub mod ground_fluxes;
 pub mod ground_temperature;
@@ -36,6 +37,14 @@ pub use atmosphere::{
     hydrometeor_temperature, new_snow_bulk_density, orbital_cosine_zenith, partition_precipitation,
     saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
     PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
+};
+pub use canopy_layer_profile::{
+    canopy_diffusivity, canopy_diffusivity_difference, canopy_diffusivity_profile_integral,
+    canopy_diffusivity_resistance, canopy_diffusivity_resistance_analytic,
+    canopy_diffusivity_roots_between, canopy_wind_difference, canopy_wind_integral,
+    canopy_wind_roots_between, canopy_wind_speed, effective_canopy_wind,
+    effective_canopy_wind_between, mean_canopy_wind, mean_canopy_wind_between,
+    CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyWindProfileInput,
 };
 pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};

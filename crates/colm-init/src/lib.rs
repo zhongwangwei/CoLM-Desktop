@@ -5,6 +5,9 @@
 pub mod albedo {
     pub use colm_core::albedo::*;
 }
+pub mod canopy_layer_profile {
+    pub use colm_core::canopy_layer_profile::*;
+}
 pub mod canopy_roughness {
     pub use colm_core::canopy_roughness::*;
 }
@@ -63,7 +66,6 @@ pub mod vegetation {
     pub use colm_core::vegetation::*;
 }
 
-pub use colm_core::CanopyRoughness;
 pub use colm_core::SoilSurfaceResistanceInput;
 pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
@@ -78,6 +80,9 @@ pub use colm_core::{
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
+};
+pub use colm_core::{
+    CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyRoughness, CanopyWindProfileInput,
 };
 pub use colm_core::{
     CanopyMoninObukhovInput, CanopyMoninObukhovState, MoninObukhovInitialInput,
