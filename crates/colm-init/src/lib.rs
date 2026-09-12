@@ -12,6 +12,7 @@ pub mod surface_data;
 pub mod time_restart;
 pub mod time_state;
 pub mod urban;
+pub mod urban_restart;
 pub mod vegetation;
 
 pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
@@ -48,5 +49,9 @@ pub use time_state::{
 pub use urban::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
+};
+pub use urban_restart::{
+    write_urban_constant_restart, write_urban_constant_restart_block, UrbanConstantRestartInput,
+    UrbanThermalFields,
 };
 pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};
