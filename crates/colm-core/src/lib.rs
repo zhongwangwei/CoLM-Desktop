@@ -24,6 +24,7 @@ pub mod net_solar;
 pub mod pc_radiation;
 pub mod phase_change;
 pub mod photosynthesis;
+pub mod plant_hydraulics;
 pub mod radiation;
 pub mod root_uptake;
 pub mod runoff;
@@ -106,6 +107,10 @@ pub use photosynthesis::{
     photosynthesis_parameters, stomata, update_photosynthesis, LeafBiochemistry,
     LeafPhotosynthesisInput, PhotosynthesisParameters, PhotosynthesisUpdateInput,
     PhotosynthesisUpdateState, StomataInput, StomataOptions, StomataState,
+};
+pub use plant_hydraulics::{
+    plant_hydraulic_stress, vegetation_water_potential, vulnerability, vulnerability_derivative,
+    PlantHydraulicInput, PlantHydraulicOutput, PlantHydraulicParameters, PlantHydraulicState,
 };
 pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
