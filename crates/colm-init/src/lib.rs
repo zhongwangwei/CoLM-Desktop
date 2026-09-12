@@ -5,6 +5,7 @@
 
 pub mod albedo;
 pub mod hydrology;
+pub mod pft_restart;
 pub mod restart;
 pub mod static_state;
 pub mod surface_data;
@@ -17,6 +18,11 @@ pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
+};
+pub use pft_restart::{
+    write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
+    write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
