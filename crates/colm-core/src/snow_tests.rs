@@ -103,3 +103,110 @@ fn compaction_rejects_mismatched_flags_and_zero_previous_melt_fraction() {
     assert!(compact_snow_layers(&mut state, 1800.0, 0.0, 0.0, &[]).is_err());
     assert!(compact_snow_layers(&mut state, 1800.0, 0.0, 0.0, &[true]).is_err());
 }
+
+#[test]
+fn combining_thin_snow_matches_current_fortran_enthalpy_and_geometry() {
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -4;
+    for (fortran_layer, thickness, ice, liquid, temperature) in [
+        (-3, 0.003, 0.2, 0.02, 260.0),
+        (-2, 0.013, 2.0, 0.5, 266.0),
+        (-1, 0.06, 12.0, 1.0, 270.0),
+        (0, 0.12, 30.0, 2.0, 272.0),
+    ] {
+        let slot = layer_slot(fortran_layer);
+        state.thickness_m[slot] = thickness;
+        state.ice_water_kg_m2[slot] = ice;
+        state.liquid_water_kg_m2[slot] = liquid;
+        state.temperature_k[slot] = temperature;
+    }
+    let mut soil_surface = SnowToSoilTransfer {
+        liquid_water_kg_m2: 7.0,
+        ice_water_kg_m2: 2.0,
+    };
+
+    combine_snow_layers(&mut state, &mut soil_surface).unwrap();
+
+    assert_eq!(state.layer_count, -3);
+    close(state.water_equivalent_kg_m2, 47.72);
+    close(state.depth_m, 0.196);
+    close(state.thickness_m[layer_slot(-2)], 0.016);
+    close(state.ice_water_kg_m2[layer_slot(-2)], 2.2);
+    close(state.liquid_water_kg_m2[layer_slot(-2)], 0.52);
+    close(state.temperature_k[layer_slot(-2)], 273.160_003_662_109_4);
+    close(state.node_depth_m[layer_slot(-2)], -0.188);
+    close(state.interface_depth_m[interface_slot(-3)], -0.196);
+    close(soil_surface.liquid_water_kg_m2, 7.0);
+    close(soil_surface.ice_water_kg_m2, 2.0);
+}
+
+#[test]
+fn combining_subcentimeter_snow_preserves_ice_and_moves_liquid_to_soil() {
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -1;
+    let slot = layer_slot(0);
+    state.thickness_m[slot] = 0.005;
+    state.ice_water_kg_m2[slot] = 0.2;
+    state.liquid_water_kg_m2[slot] = 0.03;
+    state.temperature_k[slot] = 270.0;
+    let mut soil_surface = SnowToSoilTransfer::default();
+
+    combine_snow_layers(&mut state, &mut soil_surface).unwrap();
+
+    assert_eq!(state.layer_count, 0);
+    close(state.water_equivalent_kg_m2, 0.2);
+    close(state.depth_m, 0.005);
+    close(soil_surface.liquid_water_kg_m2, 0.03);
+}
+
+#[test]
+fn dividing_thick_snow_matches_current_fortran_enthalpy_and_geometry() {
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -2;
+    for (fortran_layer, thickness, ice, liquid, temperature) in
+        [(-1, 0.05, 4.0, 2.0, 270.0), (0, 0.08, 15.0, 3.0, 275.0)]
+    {
+        let slot = layer_slot(fortran_layer);
+        state.thickness_m[slot] = thickness;
+        state.ice_water_kg_m2[slot] = ice;
+        state.liquid_water_kg_m2[slot] = liquid;
+        state.temperature_k[slot] = temperature;
+    }
+    state.water_equivalent_kg_m2 = 24.0;
+    state.depth_m = 0.13;
+
+    divide_snow_layers(&mut state).unwrap();
+
+    assert_eq!(state.layer_count, -3);
+    close(state.water_equivalent_kg_m2, 24.0);
+    close(state.depth_m, 0.13);
+    close(state.thickness_m[layer_slot(-2)], 0.019_999_999_552_965_164);
+    close(
+        state.liquid_water_kg_m2[layer_slot(-2)],
+        0.799_999_982_118_606_6,
+    );
+    close(
+        state.ice_water_kg_m2[layer_slot(-2)],
+        1.599_999_964_237_213_1,
+    );
+    close(state.temperature_k[layer_slot(-2)], 270.0);
+    close(state.thickness_m[layer_slot(-1)], 0.050_000_000_745_058_06);
+    close(
+        state.liquid_water_kg_m2[layer_slot(-1)],
+        1.909_090_937_908_030_5,
+    );
+    close(state.ice_water_kg_m2[layer_slot(-1)], 7.909_091_011_059_185);
+    close(state.temperature_k[layer_slot(-1)], 274.071_557_054_112_7);
+    close(state.thickness_m[layer_slot(0)], 0.059_999_999_701_976_78);
+    close(
+        state.liquid_water_kg_m2[layer_slot(0)],
+        2.290_909_079_973_362_7,
+    );
+    close(state.ice_water_kg_m2[layer_slot(0)], 9.490_909_024_703_601);
+    close(state.temperature_k[layer_slot(0)], 274.071_557_054_112_7);
+    close(
+        state.node_depth_m[layer_slot(-2)],
+        -0.120_000_000_223_517_42,
+    );
+    close(state.interface_depth_m[interface_slot(-3)], -0.13);
+}

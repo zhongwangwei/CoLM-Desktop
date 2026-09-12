@@ -10,6 +10,14 @@ const fn f77(value: f32) -> f64 {
     value as f64
 }
 
+#[derive(Clone, Copy, Default)]
+struct SnowLayer {
+    thickness_m: f64,
+    temperature_k: f64,
+    liquid_water_kg_m2: f64,
+    ice_water_kg_m2: f64,
+}
+
 /// Mutable snow portion of CoLM's combined soil/snow column.
 ///
 /// Layer vectors use Fortran indexes -4 through 0 in ascending order. Interface
@@ -133,6 +141,345 @@ pub fn add_new_snow(input: NewSnowInput, state: &mut RuntimeSnowColumn) -> Resul
     Ok(NewSnowOutcome {
         wetland_water_added_mm: 0.0,
     })
+}
+
+/// Snow mass transferred into the upper soil node when a snow layer vanishes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SnowToSoilTransfer {
+    pub liquid_water_kg_m2: f64,
+    pub ice_water_kg_m2: f64,
+}
+
+/// Applies MOD_SnowLayersCombineDivide:snowlayerscombine without SNICAR or tracers.
+///
+/// The upper soil node is an explicit argument because the upstream routine
+/// deposits vanished snow mass there rather than discarding it.
+pub fn combine_snow_layers(
+    state: &mut RuntimeSnowColumn,
+    soil_surface: &mut SnowToSoilTransfer,
+) -> Result<()> {
+    validate_snow_topology(state, soil_surface)?;
+    if state.layer_count == 0 {
+        return Ok(());
+    }
+
+    let initial_count = state.layer_count;
+    let mut layer_count = state.layer_count;
+    for fortran_layer in initial_count + 1..=0 {
+        if state.ice_water_kg_m2[layer_slot(fortran_layer)] > f77(0.1) {
+            continue;
+        }
+        transfer_layer_down(state, soil_surface, fortran_layer);
+        if fortran_layer > layer_count + 1 && layer_count < -1 {
+            for destination in (layer_count + 2..=fortran_layer).rev() {
+                copy_layer(state, destination - 1, destination);
+            }
+        }
+        layer_count += 1;
+    }
+    state.layer_count = layer_count;
+    if layer_count == 0 {
+        clear_snow_layers(state);
+        return Ok(());
+    }
+
+    let (snow_mass, snow_depth, ice_mass, liquid_mass) = snow_totals(state);
+    state.water_equivalent_kg_m2 = snow_mass;
+    state.depth_m = snow_depth;
+    if snow_depth < f77(0.01) {
+        state.layer_count = 0;
+        state.water_equivalent_kg_m2 = ice_mass;
+        state.depth_m = if ice_mass <= 0.0 { 0.0 } else { snow_depth };
+        soil_surface.liquid_water_kg_m2 += liquid_mass;
+        clear_snow_layers(state);
+        return Ok(());
+    }
+
+    if layer_count < -1 {
+        let mut minimum_index = 0;
+        let initial_count = layer_count;
+        for fortran_layer in initial_count + 1..=0 {
+            let slot = layer_slot(fortran_layer);
+            if state.thickness_m[slot]
+                >= [f77(0.010), f77(0.015), f77(0.025), f77(0.055), f77(0.115)][minimum_index]
+            {
+                minimum_index += 1;
+                continue;
+            }
+
+            let neighbor = if fortran_layer == layer_count + 1 {
+                fortran_layer + 1
+            } else if fortran_layer == 0
+                || state.thickness_m[layer_slot(fortran_layer - 1)] + state.thickness_m[slot]
+                    < state.thickness_m[layer_slot(fortran_layer + 1)] + state.thickness_m[slot]
+            {
+                fortran_layer - 1
+            } else {
+                fortran_layer + 1
+            };
+            let (target, other) = if neighbor > fortran_layer {
+                (neighbor, fortran_layer)
+            } else {
+                (fortran_layer, neighbor)
+            };
+            combine_layer_pair(state, target, other);
+            if target - 1 > layer_count + 1 {
+                for destination in (layer_count + 2..=target - 1).rev() {
+                    copy_layer(state, destination - 1, destination);
+                }
+            }
+            layer_count += 1;
+            state.layer_count = layer_count;
+            if layer_count >= -1 {
+                break;
+            }
+        }
+    }
+
+    rebuild_snow_geometry(state);
+    let (snow_mass, snow_depth, _, _) = snow_totals(state);
+    state.water_equivalent_kg_m2 = snow_mass;
+    state.depth_m = snow_depth;
+    Ok(())
+}
+
+fn validate_snow_topology(
+    state: &RuntimeSnowColumn,
+    soil_surface: &SnowToSoilTransfer,
+) -> Result<()> {
+    validate(
+        NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1.0,
+            ground_temperature_k: FREEZING_K,
+            ground_snowfall_kg_m2_s: 0.0,
+            new_snow_bulk_density_kg_m3: 1.0,
+            precipitation_temperature_k: FREEZING_K,
+            variably_saturated_flow: false,
+        },
+        state,
+    )?;
+    ensure!(
+        soil_surface.liquid_water_kg_m2.is_finite()
+            && soil_surface.liquid_water_kg_m2 >= 0.0
+            && soil_surface.ice_water_kg_m2.is_finite()
+            && soil_surface.ice_water_kg_m2 >= 0.0,
+        "soil-surface transfer state is invalid"
+    );
+    for fortran_layer in state.layer_count + 1..=0 {
+        let slot = layer_slot(fortran_layer);
+        ensure!(
+            state.thickness_m[slot].is_finite()
+                && state.thickness_m[slot] > 0.0
+                && state.temperature_k[slot].is_finite()
+                && state.liquid_water_kg_m2[slot].is_finite()
+                && state.liquid_water_kg_m2[slot] >= 0.0
+                && state.ice_water_kg_m2[slot].is_finite()
+                && state.ice_water_kg_m2[slot] >= 0.0,
+            "active snow layer is invalid"
+        );
+    }
+    Ok(())
+}
+
+fn transfer_layer_down(
+    state: &mut RuntimeSnowColumn,
+    soil_surface: &mut SnowToSoilTransfer,
+    fortran_layer: i32,
+) {
+    let slot = layer_slot(fortran_layer);
+    if fortran_layer == 0 {
+        soil_surface.liquid_water_kg_m2 += state.liquid_water_kg_m2[slot];
+        soil_surface.ice_water_kg_m2 += state.ice_water_kg_m2[slot];
+    } else {
+        let destination = layer_slot(fortran_layer + 1);
+        state.liquid_water_kg_m2[destination] += state.liquid_water_kg_m2[slot];
+        state.ice_water_kg_m2[destination] += state.ice_water_kg_m2[slot];
+    }
+}
+
+fn copy_layer(state: &mut RuntimeSnowColumn, source: i32, destination: i32) {
+    let source = layer_slot(source);
+    let destination = layer_slot(destination);
+    state.temperature_k[destination] = state.temperature_k[source];
+    state.liquid_water_kg_m2[destination] = state.liquid_water_kg_m2[source];
+    state.ice_water_kg_m2[destination] = state.ice_water_kg_m2[source];
+    state.thickness_m[destination] = state.thickness_m[source];
+}
+
+fn combine_layer_pair(state: &mut RuntimeSnowColumn, target: i32, other: i32) {
+    let target_slot = layer_slot(target);
+    let other_slot = layer_slot(other);
+    let target_layer = SnowLayer {
+        thickness_m: state.thickness_m[target_slot],
+        temperature_k: state.temperature_k[target_slot],
+        liquid_water_kg_m2: state.liquid_water_kg_m2[target_slot],
+        ice_water_kg_m2: state.ice_water_kg_m2[target_slot],
+    };
+    let other_layer = SnowLayer {
+        thickness_m: state.thickness_m[other_slot],
+        temperature_k: state.temperature_k[other_slot],
+        liquid_water_kg_m2: state.liquid_water_kg_m2[other_slot],
+        ice_water_kg_m2: state.ice_water_kg_m2[other_slot],
+    };
+    let combined = combine_snow_values(target_layer, other_layer);
+    state.thickness_m[target_slot] = combined.thickness_m;
+    state.temperature_k[target_slot] = combined.temperature_k;
+    state.liquid_water_kg_m2[target_slot] = combined.liquid_water_kg_m2;
+    state.ice_water_kg_m2[target_slot] = combined.ice_water_kg_m2;
+}
+
+fn combine_snow_values(target: SnowLayer, other: SnowLayer) -> SnowLayer {
+    let thickness_m = target.thickness_m + other.thickness_m;
+    let ice_water_kg_m2 = target.ice_water_kg_m2 + other.ice_water_kg_m2;
+    let liquid_water_kg_m2 = target.liquid_water_kg_m2 + other.liquid_water_kg_m2;
+    let enthalpy = (f77(2117.27) * target.ice_water_kg_m2
+        + f77(4188.0) * target.liquid_water_kg_m2)
+        * (target.temperature_k - FREEZING_K)
+        + f77(0.3336e6) * target.liquid_water_kg_m2
+        + (f77(2117.27) * other.ice_water_kg_m2 + f77(4188.0) * other.liquid_water_kg_m2)
+            * (other.temperature_k - FREEZING_K)
+        + f77(0.3336e6) * other.liquid_water_kg_m2;
+    let heat_capacity = f77(2117.27) * ice_water_kg_m2 + f77(4188.0) * liquid_water_kg_m2;
+    let temperature_k = if enthalpy < 0.0 {
+        FREEZING_K + enthalpy / heat_capacity
+    } else if enthalpy <= f77(0.3336e6) * liquid_water_kg_m2 {
+        FREEZING_K
+    } else {
+        FREEZING_K + (enthalpy - f77(0.3336e6) * liquid_water_kg_m2) / heat_capacity
+    };
+    SnowLayer {
+        thickness_m,
+        temperature_k,
+        liquid_water_kg_m2,
+        ice_water_kg_m2,
+    }
+}
+
+fn rebuild_snow_geometry(state: &mut RuntimeSnowColumn) {
+    state.interface_depth_m[interface_slot(0)] = 0.0;
+    for fortran_layer in (state.layer_count + 1..=0).rev() {
+        let slot = layer_slot(fortran_layer);
+        state.node_depth_m[slot] = state.interface_depth_m[interface_slot(fortran_layer)]
+            - f77(0.5) * state.thickness_m[slot];
+        state.interface_depth_m[interface_slot(fortran_layer - 1)] =
+            state.interface_depth_m[interface_slot(fortran_layer)] - state.thickness_m[slot];
+    }
+}
+
+fn snow_totals(state: &RuntimeSnowColumn) -> (f64, f64, f64, f64) {
+    let mut ice_mass = 0.0;
+    let mut liquid_mass = 0.0;
+    let mut depth = 0.0;
+    for fortran_layer in state.layer_count + 1..=0 {
+        let slot = layer_slot(fortran_layer);
+        ice_mass += state.ice_water_kg_m2[slot];
+        liquid_mass += state.liquid_water_kg_m2[slot];
+        depth += state.thickness_m[slot];
+    }
+    (ice_mass + liquid_mass, depth, ice_mass, liquid_mass)
+}
+
+fn clear_snow_layers(state: &mut RuntimeSnowColumn) {
+    for field in [
+        &mut state.node_depth_m,
+        &mut state.thickness_m,
+        &mut state.temperature_k,
+        &mut state.liquid_water_kg_m2,
+        &mut state.ice_water_kg_m2,
+        &mut state.previous_ice_fraction,
+    ] {
+        field.fill(0.0);
+    }
+    state.interface_depth_m.fill(0.0);
+}
+
+/// Applies MOD_SnowLayersCombineDivide:snowlayersdivide without SNICAR or tracers.
+pub fn divide_snow_layers(state: &mut RuntimeSnowColumn) -> Result<()> {
+    validate_snow_topology(state, &SnowToSoilTransfer::default())?;
+    if state.layer_count == 0 {
+        return Ok(());
+    }
+
+    let mut layer_count = state.layer_count.unsigned_abs() as usize;
+    let mut layers = [SnowLayer::default(); MAX_SNOW_LAYERS];
+    for (position, layer) in layers.iter_mut().enumerate().take(layer_count) {
+        let slot = layer_slot(position as i32 + state.layer_count + 1);
+        *layer = SnowLayer {
+            thickness_m: state.thickness_m[slot],
+            temperature_k: state.temperature_k[slot],
+            liquid_water_kg_m2: state.liquid_water_kg_m2[slot],
+            ice_water_kg_m2: state.ice_water_kg_m2[slot],
+        };
+    }
+
+    if layer_count == 1 && layers[0].thickness_m > f77(0.03) {
+        layer_count = 2;
+        halve_layer(&mut layers[0]);
+        layers[1] = layers[0];
+    }
+    split_and_combine(&mut layers, &mut layer_count, 0, f77(0.02), f77(0.07), 1);
+    split_and_combine(&mut layers, &mut layer_count, 1, f77(0.05), f77(0.18), 2);
+    split_and_combine(&mut layers, &mut layer_count, 2, f77(0.11), f77(0.41), 3);
+    if layer_count > 4 && layers[3].thickness_m > f77(0.23) {
+        move_excess_to_next(&mut layers, 3, f77(0.23));
+    }
+
+    state.layer_count = -(layer_count as i32);
+    for (position, layer) in layers.iter().enumerate().take(layer_count) {
+        let slot = layer_slot(position as i32 + state.layer_count + 1);
+        state.thickness_m[slot] = layer.thickness_m;
+        state.temperature_k[slot] = layer.temperature_k;
+        state.liquid_water_kg_m2[slot] = layer.liquid_water_kg_m2;
+        state.ice_water_kg_m2[slot] = layer.ice_water_kg_m2;
+    }
+    rebuild_snow_geometry(state);
+    Ok(())
+}
+
+fn split_and_combine(
+    layers: &mut [SnowLayer; MAX_SNOW_LAYERS],
+    layer_count: &mut usize,
+    position: usize,
+    retained_thickness_m: f64,
+    split_threshold_m: f64,
+    next_position: usize,
+) {
+    if *layer_count <= position + 1 || layers[position].thickness_m <= retained_thickness_m {
+        return;
+    }
+    move_excess_to_next(layers, position, retained_thickness_m);
+    if *layer_count <= next_position + 1 && layers[next_position].thickness_m > split_threshold_m {
+        *layer_count += 1;
+        halve_layer(&mut layers[next_position]);
+        layers[next_position + 1] = layers[next_position];
+    }
+}
+
+fn move_excess_to_next(
+    layers: &mut [SnowLayer; MAX_SNOW_LAYERS],
+    position: usize,
+    retained_thickness_m: f64,
+) {
+    let fraction =
+        (layers[position].thickness_m - retained_thickness_m) / layers[position].thickness_m;
+    let excess = SnowLayer {
+        thickness_m: layers[position].thickness_m - retained_thickness_m,
+        temperature_k: layers[position].temperature_k,
+        liquid_water_kg_m2: fraction * layers[position].liquid_water_kg_m2,
+        ice_water_kg_m2: fraction * layers[position].ice_water_kg_m2,
+    };
+    let retained_fraction = retained_thickness_m / layers[position].thickness_m;
+    layers[position].thickness_m = retained_thickness_m;
+    layers[position].liquid_water_kg_m2 *= retained_fraction;
+    layers[position].ice_water_kg_m2 *= retained_fraction;
+    layers[position + 1] = combine_snow_values(layers[position + 1], excess);
+}
+
+fn halve_layer(layer: &mut SnowLayer) {
+    layer.thickness_m /= f77(2.0);
+    layer.liquid_water_kg_m2 /= f77(2.0);
+    layer.ice_water_kg_m2 /= f77(2.0);
 }
 
 /// Applies MOD_SnowLayersCombineDivide:snowcompaction to the active snow layers.

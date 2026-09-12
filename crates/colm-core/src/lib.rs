@@ -45,7 +45,8 @@ pub use radiation::{
     LeafOptics,
 };
 pub use snow::{
-    add_new_snow, compact_snow_layers, NewSnowInput, NewSnowOutcome, RuntimeSnowColumn,
+    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, NewSnowInput,
+    NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
 };
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
