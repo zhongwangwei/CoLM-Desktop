@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+netcdf = { workspace = true, features = ["static"] }
 
 [lints]
 workspace = true

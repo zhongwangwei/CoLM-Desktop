@@ -5,6 +5,7 @@
 
 pub mod albedo;
 pub mod hydrology;
+pub mod restart;
 pub mod static_state;
 pub mod time_state;
 pub mod urban;
@@ -14,6 +15,12 @@ pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
+};
+pub use restart::{
+    write_constant_restart, write_constant_restart_block, write_restart_tuning,
+    ConstantRestartFiles, ConstantRestartInput, RestartDimensions, RestartPatchFields,
+    RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields, TerrainRadiation,
+    TopmodelFields,
 };
 pub use static_state::{
     derive_bedrock, derive_lake_layers, derive_soil_parameters, normalize_soil_texture,
