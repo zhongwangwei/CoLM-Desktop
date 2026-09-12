@@ -73,6 +73,20 @@ fn point_loader_canonicalizes_a_scalar_wind_series_once() {
 }
 
 #[test]
+fn point_sampler_uses_fortran_linear_and_nearest_rules() {
+    let dir = temp_dir("sample");
+    let series = load_point_forcing(point_file(&dir, false)).unwrap();
+    let midpoint = series.sample_at_seconds(900.0).unwrap();
+    assert_eq!(midpoint.air_temperature_k, 273.65);
+    assert_eq!(midpoint.precipitation_kg_m2_s, 0.001);
+    assert_eq!(midpoint.downward_shortwave_w_m2, 150.0);
+    let above_midpoint = series.sample_at_seconds(901.0).unwrap();
+    assert_eq!(above_midpoint.precipitation_kg_m2_s, 0.0);
+    assert!(series.sample_at_seconds(-1.0).is_err());
+    assert!(series.sample_at_seconds(1801.0).is_err());
+}
+
+#[test]
 fn point_loader_keeps_vector_wind_components_separate() {
     let dir = temp_dir("vector");
     let series = load_point_forcing(point_file(&dir, true)).unwrap();

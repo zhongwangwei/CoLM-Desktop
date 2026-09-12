@@ -61,6 +61,90 @@ impl PointForcingSeries {
             .copied()
             .with_context(|| format!("forcing record {index} is outside 0..{}", self.len()))
     }
+
+    /// Samples the Point record at an elapsed forcing second.
+    ///
+    /// This preserves `MOD_Forcing:read_forcing`: all continuous slots use
+    /// linear lower/upper interpolation; precipitation is nearest-neighbour
+    /// and a midpoint tie selects the lower record.
+    pub fn sample_at_seconds(&self, time_seconds: f64) -> Result<PointForcingFrame> {
+        ensure!(
+            time_seconds.is_finite(),
+            "forcing sample time must be finite"
+        );
+        let first = self.frames.first().context("forcing series is empty")?;
+        let last = self.frames.last().context("forcing series is empty")?;
+        ensure!(
+            time_seconds >= first.time_seconds && time_seconds <= last.time_seconds,
+            "forcing sample time {time_seconds} is outside {}..={}",
+            first.time_seconds,
+            last.time_seconds
+        );
+        let upper = self
+            .frames
+            .partition_point(|frame| frame.time_seconds < time_seconds);
+        if upper == 0 {
+            return Ok(*first);
+        }
+        if upper == self.frames.len() {
+            return Ok(*last);
+        }
+        let lower = self.frames[upper - 1];
+        let upper = self.frames[upper];
+        let lower_weight =
+            (upper.time_seconds - time_seconds) / (upper.time_seconds - lower.time_seconds);
+        let upper_weight = 1.0 - lower_weight;
+        Ok(PointForcingFrame {
+            time_seconds,
+            air_temperature_k: linear(
+                lower.air_temperature_k,
+                upper.air_temperature_k,
+                lower_weight,
+                upper_weight,
+            ),
+            specific_humidity: linear(
+                lower.specific_humidity,
+                upper.specific_humidity,
+                lower_weight,
+                upper_weight,
+            ),
+            surface_pressure_pa: linear(
+                lower.surface_pressure_pa,
+                upper.surface_pressure_pa,
+                lower_weight,
+                upper_weight,
+            ),
+            precipitation_kg_m2_s: if lower_weight >= upper_weight {
+                lower.precipitation_kg_m2_s
+            } else {
+                upper.precipitation_kg_m2_s
+            },
+            eastward_wind_m_s: linear(
+                lower.eastward_wind_m_s,
+                upper.eastward_wind_m_s,
+                lower_weight,
+                upper_weight,
+            ),
+            northward_or_scalar_wind_m_s: linear(
+                lower.northward_or_scalar_wind_m_s,
+                upper.northward_or_scalar_wind_m_s,
+                lower_weight,
+                upper_weight,
+            ),
+            downward_shortwave_w_m2: linear(
+                lower.downward_shortwave_w_m2,
+                upper.downward_shortwave_w_m2,
+                lower_weight,
+                upper_weight,
+            ),
+            downward_longwave_w_m2: linear(
+                lower.downward_longwave_w_m2,
+                upper.downward_longwave_w_m2,
+                lower_weight,
+                upper_weight,
+            ),
+        })
+    }
 }
 
 /// Loads and canonicalizes a validated NetCDF POINT forcing file.
@@ -271,6 +355,10 @@ fn frame_values(frame: PointForcingFrame) -> [f64; 9] {
         frame.downward_shortwave_w_m2,
         frame.downward_longwave_w_m2,
     ]
+}
+
+fn linear(lower: f64, upper: f64, lower_weight: f64, upper_weight: f64) -> f64 {
+    lower * lower_weight + upper * upper_weight
 }
 
 #[cfg(test)]
