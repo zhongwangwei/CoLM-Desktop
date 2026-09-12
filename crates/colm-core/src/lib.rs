@@ -86,8 +86,8 @@ pub use lake::{
     LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
 };
 pub use leaf_temperature::{
-    leaf_temperature, LeafTemperatureInput, LeafTemperatureOptions, LeafTemperatureOutput,
-    LeafTemperatureState, ObservationHeightMode,
+    leaf_temperature, LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOptions,
+    LeafTemperatureOutput, LeafTemperatureState, ObservationHeightMode,
 };
 pub use monin_obukhov::{
     canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,

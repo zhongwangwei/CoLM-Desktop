@@ -35,7 +35,7 @@ pub struct StandardLctEnergyInput<'a> {
     pub root_uptake: RootUptakeInput<'a>,
     pub soil_surface_resistance: SoilSurfaceResistanceInput,
     pub ground_flux: GroundFluxInput,
-    pub leaf_temperature: LeafTemperatureInput,
+    pub leaf_temperature: LeafTemperatureInput<'a>,
     pub ground_temperature: GroundTemperatureInput<'a>,
 }
 
@@ -72,9 +72,9 @@ pub struct StandardLctEnergyOutput {
 /// Runs the normal LCT `CoLMMAIN → THERMAL` energy chain without duplicating a
 /// physics kernel in a runtime or initializer.
 ///
-/// This supports the non-PHS/non-ozone LCT path.  PFT/PC aggregation, plant
-/// hydraulics, ozone, and the downstream soil/snow-water solver remain their
-/// own source branches and are not approximated here.
+/// This supports both normal LCT and the PHS leaf branch. PFT/PC aggregation,
+/// ozone, and the downstream soil/snow-water solver remain their own source
+/// branches and are not approximated here.
 pub fn standard_lct_energy_step(
     input: StandardLctEnergyInput<'_>,
     state: &mut StandardLctEnergyState,
@@ -149,6 +149,10 @@ pub fn standard_lct_energy_step(
         + ground_temperature_change * leaf.ground_sensible_temperature_slope_w_m2_k;
     let corrected_ground_evaporation_kg_m2_s = leaf.ground_evaporation_kg_m2_s
         + ground_temperature_change * leaf.ground_latent_temperature_slope_kg_m2_s_k;
+    let total_sensible_heat_w_m2 =
+        leaf.leaf_sensible_heat_w_m2 + corrected_ground_sensible_heat_w_m2;
+    let total_evaporation_kg_m2_s =
+        leaf.leaf_evaporation_kg_m2_s + corrected_ground_evaporation_kg_m2_s;
 
     Ok(StandardLctEnergyOutput {
         precipitation,
@@ -161,10 +165,8 @@ pub fn standard_lct_energy_step(
         ground,
         corrected_ground_sensible_heat_w_m2,
         corrected_ground_evaporation_kg_m2_s,
-        total_sensible_heat_w_m2: leaf.leaf_sensible_heat_w_m2
-            + corrected_ground_sensible_heat_w_m2,
-        total_evaporation_kg_m2_s: leaf.leaf_evaporation_kg_m2_s
-            + corrected_ground_evaporation_kg_m2_s,
+        total_sensible_heat_w_m2,
+        total_evaporation_kg_m2_s,
     })
 }
 
@@ -194,8 +196,8 @@ fn ground_flux_input(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn leaf_input(
-    input: LeafTemperatureInput,
+fn leaf_input<'a>(
+    input: LeafTemperatureInput<'a>,
     forcing: RuntimeForcing,
     radiation: &ColdStartRadiation,
     shortwave: NetSolarFluxes,
@@ -205,7 +207,7 @@ fn leaf_input(
     soil_surface_resistance_s_m: f64,
     ground_flux: GroundFluxInput,
     preliminary_ground_flux: GroundFluxState,
-) -> LeafTemperatureInput {
+) -> LeafTemperatureInput<'a> {
     let direct_leaf_optical_depth = (radiation.direct_extinction * input.leaf_area_index).min(40.0);
     let canopy_absorbed_solar_w_m2 =
         shortwave.sunlit_absorbed_w_m2 + shortwave.shaded_absorbed_w_m2;

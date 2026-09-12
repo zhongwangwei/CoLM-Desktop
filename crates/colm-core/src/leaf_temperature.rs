@@ -1,18 +1,20 @@
 //! Standard land-cover canopy energy balance from `MOD_LeafTemperature.F90`.
 //!
 //! This is the reusable LCT/PFT two-big-leaf path used by the native runtime;
-//! it contains no NetCDF or process orchestration.  Plant hydraulics and ozone
-//! are separate upstream feature branches and are intentionally not silently
-//! approximated here.
+//! it contains no NetCDF or process orchestration. Plant hydraulics shares the
+//! root-to-leaf network in [`crate::plant_hydraulics`]; ozone remains a
+//! separate upstream feature branch and is not silently approximated here.
 
 use anyhow::{ensure, Result};
 
 use crate::{
     canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
-    canopy_wetness, effective_canopy_wind, initialize_monin_obukhov, saturation_specific_humidity,
-    stomata, CanopyDiffusivityProfileInput, CanopyMoninObukhovInput, CanopyWater,
-    CanopyWindProfileInput, LeafBiochemistry, LeafPhotosynthesisInput, MoninObukhovInitialInput,
-    MoninObukhovInput, StomataInput, StomataOptions, SurfaceLayerScheme, FREEZING_K,
+    canopy_wetness, effective_canopy_wind, initialize_monin_obukhov, plant_hydraulic_stress,
+    saturation_specific_humidity, stomata, update_photosynthesis, CanopyDiffusivityProfileInput,
+    CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput, LeafBiochemistry,
+    LeafPhotosynthesisInput, MoninObukhovInitialInput, MoninObukhovInput,
+    PhotosynthesisUpdateInput, PlantHydraulicInput, PlantHydraulicParameters, PlantHydraulicState,
+    StomataInput, StomataOptions, StomataState, SurfaceLayerScheme, FREEZING_K,
 };
 
 const VON_KARMAN: f64 = 0.4;
@@ -62,9 +64,37 @@ impl Default for LeafTemperatureOptions {
     }
 }
 
+/// Soil profiles and fixed hydraulic parameters for the two-leaf PHS branch.
+///
+/// This is present only when `DEF_USE_PLANTHYDRAULICS` is active. Meteorology,
+/// leaf area, canopy geometry, and unstressed stomatal conductance remain
+/// inputs of [`LeafTemperatureInput`], which prevents the runtime from
+/// duplicating the source hand-off.
+#[derive(Debug, Clone, Copy)]
+pub struct LeafPlantHydraulicInput<'a> {
+    pub node_depth_m: &'a [f64],
+    pub layer_thickness_m: &'a [f64],
+    pub root_fraction: &'a [f64],
+    pub soil_matric_potential_mm: &'a [f64],
+    pub soil_hydraulic_conductivity_mm_s: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub maximum_sunlit_leaf_hydraulic_conductance: f64,
+    pub maximum_shaded_leaf_hydraulic_conductance: f64,
+    pub maximum_xylem_hydraulic_conductance: f64,
+    pub maximum_root_hydraulic_conductance: f64,
+    pub sunlit_leaf_psi50_mm: f64,
+    pub shaded_leaf_psi50_mm: f64,
+    pub xylem_psi50_mm: f64,
+    pub root_psi50_mm: f64,
+    pub vulnerability_shape: f64,
+    /// `DEF_RSS_SCHEME`; scheme 4 uses a conductance-style soil factor.
+    pub soil_surface_resistance_scheme: i32,
+    pub parameters: PlantHydraulicParameters,
+}
+
 /// Immutable forcing, surface, and vegetation parameters for one canopy step.
 #[derive(Debug, Clone, Copy)]
-pub struct LeafTemperatureInput {
+pub struct LeafTemperatureInput<'a> {
     pub time_step_seconds: f64,
     pub maximum_dew_mm: f64,
     pub leaf_area_index: f64,
@@ -114,6 +144,9 @@ pub struct LeafTemperatureInput {
     pub intercepted_rain_kg_m2_s: f64,
     pub intercepted_snow_kg_m2_s: f64,
     pub ground_latent_heat_j_kg: f64,
+    /// Optional default LCT PHS branch. Its persistent potential lives in
+    /// [`LeafTemperatureState::plant_hydraulics`].
+    pub plant_hydraulics: Option<LeafPlantHydraulicInput<'a>>,
     pub options: LeafTemperatureOptions,
 }
 
@@ -122,10 +155,12 @@ pub struct LeafTemperatureInput {
 pub struct LeafTemperatureState {
     pub leaf_temperature_k: f64,
     pub canopy_water: CanopyWater,
+    /// Persistent sunlit/shaded/xylem/root water potentials for PHS.
+    pub plant_hydraulics: Option<PlantHydraulicState>,
 }
 
 /// Fluxes and diagnostic state produced by one converged canopy solve.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LeafTemperatureOutput {
     pub wet_snow_fraction: f64,
     pub eastward_stress_kg_m_s2: f64,
@@ -149,6 +184,8 @@ pub struct LeafTemperatureOutput {
     pub transpiration_kg_m2_s: f64,
     pub sunlit_transpiration_kg_m2_s: f64,
     pub shaded_transpiration_kg_m2_s: f64,
+    /// PHS soil-layer uptake. Empty when plant hydraulics is disabled.
+    pub root_flux_kg_m2_s: Vec<f64>,
     pub sunlit_assimilation_mol_m2_s: f64,
     pub shaded_assimilation_mol_m2_s: f64,
     pub downward_longwave_w_m2: f64,
@@ -176,7 +213,7 @@ pub struct LeafTemperatureOutput {
 /// thermal updates; this function only updates the leaf temperature and dew
 /// pools that belong to the leaf energy balance.
 pub fn leaf_temperature(
-    input: LeafTemperatureInput,
+    input: LeafTemperatureInput<'_>,
     state: &mut LeafTemperatureState,
 ) -> Result<LeafTemperatureOutput> {
     validate(input, *state)?;
@@ -339,32 +376,147 @@ pub fn leaf_temperature(
             saturation_specific_humidity(state.leaf_temperature_k, input.surface_pressure_pa)?;
         let canopy_vapor_pressure =
             canopy_air_humidity * input.surface_pressure_pa / (0.622 + 0.378 * canopy_air_humidity);
-        let sunlit_resistance = stomatal_resistance(
+        let stomatal_soil_stress = if input.plant_hydraulics.is_some() {
+            1.0
+        } else {
+            input.soil_water_stress_sunlit
+        };
+        let mut sunlit_resistance = stomatal_resistance(
             input,
             StomataStep {
                 leaf_temperature_k: state.leaf_temperature_k,
                 leaf_boundary_resistance_s_m: leaf_boundary_resistance,
                 absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
-                soil_water_stress: input.soil_water_stress_sunlit,
+                soil_water_stress: stomatal_soil_stress,
                 canopy_scaling: cintsun,
                 canopy_air_co2_pa: canopy_air_co2,
                 canopy_vapor_pressure_pa: canopy_vapor_pressure,
                 leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
             },
         )?;
-        let shaded_resistance = stomatal_resistance(
+        let mut shaded_resistance = stomatal_resistance(
             input,
             StomataStep {
                 leaf_temperature_k: state.leaf_temperature_k,
                 leaf_boundary_resistance_s_m: leaf_boundary_resistance,
                 absorbed_par_w_m2: input.shaded_absorbed_par_w_m2,
-                soil_water_stress: input.soil_water_stress_shaded,
+                soil_water_stress: if input.plant_hydraulics.is_some() {
+                    1.0
+                } else {
+                    input.soil_water_stress_shaded
+                },
                 canopy_scaling: cintsha,
                 canopy_air_co2_pa: canopy_air_co2,
                 canopy_vapor_pressure_pa: canopy_vapor_pressure,
                 leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
             },
         )?;
+        let mut root_flux_kg_m2_s = Vec::new();
+        let mut hydraulic_transpiration = None;
+        if let Some(hydraulic) = input.plant_hydraulics {
+            let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
+            let maximum_sunlit_leaf_conductance_umol_m2_s = (1.0
+                / (sunlit_resistance.stomatal_resistance_s_m * state.leaf_temperature_k
+                    / pressure_conversion))
+                .min(1.0e6)
+                / laisun
+                * 1.0e6;
+            let maximum_shaded_leaf_conductance_umol_m2_s = (1.0
+                / (shaded_resistance.stomatal_resistance_s_m * state.leaf_temperature_k
+                    / pressure_conversion))
+                .min(1.0e6)
+                / laisha
+                * 1.0e6;
+            let hydraulic_state = state.plant_hydraulics.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("plant hydraulics input requires persistent plant hydraulic state")
+            })?;
+            let hydraulic_output = plant_hydraulic_stress(
+                PlantHydraulicInput {
+                    node_depth_m: hydraulic.node_depth_m,
+                    layer_thickness_m: hydraulic.layer_thickness_m,
+                    root_fraction: hydraulic.root_fraction,
+                    soil_matric_potential_mm: hydraulic.soil_matric_potential_mm,
+                    soil_hydraulic_conductivity_mm_s: hydraulic.soil_hydraulic_conductivity_mm_s,
+                    saturated_hydraulic_conductivity_mm_s: hydraulic
+                        .saturated_hydraulic_conductivity_mm_s,
+                    surface_pressure_pa: input.surface_pressure_pa,
+                    leaf_saturation_specific_humidity: leaf_saturation.specific_humidity,
+                    canopy_air_specific_humidity: canopy_air_humidity,
+                    ground_specific_humidity: input.ground_specific_humidity,
+                    reference_specific_humidity: input.reference_specific_humidity,
+                    leaf_temperature_k: state.leaf_temperature_k,
+                    leaf_boundary_resistance_s_m: leaf_boundary_resistance,
+                    soil_surface_resistance_s_m: input.soil_surface_resistance_s_m,
+                    reference_to_canopy_moisture_resistance_s_m: raw,
+                    ground_to_canopy_moisture_resistance_s_m: ground_to_canopy_resistance,
+                    air_density_kg_m3: input.air_density_kg_m3,
+                    wet_canopy_fraction: fwet,
+                    sunlit_leaf_area_index: laisun,
+                    shaded_leaf_area_index: laisha,
+                    stem_area_index: sai.max(0.1),
+                    canopy_top_height_m: input.canopy_top_height_m,
+                    maximum_sunlit_leaf_conductance_umol_m2_s,
+                    maximum_shaded_leaf_conductance_umol_m2_s,
+                    maximum_sunlit_leaf_hydraulic_conductance: hydraulic
+                        .maximum_sunlit_leaf_hydraulic_conductance,
+                    maximum_shaded_leaf_hydraulic_conductance: hydraulic
+                        .maximum_shaded_leaf_hydraulic_conductance,
+                    maximum_xylem_hydraulic_conductance: hydraulic
+                        .maximum_xylem_hydraulic_conductance,
+                    maximum_root_hydraulic_conductance: hydraulic
+                        .maximum_root_hydraulic_conductance,
+                    sunlit_leaf_psi50_mm: hydraulic.sunlit_leaf_psi50_mm,
+                    shaded_leaf_psi50_mm: hydraulic.shaded_leaf_psi50_mm,
+                    xylem_psi50_mm: hydraulic.xylem_psi50_mm,
+                    root_psi50_mm: hydraulic.root_psi50_mm,
+                    vulnerability_shape: hydraulic.vulnerability_shape,
+                    soil_surface_resistance_scheme: hydraulic.soil_surface_resistance_scheme,
+                    parameters: hydraulic.parameters,
+                },
+                hydraulic_state,
+            )?;
+            ensure!(
+                (hydraulic_output.sunlit_transpiration_kg_m2_s
+                    + hydraulic_output.shaded_transpiration_kg_m2_s
+                    - hydraulic_output.root_flux_kg_m2_s.iter().sum::<f64>())
+                .abs()
+                    <= 1.0e-7,
+                "plant hydraulic solve violates its root-water balance"
+            );
+            sunlit_resistance = hydraulic_stomatal_resistance(
+                input,
+                StomataStep {
+                    leaf_temperature_k: state.leaf_temperature_k,
+                    leaf_boundary_resistance_s_m: leaf_boundary_resistance,
+                    absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
+                    soil_water_stress: hydraulic_output.sunlit_stress,
+                    canopy_scaling: cintsun,
+                    canopy_air_co2_pa: canopy_air_co2,
+                    canopy_vapor_pressure_pa: canopy_vapor_pressure,
+                    leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
+                },
+                hydraulic_output.sunlit_stomatal_conductance_umol_m2_s * laisun,
+            )?;
+            shaded_resistance = hydraulic_stomatal_resistance(
+                input,
+                StomataStep {
+                    leaf_temperature_k: state.leaf_temperature_k,
+                    leaf_boundary_resistance_s_m: leaf_boundary_resistance,
+                    absorbed_par_w_m2: input.shaded_absorbed_par_w_m2,
+                    soil_water_stress: hydraulic_output.shaded_stress,
+                    canopy_scaling: cintsha,
+                    canopy_air_co2_pa: canopy_air_co2,
+                    canopy_vapor_pressure_pa: canopy_vapor_pressure,
+                    leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
+                },
+                hydraulic_output.shaded_stomatal_conductance_umol_m2_s * laisha,
+            )?;
+            hydraulic_transpiration = Some((
+                hydraulic_output.sunlit_transpiration_kg_m2_s,
+                hydraulic_output.shaded_transpiration_kg_m2_s,
+            ));
+            root_flux_kg_m2_s = hydraulic_output.root_flux_kg_m2_s;
+        }
         let leaf_sunlit_resistance = sunlit_resistance.stomatal_resistance_s_m * laisun;
         let leaf_shaded_resistance = shaded_resistance.stomatal_resistance_s_m * laisha;
         let evaporation_sign = if leaf_saturation.specific_humidity > canopy_air_humidity {
@@ -439,7 +591,11 @@ pub fn leaf_temperature(
                 + laisha / (leaf_boundary_resistance + leaf_shaded_resistance))
             * (air_moisture_weight + ground_moisture_weight)
             * leaf_saturation.specific_humidity_temperature_slope_k;
-        if transpiration >= input.transpiration_limit_kg_m2_s {
+        if let Some((sunlit, shaded)) = hydraulic_transpiration {
+            sunlit_transpiration = sunlit;
+            shaded_transpiration = shaded;
+            transpiration = sunlit + shaded;
+        } else if transpiration >= input.transpiration_limit_kg_m2_s {
             let scale = if transpiration > 0.0 {
                 input.transpiration_limit_kg_m2_s / transpiration
             } else {
@@ -600,6 +756,7 @@ pub fn leaf_temperature(
             shaded_resistance,
             leaf_sunlit_resistance,
             leaf_shaded_resistance,
+            root_flux_kg_m2_s,
         };
         iteration += 1;
         if iteration > MIN_ITERATIONS {
@@ -638,6 +795,28 @@ pub fn leaf_temperature(
         leaf_sensible_heat + LATENT_HEAT_VAPORIZATION_J_KG * excessive_wet_evaporation;
     let sunlit_transpiration = last.sunlit_transpiration;
     let shaded_transpiration = last.shaded_transpiration;
+    let mut root_flux_kg_m2_s = last.root_flux_kg_m2_s;
+    if let Some(hydraulic) = input.plant_hydraulics {
+        let root_adjustment = last.transpiration_temperature_slope * final_temperature_change;
+        if last.transpiration.abs() >= 1.0e-15 {
+            let scale = transpiration / last.transpiration;
+            for flux in &mut root_flux_kg_m2_s {
+                *flux *= scale;
+            }
+        } else {
+            let total_depth = hydraulic.layer_thickness_m.iter().sum::<f64>();
+            ensure!(
+                total_depth.is_finite() && total_depth > 0.0,
+                "plant hydraulic layer thickness has no positive total depth"
+            );
+            for (flux, depth) in root_flux_kg_m2_s
+                .iter_mut()
+                .zip(hydraulic.layer_thickness_m)
+            {
+                *flux += depth / total_depth * root_adjustment;
+            }
+        }
+    }
     state.canopy_water.total_mm =
         (state.canopy_water.total_mm - wet_evaporation * input.time_step_seconds).max(0.0);
     let wet_snow_fraction = update_canopy_water(input, state, wet_evaporation)?;
@@ -756,6 +935,7 @@ pub fn leaf_temperature(
         transpiration_kg_m2_s: transpiration,
         sunlit_transpiration_kg_m2_s: sunlit_transpiration,
         shaded_transpiration_kg_m2_s: shaded_transpiration,
+        root_flux_kg_m2_s,
         sunlit_assimilation_mol_m2_s: last.sunlit_resistance.assimilation_mol_m2_s,
         shaded_assimilation_mol_m2_s: last.shaded_resistance.assimilation_mol_m2_s,
         downward_longwave_w_m2: downward_longwave,
@@ -779,7 +959,7 @@ pub fn leaf_temperature(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Iteration {
     ram: f64,
     raw: f64,
@@ -817,6 +997,7 @@ struct Iteration {
     shaded_resistance: crate::StomataState,
     leaf_sunlit_resistance: f64,
     leaf_shaded_resistance: f64,
+    root_flux_kg_m2_s: Vec<f64>,
 }
 
 impl Default for Iteration {
@@ -874,6 +1055,7 @@ impl Default for Iteration {
             },
             leaf_sunlit_resistance: 0.0,
             leaf_shaded_resistance: 0.0,
+            root_flux_kg_m2_s: Vec::new(),
         }
     }
 }
@@ -906,7 +1088,7 @@ struct StomataStep {
 }
 
 fn stomatal_resistance(
-    input: LeafTemperatureInput,
+    input: LeafTemperatureInput<'_>,
     step: StomataStep,
 ) -> Result<crate::StomataState> {
     stomata(
@@ -933,7 +1115,42 @@ fn stomatal_resistance(
     )
 }
 
-fn longwave(input: LeafTemperatureInput, leaf_temperature_k: f64, factor: f64) -> (f64, f64) {
+fn hydraulic_stomatal_resistance(
+    input: LeafTemperatureInput<'_>,
+    step: StomataStep,
+    canopy_conductance_umol_m2_s: f64,
+) -> Result<StomataState> {
+    let photosynthesis = LeafPhotosynthesisInput {
+        biochemistry: LeafBiochemistry {
+            canopy_scaling: step.canopy_scaling,
+            ..input.biochemistry
+        },
+        leaf_temperature_k: step.leaf_temperature_k,
+        oxygen_partial_pressure_pa: input.oxygen_partial_pressure_pa,
+        absorbed_par_w_m2: step.absorbed_par_w_m2,
+        air_pressure_pa: input.surface_pressure_pa,
+        soil_water_stress: step.soil_water_stress,
+        leaf_boundary_resistance_s_m: step.leaf_boundary_resistance_s_m,
+    };
+    let update = update_photosynthesis(
+        PhotosynthesisUpdateInput {
+            photosynthesis,
+            atmospheric_co2_pa: input.atmospheric_co2_pa,
+            canopy_air_co2_pa: step.canopy_air_co2_pa,
+            canopy_conductance_h2o_mol_m2_s: canopy_conductance_umol_m2_s / 1.0e6,
+        },
+        input.options.stomata,
+    )?;
+    let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
+    Ok(StomataState {
+        assimilation_mol_m2_s: update.assimilation_mol_m2_s,
+        respiration_mol_m2_s: update.respiration_mol_m2_s,
+        stomatal_resistance_s_m: pressure_conversion * 1.0e6
+            / (step.leaf_temperature_k * canopy_conductance_umol_m2_s),
+    })
+}
+
+fn longwave(input: LeafTemperatureInput<'_>, leaf_temperature_k: f64, factor: f64) -> (f64, f64) {
     let ground_longwave = if input.options.split_soil_snow {
         (1.0 - input.snow_cover_fraction)
             * input.ground_emissivity
@@ -970,7 +1187,7 @@ fn longwave(input: LeafTemperatureInput, leaf_temperature_k: f64, factor: f64) -
 }
 
 fn upward_longwave(
-    input: LeafTemperatureInput,
+    input: LeafTemperatureInput<'_>,
     previous_leaf_temperature_k: f64,
     leaf_temperature_change_k: f64,
     factor: f64,
@@ -1012,7 +1229,7 @@ fn upward_longwave(
 }
 
 fn update_canopy_water(
-    input: LeafTemperatureInput,
+    input: LeafTemperatureInput<'_>,
     state: &mut LeafTemperatureState,
     wet_evaporation_kg_m2_s: f64,
 ) -> Result<f64> {
@@ -1099,7 +1316,7 @@ fn update_canopy_water(
     Ok(wet_snow_fraction)
 }
 
-fn validate(input: LeafTemperatureInput, state: LeafTemperatureState) -> Result<()> {
+fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Result<()> {
     let scalars = [
         input.time_step_seconds,
         input.maximum_dew_mm,
@@ -1195,7 +1412,8 @@ fn validate(input: LeafTemperatureInput, state: LeafTemperatureState) -> Result<
             && state.leaf_temperature_k > 0.0
             && state.canopy_water.total_mm >= 0.0
             && state.canopy_water.rain_mm >= 0.0
-            && state.canopy_water.snow_mm >= 0.0,
+            && state.canopy_water.snow_mm >= 0.0
+            && (input.plant_hydraulics.is_none() || state.plant_hydraulics.is_some()),
         "leaf-temperature inputs are invalid"
     );
     Ok(())

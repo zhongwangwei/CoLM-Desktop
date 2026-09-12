@@ -79,6 +79,7 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
                 rain_mm: 0.1,
                 snow_mm: 0.0,
             },
+            plant_hydraulics: None,
         },
     };
     let input = input(forcing);
@@ -211,6 +212,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
         intercepted_rain_kg_m2_s: 0.0,
         intercepted_snow_kg_m2_s: 0.0,
         ground_latent_heat_j_kg: 0.0,
+        plant_hydraulics: None,
         options: LeafTemperatureOptions::default(),
     };
     StandardLctEnergyInput {

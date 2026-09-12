@@ -33,6 +33,55 @@ fn leaf_temperature_rejects_missing_leaf_area() {
     assert!(leaf_temperature(input, &mut sample_state()).is_err());
 }
 
+#[test]
+fn hydraulic_leaf_solver_keeps_the_adjusted_root_flux_in_step_with_transpiration() {
+    let node_depth_m = [0.05, 0.25, 0.7];
+    let layer_thickness_m = [0.1, 0.3, 0.6];
+    let root_fraction = [0.5, 0.3, 0.2];
+    let soil_matric_potential_mm = [-10_000.0, -15_000.0, -25_000.0];
+    let soil_hydraulic_conductivity_mm_s = [0.005, 0.003, 0.001];
+    let saturated_hydraulic_conductivity_mm_s = [0.01, 0.01, 0.01];
+    let mut input = sample_input();
+    input.plant_hydraulics = Some(LeafPlantHydraulicInput {
+        node_depth_m: &node_depth_m,
+        layer_thickness_m: &layer_thickness_m,
+        root_fraction: &root_fraction,
+        soil_matric_potential_mm: &soil_matric_potential_mm,
+        soil_hydraulic_conductivity_mm_s: &soil_hydraulic_conductivity_mm_s,
+        saturated_hydraulic_conductivity_mm_s: &saturated_hydraulic_conductivity_mm_s,
+        maximum_sunlit_leaf_hydraulic_conductance: 2.0e-4,
+        maximum_shaded_leaf_hydraulic_conductance: 2.0e-4,
+        maximum_xylem_hydraulic_conductance: 3.0e-4,
+        maximum_root_hydraulic_conductance: 4.0e-4,
+        sunlit_leaf_psi50_mm: -150_000.0,
+        shaded_leaf_psi50_mm: -150_000.0,
+        xylem_psi50_mm: -120_000.0,
+        root_psi50_mm: -100_000.0,
+        vulnerability_shape: 3.0,
+        soil_surface_resistance_scheme: 1,
+        parameters: PlantHydraulicParameters::default(),
+    });
+    let mut state = sample_state();
+    state.plant_hydraulics = Some(PlantHydraulicState {
+        vegetation_water_potential_mm: [-25_000.0; 4],
+    });
+
+    let output = leaf_temperature(input, &mut state).unwrap();
+
+    assert_eq!(output.root_flux_kg_m2_s.len(), node_depth_m.len());
+    close(
+        output.root_flux_kg_m2_s.iter().sum(),
+        output.transpiration_kg_m2_s,
+        1.0e-12,
+    );
+    assert!(state
+        .plant_hydraulics
+        .unwrap()
+        .vegetation_water_potential_mm
+        .iter()
+        .all(|value| value.is_finite()));
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
@@ -48,10 +97,11 @@ fn sample_state() -> LeafTemperatureState {
             rain_mm: 0.1,
             snow_mm: 0.0,
         },
+        plant_hydraulics: None,
     }
 }
 
-fn sample_input() -> LeafTemperatureInput {
+fn sample_input() -> LeafTemperatureInput<'static> {
     LeafTemperatureInput {
         time_step_seconds: 1800.0,
         maximum_dew_mm: 0.1,
@@ -118,6 +168,7 @@ fn sample_input() -> LeafTemperatureInput {
         intercepted_rain_kg_m2_s: 0.0,
         intercepted_snow_kg_m2_s: 0.0,
         ground_latent_heat_j_kg: LATENT_HEAT_VAPORIZATION_J_KG,
+        plant_hydraulics: None,
         options: LeafTemperatureOptions::default(),
     }
 }
