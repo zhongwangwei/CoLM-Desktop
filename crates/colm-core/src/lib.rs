@@ -22,6 +22,7 @@ pub mod phase_change;
 pub mod photosynthesis;
 pub mod radiation;
 pub mod root_uptake;
+pub mod runoff;
 pub mod snow;
 pub mod soil_surface_resistance;
 pub mod soil_water;
@@ -90,6 +91,12 @@ pub use radiation::{
     LeafOptics,
 };
 pub use root_uptake::{root_uptake, RootUptakeInput, RootUptakeState};
+pub use runoff::{
+    simple_vic_runoff, simple_vic_subsurface_runoff, topmodel_subsurface_runoff,
+    topmodel_surface_runoff, xinanjiang_runoff, SimpleVicSubsurfaceInput, StorageRunoffInput,
+    StorageRunoffState, TopmodelMethod, TopmodelSubsurfaceInput, TopmodelSurfaceInput,
+    TopmodelSurfaceState,
+};
 pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, NewSnowInput,
     NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
