@@ -181,3 +181,129 @@ fn lake_conductivity_matches_mod_lake_for_open_and_frozen_water() {
     }
     close(frozen.top_eddy_conductivity_w_m_k, 0.697_414_690_570_876_9);
 }
+
+#[test]
+fn lake_new_snow_matches_mod_lake_phase_exchange_and_shared_snow_column() {
+    // Standalone gfortran references from MOD_Lake:newsnow_lake.
+    let mut frozen_lake = LakeColumn {
+        thickness_m: vec![1.0; 10],
+        temperature_k: vec![270.0; 10],
+        ice_fraction: vec![1.0; 10],
+    };
+    let mut frozen_snow = RuntimeSnowColumn::empty();
+    let frozen = add_lake_new_snow(
+        LakeNewSnowInput {
+            use_dynamic_lake: false,
+            time_step_seconds: 1800.0,
+            rainfall_kg_m2_s: 0.002,
+            snowfall_kg_m2_s: 0.0,
+            precipitation_temperature_k: 274.0,
+            new_snow_bulk_density_kg_m3: 100.0,
+        },
+        &mut frozen_snow,
+        &mut frozen_lake,
+    )
+    .unwrap();
+    assert_eq!(frozen_snow.layer_count, -1);
+    close(frozen.rainfall_kg_m2_s, 0.0);
+    close(frozen.snowfall_kg_m2_s, 0.002);
+    close(frozen_lake.temperature_k[0], 270.582_481_592_162_4);
+    close(frozen_lake.ice_fraction[0], 1.0);
+    close(frozen_snow.water_equivalent_kg_m2, 3.6);
+    close(frozen_snow.depth_m, 0.036);
+    let frozen_top = crate::snow::snow_layer_slot(0);
+    close(frozen_snow.temperature_k[frozen_top], 270.582_481_592_162_4);
+    close(frozen_snow.ice_water_kg_m2[frozen_top], 3.6);
+
+    let mut open_lake = LakeColumn {
+        thickness_m: vec![1.0; 10],
+        temperature_k: vec![280.0; 10],
+        ice_fraction: vec![0.0; 10],
+    };
+    let mut melted_snow = RuntimeSnowColumn::empty();
+    let melted = add_lake_new_snow(
+        LakeNewSnowInput {
+            use_dynamic_lake: false,
+            time_step_seconds: 1800.0,
+            rainfall_kg_m2_s: 0.0,
+            snowfall_kg_m2_s: 0.0001,
+            precipitation_temperature_k: 270.0,
+            new_snow_bulk_density_kg_m3: 100.0,
+        },
+        &mut melted_snow,
+        &mut open_lake,
+    )
+    .unwrap();
+    assert_eq!(melted_snow.layer_count, 0);
+    close(melted.rainfall_kg_m2_s, 0.0001);
+    close(melted.snowfall_kg_m2_s, 0.0);
+    close(open_lake.temperature_k[0], 279.984_145_984_387_6);
+    close(melted_snow.water_equivalent_kg_m2, 0.0);
+    close(melted_snow.depth_m, 0.0);
+
+    let mut dynamic_lake = LakeColumn {
+        thickness_m: vec![1.0; 10],
+        temperature_k: vec![280.0; 10],
+        ice_fraction: vec![0.0; 10],
+    };
+    let mut dynamic_snow = RuntimeSnowColumn::empty();
+    let dynamic = add_lake_new_snow(
+        LakeNewSnowInput {
+            use_dynamic_lake: true,
+            time_step_seconds: 1800.0,
+            rainfall_kg_m2_s: 0.0,
+            snowfall_kg_m2_s: 0.0001,
+            precipitation_temperature_k: 270.0,
+            new_snow_bulk_density_kg_m3: 100.0,
+        },
+        &mut dynamic_snow,
+        &mut dynamic_lake,
+    )
+    .unwrap();
+    assert_eq!(dynamic_snow.layer_count, 0);
+    close(dynamic.rainfall_kg_m2_s, 0.0001);
+    close(dynamic.snowfall_kg_m2_s, 0.0);
+    close(dynamic_lake.thickness_m.iter().sum(), 10.00018);
+    close(dynamic_lake.thickness_m[0], 0.1);
+    close(dynamic_lake.temperature_k[0], 279.984_145_984_387_6);
+    close(dynamic_lake.temperature_k[9], 280.0);
+
+    let mut existing_lake = LakeColumn {
+        thickness_m: vec![1.0; 10],
+        temperature_k: vec![275.0; 10],
+        ice_fraction: vec![0.0; 10],
+    };
+    let mut existing_snow = RuntimeSnowColumn::empty();
+    existing_snow.layer_count = -1;
+    existing_snow.water_equivalent_kg_m2 = 5.0;
+    existing_snow.depth_m = 0.05;
+    let top = crate::snow::snow_layer_slot(0);
+    existing_snow.interface_depth_m[crate::snow::snow_interface_slot(-1)] = -0.05;
+    existing_snow.node_depth_m[top] = -0.025;
+    existing_snow.thickness_m[top] = 0.05;
+    existing_snow.temperature_k[top] = 270.0;
+    existing_snow.liquid_water_kg_m2[top] = 1.0;
+    existing_snow.ice_water_kg_m2[top] = 4.0;
+    existing_snow.previous_ice_fraction[top] = 0.8;
+    let existing = add_lake_new_snow(
+        LakeNewSnowInput {
+            use_dynamic_lake: false,
+            time_step_seconds: 1800.0,
+            rainfall_kg_m2_s: 0.001,
+            snowfall_kg_m2_s: 0.002,
+            precipitation_temperature_k: 269.0,
+            new_snow_bulk_density_kg_m3: 100.0,
+        },
+        &mut existing_snow,
+        &mut existing_lake,
+    )
+    .unwrap();
+    close(existing.rainfall_kg_m2_s, 0.001);
+    close(existing.snowfall_kg_m2_s, 0.002);
+    close(existing_snow.water_equivalent_kg_m2, 8.6);
+    close(existing_snow.depth_m, 0.086);
+    close(existing_snow.temperature_k[top], 269.455_001_737_745_53);
+    close(existing_snow.ice_water_kg_m2[top], 7.6);
+    close(existing_snow.thickness_m[top], 0.086);
+    close(existing_snow.node_depth_m[top], -0.043);
+}

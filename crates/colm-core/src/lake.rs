@@ -2,6 +2,9 @@
 
 use anyhow::{ensure, Result};
 
+use crate::snow::{snow_interface_slot, snow_layer_slot, validate_runtime_snow_column};
+use crate::RuntimeSnowColumn;
+
 const LAKE_LAYERS: usize = 10;
 const DEFAULT_THICKNESS_M: [f64; LAKE_LAYERS] =
     [0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 7.0, 10.45, 10.45];
@@ -17,6 +20,27 @@ pub struct LakeColumn {
     pub temperature_k: Vec<f64>,
     /// Frozen mass fraction of each lake layer.
     pub ice_fraction: Vec<f64>,
+}
+
+/// Inputs to `MOD_Lake:newsnow_lake`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LakeNewSnowInput {
+    pub use_dynamic_lake: bool,
+    pub time_step_seconds: f64,
+    pub rainfall_kg_m2_s: f64,
+    pub snowfall_kg_m2_s: f64,
+    pub precipitation_temperature_k: f64,
+    pub new_snow_bulk_density_kg_m3: f64,
+}
+
+/// Precipitation left after lake-surface phase change.
+///
+/// This is the mutated `pg_rain`/`pg_snow` pair from `newsnow_lake`; callers
+/// pass it on to CoLM's later lake snow-water step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LakeNewSnowOutcome {
+    pub rainfall_kg_m2_s: f64,
+    pub snowfall_kg_m2_s: f64,
 }
 
 /// Inputs to `MOD_Lake:roughness_lake` for one lake surface.
@@ -59,6 +83,277 @@ pub struct LakeConductivityInput<'a> {
 pub struct LakeConductivity {
     pub thermal_conductivity_w_m_k: Vec<f64>,
     pub top_eddy_conductivity_w_m_k: f64,
+}
+
+/// Ports `MOD_Lake:newsnow_lake`.
+///
+/// The snow state is the shared CoLM snow prefix used by land patches.  It
+/// keeps the initializer and runtime on one snow-column representation while
+/// preserving the lake-specific rain/snow and surface-ice energy exchange.
+pub fn add_lake_new_snow(
+    input: LakeNewSnowInput,
+    snow: &mut RuntimeSnowColumn,
+    lake: &mut LakeColumn,
+) -> Result<LakeNewSnowOutcome> {
+    validate(lake)?;
+    validate_runtime_snow_column(snow)?;
+    ensure!(
+        lake.thickness_m[0] > 0.0,
+        "lake surface layer must have positive thickness"
+    );
+    ensure!(
+        input.time_step_seconds.is_finite()
+            && input.time_step_seconds > 0.0
+            && input.rainfall_kg_m2_s.is_finite()
+            && input.rainfall_kg_m2_s >= 0.0
+            && input.snowfall_kg_m2_s.is_finite()
+            && input.snowfall_kg_m2_s >= 0.0
+            && input.precipitation_temperature_k.is_finite()
+            && input.new_snow_bulk_density_kg_m3.is_finite()
+            && input.new_snow_bulk_density_kg_m3 > 0.0,
+        "lake new-snow inputs are invalid"
+    );
+
+    let mut rainfall = input.rainfall_kg_m2_s;
+    let mut snowfall = input.snowfall_kg_m2_s;
+    let snowfall_depth_rate = snowfall / input.new_snow_bulk_density_kg_m3;
+    snow.depth_m += snowfall_depth_rate * input.time_step_seconds;
+    snow.water_equivalent_kg_m2 += snowfall * input.time_step_seconds;
+    snow.interface_depth_m[snow_interface_slot(0)] = 0.0;
+    let mut new_node = false;
+
+    if snow.layer_count == 0 && snow.depth_m < 0.01 {
+        snow.age = 0.0;
+        exchange_precipitation_with_lake(
+            input.time_step_seconds,
+            input.precipitation_temperature_k,
+            input.new_snow_bulk_density_kg_m3,
+            &mut rainfall,
+            &mut snowfall,
+            snow,
+            lake,
+        );
+        if snow.depth_m >= 0.01 {
+            new_lake_snow_node(snow, lake.temperature_k[0]);
+            new_node = true;
+        }
+        if input.use_dynamic_lake && snow.layer_count == 0 {
+            let liquid_depth = lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
+                + rainfall * input.time_step_seconds * 1.0e-3;
+            let ice_depth = lake.thickness_m[0] * lake.ice_fraction[0];
+            lake.thickness_m[0] = liquid_depth + ice_depth;
+            lake.ice_fraction[0] = ice_depth / lake.thickness_m[0];
+            adjust_lake_layers(lake)?;
+        }
+    } else if snow.layer_count == 0 {
+        new_lake_snow_node(snow, FREEZING_K.min(input.precipitation_temperature_k));
+        new_node = true;
+    }
+
+    if snow.layer_count < 0 && !new_node {
+        let top_layer = snow.layer_count + 1;
+        let top = snow_layer_slot(top_layer);
+        let old_heat_capacity = snow.ice_water_kg_m2[top] * ICE_HEAT_CAPACITY_J_KG_K
+            + snow.liquid_water_kg_m2[top] * LIQUID_HEAT_CAPACITY_J_KG_K;
+        let precipitation_heat_capacity = input.time_step_seconds
+            * (rainfall * LIQUID_HEAT_CAPACITY_J_KG_K + snowfall * ICE_HEAT_CAPACITY_J_KG_K);
+        ensure!(
+            old_heat_capacity + precipitation_heat_capacity > 0.0,
+            "lake snow top layer has no heat capacity"
+        );
+        snow.temperature_k[top] = ((old_heat_capacity * snow.temperature_k[top])
+            + precipitation_heat_capacity * input.precipitation_temperature_k)
+            / (old_heat_capacity + precipitation_heat_capacity);
+        snow.temperature_k[top] = snow.temperature_k[top].min(FREEZING_K);
+        snow.ice_water_kg_m2[top] += input.time_step_seconds * snowfall;
+        snow.thickness_m[top] += snowfall_depth_rate * input.time_step_seconds;
+        snow.node_depth_m[top] =
+            snow.interface_depth_m[snow_interface_slot(top_layer)] - 0.5 * snow.thickness_m[top];
+        snow.interface_depth_m[snow_interface_slot(top_layer - 1)] =
+            snow.interface_depth_m[snow_interface_slot(top_layer)] - snow.thickness_m[top];
+    }
+
+    Ok(LakeNewSnowOutcome {
+        rainfall_kg_m2_s: rainfall,
+        snowfall_kg_m2_s: snowfall,
+    })
+}
+
+fn new_lake_snow_node(snow: &mut RuntimeSnowColumn, temperature_k: f64) {
+    snow.layer_count = -1;
+    let top = snow_layer_slot(0);
+    snow.thickness_m[top] = snow.depth_m;
+    snow.node_depth_m[top] = -0.5 * snow.thickness_m[top];
+    snow.interface_depth_m[snow_interface_slot(-1)] = -snow.thickness_m[top];
+    snow.age = 0.0;
+    snow.temperature_k[top] = temperature_k;
+    snow.ice_water_kg_m2[top] = snow.water_equivalent_kg_m2;
+    snow.liquid_water_kg_m2[top] = 0.0;
+    snow.previous_ice_fraction[top] = 1.0;
+}
+
+fn exchange_precipitation_with_lake(
+    time_step_seconds: f64,
+    precipitation_temperature_k: f64,
+    new_snow_bulk_density_kg_m3: f64,
+    rainfall: &mut f64,
+    snowfall: &mut f64,
+    snow: &mut RuntimeSnowColumn,
+    lake: &mut LakeColumn,
+) {
+    let a = LIQUID_HEAT_CAPACITY_J_KG_K
+        * *rainfall
+        * time_step_seconds
+        * (precipitation_temperature_k - FREEZING_K);
+    let b = *rainfall * time_step_seconds * FUSION_HEAT_J_KG;
+    let c = ICE_HEAT_CAPACITY_J_KG_K
+        * 1000.0
+        * lake.thickness_m[0]
+        * lake.ice_fraction[0]
+        * (FREEZING_K - lake.temperature_k[0]);
+    let d = 1000.0 * lake.thickness_m[0] * lake.ice_fraction[0] * FUSION_HEAT_J_KG;
+    let e = ICE_HEAT_CAPACITY_J_KG_K
+        * *snowfall
+        * time_step_seconds
+        * (FREEZING_K - precipitation_temperature_k);
+    let f = *snowfall * time_step_seconds * FUSION_HEAT_J_KG;
+    let g = LIQUID_HEAT_CAPACITY_J_KG_K
+        * 1000.0
+        * lake.thickness_m[0]
+        * (1.0 - lake.ice_fraction[0])
+        * (lake.temperature_k[0] - FREEZING_K);
+    let h = 1000.0 * lake.thickness_m[0] * (1.0 - lake.ice_fraction[0]) * FUSION_HEAT_J_KG;
+
+    if lake.ice_fraction[0] > 0.999 {
+        if a + b <= c {
+            let precipitation_temperature = FREEZING_K.min(precipitation_temperature_k);
+            lake.temperature_k[0] = (a
+                + b
+                + ICE_HEAT_CAPACITY_J_KG_K
+                    * (*rainfall + *snowfall)
+                    * time_step_seconds
+                    * precipitation_temperature
+                + ICE_HEAT_CAPACITY_J_KG_K
+                    * 1000.0
+                    * lake.thickness_m[0]
+                    * lake.temperature_k[0]
+                    * lake.ice_fraction[0])
+                / (ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * lake.ice_fraction[0]
+                    + ICE_HEAT_CAPACITY_J_KG_K * (*rainfall + *snowfall) * time_step_seconds);
+            snow.water_equivalent_kg_m2 += *rainfall * time_step_seconds;
+            snow.depth_m += *rainfall * time_step_seconds / new_snow_bulk_density_kg_m3;
+            *snowfall += *rainfall;
+            *rainfall = 0.0;
+        } else if a <= c {
+            lake.temperature_k[0] = FREEZING_K;
+            let frozen_rain = (c - a) / FUSION_HEAT_J_KG;
+            snow.water_equivalent_kg_m2 += frozen_rain;
+            snow.depth_m += frozen_rain / new_snow_bulk_density_kg_m3;
+            *snowfall += (*rainfall).min(frozen_rain / time_step_seconds);
+            *rainfall = 0.0_f64.max(*rainfall - frozen_rain / time_step_seconds);
+        } else if a <= c + d {
+            lake.temperature_k[0] = FREEZING_K;
+            let ice_mass = 1000.0 * lake.thickness_m[0] - (a - c) / FUSION_HEAT_J_KG;
+            lake.ice_fraction[0] = ice_mass / (ice_mass + (a - c) / FUSION_HEAT_J_KG);
+        } else {
+            lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
+                * *rainfall
+                * time_step_seconds
+                * precipitation_temperature_k
+                + LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
+                - c
+                - d)
+                / (LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]
+                    + LIQUID_HEAT_CAPACITY_J_KG_K * *rainfall * time_step_seconds);
+            lake.ice_fraction[0] = 0.0;
+        }
+    } else if lake.ice_fraction[0] >= 0.001 {
+        if *rainfall > 0.0 && *snowfall > 0.0 {
+            lake.temperature_k[0] = FREEZING_K;
+        } else if *rainfall > 0.0 {
+            if a >= d {
+                lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
+                    * *rainfall
+                    * time_step_seconds
+                    * precipitation_temperature_k
+                    + LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
+                    - d)
+                    / (LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]
+                        + LIQUID_HEAT_CAPACITY_J_KG_K * *rainfall * time_step_seconds);
+                lake.ice_fraction[0] = 0.0;
+            } else {
+                lake.temperature_k[0] = FREEZING_K;
+                let ice_mass =
+                    1000.0 * lake.thickness_m[0] * lake.ice_fraction[0] - a / FUSION_HEAT_J_KG;
+                let liquid_mass = 1000.0 * lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
+                    + a / FUSION_HEAT_J_KG;
+                lake.ice_fraction[0] = ice_mass / (ice_mass + liquid_mass);
+            }
+        } else if *snowfall > 0.0 {
+            if e >= h {
+                lake.temperature_k[0] = (h
+                    + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
+                    + ICE_HEAT_CAPACITY_J_KG_K
+                        * *snowfall
+                        * time_step_seconds
+                        * precipitation_temperature_k)
+                    / (ICE_HEAT_CAPACITY_J_KG_K * *snowfall * time_step_seconds
+                        + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]);
+                lake.ice_fraction[0] = 1.0;
+            } else {
+                lake.temperature_k[0] = FREEZING_K;
+                let ice_mass =
+                    1000.0 * lake.thickness_m[0] * lake.ice_fraction[0] + e / FUSION_HEAT_J_KG;
+                let liquid_mass = 1000.0 * lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
+                    - e / FUSION_HEAT_J_KG;
+                lake.ice_fraction[0] = ice_mass / (ice_mass + liquid_mass);
+            }
+        }
+    } else if e + f <= g {
+        let precipitation_temperature = FREEZING_K.max(precipitation_temperature_k);
+        lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
+            * 1000.0
+            * lake.thickness_m[0]
+            * lake.temperature_k[0]
+            * (1.0 - lake.ice_fraction[0])
+            + LIQUID_HEAT_CAPACITY_J_KG_K
+                * (*rainfall + *snowfall)
+                * time_step_seconds
+                * precipitation_temperature
+            - e
+            - f)
+            / (LIQUID_HEAT_CAPACITY_J_KG_K * (*rainfall + *snowfall) * time_step_seconds
+                + LIQUID_HEAT_CAPACITY_J_KG_K
+                    * 1000.0
+                    * lake.thickness_m[0]
+                    * (1.0 - lake.ice_fraction[0]));
+        snow.water_equivalent_kg_m2 -= *snowfall * time_step_seconds;
+        snow.depth_m -= *snowfall * time_step_seconds / new_snow_bulk_density_kg_m3;
+        *rainfall += *snowfall;
+        *snowfall = 0.0;
+    } else if e <= g {
+        lake.temperature_k[0] = FREEZING_K;
+        let melted_snow = (g - e) / FUSION_HEAT_J_KG;
+        snow.water_equivalent_kg_m2 -= melted_snow;
+        snow.depth_m -= melted_snow / new_snow_bulk_density_kg_m3;
+        *rainfall += (*snowfall).min(melted_snow / time_step_seconds);
+        *snowfall = 0.0_f64.max(*snowfall - melted_snow / time_step_seconds);
+    } else if e <= g + h {
+        lake.temperature_k[0] = FREEZING_K;
+        let ice_mass = (e - g) / FUSION_HEAT_J_KG;
+        lake.ice_fraction[0] = ice_mass / (ice_mass + 1000.0 * lake.thickness_m[0] - ice_mass);
+    } else {
+        lake.temperature_k[0] = (g
+            + h
+            + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
+            + ICE_HEAT_CAPACITY_J_KG_K
+                * *snowfall
+                * time_step_seconds
+                * precipitation_temperature_k)
+            / (ICE_HEAT_CAPACITY_J_KG_K * *snowfall * time_step_seconds
+                + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]);
+        lake.ice_fraction[0] = 1.0;
+    }
 }
 
 /// Ports `MOD_Lake:roughness_lake`.

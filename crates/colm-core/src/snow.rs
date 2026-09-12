@@ -693,6 +693,10 @@ fn validate(input: NewSnowInput, state: &RuntimeSnowColumn) -> Result<()> {
             && input.precipitation_temperature_k.is_finite(),
         "new-snow inputs are invalid"
     );
+    validate_runtime_snow_column(state)
+}
+
+pub(crate) fn validate_runtime_snow_column(state: &RuntimeSnowColumn) -> Result<()> {
     ensure!(
         (-5..=0).contains(&state.layer_count)
             && state.interface_depth_m.len() == MAX_SNOW_LAYERS + 1
@@ -714,14 +718,22 @@ fn validate(input: NewSnowInput, state: &RuntimeSnowColumn) -> Result<()> {
     Ok(())
 }
 
-fn layer_slot(index: i32) -> usize {
+pub(crate) fn snow_layer_slot(index: i32) -> usize {
     debug_assert!((-4..=0).contains(&index));
     (index + MAX_SNOW_LAYERS as i32 - 1) as usize
 }
 
-fn interface_slot(index: i32) -> usize {
+pub(crate) fn snow_interface_slot(index: i32) -> usize {
     debug_assert!((-5..=0).contains(&index));
     (index + MAX_SNOW_LAYERS as i32) as usize
+}
+
+fn layer_slot(index: i32) -> usize {
+    snow_layer_slot(index)
+}
+
+fn interface_slot(index: i32) -> usize {
+    snow_interface_slot(index)
 }
 
 #[cfg(test)]
