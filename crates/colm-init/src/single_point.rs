@@ -104,7 +104,8 @@ pub struct SinglePointTimeRestartFiles {
 ///
 /// BGC, urban, and CROP paths use additional restart families and are rejected
 /// during resolution until their native orchestration is complete. Soil, snow, and
-/// water-table state files are part of both supported restart families.
+/// water-table state files are part of both supported restart families. LULCC uses
+/// the simulation start year for the initial restart, as in upstream `CoLMINI`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointColdStartRun {
     /// Source used to resolve PFT-specific expert parameter overrides at write time.
@@ -197,7 +198,7 @@ pub fn single_point_cold_start_run_from_namelist(
     block_override: Option<&str>,
 ) -> Result<SinglePointColdStartRun> {
     let namelist = namelist.as_ref();
-    let static_run =
+    let mut static_run =
         single_point_static_run_from_namelist(namelist, land_cover_override, block_override)?;
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
@@ -210,6 +211,9 @@ pub fn single_point_cold_start_run_from_namelist(
     let day = optional_i32(&document, "DEF_simulation_time%start_day")?.unwrap_or(1);
     let seconds = optional_i32(&document, "DEF_simulation_time%start_sec")?.unwrap_or(0);
     let julian_day = month_day_to_julian(year, month, day)?;
+    if optional_bool_or(&document, "DEF_USE_LULCC", false)? {
+        static_run.land_cover_year = year;
+    }
     ensure!(
         (0..=86_400).contains(&seconds),
         "DEF_simulation_time%start_sec must be in 0..=86400"
@@ -1439,12 +1443,7 @@ fn reject_unsupported_cold_start_features(
     document: &colm_namelist::Document,
     subgrid: SinglePointSubgrid,
 ) -> Result<()> {
-    for field in [
-        "DEF_USE_BGC",
-        "DEF_URBAN_RUN",
-        "DEF_USE_LULCC",
-        "DEF_USE_IRRIGATION",
-    ] {
+    for field in ["DEF_USE_BGC", "DEF_URBAN_RUN", "DEF_USE_IRRIGATION"] {
         ensure!(
             !optional_bool_or(document, field, false)?,
             "native cold single-point restart does not yet support {field} = .true."

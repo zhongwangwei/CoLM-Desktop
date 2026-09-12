@@ -140,6 +140,34 @@ fn cold_namelist_accepts_snicar_and_keeps_existing_state_sources() {
 }
 
 #[test]
+fn cold_namelist_uses_start_year_for_lulcc_restarts() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-lulcc-start-year-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let surface = directory.join("output/CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(&surface).unwrap();
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_values(&[10], ..)
+        .unwrap();
+    file.close().unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_LC_YEAR=2005\n DEF_USE_LULCC=.true.\n DEF_simulation_time%start_year=2008\n /\n",
+            directory.join("output").display(),
+        ),
+    )
+    .unwrap();
+
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(run.static_run.land_cover_year, 2008);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
 fn native_single_point_static_restart_matches_the_upstream_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
