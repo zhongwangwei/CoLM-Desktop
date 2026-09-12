@@ -171,6 +171,252 @@ pub struct VariableSaturatedWaterBalance {
     pub solvable: bool,
 }
 
+/// Source coordinate selected while perturbing one VSF soil level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableSaturatedLevelCoordinate {
+    WettingFront,
+    LiquidWater,
+    WaterTable,
+}
+
+/// Inputs to `MOD_Hydro_SoilWater:var_perturb_level`.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedLevelPerturbationInput {
+    pub balance_residual_mm: f64,
+    pub thickness_mm: f64,
+    pub center_depth_mm: f64,
+    pub lower_interface_depth_mm: f64,
+    pub porosity: f64,
+    pub residual_water: f64,
+    pub saturated_potential_mm: f64,
+    pub saturated_hydraulic_conductivity_mm_s: f64,
+    pub hydraulic_model: SoilHydraulicModel,
+    pub saturated: bool,
+    pub has_wetting_front: bool,
+    pub has_water_table: bool,
+    pub incoming_flux_mm_s: f64,
+    pub outgoing_flux_mm_s: f64,
+    pub wetting_front_flux_mm_s: f64,
+    pub water_table_flux_mm_s: f64,
+    pub wetting_front_mm: f64,
+    pub liquid_water: f64,
+    pub water_table_thickness_mm: f64,
+    pub pressure_head_mm: f64,
+    pub hydraulic_conductivity_mm_s: f64,
+    pub volume_tolerance: f64,
+}
+
+/// One source-compatible VSF finite-difference perturbation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedLevelPerturbation {
+    pub coordinate: VariableSaturatedLevelCoordinate,
+    pub wetting_front_mm: f64,
+    pub liquid_water: f64,
+    pub water_table_thickness_mm: f64,
+    pub pressure_head_mm: f64,
+    pub hydraulic_conductivity_mm_s: f64,
+    pub delta: f64,
+    pub active: bool,
+}
+
+/// Port of `MOD_Hydro_SoilWater:var_perturb_level`.
+pub fn perturb_variable_saturated_level(
+    input: VariableSaturatedLevelPerturbationInput,
+) -> Result<VariableSaturatedLevelPerturbation> {
+    validate_level_perturbation(input)?;
+    let mut coordinate = VariableSaturatedLevelCoordinate::LiquidWater;
+    let mut wetting_front_mm = input.wetting_front_mm;
+    let mut liquid_water = input.liquid_water;
+    let mut water_table_thickness_mm = input.water_table_thickness_mm;
+    let mut pressure_head_mm = input.pressure_head_mm;
+    let mut hydraulic_conductivity_mm_s = input.hydraulic_conductivity_mm_s;
+    let mut delta = 0.0;
+    if input.has_water_table {
+        if water_table_thickness_mm == input.thickness_mm
+            || (input.balance_residual_mm >= 0.0
+                && input.water_table_flux_mm_s < input.outgoing_flux_mm_s
+                && water_table_thickness_mm > 0.0
+                && liquid_water < input.porosity)
+        {
+            coordinate = VariableSaturatedLevelCoordinate::WaterTable;
+            delta = -0.1_f64.min(water_table_thickness_mm * 0.1);
+            if water_table_thickness_mm == input.thickness_mm {
+                pressure_head_mm = input.saturated_potential_mm
+                    - (1.0
+                        - input.incoming_flux_mm_s / input.saturated_hydraulic_conductivity_mm_s)
+                        * -delta
+                        * (input.lower_interface_depth_mm - input.center_depth_mm)
+                        / input.thickness_mm;
+                liquid_water = soil_vliq_from_psi(
+                    pressure_head_mm,
+                    input.porosity,
+                    input.residual_water,
+                    input.saturated_potential_mm,
+                    input.hydraulic_model,
+                );
+                hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+                    pressure_head_mm,
+                    input.saturated_potential_mm,
+                    input.saturated_hydraulic_conductivity_mm_s,
+                    input.hydraulic_model,
+                );
+            }
+            water_table_thickness_mm += delta;
+        } else if input.balance_residual_mm < 0.0
+            && input.water_table_flux_mm_s > input.outgoing_flux_mm_s
+            && liquid_water < input.porosity
+        {
+            coordinate = VariableSaturatedLevelCoordinate::WaterTable;
+            delta = 0.1_f64
+                .min((input.thickness_mm - wetting_front_mm - water_table_thickness_mm) * 0.1);
+            water_table_thickness_mm += delta;
+        }
+    }
+    if coordinate == VariableSaturatedLevelCoordinate::LiquidWater && input.has_wetting_front {
+        if wetting_front_mm == input.thickness_mm
+            || (input.balance_residual_mm >= 0.0
+                && input.incoming_flux_mm_s < input.wetting_front_flux_mm_s
+                && wetting_front_mm > 0.0
+                && liquid_water < input.porosity)
+        {
+            coordinate = VariableSaturatedLevelCoordinate::WettingFront;
+            delta = -0.1_f64.min(wetting_front_mm * 0.1);
+            if wetting_front_mm == input.thickness_mm {
+                pressure_head_mm = input.saturated_potential_mm
+                    + (1.0
+                        - input.outgoing_flux_mm_s / input.saturated_hydraulic_conductivity_mm_s)
+                        * -delta
+                        * (input.thickness_mm
+                            - (input.lower_interface_depth_mm - input.center_depth_mm))
+                        / input.thickness_mm;
+                liquid_water = soil_vliq_from_psi(
+                    pressure_head_mm,
+                    input.porosity,
+                    input.residual_water,
+                    input.saturated_potential_mm,
+                    input.hydraulic_model,
+                );
+                hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+                    pressure_head_mm,
+                    input.saturated_potential_mm,
+                    input.saturated_hydraulic_conductivity_mm_s,
+                    input.hydraulic_model,
+                );
+            }
+            wetting_front_mm += delta;
+        } else if input.balance_residual_mm < 0.0
+            && input.incoming_flux_mm_s > input.wetting_front_flux_mm_s
+            && liquid_water < input.porosity
+        {
+            coordinate = VariableSaturatedLevelCoordinate::WettingFront;
+            delta = 0.1_f64
+                .min((input.thickness_mm - wetting_front_mm - water_table_thickness_mm) * 0.1);
+            wetting_front_mm += delta;
+        }
+    }
+    if coordinate == VariableSaturatedLevelCoordinate::LiquidWater {
+        delta = if (input.balance_residual_mm > 0.0
+            && liquid_water > input.residual_water + input.volume_tolerance)
+            || liquid_water >= input.porosity
+        {
+            -1.0e-6_f64.min((liquid_water - input.residual_water - input.volume_tolerance) * 0.5)
+        } else if (input.balance_residual_mm <= 0.0 && liquid_water < input.porosity)
+            || liquid_water <= input.residual_water + input.volume_tolerance
+        {
+            1.0e-6_f64.min((input.porosity - liquid_water) * 0.5)
+        } else {
+            0.0
+        };
+        liquid_water += delta;
+    }
+    let active = delta != 0.0;
+    if active {
+        check_and_update_variable_saturated_level(
+            input.thickness_mm,
+            input.porosity,
+            input.residual_water,
+            input.saturated_potential_mm,
+            input.saturated_hydraulic_conductivity_mm_s,
+            input.hydraulic_model,
+            input.saturated,
+            input.has_wetting_front,
+            input.has_water_table,
+            &mut wetting_front_mm,
+            &mut liquid_water,
+            &mut water_table_thickness_mm,
+            &mut pressure_head_mm,
+            &mut hydraulic_conductivity_mm_s,
+            coordinate == VariableSaturatedLevelCoordinate::LiquidWater,
+            input.volume_tolerance,
+        );
+    }
+    Ok(VariableSaturatedLevelPerturbation {
+        coordinate,
+        wetting_front_mm,
+        liquid_water,
+        water_table_thickness_mm,
+        pressure_head_mm,
+        hydraulic_conductivity_mm_s,
+        delta,
+        active,
+    })
+}
+
+/// One source-compatible rainfall-boundary perturbation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VariableSaturatedRainfallPerturbation {
+    pub ponding_depth_mm: f64,
+    pub delta: f64,
+    pub active: bool,
+}
+
+/// Port of `MOD_Hydro_SoilWater:var_perturb_rainfall`.
+pub fn perturb_variable_saturated_rainfall(
+    surface_balance_residual_mm: f64,
+    ponding_depth_mm: f64,
+) -> VariableSaturatedRainfallPerturbation {
+    let delta = if surface_balance_residual_mm > 0.0 && ponding_depth_mm > 0.0 {
+        -0.1_f64.min(ponding_depth_mm * 0.5)
+    } else if surface_balance_residual_mm < 0.0 {
+        0.1
+    } else {
+        0.0
+    };
+    VariableSaturatedRainfallPerturbation {
+        ponding_depth_mm: ponding_depth_mm + delta,
+        delta,
+        active: delta != 0.0,
+    }
+}
+
+/// One source-compatible drainage-boundary perturbation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VariableSaturatedDrainagePerturbation {
+    pub water_table_depth_mm: f64,
+    pub delta: f64,
+    pub active: bool,
+}
+
+/// Port of `MOD_Hydro_SoilWater:var_perturb_drainage`.
+pub fn perturb_variable_saturated_drainage(
+    minimum_depth_mm: f64,
+    bottom_balance_residual_mm: f64,
+    water_table_depth_mm: f64,
+) -> VariableSaturatedDrainagePerturbation {
+    let delta = if bottom_balance_residual_mm > 0.0 {
+        0.1
+    } else if bottom_balance_residual_mm < 0.0 {
+        -0.1_f64.min(((water_table_depth_mm - minimum_depth_mm) * 0.5).max(0.0))
+    } else {
+        0.0
+    };
+    VariableSaturatedDrainagePerturbation {
+        water_table_depth_mm: water_table_depth_mm + delta,
+        delta,
+        active: delta != 0.0,
+    }
+}
+
 /// Port of `MOD_Hydro_SoilWater:water_balance`.
 pub fn variable_saturated_water_balance(
     input: VariableSaturatedWaterBalanceInput<'_>,
@@ -950,6 +1196,46 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
         );
     }
     Ok(layers)
+}
+
+fn validate_level_perturbation(input: VariableSaturatedLevelPerturbationInput) -> Result<()> {
+    ensure!(
+        [
+            input.balance_residual_mm,
+            input.thickness_mm,
+            input.center_depth_mm,
+            input.lower_interface_depth_mm,
+            input.porosity,
+            input.residual_water,
+            input.saturated_potential_mm,
+            input.saturated_hydraulic_conductivity_mm_s,
+            input.incoming_flux_mm_s,
+            input.outgoing_flux_mm_s,
+            input.wetting_front_flux_mm_s,
+            input.water_table_flux_mm_s,
+            input.wetting_front_mm,
+            input.liquid_water,
+            input.water_table_thickness_mm,
+            input.pressure_head_mm,
+            input.hydraulic_conductivity_mm_s,
+            input.volume_tolerance,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && input.thickness_mm > 0.0
+            && input.porosity > 0.0
+            && input.residual_water >= 0.0
+            && input.residual_water < input.porosity
+            && input.saturated_potential_mm < 0.0
+            && input.saturated_hydraulic_conductivity_mm_s > 0.0
+            && input.volume_tolerance > 0.0
+            && (0.0..=input.thickness_mm).contains(&input.wetting_front_mm)
+            && (0.0..=input.thickness_mm).contains(&input.water_table_thickness_mm)
+            && input.wetting_front_mm + input.water_table_thickness_mm <= input.thickness_mm
+            && (0.0..=input.porosity).contains(&input.liquid_water),
+        "VSF level-perturbation inputs are invalid"
+    );
+    Ok(())
 }
 
 fn validate_water_balance(input: VariableSaturatedWaterBalanceInput<'_>) -> Result<usize> {

@@ -39,6 +39,35 @@ fn input(exchange_mm: f64) -> VariableSaturatedAquiferInput<'static> {
     }
 }
 
+fn level_perturbation_input(
+    hydraulic_model: SoilHydraulicModel,
+) -> VariableSaturatedLevelPerturbationInput {
+    VariableSaturatedLevelPerturbationInput {
+        balance_residual_mm: 0.0,
+        thickness_mm: 100.0,
+        center_depth_mm: 50.0,
+        lower_interface_depth_mm: 100.0,
+        porosity: 0.45,
+        residual_water: 0.05,
+        saturated_potential_mm: -100.0,
+        saturated_hydraulic_conductivity_mm_s: 0.01,
+        hydraulic_model,
+        saturated: false,
+        has_wetting_front: true,
+        has_water_table: false,
+        incoming_flux_mm_s: 0.001,
+        outgoing_flux_mm_s: 0.002,
+        wetting_front_flux_mm_s: 0.003,
+        water_table_flux_mm_s: 0.0,
+        wetting_front_mm: 100.0,
+        liquid_water: 0.3,
+        water_table_thickness_mm: 0.0,
+        pressure_head_mm: -121.27275296649421,
+        hydraulic_conductivity_mm_s: 9.148482938690981e-5,
+        volume_tolerance: 1.0e-8,
+    }
+}
+
 #[test]
 fn water_table_depth_matches_current_fortran_aquifer_deficit() {
     let depth = water_table_from_aquifer(
@@ -223,6 +252,94 @@ fn vsf_water_balance_matches_current_fortran() {
     close(state.residual_mm[2], -0.54, 1.0e-14);
     close(state.residual_mm[3], -0.18, 1.0e-14);
     close(state.residual_mm[4], 6.821210263296962e-15, 1.0e-16);
+}
+
+#[test]
+fn vsf_perturbations_match_current_fortran() {
+    let model = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.02,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    let wetting_front = perturb_variable_saturated_level(level_perturbation_input(model)).unwrap();
+    assert_eq!(
+        wetting_front.coordinate,
+        VariableSaturatedLevelCoordinate::WettingFront
+    );
+    assert!(wetting_front.active);
+    close(wetting_front.wetting_front_mm, 99.9, 1.0e-14);
+    close(wetting_front.liquid_water, 0.45, 1.0e-14);
+    close(wetting_front.delta, -0.1, 1.0e-14);
+    close(wetting_front.pressure_head_mm, -99.96, 1.0e-14);
+    close(wetting_front.hydraulic_conductivity_mm_s, 0.01, 1.0e-14);
+
+    let water_table = perturb_variable_saturated_level(VariableSaturatedLevelPerturbationInput {
+        balance_residual_mm: -0.1,
+        has_wetting_front: false,
+        has_water_table: true,
+        wetting_front_flux_mm_s: 0.0,
+        water_table_flux_mm_s: 0.003,
+        wetting_front_mm: 10.0,
+        water_table_thickness_mm: 20.0,
+        ..level_perturbation_input(model)
+    })
+    .unwrap();
+    assert_eq!(
+        water_table.coordinate,
+        VariableSaturatedLevelCoordinate::WaterTable
+    );
+    assert!(water_table.active);
+    close(water_table.wetting_front_mm, 0.0, 1.0e-14);
+    close(water_table.liquid_water, 0.3, 1.0e-14);
+    close(water_table.water_table_thickness_mm, 20.1, 1.0e-14);
+    close(water_table.delta, 0.1, 1.0e-14);
+    close(water_table.pressure_head_mm, -121.27275296649421, 1.0e-14);
+    close(
+        water_table.hydraulic_conductivity_mm_s,
+        9.148482938690981e-5,
+        1.0e-18,
+    );
+
+    let liquid_water = perturb_variable_saturated_level(VariableSaturatedLevelPerturbationInput {
+        balance_residual_mm: -0.1,
+        has_wetting_front: false,
+        wetting_front_mm: 0.0,
+        ..level_perturbation_input(model)
+    })
+    .unwrap();
+    assert_eq!(
+        liquid_water.coordinate,
+        VariableSaturatedLevelCoordinate::LiquidWater
+    );
+    assert!(liquid_water.active);
+    close(liquid_water.liquid_water, 0.300001, 1.0e-14);
+    close(liquid_water.delta, 1.0e-6, 1.0e-18);
+    close(liquid_water.pressure_head_mm, -121.27152595076065, 1.0e-11);
+    close(
+        liquid_water.hydraulic_conductivity_mm_s,
+        9.148739167593242e-5,
+        1.0e-18,
+    );
+
+    let rainfall = perturb_variable_saturated_rainfall(0.1, 0.05);
+    close(rainfall.ponding_depth_mm, 0.025, 1.0e-14);
+    close(rainfall.delta, -0.025, 1.0e-14);
+    assert!(rainfall.active);
+    let rainfall = perturb_variable_saturated_rainfall(-0.1, 0.05);
+    close(rainfall.ponding_depth_mm, 0.15, 1.0e-14);
+    close(rainfall.delta, 0.1, 1.0e-14);
+    assert!(rainfall.active);
+
+    let drainage = perturb_variable_saturated_drainage(100.0, 0.1, 150.0);
+    close(drainage.water_table_depth_mm, 150.1, 1.0e-14);
+    close(drainage.delta, 0.1, 1.0e-14);
+    assert!(drainage.active);
+    let drainage = perturb_variable_saturated_drainage(100.0, -0.1, 150.0);
+    close(drainage.water_table_depth_mm, 149.9, 1.0e-14);
+    close(drainage.delta, -0.1, 1.0e-14);
+    assert!(drainage.active);
 }
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
