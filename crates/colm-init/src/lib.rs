@@ -26,7 +26,9 @@ pub mod time_restart;
 pub mod time_state {
     pub use colm_core::time_state::*;
 }
-pub mod urban;
+pub mod urban {
+    pub use colm_core::urban::*;
+}
 pub mod urban_restart;
 pub mod vegetation {
     pub use colm_core::vegetation::*;
@@ -40,6 +42,10 @@ pub use colm_core::{
     soil_psi_from_vliq, soil_vliq_from_psi, CanopyState, ColdStartRadiation, EquilibriumWaterState,
     LandCoverScheme, LeafOptics, PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput,
     SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
+};
+pub use colm_core::{
+    derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
+    UrbanLucyState, UrbanState,
 };
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
@@ -81,10 +87,6 @@ pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, interpolate_profile, ColdSoilState,
     PftSnowCover, SnowCover, SnowState, SoilHydraulicState,
-};
-pub use urban::{
-    derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
-    UrbanLucyState, UrbanState,
 };
 pub use urban_restart::{
     write_urban_constant_restart, write_urban_constant_restart_block, write_urban_time_restart,

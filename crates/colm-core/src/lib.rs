@@ -12,6 +12,7 @@ pub mod pc_radiation;
 pub mod radiation;
 pub mod static_state;
 pub mod time_state;
+pub mod urban;
 pub mod vegetation;
 
 /// CoLM's landdata/restart missing marker.
@@ -48,4 +49,8 @@ pub use time_state::{
     PftSnowCover, SnowCover, SnowState, SoilHydraulicState,
 };
 
+pub use urban::{
+    derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
+    UrbanLucyState, UrbanState,
+};
 pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};
