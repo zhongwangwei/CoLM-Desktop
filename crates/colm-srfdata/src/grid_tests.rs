@@ -32,6 +32,11 @@ fn the_grid_is_the_one_colm_defines() {
     assert_eq!(COLM_500M.nlat, 43200);
     assert!((COLM_500M.dlon() - 1.0 / 240.0).abs() < 1e-15);
     assert!((COLM_500M.dlat() - 1.0 / 240.0).abs() < 1e-15);
+    // share/MOD_Grid.F90 的 grid_define_by_ndims(43200, 21600)
+    assert_eq!(COLM_1KM.nlon, 43200);
+    assert_eq!(COLM_1KM.nlat, 21600);
+    assert!((COLM_1KM.dlon() - 1.0 / 120.0).abs() < 1e-15);
+    assert!((COLM_1KM.dlat() - 1.0 / 120.0).abs() < 1e-15);
 }
 
 #[test]

@@ -29,6 +29,15 @@ pub const COLM_500M: Grid = Grid {
     nlat: 43200,
 };
 
+/// `colm_1km`：`grid_define_by_ndims(43200, 21600)`。
+///
+/// USGS LCT retains this coarser raw lattice even though the common spatial
+/// pixel coordinate system also contains 500 m cells.
+pub const COLM_1KM: Grid = Grid {
+    nlon: 43200,
+    nlat: 21600,
+};
+
 /// `colm_5km`：`grid_define_by_ndims(8640, 4320)`。
 ///
 /// 只有 `urban/LUCY_regionid.nc` 用它（`MOD_SingleSrfdata.F90:1861`）。

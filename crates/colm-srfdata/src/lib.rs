@@ -30,7 +30,7 @@ pub use albedo::{albedo, SoilAlbedo};
 pub use derive::{
     depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
 };
-pub use grid::{Grid, COLM_500M};
+pub use grid::{Grid, COLM_1KM, COLM_500M};
 pub use pft::{
     aggregate_pft_fractions, aggregate_pft_index, PftFractionInput, PftIndexInput, PftIndexState,
     PftPatchKind,
