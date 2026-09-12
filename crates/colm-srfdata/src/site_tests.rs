@@ -1297,3 +1297,68 @@ fn native_single_point_materialization_preserves_a_complete_upstream_surface_byt
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+#[ignore = "requires the locally built upstream mkinidata executable and CN-Cng reference case"]
+fn native_single_point_surface_is_accepted_by_upstream_mkinidata() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let source = root.join("oracle/work/generated/out/CN-Cng/landdata/srfdata.nc");
+    let upstream = root.join("kernels/default/mkinidata.x");
+    let template = root.join("oracle/work/generated/case.nml");
+    assert!(source.is_file(), "missing {}", source.display());
+    assert!(upstream.is_file(), "missing {}", upstream.display());
+
+    let directory = std::env::temp_dir().join(format!(
+        "colm-srfdata-mkini-integration-{}",
+        std::process::id()
+    ));
+    let output_root = directory.join("out");
+    let landdata = output_root.join("CN-Cng/landdata");
+    std::fs::create_dir_all(&landdata).unwrap();
+    let original_output = format!("{}/oracle/work/generated/out/", root.display());
+    let nml = std::fs::read_to_string(&template).unwrap().replace(
+        &format!("DEF_dir_output = '{original_output}'"),
+        &format!("DEF_dir_output = '{}/'", output_root.display()),
+    );
+    assert!(
+        !nml.contains(&original_output),
+        "test case did not redirect DEF_dir_output"
+    );
+    let case = directory.join("case.nml");
+    std::fs::write(&case, nml).unwrap();
+
+    super::materialize_single_point_surface(
+        &source,
+        &landdata,
+        super::SiteMode::Igbp,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let result = std::process::Command::new(&upstream)
+        .arg(&case)
+        .current_dir(&directory)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "mkinidata failed:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let restart = output_root.join("CN-Cng/restart");
+    assert!(restart
+        .join("const/CN-Cng_restart_const_lc2005.nc")
+        .is_file());
+    assert!(restart
+        .join("const/CN-Cng_restart_const_lc2005_w180_s90.nc")
+        .is_file());
+    assert!(restart
+        .join("2008-001-00000/CN-Cng_restart_2008-001-00000_lc2005_w180_s90.nc")
+        .is_file());
+    std::fs::remove_dir_all(directory).unwrap();
+}
