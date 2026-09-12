@@ -32,6 +32,31 @@ fn lake_depth_matches_fortrans_decimeter_scale_median_and_missing_marker() {
 }
 
 #[test]
+fn lake_soil_carbon_masks_missing_values_and_keeps_non_lake_patches_zero() {
+    let layout = patches(vec![17, 1], vec![0, 3, 5], vec![0, 1, 2, 3, 4]);
+    let carbon = layout
+        .aggregate_lake_soil_carbon(
+            &[
+                1.0,
+                -1.0,
+                5.0,
+                10.0,
+                SURFACE_MISSING,
+                30.0,
+                40.0,
+                50.0,
+                60.0,
+                70.0,
+            ],
+            2,
+            &[1.0, 3.0, 2.0, 1.0, 1.0],
+            17,
+        )
+        .unwrap();
+    assert_eq!(carbon, [11.0 / 3.0, 0.0, 250.0 / 6.0, 0.0]);
+}
+
+#[test]
 fn bedrock_is_area_weighted_and_wmo_patches_reuse_the_prior_value() {
     let layout = FlatPatches::new(
         vec![1, 1],

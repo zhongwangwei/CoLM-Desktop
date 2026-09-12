@@ -152,6 +152,58 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Port of `Aggregation_LakeSoilC`.
+    ///
+    /// `raw_soil_carbon_g_m3` and the returned vector are layer-major.  Only
+    /// waterbody patches are aggregated; invalid/missing raw values are
+    /// excluded with their area, as in the reference implementation.
+    pub fn aggregate_lake_soil_carbon(
+        &self,
+        raw_soil_carbon_g_m3: &[f64],
+        layers: usize,
+        landarea: &[f64],
+        waterbody_type: i32,
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            layers > 0 && raw_soil_carbon_g_m3.len() == layers * landarea.len(),
+            "lake soil carbon must be layers x raw cell count"
+        );
+        let mut result = vec![0.0; layers * self.len()];
+        for patch in 0..self.len() {
+            if self.patch_types[patch] != waterbody_type {
+                continue;
+            }
+            for layer in 0..layers {
+                let mut valid_area = 0.0;
+                let mut carbon_sum = 0.0;
+                for &cell in &self.cells[self.cells_for(patch)] {
+                    let area = value(landarea, cell, "landarea", patch)?;
+                    let carbon = raw_soil_carbon_g_m3
+                        .get(layer * landarea.len() + cell)
+                        .copied()
+                        .with_context(|| {
+                            format!(
+                                "lake soil-carbon patch {patch} references layer {layer}, raw cell {cell}"
+                            )
+                        })?;
+                    if area > 0.0
+                        && area.is_finite()
+                        && carbon.is_finite()
+                        && carbon >= 0.0
+                        && carbon.abs() < 0.5 * SURFACE_MISSING.abs()
+                    {
+                        valid_area += area;
+                        carbon_sum += carbon * area;
+                    }
+                }
+                if valid_area > f64::MIN_POSITIVE {
+                    result[layer * self.len() + patch] = carbon_sum / valid_area;
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Port of `Aggregation_DBedrock`.
     ///
     /// The raw field has no fill-value masking in the Fortran routine, so this
