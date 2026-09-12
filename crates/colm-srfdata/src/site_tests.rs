@@ -1272,6 +1272,81 @@ fn landtype_readers_reject_non_integer_or_out_of_range_values() {
 }
 
 #[test]
+fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-case-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("site.nc");
+    super::skeleton(&source, 123.0, 45.0, Some(10)).unwrap();
+    let output = directory.join("output");
+    let rawdata = directory.join("rawdata");
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_dir_rawdata = '{}'\n /\n",
+            source.display(),
+            output.display(),
+            rawdata.display(),
+        ),
+    )
+    .unwrap();
+
+    let run = super::single_point_surface_run_from_namelist(&namelist, None, false).unwrap();
+    assert_eq!(run.source, source);
+    assert_eq!(run.landdata_dir, output.join("native-case/landdata"));
+    assert_eq!(run.rawdata, Some(rawdata));
+    assert_eq!(run.mode, super::SiteMode::Igbp);
+    assert!(!run.crop_enabled);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn case_namelist_rejects_ambiguous_lct_classifications_without_an_override() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-lct-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("site.nc");
+    super::skeleton(&source, 123.0, 45.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&source).unwrap();
+        file.add_variable::<i32>("USGS_classification", &[])
+            .unwrap()
+            .put_value(10, ())
+            .unwrap();
+    }
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n /\n",
+            source.display(),
+            directory.join("output").display(),
+        ),
+    )
+    .unwrap();
+
+    let error = super::single_point_surface_run_from_namelist(&namelist, None, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("both IGBP_classification and USGS_classification"));
+    assert_eq!(
+        super::single_point_surface_run_from_namelist(
+            &namelist,
+            Some(super::SiteMode::Usgs),
+            false
+        )
+        .unwrap()
+        .mode,
+        super::SiteMode::Usgs
+    );
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point surface artifact"]
 fn native_single_point_materialization_preserves_a_complete_upstream_surface_byte_for_byte() {
     let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

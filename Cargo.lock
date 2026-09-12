@@ -139,6 +139,7 @@ name = "colm-srfdata"
 version = "0.2.0-beta.4"
 dependencies = [
  "anyhow",
+ "colm-namelist",
  "netcdf",
 ]
 

@@ -6,10 +6,11 @@
 //!
 //! 每个补进去的变量都带一个 `source` 属性，写明它是量出来的还是假设的。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
+use colm_namelist::{parse, Value};
 
 use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
@@ -110,6 +111,149 @@ impl SiteMode {
             Self::Pc => "pc",
             Self::Urban => "urban",
         }
+    }
+}
+
+/// The single-point surface-data inputs resolved from a CoLM case namelist.
+///
+/// `read_namelist` derives `DEF_dir_landdata` from `DEF_dir_output` and
+/// `DEF_CASE_NAME`; this records the same derivation so the native executable
+/// publishes `srfdata.nc` where both upstream and Rust `mkinidata` expect it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinglePointSurfaceRun {
+    pub source: PathBuf,
+    pub landdata_dir: PathBuf,
+    pub rawdata: Option<PathBuf>,
+    pub mode: SiteMode,
+    pub crop_enabled: bool,
+}
+
+/// Resolve the native single-point `mksrfdata` contract from `case.nml`.
+///
+/// Upstream fixes the IGBP/USGS table at kernel build time, so a site carrying
+/// both classifications is deliberately rejected unless the caller supplies
+/// the corresponding explicit override.  PFT/PC and urban modes are runtime
+/// namelist choices and take precedence over the LCT classification.
+pub fn single_point_surface_run_from_namelist(
+    namelist: impl AsRef<Path>,
+    lct_mode_override: Option<SiteMode>,
+    crop_enabled: bool,
+) -> Result<SinglePointSurfaceRun> {
+    let namelist = namelist.as_ref();
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let case_name = required_namelist_string(&document, "DEF_CASE_NAME")?;
+    let output = PathBuf::from(required_namelist_string(&document, "DEF_dir_output")?);
+    let source = PathBuf::from(required_namelist_string(&document, "SITE_fsitedata")?);
+    let urban = namelist_bool(&document, "DEF_URBAN_RUN", false)?;
+    let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
+    let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
+    let pc = namelist_bool(&document, "DEF_USE_PC", false)?;
+    if [lct, pft, pc]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+        != 1
+    {
+        bail!("exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true");
+    }
+    if crop_enabled && !matches!((pft, pc), (true, false) | (false, true)) {
+        bail!("CROP surface data requires DEF_USE_PFT or DEF_USE_PC");
+    }
+    let mode = if urban {
+        if crop_enabled {
+            bail!("CROP surface data is incompatible with DEF_URBAN_RUN");
+        }
+        SiteMode::Urban
+    } else if pft {
+        SiteMode::Pft
+    } else if pc {
+        SiteMode::Pc
+    } else {
+        let requested = match lct_mode_override {
+            Some(mode) => mode,
+            None => detect_lct_mode(&source)?,
+        };
+        if !matches!(requested, SiteMode::Igbp | SiteMode::Usgs) {
+            bail!("LCT land-cover override must be igbp or usgs");
+        }
+        requested
+    };
+    let rawdata = document
+        .get("DEF_dir_rawdata")
+        .and_then(namelist_string)
+        .filter(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("null"))
+        .map(PathBuf::from);
+    Ok(SinglePointSurfaceRun {
+        source,
+        landdata_dir: output.join(case_name).join("landdata"),
+        rawdata,
+        mode,
+        crop_enabled,
+    })
+}
+
+/// Resolve and materialize the native single-point surface artifact for a case.
+pub fn materialize_single_point_surface_from_namelist(
+    namelist: impl AsRef<Path>,
+    lct_mode_override: Option<SiteMode>,
+    crop_enabled: bool,
+    observation: Option<&Path>,
+) -> Result<(SinglePointSurfaceRun, Option<Report>)> {
+    let run = single_point_surface_run_from_namelist(namelist, lct_mode_override, crop_enabled)?;
+    let report = materialize_single_point_surface(
+        &run.source,
+        &run.landdata_dir,
+        run.mode,
+        run.rawdata.as_deref(),
+        observation,
+        run.crop_enabled,
+    )?;
+    Ok((run, report))
+}
+
+fn detect_lct_mode(source: &Path) -> Result<SiteMode> {
+    let file = netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
+    match (
+        file.variable("IGBP_classification").is_some(),
+        file.variable("USGS_classification").is_some(),
+    ) {
+        (true, false) => Ok(SiteMode::Igbp),
+        (false, true) => Ok(SiteMode::Usgs),
+        (true, true) => bail!(
+            "{} has both IGBP_classification and USGS_classification; select --land-cover igbp or usgs",
+            source.display()
+        ),
+        (false, false) => bail!(
+            "{} has neither IGBP_classification nor USGS_classification; select --land-cover igbp or usgs only after providing the matching classification",
+            source.display()
+        ),
+    }
+}
+
+fn required_namelist_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
+    document
+        .get(field)
+        .and_then(namelist_string)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .with_context(|| format!("case namelist is missing required field {field}"))
+}
+
+fn namelist_string(value: &Value) -> Option<&str> {
+    match value {
+        Value::Str(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn namelist_bool(document: &colm_namelist::Document, field: &str, default: bool) -> Result<bool> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => bail!("{field} must be a logical value"),
     }
 }
 
