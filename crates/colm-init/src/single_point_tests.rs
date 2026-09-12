@@ -236,7 +236,9 @@ fn native_single_point_cold_time_restart_matches_the_upstream_reference() {
     )
     .unwrap();
 
-    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    let run =
+        single_point_cold_start_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+            .unwrap();
     let actual_path = write_single_point_cold_time_restart(&run).unwrap().block;
     let expected = netcdf::open(reference).unwrap();
     let actual = netcdf::open(actual_path).unwrap();

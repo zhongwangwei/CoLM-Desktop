@@ -105,10 +105,10 @@ fn saturation_clamps_temperature_like_qsadv_and_refuses_invalid_inputs() {
 fn orbital_cosine_zenith_matches_current_fortran() {
     close(
         orbital_cosine_zenith(80.5, 2.1, 0.7),
-        -0.386_136_870_810_570_13,
+        -0.386_127_578_225_333_95,
     );
     close(
         orbital_cosine_zenith(172.25, -1.2, -0.4),
-        -0.942_519_597_005_832_8,
+        -0.942_528_819_370_802_5,
     );
 }

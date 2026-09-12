@@ -359,35 +359,34 @@ pub fn partition_precipitation(input: PrecipitationInput) -> Result<Precipitatio
 
 /// Port of MOD_OrbCoszen.F90:orb_coszen.
 ///
-/// Source evaluates its literal pi through default REAL before assigning it to r8.
+/// Desktop kernels compile the upstream source with `-fdefault-real-8`, so its
+/// unsuffixed literals have the same `f64` precision as the r8 arguments.
 #[allow(clippy::excessive_precision)]
 pub fn orbital_cosine_zenith(
     calendar_day: f64,
     longitude_radians: f64,
     latitude_radians: f64,
 ) -> f64 {
-    let pi = f64::from(f77(4.0) as f32 * (f77(1.0) as f32).atan());
-    let eccentricity = f77(1.672393084e-2);
-    let mean_longitude =
-        f77(-3.2625366e-2) + (calendar_day - f77(80.5)) * f77(2.0) * pi / f77(365.0);
-    let mean_anomaly = mean_longitude - f77(4.92251015);
+    let pi = 4.0 * 1.0_f64.atan();
+    let eccentricity = 1.672393084e-2;
+    let mean_longitude = -3.2625366e-2 + (calendar_day - 80.5) * 2.0 * pi / 365.0;
+    let mean_anomaly = mean_longitude - 4.92251015;
     let sine = mean_anomaly.sin();
     let lambda = mean_longitude
         + eccentricity
-            * (f77(2.0) * sine
+            * (2.0 * sine
                 + eccentricity
-                    * (f77(1.25) * (f77(2.0) * mean_anomaly).sin()
+                    * (1.25 * (2.0 * mean_anomaly).sin()
                         + eccentricity
-                            * ((f77(13.0) / f77(12.0)) * (f77(3.0) * mean_anomaly).sin()
-                                - f77(0.25) * sine)));
-    let inverse_distance = (f77(1.0) + eccentricity * (lambda - f77(4.92251015)).cos())
-        / (f77(1.0) - eccentricity.powi(2));
-    let declination = (f77(0.409214646).sin() * lambda.sin()).asin();
+                            * ((13.0 / 12.0) * (3.0 * mean_anomaly).sin() - 0.25 * sine)));
+    let inverse_distance =
+        (1.0 + eccentricity * (lambda - 4.92251015).cos()) / (1.0 - eccentricity.powi(2));
+    let declination = (0.409214646_f64.sin() * lambda.sin()).asin();
     let _earth_sun_distance_factor = inverse_distance.powi(2);
     latitude_radians.sin() * declination.sin()
         - latitude_radians.cos()
             * declination.cos()
-            * (calendar_day * f77(2.0) * pi + longitude_radians).cos()
+            * (calendar_day * 2.0 * pi + longitude_radians).cos()
 }
 
 fn polynomial(x: f64, coefficients: [f64; 9]) -> f64 {
