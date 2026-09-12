@@ -20,6 +20,7 @@ pub mod civil;
 pub mod convert;
 pub mod gapfill;
 pub mod met;
+pub mod point;
 pub mod render;
 pub mod slots;
 pub mod tabular;
@@ -35,6 +36,7 @@ pub use gapfill::{
     QC_ERA5_CORRECTED, QC_INTERPOLATED, QC_OBSERVED, QC_UNRESOLVED,
 };
 pub use met::summarize;
+pub use point::{load_point_forcing, PointForcingFrame, PointForcingSeries};
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};
 pub use tabular::{
