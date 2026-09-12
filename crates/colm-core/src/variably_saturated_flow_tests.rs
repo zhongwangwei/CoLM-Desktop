@@ -82,6 +82,58 @@ fn aquifer_exchange_matches_current_fortran_for_drainage_and_recharge() {
     assert_eq!(recharge.water_table_interface_count, 2);
 }
 
+#[test]
+fn explicit_vsf_fallback_matches_current_fortran() {
+    let model = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.02,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    let state = apply_variable_saturated_explicit_step(VariableSaturatedExplicitInput {
+        time_step_seconds: 1800.0,
+        interface_depth_mm: &[0.0, 100.0, 400.0, 1000.0],
+        porosity: &[0.45, 0.45, 0.45],
+        residual_water: &[0.05, 0.05, 0.05],
+        saturated_potential_mm: &[-100.0, -100.0, -100.0],
+        hydraulic_model: &[model; 3],
+        aquifer_porosity: 0.45,
+        upper_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.001,
+        },
+        lower_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Drainage,
+            value: 0.0,
+        },
+        interface_flux_mm_s: &[0.001, 0.0005, 0.0002, 0.0001],
+        wetting_front_mm: &[0.0, 0.0, 0.0],
+        liquid_water: &[0.25, 0.3, 0.35],
+        water_table_thickness_mm: &[0.0, 0.0, 0.0],
+        ponding_depth_mm: 5.0,
+        aquifer_water_mm: -100.0,
+        water_table_depth_mm: 1200.0,
+        previous_wetting_front_mm: &[0.0, 0.0, 0.0],
+        previous_liquid_water: &[0.25, 0.3, 0.35],
+        previous_water_table_thickness_mm: &[0.0, 0.0, 0.0],
+        previous_ponding_depth_mm: 5.0,
+        previous_aquifer_water_mm: -100.0,
+        depth_tolerance_mm: 1.0e-8,
+        volume_tolerance: 1.0e-8,
+    })
+    .unwrap();
+    assert_eq!(state.interface_flux_mm_s, [0.001, 0.0005, 0.0002, 0.0001]);
+    assert_eq!(state.wetting_front_mm, [0.0, 0.0, 0.0]);
+    assert_eq!(state.water_table_thickness_mm, [0.0, 0.0, 0.0]);
+    close(state.liquid_water[0], 0.259, 1.0e-14);
+    close(state.liquid_water[1], 0.3018, 1.0e-14);
+    close(state.liquid_water[2], 0.3503, 1.0e-14);
+    close(state.ponding_depth_mm, 5.0, 1.0e-14);
+    close(state.aquifer_water_mm, -99.82, 1.0e-13);
+    close(state.water_table_depth_mm, 1424.7706282276365, 1.0e-9);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,

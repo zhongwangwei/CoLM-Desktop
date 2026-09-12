@@ -157,8 +157,10 @@ pub use urban::{
     UrbanLucyState, UrbanState,
 };
 pub use variably_saturated_flow::{
-    exchange_soil_water_with_aquifer, water_table_from_aquifer, VariableSaturatedAquiferInput,
-    VariableSaturatedAquiferState,
+    apply_variable_saturated_explicit_step, exchange_soil_water_with_aquifer,
+    water_table_from_aquifer, VariableSaturatedAquiferInput, VariableSaturatedAquiferState,
+    VariableSaturatedBoundary, VariableSaturatedBoundaryKind, VariableSaturatedExplicitInput,
+    VariableSaturatedExplicitState,
 };
 pub use vegetation::{
     derive_igbp_canopy, derive_usgs_canopy, empirical_lai, CanopyState, EmpiricalLandCover,
