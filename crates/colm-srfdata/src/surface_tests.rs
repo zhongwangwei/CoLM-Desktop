@@ -74,6 +74,17 @@ fn lct_lai_and_sai_are_area_weighted_without_wmo_sharing() {
 }
 
 #[test]
+fn hyper_albedo_scales_before_median_and_marks_water_and_ice_missing() {
+    let layout = patches(vec![1, 17, 15], vec![0, 4, 5, 6], vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(
+        layout
+            .aggregate_soil_hyper_albedo(&[1000.0, 3000.0, 7000.0, 9000.0, 9999.0, 9999.0], 17, 15,)
+            .unwrap(),
+        [0.5, SURFACE_MISSING, SURFACE_MISSING]
+    );
+}
+
+#[test]
 fn bedrock_is_area_weighted_and_wmo_patches_reuse_the_prior_value() {
     let layout = FlatPatches::new(
         vec![1, 1],

@@ -240,6 +240,38 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Port of one wavelength in `Aggregation_SoilHyperAlbedo`.
+    ///
+    /// Raw values use CoLM's integer-like scale of 10,000.  The source
+    /// routine transforms that scale before taking the unweighted median and
+    /// leaves water and ice at the standard surface missing marker.
+    pub fn aggregate_soil_hyper_albedo(
+        &self,
+        raw_albedo_x10k: &[f64],
+        waterbody_type: i32,
+        ice_type: i32,
+    ) -> Result<Vec<f64>> {
+        let mut result = vec![SURFACE_MISSING; self.len()];
+        let mut scratch = Vec::new();
+        for (patch, output) in result.iter_mut().enumerate() {
+            if self.patch_types[patch] == waterbody_type || self.patch_types[patch] == ice_type {
+                continue;
+            }
+            scratch.clear();
+            self.gather(raw_albedo_x10k, patch, &mut scratch)?;
+            for value in &mut scratch {
+                ensure!(
+                    value.is_finite(),
+                    "hyper-albedo patch {patch} contains a non-finite raw value"
+                );
+                *value /= 10_000.0;
+            }
+            *output = median(&mut scratch)
+                .with_context(|| format!("hyper-albedo patch {patch} has no raw cells"))?;
+        }
+        Ok(result)
+    }
+
     /// Port of `Aggregation_DBedrock`.
     ///
     /// The raw field has no fill-value masking in the Fortran routine, so this
