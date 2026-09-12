@@ -107,8 +107,9 @@ pub use runoff::{
 };
 pub use runtime_forcing::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 pub use snow::{
-    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, update_snow_age,
-    NewSnowInput, NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
+    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water,
+    update_snow_age, NewSnowInput, NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer,
+    SnowWaterInput, SnowWaterOutcome,
 };
 pub use soil_surface_resistance::{soil_surface_resistance, SoilSurfaceResistanceInput};
 pub use soil_water::{solve_campbell_soil_water, CampbellSoilWaterInput, CampbellSoilWaterState};

@@ -83,6 +83,11 @@ pub use colm_core::{
     LakeRoughnessInput,
 };
 pub use colm_core::{
+    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water,
+    NewSnowInput, NewSnowOutcome, RuntimeSnowColumn, SnowToSoilTransfer, SnowWaterInput,
+    SnowWaterOutcome,
+};
+pub use colm_core::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
     derive_igbp_canopy, derive_usgs_canopy, equilibrium_water_state, land_cover_soil_reflectance,

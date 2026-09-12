@@ -230,3 +230,48 @@ fn dividing_thick_snow_matches_current_fortran_enthalpy_and_geometry() {
     );
     close(state.interface_depth_m[interface_slot(-3)], -0.13);
 }
+
+#[test]
+fn snow_water_matches_current_fortran_percolation_and_surface_fluxes() {
+    // Standalone gfortran reference from MOD_SoilSnowHydrology:snowwater.
+    let mut state = RuntimeSnowColumn::empty();
+    state.layer_count = -2;
+    state.water_equivalent_kg_m2 = 95.0;
+    state.depth_m = 0.15;
+    for (fortran_layer, thickness, ice, liquid) in [(-1, 0.05, 20.0, 5.0), (0, 0.1, 60.0, 10.0)] {
+        let slot = layer_slot(fortran_layer);
+        state.thickness_m[slot] = thickness;
+        state.temperature_k[slot] = 270.0;
+        state.ice_water_kg_m2[slot] = ice;
+        state.liquid_water_kg_m2[slot] = liquid;
+    }
+
+    let outcome = snow_water(
+        SnowWaterInput {
+            time_step_seconds: 1800.0,
+            irreducible_saturation: 0.033,
+            impermeable_porosity: 0.05,
+            rainfall_kg_m2_s: 0.001,
+            evaporation_kg_m2_s: 0.0001,
+            dew_kg_m2_s: 0.0002,
+            sublimation_kg_m2_s: 0.0001,
+            frost_kg_m2_s: 0.0003,
+        },
+        &mut state,
+    )
+    .unwrap();
+
+    close(state.ice_water_kg_m2[layer_slot(-1)], 20.36);
+    close(
+        state.liquid_water_kg_m2[layer_slot(-1)],
+        0.917_306_434_023_990_9,
+    );
+    close(state.ice_water_kg_m2[layer_slot(0)], 60.0);
+    close(
+        state.liquid_water_kg_m2[layer_slot(0)],
+        7.203_478_735_005_452_5,
+    );
+    close(outcome.layer_drainage_kg_m2[0], 6.062_693_565_976_009_5);
+    close(outcome.layer_drainage_kg_m2[1], 8.859_214_830_970_556);
+    close(outcome.bottom_drainage_kg_m2_s, 0.004_921_786_017_205_864);
+}

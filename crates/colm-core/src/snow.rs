@@ -80,6 +80,28 @@ pub struct NewSnowOutcome {
     pub wetland_water_added_mm: f64,
 }
 
+/// Surface fluxes consumed by `MOD_SoilSnowHydrology:snowwater`.
+///
+/// CoLM's `mm h2o/s` fluxes are numerically equal to `kg m-2 s-1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnowWaterInput {
+    pub time_step_seconds: f64,
+    pub irreducible_saturation: f64,
+    pub impermeable_porosity: f64,
+    pub rainfall_kg_m2_s: f64,
+    pub evaporation_kg_m2_s: f64,
+    pub dew_kg_m2_s: f64,
+    pub sublimation_kg_m2_s: f64,
+    pub frost_kg_m2_s: f64,
+}
+
+/// Per-layer drainage produced by `snowwater` in surface-to-bottom order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnowWaterOutcome {
+    pub bottom_drainage_kg_m2_s: f64,
+    pub layer_drainage_kg_m2: Vec<f64>,
+}
+
 /// Ports `MOD_Albedo:snowage` for the non-SNICAR broadband path.
 ///
 /// `snow_water_equivalent_mm` and `previous_snow_water_equivalent_mm` are
@@ -176,6 +198,101 @@ pub fn add_new_snow(input: NewSnowInput, state: &mut RuntimeSnowColumn) -> Resul
     }
     Ok(NewSnowOutcome {
         wetland_water_added_mm: 0.0,
+    })
+}
+
+/// Ports `MOD_SoilSnowHydrology:snowwater` for an existing snow column.
+///
+/// This deliberately does not update the aggregate `scv`/`snowdp` fields:
+/// CoLM updates those in the following snow-layer combine step, which callers
+/// must run after this percolation step.
+pub fn snow_water(
+    input: SnowWaterInput,
+    state: &mut RuntimeSnowColumn,
+) -> Result<SnowWaterOutcome> {
+    validate_active_snow_layers(state)?;
+    ensure!(
+        input.time_step_seconds.is_finite()
+            && input.time_step_seconds > 0.0
+            && input.irreducible_saturation.is_finite()
+            && (0.0..=1.0).contains(&input.irreducible_saturation)
+            && input.impermeable_porosity.is_finite()
+            && input.impermeable_porosity >= 0.0
+            && input.rainfall_kg_m2_s.is_finite()
+            && input.evaporation_kg_m2_s.is_finite()
+            && input.dew_kg_m2_s.is_finite()
+            && input.sublimation_kg_m2_s.is_finite()
+            && input.frost_kg_m2_s.is_finite(),
+        "snow-water inputs are invalid"
+    );
+    ensure!(
+        state.layer_count < 0,
+        "snow-water requires at least one active snow layer"
+    );
+
+    let first_layer = state.layer_count + 1;
+    let top = layer_slot(first_layer);
+    let top_ice_after_surface_flux = state.ice_water_kg_m2[top]
+        + (input.frost_kg_m2_s - input.sublimation_kg_m2_s) * input.time_step_seconds;
+    state.ice_water_kg_m2[top] = top_ice_after_surface_flux.max(0.0);
+    if top_ice_after_surface_flux < 0.0 {
+        state.liquid_water_kg_m2[top] += top_ice_after_surface_flux;
+    }
+    state.liquid_water_kg_m2[top] += (input.rainfall_kg_m2_s + input.dew_kg_m2_s
+        - input.evaporation_kg_m2_s)
+        * input.time_step_seconds;
+    if state.liquid_water_kg_m2[top] < 0.0 {
+        state.ice_water_kg_m2[top] =
+            (state.ice_water_kg_m2[top] + state.liquid_water_kg_m2[top]).max(0.0);
+        state.liquid_water_kg_m2[top] = 0.0;
+    }
+
+    let active_layers = state.layer_count.unsigned_abs() as usize;
+    let mut ice_volume_fraction = vec![0.0; active_layers];
+    let mut liquid_volume_fraction = vec![0.0; active_layers];
+    let mut effective_porosity = vec![0.0; active_layers];
+    for (relative, fortran_layer) in (first_layer..=0).enumerate() {
+        let slot = layer_slot(fortran_layer);
+        ice_volume_fraction[relative] =
+            (state.ice_water_kg_m2[slot] / (state.thickness_m[slot] * f77(917.0))).min(1.0);
+        effective_porosity[relative] = (1.0 - ice_volume_fraction[relative]).max(0.01);
+        liquid_volume_fraction[relative] = (state.liquid_water_kg_m2[slot]
+            / (state.thickness_m[slot] * f77(1000.0)))
+        .min(effective_porosity[relative]);
+    }
+
+    let mut inflow = 0.0;
+    let mut layer_drainage_kg_m2 = Vec::with_capacity(active_layers);
+    for (relative, fortran_layer) in (first_layer..=0).enumerate() {
+        let slot = layer_slot(fortran_layer);
+        state.liquid_water_kg_m2[slot] += inflow;
+        let excess_depth_m = (liquid_volume_fraction[relative]
+            - input.irreducible_saturation * effective_porosity[relative])
+            .max(0.0)
+            * state.thickness_m[slot];
+        let outflow = if fortran_layer < 0 {
+            let next = relative + 1;
+            if effective_porosity[relative] < input.impermeable_porosity
+                || effective_porosity[next] < input.impermeable_porosity
+            {
+                0.0
+            } else {
+                excess_depth_m.min(
+                    (1.0 - ice_volume_fraction[next] - liquid_volume_fraction[next])
+                        * state.thickness_m[layer_slot(fortran_layer + 1)],
+                )
+            }
+        } else {
+            excess_depth_m
+        } * f77(1000.0);
+        layer_drainage_kg_m2.push(outflow);
+        state.liquid_water_kg_m2[slot] -= outflow;
+        inflow = outflow;
+    }
+
+    Ok(SnowWaterOutcome {
+        bottom_drainage_kg_m2_s: inflow / input.time_step_seconds,
+        layer_drainage_kg_m2,
     })
 }
 
@@ -283,18 +400,7 @@ fn validate_snow_topology(
     state: &RuntimeSnowColumn,
     soil_surface: &SnowToSoilTransfer,
 ) -> Result<()> {
-    validate(
-        NewSnowInput {
-            patch_type: 0,
-            time_step_seconds: 1.0,
-            ground_temperature_k: FREEZING_K,
-            ground_snowfall_kg_m2_s: 0.0,
-            new_snow_bulk_density_kg_m3: 1.0,
-            precipitation_temperature_k: FREEZING_K,
-            variably_saturated_flow: false,
-        },
-        state,
-    )?;
+    validate_active_snow_layers(state)?;
     ensure!(
         soil_surface.liquid_water_kg_m2.is_finite()
             && soil_surface.liquid_water_kg_m2 >= 0.0
@@ -302,6 +408,11 @@ fn validate_snow_topology(
             && soil_surface.ice_water_kg_m2 >= 0.0,
         "soil-surface transfer state is invalid"
     );
+    Ok(())
+}
+
+fn validate_active_snow_layers(state: &RuntimeSnowColumn) -> Result<()> {
+    validate_runtime_snow_column(state)?;
     for fortran_layer in state.layer_count + 1..=0 {
         let slot = layer_slot(fortran_layer);
         ensure!(
