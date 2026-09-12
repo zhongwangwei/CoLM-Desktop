@@ -163,6 +163,46 @@ pub struct BedrockState {
     pub layer_index: Vec<usize>,
 }
 
+/// CoLM's fixed exponentially spaced soil column.
+///
+/// `interface_depth_m` includes the surface at index zero, followed by the
+/// lower interface of every soil layer.  The Fortran `zi_soi` array is
+/// therefore `&interface_depth_m[1..]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoilGrid {
+    pub node_depth_m: Vec<f64>,
+    pub thickness_m: Vec<f64>,
+    pub interface_depth_m: Vec<f64>,
+}
+
+/// Builds the soil grid initialized by `MOD_Vars_Global::Init_GlobalVars`.
+pub fn colm_soil_grid(layers: usize) -> Result<SoilGrid> {
+    ensure!(
+        layers >= 2,
+        "CoLM's soil grid requires at least two layers, got {layers}"
+    );
+    let node_depth_m = (1..=layers)
+        .map(|layer| 0.025 * (0.5 * (layer as f64 - 0.5)).exp() - 0.025)
+        .collect::<Vec<_>>();
+    let mut thickness_m = vec![0.0; layers];
+    thickness_m[0] = 0.5 * (node_depth_m[0] + node_depth_m[1]);
+    thickness_m[layers - 1] = node_depth_m[layers - 1] - node_depth_m[layers - 2];
+    for layer in 1..layers - 1 {
+        thickness_m[layer] = 0.5 * (node_depth_m[layer + 1] - node_depth_m[layer - 1]);
+    }
+    let mut interface_depth_m = Vec::with_capacity(layers + 1);
+    interface_depth_m.push(0.0);
+    for &thickness in &thickness_m {
+        let depth = interface_depth_m.last().copied().unwrap_or_default() + thickness;
+        interface_depth_m.push(depth);
+    }
+    Ok(SoilGrid {
+        node_depth_m,
+        thickness_m,
+        interface_depth_m,
+    })
+}
+
 /// Applies `MOD_LakeDepthReadin.F90`'s standard ten-layer lake-depth rule.
 pub fn derive_lake_layers(depth_m: &[f64], lake_layers: usize) -> Result<LakeState> {
     ensure!(
@@ -211,15 +251,15 @@ pub fn derive_lake_layers(depth_m: &[f64], lake_layers: usize) -> Result<LakeSta
 /// Applies `MOD_DBedrockReadin.F90`'s centimetre conversion and bottom-up interface lookup.
 pub fn derive_bedrock(
     depth_cm: &[f64],
-    patch_type: &[i32],
+    land_class: &[i32],
     dz_soil_m: &[f64],
     zi_soil_m: &[f64],
 ) -> Result<BedrockState> {
     ensure!(
-        depth_cm.len() == patch_type.len(),
-        "bedrock depths ({}) and patch types ({}) differ",
+        depth_cm.len() == land_class.len(),
+        "bedrock depths ({}) and land classes ({}) differ",
         depth_cm.len(),
-        patch_type.len()
+        land_class.len()
     );
     let (&first_dz, _) = dz_soil_m
         .split_first()
@@ -232,7 +272,7 @@ pub fn derive_bedrock(
     let mut depth = depth_cm.to_vec();
     let mut layer_index = vec![0; depth_cm.len()];
     for patch in 0..depth.len() {
-        if patch_type[patch] == 0 {
+        if land_class[patch] == 0 {
             continue;
         }
         depth[patch] = (depth[patch] / 100.0).max(first_dz);

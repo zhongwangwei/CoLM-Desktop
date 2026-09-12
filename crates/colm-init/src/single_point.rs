@@ -14,7 +14,7 @@ use colm_namelist::{parse, Value};
 
 use crate::{
     cold_start_broadband_radiation_with_snow, cold_start_pc_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, derive_igbp_canopy,
+    cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_igbp_canopy,
     derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover, derive_snow_cover,
     derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, leaf_optics_from_land_cover,
@@ -1524,23 +1524,13 @@ fn soil_grid(layers: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
         layers == 10,
         "native cold start requires CoLM's ten soil layers"
     );
-    let node_depth = (1..=layers)
-        .map(|layer| 0.025 * (0.5 * (layer as f64 - 0.5)).exp() - 0.025)
-        .collect::<Vec<_>>();
-    let mut thickness = vec![0.0; layers];
-    thickness[0] = 0.5 * (node_depth[0] + node_depth[1]);
-    thickness[layers - 1] = node_depth[layers - 1] - node_depth[layers - 2];
-    for layer in 1..layers - 1 {
-        thickness[layer] = 0.5 * (node_depth[layer + 1] - node_depth[layer - 1]);
-    }
-    let mut interface_mm = Vec::with_capacity(layers + 1);
-    interface_mm.push(0.0);
-    let mut depth = 0.0;
-    for value in &thickness {
-        depth += value * 1000.0;
-        interface_mm.push(depth);
-    }
-    Ok((node_depth, thickness, interface_mm))
+    let grid = colm_soil_grid(layers)?;
+    let interface_mm = grid
+        .interface_depth_m
+        .iter()
+        .map(|depth| depth * 1000.0)
+        .collect();
+    Ok((grid.node_depth_m, grid.thickness_m, interface_mm))
 }
 
 fn soil_hydraulic_models(

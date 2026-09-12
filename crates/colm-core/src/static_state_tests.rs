@@ -61,6 +61,17 @@ fn bedrock_preserves_fortran_ocean_exception_and_last_true_interface() {
 }
 
 #[test]
+fn soil_grid_matches_fortran_global_initialization() {
+    let grid = colm_soil_grid(10).unwrap();
+    assert_eq!(grid.interface_depth_m[0], 0.0);
+    assert!((grid.node_depth_m[0] - 0.007_100_635_417).abs() < 1.0e-10);
+    assert!((grid.thickness_m[0] - 0.017_512_817_916).abs() < 1.0e-10);
+    assert!((grid.interface_depth_m[1] - grid.thickness_m[0]).abs() < 1.0e-14);
+    assert!((grid.interface_depth_m[10] - grid.thickness_m.iter().sum::<f64>()).abs() < 1.0e-14);
+    assert!(colm_soil_grid(1).is_err());
+}
+
+#[test]
 fn soil_texture_clamps_fortrans_out_of_range_classes_to_zero() {
     let mut texture = [-1, 0, 8, 12, 13];
     normalize_soil_texture(&mut texture);

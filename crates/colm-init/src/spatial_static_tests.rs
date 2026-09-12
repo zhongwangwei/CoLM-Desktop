@@ -33,6 +33,58 @@ fn lct_spatial_block_becomes_a_constant_restart() {
     assert_eq!(values_f64(&block, "hbot").unwrap(), [1.0]);
     assert_eq!(values_i32(&block, "soiltext").unwrap(), [8]);
     assert_eq!(values_f64(&block, "vf_quartz").unwrap()[0], 0.3);
+    assert!(block.variable("debdrock").is_none());
+    assert!(block.variable("soil_alb").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
+    let root = temp_dir("optional-static");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_f64(
+        &landdata,
+        "dbedrock",
+        "dbedrock_patches",
+        "dbedrock_patches",
+        2005,
+        "w180_s90",
+        200.0,
+    );
+    for wavelength_nm in (400..=2500).step_by(10) {
+        let stem = format!("soil_hyper_alb_{wavelength_nm}nm_patches");
+        write_f64(
+            &landdata,
+            "HyperAlbedo",
+            &stem,
+            "soil_hyper_alb",
+            2005,
+            "w180_s90",
+            wavelength_nm as f64 / 10_000.0,
+        );
+    }
+    let restart = root.join("restart");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::Campbell,
+    );
+    config.use_bedrock = true;
+    config.use_hyperspectral = true;
+    let files = write_spatial_lct_constant_restart(config).unwrap();
+
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_f64(&block, "debdrock").unwrap(), [2.0]);
+    assert_eq!(values_i32(&block, "ibedrock").unwrap(), [9]);
+    let albedo = values_f64(&block, "soil_alb").unwrap();
+    assert_eq!(albedo.len(), 211);
+    assert_eq!(albedo.first(), Some(&0.04));
+    assert_eq!(albedo.last(), Some(&0.25));
     std::fs::remove_dir_all(root).unwrap();
 }
 

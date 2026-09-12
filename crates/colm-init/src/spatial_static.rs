@@ -11,10 +11,11 @@ use anyhow::{ensure, Context, Result};
 
 use crate::single_point::{patch_type, BVIC_USDA, IGBP_BOTTOM, IGBP_TOP, USGS_BOTTOM, USGS_TOP};
 use crate::{
-    derive_igbp_canopy, derive_lake_layers, derive_spatial_soil_parameters, derive_usgs_canopy,
-    normalize_soil_texture, write_constant_restart, CanopyState, ConstantRestartFiles,
-    ConstantRestartInput, HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields,
-    RestartTuning, SoilAlbedo, SoilLayerInput,
+    colm_soil_grid, derive_bedrock, derive_igbp_canopy, derive_lake_layers,
+    derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
+    write_constant_restart, CanopyState, ConstantRestartFiles, ConstantRestartInput,
+    HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields, RestartTuning,
+    SoilAlbedo, SoilLayerInput,
 };
 
 /// Arguments for one already-addressed LCT landpatch block.
@@ -29,6 +30,10 @@ pub struct SpatialLctStaticConfig<'a> {
     pub land_cover: LandCoverScheme,
     pub hydraulic_model: HydraulicModel,
     pub tuning: RestartTuning,
+    /// Write `dbedrock` and `ibedrock`, matching `DEF_USE_BEDROCK`.
+    pub use_bedrock: bool,
+    /// Write 211-band `soil_alb`, matching the `HYPERSPECTRAL` build.
+    pub use_hyperspectral: bool,
 }
 
 impl<'a> SpatialLctStaticConfig<'a> {
@@ -50,6 +55,8 @@ impl<'a> SpatialLctStaticConfig<'a> {
             land_cover,
             hydraulic_model,
             tuning: RestartTuning::default(),
+            use_bedrock: false,
+            use_hyperspectral: false,
         }
     }
 }
@@ -59,6 +66,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
 pub fn write_spatial_lct_constant_restart(
     config: SpatialLctStaticConfig<'_>,
 ) -> Result<ConstantRestartFiles> {
+    let dimensions = RestartDimensions::default();
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let patch_kind = patches
         .class
@@ -81,7 +89,7 @@ pub fn write_spatial_lct_constant_restart(
         config.block_label,
         patch_count,
     )?;
-    let lake = derive_lake_layers(&lake_depth, RestartDimensions::default().lake_layers)?;
+    let lake = derive_lake_layers(&lake_depth, dimensions.lake_layers)?;
     let source_soil = read_soil(
         config.landdata,
         config.land_cover_year,
@@ -92,7 +100,7 @@ pub fn write_spatial_lct_constant_restart(
         &source_soil,
         &patches.class,
         &patch_kind,
-        RestartDimensions::default().soil_layers,
+        dimensions.soil_layers,
         config.hydraulic_model,
     )?;
     let mut texture = read_i32(
@@ -181,6 +189,39 @@ pub fn write_spatial_lct_constant_restart(
         config.block_label,
         patch_count,
     )?;
+    let bedrock = config
+        .use_bedrock
+        .then(|| {
+            let grid = colm_soil_grid(dimensions.soil_layers)?;
+            let depth_cm = read_f64(
+                config.landdata,
+                "dbedrock",
+                "dbedrock_patches",
+                "dbedrock_patches",
+                config.land_cover_year,
+                config.block_label,
+                patch_count,
+            )?;
+            derive_bedrock(
+                &depth_cm,
+                &patches.class,
+                &grid.thickness_m,
+                &grid.interface_depth_m[1..],
+            )
+        })
+        .transpose()?;
+    let hyperspectral_albedo = config
+        .use_hyperspectral
+        .then(|| {
+            read_hyperspectral_albedo(
+                config.landdata,
+                config.land_cover_year,
+                config.block_label,
+                patch_count,
+                dimensions.wavelengths,
+            )
+        })
+        .transpose()?;
 
     write_constant_restart(
         config.restart_dir,
@@ -188,7 +229,7 @@ pub fn write_spatial_lct_constant_restart(
         config.land_cover_year,
         config.block_label,
         ConstantRestartInput {
-            dimensions: RestartDimensions::default(),
+            dimensions,
             patch: RestartPatchFields {
                 class: &patches.class,
                 kind: &patch_kind,
@@ -212,13 +253,40 @@ pub fn write_spatial_lct_constant_restart(
             canopy: &canopy,
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
-            bedrock: None,
+            bedrock: bedrock.as_ref(),
             topmodel: None,
             terrain: None,
             simple_terrain: None,
-            hyperspectral_albedo: None,
+            hyperspectral_albedo: hyperspectral_albedo.as_deref(),
         },
     )
+}
+
+fn read_hyperspectral_albedo(
+    landdata: &Path,
+    year: i32,
+    block: &str,
+    patches: usize,
+    wavelengths: usize,
+) -> Result<Vec<f64>> {
+    ensure!(
+        wavelengths == 211,
+        "CoLM hyperspectral landdata has 211 wavelengths, got {wavelengths}"
+    );
+    let mut values = Vec::with_capacity(wavelengths * patches);
+    for wavelength_nm in (400..=2500).step_by(10) {
+        let stem = format!("soil_hyper_alb_{wavelength_nm}nm_patches");
+        values.extend(read_f64(
+            landdata,
+            "HyperAlbedo",
+            &stem,
+            "soil_hyper_alb",
+            year,
+            block,
+            patches,
+        )?);
+    }
+    Ok(values)
 }
 
 struct Patches {

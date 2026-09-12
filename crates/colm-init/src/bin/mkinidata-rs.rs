@@ -100,10 +100,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
     let block = args.next().context("missing CoLM block label")?;
     let land_cover = parse_land_cover(&args.next().context("missing land-cover scheme")?)?;
     let hydraulic_model = parse_hydraulic_model(args.next().as_deref())?;
-    if let Some(value) = args.next() {
-        bail!("unexpected argument {value}");
-    }
-    let files = write_spatial_lct_constant_restart(SpatialLctStaticConfig::new(
+    let mut config = SpatialLctStaticConfig::new(
         &landdata,
         &restart,
         &case_name,
@@ -111,7 +108,15 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
         &block,
         land_cover,
         hydraulic_model,
-    ))?;
+    );
+    for value in args {
+        match value.as_str() {
+            "--bedrock" => config.use_bedrock = true,
+            "--hyperspectral" => config.use_hyperspectral = true,
+            _ => bail!("unexpected argument {value}"),
+        }
+    }
+    let files = write_spatial_lct_constant_restart(config)?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
     Ok(())
@@ -127,7 +132,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
 }
 
 const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>
-       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>";
+       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral]";
 
 fn parse_land_cover(value: &str) -> Result<LandCoverScheme> {
     match value {
