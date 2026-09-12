@@ -414,6 +414,14 @@ impl FlatPatches {
         self.cell_offsets[patch]..self.cell_offsets[patch + 1]
     }
 
+    pub(crate) fn raw_cells(&self, patch: usize) -> &[usize] {
+        &self.cells[self.cells_for(patch)]
+    }
+
+    pub(crate) fn wmo_source_for(&self, patch: usize) -> Option<usize> {
+        self.wmo_source[patch]
+    }
+
     fn gather<T: Copy>(&self, source: &[T], patch: usize, out: &mut Vec<T>) -> Result<()> {
         let range = self.cells_for(patch);
         out.reserve(range.len());
