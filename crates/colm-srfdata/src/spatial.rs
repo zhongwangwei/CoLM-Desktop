@@ -254,6 +254,64 @@ pub fn read_mesh_raster_f64(
     read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
 }
 
+/// Relative spherical areas in flattened mesh-pixel order.
+///
+/// CoLM uses physical grid-cell areas for area-weighted aggregation.  The
+/// common Earth-radius factor cancels, so steradians preserve the exact
+/// weighting without introducing a second radius constant.
+pub fn mesh_cell_area_weights(mesh: &FlatMesh, pixel: &PixelAxes) -> Result<Vec<f64>> {
+    ensure!(
+        pixel.lon_w.len() == pixel.lon_e.len() && pixel.lat_s.len() == pixel.lat_n.len(),
+        "spatial pixel edge vectors must be paired"
+    );
+    let mut longitude = Vec::with_capacity(pixel.lon_w.len());
+    for (&west, &east) in pixel.lon_w.iter().zip(&pixel.lon_e) {
+        let mut width = east - west;
+        if width <= 0.0 {
+            width += 360.0;
+        }
+        ensure!(
+            width.is_finite() && width > 0.0,
+            "pixel longitude has invalid width"
+        );
+        longitude.push(width.to_radians());
+    }
+    let latitude = pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| {
+            let area = north.to_radians().sin() - south.to_radians().sin();
+            ensure!(
+                area.is_finite() && area > 0.0,
+                "pixel latitude has invalid area"
+            );
+            Ok(area)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut area = Vec::new();
+    for element in 0..mesh.len() {
+        let (xs, ys) = mesh.pixels(element)?;
+        for (&x, &y) in xs.iter().zip(ys) {
+            let x = usize::try_from(x)?
+                .checked_sub(1)
+                .context("mesh longitude is zero")?;
+            let y = usize::try_from(y)?
+                .checked_sub(1)
+                .context("mesh latitude is zero")?;
+            area.push(
+                *longitude
+                    .get(x)
+                    .context("mesh pixel lies outside the spatial longitude grid")?
+                    * latitude
+                        .get(y)
+                        .context("mesh pixel lies outside the spatial latitude grid")?,
+            );
+        }
+    }
+    Ok(area)
+}
+
 fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
     raster: &Path,
     variable: &str,

@@ -101,6 +101,9 @@ fn gridbased_mesh_expands_aligned_cells_into_colm_pixel_order() {
     assert_eq!(topology.mesh.pixels(0).unwrap().1, &[1, 1, 2, 2]);
     assert_eq!(topology.pixel.lon_w, vec![-180.0, -90.0, 0.0, 90.0]);
     assert_eq!(topology.pixel.lat_s, vec![-90.0, 0.0]);
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
+    assert!(area.iter().all(|value| *value > 0.0));
+    assert!((area.iter().sum::<f64>() - 4.0 * std::f64::consts::PI).abs() < 1e-12);
 
     std::fs::remove_dir_all(directory).unwrap();
 }
