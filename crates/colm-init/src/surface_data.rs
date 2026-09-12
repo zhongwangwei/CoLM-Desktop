@@ -193,6 +193,11 @@ pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointP
         (total - 1.0).abs() <= 1.0e-6,
         "positive single-point PFT fractions must sum to one, got {total}"
     );
+    // `MOD_SingleSrfdata` normalizes the packed positive SITE components.
+    let fraction = fraction
+        .into_iter()
+        .map(|fraction| fraction / total)
+        .collect::<Vec<_>>();
     let raw_pfts = class.len();
     let lai = pft_monthly_vector(&file, "LAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
     let sai = pft_monthly_vector(&file, "SAI_pfts_monthly", years.len(), raw_pfts, &indices)?;

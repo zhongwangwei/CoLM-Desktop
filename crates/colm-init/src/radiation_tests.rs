@@ -83,6 +83,52 @@ fn cold_start_radiation_matches_the_upstream_cn_cng_broadband_restart() {
 }
 
 #[test]
+fn pft_radiation_matches_the_upstream_cn_cng_pft_restart() {
+    let output = cold_start_pft_broadband_radiation_with_snow(
+        0,
+        SoilReflectance {
+            saturated_visible: 0.14,
+            dry_visible: 0.25,
+            saturated_near_infrared: 0.28,
+            dry_near_infrared: 0.39,
+        },
+        0.0,
+        0.017_524_084_877_847_7,
+        LeafOptics {
+            chil: -0.3,
+            reflectance: [[0.11, 0.31], [0.35, 0.53]],
+            transmittance: [[0.05, 0.12], [0.34, 0.25]],
+        },
+        0.200_000_002_980_232,
+        0.449_999_988_079_071,
+        0.0,
+        0.001,
+        true,
+        0.0,
+        0.0,
+        273.16,
+    )
+    .unwrap();
+    assert_close(output.thermal_gap_fraction, 0.546_974_995_631_841);
+    assert_close(output.direct_extinction, 659.919_009_2);
+    assert_close(output.diffuse_extinction, 0.719);
+    assert_matrix_close(
+        output.sunlit_absorption,
+        [
+            [0.653_260_962_413_402, 0.000_920_882_050_068_061],
+            [0.247_869_169_434_298, 0.000_414_032_765_122_806],
+        ],
+    );
+    assert_matrix_close(
+        output.shaded_absorption,
+        [
+            [0.063_710_598_137_456_6, 0.332_772_574_677_887],
+            [0.065_079_552_237_013_9, 0.158_616_791_744_303],
+        ],
+    );
+}
+
+#[test]
 fn natural_non_lct_path_retains_ground_albedo() {
     let output = cold_start_broadband_radiation(
         0,

@@ -178,7 +178,8 @@ pub fn write_pft_time_restart_block(
         file.add_dimension("vegnodes", plant.vegetation_nodes)?;
     }
 
-    for (name, values) in pft_entries(input.fields) {
+    let entries = pft_entries(input.fields);
+    for &(name, values) in &entries[..10] {
         put_f64_1d(&mut file, name, "pft", values)?;
     }
     for (name, values) in [
@@ -206,6 +207,9 @@ pub fn write_pft_time_restart_block(
                 values,
             )?;
         }
+    }
+    for &(name, values) in &entries[10..] {
+        put_f64_1d(&mut file, name, "pft", values)?;
     }
     if let Some(plant) = input.plant_hydraulics {
         put_axis_major(

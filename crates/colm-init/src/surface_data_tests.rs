@@ -130,7 +130,7 @@ fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
         .unwrap();
     file.add_variable::<f64>("pctpfts", &["pft"])
         .unwrap()
-        .put_values(&[0.0, 0.4, 0.6], ..)
+        .put_values(&[0.0, 0.540_000_021_457_672, 0.460_000_008_344_65], ..)
         .unwrap();
     file.add_variable::<f64>("canopy_height_pfts", &["pft"])
         .unwrap()
@@ -152,7 +152,8 @@ fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
 
     let values = read_single_point_pft_data(&path).unwrap();
     assert_eq!(values.class, [13, 14]);
-    assert_eq!(values.fraction, [0.4, 0.6]);
+    assert!((values.fraction[0] - 0.540_000_005_364_418).abs() < 1.0e-14);
+    assert!((values.fraction[1] - 0.459_999_994_635_582).abs() < 1.0e-14);
     assert_eq!(values.canopy_height_m, [0.5, 0.8]);
     assert_eq!(
         values.monthly.for_year(2010, 2, true, 2000, 2020).unwrap(),

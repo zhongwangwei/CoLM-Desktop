@@ -13,14 +13,15 @@ use colm_case::pft::{
 use colm_namelist::{parse, Value};
 
 use crate::{
-    cold_start_broadband_radiation_with_snow, derive_igbp_canopy, derive_initial_soil_hydraulics,
-    derive_lake_layers, derive_pft_snow_cover, derive_snow_cover, derive_soil_parameters,
-    derive_usgs_canopy, equilibrium_water_state, initialize_cold_soil, initialize_profile_soil,
-    initialize_snow_layers, leaf_optics_from_land_cover, normalize_soil_texture,
-    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
-    read_single_point_soil_profile, read_single_point_surface, read_single_point_water_table,
-    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
-    ColdSoilState, ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
+    cold_start_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
+    derive_igbp_canopy, derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover,
+    derive_snow_cover, derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state,
+    initialize_cold_soil, initialize_profile_soil, initialize_snow_layers,
+    leaf_optics_from_land_cover, normalize_soil_texture, read_single_point_monthly_vegetation,
+    read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
+    read_single_point_surface, read_single_point_water_table, write_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, write_time_restart, ColdSoilState,
+    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
     LandCoverScheme, LeafOptics, OzoneFields, PftConstantRestartInput, PftOzoneFields,
     PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
     RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
@@ -443,6 +444,10 @@ pub fn write_single_point_cold_time_restarts(
     )?;
     let lake = derive_lake_layers(&[surface.lake_depth_m], dimensions.lake_layers)?;
     let (node_depth, thickness, interface_mm) = soil_grid(dimensions.soil_layers)?;
+    let interface_m = interface_mm[1..]
+        .iter()
+        .map(|depth| depth / 1000.0)
+        .collect::<Vec<_>>();
     let porosity = soil.field(SoilField::Porosity).to_vec();
     let residual_water = soil.field(SoilField::ThetaR).to_vec();
     let psi0 = soil.field(SoilField::Psi0).to_vec();
@@ -460,7 +465,7 @@ pub fn write_single_point_cold_time_restarts(
         &hydraulic_model,
         &node_depth,
         &thickness,
-        &interface_mm[1..],
+        &interface_m,
     )?;
     let hydraulic = derive_initial_soil_hydraulics(
         kind,
@@ -597,6 +602,10 @@ fn write_single_point_pft_cold_time_restarts(
     )?;
     let lake = derive_lake_layers(&[surface.lake_depth_m], dimensions.lake_layers)?;
     let (node_depth, thickness, interface_mm) = soil_grid(dimensions.soil_layers)?;
+    let interface_m = interface_mm[1..]
+        .iter()
+        .map(|depth| depth / 1000.0)
+        .collect::<Vec<_>>();
     let porosity = soil.field(SoilField::Porosity).to_vec();
     let residual_water = soil.field(SoilField::ThetaR).to_vec();
     let psi0 = soil.field(SoilField::Psi0).to_vec();
@@ -614,7 +623,7 @@ fn write_single_point_pft_cold_time_restarts(
         &hydraulic_model,
         &node_depth,
         &thickness,
-        &interface_mm[1..],
+        &interface_m,
     )?;
     let hydraulic = derive_initial_soil_hydraulics(
         kind,
@@ -687,7 +696,7 @@ fn write_single_point_pft_cold_time_restarts(
         .iter()
         .zip(total_lai_p.iter().zip(sai_p.iter()))
         .map(|(&class, (&lai, &sai))| {
-            cold_start_broadband_radiation_with_snow(
+            cold_start_pft_broadband_radiation_with_snow(
                 kind,
                 surface.albedo,
                 cold_soil.liquid_water_kg_m2[0],
@@ -697,8 +706,6 @@ fn write_single_point_pft_cold_time_restarts(
                 sai,
                 0.0,
                 cosine_zenith.max(0.001),
-                true,
-                false,
                 run.vegetation_snow,
                 snow_depth_m,
                 pft_snow.patch.ground_snow_fraction,

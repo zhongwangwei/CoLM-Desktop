@@ -30,7 +30,8 @@ pub use pft_restart::{
 };
 pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
-    leaf_optics_from_land_cover, ColdStartRadiation, LeafOptics,
+    cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,
+    LeafOptics,
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
