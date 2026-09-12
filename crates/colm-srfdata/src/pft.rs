@@ -207,6 +207,14 @@ pub fn aggregate_pft_index(
     };
     for patch in 0..patches.len() {
         let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+        if range.is_empty() {
+            ensure!(
+                input.patch_kind[patch] == PftPatchKind::Other
+                    && patches.wmo_source_for(patch).is_none(),
+                "PFT/PC patch {patch} has no PFT"
+            );
+            continue;
+        }
         let first = range
             .clone()
             .next()

@@ -143,6 +143,13 @@ fn write_five_degree_tile(path: &std::path::Path) {
         .unwrap()
         .put_values(&[1.0, 2.0, 10.0, 20.0], (.., .., ..))
         .unwrap();
+    file.add_variable::<f64>("MONTHLY_PFT_LAI", &["lon", "lat", "pft", "time"])
+        .unwrap()
+        .put_values(
+            &[1.0, 2.0, 100.0, 200.0, 10.0, 20.0, 1000.0, 2000.0],
+            (.., .., .., ..),
+        )
+        .unwrap();
     file.close().unwrap();
 }
 
@@ -336,6 +343,23 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
         )
         .unwrap(),
         vec![1.0, 2.0, 10.0, 20.0]
+    );
+    assert_eq!(
+        read_mesh_tiled_raster_pft_time_f64(
+            &tile_dir,
+            "MOD2005",
+            "MONTHLY_PFT_LAI",
+            2,
+            2,
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36,
+            },
+        )
+        .unwrap(),
+        vec![2.0, 20.0, 200.0, 2000.0]
     );
 
     std::fs::remove_dir_all(directory).unwrap();

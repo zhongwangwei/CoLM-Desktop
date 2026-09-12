@@ -8,14 +8,15 @@ use colm_srfdata::soil::{
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
 use colm_srfdata::{
-    aggregate_pft_fractions, build_lct_land_patches_from_raster,
+    aggregate_pft_fractions, aggregate_pft_index, build_lct_land_patches_from_raster,
     build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
     mesh_cell_area_weights, read_mesh_raster_f64, read_mesh_raster_i32,
     read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
-    write_landpatch_vector, write_spatial_pft_topology, write_spatial_topology, BlockLayout,
-    FlatLandPatches, PftFractionInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM,
+    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
+    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
+    write_spatial_pft_topology, write_spatial_topology, BlockLayout, FlatLandPatches,
+    PftFractionInput, PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM,
     COLM_500M,
 };
 
@@ -76,6 +77,7 @@ struct SpatialPftArgs {
     blocks: BlockLayout,
     dominant: bool,
     plant_tiles: PathBuf,
+    monthly_vegetation_years: Vec<i32>,
 }
 
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
@@ -137,6 +139,92 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "pct_pfts",
         &fractions,
     )?;
+    for &year in &args.monthly_vegetation_years {
+        let (suffix, lai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_LAI", year)?;
+        let (_, sai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_SAI", year)?;
+        for month in 1..=12 {
+            let lai = aggregate_pft_index(
+                &layout,
+                PftIndexInput {
+                    pft_offsets: &pfts.patch_offsets,
+                    pft_classes: &pfts.pft_classes,
+                    patch_kind: &pfts.patch_kind,
+                    raw_class_count: MODIS_PFT_CLASSES,
+                    raw_percent: &raw_percent,
+                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
+                        &args.plant_tiles,
+                        &suffix,
+                        &lai_name,
+                        MODIS_PFT_CLASSES,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                    land_area: &area,
+                },
+            )?;
+            let sai = aggregate_pft_index(
+                &layout,
+                PftIndexInput {
+                    pft_offsets: &pfts.patch_offsets,
+                    pft_classes: &pfts.pft_classes,
+                    patch_kind: &pfts.patch_kind,
+                    raw_class_count: MODIS_PFT_CLASSES,
+                    raw_percent: &raw_percent,
+                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
+                        &args.plant_tiles,
+                        &suffix,
+                        &sai_name,
+                        MODIS_PFT_CLASSES,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                    land_area: &area,
+                },
+            )?;
+            for (file_stem, variable, values, patches) in [
+                (
+                    format!("LAI_patches{month:02}"),
+                    "LAI_patches",
+                    lai.patch_index.as_slice(),
+                    &patches,
+                ),
+                (
+                    format!("LAI_pfts{month:02}"),
+                    "LAI_pfts",
+                    lai.pft_index.as_slice(),
+                    &pfts.land_pfts,
+                ),
+                (
+                    format!("SAI_patches{month:02}"),
+                    "SAI_patches",
+                    sai.patch_index.as_slice(),
+                    &patches,
+                ),
+                (
+                    format!("SAI_pfts{month:02}"),
+                    "SAI_pfts",
+                    sai.pft_index.as_slice(),
+                    &pfts.land_pfts,
+                ),
+            ] {
+                write_landpatch_vector(
+                    &args.landdata,
+                    year,
+                    &topology,
+                    patches,
+                    &args.blocks,
+                    "LAI",
+                    &file_stem,
+                    variable,
+                    values,
+                )?;
+            }
+        }
+    }
     println!(
         "wrote {} spatial land elements, {} land patches, and {} PFT tiles to {}",
         topology.land_elements.element_ids.len(),
@@ -1002,6 +1090,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut dominant = false;
     let mut plant_tiles = None;
+    let mut monthly_vegetation_years = Vec::new();
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -1030,6 +1119,18 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 ));
                 index += 2;
             }
+            "--monthly-vegetation-year" => {
+                let year = args
+                    .get(index + 1)
+                    .context("--monthly-vegetation-year needs a year")?
+                    .parse::<i32>()
+                    .context("invalid monthly vegetation year")?;
+                if year < 0 {
+                    bail!("monthly vegetation year must be non-negative")
+                }
+                monthly_vegetation_years.push(year);
+                index += 2;
+            }
             other => bail!("unknown spatial-pft option {other:?}\n{}", usage()),
         }
     }
@@ -1042,6 +1143,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         blocks,
         dominant,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
+        monthly_vegetation_years,
     })
 }
 
@@ -1140,8 +1242,22 @@ fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)
     Ok((format!("MOD{source_year:04}"), name))
 }
 
+fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)> {
+    if year < 0 {
+        bail!("monthly PFT vegetation year must be non-negative")
+    }
+    Ok((
+        format!("MOD{year:04}"),
+        if year < 2000 {
+            format!("{prefix}_{year:04}")
+        } else {
+            prefix.to_owned()
+        },
+    ))
+}
+
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -1251,12 +1367,17 @@ mod tests {
             "--blocks".into(),
             "2".into(),
             "3".into(),
+            "--monthly-vegetation-year".into(),
+            "1999".into(),
+            "--monthly-vegetation-year".into(),
+            "2005".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::GridBased);
         assert_eq!(parsed.plant_tiles, PathBuf::from("plant_15s"));
         assert_eq!(parsed.blocks.lon_w.len(), 2);
         assert_eq!(parsed.blocks.lat_s.len(), 3);
+        assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
         assert!(parse_spatial_pft(&[
             "latlon".into(),
             "mesh.nc".into(),
@@ -1276,6 +1397,18 @@ mod tests {
         assert_eq!(
             monthly_vegetation_source("MONTHLY_LC_SAI", 2005).unwrap(),
             ("MOD2005".into(), "MONTHLY_LC_SAI".into())
+        );
+    }
+
+    #[test]
+    fn historical_pft_monthly_vegetation_keeps_its_native_yearly_tile() {
+        assert_eq!(
+            monthly_pft_vegetation_source("MONTHLY_PFT_LAI", 1999).unwrap(),
+            ("MOD1999".into(), "MONTHLY_PFT_LAI_1999".into())
+        );
+        assert_eq!(
+            monthly_pft_vegetation_source("MONTHLY_PFT_SAI", 2005).unwrap(),
+            ("MOD2005".into(), "MONTHLY_PFT_SAI".into())
         );
     }
 }

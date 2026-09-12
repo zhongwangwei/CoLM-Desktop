@@ -393,6 +393,51 @@ pub fn read_mesh_tiled_raster_pft_f64(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<f64>> {
+    read_mesh_tiled_raster_pft_at_time(
+        directory, suffix, variable, pft_count, None, mesh, pixel, raw_grid,
+    )
+}
+
+/// Read one one-based time slice of a class-major PFT field from CoLM 5°×5° tiles.
+///
+/// This is the native `(lon, lat, pft, time)` contract consumed by
+/// `read_5x5_data_pft_time`.  The returned class-major layout is the same as
+/// [`read_mesh_tiled_raster_pft_f64`].
+#[allow(clippy::too_many_arguments)]
+pub fn read_mesh_tiled_raster_pft_time_f64(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    pft_count: usize,
+    time: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    ensure!(time > 0, "5 degree PFT tile time is one-based");
+    read_mesh_tiled_raster_pft_at_time(
+        directory,
+        suffix,
+        variable,
+        pft_count,
+        Some(time),
+        mesh,
+        pixel,
+        raw_grid,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_mesh_tiled_raster_pft_at_time(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    pft_count: usize,
+    time: Option<usize>,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
     ensure!(pft_count > 0, "PFT tile needs at least one PFT class");
     ensure!(
         raw_grid.nlon % 72 == 0 && raw_grid.nlat % 36 == 0,
@@ -415,7 +460,7 @@ pub fn read_mesh_tiled_raster_pft_f64(
             let source = file
                 .variable(variable)
                 .with_context(|| format!("{variable} is absent from {}", path.display()))?;
-            let axes = pft_tile_axes(&source, pft_count, tile_nlon, tile_nlat, &path)?;
+            let axes = pft_tile_axes(&source, pft_count, time, tile_nlon, tile_nlat, &path)?;
             for (pft, class_pixels) in pixels.iter_mut().enumerate() {
                 let values = read_pft_tile(&source, axes, pft, tile_nlon, tile_nlat)?;
                 for &(local_y, source_y) in rows {
@@ -760,21 +805,29 @@ struct PftTileAxes {
     pft: usize,
     latitude: usize,
     longitude: usize,
+    time: Option<(usize, usize)>,
 }
 
 fn pft_tile_axes(
     source: &netcdf::Variable<'_>,
     pft_count: usize,
+    requested_time: Option<usize>,
     tile_nlon: usize,
     tile_nlat: usize,
     path: &Path,
 ) -> Result<PftTileAxes> {
     let dimensions = source.dimensions();
+    let expected_dimensions = if requested_time.is_some() { 4 } else { 3 };
     ensure!(
-        dimensions.len() == 3,
-        "{} in {} must have longitude, latitude, and PFT dimensions",
+        dimensions.len() == expected_dimensions,
+        "{} in {} must have longitude, latitude, and PFT{} dimensions",
         source.name(),
-        path.display()
+        path.display(),
+        if requested_time.is_some() {
+            ", and time"
+        } else {
+            ""
+        },
     );
     let axis = |labels: &[&str]| {
         dimensions
@@ -786,22 +839,65 @@ fn pft_tile_axes(
         axis(&["lat", "latitude"]),
         axis(&["lon", "longitude"]),
     );
-    let (pft, latitude, longitude) = match named {
-        (Some(pft), Some(latitude), Some(longitude)) => (pft, latitude, longitude),
+    let (pft, latitude, longitude, time) = match named {
+        (Some(pft), Some(latitude), Some(longitude)) => (
+            pft,
+            latitude,
+            longitude,
+            requested_time
+                .map(|time| {
+                    let axis = axis(&["time", "month"])
+                        .context("PFT time tile has no time/month dimension")?;
+                    ensure!(
+                        time <= dimensions[axis].len(),
+                        "PFT tile {} has only {} time slices",
+                        path.display(),
+                        dimensions[axis].len()
+                    );
+                    Ok((axis, time - 1))
+                })
+                .transpose()?,
+        ),
         (None, None, None)
             if dimensions[0].len() == tile_nlon
                 && dimensions[1].len() == tile_nlat
-                && dimensions[2].len() == pft_count =>
+                && dimensions[2].len() == pft_count
+                && requested_time.is_none() =>
         {
-            (2, 1, 0)
+            (2, 1, 0, None)
         }
-        _ => bail!(
-            "PFT tile {} must use named pft/lat/lon dimensions or native lon/lat/pft order",
-            path.display()
-        ),
+        (None, None, None)
+            if dimensions[0].len() == tile_nlon
+                && dimensions[1].len() == tile_nlat
+                && dimensions[2].len() == pft_count
+                && requested_time.is_some() =>
+        {
+            let time = requested_time.expect("checked above");
+            ensure!(
+                time <= dimensions[3].len(),
+                "PFT tile {} has only {} time slices",
+                path.display(),
+                dimensions[3].len()
+            );
+            (2, 1, 0, Some((3, time - 1)))
+        }
+        _ => {
+            let time = if requested_time.is_some() {
+                "/time"
+            } else {
+                ""
+            };
+            bail!(
+                    "PFT tile {} must use named pft/lat/lon{time} dimensions or native lon/lat/pft{time} order",
+                    path.display()
+                )
+        }
     };
     ensure!(
-        pft != latitude && pft != longitude && latitude != longitude,
+        pft != latitude
+            && pft != longitude
+            && latitude != longitude
+            && time.is_none_or(|(time, _)| time != pft && time != latitude && time != longitude),
         "PFT tile {} dimension names are ambiguous",
         path.display()
     );
@@ -816,6 +912,7 @@ fn pft_tile_axes(
         pft,
         latitude,
         longitude,
+        time,
     })
 }
 
@@ -826,7 +923,7 @@ fn read_pft_tile(
     tile_nlon: usize,
     tile_nlat: usize,
 ) -> Result<Vec<f64>> {
-    let mut extents = vec![Extent::Index(0); 3];
+    let mut extents = vec![Extent::Index(0); source.dimensions().len()];
     extents[axes.pft] = Extent::Index(pft);
     extents[axes.latitude] = Extent::SliceCount {
         start: 0,
@@ -838,6 +935,9 @@ fn read_pft_tile(
         count: tile_nlon,
         stride: 1,
     };
+    if let Some((time_axis, time_index)) = axes.time {
+        extents[time_axis] = Extent::Index(time_index);
+    }
     let values = source.get_values::<f64, _>(extents)?;
     ensure!(
         values.len() == tile_nlon * tile_nlat,

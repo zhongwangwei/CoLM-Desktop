@@ -148,3 +148,23 @@ fn pft_index_matches_lai_weighting_crop_and_wmo_paths() {
     assert_eq!(state.patch_index, [7.625, 26.0 / 7.0, 6.0]);
     assert_eq!(state.pft_index, [26.0 / 7.0, 32.0 / 3.0, 26.0 / 7.0, 6.0]);
 }
+
+#[test]
+fn pft_index_keeps_non_pft_land_patches_at_zero() {
+    let layout = FlatPatches::new(vec![1, 17], vec![0, 1, 2], vec![0, 1], vec![None; 2]).unwrap();
+    let state = aggregate_pft_index(
+        &layout,
+        PftIndexInput {
+            pft_offsets: &[0, 1, 1],
+            pft_classes: &[0],
+            patch_kind: &[PftPatchKind::Natural, PftPatchKind::Other],
+            raw_class_count: 1,
+            raw_percent: &[100.0, 0.0],
+            raw_index: &[3.0, 7.0],
+            land_area: &[1.0, 1.0],
+        },
+    )
+    .unwrap();
+    assert_eq!(state.patch_index, [3.0, 0.0]);
+    assert_eq!(state.pft_index, [3.0]);
+}
