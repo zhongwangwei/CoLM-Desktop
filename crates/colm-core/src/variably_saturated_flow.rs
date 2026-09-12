@@ -529,6 +529,105 @@ pub struct VariableSaturatedHomogeneousFluxInput {
     pub lower_hydraulic_conductivity_mm_s: f64,
 }
 
+/// Inputs to `flux_sat_zone_fixed_bc`.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedSaturatedZoneFluxInput<'a> {
+    pub thickness_mm: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub top_pressure_head_mm: f64,
+    pub bottom_pressure_head_mm: f64,
+    pub top_flux_mm_s: Option<f64>,
+    pub bottom_flux_mm_s: Option<f64>,
+}
+
+/// Port of `MOD_Hydro_SoilWater:flux_sat_zone_fixed_bc`.
+pub fn flux_variable_saturated_zone_fixed_boundaries(
+    input: VariableSaturatedSaturatedZoneFluxInput<'_>,
+) -> Result<Vec<f64>> {
+    let layers = validate_saturated_zone_flux(input)?;
+    if let (Some(top_flux_mm_s), Some(bottom_flux_mm_s)) =
+        (input.top_flux_mm_s, input.bottom_flux_mm_s)
+    {
+        if top_flux_mm_s >= bottom_flux_mm_s {
+            return Ok(vec![bottom_flux_mm_s; layers]);
+        }
+    }
+    let mut pressure_head_mm = vec![0.0; layers + 1];
+    pressure_head_mm[0] = input.top_pressure_head_mm;
+    pressure_head_mm[layers] = input.bottom_pressure_head_mm;
+    let mut flux_mm_s = vec![0.0; layers];
+    let mut spread = (1..=layers).collect::<Vec<_>>();
+    for layer in 0..layers {
+        if layer + 1 < layers {
+            pressure_head_mm[layer + 1] =
+                input.saturated_potential_mm[layer].max(input.saturated_potential_mm[layer + 1]);
+        }
+        flux_mm_s[layer] = -input.saturated_hydraulic_conductivity_mm_s[layer]
+            * ((pressure_head_mm[layer + 1] - pressure_head_mm[layer]) / input.thickness_mm[layer]
+                - 1.0);
+    }
+    let mut upper = layers - 1;
+    let mut lower = upper;
+    loop {
+        if lower + 1 < layers {
+            let mut layer = spread
+                .iter()
+                .rposition(|value| *value == spread[lower + 1])
+                .expect("source spread partition always contains its own label");
+            while flux_mm_s[upper] >= flux_mm_s[layer] {
+                lower = layer;
+                let numerator = pressure_head_mm[lower + 1]
+                    - pressure_head_mm[upper]
+                    - input.thickness_mm[upper..=lower].iter().sum::<f64>();
+                let denominator = input.thickness_mm[upper..=lower]
+                    .iter()
+                    .zip(&input.saturated_hydraulic_conductivity_mm_s[upper..=lower])
+                    .map(|(thickness_mm, hydraulic_conductivity_mm_s)| {
+                        thickness_mm / hydraulic_conductivity_mm_s
+                    })
+                    .sum::<f64>();
+                let pooled_flux_mm_s = -numerator / denominator;
+                flux_mm_s[upper..=lower].fill(pooled_flux_mm_s);
+                spread[upper..=lower].fill(upper + 1);
+                if lower + 1 < layers {
+                    for value in &mut spread[lower + 1..] {
+                        *value -= 1;
+                    }
+                    layer = spread
+                        .iter()
+                        .rposition(|value| *value == spread[lower + 1])
+                        .expect("source spread partition always contains its own label");
+                } else {
+                    break;
+                }
+            }
+        }
+        if lower + 1 == layers {
+            if let Some(bottom_flux_mm_s) = input.bottom_flux_mm_s {
+                if flux_mm_s[lower] > bottom_flux_mm_s {
+                    flux_mm_s[upper..=lower].fill(bottom_flux_mm_s);
+                }
+            }
+        }
+        if upper > 0 {
+            upper -= 1;
+            lower = upper;
+        } else {
+            if let Some(top_flux_mm_s) = input.top_flux_mm_s {
+                for flux_mm_s in &mut flux_mm_s {
+                    if top_flux_mm_s > *flux_mm_s {
+                        *flux_mm_s = top_flux_mm_s;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            return Ok(flux_mm_s);
+        }
+    }
+}
+
 /// Port of `MOD_Hydro_SoilWater:flux_inside_hm_soil`.
 pub fn flux_inside_variable_saturated_soil(
     input: VariableSaturatedHomogeneousFluxInput,
@@ -1498,6 +1597,36 @@ fn validate_interface_flux(input: VariableSaturatedInterfaceFluxInput) -> Result
         "VSF interface-flux inputs are invalid"
     );
     Ok(())
+}
+
+fn validate_saturated_zone_flux(
+    input: VariableSaturatedSaturatedZoneFluxInput<'_>,
+) -> Result<usize> {
+    let layers = input.thickness_mm.len();
+    ensure!(
+        layers > 0
+            && input.saturated_potential_mm.len() == layers
+            && input.saturated_hydraulic_conductivity_mm_s.len() == layers
+            && input
+                .thickness_mm
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .saturated_potential_mm
+                .iter()
+                .all(|value| value.is_finite())
+            && input
+                .saturated_hydraulic_conductivity_mm_s
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && [input.top_pressure_head_mm, input.bottom_pressure_head_mm]
+                .iter()
+                .all(|value| value.is_finite())
+            && input.top_flux_mm_s.is_none_or(f64::is_finite)
+            && input.bottom_flux_mm_s.is_none_or(f64::is_finite),
+        "VSF saturated-zone flux inputs are invalid"
+    );
+    Ok(layers)
 }
 
 fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize> {

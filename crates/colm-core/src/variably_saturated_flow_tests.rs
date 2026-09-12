@@ -410,6 +410,64 @@ fn vsf_interface_fluxes_match_current_fortran() {
     close(flux.lower_flux_mm_s, 1.018801708402311e-4, 1.0e-15);
 }
 
+#[test]
+fn vsf_saturated_zone_fluxes_match_current_fortran() {
+    let base = VariableSaturatedSaturatedZoneFluxInput {
+        thickness_mm: &[100.0, 200.0, 300.0],
+        saturated_potential_mm: &[-100.0, -150.0, -120.0],
+        saturated_hydraulic_conductivity_mm_s: &[0.01, 0.005, 0.02],
+        top_pressure_head_mm: -50.0,
+        bottom_pressure_head_mm: -200.0,
+        top_flux_mm_s: None,
+        bottom_flux_mm_s: None,
+    };
+    let free = flux_variable_saturated_zone_fixed_boundaries(base).unwrap();
+    close(free[0], 0.0074, 1.0e-14);
+    close(free[1], 0.0074, 1.0e-14);
+    close(free[2], 0.025_333_333_333_333_333, 1.0e-14);
+
+    let top =
+        flux_variable_saturated_zone_fixed_boundaries(VariableSaturatedSaturatedZoneFluxInput {
+            top_flux_mm_s: Some(0.0002),
+            ..base
+        })
+        .unwrap();
+    assert_eq!(top, free);
+
+    let bottom =
+        flux_variable_saturated_zone_fixed_boundaries(VariableSaturatedSaturatedZoneFluxInput {
+            bottom_flux_mm_s: Some(0.0001),
+            ..base
+        })
+        .unwrap();
+    assert_eq!(bottom, [0.0001; 3]);
+
+    let both =
+        flux_variable_saturated_zone_fixed_boundaries(VariableSaturatedSaturatedZoneFluxInput {
+            top_flux_mm_s: Some(0.0002),
+            bottom_flux_mm_s: Some(0.0001),
+            ..base
+        })
+        .unwrap();
+    assert_eq!(both, [0.0001; 3]);
+
+    let four_layers =
+        flux_variable_saturated_zone_fixed_boundaries(VariableSaturatedSaturatedZoneFluxInput {
+            thickness_mm: &[80.0, 160.0, 240.0, 120.0],
+            saturated_potential_mm: &[-90.0, -130.0, -110.0, -170.0],
+            saturated_hydraulic_conductivity_mm_s: &[0.003, 0.02, 0.005, 0.01],
+            top_pressure_head_mm: -40.0,
+            bottom_pressure_head_mm: -220.0,
+            top_flux_mm_s: Some(0.001),
+            bottom_flux_mm_s: Some(0.1),
+        })
+        .unwrap();
+    close(four_layers[0], 0.004875, 1.0e-14);
+    close(four_layers[1], 0.0075, 1.0e-14);
+    close(four_layers[2], 0.0075, 1.0e-14);
+    close(four_layers[3], 0.019_166_666_666_666_665, 1.0e-14);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
