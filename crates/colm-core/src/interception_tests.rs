@@ -96,3 +96,18 @@ fn vegetation_snow_partition_matches_current_fortran() {
     close(fluxes.retained_rain_kg_m2_s, 0.000_072_794_694_513_916_37);
     close(fluxes.retained_snow_kg_m2_s, 0.000_053_851_388_273_443_07);
 }
+
+#[test]
+fn leaf_wetness_matches_leaf_temperature_dewfraction() {
+    let water = CanopyWater {
+        total_mm: 0.05,
+        rain_mm: 0.03,
+        snow_mm: 0.02,
+    };
+    let without_snow = canopy_wetness(2.0, 0.5, 0.1, water, false).unwrap();
+    close(without_snow.wet_fraction, 0.341_995_178_399_476_24);
+    close(without_snow.dry_leaf_fraction, 0.526_403_857_280_419);
+    let with_snow = canopy_wetness(2.0, 0.5, 0.1, water, true).unwrap();
+    close(with_snow.wet_fraction, 0.253_925_327_561_347_67);
+    close(with_snow.dry_leaf_fraction, 0.596_859_737_950_921_8);
+}

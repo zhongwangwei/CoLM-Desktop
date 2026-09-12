@@ -82,7 +82,8 @@ pub use colm_core::{
     UrbanLucyState, UrbanState,
 };
 pub use colm_core::{
-    CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyRoughness, CanopyWindProfileInput,
+    CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyRoughness, CanopyWetness,
+    CanopyWindProfileInput,
 };
 pub use colm_core::{
     CanopyMoninObukhovInput, CanopyMoninObukhovState, MoninObukhovInitialInput,

@@ -48,6 +48,65 @@ pub struct CanopyInterceptionFluxes {
     pub canopy_phase_heat_w_m2: f64,
 }
 
+/// Wet canopy area and dry transpiring leaf area for one canopy water state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanopyWetness {
+    pub wet_fraction: f64,
+    pub dry_leaf_fraction: f64,
+}
+
+/// Port of `MOD_LeafTemperature:dewfraction`.
+///
+/// `sigf` is deliberately absent: upstream no longer uses it, so the common
+/// interception water pools are the sole state input for leaf-temperature wetness.
+pub fn canopy_wetness(
+    leaf_area_index: f64,
+    stem_area_index: f64,
+    maximum_dew_mm: f64,
+    water: CanopyWater,
+    vegetation_snow: bool,
+) -> Result<CanopyWetness> {
+    let leaf_stem_area = leaf_area_index + stem_area_index;
+    ensure!(
+        [
+            leaf_area_index,
+            stem_area_index,
+            maximum_dew_mm,
+            water.total_mm,
+            water.rain_mm,
+            water.snow_mm,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && leaf_area_index >= 0.0
+            && stem_area_index >= 0.0
+            && leaf_stem_area > 0.0
+            && maximum_dew_mm > 0.0
+            && water.total_mm >= 0.0
+            && water.rain_mm >= 0.0
+            && water.snow_mm >= 0.0,
+        "canopy wetness inputs are invalid"
+    );
+    let coverage = |depth_mm: f64, capacity_mm: f64| {
+        if depth_mm > 0.0 {
+            (depth_mm / capacity_mm).powf(f77(0.666_666_7_f32)).min(1.0)
+        } else {
+            0.0
+        }
+    };
+    let wet_fraction = if vegetation_snow {
+        let rain = coverage(water.rain_mm, maximum_dew_mm * leaf_stem_area);
+        let snow = coverage(water.snow_mm, f77(48.0) * maximum_dew_mm * leaf_stem_area);
+        (rain + snow - rain * snow).min(1.0)
+    } else {
+        coverage(water.total_mm, maximum_dew_mm * leaf_stem_area)
+    };
+    Ok(CanopyWetness {
+        wet_fraction,
+        dry_leaf_fraction: (1.0 - wet_fraction) * leaf_area_index / leaf_stem_area,
+    })
+}
+
 /// Port of MOD_LeafInterception.F90:LEAF_interception_CoLM2014.
 ///
 /// The PFT and PC wrapper is intentionally not duplicated: it calls this same

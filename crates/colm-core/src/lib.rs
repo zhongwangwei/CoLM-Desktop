@@ -59,7 +59,8 @@ pub use hydrology::{
 pub use linear::solve_tridiagonal;
 
 pub use interception::{
-    intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput, CanopyWater,
+    canopy_wetness, intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput,
+    CanopyWater, CanopyWetness,
 };
 pub use monin_obukhov::{
     canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,
