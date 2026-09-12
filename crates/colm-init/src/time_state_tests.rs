@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn soil_hydraulics_match_unfrozen_and_frozen_initialization_branches() {
+    let hydraulic = derive_initial_soil_hydraulics(
+        0,
+        &[283.0, 270.0],
+        &[200.0, 100.0],
+        &[0.0, 1000.0, 1500.0],
+        &[0.4, 0.4],
+        &[0.0, 0.0],
+        &[-100.0, -100.0],
+        &[0.01, 0.01],
+        &[SoilHydraulicModel::Campbell { bsw: 4.0 }; 2],
+    )
+    .unwrap();
+    assert_eq!(hydraulic.matric_potential_mm[0], -1600.0);
+    assert!(hydraulic.hydraulic_conductivity_mm_s[0] > 0.0);
+    assert!(hydraulic.hydraulic_conductivity_mm_s[0] < 0.01);
+    let frozen = 1.0e3 * 0.3336e6 / 9.80616 * (270.0 - 273.16) / 270.0;
+    assert_eq!(hydraulic.matric_potential_mm[1], frozen);
+    assert_eq!(hydraulic.hydraulic_conductivity_mm_s[1], 0.0);
+}
+
+#[test]
 fn snow_layers_match_fortran_boundary_bands_and_signed_node_recurrence() {
     let state = initialize_snow_layers(0, 0.05, 5).unwrap();
     assert_eq!(state.layer_count, -2);

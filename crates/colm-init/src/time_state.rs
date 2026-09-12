@@ -24,6 +24,70 @@ pub struct ColdSoilState {
     pub water_table_depth_m: f64,
 }
 
+/// Soil matric potential and conductivity initialized after the snow/soil state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoilHydraulicState {
+    pub matric_potential_mm: Vec<f64>,
+    pub hydraulic_conductivity_mm_s: Vec<f64>,
+}
+
+/// Applies `IniTimeVar`'s soil matrix-potential and hydraulic-conductivity loop.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_initial_soil_hydraulics(
+    patch_type: i32,
+    temperature_k: &[f64],
+    liquid_water_kg_m2: &[f64],
+    interface_mm: &[f64],
+    porosity: &[f64],
+    residual_water: &[f64],
+    psi_s_mm: &[f64],
+    saturated_conductivity_mm_s: &[f64],
+    model: &[SoilHydraulicModel],
+) -> Result<SoilHydraulicState> {
+    let layers = temperature_k.len();
+    ensure!(
+        layers > 0
+            && liquid_water_kg_m2.len() == layers
+            && interface_mm.len() == layers + 1
+            && porosity.len() == layers
+            && residual_water.len() == layers
+            && psi_s_mm.len() == layers
+            && saturated_conductivity_mm_s.len() == layers
+            && model.len() == layers,
+        "soil hydraulic fields have incompatible dimensions"
+    );
+    let mut matric_potential_mm = Vec::with_capacity(layers);
+    let mut hydraulic_conductivity_mm_s = Vec::with_capacity(layers);
+    for layer in 0..layers {
+        if patch_type == 3 || temperature_k[layer] < 273.16 {
+            matric_potential_mm.push(
+                1.0e3 * 0.3336e6 / 9.80616 * (temperature_k[layer] - 273.16) / temperature_k[layer],
+            );
+            hydraulic_conductivity_mm_s.push(0.0);
+        } else {
+            let vliq = liquid_water_kg_m2[layer] / (interface_mm[layer + 1] - interface_mm[layer]);
+            let psi = crate::soil_psi_from_vliq(
+                vliq,
+                porosity[layer],
+                residual_water[layer],
+                psi_s_mm[layer],
+                model[layer],
+            );
+            matric_potential_mm.push(psi);
+            hydraulic_conductivity_mm_s.push(crate::soil_hydraulic_conductivity(
+                psi,
+                psi_s_mm[layer],
+                saturated_conductivity_mm_s[layer],
+                model[layer],
+            ));
+        }
+    }
+    Ok(SoilHydraulicState {
+        matric_potential_mm,
+        hydraulic_conductivity_mm_s,
+    })
+}
+
 /// Numerical Recipes interpolation used by CoLM's `MOD_Utils::polint`.
 pub fn interpolate_profile(depth_m: &[f64], values: &[f64], target_depth_m: f64) -> Result<f64> {
     let count = depth_m.len();

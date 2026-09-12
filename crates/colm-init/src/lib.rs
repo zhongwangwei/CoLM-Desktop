@@ -20,8 +20,8 @@ pub use static_state::{
     BedrockState, HydraulicModel, LakeState, SoilField, SoilLayerInput, SoilState, MISSING,
 };
 pub use time_state::{
-    initialize_cold_soil, initialize_profile_soil, initialize_snow_layers, interpolate_profile,
-    ColdSoilState, SnowState,
+    derive_initial_soil_hydraulics, initialize_cold_soil, initialize_profile_soil,
+    initialize_snow_layers, interpolate_profile, ColdSoilState, SnowState, SoilHydraulicState,
 };
 pub use urban::{derive_urban_geometry, UrbanConfig, UrbanInput, UrbanState};
 pub use vegetation::{derive_igbp_canopy, derive_usgs_canopy, CanopyState, PftCanopyInput};
