@@ -34,6 +34,9 @@ pub use pft::{
     aggregate_pft_fractions, aggregate_pft_index, PftFractionInput, PftIndexInput, PftIndexState,
     PftPatchKind,
 };
-pub use surface::{FlatPatches, SoilBrightness, Topography, SURFACE_MISSING};
+pub use surface::{
+    derive_topographic_wetness, FlatPatches, SoilBrightness, TopographicWetness, Topography,
+    SURFACE_MISSING,
+};
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandPatches, FlatMesh};

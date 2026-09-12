@@ -85,6 +85,28 @@ fn hyper_albedo_scales_before_median_and_marks_water_and_ice_missing() {
 }
 
 #[test]
+fn topographic_wetness_matches_threshold_fit_and_short_sample_fallback() {
+    assert_eq!(derive_topographic_wetness(&[1.0; 24]).unwrap(), None);
+    let values = (0..25).map(f64::from).collect::<Vec<_>>();
+    let output = derive_topographic_wetness(&values).unwrap().unwrap();
+    assert_eq!(output.mean_twi, 12.0);
+    assert_eq!(output.fsatmax, 0.52);
+    assert_eq!(output.alp_twi, 0.1);
+    assert_eq!(output.chi_twi, 0.01);
+    assert_eq!(output.mu_twi, 0.0);
+    assert_eq!(output.fsatdcf, 0.2);
+
+    let skewed = (0..24)
+        .map(f64::from)
+        .chain(std::iter::once(100.0))
+        .collect::<Vec<_>>();
+    let skewed = derive_topographic_wetness(&skewed).unwrap().unwrap();
+    assert!(skewed.alp_twi > 0.1);
+    assert!(skewed.chi_twi > 0.01);
+    assert!(skewed.mu_twi > 0.0);
+}
+
+#[test]
 fn bedrock_is_area_weighted_and_wmo_patches_reuse_the_prior_value() {
     let layout = FlatPatches::new(
         vec![1, 1],

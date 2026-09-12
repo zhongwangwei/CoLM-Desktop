@@ -49,6 +49,93 @@ pub struct SoilBrightness {
     pub dry_near_infrared: Vec<f64>,
 }
 
+/// Fitted TOPMODEL parameters from one gathered topographic-wetness sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TopographicWetness {
+    pub mean_twi: f64,
+    pub fsatmax: f64,
+    pub fsatdcf: f64,
+    pub alp_twi: f64,
+    pub chi_twi: f64,
+    pub mu_twi: f64,
+}
+
+/// Calculates the valid-sample branch of `Aggregation_TopoWetness`.
+///
+/// Callers gather all 25 raw TWI depths for one patch or element first.  A
+/// return value of `None` is the Fortran routine's `npxl < 25` condition and
+/// must be filled from the owning element's result by the topology adapter.
+pub fn derive_topographic_wetness(raw_twi: &[f64]) -> Result<Option<TopographicWetness>> {
+    let mut values = raw_twi
+        .iter()
+        .copied()
+        .filter(|value| *value > -1.0e3)
+        .collect::<Vec<_>>();
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "valid topographic-wetness values must be finite"
+    );
+    if values.len() < 25 {
+        return Ok(None);
+    }
+    values.sort_unstable_by(f64::total_cmp);
+    let count = values.len();
+    let count_f = count as f64;
+    let mean_twi = values.iter().sum::<f64>() / count_f;
+    let mut mean_index = 0;
+    while values[mean_index] < mean_twi && mean_index < count - 2 {
+        mean_index += 1;
+    }
+    let fsatmax = 1.0 - mean_index as f64 / count_f;
+    let mut xx_yy_sum = 0.0;
+    let mut xx_squared_sum = 0.0;
+    for (index, &value) in values[mean_index..count - 1].iter().enumerate() {
+        let rank = mean_index + index + 1;
+        let xx = -(value - mean_twi);
+        let yy = ((1.0 - rank as f64 / count_f) / fsatmax).ln();
+        xx_yy_sum += xx * yy;
+        xx_squared_sum += xx * xx;
+    }
+    ensure!(
+        xx_squared_sum > 0.0 && xx_squared_sum.is_finite(),
+        "topographic-wetness samples cannot fit fsatdcf"
+    );
+    let fsatdcf = xx_yy_sum / xx_squared_sum;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean_twi).powi(2))
+        .sum::<f64>()
+        / (count_f - 1.0);
+    let sigma_twi = variance.sqrt();
+    let (alp_twi, chi_twi, mu_twi) = if sigma_twi > 0.0 {
+        let skew_twi = count_f / ((count_f - 1.0) * (count_f - 2.0))
+            * values
+                .iter()
+                .map(|value| (value - mean_twi).powi(3))
+                .sum::<f64>()
+            / sigma_twi.powi(3);
+        if skew_twi > 0.0 {
+            (
+                (2.0 / skew_twi).powi(2),
+                sigma_twi * skew_twi / 2.0,
+                mean_twi - 2.0 * sigma_twi / skew_twi,
+            )
+        } else {
+            (0.1, 0.01, 0.0)
+        }
+    } else {
+        (0.1, 0.01, 0.0)
+    };
+    Ok(Some(TopographicWetness {
+        mean_twi,
+        fsatmax: fsatmax.clamp(0.1, 1.0),
+        fsatdcf: fsatdcf.clamp(0.2, 2.0),
+        alp_twi: alp_twi.clamp(0.1, 50.0),
+        chi_twi: chi_twi.clamp(0.01, 4.0),
+        mu_twi: mu_twi.clamp(0.0, 12.0),
+    }))
+}
+
 impl FlatPatches {
     /// Build a validated flattened patch layout.
     pub fn new(
