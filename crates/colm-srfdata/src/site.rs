@@ -9,8 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
+use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
@@ -1368,13 +1369,7 @@ pub fn materialize_single_point_surface(
     let target = landdata_dir.join("srfdata.nc");
     let readiness = audit(source, mode, None, crop_enabled)?;
     if readiness.self_contained() {
-        std::fs::copy(source, &target).with_context(|| {
-            format!(
-                "cannot materialize self-contained {} as {}",
-                source.display(),
-                target.display()
-            )
-        })?;
+        publish_single_point_surface(source, &target, mode)?;
         return Ok(None);
     }
 
@@ -1387,14 +1382,171 @@ pub fn materialize_single_point_surface(
             readiness.needs_external.join(", ")
         ));
     }
-    std::fs::rename(&temporary, &target).with_context(|| {
+    publish_single_point_surface(&temporary, &target, mode)?;
+    std::fs::remove_file(&temporary)?;
+    Ok(Some(report))
+}
+
+fn publish_single_point_surface(source: &Path, target: &Path, mode: SiteMode) -> Result<()> {
+    if matches!(mode, SiteMode::Igbp | SiteMode::Usgs) {
+        return write_single_point_surface(source, target, mode);
+    }
+    // PFT/PC need their vector arrays; their dedicated upstream projection is
+    // migrated separately, so retain the complete self-contained contract.
+    std::fs::copy(source, target).with_context(|| {
         format!(
-            "cannot publish materialized surface {} as {}",
-            temporary.display(),
+            "cannot materialize {} as {}",
+            source.display(),
             target.display()
         )
     })?;
-    Ok(Some(report))
+    Ok(())
+}
+
+/// Emit the eight-layer single-point artifact written by `write_surface_data_single`.
+fn write_single_point_surface(source: &Path, target: &Path, mode: SiteMode) -> Result<()> {
+    const SOIL: [&str; 26] = [
+        "soil_vf_quartz_mineral",
+        "soil_vf_gravels",
+        "soil_vf_sand",
+        "soil_vf_clay",
+        "soil_vf_om",
+        "soil_wf_gravels",
+        "soil_wf_sand",
+        "soil_wf_clay",
+        "soil_wf_om",
+        "soil_OM_density",
+        "soil_BD_all",
+        "soil_theta_s",
+        "soil_k_s",
+        "soil_csol",
+        "soil_tksatu",
+        "soil_tksatf",
+        "soil_tkdry",
+        "soil_k_solids",
+        "soil_psi_s",
+        "soil_lambda",
+        "soil_theta_r",
+        "soil_alpha_vgm",
+        "soil_L_vgm",
+        "soil_n_vgm",
+        "soil_BA_alpha",
+        "soil_BA_beta",
+    ];
+    let input =
+        netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
+    let years = values_i32(&input, "LAI_year")?;
+    let mut output =
+        netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
+    output.add_dimension("patch", 1)?;
+    output.add_dimension("LAI_year", years.len())?;
+    output.add_dimension("month", 12)?;
+    output.add_dimension("soil", 8)?;
+    emit_scalar(&mut output, "latitude", scalar_f64(&input, "latitude")?)?;
+    emit_scalar(&mut output, "longitude", scalar_f64(&input, "longitude")?)?;
+    let classification = match mode {
+        SiteMode::Usgs => "USGS_classification",
+        _ => "IGBP_classification",
+    };
+    output
+        .add_variable::<i32>(classification, &[])?
+        .put_values(&[scalar_i32(&input, classification)?], ..)?;
+    emit_scalar(
+        &mut output,
+        "canopy_height",
+        scalar_f64(&input, "canopy_height")?,
+    )?;
+    output
+        .add_variable::<i32>("LAI_year", &["LAI_year"])?
+        .put_values(&years, ..)?;
+    for name in ["LAI_monthly", "SAI_monthly"] {
+        emit_f64(
+            &mut output,
+            name,
+            &["LAI_year", "month"],
+            &values_f64(&input, name)?,
+        )?;
+    }
+    for name in [
+        "lakedepth",
+        "soil_s_v_alb",
+        "soil_d_v_alb",
+        "soil_s_n_alb",
+        "soil_d_n_alb",
+    ] {
+        emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
+    }
+    for name in SOIL {
+        let values = values_f64(&input, name)?;
+        ensure!(
+            values.len() >= 8,
+            "{name} has fewer than CoLM's eight soil layers"
+        );
+        emit_f64(&mut output, name, &["soil"], &values[..8])?;
+    }
+    output
+        .add_variable::<i32>("soil_texture", &[])?
+        .put_values(&[scalar_i32(&input, "soil_texture")?], ..)?;
+    for name in ["elevation", "elvstd", "sloperatio"] {
+        emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
+    }
+    Ok(())
+}
+
+fn values_f64(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    match variable.vartype() {
+        NcVariableType::Float(FloatType::F64) => Ok(variable.get_values::<f64, _>(..)?),
+        NcVariableType::Float(FloatType::F32) => Ok(variable
+            .get_values::<f32, _>(..)?
+            .into_iter()
+            .map(f64::from)
+            .collect()),
+        kind => bail!("{name} must be floating-point, got {kind:?}"),
+    }
+}
+
+fn values_i32(file: &netcdf::File, name: &str) -> Result<Vec<i32>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    match variable.vartype() {
+        NcVariableType::Int(IntType::I32) => Ok(variable.get_values::<i32, _>(..)?),
+        kind => bail!("{name} must be int32, got {kind:?}"),
+    }
+}
+
+fn scalar_f64(file: &netcdf::File, name: &str) -> Result<f64> {
+    values_f64(file, name)?
+        .into_iter()
+        .next()
+        .context(format!("{name} is empty"))
+}
+
+fn scalar_i32(file: &netcdf::File, name: &str) -> Result<i32> {
+    values_i32(file, name)?
+        .into_iter()
+        .next()
+        .context(format!("{name} is empty"))
+}
+
+fn emit_scalar(file: &mut netcdf::FileMut, name: &str, value: f64) -> Result<()> {
+    file.add_variable::<f64>(name, &[])?
+        .put_values(&[value], ..)?;
+    Ok(())
+}
+
+fn emit_f64(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[f64],
+) -> Result<()> {
+    file.add_variable::<f64>(name, dimensions)?
+        .put_values(values, ..)?;
+    Ok(())
 }
 
 /// CoLM 自己的 IGBP 冠层顶高查表（`MOD_Const_LC.F90:406-411`，`htop0_igbp`）。
