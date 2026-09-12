@@ -18,6 +18,7 @@ pub mod pft;
 pub mod raster;
 pub mod shapefile;
 pub mod site;
+pub mod spatial;
 pub mod surface;
 pub mod texture;
 pub mod topology;
@@ -37,6 +38,10 @@ pub use pft::{
 pub use site::{
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
     single_point_surface_run_from_namelist, SinglePointSurfaceRun, SiteMode,
+};
+pub use spatial::{
+    build_spatial_topology, write_spatial_topology, BlockLayout, PixelAxes, SpatialGrid,
+    SpatialInputKind, SpatialTopology,
 };
 pub use surface::{
     derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,
