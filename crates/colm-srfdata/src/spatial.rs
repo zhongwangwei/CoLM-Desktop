@@ -872,6 +872,81 @@ pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
     Ok(())
 }
 
+/// Write layer-major patch data as a CoLM two-dimensional vector block.
+///
+/// Values use `layer * patches + patch`; NetCDF stores the equivalent
+/// `(patch, layer)` order used by Fortran's vector writer on disk.
+#[allow(clippy::too_many_arguments)]
+pub fn write_landpatch_layered_vector(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    directory: &str,
+    file_stem: &str,
+    variable: &str,
+    layer_name: &str,
+    layers: usize,
+    values: &[f64],
+) -> Result<()> {
+    ensure!(
+        layers > 0,
+        "layered land-patch output needs at least one layer"
+    );
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    for (label, value) in [
+        ("directory", directory),
+        ("file stem", file_stem),
+        ("variable", variable),
+        ("layer dimension", layer_name),
+    ] {
+        ensure!(
+            !value.is_empty() && !value.contains('/'),
+            "layered land-patch {label} must be one NetCDF path/name component"
+        );
+    }
+    validate_patches(&topology.mesh, land_patches)?;
+    ensure!(
+        values.len() == layers * land_patches.len(),
+        "{variable} has {} values; expected {layers} x {} patches",
+        values.len(),
+        land_patches.len()
+    );
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let output = landdata
+        .as_ref()
+        .join(directory)
+        .join(format!("{land_cover_year:04}"));
+    std::fs::create_dir_all(&output)?;
+    let mut grouped = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (patch, element) in land_patches.element_ids.iter().enumerate() {
+        grouped
+            .entry(
+                *assignments
+                    .get(element)
+                    .with_context(|| format!("land patch {patch} references unknown element"))?,
+            )
+            .or_default()
+            .push(patch);
+    }
+    for ((x, y), patches) in grouped {
+        let mut output_values = Vec::with_capacity(patches.len() * layers);
+        for patch in patches {
+            for layer in 0..layers {
+                output_values.push(values[layer * land_patches.len() + patch]);
+            }
+        }
+        let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
+        file.add_dimension(layer_name, layers)?;
+        file.add_dimension("patch", output_values.len() / layers)?;
+        file.add_variable::<f64>(variable, &["patch", layer_name])?
+            .put_values(&output_values, (.., ..))?;
+        file.close()?;
+    }
+    Ok(())
+}
+
 /// Write the common topology artifacts expected by `mkinidata` and `colm`.
 ///
 /// `landpatch` must be constructed from real land-cover data before this call;

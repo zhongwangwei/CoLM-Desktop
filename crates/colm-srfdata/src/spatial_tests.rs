@@ -387,6 +387,30 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             .unwrap(),
         vec![2.0, 3.0]
     );
+    write_landpatch_layered_vector(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "soil",
+        "lake_soilc_patches",
+        "lake_soilc_patches",
+        "soil",
+        2,
+        &[10.0, 20.0, 100.0, 200.0],
+    )
+    .unwrap();
+    let layered = netcdf::open(landdata.join("soil/2005/lake_soilc_patches_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&layered, "lake_soilc_patches"), ["patch", "soil"]);
+    assert_eq!(
+        layered
+            .variable("lake_soilc_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![10.0, 100.0, 20.0, 200.0]
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }
