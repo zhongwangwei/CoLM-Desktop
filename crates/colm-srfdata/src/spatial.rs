@@ -654,10 +654,43 @@ pub fn write_landpatch_scalar<T: NcTypeDescriptor + Copy>(
     variable: &str,
     values: &[T],
 ) -> Result<()> {
+    write_landpatch_vector(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        blocks,
+        directory,
+        variable,
+        variable,
+        values,
+    )
+}
+
+/// Write one LCT-patch vector with separate NetCDF file and variable names.
+///
+/// Monthly LAI/SAI use `LAI_patches01.nc`/`LAI_patches`, unlike the scalar
+/// fields whose file stem equals their variable name.
+#[allow(clippy::too_many_arguments)]
+pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    directory: &str,
+    file_stem: &str,
+    variable: &str,
+    values: &[T],
+) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     ensure!(
         !directory.is_empty() && !directory.contains('/'),
         "land-patch output directory must be one path component"
+    );
+    ensure!(
+        !file_stem.is_empty() && !file_stem.contains('/'),
+        "land-patch output file stem must be one path component"
     );
     ensure!(
         !variable.is_empty() && !variable.contains('/'),
@@ -690,7 +723,7 @@ pub fn write_landpatch_scalar<T: NcTypeDescriptor + Copy>(
             .iter()
             .map(|patch| values[*patch])
             .collect::<Vec<_>>();
-        let mut file = netcdf::create(output.join(block_filename(variable, x, y, blocks)?))?;
+        let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
         file.add_dimension("patch", output_values.len())?;
         file.add_variable::<T>(variable, &["patch"])?
             .put_values(&output_values, ..)?;

@@ -347,6 +347,27 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             .unwrap(),
         vec![3, 7]
     );
+    write_landpatch_vector(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "LAI",
+        "LAI_patches01",
+        "LAI_patches",
+        &[2.0, 3.0],
+    )
+    .unwrap();
+    assert_eq!(
+        netcdf::open(landdata.join("LAI/2005/LAI_patches01_w180_s90.nc"))
+            .unwrap()
+            .variable("LAI_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![2.0, 3.0]
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }

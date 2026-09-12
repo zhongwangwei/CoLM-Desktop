@@ -6,8 +6,9 @@ use anyhow::{bail, Context, Result};
 use colm_srfdata::{
     build_lct_land_patches_from_raster, build_spatial_topology, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights, read_mesh_raster_f64,
-    read_mesh_raster_i32, read_mesh_tiled_raster_f64, write_landpatch_scalar,
-    write_spatial_topology, BlockLayout, SiteMode, SpatialInputKind, COLM_1KM, COLM_500M,
+    read_mesh_raster_i32, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_time_f64,
+    write_landpatch_scalar, write_landpatch_vector, write_spatial_topology, BlockLayout, SiteMode,
+    SpatialInputKind, COLM_1KM, COLM_500M,
 };
 
 fn main() -> Result<()> {
@@ -37,6 +38,7 @@ struct SpatialLctArgs {
     topography: Option<PathBuf>,
     bedrock: Option<PathBuf>,
     plant_tiles: Option<PathBuf>,
+    monthly_vegetation_years: Vec<i32>,
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
@@ -242,6 +244,69 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &forest_height,
         )?;
     }
+    if !args.monthly_vegetation_years.is_empty() {
+        if args.land_cover != SiteMode::Igbp {
+            bail!("--monthly-vegetation-year supports IGBP only")
+        }
+        let tiles = args
+            .plant_tiles
+            .as_deref()
+            .context("--monthly-vegetation-year requires --plant-tiles")?;
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        for &year in &args.monthly_vegetation_years {
+            let (suffix, lai_name) = monthly_vegetation_source("MONTHLY_LC_LAI", year)?;
+            let (_, sai_name) = monthly_vegetation_source("MONTHLY_LC_SAI", year)?;
+            for month in 1..=12 {
+                let lai = layout.aggregate_patch_vegetation_index(
+                    &read_mesh_tiled_raster_time_f64(
+                        tiles,
+                        &suffix,
+                        &lai_name,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                    &area,
+                )?;
+                let sai = layout.aggregate_patch_vegetation_index(
+                    &read_mesh_tiled_raster_time_f64(
+                        tiles,
+                        &suffix,
+                        &sai_name,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                    &area,
+                )?;
+                write_landpatch_vector(
+                    &args.landdata,
+                    year,
+                    &topology,
+                    &patches,
+                    &args.blocks,
+                    "LAI",
+                    &format!("LAI_patches{month:02}"),
+                    "LAI_patches",
+                    &lai,
+                )?;
+                write_landpatch_vector(
+                    &args.landdata,
+                    year,
+                    &topology,
+                    &patches,
+                    &args.blocks,
+                    "LAI",
+                    &format!("SAI_patches{month:02}"),
+                    "SAI_patches",
+                    &sai,
+                )?;
+            }
+        }
+    }
     println!(
         "wrote {} spatial land elements and {} LCT patches to {}",
         topology.land_elements.element_ids.len(),
@@ -272,6 +337,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut topography = None;
     let mut bedrock = None;
     let mut plant_tiles = None;
+    let mut monthly_vegetation_years = Vec::new();
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -342,6 +408,18 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--monthly-vegetation-year" => {
+                let year = args
+                    .get(index + 1)
+                    .context("--monthly-vegetation-year needs a year")?
+                    .parse::<i32>()
+                    .context("invalid monthly vegetation year")?;
+                if year < 0 {
+                    bail!("monthly vegetation year must be non-negative")
+                }
+                monthly_vegetation_years.push(year);
+                index += 2;
+            }
             other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
         }
     }
@@ -360,6 +438,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         topography,
         bedrock,
         plant_tiles,
+        monthly_vegetation_years,
     })
 }
 
@@ -445,8 +524,21 @@ fn parse_land_cover(value: &str) -> Result<SiteMode> {
     }
 }
 
+fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)> {
+    if year < 0 {
+        bail!("monthly vegetation year must be non-negative")
+    }
+    let source_year = if year < 2000 { year / 5 * 5 } else { year };
+    let name = if year < 2000 {
+        format!("{prefix}_{year:04}")
+    } else {
+        prefix.to_owned()
+    };
+    Ok((format!("MOD{source_year:04}"), name))
+}
+
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s]"
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-brightness soil_brightness.nc] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -479,6 +571,10 @@ mod tests {
             "bedrock.nc".into(),
             "--plant-tiles".into(),
             "plant_15s".into(),
+            "--monthly-vegetation-year".into(),
+            "1999".into(),
+            "--monthly-vegetation-year".into(),
+            "2005".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Unstructured);
@@ -493,6 +589,7 @@ mod tests {
         assert_eq!(parsed.topography, Some(PathBuf::from("topography.nc")));
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
         assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
+        assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
         assert!(parse_spatial_lct(&[
@@ -503,5 +600,17 @@ mod tests {
             "2005".into(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn historical_monthly_vegetation_uses_the_upstream_five_year_source() {
+        assert_eq!(
+            monthly_vegetation_source("MONTHLY_LC_LAI", 1999).unwrap(),
+            ("MOD1995".into(), "MONTHLY_LC_LAI_1999".into())
+        );
+        assert_eq!(
+            monthly_vegetation_source("MONTHLY_LC_SAI", 2005).unwrap(),
+            ("MOD2005".into(), "MONTHLY_LC_SAI".into())
+        );
     }
 }
