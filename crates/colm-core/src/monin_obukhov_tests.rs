@@ -87,6 +87,33 @@ fn canopy_and_initialization_match_current_fortran() {
 }
 
 #[test]
+fn large_eddy_profile_matches_current_fortran() {
+    let scheme = SurfaceLayerScheme::LargeEddy {
+        boundary_layer_height_m: 1000.0,
+    };
+    let surface = monin_obukhov_with_scheme(unstable(), scheme).unwrap();
+    close(surface.friction_velocity_m_s, 3.172_171_632_789_877_5e-1);
+    close(surface.momentum, 5.043_863_349_962_189);
+    close(surface.momentum_at_10m, 4.333_366_626_521_974);
+    close(surface.heat, 6.911_964_179_361_94);
+    let canopy = canopy_monin_obukhov_with_scheme(
+        CanopyMoninObukhovInput {
+            surface: unstable(),
+            top_layer_displacement_m: 12.0,
+            top_layer_roughness_m: 0.1,
+            canopy_top_height_m: 15.0,
+        },
+        scheme,
+    )
+    .unwrap();
+    close(canopy.momentum_at_canopy_top, 4.632_162_479_462_292);
+    close(
+        canopy.surface.friction_velocity_m_s,
+        surface.friction_velocity_m_s,
+    );
+}
+
+#[test]
 fn diffusivity_preserves_the_below_displacement_zero_branch() {
     assert_eq!(
         monin_obukhov_diffusivity(2.0, -100.0, 0.3, 2.0).unwrap(),

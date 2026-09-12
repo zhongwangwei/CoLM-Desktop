@@ -43,9 +43,11 @@ pub use interception::{
     intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput, CanopyWater,
 };
 pub use monin_obukhov::{
-    canopy_monin_obukhov, initialize_monin_obukhov, integrated_monin_obukhov_diffusivity,
-    monin_obukhov, monin_obukhov_diffusivity, CanopyMoninObukhovInput, CanopyMoninObukhovState,
+    canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,
+    integrated_monin_obukhov_diffusivity, monin_obukhov, monin_obukhov_diffusivity,
+    monin_obukhov_with_scheme, CanopyMoninObukhovInput, CanopyMoninObukhovState,
     MoninObukhovInitialInput, MoninObukhovInitialState, MoninObukhovInput, MoninObukhovState,
+    SurfaceLayerScheme,
 };
 pub use net_solar::{
     net_solar, LocalNoonShortwave, NetSolarFluxes, NetSolarInput, ShortwaveForcing,

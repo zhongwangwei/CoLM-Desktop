@@ -28,6 +28,14 @@ pub struct MoninObukhovInput {
     pub stability_adjusted_wind_m_s: f64,
 }
 
+/// CoLM's selectable surface-layer profile. `LargeEddy` is
+/// `MOD_TurbulenceLEddy`'s LZD2022 branch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SurfaceLayerScheme {
+    Standard,
+    LargeEddy { boundary_layer_height_m: f64 },
+}
+
 /// Outputs of CoLM's `moninobuk` routine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MoninObukhovState {
@@ -82,14 +90,24 @@ pub struct MoninObukhovInitialState {
 
 /// Port of `MOD_FrictionVelocity:moninobuk`.
 pub fn monin_obukhov(input: MoninObukhovInput) -> Result<MoninObukhovState> {
+    monin_obukhov_with_scheme(input, SurfaceLayerScheme::Standard)
+}
+
+/// Ports `moninobuk` and `MOD_TurbulenceLEddy:moninobuk_leddy` through one
+/// profile contract, so a caller's CBL switch changes only the momentum branch.
+pub fn monin_obukhov_with_scheme(
+    input: MoninObukhovInput,
+    scheme: SurfaceLayerScheme,
+) -> Result<MoninObukhovState> {
     validate_surface(input)?;
-    let momentum = momentum_integral(
+    let momentum_scheme = MomentumScheme::new(input, scheme)?;
+    let momentum = momentum_scheme.integral(
         input.wind_height_m - input.displacement_height_m,
         input.momentum_roughness_m,
         input.obukhov_length_m,
     );
     let friction_velocity_m_s = VON_KARMAN * input.stability_adjusted_wind_m_s / momentum;
-    let momentum_at_10m = momentum_integral(
+    let momentum_at_10m = momentum_scheme.integral(
         10.0 + input.momentum_roughness_m,
         input.momentum_roughness_m,
         input.obukhov_length_m,
@@ -127,6 +145,15 @@ pub fn monin_obukhov(input: MoninObukhovInput) -> Result<MoninObukhovState> {
 
 /// Port of `MOD_FrictionVelocity:moninobukm` for canopy-layer callers.
 pub fn canopy_monin_obukhov(input: CanopyMoninObukhovInput) -> Result<CanopyMoninObukhovState> {
+    canopy_monin_obukhov_with_scheme(input, SurfaceLayerScheme::Standard)
+}
+
+/// Ports `moninobukm` and `MOD_TurbulenceLEddy:moninobukm_leddy` through the
+/// same canopy profile interface.
+pub fn canopy_monin_obukhov_with_scheme(
+    input: CanopyMoninObukhovInput,
+    scheme: SurfaceLayerScheme,
+) -> Result<CanopyMoninObukhovState> {
     validate_surface(input.surface)?;
     ensure!(
         input.top_layer_displacement_m.is_finite()
@@ -138,8 +165,8 @@ pub fn canopy_monin_obukhov(input: CanopyMoninObukhovInput) -> Result<CanopyMoni
                 > input.surface.displacement_height_m,
         "canopy Monin-Obukhov geometry is invalid"
     );
-    let surface = monin_obukhov(input.surface)?;
-    let momentum_at_canopy_top = momentum_integral(
+    let surface = monin_obukhov_with_scheme(input.surface, scheme)?;
+    let momentum_at_canopy_top = MomentumScheme::new(input.surface, scheme)?.integral(
         input.canopy_top_height_m - input.surface.displacement_height_m,
         input.surface.momentum_roughness_m,
         input.surface.obukhov_length_m,
@@ -280,6 +307,71 @@ pub fn initialize_monin_obukhov(
         stability_adjusted_wind_m_s,
         obukhov_length_m: input.reference_height_m / zeta,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MomentumScheme {
+    Standard,
+    LargeEddy { transition: f64, coefficient: f64 },
+}
+
+impl MomentumScheme {
+    fn new(input: MoninObukhovInput, scheme: SurfaceLayerScheme) -> Result<Self> {
+        match scheme {
+            SurfaceLayerScheme::Standard => Ok(Self::Standard),
+            SurfaceLayerScheme::LargeEddy {
+                boundary_layer_height_m,
+            } => {
+                ensure!(
+                    boundary_layer_height_m.is_finite() && boundary_layer_height_m > 0.0,
+                    "large-eddy boundary-layer height must be positive"
+                );
+                let boundary_zeta = (5.0 * input.wind_height_m).max(boundary_layer_height_m)
+                    / input.obukhov_length_m;
+                let boundary_zeta = if boundary_zeta >= 0.0 {
+                    boundary_zeta.clamp(f77(1.0e-5), 200.0)
+                } else {
+                    boundary_zeta.clamp(f77(-1.0e4), f77(-1.0e-5))
+                };
+                let coefficient = f77(0.0047) * -boundary_zeta + f77(0.1854);
+                let transition = (0.5
+                    * coefficient.powi(4)
+                    * (-16.0 - (256.0 + 4.0 / coefficient.powi(4)).sqrt()))
+                .min(f77(-0.13));
+                Ok(Self::LargeEddy {
+                    transition,
+                    coefficient: coefficient.max(f77(0.2722)),
+                })
+            }
+        }
+    }
+
+    fn integral(self, distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f64 {
+        match self {
+            Self::Standard => momentum_integral(distance_m, roughness_m, obukhov_length_m),
+            Self::LargeEddy {
+                transition,
+                coefficient,
+            } => {
+                let zeta = distance_m / obukhov_length_m;
+                if zeta < transition {
+                    (transition * obukhov_length_m / roughness_m).ln() - psi(1, transition)
+                        + psi(1, roughness_m / obukhov_length_m)
+                        - 2.0 * coefficient * ((-zeta).powf(-0.5) - (-transition).powf(-0.5))
+                } else if zeta < 0.0 {
+                    (distance_m / roughness_m).ln() - psi(1, zeta)
+                        + psi(1, roughness_m / obukhov_length_m)
+                } else if zeta <= 1.0 {
+                    (distance_m / roughness_m).ln() + 5.0 * zeta
+                        - 5.0 * roughness_m / obukhov_length_m
+                } else {
+                    (obukhov_length_m / roughness_m).ln() + 5.0
+                        - 5.0 * roughness_m / obukhov_length_m
+                        + (5.0 * zeta.ln() + zeta - 1.0)
+                }
+            }
+        }
+    }
 }
 
 fn momentum_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f64 {

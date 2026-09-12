@@ -64,7 +64,7 @@ pub use colm_core::{
 };
 pub use colm_core::{
     CanopyMoninObukhovInput, CanopyMoninObukhovState, MoninObukhovInitialInput,
-    MoninObukhovInitialState, MoninObukhovInput, MoninObukhovState,
+    MoninObukhovInitialState, MoninObukhovInput, MoninObukhovState, SurfaceLayerScheme,
 };
 pub use colm_core::{GroundTemperatureInput, GroundTemperatureState};
 pub use pft_restart::{
