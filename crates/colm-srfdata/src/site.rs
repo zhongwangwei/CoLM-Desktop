@@ -75,6 +75,35 @@ pub const SOIL_RUN_FIELDS: [&str; 24] = [
     "soil_n_vgm",
 ];
 
+const SINGLE_POINT_SOIL_FIELDS: [&str; 26] = [
+    "soil_vf_quartz_mineral",
+    "soil_vf_gravels",
+    "soil_vf_sand",
+    "soil_vf_clay",
+    "soil_vf_om",
+    "soil_wf_gravels",
+    "soil_wf_sand",
+    "soil_wf_clay",
+    "soil_wf_om",
+    "soil_OM_density",
+    "soil_BD_all",
+    "soil_theta_s",
+    "soil_k_s",
+    "soil_csol",
+    "soil_tksatu",
+    "soil_tksatf",
+    "soil_tkdry",
+    "soil_k_solids",
+    "soil_lambda",
+    "soil_psi_s",
+    "soil_theta_r",
+    "soil_alpha_vgm",
+    "soil_L_vgm",
+    "soil_n_vgm",
+    "soil_BA_alpha",
+    "soil_BA_beta",
+];
+
 /// The physical identity of a site file. This is deliberately independent from
 /// whether a land-cover number happens to be present: generated natural sites may
 /// leave land type unresolved and Urban-PLUMBER files use different markers.
@@ -1352,10 +1381,9 @@ pub fn fill(
 
 /// Materialize the single-point `landdata/srfdata.nc` consumed by `mkinidata`.
 ///
-/// A fully populated site file already has CoLM's single-point surface contract, so
-/// copying it is the exact and lossless Rust replacement for the final Fortran
-/// single-point write.  Incomplete inputs take the existing strict [`fill`] path;
-/// the result is accepted only when it no longer needs a later CoLM/rawdata fallback.
+/// A fully populated site file is projected into CoLM's single-point surface
+/// contract. Incomplete inputs take the existing strict [`fill`] path; the result
+/// is accepted only when it no longer needs a later CoLM/rawdata fallback.
 pub fn materialize_single_point_surface(
     source: &Path,
     landdata_dir: &Path,
@@ -1369,7 +1397,7 @@ pub fn materialize_single_point_surface(
     let target = landdata_dir.join("srfdata.nc");
     let readiness = audit(source, mode, None, crop_enabled)?;
     if readiness.self_contained() {
-        publish_single_point_surface(source, &target, mode)?;
+        publish_single_point_surface(source, &target, mode, crop_enabled)?;
         return Ok(None);
     }
 
@@ -1382,63 +1410,56 @@ pub fn materialize_single_point_surface(
             readiness.needs_external.join(", ")
         ));
     }
-    publish_single_point_surface(&temporary, &target, mode)?;
+    publish_single_point_surface(&temporary, &target, mode, crop_enabled)?;
     std::fs::remove_file(&temporary)?;
     Ok(Some(report))
 }
 
-fn publish_single_point_surface(source: &Path, target: &Path, mode: SiteMode) -> Result<()> {
-    if matches!(mode, SiteMode::Igbp | SiteMode::Usgs) {
-        return write_single_point_surface(source, target, mode);
-    }
-    // PFT/PC need their vector arrays; their dedicated upstream projection is
-    // migrated separately, so retain the complete self-contained contract.
-    std::fs::copy(source, target).with_context(|| {
-        format!(
-            "cannot materialize {} as {}",
-            source.display(),
-            target.display()
-        )
-    })?;
-    Ok(())
+fn publish_single_point_surface(
+    source: &Path,
+    target: &Path,
+    mode: SiteMode,
+    crop_enabled: bool,
+) -> Result<()> {
+    write_single_point_surface(source, target, mode, crop_enabled)
 }
 
 /// Emit the eight-layer single-point artifact written by `write_surface_data_single`.
-fn write_single_point_surface(source: &Path, target: &Path, mode: SiteMode) -> Result<()> {
-    const SOIL: [&str; 26] = [
-        "soil_vf_quartz_mineral",
-        "soil_vf_gravels",
-        "soil_vf_sand",
-        "soil_vf_clay",
-        "soil_vf_om",
-        "soil_wf_gravels",
-        "soil_wf_sand",
-        "soil_wf_clay",
-        "soil_wf_om",
-        "soil_OM_density",
-        "soil_BD_all",
-        "soil_theta_s",
-        "soil_k_s",
-        "soil_csol",
-        "soil_tksatu",
-        "soil_tksatf",
-        "soil_tkdry",
-        "soil_k_solids",
-        "soil_lambda",
-        "soil_psi_s",
-        "soil_theta_r",
-        "soil_alpha_vgm",
-        "soil_L_vgm",
-        "soil_n_vgm",
-        "soil_BA_alpha",
-        "soil_BA_beta",
-    ];
+fn write_single_point_surface(
+    source: &Path,
+    target: &Path,
+    mode: SiteMode,
+    crop_enabled: bool,
+) -> Result<()> {
+    let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
+    ensure!(
+        !matches!(mode, SiteMode::Urban),
+        "single-point urban surface output uses its dedicated writer"
+    );
     let input =
         netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
     let years = values_i32(&input, "LAI_year")?;
+    let pfts = pft_mode
+        .then(|| pft_components(source, crop_enabled, None))
+        .transpose()?;
+    let pft_indices = pfts
+        .as_ref()
+        .map(|_| active_pft_indices(&input, crop_enabled))
+        .transpose()?;
+    let crop_surface = pft_mode && crop_enabled && scalar_i32(&input, "IGBP_classification")? == 12;
     let mut output =
         netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
-    output.add_dimension("patch", 1)?;
+    output.add_dimension(
+        "patch",
+        if crop_surface {
+            pfts.as_ref().expect("CROP requires PFT components").len()
+        } else {
+            1
+        },
+    )?;
+    if let Some(pfts) = &pfts {
+        output.add_dimension("pft", pfts.len())?;
+    }
     output.add_dimension("LAI_year", years.len())?;
     output.add_dimension("month", 12)?;
     output.add_dimension("soil", 8)?;
@@ -1451,21 +1472,83 @@ fn write_single_point_surface(source: &Path, target: &Path, mode: SiteMode) -> R
     output
         .add_variable::<i32>(classification, &[])?
         .put_values(&[scalar_i32(&input, classification)?], ..)?;
+    if let Some(pfts) = &pfts {
+        emit_i32(
+            &mut output,
+            "pfttyp",
+            &["pft"],
+            &pfts
+                .iter()
+                .map(|pft| i32::from(pft.pft_type))
+                .collect::<Vec<_>>(),
+        )?;
+        emit_f64(
+            &mut output,
+            "pctpfts",
+            &["pft"],
+            &if crop_surface {
+                // CoLM assigns every active CFT a separate PFT component.
+                vec![1.0; pfts.len()]
+            } else {
+                pfts.iter().map(|pft| pft.fraction).collect::<Vec<_>>()
+            },
+        )?;
+        if crop_surface {
+            emit_i32(
+                &mut output,
+                "croptyp",
+                &["patch"],
+                &pfts
+                    .iter()
+                    .map(|pft| i32::from(pft.pft_type) - 14)
+                    .collect::<Vec<_>>(),
+            )?;
+            emit_f64(
+                &mut output,
+                "pctcrop",
+                &["patch"],
+                &pfts.iter().map(|pft| pft.fraction).collect::<Vec<_>>(),
+            )?;
+        }
+    }
     emit_scalar(
         &mut output,
         "canopy_height",
-        scalar_f64(&input, "canopy_height")?,
+        if pft_mode {
+            0.0
+        } else {
+            scalar_f64(&input, "canopy_height")?
+        },
     )?;
+    if let (Some(pfts), Some(indices)) = (&pfts, &pft_indices) {
+        emit_f64(
+            &mut output,
+            "canopy_height_pfts",
+            &["pft"],
+            &select_pft_values(&input, "canopy_height_pfts", indices, pfts.len())?,
+        )?;
+    }
     output
         .add_variable::<i32>("LAI_year", &["LAI_year"])?
         .put_values(&years, ..)?;
-    for name in ["LAI_monthly", "SAI_monthly"] {
-        emit_f64(
-            &mut output,
-            name,
-            &["LAI_year", "month"],
-            &values_f64(&input, name)?,
-        )?;
+    if let (Some(pfts), Some(indices)) = (&pfts, &pft_indices) {
+        for name in ["LAI_pfts_monthly", "SAI_pfts_monthly"] {
+            emit_f64(
+                &mut output,
+                name,
+                &["LAI_year", "month", "pft"],
+                &pft_monthly_values(&input, name, indices, pfts.len(), years.len())?,
+            )?;
+        }
+    } else {
+        for name in ["LAI_monthly", "SAI_monthly"] {
+            emit_f64(
+                &mut output,
+                name,
+                &["LAI_year", "month"],
+                &values_f64(&input, name)?,
+            )?;
+        }
     }
     for name in [
         "lakedepth",
@@ -1476,7 +1559,7 @@ fn write_single_point_surface(source: &Path, target: &Path, mode: SiteMode) -> R
     ] {
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }
-    for name in SOIL {
+    for name in SINGLE_POINT_SOIL_FIELDS {
         let values = values_f64(&input, name)?;
         ensure!(
             values.len() >= 8,
@@ -1532,6 +1615,107 @@ fn scalar_i32(file: &netcdf::File, name: &str) -> Result<i32> {
         .context(format!("{name} is empty"))
 }
 
+fn active_pft_indices(file: &netcdf::File, crop_enabled: bool) -> Result<Vec<usize>> {
+    let cropland = crop_enabled && scalar_i32(file, "IGBP_classification")? == 12;
+    let fraction_name = if cropland { "pctcrop" } else { "pctpfts" };
+    let indices = values_f64(file, fraction_name)?
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, fraction)| (fraction > 0.0).then_some(index))
+        .collect::<Vec<_>>();
+    ensure!(
+        !indices.is_empty(),
+        "{fraction_name} has no positive fractions"
+    );
+    Ok(indices)
+}
+
+fn select_pft_values(
+    file: &netcdf::File,
+    name: &str,
+    indices: &[usize],
+    expected: usize,
+) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    ensure!(
+        variable.dimensions().len() == 1 && variable.dimensions()[0].name() == "pft",
+        "{name} must be a pft vector"
+    );
+    let values = values_f64(file, name)?;
+    ensure!(
+        indices.iter().all(|&index| index < values.len()),
+        "{name} has fewer PFT values than its fraction vector"
+    );
+    let selected = indices
+        .iter()
+        .map(|&index| values[index])
+        .collect::<Vec<_>>();
+    ensure!(
+        selected.len() == expected,
+        "{name} PFT count does not match pfttyp"
+    );
+    Ok(selected)
+}
+
+fn pft_monthly_values(
+    file: &netcdf::File,
+    name: &str,
+    indices: &[usize],
+    expected: usize,
+    years: usize,
+) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    let dimensions = variable.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "{name} must have LAI_year, month, and pft dimensions"
+    );
+    let axis = |dimension: &str| {
+        dimensions
+            .iter()
+            .position(|item| item.name() == dimension)
+            .with_context(|| format!("{name} is missing {dimension} dimension"))
+    };
+    let year_axis = axis("LAI_year")?;
+    let month_axis = axis("month")?;
+    let pft_axis = axis("pft")?;
+    ensure!(
+        dimensions[year_axis].len() == years,
+        "{name} LAI_year dimension differs from LAI_year"
+    );
+    ensure!(
+        dimensions[month_axis].len() == 12,
+        "{name} month dimension must have 12 entries"
+    );
+    ensure!(
+        indices
+            .iter()
+            .all(|&index| index < dimensions[pft_axis].len()),
+        "{name} has fewer PFT values than its fraction vector"
+    );
+    let mut strides = vec![1; dimensions.len()];
+    for axis in (0..dimensions.len() - 1).rev() {
+        strides[axis] = strides[axis + 1] * dimensions[axis + 1].len();
+    }
+    let values = values_f64(file, name)?;
+    let mut output = Vec::with_capacity(years * 12 * expected);
+    for year in 0..years {
+        for month in 0..12 {
+            for &pft in indices {
+                let index = year * strides[year_axis]
+                    + month * strides[month_axis]
+                    + pft * strides[pft_axis];
+                output.push(values[index]);
+            }
+        }
+    }
+    Ok(output)
+}
+
 fn emit_scalar(file: &mut netcdf::FileMut, name: &str, value: f64) -> Result<()> {
     file.add_variable::<f64>(name, &[])?
         .put_values(&[value], ..)?;
@@ -1545,6 +1729,17 @@ fn emit_f64(
     values: &[f64],
 ) -> Result<()> {
     file.add_variable::<f64>(name, dimensions)?
+        .put_values(values, ..)?;
+    Ok(())
+}
+
+fn emit_i32(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[i32],
+) -> Result<()> {
+    file.add_variable::<i32>(name, dimensions)?
         .put_values(values, ..)?;
     Ok(())
 }

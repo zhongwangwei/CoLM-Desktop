@@ -1347,6 +1347,120 @@ fn case_namelist_rejects_ambiguous_lct_classifications_without_an_override() {
 }
 
 #[test]
+fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-pft-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("source.nc");
+    let filled = directory.join("filled.nc");
+    let output = directory.join("srfdata.nc");
+    super::skeleton(&source, 123.0, 45.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&source).unwrap();
+        file.add_dimension("soil", 8).unwrap();
+        for (name, value) in [
+            ("soil_vf_sand", 0.30),
+            ("soil_vf_gravels", 0.10),
+            ("soil_vf_om", 0.02),
+            ("soil_wf_sand", 0.40),
+            ("soil_OM_density", 26.0),
+            ("soil_BD_all", 1300.0),
+        ] {
+            file.add_variable::<f64>(name, &["soil"])
+                .unwrap()
+                .put_values(&[value; 8], netcdf::Extents::All)
+                .unwrap();
+        }
+    }
+    super::fill(&source, &filled, None, None).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&filled).unwrap();
+        for name in super::SINGLE_POINT_SOIL_FIELDS {
+            if file.variable(name).is_none() {
+                file.add_variable::<f64>(name, &["soil"])
+                    .unwrap()
+                    .put_values(&[1.0; 8], netcdf::Extents::All)
+                    .unwrap();
+            }
+        }
+        file.add_dimension("LAI_year", 1).unwrap();
+        file.add_dimension("month", 12).unwrap();
+        file.add_dimension("pft", 3).unwrap();
+        file.add_variable::<i32>("pfttyp", &["pft"])
+            .unwrap()
+            .put_values(&[13, 14, 12], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<f64>("pctpfts", &["pft"])
+            .unwrap()
+            .put_values(&[0.5, 0.0, 0.25], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<f64>("canopy_height_pfts", &["pft"])
+            .unwrap()
+            .put_values(&[1.0, 9.0, 3.0], netcdf::Extents::All)
+            .unwrap();
+        file.add_variable::<i32>("LAI_year", &["LAI_year"])
+            .unwrap()
+            .put_values(&[2008], netcdf::Extents::All)
+            .unwrap();
+        for (name, offset) in [("LAI_pfts_monthly", 0.0), ("SAI_pfts_monthly", 100.0)] {
+            file.add_variable::<f64>(name, &["LAI_year", "month", "pft"])
+                .unwrap()
+                .put_values(
+                    &(0..36)
+                        .map(|value| value as f64 + offset)
+                        .collect::<Vec<_>>(),
+                    netcdf::Extents::All,
+                )
+                .unwrap();
+        }
+    }
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        super::write_single_point_surface(&filled, &output, super::SiteMode::Pft, false).unwrap();
+    }
+    let file = netcdf::open(&output).unwrap();
+    assert_eq!(file.dimension("soil").unwrap().len(), 8);
+    assert_eq!(file.dimension("pft").unwrap().len(), 2);
+    assert_eq!(
+        file.variable("pfttyp")
+            .unwrap()
+            .get_values::<i32, _>(netcdf::Extents::All)
+            .unwrap(),
+        [13, 12]
+    );
+    let fractions = file
+        .variable("pctpfts")
+        .unwrap()
+        .get_values::<f64, _>(netcdf::Extents::All)
+        .unwrap();
+    assert_eq!(fractions, [2.0 / 3.0, 1.0 / 3.0]);
+    assert_eq!(
+        file.variable("canopy_height")
+            .unwrap()
+            .get_value::<f64, _>(())
+            .unwrap(),
+        0.0
+    );
+    assert_eq!(
+        file.variable("canopy_height_pfts")
+            .unwrap()
+            .get_values::<f64, _>(netcdf::Extents::All)
+            .unwrap(),
+        [1.0, 3.0]
+    );
+    assert_eq!(
+        file.variable("LAI_pfts_monthly")
+            .unwrap()
+            .get_values::<f64, _>(netcdf::Extents::All)
+            .unwrap()[..4],
+        [0.0, 2.0, 3.0, 5.0]
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point surface artifact"]
 fn native_single_point_materialization_preserves_a_complete_upstream_surface_byte_for_byte() {
     let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
