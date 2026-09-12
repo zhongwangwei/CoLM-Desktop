@@ -10,16 +10,17 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
 
 use crate::{
-    cold_start_broadband_radiation, derive_igbp_canopy, derive_initial_soil_hydraulics,
-    derive_lake_layers, derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state,
-    initialize_cold_soil, initialize_profile_soil, leaf_optics_from_land_cover,
-    normalize_soil_texture, read_single_point_monthly_vegetation, read_single_point_soil_profile,
-    read_single_point_surface, read_single_point_water_table, write_constant_restart,
-    write_time_restart, ColdSoilState, ColdStartRadiation, ConstantRestartFiles,
-    ConstantRestartInput, HydraulicModel, LandCoverScheme, OzoneFields, PlantHydraulicFields,
-    RestartDate, RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields,
-    SnowSoilRestartFields, SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields,
-    TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    cold_start_broadband_radiation_with_snow, derive_igbp_canopy, derive_initial_soil_hydraulics,
+    derive_lake_layers, derive_snow_cover, derive_soil_parameters, derive_usgs_canopy,
+    equilibrium_water_state, initialize_cold_soil, initialize_profile_soil, initialize_snow_layers,
+    leaf_optics_from_land_cover, normalize_soil_texture, read_single_point_monthly_vegetation,
+    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_surface,
+    read_single_point_water_table, write_constant_restart, write_time_restart, ColdSoilState,
+    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
+    LandCoverScheme, OzoneFields, PlantHydraulicFields, RestartDate, RestartDimensions,
+    RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo,
+    SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
+    TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -71,11 +72,11 @@ pub struct SinglePointStaticRun {
 
 /// A namelist-resolved native cold start for the standard LCT single-point path.
 ///
-/// Feature-specific PFT/PC, BGC, urban, SNICAR, and external-observation paths use
-/// separate restart families and are rejected during resolution until their native
-/// orchestration is complete.  Soil and water-table state files are part of the
-/// common LCT restart family and therefore travel with this run description.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Feature-specific PFT/PC, BGC, urban, and SNICAR paths use separate restart
+/// families and are rejected during resolution until their native orchestration is
+/// complete.  Soil, snow, and water-table state files are part of the common LCT
+/// restart family and therefore travel with this run description.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointColdStartRun {
     pub static_run: SinglePointStaticRun,
     pub date: RestartDate,
@@ -88,8 +89,10 @@ pub struct SinglePointColdStartRun {
     pub plant_hydraulics: bool,
     pub ozone_stress: bool,
     pub soil_initial_state: Option<PathBuf>,
+    pub snow_initial_state: Option<PathBuf>,
     pub water_table_initial_state: Option<PathBuf>,
     pub variably_saturated_flow: bool,
+    pub snow_cover_exponent: f64,
 }
 
 impl SinglePointStaticRun {
@@ -200,6 +203,11 @@ pub fn single_point_cold_start_run_from_namelist(
             "DEF_USE_SoilInit",
             "DEF_file_SoilInit",
         )?,
+        snow_initial_state: enabled_existing_path(
+            &document,
+            "DEF_USE_SnowInit",
+            "DEF_file_SnowInit",
+        )?,
         water_table_initial_state: enabled_existing_path(
             &document,
             "DEF_USE_WaterTableInit",
@@ -210,6 +218,7 @@ pub fn single_point_cold_start_run_from_namelist(
             "DEF_USE_VariablySaturatedFlow",
             true,
         )?,
+        snow_cover_exponent: optional_f64_or(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
     })
 }
 
@@ -302,7 +311,7 @@ pub fn write_single_point_constant_restart(
 /// Writes the standard no-observation cold time restart for a resolved single point.
 ///
 /// The output is the native `MOD_Initialize` LCT cold branch: site monthly LAI/SAI,
-/// saturated initial soil, zero snow/aerosol, and the normal broadband albedo state.
+/// optional soil/snow/water-table observations, and the normal broadband albedo state.
 pub fn write_single_point_cold_time_restart(
     run: &SinglePointColdStartRun,
 ) -> Result<TimeRestartFile> {
@@ -373,7 +382,28 @@ pub fn write_single_point_cold_time_restart(
     } else {
         (1.0, 1.0)
     };
-    let sigf = fveg;
+    let snow_depth_m = initial_snow_depth(run, &surface, month)?;
+    let snow_water_equivalent_mm = snow_depth_m * 250.0;
+    let roughness = canopy_top(
+        run.static_run.land_cover,
+        surface.land_class,
+        surface.canopy_height_m,
+    )? * 0.1;
+    let snow_cover = derive_snow_cover(
+        total_lai,
+        total_sai,
+        roughness,
+        config.tuning.zlnd,
+        snow_water_equivalent_mm,
+        snow_depth_m,
+        run.snow_cover_exponent,
+    )?;
+    let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
+    let sigf = if snow_depth_m > 0.0 {
+        snow_cover.snow_free_vegetation_fraction
+    } else {
+        fveg
+    };
     let lai = total_lai;
     let sai = total_sai * sigf;
     let calendar_day = calendar_day(run.date, run.greenwich, surface.longitude_degrees)?;
@@ -382,7 +412,7 @@ pub fn write_single_point_cold_time_restart(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
-    let radiation = cold_start_broadband_radiation(
+    let radiation = cold_start_broadband_radiation_with_snow(
         kind,
         surface.albedo,
         cold_soil.liquid_water_kg_m2[0],
@@ -395,6 +425,9 @@ pub fn write_single_point_cold_time_restart(
         true,
         config.land_cover == LandCoverScheme::Usgs,
         true,
+        snow_depth_m,
+        snow_cover.ground_snow_fraction,
+        cold_soil.temperature_k[0],
     )?;
     write_cold_time_restart(
         run,
@@ -417,7 +450,33 @@ pub fn write_single_point_cold_time_restart(
         sai,
         cosine_zenith,
         &radiation,
+        &snow,
+        snow_depth_m,
+        snow_water_equivalent_mm,
+        snow_cover.ground_snow_fraction,
     )
+}
+
+fn initial_snow_depth(
+    run: &SinglePointColdStartRun,
+    surface: &crate::SinglePointSurfaceData,
+    month: u8,
+) -> Result<f64> {
+    let Some(path) = &run.snow_initial_state else {
+        return Ok(0.0);
+    };
+    let snow_depth_m = read_single_point_snow_depth(
+        path,
+        surface.latitude_degrees,
+        surface.longitude_degrees,
+        month,
+    )?
+    .unwrap_or(0.0);
+    ensure!(
+        snow_depth_m.is_finite() && snow_depth_m >= 0.0,
+        "runtime snow depth must be finite and nonnegative"
+    );
+    Ok(snow_depth_m)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -558,14 +617,34 @@ fn write_cold_time_restart(
     sai: f64,
     cosine_zenith: f64,
     radiation: &ColdStartRadiation,
+    snow: &crate::SnowState,
+    snow_depth_m: f64,
+    snow_water_equivalent_mm: f64,
+    ground_snow_fraction: f64,
 ) -> Result<TimeRestartFile> {
     let dimensions = TimeRestartDimensions::default();
-    let snow = vec![0.0; dimensions.snow_layers];
-    let mut soil_snow_temperature = vec![-999.0; dimensions.snow_layers];
+    let snow_temperature = snow
+        .thickness_m
+        .iter()
+        .map(|&thickness| {
+            if thickness > 0.0 {
+                soil_temperature[0].min(272.16)
+            } else {
+                -999.0
+            }
+        })
+        .collect::<Vec<_>>();
+    let snow_ice = snow
+        .thickness_m
+        .iter()
+        .map(|thickness| thickness * 250.0)
+        .collect::<Vec<_>>();
+    let snow_liquid = vec![0.0; dimensions.snow_layers];
+    let mut soil_snow_temperature = snow_temperature;
     soil_snow_temperature.extend_from_slice(soil_temperature);
-    let mut soil_snow_liquid = snow.clone();
+    let mut soil_snow_liquid = snow_liquid.clone();
     soil_snow_liquid.extend_from_slice(soil_liquid);
-    let mut soil_snow_ice = snow.clone();
+    let mut soil_snow_ice = snow_ice;
     soil_snow_ice.extend_from_slice(soil_ice);
     let radiation_values = radiation_values(radiation);
     let snow_layer_absorption =
@@ -600,8 +679,8 @@ fn write_cold_time_restart(
         TimeRestartInput {
             dimensions,
             snow_soil: SnowSoilRestartFields {
-                snow_node_depth_m: &snow,
-                snow_layer_thickness_m: &snow,
+                snow_node_depth_m: &snow.node_depth_m,
+                snow_layer_thickness_m: &snow.thickness_m,
                 temperature_k: &soil_snow_temperature,
                 liquid_water_kg_m2: &soil_snow_liquid,
                 ice_water_kg_m2: &soil_snow_ice,
@@ -615,11 +694,11 @@ fn write_cold_time_restart(
                 canopy_rain_mm: &one(0.0),
                 canopy_snow_mm: &one(0.0),
                 wet_snow_fraction: &one(0.0),
-                snow_age: &one(0.0),
-                snow_water_equivalent_mm: &one(0.0),
-                snow_depth_m: &one(0.0),
+                snow_age: &one(radiation.snow_age),
+                snow_water_equivalent_mm: &one(snow_water_equivalent_mm),
+                snow_depth_m: &one(snow_depth_m),
                 vegetation_fraction: &one(fveg),
-                ground_snow_fraction: &one(0.0),
+                ground_snow_fraction: &one(ground_snow_fraction),
                 snow_free_vegetation_fraction: &one(sigf),
                 greenness: &one(green),
                 lai: &one(lai),
@@ -666,14 +745,14 @@ fn write_cold_time_restart(
             },
             snow_aerosol: SnowAerosolFields {
                 grain_radius: &grain_radius,
-                black_carbon_hydrophobic: &snow,
-                black_carbon_hydrophilic: &snow,
-                organic_carbon_hydrophobic: &snow,
-                organic_carbon_hydrophilic: &snow,
-                dust_1: &snow,
-                dust_2: &snow,
-                dust_3: &snow,
-                dust_4: &snow,
+                black_carbon_hydrophobic: &snow_liquid,
+                black_carbon_hydrophilic: &snow_liquid,
+                organic_carbon_hydrophobic: &snow_liquid,
+                organic_carbon_hydrophilic: &snow_liquid,
+                dust_1: &snow_liquid,
+                dust_2: &snow_liquid,
+                dust_3: &snow_liquid,
+                dust_4: &snow_liquid,
             },
             plant_hydraulics: run.plant_hydraulics.then_some(PlantHydraulicFields {
                 water_potential_mm: &plant_water,
@@ -720,7 +799,6 @@ fn reject_unsupported_cold_start_features(document: &colm_namelist::Document) ->
         "DEF_USE_BGC",
         "DEF_URBAN_RUN",
         "DEF_USE_SNICAR",
-        "DEF_USE_SnowInit",
         "DEF_USE_LULCC",
         "DEF_USE_IRRIGATION",
     ] {
@@ -953,6 +1031,20 @@ fn optional_i32(document: &colm_namelist::Document, field: &str) -> Result<Optio
         Some(_) => bail!("{field} must be an integer"),
         None => Ok(None),
     }
+}
+
+fn optional_f64_or(document: &colm_namelist::Document, field: &str, default: f64) -> Result<f64> {
+    let value = match document.get(field) {
+        Some(value) => value
+            .as_f64()
+            .with_context(|| format!("{field} must be a real value"))?,
+        None => default,
+    };
+    ensure!(
+        value.is_finite() && value > 0.0,
+        "{field} must be finite and positive"
+    );
+    Ok(value)
 }
 
 fn optional_bool(document: &colm_namelist::Document, field: &str) -> Result<bool> {

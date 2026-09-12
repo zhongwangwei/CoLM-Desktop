@@ -105,7 +105,7 @@ const USGS_LEAF_OPTICS: [LeafOptics; 24] = [
     optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
 ];
 
-/// Broadband arrays produced by the snow-free cold-start `albland` path.
+/// Broadband arrays produced by CoLM's cold-start `albland` path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColdStartRadiation {
     /// `[band][direct, diffuse]`.
@@ -114,6 +114,8 @@ pub struct ColdStartRadiation {
     pub shaded_absorption: [[f64; RADIATION_TYPES]; BANDS],
     pub soil_absorption: [[f64; RADIATION_TYPES]; BANDS],
     pub snow_absorption: [[f64; RADIATION_TYPES]; BANDS],
+    /// CoLM's dimensionless snow age after its first 1800-second update.
+    pub snow_age: f64,
     pub thermal_gap_fraction: f64,
     pub direct_extinction: f64,
     pub diffuse_extinction: f64,
@@ -139,6 +141,48 @@ pub fn cold_start_broadband_radiation(
     usgs_land_cover: bool,
     vegetation_snow: bool,
 ) -> Result<ColdStartRadiation> {
+    cold_start_broadband_radiation_with_snow(
+        patch_type,
+        soil,
+        soil_liquid_water_kg_m2,
+        soil_thickness_m,
+        optics,
+        lai,
+        sai,
+        wet_snow_fraction,
+        cosine_zenith,
+        use_lct,
+        usgs_land_cover,
+        vegetation_snow,
+        0.0,
+        0.0,
+        273.16,
+    )
+}
+
+/// Applies `albland` with the non-SNICAR snow initialization used by `mkinidata`.
+///
+/// The supplied snow depth is converted with the source's fixed 250 kg m-3
+/// initialization density.  SNICAR remains a distinct feature because its optical
+/// lookup tables and layer absorption model are not part of this broadband kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn cold_start_broadband_radiation_with_snow(
+    patch_type: i32,
+    soil: SoilReflectance,
+    soil_liquid_water_kg_m2: f64,
+    soil_thickness_m: f64,
+    optics: LeafOptics,
+    lai: f64,
+    sai: f64,
+    wet_snow_fraction: f64,
+    cosine_zenith: f64,
+    use_lct: bool,
+    usgs_land_cover: bool,
+    vegetation_snow: bool,
+    snow_depth_m: f64,
+    ground_snow_fraction: f64,
+    ground_temperature_k: f64,
+) -> Result<ColdStartRadiation> {
     ensure!(
         soil_liquid_water_kg_m2.is_finite()
             && soil_thickness_m.is_finite()
@@ -149,6 +193,11 @@ pub fn cold_start_broadband_radiation(
             && sai >= 0.0
             && wet_snow_fraction.is_finite()
             && (0.0..=1.0).contains(&wet_snow_fraction)
+            && snow_depth_m.is_finite()
+            && snow_depth_m >= 0.0
+            && ground_snow_fraction.is_finite()
+            && (0.0..=1.0).contains(&ground_snow_fraction)
+            && ground_temperature_k.is_finite()
             && cosine_zenith.is_finite()
             && cosine_zenith > 0.0
             && optics.chil.is_finite(),
@@ -168,8 +217,7 @@ pub fn cold_start_broadband_radiation(
         }
     }
 
-    let ground;
-    let snow = [[1.0; RADIATION_TYPES]; BANDS];
+    let soil_ground;
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut transmission = [[0.0, 1.0, 1.0]; BANDS];
@@ -182,14 +230,16 @@ pub fn cold_start_broadband_radiation(
         let increase = (0.11 - 0.40 * wetness).max(0.0);
         let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
         let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
-        ground = [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]];
+        soil_ground = [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]];
     } else if patch_type == 3 {
-        ground = [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]];
+        soil_ground = [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]];
     } else {
         let albedo_water = 0.05 / (cosine_zenith + 0.15);
-        ground = [[albedo_water, 0.1], [albedo_water, 0.1]];
+        soil_ground = [[albedo_water, 0.1], [albedo_water, 0.1]];
     }
-    let soil_ground = ground;
+    let (snow, snow_age) =
+        generic_snow_albedo(snow_depth_m * 250.0, ground_temperature_k, cosine_zenith);
+    let ground = mix_ground_albedo(soil_ground, snow, ground_snow_fraction);
     let mut albedo = ground;
 
     if lai + sai > 1.0e-6 && patch_type < 3 && (patch_type != 0 || use_lct) {
@@ -229,10 +279,50 @@ pub fn cold_start_broadband_radiation(
         shaded_absorption,
         soil_absorption,
         snow_absorption,
+        snow_age,
         thermal_gap_fraction,
         direct_extinction,
         diffuse_extinction,
     })
+}
+
+fn mix_ground_albedo(
+    soil: [[f64; RADIATION_TYPES]; BANDS],
+    snow: [[f64; RADIATION_TYPES]; BANDS],
+    snow_fraction: f64,
+) -> [[f64; RADIATION_TYPES]; BANDS] {
+    std::array::from_fn(|band| {
+        std::array::from_fn(|radiation_type| {
+            (1.0 - snow_fraction) * soil[band][radiation_type]
+                + snow_fraction * snow[band][radiation_type]
+        })
+    })
+}
+
+/// `albland`'s non-SNICAR snow-age/albedo branch for a freshly initialized column.
+fn generic_snow_albedo(
+    snow_water_equivalent_mm: f64,
+    ground_temperature_k: f64,
+    cosine_zenith: f64,
+) -> ([[f64; RADIATION_TYPES]; BANDS], f64) {
+    if snow_water_equivalent_mm <= 0.0 {
+        return ([[1.0; RADIATION_TYPES]; BANDS], 0.0);
+    }
+    let snow_age = if snow_water_equivalent_mm > 800.0 {
+        0.0
+    } else {
+        let argument = 5_000.0 * (1.0 / 273.16 - 1.0 / ground_temperature_k);
+        1.0e-6 * 1800.0 * (argument.exp() + (10.0 * argument).min(0.0).exp() + 0.3)
+    }
+    .max(0.0);
+    let age = 1.0 - 1.0 / (1.0 + snow_age);
+    let direct_correction = ((1.5 / (1.0 + 4.0 * cosine_zenith)) - 0.5).max(0.0);
+    let snow_band = |new_snow_albedo: f64, age_factor: f64| {
+        let diffuse = new_snow_albedo * (1.0 - age_factor * age);
+        let direct = diffuse + 0.4 * direct_correction * (1.0 - diffuse);
+        [direct, diffuse]
+    };
+    ([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age)
 }
 
 struct TwoStreamRadiation {

@@ -113,6 +113,52 @@ fn natural_non_lct_path_retains_ground_albedo() {
     assert_eq!(output.direct_extinction, 1.0);
 }
 
+#[test]
+fn initialized_snow_uses_the_non_snicar_source_albedo_and_age() {
+    let output = cold_start_broadband_radiation_with_snow(
+        0,
+        SoilReflectance {
+            saturated_visible: 0.14,
+            dry_visible: 0.25,
+            saturated_near_infrared: 0.28,
+            dry_near_infrared: 0.39,
+        },
+        10.0,
+        0.1,
+        LeafOptics {
+            chil: 0.0,
+            reflectance: [[0.1, 0.1], [0.1, 0.1]],
+            transmittance: [[0.1, 0.1], [0.1, 0.1]],
+        },
+        0.0,
+        0.0,
+        0.0,
+        0.5,
+        true,
+        false,
+        true,
+        0.1,
+        1.0,
+        270.0,
+    )
+    .unwrap();
+    assert_close(output.snow_age, 0.002_204_192_232_638_98);
+    assert_matrix_close(
+        output.albedo,
+        [
+            [0.849_626_111_442_705, 0.849_626_111_442_705],
+            [0.649_285_213_052_231, 0.649_285_213_052_231],
+        ],
+    );
+    assert_matrix_close(
+        output.snow_absorption,
+        [
+            [0.150_373_888_557_295, 0.150_373_888_557_295],
+            [0.350_714_786_947_769, 0.350_714_786_947_769],
+        ],
+    );
+}
+
 fn assert_matrix_close(
     actual: [[f64; RADIATION_TYPES]; BANDS],
     expected: [[f64; RADIATION_TYPES]; BANDS],

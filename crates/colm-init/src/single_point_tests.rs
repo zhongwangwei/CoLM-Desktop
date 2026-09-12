@@ -60,24 +60,29 @@ fn cold_namelist_keeps_existing_soil_and_water_table_sources() {
         .unwrap();
     file.close().unwrap();
     let soil = directory.join("soilstate.nc");
+    let snow = directory.join("snowstate.nc");
     let wtd = directory.join("wtd.nc");
     std::fs::write(&soil, []).unwrap();
+    std::fs::write(&snow, []).unwrap();
     std::fs::write(&wtd, []).unwrap();
     let namelist = directory.join("case.nml");
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_SoilInit=.true.\n DEF_file_SoilInit='{}'\n DEF_USE_WaterTableInit=.true.\n DEF_file_WaterTable='{}'\n /\n",
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_SoilInit=.true.\n DEF_file_SoilInit='{}'\n DEF_USE_SnowInit=.true.\n DEF_file_SnowInit='{}'\n DEF_TUNING_SNOW_COVER_EXPONENT=.75\n DEF_USE_WaterTableInit=.true.\n DEF_file_WaterTable='{}'\n /\n",
             directory.join("output").display(),
             soil.display(),
+            snow.display(),
             wtd.display(),
         ),
     )
     .unwrap();
     let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
     assert_eq!(run.soil_initial_state, Some(soil));
+    assert_eq!(run.snow_initial_state, Some(snow));
     assert_eq!(run.water_table_initial_state, Some(wtd));
     assert!(run.variably_saturated_flow);
+    assert_eq!(run.snow_cover_exponent, 0.75);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
