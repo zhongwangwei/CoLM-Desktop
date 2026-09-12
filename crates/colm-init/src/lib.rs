@@ -8,6 +8,9 @@ pub mod albedo {
 pub mod hydrology {
     pub use colm_core::hydrology::*;
 }
+pub mod ground_temperature {
+    pub use colm_core::ground_temperature::*;
+}
 pub mod linear {
     pub use colm_core::linear::*;
 }
@@ -56,6 +59,7 @@ pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
 };
+pub use colm_core::{GroundTemperatureInput, GroundTemperatureState};
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
     write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
