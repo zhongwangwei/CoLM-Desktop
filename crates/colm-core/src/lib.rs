@@ -18,6 +18,7 @@ pub mod monin_obukhov;
 pub mod net_solar;
 pub mod pc_radiation;
 pub mod phase_change;
+pub mod photosynthesis;
 pub mod radiation;
 pub mod root_uptake;
 pub mod snow;
@@ -76,6 +77,11 @@ pub use pc_radiation::{
     cold_start_pc_broadband_radiation_with_snow, PcCanopyRadiation, PcPftInput, PcPftRadiation,
 };
 pub use phase_change::{phase_change, PhaseChangeInput, PhaseChangeState};
+pub use photosynthesis::{
+    photosynthesis_parameters, stomata, update_photosynthesis, LeafBiochemistry,
+    LeafPhotosynthesisInput, PhotosynthesisParameters, PhotosynthesisUpdateInput,
+    PhotosynthesisUpdateState, StomataInput, StomataOptions, StomataState,
+};
 pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,

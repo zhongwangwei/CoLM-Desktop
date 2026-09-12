@@ -32,6 +32,9 @@ pub mod monin_obukhov {
 pub mod pc_radiation {
     pub use colm_core::pc_radiation::*;
 }
+pub mod photosynthesis {
+    pub use colm_core::photosynthesis::*;
+}
 pub mod phase_change {
     pub use colm_core::phase_change::*;
 }
@@ -83,7 +86,9 @@ pub use colm_core::{
 };
 pub use colm_core::{
     CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyRoughness, CanopyWetness,
-    CanopyWindProfileInput,
+    CanopyWindProfileInput, LeafBiochemistry, LeafPhotosynthesisInput, PhotosynthesisParameters,
+    PhotosynthesisUpdateInput, PhotosynthesisUpdateState, StomataInput, StomataOptions,
+    StomataState,
 };
 pub use colm_core::{
     CanopyMoninObukhovInput, CanopyMoninObukhovState, MoninObukhovInitialInput,
