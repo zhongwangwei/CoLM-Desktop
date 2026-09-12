@@ -10,6 +10,7 @@ pub mod ground_temperature;
 pub mod hydrology;
 pub mod interception;
 pub mod linear;
+pub mod monin_obukhov;
 pub mod net_solar;
 pub mod pc_radiation;
 pub mod phase_change;
@@ -40,6 +41,11 @@ pub use linear::solve_tridiagonal;
 
 pub use interception::{
     intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput, CanopyWater,
+};
+pub use monin_obukhov::{
+    canopy_monin_obukhov, initialize_monin_obukhov, integrated_monin_obukhov_diffusivity,
+    monin_obukhov, monin_obukhov_diffusivity, CanopyMoninObukhovInput, CanopyMoninObukhovState,
+    MoninObukhovInitialInput, MoninObukhovInitialState, MoninObukhovInput, MoninObukhovState,
 };
 pub use net_solar::{
     net_solar, LocalNoonShortwave, NetSolarFluxes, NetSolarInput, ShortwaveForcing,

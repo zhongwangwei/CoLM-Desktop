@@ -14,6 +14,9 @@ pub mod ground_temperature {
 pub mod linear {
     pub use colm_core::linear::*;
 }
+pub mod monin_obukhov {
+    pub use colm_core::monin_obukhov::*;
+}
 pub mod pc_radiation {
     pub use colm_core::pc_radiation::*;
 }
@@ -58,6 +61,10 @@ pub use colm_core::{
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
+};
+pub use colm_core::{
+    CanopyMoninObukhovInput, CanopyMoninObukhovState, MoninObukhovInitialInput,
+    MoninObukhovInitialState, MoninObukhovInput, MoninObukhovState,
 };
 pub use colm_core::{GroundTemperatureInput, GroundTemperatureState};
 pub use pft_restart::{
