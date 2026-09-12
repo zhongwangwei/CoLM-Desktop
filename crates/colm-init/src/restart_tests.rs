@@ -153,6 +153,38 @@ fn optional_fortran_restart_sections_have_native_netcdf_dimensions() {
 }
 
 #[test]
+#[ignore = "requires the locally generated upstream CN-Cng reference restart"]
+fn static_restart_schema_matches_the_upstream_fortran_reference() {
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+    let mut restart = input(&soil, &lake, &canopy);
+    restart.dimensions = RestartDimensions::default();
+    let path = temp_dir("upstream-schema").join("restart.nc");
+    write_constant_restart_block(&path, restart).unwrap();
+
+    let reference_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../oracle/work/generated/out/CN-Cng/restart/const/CN-Cng_restart_const_lc2005_w180_s90.nc",
+    );
+    let reference = netcdf::open(&reference_path)
+        .unwrap_or_else(|error| panic!("cannot open {}: {error}", reference_path.display()));
+    let actual = netcdf::open(&path).unwrap();
+    assert_eq!(variable_names(&actual), variable_names(&reference));
+    let actual_dimensions = dimension_lengths(&actual)
+        .into_iter()
+        .filter(|(name, _)| name != "patch")
+        .collect::<Vec<_>>();
+    let reference_dimensions = dimension_lengths(&reference)
+        .into_iter()
+        .filter(|(name, _)| name != "patch")
+        .collect::<Vec<_>>();
+    assert_eq!(actual_dimensions, reference_dimensions);
+    drop(actual);
+    drop(reference);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn restart_rejects_conflicting_or_incomplete_optional_sections() {
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
@@ -308,6 +340,24 @@ fn dimension_names(variable: &netcdf::Variable<'_>) -> Vec<String> {
         .iter()
         .map(|dimension| dimension.name())
         .collect()
+}
+
+fn variable_names(file: &netcdf::File) -> Vec<String> {
+    let mut names = file
+        .variables()
+        .map(|variable| variable.name())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+fn dimension_lengths(file: &netcdf::File) -> Vec<(String, usize)> {
+    let mut dimensions = file
+        .dimensions()
+        .map(|dimension| (dimension.name(), dimension.len()))
+        .collect::<Vec<_>>();
+    dimensions.sort_unstable();
+    dimensions
 }
 
 fn temp_dir(label: &str) -> PathBuf {
