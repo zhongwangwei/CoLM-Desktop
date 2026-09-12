@@ -134,6 +134,60 @@ fn explicit_vsf_fallback_matches_current_fortran() {
     close(state.water_table_depth_mm, 1424.7706282276365, 1.0e-9);
 }
 
+#[test]
+fn sublevel_initialization_matches_current_fortran() {
+    let model = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.02,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    let state = initialize_variable_saturated_sublevels(VariableSaturatedSublevelInput {
+        interface_depth_mm: &[0.0, 100.0, 400.0, 1000.0],
+        porosity: &[0.45, 0.45, 0.45],
+        residual_water: &[0.05, 0.05, 0.05],
+        saturated_potential_mm: &[-100.0, -100.0, -100.0],
+        saturated_hydraulic_conductivity_mm_s: &[0.01, 0.01, 0.01],
+        hydraulic_model: &[model; 3],
+        upper_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.001,
+        },
+        lower_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Drainage,
+            value: 0.0,
+        },
+        wetting_front_mm: &[0.0, 0.0, 0.0],
+        liquid_water: &[0.25, 0.3, 0.35],
+        water_table_thickness_mm: &[0.0, 0.0, 0.0],
+        ponding_depth_mm: 5.0,
+        volume_tolerance: 1.0e-8,
+        depth_tolerance_mm: 1.0e-8,
+    })
+    .unwrap();
+    assert_eq!(state.saturated, [false, false, false]);
+    assert_eq!(state.has_wetting_front, [true, false, false]);
+    assert_eq!(state.has_water_table, [false, false, false]);
+    assert_eq!(state.wetting_front_mm, [0.0, 0.0, 0.0]);
+    assert_eq!(state.liquid_water, [0.25, 0.3, 0.35]);
+    assert_eq!(state.water_table_thickness_mm, [0.0, 0.0, 0.0]);
+    close(state.pressure_head_mm[0], -205.47612177296497, 1.0e-12);
+    close(state.pressure_head_mm[1], -121.27275296649421, 1.0e-12);
+    close(state.pressure_head_mm[2], -73.0154097110534, 1.0e-12);
+    close(
+        state.hydraulic_conductivity_mm_s[0],
+        1.9843402252415806e-5,
+        1.0e-18,
+    );
+    close(
+        state.hydraulic_conductivity_mm_s[1],
+        9.148482938690982e-5,
+        1.0e-18,
+    );
+    close(state.hydraulic_conductivity_mm_s[2], 0.01, 1.0e-18);
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,

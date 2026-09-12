@@ -6,7 +6,9 @@
 
 use anyhow::{ensure, Result};
 
-use crate::{soil_vliq_from_psi, SoilHydraulicModel};
+use crate::{
+    soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel,
+};
 
 const RICHARDS_TOLERANCE: f64 = 8.0e-8;
 const SOURCE_REFERENCE_STEP_SECONDS: f64 = 1800.0;
@@ -105,6 +107,205 @@ pub struct VariableSaturatedExplicitState {
     pub ponding_depth_mm: f64,
     pub aquifer_water_mm: f64,
     pub water_table_depth_mm: f64,
+}
+
+/// Inputs to `initialize_sublevel_structure` for one connected VSF column.
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedSublevelInput<'a> {
+    pub interface_depth_mm: &'a [f64],
+    pub porosity: &'a [f64],
+    pub residual_water: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    pub upper_boundary: VariableSaturatedBoundary,
+    pub lower_boundary: VariableSaturatedBoundary,
+    pub wetting_front_mm: &'a [f64],
+    pub liquid_water: &'a [f64],
+    pub water_table_thickness_mm: &'a [f64],
+    pub ponding_depth_mm: f64,
+    pub volume_tolerance: f64,
+    pub depth_tolerance_mm: f64,
+}
+
+/// Resolved active sublevel layout and hydraulic values for one VSF iteration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedSublevelState {
+    pub saturated: Vec<bool>,
+    pub has_wetting_front: Vec<bool>,
+    pub has_water_table: Vec<bool>,
+    pub wetting_front_mm: Vec<f64>,
+    pub liquid_water: Vec<f64>,
+    pub water_table_thickness_mm: Vec<f64>,
+    pub pressure_head_mm: Vec<f64>,
+    pub hydraulic_conductivity_mm_s: Vec<f64>,
+}
+
+/// Port of `MOD_Hydro_SoilWater:initialize_sublevel_structure`.
+pub fn initialize_variable_saturated_sublevels(
+    input: VariableSaturatedSublevelInput<'_>,
+) -> Result<VariableSaturatedSublevelState> {
+    let layers = validate_sublevel(input)?;
+    let thickness = input
+        .interface_depth_mm
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    let mut wetting_front_mm = input.wetting_front_mm.to_vec();
+    let mut liquid_water = input.liquid_water.to_vec();
+    let mut water_table_thickness_mm = input.water_table_thickness_mm.to_vec();
+    let mut saturated = (0..layers)
+        .map(|layer| {
+            (liquid_water[layer] - input.porosity[layer]).abs() < input.volume_tolerance
+                || (wetting_front_mm[layer] + water_table_thickness_mm[layer] - thickness[layer])
+                    .abs()
+                    < input.depth_tolerance_mm
+        })
+        .collect::<Vec<_>>();
+
+    if input.upper_boundary.kind == VariableSaturatedBoundaryKind::FixedHead
+        && input.upper_boundary.value < input.saturated_potential_mm[0]
+    {
+        if saturated[0] {
+            saturated[0] = false;
+            wetting_front_mm[0] = 0.0;
+            liquid_water[0] = input.porosity[0];
+            water_table_thickness_mm[0] = 0.9 * thickness[0];
+        } else if wetting_front_mm[0] >= input.depth_tolerance_mm {
+            liquid_water[0] = (wetting_front_mm[0] * input.porosity[0]
+                + liquid_water[0]
+                    * (thickness[0] - wetting_front_mm[0] - water_table_thickness_mm[0]))
+                / (thickness[0] - water_table_thickness_mm[0]);
+            wetting_front_mm[0] = 0.0;
+        }
+    }
+    let bottom = layers - 1;
+    if input.lower_boundary.kind == VariableSaturatedBoundaryKind::FixedHead
+        && input.lower_boundary.value < input.saturated_potential_mm[bottom]
+    {
+        if saturated[bottom] {
+            saturated[bottom] = false;
+            wetting_front_mm[bottom] = 0.9 * thickness[bottom];
+            liquid_water[bottom] = input.porosity[bottom];
+            water_table_thickness_mm[bottom] = 0.0;
+        } else if water_table_thickness_mm[bottom] >= input.depth_tolerance_mm {
+            liquid_water[bottom] = (water_table_thickness_mm[bottom] * input.porosity[bottom]
+                + liquid_water[bottom]
+                    * (thickness[bottom]
+                        - wetting_front_mm[bottom]
+                        - water_table_thickness_mm[bottom]))
+                / (thickness[bottom] - wetting_front_mm[bottom]);
+            water_table_thickness_mm[bottom] = 0.0;
+        }
+    }
+
+    let mut has_wetting_front = vec![false; layers];
+    let mut has_water_table = vec![false; layers];
+    let mut pressure_head_mm = vec![0.0; layers];
+    let mut hydraulic_conductivity_mm_s = vec![0.0; layers];
+    for layer in 0..layers {
+        if saturated[layer] {
+            wetting_front_mm[layer] = 0.0;
+            water_table_thickness_mm[layer] = thickness[layer];
+            liquid_water[layer] = input.porosity[layer];
+        } else {
+            if layer > 0 {
+                has_wetting_front[layer] = if saturated[layer - 1] {
+                    true
+                } else {
+                    wetting_front_mm[layer] >= input.depth_tolerance_mm
+                        || water_table_thickness_mm[layer - 1] >= input.depth_tolerance_mm
+                };
+                if has_wetting_front[layer]
+                    && wetting_front_mm[layer] < input.depth_tolerance_mm
+                    && input.saturated_potential_mm[layer] < input.saturated_potential_mm[layer - 1]
+                {
+                    wetting_front_mm[layer] =
+                        0.1 * (thickness[layer] - water_table_thickness_mm[layer]);
+                }
+            } else {
+                has_wetting_front[layer] = match input.upper_boundary.kind {
+                    VariableSaturatedBoundaryKind::Rainfall => {
+                        input.ponding_depth_mm >= input.depth_tolerance_mm
+                            || wetting_front_mm[layer] >= input.depth_tolerance_mm
+                    }
+                    VariableSaturatedBoundaryKind::FixedHead => {
+                        let has = input.upper_boundary.value > input.saturated_potential_mm[layer]
+                            || wetting_front_mm[layer] >= input.depth_tolerance_mm;
+                        if has && wetting_front_mm[layer] < input.depth_tolerance_mm {
+                            wetting_front_mm[layer] =
+                                0.01 * (thickness[layer] - water_table_thickness_mm[layer]);
+                        }
+                        has
+                    }
+                    VariableSaturatedBoundaryKind::FixedFlux
+                    | VariableSaturatedBoundaryKind::Drainage => {
+                        wetting_front_mm[layer] >= input.depth_tolerance_mm
+                    }
+                };
+            }
+            if layer < bottom {
+                has_water_table[layer] = if saturated[layer + 1] {
+                    true
+                } else {
+                    water_table_thickness_mm[layer] >= input.depth_tolerance_mm
+                        || wetting_front_mm[layer + 1] >= input.depth_tolerance_mm
+                };
+                if has_water_table[layer]
+                    && water_table_thickness_mm[layer] < input.depth_tolerance_mm
+                    && input.saturated_potential_mm[layer] < input.saturated_potential_mm[layer + 1]
+                {
+                    water_table_thickness_mm[layer] =
+                        0.1 * (thickness[layer] - wetting_front_mm[layer]);
+                }
+            } else {
+                has_water_table[layer] = match input.lower_boundary.kind {
+                    VariableSaturatedBoundaryKind::Drainage
+                    | VariableSaturatedBoundaryKind::FixedFlux => {
+                        water_table_thickness_mm[layer] >= input.depth_tolerance_mm
+                    }
+                    VariableSaturatedBoundaryKind::FixedHead => {
+                        let has = input.lower_boundary.value > input.saturated_potential_mm[layer]
+                            || water_table_thickness_mm[layer] >= input.depth_tolerance_mm;
+                        if has && water_table_thickness_mm[layer] < input.depth_tolerance_mm {
+                            water_table_thickness_mm[layer] =
+                                0.01 * (thickness[layer] - wetting_front_mm[layer]);
+                        }
+                        has
+                    }
+                    VariableSaturatedBoundaryKind::Rainfall => false,
+                };
+            }
+        }
+        check_and_update_variable_saturated_level(
+            thickness[layer],
+            input.porosity[layer],
+            input.residual_water[layer],
+            input.saturated_potential_mm[layer],
+            input.saturated_hydraulic_conductivity_mm_s[layer],
+            input.hydraulic_model[layer],
+            saturated[layer],
+            has_wetting_front[layer],
+            has_water_table[layer],
+            &mut wetting_front_mm[layer],
+            &mut liquid_water[layer],
+            &mut water_table_thickness_mm[layer],
+            &mut pressure_head_mm[layer],
+            &mut hydraulic_conductivity_mm_s[layer],
+            true,
+            input.volume_tolerance,
+        );
+    }
+    Ok(VariableSaturatedSublevelState {
+        saturated,
+        has_wetting_front,
+        has_water_table,
+        wetting_front_mm,
+        liquid_water,
+        water_table_thickness_mm,
+        pressure_head_mm,
+        hydraulic_conductivity_mm_s,
+    })
 }
 
 /// Port of `MOD_Hydro_SoilWater:get_zwt_from_wa`.
@@ -526,6 +727,137 @@ fn water_table_interface_count(water_table_depth_mm: f64, interfaces: &[f64]) ->
         .iter()
         .rposition(|depth| water_table_depth_mm >= *depth)
         .map_or(0, |index| index + 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_and_update_variable_saturated_level(
+    thickness_mm: f64,
+    porosity: f64,
+    residual_water: f64,
+    saturated_potential_mm: f64,
+    saturated_hydraulic_conductivity_mm_s: f64,
+    hydraulic_model: SoilHydraulicModel,
+    saturated: bool,
+    has_wetting_front: bool,
+    has_water_table: bool,
+    wetting_front_mm: &mut f64,
+    liquid_water: &mut f64,
+    water_table_thickness_mm: &mut f64,
+    pressure_head_mm: &mut f64,
+    hydraulic_conductivity_mm_s: &mut f64,
+    update_hydraulics: bool,
+    volume_tolerance: f64,
+) {
+    if !saturated {
+        if has_wetting_front {
+            *wetting_front_mm = wetting_front_mm.clamp(0.0, thickness_mm);
+        } else {
+            *wetting_front_mm = 0.0;
+        }
+        if has_water_table {
+            *water_table_thickness_mm = water_table_thickness_mm.clamp(0.0, thickness_mm);
+        } else {
+            *water_table_thickness_mm = 0.0;
+        }
+        if has_wetting_front
+            && has_water_table
+            && *wetting_front_mm + *water_table_thickness_mm > thickness_mm
+        {
+            let fraction = *wetting_front_mm / (*wetting_front_mm + *water_table_thickness_mm);
+            *wetting_front_mm = thickness_mm * fraction;
+            *water_table_thickness_mm = thickness_mm * (1.0 - fraction);
+        }
+        *liquid_water = liquid_water.min(porosity).max(volume_tolerance);
+        if update_hydraulics {
+            *pressure_head_mm = soil_psi_from_vliq(
+                *liquid_water,
+                porosity,
+                residual_water,
+                saturated_potential_mm,
+                hydraulic_model,
+            );
+            *hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
+                *pressure_head_mm,
+                saturated_potential_mm,
+                saturated_hydraulic_conductivity_mm_s,
+                hydraulic_model,
+            );
+        }
+    } else {
+        *liquid_water = porosity;
+        *pressure_head_mm = saturated_potential_mm;
+        *hydraulic_conductivity_mm_s = saturated_hydraulic_conductivity_mm_s;
+    }
+}
+
+fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize> {
+    let layers = input.porosity.len();
+    ensure!(layers > 0, "VSF sublevel initialization needs soil layers");
+    for values in [
+        input.residual_water,
+        input.saturated_potential_mm,
+        input.saturated_hydraulic_conductivity_mm_s,
+        input.wetting_front_mm,
+        input.liquid_water,
+        input.water_table_thickness_mm,
+    ] {
+        ensure!(
+            values.len() == layers,
+            "VSF sublevel vectors have incompatible dimensions"
+        );
+    }
+    ensure!(
+        input.interface_depth_mm.len() == layers + 1 && input.hydraulic_model.len() == layers,
+        "VSF sublevel vectors have incompatible dimensions"
+    );
+    ensure!(
+        input
+            .interface_depth_mm
+            .iter()
+            .all(|value| value.is_finite())
+            && input
+                .interface_depth_mm
+                .windows(2)
+                .all(|pair| pair[1] > pair[0])
+            && [
+                input.upper_boundary.value,
+                input.lower_boundary.value,
+                input.ponding_depth_mm,
+                input.volume_tolerance,
+                input.depth_tolerance_mm,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+            && input.ponding_depth_mm >= 0.0
+            && input.volume_tolerance > 0.0
+            && input.depth_tolerance_mm > 0.0,
+        "VSF sublevel scalars are invalid"
+    );
+    for layer in 0..layers {
+        let thickness = input.interface_depth_mm[layer + 1] - input.interface_depth_mm[layer];
+        ensure!(
+            input.porosity[layer].is_finite()
+                && input.residual_water[layer].is_finite()
+                && input.saturated_potential_mm[layer].is_finite()
+                && input.saturated_hydraulic_conductivity_mm_s[layer].is_finite()
+                && input.wetting_front_mm[layer].is_finite()
+                && input.liquid_water[layer].is_finite()
+                && input.water_table_thickness_mm[layer].is_finite()
+                && input.porosity[layer] > 0.0
+                && input.residual_water[layer] >= 0.0
+                && input.residual_water[layer] < input.porosity[layer]
+                && input.saturated_potential_mm[layer] < 0.0
+                && input.saturated_hydraulic_conductivity_mm_s[layer] >= 0.0
+                && (0.0..=thickness).contains(&input.wetting_front_mm[layer])
+                && (0.0..=thickness).contains(&input.water_table_thickness_mm[layer])
+                && input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
+                    <= thickness
+                && input.liquid_water[layer] >= 0.0
+                && input.liquid_water[layer] <= input.porosity[layer],
+            "VSF sublevel layer inputs are invalid"
+        );
+    }
+    Ok(layers)
 }
 
 fn validate_explicit(input: VariableSaturatedExplicitInput<'_>) -> Result<usize> {
