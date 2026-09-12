@@ -47,6 +47,41 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
 }
 
 #[test]
+fn cold_namelist_keeps_existing_soil_and_water_table_sources() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-namelist-runtime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let surface = directory.join("output/CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(&surface).unwrap();
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_values(&[10], ..)
+        .unwrap();
+    file.close().unwrap();
+    let soil = directory.join("soilstate.nc");
+    let wtd = directory.join("wtd.nc");
+    std::fs::write(&soil, []).unwrap();
+    std::fs::write(&wtd, []).unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_SoilInit=.true.\n DEF_file_SoilInit='{}'\n DEF_USE_WaterTableInit=.true.\n DEF_file_WaterTable='{}'\n /\n",
+            directory.join("output").display(),
+            soil.display(),
+            wtd.display(),
+        ),
+    )
+    .unwrap();
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(run.soil_initial_state, Some(soil));
+    assert_eq!(run.water_table_initial_state, Some(wtd));
+    assert!(run.variably_saturated_flow);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
 fn native_single_point_static_restart_matches_the_upstream_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

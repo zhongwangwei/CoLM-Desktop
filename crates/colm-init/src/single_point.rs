@@ -11,9 +11,11 @@ use colm_namelist::{parse, Value};
 
 use crate::{
     cold_start_broadband_radiation, derive_igbp_canopy, derive_initial_soil_hydraulics,
-    derive_lake_layers, derive_soil_parameters, derive_usgs_canopy, leaf_optics_from_land_cover,
-    normalize_soil_texture, read_single_point_monthly_vegetation, read_single_point_surface,
-    write_constant_restart, write_time_restart, ColdStartRadiation, ConstantRestartFiles,
+    derive_lake_layers, derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state,
+    initialize_cold_soil, initialize_profile_soil, leaf_optics_from_land_cover,
+    normalize_soil_texture, read_single_point_monthly_vegetation, read_single_point_soil_profile,
+    read_single_point_surface, read_single_point_water_table, write_constant_restart,
+    write_time_restart, ColdSoilState, ColdStartRadiation, ConstantRestartFiles,
     ConstantRestartInput, HydraulicModel, LandCoverScheme, OzoneFields, PlantHydraulicFields,
     RestartDate, RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields,
     SnowSoilRestartFields, SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields,
@@ -71,7 +73,8 @@ pub struct SinglePointStaticRun {
 ///
 /// Feature-specific PFT/PC, BGC, urban, SNICAR, and external-observation paths use
 /// separate restart families and are rejected during resolution until their native
-/// orchestration is complete.
+/// orchestration is complete.  Soil and water-table state files are part of the
+/// common LCT restart family and therefore travel with this run description.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinglePointColdStartRun {
     pub static_run: SinglePointStaticRun,
@@ -84,6 +87,9 @@ pub struct SinglePointColdStartRun {
     pub dynamic_lake: bool,
     pub plant_hydraulics: bool,
     pub ozone_stress: bool,
+    pub soil_initial_state: Option<PathBuf>,
+    pub water_table_initial_state: Option<PathBuf>,
+    pub variably_saturated_flow: bool,
 }
 
 impl SinglePointStaticRun {
@@ -189,6 +195,21 @@ pub fn single_point_cold_start_run_from_namelist(
         dynamic_lake: optional_bool_or(&document, "DEF_USE_Dynamic_Lake", false)?,
         plant_hydraulics: optional_bool_or(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
         ozone_stress: optional_bool_or(&document, "DEF_USE_OZONESTRESS", true)?,
+        soil_initial_state: enabled_existing_path(
+            &document,
+            "DEF_USE_SoilInit",
+            "DEF_file_SoilInit",
+        )?,
+        water_table_initial_state: enabled_existing_path(
+            &document,
+            "DEF_USE_WaterTableInit",
+            "DEF_file_WaterTable",
+        )?,
+        variably_saturated_flow: optional_bool_or(
+            &document,
+            "DEF_USE_VariablySaturatedFlow",
+            true,
+        )?,
     })
 }
 
@@ -306,13 +327,19 @@ pub fn write_single_point_cold_time_restart(
     let psi0 = soil.field(SoilField::Psi0).to_vec();
     let conductivity = soil.field(SoilField::HydraulicConductivity).to_vec();
     let hydraulic_model = soil_hydraulic_models(&soil, config.hydraulic_model)?;
-    let cold_soil = crate::initialize_cold_soil(
+    let month = month_from_julian(run.date.year, run.date.julian_day)?;
+    let cold_soil = initial_soil_state(
+        run,
+        &surface,
         kind,
         &porosity,
+        &residual_water,
+        &psi0,
+        &conductivity,
+        &hydraulic_model,
         &node_depth,
         &thickness,
         &interface_mm[1..],
-        true,
     )?;
     let hydraulic = derive_initial_soil_hydraulics(
         kind,
@@ -325,7 +352,6 @@ pub fn write_single_point_cold_time_restart(
         &conductivity,
         &hydraulic_model,
     )?;
-    let month = month_from_julian(run.date.year, run.date.julian_day)?;
     let vegetation = read_single_point_monthly_vegetation(&run.static_run.surface)?;
     let vegetation_year = if run.lai_change_yearly {
         run.date.year
@@ -391,6 +417,122 @@ pub fn write_single_point_cold_time_restart(
         sai,
         cosine_zenith,
         &radiation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn initial_soil_state(
+    run: &SinglePointColdStartRun,
+    surface: &crate::SinglePointSurfaceData,
+    patch_type: i32,
+    porosity: &[f64],
+    residual_water: &[f64],
+    psi0_mm: &[f64],
+    conductivity_mm_s: &[f64],
+    hydraulic: &[SoilHydraulicModel],
+    node_depth_m: &[f64],
+    thickness_m: &[f64],
+    interface_m: &[f64],
+) -> Result<ColdSoilState> {
+    let month = month_from_julian(run.date.year, run.date.julian_day)?;
+    if let Some(path) = &run.soil_initial_state {
+        let profile = read_single_point_soil_profile(
+            path,
+            surface.latitude_degrees,
+            surface.longitude_degrees,
+            month,
+        )?;
+        let (temperature, wetness, water_table) = if profile.valid {
+            (
+                profile.temperature_k.as_slice(),
+                profile.wetness.as_slice(),
+                profile.water_table_m,
+            )
+        } else {
+            // `MOD_Initialize` substitutes this profile when `zwt` is missing.
+            return initialize_profile_soil(
+                patch_type,
+                &profile.depth_m,
+                &vec![if patch_type == 3 { 250.0 } else { 280.0 }; profile.depth_m.len()],
+                &vec![1.0; profile.depth_m.len()],
+                porosity,
+                residual_water,
+                psi0_mm,
+                hydraulic,
+                node_depth_m,
+                thickness_m,
+                interface_m,
+                0.0,
+                run.variably_saturated_flow,
+            );
+        };
+        return initialize_profile_soil(
+            patch_type,
+            &profile.depth_m,
+            temperature,
+            wetness,
+            porosity,
+            residual_water,
+            psi0_mm,
+            hydraulic,
+            node_depth_m,
+            thickness_m,
+            interface_m,
+            water_table,
+            run.variably_saturated_flow,
+        );
+    }
+    if let Some(path) = &run.water_table_initial_state {
+        if let Some(water_table_m) = read_single_point_water_table(
+            path,
+            surface.latitude_degrees,
+            surface.longitude_degrees,
+            month,
+        )? {
+            if patch_type <= 1 {
+                let mut interface_mm = Vec::with_capacity(interface_m.len() + 1);
+                interface_mm.push(0.0);
+                interface_mm.extend(interface_m.iter().map(|depth| depth * 1000.0));
+                let center_mm = node_depth_m
+                    .iter()
+                    .map(|depth| depth * 1000.0)
+                    .collect::<Vec<_>>();
+                let equilibrium = equilibrium_water_state(
+                    water_table_m * 1000.0,
+                    &center_mm,
+                    &interface_mm,
+                    porosity,
+                    residual_water,
+                    psi0_mm,
+                    conductivity_mm_s,
+                    hydraulic,
+                )
+                .map_err(anyhow::Error::msg)?;
+                return Ok(ColdSoilState {
+                    temperature_k: vec![283.0; porosity.len()],
+                    liquid_water_kg_m2: equilibrium.liquid_water_kg_m2,
+                    ice_water_kg_m2: vec![0.0; porosity.len()],
+                    aquifer_water_mm: equilibrium.aquifer_water_mm
+                        + if run.variably_saturated_flow {
+                            0.0
+                        } else {
+                            5000.0
+                        },
+                    water_table_depth_m: water_table_m,
+                });
+            }
+        }
+    }
+    initialize_cold_soil(
+        patch_type,
+        porosity,
+        node_depth_m,
+        thickness_m,
+        &interface_m
+            .iter()
+            .map(|depth| depth * 1000.0)
+            .collect::<Vec<_>>(),
+        run.variably_saturated_flow,
     )
 }
 
@@ -578,9 +720,7 @@ fn reject_unsupported_cold_start_features(document: &colm_namelist::Document) ->
         "DEF_USE_BGC",
         "DEF_URBAN_RUN",
         "DEF_USE_SNICAR",
-        "DEF_USE_SoilInit",
         "DEF_USE_SnowInit",
-        "DEF_USE_WaterTableInit",
         "DEF_USE_LULCC",
         "DEF_USE_IRRIGATION",
     ] {
@@ -833,6 +973,22 @@ fn optional_bool_or(
         Some(_) => bail!("{field} must be a logical value"),
         None => Ok(default),
     }
+}
+
+fn enabled_existing_path(
+    document: &colm_namelist::Document,
+    enabled_field: &str,
+    path_field: &str,
+) -> Result<Option<PathBuf>> {
+    if !optional_bool_or(document, enabled_field, false)? {
+        return Ok(None);
+    }
+    let path = match document.get(path_field) {
+        Some(Value::Str(value)) => PathBuf::from(value.trim()),
+        Some(_) => bail!("{path_field} must be a quoted string"),
+        None => return Ok(None),
+    };
+    Ok(path.is_file().then_some(path))
 }
 
 fn detect_land_cover(surface: &Path) -> Result<LandCoverScheme> {

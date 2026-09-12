@@ -8,6 +8,7 @@ pub mod hydrology;
 pub mod pft_restart;
 pub mod radiation;
 pub mod restart;
+pub mod runtime;
 pub mod single_point;
 pub mod static_state;
 pub mod surface_data;
@@ -35,6 +36,10 @@ pub use restart::{
     ConstantRestartFiles, ConstantRestartInput, RestartDimensions, RestartPatchFields,
     RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields, TerrainRadiation,
     TopmodelFields,
+};
+pub use runtime::{
+    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_water_table,
+    RuntimeSoilProfile,
 };
 pub use single_point::{
     single_point_cold_start_run_from_namelist, single_point_static_run_from_namelist,
