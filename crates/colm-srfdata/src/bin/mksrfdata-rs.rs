@@ -1988,10 +1988,7 @@ fn spatial_case_command(
         observation.is_none(),
         "spatial observed surface data is not migrated; Rust refuses to substitute a cold rawdata surface"
     );
-    ensure!(
-        !case_bool(&document, "DEF_URBAN_RUN", false)?,
-        "spatial urban surface-data generation is not migrated"
-    );
+    let urban = case_bool(&document, "DEF_URBAN_RUN", false)?;
     let lct = case_bool(&document, "DEF_USE_LCT", true)?;
     let pft = case_bool(&document, "DEF_USE_PFT", false)?;
     let pc = case_bool(&document, "DEF_USE_PC", false)?;
@@ -2008,6 +2005,20 @@ fn spatial_case_command(
         !crop || pft || pc,
         "CROP surface data requires DEF_USE_PFT or DEF_USE_PC"
     );
+    ensure!(
+        !urban || lct,
+        "spatial urban surface data requires DEF_USE_LCT=.true."
+    );
+    ensure!(
+        !urban || !crop,
+        "CROP surface data is incompatible with DEF_URBAN_RUN"
+    );
+    if urban {
+        ensure!(
+            case_i32(&document, "DEF_URBAN_type_scheme", 1)? == 2,
+            "spatial NCAR urban scheme 1 is not migrated; use DEF_URBAN_type_scheme=2 (LCZ)"
+        );
+    }
     let lulcc = case_bool(&document, "DEF_USE_LULCC", false)?;
     ensure!(
         !lulcc || lct,
@@ -2064,9 +2075,19 @@ fn spatial_case_command(
     });
 
     if lct {
-        let land_cover = lct_mode.context(
-            "spatial LCT case needs --land-cover igbp or usgs because case.nml does not record the build-time classification table",
-        )?;
+        let land_cover = if urban {
+            if let Some(mode) = lct_mode {
+                ensure!(
+                    mode == SiteMode::Igbp,
+                    "spatial urban surface data always uses the IGBP base land cover"
+                );
+            }
+            SiteMode::Igbp
+        } else {
+            lct_mode.context(
+                "spatial LCT case needs --land-cover igbp or usgs because case.nml does not record the build-time classification table",
+            )?
+        };
         ensure!(
             !lulcc || land_cover == SiteMode::Igbp,
             "spatial LULCC transfer traces require --land-cover igbp"
@@ -2120,8 +2141,33 @@ fn spatial_case_command(
         if lulcc {
             args.push("--lulcc".to_owned());
         }
-        for lai_year in case_lai_years(&document, year)? {
+        let lai_years = if urban && lulcc {
+            vec![year]
+        } else {
+            case_lai_years(&document, year)?
+        };
+        for lai_year in lai_years {
             args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
+        }
+        if urban {
+            let geometry = match case_i32(&document, "DEF_URBAN_geom_data", 1)? {
+                1 => "ghsl",
+                _ => "li",
+            };
+            let urban_type = rawdata.join("urban_type");
+            let urban_data = rawdata.join("urban");
+            let urban_lai = rawdata.join("urban_lai_500m");
+            let lucy = urban_data.join("LUCY_regionid.nc");
+            required_directories.extend([urban_type, urban_data, urban_lai]);
+            required_files.push(lucy);
+            args.extend([
+                "--urban-rawdata".to_owned(),
+                rawdata.display().to_string(),
+                "--urban-geometry".to_owned(),
+                geometry.to_owned(),
+                "--urban-canyon-hwr".to_owned(),
+                case_bool(&document, "DEF_USE_CANYON_HWR", true)?.to_string(),
+            ]);
         }
         if let Some(blocks) = &blocks {
             args.extend(blocks.iter().cloned());
@@ -2627,6 +2673,60 @@ mod tests {
         assert!(command
             .required_directories
             .contains(&root.join("raw/soil")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lcz_urban_case_uses_its_native_rawdata_contract() {
+        let (root, namelist) = case_namelist(
+            "urban",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_URBAN_RUN=.true.
+ DEF_URBAN_type_scheme=2
+ DEF_URBAN_geom_data=1
+ DEF_USE_CANYON_HWR=.false.
+ DEF_LC_YEAR=2004
+ DEF_LAI_CHANGE_YEARLY=.false.
+/
+",
+        );
+
+        let command = spatial_case_command(&namelist, None, false, None, None)
+            .unwrap()
+            .unwrap();
+        assert!(!command.pft_or_pc);
+        assert_eq!(option_value(&command.args, "--land-cover"), Some("igbp"));
+        assert_eq!(
+            option_value(&command.args, "--urban-rawdata").map(str::to_owned),
+            Some(format!("{}/raw", root.display()))
+        );
+        assert_eq!(
+            option_value(&command.args, "--urban-geometry"),
+            Some("ghsl")
+        );
+        assert_eq!(
+            option_value(&command.args, "--urban-canyon-hwr"),
+            Some("false")
+        );
+        assert_eq!(
+            option_value(&command.args, "--monthly-vegetation-year"),
+            Some("2004")
+        );
+        for directory in ["urban_type", "urban", "urban_lai_500m"] {
+            assert!(command
+                .required_directories
+                .contains(&root.join("raw").join(directory)));
+        }
+        assert!(command
+            .required_files
+            .contains(&root.join("raw/urban/LUCY_regionid.nc")));
         std::fs::remove_dir_all(root).unwrap();
     }
 
