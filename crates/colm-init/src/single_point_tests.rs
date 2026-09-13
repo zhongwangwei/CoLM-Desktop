@@ -73,7 +73,11 @@ fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
     assert_eq!(pc_canopy_layer(8).unwrap(), 2);
     assert_eq!(pc_canopy_layer(9).unwrap(), 1);
     assert_eq!(pc_canopy_layer(15).unwrap(), 1);
-    assert!(pc_canopy_layer(16).is_err());
+    assert_eq!(pc_canopy_layer(78).unwrap(), 1);
+    assert!(pc_canopy_layer(0).is_err());
+    assert!(pc_uses_three_dimensional_canopy(14, true));
+    assert!(!pc_uses_three_dimensional_canopy(15, true));
+    assert!(pc_uses_three_dimensional_canopy(15, false));
     assert!(single_point_subgrid(
         &parse(
             "&nl_colm

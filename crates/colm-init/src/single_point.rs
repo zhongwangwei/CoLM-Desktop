@@ -1302,7 +1302,7 @@ fn write_single_point_pft_cold_time_restarts(
             .iter()
             .zip(total_lai_p.iter_mut().zip(total_sai_p.iter_mut()))
         {
-            if *class >= 17 {
+            if *class >= 15 {
                 *lai = 0.0;
                 *sai = 0.0;
             }
@@ -1359,102 +1359,111 @@ fn write_single_point_pft_cold_time_restarts(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
-    let pft_radiation = if run.subgrid == SinglePointSubgrid::Pc {
-        let inputs = pft
-            .class
-            .iter()
-            .zip(
-                pft.fraction.iter().zip(
-                    canopy
-                        .top_m
-                        .iter()
-                        .zip(canopy.bottom_m.iter())
-                        .zip(total_lai_p.iter().zip(sai_p.iter())),
-                ),
+    let one_dimensional_radiation = pft
+        .class
+        .iter()
+        .zip(total_lai_p.iter().zip(sai_p.iter()))
+        .map(|(&class, (&lai, &sai))| {
+            cold_start_pft_broadband_radiation_with_snow(
+                kind,
+                surface.albedo,
+                cold_soil.liquid_water_kg_m2[0],
+                thickness[0],
+                pft_leaf_optics(&document, class, config.hydraulic_model)?,
+                lai,
+                sai,
+                0.0,
+                cosine_zenith.max(0.001),
+                run.vegetation_snow,
+                snow_depth_m,
+                pft_snow.patch.ground_snow_fraction,
+                cold_soil.temperature_k[0],
             )
-            .map(|(&class, (&fraction, ((&top, &bottom), (&lai, &sai))))| {
-                Ok(PcPftInput {
-                    canopy_layer: pc_canopy_layer(class)?,
-                    fraction,
-                    canopy_top_m: top,
-                    canopy_bottom_m: bottom,
-                    optics: pft_leaf_optics(&document, class, config.hydraulic_model)?,
-                    lai,
-                    sai,
-                    wet_snow_fraction: 0.0,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let pc = cold_start_pc_broadband_radiation_with_snow(
-            kind,
-            surface.albedo,
-            cold_soil.liquid_water_kg_m2[0],
-            thickness[0],
-            &inputs,
-            cosine_zenith.max(0.001),
-            snow_depth_m,
-            pft_snow.patch.ground_snow_fraction,
-            cold_soil.temperature_k[0],
-        )?;
-        PftColdStartRadiation {
-            radiation: pc.common,
-            sunlit: pc_pft_radiation_values(&pc.pft, |state| state.sunlit_absorption),
-            shaded: pc_pft_radiation_values(&pc.pft, |state| state.shaded_absorption),
-            thermal_gap: pc
-                .pft
-                .iter()
-                .map(|state| state.thermal_gap_fraction)
-                .collect(),
-            shade: pc.pft.iter().map(|state| state.shade_fraction).collect(),
-            direct_extinction: pc.pft.iter().map(|state| state.direct_extinction).collect(),
-            diffuse_extinction: pc
-                .pft
-                .iter()
-                .map(|state| state.diffuse_extinction)
-                .collect(),
-        }
-    } else {
-        let radiation_p = pft
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut pft_radiation = PftColdStartRadiation {
+        radiation: aggregate_pft_radiation(
+            &one_dimensional_radiation,
+            &pft.fraction,
+            total_lai + sai,
+        )?,
+        sunlit: pft_radiation_values(&one_dimensional_radiation, |state| state.sunlit_absorption),
+        shaded: pft_radiation_values(&one_dimensional_radiation, |state| state.shaded_absorption),
+        thermal_gap: one_dimensional_radiation
+            .iter()
+            .map(|state| state.thermal_gap_fraction)
+            .collect(),
+        shade: vec![MISSING; pft.class.len()],
+        direct_extinction: one_dimensional_radiation
+            .iter()
+            .map(|state| state.direct_extinction)
+            .collect(),
+        diffuse_extinction: one_dimensional_radiation
+            .iter()
+            .map(|state| state.diffuse_extinction)
+            .collect(),
+    };
+    if run.subgrid == SinglePointSubgrid::Pc {
+        let pc_crop_split = optional_bool_or(&document, "DEF_PC_CROP_SPLIT", true)?;
+        let pc_indices = pft
             .class
             .iter()
-            .zip(total_lai_p.iter().zip(sai_p.iter()))
-            .map(|(&class, (&lai, &sai))| {
-                cold_start_pft_broadband_radiation_with_snow(
-                    kind,
-                    surface.albedo,
-                    cold_soil.liquid_water_kg_m2[0],
-                    thickness[0],
-                    pft_leaf_optics(&document, class, config.hydraulic_model)?,
-                    lai,
-                    sai,
-                    0.0,
-                    cosine_zenith.max(0.001),
-                    run.vegetation_snow,
-                    snow_depth_m,
-                    pft_snow.patch.ground_snow_fraction,
-                    cold_soil.temperature_k[0],
-                )
+            .enumerate()
+            .filter_map(|(index, &class)| {
+                pc_uses_three_dimensional_canopy(class, pc_crop_split).then_some(index)
             })
-            .collect::<Result<Vec<_>>>()?;
-        PftColdStartRadiation {
-            radiation: aggregate_pft_radiation(&radiation_p, &pft.fraction, total_lai + sai)?,
-            sunlit: pft_radiation_values(&radiation_p, |state| state.sunlit_absorption),
-            shaded: pft_radiation_values(&radiation_p, |state| state.shaded_absorption),
-            thermal_gap: radiation_p
+            .collect::<Vec<_>>();
+        if !pc_indices.is_empty() {
+            let inputs = pc_indices
                 .iter()
-                .map(|state| state.thermal_gap_fraction)
-                .collect(),
-            shade: vec![MISSING; pft.class.len()],
-            direct_extinction: radiation_p
-                .iter()
-                .map(|state| state.direct_extinction)
-                .collect(),
-            diffuse_extinction: radiation_p
-                .iter()
-                .map(|state| state.diffuse_extinction)
-                .collect(),
+                .map(|&index| {
+                    let class = pft.class[index];
+                    Ok(PcPftInput {
+                        canopy_layer: pc_canopy_layer(class)?,
+                        fraction: pft.fraction[index],
+                        canopy_top_m: canopy.top_m[index],
+                        canopy_bottom_m: canopy.bottom_m[index],
+                        optics: pft_leaf_optics(&document, class, config.hydraulic_model)?,
+                        lai: total_lai_p[index],
+                        sai: sai_p[index],
+                        wet_snow_fraction: 0.0,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let pc = cold_start_pc_broadband_radiation_with_snow(
+                kind,
+                surface.albedo,
+                cold_soil.liquid_water_kg_m2[0],
+                thickness[0],
+                &inputs,
+                cosine_zenith.max(0.001),
+                snow_depth_m,
+                pft_snow.patch.ground_snow_fraction,
+                cold_soil.temperature_k[0],
+            )?;
+            let mut common = one_dimensional_radiation.clone();
+            let pc_sunlit = pc_pft_radiation_values(&pc.pft, |state| state.sunlit_absorption);
+            let pc_shaded = pc_pft_radiation_values(&pc.pft, |state| state.shaded_absorption);
+            for (pc_index, &index) in pc_indices.iter().enumerate() {
+                common[index] = pc.common.clone();
+                for band in 0..2 {
+                    for radiation_type in 0..2 {
+                        let source = (band * 2 + radiation_type) * pc_indices.len() + pc_index;
+                        let target = (band * 2 + radiation_type) * pft.class.len() + index;
+                        pft_radiation.sunlit[target] = pc_sunlit[source];
+                        pft_radiation.shaded[target] = pc_shaded[source];
+                    }
+                }
+                let state = &pc.pft[pc_index];
+                pft_radiation.thermal_gap[index] = state.thermal_gap_fraction;
+                pft_radiation.shade[index] = state.shade_fraction;
+                pft_radiation.direct_extinction[index] = state.direct_extinction;
+                pft_radiation.diffuse_extinction[index] = state.diffuse_extinction;
+            }
+            pft_radiation.radiation =
+                aggregate_pft_radiation(&common, &pft.fraction, total_lai + sai)?;
         }
-    };
+    }
     let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
     let common = write_cold_time_restart(
         run,
@@ -1603,10 +1612,14 @@ fn single_point_crop_state(
         );
         return Ok(None);
     };
+    let pc_crop_split = optional_bool_or(document, "DEF_PC_CROP_SPLIT", true)?;
     ensure!(
-        run.subgrid == SinglePointSubgrid::Pft,
-        "CROP single-point initialization requires DEF_USE_PFT = .true.; PC CFT layering is not yet verified"
+        run.subgrid == SinglePointSubgrid::Pft
+            || (run.subgrid == SinglePointSubgrid::Pc && pc_crop_split),
+        "CROP with DEF_USE_PC requires DEF_PC_CROP_SPLIT = .true."
     );
+    // CROP state lives in the BGC PFT restart family upstream; without it
+    // `WRITE_PFTimeVariables` does not persist crop phenology variables.
     ensure!(
         run.bgc,
         "CROP single-point initialization requires DEF_USE_BGC = .true."
@@ -1800,12 +1813,20 @@ fn pc_pft_radiation_values(
     values
 }
 
+/// `canlay_p` from `MOD_Const_PFT.F90`: trees use layer 2; shrubs, grasses,
+/// and every CFT use layer 1.  Class zero is the non-vegetated sentinel.
 fn pc_canopy_layer(class: i32) -> Result<usize> {
     match class {
         1..=8 => Ok(2),
-        9..=15 => Ok(1),
+        9..=78 => Ok(1),
         _ => bail!("PFT class {class} has no PC canopy layer"),
     }
+}
+
+/// `MOD_3DCanopyRadiation.F90` stops its PC slice before CFT class 15 when
+/// `DEF_PC_CROP_SPLIT` is enabled; `twostream_wrap` handles that suffix.
+fn pc_uses_three_dimensional_canopy(class: i32, pc_crop_split: bool) -> bool {
+    class > 0 && (!pc_crop_split || class < 15)
 }
 
 fn aggregate_pft_radiation(
