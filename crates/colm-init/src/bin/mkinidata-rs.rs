@@ -14,8 +14,8 @@ use colm_init::{
     write_single_point_hyperspectral_constant_restarts, write_spatial_lct_cold_time_restart,
     write_spatial_lct_constant_restart, write_spatial_pft_cold_time_restarts,
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
-    write_spatial_urban_constant_restarts, HydraulicModel, LandCoverScheme, RestartDate,
-    SinglePointHyperspectralConfig, SinglePointStaticConfig, SpatialLctStaticConfig,
+    write_spatial_urban_constant_restarts, HydraulicModel, LaiFrequency, LandCoverScheme,
+    RestartDate, SinglePointHyperspectralConfig, SinglePointStaticConfig, SpatialLctStaticConfig,
     SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
     SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
 };
@@ -161,6 +161,7 @@ struct SpatialNamelistRun {
     land_cover_year: i32,
     date: RestartDate,
     lai_year: i32,
+    lai_frequency: LaiFrequency,
     hydraulic_model: HydraulicModel,
     subgrid: SpatialSubgrid,
     urban: Option<SpatialUrbanRun>,
@@ -256,6 +257,7 @@ fn write_spatial_urban_namelist_block(
         run.date,
     );
     time.lai_year = run.lai_year;
+    time.lai_frequency = run.lai_frequency;
     time.greenwich = run.greenwich;
     time.dynamic_lake = run.dynamic_lake;
     time.plant_hydraulics = run.plant_hydraulics;
@@ -322,6 +324,7 @@ fn write_spatial_lct_namelist_block(
         run.date,
     );
     time.lai_year = run.lai_year;
+    time.lai_frequency = run.lai_frequency;
     time.greenwich = run.greenwich;
     time.dynamic_lake = run.dynamic_lake;
     time.plant_hydraulics = run.plant_hydraulics;
@@ -391,16 +394,14 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    ensure!(
-        namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
-        "spatial cold start requires DEF_LAI_MONTHLY = .true."
-    );
+    let lai_monthly = namelist_bool(&document, "DEF_LAI_MONTHLY", true)?;
     let use_regular_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling", false)?;
     let use_simple_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     ensure!(
         !use_regular_terrain || !use_simple_terrain,
         "DEF_USE_Forcing_Downscaling and DEF_USE_Forcing_Downscaling_Simple are mutually exclusive"
     );
+    let lulcc = namelist_bool(&document, "DEF_USE_LULCC", false)?;
     let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
     let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
     let pc = namelist_bool(&document, "DEF_USE_PC", false)?;
@@ -412,6 +413,13 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
             == 1,
         "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
     );
+    // MOD_Namelist forces PFT/PC and LULCC to monthly.  Plain LCT retains
+    // the 8-day forcing selected by the case namelist.
+    let lai_frequency = if !lai_monthly && lct && !lulcc {
+        LaiFrequency::EightDay
+    } else {
+        LaiFrequency::Monthly
+    };
     let urban_enabled = namelist_bool(&document, "DEF_URBAN_RUN", false)?;
     let urban = if urban_enabled {
         ensure!(lct, "spatial urban cold starts require DEF_USE_LCT=.true.");
@@ -461,7 +469,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         namelist_i32(&document, "DEF_simulation_time%start_day", 1)?,
         namelist_i32(&document, "DEF_simulation_time%start_sec", 0)?,
     )?;
-    let land_cover_year = if namelist_bool(&document, "DEF_USE_LULCC", false)? {
+    let land_cover_year = if lulcc {
         simulation_year
     } else {
         namelist_i32(&document, "DEF_LC_YEAR", 2005)?
@@ -473,7 +481,9 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         lai_start_year <= lai_end_year,
         "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
     );
-    let lai_year = if namelist_bool(&document, "DEF_LAI_CHANGE_YEARLY", true)? {
+    let lai_year = if lai_frequency == LaiFrequency::EightDay
+        || namelist_bool(&document, "DEF_LAI_CHANGE_YEARLY", true)?
+    {
         simulation_year.max(lai_start_year).min(lai_end_year)
     } else {
         land_cover_year
@@ -490,6 +500,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         land_cover_year,
         date,
         lai_year,
+        lai_frequency,
         hydraulic_model,
         subgrid,
         urban,
@@ -676,6 +687,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
     );
     let mut cold_time = None;
     let mut lai_year = land_cover_year;
+    let mut eight_day_lai = false;
     let mut greenwich = false;
     let mut dynamic_lake = false;
     let mut plant_hydraulics = true;
@@ -701,6 +713,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
                     .parse()
                     .context("--lai-year must be an integer")?
             }
+            "--lai-8day" => eight_day_lai = true,
             "--greenwich" => greenwich = true,
             "--dynamic-lake" => dynamic_lake = true,
             "--no-plant-hydraulics" => plant_hydraulics = false,
@@ -730,6 +743,11 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             date,
         );
         time.lai_year = lai_year;
+        time.lai_frequency = if eight_day_lai {
+            LaiFrequency::EightDay
+        } else {
+            LaiFrequency::Monthly
+        };
         time.greenwich = greenwich;
         time.dynamic_lake = dynamic_lake;
         time.plant_hydraulics = plant_hydraulics;
@@ -865,7 +883,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -988,6 +1006,7 @@ mod tests {
         assert_eq!(run.restart, root.join("case/restart"));
         assert_eq!(run.land_cover_year, 2005);
         assert_eq!(run.lai_year, 2007);
+        assert_eq!(run.lai_frequency, LaiFrequency::Monthly);
         assert_eq!(
             run.date,
             RestartDate {
@@ -1011,6 +1030,27 @@ mod tests {
         assert_eq!(run.observations.soil, Some(soil));
         assert_eq!(run.observations.snow, Some(snow));
         assert_eq!(run.observations.water_table, Some(water_table));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lct_8_day_case_uses_the_clamped_simulation_year() {
+        let root = std::env::temp_dir().join(format!("colm-init-eight-day-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LAI_MONTHLY=.false.\n DEF_LAI_CHANGE_YEARLY=.false.\n DEF_LC_YEAR=2001\n DEF_simulation_time%start_year=2007\n DEF_LAI_START_YEAR=2000\n DEF_LAI_END_YEAR=2006\n/\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let run = spatial_namelist_run(&namelist).unwrap();
+        assert_eq!(run.lai_frequency, LaiFrequency::EightDay);
+        assert_eq!(run.lai_year, 2006);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -22,18 +22,18 @@ use colm_srfdata::{
     mesh_cell_area_weights, read_coordinate_patch_selection_f64,
     read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
     read_mesh_raster_f64, read_mesh_raster_i32, read_mesh_raster_layers_f64,
-    read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
-    read_methane_ph_patch_selection, write_landpatch_3d_vector, write_landpatch_layered_vector,
-    write_landpatch_scalar, write_landpatch_vector, write_patch_diagnostic,
-    write_patch_diagnostic_dimension, write_patch_diagnostic_time, write_spatial_hru_topology,
-    write_spatial_pft_topology, write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
-    FlatLandElements, FlatLandPatches, LczUrbanRawFields, NcarUrbanProperties, NcarUrbanRawFields,
-    PftFractionInput, PftIndexInput, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology,
-    TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING,
-    MERIT_90M,
+    read_mesh_raster_time_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
+    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
+    read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
+    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
+    write_patch_diagnostic, write_patch_diagnostic_dimension, write_patch_diagnostic_time,
+    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
+    write_spatial_topology, write_spatial_topology_with_shared, write_spatial_urban_material,
+    write_spatial_urban_topology, write_spatial_urban_vector, BlockLayout, CropLandPatchTopology,
+    DiagnosticStatistic, FlatLandElements, FlatLandPatches, LczUrbanRawFields, NcarUrbanProperties,
+    NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode, SpatialBounds, SpatialInputKind,
+    SpatialTopology, TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
+    DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -84,6 +84,8 @@ struct SpatialLctArgs {
     plant_tiles: Option<PathBuf>,
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
+    eight_day_lai_dir: Option<PathBuf>,
+    eight_day_lai_years: Vec<i32>,
     lulcc: bool,
     diagnostics: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
@@ -309,6 +311,8 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         plant_tiles: Some(args.plant_tiles.clone()),
         usgs_forest_height: None,
         monthly_vegetation_years: Vec::new(),
+        eight_day_lai_dir: None,
+        eight_day_lai_years: Vec::new(),
         lulcc: false,
         diagnostics: args.diagnostics,
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
@@ -2427,6 +2431,52 @@ fn materialize_spatial_common_fields(
             Some(0.0),
         )?;
     }
+    if let Some(directory) = &args.eight_day_lai_dir {
+        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        for &year in &args.eight_day_lai_years {
+            let source = directory.join(format!("lai_8-day_15s_{year:04}.nc"));
+            let mut lai_frames = Vec::with_capacity(46);
+            for time in 1..=46 {
+                let raw = read_mesh_raster_time_f64(
+                    &source,
+                    "lai",
+                    time,
+                    &topology.mesh,
+                    &topology.pixel,
+                    COLM_500M,
+                )?;
+                let lai = layout.aggregate_patch_vegetation_index(
+                    &raw.into_iter().map(|value| value * 0.1).collect::<Vec<_>>(),
+                    &area,
+                )?;
+                write_landpatch_vector(
+                    &args.landdata,
+                    year,
+                    topology,
+                    patches,
+                    &args.blocks,
+                    "LAI",
+                    &format!("LAI_patches{:03}", eight_day_julian_day(time)),
+                    "LAI_patches",
+                    &lai,
+                )?;
+                if args.diagnostics {
+                    lai_frames.push(lai);
+                }
+            }
+            write_lct_patch_diagnostic_time(
+                args,
+                year,
+                topology,
+                patches,
+                patch_pctshared,
+                &lai_frames,
+                "LAI_patch",
+                "LAI_8-day",
+            )?;
+        }
+    }
     if !args.monthly_vegetation_years.is_empty() {
         let tiles = args
             .plant_tiles
@@ -2917,6 +2967,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut urban_geometry = UrbanGeometrySource::Ghsl;
     let mut urban_canyon_hwr = true;
     let mut monthly_vegetation_years = Vec::new();
+    let mut eight_day_lai_dir = None;
+    let mut eight_day_lai_years = Vec::new();
     let mut lulcc = false;
     let mut diagnostics = false;
     let mut index = 5;
@@ -3063,6 +3115,23 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 monthly_vegetation_years.push(year);
                 index += 2;
             }
+            "--lai-8day-dir" => {
+                eight_day_lai_dir = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--lai-8day-dir needs the lai_15s_8day directory")?,
+                ));
+                index += 2;
+            }
+            "--lai-8day-year" => {
+                let year = args
+                    .get(index + 1)
+                    .context("--lai-8day-year needs a year")?
+                    .parse::<i32>()
+                    .context("invalid 8-day LAI year")?;
+                ensure!(year >= 0, "8-day LAI year must be non-negative");
+                eight_day_lai_years.push(year);
+                index += 2;
+            }
             "--usgs-forest-height" => {
                 usgs_forest_height = Some(PathBuf::from(
                     args.get(index + 1)
@@ -3131,6 +3200,14 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         simple_topography_factors.is_none() || regular_topography_factors.is_none(),
         "--simple-topography-factors and --regular-topography-factors are mutually exclusive"
     );
+    ensure!(
+        eight_day_lai_dir.is_none() || monthly_vegetation_years.is_empty(),
+        "--lai-8day-dir and --monthly-vegetation-year are mutually exclusive"
+    );
+    ensure!(
+        eight_day_lai_dir.is_some() == !eight_day_lai_years.is_empty(),
+        "--lai-8day-dir requires one or more --lai-8day-year values"
+    );
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -3155,6 +3232,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         plant_tiles,
         usgs_forest_height,
         monthly_vegetation_years,
+        eight_day_lai_dir,
+        eight_day_lai_years,
         lulcc,
         diagnostics,
         soil_hyper_albedo_dir,
@@ -3638,6 +3717,9 @@ fn spatial_case_command(
         !lulcc || lct,
         "spatial LULCC transfer traces require DEF_USE_LCT"
     );
+    // MOD_Namelist coerces PFT/PC and LULCC cases to monthly before
+    // mksrfdata runs.  Only plain LCT may retain the native 8-day product.
+    let lai_monthly = case_bool(&document, "DEF_LAI_MONTHLY", true)? || lulcc || pft || pc;
 
     let rawdata = PathBuf::from(case_string(&document, "DEF_dir_rawdata")?);
     let methane = methane_preprocessing_requirements(&document, namelist)?;
@@ -3731,7 +3813,6 @@ fn spatial_case_command(
             !lulcc || land_cover == SiteMode::Igbp,
             "spatial LULCC transfer traces require --land-cover igbp"
         );
-        required_directories.push(plant_tiles.clone());
         let landtype = match land_cover {
             SiteMode::Igbp => rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc")),
             SiteMode::Usgs => rawdata.join("landtypes/landtype-usgs-update.nc"),
@@ -3805,10 +3886,13 @@ fn spatial_case_command(
             required_files.push(bedrock.clone());
             args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
         }
-        args.extend([
-            "--plant-tiles".to_owned(),
-            plant_tiles.display().to_string(),
-        ]);
+        if lai_monthly {
+            required_directories.push(plant_tiles.clone());
+            args.extend([
+                "--plant-tiles".to_owned(),
+                plant_tiles.display().to_string(),
+            ]);
+        }
         if land_cover == SiteMode::Usgs {
             let forest_height = rawdata.join("Forest_Height.nc");
             required_files.push(forest_height.clone());
@@ -3820,13 +3904,23 @@ fn spatial_case_command(
         if lulcc {
             args.push("--lulcc".to_owned());
         }
-        let lai_years = if urban && lulcc {
-            vec![year]
+        if lai_monthly {
+            let lai_years = if urban && lulcc {
+                vec![year]
+            } else {
+                case_lai_years(&document, year)?
+            };
+            for lai_year in lai_years {
+                args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
+            }
         } else {
-            case_lai_years(&document, year)?
-        };
-        for lai_year in lai_years {
-            args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
+            let directory = rawdata.join("lai_15s_8day");
+            required_directories.push(directory.clone());
+            args.extend(["--lai-8day-dir".to_owned(), directory.display().to_string()]);
+            for lai_year in case_eight_day_lai_years(&document)? {
+                required_files.push(directory.join(format!("lai_8-day_15s_{lai_year:04}.nc")));
+                args.extend(["--lai-8day-year".to_owned(), lai_year.to_string()]);
+            }
         }
         if urban {
             let geometry = match case_i32(&document, "DEF_URBAN_geom_data", 1)? {
@@ -4181,6 +4275,28 @@ fn case_lai_years(document: &colm_namelist::Document, land_cover_year: i32) -> R
     Ok((first..=last).collect())
 }
 
+fn case_eight_day_lai_years(document: &colm_namelist::Document) -> Result<Vec<i32>> {
+    let lai_start = case_i32(document, "DEF_LAI_START_YEAR", 2000)?;
+    let lai_end = case_i32(document, "DEF_LAI_END_YEAR", 2020)?;
+    ensure!(
+        lai_start <= lai_end,
+        "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
+    );
+    let simulation_start = case_i32(document, "DEF_simulation_time%start_year", 2000)?;
+    let simulation_end = case_i32(document, "DEF_simulation_time%end_year", simulation_start)?;
+    ensure!(
+        simulation_start <= simulation_end,
+        "simulation start year must not exceed simulation end year"
+    );
+    let first = simulation_start.max(lai_start);
+    let last = simulation_end.min(lai_end);
+    ensure!(
+        first <= last,
+        "8-day LAI simulation years do not overlap DEF_LAI_START_YEAR..DEF_LAI_END_YEAR"
+    );
+    Ok((first..=last).collect())
+}
+
 fn materialize_legacy(args: &[String]) -> Result<()> {
     if !(2..=4).contains(&args.len()) {
         bail!("{}", usage());
@@ -4237,6 +4353,11 @@ fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)
     Ok((format!("MOD{source_year:04}"), name))
 }
 
+fn eight_day_julian_day(time: usize) -> usize {
+    debug_assert!((1..=46).contains(&time));
+    1 + (time - 1) * 8
+}
+
 fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)> {
     if year < 0 {
         bail!("monthly PFT vegetation year must be non-negative")
@@ -4255,7 +4376,7 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
@@ -4416,6 +4537,53 @@ mod tests {
             Some(PathBuf::from("topography_factors"))
         );
         assert_eq!(parsed.simple_topography_factors, None);
+    }
+
+    #[test]
+    fn spatial_lct_parser_keeps_8_day_lai_separate_from_monthly_lai() {
+        let parsed = parse_spatial_lct(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--lai-8day-dir".into(),
+            "lai_15s_8day".into(),
+            "--lai-8day-year".into(),
+            "2005".into(),
+            "--lai-8day-year".into(),
+            "2006".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.eight_day_lai_dir,
+            Some(PathBuf::from("lai_15s_8day"))
+        );
+        assert_eq!(parsed.eight_day_lai_years, vec![2005, 2006]);
+        assert!(parsed.monthly_vegetation_years.is_empty());
+        assert!(parse_spatial_lct(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--lai-8day-dir".into(),
+            "lai_15s_8day".into(),
+            "--monthly-vegetation-year".into(),
+            "2005".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn eight_day_lai_uses_coherently_spaced_julian_days() {
+        assert_eq!(eight_day_julian_day(1), 1);
+        assert_eq!(eight_day_julian_day(2), 9);
+        assert_eq!(eight_day_julian_day(46), 361);
     }
 
     #[test]
@@ -4831,6 +4999,50 @@ mod tests {
         assert!(command
             .required_directories
             .contains(&root.join("raw/soil")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lct_case_uses_native_8_day_lai_without_monthly_tiles() {
+        let (root, namelist) = case_namelist(
+            "eight-day-lai",
+            "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='$ROOT/out'\n DEF_dir_rawdata='$ROOT/raw'\n DEF_file_mesh='$ROOT/mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LAI_MONTHLY=.false.\n DEF_LAI_CHANGE_YEARLY=.false.\n DEF_simulation_time%start_year=2005\n DEF_simulation_time%end_year=2007\n DEF_LAI_START_YEAR=2006\n DEF_LAI_END_YEAR=2007\n/\n",
+        );
+        let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            option_value(&command.args, "--lai-8day-dir").map(str::to_owned),
+            Some(format!("{}/raw/lai_15s_8day", root.display()))
+        );
+        assert_eq!(
+            command
+                .args
+                .windows(2)
+                .filter(|pair| pair[0] == "--lai-8day-year")
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>(),
+            ["2006", "2007"]
+        );
+        assert!(!command
+            .args
+            .iter()
+            .any(|argument| argument == "--plant-tiles"));
+        assert!(!command
+            .args
+            .iter()
+            .any(|argument| argument == "--monthly-vegetation-year"));
+        assert!(command
+            .required_directories
+            .contains(&root.join("raw/lai_15s_8day")));
+        for year in [2006, 2007] {
+            assert!(command.required_files.contains(
+                &root
+                    .join("raw/lai_15s_8day")
+                    .join(format!("lai_8-day_15s_{year}.nc"))
+            ));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

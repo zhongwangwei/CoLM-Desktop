@@ -29,6 +29,13 @@ use crate::{
     UrbanRadiationInput, UrbanRadiationState, MISSING,
 };
 
+/// The vegetation files materialized by mksrfdata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaiFrequency {
+    Monthly,
+    EightDay,
+}
+
 /// Arguments for the LCT cold start of one spatial block.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialLctTimeConfig<'a> {
@@ -42,8 +49,9 @@ pub struct SpatialLctTimeConfig<'a> {
     pub hydraulic_model: HydraulicModel,
     pub date: RestartDate,
     pub greenwich: bool,
-    /// The year of the already materialized monthly LAI/SAI vector files.
+    /// The year of the already materialized LAI vector files.
     pub lai_year: i32,
+    pub lai_frequency: LaiFrequency,
     pub dynamic_lake: bool,
     pub plant_hydraulics: bool,
     pub ozone_stress: bool,
@@ -78,6 +86,7 @@ impl<'a> SpatialLctTimeConfig<'a> {
             date,
             greenwich: false,
             lai_year: land_cover_year,
+            lai_frequency: LaiFrequency::Monthly,
             dynamic_lake: false,
             plant_hydraulics: true,
             ozone_stress: false,
@@ -263,8 +272,20 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             count,
         )?,
     ];
-    let lai = read_monthly(config, "LAI_patches", month)?;
-    let sai = read_monthly(config, "SAI_patches", month)?;
+    let (lai, sai) = match config.lai_frequency {
+        LaiFrequency::Monthly => (
+            read_monthly(config, "LAI_patches", month)?,
+            read_monthly(config, "SAI_patches", month)?,
+        ),
+        LaiFrequency::EightDay => (
+            read_eight_day(config)?,
+            patches
+                .class
+                .iter()
+                .map(|&class| stem_area_index(config.land_cover, class))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+    };
     let grid = colm_soil_grid(dimensions.soil_layers)?;
     let interface_mm = grid
         .interface_depth_m
@@ -828,6 +849,54 @@ fn read_monthly(config: SpatialLctTimeConfig<'_>, variable: &str, month: u8) -> 
     )
 }
 
+fn read_eight_day(config: SpatialLctTimeConfig<'_>) -> Result<Vec<f64>> {
+    let stem = format!("LAI_patches{:03}", eight_day_julian_day(config.date)?);
+    read_f64(
+        config.landdata,
+        "LAI",
+        &stem,
+        "LAI_patches",
+        config.lai_year,
+        config.block_label,
+        read_patches(config.landdata, config.land_cover_year, config.block_label)?
+            .class
+            .len(),
+    )
+}
+
+fn eight_day_julian_day(date: RestartDate) -> Result<u16> {
+    let maximum = if crate::is_leap_year(date.year) {
+        366
+    } else {
+        365
+    };
+    ensure!(
+        (1..=maximum).contains(&i32::from(date.julian_day)),
+        "restart Julian day is outside its year"
+    );
+    Ok((date.julian_day - 1) / 8 * 8 + 1)
+}
+
+fn stem_area_index(scheme: LandCoverScheme, class: i32) -> Result<f64> {
+    const IGBP: [f64; 17] = [
+        2.0, 2.0, 2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.0, 0.0, 0.0,
+    ];
+    const USGS: [f64; 24] = [
+        0.2, 0.2, 0.3, 0.3, 0.5, 0.5, 1.0, 0.5, 1.0, 0.5, 2.0, 2.0, 2.0, 2.0, 2.0, 0.0, 0.2, 2.0,
+        0.2, 0.2, 0.2, 0.2, 0.0, 0.0,
+    ];
+    let index = usize::try_from(class)
+        .ok()
+        .and_then(|class| class.checked_sub(1))
+        .context("8-day LAI requires a positive land-cover class")?;
+    match scheme {
+        LandCoverScheme::Igbp => IGBP.get(index),
+        LandCoverScheme::Usgs => USGS.get(index),
+    }
+    .copied()
+    .context("8-day LAI land-cover class is outside its configured scheme")
+}
+
 pub(crate) fn month(date: RestartDate) -> Result<u8> {
     crate::month_lengths(date.year)
         .into_iter()
@@ -940,5 +1009,40 @@ impl RadiationBuffers {
             }
         }
         self.diffuse_extinction[patch] = state.diffuse_extinction;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eight_day_restart_uses_the_native_julian_file_suffix() {
+        assert_eq!(
+            eight_day_julian_day(RestartDate {
+                year: 2005,
+                julian_day: 9,
+                seconds: 0,
+            })
+            .unwrap(),
+            9
+        );
+        assert_eq!(
+            eight_day_julian_day(RestartDate {
+                year: 2004,
+                julian_day: 366,
+                seconds: 0,
+            })
+            .unwrap(),
+            361
+        );
+    }
+
+    #[test]
+    fn eight_day_restart_uses_upstream_stem_area_defaults() {
+        assert_eq!(stem_area_index(LandCoverScheme::Igbp, 1).unwrap(), 2.0);
+        assert_eq!(stem_area_index(LandCoverScheme::Igbp, 17).unwrap(), 0.0);
+        assert_eq!(stem_area_index(LandCoverScheme::Usgs, 11).unwrap(), 2.0);
+        assert_eq!(stem_area_index(LandCoverScheme::Usgs, 24).unwrap(), 0.0);
     }
 }

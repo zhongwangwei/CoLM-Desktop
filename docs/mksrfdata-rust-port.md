@@ -33,7 +33,10 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    grid, unstructured, and catchment cases; maps their standard rawdata paths into the
    existing Rust LCT/PFT/PC block materializers; accepts an explicit block layout; and
    validates every required source before it can create a partial landdata tree. The
-   namelist-driven LCT branch supports both IGBP and USGS monthly LAI/SAI. IGBP LULCC
+   namelist-driven LCT branch supports both IGBP and USGS monthly LAI/SAI. Plain LCT also
+   streams the native `lai_15s_8day/lai_8-day_15s_<year>.nc` source one time slice at a
+   time, applies CoLM's 0.1 scale, and writes all 46 `LAI_patchesDDD` vectors plus the
+   `LAI_8-day` diagnostic frames. PFT/PC and LULCC retain the upstream monthly coercion. IGBP LULCC
    cases also write the class-major previous-year transfer vectors required by the runtime;
    pre-2000 non-five-year source requests remain refused because upstream emits only monthly
    LAI for that special path. Desktop packaging now ships `mksrfdata-rs` beside `colm-cli`;

@@ -727,6 +727,36 @@ fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata()
 }
 
 #[test]
+fn spatial_lct_cold_start_reads_8_day_lai_and_native_stem_area() {
+    let root = temp_dir("eight-day-time");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_eight_day_lai(&landdata, 2005, "w180_s90", 9, 2.5);
+    let mut config = crate::SpatialLctTimeConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 12,
+            seconds: 0,
+        },
+    );
+    config.lai_frequency = crate::LaiFrequency::EightDay;
+    config.plant_hydraulics = false;
+    let output = crate::write_spatial_lct_cold_time_restart(config).unwrap();
+    let file = netcdf::open(output.block).unwrap();
+    assert_eq!(values_f64(&file, "tlai").unwrap(), [2.5]);
+    assert_eq!(values_f64(&file, "tsai").unwrap(), [2.0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_cold_start_area_averages_observed_soil_and_snow() {
     let root = temp_dir("observed-soil-snow");
     let landdata = root.join("landdata");
@@ -1011,6 +1041,24 @@ fn write_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f64, s
             .unwrap();
         file.close().unwrap();
     }
+}
+
+fn write_eight_day_lai(landdata: &Path, year: i32, block: &str, day: u16, lai: f64) {
+    let path = block_path(
+        landdata,
+        "LAI",
+        &format!("LAI_patches{day:03}"),
+        year,
+        block,
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", 1).unwrap();
+    file.add_variable::<f64>("LAI_patches", &["patch"])
+        .unwrap()
+        .put_values(&[lai], ..)
+        .unwrap();
+    file.close().unwrap();
 }
 
 fn write_pft_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f64, sai: f64) {

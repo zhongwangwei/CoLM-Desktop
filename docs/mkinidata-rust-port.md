@@ -48,7 +48,8 @@ enabled downscaling branch meet all of these conditions:
    branch unsupported and supplies no class-to-spectral-optics mapping. A spatial case
    namelist derives standard paths, start timestamp, LAI year, and enabled cold-start controls,
    then scans the selected landpatch year for every block; `--block` restricts that scan. The
-   namelist-driven LCT cold-start path supports IGBP and USGS monthly vegetation and LULCC
+   namelist-driven LCT cold-start path supports IGBP and USGS monthly vegetation, native
+   8-day LCT LAI (with the upstream class-level `sai0` fallback), and LULCC
    initial restarts once Rust-created transfer vectors exist. Desktop packaging now ships
    `mkinidata-rs` beside `colm-cli`; `colm-cli run` selects Rust for both preprocessing
    stages by default while keeping the verified Fortran `colm` executable. Use

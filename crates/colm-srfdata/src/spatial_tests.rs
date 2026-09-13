@@ -1342,6 +1342,46 @@ fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
 }
 
 #[test]
+fn timed_raw_raster_streams_the_requested_named_time_slice() {
+    let directory = temporary("timed-raw-raster");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("lai.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&raster).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("time", 2).unwrap();
+        file.add_variable::<f64>("lai", &["lon", "lat", "time"])
+            .unwrap()
+            .put_values(&[10.0, 30.0, 20.0, 40.0], (.., .., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 2, nlat: 1 },
+    )
+    .unwrap();
+    assert_eq!(
+        read_mesh_raster_time_f64(
+            &raster,
+            "lai",
+            2,
+            &topology.mesh,
+            &topology.pixel,
+            Grid { nlon: 2, nlat: 1 },
+        )
+        .unwrap(),
+        vec![30.0, 40.0]
+    );
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn catchment_pft_partition_keeps_natural_patches_inside_each_hru() {
     let directory = temporary("catchment-pft");
     let mesh_file = directory.join("catchment.nc");

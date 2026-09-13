@@ -565,6 +565,50 @@ pub fn read_mesh_raster_f64(
     read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
 }
 
+/// Read one one-based time slice of a global raw raster in mesh-pixel order.
+///
+/// This is the non-tiled `ncio_read_block_time` counterpart used by CoLM's
+/// 8-day LCT LAI product.  Rows are streamed over the local mesh window, so
+/// the 15-arcsecond global input is never materialized in memory.
+pub fn read_mesh_raster_time_f64(
+    raster: &Path,
+    variable: &str,
+    time: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    ensure!(time > 0, "raw raster time is one-based");
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = raster_time_axes(&source, raw_grid, raster)?;
+    ensure!(
+        time <= source.dimensions()[axes.time].len(),
+        "{variable} in {} has fewer than {time} time slices",
+        raster.display()
+    );
+    let longitude = raw_longitudes(pixel, raw_grid);
+    let latitude = raw_latitudes(pixel, raw_grid);
+    let mut rows = BTreeMap::new();
+    let mut pixel_values = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
+    for global_y in latitude {
+        if let Entry::Vacant(entry) = rows.entry(global_y) {
+            entry.insert(read_time_raster_row(
+                &source,
+                axes,
+                time - 1,
+                global_y,
+                &longitude,
+            )?);
+        }
+        pixel_values
+            .extend_from_slice(rows.get(&global_y).expect("raw time raster row was cached"));
+    }
+    mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+}
+
 /// Read leading layers of a named `(soil, lat, lon)` raster in mesh-pixel order.
 ///
 /// The return layout is `layer * raw_mesh_pixels + mesh_pixel`, which is the
@@ -1361,6 +1405,13 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
 #[derive(Debug, Clone, Copy)]
 struct RasterLayerAxes {
     layer: usize,
+    latitude: usize,
+    longitude: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RasterTimeAxes {
+    time: usize,
     latitude: usize,
     longitude: usize,
 }
@@ -2279,6 +2330,59 @@ fn raster_layer_axes(
     })
 }
 
+fn raster_time_axes(
+    source: &netcdf::Variable<'_>,
+    raw_grid: Grid,
+    path: &Path,
+) -> Result<RasterTimeAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "{} in {} must have time, latitude, and longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    let axis = |labels: &[&str]| {
+        dimensions
+            .iter()
+            .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
+    };
+    let named = (
+        axis(&["time", "day", "doy"]),
+        axis(&["lat", "latitude"]),
+        axis(&["lon", "longitude"]),
+    );
+    let (time, latitude, longitude) = match named {
+        (Some(time), Some(latitude), Some(longitude)) => (time, latitude, longitude),
+        (None, None, None)
+            if dimensions[0].len() == raw_grid.nlon && dimensions[1].len() == raw_grid.nlat =>
+        {
+            // `ncio_read_block_time`'s native unnamed ordering is lon, lat, time.
+            (2, 1, 0)
+        }
+        _ => bail!(
+            "{} in {} must use named time/lat/lon dimensions or native lon/lat/time order",
+            source.name(),
+            path.display()
+        ),
+    };
+    ensure!(
+        time != latitude
+            && time != longitude
+            && latitude != longitude
+            && dimensions[latitude].len() == raw_grid.nlat
+            && dimensions[longitude].len() == raw_grid.nlon,
+        "{} in {} has incompatible time/latitude/longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    Ok(RasterTimeAxes {
+        time,
+        latitude,
+        longitude,
+    })
+}
+
 fn read_layer_raster_row(
     source: &netcdf::Variable<'_>,
     axes: RasterLayerAxes,
@@ -2291,6 +2395,28 @@ fn read_layer_raster_row(
     projected_raster_row(longitude, nlon, |start, count| {
         let mut extents = vec![Extent::Index(0); 3];
         extents[axes.layer] = Extent::Index(layer);
+        extents[axes.latitude] = Extent::Index(global_y - 1);
+        extents[axes.longitude] = Extent::SliceCount {
+            start,
+            count,
+            stride: 1,
+        };
+        Ok(source.get_values::<f64, _>(extents)?)
+    })
+}
+
+fn read_time_raster_row(
+    source: &netcdf::Variable<'_>,
+    axes: RasterTimeAxes,
+    time: usize,
+    global_y: usize,
+    longitude: &[usize],
+) -> Result<Vec<f64>> {
+    ensure!(global_y > 0, "raw raster latitude indices are one-based");
+    let nlon = source.dimensions()[axes.longitude].len();
+    projected_raster_row(longitude, nlon, |start, count| {
+        let mut extents = vec![Extent::Index(0); 3];
+        extents[axes.time] = Extent::Index(time);
         extents[axes.latitude] = Extent::Index(global_y - 1);
         extents[axes.longitude] = Extent::SliceCount {
             start,
