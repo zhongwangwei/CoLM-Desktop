@@ -23,18 +23,20 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let first = required(&mut args, "case namelist, surface, or spatial-lct")?;
     if first.as_os_str() == "spatial-lct" {
-        return run_spatial_lct(args);
-    }
-    if first.as_os_str() == "spatial-pft" {
-        return run_spatial_pft(args);
-    }
-    if first
+        run_spatial_lct(args)?;
+    } else if first.as_os_str() == "spatial-pft" {
+        run_spatial_pft(args)?;
+    } else if first
         .extension()
         .is_some_and(|extension| extension == "nml")
     {
-        return run_namelist(first, args);
+        run_namelist(first, args)?;
+    } else {
+        run_explicit(first, args)?;
     }
-    run_explicit(first, args)
+    // Match the marker expected from upstream MKINIDATA.F90 by the stage runner.
+    println!("CoLM Initialization Execution Completed");
+    Ok(())
 }
 
 fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {

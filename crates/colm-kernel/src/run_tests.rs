@@ -3,21 +3,37 @@ use super::*;
 #[test]
 fn mpi_uses_plain_spmd_launch_without_process_roles() {
     let exe = Path::new("/kernel/colm.x");
-    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), 4, true).expect("mpi");
+    let (program, args) =
+        launch_command(exe, Path::new("/case/case.nml"), &[], 4, true).expect("mpi");
     assert_eq!(program, PathBuf::from("mpiexec"));
     assert_eq!(args, ["-n", "4", "/kernel/colm.x", "/case/case.nml"]);
     assert!(!args
         .iter()
         .any(|arg| matches!(arg.as_str(), "master" | "io" | "worker")));
     let (program, args) =
-        launch_command(exe, Path::new("/case/case.nml"), 1, false).expect("serial");
+        launch_command(exe, Path::new("/case/case.nml"), &[], 1, false).expect("serial");
     assert_eq!(program, exe);
     assert_eq!(args, ["/case/case.nml"]);
 
     let (program, args) =
-        launch_command(exe, Path::new("/case/case.nml"), 1, true).expect("one MPI rank");
+        launch_command(exe, Path::new("/case/case.nml"), &[], 1, true).expect("one MPI rank");
     assert_eq!(program, PathBuf::from("mpiexec"));
     assert_eq!(args, ["-n", "1", "/kernel/colm.x", "/case/case.nml"]);
+}
+
+#[test]
+fn hdf5_file_locking_defaults_off_but_respects_an_explicit_environment() {
+    let mut fallback = std::process::Command::new("true");
+    super::configure_hdf5_file_locking(&mut fallback, None);
+    assert!(fallback
+        .get_envs()
+        .any(|(key, value)| key == "HDF5_USE_FILE_LOCKING" && value == Some("FALSE".as_ref())));
+
+    let mut explicit = std::process::Command::new("true");
+    super::configure_hdf5_file_locking(&mut explicit, Some("TRUE".as_ref()));
+    assert!(!explicit
+        .get_envs()
+        .any(|(key, _)| key == "HDF5_USE_FILE_LOCKING"));
 }
 
 #[test]
@@ -35,7 +51,8 @@ fn mpi_prefers_the_runtime_bundled_beside_kernel_presets() {
     std::fs::write(&launcher, b"").expect("launcher");
 
     let exe = preset.join(if cfg!(windows) { "colm.exe" } else { "colm.x" });
-    let (program, args) = launch_command(&exe, Path::new("case.nml"), 2, true).expect("mpi launch");
+    let (program, args) =
+        launch_command(&exe, Path::new("case.nml"), &[], 2, true).expect("mpi launch");
     assert_eq!(program, launcher);
     assert_eq!(args[0..2], ["-n", "2"]);
 

@@ -254,6 +254,8 @@ const LABELS = Object.freeze({
   DEF_WRST_FREQ: pair('重启文件写出频率', 'Restart-write frequency'),
   DEF_HIST_FREQ: pair('历史输出频率', 'History-output frequency'),
   DEF_HIST_groupby: pair('历史文件分组周期', 'History-file grouping period'),
+  DEF_HIST_lon_res: pair('历史输出经向分辨率', 'History-output longitude resolution'),
+  DEF_HIST_lat_res: pair('历史输出纬向分辨率', 'History-output latitude resolution'),
   DEF_REST_CompressLevel: pair('重启文件压缩级别', 'Restart compression level'),
   DEF_HIST_CompressLevel: pair('历史文件压缩级别', 'History compression level'),
   DEF_HIST_vars_namelist: pair('历史变量配置文件', 'History-variable namelist'),

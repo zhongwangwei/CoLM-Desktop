@@ -41,15 +41,17 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let first = args.first().context(usage())?;
     if first == "spatial-lct" {
-        return materialize_spatial_lct(&args[1..]);
+        materialize_spatial_lct(&args[1..])?;
+    } else if first == "spatial-pft" {
+        materialize_spatial_pft(&args[1..])?;
+    } else if first.ends_with(".nml") {
+        materialize_case(&args)?;
+    } else {
+        materialize_legacy(&args)?;
     }
-    if first == "spatial-pft" {
-        return materialize_spatial_pft(&args[1..]);
-    }
-    if first.ends_with(".nml") {
-        return materialize_case(&args);
-    }
-    materialize_legacy(&args)
+    // Keep the orchestrator's success contract identical to upstream.
+    println!("Successful in surface data making.");
+    Ok(())
 }
 
 struct SpatialLctArgs {

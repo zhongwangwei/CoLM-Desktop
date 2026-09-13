@@ -48,8 +48,11 @@ enabled downscaling branch meet all of these conditions:
    namelist derives standard paths, start timestamp, LAI year, and enabled cold-start controls,
    then scans the selected landpatch year for every block; `--block` restricts that scan. The
    namelist-driven LCT cold-start path supports IGBP and USGS monthly vegetation and LULCC
-   initial restarts once Rust-created transfer vectors exist. External parity gates still must
-   complete before GUI/CLI selects Rust as the default.
+   initial restarts once Rust-created transfer vectors exist. Desktop packaging now ships
+   `mkinidata-rs` beside `colm-cli`; `colm-cli run` selects Rust for both preprocessing
+   stages by default while keeping the verified Fortran `colm` executable. Use
+   `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL kernels remain guarded
+   at this integration boundary until their namelist source wiring is complete.
 
 ## Performance constraints
 

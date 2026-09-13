@@ -132,6 +132,26 @@ if (ids.gatetitle.textContent !== '空间输入怎么准备？') throw new Error
 if (!nodeText(ids.gatecards).includes('early state') || !nodeText(ids.gatecards).includes('参数调优和不确定性分析会失效')) {
   throw new Error('spatial setup must keep a persistent early-state warning');
 }
+if (findNode(ids.gatecards, node => node.id === 'spatial-west')
+    || findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask')) {
+  throw new Error('an unstructured mesh must not ask for lat-lon bounds or a landmask');
+}
+const mesh = findNode(ids.gatecards, node => node.id === 'spatial-meshFile');
+if (!mesh || !foot('下一步').disabled || !ids.gateinfo.textContent.includes('已有非结构 mesh')) {
+  throw new Error('an unstructured mesh must be required');
+}
+mesh.value = '/data/PearlRiver.nc';
+mesh.oninput();
+if (foot('下一步').disabled) throw new Error('an existing unstructured mesh must pass the wizard gate');
+next(); choose('IGBP'); next(); next(); next(); next();
+if (state.spatial?.domain?.kind !== 'region' || state.spatial?.grid?.kind !== 'unstructured'
+    || state.spatial?.grid?.meshFile !== '/data/PearlRiver.nc' || 'dlon' in state.spatial?.grid
+    || state.wizard?.spatial !== state.spatial) {
+  throw new Error(`spatial contract was not preserved: ${JSON.stringify(state.spatial)}`);
+}
+
+showDomainGate();
+choose('区域（early state，不建议使用）'); next(); choose('经纬度网格（early state，不建议使用）'); next();
 for (const [id, value] of Object.entries({
   'spatial-west': '100', 'spatial-east': '110', 'spatial-south': '20', 'spatial-north': '30',
 })) {
@@ -141,7 +161,7 @@ for (const [id, value] of Object.entries({
   input.oninput();
 }
 if (!foot('下一步').disabled || !ids.gateinfo.textContent.includes('非海洋 mask')) {
-  throw new Error('latlon/unstructured spatial cases must require an explicit non-ocean mask');
+  throw new Error('a lat-lon spatial case must require an explicit non-ocean mask');
 }
 const mask = findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask');
 if (!mask) throw new Error('missing non-ocean mask input');
@@ -151,10 +171,29 @@ mask.value = '/data/non-ocean.nc';
 mask.oninput();
 if (foot('下一步').disabled) throw new Error('valid regional bounds, resolution, and mask must pass');
 next(); choose('IGBP'); next(); next(); next(); next();
-if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'unstructured'
+if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'latlon'
     || state.spatial?.grid?.dlon !== 0.5 || state.spatial?.grid?.nlon !== 720
     || state.wizard?.spatial !== state.spatial) {
-  throw new Error(`spatial contract was not preserved: ${JSON.stringify(state.spatial)}`);
+  throw new Error(`lat-lon spatial contract was not preserved: ${JSON.stringify(state.spatial)}`);
+}
+
+showDomainGate();
+choose('全球（early state，不建议使用）'); next(); choose('经纬度网格（early state，不建议使用）'); next();
+if (!nodeText(ids.gatecards).includes('西=-180°，东=180°，南=-90°，北=90°')
+    || findNode(ids.gatecards, node => node.id === 'spatial-west')) {
+  throw new Error('global lat-lon bounds must be fixed and visible rather than editable');
+}
+const globalMask = findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask');
+const globalMaskLabel = findNode(ids.gatecards, node => node.htmlFor === globalMask?.id);
+if (!globalMaskLabel || globalMaskLabel.textContent !== '全球非海洋 mask NetCDF 路径（必需）'
+    || !nodeText(ids.gatecards).includes('覆盖全球、且维度与当前经纬度分辨率一致')) {
+  throw new Error('global lat-lon must require an explicit global non-ocean mask path');
+}
+globalMask.value = '/data/non-ocean.nc';
+globalMask.oninput();
+next(); choose('IGBP'); next(); next(); next(); next();
+if (JSON.stringify(state.spatial?.domain) !== JSON.stringify({ kind: 'global', west: -180, east: 180, south: -90, north: 90 })) {
+  throw new Error(`global lat-lon bounds were not persisted: ${JSON.stringify(state.spatial?.domain)}`);
 }
 showDomainGate();
 choose('站点');

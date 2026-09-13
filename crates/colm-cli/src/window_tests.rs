@@ -220,7 +220,7 @@ fn mkinidata_artifacts_follow_def_lc_year() {
         "&nl_colm\n   DEF_CASE_NAME = 'LC2010'\n   DEF_LC_YEAR = 2010\n/\n",
     );
     let year = super::land_cover_year(&case.join("case.nml")).unwrap();
-    let artifacts = super::stage_artifacts(&case.join("out/LC2010"), "LC2010", year);
+    let artifacts = super::stage_artifacts(&case.join("out/LC2010"), "LC2010", year, false);
 
     let names = artifacts[1]
         .1
@@ -232,6 +232,29 @@ fn mkinidata_artifacts_follow_def_lc_year() {
         vec![
             "LC2010_restart_const_lc2010_w180_s90.nc",
             "LC2010_restart_const_lc2010.nc",
+        ]
+    );
+}
+
+#[test]
+fn spatial_mkinidata_artifact_is_the_unsuffixed_const_restart() {
+    let artifacts = super::stage_artifacts(Path::new("/tmp/out"), "Pearl", 2005, true);
+    assert_eq!(
+        artifacts[1].1,
+        vec![PathBuf::from(
+            "/tmp/out/restart/const/Pearl_restart_const_lc2005.nc"
+        )],
+    );
+}
+
+#[test]
+fn spatial_mksrfdata_artifacts_are_block_and_pixel_metadata() {
+    let artifacts = super::stage_artifacts(Path::new("/tmp/out"), "Pearl", 2005, true);
+    assert_eq!(
+        artifacts[0].1,
+        vec![
+            PathBuf::from("/tmp/out/landdata/block.nc"),
+            PathBuf::from("/tmp/out/landdata/pixel.nc"),
         ]
     );
 }

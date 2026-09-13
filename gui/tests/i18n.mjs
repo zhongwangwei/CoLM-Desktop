@@ -106,7 +106,8 @@ if (translateZh('下一步：站点信息 →') !== 'Next: Site information →'
   throw new Error('dynamic workflow navigation is not translated');
 }
 if (CHINESE.test(translateZh('选择流域 Shapefile（WGS84）'))
-    || CHINESE.test(translateZh('选择非海洋 mask（必需）'))) {
+    || CHINESE.test(translateZh('选择非海洋 mask NetCDF 路径（必需）'))
+    || CHINESE.test(translateZh('选择全球非海洋 mask NetCDF 路径（必需）'))) {
   throw new Error('dynamic spatial file-picker labels are not translated');
 }
 for (const message of [

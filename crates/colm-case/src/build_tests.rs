@@ -68,6 +68,7 @@ fn a_spatial_case_has_mesh_paths_without_single_point_fields() {
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>();
     assert!(names.contains(&"DEF_file_mesh"));
+    assert!(names.contains(&"DEF_UnitCatchment_file"));
     for name in [
         "DEF_domain%edgew",
         "DEF_domain%edgee",
@@ -78,6 +79,22 @@ fn a_spatial_case_has_mesh_paths_without_single_point_fields() {
     }
     assert!(!names.iter().any(|name| name.starts_with("SITE_")));
     assert!(!names.contains(&"DEF_CatchmentMesh_data"));
+    let unitcatchment = all
+        .iter()
+        .find(|(name, _)| name == "DEF_UnitCatchment_file")
+        .expect("spatial river flow input");
+    assert_eq!(
+        unitcatchment.1,
+        Value::Str("/w/runtime/unitcatchment/grid_routing_data_15min.nc".into()),
+    );
+    let value = |name: &str| {
+        all.iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(value("DEF_LAI_START_YEAR"), Some(Value::Int(2001)));
+    assert_eq!(value("DEF_LAI_END_YEAR"), Some(Value::Int(2001)));
+    assert_eq!(value("DEF_HIST_FREQ"), Some(Value::Str("DAILY".into())));
     for (name, _) in all {
         assert!(
             colm_schema::find(&name).is_some(),

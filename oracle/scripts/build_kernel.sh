@@ -14,6 +14,11 @@ case "$PROFILE" in
   production|debug) ;;
   *) echo "COLM_KERNEL_PROFILE must be production or debug, got: $PROFILE" >&2; exit 2 ;;
 esac
+SPMD_MODE="${COLM_SPMD_MODE:-flat}"
+case "$SPMD_MODE" in
+  flat|grouped) ;;
+  *) echo "COLM_SPMD_MODE must be flat or grouped, got: $SPMD_MODE" >&2; exit 2 ;;
+esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 case "$OUTDIR" in
@@ -122,8 +127,11 @@ rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
 if [ "$SPATIAL" -eq 1 ]; then
-  # 空间版使用普通 SPMD；站点预设保持原有 Master/IO/Worker 路径。
-  printf '\n#define FLAT_SPMD\n' >> include/define.h
+  # 默认 Flat SPMD 保持桌面版现有行为；grouped 留给有专用 IO/写出 rank 的
+  # 生产 benchmark。站点预设始终使用原有 Master/IO/Worker 路径。
+  if [ "$SPMD_MODE" = flat ]; then
+    printf '\n#define FLAT_SPMD\n' >> include/define.h
+  fi
   # 空间版明确不编译 extends/interception；站点预设保持原行为。
   sed -i.bak 's/^#define extend_interception$/#undef extend_interception/' include/define.h
 fi
@@ -206,7 +214,11 @@ done
 
 if [ "$SPATIAL" -eq 1 ]; then
   is_effective USEMPI || { echo "spatial kernel must enable USEMPI" >&2; exit 3; }
-  is_effective FLAT_SPMD || { echo "spatial kernel must enable FLAT_SPMD" >&2; exit 3; }
+  if [ "$SPMD_MODE" = flat ]; then
+    is_effective FLAT_SPMD || { echo "flat spatial kernel must enable FLAT_SPMD" >&2; exit 3; }
+  else
+    is_effective FLAT_SPMD && { echo "grouped spatial kernel must not enable FLAT_SPMD" >&2; exit 3; }
+  fi
   is_effective extend_interception && { echo "spatial kernel must disable extend_interception" >&2; exit 3; }
   is_effective CaMa_Flood && { echo "spatial kernel must disable CaMa_Flood" >&2; exit 3; }
   if [ "${ARGS[0]}" = CATCHMENT ]; then

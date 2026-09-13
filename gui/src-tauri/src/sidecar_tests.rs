@@ -27,6 +27,16 @@ fn spatial_grid_dimensions_reject_partial_global_cells() {
 }
 
 #[test]
+fn existing_mesh_is_only_accepted_for_unstructured_cases() {
+    assert_eq!(
+        existing_unstructured_mesh("unstructured", Some("/data/PearlRiver.nc".into())).unwrap(),
+        Some("/data/PearlRiver.nc".into())
+    );
+    assert!(existing_unstructured_mesh("unstructured", None).is_err());
+    assert!(existing_unstructured_mesh("latlon", Some("/data/mesh.nc".into())).is_err());
+}
+
+#[test]
 fn development_prefers_the_workspace_cli_over_a_stale_staged_sidecar() {
     let sibling = std::path::PathBuf::from("/app");
     let candidates = cli_candidates(Some(sibling.clone()));

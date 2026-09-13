@@ -1,4 +1,4 @@
-//! 把 `colm-cli` 暂存到 Tauri 打包要找的位置。
+//! 把 `colm-cli` 与 Rust 预处理器暂存到 Tauri 打包要找的位置。
 //!
 //! Tauri 的 `bundle.externalBin` 要求文件名带**目标三元组**后缀
 //! （`colm-cli-aarch64-apple-darwin`），打包时它按当前目标去找。
@@ -18,27 +18,37 @@ use anyhow::{bail, Context, Result};
 
 pub fn stage(root: &Path) -> Result<()> {
     let triple = host_triple()?;
-    println!("building colm-cli --release for {triple}");
-    let st = Command::new("cargo")
-        .args(["build", "--release", "-p", "colm-cli"])
-        .current_dir(root)
-        .status()
-        .context("cannot run cargo")?;
-    if !st.success() {
-        bail!("cargo build -p colm-cli failed");
+    println!("building desktop sidecars --release for {triple}");
+    // `cargo build -p A -p B --bin x` selects only the named binaries, not
+    // every default binary from A and B.  Build each required sidecar directly.
+    for (package, binary) in [
+        ("colm-cli", "colm-cli"),
+        ("colm-srfdata", "mksrfdata-rs"),
+        ("colm-init", "mkinidata-rs"),
+    ] {
+        let status = Command::new("cargo")
+            .args(["build", "--release", "-p", package, "--bin", binary])
+            .current_dir(root)
+            .status()
+            .context("cannot run cargo")?;
+        if !status.success() {
+            bail!("cargo build -p {package} --bin {binary} failed");
+        }
     }
 
     let ext = if cfg!(windows) { ".exe" } else { "" };
-    let src = root.join("target/release").join(format!("colm-cli{ext}"));
-    if !src.is_file() {
-        bail!("built but {} is missing", src.display());
-    }
     let dir = root.join("gui/src-tauri/binaries");
     std::fs::create_dir_all(&dir)?;
-    let dst = dir.join(format!("colm-cli-{triple}{ext}"));
-    std::fs::copy(&src, &dst).with_context(|| format!("cannot copy to {}", dst.display()))?;
-    let size = std::fs::metadata(&dst)?.len();
-    println!("staged {} ({:.1} MB)", dst.display(), size as f64 / 1e6);
+    for name in ["colm-cli", "mksrfdata-rs", "mkinidata-rs"] {
+        let src = root.join("target/release").join(format!("{name}{ext}"));
+        if !src.is_file() {
+            bail!("built but {} is missing", src.display());
+        }
+        let dst = dir.join(format!("{name}-{triple}{ext}"));
+        std::fs::copy(&src, &dst).with_context(|| format!("cannot copy to {}", dst.display()))?;
+        let size = std::fs::metadata(&dst)?.len();
+        println!("staged {} ({:.1} MB)", dst.display(), size as f64 / 1e6);
+    }
     Ok(())
 }
 

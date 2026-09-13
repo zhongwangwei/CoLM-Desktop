@@ -95,6 +95,7 @@ pub struct MeshSummary {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpatialInputSummary {
     pub schema: &'static str,
+    pub element_id_type: &'static str,
     pub nlon: usize,
     pub nlat: usize,
     pub active_cells: usize,
@@ -124,7 +125,7 @@ pub fn inspect_spatial_input(
 fn inspect_equal_latlon(
     file: &netcdf::File,
     variable: &str,
-    require_int64: bool,
+    has_explicit_element_ids: bool,
 ) -> Result<SpatialInputSummary> {
     let lon_w = coordinate(file, "lon_w")?;
     let lon_e = coordinate(file, "lon_e")?;
@@ -158,13 +159,13 @@ fn inspect_equal_latlon(
     let data = file
         .variable(variable)
         .with_context(|| format!("spatial input has no variable {variable}"))?;
-    require_integer(&data, variable, require_int64)?;
+    require_integer(&data, variable, false)?;
     require_2d_shape(&data, variable, nlat, nlon)?;
     let (active_cells, max_stored) = scan_positive(&data, nlat, nlon)?;
     if active_cells == 0 {
         bail!("spatial input {variable} has no active cells");
     }
-    let max_elmid = if require_int64 {
+    let max_elmid = if has_explicit_element_ids {
         max_stored
     } else {
         i64::try_from(nlat)?
@@ -177,11 +178,12 @@ fn inspect_equal_latlon(
         180.0
     };
     Ok(SpatialInputSummary {
-        schema: if require_int64 {
+        schema: if has_explicit_element_ids {
             "equal-lat-lon-elmindex-v1"
         } else {
             "equal-lat-lon-landmask-v1"
         },
+        element_id_type: integer_type_name(&data, variable)?,
         nlon,
         nlat,
         active_cells,
@@ -264,6 +266,7 @@ fn inspect_catchment(file: &netcdf::File) -> Result<SpatialInputSummary> {
     let (south, north) = bounds(&lat, -90.0, 90.0);
     Ok(SpatialInputSummary {
         schema: "colm-catchment-input-v1",
+        element_id_type: integer_type_name(&catchment, "icatchment2d")?,
         nlon,
         nlat,
         active_cells,
@@ -311,6 +314,22 @@ fn require_integer(variable: &netcdf::Variable<'_>, name: &str, require_int64: b
         bail!("spatial variable {name} must be integer, got {kind:?}");
     }
     Ok(())
+}
+
+fn integer_type_name(variable: &netcdf::Variable<'_>, name: &str) -> Result<&'static str> {
+    use netcdf::types::{IntType, NcVariableType};
+
+    match variable.vartype() {
+        NcVariableType::Int(IntType::I8) => Ok("int8"),
+        NcVariableType::Int(IntType::I16) => Ok("int16"),
+        NcVariableType::Int(IntType::I32) => Ok("int32"),
+        NcVariableType::Int(IntType::I64) => Ok("int64"),
+        NcVariableType::Int(IntType::U8) => Ok("uint8"),
+        NcVariableType::Int(IntType::U16) => Ok("uint16"),
+        NcVariableType::Int(IntType::U32) => Ok("uint32"),
+        NcVariableType::Int(IntType::U64) => Ok("uint64"),
+        kind => bail!("spatial variable {name} must be integer, got {kind:?}"),
+    }
 }
 
 fn require_2d_shape(
@@ -742,6 +761,39 @@ mod tests {
         let catchment = inspect_spatial_input(&catchment, "catchment").unwrap();
         assert_eq!((catchment.nlon, catchment.nlat), (3, 2));
         assert_eq!((catchment.active_cells, catchment.max_elmid), (5, 2));
+    }
+
+    #[test]
+    fn unstructured_preflight_accepts_legacy_int32_ids() {
+        let path = output("preflight-unstructured-int32");
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("nlat", 2).unwrap();
+        file.add_dimension("nlon", 3).unwrap();
+        file.add_variable::<f64>("lon_w", &["nlon"])
+            .unwrap()
+            .put_values(&[-180.0, -60.0, 60.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon_e", &["nlon"])
+            .unwrap()
+            .put_values(&[-60.0, 60.0, -180.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_s", &["nlat"])
+            .unwrap()
+            .put_values(&[-90.0, 0.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_n", &["nlat"])
+            .unwrap()
+            .put_values(&[0.0, 90.0], ..)
+            .unwrap();
+        file.add_variable::<i32>("elmindex", &["nlat", "nlon"])
+            .unwrap()
+            .put_values(&[1, 0, 3, 4, 5, 0], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+
+        let summary = inspect_spatial_input(&path, "unstructured").unwrap();
+        assert_eq!(summary.element_id_type, "int32");
+        assert_eq!((summary.active_cells, summary.max_elmid), (4, 5));
     }
 
     #[test]

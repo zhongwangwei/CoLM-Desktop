@@ -169,6 +169,13 @@ pub fn spatial_fields(s: &SpatialCaseSpec) -> Vec<(String, Value)> {
         ("DEF_simulation_time%timestep".into(), r(s.timestep_seconds)),
         ("DEF_dir_rawdata".into(), Value::Str(s.dirs.rawdata.clone())),
         ("DEF_dir_runtime".into(), Value::Str(s.dirs.runtime.clone())),
+        (
+            "DEF_UnitCatchment_file".into(),
+            Value::Str(format!(
+                "{}unitcatchment/grid_routing_data_15min.nc",
+                s.dirs.runtime
+            )),
+        ),
         ("DEF_dir_output".into(), Value::Str(s.dirs.output.clone())),
         (
             "DEF_forcing_namelist".into(),
@@ -176,8 +183,21 @@ pub fn spatial_fields(s: &SpatialCaseSpec) -> Vec<(String, Value)> {
         ),
         ("DEF_USE_OZONESTRESS".into(), Value::Bool(false)),
         ("DEF_USE_OZONEDATA".into(), Value::Bool(false)),
+        // mksrfdata only materializes LAI/SAI for the simulation window.  Clamp
+        // the first step after the end boundary to the final generated year.
+        (
+            "DEF_LAI_START_YEAR".into(),
+            Value::Int(s.window.start_year as i64),
+        ),
+        (
+            "DEF_LAI_END_YEAR".into(),
+            Value::Int(s.window.end_year as i64),
+        ),
         ("DEF_WRST_FREQ".into(), Value::Str("MONTHLY".into())),
-        ("DEF_HIST_FREQ".into(), Value::Str("HOURLY".into())),
+        // GridRiverLakeFlow writes a 720x1440 unit-catchment field alongside
+        // history.  Daily is the useful desktop default; users can opt into
+        // hourly diagnostics from the output panel.
+        ("DEF_HIST_FREQ".into(), Value::Str("DAILY".into())),
         ("DEF_domain%edgew".into(), r(s.domain.west)),
         ("DEF_domain%edgee".into(), r(s.domain.east)),
         ("DEF_domain%edges".into(), r(s.domain.south)),

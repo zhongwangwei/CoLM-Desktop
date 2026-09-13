@@ -3,6 +3,15 @@
 //! 同步翻译新节点，而不是要求每个 render 函数再维护一套 DOM。
 
 const ZH_EN = [
+  ['非结构网格输入', 'Unstructured grid input'],
+  ['已有非结构 mesh NetCDF（必需）', 'Existing unstructured mesh NetCDF (required)'],
+  ['读取已有 mesh 的 elmindex 与空间范围；无需设置边界、分辨率或非海洋 mask。', 'Read the existing mesh elmindex and spatial extent; no bounds, resolution, or non-ocean mask is needed.'],
+  ['经纬度网格设置', 'Latitude-longitude grid settings'],
+  ['按经纬度边界和分辨率生成 landmask，并以 GRIDBASED 模式运行。', 'Generate the landmask from the latitude-longitude bounds and resolution, then run in GRIDBASED mode.'],
+  ['请选择已有非结构 mesh NetCDF', 'Select an existing unstructured mesh NetCDF'],
+  ['将读取并预检已有 mesh NetCDF，并复用其中 elmindex。', 'Read and preflight the existing mesh NetCDF, reusing its elmindex.'],
+  ['读取网格、预检并建算例', 'Read grid, preflight, and create case'],
+  ['全球经纬度网格自动使用边界：西=-180°，东=180°，南=-90°，北=90°。海洋由下方非海洋 mask 剔除。', 'Global latitude-longitude grids automatically use bounds west=-180°, east=180°, south=-90°, and north=90°. The non-ocean mask below removes ocean cells.'],
   ['普通 SPMD 并行；所有 rank 执行同一程序，不使用 master/io/worker 角色。', 'Plain SPMD parallelism: every rank runs the same program, without master/io/worker roles.'],
   ['仅在同时运行多个算例时生效；总并行度会结合下方每算例 MPI 进程数自动限额。', 'Applies only when multiple cases run together; total parallelism is capped using the MPI ranks per case below.'],
   ['本次还没有要运行的算例；先在基本设定中创建算例。', 'There are no cases to run yet; create one in Basic settings first.'],
@@ -48,7 +57,9 @@ const ZH_EN = [
   ['每个算例的 MPI 进程数', 'MPI ranks per case'],
   ['空间强迫场 namelist', 'Spatial forcing namelist'],
   ['搜索算例…', 'Search cases…'],
-  ['非海洋 mask（必需）', 'Non-ocean mask (required)'],
+  ['非海洋 mask NetCDF 路径（必需）', 'Non-ocean mask NetCDF path (required)'],
+  ['全球非海洋 mask NetCDF 路径（必需）', 'Global non-ocean mask NetCDF path (required)'],
+  ['请选择覆盖全球、且维度与当前经纬度分辨率一致的非海洋 mask NetCDF 路径。', 'Select a global non-ocean mask NetCDF path whose dimensions match the current latitude-longitude resolution.'],
   ['时间步长（秒）', 'Timestep (seconds)'],
   ['算例根目录', 'Case root directory'],
   ['rawdata 目录', 'rawdata directory'],

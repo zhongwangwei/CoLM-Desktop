@@ -145,8 +145,9 @@ pub fn run_stage_streaming(
     run_stage_streaming_ranks(kernel, stage, namelist, work, artifacts, 1, on_line)
 }
 
-/// 普通 MPI/SPMD 启动：每个 rank 执行同一个程序和同一份 namelist，不引入
-/// master/io/worker 角色。MPI 内核即使只有一个 rank 也必须经 launcher 启动。
+/// MPI 启动：每个 rank 执行同一个程序和同一份 namelist；Flat 或 grouped 的
+/// master/io/worker 角色由 CoLM 内核在运行时划分。MPI 内核即使只有一个 rank
+/// 也必须经 launcher 启动。
 pub fn run_stage_streaming_ranks(
     kernel: &Kernel,
     stage: Stage,
@@ -158,10 +159,67 @@ pub fn run_stage_streaming_ranks(
 ) -> Result<StageReport> {
     let exe = kernel.program(stage.program());
     let uses_mpi = kernel.manifest.macros.iter().any(|item| item == "USEMPI");
-    let (program, args) = launch_command(&exe, namelist, ranks, uses_mpi)?;
+    run_stage_streaming_with_command(
+        kernel,
+        stage,
+        &exe,
+        namelist,
+        work,
+        artifacts,
+        &[],
+        ranks,
+        uses_mpi,
+        on_line,
+    )
+}
+
+/// Run one serial preprocessor selected by the caller instead of the Fortran
+/// executable stored in the kernel.  The model stage always stays bound to the
+/// verified kernel; this is only for the Rust mksrfdata/mkinidata replacements.
+#[allow(clippy::too_many_arguments)]
+pub fn run_stage_streaming_with_executable(
+    kernel: &Kernel,
+    stage: Stage,
+    executable: &Path,
+    namelist: &Path,
+    work: &Path,
+    artifacts: &[PathBuf],
+    arguments: &[String],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<StageReport> {
+    run_stage_streaming_with_command(
+        kernel,
+        stage,
+        executable,
+        namelist,
+        work,
+        artifacts,
+        arguments,
+        1,
+        false,
+        on_line,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_stage_streaming_with_command(
+    kernel: &Kernel,
+    stage: Stage,
+    exe: &Path,
+    namelist: &Path,
+    work: &Path,
+    artifacts: &[PathBuf],
+    extra_args: &[String],
+    ranks: usize,
+    uses_mpi: bool,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<StageReport> {
+    let (program, args) = launch_command(exe, namelist, extra_args, ranks, uses_mpi)?;
     let mut cmd = Command::new(&program);
+    let hdf5_file_locking = std::env::var_os("HDF5_USE_FILE_LOCKING");
+    configure_hdf5_file_locking(&mut cmd, hdf5_file_locking.as_deref());
     if uses_mpi {
-        configure_mpi_runtime(&mut cmd, &exe)?;
+        configure_mpi_runtime(&mut cmd, exe)?;
     }
     let mut child = no_console(&mut cmd)
         .args(args)
@@ -262,16 +320,16 @@ pub fn run_stage_streaming_ranks(
 fn launch_command(
     exe: &Path,
     namelist: &Path,
+    extra_args: &[String],
     ranks: usize,
     uses_mpi: bool,
 ) -> Result<(PathBuf, Vec<String>)> {
     anyhow::ensure!(ranks > 0, "MPI rank count must be at least 1");
     if !uses_mpi {
         anyhow::ensure!(ranks == 1, "non-MPI kernels only support one rank");
-        return Ok((
-            exe.to_path_buf(),
-            vec![namelist.to_string_lossy().into_owned()],
-        ));
+        let mut args = vec![namelist.to_string_lossy().into_owned()];
+        args.extend_from_slice(extra_args);
+        return Ok((exe.to_path_buf(), args));
     }
     let program = std::env::var_os("COLM_MPIEXEC")
         .map(PathBuf::from)
@@ -287,7 +345,17 @@ fn launch_command(
         exe.to_string_lossy().into_owned(),
         namelist.to_string_lossy().into_owned(),
     ]);
+    args.extend_from_slice(extra_args);
     Ok((program, args))
+}
+
+/// SMB/NAS 上的 netCDF-4 forcing 是只读输入；HDF5 的 POSIX 文件锁在这类
+/// 挂载上并不可靠，多个 MPI rank 同时打开同一个月文件会报笼统的 HDF error。
+/// 用户显式设置时优先，默认关闭锁以兼容共享只读资料库。
+fn configure_hdf5_file_locking(cmd: &mut Command, inherited: Option<&std::ffi::OsStr>) {
+    if inherited.is_none() {
+        cmd.env("HDF5_USE_FILE_LOCKING", "FALSE");
+    }
 }
 
 fn bundled_mpi_root(exe: &Path) -> Option<PathBuf> {

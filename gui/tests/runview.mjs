@@ -84,6 +84,11 @@ if ((html.match(/id="cpu-workers"/g) || []).length !== 1
     || !runSection.includes('批量并行算例数')) {
   throw new Error('batch parallelism must be configured once, next to the Step 4 run controls');
 }
+const runnerJs = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
+if (!runnerJs.includes('const spatialDefaultRanks = Math.min(8, cpuCapacity);')
+    || !runnerJs.includes("else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);")) {
+  throw new Error('spatial cases must default to a bounded MPI rank count without overriding a user choice');
+}
 const expectedRunButtons = [
   ['run-mksrfdata', '运行 mksrfdata'],
   ['run-mkinidata', '运行 mkinidata'],
@@ -109,6 +114,18 @@ if (!controlStudy.includes("action === 'resume' ? spatialStudyReason() : ''")
 
 if (!runner.includes("（early state，不建议使用）") || !runner.includes("GRIDBASED") || !runner.includes("UNSTRUCTURED") || !runner.includes("CATCHMENT")) {
   throw new Error('spatial kernel presets must be labeled early state');
+}
+const domainJs = await readFile(join(root, 'dist', 'app', 'domain.js'), 'utf8');
+if (!domainJs.includes("已有非结构 mesh NetCDF（必需）")
+    || !domainJs.includes("picked.grid === 'unstructured') return s.meshFile")
+    || !domainJs.includes("if (picked.grid === 'unstructured') {")
+    || !domainJs.includes("经纬度网格设置")
+    || !domainJs.includes('meshFile: picked.spatial.meshFile')) {
+  throw new Error('the spatial wizard must require an existing unstructured mesh and retain lat-lon settings');
+}
+if (!spatialJs.includes('meshFile: grid.meshFile ?? null')
+    || !spatialJs.includes('读取网格、预检并建算例')) {
+  throw new Error('the spatial wizard must forward and read an existing mesh through the native backend');
 }
 if (!runner.includes("const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null]")) {
   throw new Error('the four run buttons must map to three individual stages and the full workflow');

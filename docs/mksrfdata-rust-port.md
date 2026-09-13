@@ -36,9 +36,10 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    namelist-driven LCT branch supports both IGBP and USGS monthly LAI/SAI. IGBP LULCC
    cases also write the class-major previous-year transfer vectors required by the runtime;
    pre-2000 non-five-year source requests remain refused because upstream emits only monthly
-   LAI for that special path. MPI I/O
-   ownership, artifact checking, GUI/CLI default
-   selection, and the guarded default switch still wait for all parity gates.
+   LAI for that special path. Desktop packaging now ships `mksrfdata-rs` beside `colm-cli`;
+   `colm-cli run` selects Rust for both preprocessing stages by default and keeps
+   `--preprocessors fortran` as the explicit fallback. HYPERSPECTRAL kernels are rejected at
+   this integration boundary until their namelist source wiring is complete.
 
 `USE_srfdata_from_larger_region=.true.` now follows the upstream existing-surface
 path in Rust: it reads `DEF_dir_existing_srfdata`, retains whole overlapping mesh

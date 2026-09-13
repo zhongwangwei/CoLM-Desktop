@@ -23,9 +23,14 @@ function syncSpatialSetup() {
   $('spatial-case-setup').hidden = !spatial;
   if (!spatial || !state.spatial) return;
   $('spatial-summary').textContent = `${labels[state.domain]} · ${labels[state.grid]} · early state，不建议使用。`
-    + (state.grid === 'catchment'
+    + (state.grid === 'unstructured'
+      ? '将读取并预检已有 mesh NetCDF，并复用其中 elmindex。'
+      : state.grid === 'catchment'
       ? '将预检已准备的 Catchment/HRU NetCDF。'
       : '将按指定分辨率生成网格，以 mask 剔除海洋和范围外单元，并生成 int64 空间索引合同。');
+  $('make-spatial-case').textContent = state.grid === 'unstructured'
+    ? '读取网格、预检并建算例'
+    : '生成网格、预检并建算例';
   const warning = $('spatial-early-warning');
   if (warning) warning.textContent = spatialEarlyText;
   if (!$('spatial-rawdata').value) $('spatial-rawdata').value = $('rawdata').value;
@@ -78,6 +83,7 @@ $('make-spatial-case').onclick = async () => {
       south: domain.south ?? null, north: domain.north ?? null,
       dlon: grid.dlon ?? null, dlat: grid.dlat ?? null,
       nonOceanMask: grid.nonOceanMask ?? null,
+      meshFile: grid.meshFile ?? null,
       catchmentFile: grid.input ?? null,
       out, name,
       forcing: $('spatial-forcing').value.trim(),

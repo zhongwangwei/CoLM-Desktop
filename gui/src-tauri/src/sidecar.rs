@@ -1209,6 +1209,7 @@ struct SpatialCaseRequest {
     dlon: Option<f64>,
     dlat: Option<f64>,
     non_ocean_mask: Option<String>,
+    mesh_file: Option<String>,
     catchment_file: Option<String>,
     out: String,
     name: String,
@@ -1235,6 +1236,7 @@ pub async fn new_spatial_case(
     dlon: Option<f64>,
     dlat: Option<f64>,
     non_ocean_mask: Option<String>,
+    mesh_file: Option<String>,
     catchment_file: Option<String>,
     out: String,
     name: String,
@@ -1258,6 +1260,7 @@ pub async fn new_spatial_case(
         dlon,
         dlat,
         non_ocean_mask,
+        mesh_file,
         catchment_file,
         out,
         name,
@@ -1293,7 +1296,11 @@ pub async fn new_spatial_case(
         let _ = std::fs::remove_dir_all(&case_dir);
         error
     };
-    let mesh = if request.grid_kind == "catchment" {
+    let existing_mesh = existing_unstructured_mesh(&request.grid_kind, request.mesh_file.clone())
+        .map_err(&cleanup)?;
+    let mesh = if let Some(mesh) = existing_mesh {
+        mesh
+    } else if request.grid_kind == "catchment" {
         request
             .catchment_file
             .clone()
@@ -1407,6 +1414,19 @@ pub async fn new_spatial_case(
     let output = capture_async(args).await.map_err(&cleanup)?;
     crate::config::apply_fields(&request.out, &request.fields).map_err(&cleanup)?;
     Ok(output)
+}
+
+fn existing_unstructured_mesh(
+    grid_kind: &str,
+    mesh_file: Option<String>,
+) -> Result<Option<String>, String> {
+    let mesh_file = mesh_file.filter(|value| !value.trim().is_empty());
+    match (grid_kind, mesh_file) {
+        ("unstructured", Some(mesh)) => Ok(Some(mesh)),
+        ("unstructured", None) => Err("meshFile is required for an unstructured grid".into()),
+        (_, Some(_)) => Err("已有 mesh NetCDF 目前仅支持非结构网格".into()),
+        (_, None) => Ok(None),
+    }
 }
 
 fn is_crop_case(fields: &[crate::config::FieldChange]) -> bool {

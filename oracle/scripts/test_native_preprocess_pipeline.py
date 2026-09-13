@@ -19,12 +19,20 @@ def main() -> None:
             f"DEF_dir_output = '{ROOT}/oracle/work/generated/out/'",
             f"DEF_dir_output = '{output}/'",
         ))
-        for package, binary in (("colm-srfdata", "mksrfdata-rs"), ("colm-init", "mkinidata-rs")):
-            subprocess.run(
+        for package, binary, marker in (
+            ("colm-srfdata", "mksrfdata-rs", "Successful in surface data making."),
+            ("colm-init", "mkinidata-rs", "CoLM Initialization Execution Completed"),
+        ):
+            result = subprocess.run(
                 ["cargo", "run", "-q", "-p", package, "--bin", binary, "--", str(case), "--land-cover", "igbp"],
                 cwd=ROOT,
-                check=True,
+                text=True,
+                capture_output=True,
             )
+            if result.returncode:
+                raise SystemExit(result.stdout + result.stderr)
+            if marker not in result.stdout:
+                raise SystemExit(f"{binary} exited successfully without its CoLM stage marker: {marker}")
         restart = output / "CN-Cng/restart"
         expected = [
             output / "CN-Cng/landdata/srfdata.nc",

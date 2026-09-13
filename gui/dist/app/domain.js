@@ -73,7 +73,7 @@ const emptyPicked = () => ({
   grid: null,
   spatial: {
     shapefile: '', west: '', east: '', south: '', north: '',
-    dlon: '0.5', dlat: '0.5', catchmentFile: '', nonOceanMask: '',
+    dlon: '0.5', dlat: '0.5', meshFile: '', catchmentFile: '', nonOceanMask: '',
   },
   subgrid: null,
   soil: 'vg',
@@ -144,6 +144,17 @@ function renderSpatial() {
   const panel = document.createElement('div');
   panel.className = 'card spatial-config';
   const title = document.createElement('h3');
+  if (picked.grid === 'unstructured') {
+    title.textContent = '非结构网格输入';
+    panel.append(title, spatialEarlyWarning());
+    panel.appendChild(pathField('已有非结构 mesh NetCDF（必需）', 'meshFile', 'nc,nc4'));
+    const note = document.createElement('p');
+    note.className = 'muted mini';
+    note.textContent = '读取已有 mesh 的 elmindex 与空间范围；无需设置边界、分辨率或非海洋 mask。';
+    panel.appendChild(note);
+    $('gatecards').appendChild(panel);
+    return;
+  }
   title.textContent = picked.domain === 'watershed' ? '流域边界'
     : picked.domain === 'region' ? '区域边界' : '全球范围';
   panel.appendChild(title);
@@ -162,12 +173,14 @@ function renderSpatial() {
   } else {
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = '使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。';
+    note.textContent = picked.grid === 'latlon'
+      ? '全球经纬度网格自动使用边界：西=-180°，东=180°，南=-90°，北=90°。海洋由下方非海洋 mask 剔除。'
+      : '使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。';
     panel.appendChild(note);
   }
 
   const gridTitle = document.createElement('h3');
-  gridTitle.textContent = picked.grid === 'catchment' ? '流域网格数据' : '等经纬度底板';
+  gridTitle.textContent = picked.grid === 'catchment' ? '流域网格数据' : '经纬度网格设置';
   panel.appendChild(gridTitle);
   if (picked.grid === 'catchment') {
     panel.appendChild(pathField('Catchment NetCDF', 'catchmentFile', 'nc,nc4'));
@@ -178,11 +191,19 @@ function renderSpatial() {
     panel.appendChild(row);
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = picked.grid === 'unstructured'
-      ? '按该全球格架生成 int64 elmindex；范围外与海洋单元写为 inactive。'
-      : '按该全球格架生成 landmask，并以 GRIDBASED 模式运行。';
+    note.textContent = '按经纬度边界和分辨率生成 landmask，并以 GRIDBASED 模式运行。';
     panel.appendChild(note);
-    panel.appendChild(pathField('非海洋 mask（必需）', 'nonOceanMask', 'nc,nc4'));
+    const globalLatLon = picked.domain === 'global';
+    panel.appendChild(pathField(
+      globalLatLon ? '全球非海洋 mask NetCDF 路径（必需）' : '非海洋 mask NetCDF 路径（必需）',
+      'nonOceanMask', 'nc,nc4',
+    ));
+    if (globalLatLon) {
+      const maskNote = document.createElement('p');
+      maskNote.className = 'muted mini';
+      maskNote.textContent = '请选择覆盖全球、且维度与当前经纬度分辨率一致的非海洋 mask NetCDF 路径。';
+      panel.appendChild(maskNote);
+    }
   }
   $('gatecards').appendChild(panel);
 }
@@ -250,6 +271,7 @@ function updateSpatial(key, value) {
 
 function spatialIssue() {
   const s = picked.spatial;
+  if (picked.grid === 'unstructured') return s.meshFile ? null : '请选择已有非结构 mesh NetCDF';
   if (picked.domain === 'watershed' && !s.shapefile) return '请选择流域 Shapefile';
   if (picked.domain === 'region') {
     if ([s.west, s.east, s.south, s.north].some(value => value === '')) return '请填写完整的区域边界';
@@ -486,7 +508,9 @@ function finish() {
   state.domain = picked.domain;
   state.grid = picked.grid;
   state.spatial = picked.domain === 'site' ? null : {
-    domain: picked.domain === 'watershed'
+    domain: picked.grid === 'unstructured'
+      ? { kind: picked.domain }
+      : picked.domain === 'watershed'
       ? { kind: picked.domain, shapefile: picked.spatial.shapefile }
       : picked.domain === 'region'
         ? {
@@ -494,11 +518,16 @@ function finish() {
           west: Number(picked.spatial.west), east: Number(picked.spatial.east),
           south: Number(picked.spatial.south), north: Number(picked.spatial.north),
         }
+        : picked.domain === 'global' && picked.grid === 'latlon'
+          ? { kind: picked.domain, west: -180, east: 180, south: -90, north: 90 }
         : { kind: picked.domain },
-    grid: picked.grid === 'catchment'
+    grid: picked.grid === 'unstructured'
+      ? { kind: picked.grid, meshFile: picked.spatial.meshFile }
+      : picked.grid === 'catchment'
       ? { kind: picked.grid, input: picked.spatial.catchmentFile }
       : {
         kind: picked.grid,
+        meshFile: picked.spatial.meshFile || null,
         dlon: Number(picked.spatial.dlon), dlat: Number(picked.spatial.dlat),
         nlon: Math.round(360 / Number(picked.spatial.dlon)),
         nlat: Math.round(180 / Number(picked.spatial.dlat)),

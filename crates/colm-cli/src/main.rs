@@ -14,6 +14,7 @@
 //!                    [--spinup-years N] [--spinup-repeat N]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1] [--ranks N]
+//!                    [--preprocessors rust|fortran]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
@@ -80,11 +81,12 @@ usage:
                    # 城市站点由文件形状自动识别。两个目录都可选：预抽表盖住的
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1] [--ranks N]
-                   [--stage mksrfdata|mkinidata|colm]
-                   # --force 忽略指纹，三段全部重跑
+                   [--stage mksrfdata|mkinidata|colm] [--preprocessors rust|fortran]
+                   # --force 不读取或写入指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
-                   # --ranks 使用普通 MPI/SPMD 启动；默认 1，不使用进程角色
+                   # --ranks 使用 MPI 启动；进程角色由内核决定，默认 1
+                   # Rust 默认只替换 mksrfdata/mkinidata；colm 保持已校验的 Fortran 内核
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -152,7 +154,7 @@ usage:
                     # EARLY STATE / 不建议使用：所有空间范围与网格选项均为早期功能
                     [--west W --east E --south S --north N | --shp basin.shp]
                     [--non-ocean-mask mask.nc --non-ocean-var non_ocean_mask]
-                    # 生成 GRIDBASED landmask 或 int64 UNSTRUCTURED elmindex；无 bbox/SHP 时为全球
+                    # 生成 GRIDBASED landmask 或 int64 UNSTRUCTURED elmindex；预检也接受既有 int32 网格；无 bbox/SHP 时为全球
   colm-cli spatial-preflight --grid-kind latlon|unstructured|catchment --input <mesh.nc>
                     # EARLY STATE / 不建议使用；预检不代表科学结果已验证
                     [--out manifest.json]
@@ -226,6 +228,7 @@ fn main() -> Result<()> {
                 opts.get("--force").is_some(),
                 requested_run_stage(opts.get("--stage").as_deref())?,
                 opts.count("--ranks", 1)? as usize,
+                requested_preprocessors(opts.get("--preprocessors").as_deref())?,
             )?;
         }
         "metrics" => {
@@ -376,6 +379,7 @@ fn main() -> Result<()> {
                 false,
                 None,
                 opts.count("--ranks", 1)? as usize,
+                requested_preprocessors(opts.get("--preprocessors").as_deref())?,
             )?;
             match opts.get("--obs") {
                 Some(obs) => cmd_metrics(MetricsRequest {
@@ -1793,6 +1797,115 @@ fn requested_run_stage(value: Option<&str>) -> Result<Option<Stage>> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreprocessorMode {
+    Rust,
+    Fortran,
+}
+
+impl PreprocessorMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Fortran => "fortran",
+        }
+    }
+}
+
+fn requested_preprocessors(value: Option<&str>) -> Result<PreprocessorMode> {
+    match value.unwrap_or("rust") {
+        "rust" => Ok(PreprocessorMode::Rust),
+        "fortran" => Ok(PreprocessorMode::Fortran),
+        other => bail!("--preprocessors must be rust or fortran, got {other:?}"),
+    }
+}
+
+fn rust_preprocessor_executable(stage: Stage) -> Result<PathBuf> {
+    let name = match stage {
+        Stage::MkSrfData => "mksrfdata-rs",
+        Stage::MkIniData => "mkinidata-rs",
+        Stage::Colm => bail!("colm always runs the verified Fortran kernel executable"),
+    };
+    let name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let cli = std::env::current_exe().context("cannot locate the running colm-cli executable")?;
+    let executable = cli
+        .parent()
+        .context("colm-cli has no parent directory")?
+        .join(name);
+    if !executable.is_file() {
+        bail!(
+            "Rust preprocessor is missing beside colm-cli: {}\nrebuild the desktop sidecars with `cargo run -p xtask -- stage-sidecar`, or use --preprocessors fortran",
+            executable.display()
+        );
+    }
+    Ok(executable)
+}
+
+fn rust_preprocessor_arguments(
+    stage: Stage,
+    namelist: &Path,
+    kernel: &Kernel,
+) -> Result<Vec<String>> {
+    if stage == Stage::Colm {
+        return Ok(Vec::new());
+    }
+    if kernel
+        .manifest
+        .macros
+        .iter()
+        .any(|macro_name| macro_name == "HYPERSPECTRAL")
+    {
+        bail!(
+            "Rust preprocessor selection for HYPERSPECTRAL kernels is not wired through this namelist runner; use --preprocessors fortran rather than writing an incomplete restart"
+        );
+    }
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read {}", namelist.display()))?;
+    let document = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", namelist.display()))?;
+    let lct = match document.get("DEF_USE_LCT") {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        Some(other) => bail!("DEF_USE_LCT must be logical, got {other}"),
+        None => true,
+    };
+    if !lct {
+        return Ok(Vec::new());
+    }
+    let urban = match document.get("DEF_URBAN_RUN") {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        Some(other) => bail!("DEF_URBAN_RUN must be logical, got {other}"),
+        None => false,
+    };
+    let existing_surface = match document.get("USE_srfdata_from_larger_region") {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        Some(other) => bail!("USE_srfdata_from_larger_region must be logical, got {other}"),
+        None => false,
+    };
+    if stage == Stage::MkSrfData && existing_surface {
+        // The copied blocks already encode their own selected classification.
+        return Ok(Vec::new());
+    }
+    let land_cover = if urban || kernel.manifest.macros.iter().any(|item| item == "LULC_IGBP") {
+        "igbp"
+    } else if kernel
+        .manifest
+        .macros
+        .iter()
+        .any(|item| item == "LULC_USGS")
+    {
+        "usgs"
+    } else {
+        bail!(
+            "kernel manifest selects neither LULC_IGBP nor LULC_USGS; Rust LCT preprocessing cannot select the correct table"
+        );
+    };
+    Ok(vec!["--land-cover".into(), land_cover.into()])
+}
+
 enum RunNotice<'a> {
     StageBegin(&'a str),
     StageSkipped(&'a str),
@@ -1807,6 +1920,7 @@ fn cmd_run(
     force: bool,
     only_stage: Option<Stage>,
     ranks: usize,
+    preprocessors: PreprocessorMode,
 ) -> Result<()> {
     run_case(
         case,
@@ -1815,6 +1929,7 @@ fn cmd_run(
         force,
         only_stage,
         ranks,
+        preprocessors,
         false,
         &mut |_| {},
     )
@@ -1828,6 +1943,7 @@ fn run_case(
     force: bool,
     only_stage: Option<Stage>,
     ranks: usize,
+    preprocessors: PreprocessorMode,
     quiet: bool,
     notice: &mut dyn FnMut(RunNotice<'_>),
 ) -> Result<()> {
@@ -1845,11 +1961,8 @@ fn run_case(
     if ranks == 0 {
         bail!("--ranks must be at least 1");
     }
-    if ranks > 1
-        && !(kernel.manifest.macros.iter().any(|m| m == "USEMPI")
-            && kernel.manifest.macros.iter().any(|m| m == "FLAT_SPMD"))
-    {
-        bail!("--ranks > 1 requires a USEMPI + FLAT_SPMD kernel");
+    if ranks > 1 && !kernel.manifest.macros.iter().any(|m| m == "USEMPI") {
+        bail!("--ranks > 1 requires a USEMPI kernel");
     }
     if !quiet {
         println!(
@@ -1859,19 +1972,24 @@ fn run_case(
         );
     }
     let layout = Layout::new(case);
-    preflight_spatial_case(&layout.case_nml(), &kernel)?;
+    preflight_spatial_case(&layout.case_nml(), &kernel, only_stage)?;
     ensure_cli_output_dir(&layout.case_nml(), &layout.out())?;
     let name = colm_case::case_name(&layout.case_nml())?;
     validate_native_case_paths(case, &name)?;
     let out = layout.out().join(&name);
     let lc_year = land_cover_year(&layout.case_nml())?;
+    let spatial = colm_case::is_spatial_case(&layout.case_nml())?;
     // 产物必须列到**文件**：目录在程序写任何东西之前就已存在，
     // 只列目录的话「跑完了但什么都没写」恰好抓不到。
-    let stages = stage_artifacts(&out, &name, lc_year);
+    let stages = stage_artifacts(&out, &name, lc_year, spatial);
     // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
     // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
     // 算新算例，且没有任何迹象。见 `fingerprint.rs`。
-    let kernel_id = kernel.manifest.stage_fingerprint_identity();
+    let kernel_id = format!(
+        "{};preprocessors={}",
+        kernel.manifest.stage_fingerprint_identity(),
+        preprocessors.as_str()
+    );
     let mut marks = fingerprint::load(case);
     if force {
         match only_stage {
@@ -1896,14 +2014,22 @@ fn run_case(
             continue;
         }
         let sname = stage.program();
-        let (want, have_all, skip) = stage_fingerprint_status(
-            *stage,
-            artifacts,
-            &layout.case_nml(),
-            &out,
-            &marks,
-            &kernel_id,
-        )?;
+        // `--force` 的契约是完全忽略指纹。尤其在首次复跑一个完整
+        // rawdata 目录时，递归扫描所有未使用的历史备份既不能决定是否执行，
+        // 也不该阻挡内核启动；本轮结束后不写标记，下次常规运行仍会保守复跑。
+        let (want, have_all, skip) = if force {
+            (None, false, false)
+        } else {
+            let (want, have_all, skip) = stage_fingerprint_status(
+                *stage,
+                artifacts,
+                &layout.case_nml(),
+                &out,
+                &marks,
+                &kernel_id,
+            )?;
+            (Some(want), have_all, skip)
+        };
         if skip {
             if matches!(stage, Stage::Colm) {
                 colm_case::clear_results_stale(case)
@@ -1920,9 +2046,9 @@ fn run_case(
         }
         // 说出**为什么**要重跑。「又跑了一遍」而不知道原因，
         // 会让人怀疑跳过功能根本没生效。
-        if let Some(old) = marks.get(sname) {
-            if have_all {
-                if let Some(why) = fingerprint::first_difference(old, &want) {
+        if have_all {
+            if let (Some(old), Some(want)) = (marks.get(sname), want.as_ref()) {
+                if let Some(why) = fingerprint::first_difference(old, want) {
                     if !quiet {
                         println!("  {sname:<10} 需要重跑：{why}");
                     }
@@ -1972,15 +2098,32 @@ fn run_case(
                 let _ = o.flush();
             }
         };
-        let r = colm_kernel::run_stage_streaming_ranks(
-            &kernel,
-            *stage,
-            &layout.case_nml(),
-            case,
-            artifacts,
-            ranks,
-            &mut forward,
-        )?;
+        let r = if preprocessors == PreprocessorMode::Rust
+            && matches!(stage, Stage::MkSrfData | Stage::MkIniData)
+        {
+            let executable = rust_preprocessor_executable(*stage)?;
+            let arguments = rust_preprocessor_arguments(*stage, &layout.case_nml(), &kernel)?;
+            colm_kernel::run_stage_streaming_with_executable(
+                &kernel,
+                *stage,
+                &executable,
+                &layout.case_nml(),
+                case,
+                artifacts,
+                &arguments,
+                &mut forward,
+            )?
+        } else {
+            colm_kernel::run_stage_streaming_ranks(
+                &kernel,
+                *stage,
+                &layout.case_nml(),
+                case,
+                artifacts,
+                ranks,
+                &mut forward,
+            )?
+        };
         notice(RunNotice::StageDone {
             stage: sname,
             ok: r.succeeded(),
@@ -2016,7 +2159,11 @@ fn run_case(
             let _ = fingerprint::save(case, &marks);
             bail!("stage {} failed", stage.program());
         }
-        marks.insert(sname.to_string(), want);
+        if let Some(want) = want {
+            marks.insert(sname.to_string(), want);
+        } else {
+            marks.remove(sname);
+        }
         fingerprint::save(case, &marks)?;
         if matches!(stage, Stage::Colm) {
             colm_case::clear_results_stale(case)
@@ -2026,7 +2173,11 @@ fn run_case(
     Ok(())
 }
 
-fn preflight_spatial_case(case_nml: &Path, kernel: &Kernel) -> Result<()> {
+fn preflight_spatial_case(
+    case_nml: &Path,
+    kernel: &Kernel,
+    only_stage: Option<Stage>,
+) -> Result<()> {
     let grid_kind = if kernel.manifest.macros.iter().any(|m| m == "GRIDBASED") {
         Some("latlon")
     } else if kernel.manifest.macros.iter().any(|m| m == "UNSTRUCTURED") {
@@ -2061,11 +2212,23 @@ fn preflight_spatial_case(case_nml: &Path, kernel: &Kernel) -> Result<()> {
     let mesh = string(mesh_field)?;
     colm_srfdata::mesh::inspect_spatial_input(&mesh, grid_kind)
         .with_context(|| format!("spatial preflight failed for {}", mesh.display()))?;
-    for (field, directory) in [
-        ("DEF_dir_rawdata", true),
-        ("DEF_dir_runtime", true),
-        ("DEF_forcing_namelist", false),
-    ] {
+    let existing_surface = matches!(
+        doc.get("USE_srfdata_from_larger_region"),
+        Some(colm_namelist::Value::Bool(true))
+    );
+    let checks = [
+        // The upstream regional-clipping branch reads its existing landdata,
+        // not rawdata.  Requiring an unused rawdata tree blocks a valid run.
+        (!existing_surface && only_stage != Some(Stage::Colm), "DEF_dir_rawdata", true),
+        // mksrfdata has no forcing/runtime dependency.  A single surface stage
+        // should remain runnable while the later model inputs are being staged.
+        (only_stage != Some(Stage::MkSrfData), "DEF_dir_runtime", true),
+        (only_stage != Some(Stage::MkSrfData), "DEF_forcing_namelist", false),
+    ];
+    for (needed, field, directory) in checks {
+        if !needed {
+            continue;
+        }
         let path = string(field)?;
         let ready = if directory {
             path.is_dir()
@@ -2076,6 +2239,20 @@ fn preflight_spatial_case(case_nml: &Path, kernel: &Kernel) -> Result<()> {
             bail!(
                 "spatial preflight: {field} does not exist at {}",
                 path.display()
+            );
+        }
+    }
+    if kernel
+        .manifest
+        .macros
+        .iter()
+        .any(|macro_name| macro_name == "GridRiverLakeFlow")
+    {
+        let unitcatchment = string("DEF_UnitCatchment_file")?;
+        if !unitcatchment.is_file() {
+            bail!(
+                "spatial preflight: DEF_UnitCatchment_file does not exist at {}",
+                unitcatchment.display()
             );
         }
     }
@@ -2124,18 +2301,32 @@ fn validate_native_case_paths(case: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn stage_artifacts(out: &Path, name: &str, lc_year: i32) -> [(Stage, Vec<PathBuf>); 3] {
+fn stage_artifacts(
+    out: &Path,
+    name: &str,
+    lc_year: i32,
+    spatial: bool,
+) -> [(Stage, Vec<PathBuf>); 3] {
     let const_dir = out.join("restart/const");
     let lc = format!("lc{lc_year:04}");
+    let mkinidata = if spatial {
+        vec![const_dir.join(format!("{name}_restart_const_{lc}.nc"))]
+    } else {
+        vec![
+            const_dir.join(format!("{name}_restart_const_{lc}_w180_s90.nc")),
+            const_dir.join(format!("{name}_restart_const_{lc}.nc")),
+        ]
+    };
+    let mksrfdata = if spatial {
+        // Spatial mksrfdata is block/vector based; it never writes the
+        // SinglePoint `srfdata.nc` aggregate.
+        vec![out.join("landdata/block.nc"), out.join("landdata/pixel.nc")]
+    } else {
+        vec![out.join("landdata/srfdata.nc")]
+    };
     [
-        (Stage::MkSrfData, vec![out.join("landdata/srfdata.nc")]),
-        (
-            Stage::MkIniData,
-            vec![
-                const_dir.join(format!("{name}_restart_const_{lc}_w180_s90.nc")),
-                const_dir.join(format!("{name}_restart_const_{lc}.nc")),
-            ],
-        ),
+        (Stage::MkSrfData, mksrfdata),
+        (Stage::MkIniData, mkinidata),
         (Stage::Colm, vec![]),
     ]
 }
@@ -2168,8 +2359,9 @@ pub(crate) fn case_is_current(case: &Path, kernel_id: &str) -> Result<bool> {
     let name = colm_case::case_name(&layout.case_nml())?;
     let out = layout.out().join(&name);
     let lc_year = land_cover_year(&layout.case_nml())?;
+    let spatial = colm_case::is_spatial_case(&layout.case_nml())?;
     let marks = fingerprint::load(case);
-    for (stage, artifacts) in stage_artifacts(&out, &name, lc_year) {
+    for (stage, artifacts) in stage_artifacts(&out, &name, lc_year, spatial) {
         if !stage_fingerprint_status(
             stage,
             &artifacts,
@@ -3893,7 +4085,7 @@ fn cmd_spatial_preflight(opts: &Opts) -> Result<()> {
         "input": input,
         "sha256": fingerprint::sha256_file(&input)?,
         "bytes": std::fs::metadata(&input)?.len(),
-        "element_id_type": "int64",
+        "element_id_type": summary.element_id_type,
         "nlon": summary.nlon,
         "nlat": summary.nlat,
         "active_cells": summary.active_cells,

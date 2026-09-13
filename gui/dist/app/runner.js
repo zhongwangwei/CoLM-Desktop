@@ -11,21 +11,24 @@ import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
 import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 
-// 单点内核不启 MPI；多核的实际用途是并发跑多个独立站点。默认沿用原来的
-// 两路并发，但让用户在运行页按机器容量调整。
+// 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
 const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
+const spatialDefaultRanks = Math.min(8, cpuCapacity);
 let discoverRunTargets = true;
 let activeRunId = null;
 let fallbackRunSequence = 0;
+let mpiRanksCustomized = false;
 $('cpu-workers').max = String(cpuCapacity);
 $('cpu-workers').value = String(Math.min(cpuCapacity, Number($('cpu-workers').value) || 2));
 $('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
 $('mpi-ranks').max = String(cpuCapacity);
+$('mpi-ranks').addEventListener('input', () => { mpiRanksCustomized = true; });
 
 function syncParallelMode() {
   const spatial = !!state.domain && state.domain !== 'site';
   $('mpi-ranks').disabled = !spatial;
   if (!spatial) $('mpi-ranks').value = '1';
+  else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);
   $('mpi-capacity').textContent = spatial
     ? `最多 ${cpuCapacity} 个进程；批量并行数会按每算例 rank 数自动限额。`
     : '站点算例固定使用 1 个进程。';

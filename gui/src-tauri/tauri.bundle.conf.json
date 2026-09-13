@@ -6,7 +6,9 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/colm-cli"
+      "binaries/colm-cli",
+      "binaries/mksrfdata-rs",
+      "binaries/mkinidata-rs"
     ],
     "resources": {
       "../../kernels": "kernels",
