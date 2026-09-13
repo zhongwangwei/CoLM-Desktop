@@ -5,7 +5,7 @@
 //! `landelm`, and `landpatch` artifacts that the Fortran initializer loads.
 //! Scientific rawdata aggregation deliberately stays outside this module.
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -384,9 +384,17 @@ pub fn read_mesh_coordinate_raster_pft_f64(
                 .sum::<Result<usize>>()?,
     );
     for class in 0..class_count {
+        let mut rows = BTreeMap::new();
+        for &latitude in &source_y {
+            if let Entry::Vacant(entry) = rows.entry(latitude) {
+                entry.insert(read_coordinate_pft_row(&source, axes, class, latitude)?);
+            }
+        }
         let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
         for &latitude in &source_y {
-            let row = read_coordinate_pft_row(&source, axes, class, latitude)?;
+            let row = rows
+                .get(&latitude)
+                .expect("coordinate PFT source row was cached");
             for &longitude in &source_x {
                 pixels.push(
                     *row.get(longitude)
