@@ -125,6 +125,67 @@ pub fn crop_cold_start_from_tuning(
     Ok(state)
 }
 
+/// Builds CoLM's no-map CROP branch for a complete spatial `landpft` block.
+///
+/// Unlike the single-point helper, the block can contain natural and crop PFTs
+/// and multiple landpatches. `pft_to_patch` owns the axis conversion used by
+/// BGC's patch-level crop summary.
+pub(crate) fn spatial_crop_cold_start_from_tuning(
+    classes: &[i32],
+    pft_to_patch: &[usize],
+    pft_fraction: &[f64],
+    patches: usize,
+    planting_day: f64,
+) -> Result<CropColdStartState> {
+    ensure!(
+        !classes.is_empty()
+            && classes.len() == pft_to_patch.len()
+            && classes.len() == pft_fraction.len()
+            && patches > 0,
+        "spatial CROP PFT classes, ownership, and fractions must be nonempty and aligned"
+    );
+    ensure!(
+        planting_day.is_finite() && planting_day > 0.0,
+        "DEF_TUNING_CROP_PLANTING_DAY must be finite and positive"
+    );
+    ensure!(
+        pft_to_patch.iter().all(|patch| *patch < patches),
+        "spatial CROP PFT references a landpatch outside the block"
+    );
+    ensure!(
+        pft_fraction
+            .iter()
+            .all(|fraction| fraction.is_finite() && *fraction >= 0.0),
+        "spatial CROP PFT fractions must be finite and nonnegative"
+    );
+
+    let mut state = empty_crop_state(classes.len(), patches);
+    let mut phase_weight = vec![0.0; patches];
+    let mut phase_sum = vec![0.0; patches];
+    let mut has_crop = false;
+    for (pft, &class) in classes.iter().enumerate() {
+        if class >= CFT_FIRST {
+            ensure!(
+                class <= CFT_LAST && pft_fraction[pft] > 0.0,
+                "spatial CROP PFT class {class} must be a positive CFT fraction"
+            );
+            has_crop = true;
+            state.planting_date[pft] = planting_day;
+        }
+        let patch = pft_to_patch[pft];
+        phase_weight[patch] += pft_fraction[pft];
+        phase_sum[patch] += state.crop_phase[pft] * pft_fraction[pft];
+    }
+    ensure!(has_crop, "spatial CROP topology has no CFT entries");
+    for patch in 0..patches {
+        if phase_weight[patch] > 0.0 {
+            state.patch_phase[patch] = phase_sum[patch];
+        }
+    }
+    state.planting_day_rice2.fill(0.0);
+    Ok(state)
+}
+
 /// Mirrors the normal raster-reading path in upstream `CROP_readin` for one
 /// point.  The spatial lookup is intentionally shared with other runtime maps.
 pub fn crop_cold_start_from_management(

@@ -9,6 +9,21 @@ fn crop_state_keeps_pft_and_patch_phase_axes_distinct() {
 }
 
 #[test]
+fn spatial_tuning_keeps_crop_pft_and_bgc_patch_axes_aligned() {
+    let state =
+        spatial_crop_cold_start_from_tuning(&[1, 15, 16], &[0, 0, 1], &[0.25, 0.75, 1.0], 2, 120.0)
+            .unwrap();
+
+    assert_eq!(
+        state.pft_fields().planting_date,
+        [CROP_MANAGEMENT_MISSING, 120.0, 120.0]
+    );
+    assert_eq!(state.pft_fields().crop_phase, [4.0, 4.0, 4.0]);
+    assert_eq!(state.bgc_fields().crop_phase, [4.0, 4.0]);
+    assert_eq!(state.bgc_fields().planting_day_rice2, [0.0, 0.0]);
+}
+
+#[test]
 fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
     let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0).unwrap();
     let pft = state.pft_fields();

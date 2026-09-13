@@ -246,8 +246,12 @@ pub fn write_spatial_pft_cold_time_restarts(
     config: SpatialPftTimeConfig<'_>,
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
-    reject_unsupported_time_features(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
+    let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;
+    ensure!(
+        !use_crop || use_bgc,
+        "spatial CROP cold starts require DEF_USE_BGC = .true."
+    );
     if use_bgc {
         ensure!(
             !optional_bool_or(&document, "DEF_USE_CN_INIT", false)?,
@@ -256,6 +260,13 @@ pub fn write_spatial_pft_cold_time_restarts(
     }
     let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
     let subgrid = spatial_pft_subgrid(&document)?;
+    if use_crop {
+        ensure!(
+            subgrid == SpatialPftSubgrid::Pft
+                || optional_bool_or(&document, "DEF_PC_CROP_SPLIT", true)?,
+            "CROP with DEF_USE_PC requires DEF_PC_CROP_SPLIT = .true."
+        );
+    }
     let hydraulic_model = pft_hydraulic_model_from_document(&document)?;
     let mut common_config = SpatialLctTimeConfig::new(
         config.static_config.landdata,
@@ -290,6 +301,10 @@ pub fn write_spatial_pft_cold_time_restarts(
         .collect::<Result<Vec<_>>>()?;
     let pfts = read_pft_vectors(config.static_config)?;
     let pft_to_patch = match_pfts_to_patches(&patches, &patch_kind, &pfts)?;
+    let pft_owner = pft_owners(&pft_to_patch, pfts.class.len())?;
+    let crop = use_crop
+        .then(|| spatial_crop_state(&document, &pfts, &pft_owner, patches.class.len()))
+        .transpose()?;
     let bgc_state = use_bgc
         .then(|| {
             derive_spatial_bgc_state(
@@ -313,12 +328,20 @@ pub fn write_spatial_pft_cold_time_restarts(
     });
     let pft_count = pfts.class.len();
     let month = crate::spatial_time::month(config.date)?;
-    let total_lai = read_pft_monthly(config.static_config, config.lai_year, "LAI_pfts", month)?;
-    let total_sai = read_pft_monthly(config.static_config, config.lai_year, "SAI_pfts", month)?;
+    let mut total_lai = read_pft_monthly(config.static_config, config.lai_year, "LAI_pfts", month)?;
+    let mut total_sai = read_pft_monthly(config.static_config, config.lai_year, "SAI_pfts", month)?;
     ensure!(
         total_lai.len() == pft_count && total_sai.len() == pft_count,
         "spatial PFT monthly vegetation has inconsistent vector lengths"
     );
+    if crop.is_some() {
+        for pft in 0..pft_count {
+            if pfts.class[pft] >= 15 {
+                total_lai[pft] = 0.0;
+                total_sai[pft] = 0.0;
+            }
+        }
+    }
     let canopy = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
     let common_state = read_common_state(&common.block, patches.class.len())?;
     let top_soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m[0];
@@ -514,6 +537,13 @@ pub fn write_spatial_pft_cold_time_restarts(
     }
 
     update_common_pft_optics(&common.block, &common_radiation, &common_roughness)?;
+    if crop.is_some() {
+        let crop_patch = pft_to_patch
+            .iter()
+            .map(|indices| indices.iter().any(|&pft| pfts.class[pft] >= 15))
+            .collect::<Vec<_>>();
+        zero_common_crop_vegetation(&common.block, &crop_patch)?;
+    }
     let reference_humidity = vec![0.3; pft_count];
     let missing = vec![MISSING; pft_count];
     let plant_water = vec![-25_000.0; 4 * pft_count];
@@ -562,7 +592,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                     values,
                     active_crop_years: &state.active_crop_years,
                 }),
-            crop: None,
+            crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),
             ozone: config.ozone_stress.then_some(PftOzoneFields {
                 lai_old: &total_lai,
                 sunlit_uptake: &ozone_zero,
@@ -572,19 +602,23 @@ pub fn write_spatial_pft_cold_time_restarts(
                 sunlit_stomatal_coefficient: &one,
                 shaded_stomatal_coefficient: &one,
             }),
-            irrigation_method: None,
+            irrigation_method: crop
+                .as_ref()
+                .and_then(crate::CropColdStartState::irrigation_method),
         },
     )?;
     let bgc = bgc_state
         .as_ref()
         .map(|state| {
+            let mut input = bgc_time_restart_input(state);
+            input.crop = crop.as_ref().map(crate::CropColdStartState::bgc_fields);
             write_bgc_time_restart(
                 config.static_config.restart_dir,
                 config.static_config.case_name,
                 config.static_config.land_cover_year,
                 config.date,
                 config.static_config.block_label,
-                bgc_time_restart_input(state),
+                input,
             )
         })
         .transpose()?;
@@ -612,6 +646,53 @@ struct CommonColdState {
 enum SpatialPftSubgrid {
     Pft,
     Pc,
+}
+
+fn spatial_crop_state(
+    document: &colm_namelist::Document,
+    pfts: &SpatialPftVectors,
+    pft_owner: &[usize],
+    patches: usize,
+) -> Result<crate::CropColdStartState> {
+    let planting_day = document
+        .get("DEF_TUNING_CROP_PLANTING_DAY")
+        .map(|value| {
+            value
+                .as_f64()
+                .context("DEF_TUNING_CROP_PLANTING_DAY must be a real value")
+        })
+        .transpose()?
+        .filter(|value| *value > 0.0);
+    let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
+    let use_irrigation = optional_bool_or(document, "DEF_USE_IRRIGATION", false)?;
+    ensure!(
+        !use_fertilizer && !use_irrigation && planting_day.is_some(),
+        "spatial CROP management maps are not implemented; use a positive DEF_TUNING_CROP_PLANTING_DAY with DEF_USE_FERT = .false. and DEF_USE_IRRIGATION = .false."
+    );
+    crate::crop::spatial_crop_cold_start_from_tuning(
+        &pfts.class,
+        pft_owner,
+        &pfts.fraction,
+        patches,
+        planting_day.expect("validated positive planting day"),
+    )
+}
+
+fn pft_owners(pft_to_patch: &[Vec<usize>], pfts: usize) -> Result<Vec<usize>> {
+    let mut owner = vec![None; pfts];
+    for (patch, indices) in pft_to_patch.iter().enumerate() {
+        for &pft in indices {
+            ensure!(
+                pft < pfts && owner[pft].replace(patch).is_none(),
+                "spatial PFT topology assigns a PFT to multiple landpatches"
+            );
+        }
+    }
+    owner
+        .into_iter()
+        .enumerate()
+        .map(|(pft, patch)| patch.with_context(|| format!("spatial PFT {pft} has no landpatch")))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -955,6 +1036,31 @@ fn update_common_pft_optics(
     Ok(())
 }
 
+fn zero_common_crop_vegetation(path: &Path, crop_patch: &[bool]) -> Result<()> {
+    let mut file = netcdf::append(path)
+        .with_context(|| format!("cannot update CROP vegetation in {}", path.display()))?;
+    for name in ["lai", "tlai", "sai", "tsai"] {
+        let mut values = file
+            .variable(name)
+            .with_context(|| format!("common restart has no {name}"))?
+            .get_values::<f64, _>(..)?;
+        ensure!(
+            values.len() == crop_patch.len(),
+            "common restart {name} has an unexpected patch layout"
+        );
+        for (patch, crop) in crop_patch.iter().enumerate() {
+            if *crop {
+                values[patch] = 0.0;
+            }
+        }
+        file.variable_mut(name)
+            .expect("checked common restart variable exists")
+            .put_values(&values, ..)?;
+    }
+    file.close()?;
+    Ok(())
+}
+
 fn pft_hydraulic_model(namelist: &Path) -> Result<HydraulicModel> {
     pft_hydraulic_model_from_document(&read_pft_document(namelist)?)
 }
@@ -971,14 +1077,6 @@ fn read_pft_document(namelist: &Path) -> Result<colm_namelist::Document> {
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     parse(&text).with_context(|| format!("cannot parse case namelist {}", namelist.display()))
-}
-
-fn reject_unsupported_time_features(document: &colm_namelist::Document) -> Result<()> {
-    ensure!(
-        !optional_bool_or(document, "DEF_USE_CROP", false)?,
-        "spatial CROP cold starts are not implemented by the Rust initializer"
-    );
-    Ok(())
 }
 
 fn spatial_pft_subgrid(document: &colm_namelist::Document) -> Result<SpatialPftSubgrid> {

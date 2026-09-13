@@ -221,6 +221,68 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
 }
 
 #[test]
+fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps() {
+    let root = temp_dir("crop-tuning");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_pft_topology(&landdata, 2005, "w180_s90", 15);
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "pctpft",
+        "pct_crops",
+        "pct_crops",
+        2005,
+        "w180_s90",
+        1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        0.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CROP = .true.\n DEF_USE_FERT = .false.\n DEF_USE_IRRIGATION = .false.\n DEF_TUNING_CROP_PLANTING_DAY = 120.\n/\n",
+    )
+    .unwrap();
+
+    let mut config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+
+    let common = netcdf::open(&files.common.block).unwrap();
+    assert_eq!(values_f64(&common, "tlai").unwrap(), [0.0]);
+    assert_eq!(values_f64(&common, "tsai").unwrap(), [0.0]);
+    let pft = netcdf::open(&files.pft).unwrap();
+    assert_eq!(values_f64(&pft, "tlai_p").unwrap(), [0.0]);
+    assert_eq!(values_f64(&pft, "plantdate_p").unwrap(), [120.0]);
+    let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
+    assert_eq!(values_f64(&bgc, "cphase").unwrap(), [4.0]);
+    assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [0.0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
     let root = temp_dir("time");
     let landdata = root.join("landdata");
