@@ -86,7 +86,8 @@ pub use canopy_layer_profile::{
 };
 pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
 pub use crop_phenology::{
-    crop_phenology_climate_step, CropPhenologyClimateInput, CropPhenologyClimateState,
+    crop_phenology_climate_step, crop_phenology_step, CropPhenologyClimateInput,
+    CropPhenologyClimateState, CropPhenologyInput, CropPhenologyState,
     IRRIGATED_WINTER_WHEAT_CLASS, WINTER_WHEAT_CLASS,
 };
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};

@@ -186,3 +186,138 @@ fn crop_climate_rejects_misaligned_state() {
     )
     .is_err());
 }
+
+fn lifecycle_input(time: CalendarTime, class: &[i32]) -> CropPhenologyInput<'_> {
+    CropPhenologyInput {
+        time,
+        time_step_seconds: 1_800,
+        pft_class: class,
+        reference_temperature_k: &[280.0],
+        leaf_carbon_to_nitrogen: &[30.0],
+        leaf_longevity_years: &[1.0],
+        leaf_emergence_heat_unit_index: &[0.2],
+        grain_fill_heat_unit_index: &[0.8],
+        maximum_maturity_days: &[180],
+        total_leaf_area_index: &[0.0],
+        use_fertilizer: false,
+    }
+}
+
+#[test]
+fn crop_lifecycle_plants_with_the_source_seed_transfer_and_corn_maturity_rule() {
+    let mut climate = CropPhenologyClimateState::new(1);
+    climate.growing_degree_days_eight_twenty_year_c[0] = 1_000.0;
+    climate.growing_degree_days_since_planting_c[0] = 0.0;
+    let mut state = CropPhenologyState::new(1);
+    state.planting_day[0] = 120.0;
+    crop_phenology_step(
+        lifecycle_input(
+            CalendarTime {
+                year: 2007,
+                julian_day: 120,
+                seconds: 1_800,
+            },
+            &[17],
+        ),
+        &mut climate,
+        &mut state,
+    )
+    .unwrap();
+
+    assert!(state.crop_live[0]);
+    assert!(state.crop_planted[0]);
+    assert_eq!(state.day_of_planting[0], 120);
+    assert_eq!(state.harvest_day[0], 999.0);
+    close(state.leaf_carbon_transfer_g_m2[0], 3.0);
+    close(state.leaf_nitrogen_transfer_g_m2[0], 0.1);
+    close(state.crop_seed_carbon_to_leaf_g_m2_s[0], 3.0 / 1_800.0);
+    close(state.crop_seed_nitrogen_to_leaf_g_m2_s[0], 0.1 / 1_800.0);
+    close(state.growing_degree_days_at_maturity_c[0], 1_116.0);
+    assert_eq!(state.heat_unit_index[0], 0.0);
+    assert_eq!(state.crop_phase[0], 1.0);
+}
+
+#[test]
+fn crop_lifecycle_uses_shared_gdd_to_emerge_fertilize_and_vernalize_winter_wheat() {
+    let mut climate = CropPhenologyClimateState::new(1);
+    climate.growing_degree_days_ten_twenty_year_c[0] = 1_000.0;
+    climate.growing_degree_days_since_planting_c[0] = 200.0;
+    let mut state = CropPhenologyState::new(1);
+    state.crop_live[0] = true;
+    state.crop_planted[0] = true;
+    state.day_of_planting[0] = 100;
+    state.harvest_day[0] = 999.0;
+    state.cumulative_vernalization_days[0] = 0.0;
+    state.vernalization_factor[0] = 0.0;
+    state.manure_nitrogen_g_m2[0] = 1.0;
+    state.fertilizer_nitrogen_g_m2[0] = 2.0;
+    let mut input = lifecycle_input(
+        CalendarTime {
+            year: 2007,
+            julian_day: 110,
+            seconds: 1_800,
+        },
+        &[WINTER_WHEAT_CLASS],
+    );
+    input.reference_temperature_k = &[278.05];
+    input.use_fertilizer = true;
+    crop_phenology_step(input, &mut climate, &mut state).unwrap();
+
+    close(state.growing_degree_days_at_maturity_c[0], 860.0);
+    close(state.heat_unit_index[0], 200.0 / 860.0);
+    assert_eq!(state.crop_phase[0], 2.0);
+    assert_eq!(state.onset_flag[0], 1.0);
+    assert_eq!(state.onset_counter_seconds[0], 1_800.0);
+    assert!(state.cumulative_vernalization_days[0] > 0.0);
+    assert!(state.vernalization_factor[0] > 0.0 && state.vernalization_factor[0] < 1.0);
+    close(state.fertilizer_rate_g_m2_s[0], 3.0 / (20.0 * 86_400.0));
+    close(
+        state.fertilizer_counter_seconds[0],
+        20.0 * 86_400.0 - 1_800.0,
+    );
+}
+
+#[test]
+fn crop_lifecycle_harvests_before_phase_three_and_reverses_unemerged_seed_flux() {
+    let mut climate = CropPhenologyClimateState::new(1);
+    climate.growing_degree_days_since_planting_c[0] = 816.0;
+    let mut state = CropPhenologyState::new(1);
+    state.crop_live[0] = true;
+    state.crop_planted[0] = true;
+    state.day_of_planting[0] = 100;
+    state.harvest_day[0] = 99_999_999.0;
+    state.leaf_carbon_transfer_g_m2[0] = 3.0;
+    state.leaf_nitrogen_transfer_g_m2[0] = 0.1;
+    state.crop_seed_carbon_to_leaf_g_m2_s[0] = 0.01;
+    state.crop_seed_nitrogen_to_leaf_g_m2_s[0] = 0.001;
+    crop_phenology_step(
+        lifecycle_input(
+            CalendarTime {
+                year: 2007,
+                julian_day: 121,
+                seconds: 1_800,
+            },
+            &[17],
+        ),
+        &mut climate,
+        &mut state,
+    )
+    .unwrap();
+
+    assert!(!state.crop_live[0]);
+    assert!(!state.crop_planted[0]);
+    assert_eq!(state.harvest_day[0], 121.0);
+    assert_eq!(state.crop_phase[0], 4.0);
+    assert_eq!(state.heat_unit_index[0], 0.0);
+    assert_eq!(state.offset_flag[0], 0.0);
+    assert_eq!(state.leaf_carbon_transfer_g_m2[0], 0.0);
+    assert_eq!(state.leaf_nitrogen_transfer_g_m2[0], 0.0);
+    close(
+        state.crop_seed_carbon_to_leaf_g_m2_s[0],
+        0.01 - 3.0 / 1_800.0,
+    );
+    close(
+        state.crop_seed_nitrogen_to_leaf_g_m2_s[0],
+        0.001 - 0.1 / 1_800.0,
+    );
+}
