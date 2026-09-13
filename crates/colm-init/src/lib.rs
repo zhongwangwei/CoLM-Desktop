@@ -62,6 +62,7 @@ pub mod single_point;
 pub mod spatial_pft;
 pub mod spatial_static;
 pub mod spatial_time;
+pub mod spatial_urban;
 pub mod static_state {
     pub use colm_core::static_state::*;
 }
@@ -178,6 +179,10 @@ pub use spatial_pft::{
 };
 pub use spatial_static::{write_spatial_lct_constant_restart, SpatialLctStaticConfig};
 pub use spatial_time::{write_spatial_lct_cold_time_restart, SpatialLctTimeConfig};
+pub use spatial_urban::{
+    write_spatial_urban_constant_restarts, SpatialUrbanConstantRestartFiles,
+    SpatialUrbanStaticConfig,
+};
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,
     derive_spatial_soil_parameters, normalize_soil_texture, BedrockState, HydraulicModel,

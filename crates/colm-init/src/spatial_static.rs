@@ -66,6 +66,15 @@ impl<'a> SpatialLctStaticConfig<'a> {
 pub fn write_spatial_lct_constant_restart(
     config: SpatialLctStaticConfig<'_>,
 ) -> Result<ConstantRestartFiles> {
+    write_spatial_lct_constant_restart_with_canopy(config, None)
+}
+
+/// Same common spatial restart writer, with urban callers able to replace the
+/// canopy height of their refined urban patches after `Urban_readin`.
+pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
+    config: SpatialLctStaticConfig<'_>,
+    canopy_override: Option<CanopyState>,
+) -> Result<ConstantRestartFiles> {
     let dimensions = RestartDimensions::default();
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let patch_kind = patches
@@ -117,7 +126,10 @@ pub fn write_spatial_lct_constant_restart(
         .iter()
         .map(|&value| BVIC_USDA[value as usize])
         .collect::<Vec<_>>();
-    let canopy = read_canopy(config, &patches.class, &patch_kind, patch_count)?;
+    let canopy = match canopy_override {
+        Some(canopy) => canopy,
+        None => read_canopy(config, &patches.class, &patch_kind, patch_count)?,
+    };
     let zeros = vec![0.0; patch_count];
     let mask = vec![true; patch_count];
     let soil_s_v_alb = read_f64(
@@ -448,7 +460,7 @@ pub(crate) fn spatial_patch_type(land_cover: LandCoverScheme, class: i32) -> Res
     }
 }
 
-fn read_i32(
+pub(crate) fn read_i32(
     landdata: &Path,
     directory: &str,
     stem: &str,
@@ -702,7 +714,7 @@ pub(crate) fn values_i32(file: &netcdf::File, name: &str) -> Result<Vec<i32>> {
         .with_context(|| format!("cannot read {name}"))
 }
 
-fn values_i64(file: &netcdf::File, name: &str) -> Result<Vec<i64>> {
+pub(crate) fn values_i64(file: &netcdf::File, name: &str) -> Result<Vec<i64>> {
     file.variable(name)
         .with_context(|| format!("NetCDF file is missing {name}"))?
         .get_values(..)
