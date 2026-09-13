@@ -38,6 +38,7 @@ pub mod thermal_properties;
 pub mod time_state;
 pub mod urban;
 pub mod urban_lucy;
+pub mod urban_net_solar;
 pub mod urban_radiation;
 pub mod variably_saturated_flow;
 pub mod vegetation;
@@ -159,6 +160,7 @@ pub use urban::{
     UrbanLucyState, UrbanState,
 };
 pub use urban_lucy::{urban_lucy_flux, UrbanLucyFluxInput, UrbanLucyFluxes};
+pub use urban_net_solar::{urban_net_solar, UrbanNetSolarFluxes, UrbanNetSolarInput};
 pub use urban_radiation::{cold_start_urban_radiation, UrbanRadiationInput, UrbanRadiationState};
 pub use variably_saturated_flow::{
     apply_variable_saturated_explicit_step, exchange_soil_water_with_aquifer,

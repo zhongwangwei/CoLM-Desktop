@@ -20,7 +20,7 @@ pub struct ShortwaveForcing {
 }
 
 impl ShortwaveForcing {
-    fn total(self) -> f64 {
+    pub(crate) fn total(self) -> f64 {
         self.direct_visible_w_m2
             + self.direct_near_infrared_w_m2
             + self.diffuse_visible_w_m2
@@ -199,7 +199,7 @@ fn validate(input: NetSolarInput, radiation: &ColdStartRadiation) -> Result<()> 
     Ok(())
 }
 
-fn visible_absorption(
+pub(crate) fn visible_absorption(
     forcing: ShortwaveForcing,
     coefficient: [[f64; RADIATION_TYPES]; BANDS],
 ) -> f64 {
@@ -207,7 +207,10 @@ fn visible_absorption(
         + forcing.diffuse_visible_w_m2 * coefficient[0][1]
 }
 
-fn absorption(forcing: ShortwaveForcing, coefficient: [[f64; RADIATION_TYPES]; BANDS]) -> f64 {
+pub(crate) fn absorption(
+    forcing: ShortwaveForcing,
+    coefficient: [[f64; RADIATION_TYPES]; BANDS],
+) -> f64 {
     visible_absorption(forcing, coefficient)
         + forcing.direct_near_infrared_w_m2 * coefficient[1][0]
         + forcing.diffuse_near_infrared_w_m2 * coefficient[1][1]
@@ -229,29 +232,43 @@ fn scale(matrix: &mut [[f64; RADIATION_TYPES]; BANDS], factor: f64) {
 }
 
 fn local_noon(input: NetSolarInput, albedo: [[f64; RADIATION_TYPES]; BANDS]) -> LocalNoonShortwave {
-    let local_seconds = if input.greenwich_time {
+    local_noon_shortwave(
+        input.greenwich_time,
+        input.seconds_of_day,
+        input.time_step_seconds,
+        input.longitude_radians,
+        input.forcing,
+        albedo,
+    )
+}
+
+pub(crate) fn local_noon_shortwave(
+    greenwich_time: bool,
+    seconds_of_day: i32,
+    time_step_seconds: i32,
+    longitude_radians: f64,
+    forcing: ShortwaveForcing,
+    albedo: [[f64; RADIATION_TYPES]; BANDS],
+) -> LocalNoonShortwave {
+    let local_seconds = if greenwich_time {
         let source_pi = f64::from(4.0_f32 * 1.0_f32.atan());
         let radians_per_second = source_pi / 12.0 / 3600.0;
-        let offset_steps = fortran_nint(
-            (input.longitude_radians / radians_per_second) / f64::from(input.time_step_seconds),
-        );
-        (i64::from(input.seconds_of_day) + offset_steps * i64::from(input.time_step_seconds))
-            % 86_400
+        let offset_steps =
+            fortran_nint((longitude_radians / radians_per_second) / f64::from(time_step_seconds));
+        (i64::from(seconds_of_day) + offset_steps * i64::from(time_step_seconds)) % 86_400
     } else {
-        i64::from(input.seconds_of_day)
+        i64::from(seconds_of_day)
     };
     if local_seconds == 43_200 {
         LocalNoonShortwave {
-            direct_visible_w_m2: input.forcing.direct_visible_w_m2,
-            diffuse_visible_w_m2: input.forcing.diffuse_visible_w_m2,
-            direct_near_infrared_w_m2: input.forcing.direct_near_infrared_w_m2,
-            diffuse_near_infrared_w_m2: input.forcing.diffuse_near_infrared_w_m2,
-            reflected_direct_visible_w_m2: input.forcing.direct_visible_w_m2 * albedo[0][0],
-            reflected_diffuse_visible_w_m2: input.forcing.diffuse_visible_w_m2 * albedo[0][1],
-            reflected_direct_near_infrared_w_m2: input.forcing.direct_near_infrared_w_m2
-                * albedo[1][0],
-            reflected_diffuse_near_infrared_w_m2: input.forcing.diffuse_near_infrared_w_m2
-                * albedo[1][1],
+            direct_visible_w_m2: forcing.direct_visible_w_m2,
+            diffuse_visible_w_m2: forcing.diffuse_visible_w_m2,
+            direct_near_infrared_w_m2: forcing.direct_near_infrared_w_m2,
+            diffuse_near_infrared_w_m2: forcing.diffuse_near_infrared_w_m2,
+            reflected_direct_visible_w_m2: forcing.direct_visible_w_m2 * albedo[0][0],
+            reflected_diffuse_visible_w_m2: forcing.diffuse_visible_w_m2 * albedo[0][1],
+            reflected_direct_near_infrared_w_m2: forcing.direct_near_infrared_w_m2 * albedo[1][0],
+            reflected_diffuse_near_infrared_w_m2: forcing.diffuse_near_infrared_w_m2 * albedo[1][1],
         }
     } else {
         LocalNoonShortwave {
