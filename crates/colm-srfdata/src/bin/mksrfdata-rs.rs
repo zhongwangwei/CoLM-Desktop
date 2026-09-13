@@ -3024,6 +3024,7 @@ fn tracer_parameter_file(
     }
     let tracer_name = names.get(tracer_index).copied().unwrap_or("");
     let mut positional = 0_usize;
+    let mut matched = false;
     let mut result = None;
     for entry in mapping
         .split([',', ';'])
@@ -3037,15 +3038,17 @@ fn tracer_parameter_file(
                 !key.is_empty() && !path.is_empty(),
                 "empty tracer parameter file mapping entry: {entry}"
             );
-            if result.is_none()
+            if !matched
                 && (key.eq_ignore_ascii_case(tracer_name)
                     || key.eq_ignore_ascii_case("CH4")
                     || key.eq_ignore_ascii_case("METHANE"))
             {
+                matched = true;
                 result = (!path.eq_ignore_ascii_case("null")).then(|| path.to_owned());
             }
         } else {
-            if positional == tracer_index && result.is_none() {
+            if positional == tracer_index && !matched {
+                matched = true;
                 result = (!entry.eq_ignore_ascii_case("null")).then(|| entry.to_owned());
             }
             positional += 1;
@@ -3457,6 +3460,18 @@ mod tests {
             .required_files
             .contains(&root.join("raw/soil/PHH2O1.nc")));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn methane_parameter_mapping_keeps_the_first_matching_alias() {
+        assert_eq!(
+            tracer_parameter_file("CH4:null; METHANE:later.nml", 0, &["CH4"]).unwrap(),
+            None
+        );
+        assert_eq!(
+            tracer_parameter_file("other.nml, standard_ch4.nml", 1, &["CL", "METHANE"]).unwrap(),
+            Some("standard_ch4.nml".into())
+        );
     }
 
     #[test]
