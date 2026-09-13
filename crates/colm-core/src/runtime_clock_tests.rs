@@ -86,3 +86,47 @@ fn clock_matches_fortran_nint_and_rejects_an_invalid_window() {
     )
     .is_err());
 }
+
+#[test]
+fn clock_carries_colms_lai_update_flags_into_each_driver_step() {
+    let monthly: Vec<_> = std::iter::from_fn({
+        let mut clock = RuntimeClock::new(
+            time(2008, 1, 0),
+            time(2008, 1, 7_200),
+            time(2008, 1, 0),
+            3_600.0,
+            1,
+        )
+        .unwrap();
+        move || clock.next_step()
+    })
+    .collect();
+    assert_eq!(
+        monthly
+            .iter()
+            .map(|step| (step.update_lai, step.update_albedo, step.update_sst))
+            .collect::<Vec<_>>(),
+        vec![(true, true, false), (false, true, false)]
+    );
+
+    let eight_day: Vec<_> = std::iter::from_fn({
+        let mut clock = RuntimeClock::with_lai_update_schedule(
+            time(2008, 8, 82_800),
+            time(2008, 9, 7_200),
+            time(2008, 8, 82_800),
+            3_600.0,
+            1,
+            LaiUpdateSchedule::EightDay,
+        )
+        .unwrap();
+        move || clock.next_step()
+    })
+    .collect();
+    assert_eq!(
+        eight_day
+            .iter()
+            .map(|step| step.update_lai)
+            .collect::<Vec<_>>(),
+        vec![true, true, false]
+    );
+}

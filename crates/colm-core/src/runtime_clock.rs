@@ -8,7 +8,16 @@
 
 use anyhow::{ensure, Result};
 
-use crate::{is_leap_year, CalendarTime};
+use crate::{is_leap_year, month_lengths, CalendarTime};
+
+/// Cadence of the non-dynamic-phenology LAI update in `CoLM.F90`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaiUpdateSchedule {
+    /// `DEF_LAI_MONTHLY = .true.`: read a new LAI/SAI field at each month boundary.
+    Monthly,
+    /// `DEF_LAI_MONTHLY = .false.`: read the MODIS-style field every eight days.
+    EightDay,
+}
 
 /// One pass through the `CoLM.F90` time loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +32,12 @@ pub struct RuntimeStep {
     pub is_spinup: bool,
     /// One-based spinup cycle, matching `i_spinupcycle`.
     pub spinup_cycle: usize,
+    /// `dolai` supplied to `CoLMDRIVER` for this pass.
+    pub update_lai: bool,
+    /// `doalb` is initialized once and remains true in the upstream main loop.
+    pub update_albedo: bool,
+    /// `dosst` is initialized false and is not changed by the upstream main loop.
+    pub update_sst: bool,
 }
 
 /// Stateful iterator for the non-I/O portion of `CoLM.F90`'s main loop.
@@ -41,6 +56,8 @@ pub struct RuntimeClock {
     spinup_cycle: usize,
     is_spinup: bool,
     index: usize,
+    lai_schedule: LaiUpdateSchedule,
+    update_lai: bool,
 }
 
 impl RuntimeClock {
@@ -51,6 +68,25 @@ impl RuntimeClock {
         spinup_until: CalendarTime,
         timestep_seconds: f64,
         spinup_repeats: usize,
+    ) -> Result<Self> {
+        Self::with_lai_update_schedule(
+            start,
+            end,
+            spinup_until,
+            timestep_seconds,
+            spinup_repeats,
+            LaiUpdateSchedule::Monthly,
+        )
+    }
+
+    /// Builds a clock with the LAI cadence selected by `DEF_LAI_MONTHLY`.
+    pub fn with_lai_update_schedule(
+        start: CalendarTime,
+        end: CalendarTime,
+        spinup_until: CalendarTime,
+        timestep_seconds: f64,
+        spinup_repeats: usize,
+        lai_schedule: LaiUpdateSchedule,
     ) -> Result<Self> {
         let start = end_style(start)?;
         let end = end_style(end)?;
@@ -73,6 +109,9 @@ impl RuntimeClock {
             spinup_cycle: 1,
             is_spinup: before(start, spinup_until),
             index: 1,
+            lai_schedule,
+            // CoLM.F90 initializes `dolai = .true.` before its first pass.
+            update_lai: true,
         })
     }
 
@@ -81,14 +120,21 @@ impl RuntimeClock {
         if !before(self.current, self.end) {
             return None;
         }
+        let forcing_time = begin_style(self.current);
+        let end_time = tick(self.current, self.step_seconds);
+        let next_forcing_time = begin_style(end_time);
         let step = RuntimeStep {
             index: self.index,
-            forcing_time: begin_style(self.current),
-            end_time: tick(self.current, self.step_seconds),
+            forcing_time,
+            end_time,
             is_spinup: self.is_spinup,
             spinup_cycle: self.spinup_cycle,
+            update_lai: self.update_lai,
+            update_albedo: true,
+            update_sst: false,
         };
         self.current = step.end_time;
+        self.update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_schedule);
         if self.is_spinup && !before(self.current, self.spinup_until) {
             if self.spinup_cycle < self.spinup_repeats {
                 self.spinup_cycle += 1;
@@ -100,6 +146,26 @@ impl RuntimeClock {
         self.index += 1;
         Some(step)
     }
+}
+
+fn lai_update_due(current: CalendarTime, next: CalendarTime, schedule: LaiUpdateSchedule) -> bool {
+    match schedule {
+        LaiUpdateSchedule::Monthly => (current.year, month(current)) != (next.year, month(next)),
+        LaiUpdateSchedule::EightDay => {
+            (current.year, (current.julian_day - 1) / 8) != (next.year, (next.julian_day - 1) / 8)
+        }
+    }
+}
+
+fn month(time: CalendarTime) -> u8 {
+    let mut day = time.julian_day;
+    for (index, days) in month_lengths(time.year).iter().enumerate() {
+        if day <= *days as u16 {
+            return (index + 1) as u8;
+        }
+        day -= *days as u16;
+    }
+    unreachable!("RuntimeClock validates its Julian day")
 }
 
 fn end_style(time: CalendarTime) -> Result<CalendarTime> {
