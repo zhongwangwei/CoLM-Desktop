@@ -421,6 +421,7 @@ pub fn write_spatial_lct_cold_time_restart(
                 snow_absorption: &radiation.snow,
                 snow_layer_absorption: &snow_layer_absorption,
             },
+            hyperspectral: None,
             lake: TimeLakeFields {
                 temperature_k: &lake_temperature,
                 ice_fraction: &lake_ice,

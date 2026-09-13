@@ -109,6 +109,55 @@ fn time_restart_rejects_invalid_date_and_incomplete_axis_data_before_writing() {
 }
 
 #[test]
+fn time_restart_writes_hyperspectral_fields_in_fortran_patch_last_order() {
+    let root = temp_dir("hyperspectral");
+    let albedo = Box::leak(
+        (0..(211 * 2 * 2))
+            .map(|value| value as f64)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let optics = Box::leak(
+        (0..(211 * 16 * 2))
+            .map(|value| value as f64 + 10_000.0)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let mut restart = input();
+    restart.hyperspectral = Some(TimeHyperspectralFields {
+        albedo,
+        reflectance: optics,
+        transmittance: optics,
+    });
+    let path = root.join("restart.nc");
+    write_time_restart_block(&path, restart).unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    assert_eq!(file.dimension_len("wavelength"), Some(211));
+    assert_eq!(file.dimension_len("PFT"), Some(16));
+    let albedo_variable = file.variable("alb_hires").unwrap();
+    assert_eq!(
+        dimension_names(&albedo_variable),
+        ["patch", "rtyp", "wavelength"]
+    );
+    assert_eq!(
+        albedo_variable.get_values::<f64, _>(..).unwrap(),
+        patch_last_3d(albedo, 211, 2, 2)
+    );
+    let reflectance_variable = file.variable("reflectance_out").unwrap();
+    assert_eq!(
+        dimension_names(&reflectance_variable),
+        ["patch", "PFT", "wavelength"]
+    );
+    assert_eq!(
+        reflectance_variable.get_values::<f64, _>(..).unwrap(),
+        patch_last_3d(optics, 211, 16, 2)
+    );
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated upstream CN-Cng reference restart"]
 fn time_restart_schema_matches_the_upstream_fortran_reference() {
     let fixture = StandardFixture::new();
@@ -197,6 +246,7 @@ fn input() -> TimeRestartInput<'static> {
             snow_absorption: &RADIATION,
             snow_layer_absorption: &SNOW_RADIATION,
         },
+        hyperspectral: None,
         lake: TimeLakeFields {
             temperature_k: &SOIL,
             ice_fraction: &SOIL,
@@ -339,6 +389,7 @@ impl StandardFixture {
                 snow_absorption: &self.radiation,
                 snow_layer_absorption: &self.snow_radiation,
             },
+            hyperspectral: None,
             lake: TimeLakeFields {
                 temperature_k: &self.lake,
                 ice_fraction: &self.lake,

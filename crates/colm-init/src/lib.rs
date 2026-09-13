@@ -191,8 +191,9 @@ pub use surface_data::{
 };
 pub use time_restart::{
     write_time_restart, write_time_restart_block, IrrigationFields, OzoneFields,
-    PlantHydraulicFields, RestartDate, SnowAerosolFields, SnowSoilRestartFields, TimeLakeFields,
-    TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    PlantHydraulicFields, RestartDate, SnowAerosolFields, SnowSoilRestartFields,
+    TimeHyperspectralFields, TimeLakeFields, TimePatchFields, TimeRadiationFields,
+    TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,

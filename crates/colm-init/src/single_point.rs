@@ -2276,6 +2276,7 @@ fn write_cold_time_restart(
                 snow_absorption: &radiation_values.snow_absorption,
                 snow_layer_absorption: &snow_layer_absorption,
             },
+            hyperspectral: None,
             lake: TimeLakeFields {
                 temperature_k: &lake_temperature,
                 ice_fraction: &lake_ice,

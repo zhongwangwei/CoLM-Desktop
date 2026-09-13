@@ -108,6 +108,21 @@ pub struct TimeRadiationFields<'a> {
     pub snow_layer_absorption: &'a [f64],
 }
 
+/// HYPERSPECTRAL common-restart fields.
+///
+/// CoLM fixes this schema at 211 wavelengths and 16 PFT classes (including
+/// class zero).  Arrays retain Fortran's patch-last order before NetCDF axes
+/// are reversed by the writer.
+#[derive(Debug, Clone, Copy)]
+pub struct TimeHyperspectralFields<'a> {
+    /// `wavelength * rtyp * patches`.
+    pub albedo: &'a [f64],
+    /// `wavelength * PFT * patches`.
+    pub reflectance: &'a [f64],
+    /// `wavelength * PFT * patches`.
+    pub transmittance: &'a [f64],
+}
+
 /// Lake fields, axis-major as `lake * patches`.
 #[derive(Debug, Clone, Copy)]
 pub struct TimeLakeFields<'a> {
@@ -182,6 +197,7 @@ pub struct TimeRestartInput<'a> {
     pub snow_soil: SnowSoilRestartFields<'a>,
     pub patch: TimePatchFields<'a>,
     pub radiation: TimeRadiationFields<'a>,
+    pub hyperspectral: Option<TimeHyperspectralFields<'a>>,
     pub lake: TimeLakeFields<'a>,
     pub snow_aerosol: SnowAerosolFields<'a>,
     pub plant_hydraulics: Option<PlantHydraulicFields<'a>>,
@@ -245,7 +261,13 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
     }
     let mut file = netcdf::create(path)
         .with_context(|| format!("cannot create time restart block {}", path.display()))?;
-    define_dimensions(&mut file, patches, input.dimensions, input.plant_hydraulics)?;
+    define_dimensions(
+        &mut file,
+        patches,
+        input.dimensions,
+        input.plant_hydraulics,
+        input.hyperspectral.is_some(),
+    )?;
     let dimensions = input.dimensions;
     let soilsnow = dimensions.soil_layers + dimensions.snow_layers;
     let snowp1 = dimensions.snow_layers + 1;
@@ -306,6 +328,29 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
                 ("gs0sha", plant.shaded_stomatal_conductance),
             ],
         )?;
+    }
+    if let Some(hyperspectral) = input.hyperspectral {
+        put_patch_last_3d(
+            &mut file,
+            "alb_hires",
+            ("wavelength", HYPERSPECTRAL_WAVELENGTHS),
+            ("rtyp", dimensions.radiation_types),
+            patches,
+            hyperspectral.albedo,
+        )?;
+        for (name, values) in [
+            ("reflectance_out", hyperspectral.reflectance),
+            ("transmittance_out", hyperspectral.transmittance),
+        ] {
+            put_patch_last_3d(
+                &mut file,
+                name,
+                ("wavelength", HYPERSPECTRAL_WAVELENGTHS),
+                ("PFT", HYPERSPECTRAL_PFT_CLASSES),
+                patches,
+                values,
+            )?;
+        }
     }
     if let Some(ozone) = input.ozone {
         put_patch_values(
@@ -608,6 +653,27 @@ fn validate_input(input: TimeRestartInput<'_>) -> Result<usize> {
         snow + 1,
         patches,
     )?;
+    if let Some(hyperspectral) = input.hyperspectral {
+        validate_patch_last_3d(
+            "alb_hires",
+            hyperspectral.albedo,
+            HYPERSPECTRAL_WAVELENGTHS,
+            dimensions.radiation_types,
+            patches,
+        )?;
+        for (name, values) in [
+            ("reflectance_out", hyperspectral.reflectance),
+            ("transmittance_out", hyperspectral.transmittance),
+        ] {
+            validate_patch_last_3d(
+                name,
+                values,
+                HYPERSPECTRAL_WAVELENGTHS,
+                HYPERSPECTRAL_PFT_CLASSES,
+                patches,
+            )?;
+        }
+    }
     if let Some(plant) = input.plant_hydraulics {
         ensure!(plant.vegetation_nodes > 0, "vegnodes must be positive");
         validate_axis_major(
@@ -723,6 +789,7 @@ fn define_dimensions(
     patches: usize,
     dimensions: TimeRestartDimensions,
     plant: Option<PlantHydraulicFields<'_>>,
+    hyperspectral: bool,
 ) -> Result<()> {
     for (name, length) in [
         ("patch", patches),
@@ -743,8 +810,15 @@ fn define_dimensions(
     ] {
         file.add_dimension(name, length)?;
     }
+    if hyperspectral {
+        file.add_dimension("wavelength", HYPERSPECTRAL_WAVELENGTHS)?;
+        file.add_dimension("PFT", HYPERSPECTRAL_PFT_CLASSES)?;
+    }
     Ok(())
 }
+
+const HYPERSPECTRAL_WAVELENGTHS: usize = 211;
+const HYPERSPECTRAL_PFT_CLASSES: usize = 16;
 
 fn put_patch_values<const N: usize>(
     file: &mut netcdf::FileMut,
