@@ -1898,6 +1898,74 @@ pub fn write_spatial_urban_topology(
     )
 }
 
+/// Write one `landurban` vector in the blocked `urban/<year>/` contract.
+/// `subdirectory` is used only by the monthly `urban/<year>/LAI/` files.
+#[allow(clippy::too_many_arguments)]
+pub fn write_spatial_urban_vector<T: NcTypeDescriptor + Copy>(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    blocks: &BlockLayout,
+    subdirectory: Option<&str>,
+    file_stem: &str,
+    variable: &str,
+    values: &[T],
+) -> Result<()> {
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    for (label, value) in [("file stem", file_stem), ("variable", variable)] {
+        ensure!(
+            !value.is_empty() && !value.contains('/'),
+            "urban {label} must be one NetCDF path/name component"
+        );
+    }
+    if let Some(directory) = subdirectory {
+        ensure!(
+            !directory.is_empty() && !directory.contains('/'),
+            "urban subdirectory must be one path component"
+        );
+    }
+    validate_patches(&topology.mesh, land_urban)?;
+    ensure!(
+        values.len() == land_urban.len(),
+        "{variable} has {} values for {} urban patches",
+        values.len(),
+        land_urban.len()
+    );
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let mut output = landdata
+        .as_ref()
+        .join("urban")
+        .join(format!("{land_cover_year:04}"));
+    if let Some(directory) = subdirectory {
+        output.push(directory);
+    }
+    std::fs::create_dir_all(&output)?;
+    let mut grouped = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (patch, element) in land_urban.element_ids.iter().enumerate() {
+        grouped
+            .entry(
+                *assignments.get(element).with_context(|| {
+                    format!("landurban patch {patch} references unknown element")
+                })?,
+            )
+            .or_default()
+            .push(patch);
+    }
+    for ((x, y), patches) in grouped {
+        let output_values = patches
+            .iter()
+            .map(|&patch| values[patch])
+            .collect::<Vec<_>>();
+        let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
+        file.add_dimension("urban", output_values.len())?;
+        file.add_variable::<T>(variable, &["urban"])?
+            .put_values(&output_values, ..)?;
+        file.close()?;
+    }
+    Ok(())
+}
+
 /// Write the LCZ-derived material portion of `urban/<year>/urban_<block>.nc`.
 /// Geometry, vegetation, water, population, and LUCY vectors remain separate
 /// upstream files and are written by their corresponding aggregation path.

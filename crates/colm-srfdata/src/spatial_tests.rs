@@ -620,6 +620,30 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &UrbanMaterialParameters::from_lcz_classes(&[2, 9]).unwrap(),
     )
     .unwrap();
+    write_spatial_urban_vector(
+        &landdata,
+        2005,
+        &topology,
+        &land_urban,
+        &BlockLayout::regular(1, 1).unwrap(),
+        None,
+        "WT_ROOF",
+        "WT_ROOF",
+        &[0.5, 0.15],
+    )
+    .unwrap();
+    write_spatial_urban_vector(
+        &landdata,
+        2005,
+        &topology,
+        &land_urban,
+        &BlockLayout::regular(1, 1).unwrap(),
+        Some("LAI"),
+        "urban_LAI_01",
+        "TREE_LAI",
+        &[1.0, 2.0],
+    )
+    .unwrap();
 
     let block = netcdf::open(landdata.join("block.nc")).unwrap();
     assert_eq!(block.dimension("longitude").unwrap().len(), 1);
@@ -722,6 +746,17 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
             .unwrap(),
         vec![0.18, 0.18, 0.18, 0.18, 0.13, 0.13, 0.13, 0.13]
     );
+    let roof = netcdf::open(landdata.join("urban/2005/WT_ROOF_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&roof, "WT_ROOF"), ["urban"]);
+    assert_eq!(
+        roof.variable("WT_ROOF")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![0.5, 0.15]
+    );
+    let lai = netcdf::open(landdata.join("urban/2005/LAI/urban_LAI_01_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&lai, "TREE_LAI"), ["urban"]);
 
     std::fs::remove_dir_all(directory).unwrap();
 }

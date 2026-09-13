@@ -54,7 +54,8 @@ pub use spatial::{
     write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    BlockLayout, PixelAxes, SpatialGrid, SpatialInputKind, SpatialTopology,
+    write_spatial_urban_vector, BlockLayout, PixelAxes, SpatialGrid, SpatialInputKind,
+    SpatialTopology,
 };
 pub use surface::{
     derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,
