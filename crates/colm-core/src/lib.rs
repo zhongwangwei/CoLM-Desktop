@@ -6,6 +6,7 @@
 
 pub mod albedo;
 pub mod atmosphere;
+pub mod bgc;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;
@@ -62,6 +63,12 @@ pub use atmosphere::{
     hydrometeor_temperature, new_snow_bulk_density, orbital_cosine_zenith, partition_precipitation,
     saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
     PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
+};
+pub use bgc::{
+    derive_cold_start_bgc_state, BgcClimateOwned, BgcColdStartInput, BgcColdStartState,
+    BgcEquilibriumState, BgcNitrificationOwned, BgcPermafrostOwned, BgcPftColdStartInput,
+    BgcPoolsOwned, BgcTotalsOwned, BgcTruncationOwned, BgcVegetationCarbon, BGC_DAYS_PER_YEAR,
+    BGC_DECOMPOSITION_POOLS, BGC_FULL_SOIL_LAYERS, BGC_SOIL_LAYERS, PFT_BGC_F64_VARIABLES,
 };
 pub use calendar::{is_leap_year, month_lengths, orbital_calendar_day, CalendarTime};
 pub use canopy_layer_profile::{

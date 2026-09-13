@@ -1,5 +1,5 @@
 use super::*;
-use crate::{RuntimeCnVegetationCarbon, MISSING};
+use crate::{BgcVegetationCarbon, MISSING};
 
 #[test]
 fn cold_bgc_defaults_match_the_fortran_pft_and_soil_contract() {
@@ -12,32 +12,34 @@ fn cold_bgc_defaults_match_the_fortran_pft_and_soil_contract() {
     assert_eq!(pft_values(&state, "annavg_tref_p"), [280.0, 280.0, 280.0]);
     assert_eq!(state.active_crop_years, [0, 0, 0]);
 
-    let time = state.time_restart_input();
-    assert!(time.pools.carbon.iter().all(|value| *value == 0.0));
-    assert!(time.pools.nitrogen.iter().all(|value| *value == 0.0));
-    assert_eq!(time.pools.mineral_nitrogen, [10.0; SOIL_LAYERS]);
-    assert_eq!(time.pools.nitrate, [5.0; SOIL_LAYERS]);
-    assert_eq!(time.pools.ammonium, [5.0; SOIL_LAYERS]);
-    assert_eq!(time.totals.mineral_nitrogen, [10.0]);
-    assert_eq!(time.totals.deposition, [MISSING]);
+    assert!(state.pools.carbon.iter().all(|value| *value == 0.0));
+    assert!(state.pools.nitrogen.iter().all(|value| *value == 0.0));
+    assert_eq!(state.pools.mineral_nitrogen, [10.0; BGC_SOIL_LAYERS]);
+    assert_eq!(state.pools.nitrate, [5.0; BGC_SOIL_LAYERS]);
+    assert_eq!(state.pools.ammonium, [5.0; BGC_SOIL_LAYERS]);
+    assert_eq!(state.totals.mineral_nitrogen, [10.0]);
+    assert_eq!(state.totals.deposition, [MISSING]);
     assert_eq!(
-        time.nitrification.unwrap().oxygen_concentration_unsaturated,
-        [MISSING; SOIL_LAYERS]
+        state
+            .nitrification
+            .unwrap()
+            .oxygen_concentration_unsaturated,
+        [MISSING; BGC_SOIL_LAYERS]
     );
 }
 
 #[test]
 fn cold_bgc_maps_runtime_profiles_in_fortran_pool_order_and_preserves_full_depth_missing() {
-    let runtime = RuntimeCnState {
-        decomposition_carbon_g_m3: (0..DECOMPOSITION_POOLS)
-            .flat_map(|pool| (0..SOIL_LAYERS).map(move |soil| (pool * 100 + soil) as f64))
+    let runtime = BgcEquilibriumState {
+        decomposition_carbon_g_m3: (0..BGC_DECOMPOSITION_POOLS)
+            .flat_map(|pool| (0..BGC_SOIL_LAYERS).map(move |soil| (pool * 100 + soil) as f64))
             .collect(),
-        decomposition_nitrogen_g_m3: (0..DECOMPOSITION_POOLS)
-            .flat_map(|pool| (0..SOIL_LAYERS).map(move |soil| (pool * 10 + soil) as f64))
+        decomposition_nitrogen_g_m3: (0..BGC_DECOMPOSITION_POOLS)
+            .flat_map(|pool| (0..BGC_SOIL_LAYERS).map(move |soil| (pool * 10 + soil) as f64))
             .collect(),
-        ammonium_g_m3: vec![2.0; SOIL_LAYERS],
-        nitrate_g_m3: vec![3.0; SOIL_LAYERS],
-        vegetation_carbon: RuntimeCnVegetationCarbon {
+        ammonium_g_m3: vec![2.0; BGC_SOIL_LAYERS],
+        nitrate_g_m3: vec![3.0; BGC_SOIL_LAYERS],
+        vegetation_carbon: BgcVegetationCarbon {
             leaf_g_m2: 400.0,
             leaf_storage_g_m2: 700.0,
             fine_root_g_m2: 12.0,
@@ -49,22 +51,21 @@ fn cold_bgc_maps_runtime_profiles_in_fortran_pool_order_and_preserves_full_depth
         },
     };
     let state = derive_cold_start_bgc_state(sample_input(Some(&runtime))).unwrap();
-    let time = state.time_restart_input();
 
-    assert_eq!(time.pools.carbon[0], 0.0);
-    assert_eq!(time.pools.carbon[1], 100.0);
-    assert_eq!(time.pools.carbon[DECOMPOSITION_POOLS], 1.0);
+    assert_eq!(state.pools.carbon[0], 0.0);
+    assert_eq!(state.pools.carbon[1], 100.0);
+    assert_eq!(state.pools.carbon[BGC_DECOMPOSITION_POOLS], 1.0);
     assert_eq!(
-        time.pools.carbon[(FULL_SOIL_LAYERS - 1) * DECOMPOSITION_POOLS],
+        state.pools.carbon[(BGC_FULL_SOIL_LAYERS - 1) * BGC_DECOMPOSITION_POOLS],
         MISSING
     );
-    assert_eq!(time.pools.mineral_nitrogen, [5.0; SOIL_LAYERS]);
+    assert_eq!(state.pools.mineral_nitrogen, [5.0; BGC_SOIL_LAYERS]);
     assert_eq!(pft_values(&state, "leafc_p"), [300.0, 300.0, 300.0]);
     assert_eq!(pft_values(&state, "leafc_storage_p"), [0.0, 600.0, 600.0]);
     assert_eq!(pft_values(&state, "deadstemc_p"), [15.0, 15.0, 0.0]);
     assert_eq!(pft_values(&state, "leafn_p")[0], 12.0);
-    assert_eq!(time.totals.litter_carbon[0], 313.50000000000006);
-    assert_eq!(time.pools.total_soil_nitrogen[0], 0.0215);
+    assert_eq!(state.totals.litter_carbon[0], 313.50000000000006);
+    assert_eq!(state.pools.total_soil_nitrogen[0], 0.0215);
 }
 
 #[test]
@@ -86,10 +87,10 @@ fn pft_values<'a>(state: &'a BgcColdStartState, name: &str) -> &'a [f64] {
     &state.pft_values[index]
 }
 
-fn sample_input(runtime_cn_state: Option<&RuntimeCnState>) -> BgcColdStartInput<'_> {
+fn sample_input(runtime_cn_state: Option<&BgcEquilibriumState>) -> BgcColdStartInput<'_> {
     BgcColdStartInput {
-        soil_thickness_m: &[0.1; SOIL_LAYERS],
-        soil_bulk_density_kg_m3: &[1000.0; SOIL_LAYERS],
+        soil_thickness_m: &[0.1; BGC_SOIL_LAYERS],
+        soil_bulk_density_kg_m3: &[1000.0; BGC_SOIL_LAYERS],
         pft: BgcPftColdStartInput {
             class: &[1, 3, 13],
             fraction: &[0.2, 0.3, 0.5],

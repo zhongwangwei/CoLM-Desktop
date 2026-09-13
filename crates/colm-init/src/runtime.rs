@@ -21,33 +21,10 @@ pub struct RuntimeSoilProfile {
     pub valid: bool,
 }
 
-/// Carbon pools that `cnsteadystate.nc` supplies at one source grid cell.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeCnVegetationCarbon {
-    pub leaf_g_m2: f64,
-    pub leaf_storage_g_m2: f64,
-    pub fine_root_g_m2: f64,
-    pub fine_root_storage_g_m2: f64,
-    pub live_stem_g_m2: f64,
-    pub dead_stem_g_m2: f64,
-    pub live_coarse_root_g_m2: f64,
-    pub dead_coarse_root_g_m2: f64,
-}
-
-/// Carbon and nitrogen state selected from CoLM's steady-state BGC runtime file.
-///
-/// The decomposition vectors retain Fortran `(soil, pool)` storage: values for
-/// one pool's complete soil profile are contiguous.  Pool order is metabolic
-/// litter, cellulose litter, lignin litter, coarse woody debris, soil 1, soil 2,
-/// and soil 3.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeCnState {
-    pub decomposition_carbon_g_m3: Vec<f64>,
-    pub decomposition_nitrogen_g_m3: Vec<f64>,
-    pub ammonium_g_m3: Vec<f64>,
-    pub nitrate_g_m3: Vec<f64>,
-    pub vegetation_carbon: RuntimeCnVegetationCarbon,
-}
+/// Runtime BGC state is core-model data; this module only reads it from NetCDF.
+pub use colm_core::{
+    BgcEquilibriumState as RuntimeCnState, BgcVegetationCarbon as RuntimeCnVegetationCarbon,
+};
 
 /// Read `soilstate.nc` at a single surface coordinate and one-based month.
 pub fn read_single_point_soil_profile(
