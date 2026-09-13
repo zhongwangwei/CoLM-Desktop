@@ -432,6 +432,8 @@ pub fn cold_start_ground_albedo(
         [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]]
     } else if patch_type == 3 {
         [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]]
+    } else if ground_temperature_k < 273.16 {
+        [[0.6; RADIATION_TYPES], [0.4; RADIATION_TYPES]]
     } else {
         let albedo_water = 0.05 / (cosine_zenith + 0.15);
         [[albedo_water, 0.1], [albedo_water, 0.1]]

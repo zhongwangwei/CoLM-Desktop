@@ -183,6 +183,28 @@ fn shared_ground_albedo_retains_the_soil_and_snow_components() {
 }
 
 #[test]
+fn frozen_inland_water_uses_the_upstream_ice_albedo() {
+    let ground = cold_start_ground_albedo(
+        4,
+        SoilReflectance {
+            saturated_visible: 0.14,
+            dry_visible: 0.25,
+            saturated_near_infrared: 0.28,
+            dry_near_infrared: 0.39,
+        },
+        0.0,
+        0.1,
+        0.5,
+        0.0,
+        0.0,
+        272.0,
+    )
+    .unwrap();
+    assert_eq!(ground.soil, [[0.6; 2], [0.4; 2]]);
+    assert_eq!(ground.ground, ground.soil);
+}
+
+#[test]
 fn initialized_snow_uses_the_non_snicar_source_albedo_and_age() {
     let output = cold_start_broadband_radiation_with_snow(
         0,
