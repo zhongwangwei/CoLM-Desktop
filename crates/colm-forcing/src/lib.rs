@@ -37,8 +37,9 @@ pub use gapfill::{
     QC_ERA5_CORRECTED, QC_INTERPOLATED, QC_OBSERVED, QC_UNRESOLVED,
 };
 pub use high_res::{
-    read_high_resolution_leaf_optics, read_high_resolution_water_optics,
-    HighResolutionLeafOpticsTable, HighResolutionWaterOptics,
+    read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
+    read_high_resolution_water_optics, HighResolutionLeafOpticsTable, HighResolutionRadiationTable,
+    HighResolutionWaterOptics,
 };
 pub use met::summarize;
 pub use point::{load_point_forcing, PointForcingFrame, PointForcingSeries};

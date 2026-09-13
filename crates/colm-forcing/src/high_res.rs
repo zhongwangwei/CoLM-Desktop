@@ -7,7 +7,10 @@
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
-use colm_core::{HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS};
+use colm_core::{
+    HighResolutionLeafOptics, HighResolutionRadiationTables, HIGH_RES_REGIMES,
+    HIGH_RES_WAVELENGTHS, HIGH_RES_ZENITH_BINS,
+};
 
 const PFT_CLASSES: usize = 16;
 const LEAF_TISSUES: usize = 2;
@@ -62,6 +65,53 @@ pub fn read_high_resolution_leaf_optics(
 pub struct HighResolutionWaterOptics {
     pub absorption: Vec<f64>,
     pub refractive_index: Vec<f64>,
+}
+
+/// The clear- and cloudy-sky spectra from `swnb_480bnd_fsds.nc`.
+///
+/// The vectors retain the Fortran order consumed by
+/// [`colm_core::select_high_resolution_radiation`], so every caller shares
+/// the original wavelength/zenith/regime selection rather than deriving
+/// broadband weights locally.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HighResolutionRadiationTable {
+    clear_fraction: Vec<f64>,
+    cloud_fraction: Vec<f64>,
+}
+
+impl HighResolutionRadiationTable {
+    /// Borrows the source spectra in the shared core-table layout.
+    pub fn tables(&self) -> HighResolutionRadiationTables<'_> {
+        HighResolutionRadiationTables {
+            clear_fraction: &self.clear_fraction,
+            cloud_fraction: &self.cloud_fraction,
+        }
+    }
+}
+
+/// Reads the two spectral fraction tables used by `flux_frac_init`.
+pub fn read_high_resolution_radiation_table(
+    path: impl AsRef<Path>,
+) -> Result<HighResolutionRadiationTable> {
+    let path = path.as_ref();
+    let file = netcdf::open(path).with_context(|| {
+        format!(
+            "cannot open high-resolution radiation fractions {}",
+            path.display()
+        )
+    })?;
+    Ok(HighResolutionRadiationTable {
+        cloud_fraction: read_radiation_variable(
+            &file,
+            "flx_frc_cld",
+            &[HIGH_RES_WAVELENGTHS, HIGH_RES_REGIMES],
+        )?,
+        clear_fraction: read_radiation_variable(
+            &file,
+            "flx_frc_clr",
+            &[HIGH_RES_WAVELENGTHS, HIGH_RES_ZENITH_BINS, HIGH_RES_REGIMES],
+        )?,
+    })
 }
 
 /// Reads the 211 `kw nw` rows consumed by `get_water_optical_properties`.
@@ -145,6 +195,33 @@ fn read_leaf_variable(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
         }
     }
     Ok(pft_major)
+}
+
+fn read_radiation_variable(
+    file: &netcdf::File,
+    name: &str,
+    expected: &[usize],
+) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("high-resolution radiation table has no {name} variable"))?;
+    let dimensions = variable
+        .dimensions()
+        .iter()
+        .map(netcdf::Dimension::len)
+        .collect::<Vec<_>>();
+    ensure!(
+        dimensions == expected,
+        "high-resolution radiation variable {name} dimensions are {dimensions:?}; expected {expected:?}"
+    );
+    let values = variable
+        .get_values::<f64, _>(..)
+        .with_context(|| format!("cannot read high-resolution radiation variable {name}"))?;
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "high-resolution radiation variable {name} contains a non-finite value"
+    );
+    Ok(values)
 }
 
 #[cfg(test)]

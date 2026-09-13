@@ -65,6 +65,60 @@ fn water_optics_reader_requires_exactly_one_full_spectrum() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn radiation_table_reader_preserves_fortran_band_zenith_regime_order() {
+    let root = temp_dir("radiation");
+    let path = root.join("swnb_480bnd_fsds.nc");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("wavelength", HIGH_RES_WAVELENGTHS)
+        .unwrap();
+    file.add_dimension("zenith", HIGH_RES_ZENITH_BINS).unwrap();
+    file.add_dimension("regime", HIGH_RES_REGIMES).unwrap();
+    let cloud = (0..HIGH_RES_WAVELENGTHS * HIGH_RES_REGIMES)
+        .map(|value| value as f64 / 10_000.0)
+        .collect::<Vec<_>>();
+    let clear = (0..HIGH_RES_WAVELENGTHS * HIGH_RES_ZENITH_BINS * HIGH_RES_REGIMES)
+        .map(|value| value as f64 / 1_000_000.0)
+        .collect::<Vec<_>>();
+    file.add_variable::<f64>("flx_frc_cld", &["wavelength", "regime"])
+        .unwrap()
+        .put_values(&cloud, ..)
+        .unwrap();
+    file.add_variable::<f64>("flx_frc_clr", &["wavelength", "zenith", "regime"])
+        .unwrap()
+        .put_values(&clear, ..)
+        .unwrap();
+    file.close().unwrap();
+
+    let table = read_high_resolution_radiation_table(&path).unwrap();
+    let fractions = colm_core::select_high_resolution_radiation(
+        colm_core::CalendarTime {
+            year: 2001,
+            julian_day: 172,
+            seconds: 0,
+        },
+        true,
+        0.0,
+        1.0,
+        45.0_f64.to_radians(),
+        table.tables(),
+    )
+    .unwrap();
+    let clear_index = HIGH_RES_WAVELENGTHS * (HIGH_RES_ZENITH_BINS * 3);
+    let cloud_index = HIGH_RES_WAVELENGTHS * 3;
+    assert_eq!(fractions.direct[0], clear[clear_index]);
+    assert_eq!(
+        fractions.direct[HIGH_RES_WAVELENGTHS - 1],
+        clear[clear_index + 210]
+    );
+    assert_eq!(fractions.diffuse[0], cloud[cloud_index]);
+    assert_eq!(
+        fractions.diffuse[HIGH_RES_WAVELENGTHS - 1],
+        cloud[cloud_index + 210]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn temp_dir(label: &str) -> std::path::PathBuf {
     let number = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
