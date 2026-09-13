@@ -17,25 +17,28 @@ use colm_srfdata::{
     build_coordinate_patch_selection, build_crop_land_patches, build_crop_pft_topology,
     build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
     build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
-    clip_existing_surface, crop_pft_pctshared, materialize_single_point_surface,
-    materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
-    read_coordinate_patch_selection_f64, read_coordinate_patch_selection_layers_f64,
-    read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
-    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
-    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
-    read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
-    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
-    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
-    write_spatial_topology, write_spatial_topology_with_shared, write_spatial_urban_material,
-    write_spatial_urban_topology, write_spatial_urban_vector, BlockLayout, FlatLandPatches,
-    LczUrbanRawFields, NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput,
-    SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology, TopographicWetness,
-    UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M,
+    clip_existing_surface, crop_pft_pctshared, map_patch_diagnostic,
+    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
+    mesh_cell_area_weights, read_coordinate_patch_selection_f64,
+    read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
+    read_mesh_raster_f64, read_mesh_raster_i32, read_mesh_raster_layers_f64,
+    read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
+    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
+    read_methane_ph_patch_selection, write_landpatch_3d_vector, write_landpatch_layered_vector,
+    write_landpatch_scalar, write_landpatch_vector, write_patch_diagnostic,
+    write_patch_diagnostic_dimension, write_patch_diagnostic_time, write_spatial_hru_topology,
+    write_spatial_pft_topology, write_spatial_pft_topology_with_shared, write_spatial_topology,
+    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
+    write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
+    FlatLandElements, FlatLandPatches, LczUrbanRawFields, NcarUrbanProperties, NcarUrbanRawFields,
+    PftFractionInput, PftIndexInput, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology,
+    TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING,
+    MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
 const MODIS_PFT_CLASSES: usize = 16;
-const NATURAL_PFT_CLASSES: usize = 15;
+const CROP_NATURAL_PFT_CLASSES: usize = 15;
 const CFT_CLASSES: usize = 64;
 const IGBP_LULCC_CLASSES: usize = 17;
 const TWI_LAYERS: usize = 25;
@@ -82,6 +85,7 @@ struct SpatialLctArgs {
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
     lulcc: bool,
+    diagnostics: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
     urban: Option<SpatialUrbanInputs>,
 }
@@ -166,6 +170,7 @@ struct SpatialPftArgs {
     simple_topography_factors: Option<PathBuf>,
     regular_topography_factors: Option<PathBuf>,
     bedrock: Option<PathBuf>,
+    diagnostics: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
 }
 
@@ -246,7 +251,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             layout,
             &crop.crop_class,
             MODIS_PFT_CLASSES,
-            NATURAL_PFT_CLASSES,
+            CROP_NATURAL_PFT_CLASSES,
             &raw_percent,
             &area,
         )?,
@@ -254,7 +259,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             patches,
             layout,
             MODIS_PFT_CLASSES,
-            NATURAL_PFT_CLASSES,
+            MODIS_PFT_CLASSES,
             &raw_percent,
             &area,
         )?,
@@ -305,6 +310,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         usgs_forest_height: None,
         monthly_vegetation_years: Vec::new(),
         lulcc: false,
+        diagnostics: args.diagnostics,
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
         urban: None,
     };
@@ -356,6 +362,18 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "pct_pfts",
         &fractions,
     )?;
+    let pft_shares = pft_pctshared.as_deref().unwrap_or(&fractions);
+    write_pft_diagnostic(
+        &args,
+        &topology,
+        &pfts.land_pfts,
+        pft_shares,
+        &fractions,
+        "pftfrac_elm",
+        "pftfrac_elm",
+        DiagnosticStatistic::Fraction,
+        Some(0.0),
+    )?;
     if let Some(crop) = &crop {
         write_landpatch_scalar(
             &args.landdata,
@@ -367,6 +385,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             "pct_crops",
             &crop.pctshared,
         )?;
+        write_crop_diagnostic(&args, &topology, crop)?;
     }
     let pft_height = aggregate_pft_height(
         layout,
@@ -391,7 +410,22 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "htop_pfts",
         &pft_height,
     )?;
+    write_pft_diagnostic(
+        &args,
+        &topology,
+        &pfts.land_pfts,
+        pft_shares,
+        &pft_height,
+        "htop_pft",
+        "htop_pft",
+        DiagnosticStatistic::Mean,
+        Some(0.0),
+    )?;
     for &year in &args.monthly_vegetation_years {
+        let mut lai_patch_frames = Vec::with_capacity(12);
+        let mut lai_pft_frames = Vec::with_capacity(12);
+        let mut sai_patch_frames = Vec::with_capacity(12);
+        let mut sai_pft_frames = Vec::with_capacity(12);
         let (suffix, lai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_LAI", year)?;
         let (_, sai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_SAI", year)?;
         for month in 1..=12 {
@@ -475,7 +509,66 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                     values,
                 )?;
             }
+            if args.diagnostics {
+                lai_patch_frames.push(lai.patch_index);
+                lai_pft_frames.push(lai.pft_index);
+                sai_patch_frames.push(sai.patch_index);
+                sai_pft_frames.push(sai.pft_index);
+            }
         }
+        if args.diagnostics {
+            let patch_types = (0..=17).collect::<Vec<_>>();
+            let patch_shares = crop.as_ref().map(|crop| crop.pctshared.as_slice());
+            for (file_stem, variable, frames) in [
+                ("LAI_patch", "LAI", &lai_patch_frames),
+                ("SAI_patch", "SAI", &sai_patch_frames),
+            ] {
+                write_patch_diagnostic_time(
+                    args.landdata
+                        .join("diag")
+                        .join(format!("{file_stem}_{year:04}.nc")),
+                    variable,
+                    &topology,
+                    patches,
+                    frames,
+                    &patch_types,
+                    DiagnosticStatistic::Mean,
+                    patch_shares,
+                    DIAGNOSTIC_MISSING,
+                    Some(0.0),
+                )?;
+            }
+            write_pft_diagnostic_time(
+                &args,
+                year,
+                &topology,
+                &pfts.land_pfts,
+                pft_shares,
+                &lai_pft_frames,
+                "LAI_pft",
+                "LAI_pft",
+            )?;
+            write_pft_diagnostic_time(
+                &args,
+                year,
+                &topology,
+                &pfts.land_pfts,
+                pft_shares,
+                &sai_pft_frames,
+                "SAI_pft",
+                "SAI_pft",
+            )?;
+        }
+    }
+    if args.diagnostics {
+        write_spatial_diagnostic_baseline(
+            &args.landdata,
+            args.year,
+            &topology,
+            patches,
+            crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+            17,
+        )?;
     }
     println!(
         "wrote {} spatial land elements, {} land patches, and {} PFT tiles to {}",
@@ -582,12 +675,528 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &args.blocks,
         )?;
     }
+    if args.diagnostics {
+        write_spatial_diagnostic_baseline(
+            &args.landdata,
+            args.year,
+            &topology,
+            &patches,
+            None,
+            land_classification_count(args.land_cover),
+        )?;
+    }
     println!(
         "wrote {} spatial land elements and {} LCT patches to {}",
         topology.land_elements.element_ids.len(),
         patches.set_type.len(),
         args.landdata.display()
     );
+    Ok(())
+}
+
+fn write_spatial_diagnostic_baseline(
+    landdata: &std::path::Path,
+    year: i32,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    classification_count: i32,
+) -> Result<()> {
+    let diagnostic_dir = landdata.join("diag");
+    let elements = diagnostic_elements(&topology.land_elements);
+    let element_ids = elements
+        .element_ids
+        .iter()
+        .map(|&element| element as f64)
+        .collect::<Vec<_>>();
+    let element = map_patch_diagnostic(
+        topology,
+        &elements,
+        &element_ids,
+        &[0, 1],
+        DiagnosticStatistic::Mean,
+        None,
+        DIAGNOSTIC_MISSING,
+        Some(0.0),
+    )?;
+    write_patch_diagnostic(
+        diagnostic_dir.join(format!("element_{year:04}.nc")),
+        "element",
+        &[0, 1],
+        &element,
+        DIAGNOSTIC_MISSING,
+    )?;
+
+    ensure!(
+        classification_count > 0,
+        "diagnostic land classification count must be positive"
+    );
+    let type_indices = (0..=classification_count).collect::<Vec<_>>();
+    let shares = pctshared
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| vec![1.0; patches.len()]);
+    let patch_fraction = map_patch_diagnostic(
+        topology,
+        patches,
+        &shares,
+        &type_indices,
+        DiagnosticStatistic::Fraction,
+        Some(&shares),
+        DIAGNOSTIC_MISSING,
+        Some(0.0),
+    )?;
+    write_patch_diagnostic(
+        diagnostic_dir.join(format!("patchfrac_elm_{year:04}.nc")),
+        "patchfrac_elm",
+        &type_indices,
+        &patch_fraction,
+        DIAGNOSTIC_MISSING,
+    )
+}
+
+fn diagnostic_elements(elements: &FlatLandElements) -> FlatLandPatches {
+    FlatLandPatches {
+        element_ids: elements.element_ids.clone(),
+        pixel_start: elements.pixel_start.clone(),
+        pixel_end: elements.pixel_end.clone(),
+        set_type: elements.set_type.clone(),
+        element_index: elements.element_index.clone(),
+    }
+}
+
+fn land_classification_count(land_cover: SiteMode) -> i32 {
+    match land_cover {
+        SiteMode::Igbp | SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => 17,
+        SiteMode::Usgs => 24,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_lct_patch_diagnostic(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    values: &[f64],
+    file_stem: &str,
+    variable: &str,
+    type_indices: &[i32],
+    missing: f64,
+    default: Option<f64>,
+) -> Result<()> {
+    if !args.diagnostics {
+        return Ok(());
+    }
+    let mapped = map_patch_diagnostic(
+        topology,
+        patches,
+        values,
+        type_indices,
+        DiagnosticStatistic::Mean,
+        pctshared,
+        missing,
+        default,
+    )?;
+    write_patch_diagnostic(
+        args.landdata
+            .join("diag")
+            .join(format!("{file_stem}_{:04}.nc", args.year)),
+        variable,
+        type_indices,
+        &mapped,
+        missing,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_lct_patch_diagnostic_time(
+    args: &SpatialLctArgs,
+    year: i32,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    frames: &[Vec<f64>],
+    file_stem: &str,
+    variable: &str,
+) -> Result<()> {
+    if !args.diagnostics || frames.is_empty() {
+        return Ok(());
+    }
+    let type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
+    write_patch_diagnostic_time(
+        args.landdata
+            .join("diag")
+            .join(format!("{file_stem}_{year:04}.nc")),
+        variable,
+        topology,
+        patches,
+        frames,
+        &type_indices,
+        DiagnosticStatistic::Mean,
+        pctshared,
+        DIAGNOSTIC_MISSING,
+        Some(0.0),
+    )
+}
+
+fn write_crop_diagnostic(
+    args: &SpatialPftArgs,
+    topology: &SpatialTopology,
+    crop: &CropLandPatchTopology,
+) -> Result<()> {
+    if !args.diagnostics {
+        return Ok(());
+    }
+    let mut cft_patches = FlatLandPatches {
+        element_ids: Vec::new(),
+        pixel_start: Vec::new(),
+        pixel_end: Vec::new(),
+        set_type: Vec::new(),
+        element_index: Vec::new(),
+    };
+    let mut shares = Vec::new();
+    for patch in 0..crop.land_patches.len() {
+        let Some(class) = crop.crop_class[patch] else {
+            continue;
+        };
+        cft_patches
+            .element_ids
+            .push(crop.land_patches.element_ids[patch]);
+        cft_patches
+            .pixel_start
+            .push(crop.land_patches.pixel_start[patch]);
+        cft_patches
+            .pixel_end
+            .push(crop.land_patches.pixel_end[patch]);
+        cft_patches
+            .set_type
+            .push(i32::try_from(class).context("CFT class exceeds i32")?);
+        cft_patches
+            .element_index
+            .push(crop.land_patches.element_index[patch]);
+        shares.push(crop.pctshared[patch]);
+    }
+    let type_indices = (1..=i32::try_from(CFT_CLASSES)?).collect::<Vec<_>>();
+    let mapped = map_patch_diagnostic(
+        topology,
+        &cft_patches,
+        &shares,
+        &type_indices,
+        DiagnosticStatistic::Fraction,
+        Some(&shares),
+        DIAGNOSTIC_MISSING,
+        Some(0.0),
+    )?;
+    write_patch_diagnostic(
+        args.landdata
+            .join("diag")
+            .join(format!("cropfrac_elm_{:04}.nc", args.year)),
+        "cropfrac_elm",
+        &type_indices,
+        &mapped,
+        DIAGNOSTIC_MISSING,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_pft_diagnostic(
+    args: &SpatialPftArgs,
+    topology: &SpatialTopology,
+    pfts: &FlatLandPatches,
+    pctshared: &[f64],
+    values: &[f64],
+    file_stem: &str,
+    variable: &str,
+    statistic: DiagnosticStatistic,
+    default: Option<f64>,
+) -> Result<()> {
+    if !args.diagnostics {
+        return Ok(());
+    }
+    let type_indices = pft_type_indices(args);
+    let mapped = map_patch_diagnostic(
+        topology,
+        pfts,
+        values,
+        &type_indices,
+        statistic,
+        Some(pctshared),
+        DIAGNOSTIC_MISSING,
+        default,
+    )?;
+    write_patch_diagnostic(
+        args.landdata
+            .join("diag")
+            .join(format!("{file_stem}_{:04}.nc", args.year)),
+        variable,
+        &type_indices,
+        &mapped,
+        DIAGNOSTIC_MISSING,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_pft_diagnostic_time(
+    args: &SpatialPftArgs,
+    year: i32,
+    topology: &SpatialTopology,
+    pfts: &FlatLandPatches,
+    pctshared: &[f64],
+    frames: &[Vec<f64>],
+    file_stem: &str,
+    variable: &str,
+) -> Result<()> {
+    if !args.diagnostics || frames.is_empty() {
+        return Ok(());
+    }
+    let type_indices = pft_type_indices(args);
+    write_patch_diagnostic_time(
+        args.landdata
+            .join("diag")
+            .join(format!("{file_stem}_{year:04}.nc")),
+        variable,
+        topology,
+        pfts,
+        frames,
+        &type_indices,
+        DiagnosticStatistic::Mean,
+        Some(pctshared),
+        DIAGNOSTIC_MISSING,
+        Some(0.0),
+    )
+}
+
+fn pft_type_indices(args: &SpatialPftArgs) -> Vec<i32> {
+    let count = if args.crop_surface.is_some() {
+        CROP_NATURAL_PFT_CLASSES + CFT_CLASSES
+    } else {
+        MODIS_PFT_CLASSES
+    };
+    (0..i32::try_from(count).expect("PFT class count fits i32")).collect()
+}
+
+fn urban_type_indices(inputs: &SpatialUrbanInputs) -> Vec<i32> {
+    let (_, count) = inputs.scheme.type_raster();
+    (1..=i32::try_from(count).expect("urban class count fits i32")).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_urban_diagnostic(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    inputs: &SpatialUrbanInputs,
+    values: &[f64],
+    file_stem: &str,
+    variable: &str,
+    statistic: DiagnosticStatistic,
+    default: Option<f64>,
+) -> Result<()> {
+    if !args.diagnostics {
+        return Ok(());
+    }
+    let type_indices = urban_type_indices(inputs);
+    let mapped = map_patch_diagnostic(
+        topology,
+        land_urban,
+        values,
+        &type_indices,
+        statistic,
+        None,
+        DIAGNOSTIC_MISSING,
+        default,
+    )?;
+    write_patch_diagnostic(
+        args.landdata
+            .join("diag")
+            .join(format!("{file_stem}_{:04}.nc", args.year)),
+        variable,
+        &type_indices,
+        &mapped,
+        DIAGNOSTIC_MISSING,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_urban_diagnostic_dimension(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    inputs: &SpatialUrbanInputs,
+    values: &[f64],
+    file_stem: &str,
+    variable: &str,
+    dimension: &str,
+    statistic: DiagnosticStatistic,
+    default: Option<f64>,
+) -> Result<()> {
+    if !args.diagnostics {
+        return Ok(());
+    }
+    ensure!(
+        values.len() % land_urban.len() == 0,
+        "urban diagnostic {variable} has {} values for {} urban tiles",
+        values.len(),
+        land_urban.len()
+    );
+    let frames = values
+        .chunks_exact(land_urban.len())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let records = (1..=frames.len())
+        .map(i32::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    write_patch_diagnostic_dimension(
+        args.landdata
+            .join("diag")
+            .join(format!("{file_stem}_{:04}.nc", args.year)),
+        variable,
+        topology,
+        land_urban,
+        &frames,
+        &urban_type_indices(inputs),
+        statistic,
+        None,
+        DIAGNOSTIC_MISSING,
+        default,
+        dimension,
+        &records,
+    )
+}
+
+fn urban_type_fractions(
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+) -> Result<Vec<f64>> {
+    let cell_area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    let mut offsets = Vec::with_capacity(topology.land_elements.element_ids.len());
+    let mut offset = 0_usize;
+    for element in 0..topology.land_elements.element_ids.len() {
+        offsets.push(offset);
+        offset += topology.mesh.pixels(element)?.0.len();
+    }
+    ensure!(
+        offset == cell_area.len(),
+        "urban diagnostic mesh area layout is inconsistent"
+    );
+    let mut patch_area = vec![0.0; land_urban.len()];
+    let mut element_area = vec![0.0; offsets.len()];
+    for (patch, patch_area) in patch_area.iter_mut().enumerate() {
+        let element = land_urban.element_index[patch]
+            .checked_sub(1)
+            .with_context(|| format!("urban patch {patch} has zero element index"))?;
+        let start = offsets
+            .get(element)
+            .copied()
+            .with_context(|| format!("urban patch {patch} references unknown element"))?
+            + land_urban.pixel_start[patch]
+            - 1;
+        let end = offsets[element] + land_urban.pixel_end[patch];
+        let area = cell_area
+            .get(start..end)
+            .with_context(|| format!("urban patch {patch} has an invalid pixel range"))?
+            .iter()
+            .sum::<f64>();
+        *patch_area = area;
+        element_area[element] += area;
+    }
+    patch_area
+        .into_iter()
+        .enumerate()
+        .map(|(patch, area)| {
+            let element = land_urban.element_index[patch] - 1;
+            ensure!(
+                element_area[element] > 0.0,
+                "urban patch {patch} belongs to an empty element"
+            );
+            Ok(area / element_area[element])
+        })
+        .collect()
+}
+
+fn write_urban_material_diagnostics(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    inputs: &SpatialUrbanInputs,
+    material: &UrbanMaterialParameters,
+) -> Result<()> {
+    if !args.diagnostics {
+        return Ok(());
+    }
+    let file_stem = "urban_phyical_paras";
+    write_urban_diagnostic(
+        args,
+        topology,
+        land_urban,
+        inputs,
+        &material.pervious_road_fraction,
+        file_stem,
+        "WTROAD_PERV",
+        DiagnosticStatistic::Fraction,
+        Some(0.0),
+    )?;
+    for (variable, values) in [
+        ("EM_ROOF", &material.roof_emissivity),
+        ("EM_WALL", &material.wall_emissivity),
+        ("EM_PERROAD", &material.pervious_emissivity),
+        ("EM_IMPROAD", &material.impervious_emissivity),
+        ("THICK_ROOF", &material.roof_thickness_m),
+        ("THICK_WALL", &material.wall_thickness_m),
+        ("T_BUILDING_MIN", &material.room_min_k),
+        ("T_BUILDING_MAX", &material.room_max_k),
+    ] {
+        write_urban_diagnostic(
+            args,
+            topology,
+            land_urban,
+            inputs,
+            values,
+            file_stem,
+            variable,
+            DiagnosticStatistic::Mean,
+            Some(0.0),
+        )?;
+    }
+    for (variable, values) in [
+        ("CV_ROOF", &material.roof_heat_capacity),
+        ("TK_ROOF", &material.roof_thermal_conductivity),
+        ("CV_WALL", &material.wall_heat_capacity),
+        ("TK_WALL", &material.wall_thermal_conductivity),
+        ("CV_IMPROAD", &material.impervious_heat_capacity),
+        ("TK_IMPROAD", &material.impervious_thermal_conductivity),
+    ] {
+        write_urban_diagnostic_dimension(
+            args,
+            topology,
+            land_urban,
+            inputs,
+            values,
+            file_stem,
+            variable,
+            "ulev",
+            DiagnosticStatistic::Mean,
+            Some(0.0),
+        )?;
+    }
+    for (variable, values) in [
+        ("ALB_ROOF", &material.roof_albedo),
+        ("ALB_WALL", &material.wall_albedo),
+        ("ALB_PERROAD", &material.pervious_albedo),
+        ("ALB_IMPROAD", &material.impervious_albedo),
+    ] {
+        write_urban_diagnostic(
+            args,
+            topology,
+            land_urban,
+            inputs,
+            &values[..land_urban.len()],
+            file_stem,
+            variable,
+            DiagnosticStatistic::Mean,
+            Some(0.0),
+        )?;
+    }
     Ok(())
 }
 
@@ -711,18 +1320,56 @@ fn materialize_spatial_urban(
             )
         }
     };
-    for (file_stem, variable, values) in [
-        ("WT_ROOF", "WT_ROOF", &geometry.roof_fraction),
-        ("HT_ROOF", "HT_ROOF", &geometry.roof_height_m),
+    for (file_stem, variable, diagnostic_stem, diagnostic_variable, values) in [
+        (
+            "WT_ROOF",
+            "WT_ROOF",
+            "wt_roof",
+            "WT_ROOF",
+            &geometry.roof_fraction,
+        ),
+        (
+            "HT_ROOF",
+            "HT_ROOF",
+            "ht_roof",
+            "HT_ROOF",
+            &geometry.roof_height_m,
+        ),
         (
             "HLR_BLD",
             "BUILDING_HLR",
+            "hlr_bld",
+            "BUILDING_HLR",
             &geometry.building_height_to_width,
         ),
-        ("PCT_Tree", "PCT_Tree", &geometry.tree_percent),
-        ("htop_urb", "URBAN_TREE_TOP", &geometry.tree_top_m),
-        ("PCT_Water", "PCT_Water", &geometry.water_percent),
-        ("POP", "POP_DEN", &geometry.population_density),
+        (
+            "PCT_Tree",
+            "PCT_Tree",
+            "pct_urban_tree",
+            "PCT_Urban_Tree",
+            &geometry.tree_percent,
+        ),
+        (
+            "htop_urb",
+            "URBAN_TREE_TOP",
+            "htop_urban",
+            "Urban_Tree_HTOP",
+            &geometry.tree_top_m,
+        ),
+        (
+            "PCT_Water",
+            "PCT_Water",
+            "pct_urban_water",
+            "PCT_Urban_Water",
+            &geometry.water_percent,
+        ),
+        (
+            "POP",
+            "POP_DEN",
+            "population_urban",
+            "POP_DEN",
+            &geometry.population_density,
+        ),
     ] {
         write_spatial_urban_vector(
             &args.landdata,
@@ -734,6 +1381,17 @@ fn materialize_spatial_urban(
             file_stem,
             variable,
             values,
+        )?;
+        write_urban_diagnostic(
+            args,
+            topology,
+            land_urban,
+            inputs,
+            values,
+            diagnostic_stem,
+            diagnostic_variable,
+            DiagnosticStatistic::Mean,
+            Some(0.0),
         )?;
     }
     let lucy = aggregate_urban_region_ids(
@@ -757,6 +1415,21 @@ fn materialize_spatial_urban(
         "LUCY_id",
         &lucy,
     )?;
+    let lucy_diagnostic = lucy
+        .iter()
+        .map(|&value| f64::from(value))
+        .collect::<Vec<_>>();
+    write_urban_diagnostic(
+        args,
+        topology,
+        land_urban,
+        inputs,
+        &lucy_diagnostic,
+        "LUCY_region_id",
+        "LUCY_id",
+        DiagnosticStatistic::Mean,
+        Some(0.0),
+    )?;
     write_spatial_urban_material(
         &args.landdata,
         args.year,
@@ -765,6 +1438,18 @@ fn materialize_spatial_urban(
         &args.blocks,
         &material,
     )?;
+    write_urban_diagnostic(
+        args,
+        topology,
+        land_urban,
+        inputs,
+        &urban_type_fractions(topology, land_urban)?,
+        "pct_urban",
+        "URBAN_PCT",
+        DiagnosticStatistic::Fraction,
+        Some(0.0),
+    )?;
+    write_urban_material_diagnostics(args, topology, land_urban, inputs, &material)?;
     let monthly_years = if args.monthly_vegetation_years.is_empty() {
         vec![args.year]
     } else {
@@ -774,6 +1459,8 @@ fn materialize_spatial_urban(
         let source_year = year.max(2000);
         let output_year = source_year;
         let lai_suffix = format!("URBLAI_{source_year:04}");
+        let mut lai_frames = Vec::with_capacity(12);
+        let mut sai_frames = Vec::with_capacity(12);
         for month in 1..=12 {
             for (file_stem, variable, source) in [
                 (
@@ -812,7 +1499,45 @@ fn materialize_spatial_urban(
                     variable,
                     &index,
                 )?;
+                if args.diagnostics {
+                    if source == "URBAN_TREE_LAI" {
+                        lai_frames.push(index);
+                    } else {
+                        sai_frames.push(index);
+                    }
+                }
             }
+        }
+        if args.diagnostics {
+            let type_indices = urban_type_indices(inputs);
+            write_patch_diagnostic_time(
+                args.landdata
+                    .join("diag")
+                    .join(format!("LAI_urban_{output_year:04}.nc")),
+                "Urban_Tree_LAI",
+                topology,
+                land_urban,
+                &lai_frames,
+                &type_indices,
+                DiagnosticStatistic::Mean,
+                None,
+                DIAGNOSTIC_MISSING,
+                Some(0.0),
+            )?;
+            write_patch_diagnostic_time(
+                args.landdata
+                    .join("diag")
+                    .join(format!("SAI_urban_{output_year:04}.nc")),
+                "Urban_Tree_SAI",
+                topology,
+                land_urban,
+                &sai_frames,
+                &type_indices,
+                DiagnosticStatistic::Mean,
+                None,
+                DIAGNOSTIC_MISSING,
+                Some(0.0),
+            )?;
         }
     }
     Ok(())
@@ -856,6 +1581,32 @@ fn materialize_lulcc_transfer_traces(
             &format!("lccpct_patches_lc{source_class:02}"),
             "lccpct_patches",
             &fractions[source_class * patches.len()..(source_class + 1) * patches.len()],
+        )?;
+    }
+    if args.diagnostics && !patches.is_empty() {
+        let type_indices = (0..=IGBP_LULCC_CLASSES)
+            .map(|class| i32::try_from(class).expect("LULCC class fits i32"))
+            .collect::<Vec<_>>();
+        let source_patch = type_indices.clone();
+        let frames = fractions
+            .chunks_exact(patches.len())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        write_patch_diagnostic_dimension(
+            args.landdata
+                .join("diag")
+                .join(format!("lccpct_matrix_{:04}.nc", args.year)),
+            "lccpct_matrix",
+            topology,
+            patches,
+            &frames,
+            &type_indices,
+            DiagnosticStatistic::Mean,
+            None,
+            DIAGNOSTIC_MISSING,
+            Some(0.0),
+            "source_patch",
+            &source_patch,
         )?;
     }
     Ok(())
@@ -932,6 +1683,7 @@ fn materialize_simple_topography_factors(
     args: &SpatialLctArgs,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
+    patch_pctshared: Option<&[f64]>,
 ) -> Result<()> {
     let topography = directory.join("topography_MERITHydro.nc");
     let curvature = directory.join("curvature_MERITHydro.nc");
@@ -973,6 +1725,19 @@ fn materialize_simple_topography_factors(
         "cur_patches",
         &factors.curvature,
     )?;
+    let type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
+    write_lct_patch_diagnostic(
+        args,
+        topology,
+        patches,
+        patch_pctshared,
+        &factors.curvature,
+        "topo_factor_cur",
+        "cur",
+        &type_indices,
+        DIAGNOSTIC_MISSING,
+        None,
+    )?;
     for (stem, values) in [
         ("slp_type_patches", &factors.slope_by_aspect),
         ("asp_type_patches", &factors.aspect_by_aspect),
@@ -990,6 +1755,27 @@ fn materialize_simple_topography_factors(
             factors.aspect_types,
             values,
         )?;
+        let (file, prefix) = match stem {
+            "slp_type_patches" => ("topo_factor_slp", "slp"),
+            "asp_type_patches" => ("topo_factor_asp", "asp"),
+            _ => unreachable!("simple topography output name is fixed"),
+        };
+        for aspect in 0..factors.aspect_types {
+            let start = aspect * patches.len();
+            let end = start + patches.len();
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                &values[start..end],
+                file,
+                &format!("{prefix}_{}", aspect + 1),
+                &type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
+            )?;
+        }
     }
     Ok(())
 }
@@ -999,6 +1785,7 @@ fn materialize_regular_topography_factors(
     args: &SpatialLctArgs,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
+    patch_pctshared: Option<&[f64]>,
 ) -> Result<()> {
     const AZIMUTHS: usize = 16;
     const SLOPE_TYPES: usize = 4;
@@ -1032,6 +1819,7 @@ fn materialize_regular_topography_factors(
         )?,
         selection.areas(),
     )?;
+    let type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
     for (stem, values) in [
         ("svf_patches", &factors.sky_view_factor),
         ("cur_patches", &factors.curvature),
@@ -1045,6 +1833,23 @@ fn materialize_regular_topography_factors(
             "topography",
             stem,
             values,
+        )?;
+        let (file, variable) = match stem {
+            "svf_patches" => ("topo_factor_svf", "svf"),
+            "cur_patches" => ("topo_factor_cur", "cur"),
+            _ => unreachable!("regular topography scalar output name is fixed"),
+        };
+        write_lct_patch_diagnostic(
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            values,
+            file,
+            variable,
+            &type_indices,
+            DIAGNOSTIC_MISSING,
+            None,
         )?;
     }
     for (stem, values) in [
@@ -1065,6 +1870,28 @@ fn materialize_regular_topography_factors(
             SLOPE_TYPES,
             values,
         )?;
+        let (file, prefix) = match stem {
+            "slp_type_patches" => ("topo_factor_slp", "slp"),
+            "asp_type_patches" => ("topo_factor_asp", "asp"),
+            "area_type_patches" => continue,
+            _ => unreachable!("regular topography layered output name is fixed"),
+        };
+        for slope_type in 0..SLOPE_TYPES {
+            let start = slope_type * patches.len();
+            let end = start + patches.len();
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                &values[start..end],
+                file,
+                &format!("{prefix}_{}", slope_type + 1),
+                &type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
+            )?;
+        }
     }
     write_landpatch_3d_vector(
         &args.landdata,
@@ -1080,7 +1907,26 @@ fn materialize_regular_topography_factors(
         "zenith_p",
         CURVE_PARAMETERS,
         &factors.shadow_curve,
-    )
+    )?;
+    for azimuth in 0..AZIMUTHS {
+        for parameter in 0..CURVE_PARAMETERS {
+            let start = (azimuth * CURVE_PARAMETERS + parameter) * patches.len();
+            let end = start + patches.len();
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                &factors.shadow_curve[start..end],
+                "topo_factor_sf_lut",
+                &format!("sf_{}_{}", azimuth + 1, parameter + 1),
+                &type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn lulcc_previous_land_cover_year(year: i32) -> Option<i32> {
@@ -1104,6 +1950,7 @@ fn materialize_spatial_common_fields(
         args.simple_topography_factors.is_none() || args.regular_topography_factors.is_none(),
         "simple and regular forcing downscaling cannot both write terrain fields"
     );
+    let patch_type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
     let forest_height = match forest_height_override {
         Some(values) => Some(values.to_vec()),
         None => match (&args.plant_tiles, &args.usgs_forest_height) {
@@ -1296,16 +2143,7 @@ fn materialize_spatial_common_fields(
             },
             SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
         };
-        materialize_spatial_soil(
-            directory,
-            &args.landdata,
-            args.year,
-            topology,
-            patches,
-            &args.blocks,
-            classes,
-            args.soil_model,
-        )?;
+        materialize_spatial_soil(directory, args, topology, patches, patch_pctshared, classes)?;
     }
     if let Some(lake_depth) = lake_depth {
         write_landpatch_scalar(
@@ -1317,6 +2155,23 @@ fn materialize_spatial_common_fields(
             "lakedepth",
             "lakedepth_patches",
             &lake_depth,
+        )?;
+        let waterbody = match args.land_cover {
+            SiteMode::Igbp => 17,
+            SiteMode::Usgs => 16,
+            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
+        };
+        write_lct_patch_diagnostic(
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            &lake_depth,
+            "lakedepth",
+            "lakedepth",
+            &[waterbody],
+            DIAGNOSTIC_MISSING,
+            None,
         )?;
     }
     if let Some(lake_soil_carbon) = lake_soil_carbon {
@@ -1357,6 +2212,22 @@ fn materialize_spatial_common_fields(
             "soiltext_patches",
             &soil_texture,
         )?;
+        let diagnostic_values = soil_texture
+            .iter()
+            .map(|&value| f64::from(value))
+            .collect::<Vec<_>>();
+        write_lct_patch_diagnostic(
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            &diagnostic_values,
+            "soiltexture",
+            "soiltexture",
+            &patch_type_indices,
+            -1.0,
+            None,
+        )?;
     }
     if let Some(soil_brightness) = soil_brightness {
         for (variable, values) in [
@@ -1375,6 +2246,18 @@ fn materialize_spatial_common_fields(
                 variable,
                 values,
             )?;
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                values,
+                "soil_brightness",
+                variable,
+                &patch_type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
+            )?;
         }
     }
     if let Some(topography) = topography {
@@ -1392,6 +2275,24 @@ fn materialize_spatial_common_fields(
                 "topography",
                 variable,
                 values,
+            )?;
+            let diagnostic_variable = match variable {
+                "elevation_patches" => "elevation",
+                "elvstd_patches" => "elvstd",
+                "sloperatio_patches" => "sloperatio",
+                _ => unreachable!("topography output name is fixed"),
+            };
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                values,
+                "topography",
+                diagnostic_variable,
+                &patch_type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
             )?;
         }
     }
@@ -1414,13 +2315,32 @@ fn materialize_spatial_common_fields(
                 variable,
                 values,
             )?;
+            let diagnostic_variable = variable.trim_end_matches("_patches");
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                values,
+                "twi",
+                diagnostic_variable,
+                &patch_type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
+            )?;
         }
     }
     if let Some(directory) = &args.simple_topography_factors {
-        materialize_simple_topography_factors(directory, args, topology, patches)?;
+        materialize_simple_topography_factors(directory, args, topology, patches, patch_pctshared)?;
     }
     if let Some(directory) = &args.regular_topography_factors {
-        materialize_regular_topography_factors(directory, args, topology, patches)?;
+        materialize_regular_topography_factors(
+            directory,
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+        )?;
     }
     if let Some(bedrock) = bedrock {
         write_landpatch_scalar(
@@ -1432,6 +2352,18 @@ fn materialize_spatial_common_fields(
             "dbedrock",
             "dbedrock_patches",
             &bedrock,
+        )?;
+        write_lct_patch_diagnostic(
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            &bedrock,
+            "dbedrock_patch",
+            "dbedrock",
+            &patch_type_indices,
+            DIAGNOSTIC_MISSING,
+            None,
         )?;
     }
     if let Some(directory) = &args.soil_hyper_albedo_dir {
@@ -1457,6 +2389,18 @@ fn materialize_spatial_common_fields(
                 &stem,
                 &values,
             )?;
+            write_lct_patch_diagnostic(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                &values,
+                &format!("soil_hyper_alb_{wavelength}nm"),
+                "soil_hyper_alb",
+                &patch_type_indices,
+                DIAGNOSTIC_MISSING,
+                None,
+            )?;
         }
     }
     if let Some(forest_height) = forest_height {
@@ -1470,6 +2414,18 @@ fn materialize_spatial_common_fields(
             "htop_patches",
             &forest_height,
         )?;
+        write_lct_patch_diagnostic(
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            &forest_height,
+            "htop_patch",
+            "htop",
+            &patch_type_indices,
+            DIAGNOSTIC_MISSING,
+            Some(0.0),
+        )?;
     }
     if !args.monthly_vegetation_years.is_empty() {
         let tiles = args
@@ -1479,6 +2435,8 @@ fn materialize_spatial_common_fields(
         let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
         for &year in &args.monthly_vegetation_years {
+            let mut lai_frames = Vec::with_capacity(12);
+            let mut sai_frames = Vec::with_capacity(12);
             let (suffix, lai_name) = monthly_vegetation_source("MONTHLY_LC_LAI", year)?;
             let (_, sai_name) = monthly_vegetation_source("MONTHLY_LC_SAI", year)?;
             for month in 1..=12 {
@@ -1528,7 +2486,31 @@ fn materialize_spatial_common_fields(
                     "SAI_patches",
                     &sai,
                 )?;
+                if args.diagnostics {
+                    lai_frames.push(lai);
+                    sai_frames.push(sai);
+                }
             }
+            write_lct_patch_diagnostic_time(
+                args,
+                year,
+                topology,
+                patches,
+                patch_pctshared,
+                &lai_frames,
+                "LAI_patch",
+                "LAI",
+            )?;
+            write_lct_patch_diagnostic_time(
+                args,
+                year,
+                topology,
+                patches,
+                patch_pctshared,
+                &sai_frames,
+                "SAI_patch",
+                "SAI",
+            )?;
         }
     }
     Ok(())
@@ -1545,13 +2527,11 @@ fn soil_hyper_albedo_classes(land_cover: SiteMode) -> (i32, i32) {
 #[allow(clippy::too_many_arguments)]
 fn materialize_spatial_soil(
     directory: &std::path::Path,
-    landdata: &std::path::Path,
-    year: i32,
+    args: &SpatialLctArgs,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
-    blocks: &BlockLayout,
+    patch_pctshared: Option<&[f64]>,
     classes: SoilPatchClasses,
-    model: SoilModel,
 ) -> Result<()> {
     let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
@@ -1579,11 +2559,10 @@ fn materialize_spatial_soil(
             ("vf_om_s", &organic, 0.102),
         ] {
             write_soil_layer(
-                landdata,
-                year,
+                args,
                 topology,
                 patches,
-                blocks,
+                patch_pctshared,
                 name,
                 layer,
                 &aggregate_soil_field(
@@ -1600,10 +2579,22 @@ fn materialize_spatial_soil(
         }
         let (ba_alpha, ba_beta) = aggregate_balland_arp(&layout, &gravel, &sand, &area, classes)?;
         write_soil_layer(
-            landdata, year, topology, patches, blocks, "BA_alpha", layer, &ba_alpha,
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            "BA_alpha",
+            layer,
+            &ba_alpha,
         )?;
         write_soil_layer(
-            landdata, year, topology, patches, blocks, "BA_beta", layer, &ba_beta,
+            args,
+            topology,
+            patches,
+            patch_pctshared,
+            "BA_beta",
+            layer,
+            &ba_beta,
         )?;
 
         for (file, source, output, statistic, fill) in [
@@ -1626,11 +2617,17 @@ fn materialize_spatial_soil(
             let values =
                 aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
             write_soil_layer(
-                landdata, year, topology, patches, blocks, output, layer, &values,
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                output,
+                layer,
+                &values,
             )?;
         }
 
-        match model {
+        match args.soil_model {
             SoilModel::Vgm => {
                 let output = aggregate_vgm(
                     &layout,
@@ -1674,7 +2671,13 @@ fn materialize_spatial_soil(
                     ("L_vgm", output.l),
                 ] {
                     write_soil_layer(
-                        landdata, year, topology, patches, blocks, name, layer, &values,
+                        args,
+                        topology,
+                        patches,
+                        patch_pctshared,
+                        name,
+                        layer,
+                        &values,
                     )?;
                 }
                 // The VGM initialization branch still writes Campbell's `bsw`,
@@ -1692,7 +2695,13 @@ fn materialize_spatial_soil(
                         },
                     )?;
                     write_soil_layer(
-                        landdata, year, topology, patches, blocks, source, layer, &values,
+                        args,
+                        topology,
+                        patches,
+                        patch_pctshared,
+                        source,
+                        layer,
+                        &values,
                     )?;
                 }
             }
@@ -1723,7 +2732,13 @@ fn materialize_spatial_soil(
                     ("lambda", output.lambda),
                 ] {
                     write_soil_layer(
-                        landdata, year, topology, patches, blocks, name, layer, &values,
+                        args,
+                        topology,
+                        patches,
+                        patch_pctshared,
+                        name,
+                        layer,
+                        &values,
                     )?;
                 }
             }
@@ -1799,7 +2814,13 @@ fn materialize_spatial_soil(
             let values =
                 aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
             write_soil_layer(
-                landdata, year, topology, patches, blocks, output, layer, &values,
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                output,
+                layer,
+                &values,
             )?;
         }
     }
@@ -1824,18 +2845,37 @@ fn read_soil_raw(
 
 #[allow(clippy::too_many_arguments)]
 fn write_soil_layer(
-    landdata: &std::path::Path,
-    year: i32,
+    args: &SpatialLctArgs,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
-    blocks: &BlockLayout,
+    patch_pctshared: Option<&[f64]>,
     name: &str,
     layer: usize,
     values: &[f64],
 ) -> Result<()> {
-    let name = format!("{name}_l{layer}_patches");
+    let variable = format!("{name}_l{layer}_patches");
     write_landpatch_scalar(
-        landdata, year, topology, patches, blocks, "soil", &name, values,
+        &args.landdata,
+        args.year,
+        topology,
+        patches,
+        &args.blocks,
+        "soil",
+        &variable,
+        values,
+    )?;
+    let type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
+    write_lct_patch_diagnostic(
+        args,
+        topology,
+        patches,
+        patch_pctshared,
+        values,
+        "soil_parameters",
+        &format!("{name}_l{layer}"),
+        &type_indices,
+        DIAGNOSTIC_MISSING,
+        None,
     )
 }
 
@@ -1878,6 +2918,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut urban_canyon_hwr = true;
     let mut monthly_vegetation_years = Vec::new();
     let mut lulcc = false;
+    let mut diagnostics = false;
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -2006,6 +3047,10 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 lulcc = true;
                 index += 1;
             }
+            "--diagnostics" => {
+                diagnostics = true;
+                index += 1;
+            }
             "--monthly-vegetation-year" => {
                 let year = args
                     .get(index + 1)
@@ -2111,6 +3156,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         usgs_forest_height,
         monthly_vegetation_years,
         lulcc,
+        diagnostics,
         soil_hyper_albedo_dir,
         urban: urban_rawdata.map(|rawdata| SpatialUrbanInputs {
             rawdata,
@@ -2153,6 +3199,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut simple_topography_factors = None;
     let mut regular_topography_factors = None;
     let mut bedrock = None;
+    let mut diagnostics = false;
     let mut soil_hyper_albedo_dir = None;
     let mut index = 5;
     while index < args.len() {
@@ -2285,6 +3332,10 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 ));
                 index += 2;
             }
+            "--diagnostics" => {
+                diagnostics = true;
+                index += 1;
+            }
             "--monthly-vegetation-year" => {
                 let year = args
                     .get(index + 1)
@@ -2331,6 +3382,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         simple_topography_factors,
         regular_topography_factors,
         bedrock,
+        diagnostics,
         soil_hyper_albedo_dir,
     })
 }
@@ -2627,6 +3679,7 @@ fn spatial_case_command(
     let topographic_wetness = rawdata.join("TWI.nc");
     let regular_downscaling = case_bool(&document, "DEF_USE_Forcing_Downscaling", false)?;
     let simple_downscaling = case_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
+    let diagnostics = case_bool(&document, "DEF_USE_SrfdataDiag", false)?;
     ensure!(
         !regular_downscaling || !simple_downscaling,
         "DEF_USE_Forcing_Downscaling and DEF_USE_Forcing_Downscaling_Simple are mutually exclusive"
@@ -2890,6 +3943,10 @@ fn spatial_case_command(
         if let Some(blocks) = &blocks {
             args.extend(blocks.iter().cloned());
         }
+    }
+
+    if diagnostics {
+        args.push("--diagnostics".to_owned());
     }
 
     Ok(Some(SpatialCaseCommand {
@@ -3198,8 +4255,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -3362,6 +4419,162 @@ mod tests {
     }
 
     #[test]
+    fn spatial_parsers_enable_diagnostics_only_when_requested() {
+        let lct = parse_spatial_lct(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--diagnostics".into(),
+        ])
+        .unwrap();
+        assert!(lct.diagnostics);
+        let pft = parse_spatial_pft(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+        ])
+        .unwrap();
+        assert!(!pft.diagnostics);
+    }
+
+    #[test]
+    fn pft_diagnostic_schema_keeps_all_non_crop_and_crop_classes() {
+        let no_crop = parse_spatial_pft(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+        ])
+        .unwrap();
+        assert_eq!(pft_type_indices(&no_crop), (0..16).collect::<Vec<_>>());
+        let crop = parse_spatial_pft(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+            "--crop-surface".into(),
+            "cft.nc".into(),
+        ])
+        .unwrap();
+        assert_eq!(pft_type_indices(&crop), (0..79).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn diagnostic_baseline_writes_the_upstream_element_and_patch_files() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-srfdata-diagnostic-baseline-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mesh =
+            colm_srfdata::FlatMesh::new(vec![1, 2], vec![0, 1, 2], vec![1, 2], vec![1, 1]).unwrap();
+        let topology = SpatialTopology {
+            kind: SpatialInputKind::GridBased,
+            grid: colm_srfdata::SpatialGrid {
+                lon_w: vec![-180.0],
+                lon_e: vec![-180.0],
+                lat_s: vec![-90.0],
+                lat_n: vec![90.0],
+            },
+            pixel: colm_srfdata::PixelAxes {
+                edge_south: -90.0,
+                edge_north: 90.0,
+                edge_west: -180.0,
+                edge_east: -180.0,
+                lon_w: vec![-180.0, 0.0],
+                lon_e: vec![0.0, -180.0],
+                lat_s: vec![-90.0],
+                lat_n: vec![90.0],
+            },
+            land_elements: mesh.land_elements(),
+            mesh,
+        };
+        let patches = FlatLandPatches {
+            element_ids: vec![1, 2],
+            pixel_start: vec![1, 1],
+            pixel_end: vec![1, 1],
+            set_type: vec![1, 2],
+            element_index: vec![1, 2],
+        };
+        write_spatial_diagnostic_baseline(&root, 2005, &topology, &patches, None, 17).unwrap();
+
+        let elements = netcdf::open(root.join("diag/element_2005.nc")).unwrap();
+        assert_eq!(
+            elements
+                .variable("element_grid")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            vec![1.5]
+        );
+        let fractions = netcdf::open(root.join("diag/patchfrac_elm_2005.nc")).unwrap();
+        assert_eq!(
+            fractions
+                .variable("patchfrac_elm")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            vec![
+                0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn urban_type_fractions_follow_the_urban_pixelset_area() {
+        let mesh =
+            colm_srfdata::FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
+        let topology = SpatialTopology {
+            kind: SpatialInputKind::GridBased,
+            grid: colm_srfdata::SpatialGrid {
+                lon_w: vec![-180.0],
+                lon_e: vec![-180.0],
+                lat_s: vec![-90.0],
+                lat_n: vec![90.0],
+            },
+            pixel: colm_srfdata::PixelAxes {
+                edge_south: -90.0,
+                edge_north: 90.0,
+                edge_west: -180.0,
+                edge_east: -180.0,
+                lon_w: vec![-180.0, 0.0],
+                lon_e: vec![0.0, -180.0],
+                lat_s: vec![-90.0],
+                lat_n: vec![90.0],
+            },
+            land_elements: mesh.land_elements(),
+            mesh,
+        };
+        let urban = FlatLandPatches {
+            element_ids: vec![1, 1],
+            pixel_start: vec![1, 2],
+            pixel_end: vec![1, 2],
+            set_type: vec![1, 2],
+            element_index: vec![1, 1],
+        };
+        assert_eq!(
+            urban_type_fractions(&topology, &urban).unwrap(),
+            vec![0.5, 0.5]
+        );
+    }
+
+    #[test]
     fn spatial_pft_parser_requires_native_plant_tiles() {
         let parsed = parse_spatial_pft(&[
             "latlon".into(),
@@ -3497,6 +4710,22 @@ mod tests {
         assert!(!command
             .required_files
             .contains(&root.join("raw/soil/PHH2O1.nc")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_forwards_requested_upstream_diagnostics() {
+        let (root, namelist) = case_namelist(
+            "diagnostics",
+            "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='$ROOT/out'\n DEF_dir_rawdata='$ROOT/raw'\n DEF_file_mesh='$ROOT/mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_SrfdataDiag=.true.\n/\n",
+        );
+        let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+            .unwrap()
+            .unwrap();
+        assert!(command
+            .args
+            .iter()
+            .any(|argument| argument == "--diagnostics"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -12,6 +12,7 @@
 
 pub mod albedo;
 pub mod derive;
+pub mod diagnostics;
 pub mod grid;
 pub mod mesh;
 mod minpack;
@@ -33,6 +34,10 @@ pub mod urban_soil;
 pub use albedo::{albedo, SoilAlbedo};
 pub use derive::{
     depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
+};
+pub use diagnostics::{
+    map_patch_diagnostic, write_patch_diagnostic, write_patch_diagnostic_dimension,
+    write_patch_diagnostic_time, DiagnosticStatistic, MappedDiagnostic, DIAGNOSTIC_MISSING,
 };
 pub use grid::{Grid, COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M};
 pub use pft::{

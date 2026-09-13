@@ -108,6 +108,23 @@ fn landpft_keeps_positive_natural_classes_and_skips_non_soil_patches() {
 }
 
 #[test]
+fn non_crop_pft_topology_retains_modis_class_sixteen() {
+    let layout = FlatPatches::new(vec![1], vec![0, 1], vec![0], vec![None]).unwrap();
+    let land_patches = crate::topology::FlatLandPatches {
+        element_ids: vec![8],
+        pixel_start: vec![1],
+        pixel_end: vec![1],
+        set_type: vec![1],
+        element_index: vec![1],
+    };
+    let mut raw = vec![0.0; 16];
+    raw[15] = 100.0;
+    let topology = build_pft_topology(&land_patches, &layout, 16, 16, &raw, &[1.0]).unwrap();
+    assert_eq!(topology.pft_classes, vec![15]);
+    assert_eq!(topology.land_pfts.set_type, vec![15]);
+}
+
+#[test]
 fn crop_topology_splits_shared_patches_and_preserves_cft_ownership() {
     let layout =
         FlatPatches::new(vec![1, 17], vec![0, 2, 3], vec![0, 1, 2], vec![None; 2]).unwrap();
