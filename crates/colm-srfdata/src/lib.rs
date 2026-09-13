@@ -24,6 +24,7 @@ pub mod spatial;
 pub mod surface;
 pub mod texture;
 pub mod topology;
+pub mod urban;
 pub mod urban_extra;
 pub mod urban_runtime;
 pub mod urban_soil;
@@ -52,8 +53,8 @@ pub use spatial::{
     read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
     write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, write_spatial_urban_topology, BlockLayout, PixelAxes,
-    SpatialGrid, SpatialInputKind, SpatialTopology,
+    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
+    BlockLayout, PixelAxes, SpatialGrid, SpatialInputKind, SpatialTopology,
 };
 pub use surface::{
     derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,
@@ -61,3 +62,4 @@ pub use surface::{
 };
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh};
+pub use urban::{UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS};

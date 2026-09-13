@@ -1624,3 +1624,14 @@ fn native_single_point_surface_is_accepted_by_upstream_mkinidata() {
         .is_file());
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn lcz_surface_defaults_share_one_validated_upstream_table() {
+    let dense = lcz_defaults(1).unwrap();
+    assert_eq!(dense.roof_albedo, 0.13);
+    assert_eq!(LCZ_ROOF_FRACTION[0], 0.5);
+    assert_eq!(LCZ_ROOF_HEIGHT_M[9], 8.5);
+    assert_eq!(LCZ_CANYON_HWR[6], 1.5);
+    assert!((lcz_defaults(0).unwrap_err().to_string()).contains("positive"));
+    assert!((lcz_defaults(11).unwrap_err().to_string()).contains("1..=10"));
+}

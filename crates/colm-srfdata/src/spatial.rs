@@ -13,6 +13,7 @@ use netcdf::{Extent, NcTypeDescriptor};
 
 use crate::{
     mesh::inspect_spatial_input, FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh, Grid,
+    UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS,
 };
 
 const MAX_SERIAL_RAW_PIXELS: usize = 25_000_000;
@@ -1895,6 +1896,114 @@ pub fn write_spatial_urban_topology(
         blocks,
         &assignments,
     )
+}
+
+/// Write the LCZ-derived material portion of `urban/<year>/urban_<block>.nc`.
+/// Geometry, vegetation, water, population, and LUCY vectors remain separate
+/// upstream files and are written by their corresponding aggregation path.
+pub fn write_spatial_urban_material(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    blocks: &BlockLayout,
+    material: &UrbanMaterialParameters,
+) -> Result<()> {
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    validate_patches(&topology.mesh, land_urban)?;
+    let urban = land_urban.len();
+    material.validate(urban)?;
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let output = landdata
+        .as_ref()
+        .join("urban")
+        .join(format!("{land_cover_year:04}"));
+    std::fs::create_dir_all(&output)?;
+    let mut grouped = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (patch, element) in land_urban.element_ids.iter().enumerate() {
+        grouped
+            .entry(
+                *assignments.get(element).with_context(|| {
+                    format!("landurban patch {patch} references unknown element")
+                })?,
+            )
+            .or_default()
+            .push(patch);
+    }
+    for ((x, y), patches) in grouped {
+        let count = patches.len();
+        let mut file = netcdf::create(output.join(block_filename("urban", x, y, blocks)?))?;
+        for (name, length) in [
+            ("urban", count),
+            ("numsolar", URBAN_SOLAR_BANDS),
+            ("numrad", URBAN_RADIATION_TYPES),
+            ("ulev", URBAN_LAYERS),
+        ] {
+            file.add_dimension(name, length)?;
+        }
+        for (name, values) in [
+            ("WTROAD_PERV", &material.pervious_road_fraction),
+            ("EM_ROOF", &material.roof_emissivity),
+            ("EM_WALL", &material.wall_emissivity),
+            ("EM_IMPROAD", &material.impervious_emissivity),
+            ("EM_PERROAD", &material.pervious_emissivity),
+            ("THICK_ROOF", &material.roof_thickness_m),
+            ("THICK_WALL", &material.wall_thickness_m),
+            ("T_BUILDING_MIN", &material.room_min_k),
+            ("T_BUILDING_MAX", &material.room_max_k),
+        ] {
+            file.add_variable::<f64>(name, &["urban"])?
+                .put_values(&urban_scalar_block(values, &patches), ..)?;
+        }
+        for (name, values) in [
+            ("CV_ROOF", &material.roof_heat_capacity),
+            ("CV_WALL", &material.wall_heat_capacity),
+            ("CV_IMPROAD", &material.impervious_heat_capacity),
+            ("TK_ROOF", &material.roof_thermal_conductivity),
+            ("TK_WALL", &material.wall_thermal_conductivity),
+            ("TK_IMPROAD", &material.impervious_thermal_conductivity),
+        ] {
+            file.add_variable::<f64>(name, &["urban", "ulev"])?
+                .put_values(&urban_layer_block(values, urban, &patches), (.., ..))?;
+        }
+        for (name, values) in [
+            ("ALB_ROOF", &material.roof_albedo),
+            ("ALB_WALL", &material.wall_albedo),
+            ("ALB_IMPROAD", &material.impervious_albedo),
+            ("ALB_PERROAD", &material.pervious_albedo),
+        ] {
+            file.add_variable::<f64>(name, &["urban", "numrad", "numsolar"])?
+                .put_values(&urban_spectral_block(values, urban, &patches), (.., .., ..))?;
+        }
+        file.close()?;
+    }
+    Ok(())
+}
+
+fn urban_scalar_block(values: &[f64], patches: &[usize]) -> Vec<f64> {
+    patches.iter().map(|&patch| values[patch]).collect()
+}
+
+fn urban_layer_block(values: &[f64], urban: usize, patches: &[usize]) -> Vec<f64> {
+    let mut output = Vec::with_capacity(URBAN_LAYERS * patches.len());
+    for &patch in patches {
+        for layer in 0..URBAN_LAYERS {
+            output.push(values[layer * urban + patch]);
+        }
+    }
+    output
+}
+
+fn urban_spectral_block(values: &[f64], urban: usize, patches: &[usize]) -> Vec<f64> {
+    let mut output = Vec::with_capacity(URBAN_SOLAR_BANDS * URBAN_RADIATION_TYPES * patches.len());
+    for &patch in patches {
+        for radiation in 0..URBAN_RADIATION_TYPES {
+            for solar in 0..URBAN_SOLAR_BANDS {
+                output.push(values[(solar * URBAN_RADIATION_TYPES + radiation) * urban + patch]);
+            }
+        }
+    }
+    output
 }
 
 #[derive(Debug, Clone, Copy)]

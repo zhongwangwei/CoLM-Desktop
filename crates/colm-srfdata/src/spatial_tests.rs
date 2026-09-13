@@ -611,6 +611,15 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &BlockLayout::regular(1, 1).unwrap(),
     )
     .unwrap();
+    write_spatial_urban_material(
+        &landdata,
+        2005,
+        &topology,
+        &land_urban,
+        &BlockLayout::regular(1, 1).unwrap(),
+        &UrbanMaterialParameters::from_lcz_classes(&[2, 9]).unwrap(),
+    )
+    .unwrap();
 
     let block = netcdf::open(landdata.join("block.nc")).unwrap();
     assert_eq!(block.dimension("longitude").unwrap().len(), 1);
@@ -694,6 +703,24 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
             .get_values::<i32, _>(..)
             .unwrap(),
         vec![2, 9]
+    );
+    let urban = netcdf::open(landdata.join("urban/2005/urban_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&urban, "CV_ROOF"), ["urban", "ulev"]);
+    assert_eq!(
+        urban
+            .variable("EM_ROOF")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![0.91, 0.91]
+    );
+    assert_eq!(
+        urban
+            .variable("ALB_ROOF")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![0.18, 0.18, 0.18, 0.18, 0.13, 0.13, 0.13, 0.13]
     );
 
     std::fs::remove_dir_all(directory).unwrap();

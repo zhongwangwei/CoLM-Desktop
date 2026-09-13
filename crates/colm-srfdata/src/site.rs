@@ -1678,26 +1678,26 @@ fn write_single_point_surface(
 ///
 /// They are resolved while producing the self-contained surface artifact, just
 /// as the upstream single-point reader does before it writes `srfdata.nc`.
-#[derive(Clone, Copy)]
-struct UrbanLczDefaults {
-    roof_albedo: f64,
-    wall_albedo: f64,
-    impervious_albedo: f64,
-    pervious_albedo: f64,
-    roof_emissivity: f64,
-    wall_emissivity: f64,
-    impervious_emissivity: f64,
-    pervious_emissivity: f64,
-    roof_heat_capacity: f64,
-    wall_heat_capacity: f64,
-    impervious_heat_capacity: f64,
-    roof_conductivity: f64,
-    wall_conductivity: f64,
-    impervious_conductivity: f64,
-    roof_thickness: f64,
-    wall_thickness: f64,
-    room_max: f64,
-    room_min: f64,
+#[derive(Debug, Clone, Copy)]
+pub struct UrbanLczDefaults {
+    pub roof_albedo: f64,
+    pub wall_albedo: f64,
+    pub impervious_albedo: f64,
+    pub pervious_albedo: f64,
+    pub roof_emissivity: f64,
+    pub wall_emissivity: f64,
+    pub impervious_emissivity: f64,
+    pub pervious_emissivity: f64,
+    pub roof_heat_capacity: f64,
+    pub wall_heat_capacity: f64,
+    pub impervious_heat_capacity: f64,
+    pub roof_conductivity: f64,
+    pub wall_conductivity: f64,
+    pub impervious_conductivity: f64,
+    pub roof_thickness: f64,
+    pub wall_thickness: f64,
+    pub room_max: f64,
+    pub room_min: f64,
 }
 
 const LCZ_DEFAULTS: [UrbanLczDefaults; 10] = [
@@ -1903,6 +1903,23 @@ const LCZ_DEFAULTS: [UrbanLczDefaults; 10] = [
     },
 ];
 
+/// Returns the shared `MOD_Urban_Const_LCZ.F90` material constants for one
+/// one-based local-climate-zone class.
+pub fn lcz_defaults(class: i32) -> Result<&'static UrbanLczDefaults> {
+    let index = usize::try_from(class - 1).context("LCZ class must be positive")?;
+    LCZ_DEFAULTS
+        .get(index)
+        .with_context(|| format!("LCZ class must be within 1..=10, got {class}"))
+}
+
+/// Geometric LCZ defaults kept beside [`lcz_defaults`] so spatial and
+/// single-point surface generation use one upstream-derived table.
+pub const LCZ_ROOF_FRACTION: [f64; 10] = [0.5, 0.5, 0.55, 0.3, 0.3, 0.3, 0.8, 0.4, 0.15, 0.25];
+pub const LCZ_PERVIOUS_GROUND_FRACTION: [f64; 10] =
+    [0.05, 0.1, 0.15, 0.35, 0.3, 0.4, 0.15, 0.15, 0.7, 0.45];
+pub const LCZ_ROOF_HEIGHT_M: [f64; 10] = [45.0, 15.0, 5.0, 40.0, 15.0, 5.0, 3.0, 7.0, 5.0, 8.5];
+pub const LCZ_CANYON_HWR: [f64; 10] = [2.5, 1.25, 1.25, 1.0, 0.5, 0.5, 1.5, 0.2, 0.15, 0.35];
+
 fn write_urban_single_point_surface(
     source: &Path,
     target: &Path,
@@ -1916,7 +1933,7 @@ fn write_urban_single_point_surface(
         (1..=10).contains(&urban_type),
         "LCZ_DOM must be within 1..=10, got {urban_type}"
     );
-    let defaults = &LCZ_DEFAULTS[(urban_type - 1) as usize];
+    let defaults = lcz_defaults(urban_type)?;
     let years = values_i32(&input, "LAI_year")?;
     let tree_lai = values_f64(&input, "TREE_LAI")?;
     let tree_sai = values_f64(&input, "TREE_SAI")?;
