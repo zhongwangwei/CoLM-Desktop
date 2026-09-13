@@ -111,6 +111,7 @@ impl<'a> SpatialPftTimeConfig<'a> {
 
 /// Writes the PFT/PC constant restart for one Rust `mksrfdata-rs spatial-pft` block.
 pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) -> Result<PathBuf> {
+    let document = read_pft_document(config.namelist)?;
     let class = read_i32(
         config.landdata,
         "landpft",
@@ -141,10 +142,34 @@ pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) ->
             && class.len() == observed_height_m.len(),
         "spatial landpft, pct_pfts, and htop_pfts vectors must be nonempty and have equal lengths"
     );
-    let text = std::fs::read_to_string(config.namelist)
-        .with_context(|| format!("cannot read case namelist {}", config.namelist.display()))?;
-    let document = parse(&text)
-        .with_context(|| format!("cannot parse case namelist {}", config.namelist.display()))?;
+    let crop_fraction = optional_bool_or(&document, "DEF_USE_CROP", false)?.then(|| {
+        read_f64(
+            config.landdata,
+            "pctpft",
+            "pct_crops",
+            "pct_crops",
+            config.land_cover_year,
+            config.block_label,
+        )
+    });
+    let crop_fraction = crop_fraction.transpose()?;
+    if let Some(crop_fraction) = &crop_fraction {
+        let patches = read_i32(
+            config.landdata,
+            "landpatch",
+            "landpatch",
+            "settyp",
+            config.land_cover_year,
+            config.block_label,
+        )?;
+        ensure!(
+            crop_fraction.len() == patches.len()
+                && crop_fraction
+                    .iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+            "spatial pct_crops must be a finite [0, 1] value for every land patch"
+        );
+    }
     let canopy = pft_canopy(&document, &class, &observed_height_m)?;
     write_pft_constant_restart(
         config.restart_dir,
@@ -156,7 +181,7 @@ pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) ->
             fraction: &fraction,
             canopy_top_m: &canopy.top_m,
             canopy_bottom_m: &canopy.bottom_m,
-            crop_fraction: None,
+            crop_fraction: crop_fraction.as_deref(),
         },
     )
 }

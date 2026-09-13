@@ -33,6 +33,35 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
 }
 
 #[test]
+fn spatial_pft_constant_restart_copies_crop_fractions_by_landpatch() {
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    write_i32(&landdata, "landpatch", "landpatch", "settyp", &[12]);
+    write_i32(&landdata, "landpft", "landpft", "settyp", &[15]);
+    write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[1.0]);
+    write_f64(&landdata, "pctpft", "pct_crops", "pct_crops", &[0.4]);
+    write_f64(&landdata, "htop", "htop_pfts", "htop_pfts", &[0.0]);
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\n DEF_USE_CROP = .true.\n/\n").unwrap();
+
+    let file = write_spatial_pft_constant_restart(SpatialPftStaticConfig::new(
+        &namelist,
+        &landdata,
+        &root.join("restart"),
+        "test",
+        2005,
+        "w180_s90",
+    ))
+    .unwrap();
+
+    let output = netcdf::open(file).unwrap();
+    assert_eq!(values_i32(&output, "pftclass").unwrap(), [15]);
+    assert_eq!(values_f64(&output, "pftfrac").unwrap(), [1.0]);
+    assert_eq!(values_f64(&output, "cropfrac").unwrap(), [0.4]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_pft_time_rejects_bgc_before_materializing_any_restart() {
     let root = temp_dir();
     let namelist = root.join("case.nml");
