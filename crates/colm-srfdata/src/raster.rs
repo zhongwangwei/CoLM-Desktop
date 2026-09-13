@@ -46,9 +46,9 @@ pub fn point_f64_on(grid: Grid, file: &Path, var: &str, lon: f64, lat: f64) -> R
 
 /// 从一个已知下标的像元读一个数，并对 `_FillValue` 报错。
 ///
-/// `itime` 是第三维（1-based）；`None` 表示这是个二维变量。
-/// CoLM 的对应物分别是 `read_point_var_2d_real8` 与
-/// `read_point_5x5_var_2d_time_real8`，两者只差这一维。
+/// `itime` is the optional leading time axis (one-based); `None` means a
+/// two-dimensional variable.  PFT readers use [`read_pixel_at`] for their
+/// additional leading axes.
 fn read_pixel(
     file: &Path,
     var: &str,
@@ -56,8 +56,25 @@ fn read_pixel(
     ilat: usize,
     itime: Option<usize>,
 ) -> Result<f64> {
-    if ilon == 0 || ilat == 0 || itime == Some(0) {
-        bail!("NetCDF point indices are 1-based; got ({ilon},{ilat},{itime:?})");
+    match itime {
+        Some(time) => read_pixel_at(file, var, ilon, ilat, &[time]),
+        None => read_pixel_at(file, var, ilon, ilat, &[]),
+    }
+}
+
+/// Read one point with its leading C-order axes selected by one-based index.
+///
+/// NetCDF exposes the Fortran `(/ lon, lat, pft, time /)` arrays as
+/// `(time, pft, lat, lon)`, so callers list `time` before `pft` here.
+fn read_pixel_at(
+    file: &Path,
+    var: &str,
+    ilon: usize,
+    ilat: usize,
+    leading: &[usize],
+) -> Result<f64> {
+    if ilon == 0 || ilat == 0 || leading.contains(&0) {
+        bail!("NetCDF point indices are 1-based; got ({ilon},{ilat},{leading:?})");
     }
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
     let v = f
@@ -65,9 +82,9 @@ fn read_pixel(
         .with_context(|| format!("{var} not in {}", file.display()))?;
     // netcdf crate 的下标是 0-based，而 grid 给的是 1-based（与 Fortran 一致）。
     // 维度次序是 C 序，与 Fortran 的 `(/ilon,ilat,itime/)` 正好相反。
-    let mut ranges = Vec::with_capacity(3);
-    if let Some(t) = itime {
-        ranges.push((t - 1)..t);
+    let mut ranges = Vec::with_capacity(leading.len() + 2);
+    for &index in leading {
+        ranges.push((index - 1)..index);
     }
     ranges.push((ilat - 1)..ilat);
     ranges.push((ilon - 1)..ilon);
@@ -106,6 +123,12 @@ pub fn point_5x5_i32(dir: &Path, sfx: &str, var: &str, lon: f64, lat: f64) -> Re
     pixel_to_i32(read_pixel(&file, var, ilon, ilat, None)?, var)
 }
 
+/// Read one floating-point 5x5-tile pixel (`read_point_5x5_var_2d_real8`).
+pub fn point_5x5_f64(dir: &Path, sfx: &str, var: &str, lon: f64, lat: f64) -> Result<f64> {
+    let (file, ilon, ilat) = tile_5x5_path(dir, sfx, lon, lat)?;
+    read_pixel(&file, var, ilon, ilat, None)
+}
+
 /// 从 5x5 瓦片里取一个带时间维的实型像元（`read_point_5x5_var_2d_time_real8`）。
 ///
 /// `itime` 是 1-based，与 Fortran 一致。
@@ -119,6 +142,41 @@ pub fn point_5x5_time_f64(
 ) -> Result<f64> {
     let (file, ilon, ilat) = tile_5x5_path(dir, sfx, lon, lat)?;
     read_pixel(&file, var, ilon, ilat, Some(itime))
+}
+
+/// Read one PFT value from a 5x5 tile (`read_point_5x5_var_3d_real8`).
+///
+/// `pft` is one-based to match the Fortran reader; the source's PFT class zero
+/// is therefore requested as `pft = 1`.
+pub fn point_5x5_pft_f64(
+    dir: &Path,
+    sfx: &str,
+    var: &str,
+    lon: f64,
+    lat: f64,
+    pft: usize,
+) -> Result<f64> {
+    let (file, ilon, ilat) = tile_5x5_path(dir, sfx, lon, lat)?;
+    read_pixel_at(&file, var, ilon, ilat, &[pft])
+}
+
+/// Read one monthly PFT value from a 5x5 tile
+/// (`read_point_5x5_var_3d_time_real8`).
+///
+/// Both `pft` and `itime` are one-based.  The NetCDF slice follows its C-order
+/// `(time, pft, lat, lon)` layout, while the public argument order mirrors the
+/// native Fortran call.
+pub fn point_5x5_pft_time_f64(
+    dir: &Path,
+    sfx: &str,
+    var: &str,
+    lon: f64,
+    lat: f64,
+    pft: usize,
+    itime: usize,
+) -> Result<f64> {
+    let (file, ilon, ilat) = tile_5x5_path(dir, sfx, lon, lat)?;
+    read_pixel_at(&file, var, ilon, ilat, &[itime, pft])
 }
 
 /// 变量的 `_FillValue`，按 f64 读出；没有该属性或它不是数值时返回 `None`。
@@ -233,6 +291,43 @@ mod raster_tests {
             2.0
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn pft_tile_readers_keep_fortran_class_and_time_indices() {
+        let directory = std::env::temp_dir().join(format!(
+            "colm-srfdata-raster-pft-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let (path, _, _) = tile_5x5_path(&directory, "MOD2008", -180.0, 90.0).unwrap();
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("time", 2).unwrap();
+        file.add_dimension("pft", 2).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
+            .unwrap()
+            .put_values(&[3.0, 4.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("MONTHLY_PFT_LAI", &["time", "pft", "lat", "lon"])
+            .unwrap()
+            .put_values(&[100.0, 200.0, 300.0, 400.0], ..)
+            .unwrap();
+        file.close().unwrap();
+
+        assert_eq!(
+            point_5x5_pft_f64(&directory, "MOD2008", "PCT_PFT", -180.0, 90.0, 2).unwrap(),
+            4.0
+        );
+        assert_eq!(
+            point_5x5_pft_time_f64(&directory, "MOD2008", "MONTHLY_PFT_LAI", -180.0, 90.0, 2, 2,)
+                .unwrap(),
+            400.0
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

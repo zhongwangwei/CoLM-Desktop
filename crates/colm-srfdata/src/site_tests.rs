@@ -1363,6 +1363,21 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(eight_day.eight_day_lai_years, [2005]);
     assert!(eight_day.monthly_lai_years.is_empty());
 
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
+            source.display(),
+            output.display(),
+        ),
+    )
+    .unwrap();
+    let pft = super::single_point_surface_run_from_namelist(&namelist, None, false).unwrap();
+    assert_eq!(pft.mode, super::SiteMode::Pft);
+    assert_eq!(pft.monthly_lai_years, [2008, 2009]);
+    assert!(!pft.use_site_pctpfts);
+    assert!(!pft.use_site_htop);
+
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1809,6 +1824,9 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             urban: super::UrbanSurfaceOptions::default(),
             lai_frequency: super::SinglePointLaiFrequency::Monthly,
             use_site_lai: false,
+            use_site_pctpfts: true,
+            use_site_htop: true,
+            land_cover_year: 2008,
             eight_day_lai_years: &[],
             monthly_lai_years: &[2008],
         },
@@ -1830,6 +1848,188 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
         1.2
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-pft-raw-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let raw = directory.join("rawdata/plant_15s");
+    std::fs::create_dir_all(&raw).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    let (tile, _, _) = crate::raster::tile_5x5_path(&raw, "MOD2008", -180.0, 90.0).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(tile).unwrap();
+        file.add_dimension("time", 12).unwrap();
+        file.add_dimension("pft", 16).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &(0..16)
+                    .map(|pft| {
+                        if pft == 0 {
+                            60.0
+                        } else if pft == 1 {
+                            40.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                ..,
+            )
+            .unwrap();
+        file.add_variable::<f64>("HTOP", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[18.0], ..)
+            .unwrap();
+        for (name, offset) in [("MONTHLY_PFT_LAI", 1.0), ("MONTHLY_PFT_SAI", 2.0)] {
+            file.add_variable::<f64>(name, &["time", "pft", "lat", "lon"])
+                .unwrap()
+                .put_values(
+                    &(0..12)
+                        .flat_map(|month| {
+                            (0..16).map(move |pft| offset + month as f64 + pft as f64 / 100.0)
+                        })
+                        .collect::<Vec<_>>(),
+                    ..,
+                )
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    super::materialize_single_point_pft_fields(
+        &surface,
+        &directory.join("rawdata"),
+        super::SinglePointMaterializeOptions {
+            urban: super::UrbanSurfaceOptions::default(),
+            lai_frequency: super::SinglePointLaiFrequency::Monthly,
+            use_site_lai: true,
+            use_site_pctpfts: true,
+            use_site_htop: true,
+            land_cover_year: 2008,
+            eight_day_lai_years: &[],
+            monthly_lai_years: &[2008],
+        },
+        false,
+    )
+    .unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&surface).unwrap();
+        for name in [
+            "pctpfts",
+            "canopy_height_pfts",
+            "LAI_pfts_monthly",
+            "SAI_pfts_monthly",
+        ] {
+            let len = file.variable(name).unwrap().len();
+            file.variable_mut(name)
+                .unwrap()
+                .put_values(&vec![0.0; len], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    super::materialize_single_point_pft_fields(
+        &surface,
+        &directory.join("rawdata"),
+        super::SinglePointMaterializeOptions {
+            urban: super::UrbanSurfaceOptions::default(),
+            lai_frequency: super::SinglePointLaiFrequency::Monthly,
+            use_site_lai: false,
+            use_site_pctpfts: false,
+            use_site_htop: false,
+            land_cover_year: 2008,
+            eight_day_lai_years: &[],
+            monthly_lai_years: &[2008],
+        },
+        false,
+    )
+    .unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(file.dimension("pft").unwrap().len(), 16);
+    assert_eq!(
+        file.variable("pctpfts")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[..2],
+        [60.0, 40.0]
+    );
+    assert_eq!(
+        file.variable("canopy_height_pfts")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[0],
+        18.0
+    );
+    let lai = file
+        .variable("LAI_pfts_monthly")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    let sai = file
+        .variable("SAI_pfts_monthly")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(
+        (lai[0], lai[191], sai[0], sai[191]),
+        (1.0, 12.15, 2.0, 13.15)
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn lct_height_rawdata_fallback_replaces_the_site_value() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-height-raw-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let raw = directory.join("rawdata/plant_15s");
+    std::fs::create_dir_all(&raw).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&surface).unwrap();
+        file.add_variable::<f64>("canopy_height", &[])
+            .unwrap()
+            .put_values(&[1.0], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+    let (tile, _, _) = crate::raster::tile_5x5_path(&raw, "MOD2008", -180.0, 90.0).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(tile).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("HTOP", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[18.0], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+    super::materialize_single_point_lct_canopy_height(
+        &surface,
+        &directory.join("rawdata"),
+        super::SiteMode::Igbp,
+        2008,
+    )
+    .unwrap();
+    assert_eq!(
+        netcdf::open(&surface)
+            .unwrap()
+            .variable("canopy_height")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [18.0]
+    );
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
