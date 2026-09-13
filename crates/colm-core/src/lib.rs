@@ -96,11 +96,11 @@ pub use crop_phenology::{
     IRRIGATED_WINTER_WHEAT_CLASS, WINTER_WHEAT_CLASS,
 };
 pub use forcing_downscaling::{
-    atmospheric_density, downscale_forcings, downscale_wind, downscale_wind_simple,
-    DownscaledForcing, DownscalingSolarGeometry, DownscalingTerrain, ForcingDownscalingConfig,
-    ForcingDownscalingInput, FullTerrain, GridForcing, LongwaveDownscaling,
-    PrecipitationDownscaling, ShadowMask, SimpleTerrain, ASPECT_TYPES, AZIMUTH_BINS,
-    SHADOW_CURVE_PARAMETERS, SLOPE_TYPES, ZENITH_BINS,
+    apply_downscaled_runtime_forcing, atmospheric_density, downscale_forcings, downscale_wind,
+    downscale_wind_simple, grid_forcing_from_runtime, DownscaledForcing, DownscalingSolarGeometry,
+    DownscalingTerrain, ForcingDownscalingConfig, ForcingDownscalingInput, FullTerrain,
+    GridForcing, LongwaveDownscaling, PrecipitationDownscaling, ShadowMask, SimpleTerrain,
+    ASPECT_TYPES, AZIMUTH_BINS, SHADOW_CURVE_PARAMETERS, SLOPE_TYPES, ZENITH_BINS,
 };
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};

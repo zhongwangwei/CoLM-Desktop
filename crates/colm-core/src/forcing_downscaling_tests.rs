@@ -145,3 +145,60 @@ fn invalid_physical_inputs_are_rejected_at_the_shared_boundary() {
     )
     .is_err());
 }
+
+#[test]
+fn runtime_adapter_uses_one_grid_to_column_forcing_handoff() {
+    use crate::{prepare_runtime_forcing, RuntimeForcingInput};
+
+    let runtime = prepare_runtime_forcing(RuntimeForcingInput {
+        air_temperature_k: 280.0,
+        specific_humidity: 0.005,
+        surface_pressure_pa: 85_000.0,
+        precipitation_kg_m2_s: 0.0003,
+        eastward_wind_m_s: 2.3,
+        northward_or_scalar_wind_m_s: -1.1,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 500.0,
+        downward_longwave_w_m2: 300.0,
+        calendar_day: 172.25,
+        longitude_radians: 0.0,
+        latitude_radians: 0.0,
+    })
+    .unwrap();
+    let grid = grid_forcing_from_runtime(runtime, 500.0, 2_500.0, 30.0).unwrap();
+    close(grid.potential_temperature_k, 293.308_206_926_867_4);
+    close(grid.density_kg_m3, 1.054_388_918_975_555);
+    close(grid.downward_shortwave_w_m2, 500.0);
+
+    let downscaled = DownscaledForcing {
+        air_temperature_k: 275.8,
+        potential_temperature_k: 277.0,
+        specific_humidity: 0.004,
+        bottom_pressure_pa: 78_000.0,
+        density_kg_m3: 0.94,
+        convective_precipitation_kg_m2_s: 0.00012,
+        large_scale_precipitation_kg_m2_s: 0.00024,
+        downward_longwave_w_m2: 282.0,
+        downward_shortwave_w_m2: 450.0,
+        eastward_wind_m_s: 2.0,
+        northward_wind_m_s: -1.0,
+    };
+    let column = apply_downscaled_runtime_forcing(runtime, downscaled);
+    close(column.surface_pressure_pa, 78_000.0);
+    close(column.bottom_pressure_pa, 78_000.0);
+    close(column.air_temperature_k, 275.8);
+    close(column.specific_humidity, 0.004);
+    close(column.convective_precipitation_kg_m2_s, 0.00012);
+    close(column.large_scale_precipitation_kg_m2_s, 0.00024);
+    close(column.downward_longwave_w_m2, 282.0);
+    close(column.eastward_wind_m_s, 2.0);
+    close(column.northward_wind_m_s, -1.0);
+    close(
+        column.shortwave.direct_visible_w_m2
+            + column.shortwave.direct_near_infrared_w_m2
+            + column.shortwave.diffuse_visible_w_m2
+            + column.shortwave.diffuse_near_infrared_w_m2,
+        450.0,
+    );
+    close(column.cosine_zenith, runtime.cosine_zenith);
+}

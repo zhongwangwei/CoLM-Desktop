@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::saturation_specific_humidity;
+use crate::{saturation_specific_humidity, RuntimeForcing};
 
 /// Number of terrain classes used by CoLM's full shortwave/wind scheme.
 pub const SLOPE_TYPES: usize = 4;
@@ -167,6 +167,86 @@ pub struct DownscaledForcing {
     pub downward_shortwave_w_m2: f64,
     pub eastward_wind_m_s: f64,
     pub northward_wind_m_s: f64,
+}
+
+/// Builds the `MOD_Forcing` grid record consumed by [`downscale_forcings`].
+///
+/// `RuntimeForcing` is the shared output of every reader.  Keeping this small
+/// adapter beside the numerical kernel prevents each driver from recalculating
+/// CoLM's potential temperature and grid density before downscaling.
+pub fn grid_forcing_from_runtime(
+    forcing: RuntimeForcing,
+    surface_elevation_m: f64,
+    maximum_elevation_m: f64,
+    reference_height_m: f64,
+) -> Result<GridForcing> {
+    ensure!(
+        surface_elevation_m.is_finite()
+            && maximum_elevation_m.is_finite()
+            && reference_height_m.is_finite()
+            && reference_height_m >= 0.0,
+        "grid forcing geometry is physically invalid"
+    );
+    let density_kg_m3 = (forcing.bottom_pressure_pa
+        - 0.378 * forcing.specific_humidity * forcing.bottom_pressure_pa
+            / (0.622 + 0.378 * forcing.specific_humidity))
+        / (287.04 * forcing.air_temperature_k);
+    Ok(GridForcing {
+        surface_elevation_m,
+        maximum_elevation_m,
+        air_temperature_k: forcing.air_temperature_k,
+        potential_temperature_k: forcing.air_temperature_k
+            * (100_000.0 / forcing.bottom_pressure_pa)
+                .powf(dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K),
+        specific_humidity: forcing.specific_humidity,
+        bottom_pressure_pa: forcing.bottom_pressure_pa,
+        density_kg_m3,
+        convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
+        large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
+        downward_longwave_w_m2: forcing.downward_longwave_w_m2,
+        reference_height_m,
+        downward_shortwave_w_m2: runtime_shortwave_total(forcing),
+        eastward_wind_m_s: forcing.eastward_wind_m_s,
+        northward_wind_m_s: forcing.northward_wind_m_s,
+    })
+}
+
+/// Replaces a reader's grid-level fields with one downscaled column record.
+///
+/// This is the inverse hand-off of [`grid_forcing_from_runtime`]: the runtime
+/// keeps its calendar and shortwave geometry while downstream physics sees the
+/// adjusted pressure, moisture, radiation, precipitation, and wind values.
+pub fn apply_downscaled_runtime_forcing(
+    forcing: RuntimeForcing,
+    downscaled: DownscaledForcing,
+) -> RuntimeForcing {
+    RuntimeForcing {
+        air_temperature_k: downscaled.air_temperature_k,
+        specific_humidity: downscaled.specific_humidity,
+        surface_pressure_pa: downscaled.bottom_pressure_pa,
+        bottom_pressure_pa: downscaled.bottom_pressure_pa,
+        convective_precipitation_kg_m2_s: downscaled.convective_precipitation_kg_m2_s,
+        large_scale_precipitation_kg_m2_s: downscaled.large_scale_precipitation_kg_m2_s,
+        eastward_wind_m_s: downscaled.eastward_wind_m_s,
+        northward_wind_m_s: downscaled.northward_wind_m_s,
+        downward_longwave_w_m2: downscaled.downward_longwave_w_m2,
+        shortwave: runtime_shortwave_from_total(
+            downscaled.downward_shortwave_w_m2,
+            forcing.cosine_zenith,
+        ),
+        cosine_zenith: forcing.cosine_zenith,
+    }
+}
+
+fn runtime_shortwave_total(forcing: RuntimeForcing) -> f64 {
+    forcing.shortwave.direct_visible_w_m2
+        + forcing.shortwave.direct_near_infrared_w_m2
+        + forcing.shortwave.diffuse_visible_w_m2
+        + forcing.shortwave.diffuse_near_infrared_w_m2
+}
+
+fn runtime_shortwave_from_total(total_w_m2: f64, cosine_zenith: f64) -> crate::ShortwaveForcing {
+    crate::runtime_forcing::split_broadband_shortwave(total_w_m2, cosine_zenith)
 }
 
 /// Port of `MOD_ForcingDownscaling:rhos`.

@@ -145,7 +145,7 @@ fn validate(input: RuntimeForcingInput) -> Result<()> {
     Ok(())
 }
 
-fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> ShortwaveForcing {
+pub(crate) fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> ShortwaveForcing {
     let mut cloud = if cosine_zenith == 0.0 {
         0.0
     } else {

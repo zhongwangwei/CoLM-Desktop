@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    month_day_to_julian, standard_lct_soil_step, CalendarTime, LaiUpdateSchedule, RestartFrequency,
-    RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSoilInput, StandardLctSoilOutput,
-    StandardLctSoilState,
+    apply_downscaled_runtime_forcing, downscale_forcings, grid_forcing_from_runtime,
+    month_day_to_julian, orbital_calendar_day, orbital_cosine_azimuth, standard_lct_soil_step,
+    CalendarTime, DownscalingSolarGeometry, DownscalingTerrain, ForcingDownscalingConfig,
+    ForcingDownscalingInput, LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeForcing,
+    RuntimeStep, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
 };
 use colm_forcing::{load_point_forcing, PointForcingSeries};
 use colm_namelist::{parse, Document, Value};
@@ -36,6 +38,32 @@ pub struct PointRuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointRuntimeStep {
     pub clock: RuntimeStep,
+    /// Grid-level forcing prepared by the common reader path.
+    pub forcing: RuntimeForcing,
+    /// `MOD_OrbCosazi` evaluated from this step's local orbital calendar.
+    pub cosine_azimuth: f64,
+}
+
+/// Static terrain data needed to downscale one POINT forcing series.
+///
+/// The lifetime belongs to restart/surface data owned by the caller; the
+/// runtime neither copies it nor lets it leak into the numerical core.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointDownscalingTemplate<'a> {
+    pub grid_surface_elevation_m: f64,
+    pub grid_maximum_elevation_m: f64,
+    pub reference_height_m: f64,
+    pub column_surface_elevation_m: f64,
+    pub glacier: bool,
+    pub terrain: DownscalingTerrain<'a>,
+    pub config: ForcingDownscalingConfig,
+}
+
+/// One committed `read_forcing → downscale_forcings` runtime hand-off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownscaledPointRuntimeStep {
+    pub clock: RuntimeStep,
+    pub grid_forcing: RuntimeForcing,
     pub forcing: RuntimeForcing,
 }
 
@@ -153,6 +181,57 @@ impl PointRuntime {
         })
     }
 
+    /// Runs POINT forcing through the shared CoLM terrain-downscaling kernel.
+    ///
+    /// This is deliberately a forcing hand-off, rather than another physics
+    /// driver: all later LCT/PFT/PC/urban branches receive one adjusted
+    /// [`RuntimeForcing`] without duplicating `MOD_Forcing` mathematics.
+    pub fn run_downscaled<F>(
+        &mut self,
+        template: PointDownscalingTemplate<'_>,
+        mut on_step: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(DownscaledPointRuntimeStep) -> Result<()>,
+    {
+        let greenwich = self.greenwich;
+        let longitude_degrees = self.longitude_degrees;
+        self.run(|step| {
+            let grid = grid_forcing_from_runtime(
+                step.forcing,
+                template.grid_surface_elevation_m,
+                template.grid_maximum_elevation_m,
+                template.reference_height_m,
+            )?;
+            let forcing = apply_downscaled_runtime_forcing(
+                step.forcing,
+                downscale_forcings(
+                    ForcingDownscalingInput {
+                        glacier: template.glacier,
+                        grid,
+                        column_surface_elevation_m: template.column_surface_elevation_m,
+                        solar: DownscalingSolarGeometry {
+                            calendar_day: orbital_calendar_day(
+                                step.clock.forcing_time,
+                                greenwich,
+                                longitude_degrees,
+                            )?,
+                            cosine_zenith: step.forcing.cosine_zenith,
+                            cosine_azimuth: step.cosine_azimuth,
+                        },
+                        terrain: template.terrain,
+                    },
+                    template.config,
+                )?,
+            );
+            on_step(DownscaledPointRuntimeStep {
+                clock: step.clock,
+                grid_forcing: step.forcing,
+                forcing,
+            })
+        })
+    }
+
     fn prepared_next_step(&self) -> Result<Option<(RuntimeClock, PointRuntimeStep)>> {
         let mut next_clock = self.clock.clone();
         let Some(clock) = next_clock.next_step() else {
@@ -164,7 +243,21 @@ impl PointRuntime {
             self.longitude_degrees,
             self.latitude_degrees,
         )?;
-        Ok(Some((next_clock, PointRuntimeStep { clock, forcing })))
+        let calendar_day =
+            orbital_calendar_day(clock.forcing_time, self.greenwich, self.longitude_degrees)?;
+        Ok(Some((
+            next_clock,
+            PointRuntimeStep {
+                clock,
+                cosine_azimuth: orbital_cosine_azimuth(
+                    calendar_day,
+                    self.longitude_degrees.to_radians(),
+                    self.latitude_degrees.to_radians(),
+                    forcing.cosine_zenith,
+                ),
+                forcing,
+            },
+        )))
     }
 }
 
@@ -484,5 +577,48 @@ mod tests {
         let forcing = root.join("forcing.nml");
         write_case(&case, &forcing, "/data/", "CRUNCEP");
         assert!(read_point_runtime_config(&case).is_err());
+    }
+
+    #[test]
+    fn downscaled_loop_commits_one_shared_column_forcing_record() {
+        let root = directory("downscaled-step");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case(&case, &forcing, &source_dir, "POINT");
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let slope = [0.0; colm_core::ASPECT_TYPES];
+        let area = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let mut steps = Vec::new();
+        assert_eq!(
+            runtime
+                .run_downscaled(
+                    PointDownscalingTemplate {
+                        grid_surface_elevation_m: 500.0,
+                        grid_maximum_elevation_m: 2_500.0,
+                        reference_height_m: 30.0,
+                        column_surface_elevation_m: 800.0,
+                        glacier: false,
+                        terrain: DownscalingTerrain::Simple(colm_core::SimpleTerrain {
+                            slope_tangent: &slope,
+                            area_fraction: &area,
+                        }),
+                        config: ForcingDownscalingConfig::default(),
+                    },
+                    |step| {
+                        steps.push(step);
+                        Ok(())
+                    },
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(steps[0].clock.index, 1);
+        assert!(steps[0].grid_forcing.cosine_zenith.is_finite());
+        assert!(steps[0].forcing.air_temperature_k.is_finite());
+        assert!(steps[0].forcing.bottom_pressure_pa < steps[0].grid_forcing.bottom_pressure_pa);
+        assert!(steps[0].forcing.air_temperature_k < steps[0].grid_forcing.air_temperature_k);
+        assert!(runtime.next_step().unwrap().is_none());
     }
 }
