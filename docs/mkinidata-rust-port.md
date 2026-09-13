@@ -53,8 +53,10 @@ enabled downscaling branch meet all of these conditions:
    stages by default while keeping the verified Fortran `colm` executable. Use
    `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL spatial PFT/PC runs use
    `colm-cli run --highres-params <dir>`, whose required `fsds/`,
-   `leaf_optical_properties/`, and `water_params.txt` sources are validated and fingerprinted
-   before Rust writes a restart. Scalar LCT/urban and single-point HYPERSPECTRAL cold starts
+   `leaf_optical_properties/`, and `water_params.txt` sources, plus the required
+   `DEF_HighResUrban_albedo` NetCDF source, are validated and fingerprinted before Rust writes
+   a restart. The urban source selects the first matching lat/lon cluster and otherwise uses
+   the seasonal mean, matching `readin_urban_albedo`. Scalar LCT/urban and single-point HYPERSPECTRAL cold starts
    remain safely delegated to the Fortran preprocessor. Spatial Rust
    restarts now carry the six TOPMODEL fields when `DEF_Runoff_SCHEME=0` and the 9-aspect
    curvature/slope/aspect vectors when `DEF_USE_Forcing_Downscaling_Simple=.true.`.

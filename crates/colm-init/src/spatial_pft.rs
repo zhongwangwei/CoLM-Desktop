@@ -17,8 +17,8 @@ use colm_core::{
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
-    read_high_resolution_water_optics, HighResolutionLeafOpticsTable, HighResolutionRadiationTable,
-    HighResolutionWaterOptics,
+    read_high_resolution_urban_albedo, read_high_resolution_water_optics,
+    HighResolutionLeafOpticsTable, HighResolutionRadiationTable, HighResolutionWaterOptics,
 };
 use colm_namelist::{parse, Value};
 
@@ -90,6 +90,8 @@ pub struct SpatialPftTimeConfig<'a> {
     pub high_resolution_water_optics: Option<&'a Path>,
     /// `swnb_480bnd_fsds.nc`; required for every hyperspectral cold start.
     pub high_resolution_radiation: Option<&'a Path>,
+    /// `DEF_HighResUrban_albedo`; read by upstream for every hyperspectral cold start.
+    pub high_resolution_urban_albedo: Option<&'a Path>,
 }
 
 /// Timestamped restart blocks written by a spatial PFT cold start.
@@ -138,6 +140,7 @@ impl<'a> SpatialPftTimeConfig<'a> {
             high_resolution_leaf_optics: None,
             high_resolution_water_optics: None,
             high_resolution_radiation: None,
+            high_resolution_urban_albedo: None,
         }
     }
 }
@@ -316,14 +319,14 @@ pub fn write_spatial_pft_cold_time_restarts(
         && (optional_bool_or(&document, "DEF_HighResVeg", true)? || use_prospect);
     let high_resolution_soil =
         config.use_hyperspectral && optional_bool_or(&document, "DEF_HighResSoil", true)?;
-    if config.use_hyperspectral {
-        if let Some(Value::Str(path)) = document.get("DEF_HighResUrban_albedo") {
-            ensure!(
-                path.eq_ignore_ascii_case("null"),
-                "DEF_HighResUrban_albedo needs the upstream urban spectral reader before a Rust cold start"
-            );
-        }
-    }
+    let high_resolution_urban_albedo = config
+        .use_hyperspectral
+        .then(|| {
+            read_high_resolution_urban_albedo(config.high_resolution_urban_albedo.context(
+                "HYPERSPECTRAL cold start needs --highres-urban-albedo because upstream mkinidata always reads DEF_HighResUrban_albedo",
+            )?)
+        })
+        .transpose()?;
     let high_resolution_sources: Option<(
         Option<HighResolutionLeafOpticsTable>,
         Option<HighResolutionWaterOptics>,
@@ -486,6 +489,9 @@ pub fn write_spatial_pft_cold_time_restarts(
         mut high_resolution_reflectance,
         mut high_resolution_transmittance,
     ) = if let Some((_, water, radiation)) = high_resolution_sources.as_ref() {
+        let urban = high_resolution_urban_albedo
+            .as_ref()
+            .expect("hyperspectral sources include urban albedo");
         let (longitude, latitude) = patch_coordinates(
             config.static_config.landdata,
             config.static_config.land_cover_year,
@@ -539,11 +545,14 @@ pub fn write_spatial_pft_cold_time_restarts(
                 common_state.ground_temperature_k[patch],
             )?;
             let mut spectral_ground = if patch_kind[patch] == 1 {
-                (0..HIGH_RES_WAVELENGTHS)
-                    .flat_map(|wavelength| {
-                        let albedo = if wavelength < 29 { 0.12 } else { 0.20 };
-                        [albedo, albedo]
-                    })
+                urban
+                    .spectrum(
+                        1,
+                        latitude[patch].to_degrees(),
+                        longitude[patch].to_degrees(),
+                    )
+                    .iter()
+                    .flat_map(|&albedo| [albedo, albedo])
                     .collect()
             } else {
                 expand_broadband_ground_albedo(broadband_ground.ground)

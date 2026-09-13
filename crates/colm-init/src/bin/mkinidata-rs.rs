@@ -64,6 +64,10 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
                 high_resolution.radiation =
                     Some(required(&mut args, "high-resolution radiation table")?)
             }
+            "--highres-urban-albedo" => {
+                high_resolution.urban_albedo =
+                    Some(required(&mut args, "high-resolution urban albedo")?)
+            }
             value => bail!("unknown mkinidata-rs option {value}"),
         }
     }
@@ -71,8 +75,9 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         high_resolution.enabled
             || (high_resolution.leaf_optics.is_none()
                 && high_resolution.water_optics.is_none()
-                && high_resolution.radiation.is_none()),
-        "--highres-leaf-optics, --highres-water-optics, and --highres-radiation require --hyperspectral"
+                && high_resolution.radiation.is_none()
+                && high_resolution.urban_albedo.is_none()),
+        "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
     );
     if is_spatial_case(&namelist)? {
         return run_spatial_namelist(&namelist, land_cover, block.as_deref(), &high_resolution);
@@ -115,6 +120,7 @@ struct SpatialHighResolutionOptions {
     leaf_optics: Option<PathBuf>,
     water_optics: Option<PathBuf>,
     radiation: Option<PathBuf>,
+    urban_albedo: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +353,7 @@ fn write_spatial_pft_namelist_block(
     time.high_resolution_leaf_optics = high_resolution.leaf_optics.as_deref();
     time.high_resolution_water_optics = high_resolution.water_optics.as_deref();
     time.high_resolution_radiation = high_resolution.radiation.as_deref();
+    time.high_resolution_urban_albedo = high_resolution.urban_albedo.as_deref();
     let time = write_spatial_pft_cold_time_restarts(time)?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
@@ -743,6 +750,7 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut high_resolution_leaf_optics = None;
     let mut high_resolution_water_optics = None;
     let mut high_resolution_radiation = None;
+    let mut high_resolution_urban_albedo = None;
     while let Some(value) = args.next() {
         match value.as_str() {
             "--bedrock" => use_bedrock = true,
@@ -777,9 +785,21 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
                 high_resolution_radiation =
                     Some(required(&mut args, "high-resolution radiation table")?)
             }
+            "--highres-urban-albedo" => {
+                high_resolution_urban_albedo =
+                    Some(required(&mut args, "high-resolution urban albedo")?)
+            }
             _ => bail!("unexpected argument {value}"),
         }
     }
+    ensure!(
+        use_hyperspectral
+            || (high_resolution_leaf_optics.is_none()
+                && high_resolution_water_optics.is_none()
+                && high_resolution_radiation.is_none()
+                && high_resolution_urban_albedo.is_none()),
+        "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
+    );
     let static_config = SpatialPftStaticConfig::new(
         &namelist,
         &landdata,
@@ -809,6 +829,7 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         time.high_resolution_leaf_optics = high_resolution_leaf_optics.as_deref();
         time.high_resolution_water_optics = high_resolution_water_optics.as_deref();
         time.high_resolution_radiation = high_resolution_radiation.as_deref();
+        time.high_resolution_urban_albedo = high_resolution_urban_albedo.as_deref();
         let output = write_spatial_pft_cold_time_restarts(time)?;
         println!("wrote {}", output.common.block.display());
         println!("wrote {}", output.pft.display());
@@ -828,7 +849,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-urban-albedo PATH [--highres-radiation PATH] [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH [--highres-radiation PATH] [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');

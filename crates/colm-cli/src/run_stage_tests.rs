@@ -24,9 +24,10 @@ fn hyperspectral_pft_namelist(root: &Path) -> PathBuf {
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\nDEF_file_mesh='mesh.nc'\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.\n/\n",
+        "&nl_colm\nDEF_file_mesh='mesh.nc'\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.\nDEF_HighResUrban_albedo='urban_albedo.nc'\n/\n",
     )
     .unwrap();
+    std::fs::write(root.join("urban_albedo.nc"), "urban").unwrap();
     namelist
 }
 
@@ -100,6 +101,12 @@ fn hyperspectral_pft_sidecars_receive_validated_optical_sources() {
         mkinidata,
         vec![
             "--hyperspectral".to_owned(),
+            "--highres-urban-albedo".to_owned(),
+            root.join("urban_albedo.nc")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
             "--highres-radiation".to_owned(),
             params
                 .join("fsds/swnb_480bnd_fsds.nc")
@@ -150,6 +157,46 @@ fn hyperspectral_optical_sources_are_required_and_fingerprinted() {
     ])
     .unwrap();
     assert_ne!(first, second);
+    let urban = root.join("urban_albedo.nc");
+    let first = rust_preprocessor_input_identity(&[
+        "--highres-urban-albedo".into(),
+        urban.to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+    std::fs::write(&urban, "urban-updated").unwrap();
+    let second = rust_preprocessor_input_identity(&[
+        "--highres-urban-albedo".into(),
+        urban.to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+    assert_ne!(first, second);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hyperspectral_pc_without_soil_or_pft_optics_needs_only_urban_albedo() {
+    let root = test_directory("hyperspectral-pc-urban");
+    let namelist = hyperspectral_pft_namelist(&root);
+    std::fs::write(
+        &namelist,
+        "&nl_colm\nDEF_file_mesh='mesh.nc'\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.true.\nDEF_HighResSoil=.false.\nDEF_HighResUrban_albedo='urban_albedo.nc'\n/\n",
+    )
+    .unwrap();
+    let arguments =
+        rust_preprocessor_arguments(Stage::MkIniData, &namelist, &hyperspectral_kernel(), None, None)
+            .unwrap();
+    assert_eq!(
+        arguments,
+        vec![
+            "--hyperspectral".to_owned(),
+            "--highres-urban-albedo".to_owned(),
+            root.join("urban_albedo.nc")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

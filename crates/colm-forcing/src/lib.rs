@@ -38,7 +38,8 @@ pub use gapfill::{
 };
 pub use high_res::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
-    read_high_resolution_water_optics, HighResolutionLeafOpticsTable, HighResolutionRadiationTable,
+    read_high_resolution_urban_albedo, read_high_resolution_water_optics,
+    HighResolutionLeafOpticsTable, HighResolutionRadiationTable, HighResolutionUrbanAlbedo,
     HighResolutionWaterOptics,
 };
 pub use met::summarize;

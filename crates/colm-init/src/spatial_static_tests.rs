@@ -411,6 +411,8 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     write_high_resolution_leaf_optics(&leaf);
     let water = root.join("water_params.txt");
     write_high_resolution_water_optics(&water);
+    let urban = root.join("urban_albedo.nc");
+    write_high_resolution_urban_albedo(&urban);
 
     let mut config = crate::SpatialPftTimeConfig::new(
         crate::SpatialPftStaticConfig::new(
@@ -427,6 +429,11 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     config.high_resolution_leaf_optics = Some(&leaf);
     config.high_resolution_water_optics = Some(&water);
     config.high_resolution_radiation = Some(&radiation);
+    assert!(crate::write_spatial_pft_cold_time_restarts(config)
+        .unwrap_err()
+        .to_string()
+        .contains("--highres-urban-albedo"));
+    config.high_resolution_urban_albedo = Some(&urban);
     let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
 
     let common = netcdf::open(&files.common.block).unwrap();
@@ -471,6 +478,7 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     pc_config.plant_hydraulics = false;
     pc_config.use_hyperspectral = true;
     pc_config.high_resolution_water_optics = Some(&water);
+    pc_config.high_resolution_urban_albedo = Some(&urban);
     let pc_files = crate::write_spatial_pft_cold_time_restarts(pc_config).unwrap();
     let common = netcdf::open(&pc_files.common.block).unwrap();
     assert!(values_f64(&common, "alb_hires")
@@ -1487,6 +1495,33 @@ fn write_high_resolution_water_optics(path: &Path) {
             .join("\n"),
     )
     .unwrap();
+}
+
+fn write_high_resolution_urban_albedo(path: &Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("cluster", 1).unwrap();
+    file.add_dimension("season", 4).unwrap();
+    file.add_dimension("wavelength", 211).unwrap();
+    file.add_variable::<f64>("urban_albedo", &["cluster", "season", "wavelength"])
+        .unwrap()
+        .put_values(&vec![0.2; 4 * 211], ..)
+        .unwrap();
+    file.add_variable::<f64>("mean_albedo", &["season", "wavelength"])
+        .unwrap()
+        .put_values(&vec![0.2; 4 * 211], ..)
+        .unwrap();
+    for (name, value) in [
+        ("lat_north", 90.0),
+        ("lat_south", -90.0),
+        ("lon_east", 180.0),
+        ("lon_west", -180.0),
+    ] {
+        file.add_variable::<f64>(name, &["cluster"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    file.close().unwrap();
 }
 
 fn write_high_resolution_soil_albedo(landdata: &Path, year: i32, block: &str) {

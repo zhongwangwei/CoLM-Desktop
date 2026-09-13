@@ -1993,39 +1993,63 @@ fn hyperspectral_mkinidata_arguments(
             || case_logical(document, "DEF_PROSPECT", false)?);
     let soil = case_logical(document, "DEF_HighResSoil", true)?;
     let mut arguments = vec!["--hyperspectral".to_owned()];
-    if !pft && !soil {
-        return Ok(arguments);
-    }
-    let root = canonical_input_directory(
-        highres_params.context(
-            "HYPERSPECTRAL Rust mkinidata needs --highres-params; use --preprocessors fortran if the optical parameter package is unavailable",
-        )?,
-        "--highres-params",
+    let urban_source = match document.get("DEF_HighResUrban_albedo") {
+        Some(colm_namelist::Value::Str(path)) if !path.eq_ignore_ascii_case("null") => path,
+        Some(colm_namelist::Value::Str(_)) | None => bail!(
+            "HYPERSPECTRAL Rust mkinidata needs DEF_HighResUrban_albedo because upstream always reads its urban spectral source"
+        ),
+        Some(other) => bail!("DEF_HighResUrban_albedo must be a path, got {other}"),
+    };
+    let urban_source = Path::new(urban_source);
+    let urban_source = canonical_input_file(
+        if urban_source.is_absolute() {
+            urban_source.to_path_buf()
+        } else {
+            namelist
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(urban_source)
+        },
+        "DEF_HighResUrban_albedo",
     )?;
-    if pft {
-        let radiation =
-            canonical_input_file(root.join("fsds/swnb_480bnd_fsds.nc"), "--highres-params")?;
-        arguments.extend([
-            "--highres-radiation".to_owned(),
-            radiation.display().to_string(),
-        ]);
-    }
-    if vegetation {
-        let leaf = canonical_input_file(
-            root.join("leaf_optical_properties/colm_PFT_params.nc"),
+    arguments.extend([
+        "--highres-urban-albedo".to_owned(),
+        urban_source.display().to_string(),
+    ]);
+    if pft || soil {
+        let root = canonical_input_directory(
+            highres_params.context(
+                "HYPERSPECTRAL Rust mkinidata needs --highres-params; use --preprocessors fortran if the optical parameter package is unavailable",
+            )?,
             "--highres-params",
         )?;
-        arguments.extend([
-            "--highres-leaf-optics".to_owned(),
-            leaf.display().to_string(),
-        ]);
-    }
-    if soil {
-        let water = canonical_input_file(root.join("water_params.txt"), "--highres-params")?;
-        arguments.extend([
-            "--highres-water-optics".to_owned(),
-            water.display().to_string(),
-        ]);
+        if pft {
+            let radiation = canonical_input_file(
+                root.join("fsds/swnb_480bnd_fsds.nc"),
+                "--highres-params",
+            )?;
+            arguments.extend([
+                "--highres-radiation".to_owned(),
+                radiation.display().to_string(),
+            ]);
+        }
+        if vegetation {
+            let leaf = canonical_input_file(
+                root.join("leaf_optical_properties/colm_PFT_params.nc"),
+                "--highres-params",
+            )?;
+            arguments.extend([
+                "--highres-leaf-optics".to_owned(),
+                leaf.display().to_string(),
+            ]);
+        }
+        if soil {
+            let water = canonical_input_file(root.join("water_params.txt"), "--highres-params")?;
+            arguments.extend([
+                "--highres-water-optics".to_owned(),
+                water.display().to_string(),
+            ]);
+        }
     }
     Ok(arguments)
 }
@@ -2039,6 +2063,7 @@ fn rust_preprocessor_input_identity(arguments: &[String]) -> Result<String> {
                 | "--highres-leaf-optics"
                 | "--highres-water-optics"
                 | "--highres-radiation"
+                | "--highres-urban-albedo"
         ) {
             let path = Path::new(&pair[1]);
             inputs.push(format!(

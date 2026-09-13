@@ -119,6 +119,53 @@ fn radiation_table_reader_preserves_fortran_band_zenith_regime_order() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn urban_albedo_reader_uses_the_first_matching_cluster_then_the_seasonal_mean() {
+    let root = temp_dir("urban-albedo");
+    let path = root.join("urban_albedo.nc");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("cluster", 2).unwrap();
+    file.add_dimension("season", 4).unwrap();
+    file.add_dimension("wavelength", HIGH_RES_WAVELENGTHS)
+        .unwrap();
+    let urban = (0..2)
+        .flat_map(|cluster| {
+            (0..4).flat_map(move |season| {
+                std::iter::repeat_n((cluster * 10 + season) as f32, HIGH_RES_WAVELENGTHS)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mean = (0..4)
+        .flat_map(|season| std::iter::repeat_n((100 + season) as f32, HIGH_RES_WAVELENGTHS))
+        .collect::<Vec<_>>();
+    file.add_variable::<f32>("urban_albedo", &["cluster", "season", "wavelength"])
+        .unwrap()
+        .put_values(&urban, ..)
+        .unwrap();
+    file.add_variable::<f32>("mean_albedo", &["season", "wavelength"])
+        .unwrap()
+        .put_values(&mean, ..)
+        .unwrap();
+    for (name, values) in [
+        ("lat_north", vec![20.0_f32, 50.0]),
+        ("lat_south", vec![-20.0, 30.0]),
+        ("lon_east", vec![30.0, 60.0]),
+        ("lon_west", vec![-30.0, 40.0]),
+    ] {
+        file.add_variable::<f32>(name, &["cluster"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    file.close().unwrap();
+
+    let table = read_high_resolution_urban_albedo(&path).unwrap();
+    assert_eq!(table.spectrum(1, 0.0, 0.0)[0], 0.0);
+    assert_eq!(table.spectrum(172, 40.0, 50.0)[0], 12.0);
+    assert_eq!(table.spectrum(300, 80.0, 0.0)[0], 103.0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn temp_dir(label: &str) -> std::path::PathBuf {
     let number = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
