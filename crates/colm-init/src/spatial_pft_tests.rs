@@ -62,6 +62,28 @@ fn spatial_pft_constant_restart_copies_crop_fractions_by_landpatch() {
 }
 
 #[test]
+fn spatial_pft_constant_restart_rejects_misaligned_crop_fractions() {
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    write_i32(&landdata, "landpatch", "landpatch", "settyp", &[12]);
+    write_i32(&landdata, "landpft", "landpft", "settyp", &[15]);
+    write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[1.0]);
+    write_f64(&landdata, "pctpft", "pct_crops", "pct_crops", &[0.4, 0.6]);
+    write_f64(&landdata, "htop", "htop_pfts", "htop_pfts", &[0.0]);
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\n DEF_USE_CROP = .true.\n/\n").unwrap();
+
+    let restart = root.join("restart");
+    let error = write_spatial_pft_constant_restart(SpatialPftStaticConfig::new(
+        &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+    ))
+    .unwrap_err();
+    assert!(error.to_string().contains("pct_crops"));
+    assert!(!restart.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_pft_time_rejects_bgc_before_materializing_any_restart() {
     let root = temp_dir();
     let namelist = root.join("case.nml");
