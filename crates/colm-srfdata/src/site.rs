@@ -22,6 +22,7 @@ use crate::urban_soil::{self, UrbanSoil};
 
 const SITE_KIND_ATTRIBUTE: &str = "colm_desktop_site_kind";
 const SITE_CROP_ATTRIBUTE: &str = "colm_desktop_crop";
+const GENERATED_URBAN_LAI_ATTRIBUTE: &str = "colm_desktop_generated_urban_lai";
 
 fn netcdf_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -156,6 +157,18 @@ pub struct SinglePointSurfaceRun {
     pub rawdata: Option<PathBuf>,
     pub mode: SiteMode,
     pub crop_enabled: bool,
+    /// `DEF_USE_CANYON_HWR` selects the source geometry representation for
+    /// urban sites.  The two source fields are not interchangeable.
+    pub urban_canyon_hwr: bool,
+    /// The exact simulation/LAI window used when this crate supplied missing
+    /// urban LAI from its built-in point table.
+    pub urban_lai_year_window: Option<(i32, i32)>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct UrbanSurfaceOptions {
+    canyon_hwr: bool,
+    lai_year_window: Option<(i32, i32)>,
 }
 
 /// Resolve the native single-point `mksrfdata` contract from `case.nml`.
@@ -216,12 +229,16 @@ pub fn single_point_surface_run_from_namelist(
         .and_then(namelist_string)
         .filter(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("null"))
         .map(PathBuf::from);
+    let urban_canyon_hwr = namelist_bool(&document, "DEF_USE_CANYON_HWR", false)?;
+    let urban_lai_year_window = urban_lai_year_window(&document, urban)?;
     Ok(SinglePointSurfaceRun {
         source,
         landdata_dir: output.join(case_name).join("landdata"),
         rawdata,
         mode,
         crop_enabled,
+        urban_canyon_hwr,
+        urban_lai_year_window,
     })
 }
 
@@ -233,13 +250,17 @@ pub fn materialize_single_point_surface_from_namelist(
     observation: Option<&Path>,
 ) -> Result<(SinglePointSurfaceRun, Option<Report>)> {
     let run = single_point_surface_run_from_namelist(namelist, lct_mode_override, crop_enabled)?;
-    let report = materialize_single_point_surface(
+    let report = materialize_single_point_surface_impl(
         &run.source,
         &run.landdata_dir,
         run.mode,
         run.rawdata.as_deref(),
         observation,
         run.crop_enabled,
+        UrbanSurfaceOptions {
+            canyon_hwr: run.urban_canyon_hwr,
+            lai_year_window: run.urban_lai_year_window,
+        },
     )?;
     Ok((run, report))
 }
@@ -285,6 +306,48 @@ fn namelist_bool(document: &colm_namelist::Document, field: &str, default: bool)
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => bail!("{field} must be a logical value"),
     }
+}
+
+fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Result<i32> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Int(value)) => i32::try_from(*value)
+            .with_context(|| format!("{field} is outside CoLM's integer range")),
+        Some(_) => bail!("{field} must be an integer value"),
+    }
+}
+
+fn urban_lai_year_window(
+    document: &colm_namelist::Document,
+    urban: bool,
+) -> Result<Option<(i32, i32)>> {
+    if !urban {
+        return Ok(None);
+    }
+    let (Some(Value::Int(start)), Some(Value::Int(end))) = (
+        document.get("DEF_simulation_time%start_year"),
+        document.get("DEF_simulation_time%end_year"),
+    ) else {
+        return Ok(None);
+    };
+    let start = i32::try_from(*start).context("DEF_simulation_time%start_year is out of range")?;
+    let end = i32::try_from(*end).context("DEF_simulation_time%end_year is out of range")?;
+    let (first, last) = if namelist_bool(document, "DEF_LAI_CHANGE_YEARLY", true)? {
+        let available_first = namelist_i32(document, "DEF_LAI_START_YEAR", 2000)?;
+        let available_last = namelist_i32(document, "DEF_LAI_END_YEAR", 2020)?;
+        ensure!(
+            available_first <= available_last,
+            "DEF_LAI_START_YEAR exceeds DEF_LAI_END_YEAR"
+        );
+        (
+            start.max(available_first).min(available_last),
+            end.min(available_last).max(available_first),
+        )
+    } else {
+        let year = namelist_i32(document, "DEF_LC_YEAR", 2005)?;
+        (year, year)
+    };
+    Ok(Some((first, last)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,6 +655,7 @@ pub fn audit(
             "TREE_LAI",
             "TREE_SAI",
             "resident_population_density",
+            "LUCY_ID",
         ]),
     }
 
@@ -1392,17 +1456,42 @@ pub fn materialize_single_point_surface(
     observation: Option<&Path>,
     crop_enabled: bool,
 ) -> Result<Option<Report>> {
+    materialize_single_point_surface_impl(
+        source,
+        landdata_dir,
+        mode,
+        rawdata,
+        observation,
+        crop_enabled,
+        UrbanSurfaceOptions::default(),
+    )
+}
+
+fn materialize_single_point_surface_impl(
+    source: &Path,
+    landdata_dir: &Path,
+    mode: SiteMode,
+    rawdata: Option<&Path>,
+    observation: Option<&Path>,
+    crop_enabled: bool,
+    urban: UrbanSurfaceOptions,
+) -> Result<Option<Report>> {
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
     let readiness = audit(source, mode, None, crop_enabled)?;
     if readiness.self_contained() {
-        publish_single_point_surface(source, &target, mode, crop_enabled)?;
+        publish_single_point_surface(source, &target, mode, crop_enabled, urban)?;
         return Ok(None);
     }
 
     let temporary = landdata_dir.join(format!(".srfdata-rs-{}.nc", std::process::id()));
-    let report = fill(source, &temporary, rawdata, observation)?;
+    let report = if mode == SiteMode::Urban {
+        prepare_urban(source, &temporary)?;
+        None
+    } else {
+        Some(fill(source, &temporary, rawdata, observation)?)
+    };
     let readiness = audit(&temporary, mode, None, crop_enabled)?;
     if !readiness.self_contained() {
         return Err(anyhow::anyhow!(
@@ -1410,9 +1499,9 @@ pub fn materialize_single_point_surface(
             readiness.needs_external.join(", ")
         ));
     }
-    publish_single_point_surface(&temporary, &target, mode, crop_enabled)?;
+    publish_single_point_surface(&temporary, &target, mode, crop_enabled, urban)?;
     std::fs::remove_file(&temporary)?;
-    Ok(Some(report))
+    Ok(report)
 }
 
 fn publish_single_point_surface(
@@ -1420,8 +1509,13 @@ fn publish_single_point_surface(
     target: &Path,
     mode: SiteMode,
     crop_enabled: bool,
+    urban: UrbanSurfaceOptions,
 ) -> Result<()> {
-    write_single_point_surface(source, target, mode, crop_enabled)
+    if mode == SiteMode::Urban {
+        write_urban_single_point_surface(source, target, urban.canyon_hwr, urban.lai_year_window)
+    } else {
+        write_single_point_surface(source, target, mode, crop_enabled)
+    }
 }
 
 /// Emit the eight-layer single-point artifact written by `write_surface_data_single`.
@@ -1561,7 +1655,7 @@ fn write_single_point_surface(
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }
     for name in SINGLE_POINT_SOIL_FIELDS {
-        let values = values_f64(&input, name)?;
+        let values = single_point_soil_values(&input, name)?;
         ensure!(
             values.len() >= 8,
             "{name} has fewer than CoLM's eight soil layers"
@@ -1578,6 +1672,536 @@ fn write_single_point_surface(
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }
     Ok(())
+}
+
+/// LCZ material constants from `MOD_Urban_Const_LCZ.F90`.
+///
+/// They are resolved while producing the self-contained surface artifact, just
+/// as the upstream single-point reader does before it writes `srfdata.nc`.
+#[derive(Clone, Copy)]
+struct UrbanLczDefaults {
+    roof_albedo: f64,
+    wall_albedo: f64,
+    impervious_albedo: f64,
+    pervious_albedo: f64,
+    roof_emissivity: f64,
+    wall_emissivity: f64,
+    impervious_emissivity: f64,
+    pervious_emissivity: f64,
+    roof_heat_capacity: f64,
+    wall_heat_capacity: f64,
+    impervious_heat_capacity: f64,
+    roof_conductivity: f64,
+    wall_conductivity: f64,
+    impervious_conductivity: f64,
+    roof_thickness: f64,
+    wall_thickness: f64,
+    room_max: f64,
+    room_min: f64,
+}
+
+const LCZ_DEFAULTS: [UrbanLczDefaults; 10] = [
+    UrbanLczDefaults {
+        roof_albedo: 0.13,
+        wall_albedo: 0.25,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.8e6,
+        wall_heat_capacity: 1.8e6,
+        impervious_heat_capacity: 1.75e6,
+        roof_conductivity: 1.25,
+        wall_conductivity: 1.09,
+        impervious_conductivity: 0.77,
+        roof_thickness: 0.3,
+        wall_thickness: 0.3,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.18,
+        wall_albedo: 0.20,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.8e6,
+        wall_heat_capacity: 2.67e6,
+        impervious_heat_capacity: 1.68e6,
+        roof_conductivity: 1.25,
+        wall_conductivity: 1.5,
+        impervious_conductivity: 0.73,
+        roof_thickness: 0.3,
+        wall_thickness: 0.25,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.15,
+        wall_albedo: 0.20,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.44e6,
+        wall_heat_capacity: 2.05e6,
+        impervious_heat_capacity: 1.63e6,
+        roof_conductivity: 1.0,
+        wall_conductivity: 1.25,
+        impervious_conductivity: 0.69,
+        roof_thickness: 0.2,
+        wall_thickness: 0.2,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.13,
+        wall_albedo: 0.25,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.8e6,
+        wall_heat_capacity: 2.0e6,
+        impervious_heat_capacity: 1.54e6,
+        roof_conductivity: 1.25,
+        wall_conductivity: 1.45,
+        impervious_conductivity: 0.64,
+        roof_thickness: 0.3,
+        wall_thickness: 0.2,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.13,
+        wall_albedo: 0.25,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.8e6,
+        wall_heat_capacity: 2.0e6,
+        impervious_heat_capacity: 1.50e6,
+        roof_conductivity: 1.25,
+        wall_conductivity: 1.45,
+        impervious_conductivity: 0.62,
+        roof_thickness: 0.25,
+        wall_thickness: 0.2,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.13,
+        wall_albedo: 0.25,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.44e6,
+        wall_heat_capacity: 2.05e6,
+        impervious_heat_capacity: 1.47e6,
+        roof_conductivity: 1.0,
+        wall_conductivity: 1.25,
+        impervious_conductivity: 0.60,
+        roof_thickness: 0.15,
+        wall_thickness: 0.2,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.15,
+        wall_albedo: 0.20,
+        impervious_albedo: 0.18,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.28,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.92,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 2.0e6,
+        wall_heat_capacity: 0.72e6,
+        impervious_heat_capacity: 1.67e6,
+        roof_conductivity: 2.0,
+        wall_conductivity: 0.5,
+        impervious_conductivity: 0.72,
+        roof_thickness: 0.05,
+        wall_thickness: 0.1,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.18,
+        wall_albedo: 0.25,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.8e6,
+        wall_heat_capacity: 1.8e6,
+        impervious_heat_capacity: 1.38e6,
+        roof_conductivity: 1.25,
+        wall_conductivity: 1.25,
+        impervious_conductivity: 0.51,
+        roof_thickness: 0.12,
+        wall_thickness: 0.2,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.13,
+        wall_albedo: 0.25,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 1.44e6,
+        wall_heat_capacity: 2.56e6,
+        impervious_heat_capacity: 1.37e6,
+        roof_conductivity: 1.0,
+        wall_conductivity: 1.0,
+        impervious_conductivity: 0.55,
+        roof_thickness: 0.15,
+        wall_thickness: 0.2,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+    UrbanLczDefaults {
+        roof_albedo: 0.10,
+        wall_albedo: 0.20,
+        impervious_albedo: 0.14,
+        pervious_albedo: 0.15,
+        roof_emissivity: 0.91,
+        wall_emissivity: 0.90,
+        impervious_emissivity: 0.95,
+        pervious_emissivity: 0.95,
+        roof_heat_capacity: 2.0e6,
+        wall_heat_capacity: 1.69e6,
+        impervious_heat_capacity: 1.49e6,
+        roof_conductivity: 2.0,
+        wall_conductivity: 1.33,
+        impervious_conductivity: 0.61,
+        roof_thickness: 0.05,
+        wall_thickness: 0.05,
+        room_max: 297.65,
+        room_min: 290.65,
+    },
+];
+
+fn write_urban_single_point_surface(
+    source: &Path,
+    target: &Path,
+    canyon_hwr: bool,
+    lai_year_window: Option<(i32, i32)>,
+) -> Result<()> {
+    let input =
+        netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
+    let urban_type = scalar_i32(&input, "LCZ_DOM")?;
+    ensure!(
+        (1..=10).contains(&urban_type),
+        "LCZ_DOM must be within 1..=10, got {urban_type}"
+    );
+    let defaults = &LCZ_DEFAULTS[(urban_type - 1) as usize];
+    let years = values_i32(&input, "LAI_year")?;
+    let tree_lai = values_f64(&input, "TREE_LAI")?;
+    let tree_sai = values_f64(&input, "TREE_SAI")?;
+    ensure!(
+        tree_lai.len() == years.len() * 12 && tree_sai.len() == years.len() * 12,
+        "TREE_LAI and TREE_SAI must each have one 12-month record per LAI_year"
+    );
+    let (years, tree_lai, tree_sai) =
+        if string_attribute(&input, GENERATED_URBAN_LAI_ATTRIBUTE).as_deref() == Some("true") {
+            select_urban_lai_years(years, tree_lai, tree_sai, lai_year_window)?
+        } else {
+            (years, tree_lai, tree_sai)
+        };
+    let roof_raw = scalar_f64(&input, "roof_area_fraction")?;
+    let water_raw = scalar_f64(&input, "water_area_fraction")?;
+    let impervious_raw = scalar_f64(&input, "impervious_area_fraction")?;
+    let roof_denominator = 1.0 - water_raw;
+    let road_denominator = 1.0 - roof_raw - water_raw;
+    ensure!(
+        roof_denominator > 0.0 && road_denominator > 0.0,
+        "urban roof and water fractions leave no area for normalized urban geometry"
+    );
+    let building_hlr = if canyon_hwr {
+        scalar_f64(&input, "canyon_height_width_ratio")? * (1.0 - roof_raw.sqrt()) / roof_raw.sqrt()
+    } else {
+        scalar_f64(&input, "wall_to_plan_area_ratio")? / 4.0 / roof_raw
+    };
+    let thermal = [
+        ("ALB_ROOF", &["ALB_ROOF"][..], defaults.roof_albedo, 4),
+        ("ALB_WALL", &["ALB_WALL"][..], defaults.wall_albedo, 4),
+        (
+            "ALB_IMPROAD",
+            &["ALB_IMPROAD", "ALB_GIMP"][..],
+            defaults.impervious_albedo,
+            4,
+        ),
+        (
+            "ALB_PERROAD",
+            &["ALB_PERROAD", "ALB_GPER"][..],
+            defaults.pervious_albedo,
+            4,
+        ),
+    ];
+    let mut output =
+        netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
+    for (name, length) in [
+        ("soil", 8),
+        ("azi", 16),
+        ("zen", 101),
+        ("slope_type", 4),
+        ("patch", 1),
+        ("LAI_year", years.len()),
+        ("month", 12),
+        ("ulev", 10),
+        ("numsolar", 2),
+        ("numrad", 2),
+    ] {
+        output.add_dimension(name, length)?;
+    }
+    emit_scalar(&mut output, "latitude", scalar_f64(&input, "latitude")?)?;
+    emit_scalar(&mut output, "longitude", scalar_f64(&input, "longitude")?)?;
+    emit_i32(&mut output, "LAI_year", &["LAI_year"], &years)?;
+    emit_f64(&mut output, "TREE_LAI", &["LAI_year", "month"], &tree_lai)?;
+    emit_f64(&mut output, "TREE_SAI", &["LAI_year", "month"], &tree_sai)?;
+    emit_i32(&mut output, "URBAN_TYPE", &[], &[urban_type])?;
+    emit_scalar(&mut output, "LUCY_id", scalar_f64(&input, "LUCY_ID")?)?;
+    for (name, value) in [
+        (
+            "PCT_Tree",
+            scalar_f64(&input, "tree_area_fraction")? * 100.0,
+        ),
+        ("URBAN_TREE_TOP", scalar_f64(&input, "tree_mean_height")?),
+        ("PCT_Water", water_raw * 100.0),
+        ("WT_ROOF", roof_raw / roof_denominator),
+        ("HT_ROOF", scalar_f64(&input, "building_mean_height")?),
+        (
+            "WTROAD_PERV",
+            1.0 - (impervious_raw - roof_raw) / road_denominator,
+        ),
+        ("BUILDING_HLR", building_hlr),
+        (
+            "POP_DEN",
+            scalar_f64(&input, "resident_population_density")?,
+        ),
+        (
+            "EM_ROOF",
+            urban_scalar_or(&input, &["EM_ROOF"], defaults.roof_emissivity)?,
+        ),
+        (
+            "EM_WALL",
+            urban_scalar_or(&input, &["EM_WALL"], defaults.wall_emissivity)?,
+        ),
+        (
+            "EM_IMPROAD",
+            urban_scalar_or(
+                &input,
+                &["EM_IMPROAD", "EM_GIMP"],
+                defaults.impervious_emissivity,
+            )?,
+        ),
+        (
+            "EM_PERROAD",
+            urban_scalar_or(
+                &input,
+                &["EM_PERROAD", "EM_GPER"],
+                defaults.pervious_emissivity,
+            )?,
+        ),
+        (
+            "T_BUILDING_MAX",
+            urban_scalar_or(&input, &["T_BUILDING_MAX"], defaults.room_max)?,
+        ),
+        (
+            "T_BUILDING_MIN",
+            urban_scalar_or(&input, &["T_BUILDING_MIN"], defaults.room_min)?,
+        ),
+        (
+            "THICK_ROOF",
+            urban_scalar_or(&input, &["THICK_ROOF"], defaults.roof_thickness)?,
+        ),
+        (
+            "THICK_WALL",
+            urban_scalar_or(&input, &["THICK_WALL"], defaults.wall_thickness)?,
+        ),
+    ] {
+        emit_scalar(&mut output, name, value)?;
+    }
+    for (name, aliases, fallback, length) in thermal {
+        emit_f64(
+            &mut output,
+            name,
+            &["numsolar", "numrad"],
+            &urban_values_or(&input, aliases, fallback, length)?,
+        )?;
+    }
+    for (name, aliases, fallback) in [
+        ("CV_ROOF", &["CV_ROOF"][..], defaults.roof_heat_capacity),
+        ("CV_WALL", &["CV_WALL"][..], defaults.wall_heat_capacity),
+        (
+            "CV_IMPROAD",
+            &["CV_IMPROAD", "CV_GIMP"][..],
+            defaults.impervious_heat_capacity,
+        ),
+        ("TK_ROOF", &["TK_ROOF"][..], defaults.roof_conductivity),
+        ("TK_WALL", &["TK_WALL"][..], defaults.wall_conductivity),
+        (
+            "TK_IMPROAD",
+            &["TK_IMPROAD", "TK_GIMP"][..],
+            defaults.impervious_conductivity,
+        ),
+    ] {
+        emit_f64(
+            &mut output,
+            name,
+            &["ulev"],
+            &urban_values_or(&input, aliases, fallback, 10)?,
+        )?;
+    }
+    for name in [
+        "lakedepth",
+        "soil_s_v_alb",
+        "soil_d_v_alb",
+        "soil_s_n_alb",
+        "soil_d_n_alb",
+    ] {
+        emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
+    }
+    for name in SINGLE_POINT_SOIL_FIELDS {
+        let values = single_point_soil_values(&input, name)?;
+        ensure!(
+            values.len() >= 8,
+            "{name} has fewer than CoLM's eight soil layers"
+        );
+        emit_f64(&mut output, name, &["soil"], &values[..8])?;
+    }
+    emit_i32(
+        &mut output,
+        "soil_texture",
+        &[],
+        &[scalar_i32(&input, "soil_texture")?],
+    )?;
+    for name in ["elevation", "elvstd", "sloperatio"] {
+        emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
+    }
+    Ok(())
+}
+
+fn urban_scalar_or(input: &netcdf::File, names: &[&str], fallback: f64) -> Result<f64> {
+    for &name in names {
+        if input.variable(name).is_some() {
+            return scalar_f64(input, name);
+        }
+    }
+    Ok(fallback)
+}
+
+fn select_urban_lai_years(
+    years: Vec<i32>,
+    tree_lai: Vec<f64>,
+    tree_sai: Vec<f64>,
+    window: Option<(i32, i32)>,
+) -> Result<(Vec<i32>, Vec<f64>, Vec<f64>)> {
+    let Some((first, last)) = window else {
+        return Ok((years, tree_lai, tree_sai));
+    };
+    let indices = years
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &year)| ((first..=last).contains(&year)).then_some(index))
+        .collect::<Vec<_>>();
+    ensure!(
+        !indices.is_empty(),
+        "built-in urban LAI has no years within the case window {first}..={last}"
+    );
+    let copied = |values: &[f64]| {
+        indices
+            .iter()
+            .flat_map(|&index| values[index * 12..(index + 1) * 12].iter().copied())
+            .collect::<Vec<_>>()
+    };
+    Ok((
+        indices.iter().map(|&index| years[index]).collect(),
+        copied(&tree_lai),
+        copied(&tree_sai),
+    ))
+}
+
+fn urban_values_or(
+    input: &netcdf::File,
+    names: &[&str],
+    fallback: f64,
+    expected: usize,
+) -> Result<Vec<f64>> {
+    for &name in names {
+        if input.variable(name).is_some() {
+            let values = values_f64(input, name)?;
+            ensure!(
+                values.len() == expected,
+                "{name} has {} values; expected {expected}",
+                values.len()
+            );
+            return Ok(values);
+        }
+    }
+    Ok(vec![fallback; expected])
+}
+
+fn single_point_soil_values(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+    if !matches!(name, "soil_BA_alpha" | "soil_BA_beta") {
+        return values_f64(file, name);
+    }
+    let gravel = values_f64(file, "soil_vf_gravels")?;
+    let sand = values_f64(file, "soil_vf_sand")?;
+    ensure!(
+        gravel.len() >= 8 && sand.len() >= 8,
+        "soil_vf_gravels and soil_vf_sand each need CoLM's eight soil layers"
+    );
+    Ok(gravel
+        .iter()
+        .zip(sand)
+        .take(8)
+        .map(|(&gravel, sand)| match gravel + sand {
+            value if value > 0.4 => {
+                if name == "soil_BA_alpha" {
+                    0.38
+                } else {
+                    35.0
+                }
+            }
+            value if value > 0.25 => {
+                if name == "soil_BA_alpha" {
+                    0.24
+                } else {
+                    26.0
+                }
+            }
+            _ => {
+                if name == "soil_BA_alpha" {
+                    0.20
+                } else {
+                    10.0
+                }
+            }
+        })
+        .collect())
 }
 
 fn values_f64(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
@@ -2492,6 +3116,7 @@ fn put_urban_extra(f: &mut netcdf::FileMut, s: &UrbanExtra) -> Result<Vec<String
             put_values(f, name, &[YEAR_DIM, MONTH_DIM], &flat, note.as_str())?;
             written.push(name.to_string());
         }
+        f.add_attribute(GENERATED_URBAN_LAI_ATTRIBUTE, "true")?;
     }
 
     Ok(written)

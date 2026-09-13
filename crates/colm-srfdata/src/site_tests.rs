@@ -1486,6 +1486,81 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
 }
 
 #[test]
+fn urban_surface_projection_resolves_lcz_defaults_and_the_case_lai_window() {
+    let source = urban_fixture(
+        "urban-surface-src",
+        145.014_495_849_609_38,
+        -37.730_598_449_707_03,
+    );
+    let prepared = source.with_file_name("urban-surface-prepared.nc");
+    let output = source.with_file_name("urban-surface-output.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&source).unwrap();
+        for (name, value) in [
+            ("building_mean_height", 6.4),
+            ("roof_area_fraction", 0.445),
+            ("impervious_area_fraction", 0.62),
+            ("canyon_height_width_ratio", 0.42),
+            ("wall_to_plan_area_ratio", 0.4),
+            ("tree_mean_height", 5.7),
+            ("water_area_fraction", 0.0),
+            ("tree_area_fraction", 0.225),
+            ("resident_population_density", 2940.0),
+        ] {
+            file.add_variable::<f64>(name, &["y", "x"])
+                .unwrap()
+                .put_values(&[value], netcdf::Extents::All)
+                .unwrap();
+        }
+    }
+    prepare_urban(&source, &prepared).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        write_urban_single_point_surface(&prepared, &output, false, Some((2000, 2004))).unwrap();
+    }
+    let file = netcdf::open(&output).unwrap();
+    assert_eq!(file.dimension("LAI_year").unwrap().len(), 5);
+    assert_eq!(
+        file.variable("URBAN_TYPE")
+            .unwrap()
+            .get_value::<i32, _>(())
+            .unwrap(),
+        6
+    );
+    let scalar = |name: &str| {
+        file.variable(name)
+            .unwrap()
+            .get_value::<f64, _>(())
+            .unwrap()
+    };
+    assert!((scalar("WT_ROOF") - 0.445).abs() < 1.0e-12);
+    assert!((scalar("WTROAD_PERV") - (1.0 - (0.62 - 0.445) / (1.0 - 0.445))).abs() < 1.0e-12);
+    assert!((scalar("BUILDING_HLR") - 0.4 / 4.0 / 0.445).abs() < 1.0e-12);
+    assert_eq!(scalar("EM_ROOF"), 0.91);
+    assert_eq!(scalar("THICK_ROOF"), 0.15);
+    for (name, expected) in [
+        ("ALB_ROOF", 0.13),
+        ("CV_ROOF", 1.44e6),
+        ("TK_IMPROAD", 0.60),
+        ("soil_BA_alpha", 0.38),
+        ("soil_BA_beta", 35.0),
+    ] {
+        assert_eq!(
+            file.variable(name)
+                .unwrap()
+                .get_values::<f64, _>(netcdf::Extents::All)
+                .unwrap()[0],
+            expected,
+            "{name}"
+        );
+    }
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_file(prepared);
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
 #[ignore = "requires the locally built upstream mkinidata executable and CN-Cng reference case"]
 fn native_single_point_surface_is_accepted_by_upstream_mkinidata() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
