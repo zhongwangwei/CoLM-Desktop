@@ -248,6 +248,10 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
     println!("wrote {}", files.pft.display());
+    if let Some(bgc) = files.bgc {
+        println!("wrote {}", bgc.constants.display());
+        println!("wrote {}", bgc.block.display());
+    }
     if let Some(date) = cold_time {
         let mut time = SpatialPftTimeConfig::new(static_config, date);
         time.lai_year = lai_year;
@@ -260,6 +264,9 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         let output = write_spatial_pft_cold_time_restarts(time)?;
         println!("wrote {}", output.common.block.display());
         println!("wrote {}", output.pft.display());
+        if let Some(bgc) = output.bgc {
+            println!("wrote {}", bgc.block.display());
+        }
     }
     Ok(())
 }

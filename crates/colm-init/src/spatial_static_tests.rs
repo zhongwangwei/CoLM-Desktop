@@ -111,7 +111,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n/\n",
+        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n/\n",
     )
     .unwrap();
 
@@ -129,11 +129,12 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     )
     .unwrap();
 
-    let common = netcdf::open(files.common.block).unwrap();
+    let common = netcdf::open(&files.common.block).unwrap();
     assert!(common.variable("alpha_vgm").is_none());
-    let pft = netcdf::open(files.pft).unwrap();
+    let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_i32(&pft, "pftclass").unwrap(), [1]);
     assert_eq!(values_f64(&pft, "htop_p").unwrap(), [20.0]);
+    assert!(files.bgc.is_some());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -161,7 +162,7 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_Campbell_SOIL_MODEL = .false.\n/\n",
+        "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_Campbell_SOIL_MODEL = .false.\n/\n",
     )
     .unwrap();
 
@@ -178,14 +179,17 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     config.plant_hydraulics = false;
     let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
 
-    let common = netcdf::open(files.common.block).unwrap();
+    let common = netcdf::open(&files.common.block).unwrap();
     assert_eq!(values_f64(&common, "tlai").unwrap(), [2.5]);
     assert_eq!(values_f64(&common, "z0m").unwrap(), [2.0]);
-    let pft = netcdf::open(files.pft).unwrap();
+    let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_f64(&pft, "tlai_p").unwrap(), [2.5]);
     assert_eq!(values_f64(&pft, "tsai_p").unwrap(), [0.4]);
     assert_eq!(values_f64(&pft, "z0m_p").unwrap(), [2.0]);
+    assert_eq!(values_f64(&pft, "leafc_p").unwrap(), [100.0]);
     assert!(pft.variable("vegwp_p").is_none());
+    let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
+    assert_eq!(values_f64(&bgc, "sminn_vr").unwrap(), [10.0; 10]);
 
     let pc_restart = root.join("restart-pc");
     std::fs::write(

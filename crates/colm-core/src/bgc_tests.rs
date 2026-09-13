@@ -126,7 +126,10 @@ fn merged_cold_bgc_states_use_restart_axis_major_order() {
 
     assert_eq!(merged.pft_values[0], [10.0, 11.0, 12.0, 20.0, 21.0, 22.0]);
     assert_eq!(merged.totals.total_carbon, [1.0, 2.0]);
-    assert_eq!(merged.pools.mineral_nitrogen[..6], [10.0, 20.0, 11.0, 21.0, 12.0, 22.0]);
+    assert_eq!(
+        merged.pools.mineral_nitrogen[..6],
+        [10.0, 20.0, 11.0, 21.0, 12.0, 22.0]
+    );
     assert_eq!(
         merged.climate.precipitation_daily[..6],
         [100.0, 200.0, 101.0, 201.0, 102.0, 202.0]

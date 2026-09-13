@@ -116,8 +116,8 @@ pub use colm_core::{
 };
 pub use colm_core::{cold_start_urban_radiation, UrbanRadiationInput, UrbanRadiationState};
 pub use colm_core::{
-    derive_cold_start_bgc_state, BgcColdStartInput, BgcColdStartState, BgcPftColdStartInput,
-    PFT_BGC_F64_VARIABLES,
+    derive_cold_start_bgc_state, merge_bgc_cold_start_states, BgcColdStartInput, BgcColdStartState,
+    BgcPftColdStartInput, PFT_BGC_F64_VARIABLES,
 };
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,

@@ -84,13 +84,13 @@ fn spatial_pft_constant_restart_rejects_misaligned_crop_fractions() {
 }
 
 #[test]
-fn spatial_pft_time_rejects_bgc_before_materializing_any_restart() {
+fn spatial_pft_time_rejects_crop_before_materializing_any_restart() {
     let root = temp_dir();
     let namelist = root.join("case.nml");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(&namelist, "&nl_colm\n DEF_USE_BGC = .true.\n/\n").unwrap();
+    std::fs::write(&namelist, "&nl_colm\n DEF_USE_CROP = .true.\n/\n").unwrap();
     let config = SpatialPftTimeConfig::new(
         SpatialPftStaticConfig::new(&namelist, &landdata, &restart, "test", 2005, "w180_s90"),
         crate::RestartDate {
@@ -102,7 +102,7 @@ fn spatial_pft_time_rejects_bgc_before_materializing_any_restart() {
     let error = write_spatial_pft_cold_time_restarts(config).unwrap_err();
     assert!(error
         .to_string()
-        .contains("spatial BGC cold starts are not implemented"));
+        .contains("spatial CROP cold starts are not implemented"));
     assert!(!root.join("restart").exists());
     std::fs::remove_dir_all(root).unwrap();
 }

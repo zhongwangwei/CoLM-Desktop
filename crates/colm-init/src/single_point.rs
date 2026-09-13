@@ -1755,7 +1755,7 @@ fn pft_parameter(
     }
 }
 
-fn pft_parameters(
+pub(crate) fn pft_parameters(
     document: &colm_namelist::Document,
     name: &str,
     classes: &[i32],

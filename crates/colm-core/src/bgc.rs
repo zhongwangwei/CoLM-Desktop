@@ -640,9 +640,7 @@ pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcCo
             mineral_nitrogen: merge_patch_f64(states, "total mineral nitrogen", |state| {
                 &state.totals.mineral_nitrogen
             })?,
-            deposition: merge_patch_f64(states, "deposition", |state| {
-                &state.totals.deposition
-            })?,
+            deposition: merge_patch_f64(states, "deposition", |state| &state.totals.deposition)?,
         },
         pools: BgcPoolsOwned {
             carbon: merge_axis_f64(
@@ -675,9 +673,7 @@ pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcCo
             ammonium: merge_axis_f64(states, "BGC ammonium", BGC_SOIL_LAYERS, |state| {
                 &state.pools.ammonium
             })?,
-            lagged_npp: merge_patch_f64(states, "BGC lagged NPP", |state| {
-                &state.pools.lagged_npp
-            })?,
+            lagged_npp: merge_patch_f64(states, "BGC lagged NPP", |state| &state.pools.lagged_npp)?,
         },
         truncation: BgcTruncationOwned {
             carbon_profile: merge_axis_f64(
@@ -686,9 +682,11 @@ pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcCo
                 BGC_SOIL_LAYERS,
                 |state| &state.truncation.carbon_profile,
             )?,
-            carbon_vegetation: merge_patch_f64(states, "BGC vegetation carbon truncation", |state| {
-                &state.truncation.carbon_vegetation
-            })?,
+            carbon_vegetation: merge_patch_f64(
+                states,
+                "BGC vegetation carbon truncation",
+                |state| &state.truncation.carbon_vegetation,
+            )?,
             carbon_soil: merge_patch_f64(states, "BGC soil carbon truncation", |state| {
                 &state.truncation.carbon_soil
             })?,
@@ -708,9 +706,11 @@ pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcCo
             })?,
         },
         permafrost: BgcPermafrostOwned {
-            maximum_active_layer_depth: merge_patch_f64(states, "BGC maximum active layer", |state| {
-                &state.permafrost.maximum_active_layer_depth
-            })?,
+            maximum_active_layer_depth: merge_patch_f64(
+                states,
+                "BGC maximum active layer",
+                |state| &state.permafrost.maximum_active_layer_depth,
+            )?,
             previous_maximum_active_layer_depth: merge_patch_f64(
                 states,
                 "BGC previous maximum active layer",
@@ -767,7 +767,10 @@ fn merge_patch_f64(
         .iter()
         .map(|state| {
             let value = values(state);
-            ensure!(value.len() == 1, "{name} must have one value per source patch");
+            ensure!(
+                value.len() == 1,
+                "{name} must have one value per source patch"
+            );
             Ok(value[0])
         })
         .collect()
@@ -782,7 +785,10 @@ fn merge_patch_i32(
         .iter()
         .map(|state| {
             let value = values(state);
-            ensure!(value.len() == 1, "{name} must have one value per source patch");
+            ensure!(
+                value.len() == 1,
+                "{name} must have one value per source patch"
+            );
             Ok(value[0])
         })
         .collect()
@@ -797,7 +803,10 @@ fn merge_patch_i8(
         .iter()
         .map(|state| {
             let value = values(state);
-            ensure!(value.len() == 1, "{name} must have one value per source patch");
+            ensure!(
+                value.len() == 1,
+                "{name} must have one value per source patch"
+            );
             Ok(value[0])
         })
         .collect()

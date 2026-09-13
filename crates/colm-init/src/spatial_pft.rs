@@ -12,18 +12,21 @@ use colm_namelist::{parse, Value};
 
 use crate::single_point::{
     aggregate_pft_radiation, pc_canopy_layer, pc_uses_three_dimensional_canopy, pft_canopy,
-    pft_leaf_optics,
+    pft_leaf_optics, pft_parameters,
 };
 use crate::spatial_static::{
-    block_path, read_f64 as read_lct_f64, read_patches, spatial_patch_type, values_f64, values_i32,
-    write_spatial_lct_constant_restart, SpatialLctStaticConfig,
+    block_path, read_f64 as read_lct_f64, read_patches, read_soil, spatial_patch_type, values_f64,
+    values_i32, write_spatial_lct_constant_restart, SpatialLctStaticConfig,
 };
 use crate::{
-    cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
-    write_pft_constant_restart, write_pft_time_restart, ColdStartRadiation, ConstantRestartFiles,
-    HydraulicModel, LandCoverScheme, PcPftInput, PftConstantRestartInput, PftOzoneFields,
-    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning,
-    SpatialLctTimeConfig, TimeRestartFile, MISSING,
+    bgc_time_restart_input, cold_start_pc_broadband_radiation_with_snow,
+    cold_start_pft_broadband_radiation_with_snow, derive_cold_start_bgc_state,
+    merge_bgc_cold_start_states, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, BgcColdStartInput, BgcConstantRestartFiles,
+    BgcPftColdStartInput, BgcTimeRestartFile, ColdStartRadiation, ConstantRestartFiles,
+    HydraulicModel, LandCoverScheme, PcPftInput, PftBgcFields, PftConstantRestartInput,
+    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate,
+    RestartTuning, SpatialLctTimeConfig, TimeRestartFile, MISSING,
 };
 
 /// Arguments for one already-addressed spatial `landpft` block.
@@ -43,12 +46,13 @@ pub struct SpatialPftStaticConfig<'a> {
 pub struct SpatialPftConstantRestartFiles {
     pub common: ConstantRestartFiles,
     pub pft: PathBuf,
+    pub bgc: Option<BgcConstantRestartFiles>,
 }
 
 /// Arguments for the no-observation PFT cold start of one spatial block.
 ///
-/// PFT and PC share this adapter.  BGC and CROP need separate runtime state
-/// families and are rejected instead of being initialized as PFT.
+/// The PFT and BGC state derives through `colm-core`; CROP remains separate
+/// because its crop-management state has not yet been materialized spatially.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialPftTimeConfig<'a> {
     pub static_config: SpatialPftStaticConfig<'a>,
@@ -69,6 +73,7 @@ pub struct SpatialPftTimeConfig<'a> {
 pub struct SpatialPftTimeRestartFiles {
     pub common: TimeRestartFile,
     pub pft: PathBuf,
+    pub bgc: Option<BgcTimeRestartFile>,
 }
 
 impl<'a> SpatialPftStaticConfig<'a> {
@@ -197,6 +202,7 @@ pub fn write_spatial_pft_constant_restarts(
     use_bedrock: bool,
     use_hyperspectral: bool,
 ) -> Result<SpatialPftConstantRestartFiles> {
+    let document = read_pft_document(config.namelist)?;
     let hydraulic_model = pft_hydraulic_model(config.namelist)?;
     let mut common = SpatialLctStaticConfig::new(
         config.landdata,
@@ -211,7 +217,21 @@ pub fn write_spatial_pft_constant_restarts(
     common.use_hyperspectral = use_hyperspectral;
     let common = write_spatial_lct_constant_restart(common)?;
     let pft = write_spatial_pft_constant_restart(config)?;
-    Ok(SpatialPftConstantRestartFiles { common, pft })
+    let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?
+        .then(|| {
+            let patches =
+                read_patches(config.landdata, config.land_cover_year, config.block_label)?;
+            write_cold_start_bgc_constant_restart(
+                config.restart_dir,
+                config.case_name,
+                config.land_cover_year,
+                config.block_label,
+                patches.class.len(),
+                optional_bool_or(&document, "DEF_USE_NITRIF", true)?,
+            )
+        })
+        .transpose()?;
+    Ok(SpatialPftConstantRestartFiles { common, pft, bgc })
 }
 
 /// Writes both common and PFT timestamped restart blocks for one spatial PFT
@@ -227,6 +247,14 @@ pub fn write_spatial_pft_cold_time_restarts(
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
     reject_unsupported_time_features(&document)?;
+    let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
+    if use_bgc {
+        ensure!(
+            !optional_bool_or(&document, "DEF_USE_CN_INIT", false)?,
+            "spatial BGC cold starts with DEF_USE_CN_INIT require a spatial equilibrium reader"
+        );
+    }
+    let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
     let subgrid = spatial_pft_subgrid(&document)?;
     let hydraulic_model = pft_hydraulic_model_from_document(&document)?;
     let mut common_config = SpatialLctTimeConfig::new(
@@ -262,6 +290,27 @@ pub fn write_spatial_pft_cold_time_restarts(
         .collect::<Result<Vec<_>>>()?;
     let pfts = read_pft_vectors(config.static_config)?;
     let pft_to_patch = match_pfts_to_patches(&patches, &patch_kind, &pfts)?;
+    let bgc_state = use_bgc
+        .then(|| {
+            derive_spatial_bgc_state(
+                &document,
+                config.static_config,
+                hydraulic_model,
+                &patches,
+                &patch_kind,
+                &pfts,
+                &pft_to_patch,
+                use_nitrification,
+            )
+        })
+        .transpose()?;
+    let bgc_pft_values = bgc_state.as_ref().map(|state| {
+        state
+            .pft_values
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>()
+    });
     let pft_count = pfts.class.len();
     let month = crate::spatial_time::month(config.date)?;
     let total_lai = read_pft_monthly(config.static_config, config.lai_year, "LAI_pfts", month)?;
@@ -506,7 +555,13 @@ pub fn write_spatial_pft_cold_time_restarts(
                 shaded_stomatal_conductance: &conductance,
                 vegetation_nodes: 4,
             }),
-            bgc: None,
+            bgc: bgc_state
+                .as_ref()
+                .zip(bgc_pft_values.as_deref())
+                .map(|(state, values)| PftBgcFields {
+                    values,
+                    active_crop_years: &state.active_crop_years,
+                }),
             crop: None,
             ozone: config.ozone_stress.then_some(PftOzoneFields {
                 lai_old: &total_lai,
@@ -520,7 +575,20 @@ pub fn write_spatial_pft_cold_time_restarts(
             irrigation_method: None,
         },
     )?;
-    Ok(SpatialPftTimeRestartFiles { common, pft })
+    let bgc = bgc_state
+        .as_ref()
+        .map(|state| {
+            write_bgc_time_restart(
+                config.static_config.restart_dir,
+                config.static_config.case_name,
+                config.static_config.land_cover_year,
+                config.date,
+                config.static_config.block_label,
+                bgc_time_restart_input(state),
+            )
+        })
+        .transpose()?;
+    Ok(SpatialPftTimeRestartFiles { common, pft, bgc })
 }
 
 #[derive(Debug)]
@@ -544,6 +612,102 @@ struct CommonColdState {
 enum SpatialPftSubgrid {
     Pft,
     Pc,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_spatial_bgc_state(
+    document: &colm_namelist::Document,
+    config: SpatialPftStaticConfig<'_>,
+    hydraulic_model: HydraulicModel,
+    patches: &crate::spatial_static::Patches,
+    patch_kind: &[i32],
+    pfts: &SpatialPftVectors,
+    pft_to_patch: &[Vec<usize>],
+    use_nitrification: bool,
+) -> Result<crate::BgcColdStartState> {
+    ensure!(
+        patches.class.len() == patch_kind.len() && patch_kind.len() == pft_to_patch.len(),
+        "spatial BGC patch topology is inconsistent"
+    );
+    let pft_order = pft_to_patch.iter().flatten().copied().collect::<Vec<_>>();
+    ensure!(
+        pft_order.iter().copied().eq(0..pfts.class.len()),
+        "spatial landpft entries must be ordered by their owning landpatch"
+    );
+
+    let campbell = hydraulic_model == HydraulicModel::Campbell;
+    let leaf_carbon_to_nitrogen =
+        pft_parameters(document, "DEF_PFT_LEAFCN", &pfts.class, campbell)?;
+    let fine_root_carbon_to_nitrogen =
+        pft_parameters(document, "DEF_PFT_FROOTCN", &pfts.class, campbell)?;
+    let live_wood_carbon_to_nitrogen =
+        pft_parameters(document, "DEF_PFT_LIVEWDCN", &pfts.class, campbell)?;
+    let dead_wood_carbon_to_nitrogen =
+        pft_parameters(document, "DEF_PFT_DEADWDCN", &pfts.class, campbell)?;
+    let soil = crate::derive_spatial_soil_parameters(
+        &read_soil(
+            config.landdata,
+            config.land_cover_year,
+            config.block_label,
+            patches.class.len(),
+        )?,
+        &patches.class,
+        patch_kind,
+        10,
+        hydraulic_model,
+    )?;
+    let soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m;
+    let states = (0..patches.class.len())
+        .map(|patch| {
+            let indices = &pft_to_patch[patch];
+            ensure!(
+                patch_kind[patch] == 0 || indices.is_empty(),
+                "non-natural spatial patch {patch} unexpectedly owns PFT entries"
+            );
+            let class = indices
+                .iter()
+                .map(|&index| pfts.class[index])
+                .collect::<Vec<_>>();
+            let fraction = indices
+                .iter()
+                .map(|&index| pfts.fraction[index])
+                .collect::<Vec<_>>();
+            let leaf_cn = indices
+                .iter()
+                .map(|&index| leaf_carbon_to_nitrogen[index])
+                .collect::<Vec<_>>();
+            let root_cn = indices
+                .iter()
+                .map(|&index| fine_root_carbon_to_nitrogen[index])
+                .collect::<Vec<_>>();
+            let live_wood_cn = indices
+                .iter()
+                .map(|&index| live_wood_carbon_to_nitrogen[index])
+                .collect::<Vec<_>>();
+            let dead_wood_cn = indices
+                .iter()
+                .map(|&index| dead_wood_carbon_to_nitrogen[index])
+                .collect::<Vec<_>>();
+            let soil_bulk_density_kg_m3 = (0..soil.layers)
+                .map(|layer| soil.get(crate::SoilField::BulkDensity, layer, patch))
+                .collect::<Vec<_>>();
+            derive_cold_start_bgc_state(BgcColdStartInput {
+                soil_thickness_m: &soil_thickness_m,
+                soil_bulk_density_kg_m3: &soil_bulk_density_kg_m3,
+                pft: BgcPftColdStartInput {
+                    class: &class,
+                    fraction: &fraction,
+                    leaf_carbon_to_nitrogen: &leaf_cn,
+                    fine_root_carbon_to_nitrogen: &root_cn,
+                    live_wood_carbon_to_nitrogen: &live_wood_cn,
+                    dead_wood_carbon_to_nitrogen: &dead_wood_cn,
+                },
+                runtime_cn_state: None,
+                use_nitrification,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    merge_bgc_cold_start_states(&states)
 }
 
 fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVectors> {
@@ -810,18 +974,10 @@ fn read_pft_document(namelist: &Path) -> Result<colm_namelist::Document> {
 }
 
 fn reject_unsupported_time_features(document: &colm_namelist::Document) -> Result<()> {
-    for (field, message) in [
-        (
-            "DEF_USE_BGC",
-            "spatial BGC cold starts are not implemented by the Rust initializer",
-        ),
-        (
-            "DEF_USE_CROP",
-            "spatial CROP cold starts are not implemented by the Rust initializer",
-        ),
-    ] {
-        ensure!(!optional_bool_or(document, field, false)?, "{message}");
-    }
+    ensure!(
+        !optional_bool_or(document, "DEF_USE_CROP", false)?,
+        "spatial CROP cold starts are not implemented by the Rust initializer"
+    );
     Ok(())
 }
 
