@@ -173,6 +173,10 @@ pub struct PftOzoneFields<'a> {
     pub lai_old: &'a [f64],
     pub sunlit_uptake: &'a [f64],
     pub shaded_uptake: &'a [f64],
+    pub sunlit_vegetation_coefficient: &'a [f64],
+    pub shaded_vegetation_coefficient: &'a [f64],
+    pub sunlit_stomatal_coefficient: &'a [f64],
+    pub shaded_stomatal_coefficient: &'a [f64],
 }
 
 /// Carbon, nitrogen, and phenology state emitted when `DEF_USE_BGC` is enabled.
@@ -339,6 +343,23 @@ pub fn write_pft_time_restart_block(
             plant.shaded_stomatal_conductance,
         )?;
     }
+    if let Some(ozone) = input.ozone {
+        for (name, values) in [
+            ("lai_old_p", ozone.lai_old),
+            ("o3uptakesun_p", ozone.sunlit_uptake),
+            ("o3uptakesha_p", ozone.shaded_uptake),
+            ("o3coefv_sun_p", ozone.sunlit_vegetation_coefficient),
+            ("o3coefv_sha_p", ozone.shaded_vegetation_coefficient),
+            ("o3coefg_sun_p", ozone.sunlit_stomatal_coefficient),
+            ("o3coefg_sha_p", ozone.shaded_stomatal_coefficient),
+        ] {
+            put_f64_1d(&mut file, name, "pft", values)?;
+        }
+    }
+    if let Some(irrigation_method) = input.irrigation_method {
+        file.add_variable::<i32>("irrig_method_p", &["pft"])?
+            .put_values(irrigation_method, ..)?;
+    }
     if let Some(bgc) = input.bgc {
         for (index, (&name, values)) in PFT_BGC_F64_VARIABLES.iter().zip(bgc.values).enumerate() {
             if index == BGC_ACTIVE_CROP_YEARS_AFTER {
@@ -347,19 +368,6 @@ pub fn write_pft_time_restart_block(
             }
             put_f64_1d(&mut file, name, "pft", values)?;
         }
-    }
-    if let Some(ozone) = input.ozone {
-        for (name, values) in [
-            ("lai_old_p", ozone.lai_old),
-            ("o3uptakesun_p", ozone.sunlit_uptake),
-            ("o3uptakesha_p", ozone.shaded_uptake),
-        ] {
-            put_f64_1d(&mut file, name, "pft", values)?;
-        }
-    }
-    if let Some(irrigation_method) = input.irrigation_method {
-        file.add_variable::<i32>("irrig_method_p", &["pft"])?
-            .put_values(irrigation_method, ..)?;
     }
     Ok(())
 }
@@ -471,6 +479,10 @@ fn validate_time_input(input: PftTimeRestartInput<'_>) -> Result<usize> {
                 ("lai_old_p", ozone.lai_old),
                 ("o3uptakesun_p", ozone.sunlit_uptake),
                 ("o3uptakesha_p", ozone.shaded_uptake),
+                ("o3coefv_sun_p", ozone.sunlit_vegetation_coefficient),
+                ("o3coefv_sha_p", ozone.shaded_vegetation_coefficient),
+                ("o3coefg_sun_p", ozone.sunlit_stomatal_coefficient),
+                ("o3coefg_sha_p", ozone.shaded_stomatal_coefficient),
             ],
         )?;
     }

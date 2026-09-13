@@ -95,7 +95,14 @@ fn pft_time_restart_preserves_fortran_axis_order_and_feature_schema() {
             .unwrap(),
         [2, 3]
     );
-    assert_eq!(file.variables().count(), 29);
+    assert_eq!(
+        file.variable("o3coefg_sha_p")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 2.0]
+    );
+    assert_eq!(file.variables().count(), 33);
     drop(file);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -105,9 +112,6 @@ fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
     let fixture = Fixture::new();
     let values = vec![fixture.pft.as_slice(); PFT_BGC_F64_VARIABLES.len()];
     let mut input = fixture.time_input();
-    input.hyperspectral = None;
-    input.ozone = None;
-    input.irrigation_method = None;
     input.bgc = Some(PftBgcFields {
         values: &values,
         active_crop_years: &[2, 3],
@@ -136,8 +140,16 @@ fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
     expected.insert(BGC_ACTIVE_CROP_YEARS_AFTER, "nyrs_crop_active_p".to_owned());
-    assert_eq!(&names[23..], expected);
-    assert_eq!(names.len(), 23 + expected.len());
+    let bgc_start = names.iter().position(|name| name == "leafc_p").unwrap();
+    assert_eq!(&names[bgc_start..], expected);
+    assert!(
+        names
+            .iter()
+            .position(|name| name == "irrig_method_p")
+            .unwrap()
+            < bgc_start,
+        "upstream writes optional ozone and irrigation state before BGC PFT state"
+    );
     assert_eq!(
         file.variable("nyrs_crop_active_p")
             .unwrap()
@@ -410,6 +422,10 @@ impl Fixture {
                 lai_old: pft,
                 sunlit_uptake: pft,
                 shaded_uptake: pft,
+                sunlit_vegetation_coefficient: pft,
+                shaded_vegetation_coefficient: pft,
+                sunlit_stomatal_coefficient: pft,
+                shaded_stomatal_coefficient: pft,
             }),
             irrigation_method: Some(&[2, 3]),
         }
