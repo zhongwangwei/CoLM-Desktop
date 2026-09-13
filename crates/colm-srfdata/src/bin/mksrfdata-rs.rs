@@ -478,7 +478,7 @@ fn materialize_spatial_common_fields(
         None => match (&args.plant_tiles, &args.usgs_forest_height) {
             (Some(path), None) => {
                 if args.land_cover != SiteMode::Igbp {
-                    bail!("--plant-tiles currently supports IGBP only; USGS uses Forest_Height.nc")
+                    bail!("USGS needs --usgs-forest-height; --plant-tiles supplies its monthly LAI/SAI")
                 }
                 let layout =
                     patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
@@ -493,7 +493,7 @@ fn materialize_spatial_common_fields(
                 let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
                 Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
             }
-            (None, Some(path)) => {
+            (None, Some(path)) | (Some(_), Some(path)) => {
                 if args.land_cover != SiteMode::Usgs {
                     bail!("--usgs-forest-height supports USGS only")
                 }
@@ -509,7 +509,6 @@ fn materialize_spatial_common_fields(
                 Some(layout.aggregate_usgs_forest_height(&raw, 1, 16, 24)?)
             }
             (None, None) => None,
-            (Some(_), Some(_)) => bail!("choose one forest-height source"),
         },
     };
     let lake_depth = if let Some(path) = &args.lake_depth {
@@ -783,9 +782,6 @@ fn materialize_spatial_common_fields(
         )?;
     }
     if !args.monthly_vegetation_years.is_empty() {
-        if args.land_cover != SiteMode::Igbp {
-            bail!("--monthly-vegetation-year supports IGBP only")
-        }
         let tiles = args
             .plant_tiles
             .as_deref()
@@ -1304,9 +1300,6 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
             ),
         }
     }
-    if plant_tiles.is_some() && usgs_forest_height.is_some() {
-        bail!("--plant-tiles and --usgs-forest-height are mutually exclusive")
-    }
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -1699,12 +1692,14 @@ fn spatial_case_command(
         let land_cover = lct_mode.context(
             "spatial LCT case needs --land-cover igbp or usgs because case.nml does not record the build-time classification table",
         )?;
-        ensure!(
-            land_cover == SiteMode::Igbp,
-            "spatial USGS case.nml output is not migrated: Rust has no verified USGS monthly LAI/SAI aggregation for the required cold restart"
-        );
         required_directories.push(plant_tiles.clone());
-        let landtype = rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc"));
+        let landtype = match land_cover {
+            SiteMode::Igbp => rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc")),
+            SiteMode::Usgs => rawdata.join("landtypes/landtype-usgs-update.nc"),
+            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
+                unreachable!("LCT mode checked by parse_land_cover")
+            }
+        };
         required_files.push(landtype.clone());
         args.extend([
             kind.to_owned(),
@@ -1735,6 +1730,14 @@ fn spatial_case_command(
             "--plant-tiles".to_owned(),
             plant_tiles.display().to_string(),
         ]);
+        if land_cover == SiteMode::Usgs {
+            let forest_height = rawdata.join("Forest_Height.nc");
+            required_files.push(forest_height.clone());
+            args.extend([
+                "--usgs-forest-height".to_owned(),
+                forest_height.display().to_string(),
+            ]);
+        }
         for lai_year in case_lai_years(&document, year)? {
             args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
         }
@@ -2035,7 +2038,7 @@ mod tests {
             "2005".into(),
         ])
         .is_err());
-        assert!(parse_spatial_lct(&[
+        let usgs = parse_spatial_lct(&[
             "latlon".into(),
             "mesh.nc".into(),
             "landtype.nc".into(),
@@ -2047,8 +2050,17 @@ mod tests {
             "plant_15s".into(),
             "--usgs-forest-height".into(),
             "Forest_Height.nc".into(),
+            "--monthly-vegetation-year".into(),
+            "2005".into(),
         ])
-        .is_err());
+        .unwrap();
+        assert_eq!(usgs.land_cover, SiteMode::Usgs);
+        assert_eq!(usgs.plant_tiles, Some(PathBuf::from("plant_15s")));
+        assert_eq!(
+            usgs.usgs_forest_height,
+            Some(PathBuf::from("Forest_Height.nc"))
+        );
+        assert_eq!(usgs.monthly_vegetation_years, vec![2005]);
     }
 
     #[test]
@@ -2278,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_usgs_case_is_refused_before_source_preflight() {
+    fn spatial_usgs_case_derives_monthly_vegetation_and_forest_sources() {
         let (root, namelist) = case_namelist(
             "usgs",
             "&nl_colm
@@ -2293,11 +2305,33 @@ mod tests {
 ",
         );
 
-        let error = spatial_case_command(&namelist, Some(SiteMode::Usgs), false, None, None)
-            .err()
+        let command = spatial_case_command(&namelist, Some(SiteMode::Usgs), false, None, None)
+            .unwrap()
             .unwrap();
 
-        assert!(error.to_string().contains("USGS"));
+        assert!(!command.pft_or_pc);
+        assert_eq!(
+            command.args[2],
+            format!("{}/raw/landtypes/landtype-usgs-update.nc", root.display())
+        );
+        assert_eq!(
+            option_value(&command.args, "--plant-tiles").map(str::to_owned),
+            Some(format!("{}/raw/plant_15s", root.display()))
+        );
+        assert_eq!(
+            option_value(&command.args, "--usgs-forest-height").map(str::to_owned),
+            Some(format!("{}/raw/Forest_Height.nc", root.display()))
+        );
+        assert_eq!(
+            option_value(&command.args, "--monthly-vegetation-year"),
+            Some("2000")
+        );
+        assert!(command
+            .required_files
+            .contains(&root.join("raw/Forest_Height.nc")));
+        assert!(command
+            .required_directories
+            .contains(&root.join("raw/plant_15s")));
         std::fs::remove_dir_all(root).unwrap();
     }
 

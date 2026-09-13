@@ -45,8 +45,8 @@ enabled downscaling branch meet all of these conditions:
    so Rust must not create an unverified restart. A spatial case namelist now derives its
 standard case paths, start timestamp, LAI year, and enabled cold-start controls, then scans the
 selected landpatch year for every block; --block restricts that scan. The namelist-driven LCT
-cold-start path is IGBP-only and explicitly refuses USGS or LULCC instead of creating a restart
-with unverified monthly vegetation or transfer state. Spatial urban, observed spatial state, PC
+cold-start path supports both IGBP and USGS monthly vegetation, but explicitly refuses LULCC
+until transfer-state support exists. Spatial urban, observed spatial state, PC
    hyperspectral canopy radiation, and external parity gates still require completion before
    GUI/CLI can select Rust as the default.
 

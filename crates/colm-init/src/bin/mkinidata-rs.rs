@@ -117,10 +117,6 @@ fn run_spatial_namelist(
             let land_cover = land_cover.context(
                 "spatial LCT case needs --land-cover igbp or usgs because a landpatch block stores only its selected class table",
             )?;
-            ensure!(
-                land_cover == LandCoverScheme::Igbp,
-                "spatial USGS no-observation restart is not migrated: Rust has no verified USGS monthly LAI/SAI reader"
-            );
             for block in spatial_blocks(&run, block_override)? {
                 write_spatial_lct_namelist_block(&run, land_cover, &block)?;
             }
@@ -852,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_usgs_case_is_refused_before_block_discovery() {
+    fn spatial_usgs_case_reaches_block_discovery() {
         let root =
             std::env::temp_dir().join(format!("colm-init-spatial-usgs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -877,7 +873,9 @@ mod tests {
 
         let error = run_spatial_namelist(&namelist, Some(LandCoverScheme::Usgs), None).unwrap_err();
 
-        assert!(error.to_string().contains("USGS"));
+        assert!(error
+            .to_string()
+            .contains("cannot read spatial landpatch directory"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
