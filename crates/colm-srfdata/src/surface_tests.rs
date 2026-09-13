@@ -124,6 +124,20 @@ fn topographic_wetness_matches_threshold_fit_and_short_sample_fallback() {
 }
 
 #[test]
+fn topographic_wetness_is_layer_major_and_reuses_wmo_sources() {
+    let layout =
+        FlatPatches::new(vec![1, 1], vec![0, 1, 2], vec![0, 1], vec![None, Some(0)]).unwrap();
+    let mut raw = Vec::new();
+    for value in 0..25 {
+        raw.extend([f64::from(value), 99.0]);
+    }
+    let output = layout.aggregate_topographic_wetness(&raw, 25).unwrap();
+    assert_eq!(output[0].unwrap().mean_twi, 12.0);
+    assert_eq!(output[1], output[0]);
+    assert!(layout.aggregate_topographic_wetness(&raw, 24).is_err());
+}
+
+#[test]
 fn simple_topography_factors_mask_missing_values_and_share_wmo_results() {
     let layout = FlatPatches::new(
         vec![1, 1],

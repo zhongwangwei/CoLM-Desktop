@@ -27,8 +27,8 @@ use colm_srfdata::{
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
     write_spatial_urban_vector, BlockLayout, FlatLandPatches, LczUrbanRawFields,
     NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode,
-    SpatialBounds, SpatialInputKind, SpatialTopology, UrbanMaterialParameters, COLM_1KM,
-    COLM_500M, COLM_5KM, MERIT_90M,
+    SpatialBounds, SpatialInputKind, SpatialTopology, TopographicWetness, UrbanMaterialParameters,
+    COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -36,6 +36,7 @@ const MODIS_PFT_CLASSES: usize = 16;
 const NATURAL_PFT_CLASSES: usize = 15;
 const CFT_CLASSES: usize = 64;
 const IGBP_LULCC_CLASSES: usize = 17;
+const TWI_LAYERS: usize = 25;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +71,7 @@ struct SpatialLctArgs {
     soil_model: SoilModel,
     soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
+    topographic_wetness: Option<PathBuf>,
     bedrock: Option<PathBuf>,
     plant_tiles: Option<PathBuf>,
     usgs_forest_height: Option<PathBuf>,
@@ -141,6 +143,7 @@ struct SpatialPftArgs {
     soil_model: SoilModel,
     soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
+    topographic_wetness: Option<PathBuf>,
     bedrock: Option<PathBuf>,
     soil_hyper_albedo_dir: Option<PathBuf>,
 }
@@ -272,6 +275,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         soil_model: args.soil_model,
         soil_brightness: args.soil_brightness.clone(),
         topography: args.topography.clone(),
+        topographic_wetness: args.topographic_wetness.clone(),
         bedrock: args.bedrock.clone(),
         plant_tiles: Some(args.plant_tiles.clone()),
         usgs_forest_height: None,
@@ -833,6 +837,72 @@ fn materialize_lulcc_transfer_traces(
     Ok(())
 }
 
+#[derive(Default)]
+struct TopographicWetnessFields {
+    mean_twi: Vec<f64>,
+    fsatmax: Vec<f64>,
+    fsatdcf: Vec<f64>,
+    alp_twi: Vec<f64>,
+    chi_twi: Vec<f64>,
+    mu_twi: Vec<f64>,
+}
+
+impl TopographicWetnessFields {
+    fn push(&mut self, value: TopographicWetness) {
+        self.mean_twi.push(value.mean_twi);
+        self.fsatmax.push(value.fsatmax);
+        self.fsatdcf.push(value.fsatdcf);
+        self.alp_twi.push(value.alp_twi);
+        self.chi_twi.push(value.chi_twi);
+        self.mu_twi.push(value.mu_twi);
+    }
+}
+
+fn materialize_topographic_wetness(
+    path: &Path,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+) -> Result<TopographicWetnessFields> {
+    let raw = read_mesh_raster_layers_f64(
+        path,
+        "twi",
+        TWI_LAYERS,
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let patch_layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let patch_values = patch_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS)?;
+    let elements = FlatLandPatches {
+        element_ids: topology.land_elements.element_ids.clone(),
+        pixel_start: topology.land_elements.pixel_start.clone(),
+        pixel_end: topology.land_elements.pixel_end.clone(),
+        set_type: topology.land_elements.set_type.clone(),
+        element_index: topology.land_elements.element_index.clone(),
+    };
+    let element_layout = elements.aggregation_layout(&topology.mesh, vec![None; elements.len()])?;
+    let element_values = element_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS)?;
+    let fallback = TopographicWetness {
+        mean_twi: 9.27,
+        fsatmax: 0.38,
+        fsatdcf: 0.55,
+        alp_twi: 1.34,
+        chi_twi: 1.61,
+        mu_twi: 6.95,
+    };
+    let mut output = TopographicWetnessFields::default();
+    for (patch, value) in patch_values.into_iter().enumerate() {
+        let element = patches.element_index[patch]
+            .checked_sub(1)
+            .with_context(|| format!("topographic-wetness patch {patch} has zero element index"))?;
+        let element_value = *element_values.get(element).with_context(|| {
+            format!("topographic-wetness patch {patch} references unknown element {element}")
+        })?;
+        output.push(value.or(element_value).unwrap_or(fallback));
+    }
+    Ok(output)
+}
+
 fn lulcc_previous_land_cover_year(year: i32) -> Option<i32> {
     if year < 1990 || (year < 2000 && year % 5 != 0) {
         None
@@ -983,6 +1053,11 @@ fn materialize_spatial_common_fields(
     } else {
         None
     };
+    let topographic_wetness = args
+        .topographic_wetness
+        .as_deref()
+        .map(|path| materialize_topographic_wetness(path, topology, patches))
+        .transpose()?;
     let bedrock = if let Some(path) = &args.bedrock {
         let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         let raw =
@@ -1090,6 +1165,27 @@ fn materialize_spatial_common_fields(
             ("elevation_patches", &topography.elevation),
             ("elvstd_patches", &topography.elevation_std),
             ("sloperatio_patches", &topography.slope_ratio),
+        ] {
+            write_landpatch_scalar(
+                &args.landdata,
+                args.year,
+                topology,
+                patches,
+                &args.blocks,
+                "topography",
+                variable,
+                values,
+            )?;
+        }
+    }
+    if let Some(topographic_wetness) = topographic_wetness {
+        for (variable, values) in [
+            ("mean_twi_patches", &topographic_wetness.mean_twi),
+            ("fsatmax_patches", &topographic_wetness.fsatmax),
+            ("fsatdcf_patches", &topographic_wetness.fsatdcf),
+            ("alp_twi_patches", &topographic_wetness.alp_twi),
+            ("chi_twi_patches", &topographic_wetness.chi_twi),
+            ("mu_twi_patches", &topographic_wetness.mu_twi),
         ] {
             write_landpatch_scalar(
                 &args.landdata,
@@ -1543,6 +1639,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut soil_model = SoilModel::Vgm;
     let mut soil_brightness = None;
     let mut topography = None;
+    let mut topographic_wetness = None;
     let mut bedrock = None;
     let mut plant_tiles = None;
     let mut usgs_forest_height = None;
@@ -1632,6 +1729,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 topography = Some(PathBuf::from(
                     args.get(index + 1)
                         .context("--topography needs a NetCDF path")?,
+                ));
+                index += 2;
+            }
+            "--topographic-wetness" => {
+                topographic_wetness = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--topographic-wetness needs TWI.nc")?,
                 ));
                 index += 2;
             }
@@ -1745,6 +1849,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         soil_model,
         soil_brightness,
         topography,
+        topographic_wetness,
         bedrock,
         plant_tiles,
         usgs_forest_height,
@@ -1787,6 +1892,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut soil_model = SoilModel::Vgm;
     let mut soil_brightness = None;
     let mut topography = None;
+    let mut topographic_wetness = None;
     let mut bedrock = None;
     let mut soil_hyper_albedo_dir = None;
     let mut index = 5;
@@ -1878,6 +1984,13 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 ));
                 index += 2;
             }
+            "--topographic-wetness" => {
+                topographic_wetness = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--topographic-wetness needs TWI.nc")?,
+                ));
+                index += 2;
+            }
             "--bedrock" => {
                 bedrock = Some(PathBuf::from(
                     args.get(index + 1)
@@ -1929,6 +2042,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         soil_model,
         soil_brightness,
         topography,
+        topographic_wetness,
         bedrock,
         soil_hyper_albedo_dir,
     })
@@ -2188,6 +2302,7 @@ fn spatial_case_command(
     let soil_dir = rawdata.join("soil");
     let soil_brightness = rawdata.join("soil_brightness.nc");
     let topography = rawdata.join("topography.nc");
+    let topographic_wetness = rawdata.join("TWI.nc");
     let bedrock = rawdata.join("bedrock.nc");
     let plant_tiles = rawdata.join("plant_15s");
     let mut required_files = vec![
@@ -2255,6 +2370,13 @@ fn spatial_case_command(
             "--topography".to_owned(),
             topography.display().to_string(),
         ]);
+        if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
+            required_files.push(topographic_wetness.clone());
+            args.extend([
+                "--topographic-wetness".to_owned(),
+                topographic_wetness.display().to_string(),
+            ]);
+        }
         if case_bool(&document, "DEF_USE_BEDROCK", false)? {
             required_files.push(bedrock.clone());
             args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
@@ -2339,6 +2461,13 @@ fn spatial_case_command(
             "--topography".to_owned(),
             topography.display().to_string(),
         ]);
+        if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
+            required_files.push(topographic_wetness.clone());
+            args.extend([
+                "--topographic-wetness".to_owned(),
+                topographic_wetness.display().to_string(),
+            ]);
+        }
         if crop {
             let crop_surface = rawdata.join("global_CFT_surface_data.nc");
             required_files.push(crop_surface.clone());
@@ -2542,8 +2671,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -2578,6 +2707,8 @@ mod tests {
             "soil_brightness.nc".into(),
             "--topography".into(),
             "topography.nc".into(),
+            "--topographic-wetness".into(),
+            "TWI.nc".into(),
             "--bedrock".into(),
             "bedrock.nc".into(),
             "--plant-tiles".into(),
@@ -2615,6 +2746,7 @@ mod tests {
             Some(PathBuf::from("soil_brightness.nc"))
         );
         assert_eq!(parsed.topography, Some(PathBuf::from("topography.nc")));
+        assert_eq!(parsed.topographic_wetness, Some(PathBuf::from("TWI.nc")));
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
         assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
@@ -2697,6 +2829,8 @@ mod tests {
             "soil_brightness.nc".into(),
             "--topography".into(),
             "topography.nc".into(),
+            "--topographic-wetness".into(),
+            "TWI.nc".into(),
             "--bedrock".into(),
             "bedrock.nc".into(),
             "--soil-hyper-albedo-dir".into(),
@@ -2725,6 +2859,7 @@ mod tests {
             Some(PathBuf::from("soil_brightness.nc"))
         );
         assert_eq!(parsed.topography, Some(PathBuf::from("topography.nc")));
+        assert_eq!(parsed.topographic_wetness, Some(PathBuf::from("TWI.nc")));
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
         assert_eq!(
             parsed.soil_hyper_albedo_dir,
@@ -2782,6 +2917,7 @@ mod tests {
  DEF_LAI_START_YEAR=2006
  DEF_LAI_END_YEAR=2007
  DEF_USE_Campbell_SOIL_MODEL=.true.
+ DEF_Runoff_SCHEME=0
  DEF_USE_BEDROCK=.true.
 /
 ",
@@ -2812,6 +2948,10 @@ mod tests {
             Some("campbell")
         );
         assert_eq!(
+            option_value(&command.args, "--topographic-wetness").map(str::to_owned),
+            Some(format!("{}/raw/TWI.nc", root.display()))
+        );
+        assert_eq!(
             option_value(&command.args, "--plant-tiles").map(str::to_owned),
             Some(format!("{}/raw/plant_15s", root.display()))
         );
@@ -2831,6 +2971,7 @@ mod tests {
         assert!(command
             .required_files
             .contains(&root.join("raw/bedrock.nc")));
+        assert!(command.required_files.contains(&root.join("raw/TWI.nc")));
         assert!(command
             .required_directories
             .contains(&root.join("raw/soil")));
@@ -2972,6 +3113,7 @@ mod tests {
  DEF_USE_PFT=.true.
  DEF_USE_PC=.false.
  DEF_USE_CROP=.true.
+ DEF_Runoff_SCHEME=0
  DEF_LC_YEAR=1999
  DEF_LAI_CHANGE_YEARLY=.false.
 /
@@ -2992,6 +3134,11 @@ mod tests {
             option_value(&command.args, "--monthly-vegetation-year"),
             Some("1999")
         );
+        assert_eq!(
+            option_value(&command.args, "--topographic-wetness").map(str::to_owned),
+            Some(format!("{}/raw/TWI.nc", root.display()))
+        );
+        assert!(command.required_files.contains(&root.join("raw/TWI.nc")));
         assert!(command
             .required_directories
             .contains(&root.join("raw/plant_15s")));

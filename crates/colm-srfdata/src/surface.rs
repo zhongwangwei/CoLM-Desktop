@@ -303,6 +303,48 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Aggregate the 25-layer `TWI.nc` source for each patch.
+    ///
+    /// `Aggregation_TopoWetness.F90` first tries the patch's own samples and
+    /// then falls back to its owning element when fewer than 25 valid values
+    /// exist.  This method is the first step: it preserves the `None` result
+    /// so the topology adapter can apply that element-level fallback.
+    pub fn aggregate_topographic_wetness(
+        &self,
+        raw_twi: &[f64],
+        layers: usize,
+    ) -> Result<Vec<Option<TopographicWetness>>> {
+        ensure!(
+            layers > 0,
+            "topographic-wetness source needs at least one layer"
+        );
+        ensure!(
+            raw_twi.len() % layers == 0,
+            "topographic-wetness source must be layer-major"
+        );
+        let cells = raw_twi.len() / layers;
+        let mut result = vec![None; self.len()];
+        let mut gathered = Vec::new();
+        for patch in 0..self.len() {
+            if let Some(source) = self.wmo_source[patch] {
+                result[patch] = result[source];
+                continue;
+            }
+            gathered.clear();
+            for layer in 0..layers {
+                for &cell in &self.cells[self.cells_for(patch)] {
+                    gathered.push(*raw_twi.get(layer * cells + cell).with_context(|| {
+                        format!(
+                            "topographic-wetness patch {patch} references layer {layer}, raw cell {cell}, but the source has {cells} cells"
+                        )
+                    })?);
+                }
+            }
+            result[patch] = derive_topographic_wetness(&gathered)?;
+        }
+        Ok(result)
+    }
+
     /// Aggregate previous land-cover classes for CoLM LULCC transfer traces.
     ///
     /// Output is class-major: class * patches + patch. WMO consumer patches
