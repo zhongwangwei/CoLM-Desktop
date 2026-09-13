@@ -1733,10 +1733,6 @@ fn field_runtime_state(
     {
         return hidden("当前内核未启用 HYPERSPECTRAL");
     }
-    if name == "DEF_HighResUrban_albedo" && !c.urban {
-        return hidden("仅城市高光谱模式使用");
-    }
-
     // 站点身份在建例时逐站点写入。批量参数页若允许修改，会把多个站点的
     // 文件、坐标或地类悄悄统一成同一个值，因此 SinglePoint 一律不展示。
     // 自然站的地类来自站点 NetCDF 的 IGBP_classification；城市站固定为 13。

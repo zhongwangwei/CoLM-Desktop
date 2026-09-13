@@ -589,6 +589,9 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
     {
         return Some("强迫场");
     }
+    if n == "DEF_HIGHRESURBAN_ALBEDO" {
+        return Some("地表数据");
+    }
     if has(&["URBAN", "CANYON_HWR"]) {
         return Some("城市");
     }

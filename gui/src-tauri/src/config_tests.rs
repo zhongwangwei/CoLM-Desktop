@@ -2540,6 +2540,10 @@ fn interception_choices_follow_the_kernel_file_selection_macro() {
 
 #[test]
 fn lake_wetland_and_hyperspectral_fields_follow_actual_capabilities() {
+    assert_eq!(
+        super::field_section("DEF_HighResUrban_albedo", Some("nl_colm")),
+        Some("地表数据")
+    );
     // IGBP constants in MOD_Vars_Global.F90: WATERBODY=17, WETLAND=11.
     for (landtype, visible, hidden) in [
         (17, "DEF_USE_Dynamic_Lake", "DEF_USE_Dynamic_Wetland"),
@@ -2560,7 +2564,7 @@ fn lake_wetland_and_hyperspectral_fields_follow_actual_capabilities() {
     }
     let regular = runtime_states("&nl_colm\n/\n", &["SinglePoint", "LULC_IGBP"]);
     let spectral = runtime_states(
-        "&nl_colm\n DEF_URBAN_RUN=.true.\n/\n",
+        "&nl_colm\n/\n",
         &["SinglePoint", "LULC_IGBP", "HYPERSPECTRAL"],
     );
     for name in [
@@ -2577,7 +2581,13 @@ fn lake_wetland_and_hyperspectral_fields_follow_actual_capabilities() {
         "DEF_PROSPECT",
         "DEF_HighResUrban_albedo",
     ] {
-        assert_eq!(mode(&spectral, name), &FieldMode::Editable, "{name}");
+        let state = runtime_state(&spectral, name);
+        assert_eq!(
+            state.mode,
+            FieldMode::Editable,
+            "{name}: {:?}",
+            state.reason
+        );
     }
 }
 

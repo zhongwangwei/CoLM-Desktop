@@ -7,7 +7,7 @@
 # 因此版本握手靠构建期生成的 manifest.json + sha256，而不是问二进制。
 set -euo pipefail
 
-PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop|latlon[-usgs|-crop]|unstructured[-usgs|-crop]|catchment[-usgs|-crop]> [outdir]}"
+PRESET="${1:?usage: build_kernel.sh <default|usgs|bgc|urban|crop|latlon[-usgs|-crop|-hyper]|unstructured[-usgs|-crop|-hyper]|catchment[-usgs|-crop|-hyper]> [outdir]}"
 OUTDIR="${2:-kernels}"
 PROFILE="${COLM_KERNEL_PROFILE:-production}"
 case "$PROFILE" in
@@ -55,6 +55,7 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # 空间预设也按 IGBP / USGS / CROP 三种编译能力展开；范围（流域/区域/全球）
 # 是运行时 domain mask，不产生九份重复内核。
 SPATIAL=0
+HYPERSPECTRAL=0
 case "$PRESET" in
   default) ARGS=(SinglePoint LULC_IGBP CaMaOFF CROPOFF) ;;
   usgs)    ARGS=(SinglePoint LULC_USGS CaMaOFF CROPOFF) ;;
@@ -64,12 +65,15 @@ case "$PRESET" in
   latlon)              ARGS=(GRID LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1 ;;
   latlon-usgs)         ARGS=(GRID LULC_USGS CaMaOFF CROPOFF); SPATIAL=1 ;;
   latlon-crop)         ARGS=(GRID LULC_IGBP CaMaOFF CROPON);  SPATIAL=1 ;;
+  latlon-hyper)        ARGS=(GRID LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1; HYPERSPECTRAL=1 ;;
   unstructured)        ARGS=(UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1 ;;
   unstructured-usgs)   ARGS=(UNSTRUCTURED LULC_USGS CaMaOFF CROPOFF); SPATIAL=1 ;;
   unstructured-crop)   ARGS=(UNSTRUCTURED LULC_IGBP CaMaOFF CROPON);  SPATIAL=1 ;;
+  unstructured-hyper)  ARGS=(UNSTRUCTURED LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1; HYPERSPECTRAL=1 ;;
   catchment)           ARGS=(CATCHMENT LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1 ;;
   catchment-usgs)      ARGS=(CATCHMENT LULC_USGS CaMaOFF CROPOFF); SPATIAL=1 ;;
   catchment-crop)      ARGS=(CATCHMENT LULC_IGBP CaMaOFF CROPON);  SPATIAL=1 ;;
+  catchment-hyper)     ARGS=(CATCHMENT LULC_IGBP CaMaOFF CROPOFF); SPATIAL=1; HYPERSPECTRAL=1 ;;
   *) echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac
 
@@ -126,6 +130,9 @@ fi
 rm -f include/Makeoptions
 cp "include/$MAKEOPTS" include/Makeoptions
 ./.github/workflows/create_defineh.bash "${ARGS[@]}" >/dev/null
+if [ "$HYPERSPECTRAL" -eq 1 ]; then
+  printf '\n#define HYPERSPECTRAL\n' >> include/define.h
+fi
 if [ "$SPATIAL" -eq 1 ]; then
   # 默认 Flat SPMD 保持桌面版现有行为；grouped 留给有专用 IO/写出 rank 的
   # 生产 benchmark。站点预设始终使用原有 Master/IO/Worker 路径。
@@ -211,6 +218,13 @@ for arg in "${ARGS[@]}"; do
     exit 3
   fi
 done
+
+if [ "$HYPERSPECTRAL" -eq 1 ]; then
+  is_effective HYPERSPECTRAL || {
+    echo "hyperspectral kernel must enable HYPERSPECTRAL" >&2
+    exit 3
+  }
+fi
 
 if [ "$SPATIAL" -eq 1 ]; then
   is_effective USEMPI || { echo "spatial kernel must enable USEMPI" >&2; exit 3; }
