@@ -178,7 +178,10 @@ pub use spatial_pft::{
     SpatialPftTimeConfig, SpatialPftTimeRestartFiles,
 };
 pub use spatial_static::{write_spatial_lct_constant_restart, SpatialLctStaticConfig};
-pub use spatial_time::{write_spatial_lct_cold_time_restart, SpatialLctTimeConfig};
+pub use spatial_time::{
+    write_spatial_lct_cold_time_restart, SpatialLctTimeConfig, SpatialObservedInitialization,
+    SpatialObservedInitializationPaths,
+};
 pub use spatial_urban::{
     write_spatial_urban_cold_time_restarts, write_spatial_urban_constant_restarts,
     SpatialUrbanConstantRestartFiles, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig,

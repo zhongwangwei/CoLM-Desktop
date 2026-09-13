@@ -14,8 +14,8 @@ use colm_init::{
     write_spatial_pft_cold_time_restarts, write_spatial_pft_constant_restarts,
     write_spatial_urban_cold_time_restarts, write_spatial_urban_constant_restarts, HydraulicModel,
     LandCoverScheme, RestartDate, SinglePointStaticConfig, SpatialLctStaticConfig,
-    SpatialLctTimeConfig, SpatialPftStaticConfig, SpatialPftTimeConfig, SpatialUrbanStaticConfig,
-    SpatialUrbanTimeConfig, UrbanConfig,
+    SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
+    SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
 };
 use colm_namelist::{parse, Value};
 
@@ -115,6 +115,7 @@ struct SpatialNamelistRun {
     variably_saturated_flow: bool,
     vegetation_snow: bool,
     snow_cover_exponent: f64,
+    observations: SpatialObservedInitializationPaths,
 }
 
 fn run_spatial_namelist(
@@ -194,6 +195,7 @@ fn write_spatial_urban_namelist_block(
     time.variably_saturated_flow = run.variably_saturated_flow;
     time.vegetation_snow = run.vegetation_snow;
     time.snow_cover_exponent = run.snow_cover_exponent;
+    time.observations = run.observations.borrow();
     let time = write_spatial_urban_cold_time_restarts(SpatialUrbanTimeConfig {
         common: time,
         geometry: urban.geometry,
@@ -256,6 +258,7 @@ fn write_spatial_lct_namelist_block(
     time.variably_saturated_flow = run.variably_saturated_flow;
     time.vegetation_snow = run.vegetation_snow;
     time.snow_cover_exponent = run.snow_cover_exponent;
+    time.observations = run.observations.borrow();
     let time = write_spatial_lct_cold_time_restart(time)?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
@@ -307,16 +310,6 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    for field in [
-        "DEF_USE_SoilInit",
-        "DEF_USE_SnowInit",
-        "DEF_USE_WaterTableInit",
-    ] {
-        ensure!(
-            !namelist_bool(&document, field, false)?,
-            "spatial observed initialization ({field}) is not migrated; Rust refuses to replace it with a cold restart"
-        );
-    }
     ensure!(
         namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
         "spatial cold start requires DEF_LAI_MONTHLY = .true."
@@ -421,6 +414,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         variably_saturated_flow: namelist_bool(&document, "DEF_USE_VariablySaturatedFlow", true)?,
         vegetation_snow: namelist_bool(&document, "DEF_VEG_SNOW", true)?,
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
+        observations: SpatialObservedInitializationPaths::from_document(&document)?,
     })
 }
 
@@ -831,6 +825,12 @@ mod tests {
             std::env::temp_dir().join(format!("colm-init-spatial-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        let soil = root.join("soilstate.nc");
+        let snow = root.join("snowstate.nc");
+        let water_table = root.join("wtd.nc");
+        for path in [&soil, &snow, &water_table] {
+            std::fs::write(path, []).unwrap();
+        }
         let namelist = root.join("case.nml");
         std::fs::write(
             &namelist,
@@ -857,9 +857,18 @@ mod tests {
  DEF_USE_VariablySaturatedFlow=.false.
  DEF_VEG_SNOW=.false.
  DEF_TUNING_SNOW_COVER_EXPONENT=.75
+ DEF_USE_SoilInit=.true.
+ DEF_file_SoilInit='{}'
+ DEF_USE_SnowInit=.true.
+ DEF_file_SnowInit='{}'
+ DEF_USE_WaterTableInit=.true.
+ DEF_file_WaterTable='{}'
 /
 ",
-                root.display()
+                root.display(),
+                soil.display(),
+                snow.display(),
+                water_table.display(),
             ),
         )
         .unwrap();
@@ -888,6 +897,9 @@ mod tests {
         assert!(!run.variably_saturated_flow);
         assert!(!run.vegetation_snow);
         assert_eq!(run.snow_cover_exponent, 0.75);
+        assert_eq!(run.observations.soil, Some(soil));
+        assert_eq!(run.observations.snow, Some(snow));
+        assert_eq!(run.observations.water_table, Some(water_table));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -41,8 +41,8 @@ use crate::{
     ColdStartRadiation, ConstantRestartFiles, HydraulicModel, LandCoverScheme, PcPftInput,
     PftBgcFields, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
     PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning,
-    RuntimeCnState, RuntimeCnVegetationCarbon, SpatialLctTimeConfig, TimeHyperspectralFields,
-    TimeRestartFile, MISSING,
+    RuntimeCnState, RuntimeCnVegetationCarbon, SpatialLctTimeConfig,
+    SpatialObservedInitializationPaths, TimeHyperspectralFields, TimeRestartFile, MISSING,
 };
 
 /// Arguments for one already-addressed spatial `landpft` block.
@@ -65,7 +65,7 @@ pub struct SpatialPftConstantRestartFiles {
     pub bgc: Option<BgcConstantRestartFiles>,
 }
 
-/// Arguments for the no-observation PFT cold start of one spatial block.
+/// Arguments for the PFT cold start of one spatial block.
 ///
 /// The PFT and BGC state derives through `colm-core`; CROP remains separate
 /// because its crop-management state has not yet been materialized spatially.
@@ -265,8 +265,8 @@ pub fn write_spatial_pft_constant_restarts(
 /// Writes both common and PFT timestamped restart blocks for one spatial PFT
 /// cold start.
 ///
-/// The common block is first built by the LCT no-observation initializer, which
-/// is the owner of the shared cold soil, lake, snow, and clock state.  Natural
+/// The common block is first built by the LCT initializer, which owns the
+/// shared observed/cold soil, lake, snow, and clock state.  Natural
 /// patches are then replaced with their exact PFT-weighted optical state and
 /// roughness, while water, ice, wetland, and urban patches retain that shared
 /// common state.  This prevents a second copy of the cold-soil path here.
@@ -274,6 +274,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     config: SpatialPftTimeConfig<'_>,
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
+    let observations = SpatialObservedInitializationPaths::from_document(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;
     ensure!(
@@ -372,6 +373,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     common_config.vegetation_snow = config.vegetation_snow;
     common_config.snow_cover_exponent = config.snow_cover_exponent;
     common_config.tuning = config.tuning;
+    common_config.observations = observations.borrow();
     let common = crate::write_spatial_lct_cold_time_restart(common_config)?;
 
     let patches = read_patches(

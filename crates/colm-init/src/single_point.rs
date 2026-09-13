@@ -2449,7 +2449,7 @@ fn optional_bool_or(
     }
 }
 
-fn enabled_existing_path(
+pub(crate) fn enabled_existing_path(
     document: &colm_namelist::Document,
     enabled_field: &str,
     path_field: &str,

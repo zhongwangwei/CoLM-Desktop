@@ -159,10 +159,18 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
         20.0,
     );
     write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let soil = root.join("soilstate.nc");
+    let snow = root.join("snowstate.nc");
+    write_observed_soil(&soil);
+    write_observed_snow(&snow);
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_Campbell_SOIL_MODEL = .false.\n/\n",
+        format!(
+            "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_Campbell_SOIL_MODEL = .false.\n DEF_USE_SoilInit = .true.\n DEF_file_SoilInit = '{}'\n DEF_USE_SnowInit = .true.\n DEF_file_SnowInit = '{}'\n/\n",
+            soil.display(),
+            snow.display(),
+        ),
     )
     .unwrap();
 
@@ -182,6 +190,8 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     let common = netcdf::open(&files.common.block).unwrap();
     assert_eq!(values_f64(&common, "tlai").unwrap(), [2.5]);
     assert_eq!(values_f64(&common, "z0m").unwrap(), [2.0]);
+    assert_eq!(values_f64(&common, "zwt").unwrap(), [2.0]);
+    assert_eq!(values_f64(&common, "snowdp").unwrap(), [0.2]);
     let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_f64(&pft, "tlai_p").unwrap(), [2.5]);
     assert_eq!(values_f64(&pft, "tsai_p").unwrap(), [0.4]);
@@ -487,6 +497,119 @@ fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata()
     assert_eq!(values_f64(&file, "t_lake").unwrap(), vec![285.0; 10]);
     assert_eq!(values_f64(&file, "dz_lake").unwrap().len(), 10);
     assert!(file.variable("vegwp").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_cold_start_area_averages_observed_soil_and_snow() {
+    let root = temp_dir("observed-soil-snow");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let soil = root.join("soilstate.nc");
+    let snow = root.join("snowstate.nc");
+    write_observed_soil(&soil);
+    write_observed_snow(&snow);
+    let mut config = crate::SpatialLctTimeConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    config.observations = crate::SpatialObservedInitialization {
+        soil: Some(&soil),
+        snow: Some(&snow),
+        water_table: None,
+    };
+    let output = crate::write_spatial_lct_cold_time_restart(config).unwrap();
+    let file = netcdf::open(output.block).unwrap();
+    assert!((values_f64(&file, "t_soisno").unwrap()[5] - 260.0).abs() < 1.0e-12);
+    assert_eq!(values_f64(&file, "zwt").unwrap(), [2.0]);
+    assert_eq!(values_f64(&file, "snowdp").unwrap(), [0.2]);
+    assert_eq!(values_f64(&file, "scv").unwrap(), [50.0]);
+    assert!(values_f64(&file, "fsno").unwrap()[0] > 0.0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_observed_soil_masks_every_field_from_missing_water_table() {
+    let root = temp_dir("observed-soil-missing");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let soil = root.join("soilstate.nc");
+    write_observed_soil_with_missing_zwt(&soil);
+    let mut config = crate::SpatialLctTimeConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    config.observations = crate::SpatialObservedInitialization {
+        soil: Some(&soil),
+        snow: None,
+        water_table: None,
+    };
+    let output = crate::write_spatial_lct_cold_time_restart(config).unwrap();
+    let file = netcdf::open(output.block).unwrap();
+    assert_eq!(values_f64(&file, "t_soisno").unwrap()[5], 270.0);
+    assert_eq!(values_f64(&file, "zwt").unwrap(), [3.0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_cold_start_uses_explicit_edge_water_table_without_soil() {
+    let root = temp_dir("observed-wtd");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let wtd = root.join("wtd.nc");
+    write_observed_wtd(&wtd);
+    let mut config = crate::SpatialLctTimeConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    config.observations = crate::SpatialObservedInitialization {
+        soil: None,
+        snow: None,
+        water_table: Some(&wtd),
+    };
+    let output = crate::write_spatial_lct_cold_time_restart(config).unwrap();
+    let file = netcdf::open(output.block).unwrap();
+    assert_eq!(values_f64(&file, "zwt").unwrap(), [2.0]);
+    assert_eq!(values_f64(&file, "t_soisno").unwrap()[5], 283.0);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -974,6 +1097,117 @@ fn write_i32(
     file.add_variable::<i32>(variable, &["patch"])
         .unwrap()
         .put_values(&[value], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_observed_soil(path: &Path) {
+    write_observed_soil_with_missing(path, false);
+}
+
+fn write_observed_soil_with_missing_zwt(path: &Path) {
+    write_observed_soil_with_missing(path, true);
+}
+
+fn write_observed_soil_with_missing(path: &Path, missing_first_water_table: bool) {
+    let grid = crate::colm_soil_grid(8).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    for (name, length) in [("month", 12), ("lat", 1), ("lon", 2), ("layer", 8)] {
+        file.add_dimension(name, length).unwrap();
+    }
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-179.5, -178.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("soildepth", &["layer"])
+        .unwrap()
+        .put_values(&grid.node_depth_m, ..)
+        .unwrap();
+    let mut profile = Vec::new();
+    let mut water = Vec::new();
+    let mut zwt = Vec::new();
+    for _ in 0..12 {
+        for (temperature, wetness, table) in [(250.0, 0.4, 1.0), (270.0, 0.6, 3.0)] {
+            profile.extend(std::iter::repeat_n(temperature, 8));
+            water.extend(std::iter::repeat_n(wetness, 8));
+            zwt.push(if missing_first_water_table && table == 1.0 {
+                -1.0e36
+            } else {
+                table
+            });
+        }
+    }
+    file.add_variable::<f64>("soiltemp", &["month", "lat", "lon", "layer"])
+        .unwrap()
+        .put_values(&profile, ..)
+        .unwrap();
+    file.add_variable::<f64>("soilwat", &["month", "lat", "lon", "layer"])
+        .unwrap()
+        .put_values(&water, ..)
+        .unwrap();
+    let mut zwt_variable = file
+        .add_variable::<f64>("zwt", &["month", "lat", "lon"])
+        .unwrap();
+    zwt_variable
+        .put_attribute("missing_value", -1.0e36_f64)
+        .unwrap();
+    zwt_variable.put_values(&zwt, ..).unwrap();
+    file.close().unwrap();
+}
+
+fn write_observed_snow(path: &Path) {
+    let mut file = netcdf::create(path).unwrap();
+    for (name, length) in [("month", 12), ("lat", 1), ("lon", 2)] {
+        file.add_dimension(name, length).unwrap();
+    }
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-179.5, -178.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("snowdepth", &["month", "lat", "lon"])
+        .unwrap()
+        .put_values(
+            &std::iter::repeat_n([0.1, 0.3], 12)
+                .flatten()
+                .collect::<Vec<_>>(),
+            ..,
+        )
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_observed_wtd(path: &Path) {
+    let mut file = netcdf::create(path).unwrap();
+    for (name, length) in [("time", 12), ("lat", 1), ("lon", 2)] {
+        file.add_dimension(name, length).unwrap();
+    }
+    for (name, values, dimension) in [
+        ("lat_s", &[0.0][..], "lat"),
+        ("lat_n", &[1.0][..], "lat"),
+        ("lon_w", &[-180.0, -179.0][..], "lon"),
+        ("lon_e", &[-179.0, -178.0][..], "lon"),
+    ] {
+        file.add_variable::<f64>(name, &[dimension])
+            .unwrap()
+            .put_values(values, ..)
+            .unwrap();
+    }
+    file.add_variable::<f32>("wtd", &["time", "lat", "lon"])
+        .unwrap()
+        .put_values(
+            &std::iter::repeat_n([1.0_f32, 3.0], 12)
+                .flatten()
+                .collect::<Vec<_>>(),
+            ..,
+        )
         .unwrap();
     file.close().unwrap();
 }

@@ -704,6 +704,8 @@ pub(crate) struct MapGrid {
     lat_n: Vec<f64>,
     lon_w: Vec<f64>,
     lon_span: Vec<f64>,
+    /// Cyclic longitudes unwrapped into one increasing 360° sweep.
+    lon_start: Vec<f64>,
 }
 
 impl MapGrid {
@@ -783,11 +785,67 @@ impl MapGrid {
                 })
                 .unzip()
         };
+        let lon_start = unwrap_longitude_starts(&lon_w)?;
         Ok(Self {
             lat_s,
             lat_n,
             lon_w,
             lon_span,
+            lon_start,
+        })
+    }
+
+    /// Read CoLM's explicit cell edges (`grid_define_from_file` without
+    /// center-coordinate arguments).  Groundwater-depth maps use this form.
+    pub(crate) fn from_explicit_edges(file: &netcdf::File) -> Result<Self> {
+        let lat_s = coordinate_values(file, "lat_s")?;
+        let lat_n = coordinate_values(file, "lat_n")?;
+        let lon_w = coordinate_values(file, "lon_w")?;
+        let lon_e = coordinate_values(file, "lon_e")?;
+        ensure!(
+            !lat_s.is_empty()
+                && !lon_w.is_empty()
+                && lat_s.len() == lat_n.len()
+                && lon_w.len() == lon_e.len()
+                && lat_s
+                    .iter()
+                    .zip(&lat_n)
+                    .all(|(&south, &north)| south.is_finite()
+                        && north.is_finite()
+                        && north > south)
+                && lon_w
+                    .iter()
+                    .zip(&lon_e)
+                    .all(|(&west, &east)| west.is_finite()
+                        && east.is_finite()
+                        && longitude_span(west, east) > 0.0),
+            "CoLM map cell edges must be finite, nonempty, and have positive area"
+        );
+        let increasing = lat_s.len() < 2 || lat_s[1] > lat_s[0];
+        ensure!(
+            lat_s.windows(2).all(|pair| if increasing {
+                pair[1] > pair[0]
+            } else {
+                pair[1] < pair[0]
+            }) && lat_n.windows(2).all(|pair| if increasing {
+                pair[1] > pair[0]
+            } else {
+                pair[1] < pair[0]
+            }),
+            "CoLM map latitude edges must be strictly monotonic"
+        );
+        let lon_span = lon_w
+            .iter()
+            .zip(&lon_e)
+            .map(|(&west, &east)| longitude_span(west, east))
+            .collect();
+        let lon_start = unwrap_longitude_starts(&lon_w)?;
+        Ok(Self {
+            lat_s,
+            lat_n,
+            lon_w,
+            lon_span,
+            lon_start,
         })
     }
 
@@ -801,11 +859,67 @@ impl MapGrid {
             && self.lon_w == other.lon_w
             && self.lon_span == other.lon_span
     }
+
+    fn overlapping_latitudes(&self, south: f64, north: f64) -> std::ops::Range<usize> {
+        let increasing = self.lat_s.len() < 2 || self.lat_s[1] > self.lat_s[0];
+        let (start, end) = if increasing {
+            (
+                self.lat_n.partition_point(|edge| *edge <= south),
+                self.lat_s.partition_point(|edge| *edge < north),
+            )
+        } else {
+            (
+                self.lat_s.partition_point(|edge| *edge >= north),
+                self.lat_n.partition_point(|edge| *edge > south),
+            )
+        };
+        start.min(end)..end
+    }
+
+    fn overlapping_longitudes(&self, west: f64, span: f64) -> Vec<(usize, f64)> {
+        let first = self.lon_start[0];
+        let mut start = west.rem_euclid(360.0);
+        while start < first {
+            start += 360.0;
+        }
+        while start >= first + 360.0 {
+            start -= 360.0;
+        }
+        let end = start + span;
+        let source_count = self.lon_start.len();
+        let first_index = self
+            .lon_start
+            .partition_point(|candidate| *candidate <= start)
+            .saturating_sub(1);
+        let mut overlaps = Vec::new();
+        for position in first_index..first_index + source_count + 1 {
+            let index = position % source_count;
+            let source_start =
+                self.lon_start[index] + if position >= source_count { 360.0 } else { 0.0 };
+            if source_start >= end {
+                break;
+            }
+            if source_start + self.lon_span[index] <= start {
+                continue;
+            }
+            let width = longitude_overlap(west, span, self.lon_w[index], self.lon_span[index]);
+            if width >= 1.0e-6 {
+                overlaps.push((index, width));
+            }
+        }
+        overlaps
+    }
 }
 
 pub(crate) struct MapField {
     values: Vec<f64>,
     valid: Vec<bool>,
+}
+
+impl MapField {
+    pub(crate) fn validity(&self) -> &[bool] {
+        &self.valid
+    }
 }
 
 pub(crate) struct AreaMapping {
@@ -847,22 +961,11 @@ impl AreaMapping {
                 );
                 let target_span = longitude_span(west, east);
                 ensure!(target_span > 0.0, "CROP pixel has zero longitude width");
-                for latitude in 0..grid.lat_s.len() {
+                let longitudes = grid.overlapping_longitudes(west, target_span);
+                for latitude in grid.overlapping_latitudes(south, north) {
                     let overlap_south = south.max(grid.lat_s[latitude]);
                     let overlap_north = north.min(grid.lat_n[latitude]);
-                    if overlap_north - overlap_south < 1.0e-6 {
-                        continue;
-                    }
-                    for longitude in 0..grid.lon_w.len() {
-                        let width = longitude_overlap(
-                            west,
-                            target_span,
-                            grid.lon_w[longitude],
-                            grid.lon_span[longitude],
-                        );
-                        if width < 1.0e-6 {
-                            continue;
-                        }
+                    for &(longitude, width) in &longitudes {
                         let area = width.to_radians()
                             * (overlap_north.to_radians().sin() - overlap_south.to_radians().sin())
                             * share;
@@ -890,7 +993,9 @@ impl AreaMapping {
         self.parts.len()
     }
 
-    fn exclude_invalid(&mut self, valid: &[bool]) -> Result<()> {
+    /// Apply `spatial_mapping_set_missing_value` semantics before averaging.
+    /// The remaining weights are renormalized by [`Self::average`].
+    pub(crate) fn exclude_invalid(&mut self, valid: &[bool]) -> Result<()> {
         for parts in &mut self.parts {
             ensure!(
                 parts.iter().all(|(index, _)| *index < valid.len()),
@@ -986,6 +1091,28 @@ fn longitude_span(west: f64, east: f64) -> f64 {
     }
 }
 
+fn unwrap_longitude_starts(values: &[f64]) -> Result<Vec<f64>> {
+    ensure!(
+        !values.is_empty() && values.iter().all(|value| value.is_finite()),
+        "CoLM map longitude edges must be finite and nonempty"
+    );
+    let mut starts = Vec::with_capacity(values.len());
+    for &value in values {
+        let mut value = value.rem_euclid(360.0);
+        if let Some(&previous) = starts.last() {
+            while value <= previous {
+                value += 360.0;
+            }
+            ensure!(
+                value - previous < 360.0,
+                "CoLM map longitude edges must be in cyclic order"
+            );
+        }
+        starts.push(value);
+    }
+    Ok(starts)
+}
+
 fn longitude_overlap(west_a: f64, span_a: f64, west_b: f64, span_b: f64) -> f64 {
     let segments = |west: f64, span: f64| {
         let west = west.rem_euclid(360.0);
@@ -1042,6 +1169,65 @@ pub(crate) fn map_field_soil_3d(
     map_field(variable, values, grid, name)
 }
 
+/// Read one monthly/time slice with CoLM's `(time, lat, lon)` layout.
+///
+/// `mkinidata` selects the calendar month before applying its areal mapper;
+/// keeping that selection here makes soil, snow, and water-table readers share
+/// the established spherical overlap implementation.
+pub(crate) fn map_field_time_3d(
+    file: &netcdf::File,
+    name: &str,
+    time: usize,
+    grid: &MapGrid,
+) -> Result<MapField> {
+    let variable = required_variable(file, name)?;
+    require_time_lat_lon(&variable, name)?;
+    ensure!(
+        time < variable.dimensions()[0].len(),
+        "{name} has no time index {time}"
+    );
+    let latitude = grid.lat_s.len();
+    let longitude = grid.lon_w.len();
+    let values = variable
+        .get_values::<f64, _>((time..time + 1, 0..latitude, 0..longitude))
+        .or_else(|_| {
+            variable
+                .get_values::<f32, _>((time..time + 1, 0..latitude, 0..longitude))
+                .map(|values| values.into_iter().map(f64::from).collect())
+        })?;
+    map_field(variable, values, grid, name)
+}
+
+/// Read one vertical layer of a CoLM `(time, lat, lon, layer)` map.
+pub(crate) fn map_field_time_profile_4d(
+    file: &netcdf::File,
+    name: &str,
+    time: usize,
+    layer: usize,
+    grid: &MapGrid,
+) -> Result<MapField> {
+    let variable = required_variable(file, name)?;
+    require_time_lat_lon_layer(&variable, name)?;
+    ensure!(
+        time < variable.dimensions()[0].len(),
+        "{name} has no time index {time}"
+    );
+    ensure!(
+        layer < variable.dimensions()[3].len(),
+        "{name} has no layer index {layer}"
+    );
+    let latitude = grid.lat_s.len();
+    let longitude = grid.lon_w.len();
+    let values = variable
+        .get_values::<f64, _>((time..time + 1, 0..latitude, 0..longitude, layer..layer + 1))
+        .or_else(|_| {
+            variable
+                .get_values::<f32, _>((time..time + 1, 0..latitude, 0..longitude, layer..layer + 1))
+                .map(|values| values.into_iter().map(f64::from).collect())
+        })?;
+    map_field(variable, values, grid, name)
+}
+
 fn map_field_3d(file: &netcdf::File, name: &str, cft: usize, grid: &MapGrid) -> Result<MapField> {
     let variable = required_variable(file, name)?;
     require_dimensions(&variable, name, &["cft", "lat", "lon"])?;
@@ -1087,6 +1273,36 @@ fn map_field(
         .map(|value| value.is_finite() && !missing.iter().any(|missing| value == missing))
         .collect();
     Ok(MapField { values, valid })
+}
+
+fn require_time_lat_lon(variable: &netcdf::Variable<'_>, name: &str) -> Result<()> {
+    let dimensions = variable.dimensions();
+    let actual = dimensions
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect::<Vec<_>>();
+    ensure!(
+        dimensions.len() == 3
+            && matches!(actual[0].as_str(), "month" | "time")
+            && actual[1..] == ["lat", "lon"],
+        "CoLM map {name} dimensions are {actual:?}, expected (month|time, lat, lon)"
+    );
+    Ok(())
+}
+
+fn require_time_lat_lon_layer(variable: &netcdf::Variable<'_>, name: &str) -> Result<()> {
+    let dimensions = variable.dimensions();
+    let actual = dimensions
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect::<Vec<_>>();
+    ensure!(
+        dimensions.len() == 4
+            && matches!(actual[0].as_str(), "month" | "time")
+            && actual[1..] == ["lat", "lon", "layer"],
+        "CoLM map {name} dimensions are {actual:?}, expected (month|time, lat, lon, layer)"
+    );
+    Ok(())
 }
 
 fn read_spatial_fertilizer_source_one(

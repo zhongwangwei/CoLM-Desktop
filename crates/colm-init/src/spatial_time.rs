@@ -1,15 +1,19 @@
 //! Spatial LCT cold-time restart adapter for Rust `mksrfdata` block artifacts.
 //!
-//! This is the no-observation branch of `mkinidata/MOD_Initialize.F90`: each
-//! call owns exactly one landpatch block, so its buffers stay layer-major and
-//! bounded by that block rather than by the complete domain.
+//! Each call owns one landpatch block, so both cold and observed initial states
+//! stay layer-major and bounded by that block rather than the complete domain.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
+use colm_namelist::Document;
 
+use crate::crop::{map_field_time_3d, map_field_time_profile_4d, AreaMapping, MapGrid};
+use crate::runtime::coordinate_values;
+use crate::single_point::enabled_existing_path;
 use crate::spatial_static::{
-    patch_coordinates, read_canopy, read_f64, read_patches, read_soil, spatial_patch_type,
+    patch_coordinates, read_canopy, read_f64, read_patches, read_soil, read_spatial_pixel_sets,
+    spatial_patch_type, Patches,
 };
 use crate::spatial_urban::SpatialUrbanData;
 use crate::urban_restart::write_cold_urban_time_restart;
@@ -18,14 +22,14 @@ use crate::{
     derive_initial_soil_hydraulics, derive_lake_layers, derive_snow_cover,
     derive_spatial_soil_parameters, initialize_snow_layers, leaf_optics_from_land_cover,
     orbital_calendar_day, orbital_cosine_zenith, resolve_cold_start_soil, write_time_restart,
-    CalendarTime, ColdStartSoilInput, HydraulicModel, LandCoverScheme, OzoneFields,
-    PlantHydraulicFields, RestartDate, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
-    SoilField, SoilHydraulicModel, SoilReflectance, TimeLakeFields, TimePatchFields,
-    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    CalendarTime, ColdStartSoilInput, HydraulicModel, InitialSoilProfile, LandCoverScheme,
+    OzoneFields, PlantHydraulicFields, RestartDate, RestartTuning, SnowAerosolFields,
+    SnowSoilRestartFields, SoilField, SoilHydraulicModel, SoilReflectance, TimeLakeFields,
+    TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
     UrbanRadiationInput, UrbanRadiationState, MISSING,
 };
 
-/// Arguments for the no-observation LCT cold start of one spatial block.
+/// Arguments for the LCT cold start of one spatial block.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialLctTimeConfig<'a> {
     pub landdata: &'a Path,
@@ -47,6 +51,8 @@ pub struct SpatialLctTimeConfig<'a> {
     pub vegetation_snow: bool,
     pub snow_cover_exponent: f64,
     pub tuning: RestartTuning,
+    /// Optional monthly sources enabled by CoLM's `DEF_USE_*Init` switches.
+    pub observations: SpatialObservedInitialization<'a>,
 }
 
 impl<'a> SpatialLctTimeConfig<'a> {
@@ -79,15 +85,53 @@ impl<'a> SpatialLctTimeConfig<'a> {
             vegetation_snow: true,
             snow_cover_exponent: 0.5,
             tuning: RestartTuning::default(),
+            observations: SpatialObservedInitialization::default(),
         }
     }
 }
 
-/// Writes the common timestamped restart emitted by the spatial LCT cold start.
+/// Existing optional observation files resolved from a CoLM namelist.
 ///
-/// Optional observed soil, snow, and water-table maps deliberately remain outside
-/// this entry point.  The caller must not silently use this no-observation branch
-/// when any of those namelist switches are enabled.
+/// Upstream treats a requested but absent file as disabled, so this container
+/// intentionally retains only existing regular files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpatialObservedInitializationPaths {
+    pub soil: Option<PathBuf>,
+    pub snow: Option<PathBuf>,
+    pub water_table: Option<PathBuf>,
+}
+
+impl SpatialObservedInitializationPaths {
+    pub fn from_document(document: &Document) -> Result<Self> {
+        Ok(Self {
+            soil: enabled_existing_path(document, "DEF_USE_SoilInit", "DEF_file_SoilInit")?,
+            snow: enabled_existing_path(document, "DEF_USE_SnowInit", "DEF_file_SnowInit")?,
+            water_table: enabled_existing_path(
+                document,
+                "DEF_USE_WaterTableInit",
+                "DEF_file_WaterTable",
+            )?,
+        })
+    }
+
+    pub fn borrow(&self) -> SpatialObservedInitialization<'_> {
+        SpatialObservedInitialization {
+            soil: self.soil.as_deref(),
+            snow: self.snow.as_deref(),
+            water_table: self.water_table.as_deref(),
+        }
+    }
+}
+
+/// Borrowed observation sources passed to one spatial restart block.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpatialObservedInitialization<'a> {
+    pub soil: Option<&'a Path>,
+    pub snow: Option<&'a Path>,
+    pub water_table: Option<&'a Path>,
+}
+
+/// Writes the common timestamped restart emitted by the spatial LCT cold start.
 pub fn write_spatial_lct_cold_time_restart(
     config: SpatialLctTimeConfig<'_>,
 ) -> Result<TimeRestartFile> {
@@ -101,6 +145,8 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
     let dimensions = TimeRestartDimensions::default();
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let count = patches.class.len();
+    let month = month(config.date)?;
+    let observed = read_observed_initialization(config, &patches, month)?;
     let kind = patches
         .class
         .iter()
@@ -217,7 +263,6 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             count,
         )?,
     ];
-    let month = month(config.date)?;
     let lai = read_monthly(config, "LAI_patches", month)?;
     let sai = read_monthly(config, "SAI_patches", month)?;
     let grid = colm_soil_grid(dimensions.soil_layers)?;
@@ -236,6 +281,9 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
     let mut conductivity = matric.clone();
     let mut ground_temperature = vec![0.0; count];
     let mut water_table = vec![0.0; count];
+    let mut snow_depth = vec![0.0; count];
+    let mut snow_water_equivalent = vec![0.0; count];
+    let mut ground_snow_fraction = vec![0.0; count];
     let mut aquifer = vec![0.0; count];
     let mut roughness = vec![0.0; count];
     let mut cosine_zenith = vec![0.0; count];
@@ -274,6 +322,13 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         let psi0 = soil_column(&soil, SoilField::Psi0, patch);
         let ks = soil_column(&soil, SoilField::HydraulicConductivity, patch);
         let model = hydraulic_models(&soil, patch, config.hydraulic_model);
+        let profile = observed.soil.as_ref().map(|state| InitialSoilProfile {
+            depth_m: &state.depth_m,
+            temperature_k: &state.temperature_k[patch],
+            wetness: &state.wetness[patch],
+            water_table_m: state.water_table_m[patch],
+            valid: state.valid[patch],
+        });
         let cold = resolve_cold_start_soil(ColdStartSoilInput {
             patch_type: kind[patch],
             porosity: &porosity,
@@ -285,8 +340,11 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             soil_thickness_m: &grid.thickness_m,
             soil_interface_depth_m: &grid.interface_depth_m[1..],
             variably_saturated_flow: config.variably_saturated_flow,
-            profile: None,
-            water_table_m: None,
+            profile,
+            water_table_m: profile
+                .is_none()
+                .then(|| observed.water_table_m[patch])
+                .flatten(),
         })?;
         let hydraulics = derive_initial_soil_hydraulics(
             kind[patch],
@@ -299,12 +357,19 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             &ks,
             &model,
         )?;
-        let snow = initialize_snow_layers(kind[patch], 0.0, dimensions.snow_layers)?;
+        snow_depth[patch] = observed.snow_depth_m[patch];
+        snow_water_equivalent[patch] = snow_depth[patch] * 250.0;
+        let snow = initialize_snow_layers(kind[patch], snow_depth[patch], dimensions.snow_layers)?;
         for layer in 0..dimensions.snow_layers {
             let at = layer * count + patch;
             snow_node[at] = snow.node_depth_m[layer];
             snow_thickness[at] = snow.thickness_m[layer];
-            temperature[at] = -999.0;
+            temperature[at] = if snow.thickness_m[layer] > 0.0 {
+                cold.temperature_k[0].min(272.16)
+            } else {
+                -999.0
+            };
+            ice[at] = snow.thickness_m[layer] * 250.0;
         }
         for layer in 0..dimensions.soil_layers {
             let at = layer * count + patch;
@@ -331,10 +396,11 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             total_sai[patch],
             roughness[patch],
             config.tuning.zlnd,
-            0.0,
-            0.0,
+            snow_water_equivalent[patch],
+            snow_depth[patch],
             config.snow_cover_exponent,
         )?;
+        ground_snow_fraction[patch] = cover.ground_snow_fraction;
         sigf[patch] = if water {
             0.0
         } else {
@@ -370,7 +436,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             true,
             config.land_cover == LandCoverScheme::Usgs,
             config.vegetation_snow,
-            0.0,
+            snow_depth[patch],
             cover.ground_snow_fraction,
             cold.temperature_k[0],
         )?;
@@ -466,10 +532,10 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 canopy_snow_mm: &zero,
                 wet_snow_fraction: &zero,
                 snow_age: &radiation.snow_age,
-                snow_water_equivalent_mm: &zero,
-                snow_depth_m: &zero,
+                snow_water_equivalent_mm: &snow_water_equivalent,
+                snow_depth_m: &snow_depth,
                 vegetation_fraction: &fveg,
-                ground_snow_fraction: &zero,
+                ground_snow_fraction: &ground_snow_fraction,
                 snow_free_vegetation_fraction: &sigf,
                 greenness: &green,
                 lai: &lai_now,
@@ -577,6 +643,174 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         )?)
     };
     Ok((common, urban))
+}
+
+#[derive(Debug)]
+struct SpatialObservedState {
+    soil: Option<SpatialSoilProfile>,
+    snow_depth_m: Vec<f64>,
+    water_table_m: Vec<Option<f64>>,
+}
+
+#[derive(Debug)]
+struct SpatialSoilProfile {
+    depth_m: Vec<f64>,
+    temperature_k: Vec<Vec<f64>>,
+    wetness: Vec<Vec<f64>>,
+    water_table_m: Vec<f64>,
+    valid: Vec<bool>,
+}
+
+/// Port the observed-state branch of `MOD_Initialize` before it calls
+/// `IniTimeVar`: map all source fields over each complete landpatch, then let
+/// the shared cold-soil kernel interpolate and initialize the native column.
+fn read_observed_initialization(
+    config: SpatialLctTimeConfig<'_>,
+    patches: &Patches,
+    month: u8,
+) -> Result<SpatialObservedState> {
+    let count = patches.class.len();
+    let sources = config.observations;
+    if sources.soil.is_none() && sources.snow.is_none() && sources.water_table.is_none() {
+        return Ok(SpatialObservedState {
+            soil: None,
+            snow_depth_m: vec![0.0; count],
+            water_table_m: vec![None; count],
+        });
+    }
+    let pixels = read_spatial_pixel_sets(
+        config.landdata,
+        config.land_cover_year,
+        config.block_label,
+        &patches.element,
+        &patches.start,
+        &patches.end,
+        &patches.shared_fraction,
+        "landpatch",
+    )?;
+    let index = usize::from(month - 1);
+    let soil = sources
+        .soil
+        .filter(|path| path.is_file())
+        .map(|path| read_observed_soil(path, &pixels, index))
+        .transpose()?;
+    let snow_depth_m = sources
+        .snow
+        .filter(|path| path.is_file())
+        .map(|path| read_observed_snow(path, &pixels, index))
+        .transpose()?
+        .unwrap_or_else(|| vec![0.0; count]);
+    let water_table_m = if soil.is_none() {
+        sources
+            .water_table
+            .filter(|path| path.is_file())
+            .map(|path| read_observed_water_table(path, &pixels, index))
+            .transpose()?
+            .unwrap_or_else(|| vec![None; count])
+    } else {
+        vec![None; count]
+    };
+    Ok(SpatialObservedState {
+        soil,
+        snow_depth_m,
+        water_table_m,
+    })
+}
+
+fn read_observed_soil(
+    path: &Path,
+    pixels: &crate::spatial_static::SpatialPixelSets,
+    month: usize,
+) -> Result<SpatialSoilProfile> {
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open spatial soil initial state {}", path.display()))?;
+    let grid = MapGrid::from_file(&file)?;
+    let depth_m = coordinate_values(&file, "soildepth")?;
+    ensure!(
+        !depth_m.is_empty() && depth_m.iter().all(|depth| depth.is_finite()),
+        "spatial soilstate soildepth must be finite and nonempty"
+    );
+    let zwt = map_field_time_3d(&file, "zwt", month, &grid)?;
+    let mut mapping = AreaMapping::new(&grid, pixels)?;
+    // `msoil2p%set_missing_value(zwt_grid, ...)` masks all three mapped
+    // fields from the same zwt validity map before the averages are taken.
+    mapping.exclude_invalid(zwt.validity())?;
+    let water_table_m = mapping.average(&zwt)?;
+    let valid = water_table_m
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    let water_table_m = water_table_m
+        .into_iter()
+        .map(|value| value.unwrap_or(0.0))
+        .collect::<Vec<_>>();
+    let mut temperature_k = vec![vec![0.0; depth_m.len()]; mapping.len()];
+    let mut wetness = temperature_k.clone();
+    for layer in 0..depth_m.len() {
+        let temperature = mapping.average(&map_field_time_profile_4d(
+            &file, "soiltemp", month, layer, &grid,
+        )?)?;
+        let water = mapping.average(&map_field_time_profile_4d(
+            &file, "soilwat", month, layer, &grid,
+        )?)?;
+        for patch in 0..mapping.len() {
+            // Invalid zwt profiles are replaced by `resolve_cold_start_soil`.
+            // These placeholders are intentionally never used for those patches.
+            temperature_k[patch][layer] = temperature[patch].unwrap_or(0.0);
+            wetness[patch][layer] = water[patch].unwrap_or(0.0);
+        }
+    }
+    Ok(SpatialSoilProfile {
+        depth_m,
+        temperature_k,
+        wetness,
+        water_table_m,
+        valid,
+    })
+}
+
+fn read_observed_snow(
+    path: &Path,
+    pixels: &crate::spatial_static::SpatialPixelSets,
+    month: usize,
+) -> Result<Vec<f64>> {
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open spatial snow initial state {}", path.display()))?;
+    let grid = MapGrid::from_file(&file)?;
+    let field = map_field_time_3d(&file, "snowdepth", month, &grid)?;
+    let mut mapping = AreaMapping::new(&grid, pixels)?;
+    mapping.exclude_invalid(field.validity())?;
+    mapping
+        .average(&field)?
+        .into_iter()
+        .map(|value| value.unwrap_or(0.0))
+        .enumerate()
+        .map(|(patch, depth)| {
+            ensure!(
+                depth.is_finite() && depth >= 0.0,
+                "spatial snowdepth for landpatch {patch} must be finite and nonnegative"
+            );
+            Ok(depth)
+        })
+        .collect()
+}
+
+fn read_observed_water_table(
+    path: &Path,
+    pixels: &crate::spatial_static::SpatialPixelSets,
+    month: usize,
+) -> Result<Vec<Option<f64>>> {
+    let file = netcdf::open(path).with_context(|| {
+        format!(
+            "cannot open spatial water-table initial state {}",
+            path.display()
+        )
+    })?;
+    // `gwtd%define_from_file(fwtd)` reads the explicit edge coordinates rather
+    // than deriving cells from lat/lon centers.
+    let grid = MapGrid::from_explicit_edges(&file)?;
+    let field = map_field_time_3d(&file, "wtd", month, &grid)?;
+    AreaMapping::new(&grid, pixels)?.average(&field)
 }
 
 fn read_monthly(config: SpatialLctTimeConfig<'_>, variable: &str, month: u8) -> Result<Vec<f64>> {
