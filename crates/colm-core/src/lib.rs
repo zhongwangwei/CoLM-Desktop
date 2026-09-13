@@ -18,6 +18,7 @@ pub mod ground_humidity;
 pub mod ground_temperature;
 pub mod ground_thermal_step;
 pub mod high_res_parameters;
+pub mod high_res_radiation;
 pub mod hydrology;
 pub mod interception;
 pub mod irrigation;
@@ -112,6 +113,10 @@ pub use ground_thermal_step::{
 pub use high_res_parameters::{
     select_high_resolution_radiation, HighResolutionRadiationFractions,
     HighResolutionRadiationTables, HIGH_RES_BANDS, HIGH_RES_REGIMES, HIGH_RES_ZENITH_BINS,
+};
+pub use high_res_radiation::{
+    pft_high_resolution_radiation, HighResolutionLeafOptics, HighResolutionPftRadiation,
+    HIGH_RES_WAVELENGTHS,
 };
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
