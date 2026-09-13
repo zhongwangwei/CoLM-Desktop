@@ -24,7 +24,7 @@ pub struct ThermalWaterInput {
 }
 
 /// Water and energy diagnostics from [`partition_no_split_thermal_water`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThermalWaterFluxes {
     /// `fevpg` after limiting removal to the upper-layer water inventory.
     pub ground_evaporation_kg_m2_s: f64,
@@ -40,6 +40,35 @@ pub struct ThermalWaterFluxes {
     pub water_limited_evaporation_kg_m2_s: f64,
     /// `htvp * egidif`, to be added to the ground sensible heat (`fseng`).
     pub sensible_heat_correction_w_m2: f64,
+}
+
+/// Inputs to the split soil/snow section of `MOD_Thermal`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitThermalWaterInput {
+    pub snow_layer_exists: bool,
+    pub snow_cover_fraction: f64,
+    pub corrected_soil_evaporation_kg_m2_s: f64,
+    pub corrected_snow_evaporation_kg_m2_s: f64,
+    pub soil_liquid_water_kg_m2: f64,
+    pub soil_ice_water_kg_m2: f64,
+    pub soil_temperature_k: f64,
+    pub snow_liquid_water_kg_m2: f64,
+    pub snow_ice_water_kg_m2: f64,
+    pub snow_temperature_k: f64,
+    pub time_step_seconds: f64,
+    pub ground_latent_heat_j_kg: f64,
+}
+
+/// Area-mean split soil/snow fluxes passed to `WATER_2014`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitThermalWaterFluxes {
+    pub ground_evaporation_kg_m2_s: f64,
+    pub water_limited_evaporation_kg_m2_s: f64,
+    pub sensible_heat_correction_w_m2: f64,
+    /// Soil component, already weighted by the uncovered fraction when snow exists.
+    pub soil: ThermalWaterFluxes,
+    /// Snow component, already weighted by snow cover when a snow layer exists.
+    pub snow: ThermalWaterFluxes,
 }
 
 /// Ports the non-split section of `MOD_Thermal` after `GroundTemperature`.
@@ -78,6 +107,75 @@ pub fn partition_no_split_thermal_water(input: ThermalWaterInput) -> Result<Ther
     })
 }
 
+/// Ports the `DEF_SPLIT_SOILSNOW` water-limit and phase-partition block in
+/// `MOD_Thermal` after `GroundTemperature`.
+///
+/// Component fluxes are returned as patch-area means, matching the
+/// `qseva_soil`/`qseva_snow` values consumed by `WATER_2014`.
+pub fn partition_split_thermal_water(
+    input: SplitThermalWaterInput,
+) -> Result<SplitThermalWaterFluxes> {
+    validate_split(input)?;
+    let soil_input = |evaporation| ThermalWaterInput {
+        corrected_ground_evaporation_kg_m2_s: evaporation,
+        upper_liquid_water_kg_m2: input.soil_liquid_water_kg_m2,
+        upper_ice_water_kg_m2: input.soil_ice_water_kg_m2,
+        upper_temperature_k: input.soil_temperature_k,
+        time_step_seconds: input.time_step_seconds,
+        ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
+    };
+    if !input.snow_layer_exists {
+        let soil = partition_no_split_thermal_water(soil_input(
+            input.corrected_soil_evaporation_kg_m2_s * (1.0 - input.snow_cover_fraction)
+                + input.corrected_snow_evaporation_kg_m2_s * input.snow_cover_fraction,
+        ))?;
+        return Ok(SplitThermalWaterFluxes {
+            ground_evaporation_kg_m2_s: soil.ground_evaporation_kg_m2_s,
+            water_limited_evaporation_kg_m2_s: soil.water_limited_evaporation_kg_m2_s,
+            sensible_heat_correction_w_m2: soil.sensible_heat_correction_w_m2,
+            soil,
+            snow: ThermalWaterFluxes::default(),
+        });
+    }
+    let soil = scale_fluxes(
+        partition_no_split_thermal_water(soil_input(input.corrected_soil_evaporation_kg_m2_s))?,
+        1.0 - input.snow_cover_fraction,
+    );
+    let snow = scale_fluxes(
+        partition_no_split_thermal_water(ThermalWaterInput {
+            corrected_ground_evaporation_kg_m2_s: input.corrected_snow_evaporation_kg_m2_s,
+            upper_liquid_water_kg_m2: input.snow_liquid_water_kg_m2,
+            upper_ice_water_kg_m2: input.snow_ice_water_kg_m2,
+            upper_temperature_k: input.snow_temperature_k,
+            time_step_seconds: input.time_step_seconds,
+            ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
+        })?,
+        input.snow_cover_fraction,
+    );
+    Ok(SplitThermalWaterFluxes {
+        ground_evaporation_kg_m2_s: soil.ground_evaporation_kg_m2_s
+            + snow.ground_evaporation_kg_m2_s,
+        water_limited_evaporation_kg_m2_s: soil.water_limited_evaporation_kg_m2_s
+            + snow.water_limited_evaporation_kg_m2_s,
+        sensible_heat_correction_w_m2: soil.sensible_heat_correction_w_m2
+            + snow.sensible_heat_correction_w_m2,
+        soil,
+        snow,
+    })
+}
+
+fn scale_fluxes(fluxes: ThermalWaterFluxes, fraction: f64) -> ThermalWaterFluxes {
+    ThermalWaterFluxes {
+        ground_evaporation_kg_m2_s: fluxes.ground_evaporation_kg_m2_s * fraction,
+        evaporation_kg_m2_s: fluxes.evaporation_kg_m2_s * fraction,
+        sublimation_kg_m2_s: fluxes.sublimation_kg_m2_s * fraction,
+        dew_kg_m2_s: fluxes.dew_kg_m2_s * fraction,
+        frost_kg_m2_s: fluxes.frost_kg_m2_s * fraction,
+        water_limited_evaporation_kg_m2_s: fluxes.water_limited_evaporation_kg_m2_s * fraction,
+        sensible_heat_correction_w_m2: fluxes.sensible_heat_correction_w_m2 * fraction,
+    }
+}
+
 fn validate(input: ThermalWaterInput) -> Result<()> {
     ensure!(
         [
@@ -97,6 +195,40 @@ fn validate(input: ThermalWaterInput) -> Result<()> {
         "thermal-water inputs are invalid"
     );
     Ok(())
+}
+
+fn validate_split(input: SplitThermalWaterInput) -> Result<()> {
+    ensure!(
+        [
+            input.snow_cover_fraction,
+            input.corrected_soil_evaporation_kg_m2_s,
+            input.corrected_snow_evaporation_kg_m2_s,
+            input.soil_liquid_water_kg_m2,
+            input.soil_ice_water_kg_m2,
+            input.soil_temperature_k,
+            input.snow_liquid_water_kg_m2,
+            input.snow_ice_water_kg_m2,
+            input.snow_temperature_k,
+            input.time_step_seconds,
+            input.ground_latent_heat_j_kg,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && (0.0..=1.0).contains(&input.snow_cover_fraction)
+            && input.soil_liquid_water_kg_m2 >= 0.0
+            && input.soil_ice_water_kg_m2 >= 0.0
+            && input.snow_liquid_water_kg_m2 >= 0.0
+            && input.snow_ice_water_kg_m2 >= 0.0,
+        "split thermal-water inputs are invalid"
+    );
+    validate(ThermalWaterInput {
+        corrected_ground_evaporation_kg_m2_s: input.corrected_soil_evaporation_kg_m2_s,
+        upper_liquid_water_kg_m2: input.soil_liquid_water_kg_m2,
+        upper_ice_water_kg_m2: input.soil_ice_water_kg_m2,
+        upper_temperature_k: input.soil_temperature_k,
+        time_step_seconds: input.time_step_seconds,
+        ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
+    })
 }
 
 #[cfg(test)]

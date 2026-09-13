@@ -180,7 +180,10 @@ pub use static_state::{
 pub use thermal_properties::{
     soil_thermal_properties, SoilThermalInput, SoilThermalProperties, ThermalConductivityScheme,
 };
-pub use thermal_water::{partition_no_split_thermal_water, ThermalWaterFluxes, ThermalWaterInput};
+pub use thermal_water::{
+    partition_no_split_thermal_water, partition_split_thermal_water, SplitThermalWaterFluxes,
+    SplitThermalWaterInput, ThermalWaterFluxes, ThermalWaterInput,
+};
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, interpolate_profile, resolve_cold_start_soil,
