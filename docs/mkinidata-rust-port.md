@@ -38,9 +38,13 @@ enabled downscaling branch meet all of these conditions:
    block-bounded, no-observation LCT time restart.  `mkinidata-rs spatial-pft <case.nml> ...
    --cold-time YYYY-JJJ-SSSSS` now writes both the common and PFT blocks from the same monthly
    patch/PFT LAI/SAI vectors, reusing the shared LCT cold-soil state and replacing natural-patch
-   optics with PFT- or PC-weighted values.  Spatial BGC/CROP, urban, observed spatial state, and
-   distributed case discovery still require their parity gates before GUI/CLI can select Rust as
-   the default.
+   optics with PFT- or PC-weighted values. Spatial PFT BGC/CROP state is materialized from the
+   same block vectors. PFT hyperspectral cold starts reuse the shared Rust spectral kernels and
+   persist their common/PFT restart fields. Scalar-LCT hyperspectral cold-time output is explicitly
+   refused: upstream marks that branch unsupported and supplies no class-to-spectral-optics mapping,
+   so Rust must not create an unverified restart. Spatial urban, observed spatial state, PC
+   hyperspectral canopy radiation, and distributed case discovery still require parity gates before
+   GUI/CLI can select Rust as the default.
 
 ## Performance constraints
 
