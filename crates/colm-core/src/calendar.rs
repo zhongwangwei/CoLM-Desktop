@@ -33,6 +33,31 @@ pub const fn month_lengths(year: i32) -> [i32; 12] {
     ]
 }
 
+/// Converts CoLM's one-based Julian day to a one-based Gregorian month and day.
+///
+/// This is the same conversion as `MOD_TimeManager:julian2monthday`, kept here
+/// so every Rust runtime branch uses one calendar interpretation.
+pub fn month_day(time: CalendarTime) -> Result<(u8, u8)> {
+    let maximum_day = if is_leap_year(time.year) { 366 } else { 365 };
+    ensure!(
+        (1..=maximum_day).contains(&i32::from(time.julian_day)),
+        "Julian day is invalid for its year"
+    );
+    ensure!(
+        time.seconds <= 86_400,
+        "seconds are outside CoLM's daily timestamp range"
+    );
+
+    let mut remaining = i32::from(time.julian_day);
+    for (index, days) in month_lengths(time.year).into_iter().enumerate() {
+        if remaining <= days {
+            return Ok(((index + 1) as u8, remaining as u8));
+        }
+        remaining -= days;
+    }
+    unreachable!("validated Julian days always belong to a Gregorian month")
+}
+
 /// Applies CoLM's local-time correction before `MOD_OrbCoszen:orb_coszen`.
 ///
 /// In non-Greenwich single-point runs CoLM subtracts the longitude-derived

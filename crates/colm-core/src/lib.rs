@@ -10,6 +10,7 @@ pub mod bgc;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;
+pub mod crop_phenology;
 pub mod glacier;
 pub mod ground_fluxes;
 pub mod ground_humidity;
@@ -74,7 +75,7 @@ pub use bgc::{
     BgcTruncationOwned, BgcVegetationCarbon, BGC_DAYS_PER_YEAR, BGC_DECOMPOSITION_POOLS,
     BGC_FULL_SOIL_LAYERS, BGC_SOIL_LAYERS, PFT_BGC_F64_VARIABLES,
 };
-pub use calendar::{is_leap_year, month_lengths, orbital_calendar_day, CalendarTime};
+pub use calendar::{is_leap_year, month_day, month_lengths, orbital_calendar_day, CalendarTime};
 pub use canopy_layer_profile::{
     canopy_diffusivity, canopy_diffusivity_difference, canopy_diffusivity_profile_integral,
     canopy_diffusivity_resistance, canopy_diffusivity_resistance_analytic,
@@ -84,6 +85,10 @@ pub use canopy_layer_profile::{
     CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyWindProfileInput,
 };
 pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
+pub use crop_phenology::{
+    crop_phenology_climate_step, CropPhenologyClimateInput, CropPhenologyClimateState,
+    IRRIGATED_WINTER_WHEAT_CLASS, WINTER_WHEAT_CLASS,
+};
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_humidity::{non_split_ground_humidity, GroundHumidityInput, GroundHumidityState};

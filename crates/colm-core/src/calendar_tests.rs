@@ -43,3 +43,31 @@ fn orbital_calendar_rejects_invalid_timestamps() {
     )
     .is_err());
 }
+
+#[test]
+fn julian_month_day_matches_colm_for_leap_and_common_years() {
+    assert_eq!(
+        month_day(CalendarTime {
+            year: 2007,
+            julian_day: 59,
+            seconds: 0,
+        })
+        .unwrap(),
+        (2, 28)
+    );
+    assert_eq!(
+        month_day(CalendarTime {
+            year: 2008,
+            julian_day: 60,
+            seconds: 86_400,
+        })
+        .unwrap(),
+        (2, 29)
+    );
+    assert!(month_day(CalendarTime {
+        year: 2007,
+        julian_day: 366,
+        seconds: 0,
+    })
+    .is_err());
+}
