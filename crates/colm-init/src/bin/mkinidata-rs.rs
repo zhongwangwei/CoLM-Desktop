@@ -208,6 +208,9 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut ozone_stress = false;
     let mut variably_saturated_flow = false;
     let mut vegetation_snow = true;
+    let mut high_resolution_leaf_optics = None;
+    let mut high_resolution_water_optics = None;
+    let mut high_resolution_radiation = None;
     while let Some(value) = args.next() {
         match value.as_str() {
             "--bedrock" => use_bedrock = true,
@@ -230,11 +233,20 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
             "--ozone-stress" => ozone_stress = true,
             "--variably-saturated-flow" => variably_saturated_flow = true,
             "--no-vegetation-snow" => vegetation_snow = false,
+            "--highres-leaf-optics" => {
+                high_resolution_leaf_optics =
+                    Some(required(&mut args, "high-resolution leaf optics")?)
+            }
+            "--highres-water-optics" => {
+                high_resolution_water_optics =
+                    Some(required(&mut args, "high-resolution water optics")?)
+            }
+            "--highres-radiation" => {
+                high_resolution_radiation =
+                    Some(required(&mut args, "high-resolution radiation table")?)
+            }
             _ => bail!("unexpected argument {value}"),
         }
-    }
-    if cold_time.is_some() && use_hyperspectral {
-        bail!("spatial PFT cold-time restart does not yet support --hyperspectral");
     }
     let static_config = SpatialPftStaticConfig::new(
         &namelist,
@@ -261,6 +273,10 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         time.ozone_stress = ozone_stress;
         time.variably_saturated_flow = variably_saturated_flow;
         time.vegetation_snow = vegetation_snow;
+        time.use_hyperspectral = use_hyperspectral;
+        time.high_resolution_leaf_optics = high_resolution_leaf_optics.as_deref();
+        time.high_resolution_water_optics = high_resolution_water_optics.as_deref();
+        time.high_resolution_radiation = high_resolution_radiation.as_deref();
         let output = write_spatial_pft_cold_time_restarts(time)?;
         println!("wrote {}", output.common.block.display());
         println!("wrote {}", output.pft.display());
@@ -280,7 +296,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');

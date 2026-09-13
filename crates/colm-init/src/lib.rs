@@ -190,10 +190,10 @@ pub use surface_data::{
     SinglePointUrbanData, UrbanLucyRawData,
 };
 pub use time_restart::{
-    write_time_restart, write_time_restart_block, IrrigationFields, OzoneFields,
-    PlantHydraulicFields, RestartDate, SnowAerosolFields, SnowSoilRestartFields,
-    TimeHyperspectralFields, TimeLakeFields, TimePatchFields, TimeRadiationFields,
-    TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    append_time_hyperspectral_fields, write_time_restart, write_time_restart_block,
+    IrrigationFields, OzoneFields, PlantHydraulicFields, RestartDate, SnowAerosolFields,
+    SnowSoilRestartFields, TimeHyperspectralFields, TimeLakeFields, TimePatchFields,
+    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,

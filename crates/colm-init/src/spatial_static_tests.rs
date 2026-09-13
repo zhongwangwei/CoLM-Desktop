@@ -221,6 +221,67 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
 }
 
 #[test]
+fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
+    let root = temp_dir("pft-hyperspectral");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_high_resolution_soil_albedo(&landdata, 2005, "w180_s90");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\n DEF_USE_PFT = .true.\n/\n").unwrap();
+    let radiation = root.join("swnb_480bnd_fsds.nc");
+    write_high_resolution_radiation(&radiation);
+    let leaf = root.join("colm_PFT_params.nc");
+    write_high_resolution_leaf_optics(&leaf);
+    let water = root.join("water_params.txt");
+    write_high_resolution_water_optics(&water);
+
+    let mut config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    config.use_hyperspectral = true;
+    config.high_resolution_leaf_optics = Some(&leaf);
+    config.high_resolution_water_optics = Some(&water);
+    config.high_resolution_radiation = Some(&radiation);
+    let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+
+    let common = netcdf::open(&files.common.block).unwrap();
+    assert_eq!(values_f64(&common, "alb_hires").unwrap().len(), 211 * 2);
+    assert_eq!(
+        values_f64(&common, "reflectance_out").unwrap().len(),
+        211 * 16
+    );
+    assert!(values_f64(&common, "reflectance_out").unwrap()[211].is_finite());
+    let pft = netcdf::open(&files.pft).unwrap();
+    assert_eq!(values_f64(&pft, "ssun_hires_p").unwrap().len(), 211 * 2);
+    assert_eq!(values_f64(&pft, "ssha_hires_p").unwrap().len(), 211 * 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps() {
     let root = temp_dir("crop-tuning");
     let landdata = root.join("landdata");
@@ -758,6 +819,65 @@ fn write_i32(
         .put_values(&[value], ..)
         .unwrap();
     file.close().unwrap();
+}
+
+fn write_high_resolution_radiation(path: &Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("wavelength", 211).unwrap();
+    file.add_dimension("zenith", 89).unwrap();
+    file.add_dimension("regime", 5).unwrap();
+    file.add_variable::<f64>("flx_frc_cld", &["wavelength", "regime"])
+        .unwrap()
+        .put_values(&vec![1.0; 211 * 5], ..)
+        .unwrap();
+    file.add_variable::<f64>("flx_frc_clr", &["wavelength", "zenith", "regime"])
+        .unwrap()
+        .put_values(&vec![1.0; 211 * 89 * 5], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_high_resolution_leaf_optics(path: &Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("wavelength", 211).unwrap();
+    file.add_dimension("tissue", 2).unwrap();
+    file.add_dimension("pft", 16).unwrap();
+    let reflectance = vec![0.1; 211 * 2 * 16];
+    let transmittance = vec![0.05; 211 * 2 * 16];
+    file.add_variable::<f64>("reflectance", &["wavelength", "tissue", "pft"])
+        .unwrap()
+        .put_values(&reflectance, ..)
+        .unwrap();
+    file.add_variable::<f64>("transmittance", &["wavelength", "tissue", "pft"])
+        .unwrap()
+        .put_values(&transmittance, ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_high_resolution_water_optics(path: &Path) {
+    std::fs::write(
+        path,
+        std::iter::repeat_n("0.1 1.3", 211)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+}
+
+fn write_high_resolution_soil_albedo(landdata: &Path, year: i32, block: &str) {
+    for wavelength_nm in (400..=2500).step_by(10) {
+        let stem = format!("soil_hyper_alb_{wavelength_nm}nm_patches");
+        write_f64(
+            landdata,
+            "HyperAlbedo",
+            &stem,
+            "soil_hyper_alb",
+            year,
+            block,
+            0.2,
+        );
+    }
 }
 
 fn temp_dir(label: &str) -> PathBuf {

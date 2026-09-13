@@ -262,7 +262,7 @@ pub fn write_spatial_lct_constant_restart(
     )
 }
 
-fn read_hyperspectral_albedo(
+pub(crate) fn read_hyperspectral_albedo(
     landdata: &Path,
     year: i32,
     block: &str,

@@ -8,6 +8,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_core::{
+    bsm_soil_moisture, cold_start_ground_albedo, derive_spatial_soil_parameters,
+    expand_broadband_ground_albedo, expand_broadband_leaf_optics, pft_high_resolution_radiation,
+    select_high_resolution_radiation, weighted_high_resolution_bands, CalendarTime,
+    HighResolutionLeafOptics, HighResolutionPftRadiation, HighResolutionRadiationFractions,
+    SoilField, SoilReflectance, HIGH_RES_WAVELENGTHS,
+};
+use colm_forcing::{
+    read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
+    read_high_resolution_water_optics, HighResolutionLeafOpticsTable, HighResolutionRadiationTable,
+    HighResolutionWaterOptics,
+};
 use colm_namelist::{parse, Value};
 
 use crate::crop::{map_field_2d, map_field_soil_3d, AreaMapping, MapGrid};
@@ -16,19 +28,20 @@ use crate::single_point::{
     pft_canopy, pft_leaf_optics, pft_parameters, required_string,
 };
 use crate::spatial_static::{
-    block_path, read_f64 as read_lct_f64, read_patches, read_soil, read_spatial_pixel_sets,
-    spatial_patch_type, values_f64, values_i32, write_spatial_lct_constant_restart,
-    SpatialLctStaticConfig,
+    block_path, patch_coordinates, read_f64 as read_lct_f64, read_hyperspectral_albedo,
+    read_patches, read_soil, read_spatial_pixel_sets, spatial_patch_type, values_f64, values_i32,
+    write_spatial_lct_constant_restart, SpatialLctStaticConfig,
 };
 use crate::{
-    bgc_time_restart_input, cold_start_pc_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, derive_cold_start_bgc_state,
-    merge_bgc_cold_start_states, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
-    write_pft_constant_restart, write_pft_time_restart, BgcColdStartInput, BgcConstantRestartFiles,
-    BgcPftColdStartInput, BgcTimeRestartFile, ColdStartRadiation, ConstantRestartFiles,
-    HydraulicModel, LandCoverScheme, PcPftInput, PftBgcFields, PftConstantRestartInput,
-    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate,
-    RestartTuning, RuntimeCnState, RuntimeCnVegetationCarbon, SpatialLctTimeConfig,
+    append_time_hyperspectral_fields, bgc_time_restart_input,
+    cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
+    derive_cold_start_bgc_state, merge_bgc_cold_start_states, write_bgc_time_restart,
+    write_cold_start_bgc_constant_restart, write_pft_constant_restart, write_pft_time_restart,
+    BgcColdStartInput, BgcConstantRestartFiles, BgcPftColdStartInput, BgcTimeRestartFile,
+    ColdStartRadiation, ConstantRestartFiles, HydraulicModel, LandCoverScheme, PcPftInput,
+    PftBgcFields, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning,
+    RuntimeCnState, RuntimeCnVegetationCarbon, SpatialLctTimeConfig, TimeHyperspectralFields,
     TimeRestartFile, MISSING,
 };
 
@@ -69,6 +82,14 @@ pub struct SpatialPftTimeConfig<'a> {
     pub vegetation_snow: bool,
     pub snow_cover_exponent: f64,
     pub tuning: RestartTuning,
+    /// Emit and derive CoLM's 211-band PFT cold-start state.
+    pub use_hyperspectral: bool,
+    /// `colm_PFT_params.nc`; required when `DEF_HighResVeg = .true.`.
+    pub high_resolution_leaf_optics: Option<&'a Path>,
+    /// `water_params.txt`; required when `DEF_HighResSoil = .true.`.
+    pub high_resolution_water_optics: Option<&'a Path>,
+    /// `swnb_480bnd_fsds.nc`; required for every hyperspectral cold start.
+    pub high_resolution_radiation: Option<&'a Path>,
 }
 
 /// Timestamped restart blocks written by a spatial PFT cold start.
@@ -113,6 +134,10 @@ impl<'a> SpatialPftTimeConfig<'a> {
             vegetation_snow: true,
             snow_cover_exponent: 0.5,
             tuning: RestartTuning::default(),
+            use_hyperspectral: false,
+            high_resolution_leaf_optics: None,
+            high_resolution_water_optics: None,
+            high_resolution_radiation: None,
         }
     }
 }
@@ -274,6 +299,59 @@ pub fn write_spatial_pft_cold_time_restarts(
             "CROP with DEF_USE_PC requires DEF_PC_CROP_SPLIT = .true."
         );
     }
+    let high_resolution_vegetation =
+        config.use_hyperspectral && optional_bool_or(&document, "DEF_HighResVeg", true)?;
+    let high_resolution_soil =
+        config.use_hyperspectral && optional_bool_or(&document, "DEF_HighResSoil", true)?;
+    if config.use_hyperspectral {
+        ensure!(
+            subgrid == SpatialPftSubgrid::Pft,
+            "spatial PC cold-time restart does not support HYPERSPECTRAL canopy radiation"
+        );
+        ensure!(
+            !optional_bool_or(&document, "DEF_PROSPECT", false)?,
+            "DEF_PROSPECT is not yet implemented by the shared Rust high-resolution leaf-optics kernel"
+        );
+        if let Some(Value::Str(path)) = document.get("DEF_HighResUrban_albedo") {
+            ensure!(
+                path.eq_ignore_ascii_case("null"),
+                "DEF_HighResUrban_albedo needs the upstream urban spectral reader before a Rust cold start"
+            );
+        }
+    }
+    let high_resolution_sources: Option<(
+        Option<HighResolutionLeafOpticsTable>,
+        Option<HighResolutionWaterOptics>,
+        HighResolutionRadiationTable,
+    )> = config
+        .use_hyperspectral
+        .then(|| {
+            let radiation = read_high_resolution_radiation_table(
+                config
+                    .high_resolution_radiation
+                    .context("HYPERSPECTRAL cold start needs --highres-radiation")?,
+            )?;
+            let leaf = high_resolution_vegetation
+                .then(|| {
+                    read_high_resolution_leaf_optics(
+                        config
+                            .high_resolution_leaf_optics
+                            .context("DEF_HighResVeg requires --highres-leaf-optics")?,
+                    )
+                })
+                .transpose()?;
+            let water = high_resolution_soil
+                .then(|| {
+                    read_high_resolution_water_optics(
+                        config
+                            .high_resolution_water_optics
+                            .context("DEF_HighResSoil requires --highres-water-optics")?,
+                    )
+                })
+                .transpose()?;
+            Ok::<_, anyhow::Error>((leaf, water, radiation))
+        })
+        .transpose()?;
     let hydraulic_model = pft_hydraulic_model_from_document(&document)?;
     let mut common_config = SpatialLctTimeConfig::new(
         config.static_config.landdata,
@@ -391,6 +469,133 @@ pub fn write_spatial_pft_cold_time_restarts(
             patches.class.len(),
         )?,
     ];
+    let (
+        high_resolution_ground,
+        high_resolution_fractions,
+        mut high_resolution_albedo,
+        mut high_resolution_reflectance,
+        mut high_resolution_transmittance,
+    ) = if let Some((_, water, radiation)) = high_resolution_sources.as_ref() {
+        let (longitude, latitude) = patch_coordinates(
+            config.static_config.landdata,
+            config.static_config.land_cover_year,
+            config.static_config.block_label,
+            &patches,
+        )?;
+        let dry_soil_albedo = high_resolution_soil
+            .then(|| {
+                read_hyperspectral_albedo(
+                    config.static_config.landdata,
+                    config.static_config.land_cover_year,
+                    config.static_config.block_label,
+                    patches.class.len(),
+                    HIGH_RES_WAVELENGTHS,
+                )
+            })
+            .transpose()?;
+        let porosity = high_resolution_soil
+            .then(|| {
+                derive_spatial_soil_parameters(
+                    &read_soil(
+                        config.static_config.landdata,
+                        config.static_config.land_cover_year,
+                        config.static_config.block_label,
+                        patches.class.len(),
+                    )?,
+                    &patches.class,
+                    &patch_kind,
+                    10,
+                    hydraulic_model,
+                )
+            })
+            .transpose()?;
+        let mut ground = Vec::with_capacity(patches.class.len());
+        let mut fractions = Vec::with_capacity(patches.class.len());
+        let mut hires_albedo = vec![0.0; HIGH_RES_WAVELENGTHS * 2 * patches.class.len()];
+        for patch in 0..patches.class.len() {
+            let broadband_ground = cold_start_ground_albedo(
+                patch_kind[patch],
+                SoilReflectance {
+                    saturated_visible: albedo[0][patch],
+                    dry_visible: albedo[1][patch],
+                    saturated_near_infrared: albedo[2][patch],
+                    dry_near_infrared: albedo[3][patch],
+                },
+                common_state.top_liquid_kg_m2[patch],
+                top_soil_thickness_m,
+                common_state.cosine_zenith[patch].max(0.001),
+                0.0,
+                0.0,
+                common_state.ground_temperature_k[patch],
+            )?;
+            let mut spectral_ground = if patch_kind[patch] == 1 {
+                (0..HIGH_RES_WAVELENGTHS)
+                    .flat_map(|wavelength| {
+                        let albedo = if wavelength < 29 { 0.12 } else { 0.20 };
+                        [albedo, albedo]
+                    })
+                    .collect()
+            } else {
+                expand_broadband_ground_albedo(broadband_ground.ground)
+            };
+            if high_resolution_soil && patch_kind[patch] == 0 {
+                let dry = (0..HIGH_RES_WAVELENGTHS)
+                    .map(|wavelength| {
+                        dry_soil_albedo
+                            .as_ref()
+                            .expect("high-resolution soil source is loaded")
+                            [wavelength * patches.class.len() + patch]
+                    })
+                    .collect::<Vec<_>>();
+                if dry[0] >= 0.01 {
+                    let porosity = porosity
+                        .as_ref()
+                        .expect("high-resolution soil porosity is loaded")
+                        .get(SoilField::Porosity, 0, patch);
+                    let water = water
+                        .as_ref()
+                        .expect("high-resolution water optics are loaded");
+                    spectral_ground = bsm_soil_moisture(
+                        (1.0e-3 * common_state.top_liquid_kg_m2[patch] / top_soil_thickness_m)
+                            .min(1.0)
+                            * 100.0,
+                        porosity * 100.0,
+                        &dry,
+                        &water.absorption,
+                        &water.refractive_index,
+                    )?;
+                }
+            }
+            for wavelength in 0..HIGH_RES_WAVELENGTHS {
+                for radiation_type in 0..2 {
+                    hires_albedo[(wavelength * 2 + radiation_type) * patches.class.len() + patch] =
+                        spectral_ground[wavelength * 2 + radiation_type];
+                }
+            }
+            ground.push(spectral_ground);
+            fractions.push(select_high_resolution_radiation(
+                CalendarTime {
+                    year: config.date.year,
+                    julian_day: config.date.julian_day,
+                    seconds: config.date.seconds,
+                },
+                config.greenwich,
+                longitude[patch].to_degrees(),
+                common_state.cosine_zenith[patch],
+                latitude[patch],
+                radiation.tables(),
+            )?);
+        }
+        (
+            ground,
+            fractions,
+            hires_albedo,
+            vec![MISSING; HIGH_RES_WAVELENGTHS * 16 * patches.class.len()],
+            vec![MISSING; HIGH_RES_WAVELENGTHS * 16 * patches.class.len()],
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
 
     let mut leaf_temperature = vec![0.0; pft_count];
     let zero = vec![0.0; pft_count];
@@ -403,6 +608,9 @@ pub fn write_spatial_pft_cold_time_restarts(
     let mut direct_extinction = vec![1.0; pft_count];
     let mut diffuse_extinction = vec![0.718; pft_count];
     let mut state_by_pft = vec![None; pft_count];
+    let mut high_resolution_by_pft = vec![None; pft_count];
+    let mut high_resolution_sunlit = vec![0.0; HIGH_RES_WAVELENGTHS * 2 * pft_count];
+    let mut high_resolution_shaded = high_resolution_sunlit.clone();
     for patch in 0..patches.class.len() {
         let indices = &pft_to_patch[patch];
         if patch_kind[patch] != 0 {
@@ -425,9 +633,10 @@ pub fn write_spatial_pft_cold_time_restarts(
             "PFT fractions for natural spatial patch {patch} must sum to one, got {fraction_sum}"
         );
         for &pft in indices {
-            let state = cold_start_pft_broadband_radiation_with_snow(
+            let broadband_optics = pft_leaf_optics(&document, pfts.class[pft], hydraulic_model)?;
+            let mut state = cold_start_pft_broadband_radiation_with_snow(
                 patch_kind[patch],
-                crate::SoilReflectance {
+                SoilReflectance {
                     saturated_visible: albedo[0][patch],
                     dry_visible: albedo[1][patch],
                     saturated_near_infrared: albedo[2][patch],
@@ -435,7 +644,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 },
                 common_state.top_liquid_kg_m2[patch],
                 top_soil_thickness_m,
-                pft_leaf_optics(&document, pfts.class[pft], hydraulic_model)?,
+                broadband_optics,
                 total_lai[pft],
                 total_sai[pft],
                 0.0,
@@ -445,6 +654,64 @@ pub fn write_spatial_pft_cold_time_restarts(
                 0.0,
                 common_state.ground_temperature_k[patch],
             )?;
+            if config.use_hyperspectral {
+                let fallback = expand_broadband_leaf_optics(broadband_optics);
+                let class = usize::try_from(pfts.class[pft])
+                    .context("high-resolution PFT class must be nonnegative")?;
+                let optics = if high_resolution_vegetation {
+                    high_resolution_sources
+                        .as_ref()
+                        .expect("high-resolution sources are loaded")
+                        .0
+                        .as_ref()
+                        .expect("high-resolution leaf optics are loaded")
+                        .optics(class)?
+                } else {
+                    HighResolutionLeafOptics {
+                        reflectance: &fallback.0,
+                        transmittance: &fallback.1,
+                    }
+                };
+                let radiation = (total_lai[pft] + total_sai[pft] > 1.0e-6)
+                    .then(|| {
+                        pft_high_resolution_radiation(
+                            broadband_optics.chil,
+                            optics,
+                            total_lai[pft],
+                            total_sai[pft],
+                            0.0,
+                            common_state.cosine_zenith[patch].max(0.001),
+                            &high_resolution_ground[patch],
+                            config.vegetation_snow,
+                        )
+                    })
+                    .transpose()?;
+                state = high_resolution_cold_state(
+                    radiation.as_ref(),
+                    &high_resolution_ground[patch],
+                    &high_resolution_fractions[patch],
+                )?;
+                if let Some(radiation) = radiation.as_ref() {
+                    copy_high_resolution_pft_radiation(
+                        &mut high_resolution_sunlit,
+                        pft_count,
+                        pft,
+                        &radiation.sunlit_absorption,
+                    )?;
+                    copy_high_resolution_pft_radiation(
+                        &mut high_resolution_shaded,
+                        pft_count,
+                        pft,
+                        &radiation.shaded_absorption,
+                    )?;
+                    for wavelength in 0..HIGH_RES_WAVELENGTHS {
+                        let index = (wavelength * 16 + class) * patches.class.len() + patch;
+                        high_resolution_reflectance[index] = optics.reflectance[wavelength * 2];
+                        high_resolution_transmittance[index] = optics.transmittance[wavelength * 2];
+                    }
+                }
+                high_resolution_by_pft[pft] = radiation;
+            }
             leaf_temperature[pft] = common_state.ground_temperature_k[patch];
             roughness[pft] = canopy.top_m[pft] * 0.1;
             thermal_gap[pft] = state.thermal_gap_fraction;
@@ -542,6 +809,22 @@ pub fn write_spatial_pft_cold_time_restarts(
                 .map(|&index| roughness[index] * pfts.fraction[index])
                 .sum(),
         );
+        if config.use_hyperspectral {
+            for wavelength in 0..HIGH_RES_WAVELENGTHS {
+                for radiation_type in 0..2 {
+                    high_resolution_albedo
+                        [(wavelength * 2 + radiation_type) * patches.class.len() + patch] = indices
+                        .iter()
+                        .map(|&pft| {
+                            high_resolution_by_pft[pft].as_ref().map_or(
+                                high_resolution_ground[patch][wavelength * 2 + radiation_type],
+                                |radiation| radiation.albedo[wavelength * 2 + radiation_type],
+                            ) * pfts.fraction[pft]
+                        })
+                        .sum();
+                }
+            }
+        }
     }
 
     update_common_pft_optics(&common.block, &common_radiation, &common_roughness)?;
@@ -551,6 +834,17 @@ pub fn write_spatial_pft_cold_time_restarts(
             .map(|indices| indices.iter().any(|&pft| pfts.class[pft] >= 15))
             .collect::<Vec<_>>();
         zero_common_crop_vegetation(&common.block, &crop_patch)?;
+    }
+    if config.use_hyperspectral {
+        append_time_hyperspectral_fields(
+            &common.block,
+            2,
+            TimeHyperspectralFields {
+                albedo: &high_resolution_albedo,
+                reflectance: &high_resolution_reflectance,
+                transmittance: &high_resolution_transmittance,
+            },
+        )?;
     }
     let reference_humidity = vec![0.3; pft_count];
     let missing = vec![MISSING; pft_count];
@@ -586,7 +880,10 @@ pub fn write_spatial_pft_cold_time_restarts(
                 stomatal_resistance_s_m: &missing,
                 roughness_length_m: &roughness,
             },
-            hyperspectral: None,
+            hyperspectral: config.use_hyperspectral.then_some(PftHyperspectralFields {
+                sunlit_absorption: &high_resolution_sunlit,
+                shaded_absorption: &high_resolution_shaded,
+            }),
             plant_hydraulics: config.plant_hydraulics.then_some(PftPlantHydraulicFields {
                 water_potential_mm: &plant_water,
                 sunlit_stomatal_conductance: &conductance,
@@ -1161,6 +1458,111 @@ fn copy_pft_radiation(target: &mut [f64], pfts: usize, pft: usize, values: [[f64
             target[(band * 2 + radiation_type) * pfts + pft] = values[band][radiation_type];
         }
     }
+}
+
+fn copy_high_resolution_pft_radiation(
+    target: &mut [f64],
+    pfts: usize,
+    pft: usize,
+    values: &[f64],
+) -> Result<()> {
+    ensure!(
+        values.len() == HIGH_RES_WAVELENGTHS * 2,
+        "high-resolution PFT radiation must contain 211 wavelengths and two radiation types"
+    );
+    for wavelength in 0..HIGH_RES_WAVELENGTHS {
+        for radiation_type in 0..2 {
+            target[(wavelength * 2 + radiation_type) * pfts + pft] =
+                values[wavelength * 2 + radiation_type];
+        }
+    }
+    Ok(())
+}
+
+fn high_resolution_cold_state(
+    radiation: Option<&HighResolutionPftRadiation>,
+    ground: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+) -> Result<ColdStartRadiation> {
+    ensure!(
+        ground.len() == HIGH_RES_WAVELENGTHS * 2,
+        "high-resolution ground albedo must contain 211 wavelengths and two radiation types"
+    );
+    let albedo = match radiation {
+        Some(radiation) => weighted_two_stream(&radiation.albedo, fractions)?,
+        None => weighted_two_stream(ground, fractions)?,
+    };
+    let sunlit_absorption = match radiation {
+        Some(radiation) => weighted_two_stream(&radiation.sunlit_absorption, fractions)?,
+        None => [[0.0; 2]; 2],
+    };
+    let shaded_absorption = match radiation {
+        Some(radiation) => weighted_two_stream(&radiation.shaded_absorption, fractions)?,
+        None => [[0.0; 2]; 2],
+    };
+    let transmission = radiation.map_or_else(
+        || {
+            (0..HIGH_RES_WAVELENGTHS)
+                .flat_map(|_| [0.0, 1.0, 1.0])
+                .collect::<Vec<_>>()
+        },
+        |radiation| radiation.transmission.clone(),
+    );
+    let soil_direct = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| {
+            transmission[wavelength * 3] * (1.0 - ground[wavelength * 2 + 1])
+                + transmission[wavelength * 3 + 2] * (1.0 - ground[wavelength * 2])
+        })
+        .collect::<Vec<_>>();
+    let soil_diffuse = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| transmission[wavelength * 3 + 1] * (1.0 - ground[wavelength * 2 + 1]))
+        .collect::<Vec<_>>();
+    let soil_direct = weighted_high_resolution_bands(&soil_direct, &fractions.direct)?;
+    let soil_diffuse = weighted_high_resolution_bands(&soil_diffuse, &fractions.diffuse)?;
+    let soil_absorption = [
+        [soil_direct[0], soil_diffuse[0]],
+        [soil_direct[1], soil_diffuse[1]],
+    ];
+    let (snow_age, thermal_gap_fraction, direct_extinction, diffuse_extinction) = radiation
+        .map(|radiation| {
+            (
+                0.0,
+                radiation.thermal_gap_fraction,
+                radiation.direct_extinction,
+                radiation.diffuse_extinction,
+            )
+        })
+        .unwrap_or((0.0, 1.0, 1.0, 0.718));
+    Ok(ColdStartRadiation {
+        albedo,
+        sunlit_absorption,
+        shaded_absorption,
+        soil_absorption,
+        snow_absorption: [[0.0; 2]; 2],
+        snow_age,
+        thermal_gap_fraction,
+        direct_extinction,
+        diffuse_extinction,
+    })
+}
+
+fn weighted_two_stream(
+    values: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+) -> Result<[[f64; 2]; 2]> {
+    ensure!(
+        values.len() == HIGH_RES_WAVELENGTHS * 2,
+        "high-resolution two-stream values must contain 211 wavelengths and two radiation types"
+    );
+    let direct = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| values[wavelength * 2])
+        .collect::<Vec<_>>();
+    let diffuse = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| values[wavelength * 2 + 1])
+        .collect::<Vec<_>>();
+    let direct = weighted_high_resolution_bands(&direct, &fractions.direct)?;
+    let diffuse = weighted_high_resolution_bands(&diffuse, &fractions.diffuse)?;
+    Ok([[direct[0], diffuse[0]], [direct[1], diffuse[1]]])
 }
 
 fn update_common_pft_optics(
