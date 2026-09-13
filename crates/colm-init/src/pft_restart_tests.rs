@@ -169,6 +169,84 @@ fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
 }
 
 #[test]
+fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
+    let fixture = Fixture::new();
+    let values = vec![fixture.pft.as_slice(); PFT_BGC_F64_VARIABLES.len()];
+    let mut input = fixture.time_input();
+    input.bgc = Some(PftBgcFields {
+        values: &values,
+        active_crop_years: &[2, 3],
+    });
+    input.crop = Some(crop_fields(&fixture));
+    let path = temp_dir("crop").join("restart.nc");
+    write_pft_time_restart_block(&path, input).unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    let names = file
+        .variables()
+        .map(|variable| variable.name())
+        .collect::<Vec<_>>();
+    let first = names.iter().position(|name| name == "croplive_p").unwrap();
+    assert_eq!(
+        &names[first..],
+        [
+            "croplive_p",
+            "hui_p",
+            "gddplant_p",
+            "peaklai_p",
+            "aroot_p",
+            "astem_p",
+            "arepr_p",
+            "aleaf_p",
+            "astemi_p",
+            "aleafi_p",
+            "gddmaturity_p",
+            "cropplant_p",
+            "idop_p",
+            "a5tmin_p",
+            "a10tmin_p",
+            "t10_p",
+            "cumvd_p",
+            "vf_p",
+            "cphase_p",
+            "fert_counter_p",
+            "tref_min_p",
+            "tref_max_p",
+            "tref_min_inst_p",
+            "tref_max_inst_p",
+            "fertnitro_p",
+            "manunitro_p",
+            "fert_p",
+            "latbaset_p",
+            "plantdate_p",
+        ]
+    );
+    assert_eq!(
+        file.variable("croplive_p")
+            .unwrap()
+            .get_values::<i8, _>(..)
+            .unwrap(),
+        [0, 1]
+    );
+    assert_eq!(
+        file.variable("peaklai_p")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        [1, 2]
+    );
+    assert_eq!(
+        file.variable("idop_p")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        [99_999_999, 99_999_998]
+    );
+    drop(file);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 #[ignore = "requires the local BGC kernel and CoLMruntime cnsteadystate.nc reference data"]
 fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -317,6 +395,7 @@ fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
                 values: &bgc_refs,
                 active_crop_years: &active_crop_years,
             }),
+            crop: None,
             ozone: None,
             irrigation_method: None,
         },
@@ -418,6 +497,7 @@ impl Fixture {
                 vegetation_nodes: 2,
             }),
             bgc: None,
+            crop: None,
             ozone: Some(PftOzoneFields {
                 lai_old: pft,
                 sunlit_uptake: pft,
@@ -429,6 +509,40 @@ impl Fixture {
             }),
             irrigation_method: Some(&[2, 3]),
         }
+    }
+}
+
+fn crop_fields(fixture: &Fixture) -> PftCropFields<'_> {
+    PftCropFields {
+        crop_live: &[0, 1],
+        heat_unit_index: &fixture.pft,
+        growing_degree_days_at_planting: &fixture.pft,
+        peak_lai_day: &[1, 2],
+        root_allocation: &fixture.pft,
+        stem_allocation: &fixture.pft,
+        reproductive_allocation: &fixture.pft,
+        leaf_allocation: &fixture.pft,
+        stem_allocation_increment: &fixture.pft,
+        leaf_allocation_increment: &fixture.pft,
+        growing_degree_days_at_maturity: &fixture.pft,
+        crop_planted: &[1, 0],
+        day_of_planting: &[99_999_999, 99_999_998],
+        five_day_minimum_temperature: &fixture.pft,
+        ten_day_minimum_temperature: &fixture.pft,
+        ten_day_temperature: &fixture.pft,
+        cumulative_vernalization_days: &fixture.pft,
+        vernalization_factor: &fixture.pft,
+        crop_phase: &fixture.pft,
+        fertilizer_counter: &fixture.pft,
+        minimum_reference_temperature: &fixture.pft,
+        maximum_reference_temperature: &fixture.pft,
+        instantaneous_minimum_reference_temperature: &fixture.pft,
+        instantaneous_maximum_reference_temperature: &fixture.pft,
+        fertilizer_nitrogen: &fixture.pft,
+        manure_nitrogen: &fixture.pft,
+        fertilizer: &fixture.pft,
+        latitude_base_temperature: &fixture.pft,
+        planting_date: &fixture.pft,
     }
 }
 

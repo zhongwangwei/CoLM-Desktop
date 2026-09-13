@@ -160,16 +160,16 @@ pub struct IrrigationFields<'a> {
     pub cumulative: &'a [f64],
     pub cumulative_deficit: &'a [f64],
     pub event_count: &'a [f64],
-    pub steps_left: &'a [f64],
+    pub steps_left: &'a [i32],
     pub water_storage: &'a [f64],
-    pub corn_method: &'a [f64],
-    pub spring_wheat_method: &'a [f64],
-    pub winter_wheat_method: &'a [f64],
-    pub soybean_method: &'a [f64],
-    pub cotton_method: &'a [f64],
-    pub rice_1_method: &'a [f64],
-    pub rice_2_method: &'a [f64],
-    pub sugarcane_method: &'a [f64],
+    pub corn_method: &'a [i32],
+    pub spring_wheat_method: &'a [i32],
+    pub winter_wheat_method: &'a [i32],
+    pub soybean_method: &'a [i32],
+    pub cotton_method: &'a [i32],
+    pub rice_1_method: &'a [i32],
+    pub rice_2_method: &'a [i32],
+    pub sugarcane_method: &'a [i32],
     pub groundwater_allocation: &'a [f64],
     pub surface_water_allocation: &'a [f64],
     pub standard_water_table_depth: &'a [f64],
@@ -388,7 +388,8 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
     )?;
     put_patch_values(&mut file, regional_patch_entries(input.patch))?;
     if let Some(irrigation) = input.irrigation {
-        put_patch_values(&mut file, irrigation_entries(irrigation))?;
+        put_patch_values(&mut file, irrigation_f64_entries(irrigation))?;
+        put_patch_i32_values(&mut file, irrigation_i32_entries(irrigation))?;
     }
     file.close()
         .with_context(|| format!("cannot close time restart block {}", path.display()))?;
@@ -510,14 +511,22 @@ fn snow_aerosol_entries(fields: SnowAerosolFields<'_>) -> [(&str, &[f64]); 9] {
     ]
 }
 
-fn irrigation_entries(fields: IrrigationFields<'_>) -> [(&str, &[f64]); 17] {
+fn irrigation_f64_entries(fields: IrrigationFields<'_>) -> [(&str, &[f64]); 8] {
     [
         ("irrig_rate", fields.rate),
         ("sum_irrig", fields.cumulative),
         ("sum_deficit_irrig", fields.cumulative_deficit),
         ("sum_irrig_count", fields.event_count),
-        ("n_irrig_steps_left", fields.steps_left),
         ("waterstorage", fields.water_storage),
+        ("irrig_gw_alloc", fields.groundwater_allocation),
+        ("irrig_sw_alloc", fields.surface_water_allocation),
+        ("zwt_stand", fields.standard_water_table_depth),
+    ]
+}
+
+fn irrigation_i32_entries(fields: IrrigationFields<'_>) -> [(&str, &[i32]); 9] {
+    [
+        ("n_irrig_steps_left", fields.steps_left),
         ("irrig_method_corn", fields.corn_method),
         ("irrig_method_swheat", fields.spring_wheat_method),
         ("irrig_method_wwheat", fields.winter_wheat_method),
@@ -526,9 +535,6 @@ fn irrigation_entries(fields: IrrigationFields<'_>) -> [(&str, &[f64]); 17] {
         ("irrig_method_rice1", fields.rice_1_method),
         ("irrig_method_rice2", fields.rice_2_method),
         ("irrig_method_sugarcane", fields.sugarcane_method),
-        ("irrig_gw_alloc", fields.groundwater_allocation),
-        ("irrig_sw_alloc", fields.surface_water_allocation),
-        ("zwt_stand", fields.standard_water_table_depth),
     ]
 }
 
@@ -635,7 +641,8 @@ fn validate_input(input: TimeRestartInput<'_>) -> Result<usize> {
         )?;
     }
     if let Some(irrigation) = input.irrigation {
-        validate_patch_values("irrigation", patches, &irrigation_entries(irrigation))?;
+        validate_patch_values("irrigation", patches, &irrigation_f64_entries(irrigation))?;
+        validate_i32_patch_values("irrigation", patches, &irrigation_i32_entries(irrigation))?;
     }
     Ok(patches)
 }
@@ -652,6 +659,16 @@ fn validate_component(value: &str, name: &str) -> Result<()> {
 }
 
 fn validate_patch_values(name: &str, patches: usize, fields: &[(&str, &[f64])]) -> Result<()> {
+    if let Some((field, values)) = fields.iter().find(|(_, values)| values.len() != patches) {
+        anyhow::bail!(
+            "{name} field {field} has {} entries; expected {patches}",
+            values.len()
+        );
+    }
+    Ok(())
+}
+
+fn validate_i32_patch_values(name: &str, patches: usize, fields: &[(&str, &[i32])]) -> Result<()> {
     if let Some((field, values)) = fields.iter().find(|(_, values)| values.len() != patches) {
         anyhow::bail!(
             "{name} field {field} has {} entries; expected {patches}",
@@ -735,6 +752,17 @@ fn put_patch_values<const N: usize>(
 ) -> Result<()> {
     for (name, values) in entries {
         file.add_variable::<f64>(name, &["patch"])?
+            .put_values(values, ..)?;
+    }
+    Ok(())
+}
+
+fn put_patch_i32_values<const N: usize>(
+    file: &mut netcdf::FileMut,
+    entries: [(&str, &[i32]); N],
+) -> Result<()> {
+    for (name, values) in entries {
+        file.add_variable::<i32>(name, &["patch"])?
             .put_values(values, ..)?;
     }
     Ok(())

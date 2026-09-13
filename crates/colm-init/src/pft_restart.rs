@@ -96,6 +96,44 @@ pub struct PftBgcFields<'a> {
     pub active_crop_years: &'a [i32],
 }
 
+/// `CROP` PFT state stored after the regular BGC fields.
+///
+/// The byte and integer vectors intentionally mirror Fortran `logical` and
+/// `integer` NetCDF vector output; treating them as floating point changes the
+/// restart contract.
+#[derive(Debug, Clone, Copy)]
+pub struct PftCropFields<'a> {
+    pub crop_live: &'a [i8],
+    pub heat_unit_index: &'a [f64],
+    pub growing_degree_days_at_planting: &'a [f64],
+    pub peak_lai_day: &'a [i32],
+    pub root_allocation: &'a [f64],
+    pub stem_allocation: &'a [f64],
+    pub reproductive_allocation: &'a [f64],
+    pub leaf_allocation: &'a [f64],
+    pub stem_allocation_increment: &'a [f64],
+    pub leaf_allocation_increment: &'a [f64],
+    pub growing_degree_days_at_maturity: &'a [f64],
+    pub crop_planted: &'a [i8],
+    pub day_of_planting: &'a [i32],
+    pub five_day_minimum_temperature: &'a [f64],
+    pub ten_day_minimum_temperature: &'a [f64],
+    pub ten_day_temperature: &'a [f64],
+    pub cumulative_vernalization_days: &'a [f64],
+    pub vernalization_factor: &'a [f64],
+    pub crop_phase: &'a [f64],
+    pub fertilizer_counter: &'a [f64],
+    pub minimum_reference_temperature: &'a [f64],
+    pub maximum_reference_temperature: &'a [f64],
+    pub instantaneous_minimum_reference_temperature: &'a [f64],
+    pub instantaneous_maximum_reference_temperature: &'a [f64],
+    pub fertilizer_nitrogen: &'a [f64],
+    pub manure_nitrogen: &'a [f64],
+    pub fertilizer: &'a [f64],
+    pub latitude_base_temperature: &'a [f64],
+    pub planting_date: &'a [f64],
+}
+
 /// All PFT/PC fields for one time restart vector block.
 #[derive(Debug, Clone, Copy)]
 pub struct PftTimeRestartInput<'a> {
@@ -103,6 +141,9 @@ pub struct PftTimeRestartInput<'a> {
     pub hyperspectral: Option<PftHyperspectralFields<'a>>,
     pub plant_hydraulics: Option<PftPlantHydraulicFields<'a>>,
     pub bgc: Option<PftBgcFields<'a>>,
+    /// `CROP` only; requires [`Self::bgc`] because upstream writes it from the
+    /// BGC PFT restart family.
+    pub crop: Option<PftCropFields<'a>>,
     pub ozone: Option<PftOzoneFields<'a>>,
     /// `DEF_USE_IRRIGATION` only.
     pub irrigation_method: Option<&'a [i32]>,
@@ -276,7 +317,68 @@ pub fn write_pft_time_restart_block(
             put_f64_1d(&mut file, name, "pft", values)?;
         }
     }
+    if let Some(crop) = input.crop {
+        put_i8_1d(&mut file, "croplive_p", "pft", crop.crop_live)?;
+        for (name, values) in crop_leading_f64_entries(crop) {
+            put_f64_1d(&mut file, name, "pft", values)?;
+        }
+        put_i32_1d(&mut file, "peaklai_p", "pft", crop.peak_lai_day)?;
+        for (name, values) in crop_allocation_entries(crop) {
+            put_f64_1d(&mut file, name, "pft", values)?;
+        }
+        put_i8_1d(&mut file, "cropplant_p", "pft", crop.crop_planted)?;
+        put_i32_1d(&mut file, "idop_p", "pft", crop.day_of_planting)?;
+        for (name, values) in crop_trailing_f64_entries(crop) {
+            put_f64_1d(&mut file, name, "pft", values)?;
+        }
+    }
     Ok(())
+}
+
+fn crop_leading_f64_entries(crop: PftCropFields<'_>) -> [(&'static str, &[f64]); 2] {
+    [
+        ("hui_p", crop.heat_unit_index),
+        ("gddplant_p", crop.growing_degree_days_at_planting),
+    ]
+}
+
+fn crop_allocation_entries(crop: PftCropFields<'_>) -> [(&'static str, &[f64]); 7] {
+    [
+        ("aroot_p", crop.root_allocation),
+        ("astem_p", crop.stem_allocation),
+        ("arepr_p", crop.reproductive_allocation),
+        ("aleaf_p", crop.leaf_allocation),
+        ("astemi_p", crop.stem_allocation_increment),
+        ("aleafi_p", crop.leaf_allocation_increment),
+        ("gddmaturity_p", crop.growing_degree_days_at_maturity),
+    ]
+}
+
+fn crop_trailing_f64_entries(crop: PftCropFields<'_>) -> [(&'static str, &[f64]); 16] {
+    [
+        ("a5tmin_p", crop.five_day_minimum_temperature),
+        ("a10tmin_p", crop.ten_day_minimum_temperature),
+        ("t10_p", crop.ten_day_temperature),
+        ("cumvd_p", crop.cumulative_vernalization_days),
+        ("vf_p", crop.vernalization_factor),
+        ("cphase_p", crop.crop_phase),
+        ("fert_counter_p", crop.fertilizer_counter),
+        ("tref_min_p", crop.minimum_reference_temperature),
+        ("tref_max_p", crop.maximum_reference_temperature),
+        (
+            "tref_min_inst_p",
+            crop.instantaneous_minimum_reference_temperature,
+        ),
+        (
+            "tref_max_inst_p",
+            crop.instantaneous_maximum_reference_temperature,
+        ),
+        ("fertnitro_p", crop.fertilizer_nitrogen),
+        ("manunitro_p", crop.manure_nitrogen),
+        ("fert_p", crop.fertilizer),
+        ("latbaset_p", crop.latitude_base_temperature),
+        ("plantdate_p", crop.planting_date),
+    ]
 }
 
 fn pft_entries(fields: PftTimeFields<'_>) -> [(&'static str, &[f64]); 18] {
@@ -378,6 +480,66 @@ fn validate_time_input(input: PftTimeRestartInput<'_>) -> Result<usize> {
             bgc.active_crop_years.len()
         );
     }
+    if let Some(crop) = input.crop {
+        ensure!(input.bgc.is_some(), "CROP PFT state requires BGC PFT state");
+        ensure!(
+            crop.crop_live.len() == pfts,
+            "croplive_p has {} entries; expected {pfts}",
+            crop.crop_live.len()
+        );
+        ensure!(
+            crop.peak_lai_day.len() == pfts,
+            "peaklai_p has {} entries; expected {pfts}",
+            crop.peak_lai_day.len()
+        );
+        ensure!(
+            crop.crop_planted.len() == pfts,
+            "cropplant_p has {} entries; expected {pfts}",
+            crop.crop_planted.len()
+        );
+        ensure!(
+            crop.day_of_planting.len() == pfts,
+            "idop_p has {} entries; expected {pfts}",
+            crop.day_of_planting.len()
+        );
+        validate_pft_values(
+            "CROP PFT state",
+            pfts,
+            &[
+                ("hui_p", crop.heat_unit_index),
+                ("gddplant_p", crop.growing_degree_days_at_planting),
+                ("aroot_p", crop.root_allocation),
+                ("astem_p", crop.stem_allocation),
+                ("arepr_p", crop.reproductive_allocation),
+                ("aleaf_p", crop.leaf_allocation),
+                ("astemi_p", crop.stem_allocation_increment),
+                ("aleafi_p", crop.leaf_allocation_increment),
+                ("gddmaturity_p", crop.growing_degree_days_at_maturity),
+                ("a5tmin_p", crop.five_day_minimum_temperature),
+                ("a10tmin_p", crop.ten_day_minimum_temperature),
+                ("t10_p", crop.ten_day_temperature),
+                ("cumvd_p", crop.cumulative_vernalization_days),
+                ("vf_p", crop.vernalization_factor),
+                ("cphase_p", crop.crop_phase),
+                ("fert_counter_p", crop.fertilizer_counter),
+                ("tref_min_p", crop.minimum_reference_temperature),
+                ("tref_max_p", crop.maximum_reference_temperature),
+                (
+                    "tref_min_inst_p",
+                    crop.instantaneous_minimum_reference_temperature,
+                ),
+                (
+                    "tref_max_inst_p",
+                    crop.instantaneous_maximum_reference_temperature,
+                ),
+                ("fertnitro_p", crop.fertilizer_nitrogen),
+                ("manunitro_p", crop.manure_nitrogen),
+                ("fert_p", crop.fertilizer),
+                ("latbaset_p", crop.latitude_base_temperature),
+                ("plantdate_p", crop.planting_date),
+            ],
+        )?;
+    }
     if let Some(ozone) = input.ozone {
         validate_pft_values(
             "PFT ozone",
@@ -478,6 +640,23 @@ fn validate_pft_last_3d(
         "{name} has {} entries; expected {first} x {second} x {pfts}",
         values.len()
     );
+    Ok(())
+}
+
+fn put_i8_1d(file: &mut netcdf::FileMut, name: &str, dimension: &str, values: &[i8]) -> Result<()> {
+    file.add_variable::<i8>(name, &[dimension])?
+        .put_values(values, ..)?;
+    Ok(())
+}
+
+fn put_i32_1d(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimension: &str,
+    values: &[i32],
+) -> Result<()> {
+    file.add_variable::<i32>(name, &[dimension])?
+        .put_values(values, ..)?;
     Ok(())
 }
 

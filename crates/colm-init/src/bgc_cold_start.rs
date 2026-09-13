@@ -68,6 +68,7 @@ pub fn bgc_time_restart_input(state: &BgcColdStartState) -> BgcTimeRestartInput<
             accumulated_steps: &state.climate.accumulated_steps,
             skip_balance_check: &state.climate.skip_balance_check,
         },
+        crop: None,
         nitrification: state
             .nitrification
             .as_ref()

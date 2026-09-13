@@ -72,6 +72,14 @@ fn time_restart_matches_fortran_filename_dimensions_and_axis_order() {
     ] {
         assert!(file.variable(name).is_some(), "missing {name}");
     }
+    assert_eq!(
+        file.variable("n_irrig_steps_left").unwrap().vartype(),
+        netcdf::types::NcVariableType::Int(netcdf::types::IntType::I32)
+    );
+    assert_eq!(
+        file.variable("irrig_method_sugarcane").unwrap().vartype(),
+        netcdf::types::NcVariableType::Int(netcdf::types::IntType::I32)
+    );
     assert_eq!(file.variables().count(), 93);
     drop(file);
     std::fs::remove_dir_all(root).unwrap();
@@ -225,16 +233,16 @@ fn input() -> TimeRestartInput<'static> {
             cumulative: &PATCH,
             cumulative_deficit: &PATCH,
             event_count: &PATCH,
-            steps_left: &PATCH,
+            steps_left: &[10, 20],
             water_storage: &PATCH,
-            corn_method: &PATCH,
-            spring_wheat_method: &PATCH,
-            winter_wheat_method: &PATCH,
-            soybean_method: &PATCH,
-            cotton_method: &PATCH,
-            rice_1_method: &PATCH,
-            rice_2_method: &PATCH,
-            sugarcane_method: &PATCH,
+            corn_method: &[10, 20],
+            spring_wheat_method: &[10, 20],
+            winter_wheat_method: &[10, 20],
+            soybean_method: &[10, 20],
+            cotton_method: &[10, 20],
+            rice_1_method: &[10, 20],
+            rice_2_method: &[10, 20],
+            sugarcane_method: &[10, 20],
             groundwater_allocation: &PATCH,
             surface_water_allocation: &PATCH,
             standard_water_table_depth: &PATCH,

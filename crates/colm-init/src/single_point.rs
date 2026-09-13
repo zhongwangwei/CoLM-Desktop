@@ -27,12 +27,12 @@ use crate::{
     write_urban_constant_restart, write_urban_time_restart, BgcColdStartInput,
     BgcConstantRestartFiles, BgcPftColdStartInput, BgcTimeRestartFile, CalendarTime, ColdSoilState,
     ColdStartRadiation, ColdStartSoilInput, ConstantRestartFiles, ConstantRestartInput,
-    HydraulicModel, InitialSoilProfile, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput,
-    PftBgcFields, PftConstantRestartInput, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
-    PftTimeRestartInput, PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields,
-    RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField,
-    SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
-    TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
+    CropColdStartState, CropManagementConfig, HydraulicModel, InitialSoilProfile, LandCoverScheme,
+    LeafOptics, OzoneFields, PcPftInput, PftBgcFields, PftConstantRestartInput, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
+    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
+    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
+    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
     UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanNamedField,
     UrbanRadiationInput, UrbanState, UrbanThermalFields, UrbanTimeRestartDimensions,
     UrbanTimeRestartInput, MISSING,
@@ -508,6 +508,7 @@ pub fn write_single_point_constant_restarts(
         "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
     );
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
+    let crop = single_point_crop_state(run, &document, &surface, &pft)?;
     let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
     let common = write_single_point_constant_restart_with_canopy(
         &run.static_run.surface,
@@ -528,7 +529,7 @@ pub fn write_single_point_constant_restarts(
             fraction: &pft.fraction,
             canopy_top_m: &canopy.top_m,
             canopy_bottom_m: &canopy.bottom_m,
-            crop_fraction: None,
+            crop_fraction: crop.as_ref().map(|_| pft.crop_fraction.as_deref().unwrap()),
         },
     )?;
     let bgc = run
@@ -822,6 +823,7 @@ pub fn write_single_point_cold_time_restarts(
         snow_water_equivalent_mm,
         snow_cover.ground_snow_fraction,
         roughness,
+        None,
     )?;
     Ok(SinglePointTimeRestartFiles {
         common,
@@ -1030,6 +1032,7 @@ fn write_single_point_urban_cold_time_restarts(
         snow_water_equivalent_mm,
         snow_cover.ground_snow_fraction,
         roughness,
+        None,
     )?;
     let urban_file = write_single_point_urban_time_restart(
         run,
@@ -1198,6 +1201,7 @@ fn write_single_point_pft_cold_time_restarts(
         "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
     );
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
+    let crop = single_point_crop_state(run, &document, &surface, &pft)?;
     let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
     let dimensions = TimeRestartDimensions::default();
     let soil = derive_soil_parameters(
@@ -1285,13 +1289,25 @@ fn write_single_point_pft_cold_time_restarts(
     } else {
         run.static_run.land_cover_year
     };
-    let (total_lai_p, total_sai_p) = pft.monthly.for_year(
+    let (mut total_lai_p, mut total_sai_p) = pft.monthly.for_year(
         vegetation_year,
         month,
         run.use_site_lai,
         run.lai_start_year,
         run.lai_end_year,
     )?;
+    if crop.is_some() {
+        for (class, (lai, sai)) in pft
+            .class
+            .iter()
+            .zip(total_lai_p.iter_mut().zip(total_sai_p.iter_mut()))
+        {
+            if *class >= 17 {
+                *lai = 0.0;
+                *sai = 0.0;
+            }
+        }
+    }
     let snow_depth_m = initial_snow_depth(run, &surface, month)?;
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
     let roughness = weighted_sum(&canopy.top_m, &pft.fraction)? * 0.1;
@@ -1466,6 +1482,7 @@ fn write_single_point_pft_cold_time_restarts(
         snow_water_equivalent_mm,
         pft_snow.patch.ground_snow_fraction,
         roughness,
+        crop.as_ref(),
     )?;
     let bgc_pft_values = bgc_state.as_ref().map(|state| {
         state
@@ -1517,6 +1534,7 @@ fn write_single_point_pft_cold_time_restarts(
                     values,
                     active_crop_years: &state.active_crop_years,
                 }),
+            crop: crop.as_ref().map(CropColdStartState::pft_fields),
             ozone: run.ozone_stress.then_some(PftOzoneFields {
                 lai_old: &total_lai_p,
                 sunlit_uptake: &vec![0.0; pft.class.len()],
@@ -1526,19 +1544,23 @@ fn write_single_point_pft_cold_time_restarts(
                 sunlit_stomatal_coefficient: &vec![1.0; pft.class.len()],
                 shaded_stomatal_coefficient: &vec![1.0; pft.class.len()],
             }),
-            irrigation_method: None,
+            irrigation_method: crop
+                .as_ref()
+                .and_then(CropColdStartState::irrigation_method),
         },
     )?;
     let bgc = bgc_state
         .as_ref()
         .map(|state| {
+            let mut input = bgc_time_restart_input(state);
+            input.crop = crop.as_ref().map(CropColdStartState::bgc_fields);
             write_bgc_time_restart(
                 &run.static_run.restart_dir,
                 &run.static_run.case_name,
                 run.static_run.land_cover_year,
                 run.date,
                 &run.static_run.block_label,
-                bgc_time_restart_input(state),
+                input,
             )
         })
         .transpose()?;
@@ -1565,6 +1587,73 @@ struct PftColdStartRadiation {
 pub(crate) struct PftCanopy {
     pub(crate) top_m: Vec<f64>,
     pub(crate) bottom_m: Vec<f64>,
+}
+
+fn single_point_crop_state(
+    run: &SinglePointColdStartRun,
+    document: &colm_namelist::Document,
+    surface: &crate::SinglePointSurfaceData,
+    pft: &crate::SinglePointPftData,
+) -> Result<Option<CropColdStartState>> {
+    let use_irrigation = optional_bool_or(document, "DEF_USE_IRRIGATION", false)?;
+    let Some(crop_fraction) = pft.crop_fraction.as_deref() else {
+        ensure!(
+            !use_irrigation,
+            "DEF_USE_IRRIGATION requires CFT crop surface data in the Rust single-point initializer"
+        );
+        return Ok(None);
+    };
+    ensure!(
+        run.subgrid == SinglePointSubgrid::Pft,
+        "CROP single-point initialization requires DEF_USE_PFT = .true.; PC CFT layering is not yet verified"
+    );
+    ensure!(
+        run.bgc,
+        "CROP single-point initialization requires DEF_USE_BGC = .true."
+    );
+    ensure!(
+        pft.class.len() == 1 && crop_fraction.len() == 1,
+        "Rust CROP single-point initialization currently requires one active CFT patch; multi-CFT surfaces need multi-patch common restarts"
+    );
+    let planting_day = document
+        .get("DEF_TUNING_CROP_PLANTING_DAY")
+        .map(|value| {
+            value
+                .as_f64()
+                .context("DEF_TUNING_CROP_PLANTING_DAY must be a real value")
+        })
+        .transpose()?;
+    ensure!(
+        planting_day.is_none_or(f64::is_finite),
+        "DEF_TUNING_CROP_PLANTING_DAY must be finite"
+    );
+    let planting_day_override = planting_day.filter(|day| *day > 0.0);
+    let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
+    if !use_fertilizer && !use_irrigation {
+        if let Some(planting_day) = planting_day_override {
+            return crate::crop_cold_start_from_tuning(&pft.class, crop_fraction, planting_day)
+                .map(Some);
+        }
+    }
+    ensure!(
+        !(use_irrigation && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3)),
+        "DEF_IRRIGATION_ALLOCATION = 3 needs groundwater/surface-water allocation state, which the Rust cold restart does not yet write"
+    );
+    let runtime_dir = PathBuf::from(required_string(document, "DEF_dir_runtime")?);
+    crate::crop_cold_start_from_management(
+        &pft.class,
+        crop_fraction,
+        surface.latitude_degrees,
+        surface.longitude_degrees,
+        CropManagementConfig {
+            runtime_dir: &runtime_dir,
+            planting_day_override,
+            use_fertilizer,
+            fertilizer_source: optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1),
+            use_irrigation,
+        },
+    )
+    .map(Some)
 }
 
 fn read_run_namelist(run: &SinglePointColdStartRun) -> Result<colm_namelist::Document> {
@@ -1874,6 +1963,7 @@ fn write_cold_time_restart(
     snow_water_equivalent_mm: f64,
     ground_snow_fraction: f64,
     roughness: f64,
+    crop: Option<&CropColdStartState>,
 ) -> Result<TimeRestartFile> {
     let dimensions = TimeRestartDimensions::default();
     let snow_temperature = snow
@@ -1917,6 +2007,8 @@ fn write_cold_time_restart(
     let ozone_lai = one(lai);
     let ozone_zero = one(0.0);
     let ozone_one = one(1.0);
+    let standard_water_table_depth = one((water_table_depth_m + 1.0).clamp(0.0, 80.0));
+    let irrigation = crop.and_then(|state| state.irrigation_fields(&standard_water_table_depth));
 
     write_time_restart(
         &run.static_run.restart_dir,
@@ -2017,7 +2109,7 @@ fn write_cold_time_restart(
                 sunlit_ground_coefficient: &ozone_one,
                 shaded_ground_coefficient: &ozone_one,
             }),
-            irrigation: None,
+            irrigation,
         },
     )
 }
@@ -2082,8 +2174,9 @@ fn reject_unsupported_cold_start_features(
     subgrid: SinglePointSubgrid,
 ) -> Result<()> {
     ensure!(
-        !optional_bool_or(document, "DEF_USE_IRRIGATION", false)?,
-        "native cold single-point restart does not yet support DEF_USE_IRRIGATION = .true."
+        !optional_bool_or(document, "DEF_USE_IRRIGATION", false)?
+            || subgrid == SinglePointSubgrid::Pft,
+        "DEF_USE_IRRIGATION requires DEF_USE_PFT = .true. in the Rust single-point initializer"
     );
     ensure!(
         !optional_bool_or(document, "DEF_URBAN_RUN", false)? || subgrid == SinglePointSubgrid::Lct,

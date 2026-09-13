@@ -179,30 +179,29 @@ pub fn read_single_point_snow_depth(
     )
 }
 
-fn cell_indices(file: &netcdf::File, latitude: f64, longitude: f64) -> Result<(usize, usize)> {
+pub(crate) fn nearest_cell_indices(
+    file: &netcdf::File,
+    latitude: f64,
+    longitude: f64,
+) -> Result<(usize, usize)> {
     ensure!(
         latitude.is_finite() && longitude.is_finite(),
         "surface coordinate must be finite"
     );
-    let latitudes = values_1d(file, "lat")?;
-    let longitudes = values_1d(file, "lon")?;
+    let latitudes = coordinate_values(file, "lat")?;
+    let longitudes = coordinate_values(file, "lon")?;
     Ok((
         nearest_index(&latitudes, latitude, false)?,
         nearest_index(&longitudes, longitude, true)?,
     ))
 }
 
+fn cell_indices(file: &netcdf::File, latitude: f64, longitude: f64) -> Result<(usize, usize)> {
+    nearest_cell_indices(file, latitude, longitude)
+}
+
 fn cell_indices_f32(file: &netcdf::File, latitude: f64, longitude: f64) -> Result<(usize, usize)> {
-    ensure!(
-        latitude.is_finite() && longitude.is_finite(),
-        "surface coordinate must be finite"
-    );
-    let latitudes = values_1d_f32(file, "lat")?;
-    let longitudes = values_1d_f32(file, "lon")?;
-    Ok((
-        nearest_index(&latitudes, latitude, false)?,
-        nearest_index(&longitudes, longitude, true)?,
-    ))
+    nearest_cell_indices(file, latitude, longitude)
 }
 
 fn nearest_index(values: &[f64], target: f64, longitude: bool) -> Result<usize> {
@@ -228,6 +227,10 @@ fn nearest_index(values: &[f64], target: f64, longitude: bool) -> Result<usize> 
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(index, _)| index)
         .context("runtime coordinate must not be empty")
+}
+
+fn coordinate_values(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+    values_1d(file, name).or_else(|_| values_1d_f32(file, name))
 }
 
 fn values_1d(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {

@@ -40,15 +40,18 @@ pub struct SinglePointMonthlyVegetation {
     pub sai: Vec<f64>,
 }
 
-/// The positive PFT tiles and monthly state used by a non-CROP single-point run.
+/// The positive PFT/CFT tiles and monthly state used by a single-point run.
 ///
 /// `MOD_SingleSrfdata` packs only positive `SITE_pctpfts` entries into `landpft`.
-/// Keeping that compact order here lets the PFT restart vectors use the same order.
+/// CROP keeps those per-CFT weights as one and uses `pctcrop` per patch, so
+/// this reader preserves that distinct contract instead of normalizing it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointPftData {
     pub class: Vec<i32>,
     pub fraction: Vec<f64>,
     pub canopy_height_m: Vec<f64>,
+    /// `CROP` only: one unnormalized crop fraction per packed CFT patch.
+    pub crop_fraction: Option<Vec<f64>>,
     pub monthly: SinglePointPftMonthlyVegetation,
 }
 
@@ -201,10 +204,11 @@ pub fn read_single_point_monthly_vegetation(
     Ok(SinglePointMonthlyVegetation { years, lai, sai })
 }
 
-/// Reads the PFT composition and monthly PFT LAI/SAI single-point contract.
+/// Reads the PFT/CFT composition and monthly LAI/SAI single-point contract.
 ///
-/// This is the non-CROP `SITE_pfttyp`/`SITE_pctpfts` path.  CROP owns a
-/// different `croptyp`/`pctcrop` contract and remains a separate restart family.
+/// Normal PFT classes are `0..=15` and their positive fractions are normalized
+/// by `MOD_SingleSrfdata`. CROP exposes CFT classes `15..=78` with a separate
+/// `pctcrop` patch vector; its positive `pctpfts` entries remain unnormalized.
 pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointPftData> {
     let path = path.as_ref();
     let file = netcdf::open(path)
@@ -212,45 +216,78 @@ pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointP
     let years = vector_i32(&file, "LAI_year")?;
     validate_lai_years(&years)?;
     let class = vector_i32(&file, "pfttyp")?;
-    let fraction = vector(&file, "pctpfts")?;
+    let source_fraction = vector(&file, "pctpfts")?;
     let canopy_height_m = vector(&file, "canopy_height_pfts")?;
     ensure!(
-        !class.is_empty() && class.len() == fraction.len() && class.len() == canopy_height_m.len(),
+        !class.is_empty()
+            && class.len() == source_fraction.len()
+            && class.len() == canopy_height_m.len(),
         "pfttyp, pctpfts, and canopy_height_pfts must be nonempty equal-length vectors"
     );
     ensure!(
-        class.iter().all(|class| (0..=15).contains(class))
-            && fraction
-                .iter()
-                .all(|fraction| fraction.is_finite() && *fraction >= 0.0)
+        source_fraction
+            .iter()
+            .all(|fraction| fraction.is_finite() && *fraction >= 0.0)
             && canopy_height_m
                 .iter()
                 .all(|height| height.is_finite() && *height >= 0.0),
-        "single-point PFT classes, fractions, or canopy heights are invalid"
+        "single-point PFT fractions or canopy heights are invalid"
     );
-    let indices = fraction
+    let crop_fraction = file
+        .variable("pctcrop")
+        .map(|_| vector(&file, "pctcrop"))
+        .transpose()?;
+    let crop = crop_fraction.is_some();
+    ensure!(
+        if crop {
+            class.iter().all(|class| (15..=78).contains(class))
+        } else {
+            class.iter().all(|class| (0..=15).contains(class))
+        },
+        "single-point {} classes are invalid",
+        if crop { "CFT" } else { "PFT" }
+    );
+    if let Some(crop_fraction) = &crop_fraction {
+        ensure!(
+            crop_fraction.len() == class.len()
+                && crop_fraction
+                    .iter()
+                    .all(|fraction| fraction.is_finite() && *fraction >= 0.0),
+            "CROP pctcrop must be a finite nonnegative vector matching pfttyp"
+        );
+    }
+    let indices = source_fraction
         .iter()
         .enumerate()
         .filter_map(|(index, fraction)| (*fraction > 0.0).then_some(index))
         .collect::<Vec<_>>();
     ensure!(
         !indices.is_empty(),
-        "single-point surface has no positive PFT fractions"
+        "single-point surface has no positive PFT/CFT fractions"
     );
+    if let Some(crop_fraction) = &crop_fraction {
+        ensure!(
+            indices.iter().all(|&index| crop_fraction[index] > 0.0),
+            "positive CFT entries need positive pctcrop fractions"
+        );
+    }
     let fraction = indices
         .iter()
-        .map(|&index| fraction[index])
+        .map(|&index| source_fraction[index])
         .collect::<Vec<_>>();
-    let total: f64 = fraction.iter().sum();
-    ensure!(
-        (total - 1.0).abs() <= 1.0e-6,
-        "positive single-point PFT fractions must sum to one, got {total}"
-    );
-    // `MOD_SingleSrfdata` normalizes the packed positive SITE components.
-    let fraction = fraction
-        .into_iter()
-        .map(|fraction| fraction / total)
-        .collect::<Vec<_>>();
+    let fraction = if crop {
+        fraction
+    } else {
+        let total: f64 = fraction.iter().sum();
+        ensure!(
+            (total - 1.0).abs() <= 1.0e-6,
+            "positive single-point PFT fractions must sum to one, got {total}"
+        );
+        fraction
+            .into_iter()
+            .map(|fraction| fraction / total)
+            .collect()
+    };
     let raw_pfts = class.len();
     let lai = pft_monthly_vector(&file, "LAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
     let sai = pft_monthly_vector(&file, "SAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
@@ -261,6 +298,8 @@ pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointP
             .iter()
             .map(|&index| canopy_height_m[index])
             .collect(),
+        crop_fraction: crop_fraction
+            .map(|fractions| indices.iter().map(|&index| fractions[index]).collect()),
         monthly: SinglePointPftMonthlyVegetation {
             years,
             lai,

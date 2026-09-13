@@ -93,6 +93,28 @@ pub struct BgcNitrificationFields<'a> {
     pub oxygen_decomposition_depth_unsaturated: &'a [f64],
 }
 
+/// `CROP` patch state written after the shared BGC restart fields.
+#[derive(Debug, Clone, Copy)]
+pub struct BgcCropFields<'a> {
+    pub crop_phase: &'a [f64],
+    pub planting_day_corn: &'a [f64],
+    pub planting_day_spring_wheat: &'a [f64],
+    pub planting_day_winter_wheat: &'a [f64],
+    pub planting_day_soybean: &'a [f64],
+    pub planting_day_cotton: &'a [f64],
+    pub planting_day_rice1: &'a [f64],
+    pub planting_day_rice2: &'a [f64],
+    pub planting_day_sugarcane: &'a [f64],
+    pub fertilizer_nitrogen_corn: &'a [f64],
+    pub fertilizer_nitrogen_spring_wheat: &'a [f64],
+    pub fertilizer_nitrogen_winter_wheat: &'a [f64],
+    pub fertilizer_nitrogen_soybean: &'a [f64],
+    pub fertilizer_nitrogen_cotton: &'a [f64],
+    pub fertilizer_nitrogen_rice1: &'a [f64],
+    pub fertilizer_nitrogen_rice2: &'a [f64],
+    pub fertilizer_nitrogen_sugarcane: &'a [f64],
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BgcTimeRestartInput<'a> {
     pub dimensions: BgcTimeRestartDimensions,
@@ -102,6 +124,7 @@ pub struct BgcTimeRestartInput<'a> {
     pub permafrost: BgcPermafrostFields<'a>,
     pub climate: BgcClimateFields<'a>,
     pub nitrification: Option<BgcNitrificationFields<'a>>,
+    pub crop: Option<BgcCropFields<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,9 +290,36 @@ pub fn write_bgc_time_restart_block(
     }
     file.add_variable::<i8>("skip_balance_check", &["patch"])?
         .put_values(input.climate.skip_balance_check, ..)?;
+    if let Some(crop) = input.crop {
+        for (name, values) in crop_entries(crop) {
+            put_f64_1d(&mut file, name, "patch", values)?;
+        }
+    }
     file.close()
         .with_context(|| format!("cannot close BGC time restart {}", path.display()))?;
     Ok(())
+}
+
+fn crop_entries(crop: BgcCropFields<'_>) -> [(&'static str, &[f64]); 17] {
+    [
+        ("cphase", crop.crop_phase),
+        ("pdcorn", crop.planting_day_corn),
+        ("pdswheat", crop.planting_day_spring_wheat),
+        ("pdwwheat", crop.planting_day_winter_wheat),
+        ("pdsoybean", crop.planting_day_soybean),
+        ("pdcotton", crop.planting_day_cotton),
+        ("pdrice1", crop.planting_day_rice1),
+        ("pdrice2", crop.planting_day_rice2),
+        ("pdsugarcane", crop.planting_day_sugarcane),
+        ("fertnitro_corn", crop.fertilizer_nitrogen_corn),
+        ("fertnitro_swheat", crop.fertilizer_nitrogen_spring_wheat),
+        ("fertnitro_wwheat", crop.fertilizer_nitrogen_winter_wheat),
+        ("fertnitro_soybean", crop.fertilizer_nitrogen_soybean),
+        ("fertnitro_cotton", crop.fertilizer_nitrogen_cotton),
+        ("fertnitro_rice1", crop.fertilizer_nitrogen_rice1),
+        ("fertnitro_rice2", crop.fertilizer_nitrogen_rice2),
+        ("fertnitro_sugarcane", crop.fertilizer_nitrogen_sugarcane),
+    ]
 }
 
 fn total_entries(fields: BgcTotals<'_>) -> [(&'static str, &[f64]); 12] {
@@ -380,6 +430,9 @@ fn validate_input(input: BgcTimeRestartInput<'_>) -> Result<usize> {
         dimensions.days_per_year,
         patches,
     )?;
+    if let Some(crop) = input.crop {
+        validate_patch_fields("CROP BGC state", patches, &crop_entries(crop))?;
+    }
     if let Some(nitrification) = input.nitrification {
         validate_axis(
             "tCONC_O2_UNSAT",

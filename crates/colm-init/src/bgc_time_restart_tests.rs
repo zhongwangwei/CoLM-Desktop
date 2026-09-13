@@ -119,6 +119,53 @@ fn bgc_time_restart_matches_fortran_axis_layout_and_optional_fields() {
 }
 
 #[test]
+fn bgc_crop_restart_writes_the_exact_fortran_tail_schema() {
+    let root = temp_dir("bgc-crop");
+    let mut input = sample_input();
+    input.crop = Some(crop_fields());
+    let path = root.join("restart.nc");
+    write_bgc_time_restart_block(&path, input).unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    let names = file
+        .variables()
+        .map(|variable| variable.name())
+        .collect::<Vec<_>>();
+    let first = names.iter().position(|name| name == "cphase").unwrap();
+    assert_eq!(
+        &names[first..],
+        [
+            "cphase",
+            "pdcorn",
+            "pdswheat",
+            "pdwwheat",
+            "pdsoybean",
+            "pdcotton",
+            "pdrice1",
+            "pdrice2",
+            "pdsugarcane",
+            "fertnitro_corn",
+            "fertnitro_swheat",
+            "fertnitro_wwheat",
+            "fertnitro_soybean",
+            "fertnitro_cotton",
+            "fertnitro_rice1",
+            "fertnitro_rice2",
+            "fertnitro_sugarcane",
+        ]
+    );
+    assert_eq!(
+        file.variable("pdrice2")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        PATCH
+    );
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bgc_time_restart_rejects_invalid_contract_before_creating_output() {
     let root = temp_dir("bgc-time-invalid");
     let mut input = sample_input();
@@ -347,6 +394,7 @@ fn bgc_time_restart_matches_the_upstream_fortran_reference() {
             skip_balance_check: &skip_balance_check,
         },
         nitrification,
+        crop: None,
     };
     let native = write_bgc_time_restart(
         directory.join("native/restart"),
@@ -424,6 +472,29 @@ fn sample_input() -> BgcTimeRestartInput<'static> {
             oxygen_concentration_unsaturated: &SOIL,
             oxygen_decomposition_depth_unsaturated: &SOIL,
         }),
+        crop: None,
+    }
+}
+
+fn crop_fields() -> BgcCropFields<'static> {
+    BgcCropFields {
+        crop_phase: &PATCH,
+        planting_day_corn: &PATCH,
+        planting_day_spring_wheat: &PATCH,
+        planting_day_winter_wheat: &PATCH,
+        planting_day_soybean: &PATCH,
+        planting_day_cotton: &PATCH,
+        planting_day_rice1: &PATCH,
+        planting_day_rice2: &PATCH,
+        planting_day_sugarcane: &PATCH,
+        fertilizer_nitrogen_corn: &PATCH,
+        fertilizer_nitrogen_spring_wheat: &PATCH,
+        fertilizer_nitrogen_winter_wheat: &PATCH,
+        fertilizer_nitrogen_soybean: &PATCH,
+        fertilizer_nitrogen_cotton: &PATCH,
+        fertilizer_nitrogen_rice1: &PATCH,
+        fertilizer_nitrogen_rice2: &PATCH,
+        fertilizer_nitrogen_sugarcane: &PATCH,
     }
 }
 

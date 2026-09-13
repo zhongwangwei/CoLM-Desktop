@@ -8,6 +8,7 @@ pub mod albedo {
 pub mod bgc_cold_start;
 pub mod bgc_restart;
 pub mod bgc_time_restart;
+pub mod crop;
 pub mod canopy_layer_profile {
     pub use colm_core::canopy_layer_profile::*;
 }
@@ -85,9 +86,9 @@ pub mod vegetation {
 pub use bgc_cold_start::bgc_time_restart_input;
 pub use bgc_restart::{write_cold_start_bgc_constant_restart, BgcConstantRestartFiles};
 pub use bgc_time_restart::{
-    write_bgc_time_restart, write_bgc_time_restart_block, BgcClimateFields, BgcNitrificationFields,
-    BgcPermafrostFields, BgcPoolFields, BgcTimeRestartDimensions, BgcTimeRestartFile,
-    BgcTimeRestartInput, BgcTotals, BgcTruncationFields,
+    write_bgc_time_restart, write_bgc_time_restart_block, BgcClimateFields, BgcCropFields,
+    BgcNitrificationFields, BgcPermafrostFields, BgcPoolFields, BgcTimeRestartDimensions,
+    BgcTimeRestartFile, BgcTimeRestartInput, BgcTotals, BgcTruncationFields,
 };
 pub use colm_core::update_snow_age;
 pub use colm_core::SoilSurfaceResistanceInput;
@@ -138,10 +139,15 @@ pub use colm_core::{GroundFluxInput, GroundFluxState};
 pub use colm_core::{GroundTemperatureInput, GroundTemperatureState};
 pub use colm_core::{GroundThermalStepInput, GroundThermalStepState};
 pub use colm_core::{RootUptakeInput, RootUptakeState};
+pub use crop::{
+    crop_cold_start_from_management, crop_cold_start_from_tuning, CropColdStartState,
+    CropManagementConfig,
+};
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
-    write_pft_time_restart_block, PftBgcFields, PftConstantRestartInput, PftHyperspectralFields,
-    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
+    write_pft_time_restart_block, PftBgcFields, PftConstantRestartInput, PftCropFields,
+    PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
+    PftTimeRestartInput,
 };
 pub use pipeline::{
     prepare_single_point_case, SinglePointPreprocessFiles, SinglePointPreprocessRun,

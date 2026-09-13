@@ -163,6 +163,48 @@ fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
 }
 
 #[test]
+fn crop_pft_reader_preserves_cft_weights_and_crop_fractions() {
+    let path = temp_file("crop-pft");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("LAI_year", 1).unwrap();
+    file.add_dimension("month", 12).unwrap();
+    file.add_dimension("pft", 1).unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2005], ..)
+        .unwrap();
+    file.add_variable::<i32>("pfttyp", &["pft"])
+        .unwrap()
+        .put_values(&[17], ..)
+        .unwrap();
+    file.add_variable::<f64>("pctpfts", &["pft"])
+        .unwrap()
+        .put_values(&[1.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("pctcrop", &["pft"])
+        .unwrap()
+        .put_values(&[1.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("canopy_height_pfts", &["pft"])
+        .unwrap()
+        .put_values(&[1.03], ..)
+        .unwrap();
+    for name in ["LAI_pfts_monthly", "SAI_pfts_monthly"] {
+        file.add_variable::<f64>(name, &["LAI_year", "month", "pft"])
+            .unwrap()
+            .put_values(&[0.0; 12], (.., .., ..))
+            .unwrap();
+    }
+    file.close().unwrap();
+
+    let values = read_single_point_pft_data(&path).unwrap();
+    assert_eq!(values.class, [17]);
+    assert_eq!(values.fraction, [1.0]);
+    assert_eq!(values.crop_fraction, Some(vec![1.0]));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn urban_reader_uses_the_shared_static_contract_without_a_land_class_variable() {
     let path = temp_file("urban");
     write_surface(&path, 8, false, true);
