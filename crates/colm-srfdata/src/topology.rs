@@ -324,6 +324,202 @@ impl FlatMesh {
             },
         ))
     }
+
+    /// Port `MOD_LandUrban::landurban_build` after the ordinary LCT patches
+    /// exist.  Each urban patch is subdivided by the raw urban-density/LCZ
+    /// class, while `landpatch` deliberately keeps the ordinary urban land
+    /// type and `landurban` carries the density/LCZ type.
+    ///
+    /// Missing raw classes follow the upstream fill rule exactly, including
+    /// its historic exclusion of the first and final class when proportions
+    /// are calculated.  That quirk matters for reproducible existing cases.
+    #[allow(clippy::too_many_arguments)]
+    pub fn into_urban_land_patches(
+        mut self,
+        patches: &FlatLandPatches,
+        urban_types: &[i32],
+        cell_area: &[f64],
+        urban_land_type: i32,
+        urban_class_count: usize,
+    ) -> Result<(Self, FlatLandPatches, FlatLandPatches)> {
+        ensure!(
+            urban_types.len() == self.ilon.len() && cell_area.len() == self.ilon.len(),
+            "urban type and cell-area vectors must match the mesh pixel count"
+        );
+        ensure!(urban_class_count > 0, "urban class count must be positive");
+        ensure!(
+            cell_area
+                .iter()
+                .all(|area| area.is_finite() && *area >= 0.0),
+            "urban cell areas must be finite and non-negative"
+        );
+        validate_flat_land_patches(&self, patches)?;
+
+        let mut refined = FlatLandPatches {
+            element_ids: Vec::with_capacity(patches.len()),
+            pixel_start: Vec::with_capacity(patches.len()),
+            pixel_end: Vec::with_capacity(patches.len()),
+            set_type: Vec::with_capacity(patches.len()),
+            element_index: Vec::with_capacity(patches.len()),
+        };
+        let mut urban = FlatLandPatches {
+            element_ids: Vec::new(),
+            pixel_start: Vec::new(),
+            pixel_end: Vec::new(),
+            set_type: Vec::new(),
+            element_index: Vec::new(),
+        };
+
+        for patch in 0..patches.len() {
+            let element = patches.element_index[patch]
+                .checked_sub(1)
+                .with_context(|| format!("urban parent patch {patch} has zero element index"))?;
+            let mesh_offset = self.pixel_offsets[element];
+            let start = patches.pixel_start[patch];
+            let end = patches.pixel_end[patch];
+            if patches.set_type[patch] != urban_land_type {
+                push_patch(
+                    &mut refined,
+                    patches,
+                    patch,
+                    start,
+                    end,
+                    patches.set_type[patch],
+                );
+                continue;
+            }
+
+            let range = mesh_offset + start - 1..mesh_offset + end;
+            let mut types = urban_types[range.clone()].to_vec();
+            fill_missing_urban_types(&mut types, &cell_area[range.clone()], urban_class_count);
+            let mut order: Vec<usize> = (0..types.len()).collect();
+            colm_quicksort(&mut types, &mut order);
+            let mut sorted_lon = Vec::with_capacity(order.len());
+            let mut sorted_lat = Vec::with_capacity(order.len());
+            for source in order {
+                sorted_lon.push(self.ilon[range.start + source]);
+                sorted_lat.push(self.ilat[range.start + source]);
+            }
+            self.ilon[range.clone()].copy_from_slice(&sorted_lon);
+            self.ilat[range].copy_from_slice(&sorted_lat);
+
+            let mut local_start = 0_usize;
+            while local_start < types.len() {
+                let class = types[local_start];
+                let mut local_end = local_start + 1;
+                while local_end < types.len() && types[local_end] == class {
+                    local_end += 1;
+                }
+                let refined_start = start + local_start;
+                let refined_end = start + local_end - 1;
+                push_patch(
+                    &mut refined,
+                    patches,
+                    patch,
+                    refined_start,
+                    refined_end,
+                    urban_land_type,
+                );
+                push_patch(
+                    &mut urban,
+                    patches,
+                    patch,
+                    refined_start,
+                    refined_end,
+                    class,
+                );
+                local_start = local_end;
+            }
+        }
+        Ok((self, refined, urban))
+    }
+}
+
+fn push_patch(
+    output: &mut FlatLandPatches,
+    source: &FlatLandPatches,
+    patch: usize,
+    pixel_start: usize,
+    pixel_end: usize,
+    set_type: i32,
+) {
+    output.element_ids.push(source.element_ids[patch]);
+    output.pixel_start.push(pixel_start);
+    output.pixel_end.push(pixel_end);
+    output.set_type.push(set_type);
+    output.element_index.push(source.element_index[patch]);
+}
+
+fn validate_flat_land_patches(mesh: &FlatMesh, patches: &FlatLandPatches) -> Result<()> {
+    ensure!(
+        patches.element_ids.len() == patches.len()
+            && patches.pixel_start.len() == patches.len()
+            && patches.pixel_end.len() == patches.len()
+            && patches.element_index.len() == patches.len(),
+        "land-patch vectors must have equal lengths"
+    );
+    for patch in 0..patches.len() {
+        let element = patches.element_index[patch]
+            .checked_sub(1)
+            .with_context(|| format!("land patch {patch} has zero element index"))?;
+        ensure!(
+            mesh.element_id(element)? == patches.element_ids[patch],
+            "land patch {patch} element ID does not match the mesh"
+        );
+        let count = mesh.pixel_count(element)?;
+        ensure!(
+            patches.pixel_start[patch] > 0
+                && patches.pixel_start[patch] <= patches.pixel_end[patch]
+                && patches.pixel_end[patch] <= count,
+            "land patch {patch} has invalid pixel range"
+        );
+    }
+    Ok(())
+}
+
+fn fill_missing_urban_types(types: &mut [i32], cell_area: &[f64], class_count: usize) {
+    debug_assert_eq!(types.len(), cell_area.len());
+    let missing = types
+        .iter()
+        .filter(|&&class| class < 1 || class > class_count as i32)
+        .count();
+    if missing == 0 {
+        return;
+    }
+
+    let mut proportions = vec![0.0; class_count];
+    let mut valid_area = 0.0;
+    for (&class, &area) in types.iter().zip(cell_area) {
+        if (1..=class_count as i32).contains(&class) {
+            valid_area += area;
+            // This intentionally mirrors `ibuff > 1 .and. ibuff < N_URB`.
+            if class > 1 && class < class_count as i32 {
+                proportions[class as usize - 1] += area;
+            }
+        }
+    }
+    if valid_area > 0.0 {
+        for proportion in &mut proportions {
+            *proportion /= valid_area;
+        }
+    }
+
+    let mut counts = vec![0_usize; class_count];
+    for class in 0..class_count - 1 {
+        counts[class] = (proportions[class] * missing as f64) as usize;
+    }
+    counts[class_count - 1] = missing - counts[..class_count - 1].iter().sum::<usize>();
+    for class in types {
+        if *class < 1 || *class > class_count as i32 {
+            for (index, count) in counts.iter_mut().enumerate() {
+                if *count > 0 {
+                    *class = index as i32 + 1;
+                    *count -= 1;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl FlatLandPatches {

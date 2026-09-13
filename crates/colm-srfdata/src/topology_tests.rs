@@ -99,3 +99,57 @@ fn catchment_hrus_follow_the_mesh_sort_and_lake_sign_contract() {
     assert_eq!(mesh.pixels(0).unwrap().0, &[11, 12, 10]);
     assert_eq!(mesh.pixels(1).unwrap().0, &[21, 20]);
 }
+
+#[test]
+fn urban_refinement_splits_only_urban_patches_and_preserves_fortran_missing_fill() {
+    let mesh = FlatMesh::new(
+        vec![100, 200],
+        vec![0, 4, 5],
+        vec![10, 11, 12, 13, 20],
+        vec![1, 1, 1, 1, 2],
+    )
+    .unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![100, 200],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![4, 1],
+        set_type: vec![13, 17],
+        element_index: vec![1, 2],
+    };
+
+    let (mesh, patches, urban) = mesh
+        .into_urban_land_patches(&patches, &[3, 0, 2, 7, 1], &[1.0; 5], 13, 3)
+        .unwrap();
+
+    // The upstream fill assigns the two missing values as 2 then 3 because
+    // only class 2 contributes to its historic proportion calculation.
+    assert_eq!(mesh.pixels(0).unwrap().0, &[11, 12, 13, 10]);
+    assert_eq!(patches.set_type, vec![13, 13, 17]);
+    assert_eq!(patches.pixel_start, vec![1, 3, 1]);
+    assert_eq!(patches.pixel_end, vec![2, 4, 1]);
+    assert_eq!(urban.set_type, vec![2, 3]);
+    assert_eq!(urban.element_ids, vec![100, 100]);
+    assert_eq!(urban.pixel_start, vec![1, 3]);
+    assert_eq!(urban.pixel_end, vec![2, 4]);
+}
+
+#[test]
+fn urban_refinement_assigns_the_final_class_when_every_class_is_missing() {
+    let mesh = FlatMesh::new(vec![100], vec![0, 2], vec![10, 11], vec![1, 1]).unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![100],
+        pixel_start: vec![1],
+        pixel_end: vec![2],
+        set_type: vec![13],
+        element_index: vec![1],
+    };
+    let (_, patches, urban) = mesh
+        .into_urban_land_patches(&patches, &[0, 99], &[1.0, 1.0], 13, 10)
+        .unwrap();
+    assert_eq!(patches.set_type, vec![13]);
+    // `buff_count(N_URB)` gets the unallocated remainder in the Fortran
+    // implementation, so its later nominal fallback branch is unreachable.
+    assert_eq!(urban.set_type, vec![10]);
+    assert_eq!(urban.pixel_start, vec![1]);
+    assert_eq!(urban.pixel_end, vec![2]);
+}
