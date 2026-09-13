@@ -169,8 +169,9 @@ pub use time_restart::{
 };
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
-    initialize_profile_soil, initialize_snow_layers, interpolate_profile, ColdSoilState,
-    PftSnowCover, SnowCover, SnowState, SoilHydraulicState,
+    initialize_profile_soil, initialize_snow_layers, interpolate_profile, resolve_cold_start_soil,
+    ColdSoilState, ColdStartSoilInput, InitialSoilProfile, PftSnowCover, SnowCover, SnowState,
+    SoilHydraulicState,
 };
 pub use urban_restart::{
     write_urban_constant_restart, write_urban_constant_restart_block, write_urban_time_restart,

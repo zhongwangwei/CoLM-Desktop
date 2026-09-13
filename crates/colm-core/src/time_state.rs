@@ -1,7 +1,8 @@
 //! Time-varying cold-start kernels from `MOD_IniTimeVariable.F90`.
 
 use crate::{
-    soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel,
+    equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
+    SoilHydraulicModel,
 };
 use anyhow::{ensure, Result};
 
@@ -41,11 +42,172 @@ pub struct ColdSoilState {
     pub water_table_depth_m: f64,
 }
 
+/// One already-read profile from CoLM's optional `soilstate.nc` cold-start input.
+///
+/// NetCDF selection deliberately lives outside `colm-core`; this typed view keeps the
+/// source-independent `MOD_Initialize` branch shared by `mkinidata` and the runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct InitialSoilProfile<'a> {
+    pub depth_m: &'a [f64],
+    pub temperature_k: &'a [f64],
+    pub wetness: &'a [f64],
+    pub water_table_m: f64,
+    /// `false` is CoLM's missing-`zwt` fallback, not an empty profile.
+    pub valid: bool,
+}
+
+/// Inputs needed to choose CoLM's cold soil state after external data were read.
+///
+/// `soil_interface_depth_m` contains the lower boundary of each soil layer, as in
+/// the native initializer.  `profile` takes precedence over `water_table_m`; both
+/// are optional and the no-data branch creates CoLM's default cold state.
+#[derive(Debug, Clone, Copy)]
+pub struct ColdStartSoilInput<'a> {
+    pub patch_type: i32,
+    pub porosity: &'a [f64],
+    pub residual_water: &'a [f64],
+    pub psi_s_mm: &'a [f64],
+    pub saturated_conductivity_mm_s: &'a [f64],
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    pub soil_node_depth_m: &'a [f64],
+    pub soil_thickness_m: &'a [f64],
+    pub soil_interface_depth_m: &'a [f64],
+    pub variably_saturated_flow: bool,
+    pub profile: Option<InitialSoilProfile<'a>>,
+    pub water_table_m: Option<f64>,
+}
+
 /// Soil matric potential and conductivity initialized after the snow/soil state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SoilHydraulicState {
     pub matric_potential_mm: Vec<f64>,
     pub hydraulic_conductivity_mm_s: Vec<f64>,
+}
+
+/// Resolves the complete `IniTimeVar` cold-soil precedence chain.
+///
+/// This is intentionally independent of file formats: callers select a source
+/// coordinate once, then both initialization and a Rust runtime use exactly these
+/// profile, water-table, and default branches.  An invalid profile reproduces the
+/// upstream missing-`zwt` substitute of 280 K (250 K for glacier) and unit wetness.
+pub fn resolve_cold_start_soil(input: ColdStartSoilInput<'_>) -> Result<ColdSoilState> {
+    validate_cold_start_input(input)?;
+
+    if let Some(profile) = input.profile {
+        if profile.valid {
+            return initialize_profile_soil(
+                input.patch_type,
+                profile.depth_m,
+                profile.temperature_k,
+                profile.wetness,
+                input.porosity,
+                input.residual_water,
+                input.psi_s_mm,
+                input.hydraulic_model,
+                input.soil_node_depth_m,
+                input.soil_thickness_m,
+                input.soil_interface_depth_m,
+                profile.water_table_m,
+                input.variably_saturated_flow,
+            );
+        }
+        let reference_temperature_k = if input.patch_type == 3 { 250.0 } else { 280.0 };
+        return initialize_profile_soil(
+            input.patch_type,
+            profile.depth_m,
+            &vec![reference_temperature_k; profile.depth_m.len()],
+            &vec![1.0; profile.depth_m.len()],
+            input.porosity,
+            input.residual_water,
+            input.psi_s_mm,
+            input.hydraulic_model,
+            input.soil_node_depth_m,
+            input.soil_thickness_m,
+            input.soil_interface_depth_m,
+            0.0,
+            input.variably_saturated_flow,
+        );
+    }
+
+    if let Some(water_table_m) = input.water_table_m.filter(|_| input.patch_type <= 1) {
+        ensure!(
+            water_table_m.is_finite(),
+            "cold-start water-table depth must be finite"
+        );
+        let mut interface_mm = Vec::with_capacity(input.soil_interface_depth_m.len() + 1);
+        interface_mm.push(0.0);
+        interface_mm.extend(
+            input
+                .soil_interface_depth_m
+                .iter()
+                .map(|depth_m| depth_m * 1000.0),
+        );
+        let center_mm = input
+            .soil_node_depth_m
+            .iter()
+            .map(|depth_m| depth_m * 1000.0)
+            .collect::<Vec<_>>();
+        let equilibrium = equilibrium_water_state(
+            water_table_m * 1000.0,
+            &center_mm,
+            &interface_mm,
+            input.porosity,
+            input.residual_water,
+            input.psi_s_mm,
+            input.saturated_conductivity_mm_s,
+            input.hydraulic_model,
+        )
+        .map_err(anyhow::Error::msg)?;
+        return Ok(ColdSoilState {
+            temperature_k: vec![283.0; input.porosity.len()],
+            liquid_water_kg_m2: equilibrium.liquid_water_kg_m2,
+            ice_water_kg_m2: vec![0.0; input.porosity.len()],
+            aquifer_water_mm: equilibrium.aquifer_water_mm
+                + if input.variably_saturated_flow {
+                    0.0
+                } else {
+                    5000.0
+                },
+            water_table_depth_m: water_table_m,
+        });
+    }
+
+    initialize_cold_soil(
+        input.patch_type,
+        input.porosity,
+        input.soil_node_depth_m,
+        input.soil_thickness_m,
+        &input
+            .soil_interface_depth_m
+            .iter()
+            .map(|depth_m| depth_m * 1000.0)
+            .collect::<Vec<_>>(),
+        input.variably_saturated_flow,
+    )
+}
+
+fn validate_cold_start_input(input: ColdStartSoilInput<'_>) -> Result<()> {
+    let layers = input.porosity.len();
+    ensure!(
+        layers > 0
+            && input.residual_water.len() == layers
+            && input.psi_s_mm.len() == layers
+            && input.saturated_conductivity_mm_s.len() == layers
+            && input.hydraulic_model.len() == layers
+            && input.soil_node_depth_m.len() == layers
+            && input.soil_thickness_m.len() == layers
+            && input.soil_interface_depth_m.len() == layers,
+        "cold-start soil fields must have one nonzero, matching layer count"
+    );
+    if let Some(profile) = input.profile {
+        ensure!(
+            !profile.depth_m.is_empty()
+                && profile.depth_m.len() == profile.temperature_k.len()
+                && profile.depth_m.len() == profile.wetness.len(),
+            "cold-start profile fields must have matching nonempty lengths"
+        );
+    }
+    Ok(())
 }
 
 /// Applies `IniTimeVar`'s soil matrix-potential and hydraulic-conductivity loop.

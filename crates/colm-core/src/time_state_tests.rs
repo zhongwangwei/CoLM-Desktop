@@ -124,6 +124,53 @@ fn cold_soil_preserves_fixed_aquifer_formula_and_validates_shapes() {
 }
 
 #[test]
+fn shared_cold_start_soil_keeps_profile_water_table_and_default_precedence() {
+    let model = [SoilHydraulicModel::Campbell { bsw: 4.0 }; 2];
+    let profile = InitialSoilProfile {
+        depth_m: &[0.0, 1.0],
+        temperature_k: &[280.0, 270.0],
+        wetness: &[0.1, 0.2],
+        water_table_m: 0.6,
+        valid: true,
+    };
+    let input = |profile, water_table_m, variably_saturated_flow| ColdStartSoilInput {
+        patch_type: 0,
+        porosity: &[0.4, 0.3],
+        residual_water: &[0.0, 0.0],
+        psi_s_mm: &[-100.0, -100.0],
+        saturated_conductivity_mm_s: &[0.01, 0.01],
+        hydraulic_model: &model,
+        soil_node_depth_m: &[0.25, 0.75],
+        soil_thickness_m: &[0.5, 0.5],
+        soil_interface_depth_m: &[0.5, 1.0],
+        variably_saturated_flow,
+        profile,
+        water_table_m,
+    };
+
+    let from_profile = resolve_cold_start_soil(input(Some(profile), Some(0.1), true)).unwrap();
+    assert_eq!(from_profile.water_table_depth_m, 0.6);
+    assert_eq!(from_profile.temperature_k, vec![277.5, 272.5]);
+
+    let invalid_profile = InitialSoilProfile {
+        valid: false,
+        ..profile
+    };
+    let fallback = resolve_cold_start_soil(input(Some(invalid_profile), Some(0.1), true)).unwrap();
+    assert_eq!(fallback.water_table_depth_m, 0.0);
+    assert_eq!(fallback.temperature_k, vec![280.0, 280.0]);
+
+    let from_water_table = resolve_cold_start_soil(input(None, Some(1.5), false)).unwrap();
+    assert_eq!(from_water_table.temperature_k, vec![283.0, 283.0]);
+    assert_eq!(from_water_table.water_table_depth_m, 1.5);
+    assert!(from_water_table.aquifer_water_mm > 0.0 && from_water_table.aquifer_water_mm < 5000.0);
+
+    let default_state = resolve_cold_start_soil(input(None, None, true)).unwrap();
+    assert_eq!(default_state.water_table_depth_m, 1.0);
+    assert_eq!(default_state.liquid_water_kg_m2, vec![200.0, 150.0]);
+}
+
+#[test]
 fn profile_interpolation_matches_fortran_polint_selection_and_errors() {
     assert_eq!(
         interpolate_profile(&[0.0, 1.0, 2.0], &[1.0, 4.0, 9.0], 3.0).unwrap(),

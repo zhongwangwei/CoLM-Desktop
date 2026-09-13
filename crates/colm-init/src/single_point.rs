@@ -16,20 +16,20 @@ use crate::{
     cold_start_broadband_radiation_with_snow, cold_start_pc_broadband_radiation_with_snow,
     cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_igbp_canopy,
     derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover, derive_snow_cover,
-    derive_soil_parameters, derive_usgs_canopy, equilibrium_water_state, initialize_cold_soil,
-    initialize_profile_soil, initialize_snow_layers, is_leap_year, leaf_optics_from_land_cover,
-    month_lengths, normalize_soil_texture, orbital_calendar_day, orbital_cosine_zenith,
-    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
-    read_single_point_soil_profile, read_single_point_surface, read_single_point_urban_data,
-    read_single_point_water_table, read_urban_lucy_raw_data, write_constant_restart,
-    write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    derive_soil_parameters, derive_usgs_canopy, initialize_snow_layers, is_leap_year,
+    leaf_optics_from_land_cover, month_lengths, normalize_soil_texture, orbital_calendar_day,
+    orbital_cosine_zenith, read_single_point_monthly_vegetation, read_single_point_pft_data,
+    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_surface,
+    read_single_point_urban_data, read_single_point_water_table, read_urban_lucy_raw_data,
+    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
     write_urban_constant_restart, write_urban_time_restart, CalendarTime, ColdSoilState,
-    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
-    LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftConstantRestartInput, PftOzoneFields,
-    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
-    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
-    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
-    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
+    ColdStartRadiation, ColdStartSoilInput, ConstantRestartFiles, ConstantRestartInput,
+    HydraulicModel, InitialSoilProfile, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput,
+    PftConstantRestartInput, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
+    PftTimeRestartInput, PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields,
+    RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField,
+    SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
+    TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
     UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanNamedField,
     UrbanRadiationInput, UrbanState, UrbanThermalFields, UrbanTimeRestartDimensions,
     UrbanTimeRestartInput, MISSING,
@@ -1681,105 +1681,54 @@ fn initial_soil_state(
     interface_m: &[f64],
 ) -> Result<ColdSoilState> {
     let month = month_from_julian(run.date.year, run.date.julian_day)?;
-    if let Some(path) = &run.soil_initial_state {
-        let profile = read_single_point_soil_profile(
-            path,
-            surface.latitude_degrees,
-            surface.longitude_degrees,
-            month,
-        )?;
-        let (temperature, wetness, water_table) = if profile.valid {
-            (
-                profile.temperature_k.as_slice(),
-                profile.wetness.as_slice(),
-                profile.water_table_m,
+    let profile = run
+        .soil_initial_state
+        .as_ref()
+        .map(|path| {
+            read_single_point_soil_profile(
+                path,
+                surface.latitude_degrees,
+                surface.longitude_degrees,
+                month,
             )
-        } else {
-            // `MOD_Initialize` substitutes this profile when `zwt` is missing.
-            return initialize_profile_soil(
-                patch_type,
-                &profile.depth_m,
-                &vec![if patch_type == 3 { 250.0 } else { 280.0 }; profile.depth_m.len()],
-                &vec![1.0; profile.depth_m.len()],
-                porosity,
-                residual_water,
-                psi0_mm,
-                hydraulic,
-                node_depth_m,
-                thickness_m,
-                interface_m,
-                0.0,
-                run.variably_saturated_flow,
-            );
-        };
-        return initialize_profile_soil(
-            patch_type,
-            &profile.depth_m,
-            temperature,
-            wetness,
-            porosity,
-            residual_water,
-            psi0_mm,
-            hydraulic,
-            node_depth_m,
-            thickness_m,
-            interface_m,
-            water_table,
-            run.variably_saturated_flow,
-        );
-    }
-    if let Some(path) = &run.water_table_initial_state {
-        if let Some(water_table_m) = read_single_point_water_table(
-            path,
-            surface.latitude_degrees,
-            surface.longitude_degrees,
-            month,
-        )? {
-            if patch_type <= 1 {
-                let mut interface_mm = Vec::with_capacity(interface_m.len() + 1);
-                interface_mm.push(0.0);
-                interface_mm.extend(interface_m.iter().map(|depth| depth * 1000.0));
-                let center_mm = node_depth_m
-                    .iter()
-                    .map(|depth| depth * 1000.0)
-                    .collect::<Vec<_>>();
-                let equilibrium = equilibrium_water_state(
-                    water_table_m * 1000.0,
-                    &center_mm,
-                    &interface_mm,
-                    porosity,
-                    residual_water,
-                    psi0_mm,
-                    conductivity_mm_s,
-                    hydraulic,
+        })
+        .transpose()?;
+    let water_table_m = if profile.is_none() {
+        run.water_table_initial_state
+            .as_ref()
+            .map(|path| {
+                read_single_point_water_table(
+                    path,
+                    surface.latitude_degrees,
+                    surface.longitude_degrees,
+                    month,
                 )
-                .map_err(anyhow::Error::msg)?;
-                return Ok(ColdSoilState {
-                    temperature_k: vec![283.0; porosity.len()],
-                    liquid_water_kg_m2: equilibrium.liquid_water_kg_m2,
-                    ice_water_kg_m2: vec![0.0; porosity.len()],
-                    aquifer_water_mm: equilibrium.aquifer_water_mm
-                        + if run.variably_saturated_flow {
-                            0.0
-                        } else {
-                            5000.0
-                        },
-                    water_table_depth_m: water_table_m,
-                });
-            }
-        }
-    }
-    initialize_cold_soil(
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    crate::resolve_cold_start_soil(ColdStartSoilInput {
         patch_type,
         porosity,
-        node_depth_m,
-        thickness_m,
-        &interface_m
-            .iter()
-            .map(|depth| depth * 1000.0)
-            .collect::<Vec<_>>(),
-        run.variably_saturated_flow,
-    )
+        residual_water,
+        psi_s_mm: psi0_mm,
+        saturated_conductivity_mm_s: conductivity_mm_s,
+        hydraulic_model: hydraulic,
+        soil_node_depth_m: node_depth_m,
+        soil_thickness_m: thickness_m,
+        soil_interface_depth_m: interface_m,
+        variably_saturated_flow: run.variably_saturated_flow,
+        profile: profile.as_ref().map(|profile| InitialSoilProfile {
+            depth_m: &profile.depth_m,
+            temperature_k: &profile.temperature_k,
+            wetness: &profile.wetness,
+            water_table_m: profile.water_table_m,
+            valid: profile.valid,
+        }),
+        water_table_m,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
