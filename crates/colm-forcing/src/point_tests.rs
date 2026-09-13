@@ -99,6 +99,38 @@ fn point_runtime_adapter_uses_the_shared_core_forcing_path() {
 }
 
 #[test]
+fn point_runtime_adapter_accepts_the_shared_model_clock_timestamp() {
+    let dir = temp_dir("calendar-runtime");
+    let series = load_point_forcing(point_file(&dir, false)).unwrap();
+    let forcing = series
+        .runtime_at_calendar_time(
+            colm_core::CalendarTime {
+                year: 2008,
+                julian_day: 1,
+                seconds: 900,
+            },
+            true,
+            0.0,
+            0.7,
+        )
+        .unwrap();
+    assert_eq!(forcing.air_temperature_k, 273.65);
+    assert_eq!(forcing.convective_precipitation_kg_m2_s, 0.001 / 3.0);
+    assert!(series
+        .runtime_at_calendar_time(
+            colm_core::CalendarTime {
+                year: 2008,
+                julian_day: 2,
+                seconds: 0,
+            },
+            true,
+            0.0,
+            0.7,
+        )
+        .is_err());
+}
+
+#[test]
 fn point_loader_keeps_vector_wind_components_separate() {
     let dir = temp_dir("vector");
     let series = load_point_forcing(point_file(&dir, true)).unwrap();

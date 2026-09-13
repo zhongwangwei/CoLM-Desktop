@@ -8,9 +8,12 @@
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
-use colm_core::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
+use colm_core::{
+    month_day, orbital_calendar_day, prepare_runtime_forcing, CalendarTime, RuntimeForcing,
+    RuntimeForcingInput,
+};
 
-use crate::{canonical_units, check, resolve, summarize, MetSummary};
+use crate::{canonical_units, check, days_from_civil, resolve, summarize, MetSummary, Stamp};
 
 /// One canonical forcing record consumed by a Rust surface step.
 ///
@@ -175,6 +178,54 @@ impl PointForcingSeries {
             latitude_radians,
         })
     }
+
+    /// Samples a model-clock timestamp without reimplementing CoLM's forcing
+    /// interpolation or radiation preparation in a runtime executable.
+    ///
+    /// `time` must be the beginning-style timestamp yielded by
+    /// [`colm_core::RuntimeClock`].  The NetCDF `time` values can begin at a
+    /// nonzero offset, so the source epoch and its first stored value are both
+    /// retained when locating the frame.
+    pub fn runtime_at_calendar_time(
+        &self,
+        time: CalendarTime,
+        greenwich: bool,
+        longitude_degrees: f64,
+        latitude_degrees: f64,
+    ) -> Result<RuntimeForcing> {
+        ensure!(
+            longitude_degrees.is_finite() && latitude_degrees.is_finite(),
+            "forcing location must be finite"
+        );
+        let seconds = calendar_seconds(time)? - stamp_seconds(self.summary.start);
+        let source_seconds = self
+            .frames
+            .first()
+            .context("forcing series is empty")?
+            .time_seconds
+            + seconds as f64;
+        self.runtime_at_seconds(
+            source_seconds,
+            orbital_calendar_day(time, greenwich, longitude_degrees)?,
+            longitude_degrees.to_radians(),
+            latitude_degrees.to_radians(),
+        )
+    }
+}
+
+fn calendar_seconds(time: CalendarTime) -> Result<i64> {
+    let (month, day) = month_day(time)?;
+    Ok(
+        days_from_civil(time.year, u32::from(month), u32::from(day)) * 86_400
+            + i64::from(time.seconds),
+    )
+}
+
+fn stamp_seconds(stamp: Stamp) -> i64 {
+    days_from_civil(stamp.year, stamp.month, stamp.day) * 86_400
+        + i64::from(stamp.hour) * 3600
+        + i64::from(stamp.minute) * 60
+        + i64::from(stamp.second)
 }
 
 /// Loads and canonicalizes a validated NetCDF POINT forcing file.
