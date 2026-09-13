@@ -72,8 +72,9 @@ pub use atmosphere::{
     PrecipitationInput, PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
 };
 pub use bgc::{
-    derive_cold_start_bgc_state, summarize_bgc_state, BgcClimateOwned, BgcColdStartInput,
-    BgcColdStartState, BgcEquilibriumState, BgcNitrificationOwned, BgcPermafrostOwned,
+    derive_cold_start_bgc_state, merge_bgc_cold_start_states, summarize_bgc_state,
+    BgcClimateOwned, BgcColdStartInput, BgcColdStartState, BgcEquilibriumState,
+    BgcNitrificationOwned, BgcPermafrostOwned,
     BgcPftColdStartInput, BgcPoolsOwned, BgcStateSummary, BgcStateSummaryInput, BgcTotalsOwned,
     BgcTruncationOwned, BgcVegetationCarbon, BGC_DAYS_PER_YEAR, BGC_DECOMPOSITION_POOLS,
     BGC_FULL_SOIL_LAYERS, BGC_SOIL_LAYERS, PFT_BGC_F64_VARIABLES,

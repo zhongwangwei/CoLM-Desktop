@@ -80,6 +80,47 @@ fn cold_bgc_rejects_incomplete_runtime_or_pft_contracts() {
 }
 
 #[test]
+fn merged_cold_bgc_states_use_restart_axis_major_order() {
+    let mut first = derive_cold_start_bgc_state(sample_input(None)).unwrap();
+    let mut second = derive_cold_start_bgc_state(sample_input(None)).unwrap();
+    first.pft_values[0] = vec![10.0, 11.0, 12.0];
+    second.pft_values[0] = vec![20.0, 21.0, 22.0];
+    first.totals.total_carbon = vec![1.0];
+    second.totals.total_carbon = vec![2.0];
+    first.pools.mineral_nitrogen = (10..20).map(f64::from).collect();
+    second.pools.mineral_nitrogen = (20..30).map(f64::from).collect();
+    first.climate.precipitation_daily = (100..465).map(f64::from).collect();
+    second.climate.precipitation_daily = (200..565).map(f64::from).collect();
+    first
+        .nitrification
+        .as_mut()
+        .unwrap()
+        .oxygen_concentration_unsaturated = (30..40).map(f64::from).collect();
+    second
+        .nitrification
+        .as_mut()
+        .unwrap()
+        .oxygen_concentration_unsaturated = (40..50).map(f64::from).collect();
+
+    let merged = merge_bgc_cold_start_states(&[first, second]).unwrap();
+
+    assert_eq!(merged.pft_values[0], [10.0, 11.0, 12.0, 20.0, 21.0, 22.0]);
+    assert_eq!(merged.totals.total_carbon, [1.0, 2.0]);
+    assert_eq!(merged.pools.mineral_nitrogen[..6], [10.0, 20.0, 11.0, 21.0, 12.0, 22.0]);
+    assert_eq!(
+        merged.climate.precipitation_daily[..6],
+        [100.0, 200.0, 101.0, 201.0, 102.0, 202.0]
+    );
+    assert_eq!(
+        merged
+            .nitrification
+            .unwrap()
+            .oxygen_concentration_unsaturated[..6],
+        [30.0, 40.0, 31.0, 41.0, 32.0, 42.0]
+    );
+}
+
+#[test]
 fn state_summary_matches_the_cn_driver_pool_and_truncation_totals() {
     let thickness = (1..=BGC_SOIL_LAYERS)
         .map(|value| value as f64)

@@ -526,6 +526,301 @@ pub fn derive_cold_start_bgc_state(input: BgcColdStartInput<'_>) -> Result<BgcCo
     })
 }
 
+/// Combine independently derived one-patch BGC cold states into CoLM's
+/// block-local, axis-major restart layout.
+///
+/// PFT vectors concatenate in patch order; all soil, pool, and calendar
+/// vectors are transposed from one-patch records into `axis * patch + patch`.
+/// Keeping that transformation here lets `mkinidata` and a Rust runtime share
+/// the same ownership and memory-order contract.
+pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcColdStartState> {
+    ensure!(
+        !states.is_empty(),
+        "BGC block merge needs at least one patch state"
+    );
+    for state in states {
+        ensure!(
+            state.pft_values.len() == PFT_BGC_F64_VARIABLES.len()
+                && state
+                    .pft_values
+                    .iter()
+                    .all(|values| values.len() == state.active_crop_years.len()),
+            "BGC patch state has an inconsistent PFT field layout"
+        );
+    }
+    let pft_values = (0..PFT_BGC_F64_VARIABLES.len())
+        .map(|field| {
+            states
+                .iter()
+                .flat_map(|state| state.pft_values[field].iter().copied())
+                .collect()
+        })
+        .collect();
+    let active_crop_years = states
+        .iter()
+        .flat_map(|state| state.active_crop_years.iter().copied())
+        .collect();
+
+    let any_nitrification = states.iter().any(|state| state.nitrification.is_some());
+    let all_nitrification = states.iter().all(|state| state.nitrification.is_some());
+    ensure!(
+        !any_nitrification || all_nitrification,
+        "all BGC patch states must agree on nitrification"
+    );
+    let nitrification = if all_nitrification {
+        Some(BgcNitrificationOwned {
+            oxygen_concentration_unsaturated: merge_axis_f64(
+                states,
+                "BGC nitrification oxygen",
+                BGC_SOIL_LAYERS,
+                |state| {
+                    &state
+                        .nitrification
+                        .as_ref()
+                        .expect("all BGC states have nitrification")
+                        .oxygen_concentration_unsaturated
+                },
+            )?,
+            oxygen_decomposition_depth_unsaturated: merge_axis_f64(
+                states,
+                "BGC nitrification depth",
+                BGC_SOIL_LAYERS,
+                |state| {
+                    &state
+                        .nitrification
+                        .as_ref()
+                        .expect("all BGC states have nitrification")
+                        .oxygen_decomposition_depth_unsaturated
+                },
+            )?,
+        })
+    } else {
+        None
+    };
+
+    Ok(BgcColdStartState {
+        pft_values,
+        active_crop_years,
+        totals: BgcTotalsOwned {
+            litter_carbon: merge_patch_f64(states, "total litter carbon", |state| {
+                &state.totals.litter_carbon
+            })?,
+            vegetation_carbon: merge_patch_f64(states, "total vegetation carbon", |state| {
+                &state.totals.vegetation_carbon
+            })?,
+            soil_carbon: merge_patch_f64(states, "total soil carbon", |state| {
+                &state.totals.soil_carbon
+            })?,
+            coarse_woody_carbon: merge_patch_f64(states, "total coarse woody carbon", |state| {
+                &state.totals.coarse_woody_carbon
+            })?,
+            total_carbon: merge_patch_f64(states, "total carbon", |state| {
+                &state.totals.total_carbon
+            })?,
+            litter_nitrogen: merge_patch_f64(states, "total litter nitrogen", |state| {
+                &state.totals.litter_nitrogen
+            })?,
+            vegetation_nitrogen: merge_patch_f64(states, "total vegetation nitrogen", |state| {
+                &state.totals.vegetation_nitrogen
+            })?,
+            soil_nitrogen: merge_patch_f64(states, "total soil nitrogen", |state| {
+                &state.totals.soil_nitrogen
+            })?,
+            coarse_woody_nitrogen: merge_patch_f64(
+                states,
+                "total coarse woody nitrogen",
+                |state| &state.totals.coarse_woody_nitrogen,
+            )?,
+            total_nitrogen: merge_patch_f64(states, "total nitrogen", |state| {
+                &state.totals.total_nitrogen
+            })?,
+            mineral_nitrogen: merge_patch_f64(states, "total mineral nitrogen", |state| {
+                &state.totals.mineral_nitrogen
+            })?,
+            deposition: merge_patch_f64(states, "deposition", |state| {
+                &state.totals.deposition
+            })?,
+        },
+        pools: BgcPoolsOwned {
+            carbon: merge_axis_f64(
+                states,
+                "BGC carbon pools",
+                BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS,
+                |state| &state.pools.carbon,
+            )?,
+            nitrogen: merge_axis_f64(
+                states,
+                "BGC nitrogen pools",
+                BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS,
+                |state| &state.pools.nitrogen,
+            )?,
+            total_soil_nitrogen: merge_axis_f64(
+                states,
+                "BGC total soil nitrogen",
+                BGC_SOIL_LAYERS,
+                |state| &state.pools.total_soil_nitrogen,
+            )?,
+            mineral_nitrogen: merge_axis_f64(
+                states,
+                "BGC mineral nitrogen",
+                BGC_SOIL_LAYERS,
+                |state| &state.pools.mineral_nitrogen,
+            )?,
+            nitrate: merge_axis_f64(states, "BGC nitrate", BGC_SOIL_LAYERS, |state| {
+                &state.pools.nitrate
+            })?,
+            ammonium: merge_axis_f64(states, "BGC ammonium", BGC_SOIL_LAYERS, |state| {
+                &state.pools.ammonium
+            })?,
+            lagged_npp: merge_patch_f64(states, "BGC lagged NPP", |state| {
+                &state.pools.lagged_npp
+            })?,
+        },
+        truncation: BgcTruncationOwned {
+            carbon_profile: merge_axis_f64(
+                states,
+                "BGC carbon truncation profile",
+                BGC_SOIL_LAYERS,
+                |state| &state.truncation.carbon_profile,
+            )?,
+            carbon_vegetation: merge_patch_f64(states, "BGC vegetation carbon truncation", |state| {
+                &state.truncation.carbon_vegetation
+            })?,
+            carbon_soil: merge_patch_f64(states, "BGC soil carbon truncation", |state| {
+                &state.truncation.carbon_soil
+            })?,
+            nitrogen_profile: merge_axis_f64(
+                states,
+                "BGC nitrogen truncation profile",
+                BGC_SOIL_LAYERS,
+                |state| &state.truncation.nitrogen_profile,
+            )?,
+            nitrogen_vegetation: merge_patch_f64(
+                states,
+                "BGC vegetation nitrogen truncation",
+                |state| &state.truncation.nitrogen_vegetation,
+            )?,
+            nitrogen_soil: merge_patch_f64(states, "BGC soil nitrogen truncation", |state| {
+                &state.truncation.nitrogen_soil
+            })?,
+        },
+        permafrost: BgcPermafrostOwned {
+            maximum_active_layer_depth: merge_patch_f64(states, "BGC maximum active layer", |state| {
+                &state.permafrost.maximum_active_layer_depth
+            })?,
+            previous_maximum_active_layer_depth: merge_patch_f64(
+                states,
+                "BGC previous maximum active layer",
+                |state| &state.permafrost.previous_maximum_active_layer_depth,
+            )?,
+            previous_maximum_active_layer_index: merge_patch_i32(
+                states,
+                "BGC previous maximum active layer index",
+                |state| &state.permafrost.previous_maximum_active_layer_index,
+            )?,
+        },
+        climate: BgcClimateOwned {
+            precipitation_10_day: merge_patch_f64(states, "BGC precipitation 10 day", |state| {
+                &state.climate.precipitation_10_day
+            })?,
+            precipitation_60_day: merge_patch_f64(states, "BGC precipitation 60 day", |state| {
+                &state.climate.precipitation_60_day
+            })?,
+            precipitation_365_day: merge_patch_f64(states, "BGC precipitation 365 day", |state| {
+                &state.climate.precipitation_365_day
+            })?,
+            precipitation_today: merge_patch_f64(states, "BGC precipitation today", |state| {
+                &state.climate.precipitation_today
+            })?,
+            precipitation_daily: merge_axis_f64(
+                states,
+                "BGC daily precipitation",
+                BGC_DAYS_PER_YEAR,
+                |state| &state.climate.precipitation_daily,
+            )?,
+            soil_temperature_17: merge_patch_f64(states, "BGC soil temperature", |state| {
+                &state.climate.soil_temperature_17
+            })?,
+            relative_humidity_30_day: merge_patch_f64(states, "BGC relative humidity", |state| {
+                &state.climate.relative_humidity_30_day
+            })?,
+            accumulated_steps: merge_patch_f64(states, "BGC accumulated steps", |state| {
+                &state.climate.accumulated_steps
+            })?,
+            skip_balance_check: merge_patch_i8(states, "BGC balance-check flag", |state| {
+                &state.climate.skip_balance_check
+            })?,
+        },
+        nitrification,
+    })
+}
+
+fn merge_patch_f64(
+    states: &[BgcColdStartState],
+    name: &str,
+    values: impl for<'a> Fn(&'a BgcColdStartState) -> &'a [f64],
+) -> Result<Vec<f64>> {
+    states
+        .iter()
+        .map(|state| {
+            let value = values(state);
+            ensure!(value.len() == 1, "{name} must have one value per source patch");
+            Ok(value[0])
+        })
+        .collect()
+}
+
+fn merge_patch_i32(
+    states: &[BgcColdStartState],
+    name: &str,
+    values: impl for<'a> Fn(&'a BgcColdStartState) -> &'a [i32],
+) -> Result<Vec<i32>> {
+    states
+        .iter()
+        .map(|state| {
+            let value = values(state);
+            ensure!(value.len() == 1, "{name} must have one value per source patch");
+            Ok(value[0])
+        })
+        .collect()
+}
+
+fn merge_patch_i8(
+    states: &[BgcColdStartState],
+    name: &str,
+    values: impl for<'a> Fn(&'a BgcColdStartState) -> &'a [i8],
+) -> Result<Vec<i8>> {
+    states
+        .iter()
+        .map(|state| {
+            let value = values(state);
+            ensure!(value.len() == 1, "{name} must have one value per source patch");
+            Ok(value[0])
+        })
+        .collect()
+}
+
+fn merge_axis_f64(
+    states: &[BgcColdStartState],
+    name: &str,
+    axis: usize,
+    values: impl for<'a> Fn(&'a BgcColdStartState) -> &'a [f64],
+) -> Result<Vec<f64>> {
+    let mut output = vec![0.0; axis * states.len()];
+    for (patch, state) in states.iter().enumerate() {
+        let value = values(state);
+        ensure!(
+            value.len() == axis,
+            "{name} has {} values; expected {axis} for one source patch",
+            value.len()
+        );
+        for (index, &value) in value.iter().enumerate() {
+            output[index * states.len() + patch] = value;
+        }
+    }
+    Ok(output)
+}
+
 fn validate_input(input: BgcColdStartInput<'_>) -> Result<()> {
     validate_soil("soil thickness", input.soil_thickness_m)?;
     validate_soil("soil bulk density", input.soil_bulk_density_kg_m3)?;
