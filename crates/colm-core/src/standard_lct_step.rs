@@ -11,10 +11,12 @@ use anyhow::{ensure, Result};
 use crate::{
     ground_fluxes, ground_temperature, intercept_canopy, net_solar, root_uptake,
     soil_surface_resistance, CanopyInterceptionFluxes, CanopyInterceptionInput, ColdStartRadiation,
-    GroundFluxInput, GroundFluxState, GroundTemperatureInput, GroundTemperatureState,
-    LeafTemperatureInput, LeafTemperatureOutput, LeafTemperatureState, NetSolarFluxes,
-    NetSolarInput, PrecipitationPhaseScheme, PrecipitationState, RootUptakeInput, RootUptakeState,
-    RuntimeForcing, SoilSurfaceResistanceInput, ThermalWaterFluxes, ThermalWaterInput,
+    GroundFluxInput, GroundFluxState, GroundHumidityInput, GroundHumidityState,
+    GroundTemperatureInput, GroundTemperatureState, LeafTemperatureInput, LeafTemperatureOutput,
+    LeafTemperatureState, NetSolarFluxes, NetSolarInput, PrecipitationPhaseScheme,
+    PrecipitationState, RootUptakeInput, RootUptakeState, RuntimeForcing,
+    SoilSurfaceResistanceInput, ThermalWaterFluxes, ThermalWaterInput, Water2014SoilInput,
+    Water2014SoilOutput, Water2014SoilState,
 };
 
 const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
@@ -48,12 +50,26 @@ pub struct StandardLctEnergyState {
     pub leaf: LeafTemperatureState,
 }
 
+/// Persistent no-snow standard-LCT state for [`standard_lct_soil_step`].
+///
+/// The ground temperature and soil-water arrays live here once, so the energy
+/// and hydrology calls cannot diverge by receiving separate dynamic columns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandardLctSoilState {
+    pub energy: StandardLctEnergyState,
+    pub temperature_k: Vec<f64>,
+    pub water: Water2014SoilState,
+}
+
 /// The component results of one standard LCT energy update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StandardLctEnergyOutput {
     pub precipitation: PrecipitationState,
     pub interception: CanopyInterceptionFluxes,
     pub shortwave: NetSolarFluxes,
+    /// Runtime-derived lower humidity boundary for a non-split surface.
+    /// Split soil/snow still has separate soil and snow boundaries.
+    pub ground_humidity: Option<GroundHumidityState>,
     pub root_uptake: RootUptakeState,
     pub soil_surface_resistance_s_m: f64,
     /// Bare-ground exchange used as the `LeafTemperature` lower boundary.
@@ -73,6 +89,23 @@ pub struct StandardLctEnergyOutput {
     pub total_evaporation_kg_m2_s: f64,
 }
 
+/// Static inputs and forcing to one no-snow standard-LCT time step.
+///
+/// The dynamic arrays embedded in `energy.ground_temperature` and `water` are
+/// templates only; this driver replaces them with [`StandardLctSoilState`].
+#[derive(Debug, Clone, Copy)]
+pub struct StandardLctSoilInput<'a> {
+    pub energy: StandardLctEnergyInput<'a>,
+    pub water: Water2014SoilInput<'a>,
+}
+
+/// Results from one linked `THERMAL → WATER_2014` no-snow time step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandardLctSoilOutput {
+    pub energy: StandardLctEnergyOutput,
+    pub water: Water2014SoilOutput,
+}
+
 /// Runs the normal LCT `CoLMMAIN → THERMAL` energy chain without duplicating a
 /// physics kernel in a runtime or initializer.
 ///
@@ -85,6 +118,7 @@ pub fn standard_lct_energy_step(
 ) -> Result<StandardLctEnergyOutput> {
     validate(input)?;
 
+    let ground_humidity = non_split_ground_humidity_input(input)?;
     let precipitation = input
         .forcing
         .partition_precipitation(0, input.precipitation_scheme)?;
@@ -106,13 +140,25 @@ pub fn standard_lct_energy_step(
         },
         &mut state.leaf.canopy_water,
     )?;
-    let root_uptake = root_uptake(input.root_uptake)?;
-    let soil_surface_resistance_s_m = soil_surface_resistance(input.soil_surface_resistance)?;
-    let ground_flux_input = ground_flux_input(
+    let root_uptake = root_uptake_input(input)?;
+    let soil_surface_resistance_s_m = soil_surface_resistance_input(input, ground_humidity)?;
+    let mut ground_flux_input = ground_flux_input(
         input.ground_flux,
         input.forcing,
         soil_surface_resistance_s_m,
     );
+    let (ground_temperature_k, soil_temperature_k, snow_temperature_k) =
+        surface_temperatures(input.ground_temperature);
+    ground_flux_input.ground_temperature_k = ground_temperature_k;
+    ground_flux_input.soil_temperature_k = soil_temperature_k;
+    ground_flux_input.snow_temperature_k = snow_temperature_k;
+    if let Some(humidity) = ground_humidity {
+        ground_flux_input.ground_specific_humidity = humidity.ground_specific_humidity;
+        ground_flux_input.soil_specific_humidity = humidity.ground_specific_humidity;
+        ground_flux_input.snow_specific_humidity = humidity.ground_specific_humidity;
+        ground_flux_input.ground_humidity_temperature_derivative_kg_kg_k =
+            humidity.ground_humidity_temperature_slope_kg_kg_k;
+    }
     let preliminary_ground_flux = ground_fluxes(ground_flux_input)?;
     let leaf_input = leaf_input(
         input.leaf_temperature,
@@ -145,6 +191,9 @@ pub fn standard_lct_energy_step(
         rain_on_ground_kg_m2_s: interception.ground_rain_kg_m2_s,
         snow_on_ground_kg_m2_s: interception.ground_snow_kg_m2_s,
         precipitation_temperature_k: precipitation.precipitation_temperature_k,
+        ground_temperature_k,
+        soil_surface_temperature_k: soil_temperature_k,
+        snow_surface_temperature_k: snow_temperature_k,
         ..input.ground_temperature
     })?;
     let ground_temperature_change =
@@ -177,6 +226,7 @@ pub fn standard_lct_energy_step(
         precipitation,
         interception,
         shortwave,
+        ground_humidity,
         root_uptake,
         soil_surface_resistance_s_m,
         preliminary_ground_flux,
@@ -187,6 +237,144 @@ pub fn standard_lct_energy_step(
         thermal_water,
         total_sensible_heat_w_m2,
         total_evaporation_kg_m2_s,
+    })
+}
+
+/// Runs the no-snow regular-soil `CoLMMAIN → THERMAL → WATER_2014` sequence.
+///
+/// This deliberately accepts the branch for which both source components are
+/// ported: a normal soil LCT patch without snow or split soil/snow.  It does
+/// not approximate PFT/PC aggregation, snow, irrigation, VSF, or wetland
+/// hydrology.
+pub fn standard_lct_soil_step(
+    input: StandardLctSoilInput<'_>,
+    state: &mut StandardLctSoilState,
+) -> Result<StandardLctSoilOutput> {
+    validate_soil_step(input, state)?;
+    let mut energy_input = input.energy;
+    energy_input.ground_temperature = GroundTemperatureInput {
+        temperature_k: &state.temperature_k,
+        liquid_water_kg_m2: &state.water.liquid_water_kg_m2,
+        ice_water_kg_m2: &state.water.ice_water_kg_m2,
+        ..input.energy.ground_temperature
+    };
+    let energy = standard_lct_energy_step(energy_input, &mut state.energy)?;
+    state.temperature_k = energy.ground.temperature_k.clone();
+    state.water.liquid_water_kg_m2 = energy.ground.liquid_water_kg_m2.clone();
+    state.water.ice_water_kg_m2 = energy.ground.ice_water_kg_m2.clone();
+
+    let thermal_water = energy
+        .thermal_water
+        .expect("validated no-split energy step supplies thermal water");
+    let root_flux_mm_s = if input.water.plant_hydraulics {
+        ensure!(
+            energy.leaf.root_flux_kg_m2_s.len() == state.temperature_k.len(),
+            "plant-hydraulic leaf output must provide one root flux per soil layer"
+        );
+        &energy.leaf.root_flux_kg_m2_s
+    } else {
+        input.water.root_flux_mm_s
+    };
+    let water = crate::water_2014_soil_step(
+        Water2014SoilInput {
+            time_step_seconds: input.energy.interception.time_step_seconds,
+            fluxes: crate::Water2014SoilFluxes {
+                ground_rain_kg_m2_s: energy.interception.ground_rain_kg_m2_s,
+                snowmelt_kg_m2_s: energy.ground.snow_melt_rate_kg_m2_s,
+                ground_evaporation_kg_m2_s: thermal_water.evaporation_kg_m2_s,
+                transpiration_kg_m2_s: energy.leaf.transpiration_kg_m2_s,
+                soil_dew_kg_m2_s: thermal_water.dew_kg_m2_s,
+                soil_frost_kg_m2_s: thermal_water.frost_kg_m2_s,
+                soil_sublimation_kg_m2_s: thermal_water.sublimation_kg_m2_s,
+            },
+            temperature_k: &state.temperature_k,
+            root_flux_mm_s,
+            ..input.water
+        },
+        &mut state.water,
+    )?;
+    Ok(StandardLctSoilOutput { energy, water })
+}
+
+fn validate_soil_step(input: StandardLctSoilInput<'_>, state: &StandardLctSoilState) -> Result<()> {
+    let ground = input.energy.ground_temperature;
+    ensure!(
+        ground.patch_type == 0
+            && input.water.patch_type == 0
+            && !ground.use_split_soil_snow
+            && ground.snow_layers == 0
+            && ground.snow_water_equivalent_kg_m2 == 0.0
+            && ground.snow_depth_m == 0.0
+            && ground.snow_cover_fraction == 0.0
+            && !input.water.urban_run
+            && (input.energy.interception.time_step_seconds - input.water.time_step_seconds).abs()
+                <= 1.0e-12
+            && state.temperature_k.len() == ground.temperature_k.len()
+            && state.water.liquid_water_kg_m2.len() == state.temperature_k.len()
+            && state.water.ice_water_kg_m2.len() == state.temperature_k.len()
+            && input.water.layer_thickness_m.len() == state.temperature_k.len()
+            && input.water.root_flux_mm_s.len() == state.temperature_k.len(),
+        "standard_lct_soil_step supports one no-snow regular-soil state"
+    );
+    Ok(())
+}
+
+fn non_split_ground_humidity_input(
+    input: StandardLctEnergyInput<'_>,
+) -> Result<Option<GroundHumidityState>> {
+    let ground = input.ground_temperature;
+    if ground.use_split_soil_snow {
+        return Ok(None);
+    }
+    let soil = ground.snow_layers;
+    Ok(Some(crate::non_split_ground_humidity(
+        GroundHumidityInput {
+            ground_temperature_k: surface_temperatures(ground).0,
+            surface_pressure_pa: input.forcing.surface_pressure_pa,
+            air_specific_humidity: input.forcing.specific_humidity,
+            snow_cover_fraction: ground.snow_cover_fraction,
+            top_layer_thickness_m: ground.layer_thickness_m[soil],
+            top_layer_liquid_water_kg_m2: ground.liquid_water_kg_m2[soil],
+            top_layer_ice_water_kg_m2: ground.ice_water_kg_m2[soil],
+            top_layer_porosity: ground.soil_porosity[0],
+            top_layer_residual_water: ground.soil_residual_water[0],
+            saturated_soil_suction_mm: ground.soil_suction_mm[0],
+            hydraulic_model: ground.soil_hydraulic_model[0],
+        },
+    )?))
+}
+
+fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeState> {
+    let ground = input.ground_temperature;
+    let soil = ground.snow_layers;
+    root_uptake(RootUptakeInput {
+        temperature_k: &ground.temperature_k[soil..],
+        liquid_water_kg_m2: &ground.liquid_water_kg_m2[soil..],
+        ..input.root_uptake
+    })
+}
+
+fn soil_surface_resistance_input(
+    input: StandardLctEnergyInput<'_>,
+    ground_humidity: Option<GroundHumidityState>,
+) -> Result<f64> {
+    let Some(humidity) = ground_humidity else {
+        return soil_surface_resistance(input.soil_surface_resistance);
+    };
+    let ground = input.ground_temperature;
+    let soil = ground.snow_layers;
+    soil_surface_resistance(SoilSurfaceResistanceInput {
+        porosity: ground.soil_porosity[0],
+        saturated_soil_suction_mm: ground.soil_suction_mm[0],
+        residual_water: ground.soil_residual_water[0],
+        hydraulic_model: ground.soil_hydraulic_model[0],
+        layer_thickness_m: ground.layer_thickness_m[soil],
+        temperature_k: surface_temperatures(ground).1,
+        liquid_water_kg_m2: ground.liquid_water_kg_m2[soil],
+        ice_water_kg_m2: ground.ice_water_kg_m2[soil],
+        snow_cover_fraction: ground.snow_cover_fraction,
+        ground_specific_humidity: humidity.ground_specific_humidity,
+        ..input.soil_surface_resistance
     })
 }
 
@@ -288,14 +476,24 @@ fn solved_ground_temperature_change(
         "ground-temperature solver returned a different layer count"
     );
     let current_ground_temperature_k = if input.use_split_soil_snow {
-        let snow_temperature_k = state.temperature_k[0];
-        let soil_temperature_k = state.temperature_k[input.snow_layers];
-        input.snow_cover_fraction * snow_temperature_k
-            + (1.0 - input.snow_cover_fraction) * soil_temperature_k
+        input.snow_cover_fraction * state.temperature_k[0]
+            + (1.0 - input.snow_cover_fraction) * state.temperature_k[input.snow_layers]
     } else {
         state.temperature_k[0]
     };
-    Ok(current_ground_temperature_k - input.ground_temperature_k)
+    Ok(current_ground_temperature_k - surface_temperatures(input).0)
+}
+
+fn surface_temperatures(input: GroundTemperatureInput<'_>) -> (f64, f64, f64) {
+    let snow_temperature_k = input.temperature_k[0];
+    let soil_temperature_k = input.temperature_k[input.snow_layers];
+    let ground_temperature_k = if input.use_split_soil_snow {
+        input.snow_cover_fraction * snow_temperature_k
+            + (1.0 - input.snow_cover_fraction) * soil_temperature_k
+    } else {
+        snow_temperature_k
+    };
+    (ground_temperature_k, soil_temperature_k, snow_temperature_k)
 }
 
 fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
@@ -326,10 +524,11 @@ fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
                 input.soil_surface_resistance.air_density_kg_m3,
                 ground_flux.air_density_kg_m3,
             )
-            && same(
-                input.soil_surface_resistance.ground_specific_humidity,
-                ground_flux.ground_specific_humidity,
-            )
+            && (!ground.use_split_soil_snow
+                || same(
+                    input.soil_surface_resistance.ground_specific_humidity,
+                    ground_flux.ground_specific_humidity,
+                ))
             && input.soil_surface_resistance.scheme == ground_flux.surface_resistance_scheme
             && leaf.options.split_soil_snow == ground.use_split_soil_snow
             && leaf.options.soil_resistance_is_conductance
@@ -349,9 +548,10 @@ fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
         snow_temperature_k
     };
     ensure!(
-        same(ground_flux.ground_temperature_k, ground_temperature_k)
-            && same(ground_flux.soil_temperature_k, soil_temperature_k)
-            && same(ground_flux.snow_temperature_k, snow_temperature_k),
+        !ground.use_split_soil_snow
+            || (same(ground_flux.ground_temperature_k, ground_temperature_k)
+                && same(ground_flux.soil_temperature_k, soil_temperature_k)
+                && same(ground_flux.snow_temperature_k, snow_temperature_k)),
         "ground-flux and ground-temperature inputs must describe the same surface state"
     );
     Ok(())

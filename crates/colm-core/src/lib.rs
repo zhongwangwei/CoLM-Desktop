@@ -12,6 +12,7 @@ pub mod canopy_layer_profile;
 pub mod canopy_roughness;
 pub mod glacier;
 pub mod ground_fluxes;
+pub mod ground_humidity;
 pub mod ground_temperature;
 pub mod ground_thermal_step;
 pub mod high_res_parameters;
@@ -85,6 +86,7 @@ pub use canopy_layer_profile::{
 pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
+pub use ground_humidity::{non_split_ground_humidity, GroundHumidityInput, GroundHumidityState};
 pub use ground_temperature::{ground_temperature, GroundTemperatureInput, GroundTemperatureState};
 pub use ground_thermal_step::{
     ground_thermal_step, GroundThermalStepInput, GroundThermalStepState,
@@ -166,8 +168,9 @@ pub use soil_water::{
 };
 
 pub use standard_lct_step::{
-    standard_lct_energy_step, StandardLctEnergyInput, StandardLctEnergyOutput,
-    StandardLctEnergyState,
+    standard_lct_energy_step, standard_lct_soil_step, StandardLctEnergyInput,
+    StandardLctEnergyOutput, StandardLctEnergyState, StandardLctSoilInput, StandardLctSoilOutput,
+    StandardLctSoilState,
 };
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,

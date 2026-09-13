@@ -1,9 +1,11 @@
 use super::*;
 use crate::{
-    cold_start_broadband_radiation, prepare_runtime_forcing, CanopyInterceptionInput, CanopyWater,
-    GroundFluxInput, GroundTemperatureInput, LeafBiochemistry, LeafOptics, LeafTemperatureOptions,
-    NetSolarInput, RuntimeForcingInput, SoilHydraulicModel, SoilThermalInput, SurfaceLayerScheme,
-    ThermalConductivityScheme,
+    cold_start_broadband_radiation, non_split_ground_humidity, prepare_runtime_forcing,
+    CanopyInterceptionInput, CanopyWater, GroundFluxInput, GroundHumidityInput,
+    GroundTemperatureInput, LeafBiochemistry, LeafOptics, LeafTemperatureOptions, NetSolarInput,
+    RuntimeForcingInput, SoilHydraulicModel, SoilThermalInput, SurfaceLayerScheme,
+    ThermalConductivityScheme, TopmodelMethod, Water2014Runoff, Water2014SoilFluxes,
+    Water2014SoilInput, Water2014SoilState,
 };
 
 const THERMAL: SoilThermalInput = SoilThermalInput {
@@ -47,7 +49,141 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
         latitude_radians: 0.5,
     })
     .unwrap();
-    let mut state = StandardLctEnergyState {
+    let mut state = energy_state(forcing);
+    let mut input = input(forcing);
+    input.ground_flux.ground_specific_humidity = 0.03;
+    input.ground_flux.ground_temperature_k = 100.0;
+    input.soil_surface_resistance.ground_specific_humidity = 0.02;
+    let humidity = non_split_ground_humidity(GroundHumidityInput {
+        ground_temperature_k: input.ground_temperature.ground_temperature_k,
+        surface_pressure_pa: forcing.surface_pressure_pa,
+        air_specific_humidity: forcing.specific_humidity,
+        snow_cover_fraction: input.ground_temperature.snow_cover_fraction,
+        top_layer_thickness_m: input.ground_temperature.layer_thickness_m[0],
+        top_layer_liquid_water_kg_m2: input.ground_temperature.liquid_water_kg_m2[0],
+        top_layer_ice_water_kg_m2: input.ground_temperature.ice_water_kg_m2[0],
+        top_layer_porosity: input.ground_temperature.soil_porosity[0],
+        top_layer_residual_water: input.ground_temperature.soil_residual_water[0],
+        saturated_soil_suction_mm: input.ground_temperature.soil_suction_mm[0],
+        hydraulic_model: input.ground_temperature.soil_hydraulic_model[0],
+    })
+    .unwrap();
+    let direct_resistance = soil_surface_resistance(crate::SoilSurfaceResistanceInput {
+        porosity: input.ground_temperature.soil_porosity[0],
+        saturated_soil_suction_mm: input.ground_temperature.soil_suction_mm[0],
+        residual_water: input.ground_temperature.soil_residual_water[0],
+        hydraulic_model: input.ground_temperature.soil_hydraulic_model[0],
+        layer_thickness_m: input.ground_temperature.layer_thickness_m[0],
+        temperature_k: input.ground_temperature.temperature_k[0],
+        liquid_water_kg_m2: input.ground_temperature.liquid_water_kg_m2[0],
+        ice_water_kg_m2: input.ground_temperature.ice_water_kg_m2[0],
+        snow_cover_fraction: input.ground_temperature.snow_cover_fraction,
+        ground_specific_humidity: humidity.ground_specific_humidity,
+        ..input.soil_surface_resistance
+    })
+    .unwrap();
+    let mut expected_flux_input = ground_flux_input(input.ground_flux, forcing, direct_resistance);
+    expected_flux_input.ground_temperature_k = input.ground_temperature.temperature_k[0];
+    expected_flux_input.soil_temperature_k = input.ground_temperature.temperature_k[0];
+    expected_flux_input.snow_temperature_k = input.ground_temperature.temperature_k[0];
+    expected_flux_input.ground_specific_humidity = humidity.ground_specific_humidity;
+    expected_flux_input.soil_specific_humidity = humidity.ground_specific_humidity;
+    expected_flux_input.snow_specific_humidity = humidity.ground_specific_humidity;
+    expected_flux_input.ground_humidity_temperature_derivative_kg_kg_k =
+        humidity.ground_humidity_temperature_slope_kg_kg_k;
+    let expected_ground = ground_fluxes(expected_flux_input).unwrap();
+
+    let output = standard_lct_energy_step(input, &mut state).unwrap();
+
+    assert_eq!(output.soil_surface_resistance_s_m, direct_resistance);
+    assert_eq!(output.ground_humidity, Some(humidity));
+    assert_eq!(output.preliminary_ground_flux, expected_ground);
+    assert_eq!(
+        output.precipitation.convective_rain_kg_m2_s
+            + output.precipitation.large_scale_rain_kg_m2_s,
+        forcing.convective_precipitation_kg_m2_s + forcing.large_scale_precipitation_kg_m2_s
+    );
+    assert!(output.shortwave.ground_absorbed_w_m2.is_finite());
+    assert!(output.ground_humidity.is_some());
+    assert!(output.interception.ground_rain_kg_m2_s >= 0.0);
+    assert!(
+        output.leaf.energy_balance_error_w_m2.abs() < 0.5,
+        "{:#?}",
+        output.leaf
+    );
+    assert!(output
+        .ground
+        .temperature_k
+        .iter()
+        .all(|value| value.is_finite()));
+    let thermal_water = output.thermal_water.expect("non-split test surface");
+    assert_eq!(
+        output.corrected_ground_evaporation_kg_m2_s,
+        thermal_water.ground_evaporation_kg_m2_s
+    );
+    assert_eq!(
+        output.total_sensible_heat_w_m2,
+        output.leaf.leaf_sensible_heat_w_m2 + output.corrected_ground_sensible_heat_w_m2
+    );
+    assert!(output.root_uptake.layer_fraction.iter().sum::<f64>() > 0.999);
+    assert!(state.leaf.leaf_temperature_k.is_finite());
+    assert!(state.leaf.canopy_water.total_mm >= 0.0);
+}
+
+#[test]
+fn standard_lct_soil_step_carries_one_rust_column_between_energy_and_water() {
+    let forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        air_temperature_k: 290.0,
+        specific_humidity: 0.008,
+        surface_pressure_pa: 101_325.0,
+        precipitation_kg_m2_s: 1.0e-4,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 1.0,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 450.0,
+        downward_longwave_w_m2: 350.0,
+        calendar_day: 172.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+    })
+    .unwrap();
+    let energy = input(forcing);
+    let mut state = StandardLctSoilState {
+        energy: energy_state(forcing),
+        temperature_k: energy.ground_temperature.temperature_k.to_vec(),
+        water: Water2014SoilState {
+            liquid_water_kg_m2: energy.ground_temperature.liquid_water_kg_m2.to_vec(),
+            ice_water_kg_m2: energy.ground_temperature.ice_water_kg_m2.to_vec(),
+            water_table_depth_m: 1.0,
+            aquifer_water_mm: 100.0,
+            surface_water_mm: 0.0,
+        },
+    };
+    let input = StandardLctSoilInput {
+        energy,
+        water: water_input(),
+    };
+
+    let first = standard_lct_soil_step(input, &mut state).unwrap();
+    let second = standard_lct_soil_step(input, &mut state).unwrap();
+
+    assert!(first.energy.thermal_water.is_some());
+    assert!(first.water.infiltration_mm_s.is_finite());
+    assert!(second.water.total_runoff_mm_s.is_finite());
+    assert!(state.temperature_k.iter().all(|value| value.is_finite()));
+    assert!(state
+        .water
+        .liquid_water_kg_m2
+        .iter()
+        .all(|value| *value >= 0.0));
+    assert_eq!(
+        state.temperature_k.len(),
+        state.water.liquid_water_kg_m2.len()
+    );
+}
+
+fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
+    StandardLctEnergyState {
         radiation: cold_start_broadband_radiation(
             0,
             crate::SoilReflectance {
@@ -81,49 +217,46 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
             },
             plant_hydraulics: None,
         },
-    };
-    let input = input(forcing);
-    let direct_resistance = soil_surface_resistance(input.soil_surface_resistance).unwrap();
-    let expected_ground = ground_fluxes(ground_flux_input(
-        input.ground_flux,
-        forcing,
-        direct_resistance,
-    ))
-    .unwrap();
+    }
+}
 
-    let output = standard_lct_energy_step(input, &mut state).unwrap();
-
-    assert_eq!(output.soil_surface_resistance_s_m, direct_resistance);
-    assert_eq!(output.preliminary_ground_flux, expected_ground);
-    assert_eq!(
-        output.precipitation.convective_rain_kg_m2_s
-            + output.precipitation.large_scale_rain_kg_m2_s,
-        forcing.convective_precipitation_kg_m2_s + forcing.large_scale_precipitation_kg_m2_s
-    );
-    assert!(output.shortwave.ground_absorbed_w_m2.is_finite());
-    assert!(output.interception.ground_rain_kg_m2_s >= 0.0);
-    assert!(
-        output.leaf.energy_balance_error_w_m2.abs() < 0.5,
-        "{:#?}",
-        output.leaf
-    );
-    assert!(output
-        .ground
-        .temperature_k
-        .iter()
-        .all(|value| value.is_finite()));
-    let thermal_water = output.thermal_water.expect("non-split test surface");
-    assert_eq!(
-        output.corrected_ground_evaporation_kg_m2_s,
-        thermal_water.ground_evaporation_kg_m2_s
-    );
-    assert_eq!(
-        output.total_sensible_heat_w_m2,
-        output.leaf.leaf_sensible_heat_w_m2 + output.corrected_ground_sensible_heat_w_m2
-    );
-    assert!(output.root_uptake.layer_fraction.iter().sum::<f64>() > 0.999);
-    assert!(state.leaf.leaf_temperature_k.is_finite());
-    assert!(state.leaf.canopy_water.total_mm >= 0.0);
+fn water_input() -> Water2014SoilInput<'static> {
+    Water2014SoilInput {
+        patch_type: 0,
+        urban_run: false,
+        plant_hydraulics: false,
+        time_step_seconds: 1800.0,
+        impermeable_porosity: 0.05,
+        ponding_limit_mm: 5.0,
+        minimum_soil_potential_mm: -1.0e8,
+        soil_ice_impedance: 6.0,
+        runoff: Water2014Runoff::Topmodel {
+            saturated_fraction_max: 0.5,
+            saturated_fraction_decay_m_inv: 0.5,
+            decay_tuning: 0.1,
+            subsurface_method: TopmodelMethod::Exponential,
+        },
+        fluxes: Water2014SoilFluxes {
+            ground_rain_kg_m2_s: 0.0,
+            snowmelt_kg_m2_s: 0.0,
+            ground_evaporation_kg_m2_s: 0.0,
+            transpiration_kg_m2_s: 0.0,
+            soil_dew_kg_m2_s: 0.0,
+            soil_frost_kg_m2_s: 0.0,
+            soil_sublimation_kg_m2_s: 0.0,
+        },
+        node_depth_m: &[0.05, 0.25],
+        layer_thickness_m: &[0.1, 0.3],
+        interface_depth_m: &[0.0, 0.1, 0.4],
+        temperature_k: &[289.0, 288.0],
+        porosity: &[0.46, 0.46],
+        residual_water: &[0.05, 0.05],
+        saturated_hydraulic_conductivity_mm_s: &[0.01, 0.01],
+        clapp_hornberger_b: &[4.0, 4.0],
+        saturated_potential_mm: &[-100.0, -100.0],
+        root_fraction: &[0.6, 0.4],
+        root_flux_mm_s: &[0.0, 0.0],
+    }
 }
 
 fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
