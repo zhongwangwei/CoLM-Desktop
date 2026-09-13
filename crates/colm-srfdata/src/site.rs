@@ -15,7 +15,7 @@ use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
-use crate::grid::COLM_1KM;
+use crate::grid::{COLM_1KM, COLM_500M};
 use crate::raster::{
     point_5x5_f64, point_5x5_pft_f64, point_5x5_pft_time_f64, point_5x5_time_f64, point_f64,
     point_f64_on, point_i32, point_time_f64,
@@ -178,6 +178,10 @@ pub struct SinglePointSurfaceRun {
     pub use_site_pctpfts: bool,
     pub use_site_pctcrop: bool,
     pub use_site_htop: bool,
+    /// `USE_SITE_landtype` selects the source classification over rawdata.
+    pub use_site_landtype: bool,
+    /// An explicit `SITE_landtype` wins regardless of `USE_SITE_landtype`.
+    pub site_landtype: Option<i32>,
     pub use_site_lakedepth: bool,
     pub use_site_soilreflectance: bool,
     pub use_site_topography: bool,
@@ -215,6 +219,8 @@ struct SinglePointMaterializeOptions<'a> {
     use_site_pctpfts: bool,
     use_site_pctcrop: bool,
     use_site_htop: bool,
+    use_site_landtype: bool,
+    site_landtype: Option<i32>,
     use_site_lakedepth: bool,
     use_site_soilreflectance: bool,
     use_site_topography: bool,
@@ -310,6 +316,11 @@ pub fn single_point_surface_run_from_namelist(
     let use_site_pctpfts = namelist_bool(&document, "USE_SITE_pctpfts", true)?;
     let use_site_pctcrop = namelist_bool(&document, "USE_SITE_pctcrop", true)?;
     let use_site_htop = namelist_bool(&document, "USE_SITE_htop", true)?;
+    let use_site_landtype = namelist_bool(&document, "USE_SITE_landtype", false)?;
+    let site_landtype = match namelist_i32(&document, "SITE_landtype", -1)? {
+        value if value >= 0 => Some(value),
+        _ => None,
+    };
     let use_site_lakedepth = namelist_bool(&document, "USE_SITE_lakedepth", true)?;
     let use_site_soilreflectance = namelist_bool(&document, "USE_SITE_soilreflectance", true)?;
     let use_site_topography = namelist_bool(&document, "USE_SITE_topography", true)?;
@@ -326,6 +337,8 @@ pub fn single_point_surface_run_from_namelist(
         use_site_pctpfts,
         use_site_pctcrop,
         use_site_htop,
+        use_site_landtype,
+        site_landtype,
         use_site_lakedepth,
         use_site_soilreflectance,
         use_site_topography,
@@ -364,6 +377,8 @@ pub fn materialize_single_point_surface_from_namelist(
             use_site_pctpfts: run.use_site_pctpfts,
             use_site_pctcrop: run.use_site_pctcrop,
             use_site_htop: run.use_site_htop,
+            use_site_landtype: run.use_site_landtype,
+            site_landtype: run.site_landtype,
             use_site_lakedepth: run.use_site_lakedepth,
             use_site_soilreflectance: run.use_site_soilreflectance,
             use_site_topography: run.use_site_topography,
@@ -1645,6 +1660,8 @@ pub fn materialize_single_point_surface(
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_landtype: true,
+            site_landtype: None,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -1758,6 +1775,10 @@ fn materialize_single_point_surface_impl(
         matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && !options.use_site_lai;
     let requires_monthly_raw = lct_monthly && !options.use_site_lai;
     let requires_lct_height_raw = lct_mode && !options.use_site_htop;
+    let requires_landtype_update = mode != SiteMode::Urban
+        && (options.site_landtype.is_some()
+            || !options.use_site_landtype
+            || landtype_for_mode(source, mode)?.is_none());
     let requires_pft_raw = pft_mode
         && (!options.use_site_lai
             || !options.use_site_pctpfts
@@ -1778,6 +1799,7 @@ fn materialize_single_point_surface_impl(
         && !requires_eight_day_raw
         && !requires_monthly_raw
         && !requires_lct_height_raw
+        && !requires_landtype_update
         && !requires_pft_raw
         && !requires_bedrock_raw
         && !requires_static_raw
@@ -1810,6 +1832,9 @@ fn materialize_single_point_surface_impl(
     } else {
         Some(fill(source, &temporary, rawdata, observation)?)
     };
+    if requires_landtype_update {
+        materialize_single_point_landtype(&temporary, rawdata, mode, options)?;
+    }
     if matches!(lai_frequency, SinglePointLaiFrequency::EightDay)
         && (requires_eight_day_raw || netcdf::open(&temporary)?.variable("LAI_8day").is_none())
     {
@@ -1921,6 +1946,60 @@ fn materialize_single_point_bedrock(surface: &Path, rawdata: &Path) -> Result<()
         &[depth_cm],
         "rawdata bedrock.nc/dbedrock",
     )
+}
+
+fn materialize_single_point_landtype(
+    surface: &Path,
+    rawdata: Option<&Path>,
+    mode: SiteMode,
+    options: SinglePointMaterializeOptions<'_>,
+) -> Result<()> {
+    if mode == SiteMode::Urban {
+        return Ok(());
+    }
+    let (name, range, grid, path) = match mode {
+        SiteMode::Usgs => (
+            "USGS_classification",
+            1..=24,
+            COLM_1KM,
+            rawdata.map(|root| root.join("landtypes/landtype-usgs-update.nc")),
+        ),
+        _ => (
+            "IGBP_classification",
+            1..=17,
+            COLM_500M,
+            rawdata.map(|root| {
+                root.join(format!(
+                    "landtypes/landtype-igbp-modis-{:04}.nc",
+                    options.land_cover_year
+                ))
+            }),
+        ),
+    };
+    let (landtype, source) = if let Some(value) = options.site_landtype {
+        (
+            classification_value(surface, name, value as f64, range)?,
+            "case SITE_landtype",
+        )
+    } else if options.use_site_landtype && landtype_for_mode(surface, mode)?.is_some() {
+        return Ok(());
+    } else {
+        let file = path.context("single-point landtype fallback needs DEF_dir_rawdata")?;
+        let surface_file =
+            netcdf::open(surface).with_context(|| format!("cannot open {}", surface.display()))?;
+        let longitude = scalar_f64(&surface_file, "longitude")?;
+        let latitude = scalar_f64(&surface_file, "latitude")?;
+        drop(surface_file);
+        let input = point_f64_on(grid, &file, "landtype", longitude, latitude)?;
+        (
+            classification_value(&file, "landtype", input, range)?,
+            "rawdata landtype raster as MOD_SingleSrfdata.F90 does",
+        )
+    };
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file =
+        netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
+    put_or_replace_values(&mut file, name, &[], &[landtype as f64], source)
 }
 
 fn materialize_single_point_static_fields(

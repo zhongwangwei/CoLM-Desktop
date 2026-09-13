@@ -1344,6 +1344,8 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert!(!run.crop_enabled);
     assert_eq!(run.lai_frequency, super::SinglePointLaiFrequency::Monthly);
     assert_eq!(run.monthly_lai_years, [2000]);
+    assert!(!run.use_site_landtype);
+    assert_eq!(run.site_landtype, None);
     assert!(!run.use_bedrock);
     assert!(run.use_site_dbedrock);
 
@@ -1368,7 +1370,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n USE_SITE_lakedepth = .false.\n USE_SITE_soilreflectance = .false.\n USE_SITE_topography = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n SITE_landtype = 7\n USE_SITE_landtype = .false.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n USE_SITE_lakedepth = .false.\n USE_SITE_soilreflectance = .false.\n USE_SITE_topography = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
             source.display(),
             output.display(),
         ),
@@ -1379,12 +1381,96 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(pft.monthly_lai_years, [2008, 2009]);
     assert!(!pft.use_site_pctpfts);
     assert!(!pft.use_site_htop);
+    assert!(!pft.use_site_landtype);
+    assert_eq!(pft.site_landtype, Some(7));
     assert!(!pft.use_site_lakedepth);
     assert!(!pft.use_site_soilreflectance);
     assert!(!pft.use_site_topography);
     assert!(pft.use_bedrock);
     assert!(!pft.use_site_dbedrock);
 
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn landtype_rawdata_fallback_and_explicit_case_override() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-landtype-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let rawdata = directory.join("rawdata");
+    std::fs::create_dir_all(rawdata.join("landtypes")).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(
+            rawdata
+                .join("landtypes")
+                .join("landtype-igbp-modis-2008.nc"),
+        )
+        .unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[12], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+    let options = super::SinglePointMaterializeOptions {
+        urban: super::UrbanSurfaceOptions::default(),
+        lai_frequency: super::SinglePointLaiFrequency::Monthly,
+        use_site_lai: true,
+        use_site_pctpfts: true,
+        use_site_pctcrop: true,
+        use_site_htop: true,
+        use_site_landtype: false,
+        site_landtype: None,
+        use_site_lakedepth: true,
+        use_site_soilreflectance: true,
+        use_site_topography: true,
+        use_bedrock: false,
+        use_site_dbedrock: true,
+        land_cover_year: 2008,
+        eight_day_lai_years: &[],
+        monthly_lai_years: &[],
+    };
+    super::materialize_single_point_landtype(
+        &surface,
+        Some(&rawdata),
+        super::SiteMode::Igbp,
+        options,
+    )
+    .unwrap();
+    assert_eq!(
+        super::landtype_for_mode(&surface, super::SiteMode::Igbp).unwrap(),
+        Some(12)
+    );
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(
+        file.variable("IGBP_classification")
+            .unwrap()
+            .attribute("source")
+            .unwrap()
+            .value()
+            .unwrap(),
+        netcdf::AttributeValue::Str("rawdata landtype raster as MOD_SingleSrfdata.F90 does".into())
+    );
+    drop(file);
+    super::materialize_single_point_landtype(
+        &surface,
+        None,
+        super::SiteMode::Igbp,
+        super::SinglePointMaterializeOptions {
+            site_landtype: Some(7),
+            use_site_landtype: true,
+            ..options
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        super::landtype_for_mode(&surface, super::SiteMode::Igbp).unwrap(),
+        Some(7)
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1858,6 +1944,8 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_landtype: true,
+            site_landtype: None,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -1949,6 +2037,8 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_landtype: true,
+            site_landtype: None,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -1988,6 +2078,8 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_pctpfts: false,
             use_site_pctcrop: true,
             use_site_htop: false,
+            use_site_landtype: true,
+            site_landtype: None,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2132,6 +2224,8 @@ fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_landtype: true,
+            site_landtype: None,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2337,6 +2431,8 @@ fn static_rawdata_fallback_replaces_disabled_site_fields() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_landtype: true,
+            site_landtype: None,
             use_site_lakedepth: false,
             use_site_soilreflectance: false,
             use_site_topography: false,
