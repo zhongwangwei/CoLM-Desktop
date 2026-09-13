@@ -1,5 +1,50 @@
 use super::*;
 
+#[test]
+fn urban_phase_change_matches_upstream_meltf_urban() {
+    let state = urban_phase_change(UrbanPhaseChangeInput {
+        time_step_seconds: 1800.0,
+        fact_seconds_per_j_m2_k: &[0.0005, 0.0004, 0.0003],
+        residual_heat_flux_w_m2: &[5000.0, -2500.0, 8000.0],
+        surface_heat_flux_w_m2: 20.0,
+        surface_heat_flux_temperature_derivative_w_m2_k: -4.0,
+        previous_temperature_k: &[271.0, 274.0, 271.0],
+        temperature_k: &[274.0, 271.0, 274.0],
+        liquid_water_kg_m2: &[2.0, 1.0, 0.0],
+        ice_water_kg_m2: &[10.0, 3.0, 10.0],
+        snow_water_equivalent_kg_m2: 0.0,
+        snow_depth_m: 0.0,
+        snow_layers: 2,
+    })
+    .unwrap();
+    // Standalone gfortran run of MOD_PhaseChange:meltf_urban with these inputs.
+    assert_eq!(state.phase_flag, [1, 2, 1]);
+    close(
+        &state.temperature_k,
+        &[FREEZING_K, 273.07413333333335, FREEZING_K],
+    );
+    close(
+        &state.liquid_water_kg_m2,
+        &[5.730320114025966, 0.0, 4.316480897313395],
+    );
+    close(
+        &state.ice_water_kg_m2,
+        &[6.269679885974034, 4.0, 5.683519102686605],
+    );
+    assert!((state.snow_melt_rate_kg_m2_s - 0.002072400063347759).abs() < 5.0e-15);
+    assert!((state.latent_heat_flux_w_m2 - 1306.007120768228).abs() < 5.0e-10);
+}
+
+fn close(actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 5.0e-12,
+            "{actual} != {expected}"
+        );
+    }
+}
+
 fn run_phase_change(
     temperature_k: &[f64],
     liquid_water_kg_m2: &[f64],

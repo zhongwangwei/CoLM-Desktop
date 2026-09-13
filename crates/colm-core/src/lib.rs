@@ -108,7 +108,10 @@ pub use net_solar::{
 pub use pc_radiation::{
     cold_start_pc_broadband_radiation_with_snow, PcCanopyRadiation, PcPftInput, PcPftRadiation,
 };
-pub use phase_change::{phase_change, PhaseChangeInput, PhaseChangeState};
+pub use phase_change::{
+    phase_change, urban_phase_change, PhaseChangeInput, PhaseChangeState, UrbanPhaseChangeInput,
+    UrbanPhaseChangeState,
+};
 pub use photosynthesis::{
     photosynthesis_parameters, stomata, update_photosynthesis, LeafBiochemistry,
     LeafPhotosynthesisInput, PhotosynthesisParameters, PhotosynthesisUpdateInput,

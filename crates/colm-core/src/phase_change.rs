@@ -68,6 +68,40 @@ pub struct PhaseChangeState {
     pub freeze_mass_kg_m2: Vec<f64>,
 }
 
+/// Inputs to the shallow snow-or-surface phase step used by urban roofs and
+/// impervious roads. The packed column is every explicit snow layer followed
+/// by exactly one top substrate layer, matching `meltf_urban(lb, 1, ...)`.
+#[derive(Debug, Clone, Copy)]
+pub struct UrbanPhaseChangeInput<'a> {
+    pub time_step_seconds: f64,
+    pub fact_seconds_per_j_m2_k: &'a [f64],
+    pub residual_heat_flux_w_m2: &'a [f64],
+    pub surface_heat_flux_w_m2: f64,
+    pub surface_heat_flux_temperature_derivative_w_m2_k: f64,
+    pub previous_temperature_k: &'a [f64],
+    pub temperature_k: &'a [f64],
+    pub liquid_water_kg_m2: &'a [f64],
+    pub ice_water_kg_m2: &'a [f64],
+    pub snow_water_equivalent_kg_m2: f64,
+    pub snow_depth_m: f64,
+    /// Leading snow layers in the packed state.
+    pub snow_layers: usize,
+}
+
+/// State returned by [`urban_phase_change`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct UrbanPhaseChangeState {
+    pub temperature_k: Vec<f64>,
+    pub liquid_water_kg_m2: Vec<f64>,
+    pub ice_water_kg_m2: Vec<f64>,
+    pub snow_water_equivalent_kg_m2: f64,
+    pub snow_depth_m: f64,
+    pub snow_melt_rate_kg_m2_s: f64,
+    pub latent_heat_flux_w_m2: f64,
+    /// `0` none, `1` melting, `2` freezing; top-to-bottom packed order.
+    pub phase_flag: Vec<i32>,
+}
+
 /// Ports `MOD_PhaseChange:meltf` and its SNICAR layer-absorption addition.
 ///
 /// It is deliberately a pure state transform: the temperature solver supplies
@@ -313,6 +347,148 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
     })
 }
 
+/// Ports `MOD_PhaseChange:meltf_urban` as the common phase-change kernel for
+/// urban roofs and impervious ground. It intentionally has no soil hydraulic
+/// inputs: this source branch neither supercools nor transfers water below the
+/// top substrate layer.
+pub fn urban_phase_change(input: UrbanPhaseChangeInput<'_>) -> Result<UrbanPhaseChangeState> {
+    let layers = validate_urban(input)?;
+    let initial_ice = input.ice_water_kg_m2.to_vec();
+    let total_water: Vec<f64> = input
+        .liquid_water_kg_m2
+        .iter()
+        .zip(input.ice_water_kg_m2)
+        .map(|(liquid, ice)| liquid + ice)
+        .collect();
+    let explicit_snow_before = input.liquid_water_kg_m2[..input.snow_layers]
+        .iter()
+        .zip(&input.ice_water_kg_m2[..input.snow_layers])
+        .map(|(liquid, ice)| liquid + ice)
+        .sum::<f64>();
+    let mut temperature = input.temperature_k.to_vec();
+    let mut liquid = input.liquid_water_kg_m2.to_vec();
+    let mut ice = input.ice_water_kg_m2.to_vec();
+    let mut phase_flag = vec![0; layers];
+    let mut heat_residual = vec![0.0; layers];
+
+    for layer in 0..layers {
+        if ice[layer] > 0.0 && temperature[layer] > FREEZING_K {
+            phase_flag[layer] = 1;
+            temperature[layer] = FREEZING_K;
+        }
+        if liquid[layer] > 0.0 && temperature[layer] < FREEZING_K {
+            phase_flag[layer] = 2;
+            temperature[layer] = FREEZING_K;
+        }
+    }
+    if input.snow_layers == 0
+        && input.snow_water_equivalent_kg_m2 > 0.0
+        && temperature[0] > FREEZING_K
+    {
+        phase_flag[0] = 1;
+        temperature[0] = FREEZING_K;
+    }
+    for layer in 0..layers {
+        if phase_flag[layer] == 0 {
+            continue;
+        }
+        let temperature_change = temperature[layer] - input.previous_temperature_k[layer];
+        heat_residual[layer] = input.residual_heat_flux_w_m2[layer]
+            - temperature_change / input.fact_seconds_per_j_m2_k[layer];
+        if layer == 0 {
+            heat_residual[layer] += input.surface_heat_flux_w_m2
+                + input.surface_heat_flux_temperature_derivative_w_m2_k * temperature_change;
+        }
+        if (phase_flag[layer] == 1 && heat_residual[layer] < 0.0)
+            || (phase_flag[layer] == 2 && heat_residual[layer] > 0.0)
+        {
+            heat_residual[layer] = 0.0;
+            phase_flag[layer] = 0;
+        }
+    }
+
+    let mut snow_water_equivalent = input.snow_water_equivalent_kg_m2;
+    let mut snow_depth = input.snow_depth_m;
+    let mut snow_melt_rate = 0.0;
+    let mut latent_heat_flux = 0.0;
+    for layer in 0..layers {
+        if phase_flag[layer] == 0 || heat_residual[layer] == 0.0 {
+            continue;
+        }
+        let mut phase_mass =
+            heat_residual[layer] * input.time_step_seconds / LATENT_HEAT_FUSION_J_KG;
+        if layer == 0 && input.snow_layers == 0 && snow_water_equivalent > 0.0 && phase_mass > 0.0 {
+            let snow_before = snow_water_equivalent;
+            snow_water_equivalent = (snow_before - phase_mass).max(0.0);
+            snow_depth *= snow_water_equivalent / snow_before;
+            let heat_left = heat_residual[layer]
+                - LATENT_HEAT_FUSION_J_KG * (snow_before - snow_water_equivalent)
+                    / input.time_step_seconds;
+            if heat_left > 0.0 {
+                phase_mass = heat_left * input.time_step_seconds / LATENT_HEAT_FUSION_J_KG;
+                heat_residual[layer] = heat_left;
+            } else {
+                phase_mass = 0.0;
+                heat_residual[layer] = 0.0;
+            }
+            snow_melt_rate = (snow_before - snow_water_equivalent) / input.time_step_seconds;
+            latent_heat_flux = LATENT_HEAT_FUSION_J_KG * snow_melt_rate;
+        }
+        let heat_left = if phase_mass > 0.0 {
+            ice[layer] = (initial_ice[layer] - phase_mass).max(0.0);
+            heat_residual[layer]
+                - LATENT_HEAT_FUSION_J_KG * (initial_ice[layer] - ice[layer])
+                    / input.time_step_seconds
+        } else {
+            ice[layer] = total_water[layer].min(initial_ice[layer] - phase_mass);
+            heat_residual[layer]
+                - LATENT_HEAT_FUSION_J_KG * (initial_ice[layer] - ice[layer])
+                    / input.time_step_seconds
+        };
+        liquid[layer] = (total_water[layer] - ice[layer]).max(0.0);
+        if heat_left != 0.0 {
+            let correction = if layer == 0 {
+                1.0 - input.fact_seconds_per_j_m2_k[layer]
+                    * input.surface_heat_flux_temperature_derivative_w_m2_k
+            } else {
+                1.0
+            };
+            ensure!(
+                correction != 0.0,
+                "urban phase-change temperature correction is singular"
+            );
+            temperature[layer] += input.fact_seconds_per_j_m2_k[layer] * heat_left / correction;
+            if liquid[layer] * ice[layer] > 0.0 {
+                temperature[layer] = FREEZING_K;
+            }
+        }
+        latent_heat_flux +=
+            LATENT_HEAT_FUSION_J_KG * (initial_ice[layer] - ice[layer]) / input.time_step_seconds;
+        if phase_flag[layer] == 1 && layer < input.snow_layers {
+            snow_melt_rate += (initial_ice[layer] - ice[layer]).max(0.0) / input.time_step_seconds;
+        }
+    }
+    let explicit_snow_after = liquid[..input.snow_layers]
+        .iter()
+        .zip(&ice[..input.snow_layers])
+        .map(|(liquid, ice)| liquid + ice)
+        .sum::<f64>();
+    ensure!(
+        (explicit_snow_after - explicit_snow_before).abs() <= 1.0e-6,
+        "urban phase change did not conserve explicit snow-layer mass"
+    );
+    Ok(UrbanPhaseChangeState {
+        temperature_k: temperature,
+        liquid_water_kg_m2: liquid,
+        ice_water_kg_m2: ice,
+        snow_water_equivalent_kg_m2: snow_water_equivalent,
+        snow_depth_m: snow_depth,
+        snow_melt_rate_kg_m2_s: snow_melt_rate,
+        latent_heat_flux_w_m2: latent_heat_flux,
+        phase_flag,
+    })
+}
+
 fn supercool_limit(input: PhaseChangeInput<'_>, temperature: &[f64]) -> Result<Vec<f64>> {
     let soil_layers = input.soil_layer_thickness_m.len();
     let mut limit = vec![0.0; soil_layers];
@@ -420,6 +596,46 @@ fn validate(input: PhaseChangeInput<'_>) -> Result<usize> {
             && input.snow_depth_m.is_finite()
             && input.snow_depth_m >= 0.0,
         "phase-change scalar inputs are invalid"
+    );
+    Ok(layers)
+}
+
+fn validate_urban(input: UrbanPhaseChangeInput<'_>) -> Result<usize> {
+    let layers = input.temperature_k.len();
+    ensure!(
+        layers == input.snow_layers + 1,
+        "urban phase change needs explicit snow layers plus one substrate layer"
+    );
+    for values in [
+        input.fact_seconds_per_j_m2_k,
+        input.residual_heat_flux_w_m2,
+        input.previous_temperature_k,
+        input.liquid_water_kg_m2,
+        input.ice_water_kg_m2,
+    ] {
+        ensure!(
+            values.len() == layers && values.iter().all(|value| value.is_finite()),
+            "urban phase-change layer vectors must be finite and have matching lengths"
+        );
+    }
+    ensure!(
+        input.time_step_seconds.is_finite()
+            && input.time_step_seconds > 0.0
+            && input
+                .fact_seconds_per_j_m2_k
+                .iter()
+                .all(|value| *value > 0.0)
+            && input.liquid_water_kg_m2.iter().all(|value| *value >= 0.0)
+            && input.ice_water_kg_m2.iter().all(|value| *value >= 0.0)
+            && input.surface_heat_flux_w_m2.is_finite()
+            && input
+                .surface_heat_flux_temperature_derivative_w_m2_k
+                .is_finite()
+            && input.snow_water_equivalent_kg_m2.is_finite()
+            && input.snow_water_equivalent_kg_m2 >= 0.0
+            && input.snow_depth_m.is_finite()
+            && input.snow_depth_m >= 0.0,
+        "urban phase-change inputs are invalid"
     );
     Ok(layers)
 }
