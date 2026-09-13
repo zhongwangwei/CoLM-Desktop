@@ -62,6 +62,17 @@ fn rust_pft_bgc_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
 }
 
 #[test]
+#[ignore = "requires local BGC kernel, CoLMruntime, generated CN-Cng case, and PLUMBER2 forcing"]
+fn rust_pc_bgc_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
+    rust_preprocess_runs_in_fortran_runtime(
+        "pc-bgc",
+        None,
+        "bgc",
+        "DEF_USE_LCT = .false.\nDEF_USE_PC = .true.\nDEF_USE_BGC = .true.\nDEF_USE_CN_INIT = .true.",
+    );
+}
+
+#[test]
 #[ignore = "requires the local urban kernel, AU-Preston input data, and CoLMruntime"]
 fn rust_urban_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
