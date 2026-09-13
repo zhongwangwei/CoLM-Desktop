@@ -855,7 +855,7 @@ fn median_excluding(values: &mut Vec<f64>, marker: f64) -> Result<f64> {
     }
 }
 
-fn most_frequent(values: &mut [i32]) -> Result<i32> {
+pub(crate) fn most_frequent(values: &mut [i32]) -> Result<i32> {
     if values.is_empty() {
         bail!("cannot select a most frequent value from zero values");
     }

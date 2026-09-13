@@ -62,4 +62,8 @@ pub use surface::{
 };
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh};
-pub use urban::{UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS};
+pub use urban::{
+    aggregate_lcz_urban_geometry, aggregate_urban_region_ids, aggregate_urban_tree_index,
+    LczUrbanRawFields, UrbanGeometry, UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES,
+    URBAN_SOLAR_BANDS,
+};
