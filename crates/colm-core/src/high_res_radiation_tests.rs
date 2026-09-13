@@ -76,6 +76,31 @@ fn spectral_band_reduction_normalizes_visible_and_near_infrared_independently() 
 }
 
 #[test]
+fn leafless_high_resolution_cold_start_reduces_ground_absorption_once() {
+    let ground = (0..HIGH_RES_WAVELENGTHS)
+        .flat_map(|_| [0.2, 0.3])
+        .collect::<Vec<_>>();
+    let fractions = HighResolutionRadiationFractions {
+        direct: vec![1.0; HIGH_RES_WAVELENGTHS],
+        diffuse: vec![1.0; HIGH_RES_WAVELENGTHS],
+    };
+
+    let state = high_resolution_pft_cold_start_state(None, &ground, &fractions).unwrap();
+
+    for band in 0..2 {
+        assert!((state.albedo[band][0] - 0.2).abs() < 1.0e-12);
+        assert!((state.albedo[band][1] - 0.3).abs() < 1.0e-12);
+    }
+    assert_eq!(state.sunlit_absorption, [[0.0; 2]; 2]);
+    assert_eq!(state.shaded_absorption, [[0.0; 2]; 2]);
+    for band in 0..2 {
+        assert!((state.soil_absorption[band][0] - 0.8).abs() < 1.0e-12);
+        assert!((state.soil_absorption[band][1] - 0.7).abs() < 1.0e-12);
+    }
+    assert_eq!(state.snow_absorption, [[0.0; 2]; 2]);
+}
+
+#[test]
 fn uniform_spectrum_reduces_to_the_shared_pft_two_stream_solution() {
     let optics = LeafOptics {
         chil: 0.01,

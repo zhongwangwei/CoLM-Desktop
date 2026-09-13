@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     bsm_soil_moisture, cold_start_ground_albedo, derive_spatial_soil_parameters,
-    expand_broadband_ground_albedo, expand_broadband_leaf_optics, pft_high_resolution_radiation,
-    select_high_resolution_radiation, weighted_high_resolution_bands, CalendarTime,
-    HighResolutionLeafOptics, HighResolutionPftRadiation, HighResolutionRadiationFractions,
-    SoilField, SoilReflectance, HIGH_RES_WAVELENGTHS,
+    expand_broadband_ground_albedo, expand_broadband_leaf_optics,
+    high_resolution_pft_cold_start_state, pft_high_resolution_radiation,
+    select_high_resolution_radiation, CalendarTime, HighResolutionLeafOptics, SoilField,
+    SoilReflectance, HIGH_RES_WAVELENGTHS,
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
@@ -686,7 +686,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                         )
                     })
                     .transpose()?;
-                state = high_resolution_cold_state(
+                state = high_resolution_pft_cold_start_state(
                     radiation.as_ref(),
                     &high_resolution_ground[patch],
                     &high_resolution_fractions[patch],
@@ -1477,92 +1477,6 @@ fn copy_high_resolution_pft_radiation(
         }
     }
     Ok(())
-}
-
-fn high_resolution_cold_state(
-    radiation: Option<&HighResolutionPftRadiation>,
-    ground: &[f64],
-    fractions: &HighResolutionRadiationFractions,
-) -> Result<ColdStartRadiation> {
-    ensure!(
-        ground.len() == HIGH_RES_WAVELENGTHS * 2,
-        "high-resolution ground albedo must contain 211 wavelengths and two radiation types"
-    );
-    let albedo = match radiation {
-        Some(radiation) => weighted_two_stream(&radiation.albedo, fractions)?,
-        None => weighted_two_stream(ground, fractions)?,
-    };
-    let sunlit_absorption = match radiation {
-        Some(radiation) => weighted_two_stream(&radiation.sunlit_absorption, fractions)?,
-        None => [[0.0; 2]; 2],
-    };
-    let shaded_absorption = match radiation {
-        Some(radiation) => weighted_two_stream(&radiation.shaded_absorption, fractions)?,
-        None => [[0.0; 2]; 2],
-    };
-    let transmission = radiation.map_or_else(
-        || {
-            (0..HIGH_RES_WAVELENGTHS)
-                .flat_map(|_| [0.0, 1.0, 1.0])
-                .collect::<Vec<_>>()
-        },
-        |radiation| radiation.transmission.clone(),
-    );
-    let soil_direct = (0..HIGH_RES_WAVELENGTHS)
-        .map(|wavelength| {
-            transmission[wavelength * 3] * (1.0 - ground[wavelength * 2 + 1])
-                + transmission[wavelength * 3 + 2] * (1.0 - ground[wavelength * 2])
-        })
-        .collect::<Vec<_>>();
-    let soil_diffuse = (0..HIGH_RES_WAVELENGTHS)
-        .map(|wavelength| transmission[wavelength * 3 + 1] * (1.0 - ground[wavelength * 2 + 1]))
-        .collect::<Vec<_>>();
-    let soil_direct = weighted_high_resolution_bands(&soil_direct, &fractions.direct)?;
-    let soil_diffuse = weighted_high_resolution_bands(&soil_diffuse, &fractions.diffuse)?;
-    let soil_absorption = [
-        [soil_direct[0], soil_diffuse[0]],
-        [soil_direct[1], soil_diffuse[1]],
-    ];
-    let (snow_age, thermal_gap_fraction, direct_extinction, diffuse_extinction) = radiation
-        .map(|radiation| {
-            (
-                0.0,
-                radiation.thermal_gap_fraction,
-                radiation.direct_extinction,
-                radiation.diffuse_extinction,
-            )
-        })
-        .unwrap_or((0.0, 1.0, 1.0, 0.718));
-    Ok(ColdStartRadiation {
-        albedo,
-        sunlit_absorption,
-        shaded_absorption,
-        soil_absorption,
-        snow_absorption: [[0.0; 2]; 2],
-        snow_age,
-        thermal_gap_fraction,
-        direct_extinction,
-        diffuse_extinction,
-    })
-}
-
-fn weighted_two_stream(
-    values: &[f64],
-    fractions: &HighResolutionRadiationFractions,
-) -> Result<[[f64; 2]; 2]> {
-    ensure!(
-        values.len() == HIGH_RES_WAVELENGTHS * 2,
-        "high-resolution two-stream values must contain 211 wavelengths and two radiation types"
-    );
-    let direct = (0..HIGH_RES_WAVELENGTHS)
-        .map(|wavelength| values[wavelength * 2])
-        .collect::<Vec<_>>();
-    let diffuse = (0..HIGH_RES_WAVELENGTHS)
-        .map(|wavelength| values[wavelength * 2 + 1])
-        .collect::<Vec<_>>();
-    let direct = weighted_high_resolution_bands(&direct, &fractions.direct)?;
-    let diffuse = weighted_high_resolution_bands(&diffuse, &fractions.diffuse)?;
-    Ok([[direct[0], diffuse[0]], [direct[1], diffuse[1]]])
 }
 
 fn update_common_pft_optics(

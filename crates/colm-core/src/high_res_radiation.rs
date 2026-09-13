@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::LeafOptics;
+use crate::{ColdStartRadiation, HighResolutionRadiationFractions, LeafOptics};
 
 /// Number of CoLM hyperspectral wavelengths (400 through 2500 nm, 10 nm apart).
 pub const HIGH_RES_WAVELENGTHS: usize = 211;
@@ -172,6 +172,101 @@ pub fn weighted_high_resolution_bands(values: &[f64], weights: &[f64]) -> Result
             / weight_sum)
     };
     Ok([weighted(0..29)?, weighted(29..HIGH_RES_WAVELENGTHS)?])
+}
+
+/// Reduces one PFT's no-snow high-resolution cold-start state to CoLM's two
+/// restart bands.
+///
+/// This is the shared PFT portion of `albland_HiRes`: callers provide an
+/// active [`HighResolutionPftRadiation`] or `None` for a leafless PFT, its
+/// already-selected ground spectrum, and the location-dependent solar
+/// fractions.  Keeping this reduction in `colm-core` lets initialization and
+/// runtime use the same energy partition rather than rebuilding it around
+/// their own NetCDF output.
+pub fn high_resolution_pft_cold_start_state(
+    radiation: Option<&HighResolutionPftRadiation>,
+    ground: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+) -> Result<ColdStartRadiation> {
+    ensure!(
+        ground.len() == HIGH_RES_WAVELENGTHS * RADIATION_TYPES,
+        "high-resolution ground albedo must contain 211 wavelengths and two radiation types"
+    );
+    let albedo = match radiation {
+        Some(radiation) => weighted_two_stream(&radiation.albedo, fractions)?,
+        None => weighted_two_stream(ground, fractions)?,
+    };
+    let sunlit_absorption = match radiation {
+        Some(radiation) => weighted_two_stream(&radiation.sunlit_absorption, fractions)?,
+        None => [[0.0; RADIATION_TYPES]; 2],
+    };
+    let shaded_absorption = match radiation {
+        Some(radiation) => weighted_two_stream(&radiation.shaded_absorption, fractions)?,
+        None => [[0.0; RADIATION_TYPES]; 2],
+    };
+    let transmission = radiation.map_or_else(
+        || {
+            (0..HIGH_RES_WAVELENGTHS)
+                .flat_map(|_| [0.0, 1.0, 1.0])
+                .collect::<Vec<_>>()
+        },
+        |radiation| radiation.transmission.clone(),
+    );
+    let soil_direct = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| {
+            transmission[wavelength * 3] * (1.0 - ground[wavelength * RADIATION_TYPES + 1])
+                + transmission[wavelength * 3 + 2] * (1.0 - ground[wavelength * RADIATION_TYPES])
+        })
+        .collect::<Vec<_>>();
+    let soil_diffuse = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| {
+            transmission[wavelength * 3 + 1] * (1.0 - ground[wavelength * RADIATION_TYPES + 1])
+        })
+        .collect::<Vec<_>>();
+    let soil_direct = weighted_high_resolution_bands(&soil_direct, &fractions.direct)?;
+    let soil_diffuse = weighted_high_resolution_bands(&soil_diffuse, &fractions.diffuse)?;
+    let (thermal_gap_fraction, direct_extinction, diffuse_extinction) = radiation
+        .map(|radiation| {
+            (
+                radiation.thermal_gap_fraction,
+                radiation.direct_extinction,
+                radiation.diffuse_extinction,
+            )
+        })
+        .unwrap_or((1.0, 1.0, 0.718));
+    Ok(ColdStartRadiation {
+        albedo,
+        sunlit_absorption,
+        shaded_absorption,
+        soil_absorption: [
+            [soil_direct[0], soil_diffuse[0]],
+            [soil_direct[1], soil_diffuse[1]],
+        ],
+        snow_absorption: [[0.0; RADIATION_TYPES]; 2],
+        snow_age: 0.0,
+        thermal_gap_fraction,
+        direct_extinction,
+        diffuse_extinction,
+    })
+}
+
+fn weighted_two_stream(
+    values: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+) -> Result<[[f64; RADIATION_TYPES]; 2]> {
+    ensure!(
+        values.len() == HIGH_RES_WAVELENGTHS * RADIATION_TYPES,
+        "high-resolution two-stream values must contain 211 wavelengths and two radiation types"
+    );
+    let direct = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| values[wavelength * RADIATION_TYPES])
+        .collect::<Vec<_>>();
+    let diffuse = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| values[wavelength * RADIATION_TYPES + 1])
+        .collect::<Vec<_>>();
+    let direct = weighted_high_resolution_bands(&direct, &fractions.direct)?;
+    let diffuse = weighted_high_resolution_bands(&diffuse, &fractions.diffuse)?;
+    Ok([[direct[0], diffuse[0]], [direct[1], diffuse[1]]])
 }
 
 fn factorial(value: i32) -> f64 {
