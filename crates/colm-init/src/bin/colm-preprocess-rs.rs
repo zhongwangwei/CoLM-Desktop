@@ -47,7 +47,26 @@ fn main() -> Result<()> {
     println!("wrote {}", files.surface.display());
     println!("wrote {}", files.constants.common.constants.display());
     println!("wrote {}", files.constants.common.block.display());
+    if let Some(path) = files.constants.pft {
+        println!("wrote {}", path.display());
+    }
+    if let Some(files) = files.constants.bgc {
+        println!("wrote {}", files.constants.display());
+        println!("wrote {}", files.block.display());
+    }
+    if let Some(path) = files.constants.urban {
+        println!("wrote {}", path.display());
+    }
     println!("wrote {}", files.time.common.block.display());
+    if let Some(path) = files.time.pft {
+        println!("wrote {}", path.display());
+    }
+    if let Some(file) = files.time.bgc {
+        println!("wrote {}", file.block.display());
+    }
+    if let Some(path) = files.time.urban {
+        println!("wrote {}", path.display());
+    }
     println!("prepared {}", run.cold_start.static_run.case_name);
     Ok(())
 }
