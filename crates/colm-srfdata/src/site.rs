@@ -20,6 +20,7 @@ use crate::raster::{
     point_5x5_f64, point_5x5_pft_f64, point_5x5_pft_time_f64, point_5x5_time_f64, point_f64,
     point_f64_on, point_i32, point_time_f64,
 };
+use crate::spatial::read_coordinate_raster_pft_point_f64;
 use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
 use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
@@ -30,6 +31,7 @@ const GENERATED_URBAN_LAI_ATTRIBUTE: &str = "colm_desktop_generated_urban_lai";
 /// CoLM's fixed HYPERSPECTRAL wavelength count (400--2500 nm, 10 nm spacing).
 pub const HYPERSPECTRAL_WAVELENGTHS: usize = 211;
 const MODIS_PFT_CLASSES: usize = 16;
+const CROP_FUNCTIONAL_TYPES: usize = 64;
 
 fn netcdf_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -174,6 +176,7 @@ pub struct SinglePointSurfaceRun {
     pub lai_frequency: SinglePointLaiFrequency,
     pub use_site_lai: bool,
     pub use_site_pctpfts: bool,
+    pub use_site_pctcrop: bool,
     pub use_site_htop: bool,
     /// The native `DEF_LC_YEAR` used for PFT composition and canopy height.
     pub land_cover_year: i32,
@@ -203,6 +206,7 @@ struct SinglePointMaterializeOptions<'a> {
     lai_frequency: SinglePointLaiFrequency,
     use_site_lai: bool,
     use_site_pctpfts: bool,
+    use_site_pctcrop: bool,
     use_site_htop: bool,
     land_cover_year: i32,
     eight_day_lai_years: &'a [i32],
@@ -292,6 +296,7 @@ pub fn single_point_surface_run_from_namelist(
     };
     let use_site_lai = namelist_bool(&document, "USE_SITE_LAI", true)?;
     let use_site_pctpfts = namelist_bool(&document, "USE_SITE_pctpfts", true)?;
+    let use_site_pctcrop = namelist_bool(&document, "USE_SITE_pctcrop", true)?;
     let use_site_htop = namelist_bool(&document, "USE_SITE_htop", true)?;
     Ok(SinglePointSurfaceRun {
         source,
@@ -302,6 +307,7 @@ pub fn single_point_surface_run_from_namelist(
         lai_frequency,
         use_site_lai,
         use_site_pctpfts,
+        use_site_pctcrop,
         use_site_htop,
         land_cover_year,
         eight_day_lai_years,
@@ -334,6 +340,7 @@ pub fn materialize_single_point_surface_from_namelist(
             lai_frequency: run.lai_frequency,
             use_site_lai: run.use_site_lai,
             use_site_pctpfts: run.use_site_pctpfts,
+            use_site_pctcrop: run.use_site_pctcrop,
             use_site_htop: run.use_site_htop,
             land_cover_year: run.land_cover_year,
             eight_day_lai_years: &run.eight_day_lai_years,
@@ -1609,6 +1616,7 @@ pub fn materialize_single_point_surface(
             lai_frequency: SinglePointLaiFrequency::Monthly,
             use_site_lai: true,
             use_site_pctpfts: true,
+            use_site_pctcrop: true,
             use_site_htop: true,
             land_cover_year: 2005,
             eight_day_lai_years: &[],
@@ -1718,8 +1726,11 @@ fn materialize_single_point_surface_impl(
         matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && !options.use_site_lai;
     let requires_monthly_raw = lct_monthly && !options.use_site_lai;
     let requires_lct_height_raw = lct_mode && !options.use_site_htop;
-    let requires_pft_raw =
-        pft_mode && (!options.use_site_lai || !options.use_site_pctpfts || !options.use_site_htop);
+    let requires_pft_raw = pft_mode
+        && (!options.use_site_lai
+            || !options.use_site_pctpfts
+            || !options.use_site_pctcrop
+            || !options.use_site_htop);
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
@@ -1790,7 +1801,9 @@ fn materialize_single_point_surface_impl(
             &temporary,
             options.use_site_lai,
             options.use_site_pctpfts,
+            options.use_site_pctcrop,
             options.use_site_htop,
+            crop_enabled,
         )?
     {
         materialize_single_point_pft_fields(
@@ -2012,23 +2025,230 @@ fn single_point_pft_raw_needed(
     surface: &Path,
     use_site_lai: bool,
     use_site_pctpfts: bool,
+    use_site_pctcrop: bool,
     use_site_htop: bool,
+    crop_enabled: bool,
 ) -> Result<bool> {
     let file = netcdf::open(surface)
         .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
-    Ok([
-        "pfttyp",
-        "pctpfts",
-        "canopy_height_pfts",
-        "LAI_year",
-        "LAI_pfts_monthly",
-        "SAI_pfts_monthly",
-    ]
-    .iter()
-    .any(|name| file.variable(name).is_none())
+    let crop = crop_enabled && scalar_i32(&file, "IGBP_classification")? == 12;
+    let composition = if crop {
+        ["croptyp", "pctcrop"]
+    } else {
+        ["pfttyp", "pctpfts"]
+    };
+    Ok(composition
+        .iter()
+        .chain(
+            [
+                "canopy_height_pfts",
+                "LAI_year",
+                "LAI_pfts_monthly",
+                "SAI_pfts_monthly",
+            ]
+            .iter(),
+        )
+        .any(|name| file.variable(name).is_none())
         || !use_site_lai
-        || !use_site_pctpfts
+        || (!crop && !use_site_pctpfts)
+        || (crop && !use_site_pctcrop)
         || !use_site_htop)
+}
+
+fn materialize_single_point_crop_fields(
+    surface: &Path,
+    rawdata: &Path,
+    options: SinglePointMaterializeOptions<'_>,
+) -> Result<()> {
+    ensure!(
+        !options.monthly_lai_years.is_empty(),
+        "CROP monthly vegetation needs at least one resolved LAI year"
+    );
+    ensure!(
+        options.land_cover_year >= 0,
+        "DEF_LC_YEAR must not be negative"
+    );
+    let (longitude, latitude, missing_composition, missing_height, missing_lai) = {
+        let file = netcdf::open(surface)
+            .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        (
+            scalar_f64(&file, "longitude")?,
+            scalar_f64(&file, "latitude")?,
+            !options.use_site_pctcrop
+                || file.variable("croptyp").is_none()
+                || file.variable("pctcrop").is_none(),
+            !options.use_site_htop || file.variable("canopy_height_pfts").is_none(),
+            !options.use_site_lai
+                || file.variable("LAI_year").is_none()
+                || file.variable("LAI_pfts_monthly").is_none()
+                || file.variable("SAI_pfts_monthly").is_none(),
+        )
+    };
+    let crop_surface = rawdata.join("global_CFT_surface_data.nc");
+    let (crop_types, crop_fractions) = if missing_composition {
+        let raw = read_coordinate_raster_pft_point_f64(
+            &crop_surface,
+            "PCT_CFT",
+            CROP_FUNCTIONAL_TYPES,
+            longitude,
+            latitude,
+        )?;
+        ensure!(
+            raw.iter().all(|value| value.is_finite() && *value >= 0.0),
+            "PCT_CFT must contain finite non-negative fractions"
+        );
+        let total = raw.iter().sum::<f64>();
+        ensure!(total > 0.0, "PCT_CFT has no crop at this site");
+        let mut types = Vec::new();
+        let mut fractions = Vec::new();
+        for (index, fraction) in raw.into_iter().enumerate() {
+            if fraction > 0.0 {
+                types.push(index + 1);
+                fractions.push(fraction / total);
+            }
+        }
+        (types, fractions)
+    } else {
+        let file = netcdf::open(surface)
+            .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        let types = values_f64(&file, "croptyp")?
+            .into_iter()
+            .map(|value| {
+                let rounded = value.round();
+                ensure!(
+                    value.is_finite()
+                        && (value - rounded).abs() < 1e-9
+                        && (1.0..=64.0).contains(&rounded),
+                    "croptyp must contain CFT classes 1..64"
+                );
+                Ok(rounded as usize)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        (types, Vec::new())
+    };
+    ensure!(!crop_types.is_empty(), "croptyp must not be empty");
+
+    let plant = rawdata.join("plant_15s");
+    let canopy_height = missing_height.then(|| {
+        point_5x5_f64(
+            &plant,
+            &format!("MOD{:04}", options.land_cover_year),
+            "HTOP",
+            longitude,
+            latitude,
+        )
+        .with_context(|| "cannot read CROP canopy height")
+    });
+    let canopy_height = canopy_height.transpose()?;
+    if let Some(height) = canopy_height {
+        ensure!(
+            height.is_finite() && height >= 0.0,
+            "CROP canopy height must be finite and non-negative"
+        );
+    }
+    let (lai, sai) = if missing_lai {
+        let mut lai = Vec::with_capacity(options.monthly_lai_years.len() * 12 * crop_types.len());
+        let mut sai = Vec::with_capacity(options.monthly_lai_years.len() * 12 * crop_types.len());
+        for &year in options.monthly_lai_years {
+            let suffix = format!("MOD{year:04}");
+            let pft_fractions = (1..=MODIS_PFT_CLASSES)
+                .map(|pft| point_5x5_pft_f64(&plant, &suffix, "PCT_PFT", longitude, latitude, pft))
+                .collect::<Result<Vec<_>>>()?;
+            let total = pft_fractions.iter().sum::<f64>();
+            ensure!(
+                pft_fractions
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+                    && total > 0.0,
+                "CROP PCT_PFT must contain a positive finite fraction"
+            );
+            for month in 1..=12 {
+                let weighted = |name: &str| {
+                    (1..=MODIS_PFT_CLASSES)
+                        .map(|pft| {
+                            point_5x5_pft_time_f64(
+                                &plant, &suffix, name, longitude, latitude, pft, month,
+                            )
+                            .map(|value| value * pft_fractions[pft - 1])
+                        })
+                        .collect::<Result<Vec<_>>>()
+                        .map(|values| values.iter().sum::<f64>() / total)
+                };
+                let lai_value = weighted("MONTHLY_PFT_LAI")?;
+                let sai_value = weighted("MONTHLY_PFT_SAI")?;
+                ensure!(
+                    lai_value.is_finite()
+                        && sai_value.is_finite()
+                        && (0.0..=30.0).contains(&lai_value)
+                        && (0.0..=30.0).contains(&sai_value),
+                    "CROP monthly LAI/SAI rawdata values must be finite and within 0..30"
+                );
+                lai.extend(std::iter::repeat_n(lai_value, crop_types.len()));
+                sai.extend(std::iter::repeat_n(sai_value, crop_types.len()));
+            }
+        }
+        (Some(lai), Some(sai))
+    } else {
+        (None, None)
+    };
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::append(surface)
+        .with_context(|| format!("cannot append single-point surface {}", surface.display()))?;
+    ensure_dimension_with_len(&mut file, "pft", crop_types.len())?;
+    if missing_composition {
+        put_or_replace_values(
+            &mut file,
+            "croptyp",
+            &["pft"],
+            &crop_types
+                .iter()
+                .map(|class| *class as f64)
+                .collect::<Vec<_>>(),
+            "rawdata global_CFT_surface_data.nc PCT_CFT class index",
+        )?;
+        put_or_replace_values(
+            &mut file,
+            "pctcrop",
+            &["pft"],
+            &crop_fractions,
+            "rawdata global_CFT_surface_data.nc PCT_CFT normalized as MOD_SingleSrfdata.F90 does",
+        )?;
+    }
+    if let Some(height) = canopy_height {
+        put_or_replace_values(
+            &mut file,
+            "canopy_height_pfts",
+            &["pft"],
+            &vec![height; crop_types.len()],
+            "rawdata plant_15s HTOP as MOD_SingleSrfdata.F90 does",
+        )?;
+    }
+    if let (Some(lai), Some(sai)) = (lai, sai) {
+        ensure_lai_years(
+            &mut file,
+            options.monthly_lai_years,
+            "rawdata plant_15s selected by native mksrfdata",
+            "CROP monthly rawdata year window",
+        )?;
+        ensure_dimension_with_len(&mut file, "month", 12)?;
+        put_or_replace_values(
+            &mut file,
+            "LAI_pfts_monthly",
+            &["LAI_year", "month", "pft"],
+            &lai,
+            "rawdata plant_15s weighted MONTHLY_PFT_LAI",
+        )?;
+        put_or_replace_values(
+            &mut file,
+            "SAI_pfts_monthly",
+            &["LAI_year", "month", "pft"],
+            &sai,
+            "rawdata plant_15s weighted MONTHLY_PFT_SAI",
+        )?;
+    }
+    file.close()
+        .with_context(|| format!("cannot close single-point surface {}", surface.display()))
 }
 
 fn materialize_single_point_pft_fields(
@@ -2058,10 +2278,9 @@ fn materialize_single_point_pft_fields(
                 || file.variable("SAI_pfts_monthly").is_none(),
         )
     };
-    ensure!(
-        !cropland,
-        "CROP single-point rawdata fallback needs global_CFT_surface_data.nc and is not yet materialized by Rust"
-    );
+    if cropland {
+        return materialize_single_point_crop_fields(surface, rawdata, options);
+    }
     ensure!(
         options.land_cover_year >= 0,
         "DEF_LC_YEAR must not be negative"

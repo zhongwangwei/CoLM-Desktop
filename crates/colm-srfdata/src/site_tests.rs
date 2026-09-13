@@ -1825,6 +1825,7 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             lai_frequency: super::SinglePointLaiFrequency::Monthly,
             use_site_lai: false,
             use_site_pctpfts: true,
+            use_site_pctcrop: true,
             use_site_htop: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -1910,6 +1911,7 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             lai_frequency: super::SinglePointLaiFrequency::Monthly,
             use_site_lai: true,
             use_site_pctpfts: true,
+            use_site_pctcrop: true,
             use_site_htop: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -1943,6 +1945,7 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             lai_frequency: super::SinglePointLaiFrequency::Monthly,
             use_site_lai: false,
             use_site_pctpfts: false,
+            use_site_pctcrop: true,
             use_site_htop: false,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -1981,6 +1984,141 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
         (lai[0], lai[191], sai[0], sai[191]),
         (1.0, 12.15, 2.0, 13.15)
     );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-crop-raw-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let rawdata = directory.join("rawdata");
+    let plant = rawdata.join("plant_15s");
+    std::fs::create_dir_all(&plant).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(12)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(rawdata.join("global_CFT_surface_data.nc")).unwrap();
+        file.add_dimension("cft", 64).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[90.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[-180.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("PCT_CFT", &["cft", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &(0..64)
+                    .map(|cft| {
+                        if cft == 0 {
+                            0.25
+                        } else if cft == 1 {
+                            0.75
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                ..,
+            )
+            .unwrap();
+        file.close().unwrap();
+    }
+    let (tile, _, _) = crate::raster::tile_5x5_path(&plant, "MOD2008", -180.0, 90.0).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(tile).unwrap();
+        file.add_dimension("time", 12).unwrap();
+        file.add_dimension("pft", 16).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &(0..16)
+                    .map(|pft| {
+                        if pft == 0 {
+                            30.0
+                        } else if pft == 1 {
+                            70.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                ..,
+            )
+            .unwrap();
+        file.add_variable::<f64>("HTOP", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[18.0], ..)
+            .unwrap();
+        for (name, values) in [
+            ("MONTHLY_PFT_LAI", [1.0, 3.0]),
+            ("MONTHLY_PFT_SAI", [2.0, 4.0]),
+        ] {
+            file.add_variable::<f64>(name, &["time", "pft", "lat", "lon"])
+                .unwrap()
+                .put_values(
+                    &(0..12)
+                        .flat_map(|_| {
+                            (0..16).map(move |pft| if pft < 2 { values[pft] } else { 0.0 })
+                        })
+                        .collect::<Vec<_>>(),
+                    ..,
+                )
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    super::materialize_single_point_pft_fields(
+        &surface,
+        &rawdata,
+        super::SinglePointMaterializeOptions {
+            urban: super::UrbanSurfaceOptions::default(),
+            lai_frequency: super::SinglePointLaiFrequency::Monthly,
+            use_site_lai: true,
+            use_site_pctpfts: true,
+            use_site_pctcrop: true,
+            use_site_htop: true,
+            land_cover_year: 2008,
+            eight_day_lai_years: &[],
+            monthly_lai_years: &[2008],
+        },
+        true,
+    )
+    .unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(
+        file.variable("croptyp")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 2.0]
+    );
+    assert_eq!(
+        file.variable("pctcrop")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [0.25, 0.75]
+    );
+    let lai = file
+        .variable("LAI_pfts_monthly")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    let sai = file
+        .variable("SAI_pfts_monthly")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!((lai[0], lai[1], sai[0], sai[1]), (2.4, 2.4, 3.4, 3.4));
     std::fs::remove_dir_all(directory).unwrap();
 }
 

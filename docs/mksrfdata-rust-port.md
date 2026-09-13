@@ -42,7 +42,9 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    likewise reads `plant_15s/MODYYYY`'s `MONTHLY_LC_LAI` and `MONTHLY_LC_SAI` when
    either site data is absent or `USE_SITE_LAI=.false.`. Natural PFT/PC sites missing
    their composition, height, or monthly vegetation similarly sample `PCT_PFT`, `HTOP`,
-   `MONTHLY_PFT_LAI`, and `MONTHLY_PFT_SAI` from the same tiles. PFT/PC and LULCC retain the upstream monthly coercion. IGBP LULCC
+   `MONTHLY_PFT_LAI`, and `MONTHLY_PFT_SAI` from the same tiles. CROP sites also
+   sample `global_CFT_surface_data.nc/PCT_CFT` and use the native PFT-fraction-weighted
+   monthly vegetation for every active CFT. PFT/PC and LULCC retain the upstream monthly coercion. IGBP LULCC
    cases also write the class-major previous-year transfer vectors required by the runtime;
    pre-2000 non-five-year source requests remain refused because upstream emits only monthly
    LAI for that special path. Desktop packaging now ships `mksrfdata-rs` beside `colm-cli`;

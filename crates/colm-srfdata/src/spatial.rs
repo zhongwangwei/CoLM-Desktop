@@ -725,6 +725,42 @@ pub fn read_mesh_coordinate_raster_pft_f64(
     Ok(output)
 }
 
+/// Read all class values at one nearest coordinate-addressed raster cell.
+///
+/// This is the single-point counterpart of
+/// [`read_mesh_coordinate_raster_pft_f64`], used for CoLM's global CFT
+/// composition source whose coordinate axes are part of the NetCDF file.
+pub fn read_coordinate_raster_pft_point_f64(
+    raster: &Path,
+    variable: &str,
+    class_count: usize,
+    longitude: f64,
+    latitude: f64,
+) -> Result<Vec<f64>> {
+    ensure!(
+        class_count > 0,
+        "coordinate PFT raster needs at least one class"
+    );
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = coordinate_pft_axes(&source, class_count, raster)?;
+    let dimensions = source.dimensions();
+    let latitudes = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
+    let longitudes = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let y = nearest_coordinate(&latitudes, latitude, false)?;
+    let x = nearest_coordinate(&longitudes, longitude, true)?;
+    (0..class_count)
+        .map(|class| {
+            read_coordinate_pft_row(&source, axes, class, y)?
+                .get(x)
+                .copied()
+                .context("coordinate PFT longitude is outside its source row")
+        })
+        .collect()
+}
+
 /// Read a coordinate-addressed scalar raster in flattened mesh-pixel order.
 ///
 /// This is the `grid_define_from_file(..., 'lat', 'lon')` path used by the
