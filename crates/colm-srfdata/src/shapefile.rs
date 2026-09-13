@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bounds {
+    /// Dateline-spanning domains use the complete longitude span.
     pub west: f64,
     pub east: f64,
     pub south: f64,
@@ -52,6 +53,7 @@ impl PolygonDomain {
             south: f64::INFINITY,
             north: f64::NEG_INFINITY,
         };
+        let mut crosses_dateline = false;
         while offset < declared_len {
             let header_end = offset.checked_add(8).context("record header overflow")?;
             if header_end > declared_len {
@@ -66,7 +68,17 @@ impl PolygonDomain {
             if end > declared_len {
                 bail!("truncated shapefile record");
             }
-            if let Some(rings) = read_polygon_record(&bytes[header_end..end], &mut bounds)? {
+            if let Some(rings) = read_polygon_record(&bytes[header_end..end])? {
+                for ring in &rings {
+                    for point in ring {
+                        bounds.west = bounds.west.min(point.x);
+                        bounds.east = bounds.east.max(point.x);
+                        bounds.south = bounds.south.min(point.y);
+                        bounds.north = bounds.north.max(point.y);
+                    }
+                }
+                let (rings, crosses) = unwrap_dateline_rings(rings);
+                crosses_dateline |= crosses;
                 records.push(rings);
             }
             offset = end;
@@ -74,8 +86,9 @@ impl PolygonDomain {
         if records.is_empty() {
             bail!("shapefile contains no polygon records");
         }
-        if bounds.east - bounds.west > 180.0 {
-            bail!("dateline-crossing shapefiles are not supported yet");
+        if crosses_dateline {
+            bounds.west = -180.0;
+            bounds.east = 180.0;
         }
         Ok(Self { records, bounds })
     }
@@ -87,10 +100,13 @@ impl PolygonDomain {
     /// ESRI 同一 record 内多 ring 用奇偶规则表达 shell/hole；
     /// 多 record 取 union。点在任一 ring 边界上时视为域内。
     pub fn contains(&self, lon: f64, lat: f64) -> bool {
-        let point = Point { x: lon, y: lat };
         self.records.iter().any(|rings| {
             let mut inside = false;
             for ring in rings {
+                let point = Point {
+                    x: align_longitude(lon, ring[0].x),
+                    y: lat,
+                };
                 match relation(point, ring) {
                     Relation::Boundary => return true,
                     Relation::Inside => inside = !inside,
@@ -124,7 +140,7 @@ fn validate_wgs84_prj(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_polygon_record(content: &[u8], bounds: &mut Bounds) -> Result<Option<Vec<Vec<Point>>>> {
+fn read_polygon_record(content: &[u8]) -> Result<Option<Vec<Vec<Point>>>> {
     if content.len() < 4 {
         bail!("truncated shapefile record");
     }
@@ -196,14 +212,37 @@ fn read_polygon_record(content: &[u8], bounds: &mut Bounds) -> Result<Option<Vec
             {
                 bail!("shapefile coordinate is outside WGS84 longitude/latitude bounds");
             }
-            bounds.west = bounds.west.min(point.x);
-            bounds.east = bounds.east.max(point.x);
-            bounds.south = bounds.south.min(point.y);
-            bounds.north = bounds.north.max(point.y);
         }
         rings.push(ring);
     }
     Ok(Some(rings))
+}
+
+fn unwrap_dateline_rings(rings: Vec<Vec<Point>>) -> (Vec<Vec<Point>>, bool) {
+    let mut crosses_dateline = false;
+    let rings = rings
+        .into_iter()
+        .map(|ring| {
+            crosses_dateline |= ring
+                .iter()
+                .zip(ring.iter().cycle().skip(1))
+                .take(ring.len())
+                .any(|(left, right)| (left.x - right.x).abs() > 180.0);
+            let mut unwrapped = Vec::with_capacity(ring.len());
+            for point in ring {
+                let x = unwrapped.last().map_or(point.x, |previous: &Point| {
+                    align_longitude(point.x, previous.x)
+                });
+                unwrapped.push(Point { x, y: point.y });
+            }
+            unwrapped
+        })
+        .collect();
+    (rings, crosses_dateline)
+}
+
+fn align_longitude(longitude: f64, reference: f64) -> f64 {
+    longitude + ((reference - longitude) / 360.0).round() * 360.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,12 +329,6 @@ mod tests {
     use super::*;
 
     fn fixture() -> std::path::PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("colm-watershed-{}-{nonce}.shp", std::process::id()));
         let outer = [
             (-2.0, -2.0),
             (-2.0, 2.0),
@@ -310,17 +343,61 @@ mod tests {
             (-1.0, 1.0),
             (-1.0, -1.0),
         ];
-        let points = outer.into_iter().chain(hole).collect::<Vec<_>>();
-        let mut content = vec![0; 44 + 2 * 4 + points.len() * 16];
+        fixture_with_rings(&[&outer, &hole])
+    }
+
+    fn dateline_fixture() -> std::path::PathBuf {
+        let outer = [
+            (179.0, -1.0),
+            (-179.0, -1.0),
+            (-179.0, 1.0),
+            (179.0, 1.0),
+            (179.0, -1.0),
+        ];
+        fixture_with_rings(&[&outer])
+    }
+
+    fn fixture_with_rings(rings: &[&[(f64, f64)]]) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("colm-watershed-{}-{nonce}.shp", std::process::id()));
+        let points = rings
+            .iter()
+            .flat_map(|ring| ring.iter().copied())
+            .collect::<Vec<_>>();
+        let west = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let east = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let south = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min);
+        let north = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut content = vec![0; 44 + rings.len() * 4 + points.len() * 16];
         put_le_u32(&mut content, 0, 5);
-        put_box(&mut content, 4, [-2.0, -2.0, 2.0, 2.0]);
-        put_le_u32(&mut content, 36, 2);
+        put_box(&mut content, 4, [west, south, east, north]);
+        put_le_u32(&mut content, 36, u32::try_from(rings.len()).unwrap());
         put_le_u32(&mut content, 40, u32::try_from(points.len()).unwrap());
-        put_le_u32(&mut content, 44, 0);
-        put_le_u32(&mut content, 48, u32::try_from(outer.len()).unwrap());
+        let mut start = 0;
+        for (index, ring) in rings.iter().enumerate() {
+            put_le_u32(&mut content, 44 + index * 4, u32::try_from(start).unwrap());
+            start += ring.len();
+        }
         for (index, (x, y)) in points.into_iter().enumerate() {
-            put_le_f64(&mut content, 52 + index * 16, x);
-            put_le_f64(&mut content, 60 + index * 16, y);
+            let point_offset = 44 + rings.len() * 4 + index * 16;
+            put_le_f64(&mut content, point_offset, x);
+            put_le_f64(&mut content, point_offset + 8, y);
         }
 
         let file_len = 100 + 8 + content.len();
@@ -329,7 +406,7 @@ mod tests {
         put_be_u32(&mut bytes, 24, u32::try_from(file_len / 2).unwrap());
         put_le_u32(&mut bytes, 28, 1000);
         put_le_u32(&mut bytes, 32, 5);
-        put_box(&mut bytes, 36, [-2.0, -2.0, 2.0, 2.0]);
+        put_box(&mut bytes, 36, [west, south, east, north]);
         put_be_u32(&mut bytes, 100, 1);
         put_be_u32(&mut bytes, 104, u32::try_from(content.len() / 2).unwrap());
         bytes[108..].copy_from_slice(&content);
@@ -367,6 +444,34 @@ mod tests {
         assert_eq!(mesh.window.nlon, 4);
         assert_eq!(mesh.window.nlat, 4);
         assert_eq!(mesh.summary().unwrap().active_cells, 12);
+    }
+
+    #[test]
+    fn dateline_polygon_keeps_its_cells_without_rejecting_the_domain() {
+        let domain = PolygonDomain::read(dateline_fixture()).unwrap();
+        assert_eq!(
+            domain.bounds(),
+            Bounds {
+                west: -180.0,
+                east: 180.0,
+                south: -1.0,
+                north: 1.0,
+            }
+        );
+        assert!(domain.contains(179.5, 0.0));
+        assert!(domain.contains(-179.5, 0.0));
+        assert!(!domain.contains(0.0, 0.0));
+
+        let mesh = crate::mesh::EqualLatLonMesh::from_polygon(
+            crate::Grid {
+                nlon: 360,
+                nlat: 180,
+            },
+            &domain,
+        )
+        .unwrap();
+        assert_eq!(mesh.window.nlon, 360);
+        assert_eq!(mesh.summary().unwrap().active_cells, 4);
     }
 
     fn put_be_u32(bytes: &mut [u8], offset: usize, value: u32) {
