@@ -158,6 +158,50 @@ fn time_restart_writes_hyperspectral_fields_in_fortran_patch_last_order() {
 }
 
 #[test]
+fn hyperspectral_fields_append_to_the_shared_common_restart() {
+    let root = temp_dir("hyperspectral-append");
+    let path = root.join("restart.nc");
+    write_time_restart_block(&path, input()).unwrap();
+    let albedo = (0..(211 * 2 * 2))
+        .map(|value| value as f64)
+        .collect::<Vec<_>>();
+    let optics = (0..(211 * 16 * 2))
+        .map(|value| value as f64 + 10_000.0)
+        .collect::<Vec<_>>();
+
+    append_time_hyperspectral_fields(
+        &path,
+        2,
+        TimeHyperspectralFields {
+            albedo: &albedo,
+            reflectance: &optics,
+            transmittance: &optics,
+        },
+    )
+    .unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    assert_eq!(file.dimension_len("wavelength"), Some(211));
+    assert_eq!(file.dimension_len("PFT"), Some(16));
+    assert_eq!(
+        file.variable("alb_hires")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        patch_last_3d(&albedo, 211, 2, 2)
+    );
+    assert_eq!(
+        file.variable("reflectance_out")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        patch_last_3d(&optics, 211, 16, 2)
+    );
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated upstream CN-Cng reference restart"]
 fn time_restart_schema_matches_the_upstream_fortran_reference() {
     let fixture = StandardFixture::new();

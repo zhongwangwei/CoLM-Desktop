@@ -441,6 +441,65 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
     Ok(())
 }
 
+/// Adds the HYPERSPECTRAL fields to an already-written common restart block.
+///
+/// Spatial PFT initialization first lets the shared LCT initializer own the
+/// soil, snow, lake, and clock state, then replaces only its canopy optics.
+/// Keeping this append path here preserves the common restart schema and its
+/// patch-last NetCDF ordering for both initialization and runtime callers.
+pub fn append_time_hyperspectral_fields(
+    path: impl AsRef<Path>,
+    radiation_types: usize,
+    hyperspectral: TimeHyperspectralFields<'_>,
+) -> Result<()> {
+    ensure!(
+        radiation_types > 0,
+        "hyperspectral radiation types must be positive"
+    );
+    let path = path.as_ref();
+    let mut file = netcdf::append(path)
+        .with_context(|| format!("cannot append hyperspectral fields to {}", path.display()))?;
+    let patches = file
+        .dimension_len("patch")
+        .context("common restart has no patch dimension")?;
+    ensure!(
+        patches > 0,
+        "common restart patch dimension must be positive"
+    );
+    ensure_dimension(&mut file, "wavelength", HYPERSPECTRAL_WAVELENGTHS)?;
+    ensure_dimension(&mut file, "PFT", HYPERSPECTRAL_PFT_CLASSES)?;
+    ensure_dimension(&mut file, "rtyp", radiation_types)?;
+    for name in ["alb_hires", "reflectance_out", "transmittance_out"] {
+        ensure!(
+            file.variable(name).is_none(),
+            "common restart already has {name}; refusing to replace restart state"
+        );
+    }
+    put_patch_last_3d(
+        &mut file,
+        "alb_hires",
+        ("wavelength", HYPERSPECTRAL_WAVELENGTHS),
+        ("rtyp", radiation_types),
+        patches,
+        hyperspectral.albedo,
+    )?;
+    for (name, values) in [
+        ("reflectance_out", hyperspectral.reflectance),
+        ("transmittance_out", hyperspectral.transmittance),
+    ] {
+        put_patch_last_3d(
+            &mut file,
+            name,
+            ("wavelength", HYPERSPECTRAL_WAVELENGTHS),
+            ("PFT", HYPERSPECTRAL_PFT_CLASSES),
+            patches,
+            values,
+        )?;
+    }
+    file.close()?;
+    Ok(())
+}
+
 fn patch_entries(fields: TimePatchFields<'_>) -> [(&str, &[f64]); 41] {
     [
         ("t_grnd", fields.ground_temperature_k),
@@ -819,6 +878,18 @@ fn define_dimensions(
 
 const HYPERSPECTRAL_WAVELENGTHS: usize = 211;
 const HYPERSPECTRAL_PFT_CLASSES: usize = 16;
+
+fn ensure_dimension(file: &mut netcdf::FileMut, name: &str, expected: usize) -> Result<()> {
+    if let Some(actual) = file.dimension_len(name) {
+        ensure!(
+            actual == expected,
+            "common restart dimension {name} has length {actual}; expected {expected}"
+        );
+    } else {
+        file.add_dimension(name, expected)?;
+    }
+    Ok(())
+}
 
 fn put_patch_values<const N: usize>(
     file: &mut netcdf::FileMut,
