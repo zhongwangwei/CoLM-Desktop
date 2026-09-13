@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    month_day_to_julian, CalendarTime, LaiUpdateSchedule, RestartFrequency, RuntimeClock,
-    RuntimeForcing, RuntimeStep,
+    month_day_to_julian, standard_lct_soil_step, CalendarTime, LaiUpdateSchedule, RestartFrequency,
+    RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSoilInput, StandardLctSoilOutput,
+    StandardLctSoilState,
 };
 use colm_forcing::{load_point_forcing, PointForcingSeries};
 use colm_namelist::{parse, Document, Value};
@@ -105,6 +106,51 @@ impl PointRuntime {
             completed += 1;
         }
         Ok(completed)
+    }
+
+    /// Runs one persistent Rust model state through the shared POINT loop.
+    ///
+    /// The next state is committed only after its callback succeeds, alongside
+    /// the clock commit in [`Self::run`].  This is the common boundary for
+    /// every Rust `CoLMDRIVER` branch: callers do not need to duplicate clock,
+    /// forcing, or failure-retry behavior around their own state updates.
+    pub fn run_with_state<S, F>(&mut self, state: &mut S, mut on_step: F) -> Result<usize>
+    where
+        S: Clone,
+        F: FnMut(PointRuntimeStep, &mut S) -> Result<()>,
+    {
+        self.run(|step| {
+            let mut next = state.clone();
+            on_step(step, &mut next)?;
+            *state = next;
+            Ok(())
+        })
+    }
+
+    /// Runs the already ported regular-soil LCT chain from the shared POINT loop.
+    ///
+    /// `template` supplies static land parameters; its forcing is overwritten
+    /// on each pass with the record owned by this runtime.  `state` is only
+    /// committed after the physics and output callback both succeed.  This is
+    /// intentionally the no-snow regular-soil branch that
+    /// [`colm_core::standard_lct_soil_step`] supports today; other CoLM patch
+    /// branches must add their own exact core drivers rather than approximating
+    /// them here.
+    pub fn run_standard_lct<F>(
+        &mut self,
+        template: StandardLctSoilInput<'_>,
+        state: &mut StandardLctSoilState,
+        mut on_step: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(PointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
+    {
+        self.run_with_state(state, |step, next| {
+            let mut input = template;
+            input.energy.forcing = step.forcing;
+            let output = standard_lct_soil_step(input, next)?;
+            on_step(step, &output)
+        })
     }
 
     fn prepared_next_step(&self) -> Result<Option<(RuntimeClock, PointRuntimeStep)>> {
@@ -397,6 +443,38 @@ mod tests {
         let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
         assert!(runtime.run(|_| bail!("physics failed")).is_err());
         assert_eq!(runtime.next_step().unwrap().unwrap().clock.index, 1);
+    }
+
+    #[test]
+    fn shared_state_and_clock_commit_together_after_a_successful_step() {
+        let root = directory("state-transaction");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case(&case, &forcing, &source_dir, "POINT");
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut state = 0_u8;
+
+        assert!(runtime
+            .run_with_state(&mut state, |_, next| {
+                *next += 1;
+                bail!("history write failed")
+            })
+            .is_err());
+        assert_eq!(state, 0);
+
+        assert_eq!(
+            runtime
+                .run_with_state(&mut state, |_, next| {
+                    *next += 1;
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(state, 1);
+        assert!(runtime.next_step().unwrap().is_none());
     }
 
     #[test]
