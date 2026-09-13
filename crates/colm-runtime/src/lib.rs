@@ -78,6 +78,33 @@ impl PointRuntime {
     /// The clock advances only after the forcing lookup succeeds, so a bad
     /// forcing boundary cannot silently skip a model step.
     pub fn next_step(&mut self) -> Result<Option<PointRuntimeStep>> {
+        let Some((next_clock, step)) = self.prepared_next_step()? else {
+            return Ok(None);
+        };
+        self.clock = next_clock;
+        Ok(Some(step))
+    }
+
+    /// Runs the shared POINT loop and commits each clock pass only after its
+    /// physics/history callback succeeds.
+    ///
+    /// LCT, PFT, PC, and urban dispatchers use this one loop rather than each
+    /// reproducing `CoLM.F90`'s forcing-to-driver progression.  If a callback
+    /// fails, the uncommitted clock remains at that same model step.
+    pub fn run<F>(&mut self, mut on_step: F) -> Result<usize>
+    where
+        F: FnMut(PointRuntimeStep) -> Result<()>,
+    {
+        let mut completed = 0;
+        while let Some((next_clock, step)) = self.prepared_next_step()? {
+            on_step(step)?;
+            self.clock = next_clock;
+            completed += 1;
+        }
+        Ok(completed)
+    }
+
+    fn prepared_next_step(&self) -> Result<Option<(RuntimeClock, PointRuntimeStep)>> {
         let mut next_clock = self.clock.clone();
         let Some(clock) = next_clock.next_step() else {
             return Ok(None);
@@ -88,8 +115,7 @@ impl PointRuntime {
             self.longitude_degrees,
             self.latitude_degrees,
         )?;
-        self.clock = next_clock;
-        Ok(Some(PointRuntimeStep { clock, forcing }))
+        Ok(Some((next_clock, PointRuntimeStep { clock, forcing })))
     }
 }
 
@@ -281,11 +307,33 @@ mod tests {
         let source_dir = format!("{}/", source.display());
         write_case(&case, &forcing, &source_dir, "POINT");
         let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
-        let step = runtime.next_step().unwrap().unwrap();
-        assert_eq!(step.clock.index, 1);
-        assert_eq!(step.clock.forcing_time.seconds, 0);
-        assert!(step.forcing.air_temperature_k.is_finite());
+        let mut steps = Vec::new();
+        assert_eq!(
+            runtime
+                .run(|step| {
+                    steps.push(step);
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(steps[0].clock.index, 1);
+        assert_eq!(steps[0].clock.forcing_time.seconds, 0);
+        assert!(steps[0].forcing.air_temperature_k.is_finite());
         assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    #[test]
+    fn shared_run_loop_does_not_commit_a_failed_physics_step() {
+        let root = directory("transaction");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case(&case, &forcing, &source_dir, "POINT");
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        assert!(runtime.run(|_| bail!("physics failed")).is_err());
+        assert_eq!(runtime.next_step().unwrap().unwrap().clock.index, 1);
     }
 
     #[test]
