@@ -20,15 +20,19 @@ use crate::{
     initialize_profile_soil, initialize_snow_layers, is_leap_year, leaf_optics_from_land_cover,
     month_lengths, normalize_soil_texture, orbital_calendar_day, orbital_cosine_zenith,
     read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
-    read_single_point_soil_profile, read_single_point_surface, read_single_point_water_table,
-    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
-    CalendarTime, ColdSoilState, ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput,
-    HydraulicModel, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftConstantRestartInput,
-    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
-    PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields, RestartTuning,
-    SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField, SoilHydraulicModel,
-    TimeLakeFields, TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile,
-    TimeRestartInput, MISSING,
+    read_single_point_soil_profile, read_single_point_surface, read_single_point_urban_data,
+    read_single_point_water_table, read_urban_lucy_raw_data, write_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    write_urban_constant_restart, write_urban_time_restart, CalendarTime, ColdSoilState,
+    ColdStartRadiation, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
+    LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftConstantRestartInput, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
+    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
+    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
+    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
+    UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanNamedField,
+    UrbanRadiationInput, UrbanState, UrbanThermalFields, UrbanTimeRestartDimensions,
+    UrbanTimeRestartInput, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -91,6 +95,7 @@ pub enum SinglePointSubgrid {
 pub struct SinglePointConstantRestartFiles {
     pub common: ConstantRestartFiles,
     pub pft: Option<PathBuf>,
+    pub urban: Option<PathBuf>,
 }
 
 /// Common and optional PFT time restart files written for a cold start.
@@ -98,14 +103,28 @@ pub struct SinglePointConstantRestartFiles {
 pub struct SinglePointTimeRestartFiles {
     pub common: TimeRestartFile,
     pub pft: Option<PathBuf>,
+    pub urban: Option<PathBuf>,
 }
 
-/// A namelist-resolved native cold start for the LCT, PFT, or non-CROP PC single-point path.
+/// Urban switches and runtime source resolved from the CoLM namelist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinglePointUrbanConfig {
+    pub geometry: UrbanConfig,
+    pub lucy_enabled: bool,
+    pub runtime_dir: Option<PathBuf>,
+}
+
+struct SinglePointUrbanStatic {
+    data: crate::SinglePointUrbanData,
+    state: UrbanState,
+    lucy: UrbanLucyState,
+}
+
+/// A namelist-resolved native cold start for an LCT, PFT, PC, or urban single point.
 ///
-/// BGC, urban, and CROP paths use additional restart families and are rejected
-/// during resolution until their native orchestration is complete. Soil, snow, and
-/// water-table state files are part of both supported restart families. LULCC uses
-/// the simulation start year for the initial restart, as in upstream `CoLMINI`.
+/// Soil, snow, and water-table state files are part of every supported restart
+/// family. LULCC uses the simulation start year for the initial restart, as in
+/// upstream `CoLMINI`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointColdStartRun {
     /// Source used to resolve PFT-specific expert parameter overrides at write time.
@@ -127,6 +146,7 @@ pub struct SinglePointColdStartRun {
     pub variably_saturated_flow: bool,
     pub snow_cover_exponent: f64,
     pub vegetation_snow: bool,
+    pub urban: Option<SinglePointUrbanConfig>,
 }
 
 impl SinglePointStaticRun {
@@ -168,8 +188,10 @@ pub fn single_point_static_run_from_namelist(
     };
     let case_dir = output.join(&case_name);
     let surface = case_dir.join("landdata/srfdata.nc");
+    let urban = optional_bool_or(&document, "DEF_URBAN_RUN", false)?;
     let land_cover = match land_cover_override {
         Some(land_cover) => land_cover,
+        None if urban => LandCoverScheme::Igbp,
         None => detect_land_cover(&surface)?,
     };
     let block_label = block_override
@@ -263,6 +285,7 @@ pub fn single_point_cold_start_run_from_namelist(
         )?,
         snow_cover_exponent: optional_f64_or(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         vegetation_snow: optional_bool_or(&document, "DEF_VEG_SNOW", true)?,
+        urban: single_point_urban_config(&document)?,
     })
 }
 
@@ -280,10 +303,170 @@ pub fn write_single_point_constant_restart(
     write_single_point_constant_restart_with_canopy(surface, restart_dir, config, None)
 }
 
+/// Writes CoLM's urban time-invariant restart from a completed single-point
+/// `srfdata.nc`.  Geometry and LUCY normalization are delegated to
+/// `colm-core`, so the future Rust runtime consumes the exact same state.
+pub fn write_single_point_urban_constant_restart(
+    surface: impl AsRef<Path>,
+    lucy_runtime: Option<&Path>,
+    restart_dir: impl AsRef<Path>,
+    config: SinglePointStaticConfig<'_>,
+    urban_config: UrbanConfig,
+    lucy_enabled: bool,
+) -> Result<PathBuf> {
+    let initialized = prepare_single_point_urban(
+        surface,
+        config.land_cover,
+        config.hydraulic_model,
+        lucy_runtime,
+        urban_config,
+        lucy_enabled,
+    )?;
+    write_urban_constant_restart_from_initialized(restart_dir, config, &initialized)
+}
+
+fn prepare_single_point_urban(
+    surface: impl AsRef<Path>,
+    land_cover: LandCoverScheme,
+    hydraulic_model: HydraulicModel,
+    lucy_runtime: Option<&Path>,
+    urban_config: UrbanConfig,
+    lucy_enabled: bool,
+) -> Result<SinglePointUrbanStatic> {
+    let data = read_single_point_urban_data(surface, land_cover, hydraulic_model)?;
+    let region_id = [data.lucy_region_id];
+    let population_density = [data.population_density];
+    let lucy = if lucy_enabled {
+        let path = lucy_runtime.context("DEF_URBAN_LUCY needs DEF_dir_runtime")?;
+        let raw = read_urban_lucy_raw_data(path.join("urban/LUCY_rawdata.nc"))?;
+        crate::derive_urban_lucy(
+            UrbanLucyInput {
+                region_id: &region_id,
+                population_density: &population_density,
+                region_count: raw.region_count,
+                vehicles_per_thousand: &raw.vehicles_per_thousand,
+                week_holiday: &raw.week_holiday,
+                weekend_traffic_profile: &raw.weekend_traffic_profile,
+                weekday_traffic_profile: &raw.weekday_traffic_profile,
+                human_metabolic_profile: &raw.human_metabolic_profile,
+                fixed_holiday: &raw.fixed_holiday,
+            },
+            true,
+        )?
+    } else {
+        crate::derive_urban_lucy(
+            UrbanLucyInput {
+                region_id: &region_id,
+                population_density: &population_density,
+                region_count: 0,
+                vehicles_per_thousand: &[],
+                week_holiday: &[],
+                weekend_traffic_profile: &[],
+                weekday_traffic_profile: &[],
+                human_metabolic_profile: &[],
+                fixed_holiday: &[],
+            },
+            false,
+        )?
+    };
+    let state = crate::derive_urban_geometry(
+        UrbanInput {
+            urban_to_patch: &[0],
+            roof_fraction: &[data.roof_fraction],
+            roof_height_m: &[data.roof_height_m],
+            building_height_to_width: &[data.building_height_to_width],
+            pervious_road_fraction: &[data.pervious_road_fraction],
+            water_percent: &[data.water_percent],
+            tree_percent: &[data.tree_percent],
+            tree_top_m: &[data.tree_top_m],
+            impervious_heat_capacity: &data.impervious_heat_capacity,
+            impervious_layers: 10,
+            roof_thickness_m: &[data.roof_thickness_m],
+            wall_thickness_m: &[data.wall_thickness_m],
+            room_max_k: &[data.room_max_k],
+            room_min_k: &[data.room_min_k],
+        },
+        urban_config,
+        10,
+        10,
+        1.0,
+        0.0,
+        1,
+    )?;
+    Ok(SinglePointUrbanStatic { data, state, lucy })
+}
+
+fn write_urban_constant_restart_from_initialized(
+    restart_dir: impl AsRef<Path>,
+    config: SinglePointStaticConfig<'_>,
+    initialized: &SinglePointUrbanStatic,
+) -> Result<PathBuf> {
+    let data = &initialized.data;
+    let roof_emissivity = [data.roof_emissivity];
+    let wall_emissivity = [data.wall_emissivity];
+    let impervious_emissivity = [data.impervious_emissivity];
+    let pervious_emissivity = [data.pervious_emissivity];
+    write_urban_constant_restart(
+        restart_dir,
+        config.case_name,
+        config.land_cover_year,
+        config.block_label,
+        UrbanConstantRestartInput {
+            state: &initialized.state,
+            lucy: &initialized.lucy,
+            thermal: UrbanThermalFields {
+                roof_albedo: &data.roof_albedo,
+                wall_albedo: &data.wall_albedo,
+                impervious_albedo: &data.impervious_albedo,
+                pervious_albedo: &data.pervious_albedo,
+                roof_emissivity: &roof_emissivity,
+                wall_emissivity: &wall_emissivity,
+                impervious_emissivity: &impervious_emissivity,
+                pervious_emissivity: &pervious_emissivity,
+                roof_heat_capacity: &data.roof_heat_capacity,
+                wall_heat_capacity: &data.wall_heat_capacity,
+                impervious_heat_capacity: &data.impervious_heat_capacity,
+                roof_thermal_conductivity: &data.roof_thermal_conductivity,
+                wall_thermal_conductivity: &data.wall_thermal_conductivity,
+                impervious_thermal_conductivity: &data.impervious_thermal_conductivity,
+            },
+        },
+    )
+}
+
 /// Writes all constant restart families selected by a resolved cold-start namelist.
 pub fn write_single_point_constant_restarts(
     run: &SinglePointColdStartRun,
 ) -> Result<SinglePointConstantRestartFiles> {
+    if let Some(urban) = &run.urban {
+        let initialized = prepare_single_point_urban(
+            &run.static_run.surface,
+            run.static_run.land_cover,
+            run.static_run.hydraulic_model,
+            urban.runtime_dir.as_deref(),
+            urban.geometry,
+            urban.lucy_enabled,
+        )?;
+        let common = write_single_point_constant_restart_from_surface(
+            &initialized.data.common,
+            &run.static_run.restart_dir,
+            run.static_run.static_config(),
+            Some((
+                initialized.state.tree_top_m[0],
+                initialized.state.tree_bottom_m[0],
+            )),
+        )?;
+        let urban = write_urban_constant_restart_from_initialized(
+            &run.static_run.restart_dir,
+            run.static_run.static_config(),
+            &initialized,
+        )?;
+        return Ok(SinglePointConstantRestartFiles {
+            common,
+            pft: None,
+            urban: Some(urban),
+        });
+    }
     if run.subgrid == SinglePointSubgrid::Lct {
         return Ok(SinglePointConstantRestartFiles {
             common: write_single_point_constant_restart(
@@ -292,6 +475,7 @@ pub fn write_single_point_constant_restarts(
                 run.static_run.static_config(),
             )?,
             pft: None,
+            urban: None,
         });
     }
 
@@ -332,6 +516,7 @@ pub fn write_single_point_constant_restarts(
     Ok(SinglePointConstantRestartFiles {
         common,
         pft: Some(pft_file),
+        urban: None,
     })
 }
 
@@ -342,6 +527,15 @@ fn write_single_point_constant_restart_with_canopy(
     canopy_override: Option<(f64, f64)>,
 ) -> Result<ConstantRestartFiles> {
     let surface = read_single_point_surface(surface, config.land_cover, config.hydraulic_model)?;
+    write_single_point_constant_restart_from_surface(&surface, restart_dir, config, canopy_override)
+}
+
+fn write_single_point_constant_restart_from_surface(
+    surface: &crate::SinglePointSurfaceData,
+    restart_dir: impl AsRef<Path>,
+    config: SinglePointStaticConfig<'_>,
+    canopy_override: Option<(f64, f64)>,
+) -> Result<ConstantRestartFiles> {
     let class = [surface.land_class];
     let kind = [patch_type(config.land_cover, surface.land_class)?];
     let lake = derive_lake_layers(
@@ -435,6 +629,9 @@ pub fn write_single_point_cold_time_restart(
 pub fn write_single_point_cold_time_restarts(
     run: &SinglePointColdStartRun,
 ) -> Result<SinglePointTimeRestartFiles> {
+    if let Some(urban) = &run.urban {
+        return write_single_point_urban_cold_time_restarts(run, urban);
+    }
     if matches!(
         run.subgrid,
         SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
@@ -594,7 +791,361 @@ pub fn write_single_point_cold_time_restarts(
         snow_cover.ground_snow_fraction,
         roughness,
     )?;
-    Ok(SinglePointTimeRestartFiles { common, pft: None })
+    Ok(SinglePointTimeRestartFiles {
+        common,
+        pft: None,
+        urban: None,
+    })
+}
+
+fn write_single_point_urban_cold_time_restarts(
+    run: &SinglePointColdStartRun,
+    urban: &SinglePointUrbanConfig,
+) -> Result<SinglePointTimeRestartFiles> {
+    let config = run.static_run.static_config();
+    let initialized = prepare_single_point_urban(
+        &run.static_run.surface,
+        config.land_cover,
+        config.hydraulic_model,
+        urban.runtime_dir.as_deref(),
+        urban.geometry,
+        urban.lucy_enabled,
+    )?;
+    let surface = &initialized.data.common;
+    let kind = patch_type(config.land_cover, surface.land_class)?;
+    ensure!(kind == 1, "urban cold starts require an urban land class");
+    let dimensions = TimeRestartDimensions::default();
+    let soil = derive_soil_parameters(
+        &surface.soil_layers,
+        &[kind],
+        dimensions.soil_layers,
+        config.hydraulic_model,
+    )?;
+    let lake = derive_lake_layers(&[surface.lake_depth_m], dimensions.lake_layers)?;
+    let (node_depth, thickness, interface_mm) = soil_grid(dimensions.soil_layers)?;
+    let interface_m = interface_mm[1..]
+        .iter()
+        .map(|depth| depth / 1000.0)
+        .collect::<Vec<_>>();
+    let porosity = soil.field(SoilField::Porosity).to_vec();
+    let residual_water = soil.field(SoilField::ThetaR).to_vec();
+    let psi0 = soil.field(SoilField::Psi0).to_vec();
+    let conductivity = soil.field(SoilField::HydraulicConductivity).to_vec();
+    let hydraulic_model = soil_hydraulic_models(&soil, config.hydraulic_model)?;
+    let month = month_from_julian(run.date.year, run.date.julian_day)?;
+    let cold_soil = initial_soil_state(
+        run,
+        surface,
+        kind,
+        &porosity,
+        &residual_water,
+        &psi0,
+        &conductivity,
+        &hydraulic_model,
+        &node_depth,
+        &thickness,
+        &interface_m,
+    )?;
+    let hydraulic = derive_initial_soil_hydraulics(
+        kind,
+        &cold_soil.temperature_k,
+        &cold_soil.liquid_water_kg_m2,
+        &interface_mm,
+        &porosity,
+        &residual_water,
+        &psi0,
+        &conductivity,
+        &hydraulic_model,
+    )?;
+    let vegetation_year = if run.lai_change_yearly {
+        run.date.year
+    } else {
+        run.static_run.land_cover_year
+    };
+    let (total_lai, total_sai) = initialized.data.monthly.for_year(
+        vegetation_year,
+        month,
+        run.use_site_lai,
+        run.lai_start_year,
+        run.lai_end_year,
+    )?;
+    let fveg = initialized.state.tree_fraction[0];
+    let roughness = initialized.state.tree_top_m[0] * 0.1;
+    let snow_depth_m = initial_snow_depth(run, surface, month)?;
+    let snow_water_equivalent_mm = snow_depth_m * 250.0;
+    let snow_cover = derive_snow_cover(
+        total_lai,
+        total_sai,
+        roughness,
+        config.tuning.zlnd,
+        snow_water_equivalent_mm,
+        snow_depth_m,
+        run.snow_cover_exponent,
+    )?;
+    let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
+    let sigf = if snow_depth_m > 0.0 {
+        snow_cover.snow_free_vegetation_fraction
+    } else {
+        fveg
+    };
+    // `UrbanIniTimeVar` gets snow-free SAI; `tree_sai` retains total SAI below.
+    let lai = total_lai;
+    let sai = total_sai * sigf;
+    let calendar_day = orbital_calendar_day(
+        CalendarTime {
+            year: run.date.year,
+            julian_day: run.date.julian_day,
+            seconds: run.date.seconds,
+        },
+        run.greenwich,
+        surface.longitude_degrees,
+    )?;
+    let cosine_zenith = orbital_cosine_zenith(
+        calendar_day,
+        surface.longitude_degrees.to_radians(),
+        surface.latitude_degrees.to_radians(),
+    );
+    let mut radiation = cold_start_broadband_radiation_with_snow(
+        kind,
+        surface.albedo,
+        cold_soil.liquid_water_kg_m2[0],
+        thickness[0],
+        leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
+        lai,
+        sai,
+        0.0,
+        cosine_zenith.max(0.001),
+        true,
+        config.land_cover == LandCoverScheme::Usgs,
+        run.vegetation_snow,
+        snow_depth_m,
+        snow_cover.ground_snow_fraction,
+        cold_soil.temperature_k[0],
+    )?;
+    let urban_radiation = crate::cold_start_urban_radiation(UrbanRadiationInput {
+        roof_fraction: initialized.state.roof_fraction[0],
+        pervious_ground_fraction: initialized.state.pervious_road_fraction[0],
+        water_fraction: initialized.state.water_fraction[0],
+        building_height_to_length: initialized.state.building_height_to_width[0],
+        roof_height_m: initialized.state.roof_height_m[0],
+        roof_albedo: urban_albedo_matrix(&initialized.data.roof_albedo, "ALB_ROOF")?,
+        wall_albedo: urban_albedo_matrix(&initialized.data.wall_albedo, "ALB_WALL")?,
+        impervious_albedo: urban_albedo_matrix(&initialized.data.impervious_albedo, "ALB_IMPROAD")?,
+        pervious_albedo: urban_albedo_matrix(&initialized.data.pervious_albedo, "ALB_PERROAD")?,
+        leaf_optics: leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
+        vegetation_fraction: fveg,
+        vegetation_center_height_m: initialized.state.roof_height_m[0]
+            .min((initialized.state.tree_top_m[0] + initialized.state.tree_bottom_m[0]) / 2.0),
+        lai,
+        sai,
+        wet_snow_fraction: 0.0,
+        vegetation_snow: run.vegetation_snow,
+        cosine_zenith: cosine_zenith.max(0.01),
+        previous_sunlit_wall_fraction: 0.5,
+        lake_temperature_k: 285.0,
+        roof_snow_fraction: 0.0,
+        impervious_snow_fraction: 0.0,
+        pervious_snow_fraction: 0.0,
+        lake_snow_fraction: 0.0,
+        roof_snow_water_mm: 0.0,
+        impervious_snow_water_mm: 0.0,
+        pervious_snow_water_mm: 0.0,
+        lake_snow_water_mm: 0.0,
+        roof_snow_age: 0.0,
+        impervious_snow_age: 0.0,
+        pervious_snow_age: 0.0,
+        lake_snow_age: 0.0,
+    })?;
+    radiation.albedo = urban_radiation.albedo;
+    radiation.sunlit_absorption = urban_radiation.sunlit_tree_absorption;
+    radiation.shaded_absorption = urban_radiation.shaded_tree_absorption;
+    radiation.diffuse_extinction = urban_radiation.diffuse_extinction;
+    // `MOD_Initialize` keeps the pervious and lake columns separately, then
+    // writes their area-weighted water back to the common patch restart.
+    let common_soil_liquid = cold_soil
+        .liquid_water_kg_m2
+        .iter()
+        .map(|water| {
+            water
+                * (1.0 - initialized.state.roof_fraction[0])
+                * initialized.state.pervious_road_fraction[0]
+        })
+        .collect::<Vec<_>>();
+    let common = write_cold_time_restart(
+        run,
+        kind,
+        surface,
+        &lake,
+        &cold_soil.temperature_k,
+        &common_soil_liquid,
+        &cold_soil.ice_water_kg_m2,
+        &hydraulic.matric_potential_mm,
+        &hydraulic.hydraulic_conductivity_mm_s,
+        cold_soil.water_table_depth_m,
+        cold_soil.aquifer_water_mm,
+        total_lai,
+        total_sai,
+        fveg,
+        1.0,
+        sigf,
+        lai,
+        sai,
+        cosine_zenith,
+        &radiation,
+        &snow,
+        snow_depth_m,
+        snow_water_equivalent_mm,
+        snow_cover.ground_snow_fraction,
+        roughness,
+    )?;
+    let urban_file = write_single_point_urban_time_restart(
+        run,
+        &urban_radiation,
+        total_lai,
+        total_sai,
+        &cold_soil.liquid_water_kg_m2,
+    )?;
+    Ok(SinglePointTimeRestartFiles {
+        common,
+        pft: None,
+        urban: Some(urban_file),
+    })
+}
+
+fn write_single_point_urban_time_restart(
+    run: &SinglePointColdStartRun,
+    radiation: &crate::UrbanRadiationState,
+    total_lai: f64,
+    total_sai: f64,
+    soil_liquid: &[f64],
+) -> Result<PathBuf> {
+    let scalar_values = [
+        // `fwsun` is intent(in) in `alburban`; the first step applies dfwsun.
+        ("fwsun", 0.5),
+        ("dfwsun", radiation.change_in_sunlit_wall_fraction),
+        ("lwsun", 0.0),
+        ("lwsha", 0.0),
+        ("lgimp", 0.0),
+        ("lgper", 0.0),
+        ("lveg", 0.0),
+        ("troof_inner", 283.0),
+        ("twsun_inner", 283.0),
+        ("twsha_inner", 283.0),
+        ("sag_roof", 0.0),
+        ("sag_gimp", 0.0),
+        ("sag_gper", 0.0),
+        ("sag_lake", 0.0),
+        ("scv_roof", 0.0),
+        ("scv_gimp", 0.0),
+        ("scv_gper", 0.0),
+        ("scv_lake", 0.0),
+        ("fsno_roof", 0.0),
+        ("fsno_gimp", 0.0),
+        ("fsno_gper", 0.0),
+        ("fsno_lake", 0.0),
+        ("snowdp_roof", 0.0),
+        ("snowdp_gimp", 0.0),
+        ("snowdp_gper", 0.0),
+        ("snowdp_lake", 0.0),
+        ("t_room", 283.0),
+        ("t_roof", 283.0),
+        ("t_wall", 283.0),
+        ("tafu", 0.0),
+        ("Fhac", 0.0),
+        ("Fwst", 0.0),
+        ("Fach", 0.0),
+        ("Fahe", 0.0),
+        ("Fhah", 0.0),
+        ("vehc", 0.0),
+        ("meta", 0.0),
+        ("tree_lai", total_lai),
+        ("tree_sai", total_sai),
+        ("urb_green", 1.0),
+    ];
+    let scalar_fields = scalar_values
+        .iter()
+        .map(|(name, value)| UrbanNamedField {
+            name,
+            values: std::slice::from_ref(value),
+        })
+        .collect::<Vec<_>>();
+    let radiative_values = [
+        ("sroof", flatten_urban_radiation(radiation.roof_absorption)),
+        (
+            "swsun",
+            flatten_urban_radiation(radiation.sunlit_wall_absorption),
+        ),
+        (
+            "swsha",
+            flatten_urban_radiation(radiation.shaded_wall_absorption),
+        ),
+        (
+            "sgimp",
+            flatten_urban_radiation(radiation.impervious_absorption),
+        ),
+        (
+            "sgper",
+            flatten_urban_radiation(radiation.pervious_absorption),
+        ),
+        ("slake", flatten_urban_radiation(radiation.lake_absorption)),
+    ];
+    let radiative_fields = radiative_values
+        .iter()
+        .map(|(name, values)| UrbanNamedField { name, values })
+        .collect::<Vec<_>>();
+    let snow = vec![0.0; 5];
+    let roof = vec![283.0; 15];
+    let soil_temperature = vec![283.0; 15];
+    let roof_water = vec![0.0; 15];
+    let mut soil_water = vec![0.0; 5];
+    soil_water.extend_from_slice(soil_liquid);
+    let layer_values = vec![
+        ("z_sno_roof", snow.clone()),
+        ("z_sno_gimp", snow.clone()),
+        ("z_sno_gper", snow.clone()),
+        ("z_sno_lake", snow.clone()),
+        ("dz_sno_roof", snow.clone()),
+        ("dz_sno_gimp", snow.clone()),
+        ("dz_sno_gper", snow.clone()),
+        ("dz_sno_lake", snow.clone()),
+        ("t_roofsno", roof.clone()),
+        ("t_wallsun", roof.clone()),
+        ("t_wallsha", roof.clone()),
+        ("t_gimpsno", soil_temperature.clone()),
+        ("t_gpersno", soil_temperature.clone()),
+        ("t_lakesno", soil_temperature),
+        ("wliq_roofsno", roof_water.clone()),
+        ("wliq_gimpsno", roof_water.clone()),
+        ("wliq_gpersno", soil_water.clone()),
+        ("wliq_lakesno", soil_water),
+        ("wice_roofsno", roof_water.clone()),
+        ("wice_gimpsno", roof_water.clone()),
+        ("wice_gpersno", roof_water.clone()),
+        ("wice_lakesno", roof_water),
+    ];
+    let layer_fields = layer_values
+        .iter()
+        .map(|(name, values)| UrbanNamedField { name, values })
+        .collect::<Vec<_>>();
+    write_urban_time_restart(
+        &run.static_run.restart_dir,
+        &run.static_run.case_name,
+        run.static_run.land_cover_year,
+        run.date,
+        &run.static_run.block_label,
+        UrbanTimeRestartInput {
+            dimensions: UrbanTimeRestartDimensions {
+                urban_count: 1,
+                snow_layers: 5,
+                soil_layers: 10,
+                roof_layers: 10,
+                wall_layers: 10,
+            },
+            scalar_fields: &scalar_fields,
+            radiative_fields: &radiative_fields,
+            layer_fields: &layer_fields,
+        },
+    )
 }
 
 fn write_single_point_pft_cold_time_restarts(
@@ -891,6 +1442,7 @@ fn write_single_point_pft_cold_time_restarts(
     Ok(SinglePointTimeRestartFiles {
         common,
         pft: Some(pft_time),
+        urban: None,
     })
 }
 
@@ -1439,16 +1991,41 @@ fn single_point_subgrid(document: &colm_namelist::Document) -> Result<SinglePoin
     }
 }
 
+fn single_point_urban_config(
+    document: &colm_namelist::Document,
+) -> Result<Option<SinglePointUrbanConfig>> {
+    if !optional_bool_or(document, "DEF_URBAN_RUN", false)? {
+        return Ok(None);
+    }
+    let lucy_enabled = optional_bool_or(document, "DEF_URBAN_LUCY", true)?;
+    let runtime_dir = lucy_enabled
+        .then(|| required_string(document, "DEF_dir_runtime").map(PathBuf::from))
+        .transpose()?;
+    Ok(Some(SinglePointUrbanConfig {
+        geometry: UrbanConfig {
+            water_enabled: optional_bool_or(document, "DEF_URBAN_WATER", true)?,
+            trees_enabled: optional_bool_or(document, "DEF_URBAN_TREE", true)?,
+            building_energy_model: optional_bool_or(document, "DEF_URBAN_BEM", true)?,
+        },
+        lucy_enabled,
+        runtime_dir,
+    }))
+}
+
 fn reject_unsupported_cold_start_features(
     document: &colm_namelist::Document,
     subgrid: SinglePointSubgrid,
 ) -> Result<()> {
-    for field in ["DEF_USE_BGC", "DEF_URBAN_RUN", "DEF_USE_IRRIGATION"] {
+    for field in ["DEF_USE_BGC", "DEF_USE_IRRIGATION"] {
         ensure!(
             !optional_bool_or(document, field, false)?,
             "native cold single-point restart does not yet support {field} = .true."
         );
     }
+    ensure!(
+        !optional_bool_or(document, "DEF_URBAN_RUN", false)? || subgrid == SinglePointSubgrid::Lct,
+        "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
+    );
     ensure!(
         subgrid == SinglePointSubgrid::Lct || !optional_bool_or(document, "DEF_USE_LCT", true)?,
         "DEF_USE_PFT/DEF_USE_PC requires DEF_USE_LCT = .false."
@@ -1555,6 +2132,18 @@ fn radiation_values(radiation: &ColdStartRadiation) -> RadiationValues {
         soil_absorption: flatten(radiation.soil_absorption),
         snow_absorption: flatten(radiation.snow_absorption),
     }
+}
+
+fn urban_albedo_matrix(values: &[f64], name: &str) -> Result<[[f64; 2]; 2]> {
+    ensure!(
+        values.len() == 4 && values.iter().all(|value| value.is_finite()),
+        "{name} must contain four finite band/direct-diffuse values"
+    );
+    Ok([[values[0], values[1]], [values[2], values[3]]])
+}
+
+fn flatten_urban_radiation(values: [[f64; 2]; 2]) -> Vec<f64> {
+    values.into_iter().flatten().collect()
 }
 
 fn canopy_top(land_cover: LandCoverScheme, class: i32, observed_top: f64) -> Result<f64> {

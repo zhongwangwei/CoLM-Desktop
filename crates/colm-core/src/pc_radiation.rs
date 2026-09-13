@@ -305,18 +305,21 @@ fn three_d_canopy(
             / (layer_cosz[layer] * shadow_direct[layer]);
         diffuse_depth[layer] = 0.75 * GEE * cover[0][layer] * layer_lsai[layer]
             / (layer_cosd[layer] * shadow_diffuse[layer]);
-        direct_unscattered_original[layer] = tee(direct_depth[layer]);
-        diffuse_unscattered_original[layer] = tee(diffuse_depth[layer]);
-        direct_unscattered[layer] = tee(direct_depth[layer] / GEE * layer_gdir[layer]);
-        diffuse_unscattered[layer] = tee(diffuse_depth[layer] / GEE * layer_gdif[layer]);
+        direct_unscattered_original[layer] = canopy_transmittance(direct_depth[layer]);
+        diffuse_unscattered_original[layer] = canopy_transmittance(diffuse_depth[layer]);
+        direct_unscattered[layer] =
+            canopy_transmittance(direct_depth[layer] / GEE * layer_gdir[layer]);
+        diffuse_unscattered[layer] =
+            canopy_transmittance(diffuse_depth[layer] / GEE * layer_gdif[layer]);
         direct_calibration[layer] =
             (1.0 - direct_unscattered[layer]) / (1.0 - direct_unscattered_original[layer]);
         diffuse_calibration[layer] =
             (1.0 - diffuse_unscattered[layer]) / (1.0 - diffuse_unscattered_original[layer]);
-        let forward =
-            0.5 * (1.0 - tee(2.0 * direct_depth[layer])) / (1.0 - tee(direct_depth[layer]));
-        let backward = 2.0 * (tee(direct_depth[layer]) - (-2.0 * direct_depth[layer]).exp())
-            / (1.0 - tee(direct_depth[layer]));
+        let forward = 0.5 * (1.0 - canopy_transmittance(2.0 * direct_depth[layer]))
+            / (1.0 - canopy_transmittance(direct_depth[layer]));
+        let backward = 2.0
+            * (canopy_transmittance(direct_depth[layer]) - (-2.0 * direct_depth[layer]).exp())
+            / (1.0 - canopy_transmittance(direct_depth[layer]));
         let average = 0.5 * (forward + backward);
         let difference = 0.5 * (forward - backward);
         sunlit_direct_weight[layer] = forward;
@@ -444,10 +447,10 @@ fn three_d_canopy(
                 / (cosz[index] * pft_shadow_direct[index]);
             pft_diffuse_depth[index] = 0.75 * GEE * fractions[index] * leaf_stem_area[index]
                 / (cosd[index] * pft_shadow_diffuse[index]);
-            pft_direct_original[index] = tee(pft_direct_depth[index]);
-            pft_diffuse_original[index] = tee(pft_diffuse_depth[index]);
-            pft_direct[index] = tee(pft_direct_depth[index] / GEE * gdir[index]);
-            pft_diffuse[index] = tee(pft_diffuse_depth[index] / GEE * gdif[index]);
+            pft_direct_original[index] = canopy_transmittance(pft_direct_depth[index]);
+            pft_diffuse_original[index] = canopy_transmittance(pft_diffuse_depth[index]);
+            pft_direct[index] = canopy_transmittance(pft_direct_depth[index] / GEE * gdir[index]);
+            pft_diffuse[index] = canopy_transmittance(pft_diffuse_depth[index] / GEE * gdif[index]);
             pft_direct_calibration[index] =
                 (1.0 - pft_direct[index]) / (1.0 - pft_direct_original[index]);
             pft_diffuse_calibration[index] =
@@ -703,12 +706,13 @@ fn canopy_radiation(
     transmittance: f64,
     reflectance: f64,
 ) -> CanopyRadiation {
-    let (total_direct, difference_direct, _) = phi(direct_depth, omega, transmittance, reflectance);
+    let (total_direct, difference_direct, _) =
+        canopy_scattering(direct_depth, omega, transmittance, reflectance);
     let (total_diffuse, difference_diffuse, _) =
-        phi(diffuse_depth, omega, transmittance, reflectance);
+        canopy_scattering(diffuse_depth, omega, transmittance, reflectance);
     let sphere_depth = 0.75 * 0.5 * leaf_stem_area;
     let (total_sphere, difference_sphere, absorption_probability) =
-        phi(sphere_depth, omega, transmittance, reflectance);
+        canopy_scattering(sphere_depth, omega, transmittance, reflectance);
     let forward_sphere = (0.5 * (total_sphere - 0.5 * difference_sphere)).clamp(0.0, 1.0);
     let forward_shape = 3.0
         * (1.0 - (1.0 - 3.0_f64.sqrt() * cover / (2.0 * std::f64::consts::PI)).sqrt())
@@ -717,8 +721,9 @@ fn canopy_radiation(
     let alpha = (1.0 - omega).sqrt() * (1.0 - omega + 2.0 * wb).sqrt();
     let direct_factor = (1.0 + 2.0 * alpha) / (1.0 + 2.0 * alpha * cosine_direct);
     let diffuse_factor = (1.0 + 2.0 * alpha) / (1.0 + 2.0 * alpha * cosine_diffuse);
-    let correction = total_sphere * forward_shape * (1.0 - tee(sphere_depth)) * (1.0 - omega)
-        / (1.0 - omega * absorption_probability);
+    let correction =
+        total_sphere * forward_shape * (1.0 - canopy_transmittance(sphere_depth)) * (1.0 - omega)
+            / (1.0 - omega * absorption_probability);
     let direct_lateral = (direct_factor - 1.0)
         * forward_sphere
         * cover
@@ -767,25 +772,32 @@ fn canopy_radiation(
     }
 }
 
-fn phi(depth: f64, omega: f64, transmittance: f64, reflectance: f64) -> (f64, f64, f64) {
+/// Shared spherical-canopy multiple-scattering approximation from
+/// `MOD_3DCanopyRadiation::phi` with its calibrated (`runmode=.true.`) branch.
+pub(crate) fn canopy_scattering(
+    depth: f64,
+    omega: f64,
+    transmittance: f64,
+    reflectance: f64,
+) -> (f64, f64, f64) {
     let forward_first =
         1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth + 2.0) * (-2.0 * depth).exp();
-    let backward_first = 0.5 * (1.0 - tee(2.0 * depth));
+    let backward_first = 0.5 * (1.0 - canopy_transmittance(2.0 * depth));
     let aa = 0.70;
     let bb = 1.74;
     let backward_second = aa
-        * (1.0 / (bb + 1.0) - tee(2.0 * depth) / (bb - 1.0)
-            + 2.0 * tee((bb + 1.0) * depth) / ((bb + 1.0) * (bb - 1.0)));
+        * (1.0 / (bb + 1.0) - canopy_transmittance(2.0 * depth) / (bb - 1.0)
+            + 2.0 * canopy_transmittance((bb + 1.0) * depth) / ((bb + 1.0) * (bb - 1.0)));
     let forward_second = aa
         * (2.0 * bb * forward_first / (bb * bb - 1.0)
-            - (1.0 / (bb + 1.0).powi(2) + 1.0 / (bb - 1.0).powi(2)) * tee(depth)
-            + tee(depth * bb) / (bb - 1.0).powi(2)
-            + tee((bb + 2.0) * depth) / (bb + 1.0).powi(2));
+            - (1.0 / (bb + 1.0).powi(2) + 1.0 / (bb - 1.0).powi(2)) * canopy_transmittance(depth)
+            + canopy_transmittance(depth * bb) / (bb - 1.0).powi(2)
+            + canopy_transmittance((bb + 2.0) * depth) / (bb + 1.0).powi(2));
     let average_second = 0.5 * (backward_second + forward_second);
     let absorption_probability = (1.0
         - average_second
             / (1.0
-                - tee(depth)
+                - canopy_transmittance(depth)
                 - (reflectance * backward_first + transmittance * forward_first)
                     / (transmittance + reflectance)))
         .clamp(0.0, 1.0);
@@ -802,7 +814,8 @@ fn phi(depth: f64, omega: f64, transmittance: f64, reflectance: f64) -> (f64, f6
     )
 }
 
-fn tee(depth: f64) -> f64 {
+/// Mean direct transmission through a spherical canopy (`tee` in CoLM).
+pub(crate) fn canopy_transmittance(depth: f64) -> f64 {
     0.5 * (1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth) * (-2.0 * depth).exp())
 }
 

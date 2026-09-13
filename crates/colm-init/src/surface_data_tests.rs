@@ -162,6 +162,137 @@ fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[test]
+fn urban_reader_uses_the_shared_static_contract_without_a_land_class_variable() {
+    let path = temp_file("urban");
+    write_surface(&path, 8, false, true);
+    let mut file = netcdf::append(&path).unwrap();
+    for (name, length) in [
+        ("LAI_year", 1),
+        ("month", 12),
+        ("ulev", 10),
+        ("numsolar", 2),
+        ("numrad", 2),
+    ] {
+        file.add_dimension(name, length).unwrap();
+    }
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2005], ..)
+        .unwrap();
+    file.add_variable::<i32>("URBAN_TYPE", &[])
+        .unwrap()
+        .put_values(&[6], ..)
+        .unwrap();
+    for (name, value) in [
+        ("LUCY_id", 4.0),
+        ("PCT_Tree", 22.5),
+        ("URBAN_TREE_TOP", 5.7),
+        ("PCT_Water", 0.0),
+        ("WT_ROOF", 0.445),
+        ("HT_ROOF", 6.4),
+        ("WTROAD_PERV", 0.685),
+        ("BUILDING_HLR", 0.225),
+        ("POP_DEN", 1000.0),
+        ("EM_ROOF", 0.91),
+        ("EM_WALL", 0.9),
+        ("EM_IMPROAD", 0.95),
+        ("EM_PERROAD", 0.95),
+        ("T_BUILDING_MAX", 297.65),
+        ("T_BUILDING_MIN", 290.65),
+        ("THICK_ROOF", 0.015),
+        ("THICK_WALL", 0.02),
+    ] {
+        file.add_variable::<f64>(name, &[])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    for name in ["TREE_LAI", "TREE_SAI"] {
+        file.add_variable::<f64>(name, &["LAI_year", "month"])
+            .unwrap()
+            .put_values(&[3.0; 12], (.., ..))
+            .unwrap();
+    }
+    for name in ["ALB_ROOF", "ALB_WALL", "ALB_IMPROAD", "ALB_PERROAD"] {
+        file.add_variable::<f64>(name, &["numsolar", "numrad"])
+            .unwrap()
+            .put_values(&[0.2; 4], (.., ..))
+            .unwrap();
+    }
+    for name in [
+        "CV_ROOF",
+        "CV_WALL",
+        "CV_IMPROAD",
+        "TK_ROOF",
+        "TK_WALL",
+        "TK_IMPROAD",
+    ] {
+        file.add_variable::<f64>(name, &["ulev"])
+            .unwrap()
+            .put_values(&[1.0; 10], ..)
+            .unwrap();
+    }
+    file.close().unwrap();
+
+    let data = read_single_point_urban_data(&path, LandCoverScheme::Igbp, HydraulicModel::Campbell)
+        .unwrap();
+    assert_eq!(data.common.land_class, 13);
+    assert_eq!(data.common.canopy_height_m, 0.0);
+    assert_eq!(data.urban_type, 6);
+    assert_eq!(data.lucy_region_id, 4);
+    assert_eq!(data.roof_albedo, [0.2; 4]);
+    assert_eq!(
+        data.monthly.for_year(2005, 12, true, 2000, 2020).unwrap(),
+        (3.0, 3.0)
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn lucy_reader_transposes_runtime_component_region_arrays_once() {
+    let path = temp_file("lucy");
+    let mut file = netcdf::create(&path).unwrap();
+    for (name, length) in [
+        ("region", 2),
+        ("car_type", 3),
+        ("week", 7),
+        ("hour", 24),
+        ("ndays", 365),
+    ] {
+        file.add_dimension(name, length).unwrap();
+    }
+    file.add_variable::<i32>("WEEKEND_DAY", &["week", "region"])
+        .unwrap()
+        .put_values(&(0..14).collect::<Vec<_>>(), (.., ..))
+        .unwrap();
+    for (name, dimension, length) in [
+        ("NUMS_VEHC", "car_type", 3),
+        ("TraffProf_24hr_holiday", "hour", 24),
+        ("TraffProf_24hr_work", "hour", 24),
+        ("HumMetabolic_24hr", "hour", 24),
+        ("FIXED_HOLIDAY", "ndays", 365),
+    ] {
+        file.add_variable::<f64>(name, &[dimension, "region"])
+            .unwrap()
+            .put_values(
+                &(0..(length * 2))
+                    .map(|value| value as f64)
+                    .collect::<Vec<_>>(),
+                (.., ..),
+            )
+            .unwrap();
+    }
+    file.close().unwrap();
+
+    let data = read_urban_lucy_raw_data(&path).unwrap();
+    assert_eq!(data.region_count, 2);
+    assert_eq!(data.vehicles_per_thousand, [0.0, 2.0, 4.0, 1.0, 3.0, 5.0]);
+    assert_eq!(data.week_holiday[..4], [0.0, 2.0, 4.0, 6.0]);
+    assert_eq!(data.fixed_holiday[..4], [0.0, 2.0, 4.0, 6.0]);
+    std::fs::remove_file(path).unwrap();
+}
+
 fn write_surface(path: &Path, layers: usize, vgm: bool, with_ba_beta: bool) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("soil", layers).unwrap();

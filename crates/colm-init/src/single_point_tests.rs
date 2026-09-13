@@ -168,6 +168,40 @@ fn cold_namelist_uses_start_year_for_lulcc_restarts() {
 }
 
 #[test]
+fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-urban-namelist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let namelist = directory.join("case.nml");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='AU-Preston'\n DEF_dir_output='{}'\n DEF_dir_runtime='/runtime'\n DEF_URBAN_RUN=.true.\n /\n",
+            directory.join("output").display(),
+        ),
+    )
+    .unwrap();
+
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(run.subgrid, SinglePointSubgrid::Lct);
+    assert_eq!(run.static_run.land_cover, LandCoverScheme::Igbp);
+    assert_eq!(
+        run.urban,
+        Some(SinglePointUrbanConfig {
+            geometry: UrbanConfig {
+                water_enabled: true,
+                trees_enabled: true,
+                building_energy_model: true,
+            },
+            lucy_enabled: true,
+            runtime_dir: Some(PathBuf::from("/runtime")),
+        })
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
 fn native_single_point_static_restart_matches_the_upstream_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

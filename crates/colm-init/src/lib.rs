@@ -70,6 +70,9 @@ pub mod time_state {
 pub mod urban {
     pub use colm_core::urban::*;
 }
+pub mod urban_radiation {
+    pub use colm_core::urban_radiation::*;
+}
 pub mod urban_restart;
 pub mod vegetation {
     pub use colm_core::vegetation::*;
@@ -98,6 +101,7 @@ pub use colm_core::{
     PcCanopyRadiation, PcPftInput, PcPftRadiation, PftCanopyInput, PhaseChangeInput,
     PhaseChangeState, SoilHydraulicModel, SoilReflectance, MIN_SOIL_PSI, MISSING,
 };
+pub use colm_core::{cold_start_urban_radiation, UrbanRadiationInput, UrbanRadiationState};
 pub use colm_core::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
@@ -138,8 +142,9 @@ pub use single_point::{
     single_point_cold_start_run_from_namelist, single_point_static_run_from_namelist,
     write_single_point_cold_time_restart, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
-    SinglePointColdStartRun, SinglePointConstantRestartFiles, SinglePointStaticConfig,
-    SinglePointStaticRun, SinglePointSubgrid, SinglePointTimeRestartFiles,
+    write_single_point_urban_constant_restart, SinglePointColdStartRun,
+    SinglePointConstantRestartFiles, SinglePointStaticConfig, SinglePointStaticRun,
+    SinglePointSubgrid, SinglePointTimeRestartFiles, SinglePointUrbanConfig,
 };
 pub use spatial_pft::{
     write_spatial_pft_constant_restart, write_spatial_pft_constant_restarts,
@@ -153,8 +158,9 @@ pub use static_state::{
 };
 pub use surface_data::{
     read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_surface,
-    SinglePointMonthlyVegetation, SinglePointPftData, SinglePointPftMonthlyVegetation,
-    SinglePointSurfaceData,
+    read_single_point_urban_data, read_urban_lucy_raw_data, SinglePointMonthlyVegetation,
+    SinglePointPftData, SinglePointPftMonthlyVegetation, SinglePointSurfaceData,
+    SinglePointUrbanData, UrbanLucyRawData,
 };
 pub use time_restart::{
     write_time_restart, write_time_restart_block, IrrigationFields, OzoneFields,
