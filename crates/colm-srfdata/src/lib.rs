@@ -34,8 +34,9 @@ pub use derive::{
 };
 pub use grid::{Grid, COLM_1KM, COLM_500M};
 pub use pft::{
-    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_pft_topology,
-    PftFractionInput, PftIndexInput, PftIndexState, PftPatchKind, PftTopology,
+    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_crop_land_patches,
+    build_crop_pft_topology, build_pft_topology, crop_pft_pctshared, CropLandPatchTopology,
+    PftFractionInput, PftIndexInput, PftIndexState, PftPatchKind, PftTopology, IGBP_CROPLAND,
 };
 pub use site::{
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
@@ -43,12 +44,13 @@ pub use site::{
 };
 pub use spatial::{
     build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_spatial_topology,
-    mesh_cell_area_weights, read_mesh_raster_f64, read_mesh_raster_i32,
-    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
-    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
-    write_spatial_pft_topology, write_spatial_topology, BlockLayout, PixelAxes, SpatialGrid,
-    SpatialInputKind, SpatialTopology,
+    mesh_cell_area_weights, read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64,
+    read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64,
+    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
+    read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
+    write_landpatch_vector, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
+    write_spatial_topology, write_spatial_topology_with_shared, BlockLayout, PixelAxes,
+    SpatialGrid, SpatialInputKind, SpatialTopology,
 };
 pub use surface::{
     derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,

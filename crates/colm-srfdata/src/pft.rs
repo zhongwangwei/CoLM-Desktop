@@ -4,6 +4,24 @@ use anyhow::{ensure, Context, Result};
 
 use crate::{surface::FlatPatches, topology::FlatLandPatches};
 
+/// CoLM IGBP's crop land-cover type (`CROPLAND`).
+pub const IGBP_CROPLAND: i32 = 12;
+
+/// A crop-refined `landpatch` pixelset and its shared-area metadata.
+///
+/// This is the sequential `MOD_LandCrop::landcrop_build` partition: natural
+/// and crop shares are first split with `PCT_CROP`, then crop shares are split
+/// again by `PCT_CFT`.  Children intentionally retain their parent's raw-cell
+/// range; `pctshared` carries their fractional ownership.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CropLandPatchTopology {
+    pub land_patches: FlatLandPatches,
+    pub layout: FlatPatches,
+    pub pctshared: Vec<f64>,
+    /// One-based CFT class for crop patches, otherwise `None`.
+    pub crop_class: Vec<Option<usize>>,
+}
+
 /// The branch chosen by `Aggregation_PercentagesPFT` for one land patch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PftPatchKind {
@@ -25,6 +43,179 @@ pub struct PftTopology {
     pub patch_kind: Vec<PftPatchKind>,
 }
 
+/// Split IGBP natural patches into natural/CROP/CFT shared patches.
+///
+/// `crop_percent` is one `PCT_CROP` value per raw cell and `cft_percent` is
+/// class-major (`cft * raw_cells + cell`) `PCT_CFT`.  As in
+/// `pixelsetshared_build`, only positive area-weighted shares become child
+/// patches and their shares are normalized within their parent patch.
+pub fn build_crop_land_patches(
+    land_patches: &FlatLandPatches,
+    patches: &FlatPatches,
+    crop_percent: &[f64],
+    cft_class_count: usize,
+    cft_percent: &[f64],
+    land_area: &[f64],
+) -> Result<CropLandPatchTopology> {
+    ensure!(
+        land_patches.len() == patches.len(),
+        "crop topology needs matching structural and aggregation patch layouts"
+    );
+    ensure!(
+        crop_percent.len() == land_area.len()
+            && cft_class_count > 0
+            && cft_percent.len() == cft_class_count * land_area.len(),
+        "crop and CFT percentages must match the raw cell layout"
+    );
+    ensure!(
+        land_area
+            .iter()
+            .all(|area| area.is_finite() && *area >= 0.0)
+            && crop_percent.iter().all(|value| value.is_finite())
+            && cft_percent.iter().all(|value| value.is_finite()),
+        "crop topology inputs must be finite and land areas non-negative"
+    );
+
+    #[derive(Clone, Copy)]
+    struct Child {
+        source: usize,
+        set_type: i32,
+        pctshared: f64,
+        crop_class: Option<usize>,
+    }
+
+    let mut first = Vec::new();
+    for patch in 0..land_patches.len() {
+        ensure!(
+            patches.wmo_source_for(patch).is_none(),
+            "crop sharing needs the upstream land2mWMO topology"
+        );
+        if land_patches.set_type[patch] != 1 {
+            first.push(Child {
+                source: patch,
+                set_type: land_patches.set_type[patch],
+                pctshared: 1.0,
+                crop_class: None,
+            });
+            continue;
+        }
+        let mut shares = [0.0; 2];
+        for &cell in patches.raw_cells(patch) {
+            let area = area(land_area, cell, patch)?;
+            let crop = crop_percent[cell] / 100.0;
+            shares[0] += (1.0 - crop) * area;
+            shares[1] += crop * area;
+        }
+        let total = shares.iter().sum::<f64>();
+        ensure!(
+            total.is_finite() && total > 0.0,
+            "crop patch {patch} has no positive total area share"
+        );
+        for (class, share) in shares.into_iter().enumerate() {
+            if share > 0.0 {
+                first.push(Child {
+                    source: patch,
+                    set_type: if class == 0 { 1 } else { IGBP_CROPLAND },
+                    pctshared: share / total,
+                    crop_class: None,
+                });
+            }
+        }
+    }
+
+    let mut children = Vec::new();
+    for parent in first {
+        if parent.set_type != IGBP_CROPLAND {
+            children.push(parent);
+            continue;
+        }
+        let mut shares = vec![0.0; cft_class_count];
+        for &cell in patches.raw_cells(parent.source) {
+            let area = area(land_area, cell, parent.source)?;
+            for class in 0..cft_class_count {
+                shares[class] += cft_percent[class * land_area.len() + cell] * area;
+            }
+        }
+        let total = shares.iter().sum::<f64>();
+        ensure!(
+            total.is_finite() && total > 0.0,
+            "crop patch {} has no positive CFT share",
+            parent.source
+        );
+        for (class, share) in shares.into_iter().enumerate() {
+            if share > 0.0 {
+                children.push(Child {
+                    source: parent.source,
+                    set_type: IGBP_CROPLAND,
+                    pctshared: parent.pctshared * share / total,
+                    crop_class: Some(class + 1),
+                });
+            }
+        }
+    }
+
+    let mut element_ids = Vec::with_capacity(children.len());
+    let mut pixel_start = Vec::with_capacity(children.len());
+    let mut pixel_end = Vec::with_capacity(children.len());
+    let mut set_type = Vec::with_capacity(children.len());
+    let mut element_index = Vec::with_capacity(children.len());
+    let mut offsets = Vec::with_capacity(children.len() + 1);
+    let mut cells = Vec::new();
+    let mut pctshared = Vec::with_capacity(children.len());
+    let mut crop_class = Vec::with_capacity(children.len());
+    offsets.push(0);
+    for child in children {
+        let source = child.source;
+        element_ids.push(land_patches.element_ids[source]);
+        pixel_start.push(land_patches.pixel_start[source]);
+        pixel_end.push(land_patches.pixel_end[source]);
+        set_type.push(child.set_type);
+        element_index.push(land_patches.element_index[source]);
+        cells.extend_from_slice(patches.raw_cells(source));
+        offsets.push(cells.len());
+        pctshared.push(child.pctshared);
+        crop_class.push(child.crop_class);
+    }
+    let layout = FlatPatches::new(set_type.clone(), offsets, cells, vec![None; set_type.len()])?;
+    Ok(CropLandPatchTopology {
+        land_patches: FlatLandPatches {
+            element_ids,
+            pixel_start,
+            pixel_end,
+            set_type,
+            element_index,
+        },
+        layout,
+        pctshared,
+        crop_class,
+    })
+}
+
+/// Build the CROP-aware `landpft` partition from a shared crop topology.
+///
+/// Natural PFT classes remain zero-based; a one-based CFT class is stored as
+/// `natural_pft_class_count + cft - 1`, matching `MOD_LandPFT.F90`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_crop_pft_topology(
+    land_patches: &FlatLandPatches,
+    patches: &FlatPatches,
+    crop_class: &[Option<usize>],
+    raw_class_count: usize,
+    natural_pft_class_count: usize,
+    raw_percent: &[f64],
+    land_area: &[f64],
+) -> Result<PftTopology> {
+    build_pft_topology_inner(
+        land_patches,
+        patches,
+        raw_class_count,
+        natural_pft_class_count,
+        raw_percent,
+        land_area,
+        Some(crop_class),
+    )
+}
+
 /// Build CoLM's non-CROP `landpft` partition from class-major PFT fractions.
 ///
 /// PFT land patches are created only for the merged natural land-cover type
@@ -40,6 +231,27 @@ pub fn build_pft_topology(
     raw_percent: &[f64],
     land_area: &[f64],
 ) -> Result<PftTopology> {
+    build_pft_topology_inner(
+        land_patches,
+        patches,
+        raw_class_count,
+        pft_class_count,
+        raw_percent,
+        land_area,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pft_topology_inner(
+    land_patches: &FlatLandPatches,
+    patches: &FlatPatches,
+    raw_class_count: usize,
+    pft_class_count: usize,
+    raw_percent: &[f64],
+    land_area: &[f64],
+    crop_class: Option<&[Option<usize>]>,
+) -> Result<PftTopology> {
     ensure!(
         raw_class_count > 0
             && pft_class_count > 0
@@ -47,6 +259,12 @@ pub fn build_pft_topology(
             && raw_percent.len() == raw_class_count * land_area.len(),
         "raw PFT percentages must be raw_class_count x raw cell count"
     );
+    if let Some(crop_class) = crop_class {
+        ensure!(
+            crop_class.len() == land_patches.len(),
+            "crop classes must have one entry per land patch"
+        );
+    }
     ensure!(
         land_patches.len() == patches.len(),
         "landpft needs matching structural and aggregation patch layouts"
@@ -74,10 +292,10 @@ pub fn build_pft_topology(
             patches.wmo_source_for(patch).is_none(),
             "landpft WMO sharing needs the upstream land2mWMO topology"
         );
-        let kind = if land_patches.set_type[patch] == 1 {
-            PftPatchKind::Natural
-        } else {
-            PftPatchKind::Other
+        let kind = match land_patches.set_type[patch] {
+            1 => PftPatchKind::Natural,
+            IGBP_CROPLAND if crop_class.is_some() => PftPatchKind::Crop,
+            _ => PftPatchKind::Other,
         };
         patch_kind.push(kind);
         if kind == PftPatchKind::Natural {
@@ -111,6 +329,19 @@ pub fn build_pft_topology(
                 element_index.push(land_patches.element_index[patch]);
                 pft_classes.push(class);
             }
+        } else if kind == PftPatchKind::Crop {
+            let crop = crop_class.expect("CROP kind requires crop classes")[patch]
+                .with_context(|| format!("crop patch {patch} has no CFT class"))?;
+            let class = pft_class_count
+                .checked_add(crop)
+                .and_then(|value| value.checked_sub(1))
+                .context("crop PFT class overflows usize")?;
+            element_ids.push(land_patches.element_ids[patch]);
+            pixel_start.push(land_patches.pixel_start[patch]);
+            pixel_end.push(land_patches.pixel_end[patch]);
+            set_type.push(i32::try_from(class)?);
+            element_index.push(land_patches.element_index[patch]);
+            pft_classes.push(class);
         }
         patch_offsets.push(pft_classes.len());
     }
@@ -126,6 +357,39 @@ pub fn build_pft_topology(
         pft_classes,
         patch_kind,
     })
+}
+
+/// Compose the `landpft%pctshared` vector for a CROP build.
+///
+/// Natural PFT children use their locally aggregated PFT fraction, whereas a
+/// crop PFT directly inherits its CFT-resolved `landpatch%pctshared` value.
+pub fn crop_pft_pctshared(
+    topology: &PftTopology,
+    pft_fraction: &[f64],
+    patch_pctshared: &[f64],
+) -> Result<Vec<f64>> {
+    ensure!(
+        pft_fraction.len() == topology.pft_classes.len()
+            && patch_pctshared.len() == topology.patch_kind.len(),
+        "CROP PFT shared fractions need matching PFT and land-patch vectors"
+    );
+    ensure!(
+        pft_fraction
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+            && patch_pctshared
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "CROP PFT shared fractions must be finite and non-negative"
+    );
+    let mut output = pft_fraction.to_vec();
+    for (patch, kind) in topology.patch_kind.iter().enumerate() {
+        if *kind == PftPatchKind::Crop {
+            output[topology.patch_offsets[patch]..topology.patch_offsets[patch + 1]]
+                .fill(patch_pctshared[patch]);
+        }
+    }
+    Ok(output)
 }
 
 /// PFT topology and raw PFT-percentage fields.
@@ -343,13 +607,12 @@ fn validate_input(patches: &FlatPatches, input: PftFractionInput<'_>) -> Result<
             && input.raw_percent.len() == input.raw_class_count * input.land_area.len(),
         "raw PFT percentages must be raw_class_count x raw cell count"
     );
-    ensure!(
-        input
-            .pft_classes
-            .iter()
-            .all(|&class| class < input.raw_class_count),
-        "a PFT class is outside the raw PFT class range"
-    );
+    validate_natural_classes(
+        input.pft_offsets,
+        input.pft_classes,
+        input.patch_kind,
+        input.raw_class_count,
+    )?;
     ensure!(
         input
             .crop_excluded_class
@@ -377,13 +640,12 @@ fn validate_index_input(patches: &FlatPatches, input: PftIndexInput<'_>) -> Resu
             && input.raw_index.len() == input.raw_class_count * input.land_area.len(),
         "raw PFT percentage and index fields must be raw_class_count x raw cell count"
     );
-    ensure!(
-        input
-            .pft_classes
-            .iter()
-            .all(|&class| class < input.raw_class_count),
-        "a PFT class is outside the raw PFT class range"
-    );
+    validate_natural_classes(
+        input.pft_offsets,
+        input.pft_classes,
+        input.patch_kind,
+        input.raw_class_count,
+    )?;
     ensure!(
         input
             .land_area
@@ -399,6 +661,25 @@ fn validate_index_input(patches: &FlatPatches, input: PftIndexInput<'_>) -> Resu
             .all(|value| value.is_finite()),
         "PFT percentage and LAI/SAI inputs must be finite"
     );
+    Ok(())
+}
+
+fn validate_natural_classes(
+    offsets: &[usize],
+    classes: &[usize],
+    patch_kind: &[PftPatchKind],
+    raw_class_count: usize,
+) -> Result<()> {
+    for (patch, kind) in patch_kind.iter().enumerate() {
+        if *kind != PftPatchKind::Crop {
+            ensure!(
+                classes[offsets[patch]..offsets[patch + 1]]
+                    .iter()
+                    .all(|&class| class < raw_class_count),
+                "non-crop PFT class for patch {patch} is outside the raw PFT class range"
+            );
+        }
+    }
     Ok(())
 }
 

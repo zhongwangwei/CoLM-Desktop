@@ -629,3 +629,127 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
 
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn shared_pixelsets_write_pctshared() {
+    let directory = temporary("shared-pixelset");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    let landdata = directory.join("landdata");
+    let blocks = BlockLayout::regular(1, 1).unwrap();
+    let land_patches = FlatLandPatches {
+        element_ids: vec![1, 2],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![4, 4],
+        set_type: vec![1, 12],
+        element_index: vec![1, 2],
+    };
+    write_spatial_topology_with_shared(
+        &landdata,
+        2005,
+        &topology,
+        &land_patches,
+        Some(&[0.75, 0.25]),
+        &blocks,
+    )
+    .unwrap();
+    let land_pfts = FlatLandPatches {
+        element_ids: vec![1, 1, 2],
+        pixel_start: vec![1, 1, 1],
+        pixel_end: vec![4, 4, 4],
+        set_type: vec![0, 1, 15],
+        element_index: vec![1, 1, 2],
+    };
+    write_spatial_pft_topology_with_shared(
+        &landdata,
+        2005,
+        &topology,
+        &land_pfts,
+        Some(&[0.5, 0.25, 0.25]),
+        &blocks,
+    )
+    .unwrap();
+
+    let landpatch = netcdf::open(landdata.join("landpatch/2005/landpatch_w180_s90.nc")).unwrap();
+    assert_eq!(
+        landpatch
+            .variable("pctshared")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [0.75, 0.25]
+    );
+    let landpft = netcdf::open(landdata.join("landpft/2005/landpft_w180_s90.nc")).unwrap();
+    assert_eq!(
+        landpft
+            .variable("pctshared")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [0.5, 0.25, 0.25]
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn coordinate_cft_raster_keeps_mesh_order_without_assuming_the_500m_grid() {
+    let directory = temporary("coordinate-cft");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    let source = directory.join("cft.nc");
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&source).unwrap();
+        file.add_dimension("cft", 2).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 4).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[-45.0, 45.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[-135.0, -45.0, 45.0, 135.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("PCT_CFT", &["cft", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &[
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    17.0, 18.0,
+                ],
+                (.., .., ..),
+            )
+            .unwrap();
+        file.close().unwrap();
+    }
+    let actual =
+        read_mesh_coordinate_raster_pft_f64(&source, "PCT_CFT", 2, &topology.mesh, &topology.pixel)
+            .unwrap();
+    let values = [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+    ];
+    let mut expected = Vec::new();
+    for class in 0..2 {
+        for element in 0..topology.mesh.len() {
+            let (xs, ys) = topology.mesh.pixels(element).unwrap();
+            for (&x, &y) in xs.iter().zip(ys) {
+                expected.push(values[class * 8 + (y as usize - 1) * 4 + x as usize - 1]);
+            }
+        }
+    }
+    assert_eq!(actual, expected);
+    std::fs::remove_dir_all(directory).unwrap();
+}

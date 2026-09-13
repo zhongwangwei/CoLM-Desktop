@@ -338,6 +338,67 @@ pub fn read_mesh_raster_layers_f64(
     Ok(output)
 }
 
+/// Read a class-major coordinate-addressed raster into flattened mesh order.
+///
+/// Unlike CoLM's tiled 500 m products, `global_CFT_surface_data.nc` supplies
+/// its own latitude/longitude axes.  The mesh-pixel centres are mapped to the
+/// nearest source coordinate, exactly once per local axis, then one source row
+/// is read per class and source latitude.  Output is
+/// `class * mesh_pixels + mesh_pixel`.
+pub fn read_mesh_coordinate_raster_pft_f64(
+    raster: &Path,
+    variable: &str,
+    class_count: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+) -> Result<Vec<f64>> {
+    ensure!(
+        class_count > 0,
+        "coordinate PFT raster needs at least one class"
+    );
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = coordinate_pft_axes(&source, class_count, raster)?;
+    let dimensions = source.dimensions();
+    let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
+    let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let source_x = pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&west, &east)| nearest_coordinate(&longitude, midpoint_longitude(west, east), true))
+        .collect::<Result<Vec<_>>>()?;
+    let source_y = pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| nearest_coordinate(&latitude, (south + north) * 0.5, false))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut output = Vec::with_capacity(
+        class_count
+            * (0..mesh.len())
+                .map(|element| mesh.pixel_count(element))
+                .sum::<Result<usize>>()?,
+    );
+    for class in 0..class_count {
+        let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
+        for &latitude in &source_y {
+            let row = read_coordinate_pft_row(&source, axes, class, latitude)?;
+            for &longitude in &source_x {
+                pixels.push(
+                    *row.get(longitude)
+                        .context("coordinate PFT longitude is outside its source row")?,
+                );
+            }
+        }
+        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+    }
+    Ok(output)
+}
+
 /// Read a CoLM 5°×5° tile variable in flattened mesh-pixel order.
 ///
 /// `MOD_5x5DataReadin.F90` partitions the global grid into 72 longitude by
@@ -587,6 +648,132 @@ struct RasterLayerAxes {
     layer: usize,
     latitude: usize,
     longitude: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoordinatePftAxes {
+    class: usize,
+    latitude: usize,
+    longitude: usize,
+}
+
+fn coordinate_pft_axes(
+    source: &netcdf::Variable<'_>,
+    class_count: usize,
+    path: &Path,
+) -> Result<CoordinatePftAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "{} in {} must have class, latitude, and longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    let axis = |labels: &[&str]| {
+        dimensions
+            .iter()
+            .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
+    };
+    let latitude =
+        axis(&["lat", "latitude"]).context("coordinate PFT raster has no latitude dimension")?;
+    let longitude =
+        axis(&["lon", "longitude"]).context("coordinate PFT raster has no longitude dimension")?;
+    let class = axis(&["cft", "pft", "crop", "n_cft"]).or_else(|| {
+        (0..dimensions.len()).find(|&index| {
+            index != latitude && index != longitude && dimensions[index].len() == class_count
+        })
+    });
+    let class = class.context("coordinate PFT raster has no CFT/PFT class dimension")?;
+    ensure!(
+        class != latitude
+            && class != longitude
+            && latitude != longitude
+            && dimensions[class].len() == class_count,
+        "{} in {} has incompatible class/latitude/longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    Ok(CoordinatePftAxes {
+        class,
+        latitude,
+        longitude,
+    })
+}
+
+fn read_coordinate(
+    file: &netcdf::File,
+    dimension: &netcdf::Dimension<'_>,
+    label: &str,
+    path: &Path,
+) -> Result<Vec<f64>> {
+    let name = dimension.name();
+    let coordinate = file.variable(&name).with_context(|| {
+        format!(
+            "{label} coordinate {name:?} is absent from {}",
+            path.display()
+        )
+    })?;
+    ensure!(
+        coordinate.dimensions().len() == 1 && coordinate.len() == dimension.len(),
+        "{label} coordinate {name:?} in {} does not match its dimension",
+        path.display()
+    );
+    let values = coordinate.get_values::<f64, _>(..)?;
+    ensure!(
+        values.len() == dimension.len() && values.iter().all(|value| value.is_finite()),
+        "{label} coordinate {name:?} in {} must be finite",
+        path.display()
+    );
+    Ok(values)
+}
+
+fn nearest_coordinate(values: &[f64], target: f64, longitude: bool) -> Result<usize> {
+    ensure!(
+        !values.is_empty() && target.is_finite(),
+        "coordinate lookup needs a nonempty finite axis and target"
+    );
+    values
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            coordinate_distance(**left, target, longitude)
+                .total_cmp(&coordinate_distance(**right, target, longitude))
+        })
+        .map(|(index, _)| index)
+        .context("coordinate lookup has no source index")
+}
+
+fn coordinate_distance(source: f64, target: f64, longitude: bool) -> f64 {
+    if longitude {
+        (source - target + 180.0).rem_euclid(360.0) - 180.0
+    } else {
+        source - target
+    }
+    .abs()
+}
+
+fn read_coordinate_pft_row(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinatePftAxes,
+    class: usize,
+    latitude: usize,
+) -> Result<Vec<f64>> {
+    let dimensions = source.dimensions();
+    let mut extents = vec![Extent::Index(0); 3];
+    extents[axes.class] = Extent::Index(class);
+    extents[axes.latitude] = Extent::Index(latitude);
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: dimensions[axes.longitude].len(),
+        stride: 1,
+    };
+    let values = source.get_values::<f64, _>(extents)?;
+    ensure!(
+        values.len() == dimensions[axes.longitude].len()
+            && values.iter().all(|value| value.is_finite()),
+        "coordinate PFT raster row has invalid values"
+    );
+    Ok(values)
 }
 
 fn raster_layer_axes(
@@ -1275,6 +1462,25 @@ pub fn write_spatial_topology(
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
 ) -> Result<()> {
+    write_spatial_topology_with_shared(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        None,
+        blocks,
+    )
+}
+
+/// Write spatial topology, including `pctshared` for a shared `landpatch`.
+pub fn write_spatial_topology_with_shared(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+) -> Result<()> {
     let landdata = landdata.as_ref();
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     let (nx, ny) = blocks.dimensions()?;
@@ -1305,6 +1511,7 @@ pub fn write_spatial_topology(
         &topology.land_elements.pixel_start,
         &topology.land_elements.pixel_end,
         &topology.land_elements.set_type,
+        None,
         blocks,
         &assignments,
     )?;
@@ -1316,6 +1523,7 @@ pub fn write_spatial_topology(
         &land_patches.pixel_start,
         &land_patches.pixel_end,
         &land_patches.set_type,
+        pctshared,
         blocks,
         &assignments,
     )?;
@@ -1330,6 +1538,25 @@ pub fn write_spatial_pft_topology(
     land_pfts: &FlatLandPatches,
     blocks: &BlockLayout,
 ) -> Result<()> {
+    write_spatial_pft_topology_with_shared(
+        landdata,
+        land_cover_year,
+        topology,
+        land_pfts,
+        None,
+        blocks,
+    )
+}
+
+/// Write a PFT topology, including `pctshared` for a CROP `landpft`.
+pub fn write_spatial_pft_topology_with_shared(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_pfts: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_pfts)?;
     let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
@@ -1341,6 +1568,7 @@ pub fn write_spatial_pft_topology(
         &land_pfts.pixel_start,
         &land_pfts.pixel_end,
         &land_pfts.set_type,
+        pctshared,
         blocks,
         &assignments,
     )
@@ -1756,6 +1984,7 @@ fn write_pixelset(
     starts: &[usize],
     ends: &[usize],
     set_types: &[i32],
+    pctshared: Option<&[f64]>,
     blocks: &BlockLayout,
     assignments: &BTreeMap<i64, (usize, usize)>,
 ) -> Result<()> {
@@ -1765,6 +1994,15 @@ fn write_pixelset(
             && element_ids.len() == set_types.len(),
         "{name} vectors must have equal lengths"
     );
+    if let Some(pctshared) = pctshared {
+        ensure!(
+            pctshared.len() == element_ids.len()
+                && pctshared
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0),
+            "{name} pctshared must be finite, non-negative, and match the pixelset"
+        );
+    }
     let directory = landdata.join(name).join(year);
     std::fs::create_dir_all(&directory)?;
     let mut grouped = BTreeMap::<(usize, usize), Vec<usize>>::new();
@@ -1783,11 +2021,15 @@ fn write_pixelset(
         let mut starts_out = Vec::with_capacity(indices.len());
         let mut ends_out = Vec::with_capacity(indices.len());
         let mut types = Vec::with_capacity(indices.len());
+        let mut shared = pctshared.map(|_| Vec::with_capacity(indices.len()));
         for index in indices {
             ids.push(element_ids[index]);
             starts_out.push(i32::try_from(starts[index])?);
             ends_out.push(i32::try_from(ends[index])?);
             types.push(set_types[index]);
+            if let (Some(values), Some(shared)) = (pctshared, &mut shared) {
+                shared.push(values[index]);
+            }
         }
         let mut file = netcdf::create(directory.join(block_filename(name, x, y, blocks)?))?;
         file.add_dimension(name, ids.len())?;
@@ -1795,6 +2037,9 @@ fn write_pixelset(
         put_i32(&mut file, "ipxstt", &[name], &starts_out)?;
         put_i32(&mut file, "ipxend", &[name], &ends_out)?;
         put_i32(&mut file, "settyp", &[name], &types)?;
+        if let Some(shared) = shared {
+            put_f64(&mut file, "pctshared", &[name], &shared)?;
+        }
         file.close()?;
     }
     Ok(())

@@ -8,21 +8,24 @@ use colm_srfdata::soil::{
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
 use colm_srfdata::{
-    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index,
-    build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_pft_topology,
-    build_spatial_topology, materialize_single_point_surface,
-    materialize_single_point_surface_from_namelist, mesh_cell_area_weights, read_mesh_raster_f64,
-    read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64,
-    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
-    read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
-    write_landpatch_vector, write_spatial_pft_topology, write_spatial_topology, BlockLayout,
-    FlatLandPatches, PftFractionInput, PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology,
-    COLM_1KM, COLM_500M,
+    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_crop_land_patches,
+    build_crop_pft_topology, build_lct_land_patches_from_raster,
+    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
+    crop_pft_pctshared, materialize_single_point_surface,
+    materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
+    read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
+    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
+    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
+    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
+    write_spatial_pft_topology, write_spatial_pft_topology_with_shared, write_spatial_topology,
+    write_spatial_topology_with_shared, BlockLayout, FlatLandPatches, PftFractionInput,
+    PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM, COLM_500M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
 const MODIS_PFT_CLASSES: usize = 16;
 const NATURAL_PFT_CLASSES: usize = 15;
+const CFT_CLASSES: usize = 64;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -77,6 +80,7 @@ struct SpatialPftArgs {
     blocks: BlockLayout,
     dominant: bool,
     plant_tiles: PathBuf,
+    crop_surface: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
     lake_depth: Option<PathBuf>,
     lake_soil_carbon: Option<PathBuf>,
@@ -92,14 +96,15 @@ struct SpatialPftArgs {
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let args = parse_spatial_pft(args)?;
     let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
-    let (topology, patches) = build_pft_land_patches_from_raster(
+    let (topology, base_patches) = build_pft_land_patches_from_raster(
         topology,
         &args.landtype,
         "landtype",
         COLM_500M,
         args.dominant,
     )?;
-    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let base_layout =
+        base_patches.aggregation_layout(&topology.mesh, vec![None; base_patches.len()])?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
     let raw_percent = read_mesh_tiled_raster_pft_f64(
         &args.plant_tiles,
@@ -110,16 +115,60 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &topology.pixel,
         COLM_500M,
     )?;
-    let pfts = build_pft_topology(
-        &patches,
-        &layout,
-        MODIS_PFT_CLASSES,
-        NATURAL_PFT_CLASSES,
-        &raw_percent,
-        &area,
-    )?;
+    let crop = args
+        .crop_surface
+        .as_ref()
+        .map(|surface| {
+            let crop_percent = read_mesh_tiled_raster_f64(
+                &args.plant_tiles,
+                &format!("MOD{:04}", args.year),
+                "PCT_CROP",
+                &topology.mesh,
+                &topology.pixel,
+                COLM_500M,
+            )?;
+            let cft_percent = read_mesh_coordinate_raster_pft_f64(
+                surface,
+                "PCT_CFT",
+                CFT_CLASSES,
+                &topology.mesh,
+                &topology.pixel,
+            )?;
+            build_crop_land_patches(
+                &base_patches,
+                &base_layout,
+                &crop_percent,
+                CFT_CLASSES,
+                &cft_percent,
+                &area,
+            )
+        })
+        .transpose()?;
+    let (patches, layout) = match &crop {
+        Some(crop) => (&crop.land_patches, &crop.layout),
+        None => (&base_patches, &base_layout),
+    };
+    let pfts = match &crop {
+        Some(crop) => build_crop_pft_topology(
+            patches,
+            layout,
+            &crop.crop_class,
+            MODIS_PFT_CLASSES,
+            NATURAL_PFT_CLASSES,
+            &raw_percent,
+            &area,
+        )?,
+        None => build_pft_topology(
+            patches,
+            layout,
+            MODIS_PFT_CLASSES,
+            NATURAL_PFT_CLASSES,
+            &raw_percent,
+            &area,
+        )?,
+    };
     let fractions = aggregate_pft_fractions(
-        &layout,
+        layout,
         PftFractionInput {
             pft_offsets: &pfts.patch_offsets,
             pft_classes: &pfts.pft_classes,
@@ -127,7 +176,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             raw_class_count: MODIS_PFT_CLASSES,
             raw_percent: &raw_percent,
             land_area: &area,
-            crop_excluded_class: None,
+            crop_excluded_class: crop.as_ref().map(|_| MODIS_PFT_CLASSES - 1),
         },
     )?;
     let forest_height = read_mesh_tiled_raster_f64(
@@ -161,14 +210,35 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         monthly_vegetation_years: Vec::new(),
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
     };
-    materialize_spatial_common_fields(&common, &topology, &patches, Some(&patch_height))?;
-    write_spatial_pft_topology(
-        &args.landdata,
-        args.year,
+    materialize_spatial_common_fields(
+        &common,
         &topology,
-        &pfts.land_pfts,
-        &args.blocks,
+        patches,
+        Some(&patch_height),
+        crop.as_ref().map(|crop| crop.pctshared.as_slice()),
     )?;
+    let pft_pctshared = crop
+        .as_ref()
+        .map(|crop| crop_pft_pctshared(&pfts, &fractions, &crop.pctshared))
+        .transpose()?;
+    if let Some(pctshared) = &pft_pctshared {
+        write_spatial_pft_topology_with_shared(
+            &args.landdata,
+            args.year,
+            &topology,
+            &pfts.land_pfts,
+            Some(pctshared),
+            &args.blocks,
+        )?;
+    } else {
+        write_spatial_pft_topology(
+            &args.landdata,
+            args.year,
+            &topology,
+            &pfts.land_pfts,
+            &args.blocks,
+        )?;
+    }
     write_landpatch_scalar(
         &args.landdata,
         args.year,
@@ -179,8 +249,20 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "pct_pfts",
         &fractions,
     )?;
+    if let Some(crop) = &crop {
+        write_landpatch_scalar(
+            &args.landdata,
+            args.year,
+            &topology,
+            patches,
+            &args.blocks,
+            "pctpft",
+            "pct_crops",
+            &crop.pctshared,
+        )?;
+    }
     let pft_height = aggregate_pft_height(
-        &layout,
+        layout,
         PftFractionInput {
             pft_offsets: &pfts.patch_offsets,
             pft_classes: &pfts.pft_classes,
@@ -188,7 +270,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             raw_class_count: MODIS_PFT_CLASSES,
             raw_percent: &raw_percent,
             land_area: &area,
-            crop_excluded_class: None,
+            crop_excluded_class: crop.as_ref().map(|_| MODIS_PFT_CLASSES - 1),
         },
         &forest_height,
     )?;
@@ -207,7 +289,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         let (_, sai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_SAI", year)?;
         for month in 1..=12 {
             let lai = aggregate_pft_index(
-                &layout,
+                layout,
                 PftIndexInput {
                     pft_offsets: &pfts.patch_offsets,
                     pft_classes: &pfts.pft_classes,
@@ -228,7 +310,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 },
             )?;
             let sai = aggregate_pft_index(
-                &layout,
+                layout,
                 PftIndexInput {
                     pft_offsets: &pfts.patch_offsets,
                     pft_classes: &pfts.pft_classes,
@@ -253,7 +335,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                     format!("LAI_patches{month:02}"),
                     "LAI_patches",
                     lai.patch_index.as_slice(),
-                    &patches,
+                    patches,
                 ),
                 (
                     format!("LAI_pfts{month:02}"),
@@ -265,7 +347,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                     format!("SAI_patches{month:02}"),
                     "SAI_patches",
                     sai.patch_index.as_slice(),
-                    &patches,
+                    patches,
                 ),
                 (
                     format!("SAI_pfts{month:02}"),
@@ -315,7 +397,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         lct_grid,
         args.dominant,
     )?;
-    materialize_spatial_common_fields(&args, &topology, &patches, None)?;
+    materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
     println!(
         "wrote {} spatial land elements and {} LCT patches to {}",
         topology.land_elements.element_ids.len(),
@@ -330,6 +412,7 @@ fn materialize_spatial_common_fields(
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
     forest_height_override: Option<&[f64]>,
+    patch_pctshared: Option<&[f64]>,
 ) -> Result<()> {
     let forest_height = match forest_height_override {
         Some(values) => Some(values.to_vec()),
@@ -474,7 +557,18 @@ fn materialize_spatial_common_fields(
     } else {
         None
     };
-    write_spatial_topology(&args.landdata, args.year, topology, patches, &args.blocks)?;
+    if let Some(pctshared) = patch_pctshared {
+        write_spatial_topology_with_shared(
+            &args.landdata,
+            args.year,
+            topology,
+            patches,
+            Some(pctshared),
+            &args.blocks,
+        )?;
+    } else {
+        write_spatial_topology(&args.landdata, args.year, topology, patches, &args.blocks)?;
+    }
     if let Some(directory) = &args.soil_dir {
         let classes = match args.land_cover {
             SiteMode::Igbp => SoilPatchClasses {
@@ -1186,6 +1280,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut dominant = false;
     let mut plant_tiles = None;
+    let mut crop_surface = None;
     let mut monthly_vegetation_years = Vec::new();
     let mut lake_depth = None;
     let mut lake_soil_carbon = None;
@@ -1221,6 +1316,13 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 plant_tiles = Some(PathBuf::from(
                     args.get(index + 1)
                         .context("--plant-tiles needs the plant_15s directory")?,
+                ));
+                index += 2;
+            }
+            "--crop-surface" => {
+                crop_surface = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--crop-surface needs global_CFT_surface_data.nc")?,
                 ));
                 index += 2;
             }
@@ -1316,6 +1418,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         blocks,
         dominant,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
+        crop_surface,
         monthly_vegetation_years,
         lake_depth,
         lake_soil_carbon,
@@ -1439,7 +1542,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -1546,6 +1649,8 @@ mod tests {
             "2005".into(),
             "--plant-tiles".into(),
             "plant_15s".into(),
+            "--crop-surface".into(),
+            "global_CFT_surface_data.nc".into(),
             "--blocks".into(),
             "2".into(),
             "3".into(),
@@ -1575,6 +1680,10 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::GridBased);
         assert_eq!(parsed.plant_tiles, PathBuf::from("plant_15s"));
+        assert_eq!(
+            parsed.crop_surface,
+            Some(PathBuf::from("global_CFT_surface_data.nc"))
+        );
         assert_eq!(parsed.blocks.lon_w.len(), 2);
         assert_eq!(parsed.blocks.lat_s.len(), 3);
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);

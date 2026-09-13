@@ -108,6 +108,92 @@ fn landpft_keeps_positive_natural_classes_and_skips_non_soil_patches() {
 }
 
 #[test]
+fn crop_topology_splits_shared_patches_and_preserves_cft_ownership() {
+    let layout =
+        FlatPatches::new(vec![1, 17], vec![0, 2, 3], vec![0, 1, 2], vec![None; 2]).unwrap();
+    let land_patches = crate::topology::FlatLandPatches {
+        element_ids: vec![8, 9],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![2, 1],
+        set_type: vec![1, 17],
+        element_index: vec![1, 2],
+    };
+    let crop = build_crop_land_patches(
+        &land_patches,
+        &layout,
+        &[20.0, 60.0, 0.0],
+        2,
+        &[25.0, 75.0, 0.0, 75.0, 25.0, 0.0],
+        &[1.0, 3.0, 2.0],
+    )
+    .unwrap();
+
+    assert_eq!(
+        crop.land_patches.set_type,
+        [1, IGBP_CROPLAND, IGBP_CROPLAND, 17]
+    );
+    for (actual, expected) in crop.pctshared.iter().zip([0.5, 0.3125, 0.1875, 1.0]) {
+        assert!((actual - expected).abs() < 1.0e-12);
+    }
+    assert_eq!(crop.crop_class, [None, Some(1), Some(2), None]);
+    assert_eq!(
+        crop.layout,
+        FlatPatches::new(
+            vec![1, IGBP_CROPLAND, IGBP_CROPLAND, 17],
+            vec![0, 2, 4, 6, 7],
+            vec![0, 1, 0, 1, 0, 1, 2],
+            vec![None; 4],
+        )
+        .unwrap()
+    );
+
+    let mut raw_pft = vec![0.0; 16 * 3];
+    raw_pft[..3].copy_from_slice(&[50.0, 50.0, 0.0]);
+    let pfts = build_crop_pft_topology(
+        &crop.land_patches,
+        &crop.layout,
+        &crop.crop_class,
+        16,
+        15,
+        &raw_pft,
+        &[1.0, 3.0, 2.0],
+    )
+    .unwrap();
+    assert_eq!(pfts.patch_offsets, [0, 1, 2, 3, 3]);
+    assert_eq!(pfts.pft_classes, [0, 15, 16]);
+    assert_eq!(
+        pfts.patch_kind,
+        [
+            PftPatchKind::Natural,
+            PftPatchKind::Crop,
+            PftPatchKind::Crop,
+            PftPatchKind::Other,
+        ]
+    );
+    let fraction = aggregate_pft_fractions(
+        &crop.layout,
+        PftFractionInput {
+            pft_offsets: &pfts.patch_offsets,
+            pft_classes: &pfts.pft_classes,
+            patch_kind: &pfts.patch_kind,
+            raw_class_count: 16,
+            raw_percent: &raw_pft,
+            land_area: &[1.0, 3.0, 2.0],
+            crop_excluded_class: Some(15),
+        },
+    )
+    .unwrap();
+    assert_eq!(fraction, [1.0, 1.0, 1.0]);
+    for (actual, expected) in crop_pft_pctshared(&pfts, &fraction, &crop.pctshared)
+        .unwrap()
+        .iter()
+        .zip([1.0, 0.3125, 0.1875])
+    {
+        assert!((actual - expected).abs() < 1.0e-12);
+    }
+}
+
+#[test]
 fn pft_index_matches_lai_weighting_crop_and_wmo_paths() {
     let layout = FlatPatches::new(
         vec![1, 1, 12],
