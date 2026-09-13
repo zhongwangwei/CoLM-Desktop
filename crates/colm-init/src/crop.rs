@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_core::CropPhenologyState;
 
 use crate::{
     runtime::nearest_cell_indices, BgcCropFields, IrrigationFields, PftCropFields, MISSING,
@@ -187,6 +188,38 @@ pub fn crop_cold_start_from_management(
 }
 
 impl CropColdStartState {
+    /// Builds the shared Rust runtime state from this cold-start record.
+    ///
+    /// Restart serialization remains an adapter concern; the executable
+    /// receives the same state object that owns CropPhenology transitions.
+    pub fn cold_runtime_phenology_state(&self) -> CropPhenologyState {
+        let mut state = CropPhenologyState::new(self.crop_live.len());
+        state.crop_live = self.crop_live.iter().map(|value| *value != 0).collect();
+        state.crop_planted = self.crop_planted.iter().map(|value| *value != 0).collect();
+        state.heat_unit_index.clone_from(&self.heat_unit_index);
+        state
+            .growing_degree_days_at_maturity_c
+            .clone_from(&self.growing_degree_days_at_maturity);
+        state.planting_day.clone_from(&self.planting_date);
+        state.day_of_planting.clone_from(&self.day_of_planting);
+        state
+            .cumulative_vernalization_days
+            .clone_from(&self.cumulative_vernalization_days);
+        state
+            .vernalization_factor
+            .clone_from(&self.vernalization_factor);
+        state.crop_phase.clone_from(&self.crop_phase);
+        state
+            .fertilizer_counter_seconds
+            .clone_from(&self.fertilizer_counter);
+        state
+            .fertilizer_nitrogen_g_m2
+            .clone_from(&self.fertilizer_nitrogen);
+        state.manure_nitrogen_g_m2.clone_from(&self.manure_nitrogen);
+        state.fertilizer_rate_g_m2_s.clone_from(&self.fertilizer);
+        state
+    }
+
     pub fn pft_fields(&self) -> PftCropFields<'_> {
         PftCropFields {
             crop_live: &self.crop_live,

@@ -14,6 +14,12 @@ fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
     assert_eq!(patch.crop_phase, [4.0]);
     assert_eq!(patch.planting_day_rice2, [0.0]);
     assert_eq!(patch.planting_day_corn, [MISSING]);
+
+    let runtime = state.cold_runtime_phenology_state();
+    assert_eq!(runtime.planting_day, [120.0]);
+    assert_eq!(runtime.day_of_planting, [99_999_999]);
+    assert_eq!(runtime.crop_phase, [4.0]);
+    assert_eq!(runtime.harvest_day, [99_999_999.0]);
 }
 
 #[test]
