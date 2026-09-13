@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use crate::PFT_BGC_F64_VARIABLES;
+use crate::{
+    crop_cold_start_from_tuning, LakeState, SinglePointSurfaceData, SnowState, SoilReflectance,
+    PFT_BGC_F64_VARIABLES,
+};
 
 use super::*;
 
@@ -246,6 +249,145 @@ fn bgc_namelist_requires_a_vector_subgrid_and_resolves_its_runtime_source() {
     )
     .unwrap();
     assert!(single_point_cold_start_run_from_namelist(&namelist, None, None).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
+    let directory = std::env::temp_dir().join(format!(
+        "colm-init-single-point-crop-patches-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let run = SinglePointColdStartRun {
+        namelist: directory.join("case.nml"),
+        static_run: SinglePointStaticRun {
+            surface: directory.join("srfdata.nc"),
+            restart_dir: directory.join("restart"),
+            case_name: "crop".to_owned(),
+            land_cover_year: 2005,
+            block_label: "w180_s90".to_owned(),
+            land_cover: LandCoverScheme::Igbp,
+            hydraulic_model: HydraulicModel::VanGenuchten,
+        },
+        subgrid: SinglePointSubgrid::Pft,
+        date: RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+        greenwich: false,
+        use_site_lai: true,
+        lai_change_yearly: false,
+        lai_start_year: 2000,
+        lai_end_year: 2020,
+        dynamic_lake: false,
+        plant_hydraulics: false,
+        ozone_stress: false,
+        bgc: true,
+        cn_initial_state: None,
+        nitrification: false,
+        soil_initial_state: None,
+        snow_initial_state: None,
+        water_table_initial_state: None,
+        variably_saturated_flow: true,
+        snow_cover_exponent: 1.0,
+        vegetation_snow: true,
+        urban: None,
+    };
+    let surface = SinglePointSurfaceData {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+        land_class: 12,
+        canopy_height_m: 0.0,
+        lake_depth_m: 1.0,
+        albedo: SoilReflectance {
+            saturated_visible: 0.1,
+            dry_visible: 0.2,
+            saturated_near_infrared: 0.3,
+            dry_near_infrared: 0.4,
+        },
+        soil_texture: 1,
+        elevation_m: 0.0,
+        elevation_std_m: 0.0,
+        slope_ratio: 1.0,
+        soil_layers: Vec::new(),
+    };
+    let radiation = |value| ColdStartRadiation {
+        albedo: [[value, value + 1.0], [value + 2.0, value + 3.0]],
+        sunlit_absorption: [[0.0; 2]; 2],
+        shaded_absorption: [[0.0; 2]; 2],
+        soil_absorption: [[0.0; 2]; 2],
+        snow_absorption: [[0.0; 2]; 2],
+        snow_age: 0.0,
+        thermal_gap_fraction: 0.0,
+        direct_extinction: 0.0,
+        diffuse_extinction: 0.0,
+    };
+    let first = radiation(1.0);
+    let second = radiation(10.0);
+    let patches = [
+        ColdPatchFields {
+            total_lai: 0.0,
+            total_sai: 0.0,
+            vegetation_fraction: 1.0,
+            greenness: 1.0,
+            snow_free_vegetation_fraction: 1.0,
+            lai: 0.0,
+            sai: 0.0,
+            radiation: &first,
+            ground_snow_fraction: 0.0,
+            roughness: 0.1,
+        },
+        ColdPatchFields {
+            total_lai: 0.0,
+            total_sai: 0.0,
+            vegetation_fraction: 1.0,
+            greenness: 1.0,
+            snow_free_vegetation_fraction: 1.0,
+            lai: 0.0,
+            sai: 0.0,
+            radiation: &second,
+            ground_snow_fraction: 0.0,
+            roughness: 0.2,
+        },
+    ];
+    let crop = crop_cold_start_from_tuning(&[17, 19], &[0.4, 0.6], 120.0).unwrap();
+    let output = write_cold_time_restart(
+        &run,
+        0,
+        &surface,
+        &LakeState {
+            depth_m: vec![1.0],
+            thickness_m: vec![0.1; 10],
+        },
+        &[280.0; 10],
+        &[1.0; 10],
+        &[0.0; 10],
+        &[-10.0; 10],
+        &[0.01; 10],
+        2.0,
+        3.0,
+        0.5,
+        &SnowState {
+            layer_count: 0,
+            node_depth_m: vec![0.0; 5],
+            thickness_m: vec![0.0; 5],
+        },
+        0.0,
+        0.0,
+        &patches,
+        Some(&crop),
+    )
+    .unwrap();
+    let file = netcdf::open(output.block).unwrap();
+    assert_eq!(file.dimension("patch").unwrap().len(), 2);
+    assert_eq!(values_f64(&file, "z0m"), [0.1, 0.2]);
+    assert_eq!(
+        values_f64(&file, "alb"),
+        [1.0, 3.0, 2.0, 4.0, 10.0, 12.0, 11.0, 13.0]
+    );
+    assert_eq!(values_f64(&file, "wliq_soisno").len(), 30);
     std::fs::remove_dir_all(directory).unwrap();
 }
 

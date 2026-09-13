@@ -18,12 +18,13 @@ use crate::{
     colm_soil_grid, derive_cold_start_bgc_state, derive_igbp_canopy,
     derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover, derive_snow_cover,
     derive_soil_parameters, derive_usgs_canopy, initialize_snow_layers, is_leap_year,
-    leaf_optics_from_land_cover, month_lengths, normalize_soil_texture, orbital_calendar_day,
-    orbital_cosine_zenith, read_single_point_cn_state, read_single_point_monthly_vegetation,
-    read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
-    read_single_point_surface, read_single_point_urban_data, read_single_point_water_table,
-    read_urban_lucy_raw_data, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
-    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    leaf_optics_from_land_cover, merge_bgc_cold_start_states, month_lengths,
+    normalize_soil_texture, orbital_calendar_day, orbital_cosine_zenith,
+    read_single_point_cn_state, read_single_point_monthly_vegetation, read_single_point_pft_data,
+    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_surface,
+    read_single_point_urban_data, read_single_point_water_table, read_urban_lucy_raw_data,
+    write_bgc_time_restart, write_cold_start_bgc_constant_restart, write_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, write_time_restart,
     write_urban_constant_restart, write_urban_time_restart, BgcColdStartInput,
     BgcConstantRestartFiles, BgcPftColdStartInput, BgcTimeRestartFile, CalendarTime, ColdSoilState,
     ColdStartRadiation, ColdStartSoilInput, ConstantRestartFiles, ConstantRestartInput,
@@ -468,8 +469,8 @@ pub fn write_single_point_constant_restarts(
             &run.static_run.restart_dir,
             run.static_run.static_config(),
             Some((
-                initialized.state.tree_top_m[0],
-                initialized.state.tree_bottom_m[0],
+                initialized.state.tree_top_m.as_slice(),
+                initialized.state.tree_bottom_m.as_slice(),
             )),
         )?;
         let urban = write_urban_constant_restart_from_initialized(
@@ -510,14 +511,21 @@ pub fn write_single_point_constant_restarts(
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
     let crop = single_point_crop_state(run, &document, &surface, &pft)?;
     let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
+    let aggregate_canopy_top = [weighted_sum(&canopy.top_m, &pft.fraction)?];
+    let aggregate_canopy_bottom = [weighted_sum(&canopy.bottom_m, &pft.fraction)?];
+    let canopy_override = if crop.is_some() {
+        (canopy.top_m.as_slice(), canopy.bottom_m.as_slice())
+    } else {
+        (
+            aggregate_canopy_top.as_slice(),
+            aggregate_canopy_bottom.as_slice(),
+        )
+    };
     let common = write_single_point_constant_restart_with_canopy(
         &run.static_run.surface,
         &run.static_run.restart_dir,
         run.static_run.static_config(),
-        Some((
-            weighted_sum(&canopy.top_m, &pft.fraction)?,
-            weighted_sum(&canopy.bottom_m, &pft.fraction)?,
-        )),
+        Some(canopy_override),
     )?;
     let pft_file = write_pft_constant_restart(
         &run.static_run.restart_dir,
@@ -540,7 +548,7 @@ pub fn write_single_point_constant_restarts(
                 &run.static_run.case_name,
                 run.static_run.land_cover_year,
                 &run.static_run.block_label,
-                1,
+                crop.as_ref().map_or(1, |_| pft.class.len()),
                 run.nitrification,
             )
         })
@@ -557,7 +565,7 @@ fn write_single_point_constant_restart_with_canopy(
     surface: impl AsRef<Path>,
     restart_dir: impl AsRef<Path>,
     config: SinglePointStaticConfig<'_>,
-    canopy_override: Option<(f64, f64)>,
+    canopy_override: Option<(&[f64], &[f64])>,
 ) -> Result<ConstantRestartFiles> {
     let surface = read_single_point_surface(surface, config.land_cover, config.hydraulic_model)?;
     write_single_point_constant_restart_from_surface(&surface, restart_dir, config, canopy_override)
@@ -567,21 +575,33 @@ fn write_single_point_constant_restart_from_surface(
     surface: &crate::SinglePointSurfaceData,
     restart_dir: impl AsRef<Path>,
     config: SinglePointStaticConfig<'_>,
-    canopy_override: Option<(f64, f64)>,
+    canopy_override: Option<(&[f64], &[f64])>,
 ) -> Result<ConstantRestartFiles> {
-    let class = [surface.land_class];
-    let kind = [patch_type(config.land_cover, surface.land_class)?];
+    let patches = match canopy_override {
+        Some((top, bottom)) => {
+            ensure!(
+                top.len() == bottom.len(),
+                "single-point canopy top and bottom vectors must align"
+            );
+            top.len()
+        }
+        None => 1,
+    };
+    ensure!(patches > 0, "single-point restart needs at least one patch");
+    let class = vec![surface.land_class; patches];
+    let kind = vec![patch_type(config.land_cover, surface.land_class)?; patches];
     let lake = derive_lake_layers(
-        &[surface.lake_depth_m],
+        &vec![surface.lake_depth_m; patches],
         RestartDimensions::default().lake_layers,
     )?;
+    let source_soil = repeat_axis(&surface.soil_layers, patches);
     let soil = derive_soil_parameters(
-        &surface.soil_layers,
+        &source_soil,
         &kind,
         RestartDimensions::default().soil_layers,
         config.hydraulic_model,
     )?;
-    let observed_top = [surface.canopy_height_m];
+    let observed_top = vec![surface.canopy_height_m; patches];
     let mut canopy = match config.land_cover {
         LandCoverScheme::Igbp => {
             derive_igbp_canopy(&class, &kind, &observed_top, &IGBP_TOP, &IGBP_BOTTOM, None)?
@@ -589,19 +609,39 @@ fn write_single_point_constant_restart_from_surface(
         LandCoverScheme::Usgs => derive_usgs_canopy(&class, &USGS_TOP, &USGS_BOTTOM)?,
     };
     if let Some((top, bottom)) = canopy_override {
-        canopy.patch_top_m[0] = top;
-        canopy.patch_bottom_m[0] = bottom;
+        canopy.patch_top_m.clone_from_slice(top);
+        canopy.patch_bottom_m.clone_from_slice(bottom);
     }
-    let mut texture = [surface.soil_texture];
+    let mut texture = vec![surface.soil_texture; patches];
     normalize_soil_texture(&mut texture);
-    let bvic = [BVIC_USDA[texture[0] as usize]];
-    let longitude_radians = [surface.longitude_degrees.to_radians()];
-    let latitude_radians = [surface.latitude_degrees.to_radians()];
-    let albedo = [surface.albedo];
-    let elevation = [surface.elevation_m];
-    let elevation_std = [surface.elevation_std_m];
-    let slope = [surface.slope_ratio];
-    let zeros = [0.0];
+    let bvic = texture
+        .iter()
+        .map(|&texture| BVIC_USDA[texture as usize])
+        .collect::<Vec<_>>();
+    let longitude_radians = vec![surface.longitude_degrees.to_radians(); patches];
+    let latitude_radians = vec![surface.latitude_degrees.to_radians(); patches];
+    let albedo = vec![surface.albedo; patches];
+    let albedo_saturated_visible = albedo
+        .iter()
+        .map(|albedo| albedo.saturated_visible)
+        .collect::<Vec<_>>();
+    let albedo_dry_visible = albedo
+        .iter()
+        .map(|albedo| albedo.dry_visible)
+        .collect::<Vec<_>>();
+    let albedo_saturated_near_infrared = albedo
+        .iter()
+        .map(|albedo| albedo.saturated_near_infrared)
+        .collect::<Vec<_>>();
+    let albedo_dry_near_infrared = albedo
+        .iter()
+        .map(|albedo| albedo.dry_near_infrared)
+        .collect::<Vec<_>>();
+    let elevation = vec![surface.elevation_m; patches];
+    let elevation_std = vec![surface.elevation_std_m; patches];
+    let slope = vec![surface.slope_ratio; patches];
+    let zeros = vec![0.0; patches];
+    let mask = vec![true; patches];
 
     write_constant_restart(
         restart_dir,
@@ -613,14 +653,14 @@ fn write_single_point_constant_restart_from_surface(
             patch: RestartPatchFields {
                 class: &class,
                 kind: &kind,
-                mask: &[true],
+                mask: &mask,
                 longitude_radians: &longitude_radians,
                 latitude_radians: &latitude_radians,
                 albedo: SoilAlbedo {
-                    saturated_visible: &[albedo[0].saturated_visible],
-                    dry_visible: &[albedo[0].dry_visible],
-                    saturated_near_infrared: &[albedo[0].saturated_near_infrared],
-                    dry_near_infrared: &[albedo[0].dry_near_infrared],
+                    saturated_visible: &albedo_saturated_visible,
+                    dry_visible: &albedo_dry_visible,
+                    saturated_near_infrared: &albedo_saturated_near_infrared,
+                    dry_near_infrared: &albedo_dry_near_infrared,
                 },
                 bvic: &bvic,
                 soil_texture: &texture,
@@ -797,6 +837,18 @@ pub fn write_single_point_cold_time_restarts(
         snow_cover.ground_snow_fraction,
         cold_soil.temperature_k[0],
     )?;
+    let common_patch = [ColdPatchFields {
+        total_lai,
+        total_sai,
+        vegetation_fraction: fveg,
+        greenness: green,
+        snow_free_vegetation_fraction: sigf,
+        lai,
+        sai,
+        radiation: &radiation,
+        ground_snow_fraction: snow_cover.ground_snow_fraction,
+        roughness,
+    }];
     let common = write_cold_time_restart(
         run,
         kind,
@@ -809,20 +861,11 @@ pub fn write_single_point_cold_time_restarts(
         &hydraulic.hydraulic_conductivity_mm_s,
         cold_soil.water_table_depth_m,
         cold_soil.aquifer_water_mm,
-        total_lai,
-        total_sai,
-        fveg,
-        green,
-        sigf,
-        lai,
-        sai,
         cosine_zenith,
-        &radiation,
         &snow,
         snow_depth_m,
         snow_water_equivalent_mm,
-        snow_cover.ground_snow_fraction,
-        roughness,
+        &common_patch,
         None,
     )?;
     Ok(SinglePointTimeRestartFiles {
@@ -1006,6 +1049,18 @@ fn write_single_point_urban_cold_time_restarts(
                 * initialized.state.pervious_road_fraction[0]
         })
         .collect::<Vec<_>>();
+    let common_patch = [ColdPatchFields {
+        total_lai,
+        total_sai,
+        vegetation_fraction: fveg,
+        greenness: 1.0,
+        snow_free_vegetation_fraction: sigf,
+        lai,
+        sai,
+        radiation: &radiation,
+        ground_snow_fraction: snow_cover.ground_snow_fraction,
+        roughness,
+    }];
     let common = write_cold_time_restart(
         run,
         kind,
@@ -1018,20 +1073,11 @@ fn write_single_point_urban_cold_time_restarts(
         &hydraulic.hydraulic_conductivity_mm_s,
         cold_soil.water_table_depth_m,
         cold_soil.aquifer_water_mm,
-        total_lai,
-        total_sai,
-        fveg,
-        1.0,
-        sigf,
-        lai,
-        sai,
         cosine_zenith,
-        &radiation,
         &snow,
         snow_depth_m,
         snow_water_equivalent_mm,
-        snow_cover.ground_snow_fraction,
-        roughness,
+        &common_patch,
         None,
     )?;
     let urban_file = write_single_point_urban_time_restart(
@@ -1233,21 +1279,29 @@ fn write_single_point_pft_cold_time_restarts(
             pft_parameters(&document, "DEF_PFT_LIVEWDCN", &pft.class, campbell)?;
         let dead_wood_carbon_to_nitrogen =
             pft_parameters(&document, "DEF_PFT_DEADWDCN", &pft.class, campbell)?;
-        Some(derive_cold_start_bgc_state(BgcColdStartInput {
+        let input = |index: std::ops::RangeInclusive<usize>| BgcColdStartInput {
             soil_thickness_m: &thickness,
             soil_bulk_density_kg_m3: soil.field(SoilField::BulkDensity),
             pft: BgcPftColdStartInput {
-                class: &pft.class,
-                fraction: &pft.fraction,
-                leaf_carbon_to_nitrogen: &leaf_carbon_to_nitrogen,
-                fine_root_carbon_to_nitrogen: &fine_root_carbon_to_nitrogen,
-                live_wood_carbon_to_nitrogen: &live_wood_carbon_to_nitrogen,
-                dead_wood_carbon_to_nitrogen: &dead_wood_carbon_to_nitrogen,
+                class: &pft.class[index.clone()],
+                fraction: &pft.fraction[index.clone()],
+                leaf_carbon_to_nitrogen: &leaf_carbon_to_nitrogen[index.clone()],
+                fine_root_carbon_to_nitrogen: &fine_root_carbon_to_nitrogen[index.clone()],
+                live_wood_carbon_to_nitrogen: &live_wood_carbon_to_nitrogen[index.clone()],
+                dead_wood_carbon_to_nitrogen: &dead_wood_carbon_to_nitrogen[index],
             },
             runtime_cn_state: runtime_cn_state.as_ref(),
             runtime_vegetation_carbon: None,
             use_nitrification: run.nitrification,
-        })?)
+        };
+        Some(if crop.is_some() {
+            let states = (0..pft.class.len())
+                .map(|index| derive_cold_start_bgc_state(input(index..=index)))
+                .collect::<Result<Vec<_>>>()?;
+            merge_bgc_cold_start_states(&states)?
+        } else {
+            derive_cold_start_bgc_state(input(0..=pft.class.len() - 1))?
+        })
     } else {
         None
     };
@@ -1314,20 +1368,48 @@ fn write_single_point_pft_cold_time_restarts(
     let roughness = weighted_sum(&canopy.top_m, &pft.fraction)? * 0.1;
     let roughness_p = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
     let pft_snow = if snow_depth_m > 0.0 {
-        derive_pft_snow_cover(
-            &pft.class,
-            &pft.fraction,
-            &total_lai_p,
-            &total_sai_p,
-            &roughness_p,
-            &canopy.bottom_m,
-            &canopy.top_m,
-            config.tuning.zlnd,
-            snow_water_equivalent_mm,
-            snow_depth_m,
-            run.snow_cover_exponent,
-            run.vegetation_snow,
-        )?
+        if crop.is_some() {
+            let patches = (0..pft.class.len())
+                .map(|index| {
+                    derive_pft_snow_cover(
+                        &pft.class[index..=index],
+                        &pft.fraction[index..=index],
+                        &total_lai_p[index..=index],
+                        &total_sai_p[index..=index],
+                        &roughness_p[index..=index],
+                        &canopy.bottom_m[index..=index],
+                        &canopy.top_m[index..=index],
+                        config.tuning.zlnd,
+                        snow_water_equivalent_mm,
+                        snow_depth_m,
+                        run.snow_cover_exponent,
+                        run.vegetation_snow,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            crate::PftSnowCover {
+                patch: patches[0].patch,
+                pft_snow_free_vegetation_fraction: patches
+                    .iter()
+                    .map(|patch| patch.pft_snow_free_vegetation_fraction[0])
+                    .collect(),
+            }
+        } else {
+            derive_pft_snow_cover(
+                &pft.class,
+                &pft.fraction,
+                &total_lai_p,
+                &total_sai_p,
+                &roughness_p,
+                &canopy.bottom_m,
+                &canopy.top_m,
+                config.tuning.zlnd,
+                snow_water_equivalent_mm,
+                snow_depth_m,
+                run.snow_cover_exponent,
+                run.vegetation_snow,
+            )?
+        }
     } else {
         crate::PftSnowCover {
             patch: crate::SnowCover {
@@ -1466,6 +1548,37 @@ fn write_single_point_pft_cold_time_restarts(
         }
     }
     let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
+    let common_patches = if crop.is_some() {
+        pft.class
+            .iter()
+            .enumerate()
+            .map(|(index, _)| ColdPatchFields {
+                total_lai: total_lai_p[index],
+                total_sai: total_sai_p[index],
+                vegetation_fraction: 1.0,
+                greenness: 1.0,
+                snow_free_vegetation_fraction: pft_snow.pft_snow_free_vegetation_fraction[index],
+                lai: total_lai_p[index],
+                sai: sai_p[index],
+                radiation: &one_dimensional_radiation[index],
+                ground_snow_fraction: pft_snow.patch.ground_snow_fraction,
+                roughness: roughness_p[index],
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![ColdPatchFields {
+            total_lai,
+            total_sai,
+            vegetation_fraction: 1.0,
+            greenness: 1.0,
+            snow_free_vegetation_fraction: pft_snow.patch.snow_free_vegetation_fraction,
+            lai: total_lai,
+            sai,
+            radiation: &pft_radiation.radiation,
+            ground_snow_fraction: pft_snow.patch.ground_snow_fraction,
+            roughness,
+        }]
+    };
     let common = write_cold_time_restart(
         run,
         kind,
@@ -1478,20 +1591,11 @@ fn write_single_point_pft_cold_time_restarts(
         &hydraulic.hydraulic_conductivity_mm_s,
         cold_soil.water_table_depth_m,
         cold_soil.aquifer_water_mm,
-        total_lai,
-        total_sai,
-        1.0,
-        1.0,
-        pft_snow.patch.snow_free_vegetation_fraction,
-        total_lai,
-        sai,
         cosine_zenith,
-        &pft_radiation.radiation,
         &snow,
         snow_depth_m,
         snow_water_equivalent_mm,
-        pft_snow.patch.ground_snow_fraction,
-        roughness,
+        &common_patches,
         crop.as_ref(),
     )?;
     let bgc_pft_values = bgc_state.as_ref().map(|state| {
@@ -1593,6 +1697,20 @@ struct PftColdStartRadiation {
     diffuse_extinction: Vec<f64>,
 }
 
+/// One independent common-restart patch in a single-point cold start.
+struct ColdPatchFields<'a> {
+    total_lai: f64,
+    total_sai: f64,
+    vegetation_fraction: f64,
+    greenness: f64,
+    snow_free_vegetation_fraction: f64,
+    lai: f64,
+    sai: f64,
+    radiation: &'a ColdStartRadiation,
+    ground_snow_fraction: f64,
+    roughness: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PftCanopy {
     pub(crate) top_m: Vec<f64>,
@@ -1624,10 +1742,6 @@ fn single_point_crop_state(
     ensure!(
         run.bgc,
         "CROP single-point initialization requires DEF_USE_BGC = .true."
-    );
-    ensure!(
-        pft.class.len() == 1 && crop_fraction.len() == 1,
-        "Rust CROP single-point initialization currently requires one active CFT patch; multi-CFT surfaces need multi-patch common restarts"
     );
     let planting_day = document
         .get("DEF_TUNING_CROP_PLANTING_DAY")
@@ -1780,6 +1894,14 @@ fn weighted_sum(values: &[f64], weights: &[f64]) -> Result<f64> {
         .zip(weights)
         .map(|(value, weight)| value * weight)
         .sum())
+}
+
+/// Expands a one-patch, axis-major field to identical independent patches.
+fn repeat_axis<T: Copy>(values: &[T], patches: usize) -> Vec<T> {
+    values
+        .iter()
+        .flat_map(|&value| std::iter::repeat_n(value, patches))
+        .collect()
 }
 
 fn pft_radiation_values(
@@ -1969,23 +2091,19 @@ fn write_cold_time_restart(
     conductivity: &[f64],
     water_table_depth_m: f64,
     aquifer_water_mm: f64,
-    total_lai: f64,
-    total_sai: f64,
-    fveg: f64,
-    green: f64,
-    sigf: f64,
-    lai: f64,
-    sai: f64,
     cosine_zenith: f64,
-    radiation: &ColdStartRadiation,
     snow: &crate::SnowState,
     snow_depth_m: f64,
     snow_water_equivalent_mm: f64,
-    ground_snow_fraction: f64,
-    roughness: f64,
+    patches: &[ColdPatchFields<'_>],
     crop: Option<&CropColdStartState>,
 ) -> Result<TimeRestartFile> {
+    ensure!(
+        !patches.is_empty(),
+        "single-point common restart needs at least one patch"
+    );
     let dimensions = TimeRestartDimensions::default();
+    let patch_count = patches.len();
     let snow_temperature = snow
         .thickness_m
         .iter()
@@ -2009,25 +2127,85 @@ fn write_cold_time_restart(
     soil_snow_liquid.extend_from_slice(soil_liquid);
     let mut soil_snow_ice = snow_ice;
     soil_snow_ice.extend_from_slice(soil_ice);
-    let radiation_values = radiation_values(radiation);
-    let snow_layer_absorption =
-        vec![0.0; dimensions.bands * dimensions.radiation_types * (dimensions.snow_layers + 1)];
-    let lake_temperature = vec![285.0; dimensions.lake_layers];
-    let lake_ice = vec![0.0; dimensions.lake_layers];
-    let grain_radius = vec![54.526; dimensions.snow_layers];
-    let one = |value| [value];
-    let missing = one(crate::MISSING);
+    let snow_node_depth = repeat_axis(&snow.node_depth_m, patch_count);
+    let snow_layer_thickness = repeat_axis(&snow.thickness_m, patch_count);
+    let soil_snow_temperature = repeat_axis(&soil_snow_temperature, patch_count);
+    let soil_snow_liquid = repeat_axis(&soil_snow_liquid, patch_count);
+    let soil_snow_ice = repeat_axis(&soil_snow_ice, patch_count);
+    let matric_potential = repeat_axis(matric_potential, patch_count);
+    let conductivity = repeat_axis(conductivity, patch_count);
+    let radiation_values = radiation_values(patches);
+    let snow_layer_absorption = vec![
+        0.0;
+        dimensions.bands
+            * dimensions.radiation_types
+            * (dimensions.snow_layers + 1)
+            * patch_count
+    ];
+    let lake_temperature = vec![285.0; dimensions.lake_layers * patch_count];
+    let lake_ice = vec![0.0; dimensions.lake_layers * patch_count];
+    let lake_thickness = repeat_axis(&lake.thickness_m, patch_count);
+    let grain_radius = vec![54.526; dimensions.snow_layers * patch_count];
+    let snow_aerosol_zero = vec![0.0; dimensions.snow_layers * patch_count];
     let water_depth = if patch_type == 4 {
         surface.lake_depth_m * 1000.0
     } else {
         0.0
     };
     let wetland_water = if patch_type == 2 { 200.0 } else { 0.0 };
-    let plant_water = vec![-25_000.0; 4];
-    let ozone_lai = one(lai);
-    let ozone_zero = one(0.0);
-    let ozone_one = one(1.0);
-    let standard_water_table_depth = one((water_table_depth_m + 1.0).clamp(0.0, 80.0));
+    let patch_temperature = vec![soil_temperature[0]; patch_count];
+    let zeros = vec![0.0; patch_count];
+    let ones = vec![1.0; patch_count];
+    let missing = vec![crate::MISSING; patch_count];
+    let snow_age = patches
+        .iter()
+        .map(|patch| patch.radiation.snow_age)
+        .collect::<Vec<_>>();
+    let total_lai = patches
+        .iter()
+        .map(|patch| patch.total_lai)
+        .collect::<Vec<_>>();
+    let total_sai = patches
+        .iter()
+        .map(|patch| patch.total_sai)
+        .collect::<Vec<_>>();
+    let vegetation_fraction = patches
+        .iter()
+        .map(|patch| patch.vegetation_fraction)
+        .collect::<Vec<_>>();
+    let greenness = patches
+        .iter()
+        .map(|patch| patch.greenness)
+        .collect::<Vec<_>>();
+    let snow_free_vegetation_fraction = patches
+        .iter()
+        .map(|patch| patch.snow_free_vegetation_fraction)
+        .collect::<Vec<_>>();
+    let lai = patches.iter().map(|patch| patch.lai).collect::<Vec<_>>();
+    let sai = patches.iter().map(|patch| patch.sai).collect::<Vec<_>>();
+    let ground_snow_fraction = patches
+        .iter()
+        .map(|patch| patch.ground_snow_fraction)
+        .collect::<Vec<_>>();
+    let thermal_gap_fraction = patches
+        .iter()
+        .map(|patch| patch.radiation.thermal_gap_fraction)
+        .collect::<Vec<_>>();
+    let direct_extinction = patches
+        .iter()
+        .map(|patch| patch.radiation.direct_extinction)
+        .collect::<Vec<_>>();
+    let diffuse_extinction = patches
+        .iter()
+        .map(|patch| patch.radiation.diffuse_extinction)
+        .collect::<Vec<_>>();
+    let roughness = patches
+        .iter()
+        .map(|patch| patch.roughness)
+        .collect::<Vec<_>>();
+    let plant_water = vec![-25_000.0; 4 * patch_count];
+    let standard_water_table_depth =
+        vec![(water_table_depth_m + 1.0).clamp(0.0, 80.0); patch_count];
     let irrigation = crop.and_then(|state| state.irrigation_fields(&standard_water_table_depth));
 
     write_time_restart(
@@ -2039,56 +2217,56 @@ fn write_cold_time_restart(
         TimeRestartInput {
             dimensions,
             snow_soil: SnowSoilRestartFields {
-                snow_node_depth_m: &snow.node_depth_m,
-                snow_layer_thickness_m: &snow.thickness_m,
+                snow_node_depth_m: &snow_node_depth,
+                snow_layer_thickness_m: &snow_layer_thickness,
                 temperature_k: &soil_snow_temperature,
                 liquid_water_kg_m2: &soil_snow_liquid,
                 ice_water_kg_m2: &soil_snow_ice,
-                matric_potential_mm: matric_potential,
-                hydraulic_conductivity_mm_s: conductivity,
+                matric_potential_mm: &matric_potential,
+                hydraulic_conductivity_mm_s: &conductivity,
             },
             patch: TimePatchFields {
-                ground_temperature_k: &one(soil_temperature[0]),
-                leaf_temperature_k: &one(soil_temperature[0]),
-                canopy_water_mm: &one(0.0),
-                canopy_rain_mm: &one(0.0),
-                canopy_snow_mm: &one(0.0),
-                wet_snow_fraction: &one(0.0),
-                snow_age: &one(radiation.snow_age),
-                snow_water_equivalent_mm: &one(snow_water_equivalent_mm),
-                snow_depth_m: &one(snow_depth_m),
-                vegetation_fraction: &one(fveg),
-                ground_snow_fraction: &one(ground_snow_fraction),
-                snow_free_vegetation_fraction: &one(sigf),
-                greenness: &one(green),
-                lai: &one(lai),
-                total_lai: &one(total_lai),
-                sai: &one(sai),
-                total_sai: &one(total_sai),
-                cosine_zenith: &one(cosine_zenith),
-                thermal_gap_fraction: &one(radiation.thermal_gap_fraction),
-                direct_extinction: &one(radiation.direct_extinction),
-                diffuse_extinction: &one(radiation.diffuse_extinction),
-                water_table_depth_m: &one(water_table_depth_m),
-                aquifer_water_mm: &one(aquifer_water_mm),
-                wetland_water_mm: &one(wetland_water),
-                surface_water_mm: &one(water_depth),
+                ground_temperature_k: &patch_temperature,
+                leaf_temperature_k: &patch_temperature,
+                canopy_water_mm: &zeros,
+                canopy_rain_mm: &zeros,
+                canopy_snow_mm: &zeros,
+                wet_snow_fraction: &zeros,
+                snow_age: &snow_age,
+                snow_water_equivalent_mm: &vec![snow_water_equivalent_mm; patch_count],
+                snow_depth_m: &vec![snow_depth_m; patch_count],
+                vegetation_fraction: &vegetation_fraction,
+                ground_snow_fraction: &ground_snow_fraction,
+                snow_free_vegetation_fraction: &snow_free_vegetation_fraction,
+                greenness: &greenness,
+                lai: &lai,
+                total_lai: &total_lai,
+                sai: &sai,
+                total_sai: &total_sai,
+                cosine_zenith: &vec![cosine_zenith; patch_count],
+                thermal_gap_fraction: &thermal_gap_fraction,
+                direct_extinction: &direct_extinction,
+                diffuse_extinction: &diffuse_extinction,
+                water_table_depth_m: &vec![water_table_depth_m; patch_count],
+                aquifer_water_mm: &vec![aquifer_water_mm; patch_count],
+                wetland_water_mm: &vec![wetland_water; patch_count],
+                surface_water_mm: &vec![water_depth; patch_count],
                 soil_surface_resistance_s_m: &missing,
-                saved_tke: &one(0.6),
-                radiative_temperature_k: &one(soil_temperature[0]),
-                reference_temperature_k: &one(soil_temperature[0]),
-                reference_humidity: &one(0.3),
+                saved_tke: &vec![0.6; patch_count],
+                radiative_temperature_k: &patch_temperature,
+                reference_temperature_k: &patch_temperature,
+                reference_humidity: &vec![0.3; patch_count],
                 stomatal_resistance_s_m: &missing,
-                emissivity: &one(1.0),
-                roughness_length_m: &one(roughness),
-                monin_obukhov_height: &one(-1.0),
-                bulk_richardson: &one(-0.1),
-                friction_velocity: &one(0.25),
-                humidity_scale: &one(0.001),
-                temperature_scale_k: &one(-1.5),
-                momentum_integral: &one(30.0_f64.ln()),
-                heat_integral: &one(30.0_f64.ln()),
-                moisture_integral: &one(30.0_f64.ln()),
+                emissivity: &ones,
+                roughness_length_m: &roughness,
+                monin_obukhov_height: &vec![-1.0; patch_count],
+                bulk_richardson: &vec![-0.1; patch_count],
+                friction_velocity: &vec![0.25; patch_count],
+                humidity_scale: &vec![0.001; patch_count],
+                temperature_scale_k: &vec![-1.5; patch_count],
+                momentum_integral: &vec![30.0_f64.ln(); patch_count],
+                heat_integral: &vec![30.0_f64.ln(); patch_count],
+                moisture_integral: &vec![30.0_f64.ln(); patch_count],
             },
             radiation: TimeRadiationFields {
                 albedo: &radiation_values.albedo,
@@ -2101,33 +2279,33 @@ fn write_cold_time_restart(
             lake: TimeLakeFields {
                 temperature_k: &lake_temperature,
                 ice_fraction: &lake_ice,
-                layer_thickness_m: run.dynamic_lake.then_some(lake.thickness_m.as_slice()),
+                layer_thickness_m: run.dynamic_lake.then_some(lake_thickness.as_slice()),
             },
             snow_aerosol: SnowAerosolFields {
                 grain_radius: &grain_radius,
-                black_carbon_hydrophobic: &snow_liquid,
-                black_carbon_hydrophilic: &snow_liquid,
-                organic_carbon_hydrophobic: &snow_liquid,
-                organic_carbon_hydrophilic: &snow_liquid,
-                dust_1: &snow_liquid,
-                dust_2: &snow_liquid,
-                dust_3: &snow_liquid,
-                dust_4: &snow_liquid,
+                black_carbon_hydrophobic: &snow_aerosol_zero,
+                black_carbon_hydrophilic: &snow_aerosol_zero,
+                organic_carbon_hydrophobic: &snow_aerosol_zero,
+                organic_carbon_hydrophilic: &snow_aerosol_zero,
+                dust_1: &snow_aerosol_zero,
+                dust_2: &snow_aerosol_zero,
+                dust_3: &snow_aerosol_zero,
+                dust_4: &snow_aerosol_zero,
             },
             plant_hydraulics: run.plant_hydraulics.then_some(PlantHydraulicFields {
                 water_potential_mm: &plant_water,
-                sunlit_stomatal_conductance: &one(10_000.0),
-                shaded_stomatal_conductance: &one(10_000.0),
+                sunlit_stomatal_conductance: &vec![10_000.0; patch_count],
+                shaded_stomatal_conductance: &vec![10_000.0; patch_count],
                 vegetation_nodes: 4,
             }),
             ozone: run.ozone_stress.then_some(OzoneFields {
-                lai_old: &ozone_lai,
-                sunlit_uptake: &ozone_zero,
-                shaded_uptake: &ozone_zero,
-                sunlit_vegetation_coefficient: &ozone_one,
-                shaded_vegetation_coefficient: &ozone_one,
-                sunlit_ground_coefficient: &ozone_one,
-                shaded_ground_coefficient: &ozone_one,
+                lai_old: &lai,
+                sunlit_uptake: &zeros,
+                shaded_uptake: &zeros,
+                sunlit_vegetation_coefficient: &ones,
+                shaded_vegetation_coefficient: &ones,
+                sunlit_ground_coefficient: &ones,
+                shaded_ground_coefficient: &ones,
             }),
             irrigation,
         },
@@ -2299,14 +2477,23 @@ struct RadiationValues {
     snow_absorption: Vec<f64>,
 }
 
-fn radiation_values(radiation: &ColdStartRadiation) -> RadiationValues {
-    let flatten = |values: [[f64; 2]; 2]| values.into_iter().flatten().collect();
+fn radiation_values(patches: &[ColdPatchFields<'_>]) -> RadiationValues {
+    let flatten = |values: [[f64; 2]; 2]| values.into_iter().flatten().collect::<Vec<_>>();
+    let values = |field: fn(&ColdStartRadiation) -> [[f64; 2]; 2]| {
+        let mut output = vec![0.0; 4 * patches.len()];
+        for (patch, state) in patches.iter().enumerate() {
+            for (index, value) in flatten(field(state.radiation)).into_iter().enumerate() {
+                output[index * patches.len() + patch] = value;
+            }
+        }
+        output
+    };
     RadiationValues {
-        albedo: flatten(radiation.albedo),
-        sunlit_absorption: flatten(radiation.sunlit_absorption),
-        shaded_absorption: flatten(radiation.shaded_absorption),
-        soil_absorption: flatten(radiation.soil_absorption),
-        snow_absorption: flatten(radiation.snow_absorption),
+        albedo: values(|state| state.albedo),
+        sunlit_absorption: values(|state| state.sunlit_absorption),
+        shaded_absorption: values(|state| state.shaded_absorption),
+        soil_absorption: values(|state| state.soil_absorption),
+        snow_absorption: values(|state| state.snow_absorption),
     }
 }
 
