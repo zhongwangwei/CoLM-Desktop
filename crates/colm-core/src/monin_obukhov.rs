@@ -288,7 +288,7 @@ pub fn initialize_monin_obukhov(
         "initial Monin-Obukhov inputs are invalid"
     );
     let stability_adjusted_wind_m_s = if input.virtual_temperature_difference_k >= 0.0 {
-        input.reference_wind_m_s.max(0.1)
+        input.reference_wind_m_s.max(f77(0.1))
     } else {
         (input.reference_wind_m_s.powi(2) + 0.5_f64.powi(2)).sqrt()
     };
@@ -297,11 +297,11 @@ pub fn initialize_monin_obukhov(
             / (input.virtual_potential_temperature_k * stability_adjusted_wind_m_s.powi(2));
     let zeta = if richardson >= 0.0 {
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln()
-            / (1.0 - 5.0 * richardson.min(0.19)))
-        .clamp(1.0e-6, 2.0)
+            / (1.0 - 5.0 * richardson.min(f77(0.19))))
+        .clamp(f77(1.0e-6), 2.0)
     } else {
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln())
-            .clamp(-100.0, -1.0e-6)
+            .clamp(-100.0, -f77(1.0e-6))
     };
     Ok(MoninObukhovInitialState {
         stability_adjusted_wind_m_s,
@@ -376,10 +376,10 @@ impl MomentumScheme {
 
 fn momentum_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f64 {
     let zeta = distance_m / obukhov_length_m;
-    if zeta < -1.574 {
-        (-1.574 * obukhov_length_m / roughness_m).ln() - psi(1, -1.574)
+    if zeta < -f77(1.574) {
+        (-f77(1.574) * obukhov_length_m / roughness_m).ln() - psi(1, -f77(1.574))
             + psi(1, roughness_m / obukhov_length_m)
-            + 1.14 * ((-zeta).powf(1.0 / 3.0) - 1.574_f64.powf(1.0 / 3.0))
+            + f77(1.14) * ((-zeta).powf(f77(0.333)) - f77(1.574).powf(f77(0.333)))
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(1, zeta) + psi(1, roughness_m / obukhov_length_m)
     } else if zeta <= 1.0 {
@@ -392,10 +392,10 @@ fn momentum_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -
 
 fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f64 {
     let zeta = distance_m / obukhov_length_m;
-    if zeta < -0.465 {
-        (-0.465 * obukhov_length_m / roughness_m).ln() - psi(2, -0.465)
+    if zeta < -f77(0.465) {
+        (-f77(0.465) * obukhov_length_m / roughness_m).ln() - psi(2, -f77(0.465))
             + psi(2, roughness_m / obukhov_length_m)
-            + 0.8 * (0.465_f64.powf(-1.0 / 3.0) - (-zeta).powf(-1.0 / 3.0))
+            + f77(0.8) * (f77(0.465).powf(-f77(0.333)) - (-zeta).powf(-f77(0.333)))
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(2, zeta) + psi(2, roughness_m / obukhov_length_m)
     } else if zeta <= 1.0 {
@@ -407,8 +407,8 @@ fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f6
 }
 
 fn heat_similarity(zeta: f64) -> f64 {
-    if zeta < -0.465 {
-        0.9 * VON_KARMAN.powf(1.333) * (-zeta).powf(-1.0 / 3.0)
+    if zeta < -f77(0.465) {
+        f77(0.9) * VON_KARMAN.powf(f77(1.333)) * (-zeta).powf(-f77(0.333))
     } else if zeta < 0.0 {
         (1.0 - 16.0 * zeta).powf(-0.5)
     } else if zeta <= 1.0 {

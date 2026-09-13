@@ -57,6 +57,30 @@ fn monin_obukhov_matches_current_fortran_in_unstable_and_stable_air() {
 }
 
 #[test]
+fn monin_obukhov_preserves_the_upstream_deeply_unstable_literals() {
+    let state = monin_obukhov(MoninObukhovInput {
+        wind_height_m: 30.0,
+        temperature_height_m: 30.0,
+        humidity_height_m: 30.0,
+        displacement_height_m: 6.0,
+        momentum_roughness_m: f77(0.002),
+        heat_roughness_m: f77(0.002),
+        moisture_roughness_m: f77(0.002),
+        obukhov_length_m: -6.601_160_578_823_607,
+        stability_adjusted_wind_m_s: 3.238_826_995_252_414,
+    })
+    .unwrap();
+    // Standalone gfortran run of MOD_FrictionVelocity:moninobuk.
+    close(state.friction_velocity_m_s, 1.699_071_525_890_932_5e-1);
+    close(state.heat_at_2m, 5.838_661_178_310_979);
+    close(state.moisture_at_2m, 5.838_661_178_310_979);
+    close(state.momentum_at_10m, 7.181_720_435_998_081);
+    close(state.momentum, 7.624_933_957_542_186);
+    close(state.heat, 6.512_109_801_387_894);
+    close(state.moisture, 6.512_109_801_387_894);
+}
+
+#[test]
 fn canopy_and_initialization_match_current_fortran() {
     let canopy = canopy_monin_obukhov(CanopyMoninObukhovInput {
         surface: unstable(),

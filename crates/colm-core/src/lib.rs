@@ -45,6 +45,7 @@ pub mod urban_lucy;
 pub mod urban_net_solar;
 pub mod urban_pervious;
 pub mod urban_radiation;
+pub mod urban_roof_flux;
 pub mod urban_temperature;
 pub mod variably_saturated_flow;
 pub mod vegetation;
@@ -182,6 +183,7 @@ pub use urban_lucy::{urban_lucy_flux, UrbanLucyFluxInput, UrbanLucyFluxes};
 pub use urban_net_solar::{urban_net_solar, UrbanNetSolarFluxes, UrbanNetSolarInput};
 pub use urban_pervious::{urban_pervious_temperature, UrbanPerviousTemperatureInput};
 pub use urban_radiation::{cold_start_urban_radiation, UrbanRadiationInput, UrbanRadiationState};
+pub use urban_roof_flux::{urban_roof_flux, UrbanRoofFluxInput, UrbanRoofFluxState};
 pub use urban_temperature::{
     urban_roof_temperature, urban_wall_temperature, UrbanRoofTemperatureInput,
     UrbanRoofTemperatureState, UrbanWallTemperatureInput, UrbanWallTemperatureState,
