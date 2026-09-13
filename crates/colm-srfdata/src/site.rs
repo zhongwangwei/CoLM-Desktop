@@ -15,7 +15,7 @@ use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
-use crate::raster::{point_f64, point_i32};
+use crate::raster::{point_f64, point_i32, point_time_f64};
 use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
 use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
@@ -135,6 +135,13 @@ pub enum SiteMode {
     Urban,
 }
 
+/// Native LCT vegetation cadence resolved from the case namelist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinglePointLaiFrequency {
+    Monthly,
+    EightDay,
+}
+
 impl SiteMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -159,6 +166,11 @@ pub struct SinglePointSurfaceRun {
     pub rawdata: Option<PathBuf>,
     pub mode: SiteMode,
     pub crop_enabled: bool,
+    pub lai_frequency: SinglePointLaiFrequency,
+    pub use_site_lai: bool,
+    /// Exact rawdata years used when native LCT eight-day LAI is not supplied
+    /// by the site surface.
+    pub eight_day_lai_years: Vec<i32>,
     /// `DEF_USE_CANYON_HWR` selects the source geometry representation for
     /// urban sites.  The two source fields are not interchangeable.
     pub urban_canyon_hwr: bool,
@@ -171,6 +183,14 @@ pub struct SinglePointSurfaceRun {
 struct UrbanSurfaceOptions {
     canyon_hwr: bool,
     lai_year_window: Option<(i32, i32)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SinglePointMaterializeOptions<'a> {
+    urban: UrbanSurfaceOptions,
+    lai_frequency: SinglePointLaiFrequency,
+    use_site_lai: bool,
+    eight_day_lai_years: &'a [i32],
 }
 
 /// Resolve the native single-point `mksrfdata` contract from `case.nml`.
@@ -233,12 +253,25 @@ pub fn single_point_surface_run_from_namelist(
         .map(PathBuf::from);
     let urban_canyon_hwr = namelist_bool(&document, "DEF_USE_CANYON_HWR", false)?;
     let urban_lai_year_window = urban_lai_year_window(&document, urban)?;
+    let lai_frequency = if !urban && lct && !namelist_bool(&document, "DEF_LAI_MONTHLY", true)? {
+        SinglePointLaiFrequency::EightDay
+    } else {
+        SinglePointLaiFrequency::Monthly
+    };
+    let eight_day_lai_years = match lai_frequency {
+        SinglePointLaiFrequency::Monthly => Vec::new(),
+        SinglePointLaiFrequency::EightDay => single_point_eight_day_lai_years(&document)?,
+    };
+    let use_site_lai = namelist_bool(&document, "USE_SITE_LAI", true)?;
     Ok(SinglePointSurfaceRun {
         source,
         landdata_dir: output.join(case_name).join("landdata"),
         rawdata,
         mode,
         crop_enabled,
+        lai_frequency,
+        use_site_lai,
+        eight_day_lai_years,
         urban_canyon_hwr,
         urban_lai_year_window,
     })
@@ -259,9 +292,14 @@ pub fn materialize_single_point_surface_from_namelist(
         run.rawdata.as_deref(),
         observation,
         run.crop_enabled,
-        UrbanSurfaceOptions {
-            canyon_hwr: run.urban_canyon_hwr,
-            lai_year_window: run.urban_lai_year_window,
+        SinglePointMaterializeOptions {
+            urban: UrbanSurfaceOptions {
+                canyon_hwr: run.urban_canyon_hwr,
+                lai_year_window: run.urban_lai_year_window,
+            },
+            lai_frequency: run.lai_frequency,
+            use_site_lai: run.use_site_lai,
+            eight_day_lai_years: &run.eight_day_lai_years,
         },
     )?;
     Ok((run, report))
@@ -317,6 +355,27 @@ fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -
             .with_context(|| format!("{field} is outside CoLM's integer range")),
         Some(_) => bail!("{field} must be an integer value"),
     }
+}
+
+fn single_point_eight_day_lai_years(document: &colm_namelist::Document) -> Result<Vec<i32>> {
+    let lai_start = namelist_i32(document, "DEF_LAI_START_YEAR", 2000)?;
+    let lai_end = namelist_i32(document, "DEF_LAI_END_YEAR", 2020)?;
+    ensure!(
+        lai_start <= lai_end,
+        "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
+    );
+    if !namelist_bool(document, "DEF_LAI_CHANGE_YEARLY", true)? {
+        return Ok(vec![namelist_i32(document, "DEF_LC_YEAR", 2005)?]);
+    }
+    let simulation_start = namelist_i32(document, "DEF_simulation_time%start_year", 2000)?;
+    let simulation_end = namelist_i32(document, "DEF_simulation_time%end_year", simulation_start)?;
+    ensure!(
+        simulation_start <= simulation_end,
+        "simulation start year must not exceed simulation end year"
+    );
+    let first = simulation_start.max(lai_start).min(lai_end);
+    let last = simulation_end.min(lai_end).max(lai_start);
+    Ok((first..=last).collect())
 }
 
 fn urban_lai_year_window(
@@ -594,6 +653,22 @@ pub fn audit(
     rawdata: Option<&Path>,
     crop_enabled: bool,
 ) -> Result<SiteAudit> {
+    audit_with_lai_frequency(
+        file,
+        mode,
+        rawdata,
+        crop_enabled,
+        SinglePointLaiFrequency::Monthly,
+    )
+}
+
+fn audit_with_lai_frequency(
+    file: &Path,
+    mode: SiteMode,
+    rawdata: Option<&Path>,
+    crop_enabled: bool,
+    lai_frequency: SinglePointLaiFrequency,
+) -> Result<SiteAudit> {
     if crop_enabled && !matches!(mode, SiteMode::Pft | SiteMode::Pc) {
         bail!(
             "CROP site audit requires PFT or PC mode, got {}",
@@ -612,20 +687,20 @@ pub fn audit(
     required.extend(SOIL_RUN_FIELDS);
 
     match mode {
-        SiteMode::Igbp => required.extend([
-            "IGBP_classification",
-            "canopy_height",
-            "LAI_year",
-            "LAI_monthly",
-            "SAI_monthly",
-        ]),
-        SiteMode::Usgs => required.extend([
-            "USGS_classification",
-            "canopy_height",
-            "LAI_year",
-            "LAI_monthly",
-            "SAI_monthly",
-        ]),
+        SiteMode::Igbp => {
+            required.extend(["IGBP_classification", "canopy_height", "LAI_year"]);
+            match lai_frequency {
+                SinglePointLaiFrequency::Monthly => required.extend(["LAI_monthly", "SAI_monthly"]),
+                SinglePointLaiFrequency::EightDay => required.push("LAI_8day"),
+            }
+        }
+        SiteMode::Usgs => {
+            required.extend(["USGS_classification", "canopy_height", "LAI_year"]);
+            match lai_frequency {
+                SinglePointLaiFrequency::Monthly => required.extend(["LAI_monthly", "SAI_monthly"]),
+                SinglePointLaiFrequency::EightDay => required.push("LAI_8day"),
+            }
+        }
         SiteMode::Pft | SiteMode::Pc if crop_enabled => required.extend([
             "IGBP_classification",
             "croptyp",
@@ -708,7 +783,9 @@ pub fn audit(
 
     let rawdata_blocker = rawdata
         .filter(|_| !needs_external.is_empty())
-        .and_then(|raw| rawdata_blocker(raw, mode, &needs_external));
+        .and_then(|raw| {
+            rawdata_blocker_with_lai_frequency(raw, mode, &needs_external, lai_frequency)
+        });
     if let Some(blocker) = rawdata_blocker {
         needs_external.push(blocker);
     }
@@ -810,6 +887,9 @@ fn validate_site_variable(
         {
             Some("monthly canopy values must be 12-month groups within 0..30")
         }
+        "LAI_8day" if values.len() % 46 != 0 || values.iter().any(|v| *v < 0.0 || *v > 30.0) => {
+            Some("eight-day LAI must be 46-record groups within 0..30")
+        }
         "LAI_year" if !integers_in(&values, 1800..=2300) => Some("years must be integer years"),
         _ => None,
     };
@@ -832,6 +912,14 @@ fn validate_site_variable(
         && values.len() != 12
     {
         return Ok(Some("monthly variable has no month dimension".to_string()));
+    }
+    if name == "LAI_8day"
+        && (!dim_names.iter().any(|d| d == "J8day")
+            || values.len() != 46 * file.dimension("LAI_year").map_or(0, |d| d.len()))
+    {
+        return Ok(Some(
+            "eight-day variable must have J8day=46 for every LAI_year".to_string(),
+        ));
     }
     if matches!(mode, SiteMode::Pft | SiteMode::Pc)
         && matches!(name, "pctpfts" | "pfttyp" | "canopy_height_pfts")
@@ -871,7 +959,17 @@ fn valid_fraction_sum(values: &[f64]) -> bool {
     (sum - 1.0).abs() <= 0.01 || (sum - 100.0).abs() <= 1.0
 }
 
+#[cfg(test)]
 fn rawdata_blocker(raw: &Path, mode: SiteMode, needs: &[String]) -> Option<String> {
+    rawdata_blocker_with_lai_frequency(raw, mode, needs, SinglePointLaiFrequency::Monthly)
+}
+
+fn rawdata_blocker_with_lai_frequency(
+    raw: &Path,
+    mode: SiteMode,
+    needs: &[String],
+    lai_frequency: SinglePointLaiFrequency,
+) -> Option<String> {
     let needs_name = |name: &str| {
         needs
             .iter()
@@ -899,6 +997,9 @@ fn rawdata_blocker(raw: &Path, mode: SiteMode, needs: &[String]) -> Option<Strin
         .any(|n| needs_name(n))
     {
         buckets.push(("plant_15s", raw.join("plant_15s")));
+    }
+    if matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && needs_name("LAI_8day") {
+        buckets.push(("lai_15s_8day", raw.join("lai_15s_8day")));
     }
     if mode == SiteMode::Urban {
         if ["LCZ_DOM", "URBAN_DENSITY_CLASS"]
@@ -1465,7 +1566,12 @@ pub fn materialize_single_point_surface(
         rawdata,
         observation,
         crop_enabled,
-        UrbanSurfaceOptions::default(),
+        SinglePointMaterializeOptions {
+            urban: UrbanSurfaceOptions::default(),
+            lai_frequency: SinglePointLaiFrequency::Monthly,
+            use_site_lai: true,
+            eight_day_lai_years: &[],
+        },
     )
 }
 
@@ -1559,34 +1665,136 @@ fn materialize_single_point_surface_impl(
     rawdata: Option<&Path>,
     observation: Option<&Path>,
     crop_enabled: bool,
-    urban: UrbanSurfaceOptions,
+    options: SinglePointMaterializeOptions<'_>,
 ) -> Result<Option<Report>> {
+    let lai_frequency = options.lai_frequency;
+    let requires_eight_day_raw =
+        matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && !options.use_site_lai;
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
-    let readiness = audit(source, mode, None, crop_enabled)?;
-    if readiness.self_contained() {
-        publish_single_point_surface(source, &target, mode, crop_enabled, urban)?;
+    let readiness = audit_with_lai_frequency(source, mode, None, crop_enabled, lai_frequency)?;
+    if readiness.self_contained() && !requires_eight_day_raw {
+        publish_single_point_surface(
+            source,
+            &target,
+            mode,
+            crop_enabled,
+            lai_frequency,
+            options.urban,
+        )?;
         return Ok(None);
     }
 
     let temporary = landdata_dir.join(format!(".srfdata-rs-{}.nc", std::process::id()));
-    let report = if mode == SiteMode::Urban {
+    let report = if readiness.self_contained() {
+        std::fs::copy(source, &temporary).with_context(|| {
+            format!(
+                "cannot copy {} to {}",
+                source.display(),
+                temporary.display()
+            )
+        })?;
+        None
+    } else if mode == SiteMode::Urban {
         prepare_urban(source, &temporary)?;
         None
     } else {
         Some(fill(source, &temporary, rawdata, observation)?)
     };
-    let readiness = audit(&temporary, mode, None, crop_enabled)?;
+    if matches!(lai_frequency, SinglePointLaiFrequency::EightDay)
+        && (requires_eight_day_raw || netcdf::open(&temporary)?.variable("LAI_8day").is_none())
+    {
+        materialize_single_point_eight_day_lai(
+            &temporary,
+            rawdata.context("8-day LCT LAI needs DEF_dir_rawdata/lai_15s_8day")?,
+            options.eight_day_lai_years,
+        )?;
+    }
+    let readiness = audit_with_lai_frequency(&temporary, mode, None, crop_enabled, lai_frequency)?;
     if !readiness.self_contained() {
         return Err(anyhow::anyhow!(
             "Rust single-point surface output still requires external data: {}",
             readiness.needs_external.join(", ")
         ));
     }
-    publish_single_point_surface(&temporary, &target, mode, crop_enabled, urban)?;
+    publish_single_point_surface(
+        &temporary,
+        &target,
+        mode,
+        crop_enabled,
+        lai_frequency,
+        options.urban,
+    )?;
     std::fs::remove_file(&temporary)?;
     Ok(report)
+}
+
+fn materialize_single_point_eight_day_lai(
+    surface: &Path,
+    rawdata: &Path,
+    years: &[i32],
+) -> Result<()> {
+    ensure!(
+        !years.is_empty(),
+        "8-day LCT LAI needs at least one resolved LAI year"
+    );
+    let (longitude, latitude) = {
+        let file = netcdf::open(surface)
+            .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        (
+            scalar_f64(&file, "longitude")?,
+            scalar_f64(&file, "latitude")?,
+        )
+    };
+    let mut values = Vec::with_capacity(years.len() * 46);
+    for &year in years {
+        let path = rawdata
+            .join("lai_15s_8day")
+            .join(format!("lai_8-day_15s_{year:04}.nc"));
+        for time in 1..=46 {
+            values.push(
+                point_time_f64(&path, "lai", longitude, latitude, time)
+                    .with_context(|| format!("cannot read 8-day LAI year {year}, record {time}"))?
+                    * 0.1,
+            );
+        }
+    }
+    ensure!(
+        values
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=30.0).contains(value)),
+        "8-day LCT LAI rawdata values must be finite and within 0..30"
+    );
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::append(surface)
+        .with_context(|| format!("cannot append single-point surface {}", surface.display()))?;
+    if let Some(variable) = file.variable("LAI_year") {
+        ensure!(
+            variable.get_values::<i32, _>(..)? == years,
+            "existing LAI_year does not match the native eight-day rawdata year window"
+        );
+    } else {
+        ensure_dimension(&mut file, "LAI_year", years.len())?;
+        put_values(
+            &mut file,
+            "LAI_year",
+            &["LAI_year"],
+            years,
+            "rawdata lai_15s_8day selected by native mksrfdata",
+        )?;
+    }
+    ensure_dimension_with_len(&mut file, "J8day", 46)?;
+    put_or_replace_values(
+        &mut file,
+        "LAI_8day",
+        &["LAI_year", "J8day"],
+        &values,
+        "rawdata lai_15s_8day, x0.1 as MOD_SingleSrfdata.F90 does",
+    )?;
+    file.close()
+        .with_context(|| format!("cannot close single-point surface {}", surface.display()))
 }
 
 fn publish_single_point_surface(
@@ -1594,21 +1802,45 @@ fn publish_single_point_surface(
     target: &Path,
     mode: SiteMode,
     crop_enabled: bool,
+    lai_frequency: SinglePointLaiFrequency,
     urban: UrbanSurfaceOptions,
 ) -> Result<()> {
     if mode == SiteMode::Urban {
         write_urban_single_point_surface(source, target, urban.canyon_hwr, urban.lai_year_window)
     } else {
-        write_single_point_surface(source, target, mode, crop_enabled)
+        write_single_point_surface_with_lai_frequency(
+            source,
+            target,
+            mode,
+            crop_enabled,
+            lai_frequency,
+        )
     }
 }
 
 /// Emit the eight-layer single-point artifact written by `write_surface_data_single`.
+#[cfg(test)]
 fn write_single_point_surface(
     source: &Path,
     target: &Path,
     mode: SiteMode,
     crop_enabled: bool,
+) -> Result<()> {
+    write_single_point_surface_with_lai_frequency(
+        source,
+        target,
+        mode,
+        crop_enabled,
+        SinglePointLaiFrequency::Monthly,
+    )
+}
+
+fn write_single_point_surface_with_lai_frequency(
+    source: &Path,
+    target: &Path,
+    mode: SiteMode,
+    crop_enabled: bool,
+    lai_frequency: SinglePointLaiFrequency,
 ) -> Result<()> {
     let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
     ensure!(
@@ -1640,7 +1872,10 @@ fn write_single_point_surface(
         output.add_dimension("pft", pfts.len())?;
     }
     output.add_dimension("LAI_year", years.len())?;
-    output.add_dimension("month", 12)?;
+    match lai_frequency {
+        SinglePointLaiFrequency::Monthly => output.add_dimension("month", 12)?,
+        SinglePointLaiFrequency::EightDay => output.add_dimension("J8day", 46)?,
+    };
     output.add_dimension("soil", 8)?;
     emit_scalar(&mut output, "latitude", scalar_f64(&input, "latitude")?)?;
     emit_scalar(&mut output, "longitude", scalar_f64(&input, "longitude")?)?;
@@ -1721,13 +1956,23 @@ fn write_single_point_surface(
             )?;
         }
     } else {
-        for name in ["LAI_monthly", "SAI_monthly"] {
-            emit_f64(
+        match lai_frequency {
+            SinglePointLaiFrequency::Monthly => {
+                for name in ["LAI_monthly", "SAI_monthly"] {
+                    emit_f64(
+                        &mut output,
+                        name,
+                        &["LAI_year", "month"],
+                        &values_f64(&input, name)?,
+                    )?;
+                }
+            }
+            SinglePointLaiFrequency::EightDay => emit_f64(
                 &mut output,
-                name,
-                &["LAI_year", "month"],
-                &values_f64(&input, name)?,
-            )?;
+                "LAI_8day",
+                &["LAI_year", "J8day"],
+                &values_f64(&input, "LAI_8day")?,
+            )?,
         }
     }
     for name in [
@@ -2906,6 +3151,18 @@ fn ensure_dimension(f: &mut netcdf::FileMut, name: &str, len: usize) -> Result<(
     f.add_dimension(name, len)?;
     f.enddef()?;
     Ok(())
+}
+
+fn ensure_dimension_with_len(f: &mut netcdf::FileMut, name: &str, len: usize) -> Result<()> {
+    if let Some(dimension) = f.dimension(name) {
+        ensure!(
+            dimension.len() == len,
+            "{name} dimension has {}, expected {len}",
+            dimension.len()
+        );
+        return Ok(());
+    }
+    ensure_dimension(f, name, len)
 }
 
 fn put_values<T: netcdf::NcTypeDescriptor>(

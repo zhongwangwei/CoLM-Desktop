@@ -31,23 +31,23 @@ use crate::{
     derive_snow_cover, derive_soil_parameters, derive_usgs_canopy, initialize_snow_layers,
     is_leap_year, leaf_optics_from_land_cover, merge_bgc_cold_start_states, month_lengths,
     normalize_soil_texture, orbital_calendar_day, orbital_cosine_zenith,
-    read_single_point_cn_state, read_single_point_hyperspectral_albedo,
-    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
-    read_single_point_soil_profile, read_single_point_surface, read_single_point_urban_data,
-    read_single_point_water_table, read_urban_lucy_raw_data, write_bgc_time_restart,
-    write_cold_start_bgc_constant_restart, write_constant_restart, write_pft_constant_restart,
-    write_pft_time_restart, write_time_restart, write_urban_constant_restart, BgcColdStartInput,
-    BgcConstantRestartFiles, BgcPftColdStartInput, BgcTimeRestartFile, CalendarTime, ColdSoilState,
-    ColdStartRadiation, ColdStartSoilInput, ConstantRestartFiles, ConstantRestartInput,
-    CropColdStartState, CropManagementConfig, HydraulicModel, InitialSoilProfile, LandCoverScheme,
-    LeafOptics, OzoneFields, PcPftInput, PftBgcFields, PftConstantRestartInput,
-    PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
-    PftTimeRestartInput, PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields,
-    RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField,
-    SoilHydraulicModel, TimeHyperspectralFields, TimeLakeFields, TimePatchFields,
-    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
-    UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanRadiationInput,
-    UrbanState, UrbanThermalFields, MISSING,
+    read_single_point_cn_state, read_single_point_eight_day_vegetation,
+    read_single_point_hyperspectral_albedo, read_single_point_monthly_vegetation,
+    read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
+    read_single_point_surface, read_single_point_urban_data, read_single_point_water_table,
+    read_urban_lucy_raw_data, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
+    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    write_urban_constant_restart, BgcColdStartInput, BgcConstantRestartFiles, BgcPftColdStartInput,
+    BgcTimeRestartFile, CalendarTime, ColdSoilState, ColdStartRadiation, ColdStartSoilInput,
+    ConstantRestartFiles, ConstantRestartInput, CropColdStartState, CropManagementConfig,
+    HydraulicModel, InitialSoilProfile, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput,
+    PftBgcFields, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
+    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
+    SoilAlbedo, SoilField, SoilHydraulicModel, TimeHyperspectralFields, TimeLakeFields,
+    TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    UrbanConfig, UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState,
+    UrbanRadiationInput, UrbanState, UrbanThermalFields, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -164,6 +164,8 @@ pub struct SinglePointColdStartRun {
     pub date: RestartDate,
     pub greenwich: bool,
     pub use_site_lai: bool,
+    /// LCT-only cadence; PFT/PC and urban cases are normalized to monthly.
+    pub lai_monthly: bool,
     pub lai_change_yearly: bool,
     pub lai_start_year: i32,
     pub lai_end_year: i32,
@@ -295,6 +297,8 @@ pub fn single_point_cold_start_run_from_namelist(
         })?,
         greenwich: optional_bool_or(&document, "DEF_simulation_time%greenwich", true)?,
         use_site_lai: optional_bool_or(&document, "USE_SITE_LAI", true)?,
+        lai_monthly: subgrid != SinglePointSubgrid::Lct
+            || optional_bool_or(&document, "DEF_LAI_MONTHLY", true)?,
         lai_change_yearly: optional_bool_or(&document, "DEF_LAI_CHANGE_YEARLY", true)?,
         lai_start_year,
         lai_end_year,
@@ -831,19 +835,31 @@ pub fn write_single_point_cold_time_restarts(
         &conductivity,
         &hydraulic_model,
     )?;
-    let vegetation = read_single_point_monthly_vegetation(&run.static_run.surface)?;
     let vegetation_year = if run.lai_change_yearly {
         run.date.year
     } else {
         run.static_run.land_cover_year
     };
-    let (mut total_lai, mut total_sai) = vegetation.for_year(
-        vegetation_year,
-        month,
-        run.use_site_lai,
-        run.lai_start_year,
-        run.lai_end_year,
-    )?;
+    let (mut total_lai, mut total_sai) = if run.lai_monthly {
+        read_single_point_monthly_vegetation(&run.static_run.surface)?.for_year(
+            vegetation_year,
+            month,
+            run.use_site_lai,
+            run.lai_start_year,
+            run.lai_end_year,
+        )?
+    } else {
+        (
+            read_single_point_eight_day_vegetation(&run.static_run.surface)?.for_year(
+                vegetation_year,
+                run.date.julian_day,
+                run.use_site_lai,
+                run.lai_start_year,
+                run.lai_end_year,
+            )?,
+            crate::spatial_time::stem_area_index(config.land_cover, surface.land_class)?,
+        )
+    };
     let water = is_water_class(config.land_cover, surface.land_class);
     let (fveg, green) = if water {
         total_lai = 0.0;
@@ -2618,10 +2634,6 @@ fn reject_unsupported_cold_start_features(
     ensure!(
         subgrid == SinglePointSubgrid::Lct || !optional_bool_or(document, "DEF_USE_LCT", true)?,
         "DEF_USE_PFT/DEF_USE_PC requires DEF_USE_LCT = .false."
-    );
-    ensure!(
-        optional_bool_or(document, "DEF_LAI_MONTHLY", true)?,
-        "native cold single-point restart requires DEF_LAI_MONTHLY = .true."
     );
     Ok(())
 }

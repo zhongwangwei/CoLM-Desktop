@@ -41,6 +41,17 @@ pub struct SinglePointMonthlyVegetation {
     pub sai: Vec<f64>,
 }
 
+/// Eight-day LAI records for the LCT single-point path.
+///
+/// The values retain the NetCDF `(LAI_year, J8day)` order emitted by native
+/// `mksrfdata`; SAI is intentionally absent because `LAI_readin` uses the
+/// land-cover `sai0` table for this cadence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinglePointEightDayVegetation {
+    pub years: Vec<i32>,
+    pub lai: Vec<f64>,
+}
+
 /// The positive PFT/CFT tiles and monthly state used by a single-point run.
 ///
 /// `MOD_SingleSrfdata` packs only positive `SITE_pctpfts` entries into `landpft`.
@@ -133,24 +144,45 @@ impl SinglePointMonthlyVegetation {
             configured_start_year <= configured_end_year,
             "LAI configured start year exceeds end year"
         );
-        let selected_year = if use_site_lai {
-            *self
-                .years
-                .iter()
-                .min_by_key(|&&year| (i64::from(year) - i64::from(target_year)).abs())
-                .context("single-point surface has no LAI years")?
-        } else {
-            target_year.clamp(configured_start_year, configured_end_year)
-        };
-        let year_index = self
-            .years
-            .iter()
-            .position(|&year| year == selected_year)
-            .with_context(|| {
-                format!("single-point surface has no LAI record for {selected_year}")
-            })?;
+        let year_index = lai_year_index(
+            &self.years,
+            target_year,
+            use_site_lai,
+            configured_start_year,
+            configured_end_year,
+        )?;
         let index = year_index * 12 + usize::from(month - 1);
         Ok((self.lai[index], self.sai[index]))
+    }
+}
+
+impl SinglePointEightDayVegetation {
+    /// Resolves the native eight-day record containing this one-based Julian day.
+    pub fn for_year(
+        &self,
+        target_year: i32,
+        julian_day: u16,
+        use_site_lai: bool,
+        configured_start_year: i32,
+        configured_end_year: i32,
+    ) -> Result<f64> {
+        let maximum = if crate::is_leap_year(target_year) {
+            366
+        } else {
+            365
+        };
+        ensure!(
+            (1..=maximum).contains(&i32::from(julian_day)),
+            "Julian day is outside its year"
+        );
+        let year_index = lai_year_index(
+            &self.years,
+            target_year,
+            use_site_lai,
+            configured_start_year,
+            configured_end_year,
+        )?;
+        Ok(self.lai[year_index * 46 + usize::from((julian_day - 1) / 8)])
     }
 }
 
@@ -169,22 +201,13 @@ impl SinglePointPftMonthlyVegetation {
             configured_start_year <= configured_end_year,
             "LAI configured start year exceeds end year"
         );
-        let selected_year = if use_site_lai {
-            *self
-                .years
-                .iter()
-                .min_by_key(|&&year| (i64::from(year) - i64::from(target_year)).abs())
-                .context("single-point surface has no LAI years")?
-        } else {
-            target_year.clamp(configured_start_year, configured_end_year)
-        };
-        let year_index = self
-            .years
-            .iter()
-            .position(|&year| year == selected_year)
-            .with_context(|| {
-                format!("single-point surface has no LAI record for {selected_year}")
-            })?;
+        let year_index = lai_year_index(
+            &self.years,
+            target_year,
+            use_site_lai,
+            configured_start_year,
+            configured_end_year,
+        )?;
         let start = (year_index * 12 + usize::from(month - 1)) * self.pfts;
         let end = start + self.pfts;
         Ok((self.lai[start..end].to_vec(), self.sai[start..end].to_vec()))
@@ -203,6 +226,19 @@ pub fn read_single_point_monthly_vegetation(
     let lai = monthly_vector(&file, "LAI_monthly", years.len())?;
     let sai = monthly_vector(&file, "SAI_monthly", years.len())?;
     Ok(SinglePointMonthlyVegetation { years, lai, sai })
+}
+
+/// Reads the `LAI_year` and `LAI_8day` LCT single-point contract.
+pub fn read_single_point_eight_day_vegetation(
+    path: impl AsRef<Path>,
+) -> Result<SinglePointEightDayVegetation> {
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
+    let years = vector_i32(&file, "LAI_year")?;
+    validate_lai_years(&years)?;
+    let lai = eight_day_vector(&file, "LAI_8day", years.len())?;
+    Ok(SinglePointEightDayVegetation { years, lai })
 }
 
 /// Reads the PFT/CFT composition and monthly LAI/SAI single-point contract.
@@ -805,6 +841,54 @@ fn monthly_vector(file: &netcdf::File, name: &str, years: usize) -> Result<Vec<f
         "{name} must contain finite monthly values for every LAI year"
     );
     Ok(values)
+}
+
+fn eight_day_vector(file: &netcdf::File, name: &str, years: usize) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("single-point surface data is missing {name}"))?;
+    let dimensions = variable.dimensions();
+    ensure!(
+        dimensions.len() == 2
+            && dimensions[0].name() == "LAI_year"
+            && dimensions[0].len() == years
+            && dimensions[1].name() == "J8day"
+            && dimensions[1].len() == 46,
+        "{name} must have dimensions (LAI_year, J8day=46)"
+    );
+    let values = variable
+        .get_values::<f64, _>(..)
+        .with_context(|| format!("cannot read {name}"))?;
+    ensure!(
+        values.len() == years * 46 && values.iter().all(|value| value.is_finite()),
+        "{name} must contain finite eight-day values for every LAI year"
+    );
+    Ok(values)
+}
+
+fn lai_year_index(
+    years: &[i32],
+    target_year: i32,
+    use_site_lai: bool,
+    configured_start_year: i32,
+    configured_end_year: i32,
+) -> Result<usize> {
+    ensure!(
+        configured_start_year <= configured_end_year,
+        "LAI configured start year exceeds end year"
+    );
+    let selected_year = if use_site_lai {
+        *years
+            .iter()
+            .min_by_key(|&&year| (i64::from(year) - i64::from(target_year)).abs())
+            .context("single-point surface has no LAI years")?
+    } else {
+        target_year.clamp(configured_start_year, configured_end_year)
+    };
+    years
+        .iter()
+        .position(|&year| year == selected_year)
+        .with_context(|| format!("single-point surface has no LAI record for {selected_year}"))
 }
 
 fn validate_lai_years(years: &[i32]) -> Result<()> {

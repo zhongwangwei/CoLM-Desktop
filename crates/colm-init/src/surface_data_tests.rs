@@ -134,6 +134,30 @@ fn monthly_vegetation_uses_the_single_point_year_selection_contract() {
 }
 
 #[test]
+fn eight_day_vegetation_uses_native_julian_slices_and_year_selection() {
+    let path = temp_file("eight-day");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("LAI_year", 2).unwrap();
+    file.add_dimension("J8day", 46).unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2008, 2010], ..)
+        .unwrap();
+    file.add_variable::<f64>("LAI_8day", &["LAI_year", "J8day"])
+        .unwrap()
+        .put_values(&(0..92).map(|value| value as f64).collect::<Vec<_>>(), ..)
+        .unwrap();
+    file.close().unwrap();
+
+    let values = read_single_point_eight_day_vegetation(&path).unwrap();
+    assert_eq!(values.for_year(2009, 9, true, 2000, 2020).unwrap(), 1.0);
+    assert_eq!(values.for_year(2010, 365, true, 2000, 2020).unwrap(), 91.0);
+    assert_eq!(values.for_year(2006, 2, false, 2008, 2010).unwrap(), 0.0);
+    assert!(values.for_year(2009, 367, true, 2000, 2020).is_err());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
     let path = temp_file("pft-monthly");
     let mut file = netcdf::create(&path).unwrap();

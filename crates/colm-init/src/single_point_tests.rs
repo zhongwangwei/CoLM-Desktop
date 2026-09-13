@@ -177,6 +177,35 @@ fn cold_namelist_uses_start_year_for_lulcc_restarts() {
 }
 
 #[test]
+fn cold_lct_namelist_accepts_native_eight_day_lai() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-eight-day-lai-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let surface = directory.join("output/CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(&surface).unwrap();
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_values(&[10], ..)
+        .unwrap();
+    file.close().unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_LAI_MONTHLY=.false.\n /\n",
+            directory.join("output").display()
+        ),
+    )
+    .unwrap();
+
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(run.subgrid, SinglePointSubgrid::Lct);
+    assert!(!run.lai_monthly);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
     let directory =
         std::env::temp_dir().join(format!("colm-init-urban-namelist-{}", std::process::id()));
@@ -278,6 +307,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         },
         greenwich: false,
         use_site_lai: true,
+        lai_monthly: true,
         lai_change_yearly: false,
         lai_start_year: 2000,
         lai_end_year: 2020,

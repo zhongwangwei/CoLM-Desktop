@@ -23,6 +23,16 @@ pub fn point_f64(file: &Path, var: &str, lon: f64, lat: f64) -> Result<f64> {
     point_f64_on(COLM_500M, file, var, lon, lat)
 }
 
+/// Reads one one-based time slice at a site from CoLM's regular 500 m grid.
+///
+/// This is the `read_point_var_2d_time_real8` path used by the native
+/// eight-day LAI input.  Its NetCDF order is `(time, lat, lon)`.
+pub fn point_time_f64(file: &Path, var: &str, lon: f64, lat: f64, itime: usize) -> Result<f64> {
+    validate_lon_lat(lon, lat)?;
+    let (ilon, ilat) = COLM_500M.index_of(lon, lat);
+    read_pixel(file, var, ilon, ilat, Some(itime))
+}
+
 /// 同上，但网格由调用方指定。
 ///
 /// **网格名跟着文件走。** `urban/LUCY_regionid.nc` 是 `colm_5km`
@@ -198,6 +208,31 @@ mod raster_tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("1-based"), "{err:#}");
+    }
+
+    #[test]
+    fn timed_raster_reads_one_based_time_slice() {
+        let path = std::env::temp_dir().join(format!(
+            "colm-srfdata-raster-time-{}-{:?}.nc",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("time", 2).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("pixel", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(&[1.0, 2.0], ..)
+            .unwrap();
+        file.close().unwrap();
+
+        assert_eq!(
+            point_time_f64(&path, "pixel", -180.0, 90.0, 2).unwrap(),
+            2.0
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

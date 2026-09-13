@@ -1342,6 +1342,24 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(run.rawdata, Some(rawdata));
     assert_eq!(run.mode, super::SiteMode::Igbp);
     assert!(!run.crop_enabled);
+    assert_eq!(run.lai_frequency, super::SinglePointLaiFrequency::Monthly);
+
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_LAI_MONTHLY = .false.\n DEF_LAI_CHANGE_YEARLY = .false.\n DEF_LC_YEAR = 2005\n /\n",
+            source.display(),
+            output.display(),
+        ),
+    )
+    .unwrap();
+    let eight_day = super::single_point_surface_run_from_namelist(&namelist, None, false).unwrap();
+    assert_eq!(
+        eight_day.lai_frequency,
+        super::SinglePointLaiFrequency::EightDay
+    );
+    assert!(eight_day.use_site_lai);
+    assert_eq!(eight_day.eight_day_lai_years, [2005]);
 
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -1526,6 +1544,130 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
         "monthly leaf area index associated with PFT"
     );
     assert_eq!(attribute("soil_tkdry", "units"), "W/(m-K)");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-eight-day-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("source.nc");
+    let filled = directory.join("filled.nc");
+    let output = directory.join("srfdata.nc");
+    super::skeleton(&source, 123.0, 45.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&source).unwrap();
+        file.add_dimension("soil", 8).unwrap();
+        for (name, value) in [
+            ("soil_vf_sand", 0.30),
+            ("soil_vf_gravels", 0.10),
+            ("soil_vf_om", 0.02),
+            ("soil_wf_sand", 0.40),
+            ("soil_OM_density", 26.0),
+            ("soil_BD_all", 1300.0),
+        ] {
+            file.add_variable::<f64>(name, &["soil"])
+                .unwrap()
+                .put_values(&[value; 8], netcdf::Extents::All)
+                .unwrap();
+        }
+    }
+    super::fill(&source, &filled, None, None).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&filled).unwrap();
+        for name in super::SINGLE_POINT_SOIL_FIELDS {
+            if file.variable(name).is_none() {
+                file.add_variable::<f64>(name, &["soil"])
+                    .unwrap()
+                    .put_values(&[1.0; 8], netcdf::Extents::All)
+                    .unwrap();
+            }
+        }
+        file.add_dimension("LAI_year", 1).unwrap();
+        file.add_dimension("J8day", 46).unwrap();
+        file.add_variable::<i32>("LAI_year", &["LAI_year"])
+            .unwrap()
+            .put_values(&[2008], ..)
+            .unwrap();
+        file.add_variable::<f64>("LAI_8day", &["LAI_year", "J8day"])
+            .unwrap()
+            .put_values(
+                &(0..46).map(|value| value as f64 / 10.0).collect::<Vec<_>>(),
+                ..,
+            )
+            .unwrap();
+    }
+    super::write_single_point_surface_with_lai_frequency(
+        &filled,
+        &output,
+        super::SiteMode::Igbp,
+        false,
+        super::SinglePointLaiFrequency::EightDay,
+    )
+    .unwrap();
+    let audit = super::audit_with_lai_frequency(
+        &output,
+        super::SiteMode::Igbp,
+        None,
+        false,
+        super::SinglePointLaiFrequency::EightDay,
+    )
+    .unwrap();
+    assert!(audit.self_contained(), "{:?}", audit.needs_external);
+    let file = netcdf::open(&output).unwrap();
+    assert_eq!(file.dimension("J8day").unwrap().len(), 46);
+    assert!(file.variable("LAI_monthly").is_none());
+    assert!(file.variable("SAI_monthly").is_none());
+    let lai = file
+        .variable("LAI_8day")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!((lai[0], lai[45]), (0.0, 4.5));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn eight_day_lct_rawdata_fallback_samples_and_scales_native_lai() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-srfdata-eight-day-raw-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let raw = directory.join("rawdata/lai_15s_8day");
+    std::fs::create_dir_all(&raw).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(raw.join("lai_8-day_15s_2008.nc")).unwrap();
+        file.add_dimension("time", 46).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("lai", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &(0..46).map(|value| value as f64 + 10.0).collect::<Vec<_>>(),
+                ..,
+            )
+            .unwrap();
+        file.close().unwrap();
+    }
+    super::materialize_single_point_eight_day_lai(&surface, &directory.join("rawdata"), &[2008])
+        .unwrap();
+    // USE_SITE_LAI=.false. follows this same replacement path even when the
+    // site file already carries an eight-day series.
+    super::materialize_single_point_eight_day_lai(&surface, &directory.join("rawdata"), &[2008])
+        .unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(file.dimension("J8day").unwrap().len(), 46);
+    let lai = file
+        .variable("LAI_8day")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!((lai[0], lai[45]), (1.0, 5.5));
     std::fs::remove_dir_all(directory).unwrap();
 }
 

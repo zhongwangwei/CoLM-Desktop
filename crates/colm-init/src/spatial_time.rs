@@ -877,7 +877,7 @@ fn eight_day_julian_day(date: RestartDate) -> Result<u16> {
     Ok((date.julian_day - 1) / 8 * 8 + 1)
 }
 
-fn stem_area_index(scheme: LandCoverScheme, class: i32) -> Result<f64> {
+pub(crate) fn stem_area_index(scheme: LandCoverScheme, class: i32) -> Result<f64> {
     const IGBP: [f64; 17] = [
         2.0, 2.0, 2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.0, 0.0, 0.0,
     ];
