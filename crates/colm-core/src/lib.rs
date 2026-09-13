@@ -37,6 +37,7 @@ pub mod static_state;
 pub mod thermal_properties;
 pub mod time_state;
 pub mod urban;
+pub mod urban_ground_flux;
 pub mod urban_longwave;
 pub mod urban_lucy;
 pub mod urban_net_solar;
@@ -165,6 +166,7 @@ pub use urban::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,
 };
+pub use urban_ground_flux::{urban_ground_flux, UrbanGroundFluxInput, UrbanGroundFluxState};
 pub use urban_longwave::{
     urban_longwave_fluxes, urban_longwave_transfer, UrbanLongwaveFluxes, UrbanLongwaveInput,
     UrbanLongwaveTransfer, UrbanLongwaveVegetation,
