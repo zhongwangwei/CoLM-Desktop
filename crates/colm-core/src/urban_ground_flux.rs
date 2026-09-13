@@ -75,7 +75,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     } else {
         ((input.impervious_surface_liquid_water_kg_m2 + input.impervious_surface_ice_kg_m2)
             .max(0.0))
-        .powf(f77(2.0) / f77(3.0))
+        .powf(f77(2.0 / 3.0))
         .min(1.0)
     };
     if input.reference_specific_humidity > input.impervious_specific_humidity {
@@ -138,14 +138,14 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
         };
         stability.obukhov_length_m = input.wind_height_m / dimensionless_height;
         stability.stability_adjusted_wind_m_s = if dimensionless_height >= 0.0 {
-            input.reference_wind_m_s.max(0.1)
+            input.reference_wind_m_s.max(f77(0.1))
         } else {
             let convective_velocity = (-GRAVITY_M_S2
                 * profile.friction_velocity_m_s
                 * virtual_temperature_scale
                 * 1000.0
                 / input.virtual_potential_temperature_k)
-                .powf(f77(1.0) / f77(3.0));
+                .powf(f77(1.0 / 3.0));
             (input.reference_wind_m_s.powi(2) + convective_velocity.powi(2)).sqrt()
         };
         if previous_obukhov_length_m * stability.obukhov_length_m < 0.0 {
