@@ -1788,7 +1788,9 @@ fn materialize_single_point_surface_impl(
             options.monthly_lai_years,
         )?;
     }
-    if lct_mode && requires_lct_height_raw {
+    let synthesized_lct_height =
+        lct_mode && single_point_variable_is_synthesized(&temporary, "canopy_height")?;
+    if lct_mode && (requires_lct_height_raw || synthesized_lct_height) {
         materialize_single_point_lct_canopy_height(
             &temporary,
             rawdata.context("single-point canopy height needs DEF_dir_rawdata")?,
@@ -2019,6 +2021,21 @@ fn materialize_single_point_lct_canopy_height(
     )?;
     file.close()
         .with_context(|| format!("cannot close single-point surface {}", surface.display()))
+}
+
+fn single_point_variable_is_synthesized(surface: &Path, name: &str) -> Result<bool> {
+    let file = netcdf::open(surface)
+        .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+    let Some(variable) = file.variable(name) else {
+        return Ok(false);
+    };
+    let Some(attribute) = variable.attribute("source") else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        attribute.value().ok(),
+        Some(netcdf::AttributeValue::Str(source)) if source.starts_with("synthesized:")
+    ))
 }
 
 fn single_point_pft_raw_needed(

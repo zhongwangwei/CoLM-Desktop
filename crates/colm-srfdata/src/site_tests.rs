@@ -2133,12 +2133,14 @@ fn lct_height_rawdata_fallback_replaces_the_site_value() {
     {
         let _netcdf_guard = netcdf_write_lock().lock().unwrap();
         let mut file = netcdf::append(&surface).unwrap();
-        file.add_variable::<f64>("canopy_height", &[])
-            .unwrap()
-            .put_values(&[1.0], ..)
+        let mut height = file.add_variable::<f64>("canopy_height", &[]).unwrap();
+        height
+            .put_attribute("source", "synthesized: test placeholder")
             .unwrap();
+        height.put_values(&[1.0], ..).unwrap();
         file.close().unwrap();
     }
+    assert!(super::single_point_variable_is_synthesized(&surface, "canopy_height").unwrap());
     let (tile, _, _) = crate::raster::tile_5x5_path(&raw, "MOD2008", -180.0, 90.0).unwrap();
     {
         let _netcdf_guard = netcdf_write_lock().lock().unwrap();
