@@ -19,6 +19,7 @@ pub mod ground_thermal_step;
 pub mod high_res_parameters;
 pub mod hydrology;
 pub mod interception;
+pub mod irrigation;
 pub mod lake;
 pub mod leaf_temperature;
 pub mod linear;
@@ -112,6 +113,11 @@ pub use urban_flux_diagnostics::UrbanFluxDiagnostics;
 pub use interception::{
     canopy_wetness, intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput,
     CanopyWater, CanopyWetness,
+};
+pub use irrigation::{
+    irrigation_application_fluxes, irrigation_is_scheduled, IrrigationApplicationFluxes,
+    IrrigationApplicationState, IrrigationScheduleInput, IRRIGATION_DRIP, IRRIGATION_FLOOD,
+    IRRIGATION_PADDY, IRRIGATION_SPRINKLER,
 };
 pub use lake::{
     add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_snow_water,
