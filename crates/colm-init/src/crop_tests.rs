@@ -106,6 +106,75 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
+    let root = temp_runtime_dir("spatial-crop-management");
+    write_spatial_planting_map(&root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"));
+    write_spatial_fertilizer_source_one(&root.join("crop/fertnitro_fillcoast.nc"));
+    write_spatial_fertilizer_source_two(&root.join("crop/fertilizer_2015soc.nc"));
+    write_spatial_irrigation_map(&root.join("crop/surfdata_irrigation_method_96x144.nc"));
+    write_spatial_irrigation_allocation_map(&root.join("crop/surfdata_irrigation_allocation.nc"));
+    let pixels = SpatialPixelSets {
+        lon_w: vec![0.25, 1.0],
+        lon_e: vec![1.0, 2.25],
+        lat_s: vec![0.0],
+        lat_n: vec![1.0],
+        cells: vec![vec![(1, 1), (2, 1)]],
+        shared_fraction: vec![1.0],
+    };
+    let state = spatial_crop_cold_start_from_management(
+        &[17],
+        &[0],
+        &[1.0],
+        1,
+        &pixels,
+        &pixels,
+        CropManagementConfig {
+            runtime_dir: &root,
+            planting_day_override: None,
+            use_fertilizer: true,
+            fertilizer_source: 1,
+            use_irrigation: true,
+            use_irrigation_allocation: false,
+        },
+    )
+    .unwrap();
+
+    let expected_planting = (100.0 * 0.75 + 200.0 * 1.25) / 2.0;
+    let expected_fertilizer = (10.0 * 0.75 + 0.0 * 1.25) / 2.0;
+    assert!((state.pft_fields().planting_date[0] - expected_planting).abs() < 1.0e-12);
+    assert!((state.pft_fields().fertilizer_nitrogen[0] - expected_fertilizer).abs() < 1.0e-12);
+    assert_eq!(state.bgc_fields().planting_day_rice2, [2.0]);
+    assert_eq!(state.irrigation_method(), Some(&[3][..]));
+    let irrigation = state.irrigation_fields(&[0.0]).unwrap();
+    assert_eq!(irrigation.corn_method, [3]);
+    assert!((state.bgc_fields().fertilizer_nitrogen_corn[0] - expected_fertilizer).abs() < 1.0e-12);
+
+    let source_two = spatial_crop_cold_start_from_management(
+        &[17],
+        &[0],
+        &[1.0],
+        1,
+        &pixels,
+        &pixels,
+        CropManagementConfig {
+            runtime_dir: &root,
+            planting_day_override: None,
+            use_fertilizer: true,
+            fertilizer_source: 2,
+            use_irrigation: true,
+            use_irrigation_allocation: true,
+        },
+    )
+    .unwrap();
+    assert!((source_two.pft_fields().manure_nitrogen[0] - 6.5).abs() < 1.0e-12);
+    assert!((source_two.pft_fields().fertilizer_nitrogen[0] - 11.25).abs() < 1.0e-12);
+    let irrigation = source_two.irrigation_fields(&[0.0]).unwrap();
+    assert!((irrigation.groundwater_allocation[0] - 0.45).abs() < 1.0e-12);
+    assert!((irrigation.surface_water_allocation[0] - 0.55).abs() < 1.0e-12);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn temp_runtime_dir(label: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("colm-init-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -175,6 +244,87 @@ fn write_irrigation_allocation_map(path: &std::path::Path) {
         .put_values(&[0.0, 0.35, 0.0, 0.0], ..)
         .unwrap();
     file.close().unwrap();
+}
+
+fn write_spatial_planting_map(path: &std::path::Path) {
+    let mut file = spatial_map(path);
+    file.add_variable::<f64>("pdrice2", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[1.0, 3.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("PLANTDATE_CFT_17", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[100.0, 200.0], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_spatial_fertilizer_source_one(path: &std::path::Path) {
+    let mut file = spatial_map(path);
+    let mut fertilizer = file
+        .add_variable::<f64>("CONST_FERTNITRO_CFT_17", &["lat", "lon"])
+        .unwrap();
+    fertilizer.put_attribute("missing_value", 0.0_f64).unwrap();
+    fertilizer.put_values(&[10.0, 0.0], ..).unwrap();
+    file.close().unwrap();
+}
+
+fn write_spatial_fertilizer_source_two(path: &std::path::Path) {
+    let mut file = spatial_map(path);
+    file.add_dimension("cft", 64).unwrap();
+    file.add_variable::<f32>("manure", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[4.0, 8.0], ..)
+        .unwrap();
+    let mut fertilizer = vec![0.0_f32; 64 * 2];
+    fertilizer[2 * 2] = 5.0;
+    fertilizer[2 * 2 + 1] = 15.0;
+    file.add_variable::<f32>("fertilizer", &["cft", "lat", "lon"])
+        .unwrap()
+        .put_values(&fertilizer, ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_spatial_irrigation_map(path: &std::path::Path) {
+    let mut file = spatial_map(path);
+    file.add_dimension("cft", 64).unwrap();
+    let mut values = vec![0.0_f32; 64 * 2];
+    values[2 * 2] = 1.0;
+    values[2 * 2 + 1] = 3.0;
+    file.add_variable::<f32>("irrigation_method", &["cft", "lat", "lon"])
+        .unwrap()
+        .put_values(&values, ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_spatial_irrigation_allocation_map(path: &std::path::Path) {
+    let mut file = spatial_map(path);
+    file.add_variable::<f64>("irrig_gw_alloc", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[0.2, 0.6], ..)
+        .unwrap();
+    file.add_variable::<f64>("irrig_sw_alloc", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[0.8, 0.4], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn spatial_map(path: &std::path::Path) -> netcdf::FileMut {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[0.5, 1.5], ..)
+        .unwrap();
+    file
 }
 
 fn point_map(path: &std::path::Path, single_precision: bool) -> netcdf::FileMut {

@@ -294,6 +294,7 @@ pub(crate) struct Patches {
     pub(crate) element: Vec<i64>,
     pub(crate) start: Vec<i32>,
     pub(crate) end: Vec<i32>,
+    pub(crate) shared_fraction: Vec<f64>,
 }
 
 pub(crate) fn read_patches(landdata: &Path, year: i32, block: &str) -> Result<Patches> {
@@ -303,11 +304,24 @@ pub(crate) fn read_patches(landdata: &Path, year: i32, block: &str) -> Result<Pa
     let element = values_i64(&file, "eindex")?;
     let start = values_i32(&file, "ipxstt")?;
     let end = values_i32(&file, "ipxend")?;
+    let shared_fraction = match file.variable("pctshared") {
+        Some(variable) => variable.get_values::<f64, _>(..).with_context(|| {
+            format!(
+                "cannot read landpatch sharing fractions from {}",
+                path.display()
+            )
+        })?,
+        None => vec![1.0; class.len()],
+    };
     ensure!(
         !class.is_empty()
             && class.len() == element.len()
             && class.len() == start.len()
-            && class.len() == end.len(),
+            && class.len() == end.len()
+            && class.len() == shared_fraction.len()
+            && shared_fraction
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
         "landpatch block has inconsistent vectors"
     );
     Ok(Patches {
@@ -315,6 +329,7 @@ pub(crate) fn read_patches(landdata: &Path, year: i32, block: &str) -> Result<Pa
         element,
         start,
         end,
+        shared_fraction,
     })
 }
 
@@ -494,16 +509,68 @@ pub(crate) fn patch_coordinates(
     block: &str,
     patches: &Patches,
 ) -> Result<(Vec<f64>, Vec<f64>)> {
-    let pixel_file = netcdf::open(landdata.join("pixel.nc"))?;
-    let geometry = PixelGeometry {
-        lon_w: values_f64(&pixel_file, "lon_w")?,
-        lon_e: values_f64(&pixel_file, "lon_e")?,
-        lat_s: values_f64(&pixel_file, "lat_s")?,
-        lat_n: values_f64(&pixel_file, "lat_n")?,
-    };
+    let pixel_sets = read_spatial_pixel_sets(
+        landdata,
+        year,
+        block,
+        &patches.element,
+        &patches.start,
+        &patches.end,
+        &patches.shared_fraction,
+        "patch",
+    )?;
+    let mut longitude = Vec::with_capacity(patches.class.len());
+    let mut latitude = Vec::with_capacity(patches.class.len());
+    for cells in &pixel_sets.cells {
+        let (lon, lat) = pixel_sets.mean(cells)?;
+        longitude.push(lon.to_radians());
+        latitude.push(lat.to_radians());
+    }
+    Ok((longitude, latitude))
+}
+
+/// Pixel memberships and geographic edges shared by spatial restart readers.
+///
+/// `pctshared` is retained because CoLM's areal mapper applies it before a
+/// `landpatch` or `landpft` result is normalized.
+#[derive(Debug, Clone)]
+pub(crate) struct SpatialPixelSets {
+    pub(crate) lon_w: Vec<f64>,
+    pub(crate) lon_e: Vec<f64>,
+    pub(crate) lat_s: Vec<f64>,
+    pub(crate) lat_n: Vec<f64>,
+    pub(crate) cells: Vec<Vec<(i32, i32)>>,
+    pub(crate) shared_fraction: Vec<f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn read_spatial_pixel_sets(
+    landdata: &Path,
+    year: i32,
+    block: &str,
+    element: &[i64],
+    start: &[i32],
+    end: &[i32],
+    shared_fraction: &[f64],
+    label: &str,
+) -> Result<SpatialPixelSets> {
     ensure!(
-        geometry.lon_w.len() == geometry.lon_e.len()
-            && geometry.lat_s.len() == geometry.lat_n.len(),
+        !element.is_empty()
+            && element.len() == start.len()
+            && element.len() == end.len()
+            && element.len() == shared_fraction.len()
+            && shared_fraction
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "{label} pixel topology has inconsistent vectors"
+    );
+    let pixel_file = netcdf::open(landdata.join("pixel.nc"))?;
+    let lon_w = values_f64(&pixel_file, "lon_w")?;
+    let lon_e = values_f64(&pixel_file, "lon_e")?;
+    let lat_s = values_f64(&pixel_file, "lat_s")?;
+    let lat_n = values_f64(&pixel_file, "lat_n")?;
+    ensure!(
+        lon_w.len() == lon_e.len() && lat_s.len() == lat_n.len(),
         "pixel edge vectors have inconsistent lengths"
     );
     let path = block_path(landdata, "mesh", "mesh", year, block);
@@ -530,28 +597,29 @@ pub(crate) fn patch_coordinates(
         elements.insert(id, cells);
         offset += count;
     }
-    let mut longitude = Vec::with_capacity(patches.class.len());
-    let mut latitude = Vec::with_capacity(patches.class.len());
-    for index in 0..patches.class.len() {
-        let cells = elements
-            .get(&patches.element[index])
-            .with_context(|| format!("patch {index} references unknown mesh element"))?;
-        let range = pixel_range(patches.start[index], patches.end[index], cells.len())?;
-        let (lon, lat) = geometry.mean(&cells[range])?;
-        longitude.push(lon.to_radians());
-        latitude.push(lat.to_radians());
-    }
-    Ok((longitude, latitude))
+    let cells = element
+        .iter()
+        .zip(start)
+        .zip(end)
+        .enumerate()
+        .map(|(index, ((&element, &start), &end))| {
+            let cells = elements
+                .get(&element)
+                .with_context(|| format!("{label} {index} references unknown mesh element"))?;
+            Ok(cells[pixel_range(start, end, cells.len())?].to_vec())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SpatialPixelSets {
+        lon_w,
+        lon_e,
+        lat_s,
+        lat_n,
+        cells,
+        shared_fraction: shared_fraction.to_vec(),
+    })
 }
 
-struct PixelGeometry {
-    lon_w: Vec<f64>,
-    lon_e: Vec<f64>,
-    lat_s: Vec<f64>,
-    lat_n: Vec<f64>,
-}
-
-impl PixelGeometry {
+impl SpatialPixelSets {
     fn mean(&self, cells: &[(i32, i32)]) -> Result<(f64, f64)> {
         ensure!(!cells.is_empty(), "patch has no pixels");
         let mut area_sum = 0.0;

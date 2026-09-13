@@ -229,7 +229,7 @@ fn nearest_index(values: &[f64], target: f64, longitude: bool) -> Result<usize> 
         .context("runtime coordinate must not be empty")
 }
 
-fn coordinate_values(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
+pub(crate) fn coordinate_values(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
     values_1d(file, name).or_else(|_| values_1d_f32(file, name))
 }
 

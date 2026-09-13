@@ -4,13 +4,16 @@
 //! Rust runtime uses the same initialization contract rather than duplicating
 //! CROP setup from `mkinidata`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::CropPhenologyState;
 
 use crate::{
-    runtime::nearest_cell_indices, BgcCropFields, IrrigationFields, PftCropFields, MISSING,
+    runtime::{coordinate_values, nearest_cell_indices},
+    spatial_static::SpatialPixelSets,
+    BgcCropFields, IrrigationFields, PftCropFields, MISSING,
 };
 
 const CFT_FIRST: i32 = 15;
@@ -186,6 +189,129 @@ pub(crate) fn spatial_crop_cold_start_from_tuning(
     Ok(state)
 }
 
+/// Mirrors the spatial, raster-reading branch of upstream `CROP_readin`.
+///
+/// Continuous fields use CoLM's spherical areal weighting.  Irrigation uses
+/// its separate `grid2pset_dominant` rule: the source cell with the largest
+/// overlapping area, rather than a numerical average of category codes.
+pub(crate) fn spatial_crop_cold_start_from_management(
+    classes: &[i32],
+    pft_to_patch: &[usize],
+    pft_fraction: &[f64],
+    patches: usize,
+    pft_pixels: &SpatialPixelSets,
+    patch_pixels: &SpatialPixelSets,
+    config: CropManagementConfig<'_>,
+) -> Result<CropColdStartState> {
+    ensure!(
+        !classes.is_empty()
+            && classes.len() == pft_to_patch.len()
+            && classes.len() == pft_fraction.len()
+            && classes.len() == pft_pixels.cells.len()
+            && patches > 0
+            && patches == patch_pixels.cells.len()
+            && pft_to_patch.iter().all(|patch| *patch < patches)
+            && pft_fraction
+                .iter()
+                .all(|fraction| fraction.is_finite() && *fraction >= 0.0),
+        "spatial CROP topology, fractions, and pixel memberships must be aligned"
+    );
+    ensure!(
+        classes
+            .iter()
+            .filter(|&&class| class >= CFT_FIRST)
+            .all(|&class| class <= CFT_LAST),
+        "spatial CROP has a PFT class outside {CFT_FIRST}..={CFT_LAST}"
+    );
+    ensure!(
+        classes.iter().any(|&class| class >= CFT_FIRST),
+        "spatial CROP topology has no CFT entries"
+    );
+    if let Some(day) = config.planting_day_override {
+        ensure!(
+            day.is_finite() && day > 0.0,
+            "DEF_TUNING_CROP_PLANTING_DAY must be finite and positive when set"
+        );
+    }
+
+    let crop_dir = config.runtime_dir.join(CROP_DIR);
+    let planting = open_map(crop_dir.join(PLANTING_FILE), "CROP planting-date")?;
+    let crop_grid = MapGrid::from_file(&planting)?;
+    let mut crop_pft = AreaMapping::new(&crop_grid, pft_pixels)?;
+    let mut crop_patch = AreaMapping::new(&crop_grid, patch_pixels)?;
+    let rice2 = map_field_2d(&planting, "pdrice2", &crop_grid)?;
+    crop_pft.exclude_invalid(&rice2.valid)?;
+    crop_patch.exclude_invalid(&rice2.valid)?;
+
+    let mut state = empty_crop_state(classes.len(), patches);
+    for (patch, value) in crop_patch.average(&rice2)?.into_iter().enumerate() {
+        state.planting_day_rice2[patch] = truncated_or(value, 0, "pdrice2")? as f64;
+    }
+    let mut planting_dates = BTreeMap::new();
+    for &class in classes {
+        if class >= CFT_FIRST && !planting_dates.contains_key(&class) {
+            let field = map_field_2d(&planting, &format!("PLANTDATE_CFT_{class:02}"), &crop_grid)?;
+            planting_dates.insert(class, crop_pft.average(&field)?);
+        }
+    }
+    for (pft, &class) in classes.iter().enumerate() {
+        if let Some(values) = planting_dates.get(&class) {
+            state.planting_date[pft] = values[pft]
+                .filter(|value| *value > 0.0)
+                .unwrap_or(CROP_MANAGEMENT_MISSING);
+        }
+    }
+    if let Some(day) = config.planting_day_override {
+        for (pft, &class) in classes.iter().enumerate() {
+            if class >= CFT_FIRST {
+                state.planting_date[pft] = day;
+            }
+        }
+    }
+
+    if config.use_fertilizer {
+        match config.fertilizer_source {
+            1 => read_spatial_fertilizer_source_one(
+                &mut state,
+                classes,
+                &crop_pft,
+                &crop_grid,
+                crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
+            )?,
+            2 => read_spatial_fertilizer_source_two(
+                &mut state,
+                classes,
+                pft_pixels,
+                crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
+            )?,
+            source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
+        }
+    }
+    if config.use_irrigation {
+        state.irrigation_method = Some(read_spatial_irrigation_methods(
+            classes,
+            pft_pixels,
+            crop_dir.join(IRRIGATION_FILE),
+        )?);
+    }
+    if config.use_irrigation_allocation {
+        ensure!(
+            config.use_irrigation,
+            "irrigation allocation requires DEF_USE_IRRIGATION = .true."
+        );
+        let (groundwater, surface_water) = read_spatial_irrigation_allocations(
+            patch_pixels,
+            crop_dir.join(IRRIGATION_ALLOCATION_FILE),
+        )?;
+        state.irrigation_groundwater_allocation = groundwater;
+        state.irrigation_surface_water_allocation = surface_water;
+    }
+    state.set_patch_fertilizer(classes, pft_to_patch)?;
+    state.set_patch_irrigation(classes, pft_to_patch)?;
+    set_spatial_patch_phase(&mut state, pft_to_patch, pft_fraction)?;
+    Ok(state)
+}
+
 /// Mirrors the normal raster-reading path in upstream `CROP_readin` for one
 /// point.  The spatial lookup is intentionally shared with other runtime maps.
 pub fn crop_cold_start_from_management(
@@ -263,8 +389,9 @@ pub fn crop_cold_start_from_management(
             .irrigation_surface_water_allocation
             .fill(surface_water);
     }
-    state.set_patch_fertilizer(classes);
-    state.set_patch_irrigation(classes);
+    let pft_to_patch = (0..classes.len()).collect::<Vec<_>>();
+    state.set_patch_fertilizer(classes, &pft_to_patch)?;
+    state.set_patch_irrigation(classes, &pft_to_patch)?;
     state.patch_phase.fill(4.0);
     Ok(state)
 }
@@ -390,45 +517,64 @@ impl CropColdStartState {
         })
     }
 
-    fn set_patch_fertilizer(&mut self, classes: &[i32]) {
+    fn set_patch_fertilizer(&mut self, classes: &[i32], pft_to_patch: &[usize]) -> Result<()> {
+        ensure!(
+            classes.len() == pft_to_patch.len()
+                && pft_to_patch
+                    .iter()
+                    .all(|&patch| patch < self.patch_phase.len()),
+            "CROP PFT-to-patch ownership is inconsistent"
+        );
         for (index, &class) in classes.iter().enumerate() {
             let fertilizer = self.fertilizer_nitrogen[index];
+            let patch = pft_to_patch[index];
             match class {
-                17 | 18 | 63 | 64 => self.fertilizer_nitrogen_corn[index] = fertilizer,
-                19 | 20 => self.fertilizer_nitrogen_spring_wheat[index] = fertilizer,
-                21 | 22 => self.fertilizer_nitrogen_winter_wheat[index] = fertilizer,
-                23 | 24 | 77 | 78 => self.fertilizer_nitrogen_soybean[index] = fertilizer,
-                41 | 42 => self.fertilizer_nitrogen_cotton[index] = fertilizer,
+                17 | 18 | 63 | 64 => self.fertilizer_nitrogen_corn[patch] = fertilizer,
+                19 | 20 => self.fertilizer_nitrogen_spring_wheat[patch] = fertilizer,
+                21 | 22 => self.fertilizer_nitrogen_winter_wheat[patch] = fertilizer,
+                23 | 24 | 77 | 78 => self.fertilizer_nitrogen_soybean[patch] = fertilizer,
+                41 | 42 => self.fertilizer_nitrogen_cotton[patch] = fertilizer,
                 61 | 62 => {
-                    self.fertilizer_nitrogen_rice1[index] = fertilizer;
-                    self.fertilizer_nitrogen_rice2[index] = fertilizer;
+                    self.fertilizer_nitrogen_rice1[patch] = fertilizer;
+                    self.fertilizer_nitrogen_rice2[patch] = fertilizer;
                 }
-                67 | 68 => self.fertilizer_nitrogen_sugarcane[index] = fertilizer,
+                67 | 68 => self.fertilizer_nitrogen_sugarcane[patch] = fertilizer,
                 _ => {}
             }
         }
+        Ok(())
     }
 
-    fn set_patch_irrigation(&mut self, classes: &[i32]) {
+    fn set_patch_irrigation(&mut self, classes: &[i32], pft_to_patch: &[usize]) -> Result<()> {
         let Some(methods) = self.irrigation_method.as_deref() else {
-            return;
+            return Ok(());
         };
+        ensure!(
+            classes.len() == methods.len()
+                && classes.len() == pft_to_patch.len()
+                && pft_to_patch
+                    .iter()
+                    .all(|&patch| patch < self.patch_phase.len()),
+            "CROP PFT-to-patch irrigation ownership is inconsistent"
+        );
         for (index, &class) in classes.iter().enumerate() {
             let method = methods[index];
+            let patch = pft_to_patch[index];
             match class {
-                17 | 18 | 63 | 64 => self.irrigation_method_corn[index] = method,
-                19 | 20 => self.irrigation_method_spring_wheat[index] = method,
-                21 | 22 => self.irrigation_method_winter_wheat[index] = method,
-                23 | 24 | 77 | 78 => self.irrigation_method_soybean[index] = method,
-                41 | 42 => self.irrigation_method_cotton[index] = method,
+                17 | 18 | 63 | 64 => self.irrigation_method_corn[patch] = method,
+                19 | 20 => self.irrigation_method_spring_wheat[patch] = method,
+                21 | 22 => self.irrigation_method_winter_wheat[patch] = method,
+                23 | 24 | 77 | 78 => self.irrigation_method_soybean[patch] = method,
+                41 | 42 => self.irrigation_method_cotton[patch] = method,
                 61 | 62 => {
-                    self.irrigation_method_rice1[index] = method;
-                    self.irrigation_method_rice2[index] = method;
+                    self.irrigation_method_rice1[patch] = method;
+                    self.irrigation_method_rice2[patch] = method;
                 }
-                67 | 68 => self.irrigation_method_sugarcane[index] = method,
+                67 | 68 => self.irrigation_method_sugarcane[patch] = method,
                 _ => {}
             }
         }
+        Ok(())
     }
 }
 
@@ -520,6 +666,497 @@ fn empty_crop_state(pfts: usize, patches: usize) -> CropColdStartState {
         fertilizer_nitrogen_rice2: vec![0.0; patches],
         fertilizer_nitrogen_sugarcane: vec![0.0; patches],
     }
+}
+
+fn set_spatial_patch_phase(
+    state: &mut CropColdStartState,
+    pft_to_patch: &[usize],
+    pft_fraction: &[f64],
+) -> Result<()> {
+    ensure!(
+        pft_to_patch.len() == state.crop_phase.len()
+            && pft_fraction.len() == state.crop_phase.len()
+            && pft_to_patch
+                .iter()
+                .all(|&patch| patch < state.patch_phase.len()),
+        "CROP PFT phase ownership is inconsistent"
+    );
+    let mut weight = vec![0.0; state.patch_phase.len()];
+    let mut phase = vec![0.0; state.patch_phase.len()];
+    for ((&patch, &fraction), &crop_phase) in
+        pft_to_patch.iter().zip(pft_fraction).zip(&state.crop_phase)
+    {
+        weight[patch] += fraction;
+        phase[patch] += crop_phase * fraction;
+    }
+    for patch in 0..state.patch_phase.len() {
+        state.patch_phase[patch] = if weight[patch] > 0.0 {
+            phase[patch] / weight[patch]
+        } else {
+            MISSING
+        };
+    }
+    Ok(())
+}
+
+struct MapGrid {
+    lat_s: Vec<f64>,
+    lat_n: Vec<f64>,
+    lon_w: Vec<f64>,
+    lon_span: Vec<f64>,
+}
+
+impl MapGrid {
+    fn from_file(file: &netcdf::File) -> Result<Self> {
+        let latitude = coordinate_values(file, "lat")?;
+        let longitude = coordinate_values(file, "lon")?;
+        ensure!(
+            !latitude.is_empty()
+                && !longitude.is_empty()
+                && latitude.iter().all(|value| value.is_finite())
+                && longitude.iter().all(|value| value.is_finite()),
+            "CROP management coordinates must be finite and nonempty"
+        );
+        let increasing = latitude.len() < 2 || latitude[1] > latitude[0];
+        ensure!(
+            latitude.windows(2).all(|pair| if increasing {
+                pair[1] > pair[0]
+            } else {
+                pair[1] < pair[0]
+            }),
+            "CROP management latitude coordinates must be strictly monotonic"
+        );
+        let (lat_s, lat_n) = (0..latitude.len())
+            .map(|index| {
+                if increasing {
+                    (
+                        if index == 0 {
+                            -90.0
+                        } else {
+                            (latitude[index - 1] + latitude[index]) * 0.5
+                        },
+                        if index + 1 == latitude.len() {
+                            90.0
+                        } else {
+                            (latitude[index] + latitude[index + 1]) * 0.5
+                        },
+                    )
+                } else {
+                    (
+                        if index + 1 == latitude.len() {
+                            -90.0
+                        } else {
+                            (latitude[index] + latitude[index + 1]) * 0.5
+                        },
+                        if index == 0 {
+                            90.0
+                        } else {
+                            (latitude[index - 1] + latitude[index]) * 0.5
+                        },
+                    )
+                }
+            })
+            .unzip();
+        let longitude = longitude
+            .into_iter()
+            .map(normalize_longitude)
+            .collect::<Vec<_>>();
+        ensure!(
+            longitude.len() == 1
+                || longitude.windows(2).all(|pair| {
+                    let distance = (pair[1] - pair[0]).rem_euclid(360.0);
+                    distance > 0.0 && distance < 360.0
+                }),
+            "CROP management longitude coordinates must be unique in cyclic order"
+        );
+        let (lon_w, lon_span) = if longitude.len() == 1 {
+            (vec![-180.0], vec![360.0])
+        } else {
+            (0..longitude.len())
+                .map(|index| {
+                    let previous = longitude[(index + longitude.len() - 1) % longitude.len()];
+                    let current = longitude[index];
+                    let next = longitude[(index + 1) % longitude.len()];
+                    let west = midpoint_longitude(previous, current);
+                    let east = midpoint_longitude(current, next);
+                    (west, longitude_span(west, east))
+                })
+                .unzip()
+        };
+        Ok(Self {
+            lat_s,
+            lat_n,
+            lon_w,
+            lon_span,
+        })
+    }
+
+    fn values(&self) -> usize {
+        self.lat_s.len() * self.lon_w.len()
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.lat_s == other.lat_s
+            && self.lat_n == other.lat_n
+            && self.lon_w == other.lon_w
+            && self.lon_span == other.lon_span
+    }
+}
+
+struct MapField {
+    values: Vec<f64>,
+    valid: Vec<bool>,
+}
+
+struct AreaMapping {
+    parts: Vec<Vec<(usize, f64)>>,
+}
+
+impl AreaMapping {
+    fn new(grid: &MapGrid, pixel_sets: &SpatialPixelSets) -> Result<Self> {
+        ensure!(
+            pixel_sets.cells.len() == pixel_sets.shared_fraction.len()
+                && !pixel_sets.lon_w.is_empty()
+                && pixel_sets.lon_w.len() == pixel_sets.lon_e.len()
+                && !pixel_sets.lat_s.is_empty()
+                && pixel_sets.lat_s.len() == pixel_sets.lat_n.len(),
+            "spatial CROP pixel geometry is inconsistent"
+        );
+        let mut parts = Vec::with_capacity(pixel_sets.cells.len());
+        for (set, cells) in pixel_sets.cells.iter().enumerate() {
+            let share = pixel_sets.shared_fraction[set];
+            let mut overlap = BTreeMap::<(usize, usize), f64>::new();
+            for &(x, y) in cells {
+                let x = usize::try_from(x).context("CROP mesh longitude is negative")?;
+                let y = usize::try_from(y).context("CROP mesh latitude is negative")?;
+                ensure!(
+                    x > 0 && x <= pixel_sets.lon_w.len() && y > 0 && y <= pixel_sets.lat_s.len(),
+                    "CROP mesh pixel is outside pixel axes"
+                );
+                let west = pixel_sets.lon_w[x - 1];
+                let east = pixel_sets.lon_e[x - 1];
+                let south = pixel_sets.lat_s[y - 1];
+                let north = pixel_sets.lat_n[y - 1];
+                ensure!(
+                    south.is_finite()
+                        && north.is_finite()
+                        && west.is_finite()
+                        && east.is_finite()
+                        && north > south,
+                    "CROP pixel has invalid geographic edges"
+                );
+                let target_span = longitude_span(west, east);
+                ensure!(target_span > 0.0, "CROP pixel has zero longitude width");
+                for latitude in 0..grid.lat_s.len() {
+                    let overlap_south = south.max(grid.lat_s[latitude]);
+                    let overlap_north = north.min(grid.lat_n[latitude]);
+                    if overlap_north - overlap_south < 1.0e-6 {
+                        continue;
+                    }
+                    for longitude in 0..grid.lon_w.len() {
+                        let width = longitude_overlap(
+                            west,
+                            target_span,
+                            grid.lon_w[longitude],
+                            grid.lon_span[longitude],
+                        );
+                        if width < 1.0e-6 {
+                            continue;
+                        }
+                        let area = width.to_radians()
+                            * (overlap_north.to_radians().sin() - overlap_south.to_radians().sin())
+                            * share;
+                        ensure!(
+                            area.is_finite() && area >= 0.0,
+                            "CROP map overlap has invalid spherical area"
+                        );
+                        *overlap.entry((longitude, latitude)).or_default() += area;
+                    }
+                }
+            }
+            parts.push(
+                overlap
+                    .into_iter()
+                    .filter_map(|((longitude, latitude), area)| {
+                        (area > 0.0).then_some((latitude * grid.lon_w.len() + longitude, area))
+                    })
+                    .collect(),
+            );
+        }
+        Ok(Self { parts })
+    }
+
+    fn exclude_invalid(&mut self, valid: &[bool]) -> Result<()> {
+        for parts in &mut self.parts {
+            ensure!(
+                parts.iter().all(|(index, _)| *index < valid.len()),
+                "CROP map masking has inconsistent source dimensions"
+            );
+            parts.retain(|(index, _)| valid[*index]);
+        }
+        Ok(())
+    }
+
+    fn average(&self, field: &MapField) -> Result<Vec<Option<f64>>> {
+        ensure!(
+            field.values.len() == field.valid.len()
+                && self
+                    .parts
+                    .iter()
+                    .flatten()
+                    .all(|(index, _)| *index < field.values.len()),
+            "CROP map values have inconsistent dimensions"
+        );
+        Ok(self
+            .parts
+            .iter()
+            .map(|parts| {
+                let (sum, area) = parts
+                    .iter()
+                    .fold((0.0, 0.0), |(sum, area), &(index, weight)| {
+                        (sum + field.values[index] * weight, area + weight)
+                    });
+                (area > 0.0).then_some(sum / area)
+            })
+            .collect())
+    }
+
+    fn dominant(&self, field: &MapField) -> Result<Vec<Option<f64>>> {
+        ensure!(
+            field.values.len() == field.valid.len()
+                && self
+                    .parts
+                    .iter()
+                    .flatten()
+                    .all(|(index, _)| *index < field.values.len()),
+            "CROP map values have inconsistent dimensions"
+        );
+        Ok(self
+            .parts
+            .iter()
+            .map(|parts| {
+                let mut largest = None;
+                for &(index, area) in parts {
+                    if largest.is_none_or(|(_, largest_area)| area > largest_area) {
+                        largest = Some((field.values[index], area));
+                    }
+                }
+                largest.map(|(value, _)| value)
+            })
+            .collect())
+    }
+}
+
+fn midpoint_longitude(west: f64, east: f64) -> f64 {
+    normalize_longitude(if west > east {
+        (west + east + 360.0) * 0.5
+    } else {
+        (west + east) * 0.5
+    })
+}
+
+fn normalize_longitude(value: f64) -> f64 {
+    (value + 180.0).rem_euclid(360.0) - 180.0
+}
+
+fn longitude_span(west: f64, east: f64) -> f64 {
+    if (east - west).abs() >= 360.0 - 1.0e-10 {
+        360.0
+    } else {
+        (normalize_longitude(east) - normalize_longitude(west)).rem_euclid(360.0)
+    }
+}
+
+fn longitude_overlap(west_a: f64, span_a: f64, west_b: f64, span_b: f64) -> f64 {
+    let segments = |west: f64, span: f64| {
+        let west = west.rem_euclid(360.0);
+        if span >= 360.0 - 1.0e-10 {
+            vec![(0.0, 360.0)]
+        } else if west + span <= 360.0 {
+            vec![(west, west + span)]
+        } else {
+            vec![(west, 360.0), (0.0, west + span - 360.0)]
+        }
+    };
+    segments(west_a, span_a)
+        .into_iter()
+        .flat_map(|(west_a, east_a)| {
+            segments(west_b, span_b)
+                .into_iter()
+                .map(move |(west_b, east_b)| (east_a.min(east_b) - west_a.max(west_b)).max(0.0))
+        })
+        .sum()
+}
+
+fn map_field_2d(file: &netcdf::File, name: &str, grid: &MapGrid) -> Result<MapField> {
+    let variable = required_variable(file, name)?;
+    require_dimensions(&variable, name, &["lat", "lon"])?;
+    let values = variable.get_values::<f64, _>(..).or_else(|_| {
+        variable
+            .get_values::<f32, _>(..)
+            .map(|values| values.into_iter().map(f64::from).collect())
+    })?;
+    map_field(variable, values, grid, name)
+}
+
+fn map_field_3d(file: &netcdf::File, name: &str, cft: usize, grid: &MapGrid) -> Result<MapField> {
+    let variable = required_variable(file, name)?;
+    require_dimensions(&variable, name, &["cft", "lat", "lon"])?;
+    ensure!(
+        cft < variable.dimensions()[0].len(),
+        "{name} has no CFT index {cft}"
+    );
+    let latitude = grid.lat_s.len();
+    let longitude = grid.lon_w.len();
+    let values = variable
+        .get_values::<f64, _>((cft..cft + 1, 0..latitude, 0..longitude))
+        .or_else(|_| {
+            variable
+                .get_values::<f32, _>((cft..cft + 1, 0..latitude, 0..longitude))
+                .map(|values| values.into_iter().map(f64::from).collect())
+        })?;
+    map_field(variable, values, grid, name)
+}
+
+fn map_field(
+    variable: netcdf::Variable<'_>,
+    values: Vec<f64>,
+    grid: &MapGrid,
+    name: &str,
+) -> Result<MapField> {
+    ensure!(
+        values.len() == grid.values(),
+        "CROP map {name} has {} values; expected {} from its coordinate axes",
+        values.len(),
+        grid.values()
+    );
+    let missing = ["missing_value", "_FillValue"]
+        .into_iter()
+        .filter_map(|attribute| {
+            variable
+                .attribute_value(attribute)
+                .and_then(Result::ok)
+                .and_then(numeric_attribute)
+        })
+        .collect::<Vec<_>>();
+    let valid = values
+        .iter()
+        .map(|value| value.is_finite() && !missing.iter().any(|missing| value == missing))
+        .collect();
+    Ok(MapField { values, valid })
+}
+
+fn read_spatial_fertilizer_source_one(
+    state: &mut CropColdStartState,
+    classes: &[i32],
+    mapping: &AreaMapping,
+    crop_grid: &MapGrid,
+    path: impl AsRef<Path>,
+) -> Result<()> {
+    state.fertilizer_nitrogen.fill(CROP_MANAGEMENT_MISSING);
+    let file = open_map(path, "CROP fertilizer source 1")?;
+    let grid = MapGrid::from_file(&file)?;
+    ensure!(
+        crop_grid.matches(&grid),
+        "CROP fertilizer source 1 grid differs from the planting-date grid used by CoLM's shared mapping"
+    );
+    let mut fertilizer = BTreeMap::new();
+    for &class in classes {
+        if class >= CFT_FIRST && !fertilizer.contains_key(&class) {
+            let field = map_field_2d(&file, &format!("CONST_FERTNITRO_CFT_{class:02}"), &grid)?;
+            fertilizer.insert(class, mapping.average(&field)?);
+        }
+    }
+    for (pft, &class) in classes.iter().enumerate() {
+        if let Some(values) = fertilizer.get(&class) {
+            state.fertilizer_nitrogen[pft] =
+                values[pft].unwrap_or(CROP_MANAGEMENT_MISSING).max(0.0);
+        }
+    }
+    Ok(())
+}
+
+fn read_spatial_fertilizer_source_two(
+    state: &mut CropColdStartState,
+    classes: &[i32],
+    pft_pixels: &SpatialPixelSets,
+    path: impl AsRef<Path>,
+) -> Result<()> {
+    state.fertilizer_nitrogen.fill(CROP_MANAGEMENT_MISSING);
+    state.manure_nitrogen.fill(CROP_MANAGEMENT_MISSING);
+    let file = open_map(path, "CROP fertilizer source 2")?;
+    let grid = MapGrid::from_file(&file)?;
+    let mapping = AreaMapping::new(&grid, pft_pixels)?;
+    let manure = mapping.average(&map_field_2d(&file, "manure", &grid)?)?;
+    let mut fertilizer = BTreeMap::new();
+    for &class in classes {
+        if class >= CFT_FIRST && !fertilizer.contains_key(&class) {
+            let cft = usize::try_from(class - CFT_FIRST).expect("validated CFT class");
+            fertilizer.insert(
+                class,
+                mapping.average(&map_field_3d(&file, "fertilizer", cft, &grid)?)?,
+            );
+        }
+    }
+    for (pft, &class) in classes.iter().enumerate() {
+        if let Some(values) = fertilizer.get(&class) {
+            state.manure_nitrogen[pft] = manure[pft].unwrap_or(CROP_MANAGEMENT_MISSING).max(0.0);
+            state.fertilizer_nitrogen[pft] =
+                values[pft].unwrap_or(CROP_MANAGEMENT_MISSING).max(0.0);
+        }
+    }
+    Ok(())
+}
+
+fn read_spatial_irrigation_methods(
+    classes: &[i32],
+    pft_pixels: &SpatialPixelSets,
+    path: impl AsRef<Path>,
+) -> Result<Vec<i32>> {
+    let file = open_map(path, "CROP irrigation")?;
+    let grid = MapGrid::from_file(&file)?;
+    let mapping = AreaMapping::new(&grid, pft_pixels)?;
+    let mut methods = vec![CROP_MANAGEMENT_MISSING_I32; classes.len()];
+    let mut fields = BTreeMap::new();
+    for &class in classes {
+        if class >= CFT_FIRST && !fields.contains_key(&class) {
+            let cft = usize::try_from(class - CFT_FIRST).expect("validated CFT class");
+            fields.insert(
+                class,
+                mapping.dominant(&map_field_3d(&file, "irrigation_method", cft, &grid)?)?,
+            );
+        }
+    }
+    for (pft, &class) in classes.iter().enumerate() {
+        if let Some(values) = fields.get(&class) {
+            methods[pft] = truncated_or(
+                values[pft].filter(|value| *value >= 0.0),
+                CROP_MANAGEMENT_MISSING_I32,
+                "irrigation_method",
+            )?;
+        }
+    }
+    Ok(methods)
+}
+
+fn read_spatial_irrigation_allocations(
+    patch_pixels: &SpatialPixelSets,
+    path: impl AsRef<Path>,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    let file = open_map(path, "CROP irrigation-allocation")?;
+    let grid = MapGrid::from_file(&file)?;
+    let mapping = AreaMapping::new(&grid, patch_pixels)?;
+    let groundwater = mapping
+        .average(&map_field_2d(&file, "irrig_gw_alloc", &grid)?)?
+        .into_iter()
+        .map(|value| value.unwrap_or(MISSING))
+        .collect();
+    let surface_water = mapping
+        .average(&map_field_2d(&file, "irrig_sw_alloc", &grid)?)?
+        .into_iter()
+        .map(|value| value.unwrap_or(MISSING))
+        .collect();
+    Ok((groundwater, surface_water))
 }
 
 fn read_fertilizer_source_one(

@@ -2342,7 +2342,7 @@ fn is_water_class(land_cover: LandCoverScheme, class: i32) -> bool {
         || matches!(land_cover, LandCoverScheme::Usgs) && class == 16
 }
 
-fn required_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
+pub(crate) fn required_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
     match document.get(field) {
         Some(Value::Str(value)) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
         Some(Value::Str(_)) => bail!("{field} must not be empty"),
@@ -2351,7 +2351,7 @@ fn required_string(document: &colm_namelist::Document, field: &str) -> Result<St
     }
 }
 
-fn optional_i32(document: &colm_namelist::Document, field: &str) -> Result<Option<i32>> {
+pub(crate) fn optional_i32(document: &colm_namelist::Document, field: &str) -> Result<Option<i32>> {
     match document.get(field) {
         Some(Value::Int(value)) => i32::try_from(*value)
             .map(Some)

@@ -11,12 +11,13 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
 
 use crate::single_point::{
-    aggregate_pft_radiation, pc_canopy_layer, pc_uses_three_dimensional_canopy, pft_canopy,
-    pft_leaf_optics, pft_parameters,
+    aggregate_pft_radiation, optional_i32, pc_canopy_layer, pc_uses_three_dimensional_canopy,
+    pft_canopy, pft_leaf_optics, pft_parameters, required_string,
 };
 use crate::spatial_static::{
-    block_path, read_f64 as read_lct_f64, read_patches, read_soil, spatial_patch_type, values_f64,
-    values_i32, write_spatial_lct_constant_restart, SpatialLctStaticConfig,
+    block_path, read_f64 as read_lct_f64, read_patches, read_soil, read_spatial_pixel_sets,
+    spatial_patch_type, values_f64, values_i32, write_spatial_lct_constant_restart,
+    SpatialLctStaticConfig,
 };
 use crate::{
     bgc_time_restart_input, cold_start_pc_broadband_radiation_with_snow,
@@ -303,7 +304,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     let pft_to_patch = match_pfts_to_patches(&patches, &patch_kind, &pfts)?;
     let pft_owner = pft_owners(&pft_to_patch, pfts.class.len())?;
     let crop = use_crop
-        .then(|| spatial_crop_state(&document, &pfts, &pft_owner, patches.class.len()))
+        .then(|| spatial_crop_state(&document, config.static_config, &patches, &pfts, &pft_owner))
         .transpose()?;
     let bgc_state = use_bgc
         .then(|| {
@@ -633,6 +634,7 @@ struct SpatialPftVectors {
     element: Vec<i64>,
     start: Vec<i32>,
     end: Vec<i32>,
+    shared_fraction: Vec<f64>,
 }
 
 #[derive(Debug)]
@@ -650,9 +652,10 @@ enum SpatialPftSubgrid {
 
 fn spatial_crop_state(
     document: &colm_namelist::Document,
+    config: SpatialPftStaticConfig<'_>,
+    patches: &crate::spatial_static::Patches,
     pfts: &SpatialPftVectors,
     pft_owner: &[usize],
-    patches: usize,
 ) -> Result<crate::CropColdStartState> {
     let planting_day = document
         .get("DEF_TUNING_CROP_PLANTING_DAY")
@@ -661,20 +664,62 @@ fn spatial_crop_state(
                 .as_f64()
                 .context("DEF_TUNING_CROP_PLANTING_DAY must be a real value")
         })
-        .transpose()?
-        .filter(|value| *value > 0.0);
+        .transpose()?;
+    ensure!(
+        planting_day.is_none_or(f64::is_finite),
+        "DEF_TUNING_CROP_PLANTING_DAY must be finite"
+    );
+    let planting_day = planting_day.filter(|value| *value > 0.0);
     let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
     let use_irrigation = optional_bool_or(document, "DEF_USE_IRRIGATION", false)?;
-    ensure!(
-        !use_fertilizer && !use_irrigation && planting_day.is_some(),
-        "spatial CROP management maps are not implemented; use a positive DEF_TUNING_CROP_PLANTING_DAY with DEF_USE_FERT = .false. and DEF_USE_IRRIGATION = .false."
-    );
-    crate::crop::spatial_crop_cold_start_from_tuning(
+    if !use_fertilizer && !use_irrigation {
+        if let Some(planting_day) = planting_day {
+            return crate::crop::spatial_crop_cold_start_from_tuning(
+                &pfts.class,
+                pft_owner,
+                &pfts.fraction,
+                patches.class.len(),
+                planting_day,
+            );
+        }
+    }
+    let pft_pixels = read_spatial_pixel_sets(
+        config.landdata,
+        config.land_cover_year,
+        config.block_label,
+        &pfts.element,
+        &pfts.start,
+        &pfts.end,
+        &pfts.shared_fraction,
+        "landpft",
+    )?;
+    let patch_pixels = read_spatial_pixel_sets(
+        config.landdata,
+        config.land_cover_year,
+        config.block_label,
+        &patches.element,
+        &patches.start,
+        &patches.end,
+        &patches.shared_fraction,
+        "landpatch",
+    )?;
+    let runtime_dir = std::path::PathBuf::from(required_string(document, "DEF_dir_runtime")?);
+    crate::crop::spatial_crop_cold_start_from_management(
         &pfts.class,
         pft_owner,
         &pfts.fraction,
-        patches,
-        planting_day.expect("validated positive planting day"),
+        patches.class.len(),
+        &pft_pixels,
+        &patch_pixels,
+        crate::CropManagementConfig {
+            runtime_dir: &runtime_dir,
+            planting_day_override: planting_day,
+            use_fertilizer,
+            fertilizer_source: optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1),
+            use_irrigation,
+            use_irrigation_allocation: use_irrigation
+                && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),
+        },
     )
 }
 
@@ -807,6 +852,12 @@ fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVect
         .get_values::<i64, _>(..)?;
     let start = values_i32(&file, "ipxstt")?;
     let end = values_i32(&file, "ipxend")?;
+    let shared_fraction = match file.variable("pctshared") {
+        Some(variable) => variable
+            .get_values::<f64, _>(..)
+            .context("cannot read spatial landpft sharing fractions")?,
+        None => vec![1.0; class.len()],
+    };
     let fraction = read_f64(
         config.landdata,
         "pctpft",
@@ -831,6 +882,10 @@ fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVect
             && element.len() == count
             && start.len() == count
             && end.len() == count
+            && shared_fraction.len() == count
+            && shared_fraction
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
             && fraction.iter().all(|value| value.is_finite() && *value >= 0.0),
         "spatial PFT topology, fraction, and height vectors must be finite and have equal nonzero lengths"
     );
@@ -841,6 +896,7 @@ fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVect
         element,
         start,
         end,
+        shared_fraction,
     })
 }
 

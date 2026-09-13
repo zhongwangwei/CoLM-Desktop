@@ -283,6 +283,68 @@ fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps(
 }
 
 #[test]
+fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
+    let root = temp_dir("crop-management");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    let runtime = root.join("runtime");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_pft_topology(&landdata, 2005, "w180_s90", 15);
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "pctpft",
+        "pct_crops",
+        "pct_crops",
+        2005,
+        "w180_s90",
+        1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        0.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_crop_runtime(&runtime);
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CROP = .true.\n DEF_USE_FERT = .false.\n DEF_USE_IRRIGATION = .false.\n DEF_dir_runtime = '{}'\n/\n",
+            runtime.display()
+        ),
+    )
+    .unwrap();
+
+    let mut config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+
+    let pft = netcdf::open(&files.pft).unwrap();
+    assert_eq!(values_f64(&pft, "plantdate_p").unwrap(), [123.0]);
+    let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
+    assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [2.0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
     let root = temp_dir("time");
     let landdata = root.join("landdata");
@@ -368,6 +430,31 @@ fn write_pft_topology(landdata: &Path, year: i32, block: &str, class: i32) {
     file.add_variable::<i64>("eindex", &["pft"])
         .unwrap()
         .put_values(&[7_i64], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_crop_runtime(runtime: &Path) {
+    let path = runtime.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[-45.0, 45.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-135.0, -45.0, 45.0, 135.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("pdrice2", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[2.0; 8], ..)
+        .unwrap();
+    file.add_variable::<f64>("PLANTDATE_CFT_15", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[123.0; 8], ..)
         .unwrap();
     file.close().unwrap();
 }
