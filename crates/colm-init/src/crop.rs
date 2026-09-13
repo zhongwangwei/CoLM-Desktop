@@ -60,6 +60,7 @@ pub struct CropColdStartState {
     cumulative_vernalization_days: Vec<f64>,
     vernalization_factor: Vec<f64>,
     crop_phase: Vec<f64>,
+    patch_phase: Vec<f64>,
     fertilizer_counter: Vec<f64>,
     minimum_reference_temperature: Vec<f64>,
     maximum_reference_temperature: Vec<f64>,
@@ -120,6 +121,7 @@ pub fn crop_cold_start_from_tuning(
     let mut state = empty_crop_state(classes.len(), crop_fraction.len());
     state.planting_date.fill(planting_day);
     state.planting_day_rice2.fill(0.0);
+    state.patch_phase.fill(4.0);
     Ok(state)
 }
 
@@ -202,6 +204,7 @@ pub fn crop_cold_start_from_management(
     }
     state.set_patch_fertilizer(classes);
     state.set_patch_irrigation(classes);
+    state.patch_phase.fill(4.0);
     Ok(state)
 }
 
@@ -276,7 +279,7 @@ impl CropColdStartState {
 
     pub fn bgc_fields(&self) -> BgcCropFields<'_> {
         BgcCropFields {
-            crop_phase: &self.crop_phase,
+            crop_phase: &self.patch_phase,
             planting_day_corn: &self.planting_day_corn,
             planting_day_spring_wheat: &self.planting_day_spring_wheat,
             planting_day_winter_wheat: &self.planting_day_winter_wheat,
@@ -411,6 +414,7 @@ fn empty_crop_state(pfts: usize, patches: usize) -> CropColdStartState {
         cumulative_vernalization_days: missing.clone(),
         vernalization_factor: vec![0.0; pfts],
         crop_phase: vec![4.0; pfts],
+        patch_phase: vec![MISSING; patches],
         fertilizer_counter: vec![0.0; pfts],
         minimum_reference_temperature: vec![273.15; pfts],
         maximum_reference_temperature: vec![273.15; pfts],

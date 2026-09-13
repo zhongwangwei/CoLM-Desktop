@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn crop_state_keeps_pft_and_patch_phase_axes_distinct() {
+    let state = empty_crop_state(2, 3);
+
+    assert_eq!(state.pft_fields().crop_phase, [4.0, 4.0]);
+    assert_eq!(state.bgc_fields().crop_phase, [MISSING; 3]);
+}
+
+#[test]
 fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
     let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0).unwrap();
     let pft = state.pft_fields();
