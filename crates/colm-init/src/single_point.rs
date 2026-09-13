@@ -275,7 +275,7 @@ pub fn single_point_cold_start_run_from_namelist(
         lai_end_year,
         dynamic_lake: optional_bool_or(&document, "DEF_USE_Dynamic_Lake", false)?,
         plant_hydraulics: optional_bool_or(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
-        ozone_stress: optional_bool_or(&document, "DEF_USE_OZONESTRESS", true)?,
+        ozone_stress: optional_bool_or(&document, "DEF_USE_OZONESTRESS", false)?,
         bgc,
         cn_initial_state: enabled_existing_path(&document, "DEF_USE_CN_INIT", "DEF_file_cn_init")?,
         nitrification: optional_bool_or(&document, "DEF_USE_NITRIF", true)?,

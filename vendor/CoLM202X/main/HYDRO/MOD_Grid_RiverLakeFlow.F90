@@ -115,7 +115,7 @@ CONTAINS
             CALL read_bifurcation_restart(gridriver_restart_file, &
                wdsrf_ucat_prev_restart_found, bif_restart_loaded, &
                restart_transaction_validated, restart_feature_manifest_present, &
-               restart_bifurcation_enabled)
+               restart_bifurcation_enabled, restart_levee_enabled)
             IF (.not. bif_restart_loaded) THEN
                ! Previous depth and pathway momentum form one numerical state
                ! unit. If either half is absent, cold-start both together.

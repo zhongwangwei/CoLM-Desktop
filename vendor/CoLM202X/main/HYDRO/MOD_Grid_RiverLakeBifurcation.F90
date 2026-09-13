@@ -1269,7 +1269,7 @@ CONTAINS
    ! =========================================================================
    SUBROUTINE read_bifurcation_restart (file_restart, previous_depth_restart_found, restart_loaded, &
       restart_transaction_validated_in, restart_feature_manifest_present_in, &
-      restart_bifurcation_enabled_in)
+      restart_bifurcation_enabled_in, restart_levee_enabled_in)
    ! =========================================================================
    !
    ! Read bifurcation pathway state from restart in global pathway order.
@@ -1288,6 +1288,7 @@ CONTAINS
    logical, intent(in) :: restart_transaction_validated_in
    logical, intent(in) :: restart_feature_manifest_present_in
    logical, intent(in) :: restart_bifurcation_enabled_in
+   logical, intent(in) :: restart_levee_enabled_in
    logical :: has_pth_veloc, has_pth_momen, has_path_signature
    logical :: restart_feature_present, strict_bif_restart, state_allocated
    integer, allocatable :: global_id_read(:)
@@ -1473,6 +1474,22 @@ CONTAINS
          IF (p_is_master) THEN
             write(*,'(A,I0,A)') 'WARNING: invalid bifurcation restart state (count=', &
                invalid_state_count, '); cold-starting paired pathway state.'
+            call flush(6)
+         ENDIF
+      ENDIF
+
+      ! A levee-mode change changes pathway water surfaces and depth rules.
+      ! Keep all identity/corruption checks above, then cold-start the paired
+      ! momentum/previous-depth state without discarding stored water or history.
+      IF (restart_loaded .and. restart_feature_present .and. &
+          (restart_levee_enabled_in .neqv. DEF_USE_LEVEE)) THEN
+         IF (p_is_worker) THEN
+            pth_veloc = 0._r8
+            pth_momen = 0._r8
+         ENDIF
+         restart_loaded = .false.
+         IF (p_is_master) THEN
+            write(*,'(A)') 'WARNING: levee mode changed; cold-starting paired bifurcation state.'
             call flush(6)
          ENDIF
       ENDIF

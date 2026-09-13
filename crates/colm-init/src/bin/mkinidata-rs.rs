@@ -477,7 +477,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
         dynamic_lake: namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?,
         plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
-        ozone_stress: namelist_bool(&document, "DEF_USE_OZONESTRESS", true)?,
+        ozone_stress: namelist_bool(&document, "DEF_USE_OZONESTRESS", false)?,
         variably_saturated_flow: namelist_bool(&document, "DEF_USE_VariablySaturatedFlow", true)?,
         vegetation_snow: namelist_bool(&document, "DEF_VEG_SNOW", true)?,
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,

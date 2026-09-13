@@ -52,11 +52,10 @@ fn an_array_field_records_its_arity() {
 
 #[test]
 fn defaults_are_recorded_exactly_as_colm_declares_them() {
-    // CoLM Desktop 会为新算例显式关闭臭氧，但 schema 仍逐字记录内核的
-    // 兼容默认；植被积雪则按新版冠层路径默认开启。
+    // schema 逐字记录内核默认：臭氧必须显式启用；植被积雪则按新版冠层路径开启。
     assert_eq!(
         find("DEF_USE_OZONEDATA").map(|f| f.default),
-        Some(Default::Logical(true))
+        Some(Default::Logical(false))
     );
     assert_eq!(
         find("DEF_VEG_SNOW").map(|f| f.default),
