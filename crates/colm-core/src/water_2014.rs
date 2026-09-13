@@ -7,9 +7,10 @@
 use anyhow::{ensure, Result};
 
 use crate::{
-    simple_vic_runoff, solve_campbell_soil_water, topmodel_surface_runoff, update_groundwater,
-    update_groundwater_topmodel, xinanjiang_runoff, CampbellSoilWaterInput, GroundwaterInput,
-    StorageRunoffInput, TopmodelMethod, TopmodelSubsurfaceInput,
+    simple_vic_runoff, snow_water, solve_campbell_soil_water, topmodel_surface_runoff,
+    update_groundwater, update_groundwater_topmodel, xinanjiang_runoff, CampbellSoilWaterInput,
+    GroundwaterInput, RuntimeSnowColumn, SnowWaterInput, SnowWaterOutcome, StorageRunoffInput,
+    TopmodelMethod, TopmodelSubsurfaceInput,
 };
 
 const ICE_DENSITY_KG_M3: f64 = 917.0;
@@ -95,6 +96,20 @@ pub struct Water2014SoilOutput {
     pub root_uptake_amount_mm: Vec<f64>,
     pub matric_potential_mm: Vec<f64>,
     pub hydraulic_conductivity_mm_s: Vec<f64>,
+}
+
+/// Inputs to the active-snow, non-split `WATER_2014` hand-off.
+#[derive(Debug, Clone, Copy)]
+pub struct Water2014SnowSoilInput<'a> {
+    pub snow: SnowWaterInput,
+    pub soil: Water2014SoilInput<'a>,
+}
+
+/// Diagnostics from the linked snow-percolation and soil-water calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Water2014SnowSoilOutput {
+    pub snow: SnowWaterOutcome,
+    pub soil: Water2014SoilOutput,
 }
 
 /// Runs the no-snow regular-soil branch of `MOD_SoilSnowHydrology:WATER_2014`.
@@ -207,6 +222,41 @@ pub fn water_2014_soil_step(
         matric_potential_mm: soil.matric_potential_mm,
         hydraulic_conductivity_mm_s: soil.hydraulic_conductivity_mm_s,
     })
+}
+
+/// Runs the active-snow, non-split `snowwater → WATER_2014` hand-off.
+///
+/// `snowwater` owns rainfall, evaporation, dew, frost, sublimation, and melt
+/// drainage while a snow column exists. Its bottom drainage is then the sole
+/// soil-water input, exactly as `MOD_SoilSnowHydrology:WATER_2014` does before
+/// runoff and Richards flow. Snow compaction/combine/divide remains a later
+/// source phase and is intentionally not folded into this hydrology hand-off.
+pub fn water_2014_snow_soil_step(
+    input: Water2014SnowSoilInput<'_>,
+    snow_state: &mut RuntimeSnowColumn,
+    soil_state: &mut Water2014SoilState,
+) -> Result<Water2014SnowSoilOutput> {
+    ensure!(
+        (input.snow.time_step_seconds - input.soil.time_step_seconds).abs() <= 1.0e-12,
+        "snow and soil water steps need the same time step"
+    );
+    let snow = snow_water(input.snow, snow_state)?;
+    let soil = water_2014_soil_step(
+        Water2014SoilInput {
+            fluxes: Water2014SoilFluxes {
+                ground_rain_kg_m2_s: snow.bottom_drainage_kg_m2_s,
+                snowmelt_kg_m2_s: 0.0,
+                ground_evaporation_kg_m2_s: 0.0,
+                transpiration_kg_m2_s: input.soil.fluxes.transpiration_kg_m2_s,
+                soil_dew_kg_m2_s: 0.0,
+                soil_frost_kg_m2_s: 0.0,
+                soil_sublimation_kg_m2_s: 0.0,
+            },
+            ..input.soil
+        },
+        soil_state,
+    )?;
+    Ok(Water2014SnowSoilOutput { snow, soil })
 }
 
 fn runoff(

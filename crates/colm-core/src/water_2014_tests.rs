@@ -100,3 +100,51 @@ fn water_2014_soil_refuses_non_soil_branches() {
     input.patch_type = 2;
     assert!(water_2014_soil_step(input, &mut state()).is_err());
 }
+
+#[test]
+fn active_snow_routes_its_bottom_drainage_through_the_shared_soil_kernel() {
+    let mut snow_state = crate::RuntimeSnowColumn::empty();
+    crate::add_new_snow(
+        crate::NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1800.0,
+            ground_temperature_k: 270.0,
+            ground_snowfall_kg_m2_s: 0.002,
+            new_snow_bulk_density_kg_m3: 100.0,
+            precipitation_temperature_k: 269.0,
+            variably_saturated_flow: false,
+        },
+        &mut snow_state,
+    )
+    .unwrap();
+    let mut soil_state = state();
+    let output = water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: crate::SnowWaterInput {
+                time_step_seconds: 1800.0,
+                irreducible_saturation: 0.033,
+                impermeable_porosity: 0.05,
+                rainfall_kg_m2_s: 0.001,
+                evaporation_kg_m2_s: 0.0,
+                dew_kg_m2_s: 0.0,
+                sublimation_kg_m2_s: 0.0,
+                frost_kg_m2_s: 0.0,
+            },
+            soil: input(),
+        },
+        &mut snow_state,
+        &mut soil_state,
+    )
+    .unwrap();
+
+    assert!(output.snow.bottom_drainage_kg_m2_s > 0.0);
+    assert_eq!(
+        output.soil.water_input_mm_s,
+        output.snow.bottom_drainage_kg_m2_s
+    );
+    assert!(output.soil.infiltration_mm_s.is_finite());
+    assert!(soil_state
+        .liquid_water_kg_m2
+        .iter()
+        .all(|value| *value >= 0.0));
+}
