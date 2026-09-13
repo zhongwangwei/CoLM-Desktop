@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
 
+use crate::crop::{map_field_2d, map_field_soil_3d, AreaMapping, MapGrid};
 use crate::single_point::{
     aggregate_pft_radiation, optional_i32, pc_canopy_layer, pc_uses_three_dimensional_canopy,
     pft_canopy, pft_leaf_optics, pft_parameters, required_string,
@@ -27,7 +28,8 @@ use crate::{
     BgcPftColdStartInput, BgcTimeRestartFile, ColdStartRadiation, ConstantRestartFiles,
     HydraulicModel, LandCoverScheme, PcPftInput, PftBgcFields, PftConstantRestartInput,
     PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate,
-    RestartTuning, SpatialLctTimeConfig, TimeRestartFile, MISSING,
+    RestartTuning, RuntimeCnState, RuntimeCnVegetationCarbon, SpatialLctTimeConfig,
+    TimeRestartFile, MISSING,
 };
 
 /// Arguments for one already-addressed spatial `landpft` block.
@@ -253,10 +255,14 @@ pub fn write_spatial_pft_cold_time_restarts(
         !use_crop || use_bgc,
         "spatial CROP cold starts require DEF_USE_BGC = .true."
     );
-    if use_bgc {
+    let cn_initial_state = optional_bool_or(&document, "DEF_USE_CN_INIT", false)?
+        .then(|| required_string(&document, "DEF_file_cn_init").map(std::path::PathBuf::from))
+        .transpose()?;
+    if let Some(path) = &cn_initial_state {
         ensure!(
-            !optional_bool_or(&document, "DEF_USE_CN_INIT", false)?,
-            "spatial BGC cold starts with DEF_USE_CN_INIT require a spatial equilibrium reader"
+            path.is_file(),
+            "spatial BGC equilibrium source does not exist: {}",
+            path.display()
         );
     }
     let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
@@ -316,6 +322,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 &patch_kind,
                 &pfts,
                 &pft_to_patch,
+                cn_initial_state.as_deref(),
                 use_nitrification,
             )
         })
@@ -749,6 +756,7 @@ fn derive_spatial_bgc_state(
     patch_kind: &[i32],
     pfts: &SpatialPftVectors,
     pft_to_patch: &[Vec<usize>],
+    cn_initial_state: Option<&Path>,
     use_nitrification: bool,
 ) -> Result<crate::BgcColdStartState> {
     ensure!(
@@ -783,6 +791,9 @@ fn derive_spatial_bgc_state(
         hydraulic_model,
     )?;
     let soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m;
+    let equilibrium = cn_initial_state
+        .map(|path| read_spatial_cn_equilibrium(path, config, patches, pfts))
+        .transpose()?;
     let states = (0..patches.class.len())
         .map(|patch| {
             let indices = &pft_to_patch[patch];
@@ -814,6 +825,12 @@ fn derive_spatial_bgc_state(
                 .iter()
                 .map(|&index| dead_wood_carbon_to_nitrogen[index])
                 .collect::<Vec<_>>();
+            let vegetation = equilibrium.as_ref().map(|state| {
+                indices
+                    .iter()
+                    .map(|&index| state.vegetation[index].clone())
+                    .collect::<Vec<_>>()
+            });
             let soil_bulk_density_kg_m3 = (0..soil.layers)
                 .map(|layer| soil.get(crate::SoilField::BulkDensity, layer, patch))
                 .collect::<Vec<_>>();
@@ -828,13 +845,164 @@ fn derive_spatial_bgc_state(
                     live_wood_carbon_to_nitrogen: &live_wood_cn,
                     dead_wood_carbon_to_nitrogen: &dead_wood_cn,
                 },
-                runtime_cn_state: None,
-                runtime_vegetation_carbon: None,
+                runtime_cn_state: equilibrium.as_ref().map(|state| &state.patch[patch]),
+                runtime_vegetation_carbon: vegetation.as_deref(),
                 use_nitrification,
             })
         })
         .collect::<Result<Vec<_>>>()?;
     merge_bgc_cold_start_states(&states)
+}
+
+struct SpatialCnEquilibrium {
+    patch: Vec<RuntimeCnState>,
+    vegetation: Vec<RuntimeCnVegetationCarbon>,
+}
+
+fn read_spatial_cn_equilibrium(
+    path: &Path,
+    config: SpatialPftStaticConfig<'_>,
+    patches: &crate::spatial_static::Patches,
+    pfts: &SpatialPftVectors,
+) -> Result<SpatialCnEquilibrium> {
+    const CARBON: [&str; 7] = [
+        "litr1c_vr",
+        "litr2c_vr",
+        "litr3c_vr",
+        "cwdc_vr",
+        "soil1c_vr",
+        "soil2c_vr",
+        "soil3c_vr",
+    ];
+    const NITROGEN: [&str; 7] = [
+        "litr1n_vr",
+        "litr2n_vr",
+        "litr3n_vr",
+        "cwdn_vr",
+        "soil1n_vr",
+        "soil2n_vr",
+        "soil3n_vr",
+    ];
+    let file = netcdf::open(path).with_context(|| {
+        format!(
+            "cannot open spatial BGC equilibrium state {}",
+            path.display()
+        )
+    })?;
+    let grid = MapGrid::from_file(&file)?;
+    let patch_pixels = read_spatial_pixel_sets(
+        config.landdata,
+        config.land_cover_year,
+        config.block_label,
+        &patches.element,
+        &patches.start,
+        &patches.end,
+        &patches.shared_fraction,
+        "landpatch",
+    )?;
+    let pft_pixels = read_spatial_pixel_sets(
+        config.landdata,
+        config.land_cover_year,
+        config.block_label,
+        &pfts.element,
+        &pfts.start,
+        &pfts.end,
+        &pfts.shared_fraction,
+        "landpft",
+    )?;
+    let patch_mapping = AreaMapping::new(&grid, &patch_pixels)?;
+    let pft_mapping = AreaMapping::new(&grid, &pft_pixels)?;
+    let carbon = map_cn_profiles(&file, &grid, &patch_mapping, &CARBON)?;
+    let nitrogen = map_cn_profiles(&file, &grid, &patch_mapping, &NITROGEN)?;
+    let ammonium = map_cn_profile(&file, &grid, &patch_mapping, "smin_nh4_vr")?;
+    let nitrate = map_cn_profile(&file, &grid, &patch_mapping, "smin_no3_vr")?;
+    let vegetation = [
+        map_cn_scalar(&file, &grid, &pft_mapping, "leafc")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "leafc_storage")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "frootc")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "frootc_storage")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "livestemc")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "deadstemc")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "livecrootc")?,
+        map_cn_scalar(&file, &grid, &pft_mapping, "deadcrootc")?,
+    ];
+    let zero_vegetation = || RuntimeCnVegetationCarbon {
+        leaf_g_m2: 0.0,
+        leaf_storage_g_m2: 0.0,
+        fine_root_g_m2: 0.0,
+        fine_root_storage_g_m2: 0.0,
+        live_stem_g_m2: 0.0,
+        dead_stem_g_m2: 0.0,
+        live_coarse_root_g_m2: 0.0,
+        dead_coarse_root_g_m2: 0.0,
+    };
+    Ok(SpatialCnEquilibrium {
+        patch: (0..patches.class.len())
+            .map(|patch| RuntimeCnState {
+                decomposition_carbon_g_m3: carbon[patch].clone(),
+                decomposition_nitrogen_g_m3: nitrogen[patch].clone(),
+                ammonium_g_m3: ammonium[patch].clone(),
+                nitrate_g_m3: nitrate[patch].clone(),
+                vegetation_carbon: zero_vegetation(),
+            })
+            .collect(),
+        vegetation: (0..pfts.class.len())
+            .map(|pft| RuntimeCnVegetationCarbon {
+                leaf_g_m2: vegetation[0][pft],
+                leaf_storage_g_m2: vegetation[1][pft],
+                fine_root_g_m2: vegetation[2][pft],
+                fine_root_storage_g_m2: vegetation[3][pft],
+                live_stem_g_m2: vegetation[4][pft],
+                dead_stem_g_m2: vegetation[5][pft],
+                live_coarse_root_g_m2: vegetation[6][pft],
+                dead_coarse_root_g_m2: vegetation[7][pft],
+            })
+            .collect(),
+    })
+}
+
+fn map_cn_profiles(
+    file: &netcdf::File,
+    grid: &MapGrid,
+    mapping: &AreaMapping,
+    names: &[&str],
+) -> Result<Vec<Vec<f64>>> {
+    let mut values = vec![vec![0.0; names.len() * 10]; mapping.len()];
+    for (pool, &name) in names.iter().enumerate() {
+        for soil in 0..10 {
+            let mapped =
+                mapping.average_required(&map_field_soil_3d(file, name, soil, grid)?, name)?;
+            for (patch, value) in mapped.into_iter().enumerate() {
+                values[patch][pool * 10 + soil] = value;
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn map_cn_profile(
+    file: &netcdf::File,
+    grid: &MapGrid,
+    mapping: &AreaMapping,
+    name: &str,
+) -> Result<Vec<Vec<f64>>> {
+    (0..10)
+        .map(|soil| mapping.average_required(&map_field_soil_3d(file, name, soil, grid)?, name))
+        .collect::<Result<Vec<_>>>()
+        .map(|layers| {
+            (0..layers[0].len())
+                .map(|patch| layers.iter().map(|layer| layer[patch]).collect())
+                .collect()
+        })
+}
+
+fn map_cn_scalar(
+    file: &netcdf::File,
+    grid: &MapGrid,
+    mapping: &AreaMapping,
+    name: &str,
+) -> Result<Vec<f64>> {
+    mapping.average_required(&map_field_2d(file, name, grid)?, name)
 }
 
 fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVectors> {

@@ -345,6 +345,57 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
 }
 
 #[test]
+fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
+    let root = temp_dir("cn-equilibrium");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    let cn = root.join("cnsteadystate.nc");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_cn_equilibrium(&cn);
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CN_INIT = .true.\n DEF_file_cn_init = '{}'\n/\n",
+            cn.display()
+        ),
+    )
+    .unwrap();
+    let mut config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+    let pft = netcdf::open(&files.pft).unwrap();
+    assert_eq!(values_f64(&pft, "leafc_p").unwrap(), [200.0]);
+    let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
+    assert_eq!(values_f64(&bgc, "sminn_vr").unwrap(), [10.0; 10]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
     let root = temp_dir("time");
     let landdata = root.join("landdata");
@@ -456,6 +507,73 @@ fn write_crop_runtime(runtime: &Path) {
         .unwrap()
         .put_values(&[123.0; 8], ..)
         .unwrap();
+    file.close().unwrap();
+}
+
+fn write_cn_equilibrium(path: &Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    file.add_dimension("soil", 10).unwrap();
+    file.add_variable::<f32>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[-45.0, 45.0], ..)
+        .unwrap();
+    file.add_variable::<f32>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-135.0, -45.0, 45.0, 135.0], ..)
+        .unwrap();
+    for (pool, name) in [
+        "litr1c_vr",
+        "litr2c_vr",
+        "litr3c_vr",
+        "cwdc_vr",
+        "soil1c_vr",
+        "soil2c_vr",
+        "soil3c_vr",
+        "litr1n_vr",
+        "litr2n_vr",
+        "litr3n_vr",
+        "cwdn_vr",
+        "soil1n_vr",
+        "soil2n_vr",
+        "soil3n_vr",
+        "smin_nh4_vr",
+        "smin_no3_vr",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let value = if *name == "smin_nh4_vr" {
+            4.0
+        } else if *name == "smin_no3_vr" {
+            6.0
+        } else {
+            (pool + 1) as f32
+        };
+        file.add_variable::<f32>(name, &["lat", "lon", "soil"])
+            .unwrap()
+            .put_values(&vec![value; 80], ..)
+            .unwrap();
+    }
+    for (index, name) in [
+        "leafc",
+        "leafc_storage",
+        "frootc",
+        "frootc_storage",
+        "livestemc",
+        "deadstemc",
+        "livecrootc",
+        "deadcrootc",
+    ]
+    .iter()
+    .enumerate()
+    {
+        file.add_variable::<f32>(name, &["lat", "lon"])
+            .unwrap()
+            .put_values(&[200.0 + index as f32; 8], ..)
+            .unwrap();
+    }
     file.close().unwrap();
 }
 

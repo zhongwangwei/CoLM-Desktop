@@ -699,7 +699,7 @@ fn set_spatial_patch_phase(
     Ok(())
 }
 
-struct MapGrid {
+pub(crate) struct MapGrid {
     lat_s: Vec<f64>,
     lat_n: Vec<f64>,
     lon_w: Vec<f64>,
@@ -707,7 +707,7 @@ struct MapGrid {
 }
 
 impl MapGrid {
-    fn from_file(file: &netcdf::File) -> Result<Self> {
+    pub(crate) fn from_file(file: &netcdf::File) -> Result<Self> {
         let latitude = coordinate_values(file, "lat")?;
         let longitude = coordinate_values(file, "lon")?;
         ensure!(
@@ -803,17 +803,17 @@ impl MapGrid {
     }
 }
 
-struct MapField {
+pub(crate) struct MapField {
     values: Vec<f64>,
     valid: Vec<bool>,
 }
 
-struct AreaMapping {
+pub(crate) struct AreaMapping {
     parts: Vec<Vec<(usize, f64)>>,
 }
 
 impl AreaMapping {
-    fn new(grid: &MapGrid, pixel_sets: &SpatialPixelSets) -> Result<Self> {
+    pub(crate) fn new(grid: &MapGrid, pixel_sets: &SpatialPixelSets) -> Result<Self> {
         ensure!(
             pixel_sets.cells.len() == pixel_sets.shared_fraction.len()
                 && !pixel_sets.lon_w.is_empty()
@@ -886,6 +886,10 @@ impl AreaMapping {
         Ok(Self { parts })
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.parts.len()
+    }
+
     fn exclude_invalid(&mut self, valid: &[bool]) -> Result<()> {
         for parts in &mut self.parts {
             ensure!(
@@ -897,7 +901,7 @@ impl AreaMapping {
         Ok(())
     }
 
-    fn average(&self, field: &MapField) -> Result<Vec<Option<f64>>> {
+    pub(crate) fn average(&self, field: &MapField) -> Result<Vec<Option<f64>>> {
         ensure!(
             field.values.len() == field.valid.len()
                 && self
@@ -919,6 +923,21 @@ impl AreaMapping {
                 (area > 0.0).then_some(sum / area)
             })
             .collect())
+    }
+
+    /// CN equilibrium fields cannot safely substitute a missing value, unlike
+    /// CROP's explicit `pdrice2` fallback.  Require complete mapped coverage.
+    pub(crate) fn average_required(&self, field: &MapField, name: &str) -> Result<Vec<f64>> {
+        ensure!(
+            self.parts.iter().all(|parts| {
+                !parts.is_empty() && parts.iter().all(|(index, _)| field.valid[*index])
+            }),
+            "spatial BGC equilibrium field {name} has missing mapped values"
+        );
+        self.average(field)?
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .with_context(|| format!("spatial BGC equilibrium field {name} has no mapped area"))
     }
 
     fn dominant(&self, field: &MapField) -> Result<Vec<Option<f64>>> {
@@ -988,7 +1007,7 @@ fn longitude_overlap(west_a: f64, span_a: f64, west_b: f64, span_b: f64) -> f64 
         .sum()
 }
 
-fn map_field_2d(file: &netcdf::File, name: &str, grid: &MapGrid) -> Result<MapField> {
+pub(crate) fn map_field_2d(file: &netcdf::File, name: &str, grid: &MapGrid) -> Result<MapField> {
     let variable = required_variable(file, name)?;
     require_dimensions(&variable, name, &["lat", "lon"])?;
     let values = variable.get_values::<f64, _>(..).or_else(|_| {
@@ -996,6 +1015,30 @@ fn map_field_2d(file: &netcdf::File, name: &str, grid: &MapGrid) -> Result<MapFi
             .get_values::<f32, _>(..)
             .map(|values| values.into_iter().map(f64::from).collect())
     })?;
+    map_field(variable, values, grid, name)
+}
+
+pub(crate) fn map_field_soil_3d(
+    file: &netcdf::File,
+    name: &str,
+    soil: usize,
+    grid: &MapGrid,
+) -> Result<MapField> {
+    let variable = required_variable(file, name)?;
+    require_dimensions(&variable, name, &["lat", "lon", "soil"])?;
+    ensure!(
+        soil < variable.dimensions()[2].len(),
+        "{name} has no soil index {soil}"
+    );
+    let latitude = grid.lat_s.len();
+    let longitude = grid.lon_w.len();
+    let values = variable
+        .get_values::<f64, _>((0..latitude, 0..longitude, soil..soil + 1))
+        .or_else(|_| {
+            variable
+                .get_values::<f32, _>((0..latitude, 0..longitude, soil..soil + 1))
+                .map(|values| values.into_iter().map(f64::from).collect())
+        })?;
     map_field(variable, values, grid, name)
 }
 
