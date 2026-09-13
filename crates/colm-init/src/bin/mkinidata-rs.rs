@@ -112,6 +112,7 @@ struct SpatialNamelistRun {
     use_bedrock: bool,
     use_topmodel: bool,
     use_simple_terrain: bool,
+    use_regular_terrain: bool,
     greenwich: bool,
     dynamic_lake: bool,
     plant_hydraulics: bool,
@@ -177,6 +178,7 @@ fn write_spatial_urban_namelist_block(
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
     static_config.use_simple_terrain = run.use_simple_terrain;
+    static_config.use_regular_terrain = run.use_regular_terrain;
     let files = write_spatial_urban_constant_restarts(SpatialUrbanStaticConfig {
         common: static_config,
         runtime_dir: urban.runtime_dir.as_deref(),
@@ -247,6 +249,7 @@ fn write_spatial_lct_namelist_block(
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
     static_config.use_simple_terrain = run.use_simple_terrain;
+    static_config.use_regular_terrain = run.use_regular_terrain;
     let files = write_spatial_lct_constant_restart(static_config)?;
     let mut time = SpatialLctTimeConfig::new(
         &run.landdata,
@@ -322,9 +325,11 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
         "spatial cold start requires DEF_LAI_MONTHLY = .true."
     );
+    let use_regular_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling", false)?;
+    let use_simple_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     ensure!(
-        !namelist_bool(&document, "DEF_USE_Forcing_Downscaling", false)?,
-        "regular forcing downscaling is not yet migrated to Rust; use the explicit Fortran preprocessor fallback"
+        !use_regular_terrain || !use_simple_terrain,
+        "DEF_USE_Forcing_Downscaling and DEF_USE_Forcing_Downscaling_Simple are mutually exclusive"
     );
     let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
     let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
@@ -420,7 +425,8 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         urban,
         use_bedrock: namelist_bool(&document, "DEF_USE_BEDROCK", false)?,
         use_topmodel: namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0,
-        use_simple_terrain: namelist_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?,
+        use_simple_terrain,
+        use_regular_terrain,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
         dynamic_lake: namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?,
         plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
@@ -612,6 +618,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             "--hyperspectral" => config.use_hyperspectral = true,
             "--topmodel" => config.use_topmodel = true,
             "--simple-terrain" => config.use_simple_terrain = true,
+            "--regular-terrain" => config.use_regular_terrain = true,
             "--cold-time" => {
                 cold_time = Some(parse_restart_date(
                     &args.next().context("--cold-time needs YYYY-JJJ-SSSSS")?,
@@ -774,7 +781,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -920,6 +927,34 @@ mod tests {
         assert_eq!(run.observations.soil, Some(soil));
         assert_eq!(run.observations.snow, Some(snow));
         assert_eq!(run.observations.water_table, Some(water_table));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_namelist_enables_regular_terrain() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-regular-terrain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_file_mesh='mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_Forcing_Downscaling=.true.
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+        let run = spatial_namelist_run(&namelist).unwrap();
+        assert!(run.use_regular_terrain);
+        assert!(!run.use_simple_terrain);
         std::fs::remove_dir_all(root).unwrap();
     }
 

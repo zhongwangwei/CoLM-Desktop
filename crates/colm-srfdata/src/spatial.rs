@@ -12,8 +12,9 @@ use anyhow::{bail, ensure, Context, Result};
 use netcdf::{Extent, NcTypeDescriptor};
 
 use crate::{
-    mesh::inspect_spatial_input, FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh, Grid,
-    UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS,
+    mesh::inspect_spatial_input, FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh,
+    FlatPatches, Grid, UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES,
+    URBAN_SOLAR_BANDS,
 };
 
 const MAX_SERIAL_RAW_PIXELS: usize = 25_000_000;
@@ -84,6 +85,31 @@ pub struct SpatialTopology {
 pub struct CatchmentSpatialTopology {
     pub topology: SpatialTopology,
     pub land_hrus: FlatLandHrus,
+}
+
+/// High-resolution coordinate-grid cells grouped by their owning land patch.
+///
+/// Regular forcing downscaling does not assume the source is the 500 m mesh:
+/// every source-cell centre is assigned to the corresponding CoLM 500 m pixel,
+/// preserving native source-cell area weights during aggregation.
+#[derive(Debug, Clone)]
+pub struct CoordinatePatchSelection {
+    layout: FlatPatches,
+    source_rows: Vec<usize>,
+    source_columns: Vec<usize>,
+    latitude: Vec<f64>,
+    longitude: Vec<f64>,
+    area: Vec<f64>,
+}
+
+impl CoordinatePatchSelection {
+    pub fn layout(&self) -> &FlatPatches {
+        &self.layout
+    }
+
+    pub fn areas(&self) -> &[f64] {
+        &self.area
+    }
 }
 
 /// Regular CoLM block edges.  `x` runs west to east; `y` runs south to north.
@@ -641,6 +667,266 @@ pub fn read_mesh_coordinate_raster_pft_f64(
     Ok(output)
 }
 
+/// Read a coordinate-addressed scalar raster in flattened mesh-pixel order.
+///
+/// This is the `grid_define_from_file(..., 'lat', 'lon')` path used by the
+/// regular forcing-downscaling source.  Source centres, rather than an
+/// assumed CoLM raw grid, select the matching cells.
+pub fn read_mesh_coordinate_raster_f64(
+    raster: &Path,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+) -> Result<Vec<f64>> {
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = coordinate_raster_axes(&source, raster)?;
+    let dimensions = source.dimensions();
+    let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
+    let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let (source_y, source_x) = coordinate_source_indices(pixel, &latitude, &longitude)?;
+    let mut rows = BTreeMap::new();
+    let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
+    for &row_index in &source_y {
+        if let Entry::Vacant(entry) = rows.entry(row_index) {
+            entry.insert(read_coordinate_raster_row(&source, axes, row_index)?);
+        }
+        let row = rows
+            .get(&row_index)
+            .expect("coordinate raster source row was cached");
+        for &column_index in &source_x {
+            pixels.push(
+                *row.get(column_index)
+                    .context("coordinate raster longitude is outside its source row")?,
+            );
+        }
+    }
+    mesh_order(mesh, pixel.lon_w.len(), &pixels)
+}
+
+/// Read leading layers of a coordinate-addressed raster in mesh-pixel order.
+///
+/// Output is `layer * mesh_pixels + mesh_pixel`, matching CoLM's in-memory
+/// terrain-elevation-angle buffers.
+pub fn read_mesh_coordinate_raster_layers_f64(
+    raster: &Path,
+    variable: &str,
+    layers: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+) -> Result<Vec<f64>> {
+    ensure!(
+        layers > 0,
+        "coordinate layered raster needs at least one layer"
+    );
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = coordinate_layer_axes(&source, raster)?;
+    let dimensions = source.dimensions();
+    ensure!(
+        layers <= dimensions[axes.layer].len(),
+        "{variable} in {} has fewer than {layers} layers",
+        raster.display()
+    );
+    let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
+    let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let (source_y, source_x) = coordinate_source_indices(pixel, &latitude, &longitude)?;
+    let mut output = Vec::with_capacity(
+        layers
+            * (0..mesh.len())
+                .map(|element| mesh.pixel_count(element))
+                .sum::<Result<usize>>()?,
+    );
+    for layer in 0..layers {
+        let mut rows = BTreeMap::new();
+        let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
+        for &row_index in &source_y {
+            if let Entry::Vacant(entry) = rows.entry(row_index) {
+                entry.insert(read_coordinate_layer_raster_row(
+                    &source, axes, layer, row_index,
+                )?);
+            }
+            let row = rows
+                .get(&row_index)
+                .expect("coordinate layered raster source row was cached");
+            for &column_index in &source_x {
+                pixels
+                    .push(*row.get(column_index).context(
+                        "coordinate layered raster longitude is outside its source row",
+                    )?);
+            }
+        }
+        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+    }
+    Ok(output)
+}
+
+/// Build a source-grid selection whose cells are grouped by land patch.
+///
+/// `reference` supplies the authoritative regular-grid coordinate axes; every
+/// later field is checked against these axes before values are read.
+pub fn build_coordinate_patch_selection(
+    reference: &Path,
+    variable: &str,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+) -> Result<CoordinatePatchSelection> {
+    validate_patches(&topology.mesh, patches)?;
+    let file =
+        netcdf::open(reference).with_context(|| format!("cannot open {}", reference.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", reference.display()))?;
+    let axes = coordinate_raster_axes(&source, reference)?;
+    let dimensions = source.dimensions();
+    let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", reference)?;
+    let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", reference)?;
+    validate_coordinate_axes(&latitude, &longitude)?;
+
+    let mut patch_by_pixel = BTreeMap::new();
+    for patch in 0..patches.len() {
+        let element = patches.element_index[patch]
+            .checked_sub(1)
+            .with_context(|| format!("land patch {patch} has zero element index"))?;
+        let (xs, ys) = topology.mesh.pixels(element)?;
+        for position in patches.pixel_start[patch] - 1..patches.pixel_end[patch] {
+            let local_x = usize::try_from(*xs.get(position).context("patch longitude is absent")?)?
+                .checked_sub(1)
+                .context("patch longitude is zero")?;
+            let local_y = usize::try_from(*ys.get(position).context("patch latitude is absent")?)?
+                .checked_sub(1)
+                .context("patch latitude is zero")?;
+            if let Some(previous) = patch_by_pixel.insert((local_x, local_y), patch) {
+                ensure!(
+                    previous == patch,
+                    "spatial pixel belongs to two land patches ({previous}, {patch})"
+                );
+            }
+        }
+    }
+
+    let source_area = coordinate_cell_areas(&latitude, &longitude)?;
+    let source_rows = coordinate_rows_in_extent(
+        &latitude,
+        topology.pixel.edge_south,
+        topology.pixel.edge_north,
+    );
+    let source_columns = coordinate_columns_in_extent(
+        &longitude,
+        topology.pixel.edge_west,
+        topology.pixel.edge_east,
+    );
+    let mut by_patch = vec![Vec::new(); patches.len()];
+    for row in source_rows {
+        for &column in &source_columns {
+            if let Some(pixel) = spatial_pixel_at(&topology.pixel, longitude[column], latitude[row])
+            {
+                if let Some(&patch) = patch_by_pixel.get(&pixel) {
+                    by_patch[patch].push((row, column));
+                }
+            }
+        }
+    }
+    let mut offsets = Vec::with_capacity(patches.len() + 1);
+    let mut cells = Vec::new();
+    let mut source_rows = Vec::new();
+    let mut source_columns = Vec::new();
+    let mut area = Vec::new();
+    offsets.push(0);
+    for (patch, selected) in by_patch.into_iter().enumerate() {
+        ensure!(
+            !selected.is_empty(),
+            "regular topography source grid has no cells for land patch {patch}"
+        );
+        for (row, column) in selected {
+            cells.push(source_rows.len());
+            source_rows.push(row);
+            source_columns.push(column);
+            area.push(source_area[row * longitude.len() + column]);
+        }
+        offsets.push(cells.len());
+    }
+    let layout = FlatPatches::new(
+        patches.set_type.clone(),
+        offsets,
+        cells,
+        vec![None; patches.len()],
+    )?;
+    Ok(CoordinatePatchSelection {
+        layout,
+        source_rows,
+        source_columns,
+        latitude,
+        longitude,
+        area,
+    })
+}
+
+/// Read scalar values in [`CoordinatePatchSelection`] source-cell order.
+pub fn read_coordinate_patch_selection_f64(
+    raster: &Path,
+    variable: &str,
+    selection: &CoordinatePatchSelection,
+) -> Result<Vec<f64>> {
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = coordinate_raster_axes(&source, raster)?;
+    validate_selection_axes(&file, &source, axes, raster, selection)?;
+    read_coordinate_patch_selection_rows(&source, axes, selection)
+}
+
+/// Read leading layers in source-cell order (`layer * selected_cell + cell`).
+pub fn read_coordinate_patch_selection_layers_f64(
+    raster: &Path,
+    variable: &str,
+    layers: usize,
+    selection: &CoordinatePatchSelection,
+) -> Result<Vec<f64>> {
+    ensure!(
+        layers > 0,
+        "coordinate layered raster needs at least one layer"
+    );
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+    let axes = coordinate_layer_axes(&source, raster)?;
+    let dimensions = source.dimensions();
+    ensure!(
+        layers <= dimensions[axes.layer].len(),
+        "{variable} in {} has fewer than {layers} layers",
+        raster.display()
+    );
+    validate_selection_layer_axes(&file, &source, axes, raster, selection)?;
+    let mut output = Vec::with_capacity(layers * selection.source_rows.len());
+    for layer in 0..layers {
+        let mut rows = BTreeMap::new();
+        for &row in &selection.source_rows {
+            if let Entry::Vacant(entry) = rows.entry(row) {
+                entry.insert(read_coordinate_layer_raster_row_unchecked(
+                    &source, axes, layer, row,
+                )?);
+            }
+        }
+        for (&row, &column) in selection.source_rows.iter().zip(&selection.source_columns) {
+            output.push(
+                *rows
+                    .get(&row)
+                    .expect("selected coordinate source row was cached")
+                    .get(column)
+                    .context("selected coordinate longitude is outside its source row")?,
+            );
+        }
+    }
+    Ok(output)
+}
+
 /// Read a CoLM 5°×5° tile variable in flattened mesh-pixel order.
 ///
 /// `MOD_5x5DataReadin.F90` partitions the global grid into 72 longitude by
@@ -920,6 +1206,19 @@ struct CoordinatePftAxes {
     longitude: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CoordinateRasterAxes {
+    latitude: usize,
+    longitude: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoordinateLayerAxes {
+    layer: usize,
+    latitude: usize,
+    longitude: usize,
+}
+
 fn coordinate_pft_axes(
     source: &netcdf::Variable<'_>,
     class_count: usize,
@@ -958,6 +1257,66 @@ fn coordinate_pft_axes(
     );
     Ok(CoordinatePftAxes {
         class,
+        latitude,
+        longitude,
+    })
+}
+
+fn coordinate_raster_axes(
+    source: &netcdf::Variable<'_>,
+    path: &Path,
+) -> Result<CoordinateRasterAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 2,
+        "{} in {} must have latitude and longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    let axis = |labels: &[&str]| {
+        dimensions
+            .iter()
+            .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
+    };
+    let latitude =
+        axis(&["lat", "latitude"]).context("coordinate raster has no latitude dimension")?;
+    let longitude =
+        axis(&["lon", "longitude"]).context("coordinate raster has no longitude dimension")?;
+    ensure!(
+        latitude != longitude,
+        "coordinate raster latitude and longitude dimensions are ambiguous"
+    );
+    Ok(CoordinateRasterAxes {
+        latitude,
+        longitude,
+    })
+}
+
+fn coordinate_layer_axes(
+    source: &netcdf::Variable<'_>,
+    path: &Path,
+) -> Result<CoordinateLayerAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "{} in {} must have layer, latitude, and longitude dimensions",
+        source.name(),
+        path.display()
+    );
+    let axis = |labels: &[&str]| {
+        dimensions
+            .iter()
+            .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
+    };
+    let latitude = axis(&["lat", "latitude"])
+        .context("coordinate layered raster has no latitude dimension")?;
+    let longitude = axis(&["lon", "longitude"])
+        .context("coordinate layered raster has no longitude dimension")?;
+    let layer = (0..dimensions.len())
+        .find(|&index| index != latitude && index != longitude)
+        .context("coordinate layered raster has no layer dimension")?;
+    Ok(CoordinateLayerAxes {
+        layer,
         latitude,
         longitude,
     })
@@ -1013,6 +1372,331 @@ fn coordinate_distance(source: f64, target: f64, longitude: bool) -> f64 {
         source - target
     }
     .abs()
+}
+
+fn coordinate_source_indices(
+    pixel: &PixelAxes,
+    latitude: &[f64],
+    longitude: &[f64],
+) -> Result<(Vec<usize>, Vec<usize>)> {
+    let source_y = pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| nearest_coordinate(latitude, (south + north) * 0.5, false))
+        .collect::<Result<Vec<_>>>()?;
+    let source_x = pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&west, &east)| nearest_coordinate(longitude, midpoint_longitude(west, east), true))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((source_y, source_x))
+}
+
+fn coordinate_rows_in_extent(values: &[f64], south: f64, north: f64) -> Vec<usize> {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &value)| ((south..=north).contains(&value)).then_some(index))
+        .collect()
+}
+
+fn coordinate_columns_in_extent(values: &[f64], west: f64, east: f64) -> Vec<usize> {
+    let mut east = east;
+    if east <= west {
+        east += 360.0;
+    }
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &value)| {
+            let mut value = value;
+            while value < west {
+                value += 360.0;
+            }
+            (value <= east).then_some(index)
+        })
+        .collect()
+}
+
+fn spatial_pixel_at(pixel: &PixelAxes, longitude: f64, latitude: f64) -> Option<(usize, usize)> {
+    let dlon = pixel.lon_e.first()?.to_owned() - pixel.lon_w.first()?;
+    let dlat = pixel.lat_n.first()?.to_owned() - pixel.lat_s.first()?;
+    if !(dlon.is_finite() && dlon > 0.0 && dlat.is_finite() && dlat > 0.0) {
+        return None;
+    }
+    let mut longitude = longitude;
+    while longitude < pixel.edge_west {
+        longitude += 360.0;
+    }
+    let x = ((longitude - pixel.edge_west) / dlon).floor() as isize;
+    let y = ((latitude - pixel.edge_south) / dlat).floor() as isize;
+    let x = usize::try_from(x).ok()?;
+    let y = usize::try_from(y).ok()?;
+    let west = *pixel.lon_w.get(x)?;
+    let mut east = *pixel.lon_e.get(x)?;
+    if east <= west {
+        east += 360.0;
+    }
+    let mut point = longitude;
+    while point < west {
+        point += 360.0;
+    }
+    let south = *pixel.lat_s.get(y)?;
+    let north = *pixel.lat_n.get(y)?;
+    ((west..=east).contains(&point) && (south..=north).contains(&latitude)).then_some((x, y))
+}
+
+fn validate_coordinate_axes(latitude: &[f64], longitude: &[f64]) -> Result<()> {
+    ensure!(
+        latitude.len() >= 2 && longitude.len() >= 2,
+        "regular topography coordinates need at least two latitude and longitude cells"
+    );
+    ensure!(
+        latitude.windows(2).all(|pair| pair[0] < pair[1])
+            || latitude.windows(2).all(|pair| pair[0] > pair[1]),
+        "regular topography latitude coordinates must be strictly monotonic"
+    );
+    ensure!(
+        latitude.iter().all(|value| (-90.0..=90.0).contains(value)),
+        "regular topography latitude coordinates must lie within [-90, 90]"
+    );
+    ensure!(
+        longitude.windows(2).all(|pair| pair[0] < pair[1])
+            || longitude.windows(2).all(|pair| pair[0] > pair[1]),
+        "regular topography longitude coordinates must be strictly monotonic"
+    );
+    Ok(())
+}
+
+fn coordinate_cell_areas(latitude: &[f64], longitude: &[f64]) -> Result<Vec<f64>> {
+    validate_coordinate_axes(latitude, longitude)?;
+    let ascending = latitude[1] > latitude[0];
+    let latitude_area = (0..latitude.len())
+        .map(|index| {
+            let (south, north) = if ascending {
+                (
+                    if index == 0 {
+                        -90.0
+                    } else {
+                        (latitude[index - 1] + latitude[index]) * 0.5
+                    },
+                    if index + 1 == latitude.len() {
+                        90.0
+                    } else {
+                        (latitude[index] + latitude[index + 1]) * 0.5
+                    },
+                )
+            } else {
+                (
+                    if index + 1 == latitude.len() {
+                        -90.0
+                    } else {
+                        (latitude[index] + latitude[index + 1]) * 0.5
+                    },
+                    if index == 0 {
+                        90.0
+                    } else {
+                        (latitude[index - 1] + latitude[index]) * 0.5
+                    },
+                )
+            };
+            let value = north.to_radians().sin() - south.to_radians().sin();
+            ensure!(
+                value.is_finite() && value > 0.0,
+                "regular topography latitude cell has invalid area"
+            );
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let longitude_width = (0..longitude.len())
+        .map(|index| {
+            let current = longitude[index];
+            let previous = longitude[(index + longitude.len() - 1) % longitude.len()];
+            let next = longitude[(index + 1) % longitude.len()];
+            let gap =
+                |left: f64, right: f64| ((left - right + 180.0).rem_euclid(360.0) - 180.0).abs();
+            let width = gap(current, previous) * 0.5 + gap(next, current) * 0.5;
+            ensure!(
+                width.is_finite() && width > 0.0 && width <= 360.0,
+                "regular topography longitude cell has invalid width"
+            );
+            Ok(width.to_radians())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut output = Vec::with_capacity(latitude.len() * longitude.len());
+    for latitude in latitude_area {
+        output.extend(longitude_width.iter().map(|width| latitude * width));
+    }
+    Ok(output)
+}
+
+fn validate_selection_coordinate(
+    values: Vec<f64>,
+    expected: &[f64],
+    label: &str,
+    path: &Path,
+) -> Result<()> {
+    ensure!(
+        values.len() == expected.len()
+            && values
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() <= 1.0e-10),
+        "regular topography {label} coordinates in {} do not match slope.nc",
+        path.display()
+    );
+    Ok(())
+}
+
+fn validate_selection_axes(
+    file: &netcdf::File,
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateRasterAxes,
+    path: &Path,
+    selection: &CoordinatePatchSelection,
+) -> Result<()> {
+    let dimensions = source.dimensions();
+    validate_selection_coordinate(
+        read_coordinate(file, &dimensions[axes.latitude], "latitude", path)?,
+        &selection.latitude,
+        "latitude",
+        path,
+    )?;
+    validate_selection_coordinate(
+        read_coordinate(file, &dimensions[axes.longitude], "longitude", path)?,
+        &selection.longitude,
+        "longitude",
+        path,
+    )
+}
+
+fn validate_selection_layer_axes(
+    file: &netcdf::File,
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateLayerAxes,
+    path: &Path,
+    selection: &CoordinatePatchSelection,
+) -> Result<()> {
+    let dimensions = source.dimensions();
+    validate_selection_coordinate(
+        read_coordinate(file, &dimensions[axes.latitude], "latitude", path)?,
+        &selection.latitude,
+        "latitude",
+        path,
+    )?;
+    validate_selection_coordinate(
+        read_coordinate(file, &dimensions[axes.longitude], "longitude", path)?,
+        &selection.longitude,
+        "longitude",
+        path,
+    )
+}
+
+fn read_coordinate_patch_selection_rows(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateRasterAxes,
+    selection: &CoordinatePatchSelection,
+) -> Result<Vec<f64>> {
+    let mut rows = BTreeMap::new();
+    for &row in &selection.source_rows {
+        if let Entry::Vacant(entry) = rows.entry(row) {
+            entry.insert(read_coordinate_raster_row_unchecked(source, axes, row)?);
+        }
+    }
+    selection
+        .source_rows
+        .iter()
+        .zip(&selection.source_columns)
+        .map(|(&row, &column)| {
+            rows.get(&row)
+                .expect("selected coordinate source row was cached")
+                .get(column)
+                .copied()
+                .context("selected coordinate longitude is outside its source row")
+        })
+        .collect()
+}
+
+fn read_coordinate_raster_row_unchecked(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateRasterAxes,
+    latitude: usize,
+) -> Result<Vec<f64>> {
+    let dimensions = source.dimensions();
+    let mut extents = vec![Extent::Index(0); 2];
+    extents[axes.latitude] = Extent::Index(latitude);
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: dimensions[axes.longitude].len(),
+        stride: 1,
+    };
+    Ok(source.get_values::<f64, _>(extents)?)
+}
+
+fn read_coordinate_layer_raster_row_unchecked(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateLayerAxes,
+    layer: usize,
+    latitude: usize,
+) -> Result<Vec<f64>> {
+    let dimensions = source.dimensions();
+    let mut extents = vec![Extent::Index(0); 3];
+    extents[axes.layer] = Extent::Index(layer);
+    extents[axes.latitude] = Extent::Index(latitude);
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: dimensions[axes.longitude].len(),
+        stride: 1,
+    };
+    Ok(source.get_values::<f64, _>(extents)?)
+}
+
+fn read_coordinate_raster_row(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateRasterAxes,
+    latitude: usize,
+) -> Result<Vec<f64>> {
+    let dimensions = source.dimensions();
+    let mut extents = vec![Extent::Index(0); 2];
+    extents[axes.latitude] = Extent::Index(latitude);
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: dimensions[axes.longitude].len(),
+        stride: 1,
+    };
+    let values = source.get_values::<f64, _>(extents)?;
+    ensure!(
+        values.len() == dimensions[axes.longitude].len()
+            && values.iter().all(|value| value.is_finite()),
+        "coordinate raster row has invalid values"
+    );
+    Ok(values)
+}
+
+fn read_coordinate_layer_raster_row(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateLayerAxes,
+    layer: usize,
+    latitude: usize,
+) -> Result<Vec<f64>> {
+    let dimensions = source.dimensions();
+    let mut extents = vec![Extent::Index(0); 3];
+    extents[axes.layer] = Extent::Index(layer);
+    extents[axes.latitude] = Extent::Index(latitude);
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: dimensions[axes.longitude].len(),
+        stride: 1,
+    };
+    let values = source.get_values::<f64, _>(extents)?;
+    ensure!(
+        values.len() == dimensions[axes.longitude].len()
+            && values.iter().all(|value| value.is_finite()),
+        "coordinate layered raster row has invalid values"
+    );
+    Ok(values)
 }
 
 fn read_coordinate_pft_row(
@@ -1715,6 +2399,88 @@ pub fn write_landpatch_layered_vector(
         file.add_dimension("patch", output_values.len() / layers)?;
         file.add_variable::<f64>(variable, &["patch", layer_name])?
             .put_values(&output_values, (.., ..))?;
+        file.close()?;
+    }
+    Ok(())
+}
+
+/// Write axis-major three-dimensional patch data as `(patch, second, first)`.
+///
+/// Values use `(first * second_count + second) * patches + patch`, matching
+/// Fortran arrays and NetCDF's reversed trailing dimension order.
+#[allow(clippy::too_many_arguments)]
+pub fn write_landpatch_3d_vector(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    directory: &str,
+    file_stem: &str,
+    variable: &str,
+    first_name: &str,
+    first_count: usize,
+    second_name: &str,
+    second_count: usize,
+    values: &[f64],
+) -> Result<()> {
+    ensure!(
+        first_count > 0 && second_count > 0,
+        "three-dimensional patch output needs nonzero axes"
+    );
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    for (label, value) in [
+        ("directory", directory),
+        ("file stem", file_stem),
+        ("variable", variable),
+        ("first dimension", first_name),
+        ("second dimension", second_name),
+    ] {
+        ensure!(
+            !value.is_empty() && !value.contains('/'),
+            "three-dimensional land-patch {label} must be one NetCDF path/name component"
+        );
+    }
+    validate_patches(&topology.mesh, land_patches)?;
+    ensure!(
+        values.len() == first_count * second_count * land_patches.len(),
+        "{variable} has {} values; expected {first_count} x {second_count} x {} patches",
+        values.len(),
+        land_patches.len()
+    );
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let output = landdata
+        .as_ref()
+        .join(directory)
+        .join(format!("{land_cover_year:04}"));
+    std::fs::create_dir_all(&output)?;
+    let mut grouped = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (patch, element) in land_patches.element_ids.iter().enumerate() {
+        grouped
+            .entry(
+                *assignments
+                    .get(element)
+                    .with_context(|| format!("land patch {patch} references unknown element"))?,
+            )
+            .or_default()
+            .push(patch);
+    }
+    for ((x, y), patches) in grouped {
+        let mut output_values = Vec::with_capacity(patches.len() * first_count * second_count);
+        for patch in patches {
+            for second in 0..second_count {
+                for first in 0..first_count {
+                    output_values
+                        .push(values[(first * second_count + second) * land_patches.len() + patch]);
+                }
+            }
+        }
+        let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
+        file.add_dimension("patch", output_values.len() / (first_count * second_count))?;
+        file.add_dimension(first_name, first_count)?;
+        file.add_dimension(second_name, second_count)?;
+        file.add_variable::<f64>(variable, &["patch", second_name, first_name])?
+            .put_values(&output_values, (.., .., ..))?;
         file.close()?;
     }
     Ok(())

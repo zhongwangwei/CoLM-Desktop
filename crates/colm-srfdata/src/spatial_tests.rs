@@ -503,6 +503,38 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             .unwrap(),
         vec![10.0, 100.0, 20.0, 200.0]
     );
+    write_landpatch_3d_vector(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "topography",
+        "sf_curve_patches",
+        "sf_curve_patches",
+        "azimuth",
+        2,
+        "zenith_p",
+        3,
+        &[
+            10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0,
+        ],
+    )
+    .unwrap();
+    let three_dimensional =
+        netcdf::open(landdata.join("topography/2005/sf_curve_patches_w180_s90.nc")).unwrap();
+    assert_eq!(
+        dim_names(&three_dimensional, "sf_curve_patches"),
+        ["patch", "zenith_p", "azimuth"]
+    );
+    assert_eq!(
+        three_dimensional
+            .variable("sf_curve_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![10.0, 100.0, 30.0, 300.0, 50.0, 500.0, 20.0, 200.0, 40.0, 400.0, 60.0, 600.0]
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -864,6 +896,21 @@ fn coordinate_cft_raster_keeps_mesh_order_without_assuming_the_500m_grid() {
                 (.., .., ..),
             )
             .unwrap();
+        file.add_dimension("azimuth", 2).unwrap();
+        file.add_variable::<f64>("slope", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0], (.., ..))
+            .unwrap();
+        file.add_variable::<f64>("tea_front", &["azimuth", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &[
+                    21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 31.0, 32.0, 33.0, 34.0, 35.0,
+                    36.0, 37.0, 38.0,
+                ],
+                (.., .., ..),
+            )
+            .unwrap();
         file.close().unwrap();
     }
     let actual =
@@ -882,6 +929,192 @@ fn coordinate_cft_raster_keeps_mesh_order_without_assuming_the_500m_grid() {
         }
     }
     assert_eq!(actual, expected);
+    let scalar =
+        read_mesh_coordinate_raster_f64(&source, "slope", &topology.mesh, &topology.pixel).unwrap();
+    let layered = read_mesh_coordinate_raster_layers_f64(
+        &source,
+        "tea_front",
+        2,
+        &topology.mesh,
+        &topology.pixel,
+    )
+    .unwrap();
+    let scalar_values = [21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0];
+    let mut scalar_expected = Vec::new();
+    for element in 0..topology.mesh.len() {
+        let (xs, ys) = topology.mesh.pixels(element).unwrap();
+        for (&x, &y) in xs.iter().zip(ys) {
+            scalar_expected.push(scalar_values[(y as usize - 1) * 4 + x as usize - 1]);
+        }
+    }
+    assert_eq!(scalar, scalar_expected);
+    let mut layered_expected = scalar_expected.clone();
+    layered_expected.extend(scalar_expected.iter().map(|value| value + 10.0));
+    assert_eq!(layered, layered_expected);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn coordinate_patch_selection_keeps_all_hires_cells_and_native_areas() {
+    let directory = temporary("coordinate-patch-selection");
+    let source = directory.join("slope.nc");
+    let dlon = crate::COLM_500M.dlon();
+    let dlat = crate::COLM_500M.dlat();
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&source).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 4).unwrap();
+        file.add_dimension("azimuth", 2).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[dlat * 0.25, dlat * 0.75], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(
+                &[dlon * 0.125, dlon * 0.375, dlon * 0.625, dlon * 0.875],
+                ..,
+            )
+            .unwrap();
+        file.add_variable::<f64>("slope", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], (.., ..))
+            .unwrap();
+        file.add_variable::<f64>("tea_front", &["azimuth", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &[
+                    10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+                    25.0, 26.0, 27.0,
+                ],
+                (.., .., ..),
+            )
+            .unwrap();
+        file.close().unwrap();
+    }
+    let topology = SpatialTopology {
+        kind: SpatialInputKind::GridBased,
+        grid: SpatialGrid {
+            lon_w: vec![0.0],
+            lon_e: vec![dlon],
+            lat_s: vec![0.0],
+            lat_n: vec![dlat],
+        },
+        pixel: PixelAxes {
+            edge_south: 0.0,
+            edge_north: dlat,
+            edge_west: 0.0,
+            edge_east: dlon,
+            lon_w: vec![0.0],
+            lon_e: vec![dlon],
+            lat_s: vec![0.0],
+            lat_n: vec![dlat],
+        },
+        mesh: FlatMesh::new(vec![1], vec![0, 1], vec![1], vec![1]).unwrap(),
+        land_elements: FlatMesh::new(vec![1], vec![0, 1], vec![1], vec![1])
+            .unwrap()
+            .land_elements(),
+    };
+    let patches = FlatLandPatches {
+        element_ids: vec![1],
+        pixel_start: vec![1],
+        pixel_end: vec![1],
+        set_type: vec![1],
+        element_index: vec![1],
+    };
+    let selection =
+        build_coordinate_patch_selection(&source, "slope", &topology, &patches).unwrap();
+    let values = read_coordinate_patch_selection_f64(&source, "slope", &selection).unwrap();
+    assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    assert_eq!(
+        read_coordinate_patch_selection_layers_f64(&source, "tea_front", 2, &selection).unwrap(),
+        [
+            10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0,
+            26.0, 27.0
+        ]
+    );
+    let expected = values
+        .iter()
+        .zip(selection.areas())
+        .map(|(value, area)| value * area)
+        .sum::<f64>()
+        / selection.areas().iter().sum::<f64>();
+    assert!(
+        (selection
+            .layout()
+            .aggregate_bedrock(&values, selection.areas())
+            .unwrap()[0]
+            - expected)
+            .abs()
+            < 1.0e-12
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn coordinate_patch_selection_uses_native_mesh_pixels_not_a_500m_proxy() {
+    let directory = temporary("coordinate-patch-native-mesh");
+    let source = directory.join("slope.nc");
+    let dlon = crate::MERIT_90M.dlon();
+    let dlat = crate::MERIT_90M.dlat();
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&source).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[dlat * 0.25, dlat * 0.75], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[dlon * 0.5, dlon * 1.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("slope", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1.0, 2.0, 3.0, 4.0], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+    let mesh = FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
+    let topology = SpatialTopology {
+        kind: SpatialInputKind::Catchment,
+        grid: SpatialGrid {
+            lon_w: vec![0.0],
+            lon_e: vec![dlon * 2.0],
+            lat_s: vec![0.0],
+            lat_n: vec![dlat],
+        },
+        pixel: PixelAxes {
+            edge_south: 0.0,
+            edge_north: dlat,
+            edge_west: 0.0,
+            edge_east: dlon * 2.0,
+            lon_w: vec![0.0, dlon],
+            lon_e: vec![dlon, dlon * 2.0],
+            lat_s: vec![0.0],
+            lat_n: vec![dlat],
+        },
+        land_elements: mesh.land_elements(),
+        mesh,
+    };
+    let patches = FlatLandPatches {
+        element_ids: vec![1, 1],
+        pixel_start: vec![1, 2],
+        pixel_end: vec![1, 2],
+        set_type: vec![1, 2],
+        element_index: vec![1, 1],
+    };
+    let selection =
+        build_coordinate_patch_selection(&source, "slope", &topology, &patches).unwrap();
+    let values = read_coordinate_patch_selection_f64(&source, "slope", &selection).unwrap();
+    assert_eq!(values.len(), 4);
+    let aggregate = selection
+        .layout()
+        .aggregate_bedrock(&values, selection.areas())
+        .unwrap();
+    assert!(aggregate[0] < aggregate[1]);
     std::fs::remove_dir_all(directory).unwrap();
 }
 

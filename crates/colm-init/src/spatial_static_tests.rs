@@ -147,6 +147,66 @@ fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
 }
 
 #[test]
+fn spatial_lct_writes_enabled_regular_terrain_fields() {
+    let root = temp_dir("regular-terrain");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_f64(
+        &landdata,
+        "topography",
+        "svf_patches",
+        "svf_patches",
+        2005,
+        "w180_s90",
+        0.5,
+    );
+    write_f64(
+        &landdata,
+        "topography",
+        "cur_patches",
+        "cur_patches",
+        2005,
+        "w180_s90",
+        0.25,
+    );
+    for (stem, values) in [
+        ("slp_type_patches", &[1.0, 2.0, 3.0, 4.0][..]),
+        ("asp_type_patches", &[5.0, 6.0, 7.0, 8.0][..]),
+        ("area_type_patches", &[0.1, 0.2, 0.3, 0.4][..]),
+    ] {
+        write_layered_f64(&landdata, stem, stem, values);
+    }
+    write_curve_f64(&landdata, &(0..48).map(f64::from).collect::<Vec<_>>());
+    let restart = root.join("restart");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.use_regular_terrain = true;
+    let block = netcdf::open(write_spatial_lct_constant_restart(config).unwrap().block).unwrap();
+    assert_eq!(values_f64(&block, "svf_patches").unwrap(), [0.5]);
+    assert_eq!(values_f64(&block, "cur_patches").unwrap(), [0.25]);
+    assert_eq!(
+        values_f64(&block, "slp_type_patches").unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+    assert_eq!(
+        values_f64(&block, "area_type_patches").unwrap(),
+        [0.1, 0.2, 0.3, 0.4]
+    );
+    assert_eq!(
+        values_f64(&block, "sf_curve_patches").unwrap(),
+        (0..48).map(f64::from).collect::<Vec<_>>()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let root = temp_dir("pft-common");
     let landdata = root.join("landdata");
@@ -1227,6 +1287,20 @@ fn write_layered_f64(landdata: &Path, stem: &str, variable: &str, values: &[f64]
     file.add_variable::<f64>(variable, &["patch", "type"])
         .unwrap()
         .put_values(values, (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_curve_f64(landdata: &Path, values: &[f64]) {
+    let path = block_path(landdata, "topography", "sf_curve_patches", 2005, "w180_s90");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", 1).unwrap();
+    file.add_dimension("azimuth", 16).unwrap();
+    file.add_dimension("zenith_p", 3).unwrap();
+    file.add_variable::<f64>("sf_curve_patches", &["patch", "zenith_p", "azimuth"])
+        .unwrap()
+        .put_values(values, (.., .., ..))
         .unwrap();
     file.close().unwrap();
 }

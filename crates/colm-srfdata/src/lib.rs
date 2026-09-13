@@ -47,21 +47,24 @@ pub use site::{
 };
 pub use spatial::{
     build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
-    build_catchment_spatial_topology, build_lct_land_patches_from_raster,
-    build_pft_land_patches_from_raster, build_spatial_topology, mesh_cell_area_weights,
-    read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
-    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
-    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
-    read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
+    build_catchment_spatial_topology, build_coordinate_patch_selection,
+    build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_spatial_topology,
+    mesh_cell_area_weights, read_coordinate_patch_selection_f64,
+    read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_f64,
+    read_mesh_coordinate_raster_layers_f64, read_mesh_coordinate_raster_pft_f64,
+    read_mesh_raster_f64, read_mesh_raster_i32, read_mesh_raster_layers_f64,
+    read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
+    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
+    write_landpatch_3d_vector, write_landpatch_layered_vector, write_landpatch_scalar,
     write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, PixelAxes, SpatialGrid, SpatialInputKind,
-    SpatialTopology,
+    write_spatial_urban_vector, BlockLayout, CoordinatePatchSelection, PixelAxes, SpatialGrid,
+    SpatialInputKind, SpatialTopology,
 };
 pub use surface::{
-    derive_topographic_wetness, FlatPatches, SimpleTopographyFactors, SoilBrightness,
-    TopographicWetness, Topography, SURFACE_MISSING,
+    derive_topographic_wetness, FlatPatches, RegularTopographyFactors, SimpleTopographyFactors,
+    SoilBrightness, TopographicWetness, Topography, SURFACE_MISSING,
 };
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh};

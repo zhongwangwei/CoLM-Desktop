@@ -164,6 +164,37 @@ fn simple_topography_factors_mask_missing_values_and_share_wmo_results() {
 }
 
 #[test]
+fn regular_topography_factors_preserve_four_slope_types_and_shadow_curve() {
+    let layout = patches(vec![1], vec![0, 2], vec![0, 1]);
+    let factors = layout
+        .aggregate_regular_topography_factors(
+            &[0.1, 0.4],
+            &[0.0, std::f64::consts::PI],
+            &[0.5, -9999.0],
+            &[2.0, 4.0],
+            &[0.0; 32],
+            &[0.0; 32],
+            &[1.0, 3.0],
+        )
+        .unwrap();
+    assert_eq!(factors.sky_view_factor, [0.5]);
+    assert_eq!(factors.curvature, [3.5]);
+    assert_eq!(factors.area_type, [0.0, 0.25, 0.75, 0.0]);
+    assert_eq!(
+        factors.aspect_type,
+        [0.0, 0.0, 3.0 * std::f64::consts::PI / 4.0, 0.0]
+    );
+    assert_eq!(factors.slope_type[0], 0.0);
+    assert_eq!(factors.slope_type[1], 0.025);
+    assert!((factors.slope_type[2] - 0.3).abs() < 1.0e-12);
+    assert_eq!(factors.slope_type[3], 0.0);
+    assert_eq!(factors.shadow_curve.len(), 16 * 3);
+    assert_eq!(factors.shadow_curve[0], 0.0);
+    assert!(factors.shadow_curve[1].abs() < 1.0e-12);
+    assert!((factors.shadow_curve[2] - (-0.999_f64.ln()).ln()).abs() < 1.0e-12);
+}
+
+#[test]
 fn bedrock_is_area_weighted_and_wmo_patches_reuse_the_prior_value() {
     let layout = FlatPatches::new(
         vec![1, 1],

@@ -15,7 +15,8 @@ use crate::{
     derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
     write_constant_restart, CanopyState, ConstantRestartFiles, ConstantRestartInput,
     HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields, RestartTuning,
-    SimpleTerrainFields, SoilAlbedo, SoilLayerInput, TopmodelFields,
+    SimpleTerrainFields, SoilAlbedo, SoilLayerInput, TerrainFields, TerrainRadiation,
+    TopmodelFields,
 };
 
 /// Arguments for one already-addressed LCT landpatch block.
@@ -38,6 +39,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub use_topmodel: bool,
     /// Write the nine-aspect vectors required by simple forcing downscaling.
     pub use_simple_terrain: bool,
+    /// Write the four slope-type and shadow-curve vectors required by regular forcing downscaling.
+    pub use_regular_terrain: bool,
 }
 
 impl<'a> SpatialLctStaticConfig<'a> {
@@ -63,6 +66,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
             use_hyperspectral: false,
             use_topmodel: false,
             use_simple_terrain: false,
+            use_regular_terrain: false,
         }
     }
 }
@@ -82,6 +86,15 @@ struct SimpleTerrainSurfaceFields {
     aspect_type: Vec<f64>,
 }
 
+struct RegularTerrainSurfaceFields {
+    sky_view_factor: Vec<f64>,
+    curvature: Vec<f64>,
+    slope_type: Vec<f64>,
+    aspect_type: Vec<f64>,
+    area_type: Vec<f64>,
+    shadow_curve: Vec<f64>,
+}
+
 /// Writes the common LCT constant restart for one spatial block written by
 /// `mksrfdata-rs spatial-lct`.
 pub fn write_spatial_lct_constant_restart(
@@ -97,6 +110,10 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     canopy_override: Option<CanopyState>,
 ) -> Result<ConstantRestartFiles> {
     let dimensions = RestartDimensions::default();
+    ensure!(
+        !config.use_regular_terrain || !config.use_simple_terrain,
+        "regular and simple forcing downscaling cannot share one constant restart"
+    );
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let patch_kind = patches
         .class
@@ -263,6 +280,18 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         .use_simple_terrain
         .then(|| read_simple_terrain(config, patch_count, dimensions.aspect_types))
         .transpose()?;
+    let regular_terrain = config
+        .use_regular_terrain
+        .then(|| {
+            read_regular_terrain(
+                config,
+                patch_count,
+                dimensions.slope_types,
+                dimensions.azimuths,
+                dimensions.zenith_parameters,
+            )
+        })
+        .transpose()?;
 
     write_constant_restart(
         config.restart_dir,
@@ -303,7 +332,16 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
                 chi_twi: &fields.chi_twi,
                 mu_twi: &fields.mu_twi,
             }),
-            terrain: None,
+            terrain: regular_terrain.as_ref().map(|fields| TerrainFields {
+                sky_view_factor: &fields.sky_view_factor,
+                curvature: &fields.curvature,
+                slope_type: &fields.slope_type,
+                aspect_type: &fields.aspect_type,
+                area_type: &fields.area_type,
+                radiation: TerrainRadiation::Curve {
+                    values: &fields.shadow_curve,
+                },
+            }),
             simple_terrain: simple_terrain.as_ref().map(|fields| SimpleTerrainFields {
                 curvature: &fields.curvature,
                 slope_type: &fields.slope_type,
@@ -367,6 +405,59 @@ fn read_simple_terrain(
             "asp_type_patches",
             patches,
             aspects,
+        )?,
+    })
+}
+
+fn read_regular_terrain(
+    config: SpatialLctStaticConfig<'_>,
+    patches: usize,
+    slope_types: usize,
+    azimuths: usize,
+    curve_parameters: usize,
+) -> Result<RegularTerrainSurfaceFields> {
+    let read = |stem| {
+        read_f64(
+            config.landdata,
+            "topography",
+            stem,
+            stem,
+            config.land_cover_year,
+            config.block_label,
+            patches,
+        )
+    };
+    Ok(RegularTerrainSurfaceFields {
+        sky_view_factor: read("svf_patches")?,
+        curvature: read("cur_patches")?,
+        slope_type: read_layered_f64(
+            config,
+            "slp_type_patches",
+            "slp_type_patches",
+            patches,
+            slope_types,
+        )?,
+        aspect_type: read_layered_f64(
+            config,
+            "asp_type_patches",
+            "asp_type_patches",
+            patches,
+            slope_types,
+        )?,
+        area_type: read_layered_f64(
+            config,
+            "area_type_patches",
+            "area_type_patches",
+            patches,
+            slope_types,
+        )?,
+        shadow_curve: read_patch_last_3d_f64(
+            config,
+            "sf_curve_patches",
+            "sf_curve_patches",
+            patches,
+            azimuths,
+            curve_parameters,
         )?,
     })
 }
@@ -619,6 +710,55 @@ fn read_layered_f64(
     for patch in 0..patches {
         for layer in 0..layers {
             result[layer * patches + patch] = values[patch * layers + layer];
+        }
+    }
+    Ok(result)
+}
+
+fn read_patch_last_3d_f64(
+    config: SpatialLctStaticConfig<'_>,
+    stem: &str,
+    variable: &str,
+    patches: usize,
+    first: usize,
+    second: usize,
+) -> Result<Vec<f64>> {
+    let path = block_path(
+        config.landdata,
+        "topography",
+        stem,
+        config.land_cover_year,
+        config.block_label,
+    );
+    let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", path.display()))?;
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3
+            && dimensions[0].name() == "patch"
+            && dimensions[0].len() == patches
+            && dimensions[1].len() == second
+            && dimensions[2].len() == first,
+        "{variable} in {} must have patch, second, first dimensions of {patches}x{second}x{first}",
+        path.display()
+    );
+    let values = source.get_values::<f64, _>(..)?;
+    ensure!(
+        values.len() == patches * first * second,
+        "{variable} in {} has {} values; expected {}",
+        path.display(),
+        values.len(),
+        patches * first * second
+    );
+    let mut result = vec![0.0; values.len()];
+    for patch in 0..patches {
+        for first_index in 0..first {
+            for second_index in 0..second {
+                result[(first_index * second + second_index) * patches + patch] =
+                    values[(patch * second + second_index) * first + first_index];
+            }
         }
     }
     Ok(result)

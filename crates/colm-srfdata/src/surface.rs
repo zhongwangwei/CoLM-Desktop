@@ -72,6 +72,25 @@ pub struct SimpleTopographyFactors {
     pub aspect_types: usize,
 }
 
+/// Patch outputs from `Aggregation_TopographyFactors.F90`.
+///
+/// Type and shadow-curve fields are axis-major with patch last, which is the
+/// layout consumed by the restart writer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegularTopographyFactors {
+    pub sky_view_factor: Vec<f64>,
+    pub curvature: Vec<f64>,
+    pub slope_type: Vec<f64>,
+    pub aspect_type: Vec<f64>,
+    pub area_type: Vec<f64>,
+    pub shadow_curve: Vec<f64>,
+}
+
+const REGULAR_SLOPE_TYPES: usize = 4;
+const REGULAR_AZIMUTHS: usize = 16;
+const REGULAR_ZENITHS: usize = 101;
+const REGULAR_CURVE_PARAMETERS: usize = 3;
+
 /// Calculates the valid-sample branch of `Aggregation_TopoWetness`.
 ///
 /// Callers gather all 25 raw TWI depths for one patch or element first.  A
@@ -537,6 +556,128 @@ impl FlatPatches {
         Ok(output)
     }
 
+    /// Port of `Aggregation_TopographyFactors` for regular forcing downscaling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn aggregate_regular_topography_factors(
+        &self,
+        slope: &[f64],
+        aspect: &[f64],
+        sky_view_factor: &[f64],
+        curvature: &[f64],
+        terrain_angle_front: &[f64],
+        terrain_angle_back: &[f64],
+        landarea: &[f64],
+    ) -> Result<RegularTopographyFactors> {
+        let cells = slope.len();
+        ensure!(
+            cells > 0
+                && aspect.len() == cells
+                && sky_view_factor.len() == cells
+                && curvature.len() == cells
+                && landarea.len() == cells
+                && terrain_angle_front.len() == REGULAR_AZIMUTHS * cells
+                && terrain_angle_back.len() == REGULAR_AZIMUTHS * cells,
+            "regular topography fields must match the raw cell count and 16 azimuths"
+        );
+        ensure!(
+            landarea.iter().all(|area| area.is_finite() && *area >= 0.0),
+            "regular topography land area must be finite and non-negative"
+        );
+        let patches = self.len();
+        let mut output = RegularTopographyFactors {
+            sky_view_factor: vec![SURFACE_MISSING; patches],
+            curvature: vec![SURFACE_MISSING; patches],
+            slope_type: vec![0.0; REGULAR_SLOPE_TYPES * patches],
+            aspect_type: vec![0.0; REGULAR_SLOPE_TYPES * patches],
+            area_type: vec![0.0; REGULAR_SLOPE_TYPES * patches],
+            shadow_curve: vec![0.0; REGULAR_AZIMUTHS * REGULAR_CURVE_PARAMETERS * patches],
+        };
+        for patch in 0..patches {
+            if let Some(source) = self.wmo_source[patch] {
+                output.sky_view_factor[patch] = output.sky_view_factor[source];
+                output.curvature[patch] = output.curvature[source];
+                for kind in 0..REGULAR_SLOPE_TYPES {
+                    output.slope_type[kind * patches + patch] =
+                        output.slope_type[kind * patches + source];
+                    output.aspect_type[kind * patches + patch] =
+                        output.aspect_type[kind * patches + source];
+                    output.area_type[kind * patches + patch] =
+                        output.area_type[kind * patches + source];
+                }
+                for azimuth in 0..REGULAR_AZIMUTHS {
+                    for parameter in 0..REGULAR_CURVE_PARAMETERS {
+                        let offset = (azimuth * REGULAR_CURVE_PARAMETERS + parameter) * patches;
+                        output.shadow_curve[offset + patch] = output.shadow_curve[offset + source];
+                    }
+                }
+                continue;
+            }
+            output.sky_view_factor[patch] = weighted_not_missing(
+                self.raw_cells(patch),
+                sky_view_factor,
+                landarea,
+                0,
+                patch,
+                "sky-view factor",
+            )?;
+            output.curvature[patch] = weighted_not_missing(
+                self.raw_cells(patch),
+                curvature,
+                landarea,
+                0,
+                patch,
+                "curvature",
+            )?;
+            let shadow_lut = regular_shadow_lut(
+                self.raw_cells(patch),
+                terrain_angle_front,
+                terrain_angle_back,
+                cells,
+                patch,
+            )?;
+            for azimuth in 0..REGULAR_AZIMUTHS {
+                let curve = regular_shadow_curve(
+                    &shadow_lut[azimuth * REGULAR_ZENITHS..(azimuth + 1) * REGULAR_ZENITHS],
+                );
+                for (parameter, value) in curve.into_iter().enumerate() {
+                    output.shadow_curve
+                        [(azimuth * REGULAR_CURVE_PARAMETERS + parameter) * patches + patch] =
+                        value;
+                }
+            }
+            let total_area = self
+                .raw_cells(patch)
+                .iter()
+                .map(|&cell| landarea[cell])
+                .filter(|area| *area > 0.0)
+                .sum::<f64>();
+            if total_area == 0.0 {
+                continue;
+            }
+            for &cell in self.raw_cells(patch) {
+                let slope = value(slope, cell, "slope", patch)?;
+                let aspect = value(aspect, cell, "aspect", patch)?;
+                ensure!(
+                    (slope.is_finite() && aspect.is_finite())
+                        || (slope == -9999.0 && aspect == -9999.0),
+                    "regular topography patch {patch} contains a non-finite slope or aspect"
+                );
+                let kind = regular_slope_type(slope, aspect);
+                let Some(kind) = kind else {
+                    continue;
+                };
+                let area = landarea[cell];
+                if area == 0.0 || area > total_area {
+                    continue;
+                }
+                output.area_type[kind * patches + patch] += area / total_area;
+                output.aspect_type[kind * patches + patch] += aspect * area / total_area;
+                output.slope_type[kind * patches + patch] += slope * area / total_area;
+            }
+        }
+        Ok(output)
+    }
+
     /// Port of `Aggregation_DBedrock`.
     ///
     /// The raw field has no fill-value masking in the Fortran routine, so this
@@ -833,6 +974,111 @@ fn value(source: &[f64], cell: usize, name: &str, patch: usize) -> Result<f64> {
             source.len()
         )
     })
+}
+
+fn regular_shadow_lut(
+    cells: &[usize],
+    front: &[f64],
+    back: &[f64],
+    raw_cells: usize,
+    patch: usize,
+) -> Result<Vec<f64>> {
+    let mut output = vec![0.0; REGULAR_AZIMUTHS * REGULAR_ZENITHS];
+    for azimuth in 0..REGULAR_AZIMUTHS {
+        for zenith in 0..REGULAR_ZENITHS {
+            let zenith_angle =
+                std::f64::consts::PI * zenith as f64 / (2.0 * REGULAR_ZENITHS as f64);
+            let sun_altitude = std::f64::consts::FRAC_PI_2 - zenith_angle;
+            let mut sum = 0.0;
+            let mut valid = 0_usize;
+            for &cell in cells {
+                let front = front[azimuth * raw_cells + cell];
+                let back = back[azimuth * raw_cells + cell];
+                if front.is_nan() || back.is_nan() {
+                    sum += 1.0;
+                    continue;
+                }
+                ensure!(
+                    front.is_finite() && back.is_finite(),
+                    "regular topography patch {patch} has an infinite terrain angle"
+                );
+                let mut front = front.clamp(-1.0, 1.0).asin();
+                let back = back.clamp(-1.0, 1.0).asin();
+                valid += 1;
+                let shadow = if sun_altitude < back {
+                    0.0
+                } else if sun_altitude > front {
+                    1.0
+                } else {
+                    if front == back {
+                        front += 0.001;
+                    }
+                    (sun_altitude - back) / (front - back)
+                };
+                sum += shadow;
+            }
+            ensure!(
+                valid > 0,
+                "regular topography patch {patch} has no finite terrain-angle samples"
+            );
+            output[azimuth * REGULAR_ZENITHS + zenith] = sum / valid as f64;
+        }
+    }
+    Ok(output)
+}
+
+fn regular_shadow_curve(lut: &[f64]) -> [f64; REGULAR_CURVE_PARAMETERS] {
+    debug_assert_eq!(lut.len(), REGULAR_ZENITHS);
+    let mut index = 1_usize;
+    for zenith in 0..REGULAR_ZENITHS - 1 {
+        if lut[zenith] == 1.0 && lut[zenith + 1] < 1.0 {
+            index = zenith + 1;
+        }
+    }
+    let x = (index..REGULAR_ZENITHS)
+        .map(|zenith| std::f64::consts::PI * zenith as f64 / (2.0 * REGULAR_ZENITHS as f64))
+        .collect::<Vec<_>>();
+    let y = lut[index..]
+        .iter()
+        .map(|value| (-value.clamp(0.001, 0.999).ln()).ln())
+        .collect::<Vec<_>>();
+    let count = x.len() as f64;
+    let x_sum = x.iter().sum::<f64>();
+    let y_sum = y.iter().sum::<f64>();
+    let x2_sum = x.iter().map(|value| value * value).sum::<f64>();
+    let xy_sum = x.iter().zip(&y).map(|(x, y)| x * y).sum::<f64>();
+    let denominator = count * x2_sum - x_sum * x_sum;
+    let (a1, a2) = if denominator == 0.0 {
+        (0.0, 0.0)
+    } else {
+        let a1 = (count * xy_sum - x_sum * y_sum) / denominator;
+        (a1, (y_sum - a1 * x_sum) / count)
+    };
+    [
+        std::f64::consts::PI * (index - 1) as f64 / (2.0 * REGULAR_ZENITHS as f64),
+        a1,
+        a2,
+    ]
+}
+
+fn regular_slope_type(slope: f64, aspect: f64) -> Option<usize> {
+    let north = (0.0..=std::f64::consts::FRAC_PI_2).contains(&aspect)
+        || (3.0 * std::f64::consts::FRAC_PI_2..=std::f64::consts::TAU).contains(&aspect);
+    if north {
+        Some(if slope >= std::f64::consts::PI / 12.0 {
+            0
+        } else {
+            1
+        })
+    } else if (std::f64::consts::FRAC_PI_2..3.0 * std::f64::consts::FRAC_PI_2).contains(&aspect) {
+        Some(if slope >= std::f64::consts::PI / 12.0 {
+            2
+        } else {
+            3
+        })
+    } else {
+        None
+    }
 }
 
 fn weighted_not_missing(
