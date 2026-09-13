@@ -14,7 +14,7 @@ use crate::{
     GroundFluxInput, GroundFluxState, GroundTemperatureInput, GroundTemperatureState,
     LeafTemperatureInput, LeafTemperatureOutput, LeafTemperatureState, NetSolarFluxes,
     NetSolarInput, PrecipitationPhaseScheme, PrecipitationState, RootUptakeInput, RootUptakeState,
-    RuntimeForcing, SoilSurfaceResistanceInput,
+    RuntimeForcing, SoilSurfaceResistanceInput, ThermalWaterFluxes, ThermalWaterInput,
 };
 
 const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
@@ -61,10 +61,14 @@ pub struct StandardLctEnergyOutput {
     pub leaf: LeafTemperatureOutput,
     pub ground: GroundTemperatureState,
     /// Fluxes corrected to the just-solved ground temperature, as in
-    /// `MOD_Thermal.F90` section 6.  Water availability is applied later by the
-    /// soil/snow-water stage.
+    /// `MOD_Thermal.F90` section 6.  For non-split surfaces, water availability
+    /// is also applied before these totals are returned.
     pub corrected_ground_sensible_heat_w_m2: f64,
     pub corrected_ground_evaporation_kg_m2_s: f64,
+    /// Source-equivalent upper-layer phase partition for a non-split surface.
+    /// Split soil/snow carries two independent surface budgets and returns
+    /// `None` until that separate branch is ported.
+    pub thermal_water: Option<ThermalWaterFluxes>,
     pub total_sensible_heat_w_m2: f64,
     pub total_evaporation_kg_m2_s: f64,
 }
@@ -145,10 +149,25 @@ pub fn standard_lct_energy_step(
     })?;
     let ground_temperature_change =
         solved_ground_temperature_change(input.ground_temperature, &ground)?;
-    let corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2
+    let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2
         + ground_temperature_change * leaf.ground_sensible_temperature_slope_w_m2_k;
-    let corrected_ground_evaporation_kg_m2_s = leaf.ground_evaporation_kg_m2_s
+    let mut corrected_ground_evaporation_kg_m2_s = leaf.ground_evaporation_kg_m2_s
         + ground_temperature_change * leaf.ground_latent_temperature_slope_kg_m2_s_k;
+    let thermal_water = if input.ground_temperature.use_split_soil_snow {
+        None
+    } else {
+        let water = crate::partition_no_split_thermal_water(ThermalWaterInput {
+            corrected_ground_evaporation_kg_m2_s,
+            upper_liquid_water_kg_m2: ground.liquid_water_kg_m2[0],
+            upper_ice_water_kg_m2: ground.ice_water_kg_m2[0],
+            upper_temperature_k: ground.temperature_k[0],
+            time_step_seconds: input.ground_temperature.time_step_seconds,
+            ground_latent_heat_j_kg: leaf_input.ground_latent_heat_j_kg,
+        })?;
+        corrected_ground_sensible_heat_w_m2 += water.sensible_heat_correction_w_m2;
+        corrected_ground_evaporation_kg_m2_s = water.ground_evaporation_kg_m2_s;
+        Some(water)
+    };
     let total_sensible_heat_w_m2 =
         leaf.leaf_sensible_heat_w_m2 + corrected_ground_sensible_heat_w_m2;
     let total_evaporation_kg_m2_s =
@@ -165,6 +184,7 @@ pub fn standard_lct_energy_step(
         ground,
         corrected_ground_sensible_heat_w_m2,
         corrected_ground_evaporation_kg_m2_s,
+        thermal_water,
         total_sensible_heat_w_m2,
         total_evaporation_kg_m2_s,
     })

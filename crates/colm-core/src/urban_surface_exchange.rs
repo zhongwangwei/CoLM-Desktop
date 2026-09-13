@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::FREEZING_K;
+use crate::{partition_no_split_thermal_water, ThermalWaterInput};
 
 /// One urban roof/road flux before the surface-temperature update.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,37 +43,24 @@ pub fn urban_surface_exchange(
     let temperature_change_k = input.temperature_after_k - input.temperature_before_k;
     let mut sensible_heat_w_m2 =
         input.sensible_heat_w_m2 + temperature_change_k * input.sensible_temperature_slope_w_m2_k;
-    let evaporation_kg_m2_s = input.evaporation_kg_m2_s
+    let corrected_evaporation_kg_m2_s = input.evaporation_kg_m2_s
         + temperature_change_k * input.evaporation_temperature_slope_kg_m2_s_k;
-    let available_water_kg_m2_s = (input.surface_liquid_water_kg_m2
-        + input.surface_ice_water_kg_m2)
-        / input.time_step_seconds;
-    let excess_evaporation_kg_m2_s = (evaporation_kg_m2_s - available_water_kg_m2_s).max(0.0);
-    let evaporation_kg_m2_s = evaporation_kg_m2_s.min(available_water_kg_m2_s);
-    sensible_heat_w_m2 += input.vaporization_heat_j_kg * excess_evaporation_kg_m2_s;
-
-    let (surface_evaporation_kg_m2_s, sublimation_kg_m2_s, dew_kg_m2_s, frost_kg_m2_s) =
-        if evaporation_kg_m2_s >= 0.0 {
-            let surface_evaporation = (input.surface_liquid_water_kg_m2 / input.time_step_seconds)
-                .min(evaporation_kg_m2_s);
-            (
-                surface_evaporation,
-                evaporation_kg_m2_s - surface_evaporation,
-                0.0,
-                0.0,
-            )
-        } else if input.temperature_after_k < FREEZING_K {
-            (0.0, 0.0, 0.0, evaporation_kg_m2_s.abs())
-        } else {
-            (0.0, 0.0, evaporation_kg_m2_s.abs(), 0.0)
-        };
+    let water = partition_no_split_thermal_water(ThermalWaterInput {
+        corrected_ground_evaporation_kg_m2_s: corrected_evaporation_kg_m2_s,
+        upper_liquid_water_kg_m2: input.surface_liquid_water_kg_m2,
+        upper_ice_water_kg_m2: input.surface_ice_water_kg_m2,
+        upper_temperature_k: input.temperature_after_k,
+        time_step_seconds: input.time_step_seconds,
+        ground_latent_heat_j_kg: input.vaporization_heat_j_kg,
+    })?;
+    sensible_heat_w_m2 += water.sensible_heat_correction_w_m2;
     Ok(UrbanSurfaceExchangeState {
         sensible_heat_w_m2,
-        evaporation_kg_m2_s,
-        surface_evaporation_kg_m2_s,
-        sublimation_kg_m2_s,
-        dew_kg_m2_s,
-        frost_kg_m2_s,
+        evaporation_kg_m2_s: water.ground_evaporation_kg_m2_s,
+        surface_evaporation_kg_m2_s: water.evaporation_kg_m2_s,
+        sublimation_kg_m2_s: water.sublimation_kg_m2_s,
+        dew_kg_m2_s: water.dew_kg_m2_s,
+        frost_kg_m2_s: water.frost_kg_m2_s,
     })
 }
 

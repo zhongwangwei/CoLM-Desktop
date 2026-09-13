@@ -112,6 +112,15 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
         .temperature_k
         .iter()
         .all(|value| value.is_finite()));
+    let thermal_water = output.thermal_water.expect("non-split test surface");
+    assert_eq!(
+        output.corrected_ground_evaporation_kg_m2_s,
+        thermal_water.ground_evaporation_kg_m2_s
+    );
+    assert_eq!(
+        output.total_sensible_heat_w_m2,
+        output.leaf.leaf_sensible_heat_w_m2 + output.corrected_ground_sensible_heat_w_m2
+    );
     assert!(output.root_uptake.layer_fraction.iter().sum::<f64>() > 0.999);
     assert!(state.leaf.leaf_temperature_k.is_finite());
     assert!(state.leaf.canopy_water.total_mm >= 0.0);

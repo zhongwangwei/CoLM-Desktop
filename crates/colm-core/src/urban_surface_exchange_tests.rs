@@ -1,4 +1,5 @@
 use super::*;
+use crate::FREEZING_K;
 
 #[test]
 fn urban_surface_exchange_matches_thermal_evaporation_cap_and_partition() {
