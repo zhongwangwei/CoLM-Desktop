@@ -15,22 +15,22 @@ use colm_srfdata::{
     aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
     build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology,
     build_coordinate_patch_selection, build_crop_land_patches, build_crop_pft_topology,
-    build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_pft_topology,
-    build_spatial_topology, clip_existing_surface, crop_pft_pctshared,
-    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
-    mesh_cell_area_weights, read_coordinate_patch_selection_f64,
-    read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
-    read_mesh_raster_f64, read_mesh_raster_i32, read_mesh_raster_layers_f64,
-    read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
-    write_landpatch_3d_vector, write_landpatch_layered_vector, write_landpatch_scalar,
-    write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
-    write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, FlatLandPatches, LczUrbanRawFields,
-    NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode,
-    SpatialBounds, SpatialInputKind, SpatialTopology, TopographicWetness, UrbanMaterialParameters,
-    COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M,
+    build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
+    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
+    clip_existing_surface, crop_pft_pctshared, materialize_single_point_surface,
+    materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
+    read_coordinate_patch_selection_f64, read_coordinate_patch_selection_layers_f64,
+    read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
+    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
+    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
+    read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
+    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
+    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
+    write_spatial_topology, write_spatial_topology_with_shared, write_spatial_urban_material,
+    write_spatial_urban_topology, write_spatial_urban_vector, BlockLayout, FlatLandPatches,
+    LczUrbanRawFields, NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput,
+    SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology, TopographicWetness,
+    UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -68,6 +68,7 @@ struct SpatialLctArgs {
     land_cover: SiteMode,
     lake_depth: Option<PathBuf>,
     lake_soil_carbon: Option<PathBuf>,
+    methane_ph: Option<PathBuf>,
     soil_texture: Option<PathBuf>,
     soil_dir: Option<PathBuf>,
     soil_model: SoilModel,
@@ -129,6 +130,19 @@ enum SoilModel {
     Campbell,
 }
 
+fn methane_ph_patch_is_relevant(land_cover: SiteMode, class: i32) -> bool {
+    match land_cover {
+        // CoLM's IGBP mapping: class 13 is urban, 15 ice, and 17 water;
+        // every other positive land class is soil or wetland.
+        SiteMode::Igbp | SiteMode::Pft | SiteMode::Pc => {
+            class > 0 && !matches!(class, 13 | 15 | 17)
+        }
+        // CoLM's USGS mapping: class 1 urban, 16 water, and 24 ice.
+        SiteMode::Usgs => class > 0 && !matches!(class, 1 | 16 | 24),
+        SiteMode::Urban => false,
+    }
+}
+
 struct SpatialPftArgs {
     kind: SpatialInputKind,
     mesh: PathBuf,
@@ -142,6 +156,7 @@ struct SpatialPftArgs {
     monthly_vegetation_years: Vec<i32>,
     lake_depth: Option<PathBuf>,
     lake_soil_carbon: Option<PathBuf>,
+    methane_ph: Option<PathBuf>,
     soil_texture: Option<PathBuf>,
     soil_dir: Option<PathBuf>,
     soil_model: SoilModel,
@@ -276,6 +291,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         land_cover: SiteMode::Igbp,
         lake_depth: args.lake_depth.clone(),
         lake_soil_carbon: args.lake_soil_carbon.clone(),
+        methane_ph: args.methane_ph.clone(),
         soil_texture: args.soil_texture.clone(),
         soil_dir: args.soil_dir.clone(),
         soil_model: args.soil_model,
@@ -1154,17 +1170,38 @@ fn materialize_spatial_common_fields(
                 bail!("--lake-soil-carbon supports only LCT IGBP or USGS land cover")
             }
         };
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let raw = read_mesh_raster_layers_f64(
-            path,
-            "lake_soilc",
-            LAKE_SOIL_LAYERS,
-            &topology.mesh,
-            &topology.pixel,
-            COLM_500M,
-        )?;
-        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
-        Some(layout.aggregate_lake_soil_carbon(&raw, LAKE_SOIL_LAYERS, &area, waterbody)?)
+        if patches.set_type.contains(&waterbody) {
+            let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+            let raw = read_mesh_raster_layers_f64(
+                path,
+                "lake_soilc",
+                LAKE_SOIL_LAYERS,
+                &topology.mesh,
+                &topology.pixel,
+                COLM_500M,
+            )?;
+            let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+            Some(layout.aggregate_lake_soil_carbon(&raw, LAKE_SOIL_LAYERS, &area, waterbody)?)
+        } else {
+            Some(vec![0.0; LAKE_SOIL_LAYERS * patches.len()])
+        }
+    } else {
+        None
+    };
+    let methane_ph = if let Some(path) = &args.methane_ph {
+        let relevant = |land_cover| methane_ph_patch_is_relevant(args.land_cover, land_cover);
+        if patches.set_type.iter().copied().any(relevant) {
+            let selection = build_methane_ph_patch_selection(path, topology, patches)?;
+            let samples = read_methane_ph_patch_selection(path, &selection)?;
+            Some(selection.layout().aggregate_methane_ph(
+                &samples.ph,
+                &samples.depth_weight,
+                selection.areas(),
+                relevant,
+            )?)
+        } else {
+            Some(vec![6.2; patches.len()])
+        }
     } else {
         None
     };
@@ -1295,6 +1332,18 @@ fn materialize_spatial_common_fields(
             "soil",
             LAKE_SOIL_LAYERS,
             &lake_soil_carbon,
+        )?;
+    }
+    if let Some(methane_ph) = methane_ph {
+        write_landpatch_scalar(
+            &args.landdata,
+            args.year,
+            topology,
+            patches,
+            &args.blocks,
+            "soil",
+            "methane_ph_patches",
+            &methane_ph,
         )?;
     }
     if let Some(soil_texture) = soil_texture {
@@ -1808,6 +1857,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut land_cover = None;
     let mut lake_depth = None;
     let mut lake_soil_carbon = None;
+    let mut methane_ph = None;
     let mut soil_texture = None;
     let mut soil_dir = None;
     let mut soil_model = SoilModel::Vgm;
@@ -1865,6 +1915,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 lake_soil_carbon = Some(PathBuf::from(
                     args.get(index + 1)
                         .context("--lake-soil-carbon needs lake_soilc.nc")?,
+                ));
+                index += 2;
+            }
+            "--methane-ph" => {
+                methane_ph = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--methane-ph needs PHH2O1.nc")?,
                 ));
                 index += 2;
             }
@@ -2038,6 +2095,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         land_cover: land_cover.context("spatial-lct requires --land-cover igbp or usgs")?,
         lake_depth,
         lake_soil_carbon,
+        methane_ph,
         soil_texture,
         soil_dir,
         soil_model,
@@ -2083,6 +2141,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut monthly_vegetation_years = Vec::new();
     let mut lake_depth = None;
     let mut lake_soil_carbon = None;
+    let mut methane_ph = None;
     let mut soil_texture = None;
     let mut soil_dir = None;
     let mut soil_model = SoilModel::Vgm;
@@ -2139,6 +2198,13 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 lake_soil_carbon = Some(PathBuf::from(
                     args.get(index + 1)
                         .context("--lake-soil-carbon needs lake_soilc.nc")?,
+                ));
+                index += 2;
+            }
+            "--methane-ph" => {
+                methane_ph = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--methane-ph needs PHH2O1.nc")?,
                 ));
                 index += 2;
             }
@@ -2253,6 +2319,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         monthly_vegetation_years,
         lake_depth,
         lake_soil_carbon,
+        methane_ph,
         soil_texture,
         soil_dir,
         soil_model,
@@ -2491,6 +2558,7 @@ fn spatial_case_command(
     );
 
     let rawdata = PathBuf::from(case_string(&document, "DEF_dir_rawdata")?);
+    let methane = methane_preprocessing_requirements(&document, namelist)?;
     let case_name = case_string(&document, "DEF_CASE_NAME")?;
     let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
     let requested_year = case_i32(&document, "DEF_LC_YEAR", 2005)?;
@@ -2516,6 +2584,12 @@ fn spatial_case_command(
     };
     let landdata = output.join(&case_name).join("landdata");
     let lake_depth = rawdata.join("lake_depth.nc");
+    let lake_soil_carbon = if rawdata.join("lake_soilc.nc").is_file() {
+        rawdata.join("lake_soilc.nc")
+    } else {
+        rawdata.join("soil/lake_soilc.nc")
+    };
+    let methane_ph = rawdata.join("soil/PHH2O1.nc");
     let soil_texture = rawdata.join("soil/soiltexture_0cm-60cm_mean.nc");
     let soil_dir = rawdata.join("soil");
     let soil_brightness = rawdata.join("soil_brightness.nc");
@@ -2604,6 +2678,15 @@ fn spatial_case_command(
             "--topography".to_owned(),
             topography.display().to_string(),
         ]);
+        if methane.lake_soil_carbon {
+            args.extend([
+                "--lake-soil-carbon".to_owned(),
+                lake_soil_carbon.display().to_string(),
+            ]);
+        }
+        if methane.spatial_ph {
+            args.extend(["--methane-ph".to_owned(), methane_ph.display().to_string()]);
+        }
         if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
             required_files.push(topographic_wetness.clone());
             args.extend([
@@ -2719,6 +2802,15 @@ fn spatial_case_command(
             "--topography".to_owned(),
             topography.display().to_string(),
         ]);
+        if methane.lake_soil_carbon {
+            args.extend([
+                "--lake-soil-carbon".to_owned(),
+                lake_soil_carbon.display().to_string(),
+            ]);
+        }
+        if methane.spatial_ph {
+            args.extend(["--methane-ph".to_owned(), methane_ph.display().to_string()]);
+        }
         if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
             required_files.push(topographic_wetness.clone());
             args.extend([
@@ -2842,6 +2934,126 @@ fn case_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Re
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MethanePreprocessing {
+    lake_soil_carbon: bool,
+    spatial_ph: bool,
+}
+
+/// Mirror `methane_preprocessing_requirements` without treating every BGC
+/// case as methane.  The CH4 parameter file is selected through the same
+/// keyed-or-positional `DEF_TRACER_PARAM_FILES` convention as CoLM.
+fn methane_preprocessing_requirements(
+    document: &colm_namelist::Document,
+    namelist: &Path,
+) -> Result<MethanePreprocessing> {
+    if !case_bool(document, "DEF_USE_BGC", false)? || !case_bool(document, "DEF_USE_TRACER", false)?
+    {
+        return Ok(MethanePreprocessing {
+            lake_soil_carbon: false,
+            spatial_ph: false,
+        });
+    }
+    let count = case_i32(document, "DEF_TRACER_NUM", 2)?;
+    ensure!(count >= 0, "DEF_TRACER_NUM must be non-negative");
+    let names = optional_case_string(document, "DEF_TRACER_NAMES", "H2_18O,HDO")?;
+    let names = names.split(',').map(str::trim).collect::<Vec<_>>();
+    let mut methane = None;
+    for index in 0..usize::try_from(count)? {
+        let name = names.get(index).copied().unwrap_or("");
+        if name.eq_ignore_ascii_case("CH4") || name.eq_ignore_ascii_case("METHANE") {
+            ensure!(
+                methane.replace(index).is_none(),
+                "multiple CH4/METHANE tracers are configured"
+            );
+        }
+    }
+    let Some(index) = methane else {
+        return Ok(MethanePreprocessing {
+            lake_soil_carbon: false,
+            spatial_ph: false,
+        });
+    };
+    let types = optional_case_string(document, "DEF_TRACER_TYPES", "isotope,isotope")?;
+    let family = types.split(',').nth(index).map(str::trim).unwrap_or("");
+    ensure!(
+        family.eq_ignore_ascii_case("gas"),
+        "CH4/METHANE preprocessing descriptor must use family=gas"
+    );
+    let mapping = optional_case_string(document, "DEF_TRACER_PARAM_FILES", "null")?;
+    let parameter = tracer_parameter_file(&mapping, index, &names)?
+        .context("CH4 requires DEF_TRACER_PARAM_FILES to include a CH4 parameter file")?;
+    let parameter = PathBuf::from(parameter);
+    let parameter = if parameter.is_absolute() || parameter.is_file() {
+        parameter
+    } else {
+        namelist
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(parameter)
+    };
+    let text = std::fs::read_to_string(&parameter)
+        .with_context(|| format!("cannot read CH4 parameter file {}", parameter.display()))?;
+    let parameter_document = parse(&text)
+        .with_context(|| format!("cannot parse CH4 parameter file {}", parameter.display()))?;
+    Ok(MethanePreprocessing {
+        lake_soil_carbon: case_bool(&parameter_document, "DEF_METHANE%allowlakeprod", false)?,
+        spatial_ph: case_bool(&parameter_document, "DEF_METHANE%use_spatial_ph", false)?,
+    })
+}
+
+fn optional_case_string(
+    document: &colm_namelist::Document,
+    field: &str,
+    default: &str,
+) -> Result<String> {
+    match document.get(field) {
+        None => Ok(default.to_owned()),
+        Some(Value::Str(value)) => Ok(value.to_owned()),
+        Some(_) => bail!("{field} must be a character value"),
+    }
+}
+
+fn tracer_parameter_file(
+    mapping: &str,
+    tracer_index: usize,
+    names: &[&str],
+) -> Result<Option<String>> {
+    if mapping.trim().is_empty() || mapping.trim().eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    let tracer_name = names.get(tracer_index).copied().unwrap_or("");
+    let mut positional = 0_usize;
+    let mut result = None;
+    for entry in mapping
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        if let Some((key, path)) = entry.split_once(':') {
+            let key = key.trim();
+            let path = path.trim();
+            ensure!(
+                !key.is_empty() && !path.is_empty(),
+                "empty tracer parameter file mapping entry: {entry}"
+            );
+            if result.is_none()
+                && (key.eq_ignore_ascii_case(tracer_name)
+                    || key.eq_ignore_ascii_case("CH4")
+                    || key.eq_ignore_ascii_case("METHANE"))
+            {
+                result = (!path.eq_ignore_ascii_case("null")).then(|| path.to_owned());
+            }
+        } else {
+            if positional == tracer_index && result.is_none() {
+                result = (!entry.eq_ignore_ascii_case("null")).then(|| entry.to_owned());
+            }
+            positional += 1;
+        }
+    }
+    Ok(result)
+}
+
 fn case_f64(document: &colm_namelist::Document, field: &str) -> Result<f64> {
     match document.get(field) {
         Some(Value::Int(value)) => Ok(*value as f64),
@@ -2953,8 +3165,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -2979,6 +3191,8 @@ mod tests {
             "lake_depth.nc".into(),
             "--lake-soil-carbon".into(),
             "lake_soilc.nc".into(),
+            "--methane-ph".into(),
+            "PHH2O1.nc".into(),
             "--soil-texture".into(),
             "soiltexture.nc".into(),
             "--soil-dir".into(),
@@ -3022,6 +3236,7 @@ mod tests {
             parsed.lake_soil_carbon,
             Some(PathBuf::from("lake_soilc.nc"))
         );
+        assert_eq!(parsed.methane_ph, Some(PathBuf::from("PHH2O1.nc")));
         assert_eq!(parsed.soil_texture, Some(PathBuf::from("soiltexture.nc")));
         assert_eq!(parsed.soil_dir, Some(PathBuf::from("rawdata/soil")));
         assert_eq!(parsed.soil_model, SoilModel::Campbell);
@@ -3128,6 +3343,8 @@ mod tests {
             "lake_depth.nc".into(),
             "--lake-soil-carbon".into(),
             "lake_soilc.nc".into(),
+            "--methane-ph".into(),
+            "PHH2O1.nc".into(),
             "--soil-texture".into(),
             "soiltexture.nc".into(),
             "--soil-dir".into(),
@@ -3162,6 +3379,7 @@ mod tests {
             parsed.lake_soil_carbon,
             Some(PathBuf::from("lake_soilc.nc"))
         );
+        assert_eq!(parsed.methane_ph, Some(PathBuf::from("PHH2O1.nc")));
         assert_eq!(parsed.soil_texture, Some(PathBuf::from("soiltexture.nc")));
         assert_eq!(parsed.soil_dir, Some(PathBuf::from("rawdata/soil")));
         assert_eq!(parsed.soil_model, SoilModel::Campbell);
@@ -3210,6 +3428,35 @@ mod tests {
         args.windows(2)
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn spatial_case_enables_methane_surface_inputs_only_for_active_ch4() {
+        let (root, namelist) = case_namelist(
+            "methane",
+            "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='$ROOT/out'\n DEF_dir_rawdata='$ROOT/raw'\n DEF_file_mesh='$ROOT/mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_BGC=.true.\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_NAMES='CH4'\n DEF_TRACER_TYPES='gas'\n DEF_TRACER_PARAM_FILES='CH4:standard_ch4.nml'\n/\n",
+        );
+        std::fs::write(
+            root.join("standard_ch4.nml"),
+            "&nl_colm_methane_parameter\n DEF_METHANE%allowlakeprod=.true.\n DEF_METHANE%use_spatial_ph=.true.\n/\n",
+        )
+        .unwrap();
+
+        let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            option_value(&command.args, "--lake-soil-carbon").map(str::to_owned),
+            Some(format!("{}/raw/soil/lake_soilc.nc", root.display()))
+        );
+        assert_eq!(
+            option_value(&command.args, "--methane-ph").map(str::to_owned),
+            Some(format!("{}/raw/soil/PHH2O1.nc", root.display()))
+        );
+        assert!(!command
+            .required_files
+            .contains(&root.join("raw/soil/PHH2O1.nc")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

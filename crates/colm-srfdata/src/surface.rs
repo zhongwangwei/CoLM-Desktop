@@ -270,6 +270,65 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Aggregate PHH2O's depth-weighted hydrogen activity over each relevant
+    /// soil or wetland patch.
+    ///
+    /// The logarithm is intentionally applied after the area-depth mean, not
+    /// before it: pH is logarithmic and averaging pH values directly changes
+    /// methane production.  Patches without valid PHH2O coverage retain the
+    /// upstream neutral fallback of 6.2.
+    pub fn aggregate_methane_ph(
+        &self,
+        ph: &[f64],
+        depth_weight: &[f64],
+        area: &[f64],
+        relevant: impl Fn(i32) -> bool,
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            ph.len() == depth_weight.len() && ph.len() == area.len(),
+            "methane pH values, depth weights, and intersection areas must have the same length"
+        );
+        let mut result = vec![6.2; self.len()];
+        for patch in 0..self.len() {
+            if let Some(source) = self.wmo_source[patch] {
+                result[patch] = result[source];
+                continue;
+            }
+            if !relevant(self.patch_types[patch]) {
+                continue;
+            }
+            let mut activity_area = 0.0;
+            let mut valid_area_depth = 0.0;
+            for &cell in self.raw_cells(patch) {
+                let ph_value = value(ph, cell, "methane pH", patch)?;
+                let weight = value(depth_weight, cell, "methane pH depth weight", patch)?;
+                let intersection = value(area, cell, "methane pH intersection area", patch)?;
+                ensure!(
+                    weight.is_finite()
+                        && weight >= 0.0
+                        && intersection.is_finite()
+                        && intersection > 0.0,
+                    "methane pH patch {patch} has an invalid depth weight or intersection area"
+                );
+                if !(2.0..=10.0).contains(&ph_value) || weight == 0.0 {
+                    continue;
+                }
+                let area_depth = intersection * weight;
+                activity_area += 10_f64.powf(-ph_value) * area_depth;
+                valid_area_depth += area_depth;
+            }
+            if valid_area_depth > 0.0 {
+                let value = -(activity_area / valid_area_depth).log10();
+                ensure!(
+                    value.is_finite() && (2.0..=10.0).contains(&value),
+                    "methane pH patch {patch} has an invalid aggregate"
+                );
+                result[patch] = value;
+            }
+        }
+        Ok(result)
+    }
+
     /// Port of `Aggregation_LakeSoilC`.
     ///
     /// `raw_soil_carbon_g_m3` and the returned vector are layer-major.  Only

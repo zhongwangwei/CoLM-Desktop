@@ -9,7 +9,10 @@ use std::collections::{btree_map::Entry, BTreeMap};
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
-use netcdf::{Extent, NcTypeDescriptor};
+use netcdf::{
+    types::{IntType, NcVariableType},
+    AttributeValue, Extent, NcTypeDescriptor,
+};
 
 use crate::{
     mesh::inspect_spatial_input, FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh,
@@ -100,6 +103,17 @@ pub struct CoordinatePatchSelection {
     latitude: Vec<f64>,
     longitude: Vec<f64>,
     area: Vec<f64>,
+}
+
+/// Decoded, depth-averaged PHH2O samples in a coordinate-patch selection.
+///
+/// `depth_weight` is zero for a source cell whose top four soil layers are
+/// all missing.  The patch aggregator must retain it because a cell with only
+/// part of its profile available contributes proportionally less area-depth.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethanePhSamples {
+    pub ph: Vec<f64>,
+    pub depth_weight: Vec<f64>,
 }
 
 impl CoordinatePatchSelection {
@@ -927,6 +941,158 @@ pub fn read_coordinate_patch_selection_layers_f64(
     Ok(output)
 }
 
+/// Build the exact PHH2O-cell intersection map for every land patch.
+///
+/// PHH2O is coarser than the native CoLM mesh in many domains.  Assigning a
+/// source-cell centre to one mesh pixel would therefore drop its contribution
+/// from adjacent patches.  This keeps every positive spherical intersection,
+/// as `Aggregation_MethanePH.F90` does.
+pub fn build_methane_ph_patch_selection(
+    reference: &Path,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+) -> Result<CoordinatePatchSelection> {
+    validate_patches(&topology.mesh, patches)?;
+    let file =
+        netcdf::open(reference).with_context(|| format!("cannot open {}", reference.display()))?;
+    let source = file
+        .variable("PHH2O")
+        .with_context(|| format!("PHH2O is absent from {}", reference.display()))?;
+    let contract = methane_ph_contract(&file, &source, reference)?;
+    let latitude = methane_ph_latitude_cells(&contract.latitude)?;
+    let longitude = methane_ph_longitude_cells(&contract.longitude)?;
+    let mut by_patch = vec![Vec::new(); patches.len()];
+
+    for (patch, output) in by_patch.iter_mut().enumerate() {
+        let element = patches.element_index[patch]
+            .checked_sub(1)
+            .with_context(|| format!("land patch {patch} has zero element index"))?;
+        let (xs, ys) = topology.mesh.pixels(element)?;
+        for position in patches.pixel_start[patch] - 1..patches.pixel_end[patch] {
+            let x = usize::try_from(*xs.get(position).context("patch longitude is absent")?)?
+                .checked_sub(1)
+                .context("patch longitude is zero")?;
+            let y = usize::try_from(*ys.get(position).context("patch latitude is absent")?)?
+                .checked_sub(1)
+                .context("patch latitude is zero")?;
+            let south = *topology
+                .pixel
+                .lat_s
+                .get(y)
+                .context("patch latitude is outside pixel grid")?;
+            let north = *topology
+                .pixel
+                .lat_n
+                .get(y)
+                .context("patch latitude is outside pixel grid")?;
+            let west = *topology
+                .pixel
+                .lon_w
+                .get(x)
+                .context("patch longitude is outside pixel grid")?;
+            let east = *topology
+                .pixel
+                .lon_e
+                .get(x)
+                .context("patch longitude is outside pixel grid")?;
+            append_methane_ph_pixel_overlaps(
+                output, &latitude, &longitude, south, north, west, east,
+            )?;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(patches.len() + 1);
+    let mut cells = Vec::new();
+    let mut source_rows = Vec::new();
+    let mut source_columns = Vec::new();
+    let mut area = Vec::new();
+    offsets.push(0);
+    for selected in by_patch {
+        for (row, column, overlap) in selected {
+            cells.push(source_rows.len());
+            source_rows.push(row);
+            source_columns.push(column);
+            area.push(overlap);
+        }
+        offsets.push(cells.len());
+    }
+    Ok(CoordinatePatchSelection {
+        layout: FlatPatches::new(
+            patches.set_type.clone(),
+            offsets,
+            cells,
+            vec![None; patches.len()],
+        )?,
+        source_rows,
+        source_columns,
+        latitude: contract.latitude,
+        longitude: contract.longitude,
+        area,
+    })
+}
+
+/// Read PHH2O's top-four-layer hydrogen-activity means in selection order.
+pub fn read_methane_ph_patch_selection(
+    raster: &Path,
+    selection: &CoordinatePatchSelection,
+) -> Result<MethanePhSamples> {
+    let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    let source = file
+        .variable("PHH2O")
+        .with_context(|| format!("PHH2O is absent from {}", raster.display()))?;
+    let contract = methane_ph_contract(&file, &source, raster)?;
+    validate_selection_coordinate(contract.latitude, &selection.latitude, "latitude", raster)?;
+    validate_selection_coordinate(
+        contract.longitude,
+        &selection.longitude,
+        "longitude",
+        raster,
+    )?;
+    let axes = methane_ph_axes(&source, raster)?;
+    let mut requested = BTreeMap::<usize, Vec<(usize, usize)>>::new();
+    for (position, (&row, &column)) in selection
+        .source_rows
+        .iter()
+        .zip(&selection.source_columns)
+        .enumerate()
+    {
+        requested.entry(row).or_default().push((position, column));
+    }
+    let mut ph = vec![f64::NAN; selection.source_rows.len()];
+    let mut depth_weight = vec![0.0; selection.source_rows.len()];
+    let nlon = selection.longitude.len();
+    for (row, positions) in requested {
+        let values = read_methane_ph_row(&source, axes, row)?;
+        for (position, column) in positions {
+            let mut activity = 0.0;
+            let mut weight = 0.0;
+            for (depth, &layer_weight) in contract.depth_weight.iter().enumerate() {
+                let byte = *values
+                    .get(depth * nlon + column)
+                    .context("selected PHH2O longitude is outside its source row")?;
+                if byte == -100 {
+                    continue;
+                }
+                let encoded = if byte >= 0 {
+                    i16::from(byte)
+                } else {
+                    i16::from(byte) + 256
+                };
+                if !(20..=100).contains(&encoded) {
+                    continue;
+                }
+                activity += 10_f64.powf(-0.1 * f64::from(encoded)) * layer_weight;
+                weight += layer_weight;
+            }
+            if weight > 0.0 {
+                ph[position] = -(activity / weight).log10();
+                depth_weight[position] = weight;
+            }
+        }
+    }
+    Ok(MethanePhSamples { ph, depth_weight })
+}
+
 /// Read a CoLM 5°×5° tile variable in flattened mesh-pixel order.
 ///
 /// `MOD_5x5DataReadin.F90` partitions the global grid into 72 longitude by
@@ -1446,6 +1612,356 @@ fn spatial_pixel_at(pixel: &PixelAxes, longitude: f64, latitude: f64) -> Option<
     let south = *pixel.lat_s.get(y)?;
     let north = *pixel.lat_n.get(y)?;
     ((west..=east).contains(&point) && (south..=north).contains(&latitude)).then_some((x, y))
+}
+
+#[derive(Debug)]
+struct MethanePhContract {
+    latitude: Vec<f64>,
+    longitude: Vec<f64>,
+    depth_weight: [f64; 4],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceAxisCell {
+    index: usize,
+    lower: f64,
+    upper: f64,
+}
+
+fn methane_ph_contract(
+    file: &netcdf::File,
+    source: &netcdf::Variable<'_>,
+    path: &Path,
+) -> Result<MethanePhContract> {
+    ensure!(
+        source.vartype() == NcVariableType::Int(IntType::I8),
+        "PHH2O in {} must use signed byte encoding",
+        path.display()
+    );
+    let axes = methane_ph_axes(source, path)?;
+    let dimensions = source.dimensions();
+    let latitude = read_coordinate(file, &dimensions[axes.latitude], "latitude", path)?;
+    let longitude = read_coordinate(file, &dimensions[axes.longitude], "longitude", path)?;
+    validate_methane_ph_axes(&latitude, &longitude, path)?;
+    let depth_dimension = &dimensions[axes.layer];
+    let depth = read_coordinate(file, depth_dimension, "depth", path)?;
+    ensure!(
+        depth.len() >= 4,
+        "PHH2O in {} needs at least four depth layers",
+        path.display()
+    );
+    let depth_variable = file
+        .variable(&depth_dimension.name())
+        .expect("read_coordinate verified the depth variable");
+    let units =
+        string_attribute(&depth_variable, "units")?.context("PHH2O depth units are required")?;
+    let depth_scale = match units.trim().to_ascii_lowercase().as_str() {
+        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 1.0,
+        "m" | "meter" | "meters" | "metre" | "metres" => 100.0,
+        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 0.1,
+        _ => bail!("unsupported PHH2O depth units: {units}"),
+    };
+    let depth = depth
+        .into_iter()
+        .take(4)
+        .map(|value| value * depth_scale)
+        .collect::<Vec<_>>();
+    ensure!(
+        depth.iter().all(|value| value.is_finite())
+            && depth[0] > 0.0
+            && depth.windows(2).all(|pair| pair[1] > pair[0]),
+        "PHH2O depth bottoms must be finite, positive and increasing"
+    );
+    for (actual, expected) in depth.iter().zip([4.5, 9.1, 16.6, 28.9]) {
+        ensure!(
+            (actual - expected).abs() <= 0.05,
+            "PHH2O top-four depth coordinate is incompatible"
+        );
+    }
+    let depth_weight = [
+        depth[0],
+        depth[1] - depth[0],
+        depth[2] - depth[1],
+        depth[3] - depth[2],
+    ];
+    validate_methane_ph_metadata(source, path)?;
+    Ok(MethanePhContract {
+        latitude,
+        longitude,
+        depth_weight,
+    })
+}
+
+fn methane_ph_axes(source: &netcdf::Variable<'_>, path: &Path) -> Result<CoordinateLayerAxes> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 3,
+        "PHH2O in {} must have exactly three dimensions",
+        path.display()
+    );
+    let names = dimensions
+        .iter()
+        .map(|dimension| dimension.name().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    ensure!(
+        matches!(names.as_slice(), [depth, lat, lon]
+            if depth == "depth"
+                && matches!(lat.as_str(), "lat" | "latitude")
+                && matches!(lon.as_str(), "lon" | "longitude")),
+        "PHH2O in {} must use CDL dimension order depth,lat,lon",
+        path.display()
+    );
+    Ok(CoordinateLayerAxes {
+        layer: 0,
+        latitude: 1,
+        longitude: 2,
+    })
+}
+
+fn validate_methane_ph_axes(latitude: &[f64], longitude: &[f64], path: &Path) -> Result<()> {
+    ensure!(
+        latitude.len() >= 2 && longitude.len() >= 2,
+        "PHH2O in {} needs at least two latitude and longitude cells",
+        path.display()
+    );
+    ensure!(
+        latitude.windows(2).all(|pair| pair[1] > pair[0])
+            || latitude.windows(2).all(|pair| pair[1] < pair[0]),
+        "PHH2O latitude must be strictly monotonic"
+    );
+    ensure!(
+        latitude.iter().all(|value| (-90.0..=90.0).contains(value)),
+        "PHH2O latitude coordinates must lie within [-90, 90]"
+    );
+    ensure!(
+        longitude.windows(2).all(|pair| pair[1] > pair[0]),
+        "PHH2O longitude must be strictly increasing"
+    );
+    let spacing = (longitude[longitude.len() - 1] - longitude[0]) / (longitude.len() - 1) as f64;
+    ensure!(
+        spacing.is_finite()
+            && spacing > 0.0
+            && longitude.windows(2).all(|pair| {
+                ((pair[1] - pair[0]) - spacing).abs() <= spacing.mul_add(0.01, 1.0e-6)
+            }),
+        "PHH2O longitude spacing must be regular"
+    );
+    ensure!(
+        (longitude[longitude.len() - 1] - longitude[0] + spacing - 360.0).abs()
+            <= spacing.max(1.0e-4),
+        "PHH2O longitude does not cover a cyclic global grid"
+    );
+    Ok(())
+}
+
+fn validate_methane_ph_metadata(source: &netcdf::Variable<'_>, path: &Path) -> Result<()> {
+    let units = string_attribute(source, "units")?.context("PHH2O units are required")?;
+    ensure!(
+        matches!(units.trim(), "1/10" | "0.1" | "pH/10" | "ph/10"),
+        "unsupported PHH2O units: {units}"
+    );
+    if let Some(scale) = numeric_attribute(source, "scale_factor")? {
+        ensure!(
+            scale.is_finite() && (scale - 0.1).abs() <= 1.0e-12,
+            "PHH2O scale_factor must be 0.1"
+        );
+    }
+    if let Some(offset) = numeric_attribute(source, "add_offset")? {
+        ensure!(
+            offset.is_finite() && offset.abs() <= 1.0e-12,
+            "PHH2O add_offset must be zero"
+        );
+    }
+    let missing = ["missing_value", "_FillValue"]
+        .into_iter()
+        .map(|name| numeric_attribute(source, name))
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        missing.iter().any(Option::is_some),
+        "PHH2O missing marker is required"
+    );
+    for value in missing.into_iter().flatten() {
+        ensure!(
+            value == -100.0,
+            "PHH2O missing marker in {} must be -100",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn string_attribute(source: &netcdf::Variable<'_>, name: &str) -> Result<Option<String>> {
+    match source.attribute(name) {
+        None => Ok(None),
+        Some(attribute) => match attribute.value()? {
+            AttributeValue::Str(value) => Ok(Some(value)),
+            _ => bail!("PHH2O {name} must be a character attribute"),
+        },
+    }
+}
+
+fn numeric_attribute(source: &netcdf::Variable<'_>, name: &str) -> Result<Option<f64>> {
+    let Some(attribute) = source.attribute(name) else {
+        return Ok(None);
+    };
+    let value = match attribute.value()? {
+        AttributeValue::Uchar(value) => f64::from(value),
+        AttributeValue::Schar(value) => f64::from(value),
+        AttributeValue::Ushort(value) => f64::from(value),
+        AttributeValue::Short(value) => f64::from(value),
+        AttributeValue::Uint(value) => f64::from(value),
+        AttributeValue::Int(value) => f64::from(value),
+        AttributeValue::Ulonglong(value) => value as f64,
+        AttributeValue::Longlong(value) => value as f64,
+        AttributeValue::Float(value) => f64::from(value),
+        AttributeValue::Double(value) => value,
+        _ => bail!("PHH2O {name} must be a numeric attribute"),
+    };
+    Ok(Some(value))
+}
+
+fn methane_ph_latitude_cells(values: &[f64]) -> Result<Vec<SourceAxisCell>> {
+    let ascending = values[1] > values[0];
+    let ordered = if ascending {
+        (0..values.len()).collect::<Vec<_>>()
+    } else {
+        (0..values.len()).rev().collect::<Vec<_>>()
+    };
+    let mut cells = Vec::with_capacity(values.len());
+    for (position, &index) in ordered.iter().enumerate() {
+        let centre = values[index];
+        let lower = if position == 0 {
+            (centre - (values[ordered[position + 1]] - centre).abs() * 0.5).max(-90.0)
+        } else {
+            (values[ordered[position - 1]] + centre) * 0.5
+        };
+        let upper = if position + 1 == ordered.len() {
+            (centre + (centre - values[ordered[position - 1]]).abs() * 0.5).min(90.0)
+        } else {
+            (centre + values[ordered[position + 1]]) * 0.5
+        };
+        ensure!(
+            lower.is_finite() && upper.is_finite() && lower < upper,
+            "PHH2O latitude cell has invalid bounds"
+        );
+        cells.push(SourceAxisCell {
+            index,
+            lower,
+            upper,
+        });
+    }
+    Ok(cells)
+}
+
+fn methane_ph_longitude_cells(values: &[f64]) -> Result<Vec<SourceAxisCell>> {
+    let spacing = (values[values.len() - 1] - values[0]) / (values.len() - 1) as f64;
+    let first = values[0] - spacing * 0.5;
+    Ok(values
+        .iter()
+        .enumerate()
+        .map(|(index, _)| SourceAxisCell {
+            index,
+            lower: first + spacing * index as f64,
+            upper: first + spacing * (index + 1) as f64,
+        })
+        .collect())
+}
+
+fn append_methane_ph_pixel_overlaps(
+    output: &mut Vec<(usize, usize, f64)>,
+    latitude: &[SourceAxisCell],
+    longitude: &[SourceAxisCell],
+    south: f64,
+    north: f64,
+    west: f64,
+    east: f64,
+) -> Result<()> {
+    ensure!(
+        south.is_finite() && north.is_finite() && south < north,
+        "spatial pixel latitude bounds are invalid"
+    );
+    let first = longitude
+        .first()
+        .context("PHH2O longitude cells are empty")?
+        .lower;
+    let last = longitude
+        .last()
+        .context("PHH2O longitude cells are empty")?
+        .upper;
+    let width = if east > west {
+        east - west
+    } else {
+        east + 360.0 - west
+    };
+    ensure!(
+        width.is_finite() && width > 0.0 && width <= 360.0,
+        "spatial pixel longitude bounds are invalid"
+    );
+    let start = first + (west - first).rem_euclid(360.0);
+    let mut intervals = vec![(start, start + width)];
+    if intervals[0].1 > last {
+        let (_, end) = intervals.pop().expect("longitude interval is present");
+        intervals.push((start, last));
+        intervals.push((first, first + (end - last)));
+    }
+    let row_start = latitude.partition_point(|cell| cell.upper <= south);
+    for row in &latitude[row_start..] {
+        if row.lower >= north {
+            break;
+        }
+        let south_overlap = row.lower.max(south);
+        let north_overlap = row.upper.min(north);
+        if north_overlap <= south_overlap {
+            continue;
+        }
+        for &(interval_west, interval_east) in &intervals {
+            let column_start = longitude.partition_point(|cell| cell.upper <= interval_west);
+            for column in &longitude[column_start..] {
+                if column.lower >= interval_east {
+                    break;
+                }
+                let west_overlap = column.lower.max(interval_west);
+                let east_overlap = column.upper.min(interval_east);
+                if east_overlap <= west_overlap {
+                    continue;
+                }
+                let area = (east_overlap - west_overlap).to_radians()
+                    * (north_overlap.to_radians().sin() - south_overlap.to_radians().sin());
+                ensure!(
+                    area.is_finite() && area > 0.0,
+                    "PHH2O intersection has invalid spherical area"
+                );
+                output.push((row.index, column.index, area));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_methane_ph_row(
+    source: &netcdf::Variable<'_>,
+    axes: CoordinateLayerAxes,
+    latitude: usize,
+) -> Result<Vec<i8>> {
+    let dimensions = source.dimensions();
+    let mut extents = vec![Extent::Index(0); 3];
+    extents[axes.layer] = Extent::SliceCount {
+        start: 0,
+        count: 4,
+        stride: 1,
+    };
+    extents[axes.latitude] = Extent::Index(latitude);
+    extents[axes.longitude] = Extent::SliceCount {
+        start: 0,
+        count: dimensions[axes.longitude].len(),
+        stride: 1,
+    };
+    let values = source.get_values::<i8, _>(extents)?;
+    ensure!(
+        values.len() == 4 * dimensions[axes.longitude].len(),
+        "PHH2O source row has unexpected length"
+    );
+    Ok(values)
 }
 
 fn validate_coordinate_axes(latitude: &[f64], longitude: &[f64]) -> Result<()> {

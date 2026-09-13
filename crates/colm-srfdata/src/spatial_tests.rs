@@ -1118,6 +1118,93 @@ fn coordinate_patch_selection_uses_native_mesh_pixels_not_a_500m_proxy() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn methane_ph_selection_uses_exact_source_patch_intersections() {
+    let directory = temporary("methane-ph-selection");
+    let source = directory.join("PHH2O1.nc");
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&source).unwrap();
+        file.add_dimension("depth", 4).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        let mut depth = file.add_variable::<f64>("depth", &["depth"]).unwrap();
+        depth.put_attribute("units", "cm").unwrap();
+        depth.put_values(&[4.5, 9.1, 16.6, 28.9], ..).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[-0.5, 0.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[0.0, 180.0], ..)
+            .unwrap();
+        let mut ph = file
+            .add_variable::<i8>("PHH2O", &["depth", "lat", "lon"])
+            .unwrap();
+        ph.put_attribute("units", "1/10").unwrap();
+        ph.put_attribute("scale_factor", 0.1_f64).unwrap();
+        ph.put_attribute("missing_value", -100_i8).unwrap();
+        ph.put_values(
+            &[
+                40, 60, 80, 60, 40, 60, 80, 60, 40, 60, 80, 60, 40, 60, 80, 60,
+            ],
+            (.., .., ..),
+        )
+        .unwrap();
+        file.close().unwrap();
+    }
+    let mesh = FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
+    let topology = SpatialTopology {
+        kind: SpatialInputKind::GridBased,
+        grid: SpatialGrid {
+            lon_w: vec![-45.0],
+            lon_e: vec![45.0],
+            lat_s: vec![-0.5],
+            lat_n: vec![0.5],
+        },
+        pixel: PixelAxes {
+            edge_south: -0.5,
+            edge_north: 0.5,
+            edge_west: -45.0,
+            edge_east: 45.0,
+            lon_w: vec![-45.0, 0.0],
+            lon_e: vec![0.0, 45.0],
+            lat_s: vec![-0.5],
+            lat_n: vec![0.5],
+        },
+        land_elements: mesh.land_elements(),
+        mesh,
+    };
+    let patches = FlatLandPatches {
+        element_ids: vec![1, 1],
+        pixel_start: vec![1, 2],
+        pixel_end: vec![1, 2],
+        set_type: vec![1, 1],
+        element_index: vec![1, 1],
+    };
+    let selection = build_methane_ph_patch_selection(&source, &topology, &patches).unwrap();
+    let samples = read_methane_ph_patch_selection(&source, &selection).unwrap();
+    assert_eq!(
+        samples.ph.len(),
+        4,
+        "one source cell must serve both patches"
+    );
+    let aggregated = selection
+        .layout()
+        .aggregate_methane_ph(
+            &samples.ph,
+            &samples.depth_weight,
+            selection.areas(),
+            |_| true,
+        )
+        .unwrap();
+    let expected = -((10_f64.powi(-4) + 10_f64.powi(-8)) * 0.5).log10();
+    assert!((aggregated[0] - expected).abs() < 1.0e-12);
+    assert!((aggregated[1] - expected).abs() < 1.0e-12);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn write_catchment_mesh(path: &std::path::Path) {
     let _guard = netcdf_lock().lock().unwrap();
     let mut file = netcdf::create(path).unwrap();

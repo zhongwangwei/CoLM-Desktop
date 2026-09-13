@@ -32,6 +32,22 @@ fn lake_depth_matches_fortrans_decimeter_scale_median_and_missing_marker() {
 }
 
 #[test]
+fn methane_ph_averages_hydrogen_activity_and_keeps_nonsoil_fallbacks() {
+    let layout = patches(vec![1, 17, 11], vec![0, 2, 3, 5], vec![0, 1, 2, 3, 4]);
+    let result = layout
+        .aggregate_methane_ph(
+            &[4.0, 6.0, 2.0, 4.0, f64::NAN],
+            &[1.0, 3.0, 1.0, 2.0, 0.0],
+            &[1.0, 1.0, 1.0, 2.0, 1.0],
+            |land_cover| !matches!(land_cover, 13 | 15 | 17),
+        )
+        .unwrap();
+    assert!((result[0] + ((10_f64.powi(-4) + 3.0 * 10_f64.powi(-6)) / 4.0).log10()).abs() < 1e-12);
+    assert_eq!(result[1], 6.2);
+    assert_eq!(result[2], 4.0);
+}
+
+#[test]
 fn lake_soil_carbon_masks_missing_values_and_keeps_non_lake_patches_zero() {
     let layout = patches(vec![17, 1], vec![0, 3, 5], vec![0, 1, 2, 3, 4]);
     let carbon = layout
