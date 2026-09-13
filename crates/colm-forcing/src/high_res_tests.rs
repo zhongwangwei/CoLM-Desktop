@@ -45,7 +45,7 @@ fn leaf_optics_reader_preserves_the_fortran_wavelength_tissue_pft_mapping() {
 fn water_optics_reader_requires_exactly_one_full_spectrum() {
     let root = temp_dir("water");
     let path = root.join("water_params.txt");
-    let content = (0..HIGH_RES_WAVELENGTHS)
+    let mut rows = (0..HIGH_RES_WAVELENGTHS)
         .map(|wavelength| {
             format!(
                 "{} {}",
@@ -53,12 +53,13 @@ fn water_optics_reader_requires_exactly_one_full_spectrum() {
                 1.3 + wavelength as f64 / 1_000.0
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&path, content).unwrap();
+        .collect::<Vec<_>>();
+    rows[0] = "1.0D-1 1.3D+0".into();
+    std::fs::write(&path, rows.join("\n")).unwrap();
 
     let water = read_high_resolution_water_optics(&path).unwrap();
     assert_eq!(water.absorption.len(), HIGH_RES_WAVELENGTHS);
+    assert_eq!(water.absorption[0], 0.1);
     assert_eq!(water.absorption[29], 0.29);
     assert_eq!(water.refractive_index[HIGH_RES_WAVELENGTHS - 1], 1.51);
     std::fs::remove_dir_all(root).unwrap();

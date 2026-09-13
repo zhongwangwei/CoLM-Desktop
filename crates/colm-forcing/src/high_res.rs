@@ -84,12 +84,8 @@ pub fn read_high_resolution_water_optics(
                 fields.len() == 2,
                 "high-resolution water-optics rows must contain exactly kw and nw"
             );
-            let absorption = fields[0]
-                .parse::<f64>()
-                .context("water absorption must be a real value")?;
-            let refractive_index = fields[1]
-                .parse::<f64>()
-                .context("water refractive index must be a real value")?;
+            let absorption = parse_fortran_real(fields[0], "water absorption")?;
+            let refractive_index = parse_fortran_real(fields[1], "water refractive index")?;
             ensure!(
                 absorption.is_finite() && refractive_index.is_finite(),
                 "high-resolution water optics must be finite"
@@ -109,6 +105,13 @@ pub fn read_high_resolution_water_optics(
             .map(|&(_, refractive_index)| refractive_index)
             .collect(),
     })
+}
+
+fn parse_fortran_real(value: &str, field: &str) -> Result<f64> {
+    value
+        .replace(['d', 'D'], "E")
+        .parse::<f64>()
+        .with_context(|| format!("{field} must be a real value"))
 }
 
 fn read_leaf_variable(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
