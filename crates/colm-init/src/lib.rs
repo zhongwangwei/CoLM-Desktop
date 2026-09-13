@@ -133,8 +133,9 @@ pub use colm_core::{GroundThermalStepInput, GroundThermalStepState};
 pub use colm_core::{RootUptakeInput, RootUptakeState};
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
-    write_pft_time_restart_block, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
-    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
+    write_pft_time_restart_block, PftBgcFields, PftConstantRestartInput, PftHyperspectralFields,
+    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
+    PFT_BGC_F64_VARIABLES,
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,

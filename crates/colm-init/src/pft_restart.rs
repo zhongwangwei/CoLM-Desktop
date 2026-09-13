@@ -14,6 +14,101 @@ use crate::RestartDate;
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
 const WAVELENGTHS: usize = 211;
+const BGC_ACTIVE_CROP_YEARS_AFTER: usize = 70;
+
+/// BGC PFT variables, in the exact order of `WRITE_PFTimeVariables` except
+/// for the `nyrs_crop_active_p` integer field.
+pub const PFT_BGC_F64_VARIABLES: &[&str] = &[
+    "leafc_p",
+    "leafc_storage_p",
+    "leafc_xfer_p",
+    "frootc_p",
+    "frootc_storage_p",
+    "frootc_xfer_p",
+    "livestemc_p",
+    "livestemc_storage_p",
+    "livestemc_xfer_p",
+    "deadstemc_p",
+    "deadstemc_storage_p",
+    "deadstemc_xfer_p",
+    "livecrootc_p",
+    "livecrootc_storage_p",
+    "livecrootc_xfer_p",
+    "deadcrootc_p",
+    "deadcrootc_storage_p",
+    "deadcrootc_xfer_p",
+    "grainc_p",
+    "grainc_storage_p",
+    "grainc_xfer_p",
+    "cropseedc_deficit_p",
+    "xsmrpool_p",
+    "gresp_storage_p",
+    "gresp_xfer_p",
+    "cpool_p",
+    "cropprod1c_p",
+    "leafn_p",
+    "leafn_storage_p",
+    "leafn_xfer_p",
+    "frootn_p",
+    "frootn_storage_p",
+    "frootn_xfer_p",
+    "livestemn_p",
+    "livestemn_storage_p",
+    "livestemn_xfer_p",
+    "deadstemn_p",
+    "deadstemn_storage_p",
+    "deadstemn_xfer_p",
+    "livecrootn_p",
+    "livecrootn_storage_p",
+    "livecrootn_xfer_p",
+    "deadcrootn_p",
+    "deadcrootn_storage_p",
+    "deadcrootn_xfer_p",
+    "grainn_p",
+    "grainn_storage_p",
+    "grainn_xfer_p",
+    "cropseedn_deficit_p",
+    "retransn_p",
+    "harvdate_p",
+    "tempsum_potential_gpp_p",
+    "tempmax_retransn_p",
+    "tempavg_tref_p",
+    "tempsum_npp_p",
+    "tempsum_litfall_p",
+    "annsum_potential_gpp_p",
+    "annmax_retransn_p",
+    "annavg_tref_p",
+    "annsum_npp_p",
+    "annsum_litfall_p",
+    "bglfr_p",
+    "bgtr_p",
+    "lgsf_p",
+    "gdd0_p",
+    "gdd8_p",
+    "gdd10_p",
+    "gdd020_p",
+    "gdd820_p",
+    "gdd1020_p",
+    "offset_flag_p",
+    "offset_counter_p",
+    "onset_flag_p",
+    "onset_counter_p",
+    "onset_gddflag_p",
+    "onset_gdd_p",
+    "onset_fdd_p",
+    "onset_swi_p",
+    "offset_fdd_p",
+    "offset_swi_p",
+    "dormant_flag_p",
+    "prev_leafc_to_litter_p",
+    "prev_frootc_to_litter_p",
+    "days_active_p",
+    "burndate_p",
+    "grain_flag_p",
+    "ctrunc_p",
+    "ntrunc_p",
+    "npool_p",
+];
 
 /// Values stored by `WRITE_PFTimeInvariants`.
 #[derive(Debug, Clone, Copy)]
@@ -80,12 +175,23 @@ pub struct PftOzoneFields<'a> {
     pub shaded_uptake: &'a [f64],
 }
 
+/// Carbon, nitrogen, and phenology state emitted when `DEF_USE_BGC` is enabled.
+///
+/// `values` follows [`PFT_BGC_F64_VARIABLES`]. Every slice contains one value
+/// per PFT; `nyrs_crop_active_p` is kept separate because it is integer data.
+#[derive(Debug, Clone, Copy)]
+pub struct PftBgcFields<'a> {
+    pub values: &'a [&'a [f64]],
+    pub active_crop_years: &'a [i32],
+}
+
 /// All PFT/PC fields for one time restart vector block.
 #[derive(Debug, Clone, Copy)]
 pub struct PftTimeRestartInput<'a> {
     pub fields: PftTimeFields<'a>,
     pub hyperspectral: Option<PftHyperspectralFields<'a>>,
     pub plant_hydraulics: Option<PftPlantHydraulicFields<'a>>,
+    pub bgc: Option<PftBgcFields<'a>>,
     pub ozone: Option<PftOzoneFields<'a>>,
     /// `DEF_USE_IRRIGATION` only.
     pub irrigation_method: Option<&'a [i32]>,
@@ -233,6 +339,15 @@ pub fn write_pft_time_restart_block(
             plant.shaded_stomatal_conductance,
         )?;
     }
+    if let Some(bgc) = input.bgc {
+        for (index, (&name, values)) in PFT_BGC_F64_VARIABLES.iter().zip(bgc.values).enumerate() {
+            if index == BGC_ACTIVE_CROP_YEARS_AFTER {
+                file.add_variable::<i32>("nyrs_crop_active_p", &["pft"])?
+                    .put_values(bgc.active_crop_years, ..)?;
+            }
+            put_f64_1d(&mut file, name, "pft", values)?;
+        }
+    }
     if let Some(ozone) = input.ozone {
         for (name, values) in [
             ("lai_old_p", ozone.lai_old),
@@ -327,6 +442,26 @@ fn validate_time_input(input: PftTimeRestartInput<'_>) -> Result<usize> {
                 ("gs0sha_p", plant.shaded_stomatal_conductance),
             ],
         )?;
+    }
+    if let Some(bgc) = input.bgc {
+        ensure!(
+            bgc.values.len() == PFT_BGC_F64_VARIABLES.len(),
+            "BGC PFT restart has {} fields; expected {}",
+            bgc.values.len(),
+            PFT_BGC_F64_VARIABLES.len()
+        );
+        for (&name, values) in PFT_BGC_F64_VARIABLES.iter().zip(bgc.values) {
+            ensure!(
+                values.len() == pfts,
+                "BGC PFT field {name} has {} entries; expected {pfts}",
+                values.len()
+            );
+        }
+        ensure!(
+            bgc.active_crop_years.len() == pfts,
+            "nyrs_crop_active_p has {} entries; expected {pfts}",
+            bgc.active_crop_years.len()
+        );
     }
     if let Some(ozone) = input.ozone {
         validate_pft_values(

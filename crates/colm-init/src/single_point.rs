@@ -1431,6 +1431,7 @@ fn write_single_point_pft_cold_time_restarts(
                 shaded_stomatal_conductance: &vec![10_000.0; pft.class.len()],
                 vegetation_nodes: 4,
             }),
+            bgc: None,
             ozone: run.ozone_stress.then_some(PftOzoneFields {
                 lai_old: &total_lai_p,
                 sunlit_uptake: &vec![0.0; pft.class.len()],
