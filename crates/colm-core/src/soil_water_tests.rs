@@ -141,3 +141,30 @@ fn groundwater_uses_the_aquifer_to_cancel_a_negative_runoff_correction() {
     assert_eq!(state.subsurface_runoff_mm_s, 0.0);
     assert_eq!(state.aquifer_water_mm, 98.0);
 }
+
+#[test]
+fn topmodel_baseflow_uses_the_water_table_after_recharge() {
+    let input = groundwater_input();
+    let topmodel = TopmodelSubsurfaceInput {
+        method: crate::TopmodelMethod::Exponential,
+        layer_thickness_m: input.layer_thickness_m,
+        interface_depth_m: input.interface_depth_m,
+        ice_fraction: &[0.0, 0.0, 0.0],
+        saturated_hydraulic_conductivity_mm_s: &[0.01, 0.01, 0.01],
+        decay_tuning: 1.0,
+        water_table_depth_m: input.water_table_depth_m,
+    };
+    let expected_water_table = input.water_table_depth_m
+        - input.recharge_mm_s * input.time_step_seconds
+            / 1000.0
+            / (0.4 * (1.0 - (1.0_f64 + 10.0).powf(-0.25)));
+    let expected = topmodel_subsurface_runoff(TopmodelSubsurfaceInput {
+        water_table_depth_m: expected_water_table,
+        ..topmodel
+    })
+    .unwrap();
+
+    let state = update_groundwater_topmodel(input, topmodel).unwrap();
+
+    assert_eq!(state.subsurface_runoff_mm_s, expected);
+}

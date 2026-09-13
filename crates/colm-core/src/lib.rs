@@ -54,6 +54,7 @@ pub mod urban_temperature;
 pub mod variably_saturated_flow;
 pub mod vegetation;
 pub mod vic;
+pub mod water_2014;
 
 /// CoLM's landdata/restart missing marker.
 pub const MISSING: f64 = -1.0e36;
@@ -158,7 +159,10 @@ pub use snow::{
     SnowWaterInput, SnowWaterOutcome,
 };
 pub use soil_surface_resistance::{soil_surface_resistance, SoilSurfaceResistanceInput};
-pub use soil_water::{solve_campbell_soil_water, CampbellSoilWaterInput, CampbellSoilWaterState};
+pub use soil_water::{
+    solve_campbell_soil_water, update_groundwater, update_groundwater_topmodel,
+    CampbellSoilWaterInput, CampbellSoilWaterState, GroundwaterInput, GroundwaterState,
+};
 
 pub use standard_lct_step::{
     standard_lct_energy_step, StandardLctEnergyInput, StandardLctEnergyOutput,
@@ -234,3 +238,7 @@ pub use vegetation::{
     EmpiricalVegetation, PftCanopyInput,
 };
 pub use vic::{vic_runoff, VicRunoffInput, VicRunoffState};
+pub use water_2014::{
+    water_2014_soil_step, Water2014Runoff, Water2014SoilFluxes, Water2014SoilInput,
+    Water2014SoilOutput, Water2014SoilState,
+};

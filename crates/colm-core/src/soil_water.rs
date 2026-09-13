@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Context, Result};
 
-use crate::{solve_tridiagonal, FREEZING_K};
+use crate::{solve_tridiagonal, topmodel_subsurface_runoff, TopmodelSubsurfaceInput, FREEZING_K};
 
 /// One `soilwater` call. All layer vectors use top-to-bottom order; water and
 /// flux lengths are in millimetres and seconds, matching the upstream routine.
@@ -334,6 +334,33 @@ pub struct GroundwaterState {
 /// Ports `MOD_SoilSnowHydrology.F90:groundwater` after TOPMODEL/CaMa has
 /// resolved the supplied subsurface runoff flux.
 pub fn update_groundwater(input: GroundwaterInput<'_>) -> Result<GroundwaterState> {
+    update_groundwater_with_resolver(input, |_| Ok(input.subsurface_runoff_mm_s))
+}
+
+/// Runs groundwater correction with TOPMODEL baseflow evaluated after recharge
+/// moves the water table, matching `MOD_SoilSnowHydrology:groundwater`.
+pub fn update_groundwater_topmodel(
+    input: GroundwaterInput<'_>,
+    topmodel: TopmodelSubsurfaceInput<'_>,
+) -> Result<GroundwaterState> {
+    ensure!(
+        topmodel.layer_thickness_m.len() == input.layer_thickness_m.len()
+            && topmodel.interface_depth_m == input.interface_depth_m
+            && topmodel.ice_fraction.len() == input.layer_thickness_m.len(),
+        "TOPMODEL groundwater inputs must use the same soil column"
+    );
+    update_groundwater_with_resolver(input, |water_table_depth_m| {
+        topmodel_subsurface_runoff(TopmodelSubsurfaceInput {
+            water_table_depth_m,
+            ..topmodel
+        })
+    })
+}
+
+fn update_groundwater_with_resolver(
+    input: GroundwaterInput<'_>,
+    resolve_subsurface_runoff: impl FnOnce(f64) -> Result<f64>,
+) -> Result<GroundwaterState> {
     let layers = validate_groundwater(input)?;
     let thickness_mm = input
         .layer_thickness_m
@@ -406,7 +433,11 @@ pub fn update_groundwater(input: GroundwaterInput<'_>) -> Result<GroundwaterStat
         }
     }
 
-    let drainage_mm_s = input.subsurface_runoff_mm_s;
+    let drainage_mm_s = resolve_subsurface_runoff(water_table_depth_m)?;
+    ensure!(
+        drainage_mm_s.is_finite(),
+        "groundwater subsurface runoff must be finite"
+    );
     if initial_water_table_layer == layers {
         aquifer_water_mm -= drainage_mm_s * input.time_step_seconds;
         water_table_depth_m = (water_table_depth_m
