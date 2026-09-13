@@ -52,7 +52,9 @@ enabled downscaling branch meet all of these conditions:
    `mkinidata-rs` beside `colm-cli`; `colm-cli run` selects Rust for both preprocessing
    stages by default while keeping the verified Fortran `colm` executable. Use
    `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL kernels remain guarded
-   at this integration boundary until their namelist source wiring is complete.
+   at this integration boundary until their namelist source wiring is complete. Spatial Rust
+   restarts now carry the six TOPMODEL fields when `DEF_Runoff_SCHEME=0` and the 9-aspect
+   curvature/slope/aspect vectors when `DEF_USE_Forcing_Downscaling_Simple=.true.`.
 
 ## Performance constraints
 

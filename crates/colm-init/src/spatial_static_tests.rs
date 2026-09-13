@@ -89,6 +89,64 @@ fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
 }
 
 #[test]
+fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
+    let root = temp_dir("topmodel-simple-terrain");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    for (name, value) in [
+        ("mean_twi_patches", 9.0),
+        ("fsatmax_patches", 0.4),
+        ("fsatdcf_patches", 0.3),
+        ("alp_twi_patches", 1.5),
+        ("chi_twi_patches", 1.0),
+        ("mu_twi_patches", 7.0),
+        ("cur_patches", 0.25),
+    ] {
+        write_f64(&landdata, "topography", name, name, 2005, "w180_s90", value);
+    }
+    write_layered_f64(
+        &landdata,
+        "slp_type_patches",
+        "slp_type_patches",
+        &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    );
+    write_layered_f64(
+        &landdata,
+        "asp_type_patches",
+        "asp_type_patches",
+        &[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0],
+    );
+    let restart = root.join("restart");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.use_topmodel = true;
+    config.use_simple_terrain = true;
+    let files = write_spatial_lct_constant_restart(config).unwrap();
+
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.0]);
+    assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.4]);
+    assert_eq!(values_f64(&block, "mu_twi").unwrap(), [7.0]);
+    assert_eq!(values_f64(&block, "cur_patches").unwrap(), [0.25]);
+    assert_eq!(
+        values_f64(&block, "slp_type_patches").unwrap(),
+        [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    );
+    assert_eq!(
+        values_f64(&block, "asp_type_patches").unwrap(),
+        [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let root = temp_dir("pft-common");
     let landdata = root.join("landdata");
@@ -108,10 +166,33 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
         "w180_s90",
         20.0,
     );
+    for (name, value) in [
+        ("mean_twi_patches", 9.0),
+        ("fsatmax_patches", 0.4),
+        ("fsatdcf_patches", 0.3),
+        ("alp_twi_patches", 1.5),
+        ("chi_twi_patches", 1.0),
+        ("mu_twi_patches", 7.0),
+        ("cur_patches", 0.25),
+    ] {
+        write_f64(&landdata, "topography", name, name, 2005, "w180_s90", value);
+    }
+    write_layered_f64(
+        &landdata,
+        "slp_type_patches",
+        "slp_type_patches",
+        &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    );
+    write_layered_f64(
+        &landdata,
+        "asp_type_patches",
+        "asp_type_patches",
+        &[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0],
+    );
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n/\n",
+        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n DEF_Runoff_SCHEME = 0\n DEF_USE_Forcing_Downscaling_Simple = .true.\n/\n",
     )
     .unwrap();
 
@@ -131,6 +212,12 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
 
     let common = netcdf::open(&files.common.block).unwrap();
     assert!(common.variable("alpha_vgm").is_none());
+    assert_eq!(values_f64(&common, "topoweti").unwrap(), [9.0]);
+    assert_eq!(values_f64(&common, "cur_patches").unwrap(), [0.25]);
+    assert_eq!(
+        values_f64(&common, "slp_type_patches").unwrap(),
+        [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    );
     let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_i32(&pft, "pftclass").unwrap(), [1]);
     assert_eq!(values_f64(&pft, "htop_p").unwrap(), [20.0]);
@@ -1127,6 +1214,19 @@ fn write_f64(
     file.add_variable::<f64>(variable, &["patch"])
         .unwrap()
         .put_values(&[value], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_layered_f64(landdata: &Path, stem: &str, variable: &str, values: &[f64]) {
+    let path = block_path(landdata, "topography", stem, 2005, "w180_s90");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", 1).unwrap();
+    file.add_dimension("type", values.len()).unwrap();
+    file.add_variable::<f64>(variable, &["patch", "type"])
+        .unwrap()
+        .put_values(values, (.., ..))
         .unwrap();
     file.close().unwrap();
 }

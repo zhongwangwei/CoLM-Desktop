@@ -110,6 +110,8 @@ struct SpatialNamelistRun {
     subgrid: SpatialSubgrid,
     urban: Option<SpatialUrbanRun>,
     use_bedrock: bool,
+    use_topmodel: bool,
+    use_simple_terrain: bool,
     greenwich: bool,
     dynamic_lake: bool,
     plant_hydraulics: bool,
@@ -173,6 +175,8 @@ fn write_spatial_urban_namelist_block(
         run.hydraulic_model,
     );
     static_config.use_bedrock = run.use_bedrock;
+    static_config.use_topmodel = run.use_topmodel;
+    static_config.use_simple_terrain = run.use_simple_terrain;
     let files = write_spatial_urban_constant_restarts(SpatialUrbanStaticConfig {
         common: static_config,
         runtime_dir: urban.runtime_dir.as_deref(),
@@ -241,6 +245,8 @@ fn write_spatial_lct_namelist_block(
         run.hydraulic_model,
     );
     static_config.use_bedrock = run.use_bedrock;
+    static_config.use_topmodel = run.use_topmodel;
+    static_config.use_simple_terrain = run.use_simple_terrain;
     let files = write_spatial_lct_constant_restart(static_config)?;
     let mut time = SpatialLctTimeConfig::new(
         &run.landdata,
@@ -315,6 +321,10 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
     ensure!(
         namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
         "spatial cold start requires DEF_LAI_MONTHLY = .true."
+    );
+    ensure!(
+        !namelist_bool(&document, "DEF_USE_Forcing_Downscaling", false)?,
+        "regular forcing downscaling is not yet migrated to Rust; use the explicit Fortran preprocessor fallback"
     );
     let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
     let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
@@ -409,6 +419,8 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         subgrid,
         urban,
         use_bedrock: namelist_bool(&document, "DEF_USE_BEDROCK", false)?,
+        use_topmodel: namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0,
+        use_simple_terrain: namelist_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
         dynamic_lake: namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?,
         plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
@@ -598,6 +610,8 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
         match value.as_str() {
             "--bedrock" => config.use_bedrock = true,
             "--hyperspectral" => config.use_hyperspectral = true,
+            "--topmodel" => config.use_topmodel = true,
+            "--simple-terrain" => config.use_simple_terrain = true,
             "--cold-time" => {
                 cold_time = Some(parse_restart_date(
                     &args.next().context("--cold-time needs YYYY-JJJ-SSSSS")?,
@@ -760,7 +774,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -852,6 +866,8 @@ mod tests {
  DEF_LAI_END_YEAR=2007
  DEF_USE_Campbell_SOIL_MODEL=.true.
  DEF_USE_BEDROCK=.true.
+ DEF_Runoff_SCHEME=0
+ DEF_USE_Forcing_Downscaling_Simple=.true.
  DEF_simulation_time%greenwich=.false.
  DEF_USE_Dynamic_Lake=.true.
  DEF_USE_PLANTHYDRAULICS=.false.
@@ -892,6 +908,8 @@ mod tests {
         assert_eq!(run.hydraulic_model, HydraulicModel::Campbell);
         assert_eq!(run.subgrid, SpatialSubgrid::PftOrPc);
         assert!(run.use_bedrock);
+        assert!(run.use_topmodel);
+        assert!(run.use_simple_terrain);
         assert!(!run.greenwich);
         assert!(run.dynamic_lake);
         assert!(!run.plant_hydraulics);

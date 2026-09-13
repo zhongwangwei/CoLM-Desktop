@@ -15,7 +15,7 @@ use crate::{
     derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
     write_constant_restart, CanopyState, ConstantRestartFiles, ConstantRestartInput,
     HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields, RestartTuning,
-    SoilAlbedo, SoilLayerInput,
+    SimpleTerrainFields, SoilAlbedo, SoilLayerInput, TopmodelFields,
 };
 
 /// Arguments for one already-addressed LCT landpatch block.
@@ -34,6 +34,10 @@ pub struct SpatialLctStaticConfig<'a> {
     pub use_bedrock: bool,
     /// Write 211-band `soil_alb`, matching the `HYPERSPECTRAL` build.
     pub use_hyperspectral: bool,
+    /// Write the TOPMODEL vectors required by `DEF_Runoff_SCHEME = 0`.
+    pub use_topmodel: bool,
+    /// Write the nine-aspect vectors required by simple forcing downscaling.
+    pub use_simple_terrain: bool,
 }
 
 impl<'a> SpatialLctStaticConfig<'a> {
@@ -57,8 +61,25 @@ impl<'a> SpatialLctStaticConfig<'a> {
             tuning: RestartTuning::default(),
             use_bedrock: false,
             use_hyperspectral: false,
+            use_topmodel: false,
+            use_simple_terrain: false,
         }
     }
+}
+
+struct TopmodelSurfaceFields {
+    topographic_index: Vec<f64>,
+    saturated_fraction_max: Vec<f64>,
+    saturated_fraction_decay: Vec<f64>,
+    alpha_twi: Vec<f64>,
+    chi_twi: Vec<f64>,
+    mu_twi: Vec<f64>,
+}
+
+struct SimpleTerrainSurfaceFields {
+    curvature: Vec<f64>,
+    slope_type: Vec<f64>,
+    aspect_type: Vec<f64>,
 }
 
 /// Writes the common LCT constant restart for one spatial block written by
@@ -234,6 +255,14 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             )
         })
         .transpose()?;
+    let topmodel = config
+        .use_topmodel
+        .then(|| read_topmodel(config, patch_count))
+        .transpose()?;
+    let simple_terrain = config
+        .use_simple_terrain
+        .then(|| read_simple_terrain(config, patch_count, dimensions.aspect_types))
+        .transpose()?;
 
     write_constant_restart(
         config.restart_dir,
@@ -266,12 +295,80 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
             bedrock: bedrock.as_ref(),
-            topmodel: None,
+            topmodel: topmodel.as_ref().map(|fields| TopmodelFields {
+                topographic_index: &fields.topographic_index,
+                saturated_fraction_max: &fields.saturated_fraction_max,
+                saturated_fraction_decay: &fields.saturated_fraction_decay,
+                alpha_twi: &fields.alpha_twi,
+                chi_twi: &fields.chi_twi,
+                mu_twi: &fields.mu_twi,
+            }),
             terrain: None,
-            simple_terrain: None,
+            simple_terrain: simple_terrain.as_ref().map(|fields| SimpleTerrainFields {
+                curvature: &fields.curvature,
+                slope_type: &fields.slope_type,
+                aspect_type: &fields.aspect_type,
+            }),
             hyperspectral_albedo: hyperspectral_albedo.as_deref(),
         },
     )
+}
+
+fn read_topmodel(
+    config: SpatialLctStaticConfig<'_>,
+    patches: usize,
+) -> Result<TopmodelSurfaceFields> {
+    let read = |stem| {
+        read_f64(
+            config.landdata,
+            "topography",
+            stem,
+            stem,
+            config.land_cover_year,
+            config.block_label,
+            patches,
+        )
+    };
+    Ok(TopmodelSurfaceFields {
+        topographic_index: read("mean_twi_patches")?,
+        saturated_fraction_max: read("fsatmax_patches")?,
+        saturated_fraction_decay: read("fsatdcf_patches")?,
+        alpha_twi: read("alp_twi_patches")?,
+        chi_twi: read("chi_twi_patches")?,
+        mu_twi: read("mu_twi_patches")?,
+    })
+}
+
+fn read_simple_terrain(
+    config: SpatialLctStaticConfig<'_>,
+    patches: usize,
+    aspects: usize,
+) -> Result<SimpleTerrainSurfaceFields> {
+    Ok(SimpleTerrainSurfaceFields {
+        curvature: read_f64(
+            config.landdata,
+            "topography",
+            "cur_patches",
+            "cur_patches",
+            config.land_cover_year,
+            config.block_label,
+            patches,
+        )?,
+        slope_type: read_layered_f64(
+            config,
+            "slp_type_patches",
+            "slp_type_patches",
+            patches,
+            aspects,
+        )?,
+        aspect_type: read_layered_f64(
+            config,
+            "asp_type_patches",
+            "asp_type_patches",
+            patches,
+            aspects,
+        )?,
+    })
 }
 
 pub(crate) fn read_hyperspectral_albedo(
@@ -500,6 +597,31 @@ pub(crate) fn read_f64(
         values.len()
     );
     Ok(values)
+}
+
+fn read_layered_f64(
+    config: SpatialLctStaticConfig<'_>,
+    stem: &str,
+    variable: &str,
+    patches: usize,
+    layers: usize,
+) -> Result<Vec<f64>> {
+    let values = read_f64(
+        config.landdata,
+        "topography",
+        stem,
+        variable,
+        config.land_cover_year,
+        config.block_label,
+        patches * layers,
+    )?;
+    let mut result = vec![0.0; values.len()];
+    for patch in 0..patches {
+        for layer in 0..layers {
+            result[layer * patches + patch] = values[patch * layers + layer];
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) fn block_path(

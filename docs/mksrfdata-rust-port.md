@@ -42,7 +42,10 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    this integration boundary until their namelist source wiring is complete.
    `DEF_Runoff_SCHEME=0` selects the standard `TWI.nc` source, aggregates all 25 layers per
    patch, applies the upstream element-level fallback for sparse patches, and writes the six
-   topographic-wetness vectors consumed by the Fortran runtime.
+   topographic-wetness vectors consumed by restart initialization.
+   `DEF_USE_Forcing_Downscaling_Simple=.true.` reads the two
+   `DEF_DS_HiresTopographyDataDir` MERIT-Hydro files, aggregates curvature plus the nine
+   slope/aspect directions, and writes the three upstream-compatible patch vectors.
 
 `USE_srfdata_from_larger_region=.true.` now follows the upstream existing-surface
 path in Rust: it reads `DEF_dir_existing_srfdata`, retains whole overlapping mesh

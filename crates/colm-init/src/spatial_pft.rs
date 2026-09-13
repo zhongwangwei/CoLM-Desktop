@@ -231,6 +231,10 @@ pub fn write_spatial_pft_constant_restarts(
     use_hyperspectral: bool,
 ) -> Result<SpatialPftConstantRestartFiles> {
     let document = read_pft_document(config.namelist)?;
+    ensure!(
+        !optional_bool_or(&document, "DEF_USE_Forcing_Downscaling", false)?,
+        "regular forcing downscaling is not yet migrated to Rust; use the explicit Fortran preprocessor fallback"
+    );
     let hydraulic_model = pft_hydraulic_model(config.namelist)?;
     let mut common = SpatialLctStaticConfig::new(
         config.landdata,
@@ -243,6 +247,9 @@ pub fn write_spatial_pft_constant_restarts(
     );
     common.use_bedrock = use_bedrock;
     common.use_hyperspectral = use_hyperspectral;
+    common.use_topmodel = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3) == 0;
+    common.use_simple_terrain =
+        optional_bool_or(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     let common = write_spatial_lct_constant_restart(common)?;
     let pft = write_spatial_pft_constant_restart(config)?;
     let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?
