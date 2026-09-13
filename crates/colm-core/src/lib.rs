@@ -173,7 +173,8 @@ pub use urban_lucy::{urban_lucy_flux, UrbanLucyFluxInput, UrbanLucyFluxes};
 pub use urban_net_solar::{urban_net_solar, UrbanNetSolarFluxes, UrbanNetSolarInput};
 pub use urban_radiation::{cold_start_urban_radiation, UrbanRadiationInput, UrbanRadiationState};
 pub use urban_temperature::{
-    urban_wall_temperature, UrbanWallTemperatureInput, UrbanWallTemperatureState,
+    urban_roof_temperature, urban_wall_temperature, UrbanRoofTemperatureInput,
+    UrbanRoofTemperatureState, UrbanWallTemperatureInput, UrbanWallTemperatureState,
 };
 pub use variably_saturated_flow::{
     apply_variable_saturated_explicit_step, exchange_soil_water_with_aquifer,
