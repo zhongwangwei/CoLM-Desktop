@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     bsm_soil_moisture, cold_start_ground_albedo, derive_spatial_soil_parameters,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
-    high_resolution_pft_cold_start_state, pft_high_resolution_radiation,
+    high_resolution_pft_cold_start_state, pft_high_resolution_radiation, prospect_leaf_optics,
     select_high_resolution_radiation, CalendarTime, HighResolutionLeafOptics, SoilField,
     SoilReflectance, HIGH_RES_WAVELENGTHS,
 };
@@ -84,7 +84,7 @@ pub struct SpatialPftTimeConfig<'a> {
     pub tuning: RestartTuning,
     /// Emit and derive CoLM's 211-band PFT cold-start state.
     pub use_hyperspectral: bool,
-    /// `colm_PFT_params.nc`; required when `DEF_HighResVeg = .true.`.
+    /// `colm_PFT_params.nc`; required when `DEF_HighResVeg` or `DEF_PROSPECT` is enabled.
     pub high_resolution_leaf_optics: Option<&'a Path>,
     /// `water_params.txt`; required when `DEF_HighResSoil = .true.`.
     pub high_resolution_water_optics: Option<&'a Path>,
@@ -308,16 +308,14 @@ pub fn write_spatial_pft_cold_time_restarts(
     // PC keeps spectral ground state and its spectral PFT arrays at their initialized
     // zero/missing values, then replaces the broadband state with ThreeDCanopy.
     let high_resolution_canopy = config.use_hyperspectral && subgrid == SpatialPftSubgrid::Pft;
-    let high_resolution_vegetation =
-        high_resolution_canopy && optional_bool_or(&document, "DEF_HighResVeg", true)?;
+    let use_prospect =
+        high_resolution_canopy && optional_bool_or(&document, "DEF_PROSPECT", false)?;
+    // Upstream leaf_property_init reads colm_PFT_params.nc for either branch:
+    // PROSPECT replaces green tissue but retains the file's dead-stem spectrum.
+    let high_resolution_vegetation = high_resolution_canopy
+        && (optional_bool_or(&document, "DEF_HighResVeg", true)? || use_prospect);
     let high_resolution_soil =
         config.use_hyperspectral && optional_bool_or(&document, "DEF_HighResSoil", true)?;
-    if high_resolution_canopy {
-        ensure!(
-            !optional_bool_or(&document, "DEF_PROSPECT", false)?,
-            "DEF_PROSPECT is not yet implemented by the shared Rust high-resolution leaf-optics kernel"
-        );
-    }
     if config.use_hyperspectral {
         if let Some(Value::Str(path)) = document.get("DEF_HighResUrban_albedo") {
             ensure!(
@@ -345,9 +343,9 @@ pub fn write_spatial_pft_cold_time_restarts(
             let leaf = high_resolution_vegetation
                 .then(|| {
                     read_high_resolution_leaf_optics(
-                        config
-                            .high_resolution_leaf_optics
-                            .context("DEF_HighResVeg requires --highres-leaf-optics")?,
+                        config.high_resolution_leaf_optics.context(
+                            "DEF_HighResVeg or DEF_PROSPECT requires --highres-leaf-optics",
+                        )?,
                     )
                 })
                 .transpose()?;
@@ -677,7 +675,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 let fallback = expand_broadband_leaf_optics(broadband_optics);
                 let class = usize::try_from(pfts.class[pft])
                     .context("high-resolution PFT class must be nonnegative")?;
-                let optics = if high_resolution_vegetation {
+                let source_optics = if high_resolution_vegetation {
                     high_resolution_sources
                         .as_ref()
                         .expect("high-resolution sources are loaded")
@@ -691,6 +689,25 @@ pub fn write_spatial_pft_cold_time_restarts(
                         transmittance: &fallback.1,
                     }
                 };
+                // CoLMMAIN sets ssw from the upper liquid layer, capped at saturation,
+                // before MOD_Albedo_HiRes calls update_params_PROSPECT.
+                let prospect = use_prospect
+                    .then(|| {
+                        prospect_leaf_optics(
+                            class,
+                            (1.0e-3 * common_state.top_liquid_kg_m2[patch] / top_soil_thickness_m)
+                                .min(1.0),
+                            source_optics,
+                        )
+                    })
+                    .transpose()?;
+                let optics =
+                    prospect
+                        .as_ref()
+                        .map_or(source_optics, |optics| HighResolutionLeafOptics {
+                            reflectance: &optics.reflectance,
+                            transmittance: &optics.transmittance,
+                        });
                 let radiation = (total_lai[pft] + total_sai[pft] > 1.0e-6)
                     .then(|| {
                         pft_high_resolution_radiation(

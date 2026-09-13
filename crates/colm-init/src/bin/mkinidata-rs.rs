@@ -42,6 +42,7 @@ fn main() -> Result<()> {
 fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut land_cover = None;
     let mut block = None;
+    let mut high_resolution = SpatialHighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--land-cover" => {
@@ -50,12 +51,36 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
                 )?);
             }
             "--block" => block = Some(args.next().context("--block needs a CoLM block label")?),
+            "--hyperspectral" => high_resolution.enabled = true,
+            "--highres-leaf-optics" => {
+                high_resolution.leaf_optics =
+                    Some(required(&mut args, "high-resolution leaf optics")?)
+            }
+            "--highres-water-optics" => {
+                high_resolution.water_optics =
+                    Some(required(&mut args, "high-resolution water optics")?)
+            }
+            "--highres-radiation" => {
+                high_resolution.radiation =
+                    Some(required(&mut args, "high-resolution radiation table")?)
+            }
             value => bail!("unknown mkinidata-rs option {value}"),
         }
     }
+    ensure!(
+        high_resolution.enabled
+            || (high_resolution.leaf_optics.is_none()
+                && high_resolution.water_optics.is_none()
+                && high_resolution.radiation.is_none()),
+        "--highres-leaf-optics, --highres-water-optics, and --highres-radiation require --hyperspectral"
+    );
     if is_spatial_case(&namelist)? {
-        return run_spatial_namelist(&namelist, land_cover, block.as_deref());
+        return run_spatial_namelist(&namelist, land_cover, block.as_deref(), &high_resolution);
     }
+    ensure!(
+        !high_resolution.enabled,
+        "--hyperspectral is currently supported only by spatial PFT cold starts"
+    );
     let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
     let files = write_single_point_constant_restarts(&run)?;
     let time = write_single_point_cold_time_restarts(&run)?;
@@ -82,6 +107,14 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         println!("wrote {}", path.display());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct SpatialHighResolutionOptions {
+    enabled: bool,
+    leaf_optics: Option<PathBuf>,
+    water_optics: Option<PathBuf>,
+    radiation: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,8 +160,13 @@ fn run_spatial_namelist(
     namelist: &Path,
     land_cover: Option<LandCoverScheme>,
     block_override: Option<&str>,
+    high_resolution: &SpatialHighResolutionOptions,
 ) -> Result<()> {
     let run = spatial_namelist_run(namelist)?;
+    ensure!(
+        !high_resolution.enabled || run.subgrid == SpatialSubgrid::PftOrPc,
+        "--hyperspectral is currently supported only by spatial PFT/PC cold starts"
+    );
     match run.subgrid {
         SpatialSubgrid::Lct => {
             let land_cover = land_cover.context(
@@ -140,7 +178,7 @@ fn run_spatial_namelist(
         }
         SpatialSubgrid::PftOrPc => {
             for block in spatial_blocks(&run, block_override)? {
-                write_spatial_pft_namelist_block(namelist, &run, &block)?;
+                write_spatial_pft_namelist_block(namelist, &run, &block, high_resolution)?;
             }
         }
         SpatialSubgrid::Urban => {
@@ -281,6 +319,7 @@ fn write_spatial_pft_namelist_block(
     namelist: &Path,
     run: &SpatialNamelistRun,
     block: &str,
+    high_resolution: &SpatialHighResolutionOptions,
 ) -> Result<()> {
     let static_config = SpatialPftStaticConfig::new(
         namelist,
@@ -290,7 +329,11 @@ fn write_spatial_pft_namelist_block(
         run.land_cover_year,
         block,
     );
-    let files = write_spatial_pft_constant_restarts(static_config, run.use_bedrock, false)?;
+    let files = write_spatial_pft_constant_restarts(
+        static_config,
+        run.use_bedrock,
+        high_resolution.enabled,
+    )?;
     let mut time = SpatialPftTimeConfig::new(static_config, run.date);
     time.lai_year = run.lai_year;
     time.greenwich = run.greenwich;
@@ -300,6 +343,10 @@ fn write_spatial_pft_namelist_block(
     time.variably_saturated_flow = run.variably_saturated_flow;
     time.vegetation_snow = run.vegetation_snow;
     time.snow_cover_exponent = run.snow_cover_exponent;
+    time.use_hyperspectral = high_resolution.enabled;
+    time.high_resolution_leaf_optics = high_resolution.leaf_optics.as_deref();
+    time.high_resolution_water_optics = high_resolution.water_optics.as_deref();
+    time.high_resolution_radiation = high_resolution.radiation.as_deref();
     let time = write_spatial_pft_cold_time_restarts(time)?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
@@ -781,7 +828,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -981,7 +1028,20 @@ mod tests {
         )
         .unwrap();
 
-        let error = run_namelist(namelist, std::iter::empty::<String>()).unwrap_err();
+        let error = run_namelist(
+            namelist,
+            [
+                "--hyperspectral".to_owned(),
+                "--highres-leaf-optics".to_owned(),
+                "leaf.nc".to_owned(),
+                "--highres-water-optics".to_owned(),
+                "water.txt".to_owned(),
+                "--highres-radiation".to_owned(),
+                "radiation.nc".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()
@@ -1014,7 +1074,13 @@ mod tests {
         )
         .unwrap();
 
-        let error = run_spatial_namelist(&namelist, Some(LandCoverScheme::Igbp), None).unwrap_err();
+        let error = run_spatial_namelist(
+            &namelist,
+            Some(LandCoverScheme::Igbp),
+            None,
+            &SpatialHighResolutionOptions::default(),
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()
@@ -1046,7 +1112,13 @@ mod tests {
         )
         .unwrap();
 
-        let error = run_spatial_namelist(&namelist, Some(LandCoverScheme::Usgs), None).unwrap_err();
+        let error = run_spatial_namelist(
+            &namelist,
+            Some(LandCoverScheme::Usgs),
+            None,
+            &SpatialHighResolutionOptions::default(),
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()

@@ -400,7 +400,11 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
     write_high_resolution_soil_albedo(&landdata, 2005, "w180_s90");
     let namelist = root.join("case.nml");
-    std::fs::write(&namelist, "&nl_colm\n DEF_USE_PFT = .true.\n/\n").unwrap();
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_USE_PFT = .true.\n DEF_HighResVeg = .false.\n DEF_PROSPECT = .true.\n/\n",
+    )
+    .unwrap();
     let radiation = root.join("swnb_480bnd_fsds.nc");
     write_high_resolution_radiation(&radiation);
     let leaf = root.join("colm_PFT_params.nc");
@@ -431,7 +435,12 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
         values_f64(&common, "reflectance_out").unwrap().len(),
         211 * 16
     );
-    assert!(values_f64(&common, "reflectance_out").unwrap()[211].is_finite());
+    let reflectance = values_f64(&common, "reflectance_out").unwrap();
+    let transmittance = values_f64(&common, "transmittance_out").unwrap();
+    // Class 1 is the sole PFT in this fixture.  PROSPECT changes its green tissue
+    // while retaining the source's dead stem (the source value is 0.1 / 0.05).
+    assert!(reflectance[1].is_finite() && (reflectance[1] - 0.1).abs() > 1.0e-6);
+    assert!(transmittance[1].is_finite() && (transmittance[1] - 0.05).abs() > 1.0e-6);
     let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_f64(&pft, "ssun_hires_p").unwrap().len(), 211 * 2);
     assert_eq!(values_f64(&pft, "ssha_hires_p").unwrap().len(), 211 * 2);

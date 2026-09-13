@@ -31,6 +31,7 @@ pub mod pc_radiation;
 pub mod phase_change;
 pub mod photosynthesis;
 pub mod plant_hydraulics;
+pub mod prospect;
 pub mod radiation;
 pub mod root_uptake;
 pub mod runoff;
@@ -174,6 +175,7 @@ pub use plant_hydraulics::{
     plant_hydraulic_stress, vegetation_water_potential, vulnerability, vulnerability_derivative,
     PlantHydraulicInput, PlantHydraulicOutput, PlantHydraulicParameters, PlantHydraulicState,
 };
+pub use prospect::{prospect_leaf_optics, ProspectLeafOptics};
 pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
     cold_start_ground_albedo, cold_start_pft_broadband_radiation_with_snow,
