@@ -10,17 +10,20 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
 
-use crate::single_point::{aggregate_pft_radiation, pft_canopy, pft_leaf_optics};
+use crate::single_point::{
+    aggregate_pft_radiation, pc_canopy_layer, pc_uses_three_dimensional_canopy, pft_canopy,
+    pft_leaf_optics,
+};
 use crate::spatial_static::{
     block_path, read_f64 as read_lct_f64, read_patches, spatial_patch_type, values_f64, values_i32,
     write_spatial_lct_constant_restart, SpatialLctStaticConfig,
 };
 use crate::{
-    cold_start_pft_broadband_radiation_with_snow, write_pft_constant_restart,
-    write_pft_time_restart, ColdStartRadiation, ConstantRestartFiles, HydraulicModel,
-    LandCoverScheme, PftConstantRestartInput, PftOzoneFields, PftPlantHydraulicFields,
-    PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning, SpatialLctTimeConfig,
-    TimeRestartFile, MISSING,
+    cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
+    write_pft_constant_restart, write_pft_time_restart, ColdStartRadiation, ConstantRestartFiles,
+    HydraulicModel, LandCoverScheme, PcPftInput, PftConstantRestartInput, PftOzoneFields,
+    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning,
+    SpatialLctTimeConfig, TimeRestartFile, MISSING,
 };
 
 /// Arguments for one already-addressed spatial `landpft` block.
@@ -44,8 +47,8 @@ pub struct SpatialPftConstantRestartFiles {
 
 /// Arguments for the no-observation PFT cold start of one spatial block.
 ///
-/// This remains a PFT-only adapter.  PC, BGC, and CROP need separate runtime
-/// state families and are rejected instead of being initialized as PFT.
+/// PFT and PC share this adapter.  BGC and CROP need separate runtime state
+/// families and are rejected instead of being initialized as PFT.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialPftTimeConfig<'a> {
     pub static_config: SpatialPftStaticConfig<'a>,
@@ -199,6 +202,7 @@ pub fn write_spatial_pft_cold_time_restarts(
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
     reject_unsupported_time_features(&document)?;
+    let subgrid = spatial_pft_subgrid(&document)?;
     let hydraulic_model = pft_hydraulic_model_from_document(&document)?;
     let mut common_config = SpatialLctTimeConfig::new(
         config.static_config.landdata,
@@ -290,12 +294,10 @@ pub fn write_spatial_pft_cold_time_restarts(
     let mut sunlit = vec![0.0; 4 * pft_count];
     let mut shaded = sunlit.clone();
     let mut thermal_gap = vec![MISSING; pft_count];
-    let shade = vec![MISSING; pft_count];
+    let mut shade = vec![MISSING; pft_count];
     let mut direct_extinction = vec![1.0; pft_count];
     let mut diffuse_extinction = vec![0.718; pft_count];
-    let mut common_radiation = vec![None; patches.class.len()];
-    let mut common_roughness = vec![None; patches.class.len()];
-
+    let mut state_by_pft = vec![None; pft_count];
     for patch in 0..patches.class.len() {
         let indices = &pft_to_patch[patch];
         if patch_kind[patch] != 0 {
@@ -317,7 +319,6 @@ pub fn write_spatial_pft_cold_time_restarts(
             fraction_sum.is_finite() && (fraction_sum - 1.0).abs() <= 1.0e-8,
             "PFT fractions for natural spatial patch {patch} must sum to one, got {fraction_sum}"
         );
-        let mut states = Vec::with_capacity(indices.len());
         for &pft in indices {
             let state = cold_start_pft_broadband_radiation_with_snow(
                 patch_kind[patch],
@@ -346,12 +347,81 @@ pub fn write_spatial_pft_cold_time_restarts(
             diffuse_extinction[pft] = state.diffuse_extinction;
             copy_pft_radiation(&mut sunlit, pft_count, pft, state.sunlit_absorption);
             copy_pft_radiation(&mut shaded, pft_count, pft, state.shaded_absorption);
-            states.push(state);
+            state_by_pft[pft] = Some(state);
+        }
+    }
+    if subgrid == SpatialPftSubgrid::Pc {
+        let pc_crop_split = optional_bool_or(&document, "DEF_PC_CROP_SPLIT", true)?;
+        for patch in 0..patches.class.len() {
+            let indices = pft_to_patch[patch]
+                .iter()
+                .copied()
+                .filter(|&pft| pc_uses_three_dimensional_canopy(pfts.class[pft], pc_crop_split))
+                .collect::<Vec<_>>();
+            if indices.is_empty() {
+                continue;
+            }
+            let inputs = indices
+                .iter()
+                .map(|&pft| {
+                    Ok(PcPftInput {
+                        canopy_layer: pc_canopy_layer(pfts.class[pft])?,
+                        fraction: pfts.fraction[pft],
+                        canopy_top_m: canopy.top_m[pft],
+                        canopy_bottom_m: canopy.bottom_m[pft],
+                        optics: pft_leaf_optics(&document, pfts.class[pft], hydraulic_model)?,
+                        lai: total_lai[pft],
+                        sai: total_sai[pft],
+                        wet_snow_fraction: 0.0,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let pc = cold_start_pc_broadband_radiation_with_snow(
+                patch_kind[patch],
+                crate::SoilReflectance {
+                    saturated_visible: albedo[0][patch],
+                    dry_visible: albedo[1][patch],
+                    saturated_near_infrared: albedo[2][patch],
+                    dry_near_infrared: albedo[3][patch],
+                },
+                common_state.top_liquid_kg_m2[patch],
+                top_soil_thickness_m,
+                &inputs,
+                common_state.cosine_zenith[patch].max(0.001),
+                0.0,
+                0.0,
+                common_state.ground_temperature_k[patch],
+            )?;
+            for (pc_index, &pft) in indices.iter().enumerate() {
+                let state = &pc.pft[pc_index];
+                copy_pft_radiation(&mut sunlit, pft_count, pft, state.sunlit_absorption);
+                copy_pft_radiation(&mut shaded, pft_count, pft, state.shaded_absorption);
+                thermal_gap[pft] = state.thermal_gap_fraction;
+                shade[pft] = state.shade_fraction;
+                direct_extinction[pft] = state.direct_extinction;
+                diffuse_extinction[pft] = state.diffuse_extinction;
+                state_by_pft[pft] = Some(pc.common.clone());
+            }
+        }
+    }
+    let mut common_radiation = vec![None; patches.class.len()];
+    let mut common_roughness = vec![None; patches.class.len()];
+    for (patch, indices) in pft_to_patch.iter().enumerate() {
+        if patch_kind[patch] != 0 {
+            continue;
         }
         let fractions = indices
             .iter()
             .map(|&index| pfts.fraction[index])
             .collect::<Vec<_>>();
+        let states = indices
+            .iter()
+            .map(|&pft| {
+                state_by_pft[pft]
+                    .clone()
+                    .with_context(|| format!("spatial PFT {pft} has no cold-start radiation"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let leaf_stem_area = indices
             .iter()
             .map(|&index| (total_lai[index] + total_sai[index]) * pfts.fraction[index])
@@ -443,6 +513,12 @@ struct CommonColdState {
     ground_temperature_k: Vec<f64>,
     top_liquid_kg_m2: Vec<f64>,
     cosine_zenith: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpatialPftSubgrid {
+    Pft,
+    Pc,
 }
 
 fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVectors> {
@@ -711,10 +787,6 @@ fn read_pft_document(namelist: &Path) -> Result<colm_namelist::Document> {
 fn reject_unsupported_time_features(document: &colm_namelist::Document) -> Result<()> {
     for (field, message) in [
         (
-            "DEF_USE_PC",
-            "spatial PC cold starts are not implemented by the Rust initializer",
-        ),
-        (
             "DEF_USE_BGC",
             "spatial BGC cold starts are not implemented by the Rust initializer",
         ),
@@ -726,6 +798,20 @@ fn reject_unsupported_time_features(document: &colm_namelist::Document) -> Resul
         ensure!(!optional_bool_or(document, field, false)?, "{message}");
     }
     Ok(())
+}
+
+fn spatial_pft_subgrid(document: &colm_namelist::Document) -> Result<SpatialPftSubgrid> {
+    let pc = optional_bool_or(document, "DEF_USE_PC", false)?;
+    let pft = optional_bool_or(document, "DEF_USE_PFT", !pc)?;
+    ensure!(
+        pft != pc,
+        "exactly one of DEF_USE_PFT and DEF_USE_PC must be true for a spatial PFT restart"
+    );
+    Ok(if pc {
+        SpatialPftSubgrid::Pc
+    } else {
+        SpatialPftSubgrid::Pft
+    })
 }
 
 fn optional_bool_or(

@@ -1815,7 +1815,7 @@ fn pc_pft_radiation_values(
 
 /// `canlay_p` from `MOD_Const_PFT.F90`: trees use layer 2; shrubs, grasses,
 /// and every CFT use layer 1.  Class zero is the non-vegetated sentinel.
-fn pc_canopy_layer(class: i32) -> Result<usize> {
+pub(crate) fn pc_canopy_layer(class: i32) -> Result<usize> {
     match class {
         1..=8 => Ok(2),
         9..=78 => Ok(1),
@@ -1825,7 +1825,7 @@ fn pc_canopy_layer(class: i32) -> Result<usize> {
 
 /// `MOD_3DCanopyRadiation.F90` stops its PC slice before CFT class 15 when
 /// `DEF_PC_CROP_SPLIT` is enabled; `twostream_wrap` handles that suffix.
-fn pc_uses_three_dimensional_canopy(class: i32, pc_crop_split: bool) -> bool {
+pub(crate) fn pc_uses_three_dimensional_canopy(class: i32, pc_crop_split: bool) -> bool {
     class > 0 && (!pc_crop_split || class < 15)
 }
 

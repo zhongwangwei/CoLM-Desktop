@@ -186,6 +186,33 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     assert_eq!(values_f64(&pft, "tsai_p").unwrap(), [0.4]);
     assert_eq!(values_f64(&pft, "z0m_p").unwrap(), [2.0]);
     assert!(pft.variable("vegwp_p").is_none());
+
+    let pc_restart = root.join("restart-pc");
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_USE_PFT = .false.\n DEF_USE_PC = .true.\n DEF_USE_Campbell_SOIL_MODEL = .false.\n/\n",
+    )
+    .unwrap();
+    let mut pc_config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist,
+            &landdata,
+            &pc_restart,
+            "test",
+            2005,
+            "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    pc_config.plant_hydraulics = false;
+    let pc_files = crate::write_spatial_pft_cold_time_restarts(pc_config).unwrap();
+    let pc = netcdf::open(pc_files.pft).unwrap();
+    let shade = values_f64(&pc, "fshade_p").unwrap()[0];
+    assert!(shade.is_finite() && shade != crate::MISSING);
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -38,7 +38,7 @@ enabled downscaling branch meet all of these conditions:
    block-bounded, no-observation LCT time restart.  `mkinidata-rs spatial-pft <case.nml> ...
    --cold-time YYYY-JJJ-SSSSS` now writes both the common and PFT blocks from the same monthly
    patch/PFT LAI/SAI vectors, reusing the shared LCT cold-soil state and replacing natural-patch
-   optics with PFT-weighted values.  PC, spatial BGC/CROP, urban, observed spatial state, and
+   optics with PFT- or PC-weighted values.  Spatial BGC/CROP, urban, observed spatial state, and
    distributed case discovery still require their parity gates before GUI/CLI can select Rust as
    the default.
 
