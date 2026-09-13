@@ -340,8 +340,8 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
             "spatial urban cold starts are incompatible with DEF_USE_CROP"
         );
         ensure!(
-            namelist_i32(&document, "DEF_URBAN_type_scheme", 1)? == 2,
-            "spatial NCAR urban scheme 1 is not migrated; use DEF_URBAN_type_scheme=2 (LCZ)"
+            matches!(namelist_i32(&document, "DEF_URBAN_type_scheme", 1)?, 1 | 2),
+            "DEF_URBAN_type_scheme must be 1 (NCAR) or 2 (LCZ)"
         );
         let lucy_enabled = namelist_bool(&document, "DEF_URBAN_LUCY", true)?;
         Some(SpatialUrbanRun {
@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_lcz_urban_case_selects_the_igbp_restart_path() {
+    fn spatial_ncar_urban_case_selects_the_igbp_restart_path() {
         let root =
             std::env::temp_dir().join(format!("colm-init-spatial-urban-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -997,7 +997,7 @@ mod tests {
         std::fs::write(
             &namelist,
             format!(
-                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=2\n DEF_URBAN_LUCY=.false.\n DEF_URBAN_WATER=.false.\n DEF_URBAN_TREE=.false.\n DEF_URBAN_BEM=.false.\n/\n",
+                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=1\n DEF_URBAN_LUCY=.false.\n DEF_URBAN_WATER=.false.\n DEF_URBAN_TREE=.false.\n DEF_URBAN_BEM=.false.\n/\n",
                 root.display()
             ),
         )

@@ -1,4 +1,4 @@
-//! Spatial LCZ urban restart adapter for Rust `mksrfdata` block artifacts.
+//! Spatial urban restart adapter for Rust `mksrfdata` block artifacts.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub struct SpatialUrbanConstantRestartFiles {
     pub urban: Option<PathBuf>,
 }
 
-/// Time-varying files written for one spatial LCZ urban block.
+/// Time-varying files written for one spatial urban block.
 #[derive(Debug, Clone)]
 pub struct SpatialUrbanTimeRestartFiles {
     pub common: TimeRestartFile,
@@ -206,7 +206,7 @@ pub(crate) fn read_spatial_urban_data(
     }
     ensure!(
         urban.class.iter().all(|class| (1..=10).contains(class)),
-        "spatial urban LCZ types must be in 1..=10"
+        "spatial urban density or LCZ types must be in 1..=10"
     );
     let roof_fraction = urban_field(landdata, "WT_ROOF", "WT_ROOF", year, block, count)?;
     let roof_height_m = urban_field(landdata, "HT_ROOF", "HT_ROOF", year, block, count)?;

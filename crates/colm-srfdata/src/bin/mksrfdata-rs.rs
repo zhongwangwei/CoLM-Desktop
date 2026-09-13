@@ -10,12 +10,13 @@ use colm_srfdata::soil::{
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
 use colm_srfdata::{
-    aggregate_lcz_urban_geometry, aggregate_pft_fractions, aggregate_pft_height,
-    aggregate_pft_index, aggregate_urban_region_ids, aggregate_urban_tree_index,
-    build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
-    build_catchment_spatial_topology, build_crop_land_patches, build_crop_pft_topology,
-    build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_pft_topology,
-    build_spatial_topology, crop_pft_pctshared, materialize_single_point_surface,
+    aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
+    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
+    aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
+    build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology,
+    build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
+    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
+    crop_pft_pctshared, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
     read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
     read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
@@ -24,9 +25,10 @@ use colm_srfdata::{
     write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, FlatLandPatches, LczUrbanRawFields, PftFractionInput,
-    PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, UrbanMaterialParameters, COLM_1KM,
-    COLM_500M, COLM_5KM, MERIT_90M,
+    write_spatial_urban_vector, BlockLayout, FlatLandPatches, LczUrbanRawFields,
+    NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode,
+    SpatialInputKind, SpatialTopology, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
+    MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -78,8 +80,24 @@ struct SpatialLctArgs {
 #[derive(Debug, Clone)]
 struct SpatialUrbanInputs {
     rawdata: PathBuf,
+    scheme: UrbanScheme,
     geometry: UrbanGeometrySource,
     use_canyon_hwr: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UrbanScheme {
+    Ncar,
+    Lcz,
+}
+
+impl UrbanScheme {
+    fn type_raster(self) -> (&'static str, usize) {
+        match self {
+            Self::Ncar => ("URBAN_DENSITY_CLASS", 3),
+            Self::Lcz => ("LCZ_DOM", 10),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -495,21 +513,25 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     let land_urban = if let Some(urban) = &args.urban {
         ensure!(
             args.land_cover == SiteMode::Igbp,
-            "spatial LCZ urban data requires IGBP land cover"
+            "spatial urban data requires IGBP land cover"
         );
         let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        let (variable, class_count) = urban.scheme.type_raster();
         let raw_types = read_mesh_tiled_raster_i32(
             &urban.rawdata.join("urban_type"),
             "URBTYP",
-            "LCZ_DOM",
+            variable,
             &topology.mesh,
             &topology.pixel,
             COLM_500M,
         )?;
-        let (mesh, refined, land_urban) = topology
-            .mesh
-            .clone()
-            .into_urban_land_patches(&patches, &raw_types, &area, IGBP_URBAN, 10)?;
+        let (mesh, refined, land_urban) = topology.mesh.clone().into_urban_land_patches(
+            &patches,
+            &raw_types,
+            &area,
+            IGBP_URBAN,
+            class_count,
+        )?;
         topology.mesh = mesh;
         patches = refined;
         Some(land_urban)
@@ -615,20 +637,50 @@ fn materialize_spatial_urban(
         &topology.pixel,
         COLM_500M,
     )?;
-    let geometry = aggregate_lcz_urban_geometry(
-        &layout,
-        &land_urban.set_type,
-        &area,
-        LczUrbanRawFields {
-            roof_fraction: &roof_fraction,
-            roof_height_m: &roof_height_m,
-            tree_percent: &tree_percent,
-            tree_top_m: &tree_top_m,
-            water_percent: &water_percent,
-            population_density: &population_density,
-        },
-        inputs.use_canyon_hwr,
-    )?;
+    let raw_geometry = LczUrbanRawFields {
+        roof_fraction: &roof_fraction,
+        roof_height_m: &roof_height_m,
+        tree_percent: &tree_percent,
+        tree_top_m: &tree_top_m,
+        water_percent: &water_percent,
+        population_density: &population_density,
+    };
+    let (geometry, material) = match inputs.scheme {
+        UrbanScheme::Lcz => (
+            aggregate_lcz_urban_geometry(
+                &layout,
+                &land_urban.set_type,
+                &area,
+                raw_geometry,
+                inputs.use_canyon_hwr,
+            )?,
+            UrbanMaterialParameters::from_lcz_classes(&land_urban.set_type)?,
+        ),
+        UrbanScheme::Ncar => {
+            let regions = read_mesh_tiled_raster_i32(
+                &inputs.rawdata.join("urban_type"),
+                "URBTYP",
+                "REGION_ID",
+                &topology.mesh,
+                &topology.pixel,
+                COLM_500M,
+            )?;
+            let table = NcarUrbanProperties::read(urban_raw.join("NCAR_urban_properties.nc"))?;
+            (
+                aggregate_ncar_urban_geometry(
+                    &layout,
+                    &area,
+                    NcarUrbanRawFields {
+                        region_id: &regions,
+                        geometry: raw_geometry,
+                    },
+                    &table,
+                    inputs.use_canyon_hwr,
+                )?,
+                aggregate_ncar_urban_material(&layout, &area, &regions, &table)?,
+            )
+        }
+    };
     for (file_stem, variable, values) in [
         ("WT_ROOF", "WT_ROOF", &geometry.roof_fraction),
         ("HT_ROOF", "HT_ROOF", &geometry.roof_height_m),
@@ -681,7 +733,7 @@ fn materialize_spatial_urban(
         topology,
         land_urban,
         &args.blocks,
-        &UrbanMaterialParameters::from_lcz_classes(&land_urban.set_type)?,
+        &material,
     )?;
     let monthly_years = if args.monthly_vegetation_years.is_empty() {
         vec![args.year]
@@ -1494,6 +1546,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut usgs_forest_height = None;
     let mut soil_hyper_albedo_dir = None;
     let mut urban_rawdata = None;
+    let mut urban_scheme = UrbanScheme::Lcz;
     let mut urban_geometry = UrbanGeometrySource::Ghsl;
     let mut urban_canyon_hwr = true;
     let mut monthly_vegetation_years = Vec::new();
@@ -1631,6 +1684,18 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--urban-scheme" => {
+                urban_scheme = match args
+                    .get(index + 1)
+                    .context("--urban-scheme needs ncar or lcz")?
+                    .as_str()
+                {
+                    "ncar" => UrbanScheme::Ncar,
+                    "lcz" => UrbanScheme::Lcz,
+                    other => bail!("--urban-scheme must be ncar or lcz, got {other:?}"),
+                };
+                index += 2;
+            }
             "--urban-geometry" => {
                 urban_geometry = match args
                     .get(index + 1)
@@ -1686,6 +1751,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         soil_hyper_albedo_dir,
         urban: urban_rawdata.map(|rawdata| SpatialUrbanInputs {
             rawdata,
+            scheme: urban_scheme,
             geometry: urban_geometry,
             use_canyon_hwr: urban_canyon_hwr,
         }),
@@ -2013,12 +2079,15 @@ fn spatial_case_command(
         !urban || !crop,
         "CROP surface data is incompatible with DEF_URBAN_RUN"
     );
-    if urban {
-        ensure!(
-            case_i32(&document, "DEF_URBAN_type_scheme", 1)? == 2,
-            "spatial NCAR urban scheme 1 is not migrated; use DEF_URBAN_type_scheme=2 (LCZ)"
-        );
-    }
+    let urban_scheme = if urban {
+        match case_i32(&document, "DEF_URBAN_type_scheme", 1)? {
+            1 => UrbanScheme::Ncar,
+            2 => UrbanScheme::Lcz,
+            scheme => bail!("DEF_URBAN_type_scheme must be 1 (NCAR) or 2 (LCZ), got {scheme}"),
+        }
+    } else {
+        UrbanScheme::Lcz
+    };
     let lulcc = case_bool(&document, "DEF_USE_LULCC", false)?;
     ensure!(
         !lulcc || lct,
@@ -2160,9 +2229,18 @@ fn spatial_case_command(
             let lucy = urban_data.join("LUCY_regionid.nc");
             required_directories.extend([urban_type, urban_data, urban_lai]);
             required_files.push(lucy);
+            if urban_scheme == UrbanScheme::Ncar {
+                required_files.push(rawdata.join("urban/NCAR_urban_properties.nc"));
+            }
             args.extend([
                 "--urban-rawdata".to_owned(),
                 rawdata.display().to_string(),
+                "--urban-scheme".to_owned(),
+                match urban_scheme {
+                    UrbanScheme::Ncar => "ncar",
+                    UrbanScheme::Lcz => "lcz",
+                }
+                .to_owned(),
                 "--urban-geometry".to_owned(),
                 geometry.to_owned(),
                 "--urban-canyon-hwr".to_owned(),
@@ -2384,7 +2462,7 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
@@ -2433,6 +2511,8 @@ mod tests {
             "colm_input_ghsad".into(),
             "--urban-rawdata".into(),
             "rawdata".into(),
+            "--urban-scheme".into(),
+            "ncar".into(),
             "--urban-geometry".into(),
             "li".into(),
             "--urban-canyon-hwr".into(),
@@ -2466,6 +2546,7 @@ mod tests {
         );
         let urban = parsed.urban.unwrap();
         assert_eq!(urban.rawdata, PathBuf::from("rawdata"));
+        assert_eq!(urban.scheme, UrbanScheme::Ncar);
         assert!(matches!(urban.geometry, UrbanGeometrySource::Li));
         assert!(!urban.use_canyon_hwr);
         assert_eq!(parsed.blocks.lon_w.len(), 4);
@@ -2707,6 +2788,7 @@ mod tests {
             option_value(&command.args, "--urban-rawdata").map(str::to_owned),
             Some(format!("{}/raw", root.display()))
         );
+        assert_eq!(option_value(&command.args, "--urban-scheme"), Some("lcz"));
         assert_eq!(
             option_value(&command.args, "--urban-geometry"),
             Some("ghsl")
@@ -2727,6 +2809,38 @@ mod tests {
         assert!(command
             .required_files
             .contains(&root.join("raw/urban/LUCY_regionid.nc")));
+        assert!(!command
+            .required_files
+            .contains(&root.join("raw/urban/NCAR_urban_properties.nc")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_ncar_urban_case_uses_the_regional_property_table() {
+        let (root, namelist) = case_namelist(
+            "urban-ncar",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_URBAN_RUN=.true.
+ DEF_URBAN_type_scheme=1
+ DEF_LC_YEAR=2004
+/
+",
+        );
+
+        let command = spatial_case_command(&namelist, None, false, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(option_value(&command.args, "--urban-scheme"), Some("ncar"));
+        assert!(command
+            .required_files
+            .contains(&root.join("raw/urban/NCAR_urban_properties.nc")));
         std::fs::remove_dir_all(root).unwrap();
     }
 
