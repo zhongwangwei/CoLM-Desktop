@@ -112,29 +112,36 @@ fn run_spatial_namelist(
     block_override: Option<&str>,
 ) -> Result<()> {
     let run = spatial_namelist_run(namelist)?;
-    let blocks = match block_override {
-        Some(block) => {
-            ensure!(!block.is_empty(), "CoLM block label must not be empty");
-            vec![block.to_owned()]
-        }
-        None => discover_blocks(&run.landdata, run.land_cover_year)?,
-    };
     match run.subgrid {
         SpatialSubgrid::Lct => {
             let land_cover = land_cover.context(
                 "spatial LCT case needs --land-cover igbp or usgs because a landpatch block stores only its selected class table",
             )?;
-            for block in blocks {
+            ensure!(
+                land_cover == LandCoverScheme::Igbp,
+                "spatial USGS no-observation restart is not migrated: Rust has no verified USGS monthly LAI/SAI reader"
+            );
+            for block in spatial_blocks(&run, block_override)? {
                 write_spatial_lct_namelist_block(&run, land_cover, &block)?;
             }
         }
         SpatialSubgrid::PftOrPc => {
-            for block in blocks {
+            for block in spatial_blocks(&run, block_override)? {
                 write_spatial_pft_namelist_block(namelist, &run, &block)?;
             }
         }
     }
     Ok(())
+}
+
+fn spatial_blocks(run: &SpatialNamelistRun, block_override: Option<&str>) -> Result<Vec<String>> {
+    match block_override {
+        Some(block) => {
+            ensure!(!block.is_empty(), "CoLM block label must not be empty");
+            Ok(vec![block.to_owned()])
+        }
+        None => discover_blocks(&run.landdata, run.land_cover_year),
+    }
 }
 
 fn write_spatial_lct_namelist_block(
@@ -239,6 +246,10 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
     ensure!(
         namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
         "spatial cold start requires DEF_LAI_MONTHLY = .true."
+    );
+    ensure!(
+        !namelist_bool(&document, "DEF_USE_LULCC", false)?,
+        "spatial LULCC restart transfer traces are not migrated; Rust refuses to write only the initial land-cover year"
     );
     let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
     let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
@@ -728,7 +739,6 @@ mod tests {
  DEF_file_mesh='mesh.nc'
  DEF_USE_LCT=.false.
  DEF_USE_PFT=.true.
- DEF_USE_LULCC=.true.
  DEF_LC_YEAR=2005
  DEF_simulation_time%start_year=2008
  DEF_simulation_time%start_month=2
@@ -756,7 +766,7 @@ mod tests {
 
         assert_eq!(run.landdata, root.join("case/landdata"));
         assert_eq!(run.restart, root.join("case/restart"));
-        assert_eq!(run.land_cover_year, 2008);
+        assert_eq!(run.land_cover_year, 2005);
         assert_eq!(run.lai_year, 2007);
         assert_eq!(
             run.date,
@@ -807,6 +817,67 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot read spatial landpatch directory"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lulcc_case_is_refused_before_block_discovery() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-spatial-lulcc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_file_mesh='mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_USE_LULCC=.true.
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let error = run_spatial_namelist(&namelist, Some(LandCoverScheme::Igbp), None).unwrap_err();
+
+        assert!(error.to_string().contains("LULCC"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_usgs_case_is_refused_before_block_discovery() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-spatial-usgs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_file_mesh='mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let error = run_spatial_namelist(&namelist, Some(LandCoverScheme::Usgs), None).unwrap_err();
+
+        assert!(error.to_string().contains("USGS"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

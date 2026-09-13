@@ -1,8 +1,9 @@
 //! Native single-point surface-data materializer.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
+use colm_namelist::{parse, Value};
 use colm_srfdata::soil::{
     aggregate_balland_arp, aggregate_campbell, aggregate_soil_field, aggregate_vgm, CampbellFills,
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
@@ -1509,6 +1510,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
     let mut lct_mode = None;
     let mut crop = false;
     let mut observation = None;
+    let mut spatial_blocks = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -1530,6 +1532,21 @@ fn materialize_case(args: &[String]) -> Result<()> {
                 ));
                 index += 2;
             }
+            "--blocks" => {
+                let longitude = args
+                    .get(index + 1)
+                    .context("--blocks needs longitude and latitude block counts")?
+                    .parse()
+                    .context("invalid longitude block count")?;
+                let latitude = args
+                    .get(index + 2)
+                    .context("--blocks needs longitude and latitude block counts")?
+                    .parse()
+                    .context("invalid latitude block count")?;
+                BlockLayout::regular(longitude, latitude)?;
+                spatial_blocks = Some([longitude.to_string(), latitude.to_string()]);
+                index += 3;
+            }
             other => bail!(
                 "unknown mksrfdata-rs case option {other:?}
 {}",
@@ -1537,6 +1554,24 @@ fn materialize_case(args: &[String]) -> Result<()> {
             ),
         }
     }
+    if let Some(command) = spatial_case_command(
+        &namelist,
+        lct_mode,
+        crop,
+        observation.as_deref(),
+        spatial_blocks.as_ref(),
+    )? {
+        command.preflight()?;
+        return if command.pft_or_pc {
+            materialize_spatial_pft(&command.args)
+        } else {
+            materialize_spatial_lct(&command.args)
+        };
+    }
+    ensure!(
+        spatial_blocks.is_none(),
+        "--blocks is available only for a spatial case namelist"
+    );
     let (run, report) = materialize_single_point_surface_from_namelist(
         &namelist,
         lct_mode,
@@ -1545,6 +1580,303 @@ fn materialize_case(args: &[String]) -> Result<()> {
     )?;
     print_result(report, &run.landdata_dir);
     Ok(())
+}
+
+struct SpatialCaseCommand {
+    args: Vec<String>,
+    required_files: Vec<PathBuf>,
+    required_directories: Vec<PathBuf>,
+    pft_or_pc: bool,
+}
+
+impl SpatialCaseCommand {
+    fn preflight(&self) -> Result<()> {
+        for path in &self.required_files {
+            ensure!(
+                path.is_file(),
+                "spatial mksrfdata source is missing or not a file: {}",
+                path.display()
+            );
+        }
+        for path in &self.required_directories {
+            ensure!(
+                path.is_dir(),
+                "spatial mksrfdata source is missing or not a directory: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+fn spatial_case_command(
+    namelist: &Path,
+    lct_mode: Option<SiteMode>,
+    crop_override: bool,
+    observation: Option<&Path>,
+    blocks: Option<&[String; 2]>,
+) -> Result<Option<SpatialCaseCommand>> {
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let Some((kind, mesh)) = spatial_mesh(&document)? else {
+        return Ok(None);
+    };
+    ensure!(
+        observation.is_none(),
+        "spatial observed surface data is not migrated; Rust refuses to substitute a cold rawdata surface"
+    );
+    ensure!(
+        !case_bool(&document, "DEF_URBAN_RUN", false)?,
+        "spatial urban surface-data generation is not migrated"
+    );
+    let lct = case_bool(&document, "DEF_USE_LCT", true)?;
+    let pft = case_bool(&document, "DEF_USE_PFT", false)?;
+    let pc = case_bool(&document, "DEF_USE_PC", false)?;
+    ensure!(
+        [lct, pft, pc]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count()
+            == 1,
+        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
+    );
+    let crop = crop_override || case_bool(&document, "DEF_USE_CROP", false)?;
+    ensure!(
+        !crop || pft || pc,
+        "CROP surface data requires DEF_USE_PFT or DEF_USE_PC"
+    );
+    ensure!(
+        !case_bool(&document, "DEF_USE_LULCC", false)?,
+        "spatial LULCC surface transfer traces are not migrated; Rust refuses to write only the initial land-cover year"
+    );
+
+    let rawdata = PathBuf::from(case_string(&document, "DEF_dir_rawdata")?);
+    let case_name = case_string(&document, "DEF_CASE_NAME")?;
+    let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
+    let mut year = case_i32(&document, "DEF_LC_YEAR", 2005)?;
+    ensure!(year >= 0, "DEF_LC_YEAR must be non-negative");
+    if case_bool(&document, "DEF_USE_LULCC", false)? && year < 2000 {
+        year = (year / 5 * 5).max(1985);
+    }
+    let soil_model = if case_bool(&document, "DEF_USE_Campbell_SOIL_MODEL", false)? {
+        "campbell"
+    } else {
+        "vgm"
+    };
+    let kind = match kind {
+        SpatialInputKind::GridBased => "latlon",
+        SpatialInputKind::Unstructured => "unstructured",
+        SpatialInputKind::Catchment => "catchment",
+    };
+    let landdata = output.join(&case_name).join("landdata");
+    let lake_depth = rawdata.join("lake_depth.nc");
+    let soil_texture = rawdata.join("soil/soiltexture_0cm-60cm_mean.nc");
+    let soil_dir = rawdata.join("soil");
+    let soil_brightness = rawdata.join("soil_brightness.nc");
+    let topography = rawdata.join("topography.nc");
+    let bedrock = rawdata.join("bedrock.nc");
+    let plant_tiles = rawdata.join("plant_15s");
+    let mut required_files = vec![
+        mesh.clone(),
+        lake_depth.clone(),
+        soil_texture.clone(),
+        soil_brightness.clone(),
+        topography.clone(),
+    ];
+    let mut required_directories = vec![soil_dir.clone()];
+    let mut args = Vec::new();
+    let blocks = blocks.map(|blocks| {
+        [
+            "--blocks".to_owned(),
+            blocks[0].to_owned(),
+            blocks[1].to_owned(),
+        ]
+    });
+
+    if lct {
+        let land_cover = lct_mode.context(
+            "spatial LCT case needs --land-cover igbp or usgs because case.nml does not record the build-time classification table",
+        )?;
+        ensure!(
+            land_cover == SiteMode::Igbp,
+            "spatial USGS case.nml output is not migrated: Rust has no verified USGS monthly LAI/SAI aggregation for the required cold restart"
+        );
+        required_directories.push(plant_tiles.clone());
+        let landtype = rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc"));
+        required_files.push(landtype.clone());
+        args.extend([
+            kind.to_owned(),
+            mesh.display().to_string(),
+            landtype.display().to_string(),
+            landdata.display().to_string(),
+            year.to_string(),
+            "--land-cover".to_owned(),
+            land_cover.as_str().to_owned(),
+            "--lake-depth".to_owned(),
+            lake_depth.display().to_string(),
+            "--soil-texture".to_owned(),
+            soil_texture.display().to_string(),
+            "--soil-dir".to_owned(),
+            soil_dir.display().to_string(),
+            "--soil-model".to_owned(),
+            soil_model.to_owned(),
+            "--soil-brightness".to_owned(),
+            soil_brightness.display().to_string(),
+            "--topography".to_owned(),
+            topography.display().to_string(),
+        ]);
+        if case_bool(&document, "DEF_USE_BEDROCK", false)? {
+            required_files.push(bedrock.clone());
+            args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
+        }
+        args.extend([
+            "--plant-tiles".to_owned(),
+            plant_tiles.display().to_string(),
+        ]);
+        for lai_year in case_lai_years(&document, year)? {
+            args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
+        }
+        if let Some(blocks) = &blocks {
+            args.extend(blocks.iter().cloned());
+        }
+    } else {
+        let landtype = rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc"));
+        required_files.push(landtype.clone());
+        required_directories.push(plant_tiles.clone());
+        args.extend([
+            kind.to_owned(),
+            mesh.display().to_string(),
+            landtype.display().to_string(),
+            landdata.display().to_string(),
+            year.to_string(),
+            "--plant-tiles".to_owned(),
+            plant_tiles.display().to_string(),
+            "--lake-depth".to_owned(),
+            lake_depth.display().to_string(),
+            "--soil-texture".to_owned(),
+            soil_texture.display().to_string(),
+            "--soil-dir".to_owned(),
+            soil_dir.display().to_string(),
+            "--soil-model".to_owned(),
+            soil_model.to_owned(),
+            "--soil-brightness".to_owned(),
+            soil_brightness.display().to_string(),
+            "--topography".to_owned(),
+            topography.display().to_string(),
+        ]);
+        if crop {
+            let crop_surface = rawdata.join("global_CFT_surface_data.nc");
+            required_files.push(crop_surface.clone());
+            args.extend([
+                "--crop-surface".to_owned(),
+                crop_surface.display().to_string(),
+            ]);
+        }
+        if case_bool(&document, "DEF_USE_BEDROCK", false)? {
+            required_files.push(bedrock.clone());
+            args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
+        }
+        for lai_year in case_lai_years(&document, year)? {
+            args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
+        }
+        if let Some(blocks) = &blocks {
+            args.extend(blocks.iter().cloned());
+        }
+    }
+
+    Ok(Some(SpatialCaseCommand {
+        args,
+        required_files,
+        required_directories,
+        pft_or_pc: pft || pc,
+    }))
+}
+
+fn spatial_mesh(document: &colm_namelist::Document) -> Result<Option<(SpatialInputKind, PathBuf)>> {
+    let mesh = case_path(document, "DEF_file_mesh")?;
+    let catchment = case_path(document, "DEF_CatchmentMesh_data")?;
+    ensure!(
+        mesh.is_none() || catchment.is_none(),
+        "spatial case cannot set both DEF_file_mesh and DEF_CatchmentMesh_data"
+    );
+    match (mesh, catchment) {
+        (None, None) => Ok(None),
+        (None, Some(path)) => Ok(Some((SpatialInputKind::Catchment, path))),
+        (Some(path), None) => {
+            let grid_based = document.get("DEF_GRIDBASED_lon_res").is_some()
+                || document.get("DEF_GRIDBASED_lat_res").is_some();
+            Ok(Some((
+                if grid_based {
+                    SpatialInputKind::GridBased
+                } else {
+                    SpatialInputKind::Unstructured
+                },
+                path,
+            )))
+        }
+        (Some(_), Some(_)) => unreachable!("validated above"),
+    }
+}
+
+fn case_path(document: &colm_namelist::Document, field: &str) -> Result<Option<PathBuf>> {
+    match document.get(field) {
+        None => Ok(None),
+        Some(Value::Str(path))
+            if path.trim().is_empty() || path.trim().eq_ignore_ascii_case("null") =>
+        {
+            Ok(None)
+        }
+        Some(Value::Str(path)) => Ok(Some(PathBuf::from(path))),
+        Some(_) => bail!("{field} must be a path string"),
+    }
+}
+
+fn case_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
+    match document.get(field) {
+        Some(Value::Str(value)) if !value.trim().is_empty() => Ok(value.to_owned()),
+        Some(Value::Str(_)) | None => bail!("case namelist is missing required field {field}"),
+        Some(_) => bail!("{field} must be a character value"),
+    }
+}
+
+fn case_bool(document: &colm_namelist::Document, field: &str, default: bool) -> Result<bool> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => bail!("{field} must be a logical value"),
+    }
+}
+
+fn case_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Result<i32> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Int(value)) => i32::try_from(*value)
+            .with_context(|| format!("{field} is outside CoLM's integer range")),
+        Some(_) => bail!("{field} must be an integer value"),
+    }
+}
+
+fn case_lai_years(document: &colm_namelist::Document, land_cover_year: i32) -> Result<Vec<i32>> {
+    if !case_bool(document, "DEF_LAI_CHANGE_YEARLY", true)? {
+        return Ok(vec![land_cover_year]);
+    }
+    let lai_start = case_i32(document, "DEF_LAI_START_YEAR", 2000)?;
+    let lai_end = case_i32(document, "DEF_LAI_END_YEAR", 2020)?;
+    ensure!(
+        lai_start <= lai_end,
+        "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
+    );
+    let simulation_start = case_i32(document, "DEF_simulation_time%start_year", 2000)?;
+    let simulation_end = case_i32(document, "DEF_simulation_time%end_year", simulation_start)?;
+    ensure!(
+        simulation_start <= simulation_end,
+        "simulation start year must not exceed simulation end year"
+    );
+    let first = simulation_start.max(lai_start).min(lai_end);
+    let last = simulation_end.min(lai_end).max(lai_start);
+    Ok((first..=last).collect())
 }
 
 fn materialize_legacy(args: &[String]) -> Result<()> {
@@ -1619,7 +1951,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 
 fn usage() -> &'static str {
     "usage:
-  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]
+  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
@@ -1793,6 +2125,205 @@ mod tests {
             "2005".into(),
         ])
         .is_err());
+    }
+
+    fn case_namelist(label: &str, text: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "colm-srfdata-spatial-case-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            text.replace("$ROOT", &root.display().to_string()),
+        )
+        .unwrap();
+        (root, namelist)
+    }
+
+    fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn spatial_lct_case_uses_the_standard_rawdata_contract_before_writing() {
+        let (root, namelist) = case_namelist(
+            "lct",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_GRIDBASED_lon_res=1.
+ DEF_GRIDBASED_lat_res=1.
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_LC_YEAR=2005
+ DEF_simulation_time%start_year=2005
+ DEF_simulation_time%end_year=2008
+ DEF_LAI_START_YEAR=2006
+ DEF_LAI_END_YEAR=2007
+ DEF_USE_Campbell_SOIL_MODEL=.true.
+ DEF_USE_BEDROCK=.true.
+/
+",
+        );
+
+        let blocks = ["2".to_owned(), "3".to_owned()];
+        let command =
+            spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, Some(&blocks))
+                .unwrap()
+                .unwrap();
+
+        assert!(!command.pft_or_pc);
+        assert_eq!(
+            command.args[..5],
+            [
+                "latlon".to_owned(),
+                format!("{}/mesh.nc", root.display()),
+                format!(
+                    "{}/raw/landtypes/landtype-igbp-modis-2005.nc",
+                    root.display()
+                ),
+                format!("{}/out/case/landdata", root.display()),
+                "2005".to_owned()
+            ]
+        );
+        assert_eq!(
+            option_value(&command.args, "--soil-model"),
+            Some("campbell")
+        );
+        assert_eq!(
+            option_value(&command.args, "--plant-tiles").map(str::to_owned),
+            Some(format!("{}/raw/plant_15s", root.display()))
+        );
+        assert_eq!(
+            command
+                .args
+                .windows(2)
+                .filter(|pair| pair[0] == "--monthly-vegetation-year")
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>(),
+            ["2006", "2007"]
+        );
+        assert_eq!(
+            &command.args[command.args.len() - 3..],
+            ["--blocks", "2", "3"]
+        );
+        assert!(command
+            .required_files
+            .contains(&root.join("raw/bedrock.nc")));
+        assert!(command
+            .required_directories
+            .contains(&root.join("raw/soil")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_pft_case_derives_crop_sources_and_preserves_native_lai_years() {
+        let (root, namelist) = case_namelist(
+            "pft",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.true.
+ DEF_USE_PC=.false.
+ DEF_USE_CROP=.true.
+ DEF_LC_YEAR=1999
+ DEF_LAI_CHANGE_YEARLY=.false.
+/
+",
+        );
+
+        let command = spatial_case_command(&namelist, None, false, None, None)
+            .unwrap()
+            .unwrap();
+
+        assert!(command.pft_or_pc);
+        assert_eq!(command.args[0], "unstructured");
+        assert_eq!(
+            option_value(&command.args, "--crop-surface").map(str::to_owned),
+            Some(format!("{}/raw/global_CFT_surface_data.nc", root.display()))
+        );
+        assert_eq!(
+            option_value(&command.args, "--monthly-vegetation-year"),
+            Some("1999")
+        );
+        assert!(command
+            .required_directories
+            .contains(&root.join("raw/plant_15s")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_preflight_refuses_missing_sources_before_materialization() {
+        let root =
+            std::env::temp_dir().join(format!("colm-srfdata-preflight-{}", std::process::id()));
+        let command = SpatialCaseCommand {
+            args: Vec::new(),
+            required_files: vec![root.join("missing.nc")],
+            required_directories: Vec::new(),
+            pft_or_pc: false,
+        };
+
+        assert!(command.preflight().is_err());
+    }
+
+    #[test]
+    fn spatial_usgs_case_is_refused_before_source_preflight() {
+        let (root, namelist) = case_namelist(
+            "usgs",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+/
+",
+        );
+
+        let error = spatial_case_command(&namelist, Some(SiteMode::Usgs), false, None, None)
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("USGS"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lulcc_case_is_refused_before_source_preflight() {
+        let (root, namelist) = case_namelist(
+            "lulcc",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_USE_LULCC=.true.
+/
+",
+        );
+
+        let error = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("LULCC"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

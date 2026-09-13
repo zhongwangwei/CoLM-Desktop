@@ -29,9 +29,14 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    soil texture, topography, bedrock, and soil brightness.
 3. **Feature topology** — PFT/PC, crop, urban, catchment HRU, diagnostics, BGC methane
    fields, LULCC transfer traces, region clipping, and existing-surface reuse.
-4. **Driver and cutover** — add the namelist-driven `mksrfdata-rs` executable, MPI I/O
-   ownership, artifact checking, GUI/CLI selection, and a guarded default switch only after
-   all parity gates pass.
+4. **Driver and cutover** — the namelist-driven executable now detects spatial
+   grid, unstructured, and catchment cases; maps their standard rawdata paths into the
+   existing Rust LCT/PFT/PC block materializers; accepts an explicit block layout; and
+   validates every required source before it can create a partial landdata tree. The
+   namelist-driven LCT branch is currently IGBP-only: it explicitly rejects USGS monthly
+   LAI/SAI and LULCC transfer-trace cases rather than emitting incomplete output. MPI I/O
+   ownership, artifact checking, GUI/CLI default
+   selection, and the guarded default switch still wait for all parity gates.
 
 ## Performance constraints
 
