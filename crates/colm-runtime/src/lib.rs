@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    month_day_to_julian, CalendarTime, LaiUpdateSchedule, RuntimeClock, RuntimeForcing, RuntimeStep,
+    month_day_to_julian, CalendarTime, LaiUpdateSchedule, RestartFrequency, RuntimeClock,
+    RuntimeForcing, RuntimeStep,
 };
 use colm_forcing::{load_point_forcing, PointForcingSeries};
 use colm_namelist::{parse, Document, Value};
@@ -23,6 +24,7 @@ pub struct PointRuntimeConfig {
     pub timestep_seconds: f64,
     pub spinup_repeats: usize,
     pub lai_update_schedule: LaiUpdateSchedule,
+    pub restart_frequency: RestartFrequency,
     pub greenwich: bool,
     pub longitude_degrees: f64,
     pub latitude_degrees: f64,
@@ -65,7 +67,8 @@ impl PointRuntime {
                 config.timestep_seconds,
                 config.spinup_repeats,
                 config.lai_update_schedule,
-            )?,
+            )?
+            .with_restart_frequency(config.restart_frequency),
             forcing: load_point_forcing(&config.forcing_file)?,
             greenwich: config.greenwich,
             longitude_degrees: config.longitude_degrees,
@@ -148,12 +151,29 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         } else {
             LaiUpdateSchedule::EightDay
         },
+        restart_frequency: restart_frequency(&case)?,
         greenwich: required_bool(&case, "DEF_simulation_time%greenwich")?,
         longitude_degrees: required_real(&case, "SITE_lon_location")?,
         latitude_degrees: required_real(&case, "SITE_lat_location")?,
         // `MOD_UserSpecifiedForcing` concatenates these strings directly.
         forcing_file: PathBuf::from(format!("{forcing_directory}{forcing_name}")),
     })
+}
+
+fn restart_frequency(document: &Document) -> Result<RestartFrequency> {
+    match document.get("DEF_WRST_FREQ") {
+        None => Ok(RestartFrequency::Never),
+        Some(Value::Str(value)) => match value.trim().to_ascii_uppercase().as_str() {
+            "NONE" => Ok(RestartFrequency::Never),
+            "TIMESTEP" => Ok(RestartFrequency::Timestep),
+            "HOURLY" => Ok(RestartFrequency::Hourly),
+            "DAILY" => Ok(RestartFrequency::Daily),
+            "MONTHLY" => Ok(RestartFrequency::Monthly),
+            "YEARLY" => Ok(RestartFrequency::Yearly),
+            other => bail!("DEF_WRST_FREQ has unsupported value {other:?}"),
+        },
+        Some(_) => bail!("DEF_WRST_FREQ must be a string"),
+    }
 }
 
 fn read_document(path: &Path, kind: &str) -> Result<Document> {
@@ -240,7 +260,7 @@ mod tests {
         std::fs::write(
             path,
             format!(
-                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec=1800\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
+                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec=1800\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
                 forcing.display()
             ),
         )
@@ -275,6 +295,7 @@ mod tests {
             PathBuf::from("/data/CN-Cng_2008-2009_FLUXNET2015_Met.nc")
         );
         assert_eq!(config.lai_update_schedule, LaiUpdateSchedule::Monthly);
+        assert_eq!(config.restart_frequency, RestartFrequency::Never);
         assert!(!config.greenwich);
     }
 
@@ -295,6 +316,24 @@ mod tests {
                 .unwrap()
                 .lai_update_schedule,
             LaiUpdateSchedule::EightDay
+        );
+    }
+
+    #[test]
+    fn config_parses_the_restart_cadence_shared_with_the_clock() {
+        let root = directory("restart-cadence");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        write_case(&case, &forcing, "/data/", "POINT");
+        let contents = std::fs::read_to_string(&case).unwrap();
+        std::fs::write(
+            &case,
+            contents.replace("DEF_WRST_FREQ='none'", "DEF_WRST_FREQ='monthly'"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_point_runtime_config(&case).unwrap().restart_frequency,
+            RestartFrequency::Monthly
         );
     }
 

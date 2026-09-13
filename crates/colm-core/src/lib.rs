@@ -170,7 +170,7 @@ pub use runoff::{
     StorageRunoffState, TopmodelMethod, TopmodelSubsurfaceInput, TopmodelSurfaceInput,
     TopmodelSurfaceState,
 };
-pub use runtime_clock::{LaiUpdateSchedule, RuntimeClock, RuntimeStep};
+pub use runtime_clock::{LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeStep};
 pub use runtime_forcing::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water,

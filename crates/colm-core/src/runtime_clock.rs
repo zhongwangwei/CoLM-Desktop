@@ -19,6 +19,17 @@ pub enum LaiUpdateSchedule {
     EightDay,
 }
 
+/// `DEF_WRST_FREQ` choices understood by `save_to_restart`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartFrequency {
+    Never,
+    Timestep,
+    Hourly,
+    Daily,
+    Monthly,
+    Yearly,
+}
+
 /// One pass through the `CoLM.F90` time loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeStep {
@@ -38,6 +49,8 @@ pub struct RuntimeStep {
     pub update_albedo: bool,
     /// `dosst` is initialized false and is not changed by the upstream main loop.
     pub update_sst: bool,
+    /// Whether `save_to_restart` requests a state write after this driver pass.
+    pub write_restart: bool,
 }
 
 /// Stateful iterator for the non-I/O portion of `CoLM.F90`'s main loop.
@@ -60,6 +73,7 @@ pub struct RuntimeClock {
     index: usize,
     lai_schedule: LaiUpdateSchedule,
     update_lai: bool,
+    restart_frequency: RestartFrequency,
 }
 
 impl RuntimeClock {
@@ -117,7 +131,15 @@ impl RuntimeClock {
             lai_schedule,
             // CoLM.F90 initializes `dolai = .true.` before its first pass.
             update_lai: true,
+            restart_frequency: RestartFrequency::Never,
         })
+    }
+
+    /// Selects the `save_to_restart` cadence for later generated steps.
+    #[must_use]
+    pub fn with_restart_frequency(mut self, restart_frequency: RestartFrequency) -> Self {
+        self.restart_frequency = restart_frequency;
+        self
     }
 
     /// Returns the next forcing/driver boundary, exactly once per model step.
@@ -128,6 +150,7 @@ impl RuntimeClock {
         let forcing_time = begin_style(self.current);
         let end_time = tick(self.current, self.step_seconds);
         let next_forcing_time = begin_style(end_time);
+        let next_elapsed = tick(self.elapsed, self.elapsed_step_seconds);
         let step = RuntimeStep {
             index: self.index,
             forcing_time,
@@ -137,9 +160,17 @@ impl RuntimeClock {
             update_lai: self.update_lai,
             update_albedo: true,
             update_sst: false,
+            write_restart: restart_due(
+                self.restart_frequency,
+                end_time,
+                self.elapsed_step_seconds,
+                next_elapsed,
+                self.spinup_until,
+                self.end,
+            ),
         };
         self.current = step.end_time;
-        self.elapsed = tick(self.elapsed, self.elapsed_step_seconds);
+        self.elapsed = next_elapsed;
         self.update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_schedule);
         if self.is_spinup && !before(self.elapsed, self.spinup_until) {
             if self.spinup_cycle < self.spinup_repeats {
@@ -153,6 +184,44 @@ impl RuntimeClock {
         self.index += 1;
         Some(step)
     }
+}
+
+fn restart_due(
+    frequency: RestartFrequency,
+    driver_time: CalendarTime,
+    elapsed_step_seconds: u32,
+    elapsed_time: CalendarTime,
+    spinup_until: CalendarTime,
+    end: CalendarTime,
+) -> bool {
+    let period_due = match frequency {
+        RestartFrequency::Never => false,
+        RestartFrequency::Timestep => true,
+        RestartFrequency::Hourly => {
+            (driver_time.seconds - 1) / 3_600
+                != (driver_time.seconds + elapsed_step_seconds - 1) / 3_600
+        }
+        RestartFrequency::Daily => {
+            tick(driver_time, elapsed_step_seconds).julian_day != driver_time.julian_day
+        }
+        RestartFrequency::Monthly => {
+            let next = tick(driver_time, elapsed_step_seconds);
+            (driver_time.year, month(driver_time)) != (next.year, month(next))
+        }
+        RestartFrequency::Yearly => {
+            tick(driver_time, elapsed_step_seconds).year != driver_time.year
+        }
+    };
+    // `save_to_restart` suppresses scheduled writes during spinup except for
+    // the annual boundary, and always writes after reaching the simulation end.
+    (period_due
+        && (!before(elapsed_time, spinup_until)
+            || is_end_of_year(driver_time, elapsed_step_seconds)))
+        || !before(elapsed_time, end)
+}
+
+fn is_end_of_year(time: CalendarTime, seconds: u32) -> bool {
+    tick(time, seconds).year != time.year
 }
 
 fn lai_update_due(current: CalendarTime, next: CalendarTime, schedule: LaiUpdateSchedule) -> bool {

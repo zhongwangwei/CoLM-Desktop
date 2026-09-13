@@ -157,3 +157,43 @@ fn clock_carries_colms_lai_update_flags_into_each_driver_step() {
         vec![true, true, false]
     );
 }
+
+#[test]
+fn clock_matches_colms_restart_cadence_spinup_gate_and_final_write() {
+    let scheduled: Vec<_> = std::iter::from_fn({
+        let mut clock = RuntimeClock::new(
+            time(2008, 1, 0),
+            time(2008, 1, 7_200),
+            time(2008, 1, 7_200),
+            3_600.0,
+            1,
+        )
+        .unwrap()
+        .with_restart_frequency(RestartFrequency::Hourly);
+        move || clock.next_step()
+    })
+    .collect();
+    assert_eq!(
+        scheduled
+            .iter()
+            .map(|step| step.write_restart)
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+
+    let final_only: Vec<_> = std::iter::from_fn({
+        let mut clock = RuntimeClock::new(
+            time(2008, 1, 0),
+            time(2008, 1, 3_600),
+            time(2008, 1, 0),
+            3_600.0,
+            1,
+        )
+        .unwrap()
+        .with_restart_frequency(RestartFrequency::Never);
+        move || clock.next_step()
+    })
+    .collect();
+    assert_eq!(final_only.len(), 1);
+    assert!(final_only[0].write_restart);
+}
