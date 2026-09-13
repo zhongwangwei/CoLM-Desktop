@@ -11,7 +11,9 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 use netcdf::{Extent, NcTypeDescriptor};
 
-use crate::{mesh::inspect_spatial_input, FlatLandElements, FlatLandPatches, FlatMesh, Grid};
+use crate::{
+    mesh::inspect_spatial_input, FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh, Grid,
+};
 
 const MAX_SERIAL_RAW_PIXELS: usize = 25_000_000;
 const ALIGNMENT_EPSILON: f64 = 1e-9;
@@ -21,6 +23,7 @@ const ALIGNMENT_EPSILON: f64 = 1e-9;
 pub enum SpatialInputKind {
     GridBased,
     Unstructured,
+    Catchment,
 }
 
 impl SpatialInputKind {
@@ -28,6 +31,7 @@ impl SpatialInputKind {
         match self {
             Self::GridBased => "latlon",
             Self::Unstructured => "unstructured",
+            Self::Catchment => "catchment",
         }
     }
 
@@ -35,6 +39,7 @@ impl SpatialInputKind {
         match self {
             Self::GridBased => "landmask",
             Self::Unstructured => "elmindex",
+            Self::Catchment => "icatchment2d",
         }
     }
 }
@@ -70,6 +75,14 @@ pub struct SpatialTopology {
     pub pixel: PixelAxes,
     pub mesh: FlatMesh,
     pub land_elements: FlatLandElements,
+}
+
+/// CATCHMENT topology keeps the intermediate HRU pixelset required before
+/// land-cover classes can form land patches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchmentSpatialTopology {
+    pub topology: SpatialTopology,
+    pub land_hrus: FlatLandHrus,
 }
 
 /// Regular CoLM block edges.  `x` runs west to east; `y` runs south to north.
@@ -126,6 +139,10 @@ pub fn build_spatial_topology(
     raw_grid: Grid,
 ) -> Result<SpatialTopology> {
     let path = path.as_ref();
+    ensure!(
+        kind != SpatialInputKind::Catchment,
+        "CATCHMENT topology must retain landhru; use build_catchment_spatial_topology"
+    );
     let summary = inspect_spatial_input(path, kind.input_label())?;
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let grid = SpatialGrid {
@@ -157,6 +174,9 @@ pub fn build_spatial_topology(
                 SpatialInputKind::GridBased => continue,
                 SpatialInputKind::Unstructured if value > 0 => value,
                 SpatialInputKind::Unstructured => continue,
+                SpatialInputKind::Catchment => {
+                    unreachable!("CATCHMENT uses its dedicated topology builder")
+                }
             };
             let longitude = longitude[column];
             let width = longitude.end - longitude.start;
@@ -207,6 +227,125 @@ pub fn build_spatial_topology(
     })
 }
 
+/// Build the CATCHMENT hierarchy from MERIT 90 m catchment and HRU rasters.
+///
+/// The mesh and pixel coordinates retain the finest source lattice, just as
+/// the Fortran pixel object assimilates merit_90m before coarser rawdata grids.
+pub fn build_catchment_spatial_topology(
+    path: impl AsRef<Path>,
+    raw_grid: Grid,
+) -> Result<CatchmentSpatialTopology> {
+    let path = path.as_ref();
+    let summary = inspect_spatial_input(path, SpatialInputKind::Catchment.input_label())?;
+    let source_cells = summary
+        .nlat
+        .checked_mul(summary.nlon)
+        .context("catchment source cell count overflows usize")?;
+    ensure!(
+        source_cells <= MAX_SERIAL_RAW_PIXELS,
+        "catchment input has {source_cells} source cells; the serial topology path is limited to {MAX_SERIAL_RAW_PIXELS}. Use the block-distributed spatial path for this domain"
+    );
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let grid = catchment_grid(&file, raw_grid)?;
+    let catchments = file
+        .variable("icatchment2d")
+        .expect("inspect_spatial_input verified icatchment2d")
+        .get_values::<i64, _>((0..summary.nlat, 0..summary.nlon))?;
+    let hydrounits = file
+        .variable("ihydrounit2d")
+        .expect("inspect_spatial_input verified ihydrounit2d")
+        .get_values::<i64, _>((0..summary.nlat, 0..summary.nlon))?;
+    ensure!(
+        catchments.len() == hydrounits.len(),
+        "catchment IDs and hydrounit IDs must have equal cell counts"
+    );
+    let longitude = longitude_cells(&grid, raw_grid)?;
+    let latitude = latitude_cells(&grid, raw_grid)?;
+    let pixel = pixel_axes(&longitude, &latitude, raw_grid)?;
+
+    let mut members = BTreeMap::<i64, Vec<(i32, i32, i32)>>::new();
+    let mut raw_count = 0_usize;
+    for (row, &cell_latitude) in latitude.iter().enumerate() {
+        for (column, &cell_longitude) in longitude.iter().enumerate() {
+            let offset = row * summary.nlon + column;
+            let catchment = catchments[offset];
+            if catchment <= 0 {
+                continue;
+            }
+            let hydrounit = i32::try_from(hydrounits[offset])
+                .context("catchment hydrounit does not fit int32")?;
+            ensure!(
+                hydrounit > 0,
+                "catchment {catchment} has a non-positive hydrounit"
+            );
+            let width = cell_longitude.end - cell_longitude.start;
+            let height = cell_latitude.south - cell_latitude.north;
+            let cells = width
+                .checked_mul(height)
+                .context("catchment raw-pixel count overflows usize")?;
+            raw_count = raw_count
+                .checked_add(cells)
+                .context("catchment raw-pixel count overflows usize")?;
+            ensure!(
+                raw_count <= MAX_SERIAL_RAW_PIXELS,
+                "catchment expands to {raw_count} raw pixels; the serial topology path is limited to {MAX_SERIAL_RAW_PIXELS}. Use the block-distributed spatial path for this domain"
+            );
+            let output = members.entry(catchment).or_default();
+            for global_y in (cell_latitude.north + 1..=cell_latitude.south).rev() {
+                let local_y = cell_latitude.window_south - global_y + 1;
+                for global_x in cell_longitude.start + 1..=cell_longitude.end {
+                    let local_x = global_x - cell_longitude.window_west;
+                    output.push((i32::try_from(local_x)?, i32::try_from(local_y)?, hydrounit));
+                }
+            }
+        }
+    }
+    ensure!(
+        !members.is_empty(),
+        "catchment mesh has no positive elements"
+    );
+
+    let lake_id = file
+        .variable("lake_id")
+        .expect("inspect_spatial_input verified lake_id")
+        .get_values::<i64, _>(..)?;
+    let mut element_ids = Vec::with_capacity(members.len());
+    let mut offsets = Vec::with_capacity(members.len() + 1);
+    let mut ilon = Vec::with_capacity(raw_count);
+    let mut ilat = Vec::with_capacity(raw_count);
+    let mut hydrounit_types = Vec::with_capacity(raw_count);
+    let mut lake_sign = Vec::with_capacity(members.len());
+    offsets.push(0);
+    for (catchment, pixels) in members {
+        let basin = usize::try_from(catchment - 1)
+            .context("catchment element identity cannot index lake metadata")?;
+        let lake = *lake_id
+            .get(basin)
+            .with_context(|| format!("catchment element {catchment} exceeds lake metadata"))?;
+        element_ids.push(catchment);
+        lake_sign.push((lake > 0) as i32);
+        for (x, y, hydrounit) in pixels {
+            ilon.push(x);
+            ilat.push(y);
+            hydrounit_types.push(hydrounit);
+        }
+        offsets.push(ilon.len());
+    }
+    let mesh = FlatMesh::new(element_ids, offsets, ilon, ilat)?;
+    let (mesh, land_hrus) = mesh.into_land_hrus(&hydrounit_types, &lake_sign)?;
+    let land_elements = mesh.land_elements();
+    Ok(CatchmentSpatialTopology {
+        topology: SpatialTopology {
+            kind: SpatialInputKind::Catchment,
+            grid,
+            pixel,
+            mesh,
+            land_elements,
+        },
+        land_hrus,
+    })
+}
+
 /// Read one aligned land-cover raster and build CoLM's LCT patch partition.
 ///
 /// The raster is read one latitude strip at a time, with a split read at the
@@ -232,10 +371,64 @@ pub fn build_lct_land_patches_from_raster(
     Ok((topology, patches))
 }
 
+/// Build CATCHMENT LCT land patches, preserving every HRU boundary.
+///
+/// Lake HRUs are water, zero land-cover values are water, and IGBP class 11
+/// is remapped to 10, following the CATCHMENT branch of landpatch_build.
+pub fn build_catchment_lct_land_patches_from_raster(
+    mut catchment: CatchmentSpatialTopology,
+    raster: impl AsRef<Path>,
+    variable: &str,
+    raw_grid: Grid,
+    dominant_type: bool,
+    waterbody: i32,
+) -> Result<(CatchmentSpatialTopology, FlatLandPatches)> {
+    ensure!(waterbody > 0, "catchment waterbody class must be positive");
+    let mut types = read_mesh_raster_i32(
+        raster.as_ref(),
+        variable,
+        &catchment.topology.mesh,
+        &catchment.topology.pixel,
+        raw_grid,
+    )?;
+    let mut element_offsets = Vec::with_capacity(catchment.topology.mesh.len());
+    let mut offset = 0_usize;
+    for element in 0..catchment.topology.mesh.len() {
+        element_offsets.push(offset);
+        offset += catchment.topology.mesh.pixel_count(element)?;
+    }
+    for hru in 0..catchment.land_hrus.len() {
+        let element = catchment.land_hrus.element_index[hru]
+            .checked_sub(1)
+            .context("catchment HRU has zero element index")?;
+        let start = element_offsets[element] + catchment.land_hrus.pixel_start[hru] - 1;
+        let end = element_offsets[element] + catchment.land_hrus.pixel_end[hru];
+        if catchment.land_hrus.set_type[hru] <= 0 {
+            types[start..end].fill(waterbody);
+        } else {
+            for kind in &mut types[start..end] {
+                if *kind == 0 {
+                    *kind = waterbody;
+                } else if *kind == 11 {
+                    *kind = 10;
+                }
+            }
+        }
+    }
+    let (mesh, patches) = catchment.topology.mesh.into_land_patches_by_sets(
+        &types,
+        &catchment.land_hrus,
+        dominant_type,
+    )?;
+    catchment.topology.land_elements = mesh.land_elements();
+    catchment.topology.mesh = mesh;
+    Ok((catchment, patches))
+}
+
 /// Build the IGBP patch partition used by non-solo PFT runs.
 ///
-/// `MOD_LandPatch` merges every IGBP soil-ground class into class one before
-/// it partitions the mesh for PFTs.  Urban, wetland, ice, lake, and ocean
+/// MOD_LandPatch merges every IGBP soil-ground class into class one before
+/// it partitions the mesh for PFTs. Urban, wetland, ice, lake, and ocean
 /// remain distinct so their downstream non-PFT initialization stays intact.
 pub fn build_pft_land_patches_from_raster(
     mut topology: SpatialTopology,
@@ -639,14 +832,23 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
     );
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
+    let mut rows = BTreeMap::new();
     let mut pixel_values = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
     for (local_y, global_y) in latitude.into_iter().enumerate() {
-        let row = read_raster_row::<T>(&source, global_y, &longitude, raw_grid.nlon)?;
+        if let Entry::Vacant(entry) = rows.entry(global_y) {
+            entry.insert(read_raster_row::<T>(
+                &source,
+                global_y,
+                &longitude,
+                raw_grid.nlon,
+            )?);
+        }
+        let row = rows.get(&global_y).expect("raw raster row was cached");
         ensure!(
             row.len() == pixel.lon_w.len(),
             "raw raster row {local_y} has an unexpected length"
         );
-        pixel_values.extend(row);
+        pixel_values.extend_from_slice(row);
     }
     mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
 }
@@ -833,17 +1035,7 @@ fn read_layer_raster_row(
     nlon: usize,
 ) -> Result<Vec<f64>> {
     ensure!(global_y > 0, "raw raster latitude indices are one-based");
-    let first = *longitude
-        .first()
-        .context("spatial pixel longitude is empty")?;
-    ensure!(
-        longitude
-            .iter()
-            .enumerate()
-            .all(|(offset, index)| *index == (first + offset - 1) % nlon + 1),
-        "spatial pixel longitudes must be contiguous in raw-grid order"
-    );
-    let read = |start: usize, count: usize| -> Result<Vec<f64>> {
+    projected_raster_row(longitude, nlon, |start, count| {
         let mut extents = vec![Extent::Index(0); 3];
         extents[axes.layer] = Extent::Index(layer);
         extents[axes.latitude] = Extent::Index(global_y - 1);
@@ -853,21 +1045,7 @@ fn read_layer_raster_row(
             stride: 1,
         };
         Ok(source.get_values::<f64, _>(extents)?)
-    };
-    let start = first - 1;
-    let width = longitude.len();
-    let values = if start + width <= nlon {
-        read(start, width)?
-    } else {
-        let mut values = read(start, nlon - start)?;
-        values.extend(read(0, width - (nlon - start))?);
-        values
-    };
-    ensure!(
-        values.len() == width,
-        "layered raster row returned an unexpected length"
-    );
-    Ok(values)
+    })
 }
 
 fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
@@ -1264,32 +1442,63 @@ fn read_raster_row<T: NcTypeDescriptor + Copy>(
     nlon: usize,
 ) -> Result<Vec<T>> {
     ensure!(global_y > 0, "raw raster latitude indices are one-based");
+    projected_raster_row(longitude, nlon, |start, count| {
+        Ok(source.get_values::<T, _>((global_y - 1..global_y, start..start + count))?)
+    })
+}
+
+fn projected_raster_row<T: Copy>(
+    longitude: &[usize],
+    nlon: usize,
+    mut read: impl FnMut(usize, usize) -> Result<Vec<T>>,
+) -> Result<Vec<T>> {
     let first = *longitude
         .first()
         .context("spatial pixel longitude is empty")?;
     ensure!(
-        longitude
-            .iter()
-            .enumerate()
-            .all(|(offset, index)| *index == (first + offset - 1) % nlon + 1),
-        "spatial pixel longitudes must be contiguous in raw-grid order"
+        first > 0 && first <= nlon,
+        "raw longitude is outside its grid"
     );
-    let width = longitude.len();
-    let start = first - 1;
-    let out = if start + width <= nlon {
-        source.get_values::<T, _>((global_y - 1..global_y, start..start + width))?
-    } else {
-        let mut values = source.get_values::<T, _>((global_y - 1..global_y, start..nlon))?;
-        values.extend(
-            source.get_values::<T, _>((global_y - 1..global_y, 0..width - (nlon - start)))?,
+    let mut unwrapped = Vec::with_capacity(longitude.len());
+    let mut previous = first;
+    for &index in longitude {
+        ensure!(
+            index > 0 && index <= nlon,
+            "raw longitude is outside its grid"
         );
+        let mut index = index;
+        while index < previous {
+            index += nlon;
+        }
+        ensure!(
+            index - first < nlon,
+            "spatial pixel longitudes span more than one raw-grid revolution"
+        );
+        unwrapped.push(index);
+        previous = index;
+    }
+    let width = unwrapped
+        .last()
+        .expect("nonempty longitudes")
+        .checked_sub(first)
+        .and_then(|span| span.checked_add(1))
+        .context("raw longitude span overflows usize")?;
+    let start = first - 1;
+    let values = if start + width <= nlon {
+        read(start, width)?
+    } else {
+        let mut values = read(start, nlon - start)?;
+        values.extend(read(0, width - (nlon - start))?);
         values
     };
     ensure!(
-        out.len() == width,
+        values.len() == width,
         "raw raster row returned an unexpected length"
     );
-    Ok(out)
+    Ok(unwrapped
+        .into_iter()
+        .map(|index| values[index - first])
+        .collect())
 }
 
 /// Write one scalar LCT-patch vector in the same per-block files as
@@ -1735,8 +1944,8 @@ fn pixel_axes(
         lat_n.push(raw.lat_n(index));
     }
     Ok(PixelAxes {
-        edge_south: *lat_s.first().context("spatial pixel latitude is empty")?,
-        edge_north: *lat_n.last().context("spatial pixel latitude is empty")?,
+        edge_south: lat_s.iter().copied().fold(f64::INFINITY, f64::min),
+        edge_north: lat_n.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         edge_west: *lon_w.first().context("spatial pixel longitude is empty")?,
         edge_east: *lon_e.last().context("spatial pixel longitude is empty")?,
         lon_w,
@@ -1794,6 +2003,49 @@ fn latitude_step(value: f64, raw: Grid) -> Result<usize> {
 
 fn nearly_equal(left: f64, right: f64) -> bool {
     (left - right).abs() <= ALIGNMENT_EPSILON.max(left.abs().max(right.abs()) * 1e-12)
+}
+
+fn catchment_grid(file: &netcdf::File, raw: Grid) -> Result<SpatialGrid> {
+    let longitude = coordinate(file, "lon")?;
+    let latitude = coordinate(file, "lat")?;
+    ensure!(
+        longitude.len() <= raw.nlon && latitude.len() <= raw.nlat,
+        "catchment coordinates exceed their raw grid"
+    );
+    ensure!(
+        latitude.windows(2).all(|pair| pair[0] > pair[1]),
+        "catchment latitude must run north-to-south"
+    );
+    let normalized_longitude = |value: f64| (value + 180.0).rem_euclid(360.0) - 180.0;
+    let mut lon_w = Vec::with_capacity(longitude.len());
+    let mut lon_e = Vec::with_capacity(longitude.len());
+    for value in longitude {
+        let value = normalized_longitude(value);
+        let index = raw.index_of(value, 0.0).0;
+        ensure!(
+            nearly_equal(value, raw.lon_center(index)),
+            "catchment longitude {value} is not aligned to the raw grid centres"
+        );
+        lon_w.push(raw.lon_w(index));
+        lon_e.push(raw.lon_e(index));
+    }
+    let mut lat_s = Vec::with_capacity(latitude.len());
+    let mut lat_n = Vec::with_capacity(latitude.len());
+    for value in latitude {
+        let index = raw.index_of(0.0, value).1;
+        ensure!(
+            nearly_equal(value, raw.lat_center(index)),
+            "catchment latitude {value} is not aligned to the raw grid centres"
+        );
+        lat_s.push(raw.lat_s(index));
+        lat_n.push(raw.lat_n(index));
+    }
+    Ok(SpatialGrid {
+        lon_w,
+        lon_e,
+        lat_s,
+        lat_n,
+    })
 }
 
 fn coordinate(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {

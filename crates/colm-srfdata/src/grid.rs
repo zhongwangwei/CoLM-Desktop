@@ -29,6 +29,12 @@ pub const COLM_500M: Grid = Grid {
     nlat: 43200,
 };
 
+/// merit_90m: the three-arcsecond grid assimilated by CATCHMENT.
+pub const MERIT_90M: Grid = Grid {
+    nlon: 432000,
+    nlat: 216000,
+};
+
 /// `colm_1km`：`grid_define_by_ndims(43200, 21600)`。
 ///
 /// USGS LCT retains this coarser raw lattice even though the common spatial

@@ -8,8 +8,9 @@ use colm_srfdata::soil::{
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
 use colm_srfdata::{
-    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_crop_land_patches,
-    build_crop_pft_topology, build_lct_land_patches_from_raster,
+    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index,
+    build_catchment_lct_land_patches_from_raster, build_catchment_spatial_topology,
+    build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
     build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
     crop_pft_pctshared, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
@@ -17,9 +18,10 @@ use colm_srfdata::{
     read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
     read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
-    write_spatial_pft_topology, write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, BlockLayout, FlatLandPatches, PftFractionInput,
-    PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM, COLM_500M,
+    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
+    write_spatial_topology, write_spatial_topology_with_shared, BlockLayout, FlatLandPatches,
+    PftFractionInput, PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM,
+    COLM_500M, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -382,7 +384,6 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     let args = parse_spatial_lct(args)?;
-    let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
     let lct_grid = match args.land_cover {
         SiteMode::Igbp => COLM_500M,
         SiteMode::Usgs => COLM_1KM,
@@ -390,14 +391,46 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             bail!("spatial-lct supports only IGBP or USGS land cover")
         }
     };
-    let (topology, patches) = build_lct_land_patches_from_raster(
-        topology,
-        &args.landtype,
-        "landtype",
-        lct_grid,
-        args.dominant,
-    )?;
+    let waterbody = match args.land_cover {
+        SiteMode::Igbp => 17,
+        SiteMode::Usgs => 16,
+        SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
+    };
+    let (topology, patches, land_hrus) = match args.kind {
+        SpatialInputKind::Catchment => {
+            let catchment = build_catchment_spatial_topology(&args.mesh, MERIT_90M)?;
+            let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
+                catchment,
+                &args.landtype,
+                "landtype",
+                lct_grid,
+                args.dominant,
+                waterbody,
+            )?;
+            (catchment.topology, patches, Some(catchment.land_hrus))
+        }
+        SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
+            let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
+            let (topology, patches) = build_lct_land_patches_from_raster(
+                topology,
+                &args.landtype,
+                "landtype",
+                lct_grid,
+                args.dominant,
+            )?;
+            (topology, patches, None)
+        }
+    };
     materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
+    if let Some(land_hrus) = land_hrus {
+        write_spatial_hru_topology(
+            &args.landdata,
+            args.year,
+            &topology,
+            &land_hrus,
+            &args.blocks,
+        )?;
+    }
     println!(
         "wrote {} spatial land elements and {} LCT patches to {}",
         topology.land_elements.element_ids.len(),
@@ -1093,7 +1126,10 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let kind = match args[0].as_str() {
         "latlon" => SpatialInputKind::GridBased,
         "unstructured" => SpatialInputKind::Unstructured,
-        other => bail!("spatial-lct mesh kind must be latlon or unstructured, got {other:?}"),
+        "catchment" => SpatialInputKind::Catchment,
+        other => {
+            bail!("spatial-lct mesh kind must be latlon, unstructured, or catchment, got {other:?}")
+        }
     };
     let year = args[4]
         .parse::<i32>()
@@ -1542,7 +1578,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -1737,5 +1773,20 @@ mod tests {
             monthly_pft_vegetation_source("MONTHLY_PFT_SAI", 2005).unwrap(),
             ("MOD2005".into(), "MONTHLY_PFT_SAI".into())
         );
+    }
+
+    #[test]
+    fn spatial_lct_parser_accepts_the_catchment_hierarchy() {
+        let parsed = parse_spatial_lct(&[
+            "catchment".into(),
+            "catchment.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.kind, SpatialInputKind::Catchment);
     }
 }

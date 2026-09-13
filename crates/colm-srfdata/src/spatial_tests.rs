@@ -778,3 +778,139 @@ fn coordinate_cft_raster_keeps_mesh_order_without_assuming_the_500m_grid() {
     assert_eq!(actual, expected);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+fn write_catchment_mesh(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    file.add_dimension("basin", 2).unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-135.0, -45.0, 45.0, 135.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[45.0, -45.0], ..)
+        .unwrap();
+    file.add_variable::<i64>("icatchment2d", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[1, 1, 2, 0, 1, 1, 2, 2], (.., ..))
+        .unwrap();
+    file.add_variable::<i32>("ihydrounit2d", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[1, 2, 1, 0, 1, 2, 1, 1], (.., ..))
+        .unwrap();
+    file.add_variable::<i32>("basin_numhru", &["basin"])
+        .unwrap()
+        .put_values(&[2, 1], ..)
+        .unwrap();
+    file.add_variable::<i32>("lake_id", &["basin"])
+        .unwrap()
+        .put_values(&[0, 4], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+#[test]
+fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
+    let directory = temporary("catchment");
+    let mesh_file = directory.join("catchment.nc");
+    let landtype = directory.join("landtype.nc");
+    write_catchment_mesh(&mesh_file);
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&landtype).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 4).unwrap();
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[8, 9, 11, 0, 8, 9, 12, 17], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let catchment =
+        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    assert_eq!(catchment.land_hrus.element_ids, vec![1, 1, 2]);
+    assert_eq!(catchment.land_hrus.pixel_start, vec![1, 3, 1]);
+    assert_eq!(catchment.land_hrus.pixel_end, vec![2, 4, 3]);
+    assert_eq!(catchment.land_hrus.set_type, vec![1, 2, -1]);
+    assert_eq!(catchment.topology.pixel.edge_south, -90.0);
+    assert_eq!(catchment.topology.pixel.edge_north, 90.0);
+
+    let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
+        catchment,
+        &landtype,
+        "landtype",
+        Grid { nlon: 4, nlat: 2 },
+        false,
+        17,
+    )
+    .unwrap();
+    assert_eq!(patches.element_ids, vec![1, 1, 2]);
+    assert_eq!(patches.pixel_start, vec![1, 3, 1]);
+    assert_eq!(patches.pixel_end, vec![2, 4, 3]);
+    assert_eq!(patches.set_type, vec![8, 9, 17]);
+
+    let landdata = directory.join("landdata");
+    let blocks = BlockLayout::regular(1, 1).unwrap();
+    write_spatial_topology(&landdata, 2005, &catchment.topology, &patches, &blocks).unwrap();
+    write_spatial_hru_topology(
+        &landdata,
+        2005,
+        &catchment.topology,
+        &catchment.land_hrus,
+        &blocks,
+    )
+    .unwrap();
+    let output = netcdf::open(landdata.join("landhru/2005/landhru_w180_s90.nc")).unwrap();
+    assert_eq!(
+        output
+            .variable("settyp")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        vec![1, 2, -1]
+    );
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
+    let directory = temporary("resampled-rawdata");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("landtype.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&raster).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[10, 20], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    assert_eq!(
+        read_mesh_raster_i32(
+            &raster,
+            "landtype",
+            &topology.mesh,
+            &topology.pixel,
+            Grid { nlon: 2, nlat: 1 },
+        )
+        .unwrap(),
+        vec![10, 10, 10, 10, 20, 20, 20, 20]
+    );
+
+    std::fs::remove_dir_all(directory).unwrap();
+}

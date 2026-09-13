@@ -188,17 +188,38 @@ impl FlatMesh {
         Ok((mesh, hrus))
     }
 
-    /// Port the core of `landpatch_build` for a raw land-type vector already
+    /// Port the core of landpatch_build for a raw land-type vector already
     /// gathered in this mesh's flat pixel order.
     ///
     /// CoLM sorts every element by land type and reorders its pixel coordinates
     /// in the same permutation, so subsequent aggregations can address one
-    /// contiguous range per patch.  This consumes the mesh to make that
+    /// contiguous range per patch. This consumes the mesh to make that
     /// mutation explicit and returns it with the resulting patch pixelset.
-    /// `dominant_type` matches `DEF_USE_DOMINANT_PATCHTYPE`.
+    /// dominant_type matches DEF_USE_DOMINANT_PATCHTYPE.
     pub fn into_land_patches(
+        self,
+        land_types: &[i32],
+        dominant_type: bool,
+    ) -> Result<(Self, FlatLandPatches)> {
+        let parent_sets = self.land_elements();
+        let parent_sets = FlatLandPatches {
+            element_ids: parent_sets.element_ids,
+            pixel_start: parent_sets.pixel_start,
+            pixel_end: parent_sets.pixel_end,
+            set_type: parent_sets.set_type,
+            element_index: parent_sets.element_index,
+        };
+        self.into_land_patches_by_sets(land_types, &parent_sets, dominant_type)
+    }
+
+    /// Port landpatch_build for a pre-existing partition of every mesh element.
+    ///
+    /// CATCHMENT first groups pixels into HRUs; land cover is then sorted only
+    /// inside each HRU range, never across HRU boundaries.
+    pub fn into_land_patches_by_sets(
         mut self,
         land_types: &[i32],
+        parent_sets: &FlatLandPatches,
         dominant_type: bool,
     ) -> Result<(Self, FlatLandPatches)> {
         ensure!(
@@ -211,6 +232,13 @@ impl FlatMesh {
             land_types.iter().all(|kind| *kind >= 0),
             "land-type values must be non-negative"
         );
+        ensure!(
+            parent_sets.element_ids.len() == parent_sets.len()
+                && parent_sets.pixel_start.len() == parent_sets.len()
+                && parent_sets.pixel_end.len() == parent_sets.len()
+                && parent_sets.element_index.len() == parent_sets.len(),
+            "parent pixelset vectors must have equal lengths"
+        );
 
         let mut element_ids = Vec::new();
         let mut pixel_start = Vec::new();
@@ -221,9 +249,31 @@ impl FlatMesh {
         let mut order = Vec::new();
         let mut sorted_lon = Vec::new();
         let mut sorted_lat = Vec::new();
+        let mut covered = vec![false; self.ilon.len()];
 
-        for element in 0..self.len() {
-            let range = self.pixel_offsets[element]..self.pixel_offsets[element + 1];
+        for set in 0..parent_sets.len() {
+            let element = parent_sets.element_index[set]
+                .checked_sub(1)
+                .with_context(|| format!("parent pixelset {set} has zero element index"))?;
+            ensure!(
+                self.element_id(element)? == parent_sets.element_ids[set],
+                "parent pixelset {set} element ID does not match the mesh"
+            );
+            let count = self.pixel_count(element)?;
+            let start = parent_sets.pixel_start[set];
+            let end = parent_sets.pixel_end[set];
+            ensure!(
+                start > 0 && start <= end && end <= count,
+                "parent pixelset {set} has invalid one-based pixel range {start}..={end} for element size {count}"
+            );
+            let offset = self.pixel_offsets[element];
+            let range = offset + start - 1..offset + end;
+            ensure!(
+                covered[range.clone()].iter().all(|seen| !*seen),
+                "parent pixelsets overlap at set {set}"
+            );
+            covered[range.clone()].fill(true);
+
             types.clear();
             types.extend_from_slice(&land_types[range.clone()]);
             order.clear();
@@ -244,21 +294,25 @@ impl FlatMesh {
             self.ilon[range.clone()].copy_from_slice(&sorted_lon);
             self.ilat[range.clone()].copy_from_slice(&sorted_lat);
 
-            let mut start = 0_usize;
-            while start < types.len() {
-                let kind = types[start];
-                let mut end = start + 1;
-                while end < types.len() && types[end] == kind {
-                    end += 1;
+            let mut local_start = 0_usize;
+            while local_start < types.len() {
+                let kind = types[local_start];
+                let mut local_end = local_start + 1;
+                while local_end < types.len() && types[local_end] == kind {
+                    local_end += 1;
                 }
                 element_ids.push(self.element_ids[element]);
-                pixel_start.push(start + 1);
-                pixel_end.push(end);
+                pixel_start.push(start + local_start);
+                pixel_end.push(start + local_end - 1);
                 set_type.push(kind);
                 element_index.push(element + 1);
-                start = end;
+                local_start = local_end;
             }
         }
+        ensure!(
+            covered.iter().all(|seen| *seen),
+            "parent pixelsets do not cover every mesh pixel"
+        );
         Ok((
             self,
             FlatLandPatches {

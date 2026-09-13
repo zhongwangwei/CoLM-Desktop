@@ -32,7 +32,7 @@ pub use albedo::{albedo, SoilAlbedo};
 pub use derive::{
     depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
 };
-pub use grid::{Grid, COLM_1KM, COLM_500M};
+pub use grid::{Grid, COLM_1KM, COLM_500M, MERIT_90M};
 pub use pft::{
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_crop_land_patches,
     build_crop_pft_topology, build_pft_topology, crop_pft_pctshared, CropLandPatchTopology,
@@ -43,6 +43,7 @@ pub use site::{
     single_point_surface_run_from_namelist, SinglePointSurfaceRun, SiteMode,
 };
 pub use spatial::{
+    build_catchment_lct_land_patches_from_raster, build_catchment_spatial_topology,
     build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_spatial_topology,
     mesh_cell_area_weights, read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64,
     read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64,
