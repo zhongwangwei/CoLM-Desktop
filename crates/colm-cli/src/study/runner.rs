@@ -1024,6 +1024,8 @@ fn run_members(
                     None,
                     1,
                     crate::PreprocessorMode::Fortran,
+                    None,
+                    None,
                     true,
                     &mut |notice| {
                         let event = match notice {

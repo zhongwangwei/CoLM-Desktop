@@ -14,7 +14,8 @@
 //!                    [--spinup-years N] [--spinup-repeat N]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1] [--ranks N]
-//!                    [--preprocessors rust|fortran]
+//!                    [--preprocessors rust|fortran] [--highres-params <dir>]
+//!                    [--soil-hyper-albedo-dir <dir>]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
@@ -82,11 +83,15 @@ usage:
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1] [--ranks N]
                    [--stage mksrfdata|mkinidata|colm] [--preprocessors rust|fortran]
+                   [--highres-params <dir>] [--soil-hyper-albedo-dir <dir>]
                    # --force 不读取或写入指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
                    # --ranks 使用 MPI 启动；进程角色由内核决定，默认 1
                    # Rust 默认只替换 mksrfdata/mkinidata；colm 保持已校验的 Fortran 内核
+                   # HYPERSPECTRAL 空间 PFT/PC：--highres-params 包含 fsds/、
+                   # leaf_optical_properties/ 和 water_params.txt；--soil-hyper-albedo-dir
+                   # 包含 colm_soil_albedo_400nm.nc ... colm_soil_albedo_2500nm.nc
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -229,6 +234,10 @@ fn main() -> Result<()> {
                 requested_run_stage(opts.get("--stage").as_deref())?,
                 opts.count("--ranks", 1)? as usize,
                 requested_preprocessors(opts.get("--preprocessors").as_deref())?,
+                opts.get("--highres-params").as_deref().map(Path::new),
+                opts.get("--soil-hyper-albedo-dir")
+                    .as_deref()
+                    .map(Path::new),
             )?;
         }
         "metrics" => {
@@ -380,6 +389,10 @@ fn main() -> Result<()> {
                 None,
                 opts.count("--ranks", 1)? as usize,
                 requested_preprocessors(opts.get("--preprocessors").as_deref())?,
+                opts.get("--highres-params").as_deref().map(Path::new),
+                opts.get("--soil-hyper-albedo-dir")
+                    .as_deref()
+                    .map(Path::new),
             )?;
             match opts.get("--obs") {
                 Some(obs) => cmd_metrics(MetricsRequest {
@@ -1849,19 +1862,11 @@ fn rust_preprocessor_arguments(
     stage: Stage,
     namelist: &Path,
     kernel: &Kernel,
+    highres_params: Option<&Path>,
+    soil_hyper_albedo_dir: Option<&Path>,
 ) -> Result<Vec<String>> {
     if stage == Stage::Colm {
         return Ok(Vec::new());
-    }
-    if kernel
-        .manifest
-        .macros
-        .iter()
-        .any(|macro_name| macro_name == "HYPERSPECTRAL")
-    {
-        bail!(
-            "Rust preprocessor selection for HYPERSPECTRAL kernels is not wired through this namelist runner; use --preprocessors fortran rather than writing an incomplete restart"
-        );
     }
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read {}", namelist.display()))?;
@@ -1872,9 +1877,6 @@ fn rust_preprocessor_arguments(
         Some(other) => bail!("DEF_USE_LCT must be logical, got {other}"),
         None => true,
     };
-    if !lct {
-        return Ok(Vec::new());
-    }
     let urban = match document.get("DEF_URBAN_RUN") {
         Some(colm_namelist::Value::Bool(value)) => *value,
         Some(other) => bail!("DEF_URBAN_RUN must be logical, got {other}"),
@@ -1889,7 +1891,42 @@ fn rust_preprocessor_arguments(
         // The copied blocks already encode their own selected classification.
         return Ok(Vec::new());
     }
-    let land_cover = if urban || kernel.manifest.macros.iter().any(|item| item == "LULC_IGBP") {
+    let hyperspectral = kernel
+        .manifest
+        .macros
+        .iter()
+        .any(|macro_name| macro_name == "HYPERSPECTRAL");
+    let mut arguments = Vec::new();
+    if hyperspectral && stage == Stage::MkSrfData && colm_case::is_spatial_case(namelist)? {
+        let directory = canonical_input_directory(
+            soil_hyper_albedo_dir.context(
+                "HYPERSPECTRAL Rust mksrfdata needs --soil-hyper-albedo-dir; use --preprocessors fortran if its 211 soil-albedo files are unavailable",
+            )?,
+            "--soil-hyper-albedo-dir",
+        )?;
+        arguments.extend([
+            "--soil-hyper-albedo-dir".to_owned(),
+            directory.display().to_string(),
+        ]);
+    }
+    if hyperspectral && stage == Stage::MkIniData {
+        arguments.extend(hyperspectral_mkinidata_arguments(
+            namelist,
+            &document,
+            lct,
+            highres_params,
+        )?);
+    }
+    if !lct {
+        return Ok(arguments);
+    }
+    let land_cover = if urban
+        || kernel
+            .manifest
+            .macros
+            .iter()
+            .any(|item| item == "LULC_IGBP")
+    {
         "igbp"
     } else if kernel
         .manifest
@@ -1903,7 +1940,133 @@ fn rust_preprocessor_arguments(
             "kernel manifest selects neither LULC_IGBP nor LULC_USGS; Rust LCT preprocessing cannot select the correct table"
         );
     };
-    Ok(vec!["--land-cover".into(), land_cover.into()])
+    arguments.extend(["--land-cover".into(), land_cover.into()]);
+    Ok(arguments)
+}
+
+fn canonical_input_directory(path: &Path, option: &str) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("{option} does not exist: {}", path.display()))?;
+    if !canonical.is_dir() {
+        bail!("{option} must be a directory: {}", canonical.display());
+    }
+    Ok(canonical)
+}
+
+fn canonical_input_file(path: PathBuf, option: &str) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("{option} source does not exist: {}", path.display()))?;
+    if !canonical.is_file() {
+        bail!("{option} source must be a file: {}", canonical.display());
+    }
+    Ok(canonical)
+}
+
+fn case_logical(document: &colm_namelist::Document, field: &str, default: bool) -> Result<bool> {
+    match document.get(field) {
+        Some(colm_namelist::Value::Bool(value)) => Ok(*value),
+        Some(other) => bail!("{field} must be logical, got {other}"),
+        None => Ok(default),
+    }
+}
+
+fn hyperspectral_mkinidata_arguments(
+    namelist: &Path,
+    document: &colm_namelist::Document,
+    lct: bool,
+    highres_params: Option<&Path>,
+) -> Result<Vec<String>> {
+    if !colm_case::is_spatial_case(namelist)? || lct {
+        bail!(
+            "Rust HYPERSPECTRAL cold starts are currently supported only by spatial PFT/PC cases; use --preprocessors fortran for single-point, LCT, or urban cases"
+        );
+    }
+    let pc = case_logical(document, "DEF_USE_PC", false)?;
+    let pft = case_logical(document, "DEF_USE_PFT", !pc)?;
+    if pft == pc {
+        bail!("HYPERSPECTRAL Rust cold start needs exactly one of DEF_USE_PFT and DEF_USE_PC");
+    }
+    let vegetation = pft
+        && (case_logical(document, "DEF_HighResVeg", true)?
+            || case_logical(document, "DEF_PROSPECT", false)?);
+    let soil = case_logical(document, "DEF_HighResSoil", true)?;
+    let mut arguments = vec!["--hyperspectral".to_owned()];
+    if !pft && !soil {
+        return Ok(arguments);
+    }
+    let root = canonical_input_directory(
+        highres_params.context(
+            "HYPERSPECTRAL Rust mkinidata needs --highres-params; use --preprocessors fortran if the optical parameter package is unavailable",
+        )?,
+        "--highres-params",
+    )?;
+    if pft {
+        let radiation =
+            canonical_input_file(root.join("fsds/swnb_480bnd_fsds.nc"), "--highres-params")?;
+        arguments.extend([
+            "--highres-radiation".to_owned(),
+            radiation.display().to_string(),
+        ]);
+    }
+    if vegetation {
+        let leaf = canonical_input_file(
+            root.join("leaf_optical_properties/colm_PFT_params.nc"),
+            "--highres-params",
+        )?;
+        arguments.extend([
+            "--highres-leaf-optics".to_owned(),
+            leaf.display().to_string(),
+        ]);
+    }
+    if soil {
+        let water = canonical_input_file(root.join("water_params.txt"), "--highres-params")?;
+        arguments.extend([
+            "--highres-water-optics".to_owned(),
+            water.display().to_string(),
+        ]);
+    }
+    Ok(arguments)
+}
+
+fn rust_preprocessor_input_identity(arguments: &[String]) -> Result<String> {
+    let mut inputs = Vec::new();
+    for pair in arguments.windows(2) {
+        if matches!(
+            pair[0].as_str(),
+            "--soil-hyper-albedo-dir"
+                | "--highres-leaf-optics"
+                | "--highres-water-optics"
+                | "--highres-radiation"
+        ) {
+            let path = Path::new(&pair[1]);
+            inputs.push(format!(
+                "{}={}:{}",
+                pair[0],
+                path.display(),
+                fingerprint::input_identity(path)?
+            ));
+        }
+    }
+    Ok(inputs.join(";"))
+}
+
+fn stage_preprocessor_input_identity(
+    stage: Stage,
+    surface: Option<&str>,
+    initial: Option<&str>,
+) -> Option<String> {
+    match stage {
+        Stage::MkSrfData => surface.map(str::to_owned),
+        // A changed surface source changes its downstream restart and history too.
+        Stage::MkIniData | Stage::Colm => match (surface, initial) {
+            (Some(surface), Some(initial)) => Some(format!("{surface};{initial}")),
+            (Some(surface), None) => Some(surface.to_owned()),
+            (None, Some(initial)) => Some(initial.to_owned()),
+            (None, None) => None,
+        },
+    }
 }
 
 enum RunNotice<'a> {
@@ -1913,6 +2076,7 @@ enum RunNotice<'a> {
     StageDone { stage: &'a str, ok: bool },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     case: &Path,
     kernel_dir: &Path,
@@ -1921,6 +2085,8 @@ fn cmd_run(
     only_stage: Option<Stage>,
     ranks: usize,
     preprocessors: PreprocessorMode,
+    highres_params: Option<&Path>,
+    soil_hyper_albedo_dir: Option<&Path>,
 ) -> Result<()> {
     run_case(
         case,
@@ -1930,6 +2096,8 @@ fn cmd_run(
         only_stage,
         ranks,
         preprocessors,
+        highres_params,
+        soil_hyper_albedo_dir,
         false,
         &mut |_| {},
     )
@@ -1944,6 +2112,8 @@ fn run_case(
     only_stage: Option<Stage>,
     ranks: usize,
     preprocessors: PreprocessorMode,
+    highres_params: Option<&Path>,
+    soil_hyper_albedo_dir: Option<&Path>,
     quiet: bool,
     notice: &mut dyn FnMut(RunNotice<'_>),
 ) -> Result<()> {
@@ -1990,6 +2160,38 @@ fn run_case(
         kernel.manifest.stage_fingerprint_identity(),
         preprocessors.as_str()
     );
+    let rust_mksrfdata_arguments = (preprocessors == PreprocessorMode::Rust
+        && only_stage.is_none_or(|stage| stage == Stage::MkSrfData))
+    .then(|| {
+        rust_preprocessor_arguments(
+            Stage::MkSrfData,
+            &layout.case_nml(),
+            &kernel,
+            highres_params,
+            soil_hyper_albedo_dir,
+        )
+    })
+    .transpose()?;
+    let rust_mkinidata_arguments = (preprocessors == PreprocessorMode::Rust
+        && only_stage.is_none_or(|stage| stage == Stage::MkIniData))
+    .then(|| {
+        rust_preprocessor_arguments(
+            Stage::MkIniData,
+            &layout.case_nml(),
+            &kernel,
+            highres_params,
+            soil_hyper_albedo_dir,
+        )
+    })
+    .transpose()?;
+    let rust_mksrfdata_identity = rust_mksrfdata_arguments
+        .as_deref()
+        .map(rust_preprocessor_input_identity)
+        .transpose()?;
+    let rust_mkinidata_identity = rust_mkinidata_arguments
+        .as_deref()
+        .map(rust_preprocessor_input_identity)
+        .transpose()?;
     let mut marks = fingerprint::load(case);
     if force {
         match only_stage {
@@ -2014,6 +2216,20 @@ fn run_case(
             continue;
         }
         let sname = stage.program();
+        let rust_arguments = match stage {
+            Stage::MkSrfData => rust_mksrfdata_arguments.as_deref(),
+            Stage::MkIniData => rust_mkinidata_arguments.as_deref(),
+            Stage::Colm => None,
+        };
+        let preprocessor_inputs = stage_preprocessor_input_identity(
+            *stage,
+            rust_mksrfdata_identity.as_deref(),
+            rust_mkinidata_identity.as_deref(),
+        );
+        let stage_kernel_id = preprocessor_inputs.map_or_else(
+            || kernel_id.clone(),
+            |inputs| format!("{kernel_id};rust-preprocessor-inputs={inputs}"),
+        );
         // `--force` 的契约是完全忽略指纹。尤其在首次复跑一个完整
         // rawdata 目录时，递归扫描所有未使用的历史备份既不能决定是否执行，
         // 也不该阻挡内核启动；本轮结束后不写标记，下次常规运行仍会保守复跑。
@@ -2026,7 +2242,7 @@ fn run_case(
                 &layout.case_nml(),
                 &out,
                 &marks,
-                &kernel_id,
+                &stage_kernel_id,
             )?;
             (Some(want), have_all, skip)
         };
@@ -2102,7 +2318,6 @@ fn run_case(
             && matches!(stage, Stage::MkSrfData | Stage::MkIniData)
         {
             let executable = rust_preprocessor_executable(*stage)?;
-            let arguments = rust_preprocessor_arguments(*stage, &layout.case_nml(), &kernel)?;
             colm_kernel::run_stage_streaming_with_executable(
                 &kernel,
                 *stage,
@@ -2110,7 +2325,7 @@ fn run_case(
                 &layout.case_nml(),
                 case,
                 artifacts,
-                &arguments,
+                rust_arguments.expect("Rust preprocessing stage has prepared arguments"),
                 &mut forward,
             )?
         } else {

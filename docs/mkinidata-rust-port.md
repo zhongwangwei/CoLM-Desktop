@@ -51,8 +51,11 @@ enabled downscaling branch meet all of these conditions:
    initial restarts once Rust-created transfer vectors exist. Desktop packaging now ships
    `mkinidata-rs` beside `colm-cli`; `colm-cli run` selects Rust for both preprocessing
    stages by default while keeping the verified Fortran `colm` executable. Use
-   `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL kernels remain guarded
-   at this integration boundary until their namelist source wiring is complete. Spatial Rust
+   `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL spatial PFT/PC runs use
+   `colm-cli run --highres-params <dir>`, whose required `fsds/`,
+   `leaf_optical_properties/`, and `water_params.txt` sources are validated and fingerprinted
+   before Rust writes a restart. Scalar LCT/urban and single-point HYPERSPECTRAL cold starts
+   remain safely delegated to the Fortran preprocessor. Spatial Rust
    restarts now carry the six TOPMODEL fields when `DEF_Runoff_SCHEME=0` and the 9-aspect
    curvature/slope/aspect vectors when `DEF_USE_Forcing_Downscaling_Simple=.true.`.
 

@@ -242,6 +242,41 @@ fn record_file(out: &mut BTreeMap<String, String>, path: PathBuf, kind: FileKind
     out.insert(key, marker);
 }
 
+/// Stable-enough identity for an explicit Rust-preprocessor source.
+///
+/// This shares the normal stage-fingerprint policy: small files are hashed in full,
+/// while large rasters and source trees use the bounded forms used for rawdata.
+pub fn input_identity(path: &Path) -> Result<String> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let metadata = std::fs::metadata(&canonical)
+        .with_context(|| format!("cannot inspect preprocessing input {}", path.display()))?;
+    if metadata.is_dir() {
+        return directory_fingerprint(&canonical)
+            .map(|hash| format!("dir-sha256:{hash}"))
+            .with_context(|| format!("cannot fingerprint preprocessing input {}", path.display()));
+    }
+    if !metadata.is_file() {
+        return Ok(format!("not-a-file:{}", metadata_signature(&metadata)));
+    }
+    if is_large_data(&canonical) {
+        return Ok(format!(
+            "sample-sha256:{}:{}",
+            sample_file(&canonical).with_context(|| format!(
+                "cannot fingerprint preprocessing input {}",
+                path.display()
+            ))?,
+            metadata_signature(&metadata)
+        ));
+    }
+    Ok(format!(
+        "sha256:{}",
+        sha256_file(&canonical).with_context(|| format!(
+            "cannot fingerprint preprocessing input {}",
+            path.display()
+        ))?
+    ))
+}
+
 fn directory_fingerprint(path: &Path) -> std::io::Result<String> {
     // ponytail: directory trees use path/size/mtime only; reading samples from
     // tens of thousands of rawdata files delayed every run before MPI started.

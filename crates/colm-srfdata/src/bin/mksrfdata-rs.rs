@@ -1435,13 +1435,7 @@ fn materialize_spatial_common_fields(
         )?;
     }
     if let Some(directory) = &args.soil_hyper_albedo_dir {
-        let (waterbody, ice) = match args.land_cover {
-            SiteMode::Igbp => (17, 15),
-            SiteMode::Usgs => (16, 24),
-            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
-                bail!("--soil-hyper-albedo-dir supports only LCT IGBP or USGS land cover")
-            }
-        };
+        let (waterbody, ice) = soil_hyper_albedo_classes(args.land_cover);
         let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         for wavelength in (400..=2500).step_by(10) {
             let raw = read_mesh_raster_f64(
@@ -1538,6 +1532,14 @@ fn materialize_spatial_common_fields(
         }
     }
     Ok(())
+}
+
+fn soil_hyper_albedo_classes(land_cover: SiteMode) -> (i32, i32) {
+    match land_cover {
+        // PFT/PC fractions are derived from the IGBP raster in the native spatial path.
+        SiteMode::Igbp | SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => (17, 15),
+        SiteMode::Usgs => (16, 24),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2339,6 +2341,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
     let mut crop = false;
     let mut observation = None;
     let mut spatial_blocks = None;
+    let mut soil_hyper_albedo_dir = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -2375,6 +2378,13 @@ fn materialize_case(args: &[String]) -> Result<()> {
                 spatial_blocks = Some([longitude.to_string(), latitude.to_string()]);
                 index += 3;
             }
+            "--soil-hyper-albedo-dir" => {
+                soil_hyper_albedo_dir = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--soil-hyper-albedo-dir needs colm_input_ghsad")?,
+                ));
+                index += 2;
+            }
             other => bail!(
                 "unknown mksrfdata-rs case option {other:?}
 {}",
@@ -2389,18 +2399,29 @@ fn materialize_case(args: &[String]) -> Result<()> {
         observation.as_deref(),
         spatial_blocks.as_ref(),
     )? {
+        ensure!(
+            soil_hyper_albedo_dir.is_none(),
+            "--soil-hyper-albedo-dir is unavailable with USE_srfdata_from_larger_region because the copied landdata already owns its spectral fields"
+        );
         let destination = command.destination.clone();
         clip_existing_surface(command.source, command.destination, command.bounds)?;
         println!("clipped existing surface data to {}", destination.display());
         return Ok(());
     }
-    if let Some(command) = spatial_case_command(
+    if let Some(mut command) = spatial_case_command(
         &namelist,
         lct_mode,
         crop,
         observation.as_deref(),
         spatial_blocks.as_ref(),
     )? {
+        if let Some(directory) = soil_hyper_albedo_dir {
+            command.required_directories.push(directory.clone());
+            command.args.extend([
+                "--soil-hyper-albedo-dir".to_owned(),
+                directory.display().to_string(),
+            ]);
+        }
         command.preflight()?;
         return if command.pft_or_pc {
             materialize_spatial_pft(&command.args)
@@ -2411,6 +2432,10 @@ fn materialize_case(args: &[String]) -> Result<()> {
     ensure!(
         spatial_blocks.is_none(),
         "--blocks is available only for a spatial case namelist"
+    );
+    ensure!(
+        soil_hyper_albedo_dir.is_none(),
+        "--soil-hyper-albedo-dir is available only for a spatial case namelist"
     );
     let (run, report) = materialize_single_point_surface_from_namelist(
         &namelist,
@@ -3166,7 +3191,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 
 fn usage() -> &'static str {
     "usage:
-  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
+  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
@@ -3175,6 +3200,14 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hyperspectral_soil_albedo_keeps_igbp_classes_for_pft_and_pc() {
+        for mode in [SiteMode::Igbp, SiteMode::Pft, SiteMode::Pc, SiteMode::Urban] {
+            assert_eq!(soil_hyper_albedo_classes(mode), (17, 15));
+        }
+        assert_eq!(soil_hyper_albedo_classes(SiteMode::Usgs), (16, 24));
+    }
 
     #[test]
     fn spatial_lct_parser_requires_explicit_mesh_contract() {
