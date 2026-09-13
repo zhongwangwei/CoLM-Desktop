@@ -11,6 +11,7 @@ pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;
 pub mod crop_phenology;
+pub mod forcing_downscaling;
 pub mod glacier;
 pub mod ground_fluxes;
 pub mod ground_humidity;
@@ -93,6 +94,13 @@ pub use crop_phenology::{
     crop_phenology_climate_step, crop_phenology_step, CropPhenologyClimateInput,
     CropPhenologyClimateState, CropPhenologyInput, CropPhenologyState,
     IRRIGATED_WINTER_WHEAT_CLASS, WINTER_WHEAT_CLASS,
+};
+pub use forcing_downscaling::{
+    atmospheric_density, downscale_forcings, downscale_wind, downscale_wind_simple,
+    DownscaledForcing, DownscalingSolarGeometry, DownscalingTerrain, ForcingDownscalingConfig,
+    ForcingDownscalingInput, FullTerrain, GridForcing, LongwaveDownscaling,
+    PrecipitationDownscaling, ShadowMask, SimpleTerrain, ASPECT_TYPES, AZIMUTH_BINS,
+    SHADOW_CURVE_PARAMETERS, SLOPE_TYPES, ZENITH_BINS,
 };
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
