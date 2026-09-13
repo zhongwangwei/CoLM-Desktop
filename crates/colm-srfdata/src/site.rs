@@ -15,7 +15,7 @@ use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
-use crate::raster::{point_f64, point_i32, point_time_f64};
+use crate::raster::{point_5x5_time_f64, point_f64, point_i32, point_time_f64};
 use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
 use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
@@ -171,6 +171,9 @@ pub struct SinglePointSurfaceRun {
     /// Exact rawdata years used when native LCT eight-day LAI is not supplied
     /// by the site surface.
     pub eight_day_lai_years: Vec<i32>,
+    /// Exact rawdata years used when native LCT monthly LAI/SAI are not
+    /// supplied by the site surface.
+    pub monthly_lai_years: Vec<i32>,
     /// `DEF_USE_CANYON_HWR` selects the source geometry representation for
     /// urban sites.  The two source fields are not interchangeable.
     pub urban_canyon_hwr: bool,
@@ -191,6 +194,7 @@ struct SinglePointMaterializeOptions<'a> {
     lai_frequency: SinglePointLaiFrequency,
     use_site_lai: bool,
     eight_day_lai_years: &'a [i32],
+    monthly_lai_years: &'a [i32],
 }
 
 /// Resolve the native single-point `mksrfdata` contract from `case.nml`.
@@ -258,9 +262,20 @@ pub fn single_point_surface_run_from_namelist(
     } else {
         SinglePointLaiFrequency::Monthly
     };
-    let eight_day_lai_years = match lai_frequency {
-        SinglePointLaiFrequency::Monthly => Vec::new(),
-        SinglePointLaiFrequency::EightDay => single_point_eight_day_lai_years(&document)?,
+    let lai_years = if !urban && lct {
+        single_point_lai_years(&document)?
+    } else {
+        Vec::new()
+    };
+    let eight_day_lai_years = if matches!(lai_frequency, SinglePointLaiFrequency::EightDay) {
+        lai_years.clone()
+    } else {
+        Vec::new()
+    };
+    let monthly_lai_years = if matches!(lai_frequency, SinglePointLaiFrequency::Monthly) && lct {
+        lai_years
+    } else {
+        Vec::new()
     };
     let use_site_lai = namelist_bool(&document, "USE_SITE_LAI", true)?;
     Ok(SinglePointSurfaceRun {
@@ -272,6 +287,7 @@ pub fn single_point_surface_run_from_namelist(
         lai_frequency,
         use_site_lai,
         eight_day_lai_years,
+        monthly_lai_years,
         urban_canyon_hwr,
         urban_lai_year_window,
     })
@@ -300,6 +316,7 @@ pub fn materialize_single_point_surface_from_namelist(
             lai_frequency: run.lai_frequency,
             use_site_lai: run.use_site_lai,
             eight_day_lai_years: &run.eight_day_lai_years,
+            monthly_lai_years: &run.monthly_lai_years,
         },
     )?;
     Ok((run, report))
@@ -357,7 +374,7 @@ fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -
     }
 }
 
-fn single_point_eight_day_lai_years(document: &colm_namelist::Document) -> Result<Vec<i32>> {
+fn single_point_lai_years(document: &colm_namelist::Document) -> Result<Vec<i32>> {
     let lai_start = namelist_i32(document, "DEF_LAI_START_YEAR", 2000)?;
     let lai_end = namelist_i32(document, "DEF_LAI_END_YEAR", 2020)?;
     ensure!(
@@ -1571,6 +1588,7 @@ pub fn materialize_single_point_surface(
             lai_frequency: SinglePointLaiFrequency::Monthly,
             use_site_lai: true,
             eight_day_lai_years: &[],
+            monthly_lai_years: &[],
         },
     )
 }
@@ -1668,13 +1686,16 @@ fn materialize_single_point_surface_impl(
     options: SinglePointMaterializeOptions<'_>,
 ) -> Result<Option<Report>> {
     let lai_frequency = options.lai_frequency;
+    let lct_monthly = matches!(mode, SiteMode::Igbp | SiteMode::Usgs)
+        && matches!(lai_frequency, SinglePointLaiFrequency::Monthly);
     let requires_eight_day_raw =
         matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && !options.use_site_lai;
+    let requires_monthly_raw = lct_monthly && !options.use_site_lai;
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
     let readiness = audit_with_lai_frequency(source, mode, None, crop_enabled, lai_frequency)?;
-    if readiness.self_contained() && !requires_eight_day_raw {
+    if readiness.self_contained() && !requires_eight_day_raw && !requires_monthly_raw {
         publish_single_point_surface(
             source,
             &target,
@@ -1711,7 +1732,19 @@ fn materialize_single_point_surface_impl(
             options.eight_day_lai_years,
         )?;
     }
-    let readiness = audit_with_lai_frequency(&temporary, mode, None, crop_enabled, lai_frequency)?;
+    let monthly_lai_missing = lct_monthly && {
+        let file = netcdf::open(&temporary)?;
+        file.variable("LAI_monthly").is_none() || file.variable("SAI_monthly").is_none()
+    };
+    if monthly_lai_missing || requires_monthly_raw {
+        materialize_single_point_monthly_lai(
+            &temporary,
+            rawdata.context("monthly LCT LAI needs DEF_dir_rawdata/plant_15s")?,
+            options.monthly_lai_years,
+        )?;
+    }
+    let readiness = audit_with_lai_frequency(&temporary, mode, None, crop_enabled, lai_frequency)
+        .context("cannot audit the materialized single-point surface")?;
     if !readiness.self_contained() {
         return Err(anyhow::anyhow!(
             "Rust single-point surface output still requires external data: {}",
@@ -1725,7 +1758,8 @@ fn materialize_single_point_surface_impl(
         crop_enabled,
         lai_frequency,
         options.urban,
-    )?;
+    )
+    .context("cannot publish the materialized single-point surface")?;
     std::fs::remove_file(&temporary)?;
     Ok(report)
 }
@@ -1793,6 +1827,92 @@ fn materialize_single_point_eight_day_lai(
         &values,
         "rawdata lai_15s_8day, x0.1 as MOD_SingleSrfdata.F90 does",
     )?;
+    file.close()
+        .with_context(|| format!("cannot close single-point surface {}", surface.display()))
+}
+
+fn materialize_single_point_monthly_lai(
+    surface: &Path,
+    rawdata: &Path,
+    years: &[i32],
+) -> Result<()> {
+    ensure!(
+        !years.is_empty(),
+        "monthly LCT LAI needs at least one resolved LAI year"
+    );
+    let (longitude, latitude) = {
+        let file = netcdf::open(surface)
+            .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        (
+            scalar_f64(&file, "longitude")?,
+            scalar_f64(&file, "latitude")?,
+        )
+    };
+    let plant = rawdata.join("plant_15s");
+    let mut lai = Vec::with_capacity(years.len() * 12);
+    let mut sai = Vec::with_capacity(years.len() * 12);
+    for &year in years {
+        let suffix = format!("MOD{year:04}");
+        for month in 1..=12 {
+            lai.push(
+                point_5x5_time_f64(
+                    &plant,
+                    &suffix,
+                    "MONTHLY_LC_LAI",
+                    longitude,
+                    latitude,
+                    month,
+                )
+                .with_context(|| format!("cannot read monthly LAI year {year}, month {month}"))?,
+            );
+            sai.push(
+                point_5x5_time_f64(
+                    &plant,
+                    &suffix,
+                    "MONTHLY_LC_SAI",
+                    longitude,
+                    latitude,
+                    month,
+                )
+                .with_context(|| format!("cannot read monthly SAI year {year}, month {month}"))?,
+            );
+        }
+    }
+    ensure!(
+        lai.iter()
+            .chain(&sai)
+            .all(|value| value.is_finite() && (0.0..=30.0).contains(value)),
+        "monthly LCT LAI/SAI rawdata values must be finite and within 0..30"
+    );
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::append(surface)
+        .with_context(|| format!("cannot append single-point surface {}", surface.display()))?;
+    if let Some(variable) = file.variable("LAI_year") {
+        ensure!(
+            variable.get_values::<i32, _>(..)? == years,
+            "existing LAI_year does not match the native monthly rawdata year window"
+        );
+    } else {
+        ensure_dimension(&mut file, "LAI_year", years.len())?;
+        put_values(
+            &mut file,
+            "LAI_year",
+            &["LAI_year"],
+            years,
+            "rawdata plant_15s selected by native mksrfdata",
+        )?;
+    }
+    ensure_dimension_with_len(&mut file, "month", 12)?;
+    for (name, values) in [("LAI_monthly", &lai), ("SAI_monthly", &sai)] {
+        put_or_replace_values(
+            &mut file,
+            name,
+            &["LAI_year", "month"],
+            values,
+            "rawdata plant_15s as MOD_SingleSrfdata.F90 does",
+        )?;
+    }
     file.close()
         .with_context(|| format!("cannot close single-point surface {}", surface.display()))
 }

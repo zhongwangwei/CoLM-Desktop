@@ -1343,6 +1343,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(run.mode, super::SiteMode::Igbp);
     assert!(!run.crop_enabled);
     assert_eq!(run.lai_frequency, super::SinglePointLaiFrequency::Monthly);
+    assert_eq!(run.monthly_lai_years, [2000]);
 
     std::fs::write(
         &namelist,
@@ -1360,6 +1361,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     );
     assert!(eight_day.use_site_lai);
     assert_eq!(eight_day.eight_day_lai_years, [2005]);
+    assert!(eight_day.monthly_lai_years.is_empty());
 
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -1669,6 +1671,165 @@ fn eight_day_lct_rawdata_fallback_samples_and_scales_native_lai() {
         .unwrap();
     assert_eq!((lai[0], lai[45]), (1.0, 5.5));
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn monthly_lct_rawdata_fallback_samples_native_lai_and_sai() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-srfdata-monthly-raw-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let raw = directory.join("rawdata/plant_15s");
+    std::fs::create_dir_all(&raw).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    let (tile, _, _) = crate::raster::tile_5x5_path(&raw, "MOD2008", -180.0, 90.0).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(tile).unwrap();
+        file.add_dimension("time", 12).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("MONTHLY_LC_LAI", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(&(1..=12).map(f64::from).collect::<Vec<_>>(), ..)
+            .unwrap();
+        file.add_variable::<f64>("MONTHLY_LC_SAI", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(
+                &(1..=12)
+                    .map(|month| f64::from(month) / 10.0)
+                    .collect::<Vec<_>>(),
+                ..,
+            )
+            .unwrap();
+        file.close().unwrap();
+    }
+    super::materialize_single_point_monthly_lai(&surface, &directory.join("rawdata"), &[2008])
+        .unwrap();
+    // USE_SITE_LAI=.false. follows this same replacement path even when the
+    // site file already carries a monthly series.
+    super::materialize_single_point_monthly_lai(&surface, &directory.join("rawdata"), &[2008])
+        .unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(file.dimension("month").unwrap().len(), 12);
+    assert_eq!(
+        file.variable("LAI_year")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        [2008]
+    );
+    let lai = file
+        .variable("LAI_monthly")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    let sai = file
+        .variable("SAI_monthly")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!((lai[0], lai[11], sai[0], sai[11]), (1.0, 12.0, 0.1, 1.2));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
+    let root =
+        std::env::temp_dir().join(format!("colm-srfdata-monthly-override-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    super::skeleton(&source, -180.0, 90.0, Some(10)).unwrap();
+    let directory = root.join("monthly-raw-output");
+    let complete = directory.join("complete.nc");
+    let landdata = directory.join("landdata");
+    let raw = directory.join("rawdata/plant_15s");
+    std::fs::create_dir_all(&raw).unwrap();
+    super::fill(&source, &complete, None, None).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&complete).unwrap();
+        file.add_dimension("LAI_year", 1).unwrap();
+        file.add_dimension("month", 12).unwrap();
+        file.add_variable::<i32>("LAI_year", &["LAI_year"])
+            .unwrap()
+            .put_values(&[2008], ..)
+            .unwrap();
+        for name in ["LAI_monthly", "SAI_monthly"] {
+            file.add_variable::<f64>(name, &["LAI_year", "month"])
+                .unwrap()
+                .put_values(&[0.0; 12], ..)
+                .unwrap();
+        }
+        for name in SINGLE_POINT_SOIL_FIELDS {
+            if file.variable(name).is_none() {
+                file.add_variable::<f64>(name, &["soil"])
+                    .unwrap()
+                    .put_values(&[0.1; 8], ..)
+                    .unwrap();
+            }
+        }
+        file.close().unwrap();
+    }
+    let readiness = super::audit(&complete, super::SiteMode::Igbp, None, false).unwrap();
+    assert!(readiness.self_contained(), "{:?}", readiness.needs_external);
+    let (tile, _, _) = crate::raster::tile_5x5_path(&raw, "MOD2008", -180.0, 90.0).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(tile).unwrap();
+        file.add_dimension("time", 12).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        for (name, values) in [
+            (
+                "MONTHLY_LC_LAI",
+                (1..=12).map(f64::from).collect::<Vec<_>>(),
+            ),
+            (
+                "MONTHLY_LC_SAI",
+                (1..=12).map(|month| f64::from(month) / 10.0).collect(),
+            ),
+        ] {
+            file.add_variable::<f64>(name, &["time", "lat", "lon"])
+                .unwrap()
+                .put_values(&values, ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    super::materialize_single_point_surface_impl(
+        &complete,
+        &landdata,
+        super::SiteMode::Igbp,
+        Some(directory.join("rawdata").as_path()),
+        None,
+        false,
+        super::SinglePointMaterializeOptions {
+            urban: super::UrbanSurfaceOptions::default(),
+            lai_frequency: super::SinglePointLaiFrequency::Monthly,
+            use_site_lai: false,
+            eight_day_lai_years: &[],
+            monthly_lai_years: &[2008],
+        },
+    )
+    .unwrap();
+    let file = netcdf::open(landdata.join("srfdata.nc")).unwrap();
+    assert_eq!(
+        file.variable("LAI_monthly")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[11],
+        12.0
+    );
+    assert_eq!(
+        file.variable("SAI_monthly")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[11],
+        1.2
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

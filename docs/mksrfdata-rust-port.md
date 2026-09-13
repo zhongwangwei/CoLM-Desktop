@@ -38,7 +38,9 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    time, applies CoLM's 0.1 scale, and writes all 46 `LAI_patchesDDD` vectors plus the
    `LAI_8-day` diagnostic frames. Single-point LCT uses the same 46 samples in
    `srfdata.nc`'s `(LAI_year, J8day)` `LAI_8day` contract; if the site file does not
-   supply it, Rust samples the same rawdata source directly. PFT/PC and LULCC retain the upstream monthly coercion. IGBP LULCC
+   supply it, Rust samples the same rawdata source directly. Monthly single-point LCT
+   likewise reads `plant_15s/MODYYYY`'s `MONTHLY_LC_LAI` and `MONTHLY_LC_SAI` when
+   either site data is absent or `USE_SITE_LAI=.false.`. PFT/PC and LULCC retain the upstream monthly coercion. IGBP LULCC
    cases also write the class-major previous-year transfer vectors required by the runtime;
    pre-2000 non-five-year source requests remain refused because upstream emits only monthly
    LAI for that special path. Desktop packaging now ships `mksrfdata-rs` beside `colm-cli`;
