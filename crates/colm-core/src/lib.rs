@@ -160,7 +160,8 @@ pub use net_solar::{
     net_solar, LocalNoonShortwave, NetSolarFluxes, NetSolarInput, ShortwaveForcing,
 };
 pub use pc_radiation::{
-    cold_start_pc_broadband_radiation_with_snow, PcCanopyRadiation, PcPftInput, PcPftRadiation,
+    cold_start_pc_broadband_radiation_from_ground, cold_start_pc_broadband_radiation_with_snow,
+    PcCanopyRadiation, PcPftInput, PcPftRadiation,
 };
 pub use phase_change::{
     phase_change, urban_phase_change, PhaseChangeInput, PhaseChangeState, UrbanPhaseChangeInput,

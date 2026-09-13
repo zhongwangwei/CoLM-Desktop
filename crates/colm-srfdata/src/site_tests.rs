@@ -14,6 +14,50 @@ fn the_required_list_is_the_twelve_measured_gaps() {
 }
 
 #[test]
+fn hyperspectral_point_sampler_adds_the_complete_site_spectrum() {
+    let root = std::env::temp_dir().join(format!("colm-srfdata-hyperspectral-{}", test_suffix()));
+    let source = root.join("source");
+    let surface = root.join("srfdata.nc");
+    std::fs::create_dir_all(&source).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(&surface).unwrap();
+        for (name, value) in [("longitude", -180.0), ("latitude", 90.0)] {
+            file.add_variable::<f64>(name, &[])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+        for wavelength in (400..=2500).step_by(10) {
+            let mut file =
+                netcdf::create(source.join(format!("colm_soil_albedo_{wavelength}nm.nc"))).unwrap();
+            file.add_dimension("lat", 1).unwrap();
+            file.add_dimension("lon", 1).unwrap();
+            file.add_variable::<f64>("albedo", &["lat", "lon"])
+                .unwrap()
+                .put_values(&[wavelength as f64], ..)
+                .unwrap();
+            file.close().unwrap();
+        }
+    }
+
+    append_single_point_hyperspectral_albedo(&surface, &source).unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    let values = file
+        .variable("soil_hyper_albedo")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(values.len(), HYPERSPECTRAL_WAVELENGTHS);
+    assert_eq!(values[0], 0.04);
+    assert_eq!(values[HYPERSPECTRAL_WAVELENGTHS - 1], 0.25);
+    drop(file);
+    assert!(append_single_point_hyperspectral_albedo(&surface, &source).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn the_site_classifier_wins_over_the_raster_when_both_are_available() {
     let src = plumber_fixture("texture-site-src");
     let dst = src.with_file_name("texture-site-dst.nc");

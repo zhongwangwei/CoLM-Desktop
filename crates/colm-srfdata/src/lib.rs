@@ -42,8 +42,10 @@ pub use pft::{
 };
 pub use region::{clip_existing_surface, SpatialBounds};
 pub use site::{
-    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
-    single_point_surface_run_from_namelist, SinglePointSurfaceRun, SiteMode,
+    append_single_point_hyperspectral_albedo, materialize_single_point_surface,
+    materialize_single_point_surface_from_namelist, single_point_surface_run_from_namelist,
+    validate_single_point_hyperspectral_albedo_directory, SinglePointSurfaceRun, SiteMode,
+    HYPERSPECTRAL_WAVELENGTHS,
 };
 pub use spatial::{
     build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,

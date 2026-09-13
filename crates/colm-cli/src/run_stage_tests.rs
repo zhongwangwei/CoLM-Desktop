@@ -58,7 +58,10 @@ fn only_the_three_real_kernel_stages_are_accepted() {
 
 #[test]
 fn rust_preprocessors_are_the_default_and_fortran_is_an_explicit_fallback() {
-    assert_eq!(requested_preprocessors(None).unwrap(), PreprocessorMode::Rust);
+    assert_eq!(
+        requested_preprocessors(None).unwrap(),
+        PreprocessorMode::Rust
+    );
     assert_eq!(
         requested_preprocessors(Some("fortran")).unwrap(),
         PreprocessorMode::Fortran
@@ -134,6 +137,67 @@ fn hyperspectral_pft_sidecars_receive_validated_optical_sources() {
 }
 
 #[test]
+fn hyperspectral_single_point_pft_uses_the_same_rust_sidecars() {
+    let root = test_directory("hyperspectral-single-point");
+    let params = root.join("params");
+    std::fs::create_dir_all(params.join("fsds")).unwrap();
+    std::fs::create_dir_all(params.join("leaf_optical_properties")).unwrap();
+    std::fs::write(params.join("fsds/swnb_480bnd_fsds.nc"), "radiation").unwrap();
+    std::fs::write(
+        params.join("leaf_optical_properties/colm_PFT_params.nc"),
+        "leaf",
+    )
+    .unwrap();
+    std::fs::write(params.join("water_params.txt"), "water").unwrap();
+    let soil = root.join("soil");
+    std::fs::create_dir(&soil).unwrap();
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        [
+            "&nl_colm",
+            "DEF_USE_LCT=.false.",
+            "DEF_USE_PFT=.true.",
+            "DEF_USE_PC=.false.",
+            "DEF_HighResUrban_albedo='urban_albedo.nc'",
+            "/",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    std::fs::write(root.join("urban_albedo.nc"), "urban").unwrap();
+
+    let mksrfdata = rust_preprocessor_arguments(
+        Stage::MkSrfData,
+        &namelist,
+        &hyperspectral_kernel(),
+        None,
+        Some(&soil),
+    )
+    .unwrap();
+    assert_eq!(mksrfdata[0], "--soil-hyper-albedo-dir");
+    let mkinidata = rust_preprocessor_arguments(
+        Stage::MkIniData,
+        &namelist,
+        &hyperspectral_kernel(),
+        Some(&params),
+        None,
+    )
+    .unwrap();
+    assert_eq!(mkinidata[0], "--hyperspectral");
+    assert!(mkinidata
+        .iter()
+        .any(|argument| argument == "--highres-radiation"));
+    assert!(mkinidata
+        .iter()
+        .any(|argument| argument == "--highres-leaf-optics"));
+    assert!(mkinidata
+        .iter()
+        .any(|argument| argument == "--highres-water-optics"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn hyperspectral_optical_sources_are_required_and_fingerprinted() {
     let root = test_directory("hyperspectral-fingerprint");
     let namelist = hyperspectral_pft_namelist(&root);
@@ -174,7 +238,7 @@ fn hyperspectral_optical_sources_are_required_and_fingerprinted() {
 }
 
 #[test]
-fn hyperspectral_pc_without_soil_or_pft_optics_needs_only_urban_albedo() {
+fn hyperspectral_pc_without_soil_or_pft_optics_needs_radiation_and_urban_albedo() {
     let root = test_directory("hyperspectral-pc-urban");
     let namelist = hyperspectral_pft_namelist(&root);
     std::fs::write(
@@ -182,15 +246,30 @@ fn hyperspectral_pc_without_soil_or_pft_optics_needs_only_urban_albedo() {
         "&nl_colm\nDEF_file_mesh='mesh.nc'\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.true.\nDEF_HighResSoil=.false.\nDEF_HighResUrban_albedo='urban_albedo.nc'\n/\n",
     )
     .unwrap();
-    let arguments =
-        rust_preprocessor_arguments(Stage::MkIniData, &namelist, &hyperspectral_kernel(), None, None)
-            .unwrap();
+    let params = root.join("params");
+    std::fs::create_dir_all(params.join("fsds")).unwrap();
+    std::fs::write(params.join("fsds/swnb_480bnd_fsds.nc"), "radiation").unwrap();
+    let arguments = rust_preprocessor_arguments(
+        Stage::MkIniData,
+        &namelist,
+        &hyperspectral_kernel(),
+        Some(&params),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         arguments,
         vec![
             "--hyperspectral".to_owned(),
             "--highres-urban-albedo".to_owned(),
             root.join("urban_albedo.nc")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            "--highres-radiation".to_owned(),
+            params
+                .join("fsds/swnb_480bnd_fsds.nc")
                 .canonicalize()
                 .unwrap()
                 .to_string_lossy()

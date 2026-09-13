@@ -56,14 +56,55 @@ pub fn cold_start_pc_broadband_radiation_with_snow(
             && soil_liquid_water_kg_m2.is_finite()
             && soil_thickness_m.is_finite()
             && soil_thickness_m > 0.0
-            && cosine_zenith.is_finite()
-            && cosine_zenith > 0.0
             && snow_depth_m.is_finite()
             && snow_depth_m >= 0.0
             && ground_snow_fraction.is_finite()
             && (0.0..=1.0).contains(&ground_snow_fraction)
-            && ground_temperature_k.is_finite()
-            && !pfts.is_empty(),
+            && ground_temperature_k.is_finite(),
+        "PC cold-start radiation inputs are invalid"
+    );
+    let (soil_ground, snow, ground, snow_age) = ground_albedos(
+        soil,
+        soil_liquid_water_kg_m2,
+        soil_thickness_m,
+        cosine_zenith,
+        snow_depth_m,
+        ground_snow_fraction,
+        ground_temperature_k,
+    )?;
+    cold_start_pc_broadband_radiation_from_ground(
+        pfts,
+        cosine_zenith,
+        soil_ground,
+        snow,
+        ground,
+        snow_age,
+    )
+}
+
+/// Runs PC cold-start canopy radiation with an already-resolved ground state.
+///
+/// HYPERSPECTRAL initialization obtains this state from CoLM's 211-band soil
+/// spectrum before the PC three-dimensional canopy solver is invoked.
+pub fn cold_start_pc_broadband_radiation_from_ground(
+    pfts: &[PcPftInput],
+    cosine_zenith: f64,
+    soil_ground: [[f64; RTYPES]; BANDS],
+    snow: [[f64; RTYPES]; BANDS],
+    ground: [[f64; RTYPES]; BANDS],
+    snow_age: f64,
+) -> Result<PcCanopyRadiation> {
+    ensure!(
+        cosine_zenith.is_finite()
+            && cosine_zenith > 0.0
+            && snow_age.is_finite()
+            && !pfts.is_empty()
+            && soil_ground
+                .iter()
+                .chain(&snow)
+                .chain(&ground)
+                .flatten()
+                .all(|value| value.is_finite()),
         "PC cold-start radiation inputs are invalid"
     );
     for pft in pfts {
@@ -92,15 +133,6 @@ pub fn cold_start_pc_broadband_radiation_with_snow(
         .iter()
         .map(|pft| pft.fraction / fraction_sum)
         .collect::<Vec<_>>();
-    let (soil_ground, snow, ground, snow_age) = ground_albedos(
-        soil,
-        soil_liquid_water_kg_m2,
-        soil_thickness_m,
-        cosine_zenith,
-        snow_depth_m,
-        ground_snow_fraction,
-        ground_temperature_k,
-    )?;
     let core = three_d_canopy(pfts, &fractions, cosine_zenith, ground)?;
     let pft = (0..pfts.len())
         .map(|index| PcPftRadiation {
@@ -993,6 +1025,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn explicit_ground_entry_matches_the_standard_ground_resolution() {
+        let pfts = [PcPftInput {
+            canopy_layer: 1,
+            fraction: 1.0,
+            canopy_top_m: 0.5,
+            canopy_bottom_m: 0.05,
+            optics: LeafOptics {
+                chil: -0.3,
+                reflectance: [[0.105, 0.36], [0.58, 0.58]],
+                transmittance: [[0.07, 0.22], [0.25, 0.38]],
+            },
+            lai: 1.2,
+            sai: 0.3,
+            wet_snow_fraction: 0.0,
+        }];
+        let soil = SoilReflectance {
+            saturated_visible: 0.12,
+            dry_visible: 0.22,
+            saturated_near_infrared: 0.26,
+            dry_near_infrared: 0.36,
+        };
+        let standard = cold_start_pc_broadband_radiation_with_snow(
+            0, soil, 0.0, 0.02, &pfts, 0.5, 0.0, 0.0, 273.16,
+        )
+        .unwrap();
+        let (soil_ground, snow, ground, snow_age) =
+            ground_albedos(soil, 0.0, 0.02, 0.5, 0.0, 0.0, 273.16).unwrap();
+        assert_eq!(
+            cold_start_pc_broadband_radiation_from_ground(
+                &pfts,
+                0.5,
+                soil_ground,
+                snow,
+                ground,
+                snow_age,
+            )
+            .unwrap(),
+            standard
+        );
     }
 
     #[test]

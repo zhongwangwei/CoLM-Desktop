@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    bsm_soil_moisture, cold_start_ground_albedo, derive_spatial_soil_parameters,
+    bsm_soil_moisture, cold_start_ground_albedo, cold_start_pc_broadband_radiation_from_ground,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
     high_resolution_pft_cold_start_state, pft_high_resolution_radiation, prospect_leaf_optics,
-    select_high_resolution_radiation, CalendarTime, HighResolutionLeafOptics, SoilField,
-    SoilReflectance, HIGH_RES_WAVELENGTHS,
+    select_high_resolution_radiation, CalendarTime, HighResolutionLeafOptics, SoilReflectance,
+    HIGH_RES_WAVELENGTHS,
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
@@ -334,15 +334,11 @@ pub fn write_spatial_pft_cold_time_restarts(
     )> = config
         .use_hyperspectral
         .then(|| {
-            let radiation = high_resolution_canopy
-                .then(|| {
-                    read_high_resolution_radiation_table(
-                        config
-                            .high_resolution_radiation
-                            .context("PFT HYPERSPECTRAL cold start needs --highres-radiation")?,
-                    )
-                })
-                .transpose()?;
+            let radiation = Some(read_high_resolution_radiation_table(
+                config
+                    .high_resolution_radiation
+                    .context("HYPERSPECTRAL cold start needs --highres-radiation")?,
+            )?);
             let leaf = high_resolution_vegetation
                 .then(|| {
                     read_high_resolution_leaf_optics(
@@ -509,22 +505,6 @@ pub fn write_spatial_pft_cold_time_restarts(
                 )
             })
             .transpose()?;
-        let porosity = high_resolution_soil
-            .then(|| {
-                derive_spatial_soil_parameters(
-                    &read_soil(
-                        config.static_config.landdata,
-                        config.static_config.land_cover_year,
-                        config.static_config.block_label,
-                        patches.class.len(),
-                    )?,
-                    &patches.class,
-                    &patch_kind,
-                    10,
-                    hydraulic_model,
-                )
-            })
-            .transpose()?;
         let mut ground = Vec::with_capacity(patches.class.len());
         let mut fractions = Vec::with_capacity(patches.class.len());
         let mut hires_albedo = vec![0.0; HIGH_RES_WAVELENGTHS * 2 * patches.class.len()];
@@ -567,10 +547,6 @@ pub fn write_spatial_pft_cold_time_restarts(
                     })
                     .collect::<Vec<_>>();
                 if dry[0] >= 0.01 {
-                    let porosity = porosity
-                        .as_ref()
-                        .expect("high-resolution soil porosity is loaded")
-                        .get(SoilField::Porosity, 0, patch);
                     let water = water
                         .as_ref()
                         .expect("high-resolution water optics are loaded");
@@ -578,7 +554,8 @@ pub fn write_spatial_pft_cold_time_restarts(
                         (1.0e-3 * common_state.top_liquid_kg_m2[patch] / top_soil_thickness_m)
                             .min(1.0)
                             * 100.0,
-                        porosity * 100.0,
+                        // Upstream mkinidata passes a fixed `porsl = 0.8` to BSM here.
+                        80.0,
                         &dry,
                         &water.absorption,
                         &water.refractive_index,
@@ -616,8 +593,8 @@ pub fn write_spatial_pft_cold_time_restarts(
             ground,
             fractions,
             hires_albedo,
-            vec![MISSING; HIGH_RES_WAVELENGTHS * 16 * patches.class.len()],
-            vec![MISSING; HIGH_RES_WAVELENGTHS * 16 * patches.class.len()],
+            vec![-999.0; HIGH_RES_WAVELENGTHS * 16 * patches.class.len()],
+            vec![-999.0; HIGH_RES_WAVELENGTHS * 16 * patches.class.len()],
         )
     } else {
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
@@ -795,22 +772,45 @@ pub fn write_spatial_pft_cold_time_restarts(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let pc = cold_start_pc_broadband_radiation_with_snow(
-                patch_kind[patch],
-                crate::SoilReflectance {
-                    saturated_visible: albedo[0][patch],
-                    dry_visible: albedo[1][patch],
-                    saturated_near_infrared: albedo[2][patch],
-                    dry_near_infrared: albedo[3][patch],
-                },
-                common_state.top_liquid_kg_m2[patch],
-                top_soil_thickness_m,
-                &inputs,
-                common_state.cosine_zenith[patch].max(0.001),
-                0.0,
-                0.0,
-                common_state.ground_temperature_k[patch],
-            )?;
+            let pc = if config.use_hyperspectral {
+                let high_resolution = high_resolution_pft_cold_start_state(
+                    None,
+                    &high_resolution_ground[patch],
+                    high_resolution_fractions[patch]
+                        .as_ref()
+                        .expect("hyperspectral radiation fractions are loaded"),
+                )?;
+                let mut pc = cold_start_pc_broadband_radiation_from_ground(
+                    &inputs,
+                    common_state.cosine_zenith[patch].max(0.001),
+                    high_resolution.albedo,
+                    [[1.0; 2]; 2],
+                    high_resolution.albedo,
+                    high_resolution.snow_age,
+                )?;
+                // MOD_Albedo_HiRes retains its default high-resolution
+                // transmission when PC's broadband ThreeDCanopy solver runs.
+                pc.common.soil_absorption = high_resolution.soil_absorption;
+                pc.common.snow_absorption = high_resolution.snow_absorption;
+                pc
+            } else {
+                cold_start_pc_broadband_radiation_with_snow(
+                    patch_kind[patch],
+                    crate::SoilReflectance {
+                        saturated_visible: albedo[0][patch],
+                        dry_visible: albedo[1][patch],
+                        saturated_near_infrared: albedo[2][patch],
+                        dry_near_infrared: albedo[3][patch],
+                    },
+                    common_state.top_liquid_kg_m2[patch],
+                    top_soil_thickness_m,
+                    &inputs,
+                    common_state.cosine_zenith[patch].max(0.001),
+                    0.0,
+                    0.0,
+                    common_state.ground_temperature_k[patch],
+                )?
+            };
             for (pc_index, &pft) in indices.iter().enumerate() {
                 let state = &pc.pft[pc_index];
                 copy_pft_radiation(&mut sunlit, pft_count, pft, state.sunlit_absorption);
@@ -845,11 +845,13 @@ pub fn write_spatial_pft_cold_time_restarts(
             .iter()
             .map(|&index| (total_lai[index] + total_sai[index]) * pfts.fraction[index])
             .sum();
-        common_radiation[patch] = Some(aggregate_pft_radiation(
-            &states,
-            &fractions,
-            leaf_stem_area,
-        )?);
+        let mut radiation = aggregate_pft_radiation(&states, &fractions, leaf_stem_area)?;
+        if high_resolution_canopy {
+            // `albland_HiRes` stores PFT absorption in landpft, not landpatch.
+            radiation.sunlit_absorption = [[0.0; 2]; 2];
+            radiation.shaded_absorption = [[0.0; 2]; 2];
+        }
+        common_radiation[patch] = Some(radiation);
         common_roughness[patch] = Some(
             indices
                 .iter()

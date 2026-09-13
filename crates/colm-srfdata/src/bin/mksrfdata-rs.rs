@@ -2433,16 +2433,21 @@ fn materialize_case(args: &[String]) -> Result<()> {
         spatial_blocks.is_none(),
         "--blocks is available only for a spatial case namelist"
     );
-    ensure!(
-        soil_hyper_albedo_dir.is_none(),
-        "--soil-hyper-albedo-dir is available only for a spatial case namelist"
-    );
+    if let Some(directory) = &soil_hyper_albedo_dir {
+        colm_srfdata::validate_single_point_hyperspectral_albedo_directory(directory)?;
+    }
     let (run, report) = materialize_single_point_surface_from_namelist(
         &namelist,
         lct_mode,
         crop,
         observation.as_deref(),
     )?;
+    if let Some(directory) = soil_hyper_albedo_dir {
+        colm_srfdata::append_single_point_hyperspectral_albedo(
+            &run.landdata_dir.join("srfdata.nc"),
+            &directory,
+        )?;
+    }
     print_result(report, &run.landdata_dir);
     Ok(())
 }

@@ -89,7 +89,7 @@ usage:
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
                    # --ranks 使用 MPI 启动；进程角色由内核决定，默认 1
                    # Rust 默认只替换 mksrfdata/mkinidata；colm 保持已校验的 Fortran 内核
-                   # HYPERSPECTRAL 空间 PFT/PC：--highres-params 包含 fsds/、
+                   # HYPERSPECTRAL PFT/PC：--highres-params 包含 fsds/、
                    # leaf_optical_properties/ 和 water_params.txt；--soil-hyper-albedo-dir
                    # 包含 colm_soil_albedo_400nm.nc ... colm_soil_albedo_2500nm.nc
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
@@ -1897,7 +1897,7 @@ fn rust_preprocessor_arguments(
         .iter()
         .any(|macro_name| macro_name == "HYPERSPECTRAL");
     let mut arguments = Vec::new();
-    if hyperspectral && stage == Stage::MkSrfData && colm_case::is_spatial_case(namelist)? {
+    if hyperspectral && stage == Stage::MkSrfData && !lct {
         let directory = canonical_input_directory(
             soil_hyper_albedo_dir.context(
                 "HYPERSPECTRAL Rust mksrfdata needs --soil-hyper-albedo-dir; use --preprocessors fortran if its 211 soil-albedo files are unavailable",
@@ -1978,9 +1978,9 @@ fn hyperspectral_mkinidata_arguments(
     lct: bool,
     highres_params: Option<&Path>,
 ) -> Result<Vec<String>> {
-    if !colm_case::is_spatial_case(namelist)? || lct {
+    if lct {
         bail!(
-            "Rust HYPERSPECTRAL cold starts are currently supported only by spatial PFT/PC cases; use --preprocessors fortran for single-point, LCT, or urban cases"
+            "Rust HYPERSPECTRAL cold starts support PFT/PC only; scalar LCT/urban lacks a valid upstream spectral initialization path"
         );
     }
     let pc = case_logical(document, "DEF_USE_PC", false)?;
@@ -2016,40 +2016,34 @@ fn hyperspectral_mkinidata_arguments(
         "--highres-urban-albedo".to_owned(),
         urban_source.display().to_string(),
     ]);
-    if pft || soil {
-        let root = canonical_input_directory(
-            highres_params.context(
-                "HYPERSPECTRAL Rust mkinidata needs --highres-params; use --preprocessors fortran if the optical parameter package is unavailable",
-            )?,
+    let root = canonical_input_directory(
+        highres_params.context(
+            "HYPERSPECTRAL Rust mkinidata needs --highres-params; use --preprocessors fortran if the optical parameter package is unavailable",
+        )?,
+        "--highres-params",
+    )?;
+    let radiation =
+        canonical_input_file(root.join("fsds/swnb_480bnd_fsds.nc"), "--highres-params")?;
+    arguments.extend([
+        "--highres-radiation".to_owned(),
+        radiation.display().to_string(),
+    ]);
+    if vegetation {
+        let leaf = canonical_input_file(
+            root.join("leaf_optical_properties/colm_PFT_params.nc"),
             "--highres-params",
         )?;
-        if pft {
-            let radiation = canonical_input_file(
-                root.join("fsds/swnb_480bnd_fsds.nc"),
-                "--highres-params",
-            )?;
-            arguments.extend([
-                "--highres-radiation".to_owned(),
-                radiation.display().to_string(),
-            ]);
-        }
-        if vegetation {
-            let leaf = canonical_input_file(
-                root.join("leaf_optical_properties/colm_PFT_params.nc"),
-                "--highres-params",
-            )?;
-            arguments.extend([
-                "--highres-leaf-optics".to_owned(),
-                leaf.display().to_string(),
-            ]);
-        }
-        if soil {
-            let water = canonical_input_file(root.join("water_params.txt"), "--highres-params")?;
-            arguments.extend([
-                "--highres-water-optics".to_owned(),
-                water.display().to_string(),
-            ]);
-        }
+        arguments.extend([
+            "--highres-leaf-optics".to_owned(),
+            leaf.display().to_string(),
+        ]);
+    }
+    if soil {
+        let water = canonical_input_file(root.join("water_params.txt"), "--highres-params")?;
+        arguments.extend([
+            "--highres-water-optics".to_owned(),
+            water.display().to_string(),
+        ]);
     }
     Ok(arguments)
 }
@@ -2459,11 +2453,23 @@ fn preflight_spatial_case(
     let checks = [
         // The upstream regional-clipping branch reads its existing landdata,
         // not rawdata.  Requiring an unused rawdata tree blocks a valid run.
-        (!existing_surface && only_stage != Some(Stage::Colm), "DEF_dir_rawdata", true),
+        (
+            !existing_surface && only_stage != Some(Stage::Colm),
+            "DEF_dir_rawdata",
+            true,
+        ),
         // mksrfdata has no forcing/runtime dependency.  A single surface stage
         // should remain runnable while the later model inputs are being staged.
-        (only_stage != Some(Stage::MkSrfData), "DEF_dir_runtime", true),
-        (only_stage != Some(Stage::MkSrfData), "DEF_forcing_namelist", false),
+        (
+            only_stage != Some(Stage::MkSrfData),
+            "DEF_dir_runtime",
+            true,
+        ),
+        (
+            only_stage != Some(Stage::MkSrfData),
+            "DEF_forcing_namelist",
+            false,
+        ),
     ];
     for (needed, field, directory) in checks {
         if !needed {

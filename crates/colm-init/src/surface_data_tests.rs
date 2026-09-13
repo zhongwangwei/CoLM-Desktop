@@ -25,6 +25,26 @@ fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
 }
 
 #[test]
+fn hyperspectral_soil_albedo_requires_all_211_finite_site_values() {
+    let path = temp_file("hyperspectral-soil-albedo");
+    write_surface(&path, 8, true, true);
+    let mut file = netcdf::append(&path).unwrap();
+    file.add_dimension("wavelength", HYPERSPECTRAL_WAVELENGTHS)
+        .unwrap();
+    file.add_variable::<f64>("soil_hyper_albedo", &["wavelength"])
+        .unwrap()
+        .put_values(&vec![0.2; HYPERSPECTRAL_WAVELENGTHS], ..)
+        .unwrap();
+    file.close().unwrap();
+
+    assert_eq!(
+        read_single_point_hyperspectral_albedo(&path).unwrap(),
+        vec![0.2; HYPERSPECTRAL_WAVELENGTHS]
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn reader_uses_the_first_eight_layers_of_a_ten_layer_site_profile() {
     let path = temp_file("ten-layer");
     write_surface(&path, 10, true, true);

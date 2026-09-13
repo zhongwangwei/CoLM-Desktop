@@ -23,6 +23,8 @@ use crate::urban_soil::{self, UrbanSoil};
 const SITE_KIND_ATTRIBUTE: &str = "colm_desktop_site_kind";
 const SITE_CROP_ATTRIBUTE: &str = "colm_desktop_crop";
 const GENERATED_URBAN_LAI_ATTRIBUTE: &str = "colm_desktop_generated_urban_lai";
+/// CoLM's fixed HYPERSPECTRAL wavelength count (400--2500 nm, 10 nm spacing).
+pub const HYPERSPECTRAL_WAVELENGTHS: usize = 211;
 
 fn netcdf_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1465,6 +1467,89 @@ pub fn materialize_single_point_surface(
         crop_enabled,
         UrbanSurfaceOptions::default(),
     )
+}
+
+/// Reject an incomplete `colm_input_ghsad` package before mutating a site surface.
+pub fn validate_single_point_hyperspectral_albedo_directory(directory: &Path) -> Result<()> {
+    ensure!(
+        directory.is_dir(),
+        "--soil-hyper-albedo-dir must be a directory: {}",
+        directory.display()
+    );
+    for wavelength in (400..=2500).step_by(10) {
+        let path = directory.join(format!("colm_soil_albedo_{wavelength}nm.nc"));
+        ensure!(
+            path.is_file(),
+            "HYPERSPECTRAL soil albedo source is missing: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Append the point-sampled 211-band soil albedo that Rust `mkinidata` consumes.
+///
+/// Upstream stores this same point in `landdata/HyperAlbedo`; the compact site
+/// surface has no such directory tree, so retaining it alongside `srfdata.nc`
+/// avoids a second rawdata lookup in the initialization stage.  The raw source
+/// uses CoLM's x10,000 encoding, exactly as `Aggregation_SoilHyperAlbedo` does.
+pub fn append_single_point_hyperspectral_albedo(surface: &Path, directory: &Path) -> Result<()> {
+    validate_single_point_hyperspectral_albedo_directory(directory)?;
+    let (longitude, latitude) = {
+        let file = netcdf::open(surface)
+            .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        (
+            scalar_f64(&file, "longitude")?,
+            scalar_f64(&file, "latitude")?,
+        )
+    };
+    let values = (400..=2500)
+        .step_by(10)
+        .map(|wavelength| {
+            point_f64(
+                &directory.join(format!("colm_soil_albedo_{wavelength}nm.nc")),
+                "albedo",
+                longitude,
+                latitude,
+            )
+            .with_context(|| format!("cannot read {wavelength} nm soil albedo"))
+            .map(|value| value / 10_000.0)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "HYPERSPECTRAL soil albedo contains a non-finite value"
+    );
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file =
+        netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
+    ensure!(
+        file.variable("soil_hyper_albedo").is_none(),
+        "single-point surface already has soil_hyper_albedo"
+    );
+    if let Some(dimension) = file.dimension("wavelength") {
+        ensure!(
+            dimension.len() == HYPERSPECTRAL_WAVELENGTHS,
+            "single-point surface wavelength dimension has {}, expected {HYPERSPECTRAL_WAVELENGTHS}",
+            dimension.len()
+        );
+    } else {
+        file.redef()?;
+        file.add_dimension("wavelength", HYPERSPECTRAL_WAVELENGTHS)?;
+        file.enddef()?;
+    }
+    file.redef()?;
+    {
+        let mut variable = file.add_variable::<f64>("soil_hyper_albedo", &["wavelength"])?;
+        variable.put_attribute("source", "colm_input_ghsad point sample")?;
+    }
+    file.enddef()?;
+    file.variable_mut("soil_hyper_albedo")
+        .expect("new hyperspectral albedo variable is present")
+        .put_values(&values, ..)?;
+    file.close()
+        .with_context(|| format!("cannot close single-point surface {}", surface.display()))
 }
 
 fn materialize_single_point_surface_impl(

@@ -38,9 +38,11 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    pre-2000 non-five-year source requests remain refused because upstream emits only monthly
    LAI for that special path. Desktop packaging now ships `mksrfdata-rs` beside `colm-cli`;
    `colm-cli run` selects Rust for both preprocessing stages by default and keeps
-   `--preprocessors fortran` as the explicit fallback. HYPERSPECTRAL spatial runs pass
-   `--soil-hyper-albedo-dir <colm_input_ghsad>` through to Rust so the 211 input rasters are
-   materialized; the directory is part of the stage fingerprint.
+   `--preprocessors fortran` as the explicit fallback. HYPERSPECTRAL PFT/PC runs pass
+   `--soil-hyper-albedo-dir <colm_input_ghsad>` through to Rust so the 211 x10,000-encoded input
+   rasters are materialized; a single-point surface stores its sampled spectrum as
+   `soil_hyper_albedo`, while spatial landdata retains the block fields. The directory is part
+   of the stage fingerprint.
    `DEF_Runoff_SCHEME=0` selects the standard `TWI.nc` source, aggregates all 25 layers per
    patch, applies the upstream element-level fallback for sparse patches, and writes the six
    topographic-wetness vectors consumed by restart initialization.

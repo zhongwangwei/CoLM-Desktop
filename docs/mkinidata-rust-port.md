@@ -39,10 +39,11 @@ enabled downscaling branch meet all of these conditions:
    --cold-time YYYY-JJJ-SSSSS` writes both common and PFT blocks from the same monthly
    patch/PFT LAI/SAI vectors, reusing shared LCT cold-soil state and replacing natural-patch
    optics with PFT- or PC-weighted values. Spatial PFT BGC/CROP state derives from the same
-   block vectors. PFT hyperspectral cold starts reuse the shared Rust spectral kernels and
-   persist common/PFT restart fields. PC hyperspectral cold starts reproduce the upstream
-   fallback: spectral ground albedo is retained while spectral PFT absorption remains zero and
-   reflectance/transmittance remain missing; PC then supplies its broadband canopy state.
+   block vectors. PFT/PC hyperspectral cold starts, including single-point sites, reuse the
+   shared Rust spectral kernels and persist common/PFT restart fields. PC hyperspectral cold
+   starts reproduce the upstream fallback: spectral ground albedo is retained while spectral
+   PFT absorption remains zero; reflectance/transmittance remain missing; PC then supplies its
+   broadband canopy state.
    Scalar-LCT hyperspectral cold-time output is explicitly refused because upstream marks that
    branch unsupported and supplies no class-to-spectral-optics mapping. A spatial case
    namelist derives standard paths, start timestamp, LAI year, and enabled cold-start controls,
@@ -51,15 +52,20 @@ enabled downscaling branch meet all of these conditions:
    initial restarts once Rust-created transfer vectors exist. Desktop packaging now ships
    `mkinidata-rs` beside `colm-cli`; `colm-cli run` selects Rust for both preprocessing
    stages by default while keeping the verified Fortran `colm` executable. Use
-   `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL spatial PFT/PC runs use
-   `colm-cli run --highres-params <dir>`, whose required `fsds/`,
-   `leaf_optical_properties/`, and `water_params.txt` sources, plus the required
-   `DEF_HighResUrban_albedo` NetCDF source, are validated and fingerprinted before Rust writes
-   a restart. The urban source selects the first matching lat/lon cluster and otherwise uses
-   the seasonal mean, matching `readin_urban_albedo`. Scalar LCT/urban and single-point HYPERSPECTRAL cold starts
-   remain safely delegated to the Fortran preprocessor. Spatial Rust
-   restarts now carry the six TOPMODEL fields when `DEF_Runoff_SCHEME=0` and the 9-aspect
-   curvature/slope/aspect vectors when `DEF_USE_Forcing_Downscaling_Simple=.true.`.
+   `--preprocessors fortran` for an explicit fallback. HYPERSPECTRAL PFT/PC runs use
+   `colm-cli run --highres-params <dir>`. Its `fsds/` radiation source is required for every
+   PFT/PC branch; `leaf_optical_properties/` and `water_params.txt` are conditional, and the
+   `DEF_HighResUrban_albedo` NetCDF source is required. All are validated and fingerprinted
+   before Rust writes a restart. The urban source selects the first matching lat/lon
+   cluster and otherwise uses the seasonal mean, matching `readin_urban_albedo`.
+   Single-point PFT/PC surfaces store their 211 sampled soil albedos in `srfdata.nc`. Their
+   constant and time restart spectral fields stay on the Rust path. At zero SWE, upstream
+   serializes uninitialized spectral snow absorption; Rust writes deterministic zero instead.
+   Scalar LCT/urban HYPERSPECTRAL cold
+   starts remain refused because upstream provides no valid class-to-spectral-optics
+   initialization. Rust spatial restarts now carry the six TOPMODEL fields when
+   `DEF_Runoff_SCHEME=0` and the 9-aspect curvature/slope/aspect vectors when
+   `DEF_USE_Forcing_Downscaling_Simple=.true.`.
 
 ## Performance constraints
 

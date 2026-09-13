@@ -168,9 +168,11 @@ pub use single_point::{
     single_point_cold_start_run_from_namelist, single_point_static_run_from_namelist,
     write_single_point_cold_time_restart, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
-    write_single_point_urban_constant_restart, SinglePointColdStartRun,
-    SinglePointConstantRestartFiles, SinglePointStaticConfig, SinglePointStaticRun,
-    SinglePointSubgrid, SinglePointTimeRestartFiles, SinglePointUrbanConfig,
+    write_single_point_hyperspectral_cold_time_restarts,
+    write_single_point_hyperspectral_constant_restarts, write_single_point_urban_constant_restart,
+    SinglePointColdStartRun, SinglePointConstantRestartFiles, SinglePointHyperspectralConfig,
+    SinglePointStaticConfig, SinglePointStaticRun, SinglePointSubgrid, SinglePointTimeRestartFiles,
+    SinglePointUrbanConfig,
 };
 pub use spatial_pft::{
     write_spatial_pft_cold_time_restarts, write_spatial_pft_constant_restart,
@@ -193,10 +195,11 @@ pub use static_state::{
     LakeState, SoilField, SoilGrid, SoilLayerInput, SoilState,
 };
 pub use surface_data::{
-    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_surface,
-    read_single_point_urban_data, read_urban_lucy_raw_data, SinglePointMonthlyVegetation,
-    SinglePointPftData, SinglePointPftMonthlyVegetation, SinglePointSurfaceData,
-    SinglePointUrbanData, UrbanLucyRawData,
+    read_single_point_hyperspectral_albedo, read_single_point_monthly_vegetation,
+    read_single_point_pft_data, read_single_point_surface, read_single_point_urban_data,
+    read_urban_lucy_raw_data, SinglePointMonthlyVegetation, SinglePointPftData,
+    SinglePointPftMonthlyVegetation, SinglePointSurfaceData, SinglePointUrbanData,
+    UrbanLucyRawData,
 };
 pub use time_restart::{
     append_time_hyperspectral_fields, write_time_restart, write_time_restart_block,

@@ -444,10 +444,21 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     );
     let reflectance = values_f64(&common, "reflectance_out").unwrap();
     let transmittance = values_f64(&common, "transmittance_out").unwrap();
+    // HYPERSPECTRAL keeps canopy absorption in landpft, leaving common fields zero.
+    assert!(values_f64(&common, "ssun")
+        .unwrap()
+        .iter()
+        .all(|value| *value == 0.0));
+    assert!(values_f64(&common, "ssha")
+        .unwrap()
+        .iter()
+        .all(|value| *value == 0.0));
     // Class 1 is the sole PFT in this fixture.  PROSPECT changes its green tissue
     // while retaining the source's dead stem (the source value is 0.1 / 0.05).
     assert!(reflectance[1].is_finite() && (reflectance[1] - 0.1).abs() > 1.0e-6);
     assert!(transmittance[1].is_finite() && (transmittance[1] - 0.05).abs() > 1.0e-6);
+    assert_eq!(reflectance[0], -999.0);
+    assert_eq!(transmittance[0], -999.0);
     let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_f64(&pft, "ssun_hires_p").unwrap().len(), 211 * 2);
     assert_eq!(values_f64(&pft, "ssha_hires_p").unwrap().len(), 211 * 2);
@@ -477,6 +488,7 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     );
     pc_config.plant_hydraulics = false;
     pc_config.use_hyperspectral = true;
+    pc_config.high_resolution_radiation = Some(&radiation);
     pc_config.high_resolution_water_optics = Some(&water);
     pc_config.high_resolution_urban_albedo = Some(&urban);
     let pc_files = crate::write_spatial_pft_cold_time_restarts(pc_config).unwrap();
@@ -488,11 +500,11 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     assert!(values_f64(&common, "reflectance_out")
         .unwrap()
         .iter()
-        .all(|value| *value == crate::MISSING));
+        .all(|value| *value == -999.0));
     assert!(values_f64(&common, "transmittance_out")
         .unwrap()
         .iter()
-        .all(|value| *value == crate::MISSING));
+        .all(|value| *value == -999.0));
     let pc = netcdf::open(pc_files.pft).unwrap();
     assert!(values_f64(&pc, "ssun_hires_p")
         .unwrap()

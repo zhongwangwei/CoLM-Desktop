@@ -10,10 +10,12 @@ use colm_case::is_spatial_case;
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
-    write_spatial_lct_cold_time_restart, write_spatial_lct_constant_restart,
-    write_spatial_pft_cold_time_restarts, write_spatial_pft_constant_restarts,
-    write_spatial_urban_cold_time_restarts, write_spatial_urban_constant_restarts, HydraulicModel,
-    LandCoverScheme, RestartDate, SinglePointStaticConfig, SpatialLctStaticConfig,
+    write_single_point_hyperspectral_cold_time_restarts,
+    write_single_point_hyperspectral_constant_restarts, write_spatial_lct_cold_time_restart,
+    write_spatial_lct_constant_restart, write_spatial_pft_cold_time_restarts,
+    write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
+    write_spatial_urban_constant_restarts, HydraulicModel, LandCoverScheme, RestartDate,
+    SinglePointHyperspectralConfig, SinglePointStaticConfig, SpatialLctStaticConfig,
     SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
     SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
 };
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
 fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut land_cover = None;
     let mut block = None;
-    let mut high_resolution = SpatialHighResolutionOptions::default();
+    let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--land-cover" => {
@@ -82,13 +84,27 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     if is_spatial_case(&namelist)? {
         return run_spatial_namelist(&namelist, land_cover, block.as_deref(), &high_resolution);
     }
-    ensure!(
-        !high_resolution.enabled,
-        "--hyperspectral is currently supported only by spatial PFT cold starts"
-    );
     let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
-    let files = write_single_point_constant_restarts(&run)?;
-    let time = write_single_point_cold_time_restarts(&run)?;
+    let files = if high_resolution.enabled {
+        write_single_point_hyperspectral_constant_restarts(&run)?
+    } else {
+        write_single_point_constant_restarts(&run)?
+    };
+    let time = if high_resolution.enabled {
+        write_single_point_hyperspectral_cold_time_restarts(
+            &run,
+            SinglePointHyperspectralConfig {
+                leaf_optics: high_resolution.leaf_optics.as_deref(),
+                water_optics: high_resolution.water_optics.as_deref(),
+                radiation: high_resolution.radiation.as_deref(),
+                urban_albedo: high_resolution.urban_albedo.as_deref().context(
+                    "HYPERSPECTRAL cold start needs --highres-urban-albedo because upstream mkinidata always reads DEF_HighResUrban_albedo",
+                )?,
+            },
+        )?
+    } else {
+        write_single_point_cold_time_restarts(&run)?
+    };
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
     if let Some(path) = files.pft {
@@ -115,7 +131,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
 }
 
 #[derive(Debug, Clone, Default)]
-struct SpatialHighResolutionOptions {
+struct HighResolutionOptions {
     enabled: bool,
     leaf_optics: Option<PathBuf>,
     water_optics: Option<PathBuf>,
@@ -166,7 +182,7 @@ fn run_spatial_namelist(
     namelist: &Path,
     land_cover: Option<LandCoverScheme>,
     block_override: Option<&str>,
-    high_resolution: &SpatialHighResolutionOptions,
+    high_resolution: &HighResolutionOptions,
 ) -> Result<()> {
     let run = spatial_namelist_run(namelist)?;
     ensure!(
@@ -325,7 +341,7 @@ fn write_spatial_pft_namelist_block(
     namelist: &Path,
     run: &SpatialNamelistRun,
     block: &str,
-    high_resolution: &SpatialHighResolutionOptions,
+    high_resolution: &HighResolutionOptions,
 ) -> Result<()> {
     let static_config = SpatialPftStaticConfig::new(
         namelist,
@@ -849,7 +865,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-urban-albedo PATH [--highres-radiation PATH] [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH [--highres-radiation PATH] [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -1099,7 +1115,7 @@ mod tests {
             &namelist,
             Some(LandCoverScheme::Igbp),
             None,
-            &SpatialHighResolutionOptions::default(),
+            &HighResolutionOptions::default(),
         )
         .unwrap_err();
 
@@ -1137,7 +1153,7 @@ mod tests {
             &namelist,
             Some(LandCoverScheme::Usgs),
             None,
-            &SpatialHighResolutionOptions::default(),
+            &HighResolutionOptions::default(),
         )
         .unwrap_err();
 

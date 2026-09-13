@@ -11,6 +11,7 @@ use anyhow::{ensure, Context, Result};
 use crate::{HydraulicModel, LandCoverScheme, SoilLayerInput, SoilReflectance};
 
 const SOURCE_SOIL_LAYERS: usize = 8;
+const HYPERSPECTRAL_WAVELENGTHS: usize = 211;
 
 /// All single-point landdata needed by the static Rust initialization kernels.
 #[derive(Debug, Clone, PartialEq)]
@@ -324,6 +325,20 @@ pub fn read_single_point_surface(
     };
     let land_class = scalar_i32(&file, land_name)?;
     single_point_surface_from_file(&file, land_class, hydraulic_model, None)
+}
+
+/// Read the 211 point-sampled soil albedos emitted for a HYPERSPECTRAL site.
+pub fn read_single_point_hyperspectral_albedo(path: impl AsRef<Path>) -> Result<Vec<f64>> {
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
+    let values = vector_with_len(&file, "soil_hyper_albedo", HYPERSPECTRAL_WAVELENGTHS)?;
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "soil_hyper_albedo in {} contains a non-finite value",
+        path.display()
+    );
+    Ok(values)
 }
 
 /// Reads the non-classification fields of a single-point urban surface.
