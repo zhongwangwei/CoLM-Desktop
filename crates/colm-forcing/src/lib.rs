@@ -19,6 +19,7 @@ pub mod check;
 pub mod civil;
 pub mod convert;
 pub mod gapfill;
+pub mod high_res;
 pub mod met;
 pub mod point;
 pub mod render;
@@ -34,6 +35,10 @@ pub use gapfill::{
     fill_short_gaps, nearest_grid_point, repair_file, CorrectionKind, RepairPlan, RepairSlot,
     RepairSummary, TimezoneConfidence, TimezoneSource, VariableKind, VariableRepairSummary,
     QC_ERA5_CORRECTED, QC_INTERPOLATED, QC_OBSERVED, QC_UNRESOLVED,
+};
+pub use high_res::{
+    read_high_resolution_leaf_optics, read_high_resolution_water_optics,
+    HighResolutionLeafOpticsTable, HighResolutionWaterOptics,
 };
 pub use met::summarize;
 pub use point::{load_point_forcing, PointForcingFrame, PointForcingSeries};
