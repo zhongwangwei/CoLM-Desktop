@@ -146,6 +146,34 @@ pub fn bsm_soil_moisture(
     Ok(wet_albedo)
 }
 
+/// Reduces a 211-band spectrum to CoLM's visible and near-infrared bands.
+///
+/// This is `calculate_wgt_variable` from `MOD_Albedo_HiRes.F90`.  The weights
+/// need not be normalized; each of the two native wavelength groups is
+/// normalized independently, exactly as the upstream routine does.
+pub fn weighted_high_resolution_bands(values: &[f64], weights: &[f64]) -> Result<[f64; 2]> {
+    ensure!(
+        values.len() == HIGH_RES_WAVELENGTHS
+            && weights.len() == HIGH_RES_WAVELENGTHS
+            && values.iter().chain(weights).all(|value| value.is_finite()),
+        "high-resolution spectrum and weights must each contain 211 finite values"
+    );
+    let weighted = |range: std::ops::Range<usize>| {
+        let weight_sum: f64 = weights[range.clone()].iter().sum();
+        ensure!(
+            weight_sum.is_finite() && weight_sum.abs() > f64::EPSILON,
+            "high-resolution spectral weights must have a nonzero sum in each broadband group"
+        );
+        Ok(values[range.clone()]
+            .iter()
+            .zip(&weights[range])
+            .map(|(value, weight)| value * weight)
+            .sum::<f64>()
+            / weight_sum)
+    };
+    Ok([weighted(0..29)?, weighted(29..HIGH_RES_WAVELENGTHS)?])
+}
+
 fn factorial(value: i32) -> f64 {
     (1..=value).fold(1.0, |product, factor| product * factor as f64)
 }

@@ -61,6 +61,21 @@ fn wet_bsm_soil_produces_a_finite_spectrum_for_both_radiation_types() {
 }
 
 #[test]
+fn spectral_band_reduction_normalizes_visible_and_near_infrared_independently() {
+    let mut values = vec![2.0; HIGH_RES_WAVELENGTHS];
+    values[0] = 8.0;
+    values[29] = 20.0;
+    let mut weights = vec![1.0; HIGH_RES_WAVELENGTHS];
+    weights[0] = 3.0;
+    weights[29] = 4.0;
+
+    let bands = weighted_high_resolution_bands(&values, &weights).unwrap();
+
+    assert_eq!(bands[0], (8.0 * 3.0 + 2.0 * 28.0) / 31.0);
+    assert_eq!(bands[1], (20.0 * 4.0 + 2.0 * 181.0) / 185.0);
+}
+
+#[test]
 fn uniform_spectrum_reduces_to_the_shared_pft_two_stream_solution() {
     let optics = LeafOptics {
         chil: 0.01,

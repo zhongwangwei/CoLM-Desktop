@@ -116,8 +116,8 @@ pub use high_res_parameters::{
 };
 pub use high_res_radiation::{
     bsm_soil_moisture, expand_broadband_ground_albedo, expand_broadband_leaf_optics,
-    pft_high_resolution_radiation, HighResolutionLeafOptics, HighResolutionPftRadiation,
-    HIGH_RES_WAVELENGTHS,
+    pft_high_resolution_radiation, weighted_high_resolution_bands, HighResolutionLeafOptics,
+    HighResolutionPftRadiation, HIGH_RES_WAVELENGTHS,
 };
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
