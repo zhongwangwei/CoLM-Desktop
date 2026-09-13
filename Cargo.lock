@@ -119,6 +119,7 @@ dependencies = [
  "colm-case",
  "colm-core",
  "colm-namelist",
+ "colm-srfdata",
  "netcdf",
 ]
 

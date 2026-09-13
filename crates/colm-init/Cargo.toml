@@ -14,5 +14,8 @@ colm-core = { path = "../colm-core" }
 colm-namelist = { path = "../colm-namelist" }
 netcdf = { workspace = true, features = ["static"] }
 
+[dev-dependencies]
+colm-srfdata = { path = "../colm-srfdata" }
+
 [lints]
 workspace = true
