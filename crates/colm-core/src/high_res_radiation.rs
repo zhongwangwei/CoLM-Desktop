@@ -303,6 +303,284 @@ fn calculate_tav(alpha_degrees: f64, refractive_index: f64) -> f64 {
     (transmission_s + transmission_p) / (2.0 * sine.powi(2))
 }
 
+/// Shared spectral output schema for CoLM's scalar-LCT twostream solver.
+///
+/// The LCT and PFT solvers expose the same wavelength-major albedo,
+/// transmission, and absorption fields. They use distinct numerical kernels:
+/// this alias only shares the restart-facing representation.
+pub type HighResolutionLctRadiation = HighResolutionPftRadiation;
+
+/// Reduces scalar-LCT high-resolution radiation to CoLM's two restart bands.
+///
+/// It shares the PFT restart reduction because the physical fields have the
+/// same layout; the canopy solvers remain separate.
+pub fn high_resolution_lct_cold_start_state(
+    radiation: Option<&HighResolutionLctRadiation>,
+    ground: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+) -> Result<ColdStartRadiation> {
+    high_resolution_pft_cold_start_state(radiation, ground, fractions)
+}
+
+/// Ports scalar-LCT twostream_hires from MOD_Albedo_HiRes.F90.
+///
+/// This is deliberately separate from pft_high_resolution_radiation:
+/// upstream LCT solves against the spectral ground directly, while the PFT
+/// solver uses its black-ground solution followed by a ground correction.
+/// Callers must supply LCT leaf/stem optics explicitly; the upstream
+/// high-resolution LCT branch has no class-to-PFT optical mapping.
+#[allow(clippy::too_many_arguments)]
+pub fn lct_high_resolution_radiation(
+    chil: f64,
+    optics: HighResolutionLeafOptics<'_>,
+    lai: f64,
+    sai: f64,
+    wet_snow_fraction: f64,
+    cosine_zenith: f64,
+    ground_albedo: &[f64],
+    vegetation_snow: bool,
+    usgs_no_stem: bool,
+) -> Result<HighResolutionLctRadiation> {
+    let optical_values = HIGH_RES_WAVELENGTHS * RADIATION_TYPES;
+    ensure!(
+        chil.is_finite()
+            && lai.is_finite()
+            && lai >= 0.0
+            && sai.is_finite()
+            && sai >= 0.0
+            && wet_snow_fraction.is_finite()
+            && (0.0..=1.0).contains(&wet_snow_fraction)
+            && cosine_zenith.is_finite()
+            && cosine_zenith > 0.0
+            && optics.reflectance.len() == optical_values
+            && optics.transmittance.len() == optical_values
+            && ground_albedo.len() == optical_values
+            && optics
+                .reflectance
+                .iter()
+                .chain(optics.transmittance)
+                .chain(ground_albedo)
+                .all(|value| value.is_finite()),
+        "high-resolution LCT radiation inputs are invalid"
+    );
+
+    let phi1 = 0.5 - 0.633 * chil - 0.33 * chil * chil;
+    let phi2 = 0.877 * (1.0 - 2.0 * phi1);
+    let projection = phi1 + phi2 * cosine_zenith;
+    let direct_extinction = projection / cosine_zenith;
+    let zmu = if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
+        1.0 / phi2 * (1.0 - phi1 / phi2 * ((phi1 + phi2) / phi1).ln())
+    } else if phi1.abs() <= 1.0e-6 {
+        1.0 / 0.877
+    } else {
+        1.0 / (2.0 * phi1)
+    };
+    let effective_sai = if usgs_no_stem { 0.0 } else { sai };
+    let leaf_stem_area = lai + effective_sai;
+    ensure!(
+        projection.is_finite()
+            && direct_extinction.is_finite()
+            && direct_extinction > 0.0
+            && zmu.is_finite()
+            && zmu > 0.0
+            && leaf_stem_area > 1.0e-6,
+        "invalid high-resolution LCT leaf angle distribution or canopy area"
+    );
+    let thermal_gap_fraction = (-((lai + sai) / zmu).clamp(1.0e-5, 50.0)).exp();
+
+    let mut albedo = vec![0.0; optical_values];
+    let mut transmission = vec![0.0; HIGH_RES_WAVELENGTHS * 3];
+    let mut sunlit_absorption = vec![0.0; optical_values];
+    let mut shaded_absorption = vec![0.0; optical_values];
+    let zmu2 = zmu * zmu;
+
+    for wavelength in 0..HIGH_RES_WAVELENGTHS {
+        let green = wavelength * RADIATION_TYPES;
+        let stem = green + 1;
+        let mut scattering = lai / leaf_stem_area
+            * (optics.transmittance[green] + optics.reflectance[green])
+            + effective_sai / leaf_stem_area
+                * (optics.transmittance[stem] + optics.reflectance[stem]);
+        let mut asymmetry = scattering / 2.0 * projection / (projection + cosine_zenith * phi2);
+        asymmetry *= 1.0
+            - cosine_zenith * phi1 / (projection + cosine_zenith * phi2)
+                * ((projection + cosine_zenith * phi2 + cosine_zenith * phi1)
+                    / (cosine_zenith * phi1))
+                    .ln();
+        let transmission_fraction = lai / leaf_stem_area * optics.transmittance[green]
+            + effective_sai / leaf_stem_area * optics.transmittance[stem];
+        let mut upward = 0.5
+            * (scattering
+                + (scattering - 2.0 * transmission_fraction) * ((1.0 + chil) / 2.0).powi(2));
+        let mut beta0 =
+            (1.0 + zmu * direct_extinction) / (scattering * zmu * direct_extinction) * asymmetry;
+        if vegetation_snow {
+            let snow_scattering = if wavelength < 29 { 0.8 } else { 0.4 };
+            scattering =
+                (1.0 - wet_snow_fraction) * scattering + wet_snow_fraction * snow_scattering;
+            upward = ((1.0 - wet_snow_fraction) * scattering * upward
+                + wet_snow_fraction * snow_scattering * 0.5)
+                / scattering;
+            beta0 = ((1.0 - wet_snow_fraction) * scattering * beta0
+                + wet_snow_fraction * snow_scattering * 0.5)
+                / scattering;
+        }
+
+        let be = 1.0 - scattering + upward;
+        let ce = upward;
+        let de = scattering * zmu * direct_extinction * beta0;
+        let fe = scattering * zmu * direct_extinction * (1.0 - beta0);
+        let psi = (be.powi(2) - ce.powi(2)).sqrt() / zmu;
+        let s1 = (-(psi * leaf_stem_area).min(50.0)).exp();
+        let s2 = (-(direct_extinction * leaf_stem_area).min(50.0)).exp();
+        let p1 = be + zmu * psi;
+        let p2 = be - zmu * psi;
+        let p3 = be + zmu * direct_extinction;
+        let p4 = be - zmu * direct_extinction;
+        let ground_direct = ground_albedo[green];
+        let ground_diffuse = ground_albedo[stem];
+        let f1 = 1.0 - ground_diffuse * p1 / ce;
+        let f2 = 1.0 - ground_diffuse * p2 / ce;
+        let h1 = -(de * p4 + ce * fe);
+        let h4 = -(fe * p3 + ce * de);
+        let sigma = (zmu * direct_extinction).powi(2) + ce.powi(2) - be.powi(2);
+
+        let (direct_albedo, direct_transmission, direct_up, direct_down) = if sigma.abs() > 1.0e-10
+        {
+            let hh1 = h1 / sigma;
+            let hh4 = h4 / sigma;
+            let m1 = f1 * s1;
+            let m2 = f2 / s1;
+            let m3 = (ground_direct - (hh1 - ground_diffuse * hh4)) * s2;
+            let n1 = p1 / ce;
+            let n2 = p2 / ce;
+            let n3 = -hh4;
+            let hh2 = (m3 * n2 - m2 * n3) / (m1 * n2 - m2 * n1);
+            let hh3 = (m3 * n1 - m1 * n3) / (m2 * n1 - m1 * n2);
+            let hh5 = hh2 * p1 / ce;
+            let hh6 = hh3 * p2 / ce;
+            (
+                hh1 + hh2 + hh3,
+                hh4 * s2 + hh5 * s1 + hh6 / s1,
+                hh1 * (1.0 - s2 * s2) / (2.0 * direct_extinction)
+                    + hh2 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                    + hh3 * (1.0 - s2 / s1) / (direct_extinction - psi),
+                hh4 * (1.0 - s2 * s2) / (2.0 * direct_extinction)
+                    + hh5 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                    + hh6 * (1.0 - s2 / s1) / (direct_extinction - psi),
+            )
+        } else {
+            let m1 = f1 * s1;
+            let m2 = f2 / s1;
+            let m3 = h1 / zmu2 * (leaf_stem_area + 1.0 / (2.0 * direct_extinction)) * s2
+                + ground_diffuse / ce
+                    * (-h1 / (2.0 * direct_extinction) / zmu2
+                        * (p3 * leaf_stem_area + p4 / (2.0 * direct_extinction))
+                        - de)
+                    * s2
+                + ground_direct * s2;
+            let n1 = p1 / ce;
+            let n2 = p2 / ce;
+            let n3 = (h1 * p4 / (4.0 * direct_extinction.powi(2)) / zmu2 + de) / ce;
+            let hh2 = (m3 * n2 - m2 * n3) / (m1 * n2 - m2 * n1);
+            let hh3 = (m3 * n1 - m1 * n3) / (m2 * n1 - m1 * n2);
+            let hh5 = hh2 * p1 / ce;
+            let hh6 = hh3 * p2 / ce;
+            let direct_albedo = -h1 / (2.0 * direct_extinction * zmu2) + hh2 + hh3;
+            let direct_transmission = 1.0 / ce
+                * (-h1 / (2.0 * direct_extinction * zmu2)
+                    * (p3 * leaf_stem_area + p4 / (2.0 * direct_extinction))
+                    - de)
+                * s2
+                + hh5 * s1
+                + hh6 / s1;
+            (
+                direct_albedo,
+                direct_transmission,
+                (hh2 - h1 / (2.0 * direct_extinction * zmu2)) * (1.0 - s2 * s2)
+                    / (2.0 * direct_extinction)
+                    + hh3 * leaf_stem_area
+                    + h1 / (2.0 * direct_extinction * zmu2)
+                        * (leaf_stem_area * s2 * s2 - (1.0 - s2 * s2) / (2.0 * direct_extinction)),
+                (hh5 - (h1 * p4 / (4.0 * direct_extinction.powi(2) * zmu) + de) / ce)
+                    * (1.0 - s2 * s2)
+                    / (2.0 * direct_extinction)
+                    + hh6 * leaf_stem_area
+                    + h1 * p3 / (ce * 4.0 * direct_extinction.powi(2) * zmu2)
+                        * (leaf_stem_area * s2 * s2 - (1.0 - s2 * s2) / (2.0 * direct_extinction)),
+            )
+        };
+
+        let m1 = f1 * s1;
+        let m2 = f2 / s1;
+        let n1 = p1 / ce;
+        let n2 = p2 / ce;
+        let hh7 = -m2 / (m1 * n2 - m2 * n1);
+        let hh8 = -m1 / (m2 * n1 - m1 * n2);
+        let hh9 = hh7 * p1 / ce;
+        let hh10 = hh8 * p2 / ce;
+        let diffuse_albedo = hh7 + hh8;
+        let diffuse_transmission = hh9 * s1 + hh10 / s1;
+        let (diffuse_up, diffuse_down) = if sigma.abs() > 1.0e-10 {
+            (
+                hh7 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                    + hh8 * (1.0 - s2 / s1) / (direct_extinction - psi),
+                hh9 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                    + hh10 * (1.0 - s2 / s1) / (direct_extinction - psi),
+            )
+        } else {
+            (
+                hh7 * (1.0 - s1 * s2) / (direct_extinction + psi) + hh8 * leaf_stem_area,
+                hh9 * (1.0 - s1 * s2) / (direct_extinction + psi) + hh10 * leaf_stem_area,
+            )
+        };
+        let direct_sunlit = (1.0 - scattering) * (1.0 - s2 + (direct_up + direct_down) / zmu);
+        let direct_shaded = scattering * (1.0 - s2)
+            + (ground_diffuse * direct_transmission + ground_direct * s2 - direct_transmission)
+            - direct_albedo
+            - (1.0 - scattering) / zmu * (direct_up + direct_down);
+        let diffuse_sunlit = (1.0 - scattering) / zmu * (diffuse_up + diffuse_down);
+        let diffuse_shaded = diffuse_transmission * (ground_diffuse - 1.0)
+            - (diffuse_albedo - 1.0)
+            - (1.0 - scattering) / zmu * (diffuse_up + diffuse_down);
+
+        let values = [
+            direct_albedo,
+            diffuse_albedo,
+            direct_transmission,
+            diffuse_transmission,
+            s2,
+            direct_sunlit,
+            diffuse_sunlit,
+            direct_shaded,
+            diffuse_shaded,
+        ];
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "singular high-resolution LCT two-stream solution at wavelength {wavelength}"
+        );
+        albedo[green] = direct_albedo;
+        albedo[stem] = diffuse_albedo;
+        transmission[wavelength * 3] = direct_transmission;
+        transmission[wavelength * 3 + 1] = diffuse_transmission;
+        transmission[wavelength * 3 + 2] = s2;
+        sunlit_absorption[green] = direct_sunlit;
+        sunlit_absorption[stem] = diffuse_sunlit;
+        shaded_absorption[green] = direct_shaded;
+        shaded_absorption[stem] = diffuse_shaded;
+    }
+
+    Ok(HighResolutionLctRadiation {
+        albedo,
+        transmission,
+        sunlit_absorption,
+        shaded_absorption,
+        thermal_gap_fraction,
+        direct_extinction,
+        diffuse_extinction: 0.719,
+    })
+}
+
 /// Ports the PFT-vector `twostream_hires_mod` routine.
 ///
 /// `ground_albedo` uses `(wavelength, direct-or-diffuse)`.  It must already

@@ -116,8 +116,9 @@ pub use high_res_parameters::{
 };
 pub use high_res_radiation::{
     bsm_soil_moisture, expand_broadband_ground_albedo, expand_broadband_leaf_optics,
-    high_resolution_pft_cold_start_state, pft_high_resolution_radiation,
-    weighted_high_resolution_bands, HighResolutionLeafOptics, HighResolutionPftRadiation,
+    high_resolution_lct_cold_start_state, high_resolution_pft_cold_start_state,
+    lct_high_resolution_radiation, pft_high_resolution_radiation, weighted_high_resolution_bands,
+    HighResolutionLctRadiation, HighResolutionLeafOptics, HighResolutionPftRadiation,
     HIGH_RES_WAVELENGTHS,
 };
 pub use hydrology::{
