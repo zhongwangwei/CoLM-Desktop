@@ -1344,6 +1344,8 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert!(!run.crop_enabled);
     assert_eq!(run.lai_frequency, super::SinglePointLaiFrequency::Monthly);
     assert_eq!(run.monthly_lai_years, [2000]);
+    assert!(!run.use_bedrock);
+    assert!(run.use_site_dbedrock);
 
     std::fs::write(
         &namelist,
@@ -1366,7 +1368,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
             source.display(),
             output.display(),
         ),
@@ -1377,6 +1379,8 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(pft.monthly_lai_years, [2008, 2009]);
     assert!(!pft.use_site_pctpfts);
     assert!(!pft.use_site_htop);
+    assert!(pft.use_bedrock);
+    assert!(!pft.use_site_dbedrock);
 
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -1483,6 +1487,10 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
             .unwrap()
             .put_values(&[2008], netcdf::Extents::All)
             .unwrap();
+        file.add_variable::<f64>("depth_to_bedrock", &[])
+            .unwrap()
+            .put_values(&[250.0], netcdf::Extents::All)
+            .unwrap();
         for (name, offset) in [("LAI_pfts_monthly", 0.0), ("SAI_pfts_monthly", 100.0)] {
             file.add_variable::<f64>(name, &["LAI_year", "month", "pft"])
                 .unwrap()
@@ -1497,11 +1505,26 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
     }
     {
         let _netcdf_guard = netcdf_write_lock().lock().unwrap();
-        super::write_single_point_surface(&filled, &output, super::SiteMode::Pft, false).unwrap();
+        super::write_single_point_surface_with_lai_frequency(
+            &filled,
+            &output,
+            super::SiteMode::Pft,
+            false,
+            super::SinglePointLaiFrequency::Monthly,
+            true,
+        )
+        .unwrap();
     }
     let file = netcdf::open(&output).unwrap();
     assert_eq!(file.dimension("soil").unwrap().len(), 8);
     assert_eq!(file.dimension("pft").unwrap().len(), 2);
+    assert_eq!(
+        file.variable("depth_to_bedrock")
+            .unwrap()
+            .get_value::<f64, _>(())
+            .unwrap(),
+        250.0
+    );
     assert_eq!(
         file.variable("pfttyp")
             .unwrap()
@@ -1623,6 +1646,7 @@ fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
         super::SiteMode::Igbp,
         false,
         super::SinglePointLaiFrequency::EightDay,
+        false,
     )
     .unwrap();
     let audit = super::audit_with_lai_frequency(
@@ -1811,6 +1835,10 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
                 .put_values(&values, ..)
                 .unwrap();
         }
+        file.add_variable::<f64>("HTOP", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[18.0], ..)
+            .unwrap();
         file.close().unwrap();
     }
     super::materialize_single_point_surface_impl(
@@ -1827,6 +1855,8 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_bedrock: false,
+            use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
             monthly_lai_years: &[2008],
@@ -1913,6 +1943,8 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_bedrock: false,
+            use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
             monthly_lai_years: &[2008],
@@ -1947,6 +1979,8 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_pctpfts: false,
             use_site_pctcrop: true,
             use_site_htop: false,
+            use_bedrock: false,
+            use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
             monthly_lai_years: &[2008],
@@ -2086,6 +2120,8 @@ fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_bedrock: false,
+            use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
             monthly_lai_years: &[2008],
@@ -2169,6 +2205,54 @@ fn lct_height_rawdata_fallback_replaces_the_site_value() {
             .unwrap(),
         [18.0]
     );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn bedrock_rawdata_fallback_replaces_the_site_value() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-bedrock-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let rawdata = directory.join("rawdata");
+    std::fs::create_dir_all(&rawdata).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&surface).unwrap();
+        file.add_variable::<f64>("depth_to_bedrock", &[])
+            .unwrap()
+            .put_values(&[1.0], ..)
+            .unwrap();
+        file.close().unwrap();
+        let mut file = netcdf::create(rawdata.join("bedrock.nc")).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<f64>("dbedrock", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[250.0], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+    super::materialize_single_point_bedrock(&surface, &rawdata).unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(
+        file.variable("depth_to_bedrock")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [250.0]
+    );
+    let netcdf::AttributeValue::Str(source) = file
+        .variable("depth_to_bedrock")
+        .unwrap()
+        .attribute("source")
+        .unwrap()
+        .value()
+        .unwrap()
+    else {
+        panic!("bedrock source must be a string")
+    };
+    assert_eq!(source, "rawdata bedrock.nc/dbedrock");
     std::fs::remove_dir_all(directory).unwrap();
 }
 

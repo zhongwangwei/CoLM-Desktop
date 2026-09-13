@@ -25,6 +25,55 @@ fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
 }
 
 #[test]
+fn single_point_bedrock_is_optional_until_the_namelist_enables_it() {
+    let path = temp_file("bedrock");
+    write_surface(&path, 8, true, true);
+    let root = path.with_file_name(format!("colm-init-bedrock-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mut config = crate::SinglePointStaticConfig::new(
+        "bedrock",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.use_bedrock = true;
+    let error = crate::write_single_point_constant_restart(&path, &root, config)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("depth_to_bedrock"), "{error}");
+
+    let mut file = netcdf::append(&path).unwrap();
+    file.add_variable::<f64>("depth_to_bedrock", &[])
+        .unwrap()
+        .put_values(&[250.0], ..)
+        .unwrap();
+    file.close().unwrap();
+    let files = crate::write_single_point_constant_restart(&path, &root, config).unwrap();
+    let restart = netcdf::open(files.block).unwrap();
+    assert_eq!(
+        restart
+            .variable("debdrock")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [2.5]
+    );
+    assert!(
+        restart
+            .variable("ibedrock")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap()[0]
+            > 0
+    );
+    drop(restart);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn hyperspectral_soil_albedo_requires_all_211_finite_site_values() {
     let path = temp_file("hyperspectral-soil-albedo");
     write_surface(&path, 8, true, true);

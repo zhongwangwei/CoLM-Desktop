@@ -26,12 +26,12 @@ use colm_namelist::{parse, Value};
 use crate::{
     append_time_hyperspectral_fields, bgc_time_restart_input,
     cold_start_broadband_radiation_with_snow, cold_start_pc_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_cold_start_bgc_state,
-    derive_igbp_canopy, derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover,
-    derive_snow_cover, derive_soil_parameters, derive_usgs_canopy, initialize_snow_layers,
-    is_leap_year, leaf_optics_from_land_cover, merge_bgc_cold_start_states, month_lengths,
-    normalize_soil_texture, orbital_calendar_day, orbital_cosine_zenith,
-    read_single_point_cn_state, read_single_point_eight_day_vegetation,
+    cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_bedrock,
+    derive_cold_start_bgc_state, derive_igbp_canopy, derive_initial_soil_hydraulics,
+    derive_lake_layers, derive_pft_snow_cover, derive_snow_cover, derive_soil_parameters,
+    derive_usgs_canopy, initialize_snow_layers, is_leap_year, leaf_optics_from_land_cover,
+    merge_bgc_cold_start_states, month_lengths, normalize_soil_texture, orbital_calendar_day,
+    orbital_cosine_zenith, read_single_point_cn_state, read_single_point_eight_day_vegetation,
     read_single_point_hyperspectral_albedo, read_single_point_monthly_vegetation,
     read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
     read_single_point_surface, read_single_point_urban_data, read_single_point_water_table,
@@ -59,6 +59,7 @@ pub struct SinglePointStaticConfig<'a> {
     pub land_cover: LandCoverScheme,
     pub hydraulic_model: HydraulicModel,
     pub tuning: RestartTuning,
+    pub use_bedrock: bool,
 }
 
 impl<'a> SinglePointStaticConfig<'a> {
@@ -77,6 +78,7 @@ impl<'a> SinglePointStaticConfig<'a> {
             land_cover,
             hydraulic_model,
             tuning: RestartTuning::default(),
+            use_bedrock: false,
         }
     }
 }
@@ -95,6 +97,7 @@ pub struct SinglePointStaticRun {
     pub block_label: String,
     pub land_cover: LandCoverScheme,
     pub hydraulic_model: HydraulicModel,
+    pub use_bedrock: bool,
 }
 
 /// Runtime subgrid representation selected by CoLM's mutually exclusive flags.
@@ -187,13 +190,15 @@ pub struct SinglePointColdStartRun {
 impl SinglePointStaticRun {
     /// Borrows the fields in the form consumed by the restart initializer.
     pub fn static_config(&self) -> SinglePointStaticConfig<'_> {
-        SinglePointStaticConfig::new(
+        let mut config = SinglePointStaticConfig::new(
             &self.case_name,
             self.land_cover_year,
             &self.block_label,
             self.land_cover,
             self.hydraulic_model,
-        )
+        );
+        config.use_bedrock = self.use_bedrock;
+        config
     }
 }
 
@@ -221,6 +226,7 @@ pub fn single_point_static_run_from_namelist(
         true => HydraulicModel::Campbell,
         false => HydraulicModel::VanGenuchten,
     };
+    let use_bedrock = optional_bool_or(&document, "DEF_USE_BEDROCK", false)?;
     let case_dir = output.join(&case_name);
     let surface = case_dir.join("landdata/srfdata.nc");
     let urban = optional_bool_or(&document, "DEF_URBAN_RUN", false)?;
@@ -245,6 +251,7 @@ pub fn single_point_static_run_from_namelist(
         block_label,
         land_cover,
         hydraulic_model,
+        use_bedrock,
     })
 }
 
@@ -705,6 +712,21 @@ fn write_single_point_constant_restart_from_surface(
     let elevation = vec![surface.elevation_m; patches];
     let elevation_std = vec![surface.elevation_std_m; patches];
     let slope = vec![surface.slope_ratio; patches];
+    let bedrock = config
+        .use_bedrock
+        .then(|| {
+            let depth_cm = surface
+                .bedrock_depth_cm
+                .context("DEF_USE_BEDROCK requires depth_to_bedrock in srfdata.nc")?;
+            let grid = colm_soil_grid(RestartDimensions::default().soil_layers)?;
+            derive_bedrock(
+                &vec![depth_cm; patches],
+                &class,
+                &grid.thickness_m,
+                &grid.interface_depth_m[1..],
+            )
+        })
+        .transpose()?;
     let zeros = vec![0.0; patches];
     let mask = vec![true; patches];
     let hyperspectral_albedo = hyperspectral_albedo
@@ -752,7 +774,7 @@ fn write_single_point_constant_restart_from_surface(
             canopy: &canopy,
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
-            bedrock: None,
+            bedrock: bedrock.as_ref(),
             topmodel: None,
             terrain: None,
             simple_terrain: None,

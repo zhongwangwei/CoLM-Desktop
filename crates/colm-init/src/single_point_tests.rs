@@ -54,6 +54,21 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
     assert_eq!(run.block_label, "w180_s90");
     assert_eq!(run.land_cover, LandCoverScheme::Igbp);
     assert_eq!(run.hydraulic_model, HydraulicModel::VanGenuchten);
+    assert!(!run.use_bedrock);
+
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME = 'CN-Cng'\n DEF_dir_output = '{}'\n DEF_USE_BEDROCK = .true.\n /\n",
+            directory.join("output").display()
+        ),
+    )
+    .unwrap();
+    assert!(
+        single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+            .unwrap()
+            .use_bedrock
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -298,6 +313,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             block_label: "w180_s90".to_owned(),
             land_cover: LandCoverScheme::Igbp,
             hydraulic_model: HydraulicModel::VanGenuchten,
+            use_bedrock: false,
         },
         subgrid: SinglePointSubgrid::Pft,
         date: RestartDate {
@@ -341,6 +357,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         elevation_m: 0.0,
         elevation_std_m: 0.0,
         slope_ratio: 1.0,
+        bedrock_depth_cm: None,
         soil_layers: Vec::new(),
     };
     let radiation = |value| ColdStartRadiation {

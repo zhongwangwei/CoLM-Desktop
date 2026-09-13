@@ -178,6 +178,10 @@ pub struct SinglePointSurfaceRun {
     pub use_site_pctpfts: bool,
     pub use_site_pctcrop: bool,
     pub use_site_htop: bool,
+    /// `DEF_USE_BEDROCK` controls whether the constant restart needs bedrock state.
+    pub use_bedrock: bool,
+    /// `USE_SITE_dbedrock` selects a supplied site value over `bedrock.nc`.
+    pub use_site_dbedrock: bool,
     /// The native `DEF_LC_YEAR` used for PFT composition and canopy height.
     pub land_cover_year: i32,
     /// Exact rawdata years used when native LCT eight-day LAI is not supplied
@@ -208,6 +212,8 @@ struct SinglePointMaterializeOptions<'a> {
     use_site_pctpfts: bool,
     use_site_pctcrop: bool,
     use_site_htop: bool,
+    use_bedrock: bool,
+    use_site_dbedrock: bool,
     land_cover_year: i32,
     eight_day_lai_years: &'a [i32],
     monthly_lai_years: &'a [i32],
@@ -298,6 +304,8 @@ pub fn single_point_surface_run_from_namelist(
     let use_site_pctpfts = namelist_bool(&document, "USE_SITE_pctpfts", true)?;
     let use_site_pctcrop = namelist_bool(&document, "USE_SITE_pctcrop", true)?;
     let use_site_htop = namelist_bool(&document, "USE_SITE_htop", true)?;
+    let use_bedrock = namelist_bool(&document, "DEF_USE_BEDROCK", false)?;
+    let use_site_dbedrock = namelist_bool(&document, "USE_SITE_dbedrock", true)?;
     Ok(SinglePointSurfaceRun {
         source,
         landdata_dir: output.join(case_name).join("landdata"),
@@ -309,6 +317,8 @@ pub fn single_point_surface_run_from_namelist(
         use_site_pctpfts,
         use_site_pctcrop,
         use_site_htop,
+        use_bedrock,
+        use_site_dbedrock,
         land_cover_year,
         eight_day_lai_years,
         monthly_lai_years,
@@ -342,6 +352,8 @@ pub fn materialize_single_point_surface_from_namelist(
             use_site_pctpfts: run.use_site_pctpfts,
             use_site_pctcrop: run.use_site_pctcrop,
             use_site_htop: run.use_site_htop,
+            use_bedrock: run.use_bedrock,
+            use_site_dbedrock: run.use_site_dbedrock,
             land_cover_year: run.land_cover_year,
             eight_day_lai_years: &run.eight_day_lai_years,
             monthly_lai_years: &run.monthly_lai_years,
@@ -1618,6 +1630,8 @@ pub fn materialize_single_point_surface(
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_bedrock: false,
+            use_site_dbedrock: true,
             land_cover_year: 2005,
             eight_day_lai_years: &[],
             monthly_lai_years: &[],
@@ -1731,6 +1745,9 @@ fn materialize_single_point_surface_impl(
             || !options.use_site_pctpfts
             || !options.use_site_pctcrop
             || !options.use_site_htop);
+    let requires_bedrock_raw = options.use_bedrock
+        && (!options.use_site_dbedrock
+            || !single_point_variable_exists(source, "depth_to_bedrock")?);
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
@@ -1740,6 +1757,7 @@ fn materialize_single_point_surface_impl(
         && !requires_monthly_raw
         && !requires_lct_height_raw
         && !requires_pft_raw
+        && !requires_bedrock_raw
     {
         publish_single_point_surface(
             source,
@@ -1748,6 +1766,7 @@ fn materialize_single_point_surface_impl(
             crop_enabled,
             lai_frequency,
             options.urban,
+            options.use_bedrock,
         )?;
         return Ok(None);
     }
@@ -1798,6 +1817,14 @@ fn materialize_single_point_surface_impl(
             options.land_cover_year,
         )?;
     }
+    if options.use_bedrock
+        && (requires_bedrock_raw || !single_point_variable_exists(&temporary, "depth_to_bedrock")?)
+    {
+        materialize_single_point_bedrock(
+            &temporary,
+            rawdata.context("single-point bedrock needs DEF_dir_rawdata/bedrock.nc")?,
+        )?;
+    }
     if pft_mode
         && single_point_pft_raw_needed(
             &temporary,
@@ -1830,10 +1857,39 @@ fn materialize_single_point_surface_impl(
         crop_enabled,
         lai_frequency,
         options.urban,
+        options.use_bedrock,
     )
     .context("cannot publish the materialized single-point surface")?;
     std::fs::remove_file(&temporary)?;
     Ok(report)
+}
+
+fn single_point_variable_exists(surface: &Path, name: &str) -> Result<bool> {
+    Ok(netcdf::open(surface)
+        .with_context(|| format!("cannot open {}", surface.display()))?
+        .variable(name)
+        .is_some())
+}
+
+fn materialize_single_point_bedrock(surface: &Path, rawdata: &Path) -> Result<()> {
+    let file =
+        netcdf::open(surface).with_context(|| format!("cannot open {}", surface.display()))?;
+    let longitude = scalar_f64(&file, "longitude")?;
+    let latitude = scalar_f64(&file, "latitude")?;
+    drop(file);
+    let depth_cm = point_f64(&rawdata.join("bedrock.nc"), "dbedrock", longitude, latitude)
+        .context("cannot read single-point depth_to_bedrock")?;
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file =
+        netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
+    put_or_replace_values(
+        &mut file,
+        "depth_to_bedrock",
+        &[],
+        &[depth_cm],
+        "rawdata bedrock.nc/dbedrock",
+    )
 }
 
 fn materialize_single_point_eight_day_lai(
@@ -2489,6 +2545,7 @@ fn publish_single_point_surface(
     crop_enabled: bool,
     lai_frequency: SinglePointLaiFrequency,
     urban: UrbanSurfaceOptions,
+    use_bedrock: bool,
 ) -> Result<()> {
     if mode == SiteMode::Urban {
         write_urban_single_point_surface(source, target, urban.canyon_hwr, urban.lai_year_window)
@@ -2499,25 +2556,9 @@ fn publish_single_point_surface(
             mode,
             crop_enabled,
             lai_frequency,
+            use_bedrock,
         )
     }
-}
-
-/// Emit the eight-layer single-point artifact written by `write_surface_data_single`.
-#[cfg(test)]
-fn write_single_point_surface(
-    source: &Path,
-    target: &Path,
-    mode: SiteMode,
-    crop_enabled: bool,
-) -> Result<()> {
-    write_single_point_surface_with_lai_frequency(
-        source,
-        target,
-        mode,
-        crop_enabled,
-        SinglePointLaiFrequency::Monthly,
-    )
 }
 
 fn write_single_point_surface_with_lai_frequency(
@@ -2526,6 +2567,7 @@ fn write_single_point_surface_with_lai_frequency(
     mode: SiteMode,
     crop_enabled: bool,
     lai_frequency: SinglePointLaiFrequency,
+    use_bedrock: bool,
 ) -> Result<()> {
     let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
     ensure!(
@@ -2685,6 +2727,13 @@ fn write_single_point_surface_with_lai_frequency(
     )?;
     for name in ["elevation", "elvstd", "sloperatio"] {
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
+    }
+    if use_bedrock && input.variable("depth_to_bedrock").is_some() {
+        emit_scalar(
+            &mut output,
+            "depth_to_bedrock",
+            scalar_f64(&input, "depth_to_bedrock")?,
+        )?;
     }
     Ok(())
 }
@@ -3488,6 +3537,7 @@ fn write_surface_metadata(variable: &mut netcdf::VariableMut<'_>, name: &str) ->
             None,
         ),
         "soil_texture" => (true, Some("USDA soil texture"), None),
+        "depth_to_bedrock" => (true, None, None),
         "elevation" => (true, None, None),
         "elvstd" => (true, Some("standard deviation of elevation"), None),
         "sloperatio" => (true, Some("slope ratio"), None),

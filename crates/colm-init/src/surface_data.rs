@@ -26,6 +26,8 @@ pub struct SinglePointSurfaceData {
     pub elevation_m: f64,
     pub elevation_std_m: f64,
     pub slope_ratio: f64,
+    /// Optional raw `dbedrock` depth in centimetres, enabled by `DEF_USE_BEDROCK`.
+    pub bedrock_depth_cm: Option<f64>,
     /// The first eight CoLM soil layers, from top to bottom.
     pub soil_layers: Vec<SoilLayerInput>,
 }
@@ -533,6 +535,7 @@ fn single_point_surface_from_file(
         elevation_m: scalar(file, "elevation")?,
         elevation_std_m: scalar(file, "elvstd")?,
         slope_ratio: scalar(file, "sloperatio")?,
+        bedrock_depth_cm: optional_scalar(file, "depth_to_bedrock")?,
         soil_layers: source.into_layers(),
     })
 }
@@ -781,6 +784,10 @@ fn scalar(file: &netcdf::File, name: &str) -> Result<f64> {
         values.len()
     );
     Ok(values[0])
+}
+
+fn optional_scalar(file: &netcdf::File, name: &str) -> Result<Option<f64>> {
+    file.variable(name).map(|_| scalar(file, name)).transpose()
 }
 
 fn scalar_i32(file: &netcdf::File, name: &str) -> Result<i32> {
