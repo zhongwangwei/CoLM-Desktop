@@ -79,6 +79,66 @@ fn cold_bgc_rejects_incomplete_runtime_or_pft_contracts() {
     assert!(derive_cold_start_bgc_state(invalid).is_err());
 }
 
+#[test]
+fn state_summary_matches_the_cn_driver_pool_and_truncation_totals() {
+    let thickness = (1..=BGC_SOIL_LAYERS)
+        .map(|value| value as f64)
+        .collect::<Vec<_>>();
+    let carbon = (0..BGC_SOIL_LAYERS)
+        .flat_map(|soil| {
+            (0..BGC_DECOMPOSITION_POOLS).map(move |pool| ((soil + 1) * (pool + 1)) as f64)
+        })
+        .collect::<Vec<_>>();
+    let nitrogen = carbon.iter().map(|value| value / 10.0).collect::<Vec<_>>();
+    let mineral = (1..=BGC_SOIL_LAYERS)
+        .map(|value| value as f64)
+        .collect::<Vec<_>>();
+    let mut pft_values = vec![vec![0.0; 2]; PFT_BGC_F64_VARIABLES.len()];
+    set_pft(&mut pft_values, "leafc_p", 0, 4.0);
+    set_pft(&mut pft_values, "leafc_p", 1, 8.0);
+    set_pft(&mut pft_values, "cpool_p", 0, 1.0);
+    set_pft(&mut pft_values, "cpool_p", 1, 3.0);
+    set_pft(&mut pft_values, "leafn_p", 0, 2.0);
+    set_pft(&mut pft_values, "leafn_p", 1, 6.0);
+    set_pft(&mut pft_values, "npool_p", 0, 5.0);
+    set_pft(&mut pft_values, "npool_p", 1, 7.0);
+    set_pft(&mut pft_values, "ctrunc_p", 0, 10.0);
+    set_pft(&mut pft_values, "ctrunc_p", 1, 20.0);
+    set_pft(&mut pft_values, "ntrunc_p", 0, 1.0);
+    set_pft(&mut pft_values, "ntrunc_p", 1, 3.0);
+
+    let summary = summarize_bgc_state(BgcStateSummaryInput {
+        soil_thickness_m: &thickness,
+        soil_bulk_density_kg_m3: &[1000.0; BGC_SOIL_LAYERS],
+        carbon_g_m3: &carbon,
+        nitrogen_g_m3: &nitrogen,
+        mineral_nitrogen_g_m3: &mineral,
+        pft_values: &pft_values,
+        pft_fraction: &[0.25, 0.75],
+        carbon_truncation_g_m3: &mineral,
+        nitrogen_truncation_g_m3: &nitrogen[..BGC_SOIL_LAYERS],
+    })
+    .unwrap();
+
+    assert_eq!(
+        summary.carbon_pool_totals,
+        [385.0, 770.0, 1155.0, 1540.0, 1925.0, 2310.0, 2695.0]
+    );
+    assert_eq!(
+        summary.nitrogen_pool_totals,
+        [38.5, 77.0, 115.5, 154.0, 192.5, 231.0, 269.5]
+    );
+    assert_eq!(summary.total_soil_nitrogen[0], 0.00037999999999999997);
+    assert_eq!(summary.vegetation_carbon, 9.5);
+    assert_eq!(summary.vegetation_nitrogen, 11.5);
+    assert_eq!(summary.carbon_truncation_vegetation, 17.5);
+    assert_eq!(summary.carbon_truncation_soil, 385.0);
+    assert_eq!(summary.nitrogen_truncation_vegetation, 2.5);
+    assert_eq!(summary.nitrogen_truncation_soil, 25.2);
+    assert_eq!(summary.total_carbon, 11192.0);
+    assert_eq!(summary.total_nitrogen, 1502.2);
+}
+
 fn pft_values<'a>(state: &'a BgcColdStartState, name: &str) -> &'a [f64] {
     let index = PFT_BGC_F64_VARIABLES
         .iter()

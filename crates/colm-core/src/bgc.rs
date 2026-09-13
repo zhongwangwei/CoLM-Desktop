@@ -228,6 +228,129 @@ pub struct BgcNitrificationOwned {
     pub oxygen_decomposition_depth_unsaturated: Vec<f64>,
 }
 
+/// One-patch inputs to CoLM's `CNDriverSummarizeStates` aggregate calculation.
+///
+/// Soil pools use the Rust restart layout: `soil * BGC_DECOMPOSITION_POOLS + pool`.
+/// Only the first ten physical soil layers contribute to the summary.
+#[derive(Debug, Clone, Copy)]
+pub struct BgcStateSummaryInput<'a> {
+    pub soil_thickness_m: &'a [f64],
+    pub soil_bulk_density_kg_m3: &'a [f64],
+    pub carbon_g_m3: &'a [f64],
+    pub nitrogen_g_m3: &'a [f64],
+    pub mineral_nitrogen_g_m3: &'a [f64],
+    pub pft_values: &'a [Vec<f64>],
+    pub pft_fraction: &'a [f64],
+    pub carbon_truncation_g_m3: &'a [f64],
+    pub nitrogen_truncation_g_m3: &'a [f64],
+}
+
+/// CoLM's carbon and nitrogen aggregate state for one patch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BgcStateSummary {
+    pub carbon_pool_totals: Vec<f64>,
+    pub nitrogen_pool_totals: Vec<f64>,
+    pub total_soil_nitrogen: Vec<f64>,
+    pub litter_carbon: f64,
+    pub vegetation_carbon: f64,
+    pub soil_carbon: f64,
+    pub coarse_woody_carbon: f64,
+    pub total_carbon: f64,
+    pub litter_nitrogen: f64,
+    pub vegetation_nitrogen: f64,
+    pub soil_nitrogen: f64,
+    pub coarse_woody_nitrogen: f64,
+    pub mineral_nitrogen: f64,
+    pub total_nitrogen: f64,
+    pub carbon_truncation_vegetation: f64,
+    pub carbon_truncation_soil: f64,
+    pub nitrogen_truncation_vegetation: f64,
+    pub nitrogen_truncation_soil: f64,
+}
+
+/// Reproduces CoLM's `CNDriverSummarizeStates` for one vegetated patch.
+pub fn summarize_bgc_state(input: BgcStateSummaryInput<'_>) -> Result<BgcStateSummary> {
+    validate_summary_input(input)?;
+    let carbon_pool_totals = integrated_pool_totals(input.carbon_g_m3, input.soil_thickness_m);
+    let nitrogen_pool_totals = integrated_pool_totals(input.nitrogen_g_m3, input.soil_thickness_m);
+    let total_soil_nitrogen = (0..BGC_SOIL_LAYERS)
+        .map(|soil| {
+            let density = input.soil_bulk_density_kg_m3[soil];
+            let mut total = 0.0;
+            for pool in 0..BGC_DECOMPOSITION_POOLS {
+                total += input.nitrogen_g_m3[soil * BGC_DECOMPOSITION_POOLS + pool]
+                    / (density * 1000.0)
+                    * 100.0;
+            }
+            total + input.mineral_nitrogen_g_m3[soil] / (density * 1000.0) * 100.0
+        })
+        .collect::<Vec<_>>();
+    let litter_carbon = carbon_pool_totals[..3].iter().sum();
+    let coarse_woody_carbon = carbon_pool_totals[3];
+    let soil_carbon = carbon_pool_totals[4..].iter().sum();
+    let litter_nitrogen = nitrogen_pool_totals[..3].iter().sum();
+    let coarse_woody_nitrogen = nitrogen_pool_totals[3];
+    let soil_nitrogen = nitrogen_pool_totals[4..].iter().sum();
+    let mineral_nitrogen = input
+        .mineral_nitrogen_g_m3
+        .iter()
+        .zip(input.soil_thickness_m)
+        .map(|(value, thickness)| value * thickness)
+        .sum::<f64>();
+    let vegetation_carbon =
+        weighted_pft_total(input.pft_values, input.pft_fraction, CARBON_TOTAL_FIELDS);
+    let vegetation_nitrogen =
+        weighted_pft_total(input.pft_values, input.pft_fraction, NITROGEN_TOTAL_FIELDS);
+    let carbon_truncation_vegetation =
+        weighted_pft_total(input.pft_values, input.pft_fraction, &["ctrunc_p"]);
+    let nitrogen_truncation_vegetation =
+        weighted_pft_total(input.pft_values, input.pft_fraction, &["ntrunc_p"]);
+    let carbon_truncation_soil = input
+        .carbon_truncation_g_m3
+        .iter()
+        .zip(input.soil_thickness_m)
+        .map(|(value, thickness)| value * thickness)
+        .sum();
+    let nitrogen_truncation_soil = input
+        .nitrogen_truncation_g_m3
+        .iter()
+        .zip(input.soil_thickness_m)
+        .map(|(value, thickness)| value * thickness)
+        .sum();
+
+    Ok(BgcStateSummary {
+        carbon_pool_totals,
+        nitrogen_pool_totals,
+        total_soil_nitrogen,
+        litter_carbon,
+        vegetation_carbon,
+        soil_carbon,
+        coarse_woody_carbon,
+        total_carbon: vegetation_carbon
+            + coarse_woody_carbon
+            + litter_carbon
+            + soil_carbon
+            + carbon_truncation_vegetation
+            + carbon_truncation_soil,
+        litter_nitrogen,
+        vegetation_nitrogen,
+        soil_nitrogen,
+        coarse_woody_nitrogen,
+        mineral_nitrogen,
+        total_nitrogen: vegetation_nitrogen
+            + coarse_woody_nitrogen
+            + litter_nitrogen
+            + soil_nitrogen
+            + mineral_nitrogen
+            + nitrogen_truncation_vegetation
+            + nitrogen_truncation_soil,
+        carbon_truncation_vegetation,
+        carbon_truncation_soil,
+        nitrogen_truncation_vegetation,
+        nitrogen_truncation_soil,
+    })
+}
+
 /// Reproduces CoLM's BGC cold-start defaults and optional `cnsteadystate.nc` mapping.
 pub fn derive_cold_start_bgc_state(input: BgcColdStartInput<'_>) -> Result<BgcColdStartState> {
     validate_input(input)?;
@@ -333,87 +456,52 @@ pub fn derive_cold_start_bgc_state(input: BgcColdStartInput<'_>) -> Result<BgcCo
         .zip(&nitrate)
         .map(|(ammonium, nitrate)| ammonium + nitrate)
         .collect::<Vec<_>>();
-    let total_soil_nitrogen = (0..BGC_SOIL_LAYERS)
-        .map(|soil| {
-            let density = input.soil_bulk_density_kg_m3[soil];
-            let mut total = 0.0;
-            for pool in 0..BGC_DECOMPOSITION_POOLS {
-                total +=
-                    nitrogen[soil * BGC_DECOMPOSITION_POOLS + pool] / (density * 1000.0) * 100.0;
-            }
-            total + mineral_nitrogen[soil] / (density * 1000.0) * 100.0
-        })
-        .collect::<Vec<_>>();
-    let pool_totals = |values: &[f64]| {
-        (0..BGC_DECOMPOSITION_POOLS)
-            .map(|pool| {
-                (0..BGC_SOIL_LAYERS)
-                    .map(|soil| {
-                        values[soil * BGC_DECOMPOSITION_POOLS + pool] * input.soil_thickness_m[soil]
-                    })
-                    .sum::<f64>()
-            })
-            .collect::<Vec<_>>()
-    };
-    let carbon_totals = pool_totals(&carbon);
-    let nitrogen_totals = pool_totals(&nitrogen);
-    let litter_carbon = carbon_totals[..3].iter().sum();
-    let coarse_woody_carbon = carbon_totals[3];
-    let soil_carbon = carbon_totals[4..].iter().sum();
-    let litter_nitrogen = nitrogen_totals[..3].iter().sum();
-    let coarse_woody_nitrogen = nitrogen_totals[3];
-    let soil_nitrogen = nitrogen_totals[4..].iter().sum();
-    let mineral_nitrogen_total = mineral_nitrogen
-        .iter()
-        .zip(input.soil_thickness_m)
-        .map(|(value, thickness)| value * thickness)
-        .sum::<f64>();
-    let vegetation_carbon =
-        weighted_pft_total(&pft_values, input.pft.fraction, CARBON_TOTAL_FIELDS);
-    let vegetation_nitrogen =
-        weighted_pft_total(&pft_values, input.pft.fraction, NITROGEN_TOTAL_FIELDS);
+    let truncation_profile = vec![0.0; BGC_SOIL_LAYERS];
+    let summary = summarize_bgc_state(BgcStateSummaryInput {
+        soil_thickness_m: input.soil_thickness_m,
+        soil_bulk_density_kg_m3: input.soil_bulk_density_kg_m3,
+        carbon_g_m3: &carbon,
+        nitrogen_g_m3: &nitrogen,
+        mineral_nitrogen_g_m3: &mineral_nitrogen,
+        pft_values: &pft_values,
+        pft_fraction: input.pft.fraction,
+        carbon_truncation_g_m3: &truncation_profile,
+        nitrogen_truncation_g_m3: &truncation_profile,
+    })?;
 
     Ok(BgcColdStartState {
         pft_values,
         active_crop_years: vec![0; pfts],
         totals: BgcTotalsOwned {
-            litter_carbon: vec![litter_carbon],
-            vegetation_carbon: vec![vegetation_carbon],
-            soil_carbon: vec![soil_carbon],
-            coarse_woody_carbon: vec![coarse_woody_carbon],
-            total_carbon: vec![
-                vegetation_carbon + coarse_woody_carbon + litter_carbon + soil_carbon,
-            ],
-            litter_nitrogen: vec![litter_nitrogen],
-            vegetation_nitrogen: vec![vegetation_nitrogen],
-            soil_nitrogen: vec![soil_nitrogen],
-            coarse_woody_nitrogen: vec![coarse_woody_nitrogen],
-            total_nitrogen: vec![
-                vegetation_nitrogen
-                    + coarse_woody_nitrogen
-                    + litter_nitrogen
-                    + soil_nitrogen
-                    + mineral_nitrogen_total,
-            ],
-            mineral_nitrogen: vec![mineral_nitrogen_total],
+            litter_carbon: vec![summary.litter_carbon],
+            vegetation_carbon: vec![summary.vegetation_carbon],
+            soil_carbon: vec![summary.soil_carbon],
+            coarse_woody_carbon: vec![summary.coarse_woody_carbon],
+            total_carbon: vec![summary.total_carbon],
+            litter_nitrogen: vec![summary.litter_nitrogen],
+            vegetation_nitrogen: vec![summary.vegetation_nitrogen],
+            soil_nitrogen: vec![summary.soil_nitrogen],
+            coarse_woody_nitrogen: vec![summary.coarse_woody_nitrogen],
+            total_nitrogen: vec![summary.total_nitrogen],
+            mineral_nitrogen: vec![summary.mineral_nitrogen],
             deposition: vec![MISSING],
         },
         pools: BgcPoolsOwned {
             carbon,
             nitrogen,
-            total_soil_nitrogen,
+            total_soil_nitrogen: summary.total_soil_nitrogen,
             mineral_nitrogen,
             nitrate,
             ammonium,
             lagged_npp: vec![0.0],
         },
         truncation: BgcTruncationOwned {
-            carbon_profile: vec![0.0; BGC_SOIL_LAYERS],
-            carbon_vegetation: vec![0.0],
-            carbon_soil: vec![0.0],
-            nitrogen_profile: vec![0.0; BGC_SOIL_LAYERS],
-            nitrogen_vegetation: vec![0.0],
-            nitrogen_soil: vec![0.0],
+            carbon_profile: truncation_profile.clone(),
+            carbon_vegetation: vec![summary.carbon_truncation_vegetation],
+            carbon_soil: vec![summary.carbon_truncation_soil],
+            nitrogen_profile: truncation_profile,
+            nitrogen_vegetation: vec![summary.nitrogen_truncation_vegetation],
+            nitrogen_soil: vec![summary.nitrogen_truncation_soil],
         },
         permafrost: BgcPermafrostOwned {
             maximum_active_layer_depth: vec![10.0],
@@ -512,6 +600,73 @@ fn validate_input(input: BgcColdStartInput<'_>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_summary_input(input: BgcStateSummaryInput<'_>) -> Result<()> {
+    validate_soil("soil thickness", input.soil_thickness_m)?;
+    validate_soil("soil bulk density", input.soil_bulk_density_kg_m3)?;
+    let physical_pool_values = BGC_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS;
+    for (name, values) in [
+        ("carbon pools", input.carbon_g_m3),
+        ("nitrogen pools", input.nitrogen_g_m3),
+    ] {
+        ensure!(
+            values.len() >= physical_pool_values
+                && values[..physical_pool_values]
+                    .iter()
+                    .all(|value| value.is_finite()),
+            "{name} must contain finite values for ten soil layers and seven pools"
+        );
+    }
+    for (name, values) in [
+        ("mineral nitrogen", input.mineral_nitrogen_g_m3),
+        ("carbon truncation", input.carbon_truncation_g_m3),
+        ("nitrogen truncation", input.nitrogen_truncation_g_m3),
+    ] {
+        ensure!(
+            values.len() == BGC_SOIL_LAYERS && values.iter().all(|value| value.is_finite()),
+            "{name} must contain ten finite values"
+        );
+    }
+    let pfts = input.pft_fraction.len();
+    ensure!(pfts > 0, "BGC state summary needs at least one PFT");
+    ensure!(
+        input
+            .pft_fraction
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0),
+        "PFT fraction must be finite and nonnegative"
+    );
+    ensure!(
+        input.pft_values.len() == PFT_BGC_F64_VARIABLES.len()
+            && input.pft_values.iter().all(|values| values.len() == pfts),
+        "BGC PFT values must follow the declared field and PFT dimensions"
+    );
+    for fields in [
+        CARBON_TOTAL_FIELDS,
+        NITROGEN_TOTAL_FIELDS,
+        &["ctrunc_p", "ntrunc_p"],
+    ] {
+        for name in fields {
+            ensure!(
+                pft_field(input.pft_values, name)
+                    .iter()
+                    .all(|value| value.is_finite()),
+                "BGC PFT summary field {name} contains a non-finite value"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn integrated_pool_totals(values: &[f64], thicknesses: &[f64]) -> Vec<f64> {
+    (0..BGC_DECOMPOSITION_POOLS)
+        .map(|pool| {
+            (0..BGC_SOIL_LAYERS)
+                .map(|soil| values[soil * BGC_DECOMPOSITION_POOLS + pool] * thicknesses[soil])
+                .sum()
+        })
+        .collect()
 }
 
 fn validate_pft_cn(
@@ -625,17 +780,21 @@ fn weighted_pft_total(values: &[Vec<f64>], fractions: &[f64], fields: &[&str]) -
     fields
         .iter()
         .map(|name| {
-            let index = PFT_BGC_F64_VARIABLES
-                .iter()
-                .position(|candidate| candidate == name)
-                .expect("BGC PFT summary field must be declared");
-            values[index]
+            pft_field(values, name)
                 .iter()
                 .zip(fractions)
                 .map(|(value, fraction)| value * fraction)
                 .sum::<f64>()
         })
         .sum()
+}
+
+fn pft_field<'a>(values: &'a [Vec<f64>], name: &str) -> &'a [f64] {
+    let index = PFT_BGC_F64_VARIABLES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .expect("BGC PFT summary field must be declared");
+    &values[index]
 }
 
 fn is_evergreen(class: i32) -> bool {
