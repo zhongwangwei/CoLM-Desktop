@@ -37,6 +37,7 @@ pub mod static_state;
 pub mod thermal_properties;
 pub mod time_state;
 pub mod urban;
+pub mod urban_bem;
 pub mod urban_ground_flux;
 pub mod urban_impervious;
 pub mod urban_longwave;
@@ -83,6 +84,7 @@ pub use hydrology::{
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
 };
 pub use linear::solve_tridiagonal;
+pub use urban_bem::{urban_bem, UrbanBemInput, UrbanBemState};
 
 pub use interception::{
     canopy_wetness, intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput,
