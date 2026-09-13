@@ -160,6 +160,29 @@ fn natural_non_lct_path_retains_ground_albedo() {
 }
 
 #[test]
+fn shared_ground_albedo_retains_the_soil_and_snow_components() {
+    let ground = cold_start_ground_albedo(
+        0,
+        SoilReflectance {
+            saturated_visible: 0.2,
+            dry_visible: 0.3,
+            saturated_near_infrared: 0.4,
+            dry_near_infrared: 0.5,
+        },
+        10.0,
+        0.1,
+        0.5,
+        0.0,
+        0.0,
+        273.16,
+    )
+    .unwrap();
+    assert_matrix_close(ground.soil, [[0.27, 0.27], [0.47, 0.47]]);
+    assert_matrix_close(ground.ground, ground.soil);
+    assert_eq!(ground.snow_age, 0.0);
+}
+
+#[test]
 fn initialized_snow_uses_the_non_snicar_source_albedo_and_age() {
     let output = cold_start_broadband_radiation_with_snow(
         0,

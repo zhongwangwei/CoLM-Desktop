@@ -174,8 +174,8 @@ pub use plant_hydraulics::{
 };
 pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, leaf_optics_from_land_cover, ColdStartRadiation,
-    LeafOptics,
+    cold_start_ground_albedo, cold_start_pft_broadband_radiation_with_snow,
+    leaf_optics_from_land_cover, ColdStartGroundAlbedo, ColdStartRadiation, LeafOptics,
 };
 pub use root_uptake::{root_uptake, RootUptakeInput, RootUptakeState};
 pub use runoff::{

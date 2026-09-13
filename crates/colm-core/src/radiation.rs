@@ -22,6 +22,19 @@ pub struct LeafOptics {
     pub transmittance: [[f64; BANDS]; BANDS],
 }
 
+/// Ground optical state before a canopy two-stream calculation.
+///
+/// All matrices use CoLM's `[visible-or-near-infrared][direct-or-diffuse]`
+/// layout.  Keeping this boundary separate lets broadband and hyperspectral
+/// canopy drivers use exactly the same soil, water, and snow treatment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColdStartGroundAlbedo {
+    pub soil: [[f64; RADIATION_TYPES]; BANDS],
+    pub snow: [[f64; RADIATION_TYPES]; BANDS],
+    pub ground: [[f64; RADIATION_TYPES]; BANDS],
+    pub snow_age: f64,
+}
+
 /// Looks up CoLM's native broadband leaf optical constants for one land class.
 ///
 /// This is the `rho`/`tau` assignment in `MOD_Const_LC.F90`; it deliberately
@@ -301,7 +314,19 @@ fn cold_start_broadband_radiation_with_snow_using(
         }
     }
 
-    let soil_ground;
+    let ground_state = cold_start_ground_albedo(
+        patch_type,
+        soil,
+        soil_liquid_water_kg_m2,
+        soil_thickness_m,
+        cosine_zenith,
+        snow_depth_m,
+        ground_snow_fraction,
+        ground_temperature_k,
+    )?;
+    let soil_ground = ground_state.soil;
+    let snow = ground_state.snow;
+    let snow_age = ground_state.snow_age;
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut transmission = [[0.0, 1.0, 1.0]; BANDS];
@@ -309,22 +334,7 @@ fn cold_start_broadband_radiation_with_snow_using(
     let mut direct_extinction = 1.0;
     let mut diffuse_extinction = 0.718;
 
-    if patch_type <= 2 {
-        let wetness = (1.0e-3 * soil_liquid_water_kg_m2 / soil_thickness_m).min(1.0);
-        let increase = (0.11 - 0.40 * wetness).max(0.0);
-        let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
-        let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
-        soil_ground = [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]];
-    } else if patch_type == 3 {
-        soil_ground = [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]];
-    } else {
-        let albedo_water = 0.05 / (cosine_zenith + 0.15);
-        soil_ground = [[albedo_water, 0.1], [albedo_water, 0.1]];
-    }
-    let (snow, snow_age) =
-        generic_snow_albedo(snow_depth_m * 250.0, ground_temperature_k, cosine_zenith)?;
-    let ground = mix_ground_albedo(soil_ground, snow, ground_snow_fraction);
-    let mut albedo = ground;
+    let mut albedo = ground_state.ground;
 
     if lai + sai > 1.0e-6 && patch_type < 3 && (patch_type != 0 || use_lct) {
         let two_stream = match two_stream_kind {
@@ -334,7 +344,7 @@ fn cold_start_broadband_radiation_with_snow_using(
                 sai,
                 wet_snow_fraction,
                 cosine_zenith,
-                ground,
+                ground_state.ground,
                 usgs_land_cover,
                 vegetation_snow,
             )?,
@@ -344,7 +354,7 @@ fn cold_start_broadband_radiation_with_snow_using(
                 sai,
                 wet_snow_fraction,
                 cosine_zenith,
-                ground,
+                ground_state.ground,
                 vegetation_snow,
             )?,
         };
@@ -378,6 +388,61 @@ fn cold_start_broadband_radiation_with_snow_using(
         thermal_gap_fraction,
         direct_extinction,
         diffuse_extinction,
+    })
+}
+
+/// Applies CoLM's cold-start soil/water and non-SNICAR snow albedo branches.
+#[allow(clippy::too_many_arguments)]
+pub fn cold_start_ground_albedo(
+    patch_type: i32,
+    soil: SoilReflectance,
+    soil_liquid_water_kg_m2: f64,
+    soil_thickness_m: f64,
+    cosine_zenith: f64,
+    snow_depth_m: f64,
+    ground_snow_fraction: f64,
+    ground_temperature_k: f64,
+) -> Result<ColdStartGroundAlbedo> {
+    ensure!(
+        soil_liquid_water_kg_m2.is_finite()
+            && soil_thickness_m.is_finite()
+            && soil_thickness_m > 0.0
+            && snow_depth_m.is_finite()
+            && snow_depth_m >= 0.0
+            && ground_snow_fraction.is_finite()
+            && (0.0..=1.0).contains(&ground_snow_fraction)
+            && ground_temperature_k.is_finite()
+            && cosine_zenith.is_finite()
+            && cosine_zenith > 0.0,
+        "cold-start ground-albedo inputs are invalid"
+    );
+    for value in [
+        soil.saturated_visible,
+        soil.dry_visible,
+        soil.saturated_near_infrared,
+        soil.dry_near_infrared,
+    ] {
+        ensure!(value.is_finite(), "soil reflectance must be finite");
+    }
+    let soil = if patch_type <= 2 {
+        let wetness = (1.0e-3 * soil_liquid_water_kg_m2 / soil_thickness_m).min(1.0);
+        let increase = (0.11 - 0.40 * wetness).max(0.0);
+        let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
+        let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
+        [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]]
+    } else if patch_type == 3 {
+        [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]]
+    } else {
+        let albedo_water = 0.05 / (cosine_zenith + 0.15);
+        [[albedo_water, 0.1], [albedo_water, 0.1]]
+    };
+    let (snow, snow_age) =
+        generic_snow_albedo(snow_depth_m * 250.0, ground_temperature_k, cosine_zenith)?;
+    Ok(ColdStartGroundAlbedo {
+        ground: mix_ground_albedo(soil, snow, ground_snow_fraction),
+        soil,
+        snow,
+        snow_age,
     })
 }
 
