@@ -54,6 +54,12 @@ pub struct FlatLandPatches {
     pub element_index: Vec<usize>,
 }
 
+/// The `landhru` pixelset created by `MOD_LandHRU::landhru_build`.
+///
+/// Its flat field layout is identical to a land-patch pixelset, but its
+/// `set_type` is the hydrologic response unit ID, negated for lake catchments.
+pub type FlatLandHrus = FlatLandPatches;
+
 impl FlatMesh {
     /// Construct and validate one immutable mesh topology.
     pub fn new(
@@ -149,6 +155,37 @@ impl FlatMesh {
             set_type: vec![0; self.len()],
             element_index: (1..=self.len()).collect(),
         }
+    }
+
+    /// Port `MOD_LandHRU::landhru_build` after catchment pixels reach a flat mesh.
+    ///
+    /// `hydrounit_types` is one positive `ihydrounit2d` value per mesh pixel in
+    /// current mesh order. `lake_id_by_element` is one `lake_id` per catchment
+    /// element. As upstream does, lake-catchment HRU IDs are written negative.
+    pub fn into_land_hrus(
+        self,
+        hydrounit_types: &[i32],
+        lake_id_by_element: &[i32],
+    ) -> Result<(Self, FlatLandHrus)> {
+        ensure!(
+            hydrounit_types.len() == self.ilon.len()
+                && hydrounit_types.iter().all(|&value| value > 0),
+            "catchment hydrologic-unit types must be positive and match mesh pixels"
+        );
+        ensure!(
+            lake_id_by_element.len() == self.len(),
+            "catchment lake IDs must have one entry per mesh element"
+        );
+        let (mesh, mut hrus) = self.into_land_patches(hydrounit_types, false)?;
+        for (hru, set_type) in hrus.set_type.iter_mut().enumerate() {
+            let element = hrus.element_index[hru]
+                .checked_sub(1)
+                .context("catchment HRU has zero element index")?;
+            if lake_id_by_element[element] > 0 {
+                *set_type = -*set_type;
+            }
+        }
+        Ok((mesh, hrus))
     }
 
     /// Port the core of `landpatch_build` for a raw land-type vector already

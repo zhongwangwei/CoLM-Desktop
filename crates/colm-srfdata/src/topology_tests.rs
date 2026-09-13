@@ -78,3 +78,24 @@ fn dominant_patch_type_preserves_ocean_but_merges_positive_land_types() {
     assert_eq!(patches.pixel_start, vec![1, 2]);
     assert_eq!(patches.pixel_end, vec![1, 4]);
 }
+
+#[test]
+fn catchment_hrus_follow_the_mesh_sort_and_lake_sign_contract() {
+    let mesh = FlatMesh::new(
+        vec![100, 200],
+        vec![0, 3, 5],
+        vec![10, 11, 12, 20, 21],
+        vec![1, 1, 1, 2, 2],
+    )
+    .unwrap();
+
+    let (mesh, hrus) = mesh.into_land_hrus(&[2, 1, 2, 2, 1], &[0, 7]).unwrap();
+
+    assert_eq!(hrus.element_ids, vec![100, 100, 200, 200]);
+    assert_eq!(hrus.pixel_start, vec![1, 2, 1, 2]);
+    assert_eq!(hrus.pixel_end, vec![1, 3, 1, 2]);
+    assert_eq!(hrus.set_type, vec![1, 2, -1, -2]);
+    assert_eq!(hrus.element_index, vec![1, 1, 2, 2]);
+    assert_eq!(mesh.pixels(0).unwrap().0, &[11, 12, 10]);
+    assert_eq!(mesh.pixels(1).unwrap().0, &[21, 20]);
+}

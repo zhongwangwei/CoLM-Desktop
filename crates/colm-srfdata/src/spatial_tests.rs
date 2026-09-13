@@ -562,6 +562,21 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &BlockLayout::regular(1, 1).unwrap(),
     )
     .unwrap();
+    let land_hrus = FlatLandPatches {
+        element_ids: vec![1, 1, 2],
+        pixel_start: vec![1, 3, 1],
+        pixel_end: vec![2, 4, 4],
+        set_type: vec![1, 2, -1],
+        element_index: vec![1, 1, 2],
+    };
+    write_spatial_hru_topology(
+        &landdata,
+        2005,
+        &topology,
+        &land_hrus,
+        &BlockLayout::regular(1, 1).unwrap(),
+    )
+    .unwrap();
 
     let block = netcdf::open(landdata.join("block.nc")).unwrap();
     assert_eq!(block.dimension("longitude").unwrap().len(), 1);
@@ -625,6 +640,16 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
             .get_values::<i32, _>(..)
             .unwrap(),
         vec![0, 1, 12]
+    );
+    let landhru = netcdf::open(landdata.join("landhru/2005/landhru_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&landhru, "eindex"), ["landhru"]);
+    assert_eq!(
+        landhru
+            .variable("settyp")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        vec![1, 2, -1]
     );
 
     std::fs::remove_dir_all(directory).unwrap();

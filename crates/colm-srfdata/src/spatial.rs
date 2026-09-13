@@ -1538,6 +1538,34 @@ pub fn write_spatial_topology_with_shared(
     Ok(())
 }
 
+/// Write the CATCHMENT-only `landhru` pixelset after its mesh and HRUs are built.
+///
+/// The caller owns catchment input decoding; this adapter preserves the same
+/// block ownership and NetCDF vector contract as the other spatial pixelsets.
+pub fn write_spatial_hru_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_hrus: &FlatLandPatches,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    validate_patches(&topology.mesh, land_hrus)?;
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    write_pixelset(
+        landdata.as_ref(),
+        "landhru",
+        &format!("{land_cover_year:04}"),
+        &land_hrus.element_ids,
+        &land_hrus.pixel_start,
+        &land_hrus.pixel_end,
+        &land_hrus.set_type,
+        None,
+        blocks,
+        &assignments,
+    )
+}
+
 /// Write the PFT refinement pixelset alongside an already-written topology.
 pub fn write_spatial_pft_topology(
     landdata: impl AsRef<Path>,
