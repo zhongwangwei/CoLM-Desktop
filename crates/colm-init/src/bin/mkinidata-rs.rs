@@ -160,6 +160,11 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             _ => bail!("unexpected argument {value}"),
         }
     }
+    if config.use_hyperspectral && cold_time.is_some() {
+        bail!(
+            "spatial-lct hyperspectral cold time is unavailable: upstream has no supported LCT class-to-spectral-optics mapping; Rust refuses to write an unverified restart"
+        );
+    }
     let files = write_spatial_lct_constant_restart(config)?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
@@ -296,7 +301,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -355,5 +360,34 @@ mod tests {
         );
         assert!(parse_restart_date("2005-001").is_err());
         assert!(parse_restart_date("2005-001-00000-extra").is_err());
+    }
+}
+
+#[cfg(test)]
+mod lct_hyperspectral_tests {
+    use super::*;
+
+    #[test]
+    fn lct_hyperspectral_cold_time_fails_before_writing_an_unverified_restart() {
+        let error = run_spatial_lct(
+            [
+                "missing-landdata",
+                "missing-restart",
+                "case",
+                "2000",
+                "w180_s90",
+                "igbp",
+                "campbell",
+                "--hyperspectral",
+                "--cold-time",
+                "2000-001-0",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("class-to-spectral-optics mapping"));
     }
 }
