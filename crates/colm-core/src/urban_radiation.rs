@@ -609,22 +609,25 @@ fn complement(values: [[f64; RADIATION_TYPES]; BANDS]) -> [[f64; RADIATION_TYPES
     })
 }
 
-fn wall_shadow_direct(fraction: f64, height_to_length: f64, theta: f64) -> f64 {
+pub(crate) fn wall_shadow_direct(fraction: f64, height_to_length: f64, theta: f64) -> f64 {
     1.0 - (-4.0 / std::f64::consts::PI * fraction * height_to_length * theta.tan()).exp()
 }
 
-fn wall_shadow_diffuse(fraction: f64, height_to_length: f64) -> f64 {
+pub(crate) fn wall_shadow_diffuse(fraction: f64, height_to_length: f64) -> f64 {
     let angle =
         (53.0 - (fraction * height_to_length * 100.0).sqrt()) / 180.0 * std::f64::consts::PI;
     1.0 - (-4.0 / std::f64::consts::PI * fraction * height_to_length * angle.tan()).exp()
 }
 
-fn tree_shadow(fraction: f64, theta: f64) -> f64 {
+pub(crate) fn tree_shadow(fraction: f64, theta: f64) -> f64 {
     let cosine = theta.cos();
     fraction.max((1.0 - (-fraction / cosine).exp()) / (1.0 - fraction * (-1.0 / cosine).exp()))
 }
 
-fn solve<const N: usize>(mut matrix: [[f64; N]; N], mut rhs: [f64; N]) -> Result<[f64; N]> {
+pub(crate) fn solve<const N: usize>(
+    mut matrix: [[f64; N]; N],
+    mut rhs: [f64; N],
+) -> Result<[f64; N]> {
     for pivot in 0..N {
         let row = (pivot..N)
             .max_by(|&left, &right| {
