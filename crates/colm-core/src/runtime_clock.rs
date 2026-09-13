@@ -57,8 +57,8 @@ impl RuntimeClock {
         let spinup_until = end_style(spinup_until)?;
         ensure!(before(start, end), "simulation end must follow its start");
         ensure!(
-            timestep_seconds.is_finite() && timestep_seconds > 0.0 && timestep_seconds <= 86_400.0,
-            "CoLM timestep must be finite and in 0..=86400 seconds"
+            timestep_seconds.is_finite() && timestep_seconds > 0.0 && timestep_seconds <= 3_600.0,
+            "CoLM timestep must be finite and in 0..=3600 seconds"
         );
         let step_seconds = timestep_seconds.round() as u32;
         ensure!(step_seconds > 0, "CoLM timestep rounds to zero seconds");

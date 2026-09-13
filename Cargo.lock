@@ -142,6 +142,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-runtime"
+version = "0.2.0-beta.4"
+dependencies = [
+ "anyhow",
+ "colm-core",
+ "colm-forcing",
+ "colm-namelist",
+]
+
+[[package]]
 name = "colm-schema"
 version = "0.2.0-beta.4"
 

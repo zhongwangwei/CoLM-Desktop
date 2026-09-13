@@ -58,6 +58,21 @@ pub fn month_day(time: CalendarTime) -> Result<(u8, u8)> {
     unreachable!("validated Julian days always belong to a Gregorian month")
 }
 
+/// Converts a one-based Gregorian month/day to CoLM's one-based Julian day.
+///
+/// This is `MOD_TimeManager:monthday2julian`, shared by case parsing and the
+/// runtime so they cannot disagree about leap days.
+pub fn month_day_to_julian(year: i32, month: u8, day: u8) -> Result<u16> {
+    ensure!((1..=12).contains(&month), "month is outside 1..=12");
+    let days = month_lengths(year);
+    let maximum = days[usize::from(month - 1)];
+    ensure!(
+        (1..=maximum).contains(&i32::from(day)),
+        "day is invalid for its month"
+    );
+    Ok(days[..usize::from(month - 1)].iter().sum::<i32>() as u16 + u16::from(day))
+}
+
 /// Applies CoLM's local-time correction before `MOD_OrbCoszen:orb_coszen`.
 ///
 /// In non-Greenwich single-point runs CoLM subtracts the longitude-derived

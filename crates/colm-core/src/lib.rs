@@ -77,7 +77,9 @@ pub use bgc::{
     BgcTruncationOwned, BgcVegetationCarbon, BGC_DAYS_PER_YEAR, BGC_DECOMPOSITION_POOLS,
     BGC_FULL_SOIL_LAYERS, BGC_SOIL_LAYERS, PFT_BGC_F64_VARIABLES,
 };
-pub use calendar::{is_leap_year, month_day, month_lengths, orbital_calendar_day, CalendarTime};
+pub use calendar::{
+    is_leap_year, month_day, month_day_to_julian, month_lengths, orbital_calendar_day, CalendarTime,
+};
 pub use canopy_layer_profile::{
     canopy_diffusivity, canopy_diffusivity_difference, canopy_diffusivity_profile_integral,
     canopy_diffusivity_resistance, canopy_diffusivity_resistance_analytic,

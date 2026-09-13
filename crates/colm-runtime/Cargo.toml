@@ -1,0 +1,17 @@
+[package]
+name = "colm-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+colm-core = { path = "../colm-core" }
+colm-forcing = { path = "../colm-forcing" }
+colm-namelist = { path = "../colm-namelist" }
+
+[lints]
+workspace = true

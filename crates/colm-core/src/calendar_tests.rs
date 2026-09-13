@@ -71,3 +71,10 @@ fn julian_month_day_matches_colm_for_leap_and_common_years() {
     })
     .is_err());
 }
+
+#[test]
+fn gregorian_month_day_to_julian_matches_colm() {
+    assert_eq!(month_day_to_julian(2007, 3, 1).unwrap(), 60);
+    assert_eq!(month_day_to_julian(2008, 3, 1).unwrap(), 61);
+    assert!(month_day_to_julian(2007, 2, 29).is_err());
+}
