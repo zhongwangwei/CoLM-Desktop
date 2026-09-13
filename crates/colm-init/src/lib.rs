@@ -6,6 +6,7 @@ pub mod albedo {
     pub use colm_core::albedo::*;
 }
 pub mod bgc_restart;
+pub mod bgc_time_restart;
 pub mod canopy_layer_profile {
     pub use colm_core::canopy_layer_profile::*;
 }
@@ -80,6 +81,11 @@ pub mod vegetation {
 }
 
 pub use bgc_restart::{write_cold_start_bgc_constant_restart, BgcConstantRestartFiles};
+pub use bgc_time_restart::{
+    write_bgc_time_restart, write_bgc_time_restart_block, BgcClimateFields, BgcNitrificationFields,
+    BgcPermafrostFields, BgcPoolFields, BgcTimeRestartDimensions, BgcTimeRestartFile,
+    BgcTimeRestartInput, BgcTotals, BgcTruncationFields,
+};
 pub use colm_core::update_snow_age;
 pub use colm_core::SoilSurfaceResistanceInput;
 pub use colm_core::{
