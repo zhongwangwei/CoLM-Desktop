@@ -262,11 +262,14 @@ CONTAINS
         cgrnds,     &! deriv of soil latent heat flux wrt soil temp [w/m**2/k]
         tref,       &! 2 m height air temperature (kelvin)
         qref,       &! 2 m height air specific humidity
-        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
-        rstfacsha,  &! factor of soil water stress to transpiration on shaded leaf
         gssun,      &! stomata conductance of sunlit leaf
         gssha,      &! stomata conductance of shaded leaf
         rootflux(1:nl_soil)  ! root water uptake from different layers
+
+   ! Read the caller's soil water stress factors; plant hydraulics may update them.
+   real(r8), intent(inout) :: &
+        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
+        rstfacsha    ! factor of soil water stress to transpiration on shaded leaf
 
    real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow->rain mass [mm]
    real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy rain->snow mass [mm]
@@ -1016,6 +1019,17 @@ ENDIF
 ! ======================================================================
 !     END stability iteration
 ! ======================================================================
+
+      ! Diagnose canopy conductance (mol m-2 s-1) from the resistances used
+      ! by the final iteration, also when plant hydraulics is disabled.
+      ! rssun/rssha are now leaf-scale; tlbef is the temperature at which
+      ! they were evaluated. Do not change the resistances or the solver.
+      gssun = 0._r8
+      gssha = 0._r8
+      IF (lai > 0.001_r8) THEN
+         gssun = (laisun / rssun) * (tprcor / tlbef)
+         gssha = (laisha / rssha) * (tprcor / tlbef)
+      ENDIF
 
       z0m = z0mv
       zol = zeta

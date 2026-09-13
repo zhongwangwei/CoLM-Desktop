@@ -1750,6 +1750,18 @@ ENDIF
 !     END stability iteration
 ! ======================================================================
 
+      ! Canopy-scale conductance in mol m-2 s-1, including the non-PHS path.
+      ! Use the final iteration's leaf-scale resistance and temperature;
+      ! inactive PFTs have no conducting leaf area.
+      gssun = 0._r8
+      gssha = 0._r8
+      DO i = ps, pe
+         IF (fcover(i) > 0._r8 .and. lai(i) > 0.001_r8) THEN
+            gssun(i) = (laisun(i) / rssun(i)) * (tprcor / tlbef(i))
+            gssha(i) = (laisha(i) / rssha(i)) * (tprcor / tlbef(i))
+         ENDIF
+      ENDDO
+
       IF(DEF_USE_OZONESTRESS)THEN
          DO i = ps, pe
             p = pftclass(i)

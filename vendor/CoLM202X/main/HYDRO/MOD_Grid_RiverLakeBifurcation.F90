@@ -731,7 +731,8 @@ CONTAINS
                ! CaMa path limiter: one path may move at most 5% of the
                ! smaller endpoint storage in this substep.
                storage_ref = max(min(storage_up, storage_dn), 0._r8)
-               pth_limiter_rate(ipth) = min(1._r8, 0.05_r8 * storage_ref / (abs(pth_hflux_total(ipth)) * dt))
+               pth_limiter_rate(ipth) = bif_limiter_fraction(0.05_r8 * storage_ref, &
+                  abs(pth_hflux_total(ipth)) * dt)
             ENDIF
 
             ! Split-pool no-overdraft limiter for CoLM's levee/tracer
@@ -777,7 +778,7 @@ CONTAINS
                   ENDIF
 
                   layer_limiter_rate(ilev, ipth) = min(layer_limiter_rate(ilev, ipth), &
-                     min(1._r8, max(donor_storage, 0._r8) / (layer_transfer * dt)))
+                     bif_limiter_fraction(max(donor_storage, 0._r8), layer_transfer * dt))
                ENDDO
             ENDIF
 
@@ -803,8 +804,8 @@ CONTAINS
             IF (.not. ucatfilter(i_ucat)) CYCLE
             dt_cell = dt_all(irivsys(i_ucat))
             IF (protected_outgoing(i_ucat) > 0._r8 .and. dt_cell > 0._r8) THEN
-               protected_out_rate(i_ucat) = min(1._r8, &
-                  max(protected_storage_ucat(i_ucat), 0._r8) / (protected_outgoing(i_ucat) * dt_cell))
+               protected_out_rate(i_ucat) = bif_limiter_fraction( &
+                  max(protected_storage_ucat(i_ucat), 0._r8), protected_outgoing(i_ucat) * dt_cell)
             ENDIF
          ENDDO
       ENDIF
@@ -842,7 +843,9 @@ CONTAINS
          bif_outflow = limiter_outgoing(i_ucat)
          IF (bif_outflow > 0._r8 .and. dt_cell > 0._r8) THEN
             remaining_capacity = max(storage_ref / dt_cell - normal_outflow, 0._r8)
-            limiter_out_rate(i_ucat) = min(1._r8, remaining_capacity / bif_outflow)
+            IF (remaining_capacity < bif_outflow) THEN
+               limiter_out_rate(i_ucat) = min(1._r8, remaining_capacity / bif_outflow)
+            ENDIF
          ENDIF
       ENDDO
 
@@ -933,6 +936,19 @@ CONTAINS
                pth_hflux_total(ipth) = pth_hflux_total(ipth) + bif_hflux_lev(ilev, ipth)
             ENDDO
 
+            ! Donor limits can remove cancellation between opposed layers.
+            ! Reapply the path cap to the final net flux, scaling state together.
+            IF (abs(pth_hflux_total(ipth)) > 0._r8) THEN
+               storage_ref = max(min(storage_ucat(i_up), storage_dn_pth(ipth)), 0._r8)
+               rate = bif_limiter_fraction(0.05_r8 * storage_ref, abs(pth_hflux_total(ipth)) * dt)
+               IF (rate < 1._r8) THEN
+                  bif_hflux_lev(:, ipth) = bif_hflux_lev(:, ipth) * rate
+                  pth_momen(:, ipth) = pth_momen(:, ipth) * rate
+                  pth_veloc(:, ipth) = pth_veloc(:, ipth) * rate
+                  pth_hflux_total(ipth) = sum(bif_hflux_lev(:, ipth))
+               ENDIF
+            ENDIF
+
             ! ----- Step 5: Accumulate to upstream ucat (local) -----
          bif_hflux_sum(i_up) = bif_hflux_sum(i_up) + pth_hflux_total(ipth)
 
@@ -1006,6 +1022,23 @@ CONTAINS
                pth_lev_hflux_total, bif_lev_influx)
 
    END SUBROUTINE bifurcation_calc
+
+
+   ! =========================================================================
+   PURE FUNCTION bif_limiter_fraction (available, transfer) RESULT(rate)
+   ! Bound the transfer without evaluating a potentially overflowing ratio
+   ! when the available water already exceeds the requested transfer.
+   ! An empty donor must still suppress flux, even if flux*dt underflows.
+      real(r8), intent(in) :: available, transfer
+      real(r8) :: rate
+
+      rate = 1._r8
+      IF (available <= 0._r8) THEN
+         rate = 0._r8
+      ELSEIF (transfer > available) THEN
+         rate = available / transfer
+      ENDIF
+   END FUNCTION bif_limiter_fraction
 
 
    ! =========================================================================

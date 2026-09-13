@@ -226,6 +226,7 @@ CONTAINS
    real(r8) :: bedelv_fc, height_up, height_dn
    real(r8) :: vwave_up, vwave_dn, hflux_up, hflux_dn, mflux_up, mflux_dn
    real(r8) :: volwater, friction, floodarea
+   real(r8) :: rivsto_hist
    real(r8) :: visible_hflux, protected_hflux, protected_clip
    real(r8) :: fldfrc_levee
    real(r8) :: vis_vol_bef_lv, levsto_bef_lv
@@ -1173,8 +1174,10 @@ CONTAINS
                   ENDIF
 
                   ! River/floodplain storage separation, total storage, surface elevation
-                  ! rivsto = rivare * wdsrf (matches CaMa-Flood: P2RIVSTO = RIVLEN*RIVWTH*RIVDPH)
-                  ! fldsto = total_volume - rivsto
+                  ! Partition the actual visible volume at bankfull capacity.
+                  ! Above bankfull, the volume-depth curve need not contain
+                  ! rivare*wdsrf; using that rectangle can exceed total storage.
+                  ! rivsto = below-bank storage; fldsto = visible overbank storage
                   ! flddph = max(wdsrf - rivhgt, 0) (depth above channel banks)
                   ! storge = total_volume (+ levsto if levee enabled)
                   ! sfcelv = bed_elevation + wdsrf (matches CaMa: D2RIVELV + D2RIVDPH)
@@ -1183,9 +1186,10 @@ CONTAINS
                      ELSE
                         volwater = volwater_ucat(i)
                      ENDIF
-                  a_rivsto(i) = a_rivsto(i) + floodplain_curve(i)%rivare * wdsrf_ucat(i) * dt_all(irivsys(i))
+                  rivsto_hist = min(volwater, floodplain_curve(i)%rivstomax)
+                  a_rivsto(i) = a_rivsto(i) + rivsto_hist * dt_all(irivsys(i))
                   a_fldsto(i) = a_fldsto(i) &
-                     + max(volwater - floodplain_curve(i)%rivare * wdsrf_ucat(i), 0._r8) * dt_all(irivsys(i))
+                     + (volwater - rivsto_hist) * dt_all(irivsys(i))
                   a_flddph(i) = a_flddph(i) &
                      + max(wdsrf_ucat(i) - floodplain_curve(i)%rivhgt, 0._r8) * dt_all(irivsys(i))
                   IF (DEF_USE_LEVEE .and. has_levee(i) .and. (.not. is_built_resv(i))) THEN

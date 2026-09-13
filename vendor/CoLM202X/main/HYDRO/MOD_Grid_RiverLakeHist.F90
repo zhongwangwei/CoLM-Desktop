@@ -483,11 +483,11 @@ CONTAINS
       ENDIF
 
       CALL route_hist_write_ucat (a_rivsto, 'f_rivsto', &
-         longname = 'river channel storage', &
+         longname = 'below-bank river channel storage', &
          units = 'm^3')
 
       CALL route_hist_write_ucat (a_fldsto, 'f_fldsto', &
-         longname = 'visible river-side floodplain storage excluding levee-protected storage', &
+         longname = 'visible overbank storage excluding levee-protected storage', &
          units = 'm^3')
 
       CALL route_hist_write_ucat (a_flddph, 'f_flddph', &
