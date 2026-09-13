@@ -386,7 +386,12 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         kernel.manifest.identity(),
         kernel.manifest.platform
     );
-    let kernel_id = kernel.manifest.stage_fingerprint_identity();
+    // Study workers always execute the verified Fortran preprocessors, so stale-case
+    // validation must use the exact stage fingerprint identity `run_case` wrote.
+    let kernel_id = format!(
+        "{};preprocessors=fortran",
+        kernel.manifest.stage_fingerprint_identity()
+    );
     super::engine::ensure_supported_study_manifest(&manifest, Some(&kernel.manifest.macros))?;
     if manifest.spec.kernel_dir.is_none() || manifest.provenance.kernel_id.is_empty() {
         bail!("Study has no frozen kernel identity; create a new Study");
