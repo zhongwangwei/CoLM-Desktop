@@ -66,9 +66,9 @@ pub const MISSING: f64 = -1.0e36;
 
 pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
 pub use atmosphere::{
-    hydrometeor_temperature, new_snow_bulk_density, orbital_cosine_zenith, partition_precipitation,
-    saturation_specific_humidity, wet_bulb_temperature, PrecipitationInput,
-    PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
+    hydrometeor_temperature, new_snow_bulk_density, orbital_cosine_azimuth, orbital_cosine_zenith,
+    partition_precipitation, saturation_specific_humidity, wet_bulb_temperature,
+    PrecipitationInput, PrecipitationPhaseScheme, PrecipitationState, SaturationState, FREEZING_K,
 };
 pub use bgc::{
     derive_cold_start_bgc_state, summarize_bgc_state, BgcClimateOwned, BgcColdStartInput,

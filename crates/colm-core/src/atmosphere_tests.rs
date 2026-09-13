@@ -102,7 +102,7 @@ fn saturation_clamps_temperature_like_qsadv_and_refuses_invalid_inputs() {
 }
 
 #[test]
-fn orbital_cosine_zenith_matches_current_fortran() {
+fn orbital_geometry_matches_current_fortran() {
     close(
         orbital_cosine_zenith(80.5, 2.1, 0.7),
         -0.386_127_578_225_333_95,
@@ -110,5 +110,22 @@ fn orbital_cosine_zenith_matches_current_fortran() {
     close(
         orbital_cosine_zenith(172.25, -1.2, -0.4),
         -0.942_528_819_370_802_5,
+    );
+    close(
+        orbital_cosine_azimuth(80.5, 2.1, 0.7, orbital_cosine_zenith(80.5, 2.1, 0.7)),
+        -0.352_574_600_915_616_65,
+    );
+    close(
+        orbital_cosine_azimuth(
+            172.25,
+            -1.2,
+            -0.4,
+            orbital_cosine_zenith(172.25, -1.2, -0.4),
+        ),
+        -0.100_072_789_156_135_31,
+    );
+    assert_eq!(
+        orbital_cosine_azimuth(172.5, 0.0, 0.5, orbital_cosine_zenith(172.5, 0.0, 0.5),),
+        1.0
     );
 }

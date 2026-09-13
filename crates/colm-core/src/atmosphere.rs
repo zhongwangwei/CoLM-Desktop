@@ -1,7 +1,8 @@
 //! Atmospheric kernels called by CoLMMAIN on every physical time step.
 //!
-//! Ported from MOD_Qsadv.F90, MOD_WetBulb.F90, MOD_RainSnowTemp.F90, and
-//! MOD_OrbCoszen.F90. No caller-specific state or I/O is kept here.
+//! Ported from MOD_Qsadv.F90, MOD_WetBulb.F90, MOD_RainSnowTemp.F90,
+//! MOD_OrbCoszen.F90, and MOD_OrbCosazi.F90. No caller-specific state or I/O
+//! is kept here.
 
 use anyhow::{ensure, Result};
 
@@ -368,6 +369,36 @@ pub fn orbital_cosine_zenith(
     latitude_radians: f64,
 ) -> f64 {
     let pi = 4.0 * 1.0_f64.atan();
+    let declination = orbital_declination(calendar_day);
+    latitude_radians.sin() * declination.sin()
+        - latitude_radians.cos()
+            * declination.cos()
+            * (calendar_day * 2.0 * pi + longitude_radians).cos()
+}
+
+/// Port of MOD_OrbCosazi.F90:orb_cosazi.
+///
+/// `MOD_Forcing` passes the companion [`orbital_cosine_zenith`] result here
+/// before terrain forcing downscaling.  Keep its source-style clamp rather
+/// than calling `acos`: downstream code consumes the cosine directly.
+#[allow(clippy::excessive_precision)]
+pub fn orbital_cosine_azimuth(
+    calendar_day: f64,
+    longitude_radians: f64,
+    latitude_radians: f64,
+    cosine_zenith: f64,
+) -> f64 {
+    let pi = 4.0 * 1.0_f64.atan();
+    let declination = orbital_declination(calendar_day);
+    let cosine = (-declination.cos() * (calendar_day * 2.0 * pi + longitude_radians).cos()
+        - cosine_zenith * latitude_radians.cos())
+        / (latitude_radians.sin() * (1.0 - cosine_zenith.powi(2)).sqrt());
+    cosine.clamp(-1.0, 1.0)
+}
+
+#[allow(clippy::excessive_precision)]
+fn orbital_declination(calendar_day: f64) -> f64 {
+    let pi = 4.0 * 1.0_f64.atan();
     let eccentricity = 1.672393084e-2;
     let mean_longitude = -3.2625366e-2 + (calendar_day - 80.5) * 2.0 * pi / 365.0;
     let mean_anomaly = mean_longitude - 4.92251015;
@@ -379,14 +410,7 @@ pub fn orbital_cosine_zenith(
                     * (1.25 * (2.0 * mean_anomaly).sin()
                         + eccentricity
                             * ((13.0 / 12.0) * (3.0 * mean_anomaly).sin() - 0.25 * sine)));
-    let inverse_distance =
-        (1.0 + eccentricity * (lambda - 4.92251015).cos()) / (1.0 - eccentricity.powi(2));
-    let declination = (0.409214646_f64.sin() * lambda.sin()).asin();
-    let _earth_sun_distance_factor = inverse_distance.powi(2);
-    latitude_radians.sin() * declination.sin()
-        - latitude_radians.cos()
-            * declination.cos()
-            * (calendar_day * 2.0 * pi + longitude_radians).cos()
+    (0.409214646_f64.sin() * lambda.sin()).asin()
 }
 
 fn polynomial(x: f64, coefficients: [f64; 9]) -> f64 {
