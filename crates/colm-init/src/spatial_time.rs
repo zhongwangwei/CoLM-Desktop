@@ -4,22 +4,25 @@
 //! call owns exactly one landpatch block, so its buffers stay layer-major and
 //! bounded by that block rather than by the complete domain.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
 use crate::spatial_static::{
     patch_coordinates, read_canopy, read_f64, read_patches, read_soil, spatial_patch_type,
 };
+use crate::spatial_urban::SpatialUrbanData;
+use crate::urban_restart::write_cold_urban_time_restart;
 use crate::{
-    cold_start_broadband_radiation_with_snow, colm_soil_grid, derive_initial_soil_hydraulics,
-    derive_lake_layers, derive_snow_cover, derive_spatial_soil_parameters, initialize_snow_layers,
-    leaf_optics_from_land_cover, orbital_calendar_day, orbital_cosine_zenith,
-    resolve_cold_start_soil, write_time_restart, CalendarTime, ColdStartSoilInput, HydraulicModel,
-    LandCoverScheme, OzoneFields, PlantHydraulicFields, RestartDate, RestartTuning,
-    SnowAerosolFields, SnowSoilRestartFields, SoilField, SoilHydraulicModel, SoilReflectance,
-    TimeLakeFields, TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile,
-    TimeRestartInput, MISSING,
+    cold_start_broadband_radiation_with_snow, cold_start_urban_radiation, colm_soil_grid,
+    derive_initial_soil_hydraulics, derive_lake_layers, derive_snow_cover,
+    derive_spatial_soil_parameters, initialize_snow_layers, leaf_optics_from_land_cover,
+    orbital_calendar_day, orbital_cosine_zenith, resolve_cold_start_soil, write_time_restart,
+    CalendarTime, ColdStartSoilInput, HydraulicModel, LandCoverScheme, OzoneFields,
+    PlantHydraulicFields, RestartDate, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
+    SoilField, SoilHydraulicModel, SoilReflectance, TimeLakeFields, TimePatchFields,
+    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
+    UrbanRadiationInput, UrbanRadiationState, MISSING,
 };
 
 /// Arguments for the no-observation LCT cold start of one spatial block.
@@ -88,6 +91,13 @@ impl<'a> SpatialLctTimeConfig<'a> {
 pub fn write_spatial_lct_cold_time_restart(
     config: SpatialLctTimeConfig<'_>,
 ) -> Result<TimeRestartFile> {
+    Ok(write_spatial_lct_cold_time_restart_with_urban(config, None)?.0)
+}
+
+pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
+    config: SpatialLctTimeConfig<'_>,
+    urban_data: Option<&SpatialUrbanData>,
+) -> Result<(TimeRestartFile, Option<PathBuf>)> {
     let dimensions = TimeRestartDimensions::default();
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let count = patches.class.len();
@@ -128,7 +138,7 @@ pub fn write_spatial_lct_cold_time_restart(
         dimensions.soil_layers,
         config.hydraulic_model,
     )?;
-    let canopy = read_canopy(
+    let mut canopy = read_canopy(
         crate::SpatialLctStaticConfig::new(
             config.landdata,
             config.restart_dir,
@@ -142,6 +152,33 @@ pub fn write_spatial_lct_cold_time_restart(
         &kind,
         count,
     )?;
+    let urban_count = urban_data.map_or(0, |data| data.urban_to_patch.len());
+    let mut urban_at_patch = vec![None; count];
+    if let Some(data) = urban_data {
+        ensure!(
+            data.state.tree_fraction.len() == urban_count
+                && data.state.tree_top_m.len() == urban_count
+                && data.state.tree_bottom_m.len() == urban_count,
+            "urban cold-start geometry does not match its topology"
+        );
+        for (urban, &patch) in data.urban_to_patch.iter().enumerate() {
+            ensure!(
+                patch < count,
+                "urban patch index exceeds the landpatch block"
+            );
+            ensure!(
+                urban_at_patch[patch].replace(urban).is_none(),
+                "multiple urban vectors map to landpatch {patch}"
+            );
+            ensure!(
+                patches.class[patch] == 13,
+                "urban vector maps to non-urban IGBP landpatch {}",
+                patches.class[patch]
+            );
+            canopy.patch_top_m[patch] = data.state.tree_top_m[urban];
+            canopy.patch_bottom_m[patch] = data.state.tree_bottom_m[urban];
+        }
+    }
     let albedo = [
         read_f64(
             config.landdata,
@@ -210,6 +247,8 @@ pub fn write_spatial_lct_cold_time_restart(
     let mut total_sai = sai;
     let mut sigf = vec![1.0; count];
     let mut radiation = RadiationBuffers::new(count);
+    let mut urban_radiation = vec![None; urban_count];
+    let mut urban_soil_liquid = vec![0.0; dimensions.soil_layers * urban_count];
 
     for patch in 0..count {
         let class = patches.class[patch];
@@ -224,7 +263,9 @@ pub fn write_spatial_lct_cold_time_restart(
             lai_now[patch] = 0.0;
             sai_now[patch] = 0.0;
         } else {
-            fveg[patch] = 1.0;
+            fveg[patch] = urban_at_patch[patch]
+                .map(|urban| urban_data.expect("urban map has data").state.tree_fraction[urban])
+                .unwrap_or(1.0);
             green[patch] = 1.0;
         }
         roughness[patch] = canopy.patch_top_m[patch] * 0.1;
@@ -269,7 +310,15 @@ pub fn write_spatial_lct_cold_time_restart(
             let at = layer * count + patch;
             let snow_soil = (dimensions.snow_layers + layer) * count + patch;
             temperature[snow_soil] = cold.temperature_k[layer];
-            liquid[snow_soil] = cold.liquid_water_kg_m2[layer];
+            liquid[snow_soil] = if let Some(urban) = urban_at_patch[patch] {
+                let data = urban_data.expect("urban map has data");
+                urban_soil_liquid[layer * urban_count + urban] = cold.liquid_water_kg_m2[layer];
+                cold.liquid_water_kg_m2[layer]
+                    * (1.0 - data.state.roof_fraction[urban])
+                    * data.state.pervious_road_fraction[urban]
+            } else {
+                cold.liquid_water_kg_m2[layer]
+            };
             ice[snow_soil] = cold.ice_water_kg_m2[layer];
             matric[at] = hydraulics.matric_potential_mm[layer];
             conductivity[at] = hydraulics.hydraulic_conductivity_mm_s[layer];
@@ -326,6 +375,45 @@ pub fn write_spatial_lct_cold_time_restart(
             cold.temperature_k[0],
         )?;
         radiation.set(patch, &state);
+        if let Some(urban) = urban_at_patch[patch] {
+            let data = urban_data.expect("urban map has data");
+            let state = cold_start_urban_radiation(UrbanRadiationInput {
+                roof_fraction: data.state.roof_fraction[urban],
+                pervious_ground_fraction: data.state.pervious_road_fraction[urban],
+                water_fraction: data.state.water_fraction[urban],
+                building_height_to_length: data.state.building_height_to_width[urban],
+                roof_height_m: data.state.roof_height_m[urban],
+                roof_albedo: urban_albedo(&data.roof_albedo, urban_count, urban),
+                wall_albedo: urban_albedo(&data.wall_albedo, urban_count, urban),
+                impervious_albedo: urban_albedo(&data.impervious_albedo, urban_count, urban),
+                pervious_albedo: urban_albedo(&data.pervious_albedo, urban_count, urban),
+                leaf_optics: leaf_optics_from_land_cover(config.land_cover, class)?,
+                vegetation_fraction: fveg[patch],
+                vegetation_center_height_m: data.state.roof_height_m[urban]
+                    .min((data.state.tree_top_m[urban] + data.state.tree_bottom_m[urban]) / 2.0),
+                lai: lai_now[patch],
+                sai: sai_now[patch],
+                wet_snow_fraction: 0.0,
+                vegetation_snow: config.vegetation_snow,
+                cosine_zenith: cosine_zenith[patch].max(0.01),
+                previous_sunlit_wall_fraction: 0.5,
+                lake_temperature_k: 285.0,
+                roof_snow_fraction: 0.0,
+                impervious_snow_fraction: 0.0,
+                pervious_snow_fraction: 0.0,
+                lake_snow_fraction: 0.0,
+                roof_snow_water_mm: 0.0,
+                impervious_snow_water_mm: 0.0,
+                pervious_snow_water_mm: 0.0,
+                lake_snow_water_mm: 0.0,
+                roof_snow_age: 0.0,
+                impervious_snow_age: 0.0,
+                pervious_snow_age: 0.0,
+                lake_snow_age: 0.0,
+            })?;
+            radiation.set_urban(patch, &state);
+            urban_radiation[urban] = Some(state);
+        }
     }
 
     let zero = vec![0.0; count];
@@ -353,7 +441,7 @@ pub fn write_spatial_lct_cold_time_restart(
         .map(|(&value, &depth)| if value == 4 { depth * 1000.0 } else { 0.0 })
         .collect::<Vec<_>>();
 
-    write_time_restart(
+    let common = write_time_restart(
         config.restart_dir,
         config.case_name,
         config.land_cover_year,
@@ -455,7 +543,40 @@ pub fn write_spatial_lct_cold_time_restart(
             }),
             irrigation: None,
         },
-    )
+    )?;
+    let urban = if urban_count == 0 {
+        None
+    } else {
+        let radiation = urban_radiation
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .context("urban cold restart has unmapped urban radiation")?;
+        let data = urban_data.expect("nonzero urban count has data");
+        let total_lai = data
+            .urban_to_patch
+            .iter()
+            .map(|&patch| total_lai[patch])
+            .collect::<Vec<_>>();
+        let total_sai = data
+            .urban_to_patch
+            .iter()
+            .map(|&patch| total_sai[patch])
+            .collect::<Vec<_>>();
+        Some(write_cold_urban_time_restart(
+            config.restart_dir,
+            config.case_name,
+            config.land_cover_year,
+            config.date,
+            config.block_label,
+            crate::urban_restart::ColdUrbanTimeRestartInput {
+                radiation: &radiation,
+                total_lai: &total_lai,
+                total_sai: &total_sai,
+                soil_liquid: &urban_soil_liquid,
+            },
+        )?)
+    };
+    Ok((common, urban))
 }
 
 fn read_monthly(config: SpatialLctTimeConfig<'_>, variable: &str, month: u8) -> Result<Vec<f64>> {
@@ -518,6 +639,16 @@ fn is_water(scheme: LandCoverScheme, class: i32) -> bool {
         || matches!(scheme, LandCoverScheme::Usgs) && class == 16
 }
 
+fn urban_albedo(values: &[f64], urban_count: usize, urban: usize) -> [[f64; 2]; 2] {
+    [
+        [values[urban], values[urban_count + urban]],
+        [
+            values[2 * urban_count + urban],
+            values[3 * urban_count + urban],
+        ],
+    ]
+}
+
 struct RadiationBuffers {
     albedo: Vec<f64>,
     sunlit: Vec<f64>,
@@ -561,6 +692,19 @@ impl RadiationBuffers {
         self.snow_age[patch] = state.snow_age;
         self.thermal_gap[patch] = state.thermal_gap_fraction;
         self.direct_extinction[patch] = state.direct_extinction;
+        self.diffuse_extinction[patch] = state.diffuse_extinction;
+    }
+
+    fn set_urban(&mut self, patch: usize, state: &UrbanRadiationState) {
+        for (target, source) in [
+            (&mut self.albedo, state.albedo),
+            (&mut self.sunlit, state.sunlit_tree_absorption),
+            (&mut self.shaded, state.shaded_tree_absorption),
+        ] {
+            for (index, value) in source.into_iter().flatten().enumerate() {
+                target[index * self.count + patch] = value;
+            }
+        }
         self.diffuse_extinction[patch] = state.diffuse_extinction;
     }
 }

@@ -9,11 +9,12 @@ use crate::spatial_static::{
     block_path, read_canopy, read_f64, read_i32, read_patches, spatial_patch_type, values_i32,
     values_i64, write_spatial_lct_constant_restart_with_canopy,
 };
+use crate::spatial_time::write_spatial_lct_cold_time_restart_with_urban;
 use crate::{
     derive_urban_geometry, derive_urban_lucy, read_urban_lucy_raw_data,
     write_urban_constant_restart, ConstantRestartFiles, LandCoverScheme, SpatialLctStaticConfig,
-    UrbanConfig, UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanState,
-    UrbanThermalFields,
+    SpatialLctTimeConfig, TimeRestartFile, UrbanConfig, UrbanConstantRestartInput, UrbanInput,
+    UrbanLucyInput, UrbanLucyState, UrbanState, UrbanThermalFields,
 };
 
 const URBAN_LAYERS: usize = 10;
@@ -33,6 +34,22 @@ pub struct SpatialUrbanStaticConfig<'a> {
 pub struct SpatialUrbanConstantRestartFiles {
     pub common: ConstantRestartFiles,
     pub urban: Option<PathBuf>,
+}
+
+/// Time-varying files written for one spatial LCZ urban block.
+#[derive(Debug, Clone)]
+pub struct SpatialUrbanTimeRestartFiles {
+    pub common: TimeRestartFile,
+    pub urban: Option<PathBuf>,
+}
+
+/// Urban-specific controls layered over the common spatial LCT cold-time run.
+#[derive(Debug, Clone, Copy)]
+pub struct SpatialUrbanTimeConfig<'a> {
+    pub common: SpatialLctTimeConfig<'a>,
+    pub geometry: UrbanConfig,
+    pub runtime_dir: Option<&'a Path>,
+    pub lucy_enabled: bool,
 }
 
 /// Complete urban vectors decoded from the matching surface-data block.
@@ -119,6 +136,39 @@ pub fn write_spatial_urban_constant_restarts(
         )?)
     };
     Ok(SpatialUrbanConstantRestartFiles { common, urban })
+}
+
+/// Writes the common and urban timestamped cold restart from one LCZ block.
+pub fn write_spatial_urban_cold_time_restarts(
+    config: SpatialUrbanTimeConfig<'_>,
+) -> Result<SpatialUrbanTimeRestartFiles> {
+    ensure!(
+        config.common.land_cover == LandCoverScheme::Igbp,
+        "spatial urban cold starts require the IGBP parent land-cover table"
+    );
+    let static_config = SpatialUrbanStaticConfig {
+        common: SpatialLctStaticConfig::new(
+            config.common.landdata,
+            config.common.restart_dir,
+            config.common.case_name,
+            config.common.land_cover_year,
+            config.common.block_label,
+            config.common.land_cover,
+            config.common.hydraulic_model,
+        ),
+        runtime_dir: config.runtime_dir,
+        geometry: config.geometry,
+        lucy_enabled: config.lucy_enabled,
+    };
+    let patches = read_patches(
+        config.common.landdata,
+        config.common.land_cover_year,
+        config.common.block_label,
+    )?;
+    let data = read_spatial_urban_data(static_config, &patches)?;
+    let (common, urban) =
+        write_spatial_lct_cold_time_restart_with_urban(config.common, Some(&data))?;
+    Ok(SpatialUrbanTimeRestartFiles { common, urban })
 }
 
 /// Read the static spatial urban vectors so the time-restart adapter can share

@@ -490,6 +490,163 @@ fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata()
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn spatial_lcz_urban_cold_start_writes_common_and_urban_restarts() {
+    let root = temp_dir("urban");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_urban_landdata(&landdata, 2005, "w180_s90");
+    let geometry = crate::UrbanConfig {
+        water_enabled: true,
+        trees_enabled: true,
+        building_energy_model: true,
+    };
+    let files = crate::write_spatial_urban_constant_restarts(crate::SpatialUrbanStaticConfig {
+        common: SpatialLctStaticConfig::new(
+            &landdata,
+            &restart,
+            "test",
+            2005,
+            "w180_s90",
+            LandCoverScheme::Igbp,
+            HydraulicModel::VanGenuchten,
+        ),
+        runtime_dir: None,
+        geometry,
+        lucy_enabled: false,
+    })
+    .unwrap();
+    let common = netcdf::open(&files.common.block).unwrap();
+    assert_eq!(values_i32(&common, "patchclass").unwrap(), [13]);
+    assert_eq!(values_f64(&common, "htop").unwrap(), [5.0]);
+    assert_eq!(values_f64(&common, "hbot").unwrap(), [1.0]);
+    let urban = netcdf::open(files.urban.unwrap()).unwrap();
+    assert!((values_f64(&urban, "PCT_Tree").unwrap()[0] - 1.0 / 3.0).abs() < 1.0e-12);
+
+    let mut common_config = crate::SpatialLctTimeConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    common_config.plant_hydraulics = false;
+    let time = crate::write_spatial_urban_cold_time_restarts(crate::SpatialUrbanTimeConfig {
+        common: common_config,
+        geometry,
+        runtime_dir: None,
+        lucy_enabled: false,
+    })
+    .unwrap();
+    let common = netcdf::open(time.common.block).unwrap();
+    assert!((values_f64(&common, "fveg").unwrap()[0] - 1.0 / 3.0).abs() < 1.0e-12);
+    let urban = netcdf::open(time.urban.unwrap()).unwrap();
+    assert_eq!(values_f64(&urban, "tree_lai").unwrap(), [2.5]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn write_urban_landdata(landdata: &Path, year: i32, block: &str) {
+    let path = block_path(landdata, "landpatch", "landpatch", year, block);
+    let mut patch = netcdf::append(path).unwrap();
+    patch
+        .variable_mut("settyp")
+        .unwrap()
+        .put_values(&[13_i32], ..)
+        .unwrap();
+    patch.close().unwrap();
+
+    let path = block_path(landdata, "landurban", "landurban", year, block);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("urban", 1).unwrap();
+    for (name, values) in [
+        ("settyp", &[1_i32][..]),
+        ("ipxstt", &[1_i32][..]),
+        ("ipxend", &[2_i32][..]),
+    ] {
+        file.add_variable::<i32>(name, &["urban"])
+            .unwrap()
+            .put_values(values, ..)
+            .unwrap();
+    }
+    file.add_variable::<i64>("eindex", &["urban"])
+        .unwrap()
+        .put_values(&[7_i64], ..)
+        .unwrap();
+    file.close().unwrap();
+    for (stem, variable, value) in [
+        ("WT_ROOF", "WT_ROOF", 0.5),
+        ("HT_ROOF", "HT_ROOF", 10.0),
+        ("HLR_BLD", "BUILDING_HLR", 1.0),
+        ("PCT_Tree", "PCT_Tree", 30.0),
+        ("htop_urb", "URBAN_TREE_TOP", 5.0),
+        ("PCT_Water", "PCT_Water", 10.0),
+        ("POP", "POP_DEN", 1.0),
+    ] {
+        write_f64(landdata, "urban", stem, variable, year, block, value);
+    }
+    write_i32(
+        landdata,
+        "urban",
+        "LUCY_region_id",
+        "LUCY_id",
+        year,
+        block,
+        1,
+    );
+    let path = block_path(landdata, "urban", "urban", year, block);
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("urban", 1).unwrap();
+    file.add_dimension("ulev", 10).unwrap();
+    file.add_dimension("numrad", 2).unwrap();
+    file.add_dimension("numsolar", 2).unwrap();
+    for (name, value) in [
+        ("WTROAD_PERV", 0.6),
+        ("EM_ROOF", 0.9),
+        ("EM_WALL", 0.9),
+        ("EM_IMPROAD", 0.9),
+        ("EM_PERROAD", 0.9),
+        ("THICK_ROOF", 0.2),
+        ("THICK_WALL", 0.2),
+        ("T_BUILDING_MIN", 280.0),
+        ("T_BUILDING_MAX", 300.0),
+    ] {
+        file.add_variable::<f64>(name, &["urban"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    for name in [
+        "CV_ROOF",
+        "CV_WALL",
+        "CV_IMPROAD",
+        "TK_ROOF",
+        "TK_WALL",
+        "TK_IMPROAD",
+    ] {
+        file.add_variable::<f64>(name, &["urban", "ulev"])
+            .unwrap()
+            .put_values(&[1.0; 10], (.., ..))
+            .unwrap();
+    }
+    for name in ["ALB_ROOF", "ALB_WALL", "ALB_IMPROAD", "ALB_PERROAD"] {
+        file.add_variable::<f64>(name, &["urban", "numrad", "numsolar"])
+            .unwrap()
+            .put_values(&[0.2; 4], (.., .., ..))
+            .unwrap();
+    }
+    file.close().unwrap();
+}
+
 fn write_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f64, sai: f64) {
     for (stem, variable, value) in [
         ("LAI_patches01", "LAI_patches", lai),

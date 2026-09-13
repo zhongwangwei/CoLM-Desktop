@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::{UrbanLucyState, UrbanState};
+use crate::{RestartDate, UrbanLucyState, UrbanRadiationState, UrbanState};
 
 const URBAN_LAYERS: usize = 10;
 const NUM_SOLAR: usize = 2;
@@ -427,6 +427,16 @@ pub struct UrbanTimeRestartInput<'a> {
     pub layer_fields: &'a [UrbanNamedField<'a>],
 }
 
+/// Cold-start state passed through the shared UrbanIniTimeVar restart writer.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ColdUrbanTimeRestartInput<'a> {
+    pub radiation: &'a [UrbanRadiationState],
+    pub total_lai: &'a [f64],
+    pub total_sai: &'a [f64],
+    /// `soil * urban`, layer-major, before common-patch area weighting.
+    pub soil_liquid: &'a [f64],
+}
+
 /// Writes the timestamped urban vector block in CoLM's restart tree.
 pub fn write_urban_time_restart(
     restart_dir: impl AsRef<Path>,
@@ -454,6 +464,194 @@ pub fn write_urban_time_restart(
     ));
     write_urban_time_restart_block(&path, input)?;
     Ok(path)
+}
+
+/// Writes UrbanIniTimeVar's cold-state vectors for one spatial or single-point
+/// urban restart block.  Inputs use the same layer-major layout as CoLM.
+pub(crate) fn write_cold_urban_time_restart(
+    restart_dir: impl AsRef<Path>,
+    case_name: &str,
+    land_cover_year: i32,
+    date: RestartDate,
+    block_label: &str,
+    input: ColdUrbanTimeRestartInput<'_>,
+) -> Result<PathBuf> {
+    let urban = input.radiation.len();
+    ensure!(
+        urban > 0,
+        "urban cold restart needs at least one urban patch"
+    );
+    ensure!(
+        input.total_lai.len() == urban
+            && input.total_sai.len() == urban
+            && input.soil_liquid.len() == URBAN_LAYERS * urban,
+        "urban cold restart fields do not match the urban count"
+    );
+    let scalar_values = vec![
+        ("fwsun", vec![0.5; urban]),
+        (
+            "dfwsun",
+            input
+                .radiation
+                .iter()
+                .map(|value| value.change_in_sunlit_wall_fraction)
+                .collect(),
+        ),
+        ("lwsun", vec![0.0; urban]),
+        ("lwsha", vec![0.0; urban]),
+        ("lgimp", vec![0.0; urban]),
+        ("lgper", vec![0.0; urban]),
+        ("lveg", vec![0.0; urban]),
+        ("troof_inner", vec![283.0; urban]),
+        ("twsun_inner", vec![283.0; urban]),
+        ("twsha_inner", vec![283.0; urban]),
+        ("sag_roof", vec![0.0; urban]),
+        ("sag_gimp", vec![0.0; urban]),
+        ("sag_gper", vec![0.0; urban]),
+        ("sag_lake", vec![0.0; urban]),
+        ("scv_roof", vec![0.0; urban]),
+        ("scv_gimp", vec![0.0; urban]),
+        ("scv_gper", vec![0.0; urban]),
+        ("scv_lake", vec![0.0; urban]),
+        ("fsno_roof", vec![0.0; urban]),
+        ("fsno_gimp", vec![0.0; urban]),
+        ("fsno_gper", vec![0.0; urban]),
+        ("fsno_lake", vec![0.0; urban]),
+        ("snowdp_roof", vec![0.0; urban]),
+        ("snowdp_gimp", vec![0.0; urban]),
+        ("snowdp_gper", vec![0.0; urban]),
+        ("snowdp_lake", vec![0.0; urban]),
+        ("t_room", vec![283.0; urban]),
+        ("t_roof", vec![283.0; urban]),
+        ("t_wall", vec![283.0; urban]),
+        ("tafu", vec![0.0; urban]),
+        ("Fhac", vec![0.0; urban]),
+        ("Fwst", vec![0.0; urban]),
+        ("Fach", vec![0.0; urban]),
+        ("Fahe", vec![0.0; urban]),
+        ("Fhah", vec![0.0; urban]),
+        ("vehc", vec![0.0; urban]),
+        ("meta", vec![0.0; urban]),
+        ("tree_lai", input.total_lai.to_vec()),
+        ("tree_sai", input.total_sai.to_vec()),
+        ("urb_green", vec![1.0; urban]),
+    ];
+    let scalar_fields = scalar_values
+        .iter()
+        .map(|(name, values)| UrbanNamedField {
+            name,
+            values: values.as_slice(),
+        })
+        .collect::<Vec<_>>();
+    let radiative_values = [
+        (
+            "sroof",
+            cold_radiation_values(input.radiation, |value| value.roof_absorption),
+        ),
+        (
+            "swsun",
+            cold_radiation_values(input.radiation, |value| value.sunlit_wall_absorption),
+        ),
+        (
+            "swsha",
+            cold_radiation_values(input.radiation, |value| value.shaded_wall_absorption),
+        ),
+        (
+            "sgimp",
+            cold_radiation_values(input.radiation, |value| value.impervious_absorption),
+        ),
+        (
+            "sgper",
+            cold_radiation_values(input.radiation, |value| value.pervious_absorption),
+        ),
+        (
+            "slake",
+            cold_radiation_values(input.radiation, |value| value.lake_absorption),
+        ),
+    ];
+    let radiative_fields = radiative_values
+        .iter()
+        .map(|(name, values)| UrbanNamedField {
+            name,
+            values: values.as_slice(),
+        })
+        .collect::<Vec<_>>();
+    let snow = vec![0.0; 5 * urban];
+    let roof = vec![283.0; 15 * urban];
+    let roof_water = vec![0.0; 15 * urban];
+    let mut soil_water = vec![0.0; 15 * urban];
+    for layer in 0..URBAN_LAYERS {
+        for patch in 0..urban {
+            soil_water[(5 + layer) * urban + patch] = input.soil_liquid[layer * urban + patch];
+        }
+    }
+    let layer_values = vec![
+        ("z_sno_roof", snow.clone()),
+        ("z_sno_gimp", snow.clone()),
+        ("z_sno_gper", snow.clone()),
+        ("z_sno_lake", snow.clone()),
+        ("dz_sno_roof", snow.clone()),
+        ("dz_sno_gimp", snow.clone()),
+        ("dz_sno_gper", snow.clone()),
+        ("dz_sno_lake", snow),
+        ("t_roofsno", roof.clone()),
+        ("t_wallsun", roof.clone()),
+        ("t_wallsha", roof.clone()),
+        ("t_gimpsno", roof.clone()),
+        ("t_gpersno", roof.clone()),
+        ("t_lakesno", roof),
+        ("wliq_roofsno", roof_water.clone()),
+        ("wliq_gimpsno", roof_water.clone()),
+        ("wliq_gpersno", soil_water.clone()),
+        ("wliq_lakesno", soil_water),
+        ("wice_roofsno", roof_water.clone()),
+        ("wice_gimpsno", roof_water.clone()),
+        ("wice_gpersno", roof_water.clone()),
+        ("wice_lakesno", roof_water),
+    ];
+    let layer_fields = layer_values
+        .iter()
+        .map(|(name, values)| UrbanNamedField {
+            name,
+            values: values.as_slice(),
+        })
+        .collect::<Vec<_>>();
+    write_urban_time_restart(
+        restart_dir,
+        case_name,
+        land_cover_year,
+        date,
+        block_label,
+        UrbanTimeRestartInput {
+            dimensions: UrbanTimeRestartDimensions {
+                urban_count: urban,
+                snow_layers: 5,
+                soil_layers: URBAN_LAYERS,
+                roof_layers: URBAN_LAYERS,
+                wall_layers: URBAN_LAYERS,
+            },
+            scalar_fields: &scalar_fields,
+            radiative_fields: &radiative_fields,
+            layer_fields: &layer_fields,
+        },
+    )
+}
+
+fn cold_radiation_values(
+    radiation: &[UrbanRadiationState],
+    field: impl Fn(&UrbanRadiationState) -> [[f64; NUM_RAD]; NUM_SOLAR],
+) -> Vec<f64> {
+    let urban = radiation.len();
+    let mut values = vec![0.0; NUM_SOLAR * NUM_RAD * urban];
+    for (patch, state) in radiation.iter().enumerate() {
+        for solar in 0..NUM_SOLAR {
+            for radiation_type in 0..NUM_RAD {
+                values[(solar * NUM_RAD + radiation_type) * urban + patch] =
+                    field(state)[solar][radiation_type];
+            }
+        }
+    }
+    values
 }
 
 /// Writes one already-addressed urban time-restart vector block.

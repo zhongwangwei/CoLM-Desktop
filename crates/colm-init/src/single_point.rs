@@ -25,18 +25,17 @@ use crate::{
     read_single_point_urban_data, read_single_point_water_table, read_urban_lucy_raw_data,
     write_bgc_time_restart, write_cold_start_bgc_constant_restart, write_constant_restart,
     write_pft_constant_restart, write_pft_time_restart, write_time_restart,
-    write_urban_constant_restart, write_urban_time_restart, BgcColdStartInput,
-    BgcConstantRestartFiles, BgcPftColdStartInput, BgcTimeRestartFile, CalendarTime, ColdSoilState,
-    ColdStartRadiation, ColdStartSoilInput, ConstantRestartFiles, ConstantRestartInput,
-    CropColdStartState, CropManagementConfig, HydraulicModel, InitialSoilProfile, LandCoverScheme,
-    LeafOptics, OzoneFields, PcPftInput, PftBgcFields, PftConstantRestartInput, PftOzoneFields,
-    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, PlantHydraulicFields, RestartDate,
-    RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
-    SoilAlbedo, SoilField, SoilHydraulicModel, TimeLakeFields, TimePatchFields,
-    TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
-    UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanNamedField,
-    UrbanRadiationInput, UrbanState, UrbanThermalFields, UrbanTimeRestartDimensions,
-    UrbanTimeRestartInput, MISSING,
+    write_urban_constant_restart, BgcColdStartInput, BgcConstantRestartFiles, BgcPftColdStartInput,
+    BgcTimeRestartFile, CalendarTime, ColdSoilState, ColdStartRadiation, ColdStartSoilInput,
+    ConstantRestartFiles, ConstantRestartInput, CropColdStartState, CropManagementConfig,
+    HydraulicModel, InitialSoilProfile, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput,
+    PftBgcFields, PftConstantRestartInput, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
+    PftTimeRestartInput, PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields,
+    RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField,
+    SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
+    TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
+    UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanRadiationInput,
+    UrbanState, UrbanThermalFields, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -1080,12 +1079,18 @@ fn write_single_point_urban_cold_time_restarts(
         &common_patch,
         None,
     )?;
-    let urban_file = write_single_point_urban_time_restart(
-        run,
-        &urban_radiation,
-        total_lai,
-        total_sai,
-        &cold_soil.liquid_water_kg_m2,
+    let urban_file = crate::urban_restart::write_cold_urban_time_restart(
+        &run.static_run.restart_dir,
+        &run.static_run.case_name,
+        run.static_run.land_cover_year,
+        run.date,
+        &run.static_run.block_label,
+        crate::urban_restart::ColdUrbanTimeRestartInput {
+            radiation: std::slice::from_ref(&urban_radiation),
+            total_lai: std::slice::from_ref(&total_lai),
+            total_sai: std::slice::from_ref(&total_sai),
+            soil_liquid: &cold_soil.liquid_water_kg_m2,
+        },
     )?;
     Ok(SinglePointTimeRestartFiles {
         common,
@@ -1093,142 +1098,6 @@ fn write_single_point_urban_cold_time_restarts(
         bgc: None,
         urban: Some(urban_file),
     })
-}
-
-fn write_single_point_urban_time_restart(
-    run: &SinglePointColdStartRun,
-    radiation: &crate::UrbanRadiationState,
-    total_lai: f64,
-    total_sai: f64,
-    soil_liquid: &[f64],
-) -> Result<PathBuf> {
-    let scalar_values = [
-        // `fwsun` is intent(in) in `alburban`; the first step applies dfwsun.
-        ("fwsun", 0.5),
-        ("dfwsun", radiation.change_in_sunlit_wall_fraction),
-        ("lwsun", 0.0),
-        ("lwsha", 0.0),
-        ("lgimp", 0.0),
-        ("lgper", 0.0),
-        ("lveg", 0.0),
-        ("troof_inner", 283.0),
-        ("twsun_inner", 283.0),
-        ("twsha_inner", 283.0),
-        ("sag_roof", 0.0),
-        ("sag_gimp", 0.0),
-        ("sag_gper", 0.0),
-        ("sag_lake", 0.0),
-        ("scv_roof", 0.0),
-        ("scv_gimp", 0.0),
-        ("scv_gper", 0.0),
-        ("scv_lake", 0.0),
-        ("fsno_roof", 0.0),
-        ("fsno_gimp", 0.0),
-        ("fsno_gper", 0.0),
-        ("fsno_lake", 0.0),
-        ("snowdp_roof", 0.0),
-        ("snowdp_gimp", 0.0),
-        ("snowdp_gper", 0.0),
-        ("snowdp_lake", 0.0),
-        ("t_room", 283.0),
-        ("t_roof", 283.0),
-        ("t_wall", 283.0),
-        ("tafu", 0.0),
-        ("Fhac", 0.0),
-        ("Fwst", 0.0),
-        ("Fach", 0.0),
-        ("Fahe", 0.0),
-        ("Fhah", 0.0),
-        ("vehc", 0.0),
-        ("meta", 0.0),
-        ("tree_lai", total_lai),
-        ("tree_sai", total_sai),
-        ("urb_green", 1.0),
-    ];
-    let scalar_fields = scalar_values
-        .iter()
-        .map(|(name, value)| UrbanNamedField {
-            name,
-            values: std::slice::from_ref(value),
-        })
-        .collect::<Vec<_>>();
-    let radiative_values = [
-        ("sroof", flatten_urban_radiation(radiation.roof_absorption)),
-        (
-            "swsun",
-            flatten_urban_radiation(radiation.sunlit_wall_absorption),
-        ),
-        (
-            "swsha",
-            flatten_urban_radiation(radiation.shaded_wall_absorption),
-        ),
-        (
-            "sgimp",
-            flatten_urban_radiation(radiation.impervious_absorption),
-        ),
-        (
-            "sgper",
-            flatten_urban_radiation(radiation.pervious_absorption),
-        ),
-        ("slake", flatten_urban_radiation(radiation.lake_absorption)),
-    ];
-    let radiative_fields = radiative_values
-        .iter()
-        .map(|(name, values)| UrbanNamedField { name, values })
-        .collect::<Vec<_>>();
-    let snow = vec![0.0; 5];
-    let roof = vec![283.0; 15];
-    let soil_temperature = vec![283.0; 15];
-    let roof_water = vec![0.0; 15];
-    let mut soil_water = vec![0.0; 5];
-    soil_water.extend_from_slice(soil_liquid);
-    let layer_values = vec![
-        ("z_sno_roof", snow.clone()),
-        ("z_sno_gimp", snow.clone()),
-        ("z_sno_gper", snow.clone()),
-        ("z_sno_lake", snow.clone()),
-        ("dz_sno_roof", snow.clone()),
-        ("dz_sno_gimp", snow.clone()),
-        ("dz_sno_gper", snow.clone()),
-        ("dz_sno_lake", snow.clone()),
-        ("t_roofsno", roof.clone()),
-        ("t_wallsun", roof.clone()),
-        ("t_wallsha", roof.clone()),
-        ("t_gimpsno", soil_temperature.clone()),
-        ("t_gpersno", soil_temperature.clone()),
-        ("t_lakesno", soil_temperature),
-        ("wliq_roofsno", roof_water.clone()),
-        ("wliq_gimpsno", roof_water.clone()),
-        ("wliq_gpersno", soil_water.clone()),
-        ("wliq_lakesno", soil_water),
-        ("wice_roofsno", roof_water.clone()),
-        ("wice_gimpsno", roof_water.clone()),
-        ("wice_gpersno", roof_water.clone()),
-        ("wice_lakesno", roof_water),
-    ];
-    let layer_fields = layer_values
-        .iter()
-        .map(|(name, values)| UrbanNamedField { name, values })
-        .collect::<Vec<_>>();
-    write_urban_time_restart(
-        &run.static_run.restart_dir,
-        &run.static_run.case_name,
-        run.static_run.land_cover_year,
-        run.date,
-        &run.static_run.block_label,
-        UrbanTimeRestartInput {
-            dimensions: UrbanTimeRestartDimensions {
-                urban_count: 1,
-                snow_layers: 5,
-                soil_layers: 10,
-                roof_layers: 10,
-                wall_layers: 10,
-            },
-            scalar_fields: &scalar_fields,
-            radiative_fields: &radiative_fields,
-            layer_fields: &layer_fields,
-        },
-    )
 }
 
 fn write_single_point_pft_cold_time_restarts(
@@ -2504,10 +2373,6 @@ fn urban_albedo_matrix(values: &[f64], name: &str) -> Result<[[f64; 2]; 2]> {
         "{name} must contain four finite band/direct-diffuse values"
     );
     Ok([[values[0], values[1]], [values[2], values[3]]])
-}
-
-fn flatten_urban_radiation(values: [[f64; 2]; 2]) -> Vec<f64> {
-    values.into_iter().flatten().collect()
 }
 
 fn canopy_top(land_cover: LandCoverScheme, class: i32, observed_top: f64) -> Result<f64> {

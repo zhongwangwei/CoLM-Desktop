@@ -284,3 +284,69 @@ fn urban_time_restart_rejects_missing_schema_fields_before_writing() {
     .is_err());
     assert!(!path.exists());
 }
+
+#[test]
+fn cold_urban_writer_preserves_layer_major_soil_water_for_every_patch() {
+    let root = temp_dir("cold");
+    let radiation = vec![cold_radiation(1.0), cold_radiation(2.0)];
+    let soil = (0..20).map(f64::from).collect::<Vec<_>>();
+    let path = write_cold_urban_time_restart(
+        &root,
+        "test",
+        2005,
+        RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+        "w180_s90",
+        ColdUrbanTimeRestartInput {
+            radiation: &radiation,
+            total_lai: &[3.0, 4.0],
+            total_sai: &[0.5, 0.6],
+            soil_liquid: &soil,
+        },
+    )
+    .unwrap();
+    let file = netcdf::open(path).unwrap();
+    assert_eq!(
+        file.variable("tree_lai")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [3.0, 4.0]
+    );
+    let water = file
+        .variable("wliq_gpersno")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(&water[..5], &[0.0; 5]);
+    assert_eq!(
+        &water[5..15],
+        &[0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]
+    );
+    assert_eq!(&water[15..20], &[0.0; 5]);
+    assert_eq!(
+        &water[20..],
+        &[1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn cold_radiation(value: f64) -> UrbanRadiationState {
+    UrbanRadiationState {
+        sunlit_wall_fraction: 0.5,
+        change_in_sunlit_wall_fraction: value,
+        diffuse_extinction: value,
+        albedo: [[value; 2]; 2],
+        sunlit_tree_absorption: [[value; 2]; 2],
+        shaded_tree_absorption: [[value; 2]; 2],
+        roof_absorption: [[value; 2]; 2],
+        sunlit_wall_absorption: [[value; 2]; 2],
+        shaded_wall_absorption: [[value; 2]; 2],
+        impervious_absorption: [[value; 2]; 2],
+        pervious_absorption: [[value; 2]; 2],
+        lake_absorption: [[value; 2]; 2],
+    }
+}

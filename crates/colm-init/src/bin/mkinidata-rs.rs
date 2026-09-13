@@ -11,9 +11,11 @@ use colm_init::{
     single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
     write_spatial_lct_cold_time_restart, write_spatial_lct_constant_restart,
-    write_spatial_pft_cold_time_restarts, write_spatial_pft_constant_restarts, HydraulicModel,
+    write_spatial_pft_cold_time_restarts, write_spatial_pft_constant_restarts,
+    write_spatial_urban_cold_time_restarts, write_spatial_urban_constant_restarts, HydraulicModel,
     LandCoverScheme, RestartDate, SinglePointStaticConfig, SpatialLctStaticConfig,
-    SpatialLctTimeConfig, SpatialPftStaticConfig, SpatialPftTimeConfig,
+    SpatialLctTimeConfig, SpatialPftStaticConfig, SpatialPftTimeConfig, SpatialUrbanStaticConfig,
+    SpatialUrbanTimeConfig, UrbanConfig,
 };
 use colm_namelist::{parse, Value};
 
@@ -83,7 +85,15 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpatialSubgrid {
     Lct,
+    Urban,
     PftOrPc,
+}
+
+#[derive(Debug, Clone)]
+struct SpatialUrbanRun {
+    geometry: UrbanConfig,
+    runtime_dir: Option<PathBuf>,
+    lucy_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +106,7 @@ struct SpatialNamelistRun {
     lai_year: i32,
     hydraulic_model: HydraulicModel,
     subgrid: SpatialSubgrid,
+    urban: Option<SpatialUrbanRun>,
     use_bedrock: bool,
     greenwich: bool,
     dynamic_lake: bool,
@@ -126,6 +137,77 @@ fn run_spatial_namelist(
                 write_spatial_pft_namelist_block(namelist, &run, &block)?;
             }
         }
+        SpatialSubgrid::Urban => {
+            let land_cover = land_cover.unwrap_or(LandCoverScheme::Igbp);
+            ensure!(
+                land_cover == LandCoverScheme::Igbp,
+                "spatial urban cold starts always use the IGBP parent land-cover table"
+            );
+            for block in spatial_blocks(&run, block_override)? {
+                write_spatial_urban_namelist_block(
+                    &run,
+                    run.urban.as_ref().expect("urban subgrid has controls"),
+                    &block,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_spatial_urban_namelist_block(
+    run: &SpatialNamelistRun,
+    urban: &SpatialUrbanRun,
+    block: &str,
+) -> Result<()> {
+    let mut static_config = SpatialLctStaticConfig::new(
+        &run.landdata,
+        &run.restart,
+        &run.case_name,
+        run.land_cover_year,
+        block,
+        LandCoverScheme::Igbp,
+        run.hydraulic_model,
+    );
+    static_config.use_bedrock = run.use_bedrock;
+    let files = write_spatial_urban_constant_restarts(SpatialUrbanStaticConfig {
+        common: static_config,
+        runtime_dir: urban.runtime_dir.as_deref(),
+        geometry: urban.geometry,
+        lucy_enabled: urban.lucy_enabled,
+    })?;
+    let mut time = SpatialLctTimeConfig::new(
+        &run.landdata,
+        &run.restart,
+        &run.case_name,
+        run.land_cover_year,
+        block,
+        LandCoverScheme::Igbp,
+        run.hydraulic_model,
+        run.date,
+    );
+    time.lai_year = run.lai_year;
+    time.greenwich = run.greenwich;
+    time.dynamic_lake = run.dynamic_lake;
+    time.plant_hydraulics = run.plant_hydraulics;
+    time.ozone_stress = run.ozone_stress;
+    time.variably_saturated_flow = run.variably_saturated_flow;
+    time.vegetation_snow = run.vegetation_snow;
+    time.snow_cover_exponent = run.snow_cover_exponent;
+    let time = write_spatial_urban_cold_time_restarts(SpatialUrbanTimeConfig {
+        common: time,
+        geometry: urban.geometry,
+        runtime_dir: urban.runtime_dir.as_deref(),
+        lucy_enabled: urban.lucy_enabled,
+    })?;
+    println!("wrote {}", files.common.constants.display());
+    println!("wrote {}", files.common.block.display());
+    if let Some(path) = files.urban {
+        println!("wrote {}", path.display());
+    }
+    println!("wrote {}", time.common.block.display());
+    if let Some(path) = time.urban {
+        println!("wrote {}", path.display());
     }
     Ok(())
 }
@@ -225,10 +307,6 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    ensure!(
-        !namelist_bool(&document, "DEF_URBAN_RUN", false)?,
-        "spatial urban cold starts are not migrated; Rust refuses to write a partial urban restart"
-    );
     for field in [
         "DEF_USE_SoilInit",
         "DEF_USE_SnowInit",
@@ -254,12 +332,43 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
             == 1,
         "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
     );
+    let urban_enabled = namelist_bool(&document, "DEF_URBAN_RUN", false)?;
+    let urban = if urban_enabled {
+        ensure!(lct, "spatial urban cold starts require DEF_USE_LCT=.true.");
+        ensure!(
+            !namelist_bool(&document, "DEF_USE_CROP", false)?,
+            "spatial urban cold starts are incompatible with DEF_USE_CROP"
+        );
+        ensure!(
+            namelist_i32(&document, "DEF_URBAN_type_scheme", 1)? == 2,
+            "spatial NCAR urban scheme 1 is not migrated; use DEF_URBAN_type_scheme=2 (LCZ)"
+        );
+        let lucy_enabled = namelist_bool(&document, "DEF_URBAN_LUCY", true)?;
+        Some(SpatialUrbanRun {
+            geometry: UrbanConfig {
+                water_enabled: namelist_bool(&document, "DEF_URBAN_WATER", true)?,
+                trees_enabled: namelist_bool(&document, "DEF_URBAN_TREE", true)?,
+                building_energy_model: namelist_bool(&document, "DEF_URBAN_BEM", true)?,
+            },
+            runtime_dir: lucy_enabled
+                .then(|| required_string(&document, "DEF_dir_runtime"))
+                .transpose()?
+                .map(PathBuf::from),
+            lucy_enabled,
+        })
+    } else {
+        None
+    };
     let subgrid = if lct {
         ensure!(
             !namelist_bool(&document, "DEF_USE_BGC", false)?,
             "spatial BGC cold starts require DEF_USE_PFT or DEF_USE_PC"
         );
-        SpatialSubgrid::Lct
+        if urban.is_some() {
+            SpatialSubgrid::Urban
+        } else {
+            SpatialSubgrid::Lct
+        }
     } else {
         SpatialSubgrid::PftOrPc
     };
@@ -303,6 +412,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         lai_year,
         hydraulic_model,
         subgrid,
+        urban,
         use_bedrock: namelist_bool(&document, "DEF_USE_BEDROCK", false)?,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
         dynamic_lake: namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?,
@@ -874,6 +984,33 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot read spatial landpatch directory"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lcz_urban_case_selects_the_igbp_restart_path() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-spatial-urban-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=2\n DEF_URBAN_LUCY=.false.\n DEF_URBAN_WATER=.false.\n DEF_URBAN_TREE=.false.\n DEF_URBAN_BEM=.false.\n/\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let run = spatial_namelist_run(&namelist).unwrap();
+
+        assert_eq!(run.subgrid, SpatialSubgrid::Urban);
+        let urban = run.urban.unwrap();
+        assert!(!urban.lucy_enabled);
+        assert!(!urban.geometry.water_enabled);
+        assert!(!urban.geometry.trees_enabled);
+        assert!(!urban.geometry.building_energy_model);
         std::fs::remove_dir_all(root).unwrap();
     }
 
