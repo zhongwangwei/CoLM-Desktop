@@ -23,6 +23,7 @@ const PLANTING_FILE: &str = "plantdt-colm-64cfts-rice2_fillcoast.nc";
 const FERTILIZER_SOURCE_ONE_FILE: &str = "fertnitro_fillcoast.nc";
 const FERTILIZER_SOURCE_TWO_FILE: &str = "fertilizer_2015soc.nc";
 const IRRIGATION_FILE: &str = "surfdata_irrigation_method_96x144.nc";
+const IRRIGATION_ALLOCATION_FILE: &str = "surfdata_irrigation_allocation.nc";
 
 /// Runtime choices consumed by upstream `CROP_readin`.
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +35,8 @@ pub struct CropManagementConfig<'a> {
     /// CoLM's `DEF_FERT_SOURCE`; consulted only when fertilizer is enabled.
     pub fertilizer_source: i32,
     pub use_irrigation: bool,
+    /// Read `surfdata_irrigation_allocation.nc` for allocation mode three.
+    pub use_irrigation_allocation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +184,21 @@ pub fn crop_cold_start_from_management(
             latitude_degrees,
             longitude_degrees,
         )?);
+    }
+    if config.use_irrigation_allocation {
+        ensure!(
+            config.use_irrigation,
+            "irrigation allocation requires DEF_USE_IRRIGATION = .true."
+        );
+        let (groundwater, surface_water) = read_irrigation_allocations(
+            crop_dir.join(IRRIGATION_ALLOCATION_FILE),
+            latitude_degrees,
+            longitude_degrees,
+        )?;
+        state.irrigation_groundwater_allocation.fill(groundwater);
+        state
+            .irrigation_surface_water_allocation
+            .fill(surface_water);
     }
     state.set_patch_fertilizer(classes);
     state.set_patch_irrigation(classes);
@@ -509,6 +527,20 @@ fn read_irrigation_methods(
             })
         })
         .collect()
+}
+
+fn read_irrigation_allocations(
+    path: impl AsRef<Path>,
+    latitude_degrees: f64,
+    longitude_degrees: f64,
+) -> Result<(f64, f64)> {
+    let file = open_map(path, "CROP irrigation-allocation")?;
+    let cell = nearest_cell_indices(&file, latitude_degrees, longitude_degrees)?;
+    let groundwater = sample_f64_2d(&file, "irrig_gw_alloc", cell)?
+        .context("CROP irrigation groundwater allocation is missing")?;
+    let surface_water = sample_f64_2d(&file, "irrig_sw_alloc", cell)?
+        .context("CROP irrigation surface-water allocation is missing")?;
+    Ok((groundwater, surface_water))
 }
 
 fn open_map(path: impl AsRef<Path>, label: &str) -> Result<netcdf::File> {

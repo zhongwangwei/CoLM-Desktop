@@ -29,6 +29,7 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
     write_fertilizer_source_one(&root.join("crop/fertnitro_fillcoast.nc"));
     write_fertilizer_source_two(&root.join("crop/fertilizer_2015soc.nc"));
     write_irrigation_map(&root.join("crop/surfdata_irrigation_method_96x144.nc"));
+    write_irrigation_allocation_map(&root.join("crop/surfdata_irrigation_allocation.nc"));
 
     let source_one = crop_cold_start_from_management(
         &[17],
@@ -41,6 +42,7 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
             use_fertilizer: true,
             fertilizer_source: 1,
             use_irrigation: false,
+            use_irrigation_allocation: false,
         },
     )
     .unwrap();
@@ -62,6 +64,7 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
             use_fertilizer: true,
             fertilizer_source: 2,
             use_irrigation: true,
+            use_irrigation_allocation: true,
         },
     )
     .unwrap();
@@ -75,6 +78,8 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
     assert_eq!(irrigation.steps_left, [-9_999]);
     assert_eq!(irrigation.corn_method, [3]);
     assert_eq!(irrigation.rice_1_method, [-9_999]);
+    assert_eq!(irrigation.groundwater_allocation, [0.65]);
+    assert_eq!(irrigation.surface_water_allocation, [0.35]);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -132,6 +137,19 @@ fn write_irrigation_map(path: &std::path::Path) {
     file.add_variable::<f32>("irrigation_method", &["cft", "lat", "lon"])
         .unwrap()
         .put_values(&irrigation, ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_irrigation_allocation_map(path: &std::path::Path) {
+    let mut file = point_map(path, false);
+    file.add_variable::<f64>("irrig_gw_alloc", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[0.0, 0.65, 0.0, 0.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("irrig_sw_alloc", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[0.0, 0.35, 0.0, 0.0], ..)
         .unwrap();
     file.close().unwrap();
 }

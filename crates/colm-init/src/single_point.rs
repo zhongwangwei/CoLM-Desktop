@@ -1635,10 +1635,6 @@ fn single_point_crop_state(
                 .map(Some);
         }
     }
-    ensure!(
-        !(use_irrigation && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3)),
-        "DEF_IRRIGATION_ALLOCATION = 3 needs groundwater/surface-water allocation state, which the Rust cold restart does not yet write"
-    );
     let runtime_dir = PathBuf::from(required_string(document, "DEF_dir_runtime")?);
     crate::crop_cold_start_from_management(
         &pft.class,
@@ -1651,6 +1647,8 @@ fn single_point_crop_state(
             use_fertilizer,
             fertilizer_source: optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1),
             use_irrigation,
+            use_irrigation_allocation: use_irrigation
+                && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),
         },
     )
     .map(Some)
