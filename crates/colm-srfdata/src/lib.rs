@@ -33,7 +33,7 @@ pub use albedo::{albedo, SoilAlbedo};
 pub use derive::{
     depth_weights, derive, fine_earth_fractions, Derived, FineEarth, SoilColumn, DZ_SOIL,
 };
-pub use grid::{Grid, COLM_1KM, COLM_500M, MERIT_90M};
+pub use grid::{Grid, COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M};
 pub use pft::{
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_crop_land_patches,
     build_crop_pft_topology, build_pft_topology, crop_pft_pctshared, CropLandPatchTopology,

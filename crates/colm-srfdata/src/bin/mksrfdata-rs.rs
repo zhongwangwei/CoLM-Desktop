@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
+use colm_srfdata::albedo::IGBP_URBAN;
 use colm_srfdata::soil::{
     aggregate_balland_arp, aggregate_campbell, aggregate_soil_field, aggregate_vgm, CampbellFills,
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
 use colm_srfdata::{
-    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index,
+    aggregate_lcz_urban_geometry, aggregate_pft_fractions, aggregate_pft_height,
+    aggregate_pft_index, aggregate_urban_region_ids, aggregate_urban_tree_index,
     build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
     build_catchment_spatial_topology, build_crop_land_patches, build_crop_pft_topology,
     build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_pft_topology,
@@ -21,8 +23,10 @@ use colm_srfdata::{
     read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
     write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, BlockLayout, FlatLandPatches, PftFractionInput,
-    PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM, COLM_500M, MERIT_90M,
+    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
+    write_spatial_urban_vector, BlockLayout, FlatLandPatches, LczUrbanRawFields, PftFractionInput,
+    PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, UrbanMaterialParameters, COLM_1KM,
+    COLM_500M, COLM_5KM, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -68,6 +72,29 @@ struct SpatialLctArgs {
     monthly_vegetation_years: Vec<i32>,
     lulcc: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
+    urban: Option<SpatialUrbanInputs>,
+}
+
+#[derive(Debug, Clone)]
+struct SpatialUrbanInputs {
+    rawdata: PathBuf,
+    geometry: UrbanGeometrySource,
+    use_canyon_hwr: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UrbanGeometrySource {
+    Ghsl,
+    Li,
+}
+
+impl UrbanGeometrySource {
+    fn variables(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Ghsl => ("PCT_ROOF_GHSL", "HT_ROOF_GHSL"),
+            Self::Li => ("PCT_ROOF_Li", "HT_ROOF_Li"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +258,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         monthly_vegetation_years: Vec::new(),
         lulcc: false,
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
+        urban: None,
     };
     materialize_spatial_common_fields(
         &common,
@@ -439,7 +467,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         SiteMode::Usgs => 16,
         SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
     };
-    let (topology, patches, land_hrus) = match args.kind {
+    let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             let catchment = build_catchment_spatial_topology(&args.mesh, MERIT_90M)?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
@@ -464,8 +492,35 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (topology, patches, None)
         }
     };
+    let land_urban = if let Some(urban) = &args.urban {
+        ensure!(
+            args.land_cover == SiteMode::Igbp,
+            "spatial LCZ urban data requires IGBP land cover"
+        );
+        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        let raw_types = read_mesh_tiled_raster_i32(
+            &urban.rawdata.join("urban_type"),
+            "URBTYP",
+            "LCZ_DOM",
+            &topology.mesh,
+            &topology.pixel,
+            COLM_500M,
+        )?;
+        let (mesh, refined, land_urban) = topology
+            .mesh
+            .clone()
+            .into_urban_land_patches(&patches, &raw_types, &area, IGBP_URBAN, 10)?;
+        topology.mesh = mesh;
+        patches = refined;
+        Some(land_urban)
+    } else {
+        None
+    };
     materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
     materialize_lulcc_transfer_traces(&args, &topology, &patches)?;
+    if let (Some(urban), Some(land_urban)) = (&args.urban, land_urban.as_ref()) {
+        materialize_spatial_urban(&args, &topology, land_urban, urban)?;
+    }
     if let Some(land_hrus) = land_hrus {
         write_spatial_hru_topology(
             &args.landdata,
@@ -481,6 +536,203 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         patches.set_type.len(),
         args.landdata.display()
     );
+    Ok(())
+}
+
+fn materialize_spatial_urban(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    inputs: &SpatialUrbanInputs,
+) -> Result<()> {
+    write_spatial_urban_topology(
+        &args.landdata,
+        args.year,
+        topology,
+        land_urban,
+        &args.blocks,
+    )?;
+    if land_urban.is_empty() {
+        return Ok(());
+    }
+    let layout = land_urban.aggregation_layout(&topology.mesh, vec![None; land_urban.len()])?;
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    let surface_year = args.year / 5 * 5;
+    let suffix = format!("URBSRF{surface_year:04}");
+    let urban_raw = inputs.rawdata.join("urban");
+    let (roof_variable, height_variable) = inputs.geometry.variables();
+    let roof_fraction = read_mesh_tiled_raster_f64(
+        &urban_raw,
+        &suffix,
+        roof_variable,
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let roof_height_m = read_mesh_tiled_raster_f64(
+        &urban_raw,
+        &suffix,
+        height_variable,
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let tree_percent = read_mesh_tiled_raster_f64(
+        &urban_raw,
+        &suffix,
+        "PCT_Tree",
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let tree_top_m = read_mesh_tiled_raster_f64(
+        &urban_raw,
+        &suffix,
+        "HTOP",
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let water_percent = read_mesh_tiled_raster_f64(
+        &urban_raw,
+        &suffix,
+        "PCT_Water",
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let population_index = if args.year % 5 == 0 {
+        1
+    } else {
+        (args.year - surface_year + 1) as usize
+    };
+    let population_density = read_mesh_tiled_raster_time_f64(
+        &urban_raw,
+        &suffix,
+        "POP_DEN",
+        population_index,
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let geometry = aggregate_lcz_urban_geometry(
+        &layout,
+        &land_urban.set_type,
+        &area,
+        LczUrbanRawFields {
+            roof_fraction: &roof_fraction,
+            roof_height_m: &roof_height_m,
+            tree_percent: &tree_percent,
+            tree_top_m: &tree_top_m,
+            water_percent: &water_percent,
+            population_density: &population_density,
+        },
+        inputs.use_canyon_hwr,
+    )?;
+    for (file_stem, variable, values) in [
+        ("WT_ROOF", "WT_ROOF", &geometry.roof_fraction),
+        ("HT_ROOF", "HT_ROOF", &geometry.roof_height_m),
+        (
+            "HLR_BLD",
+            "BUILDING_HLR",
+            &geometry.building_height_to_width,
+        ),
+        ("PCT_Tree", "PCT_Tree", &geometry.tree_percent),
+        ("htop_urb", "URBAN_TREE_TOP", &geometry.tree_top_m),
+        ("PCT_Water", "PCT_Water", &geometry.water_percent),
+        ("POP", "POP_DEN", &geometry.population_density),
+    ] {
+        write_spatial_urban_vector(
+            &args.landdata,
+            args.year,
+            topology,
+            land_urban,
+            &args.blocks,
+            None,
+            file_stem,
+            variable,
+            values,
+        )?;
+    }
+    let lucy = aggregate_urban_region_ids(
+        &layout,
+        &read_mesh_raster_i32(
+            &urban_raw.join("LUCY_regionid.nc"),
+            "LUCY_REGION_ID",
+            &topology.mesh,
+            &topology.pixel,
+            COLM_5KM,
+        )?,
+    )?;
+    write_spatial_urban_vector(
+        &args.landdata,
+        args.year,
+        topology,
+        land_urban,
+        &args.blocks,
+        None,
+        "LUCY_region_id",
+        "LUCY_id",
+        &lucy,
+    )?;
+    write_spatial_urban_material(
+        &args.landdata,
+        args.year,
+        topology,
+        land_urban,
+        &args.blocks,
+        &UrbanMaterialParameters::from_lcz_classes(&land_urban.set_type)?,
+    )?;
+    let monthly_years = if args.monthly_vegetation_years.is_empty() {
+        vec![args.year]
+    } else {
+        args.monthly_vegetation_years.clone()
+    };
+    for year in monthly_years {
+        let source_year = year.max(2000);
+        let output_year = source_year;
+        let lai_suffix = format!("URBLAI_{source_year:04}");
+        for month in 1..=12 {
+            for (file_stem, variable, source) in [
+                (
+                    format!("urban_LAI_{month:02}"),
+                    "TREE_LAI",
+                    "URBAN_TREE_LAI",
+                ),
+                (
+                    format!("urban_SAI_{month:02}"),
+                    "TREE_SAI",
+                    "URBAN_TREE_SAI",
+                ),
+            ] {
+                let index = aggregate_urban_tree_index(
+                    &layout,
+                    &area,
+                    &tree_percent,
+                    &read_mesh_tiled_raster_time_f64(
+                        &inputs.rawdata.join("urban_lai_500m"),
+                        &lai_suffix,
+                        source,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                )?;
+                write_spatial_urban_vector(
+                    &args.landdata,
+                    output_year,
+                    topology,
+                    land_urban,
+                    &args.blocks,
+                    Some("LAI"),
+                    &file_stem,
+                    variable,
+                    &index,
+                )?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1241,6 +1493,9 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut plant_tiles = None;
     let mut usgs_forest_height = None;
     let mut soil_hyper_albedo_dir = None;
+    let mut urban_rawdata = None;
+    let mut urban_geometry = UrbanGeometrySource::Ghsl;
+    let mut urban_canyon_hwr = true;
     let mut monthly_vegetation_years = Vec::new();
     let mut lulcc = false;
     let mut index = 5;
@@ -1369,6 +1624,37 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--urban-rawdata" => {
+                urban_rawdata = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--urban-rawdata needs the rawdata root directory")?,
+                ));
+                index += 2;
+            }
+            "--urban-geometry" => {
+                urban_geometry = match args
+                    .get(index + 1)
+                    .context("--urban-geometry needs ghsl or li")?
+                    .as_str()
+                {
+                    "ghsl" => UrbanGeometrySource::Ghsl,
+                    "li" => UrbanGeometrySource::Li,
+                    other => bail!("--urban-geometry must be ghsl or li, got {other:?}"),
+                };
+                index += 2;
+            }
+            "--urban-canyon-hwr" => {
+                urban_canyon_hwr = match args
+                    .get(index + 1)
+                    .context("--urban-canyon-hwr needs true or false")?
+                    .as_str()
+                {
+                    "true" => true,
+                    "false" => false,
+                    other => bail!("--urban-canyon-hwr must be true or false, got {other:?}"),
+                };
+                index += 2;
+            }
             other => bail!(
                 "unknown spatial-lct option {other:?}
 {}",
@@ -1398,6 +1684,11 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         monthly_vegetation_years,
         lulcc,
         soil_hyper_albedo_dir,
+        urban: urban_rawdata.map(|rawdata| SpatialUrbanInputs {
+            rawdata,
+            geometry: urban_geometry,
+            use_canyon_hwr: urban_canyon_hwr,
+        }),
     })
 }
 
@@ -2047,7 +2338,7 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]...
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--urban-rawdata rawdata --urban-geometry ghsl|li --urban-canyon-hwr true|false]
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
@@ -2094,6 +2385,12 @@ mod tests {
             "2005".into(),
             "--soil-hyper-albedo-dir".into(),
             "colm_input_ghsad".into(),
+            "--urban-rawdata".into(),
+            "rawdata".into(),
+            "--urban-geometry".into(),
+            "li".into(),
+            "--urban-canyon-hwr".into(),
+            "false".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Unstructured);
@@ -2121,6 +2418,10 @@ mod tests {
             parsed.soil_hyper_albedo_dir,
             Some(PathBuf::from("colm_input_ghsad"))
         );
+        let urban = parsed.urban.unwrap();
+        assert_eq!(urban.rawdata, PathBuf::from("rawdata"));
+        assert!(matches!(urban.geometry, UrbanGeometrySource::Li));
+        assert!(!urban.use_canyon_hwr);
         assert_eq!(parsed.blocks.lon_w.len(), 4);
         assert_eq!(parsed.blocks.lat_s.len(), 2);
         assert!(parse_spatial_lct(&[
