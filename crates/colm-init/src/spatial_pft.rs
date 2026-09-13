@@ -300,19 +300,21 @@ pub fn write_spatial_pft_cold_time_restarts(
             "CROP with DEF_USE_PC requires DEF_PC_CROP_SPLIT = .true."
         );
     }
+    // `MOD_Albedo_HiRes` only runs its spectral canopy solver for PFT.
+    // PC keeps spectral ground state and its spectral PFT arrays at their initialized
+    // zero/missing values, then replaces the broadband state with ThreeDCanopy.
+    let high_resolution_canopy = config.use_hyperspectral && subgrid == SpatialPftSubgrid::Pft;
     let high_resolution_vegetation =
-        config.use_hyperspectral && optional_bool_or(&document, "DEF_HighResVeg", true)?;
+        high_resolution_canopy && optional_bool_or(&document, "DEF_HighResVeg", true)?;
     let high_resolution_soil =
         config.use_hyperspectral && optional_bool_or(&document, "DEF_HighResSoil", true)?;
-    if config.use_hyperspectral {
-        ensure!(
-            subgrid == SpatialPftSubgrid::Pft,
-            "spatial PC cold-time restart does not support HYPERSPECTRAL canopy radiation"
-        );
+    if high_resolution_canopy {
         ensure!(
             !optional_bool_or(&document, "DEF_PROSPECT", false)?,
             "DEF_PROSPECT is not yet implemented by the shared Rust high-resolution leaf-optics kernel"
         );
+    }
+    if config.use_hyperspectral {
         if let Some(Value::Str(path)) = document.get("DEF_HighResUrban_albedo") {
             ensure!(
                 path.eq_ignore_ascii_case("null"),
@@ -323,15 +325,19 @@ pub fn write_spatial_pft_cold_time_restarts(
     let high_resolution_sources: Option<(
         Option<HighResolutionLeafOpticsTable>,
         Option<HighResolutionWaterOptics>,
-        HighResolutionRadiationTable,
+        Option<HighResolutionRadiationTable>,
     )> = config
         .use_hyperspectral
         .then(|| {
-            let radiation = read_high_resolution_radiation_table(
-                config
-                    .high_resolution_radiation
-                    .context("HYPERSPECTRAL cold start needs --highres-radiation")?,
-            )?;
+            let radiation = high_resolution_canopy
+                .then(|| {
+                    read_high_resolution_radiation_table(
+                        config
+                            .high_resolution_radiation
+                            .context("PFT HYPERSPECTRAL cold start needs --highres-radiation")?,
+                    )
+                })
+                .transpose()?;
             let leaf = high_resolution_vegetation
                 .then(|| {
                     read_high_resolution_leaf_optics(
@@ -575,18 +581,25 @@ pub fn write_spatial_pft_cold_time_restarts(
                 }
             }
             ground.push(spectral_ground);
-            fractions.push(select_high_resolution_radiation(
-                CalendarTime {
-                    year: config.date.year,
-                    julian_day: config.date.julian_day,
-                    seconds: config.date.seconds,
-                },
-                config.greenwich,
-                longitude[patch].to_degrees(),
-                common_state.cosine_zenith[patch],
-                latitude[patch],
-                radiation.tables(),
-            )?);
+            fractions.push(
+                radiation
+                    .as_ref()
+                    .map(|radiation| {
+                        select_high_resolution_radiation(
+                            CalendarTime {
+                                year: config.date.year,
+                                julian_day: config.date.julian_day,
+                                seconds: config.date.seconds,
+                            },
+                            config.greenwich,
+                            longitude[patch].to_degrees(),
+                            common_state.cosine_zenith[patch],
+                            latitude[patch],
+                            radiation.tables(),
+                        )
+                    })
+                    .transpose()?,
+            );
         }
         (
             ground,
@@ -656,7 +669,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 0.0,
                 common_state.ground_temperature_k[patch],
             )?;
-            if config.use_hyperspectral {
+            if high_resolution_canopy {
                 let fallback = expand_broadband_leaf_optics(broadband_optics);
                 let class = usize::try_from(pfts.class[pft])
                     .context("high-resolution PFT class must be nonnegative")?;
@@ -691,7 +704,9 @@ pub fn write_spatial_pft_cold_time_restarts(
                 state = high_resolution_pft_cold_start_state(
                     radiation.as_ref(),
                     &high_resolution_ground[patch],
-                    &high_resolution_fractions[patch],
+                    high_resolution_fractions[patch]
+                        .as_ref()
+                        .expect("PFT high-resolution radiation fractions are loaded"),
                 )?;
                 if let Some(radiation) = radiation.as_ref() {
                     copy_high_resolution_pft_radiation(
@@ -811,7 +826,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 .map(|&index| roughness[index] * pfts.fraction[index])
                 .sum(),
         );
-        if config.use_hyperspectral {
+        if high_resolution_canopy {
             for wavelength in 0..HIGH_RES_WAVELENGTHS {
                 for radiation_type in 0..2 {
                     high_resolution_albedo

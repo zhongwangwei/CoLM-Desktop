@@ -288,6 +288,56 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_f64(&pft, "ssun_hires_p").unwrap().len(), 211 * 2);
     assert_eq!(values_f64(&pft, "ssha_hires_p").unwrap().len(), 211 * 2);
+
+    // Upstream MOD_Albedo_HiRes keeps PC's spectral canopy fields at their
+    // initialized values and applies ThreeDCanopy only to broadband state.
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_USE_PFT = .false.\n DEF_USE_PC = .true.\n/\n",
+    )
+    .unwrap();
+    let pc_restart = root.join("restart-pc");
+    let mut pc_config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist,
+            &landdata,
+            &pc_restart,
+            "test",
+            2005,
+            "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    pc_config.plant_hydraulics = false;
+    pc_config.use_hyperspectral = true;
+    pc_config.high_resolution_water_optics = Some(&water);
+    let pc_files = crate::write_spatial_pft_cold_time_restarts(pc_config).unwrap();
+    let common = netcdf::open(&pc_files.common.block).unwrap();
+    assert!(values_f64(&common, "alb_hires")
+        .unwrap()
+        .iter()
+        .all(|value| value.is_finite() && *value != crate::MISSING));
+    assert!(values_f64(&common, "reflectance_out")
+        .unwrap()
+        .iter()
+        .all(|value| *value == crate::MISSING));
+    assert!(values_f64(&common, "transmittance_out")
+        .unwrap()
+        .iter()
+        .all(|value| *value == crate::MISSING));
+    let pc = netcdf::open(pc_files.pft).unwrap();
+    assert!(values_f64(&pc, "ssun_hires_p")
+        .unwrap()
+        .iter()
+        .all(|value| *value == 0.0));
+    assert!(values_f64(&pc, "ssha_hires_p")
+        .unwrap()
+        .iter()
+        .all(|value| *value == 0.0));
     std::fs::remove_dir_all(root).unwrap();
 }
 

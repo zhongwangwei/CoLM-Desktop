@@ -34,21 +34,22 @@ enabled downscaling branch meet all of these conditions:
    `mksrfdata` vector files and the restart writer, including exact dimensions, field names,
    fill values and MPI ownership.  Reader/writer buffers must not alter numerical kernels.
 4. **Driver and cutover** — `mkinidata-rs case.nml` resolves the single-point restart
-   families.  `mkinidata-rs spatial-lct ... --cold-time YYYY-JJJ-SSSSS` writes a
-   block-bounded, no-observation LCT time restart.  `mkinidata-rs spatial-pft <case.nml> ...
-   --cold-time YYYY-JJJ-SSSSS` now writes both the common and PFT blocks from the same monthly
-   patch/PFT LAI/SAI vectors, reusing the shared LCT cold-soil state and replacing natural-patch
-   optics with PFT- or PC-weighted values. Spatial PFT BGC/CROP state is materialized from the
-   same block vectors. PFT hyperspectral cold starts reuse the shared Rust spectral kernels and
-   persist their common/PFT restart fields. Scalar-LCT hyperspectral cold-time output is explicitly
-   refused: upstream marks that branch unsupported and supplies no class-to-spectral-optics mapping,
-   so Rust must not create an unverified restart. A spatial case namelist now derives its
-standard case paths, start timestamp, LAI year, and enabled cold-start controls, then scans the
-selected landpatch year for every block; --block restricts that scan. The namelist-driven LCT
-cold-start path supports both IGBP and USGS monthly vegetation as well as LULCC initial
-restarts once Rust-created transfer vectors are present. Spatial urban, observed spatial state, PC
-   hyperspectral canopy radiation, and external parity gates still require completion before
-   GUI/CLI can select Rust as the default.
+   families. `mkinidata-rs spatial-lct ... --cold-time YYYY-JJJ-SSSSS` writes a
+   block-bounded, no-observation LCT time restart. `mkinidata-rs spatial-pft <case.nml> ...
+   --cold-time YYYY-JJJ-SSSSS` writes both common and PFT blocks from the same monthly
+   patch/PFT LAI/SAI vectors, reusing shared LCT cold-soil state and replacing natural-patch
+   optics with PFT- or PC-weighted values. Spatial PFT BGC/CROP state derives from the same
+   block vectors. PFT hyperspectral cold starts reuse the shared Rust spectral kernels and
+   persist common/PFT restart fields. PC hyperspectral cold starts reproduce the upstream
+   fallback: spectral ground albedo is retained while spectral PFT absorption remains zero and
+   reflectance/transmittance remain missing; PC then supplies its broadband canopy state.
+   Scalar-LCT hyperspectral cold-time output is explicitly refused because upstream marks that
+   branch unsupported and supplies no class-to-spectral-optics mapping. A spatial case
+   namelist derives standard paths, start timestamp, LAI year, and enabled cold-start controls,
+   then scans the selected landpatch year for every block; `--block` restricts that scan. The
+   namelist-driven LCT cold-start path supports IGBP and USGS monthly vegetation and LULCC
+   initial restarts once Rust-created transfer vectors exist. External parity gates still must
+   complete before GUI/CLI selects Rust as the default.
 
 ## Performance constraints
 
