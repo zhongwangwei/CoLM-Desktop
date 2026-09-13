@@ -178,6 +178,9 @@ pub struct SinglePointSurfaceRun {
     pub use_site_pctpfts: bool,
     pub use_site_pctcrop: bool,
     pub use_site_htop: bool,
+    pub use_site_lakedepth: bool,
+    pub use_site_soilreflectance: bool,
+    pub use_site_topography: bool,
     /// `DEF_USE_BEDROCK` controls whether the constant restart needs bedrock state.
     pub use_bedrock: bool,
     /// `USE_SITE_dbedrock` selects a supplied site value over `bedrock.nc`.
@@ -212,6 +215,9 @@ struct SinglePointMaterializeOptions<'a> {
     use_site_pctpfts: bool,
     use_site_pctcrop: bool,
     use_site_htop: bool,
+    use_site_lakedepth: bool,
+    use_site_soilreflectance: bool,
+    use_site_topography: bool,
     use_bedrock: bool,
     use_site_dbedrock: bool,
     land_cover_year: i32,
@@ -304,6 +310,9 @@ pub fn single_point_surface_run_from_namelist(
     let use_site_pctpfts = namelist_bool(&document, "USE_SITE_pctpfts", true)?;
     let use_site_pctcrop = namelist_bool(&document, "USE_SITE_pctcrop", true)?;
     let use_site_htop = namelist_bool(&document, "USE_SITE_htop", true)?;
+    let use_site_lakedepth = namelist_bool(&document, "USE_SITE_lakedepth", true)?;
+    let use_site_soilreflectance = namelist_bool(&document, "USE_SITE_soilreflectance", true)?;
+    let use_site_topography = namelist_bool(&document, "USE_SITE_topography", true)?;
     let use_bedrock = namelist_bool(&document, "DEF_USE_BEDROCK", false)?;
     let use_site_dbedrock = namelist_bool(&document, "USE_SITE_dbedrock", true)?;
     Ok(SinglePointSurfaceRun {
@@ -317,6 +326,9 @@ pub fn single_point_surface_run_from_namelist(
         use_site_pctpfts,
         use_site_pctcrop,
         use_site_htop,
+        use_site_lakedepth,
+        use_site_soilreflectance,
+        use_site_topography,
         use_bedrock,
         use_site_dbedrock,
         land_cover_year,
@@ -352,6 +364,9 @@ pub fn materialize_single_point_surface_from_namelist(
             use_site_pctpfts: run.use_site_pctpfts,
             use_site_pctcrop: run.use_site_pctcrop,
             use_site_htop: run.use_site_htop,
+            use_site_lakedepth: run.use_site_lakedepth,
+            use_site_soilreflectance: run.use_site_soilreflectance,
+            use_site_topography: run.use_site_topography,
             use_bedrock: run.use_bedrock,
             use_site_dbedrock: run.use_site_dbedrock,
             land_cover_year: run.land_cover_year,
@@ -1630,6 +1645,9 @@ pub fn materialize_single_point_surface(
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_lakedepth: true,
+            use_site_soilreflectance: true,
+            use_site_topography: true,
             use_bedrock: false,
             use_site_dbedrock: true,
             land_cover_year: 2005,
@@ -1748,6 +1766,10 @@ fn materialize_single_point_surface_impl(
     let requires_bedrock_raw = options.use_bedrock
         && (!options.use_site_dbedrock
             || !single_point_variable_exists(source, "depth_to_bedrock")?);
+    let requires_static_raw = mode != SiteMode::Urban
+        && (!options.use_site_lakedepth
+            || !options.use_site_soilreflectance
+            || !options.use_site_topography);
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
@@ -1758,6 +1780,7 @@ fn materialize_single_point_surface_impl(
         && !requires_lct_height_raw
         && !requires_pft_raw
         && !requires_bedrock_raw
+        && !requires_static_raw
     {
         publish_single_point_surface(
             source,
@@ -1825,6 +1848,14 @@ fn materialize_single_point_surface_impl(
             rawdata.context("single-point bedrock needs DEF_dir_rawdata/bedrock.nc")?,
         )?;
     }
+    if requires_static_raw {
+        materialize_single_point_static_fields(
+            &temporary,
+            rawdata.context("single-point static rawdata fallback needs DEF_dir_rawdata")?,
+            mode,
+            options,
+        )?;
+    }
     if pft_mode
         && single_point_pft_raw_needed(
             &temporary,
@@ -1890,6 +1921,98 @@ fn materialize_single_point_bedrock(surface: &Path, rawdata: &Path) -> Result<()
         &[depth_cm],
         "rawdata bedrock.nc/dbedrock",
     )
+}
+
+fn materialize_single_point_static_fields(
+    surface: &Path,
+    rawdata: &Path,
+    mode: SiteMode,
+    options: SinglePointMaterializeOptions<'_>,
+) -> Result<()> {
+    let file =
+        netcdf::open(surface).with_context(|| format!("cannot open {}", surface.display()))?;
+    let longitude = scalar_f64(&file, "longitude")?;
+    let latitude = scalar_f64(&file, "latitude")?;
+    drop(file);
+
+    let lake_depth = (!options.use_site_lakedepth)
+        .then(|| {
+            point_f64(
+                &rawdata.join("lake_depth.nc"),
+                "lake_depth",
+                longitude,
+                latitude,
+            )
+            .context("cannot read single-point lake depth")
+            .map(|value| value * 0.1)
+        })
+        .transpose()?;
+    let topography = (!options.use_site_topography)
+        .then(|| {
+            let path = rawdata.join("topography.nc");
+            Ok::<_, anyhow::Error>([
+                (
+                    "elevation",
+                    point_f64(&path, "elevation", longitude, latitude)?,
+                ),
+                ("elvstd", point_f64(&path, "elvstd", longitude, latitude)?),
+                (
+                    "sloperatio",
+                    point_f64(&path, "slope", longitude, latitude)?,
+                ),
+            ])
+        })
+        .transpose()?;
+    let reflectance = (!options.use_site_soilreflectance)
+        .then(|| {
+            let landtype = landtype_for_mode(surface, mode)?
+                .context("soil reflectance rawdata fallback needs a land classification")?;
+            let albedo_landtype = match mode {
+                SiteMode::Usgs if matches!(landtype, 16 | 24) => {
+                    bail!("cannot materialize soil reflectance for USGS water or ice")
+                }
+                SiteMode::Usgs => 1,
+                _ => landtype,
+            };
+            let colour = point_i32(
+                &rawdata.join("soil_brightness.nc"),
+                "soil_brightness",
+                longitude,
+                latitude,
+            )?;
+            albedo(colour, albedo_landtype)
+                .context("soil brightness is outside CoLM's supported land/colour classes")
+        })
+        .transpose()?;
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file =
+        netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
+    if let Some(value) = lake_depth {
+        put_or_replace_values(
+            &mut file,
+            "lakedepth",
+            &[],
+            &[value],
+            "rawdata lake_depth.nc/lake_depth scaled by 0.1",
+        )?;
+    }
+    if let Some(values) = topography {
+        for (name, value) in values {
+            put_or_replace_values(&mut file, name, &[], &[value], "rawdata topography.nc")?;
+        }
+    }
+    if let Some(values) = reflectance {
+        for (name, value) in [
+            ("soil_s_v_alb", values.s_v),
+            ("soil_d_v_alb", values.d_v),
+            ("soil_s_n_alb", values.s_n),
+            ("soil_d_n_alb", values.d_n),
+        ] {
+            put_or_replace_values(&mut file, name, &[], &[value], "rawdata soil_brightness.nc")?;
+        }
+    }
+    Ok(())
 }
 
 fn materialize_single_point_eight_day_lai(

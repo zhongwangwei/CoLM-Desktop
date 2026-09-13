@@ -1368,7 +1368,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n USE_SITE_lakedepth = .false.\n USE_SITE_soilreflectance = .false.\n USE_SITE_topography = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
             source.display(),
             output.display(),
         ),
@@ -1379,6 +1379,9 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(pft.monthly_lai_years, [2008, 2009]);
     assert!(!pft.use_site_pctpfts);
     assert!(!pft.use_site_htop);
+    assert!(!pft.use_site_lakedepth);
+    assert!(!pft.use_site_soilreflectance);
+    assert!(!pft.use_site_topography);
     assert!(pft.use_bedrock);
     assert!(!pft.use_site_dbedrock);
 
@@ -1855,6 +1858,9 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_lakedepth: true,
+            use_site_soilreflectance: true,
+            use_site_topography: true,
             use_bedrock: false,
             use_site_dbedrock: true,
             land_cover_year: 2008,
@@ -1943,6 +1949,9 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_lakedepth: true,
+            use_site_soilreflectance: true,
+            use_site_topography: true,
             use_bedrock: false,
             use_site_dbedrock: true,
             land_cover_year: 2008,
@@ -1979,6 +1988,9 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_pctpfts: false,
             use_site_pctcrop: true,
             use_site_htop: false,
+            use_site_lakedepth: true,
+            use_site_soilreflectance: true,
+            use_site_topography: true,
             use_bedrock: false,
             use_site_dbedrock: true,
             land_cover_year: 2008,
@@ -2120,6 +2132,9 @@ fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
             use_site_pctpfts: true,
             use_site_pctcrop: true,
             use_site_htop: true,
+            use_site_lakedepth: true,
+            use_site_soilreflectance: true,
+            use_site_topography: true,
             use_bedrock: false,
             use_site_dbedrock: true,
             land_cover_year: 2008,
@@ -2253,6 +2268,99 @@ fn bedrock_rawdata_fallback_replaces_the_site_value() {
         panic!("bedrock source must be a string")
     };
     assert_eq!(source, "rawdata bedrock.nc/dbedrock");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn static_rawdata_fallback_replaces_disabled_site_fields() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-static-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let rawdata = directory.join("rawdata");
+    std::fs::create_dir_all(&rawdata).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&surface).unwrap();
+        for (name, value) in [
+            ("lakedepth", 1.0),
+            ("soil_s_v_alb", 0.0),
+            ("soil_d_v_alb", 0.0),
+            ("soil_s_n_alb", 0.0),
+            ("soil_d_n_alb", 0.0),
+            ("elevation", 0.0),
+            ("elvstd", 0.0),
+            ("sloperatio", 0.0),
+        ] {
+            file.add_variable::<f64>(name, &[])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+        let mut lake = netcdf::create(rawdata.join("lake_depth.nc")).unwrap();
+        lake.add_dimension("lat", 1).unwrap();
+        lake.add_dimension("lon", 1).unwrap();
+        lake.add_variable::<f64>("lake_depth", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[37.0], ..)
+            .unwrap();
+        lake.close().unwrap();
+        let mut bright = netcdf::create(rawdata.join("soil_brightness.nc")).unwrap();
+        bright.add_dimension("lat", 1).unwrap();
+        bright.add_dimension("lon", 1).unwrap();
+        bright
+            .add_variable::<i32>("soil_brightness", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[16], ..)
+            .unwrap();
+        bright.close().unwrap();
+        let mut topo = netcdf::create(rawdata.join("topography.nc")).unwrap();
+        topo.add_dimension("lat", 1).unwrap();
+        topo.add_dimension("lon", 1).unwrap();
+        for (name, value) in [("elevation", 100.0), ("elvstd", 2.0), ("slope", 1.2)] {
+            topo.add_variable::<f64>(name, &["lat", "lon"])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        topo.close().unwrap();
+    }
+    super::materialize_single_point_static_fields(
+        &surface,
+        &rawdata,
+        super::SiteMode::Igbp,
+        super::SinglePointMaterializeOptions {
+            urban: super::UrbanSurfaceOptions::default(),
+            lai_frequency: super::SinglePointLaiFrequency::Monthly,
+            use_site_lai: true,
+            use_site_pctpfts: true,
+            use_site_pctcrop: true,
+            use_site_htop: true,
+            use_site_lakedepth: false,
+            use_site_soilreflectance: false,
+            use_site_topography: false,
+            use_bedrock: false,
+            use_site_dbedrock: true,
+            land_cover_year: 2005,
+            eight_day_lai_years: &[],
+            monthly_lai_years: &[],
+        },
+    )
+    .unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    let value = |name| {
+        file.variable(name)
+            .unwrap()
+            .get_value::<f64, _>(())
+            .unwrap()
+    };
+    assert_eq!(value("lakedepth"), 3.7);
+    assert_eq!(value("soil_s_v_alb"), 0.08);
+    assert_eq!(value("soil_d_n_alb"), 0.27);
+    assert_eq!(value("elevation"), 100.0);
+    assert_eq!(value("elvstd"), 2.0);
+    assert_eq!(value("sloperatio"), 1.2);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
