@@ -115,6 +115,7 @@ pub use high_res_parameters::{
     HighResolutionRadiationTables, HIGH_RES_BANDS, HIGH_RES_REGIMES, HIGH_RES_ZENITH_BINS,
 };
 pub use high_res_radiation::{
+    bsm_soil_moisture, expand_broadband_ground_albedo, expand_broadband_leaf_optics,
     pft_high_resolution_radiation, HighResolutionLeafOptics, HighResolutionPftRadiation,
     HIGH_RES_WAVELENGTHS,
 };

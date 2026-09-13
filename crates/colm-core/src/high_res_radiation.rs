@@ -6,6 +6,8 @@
 
 use anyhow::{ensure, Result};
 
+use crate::LeafOptics;
+
 /// Number of CoLM hyperspectral wavelengths (400 through 2500 nm, 10 nm apart).
 pub const HIGH_RES_WAVELENGTHS: usize = 211;
 const RADIATION_TYPES: usize = 2;
@@ -35,6 +37,147 @@ pub struct HighResolutionPftRadiation {
     pub thermal_gap_fraction: f64,
     pub direct_extinction: f64,
     pub diffuse_extinction: f64,
+}
+
+/// Expands CoLM's two broadband PFT optical values into its native 211 bands.
+///
+/// This is the `DEF_HighResVeg = .false.` branch of
+/// `MOD_HighRes_Parameters::leaf_property_init`.  The returned arrays use the
+/// same `(wavelength, green-leaf-or-dead-stem)` layout as
+/// [`HighResolutionLeafOptics`].
+pub fn expand_broadband_leaf_optics(optics: LeafOptics) -> (Vec<f64>, Vec<f64>) {
+    let mut reflectance = Vec::with_capacity(HIGH_RES_WAVELENGTHS * RADIATION_TYPES);
+    let mut transmittance = Vec::with_capacity(HIGH_RES_WAVELENGTHS * RADIATION_TYPES);
+    for wavelength in 0..HIGH_RES_WAVELENGTHS {
+        let band = usize::from(wavelength >= 29);
+        reflectance.extend(optics.reflectance[band]);
+        transmittance.extend(optics.transmittance[band]);
+    }
+    (reflectance, transmittance)
+}
+
+/// Expands CoLM's two broadband ground-albedo bands into its native 211 bands.
+///
+/// This is the `DEF_HighResSoil = .false.` branch in `albland_HiRes`; input
+/// and output use `(band-or-wavelength, direct-or-diffuse)` ordering.
+pub fn expand_broadband_ground_albedo(
+    albedo: [[f64; RADIATION_TYPES]; RADIATION_TYPES],
+) -> Vec<f64> {
+    let mut expanded = Vec::with_capacity(HIGH_RES_WAVELENGTHS * RADIATION_TYPES);
+    for wavelength in 0..HIGH_RES_WAVELENGTHS {
+        expanded.extend(albedo[usize::from(wavelength >= 29)]);
+    }
+    expanded
+}
+
+/// Calculates the BSM wet-soil spectrum used by `albland_HiRes`.
+///
+/// `soil_moisture_percent` and `porosity_percent` are the upstream
+/// `soil_moisture` and `smc` inputs.  The three spectral inputs are each 211
+/// wavelength values.  The result is `(wavelength, direct-or-diffuse)`.
+pub fn bsm_soil_moisture(
+    soil_moisture_percent: f64,
+    porosity_percent: f64,
+    dry_albedo: &[f64],
+    water_absorption: &[f64],
+    water_refractive_index: &[f64],
+) -> Result<Vec<f64>> {
+    ensure!(
+        soil_moisture_percent.is_finite()
+            && porosity_percent.is_finite()
+            && porosity_percent > 0.0
+            && dry_albedo.len() == HIGH_RES_WAVELENGTHS
+            && water_absorption.len() == HIGH_RES_WAVELENGTHS
+            && water_refractive_index.len() == HIGH_RES_WAVELENGTHS
+            && dry_albedo
+                .iter()
+                .chain(water_absorption)
+                .chain(water_refractive_index)
+                .all(|value| value.is_finite()),
+        "invalid BSM soil spectral inputs"
+    );
+
+    let mu = (soil_moisture_percent - 5.0) / porosity_percent;
+    if mu <= 0.0 {
+        return Ok(dry_albedo
+            .iter()
+            .flat_map(|&albedo| [albedo, albedo])
+            .collect());
+    }
+
+    let mut wet_albedo = Vec::with_capacity(HIGH_RES_WAVELENGTHS * RADIATION_TYPES);
+    for wavelength in 0..HIGH_RES_WAVELENGTHS {
+        let dry = dry_albedo[wavelength];
+        let refractive_index = water_refractive_index[wavelength];
+        let tav_water = calculate_tav(90.0, refractive_index);
+        let tav_air = calculate_tav(90.0, 2.0);
+        let tav_inverse_water = calculate_tav(90.0, 2.0 / refractive_index);
+        let tav_40 = calculate_tav(40.0, refractive_index);
+        ensure!(
+            tav_water.is_finite()
+                && tav_air.is_finite()
+                && tav_inverse_water.is_finite()
+                && tav_40.is_finite(),
+            "invalid BSM water refractive index at wavelength {wavelength}"
+        );
+        let rbac = 1.0 - (1.0 - dry) * (dry * tav_inverse_water / tav_air + 1.0 - dry);
+        let p = 1.0 - tav_water / refractive_index.powi(2);
+        let reflected_water = 1.0 - tav_40;
+        let mut wet = dry * (-mu).exp();
+        for layer in 1..=6 {
+            let poisson = (-mu).exp() * mu.powi(layer) / factorial(layer);
+            let transmission = (-2.0 * water_absorption[wavelength] * layer as f64 * 0.015).exp();
+            let denominator = 1.0 - p * transmission * rbac;
+            ensure!(
+                denominator.is_finite() && denominator.abs() > f64::EPSILON,
+                "singular BSM soil spectrum at wavelength {wavelength}"
+            );
+            let wet_layer = (reflected_water
+                + (1.0 - reflected_water) * (1.0 - p) * transmission * rbac)
+                / denominator;
+            wet += wet_layer * poisson;
+        }
+        ensure!(
+            wet.is_finite(),
+            "invalid BSM wet-soil albedo at wavelength {wavelength}"
+        );
+        wet_albedo.extend([wet, wet]);
+    }
+    Ok(wet_albedo)
+}
+
+fn factorial(value: i32) -> f64 {
+    (1..=value).fold(1.0, |product, factor| product * factor as f64)
+}
+
+fn calculate_tav(alpha_degrees: f64, refractive_index: f64) -> f64 {
+    let refractive_index_squared = refractive_index.powi(2);
+    let plus = refractive_index_squared + 1.0;
+    let minus = refractive_index_squared - 1.0;
+    let a = (refractive_index + 1.0).powi(2) / 2.0;
+    let k = -minus.powi(2) / 4.0;
+    let sine = (alpha_degrees.to_radians()).sin();
+    let b1 = if alpha_degrees == 90.0 {
+        0.0
+    } else {
+        ((sine.powi(2) - plus / 2.0).powi(2) + k).sqrt()
+    };
+    let b = b1 - (sine.powi(2) - plus / 2.0);
+    let transmission_s = (k.powi(2) / (6.0 * b.powi(3)) + k / b - b / 2.0)
+        - (k.powi(2) / (6.0 * a.powi(3)) + k / a - a / 2.0);
+    let transmission_p = -2.0 * refractive_index_squared * (b - a) / plus.powi(2)
+        - 2.0 * refractive_index_squared * plus * (b / a).ln() / minus.powi(2)
+        + refractive_index_squared * (1.0 / b - 1.0 / a) / 2.0
+        + 16.0
+            * refractive_index_squared.powi(2)
+            * (refractive_index_squared.powi(2) + 1.0)
+            * ((2.0 * plus * b - minus.powi(2)) / (2.0 * plus * a - minus.powi(2))).ln()
+            / (plus.powi(3) * minus.powi(2))
+        + 16.0
+            * refractive_index_squared.powi(3)
+            * (1.0 / (2.0 * plus * b - minus.powi(2)) - 1.0 / (2.0 * plus * a - minus.powi(2)))
+            / plus.powi(3);
+    (transmission_s + transmission_p) / (2.0 * sine.powi(2))
 }
 
 /// Ports the PFT-vector `twostream_hires_mod` routine.

@@ -2,6 +2,65 @@ use super::*;
 use crate::{cold_start_pft_broadband_radiation_with_snow, LeafOptics, SoilReflectance};
 
 #[test]
+fn broadband_spectra_preserve_the_visible_near_infrared_boundary() {
+    let optics = LeafOptics {
+        chil: 0.01,
+        reflectance: [[0.1, 0.2], [0.3, 0.4]],
+        transmittance: [[0.5, 0.6], [0.7, 0.8]],
+    };
+    let (reflectance, transmittance) = expand_broadband_leaf_optics(optics);
+    let ground = expand_broadband_ground_albedo([[0.11, 0.12], [0.21, 0.22]]);
+
+    assert_eq!(&reflectance[..2], &[0.1, 0.2]);
+    assert_eq!(&transmittance[..2], &[0.5, 0.6]);
+    assert_eq!(&reflectance[28 * 2..30 * 2], &[0.1, 0.2, 0.3, 0.4]);
+    assert_eq!(&transmittance[28 * 2..30 * 2], &[0.5, 0.6, 0.7, 0.8]);
+    assert_eq!(&ground[28 * 2..30 * 2], &[0.11, 0.12, 0.21, 0.22]);
+}
+
+#[test]
+fn dry_bsm_soil_preserves_the_static_spectrum_for_both_radiation_types() {
+    let dry: Vec<f64> = (0..HIGH_RES_WAVELENGTHS)
+        .map(|wavelength| wavelength as f64 / 1_000.0)
+        .collect();
+    let wet = bsm_soil_moisture(
+        5.0,
+        40.0,
+        &dry,
+        &vec![0.2; HIGH_RES_WAVELENGTHS],
+        &vec![1.34; HIGH_RES_WAVELENGTHS],
+    )
+    .unwrap();
+
+    assert_eq!(wet.len(), HIGH_RES_WAVELENGTHS * 2);
+    for wavelength in [0, 29, HIGH_RES_WAVELENGTHS - 1] {
+        assert_eq!(
+            &wet[wavelength * 2..wavelength * 2 + 2],
+            &[dry[wavelength]; 2]
+        );
+    }
+}
+
+#[test]
+fn wet_bsm_soil_produces_a_finite_spectrum_for_both_radiation_types() {
+    let dry = vec![0.2; HIGH_RES_WAVELENGTHS];
+    let wet = bsm_soil_moisture(
+        20.0,
+        40.0,
+        &dry,
+        &vec![0.3; HIGH_RES_WAVELENGTHS],
+        &vec![1.34; HIGH_RES_WAVELENGTHS],
+    )
+    .unwrap();
+
+    assert!(wet.iter().all(|value| value.is_finite()));
+    assert_ne!(wet[0], dry[0]);
+    for wavelength in [0, 29, HIGH_RES_WAVELENGTHS - 1] {
+        assert_eq!(wet[wavelength * 2], wet[wavelength * 2 + 1]);
+    }
+}
+
+#[test]
 fn uniform_spectrum_reduces_to_the_shared_pft_two_stream_solution() {
     let optics = LeafOptics {
         chil: 0.01,
