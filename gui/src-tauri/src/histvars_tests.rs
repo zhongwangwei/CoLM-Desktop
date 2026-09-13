@@ -196,7 +196,13 @@ fn default_configuration_still_matches_the_measured_history_catalog() {
         .iter()
         .filter(|var| var.on && unconditional.contains(var.name.as_str()))
         .count();
+    let runtime_gated_ready: Vec<&str> = vars
+        .iter()
+        .filter(|var| var.on && var.writable == Some(true))
+        .filter(|var| !unconditional.contains(var.name.as_str()))
+        .map(|var| var.name.as_str())
+        .collect();
     assert_eq!(ready_without_runtime_gate, 114);
-    assert_eq!(ready - ready_without_runtime_gate, 5);
-    assert_eq!(ready, 119);
+    assert_eq!(runtime_gated_ready, ["qlayer", "lake_deficit", "vegwp"]);
+    assert_eq!(ready, 117);
 }
