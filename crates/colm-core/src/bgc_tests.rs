@@ -100,6 +100,24 @@ fn cold_bgc_keeps_nonvegetated_patch_state_without_a_synthetic_pft() {
 }
 
 #[test]
+fn cold_bgc_treats_the_first_cft_as_a_crop() {
+    let mut input = sample_input(None);
+    input.pft = BgcPftColdStartInput {
+        class: &[15],
+        fraction: &[1.0],
+        leaf_carbon_to_nitrogen: &[25.0],
+        fine_root_carbon_to_nitrogen: &[40.0],
+        live_wood_carbon_to_nitrogen: &[50.0],
+        dead_wood_carbon_to_nitrogen: &[100.0],
+    };
+    let state = derive_cold_start_bgc_state(input).unwrap();
+
+    assert_eq!(pft_values(&state, "leafc_p"), [0.0]);
+    assert_eq!(pft_values(&state, "leafc_storage_p"), [0.0]);
+    assert_eq!(pft_values(&state, "frootc_p"), [0.0]);
+}
+
+#[test]
 fn merged_cold_bgc_states_use_restart_axis_major_order() {
     let mut first = derive_cold_start_bgc_state(sample_input(None)).unwrap();
     let mut second = derive_cold_start_bgc_state(sample_input(None)).unwrap();

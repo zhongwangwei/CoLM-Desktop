@@ -1111,7 +1111,7 @@ fn is_woody(class: i32) -> bool {
 }
 
 fn is_crop(class: i32) -> bool {
-    class >= 17
+    class >= 15
 }
 
 const CARBON_TOTAL_FIELDS: &[&str] = &[
