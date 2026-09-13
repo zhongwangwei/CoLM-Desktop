@@ -1245,6 +1245,7 @@ fn write_single_point_pft_cold_time_restarts(
                 dead_wood_carbon_to_nitrogen: &dead_wood_carbon_to_nitrogen,
             },
             runtime_cn_state: runtime_cn_state.as_ref(),
+            runtime_vegetation_carbon: None,
             use_nitrification: run.nitrification,
         })?)
     } else {

@@ -829,6 +829,7 @@ fn derive_spatial_bgc_state(
                     dead_wood_carbon_to_nitrogen: &dead_wood_cn,
                 },
                 runtime_cn_state: None,
+                runtime_vegetation_carbon: None,
                 use_nitrification,
             })
         })

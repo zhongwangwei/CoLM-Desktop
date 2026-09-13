@@ -69,6 +69,49 @@ fn cold_bgc_maps_runtime_profiles_in_fortran_pool_order_and_preserves_full_depth
 }
 
 #[test]
+fn cold_bgc_uses_independent_equilibrium_vegetation_for_each_pft() {
+    let source = [
+        BgcVegetationCarbon {
+            leaf_g_m2: 20.0,
+            leaf_storage_g_m2: 30.0,
+            fine_root_g_m2: 40.0,
+            fine_root_storage_g_m2: 50.0,
+            live_stem_g_m2: 60.0,
+            dead_stem_g_m2: 70.0,
+            live_coarse_root_g_m2: 80.0,
+            dead_coarse_root_g_m2: 90.0,
+        },
+        BgcVegetationCarbon {
+            leaf_g_m2: 120.0,
+            leaf_storage_g_m2: 130.0,
+            fine_root_g_m2: 140.0,
+            fine_root_storage_g_m2: 150.0,
+            live_stem_g_m2: 160.0,
+            dead_stem_g_m2: 170.0,
+            live_coarse_root_g_m2: 180.0,
+            dead_coarse_root_g_m2: 190.0,
+        },
+        BgcVegetationCarbon {
+            leaf_g_m2: 220.0,
+            leaf_storage_g_m2: 230.0,
+            fine_root_g_m2: 240.0,
+            fine_root_storage_g_m2: 250.0,
+            live_stem_g_m2: 260.0,
+            dead_stem_g_m2: 270.0,
+            live_coarse_root_g_m2: 280.0,
+            dead_coarse_root_g_m2: 290.0,
+        },
+    ];
+    let mut input = sample_input(None);
+    input.runtime_vegetation_carbon = Some(&source);
+    let state = derive_cold_start_bgc_state(input).unwrap();
+
+    assert_eq!(pft_values(&state, "leafc_p"), [20.0, 120.0, 220.0]);
+    assert_eq!(pft_values(&state, "leafc_storage_p"), [0.0, 130.0, 230.0]);
+    assert_eq!(pft_values(&state, "deadstemc_p"), [70.0, 170.0, 0.0]);
+}
+
+#[test]
 fn cold_bgc_rejects_incomplete_runtime_or_pft_contracts() {
     let mut invalid = sample_input(None);
     invalid.soil_thickness_m = &[1.0; 9];
@@ -242,6 +285,7 @@ fn sample_input(runtime_cn_state: Option<&BgcEquilibriumState>) -> BgcColdStartI
             dead_wood_carbon_to_nitrogen: &[100.0, 110.0, 120.0],
         },
         runtime_cn_state,
+        runtime_vegetation_carbon: None,
         use_nitrification: true,
     }
 }

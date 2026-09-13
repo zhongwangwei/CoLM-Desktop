@@ -148,6 +148,10 @@ pub struct BgcColdStartInput<'a> {
     pub soil_bulk_density_kg_m3: &'a [f64],
     pub pft: BgcPftColdStartInput<'a>,
     pub runtime_cn_state: Option<&'a BgcEquilibriumState>,
+    /// Optional `landpft`-resolved equilibrium vegetation pools.  Spatial
+    /// initialization supplies one source value per PFT; a single-point run
+    /// continues to use `runtime_cn_state.vegetation_carbon`.
+    pub runtime_vegetation_carbon: Option<&'a [BgcVegetationCarbon]>,
     pub use_nitrification: bool,
 }
 
@@ -359,14 +363,16 @@ pub fn derive_cold_start_bgc_state(input: BgcColdStartInput<'_>) -> Result<BgcCo
     validate_input(input)?;
     let pfts = input.pft.class.len();
     let mut pft_values = vec![vec![0.0; pfts]; PFT_BGC_F64_VARIABLES.len()];
-    let source = input.runtime_cn_state.map(|state| &state.vegetation_carbon);
-
     for index in 0..pfts {
         let class = input.pft.class[index];
         let leaf_cn = input.pft.leaf_carbon_to_nitrogen[index];
         let root_cn = input.pft.fine_root_carbon_to_nitrogen[index];
         let live_wood_cn = input.pft.live_wood_carbon_to_nitrogen[index];
         let dead_wood_cn = input.pft.dead_wood_carbon_to_nitrogen[index];
+        let source = input
+            .runtime_vegetation_carbon
+            .map(|source| &source[index])
+            .or_else(|| input.runtime_cn_state.map(|state| &state.vegetation_carbon));
         let (mut leaf, mut leaf_storage, mut fine_root, mut fine_root_storage) =
             initial_leaf_and_root_carbon(class, source);
         let (mut live_stem, mut dead_stem, mut live_root, mut dead_root) =
@@ -903,6 +909,26 @@ fn validate_input(input: BgcColdStartInput<'_>) -> Result<()> {
                 .chain(&state.nitrate_g_m3)
                 .all(|value| value.is_finite()),
             "BGC runtime state contains a non-finite value"
+        );
+    }
+    if let Some(source) = input.runtime_vegetation_carbon {
+        ensure!(
+            source.len() == pfts
+                && source.iter().all(|state| {
+                    [
+                        state.leaf_g_m2,
+                        state.leaf_storage_g_m2,
+                        state.fine_root_g_m2,
+                        state.fine_root_storage_g_m2,
+                        state.live_stem_g_m2,
+                        state.dead_stem_g_m2,
+                        state.live_coarse_root_g_m2,
+                        state.dead_coarse_root_g_m2,
+                    ]
+                    .into_iter()
+                    .all(f64::is_finite)
+                }),
+            "BGC PFT equilibrium vegetation pools must be finite and match the PFT axis"
         );
     }
     Ok(())
