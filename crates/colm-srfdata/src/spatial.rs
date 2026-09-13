@@ -383,9 +383,51 @@ pub fn build_catchment_lct_land_patches_from_raster(
     dominant_type: bool,
     waterbody: i32,
 ) -> Result<(CatchmentSpatialTopology, FlatLandPatches)> {
+    let types =
+        read_catchment_land_types(&catchment, raster.as_ref(), variable, raw_grid, waterbody)?;
+    let (mesh, patches) = catchment.topology.mesh.into_land_patches_by_sets(
+        &types,
+        &catchment.land_hrus,
+        dominant_type,
+    )?;
+    catchment.topology.land_elements = mesh.land_elements();
+    catchment.topology.mesh = mesh;
+    Ok((catchment, patches))
+}
+
+/// Build CATCHMENT IGBP patches for the PFT hierarchy.
+///
+/// The LCT preprocessing remains per-HRU before IGBP soil-ground classes are
+/// merged, so a natural PFT patch can never span two HRUs.
+pub fn build_catchment_pft_land_patches_from_raster(
+    mut catchment: CatchmentSpatialTopology,
+    raster: impl AsRef<Path>,
+    variable: &str,
+    raw_grid: Grid,
+    dominant_type: bool,
+) -> Result<(CatchmentSpatialTopology, FlatLandPatches)> {
+    let mut types = read_catchment_land_types(&catchment, raster.as_ref(), variable, raw_grid, 17)?;
+    merge_igbp_soil_ground(&mut types)?;
+    let (mesh, patches) = catchment.topology.mesh.into_land_patches_by_sets(
+        &types,
+        &catchment.land_hrus,
+        dominant_type,
+    )?;
+    catchment.topology.land_elements = mesh.land_elements();
+    catchment.topology.mesh = mesh;
+    Ok((catchment, patches))
+}
+
+fn read_catchment_land_types(
+    catchment: &CatchmentSpatialTopology,
+    raster: &Path,
+    variable: &str,
+    raw_grid: Grid,
+    waterbody: i32,
+) -> Result<Vec<i32>> {
     ensure!(waterbody > 0, "catchment waterbody class must be positive");
     let mut types = read_mesh_raster_i32(
-        raster.as_ref(),
+        raster,
         variable,
         &catchment.topology.mesh,
         &catchment.topology.pixel,
@@ -415,14 +457,7 @@ pub fn build_catchment_lct_land_patches_from_raster(
             }
         }
     }
-    let (mesh, patches) = catchment.topology.mesh.into_land_patches_by_sets(
-        &types,
-        &catchment.land_hrus,
-        dominant_type,
-    )?;
-    catchment.topology.land_elements = mesh.land_elements();
-    catchment.topology.mesh = mesh;
-    Ok((catchment, patches))
+    Ok(types)
 }
 
 /// Build the IGBP patch partition used by non-solo PFT runs.
@@ -437,7 +472,6 @@ pub fn build_pft_land_patches_from_raster(
     raw_grid: Grid,
     dominant_type: bool,
 ) -> Result<(SpatialTopology, FlatLandPatches)> {
-    const IGBP_PATCH_TYPES: [i32; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
     let mut types = read_mesh_raster_i32(
         raster.as_ref(),
         variable,
@@ -445,7 +479,16 @@ pub fn build_pft_land_patches_from_raster(
         &topology.pixel,
         raw_grid,
     )?;
-    for kind in &mut types {
+    merge_igbp_soil_ground(&mut types)?;
+    let (mesh, patches) = topology.mesh.into_land_patches(&types, dominant_type)?;
+    topology.land_elements = mesh.land_elements();
+    topology.mesh = mesh;
+    Ok((topology, patches))
+}
+
+fn merge_igbp_soil_ground(types: &mut [i32]) -> Result<()> {
+    const IGBP_PATCH_TYPES: [i32; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+    for kind in types {
         let index =
             usize::try_from(*kind).with_context(|| format!("IGBP land type {kind} is negative"))?;
         ensure!(
@@ -456,10 +499,7 @@ pub fn build_pft_land_patches_from_raster(
             *kind = 1;
         }
     }
-    let (mesh, patches) = topology.mesh.into_land_patches(&types, dominant_type)?;
-    topology.land_elements = mesh.land_elements();
-    topology.mesh = mesh;
-    Ok((topology, patches))
+    Ok(())
 }
 
 /// Read raster classes in the exact flattened mesh-pixel order.

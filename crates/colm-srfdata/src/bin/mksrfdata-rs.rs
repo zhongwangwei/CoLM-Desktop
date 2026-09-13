@@ -9,10 +9,10 @@ use colm_srfdata::soil::{
 };
 use colm_srfdata::{
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index,
-    build_catchment_lct_land_patches_from_raster, build_catchment_spatial_topology,
-    build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
-    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
-    crop_pft_pctshared, materialize_single_point_surface,
+    build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
+    build_catchment_spatial_topology, build_crop_land_patches, build_crop_pft_topology,
+    build_lct_land_patches_from_raster, build_pft_land_patches_from_raster, build_pft_topology,
+    build_spatial_topology, crop_pft_pctshared, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
     read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
     read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
@@ -97,14 +97,30 @@ struct SpatialPftArgs {
 
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let args = parse_spatial_pft(args)?;
-    let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
-    let (topology, base_patches) = build_pft_land_patches_from_raster(
-        topology,
-        &args.landtype,
-        "landtype",
-        COLM_500M,
-        args.dominant,
-    )?;
+    let (topology, base_patches, land_hrus) = match args.kind {
+        SpatialInputKind::Catchment => {
+            let catchment = build_catchment_spatial_topology(&args.mesh, MERIT_90M)?;
+            let (catchment, patches) = build_catchment_pft_land_patches_from_raster(
+                catchment,
+                &args.landtype,
+                "landtype",
+                COLM_500M,
+                args.dominant,
+            )?;
+            (catchment.topology, patches, Some(catchment.land_hrus))
+        }
+        SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
+            let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
+            let (topology, patches) = build_pft_land_patches_from_raster(
+                topology,
+                &args.landtype,
+                "landtype",
+                COLM_500M,
+                args.dominant,
+            )?;
+            (topology, patches, None)
+        }
+    };
     let base_layout =
         base_patches.aggregation_layout(&topology.mesh, vec![None; base_patches.len()])?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
@@ -219,6 +235,15 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         Some(&patch_height),
         crop.as_ref().map(|crop| crop.pctshared.as_slice()),
     )?;
+    if let Some(land_hrus) = land_hrus {
+        write_spatial_hru_topology(
+            &args.landdata,
+            args.year,
+            &topology,
+            &land_hrus,
+            &args.blocks,
+        )?;
+    }
     let pft_pctshared = crop
         .as_ref()
         .map(|crop| crop_pft_pctshared(&pfts, &fractions, &crop.pctshared))
@@ -1271,7 +1296,11 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
-            other => bail!("unknown spatial-lct option {other:?}\n{}", usage()),
+            other => bail!(
+                "unknown spatial-lct option {other:?}
+{}",
+                usage()
+            ),
         }
     }
     if plant_tiles.is_some() && usgs_forest_height.is_some() {
@@ -1308,7 +1337,10 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let kind = match args[0].as_str() {
         "latlon" => SpatialInputKind::GridBased,
         "unstructured" => SpatialInputKind::Unstructured,
-        other => bail!("spatial-pft mesh kind must be latlon or unstructured, got {other:?}"),
+        "catchment" => SpatialInputKind::Catchment,
+        other => {
+            bail!("spatial-pft mesh kind must be latlon, unstructured, or catchment, got {other:?}")
+        }
     };
     let year = args[4]
         .parse::<i32>()
@@ -1442,7 +1474,11 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 monthly_vegetation_years.push(year);
                 index += 2;
             }
-            other => bail!("unknown spatial-pft option {other:?}\n{}", usage()),
+            other => bail!(
+                "unknown spatial-pft option {other:?}
+{}",
+                usage()
+            ),
         }
     }
     Ok(SpatialPftArgs {
@@ -1494,7 +1530,11 @@ fn materialize_case(args: &[String]) -> Result<()> {
                 ));
                 index += 2;
             }
-            other => bail!("unknown mksrfdata-rs case option {other:?}\n{}", usage()),
+            other => bail!(
+                "unknown mksrfdata-rs case option {other:?}
+{}",
+                usage()
+            ),
         }
     }
     let (run, report) = materialize_single_point_surface_from_namelist(
@@ -1578,7 +1618,11 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 }
 
 fn usage() -> &'static str {
-    "usage:\n  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]\n  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]\n  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...\n  mksrfdata-rs spatial-pft <latlon|unstructured> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+    "usage:
+  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--observation observation.nc]
+  mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -1785,6 +1829,21 @@ mod tests {
             "2005".into(),
             "--land-cover".into(),
             "igbp".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.kind, SpatialInputKind::Catchment);
+    }
+
+    #[test]
+    fn spatial_pft_parser_accepts_the_catchment_hierarchy() {
+        let parsed = parse_spatial_pft(&[
+            "catchment".into(),
+            "catchment.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Catchment);

@@ -914,3 +914,38 @@ fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
 
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn catchment_pft_partition_keeps_natural_patches_inside_each_hru() {
+    let directory = temporary("catchment-pft");
+    let mesh_file = directory.join("catchment.nc");
+    let landtype = directory.join("landtype.nc");
+    write_catchment_mesh(&mesh_file);
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&landtype).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 4).unwrap();
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[8, 9, 11, 0, 8, 9, 12, 17], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+    let catchment =
+        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    let (_, patches) = build_catchment_pft_land_patches_from_raster(
+        catchment,
+        &landtype,
+        "landtype",
+        Grid { nlon: 4, nlat: 2 },
+        false,
+    )
+    .unwrap();
+    assert_eq!(patches.element_ids, vec![1, 1, 2]);
+    assert_eq!(patches.pixel_start, vec![1, 3, 1]);
+    assert_eq!(patches.pixel_end, vec![2, 4, 3]);
+    assert_eq!(patches.set_type, vec![1, 1, 17]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
