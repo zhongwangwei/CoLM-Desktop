@@ -5,6 +5,7 @@
 pub mod albedo {
     pub use colm_core::albedo::*;
 }
+pub mod bgc_cold_start;
 pub mod bgc_restart;
 pub mod bgc_time_restart;
 pub mod canopy_layer_profile {
@@ -80,6 +81,9 @@ pub mod vegetation {
     pub use colm_core::vegetation::*;
 }
 
+pub use bgc_cold_start::{
+    derive_cold_start_bgc_state, BgcColdStartInput, BgcColdStartState, BgcPftColdStartInput,
+};
 pub use bgc_restart::{write_cold_start_bgc_constant_restart, BgcConstantRestartFiles};
 pub use bgc_time_restart::{
     write_bgc_time_restart, write_bgc_time_restart_block, BgcClimateFields, BgcNitrificationFields,

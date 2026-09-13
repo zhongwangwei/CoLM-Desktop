@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::PFT_BGC_F64_VARIABLES;
+
 use super::*;
 
 #[test]
@@ -198,6 +200,137 @@ fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
             runtime_dir: Some(PathBuf::from("/runtime")),
         })
     );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn bgc_namelist_requires_a_vector_subgrid_and_resolves_its_runtime_source() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-bgc-namelist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let surface = directory.join("output/CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(&surface).unwrap();
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_values(&[10], ..)
+        .unwrap();
+    file.close().unwrap();
+    let cn = directory.join("cnsteadystate.nc");
+    std::fs::write(&cn, []).unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_CN_INIT=.true.\n DEF_file_cn_init='{}'\n DEF_USE_NITRIF=.false.\n /\n",
+            directory.join("output").display(),
+            cn.display(),
+        ),
+    )
+    .unwrap();
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert!(run.bgc);
+    assert_eq!(run.cn_initial_state, Some(cn));
+    assert!(!run.nitrification);
+
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_USE_BGC=.true.\n /\n",
+            directory.join("output").display(),
+        ),
+    )
+    .unwrap();
+    assert!(single_point_cold_start_run_from_namelist(&namelist, None, None).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[ignore = "requires the local BGC kernels and CoLMruntime cnsteadystate.nc reference data"]
+fn native_single_point_bgc_cold_restart_matches_the_upstream_reference() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let runtime = PathBuf::from("/Users/zhongwangwei/Desktop/Data/CoLMruntime");
+    let upstream_surface = root.join("kernels/bgc/mksrfdata.x");
+    let upstream_init = root.join("kernels/bgc/mkinidata.x");
+    assert!(runtime.join("cnsteadystate.nc").is_file());
+    assert!(upstream_surface.is_file());
+    assert!(upstream_init.is_file());
+
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-single-point-bgc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let fortran_output = directory.join("fortran");
+    let template = root.join("oracle/work/generated/case.nml");
+    let original_output = format!("{}/oracle/work/generated/out/", root.display());
+    let original_runtime = format!("{}/oracle/work/generated/runtime_unused/", root.display());
+    let case_text = std::fs::read_to_string(template)
+        .unwrap()
+        .replace(
+            &format!("DEF_dir_output = '{original_output}'"),
+            &format!("DEF_dir_output = '{}/'", fortran_output.display()),
+        )
+        .replace(
+            &format!("DEF_dir_runtime = '{original_runtime}'"),
+            &format!("DEF_dir_runtime = '{}/'", runtime.display()),
+        )
+        .replace(
+            "&nl_colm",
+            &format!(
+                "&nl_colm\nDEF_USE_LCT = .false.\nDEF_USE_PFT = .true.\nDEF_USE_BGC = .true.\nDEF_USE_CN_INIT = .true.\nDEF_file_cn_init = '{}/cnsteadystate.nc'",
+                runtime.display()
+            ),
+        );
+    let fortran_case = directory.join("fortran.nml");
+    std::fs::write(&fortran_case, &case_text).unwrap();
+    for executable in [&upstream_surface, &upstream_init] {
+        let result = std::process::Command::new(executable)
+            .arg(&fortran_case)
+            .current_dir(&directory)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{} failed:\n{}\n{}",
+            executable.display(),
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    let native_output = directory.join("native");
+    let native_surface = native_output.join("CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(native_surface.parent().unwrap()).unwrap();
+    std::fs::copy(
+        fortran_output.join("CN-Cng/landdata/srfdata.nc"),
+        &native_surface,
+    )
+    .unwrap();
+    let native_case = directory.join("native.nml");
+    std::fs::write(
+        &native_case,
+        case_text.replace(
+            &format!("DEF_dir_output = '{}/'", fortran_output.display()),
+            &format!("DEF_dir_output = '{}/'", native_output.display()),
+        ),
+    )
+    .unwrap();
+    let run = single_point_cold_start_run_from_namelist(&native_case, None, None).unwrap();
+    let native_constants = write_single_point_constant_restarts(&run).unwrap();
+    let native_time = write_single_point_cold_time_restarts(&run).unwrap();
+    let expected_root = fortran_output.join("CN-Cng/restart");
+    assert_bgc_restart_equal(
+        &native_time.bgc.unwrap().block,
+        &expected_root.join("2008-001-00000/CN-Cng_restart_bgc_2008-001-00000_lc2005_w180_s90.nc"),
+    );
+    assert_bgc_pft_restart_equal(
+        &native_time.pft.unwrap(),
+        &expected_root.join("2008-001-00000/CN-Cng_restart_pft_2008-001-00000_lc2005_w180_s90.nc"),
+    );
+    assert!(native_constants.bgc.is_some());
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -435,4 +568,56 @@ fn values_i8(file: &netcdf::File, name: &str) -> Vec<i8> {
         .unwrap()
         .get_values::<i8, _>(..)
         .unwrap()
+}
+
+fn assert_bgc_restart_equal(actual_path: &std::path::Path, expected_path: &std::path::Path) {
+    let actual = netcdf::open(actual_path).unwrap();
+    let expected = netcdf::open(expected_path).unwrap();
+    assert_eq!(
+        ordered_dimension_lengths(&actual),
+        ordered_dimension_lengths(&expected)
+    );
+    assert_eq!(
+        ordered_variable_names(&actual),
+        ordered_variable_names(&expected)
+    );
+    for name in ordered_variable_names(&expected) {
+        match name.as_str() {
+            "altmax_lastyear_indx" => {
+                assert_eq!(
+                    values_i32(&actual, &name),
+                    values_i32(&expected, &name),
+                    "{name}"
+                );
+            }
+            "skip_balance_check" => {
+                assert_eq!(
+                    values_i8(&actual, &name),
+                    values_i8(&expected, &name),
+                    "{name}"
+                );
+            }
+            _ => assert_eq!(
+                values_f64(&actual, &name),
+                values_f64(&expected, &name),
+                "{name}"
+            ),
+        }
+    }
+}
+
+fn assert_bgc_pft_restart_equal(actual_path: &std::path::Path, expected_path: &std::path::Path) {
+    let actual = netcdf::open(actual_path).unwrap();
+    let expected = netcdf::open(expected_path).unwrap();
+    for name in PFT_BGC_F64_VARIABLES {
+        assert_eq!(
+            values_f64(&actual, name),
+            values_f64(&expected, name),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        values_i32(&actual, "nyrs_crop_active_p"),
+        values_i32(&expected, "nyrs_crop_active_p")
+    );
 }

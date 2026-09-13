@@ -53,12 +53,19 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     if let Some(path) = files.pft {
         println!("wrote {}", path.display());
     }
+    if let Some(files) = files.bgc {
+        println!("wrote {}", files.constants.display());
+        println!("wrote {}", files.block.display());
+    }
     if let Some(path) = files.urban {
         println!("wrote {}", path.display());
     }
     println!("wrote {}", time.common.block.display());
     if let Some(path) = time.pft {
         println!("wrote {}", path.display());
+    }
+    if let Some(file) = time.bgc {
+        println!("wrote {}", file.block.display());
     }
     if let Some(path) = time.urban {
         println!("wrote {}", path.display());

@@ -14,25 +14,27 @@ use colm_namelist::{parse, Value};
 
 use crate::{
     cold_start_broadband_radiation_with_snow, cold_start_pc_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_igbp_canopy,
-    derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover, derive_snow_cover,
-    derive_soil_parameters, derive_usgs_canopy, initialize_snow_layers, is_leap_year,
-    leaf_optics_from_land_cover, month_lengths, normalize_soil_texture, orbital_calendar_day,
-    orbital_cosine_zenith, read_single_point_monthly_vegetation, read_single_point_pft_data,
-    read_single_point_snow_depth, read_single_point_soil_profile, read_single_point_surface,
-    read_single_point_urban_data, read_single_point_water_table, read_urban_lucy_raw_data,
-    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
-    write_urban_constant_restart, write_urban_time_restart, CalendarTime, ColdSoilState,
-    ColdStartRadiation, ColdStartSoilInput, ConstantRestartFiles, ConstantRestartInput,
-    HydraulicModel, InitialSoilProfile, LandCoverScheme, LeafOptics, OzoneFields, PcPftInput,
-    PftConstantRestartInput, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
-    PftTimeRestartInput, PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields,
-    RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField,
-    SoilHydraulicModel, TimeLakeFields, TimePatchFields, TimeRadiationFields,
-    TimeRestartDimensions, TimeRestartFile, TimeRestartInput, UrbanConfig,
-    UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState, UrbanNamedField,
-    UrbanRadiationInput, UrbanState, UrbanThermalFields, UrbanTimeRestartDimensions,
-    UrbanTimeRestartInput, MISSING,
+    cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_cold_start_bgc_state,
+    derive_igbp_canopy, derive_initial_soil_hydraulics, derive_lake_layers, derive_pft_snow_cover,
+    derive_snow_cover, derive_soil_parameters, derive_usgs_canopy, initialize_snow_layers,
+    is_leap_year, leaf_optics_from_land_cover, month_lengths, normalize_soil_texture,
+    orbital_calendar_day, orbital_cosine_zenith, read_single_point_cn_state,
+    read_single_point_monthly_vegetation, read_single_point_pft_data, read_single_point_snow_depth,
+    read_single_point_soil_profile, read_single_point_surface, read_single_point_urban_data,
+    read_single_point_water_table, read_urban_lucy_raw_data, write_bgc_time_restart,
+    write_cold_start_bgc_constant_restart, write_constant_restart, write_pft_constant_restart,
+    write_pft_time_restart, write_time_restart, write_urban_constant_restart,
+    write_urban_time_restart, BgcColdStartInput, BgcConstantRestartFiles, BgcPftColdStartInput,
+    BgcTimeRestartFile, CalendarTime, ColdSoilState, ColdStartRadiation, ColdStartSoilInput,
+    ConstantRestartFiles, ConstantRestartInput, HydraulicModel, InitialSoilProfile,
+    LandCoverScheme, LeafOptics, OzoneFields, PcPftInput, PftBgcFields, PftConstantRestartInput,
+    PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
+    PlantHydraulicFields, RestartDate, RestartDimensions, RestartPatchFields, RestartTuning,
+    SnowAerosolFields, SnowSoilRestartFields, SoilAlbedo, SoilField, SoilHydraulicModel,
+    TimeLakeFields, TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile,
+    TimeRestartInput, UrbanConfig, UrbanConstantRestartInput, UrbanInput, UrbanLucyInput,
+    UrbanLucyState, UrbanNamedField, UrbanRadiationInput, UrbanState, UrbanThermalFields,
+    UrbanTimeRestartDimensions, UrbanTimeRestartInput, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -95,6 +97,7 @@ pub enum SinglePointSubgrid {
 pub struct SinglePointConstantRestartFiles {
     pub common: ConstantRestartFiles,
     pub pft: Option<PathBuf>,
+    pub bgc: Option<BgcConstantRestartFiles>,
     pub urban: Option<PathBuf>,
 }
 
@@ -103,6 +106,7 @@ pub struct SinglePointConstantRestartFiles {
 pub struct SinglePointTimeRestartFiles {
     pub common: TimeRestartFile,
     pub pft: Option<PathBuf>,
+    pub bgc: Option<BgcTimeRestartFile>,
     pub urban: Option<PathBuf>,
 }
 
@@ -140,6 +144,9 @@ pub struct SinglePointColdStartRun {
     pub dynamic_lake: bool,
     pub plant_hydraulics: bool,
     pub ozone_stress: bool,
+    pub bgc: bool,
+    pub cn_initial_state: Option<PathBuf>,
+    pub nitrification: bool,
     pub soil_initial_state: Option<PathBuf>,
     pub snow_initial_state: Option<PathBuf>,
     pub water_table_initial_state: Option<PathBuf>,
@@ -228,6 +235,11 @@ pub fn single_point_cold_start_run_from_namelist(
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let subgrid = single_point_subgrid(&document)?;
     reject_unsupported_cold_start_features(&document, subgrid)?;
+    let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
+    ensure!(
+        !bgc || matches!(subgrid, SinglePointSubgrid::Pft | SinglePointSubgrid::Pc),
+        "native BGC cold single-point restart requires DEF_USE_PFT or DEF_USE_PC"
+    );
     let year = optional_i32(&document, "DEF_simulation_time%start_year")?.unwrap_or(2000);
     let month = optional_i32(&document, "DEF_simulation_time%start_month")?.unwrap_or(1);
     let day = optional_i32(&document, "DEF_simulation_time%start_day")?.unwrap_or(1);
@@ -263,6 +275,9 @@ pub fn single_point_cold_start_run_from_namelist(
         dynamic_lake: optional_bool_or(&document, "DEF_USE_Dynamic_Lake", false)?,
         plant_hydraulics: optional_bool_or(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
         ozone_stress: optional_bool_or(&document, "DEF_USE_OZONESTRESS", true)?,
+        bgc,
+        cn_initial_state: enabled_existing_path(&document, "DEF_USE_CN_INIT", "DEF_file_cn_init")?,
+        nitrification: optional_bool_or(&document, "DEF_USE_NITRIF", true)?,
         soil_initial_state: enabled_existing_path(
             &document,
             "DEF_USE_SoilInit",
@@ -464,6 +479,7 @@ pub fn write_single_point_constant_restarts(
         return Ok(SinglePointConstantRestartFiles {
             common,
             pft: None,
+            bgc: None,
             urban: Some(urban),
         });
     }
@@ -475,6 +491,7 @@ pub fn write_single_point_constant_restarts(
                 run.static_run.static_config(),
             )?,
             pft: None,
+            bgc: None,
             urban: None,
         });
     }
@@ -513,9 +530,23 @@ pub fn write_single_point_constant_restarts(
             crop_fraction: None,
         },
     )?;
+    let bgc = run
+        .bgc
+        .then(|| {
+            write_cold_start_bgc_constant_restart(
+                &run.static_run.restart_dir,
+                &run.static_run.case_name,
+                run.static_run.land_cover_year,
+                &run.static_run.block_label,
+                1,
+                run.nitrification,
+            )
+        })
+        .transpose()?;
     Ok(SinglePointConstantRestartFiles {
         common,
         pft: Some(pft_file),
+        bgc,
         urban: None,
     })
 }
@@ -794,6 +825,7 @@ pub fn write_single_point_cold_time_restarts(
     Ok(SinglePointTimeRestartFiles {
         common,
         pft: None,
+        bgc: None,
         urban: None,
     })
 }
@@ -1008,6 +1040,7 @@ fn write_single_point_urban_cold_time_restarts(
     Ok(SinglePointTimeRestartFiles {
         common,
         pft: None,
+        bgc: None,
         urban: Some(urban_file),
     })
 }
@@ -1174,6 +1207,44 @@ fn write_single_point_pft_cold_time_restarts(
     )?;
     let lake = derive_lake_layers(&[surface.lake_depth_m], dimensions.lake_layers)?;
     let (node_depth, thickness, interface_mm) = soil_grid(dimensions.soil_layers)?;
+    let bgc_state = if run.bgc {
+        let runtime_cn_state = run
+            .cn_initial_state
+            .as_deref()
+            .map(|path| {
+                read_single_point_cn_state(
+                    path,
+                    surface.latitude_degrees,
+                    surface.longitude_degrees,
+                )
+            })
+            .transpose()?;
+        let campbell = config.hydraulic_model == HydraulicModel::Campbell;
+        let leaf_carbon_to_nitrogen =
+            pft_parameters(&document, "DEF_PFT_LEAFCN", &pft.class, campbell)?;
+        let fine_root_carbon_to_nitrogen =
+            pft_parameters(&document, "DEF_PFT_FROOTCN", &pft.class, campbell)?;
+        let live_wood_carbon_to_nitrogen =
+            pft_parameters(&document, "DEF_PFT_LIVEWDCN", &pft.class, campbell)?;
+        let dead_wood_carbon_to_nitrogen =
+            pft_parameters(&document, "DEF_PFT_DEADWDCN", &pft.class, campbell)?;
+        Some(derive_cold_start_bgc_state(BgcColdStartInput {
+            soil_thickness_m: &thickness,
+            soil_bulk_density_kg_m3: soil.field(SoilField::BulkDensity),
+            pft: BgcPftColdStartInput {
+                class: &pft.class,
+                fraction: &pft.fraction,
+                leaf_carbon_to_nitrogen: &leaf_carbon_to_nitrogen,
+                fine_root_carbon_to_nitrogen: &fine_root_carbon_to_nitrogen,
+                live_wood_carbon_to_nitrogen: &live_wood_carbon_to_nitrogen,
+                dead_wood_carbon_to_nitrogen: &dead_wood_carbon_to_nitrogen,
+            },
+            runtime_cn_state: runtime_cn_state.as_ref(),
+            use_nitrification: run.nitrification,
+        })?)
+    } else {
+        None
+    };
     let interface_m = interface_mm[1..]
         .iter()
         .map(|depth| depth / 1000.0)
@@ -1395,6 +1466,13 @@ fn write_single_point_pft_cold_time_restarts(
         pft_snow.patch.ground_snow_fraction,
         roughness,
     )?;
+    let bgc_pft_values = bgc_state.as_ref().map(|state| {
+        state
+            .pft_values
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>()
+    });
     let pft_time = write_pft_time_restart(
         &run.static_run.restart_dir,
         &run.static_run.case_name,
@@ -1431,7 +1509,13 @@ fn write_single_point_pft_cold_time_restarts(
                 shaded_stomatal_conductance: &vec![10_000.0; pft.class.len()],
                 vegetation_nodes: 4,
             }),
-            bgc: None,
+            bgc: bgc_state
+                .as_ref()
+                .zip(bgc_pft_values.as_deref())
+                .map(|(state, values)| PftBgcFields {
+                    values,
+                    active_crop_years: &state.active_crop_years,
+                }),
             ozone: run.ozone_stress.then_some(PftOzoneFields {
                 lai_old: &total_lai_p,
                 sunlit_uptake: &vec![0.0; pft.class.len()],
@@ -1444,9 +1528,23 @@ fn write_single_point_pft_cold_time_restarts(
             irrigation_method: None,
         },
     )?;
+    let bgc = bgc_state
+        .as_ref()
+        .map(|state| {
+            write_bgc_time_restart(
+                &run.static_run.restart_dir,
+                &run.static_run.case_name,
+                run.static_run.land_cover_year,
+                run.date,
+                &run.static_run.block_label,
+                state.time_restart_input(),
+            )
+        })
+        .transpose()?;
     Ok(SinglePointTimeRestartFiles {
         common,
         pft: Some(pft_time),
+        bgc,
         urban: None,
     })
 }
@@ -1554,6 +1652,18 @@ fn pft_parameter(
         }
         None => Ok(fallback),
     }
+}
+
+fn pft_parameters(
+    document: &colm_namelist::Document,
+    name: &str,
+    classes: &[i32],
+    campbell: bool,
+) -> Result<Vec<f64>> {
+    classes
+        .iter()
+        .map(|&class| pft_parameter(document, name, class, campbell))
+        .collect()
 }
 
 fn weighted_sum(values: &[f64], weights: &[f64]) -> Result<f64> {
@@ -1970,12 +2080,10 @@ fn reject_unsupported_cold_start_features(
     document: &colm_namelist::Document,
     subgrid: SinglePointSubgrid,
 ) -> Result<()> {
-    for field in ["DEF_USE_BGC", "DEF_USE_IRRIGATION"] {
-        ensure!(
-            !optional_bool_or(document, field, false)?,
-            "native cold single-point restart does not yet support {field} = .true."
-        );
-    }
+    ensure!(
+        !optional_bool_or(document, "DEF_USE_IRRIGATION", false)?,
+        "native cold single-point restart does not yet support DEF_USE_IRRIGATION = .true."
+    );
     ensure!(
         !optional_bool_or(document, "DEF_URBAN_RUN", false)? || subgrid == SinglePointSubgrid::Lct,
         "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
