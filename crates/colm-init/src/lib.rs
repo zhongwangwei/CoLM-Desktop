@@ -45,6 +45,7 @@ pub mod phase_change {
     pub use colm_core::phase_change::*;
 }
 pub mod pft_restart;
+pub mod pipeline;
 pub mod radiation {
     pub use colm_core::radiation::*;
 }
@@ -141,6 +142,9 @@ pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
     write_pft_time_restart_block, PftBgcFields, PftConstantRestartInput, PftHyperspectralFields,
     PftOzoneFields, PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput,
+};
+pub use pipeline::{
+    prepare_single_point_case, SinglePointPreprocessFiles, SinglePointPreprocessRun,
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,

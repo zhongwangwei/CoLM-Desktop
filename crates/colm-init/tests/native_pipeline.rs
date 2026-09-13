@@ -1,10 +1,7 @@
 //! Native Rust preprocessing integration test against the checked-in CN-Cng case.
 
-use colm_init::{
-    single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
-    write_single_point_constant_restarts,
-};
-use colm_srfdata::{materialize_single_point_surface_from_namelist, SiteMode};
+use colm_init::prepare_single_point_case;
+use colm_srfdata::SiteMode;
 
 #[test]
 #[ignore = "requires the locally generated CN-Cng source case"]
@@ -33,15 +30,11 @@ fn native_surface_and_cold_start_write_the_common_restart_family() {
     let case = directory.join("case.nml");
     std::fs::write(&case, namelist).unwrap();
 
-    materialize_single_point_surface_from_namelist(&case, Some(SiteMode::Igbp), false, None)
-        .unwrap();
-    let run = single_point_cold_start_run_from_namelist(&case, None, None).unwrap();
-    write_single_point_constant_restarts(&run).unwrap();
-    write_single_point_cold_time_restarts(&run).unwrap();
+    let (_, files) = prepare_single_point_case(&case, Some(SiteMode::Igbp), false, None).unwrap();
 
     let restart = output.join("CN-Cng/restart");
     for path in [
-        output.join("CN-Cng/landdata/srfdata.nc"),
+        files.surface,
         restart.join("const/CN-Cng_restart_const_lc2005.nc"),
         restart.join("const/CN-Cng_restart_const_lc2005_w180_s90.nc"),
         restart.join("2008-001-00000/CN-Cng_restart_2008-001-00000_lc2005_w180_s90.nc"),

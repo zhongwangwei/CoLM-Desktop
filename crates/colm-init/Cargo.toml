@@ -12,10 +12,8 @@ anyhow.workspace = true
 colm-case = { path = "../colm-case" }
 colm-core = { path = "../colm-core" }
 colm-namelist = { path = "../colm-namelist" }
-netcdf = { workspace = true, features = ["static"] }
-
-[dev-dependencies]
 colm-srfdata = { path = "../colm-srfdata" }
+netcdf = { workspace = true, features = ["static"] }
 
 [lints]
 workspace = true
