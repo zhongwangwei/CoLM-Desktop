@@ -3,9 +3,10 @@
 //! `mkinidata-rs case.nml` follows CoLM's case-directory convention.  The explicit
 //! form is retained for a caller that needs a nonstandard surface or restart location.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
+use colm_case::is_spatial_case;
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,
@@ -14,6 +15,7 @@ use colm_init::{
     LandCoverScheme, RestartDate, SinglePointStaticConfig, SpatialLctStaticConfig,
     SpatialLctTimeConfig, SpatialPftStaticConfig, SpatialPftTimeConfig,
 };
+use colm_namelist::{parse, Value};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -47,6 +49,9 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             value => bail!("unknown mkinidata-rs option {value}"),
         }
     }
+    if is_spatial_case(&namelist)? {
+        return run_spatial_namelist(&namelist, land_cover, block.as_deref());
+    }
     let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
     let files = write_single_point_constant_restarts(&run)?;
     let time = write_single_point_cold_time_restarts(&run)?;
@@ -73,6 +78,351 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         println!("wrote {}", path.display());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpatialSubgrid {
+    Lct,
+    PftOrPc,
+}
+
+#[derive(Debug, Clone)]
+struct SpatialNamelistRun {
+    landdata: PathBuf,
+    restart: PathBuf,
+    case_name: String,
+    land_cover_year: i32,
+    date: RestartDate,
+    lai_year: i32,
+    hydraulic_model: HydraulicModel,
+    subgrid: SpatialSubgrid,
+    use_bedrock: bool,
+    greenwich: bool,
+    dynamic_lake: bool,
+    plant_hydraulics: bool,
+    ozone_stress: bool,
+    variably_saturated_flow: bool,
+    vegetation_snow: bool,
+    snow_cover_exponent: f64,
+}
+
+fn run_spatial_namelist(
+    namelist: &Path,
+    land_cover: Option<LandCoverScheme>,
+    block_override: Option<&str>,
+) -> Result<()> {
+    let run = spatial_namelist_run(namelist)?;
+    let blocks = match block_override {
+        Some(block) => {
+            ensure!(!block.is_empty(), "CoLM block label must not be empty");
+            vec![block.to_owned()]
+        }
+        None => discover_blocks(&run.landdata, run.land_cover_year)?,
+    };
+    match run.subgrid {
+        SpatialSubgrid::Lct => {
+            let land_cover = land_cover.context(
+                "spatial LCT case needs --land-cover igbp or usgs because a landpatch block stores only its selected class table",
+            )?;
+            for block in blocks {
+                write_spatial_lct_namelist_block(&run, land_cover, &block)?;
+            }
+        }
+        SpatialSubgrid::PftOrPc => {
+            for block in blocks {
+                write_spatial_pft_namelist_block(namelist, &run, &block)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_spatial_lct_namelist_block(
+    run: &SpatialNamelistRun,
+    land_cover: LandCoverScheme,
+    block: &str,
+) -> Result<()> {
+    let mut static_config = SpatialLctStaticConfig::new(
+        &run.landdata,
+        &run.restart,
+        &run.case_name,
+        run.land_cover_year,
+        block,
+        land_cover,
+        run.hydraulic_model,
+    );
+    static_config.use_bedrock = run.use_bedrock;
+    let files = write_spatial_lct_constant_restart(static_config)?;
+    let mut time = SpatialLctTimeConfig::new(
+        &run.landdata,
+        &run.restart,
+        &run.case_name,
+        run.land_cover_year,
+        block,
+        land_cover,
+        run.hydraulic_model,
+        run.date,
+    );
+    time.lai_year = run.lai_year;
+    time.greenwich = run.greenwich;
+    time.dynamic_lake = run.dynamic_lake;
+    time.plant_hydraulics = run.plant_hydraulics;
+    time.ozone_stress = run.ozone_stress;
+    time.variably_saturated_flow = run.variably_saturated_flow;
+    time.vegetation_snow = run.vegetation_snow;
+    time.snow_cover_exponent = run.snow_cover_exponent;
+    let time = write_spatial_lct_cold_time_restart(time)?;
+    println!("wrote {}", files.constants.display());
+    println!("wrote {}", files.block.display());
+    println!("wrote {}", time.block.display());
+    Ok(())
+}
+
+fn write_spatial_pft_namelist_block(
+    namelist: &Path,
+    run: &SpatialNamelistRun,
+    block: &str,
+) -> Result<()> {
+    let static_config = SpatialPftStaticConfig::new(
+        namelist,
+        &run.landdata,
+        &run.restart,
+        &run.case_name,
+        run.land_cover_year,
+        block,
+    );
+    let files = write_spatial_pft_constant_restarts(static_config, run.use_bedrock, false)?;
+    let mut time = SpatialPftTimeConfig::new(static_config, run.date);
+    time.lai_year = run.lai_year;
+    time.greenwich = run.greenwich;
+    time.dynamic_lake = run.dynamic_lake;
+    time.plant_hydraulics = run.plant_hydraulics;
+    time.ozone_stress = run.ozone_stress;
+    time.variably_saturated_flow = run.variably_saturated_flow;
+    time.vegetation_snow = run.vegetation_snow;
+    time.snow_cover_exponent = run.snow_cover_exponent;
+    let time = write_spatial_pft_cold_time_restarts(time)?;
+    println!("wrote {}", files.common.constants.display());
+    println!("wrote {}", files.common.block.display());
+    println!("wrote {}", files.pft.display());
+    if let Some(files) = files.bgc {
+        println!("wrote {}", files.constants.display());
+        println!("wrote {}", files.block.display());
+    }
+    println!("wrote {}", time.common.block.display());
+    println!("wrote {}", time.pft.display());
+    if let Some(files) = time.bgc {
+        println!("wrote {}", files.block.display());
+    }
+    Ok(())
+}
+
+fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    ensure!(
+        !namelist_bool(&document, "DEF_URBAN_RUN", false)?,
+        "spatial urban cold starts are not migrated; Rust refuses to write a partial urban restart"
+    );
+    for field in [
+        "DEF_USE_SoilInit",
+        "DEF_USE_SnowInit",
+        "DEF_USE_WaterTableInit",
+    ] {
+        ensure!(
+            !namelist_bool(&document, field, false)?,
+            "spatial observed initialization ({field}) is not migrated; Rust refuses to replace it with a cold restart"
+        );
+    }
+    ensure!(
+        namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
+        "spatial cold start requires DEF_LAI_MONTHLY = .true."
+    );
+    let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
+    let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
+    let pc = namelist_bool(&document, "DEF_USE_PC", false)?;
+    ensure!(
+        [lct, pft, pc]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count()
+            == 1,
+        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
+    );
+    let subgrid = if lct {
+        ensure!(
+            !namelist_bool(&document, "DEF_USE_BGC", false)?,
+            "spatial BGC cold starts require DEF_USE_PFT or DEF_USE_PC"
+        );
+        SpatialSubgrid::Lct
+    } else {
+        SpatialSubgrid::PftOrPc
+    };
+    let case_name = required_string(&document, "DEF_CASE_NAME")?;
+    let output = PathBuf::from(required_string(&document, "DEF_dir_output")?);
+    let simulation_year = namelist_i32(&document, "DEF_simulation_time%start_year", 2000)?;
+    let date = restart_date(
+        simulation_year,
+        namelist_i32(&document, "DEF_simulation_time%start_month", 1)?,
+        namelist_i32(&document, "DEF_simulation_time%start_day", 1)?,
+        namelist_i32(&document, "DEF_simulation_time%start_sec", 0)?,
+    )?;
+    let land_cover_year = if namelist_bool(&document, "DEF_USE_LULCC", false)? {
+        simulation_year
+    } else {
+        namelist_i32(&document, "DEF_LC_YEAR", 2005)?
+    };
+    ensure!(land_cover_year >= 0, "DEF_LC_YEAR must be non-negative");
+    let lai_start_year = namelist_i32(&document, "DEF_LAI_START_YEAR", 2000)?;
+    let lai_end_year = namelist_i32(&document, "DEF_LAI_END_YEAR", 2020)?;
+    ensure!(
+        lai_start_year <= lai_end_year,
+        "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
+    );
+    let lai_year = if namelist_bool(&document, "DEF_LAI_CHANGE_YEARLY", true)? {
+        simulation_year.max(lai_start_year).min(lai_end_year)
+    } else {
+        land_cover_year
+    };
+    let hydraulic_model = if namelist_bool(&document, "DEF_USE_Campbell_SOIL_MODEL", false)? {
+        HydraulicModel::Campbell
+    } else {
+        HydraulicModel::VanGenuchten
+    };
+    Ok(SpatialNamelistRun {
+        landdata: output.join(&case_name).join("landdata"),
+        restart: output.join(&case_name).join("restart"),
+        case_name,
+        land_cover_year,
+        date,
+        lai_year,
+        hydraulic_model,
+        subgrid,
+        use_bedrock: namelist_bool(&document, "DEF_USE_BEDROCK", false)?,
+        greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
+        dynamic_lake: namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?,
+        plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
+        ozone_stress: namelist_bool(&document, "DEF_USE_OZONESTRESS", true)?,
+        variably_saturated_flow: namelist_bool(&document, "DEF_USE_VariablySaturatedFlow", true)?,
+        vegetation_snow: namelist_bool(&document, "DEF_VEG_SNOW", true)?,
+        snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
+    })
+}
+
+fn discover_blocks(landdata: &Path, year: i32) -> Result<Vec<String>> {
+    let directory = landdata.join("landpatch").join(format!("{year:04}"));
+    let entries = std::fs::read_dir(&directory).with_context(|| {
+        format!(
+            "cannot read spatial landpatch directory {}",
+            directory.display()
+        )
+    })?;
+    let mut blocks = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot enumerate {}", directory.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("cannot inspect {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|name| anyhow::anyhow!("non-UTF-8 filename in {}", name.to_string_lossy()))?;
+        if let Some(label) = name
+            .strip_prefix("landpatch_")
+            .and_then(|name| name.strip_suffix(".nc"))
+            .filter(|label| !label.is_empty())
+        {
+            blocks.push(label.to_owned());
+        }
+    }
+    blocks.sort();
+    blocks.dedup();
+    ensure!(
+        !blocks.is_empty(),
+        "no landpatch_<block>.nc files exist in {}",
+        directory.display()
+    );
+    Ok(blocks)
+}
+
+fn required_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
+    match document.get(field) {
+        Some(Value::Str(value)) if !value.trim().is_empty() => Ok(value.to_owned()),
+        Some(Value::Str(_)) | None => bail!("case namelist is missing required field {field}"),
+        Some(_) => bail!("{field} must be a character value"),
+    }
+}
+
+fn namelist_bool(document: &colm_namelist::Document, field: &str, default: bool) -> Result<bool> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => bail!("{field} must be a logical value"),
+    }
+}
+
+fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Result<i32> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Int(value)) => i32::try_from(*value)
+            .with_context(|| format!("{field} is outside CoLM's integer range")),
+        Some(_) => bail!("{field} must be an integer value"),
+    }
+}
+
+fn namelist_f64(document: &colm_namelist::Document, field: &str, default: f64) -> Result<f64> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(Value::Real { text }) => {
+            let value: f64 = text
+                .replace(['d', 'D'], "e")
+                .parse()
+                .with_context(|| format!("{field} must be a finite real value"))?;
+            ensure!(value.is_finite(), "{field} must be a finite real value");
+            Ok(value)
+        }
+        Some(Value::Int(value)) => Ok(*value as f64),
+        Some(_) => bail!("{field} must be a real value"),
+    }
+}
+
+fn restart_date(year: i32, month: i32, day: i32, seconds: i32) -> Result<RestartDate> {
+    ensure!((1..=12).contains(&month), "start month must be in 1..=12");
+    ensure!(
+        (0..=86_400).contains(&seconds),
+        "DEF_simulation_time%start_sec must be in 0..=86400"
+    );
+    let lengths = colm_init::month_lengths(year);
+    let days = lengths[(month - 1) as usize];
+    ensure!(
+        (1..=days).contains(&day),
+        "start day is outside its calendar month"
+    );
+    let mut date = RestartDate {
+        year,
+        julian_day: (lengths[..(month - 1) as usize].iter().sum::<i32>() + day) as u16,
+        seconds: seconds as u32,
+    };
+    if date.seconds == 86_400 {
+        date.seconds = 0;
+        date.julian_day += 1;
+        let maximum = if colm_init::is_leap_year(date.year) {
+            366
+        } else {
+            365
+        };
+        if i32::from(date.julian_day) > maximum {
+            date.year += 1;
+            date.julian_day = 1;
+        }
+    }
+    Ok(date)
 }
 
 fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {
@@ -301,7 +651,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label]\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -360,6 +710,127 @@ mod tests {
         );
         assert!(parse_restart_date("2005-001").is_err());
         assert!(parse_restart_date("2005-001-00000-extra").is_err());
+    }
+
+    #[test]
+    fn spatial_case_namelist_derives_all_cold_start_controls() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-spatial-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_file_mesh='mesh.nc'
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.true.
+ DEF_USE_LULCC=.true.
+ DEF_LC_YEAR=2005
+ DEF_simulation_time%start_year=2008
+ DEF_simulation_time%start_month=2
+ DEF_simulation_time%start_day=29
+ DEF_simulation_time%start_sec=0
+ DEF_LAI_START_YEAR=2000
+ DEF_LAI_END_YEAR=2007
+ DEF_USE_Campbell_SOIL_MODEL=.true.
+ DEF_USE_BEDROCK=.true.
+ DEF_simulation_time%greenwich=.false.
+ DEF_USE_Dynamic_Lake=.true.
+ DEF_USE_PLANTHYDRAULICS=.false.
+ DEF_USE_OZONESTRESS=.false.
+ DEF_USE_VariablySaturatedFlow=.false.
+ DEF_VEG_SNOW=.false.
+ DEF_TUNING_SNOW_COVER_EXPONENT=.75
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let run = spatial_namelist_run(&namelist).unwrap();
+
+        assert_eq!(run.landdata, root.join("case/landdata"));
+        assert_eq!(run.restart, root.join("case/restart"));
+        assert_eq!(run.land_cover_year, 2008);
+        assert_eq!(run.lai_year, 2007);
+        assert_eq!(
+            run.date,
+            RestartDate {
+                year: 2008,
+                julian_day: 60,
+                seconds: 0,
+            }
+        );
+        assert_eq!(run.hydraulic_model, HydraulicModel::Campbell);
+        assert_eq!(run.subgrid, SpatialSubgrid::PftOrPc);
+        assert!(run.use_bedrock);
+        assert!(!run.greenwich);
+        assert!(run.dynamic_lake);
+        assert!(!run.plant_hydraulics);
+        assert!(!run.ozone_stress);
+        assert!(!run.variably_saturated_flow);
+        assert!(!run.vegetation_snow);
+        assert_eq!(run.snow_cover_exponent, 0.75);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_namelist_routes_before_single_point_surface_lookup() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-spatial-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_file_mesh='mesh.nc'
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.true.
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let error = run_namelist(namelist, std::iter::empty::<String>()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot read spatial landpatch directory"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_discovers_only_landpatch_block_files() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-spatial-blocks-{}", std::process::id()));
+        let directory = root.join("landpatch/2005");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in [
+            "landpatch_w180_s90.nc",
+            "landpatch_e000_s90.nc",
+            "landelm_w180_s90.nc",
+            "landpatch_w180_s90.txt",
+        ] {
+            std::fs::write(directory.join(file), "").unwrap();
+        }
+
+        assert_eq!(
+            discover_blocks(&root, 2005).unwrap(),
+            ["e000_s90", "w180_s90"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
