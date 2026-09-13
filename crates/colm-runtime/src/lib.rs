@@ -232,6 +232,51 @@ impl PointRuntime {
         })
     }
 
+    /// Runs a persistent Rust state through the shared downscaled POINT loop.
+    ///
+    /// State, forcing and clock are committed as one transaction.  A failed
+    /// driver/history callback leaves all three at the same retryable step.
+    pub fn run_downscaled_with_state<S, F>(
+        &mut self,
+        template: PointDownscalingTemplate<'_>,
+        state: &mut S,
+        mut on_step: F,
+    ) -> Result<usize>
+    where
+        S: Clone,
+        F: FnMut(DownscaledPointRuntimeStep, &mut S) -> Result<()>,
+    {
+        self.run_downscaled(template, |step| {
+            let mut next = state.clone();
+            on_step(step, &mut next)?;
+            *state = next;
+            Ok(())
+        })
+    }
+
+    /// Runs the existing regular-soil LCT chain after shared terrain downscaling.
+    ///
+    /// This retains [`Self::run_standard_lct`]'s intentionally limited
+    /// no-snow LCT contract.  Its only new responsibility is selecting the
+    /// column forcing before the same `standard_lct_soil_step` call.
+    pub fn run_downscaled_standard_lct<F>(
+        &mut self,
+        downscaling: PointDownscalingTemplate<'_>,
+        input_template: StandardLctSoilInput<'_>,
+        state: &mut StandardLctSoilState,
+        mut on_step: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(DownscaledPointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
+    {
+        self.run_downscaled_with_state(downscaling, state, |step, next| {
+            let mut input = input_template;
+            input.energy.forcing = step.forcing;
+            let output = standard_lct_soil_step(input, next)?;
+            on_step(step, &output)
+        })
+    }
+
     fn prepared_next_step(&self) -> Result<Option<(RuntimeClock, PointRuntimeStep)>> {
         let mut next_clock = self.clock.clone();
         let Some(clock) = next_clock.next_step() else {
@@ -619,6 +664,50 @@ mod tests {
         assert!(steps[0].forcing.air_temperature_k.is_finite());
         assert!(steps[0].forcing.bottom_pressure_pa < steps[0].grid_forcing.bottom_pressure_pa);
         assert!(steps[0].forcing.air_temperature_k < steps[0].grid_forcing.air_temperature_k);
+        assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    #[test]
+    fn downscaled_state_and_clock_rollback_together() {
+        let root = directory("downscaled-transaction");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case(&case, &forcing, &source_dir, "POINT");
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let slope = [0.0; colm_core::ASPECT_TYPES];
+        let area = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let template = PointDownscalingTemplate {
+            grid_surface_elevation_m: 500.0,
+            grid_maximum_elevation_m: 2_500.0,
+            reference_height_m: 30.0,
+            column_surface_elevation_m: 800.0,
+            glacier: false,
+            terrain: DownscalingTerrain::Simple(colm_core::SimpleTerrain {
+                slope_tangent: &slope,
+                area_fraction: &area,
+            }),
+            config: ForcingDownscalingConfig::default(),
+        };
+        let mut state = 0_u8;
+        assert!(runtime
+            .run_downscaled_with_state(template, &mut state, |_, next| {
+                *next += 1;
+                bail!("history write failed")
+            })
+            .is_err());
+        assert_eq!(state, 0);
+        assert_eq!(
+            runtime
+                .run_downscaled_with_state(template, &mut state, |_, next| {
+                    *next += 1;
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(state, 1);
         assert!(runtime.next_step().unwrap().is_none());
     }
 }
