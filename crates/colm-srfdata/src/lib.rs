@@ -17,6 +17,7 @@ pub mod mesh;
 mod minpack;
 pub mod pft;
 pub mod raster;
+pub mod region;
 pub mod shapefile;
 pub mod site;
 pub mod soil;
@@ -39,6 +40,7 @@ pub use pft::{
     build_crop_pft_topology, build_pft_topology, crop_pft_pctshared, CropLandPatchTopology,
     PftFractionInput, PftIndexInput, PftIndexState, PftPatchKind, PftTopology, IGBP_CROPLAND,
 };
+pub use region::{clip_existing_surface, SpatialBounds};
 pub use site::{
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
     single_point_surface_run_from_namelist, SinglePointSurfaceRun, SiteMode,

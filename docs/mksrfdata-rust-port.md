@@ -40,6 +40,13 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    ownership, artifact checking, GUI/CLI default
    selection, and the guarded default switch still wait for all parity gates.
 
+`USE_srfdata_from_larger_region=.true.` now follows the upstream existing-surface
+path in Rust: it reads `DEF_dir_existing_srfdata`, retains whole overlapping mesh
+elements within `DEF_domain%edges/edgen/edgew/edgee`, and clips every dependent
+element, patch, HRU, PFT, and urban vector.  `USE_srfdata_from_3D_gridded_data`
+remains explicitly refused because the corresponding upstream branch is still a
+`TODO` that exits without producing landdata.
+
 ## Performance constraints
 
 - Keep raw raster reads block-aligned; never materialize a global 500 m field.

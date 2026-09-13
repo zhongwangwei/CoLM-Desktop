@@ -16,7 +16,7 @@ use colm_srfdata::{
     build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology,
     build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
     build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
-    crop_pft_pctshared, materialize_single_point_surface,
+    clip_existing_surface, crop_pft_pctshared, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
     read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
     read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
@@ -27,8 +27,8 @@ use colm_srfdata::{
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
     write_spatial_urban_vector, BlockLayout, FlatLandPatches, LczUrbanRawFields,
     NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode,
-    SpatialInputKind, SpatialTopology, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
-    MERIT_90M,
+    SpatialBounds, SpatialInputKind, SpatialTopology, UrbanMaterialParameters, COLM_1KM,
+    COLM_500M, COLM_5KM, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -1981,6 +1981,18 @@ fn materialize_case(args: &[String]) -> Result<()> {
             ),
         }
     }
+    if let Some(command) = spatial_existing_surface_command(
+        &namelist,
+        lct_mode,
+        crop,
+        observation.as_deref(),
+        spatial_blocks.as_ref(),
+    )? {
+        let destination = command.destination.clone();
+        clip_existing_surface(command.source, command.destination, command.bounds)?;
+        println!("clipped existing surface data to {}", destination.display());
+        return Ok(());
+    }
     if let Some(command) = spatial_case_command(
         &namelist,
         lct_mode,
@@ -2014,6 +2026,56 @@ struct SpatialCaseCommand {
     required_files: Vec<PathBuf>,
     required_directories: Vec<PathBuf>,
     pft_or_pc: bool,
+}
+
+struct SpatialExistingSurfaceCommand {
+    source: PathBuf,
+    destination: PathBuf,
+    bounds: SpatialBounds,
+}
+
+fn spatial_existing_surface_command(
+    namelist: &Path,
+    lct_mode: Option<SiteMode>,
+    crop_override: bool,
+    observation: Option<&Path>,
+    blocks: Option<&[String; 2]>,
+) -> Result<Option<SpatialExistingSurfaceCommand>> {
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    if spatial_mesh(&document)?.is_none() {
+        return Ok(None);
+    }
+    if case_bool(&document, "USE_srfdata_from_3D_gridded_data", false)? {
+        bail!(
+            "USE_srfdata_from_3D_gridded_data is unavailable: the upstream MKSRFDATA.F90 branch is TODO and exits without creating landdata"
+        );
+    }
+    if !case_bool(&document, "USE_srfdata_from_larger_region", false)? {
+        return Ok(None);
+    }
+    ensure!(
+        lct_mode.is_none() && !crop_override && blocks.is_none(),
+        "existing spatial surface data already fixes its land cover, crop topology, and block layout; omit --land-cover, --crop, and --blocks"
+    );
+    ensure!(
+        observation.is_none(),
+        "--observation is single-point input; spatial existing-surface reuse is configured by USE_srfdata_from_larger_region and DEF_dir_existing_srfdata"
+    );
+    let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
+    let case_name = case_string(&document, "DEF_CASE_NAME")?;
+    Ok(Some(SpatialExistingSurfaceCommand {
+        source: PathBuf::from(case_string(&document, "DEF_dir_existing_srfdata")?),
+        destination: output.join(case_name).join("landdata"),
+        bounds: SpatialBounds {
+            south: case_f64(&document, "DEF_domain%edges")?,
+            north: case_f64(&document, "DEF_domain%edgen")?,
+            west: case_f64(&document, "DEF_domain%edgew")?,
+            east: case_f64(&document, "DEF_domain%edgee")?,
+        },
+    }))
 }
 
 impl SpatialCaseCommand {
@@ -2364,6 +2426,22 @@ fn case_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Re
         Some(Value::Int(value)) => i32::try_from(*value)
             .with_context(|| format!("{field} is outside CoLM's integer range")),
         Some(_) => bail!("{field} must be an integer value"),
+    }
+}
+
+fn case_f64(document: &colm_namelist::Document, field: &str) -> Result<f64> {
+    match document.get(field) {
+        Some(Value::Int(value)) => Ok(*value as f64),
+        Some(Value::Real { text }) => text
+            .replace(['d', 'D'], "e")
+            .parse::<f64>()
+            .with_context(|| format!("{field} must be a finite real value"))
+            .and_then(|value| {
+                ensure!(value.is_finite(), "{field} must be a finite real value");
+                Ok(value)
+            }),
+        Some(_) => bail!("{field} must be a real value"),
+        None => bail!("case namelist is missing required field {field}"),
     }
 }
 
@@ -2754,6 +2832,41 @@ mod tests {
         assert!(command
             .required_directories
             .contains(&root.join("raw/soil")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_existing_surface_case_uses_native_bounds_without_rawdata() {
+        let (root, namelist) = case_namelist(
+            "existing-surface",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_existing_srfdata='$ROOT/larger-landdata'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ USE_srfdata_from_larger_region=.true.
+ DEF_domain%edges=-5.
+ DEF_domain%edgen=5.
+ DEF_domain%edgew=170.d0
+ DEF_domain%edgee=-170.d0
+/
+",
+        );
+
+        let command = spatial_existing_surface_command(&namelist, None, false, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.source, root.join("larger-landdata"));
+        assert_eq!(command.destination, root.join("out/case/landdata"));
+        assert_eq!(
+            command.bounds,
+            SpatialBounds {
+                south: -5.0,
+                north: 5.0,
+                west: 170.0,
+                east: -170.0,
+            }
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
