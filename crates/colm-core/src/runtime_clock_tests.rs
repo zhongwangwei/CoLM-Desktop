@@ -85,6 +85,33 @@ fn clock_matches_fortran_nint_and_rejects_an_invalid_window() {
         1,
     )
     .is_err());
+    assert!(RuntimeClock::new(
+        time(2008, 1, 0),
+        time(2008, 1, 3_600),
+        time(2008, 1, 0),
+        0.5,
+        1,
+    )
+    .is_err());
+}
+
+#[test]
+fn clock_uses_fortran_int_for_loop_progress_and_nint_for_driver_time() {
+    let steps: Vec<_> = std::iter::from_fn({
+        let mut clock =
+            RuntimeClock::new(time(2008, 1, 0), time(2008, 1, 3), time(2008, 1, 0), 1.5, 1)
+                .unwrap();
+        move || clock.next_step()
+    })
+    .collect();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| (step.forcing_time.seconds, step.end_time.seconds))
+            .collect::<Vec<_>>(),
+        vec![(0, 2), (2, 4), (4, 6)]
+    );
 }
 
 #[test]

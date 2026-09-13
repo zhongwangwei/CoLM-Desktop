@@ -51,7 +51,9 @@ pub struct RuntimeClock {
     end: CalendarTime,
     spinup_until: CalendarTime,
     current: CalendarTime,
+    elapsed: CalendarTime,
     step_seconds: u32,
+    elapsed_step_seconds: u32,
     spinup_repeats: usize,
     spinup_cycle: usize,
     is_spinup: bool,
@@ -93,18 +95,21 @@ impl RuntimeClock {
         let spinup_until = end_style(spinup_until)?;
         ensure!(before(start, end), "simulation end must follow its start");
         ensure!(
-            timestep_seconds.is_finite() && timestep_seconds > 0.0 && timestep_seconds <= 3_600.0,
-            "CoLM timestep must be finite and in 0..=3600 seconds"
+            timestep_seconds.is_finite() && (1.0..=3_600.0).contains(&timestep_seconds),
+            "CoLM timestep must be finite and in 1..=3600 seconds"
         );
         let step_seconds = timestep_seconds.round() as u32;
-        ensure!(step_seconds > 0, "CoLM timestep rounds to zero seconds");
+        let elapsed_step_seconds = timestep_seconds as u32;
         let spinup_repeats = spinup_repeats.max(1);
         Ok(Self {
             start,
             end,
             spinup_until,
             current: start,
+            elapsed: start,
             step_seconds,
+            // CoLM.F90 uses `NINT` for TICKTIME but `INT` for itstamp.
+            elapsed_step_seconds,
             spinup_repeats,
             spinup_cycle: 1,
             is_spinup: before(start, spinup_until),
@@ -117,7 +122,7 @@ impl RuntimeClock {
 
     /// Returns the next forcing/driver boundary, exactly once per model step.
     pub fn next_step(&mut self) -> Option<RuntimeStep> {
-        if !before(self.current, self.end) {
+        if !before(self.elapsed, self.end) {
             return None;
         }
         let forcing_time = begin_style(self.current);
@@ -134,11 +139,13 @@ impl RuntimeClock {
             update_sst: false,
         };
         self.current = step.end_time;
+        self.elapsed = tick(self.elapsed, self.elapsed_step_seconds);
         self.update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_schedule);
-        if self.is_spinup && !before(self.current, self.spinup_until) {
+        if self.is_spinup && !before(self.elapsed, self.spinup_until) {
             if self.spinup_cycle < self.spinup_repeats {
                 self.spinup_cycle += 1;
                 self.current = self.start;
+                self.elapsed = self.start;
             } else {
                 self.is_spinup = false;
             }
