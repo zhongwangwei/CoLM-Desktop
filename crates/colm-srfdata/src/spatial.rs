@@ -1871,6 +1871,32 @@ pub fn write_spatial_pft_topology_with_shared(
     )
 }
 
+/// Write the urban refinement pixelset alongside its already-refined
+/// `landpatch` topology.
+pub fn write_spatial_urban_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_urban: &FlatLandPatches,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    validate_patches(&topology.mesh, land_urban)?;
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    write_pixelset(
+        landdata.as_ref(),
+        "landurban",
+        &format!("{land_cover_year:04}"),
+        &land_urban.element_ids,
+        &land_urban.pixel_start,
+        &land_urban.pixel_end,
+        &land_urban.set_type,
+        None,
+        blocks,
+        &assignments,
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LongitudeCell {
     start: usize,
