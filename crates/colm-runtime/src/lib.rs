@@ -146,7 +146,7 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
             "DEF_simulation_time%spinup_repeat",
         )?)
         .context("DEF_simulation_time%spinup_repeat must be nonnegative")?,
-        lai_update_schedule: if required_bool(&case, "DEF_LAI_MONTHLY")? {
+        lai_update_schedule: if optional_bool_or(&case, "DEF_LAI_MONTHLY", true)? {
             LaiUpdateSchedule::Monthly
         } else {
             LaiUpdateSchedule::EightDay
@@ -223,6 +223,14 @@ fn required_bool(document: &Document, field: &str) -> Result<bool> {
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => bail!("{field} must be a logical value"),
         None => bail!("namelist is missing required field {field}"),
+    }
+}
+
+fn optional_bool_or(document: &Document, field: &str, default: bool) -> Result<bool> {
+    match document.get(field) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => bail!("{field} must be a logical value"),
+        None => Ok(default),
     }
 }
 
@@ -334,6 +342,22 @@ mod tests {
         assert_eq!(
             read_point_runtime_config(&case).unwrap().restart_frequency,
             RestartFrequency::Monthly
+        );
+    }
+
+    #[test]
+    fn config_uses_colms_monthly_lai_default_when_the_field_is_absent() {
+        let root = directory("lai-default");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        write_case(&case, &forcing, "/data/", "POINT");
+        let contents = std::fs::read_to_string(&case).unwrap();
+        std::fs::write(&case, contents.replace(" DEF_LAI_MONTHLY=.true.\n", "")).unwrap();
+        assert_eq!(
+            read_point_runtime_config(&case)
+                .unwrap()
+                .lai_update_schedule,
+            LaiUpdateSchedule::Monthly
         );
     }
 
