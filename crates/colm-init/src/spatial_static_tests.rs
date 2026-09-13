@@ -138,6 +138,58 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
 }
 
 #[test]
+fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
+    let root = temp_dir("pft-time");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_Campbell_SOIL_MODEL = .false.\n/\n",
+    )
+    .unwrap();
+
+    let mut config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.plant_hydraulics = false;
+    let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+
+    let common = netcdf::open(files.common.block).unwrap();
+    assert_eq!(values_f64(&common, "tlai").unwrap(), [2.5]);
+    assert_eq!(values_f64(&common, "z0m").unwrap(), [2.0]);
+    let pft = netcdf::open(files.pft).unwrap();
+    assert_eq!(values_f64(&pft, "tlai_p").unwrap(), [2.5]);
+    assert_eq!(values_f64(&pft, "tsai_p").unwrap(), [0.4]);
+    assert_eq!(values_f64(&pft, "z0m_p").unwrap(), [2.0]);
+    assert!(pft.variable("vegwp_p").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
     let root = temp_dir("time");
     let landdata = root.join("landdata");
@@ -186,6 +238,45 @@ fn write_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f64, s
             .unwrap();
         file.close().unwrap();
     }
+}
+
+fn write_pft_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f64, sai: f64) {
+    for (stem, variable, value) in [
+        ("LAI_pfts01", "LAI_pfts", lai),
+        ("SAI_pfts01", "SAI_pfts", sai),
+    ] {
+        let path = block_path(landdata, "LAI", stem, year, block);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = netcdf::create(path).unwrap();
+        file.add_dimension("pft", 1).unwrap();
+        file.add_variable::<f64>(variable, &["pft"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+}
+
+fn write_pft_topology(landdata: &Path, year: i32, block: &str, class: i32) {
+    let path = block_path(landdata, "landpft", "landpft", year, block);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("pft", 1).unwrap();
+    for (name, values) in [
+        ("settyp", &[class][..]),
+        ("ipxstt", &[1_i32][..]),
+        ("ipxend", &[2_i32][..]),
+    ] {
+        file.add_variable::<i32>(name, &["pft"])
+            .unwrap()
+            .put_values(values, ..)
+            .unwrap();
+    }
+    file.add_variable::<i64>("eindex", &["pft"])
+        .unwrap()
+        .put_values(&[7_i64], ..)
+        .unwrap();
+    file.close().unwrap();
 }
 
 fn write_landdata(landdata: &Path, year: i32, block: &str) {

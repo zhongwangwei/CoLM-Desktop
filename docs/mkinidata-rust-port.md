@@ -34,10 +34,13 @@ enabled downscaling branch meet all of these conditions:
    `mksrfdata` vector files and the restart writer, including exact dimensions, field names,
    fill values and MPI ownership.  Reader/writer buffers must not alter numerical kernels.
 4. **Driver and cutover** — `mkinidata-rs case.nml` resolves the single-point restart
-   families.  `mkinidata-rs spatial-lct ... --cold-time YYYY-JJJ-SSSSS` now writes a
-   block-bounded, no-observation LCT time restart from the same monthly LAI/SAI landdata
-   vectors.  PFT/PC, urban, crop, BGC, observed spatial state, and distributed case discovery
-   still require their parity gates before GUI/CLI can select Rust as the default.
+   families.  `mkinidata-rs spatial-lct ... --cold-time YYYY-JJJ-SSSSS` writes a
+   block-bounded, no-observation LCT time restart.  `mkinidata-rs spatial-pft <case.nml> ...
+   --cold-time YYYY-JJJ-SSSSS` now writes both the common and PFT blocks from the same monthly
+   patch/PFT LAI/SAI vectors, reusing the shared LCT cold-soil state and replacing natural-patch
+   optics with PFT-weighted values.  PC, spatial BGC/CROP, urban, observed spatial state, and
+   distributed case discovery still require their parity gates before GUI/CLI can select Rust as
+   the default.
 
 ## Performance constraints
 

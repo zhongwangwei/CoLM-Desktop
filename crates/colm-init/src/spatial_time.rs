@@ -472,7 +472,7 @@ fn read_monthly(config: SpatialLctTimeConfig<'_>, variable: &str, month: u8) -> 
     )
 }
 
-fn month(date: RestartDate) -> Result<u8> {
+pub(crate) fn month(date: RestartDate) -> Result<u8> {
     crate::month_lengths(date.year)
         .into_iter()
         .scan(i32::from(date.julian_day), |day, length| {

@@ -1702,7 +1702,7 @@ pub(crate) fn pft_canopy(
     Ok(PftCanopy { top_m, bottom_m })
 }
 
-fn pft_leaf_optics(
+pub(crate) fn pft_leaf_optics(
     document: &colm_namelist::Document,
     class: i32,
     hydraulic_model: HydraulicModel,
@@ -1829,7 +1829,7 @@ fn pc_uses_three_dimensional_canopy(class: i32, pc_crop_split: bool) -> bool {
     class > 0 && (!pc_crop_split || class < 15)
 }
 
-fn aggregate_pft_radiation(
+pub(crate) fn aggregate_pft_radiation(
     states: &[ColdStartRadiation],
     fraction: &[f64],
     leaf_stem_area: f64,

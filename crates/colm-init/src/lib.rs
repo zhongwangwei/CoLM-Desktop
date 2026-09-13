@@ -172,8 +172,9 @@ pub use single_point::{
     SinglePointSubgrid, SinglePointTimeRestartFiles, SinglePointUrbanConfig,
 };
 pub use spatial_pft::{
-    write_spatial_pft_constant_restart, write_spatial_pft_constant_restarts,
-    SpatialPftConstantRestartFiles, SpatialPftStaticConfig,
+    write_spatial_pft_cold_time_restarts, write_spatial_pft_constant_restart,
+    write_spatial_pft_constant_restarts, SpatialPftConstantRestartFiles, SpatialPftStaticConfig,
+    SpatialPftTimeConfig, SpatialPftTimeRestartFiles,
 };
 pub use spatial_static::{write_spatial_lct_constant_restart, SpatialLctStaticConfig};
 pub use spatial_time::{write_spatial_lct_cold_time_restart, SpatialLctTimeConfig};
