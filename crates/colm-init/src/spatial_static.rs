@@ -289,14 +289,14 @@ fn read_hyperspectral_albedo(
     Ok(values)
 }
 
-struct Patches {
-    class: Vec<i32>,
-    element: Vec<i64>,
-    start: Vec<i32>,
-    end: Vec<i32>,
+pub(crate) struct Patches {
+    pub(crate) class: Vec<i32>,
+    pub(crate) element: Vec<i64>,
+    pub(crate) start: Vec<i32>,
+    pub(crate) end: Vec<i32>,
 }
 
-fn read_patches(landdata: &Path, year: i32, block: &str) -> Result<Patches> {
+pub(crate) fn read_patches(landdata: &Path, year: i32, block: &str) -> Result<Patches> {
     let path = block_path(landdata, "landpatch", "landpatch", year, block);
     let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
     let class = values_i32(&file, "settyp")?;
@@ -318,7 +318,7 @@ fn read_patches(landdata: &Path, year: i32, block: &str) -> Result<Patches> {
     })
 }
 
-fn read_canopy(
+pub(crate) fn read_canopy(
     config: SpatialLctStaticConfig<'_>,
     class: &[i32],
     kind: &[i32],
@@ -345,7 +345,7 @@ fn read_canopy(
     }
 }
 
-fn read_soil(
+pub(crate) fn read_soil(
     landdata: &Path,
     year: i32,
     block: &str,
@@ -425,7 +425,7 @@ fn read_soil(
         .collect())
 }
 
-fn spatial_patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {
+pub(crate) fn spatial_patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {
     if class == 0 {
         Ok(0)
     } else {
@@ -454,7 +454,7 @@ fn read_i32(
     Ok(values)
 }
 
-fn read_f64(
+pub(crate) fn read_f64(
     landdata: &Path,
     directory: &str,
     stem: &str,
@@ -488,7 +488,7 @@ pub(crate) fn block_path(
         .join(format!("{stem}_{block}.nc"))
 }
 
-fn patch_coordinates(
+pub(crate) fn patch_coordinates(
     landdata: &Path,
     year: i32,
     block: &str,

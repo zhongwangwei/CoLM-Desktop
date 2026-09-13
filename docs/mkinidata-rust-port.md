@@ -33,10 +33,11 @@ enabled downscaling branch meet all of these conditions:
 3. **Landdata and restart adapters** — implement block-aware NetCDF readers for the
    `mksrfdata` vector files and the restart writer, including exact dimensions, field names,
    fill values and MPI ownership.  Reader/writer buffers must not alter numerical kernels.
-4. **Driver and cutover** — `mkinidata-rs case.nml` now resolves the common static
-   single-point IGBP/USGS restart paths directly from CoLM's namelist convention.  It is
-   intentionally not a cutover yet: time-varying state, spatial vectors, and feature restart
-   families still require their parity gates before GUI/CLI can select it as the default.
+4. **Driver and cutover** — `mkinidata-rs case.nml` resolves the single-point restart
+   families.  `mkinidata-rs spatial-lct ... --cold-time YYYY-JJJ-SSSSS` now writes a
+   block-bounded, no-observation LCT time restart from the same monthly LAI/SAI landdata
+   vectors.  PFT/PC, urban, crop, BGC, observed spatial state, and distributed case discovery
+   still require their parity gates before GUI/CLI can select Rust as the default.
 
 ## Performance constraints
 

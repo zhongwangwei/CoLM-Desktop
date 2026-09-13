@@ -137,6 +137,57 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
+    let root = temp_dir("time");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    let mut config = crate::SpatialLctTimeConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    config.dynamic_lake = true;
+    config.plant_hydraulics = false;
+    let output = crate::write_spatial_lct_cold_time_restart(config).unwrap();
+    let file = netcdf::open(output.block).unwrap();
+    assert_eq!(values_f64(&file, "tlai").unwrap(), [2.5]);
+    assert_eq!(values_f64(&file, "tsai").unwrap(), [0.4]);
+    assert_eq!(values_f64(&file, "t_grnd").unwrap(), [283.0]);
+    assert_eq!(values_f64(&file, "t_lake").unwrap(), vec![285.0; 10]);
+    assert_eq!(values_f64(&file, "dz_lake").unwrap().len(), 10);
+    assert!(file.variable("vegwp").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn write_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f64, sai: f64) {
+    for (stem, variable, value) in [
+        ("LAI_patches01", "LAI_patches", lai),
+        ("SAI_patches01", "SAI_patches", sai),
+    ] {
+        let path = block_path(landdata, "LAI", stem, year, block);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = netcdf::create(path).unwrap();
+        file.add_dimension("patch", 1).unwrap();
+        file.add_variable::<f64>(variable, &["patch"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+}
+
 fn write_landdata(landdata: &Path, year: i32, block: &str) {
     std::fs::create_dir_all(landdata).unwrap();
     let mut pixel = netcdf::create(landdata.join("pixel.nc")).unwrap();
