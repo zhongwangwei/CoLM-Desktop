@@ -80,6 +80,26 @@ fn cold_bgc_rejects_incomplete_runtime_or_pft_contracts() {
 }
 
 #[test]
+fn cold_bgc_keeps_nonvegetated_patch_state_without_a_synthetic_pft() {
+    let mut input = sample_input(None);
+    input.pft = BgcPftColdStartInput {
+        class: &[],
+        fraction: &[],
+        leaf_carbon_to_nitrogen: &[],
+        fine_root_carbon_to_nitrogen: &[],
+        live_wood_carbon_to_nitrogen: &[],
+        dead_wood_carbon_to_nitrogen: &[],
+    };
+    let state = derive_cold_start_bgc_state(input).unwrap();
+
+    assert!(state.pft_values.iter().all(Vec::is_empty));
+    assert!(state.active_crop_years.is_empty());
+    assert_eq!(state.totals.vegetation_carbon, [0.0]);
+    assert_eq!(state.totals.vegetation_nitrogen, [0.0]);
+    assert_eq!(state.pools.mineral_nitrogen, [10.0; BGC_SOIL_LAYERS]);
+}
+
+#[test]
 fn merged_cold_bgc_states_use_restart_axis_major_order() {
     let mut first = derive_cold_start_bgc_state(sample_input(None)).unwrap();
     let mut second = derive_cold_start_bgc_state(sample_input(None)).unwrap();

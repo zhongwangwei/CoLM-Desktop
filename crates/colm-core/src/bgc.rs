@@ -268,7 +268,10 @@ pub struct BgcStateSummary {
     pub nitrogen_truncation_soil: f64,
 }
 
-/// Reproduces CoLM's `CNDriverSummarizeStates` for one vegetated patch.
+/// Reproduces CoLM's `CNDriverSummarizeStates` for one patch.
+///
+/// A non-vegetated patch has an empty PFT axis and therefore zero vegetation
+/// and vegetation-truncation totals, while retaining its soil BGC state.
 pub fn summarize_bgc_state(input: BgcStateSummaryInput<'_>) -> Result<BgcStateSummary> {
     validate_summary_input(input)?;
     let carbon_pool_totals = integrated_pool_totals(input.carbon_g_m3, input.soil_thickness_m);
@@ -825,7 +828,6 @@ fn validate_input(input: BgcColdStartInput<'_>) -> Result<()> {
     validate_soil("soil thickness", input.soil_thickness_m)?;
     validate_soil("soil bulk density", input.soil_bulk_density_kg_m3)?;
     let pfts = input.pft.class.len();
-    ensure!(pfts > 0, "BGC cold start needs at least one PFT");
     ensure!(
         input.pft.class.iter().all(|class| *class >= 0),
         "BGC PFT class must be nonnegative"
@@ -924,7 +926,6 @@ fn validate_summary_input(input: BgcStateSummaryInput<'_>) -> Result<()> {
         );
     }
     let pfts = input.pft_fraction.len();
-    ensure!(pfts > 0, "BGC state summary needs at least one PFT");
     ensure!(
         input
             .pft_fraction
