@@ -33,8 +33,10 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    grid, unstructured, and catchment cases; maps their standard rawdata paths into the
    existing Rust LCT/PFT/PC block materializers; accepts an explicit block layout; and
    validates every required source before it can create a partial landdata tree. The
-   namelist-driven LCT branch supports both IGBP and USGS monthly LAI/SAI; it still rejects
-   LULCC transfer-trace cases rather than emitting incomplete output. MPI I/O
+   namelist-driven LCT branch supports both IGBP and USGS monthly LAI/SAI. IGBP LULCC
+   cases also write the class-major previous-year transfer vectors required by the runtime;
+   pre-2000 non-five-year source requests remain refused because upstream emits only monthly
+   LAI for that special path. MPI I/O
    ownership, artifact checking, GUI/CLI default
    selection, and the guarded default switch still wait for all parity gates.
 

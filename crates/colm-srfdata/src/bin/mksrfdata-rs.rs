@@ -16,19 +16,20 @@ use colm_srfdata::{
     build_spatial_topology, crop_pft_pctshared, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
     read_mesh_coordinate_raster_pft_f64, read_mesh_raster_f64, read_mesh_raster_i32,
-    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_f64,
-    write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
-    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
-    write_spatial_topology, write_spatial_topology_with_shared, BlockLayout, FlatLandPatches,
-    PftFractionInput, PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM,
-    COLM_500M, MERIT_90M,
+    read_mesh_raster_layers_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
+    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
+    read_mesh_tiled_raster_time_f64, write_landpatch_layered_vector, write_landpatch_scalar,
+    write_landpatch_vector, write_spatial_hru_topology, write_spatial_pft_topology,
+    write_spatial_pft_topology_with_shared, write_spatial_topology,
+    write_spatial_topology_with_shared, BlockLayout, FlatLandPatches, PftFractionInput,
+    PftIndexInput, SiteMode, SpatialInputKind, SpatialTopology, COLM_1KM, COLM_500M, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
 const MODIS_PFT_CLASSES: usize = 16;
 const NATURAL_PFT_CLASSES: usize = 15;
 const CFT_CLASSES: usize = 64;
+const IGBP_LULCC_CLASSES: usize = 17;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,6 +66,7 @@ struct SpatialLctArgs {
     plant_tiles: Option<PathBuf>,
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
+    lulcc: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
 }
 
@@ -227,6 +229,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         plant_tiles: Some(args.plant_tiles.clone()),
         usgs_forest_height: None,
         monthly_vegetation_years: Vec::new(),
+        lulcc: false,
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
     };
     materialize_spatial_common_fields(
@@ -410,6 +413,20 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     let args = parse_spatial_lct(args)?;
+    ensure!(
+        !args.lulcc || args.land_cover == SiteMode::Igbp,
+        "spatial LULCC transfer traces require IGBP land cover"
+    );
+    ensure!(
+        !args.lulcc || args.year >= 2000 || args.year % 5 == 0,
+        "historical LULCC years before 2000 must be five-year snapshots; the upstream non-snapshot path only writes monthly LAI"
+    );
+    ensure!(
+        !args.lulcc
+            || lulcc_previous_land_cover_year(args.year).is_none()
+            || args.plant_tiles.is_some(),
+        "LULCC transfer traces require --plant-tiles before landdata is written"
+    );
     let lct_grid = match args.land_cover {
         SiteMode::Igbp => COLM_500M,
         SiteMode::Usgs => COLM_1KM,
@@ -448,6 +465,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         }
     };
     materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
+    materialize_lulcc_transfer_traces(&args, &topology, &patches)?;
     if let Some(land_hrus) = land_hrus {
         write_spatial_hru_topology(
             &args.landdata,
@@ -464,6 +482,59 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         args.landdata.display()
     );
     Ok(())
+}
+
+fn materialize_lulcc_transfer_traces(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+) -> Result<()> {
+    if !args.lulcc {
+        return Ok(());
+    }
+    let Some(previous_year) = lulcc_previous_land_cover_year(args.year) else {
+        return Ok(());
+    };
+    let tiles = args
+        .plant_tiles
+        .as_deref()
+        .context("LULCC transfer traces require --plant-tiles")?;
+    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let previous_class = read_mesh_tiled_raster_i32(
+        tiles,
+        &format!("MOD{previous_year:04}"),
+        "LC",
+        &topology.mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    let fractions =
+        layout.aggregate_lulcc_source_fractions(&previous_class, &area, IGBP_LULCC_CLASSES)?;
+    for source_class in 0..=IGBP_LULCC_CLASSES {
+        write_landpatch_vector(
+            &args.landdata,
+            args.year,
+            topology,
+            patches,
+            &args.blocks,
+            "lulcc",
+            &format!("lccpct_patches_lc{source_class:02}"),
+            "lccpct_patches",
+            &fractions[source_class * patches.len()..(source_class + 1) * patches.len()],
+        )?;
+    }
+    Ok(())
+}
+
+fn lulcc_previous_land_cover_year(year: i32) -> Option<i32> {
+    if year < 1990 || (year < 2000 && year % 5 != 0) {
+        None
+    } else if year <= 2000 {
+        Some((year - 5).max(1985))
+    } else {
+        Some((year - 1).max(1985))
+    }
 }
 
 fn materialize_spatial_common_fields(
@@ -1171,6 +1242,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut usgs_forest_height = None;
     let mut soil_hyper_albedo_dir = None;
     let mut monthly_vegetation_years = Vec::new();
+    let mut lulcc = false;
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
@@ -1267,6 +1339,10 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--lulcc" => {
+                lulcc = true;
+                index += 1;
+            }
             "--monthly-vegetation-year" => {
                 let year = args
                     .get(index + 1)
@@ -1320,6 +1396,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         plant_tiles,
         usgs_forest_height,
         monthly_vegetation_years,
+        lulcc,
         soil_hyper_albedo_dir,
     })
 }
@@ -1640,19 +1717,26 @@ fn spatial_case_command(
         !crop || pft || pc,
         "CROP surface data requires DEF_USE_PFT or DEF_USE_PC"
     );
+    let lulcc = case_bool(&document, "DEF_USE_LULCC", false)?;
     ensure!(
-        !case_bool(&document, "DEF_USE_LULCC", false)?,
-        "spatial LULCC surface transfer traces are not migrated; Rust refuses to write only the initial land-cover year"
+        !lulcc || lct,
+        "spatial LULCC transfer traces require DEF_USE_LCT"
     );
 
     let rawdata = PathBuf::from(case_string(&document, "DEF_dir_rawdata")?);
     let case_name = case_string(&document, "DEF_CASE_NAME")?;
     let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
-    let mut year = case_i32(&document, "DEF_LC_YEAR", 2005)?;
-    ensure!(year >= 0, "DEF_LC_YEAR must be non-negative");
-    if case_bool(&document, "DEF_USE_LULCC", false)? && year < 2000 {
-        year = (year / 5 * 5).max(1985);
-    }
+    let requested_year = case_i32(&document, "DEF_LC_YEAR", 2005)?;
+    ensure!(requested_year >= 0, "DEF_LC_YEAR must be non-negative");
+    ensure!(
+        !lulcc || requested_year >= 2000 || requested_year % 5 == 0,
+        "historical LULCC years before 2000 must be five-year snapshots; the upstream non-snapshot path only writes monthly LAI"
+    );
+    let year = if lulcc && requested_year < 2000 {
+        (requested_year / 5 * 5).max(1985)
+    } else {
+        requested_year
+    };
     let soil_model = if case_bool(&document, "DEF_USE_Campbell_SOIL_MODEL", false)? {
         "campbell"
     } else {
@@ -1692,6 +1776,10 @@ fn spatial_case_command(
         let land_cover = lct_mode.context(
             "spatial LCT case needs --land-cover igbp or usgs because case.nml does not record the build-time classification table",
         )?;
+        ensure!(
+            !lulcc || land_cover == SiteMode::Igbp,
+            "spatial LULCC transfer traces require --land-cover igbp"
+        );
         required_directories.push(plant_tiles.clone());
         let landtype = match land_cover {
             SiteMode::Igbp => rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc")),
@@ -1737,6 +1825,9 @@ fn spatial_case_command(
                 "--usgs-forest-height".to_owned(),
                 forest_height.display().to_string(),
             ]);
+        }
+        if lulcc {
+            args.push("--lulcc".to_owned());
         }
         for lai_year in case_lai_years(&document, year)? {
             args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
@@ -1956,7 +2047,7 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--monthly-vegetation-year year]...
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]...
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
@@ -1996,6 +2087,7 @@ mod tests {
             "bedrock.nc".into(),
             "--plant-tiles".into(),
             "plant_15s".into(),
+            "--lulcc".into(),
             "--monthly-vegetation-year".into(),
             "1999".into(),
             "--monthly-vegetation-year".into(),
@@ -2023,6 +2115,7 @@ mod tests {
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
         assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
+        assert!(parsed.lulcc);
         assert_eq!(parsed.usgs_forest_height, None);
         assert_eq!(
             parsed.soil_hyper_albedo_dir,
@@ -2336,7 +2429,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_lulcc_case_is_refused_before_source_preflight() {
+    fn spatial_lulcc_case_derives_transfer_trace_inputs() {
         let (root, namelist) = case_namelist(
             "lulcc",
             "&nl_colm
@@ -2352,12 +2445,34 @@ mod tests {
 ",
         );
 
-        let error = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
-            .err()
+        let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+            .unwrap()
             .unwrap();
 
-        assert!(error.to_string().contains("LULCC"));
+        assert!(!command.pft_or_pc);
+        assert!(command.args.iter().any(|argument| argument == "--lulcc"));
+        assert_eq!(
+            option_value(&command.args, "--plant-tiles").map(str::to_owned),
+            Some(format!("{}/raw/plant_15s", root.display()))
+        );
+        assert_eq!(
+            command.args[2],
+            format!(
+                "{}/raw/landtypes/landtype-igbp-modis-2005.nc",
+                root.display()
+            )
+        );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lulcc_transfer_uses_the_upstream_previous_land_cover_year() {
+        assert_eq!(lulcc_previous_land_cover_year(1985), None);
+        assert_eq!(lulcc_previous_land_cover_year(1990), Some(1985));
+        assert_eq!(lulcc_previous_land_cover_year(1995), Some(1990));
+        assert_eq!(lulcc_previous_land_cover_year(2000), Some(1995));
+        assert_eq!(lulcc_previous_land_cover_year(2001), Some(2000));
+        assert_eq!(lulcc_previous_land_cover_year(1999), None);
     }
 
     #[test]

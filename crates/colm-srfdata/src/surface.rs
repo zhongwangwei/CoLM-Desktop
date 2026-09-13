@@ -303,6 +303,62 @@ impl FlatPatches {
         Ok(result)
     }
 
+    /// Aggregate previous land-cover classes for CoLM LULCC transfer traces.
+    ///
+    /// Output is class-major: class * patches + patch. WMO consumer patches
+    /// remain zero, matching the upstream routine's explicit skip.
+    pub fn aggregate_lulcc_source_fractions(
+        &self,
+        previous_class: &[i32],
+        landarea: &[f64],
+        max_class: usize,
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            previous_class.len() == landarea.len(),
+            "LULCC previous class and landarea must have the same raw cell count"
+        );
+        let classes = max_class
+            .checked_add(1)
+            .context("LULCC class count overflow")?;
+        let mut result = vec![0.0; classes * self.len()];
+        for patch in 0..self.len() {
+            if self.wmo_source[patch].is_some() {
+                continue;
+            }
+            let cells = &self.cells[self.cells_for(patch)];
+            let mut total = 0.0;
+            for &cell in cells {
+                let class = previous_class.get(cell).copied().with_context(|| {
+                    format!(
+                        "LULCC patch {patch} references raw cell {cell}, but previous classes have {} cells",
+                        previous_class.len()
+                    )
+                })?;
+                let class = usize::try_from(class)
+                    .with_context(|| format!("LULCC patch {patch} has a negative source class"))?;
+                ensure!(
+                    class <= max_class,
+                    "LULCC patch {patch} has source class {class} outside 0..={max_class}"
+                );
+                let area = value(landarea, cell, "landarea", patch)?;
+                ensure!(
+                    area.is_finite() && area >= 0.0,
+                    "LULCC patch {patch} has a non-finite or negative land area"
+                );
+                total += area;
+                result[class * self.len() + patch] += area;
+            }
+            ensure!(
+                total > 0.0 && total.is_finite(),
+                "LULCC patch {patch} has zero or non-finite land area"
+            );
+            for class in 0..classes {
+                result[class * self.len() + patch] /= total;
+            }
+        }
+        Ok(result)
+    }
+
     /// Area-weighted patch LAI or SAI from `Aggregation_LAI`'s LCT path.
     ///
     /// This deliberately does not share WMO values: the corresponding

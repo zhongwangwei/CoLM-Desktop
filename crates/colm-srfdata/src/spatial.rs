@@ -656,6 +656,18 @@ pub fn read_mesh_tiled_raster_f64(
     read_mesh_tiled_raster(directory, suffix, variable, mesh, pixel, raw_grid)
 }
 
+/// Read an integer CoLM 5°×5° tile variable in flattened mesh-pixel order.
+pub fn read_mesh_tiled_raster_i32(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<i32>> {
+    read_mesh_tiled_raster(directory, suffix, variable, mesh, pixel, raw_grid)
+}
+
 /// Read one one-based time slice of a CoLM 5°×5° tile variable.
 ///
 /// `read_5x5_data_time` reads the native `(lon, lat, time)` variable order;

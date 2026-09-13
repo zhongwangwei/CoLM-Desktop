@@ -57,6 +57,23 @@ fn lake_soil_carbon_masks_missing_values_and_keeps_non_lake_patches_zero() {
 }
 
 #[test]
+fn lulcc_source_fractions_are_area_weighted_and_keep_wmo_consumers_zero() {
+    let layout = FlatPatches::new(
+        vec![1, 1],
+        vec![0, 3, 4],
+        vec![0, 1, 2, 3],
+        vec![None, Some(0)],
+    )
+    .unwrap();
+    assert_eq!(
+        layout
+            .aggregate_lulcc_source_fractions(&[0, 1, 2, 1], &[1.0, 3.0, 2.0, 4.0], 2)
+            .unwrap(),
+        [1.0 / 6.0, 0.0, 3.0 / 6.0, 0.0, 2.0 / 6.0, 0.0]
+    );
+}
+
+#[test]
 fn lct_lai_and_sai_are_area_weighted_without_wmo_sharing() {
     let layout = FlatPatches::new(
         vec![1, 1],

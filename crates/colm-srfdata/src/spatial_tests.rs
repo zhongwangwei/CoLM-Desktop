@@ -135,6 +135,10 @@ fn write_five_degree_tile(path: &std::path::Path) {
         .unwrap()
         .put_values(&[42.0, 84.0], (.., ..))
         .unwrap();
+    file.add_variable::<i32>("LC", &["lon", "lat"])
+        .unwrap()
+        .put_values(&[7, 9], (.., ..))
+        .unwrap();
     file.add_variable::<f64>("MONTHLY_LC_LAI", &["lon", "lat", "time"])
         .unwrap()
         .put_values(&[1.0, 10.0, 2.0, 20.0], (.., .., ..))
@@ -311,6 +315,21 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
         )
         .unwrap(),
         vec![42.0, 84.0]
+    );
+    assert_eq!(
+        read_mesh_tiled_raster_i32(
+            &tile_dir,
+            "MOD2005",
+            "LC",
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36
+            },
+        )
+        .unwrap(),
+        vec![7, 9]
     );
     assert_eq!(
         read_mesh_tiled_raster_time_f64(

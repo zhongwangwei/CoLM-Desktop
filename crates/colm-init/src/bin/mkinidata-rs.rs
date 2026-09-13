@@ -243,10 +243,6 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         namelist_bool(&document, "DEF_LAI_MONTHLY", true)?,
         "spatial cold start requires DEF_LAI_MONTHLY = .true."
     );
-    ensure!(
-        !namelist_bool(&document, "DEF_USE_LULCC", false)?,
-        "spatial LULCC restart transfer traces are not migrated; Rust refuses to write only the initial land-cover year"
-    );
     let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
     let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
     let pc = namelist_bool(&document, "DEF_USE_PC", false)?;
@@ -817,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_lulcc_case_is_refused_before_block_discovery() {
+    fn spatial_lulcc_case_reaches_block_discovery() {
         let root =
             std::env::temp_dir().join(format!("colm-init-spatial-lulcc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -843,7 +839,9 @@ mod tests {
 
         let error = run_spatial_namelist(&namelist, Some(LandCoverScheme::Igbp), None).unwrap_err();
 
-        assert!(error.to_string().contains("LULCC"));
+        assert!(error
+            .to_string()
+            .contains("cannot read spatial landpatch directory"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
