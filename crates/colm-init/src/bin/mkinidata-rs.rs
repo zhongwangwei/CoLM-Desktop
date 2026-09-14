@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
-use colm_case::is_spatial_case;
+use colm_case::{is_default, is_spatial_case};
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_catch_lateral_cold_restart,
     write_gridriver_cold_restart, write_single_point_cold_time_restarts,
@@ -580,6 +580,14 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
     } else {
         HydraulicModel::VanGenuchten
     };
+    let requested_dynamic_lake = namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?;
+    let variably_saturated_flow = namelist_bool(&document, "DEF_USE_VariablySaturatedFlow", true)?;
+    let dynamic_lake = if namelist_path_is_set(&document, "DEF_CatchmentMesh_data")? {
+        true
+    } else {
+        requested_dynamic_lake && variably_saturated_flow
+    };
+
     Ok(SpatialNamelistRun {
         landdata: output.join(&case_name).join("landdata"),
         restart: output.join(&case_name).join("restart"),
@@ -596,10 +604,10 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         use_simple_terrain,
         use_regular_terrain,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
-        dynamic_lake: namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?,
+        dynamic_lake,
         plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
         ozone_stress: namelist_bool(&document, "DEF_USE_OZONESTRESS", false)?,
-        variably_saturated_flow: namelist_bool(&document, "DEF_USE_VariablySaturatedFlow", true)?,
+        variably_saturated_flow,
         vegetation_snow: namelist_bool(&document, "DEF_VEG_SNOW", true)?,
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         observations: SpatialObservedInitializationPaths::from_document(&document)?,
@@ -645,6 +653,19 @@ fn discover_blocks(landdata: &Path, year: i32) -> Result<Vec<String>> {
         directory.display()
     );
     Ok(blocks)
+}
+
+fn namelist_path_is_set(document: &colm_namelist::Document, field: &str) -> Result<bool> {
+    match document.get(field) {
+        None => Ok(false),
+        Some(Value::Str(value)) => {
+            let value = value.trim();
+            Ok(!value.is_empty()
+                && !value.eq_ignore_ascii_case("null")
+                && is_default(field, &Value::Str(value.into())) != Some(true))
+        }
+        Some(_) => bail!("{field} must be a character value"),
+    }
 }
 
 fn required_string(document: &colm_namelist::Document, field: &str) -> Result<String> {
@@ -1112,7 +1133,7 @@ mod tests {
         assert!(run.use_topmodel);
         assert!(run.use_simple_terrain);
         assert!(!run.greenwich);
-        assert!(run.dynamic_lake);
+        assert!(!run.dynamic_lake); // Non-Catchment requires variably saturated flow.
         assert!(!run.plant_hydraulics);
         assert!(!run.ozone_stress);
         assert!(!run.variably_saturated_flow);
@@ -1123,6 +1144,85 @@ mod tests {
         assert_eq!(run.observations.soil, Some(soil));
         assert_eq!(run.observations.snow, Some(snow));
         assert_eq!(run.observations.water_table, Some(water_table));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catchment_namelist_forces_dynamic_lake_even_when_disabled() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-catch-dynamic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='catch'\n DEF_dir_output='{}'\n DEF_CatchmentMesh_data='catchment.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_Dynamic_Lake=.false.\n DEF_USE_VariablySaturatedFlow=.false.\n/\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let run = spatial_namelist_run(&namelist).unwrap();
+
+        assert!(run.dynamic_lake);
+        assert!(!run.variably_saturated_flow);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catchment_namelist_rejects_malformed_dynamic_lake_flag() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-init-catch-dynamic-bad-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='catch'
+ DEF_dir_output='{}'
+ DEF_CatchmentMesh_data='catchment.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_USE_Dynamic_Lake='bad'
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let error = spatial_namelist_run(&namelist).unwrap_err();
+
+        assert!(error.to_string().contains("DEF_USE_Dynamic_Lake"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn noncatchment_namelist_disables_dynamic_lake_without_vsf() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-noncatch-dynamic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='mesh'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_Dynamic_Lake=.true.\n DEF_USE_VariablySaturatedFlow=.false.\n/\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let run = spatial_namelist_run(&namelist).unwrap();
+
+        assert!(!run.dynamic_lake);
+        assert!(!run.variably_saturated_flow);
         std::fs::remove_dir_all(root).unwrap();
     }
 

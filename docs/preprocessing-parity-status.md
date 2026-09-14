@@ -985,3 +985,42 @@ the post-two-step gate remains open: 23 fields / 138 values differ above the
 threshold. Maximum `gs0sun` error decreases from 3.655042 to 0.171400; small
 remaining cold-radiation differences still require investigation. Evidence and
 red/green regressions are in `/tmp/colm-pixelset-fma-audit/`.
+
+## Catchment full-material initialization and dynamic-lake configuration
+
+The original `MOD_Namelist` forces dynamic lake on for Catchment builds; outside
+Catchment it disables dynamic lake when variably saturated flow is disabled.
+The Rust spatial namelist now applies the same effective settings, rather than
+using the requested dynamic-lake flag unconditionally. An explicitly configured,
+non-default Catchment mesh identifies this mode. Malformed boolean/path values
+remain errors, even when the effective setting would override the requested one.
+The shared setting reaches LCT, PFT/PC and urban restart writers; it is not a
+special-case file-existence workaround for `dz_lake`.
+
+A separate original-source Catchment run uses a synthetic 3-by-3 int32 mesh with
+real 2005 material data, IGBP/LCT and van Genuchten hydraulics. Original surface
+and initialization both finish successfully. The frozen Rust surface and latest
+initializer now pass **all 254 output files / 411 variable instances**, including
+the previously missing dynamic-lake `dz_lake` time-restart field. The comparison
+checks the complete file inventory, schemas and values at the unchanged `1e-12`
+gate, ignoring only `create_time`. This fixture disables LULCC, diagnostics,
+urban, crop, BGC, tracer, WMO, SNICAR, observed initialization and lateral flow;
+it uses runoff scheme 3. It does not prove those branches or a runtime trajectory.
+
+Evidence: `/tmp/colm-catchment-2005-full-original/` and
+`/tmp/colm-catchment-2005-full-rust-frozen-surface-latest-mkini-guard-1789394313/`.
+The latter reuses the previously successful frozen Rust landdata without
+regenerating it. Attempts to regenerate surface with both fresh and frozen
+binaries subsequently crashed in HDF5 (`H5G_root_loc`, `EXC_BAD_ACCESS`); the first
+failure and debugger trace are retained in
+`/tmp/colm-catchment-2005-full-rust-dzlake-fix-1789393825/`. This is not a fresh
+all-stage success claim or a fix for the separate HDF5 failure.
+
+The integrated tree passes 658 core/preprocessing/data/reference/native tests,
+all-target Clippy, downstream CLI/kernel checks and scoped formatting. The
+existing non-Catchment control test now expects the original VSF-dependent
+coercion; the added checks cover Catchment forcing, malformed input and actual
+NetCDF writer presence/absence of `dz_lake`. Logs are in
+`/tmp/colm-catchment-dynamic-lake-validation/`. Its `frozen-main-run/` repeats
+the 254-file / 411-variable pass with the freshly built main-workspace release,
+again using the preserved frozen Rust surface.

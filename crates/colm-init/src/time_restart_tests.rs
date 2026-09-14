@@ -92,6 +92,28 @@ fn time_restart_matches_fortran_filename_dimensions_and_axis_order() {
 }
 
 #[test]
+fn time_restart_dynamic_lake_schema_follows_layer_thickness_input() {
+    let root = temp_dir("dynamic-lake-schema");
+    let with_path = root.join("with.nc");
+    write_time_restart_block(&with_path, input()).unwrap();
+    let file = netcdf::open(&with_path).unwrap();
+    let dz_lake = file.variable("dz_lake").unwrap();
+    assert_eq!(dimension_names(&dz_lake), ["patch", "lake"]);
+    assert_eq!(file.dimension_len("lake"), Some(2));
+    drop(file);
+
+    let without_path = root.join("without.nc");
+    let mut without = input();
+    without.lake.layer_thickness_m = None;
+    write_time_restart_block(&without_path, without).unwrap();
+    let file = netcdf::open(&without_path).unwrap();
+    assert!(file.variable("dz_lake").is_none());
+    assert!(file.variable("t_lake").is_some());
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn time_restart_rejects_invalid_date_and_incomplete_axis_data_before_writing() {
     let root = temp_dir("invalid");
     assert!(write_time_restart(
