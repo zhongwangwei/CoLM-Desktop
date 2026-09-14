@@ -837,3 +837,23 @@ comparison remains **not passed** at combined `atol=rtol=1e-12`:
 The remaining Campbell callback rounding and other soil-fit outliers are active
 scientific gates. The Catchment same-input geometry/control matrix is separately
 in progress; neither that branch nor full preprocessing migration is declared done.
+
+### Campbell callback follow-up
+
+The remaining Campbell callback products now also preserve the original FMA
+contract: the log-conductivity slope and affine term, lambda-retention sum, and
+psi/conductivity derivative coefficient. The extracted callback is byte-identical
+to the supplied pristine source; original-backed checks compare 17 residuals,
+51 Jacobian entries, and a separate derivative-coefficient probe. A failing
+pre-fix regression and the passing repair are retained under
+`/tmp/colm-campbell-callback-audit/`.
+
+An isolated clean-target build passes 407 tests, all-target Clippy, downstream
+checks, formatting, and release compilation. The fresh `rust-full-campbell-fma/`
+pipeline completes all three stages and retains the 1,479-file schema and exact
+membership/axis checks. Surface out-of-tolerance values decrease from 20,441 to
+14,921, but still span 48 fields; the maximum `psi_s_l8` difference is 3.196086.
+The post-two-step restart still has 35 failing fields, now 12,816 values. The
+scientific gate therefore remains open, including source-observation arithmetic
+and nonlinear-fit outliers; this follow-up does not validate pending Catchment
+changes.
