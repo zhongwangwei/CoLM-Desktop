@@ -774,6 +774,96 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
 }
 
 #[test]
+fn urban_only_uses_the_selected_land_class_and_changes_only_the_single_point_mask() {
+    let root = std::env::temp_dir().join(format!("colm-init-urban-only-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let namelist = root.join("case.nml");
+    for (setting, expected) in [
+        ("", Some(false)),
+        ("=.false.", Some(false)),
+        ("=.true.", Some(true)),
+        ("=1", None),
+        ("='true'", None),
+    ] {
+        let field = if setting.is_empty() {
+            String::new()
+        } else {
+            format!("DEF_URBAN_ONLY{setting}")
+        };
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\nDEF_CASE_NAME='site'\nDEF_dir_output='{}'\n{field}\n/\n",
+                root.join("out").display()
+            ),
+        )
+        .unwrap();
+        let run =
+            single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None);
+        if let Some(expected) = expected {
+            assert_eq!(run.unwrap().static_config().urban_only, expected);
+        } else {
+            assert!(run.unwrap_err().to_string().contains("DEF_URBAN_ONLY"));
+        }
+        assert!(!root.join("out").exists());
+    }
+    for (cover, classes, urban) in [
+        (LandCoverScheme::Igbp, [13, 10, 17], 13),
+        (LandCoverScheme::Usgs, [1, 2, 16], 1),
+    ] {
+        for class in classes {
+            let mut surface = single_point_restart_surface();
+            surface.land_class = class;
+            let mut config = SinglePointStaticConfig::new(
+                "site",
+                2005,
+                "w180_s90",
+                cover,
+                HydraulicModel::VanGenuchten,
+            );
+            assert!(!config.urban_only);
+            let before = write_single_point_constant_restart_from_surface(
+                &surface,
+                root.join("all"),
+                config,
+                None,
+                None,
+            )
+            .unwrap();
+            config.urban_only = true;
+            let after = write_single_point_constant_restart_from_surface(
+                &surface,
+                root.join("urban"),
+                config,
+                None,
+                None,
+            )
+            .unwrap();
+            let before = netcdf::open(before.block).unwrap();
+            let after = netcdf::open(after.block).unwrap();
+            assert_eq!(variable_names(&before), variable_names(&after));
+            assert_eq!(after.dimension_len("patch"), Some(1));
+            assert_eq!(values_i32(&after, "patchclass"), [class]);
+            assert_eq!(values_i8(&before, "patchmask"), [1]);
+            assert_eq!(values_i8(&after, "patchmask"), [i8::from(class == urban)]);
+            for name in variable_names(&before) {
+                if name == "patchmask" {
+                    continue;
+                }
+                let bits = |file: &netcdf::File| {
+                    values_f64(file, &name)
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(bits(&before), bits(&after), "{name}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inactive_source() {
     let root =
         std::env::temp_dir().join(format!("colm-init-runoff-texture-{}", std::process::id()));
@@ -1031,6 +1121,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
     let run = SinglePointColdStartRun {
         namelist: directory.join("case.nml"),
         static_run: SinglePointStaticRun {
+            urban_only: false,
             compression_level: 1,
             surface: directory.join("srfdata.nc"),
             restart_dir: directory.join("restart"),

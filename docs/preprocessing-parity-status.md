@@ -140,6 +140,39 @@ bitwise in the active Simple VIC control:
 scalar presence and restart metadata:
 `/tmp/colm-runoff-soil-driver/pipeline-results.json`.
 
+## Urban-only initialization preserves the complete patch inventory
+
+`DEF_URBAN_ONLY` now reaches single-point, spatial LCT/urban and PFT/PC common
+constant restart writers. The strict logical parser defaults to false; direct
+single-point and `spatial-lct` commands also accept `--urban-only`. The original
+`MOD_Initialize` applies this flag without an `URBAN_MODEL` compile guard:
+non-urban rows get `patchmask=false`, using IGBP class `13` or USGS class `1`.
+It does **not** remove rows, change surface topology, or skip subsequent field
+initialization. Existing WMO virtual rows remain masked out. Rust follows that
+same shared mask rule without adding a surface-stage filter.
+
+The pre-edit executable ignored true on the copied non-urban CN-Cng surface;
+its saved regression fails with mask `[1]` rather than `[0]`. The corresponding
+single-point unit regression also failed before the mask repair. Evidence:
+`/tmp/colm-urban-only-driver/`. An extracted original Fortran integer/logical
+probe confirms both class tables and WMO interaction, but is not a full linked
+scientific parity run: `/tmp/colm-urban-only-fortran-reference/`.
+
+Mixed urban `[13,10,17]` regression now goes through the urban wrapper: mask
+becomes `[1,0,0]`, all three common rows and the one urban row remain, and every
+other common/urban decoded array is bitwise unchanged. Tests also cover USGS,
+WMO, PFT/PC and malformed logical input. AU-Preston with urban-only enabled
+completes Rust surface/init and the unchanged Fortran runtime.
+
+**718 integrated tests**, all-target Clippy, downstream checks, scoped formatting
+and all three release binaries pass; independent review approves the production
+and test changes. Logs: `/tmp/colm-urban-only-validation/` (initial test-helper
+lint failure retained). Fresh release default/false runs preserve all **3 files /
+136 decoded arrays**; true changes only the mask, preserving the other **135**.
+Direct single-point `--urban-only` also produces the expected mask. Results:
+`/tmp/colm-urban-only-driver/after-results.json` and `direct-results.json`.
+No new full spatial scientific-parity or Windows acceptance claim is made.
+
 ## SNICAR remains unported and now fails explicitly
 
 Namelist-driven cold starts now reject `DEF_USE_SNICAR=.true.` rather than
@@ -181,10 +214,11 @@ Clippy, downstream checks and scoped formatting pass. Evidence:
 real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
-rounding or absent test coverage: SNICAR optical initialization, urban-only
-masking, external-lake options and TRACER/BGC wetland initialization still require
-implementation or explicit scope
-guards. These remain open and preclude an all-feature migration claim. The main
+rounding or absent test coverage: SNICAR optical initialization, external-lake
+options and TRACER/BGC wetland initialization still require implementation.
+Urban-only masking is repaired above; an explicit unsupported-feature guard is
+not implementation of the remaining physics. These remain open and preclude an
+all-feature migration claim. The main
 LCT/PFT/PC numerical comparisons above do not establish these optional branches.
 
 ## PFT/PC transmission precedes common ground absorption

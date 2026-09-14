@@ -173,6 +173,7 @@ struct SpatialUrbanRun {
 
 #[derive(Debug, Clone)]
 struct SpatialNamelistRun {
+    urban_only: bool,
     compression_level: u8,
     landdata: PathBuf,
     restart: PathBuf,
@@ -328,6 +329,7 @@ fn write_spatial_urban_namelist_block(
         run.hydraulic_model,
     );
     static_config.compression_level = run.compression_level;
+    static_config.urban_only = run.urban_only;
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
@@ -407,6 +409,7 @@ fn write_spatial_lct_namelist_block(
         run.hydraulic_model,
     );
     static_config.compression_level = run.compression_level;
+    static_config.urban_only = run.urban_only;
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
@@ -617,6 +620,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
     };
 
     Ok(SpatialNamelistRun {
+        urban_only: namelist_bool(&document, "DEF_URBAN_ONLY", false)?,
         compression_level: colm_init::restart::restart_compression_level(&document)?,
         landdata: output.join(&case_name).join("landdata"),
         restart: output.join(&case_name).join("restart"),
@@ -807,6 +811,7 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
     let land_cover = parse_land_cover(&args.next().context("missing land-cover scheme")?)?;
     let hydraulic_model = parse_hydraulic_model(args.next().as_deref())?;
     let mut compression_level = 1;
+    let mut urban_only = false;
     let mut topmodel = false;
     let mut topmodel_method = 0;
     let mut vic_scalar_path = None;
@@ -814,6 +819,7 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
     while let Some(value) = args.next() {
         match value.as_str() {
             "--rest-compress-level" => compression_level = parse_restart_compression(args.next())?,
+            "--urban-only" => urban_only = true,
             "--topmodel" => topmodel = true,
             "--topmodel-method" => {
                 topmodel = true;
@@ -848,6 +854,7 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
         hydraulic_model,
     );
     config.compression_level = compression_level;
+    config.urban_only = urban_only;
     config.use_topmodel = topmodel;
     config.use_soil_texture = !topmodel && vic_scalar_path.is_none() && vic_grid_path.is_none();
     config.topmodel_method = topmodel_method;
@@ -904,6 +911,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             "--rest-compress-level" => {
                 config.compression_level = parse_restart_compression(args.next())?
             }
+            "--urban-only" => config.urban_only = true,
             "--bedrock" => config.use_bedrock = true,
             "--hyperspectral" => config.use_hyperspectral = true,
             "--topmodel" => config.use_topmodel = true,
@@ -1143,7 +1151,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -1189,6 +1197,40 @@ fn required(args: &mut impl Iterator<Item = String>, field: &str) -> Result<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spatial_urban_only_is_strict_for_every_subgrid_without_requiring_urban_run() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-init-spatial-urban-only-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let case = root.join("case.nml");
+        for mode in ["LCT", "PFT", "PC"] {
+            for (setting, expected) in [
+                ("", Some(false)),
+                ("=.false.", Some(false)),
+                ("=.true.", Some(true)),
+                ("=1", None),
+                ("='true'", None),
+            ] {
+                let field = if setting.is_empty() {
+                    String::new()
+                } else {
+                    format!("DEF_URBAN_ONLY{setting}")
+                };
+                std::fs::write(&case, format!("&nl_colm\nDEF_CASE_NAME='site'\nDEF_dir_output='{}'\nDEF_USE_LCT={}\nDEF_USE_PFT={}\nDEF_USE_PC={}\n{field}\n/\n", root.join("out").display(), if mode=="LCT" { ".true." } else { ".false." }, if mode=="PFT" { ".true." } else { ".false." }, if mode=="PC" { ".true." } else { ".false." })).unwrap();
+                let run = spatial_namelist_run(&case);
+                if let Some(expected) = expected {
+                    assert_eq!(run.unwrap().urban_only, expected);
+                } else {
+                    assert!(run.unwrap_err().to_string().contains("DEF_URBAN_ONLY"));
+                }
+                assert!(!root.join("out").exists());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn restart_compression_is_strict_and_shared_by_single_point_and_spatial_cases() {

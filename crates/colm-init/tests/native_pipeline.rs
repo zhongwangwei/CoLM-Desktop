@@ -208,15 +208,21 @@ fn rust_urban_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
         case = case.replace(source, replacement);
     }
     let case_path = directory.join("case.nml");
-    std::fs::write(
-        &case_path,
-        case.replace("&nl_colm", "&nl_colm\nDEF_URBAN_RUN = .true."),
-    )
-    .unwrap();
+    let mut document = colm_namelist::parse(&case).unwrap();
+    for field in ["DEF_URBAN_RUN", "DEF_URBAN_ONLY"] {
+        document
+            .insert(field, colm_namelist::Value::Bool(true), "nl_colm")
+            .unwrap();
+    }
+    std::fs::write(&case_path, document.to_string()).unwrap();
 
     let (_, files) = prepare_single_point_case(&case_path, None, false, None).unwrap();
     assert!(files.constants.urban.is_some());
     assert!(files.time.urban.is_some());
+    {
+        let common = netcdf::open(&files.constants.common.block).unwrap();
+        assert_eq!(values_f64(&common, "patchmask"), vec![1.0]);
+    }
     let result = std::process::Command::new(&colm)
         .arg(&case_path)
         .current_dir(&directory)

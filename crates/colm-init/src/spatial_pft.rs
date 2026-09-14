@@ -255,6 +255,7 @@ pub fn write_spatial_pft_constant_restarts(
     common.compression_level = compression_level;
     common.tuning = RestartTuning::from_document(&document)?;
     common.use_hyperspectral = use_hyperspectral;
+    common.urban_only = optional_bool_or(&document, "DEF_URBAN_ONLY", false)?;
     let runoff_scheme = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3);
     common.use_soil_texture = runoff_scheme == 3
         || config.force_soil_texture

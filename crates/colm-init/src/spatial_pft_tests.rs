@@ -134,6 +134,82 @@ fn spatial_pft_soil_texture_gate_tracks_scheme_and_explicit_catch_force() {
 }
 
 #[test]
+fn spatial_pft_common_honors_urban_only_for_pft_and_pc_and_rejects_malformed_flag_before_output() {
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    write_common_landdata(&landdata);
+    write_i32(&landdata, "landpft", "landpft", "settyp", &[1]);
+    write_landpft_topology(&landdata);
+    write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[1.0]);
+    write_f64(&landdata, "htop", "htop_pfts", "htop_pfts", &[20.0]);
+
+    for (mode, use_pft, use_pc) in [("pft", true, false), ("pc", false, true)] {
+        let namelist = root.join(format!("case-{mode}.nml"));
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_Runoff_SCHEME=0
+ DEF_TOPMOD_method=0
+ DEF_URBAN_ONLY=.true.
+ DEF_USE_PFT=.{use_pft}.
+ DEF_USE_PC=.{use_pc}.
+ /
+"
+            ),
+        )
+        .unwrap();
+
+        let files = write_spatial_pft_constant_restarts(
+            SpatialPftStaticConfig::new(
+                &namelist,
+                &landdata,
+                &root.join(format!("restart-urban-only-{mode}")),
+                "test",
+                2005,
+                "w180_s90",
+            ),
+            false,
+            false,
+        )
+        .unwrap();
+        let common = netcdf::open(files.common.block).unwrap();
+        assert_eq!(values_i32(&common, "patchclass").unwrap(), [1], "{mode}");
+        assert_eq!(
+            common
+                .variable("patchmask")
+                .unwrap()
+                .get_values::<i8, _>(..)
+                .unwrap(),
+            [0],
+            "{mode}"
+        );
+    }
+
+    let bad = root.join("bad.nml");
+    let restart_bad = root.join("restart-bad");
+    std::fs::write(
+        &bad,
+        "&nl_colm
+ DEF_URBAN_ONLY='yes'
+ DEF_USE_PFT=.true.
+ DEF_USE_PC=.false.
+ /
+",
+    )
+    .unwrap();
+    let err = write_spatial_pft_constant_restarts(
+        SpatialPftStaticConfig::new(&bad, &landdata, &restart_bad, "test", 2005, "w180_s90"),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("DEF_URBAN_ONLY"), "{err}");
+    assert!(!restart_bad.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_pft_time_requires_bgc_for_crop_before_materializing_any_restart() {
     let root = temp_dir();
     let namelist = root.join("case.nml");

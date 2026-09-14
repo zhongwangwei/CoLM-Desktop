@@ -71,6 +71,8 @@ pub struct SinglePointStaticConfig<'a> {
     pub use_topmodel: bool,
     /// Whether runoff initialization consumes soil texture (Simple VIC by default).
     pub use_soil_texture: bool,
+    /// Mask non-urban patches without removing their initialized restart rows.
+    pub urban_only: bool,
     pub topmodel_method: i32,
     pub vic_parameters: VicParameterSource<'a>,
 }
@@ -95,6 +97,7 @@ impl<'a> SinglePointStaticConfig<'a> {
             use_bedrock: false,
             use_topmodel: false,
             use_soil_texture: true,
+            urban_only: false,
             topmodel_method: 0,
             vic_parameters: VicParameterSource::None,
         }
@@ -108,6 +111,7 @@ impl<'a> SinglePointStaticConfig<'a> {
 /// disagreeing about where a case lives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointStaticRun {
+    pub urban_only: bool,
     pub compression_level: u8,
     pub surface: PathBuf,
     pub restart_dir: PathBuf,
@@ -226,6 +230,7 @@ impl SinglePointStaticRun {
         config.tuning = self.tuning;
         config.use_topmodel = self.runoff_scheme == 0;
         config.use_soil_texture = self.runoff_scheme == 3;
+        config.urban_only = self.urban_only;
         config.topmodel_method = self.topmodel_method;
         config.vic_parameters = if self.runoff_scheme == 1 {
             self.vic_grid_file
@@ -287,6 +292,7 @@ pub fn single_point_static_run_from_namelist(
     );
 
     Ok(SinglePointStaticRun {
+        urban_only: optional_bool_or(&document, "DEF_URBAN_ONLY", false)?,
         compression_level,
         surface,
         restart_dir: case_dir.join("restart"),
@@ -822,7 +828,8 @@ fn write_single_point_constant_restart_from_surface(
         .then(|| single_point_topmodel(config.topmodel_method, patches))
         .transpose()?;
     let vic = single_point_vic_parameters(config.vic_parameters, surface, patches)?;
-    let mask = vec![true; patches];
+    let mask =
+        vec![!config.urban_only || surface.land_class == urban_class(config.land_cover); patches];
     let hyperspectral_albedo = hyperspectral_albedo
         .map(|values| {
             ensure!(
@@ -2847,6 +2854,14 @@ fn write_cold_time_restart(
             irrigation,
         },
     )
+}
+
+/// `MOD_Vars_Global::URBAN` in the selected original land-cover table.
+pub(crate) fn urban_class(land_cover: LandCoverScheme) -> i32 {
+    match land_cover {
+        LandCoverScheme::Igbp => 13,
+        LandCoverScheme::Usgs => 1,
+    }
 }
 
 pub(crate) fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32> {

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{ensure, Context, Result};
 
 use crate::crop::{map_field_2d, AreaMapping, MapGrid};
-use crate::single_point::{patch_type, BVIC_USDA, IGBP_BOTTOM, IGBP_TOP, USGS_BOTTOM, USGS_TOP};
+use crate::single_point::{
+    patch_type, urban_class, BVIC_USDA, IGBP_BOTTOM, IGBP_TOP, USGS_BOTTOM, USGS_TOP,
+};
 use crate::{
     colm_soil_grid, derive_bedrock, derive_igbp_canopy, derive_lake_layers,
     derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
@@ -40,6 +42,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub use_hyperspectral: bool,
     /// Read and scientifically initialize `soiltext`/`BVIC`; true for Simple VIC or CatchLateral.
     pub use_soil_texture: bool,
+    /// Mask non-urban landpatch rows while preserving dimensions and initialized values.
+    pub urban_only: bool,
     /// Write the TOPMODEL vectors required by `DEF_Runoff_SCHEME = 0`.
     pub use_topmodel: bool,
     pub topmodel_method: i32,
@@ -73,6 +77,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
             use_bedrock: false,
             use_hyperspectral: false,
             use_soil_texture: true,
+            urban_only: false,
             use_topmodel: false,
             topmodel_method: 0,
             vic_parameters: VicParameterSource::None,
@@ -247,10 +252,12 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         None => read_canopy(config, &patches.class, &patch_kind, patch_count)?,
     };
     // Virtual WMO patches retain geometry but do not contribute to aggregation.
+    let urban_class = urban_class(config.land_cover);
     let mask = patches
         .start
         .iter()
-        .map(|&start| start != -1)
+        .zip(&patches.class)
+        .map(|(&start, &class)| start != -1 && (!config.urban_only || class == urban_class))
         .collect::<Vec<_>>();
     let soil_s_v_alb = read_f64(
         config.landdata,

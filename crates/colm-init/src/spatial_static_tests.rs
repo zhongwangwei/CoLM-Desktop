@@ -225,6 +225,147 @@ fn spatial_lct_constant_restart_masks_virtual_wmo_patch() {
 }
 
 #[test]
+fn spatial_lct_urban_only_masks_nonurban_through_urban_wrapper_without_compacting() {
+    let root = temp_dir("urban-only-mixed");
+    let landdata = root.join("landdata");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[13, 10, 17], &[1, 1, 1]);
+    write_urban_landdata(&landdata, 2005, "w180_s90");
+    let geometry = crate::UrbanConfig {
+        water_enabled: true,
+        trees_enabled: true,
+        building_energy_model: true,
+    };
+
+    let restart = root.join("restart-default");
+    let files = crate::write_spatial_urban_constant_restarts(crate::SpatialUrbanStaticConfig {
+        common: SpatialLctStaticConfig::new(
+            &landdata,
+            &restart,
+            "test",
+            2005,
+            "w180_s90",
+            LandCoverScheme::Igbp,
+            HydraulicModel::VanGenuchten,
+        ),
+        runtime_dir: None,
+        geometry,
+        lucy_enabled: false,
+    })
+    .unwrap();
+    let default_common = netcdf::open(&files.common.block).unwrap();
+    let default_urban = netcdf::open(files.urban.unwrap()).unwrap();
+    assert_eq!(
+        values_i32(&default_common, "patchclass").unwrap(),
+        [13, 10, 17]
+    );
+    assert_eq!(mask_values(&default_common), [1, 1, 1]);
+    assert_eq!(default_common.dimension("patch").unwrap().len(), 3);
+    assert_eq!(default_urban.dimension("urban").unwrap().len(), 1);
+
+    let restart = root.join("restart-urban-only");
+    let mut common = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    common.urban_only = true;
+    let files = crate::write_spatial_urban_constant_restarts(crate::SpatialUrbanStaticConfig {
+        common,
+        runtime_dir: None,
+        geometry,
+        lucy_enabled: false,
+    })
+    .unwrap();
+    let urban_only_common = netcdf::open(&files.common.block).unwrap();
+    let urban_only_urban = netcdf::open(files.urban.unwrap()).unwrap();
+    assert_eq!(
+        values_i32(&urban_only_common, "patchclass").unwrap(),
+        [13, 10, 17]
+    );
+    assert_eq!(mask_values(&urban_only_common), [1, 0, 0]);
+    assert_eq!(urban_only_common.dimension("patch").unwrap().len(), 3);
+    assert_eq!(urban_only_urban.dimension("urban").unwrap().len(), 1);
+
+    for (before, after) in [
+        (&default_common, &urban_only_common),
+        (&default_urban, &urban_only_urban),
+    ] {
+        let dimensions = |file: &netcdf::File| {
+            file.dimensions()
+                .map(|d| (d.name(), d.len()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(dimensions(before), dimensions(after));
+        let names = |file: &netcdf::File| file.variables().map(|v| v.name()).collect::<Vec<_>>();
+        assert_eq!(names(before), names(after));
+        for variable in before.variables() {
+            let name = variable.name();
+            let other = after.variable(&name).unwrap();
+            assert_eq!(variable.vartype(), other.vartype(), "{name}");
+            let axes = |v: &netcdf::Variable<'_>| {
+                v.dimensions().iter().map(|d| d.name()).collect::<Vec<_>>()
+            };
+            assert_eq!(axes(&variable), axes(&other), "{name}");
+            if name != "patchmask" {
+                let bits = |v: &netcdf::Variable<'_>| {
+                    v.get_values::<f64, _>(..)
+                        .unwrap()
+                        .into_iter()
+                        .map(f64::to_bits)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(bits(&variable), bits(&other), "{name}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_urban_only_preserves_wmo_sentinel_mask_and_usgs_urban_class() {
+    let root = temp_dir("urban-only-sentinel-usgs");
+    let landdata = root.join("landdata");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[13], &[-1]);
+    let restart_wmo = root.join("restart-wmo");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart_wmo,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.urban_only = true;
+    let files = write_spatial_lct_constant_restart(config).unwrap();
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(mask_values(&block), [0]);
+
+    let landdata = root.join("landdata-usgs");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[1, 2], &[1, 1]);
+    let restart_usgs = root.join("restart-usgs");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart_usgs,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Usgs,
+        HydraulicModel::VanGenuchten,
+    );
+    config.urban_only = true;
+    let files = write_spatial_lct_constant_restart(config).unwrap();
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_i32(&block, "patchclass").unwrap(), [1, 2]);
+    assert_eq!(mask_values(&block), [1, 0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
     let root = temp_dir("optional-static");
     let landdata = root.join("landdata");
@@ -1336,7 +1477,23 @@ fn write_urban_landdata(landdata: &Path, year: i32, block: &str) {
     patch
         .variable_mut("settyp")
         .unwrap()
-        .put_values(&[13_i32], ..)
+        .put_values(&[13_i32], ..1)
+        .unwrap();
+    // Both fixtures have one urban row, first in the common patch inventory.
+    let start = patch
+        .variable("ipxstt")
+        .unwrap()
+        .get_value::<i32, _>(0)
+        .unwrap();
+    let end = patch
+        .variable("ipxend")
+        .unwrap()
+        .get_value::<i32, _>(0)
+        .unwrap();
+    let element = patch
+        .variable("eindex")
+        .unwrap()
+        .get_value::<i64, _>(0)
         .unwrap();
     patch.close().unwrap();
 
@@ -1346,8 +1503,8 @@ fn write_urban_landdata(landdata: &Path, year: i32, block: &str) {
     file.add_dimension("urban", 1).unwrap();
     for (name, values) in [
         ("settyp", &[1_i32][..]),
-        ("ipxstt", &[1_i32][..]),
-        ("ipxend", &[2_i32][..]),
+        ("ipxstt", &[start][..]),
+        ("ipxend", &[end][..]),
     ] {
         file.add_variable::<i32>(name, &["urban"])
             .unwrap()
@@ -1356,7 +1513,7 @@ fn write_urban_landdata(landdata: &Path, year: i32, block: &str) {
     }
     file.add_variable::<i64>("eindex", &["urban"])
         .unwrap()
-        .put_values(&[7_i64], ..)
+        .put_values(&[element], ..)
         .unwrap();
     file.close().unwrap();
     for (stem, variable, value) in [
@@ -1613,6 +1770,193 @@ fn write_cn_equilibrium(path: &Path) {
             .put_values(&[200.0 + index as f32; 8], ..)
             .unwrap();
     }
+    file.close().unwrap();
+}
+
+fn mask_values(file: &netcdf::File) -> Vec<i8> {
+    file.variable("patchmask")
+        .unwrap()
+        .get_values::<i8, _>(..)
+        .unwrap()
+}
+
+fn write_mixed_landdata(landdata: &Path, year: i32, block: &str, classes: &[i32], starts: &[i32]) {
+    assert_eq!(classes.len(), starts.len());
+    let count = classes.len();
+    std::fs::create_dir_all(landdata).unwrap();
+    let mut pixel = netcdf::create(landdata.join("pixel.nc")).unwrap();
+    pixel.add_dimension("lon", count).unwrap();
+    pixel.add_dimension("lat", 1).unwrap();
+    let lon_w = (0..count)
+        .map(|index| -180.0 + index as f64)
+        .collect::<Vec<_>>();
+    let lon_e = lon_w.iter().map(|west| west + 1.0).collect::<Vec<_>>();
+    for (name, values, dimension) in [
+        ("lon_w", lon_w.as_slice(), "lon"),
+        ("lon_e", lon_e.as_slice(), "lon"),
+        ("lat_s", &[0.0][..], "lat"),
+        ("lat_n", &[1.0][..], "lat"),
+    ] {
+        pixel
+            .add_variable::<f64>(name, &[dimension])
+            .unwrap()
+            .put_values(values, ..)
+            .unwrap();
+    }
+    pixel.close().unwrap();
+
+    let path = block_path(landdata, "landpatch", "landpatch", year, block);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut landpatch = netcdf::create(path).unwrap();
+    landpatch.add_dimension("patch", count).unwrap();
+    landpatch
+        .add_variable::<i32>("settyp", &["patch"])
+        .unwrap()
+        .put_values(classes, ..)
+        .unwrap();
+    landpatch
+        .add_variable::<i32>("ipxstt", &["patch"])
+        .unwrap()
+        .put_values(starts, ..)
+        .unwrap();
+    landpatch
+        .add_variable::<i32>("ipxend", &["patch"])
+        .unwrap()
+        .put_values(starts, ..)
+        .unwrap();
+    let eindex = (1..=count as i64).collect::<Vec<_>>();
+    landpatch
+        .add_variable::<i64>("eindex", &["patch"])
+        .unwrap()
+        .put_values(&eindex, ..)
+        .unwrap();
+    landpatch.close().unwrap();
+
+    let path = block_path(landdata, "mesh", "mesh", year, block);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut mesh = netcdf::create(path).unwrap();
+    mesh.add_dimension("element", count).unwrap();
+    mesh.add_dimension("pixel", count).unwrap();
+    mesh.add_dimension("coordinate", 2).unwrap();
+    mesh.add_variable::<i64>("elmindex", &["element"])
+        .unwrap()
+        .put_values(&eindex, ..)
+        .unwrap();
+    mesh.add_variable::<i32>("elmnpxl", &["element"])
+        .unwrap()
+        .put_values(&vec![1_i32; count], ..)
+        .unwrap();
+    let pixels = (0..count)
+        .flat_map(|index| [index as i32 + 1, 1])
+        .collect::<Vec<_>>();
+    mesh.add_variable::<i32>("elmpixels", &["pixel", "coordinate"])
+        .unwrap()
+        .put_values(&pixels, (.., ..))
+        .unwrap();
+    mesh.close().unwrap();
+
+    write_i32_vec(
+        landdata,
+        "soil",
+        "soiltexture_patches",
+        "soiltext_patches",
+        year,
+        block,
+        &vec![8; count],
+    );
+    for (stem, variable, value) in [
+        ("lakedepth_patches", "lakedepth_patches", 10.0),
+        ("htop_patches", "htop_patches", 12.0),
+        ("elevation_patches", "elevation_patches", 100.0),
+        ("elvstd_patches", "elvstd_patches", 5.0),
+        ("sloperatio_patches", "sloperatio_patches", 1.2),
+    ] {
+        let directory = if stem == "lakedepth_patches" {
+            "lakedepth"
+        } else if stem == "htop_patches" {
+            "htop"
+        } else {
+            "topography"
+        };
+        write_f64_vec(
+            landdata,
+            directory,
+            stem,
+            variable,
+            year,
+            block,
+            &vec![value; count],
+        );
+    }
+    for (name, value) in [
+        ("soil_s_v_alb", 0.1),
+        ("soil_d_v_alb", 0.2),
+        ("soil_s_n_alb", 0.3),
+        ("soil_d_n_alb", 0.4),
+    ] {
+        write_f64_vec(
+            landdata,
+            "soil",
+            &format!("{name}_patches"),
+            name,
+            year,
+            block,
+            &vec![value; count],
+        );
+    }
+    for layer in 1..=8 {
+        for (field, value) in soil_values() {
+            let name = format!("{field}_l{layer}_patches");
+            write_f64_vec(
+                landdata,
+                "soil",
+                &name,
+                &name,
+                year,
+                block,
+                &vec![value; count],
+            );
+        }
+    }
+}
+
+fn write_f64_vec(
+    landdata: &Path,
+    directory: &str,
+    stem: &str,
+    variable: &str,
+    year: i32,
+    block: &str,
+    values: &[f64],
+) {
+    let path = block_path(landdata, directory, stem, year, block);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", values.len()).unwrap();
+    file.add_variable::<f64>(variable, &["patch"])
+        .unwrap()
+        .put_values(values, ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_i32_vec(
+    landdata: &Path,
+    directory: &str,
+    stem: &str,
+    variable: &str,
+    year: i32,
+    block: &str,
+    values: &[i32],
+) {
+    let path = block_path(landdata, directory, stem, year, block);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", values.len()).unwrap();
+    file.add_variable::<i32>(variable, &["patch"])
+        .unwrap()
+        .put_values(values, ..)
+        .unwrap();
     file.close().unwrap();
 }
 

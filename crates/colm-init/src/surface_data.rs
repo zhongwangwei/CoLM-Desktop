@@ -390,10 +390,7 @@ pub fn read_single_point_urban_data(
     let path = path.as_ref();
     let file = netcdf::open(path)
         .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
-    let urban_land_class = match land_cover {
-        LandCoverScheme::Igbp => 13,
-        LandCoverScheme::Usgs => 1,
-    };
+    let urban_land_class = crate::single_point::urban_class(land_cover);
     let years = vector_i32(&file, "LAI_year")?;
     validate_lai_years(&years)?;
     let monthly = SinglePointMonthlyVegetation {
