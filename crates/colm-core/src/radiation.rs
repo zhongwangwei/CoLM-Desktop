@@ -487,6 +487,18 @@ pub(crate) fn generic_snow_albedo(
     Ok(([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age))
 }
 
+// Shared by broadband and spectral LCT/PFT kernels in MOD_Albedo(_HiRes).
+pub(crate) fn two_stream_zmu(phi1: f64, phi2: f64) -> f64 {
+    if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
+        let log_term = ((phi1 + phi2) / phi1).ln();
+        (phi1 / phi2).mul_add(-log_term, 1.0) * (1.0 / phi2)
+    } else if phi1.abs() <= 1.0e-6 {
+        1.0 / 0.877
+    } else {
+        1.0 / (2.0 * phi1)
+    }
+}
+
 struct TwoStreamRadiation {
     albedo: [[f64; RADIATION_TYPES]; BANDS],
     transmission: [[f64; 3]; BANDS],
@@ -513,13 +525,7 @@ fn two_stream(
     let projection = phi1 + phi2 * cosine_zenith;
     let direct_extinction = projection / cosine_zenith;
     let diffuse_extinction = 0.719;
-    let zmu = if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
-        1.0 / phi2 * (1.0 - phi1 / phi2 * ((phi1 + phi2) / phi1).ln())
-    } else if phi1.abs() <= 1.0e-6 {
-        1.0 / 0.877
-    } else {
-        1.0 / (2.0 * phi1)
-    };
+    let zmu = two_stream_zmu(phi1, phi2);
     ensure!(
         zmu.is_finite() && zmu > 0.0,
         "invalid leaf angle distribution"
@@ -715,13 +721,7 @@ fn two_stream_mod(
 ) -> Result<TwoStreamRadiation> {
     let phi1 = 0.5 - 0.633 * optics.chil - 0.33 * optics.chil * optics.chil;
     let phi2 = 0.877 * (1.0 - 2.0 * phi1);
-    let zmu = if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
-        1.0 / phi2 * (1.0 - phi1 / phi2 * ((phi1 + phi2) / phi1).ln())
-    } else if phi1.abs() <= 1.0e-6 {
-        1.0 / 0.877
-    } else {
-        1.0 / (2.0 * phi1)
-    };
+    let zmu = two_stream_zmu(phi1, phi2);
     ensure!(
         zmu.is_finite() && zmu > 0.0 && lai + sai > 1.0e-6,
         "invalid PFT two-stream canopy"

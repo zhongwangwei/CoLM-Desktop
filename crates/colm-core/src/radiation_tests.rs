@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn canopy_thermal_gap_matches_original_pearl_river_patches() {
+    assert_eq!(two_stream_zmu(1.0e-6, 0.5), 1.0 / 0.877);
+    assert_eq!(two_stream_zmu(0.5, 1.0e-6), 1.0);
+    // Linked original MOD_Albedo.o, -O2 -fdefault-real-8; classes 13 and 9.
+    let soil_grid = crate::colm_soil_grid(10).unwrap();
+    for (patch_type, class, lai, sai, coszen, water, expected) in [
+        (
+            1,
+            13,
+            0.016731545999066972,
+            0.053416176787594076,
+            0.13061497421041415,
+            8.838313932745438,
+            0x3fed_d3e7_0416_235f,
+        ),
+        (
+            0,
+            9,
+            0.8492320693433216,
+            0.7621269547891374,
+            0.17590374025111977,
+            8.955592710048453,
+            0x3fc9_76a3_ae9c_1116,
+        ),
+    ] {
+        let output = cold_start_broadband_radiation_with_snow(
+            patch_type,
+            SoilReflectance {
+                saturated_visible: 0.08,
+                dry_visible: 0.19,
+                saturated_near_infrared: 0.16,
+                dry_near_infrared: 0.27,
+            },
+            water,
+            soil_grid.thickness_m[0],
+            leaf_optics_from_land_cover(LandCoverScheme::Igbp, class).unwrap(),
+            lai,
+            sai,
+            0.0,
+            coszen,
+            true,
+            false,
+            false,
+            0.0,
+            0.0,
+            283.0,
+        )
+        .unwrap();
+        assert_eq!(
+            output.thermal_gap_fraction.to_bits(),
+            expected,
+            "class {class}"
+        );
+    }
+}
+
+#[test]
 fn leaf_optics_are_the_native_land_cover_constants() {
     assert_eq!(
         leaf_optics_from_land_cover(LandCoverScheme::Igbp, 10).unwrap(),

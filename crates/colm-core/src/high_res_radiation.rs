@@ -6,6 +6,7 @@
 
 use anyhow::{ensure, Result};
 
+use crate::radiation::two_stream_zmu;
 use crate::{ColdStartRadiation, HighResolutionRadiationFractions, LeafOptics};
 
 /// Number of CoLM hyperspectral wavelengths (400 through 2500 nm, 10 nm apart).
@@ -368,13 +369,7 @@ pub fn lct_high_resolution_radiation(
     let phi2 = 0.877 * (1.0 - 2.0 * phi1);
     let projection = phi1 + phi2 * cosine_zenith;
     let direct_extinction = projection / cosine_zenith;
-    let zmu = if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
-        1.0 / phi2 * (1.0 - phi1 / phi2 * ((phi1 + phi2) / phi1).ln())
-    } else if phi1.abs() <= 1.0e-6 {
-        1.0 / 0.877
-    } else {
-        1.0 / (2.0 * phi1)
-    };
+    let zmu = two_stream_zmu(phi1, phi2);
     let effective_sai = if usgs_no_stem { 0.0 } else { sai };
     let leaf_stem_area = lai + effective_sai;
     ensure!(
@@ -623,13 +618,7 @@ pub fn pft_high_resolution_radiation(
 
     let phi1 = 0.5 - 0.633 * chil - 0.33 * chil * chil;
     let phi2 = 0.877 * (1.0 - 2.0 * phi1);
-    let zmu = if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
-        1.0 / phi2 * (1.0 - phi1 / phi2 * ((phi1 + phi2) / phi1).ln())
-    } else if phi1.abs() <= 1.0e-6 {
-        1.0 / 0.877
-    } else {
-        1.0 / (2.0 * phi1)
-    };
+    let zmu = two_stream_zmu(phi1, phi2);
     ensure!(
         zmu.is_finite() && zmu > 0.0,
         "invalid high-resolution PFT leaf angle distribution"

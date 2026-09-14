@@ -65,6 +65,11 @@ source. Its current HEAD is `ebe6de998692f075216037810ce9184fa407e27b`; its only
 working-tree change is `.gitignore`, which this audit did not touch. It is not
 identical to Desktop's vendored, runtime-switch-enabled Fortran. In particular,
 `DEF_TUNING_*` are Desktop extensions, not original namelist fields at that HEAD.
+`DEF_VEG_SNOW` also intentionally differs: the original defaults to false, while
+Desktop's vendored Fortran, generated schema and Rust adapters default to true
+since commit `48948336`. This is not a Rust-only default regression. Snow-case
+comparisons must explicitly align that control rather than silently changing
+the Desktop default or the original reference.
 
 An isolated copy was built with UNSTRUCTURED + LULC_IGBP + vanGenuchten, serial,
 without routing, urban, BGC, crop, tracer, or extended interception. Only the
@@ -1046,3 +1051,30 @@ repair does not close that scientific gate. The 658-test suite, Clippy,
 downstream checks, scoped formatting and fresh release pass. Evidence:
 `/tmp/colm-orbit-ordered-audit/`, `/tmp/colm-orbit-review-final-85999/` and the
 frozen run under the main artifact root.
+
+### Shared two-stream optical-depth arithmetic
+
+Linked original `MOD_Albedo.o` probes for two actual Pearl River patches locate
+the next first divergence in `zmu`: the original contracts the inner
+`1 - (phi1/phi2)*log_term`, then multiplies by the separately rounded reciprocal.
+The same expression and near-zero guards occur in broadband and hyperspectral
+LCT/PFT solvers. All four Rust sites now reuse one small shared kernel with the
+proven contraction; the guards and caller validation are unchanged. Actual
+thermal-gap goldens fail before the correction and pass after it, with both
+near-zero guard boundaries covered.
+
+The frozen `rust-init-original-surface-zmu-fma/` run retains matching schemas and
+passes all 13 cold files / 742 variable instances. All 7,754 cold `thermk` values
+now agree bitwise. Post-two-step out-of-tolerance values fall from 138 to **32**,
+across 16 fields rather than 23; maximum `gs0sun` error falls from `0.171400` to
+`7.04045e-6`. This remains an open scientific gate, not full radiation parity.
+The integrated working tree passes 663 core/preprocessing/data/reference/native
+tests, Clippy, downstream checks and scoped formatting. Original probes,
+red/green checks and validation logs are in
+`/tmp/colm-radiation-twostream-audit-37105/`.
+
+A separate diagnostic copied only five original cold-radiation fields into one
+temporary Rust patch before the unchanged original runtime. That patch's later
+differences vanished bitwise, supporting the radiation root cause. These mixed
+diagnostic outputs are not used as passing Rust parity evidence, and neither
+production inputs nor reference outputs were altered.
