@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::radiation::two_stream_zmu;
+use crate::radiation::{two_stream, two_stream_zmu};
 use crate::{ColdStartRadiation, HighResolutionRadiationFractions, LeafOptics};
 
 /// Number of CoLM hyperspectral wavelengths (400 through 2500 nm, 10 nm apart).
@@ -205,13 +205,153 @@ pub fn high_resolution_pft_cold_start_state(
         Some(radiation) => weighted_two_stream(&radiation.shaded_absorption, fractions)?,
         None => [[0.0; RADIATION_TYPES]; 2],
     };
-    let transmission = radiation.map_or_else(
-        || {
-            (0..HIGH_RES_WAVELENGTHS)
-                .flat_map(|_| [0.0, 1.0, 1.0])
-                .collect::<Vec<_>>()
+    let transmission = radiation.map_or_else(default_high_resolution_transmission, |radiation| {
+        radiation.transmission.clone()
+    });
+    let soil_absorption = high_resolution_soil_absorption(ground, &transmission, fractions)?;
+    let (thermal_gap_fraction, direct_extinction, diffuse_extinction) = radiation
+        .map(|radiation| {
+            (
+                radiation.thermal_gap_fraction,
+                radiation.direct_extinction,
+                radiation.diffuse_extinction,
+            )
+        })
+        .unwrap_or((1.0, 1.0, 0.718));
+    Ok(ColdStartRadiation {
+        albedo,
+        sunlit_absorption,
+        shaded_absorption,
+        soil_absorption,
+        snow_absorption: [[0.0; RADIATION_TYPES]; 2],
+        transmission: None,
+        snow_age: 0.0,
+        thermal_gap_fraction,
+        direct_extinction,
+        diffuse_extinction,
+    })
+}
+
+/// Reduces non-natural snow-free high-resolution cold-start state to CoLM's
+/// two restart bands, while returning the persistent 211-band albedo.
+///
+/// Callers must provide the already-selected snow-free ground spectrum for
+/// non-natural patch kinds 1..=4.  Patch kinds 1 and 2 with positive LAI/SAI
+/// use CoLM's broadband land-cover two-stream canopy solver; patch kinds 3 and
+/// 4 remain ground-only, matching `albland_HiRes`'s canopy guard.
+#[allow(clippy::too_many_arguments)]
+pub fn high_resolution_nonnatural_cold_start_state(
+    patch_type: i32,
+    ground: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+    optics: LeafOptics,
+    lai: f64,
+    sai: f64,
+    cosine_zenith: f64,
+    usgs_land_cover: bool,
+    vegetation_snow: bool,
+) -> Result<(ColdStartRadiation, Vec<f64>)> {
+    ensure!(
+        (1..=4).contains(&patch_type)
+            && ground.len() == HIGH_RES_WAVELENGTHS * RADIATION_TYPES
+            && ground.iter().all(|value| value.is_finite())
+            && lai.is_finite()
+            && lai >= 0.0
+            && sai.is_finite()
+            && sai >= 0.0
+            && cosine_zenith.is_finite()
+            && cosine_zenith > 0.0
+            && optics.chil.is_finite(),
+        "non-natural high-resolution cold-start inputs are invalid"
+    );
+    for values in optics.reflectance.into_iter().chain(optics.transmittance) {
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "leaf optical constants must be finite"
+        );
+    }
+
+    let ground_broadband = weighted_two_stream(ground, fractions)?;
+    let active_canopy = lai + sai > 1.0e-6 && patch_type < 3;
+    if active_canopy {
+        let two_stream = two_stream(
+            optics,
+            lai,
+            sai,
+            0.0,
+            cosine_zenith,
+            ground_broadband,
+            usgs_land_cover,
+            vegetation_snow,
+        )?;
+        let transmission_hires = expand_broadband_transmission(two_stream.transmission);
+        let soil_absorption =
+            high_resolution_soil_absorption(ground, &transmission_hires, fractions)?;
+        return Ok((
+            ColdStartRadiation {
+                albedo: two_stream.albedo,
+                sunlit_absorption: two_stream.sunlit_absorption,
+                shaded_absorption: two_stream.shaded_absorption,
+                soil_absorption,
+                snow_absorption: [[0.0; RADIATION_TYPES]; 2],
+                transmission: Some(two_stream.transmission),
+                snow_age: 0.0,
+                thermal_gap_fraction: two_stream.thermal_gap_fraction,
+                direct_extinction: two_stream.direct_extinction,
+                diffuse_extinction: two_stream.diffuse_extinction,
+            },
+            vec![1.0; HIGH_RES_WAVELENGTHS * RADIATION_TYPES],
+        ));
+    }
+
+    let transmission_hires = default_high_resolution_transmission();
+    let soil_absorption = high_resolution_soil_absorption(ground, &transmission_hires, fractions)?;
+    Ok((
+        ColdStartRadiation {
+            albedo: ground_broadband,
+            sunlit_absorption: [[0.0; RADIATION_TYPES]; 2],
+            shaded_absorption: [[0.0; RADIATION_TYPES]; 2],
+            soil_absorption,
+            snow_absorption: [[0.0; RADIATION_TYPES]; 2],
+            transmission: None,
+            snow_age: 0.0,
+            thermal_gap_fraction: if lai + sai <= 1.0e-6 {
+                1.0
+            } else {
+                crate::MISSING
+            },
+            direct_extinction: 1.0,
+            diffuse_extinction: 0.718,
         },
-        |radiation| radiation.transmission.clone(),
+        ground.to_vec(),
+    ))
+}
+
+fn default_high_resolution_transmission() -> Vec<f64> {
+    (0..HIGH_RES_WAVELENGTHS)
+        .flat_map(|_| [0.0, 1.0, 1.0])
+        .collect()
+}
+
+fn expand_broadband_transmission(transmission: [[f64; 3]; 2]) -> Vec<f64> {
+    (0..HIGH_RES_WAVELENGTHS)
+        .flat_map(|wavelength| transmission[usize::from(wavelength >= 29)])
+        .collect()
+}
+
+fn high_resolution_soil_absorption(
+    ground: &[f64],
+    transmission: &[f64],
+    fractions: &HighResolutionRadiationFractions,
+) -> Result<[[f64; RADIATION_TYPES]; 2]> {
+    ensure!(
+        ground.len() == HIGH_RES_WAVELENGTHS * RADIATION_TYPES
+            && transmission.len() == HIGH_RES_WAVELENGTHS * 3
+            && ground
+                .iter()
+                .chain(transmission)
+                .all(|value| value.is_finite()),
+        "high-resolution soil absorption inputs are invalid"
     );
     let soil_direct = (0..HIGH_RES_WAVELENGTHS)
         .map(|wavelength| {
@@ -226,30 +366,10 @@ pub fn high_resolution_pft_cold_start_state(
         .collect::<Vec<_>>();
     let soil_direct = weighted_high_resolution_bands(&soil_direct, &fractions.direct)?;
     let soil_diffuse = weighted_high_resolution_bands(&soil_diffuse, &fractions.diffuse)?;
-    let (thermal_gap_fraction, direct_extinction, diffuse_extinction) = radiation
-        .map(|radiation| {
-            (
-                radiation.thermal_gap_fraction,
-                radiation.direct_extinction,
-                radiation.diffuse_extinction,
-            )
-        })
-        .unwrap_or((1.0, 1.0, 0.718));
-    Ok(ColdStartRadiation {
-        albedo,
-        sunlit_absorption,
-        shaded_absorption,
-        soil_absorption: [
-            [soil_direct[0], soil_diffuse[0]],
-            [soil_direct[1], soil_diffuse[1]],
-        ],
-        snow_absorption: [[0.0; RADIATION_TYPES]; 2],
-        transmission: None,
-        snow_age: 0.0,
-        thermal_gap_fraction,
-        direct_extinction,
-        diffuse_extinction,
-    })
+    Ok([
+        [soil_direct[0], soil_diffuse[0]],
+        [soil_direct[1], soil_diffuse[1]],
+    ])
 }
 
 fn weighted_two_stream(

@@ -527,18 +527,18 @@ pub(crate) fn two_stream_zmu(phi1: f64, phi2: f64) -> f64 {
     }
 }
 
-struct TwoStreamRadiation {
-    albedo: [[f64; RADIATION_TYPES]; BANDS],
-    transmission: [[f64; 3]; BANDS],
-    thermal_gap_fraction: f64,
-    direct_extinction: f64,
-    diffuse_extinction: f64,
-    sunlit_absorption: [[f64; RADIATION_TYPES]; BANDS],
-    shaded_absorption: [[f64; RADIATION_TYPES]; BANDS],
+pub(crate) struct TwoStreamRadiation {
+    pub(crate) albedo: [[f64; RADIATION_TYPES]; BANDS],
+    pub(crate) transmission: [[f64; 3]; BANDS],
+    pub(crate) thermal_gap_fraction: f64,
+    pub(crate) direct_extinction: f64,
+    pub(crate) diffuse_extinction: f64,
+    pub(crate) sunlit_absorption: [[f64; RADIATION_TYPES]; BANDS],
+    pub(crate) shaded_absorption: [[f64; RADIATION_TYPES]; BANDS],
 }
 
 #[allow(clippy::too_many_arguments)]
-fn two_stream(
+pub(crate) fn two_stream(
     optics: LeafOptics,
     lai: f64,
     sai: f64,

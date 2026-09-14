@@ -8,8 +8,8 @@ use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    HighResolutionLeafOptics, HighResolutionRadiationTables, HIGH_RES_REGIMES,
-    HIGH_RES_WAVELENGTHS, HIGH_RES_ZENITH_BINS,
+    HighResolutionLeafOptics, HighResolutionRadiationFractions, HighResolutionRadiationTables,
+    HIGH_RES_REGIMES, HIGH_RES_WAVELENGTHS, HIGH_RES_ZENITH_BINS,
 };
 use netcdf::types::{FloatType, NcVariableType};
 
@@ -44,9 +44,8 @@ impl HighResolutionLeafOpticsTable {
 
 /// Reads `reflectance` and `transmittance` from CoLM's PFT optical NetCDF file.
 ///
-/// The source variables must use `(wavelength, tissue, pft)` dimensions of
-/// `211 × 2 × 16`, which is the array order consumed by
-/// `leaf_property_init` in `MOD_HighRes_Parameters.F90`.
+/// NetCDF C dimensions are `(pft, tissue, wavelength)` = `16 × 2 × 211`,
+/// the reverse of the Fortran temporary read by `leaf_property_init`.
 pub fn read_high_resolution_leaf_optics(
     path: impl AsRef<Path>,
 ) -> Result<HighResolutionLeafOpticsTable> {
@@ -124,6 +123,16 @@ impl HighResolutionUrbanAlbedo {
 }
 
 impl HighResolutionRadiationTable {
+    /// `MOD_IniTimeVariable` uses `clr_frac(:,89,1)` and `cld_frac(:,1)`.
+    /// Runtime selection remains location/time dependent via `tables()`.
+    pub fn cold_start_fractions(&self) -> HighResolutionRadiationFractions {
+        let start = HIGH_RES_WAVELENGTHS * (HIGH_RES_ZENITH_BINS - 1);
+        HighResolutionRadiationFractions {
+            direct: self.clear_fraction[start..start + HIGH_RES_WAVELENGTHS].to_vec(),
+            diffuse: self.cloud_fraction[..HIGH_RES_WAVELENGTHS].to_vec(),
+        }
+    }
+
     /// Borrows the source spectra in the shared core-table layout.
     pub fn tables(&self) -> HighResolutionRadiationTables<'_> {
         HighResolutionRadiationTables {
@@ -148,12 +157,12 @@ pub fn read_high_resolution_radiation_table(
         cloud_fraction: read_radiation_variable(
             &file,
             "flx_frc_cld",
-            &[HIGH_RES_WAVELENGTHS, HIGH_RES_REGIMES],
+            &[HIGH_RES_REGIMES, HIGH_RES_WAVELENGTHS],
         )?,
         clear_fraction: read_radiation_variable(
             &file,
             "flx_frc_clr",
-            &[HIGH_RES_WAVELENGTHS, HIGH_RES_ZENITH_BINS, HIGH_RES_REGIMES],
+            &[HIGH_RES_REGIMES, HIGH_RES_ZENITH_BINS, HIGH_RES_WAVELENGTHS],
         )?,
     })
 }
@@ -169,20 +178,36 @@ pub fn read_high_resolution_urban_albedo(
             path.display()
         )
     })?;
-    let (urban_dimensions, urban) = read_float_variable(&file, "urban_albedo")?;
+    let (urban_dimensions, urban_source) = read_float_variable(&file, "urban_albedo")?;
     ensure!(
         urban_dimensions.len() == 3
             && urban_dimensions[1] >= 4
-            && urban_dimensions[2] == HIGH_RES_WAVELENGTHS,
-        "high-resolution urban_albedo dimensions are {urban_dimensions:?}; expected [clusters, >=4, 211]"
+            && urban_dimensions[0] == HIGH_RES_WAVELENGTHS,
+        "high-resolution urban_albedo dimensions are {urban_dimensions:?}; expected NetCDF dimensions [211, >=4, clusters]"
     );
-    let clusters = urban_dimensions[0];
+    let clusters = urban_dimensions[2];
     let seasons = urban_dimensions[1];
-    let (mean_dimensions, mean) = read_float_variable(&file, "mean_albedo")?;
+    let (mean_dimensions, mean_source) = read_float_variable(&file, "mean_albedo")?;
     ensure!(
-        mean_dimensions == [seasons, HIGH_RES_WAVELENGTHS],
-        "high-resolution mean_albedo dimensions are {mean_dimensions:?}; expected [{seasons}, 211]"
+        mean_dimensions == [HIGH_RES_WAVELENGTHS, seasons],
+        "high-resolution mean_albedo dimensions are {mean_dimensions:?}; expected NetCDF dimensions [211, {seasons}]"
     );
+    // Preserve Fortran array semantics, but store each spectrum contiguously
+    // so both initialization and runtime can borrow it without gathering.
+    let mut urban = Vec::with_capacity(urban_source.len());
+    for cluster in 0..clusters {
+        for season in 0..seasons {
+            for wavelength in 0..HIGH_RES_WAVELENGTHS {
+                urban.push(urban_source[(wavelength * seasons + season) * clusters + cluster]);
+            }
+        }
+    }
+    let mut mean = Vec::with_capacity(mean_source.len());
+    for season in 0..seasons {
+        for wavelength in 0..HIGH_RES_WAVELENGTHS {
+            mean.push(mean_source[wavelength * seasons + season]);
+        }
+    }
     let lat_north = read_urban_bounds(&file, "lat_north", clusters)?;
     let lat_south = read_urban_bounds(&file, "lat_south", clusters)?;
     let lon_east = read_urban_bounds(&file, "lon_east", clusters)?;
@@ -251,8 +276,8 @@ fn parse_fortran_real(value: &str, field: &str) -> Result<f64> {
 fn read_leaf_variable(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
     let (lengths, source) = read_float_variable(file, name)?;
     ensure!(
-        lengths == [HIGH_RES_WAVELENGTHS, LEAF_TISSUES, PFT_CLASSES],
-        "high-resolution leaf variable {name} dimensions are {lengths:?}; expected [211, 2, 16]"
+        lengths == [PFT_CLASSES, LEAF_TISSUES, HIGH_RES_WAVELENGTHS],
+        "high-resolution leaf variable {name} dimensions are {lengths:?}; expected NetCDF dimensions [16, 2, 211]"
     );
     let width = HIGH_RES_WAVELENGTHS * LEAF_TISSUES;
     let mut pft_major = vec![0.0; PFT_CLASSES * width];
@@ -260,7 +285,7 @@ fn read_leaf_variable(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
         for tissue in 0..LEAF_TISSUES {
             for pft in 0..PFT_CLASSES {
                 pft_major[pft * width + wavelength * LEAF_TISSUES + tissue] =
-                    source[(wavelength * LEAF_TISSUES + tissue) * PFT_CLASSES + pft];
+                    source[(pft * LEAF_TISSUES + tissue) * HIGH_RES_WAVELENGTHS + wavelength];
             }
         }
     }

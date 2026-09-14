@@ -13,11 +13,12 @@ fn leaf_optics_reader_preserves_the_fortran_wavelength_tissue_pft_mapping() {
         .unwrap();
     file.add_dimension("tissue", LEAF_TISSUES).unwrap();
     file.add_dimension("pft", PFT_CLASSES).unwrap();
-    let source = (0..HIGH_RES_WAVELENGTHS)
-        .flat_map(|wavelength| {
+    let source = (0..PFT_CLASSES)
+        .flat_map(|pft| {
             (0..LEAF_TISSUES).flat_map(move |tissue| {
-                (0..PFT_CLASSES)
-                    .map(move |pft| (wavelength * 1_000 + tissue * 100 + pft) as f64 / 10_000.0)
+                (0..HIGH_RES_WAVELENGTHS).map(move |wavelength| {
+                    (wavelength * 1_000 + tissue * 100 + pft) as f64 / 10_000.0
+                })
             })
         })
         .collect::<Vec<_>>();
@@ -26,7 +27,7 @@ fn leaf_optics_reader_preserves_the_fortran_wavelength_tissue_pft_mapping() {
             .iter()
             .map(|value| value + offset)
             .collect::<Vec<_>>();
-        file.add_variable::<f64>(name, &["wavelength", "tissue", "pft"])
+        file.add_variable::<f64>(name, &["pft", "tissue", "wavelength"])
             .unwrap()
             .put_values(&values, ..)
             .unwrap();
@@ -80,17 +81,24 @@ fn radiation_table_reader_preserves_fortran_band_zenith_regime_order() {
     let clear = (0..HIGH_RES_WAVELENGTHS * HIGH_RES_ZENITH_BINS * HIGH_RES_REGIMES)
         .map(|value| value as f64 / 1_000_000.0)
         .collect::<Vec<_>>();
-    file.add_variable::<f64>("flx_frc_cld", &["wavelength", "regime"])
+    file.add_variable::<f64>("flx_frc_cld", &["regime", "wavelength"])
         .unwrap()
         .put_values(&cloud, ..)
         .unwrap();
-    file.add_variable::<f64>("flx_frc_clr", &["wavelength", "zenith", "regime"])
+    file.add_variable::<f64>("flx_frc_clr", &["regime", "zenith", "wavelength"])
         .unwrap()
         .put_values(&clear, ..)
         .unwrap();
     file.close().unwrap();
 
     let table = read_high_resolution_radiation_table(&path).unwrap();
+    let cold = table.cold_start_fractions();
+    let cold_start = HIGH_RES_WAVELENGTHS * (HIGH_RES_ZENITH_BINS - 1);
+    assert_eq!(
+        cold.direct,
+        clear[cold_start..cold_start + HIGH_RES_WAVELENGTHS]
+    );
+    assert_eq!(cold.diffuse, cloud[..HIGH_RES_WAVELENGTHS]);
     let fractions = colm_core::select_high_resolution_radiation(
         colm_core::CalendarTime {
             year: 2001,
@@ -128,21 +136,25 @@ fn urban_albedo_reader_uses_the_first_matching_cluster_then_the_seasonal_mean() 
     file.add_dimension("season", 4).unwrap();
     file.add_dimension("wavelength", HIGH_RES_WAVELENGTHS)
         .unwrap();
-    let urban = (0..2)
-        .flat_map(|cluster| {
+    // NetCDF C order reverses the original Fortran (cluster, season, wavelength).
+    let urban = (0..HIGH_RES_WAVELENGTHS)
+        .flat_map(|wavelength| {
             (0..4).flat_map(move |season| {
-                std::iter::repeat_n((cluster * 10 + season) as f32, HIGH_RES_WAVELENGTHS)
+                (0..2)
+                    .map(move |cluster| (cluster * 10 + season) as f32 + wavelength as f32 / 1000.0)
             })
         })
         .collect::<Vec<_>>();
-    let mean = (0..4)
-        .flat_map(|season| std::iter::repeat_n((100 + season) as f32, HIGH_RES_WAVELENGTHS))
+    let mean = (0..HIGH_RES_WAVELENGTHS)
+        .flat_map(|wavelength| {
+            (0..4).map(move |season| (100 + season) as f32 + wavelength as f32 / 1000.0)
+        })
         .collect::<Vec<_>>();
-    file.add_variable::<f32>("urban_albedo", &["cluster", "season", "wavelength"])
+    file.add_variable::<f32>("urban_albedo", &["wavelength", "season", "cluster"])
         .unwrap()
         .put_values(&urban, ..)
         .unwrap();
-    file.add_variable::<f32>("mean_albedo", &["season", "wavelength"])
+    file.add_variable::<f32>("mean_albedo", &["wavelength", "season"])
         .unwrap()
         .put_values(&mean, ..)
         .unwrap();
@@ -163,6 +175,8 @@ fn urban_albedo_reader_uses_the_first_matching_cluster_then_the_seasonal_mean() 
     assert_eq!(table.spectrum(1, 0.0, 0.0)[0], 0.0);
     assert_eq!(table.spectrum(172, 40.0, 50.0)[0], 12.0);
     assert_eq!(table.spectrum(300, 80.0, 0.0)[0], 103.0);
+    assert_eq!(table.spectrum(172, 40.0, 50.0)[210], f64::from(12.210_f32));
+    assert_eq!(table.spectrum(300, 80.0, 0.0)[29], f64::from(103.029_f32));
     std::fs::remove_dir_all(root).unwrap();
 }
 

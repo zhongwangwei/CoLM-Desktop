@@ -730,6 +730,7 @@ fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
                     &run,
                     &surface,
                     patch_type(LandCoverScheme::Igbp, class).unwrap(),
+                    None,
                 )
                 .unwrap();
                 assert_eq!(files.pft, None, "{name} must not invent a PFT time file");
@@ -773,6 +774,87 @@ fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
 }
 
 #[test]
+fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
+    use crate::spatial_static::spatial_static_tests::{
+        write_high_resolution_radiation, write_high_resolution_urban_albedo,
+    };
+    let root = std::env::temp_dir().join(format!("colm-nonnatural-hires-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let radiation = root.join("radiation.nc");
+    let urban = root.join("urban.nc");
+    write_high_resolution_radiation(&radiation);
+    write_high_resolution_urban_albedo(&urban);
+    let inputs = SinglePointHyperspectralConfig {
+        leaf_optics: None,
+        water_optics: None,
+        radiation: Some(&radiation),
+        urban_albedo: &urban,
+    };
+    for subgrid in [SinglePointSubgrid::Pft, SinglePointSubgrid::Pc] {
+        for (class, kind) in [(11, 2), (13, 1), (15, 3), (17, 4)] {
+            let run = scalar_nonvegetated_run(
+                &root,
+                &format!("{subgrid:?}-{class}"),
+                subgrid,
+                false,
+                false,
+                None,
+                None,
+            );
+            let mut surface = single_point_restart_surface();
+            surface.land_class = class;
+            let files =
+                write_single_point_scalar_cold_time_restarts(&run, &surface, kind, Some(inputs))
+                    .unwrap();
+            assert!(files.pft.is_none());
+            let file = netcdf::open(&files.common.block).unwrap();
+            let spectral = values_f64(&file, "alb_hires");
+            assert_eq!(spectral.len(), HIGH_RES_WAVELENGTHS * 2);
+            if kind < 3 {
+                // Original nonnatural twostream leaves albv_hires initialized to 1.
+                assert!(spectral.iter().all(|&value| value == 1.0));
+                assert!(values_f64(&file, "ssun").iter().any(|&value| value > 0.0));
+            } else {
+                assert!(spectral.iter().all(|&value| (0.0..1.0).contains(&value)));
+                assert_eq!(values_f64(&file, "ssun"), [0.0; 4]);
+                assert_eq!(
+                    values_f64(&file, "thermk"),
+                    [if kind == 3 { crate::MISSING } else { 1.0 }]
+                );
+            }
+            for name in ["reflectance_out", "transmittance_out"] {
+                assert_eq!(
+                    values_f64(&file, name),
+                    vec![-999.0; HIGH_RES_WAVELENGTHS * 16]
+                );
+            }
+        }
+    }
+    let snow = root.join("snow.nc");
+    write_single_point_snow_depth_fixture(&snow, 0.2);
+    let run = scalar_nonvegetated_run(
+        &root,
+        "snow",
+        SinglePointSubgrid::Pft,
+        false,
+        false,
+        None,
+        Some((&snow, false)),
+    );
+    let mut surface = single_point_restart_surface();
+    surface.land_class = 11;
+    let error =
+        write_single_point_scalar_cold_time_restarts(&run, &surface, 2, Some(inputs)).unwrap_err();
+    assert!(
+        error.to_string().contains("spectral snow is undefined"),
+        "{error:#}"
+    );
+    assert!(!run.static_run.restart_dir.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
     let root = std::env::temp_dir().join(format!(
         "colm-init-scalar-cn-vegsnow-{}",
@@ -794,7 +876,7 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
         Some(&cn),
         None,
     );
-    let files = write_single_point_scalar_cold_time_restarts(&run, &wetland, 2).unwrap();
+    let files = write_single_point_scalar_cold_time_restarts(&run, &wetland, 2, None).unwrap();
     assert_eq!(files.pft, None);
     let bgc = netcdf::open(files.bgc.expect("wetland tracer BGC output").block).unwrap();
     let carbon = values_f64(&bgc, "decomp_cpools_vr");
@@ -824,7 +906,8 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
                     None,
                 );
                 let files =
-                    write_single_point_scalar_cold_time_restarts(&run, &surface, kind).unwrap();
+                    write_single_point_scalar_cold_time_restarts(&run, &surface, kind, None)
+                        .unwrap();
                 assert_eq!(files.pft, None);
                 let bgc = netcdf::open(files.bgc.expect("BGC output").block).unwrap();
                 let carbon = values_f64(&bgc, "decomp_cpools_vr");
@@ -877,11 +960,11 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
     }
     assert!(true_run.vegetation_snow);
     assert!(!false_run.vegetation_snow);
-    let true_file = write_single_point_scalar_cold_time_restarts(&true_run, &vegetated, 0)
+    let true_file = write_single_point_scalar_cold_time_restarts(&true_run, &vegetated, 0, None)
         .unwrap()
         .common
         .block;
-    let false_file = write_single_point_scalar_cold_time_restarts(&false_run, &vegetated, 0)
+    let false_file = write_single_point_scalar_cold_time_restarts(&false_run, &vegetated, 0, None)
         .unwrap()
         .common
         .block;

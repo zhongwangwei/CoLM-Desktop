@@ -1134,6 +1134,91 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
 }
 
 #[test]
+fn spatial_hyperspectral_keeps_nonnatural_patches_out_of_pft_canopy() {
+    let root = temp_dir("mixed-hyperspectral");
+    let landdata = root.join("landdata");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[1, 13, 11, 15, 17], &[1; 5]);
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
+    {
+        let mut file = netcdf::append(block_path(
+            &landdata, "landpft", "landpft", 2005, "w180_s90",
+        ))
+        .unwrap();
+        file.variable_mut("eindex")
+            .unwrap()
+            .put_values(&[1_i64], ..)
+            .unwrap();
+        file.variable_mut("ipxend")
+            .unwrap()
+            .put_values(&[1_i32], ..)
+            .unwrap();
+    }
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    for (stem, name, value) in [
+        ("LAI_patches01", "LAI_patches", 2.5),
+        ("SAI_patches01", "SAI_patches", 0.4),
+    ] {
+        write_f64_vec(&landdata, "LAI", stem, name, 2005, "w180_s90", &[value; 5]);
+    }
+    let radiation = root.join("radiation.nc");
+    let urban = root.join("urban.nc");
+    write_high_resolution_radiation(&radiation);
+    write_high_resolution_urban_albedo(&urban);
+    let namelist = root.join("case.nml");
+    for mode in ["PFT", "PC"] {
+        std::fs::write(&namelist, format!("&nl_colm\n DEF_USE_{mode}=.true.\n DEF_HighResVeg=.false.\n DEF_HighResSoil=.false.\n/\n")).unwrap();
+        let restart = root.join(mode);
+        let mut config = crate::SpatialPftTimeConfig::new(
+            crate::SpatialPftStaticConfig::new(
+                &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+            ),
+            crate::RestartDate {
+                year: 2005,
+                julian_day: 1,
+                seconds: 43200,
+            },
+        );
+        config.use_hyperspectral = true;
+        config.high_resolution_radiation = Some(&radiation);
+        config.high_resolution_urban_albedo = Some(&urban);
+        let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+        let file = netcdf::open(files.common.block).unwrap();
+        let albedo = values_f64(&file, "alb_hires").unwrap();
+        let ssun = values_f64(&file, "ssun").unwrap();
+        for patch in 1..5 {
+            for wavelength in 0..211 {
+                for radiation_type in 0..2 {
+                    let value = albedo[(patch * 2 + radiation_type) * 211 + wavelength];
+                    if patch <= 2 {
+                        assert_eq!(value, 1.0);
+                    } else {
+                        assert!((0.0..1.0).contains(&value));
+                    }
+                }
+            }
+            assert_eq!((0..4).any(|band| ssun[patch * 4 + band] > 0.0), patch <= 2);
+        }
+        assert_eq!(values_f64(&file, "thermk").unwrap()[3], crate::MISSING);
+        assert_eq!(values_f64(&file, "thermk").unwrap()[4], 1.0);
+        let pft = netcdf::open(files.pft).unwrap();
+        assert_eq!(values_f64(&pft, "tlai_p").unwrap().len(), 1);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps() {
     let root = temp_dir("crop-tuning");
     let landdata = root.join("landdata");
@@ -2545,16 +2630,16 @@ fn write_observed_wtd(path: &Path) {
     file.close().unwrap();
 }
 
-fn write_high_resolution_radiation(path: &Path) {
+pub(crate) fn write_high_resolution_radiation(path: &Path) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("wavelength", 211).unwrap();
     file.add_dimension("zenith", 89).unwrap();
     file.add_dimension("regime", 5).unwrap();
-    file.add_variable::<f64>("flx_frc_cld", &["wavelength", "regime"])
+    file.add_variable::<f64>("flx_frc_cld", &["regime", "wavelength"])
         .unwrap()
         .put_values(&vec![1.0; 211 * 5], ..)
         .unwrap();
-    file.add_variable::<f64>("flx_frc_clr", &["wavelength", "zenith", "regime"])
+    file.add_variable::<f64>("flx_frc_clr", &["regime", "zenith", "wavelength"])
         .unwrap()
         .put_values(&vec![1.0; 211 * 89 * 5], ..)
         .unwrap();
@@ -2568,11 +2653,11 @@ fn write_high_resolution_leaf_optics(path: &Path) {
     file.add_dimension("pft", 16).unwrap();
     let reflectance = vec![0.1; 211 * 2 * 16];
     let transmittance = vec![0.05; 211 * 2 * 16];
-    file.add_variable::<f64>("reflectance", &["wavelength", "tissue", "pft"])
+    file.add_variable::<f64>("reflectance", &["pft", "tissue", "wavelength"])
         .unwrap()
         .put_values(&reflectance, ..)
         .unwrap();
-    file.add_variable::<f64>("transmittance", &["wavelength", "tissue", "pft"])
+    file.add_variable::<f64>("transmittance", &["pft", "tissue", "wavelength"])
         .unwrap()
         .put_values(&transmittance, ..)
         .unwrap();
@@ -2589,16 +2674,16 @@ fn write_high_resolution_water_optics(path: &Path) {
     .unwrap();
 }
 
-fn write_high_resolution_urban_albedo(path: &Path) {
+pub(crate) fn write_high_resolution_urban_albedo(path: &Path) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("cluster", 1).unwrap();
     file.add_dimension("season", 4).unwrap();
     file.add_dimension("wavelength", 211).unwrap();
-    file.add_variable::<f64>("urban_albedo", &["cluster", "season", "wavelength"])
+    file.add_variable::<f64>("urban_albedo", &["wavelength", "season", "cluster"])
         .unwrap()
         .put_values(&vec![0.2; 4 * 211], ..)
         .unwrap();
-    file.add_variable::<f64>("mean_albedo", &["season", "wavelength"])
+    file.add_variable::<f64>("mean_albedo", &["wavelength", "season"])
         .unwrap()
         .put_values(&vec![0.2; 4 * 211], ..)
         .unwrap();

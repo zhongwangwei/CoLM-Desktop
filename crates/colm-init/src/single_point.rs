@@ -13,8 +13,9 @@ use colm_case::pft::{
 use colm_core::{
     bsm_soil_moisture, cold_start_ground_albedo, cold_start_pc_broadband_radiation_from_ground,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
-    high_resolution_pft_cold_start_state, pft_high_resolution_radiation, prospect_leaf_optics,
-    select_high_resolution_radiation, HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS,
+    high_resolution_nonnatural_cold_start_state, high_resolution_pft_cold_start_state,
+    pft_high_resolution_radiation, prospect_leaf_optics, HighResolutionLeafOptics,
+    HIGH_RES_WAVELENGTHS,
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
@@ -584,7 +585,7 @@ pub fn write_single_point_hyperspectral_constant_restarts(
                 run.subgrid,
                 SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
             ),
-        "HYPERSPECTRAL single-point cold starts support natural PFT/PC surfaces only"
+        "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
     );
     let albedo = read_single_point_hyperspectral_albedo(&run.static_run.surface)?;
     write_single_point_constant_restarts_with_hyperspectral(run, Some(&albedo))
@@ -654,10 +655,6 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         static_config.use_soil_texture,
     )?;
     if patch_type(run.static_run.land_cover, surface.land_class)? != 0 {
-        ensure!(
-            hyperspectral_albedo.is_none(),
-            "HYPERSPECTRAL single-point cold starts support natural PFT/PC surfaces only"
-        );
         return Ok(SinglePointConstantRestartFiles {
             common: write_single_point_constant_restart_from_surface(
                 &surface,
@@ -1078,13 +1075,14 @@ pub fn write_single_point_cold_time_restarts(
     {
         return write_single_point_pft_cold_time_restarts(run, None, surface);
     }
-    write_single_point_scalar_cold_time_restarts(run, &surface, kind)
+    write_single_point_scalar_cold_time_restarts(run, &surface, kind, None)
 }
 
 fn write_single_point_scalar_cold_time_restarts(
     run: &SinglePointColdStartRun,
     surface: &crate::SinglePointSurfaceData,
     kind: i32,
+    hyperspectral: Option<SinglePointHyperspectralConfig<'_>>,
 ) -> Result<SinglePointTimeRestartFiles> {
     let config = run.static_run.static_config();
     let dimensions = TimeRestartDimensions::default();
@@ -1201,23 +1199,74 @@ fn write_single_point_scalar_cold_time_restarts(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
-    let radiation = cold_start_broadband_radiation_with_snow(
-        kind,
-        surface.albedo,
-        cold_soil.liquid_water_kg_m2[0],
-        thickness[0],
-        leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
-        lai,
-        sai,
-        0.0,
-        cosine_zenith.max(0.001),
-        true,
-        config.land_cover == LandCoverScheme::Usgs,
-        run.vegetation_snow,
-        snow_depth_m,
-        snow_cover.ground_snow_fraction,
-        cold_soil.temperature_k[0],
-    )?;
+    let (radiation, high_resolution_albedo) = if let Some(inputs) = hyperspectral {
+        ensure!(
+            snow_depth_m == 0.0 && snow_cover.ground_snow_fraction == 0.0,
+            "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
+        );
+        let urban = read_high_resolution_urban_albedo(inputs.urban_albedo)?;
+        let fractions = read_high_resolution_radiation_table(
+            inputs
+                .radiation
+                .context("HYPERSPECTRAL cold start needs --highres-radiation")?,
+        )?
+        .cold_start_fractions();
+        let ground = if kind == 1 {
+            // IniTimeVariable passes day 1, not the simulation calendar day.
+            urban
+                .spectrum(1, surface.latitude_degrees, surface.longitude_degrees)
+                .iter()
+                .flat_map(|&value| [value, value])
+                .collect()
+        } else {
+            expand_broadband_ground_albedo(
+                cold_start_ground_albedo(
+                    kind,
+                    surface.albedo,
+                    cold_soil.liquid_water_kg_m2[0],
+                    thickness[0],
+                    cosine_zenith.max(0.001),
+                    0.0,
+                    0.0,
+                    cold_soil.temperature_k[0],
+                )?
+                .ground,
+            )
+        };
+        let (state, albedo) = high_resolution_nonnatural_cold_start_state(
+            kind,
+            &ground,
+            &fractions,
+            leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
+            lai,
+            sai,
+            cosine_zenith.max(0.001),
+            config.land_cover == LandCoverScheme::Usgs,
+            run.vegetation_snow,
+        )?;
+        (state, Some(albedo))
+    } else {
+        (
+            cold_start_broadband_radiation_with_snow(
+                kind,
+                surface.albedo,
+                cold_soil.liquid_water_kg_m2[0],
+                thickness[0],
+                leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
+                lai,
+                sai,
+                0.0,
+                cosine_zenith.max(0.001),
+                true,
+                config.land_cover == LandCoverScheme::Usgs,
+                run.vegetation_snow,
+                snow_depth_m,
+                snow_cover.ground_snow_fraction,
+                cold_soil.temperature_k[0],
+            )?,
+            None,
+        )
+    };
     let common_patch = [ColdPatchFields {
         total_lai,
         total_sai,
@@ -1261,6 +1310,19 @@ fn write_single_point_scalar_cold_time_restarts(
         &common_patch,
         None,
     )?;
+    if let Some(albedo) = high_resolution_albedo {
+        let unused_optics = vec![-999.0; HIGH_RES_WAVELENGTHS * 16];
+        append_time_hyperspectral_fields(
+            &common.block,
+            2,
+            TimeHyperspectralFields {
+                albedo: &albedo,
+                reflectance: &unused_optics,
+                transmittance: &unused_optics,
+            },
+            run.static_run.compression_level,
+        )?;
+    }
     Ok(SinglePointTimeRestartFiles {
         common,
         pft: None,
@@ -1281,7 +1343,7 @@ fn write_single_point_scalar_cold_time_restarts(
     })
 }
 
-/// Writes HYPERSPECTRAL time restarts for a natural single-point PFT or PC case.
+/// Writes HYPERSPECTRAL time restarts for a single-point PFT or PC case.
 pub fn write_single_point_hyperspectral_cold_time_restarts(
     run: &SinglePointColdStartRun,
     hyperspectral: SinglePointHyperspectralConfig<'_>,
@@ -1292,7 +1354,7 @@ pub fn write_single_point_hyperspectral_cold_time_restarts(
                 run.subgrid,
                 SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
             ),
-        "HYPERSPECTRAL single-point cold starts support natural PFT/PC surfaces only"
+        "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
     );
     let config = run.static_run.static_config();
     let surface = read_single_point_surface(
@@ -1301,7 +1363,12 @@ pub fn write_single_point_hyperspectral_cold_time_restarts(
         config.hydraulic_model,
         config.use_soil_texture,
     )?;
-    write_single_point_pft_cold_time_restarts(run, Some(hyperspectral), surface)
+    let kind = patch_type(config.land_cover, surface.land_class)?;
+    if kind == 0 {
+        write_single_point_pft_cold_time_restarts(run, Some(hyperspectral), surface)
+    } else {
+        write_single_point_scalar_cold_time_restarts(run, &surface, kind, Some(hyperspectral))
+    }
 }
 
 fn write_single_point_urban_cold_time_restarts(
@@ -1664,6 +1731,10 @@ fn write_single_point_pft_cold_time_restarts(
         }
     }
     let snow_depth_m = initial_snow_depth(run, &surface, month)?;
+    ensure!(
+        hyperspectral.is_none() || snow_depth_m == 0.0,
+        "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
+    );
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
     let roughness = weighted_sum(&canopy.top_m, &pft.fraction)? * 0.1;
     let roughness_p = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
@@ -1781,21 +1852,7 @@ fn write_single_point_pft_cold_time_restarts(
     let high_resolution_fractions = high_resolution_sources
         .as_ref()
         .and_then(|sources| sources.2.as_ref())
-        .map(|radiation| {
-            select_high_resolution_radiation(
-                CalendarTime {
-                    year: run.date.year,
-                    julian_day: run.date.julian_day,
-                    seconds: run.date.seconds,
-                },
-                run.greenwich,
-                surface.longitude_degrees,
-                cosine_zenith,
-                surface.latitude_degrees.to_radians(),
-                radiation.tables(),
-            )
-        })
-        .transpose()?;
+        .map(HighResolutionRadiationTable::cold_start_fractions);
     let mut one_dimensional_radiation = pft
         .class
         .iter()

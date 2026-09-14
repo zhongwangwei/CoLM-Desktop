@@ -1259,4 +1259,4 @@ pub(crate) fn values_i64(file: &netcdf::File, name: &str) -> Result<Vec<i64>> {
 
 #[cfg(test)]
 #[path = "spatial_static_tests.rs"]
-mod spatial_static_tests;
+pub(crate) mod spatial_static_tests;

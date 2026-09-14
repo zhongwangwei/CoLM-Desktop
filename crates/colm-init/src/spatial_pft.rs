@@ -11,8 +11,8 @@ use colm_case::is_default;
 use colm_core::{
     bsm_soil_moisture, cold_start_ground_albedo, cold_start_pc_broadband_radiation_from_ground,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
-    high_resolution_pft_cold_start_state, pft_high_resolution_radiation, prospect_leaf_optics,
-    select_high_resolution_radiation, CalendarTime, HighResolutionLeafOptics, SoilReflectance,
+    high_resolution_nonnatural_cold_start_state, high_resolution_pft_cold_start_state,
+    pft_high_resolution_radiation, prospect_leaf_optics, HighResolutionLeafOptics, SoilReflectance,
     HIGH_RES_WAVELENGTHS,
 };
 use colm_forcing::{
@@ -513,6 +513,10 @@ pub fn write_spatial_pft_cold_time_restarts(
     }
     let canopy = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
     let common_state = read_common_state(&common.block, patches.class.len())?;
+    ensure!(
+        !config.use_hyperspectral || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
+        "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
+    );
     let top_soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m[0];
     let albedo = [
         read_lct_f64(
@@ -646,21 +650,7 @@ pub fn write_spatial_pft_cold_time_restarts(
             fractions.push(
                 radiation
                     .as_ref()
-                    .map(|radiation| {
-                        select_high_resolution_radiation(
-                            CalendarTime {
-                                year: config.date.year,
-                                julian_day: config.date.julian_day,
-                                seconds: config.date.seconds,
-                            },
-                            config.greenwich,
-                            longitude[patch].to_degrees(),
-                            common_state.cosine_zenith[patch],
-                            latitude[patch],
-                            radiation.tables(),
-                        )
-                    })
-                    .transpose()?,
+                    .map(HighResolutionRadiationTable::cold_start_fractions),
             );
         }
         (
@@ -917,6 +907,31 @@ pub fn write_spatial_pft_cold_time_restarts(
     let mut common_sai = vec![None; patches.class.len()];
     for (patch, indices) in pft_to_patch.iter().enumerate() {
         if patch_kind[patch] != 0 {
+            if config.use_hyperspectral {
+                let (state, albedo) = high_resolution_nonnatural_cold_start_state(
+                    patch_kind[patch],
+                    &high_resolution_ground[patch],
+                    high_resolution_fractions[patch]
+                        .as_ref()
+                        .expect("spectral fractions are loaded"),
+                    crate::leaf_optics_from_land_cover(
+                        LandCoverScheme::Igbp,
+                        patches.class[patch],
+                    )?,
+                    common_state.lai[patch],
+                    common_state.sai[patch],
+                    common_state.cosine_zenith[patch].max(0.001),
+                    false,
+                    config.vegetation_snow,
+                )?;
+                common_radiation[patch] = Some(state);
+                copy_high_resolution_pft_radiation(
+                    &mut high_resolution_albedo,
+                    patches.class.len(),
+                    patch,
+                    &albedo,
+                )?;
+            }
             continue;
         }
         let fractions = indices
@@ -1115,6 +1130,9 @@ struct CommonColdState {
     ground_temperature_k: Vec<f64>,
     top_liquid_kg_m2: Vec<f64>,
     cosine_zenith: Vec<f64>,
+    lai: Vec<f64>,
+    sai: Vec<f64>,
+    snow_depth_m: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1618,12 +1636,18 @@ fn read_common_state(path: &Path, patches: usize) -> Result<CommonColdState> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let ground_temperature_k = values_f64(&file, "t_grnd")?;
     let cosine_zenith = values_f64(&file, "coszen")?;
+    let lai = values_f64(&file, "lai")?;
+    let sai = values_f64(&file, "sai")?;
+    let snow_depth_m = values_f64(&file, "snowdp")?;
     let liquid = values_f64(&file, "wliq_soisno")?;
     const SNOW_LAYERS: usize = 5;
     const SOIL_LAYERS: usize = 10;
     ensure!(
         ground_temperature_k.len() == patches
             && cosine_zenith.len() == patches
+            && lai.len() == patches
+            && sai.len() == patches
+            && snow_depth_m.len() == patches
             && liquid.len() == patches * (SNOW_LAYERS + SOIL_LAYERS),
         "common spatial time restart has an unexpected soil/snow layout"
     );
@@ -1633,6 +1657,9 @@ fn read_common_state(path: &Path, patches: usize) -> Result<CommonColdState> {
             .map(|patch| liquid[patch * (SNOW_LAYERS + SOIL_LAYERS) + SNOW_LAYERS])
             .collect(),
         cosine_zenith,
+        lai,
+        sai,
+        snow_depth_m,
     })
 }
 

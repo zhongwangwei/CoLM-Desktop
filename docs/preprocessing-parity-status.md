@@ -6,6 +6,56 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Nonnatural hyperspectral cold initialization
+
+PFT/PC single-point surfaces with IGBP 11/13/15/17 now use the common scalar
+HiRes initializer rather than requiring a synthetic PFT. The same core helper
+updates nonnatural patches in mixed spatial PFT/PC blocks. Wetland and urban
+canopies reuse the existing broadband two-stream solver against spectrally
+weighted ground, retaining USGS stem-optics suppression; glacier and lake
+patches remain ground-only. Optical output
+sentinels remain `-999`, and positive-LAI glacier `thermk` remains `spval`.
+The original nonnatural-canopy quirk (`alb_hires=1` although broadband `alb`
+is calculated) is preserved explicitly, not silently replaced with a different
+physical model. Empty-PFT constant output and absent dynamic PFT output remain
+unchanged for single-point nonnatural surfaces.
+
+Cold radiation fractions now use the original `clr_frac(:,89,1)` and
+`cld_frac(:,1)`; urban selection uses the original fixed day 1. Runtime's
+location/time-dependent selector is unchanged. Actual NetCDF-Fortran probes
+also exposed three reversed-dimension reader contracts. Native on-disk C
+layouts are clear/cloud `(5,89,211)/(5,211)`, leaf `(16,2,211)`, and urban/mean
+`(211,seasons,clusters)/(211,seasons)`. Rust now reads these layouts and gathers
+leaf/urban spectra once into their existing contiguous storage. The previously
+accepted synthetic layouts were not compatible with the corresponding original
+Fortran calls; no on-disk dataset or reference file was rewritten.
+
+Seven numerical controls use original `MOD_Albedo_HiRes::twostream` and
+`calculate_wgt_variable` extracted unchanged, compiled with
+`-O2 -fdefault-real-8`; all defined radiation fields pass the existing combined
+`1e-12` gate. The surrounding no-snow branch driver is synthetic. Separate
+`nf90_get_var` probes establish native fraction, leaf and urban indexing with
+nonuniform sentinels. These are bounded source/I/O probes, **not a full original
+HiRes executable or real-data runtime comparison**. Evidence and RED/GREEN logs:
+`/tmp/colm-nonnatural-highres-fix/`; integrated validation:
+`/tmp/colm-nonnatural-highres-validation/`.
+The final integrated run passes 892 tests (including 144 forcing tests),
+all-target Clippy, downstream checks, scoped formatting and release builds.
+Eight release CLI cases (PFT/PC × four nonnatural classes) now initialize with
+native-layout synthetic spectra; the frozen preceding binary rejects all eight.
+Those cases reuse previously generated scalar surface data with a controlled
+211-band addition and do not constitute a fresh raw-data HiRes surface run.
+
+**Still open:** original no-SNICAR HiRes copies an uninitialized five-band snow
+albedo even at zero snow. Rust's deterministic zero snow absorption is an
+explicit defined-state choice, not byte parity with those undefined values.
+Positive-snow HiRes is rejected in both cold adapters; SNICAR remains unported.
+The spatial adapter currently writes the preliminary common restart before
+this rejection, so an error may leave an incomplete output directory (not a
+successful initializer result). All-zero-PFT spatial blocks, unsupported
+HiRes LCT/urban-model combinations, pristine whole-runtime scientific parity
+and platform acceptance are not closed by this change.
+
 ## Surface compression and TOPMODEL/VIC control coverage
 
 Rust surface output now honors `DEF_Srfdata_CompressLevel` (default `1`, valid
@@ -323,10 +373,9 @@ coverage, not a full prognostic methane validation.
 
 These comparisons use the available unchanged Desktop vendor kernels, **not a
 fresh pristine `ebe6de9` build**, and do not assert byte-identical compact surface
-containers. Nonnatural HYPERSPECTRAL is still unimplemented and rejects before
-restart writes; its constant entry can report a missing soil-spectrum field
-before the unsupported-class message. This diagnostic ordering is nonblocking,
-not full high-resolution support. SNICAR, external-lake provider integration,
+containers. Nonnatural HYPERSPECTRAL was excluded from these broadband controls;
+the subsequent snow-free migration and its separate evidence are documented at
+the top of this report. SNICAR, external-lake provider integration,
 all-PFTless spatial blocks, broader scientific and platform gates remain open.
 
 ## SNICAR remains unported and now fails explicitly
@@ -371,7 +420,8 @@ real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
 rounding or absent test coverage: SNICAR optical initialization, external-lake
-options and nonnatural hyperspectral initialization still require implementation.
+options and snow-covered hyperspectral initialization still require implementation.
+Snow-free nonnatural hyperspectral initialization is now covered above.
 Single-point broadband nonvegetated BGC, spatial wetland CN and common lake
 sediment carbon initialization are repaired above.
 Urban-only masking is repaired above; an explicit unsupported-feature guard is

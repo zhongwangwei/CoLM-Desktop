@@ -210,14 +210,6 @@ fn native_pft_pc_nonnatural_singlepoint_pipeline_writes_pftless_restarts() {
                 let highres_restart = directory.join("highres-restart");
                 let mut highres_run = run.cold_start.clone();
                 highres_run.static_run.restart_dir = highres_restart.clone();
-                let constant_error =
-                    write_single_point_hyperspectral_constant_restarts(&highres_run)
-                        .unwrap_err()
-                        .to_string();
-                assert!(
-                    constant_error.contains("natural PFT/PC surfaces only"),
-                    "constant highres must reject class before writing or reading optics: {constant_error:#}"
-                );
                 let missing = directory.join("does-not-exist.nc");
                 let time_error = write_single_point_hyperspectral_cold_time_restarts(
                     &highres_run,
@@ -231,13 +223,18 @@ fn native_pft_pc_nonnatural_singlepoint_pipeline_writes_pftless_restarts() {
                 .unwrap_err()
                 .to_string();
                 assert!(
-                    time_error.contains("natural-soil patch"),
-                    "time highres must reject class before writing or reading optics: {time_error:#}"
+                    time_error.contains("urban") || time_error.contains("radiation"),
+                    "highres must read its actual spectral inputs: {time_error:#}"
                 );
                 assert!(
                     !highres_restart.exists(),
-                    "highres class guards must fail before creating restart outputs"
+                    "missing tables must fail before writing"
                 );
+                let constants = write_single_point_hyperspectral_constant_restarts(&highres_run)
+                    .expect("nonnatural highres constants retain the zero-PFT contract");
+                assert!(constants.pft.is_some());
+                let common = netcdf::open(constants.common.block).unwrap();
+                assert_eq!(values_f64(&common, "soil_alb").len(), 211);
 
                 std::fs::remove_dir_all(directory).unwrap();
             }
