@@ -61,10 +61,10 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
         for j in 0..n {
             let diagonal = fjac[j * n + j];
             if diagonal != 0.0 {
-                let sum = (j..m).map(|row| wa4[row] * fjac[row * n + j]).sum::<f64>();
+                let sum = (j..m).fold(0.0, |sum, row| wa4[row].mul_add(fjac[row * n + j], sum));
                 let scale = -sum / diagonal;
                 for row in j..m {
-                    wa4[row] += fjac[row * n + j] * scale;
+                    wa4[row] = fjac[row * n + j].mul_add(scale, wa4[row]);
                 }
             }
             fjac[j * n + j] = wa1[j];
@@ -76,7 +76,8 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
             for j in 0..n {
                 let column = ipvt[j];
                 if wa2[column] != 0.0 {
-                    let sum = (0..=j).map(|row| qtf[row] * fjac[row * n + j]).sum::<f64>();
+                    let sum =
+                        (0..=j).fold(0.0, |sum, row| qtf[row].mul_add(fjac[row * n + j], sum));
                     gnorm = gnorm.max((sum / fnorm / wa2[column]).abs());
                 }
             }
@@ -116,7 +117,7 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
                 let column = ipvt[j];
                 let step = wa1[column];
                 for row in 0..=j {
-                    wa3[row] += fjac[row * n + j] * step;
+                    wa3[row] = fjac[row * n + j].mul_add(step, wa3[row]);
                 }
             }
             let temp1 = enorm(&wa3) / fnorm;
@@ -199,7 +200,7 @@ fn lmpar(
         wa1[j] /= r[j * n + j];
         let value = wa1[j];
         for row in 0..j {
-            wa1[row] -= r[row * n + j] * value;
+            wa1[row] = (-r[row * n + j]).mul_add(value, wa1[row]);
         }
     }
     for j in 0..n {
@@ -222,14 +223,14 @@ fn lmpar(
             wa1[j] = diag[column] * (wa2[column] / dxnorm);
         }
         for j in 0..n {
-            let sum = (0..j).map(|row| wa1[row] * r[row * n + j]).sum::<f64>();
+            let sum = (0..j).fold(0.0, |sum, row| wa1[row].mul_add(r[row * n + j], sum));
             wa1[j] = (wa1[j] - sum) / r[j * n + j];
         }
         let norm = enorm(&wa1);
         parl = (fp / delta / norm) / norm;
     }
     for j in 0..n {
-        let sum = (0..=j).map(|row| qtb[row] * r[row * n + j]).sum::<f64>();
+        let sum = (0..=j).fold(0.0, |sum, row| qtb[row].mul_add(r[row * n + j], sum));
         wa1[j] = sum / diag[ipvt[j]];
     }
     let gnorm = enorm(&wa1);
@@ -270,7 +271,7 @@ fn lmpar(
             wa1[j] /= sdiag[j];
             let value = wa1[j];
             for row in j + 1..n {
-                wa1[row] -= r[row * n + j] * value;
+                wa1[row] = (-r[row * n + j]).mul_add(value, wa1[row]);
             }
         }
         let norm = enorm(&wa1);
@@ -316,12 +317,14 @@ fn qrfac(a: &mut [f64], m: usize, n: usize) -> (Vec<usize>, Vec<f64>, Vec<f64>) 
             }
             a[j * n + j] += 1.0;
             for column in j + 1..n {
-                let dot = (j..m)
-                    .map(|row| a[row * n + j] * a[row * n + column])
-                    .sum::<f64>();
+                // Production MOD_Utils fuses the ordered dot and rank-one
+                // update. Separate rounding perturbs nearly dependent columns.
+                let dot = (j..m).fold(0.0, |sum, row| {
+                    a[row * n + j].mul_add(a[row * n + column], sum)
+                });
                 let scale = dot / a[j * n + j];
                 for row in j..m {
-                    a[row * n + column] -= scale * a[row * n + j];
+                    a[row * n + column] = (-scale).mul_add(a[row * n + j], a[row * n + column]);
                 }
                 if rdiag[column] != 0.0 {
                     let temp = a[j * n + column] / rdiag[column];
@@ -398,9 +401,7 @@ fn qrsolv(
     }
     for offset in 0..nsing {
         let j = nsing - 1 - offset;
-        let sum = (j + 1..nsing)
-            .map(|row| wa[row] * r[row * n + j])
-            .sum::<f64>();
+        let sum = (j + 1..nsing).fold(0.0, |sum, row| wa[row].mul_add(r[row * n + j], sum));
         wa[j] = (wa[j] - sum) / sdiag[j];
     }
     for j in 0..n {
@@ -438,6 +439,54 @@ mod tests {
         assert_eq!(
             enorm_column(&[999.0, 888.0, 1.0, 0.08, 2.0, 0.2], 3, 2, 1, 1),
             expected
+        );
+    }
+
+    #[test]
+    fn pivoted_qr_retains_original_dot_and_householder_rounding() {
+        // Original MOD_Utils::qrfac, -O2 -fdefault-real-8. Nearly dependent
+        // columns expose separate rounding of the dot and rank-one update.
+        let mut a = [
+            0x3ff0000000000001,
+            0x3fefffffffffffff,
+            0x3fd999999999999a,
+            0xbfd5555555555555,
+            0xbfd5555555555554,
+            0x3fe3333333333333,
+            0x3fa999999999999a,
+            0x3fa999999999999b,
+            0xbfe199999999999a,
+            0x3fd0000000000001,
+            0x3fcfffffffffffff,
+            0x3fb999999999999a,
+        ]
+        .map(f64::from_bits);
+        let (ipvt, rdiag, acnorm) = qrfac(&mut a, 4, 3);
+        assert_eq!(ipvt, [0, 2, 1]);
+        assert_eq!(
+            a.map(f64::to_bits),
+            [
+                0x3ffec0e708f74b55,
+                0xbfc74f8183ed2001,
+                0xbff15a0e95c7d2c5,
+                0xbfd3abdeb69f0f1b,
+                0x3ffc6749e447a6f4,
+                0x3c3d6c6776ed5f73,
+                0x3fa79b0b418babba,
+                0xbfe42f73247be97d,
+                0x3ffa1ee6c01bee82,
+                0x3fcd81ce11ee96aa,
+                0x3fa1493ce73266ac,
+                0xbfe8c8e6f8f460a3,
+            ]
+        );
+        assert_eq!(
+            rdiag.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            [0xbff15a0e95c7d2c5, 0xbfec9c197a74d0c7, 0xbc852407e48866ea]
+        );
+        assert_eq!(
+            acnorm.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            [0x3ff15a0e95c7d2c5, 0x3ff15a0e95c7d2c4, 0x3fed327fa4116eac]
         );
     }
 

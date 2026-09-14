@@ -579,3 +579,29 @@ Two unsupported WMO combinations fail before surface output: CROP leaves
 `aggregation_request_data` on pixel index -1 with no WMO branch. The latter
 is **not** the sentinel-aware `SpatialMapping` geometry path, so Rust does not
 invent a whole-element median or silently copy another patch's albedo.
+
+## Ordered QR arithmetic follow-up
+
+The original solver's pure-f64 dot products and rank-one updates use fused
+multiply-add on the production ARM64 build. Rust now records that rounding with
+ordered `mul_add` folds and updates, without changing pivots, damping limits,
+tolerances or iteration counts. The independent 4×3 near-dependent QR golden
+improves from 14/21 matching outputs to **21/21 bitwise matches**; its regression
+fails before the fix and passes afterward. Linking the same driver against the
+untouched production `MOD_Utils.o` produces byte-identical golden output.
+Evidence: `/tmp/colm-qr-reference/` and `/tmp/colm-lm-qr-audit/`.
+
+This is not a blanket FMA conversion: original D-literal expressions in the
+Givens rotations and convergence formulas promote to REAL(16) under
+`-fdefault-real-8`. Those formulas remain a separate numerical parity gap.
+The original-input callback probes also retain residual/Jacobian bit differences
+before QR, so matching this primitive alone cannot prove complete fit parity.
+
+The fresh full 957-element run, `rust-full-lm-qr/` under the existing Pearl River
+artifact root, completes surface / initial / unchanged original two-step runtime
+in 113.74 / 4.60 / 6.51 seconds (not a controlled speed comparison). All 1,479
+surface schemas match except `create_time`; all 15,922,348 ordered memberships
+and four pixel axes match. **48 of 242 fields / 75,333 values still fail** the
+unchanged `atol=rtol=1e-12` gate. Maximum surface errors are `psi_s_l8 = 3.93191`
+and `k_s_l5 = 3.81610`; post-runtime `gs0sun` still differs by 3.65504. The gate
+remains failing even though some individual fits move closer to the reference.
