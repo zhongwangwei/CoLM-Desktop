@@ -378,8 +378,9 @@ CFTs to **all** class-12 patches, including pre-existing fast-PC cropland. Tests
 cover both namelist defaults/coercions, invalid CLI modes, all 17 IGBP parent
 classes, all three partition modes and the two crop-splitting filters. An
 independent source review found no blocking issue in this bounded change.
-Spatial PFT/PC LULCC is still explicitly unsupported; these targeted tests do
-not establish a complete real-data PFT/PC scientific comparison.
+PFT/PC current-year and five-year snapshot LULCC preprocessing is now wired
+through the shared transfer writer (see the follow-up below). These targeted
+tests do not establish a complete real-data PFT/PC scientific comparison.
 
 ## LM norm boundary and virtual WMO mask
 
@@ -605,3 +606,80 @@ and four pixel axes match. **48 of 242 fields / 75,333 values still fail** the
 unchanged `atol=rtol=1e-12` gate. Maximum surface errors are `psi_s_l8 = 3.93191`
 and `k_s_l5 = 3.81610`; post-runtime `gs0sun` still differs by 3.65504. The gate
 remains failing even though some individual fits move closer to the reference.
+
+
+## PFT/PC LULCC preprocessing and diagnostic parity
+
+Spatial PFT/PC case namelists now forward `DEF_USE_LULCC` to the existing
+transfer writer; direct `spatial-pft` accepts `--lulcc`. Current-year and
+historical five-year snapshot topology use the ordinary PFT/PC path, with
+patch-normalized previous-land-cover transfer vectors. WMO rows remain present
+but zero, rather than inheriting their donor's distribution. The shared kernel
+also exposes **element-normalized source areas** for `lccpct_matrix`: these are
+not interchangeable with the runtime patch fractions. Element totals are summed
+in patch order, skipping WMO, and CROP diagnostic mapping retains `pctshared`.
+No initializer-specific copy of a runtime LULCC driver was added.
+
+The pristine-original GRIDBASED + IGBP_PFT + LULCC proof is
+`/tmp/colm-lulcc-original/`, at `ebe6de998692f075216037810ce9184fa407e27b`,
+using serial `-O2 -fdefault-real-8`, year 2005, WMO enabled and no CROP/BGC.
+Its raw overlay links the existing 2005 tile cache and the supplied 2004 tile;
+no replacement source dataset was invented. The four-element fixture produces
+eight patches (four virtual) and 40 PFTs. Rust artifacts and comparison scripts
+are in `/tmp/colm-lulcc-rust/`: surface and initial complete, all 299 NetCDF
+file names/schemas match except `create_time`, and all 18 transfer files pass
+`atol=rtol=1e-12` (maximum absolute error `3.3306690738754696e-15`). The full
+output comparison still has 36 failing files from soil fits and their downstream
+initial values; it is not full scientific parity.
+
+An independent initialization check feeds Rust the **unchanged original** LULCC
+surface, `/tmp/colm-lulcc-init-original-input/`. All five restart files and 164
+variables pass the same gate; 148 variables are bitwise identical. This validates
+this cold-start path, not runtime land-cover-change restart/state recovery.
+
+A second original build enables `SrfdataDiag` and `DEF_SOLO_PFT`:
+`/tmp/colm-lulcc-diag-original/`, compared with `/tmp/colm-lulcc-diag-rust/`.
+It has four elements, 24 patches (four virtual) and 140 PFTs, so it distinguishes
+patch-normalized from element-normalized diagnostics. The executable test also
+exposed a shared diagnostic-mapping bug: unlike scientific aggregation, original
+`build_arealweighted` treats a virtual WMO patch as whole-element geometry.
+Skipping that geometry had halved the diagnostic denominator. Both dense and
+sparse Rust mapping now preserve it; the transfer fractions themselves remain
+zero on WMO rows. The corrected matrix and grid companion have no values beyond
+`1e-12` (maximum absolute errors approximately `1.2e-14` and `1.3e-14`). All
+coordinates, dimensions, variable order, types and attributes match, excluding
+`create_time`. Shared diagnostic writers retain the original float32 **on-disk
+center coordinates**, float64 edges/scientific fields, and unlimited record axes;
+all mapping and model calculations remain f64.
+
+The initial diagnostic test omitted Rust's explicit `DEF_USE_SrfdataDiag`:
+Fortran selects this at compile time instead. That attempt is **not** numerical
+RED evidence. After fixing the test namelist, the actual failing matrix and
+comparison were preserved in `valid-before-numeric-fix/`; the same corrected
+case passes after the mapping/writer repairs. Existing diagnostic writer tests
+also failed for coordinate order/record schema before the fix and pass afterward.
+
+Pre-2000 non-five-year LULCC uses an upstream LAI-only branch which remains
+unmigrated. Both direct PFT commands and case commands reject that unsupported
+request before output. Real-data PC/CROP LULCC and the broader control matrix
+remain separate acceptance work; shared dispatch and synthetic tests are not
+substitutes for those comparisons.
+
+During isolated original-LULCC setup, an incorrect test namelist touched an
+older generated WMO reference. That output was moved to
+`/tmp/colm-lulcc-original/contaminated-wmo-readtest/`, not used as a golden.
+The WMO case was regenerated with its own unchanged original binaries, all
+three completion markers and executable hashes were checked, and its 284-file
+schema / isolated 164-variable initial comparisons were rerun. Recovery records
+are in `/tmp/colm-wmo-original-1789379007/recovery_verification.json` and
+`/tmp/colm-lulcc-original/recovery.log`. The supplied source repository was not
+modified by the experiment.
+
+
+Fresh checks in `/tmp/colm-qr-lulcc-validation/`: 231 surface-library and 38
+surface-binary tests, 89 initializer-library and 12 initializer-binary tests,
+11 data tests, ten opt-in Fortran reference tests and six opt-in native pipeline
+tests pass. Changed-file formatting, both-crate all-target Clippy with warnings
+denied, downstream kernel/CLI checks and release builds pass. Independent source
+reviews approved the bounded LULCC and diagnostic repairs. The full scientific
+migration gate, including the 48 fitted soil fields above, remains failing.

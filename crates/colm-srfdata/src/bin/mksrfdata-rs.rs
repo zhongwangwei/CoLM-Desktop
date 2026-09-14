@@ -175,6 +175,7 @@ struct SpatialPftArgs {
     dominant: bool,
     patch_mode: PftPatchMode,
     output_2m_wmo: bool,
+    lulcc: bool,
     plant_tiles: PathBuf,
     crop_surface: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
@@ -224,6 +225,10 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     ensure!(
         !args.output_2m_wmo || args.soil_hyper_albedo_dir.is_none(),
         "WMO plus soil hyper-albedo is not verified: upstream aggregation reads virtual pixel index -1"
+    );
+    ensure!(
+        !args.lulcc || args.year >= 2000 || args.year % 5 == 0,
+        "historical LULCC years before 2000 must be five-year snapshots; the upstream non-snapshot path only writes monthly LAI"
     );
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     let (mut topology, mut base_patches, land_hrus) = match args.kind {
@@ -408,6 +413,19 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         patches,
         Some(&patch_height),
         crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+    )?;
+    materialize_lulcc_transfer_traces(
+        LulccTraceArgs {
+            enabled: args.lulcc,
+            year: args.year,
+            plant_tiles: Some(args.plant_tiles.as_path()),
+            landdata: &args.landdata,
+            blocks: &args.blocks,
+            diagnostics: args.diagnostics,
+            pctshared: crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+        },
+        &topology,
+        patches,
     )?;
     if let Some(land_hrus) = land_hrus {
         write_spatial_hru_topology(
@@ -783,7 +801,19 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         None
     };
     materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
-    materialize_lulcc_transfer_traces(&args, &topology, &patches)?;
+    materialize_lulcc_transfer_traces(
+        LulccTraceArgs {
+            enabled: args.lulcc,
+            year: args.year,
+            plant_tiles: args.plant_tiles.as_deref(),
+            landdata: &args.landdata,
+            blocks: &args.blocks,
+            diagnostics: args.diagnostics,
+            pctshared: None,
+        },
+        &topology,
+        &patches,
+    )?;
     if let (Some(urban), Some(land_urban)) = (&args.urban, land_urban.as_ref()) {
         materialize_spatial_urban(&args, &topology, land_urban, urban)?;
     }
@@ -1673,12 +1703,22 @@ fn materialize_spatial_urban(
     Ok(())
 }
 
+struct LulccTraceArgs<'a> {
+    enabled: bool,
+    year: i32,
+    plant_tiles: Option<&'a Path>,
+    landdata: &'a Path,
+    blocks: &'a BlockLayout,
+    diagnostics: bool,
+    pctshared: Option<&'a [f64]>,
+}
+
 fn materialize_lulcc_transfer_traces(
-    args: &SpatialLctArgs,
+    args: LulccTraceArgs<'_>,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
 ) -> Result<()> {
-    if !args.lulcc {
+    if !args.enabled {
         return Ok(());
     }
     let Some(previous_year) = lulcc_previous_land_cover_year(args.year) else {
@@ -1686,9 +1726,11 @@ fn materialize_lulcc_transfer_traces(
     };
     let tiles = args
         .plant_tiles
-        .as_deref()
         .context("LULCC transfer traces require --plant-tiles")?;
-    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    // Keep WMO consumer patches explicit but do not copy source fractions: the
+    // original transfer writer skips virtual entries instead of materializing
+    // their donor patch class distribution.
+    let layout = patches.aggregation_layout(&topology.mesh, patches.wmo_sources()?)?;
     let previous_class = read_mesh_tiled_raster_i32(
         tiles,
         &format!("MOD{previous_year:04}"),
@@ -1702,11 +1744,11 @@ fn materialize_lulcc_transfer_traces(
         layout.aggregate_lulcc_source_fractions(&previous_class, &area, IGBP_LULCC_CLASSES)?;
     for source_class in 0..=IGBP_LULCC_CLASSES {
         write_landpatch_vector(
-            &args.landdata,
+            args.landdata,
             args.year,
             topology,
             patches,
-            &args.blocks,
+            args.blocks,
             "lulcc",
             &format!("lccpct_patches_lc{source_class:02}"),
             "lccpct_patches",
@@ -1718,7 +1760,13 @@ fn materialize_lulcc_transfer_traces(
             .map(|class| i32::try_from(class).expect("LULCC class fits i32"))
             .collect::<Vec<_>>();
         let source_patch = type_indices.clone();
-        let frames = fractions
+        let diagnostic_fractions = layout.aggregate_lulcc_element_source_fractions(
+            &patches.element_index,
+            &previous_class,
+            &area,
+            IGBP_LULCC_CLASSES,
+        )?;
+        let frames = diagnostic_fractions
             .chunks_exact(patches.len())
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
@@ -1732,7 +1780,7 @@ fn materialize_lulcc_transfer_traces(
             &frames,
             &type_indices,
             DiagnosticStatistic::Mean,
-            None,
+            args.pctshared,
             DIAGNOSTIC_MISSING,
             Some(0.0),
             "source_patch",
@@ -3398,6 +3446,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut dominant = false;
     let mut patch_mode = PftPatchMode::Merged;
     let mut output_2m_wmo = false;
+    let mut lulcc = false;
     let mut plant_tiles = None;
     let mut crop_surface = None;
     let mut monthly_vegetation_years = Vec::new();
@@ -3492,6 +3541,10 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
             }
             "--dominant" => {
                 dominant = true;
+                index += 1;
+            }
+            "--lulcc" => {
+                lulcc = true;
                 index += 1;
             }
             "--plant-tiles" => {
@@ -3653,6 +3706,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         dominant,
         patch_mode,
         output_2m_wmo,
+        lulcc,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         crop_surface,
         monthly_vegetation_years,
@@ -3921,10 +3975,6 @@ fn spatial_case_command(
         UrbanScheme::Lcz
     };
     let lulcc = case_bool(&document, "DEF_USE_LULCC", false)?;
-    ensure!(
-        !lulcc || lct,
-        "spatial LULCC transfer traces require DEF_USE_LCT"
-    );
     // MOD_Namelist coerces PFT/PC and LULCC cases to monthly before
     // mksrfdata runs.  Only plain LCT may retain the native 8-day product.
     let lai_monthly = case_bool(&document, "DEF_LAI_MONTHLY", true)? || lulcc || pft || pc;
@@ -4257,6 +4307,9 @@ fn spatial_case_command(
         if case_bool(&document, "DEF_USE_BEDROCK", false)? {
             required_files.push(bedrock.clone());
             args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
+        }
+        if lulcc {
+            args.push("--lulcc".to_owned());
         }
         for lai_year in case_lai_years(&document, year)? {
             args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
@@ -4650,7 +4703,7 @@ fn usage() -> &'static str {
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -4881,9 +4934,11 @@ mod tests {
             "2005".into(),
             "--plant-tiles".into(),
             "plant_15s".into(),
+            "--lulcc".into(),
         ])
         .unwrap();
         assert!(!pft.diagnostics);
+        assert!(pft.lulcc);
     }
 
     #[test]
@@ -5459,7 +5514,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_pft_materializer_writes_runtime_shares_with_and_without_wmo() {
+    fn spatial_pft_materializer_writes_runtime_shares_lulcc_and_wmo_skip() {
         let (root, _) = case_namelist("pft-wmo-output", "&nl_colm /\n");
         let mesh = root.join("mesh.nc");
         let mut file = netcdf::create(&mesh).unwrap();
@@ -5467,7 +5522,7 @@ mod tests {
         file.add_dimension("lat", 1).unwrap();
         for (name, dimension, edge) in [
             ("lon_w", "lon", COLM_500M.lon_w(1)),
-            ("lon_e", "lon", COLM_500M.lon_e(1)),
+            ("lon_e", "lon", COLM_500M.lon_e(2)),
             ("lat_s", "lat", COLM_500M.lat_s(1)),
             ("lat_n", "lat", COLM_500M.lat_n(1)),
         ] {
@@ -5481,7 +5536,7 @@ mod tests {
             .put_values(&[1], ..)
             .unwrap();
         file.close().unwrap();
-        // Sparse raw chunks cover one pixel without allocating global rasters.
+        // Sparse raw chunks cover two equal-area pixels without allocating global rasters.
         let landtype = root.join("landtype.nc");
         let mut file = netcdf::create(&landtype).unwrap();
         file.add_dimension("lat", COLM_500M.nlat).unwrap();
@@ -5489,8 +5544,8 @@ mod tests {
         let mut variable = file
             .add_variable::<i32>("landtype", &["lat", "lon"])
             .unwrap();
-        variable.set_chunking(&[1, 1]).unwrap();
-        variable.put_value(1, (0, 0)).unwrap();
+        variable.set_chunking(&[1, 2]).unwrap();
+        variable.put_values(&[1, 1], (0..1, 0..2)).unwrap();
         file.close().unwrap();
         let mut file = netcdf::create(root.join("RG_90_-180_85_-175.MOD2005.nc")).unwrap();
         file.add_dimension("lat", 1200).unwrap();
@@ -5504,13 +5559,21 @@ mod tests {
         percent[12] = 25.0;
         percent[13] = 75.0;
         variable.put_values(&percent, (.., 0, 0)).unwrap();
+        variable.put_values(&percent, (.., 0, 1)).unwrap();
         let mut variable = file.add_variable::<f64>("HTOP", &["lat", "lon"]).unwrap();
         variable.set_chunking(&[120, 120]).unwrap();
-        variable.put_value(8.0, (0, 0)).unwrap();
+        variable.put_values(&[8.0, 8.0], (0..1, 0..2)).unwrap();
         file.close().unwrap();
-        for wmo in [false, true] {
-            let output = root.join(format!("output-{wmo}"));
-            materialize_spatial_pft(&[
+        let mut file = netcdf::create(root.join("RG_90_-180_85_-175.MOD2004.nc")).unwrap();
+        file.add_dimension("lat", 1200).unwrap();
+        file.add_dimension("lon", 1200).unwrap();
+        let mut variable = file.add_variable::<i32>("LC", &["lat", "lon"]).unwrap();
+        variable.set_chunking(&[1, 2]).unwrap();
+        variable.put_values(&[1, 2], (0..1, 0..2)).unwrap();
+        file.close().unwrap();
+        for (lulcc, wmo) in [(false, false), (false, true), (true, false), (true, true)] {
+            let output = root.join(format!("output-lulcc-{lulcc}-wmo-{wmo}"));
+            let mut args = vec![
                 "latlon".into(),
                 mesh.display().to_string(),
                 landtype.display().to_string(),
@@ -5520,8 +5583,11 @@ mod tests {
                 root.display().to_string(),
                 "--output-2m-wmo".into(),
                 wmo.to_string(),
-            ])
-            .unwrap();
+            ];
+            if lulcc {
+                args.push("--lulcc".into());
+            }
+            materialize_spatial_pft(&args).unwrap();
             let pfts = netcdf::open(output.join("landpft/2005/landpft_W180_S90.nc")).unwrap();
             let shares = pfts
                 .variable("pctshared")
@@ -5549,7 +5615,135 @@ mod tests {
                     .unwrap(),
                 if wmo { vec![1, 1, -1] } else { vec![1, 1] }
             );
+            let lc1_path = output.join("lulcc/2005/lccpct_patches_lc01_W180_S90.nc");
+            if !lulcc {
+                assert!(!lc1_path.exists());
+                continue;
+            }
+            let lc1 = netcdf::open(lc1_path)
+                .unwrap()
+                .variable("lccpct_patches")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap();
+            let lc2 = netcdf::open(output.join("lulcc/2005/lccpct_patches_lc02_W180_S90.nc"))
+                .unwrap()
+                .variable("lccpct_patches")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap();
+            assert_eq!(lc1.len(), if wmo { 2 } else { 1 });
+            assert_eq!(lc2.len(), if wmo { 2 } else { 1 });
+            assert!((lc1[0] - 0.5).abs() < 1.0e-12);
+            assert!((lc2[0] - 0.5).abs() < 1.0e-12);
+            if wmo {
+                assert_eq!(lc1[1], 0.0);
+                assert_eq!(lc2[1], 0.0);
+            }
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_pft_lulcc_rejects_pre_2000_non_snapshot_year_before_outputs() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-srfdata-pft-lulcc-guard-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let output = root.join("landdata");
+        let error = materialize_spatial_pft(&[
+            "latlon".into(),
+            root.join("mesh.nc").display().to_string(),
+            root.join("landtype.nc").display().to_string(),
+            output.display().to_string(),
+            "1999".into(),
+            "--plant-tiles".into(),
+            root.display().to_string(),
+            "--lulcc".into(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("five-year snapshots"));
+        assert!(!output.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lulcc_diagnostic_matrix_uses_element_normalized_source_area() {
+        let (root, _) = case_namelist("lulcc-diag", "&nl_colm /\n");
+        let output = root.join("landdata");
+        let mesh =
+            colm_srfdata::FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
+        let topology = SpatialTopology {
+            kind: SpatialInputKind::GridBased,
+            grid: colm_srfdata::SpatialGrid {
+                lon_w: vec![COLM_500M.lon_w(1)],
+                lon_e: vec![COLM_500M.lon_e(2)],
+                lat_s: vec![COLM_500M.lat_s(1)],
+                lat_n: vec![COLM_500M.lat_n(1)],
+            },
+            pixel: colm_srfdata::PixelAxes {
+                edge_south: COLM_500M.lat_s(1),
+                edge_north: COLM_500M.lat_n(1),
+                edge_west: COLM_500M.lon_w(1),
+                edge_east: COLM_500M.lon_e(2),
+                lon_w: vec![COLM_500M.lon_w(1), COLM_500M.lon_w(2)],
+                lon_e: vec![COLM_500M.lon_e(1), COLM_500M.lon_e(2)],
+                lat_s: vec![COLM_500M.lat_s(1)],
+                lat_n: vec![COLM_500M.lat_n(1)],
+            },
+            source: None,
+            element_block_owners: None,
+            land_elements: mesh.land_elements(),
+            mesh,
+        };
+        let patches = FlatLandPatches {
+            element_ids: vec![1, 1],
+            pixel_start: vec![1, 2],
+            pixel_end: vec![1, 2],
+            set_type: vec![1, 2],
+            element_index: vec![1, 1],
+        };
+        let mut file = netcdf::create(root.join("RG_90_-180_85_-175.MOD2004.nc")).unwrap();
+        file.add_dimension("lat", 1200).unwrap();
+        file.add_dimension("lon", 1200).unwrap();
+        let mut variable = file.add_variable::<i32>("LC", &["lat", "lon"]).unwrap();
+        variable.set_chunking(&[1, 2]).unwrap();
+        variable.put_values(&[1, 1], (0..1, 0..2)).unwrap();
+        file.close().unwrap();
+
+        materialize_lulcc_transfer_traces(
+            LulccTraceArgs {
+                enabled: true,
+                year: 2005,
+                plant_tiles: Some(root.as_path()),
+                landdata: &output,
+                blocks: &BlockLayout::regular(1, 1).unwrap(),
+                diagnostics: true,
+                pctshared: None,
+            },
+            &topology,
+            &patches,
+        )
+        .unwrap();
+
+        let matrix = netcdf::open(output.join("diag/lccpct_matrix_2005.nc")).unwrap();
+        let values = matrix
+            .variable("lccpct_matrix")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        let type_count = 18;
+        assert!((values[type_count + 1] - 0.5).abs() < 1.0e-12);
+        assert!((values[type_count + 2] - 0.5).abs() < 1.0e-12);
+        let patch_lc1 = netcdf::open(output.join("lulcc/2005/lccpct_patches_lc01_W180_S90.nc"))
+            .unwrap()
+            .variable("lccpct_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(patch_lc1, vec![1.0, 1.0]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6280,6 +6474,43 @@ mod tests {
             )
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lulcc_case_forwards_pft_and_pc_transfer_trace_inputs() {
+        for (name, pft, pc) in [("lulcc-pft", true, false), ("lulcc-pc", false, true)] {
+            let (root, namelist) = case_namelist(
+                name,
+                &format!(
+                    "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT={}.
+ DEF_USE_PC={}.
+ DEF_USE_LULCC=.true.
+/
+",
+                    if pft { ".true" } else { ".false" },
+                    if pc { ".true" } else { ".false" }
+                ),
+            );
+
+            let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+                .unwrap()
+                .unwrap();
+
+            assert!(command.pft_or_pc);
+            assert!(command.args.iter().any(|argument| argument == "--lulcc"));
+            assert_eq!(
+                option_value(&command.args, "--plant-tiles").map(str::to_owned),
+                Some(format!("{}/raw/plant_15s", root.display()))
+            );
+            assert!(parse_spatial_pft(&command.args).unwrap().lulcc);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

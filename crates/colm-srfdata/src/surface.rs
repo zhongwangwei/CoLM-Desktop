@@ -10,6 +10,8 @@
 //! and rank scheduling stay at the outer layer; the numerical part can then be
 //! tested against the corresponding Fortran routines without a rawdata mount.
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, ensure, Context, Result};
 
 use crate::albedo::albedo;
@@ -433,6 +435,76 @@ impl FlatPatches {
         landarea: &[f64],
         max_class: usize,
     ) -> Result<Vec<f64>> {
+        let (mut result, patch_area, classes) =
+            self.lulcc_source_area_by_patch(previous_class, landarea, max_class)?;
+        for patch in 0..self.len() {
+            if self.wmo_source[patch].is_some() {
+                continue;
+            }
+            let total = patch_area[patch];
+            ensure!(
+                total > 0.0 && total.is_finite(),
+                "LULCC patch {patch} has zero or non-finite land area"
+            );
+            for class in 0..classes {
+                result[class * self.len() + patch] /= total;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Aggregate previous land-cover classes for `lccpct_matrix` diagnostics.
+    ///
+    /// Unlike the per-patch `lccpct_patches_lcXX` vectors, upstream normalizes
+    /// the diagnostic source-class areas by the total non-WMO patch area in the
+    /// owning element.  This preserves partial current-patch contributions in
+    /// the diagnostic matrix instead of making every patch sum to one.
+    pub fn aggregate_lulcc_element_source_fractions(
+        &self,
+        patch_elements: &[usize],
+        previous_class: &[i32],
+        landarea: &[f64],
+        max_class: usize,
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            patch_elements.len() == self.len(),
+            "LULCC diagnostic patch elements must match patch count"
+        );
+        let (mut result, patch_area, classes) =
+            self.lulcc_source_area_by_patch(previous_class, landarea, max_class)?;
+        let mut element_area = BTreeMap::<usize, f64>::new();
+        for patch in 0..self.len() {
+            let element = patch_elements[patch];
+            ensure!(element > 0, "LULCC patch {patch} has zero element index");
+            if self.wmo_source[patch].is_some() {
+                continue;
+            }
+            *element_area.entry(element).or_insert(0.0) += patch_area[patch];
+        }
+        for patch in 0..self.len() {
+            if self.wmo_source[patch].is_some() {
+                continue;
+            }
+            let total = *element_area
+                .get(&patch_elements[patch])
+                .with_context(|| format!("LULCC patch {patch} has no element area"))?;
+            ensure!(
+                total > 0.0 && total.is_finite(),
+                "LULCC patch {patch} has zero or non-finite element land area"
+            );
+            for class in 0..classes {
+                result[class * self.len() + patch] /= total;
+            }
+        }
+        Ok(result)
+    }
+
+    fn lulcc_source_area_by_patch(
+        &self,
+        previous_class: &[i32],
+        landarea: &[f64],
+        max_class: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>, usize)> {
         ensure!(
             previous_class.len() == landarea.len(),
             "LULCC previous class and landarea must have the same raw cell count"
@@ -440,14 +512,13 @@ impl FlatPatches {
         let classes = max_class
             .checked_add(1)
             .context("LULCC class count overflow")?;
-        let mut result = vec![0.0; classes * self.len()];
+        let mut source_area = vec![0.0; classes * self.len()];
+        let mut patch_area = vec![0.0; self.len()];
         for patch in 0..self.len() {
             if self.wmo_source[patch].is_some() {
                 continue;
             }
-            let cells = &self.cells[self.cells_for(patch)];
-            let mut total = 0.0;
-            for &cell in cells {
+            for &cell in &self.cells[self.cells_for(patch)] {
                 let class = previous_class.get(cell).copied().with_context(|| {
                     format!(
                         "LULCC patch {patch} references raw cell {cell}, but previous classes have {} cells",
@@ -465,18 +536,11 @@ impl FlatPatches {
                     area.is_finite() && area >= 0.0,
                     "LULCC patch {patch} has a non-finite or negative land area"
                 );
-                total += area;
-                result[class * self.len() + patch] += area;
-            }
-            ensure!(
-                total > 0.0 && total.is_finite(),
-                "LULCC patch {patch} has zero or non-finite land area"
-            );
-            for class in 0..classes {
-                result[class * self.len() + patch] /= total;
+                patch_area[patch] += area;
+                source_area[class * self.len() + patch] += area;
             }
         }
-        Ok(result)
+        Ok((source_area, patch_area, classes))
     }
 
     /// Area-weighted patch LAI or SAI from `Aggregation_LAI`'s LCT path.

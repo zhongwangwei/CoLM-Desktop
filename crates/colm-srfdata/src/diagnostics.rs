@@ -153,9 +153,16 @@ pub fn map_patch_diagnostic(
         );
         let (xs, ys) = topology.mesh.pixels(element)?;
         let range = patches.owned_pixel_range(patch, xs.len())?;
-        if range.is_empty() {
-            continue;
-        }
+        let range = if range.is_empty() {
+            // Upstream `build_arealweighted` treats a 2 m WMO virtual patch
+            // (`ipxstt=ipxend=-1`) as covering the whole mesh element for
+            // diagnostics.  The scientific aggregators still skip/copy those
+            // virtual rows separately, but the diagnostic denominator must
+            // include their whole-element geometry.
+            0..xs.len()
+        } else {
+            range
+        };
         let start = range.start;
         let end = range.end;
         ensure!(
@@ -334,9 +341,16 @@ fn map_patch_diagnostic_sparse(
         );
         let (xs, ys) = topology.mesh.pixels(element)?;
         let range = patches.owned_pixel_range(patch, xs.len())?;
-        if range.is_empty() {
-            continue;
-        }
+        let range = if range.is_empty() {
+            // Upstream `build_arealweighted` treats a 2 m WMO virtual patch
+            // (`ipxstt=ipxend=-1`) as covering the whole mesh element for
+            // diagnostics.  The scientific aggregators still skip/copy those
+            // virtual rows separately, but the diagnostic denominator must
+            // include their whole-element geometry.
+            0..xs.len()
+        } else {
+            range
+        };
         let start = range.start;
         let end = range.end;
         ensure!(
@@ -552,19 +566,19 @@ pub fn write_patch_diagnostic(
         file.add_dimension("lat", mapped.lat_s.len())?;
         put_coordinate(
             &mut file,
-            "lat",
-            "lat",
-            &mapped.latitude,
-            "latitude",
-            "degrees_north",
-        )?;
-        put_coordinate(
-            &mut file,
             "lon",
             "lon",
             &mapped.longitude,
             "longitude",
             "degrees_east",
+        )?;
+        put_coordinate(
+            &mut file,
+            "lat",
+            "lat",
+            &mapped.latitude,
+            "latitude",
+            "degrees_north",
         )?;
         put_coordinate(
             &mut file,
@@ -750,19 +764,19 @@ pub fn write_patch_diagnostic_dimension(
         file.add_dimension("lat", first.lat_s.len())?;
         put_coordinate(
             &mut file,
-            "lat",
-            "lat",
-            &first.latitude,
-            "latitude",
-            "degrees_north",
-        )?;
-        put_coordinate(
-            &mut file,
             "lon",
             "lon",
             &first.longitude,
             "longitude",
             "degrees_east",
+        )?;
+        put_coordinate(
+            &mut file,
+            "lat",
+            "lat",
+            &first.latitude,
+            "latitude",
+            "degrees_north",
         )?;
         put_coordinate(
             &mut file,
@@ -812,9 +826,9 @@ pub fn write_patch_diagnostic_dimension(
             "diagnostic dimension {dimension} has incompatible coordinate values"
         );
     } else {
-        file.add_dimension(dimension, dimension_values.len())?;
+        file.add_unlimited_dimension(dimension)?;
         file.add_variable::<i32>(dimension, &[dimension])?
-            .put_values(dimension_values, ..)?;
+            .put_values(dimension_values, ..dimension_values.len())?;
     }
     ensure!(
         file.variable(name).is_none(),
@@ -959,7 +973,13 @@ fn put_coordinate(
     long_name: &str,
     units: &str,
 ) -> Result<()> {
-    let mut variable = file.add_variable::<f64>(name, &[dimension])?;
+    // ncio_define_dimension predefines center coordinates as NF90_FLOAT;
+    // edge coordinates and all scientific fields retain f64.
+    let mut variable = if matches!(name, "lon" | "lat") {
+        file.add_variable::<f32>(name, &[dimension])?
+    } else {
+        file.add_variable::<f64>(name, &[dimension])?
+    };
     variable.put_values(values, ..)?;
     variable.put_attribute("long_name", long_name)?;
     variable.put_attribute("units", units)?;
@@ -1036,6 +1056,35 @@ mod tests {
         ));
         write_patch_diagnostic(&path, "field", &[1, 2], &mapped, DIAGNOSTIC_MISSING).unwrap();
         let file = netcdf::open(&path).unwrap();
+        use netcdf::types::{FloatType, NcVariableType};
+        assert_eq!(
+            file.variables()
+                .map(|variable| variable.name())
+                .collect::<Vec<_>>(),
+            [
+                "TypeIndex",
+                "lon",
+                "lat",
+                "lat_s",
+                "lat_n",
+                "lon_w",
+                "lon_e",
+                "field",
+                "field_grid"
+            ]
+        );
+        for name in ["lon", "lat"] {
+            assert_eq!(
+                file.variable(name).unwrap().vartype(),
+                NcVariableType::Float(FloatType::F32)
+            );
+        }
+        for name in ["lon_w", "lon_e", "lat_s", "lat_n", "field", "field_grid"] {
+            assert_eq!(
+                file.variable(name).unwrap().vartype(),
+                NcVariableType::Float(FloatType::F64)
+            );
+        }
         assert_eq!(
             file.variable("TypeIndex")
                 .unwrap()
@@ -1075,6 +1124,33 @@ mod tests {
         .unwrap();
         assert_eq!(mapped.values, vec![0.2, 0.8]);
         assert_eq!(mapped.grid, vec![1.0]);
+    }
+
+    #[test]
+    fn wmo_virtual_patches_use_whole_element_geometry_in_diagnostic_mean() {
+        let mut topology = topology();
+        topology.mesh = FlatMesh::new(vec![1], vec![0, 1], vec![1], vec![1]).unwrap();
+        topology.land_elements = topology.mesh.land_elements();
+        let patches = FlatLandPatches {
+            element_ids: vec![1, 1],
+            pixel_start: vec![1, 0],
+            pixel_end: vec![1, 0],
+            set_type: vec![1, 1],
+            element_index: vec![1, 1],
+        };
+        let mapped = map_patch_diagnostic(
+            &topology,
+            &patches,
+            &[1.0, 0.0],
+            &[1],
+            DiagnosticStatistic::Mean,
+            None,
+            DIAGNOSTIC_MISSING,
+            Some(0.0),
+        )
+        .unwrap();
+        assert_eq!(mapped.values, vec![0.5]);
+        assert_eq!(mapped.grid, vec![0.5]);
     }
 
     #[test]
@@ -1202,6 +1278,7 @@ mod tests {
         .unwrap();
         let file = netcdf::open(&path).unwrap();
         assert_eq!(file.dimension("ulev").unwrap().len(), 2);
+        assert!(file.dimension("ulev").unwrap().is_unlimited());
         assert_eq!(
             file.variable("TK_ROOF")
                 .unwrap()

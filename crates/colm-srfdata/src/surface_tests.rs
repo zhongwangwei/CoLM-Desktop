@@ -90,6 +90,28 @@ fn lulcc_source_fractions_are_area_weighted_and_keep_wmo_consumers_zero() {
 }
 
 #[test]
+fn lulcc_diagnostic_fractions_are_normalized_by_element_area() {
+    let layout = FlatPatches::new(
+        vec![1, 2, 1],
+        vec![0, 1, 2, 3],
+        vec![0, 1, 2],
+        vec![None, None, Some(0)],
+    )
+    .unwrap();
+    assert_eq!(
+        layout
+            .aggregate_lulcc_element_source_fractions(
+                &[1, 1, 1],
+                &[1, 1, 2],
+                &[1.0, 3.0, 100.0],
+                2,
+            )
+            .unwrap(),
+        [0.0, 0.0, 0.0, 0.25, 0.75, 0.0, 0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
 fn lct_lai_and_sai_are_area_weighted_without_wmo_sharing() {
     let layout = FlatPatches::new(
         vec![1, 1],
