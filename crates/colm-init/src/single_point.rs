@@ -88,7 +88,7 @@ impl<'a> SinglePointStaticConfig<'a> {
 /// The source namelist derives `landdata` and `restart` from `DEF_dir_output` and
 /// `DEF_CASE_NAME`; keeping that derivation here prevents the two executables from
 /// disagreeing about where a case lives.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointStaticRun {
     pub surface: PathBuf,
     pub restart_dir: PathBuf,
@@ -98,6 +98,7 @@ pub struct SinglePointStaticRun {
     pub land_cover: LandCoverScheme,
     pub hydraulic_model: HydraulicModel,
     pub use_bedrock: bool,
+    pub tuning: RestartTuning,
 }
 
 /// Runtime subgrid representation selected by CoLM's mutually exclusive flags.
@@ -198,6 +199,7 @@ impl SinglePointStaticRun {
             self.hydraulic_model,
         );
         config.use_bedrock = self.use_bedrock;
+        config.tuning = self.tuning;
         config
     }
 }
@@ -252,6 +254,7 @@ pub fn single_point_static_run_from_namelist(
         land_cover,
         hydraulic_model,
         use_bedrock,
+        tuning: RestartTuning::from_document(&document)?,
     })
 }
 

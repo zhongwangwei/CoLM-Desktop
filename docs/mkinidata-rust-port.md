@@ -82,3 +82,17 @@ enabled downscaling branch meet all of these conditions:
 Each ported branch gets a compact synthetic landdata/restart fixture and field-level expected
 values derived from the frozen Fortran source.  Real rawdata cases are an additional
 integration gate, not the only proof of correctness.
+
+## 2026-09-14 executable tuning and original-source audit
+
+The 15 scalar `DEF_TUNING_*` constants assigned by Desktop's Fortran
+`MOD_Initialize` now reach native single-point and spatial constant/time adapters.
+`RestartTuning::from_document` reuses the existing parameter validator, checks
+potential ordering, and retains fixed `tcrit = 2.5`. The original external source
+at `ebe6de998692` predates these Desktop tuning fields; it is kept as a distinct
+reference rather than being silently relabelled as the vendored runtime.
+
+See [the parity audit](preprocessing-parity-status.md) for the successful original
+Fortran one-hour run from Rust restart, the repaired Desktop-only LCT allocation
+regression, and the newly exposed **unresolved** surface topology discrepancy.
+This progress does not establish full migration.

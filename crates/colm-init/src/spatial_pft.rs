@@ -245,6 +245,7 @@ pub fn write_spatial_pft_constant_restarts(
         hydraulic_model,
     );
     common.use_bedrock = use_bedrock;
+    common.tuning = RestartTuning::from_document(&document)?;
     common.use_hyperspectral = use_hyperspectral;
     common.use_topmodel = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3) == 0;
     common.use_simple_terrain =
@@ -444,8 +445,8 @@ pub fn write_spatial_pft_cold_time_restarts(
         read_lct_f64(
             config.static_config.landdata,
             "soil",
+            "soil_s_v_alb_patches",
             "soil_s_v_alb",
-            "soil_s_v_alb",
             config.static_config.land_cover_year,
             config.static_config.block_label,
             patches.class.len(),
@@ -453,8 +454,8 @@ pub fn write_spatial_pft_cold_time_restarts(
         read_lct_f64(
             config.static_config.landdata,
             "soil",
+            "soil_d_v_alb_patches",
             "soil_d_v_alb",
-            "soil_d_v_alb",
             config.static_config.land_cover_year,
             config.static_config.block_label,
             patches.class.len(),
@@ -462,7 +463,7 @@ pub fn write_spatial_pft_cold_time_restarts(
         read_lct_f64(
             config.static_config.landdata,
             "soil",
-            "soil_s_n_alb",
+            "soil_s_n_alb_patches",
             "soil_s_n_alb",
             config.static_config.land_cover_year,
             config.static_config.block_label,
@@ -471,7 +472,7 @@ pub fn write_spatial_pft_cold_time_restarts(
         read_lct_f64(
             config.static_config.landdata,
             "soil",
-            "soil_d_n_alb",
+            "soil_d_n_alb_patches",
             "soil_d_n_alb",
             config.static_config.land_cover_year,
             config.static_config.block_label,

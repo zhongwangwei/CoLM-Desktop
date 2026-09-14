@@ -23,8 +23,18 @@ fn native_mkinidata_binary_writes_the_complete_common_restart_family() {
             ),
             &format!("DEF_dir_output = '{}/'", output.display()),
         );
+    let mut namelist = colm_namelist::parse(&namelist).unwrap();
+    for (name, text) in [("DEF_TUNING_ZLND", "0.025"), ("DEF_TUNING_CAPR", "0.42")] {
+        namelist
+            .insert(
+                name,
+                colm_namelist::Value::Real { text: text.into() },
+                "nl_colm",
+            )
+            .unwrap();
+    }
     let case = directory.join("case.nml");
-    std::fs::write(&case, namelist).unwrap();
+    std::fs::write(&case, namelist.to_string()).unwrap();
 
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_mkinidata-rs"))
         .args([case.as_os_str(), "--land-cover".as_ref(), "igbp".as_ref()])
@@ -45,5 +55,16 @@ fn native_mkinidata_binary_writes_the_complete_common_restart_family() {
     ] {
         assert!(path.is_file(), "missing {}", path.display());
     }
+    let file = netcdf::open(restart.join("const/CN-Cng_restart_const_lc2005.nc")).unwrap();
+    for (name, value) in [("zlnd", 0.025), ("capr", 0.42)] {
+        assert_eq!(
+            file.variable(name)
+                .unwrap()
+                .get_value::<f64, _>(())
+                .unwrap(),
+            value
+        );
+    }
+    file.close().unwrap();
     std::fs::remove_dir_all(directory).unwrap();
 }

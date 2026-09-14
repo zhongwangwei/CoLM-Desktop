@@ -74,6 +74,14 @@ Production numerical parallelism follows [`cpu-parallelism.md`](cpu-parallelism.
 Rayon distributes independent patch/mesh/raster work, while `f64` operation
 order within each work unit and ordered NetCDF output stay deterministic.
 
+The spatial namelist adapter forwards `DEF_USE_SOILPAR_UPS_FIT` for LCT and
+PFT/PC (including crop) to both VGM and Campbell aggregation. Its upstream
+default remains `true`; `false` skips only the nonlinear fit and retains the
+upstream area means, medians, and weighted geometric means. Explicit spatial
+commands accept `--soil-fit true|false`. A sparse two-cell NetCDF regression
+checks the written values for all eight soil layers with and without fitting;
+the Rayon check covers both settings and every WMO-copied VGM field.
+
 ## Performance constraints
 
 - Keep raw raster reads block-aligned; never materialize a global 500 m field.

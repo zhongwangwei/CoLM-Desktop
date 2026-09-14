@@ -153,7 +153,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     let mut texture = read_i32(
         config.landdata,
         "soil",
-        "soiltext_patches",
+        "soiltexture_patches",
         "soiltext_patches",
         config.land_cover_year,
         config.block_label,
@@ -173,7 +173,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     let soil_s_v_alb = read_f64(
         config.landdata,
         "soil",
-        "soil_s_v_alb",
+        "soil_s_v_alb_patches",
         "soil_s_v_alb",
         config.land_cover_year,
         config.block_label,
@@ -182,7 +182,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     let soil_d_v_alb = read_f64(
         config.landdata,
         "soil",
-        "soil_d_v_alb",
+        "soil_d_v_alb_patches",
         "soil_d_v_alb",
         config.land_cover_year,
         config.block_label,
@@ -191,7 +191,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     let soil_s_n_alb = read_f64(
         config.landdata,
         "soil",
-        "soil_s_n_alb",
+        "soil_s_n_alb_patches",
         "soil_s_n_alb",
         config.land_cover_year,
         config.block_label,
@@ -200,7 +200,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     let soil_d_n_alb = read_f64(
         config.landdata,
         "soil",
-        "soil_d_n_alb",
+        "soil_d_n_alb_patches",
         "soil_d_n_alb",
         config.land_cover_year,
         config.block_label,
@@ -797,8 +797,9 @@ pub(crate) fn patch_coordinates(
     let mut latitude = Vec::with_capacity(patches.class.len());
     for cells in &pixel_sets.cells {
         let (lon, lat) = pixel_sets.mean(cells)?;
-        longitude.push(lon.to_radians());
-        latitude.push(lat.to_radians());
+        // MOD_Pixelset multiplies by pi before dividing by 180 (not a folded scale).
+        longitude.push(lon * std::f64::consts::PI / 180.0);
+        latitude.push(lat * std::f64::consts::PI / 180.0);
     }
     Ok((longitude, latitude))
 }
@@ -915,7 +916,15 @@ impl SpatialPixelSets {
             } else {
                 east - west
             };
-            let area = width.to_radians() * (north.to_radians().sin() - south.to_radians().sin());
+            // Preserve MOD_Utils::areaquad's rounded conversion and km² units.
+            // Cancelling the common radius scale changes centroid rounding; near sunrise
+            // that perturbation is amplified by the canopy extinction's 1/coszen factor.
+            let deg2rad = 1.745_329_251_994_33e-2;
+            let area = width
+                * deg2rad
+                * ((north * deg2rad).sin() - (south * deg2rad).sin())
+                * 6.37122e3
+                * 6.37122e3;
             ensure!(
                 area.is_finite() && area > 0.0,
                 "pixel has invalid spherical area"

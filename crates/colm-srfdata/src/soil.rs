@@ -768,25 +768,33 @@ mod tests {
             water: 17,
             glacier: 15,
         };
-        let sequential = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .unwrap()
-            .install(|| {
-                aggregate_vgm_values(&layout, input, &area, classes, VgmFills::default(), false)
-            });
-        let parallel = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .unwrap()
-            .install(|| {
-                aggregate_vgm_values(&layout, input, &area, classes, VgmFills::default(), false)
-            });
-        assert_eq!(parallel, sequential);
-        let output =
-            aggregate_vgm(&layout, input, &area, classes, VgmFills::default(), false).unwrap();
-        assert_eq!(output.theta_r[2], output.theta_r[0]);
-        assert_eq!(output.k_s[2], output.k_s[0]);
+        for fit in [false, true] {
+            let sequential = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap()
+                .install(|| {
+                    aggregate_vgm(&layout, input, &area, classes, VgmFills::default(), fit).unwrap()
+                });
+            let parallel = rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap()
+                .install(|| {
+                    aggregate_vgm(&layout, input, &area, classes, VgmFills::default(), fit).unwrap()
+                });
+            assert_eq!(parallel, sequential);
+            for field in [
+                parallel.theta_r,
+                parallel.alpha,
+                parallel.n,
+                parallel.theta_s,
+                parallel.k_s,
+                parallel.l,
+            ] {
+                assert_eq!(field[2], field[0]);
+            }
+        }
     }
 
     #[test]

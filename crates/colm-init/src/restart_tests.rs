@@ -9,6 +9,83 @@ use crate::{
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn restart_tuning_namelist_preserves_all_overrides_in_netcdf() {
+    use colm_namelist::parse;
+    assert_eq!(
+        RestartTuning::from_document(&parse("&nl_colm\n/\n").unwrap()).unwrap(),
+        RestartTuning::default()
+    );
+    let values = [
+        ("zlnd", 0.025),
+        ("zsno", 0.003),
+        ("csoilc", 0.005),
+        ("dewmx", 0.2),
+        ("capr", 0.42),
+        ("cnfac", 0.0),
+        ("ssi", 1.0),
+        ("wimp", 0.75),
+        ("pondmx", 0.0),
+        ("smpmax", -3e5),
+        ("smpmin", -2e8),
+        ("smpmax_hr", -500.0),
+        ("smpmin_hr", -9e5),
+        ("trsmx0", 3e-4),
+        ("wetwatmax", 400.0),
+    ];
+    let mut text = "&nl_colm\n".to_owned();
+    for (name, value) in values {
+        text.push_str(&format!(
+            "DEF_TUNING_{} = {value:.17e}\n",
+            name.to_ascii_uppercase()
+        ));
+    }
+    text.push_str("/\n");
+    let tuning = RestartTuning::from_document(&parse(&text).unwrap()).unwrap();
+    let root = temp_dir("tuning");
+    let path = root.join("constants.nc");
+    write_restart_tuning(&path, tuning).unwrap();
+    let file = netcdf::open(path).unwrap();
+    assert_eq!(file.variables().count(), 16);
+    for (name, value) in values.into_iter().chain([("tcrit", 2.5)]) {
+        let variable = file.variable(name).unwrap();
+        assert!(variable.dimensions().is_empty());
+        assert_eq!(variable.get_value::<f64, _>(()).unwrap(), value, "{name}");
+    }
+    file.close().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn restart_tuning_rejects_invalid_types_ranges_and_potential_order() {
+    for (field, value) in [
+        ("ZLND", "'0.02'"),
+        ("ZSNO", ".true."),
+        ("CSOILC", "0"),
+        ("DEWMX", "-1"),
+        ("CAPR", "1e999"),
+        ("CNFAC", "1.01"),
+        ("SSI", "-0.01"),
+        ("WIMP", "1"),
+        ("PONDMX", "-1"),
+        ("SMPMAX", "0"),
+        ("SMPMAX", "-1e9"),
+        ("SMPMAX", "1e999"),
+        ("SMPMIN", "-100"),
+        ("SMPMAX_HR", "0"),
+        ("SMPMIN_HR", "-100"),
+        ("TRSMX0", "0"),
+        ("WETWATMAX", "0"),
+    ] {
+        let document =
+            colm_namelist::parse(&format!("&nl_colm\nDEF_TUNING_{field} = {value}\n/\n")).unwrap();
+        assert!(
+            RestartTuning::from_document(&document).is_err(),
+            "{field}={value}"
+        );
+    }
+}
+
+#[test]
 fn constant_restart_matches_fortran_variable_order_shapes_and_transposition() {
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();

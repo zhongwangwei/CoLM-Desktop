@@ -120,6 +120,52 @@ impl Default for RestartTuning {
     }
 }
 
+impl RestartTuning {
+    /// Resolve the expert constants assigned by `MOD_Initialize`, retaining
+    /// upstream defaults and validating before creating any restart files.
+    pub fn from_document(document: &colm_namelist::Document) -> Result<Self> {
+        let mut tuning = Self::default();
+        for (field, target) in [
+            ("DEF_TUNING_ZLND", &mut tuning.zlnd),
+            ("DEF_TUNING_ZSNO", &mut tuning.zsno),
+            ("DEF_TUNING_CSOILC", &mut tuning.csoilc),
+            ("DEF_TUNING_DEWMX", &mut tuning.dewmx),
+            ("DEF_TUNING_CAPR", &mut tuning.capr),
+            ("DEF_TUNING_CNFAC", &mut tuning.cnfac),
+            ("DEF_TUNING_SSI", &mut tuning.ssi),
+            ("DEF_TUNING_WIMP", &mut tuning.wimp),
+            ("DEF_TUNING_PONDMX", &mut tuning.pondmx),
+            ("DEF_TUNING_SMPMAX", &mut tuning.smpmax),
+            ("DEF_TUNING_SMPMIN", &mut tuning.smpmin),
+            ("DEF_TUNING_SMPMAX_HR", &mut tuning.smpmax_hr),
+            ("DEF_TUNING_SMPMIN_HR", &mut tuning.smpmin_hr),
+            ("DEF_TUNING_TRSMX0", &mut tuning.trsmx0),
+            ("DEF_TUNING_WETWATMAX", &mut tuning.wetwatmax),
+        ] {
+            if let Some(value) = document.get(field) {
+                *target = value
+                    .as_f64()
+                    .with_context(|| format!("{field} must be a real value"))?;
+            }
+            // SMPMAX is not exposed by the Study parameter registry; validate
+            // its negative bound together with SMPMIN below.
+            if field != "DEF_TUNING_SMPMAX" {
+                colm_case::tuning::validate_value(field, *target)?;
+            }
+        }
+        ensure!(
+            tuning.smpmax.is_finite() && tuning.smpmax < 0.0 && tuning.smpmin < tuning.smpmax,
+            "DEF_TUNING_SMPMAX must be finite and negative; DEF_TUNING_SMPMIN must be smaller"
+        );
+        ensure!(
+            tuning.smpmin_hr < tuning.smpmax_hr,
+            "DEF_TUNING_SMPMIN_HR must be smaller than DEF_TUNING_SMPMAX_HR"
+        );
+        // tcrit is a fixed 2.5 K in MOD_Initialize, not a namelist option.
+        Ok(tuning)
+    }
+}
+
 /// Inputs emitted only for `DEF_Runoff_SCHEME == 0`.
 #[derive(Debug, Clone, Copy)]
 pub struct TopmodelFields<'a> {

@@ -238,8 +238,8 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         read_f64(
             config.landdata,
             "soil",
+            "soil_s_v_alb_patches",
             "soil_s_v_alb",
-            "soil_s_v_alb",
             config.land_cover_year,
             config.block_label,
             count,
@@ -247,8 +247,8 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         read_f64(
             config.landdata,
             "soil",
+            "soil_d_v_alb_patches",
             "soil_d_v_alb",
-            "soil_d_v_alb",
             config.land_cover_year,
             config.block_label,
             count,
@@ -256,7 +256,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         read_f64(
             config.landdata,
             "soil",
-            "soil_s_n_alb",
+            "soil_s_n_alb_patches",
             "soil_s_n_alb",
             config.land_cover_year,
             config.block_label,
@@ -265,7 +265,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         read_f64(
             config.landdata,
             "soil",
-            "soil_d_n_alb",
+            "soil_d_n_alb_patches",
             "soil_d_n_alb",
             config.land_cover_year,
             config.block_label,

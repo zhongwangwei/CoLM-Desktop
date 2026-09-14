@@ -6,6 +6,25 @@ use super::*;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn patch_centroid_retains_upstream_spherical_area_rounding() {
+    // gfortran -O2, MOD_Utils::areaquad + MOD_Pixelset::get_pixelset_rlon/rlat,
+    // 2048 pixels cycling through these four cells (no reassociation/fast-math).
+    let lon_w = vec![102.0, 114.99583333333334];
+    let lat_s = vec![21.5, 26.995833333333334];
+    let pixels = SpatialPixelSets {
+        lon_e: lon_w.iter().map(|west| west + 1.0 / 240.0).collect(),
+        lat_n: lat_s.iter().map(|south| south + 1.0 / 240.0).collect(),
+        lon_w,
+        lat_s,
+        cells: vec![(0..2048).map(|i| (i % 2 + 1, (i / 2) % 2 + 1)).collect()],
+        shared_fraction: vec![1.0],
+    };
+    let (lon, lat) = pixels.mean(&pixels.cells[0]).unwrap();
+    assert!((lon * std::f64::consts::PI / 180.0 - 1.8936822384139238).abs() < 1.0e-14);
+    assert!((lat * std::f64::consts::PI / 180.0 - 0.4222053928230668).abs() < 1.0e-14);
+}
+
+#[test]
 fn lct_spatial_block_becomes_a_constant_restart() {
     let root = temp_dir("lct");
     let landdata = root.join("landdata");
@@ -1265,7 +1284,7 @@ fn write_landdata(landdata: &Path, year: i32, block: &str) {
     write_i32(
         landdata,
         "soil",
-        "soiltext_patches",
+        "soiltexture_patches",
         "soiltext_patches",
         year,
         block,
@@ -1277,7 +1296,15 @@ fn write_landdata(landdata: &Path, year: i32, block: &str) {
         ("soil_s_n_alb", 0.3),
         ("soil_d_n_alb", 0.4),
     ] {
-        write_f64(landdata, "soil", name, name, year, block, value);
+        write_f64(
+            landdata,
+            "soil",
+            &format!("{name}_patches"),
+            name,
+            year,
+            block,
+            value,
+        );
     }
     for (name, value) in [
         ("elevation_patches", 100.0),

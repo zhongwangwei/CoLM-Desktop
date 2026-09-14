@@ -16,10 +16,10 @@ use colm_init::{
     write_spatial_lct_constant_restart, write_spatial_pft_cold_time_restarts,
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
     write_spatial_urban_constant_restarts, CatchLateralColdStartConfig, GridRiverColdStartConfig,
-    HydraulicModel, LaiFrequency, LandCoverScheme, RestartDate, SinglePointHyperspectralConfig,
-    SinglePointStaticConfig, SpatialLctStaticConfig, SpatialLctTimeConfig,
-    SpatialObservedInitializationPaths, SpatialPftStaticConfig, SpatialPftTimeConfig,
-    SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
+    HydraulicModel, LaiFrequency, LandCoverScheme, RestartDate, RestartTuning,
+    SinglePointHyperspectralConfig, SinglePointStaticConfig, SpatialLctStaticConfig,
+    SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
+    SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
 };
 use colm_namelist::{parse, Value};
 
@@ -194,6 +194,7 @@ struct SpatialNamelistRun {
     vegetation_snow: bool,
     snow_cover_exponent: f64,
     observations: SpatialObservedInitializationPaths,
+    tuning: RestartTuning,
 }
 
 fn run_spatial_namelist(
@@ -315,6 +316,7 @@ fn write_spatial_urban_namelist_block(
         LandCoverScheme::Igbp,
         run.hydraulic_model,
     );
+    static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
     static_config.use_simple_terrain = run.use_simple_terrain;
@@ -335,6 +337,7 @@ fn write_spatial_urban_namelist_block(
         run.hydraulic_model,
         run.date,
     );
+    time.tuning = run.tuning;
     time.lai_year = run.lai_year;
     time.lai_frequency = run.lai_frequency;
     time.greenwich = run.greenwich;
@@ -387,6 +390,7 @@ fn write_spatial_lct_namelist_block(
         land_cover,
         run.hydraulic_model,
     );
+    static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
     static_config.use_simple_terrain = run.use_simple_terrain;
@@ -402,6 +406,7 @@ fn write_spatial_lct_namelist_block(
         run.hydraulic_model,
         run.date,
     );
+    time.tuning = run.tuning;
     time.lai_year = run.lai_year;
     time.lai_frequency = run.lai_frequency;
     time.greenwich = run.greenwich;
@@ -439,6 +444,7 @@ fn write_spatial_pft_namelist_block(
         high_resolution.enabled,
     )?;
     let mut time = SpatialPftTimeConfig::new(static_config, run.date);
+    time.tuning = run.tuning;
     time.lai_year = run.lai_year;
     time.greenwich = run.greenwich;
     time.dynamic_lake = run.dynamic_lake;
@@ -595,6 +601,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         vegetation_snow: namelist_bool(&document, "DEF_VEG_SNOW", true)?,
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         observations: SpatialObservedInitializationPaths::from_document(&document)?,
+        tuning: RestartTuning::from_document(&document)?,
     })
 }
 
@@ -931,6 +938,7 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
     if let Some(date) = cold_time {
         let mut time = SpatialPftTimeConfig::new(static_config, date);
+        time.tuning = RestartTuning::from_document(&parse(&std::fs::read_to_string(&namelist)?)?)?;
         time.lai_year = lai_year;
         time.greenwich = greenwich;
         time.dynamic_lake = dynamic_lake;
@@ -1062,6 +1070,8 @@ mod tests {
  DEF_USE_OZONESTRESS=.false.
  DEF_USE_VariablySaturatedFlow=.false.
  DEF_VEG_SNOW=.false.
+ DEF_TUNING_ZLND=.025
+ DEF_TUNING_CAPR=.42
  DEF_TUNING_SNOW_COVER_EXPONENT=.75
  DEF_USE_SoilInit=.true.
  DEF_file_SoilInit='{}'
@@ -1106,6 +1116,8 @@ mod tests {
         assert!(!run.variably_saturated_flow);
         assert!(!run.vegetation_snow);
         assert_eq!(run.snow_cover_exponent, 0.75);
+        assert_eq!(run.tuning.zlnd, 0.025);
+        assert_eq!(run.tuning.capr, 0.42);
         assert_eq!(run.observations.soil, Some(soil));
         assert_eq!(run.observations.snow, Some(snow));
         assert_eq!(run.observations.water_table, Some(water_table));

@@ -59,7 +59,7 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME = 'CN-Cng'\n DEF_dir_output = '{}'\n DEF_USE_BEDROCK = .true.\n /\n",
+            "&nl_colm\n DEF_CASE_NAME = 'CN-Cng'\n DEF_dir_output = '{}'\n DEF_USE_BEDROCK = .true.\n DEF_TUNING_ZLND = 0.025\n DEF_TUNING_CAPR = 0.42\n /\n",
             directory.join("output").display()
         ),
     )
@@ -69,6 +69,12 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
             .unwrap()
             .use_bedrock
     );
+    let configured =
+        single_point_cold_start_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+            .unwrap()
+            .static_run;
+    assert_eq!(configured.static_config().tuning.zlnd, 0.025);
+    assert_eq!(configured.static_config().tuning.capr, 0.42);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -314,6 +320,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             land_cover: LandCoverScheme::Igbp,
             hydraulic_model: HydraulicModel::VanGenuchten,
             use_bedrock: false,
+            tuning: RestartTuning::default(),
         },
         subgrid: SinglePointSubgrid::Pft,
         date: RestartDate {

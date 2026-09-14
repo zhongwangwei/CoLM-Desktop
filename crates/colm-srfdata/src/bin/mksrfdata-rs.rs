@@ -79,6 +79,7 @@ struct SpatialLctArgs {
     soil_texture: Option<PathBuf>,
     soil_dir: Option<PathBuf>,
     soil_model: SoilModel,
+    soil_fit: bool,
     soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
     topographic_wetness: Option<PathBuf>,
@@ -170,6 +171,7 @@ struct SpatialPftArgs {
     soil_texture: Option<PathBuf>,
     soil_dir: Option<PathBuf>,
     soil_model: SoilModel,
+    soil_fit: bool,
     soil_brightness: Option<PathBuf>,
     topography: Option<PathBuf>,
     topographic_wetness: Option<PathBuf>,
@@ -306,6 +308,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         soil_texture: args.soil_texture.clone(),
         soil_dir: args.soil_dir.clone(),
         soil_model: args.soil_model,
+        soil_fit: args.soil_fit,
         soil_brightness: args.soil_brightness.clone(),
         topography: args.topography.clone(),
         topographic_wetness: args.topographic_wetness.clone(),
@@ -2210,13 +2213,14 @@ fn materialize_spatial_common_fields(
         )?;
     }
     if let Some(soil_texture) = soil_texture {
-        write_landpatch_scalar(
+        write_landpatch_vector(
             &args.landdata,
             args.year,
             topology,
             patches,
             &args.blocks,
             "soil",
+            "soiltexture_patches",
             "soiltext_patches",
             &soil_texture,
         )?;
@@ -2244,13 +2248,14 @@ fn materialize_spatial_common_fields(
             ("soil_s_n_alb", &soil_brightness.saturated_near_infrared),
             ("soil_d_n_alb", &soil_brightness.dry_near_infrared),
         ] {
-            write_landpatch_scalar(
+            write_landpatch_vector(
                 &args.landdata,
                 args.year,
                 topology,
                 patches,
                 &args.blocks,
                 "soil",
+                &format!("{variable}_patches"),
                 variable,
                 values,
             )?;
@@ -2688,7 +2693,7 @@ fn materialize_spatial_soil(
                     &area,
                     classes,
                     VgmFills::default(),
-                    true,
+                    args.soil_fit,
                 )?;
                 for (name, values) in [
                     ("theta_r", output.theta_r),
@@ -2745,7 +2750,7 @@ fn materialize_spatial_soil(
                     &area,
                     classes,
                     CampbellFills::default(),
-                    true,
+                    args.soil_fit,
                 )?;
                 for (name, values) in [
                     ("theta_s", output.theta_s),
@@ -2847,7 +2852,9 @@ fn materialize_spatial_soil(
         }
     }
     // ponytail: macOS HDF5 faults in nc_close after reads from the production SMB
-    // rawdata mount; this short-lived materializer lets the OS reclaim its descriptors.
+    // rawdata mount; retain until exit there, remove once source reads are staged locally.
+    // Other platforms must close normally (in particular before deleting files on Windows).
+    #[cfg(target_os = "macos")]
     std::mem::forget(raw);
     Ok(())
 }
@@ -2945,6 +2952,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut soil_texture = None;
     let mut soil_dir = None;
     let mut soil_model = SoilModel::Vgm;
+    let mut soil_fit = true;
     let mut soil_brightness = None;
     let mut topography = None;
     let mut topographic_wetness = None;
@@ -3036,6 +3044,14 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                     "campbell" => SoilModel::Campbell,
                     other => bail!("--soil-model must be vgm or campbell, got {other:?}"),
                 };
+                index += 2;
+            }
+            "--soil-fit" => {
+                soil_fit = args
+                    .get(index + 1)
+                    .context("--soil-fit needs true or false")?
+                    .parse::<bool>()
+                    .context("--soil-fit must be true or false")?;
                 index += 2;
             }
             "--soil-brightness" => {
@@ -3215,6 +3231,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         soil_texture,
         soil_dir,
         soil_model,
+        soil_fit,
         soil_brightness,
         topography,
         topographic_wetness,
@@ -3264,6 +3281,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut soil_texture = None;
     let mut soil_dir = None;
     let mut soil_model = SoilModel::Vgm;
+    let mut soil_fit = true;
     let mut soil_brightness = None;
     let mut topography = None;
     let mut topographic_wetness = None;
@@ -3352,6 +3370,14 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     "campbell" => SoilModel::Campbell,
                     other => bail!("--soil-model must be vgm or campbell, got {other:?}"),
                 };
+                index += 2;
+            }
+            "--soil-fit" => {
+                soil_fit = args
+                    .get(index + 1)
+                    .context("--soil-fit needs true or false")?
+                    .parse::<bool>()
+                    .context("--soil-fit must be true or false")?;
                 index += 2;
             }
             "--soil-brightness" => {
@@ -3447,6 +3473,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         soil_texture,
         soil_dir,
         soil_model,
+        soil_fit,
         soil_brightness,
         topography,
         topographic_wetness,
@@ -3728,6 +3755,7 @@ fn spatial_case_command(
     } else {
         requested_year
     };
+    let soil_fit = case_bool(&document, "DEF_USE_SOILPAR_UPS_FIT", true)?;
     let soil_model = if case_bool(&document, "DEF_USE_Campbell_SOIL_MODEL", false)? {
         "campbell"
     } else {
@@ -3829,6 +3857,8 @@ fn spatial_case_command(
             soil_dir.display().to_string(),
             "--soil-model".to_owned(),
             soil_model.to_owned(),
+            "--soil-fit".to_owned(),
+            soil_fit.to_string(),
             "--soil-brightness".to_owned(),
             soil_brightness.display().to_string(),
             "--topography".to_owned(),
@@ -3966,6 +3996,8 @@ fn spatial_case_command(
             soil_dir.display().to_string(),
             "--soil-model".to_owned(),
             soil_model.to_owned(),
+            "--soil-fit".to_owned(),
+            soil_fit.to_string(),
             "--soil-brightness".to_owned(),
             soil_brightness.display().to_string(),
             "--topography".to_owned(),
@@ -4368,8 +4400,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -4842,6 +4874,286 @@ mod tests {
         args.windows(2)
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn spatial_case_preserves_the_upstream_soil_fit_switch() {
+        for mode in ["LCT", "PFT", "PC"] {
+            for (setting, expected) in [("", "true"), (".true.", "true"), (".false.", "false")] {
+                let switch = if setting.is_empty() {
+                    String::new()
+                } else {
+                    format!("DEF_USE_SOILPAR_UPS_FIT={setting}\n")
+                };
+                let (root, namelist) = case_namelist(
+                    "soil-fit",
+                    &format!(
+                        "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\n\
+                         DEF_dir_rawdata='$ROOT/raw'\nDEF_file_mesh='$ROOT/mesh.nc'\n\
+                         DEF_USE_LCT=.{}.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\n{switch}/\n",
+                        mode == "LCT",
+                        mode == "PFT",
+                        mode == "PC",
+                    ),
+                );
+                let command =
+                    spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(
+                    option_value(&command.args, "--soil-fit"),
+                    Some(expected),
+                    "{mode}: {setting}"
+                );
+                let fit = if command.pft_or_pc {
+                    parse_spatial_pft(&command.args).unwrap().soil_fit
+                } else {
+                    parse_spatial_lct(&command.args).unwrap().soil_fit
+                };
+                assert_eq!(fit, expected == "true");
+                let mut invalid = command.args.clone();
+                let value = invalid.iter().position(|arg| arg == "--soil-fit").unwrap() + 1;
+                invalid[value] = "not-a-bool".into();
+                if command.pft_or_pc {
+                    assert!(parse_spatial_pft(&invalid).is_err());
+                } else {
+                    assert!(parse_spatial_lct(&invalid).is_err());
+                }
+                if setting == ".false." {
+                    let contents = std::fs::read_to_string(&namelist).unwrap();
+                    std::fs::write(
+                        &namelist,
+                        contents.replace(
+                            "DEF_USE_SOILPAR_UPS_FIT=.false.",
+                            "DEF_USE_SOILPAR_UPS_FIT='false'",
+                        ),
+                    )
+                    .unwrap();
+                    assert!(spatial_case_command(
+                        &namelist,
+                        Some(SiteMode::Igbp),
+                        false,
+                        None,
+                        None
+                    )
+                    .is_err());
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn soil_outputs_preserve_fit_switch_and_upstream_names() {
+        let (root, _) = case_namelist("soil-fit-output", "&nl_colm /\n");
+        let raw = root.join("soil");
+        std::fs::create_dir(&raw).unwrap();
+        // Sparse chunks keep full upstream dimensions without storing a global raster.
+        for (name, values) in [
+            ("VGM_theta_r", [0.10, 0.12]),
+            ("VGM_alpha", [0.01, 0.02]),
+            ("VGM_n", [1.5, 1.6]),
+            ("VGM_L", [0.4, 0.5]),
+            ("theta_s", [0.45, 0.46]),
+            ("k_s", [10.0, 20.0]),
+            ("psi_s", [-30.0, -50.0]),
+            ("lambda", [0.2, 0.3]),
+            ("vf_quartz_mineral_s", [0.1, 0.3]),
+            ("vf_gravels_s", [0.1, 0.3]),
+            ("vf_sand_s", [0.1, 0.3]),
+            ("vf_om_s", [0.1, 0.3]),
+            ("wf_gravels_s", [0.1, 0.3]),
+            ("wf_sand_s", [0.1, 0.3]),
+            ("csol", [1.0e6, 2.0e6]),
+            ("tksatu", [1.0, 2.0]),
+            ("tksatf", [1.0, 2.0]),
+            ("tkdry", [0.1, 0.3]),
+            ("k_solids", [1.0, 2.0]),
+            ("OM_density_s", [60.0, 70.0]),
+            ("BD_all_s", [1100.0, 1300.0]),
+            ("vf_clay_s", [0.1, 0.3]),
+            ("wf_om_s", [0.1, 0.3]),
+            ("wf_clay_s", [0.1, 0.3]),
+        ] {
+            let mut file = netcdf::create(raw.join(format!("{name}.nc"))).unwrap();
+            file.add_dimension("lat", COLM_500M.nlat).unwrap();
+            file.add_dimension("lon", COLM_500M.nlon).unwrap();
+            for layer in 1..=SOIL_LAYERS {
+                let mut var = file
+                    .add_variable::<f64>(&format!("{name}_l{layer}"), &["lat", "lon"])
+                    .unwrap();
+                var.set_chunking(&[1, 2]).unwrap();
+                var.put_values(&values, (0..1, 0..2)).unwrap();
+            }
+            file.close().unwrap();
+        }
+        let mesh =
+            colm_srfdata::FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
+        let topology = SpatialTopology {
+            kind: SpatialInputKind::Unstructured,
+            grid: colm_srfdata::SpatialGrid {
+                lon_w: vec![COLM_500M.lon_w(1)],
+                lon_e: vec![COLM_500M.lon_e(2)],
+                lat_s: vec![COLM_500M.lat_s(1)],
+                lat_n: vec![COLM_500M.lat_n(1)],
+            },
+            pixel: colm_srfdata::PixelAxes {
+                edge_south: COLM_500M.lat_s(1),
+                edge_north: COLM_500M.lat_n(1),
+                edge_west: COLM_500M.lon_w(1),
+                edge_east: COLM_500M.lon_e(2),
+                lon_w: vec![COLM_500M.lon_w(1), COLM_500M.lon_w(2)],
+                lon_e: vec![COLM_500M.lon_e(1), COLM_500M.lon_e(2)],
+                lat_s: vec![COLM_500M.lat_s(1)],
+                lat_n: vec![COLM_500M.lat_n(1)],
+            },
+            land_elements: mesh.land_elements(),
+            mesh,
+        };
+        let patches = FlatLandPatches {
+            element_ids: vec![1],
+            pixel_start: vec![1],
+            pixel_end: vec![2],
+            set_type: vec![1],
+            element_index: vec![1],
+        };
+        for model in ["vgm", "campbell"] {
+            let mut conductivity = Vec::new();
+            for fit in [false, true] {
+                let output = root.join(format!("{model}-{fit}"));
+                let args = parse_spatial_lct(&[
+                    "unstructured".into(),
+                    "mesh.nc".into(),
+                    "landtype.nc".into(),
+                    output.display().to_string(),
+                    "2005".into(),
+                    "--land-cover".into(),
+                    "igbp".into(),
+                    "--soil-model".into(),
+                    model.into(),
+                    "--soil-fit".into(),
+                    fit.to_string(),
+                ])
+                .unwrap();
+                materialize_spatial_soil(
+                    &raw,
+                    &args,
+                    &topology,
+                    &patches,
+                    None,
+                    SoilPatchClasses {
+                        water: 17,
+                        glacier: 15,
+                    },
+                )
+                .unwrap();
+                for layer in 1..=SOIL_LAYERS {
+                    let read = |name: &str| {
+                        let variable = format!("{name}_l{layer}_patches");
+                        let file =
+                            netcdf::open(output.join(format!("soil/2005/{variable}_w180_s90.nc")))
+                                .unwrap();
+                        file.variable(&variable)
+                            .unwrap()
+                            .get_values::<f64, _>(..)
+                            .unwrap()[0]
+                    };
+                    // Aggregation_SoilParameters: area mean, median, and weighted product,
+                    // without invoking lmder when DEF_USE_SOILPAR_UPS_FIT is false.
+                    if !fit {
+                        assert!((read("theta_s") - 0.455).abs() < 1.0e-12);
+                        assert!((read("k_s") - 200.0_f64.sqrt()).abs() < 1.0e-12);
+                        for (name, expected) in if model == "vgm" {
+                            vec![
+                                ("theta_r", 0.11),
+                                ("alpha_vgm", 0.015),
+                                ("n_vgm", 1.55),
+                                ("L_vgm", 0.45),
+                            ]
+                        } else {
+                            vec![("psi_s", -40.0), ("lambda", 0.25)]
+                        } {
+                            assert!(
+                                (read(name) - expected).abs() < 1.0e-12,
+                                "{model}: {name}, layer {layer}"
+                            );
+                        }
+                    }
+                    if layer == 1 {
+                        conductivity.push(read("k_s"));
+                    }
+                }
+            }
+            assert!(
+                (conductivity[0] - conductivity[1]).abs() > 1.0e-6,
+                "fixture must distinguish fitting from aggregation for {model}"
+            );
+        }
+        let brightness = root.join("soil_brightness.nc");
+        let mut file = netcdf::create(&brightness).unwrap();
+        file.add_dimension("lat", COLM_500M.nlat).unwrap();
+        file.add_dimension("lon", COLM_500M.nlon).unwrap();
+        let mut var = file
+            .add_variable::<i32>("soil_brightness", &["lat", "lon"])
+            .unwrap();
+        var.set_chunking(&[1, 2]).unwrap();
+        var.put_values(&[1, 3], (0..1, 0..2)).unwrap();
+        let mut var = file
+            .add_variable::<i32>("soiltexture", &["lat", "lon"])
+            .unwrap();
+        var.set_chunking(&[1, 2]).unwrap();
+        var.put_values(&[1, 3], (0..1, 0..2)).unwrap();
+        file.close().unwrap();
+        let output = root.join("albedo");
+        let args = parse_spatial_lct(&[
+            "unstructured".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            output.display().to_string(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--soil-brightness".into(),
+            brightness.display().to_string(),
+            "--soil-texture".into(),
+            brightness.display().to_string(),
+        ])
+        .unwrap();
+        materialize_spatial_common_fields(&args, &topology, &patches, None, None).unwrap();
+        let texture =
+            netcdf::open(output.join("soil/2005/soiltexture_patches_w180_s90.nc")).unwrap();
+        assert_eq!(
+            texture
+                .variable("soiltext_patches")
+                .unwrap()
+                .get_values::<i32, _>(..)
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(texture);
+        for name in [
+            "soil_s_v_alb",
+            "soil_d_v_alb",
+            "soil_s_n_alb",
+            "soil_d_n_alb",
+        ] {
+            // Aggregation_SoilBrightness writes *_patches.nc but the variable has no suffix.
+            let file =
+                netcdf::open(output.join(format!("soil/2005/{name}_patches_w180_s90.nc"))).unwrap();
+            assert_eq!(
+                file.variable(name)
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(!output
+                .join(format!("soil/2005/{name}_w180_s90.nc"))
+                .exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
