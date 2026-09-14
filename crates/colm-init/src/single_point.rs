@@ -59,6 +59,8 @@ use crate::{
 /// Immutable single-point arguments that affect the common constant restart files.
 #[derive(Debug, Clone, Copy)]
 pub struct SinglePointStaticConfig<'a> {
+    /// DEF_REST_CompressLevel; validated before output creation.
+    pub compression_level: u8,
     pub case_name: &'a str,
     pub land_cover_year: i32,
     pub block_label: &'a str,
@@ -81,6 +83,7 @@ impl<'a> SinglePointStaticConfig<'a> {
         hydraulic_model: HydraulicModel,
     ) -> Self {
         Self {
+            compression_level: 1,
             case_name,
             land_cover_year,
             block_label,
@@ -102,6 +105,7 @@ impl<'a> SinglePointStaticConfig<'a> {
 /// disagreeing about where a case lives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointStaticRun {
+    pub compression_level: u8,
     pub surface: PathBuf,
     pub restart_dir: PathBuf,
     pub case_name: String,
@@ -214,6 +218,7 @@ impl SinglePointStaticRun {
             self.land_cover,
             self.hydraulic_model,
         );
+        config.compression_level = self.compression_level;
         config.use_bedrock = self.use_bedrock;
         config.tuning = self.tuning;
         config.use_topmodel = self.runoff_scheme == 0;
@@ -252,6 +257,7 @@ pub fn single_point_static_run_from_namelist(
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let compression_level = crate::restart::restart_compression_level(&document)?;
     let case_name = required_string(&document, "DEF_CASE_NAME")?;
     let output = PathBuf::from(required_string(&document, "DEF_dir_output")?);
     let land_cover_year = optional_i32(&document, "DEF_LC_YEAR")?.unwrap_or(2005);
@@ -277,6 +283,7 @@ pub fn single_point_static_run_from_namelist(
     );
 
     Ok(SinglePointStaticRun {
+        compression_level,
         surface,
         restart_dir: case_dir.join("restart"),
         case_name,
@@ -517,6 +524,7 @@ fn write_urban_constant_restart_from_initialized(
         config.land_cover_year,
         config.block_label,
         UrbanConstantRestartInput {
+            compression_level: config.compression_level,
             state: &initialized.state,
             lucy: &initialized.lucy,
             thermal: UrbanThermalFields {
@@ -650,6 +658,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         run.static_run.land_cover_year,
         &run.static_run.block_label,
         PftConstantRestartInput {
+            compression_level: run.static_run.compression_level,
             class: &pft.class,
             fraction: &pft.fraction,
             canopy_top_m: &canopy.top_m,
@@ -667,6 +676,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
                 &run.static_run.block_label,
                 crop.as_ref().map_or(1, |_| pft.class.len()),
                 run.nitrification,
+                run.static_run.compression_level,
             )
         })
         .transpose()?;
@@ -806,6 +816,7 @@ fn write_single_point_constant_restart_from_surface(
         config.land_cover_year,
         config.block_label,
         ConstantRestartInput {
+            compression_level: config.compression_level,
             dimensions: RestartDimensions::default(),
             patch: RestartPatchFields {
                 class: &class,
@@ -1367,6 +1378,7 @@ fn write_single_point_urban_cold_time_restarts(
         run.date,
         &run.static_run.block_label,
         crate::urban_restart::ColdUrbanTimeRestartInput {
+            compression_level: run.static_run.compression_level,
             radiation: std::slice::from_ref(&urban_radiation),
             total_lai: std::slice::from_ref(&total_lai),
             total_sai: std::slice::from_ref(&total_sai),
@@ -2042,6 +2054,7 @@ fn write_single_point_pft_cold_time_restarts(
                 reflectance: &high_resolution_reflectance,
                 transmittance: &high_resolution_transmittance,
             },
+            run.static_run.compression_level,
         )?;
     }
     let bgc_pft_values = bgc_state.as_ref().map(|state| {
@@ -2058,6 +2071,7 @@ fn write_single_point_pft_cold_time_restarts(
         run.date,
         &run.static_run.block_label,
         PftTimeRestartInput {
+            compression_level: run.static_run.compression_level,
             fields: PftTimeFields {
                 leaf_temperature_k: &vec![cold_soil.temperature_k[0]; pft.class.len()],
                 canopy_water_mm: &vec![0.0; pft.class.len()],
@@ -2115,7 +2129,7 @@ fn write_single_point_pft_cold_time_restarts(
     let bgc = bgc_state
         .as_ref()
         .map(|state| {
-            let mut input = bgc_time_restart_input(state);
+            let mut input = bgc_time_restart_input(state, run.static_run.compression_level);
             input.crop = crop.as_ref().map(CropColdStartState::bgc_fields);
             write_bgc_time_restart(
                 &run.static_run.restart_dir,
@@ -2710,6 +2724,7 @@ fn write_cold_time_restart(
         run.date,
         &run.static_run.block_label,
         TimeRestartInput {
+            compression_level: run.static_run.compression_level,
             dimensions,
             snow_soil: SnowSoilRestartFields {
                 snow_node_depth_m: &snow_node_depth,

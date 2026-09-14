@@ -960,6 +960,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
     let run = SinglePointColdStartRun {
         namelist: directory.join("case.nml"),
         static_run: SinglePointStaticRun {
+            compression_level: 1,
             surface: directory.join("srfdata.nc"),
             restart_dir: directory.join("restart"),
             case_name: "crop".to_owned(),

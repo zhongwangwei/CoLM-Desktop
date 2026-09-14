@@ -33,6 +33,13 @@ fn native_mkinidata_binary_writes_the_complete_common_restart_family() {
             )
             .unwrap();
     }
+    namelist
+        .insert(
+            "DEF_REST_CompressLevel",
+            colm_namelist::Value::Int(4),
+            "nl_colm",
+        )
+        .unwrap();
     let case = directory.join("case.nml");
     std::fs::write(&case, namelist.to_string()).unwrap();
 
@@ -54,6 +61,32 @@ fn native_mkinidata_binary_writes_the_complete_common_restart_family() {
         restart.join("2008-001-00000/CN-Cng_restart_2008-001-00000_lc2005_w180_s90.nc"),
     ] {
         assert!(path.is_file(), "missing {}", path.display());
+        let output = match std::process::Command::new("ncdump")
+            .arg("-sh")
+            .arg(&path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("ncdump unavailable: skipping exact restart deflate metadata check");
+                continue;
+            }
+            Err(error) => panic!("cannot inspect restart compression: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let header = String::from_utf8(output.stdout).unwrap();
+        if path.file_name().unwrap() == "CN-Cng_restart_const_lc2005.nc" {
+            assert!(!header.contains("_DeflateLevel"));
+        } else if path.parent().unwrap().ends_with("const") {
+            assert!(header.contains("porsl:_DeflateLevel = 4 ;"), "{header}");
+            assert!(!header.contains("patchclass:_DeflateLevel"));
+        } else {
+            assert!(header.contains("t_soisno:_DeflateLevel = 4 ;"), "{header}");
+        }
     }
     let file = netcdf::open(restart.join("const/CN-Cng_restart_const_lc2005.nc")).unwrap();
     for (name, value) in [("zlnd", 0.025), ("capr", 0.42)] {

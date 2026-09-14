@@ -4,6 +4,43 @@ use super::*;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} in {} did not have deflate level {level}\n{header}",
+            path.display()
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} in {} unexpectedly had deflate metadata\n{header}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn cold_restart_matches_gridriver_schema_two_base_state() {
     let root = temp_dir("base");
@@ -23,6 +60,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        compression_level: 1,
     })
     .unwrap();
 
@@ -103,6 +141,57 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
 }
 
 #[test]
+fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
+    let root = temp_dir("compression");
+    let unit_catchment = root.join("unitcatchment.nc");
+    write_unit_catchment(&unit_catchment);
+    let restart = write_gridriver_cold_restart(GridRiverColdStartConfig {
+        unit_catchment: &unit_catchment,
+        restart_dir: &root.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        bifurcation: false,
+        levee: false,
+        reservoir_method: 0,
+        reservoir_parameters: None,
+        compression_level: 4,
+    })
+    .unwrap();
+    assert_deflate(&restart.path, "gridriver_ucatch_identity", 4);
+    assert_deflate(&restart.path, "wdsrf_ucat", 4);
+    assert_deflate(&restart.path, "hist_acctime_ucat", 4);
+    assert_no_deflate(&restart.path, "gridriver_restart_schema");
+    assert_no_deflate(&restart.path, "gridriver_restart_complete");
+    assert_no_deflate(&restart.path, "acctime_rnof");
+
+    let invalid = temp_dir("compression-invalid");
+    assert!(write_gridriver_cold_restart(GridRiverColdStartConfig {
+        unit_catchment: &unit_catchment,
+        restart_dir: &invalid.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        bifurcation: false,
+        levee: false,
+        reservoir_method: 0,
+        reservoir_parameters: None,
+        compression_level: 10,
+    })
+    .is_err());
+    assert!(!invalid.join("restart").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cold_restart_refuses_unimplemented_reservoir_methods() {
     let root = temp_dir("features");
     let unit_catchment = root.join("unitcatchment.nc");
@@ -121,6 +210,7 @@ fn cold_restart_refuses_unimplemented_reservoir_methods() {
         levee: false,
         reservoir_method: 2,
         reservoir_parameters: None,
+        compression_level: 1,
     })
     .unwrap_err()
     .to_string();
@@ -148,6 +238,7 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        compression_level: 1,
     })
     .unwrap();
 
@@ -226,6 +317,7 @@ fn cold_restart_carries_zero_levee_state() {
         levee: true,
         reservoir_method: 0,
         reservoir_parameters: None,
+        compression_level: 1,
     })
     .unwrap();
 
@@ -272,6 +364,7 @@ fn cold_restart_carries_native_reservoir_identity_and_volume() {
         levee: false,
         reservoir_method: 1,
         reservoir_parameters: Some(&parameters),
+        compression_level: 1,
     })
     .unwrap();
 

@@ -114,6 +114,7 @@ pub fn write_spatial_urban_constant_restarts(
             config.common.land_cover_year,
             config.common.block_label,
             UrbanConstantRestartInput {
+                compression_level: config.common.compression_level,
                 state: &data.state,
                 lucy: &data.lucy,
                 thermal: UrbanThermalFields {

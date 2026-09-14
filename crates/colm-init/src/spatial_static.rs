@@ -23,6 +23,8 @@ use crate::{
 /// Arguments for one already-addressed LCT landpatch block.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialLctStaticConfig<'a> {
+    /// DEF_REST_CompressLevel; validated before output creation.
+    pub compression_level: u8,
     pub landdata: &'a Path,
     pub restart_dir: &'a Path,
     pub case_name: &'a str,
@@ -57,6 +59,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
         hydraulic_model: HydraulicModel,
     ) -> Self {
         Self {
+            compression_level: 1,
             landdata,
             restart_dir,
             case_name,
@@ -373,6 +376,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         config.land_cover_year,
         config.block_label,
         ConstantRestartInput {
+            compression_level: config.compression_level,
             dimensions,
             patch: RestartPatchFields {
                 class: &patches.class,

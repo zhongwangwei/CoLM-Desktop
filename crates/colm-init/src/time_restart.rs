@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
+use crate::restart::validate_restart_compression;
+
 /// Dimensions used by `WRITE_TimeVariables` for one restart block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeRestartDimensions {
@@ -194,6 +196,7 @@ pub struct IrrigationFields<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct TimeRestartInput<'a> {
     pub dimensions: TimeRestartDimensions,
+    pub compression_level: u8,
     pub snow_soil: SnowSoilRestartFields<'a>,
     pub patch: TimePatchFields<'a>,
     pub radiation: TimeRadiationFields<'a>,
@@ -231,6 +234,7 @@ pub fn write_time_restart(
 ) -> Result<TimeRestartFile> {
     validate_component(case_name, "case name")?;
     validate_component(block_label, "block label")?;
+    validate_restart_compression(input.compression_level)?;
     ensure!(
         (0..=9999).contains(&land_cover_year) && (0..=9999).contains(&date.year),
         "restart years must fit CoLM's four-digit filename convention"
@@ -253,6 +257,7 @@ pub fn write_time_restart(
 
 /// Writes one already-addressed common CoLM time restart block.
 pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<'_>) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     let patches = validate_input(input)?;
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -271,6 +276,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
     let dimensions = input.dimensions;
     let soilsnow = dimensions.soil_layers + dimensions.snow_layers;
     let snowp1 = dimensions.snow_layers + 1;
+    let compression = input.compression_level;
 
     put_axis_major(
         &mut file,
@@ -279,6 +285,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         dimensions.snow_layers,
         patches,
         input.snow_soil.snow_node_depth_m,
+        compression,
     )?;
     put_axis_major(
         &mut file,
@@ -287,13 +294,22 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         dimensions.snow_layers,
         patches,
         input.snow_soil.snow_layer_thickness_m,
+        compression,
     )?;
     for (name, values) in [
         ("t_soisno", input.snow_soil.temperature_k),
         ("wliq_soisno", input.snow_soil.liquid_water_kg_m2),
         ("wice_soisno", input.snow_soil.ice_water_kg_m2),
     ] {
-        put_axis_major(&mut file, name, "soilsnow", soilsnow, patches, values)?;
+        put_axis_major(
+            &mut file,
+            name,
+            "soilsnow",
+            soilsnow,
+            patches,
+            values,
+            compression,
+        )?;
     }
     put_axis_major(
         &mut file,
@@ -302,6 +318,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         dimensions.soil_layers,
         patches,
         input.snow_soil.matric_potential_mm,
+        compression,
     )?;
     put_axis_major(
         &mut file,
@@ -310,6 +327,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         dimensions.soil_layers,
         patches,
         input.snow_soil.hydraulic_conductivity_mm_s,
+        compression,
     )?;
 
     if let Some(plant) = input.plant_hydraulics {
@@ -320,6 +338,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             plant.vegetation_nodes,
             patches,
             plant.water_potential_mm,
+            compression,
         )?;
         put_patch_values(
             &mut file,
@@ -327,6 +346,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
                 ("gs0sun", plant.sunlit_stomatal_conductance),
                 ("gs0sha", plant.shaded_stomatal_conductance),
             ],
+            compression,
         )?;
     }
     if let Some(hyperspectral) = input.hyperspectral {
@@ -337,6 +357,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             ("rtyp", dimensions.radiation_types),
             patches,
             hyperspectral.albedo,
+            compression,
         )?;
         for (name, values) in [
             ("reflectance_out", hyperspectral.reflectance),
@@ -349,6 +370,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
                 ("PFT", HYPERSPECTRAL_PFT_CLASSES),
                 patches,
                 values,
+                compression,
             )?;
         }
     }
@@ -364,10 +386,15 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
                 ("o3coefg_sun", ozone.sunlit_ground_coefficient),
                 ("o3coefg_sha", ozone.shaded_ground_coefficient),
             ],
+            compression,
         )?;
     }
 
-    put_patch_values(&mut file, pre_radiation_patch_entries(input.patch))?;
+    put_patch_values(
+        &mut file,
+        pre_radiation_patch_entries(input.patch),
+        compression,
+    )?;
     for (name, values) in [
         ("alb", input.radiation.albedo),
         ("ssun", input.radiation.sunlit_absorption),
@@ -382,9 +409,14 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             ("rtyp", dimensions.radiation_types),
             patches,
             values,
+            compression,
         )?;
     }
-    put_patch_values(&mut file, post_radiation_patch_entries(input.patch))?;
+    put_patch_values(
+        &mut file,
+        post_radiation_patch_entries(input.patch),
+        compression,
+    )?;
     if let Some(values) = input.lake.layer_thickness_m {
         put_axis_major(
             &mut file,
@@ -393,6 +425,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             dimensions.lake_layers,
             patches,
             values,
+            compression,
         )?;
     }
     put_axis_major(
@@ -402,6 +435,7 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         dimensions.lake_layers,
         patches,
         input.lake.temperature_k,
+        compression,
     )?;
     put_axis_major(
         &mut file,
@@ -410,8 +444,13 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         dimensions.lake_layers,
         patches,
         input.lake.ice_fraction,
+        compression,
     )?;
-    put_patch_values(&mut file, [("savedtke1", input.patch.saved_tke)])?;
+    put_patch_values(
+        &mut file,
+        [("savedtke1", input.patch.saved_tke)],
+        compression,
+    )?;
     for (name, values) in snow_aerosol_entries(input.snow_aerosol) {
         put_axis_major(
             &mut file,
@@ -420,21 +459,25 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
             dimensions.snow_layers,
             patches,
             values,
+            compression,
         )?;
     }
     put_patch_last_4d(
         &mut file,
         "ssno_lyr",
-        ("band", dimensions.bands),
-        ("rtyp", dimensions.radiation_types),
-        ("snowp1", snowp1),
+        [
+            ("band", dimensions.bands),
+            ("rtyp", dimensions.radiation_types),
+            ("snowp1", snowp1),
+        ],
         patches,
         input.radiation.snow_layer_absorption,
+        compression,
     )?;
-    put_patch_values(&mut file, regional_patch_entries(input.patch))?;
+    put_patch_values(&mut file, regional_patch_entries(input.patch), compression)?;
     if let Some(irrigation) = input.irrigation {
-        put_patch_values(&mut file, irrigation_f64_entries(irrigation))?;
-        put_patch_i32_values(&mut file, irrigation_i32_entries(irrigation))?;
+        put_patch_values(&mut file, irrigation_f64_entries(irrigation), compression)?;
+        put_patch_i32_values(&mut file, irrigation_i32_entries(irrigation), compression)?;
     }
     file.close()
         .with_context(|| format!("cannot close time restart block {}", path.display()))?;
@@ -451,7 +494,9 @@ pub fn append_time_hyperspectral_fields(
     path: impl AsRef<Path>,
     radiation_types: usize,
     hyperspectral: TimeHyperspectralFields<'_>,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_restart_compression(compression_level)?;
     ensure!(
         radiation_types > 0,
         "hyperspectral radiation types must be positive"
@@ -482,6 +527,7 @@ pub fn append_time_hyperspectral_fields(
         ("rtyp", radiation_types),
         patches,
         hyperspectral.albedo,
+        compression_level,
     )?;
     for (name, values) in [
         ("reflectance_out", hyperspectral.reflectance),
@@ -494,6 +540,7 @@ pub fn append_time_hyperspectral_fields(
             ("PFT", HYPERSPECTRAL_PFT_CLASSES),
             patches,
             values,
+            compression_level,
         )?;
     }
     file.close()?;
@@ -891,13 +938,20 @@ fn ensure_dimension(file: &mut netcdf::FileMut, name: &str, expected: usize) -> 
     Ok(())
 }
 
+fn set_compression(variable: &mut netcdf::VariableMut<'_>, level: u8) -> Result<()> {
+    variable.set_compression(level.into(), false)?;
+    Ok(())
+}
+
 fn put_patch_values<const N: usize>(
     file: &mut netcdf::FileMut,
     entries: [(&str, &[f64]); N],
+    compression_level: u8,
 ) -> Result<()> {
     for (name, values) in entries {
-        file.add_variable::<f64>(name, &["patch"])?
-            .put_values(values, ..)?;
+        let mut variable = file.add_variable::<f64>(name, &["patch"])?;
+        set_compression(&mut variable, compression_level)?;
+        variable.put_values(values, ..)?;
     }
     Ok(())
 }
@@ -905,10 +959,12 @@ fn put_patch_values<const N: usize>(
 fn put_patch_i32_values<const N: usize>(
     file: &mut netcdf::FileMut,
     entries: [(&str, &[i32]); N],
+    compression_level: u8,
 ) -> Result<()> {
     for (name, values) in entries {
-        file.add_variable::<i32>(name, &["patch"])?
-            .put_values(values, ..)?;
+        let mut variable = file.add_variable::<i32>(name, &["patch"])?;
+        set_compression(&mut variable, compression_level)?;
+        variable.put_values(values, ..)?;
     }
     Ok(())
 }
@@ -920,6 +976,7 @@ fn put_axis_major(
     axis: usize,
     patches: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     validate_axis_major(name, values, axis, patches)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -928,8 +985,9 @@ fn put_axis_major(
             on_disk.push(values[axis_index * patches + patch]);
         }
     }
-    file.add_variable::<f64>(name, &["patch", axis_name])?
-        .put_values(&on_disk, (.., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["patch", axis_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., ..))?;
     Ok(())
 }
 
@@ -940,6 +998,7 @@ fn put_patch_last_3d(
     (second_name, second): (&str, usize),
     patches: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     validate_patch_last_3d(name, values, first, second, patches)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -950,19 +1009,19 @@ fn put_patch_last_3d(
             }
         }
     }
-    file.add_variable::<f64>(name, &["patch", second_name, first_name])?
-        .put_values(&on_disk, (.., .., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["patch", second_name, first_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., .., ..))?;
     Ok(())
 }
 
 fn put_patch_last_4d(
     file: &mut netcdf::FileMut,
     name: &str,
-    (first_name, first): (&str, usize),
-    (second_name, second): (&str, usize),
-    (third_name, third): (&str, usize),
+    [(first_name, first), (second_name, second), (third_name, third)]: [(&str, usize); 3],
     patches: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     validate_patch_last_4d(name, values, first, second, third, patches)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -979,8 +1038,10 @@ fn put_patch_last_4d(
             }
         }
     }
-    file.add_variable::<f64>(name, &["patch", third_name, second_name, first_name])?
-        .put_values(&on_disk, (.., .., .., ..))?;
+    let mut variable =
+        file.add_variable::<f64>(name, &["patch", third_name, second_name, first_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., .., .., ..))?;
     Ok(())
 }
 

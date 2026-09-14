@@ -6,6 +6,43 @@ use crate::RestartDate;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} in {} did not have deflate level {level}\n{header}",
+            path.display()
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} in {} unexpectedly had deflate metadata\n{header}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn urban_constant_restart_matches_fortran_filename_schema_and_axis_order() {
     let fixture = Fixture::new();
@@ -48,6 +85,115 @@ fn urban_constant_restart_matches_fortran_filename_schema_and_axis_order() {
 }
 
 #[test]
+fn urban_constant_and_time_restart_obey_compression_level() {
+    let fixture = Fixture::new();
+    let root = temp_dir("compression");
+    let constant = write_urban_constant_restart(
+        &root,
+        "CN-Cng",
+        2005,
+        "w180_s90",
+        UrbanConstantRestartInput {
+            compression_level: 4,
+            ..fixture.input()
+        },
+    )
+    .unwrap();
+    assert_deflate(&constant, "PCT_Tree", 4);
+    assert_deflate(&constant, "ALB_ROOF", 4);
+
+    let scalar_values = vec![10.0, 20.0];
+    let radiative_values = (0..8).map(f64::from).collect::<Vec<_>>();
+    let scalar_fields = URBAN_TIME_SCALARS
+        .iter()
+        .map(|name| UrbanNamedField {
+            name,
+            values: &scalar_values,
+        })
+        .collect::<Vec<_>>();
+    let radiative_fields = URBAN_TIME_RADIATIVE
+        .iter()
+        .map(|name| UrbanNamedField {
+            name,
+            values: &radiative_values,
+        })
+        .collect::<Vec<_>>();
+    let dimensions = UrbanTimeRestartDimensions {
+        urban_count: 2,
+        snow_layers: 2,
+        soil_layers: 3,
+        roof_layers: 4,
+        wall_layers: 5,
+    };
+    let schema = urban_layer_schema(dimensions);
+    let layer_values = schema
+        .iter()
+        .map(|(_, _, layers)| vec![0.0; layers * 2])
+        .collect::<Vec<_>>();
+    let layer_fields = schema
+        .iter()
+        .zip(&layer_values)
+        .map(|((name, _, _), values)| UrbanNamedField { name, values })
+        .collect::<Vec<_>>();
+    let time = write_urban_time_restart(
+        &root,
+        "CN-Cng",
+        2005,
+        RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        "w180_s90",
+        UrbanTimeRestartInput {
+            dimensions,
+            scalar_fields: &scalar_fields,
+            radiative_fields: &radiative_fields,
+            layer_fields: &layer_fields,
+            compression_level: 4,
+        },
+    )
+    .unwrap();
+    assert_deflate(&time, "fwsun", 4);
+    assert_deflate(&time, "sroof", 4);
+    assert_deflate(&time, "z_sno_roof", 4);
+
+    let constant_zero = write_urban_constant_restart(
+        &root,
+        "CN-Cng",
+        2006,
+        "w180_s90",
+        UrbanConstantRestartInput {
+            compression_level: 0,
+            ..fixture.input()
+        },
+    )
+    .unwrap();
+    assert_no_deflate(&constant_zero, "PCT_Tree");
+    assert_eq!(
+        netcdf::open(&constant_zero)
+            .unwrap()
+            .variable("PCT_Tree")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        fixture.state.patch_tree_fraction
+    );
+
+    let invalid = root.join("invalid.nc");
+    assert!(write_urban_constant_restart_block(
+        &invalid,
+        UrbanConstantRestartInput {
+            compression_level: 10,
+            ..fixture.input()
+        },
+    )
+    .is_err());
+    assert!(!invalid.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn urban_constant_restart_rejects_wrong_layer_shape_before_writing() {
     let fixture = Fixture::new();
     let mut thermal = fixture.thermal();
@@ -60,6 +206,7 @@ fn urban_constant_restart_rejects_wrong_layer_shape_before_writing() {
             state: &fixture.state,
             lucy: &fixture.lucy,
             thermal,
+            compression_level: 1,
         },
     )
     .is_err());
@@ -131,6 +278,7 @@ impl Fixture {
             state: &self.state,
             lucy: &self.lucy,
             thermal: self.thermal(),
+            compression_level: 1,
         }
     }
 }
@@ -208,6 +356,7 @@ fn urban_time_restart_writes_the_complete_upstream_field_family() {
             scalar_fields: &scalar_fields,
             radiative_fields: &radiative_fields,
             layer_fields: &layer_fields,
+            compression_level: 1,
         },
     )
     .unwrap();
@@ -279,6 +428,7 @@ fn urban_time_restart_rejects_missing_schema_fields_before_writing() {
             scalar_fields: &scalar_fields,
             radiative_fields: &radiative_fields,
             layer_fields: &layer_fields,
+            compression_level: 1,
         },
     )
     .is_err());
@@ -305,6 +455,7 @@ fn cold_urban_writer_preserves_layer_major_soil_water_for_every_patch() {
             total_lai: &[3.0, 4.0],
             total_sai: &[0.5, 0.6],
             soil_liquid: &soil,
+            compression_level: 1,
         },
     )
     .unwrap();

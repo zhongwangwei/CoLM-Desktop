@@ -21,9 +21,8 @@ Exact `ncdump -sh` checks cover requested levels and metadata exceptions, includ
 level-zero absence of deflate and unchanged decoded values. Retrospective
 old-behavior isolation (compression helpers temporarily disabled) fails these
 checks; helpers were restored and checks pass. This was **not a pre-edit RED
-run**. Evidence: `/tmp/colm-surface-compression-fix/`. Restart compression
-`DEF_REST_CompressLevel` remains separate missing functionality; no measured I/O
-speedup is claimed.
+run**. Evidence: `/tmp/colm-surface-compression-fix/`. No measured I/O speedup
+is claimed.
 
 TOPMODEL initialization now selects method `0` (fixed `0.38/0.125`, no topography
 files), method `1` (three source fields), or method `2` (four source fields).
@@ -50,6 +49,43 @@ A frozen release smoke check rejects SNICAR-enabled cold start before output;
 the explicit non-SNICAR control completes with all **3 files / 136 decoded arrays**
 unchanged from the preceding no-snow initializer. This is not a fresh original
 Fortran runtime comparison. Evidence: `/tmp/colm-snicar-safety-guard/release-result.json`.
+
+## Restart compression follows the original per-variable contract
+
+`DEF_REST_CompressLevel` now reaches common, PFT/PC, BGC, urban, CatchLateral and
+GridRiver cold restart writers, including hyperspectral append. The shared
+namelist parser defaults to `1` and accepts only integers `0..=9`; direct
+single-point and `spatial-lct` commands also accept `--rest-compress-level`.
+Level `0` disables deflate. Invalid values fail before creating restart outputs.
+Existing NetCDF define-time compression is used, without repacking, global
+configuration, new dependencies or changes to scientific arithmetic.
+
+The original policy is not “compress every array”: common static identity,
+coordinates, TOPMODEL/VIC, terrain and tuning fields remain uncompressed;
+BGC constants compress only `rf_decomp/pathfrac_decomp/rice2pdt`; BGC time
+compresses only the 16 crop planting/fertilizer fields (not `cphase`).
+CatchLateral identity arrays and GridRiver transaction/feature/time scalars
+remain uncompressed. Common/PFT time and urban payloads use the case level.
+Source contract and independent approval:
+`/tmp/colm-restart-compression-contract-review.md` and
+`/tmp/colm-restart-compression-contract.json`. The pre-existing conditional
+GridRiver `hist_bifflw_lev/hist_bifflw_acctime` coverage gap is not closed by
+compressing the payloads currently written.
+
+A **pre-edit** frozen executable ignored default `1` and explicit `4` (both
+produced uncompressed scientific arrays); the saved RED is
+`/tmp/colm-restart-compression-driver/before-results.json`. Fresh release runs
+honor default `1`, explicit `4` and `0`, while all **3 files / 136 decoded arrays
+per case** retain their schema, attributes and bitwise decoded values. Five
+invalid-value cases fail before output. Results:
+`/tmp/colm-restart-compression-driver/after-results.json`. This tiny-site check
+is not a compression-speed benchmark or full spatial scientific parity run.
+
+**703 integrated tests** pass, including exact `ncdump -sh` metadata, exemptions,
+level-zero/invalid checks, native pipeline and unchanged-Fortran-runtime fixture
+consumption. All-target Clippy, downstream CLI/kernel checks, scoped formatting
+and release builds pass. Logs: `/tmp/colm-restart-compression-validation/`.
+The full migration/scientific gates below remain open.
 
 ## SNICAR remains unported and now fails explicitly
 
@@ -92,7 +128,7 @@ Clippy, downstream checks and scoped formatting pass. Evidence:
 real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
-rounding or absent test coverage: restart compression controls are ignored; runoff-dependent soil-texture/BVIC
+rounding or absent test coverage: runoff-dependent soil-texture/BVIC
 handling is still incomplete; SNICAR optical initialization, urban-only masking, external-lake options and
 TRACER/BGC wetland initialization still require implementation or explicit scope
 guards. These remain open and preclude an all-feature migration claim. The main

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::RestartDate;
+use crate::{restart::validate_restart_compression, RestartDate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BgcTimeRestartDimensions {
@@ -125,6 +125,7 @@ pub struct BgcTimeRestartInput<'a> {
     pub climate: BgcClimateFields<'a>,
     pub nitrification: Option<BgcNitrificationFields<'a>>,
     pub crop: Option<BgcCropFields<'a>>,
+    pub compression_level: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +141,7 @@ pub fn write_bgc_time_restart(
     block_label: &str,
     input: BgcTimeRestartInput<'_>,
 ) -> Result<BgcTimeRestartFile> {
+    validate_restart_compression(input.compression_level)?;
     validate_filename_component(case_name, "case name")?;
     validate_filename_component(block_label, "block label")?;
     validate_year(land_cover_year)?;
@@ -156,6 +158,7 @@ pub fn write_bgc_time_restart_block(
     path: impl AsRef<Path>,
     input: BgcTimeRestartInput<'_>,
 ) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     let patches = validate_input(input)?;
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -292,7 +295,11 @@ pub fn write_bgc_time_restart_block(
         .put_values(input.climate.skip_balance_check, ..)?;
     if let Some(crop) = input.crop {
         for (name, values) in crop_entries(crop) {
-            put_f64_1d(&mut file, name, "patch", values)?;
+            if name == "cphase" {
+                put_f64_1d(&mut file, name, "patch", values)?;
+            } else {
+                put_f64_1d_compressed(&mut file, name, "patch", values, input.compression_level)?;
+            }
         }
     }
     file.close()
@@ -477,6 +484,19 @@ fn put_f64_1d(
 ) -> Result<()> {
     file.add_variable::<f64>(name, &[dimension])?
         .put_values(values, ..)?;
+    Ok(())
+}
+
+fn put_f64_1d_compressed(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimension: &str,
+    values: &[f64],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<f64>(name, &[dimension])?;
+    variable.set_compression(compression_level.into(), false)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 

@@ -4,6 +4,43 @@ use super::*;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} in {} did not have deflate level {level}\n{header}",
+            path.display()
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} in {} unexpectedly had deflate metadata\n{header}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn cold_restart_uses_the_surface_hru_order_and_native_four_vectors() {
     let root = temp_dir();
@@ -27,6 +64,7 @@ fn cold_restart_uses_the_surface_hru_order_and_native_four_vectors() {
         },
         estimated_river_depth: false,
         runtime_dir: None,
+        compression_level: 1,
     })
     .unwrap();
 
@@ -86,6 +124,61 @@ fn cold_restart_uses_the_surface_hru_order_and_native_four_vectors() {
 }
 
 #[test]
+fn catch_lateral_restart_compresses_dynamic_vectors_but_not_identity() {
+    let root = temp_dir();
+    let mesh = root.join("catchment.nc");
+    write_mesh(&mesh);
+    let hru_dir = root.join("landdata/landhru/2005");
+    std::fs::create_dir_all(&hru_dir).unwrap();
+    write_hru(&hru_dir.join("landhru_w180_s90.nc"), &[3, 1], &[2, 3]);
+    write_hru(&hru_dir.join("landhru_e000_s90.nc"), &[1, 3], &[1, 1]);
+    let restart = write_catch_lateral_cold_restart(CatchLateralColdStartConfig {
+        catchment_mesh: &mesh,
+        landdata: &root.join("landdata"),
+        restart_dir: &root.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        estimated_river_depth: false,
+        runtime_dir: None,
+        compression_level: 4,
+    })
+    .unwrap();
+    assert_deflate(&restart.path, "veloc_riv", 4);
+    assert_deflate(&restart.path, "wdsrf_bsn_prev", 4);
+    assert_deflate(&restart.path, "veloc_hru", 4);
+    assert_no_deflate(&restart.path, "basin");
+    assert_no_deflate(&restart.path, "bsn_hru");
+    assert_no_deflate(&restart.path, "hru_type");
+
+    let invalid = temp_dir();
+    assert!(
+        write_catch_lateral_cold_restart(CatchLateralColdStartConfig {
+            catchment_mesh: &mesh,
+            landdata: &root.join("landdata"),
+            restart_dir: &invalid.join("restart"),
+            case_name: "case",
+            land_cover_year: 2005,
+            date: RestartDate {
+                year: 2008,
+                julian_day: 1,
+                seconds: 0,
+            },
+            estimated_river_depth: false,
+            runtime_dir: None,
+            compression_level: 10,
+        })
+        .is_err()
+    );
+    assert!(!invalid.join("restart").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cold_restart_uses_native_lake_depths() {
     let root = temp_dir();
     let mesh = root.join("catchment.nc");
@@ -114,6 +207,7 @@ fn cold_restart_uses_native_lake_depths() {
         },
         estimated_river_depth: false,
         runtime_dir: None,
+        compression_level: 1,
     })
     .unwrap();
     let file = netcdf::open(restart.path).unwrap();
@@ -168,6 +262,7 @@ fn estimated_river_depth_accumulates_native_runoff_downstream() {
         },
         estimated_river_depth: true,
         runtime_dir: Some(&runtime),
+        compression_level: 1,
     })
     .unwrap();
 

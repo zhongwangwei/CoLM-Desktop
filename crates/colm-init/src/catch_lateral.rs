@@ -7,7 +7,7 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_srfdata::{mesh_cell_area_weights, read_mesh_coordinate_raster_f64, FlatMesh, PixelAxes};
 use netcdf::types::{FloatType, IntType, NcVariableType};
 
-use crate::RestartDate;
+use crate::{restart::validate_restart_compression, RestartDate};
 
 /// Inputs needed for a CatchLateralFlow cold restart.
 #[derive(Debug, Clone, Copy)]
@@ -22,6 +22,7 @@ pub struct CatchLateralColdStartConfig<'a> {
     /// Directory containing the native `runoff_clim.nc` when river depth is
     /// estimated instead of read from the catchment mesh.
     pub runtime_dir: Option<&'a Path>,
+    pub compression_level: u8,
 }
 
 /// The basin restart produced by [`write_catch_lateral_cold_restart`].
@@ -53,6 +54,7 @@ struct Hru {
 pub fn write_catch_lateral_cold_restart(
     config: CatchLateralColdStartConfig<'_>,
 ) -> Result<CatchLateralColdStartFile> {
+    validate_restart_compression(config.compression_level)?;
     ensure!(
         !config.case_name.is_empty()
             && !config.case_name.contains('/')
@@ -120,14 +122,33 @@ pub fn write_catch_lateral_cold_restart(
         .put_attribute("long_name", "index of hydrological units inside basin")?;
     let basin_zero = vec![0.0; state.basin.len()];
     let hru_zero = vec![0.0; state.hru_basin.len()];
-    put_f64(&mut file, "veloc_riv", &["basin"], &basin_zero)?;
-    put_f64(&mut file, "wdsrf_bsn_prev", &["basin"], &state.basin_depth)?;
-    put_f64(&mut file, "veloc_hru", &["hydrounit"], &hru_zero)?;
-    put_f64(
+    put_f64_compressed(
+        &mut file,
+        "veloc_riv",
+        &["basin"],
+        &basin_zero,
+        config.compression_level,
+    )?;
+    put_f64_compressed(
+        &mut file,
+        "wdsrf_bsn_prev",
+        &["basin"],
+        &state.basin_depth,
+        config.compression_level,
+    )?;
+    put_f64_compressed(
+        &mut file,
+        "veloc_hru",
+        &["hydrounit"],
+        &hru_zero,
+        config.compression_level,
+    )?;
+    put_f64_compressed(
         &mut file,
         "wdsrf_hru_prev",
         &["hydrounit"],
         &state.hru_depth,
+        config.compression_level,
     )?;
     file.close()
         .with_context(|| format!("cannot close CatchLateralFlow restart {}", path.display()))?;
@@ -866,14 +887,16 @@ fn read_f64(file: &netcdf::File, name: &str) -> Result<Vec<f64>> {
     }
 }
 
-fn put_f64(
+fn put_f64_compressed(
     file: &mut netcdf::FileMut,
     name: &str,
     dimensions: &[&str],
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
-    file.add_variable::<f64>(name, dimensions)?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<f64>(name, dimensions)?;
+    variable.set_compression(compression_level.into(), false)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 

@@ -285,12 +285,104 @@ fn restart_rejects_conflicting_or_incomplete_optional_sections() {
     assert!(!path.exists());
 }
 
+#[test]
+fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fields() {
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+    let topmodel = TopmodelFields {
+        topographic_index: &[1.0, 2.0],
+        saturated_fraction_max: &[3.0, 4.0],
+        saturated_fraction_decay: &[5.0, 6.0],
+        alpha_twi: &[7.0, 8.0],
+        chi_twi: &[9.0, 10.0],
+        mu_twi: &[11.0, 12.0],
+    };
+    let mut restart = input(&soil, &lake, &canopy);
+    restart.topmodel = Some(topmodel);
+    let path = temp_dir("compression-default").join("restart.nc");
+    write_constant_restart_block(&path, restart).unwrap();
+
+    let header = ncdump_header(&path);
+    assert_eq!(deflate_level(&header, "lakedepth"), Some(1));
+    assert_eq!(deflate_level(&header, "vf_quartz"), Some(1));
+    assert_eq!(deflate_level(&header, "BVIC"), Some(1));
+    for name in [
+        "patchclass",
+        "patchlonr",
+        "soiltext",
+        "topoweti",
+        "vic_b_infilt",
+        "htop",
+        "elvmean",
+    ] {
+        assert_eq!(deflate_level(&header, name), None, "{name}");
+    }
+    let file = netcdf::open(&path).unwrap();
+    assert_eq!(
+        file.variable("lakedepth")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [20.0, 30.0]
+    );
+    drop(file);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn constant_restart_honors_explicit_compression_levels_and_rejects_invalid_before_output() {
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+    for (level, label) in [(0, "zero"), (4, "four")] {
+        let mut restart = input(&soil, &lake, &canopy);
+        restart.compression_level = level;
+        let path = temp_dir(label).join("restart.nc");
+        write_constant_restart_block(&path, restart).unwrap();
+        let header = ncdump_header(&path);
+        let expected = if level == 0 { None } else { Some(level) };
+        assert_eq!(deflate_level(&header, "lakedepth"), expected);
+        assert_eq!(deflate_level(&header, "patchclass"), None);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    let mut invalid = input(&soil, &lake, &canopy);
+    invalid.compression_level = 10;
+    let root = temp_dir("invalid-compression");
+    let path = root.join("restart.nc");
+    assert!(write_constant_restart_block(&path, invalid).is_err());
+    assert!(!root.exists());
+}
+
+#[test]
+fn restart_compression_level_parser_matches_namelist_contract() {
+    assert_eq!(
+        restart_compression_level(&colm_namelist::parse("&nl_colm\n/\n").unwrap()).unwrap(),
+        1
+    );
+    assert_eq!(
+        restart_compression_level(
+            &colm_namelist::parse("&nl_colm\nDEF_REST_CompressLevel = 4\n/\n").unwrap()
+        )
+        .unwrap(),
+        4
+    );
+    for value in ["10", "-1", "4.0", ".true.", "'4'"] {
+        let document =
+            colm_namelist::parse(&format!("&nl_colm\nDEF_REST_CompressLevel = {value}\n/\n"))
+                .unwrap();
+        assert!(restart_compression_level(&document).is_err(), "{value}");
+    }
+}
+
 fn input<'a>(
     soil: &'a SoilState,
     lake: &'a LakeState,
     canopy: &'a CanopyState,
 ) -> ConstantRestartInput<'a> {
     ConstantRestartInput {
+        compression_level: 1,
         dimensions: RestartDimensions {
             wavelengths: 3,
             slope_types: 2,
@@ -435,6 +527,28 @@ fn dimension_lengths(file: &netcdf::File) -> Vec<(String, usize)> {
         .collect::<Vec<_>>();
     dimensions.sort_unstable();
     dimensions
+}
+
+fn ncdump_header(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ncdump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn deflate_level(header: &str, variable: &str) -> Option<u8> {
+    let needle = format!("\t\t{variable}:_DeflateLevel = ");
+    header.lines().find_map(|line| {
+        line.strip_prefix(&needle)
+            .and_then(|tail| tail.trim_end_matches(" ;").parse().ok())
+    })
 }
 
 fn temp_dir(label: &str) -> PathBuf {

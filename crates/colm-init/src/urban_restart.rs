@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::{RestartDate, UrbanLucyState, UrbanRadiationState, UrbanState};
+use crate::{
+    restart::validate_restart_compression, RestartDate, UrbanLucyState, UrbanRadiationState,
+    UrbanState,
+};
 
 const URBAN_LAYERS: usize = 10;
 const NUM_SOLAR: usize = 2;
@@ -41,6 +44,7 @@ pub struct UrbanConstantRestartInput<'a> {
     pub state: &'a UrbanState,
     pub lucy: &'a UrbanLucyState,
     pub thermal: UrbanThermalFields<'a>,
+    pub compression_level: u8,
 }
 
 /// Writes `const/<case>_restart_urb_const_lcYYYY_<block>.nc`.
@@ -51,6 +55,7 @@ pub fn write_urban_constant_restart(
     block_label: &str,
     input: UrbanConstantRestartInput<'_>,
 ) -> Result<PathBuf> {
+    validate_restart_compression(input.compression_level)?;
     validate_name(case_name, "case name")?;
     validate_name(block_label, "block label")?;
     ensure!(
@@ -69,6 +74,7 @@ pub fn write_urban_constant_restart_block(
     path: impl AsRef<Path>,
     input: UrbanConstantRestartInput<'_>,
 ) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     let urban = validate_input(input)?;
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -108,7 +114,7 @@ pub fn write_urban_constant_restart_block(
         ("T_BUILDING_MIN", state.room_min_k.as_slice()),
         ("T_BUILDING_MAX", state.room_max_k.as_slice()),
     ] {
-        put_urban_values(&mut file, name, values)?;
+        put_urban_values(&mut file, name, values, input.compression_level)?;
     }
     for (name, axis, values) in [
         (
@@ -192,7 +198,14 @@ pub fn write_urban_constant_restart_block(
             input.thermal.impervious_heat_capacity,
         ),
     ] {
-        put_axis_major(&mut file, name, axis, urban, values)?;
+        put_axis_major(
+            &mut file,
+            name,
+            axis,
+            urban,
+            values,
+            input.compression_level,
+        )?;
     }
     for (name, values) in [
         ("ALB_ROOF", input.thermal.roof_albedo),
@@ -206,6 +219,7 @@ pub fn write_urban_constant_restart_block(
             [("numsolar", NUM_SOLAR), ("numrad", NUM_RAD)],
             urban,
             values,
+            input.compression_level,
         )?;
     }
     Ok(())
@@ -348,9 +362,15 @@ fn validate_axis_major(name: &str, values: &[f64], axis: usize, urban: usize) ->
     Ok(())
 }
 
-fn put_urban_values(file: &mut netcdf::FileMut, name: &str, values: &[f64]) -> Result<()> {
-    file.add_variable::<f64>(name, &["urban"])?
-        .put_values(values, ..)?;
+fn put_urban_values(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    values: &[f64],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<f64>(name, &["urban"])?;
+    variable.set_compression(compression_level.into(), false)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
@@ -360,6 +380,7 @@ fn put_axis_major(
     (axis_name, axis): (&str, usize),
     urban: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     validate_axis_major(name, values, axis, urban)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -368,8 +389,9 @@ fn put_axis_major(
             on_disk.push(values[index * urban + patch]);
         }
     }
-    file.add_variable::<f64>(name, &["urban", axis_name])?
-        .put_values(&on_disk, (.., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["urban", axis_name])?;
+    variable.set_compression(compression_level.into(), false)?;
+    variable.put_values(&on_disk, (.., ..))?;
     Ok(())
 }
 
@@ -379,6 +401,7 @@ fn put_urban_last_3d(
     [(first_name, first), (second_name, second)]: [(&str, usize); 2],
     urban: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     let mut on_disk = Vec::with_capacity(values.len());
     for patch in 0..urban {
@@ -388,8 +411,9 @@ fn put_urban_last_3d(
             }
         }
     }
-    file.add_variable::<f64>(name, &["urban", second_name, first_name])?
-        .put_values(&on_disk, (.., .., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["urban", second_name, first_name])?;
+    variable.set_compression(compression_level.into(), false)?;
+    variable.put_values(&on_disk, (.., .., ..))?;
     Ok(())
 }
 
@@ -425,6 +449,7 @@ pub struct UrbanTimeRestartInput<'a> {
     pub radiative_fields: &'a [UrbanNamedField<'a>],
     /// Required layer-major fields. Their layer family is selected by field name.
     pub layer_fields: &'a [UrbanNamedField<'a>],
+    pub compression_level: u8,
 }
 
 /// Cold-start state passed through the shared UrbanIniTimeVar restart writer.
@@ -435,6 +460,7 @@ pub(crate) struct ColdUrbanTimeRestartInput<'a> {
     pub total_sai: &'a [f64],
     /// `soil * urban`, layer-major, before common-patch area weighting.
     pub soil_liquid: &'a [f64],
+    pub compression_level: u8,
 }
 
 /// Writes the timestamped urban vector block in CoLM's restart tree.
@@ -446,6 +472,7 @@ pub fn write_urban_time_restart(
     block_label: &str,
     input: UrbanTimeRestartInput<'_>,
 ) -> Result<PathBuf> {
+    validate_restart_compression(input.compression_level)?;
     validate_name(case_name, "case name")?;
     validate_name(block_label, "block label")?;
     ensure!(
@@ -476,6 +503,7 @@ pub(crate) fn write_cold_urban_time_restart(
     block_label: &str,
     input: ColdUrbanTimeRestartInput<'_>,
 ) -> Result<PathBuf> {
+    validate_restart_compression(input.compression_level)?;
     let urban = input.radiation.len();
     ensure!(
         urban > 0,
@@ -633,6 +661,7 @@ pub(crate) fn write_cold_urban_time_restart(
             scalar_fields: &scalar_fields,
             radiative_fields: &radiative_fields,
             layer_fields: &layer_fields,
+            compression_level: input.compression_level,
         },
     )
 }
@@ -659,6 +688,7 @@ pub fn write_urban_time_restart_block(
     path: impl AsRef<Path>,
     input: UrbanTimeRestartInput<'_>,
 ) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     validate_time_input(input)?;
     let dimensions = input.dimensions;
     let path = path.as_ref();
@@ -683,7 +713,12 @@ pub fn write_urban_time_restart_block(
         file.add_dimension(name, length)?;
     }
     for name in URBAN_TIME_SCALARS {
-        put_urban_values(&mut file, name, named(input.scalar_fields, name)?.values)?;
+        put_urban_values(
+            &mut file,
+            name,
+            named(input.scalar_fields, name)?.values,
+            input.compression_level,
+        )?;
     }
     for name in URBAN_TIME_RADIATIVE {
         put_urban_last_3d(
@@ -692,6 +727,7 @@ pub fn write_urban_time_restart_block(
             [("band", NUM_SOLAR), ("rtyp", NUM_RAD)],
             dimensions.urban_count,
             named(input.radiative_fields, name)?.values,
+            input.compression_level,
         )?;
     }
     for (name, axis_name, axis) in urban_layer_schema(dimensions) {
@@ -701,6 +737,7 @@ pub fn write_urban_time_restart_block(
             (axis_name, axis),
             dimensions.urban_count,
             named(input.layer_fields, name)?.values,
+            input.compression_level,
         )?;
     }
     Ok(())

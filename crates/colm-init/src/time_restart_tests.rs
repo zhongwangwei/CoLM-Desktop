@@ -205,6 +205,7 @@ fn hyperspectral_fields_append_to_the_shared_common_restart() {
             reflectance: &optics,
             transmittance: &optics,
         },
+        1,
     )
     .unwrap();
 
@@ -230,6 +231,62 @@ fn hyperspectral_fields_append_to_the_shared_common_restart() {
 }
 
 #[test]
+fn time_restart_compresses_all_common_restart_fields_and_preserves_decoded_values() {
+    let root = temp_dir("compression-default");
+    let path = root.join("restart.nc");
+    write_time_restart_block(&path, input()).unwrap();
+    let header = ncdump_header(&path);
+    for name in ["z_sno", "t_soisno", "alb", "dz_lake", "n_irrig_steps_left"] {
+        assert_eq!(deflate_level(&header, name), Some(1), "{name}");
+    }
+    let file = netcdf::open(&path).unwrap();
+    assert_eq!(
+        file.variable("t_soisno")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 2.0, 3.0, 4.0, 11.0, 12.0, 13.0, 14.0]
+    );
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn time_restart_honors_explicit_compression_and_append_levels_and_rejects_invalid_preoutput() {
+    let root = temp_dir("compression-levels");
+    let mut restart = input();
+    restart.compression_level = 4;
+    let path = root.join("restart.nc");
+    write_time_restart_block(&path, restart).unwrap();
+    assert_eq!(deflate_level(&ncdump_header(&path), "t_soisno"), Some(4));
+
+    let albedo = vec![0.0; 211 * 2 * 2];
+    let optics = vec![0.0; 211 * 16 * 2];
+    append_time_hyperspectral_fields(
+        &path,
+        2,
+        TimeHyperspectralFields {
+            albedo: &albedo,
+            reflectance: &optics,
+            transmittance: &optics,
+        },
+        0,
+    )
+    .unwrap();
+    let header = ncdump_header(&path);
+    assert_eq!(deflate_level(&header, "alb_hires"), None);
+    assert_eq!(deflate_level(&header, "reflectance_out"), None);
+    std::fs::remove_dir_all(root).unwrap();
+
+    let mut invalid = input();
+    invalid.compression_level = 10;
+    let root = temp_dir("invalid-compression");
+    let path = root.join("restart.nc");
+    assert!(write_time_restart_block(&path, invalid).is_err());
+    assert!(!root.exists());
+}
+
+#[test]
 #[ignore = "requires the locally generated upstream CN-Cng reference restart"]
 fn time_restart_schema_matches_the_upstream_fortran_reference() {
     let fixture = StandardFixture::new();
@@ -251,6 +308,7 @@ fn time_restart_schema_matches_the_upstream_fortran_reference() {
 
 fn input() -> TimeRestartInput<'static> {
     TimeRestartInput {
+        compression_level: 1,
         dimensions: TimeRestartDimensions {
             soil_layers: 2,
             lake_layers: 2,
@@ -400,6 +458,7 @@ impl StandardFixture {
     fn input(&self) -> TimeRestartInput<'_> {
         let patch = &self.one;
         TimeRestartInput {
+            compression_level: 1,
             dimensions: TimeRestartDimensions::default(),
             snow_soil: SnowSoilRestartFields {
                 snow_node_depth_m: &self.snow,
@@ -548,6 +607,28 @@ fn patch_last_4d(
             })
         })
         .collect()
+}
+
+fn ncdump_header(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ncdump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn deflate_level(header: &str, variable: &str) -> Option<u8> {
+    let needle = format!("\t\t{variable}:_DeflateLevel = ");
+    header.lines().find_map(|line| {
+        line.strip_prefix(&needle)
+            .and_then(|tail| tail.trim_end_matches(" ;").parse().ok())
+    })
 }
 
 fn temp_dir(label: &str) -> PathBuf {

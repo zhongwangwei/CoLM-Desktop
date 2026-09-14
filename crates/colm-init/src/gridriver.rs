@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use netcdf::types::{FloatType, IntType, NcVariableType};
 
-use crate::RestartDate;
+use crate::{restart::validate_restart_compression, RestartDate};
 
 const RESTART_SCHEMA_VERSION: i32 = 2;
 const UCATCH_IDENTITY_VERSION: f64 = 1.0;
@@ -47,6 +47,7 @@ pub struct GridRiverColdStartConfig<'a> {
     pub levee: bool,
     pub reservoir_method: i32,
     pub reservoir_parameters: Option<&'a Path>,
+    pub compression_level: u8,
 }
 
 /// The base grid-river restart produced by [`write_gridriver_cold_restart`].
@@ -64,6 +65,7 @@ pub struct GridRiverColdStartFile {
 pub fn write_gridriver_cold_restart(
     config: GridRiverColdStartConfig<'_>,
 ) -> Result<GridRiverColdStartFile> {
+    validate_restart_compression(config.compression_level)?;
     ensure!(
         !config.case_name.is_empty()
             && !config.case_name.contains('/')
@@ -179,30 +181,73 @@ pub fn write_gridriver_cold_restart(
             f64::from(next[index]),
         ]);
     }
-    put_f64(
+    put_f64_compressed(
         &mut file,
         "gridriver_ucatch_identity",
         &["ucatch", "gridriver_ucatch_identity_field"],
         &identity,
+        config.compression_level,
     )?;
     let zeros = vec![0.0; count];
-    put_f64(&mut file, "wdsrf_ucat", &["ucatch"], &channel_depth)?;
-    put_f64(&mut file, "veloc_riv", &["ucatch"], &zeros)?;
+    put_f64_compressed(
+        &mut file,
+        "wdsrf_ucat",
+        &["ucatch"],
+        &channel_depth,
+        config.compression_level,
+    )?;
+    put_f64_compressed(
+        &mut file,
+        "veloc_riv",
+        &["ucatch"],
+        &zeros,
+        config.compression_level,
+    )?;
     put_f64(&mut file, "acctime_rnof", &[], &[0.0])?;
-    put_f64(&mut file, "acc_rnof_uc", &["ucatch"], &zeros)?;
-    put_f64(&mut file, "volwater_ucat", &["ucatch"], &zeros)?;
+    put_f64_compressed(
+        &mut file,
+        "acc_rnof_uc",
+        &["ucatch"],
+        &zeros,
+        config.compression_level,
+    )?;
+    put_f64_compressed(
+        &mut file,
+        "volwater_ucat",
+        &["ucatch"],
+        &zeros,
+        config.compression_level,
+    )?;
     if let Some(bifurcation) = &bifurcation {
-        put_f64(&mut file, "hist_bifout", &["ucatch"], &zeros)?;
+        put_f64_compressed(
+            &mut file,
+            "hist_bifout",
+            &["ucatch"],
+            &zeros,
+            config.compression_level,
+        )?;
         if bifurcation.active() {
-            put_f64(&mut file, "wdsrf_ucat_prev", &["ucatch"], &channel_depth)?;
-            write_bifurcation_cold_state(&mut file, bifurcation)?;
+            put_f64_compressed(
+                &mut file,
+                "wdsrf_ucat_prev",
+                &["ucatch"],
+                &channel_depth,
+                config.compression_level,
+            )?;
+            write_bifurcation_cold_state(&mut file, bifurcation, config.compression_level)?;
         }
     }
     if config.levee {
-        put_f64(&mut file, "levsto", &["ucatch"], &zeros)?;
+        put_f64_compressed(
+            &mut file,
+            "levsto",
+            &["ucatch"],
+            &zeros,
+            config.compression_level,
+        )?;
     }
     if let Some(reservoir) = &reservoir {
-        write_reservoir_cold_state(&mut file, reservoir)?;
+        write_reservoir_cold_state(&mut file, reservoir, config.compression_level)?;
     }
     // MOD_Grid_RiverLakeHist flushes these vectors to zero before mkinidata
     // writes the cold restart.  Preserve the concrete fields rather than
@@ -219,11 +264,29 @@ pub fn write_gridriver_cold_restart(
         "hist_storge",
         "hist_sfcelv",
     ] {
-        put_f64(&mut file, name, &["ucatch"], &zeros)?;
+        put_f64_compressed(
+            &mut file,
+            name,
+            &["ucatch"],
+            &zeros,
+            config.compression_level,
+        )?;
     }
     if config.levee {
-        put_f64(&mut file, "hist_levsto", &["ucatch"], &zeros)?;
-        put_f64(&mut file, "hist_levdph", &["ucatch"], &zeros)?;
+        put_f64_compressed(
+            &mut file,
+            "hist_levsto",
+            &["ucatch"],
+            &zeros,
+            config.compression_level,
+        )?;
+        put_f64_compressed(
+            &mut file,
+            "hist_levdph",
+            &["ucatch"],
+            &zeros,
+            config.compression_level,
+        )?;
     }
     file.variable_mut("gridriver_restart_complete")
         .expect("the GridRiverLake completion marker was just written")
@@ -377,6 +440,7 @@ fn read_bifurcation_cold_state(
 fn write_bifurcation_cold_state(
     file: &mut netcdf::FileMut,
     state: &BifurcationColdState,
+    compression_level: u8,
 ) -> Result<()> {
     if !state.active() {
         return Ok(());
@@ -384,19 +448,21 @@ fn write_bifurcation_cold_state(
     file.add_dimension("bifurcation_signature_field", 4 + 3 * state.levels)?;
     file.add_dimension("bifurcation_level", state.levels)?;
     file.add_dimension("bifurcation_pathway", state.pathways)?;
-    put_f64(
+    put_f64_compressed(
         file,
         "bif_path_signature",
         &["bifurcation_pathway", "bifurcation_signature_field"],
         &state.signature,
+        compression_level,
     )?;
     let zeros = vec![0.0; state.pathways * state.levels];
     for name in ["pth_veloc", "pth_momen"] {
-        put_f64(
+        put_f64_compressed(
             file,
             name,
             &["bifurcation_pathway", "bifurcation_level"],
             &zeros,
+            compression_level,
         )?;
     }
     Ok(())
@@ -470,6 +536,7 @@ fn read_reservoir_cold_state(
 fn write_reservoir_cold_state(
     file: &mut netcdf::FileMut,
     state: &ReservoirColdState,
+    compression_level: u8,
 ) -> Result<()> {
     if state.volume.is_empty() {
         return Ok(());
@@ -477,13 +544,20 @@ fn write_reservoir_cold_state(
     let reservoirs = state.volume.len();
     file.add_dimension("reservoir", reservoirs)?;
     file.add_dimension("gridriver_reservoir_identity_field", 2)?;
-    put_f64(
+    put_f64_compressed(
         file,
         "gridriver_reservoir_identity",
         &["reservoir", "gridriver_reservoir_identity_field"],
         &state.identity,
+        compression_level,
     )?;
-    put_f64(file, "volresv", &["reservoir"], &state.volume)?;
+    put_f64_compressed(
+        file,
+        "volresv",
+        &["reservoir"],
+        &state.volume,
+        compression_level,
+    )?;
     let zeros = vec![0.0; reservoirs];
     for name in [
         "hist_acctime_resv",
@@ -491,7 +565,7 @@ fn write_reservoir_cold_state(
         "hist_qresv_in",
         "hist_qresv_out",
     ] {
-        put_f64(file, name, &["reservoir"], &zeros)?;
+        put_f64_compressed(file, name, &["reservoir"], &zeros, compression_level)?;
     }
     Ok(())
 }
@@ -515,6 +589,19 @@ fn put_f64(
 ) -> Result<()> {
     file.add_variable::<f64>(name, dimensions)?
         .put_values(values, ..)?;
+    Ok(())
+}
+
+fn put_f64_compressed(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[f64],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<f64>(name, dimensions)?;
+    variable.set_compression(compression_level.into(), false)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 

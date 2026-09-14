@@ -39,6 +39,8 @@ pub enum LaiFrequency {
 /// Arguments for the LCT cold start of one spatial block.
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialLctTimeConfig<'a> {
+    /// DEF_REST_CompressLevel; validated before output creation.
+    pub compression_level: u8,
     pub landdata: &'a Path,
     pub restart_dir: &'a Path,
     pub case_name: &'a str,
@@ -76,6 +78,7 @@ impl<'a> SpatialLctTimeConfig<'a> {
         date: RestartDate,
     ) -> Self {
         Self {
+            compression_level: 1,
             landdata,
             restart_dir,
             case_name,
@@ -535,6 +538,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         config.date,
         config.block_label,
         TimeRestartInput {
+            compression_level: config.compression_level,
             dimensions,
             snow_soil: SnowSoilRestartFields {
                 snow_node_depth_m: &snow_node,
@@ -656,6 +660,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             config.date,
             config.block_label,
             crate::urban_restart::ColdUrbanTimeRestartInput {
+                compression_level: config.compression_level,
                 radiation: &radiation,
                 total_lai: &total_lai,
                 total_sai: &total_sai,

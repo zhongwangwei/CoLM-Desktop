@@ -6,7 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
+use colm_namelist::Value;
 
 use crate::{BedrockState, CanopyState, LakeState, SoilField, SoilState};
 
@@ -212,6 +213,7 @@ pub struct SimpleTerrainFields<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct ConstantRestartInput<'a> {
     pub dimensions: RestartDimensions,
+    pub compression_level: u8,
     pub patch: RestartPatchFields<'a>,
     pub lake: &'a LakeState,
     pub soil: &'a SoilState,
@@ -234,6 +236,27 @@ pub struct ConstantRestartFiles {
     pub block: PathBuf,
 }
 
+/// Parse `DEF_REST_CompressLevel`, matching the upstream integer namelist field.
+pub fn restart_compression_level(document: &colm_namelist::Document) -> Result<u8> {
+    let value = match document.get("DEF_REST_CompressLevel") {
+        Some(Value::Int(value)) => *value,
+        Some(_) => bail!("DEF_REST_CompressLevel must be an integer"),
+        None => 1,
+    };
+    let level = u8::try_from(value).context("DEF_REST_CompressLevel must be in 0..=9")?;
+    validate_restart_compression(level)?;
+    Ok(level)
+}
+
+/// Validate a NetCDF deflate level before any restart file is created.
+pub fn validate_restart_compression(level: u8) -> Result<()> {
+    ensure!(
+        level <= 9,
+        "DEF_REST_CompressLevel must be in NetCDF deflate range 0..=9"
+    );
+    Ok(())
+}
+
 /// Writes CoLM's unblocked scalar file and one vector-block constant restart file.
 ///
 /// `block_label` is the suffix without its leading underscore, e.g. `w180_s90`.
@@ -250,6 +273,7 @@ pub fn write_constant_restart(
     );
     validate_filename_component(case_name, "case name")?;
     validate_filename_component(block_label, "block label")?;
+    validate_restart_compression(input.compression_level)?;
 
     let constants_dir = restart_dir.as_ref().join("const");
     std::fs::create_dir_all(&constants_dir)
@@ -268,6 +292,7 @@ pub fn write_constant_restart_block(
     path: impl AsRef<Path>,
     input: ConstantRestartInput<'_>,
 ) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     let patches = validate_input(input)?;
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -277,6 +302,7 @@ pub fn write_constant_restart_block(
     let mut file = netcdf::create(path)
         .with_context(|| format!("cannot create constant restart block {}", path.display()))?;
     define_dimensions(&mut file, patches, input.dimensions)?;
+    let compression = Some(input.compression_level);
 
     put_i32_1d(&mut file, "patchclass", input.patch.class)?;
     put_i32_1d(&mut file, "patchtype", input.patch.kind)?;
@@ -287,10 +313,10 @@ pub fn write_constant_restart_block(
         .map(|value| i8::from(*value))
         .collect::<Vec<_>>();
     put_i8_1d(&mut file, "patchmask", &mask)?;
-    put_f64_1d(&mut file, "patchlonr", input.patch.longitude_radians)?;
-    put_f64_1d(&mut file, "patchlatr", input.patch.latitude_radians)?;
+    put_f64_1d(&mut file, "patchlonr", input.patch.longitude_radians, None)?;
+    put_f64_1d(&mut file, "patchlatr", input.patch.latitude_radians, None)?;
 
-    put_f64_1d(&mut file, "lakedepth", &input.lake.depth_m)?;
+    put_f64_1d(&mut file, "lakedepth", &input.lake.depth_m, compression)?;
     put_layer_major(
         &mut file,
         "dz_lake",
@@ -298,23 +324,32 @@ pub fn write_constant_restart_block(
         input.dimensions.lake_layers,
         patches,
         &input.lake.thickness_m,
+        compression,
     )?;
 
     put_f64_1d(
         &mut file,
         "soil_s_v_alb",
         input.patch.albedo.saturated_visible,
+        compression,
     )?;
-    put_f64_1d(&mut file, "soil_d_v_alb", input.patch.albedo.dry_visible)?;
+    put_f64_1d(
+        &mut file,
+        "soil_d_v_alb",
+        input.patch.albedo.dry_visible,
+        compression,
+    )?;
     put_f64_1d(
         &mut file,
         "soil_s_n_alb",
         input.patch.albedo.saturated_near_infrared,
+        compression,
     )?;
     put_f64_1d(
         &mut file,
         "soil_d_n_alb",
         input.patch.albedo.dry_near_infrared,
+        compression,
     )?;
     if let Some(values) = input.hyperspectral_albedo {
         put_layer_major(
@@ -324,6 +359,7 @@ pub fn write_constant_restart_block(
             input.dimensions.wavelengths,
             patches,
             values,
+            compression,
         )?;
     }
 
@@ -335,9 +371,10 @@ pub fn write_constant_restart_block(
             input.dimensions.soil_layers,
             patches,
             input.soil.field(field),
+            compression,
         )?;
     }
-    put_f64_1d(&mut file, "BVIC", input.patch.bvic)?;
+    put_f64_1d(&mut file, "BVIC", input.patch.bvic, compression)?;
     if input.uses_van_genuchten {
         for &(field, name) in &SOIL_FIELDS_VAN_GENUCHTEN {
             put_layer_major(
@@ -347,24 +384,30 @@ pub fn write_constant_restart_block(
                 input.dimensions.soil_layers,
                 patches,
                 input.soil.field(field),
+                compression,
             )?;
         }
     }
     put_i32_1d(&mut file, "soiltext", input.patch.soil_texture)?;
 
     if let Some(topmodel) = input.topmodel {
-        put_f64_1d(&mut file, "topoweti", topmodel.topographic_index)?;
-        put_f64_1d(&mut file, "fsatmax", topmodel.saturated_fraction_max)?;
-        put_f64_1d(&mut file, "fsatdcf", topmodel.saturated_fraction_decay)?;
-        put_f64_1d(&mut file, "alp_twi", topmodel.alpha_twi)?;
-        put_f64_1d(&mut file, "chi_twi", topmodel.chi_twi)?;
-        put_f64_1d(&mut file, "mu_twi", topmodel.mu_twi)?;
+        put_f64_1d(&mut file, "topoweti", topmodel.topographic_index, None)?;
+        put_f64_1d(&mut file, "fsatmax", topmodel.saturated_fraction_max, None)?;
+        put_f64_1d(
+            &mut file,
+            "fsatdcf",
+            topmodel.saturated_fraction_decay,
+            None,
+        )?;
+        put_f64_1d(&mut file, "alp_twi", topmodel.alpha_twi, None)?;
+        put_f64_1d(&mut file, "chi_twi", topmodel.chi_twi, None)?;
+        put_f64_1d(&mut file, "mu_twi", topmodel.mu_twi, None)?;
     }
-    put_f64_1d(&mut file, "vic_b_infilt", input.patch.vic_b_infilt)?;
-    put_f64_1d(&mut file, "vic_Dsmax", input.patch.vic_dsmax)?;
-    put_f64_1d(&mut file, "vic_Ds", input.patch.vic_ds)?;
-    put_f64_1d(&mut file, "vic_Ws", input.patch.vic_ws)?;
-    put_f64_1d(&mut file, "vic_c", input.patch.vic_c)?;
+    put_f64_1d(&mut file, "vic_b_infilt", input.patch.vic_b_infilt, None)?;
+    put_f64_1d(&mut file, "vic_Dsmax", input.patch.vic_dsmax, None)?;
+    put_f64_1d(&mut file, "vic_Ds", input.patch.vic_ds, None)?;
+    put_f64_1d(&mut file, "vic_Ws", input.patch.vic_ws, None)?;
+    put_f64_1d(&mut file, "vic_c", input.patch.vic_c, None)?;
 
     for &(field, name) in &SOIL_FIELDS_THERMAL {
         put_layer_major(
@@ -374,13 +417,14 @@ pub fn write_constant_restart_block(
             input.dimensions.soil_layers,
             patches,
             input.soil.field(field),
+            compression,
         )?;
     }
-    put_f64_1d(&mut file, "htop", &input.canopy.patch_top_m)?;
-    put_f64_1d(&mut file, "hbot", &input.canopy.patch_bottom_m)?;
+    put_f64_1d(&mut file, "htop", &input.canopy.patch_top_m, None)?;
+    put_f64_1d(&mut file, "hbot", &input.canopy.patch_bottom_m, None)?;
 
     if let Some(bedrock) = input.bedrock {
-        put_f64_1d(&mut file, "debdrock", &bedrock.depth)?;
+        put_f64_1d(&mut file, "debdrock", &bedrock.depth, None)?;
         let layer_index = bedrock
             .layer_index
             .iter()
@@ -390,13 +434,13 @@ pub fn write_constant_restart_block(
             .context("bedrock layer index does not fit NetCDF int32")?;
         put_i32_1d(&mut file, "ibedrock", &layer_index)?;
     }
-    put_f64_1d(&mut file, "elvmean", input.patch.elevation_mean_m)?;
-    put_f64_1d(&mut file, "elvstd", input.patch.elevation_std_m)?;
-    put_f64_1d(&mut file, "slpratio", input.patch.slope_ratio)?;
+    put_f64_1d(&mut file, "elvmean", input.patch.elevation_mean_m, None)?;
+    put_f64_1d(&mut file, "elvstd", input.patch.elevation_std_m, None)?;
+    put_f64_1d(&mut file, "slpratio", input.patch.slope_ratio, None)?;
 
     if let Some(terrain) = input.terrain {
-        put_f64_1d(&mut file, "svf_patches", terrain.sky_view_factor)?;
-        put_f64_1d(&mut file, "cur_patches", terrain.curvature)?;
+        put_f64_1d(&mut file, "svf_patches", terrain.sky_view_factor, None)?;
+        put_f64_1d(&mut file, "cur_patches", terrain.curvature, None)?;
         put_layer_major(
             &mut file,
             "slp_type_patches",
@@ -404,6 +448,7 @@ pub fn write_constant_restart_block(
             input.dimensions.slope_types,
             patches,
             terrain.slope_type,
+            None,
         )?;
         put_layer_major(
             &mut file,
@@ -412,6 +457,7 @@ pub fn write_constant_restart_block(
             input.dimensions.slope_types,
             patches,
             terrain.aspect_type,
+            None,
         )?;
         put_layer_major(
             &mut file,
@@ -420,6 +466,7 @@ pub fn write_constant_restart_block(
             input.dimensions.slope_types,
             patches,
             terrain.area_type,
+            None,
         )?;
         match terrain.radiation {
             TerrainRadiation::LookupTable { values } => put_patch_last_3d(
@@ -429,6 +476,7 @@ pub fn write_constant_restart_block(
                 ("zen", input.dimensions.zeniths),
                 patches,
                 values,
+                None,
             )?,
             TerrainRadiation::Curve { values } => put_patch_last_3d(
                 &mut file,
@@ -437,11 +485,12 @@ pub fn write_constant_restart_block(
                 ("zen_p", input.dimensions.zenith_parameters),
                 patches,
                 values,
+                None,
             )?,
         }
     }
     if let Some(terrain) = input.simple_terrain {
-        put_f64_1d(&mut file, "cur_patches", terrain.curvature)?;
+        put_f64_1d(&mut file, "cur_patches", terrain.curvature, None)?;
         put_layer_major(
             &mut file,
             "slp_type_patches",
@@ -449,6 +498,7 @@ pub fn write_constant_restart_block(
             input.dimensions.aspect_types,
             patches,
             terrain.slope_type,
+            None,
         )?;
         put_layer_major(
             &mut file,
@@ -457,6 +507,7 @@ pub fn write_constant_restart_block(
             input.dimensions.aspect_types,
             patches,
             terrain.aspect_type,
+            None,
         )?;
     }
 
@@ -781,21 +832,34 @@ fn define_dimensions(
     Ok(())
 }
 
+fn set_compression(variable: &mut netcdf::VariableMut<'_>, level: Option<u8>) -> Result<()> {
+    if let Some(level) = level {
+        variable.set_compression(level.into(), false)?;
+    }
+    Ok(())
+}
+
 fn put_i8_1d(file: &mut netcdf::FileMut, name: &str, values: &[i8]) -> Result<()> {
-    file.add_variable::<i8>(name, &["patch"])?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<i8>(name, &["patch"])?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
 fn put_i32_1d(file: &mut netcdf::FileMut, name: &str, values: &[i32]) -> Result<()> {
-    file.add_variable::<i32>(name, &["patch"])?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<i32>(name, &["patch"])?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
-fn put_f64_1d(file: &mut netcdf::FileMut, name: &str, values: &[f64]) -> Result<()> {
-    file.add_variable::<f64>(name, &["patch"])?
-        .put_values(values, ..)?;
+fn put_f64_1d(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    values: &[f64],
+    compression_level: Option<u8>,
+) -> Result<()> {
+    let mut variable = file.add_variable::<f64>(name, &["patch"])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
@@ -806,6 +870,7 @@ fn put_layer_major(
     layers: usize,
     patches: usize,
     values: &[f64],
+    compression_level: Option<u8>,
 ) -> Result<()> {
     validate_axis_major(name, values, layers, patches)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -814,8 +879,9 @@ fn put_layer_major(
             on_disk.push(values[layer * patches + patch]);
         }
     }
-    file.add_variable::<f64>(name, &["patch", layer_name])?
-        .put_values(&on_disk, (.., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["patch", layer_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., ..))?;
     Ok(())
 }
 
@@ -826,6 +892,7 @@ fn put_patch_last_3d(
     (second_name, second): (&str, usize),
     patches: usize,
     values: &[f64],
+    compression_level: Option<u8>,
 ) -> Result<()> {
     validate_patch_last_3d(name, values, first, second, patches)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -836,8 +903,9 @@ fn put_patch_last_3d(
             }
         }
     }
-    file.add_variable::<f64>(name, &["patch", second_name, first_name])?
-        .put_values(&on_disk, (.., .., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["patch", second_name, first_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., .., ..))?;
     Ok(())
 }
 

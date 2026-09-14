@@ -9,8 +9,12 @@ use colm_core::{
 };
 
 /// Borrows shared BGC state in the exact layout required by the restart writer.
-pub fn bgc_time_restart_input(state: &BgcColdStartState) -> BgcTimeRestartInput<'_> {
+pub fn bgc_time_restart_input(
+    state: &BgcColdStartState,
+    compression_level: u8,
+) -> BgcTimeRestartInput<'_> {
     BgcTimeRestartInput {
+        compression_level,
         dimensions: BgcTimeRestartDimensions {
             soil_layers: BGC_SOIL_LAYERS,
             full_soil_layers: BGC_FULL_SOIL_LAYERS,

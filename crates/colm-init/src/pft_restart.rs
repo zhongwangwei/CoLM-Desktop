@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::RestartDate;
+use crate::{restart::validate_restart_compression, RestartDate};
 use colm_core::PFT_BGC_F64_VARIABLES;
 
 const BANDS: usize = 2;
@@ -20,6 +20,7 @@ const BGC_ACTIVE_CROP_YEARS_AFTER: usize = 70;
 /// Values stored by `WRITE_PFTimeInvariants`.
 #[derive(Debug, Clone, Copy)]
 pub struct PftConstantRestartInput<'a> {
+    pub compression_level: u8,
     pub class: &'a [i32],
     pub fraction: &'a [f64],
     pub canopy_top_m: &'a [f64],
@@ -137,6 +138,7 @@ pub struct PftCropFields<'a> {
 /// All PFT/PC fields for one time restart vector block.
 #[derive(Debug, Clone, Copy)]
 pub struct PftTimeRestartInput<'a> {
+    pub compression_level: u8,
     pub fields: PftTimeFields<'a>,
     pub hyperspectral: Option<PftHyperspectralFields<'a>>,
     pub plant_hydraulics: Option<PftPlantHydraulicFields<'a>>,
@@ -159,6 +161,7 @@ pub fn write_pft_constant_restart(
 ) -> Result<PathBuf> {
     validate_restart_name(case_name, "case name")?;
     validate_restart_name(block_label, "block label")?;
+    validate_restart_compression(input.compression_level)?;
     validate_year(land_cover_year)?;
     let path = restart_dir.as_ref().join("const").join(format!(
         "{case_name}_restart_pft_const_lc{land_cover_year:04}_{block_label}.nc"
@@ -172,6 +175,7 @@ pub fn write_pft_constant_restart_block(
     path: impl AsRef<Path>,
     input: PftConstantRestartInput<'_>,
 ) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     let pfts = validate_constant_input(input)?;
     let path = path.as_ref();
     create_parent(path)?;
@@ -181,17 +185,24 @@ pub fn write_pft_constant_restart_block(
     if let Some(crop_fraction) = input.crop_fraction {
         file.add_dimension("patch", crop_fraction.len())?;
     }
-    file.add_variable::<i32>("pftclass", &["pft"])?
-        .put_values(input.class, ..)?;
+    let mut pftclass = file.add_variable::<i32>("pftclass", &["pft"])?;
+    set_compression(&mut pftclass, input.compression_level)?;
+    pftclass.put_values(input.class, ..)?;
     for (name, values) in [
         ("pftfrac", input.fraction),
         ("htop_p", input.canopy_top_m),
         ("hbot_p", input.canopy_bottom_m),
     ] {
-        put_f64_1d(&mut file, name, "pft", values)?;
+        put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
     }
     if let Some(crop_fraction) = input.crop_fraction {
-        put_f64_1d(&mut file, "cropfrac", "patch", crop_fraction)?;
+        put_f64_1d(
+            &mut file,
+            "cropfrac",
+            "patch",
+            crop_fraction,
+            input.compression_level,
+        )?;
     }
     Ok(())
 }
@@ -207,6 +218,7 @@ pub fn write_pft_time_restart(
 ) -> Result<PathBuf> {
     validate_restart_name(case_name, "case name")?;
     validate_restart_name(block_label, "block label")?;
+    validate_restart_compression(input.compression_level)?;
     validate_year(land_cover_year)?;
     validate_date(date)?;
     let date = date_label(date);
@@ -222,6 +234,7 @@ pub fn write_pft_time_restart_block(
     path: impl AsRef<Path>,
     input: PftTimeRestartInput<'_>,
 ) -> Result<()> {
+    validate_restart_compression(input.compression_level)?;
     let pfts = validate_time_input(input)?;
     let path = path.as_ref();
     create_parent(path)?;
@@ -232,13 +245,14 @@ pub fn write_pft_time_restart_block(
     file.add_dimension("rtyp", RADIATION_TYPES)?;
     // Upstream defines this dimension even when HYPERSPECTRAL is disabled.
     file.add_dimension("wavelength", WAVELENGTHS)?;
+    let compression = input.compression_level;
     if let Some(plant) = input.plant_hydraulics {
         file.add_dimension("vegnodes", plant.vegetation_nodes)?;
     }
 
     let entries = pft_entries(input.fields);
     for &(name, values) in &entries[..10] {
-        put_f64_1d(&mut file, name, "pft", values)?;
+        put_f64_1d(&mut file, name, "pft", values, compression)?;
     }
     for (name, values) in [
         ("ssun_p", input.fields.sunlit_absorption),
@@ -250,6 +264,7 @@ pub fn write_pft_time_restart_block(
             [("band", BANDS), ("rtyp", RADIATION_TYPES)],
             pfts,
             values,
+            compression,
         )?;
     }
     if let Some(hyperspectral) = input.hyperspectral {
@@ -263,11 +278,12 @@ pub fn write_pft_time_restart_block(
                 [("wavelength", WAVELENGTHS), ("rtyp", RADIATION_TYPES)],
                 pfts,
                 values,
+                compression,
             )?;
         }
     }
     for &(name, values) in &entries[10..] {
-        put_f64_1d(&mut file, name, "pft", values)?;
+        put_f64_1d(&mut file, name, "pft", values, compression)?;
     }
     if let Some(plant) = input.plant_hydraulics {
         put_axis_major(
@@ -277,18 +293,21 @@ pub fn write_pft_time_restart_block(
             plant.vegetation_nodes,
             pfts,
             plant.water_potential_mm,
+            compression,
         )?;
         put_f64_1d(
             &mut file,
             "gs0sun_p",
             "pft",
             plant.sunlit_stomatal_conductance,
+            compression,
         )?;
         put_f64_1d(
             &mut file,
             "gs0sha_p",
             "pft",
             plant.shaded_stomatal_conductance,
+            compression,
         )?;
     }
     if let Some(ozone) = input.ozone {
@@ -301,35 +320,55 @@ pub fn write_pft_time_restart_block(
             ("o3coefg_sun_p", ozone.sunlit_stomatal_coefficient),
             ("o3coefg_sha_p", ozone.shaded_stomatal_coefficient),
         ] {
-            put_f64_1d(&mut file, name, "pft", values)?;
+            put_f64_1d(&mut file, name, "pft", values, compression)?;
         }
     }
     if let Some(irrigation_method) = input.irrigation_method {
-        file.add_variable::<i32>("irrig_method_p", &["pft"])?
-            .put_values(irrigation_method, ..)?;
+        let mut variable = file.add_variable::<i32>("irrig_method_p", &["pft"])?;
+        set_compression(&mut variable, compression)?;
+        variable.put_values(irrigation_method, ..)?;
     }
     if let Some(bgc) = input.bgc {
         for (index, (&name, values)) in PFT_BGC_F64_VARIABLES.iter().zip(bgc.values).enumerate() {
             if index == BGC_ACTIVE_CROP_YEARS_AFTER {
-                file.add_variable::<i32>("nyrs_crop_active_p", &["pft"])?
-                    .put_values(bgc.active_crop_years, ..)?;
+                let mut variable = file.add_variable::<i32>("nyrs_crop_active_p", &["pft"])?;
+                set_compression(&mut variable, compression)?;
+                variable.put_values(bgc.active_crop_years, ..)?;
             }
-            put_f64_1d(&mut file, name, "pft", values)?;
+            put_f64_1d(&mut file, name, "pft", values, compression)?;
         }
     }
     if let Some(crop) = input.crop {
-        put_i8_1d(&mut file, "croplive_p", "pft", crop.crop_live)?;
+        put_i8_1d(&mut file, "croplive_p", "pft", crop.crop_live, compression)?;
         for (name, values) in crop_leading_f64_entries(crop) {
-            put_f64_1d(&mut file, name, "pft", values)?;
+            put_f64_1d(&mut file, name, "pft", values, compression)?;
         }
-        put_i32_1d(&mut file, "peaklai_p", "pft", crop.peak_lai_day)?;
+        put_i32_1d(
+            &mut file,
+            "peaklai_p",
+            "pft",
+            crop.peak_lai_day,
+            compression,
+        )?;
         for (name, values) in crop_allocation_entries(crop) {
-            put_f64_1d(&mut file, name, "pft", values)?;
+            put_f64_1d(&mut file, name, "pft", values, compression)?;
         }
-        put_i8_1d(&mut file, "cropplant_p", "pft", crop.crop_planted)?;
-        put_i32_1d(&mut file, "idop_p", "pft", crop.day_of_planting)?;
+        put_i8_1d(
+            &mut file,
+            "cropplant_p",
+            "pft",
+            crop.crop_planted,
+            compression,
+        )?;
+        put_i32_1d(
+            &mut file,
+            "idop_p",
+            "pft",
+            crop.day_of_planting,
+            compression,
+        )?;
         for (name, values) in crop_trailing_f64_entries(crop) {
-            put_f64_1d(&mut file, name, "pft", values)?;
+            put_f64_1d(&mut file, name, "pft", values, compression)?;
         }
     }
     Ok(())
@@ -643,9 +682,21 @@ fn validate_pft_last_3d(
     Ok(())
 }
 
-fn put_i8_1d(file: &mut netcdf::FileMut, name: &str, dimension: &str, values: &[i8]) -> Result<()> {
-    file.add_variable::<i8>(name, &[dimension])?
-        .put_values(values, ..)?;
+fn set_compression(variable: &mut netcdf::VariableMut<'_>, level: u8) -> Result<()> {
+    variable.set_compression(level.into(), false)?;
+    Ok(())
+}
+
+fn put_i8_1d(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimension: &str,
+    values: &[i8],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<i8>(name, &[dimension])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
@@ -654,9 +705,11 @@ fn put_i32_1d(
     name: &str,
     dimension: &str,
     values: &[i32],
+    compression_level: u8,
 ) -> Result<()> {
-    file.add_variable::<i32>(name, &[dimension])?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<i32>(name, &[dimension])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
@@ -665,9 +718,11 @@ fn put_f64_1d(
     name: &str,
     dimension: &str,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
-    file.add_variable::<f64>(name, &[dimension])?
-        .put_values(values, ..)?;
+    let mut variable = file.add_variable::<f64>(name, &[dimension])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 
@@ -678,6 +733,7 @@ fn put_axis_major(
     axis: usize,
     pfts: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     validate_axis_major(name, values, axis, pfts)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -686,8 +742,9 @@ fn put_axis_major(
             on_disk.push(values[axis_index * pfts + pft]);
         }
     }
-    file.add_variable::<f64>(name, &["pft", axis_name])?
-        .put_values(&on_disk, (.., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["pft", axis_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., ..))?;
     Ok(())
 }
 
@@ -697,6 +754,7 @@ fn put_pft_last_3d(
     [(first_name, first), (second_name, second)]: [(&str, usize); 2],
     pfts: usize,
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     validate_pft_last_3d(name, values, first, second, pfts)?;
     let mut on_disk = Vec::with_capacity(values.len());
@@ -707,8 +765,9 @@ fn put_pft_last_3d(
             }
         }
     }
-    file.add_variable::<f64>(name, &["pft", second_name, first_name])?
-        .put_values(&on_disk, (.., .., ..))?;
+    let mut variable = file.add_variable::<f64>(name, &["pft", second_name, first_name])?;
+    set_compression(&mut variable, compression_level)?;
+    variable.put_values(&on_disk, (.., .., ..))?;
     Ok(())
 }
 

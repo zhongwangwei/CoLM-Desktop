@@ -14,6 +14,7 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
         2005,
         "w180_s90",
         PftConstantRestartInput {
+            compression_level: 1,
             class: &[1, 3],
             fraction: &[0.25, 0.75],
             canopy_top_m: &[20.0, 5.0],
@@ -247,6 +248,81 @@ fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
 }
 
 #[test]
+fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
+    let root = temp_dir("compression-default");
+    let const_path = write_pft_constant_restart(
+        &root,
+        "CN-Cng",
+        2005,
+        "w180_s90",
+        PftConstantRestartInput {
+            compression_level: 1,
+            class: &[1, 3],
+            fraction: &[0.25, 0.75],
+            canopy_top_m: &[20.0, 5.0],
+            canopy_bottom_m: &[2.0, 1.0],
+            crop_fraction: Some(&[0.4, 0.6]),
+        },
+    )
+    .unwrap();
+    let header = ncdump_header(&const_path);
+    for name in ["pftclass", "pftfrac", "cropfrac"] {
+        assert_eq!(deflate_level(&header, name), Some(1), "{name}");
+    }
+
+    let fixture = Fixture::new();
+    let time_path = root.join("time.nc");
+    write_pft_time_restart_block(&time_path, fixture.time_input()).unwrap();
+    let header = ncdump_header(&time_path);
+    for name in ["tleaf_p", "ssun_p", "vegwp_p", "irrig_method_p"] {
+        assert_eq!(deflate_level(&header, name), Some(1), "{name}");
+    }
+    let file = netcdf::open(&time_path).unwrap();
+    assert_eq!(
+        file.variable("ssun_p")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [0.0, 4.0, 2.0, 6.0, 1.0, 5.0, 3.0, 7.0]
+    );
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
+    let root = temp_dir("compression-levels");
+    for (level, label) in [(0, "zero.nc"), (4, "four.nc")] {
+        write_pft_constant_restart_block(
+            root.join(label),
+            PftConstantRestartInput {
+                compression_level: level,
+                class: &[1, 3],
+                fraction: &[0.25, 0.75],
+                canopy_top_m: &[20.0, 5.0],
+                canopy_bottom_m: &[2.0, 1.0],
+                crop_fraction: None,
+            },
+        )
+        .unwrap();
+        let expected = if level == 0 { None } else { Some(level) };
+        assert_eq!(
+            deflate_level(&ncdump_header(&root.join(label)), "pftfrac"),
+            expected
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+
+    let fixture = Fixture::new();
+    let mut invalid = fixture.time_input();
+    invalid.compression_level = 10;
+    let root = temp_dir("invalid-compression");
+    let path = root.join("restart.nc");
+    assert!(write_pft_time_restart_block(&path, invalid).is_err());
+    assert!(!root.exists());
+}
+
+#[test]
 #[ignore = "requires the local BGC kernel and CoLMruntime cnsteadystate.nc reference data"]
 fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -362,6 +438,7 @@ fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
         },
         "w180_s90",
         PftTimeRestartInput {
+            compression_level: 1,
             fields: PftTimeFields {
                 leaf_temperature_k: &base[0],
                 canopy_water_mm: &base[1],
@@ -414,6 +491,7 @@ fn pft_restart_rejects_invalid_feature_shapes_before_creating_a_file() {
         2005,
         "w180_s90",
         PftConstantRestartInput {
+            compression_level: 1,
             class: &[1],
             fraction: &[1.0, 0.0],
             canopy_top_m: &[2.0],
@@ -464,6 +542,7 @@ impl Fixture {
     fn time_input(&self) -> PftTimeRestartInput<'_> {
         let pft = &self.pft;
         PftTimeRestartInput {
+            compression_level: 1,
             fields: PftTimeFields {
                 leaf_temperature_k: pft,
                 canopy_water_mm: pft,
@@ -614,6 +693,28 @@ fn compare_netcdf(actual_path: &std::path::Path, expected_path: &std::path::Path
             );
         }
     }
+}
+
+fn ncdump_header(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ncdump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn deflate_level(header: &str, variable: &str) -> Option<u8> {
+    let needle = format!("\t\t{variable}:_DeflateLevel = ");
+    header.lines().find_map(|line| {
+        line.strip_prefix(&needle)
+            .and_then(|tail| tail.trim_end_matches(" ;").parse().ok())
+    })
 }
 
 fn temp_dir(label: &str) -> PathBuf {

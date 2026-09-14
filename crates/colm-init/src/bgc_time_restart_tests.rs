@@ -4,6 +4,43 @@ use super::*;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} in {} did not have deflate level {level}\n{header}",
+            path.display()
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} in {} unexpectedly had deflate metadata\n{header}",
+            path.display()
+        );
+    }
+}
+
 const PATCH: [f64; 2] = [10.0, 20.0];
 const SOIL: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
 const FULL_POOL: [f64; 12] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0];
@@ -163,6 +200,46 @@ fn bgc_crop_restart_writes_the_exact_fortran_tail_schema() {
     );
     drop(file);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bgc_time_restart_compresses_only_crop_tail_fields() {
+    let root = temp_dir("bgc-time-compression");
+    let mut input = sample_input();
+    input.crop = Some(crop_fields());
+    input.compression_level = 4;
+    let path = root.join("restart.nc");
+    write_bgc_time_restart_block(&path, input).unwrap();
+    assert_deflate(&path, "pdcorn", 4);
+    assert_deflate(&path, "fertnitro_corn", 4);
+    assert_no_deflate(&path, "cphase");
+    assert_no_deflate(&path, "totlitc");
+    assert_no_deflate(&path, "skip_balance_check");
+
+    let root0 = temp_dir("bgc-time-compression-zero");
+    let mut zero = sample_input();
+    zero.crop = Some(crop_fields());
+    zero.compression_level = 0;
+    let zero_path = root0.join("restart.nc");
+    write_bgc_time_restart_block(&zero_path, zero).unwrap();
+    assert_no_deflate(&zero_path, "pdcorn");
+    assert_eq!(
+        netcdf::open(&zero_path)
+            .unwrap()
+            .variable("pdcorn")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        PATCH
+    );
+
+    let invalid = temp_dir("bgc-time-compression-invalid");
+    let mut bad = sample_input();
+    bad.compression_level = 10;
+    assert!(write_bgc_time_restart_block(invalid.join("restart.nc"), bad).is_err());
+    assert!(!invalid.exists());
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root0).unwrap();
 }
 
 #[test]
@@ -395,6 +472,7 @@ fn bgc_time_restart_matches_the_upstream_fortran_reference() {
         },
         nitrification,
         crop: None,
+        compression_level: 1,
     };
     let native = write_bgc_time_restart(
         directory.join("native/restart"),
@@ -473,6 +551,7 @@ fn sample_input() -> BgcTimeRestartInput<'static> {
             oxygen_decomposition_depth_unsaturated: &SOIL,
         }),
         crop: None,
+        compression_level: 1,
     }
 }
 

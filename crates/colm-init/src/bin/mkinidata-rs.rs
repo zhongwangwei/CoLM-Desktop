@@ -173,6 +173,7 @@ struct SpatialUrbanRun {
 
 #[derive(Debug, Clone)]
 struct SpatialNamelistRun {
+    compression_level: u8,
     landdata: PathBuf,
     restart: PathBuf,
     case_name: String,
@@ -266,6 +267,7 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
         .transpose()?
         .map(PathBuf::from);
     let file = write_gridriver_cold_restart(GridRiverColdStartConfig {
+        compression_level: run.compression_level,
         unit_catchment: &unit_catchment,
         restart_dir: &run.restart,
         case_name: &run.case_name,
@@ -294,6 +296,7 @@ fn write_catch_lateral_namelist_restart(
         .transpose()?
         .map(PathBuf::from);
     let file = write_catch_lateral_cold_restart(CatchLateralColdStartConfig {
+        compression_level: run.compression_level,
         catchment_mesh: &catchment_mesh,
         landdata: &run.landdata,
         restart_dir: &run.restart,
@@ -320,6 +323,7 @@ fn write_spatial_urban_namelist_block(
         LandCoverScheme::Igbp,
         run.hydraulic_model,
     );
+    static_config.compression_level = run.compression_level;
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
@@ -343,6 +347,7 @@ fn write_spatial_urban_namelist_block(
         run.hydraulic_model,
         run.date,
     );
+    time.compression_level = run.compression_level;
     time.tuning = run.tuning;
     time.lai_year = run.lai_year;
     time.lai_frequency = run.lai_frequency;
@@ -396,6 +401,7 @@ fn write_spatial_lct_namelist_block(
         land_cover,
         run.hydraulic_model,
     );
+    static_config.compression_level = run.compression_level;
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
@@ -414,6 +420,7 @@ fn write_spatial_lct_namelist_block(
         run.hydraulic_model,
         run.date,
     );
+    time.compression_level = run.compression_level;
     time.tuning = run.tuning;
     time.lai_year = run.lai_year;
     time.lai_frequency = run.lai_frequency;
@@ -601,6 +608,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
     };
 
     Ok(SpatialNamelistRun {
+        compression_level: colm_init::restart::restart_compression_level(&document)?,
         landdata: output.join(&case_name).join("landdata"),
         restart: output.join(&case_name).join("restart"),
         case_name,
@@ -790,12 +798,14 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
     let block = args.next().context("missing CoLM block label")?;
     let land_cover = parse_land_cover(&args.next().context("missing land-cover scheme")?)?;
     let hydraulic_model = parse_hydraulic_model(args.next().as_deref())?;
+    let mut compression_level = 1;
     let mut topmodel = false;
     let mut topmodel_method = 0;
     let mut vic_scalar_path = None;
     let mut vic_grid_path = None;
     while let Some(value) = args.next() {
         match value.as_str() {
+            "--rest-compress-level" => compression_level = parse_restart_compression(args.next())?,
             "--topmodel" => topmodel = true,
             "--topmodel-method" => {
                 topmodel = true;
@@ -829,6 +839,7 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
         land_cover,
         hydraulic_model,
     );
+    config.compression_level = compression_level;
     config.use_topmodel = topmodel;
     config.topmodel_method = topmodel_method;
     config.vic_parameters = vic_grid_path
@@ -881,6 +892,9 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut vic_grid_path = None;
     while let Some(value) = args.next() {
         match value.as_str() {
+            "--rest-compress-level" => {
+                config.compression_level = parse_restart_compression(args.next())?
+            }
             "--bedrock" => config.use_bedrock = true,
             "--hyperspectral" => config.use_hyperspectral = true,
             "--topmodel" => config.use_topmodel = true,
@@ -958,6 +972,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             hydraulic_model,
             date,
         );
+        time.compression_level = config.compression_level;
         time.lai_year = lai_year;
         time.lai_frequency = if eight_day_lai {
             LaiFrequency::EightDay
@@ -1098,6 +1113,15 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
+fn parse_restart_compression(value: Option<String>) -> Result<u8> {
+    let level = value
+        .context("--rest-compress-level needs an integer in 0..=9")?
+        .parse()
+        .context("--rest-compress-level must be an integer in 0..=9")?;
+    colm_init::restart::validate_restart_compression(level)?;
+    Ok(level)
+}
+
 fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     match value {
         Some("campbell") => Ok(HydraulicModel::Campbell),
@@ -1153,6 +1177,79 @@ fn required(args: &mut impl Iterator<Item = String>, field: &str) -> Result<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_compression_is_strict_and_shared_by_single_point_and_spatial_cases() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-init-compression-options-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        for (setting, expected) in [
+            ("", Some(1)),
+            ("=0", Some(0)),
+            ("=3", Some(3)),
+            ("=9", Some(9)),
+            ("=-1", None),
+            ("=10", None),
+            ("=1.5", None),
+            ("='3'", None),
+            ("=.true.", None),
+        ] {
+            let setting = if setting.is_empty() {
+                String::new()
+            } else {
+                format!("DEF_REST_CompressLevel{setting}")
+            };
+            std::fs::write(
+                &namelist,
+                format!(
+                    "&nl_colm\n DEF_CASE_NAME='site'\n DEF_dir_output='{}'\n {setting}\n/\n",
+                    root.join("out").display()
+                ),
+            )
+            .unwrap();
+            let single = colm_init::single_point::single_point_static_run_from_namelist(
+                &namelist,
+                Some(LandCoverScheme::Igbp),
+                None,
+            )
+            .map(|run| run.compression_level);
+            let spatial = spatial_namelist_run(&namelist).map(|run| run.compression_level);
+            for result in [single, spatial] {
+                if let Some(expected) = expected {
+                    assert_eq!(result.unwrap(), expected, "{setting}");
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("DEF_REST_CompressLevel"),
+                        "{setting}"
+                    );
+                }
+            }
+            assert!(!root.join("out").exists());
+        }
+        for (value, expected) in [
+            ("0", Some(0)),
+            ("4", Some(4)),
+            ("9", Some(9)),
+            ("10", None),
+            ("-1", None),
+            ("4.0", None),
+        ] {
+            let result = parse_restart_compression(Some(value.to_owned()));
+            if let Some(expected) = expected {
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        assert!(parse_restart_compression(None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cold_time_parser_preserves_the_colm_restart_label() {

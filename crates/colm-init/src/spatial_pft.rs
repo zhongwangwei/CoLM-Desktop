@@ -148,6 +148,7 @@ impl<'a> SpatialPftTimeConfig<'a> {
 /// Writes the PFT/PC constant restart for one Rust `mksrfdata-rs spatial-pft` block.
 pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) -> Result<PathBuf> {
     let document = read_pft_document(config.namelist)?;
+    let compression_level = crate::restart::restart_compression_level(&document)?;
     let class = read_i32(
         config.landdata,
         "landpft",
@@ -213,6 +214,7 @@ pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) ->
         config.land_cover_year,
         config.block_label,
         PftConstantRestartInput {
+            compression_level,
             class: &class,
             fraction: &fraction,
             canopy_top_m: &canopy.top_m,
@@ -234,6 +236,7 @@ pub fn write_spatial_pft_constant_restarts(
     use_hyperspectral: bool,
 ) -> Result<SpatialPftConstantRestartFiles> {
     let document = read_pft_document(config.namelist)?;
+    let compression_level = crate::restart::restart_compression_level(&document)?;
     let hydraulic_model = pft_hydraulic_model(config.namelist)?;
     let mut common = SpatialLctStaticConfig::new(
         config.landdata,
@@ -245,6 +248,7 @@ pub fn write_spatial_pft_constant_restarts(
         hydraulic_model,
     );
     common.use_bedrock = use_bedrock;
+    common.compression_level = compression_level;
     common.tuning = RestartTuning::from_document(&document)?;
     common.use_hyperspectral = use_hyperspectral;
     let runoff_scheme = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3);
@@ -317,6 +321,7 @@ pub fn write_spatial_pft_constant_restarts(
                 config.block_label,
                 patches.class.len(),
                 optional_bool_or(&document, "DEF_USE_NITRIF", true)?,
+                compression_level,
             )
         })
         .transpose()?;
@@ -335,6 +340,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     config: SpatialPftTimeConfig<'_>,
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
+    let compression_level = crate::restart::restart_compression_level(&document)?;
     ensure!(
         !optional_bool_or(&document, "DEF_USE_SNICAR", false)?,
         "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
@@ -437,6 +443,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     common_config.variably_saturated_flow = config.variably_saturated_flow;
     common_config.vegetation_snow = config.vegetation_snow;
     common_config.snow_cover_exponent = config.snow_cover_exponent;
+    common_config.compression_level = compression_level;
     common_config.tuning = config.tuning;
     common_config.observations = observations.borrow();
     let common = crate::write_spatial_lct_cold_time_restart(common_config)?;
@@ -995,6 +1002,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 reflectance: &high_resolution_reflectance,
                 transmittance: &high_resolution_transmittance,
             },
+            compression_level,
         )?;
     }
     let reference_humidity = vec![0.3; pft_count];
@@ -1009,6 +1017,7 @@ pub fn write_spatial_pft_cold_time_restarts(
         config.date,
         config.static_config.block_label,
         PftTimeRestartInput {
+            compression_level,
             fields: PftTimeFields {
                 leaf_temperature_k: &leaf_temperature,
                 canopy_water_mm: &zero,
@@ -1066,7 +1075,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     let bgc = bgc_state
         .as_ref()
         .map(|state| {
-            let mut input = bgc_time_restart_input(state);
+            let mut input = bgc_time_restart_input(state, compression_level);
             input.crop = crop.as_ref().map(crate::CropColdStartState::bgc_fields);
             write_bgc_time_restart(
                 config.static_config.restart_dir,

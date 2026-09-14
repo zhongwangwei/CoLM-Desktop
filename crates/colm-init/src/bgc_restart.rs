@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
+use crate::restart::validate_restart_compression;
+
 const SOIL_LAYERS: usize = 10;
 const TRANSITIONS: usize = 10;
 const POOLS: usize = 7;
@@ -31,7 +33,9 @@ pub fn write_cold_start_bgc_constant_restart(
     block_label: &str,
     patches: usize,
     use_nitrification: bool,
+    compression_level: u8,
 ) -> Result<BgcConstantRestartFiles> {
+    validate_restart_compression(compression_level)?;
     validate_filename_component(case_name, "case name")?;
     validate_filename_component(block_label, "block label")?;
     ensure!(
@@ -47,7 +51,7 @@ pub fn write_cold_start_bgc_constant_restart(
     let constants = constants_dir.join(format!("{stem}.nc"));
     let block = constants_dir.join(format!("{stem}_{block_label}.nc"));
     write_constants(&constants, use_nitrification)?;
-    write_block(&block, patches)?;
+    write_block(&block, patches, compression_level)?;
     Ok(BgcConstantRestartFiles { constants, block })
 }
 
@@ -191,7 +195,8 @@ fn write_constants(path: &Path, use_nitrification: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_block(path: &Path, patches: usize) -> Result<()> {
+fn write_block(path: &Path, patches: usize, compression_level: u8) -> Result<()> {
+    validate_restart_compression(compression_level)?;
     let mut file = netcdf::create(path)
         .with_context(|| format!("cannot create BGC constant block {}", path.display()))?;
     file.add_dimension("patch", patches)?;
@@ -209,12 +214,17 @@ fn write_block(path: &Path, patches: usize) -> Result<()> {
             ));
         }
     }
-    file.add_variable::<f64>("rf_decomp", &["patch", "ndecomp_transitions", "soil"])?
-        .put_values(&rf_decomp, (.., .., ..))?;
-    file.add_variable::<f64>("pathfrac_decomp", &["patch", "ndecomp_transitions", "soil"])?
-        .put_values(&pathfrac, (.., .., ..))?;
-    file.add_variable::<i32>("rice2pdt", &["patch"])?
-        .put_values(&vec![MISSING_I32; patches], ..)?;
+    let mut rf =
+        file.add_variable::<f64>("rf_decomp", &["patch", "ndecomp_transitions", "soil"])?;
+    rf.set_compression(compression_level.into(), false)?;
+    rf.put_values(&rf_decomp, (.., .., ..))?;
+    let mut pathfrac_var =
+        file.add_variable::<f64>("pathfrac_decomp", &["patch", "ndecomp_transitions", "soil"])?;
+    pathfrac_var.set_compression(compression_level.into(), false)?;
+    pathfrac_var.put_values(&pathfrac, (.., .., ..))?;
+    let mut rice = file.add_variable::<i32>("rice2pdt", &["patch"])?;
+    rice.set_compression(compression_level.into(), false)?;
+    rice.put_values(&vec![MISSING_I32; patches], ..)?;
     file.close()
         .with_context(|| format!("cannot close BGC constant block {}", path.display()))?;
     Ok(())

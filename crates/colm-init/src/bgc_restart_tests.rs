@@ -4,11 +4,49 @@ use super::*;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} in {} did not have deflate level {level}\n{header}",
+            path.display()
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} in {} unexpectedly had deflate metadata\n{header}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
     let root = temp_dir("bgc-constants");
     let files =
-        write_cold_start_bgc_constant_restart(&root, "CN-Cng", 2005, "w180_s90", 2, true).unwrap();
+        write_cold_start_bgc_constant_restart(&root, "CN-Cng", 2005, "w180_s90", 2, true, 1)
+            .unwrap();
     assert_eq!(
         files.constants,
         root.join("const/CN-Cng_restart_bgc_const_lc2005.nc")
@@ -54,6 +92,7 @@ fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
         40.0 / std::f64::consts::PI
     );
 
+    assert_deflate(&files.block, "rf_decomp", 1);
     let block = netcdf::open(&files.block).unwrap();
     assert_eq!(block.dimension_len("patch"), Some(2));
     assert_eq!(block.dimension_len("soil"), Some(10));
@@ -86,17 +125,54 @@ fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
 }
 
 #[test]
+fn bgc_constant_restart_compresses_only_block_vectors() {
+    let root = temp_dir("bgc-compression");
+    let files = write_cold_start_bgc_constant_restart(&root, "case", 2005, "w180_s90", 2, false, 4)
+        .unwrap();
+    assert_deflate(&files.block, "rf_decomp", 4);
+    assert_deflate(&files.block, "pathfrac_decomp", 4);
+    assert_deflate(&files.block, "rice2pdt", 4);
+    assert_no_deflate(&files.constants, "donor_pool");
+    assert_no_deflate(&files.constants, "nfix_timeconst");
+
+    let root0 = temp_dir("bgc-compression-zero");
+    let zero = write_cold_start_bgc_constant_restart(&root0, "case", 2005, "w180_s90", 1, false, 0)
+        .unwrap();
+    assert_no_deflate(&zero.block, "rf_decomp");
+    assert_eq!(
+        netcdf::open(&zero.block)
+            .unwrap()
+            .variable("rice2pdt")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        [-9_999]
+    );
+
+    let invalid = temp_dir("bgc-compression-invalid");
+    assert!(write_cold_start_bgc_constant_restart(
+        &invalid, "case", 2005, "w180_s90", 1, false, 10,
+    )
+    .is_err());
+    assert!(!invalid.exists());
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root0).unwrap();
+}
+
+#[test]
 fn bgc_constant_restart_rejects_invalid_output_contract() {
     let root = temp_dir("bgc-invalid");
+    assert!(write_cold_start_bgc_constant_restart(
+        &root, "bad/name", 2005, "w180_s90", 1, false, 1
+    )
+    .is_err());
     assert!(
-        write_cold_start_bgc_constant_restart(&root, "bad/name", 2005, "w180_s90", 1, false)
+        write_cold_start_bgc_constant_restart(&root, "case", 10_000, "w180_s90", 1, false, 1)
             .is_err()
     );
     assert!(
-        write_cold_start_bgc_constant_restart(&root, "case", 10_000, "w180_s90", 1, false).is_err()
-    );
-    assert!(
-        write_cold_start_bgc_constant_restart(&root, "case", 2005, "w180_s90", 0, false).is_err()
+        write_cold_start_bgc_constant_restart(&root, "case", 2005, "w180_s90", 0, false, 1)
+            .is_err()
     );
     assert!(!root.exists());
 }
@@ -162,6 +238,7 @@ fn cold_start_bgc_constants_match_the_upstream_fortran_reference() {
         "w180_s90",
         1,
         true,
+        1,
     )
     .unwrap();
     let upstream = output.join("CN-Cng/restart/const");
