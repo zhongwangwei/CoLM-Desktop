@@ -68,9 +68,14 @@ CatchLateral identity arrays and GridRiver transaction/feature/time scalars
 remain uncompressed. Common/PFT time and urban payloads use the case level.
 Source contract and independent approval:
 `/tmp/colm-restart-compression-contract-review.md` and
-`/tmp/colm-restart-compression-contract.json`. The pre-existing conditional
-GridRiver `hist_bifflw_lev/hist_bifflw_acctime` coverage gap is not closed by
-compressing the payloads currently written.
+`/tmp/colm-restart-compression-contract.json`. Allocation tracing confirms that
+GridRiver `hist_bifflw_lev/hist_bifflw_acctime` belong to runtime history restarts,
+not original `mkinidata`: the cold path never initializes history and its writer
+returns at the allocation guard. They are not missing cold-start functionality.
+Rust currently emits some other zero-valued `hist_*` convenience fields absent
+from original cold output; this existing schema extension is not exact cold-file
+parity and still needs review. Do not add the missing runtime history names as
+synthetic cold fields. Trace: `/tmp/colm-gridriver-bif-history-contract.md`.
 
 A **pre-edit** frozen executable ignored default `1` and explicit `4` (both
 produced uncompressed scientific arrays); the saved RED is

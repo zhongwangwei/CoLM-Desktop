@@ -249,9 +249,9 @@ pub fn write_gridriver_cold_restart(
     if let Some(reservoir) = &reservoir {
         write_reservoir_cold_state(&mut file, reservoir, config.compression_level)?;
     }
-    // MOD_Grid_RiverLakeHist flushes these vectors to zero before mkinidata
-    // writes the cold restart.  Preserve the concrete fields rather than
-    // relying on the native optional-read fallback.
+    // Native mkinidata leaves history unallocated and omits these fields.
+    // These explicit zeros are a Rust schema extension, equivalent to the
+    // runtime's absent-history fallback, not original cold-output inventory.
     for name in [
         "hist_acctime_ucat",
         "hist_wdsrf_ucat",
