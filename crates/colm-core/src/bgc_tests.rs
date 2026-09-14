@@ -112,6 +112,174 @@ fn cold_bgc_uses_independent_equilibrium_vegetation_for_each_pft() {
 }
 
 #[test]
+fn wetland_runtime_cn_fallback_seeds_empty_positive_organic_layers_with_fortran_bits() {
+    let runtime = zero_runtime_cn_state();
+    let om = [2.0; BGC_SOIL_LAYERS];
+    let input = wetland_input(&runtime, &om);
+
+    let state = derive_cold_start_bgc_state(input).unwrap();
+
+    // Original MOD_Initialize wetland loop, gfortran -O2 -fdefault-real-8, OM=2.
+    let expected_carbon_bits = [
+        0x404D_0000_0000_0000,
+        0x405D_0000_0000_0000,
+        0x404D_0000_0000_0000,
+        0x0000_0000_0000_0000,
+        0x404D_0000_0000_0000,
+        0x4072_2000_0000_0000,
+        0x4082_2000_0000_0000,
+    ];
+    let expected_nitrogen_bits = [
+        0x400E_EEEE_EEEE_EEEF,
+        0x401E_EEEE_EEEE_EEEF,
+        0x400E_EEEE_EEEE_EEEF,
+        0x0000_0000_0000_0000,
+        0x400E_EEEE_EEEE_EEEF,
+        0x4033_5555_5555_5555,
+        0x4043_5555_5555_5555,
+    ];
+    assert_eq!(
+        state.pools.carbon[..BGC_DECOMPOSITION_POOLS]
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        expected_carbon_bits
+    );
+    assert_eq!(
+        state.pools.nitrogen[..BGC_DECOMPOSITION_POOLS]
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        expected_nitrogen_bits
+    );
+    assert_eq!(
+        state.pools.carbon[10 * BGC_DECOMPOSITION_POOLS],
+        MISSING,
+        "the trailing five full-depth layers remain untouched"
+    );
+    assert_eq!(state.pools.mineral_nitrogen, [0.0; BGC_SOIL_LAYERS]);
+    assert!(state.pft_values.iter().all(Vec::is_empty));
+}
+
+#[test]
+fn wetland_runtime_cn_fallback_threshold_and_existing_pool_conditions_follow_fortran() {
+    let mut runtime = zero_runtime_cn_state();
+    set_runtime_carbon(&mut runtime, 0, 0, -777.0); // ignored in positive sum: seed.
+    set_runtime_carbon(&mut runtime, 1, 0, 1.0e30); // sentinel ignored: seed.
+    set_runtime_carbon(&mut runtime, 2, 0, 1.0e-13); // below threshold: seed.
+    set_runtime_carbon(&mut runtime, 3, 0, 1.0e-12); // exactly threshold: seed.
+    set_runtime_carbon(&mut runtime, 4, 0, f64::from_bits(0x3D71_9799_812D_EC00)); // above threshold: keep existing.
+    set_runtime_carbon(&mut runtime, 5, 0, 1.0); // positive existing: keep existing.
+    let om = [2.0; BGC_SOIL_LAYERS];
+
+    let state = derive_cold_start_bgc_state(wetland_input(&runtime, &om)).unwrap();
+
+    for soil in 0..=3 {
+        assert_eq!(
+            state.pools.carbon[soil * BGC_DECOMPOSITION_POOLS],
+            58.0,
+            "soil {soil}"
+        );
+        assert_eq!(
+            state.pools.nitrogen[soil * BGC_DECOMPOSITION_POOLS].to_bits(),
+            0x400E_EEEE_EEEE_EEEF,
+            "soil {soil}"
+        );
+    }
+    assert_eq!(
+        state.pools.carbon[4 * BGC_DECOMPOSITION_POOLS].to_bits(),
+        0x3D71_9799_812D_EC00
+    );
+    assert_eq!(state.pools.nitrogen[4 * BGC_DECOMPOSITION_POOLS], 0.0);
+    assert_eq!(state.pools.carbon[5 * BGC_DECOMPOSITION_POOLS], 1.0);
+    assert_eq!(state.pools.nitrogen[5 * BGC_DECOMPOSITION_POOLS], 0.0);
+}
+
+#[test]
+fn wetland_runtime_cn_fallback_skips_invalid_organic_density_values() {
+    let runtime = zero_runtime_cn_state();
+    let om = [0.0, -1.0, 1.0e30, f64::NAN, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0];
+
+    let state = derive_cold_start_bgc_state(wetland_input(&runtime, &om)).unwrap();
+
+    for soil in 0..4 {
+        let start = soil * BGC_DECOMPOSITION_POOLS;
+        assert_eq!(
+            &state.pools.carbon[start..start + BGC_DECOMPOSITION_POOLS],
+            &[0.0; BGC_DECOMPOSITION_POOLS]
+        );
+    }
+    assert_eq!(state.pools.carbon[4 * BGC_DECOMPOSITION_POOLS], 58.0);
+}
+
+#[test]
+fn wetland_organic_density_without_runtime_cn_state_preserves_defaults() {
+    let om = [2.0; BGC_SOIL_LAYERS];
+    let mut input = sample_input(None);
+    input.pft = empty_pft();
+    input.wetland_organic_matter_density_kg_m3 = Some(&om);
+
+    let state = derive_cold_start_bgc_state(input).unwrap();
+
+    assert!(state.pools.carbon.iter().all(|value| *value == 0.0));
+    assert!(state.pools.nitrogen.iter().all(|value| *value == 0.0));
+    assert_eq!(state.pools.mineral_nitrogen, [10.0; BGC_SOIL_LAYERS]);
+    assert!(state.pft_values.iter().all(Vec::is_empty));
+}
+
+#[test]
+fn wetland_organic_density_requires_pftless_input_and_ten_soil_layers() {
+    let runtime = zero_runtime_cn_state();
+    let om = [2.0; BGC_SOIL_LAYERS];
+    let mut nonempty_pft = sample_input(Some(&runtime));
+    nonempty_pft.wetland_organic_matter_density_kg_m3 = Some(&om);
+    assert!(derive_cold_start_bgc_state(nonempty_pft).is_err());
+
+    let short = [2.0; BGC_SOIL_LAYERS - 1];
+    assert!(derive_cold_start_bgc_state(wetland_input(&runtime, &short)).is_err());
+}
+
+#[test]
+fn inactive_bgc_patches_keep_allocated_missing_state_when_global_cn_is_loaded() {
+    let mut source = zero_runtime_cn_state();
+    source.decomposition_carbon_g_m3.fill(3.0);
+    source.decomposition_nitrogen_g_m3.fill(2.0);
+    source.ammonium_g_m3.fill(4.0);
+    source.nitrate_g_m3.fill(6.0);
+    for runtime in [None, Some(&source)] {
+        let mut input = sample_input(runtime);
+        input.pft = empty_pft();
+        input.soil_bgc_active = false;
+        let state = derive_cold_start_bgc_state(input).unwrap();
+        let pool = if runtime.is_some() { MISSING } else { 0.0 };
+        let mineral = if runtime.is_some() { MISSING } else { 10.0 };
+        assert_eq!(
+            state.pools.carbon,
+            [pool; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS]
+        );
+        assert_eq!(
+            state.pools.nitrogen,
+            [pool; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS]
+        );
+        assert_eq!(state.pools.mineral_nitrogen, [mineral; BGC_SOIL_LAYERS]);
+        assert_eq!(state.pools.total_soil_nitrogen, [MISSING; BGC_SOIL_LAYERS]);
+        assert_eq!(state.totals.total_carbon, [0.0]);
+        assert_eq!(state.totals.litter_nitrogen, [0.0]);
+        assert_eq!(state.totals.soil_nitrogen, [0.0]);
+        assert_eq!(state.totals.total_nitrogen, state.totals.mineral_nitrogen);
+        // Original IniTimeVar with ten dz=0.1 layers, -O2 -fdefault-real-8.
+        assert_eq!(
+            state.totals.mineral_nitrogen[0].to_bits(),
+            if runtime.is_some() {
+                0xC768_12F9_CF79_20E3
+            } else {
+                0x4024_0000_0000_0000
+            }
+        );
+    }
+}
+
+#[test]
 fn cold_bgc_rejects_incomplete_runtime_or_pft_contracts() {
     let mut invalid = sample_input(None);
     invalid.soil_thickness_m = &[1.0; 9];
@@ -272,10 +440,55 @@ fn pft_values<'a>(state: &'a BgcColdStartState, name: &str) -> &'a [f64] {
     &state.pft_values[index]
 }
 
+fn set_runtime_carbon(state: &mut BgcEquilibriumState, soil: usize, pool: usize, value: f64) {
+    state.decomposition_carbon_g_m3[pool * BGC_SOIL_LAYERS + soil] = value;
+}
+
+fn empty_pft() -> BgcPftColdStartInput<'static> {
+    BgcPftColdStartInput {
+        class: &[],
+        fraction: &[],
+        leaf_carbon_to_nitrogen: &[],
+        fine_root_carbon_to_nitrogen: &[],
+        live_wood_carbon_to_nitrogen: &[],
+        dead_wood_carbon_to_nitrogen: &[],
+    }
+}
+
+fn wetland_input<'a>(
+    runtime_cn_state: &'a BgcEquilibriumState,
+    organic_matter_density: &'a [f64],
+) -> BgcColdStartInput<'a> {
+    let mut input = sample_input(Some(runtime_cn_state));
+    input.pft = empty_pft();
+    input.wetland_organic_matter_density_kg_m3 = Some(organic_matter_density);
+    input
+}
+
+fn zero_runtime_cn_state() -> BgcEquilibriumState {
+    BgcEquilibriumState {
+        decomposition_carbon_g_m3: vec![0.0; BGC_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS],
+        decomposition_nitrogen_g_m3: vec![0.0; BGC_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS],
+        ammonium_g_m3: vec![0.0; BGC_SOIL_LAYERS],
+        nitrate_g_m3: vec![0.0; BGC_SOIL_LAYERS],
+        vegetation_carbon: BgcVegetationCarbon {
+            leaf_g_m2: 400.0,
+            leaf_storage_g_m2: 700.0,
+            fine_root_g_m2: 12.0,
+            fine_root_storage_g_m2: 13.0,
+            live_stem_g_m2: 14.0,
+            dead_stem_g_m2: 15.0,
+            live_coarse_root_g_m2: 16.0,
+            dead_coarse_root_g_m2: 17.0,
+        },
+    }
+}
+
 fn sample_input(runtime_cn_state: Option<&BgcEquilibriumState>) -> BgcColdStartInput<'_> {
     BgcColdStartInput {
         soil_thickness_m: &[0.1; BGC_SOIL_LAYERS],
         soil_bulk_density_kg_m3: &[1000.0; BGC_SOIL_LAYERS],
+        soil_bgc_active: true,
         pft: BgcPftColdStartInput {
             class: &[1, 3, 13],
             fraction: &[0.2, 0.3, 0.5],
@@ -286,6 +499,7 @@ fn sample_input(runtime_cn_state: Option<&BgcEquilibriumState>) -> BgcColdStartI
         },
         runtime_cn_state,
         runtime_vegetation_carbon: None,
+        wetland_organic_matter_density_kg_m3: None,
         use_nitrification: true,
     }
 }

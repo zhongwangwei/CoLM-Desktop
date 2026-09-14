@@ -146,12 +146,18 @@ pub struct BgcPftColdStartInput<'a> {
 pub struct BgcColdStartInput<'a> {
     pub soil_thickness_m: &'a [f64],
     pub soil_bulk_density_kg_m3: &'a [f64],
+    /// Natural soil or a TRACER wetland: eligible for CN source copy and soil summary.
+    /// Other patches retain allocation/default state even when global CN input exists.
+    pub soil_bgc_active: bool,
     pub pft: BgcPftColdStartInput<'a>,
     pub runtime_cn_state: Option<&'a BgcEquilibriumState>,
     /// Optional `landpft`-resolved equilibrium vegetation pools.  Spatial
     /// initialization supplies one source value per PFT; a single-point run
     /// continues to use `runtime_cn_state.vegetation_carbon`.
     pub runtime_vegetation_carbon: Option<&'a [BgcVegetationCarbon]>,
+    /// Optional TRACER wetland OM density by soil layer; `Some` enables the
+    /// original wetland CN fallback only when a runtime CN state is present.
+    pub wetland_organic_matter_density_kg_m3: Option<&'a [f64]>,
     pub use_nitrification: bool,
 }
 
@@ -459,24 +465,50 @@ pub fn derive_cold_start_bgc_state(input: BgcColdStartInput<'_>) -> Result<BgcCo
         set_pft(&mut pft_values, "burndate_p", index, 10_000.0);
     }
 
-    let (carbon, nitrogen, ammonium, nitrate) = initial_soil_state(input.runtime_cn_state);
-    let mineral_nitrogen = ammonium
-        .iter()
-        .zip(&nitrate)
-        .map(|(ammonium, nitrate)| ammonium + nitrate)
-        .collect::<Vec<_>>();
+    let (mut carbon, mut nitrogen, ammonium, nitrate) =
+        initial_soil_state(input.runtime_cn_state, input.soil_bgc_active);
+    apply_wetland_cn_fallback(
+        &mut carbon,
+        &mut nitrogen,
+        input.runtime_cn_state,
+        input.wetland_organic_matter_density_kg_m3,
+    );
+    let mineral_nitrogen = if input.runtime_cn_state.is_some() && !input.soil_bgc_active {
+        // Allocated sminn_vr is spval, not the sum of two uninitialized species.
+        vec![MISSING; BGC_SOIL_LAYERS]
+    } else {
+        ammonium
+            .iter()
+            .zip(&nitrate)
+            .map(|(ammonium, nitrate)| ammonium + nitrate)
+            .collect::<Vec<_>>()
+    };
     let truncation_profile = vec![0.0; BGC_SOIL_LAYERS];
-    let summary = summarize_bgc_state(BgcStateSummaryInput {
+    // IniTimeVar leaves inactive patch C/N totals zero and only integrates sminn.
+    // Do not summarize their allocated missing decomposition profiles.
+    let inactive_pools = [0.0; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS];
+    let mut summary = summarize_bgc_state(BgcStateSummaryInput {
         soil_thickness_m: input.soil_thickness_m,
         soil_bulk_density_kg_m3: input.soil_bulk_density_kg_m3,
-        carbon_g_m3: &carbon,
-        nitrogen_g_m3: &nitrogen,
+        carbon_g_m3: if input.soil_bgc_active {
+            &carbon
+        } else {
+            &inactive_pools
+        },
+        nitrogen_g_m3: if input.soil_bgc_active {
+            &nitrogen
+        } else {
+            &inactive_pools
+        },
         mineral_nitrogen_g_m3: &mineral_nitrogen,
         pft_values: &pft_values,
         pft_fraction: input.pft.fraction,
         carbon_truncation_g_m3: &truncation_profile,
         nitrogen_truncation_g_m3: &truncation_profile,
     })?;
+    if !input.soil_bgc_active {
+        summary.total_soil_nitrogen.fill(MISSING);
+    }
 
     Ok(BgcColdStartState {
         pft_values,
@@ -844,6 +876,10 @@ fn validate_input(input: BgcColdStartInput<'_>) -> Result<()> {
     validate_soil("soil bulk density", input.soil_bulk_density_kg_m3)?;
     let pfts = input.pft.class.len();
     ensure!(
+        input.soil_bgc_active || pfts == 0,
+        "inactive BGC patches must not own PFT entries"
+    );
+    ensure!(
         input.pft.class.iter().all(|class| *class >= 0),
         "BGC PFT class must be nonnegative"
     );
@@ -891,6 +927,17 @@ fn validate_input(input: BgcColdStartInput<'_>) -> Result<()> {
         input.pft.class,
         is_woody,
     )?;
+    if let Some(density) = input.wetland_organic_matter_density_kg_m3 {
+        ensure!(
+            input.soil_bgc_active,
+            "wetland CN fallback requires active soil BGC"
+        );
+        ensure!(pfts == 0, "BGC wetland patches must not own PFT entries");
+        ensure!(
+            density.len() == BGC_SOIL_LAYERS,
+            "BGC wetland organic matter density must contain ten soil layers"
+        );
+    }
     if let Some(state) = input.runtime_cn_state {
         ensure!(
             state.decomposition_carbon_g_m3.len() == BGC_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS
@@ -1068,17 +1115,58 @@ fn initial_wood_carbon(
     }
 }
 
+fn apply_wetland_cn_fallback(
+    carbon: &mut [f64],
+    nitrogen: &mut [f64],
+    runtime_cn_state: Option<&BgcEquilibriumState>,
+    organic_matter_density_kg_m3: Option<&[f64]>,
+) {
+    let Some(_state) = runtime_cn_state else {
+        return;
+    };
+    let Some(organic_matter_density_kg_m3) = organic_matter_density_kg_m3 else {
+        return;
+    };
+    const FACTORS: [f64; BGC_DECOMPOSITION_POOLS] = [0.05, 0.10, 0.05, 0.0, 0.05, 0.25, 0.50];
+    for (soil, &organic_matter) in organic_matter_density_kg_m3.iter().enumerate() {
+        if !(organic_matter > 0.0 && organic_matter < 1.0e30) {
+            continue;
+        }
+        let start = soil * BGC_DECOMPOSITION_POOLS;
+        let end = start + BGC_DECOMPOSITION_POOLS;
+        let positive_carbon_sum = carbon[start..end]
+            .iter()
+            .filter(|&&value| value > 0.0 && value < 1.0e30)
+            .sum::<f64>();
+        if positive_carbon_sum > 1.0e-12 {
+            continue;
+        }
+        for (pool, factor) in FACTORS.iter().enumerate() {
+            let seeded_carbon = organic_matter * 580.0 * factor;
+            carbon[start + pool] = seeded_carbon;
+            nitrogen[start + pool] = seeded_carbon / 15.0;
+        }
+    }
+}
+
 fn initial_soil_state(
     state: Option<&BgcEquilibriumState>,
+    active: bool,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    match state {
-        None => (
+    match (state, active) {
+        (None, _) => (
             vec![0.0; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS],
             vec![0.0; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS],
             vec![5.0; BGC_SOIL_LAYERS],
             vec![5.0; BGC_SOIL_LAYERS],
         ),
-        Some(state) => {
+        (Some(_), false) => (
+            vec![MISSING; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS],
+            vec![MISSING; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS],
+            vec![MISSING; BGC_SOIL_LAYERS],
+            vec![MISSING; BGC_SOIL_LAYERS],
+        ),
+        (Some(state), true) => {
             let mut carbon = vec![MISSING; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS];
             let mut nitrogen = vec![MISSING; BGC_FULL_SOIL_LAYERS * BGC_DECOMPOSITION_POOLS];
             for soil in 0..BGC_SOIL_LAYERS {

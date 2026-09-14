@@ -1231,6 +1231,161 @@ fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
 }
 
 #[test]
+fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
+    use crate::MISSING;
+    let root = temp_dir("wetland-cn");
+    let landdata = root.join("landdata");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[1, 11], &[1, 1]);
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
+    {
+        let mut file = netcdf::append(block_path(
+            &landdata, "landpft", "landpft", 2005, "w180_s90",
+        ))
+        .unwrap();
+        file.variable_mut("eindex")
+            .unwrap()
+            .put_values(&[1_i64], ..)
+            .unwrap();
+        file.variable_mut("ipxend")
+            .unwrap()
+            .put_values(&[1_i32], ..)
+            .unwrap();
+    }
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    for (stem, name, value) in [
+        ("LAI_patches01", "LAI_patches", 2.5),
+        ("SAI_patches01", "SAI_patches", 0.4),
+    ] {
+        write_f64_vec(
+            &landdata,
+            "LAI",
+            stem,
+            name,
+            2005,
+            "w180_s90",
+            &[value, 0.0],
+        );
+    }
+    let cn = root.join("cn.nc");
+    write_cn_equilibrium(&cn);
+    let namelist = root.join("case.nml");
+    for mode in ["PFT", "PC"] {
+        for (label, tracer, use_cn, existing, expected) in [
+            ("disabled", false, true, false, MISSING),
+            ("disabled-existing", false, true, true, MISSING),
+            ("disabled-no-cn", false, false, false, 0.0),
+            ("seeded", true, true, false, 1798.0),
+            ("no-cn", true, false, false, 0.0),
+            ("existing", true, true, true, 1.0),
+        ] {
+            {
+                let mut file = netcdf::append(&cn).unwrap();
+                for name in [
+                    "litr1c_vr",
+                    "litr2c_vr",
+                    "litr3c_vr",
+                    "cwdc_vr",
+                    "soil1c_vr",
+                    "soil2c_vr",
+                    "soil3c_vr",
+                ] {
+                    file.variable_mut(name)
+                        .unwrap()
+                        .put_values(&[if existing { 1.0 } else { 0.0 }; 80], ..)
+                        .unwrap();
+                }
+            }
+            let restart = root.join(format!("{mode}-{label}"));
+            let logical = |value| if value { ".true." } else { ".false." };
+            std::fs::write(&namelist, format!("&nl_colm\nDEF_USE_PFT={}\nDEF_USE_PC={}\nDEF_USE_BGC=.true.\nDEF_USE_TRACER={}\nDEF_TRACER_NUM=0\nDEF_USE_CN_INIT={}\nDEF_file_cn_init='{}'\n/\n", logical(mode=="PFT"), logical(mode=="PC"), logical(tracer), logical(use_cn), cn.display())).unwrap();
+            let mut config = crate::SpatialPftTimeConfig::new(
+                crate::SpatialPftStaticConfig::new(
+                    &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+                ),
+                crate::RestartDate {
+                    year: 2005,
+                    julian_day: 1,
+                    seconds: 0,
+                },
+            );
+            config.plant_hydraulics = false;
+            let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+            let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
+            let carbon = bgc.variable("decomp_cpools_vr").unwrap();
+            assert_eq!(bgc.dimension_len("patch"), Some(2));
+            assert_eq!(
+                carbon.get_value::<f64, _>((1, 0, 0)).unwrap(),
+                expected,
+                "{mode}/{label}"
+            );
+            assert_eq!(
+                carbon.get_value::<f64, _>((0, 0, 0)).unwrap(),
+                if existing { 1.0 } else { 0.0 }
+            );
+            let mineral = values_f64(&bgc, "sminn_vr").unwrap();
+            assert_eq!(&mineral[..10], &[10.0; 10]);
+            assert_eq!(
+                &mineral[10..],
+                &[if !tracer && use_cn { MISSING } else { 10.0 }; 10]
+            );
+            if !tracer {
+                assert_eq!(values_f64(&bgc, "totcolc").unwrap()[1], 0.0);
+                assert_eq!(
+                    &values_f64(&bgc, "totsoiln_vr").unwrap()[10..],
+                    &[MISSING; 10]
+                );
+            }
+            assert_eq!(values_f64(&bgc, "totvegc").unwrap()[1], 0.0);
+            let pft = netcdf::open(files.pft).unwrap();
+            assert_eq!(pft.dimension_len("pft"), Some(1));
+            if label == "seeded" {
+                assert_eq!(
+                    bgc.variable("decomp_npools_vr")
+                        .unwrap()
+                        .get_value::<f64, _>((1, 0, 0))
+                        .unwrap(),
+                    1798.0 / 15.0
+                );
+                assert_eq!(carbon.get_value::<f64, _>((1, 3, 0)).unwrap(), 0.0);
+                assert!(values_f64(&bgc, "totcolc").unwrap()[1] > 0.0);
+            }
+        }
+    }
+    let restart = root.join("invalid");
+    std::fs::write(
+        &namelist,
+        "&nl_colm\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true.\nDEF_USE_TRACER='yes'\n/\n",
+    )
+    .unwrap();
+    let config = crate::SpatialPftTimeConfig::new(
+        crate::SpatialPftStaticConfig::new(
+            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+        ),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    let error = crate::write_spatial_pft_cold_time_restarts(config).unwrap_err();
+    assert!(error.to_string().contains("DEF_USE_TRACER"));
+    assert!(!restart.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
     let root = temp_dir("time");
     let landdata = root.join("landdata");

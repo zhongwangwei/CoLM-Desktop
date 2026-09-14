@@ -1259,6 +1259,9 @@ fn derive_spatial_bgc_state(
     let equilibrium = cn_initial_state
         .map(|path| read_spatial_cn_equilibrium(path, config, patches, pfts))
         .transpose()?;
+    // Desktop replaced upstream's TRACER build gate with DEF_USE_TRACER.
+    // Wetland BGC initialization is independent of tracer count and CH4 selection.
+    let use_tracer = optional_bool_or(document, "DEF_USE_TRACER", false)?;
     let states = (0..patches.class.len())
         .map(|patch| {
             let indices = &pft_to_patch[patch];
@@ -1299,9 +1302,16 @@ fn derive_spatial_bgc_state(
             let soil_bulk_density_kg_m3 = (0..soil.layers)
                 .map(|layer| soil.get(crate::SoilField::BulkDensity, layer, patch))
                 .collect::<Vec<_>>();
+            let wetland_organic_matter_density_kg_m3 =
+                (use_tracer && patch_kind[patch] == 2 && equilibrium.is_some()).then(|| {
+                    (0..soil.layers)
+                        .map(|layer| soil.get(crate::SoilField::OmDensity, layer, patch))
+                        .collect::<Vec<_>>()
+                });
             derive_cold_start_bgc_state(BgcColdStartInput {
                 soil_thickness_m: &soil_thickness_m,
                 soil_bulk_density_kg_m3: &soil_bulk_density_kg_m3,
+                soil_bgc_active: patch_kind[patch] == 0 || (use_tracer && patch_kind[patch] == 2),
                 pft: BgcPftColdStartInput {
                     class: &class,
                     fraction: &fraction,
@@ -1312,6 +1322,8 @@ fn derive_spatial_bgc_state(
                 },
                 runtime_cn_state: equilibrium.as_ref().map(|state| &state.patch[patch]),
                 runtime_vegetation_carbon: vegetation.as_deref(),
+                wetland_organic_matter_density_kg_m3: wetland_organic_matter_density_kg_m3
+                    .as_deref(),
                 use_nitrification,
             })
         })
@@ -1793,7 +1805,10 @@ fn pft_hydraulic_model_from_document(document: &colm_namelist::Document) -> Resu
 fn read_pft_document(namelist: &Path) -> Result<colm_namelist::Document> {
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
-    parse(&text).with_context(|| format!("cannot parse case namelist {}", namelist.display()))
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    optional_bool_or(&document, "DEF_USE_TRACER", false)?;
+    Ok(document)
 }
 
 fn spatial_pft_subgrid(document: &colm_namelist::Document) -> Result<SpatialPftSubgrid> {

@@ -1520,6 +1520,7 @@ fn write_single_point_pft_cold_time_restarts(
         let input = |index: std::ops::RangeInclusive<usize>| BgcColdStartInput {
             soil_thickness_m: &thickness,
             soil_bulk_density_kg_m3: soil.field(SoilField::BulkDensity),
+            soil_bgc_active: true,
             pft: BgcPftColdStartInput {
                 class: &pft.class[index.clone()],
                 fraction: &pft.fraction[index.clone()],
@@ -1530,6 +1531,7 @@ fn write_single_point_pft_cold_time_restarts(
             },
             runtime_cn_state: runtime_cn_state.as_ref(),
             runtime_vegetation_carbon: None,
+            wetland_organic_matter_density_kg_m3: None,
             use_nitrification: run.nitrification,
         };
         Some(if crop.is_some() {

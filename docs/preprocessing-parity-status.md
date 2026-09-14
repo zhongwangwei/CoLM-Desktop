@@ -173,6 +173,63 @@ Direct single-point `--urban-only` also produces the expected mask. Results:
 `/tmp/colm-urban-only-driver/after-results.json` and `direct-results.json`.
 No new full spatial scientific-parity or Windows acceptance claim is made.
 
+## Wetland CN initialization and inactive-patch state
+
+The shared `colm-core` BGC initializer now implements the original wetland
+organic-matter fallback, wired into spatial PFT/PC initialization. With a usable
+CN source, each wetland layer sums only positive carbon pools below `1e30`.
+If that sum is at most `1e-12` and organic-matter density is between zero and
+`1e30`, carbon is initialized from `OM_density * 580`, with pool fractions
+`[.05,.10,.05,0,.05,.25,.50]`; nitrogen uses C:N `15`. Existing populated layers,
+mineral nitrogen and the five extra full-depth layers are preserved. Wetlands
+remain PFTless and use soil-only totals; no synthetic PFT is introduced.
+
+The upstream condition is a `TRACER && BGC` build gate. Desktop explicitly
+converted TRACER to `DEF_USE_TRACER` in vendored `include/define.h` and
+`MOD_Initialize`; Rust uses that existing strict logical control, not tracer
+count or CH4 selection. `DEF_TRACER_NUM=0` does not suppress wetland BGC fallback.
+Original and Desktop contracts: `/tmp/colm-tracer-bgc-contract.md`.
+
+Source review also corrected the **CN copy itself**, not just fallback: natural
+soil and enabled tracer wetlands are eligible. Other patches must not consume
+mapped CN pools. If a global CN source exists, their explicitly allocated
+`spval` profiles remain missing; they must not be replaced by no-CN defaults.
+Without CN input, original zero pools and NH4/NO3 `5/5` defaults apply. Inactive
+carbon totals remain zero, `totsoiln_vr` remains missing, and scalar mineral N
+still integrates its original profile. These are original sentinel semantics,
+not invented inactive scientific values.
+
+Core regressions cover original-expression C/N bits, threshold boundaries,
+invalid OM, PFTless/shape validation, mineral-N preservation and inactive
+allocation/default state. Spatial PFT/PC tests exercise enabled/disabled,
+existing/empty CN, no-CN and malformed-control cases. Temporary Fortran probes
+use unchanged `-O2 -fdefault-real-8` flags; they are extracted-expression checks,
+not a full linked tracer runtime: `/tmp/colm-wetland-cn-fortran-reference/`.
+
+**725 integrated tests**, all-target Clippy, downstream checks, scoped formatting
+and release builds pass. An additional final core check pins the inactive
+mineral-N integral to the original probe's bits. Independent review approves the
+source-eligibility repair. Logs: `/tmp/colm-wetland-cn-validation/` and
+`/tmp/colm-wetland-cn-fix/review.md`.
+
+A frozen prior release fails the mixed natural/empty-wetland/populated-wetland
+contract for both PFT and PC. The corrected release writes the expected seeded
+carbon (`1798 gC/m3` in the first litter pool for `OM=62`) only when enabled;
+disabled wetlands retain original missing CN profiles. Each case retains all
+**8 files / 379 variable arrays** and their schema. Enabled runs change only
+9 BGC arrays in the empty wetland; populated wetland and natural-patch slices
+are bitwise unchanged. Disabled runs correct 10 BGC arrays in the ineligible
+wetlands; natural-patch slices and all other arrays remain bitwise unchanged.
+Reports: `/tmp/colm-wetland-cn-fix/after-results.json` and
+`decoded-comparison.json`. Earlier setup/axis-read mistakes and the intermediate
+fallback-only result are retained separately, not treated as final evidence.
+
+This does **not** complete the full TRACER/BGC migration. Single-point PFT/PC
+still rejects non-natural patches; `lake_soilc_srf` common constant restart
+ingestion/persistence is separately missing. Full original tracer runtime and
+scientific acceptance remain open. No source files, goldens or tolerances were
+changed to accept the new results.
+
 ## SNICAR remains unported and now fails explicitly
 
 Namelist-driven cold starts now reject `DEF_USE_SNICAR=.true.` rather than
@@ -215,7 +272,8 @@ real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
 rounding or absent test coverage: SNICAR optical initialization, external-lake
-options and TRACER/BGC wetland initialization still require implementation.
+options, single-point nonvegetated BGC and lake sediment carbon restart fields
+still require implementation. Spatial wetland CN initialization is repaired above.
 Urban-only masking is repaired above; an explicit unsupported-feature guard is
 not implementation of the remaining physics. These remain open and preclude an
 all-feature migration claim. The main
