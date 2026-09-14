@@ -118,9 +118,11 @@ The subsequent geometry run also reproduces every pixel axis and element block
 owner exactly, with identical dimensions across all 1,479 surface files.
 Canonical raw edges use explicit `f64::mul_add`; physical aggregation retains
 Fortran `areaquad` arithmetic. Source-grid votes are preserved before land-only
-filtering instead of recomputed from retained fine-pixel centers. This removes
-all observed non-soil-fit differences above the recorded 1e-12 threshold, but
-48 fitted soil fields still fail it; see the updated audit before claiming parity.
+filtering instead of recomputed from retained fine-pixel centers. The subsequent
+source-chunk ordering repair also matches every stored element/patch sequence:
+all 242 Pearl River surface fields now pass the recorded 1e-12 threshold, with
+all soil fields bitwise equal. The independent two-step runtime still fails
+that gate; see the updated audit before claiming full scientific parity.
 
 Spatial PFT/PC patch modes now honor `DEF_SOLO_PFT` and `DEF_FAST_PC`, including
 fast-PC cropland preservation and natural PFT parents beyond IGBP class 1.
@@ -164,6 +166,8 @@ Catchment now distinguishes the named MERIT half-cell grid from an ordinary
 same-resolution grid and reads the original `(lon, lat)` integer mesh contract.
 Global mesh indices and local source/diagnostic windows remain distinct;
 antimeridian diagnostics preserve both halves. The same-input synthetic
-1999 LAI-only comparison passes all 37 files, including diagnostics, but does
-not establish full Catchment material-field or initializer parity. See the
-[Catchment audit](preprocessing-parity-status.md#catchment-mesh-contract-and-diagnostic-windows).
+1999 LAI-only comparison passes all 37 files, including diagnostics. A separate
+real-2005-material 3-by-3 Catchment fixture passes all 254 surface/initial files;
+its bounded runtime extension passes restart comparison but retains one
+out-of-tolerance history energy diagnostic. Neither proves routing or other
+optional modes. See the [latest audit](preprocessing-parity-status.md).

@@ -55,11 +55,43 @@ reviewed. Broader optional-mode acceptance remains open.
 
 The full run uses a temporary repack of `soil/vf_quartz_mineral_s.nc` because the
 original file is HDF-readable but intermittently rejected by NetCDF. The full
-decoded-input equivalence audit is still pending; output agreement alone does
-not prove input identity. Original rawdata and reference outputs are untouched.
+decoded-input equivalence audit now passes: all eight layer hashes, dimensions,
+variable order, types and attributes match. An initial `array_equal` report
+incorrectly rejected identical NaNs; that report is preserved alongside the
+corrected comparison, with matching hashes required rather than ignored.
+Original rawdata and reference outputs are untouched.
 The separate plant-tile close crash reproduces in NetCDF/HDF command-line tools;
 its temporary repack has matching decoded variables and metadata. Neither
 workaround changes production file-locking policy or proves file corruption.
+The full input evidence is in
+`/tmp/colm-hdf-repack-content-verify-1789395546/final_summary.json`.
+
+### Bounded Catchment runtime extension
+
+`/tmp/colm-catchment-runtime.usbjVb/` extends the real-2005-material, synthetic
+3-by-3 Catchment fixture through the unchanged original runtime. Both preserved
+independently generated surfaces were copied into fresh output directories;
+Rust initialization was rerun with the frozen mesh-order/zmu release. Both
+pipelines use the same pristine Catchment executable, real JRA3Q forcing for
+2005-01-01 and explicit `DEF_VEG_SNOW=false`. Routing and the other optional
+physics remain disabled as in the original fixture.
+
+Both two-step runs complete, and all four restart files / 206 variable instances
+pass the unchanged combined tolerance with matching schemas. History comparison
+is stricter than simply checking successful execution: one `f_zerr` value differs
+by `3.2527009134180426e-12`, exceeding the unchanged gate. This remaining energy
+diagnostic difference is recorded and under investigation, not declared a full
+runtime pass or hidden by widening tolerances. The test reuses preserved surface
+products; it is not a fresh all-stage or all-mode acceptance claim.
+
+The failing field is an energy-balance residual in W/m²: original
+`3.0768113311682886e-11`, Rust-initialized `2.7515412398264844e-11`. Forcing
+history fields are identical, while contributing ground/latent/sensible fluxes
+differ at approximately `1e-12`. The original `MOD_Thermal` computes this
+diagnostic by subtracting flux and storage terms; the evidence is consistent
+with cancellation of small numerical differences, not a schema failure.
+`f_zerr_diagnosis.json` records the fields and source anchors. This physical
+interpretation does not change the numerical acceptance result above.
 
 ## Evidence from this audit
 

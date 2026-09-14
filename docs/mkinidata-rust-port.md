@@ -95,15 +95,19 @@ reference rather than being silently relabelled as the vendored runtime.
 See [the parity audit](preprocessing-parity-status.md) for the successful original
 Fortran one-hour run from Rust restart, the repaired Desktop-only LCT allocation
 regression, and the corrected independent surface topology. The new 7,754-patch Rust surface/initial pipeline also completes a two-step
-unchanged-original runtime run. Fitted surface differences remain unresolved;
-a runnable pipeline is not complete scientific parity.
+unchanged-original runtime run. The latest source-chunk ordering correction
+closes the Pearl River surface-field gate, but downstream runtime differences
+remain; a runnable pipeline is not complete scientific parity.
 This progress does not establish full migration.
 
 The corrected source-grid/area pipeline initializes in 2.43 s and completes the
 unchanged original two-step model again. Catchment river-depth initialization
-now converts the shared km² pixel weights to m² explicitly. Remaining fitted
-surface discrepancies propagate to restart/runtime results and remain a gate;
-initial execution success does not establish full numerical equivalence.
+now converts the shared km² pixel weights to m² explicitly. The latest independent
+Pearl River cold restart passes all 13 files / 742 variable instances, while
+post-two-step output still has 25 failing fields / 414 values. The small
+Catchment fixture also passes restart comparison after two steps, but retains
+one out-of-tolerance history energy diagnostic. Initial execution success does
+not establish full numerical equivalence; see the latest linked audit.
 
 The shared spatial constant writer now excludes valid virtual WMO patches
 (`ipxstt=ipxend=-1`) from aggregation via `patchmask=false`, retaining geometry.
