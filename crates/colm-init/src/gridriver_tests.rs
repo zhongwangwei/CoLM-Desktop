@@ -23,6 +23,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
         levee: false,
         tracer: false,
         reservoir_method: 0,
+        reservoir_parameters: None,
     })
     .unwrap();
 
@@ -121,6 +122,7 @@ fn cold_restart_refuses_features_with_separate_upstream_payloads() {
         levee: false,
         tracer: true,
         reservoir_method: 0,
+        reservoir_parameters: None,
     })
     .unwrap_err()
     .to_string();
@@ -148,6 +150,7 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
         levee: false,
         tracer: false,
         reservoir_method: 0,
+        reservoir_parameters: None,
     })
     .unwrap();
 
@@ -226,6 +229,7 @@ fn cold_restart_carries_zero_levee_state() {
         levee: true,
         tracer: false,
         reservoir_method: 0,
+        reservoir_parameters: None,
     })
     .unwrap();
 
@@ -238,6 +242,71 @@ fn cold_restart_carries_zero_levee_state() {
         [1]
     );
     for name in ["levsto", "hist_levsto", "hist_levdph"] {
+        assert_eq!(
+            file.variable(name)
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            [0.0, 0.0],
+            "{name}"
+        );
+    }
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cold_restart_carries_native_reservoir_identity_and_volume() {
+    let root = temp_dir("reservoir");
+    let unit_catchment = root.join("unitcatchment.nc");
+    let parameters = root.join("reservoir.nc");
+    write_unit_catchment(&unit_catchment);
+    write_reservoir_parameters(&parameters);
+    let restart = write_gridriver_cold_restart(GridRiverColdStartConfig {
+        unit_catchment: &unit_catchment,
+        restart_dir: &root.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        bifurcation: false,
+        levee: false,
+        tracer: false,
+        reservoir_method: 1,
+        reservoir_parameters: Some(&parameters),
+    })
+    .unwrap();
+
+    let file = netcdf::open(&restart.path).unwrap();
+    let identity = file.variable("gridriver_reservoir_identity").unwrap();
+    assert_eq!(
+        identity
+            .dimensions()
+            .iter()
+            .map(|dimension| dimension.name())
+            .collect::<Vec<_>>(),
+        ["reservoir", "gridriver_reservoir_identity_field"]
+    );
+    assert_eq!(
+        identity.get_values::<f64, _>(..).unwrap(),
+        [1.0, 2.0, 1.0, 1.0]
+    );
+    assert_eq!(
+        file.variable("volresv")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [2.8e6, -1.0e36]
+    );
+    for name in [
+        "hist_acctime_resv",
+        "hist_volresv",
+        "hist_qresv_in",
+        "hist_qresv_out",
+    ] {
         assert_eq!(
             file.variable(name)
                 .unwrap()
@@ -289,6 +358,33 @@ fn write_unit_catchment(path: &std::path::Path) {
         .unwrap()
         .put_values(&[0.03, 0.04], ..)
         .unwrap();
+    file.close().unwrap();
+}
+
+fn write_reservoir_parameters(path: &std::path::Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("dam", 2).unwrap();
+    for (name, values) in [
+        ("dam_GRAND_ID", [10, 11]),
+        ("dam_seq", [2, 1]),
+        ("dam_year", [2000, 2010]),
+    ] {
+        file.add_variable::<i32>(name, &["dam"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    for (name, values) in [
+        ("dam_TotalVol_mcm", [4.0, 10.0]),
+        ("dam_ConVol_mcm", [5.0, 5.0]),
+        ("dam_Qn", [1.0, 2.0]),
+        ("dam_Qf", [3.0, 4.0]),
+    ] {
+        file.add_variable::<f64>(name, &["dam"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
     file.close().unwrap();
 }
 

@@ -246,6 +246,11 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let unit_catchment = PathBuf::from(required_string(&document, "DEF_UnitCatchment_file")?);
+    let reservoir_method = namelist_i32(&document, "DEF_Reservoir_Method", 0)?;
+    let reservoir_parameters = (reservoir_method == 1)
+        .then(|| required_string(&document, "DEF_ReservoirPara_file"))
+        .transpose()?
+        .map(PathBuf::from);
     let file = write_gridriver_cold_restart(GridRiverColdStartConfig {
         unit_catchment: &unit_catchment,
         restart_dir: &run.restart,
@@ -255,7 +260,8 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
         bifurcation: namelist_bool(&document, "DEF_USE_BIFURCATION", false)?,
         levee: namelist_bool(&document, "DEF_USE_LEVEE", false)?,
         tracer: namelist_bool(&document, "DEF_USE_TRACER", false)?,
-        reservoir_method: namelist_i32(&document, "DEF_Reservoir_Method", 0)?,
+        reservoir_method,
+        reservoir_parameters: reservoir_parameters.as_deref(),
     })?;
     Ok(file.path)
 }
@@ -1091,13 +1097,35 @@ mod tests {
             .put_values(&[2.5], ..)
             .unwrap();
         file.close().unwrap();
+        let reservoir = root.join("reservoir.nc");
+        let mut file = netcdf::create(&reservoir).unwrap();
+        file.add_dimension("dam", 1).unwrap();
+        for (name, value) in [("dam_GRAND_ID", 10), ("dam_seq", 1), ("dam_year", 2000)] {
+            file.add_variable::<i32>(name, &["dam"])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        for (name, value) in [
+            ("dam_TotalVol_mcm", 4.0),
+            ("dam_ConVol_mcm", 5.0),
+            ("dam_Qn", 1.0),
+            ("dam_Qf", 3.0),
+        ] {
+            file.add_variable::<f64>(name, &["dam"])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
         let namelist = root.join("case.nml");
         std::fs::write(
             &namelist,
             format!(
-                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
+                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_Reservoir_Method=1\n DEF_ReservoirPara_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
                 root.display(),
                 unit_catchment.display(),
+                reservoir.display(),
             ),
         )
         .unwrap();
@@ -1126,6 +1154,13 @@ mod tests {
                 .get_values::<f64, _>(..)
                 .unwrap(),
             [0.0]
+        );
+        assert_eq!(
+            file.variable("volresv")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            [2.8e6]
         );
         drop(file);
         std::fs::remove_dir_all(root).unwrap();

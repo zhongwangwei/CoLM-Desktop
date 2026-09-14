@@ -15,6 +15,8 @@ use crate::RestartDate;
 const RESTART_SCHEMA_VERSION: i32 = 2;
 const UCATCH_IDENTITY_VERSION: f64 = 1.0;
 const BIFURCATION_SIGNATURE_VERSION: f64 = 1.0;
+const RESERVOIR_IDENTITY_VERSION: f64 = 1.0;
+const MISSING_RESERVOIR_VOLUME: f64 = -1.0e36;
 
 struct BifurcationColdState {
     pathways: usize,
@@ -26,6 +28,11 @@ impl BifurcationColdState {
     fn active(&self) -> bool {
         self.pathways > 0 && self.levels > 0
     }
+}
+
+struct ReservoirColdState {
+    identity: Vec<f64>,
+    volume: Vec<f64>,
 }
 
 /// Inputs needed for the base gridded river/lake cold restart.
@@ -40,6 +47,7 @@ pub struct GridRiverColdStartConfig<'a> {
     pub levee: bool,
     pub tracer: bool,
     pub reservoir_method: i32,
+    pub reservoir_parameters: Option<&'a Path>,
 }
 
 /// The base grid-river restart produced by [`write_gridriver_cold_restart`].
@@ -50,9 +58,9 @@ pub struct GridRiverColdStartFile {
 
 /// Write the schema-v2 GridRiverLake cold state consumed by a matching CoLM kernel.
 ///
-/// Tracer and reservoir modes own additional restart payloads upstream; refusing
-/// them is safer than emitting a transaction that claims them disabled or complete.
-/// Bifurcation and levee state cold-start to their native zero values here.
+/// Tracer mode owns additional restart payloads upstream; refusing it is safer
+/// than emitting a transaction that claims it disabled or complete. Bifurcation,
+/// levee, and reservoir state cold-start to their native values here.
 pub fn write_gridriver_cold_restart(
     config: GridRiverColdStartConfig<'_>,
 ) -> Result<GridRiverColdStartFile> {
@@ -71,8 +79,8 @@ pub fn write_gridriver_cold_restart(
         "GridRiverLake restart date is invalid"
     );
     ensure!(
-        !config.tracer && config.reservoir_method == 0,
-        "Rust GridRiverLake cold restart currently supports base routing, levee, and bifurcation state only; tracer and reservoir modes require their native restart payloads"
+        !config.tracer && matches!(config.reservoir_method, 0 | 1),
+        "Rust GridRiverLake cold restart currently supports base routing, levee, bifurcation, and reservoir method 1; tracer and other reservoir methods require their native restart payloads"
     );
 
     let source = netcdf::open(config.unit_catchment).with_context(|| {
@@ -107,6 +115,17 @@ pub fn write_gridriver_cold_restart(
     let bifurcation = config
         .bifurcation
         .then(|| read_bifurcation_cold_state(&source, count))
+        .transpose()?;
+    let reservoir = (config.reservoir_method == 1)
+        .then(|| {
+            read_reservoir_cold_state(
+                config
+                    .reservoir_parameters
+                    .context("GridRiverLake reservoir method 1 needs DEF_ReservoirPara_file")?,
+                count,
+                config.date.year,
+            )
+        })
         .transpose()?;
 
     let date = format!(
@@ -181,6 +200,9 @@ pub fn write_gridriver_cold_restart(
     }
     if config.levee {
         put_f64(&mut file, "levsto", &["ucatch"], &zeros)?;
+    }
+    if let Some(reservoir) = &reservoir {
+        write_reservoir_cold_state(&mut file, reservoir)?;
     }
     // MOD_Grid_RiverLakeHist flushes these vectors to zero before mkinidata
     // writes the cold restart.  Preserve the concrete fields rather than
@@ -376,6 +398,100 @@ fn write_bifurcation_cold_state(
             &["bifurcation_pathway", "bifurcation_level"],
             &zeros,
         )?;
+    }
+    Ok(())
+}
+
+fn read_reservoir_cold_state(
+    parameters: &Path,
+    catchments: usize,
+    start_year: i32,
+) -> Result<ReservoirColdState> {
+    let file = netcdf::open(parameters).with_context(|| {
+        format!(
+            "cannot open GridRiverLake reservoir parameter file {}",
+            parameters.display()
+        )
+    })?;
+    let grand_id = read_i32(&file, "dam_GRAND_ID")?;
+    let sequence = read_i32(&file, "dam_seq")?;
+    let build_year = read_i32(&file, "dam_year")?;
+    let total_volume = read_f64(&file, "dam_TotalVol_mcm")?;
+    let conservation_volume = read_f64(&file, "dam_ConVol_mcm")?;
+    let normal_outflow = read_f64(&file, "dam_Qn")?;
+    let flood_outflow = read_f64(&file, "dam_Qf")?;
+    let rows = sequence.len();
+    ensure!(
+        grand_id.len() == rows
+            && build_year.len() == rows
+            && total_volume.len() == rows
+            && conservation_volume.len() == rows
+            && normal_outflow.len() == rows
+            && flood_outflow.len() == rows,
+        "GridRiverLake reservoir parameter vectors must have the same length"
+    );
+    let mut sorted_sequence = sequence.clone();
+    sorted_sequence.sort_unstable();
+    ensure!(
+        sorted_sequence.windows(2).all(|pair| pair[0] != pair[1]),
+        "GridRiverLake reservoir parameter file has duplicate dam_seq entries"
+    );
+
+    let mut identity = Vec::new();
+    let mut volume = Vec::new();
+    for index in 0..rows {
+        if !(1..=catchments as i32).contains(&sequence[index]) {
+            continue;
+        }
+        let total = total_volume[index] * 1.0e6;
+        let conservation = conservation_volume[index] * 1.0e6;
+        ensure!(
+            total.is_finite()
+                && total > 0.0
+                && conservation.is_finite()
+                && conservation > 0.0
+                && normal_outflow[index].is_finite()
+                && normal_outflow[index] >= 0.0
+                && flood_outflow[index].is_finite()
+                && flood_outflow[index] >= 0.0,
+            "GridRiverLake reservoir parameters are invalid for active dam sequence {}",
+            sequence[index]
+        );
+        identity.extend([RESERVOIR_IDENTITY_VERSION, f64::from(sequence[index])]);
+        volume.push(if start_year >= build_year[index] {
+            (0.7 * total).min(conservation)
+        } else {
+            MISSING_RESERVOIR_VOLUME
+        });
+    }
+    Ok(ReservoirColdState { identity, volume })
+}
+
+fn write_reservoir_cold_state(
+    file: &mut netcdf::FileMut,
+    state: &ReservoirColdState,
+) -> Result<()> {
+    if state.volume.is_empty() {
+        return Ok(());
+    }
+    let reservoirs = state.volume.len();
+    file.add_dimension("reservoir", reservoirs)?;
+    file.add_dimension("gridriver_reservoir_identity_field", 2)?;
+    put_f64(
+        file,
+        "gridriver_reservoir_identity",
+        &["reservoir", "gridriver_reservoir_identity_field"],
+        &state.identity,
+    )?;
+    put_f64(file, "volresv", &["reservoir"], &state.volume)?;
+    let zeros = vec![0.0; reservoirs];
+    for name in [
+        "hist_acctime_resv",
+        "hist_volresv",
+        "hist_qresv_in",
+        "hist_qresv_out",
+    ] {
+        put_f64(file, name, &["reservoir"], &zeros)?;
     }
     Ok(())
 }
