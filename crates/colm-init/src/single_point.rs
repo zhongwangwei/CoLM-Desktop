@@ -1545,7 +1545,12 @@ fn write_single_point_pft_cold_time_restarts(
                 surface.albedo,
                 cold_soil.liquid_water_kg_m2[0],
                 thickness[0],
-                pft_leaf_optics(&document, class, config.hydraulic_model)?,
+                pft_leaf_optics(
+                    &document,
+                    class,
+                    config.hydraulic_model,
+                    run.subgrid == SinglePointSubgrid::Pc,
+                )?,
                 lai,
                 sai,
                 0.0,
@@ -1585,9 +1590,8 @@ fn write_single_point_pft_cold_time_restarts(
             .class
             .iter()
             .enumerate()
-            .filter_map(|(index, &class)| {
-                pc_uses_three_dimensional_canopy(class, pc_crop_split).then_some(index)
-            })
+            .take_while(|&(_, &class)| pc_uses_three_dimensional_canopy(class, pc_crop_split))
+            .map(|(index, _)| index)
             .collect::<Vec<_>>();
         if !pc_indices.is_empty() {
             let inputs = pc_indices
@@ -1599,7 +1603,12 @@ fn write_single_point_pft_cold_time_restarts(
                         fraction: pft.fraction[index],
                         canopy_top_m: canopy.top_m[index],
                         canopy_bottom_m: canopy.bottom_m[index],
-                        optics: pft_leaf_optics(&document, class, config.hydraulic_model)?,
+                        optics: pft_leaf_optics(
+                            &document,
+                            class,
+                            config.hydraulic_model,
+                            run.subgrid == SinglePointSubgrid::Pc,
+                        )?,
                         lai: total_lai_p[index],
                         sai: sai_p[index],
                         wet_snow_fraction: 0.0,
@@ -1682,8 +1691,12 @@ fn write_single_point_pft_cold_time_restarts(
         let mut pft_albedo = vec![ground.clone(); pft_count];
         if high_resolution_canopy {
             for index in 0..pft_count {
-                let broadband_optics =
-                    pft_leaf_optics(&document, pft.class[index], config.hydraulic_model)?;
+                let broadband_optics = pft_leaf_optics(
+                    &document,
+                    pft.class[index],
+                    config.hydraulic_model,
+                    run.subgrid == SinglePointSubgrid::Pc,
+                )?;
                 let fallback = expand_broadband_leaf_optics(broadband_optics);
                 let class = usize::try_from(pft.class[index])
                     .context("high-resolution PFT class must be nonnegative")?;
@@ -2076,8 +2089,8 @@ pub(crate) fn pft_canopy(
     let mut top_m = Vec::with_capacity(class.len());
     let mut bottom_m = Vec::with_capacity(class.len());
     for (&class, &observed_top_m) in class.iter().zip(canopy_height_m) {
-        let default_top_m = pft_parameter(document, "DEF_PFT_HTOP0", class, campbell)?;
-        let default_bottom_m = pft_parameter(document, "DEF_PFT_HBOT0", class, campbell)?;
+        let default_top_m = pft_parameter(document, "DEF_PFT_HTOP0", class, campbell, false)?;
+        let default_bottom_m = pft_parameter(document, "DEF_PFT_HBOT0", class, campbell, false)?;
         let (top, bottom) = if (1..=8).contains(&class) {
             (
                 observed_top_m.max(2.0),
@@ -2096,28 +2109,29 @@ pub(crate) fn pft_leaf_optics(
     document: &colm_namelist::Document,
     class: i32,
     hydraulic_model: HydraulicModel,
+    pc: bool,
 ) -> Result<LeafOptics> {
     let campbell = hydraulic_model == HydraulicModel::Campbell;
     Ok(LeafOptics {
-        chil: pft_parameter(document, "DEF_PFT_CHIL", class, campbell)?,
+        chil: pft_parameter(document, "DEF_PFT_CHIL", class, campbell, pc)?,
         reflectance: [
             [
-                pft_parameter(document, "DEF_PFT_RHOL_VIS", class, campbell)?,
-                pft_parameter(document, "DEF_PFT_RHOS_VIS", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_RHOL_VIS", class, campbell, pc)?,
+                pft_parameter(document, "DEF_PFT_RHOS_VIS", class, campbell, pc)?,
             ],
             [
-                pft_parameter(document, "DEF_PFT_RHOL_NIR", class, campbell)?,
-                pft_parameter(document, "DEF_PFT_RHOS_NIR", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_RHOL_NIR", class, campbell, pc)?,
+                pft_parameter(document, "DEF_PFT_RHOS_NIR", class, campbell, pc)?,
             ],
         ],
         transmittance: [
             [
-                pft_parameter(document, "DEF_PFT_TAUL_VIS", class, campbell)?,
-                pft_parameter(document, "DEF_PFT_TAUS_VIS", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_TAUL_VIS", class, campbell, pc)?,
+                pft_parameter(document, "DEF_PFT_TAUS_VIS", class, campbell, pc)?,
             ],
             [
-                pft_parameter(document, "DEF_PFT_TAUL_NIR", class, campbell)?,
-                pft_parameter(document, "DEF_PFT_TAUS_NIR", class, campbell)?,
+                pft_parameter(document, "DEF_PFT_TAUL_NIR", class, campbell, pc)?,
+                pft_parameter(document, "DEF_PFT_TAUS_NIR", class, campbell, pc)?,
             ],
         ],
     })
@@ -2128,9 +2142,10 @@ fn pft_parameter(
     name: &str,
     class: i32,
     campbell: bool,
+    pc: bool,
 ) -> Result<f64> {
     let class = u8::try_from(class).context("PFT class must be nonnegative")?;
-    let fallback = pft_default_value(name, class, campbell, false)?
+    let fallback = pft_default_value(name, class, campbell, pc)?
         .with_context(|| format!("{name} has no native PFT default"))?;
     let field = format!("{name}({})", usize::from(class) + 1);
     match document.get(&field) {
@@ -2153,7 +2168,7 @@ pub(crate) fn pft_parameters(
 ) -> Result<Vec<f64>> {
     classes
         .iter()
-        .map(|&class| pft_parameter(document, name, class, campbell))
+        .map(|&class| pft_parameter(document, name, class, campbell, false))
         .collect()
 }
 
@@ -2215,6 +2230,7 @@ fn pc_pft_radiation_values(
 /// and every CFT use layer 1.  Class zero is the non-vegetated sentinel.
 pub(crate) fn pc_canopy_layer(class: i32) -> Result<usize> {
     match class {
+        0 => Ok(0),
         1..=8 => Ok(2),
         9..=78 => Ok(1),
         _ => bail!("PFT class {class} has no PC canopy layer"),
@@ -2224,7 +2240,7 @@ pub(crate) fn pc_canopy_layer(class: i32) -> Result<usize> {
 /// `MOD_3DCanopyRadiation.F90` stops its PC slice before CFT class 15 when
 /// `DEF_PC_CROP_SPLIT` is enabled; `twostream_wrap` handles that suffix.
 pub(crate) fn pc_uses_three_dimensional_canopy(class: i32, pc_crop_split: bool) -> bool {
-    class > 0 && (!pc_crop_split || class < 15)
+    !pc_crop_split || class < 15
 }
 
 pub(crate) fn aggregate_pft_radiation(

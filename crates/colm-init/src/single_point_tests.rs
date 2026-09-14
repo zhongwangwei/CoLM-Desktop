@@ -98,7 +98,17 @@ fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
     assert_eq!(pc_canopy_layer(9).unwrap(), 1);
     assert_eq!(pc_canopy_layer(15).unwrap(), 1);
     assert_eq!(pc_canopy_layer(78).unwrap(), 1);
-    assert!(pc_canopy_layer(0).is_err());
+    assert_eq!(pc_canopy_layer(0).unwrap(), 0);
+    assert!(pc_canopy_layer(-1).is_err());
+    assert!(pc_canopy_layer(79).is_err());
+    let classes = [0, 1, 15, 2];
+    assert_eq!(
+        classes
+            .into_iter()
+            .take_while(|&class| pc_uses_three_dimensional_canopy(class, true))
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
     assert!(pc_uses_three_dimensional_canopy(14, true));
     assert!(!pc_uses_three_dimensional_canopy(15, true));
     assert!(pc_uses_three_dimensional_canopy(15, false));
@@ -118,15 +128,214 @@ fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
 #[test]
 fn pft_optics_honor_the_native_indexed_namelist_override() {
     let document = parse("&nl_colm\n DEF_PFT_CHIL(2) = 0.25\n /\n").unwrap();
-    let optics = pft_leaf_optics(&document, 1, HydraulicModel::VanGenuchten).unwrap();
+    let optics = pft_leaf_optics(&document, 1, HydraulicModel::VanGenuchten, false).unwrap();
     assert_eq!(optics.chil, 0.25);
     assert_eq!(optics.reflectance[0][0], 0.07);
     assert!(pft_leaf_optics(
         &parse("&nl_colm\n DEF_PFT_CHIL(2) = 1.1\n /\n").unwrap(),
         1,
         HydraulicModel::VanGenuchten,
+        false,
     )
     .is_err());
+}
+
+#[test]
+fn pc_optics_use_the_original_mode_specific_defaults() {
+    let document = parse("&nl_colm\n DEF_USE_PC = .true.\n /\n").unwrap();
+    for (class, reflectance, transmittance) in [
+        (
+            1,
+            [[0.07, 0.16], [0.36, 0.39]],
+            [[0.05, 0.001], [0.28, 0.001]],
+        ),
+        (
+            5,
+            [[0.11, 0.16], [0.46, 0.39]],
+            [[0.06, 0.001], [0.33, 0.001]],
+        ),
+    ] {
+        let optics = pft_leaf_optics(&document, class, HydraulicModel::VanGenuchten, true).unwrap();
+        assert_eq!(optics.reflectance, reflectance);
+        assert_eq!(optics.transmittance, transmittance);
+        let pft = pft_leaf_optics(&document, class, HydraulicModel::VanGenuchten, false).unwrap();
+        assert_eq!(pft.reflectance[1][0], if class == 1 { 0.35 } else { 0.45 });
+        assert_eq!(
+            pft.transmittance[1][0],
+            if class == 1 { 0.10 } else { 0.25 }
+        );
+    }
+    let override_doc = parse("&nl_colm\n DEF_PFT_TAUL_NIR(2) = 0.2\n /\n").unwrap();
+    assert_eq!(
+        pft_leaf_optics(&override_doc, 1, HydraulicModel::VanGenuchten, true)
+            .unwrap()
+            .transmittance[1][0],
+        0.2
+    );
+}
+
+#[test]
+fn pc_mixed_bare_and_vegetated_patch_matches_original_cold_radiation() {
+    // Original ebe6de9, -O2 -fdefault-real-8, GRIDBASED + LULC_IGBP_PC.
+    // PearlRiver_PC_GRID_2x2, 2003-001-00000, e110_n25 patch 1.
+    // PFT fractions are pct_pfts (not landpft pctshared); wliq uses soil slot 5.
+    let document = parse("&nl_colm\n /\n").unwrap();
+    let rows = [
+        (0, 0.00021705590164805097, 0.5, 0.0, 0.0, 0.0),
+        (
+            1,
+            0.3537185466260479,
+            25.658609866484777,
+            1.5093299921461634,
+            1.7042309916117768,
+            0.9799407627402434,
+        ),
+        (
+            2,
+            0.007744153660925456,
+            29.4230452942069,
+            1.7307673702474649,
+            1.6030201343064634,
+            0.670165377940886,
+        ),
+        (
+            5,
+            0.03726299648373725,
+            27.533709263470715,
+            1.0,
+            2.646763067059028,
+            1.084517410282785,
+        ),
+        (
+            7,
+            0.1531657069831941,
+            25.6897224788743,
+            1.284486123943715,
+            0.8726463165653942,
+            0.9392546796805088,
+        ),
+        (
+            8,
+            0.0056840218457901055,
+            29.21393231360993,
+            1.4606966156804966,
+            1.0334957225839785,
+            0.6194764851317959,
+        ),
+        (
+            9,
+            0.12334702072327662,
+            0.5,
+            0.0,
+            1.309250287705885,
+            0.9557093692102242,
+        ),
+        (
+            10,
+            0.09539037067576146,
+            0.5,
+            0.0,
+            0.6763902100380055,
+            0.95742019965578,
+        ),
+        (
+            11,
+            0.006394719198741629,
+            0.5,
+            0.0,
+            0.7023756572961151,
+            0.6292952421033547,
+        ),
+        (
+            13,
+            0.21609100659923436,
+            0.5,
+            0.0,
+            0.6104984462425272,
+            0.8817568778385789,
+        ),
+        (
+            14,
+            0.000984401301643112,
+            0.5,
+            0.0,
+            0.3025674046537227,
+            0.6360700644505335,
+        ),
+    ];
+    let inputs = rows.map(|(class, fraction, top, bottom, lai, sai)| PcPftInput {
+        canopy_layer: pc_canopy_layer(class).unwrap(),
+        fraction,
+        canopy_top_m: top,
+        canopy_bottom_m: bottom,
+        optics: pft_leaf_optics(&document, class, HydraulicModel::VanGenuchten, true).unwrap(),
+        lai,
+        sai,
+        wet_snow_fraction: 0.0,
+    });
+    let state = cold_start_pc_broadband_radiation_with_snow(
+        0,
+        SoilReflectance {
+            saturated_visible: 0.07,
+            dry_visible: 0.18,
+            saturated_near_infrared: 0.14,
+            dry_near_infrared: 0.25,
+        },
+        8.510051940327882,
+        0.017512817916255204,
+        &inputs,
+        0.16271417836172306,
+        0.0,
+        0.0,
+        283.0,
+    )
+    .unwrap();
+    let close = |actual: f64, expected: f64| {
+        assert!(
+            (actual - expected).abs() <= 1.0e-12 + 1.0e-12 * expected.abs(),
+            "{actual:.17e} != {expected:.17e}"
+        );
+    };
+    for (actual, expected) in [
+        (
+            state.common.albedo,
+            [
+                [0.04868542010385477, 0.038603560718901156],
+                [0.2170666519524319, 0.17544408529532604],
+            ],
+        ),
+        (
+            state.common.sunlit_absorption,
+            [
+                [0.8779852567793157, 0.16667297717986387],
+                [0.5466807897019881, 0.11946766080550703],
+            ],
+        ),
+        (
+            state.common.shaded_absorption,
+            [
+                [0.05123794496205346, 0.555993046814411],
+                [0.16365415483357845, 0.41228705943971194],
+            ],
+        ),
+        (
+            state.common.soil_absorption,
+            [
+                [0.02209137815477613, 0.23873041528682412],
+                [0.07259840351200166, 0.292801194459455],
+            ],
+        ),
+    ] {
+        for (actual, expected) in actual.iter().flatten().zip(expected.iter().flatten()) {
+            close(*actual, *expected);
+        }
+    }
+    assert_eq!(state.pft[0].sunlit_absorption, [[0.0; 2]; 2]);
+    assert_eq!(state.pft[0].shaded_absorption, [[0.0; 2]; 2]);
+    assert_eq!(state.pft[0].thermal_gap_fraction, 1.0);
+    assert_eq!(state.pft[0].shade_fraction, 0.0);
+    assert_eq!(state.pft[0].diffuse_extinction, 0.719);
+    close(state.pft[0].direct_extinction, 3.7764306653398987);
 }
 
 #[test]

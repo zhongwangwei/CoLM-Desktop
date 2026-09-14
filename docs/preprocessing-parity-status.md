@@ -75,6 +75,47 @@ changed to bypass the error. The canonical comparison remains failed solely
 on the recorded energy residual; the corrected reproduction script preserves
 that report and writes its repeat comparison separately.
 
+### PC full-material gate: shared cold-state inputs repaired
+
+`/tmp/colm-pc-full-gate-1789399926/` adds a separate 2-by-2 GRIDBASED/PC case
+without WMO, crop, BGC, LULCC, urban or routing. Its original build reads pristine
+source directories through symlinks, with private build outputs and configuration.
+The original compiler remains `-O2 -fdefault-real-8`. All six stages completed,
+but the initial Rust cold state had substantial radiation errors (patch `ssun`
+up to `0.0752991`), despite passing surface files.
+
+Two shared initializer input defects were confirmed and repaired:
+
+- PC leaf optics incorrectly requested non-PC defaults from the existing parameter
+  registry; both single-point and spatial paths now pass their resolved PC mode,
+  including broadband fallback optics for high-resolution radiation.
+- Class 0 was excluded from the PC slice. Original `ThreeDCanopy_wrap` includes
+  its fraction and scalar outputs, and stops at the first CFT when crop splitting
+  is enabled. Rust now uses that prefix and represents the original layer-0 bare
+  sentinel without indexing an active canopy layer. Active invalid layers remain
+  rejected. No restart output is patched after computation.
+
+The fresh full Rust run is
+`/var/folders/kx/pr5xmbf502q7sww93rg26l7r0000gn/T/colm-pc-input-fixed-full.42qbotcm/`.
+Its surface, initializer and unchanged original PC runtime all exit 0. The
+immutable original reference is reused read-only. Frozen initializer SHA-256:
+`c6a845bc47ca34c644b6c2cb6b985468bc2fe6eb626a7ea1183890e90f3d8d7d`;
+the surface binary remains `43917e18…`. All 284 filenames/schemas agree and
+695 variable instances are checked. Surface and **all cold-state fields pass**
+the unchanged `atol=rtol=1e-12` gate; this does not claim bitwise equality.
+
+After two runtime steps, one `smp` value still differs by
+`1.9337420553711127e-10`, and history `f_zerr` has 12 failing cells (maximum
+`6.0573768223548605e-12`). Thus this full gate is **not yet accepted**.
+`comparison.json` and `summary.json` retain the failures. Regression evidence in
+`/tmp/colm-pc-input-fix/validation/` includes failing-before/passing-after mode
+and bare-sentinel checks, plus a data-independent mixed bare/vegetated golden
+extracted from the actual original cold restart (correct soil slot and radiation
+axis order). All 366 scoped core/init/reference/native tests pass, as do
+all-target clippy, downstream CLI/kernel checks, scoped formatting and whitespace
+checks. Independent source review approved the shared fix. The original source,
+outputs and tolerance were not changed.
+
 ## Source-chunk ordering baseline
 
 The preceding frozen run is `rust-full-mesh-order/` under

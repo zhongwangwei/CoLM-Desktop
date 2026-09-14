@@ -13,6 +13,7 @@ const LAYERS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PcPftInput {
+    /// Original `canlay_p`: zero is an inactive bare-ground sentinel.
     pub canopy_layer: usize,
     pub fraction: f64,
     pub canopy_top_m: f64,
@@ -109,7 +110,8 @@ pub fn cold_start_pc_broadband_radiation_from_ground(
     );
     for pft in pfts {
         ensure!(
-            (1..=LAYERS).contains(&pft.canopy_layer)
+            ((1..=LAYERS).contains(&pft.canopy_layer)
+                || (pft.canopy_layer == 0 && (pft.lai + pft.sai <= 1.0e-6 || pft.fraction == 0.0)))
                 && pft.fraction.is_finite()
                 && pft.fraction >= 0.0
                 && pft.canopy_top_m.is_finite()
@@ -239,7 +241,6 @@ fn three_d_canopy(
     for (index, (pft, &fraction)) in pfts.iter().zip(fractions).enumerate() {
         let lsai = pft.lai + pft.sai;
         leaf_stem_area[index] = lsai;
-        canopy[index] = pft.canopy_layer - 1;
         let phi1 = 0.5 - 0.633 * pft.optics.chil - 0.33 * pft.optics.chil * pft.optics.chil;
         let phi2 = 0.877 * (1.0 - 2.0 * phi1);
         gdir[index] = phi1 + phi2 * cosz[index];
@@ -249,6 +250,7 @@ fn three_d_canopy(
             continue;
         }
         active[index] = true;
+        canopy[index] = pft.canopy_layer - 1;
         let layer = canopy[index];
         cover[0][layer] += fraction;
         let size = (pft.canopy_top_m - pft.canopy_bottom_m) * 0.5;
@@ -980,6 +982,41 @@ fn ground_albedos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_pc_sentinel_keeps_scalar_outputs_without_an_active_layer() {
+        let mut bare = PcPftInput {
+            canopy_layer: 0,
+            fraction: 1.0,
+            canopy_top_m: 0.0,
+            canopy_bottom_m: 0.0,
+            optics: LeafOptics {
+                chil: -0.3,
+                reflectance: [[0.11, 0.31], [0.35, 0.53]],
+                transmittance: [[0.05, 0.12], [0.34, 0.25]],
+            },
+            lai: 0.0,
+            sai: 0.0,
+            wet_snow_fraction: 0.0,
+        };
+        let ground = [[0.14; 2], [0.28; 2]];
+        let evaluate = |pft| {
+            cold_start_pc_broadband_radiation_from_ground(&[pft], 0.5, ground, ground, ground, 0.0)
+        };
+        let state = evaluate(bare).unwrap();
+        assert_eq!(state.common.albedo, ground);
+        assert_eq!(state.pft[0].sunlit_absorption, [[0.0; 2]; 2]);
+        assert_eq!(state.pft[0].shaded_absorption, [[0.0; 2]; 2]);
+        assert_eq!(state.pft[0].thermal_gap_fraction, 1.0);
+        assert_eq!(state.pft[0].shade_fraction, 0.0);
+        assert_eq!(state.pft[0].diffuse_extinction, 0.719);
+        // MOD_3DCanopyRadiation computes gdir/czen even for class 0.
+        let phi1 = 0.5 - 0.633 * bare.optics.chil - 0.33 * bare.optics.chil * bare.optics.chil;
+        let phi2 = 0.877 * (1.0 - 2.0 * phi1);
+        assert_eq!(state.pft[0].direct_extinction, (phi1 + phi2 * 0.5) / 0.5);
+        bare.lai = 1.0;
+        assert!(evaluate(bare).is_err());
+    }
 
     #[test]
     fn pc_canopy_closes_shortwave_energy_for_each_band_and_beam() {

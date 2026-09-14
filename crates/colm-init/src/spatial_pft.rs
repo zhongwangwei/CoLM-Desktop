@@ -678,7 +678,12 @@ pub fn write_spatial_pft_cold_time_restarts(
             "PFT fractions for natural spatial patch {patch} must sum to one, got {fraction_sum}"
         );
         for &pft in indices {
-            let broadband_optics = pft_leaf_optics(&document, pfts.class[pft], hydraulic_model)?;
+            let broadband_optics = pft_leaf_optics(
+                &document,
+                pfts.class[pft],
+                hydraulic_model,
+                subgrid == SpatialPftSubgrid::Pc,
+            )?;
             let mut state = cold_start_pft_broadband_radiation_with_snow(
                 patch_kind[patch],
                 SoilReflectance {
@@ -794,7 +799,7 @@ pub fn write_spatial_pft_cold_time_restarts(
             let indices = pft_to_patch[patch]
                 .iter()
                 .copied()
-                .filter(|&pft| pc_uses_three_dimensional_canopy(pfts.class[pft], pc_crop_split))
+                .take_while(|&pft| pc_uses_three_dimensional_canopy(pfts.class[pft], pc_crop_split))
                 .collect::<Vec<_>>();
             if indices.is_empty() {
                 continue;
@@ -807,7 +812,12 @@ pub fn write_spatial_pft_cold_time_restarts(
                         fraction: pfts.fraction[pft],
                         canopy_top_m: canopy.top_m[pft],
                         canopy_bottom_m: canopy.bottom_m[pft],
-                        optics: pft_leaf_optics(&document, pfts.class[pft], hydraulic_model)?,
+                        optics: pft_leaf_optics(
+                            &document,
+                            pfts.class[pft],
+                            hydraulic_model,
+                            subgrid == SpatialPftSubgrid::Pc,
+                        )?,
                         lai: total_lai[pft],
                         sai: total_sai[pft],
                         wet_snow_fraction: 0.0,
