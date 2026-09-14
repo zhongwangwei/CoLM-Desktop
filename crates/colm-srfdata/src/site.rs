@@ -21,6 +21,7 @@ use crate::raster::{
     point_f64_on, point_i32, point_time_f64,
 };
 use crate::spatial::read_coordinate_raster_pft_point_f64;
+use crate::surface::SURFACE_MISSING;
 use crate::texture::{classify, BVIC_USDA, CLASS_NAMES};
 use crate::urban_extra::{self, UrbanExtra};
 use crate::urban_soil::{self, UrbanSoil};
@@ -1523,12 +1524,7 @@ pub fn fill(
     // 既不是水体也不是冰盖，保证反照率查得到；真实值优先，这只在缺失时顶上。
     const NOMINAL_LANDTYPE: i32 = 10;
     let use_landtype = landtype.unwrap_or(NOMINAL_LANDTYPE);
-    let a = albedo(use_isc, use_landtype).with_context(|| {
-        format!(
-            "no soil albedo for colour class {use_isc} and IGBP land type {use_landtype}; \
-             CoLM leaves these at spval for water and ice, which this crate will not write silently"
-        )
-    })?;
+    let a = albedo(use_isc, use_landtype);
     let alb_note = match isc_src {
         Source::Raster => format!("rawdata soil_brightness.nc colour class {use_isc}"),
         _ => format!(
@@ -1536,10 +1532,10 @@ pub fn fill(
         ),
     };
     for (name, v) in [
-        ("soil_s_v_alb", a.s_v),
-        ("soil_d_v_alb", a.d_v),
-        ("soil_s_n_alb", a.s_n),
-        ("soil_d_n_alb", a.d_n),
+        ("soil_s_v_alb", a.map_or(SURFACE_MISSING, |value| value.s_v)),
+        ("soil_d_v_alb", a.map_or(SURFACE_MISSING, |value| value.d_v)),
+        ("soil_s_n_alb", a.map_or(SURFACE_MISSING, |value| value.s_n)),
+        ("soil_d_n_alb", a.map_or(SURFACE_MISSING, |value| value.d_n)),
     ] {
         put_scalar(&mut f, name, v, &alb_note)?;
         report.record(name, isc_src);
@@ -2180,9 +2176,6 @@ fn materialize_single_point_static_fields(
             let landtype = landtype_for_mode(surface, mode)?
                 .context("soil reflectance rawdata fallback needs a land classification")?;
             let albedo_landtype = match mode {
-                SiteMode::Usgs if matches!(landtype, 16 | 24) => {
-                    bail!("cannot materialize soil reflectance for USGS water or ice")
-                }
                 SiteMode::Usgs => 1,
                 _ => landtype,
             };
@@ -2192,8 +2185,17 @@ fn materialize_single_point_static_fields(
                 longitude,
                 latitude,
             )?;
-            albedo(colour, albedo_landtype)
-                .context("soil brightness is outside CoLM's supported land/colour classes")
+            let missing = match mode {
+                SiteMode::Usgs => matches!(landtype, 16 | 24),
+                _ => matches!(landtype, 15 | 17),
+            } || !(1..=20).contains(&colour);
+            Ok::<_, anyhow::Error>(if missing {
+                [SURFACE_MISSING; 4]
+            } else {
+                let values = albedo(colour, albedo_landtype)
+                    .context("soil brightness is outside CoLM's supported land/colour classes")?;
+                [values.s_v, values.d_v, values.s_n, values.d_n]
+            })
         })
         .transpose()?;
 
@@ -2216,10 +2218,10 @@ fn materialize_single_point_static_fields(
     }
     if let Some(values) = reflectance {
         for (name, value) in [
-            ("soil_s_v_alb", values.s_v),
-            ("soil_d_v_alb", values.d_v),
-            ("soil_s_n_alb", values.s_n),
-            ("soil_d_n_alb", values.d_n),
+            ("soil_s_v_alb", values[0]),
+            ("soil_d_v_alb", values[1]),
+            ("soil_s_n_alb", values[2]),
+            ("soil_d_n_alb", values[3]),
         ] {
             put_or_replace_values(&mut file, name, &[], &[value], "rawdata soil_brightness.nc")?;
         }

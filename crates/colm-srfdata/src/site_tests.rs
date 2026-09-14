@@ -201,6 +201,40 @@ fn lakedepth_without_a_raster_falls_back_to_the_module_default_not_a_tenth_of_it
     assert_eq!(x[0], 1.0, "fallback must stay the module default, not 0.1");
 }
 
+#[test]
+fn water_site_fill_preserves_native_missing_soil_reflectance() {
+    let source = plumber_fixture("water-reflectance-source");
+    let output = source.with_file_name("water-reflectance-output.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&source).unwrap();
+        file.variable_mut("IGBP_classification")
+            .unwrap()
+            .put_values(&[17], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+    super::fill(&source, &output, None, None).unwrap();
+    let file = netcdf::open(&output).unwrap();
+    for name in [
+        "soil_s_v_alb",
+        "soil_d_v_alb",
+        "soil_s_n_alb",
+        "soil_d_n_alb",
+    ] {
+        assert_eq!(
+            file.variable(name)
+                .unwrap()
+                .get_value::<f64, _>(())
+                .unwrap(),
+            crate::surface::SURFACE_MISSING
+        );
+    }
+    drop(file);
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(output).unwrap();
+}
+
 // ---------------------------------------------------------------- 城市
 
 /// 造一个最小的 Urban-PLUMBER 形状站点文件：只有定位与地面高程。
@@ -2535,30 +2569,31 @@ fn static_rawdata_fallback_replaces_disabled_site_fields() {
         }
         topo.close().unwrap();
     }
+    let options = super::SinglePointMaterializeOptions {
+        urban: super::UrbanSurfaceOptions::default(),
+        lai_frequency: super::SinglePointLaiFrequency::Monthly,
+        use_site_lai: true,
+        use_site_pctpfts: true,
+        use_site_pctcrop: true,
+        use_site_htop: true,
+        use_site_landtype: true,
+        site_landtype: None,
+        use_site_soilparameters: true,
+        runoff_scheme: 3,
+        use_site_lakedepth: false,
+        use_site_soilreflectance: false,
+        use_site_topography: false,
+        use_bedrock: false,
+        use_site_dbedrock: true,
+        land_cover_year: 2005,
+        eight_day_lai_years: &[],
+        monthly_lai_years: &[],
+    };
     super::materialize_single_point_static_fields(
         &surface,
         &rawdata,
         super::SiteMode::Igbp,
-        super::SinglePointMaterializeOptions {
-            urban: super::UrbanSurfaceOptions::default(),
-            lai_frequency: super::SinglePointLaiFrequency::Monthly,
-            use_site_lai: true,
-            use_site_pctpfts: true,
-            use_site_pctcrop: true,
-            use_site_htop: true,
-            use_site_landtype: true,
-            site_landtype: None,
-            use_site_soilparameters: true,
-            runoff_scheme: 3,
-            use_site_lakedepth: false,
-            use_site_soilreflectance: false,
-            use_site_topography: false,
-            use_bedrock: false,
-            use_site_dbedrock: true,
-            land_cover_year: 2005,
-            eight_day_lai_years: &[],
-            monthly_lai_years: &[],
-        },
+        options,
     )
     .unwrap();
     let file = netcdf::open(&surface).unwrap();
@@ -2574,6 +2609,37 @@ fn static_rawdata_fallback_replaces_disabled_site_fields() {
     assert_eq!(value("elevation"), 100.0);
     assert_eq!(value("elvstd"), 2.0);
     assert_eq!(value("sloperatio"), 1.2);
+    drop(file);
+    let water = directory.join("water.nc");
+    super::skeleton_with_mode(
+        &water,
+        -180.0,
+        90.0,
+        Some(16),
+        super::SiteKind::Natural,
+        super::SiteMode::Usgs,
+        false,
+    )
+    .unwrap();
+    super::materialize_single_point_static_fields(&water, &rawdata, super::SiteMode::Usgs, options)
+        .unwrap();
+    let water = netcdf::open(&water).unwrap();
+    for name in [
+        "soil_s_v_alb",
+        "soil_d_v_alb",
+        "soil_s_n_alb",
+        "soil_d_n_alb",
+    ] {
+        assert_eq!(
+            water
+                .variable(name)
+                .unwrap()
+                .get_value::<f64, _>(())
+                .unwrap(),
+            crate::surface::SURFACE_MISSING
+        );
+    }
+    drop(water);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
