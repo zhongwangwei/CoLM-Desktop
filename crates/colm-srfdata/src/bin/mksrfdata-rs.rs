@@ -18,16 +18,17 @@ use colm_srfdata::{
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
     aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
     build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology_with_filter,
-    build_coordinate_patch_selection, build_crop_land_patches, build_crop_pft_topology,
-    build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
-    build_pft_land_patches_from_raster, build_pft_topology,
-    build_spatial_topology_with_filter_grid, clip_existing_surface, crop_pft_pctshared,
-    gather_patch_raster, map_patch_diagnostic, materialize_single_point_surface,
-    materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
-    read_coordinate_patch_selection_f64, read_coordinate_patch_selection_layers_f64,
-    read_mesh_coordinate_raster_pft_f64, read_mesh_open_raster_f64, read_mesh_raster_f64,
-    read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_raster_time_f64,
-    read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
+    build_catchment_spatial_topology_with_filter_and_raw_grids, build_coordinate_patch_selection,
+    build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
+    build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_pft_topology,
+    build_spatial_topology_with_filter_grid, build_spatial_topology_with_filter_grid_and_raw_grids,
+    clip_existing_surface, crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
+    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
+    mesh_cell_area_weights, read_coordinate_patch_selection_f64,
+    read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
+    read_mesh_open_raster_f64, read_mesh_raster_f64, read_mesh_raster_i32,
+    read_mesh_raster_layers_f64, read_mesh_raster_time_f64, read_mesh_tiled_raster_f64,
+    read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
     read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_cached_f64,
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
@@ -38,9 +39,9 @@ use colm_srfdata::{
     write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
     FlatLandElements, FlatLandPatches, FlatMesh, LczUrbanRawFields, MeshFilter,
     NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode,
-    PixelAxes, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology, TiledRasterFiles,
-    TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING,
-    MERIT_90M,
+    PftTopology, PixelAxes, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology,
+    TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
+    DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -99,6 +100,7 @@ struct SpatialLctArgs {
     eight_day_lai_dir: Option<PathBuf>,
     eight_day_lai_years: Vec<i32>,
     lulcc: bool,
+    lulcc_lai_only: bool,
     diagnostics: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
     urban: Option<SpatialUrbanInputs>,
@@ -176,6 +178,7 @@ struct SpatialPftArgs {
     patch_mode: PftPatchMode,
     output_2m_wmo: bool,
     lulcc: bool,
+    lulcc_lai_only: bool,
     plant_tiles: PathBuf,
     crop_surface: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
@@ -214,6 +217,19 @@ fn optional_mesh_filter(path: Option<&Path>) -> Result<Option<MeshFilter>> {
 
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let mut args = parse_spatial_pft(args)?;
+    let requested_year = args.year;
+    if args.lulcc {
+        args.year = lulcc_snapshot_year(requested_year);
+        let effective_lai_year = if lulcc_historical_lai_only_year(requested_year) {
+            requested_year
+        } else {
+            args.year
+        };
+        normalize_lulcc_monthly_years(&mut args.monthly_vegetation_years, effective_lai_year)?;
+        if lulcc_historical_lai_only_year(requested_year) {
+            args.lulcc_lai_only = true;
+        }
+    }
     if args.output_2m_wmo && args.kind != SpatialInputKind::GridBased {
         println!("DEF_Output_2mWMO is disabled outside GRIDBASED, matching upstream");
         args.output_2m_wmo = false;
@@ -223,12 +239,10 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         "CROP plus WMO is not verified: upstream land2mWMO does not resize cropclass/pctshared"
     );
     ensure!(
-        !args.output_2m_wmo || args.soil_hyper_albedo_dir.is_none(),
+        args.lulcc_lai_only
+            || !args.output_2m_wmo
+            || args.soil_hyper_albedo_dir.is_none(),
         "WMO plus soil hyper-albedo is not verified: upstream aggregation reads virtual pixel index -1"
-    );
-    ensure!(
-        !args.lulcc || args.year >= 2000 || args.year % 5 == 0,
-        "historical LULCC years before 2000 must be five-year snapshots; the upstream non-snapshot path only writes monthly LAI"
     );
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     let (mut topology, mut base_patches, land_hrus) = match args.kind {
@@ -350,6 +364,80 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &area,
         )?,
     };
+    let pft_pctshared = crop
+        .as_ref()
+        .map(|crop| crop_pft_pctshared(&pfts, &crop.pctshared))
+        .transpose()?;
+    let pft_shares = pft_pctshared.as_deref().unwrap_or(&pfts.pctshared);
+    if args.lulcc_lai_only {
+        if let Some(pctshared) = crop.as_ref().map(|crop| crop.pctshared.as_slice()) {
+            write_spatial_topology_with_shared(
+                &args.landdata,
+                args.year,
+                &topology,
+                patches,
+                Some(pctshared),
+                &args.blocks,
+            )?;
+        } else {
+            write_spatial_topology(&args.landdata, args.year, &topology, patches, &args.blocks)?;
+        }
+        if let Some(land_hrus) = land_hrus {
+            write_spatial_hru_topology(
+                &args.landdata,
+                args.year,
+                &topology,
+                &land_hrus,
+                &args.blocks,
+            )?;
+            write_spatial_hru_patch_fractions(
+                &args.landdata,
+                args.year,
+                &topology,
+                &land_hrus,
+                patches,
+                crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+                &args.blocks,
+            )?;
+        }
+        write_spatial_pft_topology_with_shared(
+            &args.landdata,
+            args.year,
+            &topology,
+            &pfts.land_pfts,
+            Some(pft_shares),
+            &args.blocks,
+        )?;
+        if args.diagnostics {
+            write_spatial_diagnostic_baseline(
+                &args.landdata,
+                args.year,
+                &topology,
+                patches,
+                crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+                17,
+            )?;
+        }
+        materialize_pft_monthly_vegetation(
+            &args,
+            &topology,
+            patches,
+            layout,
+            &pfts,
+            &raw_percent,
+            &area,
+            pft_shares,
+            crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+        )?;
+        println!(
+            "wrote {} spatial land elements, {} land patches, and {} PFT tiles to {}",
+            topology.land_elements.element_ids.len(),
+            patches.len(),
+            pfts.land_pfts.len(),
+            args.landdata.display()
+        );
+        return Ok(());
+    }
     let fractions = aggregate_pft_fractions(
         layout,
         PftFractionInput {
@@ -403,6 +491,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         eight_day_lai_dir: None,
         eight_day_lai_years: Vec::new(),
         lulcc: false,
+        lulcc_lai_only: false,
         diagnostics: args.diagnostics,
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
         urban: None,
@@ -445,11 +534,6 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &args.blocks,
         )?;
     }
-    let pft_pctshared = crop
-        .as_ref()
-        .map(|crop| crop_pft_pctshared(&pfts, &crop.pctshared))
-        .transpose()?;
-    let pft_shares = pft_pctshared.as_deref().unwrap_or(&pfts.pctshared);
     // MOD_LandPFT allocates pctshared for every PFT, not just CROP builds.
     write_spatial_pft_topology_with_shared(
         &args.landdata,
@@ -529,151 +613,17 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         DiagnosticStatistic::Mean,
         Some(0.0),
     )?;
-    for &year in &args.monthly_vegetation_years {
-        let mut lai_patch_frames = Vec::with_capacity(12);
-        let mut lai_pft_frames = Vec::with_capacity(12);
-        let mut sai_patch_frames = Vec::with_capacity(12);
-        let mut sai_pft_frames = Vec::with_capacity(12);
-        let (suffix, lai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_LAI", year)?;
-        let (_, sai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_SAI", year)?;
-        for month in 1..=12 {
-            let lai = aggregate_pft_index(
-                layout,
-                PftIndexInput {
-                    pft_offsets: &pfts.patch_offsets,
-                    pft_classes: &pfts.pft_classes,
-                    patch_kind: &pfts.patch_kind,
-                    raw_class_count: MODIS_PFT_CLASSES,
-                    raw_percent: &raw_percent,
-                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
-                        &args.plant_tiles,
-                        &suffix,
-                        &lai_name,
-                        MODIS_PFT_CLASSES,
-                        month,
-                        &topology.mesh,
-                        &topology.pixel,
-                        COLM_500M,
-                    )?,
-                    land_area: &area,
-                },
-            )?;
-            let sai = aggregate_pft_index(
-                layout,
-                PftIndexInput {
-                    pft_offsets: &pfts.patch_offsets,
-                    pft_classes: &pfts.pft_classes,
-                    patch_kind: &pfts.patch_kind,
-                    raw_class_count: MODIS_PFT_CLASSES,
-                    raw_percent: &raw_percent,
-                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
-                        &args.plant_tiles,
-                        &suffix,
-                        &sai_name,
-                        MODIS_PFT_CLASSES,
-                        month,
-                        &topology.mesh,
-                        &topology.pixel,
-                        COLM_500M,
-                    )?,
-                    land_area: &area,
-                },
-            )?;
-            write_landpatch_vector(
-                &args.landdata,
-                year,
-                &topology,
-                patches,
-                &args.blocks,
-                "LAI",
-                &format!("LAI_patches{month:02}"),
-                "LAI_patches",
-                &lai.patch_index,
-            )?;
-            write_landpft_vector(
-                &args.landdata,
-                year,
-                &topology,
-                &pfts.land_pfts,
-                &args.blocks,
-                "LAI",
-                &format!("LAI_pfts{month:02}"),
-                "LAI_pfts",
-                &lai.pft_index,
-            )?;
-            write_landpatch_vector(
-                &args.landdata,
-                year,
-                &topology,
-                patches,
-                &args.blocks,
-                "LAI",
-                &format!("SAI_patches{month:02}"),
-                "SAI_patches",
-                &sai.patch_index,
-            )?;
-            write_landpft_vector(
-                &args.landdata,
-                year,
-                &topology,
-                &pfts.land_pfts,
-                &args.blocks,
-                "LAI",
-                &format!("SAI_pfts{month:02}"),
-                "SAI_pfts",
-                &sai.pft_index,
-            )?;
-            if args.diagnostics {
-                lai_patch_frames.push(lai.patch_index);
-                lai_pft_frames.push(lai.pft_index);
-                sai_patch_frames.push(sai.patch_index);
-                sai_pft_frames.push(sai.pft_index);
-            }
-        }
-        if args.diagnostics {
-            let patch_types = (0..=17).collect::<Vec<_>>();
-            let patch_shares = crop.as_ref().map(|crop| crop.pctshared.as_slice());
-            for (file_stem, variable, frames) in [
-                ("LAI_patch", "LAI", &lai_patch_frames),
-                ("SAI_patch", "SAI", &sai_patch_frames),
-            ] {
-                write_patch_diagnostic_time(
-                    args.landdata
-                        .join("diag")
-                        .join(format!("{file_stem}_{year:04}.nc")),
-                    variable,
-                    &topology,
-                    patches,
-                    frames,
-                    &patch_types,
-                    DiagnosticStatistic::Mean,
-                    patch_shares,
-                    DIAGNOSTIC_MISSING,
-                    Some(0.0),
-                )?;
-            }
-            write_pft_diagnostic_time(
-                &args,
-                year,
-                &topology,
-                &pfts.land_pfts,
-                pft_shares,
-                &lai_pft_frames,
-                "LAI_pft",
-                "LAI_pft",
-            )?;
-            write_pft_diagnostic_time(
-                &args,
-                year,
-                &topology,
-                &pfts.land_pfts,
-                pft_shares,
-                &sai_pft_frames,
-                "SAI_pft",
-                "SAI_pft",
-            )?;
-        }
-    }
+    materialize_pft_monthly_vegetation(
+        &args,
+        &topology,
+        patches,
+        layout,
+        &pfts,
+        &raw_percent,
+        &area,
+        pft_shares,
+        crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+    )?;
     if args.diagnostics {
         write_spatial_diagnostic_baseline(
             &args.landdata,
@@ -694,22 +644,193 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn materialize_pft_monthly_vegetation(
+    args: &SpatialPftArgs,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    layout: &colm_srfdata::FlatPatches,
+    pfts: &PftTopology,
+    raw_percent: &[f64],
+    area: &[f64],
+    pft_shares: &[f64],
+    patch_pctshared: Option<&[f64]>,
+) -> Result<()> {
+    for &year in &args.monthly_vegetation_years {
+        let mut lai_patch_frames = Vec::with_capacity(12);
+        let mut lai_pft_frames = Vec::with_capacity(12);
+        let mut sai_patch_frames = Vec::with_capacity(12);
+        let mut sai_pft_frames = Vec::with_capacity(12);
+        let (suffix, lai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_LAI", year)?;
+        let (_, sai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_SAI", year)?;
+        for month in 1..=12 {
+            let lai = aggregate_pft_index(
+                layout,
+                PftIndexInput {
+                    pft_offsets: &pfts.patch_offsets,
+                    pft_classes: &pfts.pft_classes,
+                    patch_kind: &pfts.patch_kind,
+                    raw_class_count: MODIS_PFT_CLASSES,
+                    raw_percent,
+                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
+                        &args.plant_tiles,
+                        &suffix,
+                        &lai_name,
+                        MODIS_PFT_CLASSES,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                    land_area: area,
+                },
+            )?;
+            let sai = aggregate_pft_index(
+                layout,
+                PftIndexInput {
+                    pft_offsets: &pfts.patch_offsets,
+                    pft_classes: &pfts.pft_classes,
+                    patch_kind: &pfts.patch_kind,
+                    raw_class_count: MODIS_PFT_CLASSES,
+                    raw_percent,
+                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
+                        &args.plant_tiles,
+                        &suffix,
+                        &sai_name,
+                        MODIS_PFT_CLASSES,
+                        month,
+                        &topology.mesh,
+                        &topology.pixel,
+                        COLM_500M,
+                    )?,
+                    land_area: area,
+                },
+            )?;
+            write_landpatch_vector(
+                &args.landdata,
+                year,
+                topology,
+                patches,
+                &args.blocks,
+                "LAI",
+                &format!("LAI_patches{month:02}"),
+                "LAI_patches",
+                &lai.patch_index,
+            )?;
+            write_landpft_vector(
+                &args.landdata,
+                year,
+                topology,
+                &pfts.land_pfts,
+                &args.blocks,
+                "LAI",
+                &format!("LAI_pfts{month:02}"),
+                "LAI_pfts",
+                &lai.pft_index,
+            )?;
+            write_landpatch_vector(
+                &args.landdata,
+                year,
+                topology,
+                patches,
+                &args.blocks,
+                "LAI",
+                &format!("SAI_patches{month:02}"),
+                "SAI_patches",
+                &sai.patch_index,
+            )?;
+            write_landpft_vector(
+                &args.landdata,
+                year,
+                topology,
+                &pfts.land_pfts,
+                &args.blocks,
+                "LAI",
+                &format!("SAI_pfts{month:02}"),
+                "SAI_pfts",
+                &sai.pft_index,
+            )?;
+            if args.diagnostics {
+                lai_patch_frames.push(lai.patch_index);
+                lai_pft_frames.push(lai.pft_index);
+                sai_patch_frames.push(sai.patch_index);
+                sai_pft_frames.push(sai.pft_index);
+            }
+        }
+        if args.diagnostics {
+            let patch_types = (0..=17).collect::<Vec<_>>();
+            for (file_stem, variable, frames) in [
+                ("LAI_patch", "LAI", &lai_patch_frames),
+                ("SAI_patch", "SAI", &sai_patch_frames),
+            ] {
+                write_patch_diagnostic_time(
+                    args.landdata
+                        .join("diag")
+                        .join(format!("{file_stem}_{year:04}.nc")),
+                    variable,
+                    topology,
+                    patches,
+                    frames,
+                    &patch_types,
+                    DiagnosticStatistic::Mean,
+                    patch_pctshared,
+                    DIAGNOSTIC_MISSING,
+                    Some(0.0),
+                )?;
+            }
+            write_pft_diagnostic_time(
+                args,
+                year,
+                topology,
+                &pfts.land_pfts,
+                pft_shares,
+                &lai_pft_frames,
+                "LAI_pft",
+                "LAI_pft",
+            )?;
+            write_pft_diagnostic_time(
+                args,
+                year,
+                topology,
+                &pfts.land_pfts,
+                pft_shares,
+                &sai_pft_frames,
+                "SAI_pft",
+                "SAI_pft",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
-    let args = parse_spatial_lct(args)?;
+    let mut args = parse_spatial_lct(args)?;
+    let requested_year = args.year;
+    if args.lulcc {
+        args.year = lulcc_snapshot_year(requested_year);
+        let effective_lai_year = if lulcc_historical_lai_only_year(requested_year) {
+            requested_year
+        } else {
+            args.year
+        };
+        normalize_lulcc_monthly_years(&mut args.monthly_vegetation_years, effective_lai_year)?;
+        if lulcc_historical_lai_only_year(requested_year) {
+            args.lulcc_lai_only = true;
+        }
+    }
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
+    let urban_extra_grids = if args.urban.is_some() {
+        &[COLM_500M, COLM_5KM][..]
+    } else {
+        &[][..]
+    };
     ensure!(
         !args.lulcc || args.land_cover == SiteMode::Igbp,
         "spatial LULCC transfer traces require IGBP land cover"
     );
     ensure!(
-        !args.lulcc || args.year >= 2000 || args.year % 5 == 0,
-        "historical LULCC years before 2000 must be five-year snapshots; the upstream non-snapshot path only writes monthly LAI"
-    );
-    ensure!(
-        !args.lulcc
-            || lulcc_previous_land_cover_year(args.year).is_none()
-            || args.plant_tiles.is_some(),
-        "LULCC transfer traces require --plant-tiles before landdata is written"
+        !args.lulcc || args.plant_tiles.is_some(),
+        "LULCC requires --plant-tiles before landdata is written"
     );
     let lct_grid = match args.land_cover {
         SiteMode::Igbp => COLM_500M,
@@ -725,12 +846,13 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     };
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let catchment = build_catchment_spatial_topology_with_filter(
+            let catchment = build_catchment_spatial_topology_with_filter_and_raw_grids(
                 &args.mesh,
                 MERIT_90M,
                 args.bounds,
                 mesh_filter.as_ref(),
                 Some(&args.blocks),
+                urban_extra_grids,
             )?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
                 catchment,
@@ -743,12 +865,13 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let mut topology = build_spatial_topology_with_filter_grid(
+            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids(
                 &args.mesh,
                 args.kind,
                 COLM_500M,
                 args.bounds,
                 mesh_filter.as_ref().map(|filter| &filter.grid),
+                urban_extra_grids,
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
             if let Some(filter) = &mesh_filter {
@@ -803,7 +926,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
     materialize_lulcc_transfer_traces(
         LulccTraceArgs {
-            enabled: args.lulcc,
+            enabled: args.lulcc && !args.lulcc_lai_only,
             year: args.year,
             plant_tiles: args.plant_tiles.as_deref(),
             landdata: &args.landdata,
@@ -815,7 +938,17 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         &patches,
     )?;
     if let (Some(urban), Some(land_urban)) = (&args.urban, land_urban.as_ref()) {
-        materialize_spatial_urban(&args, &topology, land_urban, urban)?;
+        if args.lulcc_lai_only {
+            write_spatial_urban_topology(
+                &args.landdata,
+                args.year,
+                &topology,
+                land_urban,
+                &args.blocks,
+            )?;
+        } else {
+            materialize_spatial_urban(&args, &topology, land_urban, urban)?;
+        }
     }
     if let Some(land_hrus) = land_hrus {
         write_spatial_hru_topology(
@@ -2116,6 +2249,30 @@ fn lulcc_previous_land_cover_year(year: i32) -> Option<i32> {
     }
 }
 
+fn lulcc_historical_lai_only_year(year: i32) -> bool {
+    year < 2000 && year % 5 != 0
+}
+
+fn lulcc_snapshot_year(year: i32) -> i32 {
+    if year < 2000 {
+        (year / 5 * 5).max(1985)
+    } else {
+        year
+    }
+}
+
+fn normalize_lulcc_monthly_years(years: &mut Vec<i32>, effective_year: i32) -> Result<()> {
+    if years.is_empty() {
+        years.push(effective_year);
+        return Ok(());
+    }
+    ensure!(
+        years.len() == 1 && years[0] == effective_year,
+        "LULCC monthly vegetation years must be exactly [{effective_year}]"
+    );
+    Ok(())
+}
+
 fn materialize_spatial_common_fields(
     args: &SpatialLctArgs,
     topology: &SpatialTopology,
@@ -2135,6 +2292,30 @@ fn materialize_spatial_common_fields(
         args.zip_aggregation,
     )?;
     let patch_type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
+    if args.lulcc_lai_only {
+        if let Some(pctshared) = patch_pctshared {
+            write_spatial_topology_with_shared(
+                &args.landdata,
+                args.year,
+                topology,
+                patches,
+                Some(pctshared),
+                &args.blocks,
+            )?;
+        } else {
+            write_spatial_topology(&args.landdata, args.year, topology, patches, &args.blocks)?;
+        }
+        materialize_lct_monthly_vegetation(
+            args,
+            topology,
+            patches,
+            &mesh,
+            &layout,
+            &area,
+            patch_pctshared,
+        )?;
+        return Ok(());
+    }
     let forest_height = match forest_height_override {
         Some(values) => Some(values.to_vec()),
         None => match (&args.plant_tiles, &args.usgs_forest_height) {
@@ -2623,93 +2804,115 @@ fn materialize_spatial_common_fields(
             )?;
         }
     }
-    if !args.monthly_vegetation_years.is_empty() {
-        let tiles = args
-            .plant_tiles
-            .as_deref()
-            .context("--monthly-vegetation-year requires --plant-tiles")?;
+    materialize_lct_monthly_vegetation(
+        args,
+        topology,
+        patches,
+        &mesh,
+        &layout,
+        &area,
+        patch_pctshared,
+    )?;
+    Ok(())
+}
 
-        let mut tile_files = TiledRasterFiles::default();
-        for &year in &args.monthly_vegetation_years {
-            let mut lai_frames = Vec::with_capacity(12);
-            let mut sai_frames = Vec::with_capacity(12);
-            let (suffix, lai_name) = monthly_vegetation_source("MONTHLY_LC_LAI", year)?;
-            let (_, sai_name) = monthly_vegetation_source("MONTHLY_LC_SAI", year)?;
-            for month in 1..=12 {
-                let lai = layout.aggregate_patch_vegetation_index(
-                    &read_mesh_tiled_raster_time_cached_f64(
-                        &mut tile_files,
-                        tiles,
-                        &suffix,
-                        &lai_name,
-                        month,
-                        &mesh,
-                        &topology.pixel,
-                        COLM_500M,
-                    )?,
-                    &area,
-                )?;
-                let sai = layout.aggregate_patch_vegetation_index(
-                    &read_mesh_tiled_raster_time_cached_f64(
-                        &mut tile_files,
-                        tiles,
-                        &suffix,
-                        &sai_name,
-                        month,
-                        &mesh,
-                        &topology.pixel,
-                        COLM_500M,
-                    )?,
-                    &area,
-                )?;
-                write_landpatch_vector(
-                    &args.landdata,
-                    year,
-                    topology,
-                    patches,
-                    &args.blocks,
-                    "LAI",
-                    &format!("LAI_patches{month:02}"),
-                    "LAI_patches",
-                    &lai,
-                )?;
-                write_landpatch_vector(
-                    &args.landdata,
-                    year,
-                    topology,
-                    patches,
-                    &args.blocks,
-                    "LAI",
-                    &format!("SAI_patches{month:02}"),
-                    "SAI_patches",
-                    &sai,
-                )?;
-                if args.diagnostics {
-                    lai_frames.push(lai);
-                    sai_frames.push(sai);
-                }
-            }
-            write_lct_patch_diagnostic_time(
-                args,
+fn materialize_lct_monthly_vegetation(
+    args: &SpatialLctArgs,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    mesh: &FlatMesh,
+    layout: &colm_srfdata::FlatPatches,
+    area: &[f64],
+    patch_pctshared: Option<&[f64]>,
+) -> Result<()> {
+    if args.monthly_vegetation_years.is_empty() {
+        return Ok(());
+    }
+    let tiles = args
+        .plant_tiles
+        .as_deref()
+        .context("--monthly-vegetation-year requires --plant-tiles")?;
+
+    let mut tile_files = TiledRasterFiles::default();
+    for &year in &args.monthly_vegetation_years {
+        let mut lai_frames = Vec::with_capacity(12);
+        let mut sai_frames = Vec::with_capacity(12);
+        let (suffix, lai_name) = monthly_vegetation_source("MONTHLY_LC_LAI", year)?;
+        let (_, sai_name) = monthly_vegetation_source("MONTHLY_LC_SAI", year)?;
+        for month in 1..=12 {
+            let lai = layout.aggregate_patch_vegetation_index(
+                &read_mesh_tiled_raster_time_cached_f64(
+                    &mut tile_files,
+                    tiles,
+                    &suffix,
+                    &lai_name,
+                    month,
+                    mesh,
+                    &topology.pixel,
+                    COLM_500M,
+                )?,
+                area,
+            )?;
+            let sai = layout.aggregate_patch_vegetation_index(
+                &read_mesh_tiled_raster_time_cached_f64(
+                    &mut tile_files,
+                    tiles,
+                    &suffix,
+                    &sai_name,
+                    month,
+                    mesh,
+                    &topology.pixel,
+                    COLM_500M,
+                )?,
+                area,
+            )?;
+            write_landpatch_vector(
+                &args.landdata,
                 year,
                 topology,
                 patches,
-                patch_pctshared,
-                &lai_frames,
-                "LAI_patch",
+                &args.blocks,
                 "LAI",
+                &format!("LAI_patches{month:02}"),
+                "LAI_patches",
+                &lai,
             )?;
-            write_lct_patch_diagnostic_time(
-                args,
+            write_landpatch_vector(
+                &args.landdata,
                 year,
                 topology,
                 patches,
-                patch_pctshared,
-                &sai_frames,
-                "SAI_patch",
-                "SAI",
+                &args.blocks,
+                "LAI",
+                &format!("SAI_patches{month:02}"),
+                "SAI_patches",
+                &sai,
             )?;
+            if args.diagnostics {
+                lai_frames.push(lai);
+                sai_frames.push(sai);
+            }
         }
+        write_lct_patch_diagnostic_time(
+            args,
+            year,
+            topology,
+            patches,
+            patch_pctshared,
+            &lai_frames,
+            "LAI_patch",
+            "LAI",
+        )?;
+        write_lct_patch_diagnostic_time(
+            args,
+            year,
+            topology,
+            patches,
+            patch_pctshared,
+            &sai_frames,
+            "SAI_patch",
+            "SAI",
+        )?;
     }
     Ok(())
 }
@@ -3412,6 +3615,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         eight_day_lai_dir,
         eight_day_lai_years,
         lulcc,
+        lulcc_lai_only: false,
         diagnostics,
         soil_hyper_albedo_dir,
         urban: urban_rawdata.map(|rawdata| SpatialUrbanInputs {
@@ -3707,6 +3911,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         patch_mode,
         output_2m_wmo,
         lulcc,
+        lulcc_lai_only: false,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         crop_surface,
         monthly_vegetation_years,
@@ -3985,15 +4190,13 @@ fn spatial_case_command(
     let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
     let requested_year = case_i32(&document, "DEF_LC_YEAR", 2005)?;
     ensure!(requested_year >= 0, "DEF_LC_YEAR must be non-negative");
-    ensure!(
-        !lulcc || requested_year >= 2000 || requested_year % 5 == 0,
-        "historical LULCC years before 2000 must be five-year snapshots; the upstream non-snapshot path only writes monthly LAI"
-    );
-    let year = if lulcc && requested_year < 2000 {
-        (requested_year / 5 * 5).max(1985)
+    let year = requested_year;
+    let snapshot_year = if lulcc {
+        lulcc_snapshot_year(requested_year)
     } else {
         requested_year
     };
+    let lulcc_lai_only = lulcc && lulcc_historical_lai_only_year(requested_year);
     let soil_fit = case_bool(&document, "DEF_USE_SOILPAR_UPS_FIT", true)?;
     let soil_model = if case_bool(&document, "DEF_USE_Campbell_SOIL_MODEL", false)? {
         "campbell"
@@ -4025,10 +4228,14 @@ fn spatial_case_command(
         !regular_downscaling || !simple_downscaling,
         "DEF_USE_Forcing_Downscaling and DEF_USE_Forcing_Downscaling_Simple are mutually exclusive"
     );
-    let topography_factors = (regular_downscaling || simple_downscaling)
-        .then(|| case_string(&document, "DEF_DS_HiresTopographyDataDir"))
-        .transpose()?
-        .map(PathBuf::from);
+    let topography_factors = if lulcc_lai_only {
+        None
+    } else {
+        (regular_downscaling || simple_downscaling)
+            .then(|| case_string(&document, "DEF_DS_HiresTopographyDataDir"))
+            .transpose()?
+            .map(PathBuf::from)
+    };
     let simple_topography_factors = simple_downscaling
         .then(|| topography_factors.clone())
         .flatten();
@@ -4037,14 +4244,8 @@ fn spatial_case_command(
         .flatten();
     let bedrock = rawdata.join("bedrock.nc");
     let plant_tiles = rawdata.join("plant_15s");
-    let mut required_files = vec![
-        mesh.clone(),
-        lake_depth.clone(),
-        soil_texture.clone(),
-        soil_brightness.clone(),
-        topography.clone(),
-    ];
-    let mut required_directories = vec![soil_dir.clone()];
+    let mut required_files = vec![mesh.clone()];
+    let mut required_directories = Vec::new();
     let mut args = Vec::new();
     let blocks = blocks.map(|blocks| {
         [
@@ -4073,7 +4274,9 @@ fn spatial_case_command(
             "spatial LULCC transfer traces require --land-cover igbp"
         );
         let landtype = match land_cover {
-            SiteMode::Igbp => rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc")),
+            SiteMode::Igbp => rawdata.join(format!(
+                "landtypes/landtype-igbp-modis-{snapshot_year:04}.nc"
+            )),
             SiteMode::Usgs => rawdata.join("landtypes/landtype-usgs-update.nc"),
             SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
                 unreachable!("LCT mode checked by parse_land_cover")
@@ -4088,64 +4291,75 @@ fn spatial_case_command(
             year.to_string(),
             "--land-cover".to_owned(),
             land_cover.as_str().to_owned(),
-            "--lake-depth".to_owned(),
-            lake_depth.display().to_string(),
-            "--soil-texture".to_owned(),
-            soil_texture.display().to_string(),
-            "--soil-dir".to_owned(),
-            soil_dir.display().to_string(),
-            "--soil-model".to_owned(),
-            soil_model.to_owned(),
-            "--soil-fit".to_owned(),
-            soil_fit.to_string(),
-            "--soil-brightness".to_owned(),
-            soil_brightness.display().to_string(),
-            "--topography".to_owned(),
-            topography.display().to_string(),
         ]);
-        if methane.lake_soil_carbon {
-            args.extend([
-                "--lake-soil-carbon".to_owned(),
-                lake_soil_carbon.display().to_string(),
-            ]);
-        }
-        if methane.spatial_ph {
-            args.extend(["--methane-ph".to_owned(), methane_ph.display().to_string()]);
-        }
-        if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
-            required_files.push(topographic_wetness.clone());
-            args.extend([
-                "--topographic-wetness".to_owned(),
-                topographic_wetness.display().to_string(),
-            ]);
-        }
-        if let Some(directory) = &simple_topography_factors {
+        if !lulcc_lai_only {
             required_files.extend([
-                directory.join("topography_MERITHydro.nc"),
-                directory.join("curvature_MERITHydro.nc"),
+                lake_depth.clone(),
+                soil_texture.clone(),
+                soil_brightness.clone(),
+                topography.clone(),
             ]);
+            required_directories.push(soil_dir.clone());
             args.extend([
-                "--simple-topography-factors".to_owned(),
-                directory.display().to_string(),
+                "--lake-depth".to_owned(),
+                lake_depth.display().to_string(),
+                "--soil-texture".to_owned(),
+                soil_texture.display().to_string(),
+                "--soil-dir".to_owned(),
+                soil_dir.display().to_string(),
+                "--soil-model".to_owned(),
+                soil_model.to_owned(),
+                "--soil-fit".to_owned(),
+                soil_fit.to_string(),
+                "--soil-brightness".to_owned(),
+                soil_brightness.display().to_string(),
+                "--topography".to_owned(),
+                topography.display().to_string(),
             ]);
-        }
-        if let Some(directory) = &regular_topography_factors {
-            required_files.extend([
-                directory.join("slope.nc"),
-                directory.join("aspect.nc"),
-                directory.join("terrain_elev_angle_front.nc"),
-                directory.join("terrain_elev_angle_back.nc"),
-                directory.join("sky_view_factor.nc"),
-                directory.join("curvature.nc"),
-            ]);
-            args.extend([
-                "--regular-topography-factors".to_owned(),
-                directory.display().to_string(),
-            ]);
-        }
-        if case_bool(&document, "DEF_USE_BEDROCK", false)? {
-            required_files.push(bedrock.clone());
-            args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
+            if methane.lake_soil_carbon {
+                args.extend([
+                    "--lake-soil-carbon".to_owned(),
+                    lake_soil_carbon.display().to_string(),
+                ]);
+            }
+            if methane.spatial_ph {
+                args.extend(["--methane-ph".to_owned(), methane_ph.display().to_string()]);
+            }
+            if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
+                required_files.push(topographic_wetness.clone());
+                args.extend([
+                    "--topographic-wetness".to_owned(),
+                    topographic_wetness.display().to_string(),
+                ]);
+            }
+            if let Some(directory) = &simple_topography_factors {
+                required_files.extend([
+                    directory.join("topography_MERITHydro.nc"),
+                    directory.join("curvature_MERITHydro.nc"),
+                ]);
+                args.extend([
+                    "--simple-topography-factors".to_owned(),
+                    directory.display().to_string(),
+                ]);
+            }
+            if let Some(directory) = &regular_topography_factors {
+                required_files.extend([
+                    directory.join("slope.nc"),
+                    directory.join("aspect.nc"),
+                    directory.join("terrain_elev_angle_front.nc"),
+                    directory.join("terrain_elev_angle_back.nc"),
+                    directory.join("sky_view_factor.nc"),
+                    directory.join("curvature.nc"),
+                ]);
+                args.extend([
+                    "--regular-topography-factors".to_owned(),
+                    directory.display().to_string(),
+                ]);
+            }
+            if case_bool(&document, "DEF_USE_BEDROCK", false)? {
+                required_files.push(bedrock.clone());
+                args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
+            }
         }
         if lai_monthly {
             required_directories.push(plant_tiles.clone());
@@ -4166,8 +4380,12 @@ fn spatial_case_command(
             args.push("--lulcc".to_owned());
         }
         if lai_monthly {
-            let lai_years = if urban && lulcc {
-                vec![year]
+            let lai_years = if lulcc {
+                vec![if lulcc_lai_only {
+                    requested_year
+                } else {
+                    snapshot_year
+                }]
             } else {
                 case_lai_years(&document, year)?
             };
@@ -4192,10 +4410,14 @@ fn spatial_case_command(
             let urban_data = rawdata.join("urban");
             let urban_lai = rawdata.join("urban_lai_500m");
             let lucy = urban_data.join("LUCY_regionid.nc");
-            required_directories.extend([urban_type, urban_data, urban_lai]);
-            required_files.push(lucy);
-            if urban_scheme == UrbanScheme::Ncar {
-                required_files.push(rawdata.join("urban/NCAR_urban_properties.nc"));
+            if lulcc_lai_only {
+                required_directories.push(urban_type);
+            } else {
+                required_directories.extend([urban_type, urban_data, urban_lai]);
+                required_files.push(lucy);
+                if urban_scheme == UrbanScheme::Ncar {
+                    required_files.push(rawdata.join("urban/NCAR_urban_properties.nc"));
+                }
             }
             args.extend([
                 "--urban-rawdata".to_owned(),
@@ -4228,7 +4450,9 @@ fn spatial_case_command(
         } else {
             "separate"
         };
-        let landtype = rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc"));
+        let landtype = rawdata.join(format!(
+            "landtypes/landtype-igbp-modis-{snapshot_year:04}.nc"
+        ));
         required_files.push(landtype.clone());
         required_directories.push(plant_tiles.clone());
         args.extend([
@@ -4241,60 +4465,75 @@ fn spatial_case_command(
             patch_mode.to_owned(),
             "--plant-tiles".to_owned(),
             plant_tiles.display().to_string(),
-            "--lake-depth".to_owned(),
-            lake_depth.display().to_string(),
-            "--soil-texture".to_owned(),
-            soil_texture.display().to_string(),
-            "--soil-dir".to_owned(),
-            soil_dir.display().to_string(),
-            "--soil-model".to_owned(),
-            soil_model.to_owned(),
-            "--soil-fit".to_owned(),
-            soil_fit.to_string(),
-            "--soil-brightness".to_owned(),
-            soil_brightness.display().to_string(),
-            "--topography".to_owned(),
-            topography.display().to_string(),
         ]);
-        if methane.lake_soil_carbon {
-            args.extend([
-                "--lake-soil-carbon".to_owned(),
-                lake_soil_carbon.display().to_string(),
-            ]);
-        }
-        if methane.spatial_ph {
-            args.extend(["--methane-ph".to_owned(), methane_ph.display().to_string()]);
-        }
-        if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
-            required_files.push(topographic_wetness.clone());
-            args.extend([
-                "--topographic-wetness".to_owned(),
-                topographic_wetness.display().to_string(),
-            ]);
-        }
-        if let Some(directory) = &simple_topography_factors {
+        if !lulcc_lai_only {
             required_files.extend([
-                directory.join("topography_MERITHydro.nc"),
-                directory.join("curvature_MERITHydro.nc"),
+                lake_depth.clone(),
+                soil_texture.clone(),
+                soil_brightness.clone(),
+                topography.clone(),
             ]);
+            required_directories.push(soil_dir.clone());
             args.extend([
-                "--simple-topography-factors".to_owned(),
-                directory.display().to_string(),
+                "--lake-depth".to_owned(),
+                lake_depth.display().to_string(),
+                "--soil-texture".to_owned(),
+                soil_texture.display().to_string(),
+                "--soil-dir".to_owned(),
+                soil_dir.display().to_string(),
+                "--soil-model".to_owned(),
+                soil_model.to_owned(),
+                "--soil-fit".to_owned(),
+                soil_fit.to_string(),
+                "--soil-brightness".to_owned(),
+                soil_brightness.display().to_string(),
+                "--topography".to_owned(),
+                topography.display().to_string(),
             ]);
-        }
-        if let Some(directory) = &regular_topography_factors {
-            required_files.extend([
-                directory.join("slope.nc"),
-                directory.join("aspect.nc"),
-                directory.join("terrain_elev_angle_front.nc"),
-                directory.join("terrain_elev_angle_back.nc"),
-                directory.join("sky_view_factor.nc"),
-                directory.join("curvature.nc"),
-            ]);
-            args.extend([
-                "--regular-topography-factors".to_owned(),
-                directory.display().to_string(),
-            ]);
+            if methane.lake_soil_carbon {
+                args.extend([
+                    "--lake-soil-carbon".to_owned(),
+                    lake_soil_carbon.display().to_string(),
+                ]);
+            }
+            if methane.spatial_ph {
+                args.extend(["--methane-ph".to_owned(), methane_ph.display().to_string()]);
+            }
+            if case_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0 {
+                required_files.push(topographic_wetness.clone());
+                args.extend([
+                    "--topographic-wetness".to_owned(),
+                    topographic_wetness.display().to_string(),
+                ]);
+            }
+            if let Some(directory) = &simple_topography_factors {
+                required_files.extend([
+                    directory.join("topography_MERITHydro.nc"),
+                    directory.join("curvature_MERITHydro.nc"),
+                ]);
+                args.extend([
+                    "--simple-topography-factors".to_owned(),
+                    directory.display().to_string(),
+                ]);
+            }
+            if let Some(directory) = &regular_topography_factors {
+                required_files.extend([
+                    directory.join("slope.nc"),
+                    directory.join("aspect.nc"),
+                    directory.join("terrain_elev_angle_front.nc"),
+                    directory.join("terrain_elev_angle_back.nc"),
+                    directory.join("sky_view_factor.nc"),
+                    directory.join("curvature.nc"),
+                ]);
+                args.extend([
+                    "--regular-topography-factors".to_owned(),
+                    directory.display().to_string(),
+                ]);
+            }
+            if case_bool(&document, "DEF_USE_BEDROCK", false)? {
+                required_files.push(bedrock.clone());
+                args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
+            }
         }
         if crop {
             let crop_surface = rawdata.join("global_CFT_surface_data.nc");
@@ -4304,14 +4543,19 @@ fn spatial_case_command(
                 crop_surface.display().to_string(),
             ]);
         }
-        if case_bool(&document, "DEF_USE_BEDROCK", false)? {
-            required_files.push(bedrock.clone());
-            args.extend(["--bedrock".to_owned(), bedrock.display().to_string()]);
-        }
         if lulcc {
             args.push("--lulcc".to_owned());
         }
-        for lai_year in case_lai_years(&document, year)? {
+        let lai_years = if lulcc {
+            vec![if lulcc_lai_only {
+                requested_year
+            } else {
+                snapshot_year
+            }]
+        } else {
+            case_lai_years(&document, year)?
+        };
+        for lai_year in lai_years {
             args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
         }
         if let Some(blocks) = &blocks {
@@ -4685,17 +4929,7 @@ fn eight_day_julian_day(time: usize) -> usize {
 }
 
 fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)> {
-    if year < 0 {
-        bail!("monthly PFT vegetation year must be non-negative")
-    }
-    Ok((
-        format!("MOD{year:04}"),
-        if year < 2000 {
-            format!("{prefix}_{year:04}")
-        } else {
-            prefix.to_owned()
-        },
-    ))
+    monthly_vegetation_source(prefix, year)
 }
 
 fn usage() -> &'static str {
@@ -5423,6 +5657,106 @@ mod tests {
     }
 
     #[test]
+    fn spatial_lct_urban_assimilates_5km_geometry_grid() {
+        let (root, _) = case_namelist("urban-geometry-grid", "&nl_colm /\n");
+        let mesh = root.join("mesh.nc");
+        let mut file = netcdf::create(&mesh).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_variable::<f64>("lon_w", &["lon"])
+            .unwrap()
+            .put_values(&[114.0, 114.1], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon_e", &["lon"])
+            .unwrap()
+            .put_values(&[114.1, 114.2], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_s", &["lat"])
+            .unwrap()
+            .put_values(&[26.2, 26.3], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_n", &["lat"])
+            .unwrap()
+            .put_values(&[26.3, 26.4], ..)
+            .unwrap();
+        file.add_variable::<i32>("landmask", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1, 1, 1, 1], ..)
+            .unwrap();
+        file.close().unwrap();
+
+        let topology = build_spatial_topology_with_filter_grid_and_raw_grids(
+            &mesh,
+            SpatialInputKind::GridBased,
+            COLM_500M,
+            None,
+            None,
+            &[COLM_500M, COLM_5KM],
+        )
+        .unwrap();
+
+        assert_eq!(topology.pixel.lon_w.len(), 50);
+        assert_eq!(topology.pixel.lat_s.len(), 51);
+        assert_eq!(topology.mesh.len(), 4);
+        let pixel_count = (0..topology.mesh.len())
+            .map(|element| topology.mesh.pixel_count(element).unwrap())
+            .sum::<usize>();
+        assert_eq!(pixel_count, 48 * 48);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_lct_urban_extra_grids_handle_antimeridian_domain() {
+        let (root, _) = case_namelist("urban-antimeridian-grid", "&nl_colm /\n");
+        let mesh = root.join("mesh.nc");
+        let mut file = netcdf::create(&mesh).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_variable::<f64>("lon_w", &["lon"])
+            .unwrap()
+            .put_values(&[-180.0, 0.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon_e", &["lon"])
+            .unwrap()
+            .put_values(&[0.0, -180.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_s", &["lat"])
+            .unwrap()
+            .put_values(&[-1.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_n", &["lat"])
+            .unwrap()
+            .put_values(&[1.0], ..)
+            .unwrap();
+        file.add_variable::<i32>("landmask", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1, 1], ..)
+            .unwrap();
+        file.close().unwrap();
+
+        let topology = build_spatial_topology_with_filter_grid_and_raw_grids(
+            &mesh,
+            SpatialInputKind::GridBased,
+            COLM_500M,
+            Some(SpatialBounds {
+                south: -0.1,
+                north: 0.1,
+                west: 179.9,
+                east: -179.9,
+            }),
+            None,
+            &[COLM_500M, COLM_5KM],
+        )
+        .unwrap();
+
+        assert_eq!(topology.pixel.edge_west, 179.9);
+        assert!((topology.pixel.edge_east + 179.9).abs() < 1.0e-12);
+        assert_eq!(topology.mesh.len(), 2);
+        assert!(topology.pixel.lon_w.len() > 48);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn spatial_lct_materializer_filters_before_patch_partition() {
         let (root, _) = case_namelist("mesh-filter-output", "&nl_colm /\n");
         let x: Vec<_> = (43201..=43205).map(|i| COLM_500M.lon_w(i)).collect();
@@ -5571,9 +5905,9 @@ mod tests {
         variable.set_chunking(&[1, 2]).unwrap();
         variable.put_values(&[1, 2], (0..1, 0..2)).unwrap();
         file.close().unwrap();
-        for (lulcc, wmo) in [(false, false), (false, true), (true, false), (true, true)] {
-            let output = root.join(format!("output-lulcc-{lulcc}-wmo-{wmo}"));
-            let mut args = vec![
+        for wmo in [false, true] {
+            let output = root.join(format!("output-wmo-{wmo}"));
+            let args = vec![
                 "latlon".into(),
                 mesh.display().to_string(),
                 landtype.display().to_string(),
@@ -5584,9 +5918,6 @@ mod tests {
                 "--output-2m-wmo".into(),
                 wmo.to_string(),
             ];
-            if lulcc {
-                args.push("--lulcc".into());
-            }
             materialize_spatial_pft(&args).unwrap();
             let pfts = netcdf::open(output.join("landpft/2005/landpft_W180_S90.nc")).unwrap();
             let shares = pfts
@@ -5615,58 +5946,135 @@ mod tests {
                     .unwrap(),
                 if wmo { vec![1, 1, -1] } else { vec![1, 1] }
             );
-            let lc1_path = output.join("lulcc/2005/lccpct_patches_lc01_W180_S90.nc");
-            if !lulcc {
-                assert!(!lc1_path.exists());
-                continue;
-            }
-            let lc1 = netcdf::open(lc1_path)
-                .unwrap()
-                .variable("lccpct_patches")
-                .unwrap()
-                .get_values::<f64, _>(..)
-                .unwrap();
-            let lc2 = netcdf::open(output.join("lulcc/2005/lccpct_patches_lc02_W180_S90.nc"))
-                .unwrap()
-                .variable("lccpct_patches")
-                .unwrap()
-                .get_values::<f64, _>(..)
-                .unwrap();
-            assert_eq!(lc1.len(), if wmo { 2 } else { 1 });
-            assert_eq!(lc2.len(), if wmo { 2 } else { 1 });
-            assert!((lc1[0] - 0.5).abs() < 1.0e-12);
-            assert!((lc2[0] - 0.5).abs() < 1.0e-12);
-            if wmo {
-                assert_eq!(lc1[1], 0.0);
-                assert_eq!(lc2[1], 0.0);
-            }
         }
+
+        let topology = SpatialTopology {
+            kind: SpatialInputKind::GridBased,
+            grid: colm_srfdata::SpatialGrid {
+                lon_w: vec![COLM_500M.lon_w(1)],
+                lon_e: vec![COLM_500M.lon_e(2)],
+                lat_s: vec![COLM_500M.lat_s(1)],
+                lat_n: vec![COLM_500M.lat_n(1)],
+            },
+            pixel: PixelAxes {
+                edge_south: COLM_500M.lat_s(1),
+                edge_north: COLM_500M.lat_n(1),
+                edge_west: COLM_500M.lon_w(1),
+                edge_east: COLM_500M.lon_e(2),
+                lon_w: vec![COLM_500M.lon_w(1), COLM_500M.lon_w(2)],
+                lon_e: vec![COLM_500M.lon_e(1), COLM_500M.lon_e(2)],
+                lat_s: vec![COLM_500M.lat_s(1)],
+                lat_n: vec![COLM_500M.lat_n(1)],
+            },
+            source: None,
+            element_block_owners: None,
+            land_elements: FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1])
+                .unwrap()
+                .land_elements(),
+            mesh: FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap(),
+        };
+        let patches = FlatLandPatches {
+            element_ids: vec![1, 1],
+            pixel_start: vec![1, 0],
+            pixel_end: vec![2, 0],
+            set_type: vec![1, 1],
+            element_index: vec![1, 1],
+        };
+        let transfer_output = root.join("transfer-wmo");
+        materialize_lulcc_transfer_traces(
+            LulccTraceArgs {
+                enabled: true,
+                year: 2005,
+                plant_tiles: Some(root.as_path()),
+                landdata: &transfer_output,
+                blocks: &BlockLayout::regular(1, 1).unwrap(),
+                diagnostics: false,
+                pctshared: None,
+            },
+            &topology,
+            &patches,
+        )
+        .unwrap();
+        let lc1 = netcdf::open(transfer_output.join("lulcc/2005/lccpct_patches_lc01_W180_S90.nc"))
+            .unwrap()
+            .variable("lccpct_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        let lc2 = netcdf::open(transfer_output.join("lulcc/2005/lccpct_patches_lc02_W180_S90.nc"))
+            .unwrap()
+            .variable("lccpct_patches")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(lc1, vec![0.5, 0.0]);
+        assert_eq!(lc2, vec![0.5, 0.0]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn spatial_pft_lulcc_rejects_pre_2000_non_snapshot_year_before_outputs() {
-        let root = std::env::temp_dir().join(format!(
-            "colm-srfdata-pft-lulcc-guard-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let output = root.join("landdata");
-        let error = materialize_spatial_pft(&[
-            "latlon".into(),
-            root.join("mesh.nc").display().to_string(),
-            root.join("landtype.nc").display().to_string(),
-            output.display().to_string(),
-            "1999".into(),
-            "--plant-tiles".into(),
-            root.display().to_string(),
-            "--lulcc".into(),
-        ])
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("five-year snapshots"));
-        assert!(!output.exists());
-        let _ = std::fs::remove_dir_all(root);
+    fn spatial_pft_lulcc_pre_2000_non_snapshot_case_uses_snapshot_topology_and_requested_lai() {
+        let (root, namelist) = case_namelist(
+            "pft-lulcc-lai-only",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_LC_YEAR=1999
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.true.
+ DEF_USE_PC=.false.
+ DEF_USE_LULCC=.true.
+ DEF_USE_SrfdataDiag=.true.
+/
+",
+        );
+
+        let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+            .unwrap()
+            .unwrap();
+
+        assert!(command.pft_or_pc);
+        assert!(command.args.iter().any(|argument| argument == "--lulcc"));
+        assert_eq!(command.args[4], "1999");
+        assert_eq!(
+            command.args[2],
+            format!(
+                "{}/raw/landtypes/landtype-igbp-modis-1995.nc",
+                root.display()
+            )
+        );
+        assert_eq!(
+            option_value(&command.args, "--monthly-vegetation-year"),
+            Some("1999")
+        );
+        let parsed = parse_spatial_pft(&command.args).unwrap();
+        assert_eq!(parsed.year, 1999);
+        assert!(parsed.lulcc);
+        assert!(!parsed.lulcc_lai_only);
+        assert!(command.required_files.contains(&root.join("mesh.nc")));
+        assert!(command
+            .required_files
+            .contains(&root.join("raw/landtypes/landtype-igbp-modis-1995.nc")));
+        for skipped in [
+            "raw/lake_depth.nc",
+            "raw/soil/soiltexture_0cm-60cm_mean.nc",
+            "raw/soil_brightness.nc",
+            "raw/topography.nc",
+        ] {
+            assert!(
+                !command.required_files.contains(&root.join(skipped)),
+                "LAI-only case should not preflight {skipped}"
+            );
+        }
+        assert!(command
+            .required_directories
+            .contains(&root.join("raw/plant_15s")));
+        assert!(!command
+            .required_directories
+            .contains(&root.join("raw/soil")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6306,6 +6714,58 @@ mod tests {
     }
 
     #[test]
+    fn spatial_lulcc_lai_only_urban_case_keeps_topology_inputs_only() {
+        let (root, namelist) = case_namelist(
+            "urban-lulcc-lai-only",
+            "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='$ROOT/out'
+ DEF_dir_rawdata='$ROOT/raw'
+ DEF_file_mesh='$ROOT/mesh.nc'
+ DEF_USE_LCT=.true.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ DEF_USE_LULCC=.true.
+ DEF_URBAN_RUN=.true.
+ DEF_URBAN_type_scheme=2
+ DEF_LC_YEAR=1999
+/
+",
+        );
+
+        let command = spatial_case_command(&namelist, None, false, None, None)
+            .unwrap()
+            .unwrap();
+        assert!(!command.pft_or_pc);
+        assert_eq!(command.args[4], "1999");
+        assert_eq!(
+            command.args[2],
+            format!(
+                "{}/raw/landtypes/landtype-igbp-modis-1995.nc",
+                root.display()
+            )
+        );
+        assert_eq!(
+            option_value(&command.args, "--monthly-vegetation-year"),
+            Some("1999")
+        );
+        assert!(command
+            .required_directories
+            .contains(&root.join("raw/urban_type")));
+        assert!(!command
+            .required_directories
+            .contains(&root.join("raw/urban")));
+        assert!(!command
+            .required_directories
+            .contains(&root.join("raw/urban_lai_500m")));
+        assert!(!command
+            .required_files
+            .contains(&root.join("raw/urban/LUCY_regionid.nc")));
+        assert!(command.args.iter().any(|arg| arg == "--urban-rawdata"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn spatial_ncar_urban_case_uses_the_regional_property_table() {
         let (root, namelist) = case_namelist(
             "urban-ncar",
@@ -6521,6 +6981,63 @@ mod tests {
         assert_eq!(lulcc_previous_land_cover_year(2000), Some(1995));
         assert_eq!(lulcc_previous_land_cover_year(2001), Some(2000));
         assert_eq!(lulcc_previous_land_cover_year(1999), None);
+        assert!(lulcc_historical_lai_only_year(1999));
+        assert!(!lulcc_historical_lai_only_year(1995));
+        assert!(!lulcc_historical_lai_only_year(2001));
+        assert_eq!(lulcc_snapshot_year(1984), 1985);
+        assert_eq!(lulcc_snapshot_year(1999), 1995);
+        assert_eq!(lulcc_snapshot_year(2001), 2001);
+        let mut years = Vec::new();
+        normalize_lulcc_monthly_years(&mut years, 1999).unwrap();
+        assert_eq!(years, vec![1999]);
+        normalize_lulcc_monthly_years(&mut years, 1999).unwrap();
+        assert!(normalize_lulcc_monthly_years(&mut years, 1995).is_err());
+        let mut duplicate = vec![1999, 1999];
+        assert!(normalize_lulcc_monthly_years(&mut duplicate, 1999).is_err());
+    }
+
+    #[test]
+    fn spatial_lulcc_direct_rejects_wrong_monthly_year_before_source_reads() {
+        let lct_error = materialize_spatial_lct(&[
+            "latlon".into(),
+            "missing-mesh.nc".into(),
+            "missing-landtype.nc".into(),
+            "landdata".into(),
+            "1999".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+            "--lulcc".into(),
+            "--monthly-vegetation-year".into(),
+            "1995".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            lct_error
+                .to_string()
+                .contains("LULCC monthly vegetation years"),
+            "{lct_error:#}"
+        );
+        let pft_error = materialize_spatial_pft(&[
+            "latlon".into(),
+            "missing-mesh.nc".into(),
+            "missing-landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+            "--lulcc".into(),
+            "--monthly-vegetation-year".into(),
+            "2004".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            pft_error
+                .to_string()
+                .contains("LULCC monthly vegetation years"),
+            "{pft_error:#}"
+        );
     }
 
     #[test]
@@ -6536,10 +7053,10 @@ mod tests {
     }
 
     #[test]
-    fn historical_pft_monthly_vegetation_keeps_its_native_yearly_tile() {
+    fn historical_pft_monthly_vegetation_uses_the_upstream_five_year_source() {
         assert_eq!(
             monthly_pft_vegetation_source("MONTHLY_PFT_LAI", 1999).unwrap(),
-            ("MOD1999".into(), "MONTHLY_PFT_LAI_1999".into())
+            ("MOD1995".into(), "MONTHLY_PFT_LAI_1999".into())
         );
         assert_eq!(
             monthly_pft_vegetation_source("MONTHLY_PFT_SAI", 2005).unwrap(),

@@ -46,8 +46,9 @@ IGBP/USGS/PFT/PC, urban, crop, BGC, LULCC, and each enabled downscaling branch:
    sample `global_CFT_surface_data.nc/PCT_CFT` and use the native PFT-fraction-weighted
    monthly vegetation for every active CFT. PFT/PC and LULCC retain the upstream monthly coercion. IGBP LULCC
    cases also write the class-major previous-year transfer vectors required by the runtime;
-   pre-2000 non-five-year source requests remain refused because upstream emits only monthly
-   LAI for that special path. Desktop packaging now ships `mksrfdata-rs` beside `colm-cli`;
+   pre-2000 non-five-year requests preserve the snapshot topology year and write only
+   the requested monthly LAI/SAI, matching the upstream early-exit branch. Desktop
+   packaging now ships `mksrfdata-rs` beside `colm-cli`;
    `colm-cli run` selects Rust for both preprocessing stages by default and keeps
    `--preprocessors fortran` as the explicit fallback. HYPERSPECTRAL PFT/PC runs pass
    `--soil-hyper-albedo-dir <colm_input_ghsad>` through to Rust so the 211 x10,000-encoded input
@@ -125,9 +126,13 @@ Spatial PFT/PC patch modes now honor `DEF_SOLO_PFT` and `DEF_FAST_PC`, including
 fast-PC cropland preservation and natural PFT parents beyond IGBP class 1.
 Direct commands select `--patch-mode merged|separate|fast-pc` (default merged).
 PFT/PC current-year and historical five-year snapshot LULCC now share the LCT
-transfer writer (`--lulcc` for direct commands). Pre-2000 non-snapshot LAI-only
-requests remain explicitly unsupported. Real PFT transfer/initial evidence and
-remaining scientific limits are recorded in the [parity audit](preprocessing-parity-status.md#pftpc-lulcc-preprocessing-and-diagnostic-parity).
+transfer writer (`--lulcc` for direct commands). Pre-2000 non-snapshot requests
+now take the LAI-only branch: topology uses the five-year snapshot, monthly fields
+retain the requested year, and skipped material fields are neither required nor
+written. LULCC always selects exactly one effective monthly year, including direct
+commands. Real PFT transfer/initial evidence and historical synthetic checks are
+recorded in the [parity audit](preprocessing-parity-status.md#historical-lulcc-lai-only-surface).
+A LAI-only output is not a complete cold-start surface.
 
 ### Explicit mesh filters
 

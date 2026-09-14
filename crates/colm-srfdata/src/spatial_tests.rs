@@ -355,7 +355,7 @@ fn sub_microdegree_edges_remain_on_axes_but_not_in_mesh_membership() {
         lat_n: vec![90.0],
     };
     let PixelMapping { pixel, columns, .. } =
-        assimilated_pixels(&grid, Grid { nlon: 4, nlat: 2 }, None, None).unwrap();
+        assimilated_pixels(&grid, Grid { nlon: 4, nlat: 2 }, None, None, &[]).unwrap();
     assert_eq!(pixel.lon_w[3], 0.5e-6);
     assert_eq!(columns, [Some(0), Some(0), None, Some(1), Some(1)]);
     assert!(assimilated_pixels(
@@ -367,7 +367,8 @@ fn sub_microdegree_edges_remain_on_axes_but_not_in_mesh_membership() {
             west: 0.0,
             east: 30.0
         }),
-        None
+        None,
+        &[]
     )
     .is_err());
 }

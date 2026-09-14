@@ -659,11 +659,10 @@ comparison were preserved in `valid-before-numeric-fix/`; the same corrected
 case passes after the mapping/writer repairs. Existing diagnostic writer tests
 also failed for coordinate order/record schema before the fix and pass afterward.
 
-Pre-2000 non-five-year LULCC uses an upstream LAI-only branch which remains
-unmigrated. Both direct PFT commands and case commands reject that unsupported
-request before output. Real-data PC/CROP LULCC and the broader control matrix
-remain separate acceptance work; shared dispatch and synthetic tests are not
-substitutes for those comparisons.
+The pre-2000 non-five-year rejection recorded in this earlier check is superseded
+by the [historical LAI-only migration](#historical-lulcc-lai-only-surface) below.
+Real-data PC/CROP LULCC and the broader control matrix remain separate acceptance
+work; shared dispatch and synthetic tests are not substitutes for those comparisons.
 
 During isolated original-LULCC setup, an incorrect test namelist touched an
 older generated WMO reference. That output was moved to
@@ -711,3 +710,80 @@ For this initializer repair, all 89 library + 12 binary tests, nine opt-in
 Fortran reference checks and six native executable/pipeline checks pass, along
 with Clippy, downstream checks and a release build. Logs are in
 `/tmp/colm-historical-migration/`; the independent source review found no issue.
+
+
+## Historical LULCC LAI-only surface
+
+The native LCT/PFT/PC materializers now preserve the upstream pre-2000
+non-five-year branch. For a 1999 request, topology uses the 1995 snapshot while
+monthly vegetation reads `MOD1995/MONTHLY_*_LAI_1999` and `MONTHLY_*_SAI_1999`
+and writes `LAI/1999`. Existing monthly aggregators/writers are shared with the
+normal path; no second materializer or dependency was added. The branch skips
+soil, lake, height, topography, PFT-fraction aggregation, transfer traces and
+urban material/tree-LAI work, but retains required topology and baseline/LAI
+diagnostics. Urban type input is still required for `landurban` topology.
+
+Case and direct LULCC commands both select exactly one effective LAI year;
+direct commands fill an omitted year or reject a conflicting/multiple-year list
+before source reads or output. Normal/snapshot LULCC uses the normalized LC year,
+not an arbitrary simulation-year interval. This branch **does not produce a
+complete cold-start surface**; it cannot substitute for snapshot preprocessing.
+
+No usable real 1995 landtype and 1999 monthly tile were found in the available
+data locations. The discovery record is `/tmp/colm-lulcc-1999-original/`.
+Historical branch verification therefore uses explicitly **synthetic** sparse
+inputs, not relabeled real historical climate data. The original executables
+were built from the supplied unchanged `ebe6de9` source, retaining its serial
+production profile. Original inputs deliberately omit skipped HTOP/soil/material
+files and any `MOD1999` tile, so a wrong read or incomplete early exit fails.
+
+The original fixture roots are `/tmp/colm-lulcc-1999-synthetic-original/` (PFT)
+and `/tmp/colm-lulcc-1999-synthetic-{lct,pc,wmo,urban}-original/`; Rust roots
+replace `original` with `rust`. Each retains namelists, build/run logs, binary
+hashes, input specifications and comparisons. Rust explicitly maps the original
+compile-time LULCC/diagnostic/urban choices to namelist options and uses the same
+72 × 36 block layout. Comparisons reuse the existing NetCDF comparator, require
+exact file/schema contracts except `create_time`, and retain `atol=rtol=1e-12`.
+
+Fresh final comparisons pass all **257 files / 616 variables** in these five
+synthetic grid-based cases:
+
+| Mode | Files | Variables | Schema and numeric gate |
+| --- | ---: | ---: | --- |
+| PFT, separate patches | 62 | 142 | PASS |
+| LCT | 35 | 93 | PASS |
+| Fast PC | 62 | 142 | PASS |
+| PFT + WMO | 62 | 142 | PASS |
+| LCT + NCAR urban | 36 | 97 | PASS |
+
+The urban executable comparison caught a missing raw-grid assimilation: original
+`URBAN_MODEL` also merges its 5 km grid before the LAI-only skip. Its near-duplicate
+boundaries remain in `pixel.nc` but do not acquire mesh ownership. Rust previously
+wrote 48 × 48 axes instead of the original 50 longitude × 51 latitude axes,
+shifting `elmpixels` indices despite matching all 34 other files. The valid
+before-fix case/output/comparison is retained in the urban Rust root's
+`valid-before-grid-fix/`. Extra raw grids now flow through the existing spatial
+and catchment axis-union routine, preserving wrapped-longitude handling and
+near-zero-cell exclusion. No manual bounds reader, fake mesh filter or second
+geometry implementation was retained. Unit regressions cover the original
+urban axis/ownership counts and an antimeridian domain. Full urban/catchment
+material-field parity still requires separate representative cases.
+
+All five final outputs use the same freshly built executable; aggregate evidence
+is `/tmp/colm-historical-migration/original-synthetic-comparisons.json`. Maximum
+absolute differences range from about `9.5e-12` to `1.8e-11` on large synthetic
+vegetation values and pass the unchanged **combined absolute/relative** tolerance;
+this is not a claim of bitwise equality or pure absolute error below `1e-12`.
+
+Fresh validation in `/tmp/colm-historical-migration/final/` passes 231 surface
+library + 42 binary tests, 89 initializer library + 12 binary tests, 11 data
+checks, ten opt-in Fortran references and six native pipeline checks (**401**
+total). All-target Clippy with warnings denied, downstream CLI/kernel checks,
+changed-file formatting and release builds pass. Independent source review
+approved the historical dispatch, urban topology and shared grid-union changes.
+Fresh normal-year PFT LULCC again matches all 299 schemas and 18 transfer files;
+all 36 previously failing soil/downstream file reports are unchanged. The
+SOLO_PFT/WMO diagnostic gate passes, and isolated initialization from the unchanged
+original surface passes five files / 164 variables (148 bitwise). None of these
+checks resolves the nonlinear soil-fit failures or the remaining real-data and
+control-mode acceptance matrix.

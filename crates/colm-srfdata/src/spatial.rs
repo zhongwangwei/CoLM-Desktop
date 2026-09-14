@@ -336,6 +336,24 @@ pub fn build_spatial_topology_with_filter_grid(
     bounds: Option<crate::SpatialBounds>,
     filter_grid: Option<&SpatialGrid>,
 ) -> Result<SpatialTopology> {
+    build_spatial_topology_with_filter_grid_and_raw_grids(
+        path,
+        kind,
+        raw_grid,
+        bounds,
+        filter_grid,
+        &[],
+    )
+}
+
+pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
+    path: impl AsRef<Path>,
+    kind: SpatialInputKind,
+    raw_grid: Grid,
+    bounds: Option<crate::SpatialBounds>,
+    filter_grid: Option<&SpatialGrid>,
+    extra_raw_grids: &[Grid],
+) -> Result<SpatialTopology> {
     let path = path.as_ref();
     ensure!(
         kind != SpatialInputKind::Catchment,
@@ -357,7 +375,7 @@ pub fn build_spatial_topology_with_filter_grid(
         pixel,
         columns,
         rows,
-    } = assimilated_pixels(&grid, raw_grid, bounds, filter_grid)?;
+    } = assimilated_pixels(&grid, raw_grid, bounds, filter_grid, extra_raw_grids)?;
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
     let mut raw_count = 0_usize;
@@ -440,6 +458,24 @@ pub fn build_catchment_spatial_topology_with_filter(
     filter: Option<&MeshFilter>,
     block_layout: Option<&BlockLayout>,
 ) -> Result<CatchmentSpatialTopology> {
+    build_catchment_spatial_topology_with_filter_and_raw_grids(
+        path,
+        raw_grid,
+        bounds,
+        filter,
+        block_layout,
+        &[],
+    )
+}
+
+pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
+    path: impl AsRef<Path>,
+    raw_grid: Grid,
+    bounds: Option<crate::SpatialBounds>,
+    filter: Option<&MeshFilter>,
+    block_layout: Option<&BlockLayout>,
+    extra_raw_grids: &[Grid],
+) -> Result<CatchmentSpatialTopology> {
     let path = path.as_ref();
     let summary = inspect_spatial_input(path, SpatialInputKind::Catchment.input_label())?;
     let source_cells = summary
@@ -468,7 +504,13 @@ pub fn build_catchment_spatial_topology_with_filter(
         pixel,
         columns,
         rows,
-    } = assimilated_pixels(&grid, raw_grid, bounds, filter.map(|filter| &filter.grid))?;
+    } = assimilated_pixels(
+        &grid,
+        raw_grid,
+        bounds,
+        filter.map(|filter| &filter.grid),
+        extra_raw_grids,
+    )?;
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32, i32)>>::new();
     let mut raw_count = 0_usize;
@@ -4348,6 +4390,7 @@ fn assimilated_pixels(
     raw: Grid,
     bounds: Option<crate::SpatialBounds>,
     filter_grid: Option<&SpatialGrid>,
+    extra_raw_grids: &[Grid],
 ) -> Result<PixelMapping> {
     ensure!(raw.nlon > 0 && raw.nlat > 0, "raw grid must be nonempty");
     ensure!(
@@ -4439,6 +4482,11 @@ fn assimilated_pixels(
                 .flat_map(|grid| grid.lon_w.iter().chain(&grid.lon_e).copied()),
         )
         .chain((0..raw.nlon).map(|i| raw.lon_w(i + 1)))
+        .chain(
+            extra_raw_grids
+                .iter()
+                .flat_map(|grid| (0..grid.nlon).map(|i| grid.lon_w(i + 1))),
+        )
     {
         // Avoid changing the last bits of already-in-window coordinates.
         let edge = if edge >= west && edge <= east {
@@ -4462,6 +4510,11 @@ fn assimilated_pixels(
                 .flat_map(|grid| grid.lat_s.iter().chain(&grid.lat_n).copied()),
         )
         .chain((0..=raw.nlat).map(|j| raw.lat_s(j)))
+        .chain(
+            extra_raw_grids
+                .iter()
+                .flat_map(|grid| (0..=grid.nlat).map(|j| grid.lat_s(j))),
+        )
     {
         if edge > bounds.south && edge < bounds.north {
             ys.push(edge);
