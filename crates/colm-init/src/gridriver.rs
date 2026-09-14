@@ -132,15 +132,22 @@ pub fn write_gridriver_cold_restart(
         &[],
         &[i32::from(config.levee)],
     )?;
+    // `ncio_write_serial` receives `(field, ucatch)` from Fortran, which
+    // stores as `(ucatch, field)` in NetCDF. Keep the same object-major
+    // layout used by the other Rust restart writers.
     let mut identity = Vec::with_capacity(4 * count);
-    identity.extend(std::iter::repeat_n(UCATCH_IDENTITY_VERSION, count));
-    identity.extend(x.iter().map(|value| f64::from(*value)));
-    identity.extend(y.iter().map(|value| f64::from(*value)));
-    identity.extend(next.iter().map(|value| f64::from(*value)));
+    for index in 0..count {
+        identity.extend([
+            UCATCH_IDENTITY_VERSION,
+            f64::from(x[index]),
+            f64::from(y[index]),
+            f64::from(next[index]),
+        ]);
+    }
     put_f64(
         &mut file,
         "gridriver_ucatch_identity",
-        &["gridriver_ucatch_identity_field", "ucatch"],
+        &["ucatch", "gridriver_ucatch_identity_field"],
         &identity,
     )?;
     let zeros = vec![0.0; count];

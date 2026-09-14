@@ -53,11 +53,11 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
             .iter()
             .map(|d| d.name())
             .collect::<Vec<_>>(),
-        ["gridriver_ucatch_identity_field", "ucatch"]
+        ["ucatch", "gridriver_ucatch_identity_field"]
     );
     assert_eq!(
         identity.get_values::<f64, _>(..).unwrap(),
-        [1.0, 1.0, 3.0, 4.0, 5.0, 6.0, 2.0, 0.0]
+        [1.0, 3.0, 5.0, 2.0, 1.0, 4.0, 6.0, 0.0]
     );
     assert_eq!(
         file.variable("wdsrf_ucat")
