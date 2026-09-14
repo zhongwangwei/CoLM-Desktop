@@ -6,6 +6,38 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## PFT initializer scalar follow-up
+
+The original compiled PFT-to-patch height and SAI sums retain ordered FMA.
+Single-point `weighted_sum` now preserves that operation while keeping its
+nonempty/equal-length/finite validation; spatial indexed reductions use the same
+fold without allocating gathered vectors. Common roughness now scales the
+aggregated canopy height, rather than aggregating already-scaled PFT roughness.
+Per-PFT roughness, radiation threshold sums and hyperspectral sums are unchanged.
+
+Compact original-expression height/SAI prefixes and roughness-grouping goldens
+have actual RED/GREEN evidence. A runtime-slice Fortran probe with the unchanged
+`-O2 -fdefault-real-8` flags confirms the accepted bits; an earlier fixed-array
+lowering mismatch is retained, not used as the final golden. All **672 integrated
+tests**, Clippy, downstream checks and scoped formatting pass. Independent review
+approves the three-file production/test diff. Evidence:
+`/tmp/colm-pc-patch-weighted-fix/` and `/tmp/colm-pc-patch-reduction-audit/`.
+
+Fresh initializer/original-runtime runs reuse unchanged, independently generated
+Rust ZIP surface data (surface generation was **not** rerun):
+`/tmp/colm-pc-patch-weighted.olc45m58/` and
+`/tmp/colm-pft-patch-weighted-wmo.toqvabbp/`. Both stages exit 0 in each case.
+All PC constant-restart floating fields are now **67/67 bitwise equal**; cold
+`htop`/`sai`/`z0m` scalar drift is removed. PC cold time restart has 84/92 floating
+fields bitwise equal; the eight residual fields are radiation outputs. Complete
+surface/cold/post restart comparisons still pass at the unchanged tolerance.
+
+History is not fixed by this scalar correction: PC and PFT/WMO retain four
+`f_zerr` failures each, with maxima `1.2363443602225743e-12` and
+`1.0231815394945443e-12` respectively. The remaining radiation and all-mode
+scientific gates stay open. Frozen initializer SHA-256:
+`29bd4f7b557399f71039c63264b0a43c484483208e4fae12421cbb36940fe475`.
+
 ## Latest PFT/PC surface result: separate topology and ZIP aggregation inputs
 
 PFT topology and crop shares retain original mesh order (`zip=false`). The

@@ -282,14 +282,12 @@ pub fn write_spatial_pft_constant_restarts(
                 !indices.is_empty(),
                 "natural patch {patch} has no PFT canopy"
             );
-            canopy.patch_top_m[patch] = indices
-                .iter()
-                .map(|&pft| pft_heights.top_m[pft] * pfts.fraction[pft])
-                .sum();
-            canopy.patch_bottom_m[patch] = indices
-                .iter()
-                .map(|&pft| pft_heights.bottom_m[pft] * pfts.fraction[pft])
-                .sum();
+            canopy.patch_top_m[patch] = indices.iter().fold(0.0, |sum, &pft| {
+                pft_heights.top_m[pft].mul_add(pfts.fraction[pft], sum)
+            });
+            canopy.patch_bottom_m[patch] = indices.iter().fold(0.0, |sum, &pft| {
+                pft_heights.bottom_m[pft].mul_add(pfts.fraction[pft], sum)
+            });
         }
     }
     let common = write_spatial_lct_constant_restart_with_canopy(common, Some(canopy))?;
@@ -905,18 +903,15 @@ pub fn write_spatial_pft_cold_time_restarts(
             radiation.shaded_absorption = [[0.0; 2]; 2];
         }
         common_radiation[patch] = Some(radiation);
+        // MOD_IniTimeVariable scales the aggregated HTOP, not each PFT's z0m.
         common_roughness[patch] = Some(
-            indices
-                .iter()
-                .map(|&index| roughness[index] * pfts.fraction[index])
-                .sum(),
+            indices.iter().fold(0.0, |sum, &pft| {
+                canopy.top_m[pft].mul_add(pfts.fraction[pft], sum)
+            }) * 0.1,
         );
-        common_sai[patch] = Some(
-            indices
-                .iter()
-                .map(|&pft| total_sai[pft] * pfts.fraction[pft])
-                .sum(),
-        );
+        common_sai[patch] = Some(indices.iter().fold(0.0, |sum, &pft| {
+            total_sai[pft].mul_add(pfts.fraction[pft], sum)
+        }));
         if high_resolution_canopy {
             for wavelength in 0..HIGH_RES_WAVELENGTHS {
                 for radiation_type in 0..2 {

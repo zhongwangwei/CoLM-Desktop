@@ -8,6 +8,52 @@ use crate::{
 use super::*;
 
 #[test]
+fn pft_patch_weighted_scalars_preserve_original_compiled_sums() {
+    // Actual PC prefixes, original MOD_HtopReadin/MOD_IniTimeVariable SUM(a*b),
+    // gfortran -O2 -fdefault-real-8. Prefix weights are not renormalized.
+    let height = [0.5, 25.658609866484777];
+    let fraction = [0.00021705590164805097, 0.3537185466260479];
+    let top = weighted_sum(&height, &fraction).unwrap();
+    assert_eq!(top.to_bits(), 0x402226ee05c981e2);
+    let height = [
+        0.5,
+        25.658609866484777,
+        29.4230452942069,
+        27.533709263470715,
+    ];
+    let fraction = [
+        0.00021705590164805097,
+        0.3537185466260479,
+        0.007744153660925456,
+        0.03726299648373725,
+    ];
+    assert_eq!(
+        (weighted_sum(&height, &fraction).unwrap() * 0.1).to_bits(),
+        0x3ff0871e67d2cad7
+    );
+    let sai = [
+        0.0,
+        1.0680911852623995,
+        0.9923584630600075,
+        1.0765703994780602,
+    ];
+    let fraction = [
+        5.921071845949028e-18,
+        0.35125384503920265,
+        0.15236981812411377,
+        0.10774828904151659,
+    ];
+    assert_eq!(
+        weighted_sum(&sai, &fraction).unwrap().to_bits(),
+        0x3fe48e568111ff5b
+    );
+    assert!(weighted_sum(&[], &[]).is_err());
+    assert!(weighted_sum(&[1.0], &[0.5, 0.5]).is_err());
+    assert!(weighted_sum(&[f64::NAN], &[1.0]).is_err());
+    assert!(weighted_sum(&[1.0], &[f64::INFINITY]).is_err());
+}
+
+#[test]
 fn static_config_uses_the_upstream_namelist_defaults() {
     assert_eq!(RestartTuning::default().zlnd, 0.01);
     assert_eq!(RestartTuning::default().wetwatmax, 200.0);
