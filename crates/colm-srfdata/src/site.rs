@@ -2697,12 +2697,46 @@ fn materialize_single_point_pft_fields(
     );
 
     let plant = rawdata.join("plant_15s");
-    let classes = if missing_composition {
-        (1..=MODIS_PFT_CLASSES).collect::<Vec<_>>()
+    let raw_pft_fractions = missing_composition
+        .then(|| {
+            (1..=MODIS_PFT_CLASSES)
+                .map(|pft| {
+                    point_5x5_pft_f64(
+                        &plant,
+                        &format!("MOD{:04}", options.land_cover_year),
+                        "PCT_PFT",
+                        longitude,
+                        latitude,
+                        pft,
+                    )
+                    .with_context(|| format!("cannot read PCT_PFT class {}", pft - 1))
+                })
+                .collect::<Result<Vec<_>>>()
+                .and_then(|values| {
+                    ensure!(
+                        values
+                            .iter()
+                            .all(|value| value.is_finite() && *value >= 0.0)
+                            && values.iter().sum::<f64>() > 0.0,
+                        "PCT_PFT must contain a positive finite fraction"
+                    );
+                    Ok(values)
+                })
+        })
+        .transpose()?;
+    let (classes, pft_fractions) = if let Some(values) = raw_pft_fractions {
+        let total = values.iter().sum::<f64>();
+        let (classes, fractions): (Vec<_>, Vec<_>) = values
+            .into_iter()
+            .enumerate()
+            .filter(|(_, fraction)| *fraction > 0.0)
+            .map(|(class, fraction)| (class + 1, fraction / total))
+            .unzip();
+        (classes, fractions)
     } else {
         let file = netcdf::open(surface)
             .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
-        values_f64(&file, "pfttyp")?
+        let classes = values_f64(&file, "pfttyp")?
             .into_iter()
             .map(|value| {
                 let rounded = value.round();
@@ -2714,37 +2748,10 @@ fn materialize_single_point_pft_fields(
                 );
                 Ok(rounded as usize + 1)
             })
-            .collect::<Result<Vec<_>>>()?
+            .collect::<Result<Vec<_>>>()?;
+        (classes, Vec::new())
     };
     ensure!(!classes.is_empty(), "pfttyp must not be empty");
-
-    let pft_fractions = if missing_composition {
-        (1..=MODIS_PFT_CLASSES)
-            .map(|pft| {
-                point_5x5_pft_f64(
-                    &plant,
-                    &format!("MOD{:04}", options.land_cover_year),
-                    "PCT_PFT",
-                    longitude,
-                    latitude,
-                    pft,
-                )
-                .with_context(|| format!("cannot read PCT_PFT class {}", pft - 1))
-            })
-            .collect::<Result<Vec<_>>>()
-            .and_then(|values| {
-                ensure!(
-                    values
-                        .iter()
-                        .all(|value| value.is_finite() && *value >= 0.0)
-                        && values.iter().sum::<f64>() > 0.0,
-                    "PCT_PFT must contain a positive finite fraction"
-                );
-                Ok(values)
-            })?
-    } else {
-        Vec::new()
-    };
     let canopy_height = missing_height.then(|| {
         point_5x5_f64(
             &plant,
@@ -2826,10 +2833,11 @@ fn materialize_single_point_pft_fields(
             &mut file,
             "pfttyp",
             &["pft"],
-            &(0..MODIS_PFT_CLASSES)
-                .map(|class| class as f64)
+            &classes
+                .iter()
+                .map(|class| (class - 1) as f64)
                 .collect::<Vec<_>>(),
-            "rawdata plant_15s PCT_PFT class index",
+            "rawdata plant_15s positive PCT_PFT class indices",
         )?;
         put_or_replace_values(
             &mut file,

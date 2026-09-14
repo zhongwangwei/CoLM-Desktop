@@ -2240,13 +2240,21 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
     )
     .unwrap();
     let file = netcdf::open(&surface).unwrap();
-    assert_eq!(file.dimension("pft").unwrap().len(), 16);
+    // MOD_SingleSrfdata.F90 packs only positive PCT_PFT classes.
+    assert_eq!(file.dimension("pft").unwrap().len(), 2);
+    assert_eq!(
+        file.variable("pfttyp")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [0.0, 1.0]
+    );
     assert_eq!(
         file.variable("pctpfts")
             .unwrap()
             .get_values::<f64, _>(..)
-            .unwrap()[..2],
-        [60.0, 40.0]
+            .unwrap(),
+        [0.6, 0.4]
     );
     assert_eq!(
         file.variable("canopy_height_pfts")
@@ -2265,10 +2273,7 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
         .unwrap()
         .get_values::<f64, _>(..)
         .unwrap();
-    assert_eq!(
-        (lai[0], lai[191], sai[0], sai[191]),
-        (1.0, 12.15, 2.0, 13.15)
-    );
+    assert_eq!((lai[0], lai[23], sai[0], sai[23]), (1.0, 12.01, 2.0, 13.01));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
