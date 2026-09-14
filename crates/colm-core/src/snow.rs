@@ -7,7 +7,7 @@ use crate::FREEZING_K;
 const MAX_SNOW_LAYERS: usize = 5;
 // `MOD_Const_Physical:tfrz`, compiled by the Desktop reference with
 // `-fdefault-real-8`.
-const SNOW_AGE_FREEZING_K: f64 = 273.16;
+pub(crate) const SNOW_AGE_FREEZING_K: f64 = 273.16;
 
 const fn f77(value: f32) -> f64 {
     value as f64

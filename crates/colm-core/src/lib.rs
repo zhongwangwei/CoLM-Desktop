@@ -37,7 +37,9 @@ pub mod root_uptake;
 pub mod runoff;
 pub mod runtime_clock;
 pub mod runtime_forcing;
+pub mod snicar;
 pub mod snow;
+pub mod snow_grain;
 pub mod soil_surface_resistance;
 pub mod soil_water;
 pub mod standard_lct_step;
@@ -285,4 +287,13 @@ pub use water_2014::{
     water_2014_snow_soil_step, water_2014_soil_step, Water2014Runoff, Water2014SnowSoilInput,
     Water2014SnowSoilOutput, Water2014SoilFluxes, Water2014SoilInput, Water2014SoilOutput,
     Water2014SoilState,
+};
+
+pub use snow_grain::{
+    age_snow_grains, fresh_snow_radius, snow_aerosol_concentrations, SnicarAgingTable,
+    SnowGrainAgingInput, FRESH_SNOW_RADIUS_MAX_UM, FRESH_SNOW_RADIUS_MIN_UM,
+};
+
+pub use snicar::{
+    snicar_ad_rt, SnicarIncident, SnicarInput, SnicarOptics, SnicarResult, SnicarSpectralTable,
 };

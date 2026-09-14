@@ -24,6 +24,7 @@ pub mod met;
 pub mod point;
 pub mod render;
 pub mod slots;
+pub mod snicar;
 pub mod tabular;
 pub mod units;
 
@@ -46,6 +47,7 @@ pub use met::summarize;
 pub use point::{load_point_forcing, PointForcingFrame, PointForcingSeries};
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};
+pub use snicar::{read_snicar_aging, read_snicar_optics};
 pub use tabular::{
     import_table, probe_table, ImportedTableSite, LandCoverScheme, TabularPlan, TabularProbe,
     TabularSlot,

@@ -31,6 +31,15 @@ residual remains outside tolerance. Other modes still require this gate.
 
 ## Migration order
 
+Current SNICAR progress is **kernel/table implementation, not executable cutover**:
+`colm-core::{snicar_ad_rt,age_snow_grains,fresh_snow_radius,snow_aerosol_concentrations}`
+and `colm-forcing::{read_snicar_optics,read_snicar_aging}` now share the source
+computation and native input layouts. Two 21-case source comparisons (synthetic
+and actual runtime tables) pass; see the latest
+[parity evidence](preprocessing-parity-status.md#snicar-numerical-kernels-and-native-tables).
+SNICAR cold-start adapters, restart integration and original-runtime acceptance
+remain required; the current explicit cold-start guard has not been removed.
+
 1. **Static-state kernels** — port landdata normalization without I/O: soil profile
    expansion and hydraulic conversion, bedrock, lake layers, texture, canopy/PFT fractions,
    vegetation height, topography and urban constants.  `colm-init::static_state` starts this

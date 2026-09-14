@@ -314,10 +314,13 @@ fn read_urban_bounds(file: &netcdf::File, name: &str, clusters: usize) -> Result
     Ok(values)
 }
 
-fn read_float_variable(file: &netcdf::File, name: &str) -> Result<(Vec<usize>, Vec<f64>)> {
+pub(crate) fn read_float_variable(
+    file: &netcdf::File,
+    name: &str,
+) -> Result<(Vec<usize>, Vec<f64>)> {
     let variable = file
         .variable(name)
-        .with_context(|| format!("high-resolution input has no {name} variable"))?;
+        .with_context(|| format!("optical input has no {name} variable"))?;
     let dimensions = variable
         .dimensions()
         .iter()
@@ -330,11 +333,11 @@ fn read_float_variable(file: &netcdf::File, name: &str) -> Result<(Vec<usize>, V
             .into_iter()
             .map(f64::from)
             .collect(),
-        kind => bail!("high-resolution {name} must be floating point, got {kind:?}"),
+        kind => bail!("optical input {name} must be floating point, got {kind:?}"),
     };
     ensure!(
         values.iter().all(|value| value.is_finite()),
-        "high-resolution {name} contains a non-finite value"
+        "optical input {name} contains a non-finite value"
     );
     Ok((dimensions, values))
 }

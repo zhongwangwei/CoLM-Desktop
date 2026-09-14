@@ -6,6 +6,48 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## SNICAR numerical kernels and native tables
+
+The shared Rust core now implements the land, spherical-grain, default-atmosphere
+`SNICAR_AD_RT` direct/diffuse solver, `SnowAge_grain`, `FreshSnowRadius`, and
+`AerosolMasses`. It retains all eight bulk aerosol species, ice-asymmetry clamping,
+the temporary 55-micrometre snow layer, strict minimum-snow-mass branches, and
+the clamped-zenith NIR correction. Grain aging includes dry/wet growth, new snow,
+refreezing and snow capping. These are reusable functions, not a second private
+physics implementation inside `colm-init`.
+
+Optical and aging readers preserve native C `(5,1471)` and `(11,31,8)` layouts,
+reject invalid/missing table values, and reuse the existing floating-point reader.
+Validated tables are reusable across patches. Solver scratch and result arrays
+are fixed-size contiguous `f64` buffers with **no per-call heap allocation**;
+no nested thread pool, dependency or unmeasured speedup claim is introduced.
+
+**Bounded source evidence:** 21 synthetic-table cases and the same 21 cases using
+the local `CoLMruntime/snicar` tables pass the unchanged combined
+`atol=rtol=1e-12` comparison against extracted original Fortran computation,
+compiled with `-O2 -fdefault-real-8`. Maximum absolute differences are
+`1.42e-14` and `2.92e-13`, respectively. Coverage includes five-layer snow,
+direct/diffuse light, nonzero aerosols, wet/new/refrozen snow, capping, no sun,
+thin snow, the exact minimum-mass boundary and the 1500-micrometre limit.
+Three additional source `AerosolMasses` controls match the capped/uncapped/empty
+Rust regression. Five further original-source AD snapshots are retained as a
+runnable Rust golden regression. Evidence: `/tmp/colm-snicar-port/`.
+
+Integrated validation passes **911 tests**, all-target Clippy, downstream checks,
+scoped formatting and all three preprocessor release builds. Logs and binary
+hashes: `/tmp/colm-snicar-validation/summary.json`. Independent bounded source
+review approves this kernel/table slice (`/tmp/colm-snicar-port/review.md`).
+
+**Still not integrated:** these are source-extracted kernel/table checks, not
+a SNICAR-enabled `mkinidata-rs` or full original-runtime acceptance result.
+The cold-start rejection remains in place until the shared kernels are wired
+through every exposed adapter and their real restart fields are verified.
+The original HiRes AD interface declares five output bands but only assigns its
+two-band reduction; its other albedo outputs are undefined. Rust's internal
+five-band results must not be presented as exact parity with that public interface.
+Legacy non-AD RT and compile-time-disabled modal/nonspherical branches are not
+implemented by this land cold-start kernel.
+
 ## Spatial blocks without PFTs
 
 Spatial PFT/PC now accepts a nonempty landpatch block containing only IGBP
@@ -101,7 +143,8 @@ Those cases reuse previously generated scalar surface data with a controlled
 **Still open:** original no-SNICAR HiRes copies an uninitialized five-band snow
 albedo even at zero snow. Rust's deterministic zero snow absorption is an
 explicit defined-state choice, not byte parity with those undefined values.
-Positive-snow HiRes is rejected in both cold adapters; SNICAR remains unported.
+Positive-snow HiRes is rejected in both cold adapters; SNICAR cold integration
+remains open despite the shared-kernel progress above.
 The spatial adapter currently writes the preliminary common restart before
 this rejection, so an error may leave an incomplete output directory (not a
 successful initializer result). Spatial zero-PFT blocks are addressed separately
@@ -430,7 +473,7 @@ the subsequent snow-free migration and its separate evidence are documented at
 the top of this report. SNICAR, external-lake provider integration,
 all-PFTless spatial blocks, broader scientific and platform gates remain open.
 
-## SNICAR remains unported and now fails explicitly
+## SNICAR cold-start safety guard (before kernel migration)
 
 Namelist-driven cold starts now reject `DEF_USE_SNICAR=.true.` rather than
 silently using non-SNICAR snow optics. This conservative temporary restriction
