@@ -129,6 +129,50 @@ fn cold_restart_refuses_features_with_separate_upstream_payloads() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn cold_restart_carries_zero_levee_state() {
+    let root = temp_dir("levee");
+    let unit_catchment = root.join("unitcatchment.nc");
+    write_unit_catchment(&unit_catchment);
+    let restart = write_gridriver_cold_restart(GridRiverColdStartConfig {
+        unit_catchment: &unit_catchment,
+        restart_dir: &root.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        bifurcation: false,
+        levee: true,
+        tracer: false,
+        reservoir_method: 0,
+    })
+    .unwrap();
+
+    let file = netcdf::open(&restart.path).unwrap();
+    assert_eq!(
+        file.variable("gridriver_restart_feature_levee")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        [1]
+    );
+    for name in ["levsto", "hist_levsto", "hist_levdph"] {
+        assert_eq!(
+            file.variable(name)
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            [0.0, 0.0],
+            "{name}"
+        );
+    }
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn write_unit_catchment(path: &std::path::Path) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("ucatch", 2).unwrap();

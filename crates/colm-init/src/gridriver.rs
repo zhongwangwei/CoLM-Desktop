@@ -37,9 +37,10 @@ pub struct GridRiverColdStartFile {
 
 /// Write the schema-v2 GridRiverLake cold state consumed by a matching CoLM kernel.
 ///
-/// Bifurcation, levee, tracer, and reservoir modes own additional restart payloads
+/// Bifurcation, tracer, and reservoir modes own additional restart payloads
 /// upstream; refusing them is safer than emitting a transaction that claims them
-/// disabled or complete.
+/// disabled or complete. Levee state cold-starts to zero upstream, so it is
+/// represented directly here.
 pub fn write_gridriver_cold_restart(
     config: GridRiverColdStartConfig<'_>,
 ) -> Result<GridRiverColdStartFile> {
@@ -58,8 +59,8 @@ pub fn write_gridriver_cold_restart(
         "GridRiverLake restart date is invalid"
     );
     ensure!(
-        !config.bifurcation && !config.levee && !config.tracer && config.reservoir_method == 0,
-        "Rust GridRiverLake cold restart currently supports only the base routing state; bifurcation, levee, tracer, and reservoir modes require their native restart payloads"
+        !config.bifurcation && !config.tracer && config.reservoir_method == 0,
+        "Rust GridRiverLake cold restart currently supports base routing and levee state only; bifurcation, tracer, and reservoir modes require their native restart payloads"
     );
 
     let source = netcdf::open(config.unit_catchment).with_context(|| {
@@ -125,7 +126,12 @@ pub fn write_gridriver_cold_restart(
         &[],
         &[0],
     )?;
-    put_i32(&mut file, "gridriver_restart_feature_levee", &[], &[0])?;
+    put_i32(
+        &mut file,
+        "gridriver_restart_feature_levee",
+        &[],
+        &[i32::from(config.levee)],
+    )?;
     let mut identity = Vec::with_capacity(4 * count);
     identity.extend(std::iter::repeat_n(UCATCH_IDENTITY_VERSION, count));
     identity.extend(x.iter().map(|value| f64::from(*value)));
@@ -143,6 +149,9 @@ pub fn write_gridriver_cold_restart(
     put_f64(&mut file, "acctime_rnof", &[], &[0.0])?;
     put_f64(&mut file, "acc_rnof_uc", &["ucatch"], &zeros)?;
     put_f64(&mut file, "volwater_ucat", &["ucatch"], &zeros)?;
+    if config.levee {
+        put_f64(&mut file, "levsto", &["ucatch"], &zeros)?;
+    }
     // MOD_Grid_RiverLakeHist flushes these vectors to zero before mkinidata
     // writes the cold restart.  Preserve the concrete fields rather than
     // relying on the native optional-read fallback.
@@ -159,6 +168,10 @@ pub fn write_gridriver_cold_restart(
         "hist_sfcelv",
     ] {
         put_f64(&mut file, name, &["ucatch"], &zeros)?;
+    }
+    if config.levee {
+        put_f64(&mut file, "hist_levsto", &["ucatch"], &zeros)?;
+        put_f64(&mut file, "hist_levdph", &["ucatch"], &zeros)?;
     }
     file.variable_mut("gridriver_restart_complete")
         .expect("the GridRiverLake completion marker was just written")

@@ -1095,7 +1095,7 @@ mod tests {
         std::fs::write(
             &namelist,
             format!(
-                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
+                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
                 root.display(),
                 unit_catchment.display(),
             ),
@@ -1112,15 +1112,22 @@ mod tests {
                 "river/restart/2008-060-00000/river_restart_gridriver_2008-060-00000_lc2005.nc"
             )
         );
+        let file = netcdf::open(&restart).unwrap();
         assert_eq!(
-            netcdf::open(&restart)
-                .unwrap()
-                .variable("wdsrf_ucat")
+            file.variable("wdsrf_ucat")
                 .unwrap()
                 .get_values::<f64, _>(..)
                 .unwrap(),
             [2.5]
         );
+        assert_eq!(
+            file.variable("levsto")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            [0.0]
+        );
+        drop(file);
         std::fs::remove_dir_all(root).unwrap();
     }
 
