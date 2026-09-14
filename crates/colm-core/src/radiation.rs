@@ -370,8 +370,10 @@ fn cold_start_broadband_radiation_with_snow_using(
     let mut soil_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut snow_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     for band in 0..BANDS {
-        soil_absorption[band][0] = transmission[band][0] * (1.0 - soil_ground[band][1])
-            + transmission[band][2] * (1.0 - soil_ground[band][0]);
+        soil_absorption[band][0] = transmission[band][2].mul_add(
+            1.0 - soil_ground[band][0],
+            transmission[band][0] * (1.0 - soil_ground[band][1]),
+        );
         soil_absorption[band][1] = transmission[band][1] * (1.0 - soil_ground[band][1]);
         snow_absorption[band][0] = transmission[band][0] * (1.0 - snow[band][1])
             + transmission[band][2] * (1.0 - snow[band][0]);
@@ -543,10 +545,11 @@ fn two_stream(
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     for band in 0..BANDS {
-        let mut scattering = lai / leaf_stem_area
-            * (optics.transmittance[band][0] + optics.reflectance[band][0])
-            + stem_area / leaf_stem_area
-                * (optics.transmittance[band][1] + optics.reflectance[band][1]);
+        let mut scattering = (lai / leaf_stem_area).mul_add(
+            optics.transmittance[band][0] + optics.reflectance[band][0],
+            stem_area / leaf_stem_area
+                * (optics.transmittance[band][1] + optics.reflectance[band][1]),
+        );
         let directional_scattering = scattering / 2.0 * projection
             / (projection + cosine_zenith * phi2)
             * (1.0
@@ -577,19 +580,19 @@ fn two_stream(
         let ce = upward_scattering;
         let de = scattering * zmu * direct_extinction * beta0;
         let fe = scattering * zmu * direct_extinction * (1.0 - beta0);
-        let psi = (be.powi(2) - ce.powi(2)).sqrt() / zmu;
+        let psi = be.mul_add(be, -(ce * ce)).sqrt() / zmu;
         let power1 = (psi * leaf_stem_area).min(50.0);
         let power2 = (direct_extinction * leaf_stem_area).min(50.0);
         let s1 = (-power1).exp();
         let s2 = (-power2).exp();
         let p1 = be + zmu * psi;
-        let p2 = be - zmu * psi;
+        let p2 = (-zmu).mul_add(psi, be);
         let p3 = be + zmu * direct_extinction;
         let p4 = be - zmu * direct_extinction;
         let f1 = 1.0 - ground[band][1] * p1 / ce;
         let f2 = 1.0 - ground[band][1] * p2 / ce;
         let h1 = -(de * p4 + ce * fe);
-        let h4 = -(fe * p3 + ce * de);
+        let h4 = -fe.mul_add(p3, ce * de);
         let sigma = (zmu * direct_extinction).powi(2) + (ce.powi(2) - be.powi(2));
         let (albedo_direct, transmission_direct, eup_direct, edown_direct) = if sigma.abs()
             > 1.0e-10
@@ -598,22 +601,22 @@ fn two_stream(
             let hh4 = h4 / sigma;
             let m1 = f1 * s1;
             let m2 = f2 / s1;
-            let m3 = (ground[band][0] - (hh1 - ground[band][1] * hh4)) * s2;
+            let m3 = (ground[band][0] - (-ground[band][1]).mul_add(hh4, hh1)) * s2;
             let n1 = p1 / ce;
             let n2 = p2 / ce;
             let n3 = -hh4;
-            let hh2 = (m3 * n2 - m2 * n3) / (m1 * n2 - m2 * n1);
+            let hh2 = m3.mul_add(n2, -(m2 * n3)) / (m1 * n2 - m2 * n1);
             let hh3 = (m3 * n1 - m1 * n3) / (m2 * n1 - m1 * n2);
             let hh5 = hh2 * p1 / ce;
             let hh6 = hh3 * p2 / ce;
             (
                 hh1 + hh2 + hh3,
-                hh4 * s2 + hh5 * s1 + hh6 / s1,
-                hh1 * (1.0 - s2 * s2) / (2.0 * direct_extinction)
-                    + hh2 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                s2.mul_add(hh4, hh5 * s1) + hh6 / s1,
+                hh1 * s2.mul_add(-s2, 1.0) / (2.0 * direct_extinction)
+                    + hh2 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
                     + hh3 * (1.0 - s2 / s1) / (direct_extinction - psi),
-                hh4 * (1.0 - s2 * s2) / (2.0 * direct_extinction)
-                    + hh5 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                hh4 * s2.mul_add(-s2, 1.0) / (2.0 * direct_extinction)
+                    + hh5 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
                     + hh6 * (1.0 - s2 / s1) / (direct_extinction - psi),
             )
         } else {
@@ -659,10 +662,13 @@ fn two_stream(
         };
         sunlit_absorption[band][0] =
             (1.0 - scattering) * (1.0 - s2 + (eup_direct + edown_direct) / zmu);
-        shaded_absorption[band][0] = scattering * (1.0 - s2)
-            + (ground[band][1] * transmission_direct + ground[band][0] * s2 - transmission_direct)
-            - albedo_direct
-            - (1.0 - scattering) * (eup_direct + edown_direct) / zmu;
+        // Preserve the linked original's fused products and evaluation order.
+        let absorption_scale = (1.0 - scattering) / zmu;
+        let reflected_direct = ground[band][1].mul_add(transmission_direct, ground[band][0] * s2)
+            - transmission_direct;
+        let shaded_direct = scattering.mul_add(1.0 - s2, reflected_direct) - albedo_direct;
+        shaded_absorption[band][0] =
+            (-(eup_direct + edown_direct)).mul_add(absorption_scale, shaded_direct);
         albedo[band][0] = albedo_direct;
         transmission[band][0] = transmission_direct;
 
@@ -674,12 +680,12 @@ fn two_stream(
         let hh8 = -m1 / (m2 * n1 - m1 * n2);
         let hh9 = hh7 * p1 / ce;
         let hh10 = hh8 * p2 / ce;
-        let transmission_diffuse = hh9 * s1 + hh10 / s1;
+        let transmission_diffuse = s1.mul_add(hh9, hh10 / s1);
         let (eup_diffuse, edown_diffuse) = if sigma.abs() > 1.0e-10 {
             (
-                hh7 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                hh7 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
                     + hh8 * (1.0 - s2 / s1) / (direct_extinction - psi),
-                hh9 * (1.0 - s1 * s2) / (direct_extinction + psi)
+                hh9 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
                     + hh10 * (1.0 - s2 / s1) / (direct_extinction - psi),
             )
         } else {
@@ -689,10 +695,10 @@ fn two_stream(
             )
         };
         let albedo_diffuse = hh7 + hh8;
-        sunlit_absorption[band][1] = (1.0 - scattering) * (eup_diffuse + edown_diffuse) / zmu;
-        shaded_absorption[band][1] = transmission_diffuse * (ground[band][1] - 1.0)
-            - (albedo_diffuse - 1.0)
-            - (1.0 - scattering) * (eup_diffuse + edown_diffuse) / zmu;
+        sunlit_absorption[band][1] = absorption_scale * (eup_diffuse + edown_diffuse);
+        shaded_absorption[band][1] = transmission_diffuse
+            .mul_add(ground[band][1] - 1.0, -(albedo_diffuse - 1.0))
+            - absorption_scale * (eup_diffuse + edown_diffuse);
         albedo[band][1] = albedo_diffuse;
         transmission[band][1] = transmission_diffuse;
         transmission[band][2] = s2;

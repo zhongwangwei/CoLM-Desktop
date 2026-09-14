@@ -1,4 +1,4 @@
-# Preprocessor parity audit — 2026-09-14
+# Preprocessor parity audit — 2026-09-15
 
 **Full migration is not yet proven.** A successful Rust-to-Rust pipeline or a
 single real case does not establish all-branch parity. The acceptance criteria
@@ -6,7 +6,38 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
-## Latest independent Pearl River result: weighted reductions
+## Latest Pearl River initializer/runtime result: LCT radiation arithmetic
+
+`/tmp/colm-spatial-parity.Mh0VZX/rust-native-surface-lct-rounding/` contains a
+fresh initializer and two-step original-runtime run. It copies the **unchanged,
+independently generated Rust surface** from the weighted-reduction baseline
+below; surface generation was not rerun in this pass. Rechecking confirms all
+242 fields remain bitwise equal and all schemas/stored topology match.
+
+The low-resolution LCT two-stream kernel now preserves original fused arithmetic
+and operand grouping in scattering, attenuation, direct/diffuse transmission
+and absorption. The common direct-soil absorption sum is also corrected.
+The original sigma guard and singular-solution body are retained. PFT's separate
+solver and high-resolution kernels were not blindly changed from LCT evidence.
+Original linked probes match all 21 outputs bitwise for three actual LCT patches;
+public soil-absorption goldens also match. Separate singular and nearby regular
+cases pass the unchanged combined `1e-12` criterion, with original branch
+execution confirmed in the debugger. This is a computation fix, not substituted
+restart data. Evidence: `/tmp/colm-radiation-twostream-audit-37105/`,
+`/tmp/colm-lct-singular-audit/`, `/tmp/colm-lct-rounding-fix/validation/`.
+
+Both new stages exit 0 using frozen initializer SHA-256
+`0de682309bedfd120ffbb971fbcf1a776de5723a264a7447b9a512d4ec20b475`.
+All 13 cold restart files / 742 variable instances pass. Post-step failures fall
+from 16 variable instances / 32 values to **only `zwt`: 6 values across 2 blocks**,
+maximum `1.185755538896105e-10`; the `gs0sun` failure disappears. History failures
+fall from 34 fields / 880 values to 3 fields / 165 values (`f_fseng`, `f_zerr`,
+`f_zwt`). All schemas match, but this is **still not full scientific acceptance**.
+`verified-summary.json` records assertions over the actual comparison reports.
+All 669 integrated tests, clippy, downstream checks and scoped formatting pass;
+independent review confirms the source changes match the backed LCT candidate.
+
+## Previous full independent Pearl River result: weighted reductions
 
 `/tmp/colm-spatial-parity.Mh0VZX/rust-full-weighted-fma/` supersedes the
 source-chunk-ordering baseline below. Its independently generated Rust surface,
@@ -435,9 +466,10 @@ call it. This is not a real catchment all-field parity claim.
 
 ## Remaining completion gates
 
-1. Resolve the captured soil-fit acceptance and numerical differences. Block
-   ownership is repaired below, but field parity is not established.
-   Validate actual PC/PFT configurations and their scientific budgets separately.
+1. Close remaining runtime numerical failures without weakening the gate. The
+   bounded LCT surface is now bitwise equal; PC/PFT surfaces pass `1e-12` but
+   still have PFT-weighted-reduction bit differences. Validate each actual mode
+   and its scientific budgets separately; none proves the full optional matrix.
 2. Finish the remaining executable-control audit. The 15 `RestartTuning`
    namelist fields are now forwarded through single-point, spatial LCT/urban,
    PFT/PC, and explicit spatial PFT entry points. `tcrit` remains the upstream

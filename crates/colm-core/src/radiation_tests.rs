@@ -6,7 +6,7 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
     assert_eq!(two_stream_zmu(0.5, 1.0e-6), 1.0);
     // Linked original MOD_Albedo.o, -O2 -fdefault-real-8; classes 13 and 9.
     let soil_grid = crate::colm_soil_grid(10).unwrap();
-    for (patch_type, class, lai, sai, coszen, water, expected) in [
+    for (patch_type, class, lai, sai, coszen, water, expected, soil_bits) in [
         (
             1,
             13,
@@ -15,6 +15,12 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
             0.13061497421041415,
             8.838313932745438,
             0x3fed_d3e7_0416_235f,
+            [
+                0x3fe728c1913468da,
+                0x3feb93cf56fdd804,
+                0x3fe63aa459ca40d0,
+                0x3fe9780a7f2f49e0,
+            ],
         ),
         (
             0,
@@ -24,6 +30,12 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
             0.17590374025111977,
             8.955592710048453,
             0x3fc9_76a3_ae9c_1116,
+            [
+                0x3fa24758892d48ea,
+                0x3fca469e4b58594c,
+                0x3fc2e60085eaaeb5,
+                0x3fd29e032612c954,
+            ],
         ),
     ] {
         let output = cold_start_broadband_radiation_with_snow(
@@ -54,6 +66,212 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
             expected,
             "class {class}"
         );
+        for (actual, expected) in output.soil_absorption.iter().flatten().zip(soil_bits) {
+            assert_eq!(actual.to_bits(), expected, "class {class} soil absorption");
+        }
+    }
+}
+
+#[test]
+fn lct_two_stream_matches_all_original_pearl_river_outputs() {
+    // Original ebe6de9 MOD_Albedo twostream, -O2 -fdefault-real-8.
+    // Stored LCT patches e110_n25:826, e110_n20:1087, e105_n20:1504.
+    // Output order: alb(2x2), tran(2x3), ssun(2x2), ssha(2x2), thermk/extkb/extkd.
+    for (class, lai, sai, coszen, visible, nir, exact, expected) in [
+        (
+            13,
+            0.016731545999066972,
+            0.053416176787594076,
+            0.13061497421041415,
+            0.08,
+            0.16,
+            true,
+            [
+                0x3fb34a7963897e4b,
+                0x3fb39857a7f22aed,
+                0x3fc633328593f6b6,
+                0x3fc4ae6715ebc2f3,
+                0x3f949eef9937bd59,
+                0x3fedf9b4d8fda804,
+                0x3fe8875558b201f7,
+                0x3faef3d8c1a32d07,
+                0x3fee51f41d817054,
+                0x3fe8875558b201f7,
+                0x3fc9a4b06a708fed,
+                0x3fabc2d2e015df49,
+                0x3fc0c61de4fcf5a2,
+                0x3fa3243e5958b593,
+                0x3f430c9ef90d84dd,
+                0x3f7e7c43014254b8,
+                0x3f4c1e2e461065be,
+                0x3f750beae01d04f8,
+                0x3fedd3e70416235f,
+                0x400e52ec6d0c9440,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+        (
+            9,
+            0.8492320693433216,
+            0.7621269547891374,
+            0.17590374025111977,
+            0.08,
+            0.16,
+            true,
+            [
+                0x3fad22eaaa1fd6e2,
+                0x3faa19fc96a9fa2e,
+                0x3fd2d28469b30028,
+                0x3fcf9f65202d9abc,
+                0x3f9cce501b58fcd8,
+                0x3fcc8f8aaaf0ba1b,
+                0x3f85dc5b28db4354,
+                0x3fc521c10540897e,
+                0x3fd629d2fc904503,
+                0x3f85dc5b28db4354,
+                0x3feb44df8b3dfec6,
+                0x3fce4039b61de2bd,
+                0x3fdac898706053c0,
+                0x3fc1433d2213ee75,
+                0x3fac47c418d2f3d0,
+                0x3fe03caa3637d15b,
+                0x3fc1e3c5c5eea97c,
+                0x3fd4f0abb8cc7214,
+                0x3fc976a3ae9c1116,
+                0x40068a23dec29950,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+        (
+            16,
+            0.04352080352942207,
+            0.024613835967001594,
+            0.12618927879439434,
+            0.1,
+            0.2,
+            true,
+            [
+                0x3fb70906fd913d1b,
+                0x3fb808c05516365c,
+                0x3fcc7521c7f0e341,
+                0x3fc9fae74bcbae10,
+                0x3f94776d02fbe073,
+                0x3fee0ae2fff0a6c1,
+                0x3fe87e8b86066e2f,
+                0x3fb3e39479613314,
+                0x3fee8f9fff9ab9f2,
+                0x3fe87e8b86066e2f,
+                0x3fc9e9f12772c11c,
+                0x3fab849c30b5f786,
+                0x3fba3301f42ee069,
+                0x3f9db0578a350ce1,
+                0x3f46259a24573ab4,
+                0x3f7e68f2c96ea078,
+                0x3f4afcfa229deca4,
+                0x3f706e8553054314,
+                0x3fede3528647a71c,
+                0x400f6261d9d7f2e7,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+        (
+            13,
+            0.016731545999066972,
+            0.053416176787594076,
+            0.5347439652952921,
+            0.08,
+            0.16,
+            false,
+            [
+                0x3fb3368aaf5c16b9,
+                0x3fb39857a7f22aed,
+                0x3fc42894ecf964db,
+                0x3fc4ae6715ebc2f3,
+                0x3f77f47b853008fd,
+                0x3fedf9b4d8fda804,
+                0x3fedf853847379b8,
+                0x3f9312a1f4b977d5,
+                0x3fee51f41d817054,
+                0x3fedf853847379b8,
+                0x3fad95cad85f6f87,
+                0x3fae91da4d5b84d7,
+                0x3fa4748053bca2b8,
+                0x3fa514a426fcf604,
+                0x3f233f1582e76a50,
+                0x3f60080f2e2a5090,
+                0x3f2a66c14794e8e5,
+                0x3f5622f1cbec05c0,
+                0x3fedd3e70416235f,
+                0x3fede5b0ebd02112,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+        (
+            13,
+            0.016731545999066972,
+            0.053416176787594076,
+            0.5347438652952922,
+            0.08,
+            0.16,
+            false,
+            [
+                0x3fb33580f1229e6b,
+                0x3fb39857a7f22aed,
+                0x3fc42894ef233750,
+                0x3fc4ae6715ebc2f3,
+                0x3f7803143a4cd47f,
+                0x3fedf9b4d8fda804,
+                0x3fedf8537e5cb9a8,
+                0x3f9312a225cdc664,
+                0x3fee51f41d817054,
+                0x3fedf8537e5cb9a8,
+                0x3fad95c514fd522d,
+                0x3fae91da4a55f2e6,
+                0x3fa4748087fa3c21,
+                0x3fa514a424e3cabd,
+                0x3f23aaf64dc54baa,
+                0x3f60080f5e836fa0,
+                0x3f2a66c19b49d619,
+                0x3f5622f20f116ea0,
+                0x3fedd3e70416235f,
+                0x3fede5b1487e3375,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+    ] {
+        let state = two_stream(
+            leaf_optics_from_land_cover(LandCoverScheme::Igbp, class).unwrap(),
+            lai,
+            sai,
+            0.0,
+            coszen,
+            [[visible; 2], [nir; 2]],
+            false,
+            false,
+        )
+        .unwrap();
+        let actual = state
+            .albedo
+            .iter()
+            .flatten()
+            .chain(state.transmission.iter().flatten())
+            .chain(state.sunlit_absorption.iter().flatten())
+            .chain(state.shaded_absorption.iter().flatten())
+            .copied()
+            .chain([
+                state.thermal_gap_fraction,
+                state.direct_extinction,
+                state.diffuse_extinction,
+            ]);
+        for (index, (actual, expected)) in actual.zip(expected).enumerate() {
+            if exact {
+                assert_eq!(actual.to_bits(), expected, "class {class}, output {index}");
+            } else {
+                let expected = f64::from_bits(expected);
+                assert!((actual - expected).abs() <= 1.0e-12 + 1.0e-12 * expected.abs(),
+                    "singular-boundary coszen {coszen}, output {index}: {actual:.17e} != {expected:.17e}");
+            }
+        }
     }
 }
 
