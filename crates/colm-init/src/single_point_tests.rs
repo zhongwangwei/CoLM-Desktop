@@ -705,6 +705,198 @@ fn cold_namelist_rejects_snicar_and_keeps_non_snicar_state_sources() {
 }
 
 #[test]
+fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-init-nonvegetated-scalar-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    for subgrid in [SinglePointSubgrid::Pft, SinglePointSubgrid::Pc] {
+        for class in [11, 13, 15, 17] {
+            for bgc in [false, true] {
+                let name = format!("{subgrid:?}-{class}-{bgc}");
+                let mut surface = single_point_restart_surface();
+                surface.land_class = class;
+                if class == 17 {
+                    surface.lake_depth_m = 0.0;
+                }
+                let run = scalar_nonvegetated_run(&root, &name, subgrid, bgc, false, None, None);
+                assert_eq!(run.subgrid, subgrid);
+                assert!(!run.dynamic_lake);
+
+                let files = write_single_point_scalar_cold_time_restarts(
+                    &run,
+                    &surface,
+                    patch_type(LandCoverScheme::Igbp, class).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(files.pft, None, "{name} must not invent a PFT time file");
+                assert_eq!(files.bgc.is_some(), bgc, "{name} BGC output mismatch");
+
+                let common = netcdf::open(files.common.block).unwrap();
+                let water = class == 17;
+                assert_eq!(values_f64(&common, "fveg"), [if water { 0.0 } else { 1.0 }]);
+                assert_eq!(values_f64(&common, "lai"), [if water { 0.0 } else { 2.0 }]);
+                assert_eq!(values_f64(&common, "sai"), [if water { 0.0 } else { 0.5 }]);
+                if water {
+                    assert_eq!(values_f64(&common, "wdsrf"), [100.0]);
+                }
+                if class == 15 {
+                    assert_eq!(values_f64(&common, "thermk"), [crate::MISSING]);
+                }
+                if let Some(bgc_file) = files.bgc {
+                    let bgc = netcdf::open(bgc_file.block).unwrap();
+                    assert_eq!(
+                        dimension_lengths(&bgc),
+                        vec![
+                            ("patch".to_string(), 1),
+                            ("soil".to_string(), 10),
+                            ("soil_full".to_string(), 15),
+                            ("ndecomp_pools".to_string(), 7),
+                            ("doy".to_string(), 365),
+                        ]
+                    );
+                    assert!(values_f64(&bgc, "decomp_cpools_vr")
+                        .iter()
+                        .all(|value| *value == 0.0));
+                    assert!(values_f64(&bgc, "decomp_npools_vr")
+                        .iter()
+                        .all(|value| *value == 0.0));
+                }
+            }
+        }
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-init-scalar-cn-vegsnow-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let cn = root.join("cnsteadystate.nc");
+    write_single_point_cn_fixture(&cn);
+    let mut wetland = single_point_restart_surface();
+    wetland.land_class = 11;
+    let run = scalar_nonvegetated_run(
+        &root,
+        "wetland-cn-tracer",
+        SinglePointSubgrid::Pft,
+        true,
+        true,
+        Some(&cn),
+        None,
+    );
+    let files = write_single_point_scalar_cold_time_restarts(&run, &wetland, 2).unwrap();
+    assert_eq!(files.pft, None);
+    let bgc = netcdf::open(files.bgc.expect("wetland tracer BGC output").block).unwrap();
+    let carbon = values_f64(&bgc, "decomp_cpools_vr");
+    assert_eq!(carbon[0], 1000.0);
+    assert_eq!(carbon[1], 1001.0);
+    assert_eq!(carbon[10], -1.0e36);
+    assert_eq!(carbon[15], 1100.0);
+    assert_eq!(values_f64(&bgc, "smin_nh4_vr")[0], 3000.0);
+    assert_eq!(values_f64(&bgc, "smin_no3_vr")[0], 4000.0);
+
+    let empty_cn = root.join("cnsteadystate-empty-carbon.nc");
+    write_single_point_cn_fixture(&empty_cn);
+    zero_single_point_cn_carbon_pools(&empty_cn);
+    for subgrid in [SinglePointSubgrid::Pft, SinglePointSubgrid::Pc] {
+        for (class, kind) in [(11, 2), (17, 4)] {
+            for tracer in [false, true] {
+                let mut surface = single_point_restart_surface();
+                surface.land_class = class;
+                let label = format!("cn-elig-{subgrid:?}-{class}-{tracer}");
+                let run = scalar_nonvegetated_run(
+                    &root,
+                    &label,
+                    subgrid,
+                    true,
+                    tracer,
+                    Some(&empty_cn),
+                    None,
+                );
+                let files =
+                    write_single_point_scalar_cold_time_restarts(&run, &surface, kind).unwrap();
+                assert_eq!(files.pft, None);
+                let bgc = netcdf::open(files.bgc.expect("BGC output").block).unwrap();
+                let carbon = values_f64(&bgc, "decomp_cpools_vr");
+                if class == 11 && tracer {
+                    assert_eq!(carbon[0], 1798.0, "{label} wetland OM fallback");
+                } else {
+                    assert_eq!(carbon[0], -1.0e36, "{label} inactive CN must stay missing");
+                    assert_eq!(values_f64(&bgc, "smin_nh4_vr")[0], -1.0e36, "{label}");
+                    assert_eq!(values_f64(&bgc, "smin_no3_vr")[0], -1.0e36, "{label}");
+                }
+            }
+        }
+    }
+
+    let snow = root.join("snowdepth.nc");
+    write_single_point_snow_depth_fixture(&snow, 0.2);
+    let mut vegetated = single_point_restart_surface();
+    vegetated.land_class = 10;
+    vegetated.latitude_degrees = 0.0;
+    vegetated.longitude_degrees = 0.0;
+    vegetated.canopy_height_m = 12.0;
+    let true_run = scalar_nonvegetated_run(
+        &root,
+        "veg-snow-true",
+        SinglePointSubgrid::Lct,
+        false,
+        false,
+        None,
+        Some((&snow, true)),
+    );
+    let false_run = scalar_nonvegetated_run(
+        &root,
+        "veg-snow-false",
+        SinglePointSubgrid::Lct,
+        false,
+        false,
+        None,
+        Some((&snow, false)),
+    );
+    for run in [&true_run, &false_run] {
+        let mut file = netcdf::append(&run.static_run.surface).unwrap();
+        file.variable_mut("LAI_monthly")
+            .unwrap()
+            .put_values(&[1.23456789; 12], ..)
+            .unwrap();
+        file.variable_mut("SAI_monthly")
+            .unwrap()
+            .put_values(&[0.3456789; 12], ..)
+            .unwrap();
+    }
+    assert!(true_run.vegetation_snow);
+    assert!(!false_run.vegetation_snow);
+    let true_file = write_single_point_scalar_cold_time_restarts(&true_run, &vegetated, 0)
+        .unwrap()
+        .common
+        .block;
+    let false_file = write_single_point_scalar_cold_time_restarts(&false_run, &vegetated, 0)
+        .unwrap()
+        .common
+        .block;
+    let true_restart = netcdf::open(true_file).unwrap();
+    let false_restart = netcdf::open(false_file).unwrap();
+    assert_ne!(
+        values_f64(&true_restart, "alb"),
+        values_f64(&false_restart, "alb"),
+        "DEF_VEG_SNOW=.false. must reach scalar broadband radiation"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
     let root = std::env::temp_dir().join(format!("colm-init-lake-carbon-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -1232,25 +1424,6 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         vegetation_snow: true,
         urban: None,
     };
-    let surface = SinglePointSurfaceData {
-        latitude_degrees: 0.0,
-        longitude_degrees: 0.0,
-        land_class: 12,
-        canopy_height_m: 0.0,
-        lake_depth_m: 1.0,
-        albedo: SoilReflectance {
-            saturated_visible: 0.1,
-            dry_visible: 0.2,
-            saturated_near_infrared: 0.3,
-            dry_near_infrared: 0.4,
-        },
-        soil_texture: 1,
-        elevation_m: 0.0,
-        elevation_std_m: 0.0,
-        slope_ratio: 1.0,
-        bedrock_depth_cm: None,
-        soil_layers: Vec::new(),
-    };
     let radiation = |value| ColdStartRadiation {
         albedo: [[value, value + 1.0], [value + 2.0, value + 3.0]],
         sunlit_absorption: [[0.0; 2]; 2],
@@ -1295,7 +1468,6 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
     let output = write_cold_time_restart(
         &run,
         0,
-        &surface,
         &LakeState {
             depth_m: vec![1.0],
             thickness_m: vec![0.1; 10],
@@ -1667,6 +1839,215 @@ fn single_point_restart_surface() -> SinglePointSurfaceData {
             })
             .collect(),
     }
+}
+
+fn scalar_nonvegetated_run(
+    root: &std::path::Path,
+    name: &str,
+    subgrid: SinglePointSubgrid,
+    bgc: bool,
+    tracer: bool,
+    cn: Option<&std::path::Path>,
+    snow: Option<(&std::path::Path, bool)>,
+) -> SinglePointColdStartRun {
+    let case_root = root.join(name);
+    let output = case_root.join("output");
+    let surface = output.join("CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    write_single_point_scalar_lai_surface(&surface);
+    let namelist = case_root.join("case.nml");
+    let (lct, pft, pc) = match subgrid {
+        SinglePointSubgrid::Lct => (true, false, false),
+        SinglePointSubgrid::Pft => (false, true, false),
+        SinglePointSubgrid::Pc => (false, false, true),
+    };
+    let mut text = format!(
+        "&nl_colm\n \
+         DEF_CASE_NAME='CN-Cng'\n \
+         DEF_dir_output='{}'\n \
+         DEF_USE_LCT={}\n \
+         DEF_USE_PFT={}\n \
+         DEF_USE_PC={}\n \
+         DEF_USE_BGC={}\n \
+         DEF_USE_TRACER={}\n \
+         DEF_USE_NITRIF=.false.\n \
+         DEF_simulation_time%greenwich=.false.\n \
+         DEF_simulation_time%start_year=2005\n \
+         DEF_simulation_time%start_month=6\n \
+         DEF_simulation_time%start_day=21\n \
+         DEF_simulation_time%start_sec=43200\n",
+        output.display(),
+        logical(lct),
+        logical(pft),
+        logical(pc),
+        logical(bgc),
+        logical(tracer),
+    );
+    if let Some(cn) = cn {
+        text.push_str(&format!(
+            " DEF_USE_CN_INIT=.true.\n DEF_file_cn_init='{}'\n",
+            cn.display()
+        ));
+    } else {
+        text.push_str(" DEF_USE_CN_INIT=.false.\n");
+    }
+    if let Some((snow, vegetation_snow)) = snow {
+        text.push_str(&format!(
+            " DEF_USE_SnowInit=.true.\n DEF_file_SnowInit='{}'\n DEF_VEG_SNOW={}\n",
+            snow.display(),
+            logical(vegetation_snow),
+        ));
+    }
+    text.push_str("/\n");
+    std::fs::write(&namelist, text).unwrap();
+    let mut run =
+        single_point_cold_start_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+            .unwrap();
+    run.static_run.surface = surface;
+    run
+}
+
+fn logical(value: bool) -> &'static str {
+    if value {
+        ".true."
+    } else {
+        ".false."
+    }
+}
+
+fn write_single_point_scalar_lai_surface(path: &std::path::Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("LAI_year", 1).unwrap();
+    file.add_dimension("month", 12).unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2005], ..)
+        .unwrap();
+    file.add_variable::<f64>("LAI_monthly", &["LAI_year", "month"])
+        .unwrap()
+        .put_values(&[2.0; 12], (.., ..))
+        .unwrap();
+    file.add_variable::<f64>("SAI_monthly", &["LAI_year", "month"])
+        .unwrap()
+        .put_values(&[0.5; 12], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn zero_single_point_cn_carbon_pools(path: &std::path::Path) {
+    let mut file = netcdf::append(path).unwrap();
+    for name in [
+        "litr1c_vr",
+        "litr2c_vr",
+        "litr3c_vr",
+        "cwdc_vr",
+        "soil1c_vr",
+        "soil2c_vr",
+        "soil3c_vr",
+    ] {
+        file.variable_mut(name)
+            .unwrap()
+            .put_values(&[0.0_f32; 10], (.., .., ..))
+            .unwrap();
+    }
+    file.close().unwrap();
+}
+
+fn write_single_point_snow_depth_fixture(path: &std::path::Path, depth_m: f64) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("month", 12).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 1).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[0.0], ..)
+        .unwrap();
+    let mut variable = file
+        .add_variable::<f64>("snowdepth", &["month", "lat", "lon"])
+        .unwrap();
+    variable
+        .put_attribute("missing_value", -1.0e36_f64)
+        .unwrap();
+    variable.put_values(&[depth_m; 12], (.., .., ..)).unwrap();
+    file.close().unwrap();
+}
+
+fn write_single_point_cn_fixture(path: &std::path::Path) {
+    const CARBON: [&str; 7] = [
+        "litr1c_vr",
+        "litr2c_vr",
+        "litr3c_vr",
+        "cwdc_vr",
+        "soil1c_vr",
+        "soil2c_vr",
+        "soil3c_vr",
+    ];
+    const NITROGEN: [&str; 7] = [
+        "litr1n_vr",
+        "litr2n_vr",
+        "litr3n_vr",
+        "cwdn_vr",
+        "soil1n_vr",
+        "soil2n_vr",
+        "soil3n_vr",
+    ];
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 1).unwrap();
+    file.add_dimension("soil", 10).unwrap();
+    file.add_variable::<f32>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.0], ..)
+        .unwrap();
+    file.add_variable::<f32>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[0.0], ..)
+        .unwrap();
+    for (offset, names) in [(1000.0_f32, &CARBON[..]), (2000.0_f32, &NITROGEN[..])] {
+        for (pool, &name) in names.iter().enumerate() {
+            let values = (0..10)
+                .map(|soil| offset + 100.0 * pool as f32 + soil as f32)
+                .collect::<Vec<_>>();
+            let mut variable = file
+                .add_variable::<f32>(name, &["lat", "lon", "soil"])
+                .unwrap();
+            variable
+                .put_attribute("missing_value", -1.0e36_f32)
+                .unwrap();
+            variable.put_values(&values, (.., .., ..)).unwrap();
+        }
+    }
+    for (offset, name) in [(3000.0_f32, "smin_nh4_vr"), (4000.0_f32, "smin_no3_vr")] {
+        let values = (0..10).map(|soil| offset + soil as f32).collect::<Vec<_>>();
+        let mut variable = file
+            .add_variable::<f32>(name, &["lat", "lon", "soil"])
+            .unwrap();
+        variable
+            .put_attribute("missing_value", -1.0e36_f32)
+            .unwrap();
+        variable.put_values(&values, (.., .., ..)).unwrap();
+    }
+    for (offset, name) in [
+        (5000.0_f32, "leafc"),
+        (5001.0_f32, "leafc_storage"),
+        (5002.0_f32, "frootc"),
+        (5003.0_f32, "frootc_storage"),
+        (5004.0_f32, "livestemc"),
+        (5005.0_f32, "deadstemc"),
+        (5006.0_f32, "livecrootc"),
+        (5007.0_f32, "deadcrootc"),
+    ] {
+        let mut variable = file.add_variable::<f32>(name, &["lat", "lon"]).unwrap();
+        variable
+            .put_attribute("missing_value", -1.0e36_f32)
+            .unwrap();
+        variable.put_values(&[offset], (.., ..)).unwrap();
+    }
+    file.close().unwrap();
 }
 
 fn write_single_point_vic_grid(path: &std::path::Path, selected_b: f64, missing: Option<f64>) {

@@ -50,6 +50,56 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
 }
 
 #[test]
+fn pftless_single_point_keeps_an_empty_constant_vector() {
+    let root = temp_dir("pftless-constant");
+    let path = write_pft_constant_restart(
+        &root,
+        "lake",
+        2005,
+        "w180_s90",
+        PftConstantRestartInput {
+            compression_level: 1,
+            class: &[],
+            fraction: &[],
+            canopy_top_m: &[],
+            canopy_bottom_m: &[],
+            crop_fraction: None,
+        },
+    )
+    .unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let dimension = file.dimension("pft").unwrap();
+    assert_eq!(dimension.len(), 0);
+    assert!(dimension.is_unlimited()); // Fortran nf90_def_dim(..., 0).
+    assert_eq!(
+        file.variables()
+            .map(|variable| variable.name())
+            .collect::<Vec<_>>(),
+        ["pftclass", "pftfrac", "htop_p", "hbot_p"]
+    );
+    for variable in file.variables() {
+        assert_eq!(variable.len(), 0);
+        assert_eq!(variable.dimensions()[0].name(), "pft");
+    }
+    drop(file);
+    let invalid = root.join("invalid.nc");
+    assert!(write_pft_constant_restart_block(
+        &invalid,
+        PftConstantRestartInput {
+            compression_level: 1,
+            class: &[],
+            fraction: &[1.0],
+            canopy_top_m: &[],
+            canopy_bottom_m: &[],
+            crop_fraction: None,
+        }
+    )
+    .is_err());
+    assert!(!invalid.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pft_time_restart_preserves_fortran_axis_order_and_feature_schema() {
     let fixture = Fixture::new();
     let root = temp_dir("time");

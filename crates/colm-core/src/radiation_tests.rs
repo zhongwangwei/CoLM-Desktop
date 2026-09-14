@@ -643,3 +643,33 @@ fn assert_close(actual: f64, expected: f64) {
         "got {actual:.17e}, expected {expected:.17e}"
     );
 }
+
+#[test]
+fn cold_ice_thermal_gap_retains_allocated_missing_without_a_canopy_solver() {
+    // MOD_Vars_TimeVariables allocates thermk=spval. MOD_Albedo sets it only
+    // for LAI+SAI<=1e-6 or when the canopy solver runs (patchtype<3).
+    for (lai, expected) in [(0.0, 1.0), (0.2, crate::MISSING)] {
+        let state = cold_start_broadband_radiation(
+            3,
+            SoilReflectance {
+                saturated_visible: 0.1,
+                dry_visible: 0.2,
+                saturated_near_infrared: 0.3,
+                dry_near_infrared: 0.4,
+            },
+            0.0,
+            0.1,
+            leaf_optics_from_land_cover(LandCoverScheme::Igbp, 15).unwrap(),
+            lai,
+            0.0,
+            0.0,
+            0.5,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.thermal_gap_fraction, expected);
+        assert_eq!(state.sunlit_absorption, [[0.0; 2]; 2]);
+    }
+}

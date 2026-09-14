@@ -359,7 +359,14 @@ fn cold_start_broadband_radiation_with_snow_using(
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut transmission = [[0.0, 1.0, 1.0]; BANDS];
-    let mut thermal_gap_fraction = if lai + sai <= 1.0e-6 { 1.0 } else { 0.0 };
+    let mut thermal_gap_fraction = if lai + sai <= 1.0e-6 {
+        1.0
+    } else if patch_type >= 3 {
+        // No canopy solver runs here; cold thermk retains its allocated spval.
+        crate::MISSING
+    } else {
+        0.0
+    };
     let mut direct_extinction = 1.0;
     let mut diffuse_extinction = 0.718;
 

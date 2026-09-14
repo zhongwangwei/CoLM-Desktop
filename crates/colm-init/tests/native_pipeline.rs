@@ -1,6 +1,10 @@
 //! Native Rust preprocessing integration test against the checked-in CN-Cng case.
 
-use colm_init::{prepare_single_point_case, SinglePointPreprocessFiles};
+use colm_init::{
+    prepare_single_point_case, write_single_point_hyperspectral_cold_time_restarts,
+    write_single_point_hyperspectral_constant_restarts, SinglePointHyperspectralConfig,
+    SinglePointPreprocessFiles,
+};
 use colm_srfdata::SiteMode;
 
 // Keep each NetCDF writer + external Fortran reader lifecycle serial, as in
@@ -98,6 +102,147 @@ fn rust_pc_bgc_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
         "bgc",
         "DEF_USE_LCT = .false.\nDEF_USE_PC = .true.\nDEF_USE_BGC = .true.\nDEF_USE_CN_INIT = .true.",
     );
+}
+
+#[test]
+#[ignore = "requires the locally generated CN-Cng source case"]
+fn native_pft_pc_nonnatural_singlepoint_pipeline_writes_pftless_restarts() {
+    let _guard = NATIVE_PIPELINE_LOCK.lock().unwrap();
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let template = root.join("oracle/work/generated/case.nml");
+    let original_output = format!("{}/oracle/work/generated/out/", root.display());
+    let cases = [(11, 2), (13, 1), (15, 3), (17, 4)];
+
+    for (mode, use_pft, use_pc) in [("pft", true, false), ("pc", false, true)] {
+        for bgc in [false, true] {
+            for (class, kind) in cases {
+                let directory = std::env::temp_dir().join(format!(
+                    "colm-native-pftless-{mode}-bgc{bgc}-igbp{class}-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                let output = directory.join("out");
+                let namelist = std::fs::read_to_string(&template).unwrap().replace(
+                    &format!("DEF_dir_output = '{original_output}'"),
+                    &format!("DEF_dir_output = '{}/'", output.display()),
+                );
+                let mut document = colm_namelist::parse(&namelist).unwrap();
+                for (field, value) in [
+                    ("DEF_USE_LCT", false),
+                    ("DEF_USE_PFT", use_pft),
+                    ("DEF_USE_PC", use_pc),
+                    ("DEF_USE_BGC", bgc),
+                    ("DEF_USE_CN_INIT", false),
+                    ("USE_SITE_landtype", false),
+                ] {
+                    document
+                        .insert(field, colm_namelist::Value::Bool(value), "nl_colm")
+                        .unwrap();
+                }
+                document
+                    .insert(
+                        "SITE_landtype",
+                        colm_namelist::Value::Int(i64::from(class)),
+                        "nl_colm",
+                    )
+                    .unwrap();
+                let case = directory.join("case.nml");
+                std::fs::write(&case, document.to_string()).unwrap();
+
+                let (run, files) = prepare_single_point_case(&case, None, false, None).unwrap();
+                let surface = netcdf::open(&files.surface).unwrap();
+                assert_eq!(values_i32(&surface, "IGBP_classification"), [class]);
+                assert!(surface.dimension("pft").is_none(), "{mode} IGBP {class}");
+                for name in [
+                    "pfttyp",
+                    "pctpfts",
+                    "canopy_height_pfts",
+                    "LAI_pfts_monthly",
+                    "SAI_pfts_monthly",
+                ] {
+                    assert!(
+                        surface.variable(name).is_none(),
+                        "{mode} IGBP {class} must omit {name}"
+                    );
+                }
+                assert!(surface.variable("LAI_monthly").is_some());
+                assert!(surface.variable("SAI_monthly").is_some());
+                drop(surface);
+
+                let common_const = netcdf::open(&files.constants.common.block).unwrap();
+                assert_eq!(values_i32(&common_const, "patchclass"), [class]);
+                assert_eq!(values_i32(&common_const, "patchtype"), [kind]);
+                assert_eq!(values_i8(&common_const, "patchmask"), [1]);
+                drop(common_const);
+
+                let pft_const_path = files
+                    .constants
+                    .pft
+                    .as_ref()
+                    .expect("PFT/PC nonnatural constants still write an empty PFT block");
+                let pft_const = netcdf::open(pft_const_path).unwrap();
+                assert_eq!(pft_const.dimension("pft").unwrap().len(), 0);
+                for name in ["pftclass", "pftfrac", "htop_p", "hbot_p"] {
+                    assert_eq!(
+                        pft_const.variable(name).unwrap().len(),
+                        0,
+                        "{mode} IGBP {class} {name}"
+                    );
+                }
+                drop(pft_const);
+
+                assert!(
+                    files.time.pft.is_none(),
+                    "PFT/PC nonnatural time restart must not write dynamic PFT fields"
+                );
+                assert_eq!(files.constants.bgc.is_some(), bgc);
+                assert_eq!(files.time.bgc.is_some(), bgc);
+                let common_time = netcdf::open(&files.time.common.block).unwrap();
+                for name in ["tlai", "tsai", "lai", "sai"] {
+                    assert_eq!(values_f64(&common_time, name).len(), 1, "{name}");
+                }
+
+                append_test_soil_hyper_albedo(&files.surface);
+                let highres_restart = directory.join("highres-restart");
+                let mut highres_run = run.cold_start.clone();
+                highres_run.static_run.restart_dir = highres_restart.clone();
+                let constant_error =
+                    write_single_point_hyperspectral_constant_restarts(&highres_run)
+                        .unwrap_err()
+                        .to_string();
+                assert!(
+                    constant_error.contains("natural PFT/PC surfaces only"),
+                    "constant highres must reject class before writing or reading optics: {constant_error:#}"
+                );
+                let missing = directory.join("does-not-exist.nc");
+                let time_error = write_single_point_hyperspectral_cold_time_restarts(
+                    &highres_run,
+                    SinglePointHyperspectralConfig {
+                        leaf_optics: Some(&missing),
+                        water_optics: Some(&missing),
+                        radiation: Some(&missing),
+                        urban_albedo: &missing,
+                    },
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(
+                    time_error.contains("natural-soil patch"),
+                    "time highres must reject class before writing or reading optics: {time_error:#}"
+                );
+                assert!(
+                    !highres_restart.exists(),
+                    "highres class guards must fail before creating restart outputs"
+                );
+
+                std::fs::remove_dir_all(directory).unwrap();
+            }
+        }
+    }
 }
 
 #[test]
@@ -403,5 +548,29 @@ fn values_f64(file: &netcdf::File, name: &str) -> Vec<f64> {
     file.variable(name)
         .unwrap()
         .get_values::<f64, _>(..)
+        .unwrap()
+}
+
+fn append_test_soil_hyper_albedo(surface: &std::path::Path) {
+    let mut file = netcdf::append(surface).unwrap();
+    file.add_dimension("wavelength", 211).unwrap();
+    file.add_variable::<f64>("soil_hyper_albedo", &["wavelength"])
+        .unwrap()
+        .put_values(&[0.2; 211], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn values_i32(file: &netcdf::File, name: &str) -> Vec<i32> {
+    file.variable(name)
+        .unwrap()
+        .get_values::<i32, _>(..)
+        .unwrap()
+}
+
+fn values_i8(file: &netcdf::File, name: &str) -> Vec<i8> {
+    file.variable(name)
+        .unwrap()
+        .get_values::<i8, _>(..)
         .unwrap()
 }

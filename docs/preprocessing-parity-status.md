@@ -270,10 +270,64 @@ Reports: `/tmp/colm-lake-soilc-fix/before-results.json`, `after-results.json` an
 `decoded-comparison.json`.
 
 This closes the common constant ingestion/persistence gap, not full methane
-runtime parity. Single-point non-natural PFT/PC cold start, all-nonvegetated PFT
-blocks and prognostic tracer runtime still require their own implementation and
-acceptance work. The existing scientific residuals and full migration gate remain
+runtime parity. Single-point broadband non-natural PFT/PC is implemented and
+verified below; all-nonvegetated spatial PFT blocks and prognostic tracer runtime
+still require their own implementation and acceptance work. The existing scientific residuals and full migration gate remain
 open; no original source, golden or tolerance was changed.
+
+## Single-point PFTless surface and broadband initialization
+
+PFT/PC now accepts nonnatural IGBP wetland 11, urban 13 (without the urban-model
+switch), glacier 15 and waterbody 17, as original `MOD_SingleSrfdata` does.
+Surface generation uses scalar canopy/LAI/SAI and omits the `pft` dimension and
+PFT arrays. Classification overrides and raw-data classification updates select
+requirements from the effective class. IGBP 16 remains natural/soil-ground and
+still requires positive PFT composition; no synthetic PFT is introduced.
+
+Initialization reuses the existing scalar common physics and shared BGC core.
+The original zero-length PFT **constant** container is written with its four
+variables; the PFT **time** file is omitted. Natural and crop callers retain
+nonempty topology validation. Tracer-enabled wetlands consume CN and organic
+matter fallback; inactive classes retain the original missing/default states.
+The scalar radiation call now honors `DEF_VEG_SNOW`, rather than hardcoding true.
+
+An actual make-surface → initialize comparison exposed two additional shared
+errors. Glacier `thermk` must retain allocated `spval` when LAI+SAI is positive
+but no canopy solver runs; zero-depth lake `wdsrf` must use the already-derived
+0.1 m minimum. The shared radiation initializer and common time writer now
+preserve these source rules. Targeted tests failed before each repair and pass
+after it; the time writer no longer needs its raw-surface argument.
+
+**740 integrated tests** pass, including the new 16-case native pipeline,
+CN/tracer eligibility, empty-vector schema, class-sensitive producer and
+high-resolution fail-before-write checks. All-target Clippy, downstream
+CLI/kernel checks, scoped formatting and all three release binaries pass.
+Logs: `/tmp/colm-single-point-nonvegetated-validation/`.
+
+Fresh available Desktop Fortran and Rust binaries independently complete
+make-surface → initialize for PFT/PC × four classes × BGC off/on (CN initialization
+disabled), using complete CN-Cng site data with synthetic land-class overrides. All **88 restart files / 3,272 variable instances** pass file inventory,
+variable type/dimension and value checks at unchanged combined `1e-12` tolerance.
+The earlier eight glacier/lake failures are retained separately, not relabeled
+as successes. Evidence: `/tmp/colm-single-point-nonvegetated-fix/pipeline/` and
+`pipeline-final/`; frozen pre-migration initializer failures, source reviews and
+focused regressions are in the same parent directory.
+
+The same unchanged Fortran `colm.x` then consumes each independently generated
+restart for two 1,800-second steps with the available PLUMBER2 forcing. All 32
+runs complete; the 16 paired comparisons pass all **40 new restart/history files
+/ 4,592 variable instances** at the same tolerance. Runtime evidence:
+`/tmp/colm-single-point-nonvegetated-fix/runtime/`. Tracer is disabled in these
+executable controls; CN/tracer fallback coverage above is source-derived unit
+coverage, not a full prognostic methane validation.
+
+These comparisons use the available unchanged Desktop vendor kernels, **not a
+fresh pristine `ebe6de9` build**, and do not assert byte-identical compact surface
+containers. Nonnatural HYPERSPECTRAL is still unimplemented and rejects before
+restart writes; its constant entry can report a missing soil-spectrum field
+before the unsupported-class message. This diagnostic ordering is nonblocking,
+not full high-resolution support. SNICAR, external-lake provider integration,
+all-PFTless spatial blocks, broader scientific and platform gates remain open.
 
 ## SNICAR remains unported and now fails explicitly
 
@@ -317,8 +371,9 @@ real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
 rounding or absent test coverage: SNICAR optical initialization, external-lake
-options and single-point nonvegetated BGC still require implementation.
-Spatial wetland CN and common lake sediment carbon initialization are repaired above.
+options and nonnatural hyperspectral initialization still require implementation.
+Single-point broadband nonvegetated BGC, spatial wetland CN and common lake
+sediment carbon initialization are repaired above.
 Urban-only masking is repaired above; an explicit unsupported-feature guard is
 not implementation of the remaining physics. These remain open and preclude an
 all-feature migration claim. The main

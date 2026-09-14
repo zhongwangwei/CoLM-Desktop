@@ -16,6 +16,7 @@ use netcdf::types::{FloatType, IntType, NcVariableType};
 use crate::albedo::{albedo, IGBP_URBAN};
 use crate::derive::{derive, fine_earth_fractions, SoilColumn};
 use crate::grid::{COLM_1KM, COLM_500M};
+use crate::pft::is_igbp_soil_ground;
 use crate::raster::{
     point_5x5_f64, point_5x5_pft_f64, point_5x5_pft_time_f64, point_5x5_time_f64, point_f64,
     point_f64_on, point_i32, point_time_f64,
@@ -638,21 +639,10 @@ pub fn pft_components(
             Ok(Some((types, fractions)))
         };
 
-    let landtype = match landtype_override.filter(|value| *value >= 0) {
-        Some(value) => Some(value),
-        None => f
-            .variable("IGBP_classification")
-            .map(|variable| -> Result<Option<i32>> {
-                let values = variable.get_values::<f64, _>(netcdf::Extents::All)?;
-                values
-                    .first()
-                    .copied()
-                    .map(|value| classification_value(file, "IGBP_classification", value, 1..=17))
-                    .transpose()
-            })
-            .transpose()?
-            .flatten(),
-    };
+    let landtype = single_point_igbp_landtype(file, &f, landtype_override)?;
+    if single_point_pftless_for_landtype(landtype)? {
+        return Ok(Vec::new());
+    }
     // PFT/PC uses the IGBP table; with CROP, CoLM only switches to CFTs for
     // IGBP class 12 and does not fall back to pfttyp/pctpfts.
     let (types, fractions, crop_ids) = if crop_enabled && landtype == Some(12) {
@@ -705,6 +695,49 @@ pub fn pft_components(
         component.fraction /= total;
     }
     Ok(out)
+}
+
+fn single_point_igbp_landtype(
+    file: &Path,
+    handle: &netcdf::File,
+    landtype_override: Option<i32>,
+) -> Result<Option<i32>> {
+    match landtype_override.filter(|value| *value >= 0) {
+        Some(value) => Ok(Some(classification_value(
+            file,
+            "IGBP_classification",
+            value as f64,
+            1..=17,
+        )?)),
+        None => handle
+            .variable("IGBP_classification")
+            .map(|variable| -> Result<Option<i32>> {
+                let values = variable.get_values::<f64, _>(netcdf::Extents::All)?;
+                values
+                    .first()
+                    .copied()
+                    .map(|value| classification_value(file, "IGBP_classification", value, 1..=17))
+                    .transpose()
+            })
+            .transpose()
+            .map(Option::flatten),
+    }
+}
+
+fn single_point_pftless_for_landtype(landtype: Option<i32>) -> Result<bool> {
+    let Some(landtype) = landtype else {
+        return Ok(false);
+    };
+    Ok(!is_igbp_soil_ground(landtype)?)
+}
+
+fn single_point_pftless(file: &Path, landtype_override: Option<i32>) -> Result<bool> {
+    let handle = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    single_point_pftless_for_landtype(single_point_igbp_landtype(
+        file,
+        &handle,
+        landtype_override,
+    )?)
 }
 
 fn classification_value(
@@ -810,6 +843,7 @@ pub fn audit(
         crop_enabled,
         SinglePointLaiFrequency::Monthly,
         true,
+        None,
     )
 }
 
@@ -820,6 +854,7 @@ fn audit_with_lai_frequency(
     crop_enabled: bool,
     lai_frequency: SinglePointLaiFrequency,
     use_soil_texture: bool,
+    landtype_override: Option<i32>,
 ) -> Result<SiteAudit> {
     if crop_enabled && !matches!(mode, SiteMode::Pft | SiteMode::Pc) {
         bail!(
@@ -834,6 +869,12 @@ fn audit_with_lai_frequency(
     }
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
     let kind = site_kind(file)?;
+    let pftless = matches!(mode, SiteMode::Pft | SiteMode::Pc)
+        && single_point_pftless_for_landtype(single_point_igbp_landtype(
+            file,
+            &f,
+            landtype_override,
+        )?)?;
     let mut required: Vec<&str> = vec!["longitude", "latitude"];
     required.extend(
         REQUIRED_FIELDS
@@ -853,6 +894,13 @@ fn audit_with_lai_frequency(
         }
         SiteMode::Usgs => {
             required.extend(["USGS_classification", "canopy_height", "LAI_year"]);
+            match lai_frequency {
+                SinglePointLaiFrequency::Monthly => required.extend(["LAI_monthly", "SAI_monthly"]),
+                SinglePointLaiFrequency::EightDay => required.push("LAI_8day"),
+            }
+        }
+        SiteMode::Pft | SiteMode::Pc if pftless => {
+            required.extend(["IGBP_classification", "canopy_height", "LAI_year"]);
             match lai_frequency {
                 SinglePointLaiFrequency::Monthly => required.extend(["LAI_monthly", "SAI_monthly"]),
                 SinglePointLaiFrequency::EightDay => required.push("LAI_8day"),
@@ -906,7 +954,7 @@ fn audit_with_lai_frequency(
             None => needs_external.push(name.to_string()),
         }
     }
-    if crop_enabled {
+    if crop_enabled && !pftless {
         let cropland = f
             .variable("IGBP_classification")
             .and_then(|v| v.get_values::<f64, _>(netcdf::Extents::All).ok())
@@ -1849,11 +1897,14 @@ fn materialize_single_point_surface_impl(
         && matches!(lai_frequency, SinglePointLaiFrequency::Monthly);
     let lct_mode = matches!(mode, SiteMode::Igbp | SiteMode::Usgs);
     let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
+    let source_pftless = pft_mode && single_point_pftless(source, options.site_landtype)?;
     let use_soil_texture = options.runoff_scheme == 3;
     let requires_eight_day_raw =
         matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && !options.use_site_lai;
-    let requires_monthly_raw = lct_monthly && !options.use_site_lai;
-    let requires_lct_height_raw = lct_mode && !options.use_site_htop;
+    let source_pftless_monthly =
+        source_pftless && matches!(lai_frequency, SinglePointLaiFrequency::Monthly);
+    let requires_monthly_raw = (lct_monthly || source_pftless_monthly) && !options.use_site_lai;
+    let requires_lct_height_raw = (lct_mode || source_pftless) && !options.use_site_htop;
     let requires_landtype_update = mode != SiteMode::Urban
         && (options.site_landtype.is_some()
             || !options.use_site_landtype
@@ -1866,6 +1917,7 @@ fn materialize_single_point_surface_impl(
             || source_soil_missing
             || (use_soil_texture && !single_point_variable_exists(source, "soil_texture")?));
     let requires_pft_raw = pft_mode
+        && !source_pftless
         && (!options.use_site_lai
             || !options.use_site_pctpfts
             || !options.use_site_pctcrop
@@ -1887,6 +1939,7 @@ fn materialize_single_point_surface_impl(
         crop_enabled,
         lai_frequency,
         use_soil_texture,
+        options.site_landtype,
     )?;
     if readiness.self_contained()
         && !requires_eight_day_raw
@@ -1931,6 +1984,7 @@ fn materialize_single_point_surface_impl(
     if requires_landtype_update {
         materialize_single_point_landtype(&temporary, rawdata, mode, options)?;
     }
+    let temporary_pftless = pft_mode && single_point_pftless(&temporary, None)?;
     if requires_soil_raw {
         materialize_single_point_soil_fields(
             &temporary,
@@ -1947,24 +2001,34 @@ fn materialize_single_point_surface_impl(
             options.eight_day_lai_years,
         )?;
     }
-    let monthly_lai_missing = lct_monthly && {
+    let temporary_pftless_monthly =
+        temporary_pftless && matches!(lai_frequency, SinglePointLaiFrequency::Monthly);
+    let monthly_lai_missing = (lct_monthly || temporary_pftless_monthly) && {
         let file = netcdf::open(&temporary)?;
         file.variable("LAI_monthly").is_none() || file.variable("SAI_monthly").is_none()
     };
-    if monthly_lai_missing || requires_monthly_raw {
+    let requires_temporary_monthly_raw =
+        (lct_monthly || temporary_pftless_monthly) && !options.use_site_lai;
+    if monthly_lai_missing || requires_temporary_monthly_raw {
         materialize_single_point_monthly_lai(
             &temporary,
-            rawdata.context("monthly LCT LAI needs DEF_dir_rawdata/plant_15s")?,
+            rawdata.context("monthly scalar LAI needs DEF_dir_rawdata/plant_15s")?,
             options.monthly_lai_years,
         )?;
     }
-    let synthesized_lct_height =
-        lct_mode && single_point_variable_is_synthesized(&temporary, "canopy_height")?;
-    if lct_mode && (requires_lct_height_raw || synthesized_lct_height) {
+    let synthesized_lct_height = (lct_mode || temporary_pftless)
+        && single_point_variable_is_synthesized(&temporary, "canopy_height")?;
+    let requires_temporary_height_raw = (lct_mode || temporary_pftless) && !options.use_site_htop;
+    if (lct_mode || temporary_pftless) && (requires_temporary_height_raw || synthesized_lct_height)
+    {
         materialize_single_point_lct_canopy_height(
             &temporary,
             rawdata.context("single-point canopy height needs DEF_dir_rawdata")?,
-            mode,
+            if temporary_pftless {
+                SiteMode::Igbp
+            } else {
+                mode
+            },
             options.land_cover_year,
         )?;
     }
@@ -2008,6 +2072,7 @@ fn materialize_single_point_surface_impl(
         crop_enabled,
         lai_frequency,
         use_soil_texture,
+        None,
     )
     .context("cannot audit the materialized single-point surface")?;
     if !readiness.self_contained() {
@@ -2492,6 +2557,9 @@ fn single_point_pft_raw_needed(
 ) -> Result<bool> {
     let file = netcdf::open(surface)
         .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+    if single_point_pftless_for_landtype(single_point_igbp_landtype(surface, &file, None)?)? {
+        return Ok(false);
+    }
     let crop = crop_enabled && scalar_i32(&file, "IGBP_classification")? == 12;
     let composition = if crop {
         ["croptyp", "pctcrop"]
@@ -2725,6 +2793,9 @@ fn materialize_single_point_pft_fields(
     let (longitude, latitude, cropland, missing_composition, missing_height, missing_lai) = {
         let file = netcdf::open(surface)
             .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        if single_point_pftless_for_landtype(single_point_igbp_landtype(surface, &file, None)?)? {
+            return Ok(());
+        }
         (
             scalar_f64(&file, "longitude")?,
             scalar_f64(&file, "latitude")?,
@@ -2989,7 +3060,9 @@ fn write_single_point_surface_with_lai_frequency(
     let input =
         netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
     let years = values_i32(&input, "LAI_year")?;
-    let pfts = pft_mode
+    let pftless = pft_mode
+        && single_point_pftless_for_landtype(single_point_igbp_landtype(source, &input, None)?)?;
+    let pfts = (pft_mode && !pftless)
         .then(|| pft_components(source, crop_enabled, None))
         .transpose()?;
     let pft_indices = pfts
@@ -3079,7 +3152,7 @@ fn write_single_point_surface_with_lai_frequency(
     emit_scalar(
         &mut output,
         "canopy_height",
-        if pft_mode {
+        if pft_mode && !pftless {
             0.0
         } else {
             scalar_f64(&input, "canopy_height")?

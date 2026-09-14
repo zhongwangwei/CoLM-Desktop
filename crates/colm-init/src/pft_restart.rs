@@ -445,7 +445,7 @@ fn pft_entries(fields: PftTimeFields<'_>) -> [(&'static str, &[f64]); 18] {
 
 fn validate_constant_input(input: PftConstantRestartInput<'_>) -> Result<usize> {
     let pfts = input.class.len();
-    ensure!(pfts > 0, "a PFT restart block needs at least one PFT");
+    // SinglePoint nonnatural classes still write this empty vector container.
     validate_pft_values(
         "PFT constants",
         pfts,

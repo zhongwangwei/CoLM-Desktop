@@ -1963,6 +1963,7 @@ fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
         false,
         super::SinglePointLaiFrequency::EightDay,
         true,
+        None,
     )
     .unwrap();
     assert!(audit.self_contained(), "{:?}", audit.needs_external);
@@ -2274,6 +2275,342 @@ fn complete_igbp_site(path: &std::path::Path, include_soil_texture: bool) {
             .unwrap();
     }
     file.close().unwrap();
+}
+
+fn complete_igbp_eight_day_site(path: &std::path::Path, class: i32) {
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("soil", 8).unwrap();
+    file.add_dimension("LAI_year", 1).unwrap();
+    file.add_dimension("J8day", 46).unwrap();
+    for (name, value) in [
+        ("longitude", -180.0),
+        ("latitude", 90.0),
+        ("canopy_height", 0.5),
+        ("lakedepth", 1.0),
+        ("soil_s_v_alb", 0.1),
+        ("soil_d_v_alb", 0.2),
+        ("soil_s_n_alb", 0.3),
+        ("soil_d_n_alb", 0.4),
+        ("elevation", 42.0),
+        ("elvstd", 0.0),
+        ("sloperatio", 0.0),
+    ] {
+        file.add_variable::<f64>(name, &[])
+            .unwrap()
+            .put_value(value, ())
+            .unwrap();
+    }
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_value(class, ())
+        .unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2008], ..)
+        .unwrap();
+    file.add_variable::<f64>("LAI_8day", &["LAI_year", "J8day"])
+        .unwrap()
+        .put_values(
+            &(0..46).map(|value| value as f64 / 10.0).collect::<Vec<_>>(),
+            ..,
+        )
+        .unwrap();
+    for name in super::SINGLE_POINT_SOIL_FIELDS {
+        file.add_variable::<f64>(name, &["soil"])
+            .unwrap()
+            .put_values(&[0.1; 8], ..)
+            .unwrap();
+    }
+    file.add_variable::<i32>("soil_texture", &[])
+        .unwrap()
+        .put_value(8, ())
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn set_igbp_class(path: &std::path::Path, class: i32) {
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::append(path).unwrap();
+    file.variable_mut("IGBP_classification")
+        .unwrap()
+        .put_value(class, ())
+        .unwrap();
+    file.close().unwrap();
+}
+
+#[test]
+fn pft_pc_audit_accepts_nonnatural_igbp_without_pft_arrays() {
+    let root = std::env::temp_dir().join(format!("colm-srfdata-pftless-audit-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    for class in [11, 13, 15, 17] {
+        let source = root.join(format!("source-{class}.nc"));
+        complete_igbp_site(&source, true);
+        set_igbp_class(&source, class);
+
+        for (mode, crop) in [
+            (super::SiteMode::Pft, false),
+            (super::SiteMode::Pc, false),
+            (super::SiteMode::Pft, true),
+            (super::SiteMode::Pc, true),
+        ] {
+            let report = super::audit(&source, mode, None, crop).unwrap();
+            assert!(
+                report.self_contained(),
+                "IGBP {class} {mode:?}: {:?}",
+                report.needs_external
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pft_components_are_empty_only_for_nonnatural_singlepoint_classes() {
+    let root =
+        std::env::temp_dir().join(format!("colm-srfdata-pftless-components-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let wetland = root.join("wetland.nc");
+    complete_igbp_site(&wetland, true);
+    set_igbp_class(&wetland, 11);
+    assert!(super::pft_components(&wetland, false, None)
+        .unwrap()
+        .is_empty());
+
+    let bare = root.join("bare.nc");
+    complete_igbp_site(&bare, true);
+    set_igbp_class(&bare, 16);
+    let err = super::pft_components(&bare, false, None).unwrap_err();
+    assert!(err.to_string().contains("pfttyp/pctpfts"), "{err:#}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pftless_site_landtype_override_publishes_without_raw_pft_data() {
+    let root =
+        std::env::temp_dir().join(format!("colm-srfdata-pftless-override-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    let landdata = root.join("landdata");
+    complete_igbp_site(&source, true);
+    let mut options = single_point_options_for_runoff(3);
+    options.site_landtype = Some(11);
+
+    super::materialize_single_point_surface_impl(
+        &source,
+        &landdata,
+        super::SiteMode::Pft,
+        None,
+        None,
+        false,
+        options,
+    )
+    .unwrap();
+    let file = netcdf::open(landdata.join("srfdata.nc")).unwrap();
+    assert_eq!(
+        file.variable("IGBP_classification")
+            .unwrap()
+            .get_value::<i32, _>(())
+            .unwrap(),
+        11
+    );
+    assert!(file.dimension("pft").is_none());
+    assert!(file.variable("pfttyp").is_none());
+    assert!(file.variable("LAI_monthly").is_some());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn raw_landtype_update_from_pftless_to_natural_does_not_request_scalar_lai_rawdata() {
+    let root =
+        std::env::temp_dir().join(format!("colm-srfdata-pftless-to-natural-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let rawdata = root.join("rawdata");
+    std::fs::create_dir_all(rawdata.join("landtypes")).unwrap();
+    let source = root.join("source.nc");
+    let landdata = root.join("landdata");
+    complete_igbp_site(&source, true);
+    set_igbp_class(&source, 11);
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(
+            rawdata
+                .join("landtypes")
+                .join("landtype-igbp-modis-2008.nc"),
+        )
+        .unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[10], ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+    let mut options = single_point_options_for_runoff(3);
+    options.use_site_landtype = false;
+    options.use_site_lai = false;
+    options.monthly_lai_years = &[2008];
+
+    let err = super::materialize_single_point_surface_impl(
+        &source,
+        &landdata,
+        super::SiteMode::Pft,
+        Some(&rawdata),
+        None,
+        false,
+        options,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("cannot read PCT_PFT class 0"), "{err:#}");
+    assert!(!err.contains("monthly scalar LAI"), "{err:#}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pftless_eight_day_site_does_not_require_monthly_lai_rawdata() {
+    let root =
+        std::env::temp_dir().join(format!("colm-srfdata-pftless-eightday-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    let landdata = root.join("landdata");
+    complete_igbp_eight_day_site(&source, 11);
+    let mut options = single_point_options_for_runoff(3);
+    options.lai_frequency = super::SinglePointLaiFrequency::EightDay;
+    options.eight_day_lai_years = &[2008];
+    options.monthly_lai_years = &[];
+
+    super::materialize_single_point_surface_impl(
+        &source,
+        &landdata,
+        super::SiteMode::Pft,
+        None,
+        None,
+        false,
+        options,
+    )
+    .unwrap();
+    let file = netcdf::open(landdata.join("srfdata.nc")).unwrap();
+    assert!(file.dimension("pft").is_none());
+    assert!(file.variable("LAI_8day").is_some());
+    assert!(file.variable("LAI_monthly").is_none());
+    assert!(file.variable("SAI_monthly").is_none());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pftless_nonnatural_surface_omits_pft_dimension_and_keeps_scalar_lai() {
+    let root = std::env::temp_dir().join(format!("colm-srfdata-pftless-write-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    let output = root.join("srfdata.nc");
+    complete_igbp_site(&source, true);
+    set_igbp_class(&source, 11);
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::append(&source).unwrap();
+        file.variable_mut("canopy_height")
+            .unwrap()
+            .put_value(2.5, ())
+            .unwrap();
+        file.variable_mut("LAI_monthly")
+            .unwrap()
+            .put_values(&(0..12).map(|m| m as f64 + 0.5).collect::<Vec<_>>(), ..)
+            .unwrap();
+        file.variable_mut("SAI_monthly")
+            .unwrap()
+            .put_values(&(0..12).map(|m| m as f64 + 10.5).collect::<Vec<_>>(), ..)
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    super::write_single_point_surface_with_lai_frequency(
+        &source,
+        &output,
+        super::SiteMode::Pft,
+        false,
+        super::SinglePointLaiFrequency::Monthly,
+        false,
+        true,
+        1,
+    )
+    .unwrap();
+    let file = netcdf::open(&output).unwrap();
+    assert!(file.dimension("pft").is_none());
+    for name in [
+        "pfttyp",
+        "pctpfts",
+        "canopy_height_pfts",
+        "LAI_pfts_monthly",
+        "SAI_pfts_monthly",
+    ] {
+        assert!(
+            file.variable(name).is_none(),
+            "{name} must be omitted for pftless nonnatural sites"
+        );
+    }
+    assert_eq!(
+        file.variable("canopy_height")
+            .unwrap()
+            .get_value::<f64, _>(())
+            .unwrap(),
+        2.5
+    );
+    assert_eq!(
+        file.variable("LAI_monthly")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[..3],
+        [0.5, 1.5, 2.5]
+    );
+    assert_eq!(
+        file.variable("SAI_monthly")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[..3],
+        [10.5, 11.5, 12.5]
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bare_igbp_sixteen_remains_a_positive_pft_host() {
+    let root = std::env::temp_dir().join(format!("colm-srfdata-bare-pft-host-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    let output = root.join("srfdata.nc");
+    complete_igbp_site(&source, true);
+    set_igbp_class(&source, 16);
+
+    let err = super::write_single_point_surface_with_lai_frequency(
+        &source,
+        &output,
+        super::SiteMode::Pft,
+        false,
+        super::SinglePointLaiFrequency::Monthly,
+        false,
+        true,
+        1,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("pfttyp/pctpfts"), "{err:#}");
+    assert!(!output.exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

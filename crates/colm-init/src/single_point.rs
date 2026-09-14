@@ -343,6 +343,7 @@ pub fn single_point_cold_start_run_from_namelist(
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let subgrid = single_point_subgrid(&document)?;
     reject_unsupported_cold_start_features(&document, subgrid)?;
+    optional_bool_or(&document, "DEF_USE_TRACER", false)?;
     let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     ensure!(
         !bgc || matches!(subgrid, SinglePointSubgrid::Pft | SinglePointSubgrid::Pc),
@@ -652,10 +653,50 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         run.static_run.hydraulic_model,
         static_config.use_soil_texture,
     )?;
-    ensure!(
-        patch_type(run.static_run.land_cover, surface.land_class)? == 0,
-        "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
-    );
+    if patch_type(run.static_run.land_cover, surface.land_class)? != 0 {
+        ensure!(
+            hyperspectral_albedo.is_none(),
+            "HYPERSPECTRAL single-point cold starts support natural PFT/PC surfaces only"
+        );
+        return Ok(SinglePointConstantRestartFiles {
+            common: write_single_point_constant_restart_from_surface(
+                &surface,
+                &run.static_run.restart_dir,
+                static_config,
+                None,
+                hyperspectral_albedo,
+            )?,
+            pft: Some(write_pft_constant_restart(
+                &run.static_run.restart_dir,
+                &run.static_run.case_name,
+                run.static_run.land_cover_year,
+                &run.static_run.block_label,
+                PftConstantRestartInput {
+                    compression_level: run.static_run.compression_level,
+                    class: &[],
+                    fraction: &[],
+                    canopy_top_m: &[],
+                    canopy_bottom_m: &[],
+                    crop_fraction: None,
+                },
+            )?),
+            bgc: run
+                .bgc
+                .then(|| {
+                    write_cold_start_bgc_constant_restart(
+                        &run.static_run.restart_dir,
+                        &run.static_run.case_name,
+                        run.static_run.land_cover_year,
+                        &run.static_run.block_label,
+                        1,
+                        run.nitrification,
+                        run.static_run.compression_level,
+                    )
+                })
+                .transpose()?,
+            urban: None,
+        });
+    }
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
     let crop = single_point_crop_state(run, &document, &surface, &pft)?;
     let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
@@ -1021,12 +1062,6 @@ pub fn write_single_point_cold_time_restarts(
     if let Some(urban) = &run.urban {
         return write_single_point_urban_cold_time_restarts(run, urban);
     }
-    if matches!(
-        run.subgrid,
-        SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
-    ) {
-        return write_single_point_pft_cold_time_restarts(run, None);
-    }
     let config = run.static_run.static_config();
     let surface = read_single_point_surface(
         &run.static_run.surface,
@@ -1035,6 +1070,23 @@ pub fn write_single_point_cold_time_restarts(
         config.use_soil_texture,
     )?;
     let kind = patch_type(config.land_cover, surface.land_class)?;
+    if kind == 0
+        && matches!(
+            run.subgrid,
+            SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
+        )
+    {
+        return write_single_point_pft_cold_time_restarts(run, None, surface);
+    }
+    write_single_point_scalar_cold_time_restarts(run, &surface, kind)
+}
+
+fn write_single_point_scalar_cold_time_restarts(
+    run: &SinglePointColdStartRun,
+    surface: &crate::SinglePointSurfaceData,
+    kind: i32,
+) -> Result<SinglePointTimeRestartFiles> {
+    let config = run.static_run.static_config();
     let dimensions = TimeRestartDimensions::default();
     let soil = derive_soil_parameters(
         &surface.soil_layers,
@@ -1056,7 +1108,7 @@ pub fn write_single_point_cold_time_restarts(
     let month = month_from_julian(run.date.year, run.date.julian_day)?;
     let cold_soil = initial_soil_state(
         run,
-        &surface,
+        surface,
         kind,
         &porosity,
         &residual_water,
@@ -1111,7 +1163,7 @@ pub fn write_single_point_cold_time_restarts(
     } else {
         (1.0, 1.0)
     };
-    let snow_depth_m = initial_snow_depth(run, &surface, month)?;
+    let snow_depth_m = initial_snow_depth(run, surface, month)?;
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
     let roughness = canopy_top(
         run.static_run.land_cover,
@@ -1161,7 +1213,7 @@ pub fn write_single_point_cold_time_restarts(
         cosine_zenith.max(0.001),
         true,
         config.land_cover == LandCoverScheme::Usgs,
-        true,
+        run.vegetation_snow,
         snow_depth_m,
         snow_cover.ground_snow_fraction,
         cold_soil.temperature_k[0],
@@ -1178,10 +1230,22 @@ pub fn write_single_point_cold_time_restarts(
         ground_snow_fraction: snow_cover.ground_snow_fraction,
         roughness,
     }];
+    let bgc_state = if run.bgc {
+        single_point_bgc_state(
+            run,
+            &read_run_namelist(run)?,
+            surface,
+            &soil,
+            &thickness,
+            None,
+            false,
+        )?
+    } else {
+        None
+    };
     let common = write_cold_time_restart(
         run,
         kind,
-        &surface,
         &lake,
         &cold_soil.temperature_k,
         &cold_soil.liquid_water_kg_m2,
@@ -1200,7 +1264,19 @@ pub fn write_single_point_cold_time_restarts(
     Ok(SinglePointTimeRestartFiles {
         common,
         pft: None,
-        bgc: None,
+        bgc: bgc_state
+            .as_ref()
+            .map(|state| {
+                write_bgc_time_restart(
+                    &run.static_run.restart_dir,
+                    &run.static_run.case_name,
+                    run.static_run.land_cover_year,
+                    run.date,
+                    &run.static_run.block_label,
+                    bgc_time_restart_input(state, run.static_run.compression_level),
+                )
+            })
+            .transpose()?,
         urban: None,
     })
 }
@@ -1218,7 +1294,14 @@ pub fn write_single_point_hyperspectral_cold_time_restarts(
             ),
         "HYPERSPECTRAL single-point cold starts support natural PFT/PC surfaces only"
     );
-    write_single_point_pft_cold_time_restarts(run, Some(hyperspectral))
+    let config = run.static_run.static_config();
+    let surface = read_single_point_surface(
+        &run.static_run.surface,
+        config.land_cover,
+        config.hydraulic_model,
+        config.use_soil_texture,
+    )?;
+    write_single_point_pft_cold_time_restarts(run, Some(hyperspectral), surface)
 }
 
 fn write_single_point_urban_cold_time_restarts(
@@ -1410,7 +1493,6 @@ fn write_single_point_urban_cold_time_restarts(
     let common = write_cold_time_restart(
         run,
         kind,
-        surface,
         &lake,
         &cold_soil.temperature_k,
         &common_soil_liquid,
@@ -1451,8 +1533,14 @@ fn write_single_point_urban_cold_time_restarts(
 fn write_single_point_pft_cold_time_restarts(
     run: &SinglePointColdStartRun,
     hyperspectral: Option<SinglePointHyperspectralConfig<'_>>,
+    surface: crate::SinglePointSurfaceData,
 ) -> Result<SinglePointTimeRestartFiles> {
     let config = run.static_run.static_config();
+    let kind = patch_type(config.land_cover, surface.land_class)?;
+    ensure!(
+        kind == 0,
+        "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
+    );
     let document = read_run_namelist(run)?;
     // MOD_Albedo_HiRes runs its canopy solver only for PFT.  PC retains the
     // spectral ground state and writes its normal ThreeDCanopy broadband state.
@@ -1496,17 +1584,6 @@ fn write_single_point_pft_cold_time_restarts(
             Ok::<_, anyhow::Error>((leaf, water, radiation))
         })
         .transpose()?;
-    let surface = read_single_point_surface(
-        &run.static_run.surface,
-        config.land_cover,
-        config.hydraulic_model,
-        config.use_soil_texture,
-    )?;
-    let kind = patch_type(config.land_cover, surface.land_class)?;
-    ensure!(
-        kind == 0,
-        "DEF_USE_PFT/DEF_USE_PC single-point cold starts require a natural-soil patch"
-    );
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
     let crop = single_point_crop_state(run, &document, &surface, &pft)?;
     let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
@@ -1519,55 +1596,15 @@ fn write_single_point_pft_cold_time_restarts(
     )?;
     let lake = derive_lake_layers(&[surface.lake_depth_m], dimensions.lake_layers)?;
     let (node_depth, thickness, interface_mm) = soil_grid(dimensions.soil_layers)?;
-    let bgc_state = if run.bgc {
-        let runtime_cn_state = run
-            .cn_initial_state
-            .as_deref()
-            .map(|path| {
-                read_single_point_cn_state(
-                    path,
-                    surface.latitude_degrees,
-                    surface.longitude_degrees,
-                )
-            })
-            .transpose()?;
-        let campbell = config.hydraulic_model == HydraulicModel::Campbell;
-        let leaf_carbon_to_nitrogen =
-            pft_parameters(&document, "DEF_PFT_LEAFCN", &pft.class, campbell)?;
-        let fine_root_carbon_to_nitrogen =
-            pft_parameters(&document, "DEF_PFT_FROOTCN", &pft.class, campbell)?;
-        let live_wood_carbon_to_nitrogen =
-            pft_parameters(&document, "DEF_PFT_LIVEWDCN", &pft.class, campbell)?;
-        let dead_wood_carbon_to_nitrogen =
-            pft_parameters(&document, "DEF_PFT_DEADWDCN", &pft.class, campbell)?;
-        let input = |index: std::ops::RangeInclusive<usize>| BgcColdStartInput {
-            soil_thickness_m: &thickness,
-            soil_bulk_density_kg_m3: soil.field(SoilField::BulkDensity),
-            soil_bgc_active: true,
-            pft: BgcPftColdStartInput {
-                class: &pft.class[index.clone()],
-                fraction: &pft.fraction[index.clone()],
-                leaf_carbon_to_nitrogen: &leaf_carbon_to_nitrogen[index.clone()],
-                fine_root_carbon_to_nitrogen: &fine_root_carbon_to_nitrogen[index.clone()],
-                live_wood_carbon_to_nitrogen: &live_wood_carbon_to_nitrogen[index.clone()],
-                dead_wood_carbon_to_nitrogen: &dead_wood_carbon_to_nitrogen[index],
-            },
-            runtime_cn_state: runtime_cn_state.as_ref(),
-            runtime_vegetation_carbon: None,
-            wetland_organic_matter_density_kg_m3: None,
-            use_nitrification: run.nitrification,
-        };
-        Some(if crop.is_some() {
-            let states = (0..pft.class.len())
-                .map(|index| derive_cold_start_bgc_state(input(index..=index)))
-                .collect::<Result<Vec<_>>>()?;
-            merge_bgc_cold_start_states(&states)?
-        } else {
-            derive_cold_start_bgc_state(input(0..=pft.class.len() - 1))?
-        })
-    } else {
-        None
-    };
+    let bgc_state = single_point_bgc_state(
+        run,
+        &document,
+        &surface,
+        &soil,
+        &thickness,
+        Some(&pft),
+        crop.is_some(),
+    )?;
     let interface_m = interface_mm[1..]
         .iter()
         .map(|depth| depth / 1000.0)
@@ -2087,7 +2124,6 @@ fn write_single_point_pft_cold_time_restarts(
     let common = write_cold_time_restart(
         run,
         kind,
-        &surface,
         &lake,
         &cold_soil.temperature_k,
         &cold_soil.liquid_water_kg_m2,
@@ -2204,6 +2240,71 @@ fn write_single_point_pft_cold_time_restarts(
         pft: Some(pft_time),
         bgc,
         urban: None,
+    })
+}
+
+fn single_point_bgc_state(
+    run: &SinglePointColdStartRun,
+    document: &colm_namelist::Document,
+    surface: &crate::SinglePointSurfaceData,
+    soil: &crate::SoilState,
+    thickness: &[f64],
+    pft: Option<&crate::SinglePointPftData>,
+    crop: bool,
+) -> Result<Option<crate::BgcColdStartState>> {
+    let config = run.static_run.static_config();
+    let kind = patch_type(config.land_cover, surface.land_class)?;
+    let use_tracer = optional_bool_or(document, "DEF_USE_TRACER", false)?;
+    let class = pft.map_or(&[][..], |pft| pft.class.as_slice());
+    let fraction = pft.map_or(&[][..], |pft| pft.fraction.as_slice());
+    Ok(if run.bgc {
+        let runtime_cn_state = run
+            .cn_initial_state
+            .as_deref()
+            .map(|path| {
+                read_single_point_cn_state(
+                    path,
+                    surface.latitude_degrees,
+                    surface.longitude_degrees,
+                )
+            })
+            .transpose()?;
+        let campbell = config.hydraulic_model == HydraulicModel::Campbell;
+        let leaf_carbon_to_nitrogen = pft_parameters(document, "DEF_PFT_LEAFCN", class, campbell)?;
+        let fine_root_carbon_to_nitrogen =
+            pft_parameters(document, "DEF_PFT_FROOTCN", class, campbell)?;
+        let live_wood_carbon_to_nitrogen =
+            pft_parameters(document, "DEF_PFT_LIVEWDCN", class, campbell)?;
+        let dead_wood_carbon_to_nitrogen =
+            pft_parameters(document, "DEF_PFT_DEADWDCN", class, campbell)?;
+        let input = |index: std::ops::Range<usize>| BgcColdStartInput {
+            soil_thickness_m: thickness,
+            soil_bulk_density_kg_m3: soil.field(SoilField::BulkDensity),
+            soil_bgc_active: kind == 0 || (use_tracer && kind == 2),
+            pft: BgcPftColdStartInput {
+                class: &class[index.clone()],
+                fraction: &fraction[index.clone()],
+                leaf_carbon_to_nitrogen: &leaf_carbon_to_nitrogen[index.clone()],
+                fine_root_carbon_to_nitrogen: &fine_root_carbon_to_nitrogen[index.clone()],
+                live_wood_carbon_to_nitrogen: &live_wood_carbon_to_nitrogen[index.clone()],
+                dead_wood_carbon_to_nitrogen: &dead_wood_carbon_to_nitrogen[index],
+            },
+            runtime_cn_state: runtime_cn_state.as_ref(),
+            runtime_vegetation_carbon: None,
+            wetland_organic_matter_density_kg_m3: (use_tracer && kind == 2)
+                .then_some(soil.field(SoilField::OmDensity)),
+            use_nitrification: run.nitrification,
+        };
+        Some(if crop {
+            let states = (0..class.len())
+                .map(|index| derive_cold_start_bgc_state(input(index..index + 1)))
+                .collect::<Result<Vec<_>>>()?;
+            merge_bgc_cold_start_states(&states)?
+        } else {
+            derive_cold_start_bgc_state(input(0..class.len()))?
+        })
+    } else {
+        None
     })
 }
 
@@ -2649,7 +2750,6 @@ fn initial_soil_state(
 fn write_cold_time_restart(
     run: &SinglePointColdStartRun,
     patch_type: i32,
-    surface: &crate::SinglePointSurfaceData,
     lake: &crate::LakeState,
     soil_temperature: &[f64],
     soil_liquid: &[f64],
@@ -2715,7 +2815,7 @@ fn write_cold_time_restart(
     let grain_radius = vec![54.526; dimensions.snow_layers * patch_count];
     let snow_aerosol_zero = vec![0.0; dimensions.snow_layers * patch_count];
     let water_depth = if patch_type == 4 {
-        surface.lake_depth_m * 1000.0
+        lake.depth_m[0] * 1000.0
     } else {
         0.0
     };
