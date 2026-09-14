@@ -159,3 +159,11 @@ and rejected-step expressions. Two real captured fits reproduce the entire
 original iteration trajectory bitwise; this does not establish all-field soil
 parity. See [the solver audit](preprocessing-parity-status.md#solver-rounding-and-callback-parity)
 for regression evidence and remaining completion gates.
+
+Catchment now distinguishes the named MERIT half-cell grid from an ordinary
+same-resolution grid and reads the original `(lon, lat)` integer mesh contract.
+Global mesh indices and local source/diagnostic windows remain distinct;
+antimeridian diagnostics preserve both halves. The same-input synthetic
+1999 LAI-only comparison passes all 37 files, including diagnostics, but does
+not establish full Catchment material-field or initializer parity. See the
+[Catchment audit](preprocessing-parity-status.md#catchment-mesh-contract-and-diagnostic-windows).

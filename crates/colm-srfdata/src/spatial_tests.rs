@@ -187,7 +187,7 @@ fn gridbased_mesh_expands_aligned_cells_into_colm_pixel_order() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     assert_eq!(topology.mesh.len(), 2);
@@ -215,7 +215,7 @@ fn unstructured_mesh_keeps_one_element_across_multiple_input_cells() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::Unstructured,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     assert_eq!(topology.mesh.len(), 1);
@@ -238,7 +238,7 @@ fn land_only_filters_pixels_and_empty_elements_before_lct_or_pft_partition() {
         .put_values(&[8, 9, 0, 0, 12, 13, 0, 0], ..)
         .unwrap();
     file.close().unwrap();
-    let raw = Grid { nlon: 4, nlat: 2 };
+    let raw = Grid::by_ndims(4, 2);
     let base = build_spatial_topology(&mesh, SpatialInputKind::Unstructured, raw).unwrap();
     for pft in [false, true] {
         for land_only in [false, true] {
@@ -311,7 +311,7 @@ fn domain_crossing_dateline_maps_each_side_to_its_source_cell() {
     let topology = build_spatial_topology_in_domain(
         &mesh,
         SpatialInputKind::Unstructured,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         Some(crate::SpatialBounds {
             south: -45.0,
             north: 45.0,
@@ -355,12 +355,12 @@ fn sub_microdegree_edges_remain_on_axes_but_not_in_mesh_membership() {
         lat_n: vec![90.0],
     };
     let PixelMapping { pixel, columns, .. } =
-        assimilated_pixels(&grid, Grid { nlon: 4, nlat: 2 }, None, None, &[]).unwrap();
+        assimilated_pixels(&grid, Grid::by_ndims(4, 2), None, None, &[]).unwrap();
     assert_eq!(pixel.lon_w[3], 0.5e-6);
     assert_eq!(columns, [Some(0), Some(0), None, Some(1), Some(1)]);
     assert!(assimilated_pixels(
         &grid,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         Some(crate::SpatialBounds {
             south: -91.0,
             north: 0.0,
@@ -388,12 +388,9 @@ fn unstructured_off_grid_edges_are_assimilated_not_snapped() {
         .put_values(&[0.00001, -180.0], ..)
         .unwrap();
     file.close().unwrap();
-    let topology = build_spatial_topology(
-        &path,
-        SpatialInputKind::Unstructured,
-        Grid { nlon: 4, nlat: 2 },
-    )
-    .unwrap();
+    let topology =
+        build_spatial_topology(&path, SpatialInputKind::Unstructured, Grid::by_ndims(4, 2))
+            .unwrap();
     assert_eq!(topology.pixel.lon_w, [-180.0, -90.0, 0.0, 0.00001, 90.0]);
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 6);
     assert_eq!(topology.mesh.pixel_count(1).unwrap(), 4);
@@ -408,7 +405,7 @@ fn unstructured_off_grid_edges_are_assimilated_not_snapped() {
         "landtype",
         &topology.mesh,
         &topology.pixel,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     assert_eq!(sampled, [12, 13, 14, 8, 9, 10, 14, 15, 10, 11]);
@@ -425,14 +422,14 @@ fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     let (topology, patches) = build_lct_land_patches_from_raster(
         topology,
         &raster,
         "landtype",
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         false,
         false,
     )
@@ -455,14 +452,14 @@ fn pft_patch_builder_merges_only_igbp_soil_ground() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     let (_, patches) = build_pft_land_patches_from_raster(
         topology,
         &raster,
         "landtype",
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         false,
         false,
         PftPatchMode::Merged,
@@ -482,7 +479,7 @@ fn pft_patch_modes_match_original_merged_separate_and_fast_pc() {
     let raster = directory.join("landtype.nc");
     write_mesh(&mesh_file, "landmask", &[1, 1]);
     write_landtype(&raster);
-    let raw = Grid { nlon: 4, nlat: 2 };
+    let raw = Grid::by_ndims(4, 2);
     let base = build_spatial_topology(&mesh_file, SpatialInputKind::GridBased, raw).unwrap();
 
     let (_, merged) = build_pft_land_patches_from_raster(
@@ -535,10 +532,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid {
-            nlon: 144,
-            nlat: 36,
-        },
+        Grid::by_ndims(144, 36),
     )
     .unwrap();
 
@@ -549,10 +543,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             "HTOP",
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![12.5, 15.0]
@@ -564,10 +555,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             "LAT_FIRST",
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![42.0, 84.0]
@@ -579,10 +567,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             "LC",
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![7, 9]
@@ -595,10 +580,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36,
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![10.0, 20.0]
@@ -614,10 +596,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
                 time,
                 &topology.mesh,
                 &topology.pixel,
-                Grid {
-                    nlon: 144,
-                    nlat: 36,
-                },
+                Grid::by_ndims(144, 36),
             )
             .unwrap(),
             expected
@@ -631,10 +610,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36,
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![2.0, 20.0]
@@ -647,10 +623,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36,
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![1.0, 2.0, 10.0, 20.0]
@@ -664,10 +637,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36,
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![2.0, 20.0, 200.0, 2000.0]
@@ -682,10 +652,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid {
-                nlon: 144,
-                nlat: 36,
-            },
+            Grid::by_ndims(144, 36),
         )
         .unwrap(),
         vec![2.0, 20.0, 200.0, 2000.0]
@@ -704,7 +671,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     assert_eq!(
@@ -713,7 +680,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             "lake_depth",
             &topology.mesh,
             &topology.pixel,
-            Grid { nlon: 4, nlat: 2 },
+            Grid::by_ndims(4, 2),
         )
         .unwrap(),
         vec![120.0, 130.0, 80.0, 90.0, 140.0, 150.0, 100.0, 110.0]
@@ -725,7 +692,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             "lake_depth",
             &topology.mesh,
             &topology.pixel,
-            Grid { nlon: 4, nlat: 2 },
+            Grid::by_ndims(4, 2),
         )
         .unwrap(),
         vec![120.0, 130.0, 80.0, 90.0, 140.0, 150.0, 100.0, 110.0]
@@ -915,7 +882,7 @@ fn layered_raster_keeps_layer_and_mesh_pixel_order_without_global_reads() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     assert_eq!(
@@ -925,7 +892,7 @@ fn layered_raster_keeps_layer_and_mesh_pixel_order_without_global_reads() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid { nlon: 4, nlat: 2 },
+            Grid::by_ndims(4, 2),
         )
         .unwrap(),
         vec![
@@ -945,7 +912,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     let patches = FlatLandPatches {
@@ -1167,7 +1134,7 @@ fn shared_pixelsets_write_pctshared() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     let landdata = directory.join("landdata");
@@ -1234,7 +1201,7 @@ fn coordinate_cft_raster_keeps_mesh_order_without_assuming_the_500m_grid() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     let source = directory.join("cft.nc");
@@ -1361,6 +1328,7 @@ fn coordinate_patch_selection_keeps_all_hires_cells_and_native_areas() {
     }
     let topology = SpatialTopology {
         kind: SpatialInputKind::GridBased,
+        mesh_index_grid: None,
         grid: SpatialGrid {
             lon_w: vec![0.0],
             lon_e: vec![dlon],
@@ -1448,6 +1416,7 @@ fn coordinate_patch_selection_uses_native_mesh_pixels_not_a_500m_proxy() {
     let mesh = FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
     let topology = SpatialTopology {
         kind: SpatialInputKind::Catchment,
+        mesh_index_grid: None,
         grid: SpatialGrid {
             lon_w: vec![0.0],
             lon_e: vec![dlon * 2.0],
@@ -1527,6 +1496,7 @@ fn methane_ph_selection_uses_exact_source_patch_intersections() {
     let mesh = FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
     let topology = SpatialTopology {
         kind: SpatialInputKind::GridBased,
+        mesh_index_grid: None,
         grid: SpatialGrid {
             lon_w: vec![-45.0],
             lon_e: vec![45.0],
@@ -1591,13 +1561,13 @@ fn write_catchment_mesh(path: &std::path::Path) {
         .unwrap()
         .put_values(&[45.0, -45.0], ..)
         .unwrap();
-    file.add_variable::<i64>("icatchment2d", &["lat", "lon"])
+    file.add_variable::<i64>("icatchment2d", &["lon", "lat"])
         .unwrap()
-        .put_values(&[1, 1, 2, 0, 1, 1, 2, 2], (.., ..))
+        .put_values(&[1, 1, 1, 1, 2, 2, 0, 2], (.., ..))
         .unwrap();
-    file.add_variable::<i32>("ihydrounit2d", &["lat", "lon"])
+    file.add_variable::<i32>("ihydrounit2d", &["lon", "lat"])
         .unwrap()
-        .put_values(&[1, 2, 1, 0, 1, 2, 1, 1], (.., ..))
+        .put_values(&[1, 1, 2, 2, 1, 1, 0, 1], (.., ..))
         .unwrap();
     file.add_variable::<i32>("basin_numhru", &["basin"])
         .unwrap()
@@ -1624,13 +1594,13 @@ fn write_three_catchment_mesh(path: &std::path::Path) {
         .unwrap()
         .put_values(&[45.0, -45.0], ..)
         .unwrap();
-    file.add_variable::<i64>("icatchment2d", &["lat", "lon"])
+    file.add_variable::<i64>("icatchment2d", &["lon", "lat"])
         .unwrap()
-        .put_values(&[1, 1, 2, 3, 1, 1, 2, 3], (.., ..))
+        .put_values(&[1, 1, 1, 1, 2, 2, 3, 3], (.., ..))
         .unwrap();
-    file.add_variable::<i32>("ihydrounit2d", &["lat", "lon"])
+    file.add_variable::<i32>("ihydrounit2d", &["lon", "lat"])
         .unwrap()
-        .put_values(&[1, 2, 1, 1, 1, 2, 1, 1], (.., ..))
+        .put_values(&[1, 1, 2, 2, 1, 1, 1, 1], (.., ..))
         .unwrap();
     file.add_variable::<i32>("basin_numhru", &["basin"])
         .unwrap()
@@ -1641,6 +1611,63 @@ fn write_three_catchment_mesh(path: &std::path::Path) {
         .put_values(&[0, 4, 0], ..)
         .unwrap();
     file.close().unwrap();
+}
+
+fn write_non_square_transpose_catchment_mesh(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 3).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_dimension("basin", 1).unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-90.0, 90.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[60.0, 0.0, -60.0], ..)
+        .unwrap();
+    file.add_variable::<i32>("icatchment2d", &["lon", "lat"])
+        .unwrap()
+        .put_values(&[1, 1, 1, 1, 1, 1], (.., ..))
+        .unwrap();
+    file.add_variable::<i32>("ihydrounit2d", &["lon", "lat"])
+        .unwrap()
+        .put_values(&[1, 3, 5, 2, 4, 6], (.., ..))
+        .unwrap();
+    file.add_variable::<i32>("basin_numhru", &["basin"])
+        .unwrap()
+        .put_values(&[6], ..)
+        .unwrap();
+    file.add_variable::<i32>("lake_id", &["basin"])
+        .unwrap()
+        .put_values(&[0], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+#[test]
+fn catchment_reads_lon_lat_arrays_through_original_fortran_cache_layout() {
+    let directory = temporary("catchment-transpose");
+    let mesh_file = directory.join("catchment.nc");
+    write_non_square_transpose_catchment_mesh(&mesh_file);
+
+    let catchment = build_catchment_spatial_topology(&mesh_file, Grid::by_ndims(2, 3)).unwrap();
+    assert_eq!(catchment.land_hrus.set_type, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(catchment.land_hrus.pixel_start, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(catchment.land_hrus.pixel_end, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        catchment.topology.mesh,
+        FlatMesh::new(
+            vec![1],
+            vec![0, 6],
+            vec![1, 2, 1, 2, 1, 2],
+            vec![3, 3, 2, 2, 1, 1],
+        )
+        .unwrap()
+    );
+
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -1661,8 +1688,7 @@ fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
         file.close().unwrap();
     }
 
-    let catchment =
-        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    let catchment = build_catchment_spatial_topology(&mesh_file, Grid::by_ndims(4, 2)).unwrap();
     assert_eq!(catchment.land_hrus.element_ids, vec![1, 1, 2]);
     assert_eq!(catchment.land_hrus.pixel_start, vec![1, 3, 1]);
     assert_eq!(catchment.land_hrus.pixel_end, vec![2, 4, 3]);
@@ -1674,7 +1700,7 @@ fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
         catchment,
         &landtype,
         "landtype",
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         false,
         17,
     )
@@ -1713,8 +1739,7 @@ fn catchment_patchfrac_hru_is_normalized_by_hru_and_shared_area() {
     let directory = temporary("catchment-patchfrac-hru");
     let mesh_file = directory.join("catchment.nc");
     write_catchment_mesh(&mesh_file);
-    let catchment =
-        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    let catchment = build_catchment_spatial_topology(&mesh_file, Grid::by_ndims(4, 2)).unwrap();
     let patches = FlatLandPatches {
         element_ids: vec![1, 1, 1, 2],
         pixel_start: vec![1, 2, 3, 1],
@@ -1772,7 +1797,7 @@ fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     assert_eq!(
@@ -1781,7 +1806,7 @@ fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
             "landtype",
             &topology.mesh,
             &topology.pixel,
-            Grid { nlon: 2, nlat: 1 },
+            Grid::by_ndims(2, 1),
         )
         .unwrap(),
         vec![10, 10, 10, 10, 20, 20, 20, 20]
@@ -1811,7 +1836,7 @@ fn timed_raw_raster_streams_the_requested_named_time_slice() {
     let topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 2, nlat: 1 },
+        Grid::by_ndims(2, 1),
     )
     .unwrap();
     assert_eq!(
@@ -1821,7 +1846,7 @@ fn timed_raw_raster_streams_the_requested_named_time_slice() {
             2,
             &topology.mesh,
             &topology.pixel,
-            Grid { nlon: 2, nlat: 1 },
+            Grid::by_ndims(2, 1),
         )
         .unwrap(),
         vec![30.0, 40.0]
@@ -1847,26 +1872,43 @@ fn catchment_pft_partition_keeps_natural_patches_inside_each_hru() {
             .unwrap();
         file.close().unwrap();
     }
-    for (mode, expected) in [
-        (PftPatchMode::Merged, [1, 1, 17]),
-        (PftPatchMode::Separate, [8, 14, 17]),
-        (PftPatchMode::FastPc, [1, 12, 17]),
+    for (mode, expected_ids, expected_start, expected_end, expected_types) in [
+        (
+            PftPatchMode::Merged,
+            vec![1, 1, 2],
+            vec![1, 3, 1],
+            vec![2, 4, 3],
+            vec![1, 1, 17],
+        ),
+        (
+            PftPatchMode::Separate,
+            vec![1, 1, 2],
+            vec![1, 3, 1],
+            vec![2, 4, 3],
+            vec![8, 14, 17],
+        ),
+        (
+            PftPatchMode::FastPc,
+            vec![1, 1, 2],
+            vec![1, 3, 1],
+            vec![2, 4, 3],
+            vec![1, 12, 17],
+        ),
     ] {
-        let catchment =
-            build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+        let catchment = build_catchment_spatial_topology(&mesh_file, Grid::by_ndims(4, 2)).unwrap();
         let (_, patches) = build_catchment_pft_land_patches_from_raster(
             catchment,
             &landtype,
             "landtype",
-            Grid { nlon: 4, nlat: 2 },
+            Grid::by_ndims(4, 2),
             false,
             mode,
         )
         .unwrap();
-        assert_eq!(patches.element_ids, vec![1, 1, 2]);
-        assert_eq!(patches.pixel_start, vec![1, 3, 1]);
-        assert_eq!(patches.pixel_end, vec![2, 4, 3]);
-        assert_eq!(patches.set_type, expected);
+        assert_eq!(patches.element_ids, expected_ids, "{mode:?}");
+        assert_eq!(patches.pixel_start, expected_start, "{mode:?}");
+        assert_eq!(patches.pixel_end, expected_end, "{mode:?}");
+        assert_eq!(patches.set_type, expected_types, "{mode:?}");
     }
 
     std::fs::remove_dir_all(directory).unwrap();
@@ -1898,7 +1940,7 @@ fn zipped_raster_merges_source_cells_not_values_or_overlapping_patches() {
         pixel_start: vec![1, 3],
         pixel_end: vec![5, 5],
     };
-    let grid = Grid { nlon: 4, nlat: 2 };
+    let grid = Grid::by_ndims(4, 2);
     for zip in [false, true] {
         let (gathered, layout, area) =
             gather_patch_raster(&mesh, &pixel, &patches, grid, zip).unwrap();
@@ -2009,10 +2051,7 @@ fn source_block_owner_uses_domain_start_for_clipped_first_cell() {
     let mut topology = build_spatial_topology_in_domain(
         &mesh_file,
         SpatialInputKind::Unstructured,
-        Grid {
-            nlon: 3600,
-            nlat: 180,
-        },
+        Grid::by_ndims(3600, 180),
         Some(crate::SpatialBounds {
             south: 20.0,
             north: 21.0,
@@ -2105,10 +2144,7 @@ fn element_block_owner_uses_source_cell_before_land_only_filtering() {
         file.close().unwrap();
     }
 
-    let raw = Grid {
-        nlon: 3600,
-        nlat: 180,
-    };
+    let raw = Grid::by_ndims(3600, 180);
     let mut topology =
         build_spatial_topology(&mesh_file, SpatialInputKind::Unstructured, raw).unwrap();
     let blocks = BlockLayout::regular(72, 36).unwrap();
@@ -2216,7 +2252,7 @@ fn mesh_filter_applies_explicit_edges_zero_negative_and_outside_fill() {
     let mut topology = build_spatial_topology_with_filter_grid(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         None,
         Some(&filter.grid),
     )
@@ -2244,7 +2280,7 @@ fn mesh_filter_reports_when_every_element_is_removed() {
     let mut topology = build_spatial_topology_with_filter_grid(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         None,
         Some(&filter.grid),
     )
@@ -2270,11 +2306,11 @@ fn topology_landonly_can_be_applied_before_custom_filter() {
     let mut topology = build_spatial_topology(
         &mesh_file,
         SpatialInputKind::GridBased,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
     )
     .unwrap();
     topology
-        .retain_land_pixels_from_raster(&raster, "landtype", Grid { nlon: 4, nlat: 2 })
+        .retain_land_pixels_from_raster(&raster, "landtype", Grid::by_ndims(4, 2))
         .unwrap();
     assert_eq!(topology.mesh.len(), 1);
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 1);
@@ -2298,11 +2334,10 @@ fn catchment_filter_builder_matches_unfiltered_when_mask_is_all_positive() {
     );
     let filter = MeshFilter::open(&filter_file).unwrap();
 
-    let unfiltered =
-        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    let unfiltered = build_catchment_spatial_topology(&mesh_file, Grid::by_ndims(4, 2)).unwrap();
     let filtered = build_catchment_spatial_topology_with_filter(
         &mesh_file,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         None,
         Some(&filter),
         None,
@@ -2333,7 +2368,7 @@ fn catchment_mesh_filter_runs_before_hru_sort_and_preserves_block_owners() {
     let blocks = BlockLayout::regular(1, 1).unwrap();
     let catchment = build_catchment_spatial_topology_with_filter(
         &mesh_file,
-        Grid { nlon: 4, nlat: 2 },
+        Grid::by_ndims(4, 2),
         None,
         Some(&filter),
         Some(&blocks),
@@ -2444,7 +2479,7 @@ fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
     let landtype = root.join("landtype.nc");
     write_mesh(&mesh_file, "landmask", &[1, 1]);
     write_landtype(&landtype);
-    let raw_grid = Grid { nlon: 4, nlat: 2 };
+    let raw_grid = Grid::by_ndims(4, 2);
     let topology =
         build_spatial_topology(&mesh_file, SpatialInputKind::GridBased, raw_grid).unwrap();
     let (mut topology, physical) = build_pft_land_patches_from_raster(

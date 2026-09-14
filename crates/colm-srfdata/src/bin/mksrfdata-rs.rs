@@ -17,7 +17,7 @@ use colm_srfdata::{
     aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
     aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
-    build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology_with_filter,
+    build_catchment_pft_land_patches_from_raster,
     build_catchment_spatial_topology_with_filter_and_raw_grids, build_coordinate_patch_selection,
     build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
     build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_pft_topology,
@@ -37,7 +37,7 @@ use colm_srfdata::{
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
     write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
-    FlatLandElements, FlatLandPatches, FlatMesh, LczUrbanRawFields, MeshFilter,
+    FlatLandElements, FlatLandPatches, FlatMesh, Grid, LczUrbanRawFields, MeshFilter,
     NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode,
     PftTopology, PixelAxes, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology,
     TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
@@ -215,6 +215,20 @@ fn optional_mesh_filter(path: Option<&Path>) -> Result<Option<MeshFilter>> {
     }
 }
 
+fn catchment_lct_extra_raw_grids(land_cover: SiteMode, urban: bool) -> Vec<Grid> {
+    let mut grids = vec![COLM_500M];
+    // Original CATCHMENT mksrfdata assimilates the common 500 m lattice before
+    // writing topology because LAI, soil, topography, lake and IGBP patch
+    // sources live there. USGS adds its coarser patch/height lattice too.
+    if land_cover == SiteMode::Usgs {
+        grids.push(COLM_1KM);
+    }
+    if urban {
+        grids.push(COLM_5KM);
+    }
+    grids
+}
+
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let mut args = parse_spatial_pft(args)?;
     let requested_year = args.year;
@@ -247,12 +261,16 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     let (mut topology, mut base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let catchment = build_catchment_spatial_topology_with_filter(
+            // PFT and PC CATCHMENT modes still aggregate PFT/LAI and the shared
+            // non-patch fields on the original 500 m raw lattice.
+            let catchment_extra_grids = [COLM_500M];
+            let catchment = build_catchment_spatial_topology_with_filter_and_raw_grids(
                 &args.mesh,
                 MERIT_90M,
                 args.bounds,
                 mesh_filter.as_ref(),
                 Some(&args.blocks),
+                &catchment_extra_grids,
             )?;
             let (catchment, patches) = build_catchment_pft_land_patches_from_raster(
                 catchment,
@@ -819,11 +837,6 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         }
     }
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
-    let urban_extra_grids = if args.urban.is_some() {
-        &[COLM_500M, COLM_5KM][..]
-    } else {
-        &[][..]
-    };
     ensure!(
         !args.lulcc || args.land_cover == SiteMode::Igbp,
         "spatial LULCC transfer traces require IGBP land cover"
@@ -844,6 +857,13 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         SiteMode::Usgs => 16,
         SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
     };
+    let catchment_extra_grids =
+        catchment_lct_extra_raw_grids(args.land_cover, args.urban.is_some());
+    let urban_extra_grids = if args.urban.is_some() {
+        &[COLM_500M, COLM_5KM][..]
+    } else {
+        &[][..]
+    };
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             let catchment = build_catchment_spatial_topology_with_filter_and_raw_grids(
@@ -852,7 +872,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 args.bounds,
                 mesh_filter.as_ref(),
                 Some(&args.blocks),
-                urban_extra_grids,
+                &catchment_extra_grids,
             )?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
                 catchment,
@@ -5214,6 +5234,7 @@ mod tests {
             colm_srfdata::FlatMesh::new(vec![1, 2], vec![0, 1, 2], vec![1, 2], vec![1, 1]).unwrap();
         let topology = SpatialTopology {
             kind: SpatialInputKind::GridBased,
+            mesh_index_grid: None,
             grid: colm_srfdata::SpatialGrid {
                 lon_w: vec![-180.0],
                 lon_e: vec![-180.0],
@@ -5274,6 +5295,7 @@ mod tests {
             colm_srfdata::FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
         let topology = SpatialTopology {
             kind: SpatialInputKind::GridBased,
+            mesh_index_grid: None,
             grid: colm_srfdata::SpatialGrid {
                 lon_w: vec![-180.0],
                 lon_e: vec![-180.0],
@@ -5950,6 +5972,7 @@ mod tests {
 
         let topology = SpatialTopology {
             kind: SpatialInputKind::GridBased,
+            mesh_index_grid: None,
             grid: colm_srfdata::SpatialGrid {
                 lon_w: vec![COLM_500M.lon_w(1)],
                 lon_e: vec![COLM_500M.lon_e(2)],
@@ -6085,6 +6108,7 @@ mod tests {
             colm_srfdata::FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
         let topology = SpatialTopology {
             kind: SpatialInputKind::GridBased,
+            mesh_index_grid: None,
             grid: colm_srfdata::SpatialGrid {
                 lon_w: vec![COLM_500M.lon_w(1)],
                 lon_e: vec![COLM_500M.lon_e(2)],
@@ -6203,6 +6227,7 @@ mod tests {
             colm_srfdata::FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
         let topology = SpatialTopology {
             kind: SpatialInputKind::Unstructured,
+            mesh_index_grid: None,
             grid: colm_srfdata::SpatialGrid {
                 lon_w: vec![COLM_500M.lon_w(1)],
                 lon_e: vec![COLM_500M.lon_e(2)],
@@ -7092,5 +7117,21 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::Catchment);
+    }
+
+    #[test]
+    fn catchment_modes_assimilate_upstream_baseline_raw_grids() {
+        assert_eq!(
+            catchment_lct_extra_raw_grids(SiteMode::Igbp, false),
+            vec![COLM_500M]
+        );
+        assert_eq!(
+            catchment_lct_extra_raw_grids(SiteMode::Usgs, false),
+            vec![COLM_500M, COLM_1KM]
+        );
+        assert_eq!(
+            catchment_lct_extra_raw_grids(SiteMode::Igbp, true),
+            vec![COLM_500M, COLM_5KM]
+        );
     }
 }

@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::{FlatLandPatches, SpatialGrid, SpatialInputKind, SpatialTopology};
+use crate::{FlatLandPatches, Grid, SpatialGrid, SpatialInputKind, SpatialTopology};
 
 pub const DIAGNOSTIC_MISSING: f64 = -1.0e36;
 
@@ -61,7 +61,7 @@ struct SparseAccumulator {
 /// Map a patch vector to CoLM's diagnostic grid.
 ///
 /// GRIDBASED cases retain their mesh grid.  UNSTRUCTURED and CATCHMENT cases
-/// deliberately follow upstream and use the fixed 0.1-degree global grid.
+/// follow upstream's 0.1-degree grid window, including wrapped domains.
 /// `pctshared` is the pixelset share used by CROP PFT/patch outputs; ordinary
 /// non-shared sets pass `None`.
 #[allow(clippy::too_many_arguments)]
@@ -889,29 +889,76 @@ pub fn write_patch_diagnostic_dimension(
 fn diagnostic_grid(topology: &SpatialTopology) -> SpatialGrid {
     match topology.kind {
         SpatialInputKind::GridBased => topology.grid.clone(),
-        SpatialInputKind::Unstructured | SpatialInputKind::Catchment => regular_tenth_degree_grid(),
+        SpatialInputKind::Unstructured | SpatialInputKind::Catchment => {
+            regular_tenth_degree_window(topology)
+        }
     }
 }
 
-fn regular_tenth_degree_grid() -> SpatialGrid {
-    let lon_w = (0..3600).map(|index| -180.0 + index as f64 * 0.1).collect();
-    let lon_e = (1..=3600)
-        .map(|index| {
-            if index == 3600 {
-                -180.0
-            } else {
-                -180.0 + index as f64 * 0.1
-            }
-        })
-        .collect();
-    let lat_s = (0..1800).map(|index| -90.0 + index as f64 * 0.1).collect();
-    let lat_n = (1..=1800).map(|index| -90.0 + index as f64 * 0.1).collect();
+fn regular_tenth_degree_window(topology: &SpatialTopology) -> SpatialGrid {
+    let diagnostic = Grid::by_ndims(3600, 1800);
+    let (lon_w, lon_e) = tenth_degree_longitude_window(
+        diagnostic,
+        topology.pixel.edge_west,
+        topology.pixel.edge_east,
+    );
+    let (lat_s, lat_n) = tenth_degree_latitude_window(
+        diagnostic,
+        topology.pixel.edge_south,
+        topology.pixel.edge_north,
+    );
     SpatialGrid {
         lon_w,
         lon_e,
         lat_s,
         lat_n,
     }
+}
+
+fn tenth_degree_longitude_window(grid: Grid, west: f64, east: f64) -> (Vec<f64>, Vec<f64>) {
+    let resolution = grid.dlon();
+    let mut east = east;
+    if east <= west {
+        east += 360.0;
+    }
+    let west_index = (((west + 180.0) / resolution).floor() as i64).clamp(0, grid.nlon as i64 - 1);
+    let east_index = (((east + 180.0) / resolution).ceil() as i64)
+        .clamp(west_index + 1, west_index + grid.nlon as i64);
+    (
+        (west_index..east_index)
+            .map(|index| normalize_diagnostic_longitude(-180.0 + index as f64 * resolution))
+            .collect(),
+        (west_index + 1..=east_index)
+            .map(|index| normalize_diagnostic_longitude(-180.0 + index as f64 * resolution))
+            .collect(),
+    )
+}
+
+fn tenth_degree_latitude_window(grid: Grid, south: f64, north: f64) -> (Vec<f64>, Vec<f64>) {
+    let edges = (0..=grid.nlat)
+        .map(|index| -90.0 + index as f64 * grid.dlat())
+        .collect::<Vec<_>>();
+    let south_index = edges
+        .partition_point(|&edge| edge <= south)
+        .saturating_sub(1)
+        .min(grid.nlat - 1);
+    let north_index = edges
+        .partition_point(|&edge| edge < north)
+        .clamp(1, grid.nlat);
+    (
+        edges[south_index..north_index].to_vec(),
+        edges[south_index + 1..=north_index].to_vec(),
+    )
+}
+
+fn normalize_diagnostic_longitude(mut lon: f64) -> f64 {
+    while lon < -180.0 {
+        lon += 360.0;
+    }
+    while lon >= 180.0 {
+        lon -= 360.0;
+    }
+    lon
 }
 
 fn longitude_index(value: f64, grid: &SpatialGrid) -> Result<usize> {
@@ -997,6 +1044,7 @@ mod tests {
         let mesh = FlatMesh::new(vec![1, 2], vec![0, 1, 2], vec![1, 2], vec![1, 1]).unwrap();
         SpatialTopology {
             kind: SpatialInputKind::GridBased,
+            mesh_index_grid: None,
             grid: SpatialGrid {
                 lon_w: vec![-180.0],
                 lon_e: vec![-180.0],
@@ -1028,6 +1076,66 @@ mod tests {
             set_type: vec![1, 2],
             element_index: vec![1, 2],
         }
+    }
+
+    fn diagnostic_window_topology(
+        kind: SpatialInputKind,
+        west: f64,
+        east: f64,
+        south: f64,
+        north: f64,
+    ) -> SpatialTopology {
+        let mut topology = topology();
+        topology.kind = kind;
+        topology.pixel.edge_west = west;
+        topology.pixel.edge_east = east;
+        topology.pixel.edge_south = south;
+        topology.pixel.edge_north = north;
+        topology
+    }
+
+    #[test]
+    fn diagnostic_window_crops_regional_and_global_domains() {
+        let regional = diagnostic_grid(&diagnostic_window_topology(
+            SpatialInputKind::Catchment,
+            114.082,
+            114.084,
+            26.248,
+            26.252,
+        ));
+        assert_eq!(regional.lon_w, vec![114.0]);
+        assert_eq!(regional.lon_e, vec![114.10000000000002]);
+        assert_eq!(regional.lat_s, vec![26.200000000000003]);
+        assert_eq!(regional.lat_n, vec![26.30000000000001]);
+
+        let global = diagnostic_grid(&diagnostic_window_topology(
+            SpatialInputKind::Unstructured,
+            -180.0,
+            -180.0,
+            -90.0,
+            90.0,
+        ));
+        assert_eq!(global.lon_w.len(), 3600);
+        assert_eq!(global.lat_s.len(), 1800);
+        assert_eq!(global.lon_w[0], -180.0);
+        assert_eq!(*global.lon_e.last().unwrap(), -180.0);
+    }
+
+    #[test]
+    fn diagnostic_window_keeps_both_halves_when_domain_crosses_dateline() {
+        let grid = diagnostic_grid(&diagnostic_window_topology(
+            SpatialInputKind::Unstructured,
+            170.0,
+            -170.0,
+            -1.0,
+            1.0,
+        ));
+        assert_eq!(grid.lon_w.len(), 200);
+        assert_eq!(grid.lon_w[0], 170.0);
+        assert_eq!(grid.lon_e[99], -180.0);
+        assert_eq!(grid.lon_w[100], -180.0);
+        assert_eq!(*grid.lon_e.last().unwrap(), -170.0);
+        assert_eq!(grid.lat_s.len(), 20);
     }
 
     #[test]

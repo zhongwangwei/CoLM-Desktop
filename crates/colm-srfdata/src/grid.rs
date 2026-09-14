@@ -14,45 +14,50 @@
 //! 索引是 **1-based**，与 Fortran 一致 —— 抽取时要直接喂给
 //! `nf90_get_var` 的 start 向量，换成 0-based 只会在交界处埋一个 off-by-one。
 
+/// CoLM grid edge convention.
+///
+/// Most named raw grids are created through `grid_define_by_ndims`, but
+/// `merit_90m` is created through `grid_define_by_name` and shifts every edge
+/// by half a cell before normalization. Keep that identity explicit: a custom
+/// 432000x216000 grid must still use the ordinary `by_ndims` geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridGeometry {
+    ByNdims,
+    Merit90mNamed,
+}
+
 /// 一个等距的全球经纬网格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grid {
     pub nlon: usize,
     pub nlat: usize,
+    geometry: GridGeometry,
 }
 
 /// `colm_500m`：`grid_define_by_ndims(86400, 43200)`。
 /// 三个 rawdata 栅格（lake_depth / soil_brightness / topography）都用它，
 /// `urban_type/` 与 `urban_lai_500m/` 的 5x5 瓦片也是。
-pub const COLM_500M: Grid = Grid {
-    nlon: 86400,
-    nlat: 43200,
-};
+pub const COLM_500M: Grid = Grid::by_ndims(86400, 43200);
 
 /// merit_90m: the three-arcsecond grid assimilated by CATCHMENT.
 pub const MERIT_90M: Grid = Grid {
     nlon: 432000,
     nlat: 216000,
+    geometry: GridGeometry::Merit90mNamed,
 };
 
 /// `colm_1km`：`grid_define_by_ndims(43200, 21600)`。
 ///
 /// USGS LCT retains this coarser raw lattice even though the common spatial
 /// pixel coordinate system also contains 500 m cells.
-pub const COLM_1KM: Grid = Grid {
-    nlon: 43200,
-    nlat: 21600,
-};
+pub const COLM_1KM: Grid = Grid::by_ndims(43200, 21600);
 
 /// `colm_5km`：`grid_define_by_ndims(8640, 4320)`。
 ///
 /// 只有 `urban/LUCY_regionid.nc` 用它（`MOD_SingleSrfdata.F90:1861`）。
 /// **网格名跟着文件走，不跟着模块走** —— 同一个 `read_point_var_2d_real8`
 /// 在别处配的是 `colm_500m`，用错网格不会报错，只会取到另一个像元。
-pub const COLM_5KM: Grid = Grid {
-    nlon: 8640,
-    nlat: 4320,
-};
+pub const COLM_5KM: Grid = Grid::by_ndims(8640, 4320);
 
 /// 一个 5°x5° 瓦片里的落点：文件名词干与瓦片内的 1-based 下标。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +71,46 @@ pub struct Tile5x5 {
 }
 
 impl Grid {
+    pub const fn by_ndims(nlon: usize, nlat: usize) -> Self {
+        Self {
+            nlon,
+            nlat,
+            geometry: GridGeometry::ByNdims,
+        }
+    }
+
+    fn uses_merit_named_edges(self) -> bool {
+        matches!(self.geometry, GridGeometry::Merit90mNamed)
+    }
+
+    fn normalize_longitude(mut lon: f64) -> f64 {
+        // MOD_Utils normalize_longitude uses conditional loops; in-range
+        // values must not be rounded again through rem_euclid.
+        while lon < -180.0 {
+            lon += 360.0;
+        }
+        while lon >= 180.0 {
+            lon -= 360.0;
+        }
+        lon
+    }
+
+    fn merit_lon_w_raw(&self, i: usize) -> f64 {
+        self.dlon().mul_add((i - 1) as f64, -180.0) - self.dlon() / 2.0
+    }
+
+    fn merit_lon_e_raw(&self, i: usize) -> f64 {
+        self.dlon().mul_add(i as f64, -180.0) - self.dlon() / 2.0
+    }
+
+    fn merit_lat_s_raw(&self, j: usize) -> f64 {
+        (-self.dlat()).mul_add(j as f64, 90.0) - self.dlat() / 2.0
+    }
+
+    fn merit_lat_n_raw(&self, j: usize) -> f64 {
+        (-self.dlat()).mul_add((j - 1) as f64, 90.0) - self.dlat() / 2.0
+    }
+
     pub fn dlon(&self) -> f64 {
         360.0 / self.nlon as f64
     }
@@ -81,14 +126,18 @@ impl Grid {
 
     /// 第 i 格的西边界（1-based），与 `grid_define_by_ndims` 算法一致。
     pub fn lon_w(&self, i: usize) -> f64 {
-        // Explicit single rounding matches the production Fortran grid and
-        // keeps pixel intersections independent of target FMA contraction.
-        self.dlon().mul_add((i - 1) as f64, -180.0)
+        if self.uses_merit_named_edges() {
+            Self::normalize_longitude(self.merit_lon_w_raw(i))
+        } else {
+            self.dlon().mul_add((i - 1) as f64, -180.0)
+        }
     }
 
     /// 第 i 格的东边界；全球最后一格按 CoLM 规范化回 -180°。
     pub fn lon_e(&self, i: usize) -> f64 {
-        if i == self.nlon {
+        if self.uses_merit_named_edges() {
+            Self::normalize_longitude(self.merit_lon_e_raw(i))
+        } else if i == self.nlon {
             -180.0
         } else {
             self.lon_w(i + 1)
@@ -96,29 +145,52 @@ impl Grid {
     }
 
     pub fn lon_center(&self, i: usize) -> f64 {
-        self.lon_w(i) + self.dlon() * 0.5
+        let west = self.lon_w(i);
+        let east = self.lon_e(i);
+        let center = if west <= east {
+            (west + east) * 0.5
+        } else {
+            (west + east) * 0.5 + 180.0
+        };
+        Self::normalize_longitude(center)
     }
 
     /// 第 j 格的南边界（1-based），同上。纬度是降序的。
     pub fn lat_s(&self, j: usize) -> f64 {
-        (-self.dlat()).mul_add(j as f64, 90.0).clamp(-90.0, 90.0)
+        if self.uses_merit_named_edges() {
+            self.merit_lat_s_raw(j).clamp(-90.0, 90.0)
+        } else {
+            (-self.dlat()).mul_add(j as f64, 90.0)
+        }
     }
 
     /// 第 j 格的北边界（1-based）。
     pub fn lat_n(&self, j: usize) -> f64 {
-        (-self.dlat())
-            .mul_add((j - 1) as f64, 90.0)
-            .clamp(-90.0, 90.0)
+        if self.uses_merit_named_edges() {
+            self.merit_lat_n_raw(j).clamp(-90.0, 90.0)
+        } else {
+            (-self.dlat()).mul_add((j - 1) as f64, 90.0)
+        }
     }
 
     pub fn lat_center(&self, j: usize) -> f64 {
-        self.lat_s(j) + self.dlat() * 0.5
+        (self.lat_s(j) + self.lat_n(j)) * 0.5
     }
 
     fn ilon(&self, lon: f64) -> usize {
         let n = self.nlon;
-        let mut i =
-            ((((lon + 180.0) / self.dlon()).floor() as i64) + 1).clamp(1, n as i64) as usize;
+        if self.uses_merit_named_edges() {
+            let first_west = self.lon_w(1);
+            let first_east = self.lon_e(1);
+            if lon >= first_west || lon < first_east {
+                return 1;
+            }
+        }
+        let mut i = if self.uses_merit_named_edges() {
+            ((((lon + 180.0) / self.dlon() + 0.5).floor() as i64) + 1).clamp(1, n as i64) as usize
+        } else {
+            ((((lon + 180.0) / self.dlon()).floor() as i64) + 1).clamp(1, n as i64) as usize
+        };
         // 解析式只是起点，判据是真实的边界值：见 ilat 的说明。
         while i > 1 && self.lon_w(i) > lon {
             i -= 1;
@@ -172,7 +244,11 @@ impl Grid {
         //
         // 所以起点之后用**真实的边界值**校正：CoLM 的二分查找比较的是
         // 算出来的 90 - dlat*j，不是数学上的那个数，照它比才对得上。
-        let mut j = (((90.0 - lat) / self.dlat()).ceil() as i64).clamp(1, n as i64) as usize;
+        let mut j = if self.uses_merit_named_edges() {
+            (((90.0 - lat) / self.dlat() - 0.5).ceil() as i64).clamp(1, n as i64) as usize
+        } else {
+            (((90.0 - lat) / self.dlat()).ceil() as i64).clamp(1, n as i64) as usize
+        };
         while j > 1 && self.lat_s(j - 1) <= lat {
             j -= 1;
         }

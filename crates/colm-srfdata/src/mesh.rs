@@ -209,10 +209,10 @@ fn inspect_catchment(file: &netcdf::File) -> Result<SpatialInputSummary> {
     let hru = file
         .variable("ihydrounit2d")
         .context("catchment input has no variable ihydrounit2d")?;
-    require_integer(&catchment, "icatchment2d", true)?;
+    require_integer(&catchment, "icatchment2d", false)?;
     require_integer(&hru, "ihydrounit2d", false)?;
-    require_2d_shape(&catchment, "icatchment2d", nlat, nlon)?;
-    require_2d_shape(&hru, "ihydrounit2d", nlat, nlon)?;
+    require_2d_shape(&catchment, "icatchment2d", nlon, nlat)?;
+    require_2d_shape(&hru, "ihydrounit2d", nlon, nlat)?;
 
     let basin_numhru = integer_vector(file, "basin_numhru")?;
     let lake_id = integer_vector(file, "lake_id")?;
@@ -223,13 +223,13 @@ fn inspect_catchment(file: &netcdf::File) -> Result<SpatialInputSummary> {
         bail!("basin_numhru values must be positive");
     }
 
-    let rows = rows_per_chunk(nlon);
+    let rows = rows_per_chunk(nlat);
     let mut active_cells = 0_usize;
     let mut max_elmid = 0_i64;
-    for start in (0..nlat).step_by(rows) {
-        let end = (start + rows).min(nlat);
-        let cats = catchment.get_values::<i64, _>((start..end, 0..nlon))?;
-        let hrus = hru.get_values::<i64, _>((start..end, 0..nlon))?;
+    for start in (0..nlon).step_by(rows) {
+        let end = (start + rows).min(nlon);
+        let cats = catchment.get_values::<i64, _>((start..end, 0..nlat))?;
+        let hrus = hru.get_values::<i64, _>((start..end, 0..nlat))?;
         for (cat, hydrounit) in cats.into_iter().zip(hrus) {
             if cat <= 0 {
                 continue;
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn cropped_window_keeps_global_row_major_ids() {
-        let grid = Grid { nlon: 8, nlat: 4 };
+        let grid = Grid::by_ndims(8, 4);
         let window = MeshWindow::new(grid, 3, 2, 3, 2).unwrap();
         let mesh =
             EqualLatLonMesh::new(grid, window, vec![true, false, true, false, true, true]).unwrap();
@@ -633,10 +633,7 @@ mod tests {
 
     #[test]
     fn ids_above_int32_are_preserved_in_netcdf() {
-        let grid = Grid {
-            nlon: 1_500_000_000,
-            nlat: 2,
-        };
+        let grid = Grid::by_ndims(1_500_000_000, 2);
         let window = MeshWindow::new(grid, 700_000_000, 2, 2, 1).unwrap();
         let mesh = EqualLatLonMesh::all_active(grid, window).unwrap();
         let path = output("mesh-int64");
@@ -654,7 +651,7 @@ mod tests {
 
     #[test]
     fn file_uses_the_dimension_order_fortran_expects() {
-        let grid = Grid { nlon: 4, nlat: 2 };
+        let grid = Grid::by_ndims(4, 2);
         let mesh = EqualLatLonMesh::all_active(grid, MeshWindow::global(grid).unwrap()).unwrap();
         let path = output("mesh-dims");
         mesh.write_netcdf(&path).unwrap();
@@ -682,7 +679,7 @@ mod tests {
 
     #[test]
     fn gridbased_file_reuses_the_mask_but_not_elmindex() {
-        let grid = Grid { nlon: 4, nlat: 2 };
+        let grid = Grid::by_ndims(4, 2);
         let window = MeshWindow::new(grid, 2, 1, 2, 2).unwrap();
         let mesh = EqualLatLonMesh::new(grid, window, vec![true, false, false, true]).unwrap();
         let path = output("gridbased-landmask");
@@ -703,7 +700,7 @@ mod tests {
 
     #[test]
     fn spatial_preflight_covers_all_three_grid_contracts() {
-        let grid = Grid { nlon: 4, nlat: 2 };
+        let grid = Grid::by_ndims(4, 2);
         let mesh = EqualLatLonMesh::new(
             grid,
             MeshWindow::global(grid).unwrap(),
@@ -740,13 +737,13 @@ mod tests {
             .unwrap()
             .put_values(&[-1.5, -0.5, 0.5], ..)
             .unwrap();
-        file.add_variable::<i64>("icatchment2d", &["lat", "lon"])
+        file.add_variable::<i32>("icatchment2d", &["lon", "lat"])
             .unwrap()
-            .put_values(&[1, 1, 0, 2, 2, 2], (.., ..))
+            .put_values(&[1, 2, 1, 2, 0, 2], (.., ..))
             .unwrap();
-        file.add_variable::<i32>("ihydrounit2d", &["lat", "lon"])
+        file.add_variable::<i32>("ihydrounit2d", &["lon", "lat"])
             .unwrap()
-            .put_values(&[1, 2, 0, 1, 2, 3], (.., ..))
+            .put_values(&[1, 1, 2, 2, 0, 3], (.., ..))
             .unwrap();
         file.add_variable::<i32>("basin_numhru", &["basin"])
             .unwrap()
@@ -798,21 +795,19 @@ mod tests {
 
     #[test]
     fn bbox_window_is_on_the_global_lattice() {
-        let grid = Grid { nlon: 8, nlat: 4 };
+        let grid = Grid::by_ndims(8, 4);
         let window = MeshWindow::covering_bbox(grid, -90.0, 0.0, 0.0, 45.0).unwrap();
         assert_eq!(window, MeshWindow::new(grid, 3, 2, 2, 1).unwrap());
     }
 
     #[test]
     fn bbox_rejects_an_empty_global_grid() {
-        assert!(
-            MeshWindow::covering_bbox(Grid { nlon: 0, nlat: 4 }, -90.0, 0.0, 0.0, 45.0).is_err()
-        );
+        assert!(MeshWindow::covering_bbox(Grid::by_ndims(0, 4), -90.0, 0.0, 0.0, 45.0).is_err());
     }
 
     #[test]
     fn global_non_ocean_mask_is_sliced_to_the_mesh_window() {
-        let grid = Grid { nlon: 4, nlat: 2 };
+        let grid = Grid::by_ndims(4, 2);
         let window = MeshWindow::new(grid, 2, 2, 2, 1).unwrap();
         let mesh = EqualLatLonMesh::all_active(grid, window).unwrap();
         let path = output("non-ocean-mask");

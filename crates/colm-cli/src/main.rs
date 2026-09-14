@@ -4306,7 +4306,7 @@ fn cmd_mesh_new(opts: &Opts) -> Result<()> {
         .need_str("--nlat")?
         .parse::<usize>()
         .context("--nlat must be a positive integer")?;
-    let grid = colm_srfdata::Grid { nlon, nlat };
+    let grid = colm_srfdata::Grid::by_ndims(nlon, nlat);
 
     let bbox = ["--west", "--east", "--south", "--north"]
         .map(|name| -> Result<Option<f64>> {

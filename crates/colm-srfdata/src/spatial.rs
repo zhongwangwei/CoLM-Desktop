@@ -91,6 +91,7 @@ pub struct ElementBlockOwners {
 pub struct SpatialTopology {
     pub kind: SpatialInputKind,
     pub grid: SpatialGrid,
+    pub mesh_index_grid: Option<Grid>,
     pub pixel: PixelAxes,
     pub source: Option<PixelSourceMapping>,
     pub element_block_owners: Option<ElementBlockOwners>,
@@ -423,6 +424,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     Ok(SpatialTopology {
         kind,
         grid,
+        mesh_index_grid: None,
         pixel,
         source: Some(PixelSourceMapping { columns, rows }),
         element_block_owners: None,
@@ -491,11 +493,11 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
     let catchments = file
         .variable("icatchment2d")
         .expect("inspect_spatial_input verified icatchment2d")
-        .get_values::<i64, _>((0..summary.nlat, 0..summary.nlon))?;
+        .get_values::<i64, _>((0..summary.nlon, 0..summary.nlat))?;
     let hydrounits = file
         .variable("ihydrounit2d")
         .expect("inspect_spatial_input verified ihydrounit2d")
-        .get_values::<i64, _>((0..summary.nlat, 0..summary.nlon))?;
+        .get_values::<i64, _>((0..summary.nlon, 0..summary.nlat))?;
     ensure!(
         catchments.len() == hydrounits.len(),
         "catchment IDs and hydrounit IDs must have equal cell counts"
@@ -520,7 +522,12 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
             let Some(column) = *source_column else {
                 continue;
             };
-            let offset = row * summary.nlon + column;
+            // MOD_CatchmentDataReadin asks NetCDF-Fortran for start/count
+            // `(lat, lon)`, which targets on-disk C-order dimensions
+            // `(lon, lat)`, then transposes the temporary array into
+            // block_data(x,y).  The flattened Rust read uses the resulting
+            // source `(column,row)` layout directly.
+            let offset = column * summary.nlat + row;
             let catchment = catchments[offset];
             if catchment <= 0 {
                 continue;
@@ -580,6 +587,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
     let mut topology = SpatialTopology {
         kind: SpatialInputKind::Catchment,
         grid,
+        mesh_index_grid: Some(raw_grid),
         pixel,
         source: Some(PixelSourceMapping { columns, rows }),
         element_block_owners: None,
@@ -4932,8 +4940,23 @@ fn write_mesh_index(
     let mut file = netcdf::create(path)?;
     file.add_dimension("xblk", nx)?;
     file.add_dimension("yblk", ny)?;
-    file.add_dimension("longitude", topology.grid.lon_w.len())?;
-    file.add_dimension("latitude", topology.grid.lat_s.len())?;
+    let (lon_w, lon_e, lat_s, lat_n) = if let Some(grid) = topology.mesh_index_grid {
+        (
+            (1..=grid.nlon).map(|i| grid.lon_w(i)).collect::<Vec<_>>(),
+            (1..=grid.nlon).map(|i| grid.lon_e(i)).collect::<Vec<_>>(),
+            (1..=grid.nlat).map(|j| grid.lat_s(j)).collect::<Vec<_>>(),
+            (1..=grid.nlat).map(|j| grid.lat_n(j)).collect::<Vec<_>>(),
+        )
+    } else {
+        (
+            topology.grid.lon_w.clone(),
+            topology.grid.lon_e.clone(),
+            topology.grid.lat_s.clone(),
+            topology.grid.lat_n.clone(),
+        )
+    };
+    file.add_dimension("longitude", lon_w.len())?;
+    file.add_dimension("latitude", lat_s.len())?;
     let mut counts = vec![0_i32; nx * ny];
     for block in assignments.values() {
         counts[block.1 * nx + block.0] += 1;
@@ -4941,27 +4964,23 @@ fn write_mesh_index(
     // NetCDF-Fortran reverses rank-two dimension order.  Preserve the external
     // `ncdump` contract of `ncio_write_serial(..., 'xblk', 'yblk')`.
     put_i32(&mut file, "nelm_blk", &["yblk", "xblk"], &counts)?;
-    let longitude = topology
-        .grid
-        .lon_w
+    let longitude = lon_w
         .iter()
-        .zip(&topology.grid.lon_e)
+        .zip(&lon_e)
         .map(|(&west, &east)| midpoint_longitude(west, east))
         .collect::<Vec<_>>();
-    let latitude = topology
-        .grid
-        .lat_s
+    let latitude = lat_s
         .iter()
-        .zip(&topology.grid.lat_n)
+        .zip(&lat_n)
         .map(|(&south, &north)| (south + north) * 0.5)
         .collect::<Vec<_>>();
     put_f64(&mut file, "longitude", &["longitude"], &longitude)?;
     put_f64(&mut file, "latitude", &["latitude"], &latitude)?;
     if topology.kind == SpatialInputKind::GridBased {
-        put_f64(&mut file, "lat_s", &["latitude"], &topology.grid.lat_s)?;
-        put_f64(&mut file, "lat_n", &["latitude"], &topology.grid.lat_n)?;
-        put_f64(&mut file, "lon_w", &["longitude"], &topology.grid.lon_w)?;
-        put_f64(&mut file, "lon_e", &["longitude"], &topology.grid.lon_e)?;
+        put_f64(&mut file, "lat_s", &["latitude"], &lat_s)?;
+        put_f64(&mut file, "lat_n", &["latitude"], &lat_n)?;
+        put_f64(&mut file, "lon_w", &["longitude"], &lon_w)?;
+        put_f64(&mut file, "lon_e", &["longitude"], &lon_e)?;
     }
     file.close()?;
     let _ = blocks;

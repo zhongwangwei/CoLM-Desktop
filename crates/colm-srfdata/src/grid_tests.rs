@@ -37,6 +37,35 @@ fn the_grid_is_the_one_colm_defines() {
     assert_eq!(COLM_1KM.nlat, 21600);
     assert!((COLM_1KM.dlon() - 1.0 / 120.0).abs() < 1e-15);
     assert!((COLM_1KM.dlat() - 1.0 / 120.0).abs() < 1e-15);
+    // share/MOD_Grid.F90 的 grid_define_by_name('merit_90m')，不是
+    // grid_define_by_ndims：经纬边界都整体偏移半格后 normalize。
+    assert_eq!(MERIT_90M.nlon, 432000);
+    assert_eq!(MERIT_90M.nlat, 216000);
+    assert!((MERIT_90M.dlon() - 1.0 / 1200.0).abs() < 1e-15);
+    assert!((MERIT_90M.dlat() - 1.0 / 1200.0).abs() < 1e-15);
+    assert!((MERIT_90M.lon_w(1) - 179.999_583_333_333_33).abs() < 1e-12);
+    assert!((MERIT_90M.lon_w(352900) - 114.082_083_333_333_36).abs() < 1e-12);
+    assert!((MERIT_90M.lon_center(352900) - 114.0825).abs() < 1e-12);
+    assert!((MERIT_90M.lat_s(76499) - 26.250_416_666_666_663).abs() < 1e-12);
+    assert!((MERIT_90M.lat_center(76499) - 26.250_833_333_333_333).abs() < 1e-12);
+    assert_eq!(MERIT_90M.lon_w(1).to_bits(), 0x40667ffc962fc963);
+    assert_eq!(MERIT_90M.lon_w(352900).to_bits(), 0x405c8540da740da9);
+    assert_eq!(MERIT_90M.lon_e(352900).to_bits(), 0x405c854e81b4e81d);
+    assert_eq!(MERIT_90M.lat_s(76499).to_bits(), 0x403a401b4e81b4e7);
+    assert_eq!(MERIT_90M.lat_s(76498).to_bits(), 0x403a4051eb851eb7);
+    assert_eq!(MERIT_90M.lat_n(76499).to_bits(), 0x403a4051eb851eb7);
+    assert_eq!(MERIT_90M.index_of(-180.0, 0.0).0, 1);
+    assert_eq!(MERIT_90M.index_of(179.9996, 0.0).0, 1);
+    assert_eq!(MERIT_90M.index_of(179.9995, 0.0).0, 432000);
+    assert_eq!(MERIT_90M.lon_center(1), -180.0);
+    assert_eq!(
+        MERIT_90M.lat_center(MERIT_90M.nlat),
+        (MERIT_90M.lat_s(MERIT_90M.nlat) + MERIT_90M.lat_n(MERIT_90M.nlat)) * 0.5
+    );
+
+    let same_ndims = Grid::by_ndims(432000, 216000);
+    assert_eq!(same_ndims.lon_w(1), -180.0);
+    assert_eq!(same_ndims.lat_s(1).to_bits(), 0x40567ff258bf258c);
 }
 
 #[test]

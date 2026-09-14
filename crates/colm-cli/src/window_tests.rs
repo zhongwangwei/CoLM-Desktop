@@ -20,7 +20,7 @@ fn spatial_new_writes_a_non_site_case_after_mesh_preflight() {
     std::fs::create_dir_all(&runtime).unwrap();
     let forcing = root.join("forcing.nml");
     std::fs::write(&forcing, "&nl_colm_forcing\n/\n").unwrap();
-    let grid = colm_srfdata::Grid { nlon: 4, nlat: 2 };
+    let grid = colm_srfdata::Grid::by_ndims(4, 2);
     let mesh = colm_srfdata::mesh::EqualLatLonMesh::all_active(
         grid,
         colm_srfdata::mesh::MeshWindow::new(grid, 2, 1, 1, 1).unwrap(),

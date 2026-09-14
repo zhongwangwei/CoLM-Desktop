@@ -839,10 +839,7 @@ fn site_landtype(case: &Path, doc: &colm_namelist::Document, usgs: bool) -> Resu
     };
     let (grid, name) = if usgs {
         (
-            colm_srfdata::grid::Grid {
-                nlon: 43200,
-                nlat: 21600,
-            },
+            colm_srfdata::grid::COLM_1KM,
             "landtype-usgs-update.nc".to_string(),
         )
     } else {

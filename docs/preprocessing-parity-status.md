@@ -857,3 +857,70 @@ The post-two-step restart still has 35 failing fields, now 12,816 values. The
 scientific gate therefore remains open, including source-observation arithmetic
 and nonlinear-fit outliers; this follow-up does not validate pending Catchment
 changes.
+
+### Campbell observations and integrated follow-up
+
+The source-observation conductivity exponent now also uses the original
+`(-3*lambda-2)` FMA. The unchanged-profile original probe differs from the old
+expression in 33 of 51 conductivity observations; all 51 agree with the repair.
+A small checked-in observation golden fails before the change and passes after it.
+The adjacent VGM observation audit finds no new discrepancy (72 retention and
+72 conductivity values agree bitwise), so that path was not changed.
+Evidence: `/tmp/colm-campbell-observation-audit/` and
+`/tmp/colm-vgm-observation-audit/`.
+
+The frozen integrated executable in `rust-full-catchment-integrated/` completes
+surface, initialization, and two unchanged original runtime steps (all exit 0).
+All 1,479 schemas still agree except `create_time`; all 15,922,348 memberships
+and all pixel axes remain exact. At the unchanged combined `atol=rtol=1e-12`:
+
+- Surface: 48 / 242 fields fail, now 1,246 values rather than 14,921. Maximum
+  `psi_s_l8` error is 2.893633; maximum `k_s_l2` error remains 1.883621.
+- Post-two-step restart: 35 / 190 fields fail, now 3,785 values rather than
+  12,816; maximum `gs0sun` error remains 3.655042.
+
+This is a combined integration check with the Catchment changes below, not a
+claim that all soil fits or initialization branches have passed.
+
+## Catchment mesh contract and diagnostic windows
+
+The named MERIT 90 m grid now explicitly retains the original half-cell edge
+shift. An ordinary `Grid::by_ndims(432000, 216000)` is not treated as MERIT merely
+because its dimensions match. Dateline ownership/centers and the clipped southern
+polar cell have regressions; the existing ordinary CoLM raw grids stay unshifted.
+Catchment source windows retain local geometry while written mesh indices use
+the global MERIT grid. The common 500 m raw lattice is assimilated before topology;
+USGS additionally uses 1 km and urban additionally uses 5 km.
+
+Catchment `icatchment2d` and `ihydrounit2d` use the original on-disk **(lon, lat)**
+order, distinct from the other mesh modes. Signed int32 catchment IDs are valid;
+the old Rust preflight incorrectly required int64. A non-square original Fortran
+read probe and Rust regression expose the transposition that square fixtures hid.
+Unstructured/Catchment diagnostics now use the original regional 0.1-degree
+window rather than allocating a global diagnostic field. Wrapped domains keep
+both sides of the antimeridian; regional, global and wrapped cases are tested.
+
+The unchanged original synthetic Catchment reference and the integrated Rust
+binary consume the exact same int32 mesh, domain and raw inputs. The strict
+comparison passes **all 37 files / 94 variables**, including all diagnostics,
+metadata except `create_time`, topology, HRU fractions and vegetation values.
+Evidence is `/tmp/colm-catchment-1999-synthetic-rust/exact-green-integrated/`,
+including the run script, executable hash and full file comparison. This is a
+**synthetic 1999 LAI-only** case, not a full material-field cold start or real
+historical-data validation. Earlier converted-input or partial-file experiments
+are not used as parity evidence.
+
+The integrated tree passes 412 preprocessing/data/reference/native tests, 45
+filtered CLI tests, all-target preprocessing Clippy, downstream CLI/kernel
+checks, scoped formatting and a fresh release build. All five historical
+synthetic modes still pass (257 files / 616 variables). Independent source
+review approves the grid/mesh/diagnostic and observation changes. Validation
+logs are in `/tmp/colm-integrated-preprocessing-validation/`.
+
+The normal-year PFT diagnostic schema/value gate also passes when run sequentially.
+Its first concurrent attempt failed opening a shared raw soil file with NetCDF
+HDF error -101 while the full case held a read-only handle to that same mounted
+file. An independent read-only probe failed with default locking and succeeded
+with advisory locking disabled. No production locking policy was changed; the
+unchanged binary passed after the other reader closed. This remains an external
+shared-file I/O limitation, not a passing concurrent-I/O test.

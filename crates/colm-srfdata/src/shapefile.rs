@@ -436,10 +436,7 @@ mod tests {
         assert!(domain.contains(-2.0, 0.0));
         assert!(!domain.contains(3.0, 0.0));
 
-        let grid = crate::Grid {
-            nlon: 360,
-            nlat: 180,
-        };
+        let grid = crate::Grid::by_ndims(360, 180);
         let mesh = crate::mesh::EqualLatLonMesh::from_polygon(grid, &domain).unwrap();
         assert_eq!(mesh.window.nlon, 4);
         assert_eq!(mesh.window.nlat, 4);
@@ -462,14 +459,9 @@ mod tests {
         assert!(domain.contains(-179.5, 0.0));
         assert!(!domain.contains(0.0, 0.0));
 
-        let mesh = crate::mesh::EqualLatLonMesh::from_polygon(
-            crate::Grid {
-                nlon: 360,
-                nlat: 180,
-            },
-            &domain,
-        )
-        .unwrap();
+        let mesh =
+            crate::mesh::EqualLatLonMesh::from_polygon(crate::Grid::by_ndims(360, 180), &domain)
+                .unwrap();
         assert_eq!(mesh.window.nlon, 360);
         assert_eq!(mesh.summary().unwrap().active_cells, 4);
     }
