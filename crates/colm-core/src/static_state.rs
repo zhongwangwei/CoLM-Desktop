@@ -182,7 +182,7 @@ pub fn colm_soil_grid(layers: usize) -> Result<SoilGrid> {
         "CoLM's soil grid requires at least two layers, got {layers}"
     );
     let node_depth_m = (1..=layers)
-        .map(|layer| 0.025 * (0.5 * (layer as f64 - 0.5)).exp() - 0.025)
+        .map(|layer| 0.025 * ((0.5 * (layer as f64 - 0.5)).exp() - 1.0))
         .collect::<Vec<_>>();
     let mut thickness_m = vec![0.0; layers];
     thickness_m[0] = 0.5 * (node_depth_m[0] + node_depth_m[1]);
@@ -335,10 +335,9 @@ pub fn derive_soil_parameters(
                     (-339.9 / input.psi_s_cm).powf(-input.lambda) * input.theta_s
                 }
                 HydraulicModel::VanGenuchten => {
-                    input.theta_r
-                        + (input.theta_s - input.theta_r)
-                            * (1.0 + (input.alpha_vgm * 339.9).powf(input.n_vgm))
-                                .powf(1.0 / input.n_vgm - 1.0)
+                    let saturation = (1.0 + (input.alpha_vgm * 339.9).powf(input.n_vgm))
+                        .powf(1.0 / input.n_vgm - 1.0);
+                    (input.theta_s - input.theta_r).mul_add(saturation, input.theta_r)
                 }
             };
             let psi0 = match hydraulic_model {

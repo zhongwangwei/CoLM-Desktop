@@ -924,3 +924,42 @@ file. An independent read-only probe failed with default locking and succeeded
 with advisory locking disabled. No production locking policy was changed; the
 unchanged binary passed after the other reader closed. This remains an external
 shared-file I/O limitation, not a passing concurrent-I/O test.
+
+## Isolated initializer soil-grid and field-capacity rounding
+
+To separate initializer errors from soil fitting, a fresh Rust initializer and
+the unchanged original two-step runtime consumed a read-only link to the same
+original-generated surface. The initial comparison still had one out-of-tolerance
+`extkb` value; across cold and post-two-step restart fields it had 24 failing
+fields / 1,112 values. The maximum `gs0sun` error was still 3.655042, demonstrating
+that this particular maximum is not caused by Rust surface-generation drift.
+Evidence: `rust-init-original-surface-integrated/` under the main artifact root.
+
+Two small shared `colm-core::static_state` corrections now retain the original
+arithmetic rather than algebraically equivalent expressions:
+
+- Soil nodes use `0.025 * (exp(...) - 1)`, not `0.025 * exp(...) - 0.025`.
+  An unchanged-expression `Init_GlobalVars` probe with the fixed original build
+  profile supplies the golden. The strengthened existing grid regression fails
+  before the fix (three ULPs at the first node). Node/thickness/interface rounding
+  had propagated into initial water and hydraulic state.
+- VGM field capacity uses the original single-rounding retention product/sum.
+  Comparing against all 77,540 original constant-restart values finds 12,555
+  bit differences before the FMA and none after it. A compact original-derived
+  regression fails by one ULP before the correction.
+
+The fresh `rust-init-original-surface-static-rounding/` run completes both stages.
+Cold `wliq_soisno`, `smp`, `hk`, and `zwt`, plus all 77,540 `wfc` values, now agree
+bitwise. All 19 restart schemas, types, variable order and attributes except
+`create_time` agree. The unchanged scientific gate still fails: 24 fields / 182
+values across cold and post-two-step restarts, including the same near-sunrise
+`extkb` discrepancy and maximum `gs0sun`. The soil-grid correction reduces this
+count; the field-capacity correction does not further reduce this two-step count.
+Coordinate/radiation rounding remains a separate active investigation.
+
+Artifacts are in `/tmp/colm-soil-grid-audit/` and
+`/tmp/colm-field-capacity-audit/`. Both red/green checks, 654 core/preprocessing/
+data/reference/native tests, all-target Clippy, downstream checks, scoped
+formatting and release compilation pass. These are initializer-only results
+on the original surface; they do not replace the independent surface-fit gate
+or prove the remaining mode matrix.

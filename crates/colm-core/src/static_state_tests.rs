@@ -64,8 +64,11 @@ fn bedrock_preserves_fortran_ocean_exception_and_last_true_interface() {
 fn soil_grid_matches_fortran_global_initialization() {
     let grid = colm_soil_grid(10).unwrap();
     assert_eq!(grid.interface_depth_m[0], 0.0);
-    assert!((grid.node_depth_m[0] - 0.007_100_635_417).abs() < 1.0e-10);
-    assert!((grid.thickness_m[0] - 0.017_512_817_916).abs() < 1.0e-10);
+    // Pristine MOD_Vars_Global::Init_GlobalVars, gfortran -O2 -fdefault-real-8.
+    // Keep 0.025 * (exp(...) - 1), not the algebraically expanded expression.
+    assert_eq!(grid.node_depth_m[0].to_bits(), 0x3f7d_158e_4e5c_d68d);
+    assert_eq!(grid.thickness_m[0].to_bits(), 0x3f91_eee1_50d8_2f92);
+    assert_eq!(grid.interface_depth_m[10].to_bits(), 0x400b_76f9_788b_6317);
     assert!((grid.interface_depth_m[1] - grid.thickness_m[0]).abs() < 1.0e-14);
     assert!((grid.interface_depth_m[10] - grid.thickness_m.iter().sum::<f64>()).abs() < 1.0e-14);
     assert!(colm_soil_grid(1).is_err());
@@ -115,6 +118,25 @@ fn van_genuchten_uses_its_own_field_capacity_and_psi0() {
     let fc = 1.0 - (1.0 - sc.powf(1.0 / m)).powf(m);
     assert!((state.get(SoilField::ScVgm, 0, 0) - sc).abs() < 1e-14);
     assert!((state.get(SoilField::FcVgm, 0, 0) - fc).abs() < 1e-14);
+}
+
+#[test]
+fn van_genuchten_field_capacity_matches_original_single_rounding() {
+    // Original Pearl River constant restart e100_n20, patch 1, layer 7;
+    // MOD_SoilParametersReadin built with -O2 -fdefault-real-8.
+    let input = SoilLayerInput {
+        theta_s: f64::from_bits(0x3fdc_4df2_9182_e905),
+        theta_r: f64::from_bits(0x3fc3_45e8_36d2_d9a2),
+        alpha_vgm: f64::from_bits(0x3f9e_ef2a_c0fa_3908),
+        n_vgm: f64::from_bits(0x3ff2_3271_dfb7_528f),
+        ..soil(1.0)
+    };
+    let state =
+        derive_soil_parameters(&[input; 8], &[0], 10, HydraulicModel::VanGenuchten).unwrap();
+    assert_eq!(
+        state.get(SoilField::FieldCapacity, 0, 0).to_bits(),
+        0x3fd7_1556_aa77_a6c1
+    );
 }
 
 #[test]
