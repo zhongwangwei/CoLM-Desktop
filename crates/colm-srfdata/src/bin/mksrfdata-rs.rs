@@ -21,8 +21,8 @@ use colm_srfdata::{
     build_catchment_spatial_topology_with_filter_and_raw_grids, build_coordinate_patch_selection,
     build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
     build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_pft_topology,
-    build_spatial_topology_with_filter_grid, build_spatial_topology_with_filter_grid_and_raw_grids,
-    clip_existing_surface, crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
+    build_spatial_topology_with_filter_grid_and_raw_grids, clip_existing_surface,
+    crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
     mesh_cell_area_weights, read_coordinate_patch_selection_f64,
     read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
@@ -283,12 +283,14 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let mut topology = build_spatial_topology_with_filter_grid(
+            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids(
                 &args.mesh,
                 args.kind,
                 COLM_500M,
                 args.bounds,
                 mesh_filter.as_ref().map(|filter| &filter.grid),
+                &[],
+                Some(&args.blocks),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
             if let Some(filter) = &mesh_filter {
@@ -892,6 +894,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 args.bounds,
                 mesh_filter.as_ref().map(|filter| &filter.grid),
                 urban_extra_grids,
+                Some(&args.blocks),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
             if let Some(filter) = &mesh_filter {
@@ -5714,6 +5717,7 @@ mod tests {
             None,
             None,
             &[COLM_500M, COLM_5KM],
+            None,
         )
         .unwrap();
 
@@ -5768,6 +5772,7 @@ mod tests {
             }),
             None,
             &[COLM_500M, COLM_5KM],
+            None,
         )
         .unwrap();
 

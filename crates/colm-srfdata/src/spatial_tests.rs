@@ -2087,7 +2087,8 @@ fn source_block_owner_uses_domain_start_for_clipped_first_cell() {
             vec![Some(0), Some(1)]
         };
         let (_, rows) = source_block_axes(
-            &topology,
+            &topology.grid,
+            &topology.pixel,
             topology.source.as_ref().unwrap(),
             &BlockLayout::regular(72, 36).unwrap(),
         )
@@ -2561,4 +2562,140 @@ fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
     };
     assert_eq!(map(&physical), map(&patches));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn block_order_test_pixel() -> PixelAxes {
+    PixelAxes {
+        edge_south: 26.4,
+        edge_north: 26.43,
+        edge_west: 109.99,
+        edge_east: 110.12,
+        // x=3 starts exactly on the 110E block edge, but it is emitted from
+        // the same source column as x=2. MOD_Mesh stores the whole source
+        // chunk before moving to the next block.
+        lon_w: vec![
+            110.11459089860631,
+            109.99792422889732,
+            110.0,
+            109.993757562122,
+        ],
+        lon_e: vec![110.116, 110.0, 110.000015124679, 109.995],
+        lat_s: vec![26.416665008602045, 26.420831675377364],
+        lat_n: vec![26.420831675377364, 26.425],
+    }
+}
+
+fn block_order_test_grid() -> SpatialGrid {
+    SpatialGrid {
+        lon_w: vec![
+            110.11459089860631,
+            109.99792422889732,
+            110.010,
+            109.993757562122,
+        ],
+        lon_e: vec![110.116, 110.000015124679, 110.012, 109.995],
+        lat_s: vec![26.416665008602045, 26.420831675377364],
+        lat_n: vec![26.420831675377364, 26.425],
+    }
+}
+
+#[test]
+fn block_order_sort_matches_original_boundary_pixel_contract() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    let pixel = block_order_test_pixel();
+    let grid = block_order_test_grid();
+    let source = PixelSourceMapping {
+        columns: vec![Some(0), Some(1), Some(1), Some(3)],
+        rows: vec![Some(0), Some(1)],
+    };
+    let axes = source_block_axes(&grid, &pixel, &source, &blocks).unwrap();
+    let mut pixels = vec![(1, 1), (3, 2), (4, 2), (3, 1), (2, 2), (2, 1)];
+
+    sort_pixels_for_block_order(&mut pixels, &axes).unwrap();
+
+    assert_eq!(pixels, vec![(2, 1), (3, 1), (2, 2), (3, 2), (4, 2), (1, 1)]);
+}
+
+#[test]
+fn source_block_axes_keep_crossing_source_cell_in_one_chunk() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    let grid = SpatialGrid {
+        lon_w: vec![109.8],
+        lon_e: vec![110.2],
+        lat_s: vec![9.8],
+        lat_n: vec![10.2],
+    };
+    let pixel = PixelAxes {
+        edge_south: 9.8,
+        edge_north: 10.2,
+        edge_west: 109.8,
+        edge_east: 110.2,
+        lon_w: vec![109.8, 109.9, 110.0, 110.1],
+        lon_e: vec![109.9, 110.0, 110.1, 110.2],
+        lat_s: vec![9.8],
+        lat_n: vec![10.2],
+    };
+    let source = PixelSourceMapping {
+        columns: vec![Some(0), Some(0), Some(0), Some(0)],
+        rows: vec![Some(0)],
+    };
+
+    let axes = source_block_axes(&grid, &pixel, &source, &blocks).unwrap();
+
+    assert_eq!(axes.0, vec![Some(57), Some(57), Some(57), Some(57)]);
+}
+
+#[test]
+fn source_block_axes_handles_wrapped_longitude_and_descending_latitude() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    let grid = SpatialGrid {
+        lon_w: vec![179.8],
+        lon_e: vec![-179.8],
+        lat_s: vec![9.5, 9.0],
+        lat_n: vec![10.0, 9.5],
+    };
+    let pixel = PixelAxes {
+        edge_south: 9.0,
+        edge_north: 10.0,
+        edge_west: 179.8,
+        edge_east: -179.8,
+        lon_w: vec![179.8, 179.9, -180.0, -179.9],
+        lon_e: vec![179.9, -180.0, -179.9, -179.8],
+        lat_s: vec![9.5, 9.0],
+        lat_n: vec![10.0, 9.5],
+    };
+    let source = PixelSourceMapping {
+        columns: vec![Some(0), Some(0), Some(0), Some(0)],
+        rows: vec![Some(0), Some(1)],
+    };
+
+    let axes = source_block_axes(&grid, &pixel, &source, &blocks).unwrap();
+
+    assert_eq!(axes.0, vec![Some(71), Some(71), Some(71), Some(71)]);
+    assert_eq!(axes.1, vec![Some(19), Some(19)]);
+}
+
+#[test]
+fn source_block_axes_rejects_malformed_block_layout_without_panic() {
+    let pixel = block_order_test_pixel();
+    let grid = block_order_test_grid();
+    let source = PixelSourceMapping {
+        columns: vec![Some(0), Some(1), Some(1), Some(3)],
+        rows: vec![Some(0), Some(1)],
+    };
+    let empty = BlockLayout {
+        lon_w: vec![],
+        lon_e: vec![],
+        lat_s: vec![0.0],
+        lat_n: vec![5.0],
+    };
+    assert!(source_block_axes(&grid, &pixel, &source, &empty).is_err());
+
+    let mismatched = BlockLayout {
+        lon_w: vec![0.0],
+        lon_e: vec![5.0, 10.0],
+        lat_s: vec![0.0],
+        lat_n: vec![5.0],
+    };
+    assert!(source_block_axes(&grid, &pixel, &source, &mismatched).is_err());
 }

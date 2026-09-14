@@ -6,6 +6,61 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Latest independent Pearl River result: source-chunk ordering
+
+The latest frozen run is `rust-full-mesh-order/` under
+`/tmp/colm-spatial-parity.Mh0VZX/`. It supersedes the earlier independent-surface
+results below, but **does not close the full scientific migration gate**.
+
+The previous membership comparison sorted coordinates before comparing them.
+That proved equal sets, not equal stored traversal order: 39 of 957 elements
+and 317 of 7,754 patches still had different sequences. ZIP aggregation sums
+pixel areas in that sequence; one-ULP area differences could change nonlinear
+soil-fit convergence even with the same solver and source values.
+
+Both spatial builders now preserve original source-grid chunk order before
+LandPatch sorting. They reuse the existing source-grid ownership mapping and
+the actual configured block layout, rather than assigning blocks to individual
+fine pixels. The latter would incorrectly split a coarse source cell crossing
+a block edge. Regressions cover that crossing, boundary slivers, wrapped
+longitude, descending latitude and malformed block layouts.
+
+The fresh Rust surface, Rust initializer and unchanged original two-step runtime
+all exit successfully. Comparisons at the unchanged combined `atol=rtol=1e-12`
+gate establish:
+
+| Check | Latest result |
+| --- | --- |
+| Surface file inventory and schemas | All 1,479 match, ignoring only `create_time` |
+| Stored element and patch pixel sequences | All 957 / 7,754 exact; 15,922,348 patch members |
+| Aggregated surface fields | All 242 pass; all soil fields bitwise equal |
+| Cold restart | All 13 files / 742 variable instances pass; all 19 restart schemas match |
+| Post-two-step restart | **25 fields / 414 values still exceed tolerance**, maximum `gs0sun` error 10.661279621883295 |
+
+Twenty-six surface fields retain bit differences within tolerance: monthly
+LAI/SAI, canopy height and elevation standard deviation. Their maximum absolute
+differences are respectively `2.66e-15`, `8.88e-16`, `1.42e-14` and `1.14e-13`.
+Their downstream effect remains under investigation; a passing cold restart
+does not establish a passing trajectory. The **32** post-step differences in
+the earlier zmu-isolated run used original-generated surface and must not be
+confused with the **414** in this independently generated full pipeline.
+
+The same frozen surface binary also passes the bounded synthetic historical
+LCT/PFT/PC/WMO/urban checks (257 files / 616 variable instances) and the 1999
+Catchment LAI-only check (37 files / 94 instances). These are not full-material
+or all-runtime mode coverage. Evidence is in
+`/tmp/colm-mesh-order-bounded-verify-1789397237/`. The integrated 663-test suite,
+Clippy and downstream checks pass; the source-order changes were independently
+reviewed. Broader optional-mode acceptance remains open.
+
+The full run uses a temporary repack of `soil/vf_quartz_mineral_s.nc` because the
+original file is HDF-readable but intermittently rejected by NetCDF. The full
+decoded-input equivalence audit is still pending; output agreement alone does
+not prove input identity. Original rawdata and reference outputs are untouched.
+The separate plant-tile close crash reproduces in NetCDF/HDF command-line tools;
+its temporary repack has matching decoded variables and metadata. Neither
+workaround changes production file-locking policy or proves file corruption.
+
 ## Evidence from this audit
 
 - The supplied Pearl River namelist has no `DEF_USE_PC=.true.` and defaults to

@@ -344,6 +344,7 @@ pub fn build_spatial_topology_with_filter_grid(
         bounds,
         filter_grid,
         &[],
+        None,
     )
 }
 
@@ -354,6 +355,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     bounds: Option<crate::SpatialBounds>,
     filter_grid: Option<&SpatialGrid>,
     extra_raw_grids: &[Grid],
+    block_order: Option<&BlockLayout>,
 ) -> Result<SpatialTopology> {
     let path = path.as_ref();
     ensure!(
@@ -377,12 +379,13 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         columns,
         rows,
     } = assimilated_pixels(&grid, raw_grid, bounds, filter_grid, extra_raw_grids)?;
+    let source = PixelSourceMapping { columns, rows };
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
     let mut raw_count = 0_usize;
-    for (y, source_row) in rows.iter().enumerate() {
+    for (y, source_row) in source.rows.iter().enumerate() {
         let Some(row) = *source_row else { continue };
-        for (x, source_column) in columns.iter().enumerate() {
+        for (x, source_column) in source.columns.iter().enumerate() {
             let Some(column) = *source_column else {
                 continue;
             };
@@ -406,6 +409,12 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         }
     }
     ensure!(!members.is_empty(), "spatial mesh has no positive elements");
+    if let Some(blocks) = block_order {
+        let axes = source_block_axes(&grid, &pixel, &source, blocks)?;
+        for pixels in members.values_mut() {
+            sort_pixels_for_block_order(pixels, &axes)?;
+        }
+    }
     let mut element_ids = Vec::with_capacity(members.len());
     let mut offsets = Vec::with_capacity(members.len() + 1);
     let mut ilon = Vec::with_capacity(raw_count);
@@ -426,7 +435,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         grid,
         mesh_index_grid: None,
         pixel,
-        source: Some(PixelSourceMapping { columns, rows }),
+        source: Some(source),
         element_block_owners: None,
         mesh,
         land_elements,
@@ -513,12 +522,13 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         filter.map(|filter| &filter.grid),
         extra_raw_grids,
     )?;
+    let source = PixelSourceMapping { columns, rows };
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32, i32)>>::new();
     let mut raw_count = 0_usize;
-    for (y, source_row) in rows.iter().enumerate() {
+    for (y, source_row) in source.rows.iter().enumerate() {
         let Some(row) = *source_row else { continue };
-        for (x, source_column) in columns.iter().enumerate() {
+        for (x, source_column) in source.columns.iter().enumerate() {
             let Some(column) = *source_column else {
                 continue;
             };
@@ -550,6 +560,12 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         !members.is_empty(),
         "catchment mesh has no positive elements"
     );
+    if let Some(blocks) = block_layout {
+        let axes = source_block_axes(&grid, &pixel, &source, blocks)?;
+        for pixels in members.values_mut() {
+            sort_catchment_pixels_for_block_order(pixels, &axes)?;
+        }
+    }
 
     let lake_id = file
         .variable("lake_id")
@@ -589,7 +605,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         grid,
         mesh_index_grid: Some(raw_grid),
         pixel,
-        source: Some(PixelSourceMapping { columns, rows }),
+        source: Some(source),
         element_block_owners: None,
         mesh,
         land_elements,
@@ -4711,13 +4727,64 @@ fn element_blocks(
     compute_element_blocks(topology, blocks)
 }
 
+fn sort_pixels_for_block_order(pixels: &mut [(i32, i32)], axes: &BlockAxes) -> Result<()> {
+    let mut keyed = pixels
+        .iter()
+        .copied()
+        .map(|pixel| block_order_key(pixel.0, pixel.1, axes).map(|key| (key, pixel)))
+        .collect::<Result<Vec<_>>>()?;
+    keyed.sort_unstable_by_key(|&(key, _)| key);
+    for (target, (_, pixel)) in pixels.iter_mut().zip(keyed) {
+        *target = pixel;
+    }
+    Ok(())
+}
+
+fn sort_catchment_pixels_for_block_order(
+    pixels: &mut [(i32, i32, i32)],
+    axes: &BlockAxes,
+) -> Result<()> {
+    let mut keyed = pixels
+        .iter()
+        .copied()
+        .map(|pixel| block_order_key(pixel.0, pixel.1, axes).map(|key| (key, pixel)))
+        .collect::<Result<Vec<_>>>()?;
+    keyed.sort_unstable_by_key(|&(key, _)| key);
+    for (target, (_, pixel)) in pixels.iter_mut().zip(keyed) {
+        *target = pixel;
+    }
+    Ok(())
+}
+
+fn block_order_key(x: i32, y: i32, axes: &BlockAxes) -> Result<(usize, usize, i32, i32)> {
+    let x_index = usize::try_from(x)?
+        .checked_sub(1)
+        .context("mesh longitude is zero")?;
+    let y_index = usize::try_from(y)?
+        .checked_sub(1)
+        .context("mesh latitude is zero")?;
+    let block_x = axes
+        .0
+        .get(x_index)
+        .copied()
+        .context("mesh longitude is outside pixel grid")?
+        .context("mesh longitude has no block owner")?;
+    let block_y = axes
+        .1
+        .get(y_index)
+        .copied()
+        .context("mesh latitude is outside pixel grid")?
+        .context("mesh latitude has no block owner")?;
+    Ok((block_x, block_y, y, x))
+}
+
 fn compute_element_blocks(
     topology: &SpatialTopology,
     blocks: &BlockLayout,
 ) -> Result<BTreeMap<i64, (usize, usize)>> {
     let (nx, ny) = blocks.dimensions()?;
     let (longitude, latitude) = if let Some(source) = &topology.source {
-        source_block_axes(topology, source, blocks)?
+        source_block_axes(&topology.grid, &topology.pixel, source, blocks)?
     } else {
         midpoint_block_axes(&topology.pixel, blocks)?
     };
@@ -4761,13 +4828,14 @@ fn compute_element_blocks(
 type BlockAxes = (Vec<Option<usize>>, Vec<Option<usize>>);
 
 fn source_block_axes(
-    topology: &SpatialTopology,
+    grid: &SpatialGrid,
+    pixel: &PixelAxes,
     source: &PixelSourceMapping,
     blocks: &BlockLayout,
 ) -> Result<BlockAxes> {
+    blocks.dimensions()?;
     ensure!(
-        source.columns.len() == topology.pixel.lon_w.len()
-            && source.rows.len() == topology.pixel.lat_s.len(),
+        source.columns.len() == pixel.lon_w.len() && source.rows.len() == pixel.lat_s.len(),
         "source-grid ownership axes do not match pixel axes"
     );
     let first_column = source.columns.iter().flatten().next().copied();
@@ -4778,20 +4846,18 @@ fn source_block_axes(
             let Some(column) = *column else {
                 return Ok(None);
             };
-            let west = *topology
-                .grid
+            let west = *grid
                 .lon_w
                 .get(column)
                 .context("mesh longitude source column is outside the source grid")?;
-            let east = *topology
-                .grid
+            let east = *grid
                 .lon_e
                 .get(column)
                 .context("mesh longitude source column is outside the source grid")?;
             let owner = if Some(column) == first_column
-                && longitude_in_floor(topology.pixel.edge_west, west, east)
+                && longitude_in_floor(pixel.edge_west, west, east)
             {
-                topology.pixel.edge_west
+                pixel.edge_west
             } else {
                 west
             };
@@ -4801,28 +4867,26 @@ fn source_block_axes(
             )?))
         })
         .collect::<Result<Vec<_>>>()?;
-    let south_to_north = topology.grid.lat_s.first() <= topology.grid.lat_s.last();
+    let south_to_north = grid.lat_s.first() <= grid.lat_s.last();
     let latitude = source
         .rows
         .iter()
         .map(|row| {
             let Some(row) = *row else { return Ok(None) };
             let block = if south_to_north {
-                let south = *topology
-                    .grid
+                let south = *grid
                     .lat_s
                     .get(row)
                     .context("mesh latitude source row is outside the source grid")?;
                 // grid_set_blocks starts at the domain's block when it
                 // clips the first source row, rather than at that row's edge.
-                block_latitude(south.max(topology.pixel.edge_south), blocks)?
+                block_latitude(south.max(pixel.edge_south), blocks)?
             } else {
-                let north = *topology
-                    .grid
+                let north = *grid
                     .lat_n
                     .get(row)
                     .context("mesh latitude source row is outside the source grid")?;
-                block_latitude_descending_north(north.min(topology.pixel.edge_north), blocks)?
+                block_latitude_descending_north(north.min(pixel.edge_north), blocks)?
             };
             Ok(Some(block))
         })
