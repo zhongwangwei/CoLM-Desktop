@@ -21,7 +21,6 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
         },
         bifurcation: false,
         levee: false,
-        tracer: false,
         reservoir_method: 0,
         reservoir_parameters: None,
     })
@@ -104,7 +103,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
 }
 
 #[test]
-fn cold_restart_refuses_features_with_separate_upstream_payloads() {
+fn cold_restart_refuses_unimplemented_reservoir_methods() {
     let root = temp_dir("features");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment(&unit_catchment);
@@ -120,13 +119,12 @@ fn cold_restart_refuses_features_with_separate_upstream_payloads() {
         },
         bifurcation: false,
         levee: false,
-        tracer: true,
-        reservoir_method: 0,
+        reservoir_method: 2,
         reservoir_parameters: None,
     })
     .unwrap_err()
     .to_string();
-    assert!(error.contains("tracer"));
+    assert!(error.contains("reservoir method"));
     assert!(!root.join("restart").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -148,7 +146,6 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
         },
         bifurcation: true,
         levee: false,
-        tracer: false,
         reservoir_method: 0,
         reservoir_parameters: None,
     })
@@ -227,7 +224,6 @@ fn cold_restart_carries_zero_levee_state() {
         },
         bifurcation: false,
         levee: true,
-        tracer: false,
         reservoir_method: 0,
         reservoir_parameters: None,
     })
@@ -274,7 +270,6 @@ fn cold_restart_carries_native_reservoir_identity_and_volume() {
         },
         bifurcation: false,
         levee: false,
-        tracer: false,
         reservoir_method: 1,
         reservoir_parameters: Some(&parameters),
     })

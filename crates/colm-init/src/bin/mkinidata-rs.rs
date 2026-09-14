@@ -259,7 +259,6 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
         date: run.date,
         bifurcation: namelist_bool(&document, "DEF_USE_BIFURCATION", false)?,
         levee: namelist_bool(&document, "DEF_USE_LEVEE", false)?,
-        tracer: namelist_bool(&document, "DEF_USE_TRACER", false)?,
         reservoir_method,
         reservoir_parameters: reservoir_parameters.as_deref(),
     })?;
@@ -1122,7 +1121,7 @@ mod tests {
         std::fs::write(
             &namelist,
             format!(
-                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_Reservoir_Method=1\n DEF_ReservoirPara_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
+                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_TRACER=.true.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_Reservoir_Method=1\n DEF_ReservoirPara_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
                 root.display(),
                 unit_catchment.display(),
                 reservoir.display(),
@@ -1162,6 +1161,7 @@ mod tests {
                 .unwrap(),
             [2.8e6]
         );
+        assert!(file.variable("trc_river_restart_complete").is_none());
         drop(file);
         std::fs::remove_dir_all(root).unwrap();
     }

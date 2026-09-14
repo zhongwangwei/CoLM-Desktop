@@ -45,7 +45,6 @@ pub struct GridRiverColdStartConfig<'a> {
     pub date: RestartDate,
     pub bifurcation: bool,
     pub levee: bool,
-    pub tracer: bool,
     pub reservoir_method: i32,
     pub reservoir_parameters: Option<&'a Path>,
 }
@@ -58,9 +57,10 @@ pub struct GridRiverColdStartFile {
 
 /// Write the schema-v2 GridRiverLake cold state consumed by a matching CoLM kernel.
 ///
-/// Tracer mode owns additional restart payloads upstream; refusing it is safer
-/// than emitting a transaction that claims it disabled or complete. Bifurcation,
-/// levee, and reservoir state cold-start to their native values here.
+/// Native `mkinidata` does not initialize route tracers, so its cold file has
+/// no tracer transaction. The runtime detects that absence and seeds tracer
+/// state from water. Bifurcation, levee, and reservoir state cold-start to
+/// their native values here.
 pub fn write_gridriver_cold_restart(
     config: GridRiverColdStartConfig<'_>,
 ) -> Result<GridRiverColdStartFile> {
@@ -79,8 +79,8 @@ pub fn write_gridriver_cold_restart(
         "GridRiverLake restart date is invalid"
     );
     ensure!(
-        !config.tracer && matches!(config.reservoir_method, 0 | 1),
-        "Rust GridRiverLake cold restart currently supports base routing, levee, bifurcation, and reservoir method 1; tracer and other reservoir methods require their native restart payloads"
+        matches!(config.reservoir_method, 0 | 1),
+        "Rust GridRiverLake cold restart currently supports base routing, levee, bifurcation, and reservoir method 1"
     );
 
     let source = netcdf::open(config.unit_catchment).with_context(|| {
