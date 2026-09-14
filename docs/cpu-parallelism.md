@@ -27,8 +27,9 @@ values as IEEE-754 `f64`.
 - Do not replace `powf`, `log10`, or other transcendental calculations with
   approximate vector math without an upstream-reference error budget approved
   by regression tests.
-- Reference rounding is explicit where it affects topology: regular raw-grid
-  edges use `f64::mul_add`, matching the original production Fortran build's
+- Reference rounding is explicit where it affects topology or nonlinear fits:
+  raw-grid edges, soil input means/observations and LM norms use `f64::mul_add`
+  where independent goldens establish the original production Fortran build's
   single rounding on ARM64. Other Fortran compiler/target settings may differ.
   Do not enable blanket contraction or fast-math. Area aggregation retains
   `areaquad`'s degree conversion, km² units and multiplication order; cancelling

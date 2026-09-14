@@ -409,19 +409,37 @@ fn qrsolv(
 }
 
 fn enorm(values: &[f64]) -> f64 {
-    values.iter().map(|value| value * value).sum::<f64>().sqrt()
+    // Production Fortran contracts SUM(x**2); retain its single rounding.
+    values
+        .iter()
+        .fold(0.0, |sum, value| value.mul_add(*value, sum))
+        .sqrt()
 }
 
 fn enorm_column(a: &[f64], m: usize, n: usize, start: usize, column: usize) -> f64 {
     (start..m)
-        .map(|row| a[row * n + column].powi(2))
-        .sum::<f64>()
+        .fold(0.0, |sum, row| {
+            a[row * n + column].mul_add(a[row * n + column], sum)
+        })
         .sqrt()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn norms_retain_original_square_sum_single_rounding() {
+        // Independently linked original MOD_Utils::enorm, production -O2.
+        // Separate multiply/add gives ...095 instead; one ULP in xnorm can
+        // terminate LM at its initial point on the xtol boundary.
+        let expected = f64::from_bits(0x3fcb9271769ab094);
+        assert_eq!(enorm(&[0.08, 0.2]), expected);
+        assert_eq!(
+            enorm_column(&[999.0, 888.0, 1.0, 0.08, 2.0, 0.2], 3, 2, 1, 1),
+            expected
+        );
+    }
 
     struct Linear;
 
