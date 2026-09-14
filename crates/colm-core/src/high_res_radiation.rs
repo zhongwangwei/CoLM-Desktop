@@ -244,6 +244,7 @@ pub fn high_resolution_pft_cold_start_state(
             [soil_direct[1], soil_diffuse[1]],
         ],
         snow_absorption: [[0.0; RADIATION_TYPES]; 2],
+        transmission: None,
         snow_age: 0.0,
         thermal_gap_fraction,
         direct_extinction,

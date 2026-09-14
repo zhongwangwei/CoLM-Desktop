@@ -35,6 +35,31 @@ pub struct ColdStartGroundAlbedo {
     pub snow_age: f64,
 }
 
+impl ColdStartGroundAlbedo {
+    /// Original `albland` soil/snow absorption after the canopy transmission sum.
+    pub fn absorption(
+        &self,
+        transmission: [[f64; 3]; BANDS],
+    ) -> (
+        [[f64; RADIATION_TYPES]; BANDS],
+        [[f64; RADIATION_TYPES]; BANDS],
+    ) {
+        let mut soil_absorption = [[0.0; RADIATION_TYPES]; BANDS];
+        let mut snow_absorption = [[0.0; RADIATION_TYPES]; BANDS];
+        for band in 0..BANDS {
+            soil_absorption[band][0] = transmission[band][2].mul_add(
+                1.0 - self.soil[band][0],
+                transmission[band][0] * (1.0 - self.soil[band][1]),
+            );
+            soil_absorption[band][1] = transmission[band][1] * (1.0 - self.soil[band][1]);
+            snow_absorption[band][0] = transmission[band][0] * (1.0 - self.snow[band][1])
+                + transmission[band][2] * (1.0 - self.snow[band][0]);
+            snow_absorption[band][1] = transmission[band][1] * (1.0 - self.snow[band][1]);
+        }
+        (soil_absorption, snow_absorption)
+    }
+}
+
 /// Looks up CoLM's native broadband leaf optical constants for one land class.
 ///
 /// This is the `rho`/`tau` assignment in `MOD_Const_LC.F90`; it deliberately
@@ -129,6 +154,12 @@ pub struct ColdStartRadiation {
     pub shaded_absorption: [[f64; RADIATION_TYPES]; BANDS],
     pub soil_absorption: [[f64; RADIATION_TYPES]; BANDS],
     pub snow_absorption: [[f64; RADIATION_TYPES]; BANDS],
+    /// `[band][direct-to-diffuse, diffuse-to-diffuse, direct-to-direct]`.
+    ///
+    /// Present for broadband `albland`/PFT/PC; the spectral adapter leaves it unset.
+    /// PC can retain broadband optics in a high-resolution run, so presence alone
+    /// does not permit replacing its 211-band ground absorption with this array.
+    pub transmission: Option<[[f64; 3]; BANDS]>,
     /// CoLM's dimensionless snow age after its first 1800-second update.
     pub snow_age: f64,
     pub thermal_gap_fraction: f64,
@@ -324,8 +355,6 @@ fn cold_start_broadband_radiation_with_snow_using(
         ground_snow_fraction,
         ground_temperature_k,
     )?;
-    let soil_ground = ground_state.soil;
-    let snow = ground_state.snow;
     let snow_age = ground_state.snow_age;
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
@@ -367,18 +396,7 @@ fn cold_start_broadband_radiation_with_snow_using(
         diffuse_extinction = two_stream.diffuse_extinction;
     }
 
-    let mut soil_absorption = [[0.0; RADIATION_TYPES]; BANDS];
-    let mut snow_absorption = [[0.0; RADIATION_TYPES]; BANDS];
-    for band in 0..BANDS {
-        soil_absorption[band][0] = transmission[band][2].mul_add(
-            1.0 - soil_ground[band][0],
-            transmission[band][0] * (1.0 - soil_ground[band][1]),
-        );
-        soil_absorption[band][1] = transmission[band][1] * (1.0 - soil_ground[band][1]);
-        snow_absorption[band][0] = transmission[band][0] * (1.0 - snow[band][1])
-            + transmission[band][2] * (1.0 - snow[band][0]);
-        snow_absorption[band][1] = transmission[band][1] * (1.0 - snow[band][1]);
-    }
+    let (soil_absorption, snow_absorption) = ground_state.absorption(transmission);
 
     Ok(ColdStartRadiation {
         albedo,
@@ -386,6 +404,7 @@ fn cold_start_broadband_radiation_with_snow_using(
         shaded_absorption,
         soil_absorption,
         snow_absorption,
+        transmission: Some(transmission),
         snow_age,
         thermal_gap_fraction,
         direct_extinction,

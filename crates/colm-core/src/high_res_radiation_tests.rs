@@ -98,6 +98,7 @@ fn leafless_high_resolution_cold_start_reduces_ground_absorption_once() {
         assert!((state.soil_absorption[band][1] - 0.7).abs() < 1.0e-12);
     }
     assert_eq!(state.snow_absorption, [[0.0; 2]; 2]);
+    assert_eq!(state.transmission, None);
 }
 
 #[test]

@@ -424,6 +424,7 @@ fn cold_start_radiation_matches_the_upstream_cn_cng_broadband_restart() {
     assert_close(output.thermal_gap_fraction, 0.546_974_995_631_841);
     assert_close(output.direct_extinction, 659.919_009_2);
     assert_close(output.diffuse_extinction, 0.719);
+    assert!(output.transmission.is_some());
     assert_matrix_close(
         output.albedo,
         [
@@ -485,6 +486,7 @@ fn pft_radiation_matches_the_upstream_cn_cng_pft_restart() {
     assert_close(output.thermal_gap_fraction, 0.546_974_995_631_841);
     assert_close(output.direct_extinction, 659.919_009_2);
     assert_close(output.diffuse_extinction, 0.719);
+    assert!(output.transmission.is_some());
     assert_matrix_close(
         output.sunlit_absorption,
         [

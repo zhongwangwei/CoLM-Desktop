@@ -6,6 +6,44 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## PFT/PC transmission precedes common ground absorption
+
+Broadband PFT and PC now follow `twostream_wrap -> albland`: sum albedo and
+transmission in stored PFT order, then derive common soil/snow absorption.
+Previously the shared caller summed already-derived absorption. Existing radiation
+state now carries optional transmission, without a new solver, allocation or NetCDF
+field. Both single-point and spatial callers use the shared fix. Spectral callers
+retain their wavelength-resolved absorption, and crop per-PFT writers are unchanged.
+The existing LCT ground formula is extracted without changing its arithmetic.
+
+An original-expression two-state regression fails at soil absorption even after
+transmission plumbing, then passes with the corrected order. The existing actual
+11-PFT test additionally checks **4 albedo + 6 transmission + 4 soil absorption
+values bitwise**, retaining its per-PFT absorption checks. Missing broadband
+transmission fails explicitly; spectral absence preserves the prior path. All
+**676 integrated tests**, Clippy, downstream checks, formatting and release build
+pass; independent production review finds no blocking issue. Evidence:
+`/tmp/colm-pft-transmission-order-fix/` and
+`/tmp/colm-pc-wrap-sum-evidence-1789409417/grouping_clarification.md`. Standalone
+Fortran code-generation differences are not treated as linked-original evidence.
+
+Fresh frozen initializers and unchanged original runtimes complete in:
+`/tmp/colm-pc-transmission-order.nf3tfwni/`,
+`/tmp/colm-pft-transmission-order-wmo.yibjcj1t/`, and
+`/tmp/colm-spatial-parity.Mh0VZX/rust-native-surface-lct-transmission-order-asa5zz03/`.
+These reuse independent Rust surface data, **not fresh surface generation**;
+every copied surface NetCDF SHA-256 matches the prior fixture. PC and PFT/WMO
+inventories, schemas and surface/cold/post-step restart comparisons all pass
+the unchanged combined `atol=rtol=1e-12`. Relative to the prior Rust runs, their
+cold changes are confined to common `alb/ssoi`; PFT vectors remain unchanged.
+The LCT control retains all **1,291 checked restart/history arrays unchanged**.
+
+Scientific gates remain open: PC and PFT/WMO still have four history `f_zerr`
+failures each (maxima `1.2363443602225743e-12` and `1.0231815394945443e-12`).
+LCT retains one post-step `zwt` and 108 history failures. PC-core pre-wrapper
+rounding and broader mode coverage are separate remaining work. Frozen initializer
+SHA-256: `092071bad169a8468b3fce68259ec0027a9ecb693e050019d52ffab85ba31983`.
+
 ## Study preprocessing cutover
 
 Study now defaults to the same Rust preprocessors as ordinary `colm-cli run`,

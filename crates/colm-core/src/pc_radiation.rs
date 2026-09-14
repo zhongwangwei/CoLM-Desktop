@@ -178,6 +178,7 @@ pub fn cold_start_pc_broadband_radiation_from_ground(
             shaded_absorption: weighted(|state| state.shaded_absorption),
             soil_absorption,
             snow_absorption,
+            transmission: Some(core.transmission),
             snow_age,
             thermal_gap_fraction: if leaf_stem_area <= 1.0e-6 {
                 1.0
@@ -1050,6 +1051,7 @@ mod tests {
             273.16,
         )
         .expect("valid PC canopy");
+        assert!(state.common.transmission.is_some());
         for band in 0..BANDS {
             for beam in 0..RTYPES {
                 let total = state.common.albedo[band][beam]

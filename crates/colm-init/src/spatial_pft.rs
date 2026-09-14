@@ -901,7 +901,27 @@ pub fn write_spatial_pft_cold_time_restarts(
             .iter()
             .map(|&index| (total_lai[index] + total_sai[index]) * pfts.fraction[index])
             .sum();
-        let mut radiation = aggregate_pft_radiation(&states, &fractions, leaf_stem_area)?;
+        let ground = (!config.use_hyperspectral)
+            .then(|| {
+                cold_start_ground_albedo(
+                    patch_kind[patch],
+                    SoilReflectance {
+                        saturated_visible: albedo[0][patch],
+                        dry_visible: albedo[1][patch],
+                        saturated_near_infrared: albedo[2][patch],
+                        dry_near_infrared: albedo[3][patch],
+                    },
+                    common_state.top_liquid_kg_m2[patch],
+                    top_soil_thickness_m,
+                    common_state.cosine_zenith[patch].max(0.001),
+                    0.0,
+                    0.0,
+                    common_state.ground_temperature_k[patch],
+                )
+            })
+            .transpose()?;
+        let mut radiation =
+            aggregate_pft_radiation(&states, &fractions, leaf_stem_area, ground.as_ref())?;
         if high_resolution_canopy {
             // `albland_HiRes` stores PFT absorption in landpft, not landpatch.
             radiation.sunlit_absorption = [[0.0; 2]; 2];

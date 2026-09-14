@@ -1482,18 +1482,19 @@ fn write_single_point_pft_cold_time_restarts(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
+    let broadband_ground = cold_start_ground_albedo(
+        kind,
+        surface.albedo,
+        cold_soil.liquid_water_kg_m2[0],
+        thickness[0],
+        cosine_zenith.max(0.001),
+        snow_depth_m,
+        pft_snow.patch.ground_snow_fraction,
+        cold_soil.temperature_k[0],
+    )?;
+    let common_ground = hyperspectral.is_none().then_some(&broadband_ground);
     let high_resolution_ground = hyperspectral
         .map(|_| {
-            let broadband_ground = cold_start_ground_albedo(
-                kind,
-                surface.albedo,
-                cold_soil.liquid_water_kg_m2[0],
-                thickness[0],
-                cosine_zenith.max(0.001),
-                snow_depth_m,
-                pft_snow.patch.ground_snow_fraction,
-                cold_soil.temperature_k[0],
-            )?;
             let mut ground = expand_broadband_ground_albedo(broadband_ground.ground);
             if high_resolution_soil {
                 let dry = read_single_point_hyperspectral_albedo(&run.static_run.surface)?;
@@ -1567,6 +1568,7 @@ fn write_single_point_pft_cold_time_restarts(
             &one_dimensional_radiation,
             &pft.fraction,
             total_lai + sai,
+            common_ground,
         )?,
         sunlit: pft_radiation_values(&one_dimensional_radiation, |state| state.sunlit_absorption),
         shaded: pft_radiation_values(&one_dimensional_radiation, |state| state.shaded_absorption),
@@ -1676,7 +1678,7 @@ fn write_single_point_pft_cold_time_restarts(
                 pft_radiation.diffuse_extinction[index] = state.diffuse_extinction;
             }
             pft_radiation.radiation =
-                aggregate_pft_radiation(&common, &pft.fraction, total_lai + sai)?;
+                aggregate_pft_radiation(&common, &pft.fraction, total_lai + sai, common_ground)?;
         }
     }
     let (
@@ -1782,6 +1784,7 @@ fn write_single_point_pft_cold_time_restarts(
                 &one_dimensional_radiation,
                 &pft.fraction,
                 total_lai + sai,
+                None,
             )?;
             // `albland_HiRes` retains canopy absorption in landpft; the shared
             // landpatch restart keeps these two fields at their initialized zero.
@@ -2251,6 +2254,7 @@ pub(crate) fn aggregate_pft_radiation(
     states: &[ColdStartRadiation],
     fraction: &[f64],
     leaf_stem_area: f64,
+    ground: Option<&colm_core::ColdStartGroundAlbedo>,
 ) -> Result<ColdStartRadiation> {
     ensure!(
         !states.is_empty() && states.len() == fraction.len(),
@@ -2267,7 +2271,7 @@ pub(crate) fn aggregate_pft_radiation(
             })
         })
     };
-    // Original twostream_wrap sums per-PFT ssun/ssha with ordered FMA.
+    // Original twostream_wrap uses stored-order FMA for its broadband sums.
     let absorption = |select: fn(&ColdStartRadiation) -> [[f64; 2]; 2]| {
         std::array::from_fn(|band| {
             std::array::from_fn(|radiation_type| {
@@ -2280,12 +2284,42 @@ pub(crate) fn aggregate_pft_radiation(
             })
         })
     };
+    let transmission =
+        states
+            .iter()
+            .zip(fraction)
+            .try_fold([[0.0; 3]; 2], |mut sum, (state, &weight)| {
+                let transmission = state.transmission?;
+                for band in 0..2 {
+                    for beam in 0..3 {
+                        sum[band][beam] = transmission[band][beam].mul_add(weight, sum[band][beam]);
+                    }
+                }
+                Some(sum)
+            });
+    // albland derives ssoi/ssno only after twostream_wrap has summed tran.
+    // Spectral callers retain their wavelength-resolved absorption instead.
+    let (soil_absorption, snow_absorption) = if let Some(ground) = ground {
+        ground.absorption(transmission.context(
+            "broadband PFT ground absorption requires canopy transmission for every PFT",
+        )?)
+    } else {
+        (
+            aggregate(|state| state.soil_absorption),
+            aggregate(|state| state.snow_absorption),
+        )
+    };
     Ok(ColdStartRadiation {
-        albedo: aggregate(|state| state.albedo),
+        albedo: if ground.is_some() {
+            absorption(|state| state.albedo)
+        } else {
+            aggregate(|state| state.albedo)
+        },
+        transmission,
         sunlit_absorption: absorption(|state| state.sunlit_absorption),
         shaded_absorption: absorption(|state| state.shaded_absorption),
-        soil_absorption: aggregate(|state| state.soil_absorption),
-        snow_absorption: aggregate(|state| state.snow_absorption),
+        soil_absorption,
+        snow_absorption,
         snow_age: states[0].snow_age,
         // `albland` leaves this common field untouched for leafy PFT patches;
         // only the PFT-vector thermal gap is a live initial state.

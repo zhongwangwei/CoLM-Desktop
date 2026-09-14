@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use colm_core::ColdStartGroundAlbedo;
+
 use crate::{
     crop_cold_start_from_tuning, LakeState, SinglePointSurfaceData, SnowState, SoilReflectance,
     PFT_BGC_F64_VARIABLES,
@@ -102,18 +104,44 @@ fn pft_radiation_absorption_reductions_preserve_original_sum_rounding() {
         0x3fcbec9fb9d98d2e,
     ]
     .map(f64::from_bits);
+    // Actual PC patch0 pre-wrapper constants and expected post-wrapper bits from
+    // `/tmp/colm-pc-wrap-sum-evidence-1789409417/pc_wrap_order_probe.out`.
+    let albedo = [
+        [
+            f64::from_bits(0x3fa8ed4b9e46b20c),
+            f64::from_bits(0x3fa3c3d88d97fa31),
+        ],
+        [
+            f64::from_bits(0x3fcbc8d70d980d6b),
+            f64::from_bits(0x3fc674f3a84f5e1e),
+        ],
+    ];
+    let transmission = [
+        [
+            f64::from_bits(0x3f845ac12f8e3d7f),
+            f64::from_bits(0x3fd06dc333223af1),
+            f64::from_bits(0x3f8c4b458cd12f1f),
+        ],
+        [
+            f64::from_bits(0x3fb212ed537380c0),
+            f64::from_bits(0x3fd5ca340649e7a2),
+            f64::from_bits(0x3f8c4b458cd12f1f),
+        ],
+    ];
+    let ground = pft_actual_patch0_ground();
     let states: [ColdStartRadiation; 11] = std::array::from_fn(|index| ColdStartRadiation {
-        albedo: [[0.0; 2]; 2],
+        albedo,
         sunlit_absorption: [[sunlit[index], 0.0], [0.0; 2]],
         shaded_absorption: [[0.0, shaded[index]], [0.0; 2]],
         soil_absorption: [[0.0; 2]; 2],
         snow_absorption: [[0.0; 2]; 2],
+        transmission: Some(transmission),
         snow_age: 0.0,
         thermal_gap_fraction: 0.0,
         direct_extinction: 0.0,
         diffuse_extinction: 0.0,
     });
-    let radiation = aggregate_pft_radiation(&states, &fractions, 1.0).unwrap();
+    let radiation = aggregate_pft_radiation(&states, &fractions, 1.0, Some(&ground)).unwrap();
     assert_eq!(
         radiation.sunlit_absorption[0][0].to_bits(),
         0x3fec187489879827
@@ -122,6 +150,177 @@ fn pft_radiation_absorption_reductions_preserve_original_sum_rounding() {
         radiation.shaded_absorption[0][1].to_bits(),
         0x3fe1cab1ee1be1a2
     );
+    assert_eq!(radiation.albedo[0][0].to_bits(), 0x3fa8ed4b9e46b20d);
+    assert_eq!(radiation.albedo[1][0].to_bits(), 0x3fcbc8d70d980d6c);
+    assert_eq!(radiation.albedo[0][1].to_bits(), 0x3fa3c3d88d97fa32);
+    assert_eq!(radiation.albedo[1][1].to_bits(), 0x3fc674f3a84f5e1f);
+    let transmission = radiation
+        .transmission
+        .expect("common broadband transmission");
+    assert_eq!(transmission[0][0].to_bits(), 0x3f845ac12f8e3d7f);
+    assert_eq!(transmission[1][0].to_bits(), 0x3fb212ed537380c1);
+    assert_eq!(transmission[0][1].to_bits(), 0x3fd06dc333223af1);
+    assert_eq!(transmission[1][1].to_bits(), 0x3fd5ca340649e7a1);
+    assert_eq!(transmission[0][2].to_bits(), 0x3f8c4b458cd12f1f);
+    assert_eq!(transmission[1][2].to_bits(), 0x3f8c4b458cd12f1f);
+    assert_eq!(
+        radiation.soil_absorption[0][0].to_bits(),
+        0x3f969f1f4acb17a0
+    );
+    assert_eq!(
+        radiation.soil_absorption[1][0].to_bits(),
+        0x3fb295cf18d36b79
+    );
+    assert_eq!(
+        radiation.soil_absorption[0][1].to_bits(),
+        0x3fce8eb7df1bd407
+    );
+    assert_eq!(
+        radiation.soil_absorption[1][1].to_bits(),
+        0x3fd2bd41389bb7d7
+    );
+}
+
+#[test]
+fn pft_radiation_keeps_existing_absorption_when_ground_is_absent() {
+    let fractions = [0.25, 0.75];
+    let states = [
+        ColdStartRadiation {
+            albedo: [[0.0; 2]; 2],
+            transmission: None,
+            sunlit_absorption: [[0.0; 2]; 2],
+            shaded_absorption: [[0.0; 2]; 2],
+            soil_absorption: [[0.25, 0.5], [0.75, 1.0]],
+            snow_absorption: [[1.25, 1.5], [1.75, 2.0]],
+            snow_age: 0.0,
+            thermal_gap_fraction: 0.0,
+            direct_extinction: 0.0,
+            diffuse_extinction: 0.0,
+        },
+        ColdStartRadiation {
+            albedo: [[0.0; 2]; 2],
+            transmission: None,
+            sunlit_absorption: [[0.0; 2]; 2],
+            shaded_absorption: [[0.0; 2]; 2],
+            soil_absorption: [[2.0, 2.25], [2.5, 2.75]],
+            snow_absorption: [[3.0, 3.25], [3.5, 3.75]],
+            snow_age: 0.0,
+            thermal_gap_fraction: 0.0,
+            direct_extinction: 0.0,
+            diffuse_extinction: 0.0,
+        },
+    ];
+
+    let radiation = aggregate_pft_radiation(&states, &fractions, 1.0, None).unwrap();
+
+    assert_eq!(radiation.transmission, None);
+    assert_eq!(radiation.soil_absorption[0][0], 1.5625);
+    assert_eq!(radiation.snow_absorption[1][1], 3.3125);
+}
+
+#[test]
+fn pft_radiation_rejects_ground_absorption_without_broadband_transmission() {
+    let state = ColdStartRadiation {
+        albedo: [[0.0; 2]; 2],
+        transmission: None,
+        sunlit_absorption: [[0.0; 2]; 2],
+        shaded_absorption: [[0.0; 2]; 2],
+        soil_absorption: [[0.0; 2]; 2],
+        snow_absorption: [[0.0; 2]; 2],
+        snow_age: 0.0,
+        thermal_gap_fraction: 0.0,
+        direct_extinction: 0.0,
+        diffuse_extinction: 0.0,
+    };
+    let ground = pft_transmission_order_ground();
+
+    let err = aggregate_pft_radiation(&[state], &[1.0], 1.0, Some(&ground)).unwrap_err();
+
+    assert!(
+        err.to_string().contains("transmission"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn pft_radiation_derives_soil_and_snow_absorption_after_transmission_sum() {
+    // Original MOD_Albedo.F90 PFT/PC order first sums `tran(k,j,ps:pe)` and
+    // only then derives `ssoi`/`ssno`.  These constants are from an unchanged
+    // gfortran -O2 -fdefault-real-8 probe of that expression, not from Rust.
+    let fractions = [0.0938595867742349, 0.02834747652200631];
+    let transmissions = [
+        [
+            [0.8357651039198697, 0.6112345678901234, 0.762280082457942],
+            [0.2134567890123456, 0.3134567890123456, 0.4134567890123456],
+        ],
+        [
+            [
+                0.43276706790505337,
+                0.7112345678901234,
+                0.0021060533511106927,
+            ],
+            [0.5234567890123456, 0.6234567890123456, 0.7234567890123456],
+        ],
+    ];
+    let ground = pft_transmission_order_ground();
+    let states: [ColdStartRadiation; 2] = std::array::from_fn(|index| {
+        let (soil_absorption, snow_absorption) = ground.absorption(transmissions[index]);
+        ColdStartRadiation {
+            albedo: [[0.0; 2]; 2],
+            transmission: Some(transmissions[index]),
+            sunlit_absorption: [[0.0; 2]; 2],
+            shaded_absorption: [[0.0; 2]; 2],
+            soil_absorption,
+            snow_absorption,
+            snow_age: 0.0,
+            thermal_gap_fraction: 0.0,
+            direct_extinction: 0.0,
+            diffuse_extinction: 0.0,
+        }
+    });
+
+    let radiation = aggregate_pft_radiation(&states, &fractions, 1.0, Some(&ground)).unwrap();
+
+    assert_eq!(
+        radiation.transmission.unwrap()[0][0].to_bits(),
+        0x3fb738ede41338bb
+    );
+    assert_eq!(
+        radiation.transmission.unwrap()[0][2].to_bits(),
+        0x3fb254d60504b260
+    );
+    assert_eq!(
+        radiation.soil_absorption[0][0].to_bits(),
+        0x3fb791dd4a1a105b
+    );
+    assert_eq!(
+        radiation.snow_absorption[0][0].to_bits(),
+        0x3fa07ccd2c7bb20e
+    );
+}
+
+fn pft_actual_patch0_ground() -> ColdStartGroundAlbedo {
+    ColdStartGroundAlbedo {
+        soil: [[0.07, 0.07], [0.14, 0.14]],
+        snow: [[1.0; 2]; 2],
+        ground: [[0.0; 2]; 2],
+        snow_age: 0.0,
+    }
+}
+
+fn pft_transmission_order_ground() -> ColdStartGroundAlbedo {
+    ColdStartGroundAlbedo {
+        soil: [
+            [1.0 - 0.7215400323407826, 1.0 - 0.4453871940548014],
+            [0.0, 0.0],
+        ],
+        snow: [
+            [1.0 - 0.2773934081394105, 1.0 - 0.13602162762001857],
+            [0.0, 0.0],
+        ],
+        ground: [[0.0; 2]; 2],
+        snow_age: 0.0,
+    }
 }
 
 #[test]
@@ -699,6 +898,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         shaded_absorption: [[0.0; 2]; 2],
         soil_absorption: [[0.0; 2]; 2],
         snow_absorption: [[0.0; 2]; 2],
+        transmission: None,
         snow_age: 0.0,
         thermal_gap_fraction: 0.0,
         direct_extinction: 0.0,

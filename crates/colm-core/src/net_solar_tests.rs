@@ -7,6 +7,7 @@ fn state() -> ColdStartRadiation {
         shaded_absorption: [[0.1, 0.2], [0.2, 0.4]],
         soil_absorption: [[0.3, 0.2], [0.1, 0.4]],
         snow_absorption: [[0.5, 0.4], [0.3, 0.2]],
+        transmission: None,
         snow_age: 0.0,
         thermal_gap_fraction: 0.0,
         direct_extinction: 0.0,
