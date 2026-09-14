@@ -1346,6 +1346,8 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert_eq!(run.monthly_lai_years, [2000]);
     assert!(!run.use_site_landtype);
     assert_eq!(run.site_landtype, None);
+    assert!(run.use_site_soilparameters);
+    assert_eq!(run.runoff_scheme, 3);
     assert!(!run.use_bedrock);
     assert!(run.use_site_dbedrock);
 
@@ -1370,7 +1372,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     std::fs::write(
         &namelist,
         format!(
-            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n SITE_landtype = 7\n USE_SITE_landtype = .false.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n USE_SITE_lakedepth = .false.\n USE_SITE_soilreflectance = .false.\n USE_SITE_topography = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
+            "&nl_colm\n DEF_CASE_NAME = 'native-case'\n SITE_fsitedata = '{}'\n DEF_dir_output = '{}'\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n SITE_landtype = 7\n USE_SITE_landtype = .false.\n USE_SITE_soilparameters = .false.\n USE_SITE_pctpfts = .false.\n USE_SITE_htop = .false.\n USE_SITE_lakedepth = .false.\n USE_SITE_soilreflectance = .false.\n USE_SITE_topography = .false.\n DEF_USE_BEDROCK = .true.\n USE_SITE_dbedrock = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%end_year = 2009\n /\n",
             source.display(),
             output.display(),
         ),
@@ -1383,6 +1385,8 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert!(!pft.use_site_htop);
     assert!(!pft.use_site_landtype);
     assert_eq!(pft.site_landtype, Some(7));
+    assert!(!pft.use_site_soilparameters);
+    assert_eq!(pft.runoff_scheme, 3);
     assert!(!pft.use_site_lakedepth);
     assert!(!pft.use_site_soilreflectance);
     assert!(!pft.use_site_topography);
@@ -1425,6 +1429,8 @@ fn landtype_rawdata_fallback_and_explicit_case_override() {
         use_site_htop: true,
         use_site_landtype: false,
         site_landtype: None,
+        use_site_soilparameters: true,
+        runoff_scheme: 3,
         use_site_lakedepth: true,
         use_site_soilreflectance: true,
         use_site_topography: true,
@@ -1470,6 +1476,107 @@ fn landtype_rawdata_fallback_and_explicit_case_override() {
     assert_eq!(
         super::landtype_for_mode(&surface, super::SiteMode::Igbp).unwrap(),
         Some(7)
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn soil_rawdata_fallback_replaces_disabled_site_profiles() {
+    let directory = std::env::temp_dir().join(format!("colm-srfdata-soil-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let rawdata = directory.join("rawdata");
+    let soil_dir = rawdata.join("soil");
+    std::fs::create_dir_all(&soil_dir).unwrap();
+    let surface = directory.join("surface.nc");
+    super::skeleton(&surface, -180.0, 90.0, Some(10)).unwrap();
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut site = netcdf::append(&surface).unwrap();
+        site.add_dimension("soil", 10).unwrap();
+        site.add_variable::<f32>("soil_vf_sand", &["soil"])
+            .unwrap()
+            .put_values(&[0.9; 10], ..)
+            .unwrap();
+        site.close().unwrap();
+        for (field, (_, filename, prefix)) in super::SOIL_RAWDATA_FIELDS.iter().enumerate() {
+            let mut file = netcdf::create(soil_dir.join(filename)).unwrap();
+            file.add_dimension("lat", 1).unwrap();
+            file.add_dimension("lon", 1).unwrap();
+            for layer in 1..=8 {
+                file.add_variable::<f64>(&format!("{prefix}{layer}"), &["lat", "lon"])
+                    .unwrap()
+                    .put_values(&[(field * 10 + layer) as f64 / 1000.0], ..)
+                    .unwrap();
+            }
+            file.close().unwrap();
+        }
+        let mut texture = netcdf::create(soil_dir.join("soiltexture_0cm-60cm_mean.nc")).unwrap();
+        texture.add_dimension("lat", 1).unwrap();
+        texture.add_dimension("lon", 1).unwrap();
+        texture
+            .add_variable::<i32>("soiltexture", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[9], ..)
+            .unwrap();
+        texture.close().unwrap();
+    }
+    super::materialize_single_point_soil_fields(
+        &surface,
+        &rawdata,
+        super::SinglePointMaterializeOptions {
+            urban: super::UrbanSurfaceOptions::default(),
+            lai_frequency: super::SinglePointLaiFrequency::Monthly,
+            use_site_lai: true,
+            use_site_pctpfts: true,
+            use_site_pctcrop: true,
+            use_site_htop: true,
+            use_site_landtype: true,
+            site_landtype: None,
+            use_site_soilparameters: false,
+            runoff_scheme: 3,
+            use_site_lakedepth: true,
+            use_site_soilreflectance: true,
+            use_site_topography: true,
+            use_bedrock: false,
+            use_site_dbedrock: true,
+            land_cover_year: 2008,
+            eight_day_lai_years: &[],
+            monthly_lai_years: &[],
+        },
+    )
+    .unwrap();
+    let file = netcdf::open(&surface).unwrap();
+    assert_eq!(
+        file.variable("soil_vf_quartz_mineral")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        (1..=8)
+            .map(|value| value as f64 / 1000.0)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        file.variable("soil_n_vgm")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        (231..=238)
+            .map(|value| value as f64 / 1000.0)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        file.variable("soil_vf_sand")
+            .unwrap()
+            .get_values::<f32, _>(..)
+            .unwrap(),
+        [0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.027, 0.028, 0.9, 0.9]
+    );
+    assert_eq!(
+        file.variable("soil_texture")
+            .unwrap()
+            .get_value::<i32, _>(())
+            .unwrap(),
+        9
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -1946,6 +2053,8 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             use_site_htop: true,
             use_site_landtype: true,
             site_landtype: None,
+            use_site_soilparameters: true,
+            runoff_scheme: 3,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2039,6 +2148,8 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_htop: true,
             use_site_landtype: true,
             site_landtype: None,
+            use_site_soilparameters: true,
+            runoff_scheme: 3,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2080,6 +2191,8 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_htop: false,
             use_site_landtype: true,
             site_landtype: None,
+            use_site_soilparameters: true,
+            runoff_scheme: 3,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2226,6 +2339,8 @@ fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
             use_site_htop: true,
             use_site_landtype: true,
             site_landtype: None,
+            use_site_soilparameters: true,
+            runoff_scheme: 3,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2433,6 +2548,8 @@ fn static_rawdata_fallback_replaces_disabled_site_fields() {
             use_site_htop: true,
             use_site_landtype: true,
             site_landtype: None,
+            use_site_soilparameters: true,
+            runoff_scheme: 3,
             use_site_lakedepth: false,
             use_site_soilreflectance: false,
             use_site_topography: false,

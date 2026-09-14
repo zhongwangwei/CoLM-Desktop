@@ -85,6 +85,41 @@ pub const SOIL_RUN_FIELDS: [&str; 24] = [
     "soil_n_vgm",
 ];
 
+/// Native `MOD_SingleSrfdata.F90` rawdata file and variable prefixes for every
+/// eight-layer natural-soil field.  The output field name is deliberately kept
+/// beside its input prefix so a disabled `USE_SITE_soilparameters` cannot drift
+/// into reading a similarly named but physically different product.
+const SOIL_RAWDATA_FIELDS: [(&str, &str, &str); 24] = [
+    (
+        "soil_vf_quartz_mineral",
+        "vf_quartz_mineral_s.nc",
+        "vf_quartz_mineral_s_l",
+    ),
+    ("soil_vf_gravels", "vf_gravels_s.nc", "vf_gravels_s_l"),
+    ("soil_vf_sand", "vf_sand_s.nc", "vf_sand_s_l"),
+    ("soil_vf_clay", "vf_clay_s.nc", "vf_clay_s_l"),
+    ("soil_vf_om", "vf_om_s.nc", "vf_om_s_l"),
+    ("soil_wf_gravels", "wf_gravels_s.nc", "wf_gravels_s_l"),
+    ("soil_wf_sand", "wf_sand_s.nc", "wf_sand_s_l"),
+    ("soil_wf_clay", "wf_clay_s.nc", "wf_clay_s_l"),
+    ("soil_wf_om", "wf_om_s.nc", "wf_om_s_l"),
+    ("soil_OM_density", "OM_density_s.nc", "OM_density_s_l"),
+    ("soil_BD_all", "BD_all_s.nc", "BD_all_s_l"),
+    ("soil_theta_s", "theta_s.nc", "theta_s_l"),
+    ("soil_k_s", "k_s.nc", "k_s_l"),
+    ("soil_csol", "csol.nc", "csol_l"),
+    ("soil_tksatu", "tksatu.nc", "tksatu_l"),
+    ("soil_tksatf", "tksatf.nc", "tksatf_l"),
+    ("soil_tkdry", "tkdry.nc", "tkdry_l"),
+    ("soil_k_solids", "k_solids.nc", "k_solids_l"),
+    ("soil_psi_s", "psi_s.nc", "psi_s_l"),
+    ("soil_lambda", "lambda.nc", "lambda_l"),
+    ("soil_theta_r", "VGM_theta_r.nc", "VGM_theta_r_l"),
+    ("soil_alpha_vgm", "VGM_alpha.nc", "VGM_alpha_l"),
+    ("soil_L_vgm", "VGM_L.nc", "VGM_L_l"),
+    ("soil_n_vgm", "VGM_n.nc", "VGM_n_l"),
+];
+
 const SINGLE_POINT_SOIL_FIELDS: [&str; 26] = [
     "soil_vf_quartz_mineral",
     "soil_vf_gravels",
@@ -182,6 +217,10 @@ pub struct SinglePointSurfaceRun {
     pub use_site_landtype: bool,
     /// An explicit `SITE_landtype` wins regardless of `USE_SITE_landtype`.
     pub site_landtype: Option<i32>,
+    /// `USE_SITE_soilparameters` selects supplied soil profiles over rawdata.
+    pub use_site_soilparameters: bool,
+    /// `DEF_Runoff_SCHEME=3` requires the native soil-texture point product.
+    pub runoff_scheme: i32,
     pub use_site_lakedepth: bool,
     pub use_site_soilreflectance: bool,
     pub use_site_topography: bool,
@@ -221,6 +260,8 @@ struct SinglePointMaterializeOptions<'a> {
     use_site_htop: bool,
     use_site_landtype: bool,
     site_landtype: Option<i32>,
+    use_site_soilparameters: bool,
+    runoff_scheme: i32,
     use_site_lakedepth: bool,
     use_site_soilreflectance: bool,
     use_site_topography: bool,
@@ -321,6 +362,8 @@ pub fn single_point_surface_run_from_namelist(
         value if value >= 0 => Some(value),
         _ => None,
     };
+    let use_site_soilparameters = namelist_bool(&document, "USE_SITE_soilparameters", true)?;
+    let runoff_scheme = namelist_i32(&document, "DEF_Runoff_SCHEME", 3)?;
     let use_site_lakedepth = namelist_bool(&document, "USE_SITE_lakedepth", true)?;
     let use_site_soilreflectance = namelist_bool(&document, "USE_SITE_soilreflectance", true)?;
     let use_site_topography = namelist_bool(&document, "USE_SITE_topography", true)?;
@@ -339,6 +382,8 @@ pub fn single_point_surface_run_from_namelist(
         use_site_htop,
         use_site_landtype,
         site_landtype,
+        use_site_soilparameters,
+        runoff_scheme,
         use_site_lakedepth,
         use_site_soilreflectance,
         use_site_topography,
@@ -379,6 +424,8 @@ pub fn materialize_single_point_surface_from_namelist(
             use_site_htop: run.use_site_htop,
             use_site_landtype: run.use_site_landtype,
             site_landtype: run.site_landtype,
+            use_site_soilparameters: run.use_site_soilparameters,
+            runoff_scheme: run.runoff_scheme,
             use_site_lakedepth: run.use_site_lakedepth,
             use_site_soilreflectance: run.use_site_soilreflectance,
             use_site_topography: run.use_site_topography,
@@ -1662,6 +1709,8 @@ pub fn materialize_single_point_surface(
             use_site_htop: true,
             use_site_landtype: true,
             site_landtype: None,
+            use_site_soilparameters: true,
+            runoff_scheme: 3,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -1779,6 +1828,14 @@ fn materialize_single_point_surface_impl(
         && (options.site_landtype.is_some()
             || !options.use_site_landtype
             || landtype_for_mode(source, mode)?.is_none());
+    let source_soil_missing = SOIL_RUN_FIELDS.iter().try_fold(false, |missing, &name| {
+        Ok::<_, anyhow::Error>(missing || !single_point_variable_exists(source, name)?)
+    })?;
+    let requires_soil_raw = mode != SiteMode::Urban
+        && (!options.use_site_soilparameters
+            || source_soil_missing
+            || (options.runoff_scheme == 3
+                && !single_point_variable_exists(source, "soil_texture")?));
     let requires_pft_raw = pft_mode
         && (!options.use_site_lai
             || !options.use_site_pctpfts
@@ -1800,6 +1857,7 @@ fn materialize_single_point_surface_impl(
         && !requires_monthly_raw
         && !requires_lct_height_raw
         && !requires_landtype_update
+        && !requires_soil_raw
         && !requires_pft_raw
         && !requires_bedrock_raw
         && !requires_static_raw
@@ -1834,6 +1892,13 @@ fn materialize_single_point_surface_impl(
     };
     if requires_landtype_update {
         materialize_single_point_landtype(&temporary, rawdata, mode, options)?;
+    }
+    if requires_soil_raw {
+        materialize_single_point_soil_fields(
+            &temporary,
+            rawdata.context("single-point soil fallback needs DEF_dir_rawdata/soil")?,
+            options,
+        )?;
     }
     if matches!(lai_frequency, SinglePointLaiFrequency::EightDay)
         && (requires_eight_day_raw || netcdf::open(&temporary)?.variable("LAI_8day").is_none())
@@ -2000,6 +2065,74 @@ fn materialize_single_point_landtype(
     let mut file =
         netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
     put_or_replace_values(&mut file, name, &[], &[landtype as f64], source)
+}
+
+fn materialize_single_point_soil_fields(
+    surface: &Path,
+    rawdata: &Path,
+    options: SinglePointMaterializeOptions<'_>,
+) -> Result<()> {
+    let input = netcdf::open(surface)
+        .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+    let longitude = scalar_f64(&input, "longitude")?;
+    let latitude = scalar_f64(&input, "latitude")?;
+    let replacements = SOIL_RAWDATA_FIELDS
+        .iter()
+        .filter(|(name, _, _)| !options.use_site_soilparameters || input.variable(name).is_none())
+        .map(|&(name, filename, prefix)| {
+            let path = rawdata.join("soil").join(filename);
+            rawdata_soil_layers(&path, prefix, longitude, latitude)
+                .with_context(|| format!("cannot read single-point {name}"))
+                .map(|values| (name, values))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let texture = (options.runoff_scheme == 3
+        && (!options.use_site_soilparameters || input.variable("soil_texture").is_none()))
+    .then(|| {
+        point_i32(
+            &rawdata.join("soil/soiltexture_0cm-60cm_mean.nc"),
+            "soiltexture",
+            longitude,
+            latitude,
+        )
+        .context("cannot read single-point soil texture")
+    })
+    .transpose()?;
+    drop(input);
+
+    if replacements.is_empty() && texture.is_none() {
+        return Ok(());
+    }
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::append(surface)
+        .with_context(|| format!("cannot append single-point surface {}", surface.display()))?;
+    let soil_dimension = if file
+        .dimension("soil")
+        .is_some_and(|dimension| dimension.len() == 8)
+    {
+        "soil"
+    } else {
+        "single_point_soil"
+    };
+    for (name, values) in replacements {
+        put_or_replace_soil_layers(
+            &mut file,
+            name,
+            &values,
+            soil_dimension,
+            "rawdata soil raster as MOD_SingleSrfdata.F90 does",
+        )?;
+    }
+    if let Some(value) = texture {
+        put_or_replace_values(
+            &mut file,
+            "soil_texture",
+            &[],
+            &[value],
+            "rawdata soil/soiltexture_0cm-60cm_mean.nc",
+        )?;
+    }
+    Ok(())
 }
 
 fn materialize_single_point_static_fields(
@@ -4071,13 +4204,22 @@ fn fill_clay_and_om_without_a_profile(
 /// 按点逐层抽取。八层缺一层就整体放弃——混一层栅格一层假设不是三级回落
 /// 的本意。文件名与变量名都照抄 `MOD_SingleSrfdata.F90:801-882`。
 fn raster_layers(rawdata: &Path, prefix: &str, lon: f64, lat: f64) -> Option<[f64; 8]> {
-    let file = rawdata.join("soil").join(format!("{prefix}_s.nc"));
+    rawdata_soil_layers(
+        &rawdata.join("soil").join(format!("{prefix}_s.nc")),
+        &format!("{prefix}_s_l"),
+        lon,
+        lat,
+    )
+    .ok()
+}
+
+fn rawdata_soil_layers(file: &Path, prefix: &str, lon: f64, lat: f64) -> Result<[f64; 8]> {
     let mut out = [0.0; 8];
     for (i, slot) in out.iter_mut().enumerate() {
-        let var = format!("{prefix}_s_l{}", i + 1);
-        *slot = point_f64(&file, &var, lon, lat).ok()?;
+        let var = format!("{prefix}{}", i + 1);
+        *slot = point_f64(file, &var, lon, lat)?;
     }
-    Some(out)
+    Ok(out)
 }
 
 fn ensure_dimension(f: &mut netcdf::FileMut, name: &str, len: usize) -> Result<()> {
@@ -4175,6 +4317,38 @@ fn put_or_replace_values<T: netcdf::NcTypeDescriptor>(
         .with_context(|| format!("variable {name} disappeared after update"))?
         .put_values(values, netcdf::Extents::All)?;
     Ok(())
+}
+
+fn put_or_replace_soil_layers(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    values: &[f64; 8],
+    dimension: &str,
+    source: &str,
+) -> Result<()> {
+    let Some(variable) = file.variable(name) else {
+        ensure_dimension_with_len(file, dimension, 8)?;
+        return put_values(file, name, &[dimension], values, source);
+    };
+    ensure!(
+        variable.len() >= 8,
+        "{name} has fewer than CoLM's eight soil layers"
+    );
+    match variable.vartype() {
+        NcVariableType::Float(FloatType::F64) => {
+            let mut existing = variable.get_values::<f64, _>(..)?;
+            existing[..8].copy_from_slice(values);
+            drop(variable);
+            put_or_replace_values(file, name, &[dimension], &existing, source)
+        }
+        NcVariableType::Float(FloatType::F32) => {
+            let mut existing = variable.get_values::<f32, _>(..)?;
+            existing[..8].copy_from_slice(&values.map(|value| value as f32));
+            drop(variable);
+            put_or_replace_values(file, name, &[dimension], &existing, source)
+        }
+        kind => bail!("{name} must be floating-point, got {kind:?}"),
+    }
 }
 
 fn put_scalar(f: &mut netcdf::FileMut, name: &str, value: f64, source: &str) -> Result<()> {
