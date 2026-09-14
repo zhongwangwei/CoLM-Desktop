@@ -250,6 +250,7 @@ fn land_only_filters_pixels_and_empty_elements_before_lct_or_pft_partition() {
                     raw,
                     false,
                     land_only,
+                    PftPatchMode::Merged,
                 )
             } else {
                 build_lct_land_patches_from_raster(
@@ -462,11 +463,61 @@ fn pft_patch_builder_merges_only_igbp_soil_ground() {
         Grid { nlon: 4, nlat: 2 },
         false,
         false,
+        PftPatchMode::Merged,
     )
     .unwrap();
 
     assert_eq!(patches.element_ids, vec![1, 1, 2, 2, 2]);
     assert_eq!(patches.set_type, vec![1, 13, 1, 11, 15]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn pft_patch_modes_match_original_merged_separate_and_fast_pc() {
+    let directory = temporary("pft-landtype-modes");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("landtype.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_landtype(&raster);
+    let raw = Grid { nlon: 4, nlat: 2 };
+    let base = build_spatial_topology(&mesh_file, SpatialInputKind::GridBased, raw).unwrap();
+
+    let (_, merged) = build_pft_land_patches_from_raster(
+        base.clone(),
+        &raster,
+        "landtype",
+        raw,
+        false,
+        false,
+        PftPatchMode::Merged,
+    )
+    .unwrap();
+    assert_eq!(merged.set_type, vec![1, 13, 1, 11, 15]);
+
+    let (_, separate) = build_pft_land_patches_from_raster(
+        base.clone(),
+        &raster,
+        "landtype",
+        raw,
+        false,
+        false,
+        PftPatchMode::Separate,
+    )
+    .unwrap();
+    assert_eq!(separate.set_type, vec![8, 9, 12, 13, 10, 11, 14, 15]);
+
+    let (_, fast_pc) = build_pft_land_patches_from_raster(
+        base,
+        &raster,
+        "landtype",
+        raw,
+        false,
+        false,
+        PftPatchMode::FastPc,
+    )
+    .unwrap();
+    assert_eq!(fast_pc.set_type, vec![1, 12, 13, 1, 11, 12, 15]);
 
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -1713,24 +1764,31 @@ fn catchment_pft_partition_keeps_natural_patches_inside_each_hru() {
         file.add_dimension("lon", 4).unwrap();
         file.add_variable::<i32>("landtype", &["lat", "lon"])
             .unwrap()
-            .put_values(&[8, 9, 11, 0, 8, 9, 12, 17], (.., ..))
+            .put_values(&[8, 14, 11, 0, 8, 14, 12, 17], (.., ..))
             .unwrap();
         file.close().unwrap();
     }
-    let catchment =
-        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
-    let (_, patches) = build_catchment_pft_land_patches_from_raster(
-        catchment,
-        &landtype,
-        "landtype",
-        Grid { nlon: 4, nlat: 2 },
-        false,
-    )
-    .unwrap();
-    assert_eq!(patches.element_ids, vec![1, 1, 2]);
-    assert_eq!(patches.pixel_start, vec![1, 3, 1]);
-    assert_eq!(patches.pixel_end, vec![2, 4, 3]);
-    assert_eq!(patches.set_type, vec![1, 1, 17]);
+    for (mode, expected) in [
+        (PftPatchMode::Merged, [1, 1, 17]),
+        (PftPatchMode::Separate, [8, 14, 17]),
+        (PftPatchMode::FastPc, [1, 12, 17]),
+    ] {
+        let catchment =
+            build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+        let (_, patches) = build_catchment_pft_land_patches_from_raster(
+            catchment,
+            &landtype,
+            "landtype",
+            Grid { nlon: 4, nlat: 2 },
+            false,
+            mode,
+        )
+        .unwrap();
+        assert_eq!(patches.element_ids, vec![1, 1, 2]);
+        assert_eq!(patches.pixel_start, vec![1, 3, 1]);
+        assert_eq!(patches.pixel_end, vec![2, 4, 3]);
+        assert_eq!(patches.set_type, expected);
+    }
 
     std::fs::remove_dir_all(directory).unwrap();
 }

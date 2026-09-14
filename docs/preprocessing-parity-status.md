@@ -213,15 +213,15 @@ call it. This is not a real catchment all-field parity claim.
 
 ## Remaining completion gates
 
-1. Resolve the captured soil-fit acceptance and exact block-ownership differences.
-   Both independent full LCT pipelines now run, but field parity is not established.
+1. Resolve the captured soil-fit acceptance and numerical differences. Block
+   ownership is repaired below, but field parity is not established.
    Validate actual PC/PFT configurations and their scientific budgets separately.
 2. Finish the remaining executable-control audit. The 15 `RestartTuning`
    namelist fields are now forwarded through single-point, spatial LCT/urban,
    PFT/PC, and explicit spatial PFT entry points. `tcrit` remains the upstream
    fixed 2.5. Other tuning/parameterization controls still need individual checks.
 3. Trace the remaining surface controls (`DEF_Output_2mWMO`,
-   `DEF_SOLO_PFT`, `DEF_FAST_PC`, `DEF_file_mesh_filter`) through topology and
+   `DEF_file_mesh_filter`) through topology and
    executable adapters. Identifier absence is a triage signal, not a completed
    behavioral audit. Verify their enabled and disabled branches. ZIP aggregation
    still needs PFT/PC-specific, crop, urban, and regular-coordinate adapter audits;
@@ -288,3 +288,93 @@ This guard does not serialize model Rayon kernels or claim to repair the
 underlying platform's concurrent HDF5/file-handle behavior. Logs use
 `/tmp/colm-geometry-*`; case comparisons and binary hashes are inside
 `rust-full-geometry/`.
+
+## Soil callback arithmetic follow-up
+
+`rust-full-soil-arithmetic/` retains the next complete independent Rust surface,
+initial and unchanged-original-runtime run. Both soil callbacks now accumulate
+retention and conductivity separately before adding them, as the original two
+`SUM` expressions do. Their Jacobians retain the original derivative expression
+order rather than algebraic regrouping. Area means use an explicit fused weighted
+accumulation, matching a separately compiled production-Fortran regression.
+Source-curve precomputation, f64, Rayon, fit limits and tolerances are unchanged.
+
+Synthetic original-callback goldens and full finite-difference Jacobian checks
+pass. This establishes the repaired arithmetic contracts, **not better parity for
+every ill-conditioned fit**. In the complete case:
+
+- all three stages exit zero, taking **141.81 / 2.62 / 6.55 seconds**; these are
+  observed warm-run times, not a controlled speedup measurement;
+- all 1,479 filenames, dimensions, variables and variable attributes still agree
+  (the global `create_time` exception remains), as do the pixel axes and all
+  15,922,348 memberships;
+- 242 patch fields have no missing/extra fields or finite-mask mismatches;
+  **48 fitted fields still fail** the existing 1e-12 absolute/relative gate;
+  failing scalar comparisons decrease from 79,929 to 75,548, but the maximum
+  error grows, so this is not a scientific acceptance pass;
+- element 207867/class 2/layer 1 conductivity changes from 44.1690 to 42.1217
+  against original 40.0203. Conversely, element 207390/class 14/layer 5 again
+  retains its initial aggregate 14.4847 against original 8.49433. An exact-input
+  probe returns success without moving from that initial point; unchanged output
+  alone must not be described as a rejected fit. This reverses the preceding
+  geometry-only run's matching result and remains an explicit blocker;
+- maximum surface differences are `k_s_l5 = 5.99040` and `psi_s_l8 = 4.05369`;
+  the unchanged two-step runtime's maximum `gs0sun` difference remains 3.65504.
+
+The isolated solver probe also confirms that the original production
+`-fdefault-real-8` flag leaves `D` literals at kind 16, unlike an additional
+`-fdefault-double-8` build. Those two unchanged-source builds produce different
+500-evaluation VGM trajectories on identical explicit inputs. This is diagnostic
+evidence of reference arithmetic sensitivity, **not permission to substitute a
+different reference build** or to relax scientific acceptance.
+
+A focused instrumented copy of the original subsequently reproduced both target
+patches' full-case outputs bit for bit. Its pre-fit dumps confirm that the
+original source values, areas and ordering exactly match the two captured JSON
+fixtures. Weighted-mean FMA reproduces their initial aggregates. An intermediate
+standalone area reconstruction differed in 70/358 areas and must not replace
+these authoritative dumps. Source-curve retention also needs FMA: the original
+array expression contracts where a scalar probe does not. The added observation
+golden fails before this correction and passes afterward. On the two exact-input
+Rust probes it eliminates all 1,973 differing retention observations; logarithmic
+conductivity observations already match. The 358-cell fit moves to 40.15095,
+still not original 40.02025, and the 44-cell fit remains at its initial aggregate.
+Thus exact observations do not close the remaining solver/callback-arithmetic
+gate. Dumps/probes: `/tmp/colm-original-fit-input-probe/`. The pristine original
+repository and reference executables were not modified.
+
+The final `rust-full-soil-observations/` full-case run includes the observation
+FMA correction: surface / initial / unchanged original runtime all exit zero in
+**98.51 / 2.44 / 6.86 seconds**. All 957 element owners, pixel axes, memberships
+and 1,479 file schemas still agree (except global `create_time`). The 242 fields
+still include **48 failing fitted fields**, now 75,350 scalar comparisons beyond
+the gate; maxima remain `k_s_l5 = 5.99040`, `psi_s_l8 = 4.05369`, and post-two-step
+`gs0sun = 3.65504`. Neither the lower elapsed time nor fewer mismatches establishes
+scientific parity. No current run remains active.
+
+Fresh checks: 210 surface library + 31 binary tests, 86 initial library + 12
+binary tests, five raster and six site checks, ten opt-in library Fortran checks,
+one native binary and all five native pipeline checks pass. Both-crate all-target
+Clippy with warnings denied, downstream CLI/kernel checks and changed-file
+formatting pass. Logs: `/tmp/colm-fit-arithmetic/final/`; full-case comparisons
+and executable hashes are in `rust-full-soil-observations/`.
+
+## PFT/PC patch-mode controls
+
+The spatial namelist adapter previously ignored `DEF_SOLO_PFT` and
+`DEF_FAST_PC`, always choosing merged non-solo PFT patches. It now follows the
+original mode coercions: PFT defaults to merged and solo PFT preserves IGBP
+classes; PC defaults to fast-PC (natural classes merge to 1 except 12/14 become
+cropland 12), while non-fast PC preserves classes. The direct `spatial-pft`
+command exposes `--patch-mode merged|separate|fast-pc`, defaulting to merged.
+Both grid/unstructured and catchment builders receive the mode; HRU boundaries
+and catchment water normalization are retained.
+
+`landpft` now accepts every natural IGBP soil-ground class, not only class 1.
+Crop refinement still splits natural/crop shares only for class 1, then assigns
+CFTs to **all** class-12 patches, including pre-existing fast-PC cropland. Tests
+cover both namelist defaults/coercions, invalid CLI modes, all 17 IGBP parent
+classes, all three partition modes and the two crop-splitting filters. An
+independent source review found no blocking issue in this bounded change.
+Spatial PFT/PC LULCC is still explicitly unsupported; these targeted tests do
+not establish a complete real-data PFT/PC scientific comparison.

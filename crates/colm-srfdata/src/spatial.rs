@@ -15,9 +15,10 @@ use netcdf::{
 };
 
 use crate::{
-    mesh::inspect_spatial_input, FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh,
-    FlatPatches, Grid, UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES,
-    URBAN_SOLAR_BANDS,
+    mesh::inspect_spatial_input,
+    pft::{is_igbp_soil_ground, PftPatchMode, IGBP_CROPLAND},
+    FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh, FlatPatches, Grid,
+    UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS,
 };
 
 const MAX_SERIAL_RAW_PIXELS: usize = 25_000_000;
@@ -470,19 +471,20 @@ pub fn build_catchment_lct_land_patches_from_raster(
     Ok((catchment, patches))
 }
 
-/// Build CATCHMENT IGBP patches for the PFT hierarchy.
+/// Build CATCHMENT IGBP patches for the PFT/PC hierarchy.
 ///
-/// The LCT preprocessing remains per-HRU before IGBP soil-ground classes are
-/// merged, so a natural PFT patch can never span two HRUs.
+/// The LCT preprocessing remains per-HRU before optional PFT/PC class merging,
+/// so a natural PFT patch can never span two HRUs.
 pub fn build_catchment_pft_land_patches_from_raster(
     mut catchment: CatchmentSpatialTopology,
     raster: impl AsRef<Path>,
     variable: &str,
     raw_grid: Grid,
     dominant_type: bool,
+    mode: PftPatchMode,
 ) -> Result<(CatchmentSpatialTopology, FlatLandPatches)> {
     let mut types = read_catchment_land_types(&catchment, raster.as_ref(), variable, raw_grid, 17)?;
-    merge_igbp_soil_ground(&mut types)?;
+    apply_pft_patch_mode(&mut types, mode)?;
     let (mesh, patches) = catchment.topology.mesh.into_land_patches_by_sets(
         &types,
         &catchment.land_hrus,
@@ -535,11 +537,11 @@ fn read_catchment_land_types(
     Ok(types)
 }
 
-/// Build the IGBP patch partition used by non-solo PFT runs.
+/// Build the IGBP patch partition used by PFT/PC runs.
 ///
-/// MOD_LandPatch merges every IGBP soil-ground class into class one before
-/// it partitions the mesh for PFTs. Urban, wetland, ice, lake, and ocean
-/// remain distinct so their downstream non-PFT initialization stays intact.
+/// The mode reproduces MOD_LandPatch: merged non-solo PFT, preserved solo PFT,
+/// or fast-PC where cropland 12/14 stay CROPLAND and other soil-ground classes
+/// merge to class one. Non-soil classes remain distinct.
 pub fn build_pft_land_patches_from_raster(
     mut topology: SpatialTopology,
     raster: impl AsRef<Path>,
@@ -547,6 +549,7 @@ pub fn build_pft_land_patches_from_raster(
     raw_grid: Grid,
     dominant_type: bool,
     land_only: bool,
+    mode: PftPatchMode,
 ) -> Result<(SpatialTopology, FlatLandPatches)> {
     let mut types = read_mesh_raster_i32(
         raster.as_ref(),
@@ -562,25 +565,24 @@ pub fn build_pft_land_patches_from_raster(
             "DEF_LANDONLY removed every mesh pixel"
         );
     }
-    merge_igbp_soil_ground(&mut types)?;
+    apply_pft_patch_mode(&mut types, mode)?;
     let (mesh, patches) = topology.mesh.into_land_patches(&types, dominant_type)?;
     topology.land_elements = mesh.land_elements();
     topology.mesh = mesh;
     Ok((topology, patches))
 }
 
-fn merge_igbp_soil_ground(types: &mut [i32]) -> Result<()> {
-    const IGBP_PATCH_TYPES: [i32; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+fn apply_pft_patch_mode(types: &mut [i32], mode: PftPatchMode) -> Result<()> {
     for kind in types {
-        let index =
-            usize::try_from(*kind).with_context(|| format!("IGBP land type {kind} is negative"))?;
-        ensure!(
-            index < IGBP_PATCH_TYPES.len(),
-            "IGBP land type {kind} is outside 0..=17"
-        );
-        if index > 0 && IGBP_PATCH_TYPES[index] == 0 {
-            *kind = 1;
+        if !is_igbp_soil_ground(*kind)? {
+            continue;
         }
+        *kind = match mode {
+            PftPatchMode::Separate => *kind,
+            PftPatchMode::Merged => 1,
+            PftPatchMode::FastPc if *kind == IGBP_CROPLAND || *kind == 14 => IGBP_CROPLAND,
+            PftPatchMode::FastPc => 1,
+        };
     }
     Ok(())
 }

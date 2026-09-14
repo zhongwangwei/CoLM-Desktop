@@ -125,6 +125,95 @@ fn non_crop_pft_topology_retains_modis_class_sixteen() {
 }
 
 #[test]
+fn landpft_treats_all_igbp_soil_ground_classes_as_natural() {
+    let natural = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16];
+    for land_type in 1..=17 {
+        let layout = FlatPatches::new(vec![land_type], vec![0, 1], vec![0], vec![None]).unwrap();
+        let land_patches = crate::topology::FlatLandPatches {
+            element_ids: vec![8],
+            pixel_start: vec![1],
+            pixel_end: vec![1],
+            set_type: vec![land_type],
+            element_index: vec![1],
+        };
+        let topology =
+            build_pft_topology(&land_patches, &layout, 3, 2, &[20.0, 80.0, 0.0], &[1.0]).unwrap();
+
+        if natural.contains(&land_type) {
+            assert_eq!(topology.patch_offsets, [0, 2], "IGBP {land_type}");
+            assert_eq!(topology.pft_classes, [0, 1], "IGBP {land_type}");
+            assert_eq!(
+                topology.patch_kind,
+                [PftPatchKind::Natural],
+                "IGBP {land_type}"
+            );
+        } else {
+            assert_eq!(topology.patch_offsets, [0, 0], "IGBP {land_type}");
+            assert_eq!(topology.pft_classes, [], "IGBP {land_type}");
+            assert_eq!(
+                topology.patch_kind,
+                [PftPatchKind::Other],
+                "IGBP {land_type}"
+            );
+        }
+    }
+}
+
+#[test]
+fn crop_land_patches_split_only_shared_filter_class_one() {
+    let layout = FlatPatches::new(
+        vec![1, 12, 14],
+        vec![0, 1, 2, 3],
+        vec![0, 1, 2],
+        vec![None; 3],
+    )
+    .unwrap();
+    let land_patches = crate::topology::FlatLandPatches {
+        element_ids: vec![8, 8, 8],
+        pixel_start: vec![1, 2, 3],
+        pixel_end: vec![1, 2, 3],
+        set_type: vec![1, 12, 14],
+        element_index: vec![1, 1, 1],
+    };
+    let crop = build_crop_land_patches(
+        &land_patches,
+        &layout,
+        &[50.0, 50.0, 50.0],
+        1,
+        &[100.0, 100.0, 100.0],
+        &[1.0, 1.0, 1.0],
+    )
+    .unwrap();
+
+    assert_eq!(crop.land_patches.set_type, vec![1, 12, 12, 14]);
+    assert_eq!(crop.crop_class, vec![None, Some(1), Some(1), None]);
+    assert_eq!(crop.pctshared, vec![0.5, 0.5, 1.0, 1.0]);
+
+    let mut raw = vec![0.0; 16 * 3];
+    raw[0] = 100.0;
+    raw[2] = 100.0;
+    let pfts = build_crop_pft_topology(
+        &crop.land_patches,
+        &crop.layout,
+        &crop.crop_class,
+        16,
+        16,
+        &raw,
+        &[1.0, 1.0, 1.0],
+    )
+    .unwrap();
+    assert_eq!(
+        pfts.patch_kind,
+        [
+            PftPatchKind::Natural,
+            PftPatchKind::Crop,
+            PftPatchKind::Crop,
+            PftPatchKind::Natural
+        ]
+    );
+}
+
+#[test]
 fn crop_topology_splits_shared_patches_and_preserves_cft_ownership() {
     let layout =
         FlatPatches::new(vec![1, 17], vec![0, 2, 3], vec![0, 1, 2], vec![None; 2]).unwrap();

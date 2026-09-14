@@ -36,8 +36,8 @@ use colm_srfdata::{
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
     write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
     FlatLandElements, FlatLandPatches, FlatMesh, LczUrbanRawFields, NcarUrbanProperties,
-    NcarUrbanRawFields, PftFractionInput, PftIndexInput, PixelAxes, SiteMode, SpatialBounds,
-    SpatialInputKind, SpatialTopology, TiledRasterFiles, TopographicWetness,
+    NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode, PixelAxes, SiteMode,
+    SpatialBounds, SpatialInputKind, SpatialTopology, TiledRasterFiles, TopographicWetness,
     UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
@@ -169,6 +169,7 @@ struct SpatialPftArgs {
     land_only: bool,
     zip_aggregation: bool,
     dominant: bool,
+    patch_mode: PftPatchMode,
     plant_tiles: PathBuf,
     crop_surface: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
@@ -202,6 +203,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 "landtype",
                 COLM_500M,
                 args.dominant,
+                args.patch_mode,
             )?;
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
@@ -216,6 +218,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 COLM_500M,
                 args.dominant,
                 args.land_only,
+                args.patch_mode,
             )?;
             (topology, patches, None)
         }
@@ -3305,6 +3308,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut land_only = true;
     let mut zip_aggregation = true;
     let mut dominant = false;
+    let mut patch_mode = PftPatchMode::Merged;
     let mut plant_tiles = None;
     let mut crop_surface = None;
     let mut monthly_vegetation_years = Vec::new();
@@ -3326,6 +3330,15 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut index = 5;
     while index < args.len() {
         match args[index].as_str() {
+            "--patch-mode" => {
+                patch_mode = match args.get(index + 1).map(String::as_str) {
+                    Some("merged") => PftPatchMode::Merged,
+                    Some("separate") => PftPatchMode::Separate,
+                    Some("fast-pc") => PftPatchMode::FastPc,
+                    _ => bail!("--patch-mode needs merged, separate, or fast-pc"),
+                };
+                index += 2;
+            }
             "--blocks" => {
                 let nx = args
                     .get(index + 1)
@@ -3533,6 +3546,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         land_only,
         zip_aggregation,
         dominant,
+        patch_mode,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         crop_surface,
         monthly_vegetation_years,
@@ -4046,6 +4060,18 @@ fn spatial_case_command(
             args.extend(blocks.iter().cloned());
         }
     } else {
+        // Match MOD_Namelist's mode coercions before MOD_LandPatch merging.
+        let patch_mode = if pft {
+            if case_bool(&document, "DEF_SOLO_PFT", false)? {
+                "separate"
+            } else {
+                "merged"
+            }
+        } else if case_bool(&document, "DEF_FAST_PC", true)? {
+            "fast-pc"
+        } else {
+            "separate"
+        };
         let landtype = rawdata.join(format!("landtypes/landtype-igbp-modis-{year:04}.nc"));
         required_files.push(landtype.clone());
         required_directories.push(plant_tiles.clone());
@@ -4055,6 +4081,8 @@ fn spatial_case_command(
             landtype.display().to_string(),
             landdata.display().to_string(),
             year.to_string(),
+            "--patch-mode".to_owned(),
+            patch_mode.to_owned(),
             "--plant-tiles".to_owned(),
             plant_tiles.display().to_string(),
             "--lake-depth".to_owned(),
@@ -4502,7 +4530,7 @@ fn usage() -> &'static str {
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--patch-mode merged|separate|fast-pc] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -4979,6 +5007,55 @@ mod tests {
         args.windows(2)
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn spatial_case_preserves_pft_and_pc_patch_modes() {
+        for (mode, switches, expected) in [
+            ("PFT", "", "merged"),
+            ("PFT", "DEF_SOLO_PFT=.true.", "separate"),
+            ("PFT", "DEF_SOLO_PFT=.false.\nDEF_FAST_PC=.true.", "merged"),
+            ("PC", "", "fast-pc"),
+            ("PC", "DEF_FAST_PC=.true.\nDEF_SOLO_PFT=.true.", "fast-pc"),
+            ("PC", "DEF_FAST_PC=.false.", "separate"),
+        ] {
+            let (root, namelist) = case_namelist(
+                "patch-mode",
+                &format!(
+                    "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\n\
+                     DEF_dir_rawdata='$ROOT/raw'\nDEF_file_mesh='$ROOT/mesh.nc'\n\
+                     DEF_USE_LCT=.false.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\n{switches}\n/\n",
+                    mode == "PFT",
+                    mode == "PC"
+                ),
+            );
+            let command = spatial_case_command(&namelist, None, false, None, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                option_value(&command.args, "--patch-mode"),
+                Some(expected),
+                "{mode}: {switches}"
+            );
+            let parsed = parse_spatial_pft(&command.args).unwrap();
+            assert_eq!(
+                parsed.patch_mode,
+                match expected {
+                    "merged" => PftPatchMode::Merged,
+                    "separate" => PftPatchMode::Separate,
+                    _ => PftPatchMode::FastPc,
+                }
+            );
+            let mut invalid = command.args.clone();
+            let value = invalid
+                .iter()
+                .position(|arg| arg == "--patch-mode")
+                .unwrap()
+                + 1;
+            invalid[value] = "invalid".into();
+            assert!(parse_spatial_pft(&invalid).is_err());
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

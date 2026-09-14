@@ -7,6 +7,26 @@ use crate::{surface::FlatPatches, topology::FlatLandPatches};
 /// CoLM IGBP's crop land-cover type (`CROPLAND`).
 pub const IGBP_CROPLAND: i32 = 12;
 
+/// Land-patch partition mode for IGBP PFT/PC preprocessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PftPatchMode {
+    Merged,
+    Separate,
+    FastPc,
+}
+
+/// True for IGBP classes with soil-ground data (`patchtypes(class) == 0`).
+pub(crate) fn is_igbp_soil_ground(kind: i32) -> Result<bool> {
+    const IGBP_PATCH_TYPES: [i32; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+    let index =
+        usize::try_from(kind).with_context(|| format!("IGBP land type {kind} is negative"))?;
+    ensure!(
+        index < IGBP_PATCH_TYPES.len(),
+        "IGBP land type {kind} is outside 0..=17"
+    );
+    Ok(index > 0 && IGBP_PATCH_TYPES[index] == 0)
+}
+
 /// A crop-refined `landpatch` pixelset and its shared-area metadata.
 ///
 /// This is the sequential `MOD_LandCrop::landcrop_build` partition: natural
@@ -218,8 +238,8 @@ pub fn build_crop_pft_topology(
 
 /// Build CoLM's non-CROP `landpft` partition from class-major PFT fractions.
 ///
-/// PFT land patches are created only for the merged natural land-cover type
-/// (`settyp == 1`).  The weighted positive-class test and bare-soil fallback
+/// PFT land patches are created for every natural IGBP soil-ground class
+/// (`patchtypes(settyp) == 0`).  The weighted positive-class test and bare-soil fallback
 /// are the `MOD_LandPFT::landpft_build` rules. `pft_class_count` permits
 /// CoLM's 16-class MODIS source to retain only its 15 natural PFT types; the
 /// actual percentages remain the responsibility of [`aggregate_pft_fractions`].
@@ -292,10 +312,13 @@ fn build_pft_topology_inner(
             patches.wmo_source_for(patch).is_none(),
             "landpft WMO sharing needs the upstream land2mWMO topology"
         );
-        let kind = match land_patches.set_type[patch] {
-            1 => PftPatchKind::Natural,
-            IGBP_CROPLAND if crop_class.is_some() => PftPatchKind::Crop,
-            _ => PftPatchKind::Other,
+        let land_type = land_patches.set_type[patch];
+        let kind = if crop_class.is_some() && land_type == IGBP_CROPLAND {
+            PftPatchKind::Crop
+        } else if is_igbp_soil_ground(land_type)? {
+            PftPatchKind::Natural
+        } else {
+            PftPatchKind::Other
         };
         patch_kind.push(kind);
         if kind == PftPatchKind::Natural {

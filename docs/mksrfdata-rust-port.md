@@ -120,3 +120,8 @@ Fortran `areaquad` arithmetic. Source-grid votes are preserved before land-only
 filtering instead of recomputed from retained fine-pixel centers. This removes
 all observed non-soil-fit differences above the recorded 1e-12 threshold, but
 48 fitted soil fields still fail it; see the updated audit before claiming parity.
+
+Spatial PFT/PC patch modes now honor `DEF_SOLO_PFT` and `DEF_FAST_PC`, including
+fast-PC cropland preservation and natural PFT parents beyond IGBP class 1.
+Direct commands select `--patch-mode merged|separate|fast-pc` (default merged).
+This does not remove the explicit spatial PFT/PC LULCC limitation.
