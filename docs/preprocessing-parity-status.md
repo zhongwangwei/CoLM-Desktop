@@ -6,7 +6,43 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
-## PFT ordered reductions: restart gate improves, ZIP input order remains open
+## Latest PFT/PC surface result: separate topology and ZIP aggregation inputs
+
+PFT topology and crop shares retain original mesh order (`zip=false`). The
+subsequent percentages, height and monthly LAI/SAI reducers now consume the
+existing `gather_patch_raster` mesh/layout/areas under `USE_zip_for_aggregation`.
+This also covers the LULCC LAI-only branch. Stored topology is unchanged; the
+uncompressed path reuses its original percentage buffer. No new algorithm,
+dependency or parallel reduction was introduced.
+
+Fresh frozen Rust surface/initializer and unchanged original-runtime pipelines:
+
+| Fixture | Surface | Cold/post restart | Remaining history failure |
+| --- | --- | --- | --- |
+| PC | **287/287 floating fields bitwise** | All pass | `f_zerr`: 4 values, max `1.2363443602225743e-12` |
+| PFT + WMO | 286/287 bitwise; only four `patchfrac_elm` values differ within tolerance | All pass | `f_zerr`: 4 values, max `1.0231815394945443e-12` |
+
+The complete inventories/schemas agree: 284 files / 695 variable instances in
+PC and 284 / 696 in PFT/WMO. Both explicitly match the original vegetation-snow
+control. Tolerances remain combined `atol=rtol=1e-12`; neither history residual
+is rounded away or accepted. Original source and outputs remain untouched.
+Artifacts: `/tmp/colm-pc-pft-zip-full.vdgol2g1/`,
+`/tmp/colm-pft-zip-wmo.pf5wozbx/`. Their `verified-summary.json` files assert
+stage statuses, schemas and comparisons; bitwise audits are additional diagnostics.
+Frozen surface SHA-256: `ac86b8b2985788a84bb63ca011abab19fcbae11408524b276979ebf029c7262a`.
+
+Fresh historical LCT/PFT/PC/WMO/urban synthetic surface tests also pass all
+257 files / 616 variable instances in `/tmp/colm-pft-zip-bounded.x53vq_xg/`.
+These bounded tests do not replace the still-open all-mode scientific gate.
+The caller wiring and new sparse-NetCDF integration test have independent
+review. The same test fails with the old caller at ZIP percentages, then passes
+with this repair; it checks both ZIP modes, unchanged topology shares, height
+and LAI/SAI output families. All 671 integrated tests, Clippy, downstream checks
+and scoped formatting pass. Logs are in `/tmp/colm-pft-zip-fix/validation/`.
+The initial validation-script test-target typo is retained separately; the
+correct real-data targets and remaining reference/native checks all pass.
+
+## Previous PFT ordered-reduction result: ZIP input order not yet repaired
 
 The shared PFT reducers now retain ten original compiled weighted-SUM operations,
 including `(height * percent) * area` grouping and the existing two-stage

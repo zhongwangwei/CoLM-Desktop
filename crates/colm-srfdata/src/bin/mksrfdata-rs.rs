@@ -389,6 +389,28 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         .map(|crop| crop_pft_pctshared(&pfts, &crop.pctshared))
         .transpose()?;
     let pft_shares = pft_pctshared.as_deref().unwrap_or(&pfts.pctshared);
+    // MOD_LandPFT explicitly uses zip=false; later PFT aggregators use the
+    // configured source-cell ZIP order without changing stored topology.
+    let (mesh, layout, area) = gather_patch_raster(
+        &topology.mesh,
+        &topology.pixel,
+        patches,
+        COLM_500M,
+        args.zip_aggregation,
+    )?;
+    let raw_percent = if args.zip_aggregation {
+        read_mesh_tiled_raster_pft_f64(
+            &args.plant_tiles,
+            &format!("MOD{:04}", args.year),
+            "PCT_PFT",
+            MODIS_PFT_CLASSES,
+            &mesh,
+            &topology.pixel,
+            COLM_500M,
+        )?
+    } else {
+        raw_percent
+    };
     if args.lulcc_lai_only {
         if let Some(pctshared) = crop.as_ref().map(|crop| crop.pctshared.as_slice()) {
             write_spatial_topology_with_shared(
@@ -442,7 +464,8 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &args,
             &topology,
             patches,
-            layout,
+            &mesh,
+            &layout,
             &pfts,
             &raw_percent,
             &area,
@@ -459,7 +482,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let fractions = aggregate_pft_fractions(
-        layout,
+        &layout,
         PftFractionInput {
             pft_offsets: &pfts.patch_offsets,
             pft_classes: &pfts.pft_classes,
@@ -474,7 +497,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &args.plant_tiles,
         &format!("MOD{:04}", args.year),
         "HTOP",
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -599,7 +622,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         write_crop_diagnostic(&args, &topology, crop)?;
     }
     let pft_height = aggregate_pft_height(
-        layout,
+        &layout,
         PftFractionInput {
             pft_offsets: &pfts.patch_offsets,
             pft_classes: &pfts.pft_classes,
@@ -637,7 +660,8 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &args,
         &topology,
         patches,
-        layout,
+        &mesh,
+        &layout,
         &pfts,
         &raw_percent,
         &area,
@@ -669,6 +693,7 @@ fn materialize_pft_monthly_vegetation(
     args: &SpatialPftArgs,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
+    mesh: &FlatMesh,
     layout: &colm_srfdata::FlatPatches,
     pfts: &PftTopology,
     raw_percent: &[f64],
@@ -698,7 +723,7 @@ fn materialize_pft_monthly_vegetation(
                         &lai_name,
                         MODIS_PFT_CLASSES,
                         month,
-                        &topology.mesh,
+                        mesh,
                         &topology.pixel,
                         COLM_500M,
                     )?,
@@ -719,7 +744,7 @@ fn materialize_pft_monthly_vegetation(
                         &sai_name,
                         MODIS_PFT_CLASSES,
                         month,
-                        &topology.mesh,
+                        mesh,
                         &topology.pixel,
                         COLM_500M,
                     )?,
@@ -5871,6 +5896,251 @@ mod tests {
         );
         drop(patches);
         drop(mesh);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_pft_materializer_keeps_topology_raw_and_obeys_aggregation_zip() {
+        let (root, _) = case_namelist("pft-zip-output", "&nl_colm /\n");
+        let mesh_path = root.join("mesh.nc");
+        let mut file = netcdf::create(&mesh_path).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        for (name, dimension, edge) in [
+            ("lon_w", "lon", COLM_500M.lon_w(1)),
+            ("lon_e", "lon", COLM_500M.lon_e(3)),
+            ("lat_s", "lat", COLM_500M.lat_s(3)),
+            ("lat_n", "lat", COLM_500M.lat_n(1)),
+        ] {
+            file.add_variable::<f64>(name, &[dimension])
+                .unwrap()
+                .put_values(&[edge], ..)
+                .unwrap();
+        }
+        file.add_variable::<i32>("landmask", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1], ..)
+            .unwrap();
+        file.close().unwrap();
+        let landtype = root.join("landtype.nc");
+        let mut file = netcdf::create(&landtype).unwrap();
+        file.add_dimension("lon", COLM_500M.nlon).unwrap();
+        file.add_dimension("lat", COLM_500M.nlat).unwrap();
+        let mut variable = file
+            .add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap();
+        variable.set_chunking(&[3, 3]).unwrap();
+        variable.put_values(&[1; 9], (0..3, 0..3)).unwrap();
+        file.close().unwrap();
+        // Reuse the reducer fixture's values on a small, unequal-area 3x3 grid.
+        // The expected routing uses independently gathered inputs, not bin internals.
+        let rows: Vec<Vec<f64>> = include_str!("../../tests/fixtures/pft_ordered_reductions.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                line.split_whitespace()
+                    .map(|s| s.parse().unwrap())
+                    .collect()
+            })
+            .collect();
+        let mut file = netcdf::create(root.join("RG_90_-180_85_-175.MOD2005.nc")).unwrap();
+        for (name, len) in [("lon", 1200), ("lat", 1200), ("pft", 16), ("month", 12)] {
+            file.add_dimension(name, len).unwrap();
+        }
+        let mut variable = file.add_variable::<f64>("HTOP", &["lat", "lon"]).unwrap();
+        variable.set_chunking(&[3, 3]).unwrap();
+        variable
+            .put_values(
+                &rows.iter().map(|row| row[1]).collect::<Vec<_>>(),
+                (0..3, 0..3),
+            )
+            .unwrap();
+        let mut variable = file
+            .add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
+            .unwrap();
+        variable.set_chunking(&[1, 120, 120]).unwrap();
+        for class in 0..16 {
+            variable
+                .put_values(
+                    &rows.iter().map(|row| row[2 + class]).collect::<Vec<_>>(),
+                    (class, 0..3, 0..3),
+                )
+                .unwrap();
+        }
+        for (name, start) in [("MONTHLY_PFT_LAI", 18), ("MONTHLY_PFT_SAI", 34)] {
+            let mut variable = file
+                .add_variable::<f64>(name, &["month", "pft", "lat", "lon"])
+                .unwrap();
+            variable.set_chunking(&[1, 1, 120, 120]).unwrap();
+            for month in 0..12 {
+                for class in 0..16 {
+                    variable
+                        .put_values(
+                            &rows
+                                .iter()
+                                .map(|row| row[start + class])
+                                .collect::<Vec<_>>(),
+                            (month, class, 0..3, 0..3),
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        file.close().unwrap();
+        let topology = build_spatial_topology_with_filter_grid_and_raw_grids(
+            &mesh_path,
+            SpatialInputKind::GridBased,
+            COLM_500M,
+            None,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        let (topology, patches) = build_pft_land_patches_from_raster(
+            topology,
+            &landtype,
+            "landtype",
+            COLM_500M,
+            false,
+            true,
+            PftPatchMode::Merged,
+        )
+        .unwrap();
+        let raw_layout = patches
+            .aggregation_layout(&topology.mesh, vec![None; patches.len()])
+            .unwrap();
+        let raw_area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
+        let read_percent = |mesh: &FlatMesh| {
+            read_mesh_tiled_raster_pft_f64(
+                &root,
+                "MOD2005",
+                "PCT_PFT",
+                16,
+                mesh,
+                &topology.pixel,
+                COLM_500M,
+            )
+            .unwrap()
+        };
+        let pfts = build_pft_topology(
+            &patches,
+            &raw_layout,
+            16,
+            16,
+            &read_percent(&topology.mesh),
+            &raw_area,
+        )
+        .unwrap();
+        let bits = |v: &[f64]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let mut mode_values = Vec::new();
+        for zip in [false, true] {
+            let output = root.join(format!("output-{zip}"));
+            materialize_spatial_pft(&[
+                "latlon".into(),
+                mesh_path.display().to_string(),
+                landtype.display().to_string(),
+                output.display().to_string(),
+                "2005".into(),
+                "--plant-tiles".into(),
+                root.display().to_string(),
+                "--aggregation-zip".into(),
+                zip.to_string(),
+                "--monthly-vegetation-year".into(),
+                "2005".into(),
+            ])
+            .unwrap();
+            let check = |path: &str, variable: &str, expected: &[f64]| {
+                let file = netcdf::open(output.join(path)).unwrap();
+                let actual = file
+                    .variable(variable)
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap();
+                assert_eq!(bits(&actual), bits(expected), "zip={zip} {path}:{variable}");
+            };
+            check(
+                "landpft/2005/landpft_W180_S90.nc",
+                "pctshared",
+                &pfts.pctshared,
+            );
+            let (mesh, layout, area) =
+                gather_patch_raster(&topology.mesh, &topology.pixel, &patches, COLM_500M, zip)
+                    .unwrap();
+            let percent = read_percent(&mesh);
+            let input = PftFractionInput {
+                pft_offsets: &pfts.patch_offsets,
+                pft_classes: &pfts.pft_classes,
+                patch_kind: &pfts.patch_kind,
+                raw_class_count: 16,
+                raw_percent: &percent,
+                land_area: &area,
+                crop_excluded_class: None,
+            };
+            let fractions = aggregate_pft_fractions(&layout, input).unwrap();
+            check("pctpft/2005/pct_pfts_W180_S90.nc", "pct_pfts", &fractions);
+            let height = read_mesh_tiled_raster_f64(
+                &root,
+                "MOD2005",
+                "HTOP",
+                &mesh,
+                &topology.pixel,
+                COLM_500M,
+            )
+            .unwrap();
+            check(
+                "htop/2005/htop_patches_W180_S90.nc",
+                "htop_patches",
+                &layout.aggregate_igbp_forest_height(&height, &area).unwrap(),
+            );
+            let height = aggregate_pft_height(&layout, input, &height).unwrap();
+            check("htop/2005/htop_pfts_W180_S90.nc", "htop_pfts", &height);
+            let mut outputs = vec![bits(&fractions), bits(&height)];
+            for kind in ["LAI", "SAI"] {
+                let raw = read_mesh_tiled_raster_pft_time_f64(
+                    &root,
+                    "MOD2005",
+                    &format!("MONTHLY_PFT_{kind}"),
+                    16,
+                    1,
+                    &mesh,
+                    &topology.pixel,
+                    COLM_500M,
+                )
+                .unwrap();
+                let index = aggregate_pft_index(
+                    &layout,
+                    PftIndexInput {
+                        pft_offsets: &pfts.patch_offsets,
+                        pft_classes: &pfts.pft_classes,
+                        patch_kind: &pfts.patch_kind,
+                        raw_class_count: 16,
+                        raw_percent: &percent,
+                        raw_index: &raw,
+                        land_area: &area,
+                    },
+                )
+                .unwrap();
+                check(
+                    &format!("LAI/2005/{kind}_patches01_W180_S90.nc"),
+                    &format!("{kind}_patches"),
+                    &index.patch_index,
+                );
+                check(
+                    &format!("LAI/2005/{kind}_pfts01_W180_S90.nc"),
+                    &format!("{kind}_pfts"),
+                    &index.pft_index,
+                );
+                outputs.push(bits(&index.pft_index));
+            }
+            mode_values.push(outputs);
+        }
+        for (raw, zipped) in mode_values[0].iter().zip(&mode_values[1]) {
+            assert_ne!(
+                raw, zipped,
+                "fixture must detect each incorrectly routed field family"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
