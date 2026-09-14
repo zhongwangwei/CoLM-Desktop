@@ -1,8 +1,10 @@
 //! Cold-start restart output for CoLM's `CatchLateralFlow` kernel.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_srfdata::{mesh_cell_area_weights, read_mesh_coordinate_raster_f64, FlatMesh, PixelAxes};
 use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::RestartDate;
@@ -17,6 +19,9 @@ pub struct CatchLateralColdStartConfig<'a> {
     pub land_cover_year: i32,
     pub date: RestartDate,
     pub estimated_river_depth: bool,
+    /// Directory containing the native `runoff_clim.nc` when river depth is
+    /// estimated instead of read from the catchment mesh.
+    pub runtime_dir: Option<&'a Path>,
 }
 
 /// The basin restart produced by [`write_catch_lateral_cold_restart`].
@@ -62,15 +67,25 @@ pub fn write_catch_lateral_cold_restart(
         (1..=366).contains(&config.date.julian_day) && config.date.seconds < 86_400,
         "CatchLateralFlow restart date is invalid"
     );
-    ensure!(
-        !config.estimated_river_depth,
-        "Rust CatchLateralFlow cold restart does not yet implement DEF_USE_EstimatedRiverDepth"
-    );
-
+    let estimated_depth = config
+        .estimated_river_depth
+        .then(|| {
+            let runtime = config.runtime_dir.context(
+                "DEF_USE_EstimatedRiverDepth requires DEF_dir_runtime for runoff_clim.nc",
+            )?;
+            estimate_river_depths(
+                config.catchment_mesh,
+                config.landdata,
+                config.land_cover_year,
+                runtime,
+            )
+        })
+        .transpose()?;
     let state = read_cold_state(
         config.catchment_mesh,
         config.landdata,
         config.land_cover_year,
+        estimated_depth.as_deref(),
     )?;
     let date = format!(
         "{:04}-{:03}-{:05}",
@@ -119,10 +134,338 @@ pub fn write_catch_lateral_cold_restart(
     Ok(CatchLateralColdStartFile { path })
 }
 
+/// Reproduce `calc_riverdepth_from_runoff` for a serial cold start.
+///
+/// Upstream maps monthly runoff to `landelm`, turns it into basin discharge
+/// with the generated land-patch area, then accumulates discharge downstream.
+/// A CatchLateral surface contains every basin from its mesh; rejecting a
+/// partial surface is preferable to silently changing upstream discharge.
+fn estimate_river_depths(
+    catchment_mesh: &Path,
+    landdata: &Path,
+    land_cover_year: i32,
+    runtime_dir: &Path,
+) -> Result<Vec<f64>> {
+    let source = netcdf::open(catchment_mesh).with_context(|| {
+        format!(
+            "cannot open CatchLateralFlow mesh {}",
+            catchment_mesh.display()
+        )
+    })?;
+    let downstream = read_i64(&source, "basin_downstream")?;
+    ensure!(
+        !downstream.is_empty(),
+        "CatchLateralFlow basin_downstream must not be empty"
+    );
+    let basins = read_active_basins(landdata, land_cover_year)?;
+    ensure!(
+        basins.len() == downstream.len()
+            && basins
+                .iter()
+                .copied()
+                .eq(1..=i64::try_from(downstream.len())?),
+        "DEF_USE_EstimatedRiverDepth requires landhru to contain every CatchLateralFlow basin"
+    );
+    let (mesh, pixel) = read_estimation_mesh(landdata, land_cover_year, &basins)?;
+    let cell_area = mesh_cell_area_weights(&mesh, &pixel)?;
+    let runoff =
+        read_mesh_coordinate_raster_f64(&runtime_dir.join("runoff_clim.nc"), "ro", &mesh, &pixel)?;
+    ensure!(
+        runoff.len() == cell_area.len(),
+        "runoff_clim mesh mapping and cell-area vectors disagree"
+    );
+    let patch_area = read_native_patch_areas(landdata, land_cover_year, &mesh, &cell_area)?;
+    let mut runoff_discharge = vec![0.0; downstream.len()];
+    let mut offset = 0;
+    for element in 0..mesh.len() {
+        let id = mesh.element_id(element)?;
+        let count = mesh.pixel_count(element)?;
+        let area = &cell_area[offset..offset + count];
+        let values = &runoff[offset..offset + count];
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "runoff_clim contains non-finite runoff for CatchLateralFlow basin {id}"
+        );
+        let area_sum = area.iter().sum::<f64>();
+        ensure!(
+            area_sum.is_finite() && area_sum > 0.0,
+            "CatchLateralFlow basin {id} has non-positive area"
+        );
+        let runoff_mean = values
+            .iter()
+            .zip(area)
+            .map(|(runoff, area)| runoff.max(0.0) * area)
+            .sum::<f64>()
+            / area_sum;
+        let total_area = *patch_area
+            .get(&id)
+            .with_context(|| format!("CatchLateralFlow basin {id} has no landpatch area"))?;
+        let index = usize::try_from(id - 1)
+            .context("CatchLateralFlow basin index cannot address runoff discharge")?;
+        runoff_discharge[index] = runoff_mean / 86_400.0 * total_area;
+        offset += count;
+    }
+    let discharge = accumulate_downstream(&downstream, runoff_discharge)?;
+    Ok(discharge
+        .into_iter()
+        .map(|value| (0.1 * value.sqrt()).max(1.0))
+        .collect())
+}
+
+fn read_active_basins(landdata: &Path, land_cover_year: i32) -> Result<BTreeSet<i64>> {
+    let directory = landdata
+        .join("landhru")
+        .join(format!("{land_cover_year:04}"));
+    let files = netcdf_block_files(&directory, "landhru_")?;
+    let mut basins = BTreeSet::new();
+    for path in files {
+        basins.extend(read_i64(&netcdf::open(&path)?, "eindex")?);
+    }
+    ensure!(
+        basins.iter().all(|basin| *basin > 0),
+        "CatchLateralFlow landhru basin IDs must be positive"
+    );
+    Ok(basins)
+}
+
+fn read_estimation_mesh(
+    landdata: &Path,
+    land_cover_year: i32,
+    basins: &BTreeSet<i64>,
+) -> Result<(FlatMesh, PixelAxes)> {
+    let pixel_file = netcdf::open(landdata.join("pixel.nc"))?;
+    let lon_w = read_f64(&pixel_file, "lon_w")?;
+    let lon_e = read_f64(&pixel_file, "lon_e")?;
+    let lat_s = read_f64(&pixel_file, "lat_s")?;
+    let lat_n = read_f64(&pixel_file, "lat_n")?;
+    ensure!(
+        lon_w.len() == lon_e.len()
+            && lat_s.len() == lat_n.len()
+            && !lon_w.is_empty()
+            && !lat_s.is_empty(),
+        "CatchLateralFlow pixel edge vectors are invalid"
+    );
+    let pixel = PixelAxes {
+        edge_south: lat_s.iter().copied().fold(f64::INFINITY, f64::min),
+        edge_north: lat_n.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        edge_west: lon_w[0],
+        edge_east: *lon_e.last().expect("non-empty longitude edge vector"),
+        lon_w,
+        lon_e,
+        lat_s,
+        lat_n,
+    };
+    let directory = landdata.join("mesh").join(format!("{land_cover_year:04}"));
+    let mut elements = BTreeMap::<i64, (Vec<i32>, Vec<i32>)>::new();
+    for path in netcdf_block_files(&directory, "mesh_")? {
+        let file = netcdf::open(&path)?;
+        let ids = read_i64(&file, "elmindex")?;
+        let counts = read_i32(&file, "elmnpxl")?;
+        let points = read_i32_coordinate_pairs(&file, "elmpixels")?;
+        ensure!(
+            ids.len() == counts.len(),
+            "CatchLateralFlow mesh block {} has inconsistent element vectors",
+            path.display()
+        );
+        let mut point_offset = 0;
+        for (&id, &count) in ids.iter().zip(&counts) {
+            let count = usize::try_from(count)
+                .context("CatchLateralFlow mesh pixel count must be positive")?;
+            ensure!(
+                point_offset + count <= points.len(),
+                "CatchLateralFlow mesh block {} has truncated coordinates",
+                path.display()
+            );
+            if basins.contains(&id) {
+                let (x, y): (Vec<_>, Vec<_>) = points[point_offset..point_offset + count]
+                    .iter()
+                    .copied()
+                    .unzip();
+                ensure!(
+                    elements.insert(id, (x, y)).is_none(),
+                    "CatchLateralFlow mesh has duplicate basin {id}"
+                );
+            }
+            point_offset += count;
+        }
+        ensure!(
+            point_offset == points.len(),
+            "CatchLateralFlow mesh block {} has excess coordinates",
+            path.display()
+        );
+    }
+    ensure!(
+        elements.len() == basins.len() && elements.keys().eq(basins.iter()),
+        "CatchLateralFlow mesh and landhru basin sets disagree"
+    );
+    let mut ids = Vec::with_capacity(elements.len());
+    let mut offsets = Vec::with_capacity(elements.len() + 1);
+    let mut ilon = Vec::new();
+    let mut ilat = Vec::new();
+    offsets.push(0);
+    for (id, (x, y)) in elements {
+        ids.push(id);
+        ilon.extend(x);
+        ilat.extend(y);
+        offsets.push(ilon.len());
+    }
+    Ok((FlatMesh::new(ids, offsets, ilon, ilat)?, pixel))
+}
+
+fn read_native_patch_areas(
+    landdata: &Path,
+    land_cover_year: i32,
+    mesh: &FlatMesh,
+    cell_area: &[f64],
+) -> Result<BTreeMap<i64, f64>> {
+    const EARTH_RADIUS_METERS: f64 = 6_371_220.0;
+    let mut spans = BTreeMap::new();
+    let mut offset = 0;
+    for element in 0..mesh.len() {
+        let id = mesh.element_id(element)?;
+        let count = mesh.pixel_count(element)?;
+        spans.insert(id, (offset, count));
+        offset += count;
+    }
+    ensure!(
+        offset == cell_area.len(),
+        "CatchLateralFlow mesh and cell-area vectors disagree"
+    );
+    let directory = landdata
+        .join("landpatch")
+        .join(format!("{land_cover_year:04}"));
+    let mut areas = BTreeMap::new();
+    for path in netcdf_block_files(&directory, "landpatch_")? {
+        let file = netcdf::open(&path)?;
+        let ids = read_i64(&file, "eindex")?;
+        let starts = read_i32(&file, "ipxstt")?;
+        let ends = read_i32(&file, "ipxend")?;
+        ensure!(
+            ids.len() == starts.len() && starts.len() == ends.len(),
+            "CatchLateralFlow landpatch block {} has inconsistent topology vectors",
+            path.display()
+        );
+        for ((id, start), end) in ids.into_iter().zip(starts).zip(ends) {
+            let Some(&(offset, count)) = spans.get(&id) else {
+                continue;
+            };
+            let start = usize::try_from(start)
+                .context("CatchLateralFlow landpatch start must be positive")?;
+            let end =
+                usize::try_from(end).context("CatchLateralFlow landpatch end must be positive")?;
+            ensure!(
+                start > 0 && start <= end && end <= count,
+                "CatchLateralFlow landpatch range is outside basin {id}"
+            );
+            // MOD_Initialize.F90 sums each landpatch directly; unlike the main
+            // time-step setup, its cold-start path does not apply pctshared.
+            *areas.entry(id).or_insert(0.0) += cell_area[offset + start - 1..offset + end]
+                .iter()
+                .sum::<f64>()
+                * EARTH_RADIUS_METERS.powi(2);
+        }
+    }
+    ensure!(
+        areas.len() == mesh.len() && areas.values().all(|area| area.is_finite() && *area > 0.0),
+        "CatchLateralFlow landpatch area does not cover every basin"
+    );
+    Ok(areas)
+}
+
+fn accumulate_downstream(downstream: &[i64], mut discharge: Vec<f64>) -> Result<Vec<f64>> {
+    ensure!(
+        discharge.len() == downstream.len()
+            && discharge
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "CatchLateralFlow runoff discharge is invalid"
+    );
+    let mut upstream = vec![0_usize; downstream.len()];
+    for (index, target) in downstream.iter().copied().enumerate() {
+        if target > 0 {
+            let target = usize::try_from(target - 1)
+                .context("CatchLateralFlow downstream basin index is invalid")?;
+            ensure!(
+                target < downstream.len() && target != index,
+                "CatchLateralFlow downstream basin index is invalid"
+            );
+            upstream[target] += 1;
+        }
+    }
+    let mut ready = (0..downstream.len())
+        .filter(|&index| upstream[index] == 0)
+        .collect::<VecDeque<_>>();
+    let mut completed = 0;
+    while let Some(index) = ready.pop_front() {
+        completed += 1;
+        if downstream[index] > 0 {
+            let target =
+                usize::try_from(downstream[index] - 1).expect("validated downstream index");
+            discharge[target] += discharge[index];
+            upstream[target] -= 1;
+            if upstream[target] == 0 {
+                ready.push_back(target);
+            }
+        }
+    }
+    ensure!(
+        completed == downstream.len(),
+        "CatchLateralFlow basin_downstream must be acyclic"
+    );
+    Ok(discharge)
+}
+
+fn netcdf_block_files(directory: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
+    let mut files = std::fs::read_dir(directory)
+        .with_context(|| {
+            format!(
+                "cannot read CatchLateralFlow directory {}",
+                directory.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.retain(|path| {
+        path.extension().is_some_and(|extension| extension == "nc")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix))
+    });
+    files.sort();
+    ensure!(
+        !files.is_empty(),
+        "CatchLateralFlow needs {prefix} NetCDF blocks in {}",
+        directory.display()
+    );
+    Ok(files)
+}
+
+fn read_i32_coordinate_pairs(file: &netcdf::File, name: &str) -> Result<Vec<(i32, i32)>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("CatchLateralFlow input is missing {name}"))?;
+    let dimensions = variable.dimensions();
+    ensure!(
+        dimensions.len() == 2 && dimensions[1].len() == 2,
+        "CatchLateralFlow {name} must use native (pixel, ncoor=2) dimensions"
+    );
+    let values = match variable.vartype() {
+        NcVariableType::Int(IntType::I32) => variable.get_values::<i32, _>(..)?.into_iter(),
+        kind => bail!("CatchLateralFlow {name} must be an int32 matrix, got {kind:?}"),
+    };
+    Ok(values
+        .collect::<Vec<_>>()
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect())
+}
+
 fn read_cold_state(
     catchment_mesh: &Path,
     landdata: &Path,
     land_cover_year: i32,
+    estimated_depth: Option<&[f64]>,
 ) -> Result<CatchLateralColdState> {
     let source = netcdf::open(catchment_mesh).with_context(|| {
         format!(
@@ -130,7 +473,6 @@ fn read_cold_state(
             catchment_mesh.display()
         )
     })?;
-    let river_depth = read_f64(&source, "river_depth")?;
     let lake_id = read_i64(&source, "lake_id")?;
     let basin_numhru = read_i64(&source, "basin_numhru")?
         .into_iter()
@@ -138,11 +480,15 @@ fn read_cold_state(
             usize::try_from(value).context("CatchLateralFlow basin_numhru must be positive")
         })
         .collect::<Result<Vec<_>>>()?;
+    let river_depth = estimated_depth
+        .map(<[f64]>::to_vec)
+        .map(Ok)
+        .unwrap_or_else(|| read_f64(&source, "river_depth"))?;
     ensure!(
         river_depth.len() == lake_id.len()
             && river_depth.len() == basin_numhru.len()
             && !river_depth.is_empty(),
-        "CatchLateralFlow river_depth, lake_id, and basin_numhru must have the same non-zero length"
+        "CatchLateralFlow river depth, lake_id, and basin_numhru must have the same non-zero length"
     );
     ensure!(
         basin_numhru.iter().all(|value| *value > 0),

@@ -26,6 +26,7 @@ fn cold_restart_uses_the_surface_hru_order_and_native_four_vectors() {
             seconds: 0,
         },
         estimated_river_depth: false,
+        runtime_dir: None,
     })
     .unwrap();
 
@@ -112,6 +113,7 @@ fn cold_restart_uses_native_lake_depths() {
             seconds: 0,
         },
         estimated_river_depth: false,
+        runtime_dir: None,
     })
     .unwrap();
     let file = netcdf::open(restart.path).unwrap();
@@ -136,6 +138,58 @@ fn cold_restart_uses_native_lake_depths() {
             .unwrap(),
         [7.0]
     );
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn estimated_river_depth_accumulates_native_runoff_downstream() {
+    let root = temp_dir();
+    let mesh = root.join("catchment.nc");
+    write_estimated_mesh(&mesh);
+    let landdata = root.join("landdata");
+    let hru_dir = landdata.join("landhru/2005");
+    std::fs::create_dir_all(&hru_dir).unwrap();
+    write_hru(&hru_dir.join("landhru_w180_s90.nc"), &[1, 2], &[1, 1]);
+    write_estimated_surface(&landdata);
+    let runtime = root.join("runtime");
+    write_runoff(&runtime);
+
+    let restart = write_catch_lateral_cold_restart(CatchLateralColdStartConfig {
+        catchment_mesh: &mesh,
+        landdata: &landdata,
+        restart_dir: &root.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        estimated_river_depth: true,
+        runtime_dir: Some(&runtime),
+    })
+    .unwrap();
+
+    let area = (1.0_f64.to_radians())
+        * (1.0_f64.to_radians().sin() - 0.0_f64.to_radians().sin())
+        * 6_371_220.0_f64.powi(2);
+    let first = (0.1 * (area / 86_400.0).sqrt()).max(1.0);
+    let second = (0.1 * (5.0 * area / 86_400.0).sqrt()).max(1.0);
+    let file = netcdf::open(restart.path).unwrap();
+    let basin = file
+        .variable("wdsrf_bsn_prev")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    let hru = file
+        .variable("wdsrf_hru_prev")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert!((basin[0] - first).abs() < 1.0e-12);
+    assert!((basin[1] - second).abs() < 1.0e-12);
+    assert_eq!(basin, hru);
     drop(file);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -190,6 +244,110 @@ fn write_mesh_with_lake(path: &std::path::Path) {
     file.add_variable::<f64>("hydrounit_hand", &["basin", "hydrounit"])
         .unwrap()
         .put_values(&[0.0, 0.0], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_estimated_mesh(path: &std::path::Path) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("basin", 2).unwrap();
+    file.add_dimension("hydrounit", 1).unwrap();
+    file.add_variable::<i32>("lake_id", &["basin"])
+        .unwrap()
+        .put_values(&[0, 0], ..)
+        .unwrap();
+    file.add_variable::<i32>("basin_numhru", &["basin"])
+        .unwrap()
+        .put_values(&[1, 1], ..)
+        .unwrap();
+    file.add_variable::<i32>("basin_downstream", &["basin"])
+        .unwrap()
+        .put_values(&[2, 0], ..)
+        .unwrap();
+    file.add_variable::<i32>("hydrounit_index", &["basin", "hydrounit"])
+        .unwrap()
+        .put_values(&[1, 1], (.., ..))
+        .unwrap();
+    file.add_variable::<f64>("hydrounit_hand", &["basin", "hydrounit"])
+        .unwrap()
+        .put_values(&[0.0, 0.0], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_estimated_surface(landdata: &std::path::Path) {
+    let mut pixel = netcdf::create(landdata.join("pixel.nc")).unwrap();
+    pixel.add_dimension("longitude", 2).unwrap();
+    pixel.add_dimension("latitude", 1).unwrap();
+    for (name, values, dimension) in [
+        ("lon_w", &[0.0, 1.0][..], "longitude"),
+        ("lon_e", &[1.0, 2.0][..], "longitude"),
+        ("lat_s", &[0.0][..], "latitude"),
+        ("lat_n", &[1.0][..], "latitude"),
+    ] {
+        pixel
+            .add_variable::<f64>(name, &[dimension])
+            .unwrap()
+            .put_values(values, ..)
+            .unwrap();
+    }
+    pixel.close().unwrap();
+
+    let mesh_dir = landdata.join("mesh/2005");
+    std::fs::create_dir_all(&mesh_dir).unwrap();
+    let mut mesh = netcdf::create(mesh_dir.join("mesh_w180_s90.nc")).unwrap();
+    mesh.add_dimension("element", 2).unwrap();
+    mesh.add_dimension("pixel", 2).unwrap();
+    mesh.add_dimension("ncoor", 2).unwrap();
+    mesh.add_variable::<i64>("elmindex", &["element"])
+        .unwrap()
+        .put_values(&[1, 2], ..)
+        .unwrap();
+    mesh.add_variable::<i32>("elmnpxl", &["element"])
+        .unwrap()
+        .put_values(&[1, 1], ..)
+        .unwrap();
+    mesh.add_variable::<i32>("elmpixels", &["pixel", "ncoor"])
+        .unwrap()
+        .put_values(&[1, 1, 2, 1], (.., ..))
+        .unwrap();
+    mesh.close().unwrap();
+
+    let patch_dir = landdata.join("landpatch/2005");
+    std::fs::create_dir_all(&patch_dir).unwrap();
+    let mut patch = netcdf::create(patch_dir.join("landpatch_w180_s90.nc")).unwrap();
+    patch.add_dimension("landpatch", 2).unwrap();
+    patch
+        .add_variable::<i64>("eindex", &["landpatch"])
+        .unwrap()
+        .put_values(&[1, 2], ..)
+        .unwrap();
+    for name in ["ipxstt", "ipxend"] {
+        patch
+            .add_variable::<i32>(name, &["landpatch"])
+            .unwrap()
+            .put_values(&[1, 1], ..)
+            .unwrap();
+    }
+    patch.close().unwrap();
+}
+
+fn write_runoff(runtime: &std::path::Path) {
+    std::fs::create_dir_all(runtime).unwrap();
+    let mut file = netcdf::create(runtime.join("runoff_clim.nc")).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[0.5, 1.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("ro", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[1.0, 4.0], (.., ..))
         .unwrap();
     file.close().unwrap();
 }

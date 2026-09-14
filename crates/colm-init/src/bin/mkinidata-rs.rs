@@ -283,6 +283,11 @@ fn write_catch_lateral_namelist_restart(
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let catchment_mesh = PathBuf::from(required_string(&document, "DEF_CatchmentMesh_data")?);
+    let estimated_river_depth = namelist_bool(&document, "DEF_USE_EstimatedRiverDepth", false)?;
+    let runtime_dir = estimated_river_depth
+        .then(|| required_string(&document, "DEF_dir_runtime"))
+        .transpose()?
+        .map(PathBuf::from);
     let file = write_catch_lateral_cold_restart(CatchLateralColdStartConfig {
         catchment_mesh: &catchment_mesh,
         landdata: &run.landdata,
@@ -290,7 +295,8 @@ fn write_catch_lateral_namelist_restart(
         case_name: &run.case_name,
         land_cover_year: run.land_cover_year,
         date: run.date,
-        estimated_river_depth: namelist_bool(&document, "DEF_USE_EstimatedRiverDepth", false)?,
+        estimated_river_depth,
+        runtime_dir: runtime_dir.as_deref(),
     })?;
     Ok(file.path)
 }
