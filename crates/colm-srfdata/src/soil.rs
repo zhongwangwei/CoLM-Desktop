@@ -246,17 +246,19 @@ fn aggregate_vgm_patch(
         statistic(&l, cells, area, SoilStatistic::Median),
     ];
     if fit && cells.len() > 1 {
-        let problem = VgmProblem {
-            theta_r: &theta_r,
-            alpha: &alpha,
-            n: &n,
-            theta_s: &theta_s,
-            k_s: &k_s,
-            l: &l,
-            phi: values[3],
-            conductivity: values[4],
-            l_patch: values[5],
-        };
+        let problem = VgmProblem::new(
+            VgmInputs {
+                theta_r: &theta_r,
+                alpha: &alpha,
+                n: &n,
+                theta_s: &theta_s,
+                k_s: &k_s,
+                l: &l,
+            },
+            values[3],
+            values[4],
+            values[5],
+        );
         let mut x = [values[0], values[1], values[2], values[4]];
         if lmder(&problem, &mut x, VGM_PRESSURES.len())
             && x[0] >= 0.0
@@ -311,6 +313,10 @@ pub fn aggregate_campbell(
     for raw in [input.theta_s, input.k_s, input.psi_s, input.lambda] {
         validate(patches, raw, area)?;
     }
+    let values: Vec<_> = (0..patches.len())
+        .into_par_iter()
+        .map(|patch| aggregate_campbell_patch(patches, patch, input, area, classes, fills, fit))
+        .collect();
     let mut output = CampbellSoil {
         theta_s: vec![SURFACE_MISSING; patches.len()],
         k_s: vec![SURFACE_MISSING; patches.len()],
@@ -328,39 +334,64 @@ pub fn aggregate_campbell(
         if patches.patch_type_for(patch) == 0 {
             continue;
         }
-        let theta_s = filled_values(patches, patch, input.theta_s, classes, fills.theta_s);
-        let k_s = filled_values(patches, patch, input.k_s, classes, fills.k_s);
-        let psi_s = filled_values(patches, patch, input.psi_s, classes, fills.psi_s);
-        let lambda = filled_values(patches, patch, input.lambda, classes, fills.lambda);
-        let cells = patches.raw_cells(patch);
-        output.theta_s[patch] = statistic(&theta_s, cells, area, SoilStatistic::AreaMean);
-        output.k_s[patch] = statistic(&k_s, cells, area, SoilStatistic::GeometricMean);
-        output.psi_s[patch] = statistic(&psi_s, cells, area, SoilStatistic::Median);
-        output.lambda[patch] = statistic(&lambda, cells, area, SoilStatistic::Median);
-        if fit && cells.len() > 1 {
-            let problem = CampbellProblem {
+        if let Some(values) = values[patch] {
+            output.theta_s[patch] = values[0];
+            output.k_s[patch] = values[1];
+            output.psi_s[patch] = values[2];
+            output.lambda[patch] = values[3];
+        }
+    }
+    Ok(output)
+}
+
+fn aggregate_campbell_patch(
+    patches: &FlatPatches,
+    patch: usize,
+    input: CampbellInputs<'_>,
+    area: &[f64],
+    classes: SoilPatchClasses,
+    fills: CampbellFills,
+    fit: bool,
+) -> Option<[f64; 4]> {
+    if patches.wmo_source_for(patch).is_some() || patches.patch_type_for(patch) == 0 {
+        return None;
+    }
+    let theta_s = filled_values(patches, patch, input.theta_s, classes, fills.theta_s);
+    let k_s = filled_values(patches, patch, input.k_s, classes, fills.k_s);
+    let psi_s = filled_values(patches, patch, input.psi_s, classes, fills.psi_s);
+    let lambda = filled_values(patches, patch, input.lambda, classes, fills.lambda);
+    let cells = patches.raw_cells(patch);
+    let mut values = [
+        statistic(&theta_s, cells, area, SoilStatistic::AreaMean),
+        statistic(&k_s, cells, area, SoilStatistic::GeometricMean),
+        statistic(&psi_s, cells, area, SoilStatistic::Median),
+        statistic(&lambda, cells, area, SoilStatistic::Median),
+    ];
+    if fit && cells.len() > 1 {
+        let problem = CampbellProblem::new(
+            CampbellInputs {
                 theta_s: &theta_s,
                 k_s: &k_s,
                 psi_s: &psi_s,
                 lambda: &lambda,
-                phi: output.theta_s[patch],
-                conductivity: output.k_s[patch],
-            };
-            let mut x = [output.psi_s[patch], output.lambda[patch], output.k_s[patch]];
-            if lmder(&problem, &mut x, CAMPBELL_PRESSURES.len())
-                && (-300.0..0.0).contains(&x[0])
-                && x[1] > 0.0
-                && x[1] <= 1.0
-                && x[2] > 0.0
-                && x[2] <= 1.0e7
-            {
-                output.psi_s[patch] = x[0];
-                output.lambda[patch] = x[1];
-                output.k_s[patch] = x[2];
-            }
+            },
+            values[0],
+            values[1],
+        );
+        let mut x = [values[2], values[3], values[1]];
+        if lmder(&problem, &mut x, CAMPBELL_PRESSURES.len())
+            && (-300.0..0.0).contains(&x[0])
+            && x[1] > 0.0
+            && x[1] <= 1.0
+            && x[2] > 0.0
+            && x[2] <= 1.0e7
+        {
+            values[2] = x[0];
+            values[3] = x[1];
+            values[1] = x[2];
         }
     }
-    Ok(output)
+    Some(values)
 }
 
 /// CoLM's water/glacier constants for Campbell source fields.
@@ -392,46 +423,63 @@ const CAMPBELL_PRESSURES: [f64; 17] = [
     15300.0, 20000.0, 100000.0, 1000000.0,
 ];
 
-struct VgmProblem<'a> {
-    theta_r: &'a [f64],
-    alpha: &'a [f64],
-    n: &'a [f64],
-    theta_s: &'a [f64],
-    k_s: &'a [f64],
-    l: &'a [f64],
+struct VgmProblem {
+    samples: Vec<[f64; 2]>,
+    cells: usize,
     phi: f64,
     conductivity: f64,
     l_patch: f64,
 }
 
-impl LeastSquaresProblem for VgmProblem<'_> {
+impl VgmProblem {
+    fn new(input: VgmInputs<'_>, phi: f64, conductivity: f64, l_patch: f64) -> Self {
+        let cells = input.theta_r.len();
+        let mut samples = Vec::with_capacity(cells * VGM_PRESSURES.len());
+        // Upstream builds ydatv/ydatvks once, not on every LM iteration.
+        for pressure in VGM_PRESSURES {
+            for cell in 0..cells {
+                let theta = (1.0 + (input.alpha[cell] * pressure).powf(input.n[cell]))
+                    .powf(1.0 / input.n[cell] - 1.0);
+                let observed =
+                    input.theta_r[cell] + (input.theta_s[cell] - input.theta_r[cell]) * theta;
+                let observed_k = input.k_s[cell]
+                    * theta.powf(input.l[cell])
+                    * (1.0
+                        - (1.0 - theta.powf(input.n[cell] / (input.n[cell] - 1.0)))
+                            .powf(1.0 - 1.0 / input.n[cell]))
+                    .powi(2);
+                samples.push([observed, observed_k.log10()]);
+            }
+        }
+        Self {
+            samples,
+            cells,
+            phi,
+            conductivity,
+            l_patch,
+        }
+    }
+}
+
+impl LeastSquaresProblem for VgmProblem {
     fn residual(&self, x: &[f64], output: &mut [f64]) -> bool {
         if x[1] <= 0.0 || x[2] <= 0.1 || x[2] >= 100.0 || x[3] <= 0.0 {
             return false;
         }
         for (index, pressure) in VGM_PRESSURES.iter().copied().enumerate() {
             let mut value = 0.0;
-            for cell in 0..self.theta_r.len() {
-                let theta = (1.0 + (self.alpha[cell] * pressure).powf(self.n[cell]))
-                    .powf(1.0 / self.n[cell] - 1.0);
-                let observed =
-                    self.theta_r[cell] + (self.theta_s[cell] - self.theta_r[cell]) * theta;
-                let fitted = x[0]
-                    + (self.phi - x[0])
-                        * (1.0 + (x[1] * pressure).powf(x[2])).powf(1.0 / x[2] - 1.0);
+            let fitted = x[0]
+                + (self.phi - x[0]) * (1.0 + (x[1] * pressure).powf(x[2])).powf(1.0 / x[2] - 1.0);
+            let base = 1.0 + (x[1] * pressure).powf(x[2]);
+            let term = 1.0 - (1.0 - 1.0 / base).powf(1.0 - 1.0 / x[2]);
+            let fitted_log = x[3].log10()
+                + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
+                + term.powi(2).log10();
+            for &[observed, observed_log_k] in
+                &self.samples[index * self.cells..(index + 1) * self.cells]
+            {
                 value += ((fitted - observed) / self.phi).powi(2);
-                let observed_k = self.k_s[cell]
-                    * theta.powf(self.l[cell])
-                    * (1.0
-                        - (1.0 - theta.powf(self.n[cell] / (self.n[cell] - 1.0)))
-                            .powf(1.0 - 1.0 / self.n[cell]))
-                    .powi(2);
-                let base = 1.0 + (x[1] * pressure).powf(x[2]);
-                let term = 1.0 - (1.0 - 1.0 / base).powf(1.0 - 1.0 / x[2]);
-                let fitted_log = x[3].log10()
-                    + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
-                    + term.powi(2).log10();
-                value += ((fitted_log - observed_k.log10()) / self.conductivity.log10()).powi(2);
+                value += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
             }
             output[index] = value;
         }
@@ -455,12 +503,9 @@ impl LeastSquaresProblem for VgmProblem<'_> {
             let u = 1.0 - 1.0 / base;
             let power = 1.0 - 1.0 / x[2];
             let term = 1.0 - u.powf(power);
-            let log_residual = |observed_k: f64| {
-                let fitted = x[3].log10()
-                    + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
-                    + term.powi(2).log10();
-                (fitted - observed_k.log10()) / log_conductivity
-            };
+            let fitted_log = x[3].log10()
+                + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
+                + term.powi(2).log10();
             let log_alpha =
                 self.l_patch * (1.0 / x[2] - 1.0) * x[2] * z.powf(x[2] - 1.0) * pressure
                     / (base * std::f64::consts::LN_10)
@@ -476,19 +521,11 @@ impl LeastSquaresProblem for VgmProblem<'_> {
                 + 2.0 * term_n / (term * std::f64::consts::LN_10);
             let log_k = 1.0 / (x[3] * std::f64::consts::LN_10);
             let mut derivatives = [0.0; 4];
-            for cell in 0..self.theta_r.len() {
-                let theta = (1.0 + (self.alpha[cell] * pressure).powf(self.n[cell]))
-                    .powf(1.0 / self.n[cell] - 1.0);
-                let observed_theta =
-                    self.theta_r[cell] + (self.theta_s[cell] - self.theta_r[cell]) * theta;
+            for &[observed_theta, observed_log_k] in
+                &self.samples[row * self.cells..(row + 1) * self.cells]
+            {
                 let theta_residual = (fitted_theta - observed_theta) / self.phi;
-                let observed_k = self.k_s[cell]
-                    * theta.powf(self.l[cell])
-                    * (1.0
-                        - (1.0 - theta.powf(self.n[cell] / (self.n[cell] - 1.0)))
-                            .powf(1.0 - 1.0 / self.n[cell]))
-                    .powi(2);
-                let conductivity_residual = log_residual(observed_k);
+                let conductivity_residual = (fitted_log - observed_log_k) / log_conductivity;
                 derivatives[0] += 2.0 * theta_residual * (1.0 - q) / self.phi;
                 derivatives[1] += 2.0
                     * (theta_residual * (self.phi - x[0]) * q_alpha / self.phi
@@ -506,30 +543,48 @@ impl LeastSquaresProblem for VgmProblem<'_> {
     }
 }
 
-struct CampbellProblem<'a> {
-    theta_s: &'a [f64],
-    k_s: &'a [f64],
-    psi_s: &'a [f64],
-    lambda: &'a [f64],
+struct CampbellProblem {
+    samples: Vec<[f64; 2]>,
+    cells: usize,
     phi: f64,
     conductivity: f64,
 }
 
-impl LeastSquaresProblem for CampbellProblem<'_> {
+impl CampbellProblem {
+    fn new(input: CampbellInputs<'_>, phi: f64, conductivity: f64) -> Self {
+        let cells = input.theta_s.len();
+        let mut samples = Vec::with_capacity(cells * CAMPBELL_PRESSURES.len());
+        for pressure in CAMPBELL_PRESSURES {
+            for cell in 0..cells {
+                let ratio = -pressure / input.psi_s[cell];
+                let observed = ratio.powf(-input.lambda[cell]) * input.theta_s[cell];
+                let observed_k = ratio.powf(-3.0 * input.lambda[cell] - 2.0) * input.k_s[cell];
+                samples.push([observed, observed_k.log10()]);
+            }
+        }
+        Self {
+            samples,
+            cells,
+            phi,
+            conductivity,
+        }
+    }
+}
+
+impl LeastSquaresProblem for CampbellProblem {
     fn residual(&self, x: &[f64], output: &mut [f64]) -> bool {
         if x[0] >= 0.0 || x[1].abs() >= 100.0 || x[2] <= 0.0 {
             return false;
         }
         for (index, pressure) in CAMPBELL_PRESSURES.iter().copied().enumerate() {
             let mut value = 0.0;
-            for cell in 0..self.theta_s.len() {
-                let ratio = -pressure / self.psi_s[cell];
-                let observed = ratio.powf(-self.lambda[cell]) * self.theta_s[cell];
-                let fitted = (-pressure / x[0]).powf(-x[1]) * self.phi;
+            let fitted = (-pressure / x[0]).powf(-x[1]) * self.phi;
+            let fitted_log = (-pressure / x[0]).log10() * (-3.0 * x[1] - 2.0) + x[2].log10();
+            for &[observed, observed_log_k] in
+                &self.samples[index * self.cells..(index + 1) * self.cells]
+            {
                 value += ((fitted - observed) / self.phi).powi(2);
-                let observed_k = ratio.powf(-3.0 * self.lambda[cell] - 2.0) * self.k_s[cell];
-                let fitted_log = (-pressure / x[0]).log10() * (-3.0 * x[1] - 2.0) + x[2].log10();
-                value += ((fitted_log - observed_k.log10()) / self.conductivity.log10()).powi(2);
+                value += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
             }
             output[index] = value;
         }
@@ -551,12 +606,11 @@ impl LeastSquaresProblem for CampbellProblem<'_> {
             let log_lambda = -3.0 * ratio.log10();
             let log_k = 1.0 / (x[2] * std::f64::consts::LN_10);
             let mut derivatives = [0.0; 3];
-            for cell in 0..self.theta_s.len() {
-                let raw_ratio = -pressure / self.psi_s[cell];
-                let observed_theta = raw_ratio.powf(-self.lambda[cell]) * self.theta_s[cell];
+            for &[observed_theta, observed_log_k] in
+                &self.samples[row * self.cells..(row + 1) * self.cells]
+            {
                 let theta_residual = (fitted_theta - observed_theta) / self.phi;
-                let observed_k = raw_ratio.powf(-3.0 * self.lambda[cell] - 2.0) * self.k_s[cell];
-                let conductivity_residual = (fitted_log - observed_k.log10()) / log_conductivity;
+                let conductivity_residual = (fitted_log - observed_log_k) / log_conductivity;
                 derivatives[0] += 2.0
                     * (theta_residual * theta_psi / self.phi
                         + conductivity_residual * log_psi / log_conductivity);
@@ -747,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_vgm_keeps_sequential_values_and_wmo_copies() {
+    fn parallel_soil_keeps_sequential_values_and_wmo_copies() {
         let layout = FlatPatches::new(
             vec![1, 1, 1],
             vec![0, 2, 4, 6],
@@ -783,6 +837,34 @@ mod tests {
                 .install(|| {
                     aggregate_vgm(&layout, input, &area, classes, VgmFills::default(), fit).unwrap()
                 });
+            let campbell = CampbellInputs {
+                theta_s: input.theta_s,
+                k_s: input.k_s,
+                psi_s: &[-30.0, -45.0, -35.0, -55.0, -40.0, -60.0],
+                lambda: &[0.1, 0.15, 0.12, 0.18, 0.2, 0.3],
+            };
+            let run = |threads| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| {
+                        aggregate_campbell(
+                            &layout,
+                            campbell,
+                            &area,
+                            classes,
+                            CampbellFills::default(),
+                            fit,
+                        )
+                        .unwrap()
+                    })
+            };
+            let cb = run(2);
+            assert_eq!(cb, run(1));
+            for field in [&cb.theta_s, &cb.k_s, &cb.psi_s, &cb.lambda] {
+                assert_eq!(field[0], field[2]);
+            }
             assert_eq!(parallel, sequential);
             for field in [
                 parallel.theta_r,
@@ -825,30 +907,89 @@ mod tests {
 
     #[test]
     fn curve_jacobians_match_the_residual_functions() {
-        let vgm = VgmProblem {
-            theta_r: &[0.08, 0.12],
-            alpha: &[0.008, 0.013],
-            n: &[1.4, 1.7],
-            theta_s: &[0.42, 0.49],
-            k_s: &[8.0, 17.0],
-            l: &[0.4, 0.6],
-            phi: 0.46,
-            conductivity: 12.0,
-            l_patch: 0.5,
-        };
+        let vgm = VgmProblem::new(
+            VgmInputs {
+                theta_r: &[0.08, 0.12],
+                alpha: &[0.008, 0.013],
+                n: &[1.4, 1.7],
+                theta_s: &[0.42, 0.49],
+                k_s: &[8.0, 17.0],
+                l: &[0.4, 0.6],
+            },
+            0.46,
+            12.0,
+            0.5,
+        );
         assert_jacobian(&vgm, &[0.1, 0.01, 1.5, 10.0], VGM_PRESSURES.len());
-        let campbell = CampbellProblem {
-            theta_s: &[0.42, 0.49],
-            k_s: &[8.0, 17.0],
-            psi_s: &[-30.0, -45.0],
-            lambda: &[0.1, 0.15],
-            phi: 0.46,
-            conductivity: 12.0,
-        };
+        let campbell = CampbellProblem::new(
+            CampbellInputs {
+                theta_s: &[0.42, 0.49],
+                k_s: &[8.0, 17.0],
+                psi_s: &[-30.0, -45.0],
+                lambda: &[0.1, 0.15],
+            },
+            0.46,
+            12.0,
+        );
         assert_jacobian(&campbell, &[-35.0, 0.12, 10.0], CAMPBELL_PRESSURES.len());
     }
 
     fn assert_jacobian(problem: &impl LeastSquaresProblem, x: &[f64], rows: usize) {
+        let mut residual = vec![0.0; rows];
+        assert!(problem.residual(x, &mut residual));
+        // Recorded before invariant source-curve precomputation; also check
+        // the full analytic Jacobian below against finite differences.
+        let expected: &[f64] = match rows {
+            24 => &[
+                0.09599902381414789,
+                0.1159547520305157,
+                0.1213355001809209,
+                0.1140519363687003,
+                0.09756423113189755,
+                0.07868190486103455,
+                0.06056346133327949,
+                0.04468417676245743,
+                0.031590960453860575,
+                0.013694972901779588,
+                0.00506761571966774,
+                0.0031990170912509813,
+                0.006002839421341494,
+                0.011960351337433566,
+                0.029449520200716464,
+                0.07883548423658349,
+                0.10432614990147343,
+                0.27359430180917377,
+                0.397002189470646,
+                1.1074778055779406,
+                1.7847149472069783,
+                1.973952008783068,
+                3.310727800466762,
+                5.819281686934102,
+            ],
+            17 => &[
+                0.257525410364438,
+                0.2493316919350615,
+                0.23650092077838236,
+                0.22669662463617563,
+                0.21881508417037904,
+                0.21225616438481512,
+                0.2066590247880124,
+                0.19749211220688015,
+                0.18277502752975155,
+                0.17725147718254705,
+                0.15169522312723793,
+                0.13851531472941594,
+                0.09218378023307755,
+                0.06695019343127888,
+                0.06151387614002263,
+                0.03448555081173949,
+                0.01217891333703709,
+            ],
+            _ => unreachable!(),
+        };
+        for (&actual, &expected) in residual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
+        }
         let mut analytic = vec![0.0; rows * x.len()];
         assert!(problem.jacobian(x, &mut analytic));
         let mut left = vec![0.0; rows];
