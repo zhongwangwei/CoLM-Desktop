@@ -4278,7 +4278,7 @@ fn lon_between_ceil(lon: f64, west: f64, east: f64) -> bool {
     }
 }
 
-fn validate_spatial_grid(grid: &SpatialGrid, label: &str) -> Result<()> {
+pub(crate) fn validate_spatial_grid(grid: &SpatialGrid, label: &str) -> Result<(f64, f64)> {
     ensure!(
         !grid.lon_w.is_empty() && grid.lon_w.len() == grid.lon_e.len(),
         "invalid {label} longitude edges"
@@ -4324,7 +4324,7 @@ fn validate_spatial_grid(grid: &SpatialGrid, label: &str) -> Result<()> {
             "invalid {label} latitude edges"
         );
     }
-    Ok(())
+    Ok((first, previous.expect("nonempty longitude checked")))
 }
 
 fn validate_filter_coordinate_dimensions(

@@ -25,13 +25,13 @@ impl MeshWindow {
         if grid.nlon == 0 || grid.nlat == 0 || nlon == 0 || nlat == 0 {
             bail!("grid and mesh window dimensions must be positive");
         }
-        let i1 = i0
+        let _ = i0
             .checked_add(nlon - 1)
             .context("mesh longitude window overflows usize")?;
         let j1 = j0
             .checked_add(nlat - 1)
             .context("mesh latitude window overflows usize")?;
-        if i0 == 0 || j0 == 0 || i1 > grid.nlon || j1 > grid.nlat {
+        if i0 == 0 || i0 > grid.nlon || j0 == 0 || nlon > grid.nlon || j1 > grid.nlat {
             bail!(
                 "mesh window ({i0},{j0}) + {nlon}x{nlat} exceeds global {}x{} grid",
                 grid.nlon,
@@ -41,7 +41,7 @@ impl MeshWindow {
         Ok(Self { i0, j0, nlon, nlat })
     }
 
-    /// 覆盖 bbox 的最小连续窗口。跨日期变更线的窗口留给后续 split-window 支持。
+    /// 包含 bbox 内格心的最小窗口；经度沿东向循环，允许跨日期变更线。
     pub fn covering_bbox(grid: Grid, west: f64, east: f64, south: f64, north: f64) -> Result<Self> {
         if grid.nlon == 0 || grid.nlat == 0 {
             bail!("global grid dimensions must be positive");
@@ -49,32 +49,66 @@ impl MeshWindow {
         if ![west, east, south, north].into_iter().all(f64::is_finite) {
             bail!("bbox coordinates must be finite");
         }
-        if west < -180.0 || east > 180.0 || south < -90.0 || north > 90.0 {
+        if !(-180.0..=180.0).contains(&west)
+            || !(-180.0..=180.0).contains(&east)
+            || !(-90.0..=90.0).contains(&south)
+            || !(-90.0..=90.0).contains(&north)
+        {
             bail!("bbox exceeds WGS84 longitude/latitude bounds");
         }
-        if west >= east {
-            bail!("bbox must satisfy west < east; dateline crossing is not implemented yet");
+        if west == east {
+            bail!("bbox west and east must differ; use -180 and 180 for the globe");
         }
         if south >= north {
             bail!("bbox must satisfy south < north");
         }
-        let nlon = i64::try_from(grid.nlon).context("global nlon exceeds int64")?;
-        let nlat = i64::try_from(grid.nlat).context("global nlat exceeds int64")?;
-        let i0 = (((west + 180.0) / grid.dlon() + 0.5).ceil() as i64).clamp(1, nlon) as usize;
-        let i1 = (((east + 180.0) / grid.dlon() + 0.5).floor() as i64).clamp(1, nlon) as usize;
-        let j0 = (((90.0 - north) / grid.dlat() + 0.5).ceil() as i64).clamp(1, nlat) as usize;
-        let j1 = (((90.0 - south) / grid.dlat() + 0.5).floor() as i64).clamp(1, nlat) as usize;
+        let west = if west == 180.0 { -180.0 } else { west };
+        let east = if east <= west { east + 360.0 } else { east };
+        // Keep the eastern endpoint unwrapped until counting centers. Clamping
+        // an empty polar/edge sliver would incorrectly select an outside cell.
+        let i0 = ((west + 180.0) / grid.dlon() + 0.5).ceil() as i128;
+        let i1 = ((east + 180.0) / grid.dlon() + 0.5).floor() as i128;
+        let j0 = ((90.0 - north) / grid.dlat() + 0.5).ceil() as i128;
+        let j1 = ((90.0 - south) / grid.dlat() + 0.5).floor() as i128;
         if i0 > i1 || j0 > j1 {
             bail!("bbox contains no grid-cell centers at this resolution");
         }
-        Self::new(grid, i0, j0, i1 - i0 + 1, j1 - j0 + 1)
+        Self::new(
+            grid,
+            usize::try_from((i0 - 1).rem_euclid(grid.nlon as i128) + 1)?,
+            usize::try_from(j0)?,
+            usize::try_from(i1 - i0 + 1)?,
+            usize::try_from(j1 - j0 + 1)?,
+        )
     }
 
-    pub fn global_indices(&self, i_local: usize, j_local: usize) -> Result<(usize, usize)> {
+    pub fn global_indices(
+        &self,
+        grid: Grid,
+        i_local: usize,
+        j_local: usize,
+    ) -> Result<(usize, usize)> {
         if i_local == 0 || j_local == 0 || i_local > self.nlon || j_local > self.nlat {
             bail!("local mesh index ({i_local},{j_local}) is outside the window");
         }
-        Ok((self.i0 + i_local - 1, self.j0 + j_local - 1))
+        if self.i0 == 0 || self.i0 > grid.nlon || self.nlon > grid.nlon {
+            bail!("mesh longitude window is outside its global grid");
+        }
+        let longitude = self
+            .i0
+            .checked_add(i_local - 1)
+            .context("mesh longitude index overflows usize")?;
+        let longitude = if longitude > grid.nlon {
+            longitude - grid.nlon
+        } else {
+            longitude
+        };
+        Ok((
+            longitude,
+            self.j0
+                .checked_add(j_local - 1)
+                .context("mesh latitude index overflows usize")?,
+        ))
     }
 }
 
@@ -135,27 +169,18 @@ fn inspect_equal_latlon(
         bail!("spatial grid edge arrays have inconsistent lengths");
     }
     let (nlon, nlat) = (lon_w.len(), lat_s.len());
-    if lat_s
-        .iter()
-        .zip(&lat_n)
-        .any(|(south, north)| south >= north)
-    {
-        bail!("spatial latitude cells must satisfy south < north");
-    }
-    let wrapped = lon_w
-        .iter()
-        .zip(&lon_e)
-        .enumerate()
-        .filter(|(_, (west, east))| east <= west)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if wrapped.len() > 1
-        || wrapped
-            .first()
-            .is_some_and(|index| *index != nlon - 1 || lon_e[*index] != -180.0)
-    {
-        bail!("spatial longitude cells contain an unsupported dateline crossing");
-    }
+    let grid = crate::SpatialGrid {
+        lon_w,
+        lon_e,
+        lat_s,
+        lat_n,
+    };
+    let (west, east) = crate::spatial::validate_spatial_grid(&grid, "spatial input")?;
+    let (west, east) = if (east - west - 360.0).abs() <= 1e-9 {
+        (-180.0, 180.0)
+    } else {
+        (west, if east > 180.0 { east - 360.0 } else { east })
+    };
     let data = file
         .variable(variable)
         .with_context(|| format!("spatial input has no variable {variable}"))?;
@@ -172,11 +197,6 @@ fn inspect_equal_latlon(
             .checked_mul(i64::try_from(nlon)?)
             .context("GRIDBASED row-major element identity exceeds int64")?
     };
-    let east = if wrapped.is_empty() {
-        lon_e.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-    } else {
-        180.0
-    };
     Ok(SpatialInputSummary {
         schema: if has_explicit_element_ids {
             "equal-lat-lon-elmindex-v1"
@@ -188,10 +208,10 @@ fn inspect_equal_latlon(
         nlat,
         active_cells,
         max_elmid,
-        west: lon_w.iter().copied().fold(f64::INFINITY, f64::min),
+        west,
         east,
-        south: lat_s.iter().copied().fold(f64::INFINITY, f64::min),
-        north: lat_n.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        south: grid.lat_s.iter().copied().fold(f64::INFINITY, f64::min),
+        north: grid.lat_n.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     })
 }
 
@@ -413,10 +433,10 @@ impl EqualLatLonMesh {
         let mut active = Vec::with_capacity(len);
         // ponytail: P0 直接做 cells×vertices；实测成为流域大网格瓶颈时改扫描线分桶。
         for j_local in 1..=window.nlat {
-            let (_, j_global) = window.global_indices(1, j_local)?;
+            let (_, j_global) = window.global_indices(grid, 1, j_local)?;
             let lat = grid.lat_center(j_global);
             for i_local in 1..=window.nlon {
-                let (i_global, _) = window.global_indices(i_local, j_local)?;
+                let (i_global, _) = window.global_indices(grid, i_local, j_local)?;
                 active.push(domain.contains(grid.lon_center(i_global), lat));
             }
         }
@@ -442,30 +462,47 @@ impl EqualLatLonMesh {
             .collect::<Vec<_>>();
         require_mask_attribute(&file, "global_nlon", self.grid.nlon)?;
         require_mask_attribute(&file, "global_nlat", self.grid.nlat)?;
-        let values = if shape == [self.grid.nlat, self.grid.nlon] {
-            var.get_values::<f64, _>((
-                self.window.j0 - 1..self.window.j0 - 1 + self.window.nlat,
-                self.window.i0 - 1..self.window.i0 - 1 + self.window.nlon,
-            ))?
+        let has_frame =
+            file.attribute("window_i0").is_some() || file.attribute("window_j0").is_some();
+        let global_mask = shape == [self.grid.nlat, self.grid.nlon]
+            && (!has_frame
+                || (require_mask_attribute(&file, "window_i0", 1).is_ok()
+                    && require_mask_attribute(&file, "window_j0", 1).is_ok()));
+        let (row_start, pieces) = if global_mask {
+            let first = self.window.nlon.min(self.grid.nlon - self.window.i0 + 1);
+            (
+                self.window.j0 - 1,
+                [
+                    (self.window.i0 - 1, first, 0),
+                    (0, self.window.nlon - first, first),
+                ],
+            )
         } else if shape == [self.window.nlat, self.window.nlon] {
             require_mask_attribute(&file, "window_i0", self.window.i0)?;
             require_mask_attribute(&file, "window_j0", self.window.j0)?;
-            var.get_values::<f64, _>(..)?
+            (0, [(0, self.window.nlon, 0), (0, 0, 0)])
         } else {
             bail!(
                 "non-ocean mask {variable} has shape {:?}; expected global {}x{} or window {}x{} in latitude,longitude order",
-                shape,
-                self.grid.nlat,
-                self.grid.nlon,
-                self.window.nlat,
-                self.window.nlon
+                shape, self.grid.nlat, self.grid.nlon, self.window.nlat, self.window.nlon
             );
         };
-        if values.len() != self.active.len() {
-            bail!("non-ocean mask returned an unexpected number of cells");
-        }
-        for (active, value) in self.active.iter_mut().zip(values) {
-            *active = *active && value.is_finite() && value > 0.0;
+        // At most two contiguous hyperslabs, applying each directly to the mask.
+        // No global allocation, per-cell I/O, or second full-window f64 buffer.
+        for (column_start, width, local_start) in pieces {
+            if width == 0 {
+                continue;
+            }
+            let values = var.get_values::<f64, _>((
+                row_start..row_start + self.window.nlat,
+                column_start..column_start + width,
+            ))?;
+            for (row, values) in values.chunks_exact(width).enumerate() {
+                let offset = row * self.window.nlon + local_start;
+                for (active, value) in self.active[offset..offset + width].iter_mut().zip(values) {
+                    *active = *active && value.is_finite() && *value > 0.0;
+                }
+            }
         }
         if !self.active.iter().any(|value| *value) {
             bail!("domain and non-ocean mask have no active cells in common");
@@ -479,7 +516,8 @@ impl EqualLatLonMesh {
             for i_local in 1..=self.window.nlon {
                 let offset = (j_local - 1) * self.window.nlon + i_local - 1;
                 if self.active[offset] {
-                    let (i_global, j_global) = self.window.global_indices(i_local, j_local)?;
+                    let (i_global, j_global) =
+                        self.window.global_indices(self.grid, i_local, j_local)?;
                     ids.push(element_id(self.grid, i_global, j_global)?);
                 } else {
                     ids.push(0);
@@ -550,11 +588,19 @@ impl EqualLatLonMesh {
         file.add_attribute("window_j0", i64::try_from(self.window.j0)?)?;
 
         let lon_w = (1..=self.window.nlon)
-            .map(|i| self.grid.lon_w(self.window.i0 + i - 1))
-            .collect::<Vec<_>>();
+            .map(|i| {
+                self.window
+                    .global_indices(self.grid, i, 1)
+                    .map(|(i, _)| self.grid.lon_w(i))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let lon_e = (1..=self.window.nlon)
-            .map(|i| self.grid.lon_e(self.window.i0 + i - 1))
-            .collect::<Vec<_>>();
+            .map(|i| {
+                self.window
+                    .global_indices(self.grid, i, 1)
+                    .map(|(i, _)| self.grid.lon_e(i))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let lat_s = (1..=self.window.nlat)
             .map(|j| self.grid.lat_s(self.window.j0 + j - 1))
             .collect::<Vec<_>>();
@@ -620,6 +666,155 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("colm-{name}-{}-{nonce}.nc", std::process::id()))
+    }
+
+    #[test]
+    fn dateline_regional_input_reaches_the_existing_spatial_mapper() {
+        let path = output("dateline-regional");
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("nlon", 2).unwrap();
+        file.add_dimension("nlat", 1).unwrap();
+        put_1d(&mut file, "lon_w", "nlon", &[135.0, -180.0]).unwrap();
+        put_1d(&mut file, "lon_e", "nlon", &[-180.0, -135.0]).unwrap();
+        put_1d(&mut file, "lat_s", "nlat", &[0.0]).unwrap();
+        put_1d(&mut file, "lat_n", "nlat", &[45.0]).unwrap();
+        file.add_variable::<i64>("elmindex", &["nlat", "nlon"])
+            .unwrap()
+            .put_values(&[101, 102], ..)
+            .unwrap();
+        file.close().unwrap();
+        let summary = inspect_spatial_input(&path, "unstructured").unwrap();
+        assert_eq!((summary.west, summary.east), (135.0, -135.0));
+        let topology = crate::build_spatial_topology(
+            &path,
+            crate::SpatialInputKind::Unstructured,
+            Grid::by_ndims(8, 4),
+        )
+        .unwrap();
+        assert_eq!(topology.land_elements.element_ids, [101, 102]);
+        assert_eq!(topology.pixel.lon_w, [135.0, -180.0]);
+        assert_eq!(topology.pixel.lon_e, [-180.0, -135.0]);
+        assert_eq!(topology.mesh.pixels(0).unwrap(), (&[1][..], &[1][..]));
+        assert_eq!(topology.mesh.pixels(1).unwrap(), (&[2][..], &[1][..]));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dateline_window_preserves_global_ids_and_wrapped_file_edges() {
+        let grid = Grid::by_ndims(8, 4);
+        let window = MeshWindow::covering_bbox(grid, 135.0, -90.0, -45.0, 45.0).unwrap();
+        assert_eq!(
+            (window.i0, window.j0, window.nlon, window.nlat),
+            (8, 2, 3, 2)
+        );
+        let mesh =
+            EqualLatLonMesh::new(grid, window, vec![true, true, true, true, false, true]).unwrap();
+        assert_eq!(mesh.element_ids().unwrap(), [16, 9, 10, 24, 0, 18]);
+        for regular in [false, true] {
+            let path = output("dateline-window");
+            if regular {
+                mesh.write_gridbased_netcdf(&path).unwrap();
+            } else {
+                mesh.write_netcdf(&path).unwrap();
+            }
+            let summary =
+                inspect_spatial_input(&path, if regular { "latlon" } else { "unstructured" })
+                    .unwrap();
+            assert_eq!(
+                (summary.west, summary.east, summary.south, summary.north),
+                (135.0, -90.0, -45.0, 45.0)
+            );
+            assert_eq!(
+                (summary.active_cells, summary.nlon, summary.nlat),
+                (5, 3, 2)
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+        assert!(MeshWindow::covering_bbox(grid, 179.0, -179.0, 0.0, 45.0).is_err());
+        assert!(MeshWindow::covering_bbox(grid, 179.0, 180.0, 0.0, 45.0).is_err());
+        assert!(MeshWindow::covering_bbox(grid, 181.0, -170.0, 0.0, 45.0).is_err());
+        assert!(MeshWindow::covering_bbox(grid, 170.0, -181.0, 0.0, 45.0).is_err());
+        assert!(MeshWindow::covering_bbox(grid, -45.0, 45.0, 89.0, 90.0).is_err());
+        assert!(MeshWindow::covering_bbox(grid, -45.0, 45.0, -90.0, -89.0).is_err());
+        for (west, east) in [(-180.0, 180.0), (180.0, -180.0)] {
+            assert_eq!(
+                MeshWindow::covering_bbox(grid, west, east, -90.0, 90.0).unwrap(),
+                MeshWindow::global(grid).unwrap()
+            );
+        }
+        assert_eq!(
+            MeshWindow::covering_bbox(grid, 180.0, -135.0, 0.0, 45.0).unwrap(),
+            MeshWindow::new(grid, 1, 2, 1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn dateline_masks_use_two_global_slabs_or_the_explicit_local_frame() {
+        let grid = Grid::by_ndims(4, 2);
+        let window = MeshWindow::new(grid, 4, 1, 2, 2).unwrap();
+        for local in [false, true] {
+            let path = output("dateline-mask");
+            let mut file = netcdf::create(&path).unwrap();
+            file.add_dimension("lat", 2).unwrap();
+            file.add_dimension("lon", if local { 2 } else { 4 })
+                .unwrap();
+            file.add_attribute("global_nlat", 2_i64).unwrap();
+            file.add_attribute("global_nlon", 4_i64).unwrap();
+            if local {
+                file.add_attribute("window_i0", 4_i64).unwrap();
+                file.add_attribute("window_j0", 1_i64).unwrap();
+            }
+            let values: &[i32] = if local {
+                &[0, 1, 1, 0]
+            } else {
+                &[1, 0, 0, 0, 0, 0, 0, 1]
+            };
+            file.add_variable::<i32>("mask", &["lat", "lon"])
+                .unwrap()
+                .put_values(values, ..)
+                .unwrap();
+            file.close().unwrap();
+            let masked = EqualLatLonMesh::all_active(grid, window)
+                .unwrap()
+                .with_non_ocean_mask(&path, "mask")
+                .unwrap();
+            assert_eq!(masked.element_ids().unwrap(), [0, 1, 8, 0]);
+            std::fs::remove_file(path).unwrap();
+        }
+        // A full-width crop has global dimensions. Explicit (1,1) metadata
+        // still denotes the global frame; a rotated local frame must match.
+        let window = MeshWindow::new(grid, 3, 1, 4, 2).unwrap();
+        for origin in [None, Some(1), Some(3), Some(4)] {
+            let path = output("dateline-fullwidth-mask");
+            let mut file = netcdf::create(&path).unwrap();
+            file.add_dimension("lat", 2).unwrap();
+            file.add_dimension("lon", 4).unwrap();
+            file.add_attribute("global_nlon", 4).unwrap();
+            file.add_attribute("global_nlat", 2).unwrap();
+            if let Some(origin) = origin {
+                file.add_attribute("window_i0", origin).unwrap();
+                file.add_attribute("window_j0", 1).unwrap();
+            }
+            file.add_variable::<i32>("mask", &["lat", "lon"])
+                .unwrap()
+                .put_values(&[1, 0, 0, 0, 0, 1, 0, 0], ..)
+                .unwrap();
+            file.close().unwrap();
+            let masked = EqualLatLonMesh::all_active(grid, window)
+                .unwrap()
+                .with_non_ocean_mask(&path, "mask");
+            if origin == Some(4) {
+                assert!(masked.is_err());
+            } else {
+                let expected = if origin == Some(3) {
+                    [3, 0, 0, 0, 0, 8, 0, 0]
+                } else {
+                    [0, 0, 1, 0, 0, 0, 0, 6]
+                };
+                assert_eq!(masked.unwrap().element_ids().unwrap(), expected);
+            }
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
