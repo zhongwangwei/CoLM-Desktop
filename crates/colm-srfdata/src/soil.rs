@@ -5,6 +5,7 @@
 //! serialization remain in the spatial command layer.
 
 use anyhow::{ensure, Result};
+use rayon::prelude::*;
 
 use crate::{
     minpack::{lmder, LeastSquaresProblem},
@@ -172,6 +173,7 @@ pub fn aggregate_vgm(
     ] {
         validate(patches, raw, area)?;
     }
+    let values = aggregate_vgm_values(patches, input, area, classes, fills, fit);
     let mut output = VgmSoil {
         theta_r: vec![SURFACE_MISSING; patches.len()],
         alpha: vec![SURFACE_MISSING; patches.len()],
@@ -188,58 +190,89 @@ pub fn aggregate_vgm(
             output.theta_s[patch] = output.theta_s[source];
             output.k_s[patch] = output.k_s[source];
             output.l[patch] = output.l[source];
-            continue;
-        }
-        if patches.patch_type_for(patch) == 0 {
-            continue;
-        }
-        let theta_r = filled_values(patches, patch, input.theta_r, classes, fills.theta_r);
-        let alpha = filled_values(patches, patch, input.alpha, classes, fills.alpha);
-        let n = filled_values(patches, patch, input.n, classes, fills.n);
-        let theta_s = filled_values(patches, patch, input.theta_s, classes, fills.theta_s);
-        let k_s = filled_values(patches, patch, input.k_s, classes, fills.k_s);
-        let l = filled_values(patches, patch, input.l, classes, fills.l);
-        let cells = patches.raw_cells(patch);
-        output.theta_r[patch] = statistic(&theta_r, cells, area, SoilStatistic::AreaMean);
-        output.alpha[patch] = statistic(&alpha, cells, area, SoilStatistic::Median);
-        output.n[patch] = statistic(&n, cells, area, SoilStatistic::Median);
-        output.theta_s[patch] = statistic(&theta_s, cells, area, SoilStatistic::AreaMean);
-        output.k_s[patch] = statistic(&k_s, cells, area, SoilStatistic::GeometricMean);
-        output.l[patch] = statistic(&l, cells, area, SoilStatistic::Median);
-        if fit && cells.len() > 1 {
-            let problem = VgmProblem {
-                theta_r: &theta_r,
-                alpha: &alpha,
-                n: &n,
-                theta_s: &theta_s,
-                k_s: &k_s,
-                l: &l,
-                phi: output.theta_s[patch],
-                conductivity: output.k_s[patch],
-                l_patch: output.l[patch],
-            };
-            let mut x = [
-                output.theta_r[patch],
-                output.alpha[patch],
-                output.n[patch],
-                output.k_s[patch],
-            ];
-            if lmder(&problem, &mut x, VGM_PRESSURES.len())
-                && x[0] >= 0.0
-                && x[0] <= output.theta_s[patch]
-                && (1.0e-5..=1.0).contains(&x[1])
-                && (1.1..=10.0).contains(&x[2])
-                && x[3] > 0.0
-                && x[3] <= 1.0e7
-            {
-                output.theta_r[patch] = x[0];
-                output.alpha[patch] = x[1];
-                output.n[patch] = x[2];
-                output.k_s[patch] = x[3];
-            }
+        } else if let Some(values) = values[patch] {
+            output.theta_r[patch] = values[0];
+            output.alpha[patch] = values[1];
+            output.n[patch] = values[2];
+            output.theta_s[patch] = values[3];
+            output.k_s[patch] = values[4];
+            output.l[patch] = values[5];
         }
     }
     Ok(output)
+}
+
+type VgmValues = [f64; 6];
+
+fn aggregate_vgm_values(
+    patches: &FlatPatches,
+    input: VgmInputs<'_>,
+    area: &[f64],
+    classes: SoilPatchClasses,
+    fills: VgmFills,
+    fit: bool,
+) -> Vec<Option<VgmValues>> {
+    (0..patches.len())
+        .into_par_iter()
+        .map(|patch| aggregate_vgm_patch(patches, patch, input, area, classes, fills, fit))
+        .collect()
+}
+
+fn aggregate_vgm_patch(
+    patches: &FlatPatches,
+    patch: usize,
+    input: VgmInputs<'_>,
+    area: &[f64],
+    classes: SoilPatchClasses,
+    fills: VgmFills,
+    fit: bool,
+) -> Option<VgmValues> {
+    if patches.wmo_source_for(patch).is_some() || patches.patch_type_for(patch) == 0 {
+        return None;
+    }
+    let theta_r = filled_values(patches, patch, input.theta_r, classes, fills.theta_r);
+    let alpha = filled_values(patches, patch, input.alpha, classes, fills.alpha);
+    let n = filled_values(patches, patch, input.n, classes, fills.n);
+    let theta_s = filled_values(patches, patch, input.theta_s, classes, fills.theta_s);
+    let k_s = filled_values(patches, patch, input.k_s, classes, fills.k_s);
+    let l = filled_values(patches, patch, input.l, classes, fills.l);
+    let cells = patches.raw_cells(patch);
+    let mut values = [
+        statistic(&theta_r, cells, area, SoilStatistic::AreaMean),
+        statistic(&alpha, cells, area, SoilStatistic::Median),
+        statistic(&n, cells, area, SoilStatistic::Median),
+        statistic(&theta_s, cells, area, SoilStatistic::AreaMean),
+        statistic(&k_s, cells, area, SoilStatistic::GeometricMean),
+        statistic(&l, cells, area, SoilStatistic::Median),
+    ];
+    if fit && cells.len() > 1 {
+        let problem = VgmProblem {
+            theta_r: &theta_r,
+            alpha: &alpha,
+            n: &n,
+            theta_s: &theta_s,
+            k_s: &k_s,
+            l: &l,
+            phi: values[3],
+            conductivity: values[4],
+            l_patch: values[5],
+        };
+        let mut x = [values[0], values[1], values[2], values[4]];
+        if lmder(&problem, &mut x, VGM_PRESSURES.len())
+            && x[0] >= 0.0
+            && x[0] <= values[3]
+            && (1.0e-5..=1.0).contains(&x[1])
+            && (1.1..=10.0).contains(&x[2])
+            && x[3] > 0.0
+            && x[3] <= 1.0e7
+        {
+            values[0] = x[0];
+            values[1] = x[1];
+            values[2] = x[2];
+            values[4] = x[3];
+        }
+    }
+    Some(values)
 }
 
 /// CoLM's water/glacier constants for the VGM source fields.
@@ -711,6 +744,49 @@ mod tests {
         assert!((result.n[0] - 1.5).abs() < 1.0e-8);
         assert!((result.theta_s[0] - 0.45).abs() < 1.0e-8);
         assert!((result.k_s[0] - 10.0).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn parallel_vgm_keeps_sequential_values_and_wmo_copies() {
+        let layout = FlatPatches::new(
+            vec![1, 1, 1],
+            vec![0, 2, 4, 6],
+            vec![0, 1, 2, 3, 4, 5],
+            vec![None, None, Some(0)],
+        )
+        .unwrap();
+        let input = VgmInputs {
+            theta_r: &[0.10, 0.12, 0.08, 0.09, 0.2, 0.2],
+            alpha: &[0.01, 0.02, 0.03, 0.04, 0.5, 0.5],
+            n: &[1.5, 1.6, 1.7, 1.8, 2.0, 2.0],
+            theta_s: &[0.45, 0.46, 0.47, 0.48, 0.5, 0.5],
+            k_s: &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            l: &[0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        };
+        let area = [1.0; 6];
+        let classes = SoilPatchClasses {
+            water: 17,
+            glacier: 15,
+        };
+        let sequential = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                aggregate_vgm_values(&layout, input, &area, classes, VgmFills::default(), false)
+            });
+        let parallel = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                aggregate_vgm_values(&layout, input, &area, classes, VgmFills::default(), false)
+            });
+        assert_eq!(parallel, sequential);
+        let output =
+            aggregate_vgm(&layout, input, &area, classes, VgmFills::default(), false).unwrap();
+        assert_eq!(output.theta_r[2], output.theta_r[0]);
+        assert_eq!(output.k_s[2], output.k_s[0]);
     }
 
     #[test]

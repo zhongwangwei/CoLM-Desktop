@@ -68,12 +68,21 @@ element, patch, HRU, PFT, and urban vector.  `USE_srfdata_from_3D_gridded_data`
 remains explicitly refused because the corresponding upstream branch is still a
 `TODO` that exits without producing landdata.
 
+## CPU parallelism
+
+Production numerical parallelism follows [`cpu-parallelism.md`](cpu-parallelism.md):
+Rayon distributes independent patch/mesh/raster work, while `f64` operation
+order within each work unit and ordered NetCDF output stay deterministic.
+
 ## Performance constraints
 
 - Keep raw raster reads block-aligned; never materialize a global 500 m field.
 - Keep patch-to-raw-cell membership in one `offsets + indices` layout and reuse it across
   every aggregation field.
 - Reuse buffers and file handles per I/O owner; no per-patch allocations or open/close.
+- On macOS, stage HDF5 tiles read from an SMB rawdata mount on a local disk: the
+  system NetCDF/HDF5 stack can fault during `nc_close` after an SMB dataset read
+  (also reproduced with Python `netCDF4`).
 - Keep NetCDF and MPI outside pure aggregation kernels, so CPU vectorization and later GPU
   kernels do not change scientific I/O semantics.
 

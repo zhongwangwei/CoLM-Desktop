@@ -6,7 +6,7 @@
 //! Scientific rawdata aggregation deliberately stays outside this module.
 
 use std::collections::{btree_map::Entry, BTreeMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use netcdf::{
@@ -563,6 +563,21 @@ pub fn read_mesh_raster_f64(
     raw_grid: Grid,
 ) -> Result<Vec<f64>> {
     read_mesh_raster(raster, variable, mesh, pixel, raw_grid)
+}
+
+/// Read an already-open floating point raster in mesh-pixel order.
+///
+/// Callers that consume several variables from one NetCDF file should retain
+/// the handle and use this function rather than repeatedly opening and closing
+/// the HDF-backed file.
+pub fn read_mesh_open_raster_f64(
+    file: &netcdf::File,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    read_mesh_open_raster(file, variable, mesh, pixel, raw_grid)
 }
 
 /// Read one one-based time slice of a global raw raster in mesh-pixel order.
@@ -1189,6 +1204,25 @@ pub fn read_mesh_tiled_raster_f64(
     read_mesh_tiled_raster(directory, suffix, variable, mesh, pixel, raw_grid)
 }
 
+/// Reusable 5°×5° NetCDF files for a serial rawdata read sequence.
+#[derive(Default)]
+pub struct TiledRasterFiles {
+    files: BTreeMap<PathBuf, netcdf::File>,
+}
+
+impl TiledRasterFiles {
+    fn open(&mut self, path: &Path) -> Result<&netcdf::File> {
+        if !self.files.contains_key(path) {
+            self.files.insert(
+                path.to_path_buf(),
+                netcdf::open(path)
+                    .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?,
+            );
+        }
+        Ok(self.files.get(path).expect("5 degree tile was inserted"))
+    }
+}
+
 /// Read an integer CoLM 5°×5° tile variable in flattened mesh-pixel order.
 pub fn read_mesh_tiled_raster_i32(
     directory: &Path,
@@ -1215,11 +1249,42 @@ pub fn read_mesh_tiled_raster_time_f64(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<f64>> {
+    let mut files = TiledRasterFiles::default();
     read_mesh_tiled_raster_at_time(
+        &mut files,
         directory,
         suffix,
         variable,
         Some(time),
+        false,
+        mesh,
+        pixel,
+        raw_grid,
+    )
+}
+
+/// Read one timed 5°×5° tile field while retaining its raw NetCDF files.
+///
+/// Reuse one [`TiledRasterFiles`] across related time slices to avoid opening
+/// and closing the same HDF-backed 5° tiles for every month.
+#[allow(clippy::too_many_arguments)]
+pub fn read_mesh_tiled_raster_time_cached_f64(
+    files: &mut TiledRasterFiles,
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    time: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<f64>> {
+    read_mesh_tiled_raster_at_time(
+        files,
+        directory,
+        suffix,
+        variable,
+        Some(time),
+        true,
         mesh,
         pixel,
         raw_grid,
@@ -1299,11 +1364,11 @@ fn read_mesh_tiled_raster_pft_at_time(
     let y_tiles = tile_axis(&latitude, tile_nlat);
     let pixel_count = pixel.lon_w.len() * pixel.lat_s.len();
     let mut pixels = vec![vec![None; pixel_count]; pft_count];
+    let mut files = TiledRasterFiles::default();
     for (&tile_y, rows) in &y_tiles {
         for (&tile_x, columns) in &x_tiles {
             let path = directory.join(tile_filename(tile_x, tile_y, suffix));
-            let file = netcdf::open(&path)
-                .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?;
+            let file = files.open(&path)?;
             let source = file
                 .variable(variable)
                 .with_context(|| format!("{variable} is absent from {}", path.display()))?;
@@ -1401,9 +1466,19 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
     raw_grid: Grid,
 ) -> Result<Vec<T>> {
     let file = netcdf::open(raster).with_context(|| format!("cannot open {}", raster.display()))?;
+    read_mesh_open_raster(&file, variable, mesh, pixel, raw_grid)
+}
+
+fn read_mesh_open_raster<T: NcTypeDescriptor + Copy>(
+    file: &netcdf::File,
+    variable: &str,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<T>> {
     let source = file
         .variable(variable)
-        .with_context(|| format!("{variable} is absent from {}", raster.display()))?;
+        .with_context(|| format!("{variable} is absent from the open raster"))?;
     let shape = source
         .dimensions()
         .iter()
@@ -2471,14 +2546,20 @@ fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<T>> {
-    read_mesh_tiled_raster_at_time(directory, suffix, variable, None, mesh, pixel, raw_grid)
+    let mut files = TiledRasterFiles::default();
+    read_mesh_tiled_raster_at_time(
+        &mut files, directory, suffix, variable, None, false, mesh, pixel, raw_grid,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
+    files: &mut TiledRasterFiles,
     directory: &Path,
     suffix: &str,
     variable: &str,
     time: Option<usize>,
+    retain_files: bool,
     mesh: &FlatMesh,
     pixel: &PixelAxes,
     raw_grid: Grid,
@@ -2498,8 +2579,7 @@ fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
     for (&tile_y, rows) in &y_tiles {
         for (&tile_x, columns) in &x_tiles {
             let path = directory.join(tile_filename(tile_x, tile_y, suffix));
-            let file = netcdf::open(&path)
-                .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?;
+            let file = files.open(&path)?;
             let source = file
                 .variable(variable)
                 .with_context(|| format!("{variable} is absent from {}", path.display()))?;
@@ -2516,6 +2596,14 @@ fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
                             .context("5 degree tile pixel is outside its variable")?,
                     );
                 }
+            }
+            if !retain_files {
+                drop(
+                    files
+                        .files
+                        .remove(&path)
+                        .expect("5 degree tile was inserted"),
+                );
             }
         }
     }
@@ -2551,23 +2639,44 @@ fn tile_values<T: NcTypeDescriptor + Copy>(
             ensure!(time > 0, "5 degree tile time is one-based");
             ensure!(
                 dimensions.len() == 3,
-                "{} in {} must have (lon, lat, time) dimensions",
+                "{} in {} must have latitude, longitude, and time dimensions",
                 source.name(),
                 path.display()
             );
+            let time_axis = dimensions
+                .iter()
+                .position(|dimension| {
+                    matches!(
+                        dimension.name().to_ascii_lowercase().as_str(),
+                        "time" | "month" | "mon"
+                    )
+                })
+                .unwrap_or(2);
             ensure!(
-                time <= dimensions[2].len(),
+                time <= dimensions[time_axis].len(),
                 "5 degree tile {} has only {} time slices",
                 path.display(),
-                dimensions[2].len()
+                dimensions[time_axis].len()
             );
-            let axes = tile_axes(&dimensions[..2], tile_nlon, tile_nlat, path)?;
-            let values = source.get_values::<T, _>((
-                0..dimensions[0].len(),
-                0..dimensions[1].len(),
-                time - 1..time,
-            ))?;
-            (values, axes)
+            let spatial = dimensions
+                .iter()
+                .enumerate()
+                .filter(|(axis, _)| *axis != time_axis)
+                .map(|(_, dimension)| dimension.clone())
+                .collect::<Vec<_>>();
+            let axes = tile_axes(&spatial, tile_nlon, tile_nlat, path)?;
+            let mut extents = vec![Extent::Index(0); dimensions.len()];
+            for (axis, dimension) in dimensions.iter().enumerate() {
+                if axis != time_axis {
+                    extents[axis] = Extent::SliceCount {
+                        start: 0,
+                        count: dimension.len(),
+                        stride: 1,
+                    };
+                }
+            }
+            extents[time_axis] = Extent::Index(time - 1);
+            (source.get_values::<T, _>(extents)?, axes)
         }
     };
     ensure!(
@@ -2594,6 +2703,7 @@ struct PftTileAxes {
     latitude: usize,
     longitude: usize,
     time: Option<(usize, usize)>,
+    spatial: TileAxes,
 }
 
 fn pft_tile_axes(
@@ -2634,7 +2744,7 @@ fn pft_tile_axes(
             longitude,
             requested_time
                 .map(|time| {
-                    let axis = axis(&["time", "month"])
+                    let axis = axis(&["time", "month", "mon"])
                         .context("PFT time tile has no time/month dimension")?;
                     ensure!(
                         time <= dimensions[axis].len(),
@@ -2696,11 +2806,23 @@ fn pft_tile_axes(
         "PFT tile {} dimensions do not match {pft_count} PFTs and a {tile_nlat}x{tile_nlon} tile",
         path.display()
     );
+    let spatial_axes = (0..dimensions.len())
+        .filter(|axis| *axis != pft && time.is_none_or(|(time, _)| *axis != time))
+        .collect::<Vec<_>>();
+    let spatial = match spatial_axes.as_slice() {
+        [first, second] if *first == latitude && *second == longitude => TileAxes::LatLon,
+        [first, second] if *first == longitude && *second == latitude => TileAxes::LonLat,
+        _ => bail!(
+            "PFT tile {} has ambiguous spatial dimensions",
+            path.display()
+        ),
+    };
     Ok(PftTileAxes {
         pft,
         latitude,
         longitude,
         time,
+        spatial,
     })
 }
 
@@ -2744,18 +2866,10 @@ fn pft_tile_offset(
     tile_nlon: usize,
     tile_nlat: usize,
 ) -> usize {
-    let mut dimensions = [1_usize; 3];
-    dimensions[axes.latitude] = tile_nlat;
-    dimensions[axes.longitude] = tile_nlon;
-    let mut coordinates = [0_usize; 3];
-    coordinates[axes.longitude] = longitude;
-    coordinates[axes.latitude] = latitude;
-    dimensions
-        .into_iter()
-        .zip(coordinates)
-        .fold(0, |offset, (dimension, coordinate)| {
-            offset * dimension + coordinate
-        })
+    match axes.spatial {
+        TileAxes::LatLon => latitude * tile_nlon + longitude,
+        TileAxes::LonLat => longitude * tile_nlat + latitude,
+    }
 }
 
 fn tile_axis(indices: &[usize], tile_len: usize) -> BTreeMap<usize, Vec<(usize, usize)>> {
@@ -3671,7 +3785,7 @@ fn unwrap_longitude(value: f64, previous: Option<f64>) -> Result<f64> {
 fn longitude_step(value: f64, raw: Grid) -> Result<usize> {
     let step = ((value + 180.0) / raw.dlon()).round();
     ensure!(
-        nearly_equal(value, -180.0 + step * raw.dlon()),
+        aligned_to_raw_grid(value, -180.0 + step * raw.dlon(), raw),
         "spatial longitude edge {value} is not aligned to the raw grid"
     );
     let step = usize::try_from(step as i64).context("spatial longitude index is negative")?;
@@ -3689,7 +3803,7 @@ fn latitude_step(value: f64, raw: Grid) -> Result<usize> {
     );
     let step = ((90.0 - value) / raw.dlat()).round();
     ensure!(
-        nearly_equal(value, 90.0 - step * raw.dlat()),
+        aligned_to_raw_grid(value, 90.0 - step * raw.dlat(), raw),
         "spatial latitude edge {value} is not aligned to the raw grid"
     );
     let step = usize::try_from(step as i64).context("spatial latitude index is negative")?;
@@ -3702,6 +3816,18 @@ fn latitude_step(value: f64, raw: Grid) -> Result<usize> {
 
 fn nearly_equal(left: f64, right: f64) -> bool {
     (left - right).abs() <= ALIGNMENT_EPSILON.max(left.abs().max(right.abs()) * 1e-12)
+}
+
+/// Accept coordinates promoted from a single-precision mesh without accepting
+/// an adjacent raw cell.  Production unstructured meshes commonly preserve
+/// their NetCDF `float` edge representation even though the Rust reader uses
+/// `f64`; its error is much larger than ordinary `f64` roundoff.
+fn aligned_to_raw_grid(value: f64, expected: f64, raw: Grid) -> bool {
+    let single_precision = 2.0 * f64::from(f32::EPSILON) * value.abs().max(expected.abs());
+    let tolerance = ALIGNMENT_EPSILON
+        .max(single_precision)
+        .min(raw.dlon().min(raw.dlat()) * 0.25);
+    (value - expected).abs() <= tolerance
 }
 
 fn catchment_grid(file: &netcdf::File, raw: Grid) -> Result<SpatialGrid> {
@@ -3722,7 +3848,7 @@ fn catchment_grid(file: &netcdf::File, raw: Grid) -> Result<SpatialGrid> {
         let value = normalized_longitude(value);
         let index = raw.index_of(value, 0.0).0;
         ensure!(
-            nearly_equal(value, raw.lon_center(index)),
+            aligned_to_raw_grid(value, raw.lon_center(index), raw),
             "catchment longitude {value} is not aligned to the raw grid centres"
         );
         lon_w.push(raw.lon_w(index));
@@ -3733,7 +3859,7 @@ fn catchment_grid(file: &netcdf::File, raw: Grid) -> Result<SpatialGrid> {
     for value in latitude {
         let index = raw.index_of(0.0, value).1;
         ensure!(
-            nearly_equal(value, raw.lat_center(index)),
+            aligned_to_raw_grid(value, raw.lat_center(index), raw),
             "catchment latitude {value} is not aligned to the raw grid centres"
         );
         lat_s.push(raw.lat_s(index));

@@ -1,6 +1,9 @@
 //! Native single-point surface-data materializer.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
@@ -21,9 +24,10 @@ use colm_srfdata::{
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
     mesh_cell_area_weights, read_coordinate_patch_selection_f64,
     read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
-    read_mesh_raster_f64, read_mesh_raster_i32, read_mesh_raster_layers_f64,
-    read_mesh_raster_time_f64, read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32,
-    read_mesh_tiled_raster_pft_f64, read_mesh_tiled_raster_pft_time_f64,
+    read_mesh_open_raster_f64, read_mesh_raster_f64, read_mesh_raster_i32,
+    read_mesh_raster_layers_f64, read_mesh_raster_time_f64, read_mesh_tiled_raster_f64,
+    read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
+    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_cached_f64,
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
     write_patch_diagnostic, write_patch_diagnostic_dimension, write_patch_diagnostic_time,
@@ -32,8 +36,8 @@ use colm_srfdata::{
     write_spatial_urban_topology, write_spatial_urban_vector, BlockLayout, CropLandPatchTopology,
     DiagnosticStatistic, FlatLandElements, FlatLandPatches, LczUrbanRawFields, NcarUrbanProperties,
     NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode, SpatialBounds, SpatialInputKind,
-    SpatialTopology, TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
-    DIAGNOSTIC_MISSING, MERIT_90M,
+    SpatialTopology, TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM,
+    COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -2484,6 +2488,7 @@ fn materialize_spatial_common_fields(
             .context("--monthly-vegetation-year requires --plant-tiles")?;
         let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        let mut tile_files = TiledRasterFiles::default();
         for &year in &args.monthly_vegetation_years {
             let mut lai_frames = Vec::with_capacity(12);
             let mut sai_frames = Vec::with_capacity(12);
@@ -2491,7 +2496,8 @@ fn materialize_spatial_common_fields(
             let (_, sai_name) = monthly_vegetation_source("MONTHLY_LC_SAI", year)?;
             for month in 1..=12 {
                 let lai = layout.aggregate_patch_vegetation_index(
-                    &read_mesh_tiled_raster_time_f64(
+                    &read_mesh_tiled_raster_time_cached_f64(
+                        &mut tile_files,
                         tiles,
                         &suffix,
                         &lai_name,
@@ -2503,7 +2509,8 @@ fn materialize_spatial_common_fields(
                     &area,
                 )?;
                 let sai = layout.aggregate_patch_vegetation_index(
-                    &read_mesh_tiled_raster_time_f64(
+                    &read_mesh_tiled_raster_time_cached_f64(
+                        &mut tile_files,
                         tiles,
                         &suffix,
                         &sai_name,
@@ -2585,23 +2592,12 @@ fn materialize_spatial_soil(
 ) -> Result<()> {
     let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    let mut raw = SoilRawReader::new(directory, topology);
     for layer in 1..=SOIL_LAYERS {
-        let quartz = read_soil_raw(
-            directory,
-            "vf_quartz_mineral_s.nc",
-            "vf_quartz_mineral_s",
-            layer,
-            topology,
-        )?;
-        let gravel = read_soil_raw(
-            directory,
-            "vf_gravels_s.nc",
-            "vf_gravels_s",
-            layer,
-            topology,
-        )?;
-        let sand = read_soil_raw(directory, "vf_sand_s.nc", "vf_sand_s", layer, topology)?;
-        let organic = read_soil_raw(directory, "vf_om_s.nc", "vf_om_s", layer, topology)?;
+        let quartz = raw.read("vf_quartz_mineral_s.nc", "vf_quartz_mineral_s", layer)?;
+        let gravel = raw.read("vf_gravels_s.nc", "vf_gravels_s", layer)?;
+        let sand = raw.read("vf_sand_s.nc", "vf_sand_s", layer)?;
+        let organic = raw.read("vf_om_s.nc", "vf_om_s", layer)?;
         for (name, raw, fill) in [
             ("vf_quartz_mineral_s", &quartz, 0.1),
             ("vf_gravels_s", &gravel, 0.0),
@@ -2663,7 +2659,7 @@ fn materialize_spatial_soil(
                 0.1,
             ),
         ] {
-            let raw = read_soil_raw(directory, file, source, layer, topology)?;
+            let raw = raw.read(file, source, layer)?;
             let values =
                 aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
             write_soil_layer(
@@ -2682,30 +2678,12 @@ fn materialize_spatial_soil(
                 let output = aggregate_vgm(
                     &layout,
                     VgmInputs {
-                        l: &read_soil_raw(directory, "VGM_L.nc", "VGM_L", layer, topology)?,
-                        theta_r: &read_soil_raw(
-                            directory,
-                            "VGM_theta_r.nc",
-                            "VGM_theta_r",
-                            layer,
-                            topology,
-                        )?,
-                        alpha: &read_soil_raw(
-                            directory,
-                            "VGM_alpha.nc",
-                            "VGM_alpha",
-                            layer,
-                            topology,
-                        )?,
-                        n: &read_soil_raw(directory, "VGM_n.nc", "VGM_n", layer, topology)?,
-                        theta_s: &read_soil_raw(
-                            directory,
-                            "theta_s.nc",
-                            "theta_s",
-                            layer,
-                            topology,
-                        )?,
-                        k_s: &read_soil_raw(directory, "k_s.nc", "k_s", layer, topology)?,
+                        l: &raw.read("VGM_L.nc", "VGM_L", layer)?,
+                        theta_r: &raw.read("VGM_theta_r.nc", "VGM_theta_r", layer)?,
+                        alpha: &raw.read("VGM_alpha.nc", "VGM_alpha", layer)?,
+                        n: &raw.read("VGM_n.nc", "VGM_n", layer)?,
+                        theta_s: &raw.read("theta_s.nc", "theta_s", layer)?,
+                        k_s: &raw.read("k_s.nc", "k_s", layer)?,
                     },
                     &area,
                     classes,
@@ -2733,7 +2711,7 @@ fn materialize_spatial_soil(
                 // The VGM initialization branch still writes Campbell's `bsw`,
                 // so `MOD_SoilParametersReadin.F90` requires these two inputs.
                 for (file, source) in [("psi_s.nc", "psi_s"), ("lambda.nc", "lambda")] {
-                    let raw = read_soil_raw(directory, file, source, layer, topology)?;
+                    let raw = raw.read(file, source, layer)?;
                     let values = aggregate_soil_field(
                         &layout,
                         &raw,
@@ -2759,16 +2737,10 @@ fn materialize_spatial_soil(
                 let output = aggregate_campbell(
                     &layout,
                     CampbellInputs {
-                        theta_s: &read_soil_raw(
-                            directory,
-                            "theta_s.nc",
-                            "theta_s",
-                            layer,
-                            topology,
-                        )?,
-                        k_s: &read_soil_raw(directory, "k_s.nc", "k_s", layer, topology)?,
-                        psi_s: &read_soil_raw(directory, "psi_s.nc", "psi_s", layer, topology)?,
-                        lambda: &read_soil_raw(directory, "lambda.nc", "lambda", layer, topology)?,
+                        theta_s: &raw.read("theta_s.nc", "theta_s", layer)?,
+                        k_s: &raw.read("k_s.nc", "k_s", layer)?,
+                        psi_s: &raw.read("psi_s.nc", "psi_s", layer)?,
+                        lambda: &raw.read("lambda.nc", "lambda", layer)?,
                     },
                     &area,
                     classes,
@@ -2860,7 +2832,7 @@ fn materialize_spatial_soil(
                 0.2,
             ),
         ] {
-            let raw = read_soil_raw(directory, file, source, layer, topology)?;
+            let raw = raw.read(file, source, layer)?;
             let values =
                 aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
             write_soil_layer(
@@ -2874,23 +2846,43 @@ fn materialize_spatial_soil(
             )?;
         }
     }
+    // ponytail: macOS HDF5 faults in nc_close after reads from the production SMB
+    // rawdata mount; this short-lived materializer lets the OS reclaim its descriptors.
+    std::mem::forget(raw);
     Ok(())
 }
 
-fn read_soil_raw(
-    directory: &std::path::Path,
-    file: &str,
-    variable: &str,
-    layer: usize,
-    topology: &SpatialTopology,
-) -> Result<Vec<f64>> {
-    read_mesh_raster_f64(
-        &directory.join(file),
-        &format!("{variable}_l{layer}"),
-        &topology.mesh,
-        &topology.pixel,
-        COLM_500M,
-    )
+struct SoilRawReader<'a> {
+    directory: &'a Path,
+    topology: &'a SpatialTopology,
+    files: BTreeMap<String, netcdf::File>,
+}
+
+impl<'a> SoilRawReader<'a> {
+    fn new(directory: &'a Path, topology: &'a SpatialTopology) -> Self {
+        Self {
+            directory,
+            topology,
+            files: BTreeMap::new(),
+        }
+    }
+
+    fn read(&mut self, file: &str, variable: &str, layer: usize) -> Result<Vec<f64>> {
+        if !self.files.contains_key(file) {
+            let path = self.directory.join(file);
+            self.files.insert(
+                file.to_owned(),
+                netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?,
+            );
+        }
+        read_mesh_open_raster_f64(
+            self.files.get(file).expect("soil file was inserted"),
+            &format!("{variable}_l{layer}"),
+            &self.topology.mesh,
+            &self.topology.pixel,
+            COLM_500M,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

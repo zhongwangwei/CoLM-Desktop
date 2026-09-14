@@ -126,6 +126,7 @@ fn write_five_degree_tile(path: &std::path::Path) {
     file.add_dimension("lat", 1).unwrap();
     file.add_dimension("lon", 2).unwrap();
     file.add_dimension("time", 2).unwrap();
+    file.add_dimension("mon", 2).unwrap();
     file.add_dimension("pft", 2).unwrap();
     file.add_variable::<f64>("HTOP", &["lon", "lat"])
         .unwrap()
@@ -143,6 +144,10 @@ fn write_five_degree_tile(path: &std::path::Path) {
         .unwrap()
         .put_values(&[1.0, 10.0, 2.0, 20.0], (.., .., ..))
         .unwrap();
+    file.add_variable::<f64>("MONTH_FIRST_LC_LAI", &["mon", "lat", "lon"])
+        .unwrap()
+        .put_values(&[1.0, 10.0, 2.0, 20.0], (.., .., ..))
+        .unwrap();
     file.add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
         .unwrap()
         .put_values(&[1.0, 2.0, 10.0, 20.0], (.., .., ..))
@@ -151,6 +156,13 @@ fn write_five_degree_tile(path: &std::path::Path) {
         .unwrap()
         .put_values(
             &[1.0, 2.0, 100.0, 200.0, 10.0, 20.0, 1000.0, 2000.0],
+            (.., .., .., ..),
+        )
+        .unwrap();
+    file.add_variable::<f64>("MONTH_FIRST_PFT_LAI", &["mon", "pft", "lat", "lon"])
+        .unwrap()
+        .put_values(
+            &[1.0, 10.0, 100.0, 1000.0, 2.0, 20.0, 200.0, 2000.0],
             (.., .., .., ..),
         )
         .unwrap();
@@ -209,6 +221,29 @@ fn unstructured_mesh_keeps_one_element_across_multiple_input_cells() {
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 8);
 
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn raw_grid_alignment_accepts_single_precision_unstructured_edges_only() {
+    let raw = Grid {
+        nlon: 86_400,
+        nlat: 43_200,
+    };
+    let aligned = SpatialGrid {
+        lon_w: vec![102.000_014_707_446_1],
+        lon_e: vec![raw.lon_e(67_681)],
+        lat_s: vec![raw.lat_s(10_000)],
+        lat_n: vec![raw.lat_n(9_999)],
+    };
+    assert_eq!(longitude_cells(&aligned, raw).unwrap()[0].start, 67_680);
+    assert!(longitude_cells(
+        &SpatialGrid {
+            lon_w: vec![102.000_1],
+            ..aligned
+        },
+        raw
+    )
+    .is_err());
 }
 
 #[test]
@@ -347,6 +382,42 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
         .unwrap(),
         vec![10.0, 20.0]
     );
+    let mut cached_tiles = TiledRasterFiles::default();
+    for (time, expected) in [(1, vec![1.0, 2.0]), (2, vec![10.0, 20.0])] {
+        assert_eq!(
+            read_mesh_tiled_raster_time_cached_f64(
+                &mut cached_tiles,
+                &tile_dir,
+                "MOD2005",
+                "MONTHLY_LC_LAI",
+                time,
+                &topology.mesh,
+                &topology.pixel,
+                Grid {
+                    nlon: 144,
+                    nlat: 36,
+                },
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        read_mesh_tiled_raster_time_f64(
+            &tile_dir,
+            "MOD2005",
+            "MONTH_FIRST_LC_LAI",
+            2,
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36,
+            },
+        )
+        .unwrap(),
+        vec![2.0, 20.0]
+    );
     assert_eq!(
         read_mesh_tiled_raster_pft_f64(
             &tile_dir,
@@ -381,6 +452,24 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
         vec![2.0, 20.0, 200.0, 2000.0]
     );
 
+    assert_eq!(
+        read_mesh_tiled_raster_pft_time_f64(
+            &tile_dir,
+            "MOD2005",
+            "MONTH_FIRST_PFT_LAI",
+            2,
+            2,
+            &topology.mesh,
+            &topology.pixel,
+            Grid {
+                nlon: 144,
+                nlat: 36,
+            },
+        )
+        .unwrap(),
+        vec![2.0, 20.0, 200.0, 2000.0]
+    );
+
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -400,6 +489,18 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
     assert_eq!(
         read_mesh_raster_f64(
             &raster,
+            "lake_depth",
+            &topology.mesh,
+            &topology.pixel,
+            Grid { nlon: 4, nlat: 2 },
+        )
+        .unwrap(),
+        vec![120.0, 130.0, 80.0, 90.0, 140.0, 150.0, 100.0, 110.0]
+    );
+    let open_raster = netcdf::open(&raster).unwrap();
+    assert_eq!(
+        read_mesh_open_raster_f64(
+            &open_raster,
             "lake_depth",
             &topology.mesh,
             &topology.pixel,
