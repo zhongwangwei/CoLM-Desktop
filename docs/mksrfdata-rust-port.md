@@ -120,8 +120,8 @@ Canonical raw edges use explicit `f64::mul_add`; physical aggregation retains
 Fortran `areaquad` arithmetic. Source-grid votes are preserved before land-only
 filtering instead of recomputed from retained fine-pixel centers. The subsequent
 source-chunk ordering repair also matches every stored element/patch sequence:
-all 242 Pearl River surface fields now pass the recorded 1e-12 threshold, with
-all soil fields bitwise equal. The independent two-step runtime still fails
+all 242 Pearl River surface fields now agree bitwise after the shared
+weighted-sum correction as well. The independent two-step runtime still fails
 that gate; see the updated audit before claiming full scientific parity.
 
 Spatial PFT/PC patch modes now honor `DEF_SOLO_PFT` and `DEF_FAST_PC`, including

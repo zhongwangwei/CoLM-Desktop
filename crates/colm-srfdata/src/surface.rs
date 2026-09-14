@@ -568,7 +568,7 @@ impl FlatPatches {
                     "vegetation-index patch {patch} has a non-finite value or invalid land area"
                 );
                 area_sum += area;
-                index_sum += index * area;
+                index_sum = index.mul_add(area, index_sum);
             }
             ensure!(
                 area_sum > 0.0 && area_sum.is_finite(),
@@ -867,7 +867,7 @@ impl FlatPatches {
                     "forest-height patch {patch} has a non-finite value or invalid land area"
                 );
                 area_sum += area;
-                height_sum += height * area;
+                height_sum = height.mul_add(area, height_sum);
             }
             ensure!(
                 area_sum > 0.0 && area_sum.is_finite(),
@@ -995,7 +995,7 @@ impl FlatPatches {
                 );
                 any_valid = true;
                 area_sum += area;
-                elevation_sum += height * area;
+                elevation_sum = height.mul_add(area, elevation_sum);
             }
             if !any_valid {
                 continue;
@@ -1019,8 +1019,9 @@ impl FlatPatches {
                     std.is_finite() && slope.is_finite(),
                     "topography patch {patch} contains a non-finite standard deviation or slope"
                 );
-                variance_sum += ((height - mean).mul_add(height - mean, std * std)) * area;
-                slope_sum += slope * area;
+                let variance = (height - mean).mul_add(height - mean, std * std);
+                variance_sum = variance.mul_add(area, variance_sum);
+                slope_sum = slope.mul_add(area, slope_sum);
             }
             result.elevation[patch] = mean;
             result.elevation_std[patch] = (variance_sum / area_sum).sqrt();

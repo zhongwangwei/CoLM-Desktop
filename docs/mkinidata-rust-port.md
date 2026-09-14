@@ -20,6 +20,12 @@ enabled downscaling branch meet all of these conditions:
 3. domain, layer, patch/PFT and water/carbon mass invariants hold; and
 4. an unchanged Fortran `colm` short run starts and completes from the Rust restart.
 
+Here, restart-continuation means runtime interoperability with Rust-produced
+restart files, not a new initializer mode. Original `CoLMINI` constructs and
+writes the initial state; `main/CoLM.F90` reads time variables from an existing
+restart and performs continuation. That interoperability still needs its own
+acceptance evidence beyond a cold-start run.
+
 ## Migration order
 
 1. **Static-state kernels** — port landdata normalization without I/O: soil profile
@@ -104,7 +110,9 @@ The corrected source-grid/area pipeline initializes in 2.43 s and completes the
 unchanged original two-step model again. Catchment river-depth initialization
 now converts the shared km² pixel weights to m² explicitly. The latest independent
 Pearl River cold restart passes all 13 files / 742 variable instances, while
-post-two-step output still has 25 failing fields / 414 values. The small
+post-two-step output still has 16 failing fields / 32 values after the surface
+weighted-sum repair (previously 25 / 414). Gridded history also remains outside
+tolerance; its counts are recorded separately in the audit. The small
 Catchment fixture also passes restart comparison after two steps, but retains
 one out-of-tolerance history energy diagnostic. Initial execution success does
 not establish full numerical equivalence; see the latest linked audit.

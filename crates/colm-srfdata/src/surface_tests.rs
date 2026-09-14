@@ -129,6 +129,71 @@ fn lct_lai_and_sai_are_area_weighted_without_wmo_sharing() {
 }
 
 #[test]
+fn weighted_surface_means_preserve_original_sum_rounding() {
+    // One real Pearl River LAI patch, reused for the identical weighted SUM
+    // in forest height, elevation and slope. Original gfortran -O2
+    // -fdefault-real-8 gives 3fee690826d1f3ea; separate multiply/add gives ...ec.
+    let values = [
+        1.0548386573791504,
+        0.9548386931419373,
+        1.2612903118133545,
+        0.8322580456733704,
+        1.2612903118133545,
+        1.5387096405029297,
+        1.229032278060913,
+        1.1806451082229614,
+        3.070967674255371,
+    ];
+    let area = [
+        0.1997263501383564,
+        0.1997269605092288,
+        0.00017124049444929067,
+        0.1997269605092288,
+        0.00017124049444929067,
+        0.0001712404944498747,
+        0.00017124049444929067,
+        0.00017124049444929064,
+        0.0007115080808939559,
+    ];
+    let layout = patches(vec![1], vec![0, values.len()], (0..values.len()).collect());
+    let vegetation = layout
+        .aggregate_patch_vegetation_index(&values, &area)
+        .unwrap();
+    let height = layout.aggregate_igbp_forest_height(&values, &area).unwrap();
+    let topography = layout
+        .aggregate_topography(&area, &values, &[0.0; 9], &values)
+        .unwrap();
+    assert_eq!(
+        [
+            vegetation[0].to_bits(),
+            height[0].to_bits(),
+            topography.elevation[0].to_bits(),
+            topography.slope_ratio[0].to_bits(),
+        ],
+        [0x3fee_6908_26d1_f3ea; 4]
+    );
+}
+
+#[test]
+fn topography_variance_preserves_original_outer_sum_rounding() {
+    // Two cells from the real Pearl River topography request. Expected bits
+    // come from unchanged Aggregation_Topography expressions compiled with
+    // gfortran -O2 -fdefault-real-8. Without outer FMA, std ends in ...3ea7.
+    let layout = patches(vec![1], vec![0, 2], vec![0, 1]);
+    let output = layout
+        .aggregate_topography(
+            &[177445.296875, 177429.4375],
+            &[99.48611450195313, 80.60832977294922],
+            &[27.390289306640625, 15.267455101013184],
+            &[0.17822501063346863, 0.11853952705860138],
+        )
+        .unwrap();
+    assert_eq!(output.elevation[0].to_bits(), 0x4056_830c_9942_d6af);
+    assert_eq!(output.elevation_std[0].to_bits(), 0x4038_195d_843a_3ea8);
+    assert_eq!(output.slope_ratio[0].to_bits(), 0x3fc2_fe3b_e00b_1392);
+}
+
+#[test]
 fn hyper_albedo_scales_before_median_and_marks_water_and_ice_missing() {
     let layout = patches(vec![1, 17, 15], vec![0, 4, 5, 6], vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(

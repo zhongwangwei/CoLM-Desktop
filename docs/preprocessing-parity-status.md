@@ -6,9 +6,44 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
-## Latest independent Pearl River result: source-chunk ordering
+## Latest independent Pearl River result: weighted reductions
 
-The latest frozen run is `rust-full-mesh-order/` under
+`/tmp/colm-spatial-parity.Mh0VZX/rust-full-weighted-fma/` supersedes the
+source-chunk-ordering baseline below. Its independently generated Rust surface,
+Rust initializer and unchanged original two-step runtime all complete.
+
+The remaining LAI/SAI/height/elevation-standard-deviation differences came from
+separate multiplication and addition in weighted reductions. Original compiled
+`SUM(value * area)` contracts these operations. Five proven sites now retain
+that FMA order: vegetation, height, elevation, outer variance and slope sums.
+Plain area sums, masking, WMO copying, soil kernels and error handling are
+unchanged. The existing inner variance FMA is also retained.
+
+Two compact original-backed regressions cover all five sites: a nine-cell
+weighted mean fails by two ULPs without FMA; a two-cell topography variance
+still fails by one ULP after the mean repair until outer FMA is retained.
+Both pass, as do 665 integrated tests, Clippy, downstream checks, formatting
+and the fresh release build. The two source files were independently reviewed.
+Original probes and red/green logs: `/tmp/colm-shared-agg-audit/`.
+
+| Check | Latest result at unchanged combined `atol=rtol=1e-12` |
+| --- | --- |
+| Surface schemas / stored topology | All 1,479 schemas match except `create_time`; all 957 element / 7,754 patch sequences exact |
+| Aggregated surface fields | **All 242 bitwise equal**, including all soil and vegetation fields |
+| Cold restart | All 13 files / 742 variable instances pass; all 19 restart schemas match |
+| Post-two-step restart | **16 fields / 32 values still exceed tolerance**; maximum `gs0sun` error `7.040449418127537e-6` |
+| Gridded history | Schema matches for 135 variables; **34 fields / 880 grid values still exceed tolerance** |
+
+The new independent pipeline reaches the same post-step error counts and
+maximum as the initializer-isolated original-surface run. Surface drift no
+longer explains the remaining differences in this case; the shared radiation
+arithmetic remains under investigation. This is a major bounded LCT surface
+result, **not full-mode migration or runtime scientific acceptance**. Original
+source, rawdata, reference outputs and numerical thresholds remain unchanged.
+
+## Source-chunk ordering baseline
+
+The preceding frozen run is `rust-full-mesh-order/` under
 `/tmp/colm-spatial-parity.Mh0VZX/`. It supersedes the earlier independent-surface
 results below, but **does not close the full scientific migration gate**.
 
@@ -36,6 +71,7 @@ gate establish:
 | Aggregated surface fields | All 242 pass; all soil fields bitwise equal |
 | Cold restart | All 13 files / 742 variable instances pass; all 19 restart schemas match |
 | Post-two-step restart | **25 fields / 414 values still exceed tolerance**, maximum `gs0sun` error 10.661279621883295 |
+| Gridded history | Schema matches for 135 variables; **49 fields / 13,201 grid values exceed tolerance** |
 
 Twenty-six surface fields retain bit differences within tolerance: monthly
 LAI/SAI, canopy height and elevation standard deviation. Their maximum absolute
@@ -44,6 +80,17 @@ Their downstream effect remains under investigation; a passing cold restart
 does not establish a passing trajectory. The **32** post-step differences in
 the earlier zmu-isolated run used original-generated surface and must not be
 confused with the **414** in this independently generated full pipeline.
+History comparison is recorded separately in `strict-all-history-files.json`;
+gridded output counts are not independent patch counts. For example, maximum
+sensible-heat-flux error is `0.001984534734891241 W/m²`, while 6,447 of the
+history failures are near-zero energy-balance residuals (maximum `2.15e-11`).
+
+A repeatability control reran the pristine runtime from the preserved original
+cold state and landdata, changing only the output directory. All seven newly
+generated post-step/history files, containing 549 variable arrays, are bitwise
+identical to the reference. This rules out reference-run drift in that control,
+not every possible uninitialized-state branch. Evidence:
+`/tmp/colm-original-runtime-repeat.xxi5lbgb/repeat-comparison.json`.
 
 The same frozen surface binary also passes the bounded synthetic historical
 LCT/PFT/PC/WMO/urban checks (257 files / 616 variable instances) and the 1999
