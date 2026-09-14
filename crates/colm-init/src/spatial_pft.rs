@@ -252,6 +252,7 @@ pub fn write_spatial_pft_constant_restarts(
         hydraulic_model,
     );
     common.use_bedrock = use_bedrock;
+    common.use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     common.compression_level = compression_level;
     common.tuning = RestartTuning::from_document(&document)?;
     common.use_hyperspectral = use_hyperspectral;

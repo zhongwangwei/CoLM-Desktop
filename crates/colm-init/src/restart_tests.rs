@@ -286,6 +286,77 @@ fn restart_rejects_conflicting_or_incomplete_optional_sections() {
 }
 
 #[test]
+fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_validation() {
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+
+    let omitted_path = temp_dir("lake-soilc-none").join("restart.nc");
+    write_constant_restart_block(&omitted_path, input(&soil, &lake, &canopy)).unwrap();
+    let omitted = netcdf::open(&omitted_path).unwrap();
+    assert!(omitted.variable("lake_soilc_srf").is_none());
+    drop(omitted);
+    std::fs::remove_dir_all(omitted_path.parent().unwrap()).unwrap();
+
+    let values = (0..20)
+        .map(|index| {
+            if index == 7 {
+                -7.0
+            } else {
+                index as f64 + 0.25
+            }
+        })
+        .collect::<Vec<_>>();
+    for (level, label) in [(0, "zero"), (4, "four")] {
+        let mut restart = input(&soil, &lake, &canopy);
+        restart.compression_level = level;
+        restart.lake_soil_carbon = Some(&values);
+        let path = temp_dir(label).join("restart.nc");
+        write_constant_restart_block(&path, restart).unwrap();
+        let file = netcdf::open(&path).unwrap();
+        let names = file
+            .variables()
+            .map(|variable| variable.name())
+            .collect::<Vec<_>>();
+        let lake_index = names.iter().position(|name| name == "lakedepth").unwrap();
+        assert_eq!(
+            &names[lake_index..lake_index + 4],
+            &["lakedepth", "dz_lake", "lake_soilc_srf", "soil_s_v_alb"]
+        );
+        let variable = file.variable("lake_soilc_srf").unwrap();
+        assert_eq!(dimension_names(&variable), ["patch", "soil"]);
+        assert_eq!(
+            variable.get_values::<f64, _>(..).unwrap(),
+            patch_major(&values, 10, 2)
+        );
+        drop(file);
+        let header = ncdump_header(&path);
+        let expected = if level == 0 { None } else { Some(level) };
+        assert_eq!(deflate_level(&header, "lake_soilc_srf"), expected);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    for (label, bad_values) in [
+        ("bad-shape", vec![1.0; 19]),
+        ("bad-nonfinite", {
+            let mut values = values.clone();
+            values[3] = f64::NAN;
+            values
+        }),
+    ] {
+        let mut restart = input(&soil, &lake, &canopy);
+        restart.lake_soil_carbon = Some(&bad_values);
+        let root = temp_dir(label);
+        let path = root.join("restart.nc");
+        assert!(
+            write_constant_restart_block(&path, restart).is_err(),
+            "{label}"
+        );
+        assert!(!root.exists(), "{label}");
+    }
+}
+
+#[test]
 fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fields() {
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
@@ -441,6 +512,7 @@ fn input<'a>(
         topmodel: None,
         terrain: None,
         simple_terrain: None,
+        lake_soil_carbon: None,
         hyperspectral_albedo: None,
     }
 }

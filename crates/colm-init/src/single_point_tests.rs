@@ -705,6 +705,74 @@ fn cold_namelist_rejects_snicar_and_keeps_non_snicar_state_sources() {
 }
 
 #[test]
+fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
+    let root = std::env::temp_dir().join(format!("colm-init-lake-carbon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let namelist = root.join("case.nml");
+    for (cover, classes) in [
+        (LandCoverScheme::Igbp, [17, 10]),
+        (LandCoverScheme::Usgs, [16, 7]),
+    ] {
+        for class in classes {
+            for bgc in [false, true] {
+                let mut surface = single_point_restart_surface();
+                surface.land_class = class;
+                for (layer, soil) in surface.soil_layers.iter_mut().enumerate() {
+                    soil.om_density = if layer == 0 {
+                        -2.0
+                    } else {
+                        layer as f64 + 0.125
+                    };
+                }
+                std::fs::write(&namelist, format!(
+                    "&nl_colm\nDEF_CASE_NAME='test'\nDEF_dir_output='{}'\nDEF_USE_BGC={}\nDEF_USE_TRACER=.false.\n/\n",
+                    root.display(), if bgc { ".true." } else { ".false." },
+                )).unwrap();
+                let run =
+                    single_point_static_run_from_namelist(&namelist, Some(cover), None).unwrap();
+                let files = write_single_point_constant_restart_from_surface(
+                    &surface,
+                    root.join(format!("{cover:?}-{class}-{bgc}")),
+                    run.static_config(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                let file = netcdf::open(files.block).unwrap();
+                if bgc {
+                    let expected = if patch_type(cover, class).unwrap() == 4 {
+                        values_f64(&file, "OM_density")
+                            .iter()
+                            .map(|&value| 580.0 * value.max(0.0))
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![0.0; 10]
+                    };
+                    assert_eq!(values_f64(&file, "lake_soilc_srf"), expected);
+                    assert_eq!(expected[0], 0.0);
+                } else {
+                    assert!(file.variable("lake_soilc_srf").is_none());
+                }
+            }
+        }
+    }
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\nDEF_CASE_NAME='test'\nDEF_dir_output='{}'\nDEF_USE_BGC='true'\n/\n",
+            root.display()
+        ),
+    )
+    .unwrap();
+    assert!(
+        single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+            .is_err()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
     let root = std::env::temp_dir().join(format!(
         "colm-init-single-vic-output-{}",
@@ -1121,6 +1189,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
     let run = SinglePointColdStartRun {
         namelist: directory.join("case.nml"),
         static_run: SinglePointStaticRun {
+            use_bgc: true,
             urban_only: false,
             compression_level: 1,
             surface: directory.join("srfdata.nc"),

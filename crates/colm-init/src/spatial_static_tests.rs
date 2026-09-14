@@ -99,6 +99,86 @@ fn lct_spatial_block_becomes_a_constant_restart() {
 }
 
 #[test]
+fn spatial_lake_soil_carbon_preserves_source_and_only_defaults_absent_data() {
+    let root = temp_dir("lake-soil-carbon");
+    let landdata = root.join("landdata");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[1, 17], &[1, 1]);
+    let restart = root.join("restart");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.use_bgc = true;
+    let path = block_path(&landdata, "soil", "lake_soilc_patches", 2005, "w180_s90");
+    for variant in [
+        "absent",
+        "variable-absent",
+        "populated",
+        "transposed",
+        "nonfinite",
+        "unreadable",
+    ] {
+        let expected = (0..20)
+            .map(|index| index as f64 - 0.125)
+            .collect::<Vec<_>>();
+        if variant != "absent" {
+            let mut file = netcdf::create(&path).unwrap();
+            file.add_dimension("patch", 2).unwrap();
+            file.add_dimension("soil", 10).unwrap();
+            if variant != "variable-absent" {
+                let dims = if variant == "transposed" {
+                    ["soil", "patch"]
+                } else {
+                    ["patch", "soil"]
+                };
+                let mut values = expected.clone();
+                if variant == "nonfinite" {
+                    values[5] = f64::NAN;
+                }
+                file.add_variable::<f64>("lake_soilc_patches", &dims)
+                    .unwrap()
+                    .put_values(&values, ..)
+                    .unwrap();
+            }
+            file.close().unwrap();
+        }
+        if variant == "unreadable" {
+            std::fs::write(&path, b"not NetCDF").unwrap();
+        }
+        config.case_name = variant;
+        let result = write_spatial_lct_constant_restart(config);
+        if ["transposed", "nonfinite", "unreadable"].contains(&variant) {
+            assert!(result.is_err(), "{variant}");
+            assert!(!restart
+                .join(format!("const/{variant}_restart_const_lc2005_w180_s90.nc"))
+                .exists());
+        } else {
+            let file = netcdf::open(result.unwrap().block).unwrap();
+            assert_eq!(
+                values_f64(&file, "lake_soilc_srf").unwrap(),
+                if variant == "populated" {
+                    expected
+                } else {
+                    vec![0.0; 20]
+                }
+            );
+        }
+    }
+    // BGC off does not even open malformed optional source data.
+    config.use_bgc = false;
+    config.case_name = "disabled";
+    let file = netcdf::open(write_spatial_lct_constant_restart(config).unwrap().block).unwrap();
+    assert!(file.variable("lake_soilc_srf").is_none());
+    drop(file);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_inactive_soil_texture_skips_missing_source_with_deterministic_placeholder() {
     let root = temp_dir("inactive-soiltexture");
     let landdata = root.join("landdata");

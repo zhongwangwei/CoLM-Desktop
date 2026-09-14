@@ -68,6 +68,8 @@ pub struct SinglePointStaticConfig<'a> {
     pub hydraulic_model: HydraulicModel,
     pub tuning: RestartTuning,
     pub use_bedrock: bool,
+    /// Include the BGC lake sediment carbon common constant.
+    pub use_bgc: bool,
     pub use_topmodel: bool,
     /// Whether runoff initialization consumes soil texture (Simple VIC by default).
     pub use_soil_texture: bool,
@@ -95,6 +97,7 @@ impl<'a> SinglePointStaticConfig<'a> {
             hydraulic_model,
             tuning: RestartTuning::default(),
             use_bedrock: false,
+            use_bgc: false,
             use_topmodel: false,
             use_soil_texture: true,
             urban_only: false,
@@ -111,6 +114,7 @@ impl<'a> SinglePointStaticConfig<'a> {
 /// disagreeing about where a case lives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinglePointStaticRun {
+    pub use_bgc: bool,
     pub urban_only: bool,
     pub compression_level: u8,
     pub surface: PathBuf,
@@ -227,6 +231,7 @@ impl SinglePointStaticRun {
         );
         config.compression_level = self.compression_level;
         config.use_bedrock = self.use_bedrock;
+        config.use_bgc = self.use_bgc;
         config.tuning = self.tuning;
         config.use_topmodel = self.runoff_scheme == 0;
         config.use_soil_texture = self.runoff_scheme == 3;
@@ -292,6 +297,7 @@ pub fn single_point_static_run_from_namelist(
     );
 
     Ok(SinglePointStaticRun {
+        use_bgc: optional_bool_or(&document, "DEF_USE_BGC", false)?,
         urban_only: optional_bool_or(&document, "DEF_URBAN_ONLY", false)?,
         compression_level,
         surface,
@@ -587,6 +593,9 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     run: &SinglePointColdStartRun,
     hyperspectral_albedo: Option<&[f64]>,
 ) -> Result<SinglePointConstantRestartFiles> {
+    let mut static_config = run.static_run.static_config();
+    // The full cold-start switch owns BGC, including manually constructed runs.
+    static_config.use_bgc = run.bgc;
     if let Some(urban) = &run.urban {
         let initialized = prepare_single_point_urban(
             &run.static_run.surface,
@@ -595,12 +604,12 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             urban.runtime_dir.as_deref(),
             urban.geometry,
             urban.lucy_enabled,
-            run.static_run.static_config().use_soil_texture,
+            static_config.use_soil_texture,
         )?;
         let common = write_single_point_constant_restart_from_surface(
             &initialized.data.common,
             &run.static_run.restart_dir,
-            run.static_run.static_config(),
+            static_config,
             Some((
                 initialized.state.tree_top_m.as_slice(),
                 initialized.state.tree_bottom_m.as_slice(),
@@ -609,7 +618,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         )?;
         let urban = write_urban_constant_restart_from_initialized(
             &run.static_run.restart_dir,
-            run.static_run.static_config(),
+            static_config,
             &initialized,
         )?;
         return Ok(SinglePointConstantRestartFiles {
@@ -628,7 +637,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             common: write_single_point_constant_restart(
                 &run.static_run.surface,
                 &run.static_run.restart_dir,
-                run.static_run.static_config(),
+                static_config,
             )?,
             pft: None,
             bgc: None,
@@ -641,7 +650,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         &run.static_run.surface,
         run.static_run.land_cover,
         run.static_run.hydraulic_model,
-        run.static_run.static_config().use_soil_texture,
+        static_config.use_soil_texture,
     )?;
     ensure!(
         patch_type(run.static_run.land_cover, surface.land_class)? == 0,
@@ -663,7 +672,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     let common = write_single_point_constant_restart_with_canopy(
         &run.static_run.surface,
         &run.static_run.restart_dir,
-        run.static_run.static_config(),
+        static_config,
         Some(canopy_override),
         hyperspectral_albedo,
     )?;
@@ -760,6 +769,19 @@ fn write_single_point_constant_restart_from_surface(
         RestartDimensions::default().soil_layers,
         config.hydraulic_model,
     )?;
+    let lake_soil_carbon = config.use_bgc.then(|| {
+        soil.field(SoilField::OmDensity)
+            .iter()
+            .enumerate()
+            .map(|(index, &density)| {
+                if kind[index % patches] == 4 {
+                    580.0 * density.max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect::<Vec<_>>()
+    });
     let observed_top = vec![surface.canopy_height_m; patches];
     let mut canopy = match config.land_cover {
         LandCoverScheme::Igbp => {
@@ -872,6 +894,7 @@ fn write_single_point_constant_restart_from_surface(
                 slope_ratio: &slope,
             },
             lake: &lake,
+            lake_soil_carbon: lake_soil_carbon.as_deref(),
             soil: &soil,
             canopy: &canopy,
             tuning: config.tuning,

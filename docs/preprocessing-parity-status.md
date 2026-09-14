@@ -225,10 +225,55 @@ Reports: `/tmp/colm-wetland-cn-fix/after-results.json` and
 fallback-only result are retained separately, not treated as final evidence.
 
 This does **not** complete the full TRACER/BGC migration. Single-point PFT/PC
-still rejects non-natural patches; `lake_soilc_srf` common constant restart
-ingestion/persistence is separately missing. Full original tracer runtime and
+still rejects non-natural patches. The next section closes `lake_soilc_srf`
+common constant ingestion/persistence. Full original tracer runtime and
 scientific acceptance remain open. No source files, goldens or tolerances were
 changed to accept the new results.
+
+## Lake sediment carbon now reaches common constant restart
+
+Rust now carries `lake_soilc_srf` through the existing common constant writer,
+not the separate BGC constants file or prognostic methane state. Desktop's
+existing `DEF_USE_BGC` switch selects it independently of `DEF_USE_TRACER`;
+the pristine source places this field under `TRACER && BGC`. This is an explicit
+Desktop feature-gate difference, not a claim that an upstream non-TRACER build
+has the same field set.
+
+Spatial initialization reads `soil/<year>/lake_soilc_patches_<block>.nc` and
+preserves its patch/soil values, including non-lake rows. Absent files or variables
+use the original zero default. Present unreadable, wrongly shaped or nonfinite
+inputs fail rather than silently becoming zeros; rejecting corrupt existing files
+is deliberately stricter than the original optional reader. Shared single-point static
+initialization uses the derived ten-layer `OM_density`: lake patches get
+`580 * max(OM_density, 0)`; all other patches get zero. With BGC off, the field is
+omitted and optional spatial lake-carbon data is not opened. Output is f64,
+NetCDF dimensions `(patch, soil)`, compressed at `DEF_REST_CompressLevel`.
+No dependency or alternate restart format is introduced.
+
+Three added runnable regressions cover writer shape/order/compression/validation,
+IGBP/USGS single-point lake and non-lake initialization, strict BGC namelist
+routing, and spatial selected-source/default/error cases. **728 integrated tests**,
+all-target Clippy, downstream CLI/kernel checks, scoped formatting and all three
+preprocessing release binaries pass, including existing unchanged-Fortran-runtime
+consumption fixtures. Logs: `/tmp/colm-lake-soilc-validation/`. Independent source
+review approves the final diff: `/tmp/colm-lake-soilc-contract.md`. The initially
+misplaced variable was caught by review; its retained failing order check and
+final passing relative-order assertion enforce `lakedepth`, `dz_lake`,
+`lake_soilc_srf`, then `soil_s_v_alb`.
+
+Before edits, a frozen release omits the required field in mixed natural/lake
+PFT and PC cases with BGC on (both tracer settings). Fresh release runs pass all
+six controls. Each BGC-enabled case adds only `lake_soilc_srf` to the same eight
+files; all **379 previous arrays**, attributes and compression settings are
+unchanged. Both BGC-off controls retain all **five files / 163 arrays** unchanged.
+Reports: `/tmp/colm-lake-soilc-fix/before-results.json`, `after-results.json` and
+`decoded-comparison.json`.
+
+This closes the common constant ingestion/persistence gap, not full methane
+runtime parity. Single-point non-natural PFT/PC cold start, all-nonvegetated PFT
+blocks and prognostic tracer runtime still require their own implementation and
+acceptance work. The existing scientific residuals and full migration gate remain
+open; no original source, golden or tolerance was changed.
 
 ## SNICAR remains unported and now fails explicitly
 
@@ -272,8 +317,8 @@ real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
 rounding or absent test coverage: SNICAR optical initialization, external-lake
-options, single-point nonvegetated BGC and lake sediment carbon restart fields
-still require implementation. Spatial wetland CN initialization is repaired above.
+options and single-point nonvegetated BGC still require implementation.
+Spatial wetland CN and common lake sediment carbon initialization are repaired above.
 Urban-only masking is repaired above; an explicit unsupported-feature guard is
 not implementation of the remaining physics. These remain open and preclude an
 all-feature migration claim. The main

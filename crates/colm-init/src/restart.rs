@@ -216,6 +216,8 @@ pub struct ConstantRestartInput<'a> {
     pub compression_level: u8,
     pub patch: RestartPatchFields<'a>,
     pub lake: &'a LakeState,
+    /// BGC lake sediment carbon [gC/m3], `soil * patches + patch`.
+    pub lake_soil_carbon: Option<&'a [f64]>,
     pub soil: &'a SoilState,
     pub canopy: &'a CanopyState,
     pub tuning: RestartTuning,
@@ -326,6 +328,17 @@ pub fn write_constant_restart_block(
         &input.lake.thickness_m,
         compression,
     )?;
+    if let Some(values) = input.lake_soil_carbon {
+        put_layer_major(
+            &mut file,
+            "lake_soilc_srf",
+            "soil",
+            input.dimensions.soil_layers,
+            patches,
+            values,
+            compression,
+        )?;
+    }
 
     put_f64_1d(
         &mut file,
@@ -608,6 +621,14 @@ fn validate_input(input: ConstantRestartInput<'_>) -> Result<usize> {
     }
     let patches = input.patch.class.len();
     ensure!(patches > 0, "a restart block needs at least one patch");
+    if let Some(values) = input.lake_soil_carbon {
+        ensure!(
+            values.len() == dimensions.soil_layers * patches
+                && values.iter().all(|value| value.is_finite()),
+            "lake_soilc_srf must have {} soil layers x {patches} finite values",
+            dimensions.soil_layers
+        );
+    }
     for (name, values) in [
         ("patch type", input.patch.kind.len()),
         ("patch mask", input.patch.mask.len()),

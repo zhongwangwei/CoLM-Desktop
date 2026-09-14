@@ -38,6 +38,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub tuning: RestartTuning,
     /// Write `dbedrock` and `ibedrock`, matching `DEF_USE_BEDROCK`.
     pub use_bedrock: bool,
+    /// Read/write `lake_soilc_srf`, present whenever Desktop BGC is enabled.
+    pub use_bgc: bool,
     /// Write 211-band `soil_alb`, matching the `HYPERSPECTRAL` build.
     pub use_hyperspectral: bool,
     /// Read and scientifically initialize `soiltext`/`BVIC`; true for Simple VIC or CatchLateral.
@@ -75,6 +77,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
             hydraulic_model,
             tuning: RestartTuning::default(),
             use_bedrock: false,
+            use_bgc: false,
             use_hyperspectral: false,
             use_soil_texture: true,
             urban_only: false,
@@ -216,6 +219,10 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         patch_count,
     )?;
     let lake = derive_lake_layers(&lake_depth, dimensions.lake_layers)?;
+    let lake_soil_carbon = config
+        .use_bgc
+        .then(|| read_lake_soil_carbon(config, patch_count, dimensions.soil_layers))
+        .transpose()?;
     let source_soil = read_soil(
         config.landdata,
         config.land_cover_year,
@@ -415,6 +422,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
                 slope_ratio: &slope,
             },
             lake: &lake,
+            lake_soil_carbon: lake_soil_carbon.as_deref(),
             soil: &soil,
             canopy: &canopy,
             tuning: config.tuning,
@@ -446,6 +454,47 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             hyperspectral_albedo: hyperspectral_albedo.as_deref(),
         },
     )
+}
+
+fn read_lake_soil_carbon(
+    config: SpatialLctStaticConfig<'_>,
+    patches: usize,
+    layers: usize,
+) -> Result<Vec<f64>> {
+    let path = block_path(
+        config.landdata,
+        "soil",
+        "lake_soilc_patches",
+        config.land_cover_year,
+        config.block_label,
+    );
+    let mut values = vec![0.0; patches * layers];
+    // Preserve original defval=0 for absent files/variables. Deliberately
+    // reject unreadable/malformed existing inputs instead of defaulting them.
+    if !path.try_exists()? {
+        return Ok(values);
+    }
+    let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+    let Some(source) = file.variable("lake_soilc_patches") else {
+        return Ok(values);
+    };
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 2
+            && dimensions[0].name() == "patch"
+            && dimensions[0].len() == patches
+            && dimensions[1].name() == "soil"
+            && dimensions[1].len() == layers,
+        "lake_soilc_patches in {} must have patch, soil dimensions of {patches}x{layers}",
+        path.display()
+    );
+    let source = source.get_values::<f64, _>(..)?;
+    for patch in 0..patches {
+        for layer in 0..layers {
+            values[layer * patches + patch] = source[patch * layers + layer];
+        }
+    }
+    Ok(values)
 }
 
 fn read_topmodel(
