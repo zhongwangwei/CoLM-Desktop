@@ -1926,6 +1926,15 @@ fn rust_preprocessor_arguments(
     {
         arguments.push("--grid-river".to_owned());
     }
+    if stage == Stage::MkIniData
+        && kernel
+            .manifest
+            .macros
+            .iter()
+            .any(|macro_name| macro_name == "CatchLateralFlow")
+    {
+        arguments.push("--catch-lateral".to_owned());
+    }
     if !lct {
         return Ok(arguments);
     }

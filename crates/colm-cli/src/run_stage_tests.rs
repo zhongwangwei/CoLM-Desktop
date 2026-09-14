@@ -26,6 +26,12 @@ fn gridriver_kernel() -> Kernel {
     kernel
 }
 
+fn catch_lateral_kernel() -> Kernel {
+    let mut kernel = hyperspectral_kernel();
+    kernel.manifest.macros = vec!["CatchLateralFlow".into(), "LULC_IGBP".into()];
+    kernel
+}
+
 fn hyperspectral_pft_namelist(root: &Path) -> PathBuf {
     let namelist = root.join("case.nml");
     std::fs::write(
@@ -84,6 +90,25 @@ fn gridriver_kernel_enables_the_matching_rust_mkinidata_branch() {
         rust_preprocessor_arguments(Stage::MkIniData, &namelist, &gridriver_kernel(), None, None)
             .unwrap(),
         vec!["--grid-river", "--land-cover", "igbp"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn catch_lateral_kernel_enables_the_matching_rust_mkinidata_branch() {
+    let root = test_directory("catch-lateral-args");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\nDEF_USE_LCT=.true.\n/\n").unwrap();
+    assert_eq!(
+        rust_preprocessor_arguments(
+            Stage::MkIniData,
+            &namelist,
+            &catch_lateral_kernel(),
+            None,
+            None,
+        )
+        .unwrap(),
+        vec!["--catch-lateral", "--land-cover", "igbp"]
     );
     std::fs::remove_dir_all(root).unwrap();
 }

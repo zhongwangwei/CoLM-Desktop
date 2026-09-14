@@ -12,6 +12,7 @@ pub mod crop;
 pub mod canopy_layer_profile {
     pub use colm_core::canopy_layer_profile::*;
 }
+pub mod catch_lateral;
 pub mod canopy_roughness {
     pub use colm_core::canopy_roughness::*;
 }
@@ -92,6 +93,9 @@ pub use bgc_time_restart::{
     write_bgc_time_restart, write_bgc_time_restart_block, BgcClimateFields, BgcCropFields,
     BgcNitrificationFields, BgcPermafrostFields, BgcPoolFields, BgcTimeRestartDimensions,
     BgcTimeRestartFile, BgcTimeRestartInput, BgcTotals, BgcTruncationFields,
+};
+pub use catch_lateral::{
+    write_catch_lateral_cold_restart, CatchLateralColdStartConfig, CatchLateralColdStartFile,
 };
 pub use colm_core::update_snow_age;
 pub use colm_core::SoilSurfaceResistanceInput;
