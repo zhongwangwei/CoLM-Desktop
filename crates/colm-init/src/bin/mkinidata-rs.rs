@@ -1233,10 +1233,12 @@ mod tests {
             .unwrap()
             .put_values(&[1], ..)
             .unwrap();
-        file.add_variable::<i32>("settyp", &["landhru"])
-            .unwrap()
-            .put_values(&[1], ..)
-            .unwrap();
+        for name in ["settyp", "ipxstt", "ipxend"] {
+            file.add_variable::<i32>(name, &["landhru"])
+                .unwrap()
+                .put_values(&[1], ..)
+                .unwrap();
+        }
         file.close().unwrap();
         let namelist = root.join("case.nml");
         std::fs::write(

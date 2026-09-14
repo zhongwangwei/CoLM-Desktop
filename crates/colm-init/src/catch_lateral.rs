@@ -33,6 +33,14 @@ struct CatchLateralColdState {
     hru_depth: Vec<f64>,
 }
 
+struct Hru {
+    basin: i64,
+    kind: i32,
+    start: i32,
+    end: i32,
+    lake_depth: Option<f64>,
+}
+
 /// Write the native four-vector CatchLateralFlow cold state.
 ///
 /// The surface stage's `landhru` files define the actual regional HRU order;
@@ -176,24 +184,50 @@ fn read_cold_state(
         directory.display()
     );
 
-    let mut hru = Vec::<(i64, i32)>::new();
+    let mut hru = Vec::<Hru>::new();
     for path in files {
         let file = netcdf::open(&path).with_context(|| {
             format!("cannot open CatchLateralFlow HRU block {}", path.display())
         })?;
         let basin = read_i64(&file, "eindex")?;
         let kind = read_i32(&file, "settyp")?;
+        let start = read_i32(&file, "ipxstt")?;
+        let end = read_i32(&file, "ipxend")?;
         ensure!(
-            basin.len() == kind.len(),
-            "CatchLateralFlow HRU block {} has mismatched eindex and settyp lengths",
+            basin.len() == kind.len() && kind.len() == start.len() && start.len() == end.len(),
+            "CatchLateralFlow HRU block {} has inconsistent topology vectors",
             path.display()
         );
-        hru.extend(basin.into_iter().zip(kind));
+        let lake_depth = read_lake_depths(
+            landdata,
+            land_cover_year,
+            &path,
+            &basin,
+            &kind,
+            &start,
+            &end,
+        )?;
+        hru.extend(
+            basin
+                .into_iter()
+                .zip(kind)
+                .zip(start)
+                .zip(end)
+                .zip(lake_depth)
+                .map(|((((basin, kind), start), end), lake_depth)| Hru {
+                    basin,
+                    kind,
+                    start,
+                    end,
+                    lake_depth,
+                }),
+        );
     }
-    hru.sort_unstable_by_key(|&(basin, kind)| (basin, kind.unsigned_abs()));
+    hru.sort_unstable_by_key(|entry| (entry.basin, entry.kind.unsigned_abs()));
     ensure!(
         hru.windows(2).all(|pair| {
-            (pair[0].0, pair[0].1.unsigned_abs()) != (pair[1].0, pair[1].1.unsigned_abs())
+            (pair[0].basin, pair[0].kind.unsigned_abs())
+                != (pair[1].basin, pair[1].kind.unsigned_abs())
         }),
         "CatchLateralFlow landhru blocks contain duplicate basin/HRU entries"
     );
@@ -205,7 +239,7 @@ fn read_cold_state(
     let mut hru_depth = Vec::with_capacity(hru.len());
     let mut offset = 0;
     while offset < hru.len() {
-        let basin_id = hru[offset].0;
+        let basin_id = hru[offset].basin;
         let index = usize::try_from(basin_id - 1)
             .context("CatchLateralFlow landhru basin index cannot address mesh metadata")?;
         ensure!(
@@ -214,15 +248,24 @@ fn read_cold_state(
         );
         let end = hru[offset..]
             .iter()
-            .position(|(id, _)| *id != basin_id)
+            .position(|entry| entry.basin != basin_id)
             .map_or(hru.len(), |length| offset + length);
-        let kinds = hru[offset..end]
+        let entries = &hru[offset..end];
+        let kinds = entries
             .iter()
-            .map(|(_, kind)| *kind)
-            .collect::<Vec<_>>();
+            .map(|entry| {
+                entry
+                    .kind
+                    .checked_abs()
+                    .context("CatchLateralFlow HRU type cannot be int32::MIN")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let is_lake = lake_id[index] > 0;
         ensure!(
-            kinds.iter().all(|kind| *kind > 0) && lake_id[index] <= 0,
-            "Rust CatchLateralFlow cold restart does not yet implement lake or reservoir HRUs"
+            entries.iter().all(|entry| (entry.kind < 0) == is_lake
+                && entry.start > 0
+                && entry.start <= entry.end),
+            "CatchLateralFlow basin {basin_id} has a lake/HRU topology sign mismatch"
         );
         let expected = basin_numhru[index];
         ensure!(
@@ -244,19 +287,27 @@ fn read_cold_state(
             "CatchLateralFlow basin {basin_id} hydrounit_hand must be finite"
         );
         let mut depth = vec![0.0; expected];
-        if lake_id[index] == 0 {
-            depth[0] = river_depth[index];
-            for value in hand.iter_mut().skip(1) {
-                *value += river_depth[index];
+        let river_stage = if is_lake {
+            for (depth, entry) in depth.iter_mut().zip(entries) {
+                *depth = entry.lake_depth.with_context(|| {
+                    format!("CatchLateralFlow lake basin {basin_id} has no lakedepth source")
+                })?;
             }
-        }
-        let hand_min = hand.iter().copied().fold(f64::INFINITY, f64::min);
-        let river_stage = hand
-            .iter()
-            .zip(&depth)
-            .map(|(height, water)| height + water)
-            .fold(f64::INFINITY, f64::min)
-            - hand_min;
+            depth.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            if lake_id[index] == 0 {
+                depth[0] = river_depth[index];
+                for value in hand.iter_mut().skip(1) {
+                    *value += river_depth[index];
+                }
+            }
+            let hand_min = hand.iter().copied().fold(f64::INFINITY, f64::min);
+            hand.iter()
+                .zip(&depth)
+                .map(|(height, water)| height + water)
+                .fold(f64::INFINITY, f64::min)
+                - hand_min
+        };
         basin.push(basin_id);
         basin_depth.push(river_stage);
         hru_basin.extend(std::iter::repeat_n(basin_id, expected));
@@ -275,6 +326,95 @@ fn read_cold_state(
         basin_depth,
         hru_depth,
     })
+}
+
+fn read_lake_depths(
+    landdata: &Path,
+    land_cover_year: i32,
+    hru_path: &Path,
+    hru_basin: &[i64],
+    hru_kind: &[i32],
+    hru_start: &[i32],
+    hru_end: &[i32],
+) -> Result<Vec<Option<f64>>> {
+    if hru_kind.iter().all(|kind| *kind >= 0) {
+        return Ok(vec![None; hru_kind.len()]);
+    }
+    let filename = hru_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("CatchLateralFlow HRU block filename is not UTF-8")?;
+    let block = filename
+        .strip_prefix("landhru_")
+        .and_then(|name| name.strip_suffix(".nc"))
+        .context("CatchLateralFlow HRU block must be named landhru_<block>.nc")?;
+    let year = format!("{land_cover_year:04}");
+    let patch_path = landdata
+        .join("landpatch")
+        .join(&year)
+        .join(format!("landpatch_{block}.nc"));
+    let depth_path = landdata
+        .join("lakedepth")
+        .join(year)
+        .join(format!("lakedepth_patches_{block}.nc"));
+    let patches = netcdf::open(&patch_path).with_context(|| {
+        format!(
+            "cannot open CatchLateralFlow patch block {}",
+            patch_path.display()
+        )
+    })?;
+    let patch_basin = read_i64(&patches, "eindex")?;
+    let patch_start = read_i32(&patches, "ipxstt")?;
+    let patch_end = read_i32(&patches, "ipxend")?;
+    let depths = read_f64(
+        &netcdf::open(&depth_path).with_context(|| {
+            format!(
+                "cannot open CatchLateralFlow lake-depth block {}",
+                depth_path.display()
+            )
+        })?,
+        "lakedepth_patches",
+    )?;
+    ensure!(
+        patch_basin.len() == patch_start.len()
+            && patch_start.len() == patch_end.len()
+            && patch_end.len() == depths.len(),
+        "CatchLateralFlow lake patch vectors disagree in block {block}"
+    );
+    ensure!(
+        depths
+            .iter()
+            .all(|depth| depth.is_finite() && *depth >= 0.0),
+        "CatchLateralFlow lake depths in block {block} must be finite and non-negative"
+    );
+    hru_basin
+        .iter()
+        .zip(hru_kind)
+        .zip(hru_start)
+        .zip(hru_end)
+        .map(|(((basin, kind), start), end)| {
+            if *kind >= 0 {
+                return Ok(None);
+            }
+            patch_basin
+                .iter()
+                .zip(&patch_start)
+                .zip(&patch_end)
+                .zip(&depths)
+                .filter(|(((patch_basin, patch_start), patch_end), _)| {
+                    **patch_basin == *basin && **patch_start >= *start && **patch_end <= *end
+                })
+                .map(|(_, depth)| *depth)
+                .max_by(f64::total_cmp)
+                .map(Some)
+                .with_context(|| {
+                    format!(
+                        "CatchLateralFlow lake HRU {basin}/{} has no matching lakedepth patch",
+                        kind.unsigned_abs()
+                    )
+                })
+        })
+        .collect()
 }
 
 fn read_i32_matrix_basin_major(
