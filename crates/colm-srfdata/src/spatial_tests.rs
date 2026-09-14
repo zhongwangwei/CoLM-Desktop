@@ -199,7 +199,9 @@ fn gridbased_mesh_expands_aligned_cells_into_colm_pixel_order() {
     assert_eq!(topology.pixel.lat_s, vec![-90.0, 0.0]);
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
     assert!(area.iter().all(|value| *value > 0.0));
-    assert!((area.iter().sum::<f64>() - 4.0 * std::f64::consts::PI).abs() < 1e-12);
+    assert!(
+        (area.iter().sum::<f64>() / 6371.22_f64.powi(2) - 4.0 * std::f64::consts::PI).abs() < 1e-12
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -324,7 +326,9 @@ fn domain_crossing_dateline_maps_each_side_to_its_source_cell() {
     assert_eq!(topology.mesh.pixels(1).unwrap().0, [1, 1]);
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
     assert!(
-        (area.iter().sum::<f64>() - 20_f64.to_radians() * 2.0 * 45_f64.to_radians().sin()).abs()
+        (area.iter().sum::<f64>() / 6371.22_f64.powi(2)
+            - 20_f64.to_radians() * 2.0 * 45_f64.to_radians().sin())
+        .abs()
             < 1e-12
     );
     let patches = topology
@@ -334,9 +338,9 @@ fn domain_crossing_dateline_maps_each_side_to_its_source_cell() {
         .unwrap()
         .1;
     let blocks = BlockLayout::regular(72, 2).unwrap();
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, &blocks).unwrap();
-    assert_eq!(assignments[&77], (1, 0));
-    assert_eq!(assignments[&88], (71, 0));
+    let assignments = element_blocks(&topology, &blocks).unwrap();
+    assert_eq!(assignments[&77], (0, 0));
+    assert_eq!(assignments[&88], (70, 0));
     assert_eq!(patches.element_ids, [77, 88]);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -391,7 +395,9 @@ fn unstructured_off_grid_edges_are_assimilated_not_snapped() {
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 6);
     assert_eq!(topology.mesh.pixel_count(1).unwrap(), 4);
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
-    assert!((area.iter().sum::<f64>() - 4.0 * std::f64::consts::PI).abs() < 1e-12);
+    assert!(
+        (area.iter().sum::<f64>() / 6371.22_f64.powi(2) - 4.0 * std::f64::consts::PI).abs() < 1e-12
+    );
     let raster = directory.join("landtype.nc");
     write_landtype(&raster);
     let sampled = read_mesh_raster_i32(
@@ -1275,6 +1281,8 @@ fn coordinate_patch_selection_keeps_all_hires_cells_and_native_areas() {
             lat_n: vec![dlat],
         },
         mesh: FlatMesh::new(vec![1], vec![0, 1], vec![1], vec![1]).unwrap(),
+        source: None,
+        element_block_owners: None,
         land_elements: FlatMesh::new(vec![1], vec![0, 1], vec![1], vec![1])
             .unwrap()
             .land_elements(),
@@ -1359,6 +1367,8 @@ fn coordinate_patch_selection_uses_native_mesh_pixels_not_a_500m_proxy() {
             lat_s: vec![0.0],
             lat_n: vec![dlat],
         },
+        source: None,
+        element_block_owners: None,
         land_elements: mesh.land_elements(),
         mesh,
     };
@@ -1436,6 +1446,8 @@ fn methane_ph_selection_uses_exact_source_patch_intersections() {
             lat_s: vec![-0.5],
             lat_n: vec![0.5],
         },
+        source: None,
+        element_block_owners: None,
         land_elements: mesh.land_elements(),
         mesh,
     };
@@ -1790,7 +1802,7 @@ fn zipped_raster_merges_source_cells_not_values_or_overlapping_patches() {
                 .map(|&i| original_area[i])
                 .sum();
             let actual: f64 = layout.raw_cells(patch).iter().map(|&i| area[i]).sum();
-            assert!((expected - actual).abs() < 1e-14);
+            assert!((expected - actual).abs() / expected < 1e-14);
         }
         if zip {
             // Original sorts source x ascending, then source y north-to-south.
@@ -1802,4 +1814,189 @@ fn zipped_raster_merges_source_cells_not_values_or_overlapping_patches() {
             assert!(area[1] > area[3]); // Shared source cell has a different covered area.
         }
     }
+}
+
+#[test]
+fn tiny_pixel_weights_preserve_fortran_areaquad_km2() {
+    // MOD_Utils::areaquad constants and operation order; the second pixel
+    // crosses the dateline, where (east + 360) - west must not be reassociated.
+    let pixel = PixelAxes {
+        edge_south: 21.504166666666666,
+        edge_north: 21.504175901412964,
+        edge_west: 102.0125,
+        edge_east: -179.99999,
+        lon_w: vec![102.0125, 179.99999],
+        lon_e: vec![102.01251459121704, -179.99999],
+        lat_s: vec![21.504166666666666],
+        lat_n: vec![21.504175901412964],
+    };
+    let mesh = FlatMesh::new(vec![1], vec![0, 2], vec![1, 2], vec![1, 1]).unwrap();
+    let areas = mesh_cell_area_weights(&mesh, &pixel).unwrap();
+    // Actual MOD_Utils.o, gfortran -O2 -fdefault-real-8; not recomputed
+    // using the implementation under test.
+    assert_eq!(areas[0].to_bits(), 0x3eba01f7ebb20b8c);
+    assert_eq!(areas[1].to_bits(), 0x3ec1d2ff512e8ae8);
+}
+
+#[test]
+fn source_block_owner_uses_domain_start_for_clipped_first_cell() {
+    let directory = temporary("source-block-domain-start");
+    let mesh_file = directory.join("mesh.nc");
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&mesh_file).unwrap();
+        file.add_dimension("nlat", 1).unwrap();
+        file.add_dimension("nlon", 1).unwrap();
+        file.add_variable::<f64>("lon_w", &["nlon"])
+            .unwrap()
+            .put_values(&[109.7], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon_e", &["nlon"])
+            .unwrap()
+            .put_values(&[110.2], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_s", &["nlat"])
+            .unwrap()
+            .put_values(&[20.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_n", &["nlat"])
+            .unwrap()
+            .put_values(&[21.0], ..)
+            .unwrap();
+        file.add_variable::<i64>("elmindex", &["nlat", "nlon"])
+            .unwrap()
+            .put_values(&[9], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+    let mut topology = build_spatial_topology_in_domain(
+        &mesh_file,
+        SpatialInputKind::Unstructured,
+        Grid {
+            nlon: 3600,
+            nlat: 180,
+        },
+        Some(crate::SpatialBounds {
+            south: 20.0,
+            north: 21.0,
+            west: 110.05,
+            east: 110.2,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        element_blocks(&topology, &BlockLayout::regular(72, 36).unwrap()).unwrap()[&9],
+        (58, 22)
+    );
+    // Source rows straddle both domain edges. Upstream starts its row walk
+    // in the domain's block, for both north-up and south-up source ordering.
+    topology.pixel.edge_south = -5.0;
+    topology.pixel.edge_north = 5.0;
+    topology.pixel.lat_s = vec![-5.0, 0.0];
+    topology.pixel.lat_n = vec![0.0, 5.0];
+    for descending in [false, true] {
+        topology.grid.lat_s = if descending {
+            vec![0.0, -10.0]
+        } else {
+            vec![-10.0, 0.0]
+        };
+        topology.grid.lat_n = if descending {
+            vec![10.0, 0.0]
+        } else {
+            vec![0.0, 10.0]
+        };
+        topology.source.as_mut().unwrap().rows = if descending {
+            vec![Some(1), Some(0)]
+        } else {
+            vec![Some(0), Some(1)]
+        };
+        let (_, rows) = source_block_axes(
+            &topology,
+            topology.source.as_ref().unwrap(),
+            &BlockLayout::regular(72, 36).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows, [Some(17), Some(18)]);
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn element_block_owner_uses_source_cell_before_land_only_filtering() {
+    let directory = temporary("source-block-owner");
+    let mesh_file = directory.join("mesh.nc");
+    let landtype = directory.join("landtype.nc");
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&mesh_file).unwrap();
+        file.add_dimension("nlat", 1).unwrap();
+        file.add_dimension("nlon", 2).unwrap();
+        file.add_variable::<f64>("lon_w", &["nlon"])
+            .unwrap()
+            .put_values(&[109.7, 110.00001], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon_e", &["nlon"])
+            .unwrap()
+            .put_values(&[110.00001, 110.2], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_s", &["nlat"])
+            .unwrap()
+            .put_values(&[20.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lat_n", &["nlat"])
+            .unwrap()
+            .put_values(&[21.0], ..)
+            .unwrap();
+        file.add_variable::<i64>("elmindex", &["nlat", "nlon"])
+            .unwrap()
+            .put_values(&[132548, 132548], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+
+        let mut file = netcdf::create(&landtype).unwrap();
+        file.add_dimension("lat", 180).unwrap();
+        file.add_dimension("lon", 3600).unwrap();
+        let mut values = vec![0_i32; 180 * 3600];
+        let row = 69; // 20..21 north-up in read_mesh_raster_i32's global grid.
+        for column in 2900..2902 {
+            values[row * 3600 + column] = 8;
+        }
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&values, (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    let raw = Grid {
+        nlon: 3600,
+        nlat: 180,
+    };
+    let mut topology =
+        build_spatial_topology(&mesh_file, SpatialInputKind::Unstructured, raw).unwrap();
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    topology.preserve_element_blocks(&blocks).unwrap();
+    assert_eq!(
+        element_blocks(&topology, &blocks).unwrap()[&132548],
+        (57, 22)
+    );
+    let mut shifted_blocks = blocks.clone();
+    shifted_blocks.lon_w[0] = -179.5;
+    assert!(element_blocks(&topology, &shifted_blocks).is_err());
+
+    let (topology, patches) =
+        build_lct_land_patches_from_raster(topology, &landtype, "landtype", raw, false, true)
+            .unwrap();
+    // Re-voting after land-only would now move the owner to e110; the frozen
+    // source-grid vote must stay e105 for topology and every field writer.
+    assert_eq!(
+        compute_element_blocks(&topology, &blocks).unwrap()[&132548],
+        (58, 22)
+    );
+    let landdata = directory.join("landdata");
+    write_spatial_topology(&landdata, 2005, &topology, &patches, &blocks).unwrap();
+
+    assert!(landdata.join("mesh/2005/mesh_e105_n20.nc").exists());
+    assert!(!landdata.join("mesh/2005/mesh_e110_n20.nc").exists());
+    std::fs::remove_dir_all(directory).unwrap();
 }

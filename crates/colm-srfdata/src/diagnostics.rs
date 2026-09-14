@@ -989,6 +989,8 @@ mod tests {
                 lat_s: vec![-90.0],
                 lat_n: vec![90.0],
             },
+            source: None,
+            element_block_owners: None,
             land_elements: mesh.land_elements(),
             mesh,
         }

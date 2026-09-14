@@ -98,3 +98,9 @@ regression, and the corrected independent surface topology. The new 7,754-patch 
 unchanged-original runtime run. Fitted surface differences remain unresolved;
 a runnable pipeline is not complete scientific parity.
 This progress does not establish full migration.
+
+The corrected source-grid/area pipeline initializes in 2.43 s and completes the
+unchanged original two-step model again. Catchment river-depth initialization
+now converts the shared km² pixel weights to m² explicitly. Remaining fitted
+surface discrepancies propagate to restart/runtime results and remain a gate;
+initial execution success does not establish full numerical equivalence.

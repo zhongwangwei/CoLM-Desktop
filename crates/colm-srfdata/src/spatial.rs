@@ -72,14 +72,39 @@ pub struct PixelAxes {
     pub lat_n: Vec<f64>,
 }
 
+/// Source-grid cell ownership for each emitted spatial pixel axis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PixelSourceMapping {
+    pub columns: Vec<Option<usize>>,
+    pub rows: Vec<Option<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementBlockOwners {
+    pub blocks: BlockLayout,
+    pub owners: BTreeMap<i64, (usize, usize)>,
+}
+
 /// Complete common spatial topology before surface fields are aggregated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpatialTopology {
     pub kind: SpatialInputKind,
     pub grid: SpatialGrid,
     pub pixel: PixelAxes,
+    pub source: Option<PixelSourceMapping>,
+    pub element_block_owners: Option<ElementBlockOwners>,
     pub mesh: FlatMesh,
     pub land_elements: FlatLandElements,
+}
+
+impl SpatialTopology {
+    pub fn preserve_element_blocks(&mut self, blocks: &BlockLayout) -> Result<()> {
+        self.element_block_owners = Some(ElementBlockOwners {
+            blocks: blocks.clone(),
+            owners: compute_element_blocks(self, blocks)?,
+        });
+        Ok(())
+    }
 }
 
 /// CATCHMENT topology keeps the intermediate HRU pixelset required before
@@ -208,15 +233,15 @@ pub fn build_spatial_topology_in_domain(
         .get_values::<i64, _>((0..summary.nlat, 0..summary.nlon))?;
     let PixelMapping {
         pixel,
-        columns: longitude,
-        rows: latitude,
+        columns,
+        rows,
     } = assimilated_pixels(&grid, raw_grid, bounds)?;
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
     let mut raw_count = 0_usize;
-    for (y, source_row) in latitude.into_iter().enumerate() {
-        let Some(row) = source_row else { continue };
-        for (x, source_column) in longitude.iter().enumerate() {
+    for (y, source_row) in rows.iter().enumerate() {
+        let Some(row) = *source_row else { continue };
+        for (x, source_column) in columns.iter().enumerate() {
             let Some(column) = *source_column else {
                 continue;
             };
@@ -259,6 +284,8 @@ pub fn build_spatial_topology_in_domain(
         kind,
         grid,
         pixel,
+        source: Some(PixelSourceMapping { columns, rows }),
+        element_block_owners: None,
         mesh,
         land_elements,
     })
@@ -307,15 +334,15 @@ pub fn build_catchment_spatial_topology_in_domain(
     );
     let PixelMapping {
         pixel,
-        columns: longitude,
-        rows: latitude,
+        columns,
+        rows,
     } = assimilated_pixels(&grid, raw_grid, bounds)?;
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32, i32)>>::new();
     let mut raw_count = 0_usize;
-    for (y, source_row) in latitude.into_iter().enumerate() {
-        let Some(row) = source_row else { continue };
-        for (x, source_column) in longitude.iter().enumerate() {
+    for (y, source_row) in rows.iter().enumerate() {
+        let Some(row) = *source_row else { continue };
+        for (x, source_column) in columns.iter().enumerate() {
             let Some(column) = *source_column else {
                 continue;
             };
@@ -377,6 +404,8 @@ pub fn build_catchment_spatial_topology_in_domain(
             kind: SpatialInputKind::Catchment,
             grid,
             pixel,
+            source: Some(PixelSourceMapping { columns, rows }),
+            element_block_owners: None,
             mesh,
             land_elements,
         },
@@ -1479,34 +1508,37 @@ pub fn gather_patch_raster(
     Ok((gathered, layout, area))
 }
 
-/// Relative spherical areas in flattened mesh-pixel order.
+/// Spherical areas (km²) in flattened mesh-pixel order.
 ///
-/// CoLM uses physical grid-cell areas for area-weighted aggregation.  The
-/// common Earth-radius factor cancels, so steradians preserve the exact
-/// weighting without introducing a second radius constant.
+/// Preserve MOD_Utils::areaquad's rounded conversion and multiplication order.
+/// Cancelling the radius or using to_radians changes the last bits of weights;
+/// those changes can flip the nonlinear soil fit's acceptance branch.
 pub fn mesh_cell_area_weights(mesh: &FlatMesh, pixel: &PixelAxes) -> Result<Vec<f64>> {
+    const DEG2RAD: f64 = 1.745_329_251_994_33e-2;
+    const EARTH_RADIUS_KM: f64 = 6371.22;
     ensure!(
         pixel.lon_w.len() == pixel.lon_e.len() && pixel.lat_s.len() == pixel.lat_n.len(),
         "spatial pixel edge vectors must be paired"
     );
     let mut longitude = Vec::with_capacity(pixel.lon_w.len());
     for (&west, &east) in pixel.lon_w.iter().zip(&pixel.lon_e) {
-        let mut width = east - west;
-        if width <= 0.0 {
-            width += 360.0;
-        }
+        let width = if east < west {
+            east + 360.0 - west
+        } else {
+            east - west
+        };
         ensure!(
             width.is_finite() && width > 0.0,
             "pixel longitude has invalid width"
         );
-        longitude.push(width.to_radians());
+        longitude.push(width * DEG2RAD);
     }
     let latitude = pixel
         .lat_s
         .iter()
         .zip(&pixel.lat_n)
         .map(|(&south, &north)| {
-            let area = north.to_radians().sin() - south.to_radians().sin();
+            let area = (north * DEG2RAD).sin() - (south * DEG2RAD).sin();
             ensure!(
                 area.is_finite() && area > 0.0,
                 "pixel latitude has invalid area"
@@ -1530,7 +1562,9 @@ pub fn mesh_cell_area_weights(mesh: &FlatMesh, pixel: &PixelAxes) -> Result<Vec<
                     .context("mesh pixel lies outside the spatial longitude grid")?
                     * latitude
                         .get(y)
-                        .context("mesh pixel lies outside the spatial latitude grid")?,
+                        .context("mesh pixel lies outside the spatial latitude grid")?
+                    * EARTH_RADIUS_KM
+                    * EARTH_RADIUS_KM,
             );
         }
     }
@@ -3171,7 +3205,7 @@ pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
         values.len(),
         land_patches.len()
     );
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     let year = format!("{land_cover_year:04}");
     let output = landdata.as_ref().join(directory).join(year);
     std::fs::create_dir_all(&output)?;
@@ -3241,7 +3275,7 @@ pub fn write_landpatch_layered_vector(
         values.len(),
         land_patches.len()
     );
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     let output = landdata
         .as_ref()
         .join(directory)
@@ -3319,7 +3353,7 @@ pub fn write_landpatch_3d_vector(
         values.len(),
         land_patches.len()
     );
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     let output = landdata
         .as_ref()
         .join(directory)
@@ -3398,7 +3432,7 @@ pub fn write_spatial_topology_with_shared(
     write_block_file(landdata, blocks)?;
     write_pixel_file(landdata, &topology.pixel)?;
 
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     let year = format!("{land_cover_year:04}");
     let mesh_dir = landdata.join("mesh").join(&year);
     std::fs::create_dir_all(&mesh_dir)?;
@@ -3534,7 +3568,7 @@ pub fn write_spatial_hru_topology(
 ) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_hrus)?;
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     write_pixelset(
         landdata.as_ref(),
         "landhru",
@@ -3602,7 +3636,7 @@ pub fn write_spatial_pft_topology_with_shared(
 ) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_pfts)?;
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     write_pixelset(
         landdata.as_ref(),
         "landpft",
@@ -3628,7 +3662,7 @@ pub fn write_spatial_urban_topology(
 ) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_urban)?;
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     write_pixelset(
         landdata.as_ref(),
         "landurban",
@@ -3677,7 +3711,7 @@ pub fn write_spatial_urban_vector<T: NcTypeDescriptor + Copy>(
         values.len(),
         land_urban.len()
     );
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     let mut output = landdata
         .as_ref()
         .join("urban")
@@ -3726,7 +3760,7 @@ pub fn write_spatial_urban_material(
     validate_patches(&topology.mesh, land_urban)?;
     let urban = land_urban.len();
     material.validate(urban)?;
-    let assignments = element_blocks(&topology.mesh, &topology.pixel, blocks)?;
+    let assignments = element_blocks(topology, blocks)?;
     let output = landdata
         .as_ref()
         .join("urban")
@@ -3934,7 +3968,7 @@ fn assimilated_pixels(
     for edge in latitude
         .iter()
         .flat_map(|&(s, n, _)| [s, n])
-        .chain((0..=raw.nlat).map(|j| 90.0 - raw.dlat() * j as f64))
+        .chain((0..=raw.nlat).map(|j| raw.lat_s(j)))
     {
         if edge > bounds.south && edge < bounds.north {
             ys.push(edge);
@@ -4104,29 +4138,44 @@ fn validate_patches(mesh: &FlatMesh, patches: &FlatLandPatches) -> Result<()> {
 }
 
 fn element_blocks(
-    mesh: &FlatMesh,
-    pixel: &PixelAxes,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<BTreeMap<i64, (usize, usize)>> {
+    if let Some(preserved) = &topology.element_block_owners {
+        ensure!(
+            preserved.blocks == *blocks,
+            "preserved element block owners were computed for different block edges"
+        );
+        let owners = &preserved.owners;
+        let mut current = BTreeMap::new();
+        for element in 0..topology.mesh.len() {
+            let id = topology.mesh.element_id(element)?;
+            current.insert(
+                id,
+                *owners
+                    .get(&id)
+                    .with_context(|| format!("mesh element {id} has no preserved block owner"))?,
+            );
+        }
+        return Ok(current);
+    }
+    compute_element_blocks(topology, blocks)
+}
+
+fn compute_element_blocks(
+    topology: &SpatialTopology,
     blocks: &BlockLayout,
 ) -> Result<BTreeMap<i64, (usize, usize)>> {
     let (nx, ny) = blocks.dimensions()?;
-    // Axis cells are shared by millions of pixel memberships. Resolve each
-    // coordinate once, rather than searching the block edges for every pixel.
-    let longitude = pixel
-        .lon_w
-        .iter()
-        .zip(&pixel.lon_e)
-        .map(|(&w, &e)| block_longitude(midpoint_longitude(w, e), blocks))
-        .collect::<Result<Vec<_>>>()?;
-    let latitude = pixel
-        .lat_s
-        .iter()
-        .zip(&pixel.lat_n)
-        .map(|(&s, &n)| block_latitude((s + n) * 0.5, blocks))
-        .collect::<Result<Vec<_>>>()?;
+    let (longitude, latitude) = if let Some(source) = &topology.source {
+        source_block_axes(topology, source, blocks)?
+    } else {
+        midpoint_block_axes(&topology.pixel, blocks)?
+    };
     let mut out = BTreeMap::new();
-    for element in 0..mesh.len() {
+    for element in 0..topology.mesh.len() {
         let mut counts = vec![0_usize; nx * ny];
-        let (xs, ys) = mesh.pixels(element)?;
+        let (xs, ys) = topology.mesh.pixels(element)?;
         for (&x, &y) in xs.iter().zip(ys) {
             let x = usize::try_from(x)?
                 .checked_sub(1)
@@ -4134,12 +4183,16 @@ fn element_blocks(
             let y = usize::try_from(y)?
                 .checked_sub(1)
                 .context("mesh latitude is zero")?;
-            let block_x = *longitude
+            let block_x = longitude
                 .get(x)
-                .context("mesh longitude is outside pixel grid")?;
-            let block_y = *latitude
+                .copied()
+                .context("mesh longitude is outside pixel grid")?
+                .context("mesh longitude has no source-grid owner")?;
+            let block_y = latitude
                 .get(y)
-                .context("mesh latitude is outside pixel grid")?;
+                .copied()
+                .context("mesh latitude is outside pixel grid")?
+                .context("mesh latitude has no source-grid owner")?;
             counts[block_y * nx + block_x] += 1;
         }
         let mut selected = 0_usize;
@@ -4148,9 +4201,116 @@ fn element_blocks(
                 selected = index;
             }
         }
-        out.insert(mesh.element_id(element)?, (selected % nx, selected / nx));
+        out.insert(
+            topology.mesh.element_id(element)?,
+            (selected % nx, selected / nx),
+        );
     }
     Ok(out)
+}
+
+type BlockAxes = (Vec<Option<usize>>, Vec<Option<usize>>);
+
+fn source_block_axes(
+    topology: &SpatialTopology,
+    source: &PixelSourceMapping,
+    blocks: &BlockLayout,
+) -> Result<BlockAxes> {
+    ensure!(
+        source.columns.len() == topology.pixel.lon_w.len()
+            && source.rows.len() == topology.pixel.lat_s.len(),
+        "source-grid ownership axes do not match pixel axes"
+    );
+    let first_column = source.columns.iter().flatten().next().copied();
+    let longitude = source
+        .columns
+        .iter()
+        .map(|column| {
+            let Some(column) = *column else {
+                return Ok(None);
+            };
+            let west = *topology
+                .grid
+                .lon_w
+                .get(column)
+                .context("mesh longitude source column is outside the source grid")?;
+            let east = *topology
+                .grid
+                .lon_e
+                .get(column)
+                .context("mesh longitude source column is outside the source grid")?;
+            let owner = if Some(column) == first_column
+                && longitude_in_floor(topology.pixel.edge_west, west, east)
+            {
+                topology.pixel.edge_west
+            } else {
+                west
+            };
+            Ok(Some(block_longitude(
+                normalize_longitude_value(owner),
+                blocks,
+            )?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let south_to_north = topology.grid.lat_s.first() <= topology.grid.lat_s.last();
+    let latitude = source
+        .rows
+        .iter()
+        .map(|row| {
+            let Some(row) = *row else { return Ok(None) };
+            let block = if south_to_north {
+                let south = *topology
+                    .grid
+                    .lat_s
+                    .get(row)
+                    .context("mesh latitude source row is outside the source grid")?;
+                // grid_set_blocks starts at the domain's block when it
+                // clips the first source row, rather than at that row's edge.
+                block_latitude(south.max(topology.pixel.edge_south), blocks)?
+            } else {
+                let north = *topology
+                    .grid
+                    .lat_n
+                    .get(row)
+                    .context("mesh latitude source row is outside the source grid")?;
+                block_latitude_descending_north(north.min(topology.pixel.edge_north), blocks)?
+            };
+            Ok(Some(block))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((longitude, latitude))
+}
+
+fn midpoint_block_axes(pixel: &PixelAxes, blocks: &BlockLayout) -> Result<BlockAxes> {
+    // Axis cells are shared by millions of pixel memberships. Resolve each
+    // coordinate once, rather than searching the block edges for every pixel.
+    let longitude = pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&w, &e)| block_longitude(midpoint_longitude(w, e), blocks))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(Some)
+        .collect();
+    let latitude = pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&s, &n)| block_latitude((s + n) * 0.5, blocks))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(Some)
+        .collect();
+    Ok((longitude, latitude))
+}
+
+fn normalize_longitude_value(value: f64) -> f64 {
+    if (-180.0..180.0).contains(&value) {
+        value
+    } else {
+        (value + 180.0).rem_euclid(360.0) - 180.0
+    }
 }
 
 fn block_longitude(lon: f64, blocks: &BlockLayout) -> Result<usize> {
@@ -4169,6 +4329,15 @@ fn block_latitude(lat: f64, blocks: &BlockLayout) -> Result<usize> {
         .zip(&blocks.lat_n)
         .position(|(&south, &north)| lat >= south && (lat < north || nearly_equal(lat, 90.0)))
         .with_context(|| format!("latitude {lat} is outside block edges"))
+}
+
+fn block_latitude_descending_north(lat_n: f64, blocks: &BlockLayout) -> Result<usize> {
+    blocks
+        .lat_s
+        .iter()
+        .zip(&blocks.lat_n)
+        .position(|(&south, &north)| lat_n > south && lat_n <= north)
+        .with_context(|| format!("latitude north edge {lat_n} is outside block edges"))
 }
 
 fn longitude_in_floor(lon: f64, west: f64, east: f64) -> bool {

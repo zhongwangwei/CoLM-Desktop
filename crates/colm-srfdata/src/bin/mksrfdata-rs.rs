@@ -193,8 +193,9 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let args = parse_spatial_pft(args)?;
     let (topology, base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let catchment =
+            let mut catchment =
                 build_catchment_spatial_topology_in_domain(&args.mesh, MERIT_90M, args.bounds)?;
+            catchment.topology.preserve_element_blocks(&args.blocks)?;
             let (catchment, patches) = build_catchment_pft_land_patches_from_raster(
                 catchment,
                 &args.landtype,
@@ -205,8 +206,9 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let topology =
+            let mut topology =
                 build_spatial_topology_in_domain(&args.mesh, args.kind, COLM_500M, args.bounds)?;
+            topology.preserve_element_blocks(&args.blocks)?;
             let (topology, patches) = build_pft_land_patches_from_raster(
                 topology,
                 &args.landtype,
@@ -643,8 +645,9 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     };
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let catchment =
+            let mut catchment =
                 build_catchment_spatial_topology_in_domain(&args.mesh, MERIT_90M, args.bounds)?;
+            catchment.topology.preserve_element_blocks(&args.blocks)?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
                 catchment,
                 &args.landtype,
@@ -656,8 +659,9 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let topology =
+            let mut topology =
                 build_spatial_topology_in_domain(&args.mesh, args.kind, COLM_500M, args.bounds)?;
+            topology.preserve_element_blocks(&args.blocks)?;
             let (topology, patches) = build_lct_land_patches_from_raster(
                 topology,
                 &args.landtype,
@@ -4789,6 +4793,8 @@ mod tests {
                 lat_s: vec![-90.0],
                 lat_n: vec![90.0],
             },
+            source: None,
+            element_block_owners: None,
             land_elements: mesh.land_elements(),
             mesh,
         };
@@ -4847,6 +4853,8 @@ mod tests {
                 lat_s: vec![-90.0],
                 lat_n: vec![90.0],
             },
+            source: None,
+            element_block_owners: None,
             land_elements: mesh.land_elements(),
             mesh,
         };
@@ -5133,6 +5141,8 @@ mod tests {
                 lat_s: vec![COLM_500M.lat_s(1)],
                 lat_n: vec![COLM_500M.lat_n(1)],
             },
+            source: None,
+            element_block_owners: None,
             land_elements: mesh.land_elements(),
             mesh,
         };

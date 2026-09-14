@@ -112,3 +112,11 @@ Both soil models distribute patch fits through Rayon; invariant source curves ar
 computed once rather than inside every LM callback. No new dependency, precision
 reduction, parallel NetCDF access, or scientific tolerance relaxation was added.
 Full migration is still not established by this one LCT case.
+
+The subsequent geometry run also reproduces every pixel axis and element block
+owner exactly, with identical dimensions across all 1,479 surface files.
+Canonical raw edges use explicit `f64::mul_add`; physical aggregation retains
+Fortran `areaquad` arithmetic. Source-grid votes are preserved before land-only
+filtering instead of recomputed from retained fine-pixel centers. This removes
+all observed non-soil-fit differences above the recorded 1e-12 threshold, but
+48 fitted soil fields still fail it; see the updated audit before claiming parity.

@@ -234,3 +234,50 @@ call it. This is not a real catchment all-field parity claim.
    source I/O ownership/staging. Other platforms now close normally, but no
    Windows execution was performed here. Do not describe this as universal
    NetCDF/HDF5 mount safety.
+
+## Exact geometry and source-block ownership follow-up
+
+The completed `rust-full-geometry/` run supersedes the numerical/block results
+of `rust-full-precomputed/` above; both are retained as independent artifacts.
+
+- All four pixel-edge arrays now match the original **bit for bit**. The 992
+  latitude / 2,496 longitude discrepancies were entirely explained by the
+  production Fortran build's fused multiply-add grid generation. Rust records
+  this single rounding explicitly, including the near-zero equatorial edge.
+- Shared surface weights now retain `areaquad`'s rounded degree conversion,
+  km² units and multiplication order. The absolute-area catchment consumer
+  converts km² to m²; normalized-weight consumers need no conversion.
+- Source-grid block votes are frozen before land-only compaction and reused by
+  every writer. Clipped domain starts, both latitude orientations, unreferenced
+  thin strips and mismatched subsequent block layouts have regressions. The
+  former element 132548 mismatch is gone; all 957 element owners now agree.
+- All 15,922,348 memberships / 7,754 patches still agree. Maximum element patch
+  fraction difference is **3.86e-15**, down from 1.71e-12.
+- All **1,479** file names, dimensions (including lengths/unlimited flags),
+  variables, types and variable attributes agree. The only attribute inventory
+  difference is upstream's per-file `create_time`, absent in Rust.
+- There are still 242 patch fields, with no missing/extra fields or finite-mask
+  mismatches. All non-soil-fit fields pass the recorded 1e-12 absolute/relative
+  comparison. **48 fitted soil fields still exceed it**; this is not a parity pass.
+
+Surface / initial / unchanged original two-step runtime all exit zero, taking
+**193.17 / 2.43 / 6.54 seconds** respectively. Surface is about 22% less elapsed
+time than the preceding 248.68 s run, but cache state and concurrent validation
+were not controlled; this is an observation, not a benchmark guarantee.
+
+The earlier 44-source-cell outlier now takes the same accepted VGM branch:
+`k_s_l5 = 8.494329182793543` vs original `8.494329182669710`, rather than retaining
+14.484728866078875. Remaining worst surface differences are `k_s_l1 = 4.14876`
+and `psi_s_l8 = 2.50504`; after two model steps `gs0sun` differs by up to 3.65504.
+The remaining nonlinear-solver/reference-rounding audit stays open. No fit
+criteria or scientific acceptance tolerances were relaxed.
+
+Validation: 205 surface library + 30 binary tests, 86 initial library + 12 binary
+tests, five real raster and six real-site checks; the ten opt-in library Fortran
+reference checks pass. Clippy (both crates/all targets, warnings denied),
+downstream CLI/kernel checks and changed-file formatting pass. Native binary
+and all five native pipeline checks pass when run with `--test-threads=1`.
+A concurrent native-pipeline run exposed missing global-header failures for
+PFT-BGC/urban; its cause is being tracked separately, not counted as a parallel
+validation pass. Logs use `/tmp/colm-geometry-*`; case comparisons and binary
+hashes are inside `rust-full-geometry/`.

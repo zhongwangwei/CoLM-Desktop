@@ -318,7 +318,6 @@ fn read_native_patch_areas(
     mesh: &FlatMesh,
     cell_area: &[f64],
 ) -> Result<BTreeMap<i64, f64>> {
-    const EARTH_RADIUS_METERS: f64 = 6_371_220.0;
     let mut spans = BTreeMap::new();
     let mut offset = 0;
     for element in 0..mesh.len() {
@@ -362,7 +361,7 @@ fn read_native_patch_areas(
             *areas.entry(id).or_insert(0.0) += cell_area[offset + start - 1..offset + end]
                 .iter()
                 .sum::<f64>()
-                * EARTH_RADIUS_METERS.powi(2);
+                * 1.0e6; // mesh_cell_area_weights returns km²; discharge needs m².
         }
     }
     ensure!(

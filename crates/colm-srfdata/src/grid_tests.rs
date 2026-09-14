@@ -6,7 +6,7 @@ use super::*;
 /// 概率远低于各自出错。里程碑 2 的教训是「一条只会说相同的测试比没有更糟」。
 fn binary_search_south(y: f64) -> usize {
     let n = COLM_500M.nlat;
-    let lat = |j: usize| 90.0 - COLM_500M.dlat() * (j as f64);
+    let lat = |j: usize| (-COLM_500M.dlat()).mul_add(j as f64, 90.0);
     if y >= lat(1) {
         return 1;
     }
@@ -48,10 +48,10 @@ fn cn_cng_lands_on_the_pixel_the_extraction_used() {
 
 #[test]
 fn a_latitude_exactly_on_a_cell_edge_matches_colm_not_the_naive_formula() {
-    // 赤道正好落在格边界上。floor(...)+1 给 21601，CoLM 给 21600。
-    // 90 个 PLUMBER2 站点都没踩到这个，但用户自己的站点会。
-    assert_eq!(COLM_500M.index_of(0.0, 0.0).1, 21600);
-    assert_eq!(binary_search_south(0.0), 21600);
+    // Use the actual single-rounded grid edge, not mathematical zero.
+    let edge = f64::from_bits(0x3cd6800000000000);
+    assert_eq!(COLM_500M.index_of(0.0, edge).1, 21600);
+    assert_eq!(binary_search_south(edge), 21600);
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn every_single_cell_edge_agrees_with_the_binary_search() {
     // 会让两者分道扬镳的地方，抽样只会碰巧躲开它。跑完约 30 ms。
     let mut bad = Vec::new();
     for j in 1..=COLM_500M.nlat {
-        let y = 90.0 - COLM_500M.dlat() * (j as f64);
+        let y = (-COLM_500M.dlat()).mul_add(j as f64, 90.0);
         let (got, want) = (COLM_500M.index_of(0.0, y).1, binary_search_south(y));
         if got != want {
             bad.push(format!(
@@ -157,4 +157,16 @@ fn the_tile_offset_reconstructs_the_global_index() {
         assert_eq!((ilon - 1) % 1200 + 1, t.ilon);
         assert_eq!((ilat - 1) % 1200 + 1, t.ilat);
     }
+}
+
+#[test]
+fn raw_edges_keep_the_production_fortran_single_rounding() {
+    // Pristine MOD_Grid, gfortran -O2 -fdefault-real-8, ARM64.
+    // Separate multiply/subtract changes real patch areas and soil-fit branches.
+    assert_eq!(COLM_500M.lat_s(16439).to_bits(), 0x4035811111111111);
+    assert_eq!(COLM_500M.lat_n(16440).to_bits(), 0x4035811111111111);
+    assert_eq!(COLM_500M.lon_w(67684), 102.0125);
+    assert_eq!(COLM_500M.lon_e(67683), 102.0125);
+    assert_eq!(COLM_500M.lat_s(21600).to_bits(), 0x3cd6800000000000);
+    assert_eq!(COLM_500M.index_of(0.0, 0.0).1, 21601);
 }

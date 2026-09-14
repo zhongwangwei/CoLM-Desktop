@@ -5,8 +5,8 @@
 //! （`share/MOD_Grid.F90`）：经度西边界升序、纬度南边界降序，都是等距。
 //!
 //! 等距网格上二分查找有闭式解，但**朴素的那个是错的**：
-//! `floor((90-y)/dlat)+1` 在纬度恰好落在格边界时比 CoLM 多一格，赤道就是
-//! 这种情形（CoLM 给 21600，朴素式给 21601）。改成 `ceil` 之后仍不够 ——
+//! `floor((90-y)/dlat)+1` 在纬度恰好落在格边界时比 CoLM 多一格。
+//! 改成 `ceil` 之后仍不够 ——
 //! 极点附近 `90.0 - lat` 会发生灾难性抵消，`ceil` 又会跳掉一格。
 //! 所以这里用解析式起步、再拿**真实的边界值**校正一两步。
 //! `grid_tests.rs` 里有一份二分查找的移植逐点比对着这件事。
@@ -81,7 +81,9 @@ impl Grid {
 
     /// 第 i 格的西边界（1-based），与 `grid_define_by_ndims` 算法一致。
     pub fn lon_w(&self, i: usize) -> f64 {
-        -180.0 + self.dlon() * ((i - 1) as f64)
+        // Explicit single rounding matches the production Fortran grid and
+        // keeps pixel intersections independent of target FMA contraction.
+        self.dlon().mul_add((i - 1) as f64, -180.0)
     }
 
     /// 第 i 格的东边界；全球最后一格按 CoLM 规范化回 -180°。
@@ -89,7 +91,7 @@ impl Grid {
         if i == self.nlon {
             -180.0
         } else {
-            -180.0 + self.dlon() * (i as f64)
+            self.lon_w(i + 1)
         }
     }
 
@@ -99,12 +101,14 @@ impl Grid {
 
     /// 第 j 格的南边界（1-based），同上。纬度是降序的。
     pub fn lat_s(&self, j: usize) -> f64 {
-        90.0 - self.dlat() * (j as f64)
+        (-self.dlat()).mul_add(j as f64, 90.0).clamp(-90.0, 90.0)
     }
 
     /// 第 j 格的北边界（1-based）。
     pub fn lat_n(&self, j: usize) -> f64 {
-        90.0 - self.dlat() * ((j - 1) as f64)
+        (-self.dlat())
+            .mul_add((j - 1) as f64, 90.0)
+            .clamp(-90.0, 90.0)
     }
 
     pub fn lat_center(&self, j: usize) -> f64 {
