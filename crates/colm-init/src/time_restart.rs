@@ -385,6 +385,16 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         )?;
     }
     put_patch_values(&mut file, post_radiation_patch_entries(input.patch))?;
+    if let Some(values) = input.lake.layer_thickness_m {
+        put_axis_major(
+            &mut file,
+            "dz_lake",
+            "lake",
+            dimensions.lake_layers,
+            patches,
+            values,
+        )?;
+    }
     put_axis_major(
         &mut file,
         "t_lake",
@@ -401,16 +411,6 @@ pub fn write_time_restart_block(path: impl AsRef<Path>, input: TimeRestartInput<
         patches,
         input.lake.ice_fraction,
     )?;
-    if let Some(values) = input.lake.layer_thickness_m {
-        put_axis_major(
-            &mut file,
-            "dz_lake",
-            "lake",
-            dimensions.lake_layers,
-            patches,
-            values,
-        )?;
-    }
     put_patch_values(&mut file, [("savedtke1", input.patch.saved_tke)])?;
     for (name, values) in snow_aerosol_entries(input.snow_aerosol) {
         put_axis_major(

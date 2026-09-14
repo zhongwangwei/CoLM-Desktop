@@ -45,6 +45,8 @@ pub struct FlatLandElements {
 /// Ranges are one-based and inclusive because they are part of CoLM's on-disk
 /// pixelset contract.  The referenced [`FlatMesh`] owns the reordered pixel
 /// coordinates; this structure stores no duplicate coordinate vectors.
+/// Paired `(0, 0)` denotes a virtual WMO patch internally; serialization maps
+/// it to Fortran's `(-1, -1)`. A virtual patch owns no physical area.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatLandPatches {
     pub element_ids: Vec<i64>,
@@ -567,6 +569,129 @@ impl FlatLandPatches {
         self.set_type.is_empty()
     }
 
+    /// Owned zero-based cells; WMO virtual patches have an empty range.
+    pub fn owned_pixel_range(&self, patch: usize, count: usize) -> Result<std::ops::Range<usize>> {
+        let start = *self
+            .pixel_start
+            .get(patch)
+            .context("patch start is absent")?;
+        let end = *self.pixel_end.get(patch).context("patch end is absent")?;
+        if start == 0 && end == 0 {
+            return Ok(0..0);
+        }
+        ensure!(start > 0 && start <= end && end <= count,
+            "patch {patch} has invalid one-based pixel range {start}..={end} for element size {count}");
+        Ok(start - 1..end)
+    }
+
+    /// Recover MOD_Land2mWMO's earlier source from the stored patch topology.
+    /// Ties retain the first soil patch, using pixel counts rather than area.
+    pub fn wmo_sources(&self) -> Result<Vec<Option<usize>>> {
+        ensure!(
+            self.element_ids.len() == self.len()
+                && self.element_index.len() == self.len()
+                && self.pixel_start.len() == self.len()
+                && self.pixel_end.len() == self.len(),
+            "land-patch vectors must have equal lengths"
+        );
+        let mut sources = vec![None; self.len()];
+        if !self.pixel_start.contains(&0) {
+            return Ok(sources);
+        }
+        let mut largest = None::<(usize, usize)>;
+        let mut current = None;
+        let mut seen = HashSet::new();
+        for (patch, source) in sources.iter_mut().enumerate() {
+            let key = (self.element_ids[patch], self.element_index[patch]);
+            if current != Some(key) {
+                ensure!(
+                    seen.insert(key),
+                    "WMO land patches must be contiguous by element"
+                );
+                current = Some(key);
+                largest = None;
+            }
+            let range = self.owned_pixel_range(patch, usize::MAX)?;
+            if range.is_empty() {
+                ensure!(
+                    patch + 1 == self.len() || self.element_ids[patch + 1] != key.0,
+                    "virtual WMO patch must be last in its element"
+                );
+                let (index, _) = largest.context("virtual WMO patch has no earlier soil source")?;
+                ensure!(
+                    self.set_type[patch] == self.set_type[index],
+                    "virtual WMO class differs from its source"
+                );
+                *source = Some(index);
+            } else if crate::pft::is_igbp_soil_ground(self.set_type[patch])?
+                && largest.is_none_or(|(_, count)| range.len() > count)
+            {
+                largest = Some((patch, range.len()));
+            }
+        }
+        Ok(sources)
+    }
+
+    /// Append one WMO patch after each element with a soil-ground source.
+    /// Call after physical/crop patch partition and before PFT construction.
+    pub fn with_wmo_patches(&self, elements: &mut FlatLandElements) -> Result<Self> {
+        self.wmo_sources()?;
+        ensure!(!self.pixel_start.contains(&0), "WMO patches already exist");
+        ensure!(
+            elements.set_type.len() == elements.element_ids.len(),
+            "invalid land elements"
+        );
+        let mut order = Vec::with_capacity(self.len() + elements.element_ids.len());
+        let mut start = 0;
+        for (element, &id) in elements.element_ids.iter().enumerate() {
+            let mut end = start;
+            let mut source = None;
+            let mut largest = 0;
+            while end < self.len() && self.element_ids[end] == id {
+                ensure!(
+                    self.element_index[end] == element + 1,
+                    "patch element index differs from landelm"
+                );
+                let count = self.owned_pixel_range(end, usize::MAX)?.len();
+                if crate::pft::is_igbp_soil_ground(self.set_type[end])? && count > largest {
+                    source = Some(end);
+                    largest = count;
+                }
+                order.push((end, false));
+                end += 1;
+            }
+            ensure!(end > start, "element {id} has no contiguous land patches");
+            if let Some(source) = source {
+                order.push((source, true));
+                elements.set_type[element] = 1;
+            }
+            start = end;
+        }
+        ensure!(
+            start == self.len(),
+            "landpatch element order differs from landelm"
+        );
+        Ok(Self {
+            element_ids: order.iter().map(|&(p, _)| self.element_ids[p]).collect(),
+            element_index: order.iter().map(|&(p, _)| self.element_index[p]).collect(),
+            pixel_start: order
+                .iter()
+                .map(|&(p, virtual_patch)| {
+                    if virtual_patch {
+                        0
+                    } else {
+                        self.pixel_start[p]
+                    }
+                })
+                .collect(),
+            pixel_end: order
+                .iter()
+                .map(|&(p, virtual_patch)| if virtual_patch { 0 } else { self.pixel_end[p] })
+                .collect(),
+            set_type: order.iter().map(|&(p, _)| self.set_type[p]).collect(),
+        })
+    }
+
     /// Convert the CoLM one-based patch ranges into the zero-based flat cell
     /// indices consumed by Rust aggregation kernels.
     pub fn aggregation_layout(
@@ -593,14 +718,13 @@ impl FlatLandPatches {
                 "patch {patch} element ID does not match the mesh"
             );
             let count = mesh.pixel_count(element)?;
-            let start = self.pixel_start[patch];
-            let end = self.pixel_end[patch];
+            let range = self.owned_pixel_range(patch, count)?;
             ensure!(
-                start > 0 && start <= end && end <= count,
-                "patch {patch} has invalid one-based pixel range {start}..={end} for element size {count}"
+                !range.is_empty() || wmo_source.get(patch).is_some_and(Option::is_some),
+                "virtual WMO patch {patch} needs a source for aggregation"
             );
             let base = mesh.pixel_offsets[element];
-            cells.extend(base + start - 1..base + end);
+            cells.extend(base + range.start..base + range.end);
             offsets.push(cells.len());
         }
         FlatPatches::new(self.set_type.clone(), offsets, cells, wmo_source)

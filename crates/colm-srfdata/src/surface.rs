@@ -776,17 +776,20 @@ impl FlatPatches {
         Ok(result)
     }
 
-    /// Port of the IGBP LCT branch of `Aggregation_ForestHeight`.
-    ///
-    /// This branch uses raw-cell land-area weighting and intentionally does
-    /// not inherit a WMO source; that is also how the Fortran LCT path works.
+    /// Patch height shared by IGBP LCT and PFT/PC: area-weighted physical
+    /// patches, with virtual PFT/PC WMO patches copying their source height.
+    /// LCT disables WMO in the namelist before building the topology.
     pub fn aggregate_igbp_forest_height(
         &self,
         height_m: &[f64],
         landarea: &[f64],
     ) -> Result<Vec<f64>> {
         let mut result = vec![SURFACE_MISSING; self.len()];
-        for (patch, output) in result.iter_mut().enumerate() {
+        for patch in 0..self.len() {
+            if let Some(source) = self.wmo_source[patch] {
+                result[patch] = result[source];
+                continue;
+            }
             if self.patch_types[patch] == 0 {
                 continue;
             }
@@ -806,7 +809,7 @@ impl FlatPatches {
                 area_sum > 0.0 && area_sum.is_finite(),
                 "forest-height patch {patch} has zero or non-finite land area"
             );
-            *output = height_sum / area_sum;
+            result[patch] = height_sum / area_sum;
         }
         Ok(result)
     }

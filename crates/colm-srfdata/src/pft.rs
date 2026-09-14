@@ -61,6 +61,9 @@ pub struct PftTopology {
     pub patch_offsets: Vec<usize>,
     pub pft_classes: Vec<usize>,
     pub patch_kind: Vec<PftPatchKind>,
+    /// MOD_LandPFT's raw-weighted fractions, distinct from pct_pfts' mean of
+    /// per-cell fractions. CROP callers replace CFT entries with patch shares.
+    pub pctshared: Vec<f64>,
 }
 
 /// Split IGBP natural patches into natural/CROP/CFT shared patches.
@@ -242,7 +245,8 @@ pub fn build_crop_pft_topology(
 /// (`patchtypes(settyp) == 0`).  The weighted positive-class test and bare-soil fallback
 /// are the `MOD_LandPFT::landpft_build` rules. `pft_class_count` permits
 /// CoLM's 16-class MODIS source to retain only its 15 natural PFT types; the
-/// actual percentages remain the responsibility of [`aggregate_pft_fractions`].
+/// `pctshared` retains these raw-weighted fractions; the distinct surface
+/// `pct_pfts` percentages come from [`aggregate_pft_fractions`].
 pub fn build_pft_topology(
     land_patches: &FlatLandPatches,
     patches: &FlatPatches,
@@ -305,60 +309,77 @@ fn build_pft_topology_inner(
     let mut patch_offsets = Vec::with_capacity(land_patches.len() + 1);
     let mut pft_classes = Vec::new();
     let mut patch_kind = Vec::with_capacity(land_patches.len());
+    let mut pctshared = Vec::new();
     patch_offsets.push(0);
 
     for patch in 0..land_patches.len() {
-        ensure!(
-            patches.wmo_source_for(patch).is_none(),
-            "landpft WMO sharing needs the upstream land2mWMO topology"
-        );
-        let land_type = land_patches.set_type[patch];
-        let kind = if crop_class.is_some() && land_type == IGBP_CROPLAND {
-            PftPatchKind::Crop
-        } else if is_igbp_soil_ground(land_type)? {
-            PftPatchKind::Natural
+        let (kind, classes) = if let Some(source) = patches.wmo_source_for(patch) {
+            ensure!(
+                crop_class.is_none(),
+                "CROP plus WMO PFT topology is ambiguous in upstream land2mWMO"
+            );
+            (
+                PftPatchKind::Natural,
+                vec![(
+                    wmo_pft_class(
+                        patches,
+                        source,
+                        raw_class_count,
+                        pft_class_count,
+                        raw_percent,
+                        land_area,
+                    )?,
+                    1.0,
+                )],
+            )
         } else {
-            PftPatchKind::Other
+            let land_type = land_patches.set_type[patch];
+            let kind = if crop_class.is_some() && land_type == IGBP_CROPLAND {
+                PftPatchKind::Crop
+            } else if is_igbp_soil_ground(land_type)? {
+                PftPatchKind::Natural
+            } else {
+                PftPatchKind::Other
+            };
+            let classes = match kind {
+                PftPatchKind::Natural => {
+                    let fractions = normalized_patch_pft_fractions(
+                        patches.raw_cells(patch),
+                        patch,
+                        raw_class_count,
+                        pft_class_count,
+                        raw_percent,
+                        land_area,
+                    )?;
+                    let classes = fractions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(class, value)| (*value > 0.0).then_some((class, *value)))
+                        .collect::<Vec<_>>();
+                    if classes.is_empty() {
+                        vec![(0, 1.0)]
+                    } else {
+                        classes
+                    }
+                }
+                PftPatchKind::Crop => {
+                    let crop = crop_class.expect("CROP kind requires crop classes")[patch]
+                        .with_context(|| format!("crop patch {patch} has no CFT class"))?;
+                    vec![(
+                        pft_class_count
+                            .checked_add(crop)
+                            .and_then(|value| value.checked_sub(1))
+                            .context("crop PFT class overflows usize")?,
+                        1.0,
+                    )]
+                }
+                PftPatchKind::Other => Vec::new(),
+            };
+            (kind, classes)
         };
         patch_kind.push(kind);
-        if kind == PftPatchKind::Natural {
-            let mut weighted = vec![0.0; raw_class_count];
-            let mut total = 0.0;
-            for &cell in patches.raw_cells(patch) {
-                let area = land_area[cell];
-                let mut sum = 0.0;
-                for class in 0..raw_class_count {
-                    let value = raw_percent[class * land_area.len() + cell];
-                    sum += value;
-                    weighted[class] += value * area;
-                }
-                total += area * sum;
-            }
-            let classes = if total > 0.0 {
-                weighted
-                    .iter()
-                    .take(pft_class_count)
-                    .enumerate()
-                    .filter_map(|(class, value)| (value / total > 0.0).then_some(class))
-                    .collect::<Vec<_>>()
-            } else {
-                vec![0]
-            };
-            for class in classes {
-                element_ids.push(land_patches.element_ids[patch]);
-                pixel_start.push(land_patches.pixel_start[patch]);
-                pixel_end.push(land_patches.pixel_end[patch]);
-                set_type.push(i32::try_from(class)?);
-                element_index.push(land_patches.element_index[patch]);
-                pft_classes.push(class);
-            }
-        } else if kind == PftPatchKind::Crop {
-            let crop = crop_class.expect("CROP kind requires crop classes")[patch]
-                .with_context(|| format!("crop patch {patch} has no CFT class"))?;
-            let class = pft_class_count
-                .checked_add(crop)
-                .and_then(|value| value.checked_sub(1))
-                .context("crop PFT class overflows usize")?;
+        for (class, fraction) in classes {
+            pctshared.push(fraction);
             element_ids.push(land_patches.element_ids[patch]);
             pixel_start.push(land_patches.pixel_start[patch]);
             pixel_end.push(land_patches.pixel_end[patch]);
@@ -379,25 +400,90 @@ fn build_pft_topology_inner(
         patch_offsets,
         pft_classes,
         patch_kind,
+        pctshared,
     })
+}
+
+fn wmo_pft_class(
+    patches: &FlatPatches,
+    source: usize,
+    raw_class_count: usize,
+    pft_class_count: usize,
+    raw_percent: &[f64],
+    land_area: &[f64],
+) -> Result<usize> {
+    let fractions = normalized_patch_pft_fractions(
+        patches.raw_cells(source),
+        source,
+        raw_class_count,
+        pft_class_count,
+        raw_percent,
+        land_area,
+    )?;
+    let mut best = None;
+    for class in 12..=14 {
+        let Some(&fraction) = fractions.get(class) else {
+            continue;
+        };
+        if fraction > 0.0
+            && best
+                .map(|(_, best_fraction)| fraction > best_fraction)
+                .unwrap_or(true)
+        {
+            best = Some((class, fraction));
+        }
+    }
+    Ok(best.map(|(class, _)| class).unwrap_or(0))
+}
+
+fn normalized_patch_pft_fractions(
+    cells: &[usize],
+    patch: usize,
+    raw_class_count: usize,
+    pft_class_count: usize,
+    raw_percent: &[f64],
+    land_area: &[f64],
+) -> Result<Vec<f64>> {
+    ensure!(
+        pft_class_count <= raw_class_count,
+        "PFT output class count exceeds raw class count"
+    );
+    let mut weighted = vec![0.0; pft_class_count];
+    let mut total = 0.0;
+    for &cell in cells {
+        let area = area(land_area, cell, patch)?;
+        let mut sum = 0.0;
+        for class in 0..pft_class_count {
+            let value = raw_percent[class * land_area.len() + cell];
+            sum += value;
+            weighted[class] += value * area;
+        }
+        total += area * sum;
+    }
+    if total > 0.0 {
+        for value in &mut weighted {
+            *value /= total;
+        }
+    } else {
+        weighted.fill(0.0);
+        weighted[0] = 1.0;
+    }
+    Ok(weighted)
 }
 
 /// Compose the `landpft%pctshared` vector for a CROP build.
 ///
-/// Natural PFT children use their locally aggregated PFT fraction, whereas a
+/// Natural PFT children retain their topology's raw-weighted fraction; a
 /// crop PFT directly inherits its CFT-resolved `landpatch%pctshared` value.
-pub fn crop_pft_pctshared(
-    topology: &PftTopology,
-    pft_fraction: &[f64],
-    patch_pctshared: &[f64],
-) -> Result<Vec<f64>> {
+pub fn crop_pft_pctshared(topology: &PftTopology, patch_pctshared: &[f64]) -> Result<Vec<f64>> {
     ensure!(
-        pft_fraction.len() == topology.pft_classes.len()
+        topology.pctshared.len() == topology.pft_classes.len()
             && patch_pctshared.len() == topology.patch_kind.len(),
         "CROP PFT shared fractions need matching PFT and land-patch vectors"
     );
     ensure!(
-        pft_fraction
+        topology
+            .pctshared
             .iter()
             .all(|value| value.is_finite() && *value >= 0.0)
             && patch_pctshared
@@ -405,7 +491,7 @@ pub fn crop_pft_pctshared(
                 .all(|value| value.is_finite() && *value >= 0.0),
         "CROP PFT shared fractions must be finite and non-negative"
     );
-    let mut output = pft_fraction.to_vec();
+    let mut output = topology.pctshared.clone();
     for (patch, kind) in topology.patch_kind.iter().enumerate() {
         if *kind == PftPatchKind::Crop {
             output[topology.patch_offsets[patch]..topology.patch_offsets[patch + 1]]
@@ -464,10 +550,7 @@ pub fn aggregate_pft_fractions(
     for patch in 0..patches.len() {
         let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
         if patches.wmo_source_for(patch).is_some() {
-            let first = range
-                .clone()
-                .next()
-                .with_context(|| format!("WMO patch {patch} has no PFT"))?;
+            let first = single_wmo_pft(range, patch)?;
             output[first] = 1.0;
             continue;
         }
@@ -501,26 +584,21 @@ pub fn aggregate_pft_height(
     let mut output = vec![0.0; input.pft_classes.len()];
     for patch in 0..patches.len() {
         let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+        if let Some(source) = patches.wmo_source_for(patch) {
+            let first = single_wmo_pft(range, patch)?;
+            output[first] = patch_area_weighted_height(
+                patches.raw_cells(source),
+                source,
+                input.land_area,
+                raw_height_m,
+            )?;
+            continue;
+        }
         if range.is_empty() || input.patch_kind[patch] == PftPatchKind::Other {
             continue;
         }
-        ensure!(
-            patches.wmo_source_for(patch).is_none(),
-            "PFT forest height needs the upstream land2mWMO topology"
-        );
         let cells = patches.raw_cells(patch);
-        let mut patch_area = 0.0;
-        let mut patch_height = 0.0;
-        for &cell in cells {
-            let area = area(input.land_area, cell, patch)?;
-            patch_area += area;
-            patch_height += raw_height_m[cell] * area;
-        }
-        ensure!(
-            patch_area > 0.0 && patch_area.is_finite(),
-            "PFT forest-height patch {patch} has zero or non-finite land area"
-        );
-        let patch_height = patch_height / patch_area;
+        let patch_height = patch_area_weighted_height(cells, patch, input.land_area, raw_height_m)?;
         match input.patch_kind[patch] {
             PftPatchKind::Natural => {
                 for pft in range {
@@ -545,6 +623,37 @@ pub fn aggregate_pft_height(
         }
     }
     Ok(output)
+}
+
+fn patch_area_weighted_height(
+    cells: &[usize],
+    patch: usize,
+    land_area: &[f64],
+    raw_height_m: &[f64],
+) -> Result<f64> {
+    let mut patch_area = 0.0;
+    let mut patch_height = 0.0;
+    for &cell in cells {
+        let area = area(land_area, cell, patch)?;
+        let height = *raw_height_m.get(cell).with_context(|| {
+            format!("PFT forest-height patch {patch} references raw height cell {cell}")
+        })?;
+        patch_area += area;
+        patch_height += height * area;
+    }
+    ensure!(
+        patch_area > 0.0 && patch_area.is_finite(),
+        "PFT forest-height patch {patch} has zero or non-finite land area"
+    );
+    Ok(patch_height / patch_area)
+}
+
+fn single_wmo_pft(range: std::ops::Range<usize>, patch: usize) -> Result<usize> {
+    ensure!(
+        range.len() == 1,
+        "WMO patch {patch} must have exactly one virtual PFT"
+    );
+    Ok(range.start)
 }
 
 /// Applies the PFT/PC branch of `Aggregation_LAI` to one LAI or SAI field.
@@ -572,6 +681,7 @@ pub fn aggregate_pft_index(
             .next()
             .with_context(|| format!("PFT/PC patch {patch} has no PFT"))?;
         if let Some(source) = patches.wmo_source_for(patch) {
+            let first = single_wmo_pft(range, patch)?;
             let class = input.pft_classes[first];
             if (12..=14).contains(&class) {
                 let source_range = input.pft_offsets[source]..input.pft_offsets[source + 1];

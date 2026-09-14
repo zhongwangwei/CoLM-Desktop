@@ -175,3 +175,44 @@ fn urban_refinement_assigns_the_final_class_when_every_class_is_missing() {
     assert_eq!(urban.pixel_start, vec![1]);
     assert_eq!(urban.pixel_end, vec![2]);
 }
+
+#[test]
+fn wmo_patches_keep_first_largest_source_and_shift_later_element_indices() {
+    let mesh = FlatMesh::new(
+        vec![1, 2, 3],
+        vec![0, 6, 8, 11],
+        (1..=11).collect(),
+        vec![1; 11],
+    )
+    .unwrap();
+    let (mesh, patches) = mesh
+        .into_land_patches(&[1, 1, 2, 2, 17, 17, 17, 17, 10, 10, 13], false)
+        .unwrap();
+    let mut elements = mesh.land_elements();
+    let wmo = patches.with_wmo_patches(&mut elements).unwrap();
+    assert_eq!(elements.set_type, [1, 0, 1]);
+    assert_eq!(wmo.set_type, [1, 2, 17, 1, 17, 10, 13, 10]);
+    assert_eq!(wmo.pixel_start, [1, 3, 5, 0, 1, 1, 3, 0]);
+    assert_eq!(wmo.pixel_end, [2, 4, 6, 0, 2, 2, 3, 0]);
+    let sources = vec![None, None, None, Some(0), None, None, None, Some(5)];
+    assert_eq!(wmo.wmo_sources().unwrap(), sources);
+    let layout = wmo.aggregation_layout(&mesh, sources).unwrap();
+    assert_eq!(
+        layout
+            .aggregate_soil_texture(&(1..=11).collect::<Vec<_>>())
+            .unwrap()[3],
+        layout
+            .aggregate_soil_texture(&(1..=11).collect::<Vec<_>>())
+            .unwrap()[0]
+    );
+    assert!(wmo
+        .aggregation_layout(&mesh, vec![None; wmo.len()])
+        .is_err());
+    assert!(wmo.with_wmo_patches(&mut elements).is_err());
+    let mut invalid = wmo.clone();
+    invalid.pixel_end[3] = 1;
+    assert!(invalid.wmo_sources().is_err());
+    invalid = wmo.clone();
+    invalid.set_type[3] = 2;
+    assert!(invalid.wmo_sources().is_err());
+}

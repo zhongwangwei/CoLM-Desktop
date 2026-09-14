@@ -108,6 +108,41 @@ fn landpft_keeps_positive_natural_classes_and_skips_non_soil_patches() {
 }
 
 #[test]
+fn pft_topology_shares_differ_from_mean_per_cell_surface_fractions() {
+    let patches = FlatPatches::new(vec![1], vec![0, 2], vec![0, 1], vec![None]).unwrap();
+    let land = crate::topology::FlatLandPatches {
+        element_ids: vec![1],
+        pixel_start: vec![1],
+        pixel_end: vec![2],
+        set_type: vec![1],
+        element_index: vec![1],
+    };
+    let raw = [20.0, 0.0, 0.0, 80.0];
+    let area = [1.0, 1.0];
+    let pft = build_pft_topology(&land, &patches, 2, 2, &raw, &area).unwrap();
+    assert_eq!(pft.pctshared, [0.2, 0.8]);
+    let surface = aggregate_pft_fractions(
+        &patches,
+        PftFractionInput {
+            pft_offsets: &pft.patch_offsets,
+            pft_classes: &pft.pft_classes,
+            patch_kind: &pft.patch_kind,
+            raw_class_count: 2,
+            raw_percent: &raw,
+            land_area: &area,
+            crop_excluded_class: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(surface, [0.5, 0.5]);
+    // MOD_LandPFT falls back before selecting classes when total raw cover <= 0.
+    let missing =
+        build_pft_topology(&land, &patches, 2, 2, &[20.0, 0.0, -80.0, 0.0], &area).unwrap();
+    assert_eq!(missing.pft_classes, [0]);
+    assert_eq!(missing.pctshared, [1.0]);
+}
+
+#[test]
 fn non_crop_pft_topology_retains_modis_class_sixteen() {
     let layout = FlatPatches::new(vec![1], vec![0, 1], vec![0], vec![None]).unwrap();
     let land_patches = crate::topology::FlatLandPatches {
@@ -122,6 +157,25 @@ fn non_crop_pft_topology_retains_modis_class_sixteen() {
     let topology = build_pft_topology(&land_patches, &layout, 16, 16, &raw, &[1.0]).unwrap();
     assert_eq!(topology.pft_classes, vec![15]);
     assert_eq!(topology.land_pfts.set_type, vec![15]);
+}
+
+#[test]
+fn landpft_bare_fallback_uses_output_pft_denominator_not_extra_raw_classes() {
+    let layout = FlatPatches::new(vec![1], vec![0, 1], vec![0], vec![None]).unwrap();
+    let land_patches = crate::topology::FlatLandPatches {
+        element_ids: vec![8],
+        pixel_start: vec![1],
+        pixel_end: vec![1],
+        set_type: vec![1],
+        element_index: vec![1],
+    };
+    let mut raw = vec![0.0; 16];
+    raw[15] = 100.0;
+
+    let topology = build_pft_topology(&land_patches, &layout, 16, 15, &raw, &[1.0]).unwrap();
+
+    assert_eq!(topology.pft_classes, vec![0]);
+    assert_eq!(topology.land_pfts.set_type, vec![0]);
 }
 
 #[test]
@@ -290,7 +344,7 @@ fn crop_topology_splits_shared_patches_and_preserves_cft_ownership() {
     )
     .unwrap();
     assert_eq!(fraction, [1.0, 1.0, 1.0]);
-    for (actual, expected) in crop_pft_pctshared(&pfts, &fraction, &crop.pctshared)
+    for (actual, expected) in crop_pft_pctshared(&pfts, &crop.pctshared)
         .unwrap()
         .iter()
         .zip([1.0, 0.3125, 0.1875])
@@ -379,4 +433,138 @@ fn pft_height_uses_pft_weights_and_patch_mean_fallback() {
     )
     .unwrap();
     assert_eq!(height, [130.0 / 7.0, 50.0 / 3.0, 17.5]);
+}
+
+fn wmo_land_patches(
+    set_type: Vec<i32>,
+    pixel_start: Vec<usize>,
+    pixel_end: Vec<usize>,
+) -> crate::topology::FlatLandPatches {
+    let len = set_type.len();
+    crate::topology::FlatLandPatches {
+        element_ids: vec![8; len],
+        pixel_start,
+        pixel_end,
+        set_type,
+        element_index: vec![1; len],
+    }
+}
+
+#[test]
+fn wmo_pft_topology_chooses_largest_source_grass_with_first_tie() {
+    let layout =
+        FlatPatches::new(vec![1, 1], vec![0, 2, 2], vec![0, 1], vec![None, Some(0)]).unwrap();
+    let land_patches = wmo_land_patches(vec![1, 1], vec![1, 0], vec![2, 0]);
+    let mut raw = vec![0.0; 15 * 2];
+    raw[12 * 2] = 50.0;
+    raw[12 * 2 + 1] = 50.0;
+    raw[13 * 2] = 50.0;
+    raw[13 * 2 + 1] = 50.0;
+
+    let topology = build_pft_topology(&land_patches, &layout, 15, 15, &raw, &[1.0, 1.0]).unwrap();
+
+    assert_eq!(topology.patch_offsets, [0, 2, 3]);
+    assert_eq!(topology.pft_classes, [12, 13, 12]);
+    assert_eq!(topology.land_pfts.pixel_start, [1, 1, 0]);
+    assert_eq!(topology.land_pfts.pixel_end, [2, 2, 0]);
+}
+
+#[test]
+fn wmo_pft_topology_falls_back_to_bare_when_source_has_no_grass() {
+    let layout = FlatPatches::new(vec![1, 1], vec![0, 1, 1], vec![0], vec![None, Some(0)]).unwrap();
+    let land_patches = wmo_land_patches(vec![1, 1], vec![1, 0], vec![1, 0]);
+    let mut raw = vec![0.0; 15];
+    raw[1] = 100.0;
+
+    let topology = build_pft_topology(&land_patches, &layout, 15, 15, &raw, &[1.0]).unwrap();
+
+    assert_eq!(topology.patch_offsets, [0, 1, 2]);
+    assert_eq!(topology.pft_classes, [1, 0]);
+    assert_eq!(topology.land_pfts.pixel_start, [1, 0]);
+    assert_eq!(topology.land_pfts.pixel_end, [1, 0]);
+}
+
+#[test]
+fn wmo_pft_height_uses_source_patch_height_not_source_pft_height() {
+    let layout =
+        FlatPatches::new(vec![1, 1], vec![0, 2, 2], vec![0, 1], vec![None, Some(0)]).unwrap();
+    let land_patches = wmo_land_patches(vec![1, 1], vec![1, 0], vec![2, 0]);
+    let mut raw = vec![0.0; 15 * 2];
+    raw[12 * 2] = 100.0;
+    raw[13 * 2 + 1] = 100.0;
+    let topology = build_pft_topology(&land_patches, &layout, 15, 15, &raw, &[1.0, 3.0]).unwrap();
+
+    let height = aggregate_pft_height(
+        &layout,
+        PftFractionInput {
+            pft_offsets: &topology.patch_offsets,
+            pft_classes: &topology.pft_classes,
+            patch_kind: &topology.patch_kind,
+            raw_class_count: 15,
+            raw_percent: &raw,
+            land_area: &[1.0, 3.0],
+            crop_excluded_class: None,
+        },
+        &[10.0, 30.0],
+    )
+    .unwrap();
+
+    assert_eq!(topology.pft_classes, [12, 13, 13]);
+    assert_eq!(height, [10.0, 30.0, 25.0]);
+}
+
+#[test]
+fn wmo_pft_lai_sai_copies_matching_source_grass_or_zero_for_bare() {
+    let layout =
+        FlatPatches::new(vec![1, 1], vec![0, 2, 2], vec![0, 1], vec![None, Some(0)]).unwrap();
+    let land_patches = wmo_land_patches(vec![1, 1], vec![1, 0], vec![2, 0]);
+    let mut raw = vec![0.0; 15 * 2];
+    let mut index = vec![0.0; 15 * 2];
+    raw[12 * 2] = 100.0;
+    raw[13 * 2 + 1] = 100.0;
+    index[12 * 2] = 4.0;
+    index[13 * 2 + 1] = 9.0;
+    let topology = build_pft_topology(&land_patches, &layout, 15, 15, &raw, &[1.0, 3.0]).unwrap();
+
+    let state = aggregate_pft_index(
+        &layout,
+        PftIndexInput {
+            pft_offsets: &topology.patch_offsets,
+            pft_classes: &topology.pft_classes,
+            patch_kind: &topology.patch_kind,
+            raw_class_count: 15,
+            raw_percent: &raw,
+            raw_index: &index,
+            land_area: &[1.0, 3.0],
+        },
+    )
+    .unwrap();
+    assert_eq!(state.pft_index, [4.0, 9.0, 9.0]);
+    assert_eq!(state.patch_index, [31.0 / 4.0, 9.0]);
+
+    let mut bare_raw = vec![0.0; 15];
+    let mut bare_index = vec![0.0; 15];
+    bare_raw[1] = 100.0;
+    bare_index[1] = 7.0;
+    let bare_layout =
+        FlatPatches::new(vec![1, 1], vec![0, 1, 1], vec![0], vec![None, Some(0)]).unwrap();
+    let bare_land_patches = wmo_land_patches(vec![1, 1], vec![1, 0], vec![1, 0]);
+    let bare_topology =
+        build_pft_topology(&bare_land_patches, &bare_layout, 15, 15, &bare_raw, &[1.0]).unwrap();
+    let bare_state = aggregate_pft_index(
+        &bare_layout,
+        PftIndexInput {
+            pft_offsets: &bare_topology.patch_offsets,
+            pft_classes: &bare_topology.pft_classes,
+            patch_kind: &bare_topology.patch_kind,
+            raw_class_count: 15,
+            raw_percent: &bare_raw,
+            raw_index: &bare_index,
+            land_area: &[1.0],
+        },
+    )
+    .unwrap();
+    assert_eq!(bare_topology.pft_classes, [1, 0]);
+    assert_eq!(bare_state.pft_index, [7.0, 0.0]);
+    assert_eq!(bare_state.patch_index, [7.0, 0.0]);
 }

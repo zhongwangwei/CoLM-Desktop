@@ -800,6 +800,50 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
             .unwrap(),
         vec![2.0, 3.0]
     );
+    write_landpft_vector(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "pctpft",
+        "pct_pfts",
+        "pct_pfts",
+        &[0.25, 0.75],
+    )
+    .unwrap();
+    let pct_pfts = netcdf::open(landdata.join("pctpft/2005/pct_pfts_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&pct_pfts, "pct_pfts"), ["pft"]);
+    assert_eq!(
+        pct_pfts
+            .variable("pct_pfts")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![0.25, 0.75]
+    );
+    write_landpft_vector(
+        &landdata,
+        2005,
+        &topology,
+        &patches,
+        &BlockLayout::regular(1, 1).unwrap(),
+        "LAI",
+        "LAI_pfts01",
+        "LAI_pfts",
+        &[4.0, 5.0],
+    )
+    .unwrap();
+    let lai_pfts = netcdf::open(landdata.join("LAI/2005/LAI_pfts01_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&lai_pfts, "LAI_pfts"), ["pft"]);
+    assert_eq!(
+        lai_pfts
+            .variable("LAI_pfts")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![4.0, 5.0]
+    );
     write_landpatch_layered_vector(
         &landdata,
         2005,
@@ -2390,4 +2434,95 @@ fn mesh_filter_open_normalizes_descending_lat_edges() {
     assert_eq!(filter.grid.lat_n, vec![89.0, 0.0]);
 
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
+    let root = temporary("wmo-surface");
+    let mesh_file = root.join("mesh.nc");
+    let landtype = root.join("landtype.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_landtype(&landtype);
+    let raw_grid = Grid { nlon: 4, nlat: 2 };
+    let topology =
+        build_spatial_topology(&mesh_file, SpatialInputKind::GridBased, raw_grid).unwrap();
+    let (mut topology, physical) = build_pft_land_patches_from_raster(
+        topology,
+        &landtype,
+        "landtype",
+        raw_grid,
+        false,
+        true,
+        PftPatchMode::Merged,
+    )
+    .unwrap();
+    let patches = physical
+        .with_wmo_patches(&mut topology.land_elements)
+        .unwrap();
+    let sources = patches.wmo_sources().unwrap();
+    assert_eq!(sources.iter().flatten().count(), 2);
+    for zip in [false, true] {
+        let (mesh, layout, _) =
+            gather_patch_raster(&topology.mesh, &topology.pixel, &patches, raw_grid, zip).unwrap();
+        let types =
+            read_mesh_raster_i32(&landtype, "landtype", &mesh, &topology.pixel, raw_grid).unwrap();
+        let texture = layout.aggregate_soil_texture(&types).unwrap();
+        for (patch, source) in sources.iter().enumerate() {
+            if let Some(source) = source {
+                assert_eq!(texture[patch], texture[*source]);
+            }
+        }
+    }
+    let output = root.join("landdata");
+    let blocks = BlockLayout::regular(1, 1).unwrap();
+    write_spatial_topology(&output, 2005, &topology, &patches, &blocks).unwrap();
+    let file = netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+    let starts = file
+        .variable("ipxstt")
+        .unwrap()
+        .get_values::<i32, _>(..)
+        .unwrap();
+    let ends = file
+        .variable("ipxend")
+        .unwrap()
+        .get_values::<i32, _>(..)
+        .unwrap();
+    drop(file);
+    let file = netcdf::open(output.join("landpatch/2005/patchfrac_elm_w180_s90.nc")).unwrap();
+    let fractions = file
+        .variable("patchfrac_elm")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    drop(file);
+    for (patch, source) in sources.iter().enumerate() {
+        if source.is_some() {
+            assert_eq!((starts[patch], ends[patch]), (-1, -1));
+            assert_eq!(fractions[patch], 0.0);
+        }
+    }
+    for element in 1..=2 {
+        let fraction: f64 = fractions
+            .iter()
+            .zip(&patches.element_index)
+            .filter_map(|(&f, &e)| (e == element).then_some(f))
+            .sum();
+        assert!((fraction - 1.0).abs() < 1e-15);
+    }
+    let types: Vec<_> = (0..=17).collect();
+    let map = |sets: &FlatLandPatches| {
+        crate::map_patch_diagnostic(
+            &topology,
+            sets,
+            &vec![1.0; sets.len()],
+            &types,
+            crate::DiagnosticStatistic::Mean,
+            None,
+            crate::DIAGNOSTIC_MISSING,
+            None,
+        )
+        .unwrap()
+    };
+    assert_eq!(map(&physical), map(&patches));
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -1108,7 +1108,7 @@ pub fn build_coordinate_patch_selection(
             .checked_sub(1)
             .with_context(|| format!("land patch {patch} has zero element index"))?;
         let (xs, ys) = topology.mesh.pixels(element)?;
-        for position in patches.pixel_start[patch] - 1..patches.pixel_end[patch] {
+        for position in patches.owned_pixel_range(patch, xs.len())? {
             let local_x = usize::try_from(*xs.get(position).context("patch longitude is absent")?)?
                 .checked_sub(1)
                 .context("patch longitude is zero")?;
@@ -1154,7 +1154,7 @@ pub fn build_coordinate_patch_selection(
     offsets.push(0);
     for (patch, selected) in by_patch.into_iter().enumerate() {
         ensure!(
-            !selected.is_empty(),
+            !selected.is_empty() || patches.pixel_start[patch] == 0,
             "regular topography source grid has no cells for land patch {patch}"
         );
         for (row, column) in selected {
@@ -1169,7 +1169,7 @@ pub fn build_coordinate_patch_selection(
         patches.set_type.clone(),
         offsets,
         cells,
-        vec![None; patches.len()],
+        patches.wmo_sources()?,
     )?;
     Ok(CoordinatePatchSelection {
         layout,
@@ -1269,7 +1269,7 @@ pub fn build_methane_ph_patch_selection(
             .checked_sub(1)
             .with_context(|| format!("land patch {patch} has zero element index"))?;
         let (xs, ys) = topology.mesh.pixels(element)?;
-        for position in patches.pixel_start[patch] - 1..patches.pixel_end[patch] {
+        for position in patches.owned_pixel_range(patch, xs.len())? {
             let x = usize::try_from(*xs.get(position).context("patch longitude is absent")?)?
                 .checked_sub(1)
                 .context("patch longitude is zero")?;
@@ -1322,7 +1322,7 @@ pub fn build_methane_ph_patch_selection(
             patches.set_type.clone(),
             offsets,
             cells,
-            vec![None; patches.len()],
+            patches.wmo_sources()?,
         )?,
         source_rows,
         source_columns,
@@ -1624,7 +1624,7 @@ pub fn gather_patch_raster(
     if !zip {
         return Ok((
             mesh.clone(),
-            patches.aggregation_layout(mesh, vec![None; patches.len()])?,
+            patches.aggregation_layout(mesh, patches.wmo_sources()?)?,
             pixel_area,
         ));
     }
@@ -1635,6 +1635,8 @@ pub fn gather_patch_raster(
         element_offsets.push(element_offsets[element] + mesh.pixel_count(element)?);
     }
     let mut offsets = vec![0];
+    let mut mesh_offsets = vec![0];
+    let mut mesh_ids = Vec::new();
     let mut ilon = Vec::new();
     let mut ilat = Vec::new();
     let mut area = Vec::new();
@@ -1642,7 +1644,7 @@ pub fn gather_patch_raster(
         let element = patches.element_index[patch] - 1;
         let (xs, ys) = mesh.pixels(element)?;
         let mut sources = BTreeMap::new();
-        for position in patches.pixel_start[patch] - 1..patches.pixel_end[patch] {
+        for position in patches.owned_pixel_range(patch, xs.len())? {
             let x = xs[position];
             let y = ys[position];
             let entry = sources
@@ -1650,24 +1652,24 @@ pub fn gather_patch_raster(
                 .or_insert((x, y, 0.0));
             entry.2 += pixel_area[element_offsets[element] + position];
         }
+        let sources_empty = sources.is_empty();
         for (x, y, weight) in sources.into_values() {
             ilon.push(x);
             ilat.push(y);
             area.push(weight);
         }
         offsets.push(area.len());
+        if !sources_empty {
+            mesh_ids.push((patch + 1) as i64);
+            mesh_offsets.push(area.len());
+        }
     }
-    let gathered = FlatMesh::new(
-        (1..=patches.len()).map(|id| id as i64).collect(),
-        offsets.clone(),
-        ilon,
-        ilat,
-    )?;
+    let gathered = FlatMesh::new(mesh_ids, mesh_offsets, ilon, ilat)?;
     let layout = FlatPatches::new(
         patches.set_type.clone(),
         offsets,
         (0..area.len()).collect(),
-        vec![None; patches.len()],
+        patches.wmo_sources()?,
     )?;
     Ok((gathered, layout, area))
 }
@@ -3320,7 +3322,7 @@ pub fn write_landpatch_scalar<T: NcTypeDescriptor + Copy>(
     variable: &str,
     values: &[T],
 ) -> Result<()> {
-    write_landpatch_vector(
+    write_landpatch_vector_with_primary_dimension(
         landdata,
         land_cover_year,
         topology,
@@ -3329,6 +3331,7 @@ pub fn write_landpatch_scalar<T: NcTypeDescriptor + Copy>(
         directory,
         variable,
         variable,
+        "patch",
         values,
     )
 }
@@ -3349,6 +3352,60 @@ pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
     variable: &str,
     values: &[T],
 ) -> Result<()> {
+    write_landpatch_vector_with_primary_dimension(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        blocks,
+        directory,
+        file_stem,
+        variable,
+        "patch",
+        values,
+    )
+}
+
+/// Write one PFT vector with explicit `pft` NetCDF dimension name.
+#[allow(clippy::too_many_arguments)]
+pub fn write_landpft_vector<T: NcTypeDescriptor + Copy>(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_pfts: &FlatLandPatches,
+    blocks: &BlockLayout,
+    directory: &str,
+    file_stem: &str,
+    variable: &str,
+    values: &[T],
+) -> Result<()> {
+    write_landpatch_vector_with_primary_dimension(
+        landdata,
+        land_cover_year,
+        topology,
+        land_pfts,
+        blocks,
+        directory,
+        file_stem,
+        variable,
+        "pft",
+        values,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_landpatch_vector_with_primary_dimension<T: NcTypeDescriptor + Copy>(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    blocks: &BlockLayout,
+    directory: &str,
+    file_stem: &str,
+    variable: &str,
+    primary_dimension: &str,
+    values: &[T],
+) -> Result<()> {
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     ensure!(
         !directory.is_empty() && !directory.contains('/'),
@@ -3361,6 +3418,10 @@ pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
     ensure!(
         !variable.is_empty() && !variable.contains('/'),
         "land-patch output variable must be one NetCDF name"
+    );
+    ensure!(
+        !primary_dimension.is_empty() && !primary_dimension.contains('/'),
+        "land-patch output primary dimension must be one NetCDF name"
     );
     validate_patches(&topology.mesh, land_patches)?;
     ensure!(
@@ -3390,8 +3451,8 @@ pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
             .map(|patch| values[*patch])
             .collect::<Vec<_>>();
         let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
-        file.add_dimension("patch", output_values.len())?;
-        file.add_variable::<T>(variable, &["patch"])?
+        file.add_dimension(primary_dimension, output_values.len())?;
+        file.add_variable::<T>(variable, &[primary_dimension])?
             .put_values(&output_values, ..)?;
         file.close()?;
     }
@@ -3694,16 +3755,19 @@ fn patch_subset_fractions(
             .find(|&superset| {
                 supersets.element_index[superset] == patches.element_index[patch]
                     && supersets.element_ids[superset] == patches.element_ids[patch]
-                    && supersets.pixel_start[superset] <= patches.pixel_start[patch]
-                    && patches.pixel_end[patch] <= supersets.pixel_end[superset]
+                    && (patches.pixel_start[patch] == 0
+                        || (supersets.pixel_start[superset] <= patches.pixel_start[patch]
+                            && patches.pixel_end[patch] <= supersets.pixel_end[superset]))
             })
             .with_context(|| {
                 format!("land patch {patch} is not contained in any parent pixelset")
             })?;
         let element = patches.element_index[patch] - 1;
-        let start = offsets[element] + patches.pixel_start[patch] - 1;
-        let end = offsets[element] + patches.pixel_end[patch];
-        let weight = area[start..end].iter().sum::<f64>() * shares.map_or(1.0, |s| s[patch]);
+        let range = patches.owned_pixel_range(patch, topology.mesh.pixel_count(element)?)?;
+        let weight = area[offsets[element] + range.start..offsets[element] + range.end]
+            .iter()
+            .sum::<f64>()
+            * shares.map_or(1.0, |s| s[patch]);
         totals[owner] += weight;
         owners.push(owner);
         fractions.push(weight);
@@ -3789,7 +3853,8 @@ pub fn write_spatial_pft_topology(
     )
 }
 
-/// Write a PFT topology, including `pctshared` for a CROP `landpft`.
+/// Write a PFT topology with natural-PFT or CROP `pctshared` fractions.
+/// Runnable PFT/PC surfaces must supply them; `None` writes structural data only.
 pub fn write_spatial_pft_topology_with_shared(
     landdata: impl AsRef<Path>,
     land_cover_year: i32,
@@ -4555,12 +4620,7 @@ fn validate_patches(mesh: &FlatMesh, patches: &FlatLandPatches) -> Result<()> {
             .find(|index| mesh.element_id(*index).ok() == Some(patches.element_ids[patch]))
             .with_context(|| format!("land patch {patch} references an unknown element"))?;
         let count = mesh.pixel_count(element)?;
-        ensure!(
-            patches.pixel_start[patch] > 0
-                && patches.pixel_start[patch] <= patches.pixel_end[patch]
-                && patches.pixel_end[patch] <= count,
-            "land patch {patch} has an invalid pixel range"
-        );
+        patches.owned_pixel_range(patch, count)?;
     }
     Ok(())
 }
@@ -4951,8 +5011,13 @@ fn write_pixelset(
         let mut shared = pctshared.map(|_| Vec::with_capacity(indices.len()));
         for index in indices {
             ids.push(element_ids[index]);
-            starts_out.push(i32::try_from(starts[index])?);
-            ends_out.push(i32::try_from(ends[index])?);
+            if starts[index] == 0 && ends[index] == 0 {
+                starts_out.push(-1);
+                ends_out.push(-1);
+            } else {
+                starts_out.push(i32::try_from(starts[index])?);
+                ends_out.push(i32::try_from(ends[index])?);
+            }
             types.push(set_types[index]);
             if let (Some(values), Some(shared)) = (pctshared, &mut shared) {
                 shared.push(values[index]);

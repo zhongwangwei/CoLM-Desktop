@@ -136,3 +136,11 @@ block ownership is retained. Missing filter files are ignored (upstream
 behavior), while malformed existing files fail. The filtered two-element
 original-Fortran comparison and remaining scientific limitations are recorded
 in [the parity audit](preprocessing-parity-status.md#mesh-filter-executable-and-original-source-comparison).
+
+Grid-based PFT/PC WMO virtual topology is now wired through the namelist and
+`--output-2m-wmo`, retaining zero-area sentinels, original source selection,
+source-copy aggregation and grass/bare PFT rules. PFT vectors use their native
+`pft` NetCDF dimension and always include the original raw-weighted topology
+`pctshared`, distinct from surface `pct_pfts`. Original-source WMO execution,
+initializer-only parity, explicit unsupported combinations and remaining
+scientific gaps are recorded in [the WMO audit](preprocessing-parity-status.md#grid-based-wmo-surface-and-pft-initialization).

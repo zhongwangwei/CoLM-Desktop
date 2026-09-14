@@ -285,9 +285,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let root = temp_dir("pft-common");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
-    write_i32(
-        &landdata, "landpft", "landpft", "settyp", 2005, "w180_s90", 1,
-    );
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
     write_f64(
         &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
     );
@@ -354,8 +352,100 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     );
     let pft = netcdf::open(&files.pft).unwrap();
     assert_eq!(values_i32(&pft, "pftclass").unwrap(), [1]);
+    assert_eq!(values_f64(&common, "htop").unwrap(), [20.0]);
     assert_eq!(values_f64(&pft, "htop_p").unwrap(), [20.0]);
+    assert_eq!(values_f64(&pft, "hbot_p").unwrap(), [20.0 / 17.0]);
+    assert_eq!(values_f64(&common, "hbot").unwrap(), [20.0 / 17.0]);
     assert!(files.bgc.is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_pft_wmo_virtual_patch_keeps_sentinel_geometry_and_time_state() {
+    let root = temp_dir("pft-wmo");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\n/\n").unwrap();
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_pft_topology(&landdata, 2005, "w180_s90", 1);
+    // Exposed SAI is PFT-weighted; total patch SAI remains its own input.
+    write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.8);
+    write_f64(
+        &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
+    );
+    write_f64(
+        &landdata,
+        "htop",
+        "htop_pfts",
+        "htop_pfts",
+        2005,
+        "w180_s90",
+        20.0,
+    );
+
+    set_single_topology_range(&landdata, "landpatch", "landpatch", 1, 1, None);
+    set_single_topology_range(&landdata, "landpft", "landpft", 1, 1, None);
+    let normal = crate::write_spatial_pft_constant_restarts(
+        crate::SpatialPftStaticConfig::new(
+            &namelist,
+            &landdata,
+            &root.join("restart-normal"),
+            "test",
+            2005,
+            "w180_s90",
+        ),
+        false,
+        false,
+    )
+    .unwrap();
+    let normal_common = netcdf::open(&normal.common.block).unwrap();
+    let normal_lon = values_f64(&normal_common, "patchlonr").unwrap()[0];
+
+    set_single_topology_range(&landdata, "landpatch", "landpatch", -1, -1, None);
+    set_single_topology_range(&landdata, "landpft", "landpft", -1, -1, Some(13));
+    let wmo_restart = root.join("restart-wmo");
+    let static_config = crate::SpatialPftStaticConfig::new(
+        &namelist,
+        &landdata,
+        &wmo_restart,
+        "test",
+        2005,
+        "w180_s90",
+    );
+    let constants =
+        crate::write_spatial_pft_constant_restarts(static_config, false, false).unwrap();
+    let common = netcdf::open(&constants.common.block).unwrap();
+    assert_eq!(
+        common
+            .variable("patchmask")
+            .unwrap()
+            .get_values::<i8, _>(..)
+            .unwrap(),
+        [0]
+    );
+    assert_ne!(values_f64(&common, "patchlonr").unwrap()[0], normal_lon);
+    assert!(
+        (values_f64(&common, "patchlonr").unwrap()[0] - (-179.0_f64).to_radians()).abs() < 1.0e-12
+    );
+    assert_eq!(values_f64(&common, "htop").unwrap(), [0.5]);
+    assert_eq!(values_f64(&common, "hbot").unwrap(), [0.0]);
+
+    let files = crate::write_spatial_pft_cold_time_restarts(crate::SpatialPftTimeConfig::new(
+        static_config,
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    ))
+    .unwrap();
+    let pft_time = netcdf::open(&files.pft).unwrap();
+    assert_eq!(values_f64(&pft_time, "tlai_p").unwrap(), [2.5]);
+    assert_eq!(values_f64(&pft_time, "tsai_p").unwrap(), [0.8]);
+    let common_time = netcdf::open(&files.common.block).unwrap();
+    assert_eq!(values_f64(&common_time, "sai").unwrap(), [0.8]);
+    assert_eq!(values_f64(&common_time, "tsai").unwrap(), [0.4]);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -597,6 +687,7 @@ fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps(
     let landdata = root.join("landdata");
     let restart = root.join("restart");
     write_landdata(&landdata, 2005, "w180_s90");
+    set_single_topology_range(&landdata, "landpatch", "landpatch", 1, 2, Some(12));
     write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
     write_pft_topology(&landdata, 2005, "w180_s90", 15);
     write_f64(
@@ -660,6 +751,7 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
     let restart = root.join("restart");
     let runtime = root.join("runtime");
     write_landdata(&landdata, 2005, "w180_s90");
+    set_single_topology_range(&landdata, "landpatch", "landpatch", 1, 2, Some(12));
     write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
     write_pft_topology(&landdata, 2005, "w180_s90", 15);
     write_f64(
@@ -1150,6 +1242,33 @@ fn write_pft_monthly_vegetation(landdata: &Path, year: i32, block: &str, lai: f6
             .unwrap();
         file.close().unwrap();
     }
+}
+
+fn set_single_topology_range(
+    landdata: &Path,
+    directory: &str,
+    stem: &str,
+    start: i32,
+    end: i32,
+    class: Option<i32>,
+) {
+    let path = block_path(landdata, directory, stem, 2005, "w180_s90");
+    let mut file = netcdf::append(path).unwrap();
+    file.variable_mut("ipxstt")
+        .unwrap()
+        .put_values(&[start], ..)
+        .unwrap();
+    file.variable_mut("ipxend")
+        .unwrap()
+        .put_values(&[end], ..)
+        .unwrap();
+    if let Some(class) = class {
+        file.variable_mut("settyp")
+            .unwrap()
+            .put_values(&[class], ..)
+            .unwrap();
+    }
+    file.close().unwrap();
 }
 
 fn write_pft_topology(landdata: &Path, year: i32, block: &str, class: i32) {

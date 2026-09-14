@@ -4,7 +4,6 @@
 //! This module writes its separate `landpft` companion, exactly as CoLM's
 //! `WRITE_PFTimeInvariants` does after `pct_readin` and `HTOP_readin`.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -25,12 +24,12 @@ use colm_namelist::{parse, Value};
 use crate::crop::{map_field_2d, map_field_soil_3d, AreaMapping, MapGrid};
 use crate::single_point::{
     aggregate_pft_radiation, optional_i32, pc_canopy_layer, pc_uses_three_dimensional_canopy,
-    pft_canopy, pft_leaf_optics, pft_parameters, required_string,
+    pft_canopy, pft_leaf_optics, pft_parameters, required_string, IGBP_BOTTOM, IGBP_TOP,
 };
 use crate::spatial_static::{
     block_path, patch_coordinates, read_f64 as read_lct_f64, read_hyperspectral_albedo,
     read_patches, read_soil, read_spatial_pixel_sets, spatial_patch_type, values_f64, values_i32,
-    write_spatial_lct_constant_restart, SpatialLctStaticConfig,
+    write_spatial_lct_constant_restart_with_canopy, SpatialLctStaticConfig,
 };
 use crate::{
     append_time_hyperspectral_fields, bgc_time_restart_input,
@@ -251,7 +250,49 @@ pub fn write_spatial_pft_constant_restarts(
     common.use_simple_terrain =
         optional_bool_or(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     common.use_regular_terrain = optional_bool_or(&document, "DEF_USE_Forcing_Downscaling", false)?;
-    let common = write_spatial_lct_constant_restart(common)?;
+    let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
+    let patch_kind = patches
+        .class
+        .iter()
+        .map(|&class| spatial_patch_type(LandCoverScheme::Igbp, class))
+        .collect::<Result<Vec<_>>>()?;
+    let pfts = read_pft_vectors(config)?;
+    let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;
+    let pft_indices = match_pfts_to_patches(&patches, &patch_kind, &pfts, use_crop)?;
+    let pft_heights = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
+    let mut canopy = colm_core::CanopyState {
+        patch_top_m: patches
+            .class
+            .iter()
+            .map(|&class| IGBP_TOP[class as usize])
+            .collect(),
+        patch_bottom_m: patches
+            .class
+            .iter()
+            .map(|&class| IGBP_BOTTOM[class as usize])
+            .collect(),
+        pft_top_m: Vec::new(),
+        pft_bottom_m: Vec::new(),
+    };
+    // MOD_HtopReadin weights the class-adjusted PFT heights, including WMO
+    // grass/bare defaults. Non-soil patches retain the IGBP table heights.
+    for (patch, indices) in pft_indices.iter().enumerate() {
+        if patch_kind[patch] == 0 {
+            ensure!(
+                !indices.is_empty(),
+                "natural patch {patch} has no PFT canopy"
+            );
+            canopy.patch_top_m[patch] = indices
+                .iter()
+                .map(|&pft| pft_heights.top_m[pft] * pfts.fraction[pft])
+                .sum();
+            canopy.patch_bottom_m[patch] = indices
+                .iter()
+                .map(|&pft| pft_heights.bottom_m[pft] * pfts.fraction[pft])
+                .sum();
+        }
+    }
+    let common = write_spatial_lct_constant_restart_with_canopy(common, Some(canopy))?;
     let pft = write_spatial_pft_constant_restart(config)?;
     let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?
         .then(|| {
@@ -395,7 +436,7 @@ pub fn write_spatial_pft_cold_time_restarts(
         .map(|&class| spatial_patch_type(LandCoverScheme::Igbp, class))
         .collect::<Result<Vec<_>>>()?;
     let pfts = read_pft_vectors(config.static_config)?;
-    let pft_to_patch = match_pfts_to_patches(&patches, &patch_kind, &pfts)?;
+    let pft_to_patch = match_pfts_to_patches(&patches, &patch_kind, &pfts, use_crop)?;
     let pft_owner = pft_owners(&pft_to_patch, pfts.class.len())?;
     let crop = use_crop
         .then(|| spatial_crop_state(&document, config.static_config, &patches, &pfts, &pft_owner))
@@ -826,6 +867,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     }
     let mut common_radiation = vec![None; patches.class.len()];
     let mut common_roughness = vec![None; patches.class.len()];
+    let mut common_sai = vec![None; patches.class.len()];
     for (patch, indices) in pft_to_patch.iter().enumerate() {
         if patch_kind[patch] != 0 {
             continue;
@@ -859,6 +901,12 @@ pub fn write_spatial_pft_cold_time_restarts(
                 .map(|&index| roughness[index] * pfts.fraction[index])
                 .sum(),
         );
+        common_sai[patch] = Some(
+            indices
+                .iter()
+                .map(|&pft| total_sai[pft] * pfts.fraction[pft])
+                .sum(),
+        );
         if high_resolution_canopy {
             for wavelength in 0..HIGH_RES_WAVELENGTHS {
                 for radiation_type in 0..2 {
@@ -877,7 +925,12 @@ pub fn write_spatial_pft_cold_time_restarts(
         }
     }
 
-    update_common_pft_optics(&common.block, &common_radiation, &common_roughness)?;
+    update_common_pft_optics(
+        &common.block,
+        &common_radiation,
+        &common_roughness,
+        &common_sai,
+    )?;
     if crop.is_some() {
         let crop_patch = pft_to_patch
             .iter()
@@ -1420,39 +1473,42 @@ fn match_pfts_to_patches(
     patches: &crate::spatial_static::Patches,
     patch_kind: &[i32],
     pfts: &SpatialPftVectors,
+    use_crop: bool,
 ) -> Result<Vec<Vec<usize>>> {
     ensure!(
         patches.class.len() == patch_kind.len(),
         "spatial patch kind vector does not match topology"
     );
-    let mut indices = BTreeMap::new();
-    for patch in 0..patches.class.len() {
-        ensure!(
-            indices
-                .insert(
-                    (
-                        patches.element[patch],
-                        patches.start[patch],
-                        patches.end[patch]
-                    ),
-                    patch,
-                )
-                .is_none(),
-            "spatial landpatch topology duplicates a pixel range"
-        );
-    }
+    // MOD_LandPFT emits PFTs in patch order. Shared natural/CFT patches may
+    // have identical ranges, so a unique (element,start,end) map loses owners.
     let mut out = vec![Vec::new(); patches.class.len()];
-    for pft in 0..pfts.class.len() {
-        let key = (pfts.element[pft], pfts.start[pft], pfts.end[pft]);
-        let patch = *indices
-            .get(&key)
-            .with_context(|| format!("PFT {pft} does not match a landpatch pixel range"))?;
+    let mut next = 0;
+    for (patch, indices) in out.iter_mut().enumerate() {
+        if patch_kind[patch] != 0 {
+            continue;
+        }
+        let crop = use_crop && patches.class[patch] == 12;
+        while next < pfts.class.len()
+            && pfts.element[next] == patches.element[patch]
+            && pfts.start[next] == patches.start[patch]
+            && pfts.end[next] == patches.end[patch]
+            && (!use_crop || (pfts.class[next] >= 15) == crop)
+        {
+            indices.push(next);
+            next += 1;
+            if crop {
+                break;
+            } // one PFT for each CFT child, even with shared pixels
+        }
         ensure!(
-            patch_kind[patch] == 0,
-            "PFT {pft} belongs to non-natural landpatch {patch}"
+            !indices.is_empty(),
+            "natural/CFT patch {patch} has no matching ordered PFT"
         );
-        out[patch].push(pft);
     }
+    ensure!(
+        next == pfts.class.len(),
+        "PFT {next} does not match ordered landpatch topology"
+    );
     Ok(out)
 }
 
@@ -1533,10 +1589,11 @@ fn update_common_pft_optics(
     path: &Path,
     states: &[Option<ColdStartRadiation>],
     roughness: &[Option<f64>],
+    stem_area: &[Option<f64>],
 ) -> Result<()> {
     ensure!(
-        states.len() == roughness.len(),
-        "common PFT radiation and roughness vectors must align"
+        states.len() == roughness.len() && states.len() == stem_area.len(),
+        "common PFT radiation, roughness and stem-area vectors must align"
     );
     let patches = states.len();
     let mut file = netcdf::append(path)
@@ -1607,22 +1664,26 @@ fn update_common_pft_optics(
             .expect("checked common restart variable exists")
             .put_values(&values, ..)?;
     }
-    let mut z0m = file
-        .variable("z0m")
-        .context("common restart has no z0m")?
-        .get_values::<f64, _>(..)?;
-    ensure!(
-        z0m.len() == patches,
-        "common restart z0m has an unexpected patch layout"
-    );
-    for (patch, value) in roughness.iter().enumerate() {
-        if let Some(value) = value {
-            z0m[patch] = *value;
+    // IniTimeVariable uses PFT-weighted exposed SAI, not the independently
+    // aggregated patch tsai. Keep total LAI/SAI and non-soil patches unchanged.
+    for (name, replacements) in [("z0m", roughness), ("sai", stem_area)] {
+        let mut values = file
+            .variable(name)
+            .with_context(|| format!("common restart has no {name}"))?
+            .get_values::<f64, _>(..)?;
+        ensure!(
+            values.len() == patches,
+            "common restart {name} has an unexpected patch layout"
+        );
+        for (value, replacement) in values.iter_mut().zip(replacements) {
+            if let Some(replacement) = replacement {
+                *value = *replacement;
+            }
         }
+        file.variable_mut(name)
+            .expect("checked common restart variable exists")
+            .put_values(&values, ..)?;
     }
-    file.variable_mut("z0m")
-        .expect("checked common restart z0m exists")
-        .put_values(&z0m, ..)?;
     file.close()?;
     Ok(())
 }

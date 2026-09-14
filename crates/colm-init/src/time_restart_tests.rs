@@ -81,6 +81,12 @@ fn time_restart_matches_fortran_filename_dimensions_and_axis_order() {
         netcdf::types::NcVariableType::Int(netcdf::types::IntType::I32)
     );
     assert_eq!(file.variables().count(), 93);
+    let lake_order = file
+        .variables()
+        .map(|v| v.name())
+        .filter(|name| ["dz_lake", "t_lake", "lake_icefrc"].contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(lake_order, ["dz_lake", "t_lake", "lake_icefrc"]);
     drop(file);
     std::fs::remove_dir_all(root).unwrap();
 }

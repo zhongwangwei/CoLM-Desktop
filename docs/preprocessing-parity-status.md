@@ -220,12 +220,12 @@ call it. This is not a real catchment all-field parity claim.
    namelist fields are now forwarded through single-point, spatial LCT/urban,
    PFT/PC, and explicit spatial PFT entry points. `tcrit` remains the upstream
    fixed 2.5. Other tuning/parameterization controls still need individual checks.
-3. `DEF_file_mesh_filter` is now wired through the surface adapter, with a
-   filtered original-source comparison below. Complete `DEF_Output_2mWMO`:
-   it still needs virtual patch/source topology in supported grid-based PFT/PC
-   configurations and is currently ignored by the surface adapter. The initial
-   WMO aggregation mask is repaired below, not the surface builder.
-   ZIP aggregation
+3. `DEF_file_mesh_filter` and grid-based PFT/PC `DEF_Output_2mWMO` now reach
+   the surface executable, with original-source comparisons below. WMO plus
+   CROP or soil hyper-albedo remains explicitly rejected because the original
+   source does not safely handle those virtual entries; neither combination
+   has been declared migrated. The successful WMO golden is PFT, not the full
+   PC/CROP/BGC/observed-snow matrix. ZIP aggregation
    still needs PFT/PC-specific, crop, urban, and regular-coordinate adapter audits;
    catchment `patchfrac_hru` now has a targeted writer regression, not a real-case
    complete branch comparison.
@@ -492,3 +492,90 @@ and 6 native integration tests passed. Clippy (`-D warnings`), downstream
 CLI/kernel checks, release builds, changed-file formatting and diff checks
 passed. The bounded independent filter review approved with no findings.
 Logs: `/tmp/colm-mesh-filter-validation/`.
+
+
+## Grid-based WMO surface and PFT initialization
+
+`DEF_Output_2mWMO` now generates original `MOD_Land2mWMO` topology in the
+spatial PFT/PC path (`--output-2m-wmo true`). As upstream does, non-GRIDBASED
+and plain LCT configurations disable this switch. Each eligible element gets
+one virtual patch after its physical patches, sourced from the soil patch with
+the most pixels (first tie wins). Its patch fraction is zero. Internal paired
+`(0,0)` ranges serialize as `(-1,-1)`; no pixel coordinates are duplicated.
+
+Aggregation uses empty owned ranges and existing source-copy kernels, including
+forest height. Geometry in initialization still uses the whole element, not an
+empty footprint. The virtual PFT is the largest positive source grass class
+12–14 (first tie), or bare class 0; its fraction is one and grass LAI/SAI follows
+the corresponding source PFT. ZIP and unzipped gather, diagnostics, source index
+shifts across elements, and sentinel serialization have regressions.
+
+The executable comparison exposed three pre-existing PFT integration gaps:
+
+- `landpft%pctshared` was omitted outside CROP, making original `colm.x` stop
+  while returning exit code zero. It is now always written. These topology
+  fractions are **ratios of raw-weighted sums**, not the independently generated
+  `pct_pfts` **means of per-cell fractions**. The two formulas are retained
+  separately; a two-cell regression distinguishes `[0.2,0.8]` from `[0.5,0.5]`.
+- PFT surface vectors (`pct_pfts`, height, monthly LAI/SAI) incorrectly used the
+  NetCDF dimension `patch`; they now explicitly use `pft` through the same
+  block writer. Patch vectors keep their original dimension.
+- Common initial canopy height incorrectly used the LCT branch. It now uses
+  the existing PFT class-adjusted canopy kernel, weighted by `pftfrac`, via the
+  existing common-writer override. Consequently WMO grass gets its class default
+  height rather than copied forest height. Exposed `sai` is also PFT-weighted
+  as `MOD_IniTimeVariable` requires; total `tsai` stays independently read.
+  Dynamic-lake `dz_lake` now precedes `t_lake` in restart variable order.
+  PFT ownership is reconstructed in original patch/PFT order, not a unique
+  pixel-range map: natural and multiple CFT children legitimately share ranges.
+  The crop switch explicitly distinguishes CFT classes from non-CROP MODIS
+  class 15; WMO retains exact sentinel matching.
+
+The pristine original-source proof is `/tmp/colm-wmo-original-1789379007/`
+(commit `ebe6de998692f075216037810ce9184fa407e27b`, GRIDBASED + LULC_IGBP_PFT,
+serial, no CROP/BGC, original `-O2 -fdefault-real-8`). Its build, fixture, run,
+metadata, hashes, and summary scripts are retained there. Rust artifacts are
+`/tmp/colm-wmo-rust/`. The cases differ only in output directory and explicit
+Rust GRIDBASED selector metadata; mesh edges, raw inputs and dates are shared.
+The 0.1-degree, 2×2 fixture has four elements, eight patches (four virtual),
+40 PFTs and 2,304 ordered fine-pixel memberships.
+
+Both surface → initial → unchanged original two-step runtime pipelines finish;
+verification requires the completion marker, history file and 3,600-second patch
+and PFT restarts, **not merely exit status zero**. All original topology arrays,
+virtual PFT indices/classes/fractions, and surface dimensions now agree within
+the unchanged `atol=rtol=1e-12` gate. This is interoperability evidence, not a
+claim that the simulation runtime in this experiment was Rust.
+All 284 NetCDF file names and schemas agree (dimensions, variable order,
+types and attributes), excluding the non-scientific `create_time` attribute.
+
+An independent initializer-only check, `/tmp/colm-wmo-init-original-input/`,
+feeds Rust mkini the unchanged original surface. All five restart files and
+164 variables pass the same gate; 148 variables are bitwise identical. This
+isolates initial-state corrections from remaining surface fitting differences.
+The complete Rust-surface pipeline still fails the scientific numerical gate:
+33 soil-field files and five restart/history files have out-of-tolerance values.
+`f_t2m_wmo` has the original finite-data mask, but its maximum absolute difference
+is `3.859554453811143e-9 K`, outside the same gate. No tolerance was relaxed and
+full migration remains unaccepted.
+
+A separate non-WMO CROP constant-writer probe (`/tmp/colm_crop_probe/`) uses
+patch classes `[1,12,12]` and PFT classes `[1,13,15,19]` with identical element
+and pixel ranges. Ordered ownership is `[0,1]`, `[2]`, `[3]`; the actual writer
+preserves crop fractions `[0,0.3,0.7]` and produces common canopy heights
+`[5.375,0.5,0.5]`. This checks shared-range integration, not a complete CROP run.
+Two older CROP time fixtures were corrected to use upstream `CROPLAND=12`
+instead of attaching a CFT to a natural class-1 patch.
+
+Fresh validation in `/tmp/colm-wmo-validation/`: 228 surface-library and 35
+surface-binary tests, 89 initializer-library and 12 initializer-binary tests,
+11 data tests, ten opt-in Fortran reference tests and six opt-in native pipeline
+tests pass. Changed-file formatting, Clippy with warnings denied, downstream
+kernel/CLI checks and release builds pass. Scientific parity above remains a
+separate failing gate; these checks do not replace it.
+
+Two unsupported WMO combinations fail before surface output: CROP leaves
+`cropclass/pctshared` unresized in original `land2mWMO`; soil hyper-albedo calls
+`aggregation_request_data` on pixel index -1 with no WMO branch. The latter
+is **not** the sentinel-aware `SpatialMapping` geometry path, so Rust does not
+invent a whole-element median or silently copy another patch's albedo.

@@ -152,10 +152,12 @@ pub fn map_patch_diagnostic(
             "patch {patch} does not match its mesh element"
         );
         let (xs, ys) = topology.mesh.pixels(element)?;
-        let start = patches.pixel_start[patch]
-            .checked_sub(1)
-            .context("diagnostic patch start is zero")?;
-        let end = patches.pixel_end[patch];
+        let range = patches.owned_pixel_range(patch, xs.len())?;
+        if range.is_empty() {
+            continue;
+        }
+        let start = range.start;
+        let end = range.end;
         ensure!(
             start < end && end <= xs.len() && xs.len() == ys.len(),
             "patch {patch} has an invalid mesh-pixel range"
@@ -331,10 +333,12 @@ fn map_patch_diagnostic_sparse(
             "patch {patch} does not match its mesh element"
         );
         let (xs, ys) = topology.mesh.pixels(element)?;
-        let start = patches.pixel_start[patch]
-            .checked_sub(1)
-            .context("diagnostic patch start is zero")?;
-        let end = patches.pixel_end[patch];
+        let range = patches.owned_pixel_range(patch, xs.len())?;
+        if range.is_empty() {
+            continue;
+        }
+        let start = range.start;
+        let end = range.end;
         ensure!(
             start < end && end <= xs.len() && xs.len() == ys.len(),
             "patch {patch} has an invalid mesh-pixel range"

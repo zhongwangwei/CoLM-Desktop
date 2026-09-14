@@ -12,6 +12,7 @@ use colm_srfdata::soil::{
     aggregate_balland_arp, aggregate_campbell, aggregate_soil_field, aggregate_vgm, CampbellFills,
     CampbellInputs, SoilField, SoilPatchClasses, SoilStatistic, VgmFills, VgmInputs, SOIL_LAYERS,
 };
+use colm_srfdata::spatial::write_landpft_vector;
 use colm_srfdata::{
     aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
@@ -31,7 +32,7 @@ use colm_srfdata::{
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
     write_patch_diagnostic, write_patch_diagnostic_dimension, write_patch_diagnostic_time,
-    write_spatial_hru_patch_fractions, write_spatial_hru_topology, write_spatial_pft_topology,
+    write_spatial_hru_patch_fractions, write_spatial_hru_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
     write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
@@ -173,6 +174,7 @@ struct SpatialPftArgs {
     zip_aggregation: bool,
     dominant: bool,
     patch_mode: PftPatchMode,
+    output_2m_wmo: bool,
     plant_tiles: PathBuf,
     crop_surface: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
@@ -210,9 +212,21 @@ fn optional_mesh_filter(path: Option<&Path>) -> Result<Option<MeshFilter>> {
 }
 
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
-    let args = parse_spatial_pft(args)?;
+    let mut args = parse_spatial_pft(args)?;
+    if args.output_2m_wmo && args.kind != SpatialInputKind::GridBased {
+        println!("DEF_Output_2mWMO is disabled outside GRIDBASED, matching upstream");
+        args.output_2m_wmo = false;
+    }
+    ensure!(
+        !args.output_2m_wmo || args.crop_surface.is_none(),
+        "CROP plus WMO is not verified: upstream land2mWMO does not resize cropclass/pctshared"
+    );
+    ensure!(
+        !args.output_2m_wmo || args.soil_hyper_albedo_dir.is_none(),
+        "WMO plus soil hyper-albedo is not verified: upstream aggregation reads virtual pixel index -1"
+    );
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
-    let (topology, base_patches, land_hrus) = match args.kind {
+    let (mut topology, mut base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             let catchment = build_catchment_spatial_topology_with_filter(
                 &args.mesh,
@@ -262,7 +276,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (topology, patches, None)
         }
     };
-    let base_layout =
+    let mut base_layout =
         base_patches.aggregation_layout(&topology.mesh, vec![None; base_patches.len()])?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
     let raw_percent = read_mesh_tiled_raster_pft_f64(
@@ -303,6 +317,11 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             )
         })
         .transpose()?;
+    if args.output_2m_wmo {
+        base_patches = base_patches.with_wmo_patches(&mut topology.land_elements)?;
+        base_layout =
+            base_patches.aggregation_layout(&topology.mesh, base_patches.wmo_sources()?)?;
+    }
     let (patches, layout) = match &crop {
         Some(crop) => (&crop.land_patches, &crop.layout),
         None => (&base_patches, &base_layout),
@@ -410,27 +429,19 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     }
     let pft_pctshared = crop
         .as_ref()
-        .map(|crop| crop_pft_pctshared(&pfts, &fractions, &crop.pctshared))
+        .map(|crop| crop_pft_pctshared(&pfts, &crop.pctshared))
         .transpose()?;
-    if let Some(pctshared) = &pft_pctshared {
-        write_spatial_pft_topology_with_shared(
-            &args.landdata,
-            args.year,
-            &topology,
-            &pfts.land_pfts,
-            Some(pctshared),
-            &args.blocks,
-        )?;
-    } else {
-        write_spatial_pft_topology(
-            &args.landdata,
-            args.year,
-            &topology,
-            &pfts.land_pfts,
-            &args.blocks,
-        )?;
-    }
-    write_landpatch_scalar(
+    let pft_shares = pft_pctshared.as_deref().unwrap_or(&pfts.pctshared);
+    // MOD_LandPFT allocates pctshared for every PFT, not just CROP builds.
+    write_spatial_pft_topology_with_shared(
+        &args.landdata,
+        args.year,
+        &topology,
+        &pfts.land_pfts,
+        Some(pft_shares),
+        &args.blocks,
+    )?;
+    write_landpft_vector(
         &args.landdata,
         args.year,
         &topology,
@@ -438,9 +449,9 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &args.blocks,
         "pctpft",
         "pct_pfts",
+        "pct_pfts",
         &fractions,
     )?;
-    let pft_shares = pft_pctshared.as_deref().unwrap_or(&fractions);
     write_pft_diagnostic(
         &args,
         &topology,
@@ -478,13 +489,14 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         },
         &forest_height,
     )?;
-    write_landpatch_scalar(
+    write_landpft_vector(
         &args.landdata,
         args.year,
         &topology,
         &pfts.land_pfts,
         &args.blocks,
         "htop",
+        "htop_pfts",
         "htop_pfts",
         &pft_height,
     )?;
@@ -549,44 +561,50 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                     land_area: &area,
                 },
             )?;
-            for (file_stem, variable, values, patches) in [
-                (
-                    format!("LAI_patches{month:02}"),
-                    "LAI_patches",
-                    lai.patch_index.as_slice(),
-                    patches,
-                ),
-                (
-                    format!("LAI_pfts{month:02}"),
-                    "LAI_pfts",
-                    lai.pft_index.as_slice(),
-                    &pfts.land_pfts,
-                ),
-                (
-                    format!("SAI_patches{month:02}"),
-                    "SAI_patches",
-                    sai.patch_index.as_slice(),
-                    patches,
-                ),
-                (
-                    format!("SAI_pfts{month:02}"),
-                    "SAI_pfts",
-                    sai.pft_index.as_slice(),
-                    &pfts.land_pfts,
-                ),
-            ] {
-                write_landpatch_vector(
-                    &args.landdata,
-                    year,
-                    &topology,
-                    patches,
-                    &args.blocks,
-                    "LAI",
-                    &file_stem,
-                    variable,
-                    values,
-                )?;
-            }
+            write_landpatch_vector(
+                &args.landdata,
+                year,
+                &topology,
+                patches,
+                &args.blocks,
+                "LAI",
+                &format!("LAI_patches{month:02}"),
+                "LAI_patches",
+                &lai.patch_index,
+            )?;
+            write_landpft_vector(
+                &args.landdata,
+                year,
+                &topology,
+                &pfts.land_pfts,
+                &args.blocks,
+                "LAI",
+                &format!("LAI_pfts{month:02}"),
+                "LAI_pfts",
+                &lai.pft_index,
+            )?;
+            write_landpatch_vector(
+                &args.landdata,
+                year,
+                &topology,
+                patches,
+                &args.blocks,
+                "LAI",
+                &format!("SAI_patches{month:02}"),
+                "SAI_patches",
+                &sai.patch_index,
+            )?;
+            write_landpft_vector(
+                &args.landdata,
+                year,
+                &topology,
+                &pfts.land_pfts,
+                &args.blocks,
+                "LAI",
+                &format!("SAI_pfts{month:02}"),
+                "SAI_pfts",
+                &sai.pft_index,
+            )?;
             if args.diagnostics {
                 lai_patch_frames.push(lai.patch_index);
                 lai_pft_frames.push(lai.pft_index);
@@ -3379,6 +3397,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut zip_aggregation = true;
     let mut dominant = false;
     let mut patch_mode = PftPatchMode::Merged;
+    let mut output_2m_wmo = false;
     let mut plant_tiles = None;
     let mut crop_surface = None;
     let mut monthly_vegetation_years = Vec::new();
@@ -3429,6 +3448,14 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     .context("--aggregation-zip needs true or false")?
                     .parse::<bool>()
                     .context("--aggregation-zip needs true or false")?;
+                index += 2;
+            }
+            "--output-2m-wmo" => {
+                output_2m_wmo = args
+                    .get(index + 1)
+                    .context("--output-2m-wmo needs true or false")?
+                    .parse::<bool>()
+                    .context("--output-2m-wmo needs true or false")?;
                 index += 2;
             }
             "--mesh-filter" => {
@@ -3625,6 +3652,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         zip_aggregation,
         dominant,
         patch_mode,
+        output_2m_wmo,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         crop_surface,
         monthly_vegetation_years,
@@ -4263,6 +4291,16 @@ fn spatial_case_command(
         }
     }
 
+    if case_bool(&document, "DEF_Output_2mWMO", false)? {
+        if kind == "latlon" && (pft || pc) {
+            args.extend(["--output-2m-wmo".to_owned(), "true".to_owned()]);
+        } else {
+            println!(
+                "DEF_Output_2mWMO is disabled for this grid/land-cover mode, matching upstream"
+            );
+        }
+    }
+
     if let Some(filter) = case_path(&document, "DEF_file_mesh_filter")? {
         args.extend(["--mesh-filter".to_owned(), filter.display().to_string()]);
     }
@@ -4612,7 +4650,7 @@ fn usage() -> &'static str {
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--patch-mode merged|separate|fast-pc] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -5237,6 +5275,56 @@ mod tests {
     }
 
     #[test]
+    fn wmo_case_switch_obeys_original_grid_and_land_cover_coercions() {
+        for mode in ["LCT", "PFT", "PC"] {
+            for (mesh, gridbased) in [
+                ("DEF_file_mesh", false),
+                ("DEF_file_mesh", true),
+                ("DEF_CatchmentMesh_data", false),
+            ] {
+                let grid = if gridbased {
+                    "DEF_GRIDBASED_lon_res=0.1\nDEF_GRIDBASED_lat_res=0.1\n"
+                } else {
+                    ""
+                };
+                let (root, namelist) = case_namelist("wmo-mode", &format!(
+                    "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\nDEF_dir_rawdata='$ROOT/raw'\n\
+                     {mesh}='$ROOT/mesh.nc'\n{grid}DEF_Output_2mWMO=.true.\n\
+                     DEF_USE_LCT=.{}.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\n/\n",
+                    mode == "LCT", mode == "PFT", mode == "PC",
+                ));
+                let command =
+                    spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+                        .unwrap()
+                        .unwrap();
+                let expected = gridbased && mode != "LCT";
+                assert_eq!(
+                    option_value(&command.args, "--output-2m-wmo"),
+                    expected.then_some("true")
+                );
+                if expected {
+                    for option in ["--crop-surface", "--soil-hyper-albedo-dir"] {
+                        let mut unsupported = command.args.clone();
+                        unsupported.extend([option.into(), "absent.nc".into()]);
+                        let error = materialize_spatial_pft(&unsupported).unwrap_err();
+                        assert!(error.to_string().contains("not verified"), "{error:#}");
+                    }
+                }
+                if mode != "LCT" {
+                    assert_eq!(
+                        parse_spatial_pft(&command.args).unwrap().output_2m_wmo,
+                        expected
+                    );
+                    let mut invalid = command.args.clone();
+                    invalid.extend(["--output-2m-wmo".into(), "invalid".into()]);
+                    assert!(parse_spatial_pft(&invalid).is_err());
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn spatial_mesh_filter_reaches_each_case_mode_and_rejects_bad_existing_files() {
         for mode in ["LCT", "PFT", "PC"] {
             for mesh in ["DEF_file_mesh", "DEF_CatchmentMesh_data"] {
@@ -5367,6 +5455,101 @@ mod tests {
         );
         drop(patches);
         drop(mesh);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_pft_materializer_writes_runtime_shares_with_and_without_wmo() {
+        let (root, _) = case_namelist("pft-wmo-output", "&nl_colm /\n");
+        let mesh = root.join("mesh.nc");
+        let mut file = netcdf::create(&mesh).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        for (name, dimension, edge) in [
+            ("lon_w", "lon", COLM_500M.lon_w(1)),
+            ("lon_e", "lon", COLM_500M.lon_e(1)),
+            ("lat_s", "lat", COLM_500M.lat_s(1)),
+            ("lat_n", "lat", COLM_500M.lat_n(1)),
+        ] {
+            file.add_variable::<f64>(name, &[dimension])
+                .unwrap()
+                .put_values(&[edge], ..)
+                .unwrap();
+        }
+        file.add_variable::<i32>("landmask", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[1], ..)
+            .unwrap();
+        file.close().unwrap();
+        // Sparse raw chunks cover one pixel without allocating global rasters.
+        let landtype = root.join("landtype.nc");
+        let mut file = netcdf::create(&landtype).unwrap();
+        file.add_dimension("lat", COLM_500M.nlat).unwrap();
+        file.add_dimension("lon", COLM_500M.nlon).unwrap();
+        let mut variable = file
+            .add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap();
+        variable.set_chunking(&[1, 1]).unwrap();
+        variable.put_value(1, (0, 0)).unwrap();
+        file.close().unwrap();
+        let mut file = netcdf::create(root.join("RG_90_-180_85_-175.MOD2005.nc")).unwrap();
+        file.add_dimension("lat", 1200).unwrap();
+        file.add_dimension("lon", 1200).unwrap();
+        file.add_dimension("pft", 16).unwrap();
+        let mut variable = file
+            .add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
+            .unwrap();
+        variable.set_chunking(&[1, 120, 120]).unwrap();
+        let mut percent = [0.0; 16];
+        percent[12] = 25.0;
+        percent[13] = 75.0;
+        variable.put_values(&percent, (.., 0, 0)).unwrap();
+        let mut variable = file.add_variable::<f64>("HTOP", &["lat", "lon"]).unwrap();
+        variable.set_chunking(&[120, 120]).unwrap();
+        variable.put_value(8.0, (0, 0)).unwrap();
+        file.close().unwrap();
+        for wmo in [false, true] {
+            let output = root.join(format!("output-{wmo}"));
+            materialize_spatial_pft(&[
+                "latlon".into(),
+                mesh.display().to_string(),
+                landtype.display().to_string(),
+                output.display().to_string(),
+                "2005".into(),
+                "--plant-tiles".into(),
+                root.display().to_string(),
+                "--output-2m-wmo".into(),
+                wmo.to_string(),
+            ])
+            .unwrap();
+            let pfts = netcdf::open(output.join("landpft/2005/landpft_W180_S90.nc")).unwrap();
+            let shares = pfts
+                .variable("pctshared")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap();
+            assert_eq!(shares.len(), if wmo { 3 } else { 2 });
+            for (&actual, expected) in shares.iter().zip([0.25, 0.75, 1.0]) {
+                assert!((actual - expected).abs() < 1.0e-12);
+            }
+            if wmo {
+                assert_eq!(shares[2], 1.0);
+            }
+            assert_eq!(
+                pfts.variable("settyp")
+                    .unwrap()
+                    .get_values::<i32, _>(..)
+                    .unwrap(),
+                if wmo { vec![12, 13, 13] } else { vec![12, 13] }
+            );
+            assert_eq!(
+                pfts.variable("ipxstt")
+                    .unwrap()
+                    .get_values::<i32, _>(..)
+                    .unwrap(),
+                if wmo { vec![1, 1, -1] } else { vec![1, 1] }
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -255,6 +255,12 @@ fn forest_height_preserves_the_usgs_median_and_igbp_weighted_branches() {
             .unwrap(),
         vec![SURFACE_MISSING, 39.0, 8.5, 99.0, 99.0]
     );
+    let wmo = FlatPatches::new(vec![1, 1], vec![0, 2, 2], vec![0, 1], vec![None, Some(0)]).unwrap();
+    assert_eq!(
+        wmo.aggregate_igbp_forest_height(&[4.0, 12.0], &[1.0, 3.0])
+            .unwrap(),
+        vec![10.0, 10.0]
+    );
 }
 
 #[test]

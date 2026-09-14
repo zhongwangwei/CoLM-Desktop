@@ -103,8 +103,8 @@ pub fn write_spatial_lct_constant_restart(
     write_spatial_lct_constant_restart_with_canopy(config, None)
 }
 
-/// Same common spatial restart writer, with urban callers able to replace the
-/// canopy height of their refined urban patches after `Urban_readin`.
+/// Common spatial writer with canopy supplied by PFT/PC `HTOP_readin` or
+/// urban `Urban_readin`, without duplicating soil/lake/terrain initialization.
 pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     config: SpatialLctStaticConfig<'_>,
     canopy_override: Option<CanopyState>,
