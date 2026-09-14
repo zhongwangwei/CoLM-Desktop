@@ -4660,6 +4660,9 @@ fn spatial_case_command(
     if diagnostics {
         args.push("--diagnostics".to_owned());
     }
+    if case_bool(&document, "DEF_USE_DOMINANT_PATCHTYPE", false)? {
+        args.push("--dominant".to_owned());
+    }
 
     Ok(Some(SpatialCaseCommand {
         args,
@@ -6715,6 +6718,47 @@ mod tests {
             .required_files
             .contains(&root.join("raw/soil/PHH2O1.nc")));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_forwards_dominant_patchtype_to_both_native_parsers() {
+        for (subgrid, land_cover) in [
+            ("LCT", Some(SiteMode::Igbp)),
+            ("LCT", Some(SiteMode::Usgs)),
+            ("PFT", None),
+            ("PC", None),
+        ] {
+            for (setting, expected) in [
+                ("", Some(false)),
+                ("DEF_USE_DOMINANT_PATCHTYPE=.false.", Some(false)),
+                ("DEF_USE_DOMINANT_PATCHTYPE=.true.", Some(true)),
+                ("DEF_USE_DOMINANT_PATCHTYPE='true'", None),
+            ] {
+                let (root, namelist) = case_namelist(
+                    "dominant",
+                    &format!(
+                        "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='$ROOT/out'\n DEF_dir_rawdata='$ROOT/raw'\n DEF_file_mesh='$ROOT/mesh.nc'\n DEF_USE_LCT={}\n DEF_USE_PFT={}\n DEF_USE_PC={}\n {setting}\n/\n",
+                        if subgrid == "LCT" { ".true." } else { ".false." },
+                        if subgrid == "PFT" { ".true." } else { ".false." },
+                        if subgrid == "PC" { ".true." } else { ".false." },
+                    ),
+                );
+                let result = spatial_case_command(&namelist, land_cover, false, None, None);
+                if let Some(expected) = expected {
+                    let command = result.unwrap().unwrap();
+                    let dominant = if command.pft_or_pc {
+                        parse_spatial_pft(&command.args).unwrap().dominant
+                    } else {
+                        parse_spatial_lct(&command.args).unwrap().dominant
+                    };
+                    assert_eq!(dominant, expected, "{subgrid}: {setting}");
+                } else {
+                    let error = result.err().expect("invalid logical value").to_string();
+                    assert!(error.contains("DEF_USE_DOMINANT_PATCHTYPE"), "{error}");
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

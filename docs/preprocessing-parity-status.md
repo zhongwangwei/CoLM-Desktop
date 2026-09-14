@@ -6,6 +6,26 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Dominant patch-type namelist forwarding and remaining control gaps
+
+The spatial namelist adapter now forwards `DEF_USE_DOMINANT_PATCHTYPE` to the
+existing native topology implementation. It previously ignored this control;
+no new aggregation algorithm is introduced. One table-driven regression covers
+IGBP/USGS LCT, PFT and PC, omitted/false/true settings and invalid logical input,
+and checks the generated arguments through both actual native parsers. The true
+case fails before the repair and passes afterwards. All **677 integrated tests**,
+Clippy, downstream checks and scoped formatting pass. Evidence:
+`/tmp/colm-dominant-namelist-fix/`. This is control-path verification, not a fresh
+real-data dominant-mode parity run.
+
+A broader source audit also identifies actual missing functionality, not just
+rounding or absent test coverage: surface/restart compression controls are ignored;
+TOPMODEL method selection and VIC parameter initialization are incomplete;
+SNICAR optical initialization, urban-only masking, external-lake options and
+TRACER/BGC wetland initialization still require implementation or explicit scope
+guards. These remain open and preclude an all-feature migration claim. The main
+LCT/PFT/PC numerical comparisons above do not establish these optional branches.
+
 ## PFT/PC transmission precedes common ground absorption
 
 Broadband PFT and PC now follow `twostream_wrap -> albland`: sum albedo and
