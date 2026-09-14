@@ -809,6 +809,7 @@ pub fn audit(
         rawdata,
         crop_enabled,
         SinglePointLaiFrequency::Monthly,
+        true,
     )
 }
 
@@ -818,6 +819,7 @@ fn audit_with_lai_frequency(
     rawdata: Option<&Path>,
     crop_enabled: bool,
     lai_frequency: SinglePointLaiFrequency,
+    use_soil_texture: bool,
 ) -> Result<SiteAudit> {
     if crop_enabled && !matches!(mode, SiteMode::Pft | SiteMode::Pc) {
         bail!(
@@ -833,7 +835,12 @@ fn audit_with_lai_frequency(
     let f = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
     let kind = site_kind(file)?;
     let mut required: Vec<&str> = vec!["longitude", "latitude"];
-    required.extend(REQUIRED_FIELDS);
+    required.extend(
+        REQUIRED_FIELDS
+            .iter()
+            .copied()
+            .filter(|&name| use_soil_texture || name != "soil_texture"),
+    );
     required.extend(SOIL_RUN_FIELDS);
 
     match mode {
@@ -1842,6 +1849,7 @@ fn materialize_single_point_surface_impl(
         && matches!(lai_frequency, SinglePointLaiFrequency::Monthly);
     let lct_mode = matches!(mode, SiteMode::Igbp | SiteMode::Usgs);
     let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
+    let use_soil_texture = options.runoff_scheme == 3;
     let requires_eight_day_raw =
         matches!(lai_frequency, SinglePointLaiFrequency::EightDay) && !options.use_site_lai;
     let requires_monthly_raw = lct_monthly && !options.use_site_lai;
@@ -1856,8 +1864,7 @@ fn materialize_single_point_surface_impl(
     let requires_soil_raw = mode != SiteMode::Urban
         && (!options.use_site_soilparameters
             || source_soil_missing
-            || (options.runoff_scheme == 3
-                && !single_point_variable_exists(source, "soil_texture")?));
+            || (use_soil_texture && !single_point_variable_exists(source, "soil_texture")?));
     let requires_pft_raw = pft_mode
         && (!options.use_site_lai
             || !options.use_site_pctpfts
@@ -1873,7 +1880,14 @@ fn materialize_single_point_surface_impl(
     std::fs::create_dir_all(landdata_dir)
         .with_context(|| format!("cannot create {}", landdata_dir.display()))?;
     let target = landdata_dir.join("srfdata.nc");
-    let readiness = audit_with_lai_frequency(source, mode, None, crop_enabled, lai_frequency)?;
+    let readiness = audit_with_lai_frequency(
+        source,
+        mode,
+        None,
+        crop_enabled,
+        lai_frequency,
+        use_soil_texture,
+    )?;
     if readiness.self_contained()
         && !requires_eight_day_raw
         && !requires_monthly_raw
@@ -1892,6 +1906,7 @@ fn materialize_single_point_surface_impl(
             lai_frequency,
             options.urban,
             options.use_bedrock,
+            use_soil_texture,
             options.srfdata_compression,
         )?;
         return Ok(None);
@@ -1986,8 +2001,15 @@ fn materialize_single_point_surface_impl(
             crop_enabled,
         )?;
     }
-    let readiness = audit_with_lai_frequency(&temporary, mode, None, crop_enabled, lai_frequency)
-        .context("cannot audit the materialized single-point surface")?;
+    let readiness = audit_with_lai_frequency(
+        &temporary,
+        mode,
+        None,
+        crop_enabled,
+        lai_frequency,
+        use_soil_texture,
+    )
+    .context("cannot audit the materialized single-point surface")?;
     if !readiness.self_contained() {
         return Err(anyhow::anyhow!(
             "Rust single-point surface output still requires external data: {}",
@@ -2002,6 +2024,7 @@ fn materialize_single_point_surface_impl(
         lai_frequency,
         options.urban,
         options.use_bedrock,
+        use_soil_texture,
         options.srfdata_compression,
     )
     .context("cannot publish the materialized single-point surface")?;
@@ -2920,6 +2943,7 @@ fn publish_single_point_surface(
     lai_frequency: SinglePointLaiFrequency,
     urban: UrbanSurfaceOptions,
     use_bedrock: bool,
+    use_soil_texture: bool,
     compression_level: u8,
 ) -> Result<()> {
     validate_compression_level(compression_level)?;
@@ -2929,6 +2953,7 @@ fn publish_single_point_surface(
             target,
             urban.canyon_hwr,
             urban.lai_year_window,
+            use_soil_texture,
             compression_level,
         )
     } else {
@@ -2939,11 +2964,13 @@ fn publish_single_point_surface(
             crop_enabled,
             lai_frequency,
             use_bedrock,
+            use_soil_texture,
             compression_level,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_single_point_surface_with_lai_frequency(
     source: &Path,
     target: &Path,
@@ -2951,6 +2978,7 @@ fn write_single_point_surface_with_lai_frequency(
     crop_enabled: bool,
     lai_frequency: SinglePointLaiFrequency,
     use_bedrock: bool,
+    use_soil_texture: bool,
     compression_level: u8,
 ) -> Result<()> {
     let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
@@ -2969,6 +2997,9 @@ fn write_single_point_surface_with_lai_frequency(
         .map(|_| active_pft_indices(&input, crop_enabled))
         .transpose()?;
     let crop_surface = pft_mode && crop_enabled && scalar_i32(&input, "IGBP_classification")? == 12;
+    let soil_texture = use_soil_texture
+        .then(|| scalar_i32(&input, "soil_texture"))
+        .transpose()?;
     let mut output =
         netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
     let emit_f64 = |file: &mut netcdf::FileMut, name: &str, dimensions: &[&str], values: &[f64]| {
@@ -3109,12 +3140,9 @@ fn write_single_point_surface_with_lai_frequency(
         );
         emit_f64(&mut output, name, &["soil"], &values[..8])?;
     }
-    emit_i32(
-        &mut output,
-        "soil_texture",
-        &[],
-        &[scalar_i32(&input, "soil_texture")?],
-    )?;
+    if let Some(soil_texture) = soil_texture {
+        emit_i32(&mut output, "soil_texture", &[], &[soil_texture])?;
+    }
     for name in ["elevation", "elvstd", "sloperatio"] {
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }
@@ -3379,6 +3407,7 @@ fn write_urban_single_point_surface(
     target: &Path,
     canyon_hwr: bool,
     lai_year_window: Option<(i32, i32)>,
+    use_soil_texture: bool,
     compression_level: u8,
 ) -> Result<()> {
     let input =
@@ -3432,6 +3461,9 @@ fn write_urban_single_point_surface(
             4,
         ),
     ];
+    let soil_texture = use_soil_texture
+        .then(|| scalar_i32(&input, "soil_texture"))
+        .transpose()?;
     let mut output =
         netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
     let emit_f64 = |file: &mut netcdf::FileMut, name: &str, dimensions: &[&str], values: &[f64]| {
@@ -3570,12 +3602,9 @@ fn write_urban_single_point_surface(
         );
         emit_f64(&mut output, name, &["soil"], &values[..8])?;
     }
-    emit_i32(
-        &mut output,
-        "soil_texture",
-        &[],
-        &[scalar_i32(&input, "soil_texture")?],
-    )?;
+    if let Some(soil_texture) = soil_texture {
+        emit_i32(&mut output, "soil_texture", &[], &[soil_texture])?;
+    }
     for name in ["elevation", "elvstd", "sloperatio"] {
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }

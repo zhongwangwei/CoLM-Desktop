@@ -84,6 +84,56 @@ fn spatial_pft_constant_restart_rejects_misaligned_crop_fractions() {
 }
 
 #[test]
+fn spatial_pft_soil_texture_gate_tracks_scheme_and_explicit_catch_force() {
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    write_common_landdata(&landdata);
+    write_i32(&landdata, "landpft", "landpft", "settyp", &[1]);
+    write_landpft_topology(&landdata);
+    write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[1.0]);
+    write_f64(&landdata, "htop", "htop_pfts", "htop_pfts", &[20.0]);
+    let texture = block_path(&landdata, "soil", "soiltexture_patches", 2005, "w180_s90");
+    std::fs::remove_file(&texture).unwrap();
+    let namelist = root.join("case.nml");
+    std::fs::write(
+        &namelist,
+        "&nl_colm\n DEF_Runoff_SCHEME=0\n DEF_TOPMOD_method=0\n DEF_USE_PFT=.true.\n DEF_USE_PC=.false.\n /\n",
+    )
+    .unwrap();
+
+    let files = write_spatial_pft_constant_restarts(
+        SpatialPftStaticConfig::new(
+            &namelist,
+            &landdata,
+            &root.join("restart-inactive"),
+            "test",
+            2005,
+            "w180_s90",
+        ),
+        false,
+        false,
+    )
+    .unwrap();
+    let common = netcdf::open(files.common.block).unwrap();
+    assert_eq!(values_i32(&common, "soiltext").unwrap(), [0]);
+    assert_eq!(values_f64(&common, "BVIC").unwrap(), [1.0]);
+
+    let restart_catch = root.join("restart-catch");
+    let mut config = SpatialPftStaticConfig::new(
+        &namelist,
+        &landdata,
+        &restart_catch,
+        "test",
+        2005,
+        "w180_s90",
+    );
+    config.force_soil_texture = true;
+    let err = write_spatial_pft_constant_restarts(config, false, false).unwrap_err();
+    assert!(err.to_string().contains("soiltexture_patches"), "{err}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_pft_time_requires_bgc_for_crop_before_materializing_any_restart() {
     let root = temp_dir();
     let namelist = root.join("case.nml");
@@ -202,6 +252,157 @@ fn write_f64(landdata: &Path, directory: &str, stem: &str, variable: &str, value
     file.add_variable::<f64>(variable, &["pft"])
         .unwrap()
         .put_values(values, ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_landpft_topology(landdata: &Path) {
+    let path = block_path(landdata, "landpft", "landpft", 2005, "w180_s90");
+    let mut file = netcdf::append(path).unwrap();
+    file.add_variable::<i64>("eindex", &["pft"])
+        .unwrap()
+        .put_values(&[7_i64], ..)
+        .unwrap();
+    for (name, value) in [("ipxstt", 1_i32), ("ipxend", 1_i32)] {
+        file.add_variable::<i32>(name, &["pft"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    file.close().unwrap();
+}
+
+fn write_common_landdata(landdata: &Path) {
+    std::fs::create_dir_all(landdata).unwrap();
+    let mut pixel = netcdf::create(landdata.join("pixel.nc")).unwrap();
+    pixel.add_dimension("lon", 1).unwrap();
+    pixel.add_dimension("lat", 1).unwrap();
+    for (name, value, dimension) in [
+        ("lon_w", -180.0, "lon"),
+        ("lon_e", -179.0, "lon"),
+        ("lat_s", 0.0, "lat"),
+        ("lat_n", 1.0, "lat"),
+    ] {
+        pixel
+            .add_variable::<f64>(name, &[dimension])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    pixel.close().unwrap();
+
+    let path = block_path(landdata, "landpatch", "landpatch", 2005, "w180_s90");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut landpatch = netcdf::create(path).unwrap();
+    landpatch.add_dimension("patch", 1).unwrap();
+    for (name, value) in [("settyp", 1), ("ipxstt", 1), ("ipxend", 1)] {
+        landpatch
+            .add_variable::<i32>(name, &["patch"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    landpatch
+        .add_variable::<i64>("eindex", &["patch"])
+        .unwrap()
+        .put_values(&[7_i64], ..)
+        .unwrap();
+    landpatch.close().unwrap();
+
+    let path = block_path(landdata, "mesh", "mesh", 2005, "w180_s90");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut mesh = netcdf::create(path).unwrap();
+    mesh.add_dimension("element", 1).unwrap();
+    mesh.add_dimension("pixel", 1).unwrap();
+    mesh.add_dimension("coordinate", 2).unwrap();
+    mesh.add_variable::<i64>("elmindex", &["element"])
+        .unwrap()
+        .put_values(&[7_i64], ..)
+        .unwrap();
+    mesh.add_variable::<i32>("elmnpxl", &["element"])
+        .unwrap()
+        .put_values(&[1_i32], ..)
+        .unwrap();
+    mesh.add_variable::<i32>("elmpixels", &["pixel", "coordinate"])
+        .unwrap()
+        .put_values(&[1_i32, 1], (.., ..))
+        .unwrap();
+    mesh.close().unwrap();
+
+    write_i32(
+        landdata,
+        "soil",
+        "soiltexture_patches",
+        "soiltext_patches",
+        &[8],
+    );
+    for (name, value) in [
+        ("lakedepth_patches", 10.0),
+        ("htop_patches", 12.0),
+        ("elevation_patches", 100.0),
+        ("elvstd_patches", 5.0),
+        ("sloperatio_patches", 1.2),
+    ] {
+        let directory = if name == "lakedepth_patches" {
+            "lakedepth"
+        } else if name == "htop_patches" {
+            "htop"
+        } else {
+            "topography"
+        };
+        write_patch_f64(landdata, directory, name, name, value);
+    }
+    for (name, value) in [
+        ("soil_s_v_alb", 0.1),
+        ("soil_d_v_alb", 0.2),
+        ("soil_s_n_alb", 0.3),
+        ("soil_d_n_alb", 0.4),
+    ] {
+        write_patch_f64(landdata, "soil", &format!("{name}_patches"), name, value);
+    }
+    for layer in 1..=8 {
+        for (field, value) in [
+            ("vf_quartz_mineral_s", 0.3),
+            ("vf_gravels_s", 0.1),
+            ("vf_om_s", 0.02),
+            ("vf_sand_s", 0.4),
+            ("vf_clay_s", 0.2),
+            ("wf_gravels_s", 0.1),
+            ("wf_sand_s", 0.4),
+            ("wf_clay_s", 0.2),
+            ("wf_om_s", 0.02),
+            ("OM_density_s", 62.0),
+            ("BD_all_s", 1200.0),
+            ("theta_s", 0.45),
+            ("psi_s", -10.0),
+            ("lambda", 0.2),
+            ("theta_r", 0.05),
+            ("alpha_vgm", 0.02),
+            ("L_vgm", 0.5),
+            ("n_vgm", 1.5),
+            ("k_s", 86.4),
+            ("csol", 1.2e6),
+            ("k_solids", 2.0),
+            ("tksatu", 1.5),
+            ("tksatf", 2.2),
+            ("tkdry", 0.2),
+            ("BA_alpha", 0.24),
+            ("BA_beta", 18.0),
+        ] {
+            let name = format!("{field}_l{layer}_patches");
+            write_patch_f64(landdata, "soil", &name, &name, value);
+        }
+    }
+}
+
+fn write_patch_f64(landdata: &Path, directory: &str, stem: &str, variable: &str, value: f64) {
+    let path = block_path(landdata, directory, stem, 2005, "w180_s90");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", 1).unwrap();
+    file.add_variable::<f64>(variable, &["patch"])
+        .unwrap()
+        .put_values(&[value], ..)
         .unwrap();
     file.close().unwrap();
 }

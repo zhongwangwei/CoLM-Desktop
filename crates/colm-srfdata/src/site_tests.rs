@@ -1811,6 +1811,7 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
             false,
             super::SinglePointLaiFrequency::Monthly,
             true,
+            true,
             4,
         )
         .unwrap();
@@ -1951,6 +1952,7 @@ fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
         false,
         super::SinglePointLaiFrequency::EightDay,
         false,
+        true,
         1,
     )
     .unwrap();
@@ -1960,6 +1962,7 @@ fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
         None,
         false,
         super::SinglePointLaiFrequency::EightDay,
+        true,
     )
     .unwrap();
     assert!(audit.self_contained(), "{:?}", audit.needs_external);
@@ -2191,6 +2194,164 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             .unwrap()[11],
         1.2
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn single_point_options_for_runoff(
+    runoff_scheme: i32,
+) -> super::SinglePointMaterializeOptions<'static> {
+    super::SinglePointMaterializeOptions {
+        urban: super::UrbanSurfaceOptions::default(),
+        lai_frequency: super::SinglePointLaiFrequency::Monthly,
+        use_site_lai: true,
+        use_site_pctpfts: true,
+        use_site_pctcrop: true,
+        use_site_htop: true,
+        use_site_landtype: true,
+        site_landtype: None,
+        use_site_soilparameters: true,
+        runoff_scheme,
+        use_site_lakedepth: true,
+        use_site_soilreflectance: true,
+        use_site_topography: true,
+        use_bedrock: false,
+        srfdata_compression: 1,
+        use_site_dbedrock: true,
+        land_cover_year: 2008,
+        eight_day_lai_years: &[],
+        monthly_lai_years: &[],
+    }
+}
+
+fn complete_igbp_site(path: &std::path::Path, include_soil_texture: bool) {
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("soil", 8).unwrap();
+    file.add_dimension("LAI_year", 1).unwrap();
+    file.add_dimension("month", 12).unwrap();
+    for (name, value) in [
+        ("longitude", -180.0),
+        ("latitude", 90.0),
+        ("canopy_height", 0.5),
+        ("lakedepth", 1.0),
+        ("soil_s_v_alb", 0.1),
+        ("soil_d_v_alb", 0.2),
+        ("soil_s_n_alb", 0.3),
+        ("soil_d_n_alb", 0.4),
+        ("elevation", 42.0),
+        ("elvstd", 0.0),
+        ("sloperatio", 0.0),
+    ] {
+        file.add_variable::<f64>(name, &[])
+            .unwrap()
+            .put_value(value, ())
+            .unwrap();
+    }
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_value(10, ())
+        .unwrap();
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2008], ..)
+        .unwrap();
+    for name in ["LAI_monthly", "SAI_monthly"] {
+        file.add_variable::<f64>(name, &["LAI_year", "month"])
+            .unwrap()
+            .put_values(&[0.0; 12], ..)
+            .unwrap();
+    }
+    for name in super::SINGLE_POINT_SOIL_FIELDS {
+        file.add_variable::<f64>(name, &["soil"])
+            .unwrap()
+            .put_values(&[0.1; 8], ..)
+            .unwrap();
+    }
+    if include_soil_texture {
+        file.add_variable::<i32>("soil_texture", &[])
+            .unwrap()
+            .put_value(8, ())
+            .unwrap();
+    }
+    file.close().unwrap();
+}
+
+#[test]
+fn runoff_scheme_zero_one_two_publish_complete_site_without_soil_texture() {
+    let root =
+        std::env::temp_dir().join(format!("colm-srfdata-runoff-no-texture-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    for scheme in [0, 1, 2] {
+        let source = root.join(format!("source-{scheme}.nc"));
+        let landdata = root.join(format!("landdata-{scheme}"));
+        complete_igbp_site(&source, false);
+        super::materialize_single_point_surface_impl(
+            &source,
+            &landdata,
+            super::SiteMode::Igbp,
+            None,
+            None,
+            false,
+            single_point_options_for_runoff(scheme),
+        )
+        .unwrap();
+        let output = netcdf::open(landdata.join("srfdata.nc")).unwrap();
+        assert!(
+            output.variable("soil_texture").is_none(),
+            "DEF_Runoff_SCHEME={scheme} must not publish SITE soil_texture"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runoff_scheme_three_publication_requires_site_soil_texture() {
+    let root = std::env::temp_dir().join(format!("colm-srfdata-runoff-texture-{}", test_suffix()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    let output = root.join("srfdata.nc");
+    complete_igbp_site(&source, false);
+    let err = super::write_single_point_surface_with_lai_frequency(
+        &source,
+        &output,
+        super::SiteMode::Igbp,
+        false,
+        super::SinglePointLaiFrequency::Monthly,
+        false,
+        true,
+        1,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("soil_texture"), "{err:#}");
+    assert!(!output.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn inactive_runoff_scheme_omits_present_site_soil_texture() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-srfdata-runoff-ignore-texture-{}",
+        test_suffix()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.nc");
+    let landdata = root.join("landdata");
+    complete_igbp_site(&source, true);
+    super::materialize_single_point_surface_impl(
+        &source,
+        &landdata,
+        super::SiteMode::Igbp,
+        None,
+        None,
+        false,
+        single_point_options_for_runoff(1),
+    )
+    .unwrap();
+    let output = netcdf::open(landdata.join("srfdata.nc")).unwrap();
+    assert!(output.variable("soil_texture").is_none());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2760,7 +2921,8 @@ fn urban_surface_projection_resolves_lcz_defaults_and_the_case_lai_window() {
     prepare_urban(&source, &prepared).unwrap();
     {
         let _netcdf_guard = netcdf_write_lock().lock().unwrap();
-        write_urban_single_point_surface(&prepared, &output, false, Some((2000, 2004)), 1).unwrap();
+        write_urban_single_point_surface(&prepared, &output, false, Some((2000, 2004)), true, 1)
+            .unwrap();
     }
     let file = netcdf::open(&output).unwrap();
     assert_eq!(file.dimension("LAI_year").unwrap().len(), 5);
@@ -2798,9 +2960,28 @@ fn urban_surface_projection_resolves_lcz_defaults_and_the_case_lai_window() {
             "{name}"
         );
     }
+    drop(file);
+    let inactive_output = output.with_file_name("urban-surface-output-inactive.nc");
+    write_urban_single_point_surface(
+        &prepared,
+        &inactive_output,
+        false,
+        Some((2000, 2004)),
+        false,
+        1,
+    )
+    .unwrap();
+    assert!(
+        netcdf::open(&inactive_output)
+            .unwrap()
+            .variable("soil_texture")
+            .is_none(),
+        "inactive runoff schemes must not publish urban SITE soil_texture"
+    );
     let _ = std::fs::remove_file(source);
     let _ = std::fs::remove_file(prepared);
     let _ = std::fs::remove_file(output);
+    let _ = std::fs::remove_file(inactive_output);
 }
 
 #[test]

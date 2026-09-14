@@ -1,7 +1,7 @@
 //! Single-point `srfdata.nc` adapter used by the Rust `mkinidata` path.
 //!
-//! This is intentionally a strict reader: a missing static field is a scientific input
-//! error, not a cue to substitute a plausible value.  The rawdata fallback remains the
+//! This is intentionally a strict reader: a missing active static field is a scientific
+//! input error, not a cue to substitute a plausible value.  The rawdata fallback remains the
 //! responsibility of the Rust `mksrfdata` stage that creates `srfdata.nc`.
 
 use std::path::Path;
@@ -353,6 +353,7 @@ pub fn read_single_point_surface(
     path: impl AsRef<Path>,
     land_cover: LandCoverScheme,
     hydraulic_model: HydraulicModel,
+    use_soil_texture: bool,
 ) -> Result<SinglePointSurfaceData> {
     let path = path.as_ref();
     let file = netcdf::open(path)
@@ -362,7 +363,7 @@ pub fn read_single_point_surface(
         LandCoverScheme::Usgs => "USGS_classification",
     };
     let land_class = scalar_i32(&file, land_name)?;
-    single_point_surface_from_file(&file, land_class, hydraulic_model, None)
+    single_point_surface_from_file(&file, land_class, hydraulic_model, None, use_soil_texture)
 }
 
 /// Read the 211 point-sampled soil albedos emitted for a HYPERSPECTRAL site.
@@ -384,6 +385,7 @@ pub fn read_single_point_urban_data(
     path: impl AsRef<Path>,
     land_cover: LandCoverScheme,
     hydraulic_model: HydraulicModel,
+    use_soil_texture: bool,
 ) -> Result<SinglePointUrbanData> {
     let path = path.as_ref();
     let file = netcdf::open(path)
@@ -410,6 +412,7 @@ pub fn read_single_point_urban_data(
             urban_land_class,
             hydraulic_model,
             Some(0.0),
+            use_soil_texture,
         )?,
         urban_type: scalar_i32(&file, "URBAN_TYPE")?,
         lucy_region_id: lucy_raw as i32,
@@ -485,6 +488,7 @@ fn single_point_surface_from_file(
     land_class: i32,
     hydraulic_model: HydraulicModel,
     canopy_height_fallback_m: Option<f64>,
+    use_soil_texture: bool,
 ) -> Result<SinglePointSurfaceData> {
     let source = SoilSourceFields {
         vf_quartz: vector(file, "soil_vf_quartz_mineral")?,
@@ -531,7 +535,13 @@ fn single_point_surface_from_file(
             saturated_near_infrared: scalar(file, "soil_s_n_alb")?,
             dry_near_infrared: scalar(file, "soil_d_n_alb")?,
         },
-        soil_texture: scalar_i32(file, "soil_texture")?,
+        // MOD_Initialize only reads soil texture for Simple VIC / CatchLateral.
+        // Zero is deterministic inactive metadata, not upstream undefined memory.
+        soil_texture: if use_soil_texture {
+            scalar_i32(file, "soil_texture")?
+        } else {
+            0
+        },
         elevation_m: scalar(file, "elevation")?,
         elevation_std_m: scalar(file, "elvstd")?,
         slope_ratio: scalar(file, "sloperatio")?,

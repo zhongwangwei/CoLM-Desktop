@@ -99,6 +99,85 @@ fn lct_spatial_block_becomes_a_constant_restart() {
 }
 
 #[test]
+fn spatial_lct_inactive_soil_texture_skips_missing_source_with_deterministic_placeholder() {
+    let root = temp_dir("inactive-soiltexture");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    std::fs::remove_file(block_path(
+        &landdata,
+        "soil",
+        "soiltexture_patches",
+        2005,
+        "w180_s90",
+    ))
+    .unwrap();
+    let restart = root.join("restart");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.use_soil_texture = false;
+
+    let files = write_spatial_lct_constant_restart(config).unwrap();
+
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_i32(&block, "soiltext").unwrap(), [0]);
+    assert_eq!(values_f64(&block, "BVIC").unwrap(), [BVIC_USDA[0]]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_active_soil_texture_requires_source_and_preserves_normalization() {
+    let root = temp_dir("active-soiltexture");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    let texture = block_path(&landdata, "soil", "soiltexture_patches", 2005, "w180_s90");
+    std::fs::remove_file(&texture).unwrap();
+    let restart_missing = root.join("restart-missing");
+    let config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart_missing,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    let err = write_spatial_lct_constant_restart(config).unwrap_err();
+    assert!(err.to_string().contains("soiltexture_patches"), "{err}");
+
+    write_i32(
+        &landdata,
+        "soil",
+        "soiltexture_patches",
+        "soiltext_patches",
+        2005,
+        "w180_s90",
+        99,
+    );
+    let restart_valid = root.join("restart-valid");
+    let config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart_valid,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    let files = write_spatial_lct_constant_restart(config).unwrap();
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_i32(&block, "soiltext").unwrap(), [0]);
+    assert_eq!(values_f64(&block, "BVIC").unwrap(), [BVIC_USDA[0]]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn spatial_lct_constant_restart_masks_virtual_wmo_patch() {
     let root = temp_dir("wmo-mask");
     let landdata = root.join("landdata");

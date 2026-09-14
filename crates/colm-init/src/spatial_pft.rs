@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_case::is_default;
 use colm_core::{
     bsm_soil_moisture, cold_start_ground_albedo, cold_start_pc_broadband_radiation_from_ground,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
@@ -49,6 +50,8 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialPftStaticConfig<'a> {
     pub namelist: &'a Path,
+    /// Force soil texture/BVIC initialization for CatchLateral even when runoff scheme is not Simple VIC.
+    pub force_soil_texture: bool,
     pub landdata: &'a Path,
     pub restart_dir: &'a Path,
     pub case_name: &'a str,
@@ -113,6 +116,7 @@ impl<'a> SpatialPftStaticConfig<'a> {
     ) -> Self {
         Self {
             namelist,
+            force_soil_texture: false,
             landdata,
             restart_dir,
             case_name,
@@ -252,6 +256,9 @@ pub fn write_spatial_pft_constant_restarts(
     common.tuning = RestartTuning::from_document(&document)?;
     common.use_hyperspectral = use_hyperspectral;
     let runoff_scheme = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3);
+    common.use_soil_texture = runoff_scheme == 3
+        || config.force_soil_texture
+        || optional_path_is_set(&document, "DEF_CatchmentMesh_data")?;
     common.use_topmodel = runoff_scheme == 0;
     common.topmodel_method = optional_i32(&document, "DEF_TOPMOD_method")?.unwrap_or(0);
     let vic_file = if runoff_scheme == 1 {
@@ -1811,6 +1818,19 @@ fn optional_bool_or(
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => bail!("{field} must be a logical value"),
         None => Ok(default),
+    }
+}
+
+fn optional_path_is_set(document: &colm_namelist::Document, field: &str) -> Result<bool> {
+    match document.get(field) {
+        None => Ok(false),
+        Some(Value::Str(value)) => {
+            let value = value.trim();
+            Ok(!value.is_empty()
+                && !value.eq_ignore_ascii_case("null")
+                && is_default(field, &Value::Str(value.into())) != Some(true))
+        }
+        Some(_) => bail!("{field} must be a character value"),
     }
 }
 

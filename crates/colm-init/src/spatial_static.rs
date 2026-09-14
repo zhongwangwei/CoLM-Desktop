@@ -38,6 +38,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub use_bedrock: bool,
     /// Write 211-band `soil_alb`, matching the `HYPERSPECTRAL` build.
     pub use_hyperspectral: bool,
+    /// Read and scientifically initialize `soiltext`/`BVIC`; true for Simple VIC or CatchLateral.
+    pub use_soil_texture: bool,
     /// Write the TOPMODEL vectors required by `DEF_Runoff_SCHEME = 0`.
     pub use_topmodel: bool,
     pub topmodel_method: i32,
@@ -70,6 +72,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
             tuning: RestartTuning::default(),
             use_bedrock: false,
             use_hyperspectral: false,
+            use_soil_texture: true,
             use_topmodel: false,
             topmodel_method: 0,
             vic_parameters: VicParameterSource::None,
@@ -221,15 +224,19 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         dimensions.soil_layers,
         config.hydraulic_model,
     )?;
-    let mut texture = read_i32(
-        config.landdata,
-        "soil",
-        "soiltexture_patches",
-        "soiltext_patches",
-        config.land_cover_year,
-        config.block_label,
-        patch_count,
-    )?;
+    let mut texture = if config.use_soil_texture {
+        read_i32(
+            config.landdata,
+            "soil",
+            "soiltexture_patches",
+            "soiltext_patches",
+            config.land_cover_year,
+            config.block_label,
+            patch_count,
+        )?
+    } else {
+        vec![0; patch_count]
+    };
     normalize_soil_texture(&mut texture);
     let bvic = texture
         .iter()

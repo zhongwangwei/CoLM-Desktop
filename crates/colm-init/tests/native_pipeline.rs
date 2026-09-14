@@ -57,6 +57,28 @@ fn rust_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
 }
 
 #[test]
+#[ignore = "requires local default kernel, generated CN-Cng case, and PLUMBER2 forcing"]
+fn inactive_runoff_preprocessors_run_in_the_unchanged_fortran_runtime() {
+    let vic = std::env::temp_dir().join(format!(
+        "colm-inactive-runoff-vic-{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&vic, "VIC parameters\n0.3 1.5 0.2 0.8 2.0\n").unwrap();
+    for scheme in 0..=2 {
+        rust_preprocess_runs_in_fortran_runtime(
+            &format!("runoff{scheme}"),
+            Some(SiteMode::Igbp),
+            "default",
+            &format!(
+                "DEF_Runoff_SCHEME = {scheme}\nDEF_file_VIC_para = '{}'",
+                vic.display()
+            ),
+        );
+    }
+    std::fs::remove_file(vic).unwrap();
+}
+
+#[test]
 #[ignore = "requires local BGC kernel, CoLMruntime, generated CN-Cng case, and PLUMBER2 forcing"]
 fn rust_pft_bgc_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
     rust_preprocess_runs_in_fortran_runtime(
@@ -287,6 +309,24 @@ fn rust_preprocess_runs_in_fortran_runtime(
     .unwrap();
 
     let (_, files) = prepare_single_point_case(&case, land_cover, false, None).unwrap();
+    let document = colm_namelist::parse(&std::fs::read_to_string(&case).unwrap()).unwrap();
+    let use_texture = match document.get("DEF_Runoff_SCHEME") {
+        Some(colm_namelist::Value::Int(scheme)) => *scheme == 3,
+        None => true,
+        value => panic!("unexpected runoff scheme: {value:?}"),
+    };
+    let surface = netcdf::open(&files.surface).unwrap();
+    assert_eq!(surface.variable("soil_texture").is_some(), use_texture);
+    drop(surface);
+    if !use_texture {
+        let constants = netcdf::open(&files.constants.common.block).unwrap();
+        assert!(values_f64(&constants, "soiltext")
+            .iter()
+            .all(|&value| value == 0.0));
+        assert!(values_f64(&constants, "BVIC")
+            .iter()
+            .all(|&value| value == 1.0));
+    }
     if additions.contains("DEF_USE_PC = .true.") {
         assert_pc_common_absorption_matches_pft_outputs(&files);
     }

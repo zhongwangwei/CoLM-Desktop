@@ -774,6 +774,77 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
 }
 
 #[test]
+fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inactive_source() {
+    let root =
+        std::env::temp_dir().join(format!("colm-init-runoff-texture-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let surface = single_point_restart_surface();
+    let vic = root.join("vic.txt");
+    std::fs::write(&vic, "VIC parameters\n0.3 1.5 0.2 0.8 2.0\n").unwrap();
+    let namelist = root.join("case.nml");
+    for scheme in 0..=3 {
+        std::fs::write(&namelist, format!(
+            "&nl_colm\nDEF_CASE_NAME='site'\nDEF_dir_output='{}'\nDEF_Runoff_SCHEME={scheme}\nDEF_file_VIC_para='{}'\n/\n",
+            root.display(), vic.display(),
+        )).unwrap();
+        let run =
+            single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
+                .unwrap();
+        let config = run.static_config();
+        assert_eq!(config.use_soil_texture, scheme == 3);
+        let path = write_single_point_constant_restart_from_surface(
+            &surface,
+            root.join(format!("scheme{scheme}")),
+            config,
+            None,
+            None,
+        )
+        .unwrap()
+        .block;
+        let file = netcdf::open(path).unwrap();
+        // Inactive values are defined by Rust, not by original uninitialized memory.
+        assert_eq!(
+            values_i32(&file, "soiltext"),
+            [if scheme == 3 { 8 } else { 0 }]
+        );
+        assert_eq!(
+            values_f64(&file, "BVIC"),
+            [if scheme == 3 { 0.1 } else { 1.0 }]
+        );
+    }
+    let config = SinglePointStaticConfig::new(
+        "site",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    assert!(config.use_soil_texture);
+    for texture in [-1, 0, 12, 13] {
+        let mut surface = surface.clone();
+        surface.soil_texture = texture;
+        let path = write_single_point_constant_restart_from_surface(
+            &surface,
+            root.join(format!("texture{texture}")),
+            config,
+            None,
+            None,
+        )
+        .unwrap()
+        .block;
+        let file = netcdf::open(path).unwrap();
+        let class = if (0..=12).contains(&texture) {
+            texture
+        } else {
+            0
+        };
+        assert_eq!(values_i32(&file, "soiltext"), [class]);
+        assert_eq!(values_f64(&file, "BVIC"), [BVIC_USDA[class as usize]]);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn single_point_runoff_namelist_forces_topmodel_method_zero_and_resolves_vic_paths() {
     let directory =
         std::env::temp_dir().join(format!("colm-init-single-runoff-{}", std::process::id()));

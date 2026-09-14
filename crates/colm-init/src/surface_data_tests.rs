@@ -8,10 +8,14 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
     let path = temp_file("vgm");
-    write_surface(&path, 8, true, true);
-    let data =
-        read_single_point_surface(&path, LandCoverScheme::Igbp, HydraulicModel::VanGenuchten)
-            .unwrap();
+    write_surface(&path, 8, true, true, true);
+    let data = read_single_point_surface(
+        &path,
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        true,
+    )
+    .unwrap();
     assert_eq!(data.latitude_degrees, 22.5);
     assert_eq!(data.longitude_degrees, 113.5);
     assert_eq!(data.land_class, 4);
@@ -27,7 +31,7 @@ fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
 #[test]
 fn single_point_bedrock_is_optional_until_the_namelist_enables_it() {
     let path = temp_file("bedrock");
-    write_surface(&path, 8, true, true);
+    write_surface(&path, 8, true, true, true);
     let root = path.with_file_name(format!("colm-init-bedrock-restart-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
 
@@ -76,7 +80,7 @@ fn single_point_bedrock_is_optional_until_the_namelist_enables_it() {
 #[test]
 fn hyperspectral_soil_albedo_requires_all_211_finite_site_values() {
     let path = temp_file("hyperspectral-soil-albedo");
-    write_surface(&path, 8, true, true);
+    write_surface(&path, 8, true, true, true);
     let mut file = netcdf::append(&path).unwrap();
     file.add_dimension("wavelength", HYPERSPECTRAL_WAVELENGTHS)
         .unwrap();
@@ -96,10 +100,14 @@ fn hyperspectral_soil_albedo_requires_all_211_finite_site_values() {
 #[test]
 fn reader_uses_the_first_eight_layers_of_a_ten_layer_site_profile() {
     let path = temp_file("ten-layer");
-    write_surface(&path, 10, true, true);
-    let data =
-        read_single_point_surface(&path, LandCoverScheme::Igbp, HydraulicModel::VanGenuchten)
-            .unwrap();
+    write_surface(&path, 10, true, true, true);
+    let data = read_single_point_surface(
+        &path,
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        true,
+    )
+    .unwrap();
     assert_eq!(data.soil_layers.len(), 8);
     assert_eq!(data.soil_layers[7].vf_quartz, 8.0);
     std::fs::remove_file(path).unwrap();
@@ -108,33 +116,63 @@ fn reader_uses_the_first_eight_layers_of_a_ten_layer_site_profile() {
 #[test]
 fn campbell_does_not_require_van_genuchten_surface_variables() {
     let path = temp_file("campbell");
-    write_surface(&path, 8, false, true);
+    write_surface(&path, 8, false, true, true);
     let data =
-        read_single_point_surface(&path, LandCoverScheme::Igbp, HydraulicModel::Campbell).unwrap();
+        read_single_point_surface(&path, LandCoverScheme::Igbp, HydraulicModel::Campbell, true)
+            .unwrap();
     assert!(data.soil_layers.iter().all(|layer| layer.theta_r == 0.0));
-    assert!(
-        read_single_point_surface(&path, LandCoverScheme::Igbp, HydraulicModel::VanGenuchten)
-            .is_err()
-    );
+    assert!(read_single_point_surface(
+        &path,
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        true
+    )
+    .is_err());
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn inactive_runoff_reader_skips_soil_texture_but_active_runoff_requires_it() {
+    for present in [false, true] {
+        let path = temp_file("runoff-texture");
+        write_surface(&path, 8, false, true, present);
+        for active in [false, true] {
+            let result = read_single_point_surface(
+                &path,
+                LandCoverScheme::Igbp,
+                HydraulicModel::Campbell,
+                active,
+            );
+            if active && !present {
+                assert!(result.unwrap_err().to_string().contains("soil_texture"));
+            } else {
+                assert_eq!(result.unwrap().soil_texture, if active { 8 } else { 0 });
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]
 fn reader_rejects_missing_or_wrong_sized_scientific_inputs() {
     let short = temp_file("short");
-    write_surface(&short, 7, true, true);
-    assert!(
-        read_single_point_surface(&short, LandCoverScheme::Igbp, HydraulicModel::VanGenuchten)
-            .is_err()
-    );
+    write_surface(&short, 7, true, true, true);
+    assert!(read_single_point_surface(
+        &short,
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+        true
+    )
+    .is_err());
     std::fs::remove_file(short).unwrap();
 
     let missing = temp_file("missing");
-    write_surface(&missing, 8, true, false);
+    write_surface(&missing, 8, true, false, true);
     let error = read_single_point_surface(
         &missing,
         LandCoverScheme::Igbp,
         HydraulicModel::VanGenuchten,
+        true,
     )
     .unwrap_err()
     .to_string();
@@ -299,89 +337,108 @@ fn crop_pft_reader_preserves_cft_weights_and_crop_fractions() {
 
 #[test]
 fn urban_reader_uses_the_shared_static_contract_without_a_land_class_variable() {
-    let path = temp_file("urban");
-    write_surface(&path, 8, false, true);
-    let mut file = netcdf::append(&path).unwrap();
-    for (name, length) in [
-        ("LAI_year", 1),
-        ("month", 12),
-        ("ulev", 10),
-        ("numsolar", 2),
-        ("numrad", 2),
-    ] {
-        file.add_dimension(name, length).unwrap();
-    }
-    file.add_variable::<i32>("LAI_year", &["LAI_year"])
-        .unwrap()
-        .put_values(&[2005], ..)
-        .unwrap();
-    file.add_variable::<i32>("URBAN_TYPE", &[])
-        .unwrap()
-        .put_values(&[6], ..)
-        .unwrap();
-    for (name, value) in [
-        ("LUCY_id", 4.0),
-        ("PCT_Tree", 22.5),
-        ("URBAN_TREE_TOP", 5.7),
-        ("PCT_Water", 0.0),
-        ("WT_ROOF", 0.445),
-        ("HT_ROOF", 6.4),
-        ("WTROAD_PERV", 0.685),
-        ("BUILDING_HLR", 0.225),
-        ("POP_DEN", 1000.0),
-        ("EM_ROOF", 0.91),
-        ("EM_WALL", 0.9),
-        ("EM_IMPROAD", 0.95),
-        ("EM_PERROAD", 0.95),
-        ("T_BUILDING_MAX", 297.65),
-        ("T_BUILDING_MIN", 290.65),
-        ("THICK_ROOF", 0.015),
-        ("THICK_WALL", 0.02),
-    ] {
-        file.add_variable::<f64>(name, &[])
+    for active in [false, true] {
+        let path = temp_file("urban");
+        write_surface(&path, 8, false, true, active);
+        let mut file = netcdf::append(&path).unwrap();
+        for (name, length) in [
+            ("LAI_year", 1),
+            ("month", 12),
+            ("ulev", 10),
+            ("numsolar", 2),
+            ("numrad", 2),
+        ] {
+            file.add_dimension(name, length).unwrap();
+        }
+        file.add_variable::<i32>("LAI_year", &["LAI_year"])
             .unwrap()
-            .put_values(&[value], ..)
+            .put_values(&[2005], ..)
             .unwrap();
-    }
-    for name in ["TREE_LAI", "TREE_SAI"] {
-        file.add_variable::<f64>(name, &["LAI_year", "month"])
+        file.add_variable::<i32>("URBAN_TYPE", &[])
             .unwrap()
-            .put_values(&[3.0; 12], (.., ..))
+            .put_values(&[6], ..)
             .unwrap();
-    }
-    for name in ["ALB_ROOF", "ALB_WALL", "ALB_IMPROAD", "ALB_PERROAD"] {
-        file.add_variable::<f64>(name, &["numsolar", "numrad"])
-            .unwrap()
-            .put_values(&[0.2; 4], (.., ..))
-            .unwrap();
-    }
-    for name in [
-        "CV_ROOF",
-        "CV_WALL",
-        "CV_IMPROAD",
-        "TK_ROOF",
-        "TK_WALL",
-        "TK_IMPROAD",
-    ] {
-        file.add_variable::<f64>(name, &["ulev"])
-            .unwrap()
-            .put_values(&[1.0; 10], ..)
-            .unwrap();
-    }
-    file.close().unwrap();
+        for (name, value) in [
+            ("LUCY_id", 4.0),
+            ("PCT_Tree", 22.5),
+            ("URBAN_TREE_TOP", 5.7),
+            ("PCT_Water", 0.0),
+            ("WT_ROOF", 0.445),
+            ("HT_ROOF", 6.4),
+            ("WTROAD_PERV", 0.685),
+            ("BUILDING_HLR", 0.225),
+            ("POP_DEN", 1000.0),
+            ("EM_ROOF", 0.91),
+            ("EM_WALL", 0.9),
+            ("EM_IMPROAD", 0.95),
+            ("EM_PERROAD", 0.95),
+            ("T_BUILDING_MAX", 297.65),
+            ("T_BUILDING_MIN", 290.65),
+            ("THICK_ROOF", 0.015),
+            ("THICK_WALL", 0.02),
+        ] {
+            file.add_variable::<f64>(name, &[])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        for name in ["TREE_LAI", "TREE_SAI"] {
+            file.add_variable::<f64>(name, &["LAI_year", "month"])
+                .unwrap()
+                .put_values(&[3.0; 12], (.., ..))
+                .unwrap();
+        }
+        for name in ["ALB_ROOF", "ALB_WALL", "ALB_IMPROAD", "ALB_PERROAD"] {
+            file.add_variable::<f64>(name, &["numsolar", "numrad"])
+                .unwrap()
+                .put_values(&[0.2; 4], (.., ..))
+                .unwrap();
+        }
+        for name in [
+            "CV_ROOF",
+            "CV_WALL",
+            "CV_IMPROAD",
+            "TK_ROOF",
+            "TK_WALL",
+            "TK_IMPROAD",
+        ] {
+            file.add_variable::<f64>(name, &["ulev"])
+                .unwrap()
+                .put_values(&[1.0; 10], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
 
-    let data = read_single_point_urban_data(&path, LandCoverScheme::Igbp, HydraulicModel::Campbell)
+        let data = read_single_point_urban_data(
+            &path,
+            LandCoverScheme::Igbp,
+            HydraulicModel::Campbell,
+            active,
+        )
         .unwrap();
-    assert_eq!(data.common.land_class, 13);
-    assert_eq!(data.common.canopy_height_m, 0.0);
-    assert_eq!(data.urban_type, 6);
-    assert_eq!(data.lucy_region_id, 4);
-    assert_eq!(data.roof_albedo, [0.2; 4]);
-    assert_eq!(
-        data.monthly.for_year(2005, 12, true, 2000, 2020).unwrap(),
-        (3.0, 3.0)
-    );
-    std::fs::remove_file(path).unwrap();
+        assert_eq!(data.common.soil_texture, if active { 8 } else { 0 });
+        if !active {
+            assert!(read_single_point_urban_data(
+                &path,
+                LandCoverScheme::Igbp,
+                HydraulicModel::Campbell,
+                true
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("soil_texture"));
+        }
+        assert_eq!(data.common.land_class, 13);
+        assert_eq!(data.common.canopy_height_m, 0.0);
+        assert_eq!(data.urban_type, 6);
+        assert_eq!(data.lucy_region_id, 4);
+        assert_eq!(data.roof_albedo, [0.2; 4]);
+        assert_eq!(
+            data.monthly.for_year(2005, 12, true, 2000, 2020).unwrap(),
+            (3.0, 3.0)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]
@@ -428,7 +485,13 @@ fn lucy_reader_transposes_runtime_component_region_arrays_once() {
     std::fs::remove_file(path).unwrap();
 }
 
-fn write_surface(path: &Path, layers: usize, vgm: bool, with_ba_beta: bool) {
+fn write_surface(
+    path: &Path,
+    layers: usize,
+    vgm: bool,
+    with_ba_beta: bool,
+    with_soil_texture: bool,
+) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("soil", layers).unwrap();
     for (name, value) in [
@@ -450,6 +513,9 @@ fn write_surface(path: &Path, layers: usize, vgm: bool, with_ba_beta: bool) {
             .unwrap();
     }
     for (name, value) in [("IGBP_classification", 4), ("soil_texture", 8)] {
+        if name == "soil_texture" && !with_soil_texture {
+            continue;
+        }
         file.add_variable::<i32>(name, &[])
             .unwrap()
             .put_values(&[value], ..)
@@ -515,6 +581,7 @@ fn single_point_static_kernels_match_the_upstream_fortran_reference() {
         root.join("landdata/srfdata.nc"),
         LandCoverScheme::Igbp,
         HydraulicModel::VanGenuchten,
+        true,
     )
     .unwrap();
     let soil = derive_soil_parameters(&surface.soil_layers, &[0], 10, HydraulicModel::VanGenuchten)

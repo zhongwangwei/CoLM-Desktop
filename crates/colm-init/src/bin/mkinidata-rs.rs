@@ -186,6 +186,7 @@ struct SpatialNamelistRun {
     urban: Option<SpatialUrbanRun>,
     use_bedrock: bool,
     use_topmodel: bool,
+    use_soil_texture: bool,
     topmodel_method: i32,
     vic_parameter_file: Option<PathBuf>,
     vic_grid_file: Option<PathBuf>,
@@ -210,11 +211,14 @@ fn run_spatial_namelist(
     grid_river: bool,
     catch_lateral: bool,
 ) -> Result<()> {
-    let run = spatial_namelist_run(namelist)?;
+    let mut run = spatial_namelist_run(namelist)?;
     ensure!(
         !high_resolution.enabled || run.subgrid == SpatialSubgrid::PftOrPc,
         "--hyperspectral is currently supported only by spatial PFT/PC cold starts"
     );
+    if catch_lateral {
+        run.use_soil_texture = true;
+    }
     match run.subgrid {
         SpatialSubgrid::Lct => {
             let land_cover = land_cover.context(
@@ -327,6 +331,7 @@ fn write_spatial_urban_namelist_block(
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
+    static_config.use_soil_texture = run.use_soil_texture;
     static_config.topmodel_method = run.topmodel_method;
     static_config.vic_parameters = spatial_run_vic_source(run);
     static_config.use_simple_terrain = run.use_simple_terrain;
@@ -405,6 +410,7 @@ fn write_spatial_lct_namelist_block(
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
+    static_config.use_soil_texture = run.use_soil_texture;
     static_config.topmodel_method = run.topmodel_method;
     static_config.vic_parameters = spatial_run_vic_source(run);
     static_config.use_simple_terrain = run.use_simple_terrain;
@@ -445,7 +451,7 @@ fn write_spatial_pft_namelist_block(
     block: &str,
     high_resolution: &HighResolutionOptions,
 ) -> Result<()> {
-    let static_config = SpatialPftStaticConfig::new(
+    let mut static_config = SpatialPftStaticConfig::new(
         namelist,
         &run.landdata,
         &run.restart,
@@ -453,6 +459,7 @@ fn write_spatial_pft_namelist_block(
         run.land_cover_year,
         block,
     );
+    static_config.force_soil_texture = run.use_soil_texture;
     let files = write_spatial_pft_constant_restarts(
         static_config,
         run.use_bedrock,
@@ -601,7 +608,9 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
     };
     let requested_dynamic_lake = namelist_bool(&document, "DEF_USE_Dynamic_Lake", false)?;
     let variably_saturated_flow = namelist_bool(&document, "DEF_USE_VariablySaturatedFlow", true)?;
-    let dynamic_lake = if namelist_path_is_set(&document, "DEF_CatchmentMesh_data")? {
+    let runoff_scheme = namelist_i32(&document, "DEF_Runoff_SCHEME", 3)?;
+    let configured_catch_lateral = namelist_path_is_set(&document, "DEF_CatchmentMesh_data")?;
+    let dynamic_lake = if configured_catch_lateral {
         true
     } else {
         requested_dynamic_lake && variably_saturated_flow
@@ -620,18 +629,17 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         subgrid,
         urban,
         use_bedrock: namelist_bool(&document, "DEF_USE_BEDROCK", false)?,
-        use_topmodel: namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0,
+        use_topmodel: runoff_scheme == 0,
+        use_soil_texture: runoff_scheme == 3 || configured_catch_lateral,
         topmodel_method: namelist_i32(&document, "DEF_TOPMOD_method", 0)?,
-        vic_parameter_file: if namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 1
+        vic_parameter_file: if runoff_scheme == 1
             && !namelist_bool(&document, "DEF_VIC_OPT", false)?
         {
             Some(resolve_vic_parameter_file(&document, false)?)
         } else {
             None
         },
-        vic_grid_file: if namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 1
-            && namelist_bool(&document, "DEF_VIC_OPT", false)?
-        {
+        vic_grid_file: if runoff_scheme == 1 && namelist_bool(&document, "DEF_VIC_OPT", false)? {
             Some(resolve_vic_parameter_file(&document, true)?)
         } else {
             None
@@ -841,6 +849,7 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
     );
     config.compression_level = compression_level;
     config.use_topmodel = topmodel;
+    config.use_soil_texture = !topmodel && vic_scalar_path.is_none() && vic_grid_path.is_none();
     config.topmodel_method = topmodel_method;
     config.vic_parameters = vic_grid_path
         .as_deref()
@@ -944,6 +953,9 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
         vic_scalar_path.is_none() || vic_grid_path.is_none(),
         "--vic-params and --vic-grid are mutually exclusive"
     );
+    if config.use_topmodel || vic_scalar_path.is_some() || vic_grid_path.is_some() {
+        config.use_soil_texture = false;
+    }
     config.vic_parameters = vic_grid_path
         .as_deref()
         .map(VicParameterSource::GridFile)
@@ -1477,6 +1489,76 @@ mod tests {
         assert_eq!(run.observations.soil, Some(soil));
         assert_eq!(run.observations.snow, Some(snow));
         assert_eq!(run.observations.water_table, Some(water_table));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spatial_case_soil_texture_gate_tracks_runoff_scheme_and_catchment_path() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-soiltexture-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        for (scheme, expected) in [(0, false), (1, false), (2, false), (3, true)] {
+            let extra = if scheme == 1 {
+                format!(
+                    " DEF_dir_runtime='{}'
+",
+                    root.join("runtime").display()
+                )
+            } else {
+                String::new()
+            };
+            std::fs::write(
+                &namelist,
+                format!(
+                    "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_Runoff_SCHEME={scheme}
+{extra}/
+",
+                    root.display()
+                ),
+            )
+            .unwrap();
+            let run = spatial_namelist_run(&namelist).unwrap();
+            assert_eq!(run.use_soil_texture, expected, "scheme {scheme}");
+        }
+
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_Runoff_SCHEME=0
+ DEF_CatchmentMesh_data='catch.nc'
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+        let run = spatial_namelist_run(&namelist).unwrap();
+        assert!(run.use_soil_texture);
+
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_Runoff_SCHEME=0
+ DEF_CatchmentMesh_data=123
+/
+",
+                root.display()
+            ),
+        )
+        .unwrap();
+        let err = spatial_namelist_run(&namelist).unwrap_err();
+        assert!(err.to_string().contains("DEF_CatchmentMesh_data"), "{err}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

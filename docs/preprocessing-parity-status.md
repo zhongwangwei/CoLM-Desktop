@@ -36,9 +36,9 @@ deterministic values, not claimed parity with original uninitialized memory.
 Source-derived fixtures cover selected-file reads, scalar/grid values, missing
 sentinels, runtime-path derivation and direct-driver validation. Old behavior fails
 the new selected-source/value regressions. Evidence: `/tmp/colm-runoff-init-fix/`.
-The existing unconditional `soiltext/BVIC` handling still differs from original
-scheme-dependent initialization and remains open; these bounded repairs do not
-close every runoff branch or replace original-runtime trajectory comparisons.
+The subsequent soil-texture source-gate repair below removes the remaining
+unconditional texture dependency; it does not replace original-runtime trajectory
+comparisons across every runoff branch.
 
 The combined surface/runoff/SNICAR changes pass **690 integrated tests**, all-target
 Clippy, downstream CLI/kernel checks, scoped formatting and release builds of
@@ -92,6 +92,54 @@ consumption. All-target Clippy, downstream CLI/kernel checks, scoped formatting
 and release builds pass. Logs: `/tmp/colm-restart-compression-validation/`.
 The full migration/scientific gates below remain open.
 
+## Runoff-dependent soil texture is now selected at the source boundary
+
+Original initialization reads soil texture only for `CatchLateralFlow` or
+`DEF_Runoff_SCHEME == 3` (Simple VIC). Native spatial LCT/PFT/PC/urban adapters
+now preserve that distinction, including the full namelist `--catch-lateral`
+override and configured catchment path. Scheme `0` TOPMODEL, `1` full VIC and
+`2` XinAnJiang no longer require an unused `soiltexture_patches` input.
+Active texture reads remain strict and retain original class normalization and
+`BVIC_USDA` mapping. Direct static configs default to Simple VIC requirements.
+
+Single-point surface production and initialization now agree: site materialization
+requires and publishes scalar `soil_texture` only for scheme `3`; all common,
+PFT/PC and urban static/cold readers receive that same condition. Existing active
+raw fallback is retained. **Spatial surface production remains unconditional**,
+as in original `MKSRFDATA`; only its later initializer read is conditional.
+
+Constant restart inventory remains unchanged: `soiltext` and `BVIC` are always
+written. For inactive branches Rust writes texture class `0` and `BVIC_USDA[0]`
+(`1.0`). These are explicitly deterministic unused metadata, **not claimed
+parity with uninitialized original Fortran memory**.
+
+Pre-edit frozen `mkinidata-rs` fails on an otherwise complete copied site without
+texture for all three inactive schemes; scheme `3` correctly requires it.
+Evidence: `/tmp/colm-runoff-soil-driver/before-results.json`. Separate site
+readiness/publication regressions fail before their producer repair:
+`/tmp/colm-runoff-soil-surface/red-before-site-gate.log`. Tests cover missing and
+present inactive inputs, required active inputs, normalization, explicit and
+configured catchment forcing, and common/PFT/urban readers. Original contract
+maps: `/tmp/colm-runoff-soil-contract.md` and
+`/tmp/colm-runoff-soil-surface-contract.md`.
+
+The ignored local integration fixture exercises schemes `0/1/2` through actual
+Rust surface generation and initialization, then runs the unchanged Fortran
+kernel. It checks omission of the site scalar and preservation of constant
+restart metadata. Successful consumption is not an all-scheme trajectory-parity
+claim; the full scientific gates remain open.
+
+Final validation passes **713 integrated tests**, all-target Clippy,
+downstream CLI/kernel checks, scoped formatting and release builds. Logs:
+`/tmp/colm-runoff-soil-validation/` (first-pass lint failure retained).
+The fresh release initializer accepts all three inactive missing-texture cases,
+rejects active missing texture, and preserves all **3 files / 136 decoded arrays**
+bitwise in the active Simple VIC control:
+`/tmp/colm-runoff-soil-driver/after-results.json`. The release
+`colm-preprocess-rs` also completes all four schemes with the expected site
+scalar presence and restart metadata:
+`/tmp/colm-runoff-soil-driver/pipeline-results.json`.
+
 ## SNICAR remains unported and now fails explicitly
 
 Namelist-driven cold starts now reject `DEF_USE_SNICAR=.true.` rather than
@@ -133,9 +181,9 @@ Clippy, downstream checks and scoped formatting pass. Evidence:
 real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
-rounding or absent test coverage: runoff-dependent soil-texture/BVIC
-handling is still incomplete; SNICAR optical initialization, urban-only masking, external-lake options and
-TRACER/BGC wetland initialization still require implementation or explicit scope
+rounding or absent test coverage: SNICAR optical initialization, urban-only
+masking, external-lake options and TRACER/BGC wetland initialization still require
+implementation or explicit scope
 guards. These remain open and preclude an all-feature migration claim. The main
 LCT/PFT/PC numerical comparisons above do not establish these optional branches.
 

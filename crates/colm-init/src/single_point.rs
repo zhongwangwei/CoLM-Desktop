@@ -69,6 +69,8 @@ pub struct SinglePointStaticConfig<'a> {
     pub tuning: RestartTuning,
     pub use_bedrock: bool,
     pub use_topmodel: bool,
+    /// Whether runoff initialization consumes soil texture (Simple VIC by default).
+    pub use_soil_texture: bool,
     pub topmodel_method: i32,
     pub vic_parameters: VicParameterSource<'a>,
 }
@@ -92,6 +94,7 @@ impl<'a> SinglePointStaticConfig<'a> {
             tuning: RestartTuning::default(),
             use_bedrock: false,
             use_topmodel: false,
+            use_soil_texture: true,
             topmodel_method: 0,
             vic_parameters: VicParameterSource::None,
         }
@@ -222,6 +225,7 @@ impl SinglePointStaticRun {
         config.use_bedrock = self.use_bedrock;
         config.tuning = self.tuning;
         config.use_topmodel = self.runoff_scheme == 0;
+        config.use_soil_texture = self.runoff_scheme == 3;
         config.topmodel_method = self.topmodel_method;
         config.vic_parameters = if self.runoff_scheme == 1 {
             self.vic_grid_file
@@ -433,6 +437,7 @@ pub fn write_single_point_urban_constant_restart(
         lucy_runtime,
         urban_config,
         lucy_enabled,
+        config.use_soil_texture,
     )?;
     write_urban_constant_restart_from_initialized(restart_dir, config, &initialized)
 }
@@ -444,8 +449,10 @@ fn prepare_single_point_urban(
     lucy_runtime: Option<&Path>,
     urban_config: UrbanConfig,
     lucy_enabled: bool,
+    use_soil_texture: bool,
 ) -> Result<SinglePointUrbanStatic> {
-    let data = read_single_point_urban_data(surface, land_cover, hydraulic_model)?;
+    let data =
+        read_single_point_urban_data(surface, land_cover, hydraulic_model, use_soil_texture)?;
     let region_id = [data.lucy_region_id];
     let population_density = [data.population_density];
     let lucy = if lucy_enabled {
@@ -582,6 +589,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             urban.runtime_dir.as_deref(),
             urban.geometry,
             urban.lucy_enabled,
+            run.static_run.static_config().use_soil_texture,
         )?;
         let common = write_single_point_constant_restart_from_surface(
             &initialized.data.common,
@@ -627,6 +635,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         &run.static_run.surface,
         run.static_run.land_cover,
         run.static_run.hydraulic_model,
+        run.static_run.static_config().use_soil_texture,
     )?;
     ensure!(
         patch_type(run.static_run.land_cover, surface.land_class)? == 0,
@@ -695,7 +704,12 @@ fn write_single_point_constant_restart_with_canopy(
     canopy_override: Option<(&[f64], &[f64])>,
     hyperspectral_albedo: Option<&[f64]>,
 ) -> Result<ConstantRestartFiles> {
-    let surface = read_single_point_surface(surface, config.land_cover, config.hydraulic_model)?;
+    let surface = read_single_point_surface(
+        surface,
+        config.land_cover,
+        config.hydraulic_model,
+        config.use_soil_texture,
+    )?;
     write_single_point_constant_restart_from_surface(
         &surface,
         restart_dir,
@@ -751,7 +765,16 @@ fn write_single_point_constant_restart_from_surface(
         canopy.patch_top_m.clone_from_slice(top);
         canopy.patch_bottom_m.clone_from_slice(bottom);
     }
-    let mut texture = vec![surface.soil_texture; patches];
+    // Inactive runoff keeps the unconditional restart schema, but does not
+    // consume texture. Class 0 and BVIC_USDA[0] are Rust-defined placeholders.
+    let mut texture = vec![
+        if config.use_soil_texture {
+            surface.soil_texture
+        } else {
+            0
+        };
+        patches
+    ];
     normalize_soil_texture(&mut texture);
     let bvic = texture
         .iter()
@@ -979,6 +1002,7 @@ pub fn write_single_point_cold_time_restarts(
         &run.static_run.surface,
         config.land_cover,
         config.hydraulic_model,
+        config.use_soil_texture,
     )?;
     let kind = patch_type(config.land_cover, surface.land_class)?;
     let dimensions = TimeRestartDimensions::default();
@@ -1179,6 +1203,7 @@ fn write_single_point_urban_cold_time_restarts(
         urban.runtime_dir.as_deref(),
         urban.geometry,
         urban.lucy_enabled,
+        config.use_soil_texture,
     )?;
     let surface = &initialized.data.common;
     let kind = patch_type(config.land_cover, surface.land_class)?;
@@ -1445,6 +1470,7 @@ fn write_single_point_pft_cold_time_restarts(
         &run.static_run.surface,
         config.land_cover,
         config.hydraulic_model,
+        config.use_soil_texture,
     )?;
     let kind = patch_type(config.land_cover, surface.land_class)?;
     ensure!(
