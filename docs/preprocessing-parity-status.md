@@ -787,3 +787,53 @@ SOLO_PFT/WMO diagnostic gate passes, and isolated initialization from the unchan
 original surface passes five files / 164 variables (148 bitwise). None of these
 checks resolves the nonlinear soil-fit failures or the remaining real-data and
 control-mode acceptance matrix.
+
+## Solver rounding and callback parity
+
+The original production `MOD_Utils.o` and unchanged `SW_VG_dist` callback expose
+several single-rounding contracts that the literal Rust port did not preserve:
+QR rotations, residual square reductions, selected VGM residual/Jacobian products,
+and the LM actual reduction. These now use explicit `f64::mul_add` in the original
+operand order. The original `-fdefault-real-8` build also promotes D-literal
+rotation angles and rejected-step shrink expressions to REAL16. Narrow compensated
+`f64` calculations retain their low parts; no Fortran call, new arithmetic backend,
+new dependency, altered fit limit, or relaxed tolerance is used in production.
+
+Independent original-reference checks now establish:
+
+- 128 QR solves and 1,269,577 rotation-angle samples agree bitwise.
+- Two million rejected-step shrink checks agree after the original 0.1 clamp;
+  96 un-clamped, extremely small ratios differ by one ULP below that clamp.
+- Both captured real soil problems (44 and 358 source cells) reproduce the entire
+  original callback trajectory: 152 and 991 calls respectively, including trial
+  parameters, residuals, Jacobians, and final fitted parameters, all bitwise.
+- Checked-in regressions cover the primitive rounding contracts and a compact
+  two-cell original VGM callback/full-fit golden. Reverting only the actual-reduction
+  FMA makes that full-fit test fail. This is not a proof for every nonlinear fit.
+
+Artifacts are in `/tmp/colm-lm-rotation-audit/`,
+`/tmp/colm-lm-trajectory-audit/`, and `/tmp/colm-lm-qr-audit/`.
+The numerical changes are validated independently of the still-in-progress
+Catchment geometry repair, using a HEAD source snapshot plus only `minpack.rs`
+and `soil.rs`, with a separate Cargo target directory. Cross-worktree shared
+Cargo artifacts are not accepted as final verification evidence.
+
+The clean-target `rust-full-lm-verified/` run completes surface generation,
+initialization, and two unchanged original runtime steps (all exit 0). All 1,479
+surface file schemas agree except the already-excluded `create_time` attribute;
+all 15,922,348 memberships and all pixel-axis values agree exactly. Its scientific
+comparison remains **not passed** at combined `atol=rtol=1e-12`:
+
+- Surface: 48 / 242 fields still fail, now 20,441 out-of-tolerance values versus
+  75,333 in `rust-full-lm-qr/`. The largest `psi_s_l8` error is 4.053671; reducing
+  the failure count has not uniformly reduced every maximum error.
+- Post-two-step restart: 35 / 190 fields fail, 16,418 values versus 159,123 before;
+  maximum `gs0sun` error remains 3.655042. These are independently generated
+  surfaces, not an isolated initializer parity test.
+- 406 targeted/unit/data/reference/native tests pass, along with all-target
+  Clippy, downstream checks, formatting, and a fresh release build. Historical
+  LCT/PFT/PC/WMO/urban synthetic comparisons still pass (257 files / 616 variables).
+
+The remaining Campbell callback rounding and other soil-fit outliers are active
+scientific gates. The Catchment same-input geometry/control matrix is separately
+in progress; neither that branch nor full preprocessing migration is declared done.

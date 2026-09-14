@@ -108,7 +108,9 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
             nfev += 1;
             let fnorm1 = enorm(&wa4);
             let actred = if 0.1 * fnorm1 < fnorm {
-                1.0 - (fnorm1 / fnorm).powi(2)
+                // Original MOD_Utils contracts the square and subtraction.
+                let ratio = fnorm1 / fnorm;
+                (-ratio).mul_add(ratio, 1.0)
             } else {
                 -1.0
             };
@@ -130,7 +132,7 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
                 let mut temp = if actred >= 0.0 {
                     0.5
                 } else {
-                    0.5 * dirder / (dirder + 0.5 * actred)
+                    lm_step_shrink(dirder, actred)
                 };
                 if 0.1 * fnorm1 >= fnorm || temp < 0.1 {
                     temp = 0.1;
@@ -169,6 +171,30 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
             }
         }
     }
+}
+
+fn lm_step_shrink(mut dirder: f64, mut actred: f64) -> f64 {
+    // For a rejected step, dirder <= 0 and actred < 0. The original D
+    // literals promote .5*d/(d+.5*a) to REAL16. Use d/(2*d+a), retaining
+    // the denominator's low part and the quotient residual in f64. Tiny
+    // ratios are subsequently clamped to 0.1 by lmder, as in the original.
+    // Exact power-of-two scaling keeps the compensated residual normal.
+    const SCALE: f64 = f64::from_bits((1023 + 512) << 52);
+    let largest = dirder.abs().max(actred.abs());
+    if largest > SCALE {
+        dirder /= SCALE;
+        actred /= SCALE;
+    } else if largest < 1.0 / SCALE {
+        dirder *= SCALE;
+        actred *= SCALE;
+    }
+    let twice = dirder * 2.0;
+    let denominator = twice + actred;
+    let virtual_a = denominator - twice;
+    let low = (twice - (denominator - virtual_a)) + (actred - virtual_a);
+    let q = dirder / denominator;
+    let residual = (-q).mul_add(denominator, dirder) - q * low;
+    q + residual / denominator
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -369,20 +395,21 @@ fn qrsolv(
                 }
                 let (sine, cosine) = if r[k * n + k].abs() < sdiag[k].abs() {
                     let cotan = r[k * n + k] / sdiag[k];
-                    let sine = 0.5 / (0.25 + 0.25 * cotan * cotan).sqrt();
+                    let sine = qrsolv_rotation_coefficient(cotan);
                     (sine, sine * cotan)
                 } else {
                     let tangent = sdiag[k] / r[k * n + k];
-                    let cosine = 0.5 / (0.25 + 0.25 * tangent * tangent).sqrt();
+                    let cosine = qrsolv_rotation_coefficient(tangent);
                     (cosine * tangent, cosine)
                 };
-                r[k * n + k] = cosine * r[k * n + k] + sine * sdiag[k];
-                let temp = cosine * wa[k] + sine * qtbpj;
-                qtbpj = -sine * wa[k] + cosine * qtbpj;
+                // MOD_Utils fuses the cosine product after rounding the sine product.
+                r[k * n + k] = cosine.mul_add(r[k * n + k], sine * sdiag[k]);
+                let temp = cosine.mul_add(wa[k], sine * qtbpj);
+                qtbpj = cosine.mul_add(qtbpj, -sine * wa[k]);
                 wa[k] = temp;
                 for row in k + 1..n {
-                    let temp = cosine * r[row * n + k] + sine * sdiag[row];
-                    sdiag[row] = -sine * r[row * n + k] + cosine * sdiag[row];
+                    let temp = cosine.mul_add(r[row * n + k], sine * sdiag[row]);
+                    sdiag[row] = cosine.mul_add(sdiag[row], -sine * r[row * n + k]);
                     r[row * n + k] = temp;
                 }
             }
@@ -409,6 +436,21 @@ fn qrsolv(
     }
 }
 
+fn qrsolv_rotation_coefficient(t: f64) -> f64 {
+    debug_assert!(t.is_finite() && t.abs() <= 1.0);
+    // Original 0.5D/sqrt(0.25D + 0.25D*t**2) rounds t*t in f64, then
+    // promotes sqrt/div to REAL16. Recover the low-part residual in f64
+    // instead of rounding 1+q and its reciprocal sqrt independently.
+    let q = t * t;
+    let u = 1.0 + q;
+    let low = q - (u - 1.0);
+    let y = 1.0 / u.sqrt();
+    let yy = y * y;
+    let yy_error = y.mul_add(y, -yy);
+    let residual = (-u).mul_add(yy, 1.0) - u * yy_error - low * yy;
+    (0.5 * y).mul_add(residual, y)
+}
+
 fn enorm(values: &[f64]) -> f64 {
     // Production Fortran contracts SUM(x**2); retain its single rounding.
     values
@@ -428,6 +470,95 @@ fn enorm_column(a: &[f64], m: usize, n: usize, start: usize, column: usize) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_step_shrink_matches_original_mixed_precision() {
+        // MOD_Utils::lmder evaluates .5D*d/(d+.5D*a) in REAL16. First
+        // four pairs are rejected steps from the original soil trajectories.
+        for (dirder, actred, expected) in [
+            (0xbf60988fda3e6a11, 0xbf73274f3cc3fd10, 0x3fcdb5ec8a80b114),
+            (0xbf2b68c51b146f1b, 0xbee140ca2335dc3f, 0x3fdf61f764480f30),
+            (0xbf87b1d699ddf93a, 0xbfb1f979a6099eb9, 0x3fbfba3df9bf4e1b),
+            (0xbf4a8416f2ae0619, 0xbf6140bf622c2420, 0x3fcbcf624c3a3828),
+            (0xffe0000000000000, 0xffe0000000000000, 0x3fd5555555555555),
+            (0x8000000000000001, 0x8000000000000002, 0x3fd0000000000000),
+            (0x8000000000000000, 0xbff0000000000000, 0x0000000000000000),
+        ] {
+            assert_eq!(
+                lm_step_shrink(f64::from_bits(dirder), f64::from_bits(actred)).to_bits(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn damped_qr_angle_matches_original_mixed_precision_rounding() {
+        // Independent original expression at -O2 -fdefault-real-8: t*t is
+        // rounded in f64 before the D literals promote sqrt/div to REAL16.
+        for (input, expected) in [
+            (0x0000000000000000, 0x3ff0000000000000),
+            (0x0000000000000001, 0x3ff0000000000000),
+            (0x8000000000000000, 0x3ff0000000000000),
+            (0x3ff0000000000000, 0x3fe6a09e667f3bcd),
+            (0xbff0000000000000, 0x3fe6a09e667f3bcd),
+            (0x3fefffffffffffff, 0x3fe6a09e667f3bcd),
+            (0x3fe8000000000000, 0x3fe999999999999a),
+            (0x3fe0000000000000, 0x3fec9f25c5bfedd9),
+            (0x3fb999999999999a, 0x3fefd7583bc82e29),
+            (0x3e40000000000000, 0x3ff0000000000000),
+            (0x3e3fffffffffffff, 0x3ff0000000000000),
+            (0x1e60000000000000, 0x3ff0000000000000),
+        ] {
+            assert_eq!(
+                qrsolv_rotation_coefficient(f64::from_bits(input)).to_bits(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn damped_qr_rotations_retain_original_single_rounding() {
+        // Original MOD_Utils::qrsolv linked unchanged at -O2 -fdefault-real-8.
+        // This fixture isolates fused rotation updates; it does not prove the
+        // remaining REAL16-literal rotation-angle expressions match in f64.
+        let mut r = [
+            0xc0114057a409ce54,
+            0xc004302890adc765,
+            0x3fe36101dc4d04f0,
+            0x0000000000000000,
+            0xc0136789aee71586,
+            0x4012dbd94697ebec,
+            0x0000000000000000,
+            0x0000000000000000,
+            0xbfe57b3c083344c0,
+        ]
+        .map(f64::from_bits);
+        let diag = [0x4007487c4975f1a4, 0x4004be34f78500ef, 0x3ff0d17c1d1cec5e].map(f64::from_bits);
+        let qtb = [0xbfdb491fec382330, 0xbff8a16b9d3c8b0e, 0x3ff4fc98dc78ca9a].map(f64::from_bits);
+        let mut x = [0.0; 3];
+        let mut sdiag = [0.0; 3];
+        qrsolv(&mut r, 3, &[1, 2, 0], &diag, &qtb, &mut x, &mut sdiag);
+        let expected = [
+            0xbfc0394faa01fcfd,
+            0xbf9351ca77309cdf,
+            0x3fc759ca86a499a6,
+            0xc014210616548d98,
+            0xc014864f3b12598f,
+            0x400a20f957729a29,
+            0xc0114057a409ce54,
+            0xc004302890adc765,
+            0x3fe36101dc4d04f0,
+            0xc0014d50382e9524,
+            0xc0136789aee71586,
+            0x4012dbd94697ebec,
+            0x3fe09bc6d6608a6e,
+            0x40122551d895d0d1,
+            0xbfe57b3c083344c0,
+        ];
+        for (actual, expected) in x.iter().chain(&sdiag).chain(&r).zip(expected) {
+            assert_eq!(actual.to_bits(), expected);
+        }
+    }
 
     #[test]
     fn norms_retain_original_square_sum_single_rounding() {

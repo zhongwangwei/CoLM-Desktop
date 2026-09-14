@@ -471,18 +471,23 @@ impl LeastSquaresProblem for VgmProblem {
             // Upstream adds two independently accumulated SUMs.
             let mut retention = 0.0;
             let mut conductivity = 0.0;
-            let fitted = x[0]
-                + (self.phi - x[0]) * (1.0 + (x[1] * pressure).powf(x[2])).powf(1.0 / x[2] - 1.0);
+            let fitted = (self.phi - x[0]).mul_add(
+                (1.0 + (x[1] * pressure).powf(x[2])).powf(1.0 / x[2] - 1.0),
+                x[0],
+            );
             let base = 1.0 + (x[1] * pressure).powf(x[2]);
             let term = 1.0 - (1.0 - 1.0 / base).powf(1.0 - 1.0 / x[2]);
-            let fitted_log = x[3].log10()
-                + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
+            let fitted_log = ((1.0 / x[2] - 1.0) * self.l_patch)
+                .mul_add(base.log10(), x[3].log10())
                 + term.powi(2).log10();
             for &[observed, observed_log_k] in
                 &self.samples[index * self.cells..(index + 1) * self.cells]
             {
-                retention += ((fitted - observed) / self.phi).powi(2);
-                conductivity += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
+                let theta_residual = (fitted - observed) / self.phi;
+                let conductivity_residual =
+                    (fitted_log - observed_log_k) / self.conductivity.log10();
+                retention = theta_residual.mul_add(theta_residual, retention);
+                conductivity = conductivity_residual.mul_add(conductivity_residual, conductivity);
             }
             output[index] = retention + conductivity;
         }
@@ -506,13 +511,13 @@ impl LeastSquaresProblem for VgmProblem {
             let q_alpha_power = base.powf(1.0 / x[2] - 2.0);
             let q_n_factor =
                 (1.0 - x[2]) * z_to_n * z.ln() / (x[2] * base) - base.ln() / x[2].powi(2);
-            let fitted_theta = x[0] + (self.phi - x[0]) * q;
+            let fitted_theta = (self.phi - x[0]).mul_add(q, x[0]);
             let u = 1.0 - 1.0 / base;
             let power = 1.0 - 1.0 / x[2];
             let u_power = u.powf(power);
             let term = 1.0 - u_power;
-            let fitted_log = x[3].log10()
-                + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
+            let fitted_log = ((1.0 / x[2] - 1.0) * self.l_patch)
+                .mul_add(base.log10(), x[3].log10())
                 + term.powi(2).log10();
             let log_alpha = self.l_patch * (1.0 - x[2]) * alpha_power * pressure_power
                 / (base * std::f64::consts::LN_10)
@@ -523,9 +528,11 @@ impl LeastSquaresProblem for VgmProblem {
                     * pressure_power
                     * base.powi(-2)
                     / (term * std::f64::consts::LN_10);
-            let log_n = -self.l_patch * base.log10() / x[2].powi(2)
-                + (1.0 / x[2] - 1.0) * self.l_patch * z_to_n * z.log10() / base
-                - 2.0 * u_power / term * (u.log10() / x[2].powi(2) + power * z.log10() / base);
+            let log_n_leading = -self.l_patch * base.log10() / x[2].powi(2)
+                + (1.0 / x[2] - 1.0) * self.l_patch * z_to_n * z.log10() / base;
+            let log_n_product = 2.0 * u_power / term;
+            let log_n_inner = u.log10() / x[2].powi(2) + power * z.log10() / base;
+            let log_n = log_n_product.mul_add(-log_n_inner, log_n_leading);
             let mut retention = [0.0; 3];
             let mut conductivity = [0.0; 3];
             for &[observed_theta, observed_log_k] in
@@ -534,14 +541,14 @@ impl LeastSquaresProblem for VgmProblem {
                 let theta_residual = (fitted_theta - observed_theta) / self.phi;
                 let conductivity_residual = (fitted_log - observed_log_k) / log_conductivity;
                 retention[0] += 2.0 * theta_residual * (1.0 - q) / self.phi;
-                retention[1] += 2.0 * theta_residual / self.phi
+                let alpha_derivative_prefix = 2.0 * theta_residual / self.phi
                     * (self.phi - x[0])
                     * (1.0 - x[2])
                     * q_alpha_power
-                    * alpha_power
-                    * pressure_power;
-                retention[2] +=
-                    2.0 * theta_residual / self.phi * (self.phi - x[0]) * q * q_n_factor;
+                    * alpha_power;
+                retention[1] = alpha_derivative_prefix.mul_add(pressure_power, retention[1]);
+                let n_derivative_prefix = 2.0 * theta_residual / self.phi * (self.phi - x[0]) * q;
+                retention[2] = n_derivative_prefix.mul_add(q_n_factor, retention[2]);
                 conductivity[0] += 2.0 * conductivity_residual * log_alpha / log_conductivity;
                 conductivity[1] += 2.0 * conductivity_residual * log_n / log_conductivity;
                 conductivity[2] += 2.0 * conductivity_residual
@@ -604,8 +611,11 @@ impl LeastSquaresProblem for CampbellProblem {
             for &[observed, observed_log_k] in
                 &self.samples[index * self.cells..(index + 1) * self.cells]
             {
-                retention += ((fitted - observed) / self.phi).powi(2);
-                conductivity += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
+                let theta_residual = (fitted - observed) / self.phi;
+                let conductivity_residual =
+                    (fitted_log - observed_log_k) / self.conductivity.log10();
+                retention = theta_residual.mul_add(theta_residual, retention);
+                conductivity = conductivity_residual.mul_add(conductivity_residual, conductivity);
             }
             output[index] = retention + conductivity;
         }
@@ -956,6 +966,110 @@ mod tests {
             0.5,
         );
         assert_eq!(problem.samples[1][0].to_bits(), 0x3fe0cdb06b4c933b);
+    }
+
+    #[test]
+    fn curve_residual_sums_match_original_fused_square_accumulation() {
+        // /tmp/colm-soil-callback-golden/original_callback_golden.f90
+        // compiled with: gfortran -O2 -fdefault-real-8 -ffree-line-length-none.
+        // Both original SW_VG_dist and SW_CB_dist return 3F96E05AEA7035C1;
+        // separate square-then-add reductions return 3F96E05AEA7035C2.
+        let first_delta = f64::from_bits(0x3fbd_9541_8fc4_c914);
+        let second_delta = f64::from_bits(0x3fb8_4497_ddfc_4485);
+        let observed = [[1.0 - first_delta, 1.0], [1.0 - second_delta, 1.0]];
+
+        let mut vgm_samples = Vec::with_capacity(VGM_PRESSURES.len() * observed.len());
+        for pressure in VGM_PRESSURES {
+            let x = [1.0, 1.0, 2.0, 1.0];
+            let base = 1.0 + (x[1] * pressure).powf(x[2]);
+            let term = 1.0 - (1.0 - 1.0 / base).powf(1.0 - 1.0 / x[2]);
+            let fitted_log =
+                x[3].log10() + (1.0 / x[2] - 1.0) * 0.5 * base.log10() + term.powi(2).log10();
+            vgm_samples.extend(observed.iter().map(|sample| [sample[0], fitted_log]));
+        }
+        let vgm = VgmProblem {
+            samples: vgm_samples,
+            cells: observed.len(),
+            phi: 1.0,
+            conductivity: 10.0,
+            l_patch: 0.5,
+        };
+        let mut residual = [0.0; 24];
+        assert!(vgm.residual(&[1.0, 1.0, 2.0, 1.0], &mut residual));
+        assert_eq!(residual[7].to_bits(), 0x3f96_e05a_ea70_35c1);
+
+        let campbell = CampbellProblem {
+            samples: observed.repeat(CAMPBELL_PRESSURES.len()),
+            cells: observed.len(),
+            phi: 1.0,
+            conductivity: 10.0,
+        };
+        let mut residual = [0.0; 17];
+        assert!(campbell.residual(&[-60.0, 1.0, 10.0], &mut residual));
+        assert_eq!(residual[0].to_bits(), 0x3f96_e05a_ea70_35c1);
+    }
+
+    #[test]
+    fn vgm_callback_matches_original_fma_operand_contract() {
+        // Golden generated by the unchanged SW_VG_dist callback using the first
+        // two cells from /tmp/colm-original-fit-input-probe/vgm_l5_e207390_c14_inputs.txt:
+        // /tmp/colm-lm-qr-audit/subset_callback_original.f90
+        // compiled in /tmp with: gfortran -J/tmp/colm-lm-qr-audit -O2 -fdefault-real-8 -ffree-line-length-none.
+        fn bits(hex: &str) -> Vec<u64> {
+            hex.split_whitespace()
+                .map(|value| u64::from_str_radix(value, 16).expect("valid hex golden"))
+                .collect()
+        }
+
+        let theta_bits = bits("3FDC52E742187508 3FDC894426602D16 3FDC33E883C0E8B2 3FDC6945D3AC9A60 3FDC02CCCC4F99E9 3FDC36AF4B0F16F5 3FDB9469923A1B10 3FDBC540DF9C6B17 3FDB2287B4600C20 3FDB508DA35F09A9 3FDAB35C5017DF89 3FDADEE609BBAE8E 3FDA4958B26FED68 3FDA72BA9572AE62 3FD9E55CBAEECBD8 3FDA0CE20237FA9F 3FD9878D84B78FCC 3FD9AD769340095A 3FD8DD80AFC9A0BF 3FD900CAFC170006 3FD8484495FD1048 3FD869890EA01823 3FD7C49298F52174 3FD7E43D482A0D6E 3FD74F85545B97A1 3FD76DE417DDB329 3FD6E6B774360CA1 3FD70403B7861FCE 3FD632761520A2C0 3FD64E154F7DCB68 3FD4FFA786BF3E87 3FD518CF4B3043C1 3FD488A7457BFB61 3FD4A0F3887EE48A 3FD258E38E7CBECD 3FD26D96239D4CCF 3FD13BF102912BA3 3FD14EED72C6257F 3FCB4BE70CFD0BFD 3FCB6612929BF1D2 3FC7F30CFF72C828 3FC806974A1DC6BB 3FC747EFE62B3D33 3FC75A047A12459D 3FC430D502C1F7C4 3FC43B5CF4D6A927 3FC1A7A7BEC340B8 3FC1AA9039F2DC64");
+        let conductivity_bits = bits("4022B1CA4110DAD3 4022C857805EF7E6 4015E1C5A7298982 4015DF23A2B15361 400DAF2DC421B7E5 400D8F0FC312AFF3 40010869175BBDB4 4000DF364145977F 3FF61B1272970D3A 3FF5D03EDDCE761A 3FEEAA3886BF0DB6 3FEE2B968B98263F 3FE63FE1EC4E732A 3FE5D6DE05D23FBE 3FE0B29C33B16993 3FE05BD80347959E 3FD9BDB80BD17751 3FD92DED9DF321AA 3FD0466FACE91F39 3FCFC3C9EA7910EB 3FC5ED95E0521D1F 3FC55CEF0170CA13 3FBEFEE54011DE19 3FBE28F75A7875DD 3FB6BF26D12B0D46 3FB61CFBE0C68B56 3FB13522AD62B06E 3FB0B77DB7709425 3FA524B27BA3F055 3FA485557BCC68F8 3F91E2986C4C1A85 3F91574E34BAAADD 3F8943263978DC1F 3F887D0B87597075 3F60F4CF1BA4CD83 3F606FEE763CEAB7 3F4817F6EBD0F9C5 3F475E7CE9C9C78D 3EE40DE5236B614A 3EE386E0C50B7F7A 3EA02EE9A926879B 3E9F9CE44D617FE3 3E8F39EFCBC2C065 3E8E85C7CDD715A6 3E28FE2F7F7F1CE9 3E288B00C6BDA308 3D98386E02209226 3D97F15E720C2662");
+        let samples = theta_bits
+            .into_iter()
+            .zip(conductivity_bits)
+            .map(|(theta, conductivity)| {
+                [f64::from_bits(theta), f64::from_bits(conductivity).log10()]
+            })
+            .collect::<Vec<_>>();
+        let problem = VgmProblem {
+            samples,
+            cells: 2,
+            phi: f64::from_bits(0x3FDE0D4832268437),
+            conductivity: f64::from_bits(0x402CF82E61C674FD),
+            l_patch: f64::from_bits(0x3FE0000000000000),
+        };
+        let x = [
+            f64::from_bits(0x3FC92287134C083B),
+            f64::from_bits(0x3F87A58C255A465A),
+            f64::from_bits(0x3FF4ACF39CBD580B),
+            f64::from_bits(0x402CF82E61C674FD),
+        ];
+        let mut residual = [0.0; 24];
+        let mut jacobian = [0.0; 96];
+        assert!(problem.residual(&x, &mut residual));
+        assert!(problem.jacobian(&x, &mut jacobian));
+
+        assert_eq!(
+            residual.map(f64::to_bits).as_slice(),
+            bits("3F911BFE24EBF3F7 3F8B2310F7DAE3D8 3F872BBFCB341A0E 3F83D1D520EB2F08 3F833E276431B3F2 3F8408F813A8F3D5 3F858BDB9536EBA6 3F876BC89A2A3A92 3F897468F6BF253F 3F8D92D964C7E823 3F90B8B6D5B9C99A 3F9277B1ADE7C564 3F94056680870A19 3F95661B219DC93B 3F97B6D868D0907C 3F9B700EA7655B2C 3F9CCCA85A82EEC4 3FA15009300D369A 3FA2A63D33118393 3FA6A9DD5D5C61CB 3FA886D9A735BADC 3FA8E73C5C878260 3FAAA816FE083A99 3FAC0FA77D8533DC").as_slice(),
+            "VGM residual FMA operands must match original callback bits"
+        );
+        assert_eq!(
+            jacobian.map(f64::to_bits).as_slice(),
+            bits("3F35281DE4F5F1F2 40009870DF6A4789 BFD786A9EA6AA1F2 BF7F4DA50F3F065A 3F655F7AF8BFFDA5 400A9E2845B7CF28 BFD8F5906D899478 BF796B9F22CB0C6C 3F7A856B73237D9A 400DF95F6FF6CEEF BFD6A04A079BBC69 BF74D5E200C05AC4 3F9095BF5870275A 400B19AF67F32079 BFD0C474E7F58759 BF6C3A45E70E9DA2 3F9C50E25ACF062E 40026ADB0F877A83 BFC6F24D31C0C742 BF62053AB2891ADE 3FA4902A1E6F7619 3FED00565C022EC8 BFBCA23BE798120E BF53B087AC87F62E 3FAB441368925A79 BFE32167F0DF790E BFAE4442EAB4D392 BF39272BD61913B7 3FB10C18FB38DCD8 C000D0F649156E9B BF93679501DA339D 3F336D72D5DB6787 3FB476EE79711C61 C00C6471E8E5392C 3F8657D208708094 3F4C7628F477BA9C 3FBB28C1FA4BD93E C018B30529DD4DD0 3FA8503B14A03348 3F5D01ADD2978A89 3FC0C45DEB88ECF1 C020D0C68BCF8DD3 3FB01D3D58B26688 3F63FF9F41939B6D 3FC3C30713B897E8 C0248E33620F6C3E 3FB0B4745D95CC8D 3F68322FD5070F71 3FC68F2B9C4D7496 C027AD90A067789B 3FAE6B833C38AE90 3F6B798006B6A514 3FC92AE39E35CB9C C02A4A9841C4D378 3FA8DE4C2588F220 3F6E1596D42032E1 3FCDDF33B003EF8F C02E59557442DF55 3F9394599552F528 3F70F6B820834819 3FD33D0F7812F5DB C031F608BB016120 BFACC9E82BAC8D10 3F736D9830977032 3FD500F380E13D83 C032D0FF886E17D9 BFB79390F5942FFC 3F7426419FA0FCB9 3FDDFE06C7429FCC C0354B6FF677F0D7 BFD2AEE79B3C1D94 3F76292810C4E368 3FE17F083E088B96 C035B6C1DBF20B64 BFD9E505AD019731 3F767E37B1BAE38D 3FEA8A6C85651AC1 C0345740B72603E2 BFE8AD7D54CF5A94 3F756B232D8932B0 3FEF4EB9E89F5F60 C0329AF4559DA9F9 BFEDC386AB10494A 3F73FA9F940A6D0C 3FF026E409666CAA C0322C8F5CB3EFD4 BFEEB7AB7D1BA546 3F739B935A12F85C 3FF28E93C19A6406 C02F529E7603C744 BFF14F039A6EEE4F 3F715425BDB6D4FF 3FF4AAAE1BA85DBF C028B742A3EA7559 BFF2090904ECD08A 3F6C11BF28E9394F").as_slice(),
+            "VGM Jacobian FMA operands must match original callback bits"
+        );
+        let mut fit = x;
+        assert!(lmder(&problem, &mut fit, 24));
+        assert_eq!(
+            fit.map(f64::to_bits),
+            [
+                0x3FB8D9AC55556D3F,
+                0x3F8C3353C983A9BF,
+                0x3FF4964CCB0C2C2E,
+                0x40335F93306E0B1A,
+            ],
+            "VGM lmder final fit must match original callback plus MOD_Utils bits"
+        );
     }
 
     #[test]

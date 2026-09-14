@@ -152,3 +152,10 @@ source-copy aggregation and grass/bare PFT rules. PFT vectors use their native
 `pctshared`, distinct from surface `pct_pfts`. Original-source WMO execution,
 initializer-only parity, explicit unsupported combinations and remaining
 scientific gaps are recorded in [the WMO audit](preprocessing-parity-status.md#grid-based-wmo-surface-and-pft-initialization).
+
+The soil solver now preserves additional original FMA operand order and uses
+narrow compensated f64 calculations for the original mixed-precision QR-angle
+and rejected-step expressions. Two real captured fits reproduce the entire
+original iteration trajectory bitwise; this does not establish all-field soil
+parity. See [the solver audit](preprocessing-parity-status.md#solver-rounding-and-callback-parity)
+for regression evidence and remaining completion gates.
