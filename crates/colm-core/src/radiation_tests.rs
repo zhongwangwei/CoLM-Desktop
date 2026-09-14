@@ -75,9 +75,41 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
 #[test]
 fn lct_two_stream_matches_all_original_pearl_river_outputs() {
     // Original ebe6de9 MOD_Albedo twostream, -O2 -fdefault-real-8.
-    // Stored LCT patches e110_n25:826, e110_n20:1087, e105_n20:1504.
+    // Stored LCT patches e110_n25:826, e110_n20:1075/1087, e105_n20:1504.
     // Output order: alb(2x2), tran(2x3), ssun(2x2), ssha(2x2), thermk/extkb/extkd.
     for (class, lai, sai, coszen, visible, nir, exact, expected) in [
+        (
+            8,
+            0.21468035864032103,
+            0.2457523580306496,
+            0.17552658878122934,
+            0.08,
+            0.16,
+            true,
+            [
+                0x3fafb6b1b44f80bc,
+                0x3fb00d38f6a616db,
+                0x3fcf40049a90b3f7,
+                0x3fc96ee3bffb36c9,
+                0x3fa9ceaa6639ca67,
+                0x3fe4d980b7ef8e88,
+                0x3fd1710ed5535ff1,
+                0x3fcb4d5c3d1d86de,
+                0x3fe751a8cc35d79f,
+                0x3fd1710ed5535ff1,
+                0x3fe4190c4d053806,
+                0x3fc942a7b013cc6b,
+                0x3fd4b66d0d3dfa7d,
+                0x3fbc19b5883ac6c9,
+                0x3f8a6e5015ea0a45,
+                0x3fc1fcb92fb6f2af,
+                0x3f98b6290eee9f9d,
+                0x3fb4546691464167,
+                0x3fe42c2d84bcad5c,
+                0x4006967d3db067c9,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
         (
             13,
             0.016731545999066972,

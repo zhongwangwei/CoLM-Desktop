@@ -6,6 +6,29 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## LCT linked arithmetic follow-up
+
+Two further contractions in scalar LCT `two_stream` now match the linked original
+object: `p1` and the direct-sunlit absorption bracket. PFT and hyperspectral
+siblings, optical-depth calculation, singular guards and controls are unchanged.
+The fourth actual Pearl River case (`e110_n20:1075`, class 8) checks all 21
+outputs bitwise, alongside the three existing actual cases and singular/nearby
+regressions. Both isolated defects have RED/GREEN evidence; source review approves.
+All **672 integrated tests**, Clippy, downstream checks and scoped formatting pass.
+Evidence: `/tmp/colm-lct-directsun-fix/` and
+`/tmp/colm-lct-matched-first-divergence/`.
+
+The frozen `rust-native-surface-lct-linked-fma-zqu4d8da/` run under
+`/tmp/colm-spatial-parity.Mh0VZX/` completes fresh initialization and the unchanged
+original two-step runtime. It reuses independent Rust surface data (not a new
+surface run); every copied NetCDF hash matches its prior source, retaining all
+242 bitwise surface fields and exact stored topology. All 13 cold files / 742
+variable instances pass and schemas agree. Post-step `zwt` failures decrease
+from six to **two values**, maximum `1.746947118214104e-11` (previously
+`1.185755538896105e-10`). History failures decrease from 165 to **138 values**:
+`f_fseng` 5, `f_zerr` 71, and `f_zwt` 62. The scientific gate remains open at the
+unchanged combined `atol=rtol=1e-12`; process exit 0 is not parity acceptance.
+
 ## PFT initializer scalar follow-up
 
 The original compiled PFT-to-patch height and SAI sums retain ordered FMA.

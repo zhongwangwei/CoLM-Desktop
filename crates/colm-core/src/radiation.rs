@@ -585,7 +585,7 @@ fn two_stream(
         let power2 = (direct_extinction * leaf_stem_area).min(50.0);
         let s1 = (-power1).exp();
         let s2 = (-power2).exp();
-        let p1 = be + zmu * psi;
+        let p1 = zmu.mul_add(psi, be);
         let p2 = (-zmu).mul_add(psi, be);
         let p3 = be + zmu * direct_extinction;
         let p4 = be - zmu * direct_extinction;
@@ -660,8 +660,8 @@ fn two_stream(
                         * (leaf_stem_area * s2 * s2 - (1.0 - s2 * s2) / (2.0 * direct_extinction)),
             )
         };
-        sunlit_absorption[band][0] =
-            (1.0 - scattering) * (1.0 - s2 + (eup_direct + edown_direct) / zmu);
+        let direct_sunlit_bracket = (eup_direct + edown_direct).mul_add(1.0 / zmu, 1.0 - s2);
+        sunlit_absorption[band][0] = direct_sunlit_bracket * (1.0 - scattering);
         // Preserve the linked original's fused products and evaluation order.
         let absorption_scale = (1.0 - scattering) / zmu;
         let reflected_direct = ground[band][1].mul_add(transmission_direct, ground[band][0] * s2)
