@@ -108,6 +108,43 @@ fn spatial_pft_time_requires_bgc_for_crop_before_materializing_any_restart() {
 }
 
 #[test]
+fn spatial_pft_runoff_scheme_one_uses_shared_vic_source_resolution() {
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    std::fs::create_dir_all(&root).unwrap();
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\n DEF_Runoff_SCHEME=1\n /\n").unwrap();
+    let error = write_spatial_pft_constant_restarts(
+        SpatialPftStaticConfig::new(&namelist, &landdata, &restart, "test", 2005, "w180_s90"),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("DEF_file_VIC_para"), "{error}");
+    assert!(!restart.exists());
+
+    let runtime = root.join("runtime");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_Runoff_SCHEME=1\n DEF_VIC_OPT=.true.\n DEF_dir_runtime='{}'\n /\n",
+            runtime.display()
+        ),
+    )
+    .unwrap();
+    let error = write_spatial_pft_constant_restarts(
+        SpatialPftStaticConfig::new(&namelist, &landdata, &restart, "test", 2005, "w180_s90"),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert!(!error.to_string().contains("DEF_file_VIC_OPT"), "{error}");
+    assert!(!restart.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn shared_crop_ranges_keep_ordered_natural_and_cft_owners() {
     let mut patches = crate::spatial_static::Patches {
         class: vec![1, 12, 12],

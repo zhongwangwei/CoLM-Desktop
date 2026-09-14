@@ -68,3 +68,72 @@ fn native_mkinidata_binary_writes_the_complete_common_restart_family() {
     file.close().unwrap();
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn snicar_cold_entries_reject_before_reading_or_writing_restart_data() {
+    let directory = std::env::temp_dir().join(format!("colm-init-snicar-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let namelist = directory.join("case.nml");
+    let landdata = directory.join("landdata");
+    let restart = directory.join("restart");
+    for subgrid in ["LCT", "PFT", "PC"] {
+        std::fs::write(&namelist, format!(
+            "&nl_colm\n DEF_CASE_NAME='snow'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT={}\n DEF_USE_PFT={}\n DEF_USE_PC={}\n DEF_USE_SNICAR=.true.\n/\n",
+            directory.display(),
+            if subgrid == "LCT" { ".true." } else { ".false." },
+            if subgrid == "PFT" { ".true." } else { ".false." },
+            if subgrid == "PC" { ".true." } else { ".false." },
+        )).unwrap();
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_mkinidata-rs"))
+            .arg(&namelist)
+            .current_dir(&directory)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success());
+        assert!(stderr.contains("DEF_USE_SNICAR"), "{subgrid}: {stderr}");
+        assert!(!directory.join("snow/restart").exists());
+        if subgrid != "LCT" {
+            let mut direct = std::process::Command::new(env!("CARGO_BIN_EXE_mkinidata-rs"));
+            direct
+                .arg("spatial-pft")
+                .arg(&namelist)
+                .arg(&landdata)
+                .arg(&restart)
+                .args(["snow", "2005", "w180_s90"])
+                .current_dir(&directory);
+            // Static-only still reaches its normal missing-landdata error.
+            let result = direct.output().unwrap();
+            assert!(!result.status.success());
+            assert!(!String::from_utf8_lossy(&result.stderr).contains("DEF_USE_SNICAR"));
+            let result = direct
+                .args(["--cold-time", "2000-001-00000"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(!result.status.success());
+            assert!(
+                stderr.contains("DEF_USE_SNICAR"),
+                "direct {subgrid}: {stderr}"
+            );
+            assert!(!restart.exists());
+            let config = colm_init::SpatialPftStaticConfig::new(
+                &namelist, &landdata, &restart, "snow", 2005, "w180_s90",
+            );
+            let error = colm_init::write_spatial_pft_cold_time_restarts(
+                colm_init::SpatialPftTimeConfig::new(
+                    config,
+                    colm_init::RestartDate {
+                        year: 2000,
+                        julian_day: 1,
+                        seconds: 0,
+                    },
+                ),
+            )
+            .expect_err("direct PFT/PC library cold starts must also reject SNICAR");
+            assert!(error.to_string().contains("DEF_USE_SNICAR"), "{error}");
+            assert!(!restart.exists());
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

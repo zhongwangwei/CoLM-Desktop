@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use colm_core::ColdStartGroundAlbedo;
 
 use crate::{
-    crop_cold_start_from_tuning, LakeState, SinglePointSurfaceData, SnowState, SoilReflectance,
-    PFT_BGC_F64_VARIABLES,
+    crop_cold_start_from_tuning, LakeState, SinglePointSurfaceData, SnowState, SoilLayerInput,
+    SoilReflectance, PFT_BGC_F64_VARIABLES,
 };
 
 use super::*;
@@ -655,7 +655,7 @@ fn pc_mixed_bare_and_vegetated_patch_matches_original_cold_radiation() {
 }
 
 #[test]
-fn cold_namelist_accepts_snicar_and_keeps_existing_state_sources() {
+fn cold_namelist_rejects_snicar_and_keeps_non_snicar_state_sources() {
     let directory =
         std::env::temp_dir().join(format!("colm-init-namelist-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -685,12 +685,135 @@ fn cold_namelist_accepts_snicar_and_keeps_existing_state_sources() {
         ),
     )
     .unwrap();
+    assert!(single_point_static_run_from_namelist(&namelist, None, None).is_ok());
+    let error = single_point_cold_start_run_from_namelist(&namelist, None, None)
+        .expect_err("SNICAR snow optics must not silently use non-SNICAR initialization");
+    assert!(error.to_string().contains("DEF_USE_SNICAR"), "{error}");
+    let text = std::fs::read_to_string(&namelist).unwrap();
+    std::fs::write(
+        &namelist,
+        text.replace("DEF_USE_SNICAR=.true.", "DEF_USE_SNICAR=.false."),
+    )
+    .unwrap();
     let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
     assert_eq!(run.soil_initial_state, Some(soil));
     assert_eq!(run.snow_initial_state, Some(snow));
     assert_eq!(run.water_table_initial_state, Some(wtd));
     assert!(run.variably_saturated_flow);
     assert_eq!(run.snow_cover_exponent, 0.75);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-init-single-vic-output-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let surface = single_point_restart_surface();
+    let scalar = root.join("vic_para.txt");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&scalar, "header\n0.12 13.0 0.34 0.45 2.6\n").unwrap();
+    let mut config = SinglePointStaticConfig::new(
+        "case",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.vic_parameters = VicParameterSource::ScalarFile(&scalar);
+    let files = write_single_point_constant_restart_from_surface(
+        &surface,
+        root.join("restart-scalar"),
+        config,
+        None,
+        None,
+    )
+    .unwrap();
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_f64(&block, "vic_b_infilt"), [0.12]);
+    assert_eq!(values_f64(&block, "vic_Dsmax"), [13.0]);
+    assert_eq!(values_f64(&block, "vic_Ds"), [0.34]);
+    assert_eq!(values_f64(&block, "vic_Ws"), [0.45]);
+    assert_eq!(values_f64(&block, "vic_c"), [2.6]);
+    drop(block);
+
+    let grid = root.join("vic_para.nc");
+    write_single_point_vic_grid(&grid, 0.22, None);
+    let mut grid_config = config;
+    grid_config.vic_parameters = VicParameterSource::GridFile(&grid);
+    let files = write_single_point_constant_restart_from_surface(
+        &surface,
+        root.join("restart-grid"),
+        grid_config,
+        None,
+        None,
+    )
+    .unwrap();
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(values_f64(&block, "vic_b_infilt"), [0.22]);
+    assert_eq!(values_f64(&block, "vic_Dsmax"), [14.0]);
+    assert_eq!(values_f64(&block, "vic_Ds"), [0.4]);
+    assert_eq!(values_f64(&block, "vic_Ws"), [0.7]);
+    assert_eq!(values_f64(&block, "vic_c"), [2.0]);
+    drop(block);
+
+    let missing_grid = root.join("vic_missing.nc");
+    write_single_point_vic_grid(&missing_grid, -9999.0, Some(-9999.0));
+    grid_config.vic_parameters = VicParameterSource::GridFile(&missing_grid);
+    assert!(write_single_point_constant_restart_from_surface(
+        &surface,
+        root.join("restart-missing"),
+        grid_config,
+        None,
+        None,
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn single_point_runoff_namelist_forces_topmodel_method_zero_and_resolves_vic_paths() {
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-single-runoff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let surface = directory.join("output/CN-Cng/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    let mut file = netcdf::create(&surface).unwrap();
+    file.add_variable::<i32>("IGBP_classification", &[])
+        .unwrap()
+        .put_values(&[10], ..)
+        .unwrap();
+    file.close().unwrap();
+    let namelist = directory.join("case.nml");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_Runoff_SCHEME=0\n DEF_TOPMOD_method=2\n /\n",
+            directory.join("output").display()
+        ),
+    )
+    .unwrap();
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(run.static_run.runoff_scheme, 0);
+    assert_eq!(run.static_run.topmodel_method, 0);
+
+    let runtime = directory.join("runtime");
+    std::fs::write(
+        &namelist,
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='CN-Cng'\n DEF_dir_output='{}'\n DEF_dir_runtime='{}'\n DEF_Runoff_SCHEME=1\n DEF_VIC_OPT=.true.\n /\n",
+            directory.join("output").display(),
+            runtime.display()
+        ),
+    )
+    .unwrap();
+    let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    assert_eq!(
+        run.static_run.vic_grid_file,
+        Some(runtime.join("vic/vic_para.nc"))
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -846,6 +969,10 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             hydraulic_model: HydraulicModel::VanGenuchten,
             use_bedrock: false,
             tuning: RestartTuning::default(),
+            runoff_scheme: 3,
+            topmodel_method: 0,
+            vic_parameter_file: None,
+            vic_grid_file: None,
         },
         subgrid: SinglePointSubgrid::Pft,
         date: RestartDate {
@@ -1257,6 +1384,84 @@ const TUNING_FIELDS: &[&str] = &[
 
 fn variable_names(file: &netcdf::File) -> Vec<String> {
     file.variables().map(|variable| variable.name()).collect()
+}
+
+fn single_point_restart_surface() -> SinglePointSurfaceData {
+    SinglePointSurfaceData {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+        land_class: 10,
+        canopy_height_m: 12.0,
+        lake_depth_m: 10.0,
+        albedo: SoilReflectance {
+            saturated_visible: 0.1,
+            dry_visible: 0.2,
+            saturated_near_infrared: 0.3,
+            dry_near_infrared: 0.4,
+        },
+        soil_texture: 8,
+        elevation_m: 100.0,
+        elevation_std_m: 5.0,
+        slope_ratio: 1.2,
+        bedrock_depth_cm: None,
+        soil_layers: (0..8)
+            .map(|_| SoilLayerInput {
+                vf_quartz: 0.3,
+                vf_gravels: 0.1,
+                vf_om: 0.02,
+                vf_sand: 0.4,
+                vf_clay: 0.2,
+                wf_gravels: 0.1,
+                wf_sand: 0.4,
+                wf_clay: 0.2,
+                wf_om: 0.02,
+                om_density: 62.0,
+                bulk_density: 1200.0,
+                theta_s: 0.45,
+                psi_s_cm: -10.0,
+                lambda: 0.2,
+                theta_r: 0.05,
+                alpha_vgm: 0.02,
+                l_vgm: 0.5,
+                n_vgm: 1.5,
+                k_s_cm_day: 86.4,
+                csol: 1.2e6,
+                k_solids: 2.0,
+                tksatu: 1.5,
+                tksatf: 2.2,
+                tkdry: 0.2,
+                ba_alpha: 0.24,
+                ba_beta: 18.0,
+            })
+            .collect(),
+    }
+}
+
+fn write_single_point_vic_grid(path: &std::path::Path, selected_b: f64, missing: Option<f64>) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[0.0, 1.0], ..)
+        .unwrap();
+    for (name, values) in [
+        ("b", vec![selected_b, 9.0]),
+        ("DsM", vec![14.0, 9.0]),
+        ("Ds", vec![0.4, 9.0]),
+        ("Ws", vec![0.7, 9.0]),
+    ] {
+        let mut variable = file.add_variable::<f64>(name, &["lat", "lon"]).unwrap();
+        if let Some(missing) = missing {
+            variable.put_attribute("missing_value", missing).unwrap();
+        }
+        variable.put_values(&values, (.., ..)).unwrap();
+    }
+    file.close().unwrap();
 }
 
 fn dimension_lengths(file: &netcdf::File) -> Vec<(String, usize)> {

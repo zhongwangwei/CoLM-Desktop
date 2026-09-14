@@ -35,8 +35,14 @@ use crate::{
     read_single_point_hyperspectral_albedo, read_single_point_monthly_vegetation,
     read_single_point_pft_data, read_single_point_snow_depth, read_single_point_soil_profile,
     read_single_point_surface, read_single_point_urban_data, read_single_point_water_table,
-    read_urban_lucy_raw_data, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
-    write_constant_restart, write_pft_constant_restart, write_pft_time_restart, write_time_restart,
+    read_urban_lucy_raw_data,
+    runtime::nearest_cell_indices,
+    spatial_static::{
+        constant_vic_fields, read_vic_scalar_file, resolve_vic_parameter_file, topmodel_defaults,
+        TopmodelSurfaceFields, VicParameterSource, VicParameters, VicSurfaceFields,
+    },
+    write_bgc_time_restart, write_cold_start_bgc_constant_restart, write_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, write_time_restart,
     write_urban_constant_restart, BgcColdStartInput, BgcConstantRestartFiles, BgcPftColdStartInput,
     BgcTimeRestartFile, CalendarTime, ColdSoilState, ColdStartRadiation, ColdStartSoilInput,
     ConstantRestartFiles, ConstantRestartInput, CropColdStartState, CropManagementConfig,
@@ -46,8 +52,8 @@ use crate::{
     RestartDimensions, RestartPatchFields, RestartTuning, SnowAerosolFields, SnowSoilRestartFields,
     SoilAlbedo, SoilField, SoilHydraulicModel, TimeHyperspectralFields, TimeLakeFields,
     TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
-    UrbanConfig, UrbanConstantRestartInput, UrbanInput, UrbanLucyInput, UrbanLucyState,
-    UrbanRadiationInput, UrbanState, UrbanThermalFields, MISSING,
+    TopmodelFields, UrbanConfig, UrbanConstantRestartInput, UrbanInput, UrbanLucyInput,
+    UrbanLucyState, UrbanRadiationInput, UrbanState, UrbanThermalFields, MISSING,
 };
 
 /// Immutable single-point arguments that affect the common constant restart files.
@@ -60,6 +66,9 @@ pub struct SinglePointStaticConfig<'a> {
     pub hydraulic_model: HydraulicModel,
     pub tuning: RestartTuning,
     pub use_bedrock: bool,
+    pub use_topmodel: bool,
+    pub topmodel_method: i32,
+    pub vic_parameters: VicParameterSource<'a>,
 }
 
 impl<'a> SinglePointStaticConfig<'a> {
@@ -79,6 +88,9 @@ impl<'a> SinglePointStaticConfig<'a> {
             hydraulic_model,
             tuning: RestartTuning::default(),
             use_bedrock: false,
+            use_topmodel: false,
+            topmodel_method: 0,
+            vic_parameters: VicParameterSource::None,
         }
     }
 }
@@ -99,6 +111,10 @@ pub struct SinglePointStaticRun {
     pub hydraulic_model: HydraulicModel,
     pub use_bedrock: bool,
     pub tuning: RestartTuning,
+    pub runoff_scheme: i32,
+    pub topmodel_method: i32,
+    pub vic_parameter_file: Option<PathBuf>,
+    pub vic_grid_file: Option<PathBuf>,
 }
 
 /// Runtime subgrid representation selected by CoLM's mutually exclusive flags.
@@ -200,6 +216,21 @@ impl SinglePointStaticRun {
         );
         config.use_bedrock = self.use_bedrock;
         config.tuning = self.tuning;
+        config.use_topmodel = self.runoff_scheme == 0;
+        config.topmodel_method = self.topmodel_method;
+        config.vic_parameters = if self.runoff_scheme == 1 {
+            self.vic_grid_file
+                .as_deref()
+                .map(VicParameterSource::GridFile)
+                .or_else(|| {
+                    self.vic_parameter_file
+                        .as_deref()
+                        .map(VicParameterSource::ScalarFile)
+                })
+                .unwrap_or(VicParameterSource::None)
+        } else {
+            VicParameterSource::None
+        };
         config
     }
 }
@@ -255,6 +286,22 @@ pub fn single_point_static_run_from_namelist(
         hydraulic_model,
         use_bedrock,
         tuning: RestartTuning::from_document(&document)?,
+        runoff_scheme: optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3),
+        topmodel_method: optional_i32(&document, "DEF_TOPMOD_method")?.unwrap_or(0),
+        vic_parameter_file: if optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3) == 1
+            && !optional_bool_or(&document, "DEF_VIC_OPT", false)?
+        {
+            Some(resolve_vic_parameter_file(&document, false)?)
+        } else {
+            None
+        },
+        vic_grid_file: if optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3) == 1
+            && optional_bool_or(&document, "DEF_VIC_OPT", false)?
+        {
+            Some(resolve_vic_parameter_file(&document, true)?)
+        } else {
+            None
+        },
     })
 }
 
@@ -285,6 +332,9 @@ pub fn single_point_cold_start_run_from_namelist(
     let julian_day = month_day_to_julian(year, month, day)?;
     if optional_bool_or(&document, "DEF_USE_LULCC", false)? {
         static_run.land_cover_year = year;
+    }
+    if static_run.runoff_scheme == 0 {
+        static_run.topmodel_method = 0;
     }
     ensure!(
         (0..=86_400).contains(&seconds),
@@ -652,6 +702,10 @@ fn write_single_point_constant_restart_from_surface(
     canopy_override: Option<(&[f64], &[f64])>,
     hyperspectral_albedo: Option<&[f64]>,
 ) -> Result<ConstantRestartFiles> {
+    ensure!(
+        !config.use_topmodel || matches!(config.vic_parameters, VicParameterSource::None),
+        "DEF_Runoff_SCHEME cannot enable TOPMODEL and VIC parameters at the same time"
+    );
     let patches = match canopy_override {
         Some((top, bottom)) => {
             ensure!(
@@ -730,7 +784,11 @@ fn write_single_point_constant_restart_from_surface(
             )
         })
         .transpose()?;
-    let zeros = vec![0.0; patches];
+    let topmodel = config
+        .use_topmodel
+        .then(|| single_point_topmodel(config.topmodel_method, patches))
+        .transpose()?;
+    let vic = single_point_vic_parameters(config.vic_parameters, surface, patches)?;
     let mask = vec![true; patches];
     let hyperspectral_albedo = hyperspectral_albedo
         .map(|values| {
@@ -763,11 +821,11 @@ fn write_single_point_constant_restart_from_surface(
                 },
                 bvic: &bvic,
                 soil_texture: &texture,
-                vic_b_infilt: &zeros,
-                vic_dsmax: &zeros,
-                vic_ds: &zeros,
-                vic_ws: &zeros,
-                vic_c: &zeros,
+                vic_b_infilt: &vic.b_infilt,
+                vic_dsmax: &vic.dsmax,
+                vic_ds: &vic.ds,
+                vic_ws: &vic.ws,
+                vic_c: &vic.c,
                 elevation_mean_m: &elevation,
                 elevation_std_m: &elevation_std,
                 slope_ratio: &slope,
@@ -778,12 +836,107 @@ fn write_single_point_constant_restart_from_surface(
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
             bedrock: bedrock.as_ref(),
-            topmodel: None,
+            topmodel: topmodel.as_ref().map(|fields| TopmodelFields {
+                topographic_index: &fields.topographic_index,
+                saturated_fraction_max: &fields.saturated_fraction_max,
+                saturated_fraction_decay: &fields.saturated_fraction_decay,
+                alpha_twi: &fields.alpha_twi,
+                chi_twi: &fields.chi_twi,
+                mu_twi: &fields.mu_twi,
+            }),
             terrain: None,
             simple_terrain: None,
             hyperspectral_albedo: hyperspectral_albedo.as_deref(),
         },
     )
+}
+
+fn single_point_topmodel(method: i32, patches: usize) -> Result<TopmodelSurfaceFields> {
+    ensure!(
+        method == 0,
+        "SinglePoint forces DEF_TOPMOD_method to 0 for TOPMODEL runoff"
+    );
+    Ok(topmodel_defaults(patches))
+}
+
+fn single_point_vic_parameters(
+    source: VicParameterSource<'_>,
+    surface: &crate::SinglePointSurfaceData,
+    patches: usize,
+) -> Result<VicSurfaceFields> {
+    let parameters = match source {
+        VicParameterSource::None => VicParameters {
+            b_infilt: 0.0,
+            dsmax: 0.0,
+            ds: 0.0,
+            ws: 0.0,
+            c: 0.0,
+        },
+        VicParameterSource::ScalarFile(path) => read_vic_scalar_file(path)?,
+        VicParameterSource::GridFile(path) => {
+            read_single_point_vic_grid(path, surface.latitude_degrees, surface.longitude_degrees)?
+        }
+    };
+    Ok(constant_vic_fields(parameters, patches))
+}
+
+fn read_single_point_vic_grid(path: &Path, latitude: f64, longitude: f64) -> Result<VicParameters> {
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open gridded VIC parameter file {}", path.display()))?;
+    let (lat, lon) = nearest_cell_indices(&file, latitude, longitude)?;
+    let value = |name: &str| -> Result<f64> {
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{name} is absent from {}", path.display()))?;
+        let dimensions = variable.dimensions();
+        ensure!(
+            dimensions.len() == 2 && dimensions[0].name() == "lat" && dimensions[1].name() == "lon",
+            "VIC grid {name} must use lat, lon dimensions"
+        );
+        let values = variable
+            .get_values::<f64, _>((lat..lat + 1, lon..lon + 1))
+            .or_else(|_| {
+                variable
+                    .get_values::<f32, _>((lat..lat + 1, lon..lon + 1))
+                    .map(|values| values.into_iter().map(f64::from).collect())
+            })?;
+        let value = values[0];
+        ensure!(
+            grid_value_is_valid(&variable, value),
+            "VIC grid {name} contains a missing or non-finite value"
+        );
+        Ok(value)
+    };
+    Ok(VicParameters {
+        b_infilt: value("b")?,
+        ws: value("Ws")?,
+        ds: value("Ds")?,
+        dsmax: value("DsM")?,
+        c: 2.0,
+    })
+}
+
+fn grid_value_is_valid(variable: &netcdf::Variable<'_>, value: f64) -> bool {
+    value.is_finite()
+        && !["missing_value", "_FillValue"]
+            .into_iter()
+            .filter_map(|attribute| {
+                variable
+                    .attribute_value(attribute)
+                    .and_then(Result::ok)
+                    .and_then(numeric_attribute)
+            })
+            .any(|missing| value == missing)
+}
+
+fn numeric_attribute(value: netcdf::AttributeValue) -> Option<f64> {
+    match value {
+        netcdf::AttributeValue::Double(value) => Some(value),
+        netcdf::AttributeValue::Float(value) => Some(f64::from(value)),
+        netcdf::AttributeValue::Int(value) => Some(f64::from(value)),
+        netcdf::AttributeValue::Short(value) => Some(f64::from(value)),
+        _ => None,
+    }
 }
 
 /// Writes the standard no-observation cold time restart for a resolved single point.
@@ -2714,6 +2867,10 @@ fn reject_unsupported_cold_start_features(
     document: &colm_namelist::Document,
     subgrid: SinglePointSubgrid,
 ) -> Result<()> {
+    ensure!(
+        !optional_bool_or(document, "DEF_USE_SNICAR", false)?,
+        "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
+    );
     ensure!(
         !optional_bool_or(document, "DEF_USE_IRRIGATION", false)?
             || subgrid == SinglePointSubgrid::Pft,

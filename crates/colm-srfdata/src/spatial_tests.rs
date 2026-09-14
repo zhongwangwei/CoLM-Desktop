@@ -178,6 +178,133 @@ fn dim_names(file: &netcdf::File, variable: &str) -> Vec<String> {
         .collect()
 }
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} in {} did not have deflate level {level}\n{header}",
+            path.display()
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} in {} unexpectedly had deflate metadata\n{header}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn surface_writers_apply_requested_deflate_and_keep_metadata_exceptions() {
+    let root = temporary("compression");
+    let mesh = root.join("mesh.nc");
+    write_mesh(&mesh, "elmindex", &[1, 1]);
+    let topology =
+        build_spatial_topology(&mesh, SpatialInputKind::Unstructured, Grid::by_ndims(4, 2))
+            .unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![1],
+        pixel_start: vec![1],
+        pixel_end: vec![8],
+        set_type: vec![1],
+        element_index: vec![1],
+    };
+    let blocks = BlockLayout::regular(1, 1).unwrap();
+    let out = root.join("out");
+    write_spatial_topology(&out, 2005, &topology, &patches, &blocks, 4).unwrap();
+    write_landpatch_scalar(
+        &out,
+        2005,
+        &topology,
+        &patches,
+        &blocks,
+        4,
+        "soil",
+        "soiltext_patches",
+        &[7_i32],
+    )
+    .unwrap();
+
+    let out0 = root.join("out0");
+    write_landpatch_scalar(
+        &out0,
+        2005,
+        &topology,
+        &patches,
+        &blocks,
+        0,
+        "soil",
+        "soiltext_patches",
+        &[8_i32],
+    )
+    .unwrap();
+    let zero_file = out0.join("soil/2005/soiltext_patches_w180_s90.nc");
+    assert_no_deflate(&zero_file, "soiltext_patches");
+    assert_eq!(
+        netcdf::open(&zero_file)
+            .unwrap()
+            .variable("soiltext_patches")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap(),
+        vec![8]
+    );
+
+    assert_deflate(
+        &out.join("soil/2005/soiltext_patches_w180_s90.nc"),
+        "soiltext_patches",
+        4,
+    );
+    assert_deflate(
+        &out.join("landpatch/2005/landpatch_w180_s90.nc"),
+        "eindex",
+        4,
+    );
+    assert_deflate(&out.join("mesh/2005/mesh_w180_s90.nc"), "elmpixels", 1);
+    assert_no_deflate(&out.join("block.nc"), "lon_w");
+    assert_no_deflate(&out.join("pixel.nc"), "lat_s");
+    assert_no_deflate(&out.join("mesh/2005/mesh.nc"), "nelm_blk");
+    assert_no_deflate(&out.join("mesh/2005/mesh_w180_s90.nc"), "elmindex");
+    assert_no_deflate(&out.join("mesh/2005/mesh_w180_s90.nc"), "elmnpxl");
+
+    let invalid = root.join("invalid");
+    assert!(write_landpatch_scalar(
+        &invalid,
+        2005,
+        &topology,
+        &patches,
+        &blocks,
+        10,
+        "soil",
+        "soiltext_patches",
+        &[7_i32],
+    )
+    .is_err());
+    assert!(!invalid.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn gridbased_mesh_expands_aligned_cells_into_colm_pixel_order() {
     let directory = temporary("grid");
@@ -286,6 +413,7 @@ fn land_only_filters_pixels_and_empty_elements_before_lct_or_pft_partition() {
                 &topology,
                 &patches,
                 &BlockLayout::regular(1, 1).unwrap(),
+                1,
             )
             .unwrap();
             let file =
@@ -711,6 +839,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "lakedepth",
         "lakedepth_patches",
         &[12.5, -1.0e36],
@@ -733,6 +862,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "soil",
         "soiltext_patches",
         &[3_i32, 7],
@@ -753,6 +883,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "LAI",
         "LAI_patches01",
         "LAI_patches",
@@ -774,6 +905,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "pctpft",
         "pct_pfts",
         "pct_pfts",
@@ -796,6 +928,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "LAI",
         "LAI_pfts01",
         "LAI_pfts",
@@ -818,6 +951,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "soil",
         "lake_soilc_patches",
         "lake_soilc_patches",
@@ -842,6 +976,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         "topography",
         "sf_curve_patches",
         "sf_curve_patches",
@@ -929,6 +1064,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &patches,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
     )
     .unwrap();
     let land_pfts = FlatLandPatches {
@@ -944,6 +1080,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &land_pfts,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
     )
     .unwrap();
     let land_hrus = FlatLandPatches {
@@ -959,6 +1096,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &land_hrus,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
     )
     .unwrap();
     let land_urban = FlatLandPatches {
@@ -974,6 +1112,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &land_urban,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
     )
     .unwrap();
     write_spatial_urban_material(
@@ -982,6 +1121,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &land_urban,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         &UrbanMaterialParameters::from_lcz_classes(&[2, 9]).unwrap(),
     )
     .unwrap();
@@ -991,6 +1131,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &land_urban,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         None,
         "WT_ROOF",
         "WT_ROOF",
@@ -1003,6 +1144,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
         &topology,
         &land_urban,
         &BlockLayout::regular(1, 1).unwrap(),
+        1,
         Some("LAI"),
         "urban_LAI_01",
         "TREE_LAI",
@@ -1153,6 +1295,7 @@ fn shared_pixelsets_write_pctshared() {
         &land_patches,
         Some(&[0.75, 0.25]),
         &blocks,
+        1,
     )
     .unwrap();
     let land_pfts = FlatLandPatches {
@@ -1169,6 +1312,7 @@ fn shared_pixelsets_write_pctshared() {
         &land_pfts,
         Some(&[0.5, 0.25, 0.25]),
         &blocks,
+        1,
     )
     .unwrap();
 
@@ -1712,13 +1856,14 @@ fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
 
     let landdata = directory.join("landdata");
     let blocks = BlockLayout::regular(1, 1).unwrap();
-    write_spatial_topology(&landdata, 2005, &catchment.topology, &patches, &blocks).unwrap();
+    write_spatial_topology(&landdata, 2005, &catchment.topology, &patches, &blocks, 1).unwrap();
     write_spatial_hru_topology(
         &landdata,
         2005,
         &catchment.topology,
         &catchment.land_hrus,
         &blocks,
+        1,
     )
     .unwrap();
     let output = netcdf::open(landdata.join("landhru/2005/landhru_w180_s90.nc")).unwrap();
@@ -1757,6 +1902,7 @@ fn catchment_patchfrac_hru_is_normalized_by_hru_and_shared_area() {
         &patches,
         Some(&[1.0, 3.0, 1.0, 0.5]),
         &blocks,
+        1,
     )
     .unwrap();
 
@@ -2168,7 +2314,7 @@ fn element_block_owner_uses_source_cell_before_land_only_filtering() {
         (58, 22)
     );
     let landdata = directory.join("landdata");
-    write_spatial_topology(&landdata, 2005, &topology, &patches, &blocks).unwrap();
+    write_spatial_topology(&landdata, 2005, &topology, &patches, &blocks, 1).unwrap();
 
     assert!(landdata.join("mesh/2005/mesh_e105_n20.nc").exists());
     assert!(!landdata.join("mesh/2005/mesh_e110_n20.nc").exists());
@@ -2512,7 +2658,7 @@ fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
     }
     let output = root.join("landdata");
     let blocks = BlockLayout::regular(1, 1).unwrap();
-    write_spatial_topology(&output, 2005, &topology, &patches, &blocks).unwrap();
+    write_spatial_topology(&output, 2005, &topology, &patches, &blocks, 1).unwrap();
     let file = netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
     let starts = file
         .variable("ipxstt")

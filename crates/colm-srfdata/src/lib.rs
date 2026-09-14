@@ -48,7 +48,8 @@ pub use pft::{
 };
 pub use region::{clip_existing_surface, SpatialBounds};
 pub use site::{
-    append_single_point_hyperspectral_albedo, materialize_single_point_surface,
+    append_single_point_hyperspectral_albedo,
+    append_single_point_hyperspectral_albedo_with_compression, materialize_single_point_surface,
     materialize_single_point_surface_from_namelist, single_point_surface_run_from_namelist,
     validate_single_point_hyperspectral_albedo_directory, SinglePointLaiFrequency,
     SinglePointSurfaceRun, SiteMode, HYPERSPECTRAL_WAVELENGTHS,

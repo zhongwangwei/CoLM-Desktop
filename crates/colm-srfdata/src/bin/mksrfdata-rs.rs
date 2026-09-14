@@ -80,6 +80,7 @@ struct SpatialLctArgs {
     land_only: bool,
     zip_aggregation: bool,
     dominant: bool,
+    srfdata_compression: u8,
     land_cover: SiteMode,
     lake_depth: Option<PathBuf>,
     lake_soil_carbon: Option<PathBuf>,
@@ -175,6 +176,7 @@ struct SpatialPftArgs {
     land_only: bool,
     zip_aggregation: bool,
     dominant: bool,
+    srfdata_compression: u8,
     patch_mode: PftPatchMode,
     output_2m_wmo: bool,
     lulcc: bool,
@@ -420,9 +422,17 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 patches,
                 Some(pctshared),
                 &args.blocks,
+                args.srfdata_compression,
             )?;
         } else {
-            write_spatial_topology(&args.landdata, args.year, &topology, patches, &args.blocks)?;
+            write_spatial_topology(
+                &args.landdata,
+                args.year,
+                &topology,
+                patches,
+                &args.blocks,
+                args.srfdata_compression,
+            )?;
         }
         if let Some(land_hrus) = land_hrus {
             write_spatial_hru_topology(
@@ -431,6 +441,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 &topology,
                 &land_hrus,
                 &args.blocks,
+                args.srfdata_compression,
             )?;
             write_spatial_hru_patch_fractions(
                 &args.landdata,
@@ -440,6 +451,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 patches,
                 crop.as_ref().map(|crop| crop.pctshared.as_slice()),
                 &args.blocks,
+                args.srfdata_compression,
             )?;
         }
         write_spatial_pft_topology_with_shared(
@@ -449,6 +461,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &pfts.land_pfts,
             Some(pft_shares),
             &args.blocks,
+            args.srfdata_compression,
         )?;
         if args.diagnostics {
             write_spatial_diagnostic_baseline(
@@ -458,6 +471,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 patches,
                 crop.as_ref().map(|crop| crop.pctshared.as_slice()),
                 17,
+                args.srfdata_compression,
             )?;
         }
         materialize_pft_monthly_vegetation(
@@ -514,6 +528,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         land_only: args.land_only,
         zip_aggregation: args.zip_aggregation,
         dominant: args.dominant,
+        srfdata_compression: args.srfdata_compression,
         land_cover: SiteMode::Igbp,
         lake_depth: args.lake_depth.clone(),
         lake_soil_carbon: args.lake_soil_carbon.clone(),
@@ -555,6 +570,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             blocks: &args.blocks,
             diagnostics: args.diagnostics,
             pctshared: crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+            compression_level: args.srfdata_compression,
         },
         &topology,
         patches,
@@ -566,6 +582,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &topology,
             &land_hrus,
             &args.blocks,
+            args.srfdata_compression,
         )?;
         write_spatial_hru_patch_fractions(
             &args.landdata,
@@ -575,6 +592,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             patches,
             crop.as_ref().map(|crop| crop.pctshared.as_slice()),
             &args.blocks,
+            args.srfdata_compression,
         )?;
     }
     // MOD_LandPFT allocates pctshared for every PFT, not just CROP builds.
@@ -585,6 +603,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &pfts.land_pfts,
         Some(pft_shares),
         &args.blocks,
+        args.srfdata_compression,
     )?;
     write_landpft_vector(
         &args.landdata,
@@ -592,6 +611,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &topology,
         &pfts.land_pfts,
         &args.blocks,
+        args.srfdata_compression,
         "pctpft",
         "pct_pfts",
         "pct_pfts",
@@ -615,6 +635,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "pctpft",
             "pct_crops",
             &crop.pctshared,
@@ -640,6 +661,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &topology,
         &pfts.land_pfts,
         &args.blocks,
+        args.srfdata_compression,
         "htop",
         "htop_pfts",
         "htop_pfts",
@@ -676,6 +698,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             patches,
             crop.as_ref().map(|crop| crop.pctshared.as_slice()),
             17,
+            args.srfdata_compression,
         )?;
     }
     println!(
@@ -757,6 +780,7 @@ fn materialize_pft_monthly_vegetation(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "LAI",
                 &format!("LAI_patches{month:02}"),
                 "LAI_patches",
@@ -768,6 +792,7 @@ fn materialize_pft_monthly_vegetation(
                 topology,
                 &pfts.land_pfts,
                 &args.blocks,
+                args.srfdata_compression,
                 "LAI",
                 &format!("LAI_pfts{month:02}"),
                 "LAI_pfts",
@@ -779,6 +804,7 @@ fn materialize_pft_monthly_vegetation(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "LAI",
                 &format!("SAI_patches{month:02}"),
                 "SAI_patches",
@@ -790,6 +816,7 @@ fn materialize_pft_monthly_vegetation(
                 topology,
                 &pfts.land_pfts,
                 &args.blocks,
+                args.srfdata_compression,
                 "LAI",
                 &format!("SAI_pfts{month:02}"),
                 "SAI_pfts",
@@ -821,6 +848,7 @@ fn materialize_pft_monthly_vegetation(
                     patch_pctshared,
                     DIAGNOSTIC_MISSING,
                     Some(0.0),
+                    args.srfdata_compression,
                 )?;
             }
             write_pft_diagnostic_time(
@@ -981,6 +1009,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             blocks: &args.blocks,
             diagnostics: args.diagnostics,
             pctshared: None,
+            compression_level: args.srfdata_compression,
         },
         &topology,
         &patches,
@@ -993,6 +1022,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 &topology,
                 land_urban,
                 &args.blocks,
+                args.srfdata_compression,
             )?;
         } else {
             materialize_spatial_urban(&args, &topology, land_urban, urban)?;
@@ -1005,6 +1035,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &topology,
             &land_hrus,
             &args.blocks,
+            args.srfdata_compression,
         )?;
         write_spatial_hru_patch_fractions(
             &args.landdata,
@@ -1014,6 +1045,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &patches,
             None,
             &args.blocks,
+            args.srfdata_compression,
         )?;
     }
     if args.diagnostics {
@@ -1024,6 +1056,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &patches,
             None,
             land_classification_count(args.land_cover),
+            args.srfdata_compression,
         )?;
     }
     println!(
@@ -1042,6 +1075,7 @@ fn write_spatial_diagnostic_baseline(
     patches: &FlatLandPatches,
     pctshared: Option<&[f64]>,
     classification_count: i32,
+    compression_level: u8,
 ) -> Result<()> {
     let diagnostic_dir = landdata.join("diag");
     let elements = diagnostic_elements(&topology.land_elements);
@@ -1066,6 +1100,7 @@ fn write_spatial_diagnostic_baseline(
         &[0, 1],
         &element,
         DIAGNOSTIC_MISSING,
+        compression_level,
     )?;
 
     ensure!(
@@ -1092,6 +1127,7 @@ fn write_spatial_diagnostic_baseline(
         &type_indices,
         &patch_fraction,
         DIAGNOSTIC_MISSING,
+        compression_level,
     )
 }
 
@@ -1146,6 +1182,7 @@ fn write_lct_patch_diagnostic(
         type_indices,
         &mapped,
         missing,
+        args.srfdata_compression,
     )
 }
 
@@ -1177,6 +1214,7 @@ fn write_lct_patch_diagnostic_time(
         pctshared,
         DIAGNOSTIC_MISSING,
         Some(0.0),
+        args.srfdata_compression,
     )
 }
 
@@ -1236,6 +1274,7 @@ fn write_crop_diagnostic(
         &type_indices,
         &mapped,
         DIAGNOSTIC_MISSING,
+        args.srfdata_compression,
     )
 }
 
@@ -1273,6 +1312,7 @@ fn write_pft_diagnostic(
         &type_indices,
         &mapped,
         DIAGNOSTIC_MISSING,
+        args.srfdata_compression,
     )
 }
 
@@ -1304,6 +1344,7 @@ fn write_pft_diagnostic_time(
         Some(pctshared),
         DIAGNOSTIC_MISSING,
         Some(0.0),
+        args.srfdata_compression,
     )
 }
 
@@ -1355,6 +1396,7 @@ fn write_urban_diagnostic(
         &type_indices,
         &mapped,
         DIAGNOSTIC_MISSING,
+        args.srfdata_compression,
     )
 }
 
@@ -1402,6 +1444,7 @@ fn write_urban_diagnostic_dimension(
         default,
         dimension,
         &records,
+        args.srfdata_compression,
     )
 }
 
@@ -1553,6 +1596,7 @@ fn materialize_spatial_urban(
         topology,
         land_urban,
         &args.blocks,
+        args.srfdata_compression,
     )?;
     if land_urban.is_empty() {
         return Ok(());
@@ -1718,6 +1762,7 @@ fn materialize_spatial_urban(
             topology,
             land_urban,
             &args.blocks,
+            args.srfdata_compression,
             None,
             file_stem,
             variable,
@@ -1751,6 +1796,7 @@ fn materialize_spatial_urban(
         topology,
         land_urban,
         &args.blocks,
+        args.srfdata_compression,
         None,
         "LUCY_region_id",
         "LUCY_id",
@@ -1777,6 +1823,7 @@ fn materialize_spatial_urban(
         topology,
         land_urban,
         &args.blocks,
+        args.srfdata_compression,
         &material,
     )?;
     write_urban_diagnostic(
@@ -1835,6 +1882,7 @@ fn materialize_spatial_urban(
                     topology,
                     land_urban,
                     &args.blocks,
+                    args.srfdata_compression,
                     Some("LAI"),
                     &file_stem,
                     variable,
@@ -1864,6 +1912,7 @@ fn materialize_spatial_urban(
                 None,
                 DIAGNOSTIC_MISSING,
                 Some(0.0),
+                args.srfdata_compression,
             )?;
             write_patch_diagnostic_time(
                 args.landdata
@@ -1878,6 +1927,7 @@ fn materialize_spatial_urban(
                 None,
                 DIAGNOSTIC_MISSING,
                 Some(0.0),
+                args.srfdata_compression,
             )?;
         }
     }
@@ -1892,6 +1942,7 @@ struct LulccTraceArgs<'a> {
     blocks: &'a BlockLayout,
     diagnostics: bool,
     pctshared: Option<&'a [f64]>,
+    compression_level: u8,
 }
 
 fn materialize_lulcc_transfer_traces(
@@ -1930,6 +1981,7 @@ fn materialize_lulcc_transfer_traces(
             topology,
             patches,
             args.blocks,
+            args.compression_level,
             "lulcc",
             &format!("lccpct_patches_lc{source_class:02}"),
             "lccpct_patches",
@@ -1966,6 +2018,7 @@ fn materialize_lulcc_transfer_traces(
             Some(0.0),
             "source_patch",
             &source_patch,
+            args.compression_level,
         )?;
     }
     Ok(())
@@ -2079,6 +2132,7 @@ fn materialize_simple_topography_factors(
         topology,
         patches,
         &args.blocks,
+        args.srfdata_compression,
         "topography",
         "cur_patches",
         &factors.curvature,
@@ -2106,6 +2160,7 @@ fn materialize_simple_topography_factors(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "topography",
             stem,
             stem,
@@ -2188,6 +2243,7 @@ fn materialize_regular_topography_factors(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "topography",
             stem,
             values,
@@ -2221,6 +2277,7 @@ fn materialize_regular_topography_factors(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "topography",
             stem,
             stem,
@@ -2257,6 +2314,7 @@ fn materialize_regular_topography_factors(
         topology,
         patches,
         &args.blocks,
+        args.srfdata_compression,
         "topography",
         "sf_curve_patches",
         "sf_curve_patches",
@@ -2349,9 +2407,17 @@ fn materialize_spatial_common_fields(
                 patches,
                 Some(pctshared),
                 &args.blocks,
+                args.srfdata_compression,
             )?;
         } else {
-            write_spatial_topology(&args.landdata, args.year, topology, patches, &args.blocks)?;
+            write_spatial_topology(
+                &args.landdata,
+                args.year,
+                topology,
+                patches,
+                &args.blocks,
+                args.srfdata_compression,
+            )?;
         }
         materialize_lct_monthly_vegetation(
             args,
@@ -2507,9 +2573,17 @@ fn materialize_spatial_common_fields(
             patches,
             Some(pctshared),
             &args.blocks,
+            args.srfdata_compression,
         )?;
     } else {
-        write_spatial_topology(&args.landdata, args.year, topology, patches, &args.blocks)?;
+        write_spatial_topology(
+            &args.landdata,
+            args.year,
+            topology,
+            patches,
+            &args.blocks,
+            args.srfdata_compression,
+        )?;
     }
     if let Some(directory) = &args.soil_dir {
         let classes = match args.land_cover {
@@ -2532,6 +2606,7 @@ fn materialize_spatial_common_fields(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "lakedepth",
             "lakedepth_patches",
             &lake_depth,
@@ -2561,6 +2636,7 @@ fn materialize_spatial_common_fields(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "soil",
             "lake_soilc_patches",
             "lake_soilc_patches",
@@ -2576,6 +2652,7 @@ fn materialize_spatial_common_fields(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "soil",
             "methane_ph_patches",
             &methane_ph,
@@ -2588,6 +2665,7 @@ fn materialize_spatial_common_fields(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "soil",
             "soiltexture_patches",
             "soiltext_patches",
@@ -2623,6 +2701,7 @@ fn materialize_spatial_common_fields(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "soil",
                 &format!("{variable}_patches"),
                 variable,
@@ -2654,6 +2733,7 @@ fn materialize_spatial_common_fields(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "topography",
                 variable,
                 values,
@@ -2693,6 +2773,7 @@ fn materialize_spatial_common_fields(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "topography",
                 variable,
                 values,
@@ -2731,6 +2812,7 @@ fn materialize_spatial_common_fields(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "dbedrock",
             "dbedrock_patches",
             &bedrock,
@@ -2766,6 +2848,7 @@ fn materialize_spatial_common_fields(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "HyperAlbedo",
                 &stem,
                 &values,
@@ -2791,6 +2874,7 @@ fn materialize_spatial_common_fields(
             topology,
             patches,
             &args.blocks,
+            args.srfdata_compression,
             "htop",
             "htop_patches",
             &forest_height,
@@ -2831,6 +2915,7 @@ fn materialize_spatial_common_fields(
                     topology,
                     patches,
                     &args.blocks,
+                    args.srfdata_compression,
                     "LAI",
                     &format!("LAI_patches{:03}", eight_day_julian_day(time)),
                     "LAI_patches",
@@ -2920,6 +3005,7 @@ fn materialize_lct_monthly_vegetation(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "LAI",
                 &format!("LAI_patches{month:02}"),
                 "LAI_patches",
@@ -2931,6 +3017,7 @@ fn materialize_lct_monthly_vegetation(
                 topology,
                 patches,
                 &args.blocks,
+                args.srfdata_compression,
                 "LAI",
                 &format!("SAI_patches{month:02}"),
                 "SAI_patches",
@@ -3280,6 +3367,7 @@ fn write_soil_layer(
         topology,
         patches,
         &args.blocks,
+        args.srfdata_compression,
         "soil",
         &variable,
         values,
@@ -3320,6 +3408,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut mesh_filter = None;
     let mut zip_aggregation = true;
     let mut dominant = false;
+    let mut srfdata_compression = 1;
     let mut land_cover = None;
     let mut lake_depth = None;
     let mut lake_soil_carbon = None;
@@ -3406,6 +3495,14 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
             "--dominant" => {
                 dominant = true;
                 index += 1;
+            }
+            "--srfdata-compress-level" => {
+                srfdata_compression = parse_compression_level(
+                    args.get(index + 1)
+                        .context("--srfdata-compress-level needs 0..9")?,
+                    "--srfdata-compress-level",
+                )?;
+                index += 2;
             }
             "--land-cover" => {
                 land_cover = Some(parse_land_cover(
@@ -3643,6 +3740,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         land_only,
         zip_aggregation,
         dominant,
+        srfdata_compression,
         land_cover: land_cover.context("spatial-lct requires --land-cover igbp or usgs")?,
         lake_depth,
         lake_soil_carbon,
@@ -3696,6 +3794,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut mesh_filter = None;
     let mut zip_aggregation = true;
     let mut dominant = false;
+    let mut srfdata_compression = 1;
     let mut patch_mode = PftPatchMode::Merged;
     let mut output_2m_wmo = false;
     let mut lulcc = false;
@@ -3794,6 +3893,14 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
             "--dominant" => {
                 dominant = true;
                 index += 1;
+            }
+            "--srfdata-compress-level" => {
+                srfdata_compression = parse_compression_level(
+                    args.get(index + 1)
+                        .context("--srfdata-compress-level needs 0..9")?,
+                    "--srfdata-compress-level",
+                )?;
+                index += 2;
             }
             "--lulcc" => {
                 lulcc = true;
@@ -3956,6 +4063,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         land_only,
         zip_aggregation,
         dominant,
+        srfdata_compression,
         patch_mode,
         output_2m_wmo,
         lulcc,
@@ -4089,9 +4197,10 @@ fn materialize_case(args: &[String]) -> Result<()> {
         observation.as_deref(),
     )?;
     if let Some(directory) = soil_hyper_albedo_dir {
-        colm_srfdata::append_single_point_hyperspectral_albedo(
+        colm_srfdata::append_single_point_hyperspectral_albedo_with_compression(
             &run.landdata_dir.join("srfdata.nc"),
             &directory,
+            run.srfdata_compression,
         )?;
     }
     print_result(report, &run.landdata_dir);
@@ -4272,6 +4381,10 @@ fn spatial_case_command(
     let regular_downscaling = case_bool(&document, "DEF_USE_Forcing_Downscaling", false)?;
     let simple_downscaling = case_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     let diagnostics = case_bool(&document, "DEF_USE_SrfdataDiag", false)?;
+    let srfdata_compression = compression_level_i32(
+        case_i32(&document, "DEF_Srfdata_CompressLevel", 1)?,
+        "DEF_Srfdata_CompressLevel",
+    )?;
     ensure!(
         !regular_downscaling || !simple_downscaling,
         "DEF_USE_Forcing_Downscaling and DEF_USE_Forcing_Downscaling_Simple are mutually exclusive"
@@ -4655,6 +4768,8 @@ fn spatial_case_command(
         case_bool(&document, "USE_zip_for_aggregation", true)?.to_string(),
         "--land-only".to_owned(),
         case_bool(&document, "DEF_LANDONLY", true)?.to_string(),
+        "--srfdata-compress-level".to_owned(),
+        srfdata_compression.to_string(),
     ]);
 
     if diagnostics {
@@ -4734,6 +4849,20 @@ fn case_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Re
             .with_context(|| format!("{field} is outside CoLM's integer range")),
         Some(_) => bail!("{field} must be an integer value"),
     }
+}
+
+fn parse_compression_level(value: &str, field: &str) -> Result<u8> {
+    let level = value
+        .parse::<i32>()
+        .with_context(|| format!("{field} must be an integer 0..9"))?;
+    compression_level_i32(level, field)
+}
+
+fn compression_level_i32(value: i32, field: &str) -> Result<u8> {
+    u8::try_from(value)
+        .ok()
+        .filter(|level| *level <= 9)
+        .with_context(|| format!("{field} must be in 0..=9, got {value}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4987,8 +5116,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--srfdata-compress-level 0..9] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -5001,6 +5130,55 @@ mod tests {
             assert_eq!(soil_hyper_albedo_classes(mode), (17, 15));
         }
         assert_eq!(soil_hyper_albedo_classes(SiteMode::Usgs), (16, 24));
+    }
+
+    #[test]
+    fn spatial_parsers_accept_only_valid_srfdata_compression_levels() {
+        let lct = parse_spatial_lct(&[
+            "unstructured".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--srfdata-compress-level".into(),
+            "0".into(),
+        ])
+        .unwrap();
+        assert_eq!(lct.srfdata_compression, 0);
+
+        let pft = parse_spatial_pft(&[
+            "latlon".into(),
+            "mesh.nc".into(),
+            "landtype.nc".into(),
+            "landdata".into(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            "plant_15s".into(),
+            "--srfdata-compress-level".into(),
+            "9".into(),
+        ])
+        .unwrap();
+        assert_eq!(pft.srfdata_compression, 9);
+
+        for value in ["-1", "10", "4.0"] {
+            let mut args = vec![
+                "latlon".into(),
+                "mesh.nc".into(),
+                "landtype.nc".into(),
+                "landdata".into(),
+                "2005".into(),
+                "--land-cover".into(),
+                "igbp".into(),
+                "--srfdata-compress-level".into(),
+                value.into(),
+            ];
+            assert!(parse_spatial_lct(&args).is_err(), "{value}");
+            args[5] = "--plant-tiles".into();
+            args[6] = "plant_15s".into();
+            assert!(parse_spatial_pft(&args).is_err(), "{value}");
+        }
     }
 
     #[test]
@@ -5294,7 +5472,7 @@ mod tests {
             set_type: vec![1, 2],
             element_index: vec![1, 2],
         };
-        write_spatial_diagnostic_baseline(&root, 2005, &topology, &patches, None, 17).unwrap();
+        write_spatial_diagnostic_baseline(&root, 2005, &topology, &patches, None, 17, 1).unwrap();
 
         let elements = netcdf::open(root.join("diag/element_2005.nc")).unwrap();
         assert_eq!(
@@ -5469,6 +5647,42 @@ mod tests {
         args.windows(2)
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn spatial_case_forwards_srfdata_compression_level() {
+        for (setting, expected) in [("", "1"), ("DEF_Srfdata_CompressLevel=4\n", "4")] {
+            let (_root, namelist) = case_namelist(
+                "compress-level",
+                &format!(
+                    "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\n\
+                     DEF_dir_rawdata='$ROOT/raw'\nDEF_file_mesh='$ROOT/mesh.nc'\n\
+                     DEF_USE_LCT=.true.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.false.\n\
+                     {setting}/\n",
+                ),
+            );
+            let command = spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                option_value(&command.args, "--srfdata-compress-level"),
+                Some(expected)
+            );
+            assert_eq!(
+                parse_spatial_lct(&command.args)
+                    .unwrap()
+                    .srfdata_compression,
+                expected.parse::<u8>().unwrap()
+            );
+        }
+
+        let (_root, namelist) = case_namelist(
+            "bad-compress-level",
+            "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\n\
+             DEF_dir_rawdata='$ROOT/raw'\nDEF_file_mesh='$ROOT/mesh.nc'\n\
+             DEF_USE_LCT=.true.\nDEF_Srfdata_CompressLevel=10\n/\n",
+        );
+        assert!(spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None).is_err());
     }
 
     #[test]
@@ -6291,6 +6505,7 @@ mod tests {
                 blocks: &BlockLayout::regular(1, 1).unwrap(),
                 diagnostics: false,
                 pctshared: None,
+                compression_level: 1,
             },
             &topology,
             &patches,
@@ -6432,6 +6647,7 @@ mod tests {
                 blocks: &BlockLayout::regular(1, 1).unwrap(),
                 diagnostics: true,
                 pctshared: None,
+                compression_level: 1,
             },
             &topology,
             &patches,

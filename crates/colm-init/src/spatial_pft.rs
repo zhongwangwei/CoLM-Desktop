@@ -28,8 +28,9 @@ use crate::single_point::{
 };
 use crate::spatial_static::{
     block_path, patch_coordinates, read_f64 as read_lct_f64, read_hyperspectral_albedo,
-    read_patches, read_soil, read_spatial_pixel_sets, spatial_patch_type, values_f64, values_i32,
-    write_spatial_lct_constant_restart_with_canopy, SpatialLctStaticConfig,
+    read_patches, read_soil, read_spatial_pixel_sets, resolve_vic_parameter_file,
+    spatial_patch_type, values_f64, values_i32, write_spatial_lct_constant_restart_with_canopy,
+    SpatialLctStaticConfig, VicParameterSource,
 };
 use crate::{
     append_time_hyperspectral_fields, bgc_time_restart_input,
@@ -246,7 +247,20 @@ pub fn write_spatial_pft_constant_restarts(
     common.use_bedrock = use_bedrock;
     common.tuning = RestartTuning::from_document(&document)?;
     common.use_hyperspectral = use_hyperspectral;
-    common.use_topmodel = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3) == 0;
+    let runoff_scheme = optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3);
+    common.use_topmodel = runoff_scheme == 0;
+    common.topmodel_method = optional_i32(&document, "DEF_TOPMOD_method")?.unwrap_or(0);
+    let vic_file = if runoff_scheme == 1 {
+        let use_grid = optional_bool_or(&document, "DEF_VIC_OPT", false)?;
+        Some((resolve_vic_parameter_file(&document, use_grid)?, use_grid))
+    } else {
+        None
+    };
+    common.vic_parameters = match &vic_file {
+        Some((path, true)) => VicParameterSource::GridFile(path),
+        Some((path, false)) => VicParameterSource::ScalarFile(path),
+        None => VicParameterSource::None,
+    };
     common.use_simple_terrain =
         optional_bool_or(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     common.use_regular_terrain = optional_bool_or(&document, "DEF_USE_Forcing_Downscaling", false)?;
@@ -321,6 +335,10 @@ pub fn write_spatial_pft_cold_time_restarts(
     config: SpatialPftTimeConfig<'_>,
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
+    ensure!(
+        !optional_bool_or(&document, "DEF_USE_SNICAR", false)?,
+        "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
+    );
     let observations = SpatialObservedInitializationPaths::from_document(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;

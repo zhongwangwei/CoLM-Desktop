@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_case::{is_default, is_spatial_case};
+use colm_init::spatial_static::{resolve_vic_parameter_file, VicParameterSource};
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_catch_lateral_cold_restart,
     write_gridriver_cold_restart, write_single_point_cold_time_restarts,
@@ -184,6 +185,9 @@ struct SpatialNamelistRun {
     urban: Option<SpatialUrbanRun>,
     use_bedrock: bool,
     use_topmodel: bool,
+    topmodel_method: i32,
+    vic_parameter_file: Option<PathBuf>,
+    vic_grid_file: Option<PathBuf>,
     use_simple_terrain: bool,
     use_regular_terrain: bool,
     greenwich: bool,
@@ -319,6 +323,8 @@ fn write_spatial_urban_namelist_block(
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
+    static_config.topmodel_method = run.topmodel_method;
+    static_config.vic_parameters = spatial_run_vic_source(run);
     static_config.use_simple_terrain = run.use_simple_terrain;
     static_config.use_regular_terrain = run.use_regular_terrain;
     let files = write_spatial_urban_constant_restarts(SpatialUrbanStaticConfig {
@@ -393,6 +399,8 @@ fn write_spatial_lct_namelist_block(
     static_config.tuning = run.tuning;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
+    static_config.topmodel_method = run.topmodel_method;
+    static_config.vic_parameters = spatial_run_vic_source(run);
     static_config.use_simple_terrain = run.use_simple_terrain;
     static_config.use_regular_terrain = run.use_regular_terrain;
     let files = write_spatial_lct_constant_restart(static_config)?;
@@ -479,6 +487,10 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    ensure!(
+        !namelist_bool(&document, "DEF_USE_SNICAR", false)?,
+        "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
+    );
     let lai_monthly = namelist_bool(&document, "DEF_LAI_MONTHLY", true)?;
     let use_regular_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling", false)?;
     let use_simple_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
@@ -601,6 +613,21 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         urban,
         use_bedrock: namelist_bool(&document, "DEF_USE_BEDROCK", false)?,
         use_topmodel: namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 0,
+        topmodel_method: namelist_i32(&document, "DEF_TOPMOD_method", 0)?,
+        vic_parameter_file: if namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 1
+            && !namelist_bool(&document, "DEF_VIC_OPT", false)?
+        {
+            Some(resolve_vic_parameter_file(&document, false)?)
+        } else {
+            None
+        },
+        vic_grid_file: if namelist_i32(&document, "DEF_Runoff_SCHEME", 3)? == 1
+            && namelist_bool(&document, "DEF_VIC_OPT", false)?
+        {
+            Some(resolve_vic_parameter_file(&document, true)?)
+        } else {
+            None
+        },
         use_simple_terrain,
         use_regular_terrain,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
@@ -653,6 +680,16 @@ fn discover_blocks(landdata: &Path, year: i32) -> Result<Vec<String>> {
         directory.display()
     );
     Ok(blocks)
+}
+
+fn spatial_run_vic_source(run: &SpatialNamelistRun) -> VicParameterSource<'_> {
+    if run.vic_grid_file.is_some() {
+        VicParameterSource::GridFile(run.vic_grid_file.as_deref().unwrap())
+    } else if run.vic_parameter_file.is_some() {
+        VicParameterSource::ScalarFile(run.vic_parameter_file.as_deref().unwrap())
+    } else {
+        VicParameterSource::None
+    }
 }
 
 fn namelist_path_is_set(document: &colm_namelist::Document, field: &str) -> Result<bool> {
@@ -753,21 +790,58 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
     let block = args.next().context("missing CoLM block label")?;
     let land_cover = parse_land_cover(&args.next().context("missing land-cover scheme")?)?;
     let hydraulic_model = parse_hydraulic_model(args.next().as_deref())?;
-    if let Some(value) = args.next() {
-        bail!("unexpected argument {value}");
+    let mut topmodel = false;
+    let mut topmodel_method = 0;
+    let mut vic_scalar_path = None;
+    let mut vic_grid_path = None;
+    while let Some(value) = args.next() {
+        match value.as_str() {
+            "--topmodel" => topmodel = true,
+            "--topmodel-method" => {
+                topmodel = true;
+                topmodel_method = args
+                    .next()
+                    .context("--topmodel-method needs 0 for single-point")?
+                    .parse()
+                    .context("--topmodel-method must be an integer")?;
+            }
+            "--vic-params" => {
+                vic_scalar_path = Some(PathBuf::from(
+                    args.next().context("--vic-params needs a text file")?,
+                ))
+            }
+            "--vic-grid" => {
+                vic_grid_path = Some(PathBuf::from(
+                    args.next().context("--vic-grid needs a NetCDF file")?,
+                ))
+            }
+            _ => bail!("unexpected argument {value}"),
+        }
     }
+    ensure!(
+        vic_scalar_path.is_none() || vic_grid_path.is_none(),
+        "--vic-params and --vic-grid are mutually exclusive"
+    );
+    let mut config = SinglePointStaticConfig::new(
+        &case_name,
+        land_cover_year,
+        &block,
+        land_cover,
+        hydraulic_model,
+    );
+    config.use_topmodel = topmodel;
+    config.topmodel_method = topmodel_method;
+    config.vic_parameters = vic_grid_path
+        .as_deref()
+        .map(VicParameterSource::GridFile)
+        .or_else(|| {
+            vic_scalar_path
+                .as_deref()
+                .map(VicParameterSource::ScalarFile)
+        })
+        .unwrap_or(VicParameterSource::None);
 
-    let files = write_single_point_constant_restart(
-        surface,
-        restart,
-        SinglePointStaticConfig::new(
-            &case_name,
-            land_cover_year,
-            &block,
-            land_cover,
-            hydraulic_model,
-        ),
-    )?;
+    let files = write_single_point_constant_restart(surface, restart, config)?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
     Ok(())
@@ -803,11 +877,31 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut ozone_stress = false;
     let mut variably_saturated_flow = false;
     let mut vegetation_snow = true;
+    let mut vic_scalar_path = None;
+    let mut vic_grid_path = None;
     while let Some(value) = args.next() {
         match value.as_str() {
             "--bedrock" => config.use_bedrock = true,
             "--hyperspectral" => config.use_hyperspectral = true,
             "--topmodel" => config.use_topmodel = true,
+            "--topmodel-method" => {
+                config.use_topmodel = true;
+                config.topmodel_method = args
+                    .next()
+                    .context("--topmodel-method needs 0, 1, or 2")?
+                    .parse()
+                    .context("--topmodel-method must be an integer")?;
+            }
+            "--vic-params" => {
+                vic_scalar_path = Some(PathBuf::from(
+                    args.next().context("--vic-params needs a text file")?,
+                ));
+            }
+            "--vic-grid" => {
+                vic_grid_path = Some(PathBuf::from(
+                    args.next().context("--vic-grid needs a NetCDF file")?,
+                ));
+            }
             "--simple-terrain" => config.use_simple_terrain = true,
             "--regular-terrain" => config.use_regular_terrain = true,
             "--cold-time" => {
@@ -832,6 +926,19 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             _ => bail!("unexpected argument {value}"),
         }
     }
+    ensure!(
+        vic_scalar_path.is_none() || vic_grid_path.is_none(),
+        "--vic-params and --vic-grid are mutually exclusive"
+    );
+    config.vic_parameters = vic_grid_path
+        .as_deref()
+        .map(VicParameterSource::GridFile)
+        .or_else(|| {
+            vic_scalar_path
+                .as_deref()
+                .map(VicParameterSource::ScalarFile)
+        })
+        .unwrap_or(VicParameterSource::None);
     if config.use_hyperspectral && cold_time.is_some() {
         bail!(
             "spatial-lct hyperspectral cold time is unavailable: upstream has no supported LCT class-to-spectral-optics mapping; Rust refuses to write an unverified restart"
@@ -943,6 +1050,13 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
                 && high_resolution_urban_albedo.is_none()),
         "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
     );
+    let document = parse(&std::fs::read_to_string(&namelist)?)?;
+    if cold_time.is_some() {
+        ensure!(
+            !namelist_bool(&document, "DEF_USE_SNICAR", false)?,
+            "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
+        );
+    }
     let static_config = SpatialPftStaticConfig::new(
         &namelist,
         &landdata,
@@ -961,7 +1075,7 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
     if let Some(date) = cold_time {
         let mut time = SpatialPftTimeConfig::new(static_config, date);
-        time.tuning = RestartTuning::from_document(&parse(&std::fs::read_to_string(&namelist)?)?)?;
+        time.tuning = RestartTuning::from_document(&document)?;
         time.lai_year = lai_year;
         time.greenwich = greenwich;
         time.dynamic_lake = dynamic_lake;
@@ -1055,6 +1169,127 @@ mod tests {
     }
 
     #[test]
+    fn direct_runoff_cli_rejects_conflicting_vic_sources_before_inputs() {
+        let err = run_explicit(
+            PathBuf::from("missing-srfdata.nc"),
+            [
+                "restart",
+                "case",
+                "2005",
+                "w180_s90",
+                "igbp",
+                "vg",
+                "--vic-params",
+                "vic.txt",
+                "--vic-grid",
+                "vic.nc",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("conflicting direct VIC sources must fail before file I/O");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn spatial_lct_runoff_cli_rejects_conflicting_vic_sources_and_bad_topmod_before_outputs() {
+        let err = run_spatial_lct(
+            [
+                "landdata",
+                "restart",
+                "case",
+                "2005",
+                "w180_s90",
+                "igbp",
+                "vg",
+                "--vic-params",
+                "vic.txt",
+                "--vic-grid",
+                "vic.nc",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect_err("conflicting spatial VIC sources must fail before file I/O");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+
+        let root =
+            std::env::temp_dir().join(format!("colm-init-bad-topmod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let restart = root.join("restart");
+        let err = run_spatial_lct(
+            [
+                root.join("landdata").to_string_lossy().into_owned(),
+                restart.to_string_lossy().into_owned(),
+                "case".to_owned(),
+                "2005".to_owned(),
+                "w180_s90".to_owned(),
+                "igbp".to_owned(),
+                "vg".to_owned(),
+                "--topmodel-method".to_owned(),
+                "9".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .expect_err("invalid TOPMOD method must fail before writing restart files");
+        assert!(err.to_string().contains("DEF_TOPMOD_method"), "{err}");
+        assert!(!restart.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn spatial_case_requires_vic_source_for_runoff_scheme_one_and_derives_runtime_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-init-spatial-vic-paths-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_Runoff_SCHEME=1\n /\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        let error = spatial_namelist_run(&namelist).unwrap_err();
+        assert!(error.to_string().contains("DEF_file_VIC_para"), "{error}");
+
+        let runtime = root.join("runtime");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_dir_runtime='{}'\n DEF_Runoff_SCHEME=1\n DEF_VIC_OPT=.false.\n /\n",
+                root.display(),
+                runtime.display()
+            ),
+        )
+        .unwrap();
+        let run = spatial_namelist_run(&namelist).unwrap();
+        assert_eq!(
+            run.vic_parameter_file,
+            Some(runtime.join("vic/vic_para.txt"))
+        );
+        assert_eq!(run.vic_grid_file, None);
+
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_dir_runtime='{}'\n DEF_Runoff_SCHEME=1\n DEF_VIC_OPT=.true.\n /\n",
+                root.display(),
+                runtime.display()
+            ),
+        )
+        .unwrap();
+        let run = spatial_namelist_run(&namelist).unwrap();
+        assert_eq!(run.vic_grid_file, Some(runtime.join("vic/vic_para.nc")));
+        assert_eq!(run.vic_parameter_file, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn spatial_case_namelist_derives_all_cold_start_controls() {
         let root =
             std::env::temp_dir().join(format!("colm-init-spatial-case-{}", std::process::id()));
@@ -1131,6 +1366,7 @@ mod tests {
         assert_eq!(run.subgrid, SpatialSubgrid::PftOrPc);
         assert!(run.use_bedrock);
         assert!(run.use_topmodel);
+        assert_eq!(run.topmodel_method, 0);
         assert!(run.use_simple_terrain);
         assert!(!run.greenwich);
         assert!(!run.dynamic_lake); // Non-Catchment requires variably saturated flow.

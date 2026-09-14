@@ -227,6 +227,7 @@ pub struct SinglePointSurfaceRun {
     pub use_site_topography: bool,
     /// `DEF_USE_BEDROCK` controls whether the constant restart needs bedrock state.
     pub use_bedrock: bool,
+    pub srfdata_compression: u8,
     /// `USE_SITE_dbedrock` selects a supplied site value over `bedrock.nc`.
     pub use_site_dbedrock: bool,
     /// The native `DEF_LC_YEAR` used for PFT composition and canopy height.
@@ -267,6 +268,7 @@ struct SinglePointMaterializeOptions<'a> {
     use_site_soilreflectance: bool,
     use_site_topography: bool,
     use_bedrock: bool,
+    srfdata_compression: u8,
     use_site_dbedrock: bool,
     land_cover_year: i32,
     eight_day_lai_years: &'a [i32],
@@ -369,6 +371,10 @@ pub fn single_point_surface_run_from_namelist(
     let use_site_soilreflectance = namelist_bool(&document, "USE_SITE_soilreflectance", true)?;
     let use_site_topography = namelist_bool(&document, "USE_SITE_topography", true)?;
     let use_bedrock = namelist_bool(&document, "DEF_USE_BEDROCK", false)?;
+    let srfdata_compression = compression_level_i32(
+        namelist_i32(&document, "DEF_Srfdata_CompressLevel", 1)?,
+        "DEF_Srfdata_CompressLevel",
+    )?;
     let use_site_dbedrock = namelist_bool(&document, "USE_SITE_dbedrock", true)?;
     Ok(SinglePointSurfaceRun {
         source,
@@ -389,6 +395,7 @@ pub fn single_point_surface_run_from_namelist(
         use_site_soilreflectance,
         use_site_topography,
         use_bedrock,
+        srfdata_compression,
         use_site_dbedrock,
         land_cover_year,
         eight_day_lai_years,
@@ -431,6 +438,7 @@ pub fn materialize_single_point_surface_from_namelist(
             use_site_soilreflectance: run.use_site_soilreflectance,
             use_site_topography: run.use_site_topography,
             use_bedrock: run.use_bedrock,
+            srfdata_compression: run.srfdata_compression,
             use_site_dbedrock: run.use_site_dbedrock,
             land_cover_year: run.land_cover_year,
             eight_day_lai_years: &run.eight_day_lai_years,
@@ -490,6 +498,13 @@ fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -
             .with_context(|| format!("{field} is outside CoLM's integer range")),
         Some(_) => bail!("{field} must be an integer value"),
     }
+}
+
+fn compression_level_i32(value: i32, field: &str) -> Result<u8> {
+    u8::try_from(value)
+        .ok()
+        .filter(|level| *level <= 9)
+        .with_context(|| format!("{field} must be in 0..=9, got {value}"))
 }
 
 fn single_point_lai_years(document: &colm_namelist::Document) -> Result<Vec<i32>> {
@@ -1711,6 +1726,7 @@ pub fn materialize_single_point_surface(
             use_site_soilreflectance: true,
             use_site_topography: true,
             use_bedrock: false,
+            srfdata_compression: 1,
             use_site_dbedrock: true,
             land_cover_year: 2005,
             eight_day_lai_years: &[],
@@ -1744,6 +1760,15 @@ pub fn validate_single_point_hyperspectral_albedo_directory(directory: &Path) ->
 /// avoids a second rawdata lookup in the initialization stage.  The raw source
 /// uses CoLM's x10,000 encoding, exactly as `Aggregation_SoilHyperAlbedo` does.
 pub fn append_single_point_hyperspectral_albedo(surface: &Path, directory: &Path) -> Result<()> {
+    append_single_point_hyperspectral_albedo_with_compression(surface, directory, 1)
+}
+
+pub fn append_single_point_hyperspectral_albedo_with_compression(
+    surface: &Path,
+    directory: &Path,
+    compression_level: u8,
+) -> Result<()> {
+    validate_compression_level(compression_level)?;
     validate_single_point_hyperspectral_albedo_directory(directory)?;
     let (longitude, latitude) = {
         let file = netcdf::open(surface)
@@ -1792,6 +1817,7 @@ pub fn append_single_point_hyperspectral_albedo(surface: &Path, directory: &Path
     file.redef()?;
     {
         let mut variable = file.add_variable::<f64>("soil_hyper_albedo", &["wavelength"])?;
+        apply_compression(&mut variable, compression_level)?;
         variable.put_attribute("source", "colm_input_ghsad point sample")?;
     }
     file.enddef()?;
@@ -1866,6 +1892,7 @@ fn materialize_single_point_surface_impl(
             lai_frequency,
             options.urban,
             options.use_bedrock,
+            options.srfdata_compression,
         )?;
         return Ok(None);
     }
@@ -1975,6 +2002,7 @@ fn materialize_single_point_surface_impl(
         lai_frequency,
         options.urban,
         options.use_bedrock,
+        options.srfdata_compression,
     )
     .context("cannot publish the materialized single-point surface")?;
     std::fs::remove_file(&temporary)?;
@@ -2883,6 +2911,7 @@ fn materialize_single_point_pft_fields(
         .with_context(|| format!("cannot close single-point surface {}", surface.display()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_single_point_surface(
     source: &Path,
     target: &Path,
@@ -2891,9 +2920,17 @@ fn publish_single_point_surface(
     lai_frequency: SinglePointLaiFrequency,
     urban: UrbanSurfaceOptions,
     use_bedrock: bool,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     if mode == SiteMode::Urban {
-        write_urban_single_point_surface(source, target, urban.canyon_hwr, urban.lai_year_window)
+        write_urban_single_point_surface(
+            source,
+            target,
+            urban.canyon_hwr,
+            urban.lai_year_window,
+            compression_level,
+        )
     } else {
         write_single_point_surface_with_lai_frequency(
             source,
@@ -2902,6 +2939,7 @@ fn publish_single_point_surface(
             crop_enabled,
             lai_frequency,
             use_bedrock,
+            compression_level,
         )
     }
 }
@@ -2913,6 +2951,7 @@ fn write_single_point_surface_with_lai_frequency(
     crop_enabled: bool,
     lai_frequency: SinglePointLaiFrequency,
     use_bedrock: bool,
+    compression_level: u8,
 ) -> Result<()> {
     let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
     ensure!(
@@ -2932,6 +2971,12 @@ fn write_single_point_surface_with_lai_frequency(
     let crop_surface = pft_mode && crop_enabled && scalar_i32(&input, "IGBP_classification")? == 12;
     let mut output =
         netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
+    let emit_f64 = |file: &mut netcdf::FileMut, name: &str, dimensions: &[&str], values: &[f64]| {
+        emit_f64_compressed(file, name, dimensions, values, compression_level)
+    };
+    let emit_i32 = |file: &mut netcdf::FileMut, name: &str, dimensions: &[&str], values: &[i32]| {
+        emit_i32_compressed(file, name, dimensions, values, compression_level)
+    };
     output.add_dimension(
         "patch",
         if crop_surface {
@@ -3334,6 +3379,7 @@ fn write_urban_single_point_surface(
     target: &Path,
     canyon_hwr: bool,
     lai_year_window: Option<(i32, i32)>,
+    compression_level: u8,
 ) -> Result<()> {
     let input =
         netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
@@ -3388,6 +3434,12 @@ fn write_urban_single_point_surface(
     ];
     let mut output =
         netcdf::create(target).with_context(|| format!("cannot create {}", target.display()))?;
+    let emit_f64 = |file: &mut netcdf::FileMut, name: &str, dimensions: &[&str], values: &[f64]| {
+        emit_f64_compressed(file, name, dimensions, values, compression_level)
+    };
+    let emit_i32 = |file: &mut netcdf::FileMut, name: &str, dimensions: &[&str], values: &[i32]| {
+        emit_i32_compressed(file, name, dimensions, values, compression_level)
+    };
     for (name, length) in [
         ("soil", 8),
         ("azi", 16),
@@ -3907,27 +3959,48 @@ fn emit_scalar(file: &mut netcdf::FileMut, name: &str, value: f64) -> Result<()>
     Ok(())
 }
 
-fn emit_f64(
+fn emit_f64_compressed(
     file: &mut netcdf::FileMut,
     name: &str,
     dimensions: &[&str],
     values: &[f64],
+    compression_level: u8,
 ) -> Result<()> {
     let mut variable = file.add_variable::<f64>(name, dimensions)?;
     write_surface_metadata(&mut variable, name)?;
+    if !dimensions.is_empty() {
+        apply_compression(&mut variable, compression_level)?;
+    }
     variable.put_values(values, ..)?;
     Ok(())
 }
 
-fn emit_i32(
+fn emit_i32_compressed(
     file: &mut netcdf::FileMut,
     name: &str,
     dimensions: &[&str],
     values: &[i32],
+    compression_level: u8,
 ) -> Result<()> {
     let mut variable = file.add_variable::<i32>(name, dimensions)?;
     write_surface_metadata(&mut variable, name)?;
+    if !dimensions.is_empty() {
+        apply_compression(&mut variable, compression_level)?;
+    }
     variable.put_values(values, ..)?;
+    Ok(())
+}
+
+fn apply_compression(variable: &mut netcdf::VariableMut<'_>, level: u8) -> Result<()> {
+    variable.set_compression(level.into(), false)?;
+    Ok(())
+}
+
+fn validate_compression_level(level: u8) -> Result<()> {
+    ensure!(
+        level <= 9,
+        "NetCDF compression level must be in 0..=9, got {level}"
+    );
     Ok(())
 }
 

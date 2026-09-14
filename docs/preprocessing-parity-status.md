@@ -6,6 +6,79 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Surface compression and TOPMODEL/VIC control coverage
+
+Rust surface output now honors `DEF_Srfdata_CompressLevel` (default `1`, valid
+`0..=9`), including topology pixelsets, scientific vectors, diagnostic data,
+compact single-point arrays and appended hyperspectral soil albedo. Coordinates,
+indices and scalars retain the original uncompressed exceptions; mesh
+`elmpixels` retains original fixed level `1`. Compression is set before writing
+via the existing NetCDF library, with explicit per-run arguments and no global
+setting or repacking. Compact site output is a native artifact, not an assertion
+that its container matches an original site file byte-for-byte.
+
+Exact `ncdump -sh` checks cover requested levels and metadata exceptions, including
+level-zero absence of deflate and unchanged decoded values. Retrospective
+old-behavior isolation (compression helpers temporarily disabled) fails these
+checks; helpers were restored and checks pass. This was **not a pre-edit RED
+run**. Evidence: `/tmp/colm-surface-compression-fix/`. Restart compression
+`DEF_REST_CompressLevel` remains separate missing functionality; no measured I/O
+speedup is claimed.
+
+TOPMODEL initialization now selects method `0` (fixed `0.38/0.125`, no topography
+files), method `1` (three source fields), or method `2` (four source fields).
+Single-point namelists retain original method-zero coercion. VIC initialization
+reads scalar parameters or maps the selected grid, rather than always writing
+zeros. Single-point, spatial LCT and PFT/PC share required VIC source resolution;
+scheme `1` without a usable source fails before output. Explicit conflicting VIC
+options and invalid methods also fail. Inactive TOPMODEL arrays use documented
+deterministic values, not claimed parity with original uninitialized memory.
+
+Source-derived fixtures cover selected-file reads, scalar/grid values, missing
+sentinels, runtime-path derivation and direct-driver validation. Old behavior fails
+the new selected-source/value regressions. Evidence: `/tmp/colm-runoff-init-fix/`.
+The existing unconditional `soiltext/BVIC` handling still differs from original
+scheme-dependent initialization and remains open; these bounded repairs do not
+close every runoff branch or replace original-runtime trajectory comparisons.
+
+The combined surface/runoff/SNICAR changes pass **690 integrated tests**, all-target
+Clippy, downstream CLI/kernel checks, scoped formatting and release builds of
+both preprocessors and `colm-preprocess-rs`. Independent source review approves
+the repaired source resolution, fail-fast boundaries and compression routing.
+Logs: `/tmp/colm-runoff-compression-validation/` (earlier lint failures retained).
+A frozen release smoke check rejects SNICAR-enabled cold start before output;
+the explicit non-SNICAR control completes with all **3 files / 136 decoded arrays**
+unchanged from the preceding no-snow initializer. This is not a fresh original
+Fortran runtime comparison. Evidence: `/tmp/colm-snicar-safety-guard/release-result.json`.
+
+## SNICAR remains unported and now fails explicitly
+
+Namelist-driven cold starts now reject `DEF_USE_SNICAR=.true.` rather than
+silently using non-SNICAR snow optics. This conservative temporary restriction
+also rejects snow-free enabled cases whose cold state may otherwise agree; it is
+**not SNICAR implementation**. Constant-only initialization remains available.
+Checks cover single-point, spatial LCT/PFT/PC/urban dispatch, and direct PFT/PC
+cold-time entry. Direct `spatial-pft --cold-time` validates before writing its
+constant restart, not just when the time writer is reached.
+
+A frozen pre-change initializer with SNICAR enabled returned success and wrote
+three restart files; the new executable regression rejects that substitution.
+Both targeted regressions pass, including full/direct CLI and direct library
+paths, static-only control, and retained non-SNICAR observed-state paths.
+Evidence: `/tmp/colm-snicar-safety-guard/`. Full optical-table loading, snow grain
+aging and snow-layer absorption remain required for the complete migration.
+
+## PC layer candidate was not adopted
+
+The standalone early-layer FMA/direct-division probe did not establish a safe
+production repair. Applying it to the actual TEMP PC core for the same patch
+inputs reduced mismatched public outputs from 9 to 8 out of 10, but increased
+summed absolute ULP differences from 25 to 27 and the maximum from 9 to 18.
+Production PC arithmetic is therefore unchanged. The probe artifacts and rejected
+diff are retained in `/tmp/colm-pc-core-layer-candidate-1789411093/`;
+extended-precision `tee` and subsequent transfer calculations still need separate
+source-backed diagnosis. These probes did not rerun raw-data or runtime gates.
+
 ## Dominant patch-type namelist forwarding and remaining control gaps
 
 The spatial namelist adapter now forwards `DEF_USE_DOMINANT_PATCHTYPE` to the
@@ -19,9 +92,8 @@ Clippy, downstream checks and scoped formatting pass. Evidence:
 real-data dominant-mode parity run.
 
 A broader source audit also identifies actual missing functionality, not just
-rounding or absent test coverage: surface/restart compression controls are ignored;
-TOPMODEL method selection and VIC parameter initialization are incomplete;
-SNICAR optical initialization, urban-only masking, external-lake options and
+rounding or absent test coverage: restart compression controls are ignored; runoff-dependent soil-texture/BVIC
+handling is still incomplete; SNICAR optical initialization, urban-only masking, external-lake options and
 TRACER/BGC wetland initialization still require implementation or explicit scope
 guards. These remain open and preclude an all-feature migration claim. The main
 LCT/PFT/PC numerical comparisons above do not establish these optional branches.

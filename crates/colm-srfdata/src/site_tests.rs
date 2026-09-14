@@ -4,6 +4,41 @@ fn test_suffix() -> String {
     format!("{}-{:?}", std::process::id(), std::thread::current().id())
 }
 
+fn ncdump_header(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("ncdump")
+        .arg("-sh")
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+        return None;
+    };
+    assert!(
+        output.status.success(),
+        "ncdump -sh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+}
+
+fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+            "{variable} did not have deflate level {level}\n{header}"
+        );
+    }
+}
+
+fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+    if let Some(header) = ncdump_header(path) {
+        assert!(
+            !header.contains(&format!("{variable}:_DeflateLevel")),
+            "{variable} unexpectedly had deflate metadata\n{header}"
+        );
+    }
+}
+
 #[test]
 fn the_required_list_is_the_twelve_measured_gaps() {
     // 实测：90 个 PLUMBER2 站点文件的变量集完全相同（各 39 个），
@@ -42,7 +77,7 @@ fn hyperspectral_point_sampler_adds_the_complete_site_spectrum() {
         }
     }
 
-    append_single_point_hyperspectral_albedo(&surface, &source).unwrap();
+    append_single_point_hyperspectral_albedo_with_compression(&surface, &source, 4).unwrap();
     let file = netcdf::open(&surface).unwrap();
     let values = file
         .variable("soil_hyper_albedo")
@@ -53,6 +88,38 @@ fn hyperspectral_point_sampler_adds_the_complete_site_spectrum() {
     assert_eq!(values[0], 0.04);
     assert_eq!(values[HYPERSPECTRAL_WAVELENGTHS - 1], 0.25);
     drop(file);
+    assert_deflate(&surface, "soil_hyper_albedo", 4);
+
+    let surface_zero = root.join("srfdata-zero.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(&surface_zero).unwrap();
+        for (name, value) in [("longitude", -180.0), ("latitude", 90.0)] {
+            file.add_variable::<f64>(name, &[])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    append_single_point_hyperspectral_albedo_with_compression(&surface_zero, &source, 0).unwrap();
+    assert_no_deflate(&surface_zero, "soil_hyper_albedo");
+
+    let surface_default = root.join("srfdata-default.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut file = netcdf::create(&surface_default).unwrap();
+        for (name, value) in [("longitude", -180.0), ("latitude", 90.0)] {
+            file.add_variable::<f64>(name, &[])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    append_single_point_hyperspectral_albedo(&surface_default, &source).unwrap();
+    assert_deflate(&surface_default, "soil_hyper_albedo", 1);
+
     assert!(append_single_point_hyperspectral_albedo(&surface, &source).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1469,6 +1536,7 @@ fn landtype_rawdata_fallback_and_explicit_case_override() {
         use_site_soilreflectance: true,
         use_site_topography: true,
         use_bedrock: false,
+        srfdata_compression: 1,
         use_site_dbedrock: true,
         land_cover_year: 2008,
         eight_day_lai_years: &[],
@@ -1572,6 +1640,7 @@ fn soil_rawdata_fallback_replaces_disabled_site_profiles() {
             use_site_soilreflectance: true,
             use_site_topography: true,
             use_bedrock: false,
+            srfdata_compression: 1,
             use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -1742,6 +1811,7 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
             false,
             super::SinglePointLaiFrequency::Monthly,
             true,
+            4,
         )
         .unwrap();
     }
@@ -1814,6 +1884,10 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
         "monthly leaf area index associated with PFT"
     );
     assert_eq!(attribute("soil_tkdry", "units"), "W/(m-K)");
+    drop(file);
+    assert_deflate(&output, "pfttyp", 4);
+    assert_deflate(&output, "LAI_year", 4);
+    assert_no_deflate(&output, "depth_to_bedrock");
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1877,6 +1951,7 @@ fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
         false,
         super::SinglePointLaiFrequency::EightDay,
         false,
+        1,
     )
     .unwrap();
     let audit = super::audit_with_lai_frequency(
@@ -2093,6 +2168,7 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             use_site_soilreflectance: true,
             use_site_topography: true,
             use_bedrock: false,
+            srfdata_compression: 1,
             use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -2188,6 +2264,7 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_soilreflectance: true,
             use_site_topography: true,
             use_bedrock: false,
+            srfdata_compression: 1,
             use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -2231,6 +2308,7 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
             use_site_soilreflectance: true,
             use_site_topography: true,
             use_bedrock: false,
+            srfdata_compression: 1,
             use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -2384,6 +2462,7 @@ fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
             use_site_soilreflectance: true,
             use_site_topography: true,
             use_bedrock: false,
+            srfdata_compression: 1,
             use_site_dbedrock: true,
             land_cover_year: 2008,
             eight_day_lai_years: &[],
@@ -2589,6 +2668,7 @@ fn static_rawdata_fallback_replaces_disabled_site_fields() {
         use_site_soilreflectance: false,
         use_site_topography: false,
         use_bedrock: false,
+        srfdata_compression: 1,
         use_site_dbedrock: true,
         land_cover_year: 2005,
         eight_day_lai_years: &[],
@@ -2680,7 +2760,7 @@ fn urban_surface_projection_resolves_lcz_defaults_and_the_case_lai_window() {
     prepare_urban(&source, &prepared).unwrap();
     {
         let _netcdf_guard = netcdf_write_lock().lock().unwrap();
-        write_urban_single_point_surface(&prepared, &output, false, Some((2000, 2004))).unwrap();
+        write_urban_single_point_surface(&prepared, &output, false, Some((2000, 2004)), 1).unwrap();
     }
     let file = netcdf::open(&output).unwrap();
     assert_eq!(file.dimension("LAI_year").unwrap().len(), 5);

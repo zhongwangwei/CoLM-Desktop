@@ -3384,16 +3384,19 @@ pub fn write_landpatch_scalar<T: NcTypeDescriptor + Copy>(
     topology: &SpatialTopology,
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     directory: &str,
     variable: &str,
     values: &[T],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     write_landpatch_vector_with_primary_dimension(
         landdata,
         land_cover_year,
         topology,
         land_patches,
         blocks,
+        compression_level,
         directory,
         variable,
         variable,
@@ -3413,17 +3416,20 @@ pub fn write_landpatch_vector<T: NcTypeDescriptor + Copy>(
     topology: &SpatialTopology,
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     directory: &str,
     file_stem: &str,
     variable: &str,
     values: &[T],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     write_landpatch_vector_with_primary_dimension(
         landdata,
         land_cover_year,
         topology,
         land_patches,
         blocks,
+        compression_level,
         directory,
         file_stem,
         variable,
@@ -3440,17 +3446,20 @@ pub fn write_landpft_vector<T: NcTypeDescriptor + Copy>(
     topology: &SpatialTopology,
     land_pfts: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     directory: &str,
     file_stem: &str,
     variable: &str,
     values: &[T],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     write_landpatch_vector_with_primary_dimension(
         landdata,
         land_cover_year,
         topology,
         land_pfts,
         blocks,
+        compression_level,
         directory,
         file_stem,
         variable,
@@ -3466,12 +3475,14 @@ fn write_landpatch_vector_with_primary_dimension<T: NcTypeDescriptor + Copy>(
     topology: &SpatialTopology,
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     directory: &str,
     file_stem: &str,
     variable: &str,
     primary_dimension: &str,
     values: &[T],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     ensure!(
         !directory.is_empty() && !directory.contains('/'),
@@ -3518,8 +3529,9 @@ fn write_landpatch_vector_with_primary_dimension<T: NcTypeDescriptor + Copy>(
             .collect::<Vec<_>>();
         let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
         file.add_dimension(primary_dimension, output_values.len())?;
-        file.add_variable::<T>(variable, &[primary_dimension])?
-            .put_values(&output_values, ..)?;
+        let mut var = file.add_variable::<T>(variable, &[primary_dimension])?;
+        apply_compression(&mut var, compression_level)?;
+        var.put_values(&output_values, ..)?;
         file.close()?;
     }
     Ok(())
@@ -3536,6 +3548,7 @@ pub fn write_landpatch_layered_vector(
     topology: &SpatialTopology,
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     directory: &str,
     file_stem: &str,
     variable: &str,
@@ -3543,6 +3556,7 @@ pub fn write_landpatch_layered_vector(
     layers: usize,
     values: &[f64],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(
         layers > 0,
         "layered land-patch output needs at least one layer"
@@ -3593,8 +3607,9 @@ pub fn write_landpatch_layered_vector(
         let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
         file.add_dimension(layer_name, layers)?;
         file.add_dimension("patch", output_values.len() / layers)?;
-        file.add_variable::<f64>(variable, &["patch", layer_name])?
-            .put_values(&output_values, (.., ..))?;
+        let mut var = file.add_variable::<f64>(variable, &["patch", layer_name])?;
+        apply_compression(&mut var, compression_level)?;
+        var.put_values(&output_values, (.., ..))?;
         file.close()?;
     }
     Ok(())
@@ -3611,6 +3626,7 @@ pub fn write_landpatch_3d_vector(
     topology: &SpatialTopology,
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     directory: &str,
     file_stem: &str,
     variable: &str,
@@ -3620,6 +3636,7 @@ pub fn write_landpatch_3d_vector(
     second_count: usize,
     values: &[f64],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(
         first_count > 0 && second_count > 0,
         "three-dimensional patch output needs nonzero axes"
@@ -3675,8 +3692,9 @@ pub fn write_landpatch_3d_vector(
         file.add_dimension("patch", output_values.len() / (first_count * second_count))?;
         file.add_dimension(first_name, first_count)?;
         file.add_dimension(second_name, second_count)?;
-        file.add_variable::<f64>(variable, &["patch", second_name, first_name])?
-            .put_values(&output_values, (.., .., ..))?;
+        let mut var = file.add_variable::<f64>(variable, &["patch", second_name, first_name])?;
+        apply_compression(&mut var, compression_level)?;
+        var.put_values(&output_values, (.., .., ..))?;
         file.close()?;
     }
     Ok(())
@@ -3693,7 +3711,9 @@ pub fn write_spatial_topology(
     topology: &SpatialTopology,
     land_patches: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     write_spatial_topology_with_shared(
         landdata,
         land_cover_year,
@@ -3701,6 +3721,7 @@ pub fn write_spatial_topology(
         land_patches,
         None,
         blocks,
+        compression_level,
     )
 }
 
@@ -3712,7 +3733,9 @@ pub fn write_spatial_topology_with_shared(
     land_patches: &FlatLandPatches,
     pctshared: Option<&[f64]>,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     let landdata = landdata.as_ref();
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     let (nx, ny) = blocks.dimensions()?;
@@ -3747,6 +3770,7 @@ pub fn write_spatial_topology_with_shared(
         None,
         blocks,
         &assignments,
+        compression_level,
     )?;
     write_pixelset(
         landdata,
@@ -3759,6 +3783,7 @@ pub fn write_spatial_topology_with_shared(
         pctshared,
         blocks,
         &assignments,
+        compression_level,
     )?;
     write_landpatch_scalar(
         landdata,
@@ -3766,6 +3791,7 @@ pub fn write_spatial_topology_with_shared(
         topology,
         land_patches,
         blocks,
+        compression_level,
         "landpatch",
         "patchfrac_elm",
         &fractions,
@@ -3860,7 +3886,9 @@ pub fn write_spatial_hru_topology(
     topology: &SpatialTopology,
     land_hrus: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_hrus)?;
     let assignments = element_blocks(topology, blocks)?;
@@ -3875,10 +3903,12 @@ pub fn write_spatial_hru_topology(
         None,
         blocks,
         &assignments,
+        compression_level,
     )
 }
 
 /// Write CATCHMENT patch fractions normalized within each HRU.
+#[allow(clippy::too_many_arguments)]
 pub fn write_spatial_hru_patch_fractions(
     landdata: impl AsRef<Path>,
     land_cover_year: i32,
@@ -3887,7 +3917,9 @@ pub fn write_spatial_hru_patch_fractions(
     land_patches: &FlatLandPatches,
     pctshared: Option<&[f64]>,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     let fractions = patch_subset_fractions(topology, land_hrus, land_patches, pctshared)?;
     write_landpatch_scalar(
@@ -3896,6 +3928,7 @@ pub fn write_spatial_hru_patch_fractions(
         topology,
         land_patches,
         blocks,
+        compression_level,
         "landpatch",
         "patchfrac_hru",
         &fractions,
@@ -3909,7 +3942,9 @@ pub fn write_spatial_pft_topology(
     topology: &SpatialTopology,
     land_pfts: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     write_spatial_pft_topology_with_shared(
         landdata,
         land_cover_year,
@@ -3917,6 +3952,7 @@ pub fn write_spatial_pft_topology(
         land_pfts,
         None,
         blocks,
+        compression_level,
     )
 }
 
@@ -3929,7 +3965,9 @@ pub fn write_spatial_pft_topology_with_shared(
     land_pfts: &FlatLandPatches,
     pctshared: Option<&[f64]>,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_pfts)?;
     let assignments = element_blocks(topology, blocks)?;
@@ -3944,6 +3982,7 @@ pub fn write_spatial_pft_topology_with_shared(
         pctshared,
         blocks,
         &assignments,
+        compression_level,
     )
 }
 
@@ -3955,7 +3994,9 @@ pub fn write_spatial_urban_topology(
     topology: &SpatialTopology,
     land_urban: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_urban)?;
     let assignments = element_blocks(topology, blocks)?;
@@ -3970,6 +4011,7 @@ pub fn write_spatial_urban_topology(
         None,
         blocks,
         &assignments,
+        compression_level,
     )
 }
 
@@ -3982,11 +4024,13 @@ pub fn write_spatial_urban_vector<T: NcTypeDescriptor + Copy>(
     topology: &SpatialTopology,
     land_urban: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     subdirectory: Option<&str>,
     file_stem: &str,
     variable: &str,
     values: &[T],
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     for (label, value) in [("file stem", file_stem), ("variable", variable)] {
         ensure!(
@@ -4034,8 +4078,9 @@ pub fn write_spatial_urban_vector<T: NcTypeDescriptor + Copy>(
             .collect::<Vec<_>>();
         let mut file = netcdf::create(output.join(block_filename(file_stem, x, y, blocks)?))?;
         file.add_dimension("urban", output_values.len())?;
-        file.add_variable::<T>(variable, &["urban"])?
-            .put_values(&output_values, ..)?;
+        let mut var = file.add_variable::<T>(variable, &["urban"])?;
+        apply_compression(&mut var, compression_level)?;
+        var.put_values(&output_values, ..)?;
         file.close()?;
     }
     Ok(())
@@ -4050,8 +4095,10 @@ pub fn write_spatial_urban_material(
     topology: &SpatialTopology,
     land_urban: &FlatLandPatches,
     blocks: &BlockLayout,
+    compression_level: u8,
     material: &UrbanMaterialParameters,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
     validate_patches(&topology.mesh, land_urban)?;
     let urban = land_urban.len();
@@ -4095,8 +4142,9 @@ pub fn write_spatial_urban_material(
             ("T_BUILDING_MIN", &material.room_min_k),
             ("T_BUILDING_MAX", &material.room_max_k),
         ] {
-            file.add_variable::<f64>(name, &["urban"])?
-                .put_values(&urban_scalar_block(values, &patches), ..)?;
+            let mut var = file.add_variable::<f64>(name, &["urban"])?;
+            apply_compression(&mut var, compression_level)?;
+            var.put_values(&urban_scalar_block(values, &patches), ..)?;
         }
         for (name, values) in [
             ("CV_ROOF", &material.roof_heat_capacity),
@@ -4106,8 +4154,9 @@ pub fn write_spatial_urban_material(
             ("TK_WALL", &material.wall_thermal_conductivity),
             ("TK_IMPROAD", &material.impervious_thermal_conductivity),
         ] {
-            file.add_variable::<f64>(name, &["urban", "ulev"])?
-                .put_values(&urban_layer_block(values, urban, &patches), (.., ..))?;
+            let mut var = file.add_variable::<f64>(name, &["urban", "ulev"])?;
+            apply_compression(&mut var, compression_level)?;
+            var.put_values(&urban_layer_block(values, urban, &patches), (.., ..))?;
         }
         for (name, values) in [
             ("ALB_ROOF", &material.roof_albedo),
@@ -4115,8 +4164,9 @@ pub fn write_spatial_urban_material(
             ("ALB_IMPROAD", &material.impervious_albedo),
             ("ALB_PERROAD", &material.pervious_albedo),
         ] {
-            file.add_variable::<f64>(name, &["urban", "numrad", "numsolar"])?
-                .put_values(&urban_spectral_block(values, urban, &patches), (.., .., ..))?;
+            let mut var = file.add_variable::<f64>(name, &["urban", "numrad", "numsolar"])?;
+            apply_compression(&mut var, compression_level)?;
+            var.put_values(&urban_spectral_block(values, urban, &patches), (.., .., ..))?;
         }
         file.close()?;
     }
@@ -5093,7 +5143,7 @@ fn write_mesh_blocks(
         file.add_dimension("pixel", pixels)?;
         put_i64(&mut file, "elmindex", &["element"], &ids)?;
         put_i32(&mut file, "elmnpxl", &["element"], &counts)?;
-        put_i32(&mut file, "elmpixels", &["pixel", "ncoor"], &coordinates)?;
+        put_i32_compressed(&mut file, "elmpixels", &["pixel", "ncoor"], &coordinates, 1)?;
         file.close()?;
     }
     Ok(())
@@ -5111,6 +5161,7 @@ fn write_pixelset(
     pctshared: Option<&[f64]>,
     blocks: &BlockLayout,
     assignments: &BTreeMap<i64, (usize, usize)>,
+    compression_level: u8,
 ) -> Result<()> {
     ensure!(
         element_ids.len() == starts.len()
@@ -5162,12 +5213,12 @@ fn write_pixelset(
         }
         let mut file = netcdf::create(directory.join(block_filename(name, x, y, blocks)?))?;
         file.add_dimension(name, ids.len())?;
-        put_i64(&mut file, "eindex", &[name], &ids)?;
-        put_i32(&mut file, "ipxstt", &[name], &starts_out)?;
-        put_i32(&mut file, "ipxend", &[name], &ends_out)?;
-        put_i32(&mut file, "settyp", &[name], &types)?;
+        put_i64_compressed(&mut file, "eindex", &[name], &ids, compression_level)?;
+        put_i32_compressed(&mut file, "ipxstt", &[name], &starts_out, compression_level)?;
+        put_i32_compressed(&mut file, "ipxend", &[name], &ends_out, compression_level)?;
+        put_i32_compressed(&mut file, "settyp", &[name], &types, compression_level)?;
         if let Some(shared) = shared {
-            put_f64(&mut file, "pctshared", &[name], &shared)?;
+            put_f64_compressed(&mut file, "pctshared", &[name], &shared, compression_level)?;
         }
         file.close()?;
     }
@@ -5215,6 +5266,58 @@ fn put_f64(
 ) -> Result<()> {
     file.add_variable::<f64>(name, dimensions)?
         .put_values(values, ..)?;
+    Ok(())
+}
+
+fn apply_compression(variable: &mut netcdf::VariableMut<'_>, level: u8) -> Result<()> {
+    variable.set_compression(level.into(), false)?;
+    Ok(())
+}
+
+fn validate_compression_level(level: u8) -> Result<()> {
+    ensure!(
+        level <= 9,
+        "NetCDF compression level must be in 0..=9, got {level}"
+    );
+    Ok(())
+}
+
+fn put_f64_compressed(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[f64],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<f64>(name, dimensions)?;
+    apply_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
+    Ok(())
+}
+
+fn put_i32_compressed(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[i32],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<i32>(name, dimensions)?;
+    apply_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
+    Ok(())
+}
+
+fn put_i64_compressed(
+    file: &mut netcdf::FileMut,
+    name: &str,
+    dimensions: &[&str],
+    values: &[i64],
+    compression_level: u8,
+) -> Result<()> {
+    let mut variable = file.add_variable::<i64>(name, dimensions)?;
+    apply_compression(&mut variable, compression_level)?;
+    variable.put_values(values, ..)?;
     Ok(())
 }
 

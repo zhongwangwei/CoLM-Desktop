@@ -234,13 +234,14 @@ fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
         HydraulicModel::VanGenuchten,
     );
     config.use_topmodel = true;
+    config.topmodel_method = 1;
     config.use_simple_terrain = true;
     let files = write_spatial_lct_constant_restart(config).unwrap();
 
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.0]);
     assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.4]);
-    assert_eq!(values_f64(&block, "mu_twi").unwrap(), [7.0]);
+    assert_eq!(values_f64(&block, "mu_twi").unwrap(), [6.95]);
     assert_eq!(values_f64(&block, "cur_patches").unwrap(), [0.25]);
     assert_eq!(
         values_f64(&block, "slp_type_patches").unwrap(),
@@ -250,6 +251,124 @@ fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
         values_f64(&block, "asp_type_patches").unwrap(),
         [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_runoff_topmodel_methods_read_only_their_selected_sources() {
+    let root = temp_dir("runoff-topmodel");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    let restart = root.join("restart");
+
+    let mut method0 = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    method0.use_topmodel = true;
+    let block = netcdf::open(write_spatial_lct_constant_restart(method0).unwrap().block).unwrap();
+    assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.38]);
+    assert_eq!(values_f64(&block, "fsatdcf").unwrap(), [0.125]);
+    assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.27]);
+    drop(block);
+
+    for (name, value) in [
+        ("mean_twi_patches", 9.0),
+        ("fsatmax_patches", 0.4),
+        ("fsatdcf_patches", 0.3),
+    ] {
+        write_f64(&landdata, "topography", name, name, 2005, "w180_s90", value);
+    }
+    let restart_method1 = root.join("restart-method1");
+    let mut method1 = method0;
+    method1.restart_dir = &restart_method1;
+    method1.topmodel_method = 1;
+    let block = netcdf::open(write_spatial_lct_constant_restart(method1).unwrap().block).unwrap();
+    assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.0]);
+    assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.4]);
+    assert_eq!(values_f64(&block, "fsatdcf").unwrap(), [0.3]);
+    assert_eq!(values_f64(&block, "alp_twi").unwrap(), [1.34]);
+    drop(block);
+
+    for (name, value) in [
+        ("alp_twi_patches", 1.5),
+        ("chi_twi_patches", 1.0),
+        ("mu_twi_patches", 7.0),
+    ] {
+        write_f64(&landdata, "topography", name, name, 2005, "w180_s90", value);
+    }
+    let restart_method2 = root.join("restart-method2");
+    let mut method2 = method0;
+    method2.restart_dir = &restart_method2;
+    method2.topmodel_method = 2;
+    let block = netcdf::open(write_spatial_lct_constant_restart(method2).unwrap().block).unwrap();
+    assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.0]);
+    assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.38]);
+    assert_eq!(values_f64(&block, "alp_twi").unwrap(), [1.5]);
+    assert_eq!(values_f64(&block, "mu_twi").unwrap(), [7.0]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_vic_scalar_and_grid_parameters_follow_runoff_scheme_one() {
+    let root = temp_dir("runoff-vic");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    let scalar = root.join("vic_para.txt");
+    std::fs::write(&scalar, "header\n0.11 12.0 0.33 0.44 2.5\n").unwrap();
+    let restart_scalar = root.join("restart-scalar");
+    let mut config = SpatialLctStaticConfig::new(
+        &landdata,
+        &restart_scalar,
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    );
+    config.vic_parameters = VicParameterSource::ScalarFile(&scalar);
+    let block = netcdf::open(write_spatial_lct_constant_restart(config).unwrap().block).unwrap();
+    assert_eq!(values_f64(&block, "vic_b_infilt").unwrap(), [0.11]);
+    assert_eq!(values_f64(&block, "vic_Dsmax").unwrap(), [12.0]);
+    assert_eq!(values_f64(&block, "vic_Ds").unwrap(), [0.33]);
+    assert_eq!(values_f64(&block, "vic_Ws").unwrap(), [0.44]);
+    assert_eq!(values_f64(&block, "vic_c").unwrap(), [2.5]);
+    drop(block);
+
+    let grid = root.join("vic_para.nc");
+    write_vic_grid(&grid, &[1.0, 3.0], &[10.0, 14.0], &[0.2, 0.4], &[0.5, 0.7]);
+    let restart_grid = root.join("restart-grid");
+    let mut grid_config = config;
+    grid_config.restart_dir = &restart_grid;
+    grid_config.vic_parameters = VicParameterSource::GridFile(&grid);
+    let block = netcdf::open(
+        write_spatial_lct_constant_restart(grid_config)
+            .unwrap()
+            .block,
+    )
+    .unwrap();
+    assert_eq!(values_f64(&block, "vic_b_infilt").unwrap(), [2.0]);
+    assert_eq!(values_f64(&block, "vic_Dsmax").unwrap(), [12.0]);
+    assert_eq!(values_f64(&block, "vic_Ds").unwrap(), [0.3]);
+    assert_eq!(values_f64(&block, "vic_Ws").unwrap(), [0.6]);
+    assert_eq!(values_f64(&block, "vic_c").unwrap(), [2.0]);
+
+    let bad = root.join("bad_vic.txt");
+    std::fs::write(&bad, "9 9 9 9 9\n1 2 3 4\n").unwrap();
+    let restart_bad = root.join("restart-bad");
+    let mut bad_config = grid_config;
+    bad_config.restart_dir = &restart_bad;
+    bad_config.vic_parameters = VicParameterSource::ScalarFile(&bad);
+    assert!(write_spatial_lct_constant_restart(bad_config).is_err());
+
+    let mut conflicting = config;
+    conflicting.use_topmodel = true;
+    assert!(write_spatial_lct_constant_restart(conflicting).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -357,7 +476,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n DEF_Runoff_SCHEME = 0\n DEF_USE_Forcing_Downscaling_Simple = .true.\n/\n",
+        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n DEF_Runoff_SCHEME = 0\n DEF_TOPMOD_method = 1\n DEF_USE_Forcing_Downscaling_Simple = .true.\n/\n",
     )
     .unwrap();
 
@@ -1599,6 +1718,27 @@ fn write_layered_f64(landdata: &Path, stem: &str, variable: &str, values: &[f64]
         .unwrap()
         .put_values(values, (.., ..))
         .unwrap();
+    file.close().unwrap();
+}
+
+fn write_vic_grid(path: &Path, b: &[f64], dsmax: &[f64], ds: &[f64], ws: &[f64]) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[0.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-179.5, -178.5], ..)
+        .unwrap();
+    for (name, values) in [("b", b), ("DsM", dsmax), ("Ds", ds), ("Ws", ws)] {
+        file.add_variable::<f64>(name, &["lat", "lon"])
+            .unwrap()
+            .put_values(values, (.., ..))
+            .unwrap();
+    }
     file.close().unwrap();
 }
 

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
+use crate::crop::{map_field_2d, AreaMapping, MapGrid};
 use crate::single_point::{patch_type, BVIC_USDA, IGBP_BOTTOM, IGBP_TOP, USGS_BOTTOM, USGS_TOP};
 use crate::{
     colm_soil_grid, derive_bedrock, derive_igbp_canopy, derive_lake_layers,
@@ -37,6 +38,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub use_hyperspectral: bool,
     /// Write the TOPMODEL vectors required by `DEF_Runoff_SCHEME = 0`.
     pub use_topmodel: bool,
+    pub topmodel_method: i32,
+    pub vic_parameters: VicParameterSource<'a>,
     /// Write the nine-aspect vectors required by simple forcing downscaling.
     pub use_simple_terrain: bool,
     /// Write the four slope-type and shadow-curve vectors required by regular forcing downscaling.
@@ -65,19 +68,75 @@ impl<'a> SpatialLctStaticConfig<'a> {
             use_bedrock: false,
             use_hyperspectral: false,
             use_topmodel: false,
+            topmodel_method: 0,
+            vic_parameters: VicParameterSource::None,
             use_simple_terrain: false,
             use_regular_terrain: false,
         }
     }
 }
 
-struct TopmodelSurfaceFields {
-    topographic_index: Vec<f64>,
-    saturated_fraction_max: Vec<f64>,
-    saturated_fraction_decay: Vec<f64>,
-    alpha_twi: Vec<f64>,
-    chi_twi: Vec<f64>,
-    mu_twi: Vec<f64>,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VicParameters {
+    pub b_infilt: f64,
+    pub dsmax: f64,
+    pub ds: f64,
+    pub ws: f64,
+    pub c: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VicParameterSource<'a> {
+    None,
+    ScalarFile(&'a Path),
+    GridFile(&'a Path),
+}
+
+pub fn resolve_vic_parameter_file(
+    document: &colm_namelist::Document,
+    use_grid: bool,
+) -> Result<PathBuf> {
+    let (field, suffix) = if use_grid {
+        ("DEF_file_VIC_OPT", "vic/vic_para.nc")
+    } else {
+        ("DEF_file_VIC_para", "vic/vic_para.txt")
+    };
+    if let Some(colm_namelist::Value::Str(value)) = document.get(field) {
+        let value = value.trim();
+        if !value.is_empty() && !value.eq_ignore_ascii_case("null") {
+            return Ok(PathBuf::from(value));
+        }
+    } else if document.get(field).is_some() {
+        anyhow::bail!("{field} must be a quoted string");
+    }
+    match document.get("DEF_dir_runtime") {
+        Some(colm_namelist::Value::Str(value))
+            if !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null") =>
+        {
+            Ok(PathBuf::from(value.trim()).join(suffix))
+        }
+        Some(colm_namelist::Value::Str(_)) | None => {
+            anyhow::bail!("{field} or DEF_dir_runtime must be set for DEF_Runoff_SCHEME=1")
+        }
+        Some(_) => anyhow::bail!("DEF_dir_runtime must be a quoted string"),
+    }
+}
+
+pub(crate) struct TopmodelSurfaceFields {
+    pub(crate) topographic_index: Vec<f64>,
+    pub(crate) saturated_fraction_max: Vec<f64>,
+    pub(crate) saturated_fraction_decay: Vec<f64>,
+    pub(crate) alpha_twi: Vec<f64>,
+    pub(crate) chi_twi: Vec<f64>,
+    pub(crate) mu_twi: Vec<f64>,
+}
+
+pub(crate) struct VicSurfaceFields {
+    pub(crate) b_infilt: Vec<f64>,
+    pub(crate) dsmax: Vec<f64>,
+    pub(crate) ds: Vec<f64>,
+    pub(crate) ws: Vec<f64>,
+    pub(crate) c: Vec<f64>,
 }
 
 struct SimpleTerrainSurfaceFields {
@@ -113,6 +172,15 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     ensure!(
         !config.use_regular_terrain || !config.use_simple_terrain,
         "regular and simple forcing downscaling cannot share one constant restart"
+    );
+    ensure!(
+        !config.use_topmodel || matches!(config.vic_parameters, VicParameterSource::None),
+        "DEF_Runoff_SCHEME cannot enable TOPMODEL and VIC parameters at the same time"
+    );
+    ensure!(
+        !config.use_topmodel || (0..=2).contains(&config.topmodel_method),
+        "DEF_TOPMOD_method must be 0, 1, or 2; got {}",
+        config.topmodel_method
     );
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let patch_kind = patches
@@ -168,7 +236,6 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         Some(canopy) => canopy,
         None => read_canopy(config, &patches.class, &patch_kind, patch_count)?,
     };
-    let zeros = vec![0.0; patch_count];
     // Virtual WMO patches retain geometry but do not contribute to aggregation.
     let mask = patches
         .start
@@ -281,6 +348,8 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         .use_topmodel
         .then(|| read_topmodel(config, patch_count))
         .transpose()?;
+    let vic = read_vic_parameters(config, &patches)?;
+    let zeros = vec![0.0; patch_count];
     let simple_terrain = config
         .use_simple_terrain
         .then(|| read_simple_terrain(config, patch_count, dimensions.aspect_types))
@@ -314,11 +383,15 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
                 albedo,
                 bvic: &bvic,
                 soil_texture: &texture,
-                vic_b_infilt: &zeros,
-                vic_dsmax: &zeros,
-                vic_ds: &zeros,
-                vic_ws: &zeros,
-                vic_c: &zeros,
+                vic_b_infilt: vic
+                    .as_ref()
+                    .map_or(zeros.as_slice(), |fields| &fields.b_infilt),
+                vic_dsmax: vic
+                    .as_ref()
+                    .map_or(zeros.as_slice(), |fields| &fields.dsmax),
+                vic_ds: vic.as_ref().map_or(zeros.as_slice(), |fields| &fields.ds),
+                vic_ws: vic.as_ref().map_or(zeros.as_slice(), |fields| &fields.ws),
+                vic_c: vic.as_ref().map_or(zeros.as_slice(), |fields| &fields.c),
                 elevation_mean_m: &elevation,
                 elevation_std_m: &elevation_std,
                 slope_ratio: &slope,
@@ -361,6 +434,7 @@ fn read_topmodel(
     config: SpatialLctStaticConfig<'_>,
     patches: usize,
 ) -> Result<TopmodelSurfaceFields> {
+    let defaults = topmodel_defaults(patches);
     let read = |stem| {
         read_f64(
             config.landdata,
@@ -372,13 +446,128 @@ fn read_topmodel(
             patches,
         )
     };
-    Ok(TopmodelSurfaceFields {
-        topographic_index: read("mean_twi_patches")?,
-        saturated_fraction_max: read("fsatmax_patches")?,
-        saturated_fraction_decay: read("fsatdcf_patches")?,
-        alpha_twi: read("alp_twi_patches")?,
-        chi_twi: read("chi_twi_patches")?,
-        mu_twi: read("mu_twi_patches")?,
+    match config.topmodel_method {
+        0 => Ok(defaults),
+        1 => Ok(TopmodelSurfaceFields {
+            topographic_index: read("mean_twi_patches")?,
+            saturated_fraction_max: read("fsatmax_patches")?,
+            saturated_fraction_decay: read("fsatdcf_patches")?,
+            ..defaults
+        }),
+        2 => Ok(TopmodelSurfaceFields {
+            topographic_index: read("mean_twi_patches")?,
+            alpha_twi: read("alp_twi_patches")?,
+            chi_twi: read("chi_twi_patches")?,
+            mu_twi: read("mu_twi_patches")?,
+            ..defaults
+        }),
+        value => anyhow::bail!("DEF_TOPMOD_method must be 0, 1, or 2; got {value}"),
+    }
+}
+
+pub(crate) fn topmodel_defaults(patches: usize) -> TopmodelSurfaceFields {
+    // ponytail: deterministic inactive TOPMODEL slots; upstream mkinidata leaves
+    // some method-inactive arrays unassigned before writing them.
+    TopmodelSurfaceFields {
+        topographic_index: vec![9.27; patches],
+        saturated_fraction_max: vec![0.38; patches],
+        saturated_fraction_decay: vec![0.125; patches],
+        alpha_twi: vec![1.34; patches],
+        chi_twi: vec![1.61; patches],
+        mu_twi: vec![6.95; patches],
+    }
+}
+
+pub(crate) fn read_vic_scalar_file(path: &Path) -> Result<VicParameters> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read VIC parameter file {}", path.display()))?;
+    let line = text.lines().nth(1).with_context(|| {
+        format!(
+            "{} must contain a header and one VIC parameter line",
+            path.display()
+        )
+    })?;
+    let data = line
+        .split_whitespace()
+        .map(|value| value.replace(['d', 'D'], "e").parse::<f64>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| {
+            format!(
+                "{} second line must contain five VIC parameters",
+                path.display()
+            )
+        })?;
+    ensure!(
+        data.len() == 5 && data.iter().all(|value| value.is_finite()),
+        "{} second line must contain five finite VIC parameters",
+        path.display()
+    );
+    Ok(VicParameters {
+        b_infilt: data[0],
+        dsmax: data[1],
+        ds: data[2],
+        ws: data[3],
+        c: data[4],
+    })
+}
+
+pub(crate) fn constant_vic_fields(parameters: VicParameters, patches: usize) -> VicSurfaceFields {
+    VicSurfaceFields {
+        b_infilt: vec![parameters.b_infilt; patches],
+        dsmax: vec![parameters.dsmax; patches],
+        ds: vec![parameters.ds; patches],
+        ws: vec![parameters.ws; patches],
+        c: vec![parameters.c; patches],
+    }
+}
+
+fn read_vic_parameters(
+    config: SpatialLctStaticConfig<'_>,
+    patches: &Patches,
+) -> Result<Option<VicSurfaceFields>> {
+    match config.vic_parameters {
+        VicParameterSource::None => Ok(None),
+        VicParameterSource::ScalarFile(path) => Ok(Some(constant_vic_fields(
+            read_vic_scalar_file(path)?,
+            patches.class.len(),
+        ))),
+        VicParameterSource::GridFile(path) => read_vic_grid(path, config, patches).map(Some),
+    }
+}
+
+fn read_vic_grid(
+    path: &Path,
+    config: SpatialLctStaticConfig<'_>,
+    patches: &Patches,
+) -> Result<VicSurfaceFields> {
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open gridded VIC parameter file {}", path.display()))?;
+    let grid = MapGrid::from_file(&file)?;
+    let pixels = read_spatial_pixel_sets(
+        config.landdata,
+        config.land_cover_year,
+        config.block_label,
+        &patches.element,
+        &patches.start,
+        &patches.end,
+        &patches.shared_fraction,
+        "VIC landpatch",
+    )?;
+    let mapping = AreaMapping::new(&grid, &pixels)?;
+    let required = |name| -> Result<Vec<f64>> {
+        mapping
+            .average(&map_field_2d(&file, name, &grid)?)?
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .with_context(|| format!("gridded VIC parameter {name} has no mapped area"))
+    };
+    let patches = mapping.len();
+    Ok(VicSurfaceFields {
+        b_infilt: required("b")?,
+        ws: required("Ws")?,
+        ds: required("Ds")?,
+        dsmax: required("DsM")?,
+        c: vec![2.0; patches],
     })
 }
 

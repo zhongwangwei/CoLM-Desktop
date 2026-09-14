@@ -539,7 +539,9 @@ pub fn write_patch_diagnostic(
     type_indices: &[i32],
     mapped: &MappedDiagnostic,
     missing: f64,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(!name.is_empty(), "diagnostic variable name cannot be empty");
     ensure!(
         mapped.ntypes == type_indices.len() && mapped_shape_is_valid(mapped),
@@ -620,6 +622,7 @@ pub fn write_patch_diagnostic(
     );
     if mapped.ntypes > 1 {
         let mut variable = file.add_variable::<f64>(name, &["TypeIndex", "lat", "lon"])?;
+        apply_compression(&mut variable, compression_level)?;
         if mapped.sparse.is_some() {
             variable.set_fill_value(mapped.fill_value)?;
             write_sparse_static(&mut variable, mapped, true)?;
@@ -628,6 +631,7 @@ pub fn write_patch_diagnostic(
         }
         variable.put_attribute("missing_value", missing)?;
         let mut grid = file.add_variable::<f64>(&format!("{name}_grid"), &["lat", "lon"])?;
+        apply_compression(&mut grid, compression_level)?;
         if mapped.sparse.is_some() {
             grid.set_fill_value(mapped.fill_value)?;
             write_sparse_static(&mut grid, mapped, false)?;
@@ -637,6 +641,7 @@ pub fn write_patch_diagnostic(
         grid.put_attribute("missing_value", missing)?;
     } else {
         let mut variable = file.add_variable::<f64>(name, &["lat", "lon"])?;
+        apply_compression(&mut variable, compression_level)?;
         if mapped.sparse.is_some() {
             variable.set_fill_value(mapped.fill_value)?;
             write_sparse_static(&mut variable, mapped, false)?;
@@ -665,7 +670,9 @@ pub fn write_patch_diagnostic_time(
     pctshared: Option<&[f64]>,
     missing: f64,
     default: Option<f64>,
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     let records = (1..=i32::try_from(frames.len())?).collect::<Vec<_>>();
     write_patch_diagnostic_dimension(
         path,
@@ -680,6 +687,7 @@ pub fn write_patch_diagnostic_time(
         default,
         "Itime",
         &records,
+        compression_level,
     )
 }
 
@@ -702,7 +710,9 @@ pub fn write_patch_diagnostic_dimension(
     default: Option<f64>,
     dimension: &str,
     dimension_values: &[i32],
+    compression_level: u8,
 ) -> Result<()> {
+    validate_compression_level(compression_level)?;
     ensure!(!name.is_empty(), "diagnostic variable name cannot be empty");
     ensure!(
         !frames.is_empty(),
@@ -838,6 +848,7 @@ pub fn write_patch_diagnostic_dimension(
     if first.ntypes > 1 {
         let mut variable =
             file.add_variable::<f64>(name, &[dimension, "TypeIndex", "lat", "lon"])?;
+        apply_compression(&mut variable, compression_level)?;
         if first.sparse.is_some() {
             variable.set_fill_value(first.fill_value)?;
             for (record, frame) in mapped.iter().enumerate() {
@@ -853,6 +864,7 @@ pub fn write_patch_diagnostic_dimension(
         variable.put_attribute("missing_value", missing)?;
         let mut all_type =
             file.add_variable::<f64>(&format!("{name}_grid"), &[dimension, "lat", "lon"])?;
+        apply_compression(&mut all_type, compression_level)?;
         if first.sparse.is_some() {
             all_type.set_fill_value(first.fill_value)?;
             for (record, frame) in mapped.iter().enumerate() {
@@ -868,6 +880,7 @@ pub fn write_patch_diagnostic_dimension(
         all_type.put_attribute("missing_value", missing)?;
     } else {
         let mut variable = file.add_variable::<f64>(name, &[dimension, "lat", "lon"])?;
+        apply_compression(&mut variable, compression_level)?;
         if first.sparse.is_some() {
             variable.set_fill_value(first.fill_value)?;
             for (record, frame) in mapped.iter().enumerate() {
@@ -1033,6 +1046,19 @@ fn put_coordinate(
     Ok(())
 }
 
+fn apply_compression(variable: &mut netcdf::VariableMut<'_>, level: u8) -> Result<()> {
+    variable.set_compression(level.into(), false)?;
+    Ok(())
+}
+
+fn validate_compression_level(level: u8) -> Result<()> {
+    ensure!(
+        level <= 9,
+        "NetCDF compression level must be in 0..=9, got {level}"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1075,6 +1101,41 @@ mod tests {
             pixel_end: vec![1, 1],
             set_type: vec![1, 2],
             element_index: vec![1, 2],
+        }
+    }
+
+    fn ncdump_header(path: &std::path::Path) -> Option<String> {
+        let output = std::process::Command::new("ncdump")
+            .arg("-sh")
+            .arg(path)
+            .output();
+        let Ok(output) = output else {
+            eprintln!("skipping NetCDF compression metadata check: ncdump not found on PATH");
+            return None;
+        };
+        assert!(
+            output.status.success(),
+            "ncdump -sh failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(String::from_utf8(output.stdout).expect("ncdump header is utf8"))
+    }
+
+    fn assert_deflate(path: &std::path::Path, variable: &str, level: u8) {
+        if let Some(header) = ncdump_header(path) {
+            assert!(
+                header.contains(&format!("{variable}:_DeflateLevel = {level} ;")),
+                "{variable} did not have deflate level {level}\n{header}"
+            );
+        }
+    }
+
+    fn assert_no_deflate(path: &std::path::Path, variable: &str) {
+        if let Some(header) = ncdump_header(path) {
+            assert!(
+                !header.contains(&format!("{variable}:_DeflateLevel")),
+                "{variable} unexpectedly had deflate metadata\n{header}"
+            );
         }
     }
 
@@ -1162,7 +1223,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        write_patch_diagnostic(&path, "field", &[1, 2], &mapped, DIAGNOSTIC_MISSING).unwrap();
+        write_patch_diagnostic(&path, "field", &[1, 2], &mapped, DIAGNOSTIC_MISSING, 1).unwrap();
         let file = netcdf::open(&path).unwrap();
         use netcdf::types::{FloatType, NcVariableType};
         assert_eq!(
@@ -1214,6 +1275,47 @@ mod tests {
                 .unwrap(),
             vec![2.0]
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnostic_data_variables_obey_deflate_level_but_coordinates_do_not() {
+        let path = std::env::temp_dir().join(format!(
+            "colm-srfdata-diagnostic-compression-{}-{}.nc",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mapped = map_patch_diagnostic(
+            &topology(),
+            &patches(),
+            &[1.0, 3.0],
+            &[1, 2],
+            DiagnosticStatistic::Mean,
+            None,
+            DIAGNOSTIC_MISSING,
+            Some(0.0),
+        )
+        .unwrap();
+        write_patch_diagnostic(&path, "field", &[1, 2], &mapped, DIAGNOSTIC_MISSING, 4).unwrap();
+
+        assert_deflate(&path, "field", 4);
+        assert_deflate(&path, "field_grid", 4);
+        assert_no_deflate(&path, "TypeIndex");
+        assert_no_deflate(&path, "lon");
+        assert_no_deflate(&path, "lat");
+
+        assert!(write_patch_diagnostic(
+            path.with_extension("bad.nc"),
+            "bad",
+            &[1, 2],
+            &mapped,
+            DIAGNOSTIC_MISSING,
+            10,
+        )
+        .is_err());
         let _ = std::fs::remove_file(path);
     }
 
@@ -1289,6 +1391,7 @@ mod tests {
             &[1, 2, 3, 4, 5],
             &mapped,
             DIAGNOSTIC_MISSING,
+            1,
         )
         .unwrap();
         let file = netcdf::open(&path).unwrap();
@@ -1323,6 +1426,7 @@ mod tests {
             None,
             DIAGNOSTIC_MISSING,
             Some(0.0),
+            1,
         )
         .unwrap();
         let file = netcdf::open(&path).unwrap();
@@ -1367,6 +1471,7 @@ mod tests {
             Some(0.0),
             "ulev",
             &[1, 2],
+            1,
         )
         .unwrap();
         write_patch_diagnostic_dimension(
@@ -1382,6 +1487,7 @@ mod tests {
             Some(0.0),
             "ulev",
             &[1, 2],
+            1,
         )
         .unwrap();
         let file = netcdf::open(&path).unwrap();
