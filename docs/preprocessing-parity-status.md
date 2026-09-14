@@ -683,3 +683,31 @@ tests pass. Changed-file formatting, both-crate all-target Clippy with warnings
 denied, downstream kernel/CLI checks and release builds pass. Independent source
 reviews approved the bounded LULCC and diagnostic repairs. The full scientific
 migration gate, including the 48 fitted soil fields above, remains failing.
+
+## Fixed-monthly initializer LAI year selection
+
+`MOD_Initialize` selects either the simulation year or fixed land-cover year,
+then `MOD_LAIReadin` clamps **either** choice to the configured LAI interval.
+Rust previously clamped only the simulation-year path, so fixed monthly LCT,
+PFT and PC could request an unavailable year. The shared spatial namelist
+selector now clamps after selection; the single-point selector already did this.
+The existing regression now covers both interval ends, in-range fixed years,
+8-day LCT, PFT/PC and LULCC without adding a second fixture.
+
+A real-input executable check is in `/tmp/colm-init-lai-clamp-original/` and
+`/tmp/colm-init-lai-clamp-rust/`. The unchanged original non-LULCC PFT/WMO
+surface builder uses LC2005 topology and actual MOD2004 monthly inputs, with
+`DEF_LAI_START_YEAR=DEF_LAI_END_YEAR=2004`; surface preparation uses yearly LAI.
+Initialization then selects **fixed** monthly LAI, still requiring the 2004
+files. The saved old Rust executable fails looking for `LAI/2005/LAI_patches01`;
+the corrected executable completes with the original surface and all five
+restart schemas / 164 variables pass `atol=rtol=1e-12` (148 bitwise). The raw
+2004 data are not fabricated or renamed climate data. Both executable logs,
+namelists, hashes, comparison script and before-failure evidence are retained.
+This is a year-routing and isolated initializer check, not full historical
+surface or nonlinear-soil-fit parity.
+
+For this initializer repair, all 89 library + 12 binary tests, nine opt-in
+Fortran reference checks and six native executable/pipeline checks pass, along
+with Clippy, downstream checks and a release build. Logs are in
+`/tmp/colm-historical-migration/`; the independent source review found no issue.

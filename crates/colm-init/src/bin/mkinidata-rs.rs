@@ -566,13 +566,15 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         lai_start_year <= lai_end_year,
         "DEF_LAI_START_YEAR must not exceed DEF_LAI_END_YEAR"
     );
+    // MOD_LAIReadin clamps either selected year, including fixed monthly LAI.
     let lai_year = if lai_frequency == LaiFrequency::EightDay
         || namelist_bool(&document, "DEF_LAI_CHANGE_YEARLY", true)?
     {
-        simulation_year.max(lai_start_year).min(lai_end_year)
+        simulation_year
     } else {
         land_cover_year
-    };
+    }
+    .clamp(lai_start_year, lai_end_year);
     let hydraulic_model = if namelist_bool(&document, "DEF_USE_Campbell_SOIL_MODEL", false)? {
         HydraulicModel::Campbell
     } else {
@@ -1299,23 +1301,61 @@ mod tests {
     }
 
     #[test]
-    fn spatial_lct_8_day_case_uses_the_clamped_simulation_year() {
-        let root = std::env::temp_dir().join(format!("colm-init-eight-day-{}", std::process::id()));
+    fn spatial_case_clamps_monthly_and_eight_day_lai_years() {
+        let root = std::env::temp_dir().join(format!("colm-init-lai-year-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let namelist = root.join("case.nml");
-        std::fs::write(
-            &namelist,
-            format!(
-                "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LAI_MONTHLY=.false.\n DEF_LAI_CHANGE_YEARLY=.false.\n DEF_LC_YEAR=2001\n DEF_simulation_time%start_year=2007\n DEF_LAI_START_YEAR=2000\n DEF_LAI_END_YEAR=2006\n/\n",
-                root.display()
-            ),
-        )
-        .unwrap();
-
-        let run = spatial_namelist_run(&namelist).unwrap();
-        assert_eq!(run.lai_frequency, LaiFrequency::EightDay);
-        assert_eq!(run.lai_year, 2006);
+        for (mode, monthly, lulcc, lc_year, expected) in [
+            ("LCT", false, false, 2001, 2006),
+            ("LCT", true, false, 2001, 2001),
+            ("LCT", true, false, 1995, 2000),
+            ("LCT", true, false, 2010, 2006),
+            ("PFT", true, false, 1995, 2000),
+            ("PC", true, false, 2010, 2006),
+            ("PFT", true, true, 2001, 2006),
+        ] {
+            std::fs::write(
+                &namelist,
+                format!(
+                    "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_file_mesh='mesh.nc'
+ DEF_USE_LCT=.{}.
+ DEF_USE_PFT=.{}.
+ DEF_USE_PC=.{}.
+ DEF_USE_LULCC=.{lulcc}.
+ DEF_LAI_MONTHLY=.{monthly}.
+ DEF_LAI_CHANGE_YEARLY=.false.
+ DEF_LC_YEAR={lc_year}
+ DEF_simulation_time%start_year=2007
+ DEF_LAI_START_YEAR=2000
+ DEF_LAI_END_YEAR=2006
+/
+",
+                    root.display(),
+                    mode == "LCT",
+                    mode == "PFT",
+                    mode == "PC",
+                ),
+            )
+            .unwrap();
+            let run = spatial_namelist_run(&namelist).unwrap();
+            assert_eq!(run.land_cover_year, if lulcc { 2007 } else { lc_year });
+            assert_eq!(
+                run.lai_year, expected,
+                "{mode} monthly={monthly} lulcc={lulcc} lc={lc_year}"
+            );
+            assert_eq!(
+                run.lai_frequency,
+                if monthly {
+                    LaiFrequency::Monthly
+                } else {
+                    LaiFrequency::EightDay
+                }
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
