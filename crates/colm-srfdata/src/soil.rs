@@ -440,8 +440,9 @@ impl VgmProblem {
             for cell in 0..cells {
                 let theta = (1.0 + (input.alpha[cell] * pressure).powf(input.n[cell]))
                     .powf(1.0 / input.n[cell] - 1.0);
+                // The original array expression contracts this final product.
                 let observed =
-                    input.theta_r[cell] + (input.theta_s[cell] - input.theta_r[cell]) * theta;
+                    (input.theta_s[cell] - input.theta_r[cell]).mul_add(theta, input.theta_r[cell]);
                 let observed_k = input.k_s[cell]
                     * theta.powf(input.l[cell])
                     * (1.0
@@ -467,7 +468,9 @@ impl LeastSquaresProblem for VgmProblem {
             return false;
         }
         for (index, pressure) in VGM_PRESSURES.iter().copied().enumerate() {
-            let mut value = 0.0;
+            // Upstream adds two independently accumulated SUMs.
+            let mut retention = 0.0;
+            let mut conductivity = 0.0;
             let fitted = x[0]
                 + (self.phi - x[0]) * (1.0 + (x[1] * pressure).powf(x[2])).powf(1.0 / x[2] - 1.0);
             let base = 1.0 + (x[1] * pressure).powf(x[2]);
@@ -478,10 +481,10 @@ impl LeastSquaresProblem for VgmProblem {
             for &[observed, observed_log_k] in
                 &self.samples[index * self.cells..(index + 1) * self.cells]
             {
-                value += ((fitted - observed) / self.phi).powi(2);
-                value += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
+                retention += ((fitted - observed) / self.phi).powi(2);
+                conductivity += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
             }
-            output[index] = value;
+            output[index] = retention + conductivity;
         }
         output.iter().all(|value| value.is_finite())
     }
@@ -496,45 +499,61 @@ impl LeastSquaresProblem for VgmProblem {
             let z_to_n = z.powf(x[2]);
             let base = 1.0 + z_to_n;
             let q = base.powf(1.0 / x[2] - 1.0);
-            let q_alpha = q * (1.0 - x[2]) * z.powf(x[2] - 1.0) * pressure / base;
-            let base_n = z_to_n * z.ln();
-            let q_n = q * (-base.ln() / x[2].powi(2) + (1.0 / x[2] - 1.0) * base_n / base);
+            // Retain SW_VG_dist's powers and multiplication order. Equivalent
+            // chain-rule rearrangements perturb this poorly conditioned fit.
+            let alpha_power = x[1].powf(x[2] - 1.0);
+            let pressure_power = pressure.powf(x[2]);
+            let q_alpha_power = base.powf(1.0 / x[2] - 2.0);
+            let q_n_factor =
+                (1.0 - x[2]) * z_to_n * z.ln() / (x[2] * base) - base.ln() / x[2].powi(2);
             let fitted_theta = x[0] + (self.phi - x[0]) * q;
             let u = 1.0 - 1.0 / base;
             let power = 1.0 - 1.0 / x[2];
-            let term = 1.0 - u.powf(power);
+            let u_power = u.powf(power);
+            let term = 1.0 - u_power;
             let fitted_log = x[3].log10()
                 + (1.0 / x[2] - 1.0) * self.l_patch * base.log10()
                 + term.powi(2).log10();
-            let log_alpha =
-                self.l_patch * (1.0 / x[2] - 1.0) * x[2] * z.powf(x[2] - 1.0) * pressure
-                    / (base * std::f64::consts::LN_10)
-                    + 2.0
-                        * (-(power) * u.powf(-1.0 / x[2]) * x[2] * z.powf(x[2] - 1.0) * pressure
-                            / base.powi(2))
-                        / (term * std::f64::consts::LN_10);
-            let term_n =
-                -u.powf(power) * (u.ln() / x[2].powi(2) + power * base_n / (u * base.powi(2)));
-            let log_n = self.l_patch
-                * (-base.log10() / x[2].powi(2)
-                    + (1.0 / x[2] - 1.0) * base_n / (base * std::f64::consts::LN_10))
-                + 2.0 * term_n / (term * std::f64::consts::LN_10);
-            let log_k = 1.0 / (x[3] * std::f64::consts::LN_10);
-            let mut derivatives = [0.0; 4];
+            let log_alpha = self.l_patch * (1.0 - x[2]) * alpha_power * pressure_power
+                / (base * std::f64::consts::LN_10)
+                + 2.0
+                    * (1.0 - x[2])
+                    * u.powf(-1.0 / x[2])
+                    * alpha_power
+                    * pressure_power
+                    * base.powi(-2)
+                    / (term * std::f64::consts::LN_10);
+            let log_n = -self.l_patch * base.log10() / x[2].powi(2)
+                + (1.0 / x[2] - 1.0) * self.l_patch * z_to_n * z.log10() / base
+                - 2.0 * u_power / term * (u.log10() / x[2].powi(2) + power * z.log10() / base);
+            let mut retention = [0.0; 3];
+            let mut conductivity = [0.0; 3];
             for &[observed_theta, observed_log_k] in
                 &self.samples[row * self.cells..(row + 1) * self.cells]
             {
                 let theta_residual = (fitted_theta - observed_theta) / self.phi;
                 let conductivity_residual = (fitted_log - observed_log_k) / log_conductivity;
-                derivatives[0] += 2.0 * theta_residual * (1.0 - q) / self.phi;
-                derivatives[1] += 2.0
-                    * (theta_residual * (self.phi - x[0]) * q_alpha / self.phi
-                        + conductivity_residual * log_alpha / log_conductivity);
-                derivatives[2] += 2.0
-                    * (theta_residual * (self.phi - x[0]) * q_n / self.phi
-                        + conductivity_residual * log_n / log_conductivity);
-                derivatives[3] += 2.0 * conductivity_residual * log_k / log_conductivity;
+                retention[0] += 2.0 * theta_residual * (1.0 - q) / self.phi;
+                retention[1] += 2.0 * theta_residual / self.phi
+                    * (self.phi - x[0])
+                    * (1.0 - x[2])
+                    * q_alpha_power
+                    * alpha_power
+                    * pressure_power;
+                retention[2] +=
+                    2.0 * theta_residual / self.phi * (self.phi - x[0]) * q * q_n_factor;
+                conductivity[0] += 2.0 * conductivity_residual * log_alpha / log_conductivity;
+                conductivity[1] += 2.0 * conductivity_residual * log_n / log_conductivity;
+                conductivity[2] += 2.0 * conductivity_residual
+                    / (x[3] * std::f64::consts::LN_10)
+                    / log_conductivity;
             }
+            let derivatives = [
+                retention[0],
+                retention[1] + conductivity[0],
+                retention[2] + conductivity[1],
+                conductivity[2],
+            ];
             for (column, value) in derivatives.into_iter().enumerate() {
                 output[row * 4 + column] = value;
             }
@@ -577,16 +596,18 @@ impl LeastSquaresProblem for CampbellProblem {
             return false;
         }
         for (index, pressure) in CAMPBELL_PRESSURES.iter().copied().enumerate() {
-            let mut value = 0.0;
+            // Upstream adds two independently accumulated SUMs.
+            let mut retention = 0.0;
+            let mut conductivity = 0.0;
             let fitted = (-pressure / x[0]).powf(-x[1]) * self.phi;
             let fitted_log = (-pressure / x[0]).log10() * (-3.0 * x[1] - 2.0) + x[2].log10();
             for &[observed, observed_log_k] in
                 &self.samples[index * self.cells..(index + 1) * self.cells]
             {
-                value += ((fitted - observed) / self.phi).powi(2);
-                value += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
+                retention += ((fitted - observed) / self.phi).powi(2);
+                conductivity += ((fitted_log - observed_log_k) / self.conductivity.log10()).powi(2);
             }
-            output[index] = value;
+            output[index] = retention + conductivity;
         }
         output.iter().all(|value| value.is_finite())
     }
@@ -600,25 +621,28 @@ impl LeastSquaresProblem for CampbellProblem {
             let ratio = -pressure / x[0];
             let fitted_theta = ratio.powf(-x[1]) * self.phi;
             let fitted_log = ratio.log10() * (-3.0 * x[1] - 2.0) + x[2].log10();
-            let theta_psi = fitted_theta * x[1] / x[0];
-            let theta_lambda = -fitted_theta * ratio.ln();
-            let log_psi = (3.0 * x[1] + 2.0) / (x[0] * std::f64::consts::LN_10);
-            let log_lambda = -3.0 * ratio.log10();
-            let log_k = 1.0 / (x[2] * std::f64::consts::LN_10);
-            let mut derivatives = [0.0; 3];
+            let theta = ratio.powf(-x[1]);
+            let mut retention = [0.0; 2];
+            let mut conductivity = [0.0; 3];
             for &[observed_theta, observed_log_k] in
                 &self.samples[row * self.cells..(row + 1) * self.cells]
             {
                 let theta_residual = (fitted_theta - observed_theta) / self.phi;
                 let conductivity_residual = (fitted_log - observed_log_k) / log_conductivity;
-                derivatives[0] += 2.0
-                    * (theta_residual * theta_psi / self.phi
-                        + conductivity_residual * log_psi / log_conductivity);
-                derivatives[1] += 2.0
-                    * (theta_residual * theta_lambda / self.phi
-                        + conductivity_residual * log_lambda / log_conductivity);
-                derivatives[2] += 2.0 * conductivity_residual * log_k / log_conductivity;
+                retention[0] += 2.0 * theta_residual * x[1] * theta / x[0];
+                retention[1] += -2.0 * theta_residual * theta * ratio.ln();
+                conductivity[0] += 2.0 * conductivity_residual * (3.0 * x[1] + 2.0)
+                    / (x[0] * std::f64::consts::LN_10)
+                    / log_conductivity;
+                conductivity[1] += -6.0 * conductivity_residual * ratio.log10() / log_conductivity;
+                conductivity[2] += 2.0 * conductivity_residual
+                    / (x[2] * std::f64::consts::LN_10 * log_conductivity);
             }
+            let derivatives = [
+                retention[0] + conductivity[0],
+                retention[1] + conductivity[1],
+                conductivity[2],
+            ];
             for (column, value) in derivatives.into_iter().enumerate() {
                 output[row * 3 + column] = value;
             }
@@ -689,8 +713,11 @@ fn statistic(values: &[f64], cells: &[usize], area: &[f64], method: SoilStatisti
             values
                 .iter()
                 .zip(cells)
-                .map(|(value, cell)| value * (area[*cell] / total))
-                .sum()
+                // The production Fortran SUM contracts this weighted product.
+                // One ULP in porosity can change the subsequent LM trajectory.
+                .fold(0.0, |sum, (value, cell)| {
+                    value.mul_add(area[*cell] / total, sum)
+                })
         }
         SoilStatistic::GeometricMean => {
             let total = cells.iter().map(|cell| area[*cell]).sum::<f64>();
@@ -903,6 +930,65 @@ mod tests {
         assert!((result.k_s[0] - 10.0).abs() < 1.0e-8);
         assert!((result.psi_s[0] + 35.0).abs() < 1.0e-8);
         assert!((result.lambda[0] - 0.12).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn soil_inputs_retain_production_fortran_single_rounding() {
+        // Original -O2 contracts each final weighted product into its SUM.
+        // The separate multiply/add yields 0.07999999999999999 instead.
+        assert_eq!(
+            statistic(&[0.08, 0.08], &[0, 1], &[1.0, 2.0], SoilStatistic::AreaMean),
+            0.08
+        );
+        // Original production array expression, element 207867/class 2/layer 1,
+        // source cell 1 at pressure 5. A scalar Fortran probe does not contract.
+        let problem = VgmProblem::new(
+            VgmInputs {
+                theta_r: &[f64::from_bits(0x3fb329ce57ce1825)],
+                theta_s: &[f64::from_bits(0x3fe0fab010392ec0)],
+                alpha: &[f64::from_bits(0x3f95c098cea15564)],
+                n: &[f64::from_bits(0x3ff4a2210f47ab99)],
+                k_s: &[10.0],
+                l: &[0.5],
+            },
+            0.5,
+            10.0,
+            0.5,
+        );
+        assert_eq!(problem.samples[1][0].to_bits(), 0x3fe0cdb06b4c933b);
+    }
+
+    #[test]
+    fn curve_residuals_keep_the_two_upstream_sum_reductions_separate() {
+        // SW_CB_dist/SW_VG_dist compute SUM(retention²) + SUM(conductivity²).
+        // Interleaving both channels loses the small conductivity contribution.
+        let cb = CampbellProblem {
+            samples: [[-99_999_999.0, 0.0], [0.0, 0.0]].repeat(CAMPBELL_PRESSURES.len()),
+            cells: 2,
+            phi: 1.0,
+            conductivity: 10.0,
+        };
+        let mut residual = [0.0; 17];
+        assert!(cb.residual(&[-60.0, 1.0, 10.0], &mut residual));
+        assert_eq!(residual[0], 10_000_000_000_000_002.0);
+        let mut jacobian = [0.0; 17 * 3];
+        assert!(cb.jacobian(&[-60.0, 1.0, 10.0], &mut jacobian));
+        // Original SW_CB_dist, same synthetic inputs, production real-kind flags.
+        assert_eq!(jacobian[0].to_bits(), 0xc1496e6ac1769652);
+        assert_eq!(jacobian[1], 0.0);
+        assert_eq!(jacobian[2].to_bits(), 0x3fc63c62775250d7);
+
+        let log_k = -0.25 * 2.0_f64.log10() + (1.0 - 0.5_f64.sqrt()).powi(2).log10();
+        let vg = VgmProblem {
+            samples: [[-99_999_999.0, log_k - 1.0], [0.0, log_k - 1.0]].repeat(VGM_PRESSURES.len()),
+            cells: 2,
+            phi: 1.0,
+            conductivity: 10.0,
+            l_patch: 0.5,
+        };
+        let mut residual = [0.0; 24];
+        assert!(vg.residual(&[1.0, 1.0, 2.0, 1.0], &mut residual));
+        assert_eq!(residual[0], 10_000_000_000_000_002.0);
     }
 
     #[test]
