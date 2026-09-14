@@ -44,6 +44,14 @@ fn lct_spatial_block_becomes_a_constant_restart() {
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_i32(&block, "patchclass").unwrap(), [1]);
     assert_eq!(values_i32(&block, "patchtype").unwrap(), [0]);
+    assert_eq!(
+        block
+            .variable("patchmask")
+            .unwrap()
+            .get_values::<i8, _>(..)
+            .unwrap(),
+        [1]
+    );
     assert!(
         (values_f64(&block, "patchlonr").unwrap()[0] - (-179.0_f64).to_radians()).abs() < 1.0e-12
     );
@@ -54,6 +62,53 @@ fn lct_spatial_block_becomes_a_constant_restart() {
     assert_eq!(values_f64(&block, "vf_quartz").unwrap()[0], 0.3);
     assert!(block.variable("debdrock").is_none());
     assert!(block.variable("soil_alb").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_lct_constant_restart_masks_virtual_wmo_patch() {
+    let root = temp_dir("wmo-mask");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    let path = block_path(&landdata, "landpatch", "landpatch", 2005, "w180_s90");
+    let mut landpatch = netcdf::append(path).unwrap();
+    landpatch
+        .variable_mut("ipxstt")
+        .unwrap()
+        .put_values(&[-1_i32], ..)
+        .unwrap();
+    landpatch
+        .variable_mut("ipxend")
+        .unwrap()
+        .put_values(&[-1_i32], ..)
+        .unwrap();
+    landpatch.close().unwrap();
+
+    let files = write_spatial_lct_constant_restart(SpatialLctStaticConfig::new(
+        &landdata,
+        &root.join("restart"),
+        "test",
+        2005,
+        "w180_s90",
+        LandCoverScheme::Igbp,
+        HydraulicModel::VanGenuchten,
+    ))
+    .unwrap();
+
+    let block = netcdf::open(files.block).unwrap();
+    assert_eq!(
+        block
+            .variable("patchmask")
+            .unwrap()
+            .get_values::<i8, _>(..)
+            .unwrap(),
+        [0]
+    );
+    assert_eq!(values_i32(&block, "patchclass").unwrap(), [1]);
+    assert!(
+        (values_f64(&block, "patchlonr").unwrap()[0] - (-179.0_f64).to_radians()).abs() < 1.0e-12
+    );
+
     std::fs::remove_dir_all(root).unwrap();
 }
 

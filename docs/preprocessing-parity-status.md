@@ -220,10 +220,12 @@ call it. This is not a real catchment all-field parity claim.
    namelist fields are now forwarded through single-point, spatial LCT/urban,
    PFT/PC, and explicit spatial PFT entry points. `tcrit` remains the upstream
    fixed 2.5. Other tuning/parameterization controls still need individual checks.
-3. Trace the remaining surface controls (`DEF_Output_2mWMO`,
-   `DEF_file_mesh_filter`) through topology and
-   executable adapters. Identifier absence is a triage signal, not a completed
-   behavioral audit. Verify their enabled and disabled branches. ZIP aggregation
+3. Implement the confirmed missing surface controls: `DEF_file_mesh_filter`
+   needs its grid assimilated and its mask applied after land-only filtering;
+   `DEF_Output_2mWMO` needs virtual patch/source topology in supported grid-based
+   PFT/PC configurations. Both are currently ignored by the surface adapter.
+   The initial WMO aggregation mask is repaired below, not the surface builder.
+   ZIP aggregation
    still needs PFT/PC-specific, crop, urban, and regular-coordinate adapter audits;
    catchment `patchfrac_hru` now has a targeted writer regression, not a real-case
    complete branch comparison.
@@ -378,3 +380,51 @@ classes, all three partition modes and the two crop-splitting filters. An
 independent source review found no blocking issue in this bounded change.
 Spatial PFT/PC LULCC is still explicitly unsupported; these targeted tests do
 not establish a complete real-data PFT/PC scientific comparison.
+
+## LM norm boundary and virtual WMO mask
+
+The exact 44-cell input/observation driver now isolates the premature LM exit.
+Rust's non-fused square sum produced `xnorm = 439.24409850925156`; original
+Fortran produced `439.24409850925161`. After three unsuccessful trials, the
+former lands exactly on `delta <= xtol*xnorm` and returns the initial aggregate
+at evaluation 4. Original continues to evaluation 5, accepts a step, and reaches
+`k_s = 8.494329182669709` after 80 evaluations / 71 iterations. These are traced
+values, not an inferred rejected-fit condition.
+
+Both contiguous and strided Rust Euclidean norms now retain the original fused
+square accumulation. An independently linked production `MOD_Utils.o` gives
+`enorm([0.08, 0.2])` bits `0x3fcb9271769ab094`; the old Rust calculation gives
+`...095`. The regression fails before the change and passes afterward. No
+stopping threshold, fit bound or iteration limit changed. The exact-input Rust
+driver now follows the original accepted branch and gives `8.494329182641458`.
+This fixes the exposed premature exit, not all nonlinear-fit differences: the
+358-cell driver still differs. Traces: `/tmp/colm-lm-iteration/` and
+`/tmp/colm-lm-fortran/`.
+
+The shared initial constant-restart writer now writes `patchmask=false` for
+valid virtual WMO ranges `ipxstt=ipxend=-1`, while preserving their whole-element
+geometry. Ordinary patches remain true. Existing pixel-range validation still
+rejects malformed ranges before writing. This reaches common LCT, PFT/PC and
+urban constant writers through the existing shared path; it does not add a
+new WMO namelist option or claim complete WMO surface/time-state support. A disk
+regression modifies the existing surface fixture into a virtual patch and checks
+the written mask and longitude; the ordinary-patch fixture checks the true mask.
+
+The completed `rust-full-lm-norms/` run takes **101.01 / 2.36 / 6.19 seconds**
+for surface / initial / unchanged original two-step runtime, all exit zero. The
+44-cell patch now also gives `8.494329182641458` in the full case. All 957 owners,
+four pixel axes, 15,922,348 memberships and 1,479 schemas still agree (only global
+`create_time` differs). There remain 48 fitted fields / 75,425 scalar comparisons
+outside the gate; maxima are `psi_s_l8 = 4.16925`, `k_s_l1 = 3.68741`, with
+post-two-step `gs0sun = 3.65504`. These numbers do not establish a blanket
+improvement or scientific parity; the 358-cell conductivity is now 43.70766
+against original 40.02025. The next numerical audit must retain the repaired
+norm contract instead of tuning a threshold to favor one fixture.
+
+Fresh validation: 211 surface library + 31 binary tests, 87 initial library +
+12 binary tests, five raster and six site checks, ten opt-in Fortran library
+checks, one native binary and all five native pipeline checks pass. Clippy,
+downstream CLI/kernel checks and changed-file formatting pass; independent review
+approved the bounded norm/mask diff. Logs: `/tmp/colm-lm-iteration/final/`.
+Full comparisons and executable hashes are retained in `rust-full-lm-norms/`;
+no current job remains active.

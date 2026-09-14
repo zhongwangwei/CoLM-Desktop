@@ -169,7 +169,12 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         None => read_canopy(config, &patches.class, &patch_kind, patch_count)?,
     };
     let zeros = vec![0.0; patch_count];
-    let mask = vec![true; patch_count];
+    // Virtual WMO patches retain geometry but do not contribute to aggregation.
+    let mask = patches
+        .start
+        .iter()
+        .map(|&start| start != -1)
+        .collect::<Vec<_>>();
     let soil_s_v_alb = read_f64(
         config.landdata,
         "soil",

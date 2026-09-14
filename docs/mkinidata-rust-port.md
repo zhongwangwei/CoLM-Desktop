@@ -104,3 +104,8 @@ unchanged original two-step model again. Catchment river-depth initialization
 now converts the shared km² pixel weights to m² explicitly. Remaining fitted
 surface discrepancies propagate to restart/runtime results and remain a gate;
 initial execution success does not establish full numerical equivalence.
+
+The shared spatial constant writer now excludes valid virtual WMO patches
+(`ipxstt=ipxend=-1`) from aggregation via `patchmask=false`, retaining geometry.
+Ordinary patches remain unmasked; disk regressions cover both. This is not full
+WMO surface-generation or time-state parity; those branches remain open.
