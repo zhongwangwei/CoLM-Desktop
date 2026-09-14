@@ -3,9 +3,15 @@
 use colm_init::prepare_single_point_case;
 use colm_srfdata::SiteMode;
 
+// Keep each NetCDF writer + external Fortran reader lifecycle serial, as in
+// the production stage runner. Concurrent tests can make existing HDF5 block
+// files transiently unopenable in the child (reported as "variable not found").
+static NATIVE_PIPELINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore = "requires the locally generated CN-Cng source case"]
 fn native_surface_and_cold_start_write_the_common_restart_family() {
+    let _guard = NATIVE_PIPELINE_LOCK.lock().unwrap();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -75,6 +81,7 @@ fn rust_pc_bgc_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
 #[test]
 #[ignore = "requires the local urban kernel, AU-Preston input data, and CoLMruntime"]
 fn rust_urban_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
+    let _guard = NATIVE_PIPELINE_LOCK.lock().unwrap();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -218,6 +225,7 @@ fn rust_preprocess_runs_in_fortran_runtime(
     kernel: &str,
     additions: &str,
 ) {
+    let _guard = NATIVE_PIPELINE_LOCK.lock().unwrap();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

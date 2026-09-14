@@ -277,7 +277,14 @@ tests, five real raster and six real-site checks; the ten opt-in library Fortran
 reference checks pass. Clippy (both crates/all targets, warnings denied),
 downstream CLI/kernel checks and changed-file formatting pass. Native binary
 and all five native pipeline checks pass when run with `--test-threads=1`.
-A concurrent native-pipeline run exposed missing global-header failures for
-PFT-BGC/urban; its cause is being tracked separately, not counted as a parallel
-validation pass. Logs use `/tmp/colm-geometry-*`; case comparisons and binary
-hashes are inside `rust-full-geometry/`.
+A concurrent native-pipeline run initially reported missing `PCT_Tree` / `totlitc`
+for PFT-BGC/urban. The block files and variables were present, and rerunning both
+unchanged failing cases succeeded without regeneration: Fortran's existence
+probe also reports transient file-open failures as absent variables. This is
+not evidence of missing schema fields. The test harness now serializes each
+complete NetCDF-write / child-runtime lifecycle, matching production stage
+ownership; both default and five-thread test harness runs pass all five cases.
+This guard does not serialize model Rayon kernels or claim to repair the
+underlying platform's concurrent HDF5/file-handle behavior. Logs use
+`/tmp/colm-geometry-*`; case comparisons and binary hashes are inside
+`rust-full-geometry/`.
