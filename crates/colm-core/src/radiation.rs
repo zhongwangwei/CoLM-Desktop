@@ -355,6 +355,99 @@ fn cold_start_broadband_radiation_with_snow_using(
         ground_snow_fraction,
         ground_temperature_k,
     )?;
+    cold_start_broadband_radiation_from_ground_using(
+        patch_type,
+        ground_state,
+        optics,
+        lai,
+        sai,
+        wet_snow_fraction,
+        cosine_zenith,
+        use_lct,
+        vegetation_snow,
+        two_stream_kind,
+    )
+}
+
+/// Applies the LCT broadband canopy cold-start path to an already computed ground albedo.
+///
+/// This is the shared trust boundary used by SNICAR and non-SNICAR ground drivers:
+/// callers own the ground optical state, while this function preserves CoLM's LCT
+/// canopy/two-stream and soil/snow absorption tail.
+#[allow(clippy::too_many_arguments)]
+pub fn cold_start_broadband_radiation_from_ground(
+    patch_type: i32,
+    ground: ColdStartGroundAlbedo,
+    optics: LeafOptics,
+    lai: f64,
+    sai: f64,
+    wet_snow_fraction: f64,
+    cosine_zenith: f64,
+    use_lct: bool,
+    usgs_land_cover: bool,
+    vegetation_snow: bool,
+) -> Result<ColdStartRadiation> {
+    cold_start_broadband_radiation_from_ground_using(
+        patch_type,
+        ground,
+        optics,
+        lai,
+        sai,
+        wet_snow_fraction,
+        cosine_zenith,
+        use_lct,
+        vegetation_snow,
+        TwoStreamKind::LandCover { usgs_land_cover },
+    )
+}
+
+/// Applies the PFT-vector broadband canopy cold-start path to an already computed ground albedo.
+#[allow(clippy::too_many_arguments)]
+pub fn cold_start_pft_broadband_radiation_from_ground(
+    patch_type: i32,
+    ground: ColdStartGroundAlbedo,
+    optics: LeafOptics,
+    lai: f64,
+    sai: f64,
+    wet_snow_fraction: f64,
+    cosine_zenith: f64,
+    vegetation_snow: bool,
+) -> Result<ColdStartRadiation> {
+    cold_start_broadband_radiation_from_ground_using(
+        patch_type,
+        ground,
+        optics,
+        lai,
+        sai,
+        wet_snow_fraction,
+        cosine_zenith,
+        true,
+        vegetation_snow,
+        TwoStreamKind::Pft,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cold_start_broadband_radiation_from_ground_using(
+    patch_type: i32,
+    ground_state: ColdStartGroundAlbedo,
+    optics: LeafOptics,
+    lai: f64,
+    sai: f64,
+    wet_snow_fraction: f64,
+    cosine_zenith: f64,
+    use_lct: bool,
+    vegetation_snow: bool,
+    two_stream_kind: TwoStreamKind,
+) -> Result<ColdStartRadiation> {
+    validate_canopy_from_ground_inputs(
+        ground_state,
+        optics,
+        lai,
+        sai,
+        wet_snow_fraction,
+        cosine_zenith,
+    )?;
     let snow_age = ground_state.snow_age;
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
@@ -419,6 +512,44 @@ fn cold_start_broadband_radiation_with_snow_using(
     })
 }
 
+fn validate_canopy_from_ground_inputs(
+    ground: ColdStartGroundAlbedo,
+    optics: LeafOptics,
+    lai: f64,
+    sai: f64,
+    wet_snow_fraction: f64,
+    cosine_zenith: f64,
+) -> Result<()> {
+    ensure!(
+        lai.is_finite()
+            && lai >= 0.0
+            && sai.is_finite()
+            && sai >= 0.0
+            && wet_snow_fraction.is_finite()
+            && (0.0..=1.0).contains(&wet_snow_fraction)
+            && cosine_zenith.is_finite()
+            && cosine_zenith > 0.0
+            && optics.chil.is_finite()
+            && ground.snow_age.is_finite(),
+        "cold-start radiation inputs are invalid"
+    );
+    for value in ground
+        .soil
+        .into_iter()
+        .chain(ground.snow)
+        .chain(ground.ground)
+        .flatten()
+    {
+        ensure!(value.is_finite(), "ground optical constants must be finite");
+    }
+    for values in optics.reflectance.into_iter().chain(optics.transmittance) {
+        for value in values {
+            ensure!(value.is_finite(), "leaf optical constants must be finite");
+        }
+    }
+    Ok(())
+}
+
 /// Applies CoLM's cold-start soil/water and non-SNICAR snow albedo branches.
 #[allow(clippy::too_many_arguments)]
 pub fn cold_start_ground_albedo(
@@ -476,7 +607,8 @@ pub fn cold_start_ground_albedo(
     })
 }
 
-pub(crate) fn mix_ground_albedo(
+/// Mix validated soil/snow albedos using the caller's ground snow fraction.
+pub fn mix_ground_albedo(
     soil: [[f64; RADIATION_TYPES]; BANDS],
     snow: [[f64; RADIATION_TYPES]; BANDS],
     snow_fraction: f64,

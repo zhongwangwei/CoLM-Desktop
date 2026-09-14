@@ -10,10 +10,11 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_case::is_default;
 use colm_core::{
     bsm_soil_moisture, cold_start_ground_albedo, cold_start_pc_broadband_radiation_from_ground,
+    cold_start_pft_broadband_radiation_from_ground, derive_pft_snow_cover,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
     high_resolution_nonnatural_cold_start_state, high_resolution_pft_cold_start_state,
-    pft_high_resolution_radiation, prospect_leaf_optics, HighResolutionLeafOptics, SoilReflectance,
-    HIGH_RES_WAVELENGTHS,
+    initialize_snow_layers, pft_high_resolution_radiation, prospect_leaf_optics,
+    HighResolutionLeafOptics, SoilReflectance, HIGH_RES_WAVELENGTHS,
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
@@ -34,16 +35,15 @@ use crate::spatial_static::{
     SpatialLctStaticConfig, VicParameterSource,
 };
 use crate::{
-    append_time_hyperspectral_fields, bgc_time_restart_input,
-    cold_start_pc_broadband_radiation_with_snow, cold_start_pft_broadband_radiation_with_snow,
-    derive_cold_start_bgc_state, merge_bgc_cold_start_states, write_bgc_time_restart,
-    write_cold_start_bgc_constant_restart, write_pft_constant_restart, write_pft_time_restart,
-    BgcColdStartInput, BgcConstantRestartFiles, BgcPftColdStartInput, BgcTimeRestartFile,
-    ColdStartRadiation, ConstantRestartFiles, HydraulicModel, LandCoverScheme, PcPftInput,
-    PftBgcFields, PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields,
-    PftPlantHydraulicFields, PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning,
-    RuntimeCnState, RuntimeCnVegetationCarbon, SpatialLctTimeConfig,
-    SpatialObservedInitializationPaths, TimeHyperspectralFields, TimeRestartFile, MISSING,
+    append_time_hyperspectral_fields, bgc_time_restart_input, derive_cold_start_bgc_state,
+    merge_bgc_cold_start_states, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
+    write_pft_constant_restart, write_pft_time_restart, BgcColdStartInput, BgcConstantRestartFiles,
+    BgcPftColdStartInput, BgcTimeRestartFile, ColdStartRadiation, ConstantRestartFiles,
+    HydraulicModel, LandCoverScheme, PcPftInput, PftBgcFields, PftConstantRestartInput,
+    PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
+    PftTimeRestartInput, RestartDate, RestartTuning, RuntimeCnState, RuntimeCnVegetationCarbon,
+    SpatialLctTimeConfig, SpatialObservedInitializationPaths, TimeHyperspectralFields,
+    TimeRestartFile, MISSING,
 };
 
 /// Arguments for one already-addressed spatial `landpft` block.
@@ -96,6 +96,8 @@ pub struct SpatialPftTimeConfig<'a> {
     pub high_resolution_radiation: Option<&'a Path>,
     /// `DEF_HighResUrban_albedo`; read by upstream for every hyperspectral cold start.
     pub high_resolution_urban_albedo: Option<&'a Path>,
+    /// Once-loaded SNICAR tables for this run; `None` means resolve once from the namelist.
+    pub snicar: Option<&'a crate::SnicarInitialization>,
 }
 
 /// Timestamped restart blocks written by a spatial PFT cold start.
@@ -147,6 +149,7 @@ impl<'a> SpatialPftTimeConfig<'a> {
             high_resolution_water_optics: None,
             high_resolution_radiation: None,
             high_resolution_urban_albedo: None,
+            snicar: None,
         }
     }
 }
@@ -345,9 +348,16 @@ pub fn write_spatial_pft_cold_time_restarts(
 ) -> Result<SpatialPftTimeRestartFiles> {
     let document = read_pft_document(config.static_config.namelist)?;
     let compression_level = crate::restart::restart_compression_level(&document)?;
+    let loaded_snicar;
+    let snicar = if let Some(snicar) = config.snicar {
+        Some(snicar)
+    } else {
+        loaded_snicar = crate::SnicarInitialization::from_document(&document)?;
+        loaded_snicar.as_ref()
+    };
     ensure!(
-        !optional_bool_or(&document, "DEF_USE_SNICAR", false)?,
-        "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
+        !config.use_hyperspectral || snicar.is_none(),
+        "DEF_USE_SNICAR with HYPERSPECTRAL cold start is not implemented: upstream five-band SNICAR has no verified 211-band output mapping"
     );
     let observations = SpatialObservedInitializationPaths::from_document(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
@@ -450,6 +460,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     common_config.compression_level = compression_level;
     common_config.tuning = config.tuning;
     common_config.observations = observations.borrow();
+    common_config.snicar = snicar;
     let common = crate::write_spatial_lct_cold_time_restart(common_config)?;
 
     let patches = read_patches(
@@ -525,6 +536,25 @@ pub fn write_spatial_pft_cold_time_restarts(
         "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
     );
     let top_soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m[0];
+    let pft_roughness = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
+    let (patch_snow_cover, pft_snow_free_vegetation_fraction) = derive_spatial_pft_snow_cover(
+        &patch_kind,
+        &pft_to_patch,
+        &pfts,
+        &total_lai,
+        &total_sai,
+        &pft_roughness,
+        &canopy,
+        &common_state.snow_depth_m,
+        config.tuning.zlnd,
+        config.snow_cover_exponent,
+        config.vegetation_snow,
+    )?;
+    let sai_pft = total_sai
+        .iter()
+        .zip(&pft_snow_free_vegetation_fraction)
+        .map(|(sai, snow_free)| sai * snow_free)
+        .collect::<Vec<_>>();
     let albedo = [
         read_lct_f64(
             config.static_config.landdata,
@@ -682,6 +712,12 @@ pub fn write_spatial_pft_cold_time_restarts(
     let mut direct_extinction = vec![1.0; pft_count];
     let mut diffuse_extinction = vec![0.718; pft_count];
     let mut state_by_pft = vec![None; pft_count];
+    let mut natural_ground_by_patch = std::iter::repeat_with(|| None)
+        .take(patches.class.len())
+        .collect::<Vec<_>>();
+    let mut snicar_by_patch = std::iter::repeat_with(|| None)
+        .take(patches.class.len())
+        .collect::<Vec<_>>();
     let mut high_resolution_by_pft = vec![None; pft_count];
     let mut high_resolution_sunlit = vec![0.0; HIGH_RES_WAVELENGTHS * 2 * pft_count];
     let mut high_resolution_shaded = high_resolution_sunlit.clone();
@@ -706,6 +742,40 @@ pub fn write_spatial_pft_cold_time_restarts(
             fraction_sum.is_finite() && (fraction_sum - 1.0).abs() <= 1.0e-8,
             "PFT fractions for natural spatial patch {patch} must sum to one, got {fraction_sum}"
         );
+        let snow_cover = patch_snow_cover[patch]
+            .context("natural spatial PFT patch has no derived snow cover")?;
+        let snow_depth_m = common_state.snow_depth_m[patch];
+        let snow_water_equivalent_mm = snow_depth_m * 250.0;
+        let snow = initialize_snow_layers(patch_kind[patch], snow_depth_m, 5)?;
+        let mut ground = cold_start_ground_albedo(
+            patch_kind[patch],
+            SoilReflectance {
+                saturated_visible: albedo[0][patch],
+                dry_visible: albedo[1][patch],
+                saturated_near_infrared: albedo[2][patch],
+                dry_near_infrared: albedo[3][patch],
+            },
+            common_state.top_liquid_kg_m2[patch],
+            top_soil_thickness_m,
+            common_state.cosine_zenith[patch].max(0.001),
+            snow_depth_m,
+            snow_cover.ground_snow_fraction,
+            common_state.ground_temperature_k[patch],
+        )?;
+        if let Some(tables) = snicar {
+            let snow_optics = tables.initialize_cold(
+                ground,
+                common_state.cosine_zenith[patch].max(0.001),
+                &snow,
+                snow_water_equivalent_mm,
+                snow_cover.ground_snow_fraction,
+                common_state.ground_temperature_k[patch],
+                top_soil_thickness_m,
+            )?;
+            ground = snow_optics.ground;
+            snicar_by_patch[patch] = Some(snow_optics);
+        }
+        natural_ground_by_patch[patch] = Some(ground);
         for &pft in indices {
             let broadband_optics = pft_leaf_optics(
                 &document,
@@ -713,25 +783,15 @@ pub fn write_spatial_pft_cold_time_restarts(
                 hydraulic_model,
                 subgrid == SpatialPftSubgrid::Pc,
             )?;
-            let mut state = cold_start_pft_broadband_radiation_with_snow(
+            let mut state = cold_start_pft_broadband_radiation_from_ground(
                 patch_kind[patch],
-                SoilReflectance {
-                    saturated_visible: albedo[0][patch],
-                    dry_visible: albedo[1][patch],
-                    saturated_near_infrared: albedo[2][patch],
-                    dry_near_infrared: albedo[3][patch],
-                },
-                common_state.top_liquid_kg_m2[patch],
-                top_soil_thickness_m,
+                ground,
                 broadband_optics,
                 total_lai[pft],
-                total_sai[pft],
+                sai_pft[pft],
                 0.0,
                 common_state.cosine_zenith[patch].max(0.001),
                 config.vegetation_snow,
-                0.0,
-                0.0,
-                common_state.ground_temperature_k[patch],
             )?;
             if high_resolution_canopy {
                 let fallback = expand_broadband_leaf_optics(broadband_optics);
@@ -770,13 +830,13 @@ pub fn write_spatial_pft_cold_time_restarts(
                             reflectance: &optics.reflectance,
                             transmittance: &optics.transmittance,
                         });
-                let radiation = (total_lai[pft] + total_sai[pft] > 1.0e-6)
+                let radiation = (total_lai[pft] + sai_pft[pft] > 1.0e-6)
                     .then(|| {
                         pft_high_resolution_radiation(
                             broadband_optics.chil,
                             optics,
                             total_lai[pft],
-                            total_sai[pft],
+                            sai_pft[pft],
                             0.0,
                             common_state.cosine_zenith[patch].max(0.001),
                             &high_resolution_ground[patch],
@@ -813,7 +873,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                 high_resolution_by_pft[pft] = radiation;
             }
             leaf_temperature[pft] = common_state.ground_temperature_k[patch];
-            roughness[pft] = canopy.top_m[pft] * 0.1;
+            roughness[pft] = pft_roughness[pft];
             thermal_gap[pft] = state.thermal_gap_fraction;
             direct_extinction[pft] = state.direct_extinction;
             diffuse_extinction[pft] = state.diffuse_extinction;
@@ -848,7 +908,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                             subgrid == SpatialPftSubgrid::Pc,
                         )?,
                         lai: total_lai[pft],
-                        sai: total_sai[pft],
+                        sai: sai_pft[pft],
                         wet_snow_fraction: 0.0,
                     })
                 })
@@ -864,10 +924,12 @@ pub fn write_spatial_pft_cold_time_restarts(
                 let mut pc = cold_start_pc_broadband_radiation_from_ground(
                     &inputs,
                     common_state.cosine_zenith[patch].max(0.001),
-                    high_resolution.albedo,
-                    [[1.0; 2]; 2],
-                    high_resolution.albedo,
-                    high_resolution.snow_age,
+                    colm_core::ColdStartGroundAlbedo {
+                        soil: high_resolution.albedo,
+                        snow: [[1.0; 2]; 2],
+                        ground: high_resolution.albedo,
+                        snow_age: high_resolution.snow_age,
+                    },
                 )?;
                 // MOD_Albedo_HiRes retains its default high-resolution
                 // transmission when PC's broadband ThreeDCanopy solver runs.
@@ -875,21 +937,12 @@ pub fn write_spatial_pft_cold_time_restarts(
                 pc.common.snow_absorption = high_resolution.snow_absorption;
                 pc
             } else {
-                cold_start_pc_broadband_radiation_with_snow(
-                    patch_kind[patch],
-                    crate::SoilReflectance {
-                        saturated_visible: albedo[0][patch],
-                        dry_visible: albedo[1][patch],
-                        saturated_near_infrared: albedo[2][patch],
-                        dry_near_infrared: albedo[3][patch],
-                    },
-                    common_state.top_liquid_kg_m2[patch],
-                    top_soil_thickness_m,
+                let ground = natural_ground_by_patch[patch]
+                    .context("natural PC patch has no broadband ground state")?;
+                cold_start_pc_broadband_radiation_from_ground(
                     &inputs,
                     common_state.cosine_zenith[patch].max(0.001),
-                    0.0,
-                    0.0,
-                    common_state.ground_temperature_k[patch],
+                    ground,
                 )?
             };
             for (pc_index, &pft) in indices.iter().enumerate() {
@@ -955,25 +1008,12 @@ pub fn write_spatial_pft_cold_time_restarts(
             .collect::<Result<Vec<_>>>()?;
         let leaf_stem_area = indices
             .iter()
-            .map(|&index| (total_lai[index] + total_sai[index]) * pfts.fraction[index])
+            .map(|&index| (total_lai[index] + sai_pft[index]) * pfts.fraction[index])
             .sum();
         let ground = (!config.use_hyperspectral)
             .then(|| {
-                cold_start_ground_albedo(
-                    patch_kind[patch],
-                    SoilReflectance {
-                        saturated_visible: albedo[0][patch],
-                        dry_visible: albedo[1][patch],
-                        saturated_near_infrared: albedo[2][patch],
-                        dry_near_infrared: albedo[3][patch],
-                    },
-                    common_state.top_liquid_kg_m2[patch],
-                    top_soil_thickness_m,
-                    common_state.cosine_zenith[patch].max(0.001),
-                    0.0,
-                    0.0,
-                    common_state.ground_temperature_k[patch],
-                )
+                natural_ground_by_patch[patch]
+                    .context("natural PFT patch has no broadband ground state")
             })
             .transpose()?;
         let mut radiation =
@@ -985,13 +1025,11 @@ pub fn write_spatial_pft_cold_time_restarts(
         }
         common_radiation[patch] = Some(radiation);
         // MOD_IniTimeVariable scales the aggregated HTOP, not each PFT's z0m.
-        common_roughness[patch] = Some(
-            indices.iter().fold(0.0, |sum, &pft| {
-                canopy.top_m[pft].mul_add(pfts.fraction[pft], sum)
-            }) * 0.1,
-        );
+        common_roughness[patch] = Some(indices.iter().fold(0.0, |sum, &pft| {
+            pft_roughness[pft].mul_add(pfts.fraction[pft], sum)
+        }));
         common_sai[patch] = Some(indices.iter().fold(0.0, |sum, &pft| {
-            total_sai[pft].mul_add(pfts.fraction[pft], sum)
+            sai_pft[pft].mul_add(pfts.fraction[pft], sum)
         }));
         if high_resolution_canopy {
             for wavelength in 0..HIGH_RES_WAVELENGTHS {
@@ -1016,6 +1054,8 @@ pub fn write_spatial_pft_cold_time_restarts(
         &common_radiation,
         &common_roughness,
         &common_sai,
+        &patch_snow_cover,
+        &snicar_by_patch,
     )?;
     if crop.is_some() {
         let crop_patch = pft_to_patch
@@ -1057,11 +1097,11 @@ pub fn write_spatial_pft_cold_time_restarts(
                         canopy_rain_mm: &zero,
                         canopy_snow_mm: &zero,
                         wet_snow_fraction: &zero,
-                        vegetation_fraction: &one,
+                        vegetation_fraction: &pft_snow_free_vegetation_fraction,
                         total_lai: &total_lai,
                         lai: &total_lai,
                         total_sai: &total_sai,
-                        sai: &total_sai,
+                        sai: &sai_pft,
                         sunlit_absorption: &sunlit,
                         shaded_absorption: &shaded,
                         thermal_gap_fraction: &thermal_gap,
@@ -1222,6 +1262,110 @@ fn spatial_crop_state(
                 && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),
         },
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_spatial_pft_snow_cover(
+    patch_kind: &[i32],
+    pft_to_patch: &[Vec<usize>],
+    pfts: &SpatialPftVectors,
+    total_lai: &[f64],
+    total_sai: &[f64],
+    roughness_m: &[f64],
+    canopy: &crate::single_point::PftCanopy,
+    snow_depth_m: &[f64],
+    soil_roughness_m: f64,
+    snow_cover_exponent: f64,
+    vegetation_snow: bool,
+) -> Result<(Vec<Option<crate::SnowCover>>, Vec<f64>)> {
+    let patches = patch_kind.len();
+    ensure!(
+        pft_to_patch.len() == patches
+            && snow_depth_m.len() == patches
+            && total_lai.len() == pfts.class.len()
+            && total_sai.len() == pfts.class.len()
+            && roughness_m.len() == pfts.class.len()
+            && canopy.top_m.len() == pfts.class.len()
+            && canopy.bottom_m.len() == pfts.class.len(),
+        "spatial PFT snow-cover inputs have inconsistent dimensions"
+    );
+    let mut patch_cover = vec![None; patches];
+    let mut pft_snow_free = vec![1.0; pfts.class.len()];
+    for patch in 0..patches {
+        let indices = &pft_to_patch[patch];
+        if patch_kind[patch] != 0 {
+            ensure!(
+                indices.is_empty(),
+                "non-natural spatial patch {patch} unexpectedly owns PFT snow entries"
+            );
+            continue;
+        }
+        ensure!(
+            !indices.is_empty(),
+            "natural spatial patch {patch} has no PFT snow entries"
+        );
+        let cover = if snow_depth_m[patch] > 0.0 {
+            let class = indices
+                .iter()
+                .map(|&pft| pfts.class[pft])
+                .collect::<Vec<_>>();
+            let fraction = indices
+                .iter()
+                .map(|&pft| pfts.fraction[pft])
+                .collect::<Vec<_>>();
+            let lai = indices
+                .iter()
+                .map(|&pft| total_lai[pft])
+                .collect::<Vec<_>>();
+            let sai = indices
+                .iter()
+                .map(|&pft| total_sai[pft])
+                .collect::<Vec<_>>();
+            let roughness = indices
+                .iter()
+                .map(|&pft| roughness_m[pft])
+                .collect::<Vec<_>>();
+            let bottom = indices
+                .iter()
+                .map(|&pft| canopy.bottom_m[pft])
+                .collect::<Vec<_>>();
+            let top = indices
+                .iter()
+                .map(|&pft| canopy.top_m[pft])
+                .collect::<Vec<_>>();
+            derive_pft_snow_cover(
+                &class,
+                &fraction,
+                &lai,
+                &sai,
+                &roughness,
+                &bottom,
+                &top,
+                soil_roughness_m,
+                snow_depth_m[patch] * 250.0,
+                snow_depth_m[patch],
+                snow_cover_exponent,
+                vegetation_snow,
+            )?
+        } else {
+            crate::PftSnowCover {
+                patch: crate::SnowCover {
+                    vegetation_burial_fraction: 0.0,
+                    snow_free_vegetation_fraction: 1.0,
+                    ground_snow_fraction: 0.0,
+                },
+                pft_snow_free_vegetation_fraction: vec![1.0; indices.len()],
+            }
+        };
+        for (&pft, snow_free) in indices
+            .iter()
+            .zip(cover.pft_snow_free_vegetation_fraction.iter().copied())
+        {
+            pft_snow_free[pft] = snow_free;
+        }
+        patch_cover[patch] = Some(cover.patch);
+    }
+    Ok((patch_cover, pft_snow_free))
 }
 
 fn pft_owners(pft_to_patch: &[Vec<usize>], pfts: usize) -> Result<Vec<usize>> {
@@ -1774,10 +1918,15 @@ fn update_common_pft_optics(
     states: &[Option<ColdStartRadiation>],
     roughness: &[Option<f64>],
     stem_area: &[Option<f64>],
+    snow_cover: &[Option<crate::SnowCover>],
+    snicar: &[Option<crate::snicar::ColdSnicarState>],
 ) -> Result<()> {
     ensure!(
-        states.len() == roughness.len() && states.len() == stem_area.len(),
-        "common PFT radiation, roughness and stem-area vectors must align"
+        states.len() == roughness.len()
+            && states.len() == stem_area.len()
+            && states.len() == snow_cover.len()
+            && states.len() == snicar.len(),
+        "common PFT radiation, roughness, snow and stem-area vectors must align"
     );
     let patches = states.len();
     let mut file = netcdf::append(path)
@@ -1867,6 +2016,78 @@ fn update_common_pft_optics(
         file.variable_mut(name)
             .expect("checked common restart variable exists")
             .put_values(&values, ..)?;
+    }
+    for (name, select) in [
+        (
+            "fsno",
+            (|cover: &crate::SnowCover| cover.ground_snow_fraction) as fn(&crate::SnowCover) -> f64,
+        ),
+        (
+            "sigf",
+            (|cover: &crate::SnowCover| cover.snow_free_vegetation_fraction)
+                as fn(&crate::SnowCover) -> f64,
+        ),
+    ] {
+        let mut values = file
+            .variable(name)
+            .with_context(|| format!("common restart has no {name}"))?
+            .get_values::<f64, _>(..)?;
+        ensure!(
+            values.len() == patches,
+            "common restart {name} has an unexpected patch layout"
+        );
+        for (patch, cover) in snow_cover.iter().enumerate() {
+            if let Some(cover) = cover {
+                values[patch] = select(cover);
+            }
+        }
+        file.variable_mut(name)
+            .expect("checked common restart variable exists")
+            .put_values(&values, ..)?;
+    }
+    if snicar.iter().any(Option::is_some) {
+        let mut grain = file
+            .variable("snw_rds")
+            .context("common restart has no snw_rds")?
+            .get_values::<f64, _>(..)?;
+        ensure!(
+            grain.len() == 5 * patches,
+            "common restart snw_rds has an unexpected snow layout"
+        );
+        for (patch, state) in snicar.iter().enumerate() {
+            if let Some(state) = state {
+                for layer in 0..5 {
+                    grain[patch * 5 + layer] = state.grain_radius[layer];
+                }
+            }
+        }
+        file.variable_mut("snw_rds")
+            .expect("checked common restart variable exists")
+            .put_values(&grain, (.., ..))?;
+
+        let mut layers = file
+            .variable("ssno_lyr")
+            .context("common restart has no ssno_lyr")?
+            .get_values::<f64, _>(..)?;
+        ensure!(
+            layers.len() == 2 * 2 * 6 * patches,
+            "common restart ssno_lyr has an unexpected snow-radiation layout"
+        );
+        for (patch, state) in snicar.iter().enumerate() {
+            if let Some(state) = state {
+                for band in 0..2 {
+                    for incident in 0..2 {
+                        for layer in 0..6 {
+                            layers[((patch * 6 + layer) * 2 + incident) * 2 + band] =
+                                state.layer_absorption[band][incident][layer];
+                        }
+                    }
+                }
+            }
+        }
+        file.variable_mut("ssno_lyr")
+            .expect("checked common restart variable exists")
+            .put_values(&layers, (.., .., .., ..))?;
     }
     file.close()?;
     Ok(())

@@ -61,6 +61,8 @@ pub mod root_uptake {
 pub mod restart;
 pub mod runtime;
 pub mod single_point;
+mod snicar;
+pub use snicar::SnicarInitialization;
 pub mod spatial_pft;
 pub mod spatial_static;
 pub mod spatial_time;

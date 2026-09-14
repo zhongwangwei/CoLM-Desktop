@@ -61,6 +61,33 @@ fn rust_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
 }
 
 #[test]
+#[ignore = "requires local default/BGC kernels, CoLMruntime SNICAR tables, CN-Cng case and forcing"]
+fn snicar_single_point_preprocessing_runs_in_unchanged_fortran_runtime() {
+    for (label, land_cover, kernel, mode) in [
+        ("snicar-lct", Some(SiteMode::Igbp), "default", ""),
+        (
+            "snicar-pft",
+            None,
+            "bgc",
+            "DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.",
+        ),
+        (
+            "snicar-pc",
+            None,
+            "bgc",
+            "DEF_USE_LCT=.false.\nDEF_USE_PC=.true.",
+        ),
+    ] {
+        rust_preprocess_runs_in_fortran_runtime(
+            label,
+            land_cover,
+            kernel,
+            &format!("{mode}\nDEF_USE_SNICAR=.true.\nDEF_Aerosol_Readin=.false."),
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires local default kernel, generated CN-Cng case, and PLUMBER2 forcing"]
 fn inactive_runoff_preprocessors_run_in_the_unchanged_fortran_runtime() {
     let vic = std::env::temp_dir().join(format!(
@@ -475,7 +502,19 @@ fn rust_preprocess_runs_in_fortran_runtime(
             .iter()
             .all(|&value| value == 1.0));
     }
-    if additions.contains("DEF_USE_PC = .true.") {
+    {
+        let restart = netcdf::open(&files.time.common.block).unwrap();
+        for name in ["alb", "ssun", "ssha", "ssoi", "ssno", "snw_rds", "ssno_lyr"] {
+            assert!(
+                values_f64(&restart, name).iter().all(|v| v.is_finite()),
+                "{label}: nonfinite initial {name}"
+            );
+        }
+    }
+    if matches!(
+        document.get("DEF_USE_PC"),
+        Some(colm_namelist::Value::Bool(true))
+    ) {
         assert_pc_common_absorption_matches_pft_outputs(&files);
     }
     let result = std::process::Command::new(&colm)

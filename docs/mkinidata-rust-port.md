@@ -31,14 +31,18 @@ residual remains outside tolerance. Other modes still require this gate.
 
 ## Migration order
 
-Current SNICAR progress is **kernel/table implementation, not executable cutover**:
-`colm-core::{snicar_ad_rt,age_snow_grains,fresh_snow_radius,snow_aerosol_concentrations}`
-and `colm-forcing::{read_snicar_optics,read_snicar_aging}` now share the source
-computation and native input layouts. Two 21-case source comparisons (synthetic
-and actual runtime tables) pass; see the latest
-[parity evidence](preprocessing-parity-status.md#snicar-numerical-kernels-and-native-tables).
-SNICAR cold-start adapters, restart integration and original-runtime acceptance
-remain required; the current explicit cold-start guard has not been removed.
+Broadband SNICAR is now connected to the executable cold-start paths, not just
+standalone kernels. `SnicarInitialization` loads the native tables once and shares
+`colm-core` snow optics/grain physics across single-point and spatial LCT/PFT/PC
+and the urban common-state path. The restart contains computed `snw_rds` and
+`ssno_lyr`; cold aerosol masses remain zero as in the source. PC uses the existing
+`ColdStartGroundAlbedo` type rather than interchangeable positional matrices.
+Fourteen original-Fortran cold-start comparisons pass the combined `1e-12` gate;
+see [current evidence and limits](preprocessing-parity-status.md#snicar-broadband-executable-integration).
+This does not establish full migration: runtime residuals, all optional-mode
+combinations and the undefined upstream HYPERSPECTRAL+SNICAR public interface
+still require acceptance work. That spectral combination remains explicitly
+rejected; broadband missing/corrupt tables fail before restart creation.
 
 1. **Static-state kernels** — port landdata normalization without I/O: soil profile
    expansion and hydraulic conversion, bedrock, lake layers, texture, canopy/PFT fractions,

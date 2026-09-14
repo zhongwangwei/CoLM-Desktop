@@ -4,7 +4,7 @@ use anyhow::{ensure, Result};
 
 use crate::{
     radiation::{generic_snow_albedo, mix_ground_albedo},
-    ColdStartRadiation, LeafOptics, SoilReflectance, MISSING,
+    ColdStartGroundAlbedo, ColdStartRadiation, LeafOptics, SoilReflectance, MISSING,
 };
 
 const BANDS: usize = 2;
@@ -76,10 +76,12 @@ pub fn cold_start_pc_broadband_radiation_with_snow(
     cold_start_pc_broadband_radiation_from_ground(
         pfts,
         cosine_zenith,
-        soil_ground,
-        snow,
-        ground,
-        snow_age,
+        ColdStartGroundAlbedo {
+            soil: soil_ground,
+            snow,
+            ground,
+            snow_age,
+        },
     )
 }
 
@@ -90,11 +92,14 @@ pub fn cold_start_pc_broadband_radiation_with_snow(
 pub fn cold_start_pc_broadband_radiation_from_ground(
     pfts: &[PcPftInput],
     cosine_zenith: f64,
-    soil_ground: [[f64; RTYPES]; BANDS],
-    snow: [[f64; RTYPES]; BANDS],
-    ground: [[f64; RTYPES]; BANDS],
-    snow_age: f64,
+    ground_state: ColdStartGroundAlbedo,
 ) -> Result<PcCanopyRadiation> {
+    let ColdStartGroundAlbedo {
+        soil: soil_ground,
+        snow,
+        ground,
+        snow_age,
+    } = ground_state;
     ensure!(
         cosine_zenith.is_finite()
             && cosine_zenith > 0.0
@@ -1002,7 +1007,16 @@ mod tests {
         };
         let ground = [[0.14; 2], [0.28; 2]];
         let evaluate = |pft| {
-            cold_start_pc_broadband_radiation_from_ground(&[pft], 0.5, ground, ground, ground, 0.0)
+            cold_start_pc_broadband_radiation_from_ground(
+                &[pft],
+                0.5,
+                ColdStartGroundAlbedo {
+                    soil: ground,
+                    snow: ground,
+                    ground,
+                    snow_age: 0.0,
+                },
+            )
         };
         let state = evaluate(bare).unwrap();
         assert_eq!(state.common.albedo, ground);
@@ -1098,10 +1112,12 @@ mod tests {
             cold_start_pc_broadband_radiation_from_ground(
                 &pfts,
                 0.5,
-                soil_ground,
-                snow,
-                ground,
-                snow_age,
+                ColdStartGroundAlbedo {
+                    soil: soil_ground,
+                    snow,
+                    ground,
+                    snow_age
+                },
             )
             .unwrap(),
             standard

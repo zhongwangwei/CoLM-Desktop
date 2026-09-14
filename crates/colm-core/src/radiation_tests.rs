@@ -1,6 +1,92 @@
 use super::*;
 
 #[test]
+fn from_ground_helpers_preserve_existing_lct_and_pft_snow_cold_start() {
+    let soil = SoilReflectance {
+        saturated_visible: 0.08,
+        dry_visible: 0.19,
+        saturated_near_infrared: 0.16,
+        dry_near_infrared: 0.27,
+    };
+    let soil_grid = crate::colm_soil_grid(10).unwrap();
+    let common_ground = cold_start_ground_albedo(
+        1,
+        soil,
+        8.25,
+        soil_grid.thickness_m[0],
+        0.42,
+        0.18,
+        0.37,
+        268.5,
+    )
+    .unwrap();
+
+    let lct_optics = leaf_optics_from_land_cover(LandCoverScheme::Igbp, 8).unwrap();
+    let lct_existing = cold_start_broadband_radiation_with_snow(
+        1,
+        soil,
+        8.25,
+        soil_grid.thickness_m[0],
+        lct_optics,
+        0.62,
+        0.31,
+        0.2,
+        0.42,
+        true,
+        false,
+        true,
+        0.18,
+        0.37,
+        268.5,
+    )
+    .unwrap();
+    let lct_from_ground = cold_start_broadband_radiation_from_ground(
+        1,
+        common_ground,
+        lct_optics,
+        0.62,
+        0.31,
+        0.2,
+        0.42,
+        true,
+        false,
+        true,
+    )
+    .unwrap();
+    assert_eq!(lct_from_ground, lct_existing);
+
+    let pft_optics = leaf_optics_from_land_cover(LandCoverScheme::Igbp, 13).unwrap();
+    let pft_existing = cold_start_pft_broadband_radiation_with_snow(
+        1,
+        soil,
+        8.25,
+        soil_grid.thickness_m[0],
+        pft_optics,
+        0.48,
+        0.18,
+        0.1,
+        0.42,
+        true,
+        0.18,
+        0.37,
+        268.5,
+    )
+    .unwrap();
+    let pft_from_ground = cold_start_pft_broadband_radiation_from_ground(
+        1,
+        common_ground,
+        pft_optics,
+        0.48,
+        0.18,
+        0.1,
+        0.42,
+        true,
+    )
+    .unwrap();
+    assert_eq!(pft_from_ground, pft_existing);
+}
+
+#[test]
 fn canopy_thermal_gap_matches_original_pearl_river_patches() {
     assert_eq!(two_stream_zmu(1.0e-6, 0.5), 1.0 / 0.877);
     assert_eq!(two_stream_zmu(0.5, 1.0e-6), 1.0);

@@ -18,15 +18,14 @@ use crate::spatial_static::{
 use crate::spatial_urban::SpatialUrbanData;
 use crate::urban_restart::write_cold_urban_time_restart;
 use crate::{
-    cold_start_broadband_radiation_with_snow, cold_start_urban_radiation, colm_soil_grid,
-    derive_initial_soil_hydraulics, derive_lake_layers, derive_snow_cover,
-    derive_spatial_soil_parameters, initialize_snow_layers, leaf_optics_from_land_cover,
-    orbital_calendar_day, orbital_cosine_zenith, resolve_cold_start_soil, write_time_restart,
-    CalendarTime, ColdStartSoilInput, HydraulicModel, InitialSoilProfile, LandCoverScheme,
-    OzoneFields, PlantHydraulicFields, RestartDate, RestartTuning, SnowAerosolFields,
-    SnowSoilRestartFields, SoilField, SoilHydraulicModel, SoilReflectance, TimeLakeFields,
-    TimePatchFields, TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
-    UrbanRadiationInput, UrbanRadiationState, MISSING,
+    cold_start_urban_radiation, colm_soil_grid, derive_initial_soil_hydraulics, derive_lake_layers,
+    derive_snow_cover, derive_spatial_soil_parameters, initialize_snow_layers,
+    leaf_optics_from_land_cover, orbital_calendar_day, orbital_cosine_zenith,
+    resolve_cold_start_soil, write_time_restart, CalendarTime, ColdStartSoilInput, HydraulicModel,
+    InitialSoilProfile, LandCoverScheme, OzoneFields, PlantHydraulicFields, RestartDate,
+    RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilField, SoilHydraulicModel,
+    SoilReflectance, TimeLakeFields, TimePatchFields, TimeRadiationFields, TimeRestartDimensions,
+    TimeRestartFile, TimeRestartInput, UrbanRadiationInput, UrbanRadiationState, MISSING,
 };
 
 /// The vegetation files materialized by mksrfdata.
@@ -63,6 +62,8 @@ pub struct SpatialLctTimeConfig<'a> {
     pub tuning: RestartTuning,
     /// Optional monthly sources enabled by CoLM's `DEF_USE_*Init` switches.
     pub observations: SpatialObservedInitialization<'a>,
+    /// Immutable SNICAR tables resolved before writing any block outputs.
+    pub snicar: Option<&'a crate::SnicarInitialization>,
 }
 
 impl<'a> SpatialLctTimeConfig<'a> {
@@ -98,6 +99,7 @@ impl<'a> SpatialLctTimeConfig<'a> {
             snow_cover_exponent: 0.5,
             tuning: RestartTuning::default(),
             observations: SpatialObservedInitialization::default(),
+            snicar: None,
         }
     }
 }
@@ -319,6 +321,12 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
     let mut total_sai = sai;
     let mut sigf = vec![1.0; count];
     let mut radiation = RadiationBuffers::new(count);
+    let mut grain = vec![54.526; dimensions.snow_layers * count];
+    let mut snow_layer_absorption =
+        vec![
+            0.0;
+            dimensions.bands * dimensions.radiation_types * (dimensions.snow_layers + 1) * count
+        ];
     let mut urban_radiation = vec![None; urban_count];
     let mut urban_soil_liquid = vec![0.0; dimensions.soil_layers * urban_count];
 
@@ -425,11 +433,11 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             config.snow_cover_exponent,
         )?;
         ground_snow_fraction[patch] = cover.ground_snow_fraction;
-        sigf[patch] = if water {
-            0.0
-        } else {
-            cover.snow_free_vegetation_fraction
-        };
+        sigf[patch] = spatial_sigf(
+            water,
+            config.observations.snow.is_some(),
+            cover.snow_free_vegetation_fraction,
+        );
         sai_now[patch] *= sigf[patch];
         let calendar_day = orbital_calendar_day(
             CalendarTime {
@@ -442,7 +450,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         )?;
         cosine_zenith[patch] =
             orbital_cosine_zenith(calendar_day, longitude[patch], latitude[patch]);
-        let state = cold_start_broadband_radiation_with_snow(
+        let mut ground = colm_core::cold_start_ground_albedo(
             kind[patch],
             SoilReflectance {
                 saturated_visible: albedo[0][patch],
@@ -452,6 +460,38 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             },
             cold.liquid_water_kg_m2[0],
             grid.thickness_m[0],
+            cosine_zenith[patch].max(0.001),
+            snow_depth[patch],
+            cover.ground_snow_fraction,
+            cold.temperature_k[0],
+        )?;
+        if let Some(tables) = config.snicar {
+            let snow_optics = tables.initialize_cold(
+                ground,
+                cosine_zenith[patch].max(0.001),
+                &snow,
+                snow_water_equivalent[patch],
+                cover.ground_snow_fraction,
+                cold.temperature_k[0],
+                grid.thickness_m[0],
+            )?;
+            ground = snow_optics.ground;
+            for layer in 0..dimensions.snow_layers {
+                grain[layer * count + patch] = snow_optics.grain_radius[layer];
+            }
+            for band in 0..2 {
+                for incident in 0..2 {
+                    for layer in 0..6 {
+                        snow_layer_absorption
+                            [((band * 2 + incident) * 6 + layer) * count + patch] =
+                            snow_optics.layer_absorption[band][incident][layer];
+                    }
+                }
+            }
+        }
+        let state = colm_core::cold_start_broadband_radiation_from_ground(
+            kind[patch],
+            ground,
             leaf_optics_from_land_cover(config.land_cover, class)?,
             lai_now[patch],
             sai_now[patch],
@@ -460,9 +500,6 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             true,
             config.land_cover == LandCoverScheme::Usgs,
             config.vegetation_snow,
-            snow_depth[patch],
-            cover.ground_snow_fraction,
-            cold.temperature_k[0],
         )?;
         radiation.set(patch, &state);
         if let Some(urban) = urban_at_patch[patch] {
@@ -513,12 +550,6 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
     let lake_temperature = vec![285.0; dimensions.lake_layers * count];
     let lake_ice = vec![0.0; dimensions.lake_layers * count];
     let snow_zero = vec![0.0; dimensions.snow_layers * count];
-    let grain = vec![54.526; dimensions.snow_layers * count];
-    let snow_layer_absorption =
-        vec![
-            0.0;
-            dimensions.bands * dimensions.radiation_types * (dimensions.snow_layers + 1) * count
-        ];
     let plant_water = vec![-25_000.0; 4 * count];
     let conductance = vec![10_000.0; count];
     let wetland = kind
@@ -947,6 +978,18 @@ fn is_water(scheme: LandCoverScheme, class: i32) -> bool {
         || matches!(scheme, LandCoverScheme::Usgs) && class == 16
 }
 
+fn spatial_sigf(
+    water: bool,
+    snow_initialization_enabled: bool,
+    snow_free_vegetation_fraction: f64,
+) -> f64 {
+    if water && !snow_initialization_enabled {
+        0.0
+    } else {
+        snow_free_vegetation_fraction
+    }
+}
+
 fn urban_albedo(values: &[f64], urban_count: usize, urban: usize) -> [[f64; 2]; 2] {
     [
         [values[urban], values[urban_count + urban]],
@@ -1041,6 +1084,21 @@ mod tests {
             .unwrap(),
             361
         );
+    }
+
+    #[test]
+    fn snow_initialization_preserves_source_sigf_for_water_patches() {
+        // MOD_IniTimeVariable.F90 calls snowfraction when use_snowini is true
+        // and skips the later no-snow fveg assignment. For lake/water patches
+        // with zero LAI/SAI, snowfraction returns sigf=1.
+        assert_eq!(spatial_sigf(true, true, 1.0), 1.0);
+
+        // Without snow initialization, the original no-snow branch uses fveg;
+        // Desktop represents water patches with fveg=0.
+        assert_eq!(spatial_sigf(true, false, 1.0), 0.0);
+
+        assert_eq!(spatial_sigf(false, true, 0.75), 0.75);
+        assert_eq!(spatial_sigf(false, false, 0.75), 0.75);
     }
 
     #[test]

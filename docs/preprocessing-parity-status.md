@@ -6,6 +6,67 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## SNICAR broadband executable integration
+
+`mkinidata-rs` now loads native SNICAR optics/aging tables from
+`DEF_dir_runtime/snicar` before writing output. Immutable tables are shared across
+blocks; the cold adapter uses the existing fixed-buffer `colm-core` computations.
+Single-point and spatial LCT/PFT/PC, including the urban common state, persist
+computed `snw_rds` and snow-layer absorption `ssno_lyr`. Aerosol masses start at
+zero in original `IniTimeVar` and remain zero here; they are not missing-input
+substitutions. Underlying diffuse soil albedo, active snow-slot order, thin-snow
+absorption folding and cold grain-aging inputs follow original `albland`.
+
+Two observational-state fixes accompany the integration: spatial natural PFT/PC
+now uses actual snow depth/fraction and snow-adjusted SAI instead of hardcoded
+zero snow; water `sigf` distinguishes a present zero-depth SnowInit observation
+from no observation, in spatial and single-point adapters.
+
+**Original executable cold-start gate:** 14 comparisons pass unchanged
+`atol=rtol=1e-12` (62 NetCDF files / 2,188 variable comparisons, including schema
+and attributes). LCT unstructured, grid PFT/WMO and fast PC each cover SNICAR snow
+depths 0, 0.003, 0.04 and 0.7 m; PFT/PC also cover non-SNICAR 0.04 m controls.
+Existing complete landdata is copied to fresh directories; this is not a new
+raw-data `mksrfdata` run. Original source is pristine `ebe6de998...`, compiled with
+`-O2 -fdefault-real-8`; `DEF_VEG_SNOW=false` is explicit for parity and production's
+default remains unchanged. Maximum absolute cold differences are `6.57e-14` for
+PFT/PC and `1.94e-12` for LCT; all satisfy the combined absolute/relative gate.
+Evidence: `/tmp/colm-snicar-integration/paired-v2/results.json` and
+`/tmp/colm-snicar-integration/lct-v1/final-results.json`.
+
+The initial integration test found swapped PC ground-matrix arguments, including
+nonfinite **Rust**, not original, absorption. This was a Rust integration defect,
+not source undefined behavior. The API now takes the existing typed
+`ColdStartGroundAlbedo`; the native regression fails on nonfinite initial fields
+and checks PC common/PFT consistency. The failing native check and its corrected
+run are retained as `native-snicar-red.log` / `native-snicar-green.log`; original
+repeat controls are stable. No PC numerical formula or tolerance was changed.
+
+**Unchanged runtime:** all eight PC/PFT paired two-step runs complete and their
+entire restart comparisons pass. Only three of eight full history comparisons
+pass the strict gate. The remaining differences are four `f_zerr` values per
+case: PC snow depths 0 / 0.003 / 0.7 m have maximum absolute differences
+`1.24e-12` / `6.46e-12` / `9.05e-12`; PFT depths 0 / 0.7 m have `1.03e-12` /
+`2.06e-12`. These are retained failures, not rounded away or hidden behind a
+successful exit code. PC 0.04 m and PFT 0.003 / 0.04 m history pass.
+Evidence: `/tmp/colm-snicar-integration/runtime-final-results.json`.
+Single-point LCT/PFT/PC SNICAR additionally pass the native preprocessing plus
+unchanged Desktop Fortran runtime regression, with finite initial radiation and
+PC common/PFT absorption checks; those Desktop binaries are secondary evidence,
+not replacements for the pristine spatial oracle.
+
+**Code verification:** 918 tests pass, including native I/O/reference/runtime
+checks, with all-target Clippy, downstream typecheck, scoped formatting and all
+three release binaries. `validation/summary.json` under the same artifact root
+records exact test counts and binary hashes; `final-review.md` approves this
+bounded integration, not overall migration completion.
+
+**Remaining boundaries:** full all-mode migration is still open. Broadband
+integration does not enable HYPERSPECTRAL+SNICAR: original HiRes AD declares five
+albedo outputs but only defines its two-band reduction. No silent replacement is
+made for that undefined public contract. The cold matrix does not establish all
+CROP/BGC/urban/SNICAR combinations or long-run aerosol evolution.
+
 ## SNICAR numerical kernels and native tables
 
 The shared Rust core now implements the land, spherical-grain, default-atmosphere
@@ -38,10 +99,9 @@ scoped formatting and all three preprocessor release builds. Logs and binary
 hashes: `/tmp/colm-snicar-validation/summary.json`. Independent bounded source
 review approves this kernel/table slice (`/tmp/colm-snicar-port/review.md`).
 
-**Still not integrated:** these are source-extracted kernel/table checks, not
-a SNICAR-enabled `mkinidata-rs` or full original-runtime acceptance result.
-The cold-start rejection remains in place until the shared kernels are wired
-through every exposed adapter and their real restart fields are verified.
+These earlier kernel/table checks alone did not establish executable acceptance;
+that integration now has the separate bounded evidence above. They are retained
+as source-level coverage of the reusable numerical routines.
 The original HiRes AD interface declares five output bands but only assigns its
 two-band reduction; its other albedo outputs are undefined. Rust's internal
 five-band results must not be presented as exact parity with that public interface.
@@ -475,8 +535,10 @@ all-PFTless spatial blocks, broader scientific and platform gates remain open.
 
 ## SNICAR cold-start safety guard (before kernel migration)
 
-Namelist-driven cold starts now reject `DEF_USE_SNICAR=.true.` rather than
-silently using non-SNICAR snow optics. This conservative temporary restriction
+Historically, namelist-driven cold starts rejected `DEF_USE_SNICAR=.true.` rather
+than silently using non-SNICAR snow optics. The broadband integration above
+supersedes this temporary guard; missing tables and unsupported spectral modes
+still fail explicitly. This conservative temporary restriction
 also rejects snow-free enabled cases whose cold state may otherwise agree; it is
 **not SNICAR implementation**. Constant-only initialization remains available.
 Checks cover single-point, spatial LCT/PFT/PC/urban dispatch, and direct PFT/PC
@@ -487,8 +549,9 @@ A frozen pre-change initializer with SNICAR enabled returned success and wrote
 three restart files; the new executable regression rejects that substitution.
 Both targeted regressions pass, including full/direct CLI and direct library
 paths, static-only control, and retained non-SNICAR observed-state paths.
-Evidence: `/tmp/colm-snicar-safety-guard/`. Full optical-table loading, snow grain
-aging and snow-layer absorption remain required for the complete migration.
+Historical evidence: `/tmp/colm-snicar-safety-guard/`. Optical-table loading, grain
+aging and snow-layer absorption are now connected by the bounded integration
+reported above; the full all-mode acceptance gate remains open.
 
 ## PC layer candidate was not adopted
 

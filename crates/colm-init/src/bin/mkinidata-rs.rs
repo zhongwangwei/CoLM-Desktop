@@ -18,9 +18,10 @@ use colm_init::{
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
     write_spatial_urban_constant_restarts, CatchLateralColdStartConfig, GridRiverColdStartConfig,
     HydraulicModel, LaiFrequency, LandCoverScheme, RestartDate, RestartTuning,
-    SinglePointHyperspectralConfig, SinglePointStaticConfig, SpatialLctStaticConfig,
-    SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
-    SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
+    SinglePointHyperspectralConfig, SinglePointStaticConfig, SnicarInitialization,
+    SpatialLctStaticConfig, SpatialLctTimeConfig, SpatialObservedInitializationPaths,
+    SpatialPftStaticConfig, SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig,
+    UrbanConfig,
 };
 use colm_namelist::{parse, Value};
 
@@ -103,6 +104,10 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         "--grid-river and --catch-lateral require a spatial case because routing kernels are not SinglePoint kernels"
     );
     let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
+    ensure!(
+        !high_resolution.enabled || run.snicar.is_none(),
+        "DEF_USE_SNICAR: HYPERSPECTRAL cold integration is not yet implemented"
+    );
     let files = if high_resolution.enabled {
         write_single_point_hyperspectral_constant_restarts(&run)?
     } else {
@@ -202,6 +207,7 @@ struct SpatialNamelistRun {
     snow_cover_exponent: f64,
     observations: SpatialObservedInitializationPaths,
     tuning: RestartTuning,
+    snicar: Option<SnicarInitialization>,
 }
 
 fn run_spatial_namelist(
@@ -213,6 +219,10 @@ fn run_spatial_namelist(
     catch_lateral: bool,
 ) -> Result<()> {
     let mut run = spatial_namelist_run(namelist)?;
+    ensure!(
+        !high_resolution.enabled || run.snicar.is_none(),
+        "DEF_USE_SNICAR: HYPERSPECTRAL cold integration is not yet implemented"
+    );
     ensure!(
         !high_resolution.enabled || run.subgrid == SpatialSubgrid::PftOrPc,
         "--hyperspectral is currently supported only by spatial PFT/PC cold starts"
@@ -365,6 +375,7 @@ fn write_spatial_urban_namelist_block(
     time.variably_saturated_flow = run.variably_saturated_flow;
     time.vegetation_snow = run.vegetation_snow;
     time.snow_cover_exponent = run.snow_cover_exponent;
+    time.snicar = run.snicar.as_ref();
     time.observations = run.observations.borrow();
     let time = write_spatial_urban_cold_time_restarts(SpatialUrbanTimeConfig {
         common: time,
@@ -440,6 +451,7 @@ fn write_spatial_lct_namelist_block(
     time.variably_saturated_flow = run.variably_saturated_flow;
     time.vegetation_snow = run.vegetation_snow;
     time.snow_cover_exponent = run.snow_cover_exponent;
+    time.snicar = run.snicar.as_ref();
     time.observations = run.observations.borrow();
     let time = write_spatial_lct_cold_time_restart(time)?;
     println!("wrote {}", files.constants.display());
@@ -478,6 +490,7 @@ fn write_spatial_pft_namelist_block(
     time.variably_saturated_flow = run.variably_saturated_flow;
     time.vegetation_snow = run.vegetation_snow;
     time.snow_cover_exponent = run.snow_cover_exponent;
+    time.snicar = run.snicar.as_ref();
     time.use_hyperspectral = high_resolution.enabled;
     time.high_resolution_leaf_optics = high_resolution.leaf_optics.as_deref();
     time.high_resolution_water_optics = high_resolution.water_optics.as_deref();
@@ -508,10 +521,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    ensure!(
-        !namelist_bool(&document, "DEF_USE_SNICAR", false)?,
-        "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
-    );
+    let snicar = SnicarInitialization::from_document(&document)?;
     let lai_monthly = namelist_bool(&document, "DEF_LAI_MONTHLY", true)?;
     let use_regular_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling", false)?;
     let use_simple_terrain = namelist_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
@@ -663,6 +673,7 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         observations: SpatialObservedInitializationPaths::from_document(&document)?,
         tuning: RestartTuning::from_document(&document)?,
+        snicar,
     })
 }
 
@@ -1090,12 +1101,15 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
     );
     let document = parse(&std::fs::read_to_string(&namelist)?)?;
-    if cold_time.is_some() {
-        ensure!(
-            !namelist_bool(&document, "DEF_USE_SNICAR", false)?,
-            "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
-        );
-    }
+    let snicar = cold_time
+        .is_some()
+        .then(|| SnicarInitialization::from_document(&document))
+        .transpose()?
+        .flatten();
+    ensure!(
+        !use_hyperspectral || snicar.is_none(),
+        "DEF_USE_SNICAR: HYPERSPECTRAL cold integration is not yet implemented"
+    );
     let static_config = SpatialPftStaticConfig::new(
         &namelist,
         &landdata,
@@ -1116,6 +1130,7 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
     if let Some(date) = cold_time {
         let mut time = SpatialPftTimeConfig::new(static_config, date);
+        time.snicar = snicar.as_ref();
         time.tuning = RestartTuning::from_document(&document)?;
         time.lai_year = lai_year;
         time.greenwich = greenwich;

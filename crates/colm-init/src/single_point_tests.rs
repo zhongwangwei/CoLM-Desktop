@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use colm_core::ColdStartGroundAlbedo;
+use colm_core::{cold_start_pc_broadband_radiation_with_snow, ColdStartGroundAlbedo};
 
 use crate::{
     crop_cold_start_from_tuning, LakeState, SinglePointSurfaceData, SnowState, SoilLayerInput,
@@ -655,7 +655,7 @@ fn pc_mixed_bare_and_vegetated_patch_matches_original_cold_radiation() {
 }
 
 #[test]
-fn cold_namelist_rejects_snicar_and_keeps_non_snicar_state_sources() {
+fn cold_namelist_errors_on_missing_snicar_tables_and_keeps_non_snicar_state_sources() {
     let directory =
         std::env::temp_dir().join(format!("colm-init-namelist-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -701,6 +701,7 @@ fn cold_namelist_rejects_snicar_and_keeps_non_snicar_state_sources() {
     assert_eq!(run.water_table_initial_state, Some(wtd));
     assert!(run.variably_saturated_flow);
     assert_eq!(run.snow_cover_exponent, 0.75);
+    assert!(run.snicar.is_none());
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -769,6 +770,28 @@ fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
             }
         }
     }
+
+    let zero_snow = root.join("zero-snow.nc");
+    write_single_point_snow_depth_fixture(&zero_snow, 0.0);
+    let observed_water_run = scalar_nonvegetated_run(
+        &root,
+        "lct-observed-zero-snow-water",
+        SinglePointSubgrid::Lct,
+        false,
+        false,
+        None,
+        Some((&zero_snow, true)),
+    );
+    let mut observed_water = single_point_restart_surface();
+    observed_water.land_class = 17;
+    observed_water.lake_depth_m = 0.0;
+    let observed_files =
+        write_single_point_scalar_cold_time_restarts(&observed_water_run, &observed_water, 4, None)
+            .unwrap();
+    let observed_common = netcdf::open(observed_files.common.block).unwrap();
+    assert_eq!(values_f64(&observed_common, "fveg"), [0.0]);
+    assert_eq!(values_f64(&observed_common, "sigf"), [1.0]);
+    assert_eq!(values_f64(&observed_common, "fsno"), [0.0]);
 
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1505,6 +1528,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         variably_saturated_flow: true,
         snow_cover_exponent: 1.0,
         vegetation_snow: true,
+        snicar: None,
         urban: None,
     };
     let radiation = |value| ColdStartRadiation {
@@ -1521,6 +1545,22 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
     };
     let first = radiation(1.0);
     let second = radiation(10.0);
+    let snicar = crate::snicar::ColdSnicarState {
+        ground: ColdStartGroundAlbedo {
+            soil: [[0.0; 2]; 2],
+            snow: [[0.0; 2]; 2],
+            ground: [[0.0; 2]; 2],
+            snow_age: 0.0,
+        },
+        grain_radius: [101.0, 102.0, 103.0, 104.0, 105.0],
+        layer_absorption: std::array::from_fn(|band| {
+            std::array::from_fn(|radiation_type| {
+                std::array::from_fn(|snow_or_soil| {
+                    100.0 * band as f64 + 10.0 * radiation_type as f64 + snow_or_soil as f64
+                })
+            })
+        }),
+    };
     let patches = [
         ColdPatchFields {
             total_lai: 0.0,
@@ -1531,6 +1571,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             lai: 0.0,
             sai: 0.0,
             radiation: &first,
+            snicar: Some(&snicar),
             ground_snow_fraction: 0.0,
             roughness: 0.1,
         },
@@ -1543,6 +1584,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             lai: 0.0,
             sai: 0.0,
             radiation: &second,
+            snicar: None,
             ground_snow_fraction: 0.0,
             roughness: 0.2,
         },
@@ -1582,6 +1624,16 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         [1.0, 3.0, 2.0, 4.0, 10.0, 12.0, 11.0, 13.0]
     );
     assert_eq!(values_f64(&file, "wliq_soisno").len(), 30);
+    assert_eq!(
+        values_f64(&file, "snw_rds"),
+        [101.0, 102.0, 103.0, 104.0, 105.0, 54.526, 54.526, 54.526, 54.526, 54.526]
+    );
+    let snow_absorption = values_f64(&file, "ssno_lyr");
+    assert_eq!(
+        &snow_absorption[..8],
+        &[0.0, 100.0, 10.0, 110.0, 1.0, 101.0, 11.0, 111.0]
+    );
+    assert!(snow_absorption[24..].iter().all(|value| *value == 0.0));
     std::fs::remove_dir_all(directory).unwrap();
 }
 

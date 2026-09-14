@@ -103,7 +103,7 @@ fn native_mkinidata_binary_writes_the_complete_common_restart_family() {
 }
 
 #[test]
-fn snicar_cold_entries_reject_before_reading_or_writing_restart_data() {
+fn missing_snicar_tables_fail_before_reading_or_writing_restart_data() {
     let directory = std::env::temp_dir().join(format!("colm-init-snicar-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let namelist = directory.join("case.nml");

@@ -11,11 +11,12 @@ use colm_case::pft::{
     default_value as pft_default_value, validate_override as validate_pft_override,
 };
 use colm_core::{
-    bsm_soil_moisture, cold_start_ground_albedo, cold_start_pc_broadband_radiation_from_ground,
+    bsm_soil_moisture, cold_start_broadband_radiation_from_ground, cold_start_ground_albedo,
+    cold_start_pc_broadband_radiation_from_ground, cold_start_pft_broadband_radiation_from_ground,
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
     high_resolution_nonnatural_cold_start_state, high_resolution_pft_cold_start_state,
-    pft_high_resolution_radiation, prospect_leaf_optics, HighResolutionLeafOptics,
-    HIGH_RES_WAVELENGTHS,
+    pft_high_resolution_radiation, prospect_leaf_optics, ColdStartGroundAlbedo,
+    HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS,
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
@@ -25,9 +26,7 @@ use colm_forcing::{
 use colm_namelist::{parse, Value};
 
 use crate::{
-    append_time_hyperspectral_fields, bgc_time_restart_input,
-    cold_start_broadband_radiation_with_snow, cold_start_pc_broadband_radiation_with_snow,
-    cold_start_pft_broadband_radiation_with_snow, colm_soil_grid, derive_bedrock,
+    append_time_hyperspectral_fields, bgc_time_restart_input, colm_soil_grid, derive_bedrock,
     derive_cold_start_bgc_state, derive_igbp_canopy, derive_initial_soil_hydraulics,
     derive_lake_layers, derive_pft_snow_cover, derive_snow_cover, derive_soil_parameters,
     derive_usgs_canopy, initialize_snow_layers, is_leap_year, leaf_optics_from_land_cover,
@@ -217,6 +216,7 @@ pub struct SinglePointColdStartRun {
     pub variably_saturated_flow: bool,
     pub snow_cover_exponent: f64,
     pub vegetation_snow: bool,
+    pub snicar: Option<crate::SnicarInitialization>,
     pub urban: Option<SinglePointUrbanConfig>,
 }
 
@@ -343,6 +343,7 @@ pub fn single_point_cold_start_run_from_namelist(
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let subgrid = single_point_subgrid(&document)?;
+    let snicar = crate::SnicarInitialization::from_document(&document)?;
     reject_unsupported_cold_start_features(&document, subgrid)?;
     optional_bool_or(&document, "DEF_USE_TRACER", false)?;
     let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
@@ -415,6 +416,7 @@ pub fn single_point_cold_start_run_from_namelist(
         )?,
         snow_cover_exponent: optional_f64_or(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         vegetation_snow: optional_bool_or(&document, "DEF_VEG_SNOW", true)?,
+        snicar,
         urban: single_point_urban_config(&document)?,
     })
 }
@@ -587,6 +589,10 @@ pub fn write_single_point_hyperspectral_constant_restarts(
             ),
         "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
     );
+    ensure!(
+        run.snicar.is_none(),
+        "HYPERSPECTRAL+SNICAR single-point cold starts are not implemented: upstream public 5-band restart policy is undefined"
+    );
     let albedo = read_single_point_hyperspectral_albedo(&run.static_run.surface)?;
     write_single_point_constant_restarts_with_hyperspectral(run, Some(&albedo))
 }
@@ -595,6 +601,10 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     run: &SinglePointColdStartRun,
     hyperspectral_albedo: Option<&[f64]>,
 ) -> Result<SinglePointConstantRestartFiles> {
+    ensure!(
+        hyperspectral_albedo.is_none() || run.snicar.is_none(),
+        "HYPERSPECTRAL+SNICAR single-point cold starts are not implemented: upstream public 5-band restart policy is undefined"
+    );
     let mut static_config = run.static_run.static_config();
     // The full cold-start switch owns BGC, including manually constructed runs.
     static_config.use_bgc = run.bgc;
@@ -1078,6 +1088,33 @@ pub fn write_single_point_cold_time_restarts(
     write_single_point_scalar_cold_time_restarts(run, &surface, kind, None)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn initialize_snicar_cold_state(
+    run: &SinglePointColdStartRun,
+    ground: ColdStartGroundAlbedo,
+    cosine_zenith: f64,
+    snow: &crate::SnowState,
+    snow_water_equivalent_mm: f64,
+    ground_snow_fraction: f64,
+    soil_temperature_k: f64,
+    soil_thickness_m: f64,
+) -> Result<Option<crate::snicar::ColdSnicarState>> {
+    run.snicar
+        .as_ref()
+        .map(|snicar| {
+            snicar.initialize_cold(
+                ground,
+                cosine_zenith.max(0.001),
+                snow,
+                snow_water_equivalent_mm,
+                ground_snow_fraction,
+                soil_temperature_k,
+                soil_thickness_m,
+            )
+        })
+        .transpose()
+}
+
 fn write_single_point_scalar_cold_time_restarts(
     run: &SinglePointColdStartRun,
     surface: &crate::SinglePointSurfaceData,
@@ -1178,7 +1215,7 @@ fn write_single_point_scalar_cold_time_restarts(
         run.snow_cover_exponent,
     )?;
     let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
-    let sigf = if snow_depth_m > 0.0 {
+    let sigf = if run.snow_initial_state.is_some() {
         snow_cover.snow_free_vegetation_fraction
     } else {
         fveg
@@ -1199,6 +1236,7 @@ fn write_single_point_scalar_cold_time_restarts(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
+    let mut snicar_state = None;
     let (radiation, high_resolution_albedo) = if let Some(inputs) = hyperspectral {
         ensure!(
             snow_depth_m == 0.0 && snow_cover.ground_snow_fraction == 0.0,
@@ -1246,12 +1284,31 @@ fn write_single_point_scalar_cold_time_restarts(
         )?;
         (state, Some(albedo))
     } else {
+        let ground = cold_start_ground_albedo(
+            kind,
+            surface.albedo,
+            cold_soil.liquid_water_kg_m2[0],
+            thickness[0],
+            cosine_zenith.max(0.001),
+            snow_depth_m,
+            snow_cover.ground_snow_fraction,
+            cold_soil.temperature_k[0],
+        )?;
+        snicar_state = initialize_snicar_cold_state(
+            run,
+            ground,
+            cosine_zenith,
+            &snow,
+            snow_water_equivalent_mm,
+            snow_cover.ground_snow_fraction,
+            cold_soil.temperature_k[0],
+            thickness[0],
+        )?;
+        let ground = snicar_state.as_ref().map_or(ground, |state| state.ground);
         (
-            cold_start_broadband_radiation_with_snow(
+            cold_start_broadband_radiation_from_ground(
                 kind,
-                surface.albedo,
-                cold_soil.liquid_water_kg_m2[0],
-                thickness[0],
+                ground,
                 leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
                 lai,
                 sai,
@@ -1260,9 +1317,6 @@ fn write_single_point_scalar_cold_time_restarts(
                 true,
                 config.land_cover == LandCoverScheme::Usgs,
                 run.vegetation_snow,
-                snow_depth_m,
-                snow_cover.ground_snow_fraction,
-                cold_soil.temperature_k[0],
             )?,
             None,
         )
@@ -1276,6 +1330,7 @@ fn write_single_point_scalar_cold_time_restarts(
         lai,
         sai,
         radiation: &radiation,
+        snicar: snicar_state.as_ref(),
         ground_snow_fraction: snow_cover.ground_snow_fraction,
         roughness,
     }];
@@ -1355,6 +1410,10 @@ pub fn write_single_point_hyperspectral_cold_time_restarts(
                 SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
             ),
         "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
+    );
+    ensure!(
+        run.snicar.is_none(),
+        "HYPERSPECTRAL+SNICAR single-point cold starts are not implemented: upstream public 5-band restart policy is undefined"
     );
     let config = run.static_run.static_config();
     let surface = read_single_point_surface(
@@ -1457,7 +1516,7 @@ fn write_single_point_urban_cold_time_restarts(
         run.snow_cover_exponent,
     )?;
     let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
-    let sigf = if snow_depth_m > 0.0 {
+    let sigf = if run.snow_initial_state.is_some() {
         snow_cover.snow_free_vegetation_fraction
     } else {
         fveg
@@ -1479,11 +1538,30 @@ fn write_single_point_urban_cold_time_restarts(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
-    let mut radiation = cold_start_broadband_radiation_with_snow(
+    let ground = cold_start_ground_albedo(
         kind,
         surface.albedo,
         cold_soil.liquid_water_kg_m2[0],
         thickness[0],
+        cosine_zenith.max(0.001),
+        snow_depth_m,
+        snow_cover.ground_snow_fraction,
+        cold_soil.temperature_k[0],
+    )?;
+    let snicar_state = initialize_snicar_cold_state(
+        run,
+        ground,
+        cosine_zenith,
+        &snow,
+        snow_water_equivalent_mm,
+        snow_cover.ground_snow_fraction,
+        cold_soil.temperature_k[0],
+        thickness[0],
+    )?;
+    let ground = snicar_state.as_ref().map_or(ground, |state| state.ground);
+    let mut radiation = cold_start_broadband_radiation_from_ground(
+        kind,
+        ground,
         leaf_optics_from_land_cover(config.land_cover, surface.land_class)?,
         lai,
         sai,
@@ -1492,9 +1570,6 @@ fn write_single_point_urban_cold_time_restarts(
         true,
         config.land_cover == LandCoverScheme::Usgs,
         run.vegetation_snow,
-        snow_depth_m,
-        snow_cover.ground_snow_fraction,
-        cold_soil.temperature_k[0],
     )?;
     let urban_radiation = crate::cold_start_urban_radiation(UrbanRadiationInput {
         roof_fraction: initialized.state.roof_fraction[0],
@@ -1554,6 +1629,7 @@ fn write_single_point_urban_cold_time_restarts(
         lai,
         sai,
         radiation: &radiation,
+        snicar: snicar_state.as_ref(),
         ground_snow_fraction: snow_cover.ground_snow_fraction,
         roughness,
     }];
@@ -1813,7 +1889,8 @@ fn write_single_point_pft_cold_time_restarts(
         surface.longitude_degrees.to_radians(),
         surface.latitude_degrees.to_radians(),
     );
-    let broadband_ground = cold_start_ground_albedo(
+    let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
+    let base_broadband_ground = cold_start_ground_albedo(
         kind,
         surface.albedo,
         cold_soil.liquid_water_kg_m2[0],
@@ -1823,6 +1900,23 @@ fn write_single_point_pft_cold_time_restarts(
         pft_snow.patch.ground_snow_fraction,
         cold_soil.temperature_k[0],
     )?;
+    let snicar_state = if hyperspectral.is_none() {
+        initialize_snicar_cold_state(
+            run,
+            base_broadband_ground,
+            cosine_zenith,
+            &snow,
+            snow_water_equivalent_mm,
+            pft_snow.patch.ground_snow_fraction,
+            cold_soil.temperature_k[0],
+            thickness[0],
+        )?
+    } else {
+        None
+    };
+    let broadband_ground = snicar_state
+        .as_ref()
+        .map_or(base_broadband_ground, |state| state.ground);
     let common_ground = hyperspectral.is_none().then_some(&broadband_ground);
     let high_resolution_ground = hyperspectral
         .map(|_| {
@@ -1858,11 +1952,9 @@ fn write_single_point_pft_cold_time_restarts(
         .iter()
         .zip(total_lai_p.iter().zip(sai_p.iter()))
         .map(|(&class, (&lai, &sai))| {
-            cold_start_pft_broadband_radiation_with_snow(
+            cold_start_pft_broadband_radiation_from_ground(
                 kind,
-                surface.albedo,
-                cold_soil.liquid_water_kg_m2[0],
-                thickness[0],
+                broadband_ground,
                 pft_leaf_optics(
                     &document,
                     class,
@@ -1874,9 +1966,6 @@ fn write_single_point_pft_cold_time_restarts(
                 0.0,
                 cosine_zenith.max(0.001),
                 run.vegetation_snow,
-                snow_depth_m,
-                pft_snow.patch.ground_snow_fraction,
-                cold_soil.temperature_k[0],
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1947,10 +2036,12 @@ fn write_single_point_pft_cold_time_restarts(
                 let mut pc = cold_start_pc_broadband_radiation_from_ground(
                     &inputs,
                     cosine_zenith.max(0.001),
-                    high_resolution.albedo,
-                    [[1.0; 2]; 2],
-                    high_resolution.albedo,
-                    high_resolution.snow_age,
+                    colm_core::ColdStartGroundAlbedo {
+                        soil: high_resolution.albedo,
+                        snow: [[1.0; 2]; 2],
+                        ground: high_resolution.albedo,
+                        snow_age: high_resolution.snow_age,
+                    },
                 )?;
                 // MOD_Albedo_HiRes retains its default high-resolution
                 // transmission when PC's broadband ThreeDCanopy solver runs.
@@ -1958,16 +2049,10 @@ fn write_single_point_pft_cold_time_restarts(
                 pc.common.snow_absorption = high_resolution.snow_absorption;
                 pc
             } else {
-                cold_start_pc_broadband_radiation_with_snow(
-                    kind,
-                    surface.albedo,
-                    cold_soil.liquid_water_kg_m2[0],
-                    thickness[0],
+                cold_start_pc_broadband_radiation_from_ground(
                     &inputs,
                     cosine_zenith.max(0.001),
-                    snow_depth_m,
-                    pft_snow.patch.ground_snow_fraction,
-                    cold_soil.temperature_k[0],
+                    broadband_ground,
                 )?
             };
             let mut common = one_dimensional_radiation.clone();
@@ -2146,7 +2231,6 @@ fn write_single_point_pft_cold_time_restarts(
     } else {
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
-    let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
     let common_patches = if crop.is_some() {
         pft.class
             .iter()
@@ -2160,6 +2244,7 @@ fn write_single_point_pft_cold_time_restarts(
                 lai: total_lai_p[index],
                 sai: sai_p[index],
                 radiation: &one_dimensional_radiation[index],
+                snicar: snicar_state.as_ref(),
                 ground_snow_fraction: pft_snow.patch.ground_snow_fraction,
                 roughness: roughness_p[index],
             })
@@ -2174,6 +2259,7 @@ fn write_single_point_pft_cold_time_restarts(
             lai: total_lai,
             sai,
             radiation: &pft_radiation.radiation,
+            snicar: snicar_state.as_ref(),
             ground_snow_fraction: pft_snow.patch.ground_snow_fraction,
             roughness,
         }]
@@ -2386,6 +2472,7 @@ struct ColdPatchFields<'a> {
     lai: f64,
     sai: f64,
     radiation: &'a ColdStartRadiation,
+    snicar: Option<&'a crate::snicar::ColdSnicarState>,
     ground_snow_fraction: f64,
     roughness: f64,
 }
@@ -2859,17 +2946,36 @@ fn write_cold_time_restart(
     let matric_potential = repeat_axis(matric_potential, patch_count);
     let conductivity = repeat_axis(conductivity, patch_count);
     let radiation_values = radiation_values(patches);
-    let snow_layer_absorption = vec![
+    let mut snow_layer_absorption = vec![
         0.0;
         dimensions.bands
             * dimensions.radiation_types
             * (dimensions.snow_layers + 1)
             * patch_count
     ];
+    let mut grain_radius = vec![54.526; dimensions.snow_layers * patch_count];
+    for (patch, fields) in patches.iter().enumerate() {
+        if let Some(snicar) = fields.snicar {
+            for snow_layer in 0..dimensions.snow_layers {
+                grain_radius[snow_layer * patch_count + patch] = snicar.grain_radius[snow_layer];
+            }
+            for band in 0..dimensions.bands {
+                for radiation_type in 0..dimensions.radiation_types {
+                    for snow_or_soil in 0..=dimensions.snow_layers {
+                        snow_layer_absorption[((band * dimensions.radiation_types
+                            + radiation_type)
+                            * (dimensions.snow_layers + 1)
+                            + snow_or_soil)
+                            * patch_count
+                            + patch] = snicar.layer_absorption[band][radiation_type][snow_or_soil];
+                    }
+                }
+            }
+        }
+    }
     let lake_temperature = vec![285.0; dimensions.lake_layers * patch_count];
     let lake_ice = vec![0.0; dimensions.lake_layers * patch_count];
     let lake_thickness = repeat_axis(&lake.thickness_m, patch_count);
-    let grain_radius = vec![54.526; dimensions.snow_layers * patch_count];
     let snow_aerosol_zero = vec![0.0; dimensions.snow_layers * patch_count];
     let water_depth = if patch_type == 4 {
         lake.depth_m[0] * 1000.0
@@ -3105,10 +3211,6 @@ fn reject_unsupported_cold_start_features(
     document: &colm_namelist::Document,
     subgrid: SinglePointSubgrid,
 ) -> Result<()> {
-    ensure!(
-        !optional_bool_or(document, "DEF_USE_SNICAR", false)?,
-        "DEF_USE_SNICAR: SNICAR snow-optics cold-start initialization is not yet implemented in Rust"
-    );
     ensure!(
         !optional_bool_or(document, "DEF_USE_IRRIGATION", false)?
             || subgrid == SinglePointSubgrid::Pft,

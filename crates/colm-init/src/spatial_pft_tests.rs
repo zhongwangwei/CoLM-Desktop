@@ -372,6 +372,69 @@ fn shared_crop_ranges_keep_ordered_natural_and_cft_owners() {
     assert!(match_pfts_to_patches(&patches, &[0], &pfts, false).is_err());
 }
 
+#[test]
+fn spatial_pft_time_config_defaults_to_loading_snicar_from_document() {
+    let root = temp_dir();
+    let namelist = root.join("case.nml");
+    let landdata = root.join("landdata");
+    let restart = root.join("restart");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&namelist, "&nl_colm /\n").unwrap();
+    let config = SpatialPftTimeConfig::new(
+        SpatialPftStaticConfig::new(&namelist, &landdata, &restart, "test", 2005, "w180_s90"),
+        crate::RestartDate {
+            year: 2005,
+            julian_day: 1,
+            seconds: 0,
+        },
+    );
+    assert!(config.snicar.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_pft_snow_cover_uses_pft_geometry_and_snow_adjusts_sai_inputs() {
+    let pfts = SpatialPftVectors {
+        class: vec![1, 13],
+        element: vec![7, 7],
+        start: vec![1, 1],
+        end: vec![1, 1],
+        fraction: vec![0.25, 0.75],
+        shared_fraction: vec![0.25, 0.75],
+        observed_height_m: vec![20.0, 4.0],
+    };
+    let canopy = crate::single_point::PftCanopy {
+        top_m: vec![20.0, 4.0],
+        bottom_m: vec![1.0, 0.0],
+    };
+    let (patch, pft_sigf) = derive_spatial_pft_snow_cover(
+        &[0],
+        &[vec![0, 1]],
+        &pfts,
+        &[2.0, 1.0],
+        &[0.5, 0.25],
+        &[2.0, 0.4],
+        &canopy,
+        &[2.0],
+        0.05,
+        0.5,
+        true,
+    )
+    .unwrap();
+
+    assert!(pft_sigf[0] < 1.0, "tree PFT should be partly buried");
+    assert!(
+        pft_sigf[1] < 1.0,
+        "non-tree PFT should use roughness burial"
+    );
+    let cover = patch[0].unwrap();
+    assert!(cover.ground_snow_fraction > 0.0);
+    assert!(
+        (cover.snow_free_vegetation_fraction - (0.25 * pft_sigf[0] + 0.75 * pft_sigf[1])).abs()
+            < 1e-12
+    );
+}
+
 fn write_i32(landdata: &Path, directory: &str, stem: &str, variable: &str, values: &[i32]) {
     let path = block_path(landdata, directory, stem, 2005, "w180_s90");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
