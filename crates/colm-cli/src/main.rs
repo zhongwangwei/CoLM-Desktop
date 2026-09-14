@@ -49,7 +49,7 @@ mod study;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use colm_case::{
     fields, minimal::required, render, spatial_fields, CaseSpec, Dirs, Layout, SpatialBounds,
     SpatialCaseSpec, SpatialGrid, Spinup, Window,
@@ -1917,6 +1917,15 @@ fn rust_preprocessor_arguments(
             highres_params,
         )?);
     }
+    if stage == Stage::MkIniData
+        && kernel
+            .manifest
+            .macros
+            .iter()
+            .any(|macro_name| macro_name == "GridRiverLakeFlow")
+    {
+        arguments.push("--grid-river".to_owned());
+    }
     if !lct {
         return Ok(arguments);
     }
@@ -2170,7 +2179,14 @@ fn run_case(
     let spatial = colm_case::is_spatial_case(&layout.case_nml())?;
     // 产物必须列到**文件**：目录在程序写任何东西之前就已存在，
     // 只列目录的话「跑完了但什么都没写」恰好抓不到。
-    let stages = stage_artifacts(&out, &name, lc_year, spatial);
+    let gridriver_restart = kernel
+        .manifest
+        .macros
+        .iter()
+        .any(|macro_name| macro_name == "GridRiverLakeFlow")
+        .then(|| gridriver_restart_artifact(&layout.case_nml(), &out, &name, lc_year))
+        .transpose()?;
+    let stages = stage_artifacts(&out, &name, lc_year, spatial, gridriver_restart.as_deref());
     // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
     // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
     // 算新算例，且没有任何迹象。见 `fingerprint.rs`。
@@ -2524,6 +2540,59 @@ fn land_cover_year(case_nml: &Path) -> Result<i32> {
     Ok(year as i32)
 }
 
+fn gridriver_restart_artifact(
+    case_nml: &Path,
+    out: &Path,
+    case_name: &str,
+    land_cover_year: i32,
+) -> Result<PathBuf> {
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let document = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    let value = |field: &str, default: i32| match document.get(field) {
+        Some(colm_namelist::Value::Int(value)) => i32::try_from(*value)
+            .with_context(|| format!("{field} is outside CoLM's integer range")),
+        Some(other) => bail!("{field} must be an integer, got {other}"),
+        None => Ok(default),
+    };
+    let mut year = value("DEF_simulation_time%start_year", 2000)?;
+    let month = value("DEF_simulation_time%start_month", 1)?;
+    let day = value("DEF_simulation_time%start_day", 1)?;
+    let mut seconds = value("DEF_simulation_time%start_sec", 0)?;
+    ensure!(
+        (0..=9999).contains(&year),
+        "restart year must fit CoLM's filename convention"
+    );
+    ensure!((1..=12).contains(&month), "start month must be in 1..=12");
+    ensure!(
+        (0..=86_400).contains(&seconds),
+        "start seconds must be in 0..=86400"
+    );
+    let mut lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+        lengths[1] = 29;
+    }
+    ensure!(
+        (1..=lengths[(month - 1) as usize]).contains(&day),
+        "start day is outside its calendar month"
+    );
+    let mut julian_day = lengths[..(month - 1) as usize].iter().sum::<i32>() + day;
+    if seconds == 86_400 {
+        seconds = 0;
+        julian_day += 1;
+        let maximum = if lengths[1] == 29 { 366 } else { 365 };
+        if julian_day > maximum {
+            year += 1;
+            julian_day = 1;
+        }
+    }
+    let date = format!("{year:04}-{julian_day:03}-{seconds:05}");
+    Ok(out.join("restart").join(&date).join(format!(
+        "{case_name}_restart_gridriver_{date}_lc{land_cover_year:04}.nc"
+    )))
+}
+
 fn validate_native_case_paths(case: &Path, name: &str) -> Result<()> {
     // Native file_restart/fileblock buffers are character(len=256). A truncated
     // extension makes MOD_Block find the dot in /.colm instead, aliasing members.
@@ -2552,10 +2621,11 @@ fn stage_artifacts(
     name: &str,
     lc_year: i32,
     spatial: bool,
+    gridriver_restart: Option<&Path>,
 ) -> [(Stage, Vec<PathBuf>); 3] {
     let const_dir = out.join("restart/const");
     let lc = format!("lc{lc_year:04}");
-    let mkinidata = if spatial {
+    let mut mkinidata = if spatial {
         vec![const_dir.join(format!("{name}_restart_const_{lc}.nc"))]
     } else {
         vec![
@@ -2563,6 +2633,9 @@ fn stage_artifacts(
             const_dir.join(format!("{name}_restart_const_{lc}.nc")),
         ]
     };
+    if let Some(path) = gridriver_restart {
+        mkinidata.push(path.to_owned());
+    }
     let mksrfdata = if spatial {
         // Spatial mksrfdata is block/vector based; it never writes the
         // SinglePoint `srfdata.nc` aggregate.
@@ -2607,7 +2680,20 @@ pub(crate) fn case_is_current(case: &Path, kernel_id: &str) -> Result<bool> {
     let lc_year = land_cover_year(&layout.case_nml())?;
     let spatial = colm_case::is_spatial_case(&layout.case_nml())?;
     let marks = fingerprint::load(case);
-    for (stage, artifacts) in stage_artifacts(&out, &name, lc_year, spatial) {
+    let gridriver_restart = kernel_id
+        .split(";macros=")
+        .nth(1)
+        .and_then(|macros| macros.split(';').next())
+        .is_some_and(|macros| {
+            macros
+                .split(',')
+                .any(|macro_name| macro_name == "GridRiverLakeFlow")
+        })
+        .then(|| gridriver_restart_artifact(&layout.case_nml(), &out, &name, lc_year))
+        .transpose()?;
+    for (stage, artifacts) in
+        stage_artifacts(&out, &name, lc_year, spatial, gridriver_restart.as_deref())
+    {
         if !stage_fingerprint_status(
             stage,
             &artifacts,

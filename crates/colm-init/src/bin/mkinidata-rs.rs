@@ -8,16 +8,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use colm_case::is_spatial_case;
 use colm_init::{
-    single_point_cold_start_run_from_namelist, write_single_point_cold_time_restarts,
-    write_single_point_constant_restart, write_single_point_constant_restarts,
-    write_single_point_hyperspectral_cold_time_restarts,
+    single_point_cold_start_run_from_namelist, write_gridriver_cold_restart,
+    write_single_point_cold_time_restarts, write_single_point_constant_restart,
+    write_single_point_constant_restarts, write_single_point_hyperspectral_cold_time_restarts,
     write_single_point_hyperspectral_constant_restarts, write_spatial_lct_cold_time_restart,
     write_spatial_lct_constant_restart, write_spatial_pft_cold_time_restarts,
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
-    write_spatial_urban_constant_restarts, HydraulicModel, LaiFrequency, LandCoverScheme,
-    RestartDate, SinglePointHyperspectralConfig, SinglePointStaticConfig, SpatialLctStaticConfig,
-    SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
-    SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
+    write_spatial_urban_constant_restarts, GridRiverColdStartConfig, HydraulicModel, LaiFrequency,
+    LandCoverScheme, RestartDate, SinglePointHyperspectralConfig, SinglePointStaticConfig,
+    SpatialLctStaticConfig, SpatialLctTimeConfig, SpatialObservedInitializationPaths,
+    SpatialPftStaticConfig, SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig,
+    UrbanConfig,
 };
 use colm_namelist::{parse, Value};
 
@@ -44,6 +45,7 @@ fn main() -> Result<()> {
 fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut land_cover = None;
     let mut block = None;
+    let mut grid_river = false;
     let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -53,6 +55,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
                 )?);
             }
             "--block" => block = Some(args.next().context("--block needs a CoLM block label")?),
+            "--grid-river" => grid_river = true,
             "--hyperspectral" => high_resolution.enabled = true,
             "--highres-leaf-optics" => {
                 high_resolution.leaf_optics =
@@ -82,8 +85,18 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
     );
     if is_spatial_case(&namelist)? {
-        return run_spatial_namelist(&namelist, land_cover, block.as_deref(), &high_resolution);
+        return run_spatial_namelist(
+            &namelist,
+            land_cover,
+            block.as_deref(),
+            &high_resolution,
+            grid_river,
+        );
     }
+    ensure!(
+        !grid_river,
+        "--grid-river requires a spatial case because GridRiverLakeFlow is not a SinglePoint kernel"
+    );
     let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
     let files = if high_resolution.enabled {
         write_single_point_hyperspectral_constant_restarts(&run)?
@@ -184,6 +197,7 @@ fn run_spatial_namelist(
     land_cover: Option<LandCoverScheme>,
     block_override: Option<&str>,
     high_resolution: &HighResolutionOptions,
+    grid_river: bool,
 ) -> Result<()> {
     let run = spatial_namelist_run(namelist)?;
     ensure!(
@@ -219,7 +233,31 @@ fn run_spatial_namelist(
             }
         }
     }
+    if grid_river {
+        let path = write_gridriver_namelist_restart(namelist, &run)?;
+        println!("wrote {}", path.display());
+    }
     Ok(())
+}
+
+fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -> Result<PathBuf> {
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let unit_catchment = PathBuf::from(required_string(&document, "DEF_UnitCatchment_file")?);
+    let file = write_gridriver_cold_restart(GridRiverColdStartConfig {
+        unit_catchment: &unit_catchment,
+        restart_dir: &run.restart,
+        case_name: &run.case_name,
+        land_cover_year: run.land_cover_year,
+        date: run.date,
+        bifurcation: namelist_bool(&document, "DEF_USE_BIFURCATION", false)?,
+        levee: namelist_bool(&document, "DEF_USE_LEVEE", false)?,
+        tracer: namelist_bool(&document, "DEF_USE_TRACER", false)?,
+        reservoir_method: namelist_i32(&document, "DEF_Reservoir_Method", 0)?,
+    })?;
+    Ok(file.path)
 }
 
 fn write_spatial_urban_namelist_block(
@@ -883,7 +921,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--grid-river] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg>\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -1034,6 +1072,59 @@ mod tests {
     }
 
     #[test]
+    fn gridriver_namelist_restart_uses_the_case_unit_catchment_file() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-gridriver-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let unit_catchment = root.join("unitcatchment.nc");
+        let mut file = netcdf::create(&unit_catchment).unwrap();
+        file.add_dimension("ucatch", 1).unwrap();
+        for (name, value) in [("seq_x", 3), ("seq_y", 5), ("seq_next", 0)] {
+            file.add_variable::<i32>(name, &["ucatch"])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        file.add_variable::<f64>("topo_rivhgt", &["ucatch"])
+            .unwrap()
+            .put_values(&[2.5], ..)
+            .unwrap();
+        file.close().unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
+                root.display(),
+                unit_catchment.display(),
+            ),
+        )
+        .unwrap();
+
+        let restart =
+            write_gridriver_namelist_restart(&namelist, &spatial_namelist_run(&namelist).unwrap())
+                .unwrap();
+
+        assert_eq!(
+            restart,
+            root.join(
+                "river/restart/2008-060-00000/river_restart_gridriver_2008-060-00000_lc2005.nc"
+            )
+        );
+        assert_eq!(
+            netcdf::open(&restart)
+                .unwrap()
+                .variable("wdsrf_ucat")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            [2.5]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn spatial_lct_8_day_case_uses_the_clamped_simulation_year() {
         let root = std::env::temp_dir().join(format!("colm-init-eight-day-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1156,6 +1247,7 @@ mod tests {
             Some(LandCoverScheme::Igbp),
             None,
             &HighResolutionOptions::default(),
+            false,
         )
         .unwrap_err();
 
@@ -1194,6 +1286,7 @@ mod tests {
             Some(LandCoverScheme::Usgs),
             None,
             &HighResolutionOptions::default(),
+            false,
         )
         .unwrap_err();
 

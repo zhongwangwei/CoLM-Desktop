@@ -27,6 +27,7 @@ pub mod ground_fluxes {
 pub mod ground_thermal_step {
     pub use colm_core::ground_thermal_step::*;
 }
+pub mod gridriver;
 pub mod linear {
     pub use colm_core::linear::*;
 }
@@ -144,6 +145,9 @@ pub use colm_core::{RootUptakeInput, RootUptakeState};
 pub use crop::{
     crop_cold_start_from_management, crop_cold_start_from_tuning, CropColdStartState,
     CropManagementConfig,
+};
+pub use gridriver::{
+    write_gridriver_cold_restart, GridRiverColdStartConfig, GridRiverColdStartFile,
 };
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,

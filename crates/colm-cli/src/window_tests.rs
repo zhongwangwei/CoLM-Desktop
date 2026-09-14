@@ -220,7 +220,7 @@ fn mkinidata_artifacts_follow_def_lc_year() {
         "&nl_colm\n   DEF_CASE_NAME = 'LC2010'\n   DEF_LC_YEAR = 2010\n/\n",
     );
     let year = super::land_cover_year(&case.join("case.nml")).unwrap();
-    let artifacts = super::stage_artifacts(&case.join("out/LC2010"), "LC2010", year, false);
+    let artifacts = super::stage_artifacts(&case.join("out/LC2010"), "LC2010", year, false, None);
 
     let names = artifacts[1]
         .1
@@ -238,7 +238,7 @@ fn mkinidata_artifacts_follow_def_lc_year() {
 
 #[test]
 fn spatial_mkinidata_artifact_is_the_unsuffixed_const_restart() {
-    let artifacts = super::stage_artifacts(Path::new("/tmp/out"), "Pearl", 2005, true);
+    let artifacts = super::stage_artifacts(Path::new("/tmp/out"), "Pearl", 2005, true, None);
     assert_eq!(
         artifacts[1].1,
         vec![PathBuf::from(
@@ -248,8 +248,32 @@ fn spatial_mkinidata_artifact_is_the_unsuffixed_const_restart() {
 }
 
 #[test]
+fn gridriver_mkinidata_artifact_uses_the_normalized_cold_start_date() {
+    let case = case_with_nml(
+        "gridriver-artifact",
+        "&nl_colm\n DEF_CASE_NAME='River'\n DEF_LC_YEAR=2005\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n DEF_simulation_time%start_sec=0\n/\n",
+    );
+    let out = case.join("out/River");
+    let restart =
+        super::gridriver_restart_artifact(&case.join("case.nml"), &out, "River", 2005).unwrap();
+    assert_eq!(
+        restart,
+        out.join("restart/2008-060-00000/River_restart_gridriver_2008-060-00000_lc2005.nc")
+    );
+    let artifacts = super::stage_artifacts(&out, "River", 2005, true, Some(&restart));
+    assert_eq!(
+        artifacts[1].1,
+        vec![
+            out.join("restart/const/River_restart_const_lc2005.nc"),
+            restart,
+        ]
+    );
+    std::fs::remove_dir_all(case).unwrap();
+}
+
+#[test]
 fn spatial_mksrfdata_artifacts_are_block_and_pixel_metadata() {
-    let artifacts = super::stage_artifacts(Path::new("/tmp/out"), "Pearl", 2005, true);
+    let artifacts = super::stage_artifacts(Path::new("/tmp/out"), "Pearl", 2005, true, None);
     assert_eq!(
         artifacts[0].1,
         vec![

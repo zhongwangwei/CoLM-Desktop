@@ -20,6 +20,12 @@ fn hyperspectral_kernel() -> Kernel {
     }
 }
 
+fn gridriver_kernel() -> Kernel {
+    let mut kernel = hyperspectral_kernel();
+    kernel.manifest.macros = vec!["GridRiverLakeFlow".into(), "LULC_IGBP".into()];
+    kernel
+}
+
 fn hyperspectral_pft_namelist(root: &Path) -> PathBuf {
     let namelist = root.join("case.nml");
     std::fs::write(
@@ -67,6 +73,19 @@ fn rust_preprocessors_are_the_default_and_fortran_is_an_explicit_fallback() {
         PreprocessorMode::Fortran
     );
     assert!(requested_preprocessors(Some("other")).is_err());
+}
+
+#[test]
+fn gridriver_kernel_enables_the_matching_rust_mkinidata_branch() {
+    let root = test_directory("gridriver-args");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\nDEF_USE_LCT=.true.\n/\n").unwrap();
+    assert_eq!(
+        rust_preprocessor_arguments(Stage::MkIniData, &namelist, &gridriver_kernel(), None, None)
+            .unwrap(),
+        vec!["--grid-river", "--land-cover", "igbp"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
