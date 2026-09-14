@@ -6,6 +6,41 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## PC common absorption uses per-PFT outputs
+
+Both single-point and spatial PC callers now retain each PFT's sunlit/shaded
+absorption when copying shared PC optical state. Original `twostream_wrap`
+reduces `ssun_p/ssha_p`; the previous callers instead reweighted a copied common
+absorption value. Only these two reductions now use the original ordered FMA.
+Albedo, soil/snow absorption, crop suffix handling, thermal/extinction fields and
+hyperspectral overrides are unchanged. No new allocation or dependency is needed.
+
+An original-derived SUM regression fails without the contraction. Separately,
+the existing native PC/BGC single-point pipeline now asserts that its written
+common absorption is the ordered sum of its written PFT absorption and fractions;
+it fails even with FMA alone and passes after the caller repair. All **673
+integrated tests**, Clippy, downstream checks, scoped formatting and release
+compilation pass. Independent production review approves both callers and their
+crop-split/hyperspectral guards. Evidence:
+`/tmp/colm-pc-absorption-fix/` and
+`/tmp/colm-pc-radiation-reduction-audit/`.
+
+Fresh initialization and unchanged original-runtime runs are preserved in
+`/tmp/colm-pc-absorption.lgi1jw_n/` and
+`/tmp/colm-pft-absorption-wmo.ar6dx177/`. They reuse unchanged independent Rust
+surface products; neither is a new surface-generation run. All inventories,
+schemas, surface fields and cold/post-step restart fields pass the unchanged
+`1e-12` gate. Both retain 287/287 bitwise surface floating fields; PC constant
+restart remains 67/67 bitwise. The actual spatial PC caller now matches the
+original-expression SUM of the same stored PFT inputs in **all 32 absorption
+reductions**, with those input arrays independently confirmed bitwise unchanged.
+This is aggregation parity, not a claim that every PC-core output is bitwise.
+
+The history residuals are unchanged: four `f_zerr` values each in PC and PFT/WMO,
+maxima `1.2363443602225743e-12` and `1.0231815394945443e-12`. Full scientific and
+all-mode acceptance remains open. Frozen initializer SHA-256:
+`f17c3892c0f4fcb4897d22c8e849274e4effc6d43212e3af7cb559426fc4510f`.
+
 ## WMO empty-area identity
 
 The four remaining WMO surface bit differences were signed zeros, not nonzero
@@ -14,7 +49,7 @@ fraction drift: Rust's empty floating sum produced `-0.0` where original
 at positive zero; ordered nonempty addition, PFT shares and normalization are
 unchanged. The existing WMO writer regression now asserts zero bits rather than
 floating equality. Actual RED/GREEN and independent source review pass, as does
-the 672-test integrated validation recorded above.
+the 672-test integrated validation recorded with the LCT follow-up.
 
 A fresh frozen surface/initializer/original-runtime pipeline in
 `/tmp/colm-wmo-positive-zero-full.vwvc8pf1/` exits 0 at all three stages. Its full

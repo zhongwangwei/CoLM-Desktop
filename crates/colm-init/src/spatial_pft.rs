@@ -869,7 +869,12 @@ pub fn write_spatial_pft_cold_time_restarts(
                 shade[pft] = state.shade_fraction;
                 direct_extinction[pft] = state.direct_extinction;
                 diffuse_extinction[pft] = state.diffuse_extinction;
-                state_by_pft[pft] = Some(pc.common.clone());
+                // twostream_wrap retains per-PFT absorption when sharing PC optics.
+                state_by_pft[pft] = Some(ColdStartRadiation {
+                    sunlit_absorption: state.sunlit_absorption,
+                    shaded_absorption: state.shaded_absorption,
+                    ..pc.common.clone()
+                });
             }
         }
     }

@@ -1655,7 +1655,13 @@ fn write_single_point_pft_cold_time_restarts(
             let pc_sunlit = pc_pft_radiation_values(&pc.pft, |state| state.sunlit_absorption);
             let pc_shaded = pc_pft_radiation_values(&pc.pft, |state| state.shaded_absorption);
             for (pc_index, &index) in pc_indices.iter().enumerate() {
-                common[index] = pc.common.clone();
+                let state = &pc.pft[pc_index];
+                // twostream_wrap retains per-PFT absorption when sharing PC optics.
+                common[index] = ColdStartRadiation {
+                    sunlit_absorption: state.sunlit_absorption,
+                    shaded_absorption: state.shaded_absorption,
+                    ..pc.common.clone()
+                };
                 for band in 0..2 {
                     for radiation_type in 0..2 {
                         let source = (band * 2 + radiation_type) * pc_indices.len() + pc_index;
@@ -1664,7 +1670,6 @@ fn write_single_point_pft_cold_time_restarts(
                         pft_radiation.shaded[target] = pc_shaded[source];
                     }
                 }
-                let state = &pc.pft[pc_index];
                 pft_radiation.thermal_gap[index] = state.thermal_gap_fraction;
                 pft_radiation.shade[index] = state.shade_fraction;
                 pft_radiation.direct_extinction[index] = state.direct_extinction;
@@ -2262,10 +2267,23 @@ pub(crate) fn aggregate_pft_radiation(
             })
         })
     };
+    // Original twostream_wrap sums per-PFT ssun/ssha with ordered FMA.
+    let absorption = |select: fn(&ColdStartRadiation) -> [[f64; 2]; 2]| {
+        std::array::from_fn(|band| {
+            std::array::from_fn(|radiation_type| {
+                states
+                    .iter()
+                    .zip(fraction)
+                    .fold(0.0, |sum, (state, &weight)| {
+                        select(state)[band][radiation_type].mul_add(weight, sum)
+                    })
+            })
+        })
+    };
     Ok(ColdStartRadiation {
         albedo: aggregate(|state| state.albedo),
-        sunlit_absorption: aggregate(|state| state.sunlit_absorption),
-        shaded_absorption: aggregate(|state| state.shaded_absorption),
+        sunlit_absorption: absorption(|state| state.sunlit_absorption),
+        shaded_absorption: absorption(|state| state.shaded_absorption),
         soil_absorption: aggregate(|state| state.soil_absorption),
         snow_absorption: aggregate(|state| state.snow_absorption),
         snow_age: states[0].snow_age,

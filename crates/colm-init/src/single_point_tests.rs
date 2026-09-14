@@ -54,6 +54,77 @@ fn pft_patch_weighted_scalars_preserve_original_compiled_sums() {
 }
 
 #[test]
+fn pft_radiation_absorption_reductions_preserve_original_sum_rounding() {
+    // Actual PC patch prefix from PearlRiver_PC_GRID_2x2 e110_n25 patch 1.
+    // The expected bit patterns are pristine
+    // `sum(ssun_p/ssha_p(...,ps:pe)*pftfrac(ps:pe))`, compiled with
+    // gfortran -O2 -fdefault-real-8.  Literals use exact f64 bit patterns to
+    // avoid clippy/excessive_precision churn.
+    let fractions = [
+        0x3f2c732fff7a9757,
+        0x3fd6a3531d6fd77b,
+        0x3f7fb8556b578bbf,
+        0x3fa31422ae7f4a66,
+        0x3fc39aef132e46dc,
+        0x3f774820feffaa14,
+        0x3fbf93ab9c10c517,
+        0x3fb86b80da67dccd,
+        0x3f7a31595d360fc2,
+        0x3fcba8debf26d6da,
+        0x3f5020e0d9637bcd,
+    ]
+    .map(f64::from_bits);
+    let sunlit = [
+        0x0000000000000000,
+        0x3ff87e7d5fc1e8eb,
+        0x3ff85c79a51b3638,
+        0x3ff87b1121c3146b,
+        0x3ff58d430a17676b,
+        0x3ff5366c79cc1138,
+        0x3fc26e524a3b4833,
+        0x3fbee763ddc067f3,
+        0x3fbc8e3a8a617d91,
+        0x3fbc22f2661bc47c,
+        0x3fb7aee9e6ae52bc,
+    ]
+    .map(f64::from_bits);
+    let shaded = [
+        0x0000000000000000,
+        0x3fe8be2fc6b6bb1b,
+        0x3fe76398bc55c9b2,
+        0x3feaa22a33706673,
+        0x3fe1c527c5d5b69b,
+        0x3fe0cddcba886847,
+        0x3fdc2cbeffe91b0d,
+        0x3fd6f88064d756a2,
+        0x3fd461ee2f9b6fd2,
+        0x3fd3d7052c6e1215,
+        0x3fcbec9fb9d98d2e,
+    ]
+    .map(f64::from_bits);
+    let states: [ColdStartRadiation; 11] = std::array::from_fn(|index| ColdStartRadiation {
+        albedo: [[0.0; 2]; 2],
+        sunlit_absorption: [[sunlit[index], 0.0], [0.0; 2]],
+        shaded_absorption: [[0.0, shaded[index]], [0.0; 2]],
+        soil_absorption: [[0.0; 2]; 2],
+        snow_absorption: [[0.0; 2]; 2],
+        snow_age: 0.0,
+        thermal_gap_fraction: 0.0,
+        direct_extinction: 0.0,
+        diffuse_extinction: 0.0,
+    });
+    let radiation = aggregate_pft_radiation(&states, &fractions, 1.0).unwrap();
+    assert_eq!(
+        radiation.sunlit_absorption[0][0].to_bits(),
+        0x3fec187489879827
+    );
+    assert_eq!(
+        radiation.shaded_absorption[0][1].to_bits(),
+        0x3fe1cab1ee1be1a2
+    );
+}
+
+#[test]
 fn static_config_uses_the_upstream_namelist_defaults() {
     assert_eq!(RestartTuning::default().zlnd, 0.01);
     assert_eq!(RestartTuning::default().wetwatmax, 200.0);

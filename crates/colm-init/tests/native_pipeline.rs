@@ -1,6 +1,6 @@
 //! Native Rust preprocessing integration test against the checked-in CN-Cng case.
 
-use colm_init::prepare_single_point_case;
+use colm_init::{prepare_single_point_case, SinglePointPreprocessFiles};
 use colm_srfdata::SiteMode;
 
 // Keep each NetCDF writer + external Fortran reader lifecycle serial, as in
@@ -286,7 +286,10 @@ fn rust_preprocess_runs_in_fortran_runtime(
     )
     .unwrap();
 
-    prepare_single_point_case(&case, land_cover, false, None).unwrap();
+    let (_, files) = prepare_single_point_case(&case, land_cover, false, None).unwrap();
+    if additions.contains("DEF_USE_PC = .true.") {
+        assert_pc_common_absorption_matches_pft_outputs(&files);
+    }
     let result = std::process::Command::new(&colm)
         .arg(&case)
         .current_dir(&directory)
@@ -309,4 +312,50 @@ fn rust_preprocess_runs_in_fortran_runtime(
         "colm completed without its expected history file:\n{log}"
     );
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn assert_pc_common_absorption_matches_pft_outputs(files: &SinglePointPreprocessFiles) {
+    let pft_const_path = files
+        .constants
+        .pft
+        .as_ref()
+        .expect("PC preprocessing should write a PFT constant restart");
+    let pft_time_path = files
+        .time
+        .pft
+        .as_ref()
+        .expect("PC preprocessing should write a PFT time restart");
+    let pft_const = netcdf::open(pft_const_path).unwrap();
+    let pft_time = netcdf::open(pft_time_path).unwrap();
+    let common = netcdf::open(&files.time.common.block).unwrap();
+    let fractions = values_f64(&pft_const, "pftfrac");
+    let pfts = fractions.len();
+    for (common_name, pft_name) in [("ssun", "ssun_p"), ("ssha", "ssha_p")] {
+        let common_values = values_f64(&common, common_name);
+        let pft_values = values_f64(&pft_time, pft_name);
+        assert_eq!(common_values.len(), 4, "{common_name}");
+        assert_eq!(pft_values.len(), pfts * 4, "{pft_name}");
+        for rtyp in 0..2 {
+            for band in 0..2 {
+                let mut expected = 0.0;
+                for (pft, &fraction) in fractions.iter().enumerate() {
+                    let value = pft_values[(pft * 2 + rtyp) * 2 + band];
+                    expected = value.mul_add(fraction, expected);
+                }
+                let actual = common_values[rtyp * 2 + band];
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{common_name}[rtyp={rtyp},band={band}] should be reduced from {pft_name}"
+                );
+            }
+        }
+    }
+}
+
+fn values_f64(file: &netcdf::File, name: &str) -> Vec<f64> {
+    file.variable(name)
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap()
 }
