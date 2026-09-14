@@ -940,16 +940,17 @@ impl SpatialPixelSets {
                 (west + east) * 0.5
             };
             center = normalize_longitude(center);
-            if longitude - center > 180.0 {
-                longitude = longitude * area_sum + (center + 360.0) * area;
+            let adjusted_center = if longitude - center > 180.0 {
+                center + 360.0
             } else if longitude - center < -180.0 {
-                longitude = longitude * area_sum + (center - 360.0) * area;
+                center - 360.0
             } else {
-                longitude = longitude * area_sum + center * area;
-            }
+                center
+            };
+            longitude = adjusted_center.mul_add(area, longitude * area_sum);
             area_sum += area;
             longitude = normalize_longitude(longitude / area_sum);
-            latitude += (south + north) * 0.5 * area;
+            latitude = ((south + north) * 0.5).mul_add(area, latitude);
         }
         Ok((longitude, latitude / area_sum))
     }
@@ -972,6 +973,9 @@ fn normalize_longitude(value: f64) -> f64 {
     let mut value = value % 360.0;
     if value >= 180.0 {
         value -= 360.0;
+    }
+    if value < -180.0 {
+        value += 360.0;
     }
     value
 }

@@ -7,11 +7,12 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn patch_centroid_retains_upstream_spherical_area_rounding() {
-    // gfortran -O2, MOD_Utils::areaquad + MOD_Pixelset::get_pixelset_rlon/rlat,
+    // gfortran -O2 -fdefault-real-8, original MOD_Utils::areaquad and
+    // MOD_Pixelset::get_pixelset_rlon/rlat,
     // 2048 pixels cycling through these four cells (no reassociation/fast-math).
     let lon_w = vec![102.0, 114.99583333333334];
     let lat_s = vec![21.5, 26.995833333333334];
-    let pixels = SpatialPixelSets {
+    let mut pixels = SpatialPixelSets {
         lon_e: lon_w.iter().map(|west| west + 1.0 / 240.0).collect(),
         lat_n: lat_s.iter().map(|south| south + 1.0 / 240.0).collect(),
         lon_w,
@@ -19,9 +20,41 @@ fn patch_centroid_retains_upstream_spherical_area_rounding() {
         cells: vec![(0..2048).map(|i| (i % 2 + 1, (i / 2) % 2 + 1)).collect()],
         shared_fraction: vec![1.0],
     };
+    let (lon, _) = pixels.mean(&pixels.cells[0][..2]).unwrap();
+    assert_eq!(
+        (lon * std::f64::consts::PI / 180.0).to_bits(),
+        0x3ffe_4c85_bf30_0e8a
+    );
     let (lon, lat) = pixels.mean(&pixels.cells[0]).unwrap();
-    assert!((lon * std::f64::consts::PI / 180.0 - 1.8936822384139238).abs() < 1.0e-14);
-    assert!((lat * std::f64::consts::PI / 180.0 - 0.4222053928230668).abs() < 1.0e-14);
+    assert_eq!(
+        (lon * std::f64::consts::PI / 180.0).to_bits(),
+        0x3ffe_4c85_bf30_0fe2
+    );
+    assert_eq!(
+        (lat * std::f64::consts::PI / 180.0).to_bits(),
+        0x3fdb_0569_c497_ac86
+    );
+    for (west, east, expected_lon) in [
+        (
+            [179.995, -179.998],
+            [-179.999, -179.995],
+            0x4009_21f9_cdd7_bf18,
+        ),
+        (
+            [-179.998, 179.995],
+            [-179.995, -179.999],
+            0x4009_21f9_cdd7_bf21,
+        ),
+    ] {
+        pixels.lon_w = west.to_vec();
+        pixels.lon_e = east.to_vec();
+        let (lon, lat) = pixels.mean(&pixels.cells[0]).unwrap();
+        assert_eq!((lon * std::f64::consts::PI / 180.0).to_bits(), expected_lon);
+        assert_eq!(
+            (lat * std::f64::consts::PI / 180.0).to_bits(),
+            0x3fdb_0569_c497_aba2
+        );
+    }
 }
 
 #[test]

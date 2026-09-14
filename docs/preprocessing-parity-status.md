@@ -963,3 +963,25 @@ data/reference/native tests, all-target Clippy, downstream checks, scoped
 formatting and release compilation pass. These are initializer-only results
 on the original surface; they do not replace the independent surface-fit gate
 or prove the remaining mode matrix.
+
+### Patch-coordinate rounding and cold-restart acceptance
+
+The original `MOD_Pixelset` arithmetic contracts the new weighted longitude
+product with the separately rounded prior product; latitude accumulation also
+uses FMA. The shared Rust pixelset mean now retains that order without an extra
+area buffer or second pass. A separate antimeridian regression exposed the
+missing negative branch in longitude normalization; values below -180 degrees
+now wrap as well as values at or above +180 degrees. Original-derived two-pixel
+and 2,048-pixel goldens cover ordinary and both wrapped traversal orders.
+Reverting just longitude FMA fails even with the normalization fix retained.
+
+In the frozen `rust-init-original-surface-coordinate-fma/` run, all patch latitude
+and longitude radians agree bitwise with the original. **All 13 cold-restart
+files / 742 variable instances pass** the unchanged combined absolute/relative
+`1e-12` gate, with matching schemas and attributes except `create_time`. This is
+an isolated LCT initializer comparison using original-generated landdata, not
+all preprocessing modes. The unchanged original runtime still completes, but
+the post-two-step gate remains open: 23 fields / 138 values differ above the
+threshold. Maximum `gs0sun` error decreases from 3.655042 to 0.171400; small
+remaining cold-radiation differences still require investigation. Evidence and
+red/green regressions are in `/tmp/colm-pixelset-fma-audit/`.
