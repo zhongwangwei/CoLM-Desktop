@@ -1024,3 +1024,25 @@ NetCDF writer presence/absence of `dz_lake`. Logs are in
 `/tmp/colm-catchment-dynamic-lake-validation/`. Its `frozen-main-run/` repeats
 the 254-file / 411-variable pass with the freshly built main-workspace release,
 again using the preserved frozen Rust surface.
+
+## Solar-angle arithmetic follow-up
+
+The shared cosine-zenith kernel now retains the original compiled angle FMA
+and the final sine-product/subtraction FMA. Declination and cosine-azimuth are
+unchanged; no platform-specific trigonometric helper or FFI was introduced.
+Two actual cold-start goldens fail before the final contraction; a later-year
+case still fails without the angle contraction. Both checks now pass. The
+12-case varied-day original probe reduces maximum error from `1.52e-13` to
+`2.08e-17`; this is a bounded probe, not every date/location combination.
+
+The frozen `rust-init-original-surface-orbital-fma/` initializer and original
+two-step runtime both complete. All 19 restart schemas still agree and all
+13 cold files / 742 variable instances remain within the unchanged tolerance.
+Cold `coszen` bit differences decrease from 2,987 to 141 (maximum `2.78e-17`);
+`extkb` bit differences decrease from 2,422 to 116. The residual paired-trig
+rounding is recorded, not hidden with a relaxed gate. **Post-two-step differences
+remain 23 fields / 138 values**, with maximum `gs0sun` error `0.171400`; this
+repair does not close that scientific gate. The 658-test suite, Clippy,
+downstream checks, scoped formatting and fresh release pass. Evidence:
+`/tmp/colm-orbit-ordered-audit/`, `/tmp/colm-orbit-review-final-85999/` and the
+frozen run under the main artifact root.

@@ -370,10 +370,12 @@ pub fn orbital_cosine_zenith(
 ) -> f64 {
     let pi = 4.0 * 1.0_f64.atan();
     let declination = orbital_declination(calendar_day);
-    latitude_radians.sin() * declination.sin()
-        - latitude_radians.cos()
-            * declination.cos()
-            * (calendar_day * 2.0 * pi + longitude_radians).cos()
+    // Preserve the original angle and final product/subtraction contractions.
+    let angle = (calendar_day + calendar_day).mul_add(pi, longitude_radians);
+    let cosine_product = latitude_radians.cos() * declination.cos() * angle.cos();
+    latitude_radians
+        .sin()
+        .mul_add(declination.sin(), -cosine_product)
 }
 
 /// Port of MOD_OrbCosazi.F90:orb_cosazi.

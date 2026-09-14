@@ -103,6 +103,28 @@ fn saturation_clamps_temperature_like_qsadv_and_refuses_invalid_inputs() {
 
 #[test]
 fn orbital_geometry_matches_current_fortran() {
+    // Original MOD_OrbCoszen, -O2 -fdefault-real-8: Pearl River cold-start inputs.
+    for (longitude, latitude, expected) in [
+        (
+            1.826_959_755_551_147_6,
+            0.379_790_917_438_732_33,
+            0x3fb2_2f17_4cfb_2d23,
+        ),
+        (
+            1.825_243_813_277_345_2,
+            0.380_495_665_082_348_4,
+            0x3fb1_bd57_666c_6825,
+        ),
+    ] {
+        assert_eq!(
+            orbital_cosine_zenith(1.0, longitude, latitude).to_bits(),
+            expected
+        );
+    }
+    // This later-year angle exposes rounding hidden by the integer-day case.
+    assert!(
+        (orbital_cosine_zenith(200.125, -3.13, 0.01) - 0.655_922_567_920_138_4).abs() < 1.0e-15
+    );
     close(
         orbital_cosine_zenith(80.5, 2.1, 0.7),
         -0.386_127_578_225_333_95,
