@@ -28,7 +28,7 @@
 //! colm-cli study-preflight <case-root> --spec study.json
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
-//! colm-cli study-run <study-dir> --kernel <目录> [--stream 1]
+//! colm-cli study-run <study-dir> --kernel <目录> [--stream 1] [--preprocessors rust|fortran]
 //! colm-cli study-export <study-dir> --out <目录>
 //! colm-cli study-pause|study-resume|study-cancel <study-dir>
 //! colm-cli study-finalize-cancel <study-dir> --pid <pid>
@@ -113,7 +113,7 @@ usage:
                    # 仅站点模式：创建不确定性分析/参数调优 Study，写采样设计
   colm-cli study-status <study-dir>
                    # 输出 Study manifest 与成员状态
-  colm-cli study-run <study-dir> --kernel <dir> [--stream 1]
+  colm-cli study-run <study-dir> --kernel <dir> [--stream 1] [--preprocessors rust|fortran]
                    # 串行运行尚未完成的成员算例
   colm-cli study-export <study-dir> --out <dir>
                    # 导出 manifest、samples、status、report.md/html
@@ -341,6 +341,7 @@ fn main() -> Result<()> {
                     .transpose()?
                     .unwrap_or(manifest.spec.budget.jobs),
                 opts.get("--retry-failed").is_some(),
+                requested_preprocessors(opts.get("--preprocessors").as_deref())?,
             )?;
         }
         "study-export" => {
@@ -1811,7 +1812,7 @@ fn requested_run_stage(value: Option<&str>) -> Result<Option<Stage>> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreprocessorMode {
+pub(crate) enum PreprocessorMode {
     Rust,
     Fortran,
 }
@@ -2089,11 +2090,50 @@ fn rust_preprocessor_input_identity(arguments: &[String]) -> Result<String> {
     Ok(inputs.join(";"))
 }
 
+#[derive(Default)]
+pub(crate) struct RustPreprocessorIdentities {
+    surface: Option<String>,
+    initial: Option<String>,
+}
+
+fn rust_preprocessor_stage_identity(stage: Stage, arguments: &[String]) -> Result<String> {
+    let executable = rust_preprocessor_executable(stage)?;
+    let binary = format!(
+        "{}={}",
+        stage.program(),
+        fingerprint::sha256_file(&executable)?
+    );
+    let inputs = rust_preprocessor_input_identity(arguments)?;
+    Ok(if inputs.is_empty() {
+        binary
+    } else {
+        format!("{binary};{inputs}")
+    })
+}
+
+fn stage_kernel_identity(
+    kernel_id: &str,
+    stage: Stage,
+    identities: &RustPreprocessorIdentities,
+) -> String {
+    stage_preprocessor_input_identity(
+        stage,
+        identities.surface.as_deref(),
+        identities.initial.as_deref(),
+    )
+    .map_or_else(
+        || kernel_id.to_owned(),
+        |inputs| format!("{kernel_id};rust-preprocessor-inputs={inputs}"),
+    )
+}
+
 fn stage_preprocessor_input_identity(
     stage: Stage,
     surface: Option<&str>,
     initial: Option<&str>,
 ) -> Option<String> {
+    let surface = surface.filter(|identity| !identity.is_empty());
+    let initial = initial.filter(|identity| !identity.is_empty());
     match stage {
         Stage::MkSrfData => surface.map(str::to_owned),
         // A changed surface source changes its downstream restart and history too.
@@ -2228,14 +2268,16 @@ fn run_case(
         )
     })
     .transpose()?;
-    let rust_mksrfdata_identity = rust_mksrfdata_arguments
-        .as_deref()
-        .map(rust_preprocessor_input_identity)
-        .transpose()?;
-    let rust_mkinidata_identity = rust_mkinidata_arguments
-        .as_deref()
-        .map(rust_preprocessor_input_identity)
-        .transpose()?;
+    let rust_identities = RustPreprocessorIdentities {
+        surface: rust_mksrfdata_arguments
+            .as_deref()
+            .map(|arguments| rust_preprocessor_stage_identity(Stage::MkSrfData, arguments))
+            .transpose()?,
+        initial: rust_mkinidata_arguments
+            .as_deref()
+            .map(|arguments| rust_preprocessor_stage_identity(Stage::MkIniData, arguments))
+            .transpose()?,
+    };
     let mut marks = fingerprint::load(case);
     if force {
         match only_stage {
@@ -2265,15 +2307,7 @@ fn run_case(
             Stage::MkIniData => rust_mkinidata_arguments.as_deref(),
             Stage::Colm => None,
         };
-        let preprocessor_inputs = stage_preprocessor_input_identity(
-            *stage,
-            rust_mksrfdata_identity.as_deref(),
-            rust_mkinidata_identity.as_deref(),
-        );
-        let stage_kernel_id = preprocessor_inputs.map_or_else(
-            || kernel_id.clone(),
-            |inputs| format!("{kernel_id};rust-preprocessor-inputs={inputs}"),
-        );
+        let stage_kernel_id = stage_kernel_identity(&kernel_id, *stage, &rust_identities);
         // `--force` 的契约是完全忽略指纹。尤其在首次复跑一个完整
         // rawdata 目录时，递归扫描所有未使用的历史备份既不能决定是否执行，
         // 也不该阻挡内核启动；本轮结束后不写标记，下次常规运行仍会保守复跑。
@@ -2682,7 +2716,11 @@ fn stage_fingerprint_status(
     Ok((want, have_all, current))
 }
 
-pub(crate) fn case_is_current(case: &Path, kernel_id: &str) -> Result<bool> {
+pub(crate) fn case_is_current(
+    case: &Path,
+    kernel_id: &str,
+    rust_identities: &RustPreprocessorIdentities,
+) -> Result<bool> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let out = layout.out().join(&name);
@@ -2709,7 +2747,7 @@ pub(crate) fn case_is_current(case: &Path, kernel_id: &str) -> Result<bool> {
             &layout.case_nml(),
             &out,
             &marks,
-            kernel_id,
+            &stage_kernel_identity(kernel_id, stage, rust_identities),
         )?
         .2
         {
@@ -2725,6 +2763,7 @@ fn cmd_study_run(
     stream: bool,
     jobs: usize,
     retry_failed: bool,
+    preprocessors: PreprocessorMode,
 ) -> Result<()> {
     let state = study::runner::run(
         study_dir,
@@ -2733,6 +2772,7 @@ fn cmd_study_run(
             jobs,
             stream,
             retry_failed,
+            preprocessors,
         },
     )?;
     if !stream {

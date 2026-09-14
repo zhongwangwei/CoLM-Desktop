@@ -54,6 +54,29 @@ fn run_fail(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn run_with_bin_ok(program: &Path, args: &[&str]) -> String {
+    let output = Command::new(program).args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {args:?}\nstdout={}\nstderr={}",
+        program.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn run_with_bin_fail(program: &Path, args: &[&str]) -> String {
+    let output = Command::new(program).args(args).output().unwrap();
+    assert!(
+        !output.status.success(),
+        "{} {args:?} unexpectedly succeeded: {}",
+        program.display(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 fn status_json(study: &str) -> Option<Value> {
     let output = Command::new(bin())
         .args(["study-status", study])
@@ -127,6 +150,7 @@ lc_year=${{lc_year:-2005}}
 lc=$(printf 'lc%04d' "$lc_year")
 out="$output_root/$case_name"
 program=$(basename "$0")
+printf '%s\n' "$program" >> '{marker}'
 case "$program" in
   mksrfdata*) mkdir -p "$out/landdata"; : > "$out/landdata/srfdata.nc"; echo 'Successful in surface data making.' ;;
   mkinidata*) mkdir -p "$out/restart/const"; : > "$out/restart/const/${{case_name}}_restart_const_${{lc}}_w180_s90.nc"; : > "$out/restart/const/${{case_name}}_restart_const_${{lc}}.nc"; echo 'CoLM Initialization Execution Completed' ;;
@@ -134,6 +158,7 @@ case "$program" in
 esac
 "#,
         golden.display(),
+        marker = root.join("kernel-programs.log").display(),
         fail_marker = root.join("fail-baseline").display()
     );
     let mut hashes = serde_json::Map::new();
@@ -162,6 +187,43 @@ esac
     )
     .unwrap();
     kernel
+}
+
+#[cfg(unix)]
+fn private_cli(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = root.join("private-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cli = bin_dir.join("colm-cli");
+    fs::copy(bin(), &cli).unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+    cli
+}
+
+#[cfg(unix)]
+fn install_rust_sidecars(private_cli: &Path, kernel: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = private_cli.parent().unwrap();
+    for (source, target) in [
+        ("mksrfdata.x", "mksrfdata-rs"),
+        ("mkinidata.x", "mkinidata-rs"),
+    ] {
+        let path = bin_dir.join(target);
+        fs::copy(kernel.join(source), &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn add_kernel_macro(kernel: &Path, name: &str) {
+    let manifest = kernel.join("manifest.json");
+    let mut json: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    json["macros"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::String(name.to_owned()));
+    fs::write(&manifest, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 }
 
 fn write_case(root: &Path, site: &str) {
@@ -351,6 +413,525 @@ fn write_tuning_spec_for_sites(
     spec
 }
 
+fn marker_lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn first_task_stages_json(state: &Value) -> String {
+    let case_dir = state["tasks"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|task| task["case_dir"].as_str())
+        .unwrap();
+    fs::read_to_string(Path::new(case_dir).join("stages.json")).unwrap()
+}
+
+fn study_state_status(program: &Path, study: &str) -> String {
+    let status: Value =
+        serde_json::from_str(&run_with_bin_ok(program, &["study-status", study])).unwrap();
+    status["state"]["status"].as_str().unwrap().to_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
+    let _guard = netcdf_lock();
+    let root = temp_root("run-init");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    install_rust_sidecars(&cli, &kernel);
+    write_case(&root, "siteA");
+    let case = root.join("siteA");
+    let call_log = root.join("kernel-programs.log");
+
+    run_with_bin_ok(
+        &cli,
+        &[
+            "run",
+            case.to_str().unwrap(),
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--preprocessors",
+            "rust",
+        ],
+    );
+    let first_count = marker_lines(&call_log).len();
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(cli.parent().unwrap().join("mkinidata-rs"))
+        .unwrap()
+        .write_all(b"\n# changed Rust mkinidata sidecar\n")
+        .unwrap();
+    run_with_bin_ok(
+        &cli,
+        &[
+            "run",
+            case.to_str().unwrap(),
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--preprocessors",
+            "rust",
+        ],
+    );
+    let rerun = marker_lines(&call_log)
+        .into_iter()
+        .skip(first_count)
+        .collect::<Vec<_>>();
+    assert!(
+        !rerun.iter().any(|line| line == "mksrfdata-rs"),
+        "changing mkinidata-rs must not invalidate the surface stage: {rerun:?}"
+    );
+    assert!(
+        rerun.iter().any(|line| line == "mkinidata-rs"),
+        "changing mkinidata-rs should rerun the initial stage: {rerun:?}"
+    );
+    assert!(
+        rerun.iter().any(|line| line.starts_with("colm")),
+        "changing mkinidata-rs should invalidate the downstream runtime stage: {rerun:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn run_rust_mksrfdata_sidecar_change_invalidates_all_preprocessing_downstream() {
+    let _guard = netcdf_lock();
+    let root = temp_root("run-surf");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    install_rust_sidecars(&cli, &kernel);
+    write_case(&root, "siteA");
+    let case = root.join("siteA");
+    let call_log = root.join("kernel-programs.log");
+
+    run_with_bin_ok(
+        &cli,
+        &[
+            "run",
+            case.to_str().unwrap(),
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--preprocessors",
+            "rust",
+        ],
+    );
+    let first_count = marker_lines(&call_log).len();
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(cli.parent().unwrap().join("mksrfdata-rs"))
+        .unwrap()
+        .write_all(b"\n# changed Rust mksrfdata sidecar\n")
+        .unwrap();
+    run_with_bin_ok(
+        &cli,
+        &[
+            "run",
+            case.to_str().unwrap(),
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--preprocessors",
+            "rust",
+        ],
+    );
+    let rerun = marker_lines(&call_log)
+        .into_iter()
+        .skip(first_count)
+        .collect::<Vec<_>>();
+    assert!(
+        rerun.iter().any(|line| line == "mksrfdata-rs"),
+        "changing mksrfdata-rs should rerun the surface stage: {rerun:?}"
+    );
+    assert!(
+        rerun.iter().any(|line| line == "mkinidata-rs"),
+        "changing mksrfdata-rs should invalidate the initial stage: {rerun:?}"
+    );
+    assert!(
+        rerun.iter().any(|line| line.starts_with("colm")),
+        "changing mksrfdata-rs should invalidate the runtime stage: {rerun:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn run_stage_colm_with_rust_preprocessors_does_not_require_rust_sidecars() {
+    let _guard = netcdf_lock();
+    let root = temp_root("run-colm");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    write_case(&root, "siteA");
+    let case = root.join("siteA");
+
+    run_with_bin_ok(
+        &cli,
+        &[
+            "run",
+            case.to_str().unwrap(),
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--stage",
+            "colm",
+            "--preprocessors",
+            "rust",
+        ],
+    );
+    let calls = marker_lines(&root.join("kernel-programs.log"));
+    assert_eq!(
+        calls,
+        vec!["colm.x".to_owned()],
+        "--stage colm should not inspect or execute Rust preprocessor sidecars"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn study_run_defaults_to_rust_preprocessors_and_reuses_rust_stage_fingerprints() {
+    let _guard = netcdf_lock();
+    let root = temp_root("rust-default");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    install_rust_sidecars(&cli, &kernel);
+    write_case(&root, "siteA");
+    write_obs(&root.join("siteA-obs.nc"), 264);
+    let spec = write_tuning_spec_for_sites(&root, &kernel, 10, &["siteA"]);
+
+    let study = run_with_bin_ok(
+        &cli,
+        &[
+            "study-create",
+            root.to_str().unwrap(),
+            "--spec",
+            spec.to_str().unwrap(),
+        ],
+    )
+    .trim()
+    .to_string();
+    let first: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(first["status"], "completed");
+
+    let call_log = root.join("kernel-programs.log");
+    let calls = marker_lines(&call_log);
+    assert!(
+        calls.iter().any(|line| line == "mksrfdata-rs"),
+        "default study-run should execute the Rust mksrfdata sidecar: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|line| line == "mkinidata-rs"),
+        "default study-run should execute the Rust mkinidata sidecar: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|line| line.starts_with("colm")),
+        "Rust preprocessing should still execute the Fortran colm runtime: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|line| line == "mksrfdata.x" || line == "mkinidata.x"),
+        "Rust preprocessing must not fall back to kernel preprocessors: {calls:?}"
+    );
+    let stages = first_task_stages_json(&first);
+    assert!(
+        stages.contains("preprocessors=rust"),
+        "study stage fingerprint should record Rust preprocessors: {stages}"
+    );
+    assert!(
+        !stages.contains("preprocessors=fortran"),
+        "Rust study stage fingerprint must not retain Fortran identity: {stages}"
+    );
+
+    let call_count = calls.len();
+    let second: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(second["status"], "completed");
+    assert_eq!(
+        marker_lines(&call_log).len(),
+        call_count,
+        "a second unchanged Rust study-run should reuse stage fingerprints instead of rerunning stages"
+    );
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(cli.parent().unwrap().join("mkinidata-rs"))
+        .unwrap()
+        .write_all(b"\n# changed Rust preprocessor binary\n")
+        .unwrap();
+    let stale: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    ))
+    .unwrap();
+    let closed_member = &stale["tasks"]["m000005/siteA"];
+    assert_eq!(
+        closed_member["status"], "failed",
+        "changing the Rust sidecar binary should stale closed DE members instead of reusing old results"
+    );
+    let reason = closed_member["reason"].as_str().unwrap();
+    assert!(reason.contains("closed DE generation"), "{reason}");
+    assert!(reason.contains("create a new Study"), "{reason}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn study_run_default_rust_fails_when_sidecars_are_missing_without_fortran_fallback() {
+    let _guard = netcdf_lock();
+    let root = temp_root("rust-missing");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    write_case(&root, "siteA");
+    write_obs(&root.join("siteA-obs.nc"), 264);
+    let spec = write_tuning_spec_for_sites(&root, &kernel, 10, &["siteA"]);
+    let study = run_with_bin_ok(
+        &cli,
+        &[
+            "study-create",
+            root.to_str().unwrap(),
+            "--spec",
+            spec.to_str().unwrap(),
+        ],
+    )
+    .trim()
+    .to_string();
+
+    let stderr = run_with_bin_fail(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    );
+    assert!(
+        stderr.contains("Rust preprocessor is missing"),
+        "missing Rust sidecars must be reported instead of silently falling back: {stderr}"
+    );
+    assert_ne!(
+        study_state_status(&cli, &study),
+        "completed_with_failures",
+        "missing sidecars should fail before dispatch, not mark the Study completed with failures"
+    );
+    let kernel_calls = marker_lines(&root.join("kernel-programs.log"));
+    assert!(
+        !kernel_calls
+            .iter()
+            .any(|line| line == "mksrfdata.x" || line == "mkinidata.x"),
+        "missing Rust sidecars must not fall back to Fortran preprocessors: {kernel_calls:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn study_run_default_rust_rejects_hyperspectral_before_dispatching_tasks() {
+    let _guard = netcdf_lock();
+    let root = temp_root("rust-hyper");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    add_kernel_macro(&kernel, "HYPERSPECTRAL");
+    write_case(&root, "siteA");
+    write_obs(&root.join("siteA-obs.nc"), 264);
+    let spec = write_tuning_spec_for_sites(&root, &kernel, 10, &["siteA"]);
+    let study = run_with_bin_ok(
+        &cli,
+        &[
+            "study-create",
+            root.to_str().unwrap(),
+            "--spec",
+            spec.to_str().unwrap(),
+        ],
+    )
+    .trim()
+    .to_string();
+
+    let stderr = run_with_bin_fail(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    );
+    assert!(
+        stderr.contains("Study Rust preprocessing does not yet support HYPERSPECTRAL"),
+        "HYPERSPECTRAL Rust Study should fail with the explicit input-fingerprint guard: {stderr}"
+    );
+    assert_ne!(
+        study_state_status(&cli, &study),
+        "completed_with_failures",
+        "HYPERSPECTRAL Rust rejection should happen before task dispatch"
+    );
+    assert!(
+        marker_lines(&root.join("kernel-programs.log")).is_empty(),
+        "HYPERSPECTRAL Rust rejection should not launch preprocessors or runtime"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn switching_completed_closed_de_study_from_fortran_to_default_rust_marks_closed_members_stale() {
+    let _guard = netcdf_lock();
+    let root = temp_root("backend-stale");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    install_rust_sidecars(&cli, &kernel);
+    write_case(&root, "siteA");
+    write_obs(&root.join("siteA-obs.nc"), 264);
+    let spec = write_tuning_spec_for_sites(&root, &kernel, 10, &["siteA"]);
+    let study = run_with_bin_ok(
+        &cli,
+        &[
+            "study-create",
+            root.to_str().unwrap(),
+            "--spec",
+            spec.to_str().unwrap(),
+        ],
+    )
+    .trim()
+    .to_string();
+
+    let completed: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+            "--preprocessors",
+            "fortran",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(completed["status"], "completed");
+
+    let rerun: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    ))
+    .unwrap();
+    let task = &rerun["tasks"]["m000005/siteA"];
+    assert_eq!(task["status"], "failed");
+    let reason = task["reason"].as_str().unwrap();
+    assert!(reason.contains("closed DE generation"), "{reason}");
+    assert!(reason.contains("create a new Study"), "{reason}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn study_run_explicit_fortran_keeps_kernel_preprocessors_and_fortran_fingerprints() {
+    let _guard = netcdf_lock();
+    let root = temp_root("explicit-fortran");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    install_rust_sidecars(&cli, &kernel);
+    write_case(&root, "siteA");
+    write_obs(&root.join("siteA-obs.nc"), 264);
+    let spec = write_tuning_spec_for_sites(&root, &kernel, 10, &["siteA"]);
+
+    let study = run_with_bin_ok(
+        &cli,
+        &[
+            "study-create",
+            root.to_str().unwrap(),
+            "--spec",
+            spec.to_str().unwrap(),
+        ],
+    )
+    .trim()
+    .to_string();
+    let state: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+            "--preprocessors",
+            "fortran",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(state["status"], "completed");
+
+    let kernel_calls = marker_lines(&root.join("kernel-programs.log"));
+    assert!(
+        kernel_calls.iter().any(|line| line == "mksrfdata.x")
+            && kernel_calls.iter().any(|line| line == "mkinidata.x")
+            && kernel_calls.iter().any(|line| line.starts_with("colm")),
+        "explicit Fortran preprocessing should use kernel preprocessors and runtime: {kernel_calls:?}"
+    );
+    assert!(
+        !kernel_calls
+            .iter()
+            .any(|line| line == "mksrfdata-rs" || line == "mkinidata-rs"),
+        "explicit Fortran preprocessing should not execute Rust sidecars: {kernel_calls:?}"
+    );
+    let stages = first_task_stages_json(&state);
+    assert!(
+        stages.contains("preprocessors=fortran"),
+        "Fortran study stage fingerprint should record Fortran preprocessors: {stages}"
+    );
+    assert!(
+        !stages.contains("preprocessors=rust"),
+        "Fortran study stage fingerprint must not be marked Rust: {stages}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn multi_site_tuning_runs_and_applies_best_member() {
@@ -384,6 +965,8 @@ fn multi_site_tuning_runs_and_applies_best_member() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(state["status"], "completed");
@@ -511,6 +1094,8 @@ fn tuning_prefers_parameter_dependent_candidate_over_baseline() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(state["status"], "completed");
@@ -598,6 +1183,8 @@ fn tuning_validation_failure_warns_without_breaking_calibration_selection() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(state["status"], "completed");
@@ -666,6 +1253,8 @@ fn retry_failed_does_not_reopen_closed_de_generation() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(failed["generation"], 1);
@@ -678,6 +1267,8 @@ fn retry_failed_does_not_reopen_closed_de_generation() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
         "--retry-failed",
         "1",
     ]))
@@ -707,6 +1298,8 @@ fn stale_success_in_closed_de_generation_is_failed_without_rerun() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(completed["status"], "completed");
@@ -727,6 +1320,8 @@ fn stale_success_in_closed_de_generation_is_failed_without_rerun() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     let task = &rerun["tasks"]["m000005/siteA"];
@@ -761,6 +1356,8 @@ fn pause_resume_keeps_open_de_generation_selection_and_patience_stable() {
         completed_kernel.to_str().unwrap(),
         "--jobs",
         "1",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(completed["status"], "completed");
@@ -786,6 +1383,8 @@ fn pause_resume_keeps_open_de_generation_selection_and_patience_stable() {
             paused_kernel.to_str().unwrap(),
             "--jobs",
             "1",
+            "--preprocessors",
+            "fortran",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -809,6 +1408,8 @@ fn pause_resume_keeps_open_de_generation_selection_and_patience_stable() {
         paused_kernel.to_str().unwrap(),
         "--jobs",
         "1",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(resumed["status"], "completed");
@@ -917,6 +1518,8 @@ fn tuning_baseline_blocks_candidates_when_real_pairs_do_not_align() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(state["status"], "completed_with_failures");
@@ -969,6 +1572,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
             kernel.to_str().unwrap(),
             "--jobs",
             "2",
+            "--preprocessors",
+            "fortran",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -988,6 +1593,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert!(matches!(
@@ -1018,6 +1625,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
             cancel_kernel.to_str().unwrap(),
             "--jobs",
             "2",
+            "--preprocessors",
+            "fortran",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1052,6 +1661,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
             recovery_kernel.to_str().unwrap(),
             "--jobs",
             "2",
+            "--preprocessors",
+            "fortran",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1076,6 +1687,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
         recovery_kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(recovered["status"], "completed");
@@ -1136,6 +1749,8 @@ fn failed_tuning_baseline_finishes_retryable_without_running_candidates() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(failed["status"], "completed_with_failures");
@@ -1154,6 +1769,8 @@ fn failed_tuning_baseline_finishes_retryable_without_running_candidates() {
         kernel.to_str().unwrap(),
         "--jobs",
         "2",
+        "--preprocessors",
+        "fortran",
     ]))
     .unwrap();
     assert_eq!(recovered["status"], "completed");

@@ -6,6 +6,23 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Study preprocessing cutover
+
+Study now defaults to the same Rust preprocessors as ordinary `colm-cli run`,
+while preserving explicit `--preprocessors fortran` and the original model runtime.
+Both execution and Study freshness share complete sidecar SHA-256 identities:
+surface changes invalidate all downstream stages; initializer-only changes leave
+surface reusable. Missing sidecars and unsupported Rust HYPERSPECTRAL Study
+inputs fail before dispatch. Closed DE generations retain their stale-result
+protection instead of silently accepting old outputs after a backend/binary change.
+
+All **231 CLI tests** (212 unit and 19 Unix integration), Clippy, downstream checks
+and scoped formatting pass. Integration regressions use isolated copied CLI/fake
+sidecars, including unchanged resume and runtime-only execution without Rust
+sidecars. They establish routing/cache behavior, not a real-data Study scientific
+comparison or Windows acceptance. Independent read-only review approves the
+shared identities. Evidence: `/tmp/colm-study-rust-cutover/validation/`.
+
 ## LCT upward-scattering arithmetic
 
 Scalar LCT `two_stream` now preserves the original linked object's three

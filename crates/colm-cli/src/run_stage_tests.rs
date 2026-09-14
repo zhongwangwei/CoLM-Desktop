@@ -325,6 +325,16 @@ fn hyperspectral_pc_without_soil_or_pft_optics_needs_radiation_and_urban_albedo(
 
 #[test]
 fn a_changed_hyperspectral_surface_source_invalidates_downstream_stages() {
+    for stage in [Stage::MkSrfData, Stage::MkIniData, Stage::Colm] {
+        assert_eq!(
+            stage_preprocessor_input_identity(stage, Some(""), Some("")),
+            None
+        );
+        assert_eq!(
+            stage_preprocessor_input_identity(stage, None, Some("")),
+            None
+        );
+    }
     assert_eq!(
         stage_preprocessor_input_identity(Stage::MkSrfData, Some("surface"), Some("initial")),
         Some("surface".into())

@@ -22,6 +22,7 @@ pub struct RunOptions<'a> {
     pub jobs: usize,
     pub stream: bool,
     pub retry_failed: bool,
+    pub preprocessors: crate::PreprocessorMode,
 }
 
 struct StudyRunLock {
@@ -386,13 +387,36 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         kernel.manifest.identity(),
         kernel.manifest.platform
     );
-    // Study workers always execute the verified Fortran preprocessors, so stale-case
-    // validation must use the exact stage fingerprint identity `run_case` wrote.
+    // Match the backend identity written by run_case before reusing completed tasks.
     let kernel_id = format!(
-        "{};preprocessors=fortran",
-        kernel.manifest.stage_fingerprint_identity()
+        "{};preprocessors={}",
+        kernel.manifest.stage_fingerprint_identity(),
+        options.preprocessors.as_str()
     );
+    if options.preprocessors == crate::PreprocessorMode::Rust
+        && kernel
+            .manifest
+            .macros
+            .iter()
+            .any(|name| name == "HYPERSPECTRAL")
+    {
+        bail!("Study Rust preprocessing does not yet support HYPERSPECTRAL input fingerprints; use --preprocessors fortran");
+    }
     super::engine::ensure_supported_study_manifest(&manifest, Some(&kernel.manifest.macros))?;
+    let rust_identities = if options.preprocessors == crate::PreprocessorMode::Rust {
+        crate::RustPreprocessorIdentities {
+            surface: Some(crate::rust_preprocessor_stage_identity(
+                crate::Stage::MkSrfData,
+                &[],
+            )?),
+            initial: Some(crate::rust_preprocessor_stage_identity(
+                crate::Stage::MkIniData,
+                &[],
+            )?),
+        }
+    } else {
+        crate::RustPreprocessorIdentities::default()
+    };
     if manifest.spec.kernel_dir.is_none() || manifest.provenance.kernel_id.is_empty() {
         bail!("Study has no frozen kernel identity; create a new Study");
     }
@@ -460,6 +484,8 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
                 &checkpoint_dir,
                 &kernel_dir,
                 &kernel_id,
+                options.preprocessors,
+                &rust_identities,
                 jobs,
                 options.stream,
                 options.retry_failed,
@@ -500,6 +526,8 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         &checkpoint_dir,
         &kernel_dir,
         &kernel_id,
+        options.preprocessors,
+        &rust_identities,
         jobs,
         options.stream,
         options.retry_failed,
@@ -519,6 +547,8 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
             &checkpoint_dir,
             &kernel_dir,
             &kernel_id,
+            options.preprocessors,
+            &rust_identities,
             jobs,
             options.stream,
             &mut members,
@@ -884,6 +914,8 @@ fn run_members(
     checkpoint_dir: &Path,
     kernel_dir: &Path,
     kernel_id: &str,
+    preprocessors: crate::PreprocessorMode,
+    rust_identities: &crate::RustPreprocessorIdentities,
     jobs: usize,
     stream: bool,
     retry_failed: bool,
@@ -915,7 +947,8 @@ fn run_members(
     {
         for task in state.tasks.values_mut() {
             let stale_success = task.status == TaskStatus::Succeeded
-                && !crate::case_is_current(Path::new(&task.case_dir), kernel_id).unwrap_or(false);
+                && !crate::case_is_current(Path::new(&task.case_dir), kernel_id, rust_identities)
+                    .unwrap_or(false);
             if stale_success
                 && !retryable_task(
                     manifest,
@@ -944,7 +977,8 @@ fn run_members(
             continue;
         }
         let stale_success = task.status == TaskStatus::Succeeded
-            && !crate::case_is_current(Path::new(&task.case_dir), kernel_id).unwrap_or(false);
+            && !crate::case_is_current(Path::new(&task.case_dir), kernel_id, rust_identities)
+                .unwrap_or(false);
         let waiting_for_tuning_baseline = manifest.spec.kind == StudyKind::Tuning
             && !baseline_tasks_succeeded(manifest, state)
             && task.member != "m000000";
@@ -1023,7 +1057,7 @@ fn run_members(
                     false,
                     None,
                     1,
-                    crate::PreprocessorMode::Fortran,
+                    preprocessors,
                     None,
                     None,
                     true,
@@ -1792,6 +1826,8 @@ fn run_de_generations(
     checkpoint_dir: &Path,
     kernel_dir: &Path,
     kernel_id: &str,
+    preprocessors: crate::PreprocessorMode,
+    rust_identities: &crate::RustPreprocessorIdentities,
     jobs: usize,
     stream: bool,
     members: &mut Vec<MemberPlan>,
@@ -1876,6 +1912,8 @@ fn run_de_generations(
             checkpoint_dir,
             kernel_dir,
             kernel_id,
+            preprocessors,
+            rust_identities,
             jobs,
             stream,
             false,
@@ -3339,7 +3377,12 @@ mod tests {
             "&nl_colm\n   DEF_CASE_NAME = 'case'\n   DEF_dir_output = 'out'\n/\n",
         )
         .unwrap();
-        assert!(!crate::case_is_current(&dir, "test@kernel").unwrap());
+        assert!(!crate::case_is_current(
+            &dir,
+            "test@kernel",
+            &crate::RustPreprocessorIdentities::default()
+        )
+        .unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -4562,6 +4605,7 @@ mod tests {
                 jobs: 1,
                 stream: false,
                 retry_failed: false,
+                preprocessors: crate::PreprocessorMode::Fortran,
             },
         )
         .unwrap_err()
@@ -4619,6 +4663,7 @@ mod tests {
                 jobs: 1,
                 stream: false,
                 retry_failed: false,
+                preprocessors: crate::PreprocessorMode::Fortran,
             },
         )
         .unwrap_err()
@@ -5118,6 +5163,7 @@ esac
                 jobs: 2,
                 stream: false,
                 retry_failed: false,
+                preprocessors: crate::PreprocessorMode::Fortran,
             },
         )
         .unwrap();
