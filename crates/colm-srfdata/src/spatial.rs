@@ -3830,9 +3830,10 @@ fn patch_subset_fractions(
             })?;
         let element = patches.element_index[patch] - 1;
         let range = patches.owned_pixel_range(patch, topology.mesh.pixel_count(element)?)?;
+        // Original subset_build starts at +0.0, including empty WMO ranges.
         let weight = area[offsets[element] + range.start..offsets[element] + range.end]
             .iter()
-            .sum::<f64>()
+            .fold(0.0, |sum, &value| sum + value)
             * shares.map_or(1.0, |s| s[patch]);
         totals[owner] += weight;
         owners.push(owner);

@@ -6,6 +6,25 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## WMO empty-area identity
+
+The four remaining WMO surface bit differences were signed zeros, not nonzero
+fraction drift: Rust's empty floating sum produced `-0.0` where original
+`subset_build` initializes `+0.0`. The shared subset-area reduction now starts
+at positive zero; ordered nonempty addition, PFT shares and normalization are
+unchanged. The existing WMO writer regression now asserts zero bits rather than
+floating equality. Actual RED/GREEN and independent source review pass, as does
+the 672-test integrated validation recorded above.
+
+A fresh frozen surface/initializer/original-runtime pipeline in
+`/tmp/colm-wmo-positive-zero-full.vwvc8pf1/` exits 0 at all three stages. Its full
+284-file / 696-variable comparison retains matching inventories and schemas;
+**all 287 surface floating fields now match bitwise**. All cold and post-step
+restart fields pass the unchanged tolerance. History still has four `f_zerr`
+values outside it, maximum `1.0231815394945443e-12`; this fix does not close that
+gate. Evidence and the independent bitwise audit are under
+`/tmp/colm-wmo-positive-zero-fix/` and `/tmp/colm-wmo-patchfrac-audit/`.
+
 ## LCT linked arithmetic follow-up
 
 Two further contractions in scalar LCT `two_stream` now match the linked original

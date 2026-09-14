@@ -2535,7 +2535,7 @@ fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
     for (patch, source) in sources.iter().enumerate() {
         if source.is_some() {
             assert_eq!((starts[patch], ends[patch]), (-1, -1));
-            assert_eq!(fractions[patch], 0.0);
+            assert_eq!(fractions[patch].to_bits(), 0.0_f64.to_bits());
         }
     }
     for element in 1..=2 {
