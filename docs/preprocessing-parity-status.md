@@ -6,6 +6,31 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## LCT upward-scattering arithmetic
+
+Scalar LCT `two_stream` now preserves the original linked object's three
+upward-scattering contractions and `h1` contraction. PFT/hyperspectral solvers,
+singular guards, controls and the actual Rust solar-angle inputs are unchanged.
+Two further actual-patch regressions extend the six-case original-output check.
+An instrumented patch-149 probe changed one observable's last bits; its conflicting
+golden is retained as failed evidence, while the corrected golden uses the
+pristine cold restart and uninstrumented linked observable. Internal transmission
+goldens remain probe-derived; they are not claimed as pristine restart fields.
+All **673 integrated tests**, Clippy, downstream checks, scoped formatting and
+release compilation pass. Evidence: `/tmp/colm-lct-upscatter-fix/` and
+`/tmp/colm-lct-matched-first-divergence/`.
+
+The frozen `rust-native-surface-lct-upscatter-h1-hi6sbwia/` run under
+`/tmp/colm-spatial-parity.Mh0VZX/` completes fresh Rust initialization and the
+unchanged original two-step runtime. Surface generation is not rerun: all copied
+landdata hashes match the independent Rust source, retaining 242 bitwise surface
+fields and exact topology. All 13 cold files / 742 variable instances and all
+schemas pass. Post-step failures decrease from two to **one `zwt` value**, still
+`1.746947118214104e-11`. History failures decrease from 138 to **108 values**:
+`f_fseng` 5, `f_zerr` 41 and `f_zwt` 62. Their maxima are respectively
+`5.522693413695379e-12`, `4.210430188390165e-12` and `4.411795581638067e-12`.
+The combined `atol=rtol=1e-12` gate remains unchanged and open.
+
 ## PC common absorption uses per-PFT outputs
 
 Both single-point and spatial PC callers now retain each PFT's sunlit/shaded

@@ -557,11 +557,13 @@ fn two_stream(
                     * ((projection + cosine_zenith * phi2 + cosine_zenith * phi1)
                         / (cosine_zenith * phi1))
                         .ln());
-        let mut upward_scattering = lai / leaf_stem_area * optics.transmittance[band][0]
-            + stem_area / leaf_stem_area * optics.transmittance[band][1];
-        upward_scattering = 0.5
-            * (scattering
-                + (scattering - 2.0 * upward_scattering) * ((1.0 + optics.chil) / 2.0).powi(2));
+        let mut upward_scattering = (lai / leaf_stem_area).mul_add(
+            optics.transmittance[band][0],
+            stem_area / leaf_stem_area * optics.transmittance[band][1],
+        );
+        let upward_factor = ((1.0 + optics.chil) / 2.0).powi(2);
+        upward_scattering =
+            0.5 * upward_factor.mul_add(upward_scattering.mul_add(-2.0, scattering), scattering);
         let mut beta0 = (1.0 + zmu * direct_extinction) / (scattering * zmu * direct_extinction)
             * directional_scattering;
         if vegetation_snow {
@@ -591,7 +593,7 @@ fn two_stream(
         let p4 = be - zmu * direct_extinction;
         let f1 = 1.0 - ground[band][1] * p1 / ce;
         let f2 = 1.0 - ground[band][1] * p2 / ce;
-        let h1 = -(de * p4 + ce * fe);
+        let h1 = -de.mul_add(p4, ce * fe);
         let h4 = -fe.mul_add(p3, ce * de);
         let sigma = (zmu * direct_extinction).powi(2) + (ce.powi(2) - be.powi(2));
         let (albedo_direct, transmission_direct, eup_direct, edown_direct) = if sigma.abs()

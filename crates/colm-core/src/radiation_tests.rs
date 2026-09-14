@@ -75,7 +75,9 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
 #[test]
 fn lct_two_stream_matches_all_original_pearl_river_outputs() {
     // Original ebe6de9 MOD_Albedo twostream, -O2 -fdefault-real-8.
-    // Stored LCT patches e110_n25:826, e110_n20:1075/1087, e105_n20:1504.
+    // Stored LCT patches e110_n25:826, e110_n20:27/149/1075/1087, e105_n20:1504.
+    // Patches 27/149 use the original linked inputs exactly; the actual frozen
+    // full case still has a separate 1-ULP coszen drift for patch 149.
     // Output order: alb(2x2), tran(2x3), ssun(2x2), ssha(2x2), thermk/extkb/extkd.
     for (class, lai, sai, coszen, visible, nir, exact, expected) in [
         (
@@ -203,6 +205,70 @@ fn lct_two_stream_matches_all_original_pearl_river_outputs() {
                 0x3f706e8553054314,
                 0x3fede3528647a71c,
                 0x400f6261d9d7f2e7,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+        (
+            13,
+            f64::from_bits(0x3fc0cd63052760aa),
+            f64::from_bits(0x3fb8f6bf0ad51a71),
+            0.19915640171863735,
+            0.08,
+            0.16,
+            true,
+            [
+                0x3fb12e29c09844e1,
+                0x3fb1bc5f850c932c,
+                0x3fc9db10f613689e,
+                0x3fc6adf1aceec054,
+                0x3fa1b8b3a8608c52,
+                0x3fe9df5ca90cd172,
+                0x3fe21a86e4dde7a1,
+                0x3fc127606bc1783c,
+                0x3feb4547554a23cc,
+                0x3fe21a86e4dde7a1,
+                0x3fd8201c22450d79,
+                0x3fc26956964e2f14,
+                0x3fca31fef9fb931b,
+                0x3fb50c3407c281f5,
+                0x3f6d8cae64419141,
+                0x3fa60a034aa9c058,
+                0x3f76c577d592a04f,
+                0x3f9956dd5bf48548,
+                0x3fe9719329259a55,
+                0x4003eb1c91852bbc,
+                0x3fe7020c49ba5e35,
+            ],
+        ),
+        (
+            9,
+            1.2434825793038546,
+            0.8435910561680191,
+            0.18549345346001397,
+            0.08,
+            0.16,
+            true,
+            [
+                0x3fac905b415c8b17,
+                0x3fa95c93c844a3f9,
+                0x3fd42b22559f8160,
+                0x3fd141672ff02da1,
+                0x3f936b1358bdd842,
+                0x3fc25bb222ef7b7f,
+                0x3f6efbf85d902725,
+                0x3fc1ab35ab7f1dfa,
+                0x3fd11a07eea40707,
+                0x3f6efbf85d902725,
+                0x3feb7da2cf11b02d,
+                0x3fcf7b3c9c7c7cb3,
+                0x3fd92ba3ccfd0873,
+                0x3fc117166b97b169,
+                0x3fb06f57abd37445,
+                0x3fe2527984f76d5f,
+                0x3fc612d94e9ca722,
+                0x3fd7d581d1ceac16,
+                0x3fbf9db3d3fc003f,
+                0x40056103cbea00ad,
                 0x3fe7020c49ba5e35,
             ],
         ),
