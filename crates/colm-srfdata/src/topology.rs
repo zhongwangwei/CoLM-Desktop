@@ -141,6 +141,42 @@ impl FlatMesh {
         Ok((&self.ilon[start..end], &self.ilat[start..end]))
     }
 
+    /// In-place MOD_MeshFilter compaction; drop ocean pixels and empty elements
+    /// without allocating another mesh-sized coordinate or raster buffer.
+    pub(crate) fn retain_land_pixels(&mut self, types: &mut Vec<i32>) -> Result<()> {
+        ensure!(
+            types.len() == self.ilon.len(),
+            "landtype must match mesh pixel count"
+        );
+        let mut output = 0;
+        let mut elements = 0;
+        for element in 0..self.len() {
+            let start = self.pixel_offsets[element];
+            let end = self.pixel_offsets[element + 1];
+            let kept_start = output;
+            for input in start..end {
+                if types[input] > 0 {
+                    self.ilon[output] = self.ilon[input];
+                    self.ilat[output] = self.ilat[input];
+                    types[output] = types[input];
+                    output += 1;
+                }
+            }
+            if output > kept_start {
+                self.element_ids[elements] = self.element_ids[element];
+                self.pixel_offsets[elements] = kept_start;
+                elements += 1;
+            }
+        }
+        self.pixel_offsets[elements] = output;
+        self.pixel_offsets.truncate(elements + 1);
+        self.element_ids.truncate(elements);
+        self.ilon.truncate(output);
+        self.ilat.truncate(output);
+        types.truncate(output);
+        Ok(())
+    }
+
     /// Build the exact structural fields written by `landelm_build`.
     pub fn land_elements(&self) -> FlatLandElements {
         let mut pixel_end = Vec::with_capacity(self.len());

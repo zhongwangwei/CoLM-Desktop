@@ -54,9 +54,10 @@ pub use site::{
 };
 pub use spatial::{
     build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
-    build_catchment_spatial_topology, build_coordinate_patch_selection,
-    build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
-    build_pft_land_patches_from_raster, build_spatial_topology, mesh_cell_area_weights,
+    build_catchment_spatial_topology, build_catchment_spatial_topology_in_domain,
+    build_coordinate_patch_selection, build_lct_land_patches_from_raster,
+    build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_spatial_topology,
+    build_spatial_topology_in_domain, gather_patch_raster, mesh_cell_area_weights,
     read_coordinate_patch_selection_f64, read_coordinate_patch_selection_layers_f64,
     read_coordinate_raster_pft_point_f64, read_mesh_coordinate_raster_f64,
     read_mesh_coordinate_raster_layers_f64, read_mesh_coordinate_raster_pft_f64,
@@ -66,11 +67,11 @@ pub use spatial::{
     read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_cached_f64,
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
-    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
-    write_spatial_topology, write_spatial_topology_with_shared, write_spatial_urban_material,
-    write_spatial_urban_topology, write_spatial_urban_vector, BlockLayout,
-    CoordinatePatchSelection, MethanePhSamples, PixelAxes, SpatialGrid, SpatialInputKind,
-    SpatialTopology, TiledRasterFiles,
+    write_spatial_hru_patch_fractions, write_spatial_hru_topology, write_spatial_pft_topology,
+    write_spatial_pft_topology_with_shared, write_spatial_topology,
+    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
+    write_spatial_urban_vector, BlockLayout, CoordinatePatchSelection, MethanePhSamples, PixelAxes,
+    SpatialGrid, SpatialInputKind, SpatialTopology, TiledRasterFiles,
 };
 pub use surface::{
     derive_topographic_wetness, FlatPatches, RegularTopographyFactors, SimpleTopographyFactors,

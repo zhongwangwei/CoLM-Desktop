@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn land_filter_compacts_leading_empty_and_mixed_elements_in_place() {
+    let mut mesh = FlatMesh::new(
+        vec![1, 2, 3, 4],
+        vec![0, 2, 3, 5, 6],
+        vec![1, 2, 3, 4, 5, 6],
+        vec![1; 6],
+    )
+    .unwrap();
+    let mut types = vec![0, -1, 2, 0, 17, 0];
+    mesh.retain_land_pixels(&mut types).unwrap();
+    assert_eq!(mesh.land_elements().element_ids, [2, 3]);
+    assert_eq!(mesh.land_elements().pixel_end, [1, 1]);
+    assert_eq!(mesh.pixels(0).unwrap().0, [3]);
+    assert_eq!(mesh.pixels(1).unwrap().0, [5]);
+    assert_eq!(types, [2, 17]);
+    types.fill(0);
+    mesh.retain_land_pixels(&mut types).unwrap();
+    assert!(mesh.is_empty());
+    assert!(types.is_empty());
+}
+
+#[test]
 fn mesh_uses_one_flat_coordinate_store_for_variable_size_elements() {
     let mesh = FlatMesh::new(
         vec![42, 9001],

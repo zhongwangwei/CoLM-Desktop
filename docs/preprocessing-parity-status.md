@@ -10,7 +10,8 @@ branches, and an unchanged Fortran runtime consuming the Rust products.
 
 - The supplied Pearl River namelist has no `DEF_USE_PC=.true.` and defaults to
   LCT. The case name contains `PC`, but the completed `--land-cover igbp` run
-  therefore tested **LCT**, not PC: 957 elements and 7,698 patches.
+  therefore tested **LCT**, not PC. The old Rust topology had 957 elements
+  and 7,698 patches; the independent original-source audit below supersedes it.
 - The initial Rust surface was not directly readable by Fortran: four albedo
   files lacked `_patches` in their filenames and `soiltext_patches.nc` should
   have been `soiltexture_patches.nc` (variable remains `soiltext_patches`).
@@ -100,29 +101,105 @@ both steps from Rust restart (`runtime-smoke/colm-fixed.status = 0`). A full
 bounds-checked Desktop build instead crashed earlier in pixelset loading; this
 separate debug-profile issue is not claimed resolved by the allocation fix.
 
-## Independent surface generation: a newly exposed gap
+## Independent surface generation and repaired aggregation
 
-`original-surface/` is an independent original-Fortran mksrfdata run using the
-same mesh, land-cover year, domain, rawdata overlay, and effective LCT mode. Its
-soil aggregation is still running at this checkpoint (tool session 67192,
-PID 33882); do not claim a finished surface comparison yet.
+`original-surface/` completed unchanged original-Fortran mksrfdata successfully
+(`surface.status = 0`, 22 min 16 s). It uses the same source mesh, land-cover year,
+domain, rawdata overlay, and effective LCT mode, without reusing Rust landdata.
 
-Its completed topology already contradicts exact parity: both versions contain
-957 elements, but original Fortran creates **7,754 patches** while the existing
-Rust case has **7,698**. Original pixel axes merge the slightly offset mesh edges
-with raw-raster edges (2640 × 6240 axis cells); Rust snaps near-aligned mesh
-coordinates to the raw lattice (1319 × 3119). Original also retains the requested
-domain margins outside the source mesh edges. Thus a raw-grid snapping tolerance
-is not equivalent to upstream pixel-grid assimilation. Next work must preserve
-mesh/raw/domain edge intersections and compare patches by element ID and class,
-not assume the six original blocks equal the single Rust output block. Original
-also emits `landpatch/.../patchfrac_elm_<block>.nc`; Rust currently only writes
-that quantity through its diagnostic path. This output contract needs repair.
+The original has 957 elements and **7,754 patches**, not the old Rust 7,698.
+Rust had snapped slightly offset mesh boundaries to raw-data edges. It now
+assimilates the exact mesh/raw/domain edge union, keeps the requested margins,
+and excludes sub-1e-6-degree strips from membership as upstream does. The
+`DEF_LANDONLY` default-true filter removes nonpositive landtype pixels and empty
+elements before LCT/PFT partitioning; catchment keeps its distinct upstream rule.
+Explicit `DEF_domain` bounds reach both LCT and PFT/PC executables. No-domain
+source-extent behavior and the 25-million-pixel window limit remain limitations.
+
+`rust-assimilated-land/` and `topology-comparison.json` establish, for this case:
+
+- all **15,922,348** memberships match by element ID and patch class;
+- 957 elements / 7,754 patches and six output blocks agree;
+- pixel axes have 2,640 latitude / 6,240 longitude cells, with maximum coordinate
+  differences 7.11e-15 / 2.85e-14 degrees;
+- the newly written `patchfrac_elm_<block>.nc` fields differ by at most 1.706e-12.
+
+The first independent field comparison then exposed missing
+`USE_zip_for_aggregation` behavior: upstream sums covered pixel area per unique
+source-grid cell before requesting values. Without this, repeated fine pixels
+biased unweighted medians and nonlinear fitting: 116 first-layer Balland-Arp
+alpha/beta pairs differed by up to 0.18 / 25. The new gathered flat mesh preserves
+source x-then-y order and independent overlapping patch requests. All 116 pairs
+now match **exactly**. True/false namelist and CLI controls are wired through the
+shared 500 m LCT/PFT/PC fields, soil, USGS forest height, simple downscaling, and
+patch/element wetness; remaining optional adapters need separate ZIP audits.
+
+VGM mode must also run the Campbell fit for `psi_s` and `lambda`; upstream only
+suppresses Campbell's `theta_s`/`k_s` writes. The previous area-mean substitute
+was wrong and is replaced by the existing Campbell kernel. A disk regression
+compares both modes with fitting on/off. Both fits now use Rayon per patch, with
+ordered WMO copying and no parallel NetCDF calls.
+
+Sampling identified source-curve recomputation inside every LM residual and
+Jacobian as the next CPU hotspot. Like upstream `ydatv`/`ydatvks`, Rust now
+precomputes invariant observations once per patch in flat pressure-major buffers.
+Recorded residual vectors and full finite-difference Jacobian checks pass. A
+512-cell, 200-evaluation microbenchmark has identical residual/Jacobian bit
+hashes before/after; median times improve from 0.345 to 0.0196 s (VGM) and 0.0980
+to 0.0106 s (Campbell). These are kernel timings, **not whole-case speedups**.
+Artifacts: `/tmp/colm-fit-benchmark/`, `/tmp/colm-fit-probe/`. With the original
+production `-fdefault-real-8` flag and explicitly r8 driver arguments, extracted
+original callbacks agree on residuals to 2.3e-16 and Jacobians to 3.2e-14.
+`comparison-production.json` supersedes the initial probe compiled without that
+flag; compiler real-kind options are part of the reference contract.
+
+The old scratch debug/release runs were deliberately stopped after each concrete
+failure/profile diagnosis; their partial artifacts are retained, not counted as
+successful full runs. The final `rust-full-precomputed/` run completed all eight
+soil layers and vegetation in **248.68 s**, versus original **22 min 16 s** (about
+5.4× observed wall-time ratio for this case, not a controlled cold-cache benchmark).
+Rust initial completed in **4.46 s**. Both independently generated pipelines then
+completed the **unchanged original `colm.x`** for two 1800-second steps, with all
+surface/initial/runtime exit statuses zero. No job remains running at this checkpoint.
+
+Full field and file inventory comparison found:
+
+- 1,479 NetCDF filenames in each surface tree, none missing or extra;
+- matching variable names, numeric types and dimension names in every paired file;
+- 242 aggregated patch fields in each tree, none missing or extra, 32 bitwise equal,
+  and no finite/nonfinite classification mismatches;
+- one element (`132548`, eight patches) assigned to `e110_n20` in Rust instead of
+  original `e105_n20`, changing 492 files' dimension lengths. Global memberships
+  still match, but exact block ownership is **not yet reproduced**. Original votes
+  via the source mesh grid during mesh_build, before later filtering; Rust currently
+  recomputes from retained pixel midpoints. Attribute parity is not newly asserted.
+
+Fitted soil fields remain a **scientific completion gate**, not harmless blanket
+roundoff. Maximum observed surface differences include `k_s_l5 = 5.9904` and
+`psi_s_l8 = 3.9350` in native units. The worst conductivity example is captured in
+`fit-outlier.json`: element 207390, class 14, layer 5, 166 fine pixels / 44 unique
+source cells. Rust's full run rejected the fit and retained `k_s = 14.4847`, while
+Fortran accepted `8.49433`. Feeding the same captured source values and original
+areas to the isolated Rust and production Fortran solvers reproduces the accepted
+fit in both (difference about 1.3e-10). Thus the callback port alone does not explain
+the production discrepancy; area/coordinate rounding and fit acceptance sensitivity
+need resolution. Do not relax a tolerance to conceal that branch change.
+
+`surface-comparison.json`, `schema-comparison.json` and `restart-comparison.json`
+in the final run retain the complete measured differences. The independent
+pipelines' post-two-step `gs0sun` difference reaches 19.6311 (native units); this
+includes differing surface fits and is not an isolated initial-kernel error.
+Previous runtime evidence above used the old common 7,698-patch surface instead.
+
+The catchment writer now also emits `patchfrac_hru_<block>.nc` from parent-HRU
+membership, covered area and optional `pctshared`. A targeted test checks
+per-HRU normalization and serialization; both LCT and PFT/crop catchment commands
+call it. This is not a real catchment all-field parity claim.
 
 ## Fresh regression evidence
 
 - colm-init: 86 library tests + 12 binary tests; all 9 opt-in reference tests.
-- colm-srfdata: 195 library tests + 30 binary tests; its opt-in reference test.
+- colm-srfdata: 201 library tests + 30 binary tests; its opt-in reference test.
 - Native executable test (now checking tuning overrides) and all 5 preprocessing
   integration tests passed, including common, PFT-BGC, PC-BGC, and urban runtime.
 - `cargo clippy -p colm-init -p colm-srfdata --all-targets -- -D warnings` passed.
@@ -136,17 +213,20 @@ that quantity through its diagnostic path. This output contract needs repair.
 
 ## Remaining completion gates
 
-1. Repair the independent surface topology/patch-fraction discrepancies above,
-   finish the ongoing original **surface aggregation**, then compare every field.
-   Validate actual PC/PFT Pearl River configurations separately.
+1. Resolve the captured soil-fit acceptance and exact block-ownership differences.
+   Both independent full LCT pipelines now run, but field parity is not established.
+   Validate actual PC/PFT configurations and their scientific budgets separately.
 2. Finish the remaining executable-control audit. The 15 `RestartTuning`
    namelist fields are now forwarded through single-point, spatial LCT/urban,
    PFT/PC, and explicit spatial PFT entry points. `tcrit` remains the upstream
    fixed 2.5. Other tuning/parameterization controls still need individual checks.
-3. Trace the remaining surface controls (`DEF_LANDONLY`, `DEF_Output_2mWMO`,
+3. Trace the remaining surface controls (`DEF_Output_2mWMO`,
    `DEF_SOLO_PFT`, `DEF_FAST_PC`, `DEF_file_mesh_filter`) through topology and
    executable adapters. Identifier absence is a triage signal, not a completed
-   behavioral audit. Verify their enabled and disabled branches.
+   behavioral audit. Verify their enabled and disabled branches. ZIP aggregation
+   still needs PFT/PC-specific, crop, urban, and regular-coordinate adapter audits;
+   catchment `patchfrac_hru` now has a targeted writer regression, not a real-case
+   complete branch comparison.
 4. Retain separate evidence for regular-grid, catchment, USGS, PFT/PC, crop,
    urban, BGC/methane, observations/continuations, LULCC, downscaling, and routing.
    Existing synthetic and single-point tests do not prove the complete matrix.

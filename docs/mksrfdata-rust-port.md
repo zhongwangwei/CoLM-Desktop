@@ -99,3 +99,16 @@ the Rayon check covers both settings and every WMO-copied VGM field.
 The parity suite will keep a small, checked-in synthetic rawdata case for every branch and
 will use real rawdata cases only as an additional integration gate.  This prevents an
 unavailable external mount from blocking deterministic algorithm tests.
+
+## Independent original-source audit (2026-09-14)
+
+The supplied `/Users/zhongwangwei/Desktop/Github/CoLM202X` at `ebe6de9` is now an
+additional unchanged reference; the backup snapshot is retained. See the
+[parity audit](preprocessing-parity-status.md) for real-case evidence and limits.
+Mesh/raw/domain edge assimilation, land-only compaction, element/HRU patch fractions, source-cell
+ZIP aggregation in common/soil paths, and VGM's companion Campbell fit are repaired.
+`--aggregation-zip true|false` preserves `USE_zip_for_aggregation` (default true).
+Both soil models distribute patch fits through Rayon; invariant source curves are
+computed once rather than inside every LM callback. No new dependency, precision
+reduction, parallel NetCDF access, or scientific tolerance relaxation was added.
+Full migration is still not established by this one LCT case.

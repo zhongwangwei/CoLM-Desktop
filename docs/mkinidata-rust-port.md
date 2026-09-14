@@ -94,5 +94,7 @@ reference rather than being silently relabelled as the vendored runtime.
 
 See [the parity audit](preprocessing-parity-status.md) for the successful original
 Fortran one-hour run from Rust restart, the repaired Desktop-only LCT allocation
-regression, and the newly exposed **unresolved** surface topology discrepancy.
+regression, and the corrected independent surface topology. The new 7,754-patch Rust surface/initial pipeline also completes a two-step
+unchanged-original runtime run. Fitted surface differences remain unresolved;
+a runnable pipeline is not complete scientific parity.
 This progress does not establish full migration.

@@ -16,11 +16,11 @@ use colm_srfdata::{
     aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
     aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
-    build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology,
+    build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology_in_domain,
     build_coordinate_patch_selection, build_crop_land_patches, build_crop_pft_topology,
     build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
-    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology,
-    clip_existing_surface, crop_pft_pctshared, map_patch_diagnostic,
+    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology_in_domain,
+    clip_existing_surface, crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
     materialize_single_point_surface, materialize_single_point_surface_from_namelist,
     mesh_cell_area_weights, read_coordinate_patch_selection_f64,
     read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
@@ -31,13 +31,14 @@ use colm_srfdata::{
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
     write_patch_diagnostic, write_patch_diagnostic_dimension, write_patch_diagnostic_time,
-    write_spatial_hru_topology, write_spatial_pft_topology, write_spatial_pft_topology_with_shared,
-    write_spatial_topology, write_spatial_topology_with_shared, write_spatial_urban_material,
-    write_spatial_urban_topology, write_spatial_urban_vector, BlockLayout, CropLandPatchTopology,
-    DiagnosticStatistic, FlatLandElements, FlatLandPatches, LczUrbanRawFields, NcarUrbanProperties,
-    NcarUrbanRawFields, PftFractionInput, PftIndexInput, SiteMode, SpatialBounds, SpatialInputKind,
-    SpatialTopology, TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM,
-    COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
+    write_spatial_hru_patch_fractions, write_spatial_hru_topology, write_spatial_pft_topology,
+    write_spatial_pft_topology_with_shared, write_spatial_topology,
+    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
+    write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
+    FlatLandElements, FlatLandPatches, FlatMesh, LczUrbanRawFields, NcarUrbanProperties,
+    NcarUrbanRawFields, PftFractionInput, PftIndexInput, PixelAxes, SiteMode, SpatialBounds,
+    SpatialInputKind, SpatialTopology, TiledRasterFiles, TopographicWetness,
+    UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -71,6 +72,9 @@ struct SpatialLctArgs {
     landdata: PathBuf,
     year: i32,
     blocks: BlockLayout,
+    bounds: Option<SpatialBounds>,
+    land_only: bool,
+    zip_aggregation: bool,
     dominant: bool,
     land_cover: SiteMode,
     lake_depth: Option<PathBuf>,
@@ -161,6 +165,9 @@ struct SpatialPftArgs {
     landdata: PathBuf,
     year: i32,
     blocks: BlockLayout,
+    bounds: Option<SpatialBounds>,
+    land_only: bool,
+    zip_aggregation: bool,
     dominant: bool,
     plant_tiles: PathBuf,
     crop_surface: Option<PathBuf>,
@@ -186,7 +193,8 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let args = parse_spatial_pft(args)?;
     let (topology, base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let catchment = build_catchment_spatial_topology(&args.mesh, MERIT_90M)?;
+            let catchment =
+                build_catchment_spatial_topology_in_domain(&args.mesh, MERIT_90M, args.bounds)?;
             let (catchment, patches) = build_catchment_pft_land_patches_from_raster(
                 catchment,
                 &args.landtype,
@@ -197,13 +205,15 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
+            let topology =
+                build_spatial_topology_in_domain(&args.mesh, args.kind, COLM_500M, args.bounds)?;
             let (topology, patches) = build_pft_land_patches_from_raster(
                 topology,
                 &args.landtype,
                 "landtype",
                 COLM_500M,
                 args.dominant,
+                args.land_only,
             )?;
             (topology, patches, None)
         }
@@ -300,6 +310,9 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         landdata: args.landdata.clone(),
         year: args.year,
         blocks: args.blocks.clone(),
+        bounds: args.bounds,
+        land_only: args.land_only,
+        zip_aggregation: args.zip_aggregation,
         dominant: args.dominant,
         land_cover: SiteMode::Igbp,
         lake_depth: args.lake_depth.clone(),
@@ -338,6 +351,15 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             args.year,
             &topology,
             &land_hrus,
+            &args.blocks,
+        )?;
+        write_spatial_hru_patch_fractions(
+            &args.landdata,
+            args.year,
+            &topology,
+            &land_hrus,
+            patches,
+            crop.as_ref().map(|crop| crop.pctshared.as_slice()),
             &args.blocks,
         )?;
     }
@@ -621,7 +643,8 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     };
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let catchment = build_catchment_spatial_topology(&args.mesh, MERIT_90M)?;
+            let catchment =
+                build_catchment_spatial_topology_in_domain(&args.mesh, MERIT_90M, args.bounds)?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
                 catchment,
                 &args.landtype,
@@ -633,13 +656,15 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let topology = build_spatial_topology(&args.mesh, args.kind, COLM_500M)?;
+            let topology =
+                build_spatial_topology_in_domain(&args.mesh, args.kind, COLM_500M, args.bounds)?;
             let (topology, patches) = build_lct_land_patches_from_raster(
                 topology,
                 &args.landtype,
                 "landtype",
                 lct_grid,
                 args.dominant,
+                args.land_only,
             )?;
             (topology, patches, None)
         }
@@ -683,6 +708,15 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             args.year,
             &topology,
             &land_hrus,
+            &args.blocks,
+        )?;
+        write_spatial_hru_patch_fractions(
+            &args.landdata,
+            args.year,
+            &topology,
+            &land_hrus,
+            &patches,
+            None,
             &args.blocks,
         )?;
     }
@@ -1648,16 +1682,12 @@ fn materialize_topographic_wetness(
     path: &Path,
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
+    zip: bool,
 ) -> Result<TopographicWetnessFields> {
-    let raw = read_mesh_raster_layers_f64(
-        path,
-        "twi",
-        TWI_LAYERS,
-        &topology.mesh,
-        &topology.pixel,
-        COLM_500M,
-    )?;
-    let patch_layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let (mesh, patch_layout, _) =
+        gather_patch_raster(&topology.mesh, &topology.pixel, patches, COLM_500M, zip)?;
+    let raw =
+        read_mesh_raster_layers_f64(path, "twi", TWI_LAYERS, &mesh, &topology.pixel, COLM_500M)?;
     let patch_values = patch_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS)?;
     let elements = FlatLandPatches {
         element_ids: topology.land_elements.element_ids.clone(),
@@ -1666,7 +1696,10 @@ fn materialize_topographic_wetness(
         set_type: topology.land_elements.set_type.clone(),
         element_index: topology.land_elements.element_index.clone(),
     };
-    let element_layout = elements.aggregation_layout(&topology.mesh, vec![None; elements.len()])?;
+    let (mesh, element_layout, _) =
+        gather_patch_raster(&topology.mesh, &topology.pixel, &elements, COLM_500M, zip)?;
+    let raw =
+        read_mesh_raster_layers_f64(path, "twi", TWI_LAYERS, &mesh, &topology.pixel, COLM_500M)?;
     let element_values = element_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS)?;
     let fallback = TopographicWetness {
         mean_twi: 9.27,
@@ -1698,20 +1731,20 @@ fn materialize_simple_topography_factors(
 ) -> Result<()> {
     let topography = directory.join("topography_MERITHydro.nc");
     let curvature = directory.join("curvature_MERITHydro.nc");
-    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
+    let (mesh, layout, area) = gather_patch_raster(
+        &topology.mesh,
+        &topology.pixel,
+        patches,
+        COLM_500M,
+        args.zip_aggregation,
+    )?;
     let factors = layout.aggregate_simple_topography_factors(
-        &read_mesh_raster_f64(
-            &curvature,
-            "curvature",
-            &topology.mesh,
-            &topology.pixel,
-            COLM_500M,
-        )?,
+        &read_mesh_raster_f64(&curvature, "curvature", &mesh, &topology.pixel, COLM_500M)?,
         &read_mesh_raster_layers_f64(
             &topography,
             "slp_aspect",
             9,
-            &topology.mesh,
+            &mesh,
             &topology.pixel,
             COLM_500M,
         )?,
@@ -1719,12 +1752,12 @@ fn materialize_simple_topography_factors(
             &topography,
             "pct_aspect",
             9,
-            &topology.mesh,
+            &mesh,
             &topology.pixel,
             COLM_500M,
         )?,
         9,
-        &mesh_cell_area_weights(&topology.mesh, &topology.pixel)?,
+        &area,
     )?;
     write_landpatch_scalar(
         &args.landdata,
@@ -1961,6 +1994,13 @@ fn materialize_spatial_common_fields(
         args.simple_topography_factors.is_none() || args.regular_topography_factors.is_none(),
         "simple and regular forcing downscaling cannot both write terrain fields"
     );
+    let (mesh, layout, area) = gather_patch_raster(
+        &topology.mesh,
+        &topology.pixel,
+        patches,
+        COLM_500M,
+        args.zip_aggregation,
+    )?;
     let patch_type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
     let forest_height = match forest_height_override {
         Some(values) => Some(values.to_vec()),
@@ -1969,32 +2009,30 @@ fn materialize_spatial_common_fields(
                 if args.land_cover != SiteMode::Igbp {
                     bail!("USGS needs --usgs-forest-height; --plant-tiles supplies its monthly LAI/SAI")
                 }
-                let layout =
-                    patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
                 let raw = read_mesh_tiled_raster_f64(
                     path,
                     &format!("MOD{:04}", args.year),
                     "HTOP",
-                    &topology.mesh,
+                    &mesh,
                     &topology.pixel,
                     COLM_500M,
                 )?;
-                let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+
                 Some(layout.aggregate_igbp_forest_height(&raw, &area)?)
             }
             (None, Some(path)) | (Some(_), Some(path)) => {
                 if args.land_cover != SiteMode::Usgs {
                     bail!("--usgs-forest-height supports USGS only")
                 }
-                let layout =
-                    patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-                let raw = read_mesh_raster_f64(
-                    path,
-                    "forest_height",
+                let (mesh, layout, _) = gather_patch_raster(
                     &topology.mesh,
                     &topology.pixel,
+                    patches,
                     COLM_1KM,
+                    args.zip_aggregation,
                 )?;
+                let raw =
+                    read_mesh_raster_f64(path, "forest_height", &mesh, &topology.pixel, COLM_1KM)?;
                 Some(layout.aggregate_usgs_forest_height(&raw, 1, 16, 24)?)
             }
             (None, None) => None,
@@ -2008,14 +2046,7 @@ fn materialize_spatial_common_fields(
                 bail!("--lake-depth supports only LCT IGBP or USGS land cover")
             }
         };
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let raw = read_mesh_raster_f64(
-            path,
-            "lake_depth",
-            &topology.mesh,
-            &topology.pixel,
-            COLM_500M,
-        )?;
+        let raw = read_mesh_raster_f64(path, "lake_depth", &mesh, &topology.pixel, COLM_500M)?;
         Some(layout.aggregate_lake_depth(&raw, waterbody)?)
     } else {
         None
@@ -2029,16 +2060,15 @@ fn materialize_spatial_common_fields(
             }
         };
         if patches.set_type.contains(&waterbody) {
-            let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
             let raw = read_mesh_raster_layers_f64(
                 path,
                 "lake_soilc",
                 LAKE_SOIL_LAYERS,
-                &topology.mesh,
+                &mesh,
                 &topology.pixel,
                 COLM_500M,
             )?;
-            let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+
             Some(layout.aggregate_lake_soil_carbon(&raw, LAKE_SOIL_LAYERS, &area, waterbody)?)
         } else {
             Some(vec![0.0; LAKE_SOIL_LAYERS * patches.len()])
@@ -2064,14 +2094,7 @@ fn materialize_spatial_common_fields(
         None
     };
     let soil_texture = if let Some(path) = &args.soil_texture {
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let raw = read_mesh_raster_i32(
-            path,
-            "soiltexture",
-            &topology.mesh,
-            &topology.pixel,
-            COLM_500M,
-        )?;
+        let raw = read_mesh_raster_i32(path, "soiltexture", &mesh, &topology.pixel, COLM_500M)?;
         Some(layout.aggregate_soil_texture(&raw)?)
     } else {
         None
@@ -2084,15 +2107,8 @@ fn materialize_spatial_common_fields(
                 bail!("--soil-brightness supports only LCT IGBP or USGS land cover")
             }
         };
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         Some(layout.aggregate_soil_brightness(
-            &read_mesh_raster_i32(
-                path,
-                "soil_brightness",
-                &topology.mesh,
-                &topology.pixel,
-                COLM_500M,
-            )?,
+            &read_mesh_raster_i32(path, "soil_brightness", &mesh, &topology.pixel, COLM_500M)?,
             waterbody,
             ice,
         )?)
@@ -2100,18 +2116,11 @@ fn materialize_spatial_common_fields(
         None
     };
     let topography = if let Some(path) = &args.topography {
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         Some(layout.aggregate_topography(
-            &read_mesh_raster_f64(path, "landarea", &topology.mesh, &topology.pixel, COLM_500M)?,
-            &read_mesh_raster_f64(
-                path,
-                "elevation",
-                &topology.mesh,
-                &topology.pixel,
-                COLM_500M,
-            )?,
-            &read_mesh_raster_f64(path, "elvstd", &topology.mesh, &topology.pixel, COLM_500M)?,
-            &read_mesh_raster_f64(path, "slope", &topology.mesh, &topology.pixel, COLM_500M)?,
+            &read_mesh_raster_f64(path, "landarea", &mesh, &topology.pixel, COLM_500M)?,
+            &read_mesh_raster_f64(path, "elevation", &mesh, &topology.pixel, COLM_500M)?,
+            &read_mesh_raster_f64(path, "elvstd", &mesh, &topology.pixel, COLM_500M)?,
+            &read_mesh_raster_f64(path, "slope", &mesh, &topology.pixel, COLM_500M)?,
         )?)
     } else {
         None
@@ -2119,13 +2128,11 @@ fn materialize_spatial_common_fields(
     let topographic_wetness = args
         .topographic_wetness
         .as_deref()
-        .map(|path| materialize_topographic_wetness(path, topology, patches))
+        .map(|path| materialize_topographic_wetness(path, topology, patches, args.zip_aggregation))
         .transpose()?;
     let bedrock = if let Some(path) = &args.bedrock {
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let raw =
-            read_mesh_raster_f64(path, "dbedrock", &topology.mesh, &topology.pixel, COLM_500M)?;
-        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+        let raw = read_mesh_raster_f64(path, "dbedrock", &mesh, &topology.pixel, COLM_500M)?;
+
         Some(layout.aggregate_bedrock(&raw, &area)?)
     } else {
         None
@@ -2381,12 +2388,11 @@ fn materialize_spatial_common_fields(
     }
     if let Some(directory) = &args.soil_hyper_albedo_dir {
         let (waterbody, ice) = soil_hyper_albedo_classes(args.land_cover);
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
         for wavelength in (400..=2500).step_by(10) {
             let raw = read_mesh_raster_f64(
                 &directory.join(format!("colm_soil_albedo_{wavelength}nm.nc")),
                 "albedo",
-                &topology.mesh,
+                &mesh,
                 &topology.pixel,
                 COLM_500M,
             )?;
@@ -2441,8 +2447,6 @@ fn materialize_spatial_common_fields(
         )?;
     }
     if let Some(directory) = &args.eight_day_lai_dir {
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
         for &year in &args.eight_day_lai_years {
             let source = directory.join(format!("lai_8-day_15s_{year:04}.nc"));
             let mut lai_frames = Vec::with_capacity(46);
@@ -2451,7 +2455,7 @@ fn materialize_spatial_common_fields(
                     &source,
                     "lai",
                     time,
-                    &topology.mesh,
+                    &mesh,
                     &topology.pixel,
                     COLM_500M,
                 )?;
@@ -2491,8 +2495,7 @@ fn materialize_spatial_common_fields(
             .plant_tiles
             .as_deref()
             .context("--monthly-vegetation-year requires --plant-tiles")?;
-        let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-        let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+
         let mut tile_files = TiledRasterFiles::default();
         for &year in &args.monthly_vegetation_years {
             let mut lai_frames = Vec::with_capacity(12);
@@ -2507,7 +2510,7 @@ fn materialize_spatial_common_fields(
                         &suffix,
                         &lai_name,
                         month,
-                        &topology.mesh,
+                        &mesh,
                         &topology.pixel,
                         COLM_500M,
                     )?,
@@ -2520,7 +2523,7 @@ fn materialize_spatial_common_fields(
                         &suffix,
                         &sai_name,
                         month,
-                        &topology.mesh,
+                        &mesh,
                         &topology.pixel,
                         COLM_500M,
                     )?,
@@ -2595,9 +2598,14 @@ fn materialize_spatial_soil(
     patch_pctshared: Option<&[f64]>,
     classes: SoilPatchClasses,
 ) -> Result<()> {
-    let layout = patches.aggregation_layout(&topology.mesh, vec![None; patches.len()])?;
-    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
-    let mut raw = SoilRawReader::new(directory, topology);
+    let (mesh, layout, area) = gather_patch_raster(
+        &topology.mesh,
+        &topology.pixel,
+        patches,
+        COLM_500M,
+        args.zip_aggregation,
+    )?;
+    let mut raw = SoilRawReader::new(directory, &mesh, &topology.pixel);
     for layer in 1..=SOIL_LAYERS {
         let quartz = raw.read("vf_quartz_mineral_s.nc", "vf_quartz_mineral_s", layer)?;
         let gravel = raw.read("vf_gravels_s.nc", "vf_gravels_s", layer)?;
@@ -2678,97 +2686,74 @@ fn materialize_spatial_soil(
             )?;
         }
 
-        match args.soil_model {
-            SoilModel::Vgm => {
-                let output = aggregate_vgm(
-                    &layout,
-                    VgmInputs {
-                        l: &raw.read("VGM_L.nc", "VGM_L", layer)?,
-                        theta_r: &raw.read("VGM_theta_r.nc", "VGM_theta_r", layer)?,
-                        alpha: &raw.read("VGM_alpha.nc", "VGM_alpha", layer)?,
-                        n: &raw.read("VGM_n.nc", "VGM_n", layer)?,
-                        theta_s: &raw.read("theta_s.nc", "theta_s", layer)?,
-                        k_s: &raw.read("k_s.nc", "k_s", layer)?,
-                    },
-                    &area,
-                    classes,
-                    VgmFills::default(),
-                    args.soil_fit,
+        if matches!(args.soil_model, SoilModel::Vgm) {
+            let output = aggregate_vgm(
+                &layout,
+                VgmInputs {
+                    l: &raw.read("VGM_L.nc", "VGM_L", layer)?,
+                    theta_r: &raw.read("VGM_theta_r.nc", "VGM_theta_r", layer)?,
+                    alpha: &raw.read("VGM_alpha.nc", "VGM_alpha", layer)?,
+                    n: &raw.read("VGM_n.nc", "VGM_n", layer)?,
+                    theta_s: &raw.read("theta_s.nc", "theta_s", layer)?,
+                    k_s: &raw.read("k_s.nc", "k_s", layer)?,
+                },
+                &area,
+                classes,
+                VgmFills::default(),
+                args.soil_fit,
+            )?;
+            for (name, values) in [
+                ("theta_r", output.theta_r),
+                ("alpha_vgm", output.alpha),
+                ("n_vgm", output.n),
+                ("theta_s", output.theta_s),
+                ("k_s", output.k_s),
+                ("L_vgm", output.l),
+            ] {
+                write_soil_layer(
+                    args,
+                    topology,
+                    patches,
+                    patch_pctshared,
+                    name,
+                    layer,
+                    &values,
                 )?;
-                for (name, values) in [
-                    ("theta_r", output.theta_r),
-                    ("alpha_vgm", output.alpha),
-                    ("n_vgm", output.n),
-                    ("theta_s", output.theta_s),
-                    ("k_s", output.k_s),
-                    ("L_vgm", output.l),
-                ] {
-                    write_soil_layer(
-                        args,
-                        topology,
-                        patches,
-                        patch_pctshared,
-                        name,
-                        layer,
-                        &values,
-                    )?;
-                }
-                // The VGM initialization branch still writes Campbell's `bsw`,
-                // so `MOD_SoilParametersReadin.F90` requires these two inputs.
-                for (file, source) in [("psi_s.nc", "psi_s"), ("lambda.nc", "lambda")] {
-                    let raw = raw.read(file, source, layer)?;
-                    let values = aggregate_soil_field(
-                        &layout,
-                        &raw,
-                        &area,
-                        classes,
-                        SoilField {
-                            statistic: SoilStatistic::AreaMean,
-                            fill: 0.0,
-                        },
-                    )?;
-                    write_soil_layer(
-                        args,
-                        topology,
-                        patches,
-                        patch_pctshared,
-                        source,
-                        layer,
-                        &values,
-                    )?;
-                }
             }
-            SoilModel::Campbell => {
-                let output = aggregate_campbell(
-                    &layout,
-                    CampbellInputs {
-                        theta_s: &raw.read("theta_s.nc", "theta_s", layer)?,
-                        k_s: &raw.read("k_s.nc", "k_s", layer)?,
-                        psi_s: &raw.read("psi_s.nc", "psi_s", layer)?,
-                        lambda: &raw.read("lambda.nc", "lambda", layer)?,
-                    },
-                    &area,
-                    classes,
-                    CampbellFills::default(),
-                    args.soil_fit,
-                )?;
-                for (name, values) in [
-                    ("theta_s", output.theta_s),
-                    ("k_s", output.k_s),
-                    ("psi_s", output.psi_s),
-                    ("lambda", output.lambda),
-                ] {
-                    write_soil_layer(
-                        args,
-                        topology,
-                        patches,
-                        patch_pctshared,
-                        name,
-                        layer,
-                        &values,
-                    )?;
-                }
+        }
+        // Upstream also fits Campbell in VGM mode, but writes only psi_s/lambda
+        // from that fit; theta_s/k_s above retain the VGM result.
+        let output = aggregate_campbell(
+            &layout,
+            CampbellInputs {
+                theta_s: &raw.read("theta_s.nc", "theta_s", layer)?,
+                k_s: &raw.read("k_s.nc", "k_s", layer)?,
+                psi_s: &raw.read("psi_s.nc", "psi_s", layer)?,
+                lambda: &raw.read("lambda.nc", "lambda", layer)?,
+            },
+            &area,
+            classes,
+            CampbellFills::default(),
+            args.soil_fit,
+        )?;
+        for (name, values) in [
+            ("theta_s", output.theta_s),
+            ("k_s", output.k_s),
+            ("psi_s", output.psi_s),
+            ("lambda", output.lambda),
+        ] {
+            if matches!(args.soil_model, SoilModel::Vgm) && matches!(name, "theta_s" | "k_s") {
+                continue;
             }
+            write_soil_layer(
+                args,
+                topology,
+                patches,
+                patch_pctshared,
+                name,
+                layer,
+                &values,
+            )?;
         }
 
         for (file, source, output, statistic, fill) in [
@@ -2861,15 +2846,17 @@ fn materialize_spatial_soil(
 
 struct SoilRawReader<'a> {
     directory: &'a Path,
-    topology: &'a SpatialTopology,
+    mesh: &'a FlatMesh,
+    pixel: &'a PixelAxes,
     files: BTreeMap<String, netcdf::File>,
 }
 
 impl<'a> SoilRawReader<'a> {
-    fn new(directory: &'a Path, topology: &'a SpatialTopology) -> Self {
+    fn new(directory: &'a Path, mesh: &'a FlatMesh, pixel: &'a PixelAxes) -> Self {
         Self {
             directory,
-            topology,
+            mesh,
+            pixel,
             files: BTreeMap::new(),
         }
     }
@@ -2885,8 +2872,8 @@ impl<'a> SoilRawReader<'a> {
         read_mesh_open_raster_f64(
             self.files.get(file).expect("soil file was inserted"),
             &format!("{variable}_l{layer}"),
-            &self.topology.mesh,
-            &self.topology.pixel,
+            self.mesh,
+            self.pixel,
             COLM_500M,
         )
     }
@@ -2944,6 +2931,9 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         .parse::<i32>()
         .with_context(|| format!("invalid land-cover year {:?}", args[4]))?;
     let mut blocks = BlockLayout::regular(1, 1)?;
+    let mut bounds = None;
+    let mut land_only = true;
+    let mut zip_aggregation = true;
     let mut dominant = false;
     let mut land_cover = None;
     let mut lake_depth = None;
@@ -2987,6 +2977,39 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                     .context("invalid latitude block count")?;
                 blocks = BlockLayout::regular(nx, ny)?;
                 index += 3;
+            }
+            "--aggregation-zip" => {
+                zip_aggregation = args
+                    .get(index + 1)
+                    .context("--aggregation-zip needs true or false")?
+                    .parse::<bool>()
+                    .context("--aggregation-zip needs true or false")?;
+                index += 2;
+            }
+            "--land-only" => {
+                land_only = args
+                    .get(index + 1)
+                    .context("--land-only needs true or false")?
+                    .parse::<bool>()
+                    .context("--land-only needs true or false")?;
+                index += 2;
+            }
+            "--domain" => {
+                let values = args
+                    .get(index + 1..index + 5)
+                    .context("--domain needs south north west east")?;
+                let value = |i: usize| {
+                    values[i]
+                        .parse::<f64>()
+                        .context("--domain coordinates must be real values")
+                };
+                bounds = Some(SpatialBounds {
+                    south: value(0)?,
+                    north: value(1)?,
+                    west: value(2)?,
+                    east: value(3)?,
+                });
+                index += 5;
             }
             "--dominant" => {
                 dominant = true;
@@ -3223,6 +3246,9 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         landdata: PathBuf::from(&args[3]),
         year,
         blocks,
+        bounds,
+        land_only,
+        zip_aggregation,
         dominant,
         land_cover: land_cover.context("spatial-lct requires --land-cover igbp or usgs")?,
         lake_depth,
@@ -3271,6 +3297,9 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         .parse::<i32>()
         .with_context(|| format!("invalid land-cover year {:?}", args[4]))?;
     let mut blocks = BlockLayout::regular(1, 1)?;
+    let mut bounds = None;
+    let mut land_only = true;
+    let mut zip_aggregation = true;
     let mut dominant = false;
     let mut plant_tiles = None;
     let mut crop_surface = None;
@@ -3306,6 +3335,39 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     .context("invalid latitude block count")?;
                 blocks = BlockLayout::regular(nx, ny)?;
                 index += 3;
+            }
+            "--aggregation-zip" => {
+                zip_aggregation = args
+                    .get(index + 1)
+                    .context("--aggregation-zip needs true or false")?
+                    .parse::<bool>()
+                    .context("--aggregation-zip needs true or false")?;
+                index += 2;
+            }
+            "--land-only" => {
+                land_only = args
+                    .get(index + 1)
+                    .context("--land-only needs true or false")?
+                    .parse::<bool>()
+                    .context("--land-only needs true or false")?;
+                index += 2;
+            }
+            "--domain" => {
+                let values = args
+                    .get(index + 1..index + 5)
+                    .context("--domain needs south north west east")?;
+                let value = |i: usize| {
+                    values[i]
+                        .parse::<f64>()
+                        .context("--domain coordinates must be real values")
+                };
+                bounds = Some(SpatialBounds {
+                    south: value(0)?,
+                    north: value(1)?,
+                    west: value(2)?,
+                    east: value(3)?,
+                });
+                index += 5;
             }
             "--dominant" => {
                 dominant = true;
@@ -3463,6 +3525,9 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         landdata: PathBuf::from(&args[3]),
         year,
         blocks,
+        bounds,
+        land_only,
+        zip_aggregation,
         dominant,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         crop_surface,
@@ -4062,6 +4127,38 @@ fn spatial_case_command(
             args.extend(blocks.iter().cloned());
         }
     }
+
+    if [
+        "DEF_domain%edges",
+        "DEF_domain%edgen",
+        "DEF_domain%edgew",
+        "DEF_domain%edgee",
+    ]
+    .iter()
+    .any(|field| document.get(field).is_some())
+    {
+        args.push("--domain".to_owned());
+        for (field, default) in [
+            ("DEF_domain%edges", -90.0),
+            ("DEF_domain%edgen", 90.0),
+            ("DEF_domain%edgew", -180.0),
+            ("DEF_domain%edgee", 180.0),
+        ] {
+            let value = if document.get(field).is_some() {
+                case_f64(&document, field)?
+            } else {
+                default
+            };
+            args.push(value.to_string());
+        }
+    }
+
+    args.extend([
+        "--aggregation-zip".to_owned(),
+        case_bool(&document, "USE_zip_for_aggregation", true)?.to_string(),
+        "--land-only".to_owned(),
+        case_bool(&document, "DEF_LANDONLY", true)?.to_string(),
+    ]);
 
     if diagnostics {
         args.push("--diagnostics".to_owned());
@@ -4883,14 +4980,16 @@ mod tests {
                 let switch = if setting.is_empty() {
                     String::new()
                 } else {
-                    format!("DEF_USE_SOILPAR_UPS_FIT={setting}\n")
+                    format!(
+                        "DEF_USE_SOILPAR_UPS_FIT={setting}\nUSE_zip_for_aggregation={setting}\n"
+                    )
                 };
                 let (root, namelist) = case_namelist(
                     "soil-fit",
                     &format!(
                         "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\n\
                          DEF_dir_rawdata='$ROOT/raw'\nDEF_file_mesh='$ROOT/mesh.nc'\n\
-                         DEF_USE_LCT=.{}.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\n{switch}/\n",
+                         DEF_USE_LCT=.{}.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\nDEF_LANDONLY=.false.\nDEF_domain%edges=21.5\nDEF_domain%edgen=27.0\nDEF_domain%edgew=102.0\nDEF_domain%edgee=115.0\n{switch}/\n",
                         mode == "LCT",
                         mode == "PFT",
                         mode == "PC",
@@ -4905,11 +5004,38 @@ mod tests {
                     Some(expected),
                     "{mode}: {setting}"
                 );
-                let fit = if command.pft_or_pc {
-                    parse_spatial_pft(&command.args).unwrap().soil_fit
+                assert_eq!(
+                    option_value(&command.args, "--aggregation-zip"),
+                    Some(expected)
+                );
+                let (fit, land_only, bounds, zip) = if command.pft_or_pc {
+                    let parsed = parse_spatial_pft(&command.args).unwrap();
+                    (
+                        parsed.soil_fit,
+                        parsed.land_only,
+                        parsed.bounds,
+                        parsed.zip_aggregation,
+                    )
                 } else {
-                    parse_spatial_lct(&command.args).unwrap().soil_fit
+                    let parsed = parse_spatial_lct(&command.args).unwrap();
+                    (
+                        parsed.soil_fit,
+                        parsed.land_only,
+                        parsed.bounds,
+                        parsed.zip_aggregation,
+                    )
                 };
+                assert!(!land_only);
+                assert_eq!(zip, expected == "true");
+                assert_eq!(
+                    bounds,
+                    Some(SpatialBounds {
+                        south: 21.5,
+                        north: 27.0,
+                        west: 102.0,
+                        east: 115.0
+                    })
+                );
                 assert_eq!(fit, expected == "true");
                 let mut invalid = command.args.clone();
                 let value = invalid.iter().position(|arg| arg == "--soil-fit").unwrap() + 1;
@@ -5088,6 +5214,24 @@ mod tests {
                 (conductivity[0] - conductivity[1]).abs() > 1.0e-6,
                 "fixture must distinguish fitting from aggregation for {model}"
             );
+        }
+        // VGM still runs the Campbell fit for psi_s/lambda; only theta_s/k_s
+        // retain the separately written VGM result (upstream #ifndef guard).
+        for fit in [false, true] {
+            for field in ["psi_s", "lambda"] {
+                let variable = format!("{field}_l1_patches");
+                let read = |model: &str| {
+                    netcdf::open(
+                        root.join(format!("{model}-{fit}/soil/2005/{variable}_w180_s90.nc")),
+                    )
+                    .unwrap()
+                    .variable(&variable)
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap()
+                };
+                assert_eq!(read("vgm"), read("campbell"), "{field}, fit={fit}");
+            }
         }
         let brightness = root.join("soil_brightness.nc");
         let mut file = netcdf::create(&brightness).unwrap();
@@ -5286,10 +5430,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["2006", "2007"]
         );
-        assert_eq!(
-            &command.args[command.args.len() - 3..],
-            ["--blocks", "2", "3"]
-        );
+        assert!(command
+            .args
+            .windows(3)
+            .any(|args| args == ["--blocks", "2", "3"]));
+        assert!(parse_spatial_lct(&command.args).unwrap().land_only);
         assert!(command
             .required_files
             .contains(&root.join("raw/bedrock.nc")));

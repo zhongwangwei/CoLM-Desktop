@@ -224,26 +224,186 @@ fn unstructured_mesh_keeps_one_element_across_multiple_input_cells() {
 }
 
 #[test]
-fn raw_grid_alignment_accepts_single_precision_unstructured_edges_only() {
-    let raw = Grid {
-        nlon: 86_400,
-        nlat: 43_200,
+fn land_only_filters_pixels_and_empty_elements_before_lct_or_pft_partition() {
+    let root = temporary("land-only");
+    let mesh = root.join("mesh.nc");
+    let raster = root.join("landtype.nc");
+    write_mesh(&mesh, "elmindex", &[77, 88]);
+    write_landtype(&raster);
+    let mut file = netcdf::append(&raster).unwrap();
+    file.variable_mut("landtype")
+        .unwrap()
+        .put_values(&[8, 9, 0, 0, 12, 13, 0, 0], ..)
+        .unwrap();
+    file.close().unwrap();
+    let raw = Grid { nlon: 4, nlat: 2 };
+    let base = build_spatial_topology(&mesh, SpatialInputKind::Unstructured, raw).unwrap();
+    for pft in [false, true] {
+        for land_only in [false, true] {
+            let (topology, patches) = if pft {
+                build_pft_land_patches_from_raster(
+                    base.clone(),
+                    &raster,
+                    "landtype",
+                    raw,
+                    false,
+                    land_only,
+                )
+            } else {
+                build_lct_land_patches_from_raster(
+                    base.clone(),
+                    &raster,
+                    "landtype",
+                    raw,
+                    false,
+                    land_only,
+                )
+            }
+            .unwrap();
+            assert_eq!(topology.mesh.len(), if land_only { 1 } else { 2 });
+            assert_eq!(patches.set_type.contains(&0), !land_only);
+            let weights = patch_element_fractions(&topology, &patches, None).unwrap();
+            for element in 1..=topology.mesh.len() {
+                assert!(
+                    (weights
+                        .iter()
+                        .zip(&patches.element_index)
+                        .filter(|(_, e)| **e == element)
+                        .map(|(v, _)| *v)
+                        .sum::<f64>()
+                        - 1.0)
+                        .abs()
+                        < 1e-12
+                );
+            }
+            let output = root.join(format!("out-{pft}-{land_only}"));
+            write_spatial_topology(
+                &output,
+                2005,
+                &topology,
+                &patches,
+                &BlockLayout::regular(1, 1).unwrap(),
+            )
+            .unwrap();
+            let file =
+                netcdf::open(output.join("landpatch/2005/patchfrac_elm_w180_s90.nc")).unwrap();
+            assert_eq!(
+                file.variable("patchfrac_elm")
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap(),
+                weights
+            );
+            file.close().unwrap();
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn domain_crossing_dateline_maps_each_side_to_its_source_cell() {
+    let root = temporary("dateline-domain");
+    let mesh = root.join("mesh.nc");
+    write_mesh(&mesh, "elmindex", &[77, 88]);
+    let topology = build_spatial_topology_in_domain(
+        &mesh,
+        SpatialInputKind::Unstructured,
+        Grid { nlon: 4, nlat: 2 },
+        Some(crate::SpatialBounds {
+            south: -45.0,
+            north: 45.0,
+            west: 170.0,
+            east: -170.0,
+        }),
+    )
+    .unwrap();
+    assert_eq!(topology.pixel.lon_w, [170.0, -180.0]);
+    assert_eq!(topology.pixel.lon_e, [-180.0, -170.0]);
+    assert_eq!(topology.pixel.lat_s, [-45.0, 0.0]);
+    assert_eq!(topology.mesh.pixels(0).unwrap().0, [2, 2]);
+    assert_eq!(topology.mesh.pixels(1).unwrap().0, [1, 1]);
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
+    assert!(
+        (area.iter().sum::<f64>() - 20_f64.to_radians() * 2.0 * 45_f64.to_radians().sin()).abs()
+            < 1e-12
+    );
+    let patches = topology
+        .mesh
+        .clone()
+        .into_land_patches(&[10; 4], false)
+        .unwrap()
+        .1;
+    let blocks = BlockLayout::regular(72, 2).unwrap();
+    let assignments = element_blocks(&topology.mesh, &topology.pixel, &blocks).unwrap();
+    assert_eq!(assignments[&77], (1, 0));
+    assert_eq!(assignments[&88], (71, 0));
+    assert_eq!(patches.element_ids, [77, 88]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sub_microdegree_edges_remain_on_axes_but_not_in_mesh_membership() {
+    let grid = SpatialGrid {
+        lon_w: vec![-180.0, 0.5e-6],
+        lon_e: vec![0.5e-6, -180.0],
+        lat_s: vec![-90.0],
+        lat_n: vec![90.0],
     };
-    let aligned = SpatialGrid {
-        lon_w: vec![102.000_014_707_446_1],
-        lon_e: vec![raw.lon_e(67_681)],
-        lat_s: vec![raw.lat_s(10_000)],
-        lat_n: vec![raw.lat_n(9_999)],
-    };
-    assert_eq!(longitude_cells(&aligned, raw).unwrap()[0].start, 67_680);
-    assert!(longitude_cells(
-        &SpatialGrid {
-            lon_w: vec![102.000_1],
-            ..aligned
-        },
-        raw
+    let PixelMapping { pixel, columns, .. } =
+        assimilated_pixels(&grid, Grid { nlon: 4, nlat: 2 }, None).unwrap();
+    assert_eq!(pixel.lon_w[3], 0.5e-6);
+    assert_eq!(columns, [Some(0), Some(0), None, Some(1), Some(1)]);
+    assert!(assimilated_pixels(
+        &grid,
+        Grid { nlon: 4, nlat: 2 },
+        Some(crate::SpatialBounds {
+            south: -91.0,
+            north: 0.0,
+            west: 0.0,
+            east: 30.0
+        })
     )
     .is_err());
+}
+
+#[test]
+fn unstructured_off_grid_edges_are_assimilated_not_snapped() {
+    let directory = temporary("off-grid");
+    let path = directory.join("mesh.nc");
+    write_mesh(&path, "elmindex", &[77, 88]);
+    let mut file = netcdf::append(&path).unwrap();
+    file.variable_mut("lon_w")
+        .unwrap()
+        .put_values(&[-180.0, 0.00001], ..)
+        .unwrap();
+    file.variable_mut("lon_e")
+        .unwrap()
+        .put_values(&[0.00001, -180.0], ..)
+        .unwrap();
+    file.close().unwrap();
+    let topology = build_spatial_topology(
+        &path,
+        SpatialInputKind::Unstructured,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    assert_eq!(topology.pixel.lon_w, [-180.0, -90.0, 0.0, 0.00001, 90.0]);
+    assert_eq!(topology.mesh.pixel_count(0).unwrap(), 6);
+    assert_eq!(topology.mesh.pixel_count(1).unwrap(), 4);
+    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel).unwrap();
+    assert!((area.iter().sum::<f64>() - 4.0 * std::f64::consts::PI).abs() < 1e-12);
+    let raster = directory.join("landtype.nc");
+    write_landtype(&raster);
+    let sampled = read_mesh_raster_i32(
+        &raster,
+        "landtype",
+        &topology.mesh,
+        &topology.pixel,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    assert_eq!(sampled, [12, 13, 14, 8, 9, 10, 14, 15, 10, 11]);
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -264,6 +424,7 @@ fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
         &raster,
         "landtype",
         Grid { nlon: 4, nlat: 2 },
+        false,
         false,
     )
     .unwrap();
@@ -293,6 +454,7 @@ fn pft_patch_builder_merges_only_igbp_soil_ground() {
         &raster,
         "landtype",
         Grid { nlon: 4, nlat: 2 },
+        false,
         false,
     )
     .unwrap();
@@ -1405,6 +1567,50 @@ fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
 }
 
 #[test]
+fn catchment_patchfrac_hru_is_normalized_by_hru_and_shared_area() {
+    let directory = temporary("catchment-patchfrac-hru");
+    let mesh_file = directory.join("catchment.nc");
+    write_catchment_mesh(&mesh_file);
+    let catchment =
+        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![1, 1, 1, 2],
+        pixel_start: vec![1, 2, 3, 1],
+        pixel_end: vec![1, 2, 4, 3],
+        set_type: vec![8, 9, 10, 17],
+        element_index: vec![1, 1, 1, 2],
+    };
+    let landdata = directory.join("landdata");
+    let blocks = BlockLayout::regular(1, 1).unwrap();
+    write_spatial_hru_patch_fractions(
+        &landdata,
+        2005,
+        &catchment.topology,
+        &catchment.land_hrus,
+        &patches,
+        Some(&[1.0, 3.0, 1.0, 0.5]),
+        &blocks,
+    )
+    .unwrap();
+
+    let output = netcdf::open(landdata.join("landpatch/2005/patchfrac_hru_w180_s90.nc")).unwrap();
+    assert_eq!(dim_names(&output, "patchfrac_hru"), ["patch"]);
+    let values = output
+        .variable("patchfrac_hru")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(values.len(), 4);
+    assert!((values[0] - 0.25).abs() < 1e-12);
+    assert!((values[1] - 0.75).abs() < 1e-12);
+    assert!((values[2] - 1.0).abs() < 1e-12);
+    assert!((values[3] - 1.0).abs() < 1e-12);
+    output.close().unwrap();
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
     let directory = temporary("resampled-rawdata");
     let mesh_file = directory.join("mesh.nc");
@@ -1515,4 +1721,85 @@ fn catchment_pft_partition_keeps_natural_patches_inside_each_hru() {
     assert_eq!(patches.set_type, vec![1, 1, 17]);
 
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn zipped_raster_merges_source_cells_not_values_or_overlapping_patches() {
+    let pixel = PixelAxes {
+        edge_south: -90.0,
+        edge_north: 90.0,
+        edge_west: -180.0,
+        edge_east: 0.0,
+        lon_w: vec![-180.0, -170.0, -160.0, -90.0],
+        lon_e: vec![-170.0, -160.0, -90.0, 0.0],
+        lat_s: vec![-90.0, 0.0],
+        lat_n: vec![0.0, 90.0],
+    };
+    let mesh = FlatMesh::new(
+        vec![7],
+        vec![0, 5],
+        vec![1, 1, 2, 3, 4],
+        vec![1, 2, 1, 1, 1],
+    )
+    .unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![7, 7],
+        element_index: vec![1, 1],
+        set_type: vec![1, 2],
+        pixel_start: vec![1, 3],
+        pixel_end: vec![5, 5],
+    };
+    let grid = Grid { nlon: 4, nlat: 2 };
+    for zip in [false, true] {
+        let (gathered, layout, area) =
+            gather_patch_raster(&mesh, &pixel, &patches, grid, zip).unwrap();
+        let mut values = Vec::new();
+        for element in 0..gathered.len() {
+            let (xs, ys) = gathered.pixels(element).unwrap();
+            for (&x, &y) in xs.iter().zip(ys) {
+                values.push(if y == 2 {
+                    7.0
+                } else if x == 4 {
+                    9.0
+                } else {
+                    1.0
+                });
+            }
+        }
+        let medians = crate::soil::aggregate_soil_field(
+            &layout,
+            &values,
+            &area,
+            crate::soil::SoilPatchClasses {
+                water: 17,
+                glacier: 15,
+            },
+            crate::soil::SoilField {
+                statistic: crate::soil::SoilStatistic::Median,
+                fill: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(medians, if zip { vec![7.0, 5.0] } else { vec![1.0, 1.0] });
+        let original = patches.aggregation_layout(&mesh, vec![None; 2]).unwrap();
+        let original_area = mesh_cell_area_weights(&mesh, &pixel).unwrap();
+        for patch in 0..2 {
+            let expected: f64 = original
+                .raw_cells(patch)
+                .iter()
+                .map(|&i| original_area[i])
+                .sum();
+            let actual: f64 = layout.raw_cells(patch).iter().map(|&i| area[i]).sum();
+            assert!((expected - actual).abs() < 1e-14);
+        }
+        if zip {
+            // Original sorts source x ascending, then source y north-to-south.
+            assert_eq!(
+                gathered.pixels(0).unwrap(),
+                (&[1, 1, 4][..], &[2, 1, 1][..])
+            );
+            assert_eq!(layout.raw_cells(1), &[3, 4]);
+            assert!(area[1] > area[3]); // Shared source cell has a different covered area.
+        }
+    }
 }
