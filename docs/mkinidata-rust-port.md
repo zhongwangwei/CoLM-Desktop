@@ -24,7 +24,10 @@ Here, restart-continuation means runtime interoperability with Rust-produced
 restart files, not a new initializer mode. Original `CoLMINI` constructs and
 writes the initial state; `main/CoLM.F90` reads time variables from an existing
 restart and performs continuation. That interoperability still needs its own
-acceptance evidence beyond a cold-start run.
+acceptance evidence beyond a cold-start run. The latest bounded Catchment check
+successfully resumes both original and Rust-derived first-hour restarts without
+initializing again; its restart comparison passes but one history energy
+residual remains outside tolerance. Other modes still require this gate.
 
 ## Migration order
 

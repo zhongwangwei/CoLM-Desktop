@@ -26,6 +26,11 @@ Both pass, as do 665 integrated tests, Clippy, downstream checks, formatting
 and the fresh release build. The two source files were independently reviewed.
 Original probes and red/green logs: `/tmp/colm-shared-agg-audit/`.
 
+The same new frozen surface executable also passes all 257 files / 616 variable
+instances in the five historical synthetic modes and all 37 / 94 in the 1999
+Catchment LAI-only fixture. Fresh outputs and summaries are in
+`/tmp/colm-weighted-fma-bounded-verify-1789399707/`.
+
 | Check | Latest result at unchanged combined `atol=rtol=1e-12` |
 | --- | --- |
 | Surface schemas / stored topology | All 1,479 schemas match except `create_time`; all 957 element / 7,754 patch sequences exact |
@@ -40,6 +45,35 @@ longer explains the remaining differences in this case; the shared radiation
 arithmetic remains under investigation. This is a major bounded LCT surface
 result, **not full-mode migration or runtime scientific acceptance**. Original
 source, rawdata, reference outputs and numerical thresholds remain unchanged.
+
+A separate **diagnostic-only mixed restart** replaces four cold radiation
+fields at the current worst patch (element 207978, class 16) with original
+values. Its later `gs0sun` discrepancy disappears and the 32 restart failures
+fall to ten `zwt` values at other patches. This isolates the remaining cause;
+it is not a production fix or passing parity evidence. The unchanged inputs,
+replacement values and residual patch list are retained in
+`/tmp/colm-diagnostic-current-radiation.wmtokhgm/`.
+
+### PFT/WMO full-material extension
+
+The fresh `/tmp/colm-pft-wmo-full-gate-1789398852/` test uses the same frozen
+weighted-FMA binaries with pristine GRIDBASED/PFT reference outputs and runtime.
+Its 2-by-2 grid has four physical plus four virtual WMO patches and 40 PFT rows.
+All three Rust-surface/Rust-initial/original-runtime stages complete. Across
+284 files / 696 variable instances, inventory, schemas, stored topology and
+WMO ownership agree; only history `f_zerr` fails numerically, in 16 grid cells
+with maximum absolute difference `4.835243316847482e-12 W/m²`. Surface and restart
+comparisons pass. This is real-material PFT/WMO evidence, not PC/CROP/BGC or a
+fully passing history gate.
+
+The first attempt failed before reading materials because the Rust invocation
+did not encode the original build's GRIDBASED selection. The corrected fresh
+attempt supplies the existing `DEF_GRIDBASED_lon_res/lat_res=0.1` contract and
+72-by-36 blocks. Its grid coordinates and ordered topology match the reference;
+the failed attempt is retained. No production parser or original input was
+changed to bypass the error. The canonical comparison remains failed solely
+on the recorded energy residual; the corrected reproduction script preserves
+that report and writes its repeat comparison separately.
 
 ## Source-chunk ordering baseline
 
@@ -139,6 +173,14 @@ diagnostic by subtracting flux and storage terms; the evidence is consistent
 with cancellation of small numerical differences, not a schema failure.
 `f_zerr_diagnosis.json` records the fields and source anchors. This physical
 interpretation does not change the numerical acceptance result above.
+
+The continuation check in `/tmp/colm-catchment-continuation.agv6jqj0/` then
+starts from each pipeline's first-hour restart at `2005-001-03600`, without
+running an initializer or supplying a cold-time directory. The same original
+runtime completes both runs through `2005-001-07200`. All four restart files /
+206 variable instances pass; history again has one failing `f_zerr`, now
+`1.5158217848938436e-12` apart. This proves bounded restart-read interoperability,
+not a separate mkinidata continuation mode or full numerical acceptance.
 
 ## Evidence from this audit
 
