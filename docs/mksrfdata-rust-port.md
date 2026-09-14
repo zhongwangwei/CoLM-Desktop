@@ -125,3 +125,14 @@ Spatial PFT/PC patch modes now honor `DEF_SOLO_PFT` and `DEF_FAST_PC`, including
 fast-PC cropland preservation and natural PFT parents beyond IGBP class 1.
 Direct commands select `--patch-mode merged|separate|fast-pc` (default merged).
 This does not remove the explicit spatial PFT/PC LULCC limitation.
+
+### Explicit mesh filters
+
+Spatial case namelists honor `DEF_file_mesh_filter`; direct `spatial-lct` and
+`spatial-pft` commands accept `--mesh-filter filter.nc`. The edge-coordinate
+filter grid is assimilated before topology creation, with positive mask pixels
+kept after land-only filtering and before HRU/patch construction. Existing
+block ownership is retained. Missing filter files are ignored (upstream
+behavior), while malformed existing files fail. The filtered two-element
+original-Fortran comparison and remaining scientific limitations are recorded
+in [the parity audit](preprocessing-parity-status.md#mesh-filter-executable-and-original-source-comparison).

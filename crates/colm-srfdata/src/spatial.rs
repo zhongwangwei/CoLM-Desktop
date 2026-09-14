@@ -106,6 +106,117 @@ impl SpatialTopology {
         });
         Ok(())
     }
+
+    pub fn retain_land_pixels_from_raster(
+        &mut self,
+        raster: impl AsRef<Path>,
+        variable: &str,
+        raw_grid: Grid,
+    ) -> Result<()> {
+        let mut types =
+            read_mesh_raster_i32(raster.as_ref(), variable, &self.mesh, &self.pixel, raw_grid)?;
+        self.mesh.retain_land_pixels(&mut types)?;
+        ensure!(
+            !self.mesh.is_empty(),
+            "land raster removed every mesh element"
+        );
+        self.land_elements = self.mesh.land_elements();
+        Ok(())
+    }
+}
+
+/// On-disk mesh filter equivalent to `DEF_file_mesh_filter`.
+#[derive(Debug, Clone)]
+pub struct MeshFilter {
+    pub grid: SpatialGrid,
+    path: PathBuf,
+}
+
+impl MeshFilter {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let mut grid = SpatialGrid {
+            lon_w: coordinate(&file, "lon_w")?,
+            lon_e: coordinate(&file, "lon_e")?,
+            lat_s: coordinate(&file, "lat_s")?,
+            lat_n: coordinate(&file, "lat_n")?,
+        };
+        normalize_filter_grid(&mut grid)?;
+        validate_spatial_grid(&grid, "mesh filter")?;
+        let source = file
+            .variable("mesh_filter")
+            .with_context(|| format!("mesh_filter is absent from {}", path.display()))?;
+        ensure!(
+            matches!(source.vartype(), NcVariableType::Int(_)),
+            "mesh_filter in {} must be an integer raster",
+            path.display()
+        );
+        let shape = source
+            .dimensions()
+            .iter()
+            .map(|dimension| dimension.len())
+            .collect::<Vec<_>>();
+        ensure!(
+            shape == [grid.lat_s.len(), grid.lon_w.len()],
+            "mesh_filter has shape {shape:?}; expected latitude,longitude [{}, {}]",
+            grid.lat_s.len(),
+            grid.lon_w.len()
+        );
+        validate_filter_coordinate_dimensions(&file, &source)?;
+        Ok(Self {
+            grid,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn apply(&self, topology: &mut SpatialTopology) -> Result<()> {
+        let mut filter = self.read_for_topology(topology)?;
+        topology.mesh.retain_land_pixels(&mut filter)?;
+        ensure!(
+            !topology.mesh.is_empty(),
+            "mesh filter removed every mesh element"
+        );
+        topology.land_elements = topology.mesh.land_elements();
+        Ok(())
+    }
+
+    fn read_for_topology(&self, topology: &SpatialTopology) -> Result<Vec<i32>> {
+        let file = netcdf::open(&self.path)
+            .with_context(|| format!("cannot open {}", self.path.display()))?;
+        let source = file
+            .variable("mesh_filter")
+            .with_context(|| format!("mesh_filter is absent from {}", self.path.display()))?;
+        let column = filter_columns(&topology.pixel, &self.grid)?;
+        let row = filter_rows(&topology.pixel, &self.grid)?;
+        let mut rows = BTreeMap::new();
+        let mut output = Vec::new();
+        // Gather only owned pixels, not a second dense simulation-domain raster.
+        for element in 0..topology.mesh.len() {
+            let (xs, ys) = topology.mesh.pixels(element)?;
+            for (&x, &y) in xs.iter().zip(ys) {
+                let source_row = row
+                    .get(y as usize - 1)
+                    .context("mesh filter pixel latitude is outside the pixel grid")?;
+                let Some(source_row) = source_row else {
+                    output.push(-1);
+                    continue;
+                };
+                let values = match rows.entry(*source_row) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(read_filter_row(&source, *source_row, &column)?)
+                    }
+                    Entry::Occupied(entry) => entry.into_mut(),
+                };
+                output.push(
+                    *values
+                        .get(x as usize - 1)
+                        .context("mesh filter pixel longitude is outside the pixel grid")?,
+                );
+            }
+        }
+        Ok(output)
+    }
 }
 
 /// CATCHMENT topology keeps the intermediate HRU pixelset required before
@@ -215,6 +326,16 @@ pub fn build_spatial_topology_in_domain(
     raw_grid: Grid,
     bounds: Option<crate::SpatialBounds>,
 ) -> Result<SpatialTopology> {
+    build_spatial_topology_with_filter_grid(path, kind, raw_grid, bounds, None)
+}
+
+pub fn build_spatial_topology_with_filter_grid(
+    path: impl AsRef<Path>,
+    kind: SpatialInputKind,
+    raw_grid: Grid,
+    bounds: Option<crate::SpatialBounds>,
+    filter_grid: Option<&SpatialGrid>,
+) -> Result<SpatialTopology> {
     let path = path.as_ref();
     ensure!(
         kind != SpatialInputKind::Catchment,
@@ -236,7 +357,7 @@ pub fn build_spatial_topology_in_domain(
         pixel,
         columns,
         rows,
-    } = assimilated_pixels(&grid, raw_grid, bounds)?;
+    } = assimilated_pixels(&grid, raw_grid, bounds, filter_grid)?;
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
     let mut raw_count = 0_usize;
@@ -309,6 +430,16 @@ pub fn build_catchment_spatial_topology_in_domain(
     raw_grid: Grid,
     bounds: Option<crate::SpatialBounds>,
 ) -> Result<CatchmentSpatialTopology> {
+    build_catchment_spatial_topology_with_filter(path, raw_grid, bounds, None, None)
+}
+
+pub fn build_catchment_spatial_topology_with_filter(
+    path: impl AsRef<Path>,
+    raw_grid: Grid,
+    bounds: Option<crate::SpatialBounds>,
+    filter: Option<&MeshFilter>,
+    block_layout: Option<&BlockLayout>,
+) -> Result<CatchmentSpatialTopology> {
     let path = path.as_ref();
     let summary = inspect_spatial_input(path, SpatialInputKind::Catchment.input_label())?;
     let source_cells = summary
@@ -337,7 +468,7 @@ pub fn build_catchment_spatial_topology_in_domain(
         pixel,
         columns,
         rows,
-    } = assimilated_pixels(&grid, raw_grid, bounds)?;
+    } = assimilated_pixels(&grid, raw_grid, bounds, filter.map(|filter| &filter.grid))?;
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32, i32)>>::new();
     let mut raw_count = 0_usize;
@@ -397,19 +528,50 @@ pub fn build_catchment_spatial_topology_in_domain(
         }
         offsets.push(ilon.len());
     }
+    let lake_sign_by_id = element_ids
+        .iter()
+        .copied()
+        .zip(lake_sign)
+        .collect::<BTreeMap<_, _>>();
     let mesh = FlatMesh::new(element_ids, offsets, ilon, ilat)?;
-    let (mesh, land_hrus) = mesh.into_land_hrus(&hydrounit_types, &lake_sign)?;
     let land_elements = mesh.land_elements();
+    let mut topology = SpatialTopology {
+        kind: SpatialInputKind::Catchment,
+        grid,
+        pixel,
+        source: Some(PixelSourceMapping { columns, rows }),
+        element_block_owners: None,
+        mesh,
+        land_elements,
+    };
+    if let Some(blocks) = block_layout {
+        topology.preserve_element_blocks(blocks)?;
+    }
+    if let Some(filter) = filter {
+        let filter_values = filter.read_for_topology(&topology)?;
+        for (hru, keep) in hydrounit_types.iter_mut().zip(filter_values) {
+            if keep <= 0 {
+                *hru = 0;
+            }
+        }
+        topology.mesh.retain_land_pixels(&mut hydrounit_types)?;
+        ensure!(
+            !topology.mesh.is_empty(),
+            "mesh filter removed every catchment element"
+        );
+        topology.land_elements = topology.mesh.land_elements();
+    }
+    let lake_sign = (0..topology.mesh.len())
+        .map(|element| {
+            let id = topology.mesh.element_id(element)?;
+            Ok(*lake_sign_by_id.get(&id).unwrap_or(&0))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (mesh, land_hrus) = topology.mesh.into_land_hrus(&hydrounit_types, &lake_sign)?;
+    topology.mesh = mesh;
+    topology.land_elements = topology.mesh.land_elements();
     Ok(CatchmentSpatialTopology {
-        topology: SpatialTopology {
-            kind: SpatialInputKind::Catchment,
-            grid,
-            pixel,
-            source: Some(PixelSourceMapping { columns, rows }),
-            element_block_owners: None,
-            mesh,
-            land_elements,
-        },
+        topology,
         land_hrus,
     })
 }
@@ -3861,12 +4023,266 @@ struct PixelMapping {
     rows: Vec<Option<usize>>,
 }
 
-/// Union mesh/raw/domain boundaries as MOD_Pixel does. Only the sub-microdegree
-/// strips rejected by upstream mesh_build are omitted from pixel membership.
+fn normalize_filter_grid(grid: &mut SpatialGrid) -> Result<()> {
+    ensure!(
+        !grid.lon_w.is_empty()
+            && grid.lon_w.len() == grid.lon_e.len()
+            && !grid.lat_s.is_empty()
+            && grid.lat_s.len() == grid.lat_n.len(),
+        "mesh filter requires nonempty, paired longitude and latitude edges"
+    );
+    for value in grid.lon_w.iter_mut().chain(&mut grid.lon_e) {
+        *value = normalize_fortran_longitude(*value)?;
+    }
+    for value in grid.lat_s.iter_mut().chain(&mut grid.lat_n) {
+        ensure!(value.is_finite(), "mesh filter coordinate must be finite");
+        *value = value.clamp(-90.0, 90.0);
+    }
+    let yinc = if grid.lat_s[0] <= grid.lat_s[grid.lat_s.len() - 1] {
+        1
+    } else {
+        -1
+    };
+    for index in 0..grid.lon_w.len().saturating_sub(1) {
+        if lon_between_ceil(
+            grid.lon_e[index],
+            grid.lon_w[index + 1],
+            grid.lon_e[index + 1],
+        ) {
+            grid.lon_e[index] = grid.lon_w[index + 1];
+        } else {
+            grid.lon_w[index + 1] = grid.lon_e[index];
+        }
+    }
+    if grid.lon_w.len() > 1 {
+        let last = grid.lon_w.len() - 1;
+        if lon_between_ceil(grid.lon_e[last], grid.lon_w[0], grid.lon_e[0]) {
+            grid.lon_e[last] = grid.lon_w[0];
+        }
+    }
+    for index in 0..grid.lat_s.len().saturating_sub(1) {
+        if yinc == 1 {
+            grid.lat_n[index] = grid.lat_n[index].max(grid.lat_s[index + 1]);
+            grid.lat_s[index + 1] = grid.lat_n[index];
+        } else {
+            grid.lat_s[index] = grid.lat_s[index].min(grid.lat_n[index + 1]);
+            grid.lat_n[index + 1] = grid.lat_s[index];
+        }
+    }
+    Ok(())
+}
+
+fn normalize_fortran_longitude(value: f64) -> Result<f64> {
+    ensure!(value.is_finite(), "mesh filter coordinate must be finite");
+    if (-180.0..180.0).contains(&value) {
+        return Ok(value);
+    }
+    // Avoid adding 180 before reduction: that rounds wrapped decimal edges
+    // differently from upstream's subtraction/addition of 360.
+    let mut normalized = value % 360.0;
+    if normalized >= 180.0 {
+        normalized -= 360.0;
+    } else if normalized < -180.0 {
+        normalized += 360.0;
+    }
+    Ok(normalized)
+}
+
+fn lon_between_ceil(lon: f64, west: f64, east: f64) -> bool {
+    if west >= east {
+        lon > west || lon <= east
+    } else {
+        lon > west && lon <= east
+    }
+}
+
+fn validate_spatial_grid(grid: &SpatialGrid, label: &str) -> Result<()> {
+    ensure!(
+        !grid.lon_w.is_empty() && grid.lon_w.len() == grid.lon_e.len(),
+        "invalid {label} longitude edges"
+    );
+    ensure!(
+        !grid.lat_s.is_empty() && grid.lat_s.len() == grid.lat_n.len(),
+        "invalid {label} latitude edges"
+    );
+    let mut previous = None;
+    let mut first = 0.0;
+    for (&west, &east) in grid.lon_w.iter().zip(&grid.lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "{label} longitude cells must be contiguous west-to-east"
+            );
+            west = end;
+        } else {
+            first = west;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east == west {
+            east += 360.0;
+        }
+        ensure!(
+            east > west && east - west <= 360.0,
+            "invalid {label} longitude width"
+        );
+        previous = Some(east);
+    }
+    ensure!(
+        previous.expect("non-empty longitude checked") - first <= 360.0 + ALIGNMENT_EPSILON,
+        "{label} longitude spans more than one revolution"
+    );
+    for (&south, &north) in grid.lat_s.iter().zip(&grid.lat_n) {
+        ensure!(
+            south.is_finite()
+                && north.is_finite()
+                && south >= -90.0
+                && north <= 90.0
+                && south < north,
+            "invalid {label} latitude edges"
+        );
+    }
+    Ok(())
+}
+
+fn validate_filter_coordinate_dimensions(
+    file: &netcdf::File,
+    source: &netcdf::Variable<'_>,
+) -> Result<()> {
+    let dimensions = source.dimensions();
+    ensure!(
+        dimensions.len() == 2,
+        "mesh_filter must be a two-dimensional latitude,longitude raster"
+    );
+    for name in ["lat_s", "lat_n", "lon_w", "lon_e"] {
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("mesh filter has no coordinate {name}"))?;
+        ensure!(
+            variable.dimensions().len() == 1,
+            "mesh filter coordinate {name} must be one-dimensional"
+        );
+    }
+    Ok(())
+}
+
+fn filter_columns(pixel: &PixelAxes, grid: &SpatialGrid) -> Result<Vec<Option<usize>>> {
+    let mut cells = Vec::with_capacity(grid.lon_w.len());
+    let mut previous = None;
+    for (index, (&west, &east)) in grid.lon_w.iter().zip(&grid.lon_e).enumerate() {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "mesh filter longitude cells must be contiguous west-to-east"
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east == west {
+            east += 360.0;
+        }
+        ensure!(
+            east > west && east - west <= 360.0,
+            "invalid mesh filter longitude width"
+        );
+        cells.push((west, east, index));
+        previous = Some(east);
+    }
+    let origin = cells[0].0;
+    Ok(pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&west, &east)| {
+            let mut mid = midpoint_longitude(west, east);
+            if mid < origin || mid >= origin + 360.0 {
+                mid = origin + (mid - origin).rem_euclid(360.0);
+            }
+            let index = cells
+                .partition_point(|&(w, _, _)| w <= mid)
+                .checked_sub(1)?;
+            (mid < cells[index].1).then_some(cells[index].2)
+        })
+        .collect())
+}
+
+fn filter_rows(pixel: &PixelAxes, grid: &SpatialGrid) -> Result<Vec<Option<usize>>> {
+    let mut cells = grid
+        .lat_s
+        .iter()
+        .zip(&grid.lat_n)
+        .enumerate()
+        .map(|(index, (&south, &north))| {
+            ensure!(
+                south.is_finite()
+                    && north.is_finite()
+                    && south >= -90.0
+                    && north <= 90.0
+                    && south < north,
+                "invalid mesh filter latitude edges"
+            );
+            Ok((south, north, index))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    cells.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in cells.windows(2) {
+        ensure!(
+            nearly_equal(pair[0].1, pair[1].0),
+            "mesh filter latitude cells must be contiguous"
+        );
+    }
+    Ok(pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| {
+            let mid = (south + north) * 0.5;
+            let index = cells
+                .partition_point(|&(s, _, _)| s <= mid)
+                .checked_sub(1)?;
+            (mid < cells[index].1).then_some(cells[index].2)
+        })
+        .collect())
+}
+
+fn read_filter_row(
+    source: &netcdf::Variable<'_>,
+    row: usize,
+    columns: &[Option<usize>],
+) -> Result<Vec<i32>> {
+    let mut output = vec![-1; columns.len()];
+    let mut index = 0;
+    while index < columns.len() {
+        let Some(first_column) = columns[index] else {
+            index += 1;
+            continue;
+        };
+        let start_index = index;
+        let mut last_column = first_column;
+        index += 1;
+        while index < columns.len() {
+            let Some(column) = columns[index] else { break };
+            if column < last_column {
+                break;
+            }
+            last_column = column;
+            index += 1;
+        }
+        let values = source.get_values::<i32, _>((row..row + 1, first_column..last_column + 1))?;
+        for (output_index, column) in columns[start_index..index].iter().enumerate() {
+            let column = column.expect("run contains only present columns");
+            output[start_index + output_index] = values[column - first_column];
+        }
+    }
+    Ok(output)
+}
+
 fn assimilated_pixels(
     grid: &SpatialGrid,
     raw: Grid,
     bounds: Option<crate::SpatialBounds>,
+    filter_grid: Option<&SpatialGrid>,
 ) -> Result<PixelMapping> {
     ensure!(raw.nlon > 0 && raw.nlat > 0, "raw grid must be nonempty");
     ensure!(
@@ -3952,6 +4368,11 @@ fn assimilated_pixels(
     for edge in longitude
         .iter()
         .flat_map(|&(w, e)| [w, e])
+        .chain(
+            filter_grid
+                .into_iter()
+                .flat_map(|grid| grid.lon_w.iter().chain(&grid.lon_e).copied()),
+        )
         .chain((0..raw.nlon).map(|i| raw.lon_w(i + 1)))
     {
         // Avoid changing the last bits of already-in-window coordinates.
@@ -3970,6 +4391,11 @@ fn assimilated_pixels(
     for edge in latitude
         .iter()
         .flat_map(|&(s, n, _)| [s, n])
+        .chain(
+            filter_grid
+                .into_iter()
+                .flat_map(|grid| grid.lat_s.iter().chain(&grid.lat_n).copied()),
+        )
         .chain((0..=raw.nlat).map(|j| raw.lat_s(j)))
     {
         if edge > bounds.south && edge < bounds.north {

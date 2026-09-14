@@ -220,11 +220,11 @@ call it. This is not a real catchment all-field parity claim.
    namelist fields are now forwarded through single-point, spatial LCT/urban,
    PFT/PC, and explicit spatial PFT entry points. `tcrit` remains the upstream
    fixed 2.5. Other tuning/parameterization controls still need individual checks.
-3. Implement the confirmed missing surface controls: `DEF_file_mesh_filter`
-   needs its grid assimilated and its mask applied after land-only filtering;
-   `DEF_Output_2mWMO` needs virtual patch/source topology in supported grid-based
-   PFT/PC configurations. Both are currently ignored by the surface adapter.
-   The initial WMO aggregation mask is repaired below, not the surface builder.
+3. `DEF_file_mesh_filter` is now wired through the surface adapter, with a
+   filtered original-source comparison below. Complete `DEF_Output_2mWMO`:
+   it still needs virtual patch/source topology in supported grid-based PFT/PC
+   configurations and is currently ignored by the surface adapter. The initial
+   WMO aggregation mask is repaired below, not the surface builder.
    ZIP aggregation
    still needs PFT/PC-specific, crop, urban, and regular-coordinate adapter audits;
    catchment `patchfrac_hru` now has a targeted writer regression, not a real-case
@@ -428,3 +428,67 @@ downstream CLI/kernel checks and changed-file formatting pass; independent revie
 approved the bounded norm/mask diff. Logs: `/tmp/colm-lm-iteration/final/`.
 Full comparisons and executable hashes are retained in `rust-full-lm-norms/`;
 no current job remains active.
+
+## Mesh-filter executable and original-source comparison
+
+`DEF_file_mesh_filter` now reaches spatial LCT (IGBP/USGS, including urban)
+and PFT/PC (including crop) through `--mesh-filter`. The file supplies explicit
+`lon_w/lon_e/lat_s/lat_n` edges and the integer `mesh_filter` raster. Edges are
+normalized/aligned using the original `MOD_Grid` rules, then assimilated before
+mesh construction. Positive mask cells survive; zero, negative, and outside-grid
+cells do not. Missing paths are skipped as upstream does; existing malformed
+files and empty filtered domains return errors instead of silently changing the
+requested domain. NetCDF reads stay serial and use contiguous row windows,
+including repeated source columns under finer pixels.
+
+The grid/unstructured execution order is source block ownership, `DEF_LANDONLY`,
+custom filter, then patch partition. Catchment filtering happens before the
+**first** HRU sort, retaining lake signs and surviving element IDs. Sorting HRUs,
+filtering, then sorting again is not equivalent: CoLM's quicksort is unstable.
+The original unfiltered constructors retain their existing APIs.
+
+Independent production-Fortran artifacts are in
+`/tmp/colm-mesh-filter-golden2/`; `generate_fixture.py`,
+`run_original_pipeline.sh`, and `repro_metadata.json` record source HEAD,
+executable hashes, mask values, generation, and commands. The fixture retains
+two Pearl River elements and uses a misaligned full-domain filter containing
+positive, zero, and negative cells. Rust artifacts and comparison scripts are
+in `/tmp/colm-mesh-filter-rust/`.
+
+Verified against the original outputs:
+
+- Both elements remain in their original blocks (`207390`: `e110_n20`,
+  `207867`: `e110_n25`). All **12,768 ordered pixel coordinates**, 16 patch
+  memberships, four pixel axes, and patch-area fractions are identical.
+- All **495** surface files agree in names, dimensions, variable types/order,
+  and attributes except the existing global `create_time` omission in Rust.
+- Both original and Rust surface → initial → unchanged original runtime
+  pipelines exit successfully for two 1,800-second steps. The Rust filtered
+  run took 33.89 s / 1.24 s / 2.02 s respectively; these are observations, not a
+  controlled speed comparison.
+
+This proves the tested LCT/unstructured filtered topology and consumable
+outputs, not full scientific-field parity, all land-cover modes, or real-case
+catchment parity. The filtered case still has **48 fitted fields / 268 scalar
+values** outside the unchanged `1e-12` absolute/relative gate (maximum
+`k_s_l4` error `0.33020257954951404`). There is no finite-mask mismatch.
+The existing full-case 48-field fit discrepancy also remains open.
+An original narrower, out-of-domain filter probe crashed upstream with SIGSEGV
+(`/tmp/colm-mesh-filter-golden/mksrfdata.log`). Rust's outside-grid removal is
+covered by a regression and the documented `filledvalue_i4=-1` source path;
+there is no successful original executable golden for that crash case.
+
+Regression coverage includes all-positive catchment filter equality with the
+unfiltered constructor, partial HRUs/lake signs/removed elements, normalization
+and malformed edge vectors, independently named coordinate dimensions, and
+an on-disk LCT materializer test that exercises LANDONLY → custom filter →
+patches. All three case modes (LCT/PFT/PC) forward the filter for both ordinary
+and catchment mesh namelists. Direct gathering avoids allocating another dense
+simulation-domain mask raster; row windows still share one serial NetCDF reader.
+
+Validation: 220 surface-library + 33 surface-binary tests, 87 init-library +
+12 init-binary tests, 11 raster/site tests, 10 opt-in Fortran reference tests,
+and 6 native integration tests passed. Clippy (`-D warnings`), downstream
+CLI/kernel checks, release builds, changed-file formatting and diff checks
+passed. The bounded independent filter review approved with no findings.
+Logs: `/tmp/colm-mesh-filter-validation/`.

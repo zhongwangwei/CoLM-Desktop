@@ -355,7 +355,7 @@ fn sub_microdegree_edges_remain_on_axes_but_not_in_mesh_membership() {
         lat_n: vec![90.0],
     };
     let PixelMapping { pixel, columns, .. } =
-        assimilated_pixels(&grid, Grid { nlon: 4, nlat: 2 }, None).unwrap();
+        assimilated_pixels(&grid, Grid { nlon: 4, nlat: 2 }, None, None).unwrap();
     assert_eq!(pixel.lon_w[3], 0.5e-6);
     assert_eq!(columns, [Some(0), Some(0), None, Some(1), Some(1)]);
     assert!(assimilated_pixels(
@@ -366,7 +366,8 @@ fn sub_microdegree_edges_remain_on_axes_but_not_in_mesh_membership() {
             north: 0.0,
             west: 0.0,
             east: 30.0
-        })
+        }),
+        None
     )
     .is_err());
 }
@@ -1564,6 +1565,39 @@ fn write_catchment_mesh(path: &std::path::Path) {
     file.close().unwrap();
 }
 
+fn write_three_catchment_mesh(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    file.add_dimension("basin", 3).unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[-135.0, -45.0, 45.0, 135.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[45.0, -45.0], ..)
+        .unwrap();
+    file.add_variable::<i64>("icatchment2d", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[1, 1, 2, 3, 1, 1, 2, 3], (.., ..))
+        .unwrap();
+    file.add_variable::<i32>("ihydrounit2d", &["lat", "lon"])
+        .unwrap()
+        .put_values(&[1, 2, 1, 1, 1, 2, 1, 1], (.., ..))
+        .unwrap();
+    file.add_variable::<i32>("basin_numhru", &["basin"])
+        .unwrap()
+        .put_values(&[2, 1, 1], ..)
+        .unwrap();
+    file.add_variable::<i32>("lake_id", &["basin"])
+        .unwrap()
+        .put_values(&[0, 4, 0], ..)
+        .unwrap();
+    file.close().unwrap();
+}
+
 #[test]
 fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
     let directory = temporary("catchment");
@@ -2056,5 +2090,304 @@ fn element_block_owner_uses_source_cell_before_land_only_filtering() {
 
     assert!(landdata.join("mesh/2005/mesh_e105_n20.nc").exists());
     assert!(!landdata.join("mesh/2005/mesh_e110_n20.nc").exists());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn write_mesh_filter(
+    path: &std::path::Path,
+    lon_w: &[f64],
+    lon_e: &[f64],
+    lat_s: &[f64],
+    lat_n: &[f64],
+    values: &[i32],
+) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("lat", lat_s.len()).unwrap();
+    file.add_dimension("lon", lon_w.len()).unwrap();
+    for (name, data, dim) in [
+        ("lon_w", lon_w, "lon"),
+        ("lon_e", lon_e, "lon"),
+        ("lat_s", lat_s, "lat"),
+        ("lat_n", lat_n, "lat"),
+    ] {
+        file.add_variable::<f64>(name, &[dim])
+            .unwrap()
+            .put_values(data, ..)
+            .unwrap();
+    }
+    file.add_variable::<i32>("mesh_filter", &["lat", "lon"])
+        .unwrap()
+        .put_values(values, (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn write_mesh_filter_with_independent_coordinate_dims(path: &std::path::Path) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("y", 1).unwrap();
+    file.add_dimension("x", 1).unwrap();
+    file.add_dimension("lat_edges", 1).unwrap();
+    file.add_dimension("lon_edges", 1).unwrap();
+    file.add_variable::<f64>("lon_w", &["lon_edges"])
+        .unwrap()
+        .put_values(&[-180.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon_e", &["lon_edges"])
+        .unwrap()
+        .put_values(&[180.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat_s", &["lat_edges"])
+        .unwrap()
+        .put_values(&[-90.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat_n", &["lat_edges"])
+        .unwrap()
+        .put_values(&[90.0], ..)
+        .unwrap();
+    file.add_variable::<i32>("mesh_filter", &["y", "x"])
+        .unwrap()
+        .put_values(&[1], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+#[test]
+fn mesh_filter_applies_explicit_edges_zero_negative_and_outside_fill() {
+    let directory = temporary("mesh-filter");
+    let mesh_file = directory.join("mesh.nc");
+    let filter_file = directory.join("filter.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_mesh_filter(
+        &filter_file,
+        &[-180.0, -90.0],
+        &[-90.0, 0.0],
+        &[-90.0, 0.0],
+        &[0.0, 90.0],
+        &[1, 0, -2, 3],
+    );
+    let filter = MeshFilter::open(&filter_file).unwrap();
+    let mut topology = build_spatial_topology_with_filter_grid(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+        None,
+        Some(&filter.grid),
+    )
+    .unwrap();
+    assert_eq!(topology.mesh.len(), 2);
+    assert_eq!(topology.mesh.pixel_count(0).unwrap(), 4);
+    filter.apply(&mut topology).unwrap();
+
+    assert_eq!(topology.mesh.len(), 1);
+    assert_eq!(topology.land_elements.element_ids, vec![1]);
+    assert_eq!(topology.mesh.pixels(0).unwrap().0, &[1, 2]);
+    assert_eq!(topology.mesh.pixels(0).unwrap().1, &[1, 2]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mesh_filter_reports_when_every_element_is_removed() {
+    let directory = temporary("mesh-filter-empty");
+    let mesh_file = directory.join("mesh.nc");
+    let filter_file = directory.join("filter.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_mesh_filter(&filter_file, &[-180.0], &[180.0], &[-90.0], &[90.0], &[0]);
+    let filter = MeshFilter::open(&filter_file).unwrap();
+    let mut topology = build_spatial_topology_with_filter_grid(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+        None,
+        Some(&filter.grid),
+    )
+    .unwrap();
+    assert!(filter.apply(&mut topology).is_err());
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn topology_landonly_can_be_applied_before_custom_filter() {
+    let directory = temporary("topology-landonly-raster");
+    let mesh_file = directory.join("mesh.nc");
+    let raster = directory.join("landtype.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    write_landtype(&raster);
+    let mut file = netcdf::append(&raster).unwrap();
+    file.variable_mut("landtype")
+        .unwrap()
+        .put_values(&[8, 0, 0, 0, 0, 0, 0, 0], ..)
+        .unwrap();
+    file.close().unwrap();
+    let mut topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid { nlon: 4, nlat: 2 },
+    )
+    .unwrap();
+    topology
+        .retain_land_pixels_from_raster(&raster, "landtype", Grid { nlon: 4, nlat: 2 })
+        .unwrap();
+    assert_eq!(topology.mesh.len(), 1);
+    assert_eq!(topology.mesh.pixel_count(0).unwrap(), 1);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn catchment_filter_builder_matches_unfiltered_when_mask_is_all_positive() {
+    let directory = temporary("catchment-mesh-filter-all-positive");
+    let mesh_file = directory.join("catchment.nc");
+    let filter_file = directory.join("filter.nc");
+    write_catchment_mesh(&mesh_file);
+    write_mesh_filter(
+        &filter_file,
+        &[-180.0, -90.0, 0.0, 90.0],
+        &[-90.0, 0.0, 90.0, 180.0],
+        &[-90.0, 0.0],
+        &[0.0, 90.0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
+    );
+    let filter = MeshFilter::open(&filter_file).unwrap();
+
+    let unfiltered =
+        build_catchment_spatial_topology(&mesh_file, Grid { nlon: 4, nlat: 2 }).unwrap();
+    let filtered = build_catchment_spatial_topology_with_filter(
+        &mesh_file,
+        Grid { nlon: 4, nlat: 2 },
+        None,
+        Some(&filter),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(filtered.topology.mesh, unfiltered.topology.mesh);
+    assert_eq!(filtered.land_hrus, unfiltered.land_hrus);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn catchment_mesh_filter_runs_before_hru_sort_and_preserves_block_owners() {
+    let directory = temporary("catchment-mesh-filter");
+    let mesh_file = directory.join("catchment.nc");
+    let filter_file = directory.join("filter.nc");
+    write_three_catchment_mesh(&mesh_file);
+    write_mesh_filter(
+        &filter_file,
+        &[-180.0, -90.0, 0.0, 90.0],
+        &[-90.0, 0.0, 90.0, 180.0],
+        &[-90.0, 0.0],
+        &[0.0, 90.0],
+        &[1, 0, 1, 0, 1, 0, 1, 0],
+    );
+    let filter = MeshFilter::open(&filter_file).unwrap();
+    let blocks = BlockLayout::regular(1, 1).unwrap();
+    let catchment = build_catchment_spatial_topology_with_filter(
+        &mesh_file,
+        Grid { nlon: 4, nlat: 2 },
+        None,
+        Some(&filter),
+        Some(&blocks),
+    )
+    .unwrap();
+
+    let expected_mesh = FlatMesh::new(
+        vec![1, 2],
+        vec![0, 2, 4],
+        vec![1, 1, 3, 3],
+        vec![1, 2, 1, 2],
+    )
+    .unwrap();
+    let (expected_mesh, expected_hrus) = expected_mesh
+        .into_land_hrus(&[1, 1, 1, 1], &[0, 1])
+        .unwrap();
+    assert_eq!(catchment.topology.mesh, expected_mesh);
+    assert_eq!(catchment.land_hrus, expected_hrus);
+    assert!(matches!(
+        catchment.topology.element_block_owners.as_ref(),
+        Some(owners) if owners.owners.len() == 3
+    ));
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mesh_filter_open_normalizes_lonwrap_and_ascending_lat_edges() {
+    let directory = temporary("mesh-filter-normalize-ascending");
+    let filter_file = directory.join("filter.nc");
+    write_mesh_filter(
+        &filter_file,
+        &[170.0, -169.5],
+        &[-169.5, 181.0],
+        &[-91.0, 0.1],
+        &[-0.1, 91.0],
+        &[1, 1, 1, 1],
+    );
+    let filter = MeshFilter::open(&filter_file).unwrap();
+    assert_eq!(filter.grid.lon_w, vec![170.0, -169.5]);
+    assert_eq!(filter.grid.lon_e, vec![-169.5, 170.0]);
+    assert_eq!(filter.grid.lat_s, vec![-90.0, 0.1]);
+    assert_eq!(filter.grid.lat_n, vec![0.1, 90.0]);
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mesh_filter_open_accepts_independent_coordinate_dimension_names() {
+    let directory = temporary("mesh-filter-independent-dims");
+    let filter_file = directory.join("filter.nc");
+    write_mesh_filter_with_independent_coordinate_dims(&filter_file);
+
+    assert!(MeshFilter::open(&filter_file).is_ok());
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mesh_filter_validates_edges_before_normalizing_and_bounds_longitude_work() {
+    let mut grid = SpatialGrid {
+        lon_w: vec![0.0, 90.0],
+        lon_e: vec![90.0],
+        lat_s: vec![-90.0],
+        lat_n: vec![90.0],
+    };
+    assert!(normalize_filter_grid(&mut grid).is_err());
+    grid.lon_e.push(180.0);
+    grid.lat_n.clear();
+    assert!(normalize_filter_grid(&mut grid).is_err());
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(normalize_fortran_longitude(value).is_err());
+    }
+    assert!(normalize_fortran_longitude(1.0e300).unwrap().is_finite());
+    assert_eq!(
+        normalize_fortran_longitude(201.42).unwrap().to_bits(),
+        (201.42_f64 - 360.0).to_bits()
+    );
+    assert_eq!(
+        normalize_fortran_longitude(-201.42).unwrap().to_bits(),
+        (-201.42_f64 + 360.0).to_bits()
+    );
+}
+
+#[test]
+fn mesh_filter_open_normalizes_descending_lat_edges() {
+    let directory = temporary("mesh-filter-normalize-descending");
+    let filter_file = directory.join("filter.nc");
+    write_mesh_filter(
+        &filter_file,
+        &[-180.0],
+        &[180.0],
+        &[0.0, -91.0],
+        &[89.0, 0.2],
+        &[1, 1],
+    );
+    let filter = MeshFilter::open(&filter_file).unwrap();
+    assert_eq!(filter.grid.lat_s, vec![0.0, -90.0]);
+    assert_eq!(filter.grid.lat_n, vec![89.0, 0.0]);
+
     std::fs::remove_dir_all(directory).unwrap();
 }

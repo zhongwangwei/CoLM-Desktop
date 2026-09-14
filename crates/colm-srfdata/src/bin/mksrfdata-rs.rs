@@ -16,17 +16,17 @@ use colm_srfdata::{
     aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
     aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
     aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
-    build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology_in_domain,
+    build_catchment_pft_land_patches_from_raster, build_catchment_spatial_topology_with_filter,
     build_coordinate_patch_selection, build_crop_land_patches, build_crop_pft_topology,
     build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
-    build_pft_land_patches_from_raster, build_pft_topology, build_spatial_topology_in_domain,
-    clip_existing_surface, crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
-    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
-    mesh_cell_area_weights, read_coordinate_patch_selection_f64,
-    read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
-    read_mesh_open_raster_f64, read_mesh_raster_f64, read_mesh_raster_i32,
-    read_mesh_raster_layers_f64, read_mesh_raster_time_f64, read_mesh_tiled_raster_f64,
-    read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
+    build_pft_land_patches_from_raster, build_pft_topology,
+    build_spatial_topology_with_filter_grid, clip_existing_surface, crop_pft_pctshared,
+    gather_patch_raster, map_patch_diagnostic, materialize_single_point_surface,
+    materialize_single_point_surface_from_namelist, mesh_cell_area_weights,
+    read_coordinate_patch_selection_f64, read_coordinate_patch_selection_layers_f64,
+    read_mesh_coordinate_raster_pft_f64, read_mesh_open_raster_f64, read_mesh_raster_f64,
+    read_mesh_raster_i32, read_mesh_raster_layers_f64, read_mesh_raster_time_f64,
+    read_mesh_tiled_raster_f64, read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
     read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_cached_f64,
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
@@ -35,10 +35,11 @@ use colm_srfdata::{
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
     write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
-    FlatLandElements, FlatLandPatches, FlatMesh, LczUrbanRawFields, NcarUrbanProperties,
-    NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode, PixelAxes, SiteMode,
-    SpatialBounds, SpatialInputKind, SpatialTopology, TiledRasterFiles, TopographicWetness,
-    UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
+    FlatLandElements, FlatLandPatches, FlatMesh, LczUrbanRawFields, MeshFilter,
+    NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode,
+    PixelAxes, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology, TiledRasterFiles,
+    TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING,
+    MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -68,6 +69,7 @@ fn main() -> Result<()> {
 struct SpatialLctArgs {
     kind: SpatialInputKind,
     mesh: PathBuf,
+    mesh_filter: Option<PathBuf>,
     landtype: PathBuf,
     landdata: PathBuf,
     year: i32,
@@ -161,6 +163,7 @@ fn methane_ph_patch_is_relevant(land_cover: SiteMode, class: i32) -> bool {
 struct SpatialPftArgs {
     kind: SpatialInputKind,
     mesh: PathBuf,
+    mesh_filter: Option<PathBuf>,
     landtype: PathBuf,
     landdata: PathBuf,
     year: i32,
@@ -190,13 +193,34 @@ struct SpatialPftArgs {
     soil_hyper_albedo_dir: Option<PathBuf>,
 }
 
+// Upstream ignores an absent filter, but an existing unreadable or malformed file
+// must not silently turn into an unfiltered scientific domain.
+fn optional_mesh_filter(path: Option<&Path>) -> Result<Option<MeshFilter>> {
+    let Some(path) = path else { return Ok(None) };
+    match std::fs::metadata(path) {
+        Ok(_) => MeshFilter::open(path).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("Mesh Filter not used: {} does not exist", path.display());
+            Ok(None)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("cannot inspect mesh filter {}", path.display()))
+        }
+    }
+}
+
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let args = parse_spatial_pft(args)?;
+    let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     let (topology, base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let mut catchment =
-                build_catchment_spatial_topology_in_domain(&args.mesh, MERIT_90M, args.bounds)?;
-            catchment.topology.preserve_element_blocks(&args.blocks)?;
+            let catchment = build_catchment_spatial_topology_with_filter(
+                &args.mesh,
+                MERIT_90M,
+                args.bounds,
+                mesh_filter.as_ref(),
+                Some(&args.blocks),
+            )?;
             let (catchment, patches) = build_catchment_pft_land_patches_from_raster(
                 catchment,
                 &args.landtype,
@@ -208,16 +232,31 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let mut topology =
-                build_spatial_topology_in_domain(&args.mesh, args.kind, COLM_500M, args.bounds)?;
+            let mut topology = build_spatial_topology_with_filter_grid(
+                &args.mesh,
+                args.kind,
+                COLM_500M,
+                args.bounds,
+                mesh_filter.as_ref().map(|filter| &filter.grid),
+            )?;
             topology.preserve_element_blocks(&args.blocks)?;
+            if let Some(filter) = &mesh_filter {
+                if args.land_only {
+                    topology.retain_land_pixels_from_raster(
+                        &args.landtype,
+                        "landtype",
+                        COLM_500M,
+                    )?;
+                }
+                filter.apply(&mut topology)?;
+            }
             let (topology, patches) = build_pft_land_patches_from_raster(
                 topology,
                 &args.landtype,
                 "landtype",
                 COLM_500M,
                 args.dominant,
-                args.land_only,
+                args.land_only && mesh_filter.is_none(),
                 args.patch_mode,
             )?;
             (topology, patches, None)
@@ -311,6 +350,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     let common = SpatialLctArgs {
         kind: args.kind,
         mesh: args.mesh.clone(),
+        mesh_filter: args.mesh_filter.clone(),
         landtype: args.landtype.clone(),
         landdata: args.landdata.clone(),
         year: args.year,
@@ -620,6 +660,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     let args = parse_spatial_lct(args)?;
+    let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     ensure!(
         !args.lulcc || args.land_cover == SiteMode::Igbp,
         "spatial LULCC transfer traces require IGBP land cover"
@@ -648,9 +689,13 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     };
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
-            let mut catchment =
-                build_catchment_spatial_topology_in_domain(&args.mesh, MERIT_90M, args.bounds)?;
-            catchment.topology.preserve_element_blocks(&args.blocks)?;
+            let catchment = build_catchment_spatial_topology_with_filter(
+                &args.mesh,
+                MERIT_90M,
+                args.bounds,
+                mesh_filter.as_ref(),
+                Some(&args.blocks),
+            )?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
                 catchment,
                 &args.landtype,
@@ -662,16 +707,31 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let mut topology =
-                build_spatial_topology_in_domain(&args.mesh, args.kind, COLM_500M, args.bounds)?;
+            let mut topology = build_spatial_topology_with_filter_grid(
+                &args.mesh,
+                args.kind,
+                COLM_500M,
+                args.bounds,
+                mesh_filter.as_ref().map(|filter| &filter.grid),
+            )?;
             topology.preserve_element_blocks(&args.blocks)?;
+            if let Some(filter) = &mesh_filter {
+                if args.land_only {
+                    topology.retain_land_pixels_from_raster(
+                        &args.landtype,
+                        "landtype",
+                        lct_grid,
+                    )?;
+                }
+                filter.apply(&mut topology)?;
+            }
             let (topology, patches) = build_lct_land_patches_from_raster(
                 topology,
                 &args.landtype,
                 "landtype",
                 lct_grid,
                 args.dominant,
-                args.land_only,
+                args.land_only && mesh_filter.is_none(),
             )?;
             (topology, patches, None)
         }
@@ -2940,6 +3000,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut bounds = None;
     let mut land_only = true;
+    let mut mesh_filter = None;
     let mut zip_aggregation = true;
     let mut dominant = false;
     let mut land_cover = None;
@@ -2991,6 +3052,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                     .context("--aggregation-zip needs true or false")?
                     .parse::<bool>()
                     .context("--aggregation-zip needs true or false")?;
+                index += 2;
+            }
+            "--mesh-filter" => {
+                mesh_filter = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--mesh-filter needs a file path")?,
+                ));
                 index += 2;
             }
             "--land-only" => {
@@ -3249,6 +3317,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
+        mesh_filter,
         landtype: PathBuf::from(&args[2]),
         landdata: PathBuf::from(&args[3]),
         year,
@@ -3306,6 +3375,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut bounds = None;
     let mut land_only = true;
+    let mut mesh_filter = None;
     let mut zip_aggregation = true;
     let mut dominant = false;
     let mut patch_mode = PftPatchMode::Merged;
@@ -3359,6 +3429,13 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     .context("--aggregation-zip needs true or false")?
                     .parse::<bool>()
                     .context("--aggregation-zip needs true or false")?;
+                index += 2;
+            }
+            "--mesh-filter" => {
+                mesh_filter = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--mesh-filter needs a file path")?,
+                ));
                 index += 2;
             }
             "--land-only" => {
@@ -3538,6 +3615,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     Ok(SpatialPftArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
+        mesh_filter,
         landtype: PathBuf::from(&args[2]),
         landdata: PathBuf::from(&args[3]),
         year,
@@ -4185,6 +4263,10 @@ fn spatial_case_command(
         }
     }
 
+    if let Some(filter) = case_path(&document, "DEF_file_mesh_filter")? {
+        args.extend(["--mesh-filter".to_owned(), filter.display().to_string()]);
+    }
+
     args.extend([
         "--aggregation-zip".to_owned(),
         case_bool(&document, "USE_zip_for_aggregation", true)?.to_string(),
@@ -4529,8 +4611,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--patch-mode merged|separate|fast-pc] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--patch-mode merged|separate|fast-pc] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -5152,6 +5234,140 @@ mod tests {
                 std::fs::remove_dir_all(root).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn spatial_mesh_filter_reaches_each_case_mode_and_rejects_bad_existing_files() {
+        for mode in ["LCT", "PFT", "PC"] {
+            for mesh in ["DEF_file_mesh", "DEF_CatchmentMesh_data"] {
+                let (root, namelist) = case_namelist(
+                    "mesh-filter",
+                    &format!(
+                        "&nl_colm\nDEF_CASE_NAME='case'\nDEF_dir_output='$ROOT/out'\n\
+                     DEF_dir_rawdata='$ROOT/raw'\n{mesh}='$ROOT/mesh.nc'\n\
+                     DEF_file_mesh_filter='$ROOT/filter.nc'\n\
+                     DEF_USE_LCT=.{}.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\n/\n",
+                        mode == "LCT",
+                        mode == "PFT",
+                        mode == "PC",
+                    ),
+                );
+                let command =
+                    spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, None)
+                        .unwrap()
+                        .unwrap();
+                let filter = if command.pft_or_pc {
+                    parse_spatial_pft(&command.args).unwrap().mesh_filter
+                } else {
+                    parse_spatial_lct(&command.args).unwrap().mesh_filter
+                };
+                assert_eq!(filter, Some(root.join("filter.nc")));
+                assert!(!command.required_files.contains(filter.as_ref().unwrap()));
+                assert!(optional_mesh_filter(filter.as_deref()).unwrap().is_none());
+                std::fs::write(filter.as_ref().unwrap(), "not NetCDF").unwrap();
+                assert!(optional_mesh_filter(filter.as_deref()).is_err());
+                let mut invalid = command.args.clone();
+                invalid.push("--mesh-filter".into());
+                assert!(if command.pft_or_pc {
+                    parse_spatial_pft(&invalid).is_err()
+                } else {
+                    parse_spatial_lct(&invalid).is_err()
+                });
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+        assert!(optional_mesh_filter(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn spatial_lct_materializer_filters_before_patch_partition() {
+        let (root, _) = case_namelist("mesh-filter-output", "&nl_colm /\n");
+        let x: Vec<_> = (43201..=43205).map(|i| COLM_500M.lon_w(i)).collect();
+        let south = COLM_500M.lat_s(21601);
+        let north = COLM_500M.lat_n(21601);
+        let mesh = root.join("mesh.nc");
+        let filter = root.join("filter.nc");
+        for (path, variable, edges, values) in [
+            (&mesh, "landmask", vec![x[0], x[2], x[4]], vec![1, 1]),
+            (
+                &filter,
+                "mesh_filter",
+                x.windows(2).map(|v| (v[0] + v[1]) * 0.5).collect(),
+                vec![1, 0, 2],
+            ),
+        ] {
+            let mut file = netcdf::create(path).unwrap();
+            file.add_dimension("lon", edges.len() - 1).unwrap();
+            file.add_dimension("lat", 1).unwrap();
+            for (name, dimension, coordinates) in [
+                ("lon_w", "lon", &edges[..edges.len() - 1]),
+                ("lon_e", "lon", &edges[1..]),
+                ("lat_s", "lat", &[south][..]),
+                ("lat_n", "lat", &[north][..]),
+            ] {
+                file.add_variable::<f64>(name, &[dimension])
+                    .unwrap()
+                    .put_values(coordinates, ..)
+                    .unwrap();
+            }
+            file.add_variable::<i32>(variable, &["lat", "lon"])
+                .unwrap()
+                .put_values(&values, ..)
+                .unwrap();
+            file.close().unwrap();
+        }
+        let landtype = root.join("landtype.nc");
+        let mut file = netcdf::create(&landtype).unwrap();
+        file.add_dimension("lat", COLM_500M.nlat).unwrap();
+        file.add_dimension("lon", COLM_500M.nlon).unwrap();
+        let mut variable = file
+            .add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap();
+        variable.set_chunking(&[1, 4]).unwrap();
+        variable
+            .put_values(&[0, 8, 9, 10], (21600, 43200..43204))
+            .unwrap();
+        file.close().unwrap();
+        let output = root.join("landdata");
+        materialize_spatial_lct(&[
+            "latlon".into(),
+            mesh.display().to_string(),
+            landtype.display().to_string(),
+            output.display().to_string(),
+            "2005".into(),
+            "--land-cover".into(),
+            "igbp".into(),
+            "--mesh-filter".into(),
+            filter.display().to_string(),
+        ])
+        .unwrap();
+        let mesh = netcdf::open(output.join("mesh/2005/mesh_W180_S90.nc")).unwrap();
+        assert_eq!(
+            mesh.variable("elmindex")
+                .unwrap()
+                .get_values::<i64, _>(..)
+                .unwrap(),
+            [1, 2]
+        );
+        assert_eq!(
+            mesh.variable("elmpixels")
+                .unwrap()
+                .get_values::<i32, _>(..)
+                .unwrap(),
+            [3, 1, 6, 1, 7, 1]
+        );
+        let patches = netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+        assert_eq!(
+            patches
+                .variable("settyp")
+                .unwrap()
+                .get_values::<i32, _>(..)
+                .unwrap(),
+            [8, 9, 10]
+        );
+        drop(patches);
+        drop(mesh);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
