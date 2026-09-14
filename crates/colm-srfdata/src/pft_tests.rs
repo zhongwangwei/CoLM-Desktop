@@ -11,6 +11,141 @@ fn patches() -> FlatPatches {
 }
 
 #[test]
+fn pft_ordered_reductions_match_original_compiled_sums() {
+    // Original MOD_LandPFT, Aggregation_LAI and Aggregation_ForestHeight expressions.
+    let rows = include_str!("../tests/fixtures/pft_ordered_reductions.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            line.split_whitespace()
+                .map(|s| s.parse::<f64>().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 9);
+    assert!(rows.iter().all(|row| row.len() == 50));
+    let cells = (0..rows.len()).collect::<Vec<_>>();
+    let areas = rows.iter().map(|row| row[0]).collect::<Vec<_>>();
+    let heights = rows.iter().map(|row| row[1]).collect::<Vec<_>>();
+    let field = |start: usize| {
+        (0..16)
+            .flat_map(|class| rows.iter().map(move |row| row[start + class]))
+            .collect::<Vec<_>>()
+    };
+    let percent = field(2);
+    let lai = field(18);
+    let sai = field(34);
+    let classes = [0, 1, 5, 7, 9, 10, 13];
+    let layout = FlatPatches::new(vec![1], vec![0, 9], cells.clone(), vec![None]).unwrap();
+    let share = normalized_patch_pft_fractions(&cells, 0, 16, 16, &percent, &areas).unwrap();
+    let fraction_input = PftFractionInput {
+        pft_offsets: &[0, 7],
+        pft_classes: &classes,
+        patch_kind: &[PftPatchKind::Natural],
+        raw_class_count: 16,
+        raw_percent: &percent,
+        land_area: &areas,
+        crop_excluded_class: None,
+    };
+    let fractions = aggregate_pft_fractions(&layout, fraction_input).unwrap();
+    let htop = aggregate_pft_height(&layout, fraction_input, &heights).unwrap();
+    let index_input = PftIndexInput {
+        pft_offsets: &[0, 7],
+        pft_classes: &classes,
+        patch_kind: &[PftPatchKind::Natural],
+        raw_class_count: 16,
+        raw_percent: &percent,
+        raw_index: &lai,
+        land_area: &areas,
+    };
+    let lai = aggregate_pft_index(&layout, index_input).unwrap();
+    let sai = aggregate_pft_index(
+        &layout,
+        PftIndexInput {
+            raw_index: &sai,
+            ..index_input
+        },
+    )
+    .unwrap();
+    let expected = [
+        [
+            0x3c523464cea15b10,
+            0x403c000000000000,
+            0x0000000000000000,
+            0x0000000000000000,
+            0x3c523464ce633bca,
+        ],
+        [
+            0x3fdc0783951fc4a4,
+            0x403be2103953b650,
+            0x3ffada5bc95668bd,
+            0x3ff0228b17eb92f4,
+            0x3fdc078395d40200,
+        ],
+        [
+            0x3fb110f630731fe0,
+            0x403d000000000000,
+            0x3ffbc140e0000000,
+            0x3fef97a100000000,
+            0x3fb110f633a2adf0,
+        ],
+        [
+            0x3fbfc5c72853b847,
+            0x403bb1120e7f1bb9,
+            0x3fea5992c2593da7,
+            0x3ff053bc3b2697c5,
+            0x3fbfc5c728789685,
+        ],
+        [
+            0x3fc40b9fe6c171ab,
+            0x403ba0c997f44aac,
+            0x3ff5f72461264670,
+            0x3ff0ac59d220b3a5,
+            0x3fc40b9fe4b0001c,
+        ],
+        [
+            0x3fc05472b8d45b55,
+            0x403b6ed74f34e782,
+            0x3fe635ac0060aaaf,
+            0x3ff164296c5bf1f9,
+            0x3fc05472b63ad0a5,
+        ],
+        [
+            0x3fb64b0f138e7b49,
+            0x403c7c4daeb7de64,
+            0x3fe4e4526a573d67,
+            0x3ff0ab3127ef9c25,
+            0x3fb64b0f16bf120c,
+        ],
+    ];
+    for (pft, (&class, expected)) in classes.iter().zip(expected).enumerate() {
+        for (field, (actual, expected)) in [
+            share[class],
+            htop[pft],
+            lai.pft_index[pft],
+            sai.pft_index[pft],
+            fractions[pft],
+        ]
+        .into_iter()
+        .zip(expected)
+        .enumerate()
+        {
+            assert_eq!(actual.to_bits(), expected, "class {class}, field {field}");
+        }
+    }
+    for (actual, expected) in [
+        (lai.patch_index[0], 0x3ff5031fb4acd60f),
+        (sai.patch_index[0], 0x3ff06d610ac7fb78),
+        (
+            patch_area_weighted_height(&cells, 0, &areas, &heights).unwrap(),
+            0x403be38ddf4b6920,
+        ),
+    ] {
+        assert_eq!(actual.to_bits(), expected);
+    }
+}
+
+#[test]
 fn pft_fractions_match_weighting_wmo_crop_and_bare_soil_branches() {
     let output = aggregate_pft_fractions(
         &patches(),

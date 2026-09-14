@@ -6,6 +6,50 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## PFT ordered reductions: restart gate improves, ZIP input order remains open
+
+The shared PFT reducers now retain ten original compiled weighted-SUM operations,
+including `(height * percent) * area` grouping and the existing two-stage
+percentage normalization. Topology, masks, fallbacks and reduction order are
+unchanged. A compact nine-cell original `-O2 -fdefault-real-8` fixture fails
+before the repair and passes bitwise afterwards. These are operation-level
+goldens, not evidence that the caller supplies the correct ZIP input order.
+
+Fresh independent surface / initializer / unchanged original-runtime runs:
+
+| Fixture | Result at unchanged combined `atol=rtol=1e-12` |
+| --- | --- |
+| PC, 284 files / 695 variable instances | All surface and cold/post restart fields pass; only history `f_zerr` fails (12 values, max `5.5493387662863825e-12`) |
+| PFT + WMO, 284 / 696 | All surface and cold/post restart fields pass; only history `f_zerr` fails (max `9.158895863947691e-12`) |
+
+Evidence: `/tmp/colm-pc-pft-weighted-full.71u7t96_/`,
+`/tmp/colm-pft-weighted-wmo.te76mtpt/`, `/tmp/colm-pft-reduction-audit/` and
+`/tmp/colm-pft-weighted-fix/validation/`. All 670 integrated tests pass, with
+reference/native checks run serially. An initial parallel initializer reference
+run failed opening a fresh NetCDF mock with `Netcdf(-101)`; its log is retained.
+The isolated retry and complete serial reference/native suite pass; the transient
+I/O failure is not claimed fixed. Clippy, downstream checks and scoped formatting
+also pass. The arithmetic change has independent source review.
+
+The PC surface still has 51 bit-different floating fields (all within tolerance).
+`landpft/pctshared` is now bitwise equal. Review identifies a separate caller
+contract defect: original topology uses `zip=false`, whereas percentages, height
+and monthly LAI/SAI use `USE_zip_for_aggregation`. Rust currently reuses mesh order
+for both. The existing `gather_patch_raster` ZIP path must be wired into the latter
+without changing topology order. This repair is pending, not a closed parity gate.
+
+### Explicit vegetation-snow control
+
+The pristine original defaults `DEF_VEG_SNOW=false`; Desktop intentionally
+defaults it to true. Production defaults are not changed for parity testing.
+Fresh matched-control initializer/runtime runs explicitly select false:
+`rust-native-surface-lct-matched-snow/` under the Pearl River artifact root and
+`/tmp/colm-pc-pft-matched-snow.9kykxndz/`. Cold bit differences decrease in LCT,
+but its six post-step `zwt` failures and three history-field failures remain;
+PC retains the same history residual. The latest PFT/WMO run also explicitly
+matches this control. Its change from earlier history residuals cannot be
+attributed solely to weighted arithmetic because that control also changed.
+
 ## Latest Pearl River initializer/runtime result: LCT radiation arithmetic
 
 `/tmp/colm-spatial-parity.Mh0VZX/rust-native-surface-lct-rounding/` contains a

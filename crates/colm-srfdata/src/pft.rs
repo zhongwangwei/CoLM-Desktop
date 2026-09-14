@@ -456,9 +456,9 @@ fn normalized_patch_pft_fractions(
         for class in 0..pft_class_count {
             let value = raw_percent[class * land_area.len() + cell];
             sum += value;
-            weighted[class] += value * area;
+            weighted[class] = value.mul_add(area, weighted[class]);
         }
-        total += area * sum;
+        total = area.mul_add(sum, total);
     }
     if total > 0.0 {
         for value in &mut weighted {
@@ -606,10 +606,11 @@ pub fn aggregate_pft_height(
                     let mut weighted_area = 0.0;
                     let mut weighted_height = 0.0;
                     for &cell in cells {
-                        let weight = percentage(input, class, cell, patch)?.max(0.0)
-                            * area(input.land_area, cell, patch)?;
-                        weighted_area += weight;
-                        weighted_height += raw_height_m[cell] * weight;
+                        let percent = percentage(input, class, cell, patch)?.max(0.0);
+                        let area = area(input.land_area, cell, patch)?;
+                        weighted_area = percent.mul_add(area, weighted_area);
+                        weighted_height =
+                            (raw_height_m[cell] * percent).mul_add(area, weighted_height);
                     }
                     output[pft] = if weighted_area > 0.0 {
                         weighted_height / weighted_area
@@ -639,7 +640,7 @@ fn patch_area_weighted_height(
             format!("PFT forest-height patch {patch} references raw height cell {cell}")
         })?;
         patch_area += area;
-        patch_height += height * area;
+        patch_height = height.mul_add(area, patch_height);
     }
     ensure!(
         patch_area > 0.0 && patch_area.is_finite(),
@@ -708,8 +709,9 @@ pub fn aggregate_pft_index(
                     for &cell in patches.raw_cells(patch) {
                         let percent = percentage_index(input, class, cell, patch)?.max(0.0);
                         let area = area(input.land_area, cell, patch)?;
-                        weighted_area += percent * area;
-                        weighted_index += index(input, class, cell, patch)? * percent * area;
+                        weighted_area = percent.mul_add(area, weighted_area);
+                        weighted_index = (index(input, class, cell, patch)? * percent)
+                            .mul_add(area, weighted_index);
                     }
                     if weighted_area > 0.0 {
                         output.pft_index[pft] = weighted_index / weighted_area;
@@ -830,9 +832,9 @@ fn aggregate_patch_index(
         for class in 0..input.raw_class_count {
             let percent = percentage_index(input, class, cell, patch)?.max(0.0);
             percent_sum += percent;
-            value_sum += index(input, class, cell, patch)? * percent;
+            value_sum = index(input, class, cell, patch)?.mul_add(percent, value_sum);
         }
-        index_sum += value_sum / percent_sum.max(1.0e-6) * area;
+        index_sum = (value_sum / percent_sum.max(1.0e-6)).mul_add(area, index_sum);
         area_sum += area;
     }
     ensure!(
@@ -871,7 +873,7 @@ fn aggregate_natural_patch(
             } else {
                 percentage(input, class, cell, patch)?.max(0.0)
             };
-            output[pft] += value / total * area;
+            output[pft] = (value / total).mul_add(area, output[pft]);
         }
     }
     ensure!(
