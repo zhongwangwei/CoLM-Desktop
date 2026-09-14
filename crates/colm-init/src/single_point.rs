@@ -2473,8 +2473,8 @@ pub(crate) fn pft_canopy(
     canopy_height_m: &[f64],
 ) -> Result<PftCanopy> {
     ensure!(
-        !class.is_empty() && class.len() == canopy_height_m.len(),
-        "PFT class and canopy-height vectors must be nonempty and have matching lengths"
+        class.len() == canopy_height_m.len(),
+        "PFT class and canopy-height vectors must have matching lengths"
     );
     let campbell = optional_bool_or(document, "DEF_USE_Campbell_SOIL_MODEL", false)?;
     let mut top_m = Vec::with_capacity(class.len());

@@ -6362,6 +6362,123 @@ mod tests {
     }
 
     #[test]
+    fn spatial_pft_materializer_all_nonnatural_keeps_common_surface_without_pft_children() {
+        for (label, extra_args) in [
+            ("pft", Vec::<String>::new()),
+            (
+                "pc",
+                vec!["--patch-mode".to_string(), "fast-pc".to_string()],
+            ),
+        ] {
+            let (root, _) = case_namelist(&format!("pftless-{label}"), "&nl_colm /\n");
+            let mesh = root.join("mesh.nc");
+            let mut file = netcdf::create(&mesh).unwrap();
+            file.add_dimension("lon", 4).unwrap();
+            file.add_dimension("lat", 1).unwrap();
+            for (name, dimension, values) in [
+                (
+                    "lon_w",
+                    "lon",
+                    (1..=4).map(|i| COLM_500M.lon_w(i)).collect::<Vec<_>>(),
+                ),
+                (
+                    "lon_e",
+                    "lon",
+                    (1..=4).map(|i| COLM_500M.lon_e(i)).collect::<Vec<_>>(),
+                ),
+                ("lat_s", "lat", vec![COLM_500M.lat_s(1)]),
+                ("lat_n", "lat", vec![COLM_500M.lat_n(1)]),
+            ] {
+                file.add_variable::<f64>(name, &[dimension])
+                    .unwrap()
+                    .put_values(&values, ..)
+                    .unwrap();
+            }
+            file.add_variable::<i32>("landmask", &["lat", "lon"])
+                .unwrap()
+                .put_values(&[1, 1, 1, 1], ..)
+                .unwrap();
+            file.close().unwrap();
+
+            let landtype = root.join("landtype.nc");
+            let mut file = netcdf::create(&landtype).unwrap();
+            file.add_dimension("lat", COLM_500M.nlat).unwrap();
+            file.add_dimension("lon", COLM_500M.nlon).unwrap();
+            let mut variable = file
+                .add_variable::<i32>("landtype", &["lat", "lon"])
+                .unwrap();
+            variable.set_chunking(&[1, 4]).unwrap();
+            variable
+                .put_values(&[11, 13, 15, 17], (0..1, 0..4))
+                .unwrap();
+            file.close().unwrap();
+
+            let mut file = netcdf::create(root.join("RG_90_-180_85_-175.MOD2005.nc")).unwrap();
+            file.add_dimension("lat", 1200).unwrap();
+            file.add_dimension("lon", 1200).unwrap();
+            file.add_dimension("pft", 16).unwrap();
+            let mut variable = file
+                .add_variable::<f64>("PCT_PFT", &["pft", "lat", "lon"])
+                .unwrap();
+            variable.set_chunking(&[1, 120, 120]).unwrap();
+            variable
+                .put_values(&vec![0.0; 16 * 4], (.., 0..1, 0..4))
+                .unwrap();
+            let mut variable = file.add_variable::<f64>("HTOP", &["lat", "lon"]).unwrap();
+            variable.set_chunking(&[1, 4]).unwrap();
+            variable
+                .put_values(&[1.0, 2.0, 3.0, 4.0], (0..1, 0..4))
+                .unwrap();
+            file.close().unwrap();
+
+            let output = root.join("landdata");
+            let mut args = vec![
+                "latlon".into(),
+                mesh.display().to_string(),
+                landtype.display().to_string(),
+                output.display().to_string(),
+                "2005".into(),
+                "--plant-tiles".into(),
+                root.display().to_string(),
+            ];
+            args.extend(extra_args);
+            materialize_spatial_pft(&args).unwrap();
+
+            let patches =
+                netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+            assert_eq!(
+                patches
+                    .variable("settyp")
+                    .unwrap()
+                    .get_values::<i32, _>(..)
+                    .unwrap(),
+                [11, 13, 15, 17],
+                "{label}"
+            );
+            let htop = netcdf::open(output.join("htop/2005/htop_patches_W180_S90.nc")).unwrap();
+            assert_eq!(
+                htop.variable("htop_patches")
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap(),
+                [1.0, 2.0, 3.0, 4.0],
+                "{label}"
+            );
+            for path in [
+                "landpft/2005/landpft_W180_S90.nc",
+                "pctpft/2005/pct_pfts_W180_S90.nc",
+                "htop/2005/htop_pfts_W180_S90.nc",
+            ] {
+                assert!(
+                    !output.join(path).exists(),
+                    "{label} unexpectedly wrote {path}"
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn spatial_pft_materializer_writes_runtime_shares_lulcc_and_wmo_skip() {
         let (root, _) = case_namelist("pft-wmo-output", "&nl_colm /\n");
         let mesh = root.join("mesh.nc");

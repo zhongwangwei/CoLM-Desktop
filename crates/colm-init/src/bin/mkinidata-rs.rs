@@ -486,13 +486,17 @@ fn write_spatial_pft_namelist_block(
     let time = write_spatial_pft_cold_time_restarts(time)?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
-    println!("wrote {}", files.pft.display());
+    if let Some(path) = files.pft {
+        println!("wrote {}", path.display());
+    }
     if let Some(files) = files.bgc {
         println!("wrote {}", files.constants.display());
         println!("wrote {}", files.block.display());
     }
     println!("wrote {}", time.common.block.display());
-    println!("wrote {}", time.pft.display());
+    if let Some(path) = time.pft {
+        println!("wrote {}", path.display());
+    }
     if let Some(files) = time.bgc {
         println!("wrote {}", files.block.display());
     }
@@ -1103,7 +1107,9 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
     let files = write_spatial_pft_constant_restarts(static_config, use_bedrock, use_hyperspectral)?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
-    println!("wrote {}", files.pft.display());
+    if let Some(path) = files.pft {
+        println!("wrote {}", path.display());
+    }
     if let Some(bgc) = files.bgc {
         println!("wrote {}", bgc.constants.display());
         println!("wrote {}", bgc.block.display());
@@ -1125,7 +1131,9 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         time.high_resolution_urban_albedo = high_resolution_urban_albedo.as_deref();
         let output = write_spatial_pft_cold_time_restarts(time)?;
         println!("wrote {}", output.common.block.display());
-        println!("wrote {}", output.pft.display());
+        if let Some(path) = output.pft {
+            println!("wrote {}", path.display());
+        }
         if let Some(bgc) = output.bgc {
             println!("wrote {}", bgc.block.display());
         }

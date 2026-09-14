@@ -6,6 +6,58 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Spatial blocks without PFTs
+
+Spatial PFT/PC now accepts a nonempty landpatch block containing only IGBP
+11/13/15/17 with no landpft entries. It reads patch/common surface state normally
+and omits PFT-backed constant and time restart files for that block. Both
+constant adapters and the time adapter share the topology-gated PFT readers;
+missing natural/CFT topology, nonempty orphan fields and corrupt explicit files
+still fail. No synthetic PFT or zero-filled replacement input is introduced.
+The surface producer already omitted these empty vector blocks; its regression
+now verifies retained patch fields and absent PFT children for PFT and fast PC.
+
+Common soil/lake/radiation and patch BGC/CN initialization remain active. Empty
+PFT mappings and canopy arrays reuse existing shared functions. CROP no longer
+requires a local CFT: patch `pdrice2` and irrigation allocation are still mapped,
+while PFT/CFT arrays stay empty. Tests exercise both tuning and runtime-map paths,
+including fertilizer/irrigation, and reject misaligned topology.
+
+**Original-executable evidence:** a copied, complete original PC 2x2 surface was
+translated east by 0.9 degree, placing its two longitude columns across the real
+115-degree block boundary. Pixel/mesh coordinates, block element counts and
+all vector memberships were updated consistently; the west retained natural
+PFTs, while the east became either wetland/urban or glacier/lake. PFT child
+files were omitted only in the east. No original source, binary or golden data
+was modified. This is a controlled surface-input oracle, **not a new raw-data
+mksrfdata comparison**. Original and Rust mkini pass both cases: 14 restart files /
+566 variable instances, including schema and attributes (excluding creation
+time), with maximum absolute difference `4.44e-16`. The frozen preceding Rust
+binary rejects both cases at the missing eastern landpft file.
+
+The unchanged original PC `colm` completes two timesteps on both original and
+Rust initializations: four successful runs. All post-run restart and history
+fields pass the unchanged combined `atol=rtol=1e-12` gate. The largest absolute
+post-run difference is `9.03e-9`, accepted by the relative part of that gate,
+not an absolute `1e-12` claim. This bounded result does not supersede the older
+pristine-case residuals recorded below. Evidence:
+`/tmp/colm-spatial-zero-pft-fix/{mixed-results,mixed-runtime-results}.json`.
+
+**Boundaries:** pristine spatial mkini stops when the *whole domain* has no
+landpft files. Rust's all-nonnatural-domain support is a Desktop extension, not
+original parity. Zero-PFT+CROP constant output retains patch `cropfrac` using
+an empty-PFT container; pristine patch-backed writing on that edge is fragile,
+so its exact schema/runtime parity is not claimed. CROP/CN and PFT-mode empty
+blocks are covered by Rust regressions, not these PC/non-BGC original runs.
+
+Integrated validation passes **897 tests**, all-target Clippy, downstream
+CLI/kernel checks, scoped formatting and all three preprocessor release builds.
+Logs: `/tmp/colm-spatial-zero-pft-validation/`. Source and independent review:
+`/tmp/colm-spatial-zero-pft-contract.md` and
+`/tmp/colm-spatial-zero-pft-fix/review.md`. No I/O speedup or full migration
+completion is claimed. SNICAR, unsupported HiRes branches and broader original
+runtime/platform acceptance remain open.
+
 ## Nonnatural hyperspectral cold initialization
 
 PFT/PC single-point surfaces with IGBP 11/13/15/17 now use the common scalar
@@ -52,9 +104,9 @@ explicit defined-state choice, not byte parity with those undefined values.
 Positive-snow HiRes is rejected in both cold adapters; SNICAR remains unported.
 The spatial adapter currently writes the preliminary common restart before
 this rejection, so an error may leave an incomplete output directory (not a
-successful initializer result). All-zero-PFT spatial blocks, unsupported
-HiRes LCT/urban-model combinations, pristine whole-runtime scientific parity
-and platform acceptance are not closed by this change.
+successful initializer result). Spatial zero-PFT blocks are addressed separately
+above; unsupported HiRes LCT/urban-model combinations, pristine whole-runtime
+scientific parity and platform acceptance remain open.
 
 ## Surface compression and TOPMODEL/VIC control coverage
 

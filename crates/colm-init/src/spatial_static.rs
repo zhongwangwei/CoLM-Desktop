@@ -1091,8 +1091,7 @@ pub(crate) fn read_spatial_pixel_sets(
     label: &str,
 ) -> Result<SpatialPixelSets> {
     ensure!(
-        !element.is_empty()
-            && element.len() == start.len()
+        element.len() == start.len()
             && element.len() == end.len()
             && element.len() == shared_fraction.len()
             && shared_fraction

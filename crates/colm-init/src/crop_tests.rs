@@ -24,6 +24,18 @@ fn spatial_tuning_keeps_crop_pft_and_bgc_patch_axes_aligned() {
 }
 
 #[test]
+fn spatial_tuning_allows_empty_pft_axis_and_keeps_patch_defaults() {
+    let state = spatial_crop_cold_start_from_tuning(&[], &[], &[], 2, 120.0).unwrap();
+
+    assert!(state.pft_fields().planting_date.is_empty());
+    assert!(state.pft_fields().crop_phase.is_empty());
+    assert_eq!(state.bgc_fields().crop_phase, [MISSING, MISSING]);
+    assert_eq!(state.bgc_fields().planting_day_rice2, [0.0, 0.0]);
+
+    assert!(spatial_crop_cold_start_from_tuning(&[], &[0], &[], 2, 120.0).is_err());
+}
+
+#[test]
 fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
     let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0).unwrap();
     let pft = state.pft_fields();
@@ -172,6 +184,90 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
     let irrigation = source_two.irrigation_fields(&[0.0]).unwrap();
     assert!((irrigation.groundwater_allocation[0] - 0.45).abs() < 1.0e-12);
     assert!((irrigation.surface_water_allocation[0] - 0.55).abs() < 1.0e-12);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
+    let root = temp_runtime_dir("spatial-crop-empty-pft");
+    write_spatial_planting_map(&root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"));
+    write_spatial_fertilizer_source_two(&root.join("crop/fertilizer_2015soc.nc"));
+    write_spatial_irrigation_map(&root.join("crop/surfdata_irrigation_method_96x144.nc"));
+    write_spatial_irrigation_allocation_map(&root.join("crop/surfdata_irrigation_allocation.nc"));
+    let empty_pft_pixels = SpatialPixelSets {
+        lon_w: vec![0.25, 1.0],
+        lon_e: vec![1.0, 2.25],
+        lat_s: vec![0.0],
+        lat_n: vec![1.0],
+        cells: vec![],
+        shared_fraction: vec![],
+    };
+    let patch_pixels = SpatialPixelSets {
+        lon_w: vec![0.25, 1.0],
+        lon_e: vec![1.0, 2.25],
+        lat_s: vec![0.0],
+        lat_n: vec![1.0],
+        cells: vec![vec![(1, 1)], vec![(2, 1)]],
+        shared_fraction: vec![1.0, 1.0],
+    };
+
+    let state = spatial_crop_cold_start_from_management(
+        &[],
+        &[],
+        &[],
+        2,
+        &empty_pft_pixels,
+        &patch_pixels,
+        CropManagementConfig {
+            runtime_dir: &root,
+            planting_day_override: Some(99.0),
+            use_fertilizer: true,
+            fertilizer_source: 2,
+            use_irrigation: true,
+            use_irrigation_allocation: true,
+        },
+    )
+    .unwrap();
+
+    assert!(state.pft_fields().planting_date.is_empty());
+    assert!(state.pft_fields().fertilizer_nitrogen.is_empty());
+    assert_eq!(state.irrigation_method(), Some(&[][..]));
+    assert_eq!(state.bgc_fields().crop_phase, [MISSING, MISSING]);
+    assert_eq!(state.bgc_fields().planting_day_rice2, [1.0, 3.0]);
+    let irrigation = state.irrigation_fields(&[0.0, 0.0]).unwrap();
+    for (values, expected) in [
+        (irrigation.groundwater_allocation, [0.2, 0.6]),
+        (irrigation.surface_water_allocation, [0.8, 0.4]),
+    ] {
+        for (&actual, expected) in values.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+    }
+    let invalid_patch_pixels = SpatialPixelSets {
+        lon_w: vec![0.25, 1.0],
+        lon_e: vec![1.0, 2.25],
+        lat_s: vec![0.0],
+        lat_n: vec![1.0],
+        cells: vec![vec![(1, 1)]],
+        shared_fraction: vec![1.0],
+    };
+    assert!(spatial_crop_cold_start_from_management(
+        &[],
+        &[],
+        &[],
+        2,
+        &empty_pft_pixels,
+        &invalid_patch_pixels,
+        CropManagementConfig {
+            runtime_dir: &root,
+            planting_day_override: None,
+            use_fertilizer: false,
+            fertilizer_source: 1,
+            use_irrigation: false,
+            use_irrigation_allocation: false,
+        },
+    )
+    .is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
 

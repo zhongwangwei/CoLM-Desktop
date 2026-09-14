@@ -171,3 +171,14 @@ real-2005-material 3-by-3 Catchment fixture passes all 254 surface/initial files
 its bounded runtime extension passes restart comparison but retains one
 out-of-tolerance history energy diagnostic. Neither proves routing or other
 optional modes. See the [latest audit](preprocessing-parity-status.md).
+
+## Empty PFT vector blocks
+
+Spatial PFT/PC writes patch/common surface fields even when a block contains
+only nonnatural IGBP classes. No landpft, percentage, PFT height or monthly
+PFT LAI/SAI file is emitted for zero PFT entries; mkini now consumes that
+absence instead of fabricating a PFT. A producer regression covers all four
+nonnatural classes in PFT and fast PC. See the
+[parity audit](preprocessing-parity-status.md#spatial-blocks-without-pfts) for
+original mixed-block restart/runtime controls and the distinction from Rust's
+all-zero-PFT-domain extension.

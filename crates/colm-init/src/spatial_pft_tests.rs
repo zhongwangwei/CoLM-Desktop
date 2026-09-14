@@ -24,7 +24,7 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
     ))
     .unwrap();
 
-    let output = netcdf::open(file).unwrap();
+    let output = netcdf::open(file.unwrap()).unwrap();
     assert_eq!(values_i32(&output, "pftclass").unwrap(), [1, 13]);
     assert_eq!(values_f64(&output, "pftfrac").unwrap(), [0.25, 0.75]);
     assert_eq!(values_f64(&output, "htop_p").unwrap(), [20.0, 3.0]);
@@ -54,7 +54,7 @@ fn spatial_pft_constant_restart_copies_crop_fractions_by_landpatch() {
     ))
     .unwrap();
 
-    let output = netcdf::open(file).unwrap();
+    let output = netcdf::open(file.unwrap()).unwrap();
     assert_eq!(values_i32(&output, "pftclass").unwrap(), [15]);
     assert_eq!(values_f64(&output, "pftfrac").unwrap(), [1.0]);
     assert_eq!(values_f64(&output, "cropfrac").unwrap(), [0.4]);
@@ -267,6 +267,70 @@ fn spatial_pft_runoff_scheme_one_uses_shared_vic_source_resolution() {
     .unwrap_err();
     assert!(!error.to_string().contains("DEF_file_VIC_OPT"), "{error}");
     assert!(!restart.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn empty_pft_inputs_require_nonnatural_owners_and_reject_orphan_or_corrupt_data() {
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    let namelist = root.join("case.nml");
+    let restart = root.join("restart");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&namelist, "&nl_colm\n DEF_USE_PFT=.true.\n/\n").unwrap();
+    let config =
+        SpatialPftStaticConfig::new(&namelist, &landdata, &restart, "test", 2005, "w180_s90");
+    write_i32(
+        &landdata,
+        "landpatch",
+        "landpatch",
+        "settyp",
+        &[11, 13, 15, 17],
+    );
+    assert!(read_pft_vectors(config).unwrap().class.is_empty());
+    assert!(write_spatial_pft_constant_restart(config)
+        .unwrap()
+        .is_none());
+    assert!(!restart.exists());
+
+    write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[1.0]);
+    assert!(read_pft_vectors(config)
+        .unwrap_err()
+        .to_string()
+        .contains("length"));
+    std::fs::remove_file(block_path(
+        &landdata, "pctpft", "pct_pfts", 2005, "w180_s90",
+    ))
+    .unwrap();
+    write_f64(&landdata, "LAI", "LAI_pfts01", "LAI_pfts", &[2.0]);
+    assert!(read_pft_monthly(config, 2005, "LAI_pfts", 1, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("length"));
+
+    // An explicit aligned empty file is accepted as well as the native omitted block.
+    write_i32(&landdata, "landpft", "landpft", "settyp", &[]);
+    let topology = block_path(&landdata, "landpft", "landpft", 2005, "w180_s90");
+    {
+        let mut file = netcdf::append(&topology).unwrap();
+        file.add_variable::<i64>("eindex", &["pft"]).unwrap();
+        file.add_variable::<i32>("ipxstt", &["pft"]).unwrap();
+        file.add_variable::<i32>("ipxend", &["pft"]).unwrap();
+    }
+    assert!(read_pft_vectors(config).unwrap().class.is_empty());
+    for class in [1, 12, 16] {
+        write_i32(&landdata, "landpatch", "landpatch", "settyp", &[class]);
+        assert!(read_pft_vectors(config)
+            .unwrap_err()
+            .to_string()
+            .contains("requires nonempty PFT"));
+    }
+    write_i32(&landdata, "landpatch", "landpatch", "settyp", &[17]);
+    std::fs::write(&topology, b"not a netcdf file").unwrap();
+    assert!(read_pft_vectors(config)
+        .unwrap_err()
+        .to_string()
+        .contains("cannot open"));
     std::fs::remove_dir_all(root).unwrap();
 }
 

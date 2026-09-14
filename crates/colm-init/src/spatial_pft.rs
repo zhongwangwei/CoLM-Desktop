@@ -64,14 +64,15 @@ pub struct SpatialPftStaticConfig<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpatialPftConstantRestartFiles {
     pub common: ConstantRestartFiles,
-    pub pft: PathBuf,
+    /// Absent for blocks without PFTs, unless patch-level CROP fields are present.
+    pub pft: Option<PathBuf>,
     pub bgc: Option<BgcConstantRestartFiles>,
 }
 
 /// Arguments for the PFT cold start of one spatial block.
 ///
-/// The PFT and BGC state derives through `colm-core`; CROP remains separate
-/// because its crop-management state has not yet been materialized spatially.
+/// PFT and BGC state derives through `colm-core`; crop management uses the
+/// shared spatial mappings in [`crate::crop`].
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialPftTimeConfig<'a> {
     pub static_config: SpatialPftStaticConfig<'a>,
@@ -101,7 +102,8 @@ pub struct SpatialPftTimeConfig<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpatialPftTimeRestartFiles {
     pub common: TimeRestartFile,
-    pub pft: PathBuf,
+    /// CoLM omits landpft-backed files for blocks without PFTs.
+    pub pft: Option<PathBuf>,
     pub bgc: Option<BgcTimeRestartFile>,
 }
 
@@ -150,39 +152,28 @@ impl<'a> SpatialPftTimeConfig<'a> {
 }
 
 /// Writes the PFT/PC constant restart for one Rust `mksrfdata-rs spatial-pft` block.
-pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) -> Result<PathBuf> {
+pub fn write_spatial_pft_constant_restart(
+    config: SpatialPftStaticConfig<'_>,
+) -> Result<Option<PathBuf>> {
     let document = read_pft_document(config.namelist)?;
     let compression_level = crate::restart::restart_compression_level(&document)?;
-    let class = read_i32(
-        config.landdata,
-        "landpft",
-        "landpft",
-        "settyp",
-        config.land_cover_year,
-        config.block_label,
-    )?;
-    let fraction = read_f64(
-        config.landdata,
+    let class = read_pft_classes(config)?;
+    let fraction = read_pft_f64(
+        config,
         "pctpft",
         "pct_pfts",
         "pct_pfts",
         config.land_cover_year,
-        config.block_label,
+        class.len(),
     )?;
-    let observed_height_m = read_f64(
-        config.landdata,
+    let observed_height_m = read_pft_f64(
+        config,
         "htop",
         "htop_pfts",
         "htop_pfts",
         config.land_cover_year,
-        config.block_label,
+        class.len(),
     )?;
-    ensure!(
-        !class.is_empty()
-            && class.len() == fraction.len()
-            && class.len() == observed_height_m.len(),
-        "spatial landpft, pct_pfts, and htop_pfts vectors must be nonempty and have equal lengths"
-    );
     let crop_fraction = optional_bool_or(&document, "DEF_USE_CROP", false)?.then(|| {
         read_f64(
             config.landdata,
@@ -212,6 +203,9 @@ pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) ->
         );
     }
     let canopy = pft_canopy(&document, &class, &observed_height_m)?;
+    if class.is_empty() && crop_fraction.is_none() {
+        return Ok(None);
+    }
     write_pft_constant_restart(
         config.restart_dir,
         config.case_name,
@@ -226,6 +220,7 @@ pub fn write_spatial_pft_constant_restart(config: SpatialPftStaticConfig<'_>) ->
             crop_fraction: crop_fraction.as_deref(),
         },
     )
+    .map(Some)
 }
 
 /// Writes both restart families required by a spatial PFT cold start.
@@ -497,8 +492,20 @@ pub fn write_spatial_pft_cold_time_restarts(
     });
     let pft_count = pfts.class.len();
     let month = crate::spatial_time::month(config.date)?;
-    let mut total_lai = read_pft_monthly(config.static_config, config.lai_year, "LAI_pfts", month)?;
-    let mut total_sai = read_pft_monthly(config.static_config, config.lai_year, "SAI_pfts", month)?;
+    let mut total_lai = read_pft_monthly(
+        config.static_config,
+        config.lai_year,
+        "LAI_pfts",
+        month,
+        pft_count,
+    )?;
+    let mut total_sai = read_pft_monthly(
+        config.static_config,
+        config.lai_year,
+        "SAI_pfts",
+        month,
+        pft_count,
+    )?;
     ensure!(
         total_lai.len() == pft_count && total_sai.len() == pft_count,
         "spatial PFT monthly vegetation has inconsistent vector lengths"
@@ -1034,68 +1041,71 @@ pub fn write_spatial_pft_cold_time_restarts(
     let plant_water = vec![-25_000.0; 4 * pft_count];
     let conductance = vec![10_000.0; pft_count];
     let ozone_zero = vec![0.0; pft_count];
-    let pft = write_pft_time_restart(
-        config.static_config.restart_dir,
-        config.static_config.case_name,
-        config.static_config.land_cover_year,
-        config.date,
-        config.static_config.block_label,
-        PftTimeRestartInput {
-            compression_level,
-            fields: PftTimeFields {
-                leaf_temperature_k: &leaf_temperature,
-                canopy_water_mm: &zero,
-                canopy_rain_mm: &zero,
-                canopy_snow_mm: &zero,
-                wet_snow_fraction: &zero,
-                vegetation_fraction: &one,
-                total_lai: &total_lai,
-                lai: &total_lai,
-                total_sai: &total_sai,
-                sai: &total_sai,
-                sunlit_absorption: &sunlit,
-                shaded_absorption: &shaded,
-                thermal_gap_fraction: &thermal_gap,
-                shade_fraction: &shade,
-                direct_extinction: &direct_extinction,
-                diffuse_extinction: &diffuse_extinction,
-                reference_temperature_k: &leaf_temperature,
-                reference_humidity: &reference_humidity,
-                stomatal_resistance_s_m: &missing,
-                roughness_length_m: &roughness,
-            },
-            hyperspectral: config.use_hyperspectral.then_some(PftHyperspectralFields {
-                sunlit_absorption: &high_resolution_sunlit,
-                shaded_absorption: &high_resolution_shaded,
-            }),
-            plant_hydraulics: config.plant_hydraulics.then_some(PftPlantHydraulicFields {
-                water_potential_mm: &plant_water,
-                sunlit_stomatal_conductance: &conductance,
-                shaded_stomatal_conductance: &conductance,
-                vegetation_nodes: 4,
-            }),
-            bgc: bgc_state
-                .as_ref()
-                .zip(bgc_pft_values.as_deref())
-                .map(|(state, values)| PftBgcFields {
-                    values,
-                    active_crop_years: &state.active_crop_years,
-                }),
-            crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),
-            ozone: config.ozone_stress.then_some(PftOzoneFields {
-                lai_old: &total_lai,
-                sunlit_uptake: &ozone_zero,
-                shaded_uptake: &ozone_zero,
-                sunlit_vegetation_coefficient: &one,
-                shaded_vegetation_coefficient: &one,
-                sunlit_stomatal_coefficient: &one,
-                shaded_stomatal_coefficient: &one,
-            }),
-            irrigation_method: crop
-                .as_ref()
-                .and_then(crate::CropColdStartState::irrigation_method),
-        },
-    )?;
+    let pft = (pft_count > 0)
+        .then(|| {
+            write_pft_time_restart(
+                config.static_config.restart_dir,
+                config.static_config.case_name,
+                config.static_config.land_cover_year,
+                config.date,
+                config.static_config.block_label,
+                PftTimeRestartInput {
+                    compression_level,
+                    fields: PftTimeFields {
+                        leaf_temperature_k: &leaf_temperature,
+                        canopy_water_mm: &zero,
+                        canopy_rain_mm: &zero,
+                        canopy_snow_mm: &zero,
+                        wet_snow_fraction: &zero,
+                        vegetation_fraction: &one,
+                        total_lai: &total_lai,
+                        lai: &total_lai,
+                        total_sai: &total_sai,
+                        sai: &total_sai,
+                        sunlit_absorption: &sunlit,
+                        shaded_absorption: &shaded,
+                        thermal_gap_fraction: &thermal_gap,
+                        shade_fraction: &shade,
+                        direct_extinction: &direct_extinction,
+                        diffuse_extinction: &diffuse_extinction,
+                        reference_temperature_k: &leaf_temperature,
+                        reference_humidity: &reference_humidity,
+                        stomatal_resistance_s_m: &missing,
+                        roughness_length_m: &roughness,
+                    },
+                    hyperspectral: config.use_hyperspectral.then_some(PftHyperspectralFields {
+                        sunlit_absorption: &high_resolution_sunlit,
+                        shaded_absorption: &high_resolution_shaded,
+                    }),
+                    plant_hydraulics: config.plant_hydraulics.then_some(PftPlantHydraulicFields {
+                        water_potential_mm: &plant_water,
+                        sunlit_stomatal_conductance: &conductance,
+                        shaded_stomatal_conductance: &conductance,
+                        vegetation_nodes: 4,
+                    }),
+                    bgc: bgc_state.as_ref().zip(bgc_pft_values.as_deref()).map(
+                        |(state, values)| PftBgcFields {
+                            values,
+                            active_crop_years: &state.active_crop_years,
+                        },
+                    ),
+                    crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),
+                    ozone: config.ozone_stress.then_some(PftOzoneFields {
+                        lai_old: &total_lai,
+                        sunlit_uptake: &ozone_zero,
+                        shaded_uptake: &ozone_zero,
+                        sunlit_vegetation_coefficient: &one,
+                        shaded_vegetation_coefficient: &one,
+                        sunlit_stomatal_coefficient: &one,
+                        shaded_stomatal_coefficient: &one,
+                    }),
+                    irrigation_method: crop
+                        .as_ref()
+                        .and_then(crate::CropColdStartState::irrigation_method),
+                },
+            )
+        })
+        .transpose()?;
     let bgc = bgc_state
         .as_ref()
         .map(|state| {
@@ -1501,7 +1511,9 @@ fn map_cn_scalar(
     mapping.average_required(&map_field_2d(file, name, grid)?, name)
 }
 
-fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVectors> {
+// Empty block files are omitted by mksrfdata. Only patch topology can prove
+// their absence is legitimate; never turn missing natural/CFT inputs into PFTs.
+fn read_pft_classes(config: SpatialPftStaticConfig<'_>) -> Result<Vec<i32>> {
     let path = block_path(
         config.landdata,
         "landpft",
@@ -1509,40 +1521,111 @@ fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVect
         config.land_cover_year,
         config.block_label,
     );
-    let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
-    let class = values_i32(&file, "settyp")?;
-    let element = file
-        .variable("eindex")
-        .context("spatial landpft has no eindex")?
-        .get_values::<i64, _>(..)?;
-    let start = values_i32(&file, "ipxstt")?;
-    let end = values_i32(&file, "ipxend")?;
-    let shared_fraction = match file.variable("pctshared") {
-        Some(variable) => variable
-            .get_values::<f64, _>(..)
-            .context("cannot read spatial landpft sharing fractions")?,
-        None => vec![1.0; class.len()],
+    let class = if path.try_exists()? {
+        let file =
+            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        values_i32(&file, "settyp")?
+    } else {
+        Vec::new()
     };
-    let fraction = read_f64(
+    if class.is_empty() {
+        let patches = read_i32(
+            config.landdata,
+            "landpatch",
+            "landpatch",
+            "settyp",
+            config.land_cover_year,
+            config.block_label,
+        )?;
+        ensure!(
+            !patches.is_empty(),
+            "empty PFT block needs nonempty landpatch topology"
+        );
+        for patch in patches {
+            ensure!(
+                spatial_patch_type(LandCoverScheme::Igbp, patch)? != 0,
+                "natural/CFT landpatch class {patch} requires nonempty PFT topology in {}",
+                path.display()
+            );
+        }
+    }
+    Ok(class)
+}
+
+fn read_pft_f64(
+    config: SpatialPftStaticConfig<'_>,
+    directory: &str,
+    stem: &str,
+    variable: &str,
+    year: i32,
+    count: usize,
+) -> Result<Vec<f64>> {
+    let path = block_path(config.landdata, directory, stem, year, config.block_label);
+    if count == 0 && !path.try_exists()? {
+        return Ok(Vec::new());
+    }
+    let values = read_f64(
         config.landdata,
+        directory,
+        stem,
+        variable,
+        year,
+        config.block_label,
+    )?;
+    ensure!(
+        values.len() == count,
+        "{variable} length must match the {count} PFT entries"
+    );
+    Ok(values)
+}
+
+fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVectors> {
+    let class = read_pft_classes(config)?;
+    let path = block_path(
+        config.landdata,
+        "landpft",
+        "landpft",
+        config.land_cover_year,
+        config.block_label,
+    );
+    let (element, start, end, shared_fraction) = if path.try_exists()? {
+        let file =
+            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        let element = file
+            .variable("eindex")
+            .context("spatial landpft has no eindex")?
+            .get_values::<i64, _>(..)?;
+        let start = values_i32(&file, "ipxstt")?;
+        let end = values_i32(&file, "ipxend")?;
+        let shared_fraction = match file.variable("pctshared") {
+            Some(variable) => variable
+                .get_values::<f64, _>(..)
+                .context("cannot read spatial landpft sharing fractions")?,
+            None => vec![1.0; class.len()],
+        };
+        (element, start, end, shared_fraction)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+    let fraction = read_pft_f64(
+        config,
         "pctpft",
         "pct_pfts",
         "pct_pfts",
         config.land_cover_year,
-        config.block_label,
+        class.len(),
     )?;
-    let observed_height_m = read_f64(
-        config.landdata,
+    let observed_height_m = read_pft_f64(
+        config,
         "htop",
         "htop_pfts",
         "htop_pfts",
         config.land_cover_year,
-        config.block_label,
+        class.len(),
     )?;
     let count = class.len();
     ensure!(
-        count > 0
-            && fraction.len() == count
+        fraction.len() == count
             && observed_height_m.len() == count
             && element.len() == count
             && start.len() == count
@@ -1551,8 +1634,10 @@ fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVect
             && shared_fraction
                 .iter()
                 .all(|value| value.is_finite() && *value >= 0.0)
-            && fraction.iter().all(|value| value.is_finite() && *value >= 0.0),
-        "spatial PFT topology, fraction, and height vectors must be finite and have equal nonzero lengths"
+            && fraction
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "spatial PFT topology, fraction, and height vectors must be finite and have equal lengths"
     );
     Ok(SpatialPftVectors {
         class,
@@ -1613,16 +1698,10 @@ fn read_pft_monthly(
     year: i32,
     variable: &str,
     month: u8,
+    count: usize,
 ) -> Result<Vec<f64>> {
     let stem = format!("{variable}{month:02}");
-    let values = read_f64(
-        config.landdata,
-        "LAI",
-        &stem,
-        variable,
-        year,
-        config.block_label,
-    )?;
+    let values = read_pft_f64(config, "LAI", &stem, variable, year, count)?;
     ensure!(
         values
             .iter()

@@ -77,6 +77,22 @@ residual remains outside tolerance. Other modes still require this gate.
    `DEF_Runoff_SCHEME=0` and the 9-aspect curvature/slope/aspect vectors when
    `DEF_USE_Forcing_Downscaling_Simple=.true.`.
 
+## Empty PFT blocks
+
+Spatial PFT/PC block adapters return optional PFT paths: `None` means the
+landpatch block has no natural/CFT owner and the corresponding landpft-backed
+file is absent, as in original CoLM. It does not mean common/BGC initialization
+was skipped. Missing input remains an error for any natural/CFT owner, including
+IGBP bare land. CROP patch-level fields remain active without local CFTs.
+
+Rust additionally accepts an all-nonnatural spatial domain; pristine mkini
+cannot reload a domain with no landpft files at all. This is explicitly a Desktop
+extension. Empty-PFT CROP constants retain `cropfrac` in the existing empty-PFT
+container; exact original schema parity for that source edge remains unverified.
+See the [parity audit](preprocessing-parity-status.md#spatial-blocks-without-pfts)
+for the paired original PC mixed-block initialization/runtime evidence and its
+limits. The overall migration is still not complete.
+
 ## Performance constraints
 
 - Store every patch/layer field as one layer-major flat buffer; do not recreate Fortran's

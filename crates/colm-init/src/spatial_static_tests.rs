@@ -802,7 +802,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
         values_f64(&common, "slp_type_patches").unwrap(),
         [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
     );
-    let pft = netcdf::open(&files.pft).unwrap();
+    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_i32(&pft, "pftclass").unwrap(), [1]);
     assert_eq!(values_f64(&common, "htop").unwrap(), [20.0]);
     assert_eq!(values_f64(&pft, "htop_p").unwrap(), [20.0]);
@@ -892,7 +892,7 @@ fn spatial_pft_wmo_virtual_patch_keeps_sentinel_geometry_and_time_state() {
         },
     ))
     .unwrap();
-    let pft_time = netcdf::open(&files.pft).unwrap();
+    let pft_time = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_f64(&pft_time, "tlai_p").unwrap(), [2.5]);
     assert_eq!(values_f64(&pft_time, "tsai_p").unwrap(), [0.8]);
     let common_time = netcdf::open(&files.common.block).unwrap();
@@ -955,7 +955,7 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     assert_eq!(values_f64(&common, "z0m").unwrap(), [2.0]);
     assert_eq!(values_f64(&common, "zwt").unwrap(), [2.0]);
     assert_eq!(values_f64(&common, "snowdp").unwrap(), [0.2]);
-    let pft = netcdf::open(&files.pft).unwrap();
+    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_f64(&pft, "tlai_p").unwrap(), [2.5]);
     assert_eq!(values_f64(&pft, "tsai_p").unwrap(), [0.4]);
     assert_eq!(values_f64(&pft, "z0m_p").unwrap(), [2.0]);
@@ -987,7 +987,7 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     );
     pc_config.plant_hydraulics = false;
     let pc_files = crate::write_spatial_pft_cold_time_restarts(pc_config).unwrap();
-    let pc = netcdf::open(pc_files.pft).unwrap();
+    let pc = netcdf::open(pc_files.pft.unwrap()).unwrap();
     let shade = values_f64(&pc, "fshade_p").unwrap()[0];
     assert!(shade.is_finite() && shade != crate::MISSING);
     std::fs::remove_dir_all(root).unwrap();
@@ -1075,7 +1075,7 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
     assert!(transmittance[1].is_finite() && (transmittance[1] - 0.05).abs() > 1.0e-6);
     assert_eq!(reflectance[0], -999.0);
     assert_eq!(transmittance[0], -999.0);
-    let pft = netcdf::open(&files.pft).unwrap();
+    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_f64(&pft, "ssun_hires_p").unwrap().len(), 211 * 2);
     assert_eq!(values_f64(&pft, "ssha_hires_p").unwrap().len(), 211 * 2);
 
@@ -1121,7 +1121,7 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
         .unwrap()
         .iter()
         .all(|value| *value == -999.0));
-    let pc = netcdf::open(pc_files.pft).unwrap();
+    let pc = netcdf::open(pc_files.pft.unwrap()).unwrap();
     assert!(values_f64(&pc, "ssun_hires_p")
         .unwrap()
         .iter()
@@ -1212,8 +1212,122 @@ fn spatial_hyperspectral_keeps_nonnatural_patches_out_of_pft_canopy() {
         }
         assert_eq!(values_f64(&file, "thermk").unwrap()[3], crate::MISSING);
         assert_eq!(values_f64(&file, "thermk").unwrap()[4], 1.0);
-        let pft = netcdf::open(files.pft).unwrap();
+        let pft = netcdf::open(files.pft.unwrap()).unwrap();
         assert_eq!(values_f64(&pft, "tlai_p").unwrap().len(), 1);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn spatial_pft_pc_empty_blocks_keep_common_cn_and_crop_without_pft_files() {
+    let root = temp_dir("zero-pft");
+    let landdata = root.join("landdata");
+    write_mixed_landdata(&landdata, 2005, "w180_s90", &[11, 13, 15, 17], &[1; 4]);
+    for (stem, name, value) in [
+        ("LAI_patches01", "LAI_patches", 2.5),
+        ("SAI_patches01", "SAI_patches", 0.4),
+    ] {
+        write_f64_vec(&landdata, "LAI", stem, name, 2005, "w180_s90", &[value; 4]);
+    }
+    write_f64_vec(
+        &landdata,
+        "pctpft",
+        "pct_crops",
+        "pct_crops",
+        2005,
+        "w180_s90",
+        &[0.0; 4],
+    );
+    let cn = root.join("cn.nc");
+    write_cn_equilibrium(&cn);
+    let runtime = root.join("runtime");
+    write_crop_runtime(&runtime);
+    let namelist = root.join("case.nml");
+    for mode in ["PFT", "PC"] {
+        for (label, bgc, use_cn, crop, tuning) in [
+            ("common", false, false, false, false),
+            ("bgc", true, false, false, false),
+            ("cn", true, true, false, false),
+            ("crop-tuning", true, true, true, true),
+            ("crop-map", true, true, true, false),
+        ] {
+            let logical = |value| if value { ".true." } else { ".false." };
+            std::fs::write(
+                &namelist,
+                format!(
+                    "&nl_colm
+ DEF_USE_{mode}=.true.
+ DEF_USE_BGC={}
+ DEF_USE_CN_INIT={}
+ DEF_USE_TRACER=.true.
+ DEF_TRACER_NUM=0
+ DEF_file_cn_init='{}'
+ DEF_USE_CROP={}
+ DEF_USE_FERT=.false.
+ DEF_USE_IRRIGATION=.false.
+ DEF_TUNING_CROP_PLANTING_DAY={}
+ DEF_dir_runtime='{}'
+/\n",
+                    logical(bgc),
+                    logical(use_cn),
+                    cn.display(),
+                    logical(crop),
+                    if tuning { 120.0 } else { -9999.0 },
+                    runtime.display()
+                ),
+            )
+            .unwrap();
+            let restart = root.join(format!("{mode}-{label}"));
+            let static_config = crate::SpatialPftStaticConfig::new(
+                &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+            );
+            let constant =
+                crate::write_spatial_pft_constant_restarts(static_config, false, false).unwrap();
+            let file = netcdf::open(&constant.common.block).unwrap();
+            assert_eq!(values_i32(&file, "patchtype").unwrap(), [2, 1, 3, 4]);
+            assert_eq!(constant.bgc.is_some(), bgc);
+            assert_eq!(constant.pft.is_some(), crop);
+            if let Some(path) = constant.pft {
+                let pft = netcdf::open(path).unwrap();
+                assert_eq!(pft.dimension_len("pft"), Some(0));
+                assert_eq!(values_f64(&pft, "cropfrac").unwrap(), [0.0; 4]);
+            }
+            drop(file);
+            let config = crate::SpatialPftTimeConfig::new(
+                static_config,
+                crate::RestartDate {
+                    year: 2005,
+                    julian_day: 1,
+                    seconds: 43200,
+                },
+            );
+            let time = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+            let file = netcdf::open(&time.common.block).unwrap();
+            assert_eq!(values_f64(&file, "lai").unwrap(), [2.5, 2.5, 2.5, 0.0]);
+            assert_eq!(values_f64(&file, "thermk").unwrap()[2], crate::MISSING);
+            assert_eq!(time.bgc.is_some(), bgc);
+            assert!(time.pft.is_none());
+            if let Some(bgc) = time.bgc {
+                let file = netcdf::open(bgc.block).unwrap();
+                assert_eq!(values_f64(&file, "totvegc").unwrap(), [0.0; 4]);
+                if use_cn {
+                    assert_eq!(
+                        file.variable("decomp_cpools_vr")
+                            .unwrap()
+                            .get_value::<f64, _>((0, 0, 0))
+                            .unwrap(),
+                        1.0
+                    );
+                    assert_eq!(&values_f64(&file, "sminn_vr").unwrap()[..10], &[10.0; 10]);
+                }
+                if crop {
+                    assert_eq!(
+                        values_f64(&file, "pdrice2").unwrap(),
+                        [if tuning { 0.0 } else { 2.0 }; 4]
+                    );
+                }
+            }
+        }
     }
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1272,7 +1386,7 @@ fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps(
     let common = netcdf::open(&files.common.block).unwrap();
     assert_eq!(values_f64(&common, "tlai").unwrap(), [0.0]);
     assert_eq!(values_f64(&common, "tsai").unwrap(), [0.0]);
-    let pft = netcdf::open(&files.pft).unwrap();
+    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_f64(&pft, "tlai_p").unwrap(), [0.0]);
     assert_eq!(values_f64(&pft, "plantdate_p").unwrap(), [120.0]);
     let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
@@ -1337,7 +1451,7 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
     config.plant_hydraulics = false;
     let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
 
-    let pft = netcdf::open(&files.pft).unwrap();
+    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_f64(&pft, "plantdate_p").unwrap(), [123.0]);
     let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
     assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [2.0]);
@@ -1388,7 +1502,7 @@ fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
     );
     config.plant_hydraulics = false;
     let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
-    let pft = netcdf::open(&files.pft).unwrap();
+    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_f64(&pft, "leafc_p").unwrap(), [200.0]);
     let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
     assert_eq!(values_f64(&bgc, "sminn_vr").unwrap(), [10.0; 10]);
@@ -1513,7 +1627,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
                 );
             }
             assert_eq!(values_f64(&bgc, "totvegc").unwrap()[1], 0.0);
-            let pft = netcdf::open(files.pft).unwrap();
+            let pft = netcdf::open(files.pft.unwrap()).unwrap();
             assert_eq!(pft.dimension_len("pft"), Some(1));
             if label == "seeded" {
                 assert_eq!(
