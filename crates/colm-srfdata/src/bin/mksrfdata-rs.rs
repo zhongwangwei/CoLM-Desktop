@@ -251,10 +251,6 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         args.output_2m_wmo = false;
     }
     ensure!(
-        !args.output_2m_wmo || args.crop_surface.is_none(),
-        "CROP plus WMO is not verified: upstream land2mWMO does not resize cropclass/pctshared"
-    );
-    ensure!(
         args.lulcc_lai_only
             || !args.output_2m_wmo
             || args.soil_hyper_albedo_dir.is_none(),
@@ -329,7 +325,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &topology.pixel,
         COLM_500M,
     )?;
-    let crop = args
+    let mut crop = args
         .crop_surface
         .as_ref()
         .map(|surface| {
@@ -359,9 +355,14 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         })
         .transpose()?;
     if args.output_2m_wmo {
-        base_patches = base_patches.with_wmo_patches(&mut topology.land_elements)?;
-        base_layout =
-            base_patches.aggregation_layout(&topology.mesh, base_patches.wmo_sources()?)?;
+        if let Some(crop_topology) = crop.take() {
+            crop =
+                Some(crop_topology.with_wmo_patches(&topology.mesh, &mut topology.land_elements)?);
+        } else {
+            base_patches = base_patches.with_wmo_patches(&mut topology.land_elements)?;
+            base_layout =
+                base_patches.aggregation_layout(&topology.mesh, base_patches.wmo_sources()?)?;
+        }
     }
     let (patches, layout) = match &crop {
         Some(crop) => (&crop.land_patches, &crop.layout),
@@ -5859,12 +5860,10 @@ mod tests {
                     expected.then_some("true")
                 );
                 if expected {
-                    for option in ["--crop-surface", "--soil-hyper-albedo-dir"] {
-                        let mut unsupported = command.args.clone();
-                        unsupported.extend([option.into(), "absent.nc".into()]);
-                        let error = materialize_spatial_pft(&unsupported).unwrap_err();
-                        assert!(error.to_string().contains("not verified"), "{error:#}");
-                    }
+                    let mut unsupported = command.args.clone();
+                    unsupported.extend(["--soil-hyper-albedo-dir".into(), "absent.nc".into()]);
+                    let error = materialize_spatial_pft(&unsupported).unwrap_err();
+                    assert!(error.to_string().contains("not verified"), "{error:#}");
                 }
                 if mode != "LCT" {
                     assert_eq!(
@@ -6479,7 +6478,7 @@ mod tests {
     }
 
     #[test]
-    fn spatial_pft_materializer_writes_runtime_shares_lulcc_and_wmo_skip() {
+    fn spatial_pft_materializer_writes_runtime_shares_lulcc_and_wmo() {
         let (root, _) = case_namelist("pft-wmo-output", "&nl_colm /\n");
         let mesh = root.join("mesh.nc");
         let mut file = netcdf::create(&mesh).unwrap();
@@ -6577,6 +6576,98 @@ mod tests {
                     .unwrap(),
                 if wmo { vec![1, 1, -1] } else { vec![1, 1] }
             );
+        }
+
+        let tile = root.join("RG_90_-180_85_-175.MOD2005.nc");
+        let mut file = netcdf::append(&tile).unwrap();
+        let mut crop_percent = file
+            .add_variable::<f64>("PCT_CROP", &["lat", "lon"])
+            .unwrap();
+        crop_percent.set_chunking(&[1, 2]).unwrap();
+        crop_percent
+            .put_values(&[50.0, 50.0], (0..1, 0..2))
+            .unwrap();
+        file.close().unwrap();
+
+        let crop_surface = root.join("global_CFT_surface_data.nc");
+        let mut file = netcdf::create(&crop_surface).unwrap();
+        file.add_dimension("cft", CFT_CLASSES).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[(COLM_500M.lat_s(1) + COLM_500M.lat_n(1)) * 0.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(
+                &[
+                    (COLM_500M.lon_w(1) + COLM_500M.lon_e(1)) * 0.5,
+                    (COLM_500M.lon_w(2) + COLM_500M.lon_e(2)) * 0.5,
+                ],
+                ..,
+            )
+            .unwrap();
+        let mut cft = vec![0.0; CFT_CLASSES * 2];
+        cft[..2].fill(100.0);
+        file.add_variable::<f64>("PCT_CFT", &["cft", "lat", "lon"])
+            .unwrap()
+            .put_values(&cft, (.., .., ..))
+            .unwrap();
+        file.close().unwrap();
+
+        let crop_output = root.join("output-crop-wmo");
+        materialize_spatial_pft(&[
+            "latlon".into(),
+            mesh.display().to_string(),
+            landtype.display().to_string(),
+            crop_output.display().to_string(),
+            "2005".into(),
+            "--plant-tiles".into(),
+            root.display().to_string(),
+            "--crop-surface".into(),
+            crop_surface.display().to_string(),
+            "--output-2m-wmo".into(),
+            "true".into(),
+        ])
+        .unwrap();
+        let patches =
+            netcdf::open(crop_output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+        assert_eq!(
+            patches
+                .variable("settyp")
+                .unwrap()
+                .get_values::<i32, _>(..)
+                .unwrap(),
+            [1, 12, 1]
+        );
+        for (actual, expected) in patches
+            .variable("pctshared")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()
+            .iter()
+            .zip([0.5, 0.5, 0.5])
+        {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+        let pfts = netcdf::open(crop_output.join("landpft/2005/landpft_W180_S90.nc")).unwrap();
+        assert_eq!(
+            pfts.variable("settyp")
+                .unwrap()
+                .get_values::<i32, _>(..)
+                .unwrap(),
+            [12, 13, 15, 13]
+        );
+        for (actual, expected) in pfts
+            .variable("pctshared")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()
+            .iter()
+            .zip([0.25, 0.75, 0.5, 1.0])
+        {
+            assert!((actual - expected).abs() < 1.0e-12);
         }
 
         let topology = SpatialTopology {

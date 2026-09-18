@@ -2,7 +2,10 @@
 
 use anyhow::{ensure, Context, Result};
 
-use crate::{surface::FlatPatches, topology::FlatLandPatches};
+use crate::{
+    surface::FlatPatches,
+    topology::{FlatLandElements, FlatLandPatches, FlatMesh},
+};
 
 /// CoLM IGBP's crop land-cover type (`CROPLAND`).
 pub const IGBP_CROPLAND: i32 = 12;
@@ -40,6 +43,48 @@ pub struct CropLandPatchTopology {
     pub pctshared: Vec<f64>,
     /// One-based CFT class for crop patches, otherwise `None`.
     pub crop_class: Vec<Option<usize>>,
+}
+
+impl CropLandPatchTopology {
+    /// Append virtual WMO patches after crop partitioning, copying the source
+    /// patch's shared-area metadata for consumers that index every patch.
+    pub fn with_wmo_patches(
+        self,
+        mesh: &FlatMesh,
+        elements: &mut FlatLandElements,
+    ) -> Result<Self> {
+        ensure!(
+            self.pctshared.len() == self.land_patches.len()
+                && self.crop_class.len() == self.land_patches.len(),
+            "crop metadata must match the land-patch topology"
+        );
+        let land_patches = self.land_patches.with_wmo_patches(elements)?;
+        let sources = land_patches.wmo_sources()?;
+        let mut pctshared = Vec::with_capacity(land_patches.len());
+        let mut crop_class = Vec::with_capacity(land_patches.len());
+        let mut physical = 0;
+        for source in &sources {
+            if let Some(source) = source {
+                pctshared.push(pctshared[*source]);
+                crop_class.push(crop_class[*source]);
+            } else {
+                pctshared.push(self.pctshared[physical]);
+                crop_class.push(self.crop_class[physical]);
+                physical += 1;
+            }
+        }
+        ensure!(
+            physical == self.pctshared.len(),
+            "WMO insertion did not preserve every physical crop patch"
+        );
+        let layout = land_patches.aggregation_layout(mesh, sources)?;
+        Ok(Self {
+            land_patches,
+            layout,
+            pctshared,
+            crop_class,
+        })
+    }
 }
 
 /// The branch chosen by `Aggregation_PercentagesPFT` for one land patch.
@@ -314,10 +359,6 @@ fn build_pft_topology_inner(
 
     for patch in 0..land_patches.len() {
         let (kind, classes) = if let Some(source) = patches.wmo_source_for(patch) {
-            ensure!(
-                crop_class.is_none(),
-                "CROP plus WMO PFT topology is ambiguous in upstream land2mWMO"
-            );
             (
                 PftPatchKind::Natural,
                 vec![(

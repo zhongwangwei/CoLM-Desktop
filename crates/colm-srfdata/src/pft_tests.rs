@@ -442,8 +442,46 @@ fn crop_topology_splits_shared_patches_and_preserves_cft_ownership() {
         .unwrap()
     );
 
+    let mesh =
+        crate::topology::FlatMesh::new(vec![8, 9], vec![0, 2, 3], vec![1, 2, 3], vec![1, 1, 1])
+            .unwrap();
+    let mut elements = mesh.land_elements();
+    let crop_wmo = crop.clone().with_wmo_patches(&mesh, &mut elements).unwrap();
+    assert_eq!(crop_wmo.land_patches.set_type, [1, 12, 12, 1, 17]);
+    for (actual, expected) in crop_wmo
+        .pctshared
+        .iter()
+        .zip([0.5, 0.3125, 0.1875, 0.5, 1.0])
+    {
+        assert!((actual - expected).abs() < 1.0e-12);
+    }
+    assert_eq!(crop_wmo.crop_class, [None, Some(1), Some(2), None, None]);
+    assert_eq!(crop_wmo.layout.wmo_source_for(3), Some(0));
+
     let mut raw_pft = vec![0.0; 16 * 3];
     raw_pft[..3].copy_from_slice(&[50.0, 50.0, 0.0]);
+    let wmo_pfts = build_crop_pft_topology(
+        &crop_wmo.land_patches,
+        &crop_wmo.layout,
+        &crop_wmo.crop_class,
+        16,
+        15,
+        &raw_pft,
+        &[1.0, 3.0, 2.0],
+    )
+    .unwrap();
+    assert_eq!(wmo_pfts.patch_offsets, [0, 1, 2, 3, 4, 4]);
+    assert_eq!(wmo_pfts.pft_classes, [0, 15, 16, 0]);
+    assert_eq!(
+        wmo_pfts.patch_kind,
+        [
+            PftPatchKind::Natural,
+            PftPatchKind::Crop,
+            PftPatchKind::Crop,
+            PftPatchKind::Natural,
+            PftPatchKind::Other,
+        ]
+    );
     let pfts = build_crop_pft_topology(
         &crop.land_patches,
         &crop.layout,
