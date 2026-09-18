@@ -236,7 +236,6 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
     snow.temperature_k[top] = 268.0;
     snow.liquid_water_kg_m2[top] = 1.0;
     snow.ice_water_kg_m2[top] = 30.0;
-    snow.previous_ice_fraction[top] = 30.0 / (0.05 * 917.0);
     let mut state = StandardLctSnowSoilState {
         energy: energy_state(forcing),
         snow,
@@ -265,12 +264,14 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
     };
 
     let first = standard_lct_snow_soil_step(input, &mut state).unwrap();
-    let second = standard_lct_snow_soil_step(input, &mut state).unwrap();
+    assert_eq!(state.snow.layer_count, -2);
+    let output = standard_lct_snow_soil_step(input, &mut state).unwrap();
 
-    assert!(first.energy.thermal_water.is_some());
-    assert!(first.water.snow.bottom_drainage_kg_m2_s.is_finite());
-    assert!(second.water.soil.total_runoff_mm_s.is_finite());
-    assert_eq!(state.snow.layer_count, -1);
+    assert!(first.energy.interception.ground_snow_kg_m2_s > 0.0);
+    assert!(output.energy.thermal_water.is_some());
+    assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
+    assert!(output.water.soil.total_runoff_mm_s.is_finite());
+    assert!(state.snow.layer_count < 0);
     assert_eq!(
         state.soil_temperature_k.len(),
         state.soil_water.liquid_water_kg_m2.len()
@@ -279,7 +280,13 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
         .soil_temperature_k
         .iter()
         .all(|value| value.is_finite()));
-    assert!(state.snow.temperature_k[top].is_finite());
+    let snow_mass = (state.snow.layer_count + 1..=0)
+        .map(|index| {
+            let slot = crate::snow::snow_layer_slot(index);
+            state.snow.liquid_water_kg_m2[slot] + state.snow.ice_water_kg_m2[slot]
+        })
+        .sum::<f64>();
+    assert!((snow_mass - state.snow.water_equivalent_kg_m2).abs() < 1.0e-12);
 }
 
 fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
