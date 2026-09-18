@@ -379,19 +379,21 @@ fn aggregate_campbell_patch(
             values[1],
         );
         let mut x = [values[2], values[3], values[1]];
-        if lmder(&problem, &mut x, CAMPBELL_PRESSURES.len())
-            && (-300.0..0.0).contains(&x[0])
-            && x[1] > 0.0
-            && x[1] <= 1.0
-            && x[2] > 0.0
-            && x[2] <= 1.0e7
-        {
+        if lmder(&problem, &mut x, CAMPBELL_PRESSURES.len()) && valid_campbell_fit(x) {
             values[2] = x[0];
             values[3] = x[1];
             values[1] = x[2];
         }
     }
     Some(values)
+}
+
+fn valid_campbell_fit([psi_s, lambda, k_s]: [f64; 3]) -> bool {
+    (psi_s == -300.0 || (-300.0..0.0).contains(&psi_s))
+        && lambda > 0.0
+        && lambda <= 1.0
+        && k_s > 0.0
+        && k_s <= 1.0e7
 }
 
 /// CoLM's water/glacier constants for Campbell source fields.
@@ -947,6 +949,17 @@ mod tests {
         assert!((result.k_s[0] - 10.0).abs() < 1.0e-8);
         assert!((result.psi_s[0] + 35.0).abs() < 1.0e-8);
         assert!((result.lambda[0] - 0.12).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn campbell_fit_accepts_the_upstream_inclusive_lower_psi_bound() {
+        assert!(valid_campbell_fit([-300.0, 0.5, 10.0]));
+        assert!(!valid_campbell_fit([
+            f64::from_bits((-300.0_f64).to_bits() + 1),
+            0.5,
+            10.0,
+        ]));
+        assert!(!valid_campbell_fit([0.0, 0.5, 10.0]));
     }
 
     #[test]
