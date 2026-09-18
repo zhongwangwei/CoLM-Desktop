@@ -1936,6 +1936,15 @@ fn rust_preprocessor_arguments(
     {
         arguments.push("--catch-lateral".to_owned());
     }
+    if stage == Stage::MkIniData
+        && kernel
+            .manifest
+            .macros
+            .iter()
+            .any(|macro_name| macro_name == "DataAssimilation")
+    {
+        arguments.push("--data-assimilation".to_owned());
+    }
     if !lct {
         return Ok(arguments);
     }

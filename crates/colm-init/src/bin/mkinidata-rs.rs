@@ -10,9 +10,9 @@ use colm_case::{is_default, is_spatial_case};
 use colm_init::spatial_static::{resolve_vic_parameter_file, VicParameterSource};
 use colm_init::{
     single_point_cold_start_run_from_namelist, write_catch_lateral_cold_restart,
-    write_gridriver_cold_restart, write_single_point_cold_time_restarts,
-    write_single_point_constant_restart, write_single_point_constant_restarts,
-    write_single_point_hyperspectral_cold_time_restarts,
+    write_data_assimilation_restart, write_gridriver_cold_restart,
+    write_single_point_cold_time_restarts, write_single_point_constant_restart,
+    write_single_point_constant_restarts, write_single_point_hyperspectral_cold_time_restarts,
     write_single_point_hyperspectral_constant_restarts, write_spatial_lct_cold_time_restart,
     write_spatial_lct_constant_restart, write_spatial_pft_cold_time_restarts,
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
@@ -50,6 +50,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     let mut block = None;
     let mut grid_river = false;
     let mut catch_lateral = false;
+    let mut data_assimilation = false;
     let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -61,6 +62,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             "--block" => block = Some(args.next().context("--block needs a CoLM block label")?),
             "--grid-river" => grid_river = true,
             "--catch-lateral" => catch_lateral = true,
+            "--data-assimilation" => data_assimilation = true,
             "--hyperspectral" => high_resolution.enabled = true,
             "--highres-leaf-optics" => {
                 high_resolution.leaf_optics =
@@ -89,6 +91,9 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
                 && high_resolution.urban_albedo.is_none()),
         "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
     );
+    let data_assimilation_ensembles = data_assimilation
+        .then(|| namelist_data_assimilation_ensembles(&namelist))
+        .transpose()?;
     if is_spatial_case(&namelist)? {
         return run_spatial_namelist(
             &namelist,
@@ -97,6 +102,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             &high_resolution,
             grid_river,
             catch_lateral,
+            data_assimilation_ensembles,
         );
     }
     ensure!(
@@ -124,6 +130,15 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     } else {
         write_single_point_cold_time_restarts(&run)?
     };
+    let da = data_assimilation_ensembles
+        .map(|members| {
+            write_data_assimilation_restart(
+                &time.common.block,
+                members,
+                run.static_run.compression_level,
+            )
+        })
+        .transpose()?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
     if let Some(path) = files.pft {
@@ -137,6 +152,9 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         println!("wrote {}", path.display());
     }
     println!("wrote {}", time.common.block.display());
+    if let Some(file) = da {
+        println!("wrote {}", file.path.display());
+    }
     if let Some(path) = time.pft {
         println!("wrote {}", path.display());
     }
@@ -213,6 +231,7 @@ fn run_spatial_namelist(
     high_resolution: &HighResolutionOptions,
     grid_river: bool,
     catch_lateral: bool,
+    data_assimilation_ensembles: Option<usize>,
 ) -> Result<()> {
     let mut run = spatial_namelist_run(namelist)?;
     ensure!(
@@ -228,12 +247,23 @@ fn run_spatial_namelist(
                 "spatial LCT case needs --land-cover igbp or usgs because a landpatch block stores only its selected class table",
             )?;
             for block in spatial_blocks(&run, block_override)? {
-                write_spatial_lct_namelist_block(&run, land_cover, &block)?;
+                write_spatial_lct_namelist_block(
+                    &run,
+                    land_cover,
+                    &block,
+                    data_assimilation_ensembles,
+                )?;
             }
         }
         SpatialSubgrid::PftOrPc => {
             for block in spatial_blocks(&run, block_override)? {
-                write_spatial_pft_namelist_block(namelist, &run, &block, high_resolution)?;
+                write_spatial_pft_namelist_block(
+                    namelist,
+                    &run,
+                    &block,
+                    high_resolution,
+                    data_assimilation_ensembles,
+                )?;
             }
         }
         SpatialSubgrid::Urban => {
@@ -247,6 +277,7 @@ fn run_spatial_namelist(
                     &run,
                     run.urban.as_ref().expect("urban subgrid has controls"),
                     &block,
+                    data_assimilation_ensembles,
                 )?;
             }
         }
@@ -320,6 +351,7 @@ fn write_spatial_urban_namelist_block(
     run: &SpatialNamelistRun,
     urban: &SpatialUrbanRun,
     block: &str,
+    data_assimilation_ensembles: Option<usize>,
 ) -> Result<()> {
     let mut static_config = SpatialLctStaticConfig::new(
         &run.landdata,
@@ -375,12 +407,20 @@ fn write_spatial_urban_namelist_block(
         runtime_dir: urban.runtime_dir.as_deref(),
         lucy_enabled: urban.lucy_enabled,
     })?;
+    let da = data_assimilation_ensembles
+        .map(|members| {
+            write_data_assimilation_restart(&time.common.block, members, run.compression_level)
+        })
+        .transpose()?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
     if let Some(path) = files.urban {
         println!("wrote {}", path.display());
     }
     println!("wrote {}", time.common.block.display());
+    if let Some(file) = da {
+        println!("wrote {}", file.path.display());
+    }
     if let Some(path) = time.urban {
         println!("wrote {}", path.display());
     }
@@ -401,6 +441,7 @@ fn write_spatial_lct_namelist_block(
     run: &SpatialNamelistRun,
     land_cover: LandCoverScheme,
     block: &str,
+    data_assimilation_ensembles: Option<usize>,
 ) -> Result<()> {
     let mut static_config = SpatialLctStaticConfig::new(
         &run.landdata,
@@ -446,9 +487,15 @@ fn write_spatial_lct_namelist_block(
     time.snicar = run.snicar.as_ref();
     time.observations = run.observations.borrow();
     let time = write_spatial_lct_cold_time_restart(time)?;
+    let da = data_assimilation_ensembles
+        .map(|members| write_data_assimilation_restart(&time.block, members, run.compression_level))
+        .transpose()?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
     println!("wrote {}", time.block.display());
+    if let Some(file) = da {
+        println!("wrote {}", file.path.display());
+    }
     Ok(())
 }
 
@@ -457,6 +504,7 @@ fn write_spatial_pft_namelist_block(
     run: &SpatialNamelistRun,
     block: &str,
     high_resolution: &HighResolutionOptions,
+    data_assimilation_ensembles: Option<usize>,
 ) -> Result<()> {
     let mut static_config = SpatialPftStaticConfig::new(
         namelist,
@@ -489,6 +537,11 @@ fn write_spatial_pft_namelist_block(
     time.high_resolution_radiation = high_resolution.radiation.as_deref();
     time.high_resolution_urban_albedo = high_resolution.urban_albedo.as_deref();
     let time = write_spatial_pft_cold_time_restarts(time)?;
+    let da = data_assimilation_ensembles
+        .map(|members| {
+            write_data_assimilation_restart(&time.common.block, members, run.compression_level)
+        })
+        .transpose()?;
     println!("wrote {}", files.common.constants.display());
     println!("wrote {}", files.common.block.display());
     if let Some(path) = files.pft {
@@ -499,6 +552,9 @@ fn write_spatial_pft_namelist_block(
         println!("wrote {}", files.block.display());
     }
     println!("wrote {}", time.common.block.display());
+    if let Some(file) = da {
+        println!("wrote {}", file.path.display());
+    }
     if let Some(path) = time.pft {
         println!("wrote {}", path.display());
     }
@@ -755,6 +811,16 @@ fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -
             .with_context(|| format!("{field} is outside CoLM's integer range")),
         Some(_) => bail!("{field} must be an integer value"),
     }
+}
+
+fn namelist_data_assimilation_ensembles(namelist: &Path) -> Result<usize> {
+    let text = std::fs::read_to_string(namelist)
+        .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let members = namelist_i32(&document, "DEF_DA_ENS_NUM", 20)?;
+    ensure!(members > 0, "DEF_DA_ENS_NUM must be positive");
+    Ok(members as usize)
 }
 
 fn namelist_f64(document: &colm_namelist::Document, field: &str, default: f64) -> Result<f64> {
@@ -1162,7 +1228,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--data-assimilation] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -1313,6 +1379,23 @@ mod tests {
             }
         }
         assert!(parse_restart_compression(None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn data_assimilation_ensemble_count_uses_upstream_default_and_rejects_zero() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-init-da-count-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        std::fs::write(&namelist, "&nl_colm\n/\n").unwrap();
+        assert_eq!(namelist_data_assimilation_ensembles(&namelist).unwrap(), 20);
+        std::fs::write(&namelist, "&nl_colm\nDEF_DA_ENS_NUM=0\n/\n").unwrap();
+        assert!(namelist_data_assimilation_ensembles(&namelist).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2031,6 +2114,7 @@ mod tests {
             &HighResolutionOptions::default(),
             false,
             false,
+            None,
         )
         .unwrap_err();
 
@@ -2071,6 +2155,7 @@ mod tests {
             &HighResolutionOptions::default(),
             false,
             false,
+            None,
         )
         .unwrap_err();
 

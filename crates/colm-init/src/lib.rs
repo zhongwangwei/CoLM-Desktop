@@ -9,6 +9,7 @@ pub mod bgc_cold_start;
 pub mod bgc_restart;
 pub mod bgc_time_restart;
 pub mod crop;
+pub mod data_assimilation_restart;
 pub mod canopy_layer_profile {
     pub use colm_core::canopy_layer_profile::*;
 }
@@ -151,6 +152,9 @@ pub use colm_core::{RootUptakeInput, RootUptakeState};
 pub use crop::{
     crop_cold_start_from_management, crop_cold_start_from_tuning, CropColdStartState,
     CropManagementConfig,
+};
+pub use data_assimilation_restart::{
+    data_assimilation_restart_path, write_data_assimilation_restart, DataAssimilationRestartFile,
 };
 pub use gridriver::{
     write_gridriver_cold_restart, GridRiverColdStartConfig, GridRiverColdStartFile,

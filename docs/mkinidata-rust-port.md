@@ -116,6 +116,16 @@ limits. The overall migration is still not complete.
 - Keep MPI and NetCDF at adapter boundaries, so deterministic kernels can be tested without
   the currently unavailable rawdata mount and can later be parallelized safely.
 
+## Data-assimilation cold restart
+
+Kernels compiled with `DataAssimilation` now make `colm-cli` pass
+`--data-assimilation` to `mkinidata-rs`. The native writer reads the already
+validated common cold restart and copies its 39 upstream DA fields into every
+ensemble member, using `DEF_DA_ENS_NUM` (upstream default 20) and the original
+block filename/schema. A synthetic two-patch/three-member check verifies exact
+values and NetCDF axis order. No local DA-enabled Fortran kernel is available,
+so executable Fortran/Rust DA-file comparison remains open.
+
 ## Validation artifacts
 
 Each ported branch gets a compact synthetic landdata/restart fixture and field-level expected

@@ -32,6 +32,12 @@ fn catch_lateral_kernel() -> Kernel {
     kernel
 }
 
+fn data_assimilation_kernel() -> Kernel {
+    let mut kernel = hyperspectral_kernel();
+    kernel.manifest.macros = vec!["DataAssimilation".into(), "LULC_IGBP".into()];
+    kernel
+}
+
 fn hyperspectral_pft_namelist(root: &Path) -> PathBuf {
     let namelist = root.join("case.nml");
     std::fs::write(
@@ -109,6 +115,25 @@ fn catch_lateral_kernel_enables_the_matching_rust_mkinidata_branch() {
         )
         .unwrap(),
         vec!["--catch-lateral", "--land-cover", "igbp"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn data_assimilation_kernel_enables_the_matching_rust_mkinidata_branch() {
+    let root = test_directory("data-assimilation-args");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\nDEF_USE_LCT=.true.\n/\n").unwrap();
+    assert_eq!(
+        rust_preprocessor_arguments(
+            Stage::MkIniData,
+            &namelist,
+            &data_assimilation_kernel(),
+            None,
+            None,
+        )
+        .unwrap(),
+        vec!["--data-assimilation", "--land-cover", "igbp"]
     );
     std::fs::remove_dir_all(root).unwrap();
 }
