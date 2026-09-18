@@ -1644,7 +1644,7 @@ fn native_single_point_bgc_cold_restart_matches_the_upstream_reference() {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let runtime = PathBuf::from("/Users/zhongwangwei/Desktop/Data/CoLMruntime");
+    let runtime = PathBuf::from("/Volumes/Data01/Data/CoLMruntime");
     let upstream_surface = root.join("kernels/bgc/mksrfdata.x");
     let upstream_init = root.join("kernels/bgc/mkinidata.x");
     assert!(runtime.join("cnsteadystate.nc").is_file());

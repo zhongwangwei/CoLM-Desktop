@@ -277,13 +277,10 @@ fn rust_urban_preprocess_restart_runs_in_the_unchanged_fortran_runtime() {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let data = std::path::PathBuf::from(
-        "/Users/zhongwangwei/Desktop/Data/ex03_site_urban/AU-Preston_data",
-    );
-    let template = std::path::PathBuf::from(
-        "/Users/zhongwangwei/Desktop/Data/ex03_site_urban/Site_AU-Preston.nml",
-    );
-    let runtime = std::path::PathBuf::from("/Users/zhongwangwei/Desktop/Data/CoLMruntime");
+    let data = std::path::PathBuf::from("/Volumes/Data01/Data/ex03_site_urban/AU-Preston_data");
+    let template =
+        std::path::PathBuf::from("/Volumes/Data01/Data/ex03_site_urban/Site_AU-Preston.nml");
+    let runtime = std::path::PathBuf::from("/Volumes/Data01/Data/CoLMruntime");
     for path in [
         data.join("AU-Preston_site_v1.nc"),
         data.join("AU-Preston_metforcing_v1.nc"),
@@ -427,9 +424,8 @@ fn rust_preprocess_runs_in_fortran_runtime(
         .join("../..")
         .canonicalize()
         .unwrap();
-    let forcing_dir =
-        std::path::PathBuf::from("/Users/zhongwangwei/Desktop/Data/PLUMBER2s/Forcing");
-    let runtime = std::path::PathBuf::from("/Users/zhongwangwei/Desktop/Data/CoLMruntime");
+    let forcing_dir = std::path::PathBuf::from("/Volumes/Data01/Data/PLUMBER2s/Forcing");
+    let runtime = std::path::PathBuf::from("/Volumes/Data01/Data/CoLMruntime");
     assert!(forcing_dir
         .join("CN-Cng_2008-2009_FLUXNET2015_Met.nc")
         .is_file());

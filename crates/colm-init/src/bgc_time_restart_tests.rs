@@ -271,7 +271,7 @@ fn bgc_time_restart_matches_the_upstream_fortran_reference() {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let runtime = std::path::Path::new("/Users/zhongwangwei/Desktop/Data/CoLMruntime");
+    let runtime = std::path::Path::new("/Volumes/Data01/Data/CoLMruntime");
     let upstream_surface = root.join("kernels/bgc/mksrfdata.x");
     let upstream_init = root.join("kernels/bgc/mkinidata.x");
     assert!(runtime.join("cnsteadystate.nc").is_file());
