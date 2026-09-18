@@ -16,8 +16,8 @@ existing Pearl River landdata, `/Volumes/Data01/Data/CoLMruntime`, and the same
 
 All 904 common variable instances pass the unchanged combined
 `atol=rtol=1e-12` comparison; the maximum absolute difference is
-`7.536445426059579e-13`.  The serial wall times were 19.74 s for Fortran and
-12.58 s for Rust (1.57x faster in this run).  The only remaining comparison
+`9.955924973326091e-14`.  The serial wall times were 19.74 s for Fortran and
+10.80 s for the latest Rust rerun (1.83x faster in this run).  The only remaining comparison
 items are 438 storage-filter differences: original sequential redefine/write
 leaves rank-one variables contiguous, while Rust applies the requested deflate
 level.  Direct NetCDF probes reproduce this original-library behavior.  Rust
@@ -36,8 +36,19 @@ the real `e110_n20` block, the previous implementation differed from Fortran
 at eight points by one ULP; the corrected implementation has zero bitwise
 differences.  A fresh Rust initializer rerun also matches Fortran `coszen`
 bitwise in all six common restart blocks.  This is a bounded preprocessing
-result: downstream radiation fields retain separate last-bit differences, and
-the unchanged two-step runtime has not been rerun for this correction.
+result: downstream radiation fields retain separate last-bit differences.
+
+The PC spherical-canopy transmission and forward-scattering tails now evaluate
+their exact small-optical-depth series instead of cancellation-prone `f64`
+expressions.  This preserves the values returned by the original `real(r16)`
+intermediates for sparse canopies and reduced the initializer maximum difference
+from `7.536445426059579e-13` to `9.955924973326091e-14`.  The unchanged original
+runtime completed two timesteps from both initializations.  Its post-step result
+is unchanged at 38 fields / 223 values outside the combined tolerance, with
+maximum absolute difference `0.004069652932230383` in `rst_p`; therefore that
+remaining dynamic divergence has another cause.  Because Data01 currently has
+only 2003 JRA3Q, this paired 1980 runtime check maps identical 2003 monthly files
+to both 1980 inputs and is synthetic-date evidence, not chronological validation.
 
 ## SNICAR broadband executable integration
 

@@ -820,8 +820,7 @@ pub(crate) fn canopy_scattering(
     transmittance: f64,
     reflectance: f64,
 ) -> (f64, f64, f64) {
-    let forward_first =
-        1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth + 2.0) * (-2.0 * depth).exp();
+    let forward_first = canopy_forward_scattering(depth);
     let backward_first = 0.5 * (1.0 - canopy_transmittance(2.0 * depth));
     let aa = 0.70;
     let bb = 1.74;
@@ -854,8 +853,50 @@ pub(crate) fn canopy_scattering(
     )
 }
 
+fn canopy_forward_scattering(depth: f64) -> f64 {
+    if depth.abs() <= 0.05 {
+        const SERIES: [f64; 11] = [
+            0.0,
+            4.0 / 3.0,
+            -2.0,
+            8.0 / 5.0,
+            -8.0 / 9.0,
+            8.0 / 21.0,
+            -2.0 / 15.0,
+            16.0 / 405.0,
+            -16.0 / 1_575.0,
+            8.0 / 3_465.0,
+            -4.0 / 8_505.0,
+        ];
+        return SERIES
+            .iter()
+            .rev()
+            .fold(0.0, |sum, &coefficient| sum.mul_add(depth, coefficient));
+    }
+    1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth + 2.0) * (-2.0 * depth).exp()
+}
+
 /// Mean direct transmission through a spherical canopy (`tee` in CoLM).
 pub(crate) fn canopy_transmittance(depth: f64) -> f64 {
+    if depth.abs() <= 0.05 {
+        // `tee` evaluates this cancellation-prone expression in real(r16).
+        const SERIES: [f64; 10] = [
+            1.0,
+            -4.0 / 3.0,
+            1.0,
+            -8.0 / 15.0,
+            2.0 / 9.0,
+            -8.0 / 105.0,
+            1.0 / 45.0,
+            -16.0 / 2_835.0,
+            2.0 / 1_575.0,
+            -8.0 / 31_185.0,
+        ];
+        return SERIES
+            .iter()
+            .rev()
+            .fold(0.0, |sum, &coefficient| sum.mul_add(depth, coefficient));
+    }
     0.5 * (1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth) * (-2.0 * depth).exp())
 }
 
@@ -1077,6 +1118,24 @@ mod tests {
                     "band={band}, beam={beam}, {total}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sparse_canopy_transmission_matches_the_upstream_quad_precision_tail() {
+        // Actual Pearl River PFT optical depths; MOD_3DCanopyRadiation::tee
+        // evaluates in real(r16) before returning f64.
+        for (depth, expected) in [
+            (5.535_032_188_353_261e-3, 0x3fef_c3ca_fd13_258e),
+            (8.204_479_852_876_279e-3, 0x3fef_a6ef_299e_9485),
+        ] {
+            assert_eq!(canopy_transmittance(depth).to_bits(), expected);
+        }
+        for (depth, expected) in [
+            (5.535_032_188_353_261e-3, 0x3f7d_fa91_e7a3_18e3),
+            (8.204_479_852_876_279e-3, 0x3f86_2139_980c_14c6),
+        ] {
+            assert_eq!(canopy_forward_scattering(depth).to_bits(), expected);
         }
     }
 
