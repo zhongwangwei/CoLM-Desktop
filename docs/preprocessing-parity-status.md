@@ -40,15 +40,24 @@ result: downstream radiation fields retain separate last-bit differences.
 
 The PC spherical-canopy transmission and forward-scattering tails now evaluate
 their exact small-optical-depth series instead of cancellation-prone `f64`
-expressions.  This preserves the values returned by the original `real(r16)`
-intermediates for sparse canopies and reduced the initializer maximum difference
-from `7.536445426059579e-13` to `9.955924973326091e-14`.  The unchanged original
-runtime completed two timesteps from both initializations.  Its post-step result
-is unchanged at 38 fields / 223 values outside the combined tolerance, with
-maximum absolute difference `0.004069652932230383` in `rst_p`; therefore that
-remaining dynamic divergence has another cause.  Because Data01 currently has
-only 2003 JRA3Q, this paired 1980 runtime check maps identical 2003 monthly files
-to both 1980 inputs and is synthetic-date evidence, not chronological validation.
+expressions.  The `thermk_p` path also uses the same double-double series for
+small-to-moderate optical depths (`|tau| <= 1`), matching the original `tee`
+function's `real(r16)` intermediate rounding for the Pearl River PC thermal-gap
+case bit-for-bit.  Together with the original diffuse-angle rounding
+(`cos(60/180*pi)`, one ULP above 0.5), the initializer still passes all 904
+variable comparisons at the unchanged combined `atol=rtol=1e-12`; maximum
+absolute difference remains `9.955924973326091e-14`, and non-compression
+initializer issues are zero.
+
+The unchanged original runtime completed two timesteps from the final Rust
+initialization.  Restart-only comparison against the pristine original runtime is
+now 40 fields / 288 values outside the combined tolerance; ordinary hydrology
+residuals are <= `2.4611938858470905e-09`, while three stomatal-conductance
+entries differ by `O(1e27-1e29)` on `O(1e39-1e40)` source values.  This is a
+large improvement over the earlier `rst_p` maximum `0.004069652932230383`, but it
+is still not a full runtime-parity pass.  Because Data01 currently has only 2003
+JRA3Q, this paired 1980 runtime check maps identical 2003 monthly files to both
+1980 inputs and is synthetic-date evidence, not chronological validation.
 
 ## SNICAR broadband executable integration
 

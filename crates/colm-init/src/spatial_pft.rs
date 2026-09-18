@@ -1024,10 +1024,8 @@ pub fn write_spatial_pft_cold_time_restarts(
             radiation.shaded_absorption = [[0.0; 2]; 2];
         }
         common_radiation[patch] = Some(radiation);
-        // MOD_IniTimeVariable scales the aggregated HTOP, not each PFT's z0m.
-        common_roughness[patch] = Some(indices.iter().fold(0.0, |sum, &pft| {
-            pft_roughness[pft].mul_add(pfts.fraction[pft], sum)
-        }));
+        common_roughness[patch] =
+            Some(common_pft_roughness(indices, &canopy.top_m, &pfts.fraction));
         common_sai[patch] = Some(indices.iter().fold(0.0, |sum, &pft| {
             sai_pft[pft].mul_add(pfts.fraction[pft], sum)
         }));
@@ -1162,6 +1160,14 @@ pub fn write_spatial_pft_cold_time_restarts(
         })
         .transpose()?;
     Ok(SpatialPftTimeRestartFiles { common, pft, bgc })
+}
+
+fn common_pft_roughness(indices: &[usize], top_m: &[f64], fraction: &[f64]) -> f64 {
+    // MOD_HtopReadin aggregates HTOP before MOD_IniTimeVariable applies z0mr.
+    indices
+        .iter()
+        .fold(0.0, |sum, &pft| top_m[pft].mul_add(fraction[pft], sum))
+        * 0.1
 }
 
 #[derive(Debug)]

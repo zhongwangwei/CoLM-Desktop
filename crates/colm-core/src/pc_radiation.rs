@@ -214,7 +214,8 @@ fn three_d_canopy(
     ground: [[f64; RTYPES]; BANDS],
 ) -> Result<CoreRadiation> {
     const GEE: f64 = 0.5;
-    const COSINE_DIFFUSE: f64 = 0.5;
+    // `cos(60/180*pi)` in the original is one ULP above mathematical 0.5.
+    const COSINE_DIFFUSE: f64 = f64::from_bits(0x3fe0_0000_0000_0001);
     const EPSILON: f64 = 1.0e-6;
     ensure!(
         pfts.len() == fractions.len(),
@@ -878,26 +879,46 @@ fn canopy_forward_scattering(depth: f64) -> f64 {
 
 /// Mean direct transmission through a spherical canopy (`tee` in CoLM).
 pub(crate) fn canopy_transmittance(depth: f64) -> f64 {
-    if depth.abs() <= 0.05 {
+    if depth.abs() <= 1.0 {
         // `tee` evaluates this cancellation-prone expression in real(r16).
-        const SERIES: [f64; 10] = [
-            1.0,
-            -4.0 / 3.0,
-            1.0,
-            -8.0 / 15.0,
-            2.0 / 9.0,
-            -8.0 / 105.0,
-            1.0 / 45.0,
-            -16.0 / 2_835.0,
-            2.0 / 1_575.0,
-            -8.0 / 31_185.0,
-        ];
-        return SERIES
-            .iter()
-            .rev()
-            .fold(0.0, |sum, &coefficient| sum.mul_add(depth, coefficient));
+        let mut term = (1.0, 0.0);
+        let mut sum = term;
+        for index in 0..64 {
+            term = double_multiply(term, depth);
+            term = double_multiply(term, -2.0 * (index as f64 + 2.0));
+            term = double_divide(term, (index as f64 + 1.0) * (index as f64 + 3.0));
+            sum = double_add(sum, term);
+            if term.0.abs() + term.1.abs() < 1.0e-34 {
+                break;
+            }
+        }
+        return sum.0 + sum.1;
     }
-    0.5 * (1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth) * (-2.0 * depth).exp())
+    (-(1.0 + 2.0 * depth)).mul_add((-2.0 * depth).exp(), 1.0) / (2.0 * depth * depth)
+}
+
+fn double_add(left: (f64, f64), right: (f64, f64)) -> (f64, f64) {
+    let sum = left.0 + right.0;
+    let shifted = sum - left.0;
+    let error = (left.0 - (sum - shifted)) + (right.0 - shifted);
+    let tail = left.1 + right.1 + error;
+    let value = sum + tail;
+    (value, tail - (value - sum))
+}
+
+fn double_multiply(value: (f64, f64), factor: f64) -> (f64, f64) {
+    let product = value.0 * factor;
+    let error = value.0.mul_add(factor, -product) + value.1 * factor;
+    let result = product + error;
+    (result, error - (result - product))
+}
+
+fn double_divide(value: (f64, f64), divisor: f64) -> (f64, f64) {
+    let quotient = value.0 / divisor;
+    let product = double_multiply((quotient, 0.0), divisor);
+    let remainder = double_add(value, (-product.0, -product.1));
+    let correction = (remainder.0 + remainder.1) / divisor;
+    double_add((quotient, 0.0), (correction, 0.0))
 }
 
 fn overlap_area(radius: f64, height: f64, zenith: f64) -> f64 {
@@ -1137,6 +1158,112 @@ mod tests {
         ] {
             assert_eq!(canopy_forward_scattering(depth).to_bits(), expected);
         }
+    }
+
+    #[test]
+    fn diffuse_pc_state_keeps_the_original_quad_precision_rounding() {
+        let values = [
+            (0, 0.115_217_488_614_401_69, 0.0, 0.0, 0.0),
+            (
+                2,
+                0.023_185_641_975_434_653,
+                0.570_502_674_625_059_4,
+                0.664_139_568_501_346_6,
+                0.01,
+            ),
+            (
+                2,
+                0.001_655_228_518_701_910_8,
+                1.078_252_744_197_161,
+                0.729_361_705_903_759_7,
+                0.1,
+            ),
+            (
+                2,
+                0.030_869_091_807_732_268,
+                0.380_747_583_159_298_3,
+                0.673_486_992_663_461_2,
+                0.25,
+            ),
+            (
+                1,
+                0.000_410_000_956_726_737_43,
+                0.846_162_133_557_223,
+                0.797_991_901_655_422_3,
+                0.01,
+            ),
+            (
+                1,
+                0.000_273_333_969_844_663_2,
+                0.846_162_138_285_942,
+                0.797_991_901_083_981_7,
+                0.25,
+            ),
+            (
+                1,
+                0.003_917_038_798_867_017,
+                0.860_805_152_754_536_3,
+                0.816_439_591_056_742_9,
+                -0.3,
+            ),
+        ];
+        let pfts = values.map(|(canopy_layer, fraction, lai, sai, chil)| PcPftInput {
+            canopy_layer,
+            fraction,
+            canopy_top_m: if canopy_layer == 0 { 0.5 } else { 4.0 },
+            canopy_bottom_m: if canopy_layer == 0 { 0.0 } else { 1.0 },
+            optics: LeafOptics {
+                chil,
+                reflectance: [[0.1, 0.2], [0.3, 0.4]],
+                transmittance: [[0.05, 0.1], [0.2, 0.3]],
+            },
+            lai,
+            sai,
+            wet_snow_fraction: 0.0,
+        });
+        let state = cold_start_pc_broadband_radiation_from_ground(
+            &pfts,
+            0.5,
+            ColdStartGroundAlbedo {
+                soil: [[0.2; 2]; 2],
+                snow: [[0.8; 2]; 2],
+                ground: [[0.2; 2]; 2],
+                snow_age: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .pft
+                .iter()
+                .map(|pft| pft.shade_fraction.to_bits())
+                .collect::<Vec<_>>(),
+            [
+                0,
+                0x3fca_2881_b9f7_5a6c,
+                0x3f8d_e10b_1fe3_ab83,
+                0x3fd1_69d3_44fe_09da,
+                0x3f72_b561_7599_273d,
+                0x3f68_f1d7_4576_c62d,
+                0x3fa6_578e_8960_b3be,
+            ]
+        );
+        assert_eq!(
+            state
+                .pft
+                .iter()
+                .map(|pft| pft.thermal_gap_fraction.to_bits())
+                .collect::<Vec<_>>(),
+            [
+                0x3ff0_0000_0000_0000,
+                0x3fde_1340_cc3e_76df,
+                0x3fd6_2532_0e33_5c0e,
+                0x3fe1_25f3_8f62_2270,
+                0x3fdc_f3d2_9446_4f0f,
+                0x3fdd_e2f8_ff1f_7dd8,
+                0x3fdb_a6a7_ae7a_5983,
+            ]
+        );
     }
 
     #[test]

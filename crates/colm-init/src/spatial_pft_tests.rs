@@ -6,6 +6,36 @@ use super::*;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn common_pc_roughness_scales_the_aggregated_height() {
+    // Actual final e100_n20 Pearl River patch; pristine MOD_HtopReadin followed
+    // by MOD_IniTimeVariable with -O2 -fdefault-real-8.
+    let top_m = [
+        0.5,
+        3.353_959_710_373_461,
+        8.282_848_630_059_364,
+        4.472_538_603_145_382,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+    ];
+    let fraction = [
+        0.115_217_488_614_401_69,
+        0.023_185_641_975_434_653,
+        0.001_655_228_518_701_910_8,
+        0.030_869_091_807_732_268,
+        0.000_410_000_956_726_737_43,
+        0.000_273_333_969_844_663_2,
+        0.003_917_038_798_867_017,
+        0.824_472_175_358_291_1,
+    ];
+    assert_eq!(
+        common_pft_roughness(&[0, 1, 2, 3, 4, 5, 6, 7], &top_m, &fraction).to_bits(),
+        0x3fb1_f68a_f269_dc97
+    );
+}
+
+#[test]
 fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
     let root = temp_dir();
     let landdata = root.join("landdata");
