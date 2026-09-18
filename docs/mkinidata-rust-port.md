@@ -39,10 +39,11 @@ and the urban common-state path. The restart contains computed `snw_rds` and
 `ColdStartGroundAlbedo` type rather than interchangeable positional matrices.
 Fourteen original-Fortran cold-start comparisons pass the combined `1e-12` gate;
 see [current evidence and limits](preprocessing-parity-status.md#snicar-broadband-executable-integration).
-This does not establish full migration: runtime residuals, all optional-mode
-combinations and the undefined upstream HYPERSPECTRAL+SNICAR public interface
-still require acceptance work. That spectral combination remains explicitly
-rejected; broadband missing/corrupt tables fail before restart creation.
+This does not establish full migration: runtime residuals and all optional-mode
+combinations still require acceptance work. HYPERSPECTRAL+SNICAR cold starts are
+accepted only when every initialized snow depth is zero; actual spectral snow
+remains rejected because upstream has no verified 211-band SNICAR output mapping.
+Broadband missing/corrupt tables fail before restart creation.
 
 1. **Static-state kernels** — port landdata normalization without I/O: soil profile
    expansion and hydraulic conversion, bedrock, lake layers, texture, canopy/PFT fractions,

@@ -363,10 +363,6 @@ pub fn write_spatial_pft_cold_time_restarts(
         loaded_snicar = crate::SnicarInitialization::from_document(&document)?;
         loaded_snicar.as_ref()
     };
-    ensure!(
-        !config.use_hyperspectral || snicar.is_none(),
-        "DEF_USE_SNICAR with HYPERSPECTRAL cold start is not implemented: upstream five-band SNICAR has no verified 211-band output mapping"
-    );
     let observations = SpatialObservedInitializationPaths::from_document(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;
@@ -541,7 +537,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     let common_state = read_common_state(&common.block, patches.class.len())?;
     ensure!(
         !config.use_hyperspectral || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
-        "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
+        "HYPERSPECTRAL snow cold start is not implemented: upstream has no verified 211-band SNICAR snow output mapping"
     );
     let top_soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m[0];
     let pft_roughness = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();

@@ -104,10 +104,6 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         "--grid-river and --catch-lateral require a spatial case because routing kernels are not SinglePoint kernels"
     );
     let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
-    ensure!(
-        !high_resolution.enabled || run.snicar.is_none(),
-        "DEF_USE_SNICAR: HYPERSPECTRAL cold integration is not yet implemented"
-    );
     let files = if high_resolution.enabled {
         write_single_point_hyperspectral_constant_restarts(&run)?
     } else {
@@ -219,10 +215,6 @@ fn run_spatial_namelist(
     catch_lateral: bool,
 ) -> Result<()> {
     let mut run = spatial_namelist_run(namelist)?;
-    ensure!(
-        !high_resolution.enabled || run.snicar.is_none(),
-        "DEF_USE_SNICAR: HYPERSPECTRAL cold integration is not yet implemented"
-    );
     ensure!(
         !high_resolution.enabled || run.subgrid == SpatialSubgrid::PftOrPc,
         "--hyperspectral is currently supported only by spatial PFT/PC cold starts"
@@ -1106,10 +1098,6 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         .then(|| SnicarInitialization::from_document(&document))
         .transpose()?
         .flatten();
-    ensure!(
-        !use_hyperspectral || snicar.is_none(),
-        "DEF_USE_SNICAR: HYPERSPECTRAL cold integration is not yet implemented"
-    );
     let static_config = SpatialPftStaticConfig::new(
         &namelist,
         &landdata,

@@ -3,9 +3,9 @@ use crate::{
     cold_start_broadband_radiation, non_split_ground_humidity, prepare_runtime_forcing,
     CanopyInterceptionInput, CanopyWater, GroundFluxInput, GroundHumidityInput,
     GroundTemperatureInput, LeafBiochemistry, LeafOptics, LeafTemperatureOptions, NetSolarInput,
-    RuntimeForcingInput, SoilHydraulicModel, SoilThermalInput, SurfaceLayerScheme,
-    ThermalConductivityScheme, TopmodelMethod, Water2014Runoff, Water2014SoilFluxes,
-    Water2014SoilInput, Water2014SoilState,
+    RuntimeForcingInput, RuntimeSnowColumn, SnowWaterInput, SoilHydraulicModel, SoilThermalInput,
+    SurfaceLayerScheme, ThermalConductivityScheme, TopmodelMethod, Water2014Runoff,
+    Water2014SoilFluxes, Water2014SoilInput, Water2014SoilState,
 };
 
 const THERMAL: SoilThermalInput = SoilThermalInput {
@@ -180,6 +180,106 @@ fn standard_lct_soil_step_carries_one_rust_column_between_energy_and_water() {
         state.temperature_k.len(),
         state.water.liquid_water_kg_m2.len()
     );
+}
+
+#[test]
+fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
+    let forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        air_temperature_k: 272.0,
+        specific_humidity: 0.002,
+        surface_pressure_pa: 101_325.0,
+        precipitation_kg_m2_s: 4.0e-5,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 1.0,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 180.0,
+        downward_longwave_w_m2: 280.0,
+        calendar_day: 20.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+    })
+    .unwrap();
+    let mut energy = input(forcing);
+    let layer_thickness_m = [0.05, 0.1, 0.3];
+    let node_depth_m = [-0.025, 0.05, 0.25];
+    let interface_depth_m = [-0.05, 0.0, 0.1, 0.4];
+    let temperature_k = [268.0, 289.0, 288.0];
+    let liquid_water_kg_m2 = [1.0, 20.0, 80.0];
+    let ice_water_kg_m2 = [30.0, 0.0, 0.0];
+    energy.solar.snow_fraction = 0.8;
+    energy.ground_flux.snow_cover_fraction = 0.8;
+    energy.ground_temperature = GroundTemperatureInput {
+        snow_layers: 1,
+        layer_thickness_m: &layer_thickness_m,
+        node_depth_m: &node_depth_m,
+        interface_depth_m: &interface_depth_m,
+        temperature_k: &temperature_k,
+        liquid_water_kg_m2: &liquid_water_kg_m2,
+        ice_water_kg_m2: &ice_water_kg_m2,
+        snow_water_equivalent_kg_m2: 31.0,
+        snow_depth_m: 0.05,
+        snow_cover_fraction: 0.8,
+        snow_surface_temperature_k: 268.0,
+        ground_temperature_k: 272.2,
+        ..energy.ground_temperature
+    };
+    let mut snow = RuntimeSnowColumn::empty();
+    snow.layer_count = -1;
+    snow.water_equivalent_kg_m2 = 31.0;
+    snow.depth_m = 0.05;
+    snow.ground_snow_fraction = 0.8;
+    snow.interface_depth_m[crate::snow::snow_interface_slot(-1)] = -0.05;
+    snow.interface_depth_m[crate::snow::snow_interface_slot(0)] = 0.0;
+    let top = crate::snow::snow_layer_slot(0);
+    snow.thickness_m[top] = 0.05;
+    snow.node_depth_m[top] = -0.025;
+    snow.temperature_k[top] = 268.0;
+    snow.liquid_water_kg_m2[top] = 1.0;
+    snow.ice_water_kg_m2[top] = 30.0;
+    snow.previous_ice_fraction[top] = 30.0 / (0.05 * 917.0);
+    let mut state = StandardLctSnowSoilState {
+        energy: energy_state(forcing),
+        snow,
+        soil_temperature_k: vec![289.0, 288.0],
+        soil_water: Water2014SoilState {
+            liquid_water_kg_m2: vec![20.0, 80.0],
+            ice_water_kg_m2: vec![0.0, 0.0],
+            water_table_depth_m: 1.0,
+            aquifer_water_mm: 100.0,
+            surface_water_mm: 0.0,
+        },
+    };
+    let input = StandardLctSnowSoilInput {
+        energy,
+        snow_water: SnowWaterInput {
+            time_step_seconds: 1800.0,
+            irreducible_saturation: 0.03,
+            impermeable_porosity: 0.05,
+            rainfall_kg_m2_s: 0.0,
+            evaporation_kg_m2_s: 0.0,
+            dew_kg_m2_s: 0.0,
+            sublimation_kg_m2_s: 0.0,
+            frost_kg_m2_s: 0.0,
+        },
+        soil_water: water_input(),
+    };
+
+    let first = standard_lct_snow_soil_step(input, &mut state).unwrap();
+    let second = standard_lct_snow_soil_step(input, &mut state).unwrap();
+
+    assert!(first.energy.thermal_water.is_some());
+    assert!(first.water.snow.bottom_drainage_kg_m2_s.is_finite());
+    assert!(second.water.soil.total_runoff_mm_s.is_finite());
+    assert_eq!(state.snow.layer_count, -1);
+    assert_eq!(
+        state.soil_temperature_k.len(),
+        state.soil_water.liquid_water_kg_m2.len()
+    );
+    assert!(state
+        .soil_temperature_k
+        .iter()
+        .all(|value| value.is_finite()));
+    assert!(state.snow.temperature_k[top].is_finite());
 }
 
 fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {

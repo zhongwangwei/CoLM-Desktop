@@ -589,10 +589,6 @@ pub fn write_single_point_hyperspectral_constant_restarts(
             ),
         "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
     );
-    ensure!(
-        run.snicar.is_none(),
-        "HYPERSPECTRAL+SNICAR single-point cold starts are not implemented: upstream public 5-band restart policy is undefined"
-    );
     let albedo = read_single_point_hyperspectral_albedo(&run.static_run.surface)?;
     write_single_point_constant_restarts_with_hyperspectral(run, Some(&albedo))
 }
@@ -601,10 +597,6 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     run: &SinglePointColdStartRun,
     hyperspectral_albedo: Option<&[f64]>,
 ) -> Result<SinglePointConstantRestartFiles> {
-    ensure!(
-        hyperspectral_albedo.is_none() || run.snicar.is_none(),
-        "HYPERSPECTRAL+SNICAR single-point cold starts are not implemented: upstream public 5-band restart policy is undefined"
-    );
     let mut static_config = run.static_run.static_config();
     // The full cold-start switch owns BGC, including manually constructed runs.
     static_config.use_bgc = run.bgc;
@@ -1243,7 +1235,7 @@ fn write_single_point_scalar_cold_time_restarts(
     let (radiation, high_resolution_albedo) = if let Some(inputs) = hyperspectral {
         ensure!(
             snow_depth_m == 0.0 && snow_cover.ground_snow_fraction == 0.0,
-            "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
+            "HYPERSPECTRAL snow cold start is not implemented: upstream has no verified 211-band SNICAR snow output mapping"
         );
         let urban = read_high_resolution_urban_albedo(inputs.urban_albedo)?;
         let fractions = read_high_resolution_radiation_table(
@@ -1413,10 +1405,6 @@ pub fn write_single_point_hyperspectral_cold_time_restarts(
                 SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
             ),
         "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
-    );
-    ensure!(
-        run.snicar.is_none(),
-        "HYPERSPECTRAL+SNICAR single-point cold starts are not implemented: upstream public 5-band restart policy is undefined"
     );
     let config = run.static_run.static_config();
     let surface = read_single_point_surface(
@@ -1812,7 +1800,7 @@ fn write_single_point_pft_cold_time_restarts(
     let snow_depth_m = initial_snow_depth(run, &surface, month)?;
     ensure!(
         hyperspectral.is_none() || snow_depth_m == 0.0,
-        "HYPERSPECTRAL snow cold start is not implemented: upstream no-SNICAR spectral snow is undefined"
+        "HYPERSPECTRAL snow cold start is not implemented: upstream has no verified 211-band SNICAR snow output mapping"
     );
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
     let roughness = weighted_sum(&canopy.top_m, &pft.fraction)? * 0.1;

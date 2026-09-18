@@ -642,6 +642,11 @@ CI 里唯一跑通过的那次，是**先把 `.x` 拷成 `.exe` 再跑的**。�
 | `bgc` | IGBP | ✅ 三段跑通 | BGC 是运行时开关；需要两份 runtime 数据，见下 |
 | `urban` | IGBP | ✅ 三段跑通 | URBAN 是运行时开关；完整站点文件可不提供 rawdata，见下 |
 
+Rust 原生后端仍在迁移中。`colm-core::standard_lct_snow_soil_step` 已把普通地表的
+非拆分活动积雪路径连接为 `THERMAL → snowwater → WATER_2014`，并让积雪、土温和
+土壤水分状态继续传递；它尚未包含后续积雪合并、压实和分层，因此还不能替代完整
+时间循环。
+
 **BGC 需要两份 runtime 数据，而 `design.md` §10 只记了一份。**
 `nitrif/`（30 MB）是记过的；`ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc`
 （17 MB）没有记过，而且**无法绕开** —— `main/CoLM.F90:391-394` 的两个分支

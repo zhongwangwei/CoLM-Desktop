@@ -14,10 +14,10 @@ use crate::{
     GroundFluxInput, GroundFluxState, GroundHumidityInput, GroundHumidityState,
     GroundTemperatureInput, GroundTemperatureState, LeafTemperatureInput, LeafTemperatureOutput,
     LeafTemperatureState, NetSolarFluxes, NetSolarInput, PrecipitationPhaseScheme,
-    PrecipitationState, RootUptakeInput, RootUptakeState, RuntimeForcing,
-    SoilSurfaceResistanceInput, SplitThermalWaterFluxes, SplitThermalWaterInput,
-    ThermalWaterFluxes, ThermalWaterInput, Water2014SoilInput, Water2014SoilOutput,
-    Water2014SoilState,
+    PrecipitationState, RootUptakeInput, RootUptakeState, RuntimeForcing, RuntimeSnowColumn,
+    SnowWaterInput, SoilSurfaceResistanceInput, SplitThermalWaterFluxes, SplitThermalWaterInput,
+    ThermalWaterFluxes, ThermalWaterInput, Water2014SnowSoilInput, Water2014SnowSoilOutput,
+    Water2014SoilInput, Water2014SoilOutput, Water2014SoilState,
 };
 
 const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
@@ -60,6 +60,16 @@ pub struct StandardLctSoilState {
     pub energy: StandardLctEnergyState,
     pub temperature_k: Vec<f64>,
     pub water: Water2014SoilState,
+}
+
+/// Persistent active-snow, non-split standard-LCT state for
+/// [`standard_lct_snow_soil_step`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandardLctSnowSoilState {
+    pub energy: StandardLctEnergyState,
+    pub snow: RuntimeSnowColumn,
+    pub soil_temperature_k: Vec<f64>,
+    pub soil_water: Water2014SoilState,
 }
 
 /// The component results of one standard LCT energy update.
@@ -107,6 +117,21 @@ pub struct StandardLctSoilInput<'a> {
 pub struct StandardLctSoilOutput {
     pub energy: StandardLctEnergyOutput,
     pub water: Water2014SoilOutput,
+}
+
+/// Static inputs and forcing to one active-snow, non-split standard-LCT step.
+#[derive(Debug, Clone, Copy)]
+pub struct StandardLctSnowSoilInput<'a> {
+    pub energy: StandardLctEnergyInput<'a>,
+    pub snow_water: SnowWaterInput,
+    pub soil_water: Water2014SoilInput<'a>,
+}
+
+/// Results from one linked `THERMAL → snowwater → WATER_2014` active-snow step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandardLctSnowSoilOutput {
+    pub energy: StandardLctEnergyOutput,
+    pub water: Water2014SnowSoilOutput,
 }
 
 /// Runs the normal LCT `CoLMMAIN → THERMAL` energy chain without duplicating a
@@ -339,6 +364,84 @@ pub fn standard_lct_soil_step(
     Ok(StandardLctSoilOutput { energy, water })
 }
 
+/// Runs the active-snow, non-split `CoLMMAIN → THERMAL → snowwater → WATER_2014`
+/// sequence.
+///
+/// This is the regular-soil LCT branch with an existing snow column and without
+/// `DEF_SPLIT_SOILSNOW`. Snow-layer creation/compaction and split soil/snow
+/// remain separate source branches.
+pub fn standard_lct_snow_soil_step(
+    input: StandardLctSnowSoilInput<'_>,
+    state: &mut StandardLctSnowSoilState,
+) -> Result<StandardLctSnowSoilOutput> {
+    let snow_layers = validate_snow_soil_step(input, state)?;
+    let packed = packed_snow_soil_state(input.energy.ground_temperature, state, snow_layers);
+    let mut energy_input = input.energy;
+    energy_input.ground_temperature = GroundTemperatureInput {
+        snow_layers,
+        layer_thickness_m: &packed.layer_thickness_m,
+        node_depth_m: &packed.node_depth_m,
+        interface_depth_m: &packed.interface_depth_m,
+        temperature_k: &packed.temperature_k,
+        liquid_water_kg_m2: &packed.liquid_water_kg_m2,
+        ice_water_kg_m2: &packed.ice_water_kg_m2,
+        snow_water_equivalent_kg_m2: state.snow.water_equivalent_kg_m2,
+        snow_depth_m: state.snow.depth_m,
+        snow_cover_fraction: state.snow.ground_snow_fraction,
+        ..input.energy.ground_temperature
+    };
+    energy_input.solar = NetSolarInput {
+        snow_fraction: state.snow.ground_snow_fraction,
+        ..input.energy.solar
+    };
+    energy_input.ground_flux = GroundFluxInput {
+        snow_cover_fraction: state.snow.ground_snow_fraction,
+        ..input.energy.ground_flux
+    };
+
+    let energy = standard_lct_energy_step(energy_input, &mut state.energy)?;
+    sync_snow_soil_state(&energy.ground, snow_layers, state);
+
+    let thermal_water = energy
+        .thermal_water
+        .expect("validated non-split active-snow energy step supplies thermal water");
+    let root_flux_mm_s = if input.soil_water.plant_hydraulics {
+        ensure!(
+            energy.leaf.root_flux_kg_m2_s.len() == state.soil_temperature_k.len(),
+            "plant-hydraulic leaf output must provide one root flux per soil layer"
+        );
+        &energy.leaf.root_flux_kg_m2_s
+    } else {
+        input.soil_water.root_flux_mm_s
+    };
+    let water = crate::water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: SnowWaterInput {
+                time_step_seconds: input.energy.interception.time_step_seconds,
+                rainfall_kg_m2_s: energy.interception.ground_rain_kg_m2_s,
+                evaporation_kg_m2_s: thermal_water.evaporation_kg_m2_s,
+                dew_kg_m2_s: thermal_water.dew_kg_m2_s,
+                sublimation_kg_m2_s: thermal_water.sublimation_kg_m2_s,
+                frost_kg_m2_s: thermal_water.frost_kg_m2_s,
+                ..input.snow_water
+            },
+            soil: Water2014SoilInput {
+                time_step_seconds: input.energy.interception.time_step_seconds,
+                fluxes: crate::Water2014SoilFluxes {
+                    transpiration_kg_m2_s: energy.leaf.transpiration_kg_m2_s,
+                    ..input.soil_water.fluxes
+                },
+                temperature_k: &state.soil_temperature_k,
+                root_flux_mm_s,
+                ..input.soil_water
+            },
+        },
+        &mut state.snow,
+        &mut state.soil_water,
+    )?;
+    Ok(StandardLctSnowSoilOutput { energy, water })
+}
+
 fn validate_soil_step(input: StandardLctSoilInput<'_>, state: &StandardLctSoilState) -> Result<()> {
     let ground = input.energy.ground_temperature;
     ensure!(
@@ -360,6 +463,131 @@ fn validate_soil_step(input: StandardLctSoilInput<'_>, state: &StandardLctSoilSt
         "standard_lct_soil_step supports one no-snow regular-soil state"
     );
     Ok(())
+}
+
+fn validate_snow_soil_step(
+    input: StandardLctSnowSoilInput<'_>,
+    state: &StandardLctSnowSoilState,
+) -> Result<usize> {
+    let ground = input.energy.ground_temperature;
+    let snow_layers = state.snow.layer_count.unsigned_abs() as usize;
+    let packed_layers = snow_layers + state.soil_temperature_k.len();
+    ensure!(
+        ground.patch_type == 0
+            && input.soil_water.patch_type == 0
+            && !ground.use_split_soil_snow
+            && (-5..0).contains(&state.snow.layer_count)
+            && snow_layers > 0
+            && ground.snow_layers == snow_layers
+            && !input.soil_water.urban_run
+            && same(
+                input.energy.interception.time_step_seconds,
+                input.soil_water.time_step_seconds,
+            )
+            && same(
+                input.energy.interception.time_step_seconds,
+                input.snow_water.time_step_seconds,
+            )
+            && state.soil_temperature_k.len() == state.soil_water.liquid_water_kg_m2.len()
+            && state.soil_temperature_k.len() == state.soil_water.ice_water_kg_m2.len()
+            && input.soil_water.layer_thickness_m.len() == state.soil_temperature_k.len()
+            && input.soil_water.node_depth_m.len() == state.soil_temperature_k.len()
+            && input.soil_water.interface_depth_m.len() == state.soil_temperature_k.len() + 1
+            && input.soil_water.root_flux_mm_s.len() == state.soil_temperature_k.len()
+            && ground.layer_thickness_m.len() == packed_layers
+            && ground.node_depth_m.len() == packed_layers
+            && ground.interface_depth_m.len() == packed_layers + 1
+            && ground.temperature_k.len() == packed_layers
+            && ground.liquid_water_kg_m2.len() == packed_layers
+            && ground.ice_water_kg_m2.len() == packed_layers
+            && state.snow.interface_depth_m.len() == 6
+            && state.snow.node_depth_m.len() == 5
+            && state.snow.thickness_m.len() == 5
+            && state.snow.temperature_k.len() == 5
+            && state.snow.liquid_water_kg_m2.len() == 5
+            && state.snow.ice_water_kg_m2.len() == 5,
+        "standard_lct_snow_soil_step supports one active-snow, non-split regular-soil state"
+    );
+    Ok(snow_layers)
+}
+
+#[derive(Debug)]
+struct PackedSnowSoilState {
+    layer_thickness_m: Vec<f64>,
+    node_depth_m: Vec<f64>,
+    interface_depth_m: Vec<f64>,
+    temperature_k: Vec<f64>,
+    liquid_water_kg_m2: Vec<f64>,
+    ice_water_kg_m2: Vec<f64>,
+}
+
+fn packed_snow_soil_state(
+    ground: GroundTemperatureInput<'_>,
+    state: &StandardLctSnowSoilState,
+    snow_layers: usize,
+) -> PackedSnowSoilState {
+    let mut packed = PackedSnowSoilState {
+        layer_thickness_m: Vec::with_capacity(snow_layers + state.soil_temperature_k.len()),
+        node_depth_m: Vec::with_capacity(snow_layers + state.soil_temperature_k.len()),
+        interface_depth_m: Vec::with_capacity(snow_layers + state.soil_temperature_k.len() + 1),
+        temperature_k: Vec::with_capacity(snow_layers + state.soil_temperature_k.len()),
+        liquid_water_kg_m2: Vec::with_capacity(snow_layers + state.soil_temperature_k.len()),
+        ice_water_kg_m2: Vec::with_capacity(snow_layers + state.soil_temperature_k.len()),
+    };
+    for index in state.snow.layer_count + 1..=0 {
+        let slot = crate::snow::snow_layer_slot(index);
+        packed.layer_thickness_m.push(state.snow.thickness_m[slot]);
+        packed.node_depth_m.push(state.snow.node_depth_m[slot]);
+        packed.temperature_k.push(state.snow.temperature_k[slot]);
+        packed
+            .liquid_water_kg_m2
+            .push(state.snow.liquid_water_kg_m2[slot]);
+        packed
+            .ice_water_kg_m2
+            .push(state.snow.ice_water_kg_m2[slot]);
+    }
+    for index in state.snow.layer_count..=0 {
+        packed
+            .interface_depth_m
+            .push(state.snow.interface_depth_m[crate::snow::snow_interface_slot(index)]);
+    }
+    packed
+        .layer_thickness_m
+        .extend_from_slice(&ground.layer_thickness_m[snow_layers..]);
+    packed
+        .node_depth_m
+        .extend_from_slice(&ground.node_depth_m[snow_layers..]);
+    packed
+        .interface_depth_m
+        .extend_from_slice(&ground.interface_depth_m[snow_layers + 1..]);
+    packed
+        .temperature_k
+        .extend_from_slice(&state.soil_temperature_k);
+    packed
+        .liquid_water_kg_m2
+        .extend_from_slice(&state.soil_water.liquid_water_kg_m2);
+    packed
+        .ice_water_kg_m2
+        .extend_from_slice(&state.soil_water.ice_water_kg_m2);
+    packed
+}
+
+fn sync_snow_soil_state(
+    ground: &GroundTemperatureState,
+    snow_layers: usize,
+    state: &mut StandardLctSnowSoilState,
+) {
+    for (relative, index) in (state.snow.layer_count + 1..=0).enumerate() {
+        let slot = crate::snow::snow_layer_slot(index);
+        state.snow.temperature_k[slot] = ground.temperature_k[relative];
+        state.snow.liquid_water_kg_m2[slot] = ground.liquid_water_kg_m2[relative];
+        state.snow.ice_water_kg_m2[slot] = ground.ice_water_kg_m2[relative];
+    }
+    state.snow.water_equivalent_kg_m2 = ground.snow_water_equivalent_kg_m2;
+    state.snow.depth_m = ground.snow_depth_m;
+    state.soil_temperature_k = ground.temperature_k[snow_layers..].to_vec();
+    state.soil_water.liquid_water_kg_m2 = ground.liquid_water_kg_m2[snow_layers..].to_vec();
+    state.soil_water.ice_water_kg_m2 = ground.ice_water_kg_m2[snow_layers..].to_vec();
 }
 
 fn non_split_ground_humidity_input(

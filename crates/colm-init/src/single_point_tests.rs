@@ -814,9 +814,10 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
         radiation: Some(&radiation),
         urban_albedo: &urban,
     };
+    let snicar = crate::snicar::test_initialization();
     for subgrid in [SinglePointSubgrid::Pft, SinglePointSubgrid::Pc] {
         for (class, kind) in [(11, 2), (13, 1), (15, 3), (17, 4)] {
-            let run = scalar_nonvegetated_run(
+            let mut run = scalar_nonvegetated_run(
                 &root,
                 &format!("{subgrid:?}-{class}"),
                 subgrid,
@@ -825,6 +826,7 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
                 None,
                 None,
             );
+            run.snicar = Some(snicar.clone());
             let mut surface = single_point_restart_surface();
             surface.land_class = class;
             let files =
@@ -856,7 +858,7 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
     }
     let snow = root.join("snow.nc");
     write_single_point_snow_depth_fixture(&snow, 0.2);
-    let run = scalar_nonvegetated_run(
+    let mut run = scalar_nonvegetated_run(
         &root,
         "snow",
         SinglePointSubgrid::Pft,
@@ -865,12 +867,15 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
         None,
         Some((&snow, false)),
     );
+    run.snicar = Some(snicar);
     let mut surface = single_point_restart_surface();
     surface.land_class = 11;
     let error =
         write_single_point_scalar_cold_time_restarts(&run, &surface, 2, Some(inputs)).unwrap_err();
     assert!(
-        error.to_string().contains("spectral snow is undefined"),
+        error
+            .to_string()
+            .contains("no verified 211-band SNICAR snow output mapping"),
         "{error:#}"
     );
     assert!(!run.static_run.restart_dir.exists());

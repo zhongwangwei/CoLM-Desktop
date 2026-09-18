@@ -1,24 +1,8 @@
 use super::*;
-use colm_core::{initialize_snow_layers, SnicarSpectralTable};
+use colm_core::initialize_snow_layers;
 
 fn tables() -> SnicarInitialization {
-    let ice = SnicarSpectralTable::new(
-        vec![0.98; 5 * 1471],
-        vec![0.7; 5 * 1471],
-        vec![0.5; 5 * 1471],
-    )
-    .unwrap();
-    SnicarInitialization {
-        optics: SnicarOptics::new(
-            ice.clone(),
-            ice,
-            [[0.3; 5]; 8],
-            [[0.4; 5]; 8],
-            [[2.0; 5]; 8],
-        )
-        .unwrap(),
-        aging: SnicarAgingTable::new(vec![2.0; 2728], vec![1.0; 2728], vec![2.0; 2728]).unwrap(),
-    }
+    test_initialization()
 }
 
 fn ground() -> ColdStartGroundAlbedo {

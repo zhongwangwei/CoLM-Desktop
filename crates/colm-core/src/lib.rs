@@ -206,9 +206,10 @@ pub use soil_water::{
 };
 
 pub use standard_lct_step::{
-    standard_lct_energy_step, standard_lct_soil_step, StandardLctEnergyInput,
-    StandardLctEnergyOutput, StandardLctEnergyState, StandardLctSoilInput, StandardLctSoilOutput,
-    StandardLctSoilState,
+    standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step,
+    StandardLctEnergyInput, StandardLctEnergyOutput, StandardLctEnergyState,
+    StandardLctSnowSoilInput, StandardLctSnowSoilOutput, StandardLctSnowSoilState,
+    StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
 };
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,

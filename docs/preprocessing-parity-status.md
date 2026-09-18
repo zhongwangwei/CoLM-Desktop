@@ -2260,3 +2260,20 @@ temporary Rust patch before the unchanged original runtime. That patch's later
 differences vanished bitwise, supporting the radiation root cause. These mixed
 diagnostic outputs are not used as passing Rust parity evidence, and neither
 production inputs nor reference outputs were altered.
+
+## Soil-fit compiler-rounding audit
+
+Fresh Rust and independently compiled unchanged-Fortran surface runs now isolate
+the remaining Pearl River soil differences to nonlinear fitting. With fitting
+disabled, all 213 soil fields and every one of the 2,952 logical patches pass the
+unchanged `1e-12` gate. With fitting enabled, 48 fields / 484 scalar values fail;
+the raw source order, observations, and pre-fit aggregates agree.
+
+The largest VGM patch exposed a compiler-context-dependent Jacobian rounding
+difference. Replacing the VGM Jacobian observation with the expression that
+matches that single initial callback made a fresh full run substantially worse:
+48 fields / 22,649 values failed. That candidate was therefore reverted rather
+than encoded as a platform-specific rule. The production solver and tolerance
+remain unchanged. Evidence is in `/tmp/colm-original-raw-input-probe/`,
+`/tmp/colm-vgm-large-probe/`, `/tmp/colm-campbell-large-probe/`, and the rejected
+full run `/tmp/colm-vgm-jacobian-candidate.ZRDUcs/`.
