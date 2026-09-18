@@ -6,6 +6,30 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## Current PC/unstructured initializer baseline
+
+Current `CoLM202X` commit `080a09fb94250b4ad4b9ae2df418dbf89ea9a72e` was
+built independently as serial `UNSTRUCTURED + LULC_IGBP_PC` with
+`-O2 -fdefault-real-8`.  It and the release Rust initializer consumed the same
+existing Pearl River landdata, `/Volumes/Data01/Data/CoLMruntime`, and the same
+1980-001 cold-start controls.  Both completed and wrote 25 restart files.
+
+All 904 common variable instances pass the unchanged combined
+`atol=rtol=1e-12` comparison; the maximum absolute difference is
+`7.536445426059579e-13`.  The serial wall times were 19.74 s for Fortran and
+12.58 s for Rust (1.57x faster in this run).  The only remaining comparison
+items are 438 storage-filter differences: original sequential redefine/write
+leaves rank-one variables contiguous, while Rust applies the requested deflate
+level.  Direct NetCDF probes reproduce this original-library behavior.  Rust
+keeps the requested compression because decoded values and schemas agree and
+the more compact storage is intentional.
+
+Evidence is under
+`.omx/evidence/current-pc-original-serial-20260918-v1/`.  The Data01 volume
+currently contains the complete runtime and JRA3Q trees but only the Pearl
+`plant_15s` raw-data cache, so this result is an initializer proof, not a fresh
+full-rawdata surface-generation proof.
+
 ## SNICAR broadband executable integration
 
 `mkinidata-rs` now loads native SNICAR optics/aging tables from
