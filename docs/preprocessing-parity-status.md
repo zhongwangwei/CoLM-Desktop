@@ -6,6 +6,33 @@ remain those in [mksrfdata](mksrfdata-rust-port.md) and
 [mkinidata](mkinidata-rust-port.md), including field values, metadata, optional
 branches, and an unchanged Fortran runtime consuming the Rust products.
 
+## CoLM2024 canopy-structure path
+
+The Rust spatial surface and initializer now implement the current upstream
+`Aggregation_CanopyStructure` / `MOD_HtopReadin` path end to end.  The surface
+writer reads the three `canopy_data` 500 m tile fields, preserves the upstream
+`(0, 1000)` validity mask, area and PFT weighting, WMO copy, crop fallback, and
+`-1e36` missing marker, then writes `ncd/ncw/bcw` patch and PFT vectors.  The
+initializer reads those vectors and writes the six current restart fields;
+missing surface files still produce the upstream sentinel and therefore retain
+the legacy interception capacity.
+
+A fresh Pearl River `UNSTRUCTURED + LULC_IGBP_PC` run used the current upstream
+working source, the same mesh and raw inputs, and independent serial Fortran
+executables built with `-O2 -fdefault-real-8`.  All six surface vectors (2,952
+patches and 13,012 PFTs) and all six constant-restart vectors pass the unchanged
+combined `atol=rtol=1e-12` gate.  The largest absolute difference is
+`2.6645352591003757e-15`; topology-key inventories are identical.  The current
+Fortran runtime also completed two timesteps from the Rust restart while using
+the new interception code.
+
+In this run Rust surface generation took 215.68 s versus 1,111.33 s for serial
+Fortran (5.15x wall-time speedup); Rust used substantially more peak memory
+(15.48 GB versus 2.14 GB), which remains an optimization target.  Initializer
+times were 2.36 s and 2.57 s respectively.  Evidence and path pointers are in
+`.omx/evidence/current-pc-original-serial-20260918-v1/` and the referenced
+`/tmp/colm-canopy-*` directories.
+
 ## Current PC/unstructured initializer baseline
 
 Current `CoLM202X` commit `080a09fb94250b4ad4b9ae2df418dbf89ea9a72e` was
@@ -25,10 +52,10 @@ keeps the requested compression because decoded values and schemas agree and
 the more compact storage is intentional.
 
 Evidence is under
-`.omx/evidence/current-pc-original-serial-20260918-v1/`.  The Data01 volume
-currently contains the complete runtime and JRA3Q trees but only the Pearl
-`plant_15s` raw-data cache, so this result is an initializer proof, not a fresh
-full-rawdata surface-generation proof.
+`.omx/evidence/current-pc-original-serial-20260918-v1/`.  That earlier run used
+only the Pearl `plant_15s` raw-data cache, so it remains an initializer proof;
+the later canopy-structure section above records the fresh surface-generation
+proof using the restored Data01/Data02 inputs.
 
 The orbital calculation now preserves the original's separate `SIN`/`COS`
 calls instead of allowing LLVM to combine each pair.  On all 869 patches in

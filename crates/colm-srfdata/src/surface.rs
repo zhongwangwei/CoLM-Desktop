@@ -51,6 +51,14 @@ pub struct SoilBrightness {
     pub dry_near_infrared: Vec<f64>,
 }
 
+/// Crown dimensions written by `Aggregation_CanopyStructure.F90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanopyStructure {
+    pub needleleaf_crown_depth_m: Vec<f64>,
+    pub needleleaf_crown_width_m: Vec<f64>,
+    pub broadleaf_crown_width_m: Vec<f64>,
+}
+
 /// Fitted TOPMODEL parameters from one gathered topographic-wetness sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TopographicWetness {
@@ -878,6 +886,71 @@ impl FlatPatches {
                 "forest-height patch {patch} has zero or non-finite land area"
             );
             result[patch] = height_sum / area_sum;
+        }
+        Ok(result)
+    }
+
+    /// Area-weighted crown dimensions. Only finite values in `(0, 1000)` are
+    /// valid; patches without one retain CoLM's canopy-structure sentinel.
+    pub fn aggregate_canopy_structure(
+        &self,
+        needleleaf_depth_m: &[f64],
+        needleleaf_width_m: &[f64],
+        broadleaf_width_m: &[f64],
+        landarea: &[f64],
+    ) -> Result<CanopyStructure> {
+        Ok(CanopyStructure {
+            needleleaf_crown_depth_m: self.aggregate_valid_canopy_dimension(
+                needleleaf_depth_m,
+                landarea,
+                "needleleaf crown depth",
+            )?,
+            needleleaf_crown_width_m: self.aggregate_valid_canopy_dimension(
+                needleleaf_width_m,
+                landarea,
+                "needleleaf crown width",
+            )?,
+            broadleaf_crown_width_m: self.aggregate_valid_canopy_dimension(
+                broadleaf_width_m,
+                landarea,
+                "broadleaf crown width",
+            )?,
+        })
+    }
+
+    fn aggregate_valid_canopy_dimension(
+        &self,
+        values: &[f64],
+        landarea: &[f64],
+        field: &str,
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            values.len() == landarea.len(),
+            "{field} and landarea must have the same raw cell count"
+        );
+        let mut result = vec![SURFACE_MISSING; self.len()];
+        for patch in 0..self.len() {
+            if let Some(source) = self.wmo_source[patch] {
+                result[patch] = result[source];
+                continue;
+            }
+            let mut area_sum = 0.0;
+            let mut value_sum = 0.0;
+            for &cell in self.raw_cells(patch) {
+                let field_value = value(values, cell, field, patch)?;
+                let area = value(landarea, cell, "landarea", patch)?;
+                ensure!(
+                    area.is_finite() && area >= 0.0,
+                    "{field} patch {patch} has invalid land area"
+                );
+                if field_value > 0.0 && field_value < 1000.0 {
+                    area_sum += area;
+                    value_sum = field_value.mul_add(area, value_sum);
+                }
+            }
+            if area_sum > 0.0 {
+                result[patch] = value_sum / area_sum;
+            }
         }
         Ok(result)
     }

@@ -25,8 +25,16 @@ pub struct PftConstantRestartInput<'a> {
     pub fraction: &'a [f64],
     pub canopy_top_m: &'a [f64],
     pub canopy_bottom_m: &'a [f64],
+    pub canopy_structure: Option<PftCanopyStructure<'a>>,
     /// `CROP` only; one value per land patch.
     pub crop_fraction: Option<&'a [f64]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PftCanopyStructure<'a> {
+    pub needleleaf_crown_depth_m: &'a [f64],
+    pub needleleaf_crown_width_m: &'a [f64],
+    pub broadleaf_crown_width_m: &'a [f64],
 }
 
 /// Required PFT/PC fields stored by `WRITE_PFTimeVariables`.
@@ -192,6 +200,25 @@ pub fn write_pft_constant_restart_block(
         ("pftfrac", input.fraction),
         ("htop_p", input.canopy_top_m),
         ("hbot_p", input.canopy_bottom_m),
+    ] {
+        put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
+    }
+    let missing_structure;
+    let structure = match input.canopy_structure {
+        Some(structure) => structure,
+        None => {
+            missing_structure = vec![-1.0e36; pfts];
+            PftCanopyStructure {
+                needleleaf_crown_depth_m: &missing_structure,
+                needleleaf_crown_width_m: &missing_structure,
+                broadleaf_crown_width_m: &missing_structure,
+            }
+        }
+    };
+    for (name, values) in [
+        ("ncd_p", structure.needleleaf_crown_depth_m),
+        ("ncw_p", structure.needleleaf_crown_width_m),
+        ("bcw_p", structure.broadleaf_crown_width_m),
     ] {
         put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
     }
@@ -455,6 +482,17 @@ fn validate_constant_input(input: PftConstantRestartInput<'_>) -> Result<usize> 
             ("hbot_p", input.canopy_bottom_m),
         ],
     )?;
+    if let Some(structure) = input.canopy_structure {
+        validate_pft_values(
+            "PFT canopy structure",
+            pfts,
+            &[
+                ("ncd_p", structure.needleleaf_crown_depth_m),
+                ("ncw_p", structure.needleleaf_crown_width_m),
+                ("bcw_p", structure.broadleaf_crown_width_m),
+            ],
+        )?;
+    }
     if let Some(crop_fraction) = input.crop_fraction {
         ensure!(
             !crop_fraction.is_empty(),

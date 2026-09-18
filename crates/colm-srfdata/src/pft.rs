@@ -3,7 +3,7 @@
 use anyhow::{ensure, Context, Result};
 
 use crate::{
-    surface::FlatPatches,
+    surface::{CanopyStructure, FlatPatches, SURFACE_MISSING},
     topology::{FlatLandElements, FlatLandPatches, FlatMesh},
 };
 
@@ -661,6 +661,94 @@ pub fn aggregate_pft_height(
                 }
             }
             PftPatchKind::Crop => output[range.start] = patch_height,
+            PftPatchKind::Other => unreachable!(),
+        }
+    }
+    Ok(output)
+}
+
+/// PFT-weighted crown dimensions from `Aggregation_CanopyStructure.F90`.
+pub fn aggregate_pft_canopy_structure(
+    patches: &FlatPatches,
+    input: PftFractionInput<'_>,
+    patch_structure: &CanopyStructure,
+    raw_structure: &CanopyStructure,
+) -> Result<CanopyStructure> {
+    validate_input(patches, input)?;
+    ensure!(
+        patch_structure.needleleaf_crown_depth_m.len() == patches.len()
+            && patch_structure.needleleaf_crown_width_m.len() == patches.len()
+            && patch_structure.broadleaf_crown_width_m.len() == patches.len(),
+        "patch canopy structure must have one value per patch"
+    );
+    let cells = input.land_area.len();
+    ensure!(
+        raw_structure.needleleaf_crown_depth_m.len() == cells
+            && raw_structure.needleleaf_crown_width_m.len() == cells
+            && raw_structure.broadleaf_crown_width_m.len() == cells,
+        "raw canopy structure must have one value per raw cell"
+    );
+    Ok(CanopyStructure {
+        needleleaf_crown_depth_m: aggregate_pft_canopy_dimension(
+            patches,
+            input,
+            &patch_structure.needleleaf_crown_depth_m,
+            &raw_structure.needleleaf_crown_depth_m,
+        )?,
+        needleleaf_crown_width_m: aggregate_pft_canopy_dimension(
+            patches,
+            input,
+            &patch_structure.needleleaf_crown_width_m,
+            &raw_structure.needleleaf_crown_width_m,
+        )?,
+        broadleaf_crown_width_m: aggregate_pft_canopy_dimension(
+            patches,
+            input,
+            &patch_structure.broadleaf_crown_width_m,
+            &raw_structure.broadleaf_crown_width_m,
+        )?,
+    })
+}
+
+fn aggregate_pft_canopy_dimension(
+    patches: &FlatPatches,
+    input: PftFractionInput<'_>,
+    patch_values: &[f64],
+    raw_values: &[f64],
+) -> Result<Vec<f64>> {
+    let mut output = vec![SURFACE_MISSING; input.pft_classes.len()];
+    for patch in 0..patches.len() {
+        let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+        if let Some(source) = patches.wmo_source_for(patch) {
+            output[single_wmo_pft(range, patch)?] = patch_values[source];
+            continue;
+        }
+        if range.is_empty() || input.patch_kind[patch] == PftPatchKind::Other {
+            continue;
+        }
+        match input.patch_kind[patch] {
+            PftPatchKind::Natural => {
+                for pft in range {
+                    let class = input.pft_classes[pft];
+                    let mut weighted_area = 0.0;
+                    let mut weighted_value = 0.0;
+                    for &cell in patches.raw_cells(patch) {
+                        let value = raw_values[cell];
+                        if value > 0.0 && value < 1000.0 {
+                            let percent = percentage(input, class, cell, patch)?.max(0.0);
+                            let area = area(input.land_area, cell, patch)?;
+                            weighted_area = percent.mul_add(area, weighted_area);
+                            weighted_value = (value * percent).mul_add(area, weighted_value);
+                        }
+                    }
+                    output[pft] = if weighted_area > 0.0 {
+                        weighted_value / weighted_area
+                    } else {
+                        patch_values[patch]
+                    };
+                }
+            }
+            PftPatchKind::Crop => output[range.start] = patch_values[patch],
             PftPatchKind::Other => unreachable!(),
         }
     }

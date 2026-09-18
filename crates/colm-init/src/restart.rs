@@ -54,6 +54,14 @@ pub struct SoilAlbedo<'a> {
     pub dry_near_infrared: &'a [f64],
 }
 
+/// CoLM2024 crown dimensions; the sentinel keeps the legacy interception path.
+#[derive(Debug, Clone, Copy)]
+pub struct CanopyStructureFields<'a> {
+    pub needleleaf_crown_depth_m: &'a [f64],
+    pub needleleaf_crown_width_m: &'a [f64],
+    pub broadleaf_crown_width_m: &'a [f64],
+}
+
 /// Per-patch fields that are not held by the soil, lake, or canopy state objects.
 #[derive(Debug, Clone, Copy)]
 pub struct RestartPatchFields<'a> {
@@ -220,6 +228,7 @@ pub struct ConstantRestartInput<'a> {
     pub lake_soil_carbon: Option<&'a [f64]>,
     pub soil: &'a SoilState,
     pub canopy: &'a CanopyState,
+    pub canopy_structure: Option<CanopyStructureFields<'a>>,
     pub tuning: RestartTuning,
     /// `false` is Campbell; `true` writes the five van Genuchten arrays.
     pub uses_van_genuchten: bool,
@@ -435,6 +444,25 @@ pub fn write_constant_restart_block(
     }
     put_f64_1d(&mut file, "htop", &input.canopy.patch_top_m, None)?;
     put_f64_1d(&mut file, "hbot", &input.canopy.patch_bottom_m, None)?;
+    let missing_structure;
+    let structure = match input.canopy_structure {
+        Some(structure) => structure,
+        None => {
+            missing_structure = vec![-1.0e36; patches];
+            CanopyStructureFields {
+                needleleaf_crown_depth_m: &missing_structure,
+                needleleaf_crown_width_m: &missing_structure,
+                broadleaf_crown_width_m: &missing_structure,
+            }
+        }
+    };
+    for (name, values) in [
+        ("ncd", structure.needleleaf_crown_depth_m),
+        ("ncw", structure.needleleaf_crown_width_m),
+        ("bcw", structure.broadleaf_crown_width_m),
+    ] {
+        put_f64_1d(&mut file, name, values, compression)?;
+    }
 
     if let Some(bedrock) = input.bedrock {
         put_f64_1d(&mut file, "debdrock", &bedrock.depth, None)?;
@@ -628,6 +656,17 @@ fn validate_input(input: ConstantRestartInput<'_>) -> Result<usize> {
             "lake_soilc_srf must have {} soil layers x {patches} finite values",
             dimensions.soil_layers
         );
+    }
+    if let Some(structure) = input.canopy_structure {
+        validate_patch_fields(
+            "canopy structure",
+            patches,
+            [
+                structure.needleleaf_crown_depth_m,
+                structure.needleleaf_crown_width_m,
+                structure.broadleaf_crown_width_m,
+            ],
+        )?;
     }
     for (name, values) in [
         ("patch type", input.patch.kind.len()),

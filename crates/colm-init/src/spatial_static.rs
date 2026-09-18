@@ -16,10 +16,10 @@ use crate::single_point::{
 use crate::{
     colm_soil_grid, derive_bedrock, derive_igbp_canopy, derive_lake_layers,
     derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
-    write_constant_restart, CanopyState, ConstantRestartFiles, ConstantRestartInput,
-    HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields, RestartTuning,
-    SimpleTerrainFields, SoilAlbedo, SoilLayerInput, TerrainFields, TerrainRadiation,
-    TopmodelFields,
+    write_constant_restart, CanopyState, CanopyStructureFields, ConstantRestartFiles,
+    ConstantRestartInput, HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields,
+    RestartTuning, SimpleTerrainFields, SoilAlbedo, SoilLayerInput, TerrainFields,
+    TerrainRadiation, TopmodelFields,
 };
 
 /// Arguments for one already-addressed LCT landpatch block.
@@ -390,6 +390,36 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             )
         })
         .transpose()?;
+    let ncd = read_optional_f64(
+        config.landdata,
+        "cstructure",
+        "ncd_patches",
+        "ncd_patches",
+        config.land_cover_year,
+        config.block_label,
+        patch_count,
+        -1.0e36,
+    )?;
+    let ncw = read_optional_f64(
+        config.landdata,
+        "cstructure",
+        "ncw_patches",
+        "ncw_patches",
+        config.land_cover_year,
+        config.block_label,
+        patch_count,
+        -1.0e36,
+    )?;
+    let bcw = read_optional_f64(
+        config.landdata,
+        "cstructure",
+        "bcw_patches",
+        "bcw_patches",
+        config.land_cover_year,
+        config.block_label,
+        patch_count,
+        -1.0e36,
+    )?;
 
     write_constant_restart(
         config.restart_dir,
@@ -425,6 +455,11 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             lake_soil_carbon: lake_soil_carbon.as_deref(),
             soil: &soil,
             canopy: &canopy,
+            canopy_structure: Some(CanopyStructureFields {
+                needleleaf_crown_depth_m: &ncd,
+                needleleaf_crown_width_m: &ncw,
+                broadleaf_crown_width_m: &bcw,
+            }),
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
             bedrock: bedrock.as_ref(),
@@ -942,6 +977,35 @@ pub(crate) fn read_f64(
     let path = block_path(landdata, directory, stem, year, block);
     let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
     let values = values_f64(&file, variable)?;
+    ensure!(
+        values.len() == expected,
+        "{} has {} values; expected {expected}",
+        path.display(),
+        values.len()
+    );
+    Ok(values)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_optional_f64(
+    landdata: &Path,
+    directory: &str,
+    stem: &str,
+    variable: &str,
+    year: i32,
+    block: &str,
+    expected: usize,
+    default: f64,
+) -> Result<Vec<f64>> {
+    let path = block_path(landdata, directory, stem, year, block);
+    if !path.try_exists()? {
+        return Ok(vec![default; expected]);
+    }
+    let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+    let Some(variable) = file.variable(variable) else {
+        return Ok(vec![default; expected]);
+    };
+    let values = variable.get_values::<f64, _>(..)?;
     ensure!(
         values.len() == expected,
         "{} has {} values; expected {expected}",

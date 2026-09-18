@@ -684,6 +684,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
                     fraction: &[],
                     canopy_top_m: &[],
                     canopy_bottom_m: &[],
+                    canopy_structure: None,
                     crop_fraction: None,
                 },
             )?),
@@ -735,6 +736,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             fraction: &pft.fraction,
             canopy_top_m: &canopy.top_m,
             canopy_bottom_m: &canopy.bottom_m,
+            canopy_structure: None,
             crop_fraction: crop.as_ref().map(|_| pft.crop_fraction.as_deref().unwrap()),
         },
     )?;
@@ -945,6 +947,7 @@ fn write_single_point_constant_restart_from_surface(
             lake_soil_carbon: lake_soil_carbon.as_deref(),
             soil: &soil,
             canopy: &canopy,
+            canopy_structure: None,
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
             bedrock: bedrock.as_ref(),

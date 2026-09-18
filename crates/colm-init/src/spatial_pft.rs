@@ -39,11 +39,11 @@ use crate::{
     merge_bgc_cold_start_states, write_bgc_time_restart, write_cold_start_bgc_constant_restart,
     write_pft_constant_restart, write_pft_time_restart, BgcColdStartInput, BgcConstantRestartFiles,
     BgcPftColdStartInput, BgcTimeRestartFile, ColdStartRadiation, ConstantRestartFiles,
-    HydraulicModel, LandCoverScheme, PcPftInput, PftBgcFields, PftConstantRestartInput,
-    PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
-    PftTimeRestartInput, RestartDate, RestartTuning, RuntimeCnState, RuntimeCnVegetationCarbon,
-    SpatialLctTimeConfig, SpatialObservedInitializationPaths, TimeHyperspectralFields,
-    TimeRestartFile, MISSING,
+    HydraulicModel, LandCoverScheme, PcPftInput, PftBgcFields, PftCanopyStructure,
+    PftConstantRestartInput, PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields,
+    PftTimeFields, PftTimeRestartInput, RestartDate, RestartTuning, RuntimeCnState,
+    RuntimeCnVegetationCarbon, SpatialLctTimeConfig, SpatialObservedInitializationPaths,
+    TimeHyperspectralFields, TimeRestartFile, MISSING,
 };
 
 /// Arguments for one already-addressed spatial `landpft` block.
@@ -206,6 +206,9 @@ pub fn write_spatial_pft_constant_restart(
         );
     }
     let canopy = pft_canopy(&document, &class, &observed_height_m)?;
+    let ncd = read_optional_pft_f64(config, "ncd_pfts", class.len(), -1.0e36)?;
+    let ncw = read_optional_pft_f64(config, "ncw_pfts", class.len(), -1.0e36)?;
+    let bcw = read_optional_pft_f64(config, "bcw_pfts", class.len(), -1.0e36)?;
     if class.is_empty() && crop_fraction.is_none() {
         return Ok(None);
     }
@@ -220,6 +223,11 @@ pub fn write_spatial_pft_constant_restart(
             fraction: &fraction,
             canopy_top_m: &canopy.top_m,
             canopy_bottom_m: &canopy.bottom_m,
+            canopy_structure: Some(PftCanopyStructure {
+                needleleaf_crown_depth_m: &ncd,
+                needleleaf_crown_width_m: &ncw,
+                broadleaf_crown_width_m: &bcw,
+            }),
             crop_fraction: crop_fraction.as_deref(),
         },
     )
@@ -1725,6 +1733,36 @@ fn read_pft_f64(
     ensure!(
         values.len() == count,
         "{variable} length must match the {count} PFT entries"
+    );
+    Ok(values)
+}
+
+fn read_optional_pft_f64(
+    config: SpatialPftStaticConfig<'_>,
+    stem: &str,
+    count: usize,
+    default: f64,
+) -> Result<Vec<f64>> {
+    let path = block_path(
+        config.landdata,
+        "cstructure",
+        stem,
+        config.land_cover_year,
+        config.block_label,
+    );
+    if !path.try_exists()? {
+        return Ok(vec![default; count]);
+    }
+    let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+    let Some(variable) = file.variable(stem) else {
+        return Ok(vec![default; count]);
+    };
+    let values = variable.get_values::<f64, _>(..)?;
+    ensure!(
+        values.len() == count,
+        "{} has {} values; expected {count}",
+        path.display(),
+        values.len()
     );
     Ok(values)
 }

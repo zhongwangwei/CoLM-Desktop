@@ -750,6 +750,16 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
         "w180_s90",
         20.0,
     );
+    for (stem, value) in [
+        ("ncd_patches", 1.0),
+        ("ncw_patches", 2.0),
+        ("bcw_patches", 3.0),
+    ] {
+        write_f64(&landdata, "cstructure", stem, stem, 2005, "w180_s90", value);
+    }
+    for (stem, value) in [("ncd_pfts", 4.0), ("ncw_pfts", 5.0), ("bcw_pfts", 6.0)] {
+        write_f64(&landdata, "cstructure", stem, stem, 2005, "w180_s90", value);
+    }
     for (name, value) in [
         ("mean_twi_patches", 9.0),
         ("fsatmax_patches", 0.4),
@@ -805,7 +815,9 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
     assert_eq!(values_i32(&pft, "pftclass").unwrap(), [1]);
     assert_eq!(values_f64(&common, "htop").unwrap(), [20.0]);
+    assert_eq!(values_f64(&common, "ncd").unwrap(), [1.0]);
     assert_eq!(values_f64(&pft, "htop_p").unwrap(), [20.0]);
+    assert_eq!(values_f64(&pft, "ncd_p").unwrap(), [4.0]);
     assert_eq!(values_f64(&pft, "hbot_p").unwrap(), [20.0 / 17.0]);
     assert_eq!(values_f64(&common, "hbot").unwrap(), [20.0 / 17.0]);
     assert!(files.bgc.is_some());

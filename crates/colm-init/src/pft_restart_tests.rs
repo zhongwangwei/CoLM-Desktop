@@ -18,6 +18,11 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
             class: &[1, 3],
             fraction: &[0.25, 0.75],
             canopy_top_m: &[20.0, 5.0],
+            canopy_structure: Some(PftCanopyStructure {
+                needleleaf_crown_depth_m: &[1.0, 2.0],
+                needleleaf_crown_width_m: &[3.0, 4.0],
+                broadleaf_crown_width_m: &[5.0, 6.0],
+            }),
             canopy_bottom_m: &[2.0, 1.0],
             crop_fraction: Some(&[0.4, 0.6]),
         },
@@ -45,6 +50,13 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
             .unwrap(),
         [0.4, 0.6]
     );
+    assert_eq!(
+        file.variable("ncd_p")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 2.0]
+    );
     drop(file);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -62,6 +74,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
             class: &[],
             fraction: &[],
             canopy_top_m: &[],
+            canopy_structure: None,
             canopy_bottom_m: &[],
             crop_fraction: None,
         },
@@ -75,7 +88,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
         file.variables()
             .map(|variable| variable.name())
             .collect::<Vec<_>>(),
-        ["pftclass", "pftfrac", "htop_p", "hbot_p"]
+        ["pftclass", "pftfrac", "htop_p", "hbot_p", "ncd_p", "ncw_p", "bcw_p"]
     );
     for variable in file.variables() {
         assert_eq!(variable.len(), 0);
@@ -90,6 +103,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
             class: &[],
             fraction: &[1.0],
             canopy_top_m: &[],
+            canopy_structure: None,
             canopy_bottom_m: &[],
             crop_fraction: None,
         }
@@ -310,13 +324,14 @@ fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
             class: &[1, 3],
             fraction: &[0.25, 0.75],
             canopy_top_m: &[20.0, 5.0],
+            canopy_structure: None,
             canopy_bottom_m: &[2.0, 1.0],
             crop_fraction: Some(&[0.4, 0.6]),
         },
     )
     .unwrap();
     let header = ncdump_header(&const_path);
-    for name in ["pftclass", "pftfrac", "cropfrac"] {
+    for name in ["pftclass", "pftfrac", "ncd_p", "cropfrac"] {
         assert_eq!(deflate_level(&header, name), Some(1), "{name}");
     }
 
@@ -350,6 +365,7 @@ fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
                 class: &[1, 3],
                 fraction: &[0.25, 0.75],
                 canopy_top_m: &[20.0, 5.0],
+                canopy_structure: None,
                 canopy_bottom_m: &[2.0, 1.0],
                 crop_fraction: None,
             },
@@ -545,6 +561,7 @@ fn pft_restart_rejects_invalid_feature_shapes_before_creating_a_file() {
             class: &[1],
             fraction: &[1.0, 0.0],
             canopy_top_m: &[2.0],
+            canopy_structure: None,
             canopy_bottom_m: &[1.0],
             crop_fraction: None,
         },

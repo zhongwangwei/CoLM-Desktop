@@ -151,6 +151,14 @@ fn constant_restart_matches_fortran_variable_order_shapes_and_transposition() {
     ] {
         assert!(block.variable(name).is_some(), "missing {name}");
     }
+    assert_eq!(
+        block
+            .variable("ncd")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 2.0]
+    );
     drop(block);
 
     let constants = netcdf::open(&files.constants).unwrap();
@@ -378,6 +386,7 @@ fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fie
     assert_eq!(deflate_level(&header, "lakedepth"), Some(1));
     assert_eq!(deflate_level(&header, "vf_quartz"), Some(1));
     assert_eq!(deflate_level(&header, "BVIC"), Some(1));
+    assert_eq!(deflate_level(&header, "ncd"), Some(1));
     for name in [
         "patchclass",
         "patchlonr",
@@ -489,6 +498,11 @@ fn input<'a>(
         lake,
         soil,
         canopy,
+        canopy_structure: Some(CanopyStructureFields {
+            needleleaf_crown_depth_m: &[1.0, 2.0],
+            needleleaf_crown_width_m: &[3.0, 4.0],
+            broadleaf_crown_width_m: &[5.0, 6.0],
+        }),
         tuning: RestartTuning {
             zlnd: 1.0,
             zsno: 2.0,

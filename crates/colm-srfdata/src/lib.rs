@@ -41,10 +41,10 @@ pub use diagnostics::{
 };
 pub use grid::{Grid, COLM_1KM, COLM_500M, COLM_5KM, MERIT_90M};
 pub use pft::{
-    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, build_crop_land_patches,
-    build_crop_pft_topology, build_pft_topology, crop_pft_pctshared, CropLandPatchTopology,
-    PftFractionInput, PftIndexInput, PftIndexState, PftPatchKind, PftPatchMode, PftTopology,
-    IGBP_CROPLAND,
+    aggregate_pft_canopy_structure, aggregate_pft_fractions, aggregate_pft_height,
+    aggregate_pft_index, build_crop_land_patches, build_crop_pft_topology, build_pft_topology,
+    crop_pft_pctshared, CropLandPatchTopology, PftFractionInput, PftIndexInput, PftIndexState,
+    PftPatchKind, PftPatchMode, PftTopology, IGBP_CROPLAND,
 };
 pub use region::{clip_existing_surface, SpatialBounds};
 pub use site::{
@@ -78,8 +78,8 @@ pub use spatial::{
     MethanePhSamples, PixelAxes, SpatialGrid, SpatialInputKind, SpatialTopology, TiledRasterFiles,
 };
 pub use surface::{
-    derive_topographic_wetness, FlatPatches, RegularTopographyFactors, SimpleTopographyFactors,
-    SoilBrightness, TopographicWetness, Topography, SURFACE_MISSING,
+    derive_topographic_wetness, CanopyStructure, FlatPatches, RegularTopographyFactors,
+    SimpleTopographyFactors, SoilBrightness, TopographicWetness, Topography, SURFACE_MISSING,
 };
 pub use texture::{classify, BVIC_USDA, CLASS_NAMES};
 pub use topology::{FlatLandElements, FlatLandHrus, FlatLandPatches, FlatMesh};

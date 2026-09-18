@@ -73,6 +73,41 @@ fn lake_soil_carbon_masks_missing_values_and_keeps_non_lake_patches_zero() {
 }
 
 #[test]
+fn canopy_structure_masks_invalid_cells_and_copies_wmo_source() {
+    let layout = FlatPatches::new(
+        vec![1, 1, 1],
+        vec![0, 3, 4, 5],
+        vec![0, 1, 2, 3, 4],
+        vec![None, None, Some(0)],
+    )
+    .unwrap();
+    let structure = layout
+        .aggregate_canopy_structure(
+            &[2.0, 4.0, f64::NAN, 1000.0, 99.0],
+            &[3.0, 9.0, -1.0, 1001.0, 99.0],
+            &[5.0, 11.0, f64::MIN_POSITIVE, 0.0, 99.0],
+            &[1.0, 3.0, 20.0, 1.0, 1.0],
+        )
+        .unwrap();
+    assert_eq!(
+        structure.needleleaf_crown_depth_m,
+        [3.5, SURFACE_MISSING, 3.5]
+    );
+    assert_eq!(
+        structure.needleleaf_crown_width_m,
+        [7.5, SURFACE_MISSING, 7.5]
+    );
+    assert_eq!(
+        structure.broadleaf_crown_width_m,
+        [
+            (5.0 + 33.0 + 20.0 * f64::MIN_POSITIVE) / 24.0,
+            SURFACE_MISSING,
+            (5.0 + 33.0 + 20.0 * f64::MIN_POSITIVE) / 24.0
+        ]
+    );
+}
+
+#[test]
 fn lulcc_source_fractions_are_area_weighted_and_keep_wmo_consumers_zero() {
     let layout = FlatPatches::new(
         vec![1, 1],

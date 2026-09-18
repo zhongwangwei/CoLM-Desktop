@@ -11,6 +11,38 @@ fn patches() -> FlatPatches {
 }
 
 #[test]
+fn pft_canopy_structure_uses_pft_weights_and_patch_fallbacks() {
+    let layout = patches();
+    let input = PftFractionInput {
+        pft_offsets: &[0, 2, 3, 4],
+        pft_classes: &[0, 1, 0, 16],
+        patch_kind: &[
+            PftPatchKind::Natural,
+            PftPatchKind::Natural,
+            PftPatchKind::Crop,
+        ],
+        raw_class_count: 2,
+        raw_percent: &[100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0],
+        land_area: &[1.0; 5],
+        crop_excluded_class: None,
+    };
+    let patch = CanopyStructure {
+        needleleaf_crown_depth_m: vec![10.0, 10.0, 30.0],
+        needleleaf_crown_width_m: vec![11.0, 11.0, 31.0],
+        broadleaf_crown_width_m: vec![12.0, 12.0, 32.0],
+    };
+    let raw = CanopyStructure {
+        needleleaf_crown_depth_m: vec![2.0, 6.0, 9.0, 20.0, 40.0],
+        needleleaf_crown_width_m: vec![3.0, 7.0, 9.0, 21.0, 41.0],
+        broadleaf_crown_width_m: vec![4.0, 8.0, 9.0, 22.0, 42.0],
+    };
+    let result = aggregate_pft_canopy_structure(&layout, input, &patch, &raw).unwrap();
+    assert_eq!(result.needleleaf_crown_depth_m, [2.0, 6.0, 10.0, 30.0]);
+    assert_eq!(result.needleleaf_crown_width_m, [3.0, 7.0, 11.0, 31.0]);
+    assert_eq!(result.broadleaf_crown_width_m, [4.0, 8.0, 12.0, 32.0]);
+}
+
+#[test]
 fn pft_ordered_reductions_match_original_compiled_sums() {
     // Original MOD_LandPFT, Aggregation_LAI and Aggregation_ForestHeight expressions.
     let rows = include_str!("../tests/fixtures/pft_ordered_reductions.txt")

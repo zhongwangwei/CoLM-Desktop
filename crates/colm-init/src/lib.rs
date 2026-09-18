@@ -157,8 +157,8 @@ pub use gridriver::{
 };
 pub use pft_restart::{
     write_pft_constant_restart, write_pft_constant_restart_block, write_pft_time_restart,
-    write_pft_time_restart_block, PftBgcFields, PftConstantRestartInput, PftCropFields,
-    PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
+    write_pft_time_restart_block, PftBgcFields, PftCanopyStructure, PftConstantRestartInput,
+    PftCropFields, PftHyperspectralFields, PftOzoneFields, PftPlantHydraulicFields, PftTimeFields,
     PftTimeRestartInput,
 };
 pub use pipeline::{
@@ -166,9 +166,9 @@ pub use pipeline::{
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
-    ConstantRestartFiles, ConstantRestartInput, RestartDimensions, RestartPatchFields,
-    RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields, TerrainRadiation,
-    TopmodelFields,
+    CanopyStructureFields, ConstantRestartFiles, ConstantRestartInput, RestartDimensions,
+    RestartPatchFields, RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields,
+    TerrainRadiation, TopmodelFields,
 };
 pub use runtime::{
     read_single_point_cn_state, read_single_point_snow_depth, read_single_point_soil_profile,

@@ -42,6 +42,9 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
     write_i32(&landdata, "landpft", "landpft", "settyp", &[1, 13]);
     write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[0.25, 0.75]);
     write_f64(&landdata, "htop", "htop_pfts", "htop_pfts", &[20.0, 4.0]);
+    write_f64(&landdata, "cstructure", "ncd_pfts", "ncd_pfts", &[1.0, 2.0]);
+    write_f64(&landdata, "cstructure", "ncw_pfts", "ncw_pfts", &[3.0, 4.0]);
+    write_f64(&landdata, "cstructure", "bcw_pfts", "bcw_pfts", &[5.0, 6.0]);
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
@@ -58,6 +61,7 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
     assert_eq!(values_i32(&output, "pftclass").unwrap(), [1, 13]);
     assert_eq!(values_f64(&output, "pftfrac").unwrap(), [0.25, 0.75]);
     assert_eq!(values_f64(&output, "htop_p").unwrap(), [20.0, 3.0]);
+    assert_eq!(values_f64(&output, "ncd_p").unwrap(), [1.0, 2.0]);
     assert!(values_f64(&output, "hbot_p").unwrap()[0] >= 1.0);
     std::fs::remove_dir_all(root).unwrap();
 }

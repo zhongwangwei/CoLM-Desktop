@@ -15,9 +15,9 @@ use colm_srfdata::soil::{
 use colm_srfdata::spatial::write_landpft_vector;
 use colm_srfdata::{
     aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
-    aggregate_pft_fractions, aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
-    aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
-    build_catchment_pft_land_patches_from_raster,
+    aggregate_pft_canopy_structure, aggregate_pft_fractions, aggregate_pft_height,
+    aggregate_pft_index, aggregate_urban_region_ids, aggregate_urban_tree_index,
+    build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
     build_catchment_spatial_topology_with_filter_and_raw_grids, build_coordinate_patch_selection,
     build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
     build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_pft_topology,
@@ -36,12 +36,12 @@ use colm_srfdata::{
     write_spatial_hru_patch_fractions, write_spatial_hru_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
     write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, CropLandPatchTopology, DiagnosticStatistic,
-    FlatLandElements, FlatLandPatches, FlatMesh, Grid, LczUrbanRawFields, MeshFilter,
-    NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode,
-    PftTopology, PixelAxes, SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology,
-    TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM,
-    DIAGNOSTIC_MISSING, MERIT_90M,
+    write_spatial_urban_vector, BlockLayout, CanopyStructure, CropLandPatchTopology,
+    DiagnosticStatistic, FlatLandElements, FlatLandPatches, FlatMesh, Grid, LczUrbanRawFields,
+    MeshFilter, NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput,
+    PftPatchMode, PftTopology, PixelAxes, SiteMode, SpatialBounds, SpatialInputKind,
+    SpatialTopology, TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM,
+    COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -50,6 +50,7 @@ const CROP_NATURAL_PFT_CLASSES: usize = 15;
 const CFT_CLASSES: usize = 64;
 const IGBP_LULCC_CLASSES: usize = 17;
 const TWI_LAYERS: usize = 25;
+const CANOPY_STRUCTURE_SUFFIX: &str = "CanopyStructure_500m_CH90_aggregated";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -96,6 +97,7 @@ struct SpatialLctArgs {
     regular_topography_factors: Option<PathBuf>,
     bedrock: Option<PathBuf>,
     plant_tiles: Option<PathBuf>,
+    canopy_tiles: Option<PathBuf>,
     usgs_forest_height: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
     eight_day_lai_dir: Option<PathBuf>,
@@ -182,6 +184,7 @@ struct SpatialPftArgs {
     lulcc: bool,
     lulcc_lai_only: bool,
     plant_tiles: PathBuf,
+    canopy_tiles: Option<PathBuf>,
     crop_surface: Option<PathBuf>,
     monthly_vegetation_years: Vec<i32>,
     lake_depth: Option<PathBuf>,
@@ -511,6 +514,22 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         COLM_500M,
     )?;
     let patch_height = layout.aggregate_igbp_forest_height(&forest_height, &area)?;
+    let raw_canopy_structure = args
+        .canopy_tiles
+        .as_deref()
+        .map(|directory| read_raw_canopy_structure(directory, &mesh, &topology.pixel))
+        .transpose()?;
+    let patch_canopy_structure = raw_canopy_structure
+        .as_ref()
+        .map(|raw| {
+            layout.aggregate_canopy_structure(
+                &raw.needleleaf_crown_depth_m,
+                &raw.needleleaf_crown_width_m,
+                &raw.broadleaf_crown_width_m,
+                &area,
+            )
+        })
+        .transpose()?;
     let common = SpatialLctArgs {
         kind: args.kind,
         mesh: args.mesh.clone(),
@@ -539,6 +558,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         regular_topography_factors: args.regular_topography_factors.clone(),
         bedrock: args.bedrock.clone(),
         plant_tiles: Some(args.plant_tiles.clone()),
+        canopy_tiles: args.canopy_tiles.clone(),
         usgs_forest_height: None,
         monthly_vegetation_years: Vec::new(),
         eight_day_lai_dir: None,
@@ -554,6 +574,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         &topology,
         patches,
         Some(&patch_height),
+        patch_canopy_structure.as_ref(),
         crop.as_ref().map(|crop| crop.pctshared.as_slice()),
     )?;
     materialize_lulcc_transfer_traces(
@@ -623,6 +644,40 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         DiagnosticStatistic::Fraction,
         Some(0.0),
     )?;
+    if let (Some(raw), Some(patch)) = (&raw_canopy_structure, &patch_canopy_structure) {
+        let structure = aggregate_pft_canopy_structure(
+            &layout,
+            PftFractionInput {
+                pft_offsets: &pfts.patch_offsets,
+                pft_classes: &pfts.pft_classes,
+                patch_kind: &pfts.patch_kind,
+                raw_class_count: MODIS_PFT_CLASSES,
+                raw_percent: &raw_percent,
+                land_area: &area,
+                crop_excluded_class: crop.as_ref().map(|_| MODIS_PFT_CLASSES - 1),
+            },
+            patch,
+            raw,
+        )?;
+        for (name, values) in [
+            ("ncd_pfts", &structure.needleleaf_crown_depth_m),
+            ("ncw_pfts", &structure.needleleaf_crown_width_m),
+            ("bcw_pfts", &structure.broadleaf_crown_width_m),
+        ] {
+            write_landpft_vector(
+                &args.landdata,
+                args.year,
+                &topology,
+                &pfts.land_pfts,
+                &args.blocks,
+                args.srfdata_compression,
+                "cstructure",
+                name,
+                name,
+                values,
+            )?;
+        }
+    }
     if let Some(crop) = &crop {
         write_landpatch_scalar(
             &args.landdata,
@@ -994,7 +1049,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     } else {
         None
     };
-    materialize_spatial_common_fields(&args, &topology, &patches, None, None)?;
+    materialize_spatial_common_fields(&args, &topology, &patches, None, None, None)?;
     materialize_lulcc_transfer_traces(
         LulccTraceArgs {
             enabled: args.lulcc && !args.lulcc_lai_only,
@@ -2379,6 +2434,7 @@ fn materialize_spatial_common_fields(
     topology: &SpatialTopology,
     patches: &FlatLandPatches,
     forest_height_override: Option<&[f64]>,
+    canopy_structure_override: Option<&CanopyStructure>,
     patch_pctshared: Option<&[f64]>,
 ) -> Result<()> {
     ensure!(
@@ -2460,6 +2516,22 @@ fn materialize_spatial_common_fields(
             }
             (None, None) => None,
         },
+    };
+    let canopy_structure = match canopy_structure_override {
+        Some(values) => Some(values.clone()),
+        None => args
+            .canopy_tiles
+            .as_deref()
+            .map(|directory| {
+                let raw = read_raw_canopy_structure(directory, &mesh, &topology.pixel)?;
+                layout.aggregate_canopy_structure(
+                    &raw.needleleaf_crown_depth_m,
+                    &raw.needleleaf_crown_width_m,
+                    &raw.broadleaf_crown_width_m,
+                    &area,
+                )
+            })
+            .transpose()?,
     };
     let lake_depth = if let Some(path) = &args.lake_depth {
         let waterbody = match args.land_cover {
@@ -2887,6 +2959,25 @@ fn materialize_spatial_common_fields(
             Some(0.0),
         )?;
     }
+    if let Some(structure) = canopy_structure {
+        for (name, values) in [
+            ("ncd_patches", &structure.needleleaf_crown_depth_m),
+            ("ncw_patches", &structure.needleleaf_crown_width_m),
+            ("bcw_patches", &structure.broadleaf_crown_width_m),
+        ] {
+            write_landpatch_scalar(
+                &args.landdata,
+                args.year,
+                topology,
+                patches,
+                &args.blocks,
+                args.srfdata_compression,
+                "cstructure",
+                name,
+                values,
+            )?;
+        }
+    }
     if let Some(directory) = &args.eight_day_lai_dir {
         for &year in &args.eight_day_lai_years {
             let source = directory.join(format!("lai_8-day_15s_{year:04}.nc"));
@@ -2942,6 +3033,28 @@ fn materialize_spatial_common_fields(
         patch_pctshared,
     )?;
     Ok(())
+}
+
+fn read_raw_canopy_structure(
+    directory: &Path,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+) -> Result<CanopyStructure> {
+    let read = |variable| {
+        read_mesh_tiled_raster_f64(
+            directory,
+            CANOPY_STRUCTURE_SUFFIX,
+            variable,
+            mesh,
+            pixel,
+            COLM_500M,
+        )
+    };
+    Ok(CanopyStructure {
+        needleleaf_crown_depth_m: read("NEEDLELEAF_CROWN_DEPTH")?,
+        needleleaf_crown_width_m: read("NEEDLELEAF_CROWN_WIDTH")?,
+        broadleaf_crown_width_m: read("BROADLEAF_CROWN_WIDTH")?,
+    })
 }
 
 fn materialize_lct_monthly_vegetation(
@@ -3419,6 +3532,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut regular_topography_factors = None;
     let mut bedrock = None;
     let mut plant_tiles = None;
+    let mut canopy_tiles = None;
     let mut usgs_forest_height = None;
     let mut soil_hyper_albedo_dir = None;
     let mut urban_rawdata = None;
@@ -3610,6 +3724,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 ));
                 index += 2;
             }
+            "--canopy-structure-dir" => {
+                canopy_tiles = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--canopy-structure-dir needs the canopy_data directory")?,
+                ));
+                index += 2;
+            }
             "--lulcc" => {
                 lulcc = true;
                 index += 1;
@@ -3723,6 +3844,11 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         eight_day_lai_dir.is_some() == !eight_day_lai_years.is_empty(),
         "--lai-8day-dir requires one or more --lai-8day-year values"
     );
+    let land_cover = land_cover.context("spatial-lct requires --land-cover igbp or usgs")?;
+    ensure!(
+        canopy_tiles.is_none() || land_cover == SiteMode::Igbp,
+        "--canopy-structure-dir supports IGBP land cover only"
+    );
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -3736,7 +3862,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         zip_aggregation,
         dominant,
         srfdata_compression,
-        land_cover: land_cover.context("spatial-lct requires --land-cover igbp or usgs")?,
+        land_cover,
         lake_depth,
         lake_soil_carbon,
         methane_ph,
@@ -3751,6 +3877,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         regular_topography_factors,
         bedrock,
         plant_tiles,
+        canopy_tiles,
         usgs_forest_height,
         monthly_vegetation_years,
         eight_day_lai_dir,
@@ -3794,6 +3921,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut output_2m_wmo = false;
     let mut lulcc = false;
     let mut plant_tiles = None;
+    let mut canopy_tiles = None;
     let mut crop_surface = None;
     let mut monthly_vegetation_years = Vec::new();
     let mut lake_depth = None;
@@ -3905,6 +4033,13 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 plant_tiles = Some(PathBuf::from(
                     args.get(index + 1)
                         .context("--plant-tiles needs the plant_15s directory")?,
+                ));
+                index += 2;
+            }
+            "--canopy-structure-dir" => {
+                canopy_tiles = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .context("--canopy-structure-dir needs the canopy_data directory")?,
                 ));
                 index += 2;
             }
@@ -4064,6 +4199,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         lulcc,
         lulcc_lai_only: false,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
+        canopy_tiles,
         crop_surface,
         monthly_vegetation_years,
         lake_depth,
@@ -4400,6 +4536,7 @@ fn spatial_case_command(
         .flatten();
     let bedrock = rawdata.join("bedrock.nc");
     let plant_tiles = rawdata.join("plant_15s");
+    let canopy_tiles = rawdata.join("canopy_data");
     let mut required_files = vec![mesh.clone()];
     let mut required_directories = Vec::new();
     let mut args = Vec::new();
@@ -4532,6 +4669,12 @@ fn spatial_case_command(
                 forest_height.display().to_string(),
             ]);
         }
+        if !lulcc_lai_only && land_cover == SiteMode::Igbp && canopy_tiles.is_dir() {
+            args.extend([
+                "--canopy-structure-dir".to_owned(),
+                canopy_tiles.display().to_string(),
+            ]);
+        }
         if lulcc {
             args.push("--lulcc".to_owned());
         }
@@ -4622,6 +4765,12 @@ fn spatial_case_command(
             "--plant-tiles".to_owned(),
             plant_tiles.display().to_string(),
         ]);
+        if !lulcc_lai_only && canopy_tiles.is_dir() {
+            args.extend([
+                "--canopy-structure-dir".to_owned(),
+                canopy_tiles.display().to_string(),
+            ]);
+        }
         if !lulcc_lai_only {
             required_files.extend([
                 lake_depth.clone(),
@@ -5111,8 +5260,8 @@ fn usage() -> &'static str {
     "usage:
   mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
-  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--srfdata-compress-level 0..9] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--srfdata-compress-level 0..9] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--canopy-structure-dir canopy_data] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--canopy-structure-dir canopy_data] [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
 }
 
 #[cfg(test)]
@@ -5214,6 +5363,8 @@ mod tests {
             "bedrock.nc".into(),
             "--plant-tiles".into(),
             "plant_15s".into(),
+            "--canopy-structure-dir".into(),
+            "canopy_data".into(),
             "--lulcc".into(),
             "--monthly-vegetation-year".into(),
             "1999".into(),
@@ -5255,6 +5406,7 @@ mod tests {
         );
         assert_eq!(parsed.bedrock, Some(PathBuf::from("bedrock.nc")));
         assert_eq!(parsed.plant_tiles, Some(PathBuf::from("plant_15s")));
+        assert_eq!(parsed.canopy_tiles, Some(PathBuf::from("canopy_data")));
         assert_eq!(parsed.monthly_vegetation_years, vec![1999, 2005]);
         assert!(parsed.lulcc);
         assert_eq!(parsed.usgs_forest_height, None);
@@ -5544,6 +5696,8 @@ mod tests {
             "2005".into(),
             "--plant-tiles".into(),
             "plant_15s".into(),
+            "--canopy-structure-dir".into(),
+            "canopy_data".into(),
             "--crop-surface".into(),
             "global_CFT_surface_data.nc".into(),
             "--blocks".into(),
@@ -5581,6 +5735,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.kind, SpatialInputKind::GridBased);
         assert_eq!(parsed.plant_tiles, PathBuf::from("plant_15s"));
+        assert_eq!(parsed.canopy_tiles, Some(PathBuf::from("canopy_data")));
         assert_eq!(
             parsed.crop_surface,
             Some(PathBuf::from("global_CFT_surface_data.nc"))
@@ -7066,7 +7221,7 @@ mod tests {
             brightness.display().to_string(),
         ])
         .unwrap();
-        materialize_spatial_common_fields(&args, &topology, &patches, None, None).unwrap();
+        materialize_spatial_common_fields(&args, &topology, &patches, None, None, None).unwrap();
         let texture =
             netcdf::open(output.join("soil/2005/soiltexture_patches_w180_s90.nc")).unwrap();
         assert_eq!(
