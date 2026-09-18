@@ -1703,11 +1703,14 @@ tests pass. Changed-file formatting, Clippy with warnings denied, downstream
 kernel/CLI checks and release builds pass. Scientific parity above remains a
 separate failing gate; these checks do not replace it.
 
-Two unsupported WMO combinations fail before surface output: CROP leaves
-`cropclass/pctshared` unresized in original `land2mWMO`; soil hyper-albedo calls
-`aggregation_request_data` on pixel index -1 with no WMO branch. The latter
-is **not** the sentinel-aware `SpatialMapping` geometry path, so Rust does not
-invent a whole-element median or silently copy another patch's albedo.
+The two former WMO exclusions are now closed without preserving the original
+out-of-bounds behavior. CROP virtual patches are inserted after physical crop
+partitioning and copy the selected source patch's aligned `cropclass/pctshared`
+metadata. Soil hyper-albedo resolves the same explicit WMO source before reading
+raw-cell ranges, rather than passing the original pixel index -1 into
+`aggregation_request_data`. Physical-patch aggregation is unchanged. Synthetic
+surface tests cover both paths; a full 211-file real-data hyperspectral WMO run
+is still pending.
 
 ## Ordered QR arithmetic follow-up
 
