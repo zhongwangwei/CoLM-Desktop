@@ -32,10 +32,9 @@ const IRRIGATION_ALLOCATION_FILE: &str = "surfdata_irrigation_allocation.nc";
 #[derive(Debug, Clone, Copy)]
 pub struct CropManagementConfig<'a> {
     pub runtime_dir: &'a Path,
-    /// Positive values replace raster planting days, as in CoLM.
+    /// Desktop override: positive values replace raster planting days.
     pub planting_day_override: Option<f64>,
-    pub use_fertilizer: bool,
-    /// CoLM's `DEF_FERT_SOURCE`; consulted only when fertilizer is enabled.
+    /// CoLM's `DEF_FERT_SOURCE`; read even when runtime fertilization is disabled.
     pub fertilizer_source: i32,
     pub use_irrigation: bool,
     /// Read `surfdata_irrigation_allocation.nc` for allocation mode three.
@@ -109,8 +108,10 @@ pub struct CropColdStartState {
     fertilizer_nitrogen_sugarcane: Vec<f64>,
 }
 
-/// Mirrors `CROP_readin`'s explicit-planting-day branch, which intentionally
-/// avoids global management rasters when fertilization and irrigation are off.
+/// Desktop's explicit-planting-day extension for fertilizer source one.
+/// It skips management maps when fertilization and irrigation are off, but
+/// retains `MOD_IniTimeVariable`'s class-dependent manure defaults. Source two
+/// must use its management map; its manure input cannot be inferred here.
 pub fn crop_cold_start_from_tuning(
     classes: &[i32],
     crop_fraction: &[f64],
@@ -122,13 +123,14 @@ pub fn crop_cold_start_from_tuning(
         "DEF_TUNING_CROP_PLANTING_DAY must be finite and positive"
     );
     let mut state = empty_crop_state(classes.len(), crop_fraction.len());
+    state.set_source_one_manure(classes);
     state.planting_date.fill(planting_day);
     state.planting_day_rice2.fill(0.0);
     state.patch_phase.fill(4.0);
     Ok(state)
 }
 
-/// Builds CoLM's no-map CROP branch for a complete spatial `landpft` block.
+/// Builds the source-one no-map extension for a complete spatial `landpft` block.
 ///
 /// Unlike the single-point helper, the block can contain natural and crop PFTs
 /// and multiple landpatches. `pft_to_patch` owns the axis conversion used by
@@ -160,6 +162,7 @@ pub(crate) fn spatial_crop_cold_start_from_tuning(
     );
 
     let mut state = empty_crop_state(classes.len(), patches);
+    state.set_source_one_manure(classes);
     let mut phase_weight = vec![0.0; patches];
     let mut phase_sum = vec![0.0; patches];
     for (pft, &class) in classes.iter().enumerate() {
@@ -258,23 +261,22 @@ pub(crate) fn spatial_crop_cold_start_from_management(
         }
     }
 
-    if config.use_fertilizer {
-        match config.fertilizer_source {
-            1 => read_spatial_fertilizer_source_one(
-                &mut state,
-                classes,
-                &crop_pft,
-                &crop_grid,
-                crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
-            )?,
-            2 => read_spatial_fertilizer_source_two(
-                &mut state,
-                classes,
-                pft_pixels,
-                crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
-            )?,
-            source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
-        }
+    // CROP_readin populates restart inputs regardless of DEF_USE_FERT.
+    match config.fertilizer_source {
+        1 => read_spatial_fertilizer_source_one(
+            &mut state,
+            classes,
+            &crop_pft,
+            &crop_grid,
+            crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
+        )?,
+        2 => read_spatial_fertilizer_source_two(
+            &mut state,
+            classes,
+            pft_pixels,
+            crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
+        )?,
+        source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
     }
     if config.use_irrigation {
         state.irrigation_method = Some(read_spatial_irrigation_methods(
@@ -336,24 +338,23 @@ pub fn crop_cold_start_from_management(
         state.planting_date.fill(day);
     }
 
-    if config.use_fertilizer {
-        match config.fertilizer_source {
-            1 => read_fertilizer_source_one(
-                &mut state,
-                classes,
-                crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
-                latitude_degrees,
-                longitude_degrees,
-            )?,
-            2 => read_fertilizer_source_two(
-                &mut state,
-                classes,
-                crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
-                latitude_degrees,
-                longitude_degrees,
-            )?,
-            source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
-        }
+    // CROP_readin populates restart inputs regardless of DEF_USE_FERT.
+    match config.fertilizer_source {
+        1 => read_fertilizer_source_one(
+            &mut state,
+            classes,
+            crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
+            latitude_degrees,
+            longitude_degrees,
+        )?,
+        2 => read_fertilizer_source_two(
+            &mut state,
+            classes,
+            crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
+            latitude_degrees,
+            longitude_degrees,
+        )?,
+        source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
     }
     if config.use_irrigation {
         state.irrigation_method = Some(read_irrigation_methods(
@@ -386,6 +387,17 @@ pub fn crop_cold_start_from_management(
 }
 
 impl CropColdStartState {
+    fn set_source_one_manure(&mut self, classes: &[i32]) {
+        // MOD_Const_PFT manure(0:78), kg N/m² × 1000 in MOD_IniTimeVariable.
+        for (value, &class) in self.manure_nitrogen.iter_mut().zip(classes) {
+            *value = if matches!(class, 17..=32 | 41..=42 | 61..=62 | 67..=68 | 75..=78) {
+                2.0
+            } else {
+                0.0
+            };
+        }
+    }
+
     /// Builds the shared Rust runtime state from this cold-start record.
     ///
     /// Restart serialization remains an adapter concern; the executable
@@ -1302,6 +1314,7 @@ fn read_spatial_fertilizer_source_one(
     path: impl AsRef<Path>,
 ) -> Result<()> {
     state.fertilizer_nitrogen.fill(CROP_MANAGEMENT_MISSING);
+    state.set_source_one_manure(classes);
     let file = open_map(path, "CROP fertilizer source 1")?;
     let grid = MapGrid::from_file(&file)?;
     ensure!(
@@ -1414,6 +1427,7 @@ fn read_fertilizer_source_one(
     latitude: f64,
     longitude: f64,
 ) -> Result<()> {
+    state.set_source_one_manure(classes);
     let file = open_map(path, "CROP fertilizer source 1")?;
     let cell = nearest_cell_indices(&file, latitude, longitude)?;
     for (index, &class) in classes.iter().enumerate() {

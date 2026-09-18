@@ -1212,8 +1212,9 @@ fn spatial_crop_state(
     );
     let planting_day = planting_day.filter(|value| *value > 0.0);
     let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
+    let fertilizer_source = optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1);
     let use_irrigation = optional_bool_or(document, "DEF_USE_IRRIGATION", false)?;
-    if !use_fertilizer && !use_irrigation {
+    if !use_fertilizer && !use_irrigation && fertilizer_source == 1 {
         if let Some(planting_day) = planting_day {
             return crate::crop::spatial_crop_cold_start_from_tuning(
                 &pfts.class,
@@ -1255,8 +1256,7 @@ fn spatial_crop_state(
         crate::CropManagementConfig {
             runtime_dir: &runtime_dir,
             planting_day_override: planting_day,
-            use_fertilizer,
-            fertilizer_source: optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1),
+            fertilizer_source,
             use_irrigation,
             use_irrigation_allocation: use_irrigation
                 && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),

@@ -1429,32 +1429,51 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
     write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
     write_crop_runtime(&runtime);
     let namelist = root.join("case.nml");
-    std::fs::write(
-        &namelist,
-        format!(
-            "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CROP = .true.\n DEF_USE_FERT = .false.\n DEF_USE_IRRIGATION = .false.\n DEF_dir_runtime = '{}'\n/\n",
-            runtime.display()
-        ),
-    )
-    .unwrap();
+    // Disabled application still reads both input sources. Source two must also
+    // read its manure map when Desktop's planting-day override is enabled.
+    for (source, planting_day) in [(1, -9999.0), (2, -9999.0), (2, 99.0)] {
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CROP = .true.\n DEF_USE_FERT = .false.\n DEF_USE_IRRIGATION = .false.\n DEF_dir_runtime = '{}'\n DEF_FERT_SOURCE = {source}\n DEF_TUNING_CROP_PLANTING_DAY = {planting_day}\n/\n",
+                runtime.display()
+            ),
+        )
+        .unwrap();
 
-    let mut config = crate::SpatialPftTimeConfig::new(
-        crate::SpatialPftStaticConfig::new(
-            &namelist, &landdata, &restart, "test", 2005, "w180_s90",
-        ),
-        crate::RestartDate {
-            year: 2005,
-            julian_day: 1,
-            seconds: 0,
-        },
-    );
-    config.plant_hydraulics = false;
-    let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
+        let mut config = crate::SpatialPftTimeConfig::new(
+            crate::SpatialPftStaticConfig::new(
+                &namelist, &landdata, &restart, "test", 2005, "w180_s90",
+            ),
+            crate::RestartDate {
+                year: 2005,
+                julian_day: 1,
+                seconds: 0,
+            },
+        );
+        config.plant_hydraulics = false;
+        let files = crate::write_spatial_pft_cold_time_restarts(config).unwrap();
 
-    let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
-    assert_eq!(values_f64(&pft, "plantdate_p").unwrap(), [123.0]);
-    let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
-    assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [2.0]);
+        let pft = netcdf::open(files.pft.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            values_f64(&pft, "plantdate_p").unwrap(),
+            [if planting_day > 0.0 {
+                planting_day
+            } else {
+                123.0
+            }]
+        );
+        assert_eq!(
+            values_f64(&pft, "fertnitro_p").unwrap(),
+            [if source == 1 { 12.5 } else { 5.5 }]
+        );
+        assert_eq!(
+            values_f64(&pft, "manunitro_p").unwrap(),
+            [if source == 1 { 0.0 } else { 3.0 }]
+        );
+        let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
+        assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [2.0]);
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2138,6 +2157,33 @@ fn write_crop_runtime(runtime: &Path) {
         .put_values(&[123.0; 8], ..)
         .unwrap();
     file.close().unwrap();
+
+    for (name, source) in [("fertnitro_fillcoast.nc", 1), ("fertilizer_2015soc.nc", 2)] {
+        let path = runtime.join("crop").join(name);
+        std::fs::copy(
+            runtime.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"),
+            &path,
+        )
+        .unwrap();
+        let mut file = netcdf::append(path).unwrap();
+        if source == 1 {
+            file.add_variable::<f64>("CONST_FERTNITRO_CFT_15", &["lat", "lon"])
+                .unwrap()
+                .put_values(&[12.5; 8], ..)
+                .unwrap();
+        } else {
+            file.add_dimension("cft", 64).unwrap();
+            file.add_variable::<f32>("manure", &["lat", "lon"])
+                .unwrap()
+                .put_values(&[3.0; 8], ..)
+                .unwrap();
+            file.add_variable::<f32>("fertilizer", &["cft", "lat", "lon"])
+                .unwrap()
+                .put_values(&[5.5; 64 * 8], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
 }
 
 fn write_cn_equilibrium(path: &Path) {

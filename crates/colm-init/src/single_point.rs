@@ -2523,7 +2523,8 @@ fn single_point_crop_state(
     );
     let planting_day_override = planting_day.filter(|day| *day > 0.0);
     let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
-    if !use_fertilizer && !use_irrigation {
+    let fertilizer_source = optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1);
+    if !use_fertilizer && !use_irrigation && fertilizer_source == 1 {
         if let Some(planting_day) = planting_day_override {
             return crate::crop_cold_start_from_tuning(&pft.class, crop_fraction, planting_day)
                 .map(Some);
@@ -2538,8 +2539,7 @@ fn single_point_crop_state(
         CropManagementConfig {
             runtime_dir: &runtime_dir,
             planting_day_override,
-            use_fertilizer,
-            fertilizer_source: optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1),
+            fertilizer_source,
             use_irrigation,
             use_irrigation_allocation: use_irrigation
                 && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),

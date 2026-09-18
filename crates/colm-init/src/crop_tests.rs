@@ -36,7 +36,7 @@ fn spatial_tuning_allows_empty_pft_axis_and_keeps_patch_defaults() {
 }
 
 #[test]
-fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
+fn explicit_planting_day_keeps_source_one_manure_without_management_maps() {
     let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0).unwrap();
     let pft = state.pft_fields();
     let patch = state.bgc_fields();
@@ -46,6 +46,7 @@ fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
     assert_eq!(pft.day_of_planting, [99_999_999]);
     assert_eq!(pft.crop_phase, [4.0]);
     assert_eq!(pft.fertilizer_nitrogen, [0.0]);
+    assert_eq!(pft.manure_nitrogen, [2.0]);
     assert_eq!(patch.crop_phase, [4.0]);
     assert_eq!(patch.planting_day_rice2, [0.0]);
     assert_eq!(patch.planting_day_corn, [MISSING]);
@@ -58,7 +59,7 @@ fn explicit_planting_day_uses_the_fortran_no_map_cold_start_values() {
 }
 
 #[test]
-fn management_maps_follow_cft_indices_and_runtime_switches() {
+fn management_maps_keep_restart_inputs_independent_of_runtime_application() {
     let root = temp_runtime_dir("crop-management");
     write_planting_map(&root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"));
     write_fertilizer_source_one(&root.join("crop/fertnitro_fillcoast.nc"));
@@ -74,7 +75,6 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
         CropManagementConfig {
             runtime_dir: &root,
             planting_day_override: None,
-            use_fertilizer: true,
             fertilizer_source: 1,
             use_irrigation: false,
             use_irrigation_allocation: false,
@@ -83,7 +83,7 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
     .unwrap();
     assert_eq!(source_one.pft_fields().planting_date, [123.0]);
     assert_eq!(source_one.pft_fields().fertilizer_nitrogen, [12.5]);
-    assert_eq!(source_one.pft_fields().manure_nitrogen, [0.0]);
+    assert_eq!(source_one.pft_fields().manure_nitrogen, [2.0]);
     assert_eq!(source_one.bgc_fields().planting_day_rice2, [2.0]);
     assert_eq!(source_one.bgc_fields().fertilizer_nitrogen_corn, [12.5]);
     assert_eq!(source_one.irrigation_method(), None);
@@ -96,7 +96,6 @@ fn management_maps_follow_cft_indices_and_runtime_switches() {
         CropManagementConfig {
             runtime_dir: &root,
             planting_day_override: Some(99.0),
-            use_fertilizer: true,
             fertilizer_source: 2,
             use_irrigation: true,
             use_irrigation_allocation: true,
@@ -144,7 +143,6 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
         CropManagementConfig {
             runtime_dir: &root,
             planting_day_override: None,
-            use_fertilizer: true,
             fertilizer_source: 1,
             use_irrigation: true,
             use_irrigation_allocation: false,
@@ -156,6 +154,7 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
     let expected_fertilizer = (10.0 * 0.75 + 0.0 * 1.25) / 2.0;
     assert!((state.pft_fields().planting_date[0] - expected_planting).abs() < 1.0e-12);
     assert!((state.pft_fields().fertilizer_nitrogen[0] - expected_fertilizer).abs() < 1.0e-12);
+    assert_eq!(state.pft_fields().manure_nitrogen, [2.0]);
     assert_eq!(state.bgc_fields().planting_day_rice2, [2.0]);
     assert_eq!(state.irrigation_method(), Some(&[3][..]));
     let irrigation = state.irrigation_fields(&[0.0]).unwrap();
@@ -172,7 +171,6 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
         CropManagementConfig {
             runtime_dir: &root,
             planting_day_override: None,
-            use_fertilizer: true,
             fertilizer_source: 2,
             use_irrigation: true,
             use_irrigation_allocation: true,
@@ -221,7 +219,6 @@ fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
         CropManagementConfig {
             runtime_dir: &root,
             planting_day_override: Some(99.0),
-            use_fertilizer: true,
             fertilizer_source: 2,
             use_irrigation: true,
             use_irrigation_allocation: true,
@@ -261,7 +258,6 @@ fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
         CropManagementConfig {
             runtime_dir: &root,
             planting_day_override: None,
-            use_fertilizer: false,
             fertilizer_source: 1,
             use_irrigation: false,
             use_irrigation_allocation: false,
@@ -447,4 +443,19 @@ fn point_map(path: &std::path::Path, single_precision: bool) -> netcdf::FileMut 
             .unwrap();
     }
     file
+}
+
+#[test]
+fn source_one_manure_matches_the_complete_fortran_class_table() {
+    let classes = (0..=78).collect::<Vec<_>>();
+    let mut state = empty_crop_state(classes.len(), 1);
+    state.set_source_one_manure(&classes);
+    // Original MOD_Const_PFT manure table (kg N/m²), converted by IniTimeVariable.
+    let expected = [
+        0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 2., 2., 2., 2., 2., 2.,
+        2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 0., 0., 0., 0., 0., 0., 0., 0., 2., 2., 0., 0., 0.,
+        0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 2., 2., 0., 0., 0., 0., 2., 2.,
+        0., 0., 0., 0., 0., 0., 2., 2., 2., 2.,
+    ];
+    assert_eq!(state.pft_fields().manure_nitrogen, expected);
 }
