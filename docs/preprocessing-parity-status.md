@@ -30,6 +30,15 @@ currently contains the complete runtime and JRA3Q trees but only the Pearl
 `plant_15s` raw-data cache, so this result is an initializer proof, not a fresh
 full-rawdata surface-generation proof.
 
+The orbital calculation now preserves the original's separate `SIN`/`COS`
+calls instead of allowing LLVM to combine each pair.  On all 869 patches in
+the real `e110_n20` block, the previous implementation differed from Fortran
+at eight points by one ULP; the corrected implementation has zero bitwise
+differences.  A fresh Rust initializer rerun also matches Fortran `coszen`
+bitwise in all six common restart blocks.  This is a bounded preprocessing
+result: downstream radiation fields retain separate last-bit differences, and
+the unchanged two-step runtime has not been rerun for this correction.
+
 ## SNICAR broadband executable integration
 
 `mkinidata-rs` now loads native SNICAR optics/aging tables from

@@ -11,6 +11,26 @@ pub const FREEZING_K: f64 = 273.16_f32 as f64;
 const CP_AIR: f64 = 1004.64_f32 as f64;
 const LATENT_HEAT_VAPORIZATION: f64 = 2.5104e6_f32 as f64;
 
+#[inline(never)]
+fn fortran_sin(value: f64) -> f64 {
+    value.sin()
+}
+
+#[inline(never)]
+fn fortran_cos(value: f64) -> f64 {
+    value.cos()
+}
+
+#[inline(never)]
+fn fortran_asin(value: f64) -> f64 {
+    value.asin()
+}
+
+#[inline(never)]
+fn fortran_atan(value: f64) -> f64 {
+    value.atan()
+}
+
 const fn f77(value: f32) -> f64 {
     value as f64
 }
@@ -368,14 +388,15 @@ pub fn orbital_cosine_zenith(
     longitude_radians: f64,
     latitude_radians: f64,
 ) -> f64 {
-    let pi = 4.0 * 1.0_f64.atan();
+    let pi = 4.0 * fortran_atan(1.0);
     let declination = orbital_declination(calendar_day);
     // Preserve the original angle and final product/subtraction contractions.
     let angle = (calendar_day + calendar_day).mul_add(pi, longitude_radians);
-    let cosine_product = latitude_radians.cos() * declination.cos() * angle.cos();
-    latitude_radians
-        .sin()
-        .mul_add(declination.sin(), -cosine_product)
+    // Keep the source's separate SIN/COS calls; LLVM otherwise combines paired
+    // calls and changes a few real-grid results by one ULP.
+    let cosine_product =
+        fortran_cos(latitude_radians) * fortran_cos(declination) * fortran_cos(angle);
+    fortran_sin(latitude_radians).mul_add(fortran_sin(declination), -cosine_product)
 }
 
 /// Port of MOD_OrbCosazi.F90:orb_cosazi.
@@ -390,29 +411,30 @@ pub fn orbital_cosine_azimuth(
     latitude_radians: f64,
     cosine_zenith: f64,
 ) -> f64 {
-    let pi = 4.0 * 1.0_f64.atan();
+    let pi = 4.0 * fortran_atan(1.0);
     let declination = orbital_declination(calendar_day);
-    let cosine = (-declination.cos() * (calendar_day * 2.0 * pi + longitude_radians).cos()
-        - cosine_zenith * latitude_radians.cos())
-        / (latitude_radians.sin() * (1.0 - cosine_zenith.powi(2)).sqrt());
+    let cosine = (-fortran_cos(declination)
+        * fortran_cos(calendar_day * 2.0 * pi + longitude_radians)
+        - cosine_zenith * fortran_cos(latitude_radians))
+        / (fortran_sin(latitude_radians) * (1.0 - cosine_zenith.powi(2)).sqrt());
     cosine.clamp(-1.0, 1.0)
 }
 
 #[allow(clippy::excessive_precision)]
 fn orbital_declination(calendar_day: f64) -> f64 {
-    let pi = 4.0 * 1.0_f64.atan();
+    let pi = 4.0 * fortran_atan(1.0);
     let eccentricity = 1.672393084e-2;
     let mean_longitude = -3.2625366e-2 + (calendar_day - 80.5) * 2.0 * pi / 365.0;
     let mean_anomaly = mean_longitude - 4.92251015;
-    let sine = mean_anomaly.sin();
+    let sine = fortran_sin(mean_anomaly);
     let lambda = mean_longitude
         + eccentricity
             * (2.0 * sine
                 + eccentricity
-                    * (1.25 * (2.0 * mean_anomaly).sin()
+                    * (1.25 * fortran_sin(2.0 * mean_anomaly)
                         + eccentricity
-                            * ((13.0 / 12.0) * (3.0 * mean_anomaly).sin() - 0.25 * sine)));
-    (0.409214646_f64.sin() * lambda.sin()).asin()
+                            * ((13.0 / 12.0) * fortran_sin(3.0 * mean_anomaly) - 0.25 * sine)));
+    fortran_asin(fortran_sin(0.409214646) * fortran_sin(lambda))
 }
 
 fn polynomial(x: f64, coefficients: [f64; 9]) -> f64 {

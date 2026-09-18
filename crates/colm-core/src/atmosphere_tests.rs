@@ -115,6 +115,11 @@ fn orbital_geometry_matches_current_fortran() {
             0.380_495_665_082_348_4,
             0x3fb1_bd57_666c_6825,
         ),
+        (
+            1.972_546_897_943_850_5,
+            0.424_086_247_728_635_4,
+            0x3fc5_4cfa_9535_e32d,
+        ),
     ] {
         assert_eq!(
             orbital_cosine_zenith(1.0, longitude, latitude).to_bits(),
