@@ -177,6 +177,8 @@ pub struct LeafTemperatureOutput {
     pub air_temperature_2m_k: f64,
     pub air_specific_humidity_2m: f64,
     pub canopy_stomatal_resistance_s_m: f64,
+    pub sunlit_stomatal_conductance_mol_m2_s: f64,
+    pub shaded_stomatal_conductance_mol_m2_s: f64,
     pub assimilation_mol_m2_s: f64,
     pub respiration_mol_m2_s: f64,
     pub leaf_sensible_heat_w_m2: f64,
@@ -886,6 +888,11 @@ pub fn leaf_temperature(
         - canopy_heat_storage;
     let canopy_stomatal_resistance =
         1.0 / (laisun / last.leaf_sunlit_resistance + laisha / last.leaf_shaded_resistance);
+    let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
+    let sunlit_stomatal_conductance =
+        laisun / last.leaf_sunlit_resistance * pressure_conversion / previous_leaf_temperature;
+    let shaded_stomatal_conductance =
+        laisha / last.leaf_shaded_resistance * pressure_conversion / previous_leaf_temperature;
     let bulk_richardson = (last.zeta * last.surface.friction_velocity_m_s.powi(2)
         / (VON_KARMAN.powi(2) / last.surface.heat * stability_wind.powi(2)))
     .min(5.0);
@@ -926,6 +933,8 @@ pub fn leaf_temperature(
                 * humidity_difference
                 * (last.moisture_at_2m / VON_KARMAN - last.surface.moisture / VON_KARMAN),
         canopy_stomatal_resistance_s_m: canopy_stomatal_resistance,
+        sunlit_stomatal_conductance_mol_m2_s: sunlit_stomatal_conductance,
+        shaded_stomatal_conductance_mol_m2_s: shaded_stomatal_conductance,
         assimilation_mol_m2_s: last.sunlit_resistance.assimilation_mol_m2_s
             + last.shaded_resistance.assimilation_mol_m2_s,
         respiration_mol_m2_s: last.sunlit_resistance.respiration_mol_m2_s

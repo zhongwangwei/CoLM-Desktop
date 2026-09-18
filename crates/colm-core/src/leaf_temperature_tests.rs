@@ -14,6 +14,13 @@ fn standard_leaf_solver_closes_the_canopy_energy_balance() {
         159.53742997435126,
         3.0e-5,
     );
+    close(
+        output.sunlit_stomatal_conductance_mol_m2_s + output.shaded_stomatal_conductance_mol_m2_s,
+        0.263_976_175_644_145_66,
+        1.0e-12,
+    );
+    assert!(output.sunlit_stomatal_conductance_mol_m2_s > 0.0);
+    assert!(output.shaded_stomatal_conductance_mol_m2_s > 0.0);
     close(output.assimilation_mol_m2_s, 1.2979709340e-5, 1.0e-12);
     close(output.transpiration_kg_m2_s, 5.130859485e-6, 2.0e-10);
     close(output.leaf_sensible_heat_w_m2, -42.129937997429295, 2.0e-5);
