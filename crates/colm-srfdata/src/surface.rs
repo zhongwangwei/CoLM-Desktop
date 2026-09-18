@@ -592,7 +592,11 @@ impl FlatPatches {
     ) -> Result<Vec<f64>> {
         let mut result = vec![SURFACE_MISSING; self.len()];
         let mut scratch = Vec::new();
-        for (patch, output) in result.iter_mut().enumerate() {
+        for patch in 0..self.len() {
+            if let Some(source) = self.wmo_source[patch] {
+                result[patch] = result[source];
+                continue;
+            }
             if self.patch_types[patch] == waterbody_type || self.patch_types[patch] == ice_type {
                 continue;
             }
@@ -605,7 +609,7 @@ impl FlatPatches {
                 );
                 *value /= 10_000.0;
             }
-            *output = median(&mut scratch)
+            result[patch] = median(&mut scratch)
                 .with_context(|| format!("hyper-albedo patch {patch} has no raw cells"))?;
         }
         Ok(result)

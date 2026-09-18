@@ -250,12 +250,6 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         println!("DEF_Output_2mWMO is disabled outside GRIDBASED, matching upstream");
         args.output_2m_wmo = false;
     }
-    ensure!(
-        args.lulcc_lai_only
-            || !args.output_2m_wmo
-            || args.soil_hyper_albedo_dir.is_none(),
-        "WMO plus soil hyper-albedo is not verified: upstream aggregation reads virtual pixel index -1"
-    );
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     let (mut topology, mut base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
@@ -5859,12 +5853,6 @@ mod tests {
                     option_value(&command.args, "--output-2m-wmo"),
                     expected.then_some("true")
                 );
-                if expected {
-                    let mut unsupported = command.args.clone();
-                    unsupported.extend(["--soil-hyper-albedo-dir".into(), "absent.nc".into()]);
-                    let error = materialize_spatial_pft(&unsupported).unwrap_err();
-                    assert!(error.to_string().contains("not verified"), "{error:#}");
-                }
                 if mode != "LCT" {
                     assert_eq!(
                         parse_spatial_pft(&command.args).unwrap().output_2m_wmo,
