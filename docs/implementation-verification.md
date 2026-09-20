@@ -1630,3 +1630,47 @@ lfevpa = hvap*fevpl + htvp*fevpg   ! W/m^2 (accounting for sublimation)   ! MOD_
 ### 证据
 
 `cargo test -p colm-runtime --lib`：43 通过。schema 逐变量比对现在覆盖 **34 项**。
+
+## 首次在本机跑通黄金回归：三阶段 ok，比对失败（2026 年，实测）
+
+本机 PLUMBER2 数据在 **`/Volumes/Data01/Data/PLUMBER2s`**（含 `Forcing/`、`Forcingnml/`、
+`Observation/`、`Sitedata/`），本 shell 里 `PLUMBER2_ROOT` 没有导出 —— 此前多轮把它记成
+"未导出因而未跑"，现在补上实测结果。
+
+```
+PLUMBER2_ROOT=/Volumes/Data01/Data/PLUMBER2s cargo run -p oracle --bin golden-run -- CN-Cng
+   inputs verified
+   kernel: default@f427762#production (Darwin-arm64)
+   WARNING: kernel differs from the one that produced the golden files:
+     colm_git_sha: recorded "4894833", current "f427762"
+   mksrfdata  ok
+   mkinidata  ok
+   colm       ok
+```
+
+**三阶段全部 ok**（含未改动的 Fortran `colm.x` 跑完 264 小时），这本身就是一段端到端证据。
+随后 `golden-compare` 报 **85 problem(s)** 并失败。`golden-compare` 目前是**逐位**比较：
+`oracle/tolerances.toml` 的头两行写着"里程碑 1 只做逐位比较，本文件此时不参与比较"，
+`grep tier oracle/src/bin/golden_compare.rs` 无命中。`tier-check` 另报
+`all 127 golden variables have a tier assignment` —— 容差表本身是完备的，只是还没被消费。
+
+把 85 条按**首处相对偏差**分类（脚本按 golden-compare 打印的两个值现算）：
+
+| 类别 | 条数 | 说明 |
+|---|---|---|
+| 末位噪声 `rel <= 1e-12` | **76** | 内核与产黄金文件那次不是同一份（`4894833` vs `f427762`），工具自己也警告"可能是工具链漂移而非物理变化" |
+| 真实相对差异 `rel > 1e-12` | **4** | `f_zerr`(4.2e-1)、`f_frcsat`(1.8e-2)、`f_xerr`(2.0e-5)、`f_zwt`(2.2e-12) |
+| `missing_value` 不一致 | **5** | `f_t_lake`、`f_lake_icefrac`、`f_wetwat`、`f_wetwat_inst`、`f_wetzwt`：黄金全是 `-1e36`，本次运行写出真值 |
+
+两条需要正确解读：
+
+1. `f_zerr`/`f_xerr` 是**收支残差**，相对偏差没有意义 —— 它们的量级本就是 `1e-11` 与 `1e-16`。
+   实际绝对差：`f_zerr` 从 `-9.73e-12` 到 `-1.68e-11`（差 `7e-12`），`f_xerr` 差 `1.9e-19`。
+   前者比黄金自身的值还大，是真差异；后者是噪声。
+2. `f_frcsat` 是**唯一量级明显、且不是残差**的差异（`0.982276366840696` vs `1.0`），
+   出现在第 1 条记录，值得单独查。
+
+结论（供后续判断）：**本机无法用现有黄金文件判定 Rust 移植的数值等价性** —— 黄金文件产自
+另一份 CoLM 快照，而比对在这一里程碑是逐位的。要用它当判据，得先把内核与黄金文件对齐到
+同一快照（重编内核 + 重生成黄金文件），或先让比较消费 `tolerances.toml` 的分层。
+这两件事都不是 Rust 侧能单方面完成的。
