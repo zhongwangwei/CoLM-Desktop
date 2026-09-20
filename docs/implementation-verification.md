@@ -4040,3 +4040,46 @@ VIC 的基流是水位的指数函数，所以 0.007% 的 `zwt` 差在深层被�
 结论：**这条不该去改径流公式**，要改就得先把 `f_zwt`/`f_wliq_soisno`（差 1~2%）
 压下来。上一轮修 `htvp`/累加器那种"改一处、残差整片下降"的机会在这里没有，
 因为入口量已经对了 99.99%。
+
+## 冠层几何三项 + 传感器槽：31 → 27（2026 年，实测）
+
+补四项，都是"内核早就算好、只是没带出来"那一类：
+
+| 变量 | 上游出处 | 本仓库来源 | 维度 |
+|---|---|---|---|
+| `sigf` | `MOD_SnowFraction`（未被雪埋的植被比例） | `StandardLctEnergyState::canopy.vegetation_free_fraction` | `(time, patch)` |
+| `laisun` | `lai*fsun`（`MOD_Thermal.F90:672`） | `LeafTemperatureOutput::sunlit_leaf_area_index` | `(time, patch)` |
+| `laisha` | `lai*(1-fsun)`（`:673`） | `LeafTemperatureOutput::shaded_leaf_area_index` | `(time, patch)` |
+| `sensors` | 用户自定义诊断槽（`MOD_Hist.F90:4671`） | **只声明、不填** | `(time, patch, sensor)` |
+
+`laisun`/`laisha` 在叶温求解里本来就有局部量（`:233-234`），只是出口没带 ——
+加两个字段、不新增任何计算。
+
+`sensors` 走的是与 `frcsat` 相反的机制：`frcsat` 是"上游在 `WATER_2014` 下不设，
+声明留空才一致"，`sensors` 是"上游只有算例主动写才有值"。两者都在黄金文件里
+整列是 `missing_value`，`oracle/tolerances.toml` 把 `sensors` 钉在 tier0 并注明
+"未启用的用户自定义诊断槽"。所以声明 + 留空是**忠实**，填任何东西都是无中生有；
+`DECLARED_ONLY` 这个常量就是为这类槽位立的，测试与 `DECLARED_BUT_UNFILLED` 一起
+断言它们保持填充值。
+
+实测（对齐算例 264 条）：
+
+```
+f_laisun   F[0.088424,0.174610]  R 同区间   maxdiff 9.14e-9   ← 相对 5e-8
+f_laisha   F[0.025390,0.111576]  R 同区间   maxdiff 9.14e-9
+f_sensors  维度 (time,patch,sensor) 一致，264×1×1 全填充
+f_sigf     F[0.999622,1.000000]  R[0.999561,1.000000]  maxdiff 6.12e-5
+```
+
+`f_sigf` 那 6.12e-5 是**继承来的**，不是它自己算错：`sigf = 1 - wt`，而 `wt`
+本身只有 4e-4 量级，本仓库的 `scv` 已知偏大 15%（冠层露水的近抵消，见前文），
+在 `sigf` 上表现为 6e-5 的绝对差。它因此落在 tier2 之外（新增一条 70），
+和 `f_fsno`/`f_scv`/`f_snowdp` 同一条链，不该单独去修。
+
+**`green` 仍不写。** 上游 `green` 来自 `MOD_LAIEmpirical.F90:132-135`
+（`fveg = vegc(ivt)`、`green = 0.; IF (fveg>0.) green = 1.`），而 `vegc` 是
+**该模块内部的硬编码表**（IGBP 那支是 17 项：15=Snow/Ice→0、17=Water→0，其余 1）。
+本算例地类 10 → `vegc(10)=1` → 恒为 1，与黄金一致。但"恒为 1"不是实现依据：
+把它搬进来要么新增第四张生成表、要么手抄一张 17 项数组，两种都要先确认
+`USE_SITE_LAI = .true.` 时到底是哪个模块设的 `green`（`LAI_empirical` 还是
+`MOD_LAIReadin`）。**证据不足就不写** —— 填一个恒 1 的常量在别的算例上会静默错。

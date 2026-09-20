@@ -228,6 +228,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     .unwrap();
     set_lct_forcing_mirrors(&mut buffer, 0, reference()).unwrap();
     set_lct_radiation_bands(&mut buffer, 0, &output.energy).unwrap();
+    set_lct_canopy_geometry(&mut buffer, 0, &state.energy, &output.energy).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -242,6 +243,8 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_STOMATAL_VARIABLES.iter())
         .chain(LCT_FORCING_VARIABLES.iter())
         .chain(LCT_RADIATION_VARIABLES.iter())
+        .chain(LCT_CANOPY_VARIABLES.iter())
+        .chain(DECLARED_ONLY.iter())
     {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
@@ -355,7 +358,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     }
     // `frcsat` 声明了但**不该**有值：上游只有 `WATER_VSF` 会设它，`WATER_2014`
     // （本仓库唯一的编排）从不设，写出的就是填充值。见 `DECLARED_BUT_UNFILLED`。
-    for name in DECLARED_BUT_UNFILLED {
+    for name in DECLARED_BUT_UNFILLED.iter().chain(DECLARED_ONLY.iter()) {
         let values = file
             .variable(&format!("f_{name}"))
             .unwrap()
@@ -435,6 +438,8 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_STOMATAL_VARIABLES.iter())
         .chain(LCT_FORCING_VARIABLES.iter())
         .chain(LCT_RADIATION_VARIABLES.iter())
+        .chain(LCT_CANOPY_VARIABLES.iter())
+        .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();

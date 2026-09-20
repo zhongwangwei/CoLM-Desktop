@@ -184,6 +184,12 @@ pub struct LeafTemperatureOutput {
     /// 随输入原样带出来，好让 history 的 `lfevpa`/`fgrnd` 与物理用的是**同一个**
     /// `htvp` —— 自己再判一次表层冰水比就会有两份判据。
     pub ground_latent_heat_j_kg: f64,
+    /// `laisun = lai*fsun`、`laisha = lai*(1-fsun)`。
+    ///
+    /// 上游把它们当每步的 patch 量累加进 history（`MOD_Vars_1DAccFluxes.F90:2147-2148`），
+    /// 内核里本来就是这两个值，只是先前没带出来。
+    pub sunlit_leaf_area_index: f64,
+    pub shaded_leaf_area_index: f64,
     pub sunlit_stomatal_conductance_mol_m2_s: f64,
     pub shaded_stomatal_conductance_mol_m2_s: f64,
     pub assimilation_mol_m2_s: f64,
@@ -911,6 +917,8 @@ pub fn leaf_temperature(
     transpiration = transpiration.max(0.0);
     Ok(LeafTemperatureOutput {
         ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
+        sunlit_leaf_area_index: laisun,
+        shaded_leaf_area_index: laisha,
         wet_snow_fraction,
         eastward_stress_kg_m_s2: -input.air_density_kg_m3 * input.eastward_wind_m_s / last.ram,
         northward_stress_kg_m_s2: -input.air_density_kg_m3 * input.northward_wind_m_s / last.ram,

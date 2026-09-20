@@ -94,6 +94,19 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**冠层几何**量，三项。
+///
+/// `sigf` 是"未被雪埋的植被比例"（`MOD_SnowFraction`），本来就在步状态里
+/// （`StandardLctEnergyState::vegetation_free_fraction`，续跑写回用的也是它）；
+/// `laisun`/`laisha` 是 `lai*fsun` 与 `lai*(1-fsun)`，上游逐 patch 累加
+/// （`MOD_Vars_1DAccFluxes.F90:2147-2148`），内核在叶温求解里就已经算好。
+///
+/// **`green` 不在此列。** 上游 `green` 由 `MOD_LAIEmpirical.F90:132-135` 从
+/// `fveg = vegc(ivt)` 得出（`green = 0.; IF (fveg > 0.) green = 1.`），
+/// 而 `vegc` 是 `MOD_Const_LC` 的地类表列，本仓库还没把它搬进来 ——
+/// 在这个算例上它恒为 1（`fveg > 0`），但"恒为 1"不是实现依据。
+pub const LCT_CANOPY_VARIABLES: [&str; 3] = ["sigf", "laisun", "laisha"];
+
 /// 本层能填的**短波分带**量，十七项。
 ///
 /// 上游 `MOD_NetSolar.F90:279-315` 逐定义：
@@ -168,6 +181,14 @@ pub const LCT_STOMATAL_VARIABLES: [&str; 11] = [
 /// 的 schema 与上游一致，不填才是数值上一致。
 pub const DECLARED_BUT_UNFILLED: [&str; 1] = ["frcsat"];
 
+/// 声明了但**上游在单点算例里本来就不填**的量。
+///
+/// `sensors` 是用户自定义诊断槽（`MOD_Hist.F90:4671` 的 `nsensor` 槽位），
+/// 上游只有在算例主动往里写东西时才有值。对齐黄金算例 264×1×1 条**全是**
+/// `missing_value`，`oracle/tolerances.toml` 也把它钉在 tier0 并注明这一点。
+/// 所以"声明 + 留空"才是忠实：填任何东西都是无中生有。
+pub const DECLARED_ONLY: [&str; 1] = ["sensors"];
+
 /// 黄金算例（CN-Cng）里没有、但本层仍会声明的量。
 ///
 /// 闸门表允许写不等于这个算例会产出：`qcharge` 受运行时条件控制，黄金算例没触发。
@@ -195,6 +216,8 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_STOMATAL_VARIABLES);
     names.extend_from_slice(&LCT_FORCING_VARIABLES);
     names.extend_from_slice(&LCT_RADIATION_VARIABLES);
+    names.extend_from_slice(&LCT_CANOPY_VARIABLES);
+    names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
 
@@ -634,6 +657,30 @@ pub fn set_lct_stomatal_diagnostics(
     Ok(())
 }
 
+/// 把一步的冠层几何量写进第 `record` 条记录。
+///
+/// `sigf` 取步状态、`laisun`/`laisha` 取叶温出口 —— 两处都是内核已有的量，
+/// 不做换算。见 [`LCT_CANOPY_VARIABLES`]。
+pub fn set_lct_canopy_geometry(
+    sink: &mut impl HistorySink,
+    record: usize,
+    state: &colm_core::StandardLctEnergyState,
+    energy: &colm_core::StandardLctEnergyOutput,
+) -> Result<()> {
+    for (name, value) in [
+        ("sigf", state.canopy.vegetation_free_fraction),
+        ("laisun", energy.leaf.sunlit_leaf_area_index),
+        ("laisha", energy.leaf.shaded_leaf_area_index),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, record, value)?;
+    }
+    Ok(())
+}
+
 /// 把一步的短波分带量写进第 `record` 条记录。
 ///
 /// 十七项全部来自 `NetSolarFluxes`，不做换算；`*ln` 那一半在非本地正午时
@@ -951,6 +998,7 @@ impl HistorySession {
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
+            set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
@@ -993,6 +1041,7 @@ impl HistorySession {
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
+            set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
