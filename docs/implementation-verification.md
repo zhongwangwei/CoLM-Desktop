@@ -2490,3 +2490,72 @@ Rust 的 `alb` 更大、`ssoi` 更小 —— **两者都指向"吸收更少短�
 所以下一轮要追的不是通量公式，而是**为什么第一条记录时地表温度就差 0.77 K、
 `ustar` 就差 30%** —— 那是最早的、也可能是最纯粹的信号。已有的线索是
 `t_grnd = tfrz` 的钉住（第 32 节记过 Rust 冻得更多）与 `ustar` 的持续偏小。
+
+## 一步之后就能看清：第四个默认打开的分支，以及"最早的那个信号"（2026 年，实测）
+
+上一节把 `fseng` 记成"地表偏暖的结果"。为了找到**最早**的分歧点，造了一个**只跑一步**的
+算例（`end_day = 1`、`end_sec = 1800`；`mksrfdata`/`mkinidata` 与对齐算例相同，只用
+`--stage colm` 重跑第三段），与 Rust 从**同一份**初始重启跑一步的产出逐字段比。
+
+一步之后的对照（初始 `t_soisno` 全 283 K、`wice` 全 0）：
+
+| | Fortran | Rust | 读法 |
+|---|---|---|---|
+| `t_grnd` | 273.160 | 273.160 | **完全相同**（都被相变钉在冰点） |
+| `wa` / `zwt` | 4806.0078 / 4.399434 | 4806.0078 / 4.399434 | **逐位相同** |
+| `z0m` | 0.120573 | 0.120573 | **逐位相同** |
+| `wliq[0]`+`wice[0]` | 5.9826 + **3.0755** | 7.2319 + **1.8387** | 总量 9.06 / 9.07，**相变分配不同** |
+| `smp[0]` | −22031.8 | −3576.96 | 6 倍（由上面的液态水量决定） |
+| `hk[0]` | 9.3e-5 | 2.68e-4 | 2.9 倍 |
+| `rib` | −0.072224 | **−1.408939** | **20 倍** |
+| `zol` | −0.277312 | **−10.53948** | **38 倍** |
+| `ustar` | 0.685832 | 0.474638 | 0.69 倍 |
+| `tref` | 258.836923 | 260.165932 | **+1.33 K** |
+| `tleaf` | 265.884942 | 266.477078 | +0.59 K |
+| `fwet_snow` | **0.061358** | **0** | 见下 |
+
+三条结论：
+
+1. **`t_grnd` 第一步是对的。** 上一节看到"第一条记录就差 0.77 K"是**小时平均**的错觉
+   —— 第一步两边都钉在 273.160，分歧从**第二步**才开始。
+2. **最早的实质分歧在地表层的稳定度**：`rib` 20 倍、`zol` 38 倍、`ustar` 0.69 倍，
+   而 `t_grnd`、`z0m`、`wa`、`zwt` 都完全相同。`rib` 的公式两边一致
+   （`rib = min(5, zol*ustar²/(vonkar²/fh*um²))`），所以差的是**迭代的输入或收敛路径**，
+   不是公式。这是目前最干净、最靠前的信号。
+3. **`fwet_snow` 是 0 对 0.061，不是数值差，是分支没跑。** 顺着查到第四个
+   **默认打开、本仓库硬关**的分支：
+
+```fortran
+! MOD_Namelist.F90:314
+logical :: DEF_VEG_SNOW = .true.
+! extends/interception/MOD_LeafTemperature_Extended.F90:1518
+fwet_snow = canopy_snow_wetfrac(sigf, lai, sai, dewmx, tl, ldew_snow)
+```
+
+而 `assembly.rs` 把 `options.vegetation_snow` 硬写成 `false`，于是
+`update_canopy_water` 在 `if !vegetation_snow` 那一条上直接 `return Ok(0.0)` ——
+整支 vegetation-snow 绕过。实测 `ldew_snow` 两边都是 ~0.045（有雪水），
+所以这不是"没有雪"，是**有雪但没走那一支**。
+
+### 处置：把四道 `ensure!` 收成**一张清单 + 一个显式开关**
+
+到目前为止 VSF、植物水力、植被上的雪已经是**三个默认打开**的分支，逐个 `ensure!` 的结果是
+"修一个再撞下一个"。改成一次列全：
+
+```rust
+pub fn unported_branches(physics: &LandPhysicsParameters) -> Vec<&'static str>
+```
+
+`colm-rs` 默认拒绝并打出**全部**缺项；`--allow-unported-branches` 显式放行，
+并在 stderr 上打警告说明"结果不是忠实复现"。这样诊断性测量仍然做得了，
+而"悄悄按另一套物理跑完"变得不可能。
+
+`oracle/work/CN-Cng-aligned` 现在把三个开关全部关掉，`unported_branches` 返回**空表**
+—— 这是本仓库目前唯一**完全忠实**的配置：
+
+```
+DEF_USE_Campbell_SOIL_MODEL   = .true.
+DEF_USE_VariablySaturatedFlow = .false.
+DEF_USE_PLANTHYDRAULICS       = .false.
+DEF_VEG_SNOW                  = .false.
+```

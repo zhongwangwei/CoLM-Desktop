@@ -69,6 +69,8 @@ pub fn land_physics_parameters(
     // `DEF_USE_PLANTHYDRAULICS` 的声明默认值是 `.true.`，所以**默认配置开着 PHS**，
     // 本仓库的 standard-LCT 分支则是硬关的。调用方要能看出这个不匹配。
     let plant_hydraulics = logical(document, "DEF_USE_PLANTHYDRAULICS")?;
+    // 同上：`DEF_VEG_SNOW` 的声明默认值也是 `.true.`。
+    let vegetation_snow = logical(document, "DEF_VEG_SNOW")?;
     Ok(LandPhysicsParameters {
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
@@ -77,6 +79,7 @@ pub fn land_physics_parameters(
         },
         variably_saturated_flow,
         plant_hydraulics,
+        vegetation_snow,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,
         timestep_seconds,
@@ -119,6 +122,39 @@ pub fn land_physics_parameters(
         runoff_scheme,
         topmodel_decay_tuning: real(document, "DEF_TUNING_TOPMOD_DECAY")?,
     })
+}
+
+/// 这个算例要、但**本仓库的运行时尚且没有实现**的分支。
+///
+/// 每一项在上游都是**声明默认打开**或由另一项推出，所以"什么都没写"的算例几乎必然
+/// 落进来。列成一张表而不是四处 `ensure!`，是因为调用方需要一次看全 —— 修一个再撞下一个
+/// 的体验会让"到底能跑什么"变成一个移动靶。
+///
+/// 每一项都附上实测或上游出处，见 `docs/implementation-verification.md` 的对应小节。
+pub fn unported_branches(physics: &LandPhysicsParameters) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if physics.variably_saturated_flow {
+        missing.push(
+            "DEF_USE_VariablySaturatedFlow：土壤水文走 WATER_VSF（van Genuchten），\
+             内核已移植但缺编排；上游在选 van Genuchten 时强制打开，且自身默认即为真。\
+             写 DEF_USE_Campbell_SOIL_MODEL = .true. 与 \
+             DEF_USE_VariablySaturatedFlow = .false. 可走已编排的 WATER_2014",
+        );
+    }
+    if physics.plant_hydraulics {
+        missing.push(
+            "DEF_USE_PLANTHYDRAULICS：植物水力（默认真）改的是 ET 的分层分配、冠层阻力\
+             的来源与 vegwp 状态；写 DEF_USE_PLANTHYDRAULICS = .false. 可走已移植的那条",
+        );
+    }
+    if physics.vegetation_snow {
+        missing.push(
+            "DEF_VEG_SNOW：植被上的雪（默认真）决定 fwet_snow 与冠层水的雪/雨分配；\
+             实测一步之后 Fortran 的 fwet_snow = 0.061 而本仓库是 0。\
+             写 DEF_VEG_SNOW = .false. 可走已移植的那条",
+        );
+    }
+    missing
 }
 
 /// `MOD_SoilSnowHydrology.F90:315-348` 的 `DEF_Runoff_SCHEME` 派发。

@@ -85,6 +85,14 @@ pub struct LandPhysicsParameters {
     /// 冠层阻力的来源、以及 `vegwp` 这个状态量。本仓库的 standard-LCT 分支把这个开关
     /// 硬写成关（`plant_hydraulics: None`），所以调用方必须能看出算例要的是哪一支。
     pub plant_hydraulics: bool,
+    /// `DEF_VEG_SNOW`：植被上的雪（冠层雪的湿比例、冠层水的雪/雨分配）。
+    ///
+    /// **默认也是 `.true.`**（`MOD_Namelist.F90:314`）。打开时上游走
+    /// `MOD_LeafTemperature` 的 vegetation-snow 分支并调用
+    /// `canopy_snow_wetfrac` 算 `fwet_snow`；本仓库的装配层把它硬写成 `false`
+    /// （`vegetation_snow: false`），那一整支被绕过。实测一步之后：Fortran 的
+    /// `fwet_snow = 0.061`、Rust 是 0 —— 分支没跑，不是数值差。
+    pub vegetation_snow: bool,
     /// 本算例编译的地类分类体系。
     pub land_cover_scheme: LandCoverScheme,
     /// `ROOTFR_SCHEME`：`rootfr` 取哪一套公式。

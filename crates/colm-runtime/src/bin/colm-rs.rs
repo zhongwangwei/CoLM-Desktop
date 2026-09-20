@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! colm-rs <case-dir> --land-cover igbp|usgs --restart-out <path> \
-//!         [--patch N] [--history-dir <dir>] [--history-stem <stem>]
+//!         [--patch N] [--history-dir <dir>] [--history-stem <stem>] \
+//!         [--allow-unported-branches]
 //! ```
 //!
 //! **它只覆盖已经移植的那一条链**（`standard_lct` 的规则土壤 patch，无雪与积雪两支），
@@ -19,6 +20,9 @@
 //!   `_w180_s90` 块后缀的另一套名字；指向同一路径会让"以原文件为底、只换声明改过的
 //!   变量"这条写出语义失去底稿。
 //! * **不写 history 文件时也照常推进**：history 是旁路，不是状态的一部分。
+//! * **`--allow-unported-branches` 默认关。** 算例要的分支里但凡有本仓库没实现的
+//!   （VSF、植物水力、植被上的雪 —— 三者在**上游都是默认打开**），默认直接拒绝并
+//!   一次列全；这个开关只为诊断性测量而存在，用了就会在 stderr 上打出警告。
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -65,41 +69,31 @@ fn run() -> Result<()> {
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
     let physics = land_physics_parameters(&document, arguments.land_cover)?;
-    // 与 VSF 同一类的不匹配：`DEF_USE_PLANTHYDRAULICS` 的声明默认值是 `.true.`，
-    // 所以**默认算例开着植物水力**，而本仓库的 standard-LCT 分支把它硬关
-    // （`assembly.rs` 的 `plant_hydraulics: None`）。PHS 改的是 ET 的分层分配、
-    // 冠层阻力的来源与 `vegwp` 状态，静默按非 PHS 跑完只会得到另一套蒸散。
-    ensure!(
-        !physics.plant_hydraulics,
-        concat!(
-            "this case enables plant hydraulics (DEF_USE_PLANTHYDRAULICS, default true), ",
-            "which the Rust standard-LCT branch does not run: it affects how transpiration ",
-            "is distributed across soil layers, where canopy resistance comes from, and adds ",
-            "the vegwp state. Set DEF_USE_PLANTHYDRAULICS = .false. to use the ported path."
-        )
-    );
-    // **跑之前先挡住分支不匹配。** 上游在选了 van Genuchten 时强制打开
-    // `DEF_USE_VariablySaturatedFlow`（`MOD_Namelist.F90:1767-1772`），而它的声明
-    // 默认值本来就是 `.true.` —— 也就是说默认配置走 VSF 土壤水文。本仓库的
-    // `variably_saturated_flow.rs` 有那 15 个内核，但**没有编排**（`WATER_VSF`
-    // 的驱动没人调用），运行时只有经典 Richards 路径。
+    // 本仓库没有实现的分支：**一次列全**，并且默认拒绝。
     //
-    // 按经典路径跑完 VSF 算例不会报错，只会给出另一套水文下的"看起来正常"的结果 ——
-    // 这正是本仓库最忌讳的那种错。所以在这里拒绝，并说清当前支持哪一种组合。
-    ensure!(
-        !physics.variably_saturated_flow,
-        concat!(
-            "this case runs the variably saturated flow (VSF) soil hydrology, which the ",
-            "Rust runtime does not orchestrate yet: MOD_Namelist.F90:1767 forces ",
-            "DEF_USE_VariablySaturatedFlow on whenever the van Genuchten soil model is ",
-            "selected, and its own default is true. WATER_2014 (the ported routine) is the ",
-            "Campbell/Richards path; the van Genuchten path is WATER_VSF (CoLMMAIN.F90:1215), ",
-            "whose kernels exist in variably_saturated_flow.rs but have no driver. Running ",
-            "this case through the classic path would produce plausible numbers under a ",
-            "different hydrology. Set DEF_USE_Campbell_SOIL_MODEL = .true. and ",
-            "DEF_USE_VariablySaturatedFlow = .false. to use the ported path."
-        )
-    );
+    // 每一项在上游都是默认打开的，所以"只写了几行"的算例几乎必然会撞上其中一条。
+    // 直接跑完不会报错，只会给出另一套物理下的"看起来正常"的数字 —— 这正是本仓库
+    // 最忌讳的错。`--allow-unported-branches` 是为**诊断性测量**留的：它把不匹配
+    // 显式写进命令行，而不是让它悄悄发生。
+    let missing = colm_runtime::physics::unported_branches(&physics);
+    if !missing.is_empty() {
+        ensure!(
+            arguments.allow_unported_branches,
+            "this case needs {} branch(es) the Rust runtime does not implement:\n  - {}\n\
+             Set the switches above to use the ported path, or pass \
+             --allow-unported-branches to run anyway for a labelled diagnostic measurement.",
+            missing.len(),
+            missing.join("\n  - ")
+        );
+        eprintln!(
+            "colm-rs: WARNING: running {} unported branch(es); results are NOT a faithful \
+             reproduction:",
+            missing.len()
+        );
+        for branch in &missing {
+            eprintln!("  - {branch}");
+        }
+    }
     let restarts = restart_files(&layout, &name, &document, &config)?;
     let files = RestartStateFiles {
         constant: restarts.constant.clone(),
@@ -384,6 +378,8 @@ struct Arguments {
     restart_out: PathBuf,
     history_directory: Option<PathBuf>,
     history_stem: String,
+    /// 显式允许跑"本仓库没实现的那些分支"。默认关。
+    allow_unported_branches: bool,
 }
 
 impl Arguments {
@@ -395,6 +391,7 @@ impl Arguments {
         let mut restart_out = None;
         let mut history_directory = None;
         let mut history_stem = None;
+        let mut allow_unported_branches = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -419,6 +416,7 @@ impl Arguments {
                     history_directory = Some(PathBuf::from(value("--history-dir")?));
                 }
                 "--history-stem" => history_stem = Some(value("--history-stem")?),
+                "--allow-unported-branches" => allow_unported_branches = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -454,6 +452,7 @@ impl Arguments {
             // 上游 history 文件名的默认前缀是算例名，不是可执行名 —— 但是否写、
             // 写在哪由调用方决定，这里只给一个能认出来的中性名。
             history_stem: history_stem.unwrap_or_else(|| "colm-rs".to_owned()),
+            allow_unported_branches,
         })
     }
 }
