@@ -12,10 +12,15 @@ use std::fmt::Write as _;
 
 use anyhow::{bail, Result};
 
+#[derive(Debug)]
 pub struct Var {
     pub name: String,
     pub macros: Vec<Cond>,
     pub runtime: Option<String>,
+    /// 写出调用里的描述字面量（`long_name`）。同名多点写出时取第一条。
+    pub long_name: Option<String>,
+    /// 写出调用里的单位字面量。同名多点的单位必须一致，否则报错。
+    pub units: Option<String>,
     pub line: u32,
 }
 
@@ -189,12 +194,16 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
                     .filter_map(|frame| frame.current.clone())
                     .chain(inline_runtime(&buf)),
             );
+            let lits = raw_literals(&buf);
+            let (long_name, units) = call_metadata(&lits);
             for name in literals(&buf) {
                 let macros: Vec<Cond> = mstack.iter().flatten().cloned().collect();
                 let candidate = Var {
                     name,
                     macros,
                     runtime: rt.clone(),
+                    long_name: long_name.clone(),
+                    units: units.clone(),
                     line: (start + 1) as u32,
                 };
                 match out.entry(candidate.name.clone()) {
@@ -280,6 +289,21 @@ fn merge_sites(existing: &mut Var, candidate: Var) -> Result<()> {
             candidate.line
         );
     }
+    // 单位是同一个 NetCDF 变量唯一的量纲声明，两处不一致一定是上游写错了。
+    if existing.units != candidate.units {
+        bail!(
+            "{} is written with different units ({:?} vs {:?}) at lines {} and {}",
+            existing.name,
+            existing.units,
+            candidate.units,
+            existing.line,
+            candidate.line
+        );
+    }
+    // `long_name` 允许分歧：实测 `f_methane_surf_flux_lake` 与
+    // `f_methane_surf_flux_rice` 各在两个分支里出现（面平均 vs 强度量），
+    // 运行期只会有一支生效，而表的 schema 只能留一个。取先出现的那条，
+    // 顺序由「先 MOD_Hist.F90 后甲烷源、文件内按行」固定。
     existing.runtime = match (existing.runtime.take(), candidate.runtime) {
         (None, _) | (_, None) => None,
         (Some(a), Some(b)) if a == b => Some(a),
@@ -332,6 +356,38 @@ fn strip_comment(l: &str) -> &str {
     l
 }
 
+/// 调用里按出现顺序的全部 `'…'` 字面量。
+///
+/// 命名与描述都从这一遍扫描里取，避免两处各自解析引号、慢慢分叉。
+fn raw_literals(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = s[i..].find('\'') {
+        let st = i + p + 1;
+        let Some(e) = s[st..].find('\'') else { break };
+        out.push(s[st..st + e].to_string());
+        i = st + e + 1;
+    }
+    out
+}
+
+/// 从一次写出调用里取 `(long_name, units)`。
+///
+/// 四种例程的实参排布实测一致：变量名之后是时间、维度名（`'soil'`/`'band'`/
+/// `'rtyp'`/`'ens'`）、过滤数组，**最后两个字面量一定是 long_name 与 units**。
+/// 已用黄金文件里 117 个变量的真实属性逐一对过：units 117/117 相同、long_name
+/// 零不一致（连上游把 `f_qinfl` 的 long_name 填成变量名这种怪例都对上了）。
+/// 字面量少于三个时不猜，返回 `None`。
+fn call_metadata(lits: &[String]) -> (Option<String>, Option<String>) {
+    if lits.len() < 3 {
+        return (None, None);
+    }
+    (
+        Some(lits[lits.len() - 2].clone()),
+        Some(lits[lits.len() - 1].clone()),
+    )
+}
+
 /// 取 `'f_…'` 字面量的名字部分。
 ///
 /// 必须在 `strip_comment` 之后、且只在调用内部调用它：实测直接对全文
@@ -343,20 +399,14 @@ fn strip_comment(l: &str) -> &str {
 /// 的开关判断里，而那些行不是写出调用、本就不扫。将来若写出调用里扫到了，
 /// 以 `_` 结尾的名字要单独处理，因为它的真实变量名到运行时才成形。
 fn literals(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while let Some(p) = s[i..].find('\'') {
-        let st = i + p + 1;
-        let Some(e) = s[st..].find('\'') else { break };
-        let lit = &s[st..st + e];
-        if let Some(n) = lit.strip_prefix("f_") {
-            if !n.is_empty() && lit.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                out.push(n.to_string());
-            }
-        }
-        i = st + e + 1;
-    }
-    out
+    raw_literals(s)
+        .into_iter()
+        .filter_map(|lit| {
+            let name = lit.strip_prefix("f_")?;
+            let plain = lit.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            (!name.is_empty() && plain).then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// 渲染入库产物。**按 `name` 排序**，不依赖 `extract` 用的容器 ——
@@ -391,9 +441,17 @@ pub fn render(vars: &[Var]) -> String {
             Some(r) => format!("Some({r:?})"),
             None => "None".to_string(),
         };
+        let long_name = match &v.long_name {
+            Some(value) => format!("Some({value:?})"),
+            None => "None".to_string(),
+        };
+        let units = match &v.units {
+            Some(value) => format!("Some({value:?})"),
+            None => "None".to_string(),
+        };
         let _ = writeln!(
             s,
-            "    Var {{ name: {:?}, macros: &[{macros}], runtime: {runtime}, line: {} }},",
+            "    Var {{ name: {:?}, macros: &[{macros}], runtime: {runtime}, long_name: {long_name}, units: {units}, line: {} }},",
             v.name, v.line
         );
     }
@@ -501,5 +559,59 @@ mod tests {
             .find(|v| v.name == "methane_surf_flux_rice_intensive")
             .expect("the tracer ratio writer must count as a history write site");
         assert_eq!(ratio.runtime.as_deref(), Some("DEF_RICE"));
+    }
+
+    /// 描述与单位取调用里**最后两个字面量**；维度名（`'soil'`/`'band'`/`'rtyp'`）
+    /// 与 `mhist_on('f_…')` 的开关都在它们之前，不能串位。
+    #[test]
+    fn write_call_metadata_comes_from_the_last_two_literals() {
+        let vars = extract(&corpus(
+            "CALL write_history_variable_3d (a, b, file_hist, 'f_described', itime_in_file, 'soil', 1, nl_soil, &\n\
+             sumarea, filter,'litter 1 carbon density in soil layers','gC/m3')\n\
+             CALL write_history_variable_2d (mhist_on('f_switched'), c, file_hist, &\n\
+             'f_switched', itime_in_file, sumarea, filter, 'described too','mol/m2/s', acc_num=n)\n\
+             CALL write_history_variable_4d (d, e, file_hist, 'f_four', itime_in_file, 'band', 1, 2, 'rtyp', 1, 2, &\n\
+             sumarea_dt, filter_dt, 'averaged albedo','-',nac_dt)\n",
+        ))
+        .unwrap();
+        let find = |name: &str| vars.iter().find(|v| v.name == name).unwrap();
+        assert_eq!(
+            find("described").long_name.as_deref(),
+            Some("litter 1 carbon density in soil layers")
+        );
+        assert_eq!(find("described").units.as_deref(), Some("gC/m3"));
+        assert_eq!(find("switched").long_name.as_deref(), Some("described too"));
+        assert_eq!(find("switched").units.as_deref(), Some("mol/m2/s"));
+        assert_eq!(find("four").long_name.as_deref(), Some("averaged albedo"));
+        assert_eq!(find("four").units.as_deref(), Some("-"));
+    }
+
+    /// 没有描述字面量的调用不猜：两个字段留空（`corpus` 的基底就是这种形态）。
+    #[test]
+    fn a_call_without_a_description_leaves_the_metadata_empty() {
+        let vars = extract(&corpus("")).unwrap();
+        assert_eq!(vars[0].long_name, None);
+        assert_eq!(vars[0].units, None);
+    }
+
+    /// 单位是同一个 NetCDF 变量唯一的量纲声明，两处不一致必须报错；`long_name`
+    /// 允许分歧（甲烷的「面平均 / 强度量」两支），取先出现的那条。
+    #[test]
+    fn conflicting_units_are_refused_while_long_names_keep_the_first_site() {
+        let error = extract(&corpus(
+            "CALL write_history_variable_2d (a, b, file_hist, 'f_clash', itime, sumarea, filter, 'first','W/m2')\n\
+             CALL write_history_variable_2d (c, d, file_hist, 'f_clash', itime, sumarea, filter, 'second','K')\n",
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("different units"), "{error}");
+
+        let vars = extract(&corpus(
+            "CALL write_history_variable_2d (a, b, file_hist, 'f_same', itime, sumarea, filter, 'first','W/m2')\n\
+             CALL write_history_variable_2d (c, d, file_hist, 'f_same', itime, sumarea, filter, 'second','W/m2')\n",
+        ))
+        .unwrap();
+        let same = vars.iter().find(|v| v.name == "same").unwrap();
+        assert_eq!(same.long_name.as_deref(), Some("first"));
+        assert_eq!(same.units.as_deref(), Some("W/m2"));
     }
 }

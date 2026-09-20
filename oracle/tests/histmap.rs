@@ -153,3 +153,50 @@ fn the_second_window_agrees_with_the_first() {
     }
     assert_eq!(sets[0], sets[1]);
 }
+
+/// 表里记的 `units` / `long_name` 必须与真实 history 文件的属性一致。
+///
+/// 这是元数据解析（「调用里最后两个字面量」规则）唯一的经验证据：黄金文件里
+/// 与表相交的 117 个变量逐一对属性，对不上就是解析串了位（维度名、`mhist_on`
+/// 开关或上游把 long_name 填成变量名之类）。缺元数据的条目也会在这里暴露。
+#[test]
+fn recorded_metadata_matches_the_golden_file() {
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("golden/CN-Cng_hist_2008-01.nc");
+    let nc = netcdf::open(&path).expect("golden file opens");
+    let text_attribute = |variable: &netcdf::Variable<'_>, name: &str| -> Option<String> {
+        variable
+            .attribute(name)
+            .and_then(|attribute| attribute.value().ok())
+            .and_then(|value| match value {
+                netcdf::AttributeValue::Str(value) => Some(value),
+                _ => None,
+            })
+    };
+    let table = colm_hist::all();
+    let mut checked = 0;
+    for variable in nc.variables() {
+        let raw = variable.name();
+        let Some(name) = raw.strip_prefix("f_") else {
+            continue;
+        };
+        let Some(entry) = table.iter().find(|entry| entry.name == name) else {
+            continue;
+        };
+        assert_eq!(
+            entry.units,
+            text_attribute(&variable, "units").as_deref(),
+            "{name}: units"
+        );
+        assert_eq!(
+            entry.long_name,
+            text_attribute(&variable, "long_name").as_deref(),
+            "{name}: long_name"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 117,
+        "every golden variable must be described by the table"
+    );
+}

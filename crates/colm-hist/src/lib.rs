@@ -64,6 +64,13 @@ pub struct Var {
     /// 刻意保留原文而不解析成表达式：这一层的职责是「如实报出 CoLM 写了什么
     /// 条件」，求值需要一份具体的算例配置，那是调用方的事。
     pub runtime: Option<&'static str>,
+    /// 写出调用里的描述字面量（NetCDF 的 `long_name`）。同名多点写出时取
+    /// 先出现的那条：实测甲烷的「面平均 / 强度量」两支用了不同描述，而一个
+    /// NetCDF 变量只能有一个 `long_name`。
+    pub long_name: Option<&'static str>,
+    /// 写出调用里的单位字面量（NetCDF 的 `units`）。同名多点必须一致，
+    /// 生成器不一致时会直接报错。
+    pub units: Option<&'static str>,
     /// `MOD_Hist.F90` 里的行号，便于回查。
     pub line: u32,
 }
