@@ -194,6 +194,9 @@ golden file (all 117 intersecting variables agree on all four), and
 `colm_hist::history` writes a history file from that table. Its acceptance test
 rebuilds the golden file's schema and values: dimensions, variable set, per-variable
 dimension order, dtypes, the three attributes, the index/site coordinates and every
-value of every variable round-trip through the writer unchanged. What remains is
-wiring the writer to the runtime: the per-step field values and the history-group
-scheduling (`DEF_HIST_groupby`/`DEF_HIST_FREQ`).
+value of every variable round-trip through the writer unchanged. `colm_hist::schedule`
+now owns the cadence as well: it expands the case window and `DEF_HIST_FREQ`/
+`DEF_HIST_groupby` into the per-file record labels (the upstream fixed half-interval
+shift) and grouping suffixes, and the CN-Cng window reproduces the golden file's 264
+`time` values exactly. What remains is wiring both to the runtime: the per-step field
+values the writer would serialize.

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::schedule::{schedule, HistoryFrequency, HistoryGrouping, SimulationWindow};
 
 fn golden() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle/golden/CN-Cng_hist_2008-01.nc")
@@ -171,6 +172,45 @@ fn a_written_history_file_matches_the_golden_schema_and_values() {
         assert_eq!(ours, theirs, "{name}: site coordinate");
     }
     std::fs::remove_file(&produced_path).unwrap();
+}
+
+/// 调度器必须逐值复现黄金文件的 `time` 轴，并按 `MONTH` 分组得到与文件名
+/// 一致的后缀 —— 这是「哪些时刻落一条记录、标签是多少」唯一的经验证据。
+#[test]
+fn the_scheduled_labels_reproduce_the_golden_time_axis() {
+    let golden_file = netcdf::open(golden()).expect("golden history opens");
+    let expected: Vec<i32> = golden_file
+        .variable("time")
+        .unwrap()
+        .get_values(..)
+        .unwrap();
+    // `oracle/cases/CN-Cng/case.nml`：2008-01-01 00:00 → 01-11 24:00，步长 1800 s，
+    // DEF_HIST_FREQ='HOURLY'，DEF_HIST_groupby='MONTH'。
+    let groups = schedule(
+        SimulationWindow {
+            start_year: 2008,
+            start_julian_day: 1,
+            start_seconds: 0,
+            end_year: 2008,
+            end_julian_day: 11,
+            end_seconds: 86_400,
+            timestep_seconds: 1_800,
+        },
+        HistoryFrequency::Hourly,
+        HistoryGrouping::Month,
+    )
+    .unwrap();
+    assert_eq!(groups.len(), 1, "the window lies inside one month");
+    assert_eq!(groups[0].suffix, "2008-01");
+    assert_eq!(groups[0].labels_minutes.len(), expected.len());
+    for (index, (ours, theirs)) in groups[0].labels_minutes.iter().zip(&expected).enumerate() {
+        assert_eq!(*ours, i64::from(*theirs), "record {index}");
+    }
+    let golden_name = golden().file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        golden_name.contains(&format!("hist_{}.nc", groups[0].suffix)),
+        "{golden_name} should carry the scheduled suffix"
+    );
 }
 
 #[test]

@@ -25,6 +25,7 @@ pub mod metric;
 #[cfg(feature = "io")]
 pub mod obs;
 pub mod pair;
+pub mod schedule;
 pub mod time;
 
 use std::collections::BTreeSet;

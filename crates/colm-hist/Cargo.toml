@@ -8,14 +8,17 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-# 闸门表那一半刻意无依赖 —— GUI 为了问一句「这个内核能产出什么」
+# 闸门表那一半刻意不带 netcdf —— GUI 为了问一句「这个内核能产出什么」
 # 不该拖进整个 HDF5。读文件与算指标那一半才需要 netcdf，所以做成 feature。
+# anyhow 是纯 Rust 的错误包装，colm-namelist / colm-case / colm-kernel 也都用它，
+# 不改变「默认 features 下 0 个 netcdf 依赖」这条约束；history 的调度是纯逻辑，
+# 不该为了一个错误类型被关进 io feature。
 netcdf = { workspace = true, features = ["static"], optional = true }
-anyhow = { workspace = true, optional = true }
+anyhow.workspace = true
 
 [features]
 default = []
-io = ["dep:netcdf", "dep:anyhow"]
+io = ["dep:netcdf"]
 
 [lints]
 workspace = true
