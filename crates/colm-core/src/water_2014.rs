@@ -240,11 +240,29 @@ pub fn water_2014_snow_soil_step(
         (input.snow.time_step_seconds - input.soil.time_step_seconds).abs() <= 1.0e-12,
         "snow and soil water steps need the same time step"
     );
-    let snow = snow_water(input.snow, snow_state)?;
+    // 无雪列时**跳过** `snowwater`：上游 `WATER_2014` 的第 [1] 节在 `lb >= 1`
+    // （即 `snl == 0`）时不做雪层水的运算，`snowwater` 自己也不接受空列。
+    //
+    // 关键是**雨要直接落到土上** —— 有雪时雨先经雪列、由底部排水转给土壤，
+    // 无雪时上游 `gwat = pg_rain + sm - ...` 里的 `pg_rain` 就是雨水本身。
+    // 这里若给 0，等于把降雨吞掉。
+    let (snow, ground_rain_kg_m2_s) = if snow_state.layer_count < 0 {
+        let snow = snow_water(input.snow, snow_state)?;
+        let ground_rain_kg_m2_s = snow.bottom_drainage_kg_m2_s;
+        (snow, ground_rain_kg_m2_s)
+    } else {
+        (
+            SnowWaterOutcome {
+                bottom_drainage_kg_m2_s: 0.0,
+                layer_drainage_kg_m2: Vec::new(),
+            },
+            input.snow.rainfall_kg_m2_s,
+        )
+    };
     let soil = water_2014_soil_step(
         Water2014SoilInput {
             fluxes: Water2014SoilFluxes {
-                ground_rain_kg_m2_s: snow.bottom_drainage_kg_m2_s,
+                ground_rain_kg_m2_s,
                 snowmelt_kg_m2_s: 0.0,
                 ground_evaporation_kg_m2_s: 0.0,
                 transpiration_kg_m2_s: input.soil.fluxes.transpiration_kg_m2_s,

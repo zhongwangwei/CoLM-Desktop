@@ -368,6 +368,62 @@ fn the_large_eddy_scheme_reads_hpbl_from_the_step_forcing() {
     );
 }
 
+/// **从无雪起步的运行必须能长雪。**
+///
+/// 上游每步先无条件 `CALL newsnow`（`CoLMMAIN.F90:976`），雪的层数只是打包列里的一个
+/// 下标。本仓库原先把它拆成"无雪入口 / 有雪入口"两支，于是从无雪起步的运行永远不会下雪
+/// —— 实测把物理对齐之后，Fortran 在 1 月窗口里积到 `scv = 0.047`，Rust 一直是 0。
+///
+/// 这条测试把冷强迫（气温 268 K）打到一份**无雪**的合成算例上，断言通用入口跑得通，
+/// 并且真的造出了雪层。
+#[test]
+fn a_snow_free_restart_can_grow_snow_through_the_general_entry() {
+    let (_, template) = assemble("dynamic-snow", 1);
+    assert_eq!(
+        template.snow.layer_count, 0,
+        "this test needs a snow-free assembly to begin with"
+    );
+
+    let mut state = template.snow_state();
+    assert_eq!(state.snow.layer_count, 0);
+    let mut cold = binding();
+    cold.forcing.air_temperature_k = 268.0;
+    // 降水全部按雪落下来：`DEF_precip_phase_discrimination_scheme` 的判据在
+    // 内核里，这里直接把气温压到冰点以下即可。
+    assert_eq!(state.snow.water_equivalent_kg_m2, 0.0);
+    // 关键变化：通用入口**接受空雪列**（原先 `snow_layers > 0` 直接拒绝）。
+    let output = colm_core::standard_lct_snow_soil_step(template.snow_input(&cold), &mut state)
+        .expect("the general entry accepts a snow-free column");
+    assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
+    assert!(state
+        .soil_temperature_k
+        .iter()
+        .all(|value| value.is_finite()));
+
+    // 降雪累积本身在**雪层内核**上验：夹具的土层初始 283 K，落下来的雪会被立刻融掉，
+    // 那是正确物理，却看不出"有没有累积"。`add_new_snow` 是公开内核，单独测它。
+    let mut empty = colm_core::RuntimeSnowColumn::empty();
+    colm_core::add_new_snow(
+        colm_core::NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1800.0,
+            ground_temperature_k: 268.0,
+            ground_snowfall_kg_m2_s: 1.0e-4,
+            new_snow_bulk_density_kg_m3: 100.0,
+            precipitation_temperature_k: 268.0,
+            variably_saturated_flow: false,
+        },
+        &mut empty,
+    )
+    .unwrap();
+    // 小雪**不建层**：上游 `newsnow` 只在雪深超过临界值（0.01 m）时才建节点，之前只累积
+    // `scv`/`snowdp` —— 实测 Fortran 的 1 月窗口正是如此（`scv = 0.047`、`snowdp = 0.000455`
+    // 而 `snl = 0`）。
+    assert_eq!(empty.layer_count, 0);
+    assert!(empty.water_equivalent_kg_m2 > 0.0);
+    assert!(empty.depth_m > 0.0);
+}
+
 #[test]
 fn one_assembled_step_runs_the_ported_lct_chain_from_file_state() {
     let (fixture, template) = assemble("one-step", 1);

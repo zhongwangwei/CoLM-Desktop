@@ -398,6 +398,16 @@ pub fn standard_lct_soil_step(
 /// This is the regular-soil LCT branch with an existing snow column and without
 /// `DEF_SPLIT_SOILSNOW`. Split soil/snow, SNICAR aerosols, and tracers remain
 /// separate source branches.
+/// 一步「能长雪」的 standard-LCT 更新 —— **这是通用入口**，`snow.layer_count` 可以为 0。
+///
+/// 上游没有"无雪入口"这种东西：`CoLMMAIN` 每步先无条件 `CALL newsnow`
+/// （`CoLMMAIN.F90:976`，在 `[3] Initialize new snow nodes for snowfall / sleet` 一节），
+/// 雪的层数只是打包列里的一个下标。本仓库原先把它拆成"无雪入口 / 有雪入口"两支，
+/// 于是**从无雪起步的运行永远不会下雪** —— 实测把物理对齐之后，Fortran 在 1 月窗口里
+/// 积到 `scv = 0.047`，Rust 一直是 0，地表温度因此差 2.45 K。
+///
+/// 允许 `layer_count == 0` 之后，`add_new_snow` 会在有降雪时自己造层，
+/// 调用方也就不需要"先看有没有雪、再挑入口"。
 pub fn standard_lct_snow_soil_step(
     input: StandardLctSnowSoilInput<'_>,
     state: &mut StandardLctSnowSoilState,
@@ -410,8 +420,13 @@ pub fn standard_lct_snow_soil_step(
         NewSnowInput {
             patch_type: 0,
             time_step_seconds: input.energy.interception.time_step_seconds,
-            ground_temperature_k: state.snow.temperature_k
-                [crate::snow::snow_layer_slot(state.snow.layer_count + 1)],
+            // 雪层下面那一层的温度：有雪时是雪列最后一层，无雪时就是**第一个土层**
+            // —— 没有雪槽可索引（`snow_layer_slot(1)` 会越界）。
+            ground_temperature_k: if state.snow.layer_count < 0 {
+                state.snow.temperature_k[crate::snow::snow_layer_slot(state.snow.layer_count + 1)]
+            } else {
+                state.soil_temperature_k[0]
+            },
             ground_snowfall_kg_m2_s: prepared.interception.ground_snow_kg_m2_s,
             new_snow_bulk_density_kg_m3: prepared.precipitation.new_snow_bulk_density_kg_m3,
             precipitation_temperature_k: prepared.precipitation.precipitation_temperature_k,
@@ -570,8 +585,7 @@ fn validate_snow_soil_step(
         ground.patch_type == 0
             && input.soil_water.patch_type == 0
             && !ground.use_split_soil_snow
-            && (-5..0).contains(&state.snow.layer_count)
-            && snow_layers > 0
+            && (-5..=0).contains(&state.snow.layer_count)
             && !input.soil_water.urban_run
             && same(
                 input.energy.interception.time_step_seconds,
@@ -599,7 +613,7 @@ fn validate_snow_soil_step(
             && state.snow.temperature_k.len() == 5
             && state.snow.liquid_water_kg_m2.len() == 5
             && state.snow.ice_water_kg_m2.len() == 5,
-        "standard_lct_snow_soil_step supports one active-snow, non-split regular-soil state"
+        "standard_lct_snow_soil_step supports one non-split regular-soil state"
     );
     Ok((snow_layers, template_snow_layers))
 }

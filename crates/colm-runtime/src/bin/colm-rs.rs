@@ -110,6 +110,8 @@ fn run() -> Result<()> {
         time: restarts.initial.clone(),
     };
 
+    // 两支装配的**断言**不同（一支要求启动时有雪、另一支要求没有），但返回的是同一个
+    // 模板类型；运行时只走通用入口（能长雪的那一支），所以这里按启动时的雪列选断言。
     let has_snow = restart_has_snow_column(&files, arguments.patch)
         .context("cannot tell whether the initial restart carries an active snow column")?;
     let template = if has_snow {
@@ -124,23 +126,15 @@ fn run() -> Result<()> {
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
     let session = history_session(&config, &arguments)?;
     let mut runtime = PointRuntime::open(config)?;
-    let summary = if has_snow {
-        run_snow(
-            &mut runtime,
-            &template,
-            &restarts.initial,
-            &arguments,
-            session,
-        )?
-    } else {
-        run_soil(
-            &mut runtime,
-            &template,
-            &restarts.initial,
-            &arguments,
-            session,
-        )?
-    };
+    // **一个入口跑到底。** 上游每步无条件先 `newsnow`（`CoLMMAIN.F90:976`）再造打包列，
+    // 所以"这一步有没有雪"是状态、不是配置；这里同理 —— 从无雪起步的运行也必须能长雪。
+    let summary = run_snow(
+        &mut runtime,
+        &template,
+        &restarts.initial,
+        &arguments,
+        session,
+    )?;
     println!(
         "colm-rs: {} step(s) on patch {}; wrote {}",
         summary.steps,
@@ -157,69 +151,6 @@ struct RunSummary {
     steps: usize,
     /// `None` 表示这份算例没开 history（`DEF_HIST_FREQ = 'none'`）。
     history_files: Option<usize>,
-}
-
-/// 无雪分支跑完整个窗口，并把最后一步的地表温度交给续跑写出。
-fn run_soil(
-    runtime: &mut PointRuntime,
-    template: &StandardLctRestartTemplate,
-    restart_in: &Path,
-    arguments: &Arguments,
-    session: Option<HistorySession>,
-) -> Result<RunSummary> {
-    let mut state = template.state();
-    // `evolved_overrides` 要的是**最后一步**的地表温度：它只出现在步输出里，
-    // 状态只带逐层土温。
-    let mut last_ground_temperature_k = None;
-    // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
-    let mut last_water = None;
-    let mut last_energy = None;
-    let mut last_cosine_zenith = 0.0;
-    let (steps, history_files) = match session {
-        Some(mut session) => {
-            let outcome = runtime.run_restart_standard_lct_with_history(
-                template,
-                &mut state,
-                &mut session,
-                |step, output| {
-                    last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
-                    last_water = Some(output.water.clone());
-                    last_energy = Some(output.energy.clone());
-                    last_cosine_zenith = step.forcing.cosine_zenith;
-                    Ok(())
-                },
-            )?;
-            (outcome.steps, Some(outcome.files.len()))
-        }
-        None => (
-            runtime.run_restart_standard_lct(template, &mut state, |step, output| {
-                last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
-                last_water = Some(output.water.clone());
-                last_energy = Some(output.energy.clone());
-                last_cosine_zenith = step.forcing.cosine_zenith;
-                Ok(())
-            })?,
-            None,
-        ),
-    };
-    let ground_temperature_k = last_ground_temperature_k.context(NO_STEP)?;
-    let last_water = last_water.context(NO_STEP)?;
-    let last_energy = last_energy.context(NO_STEP)?;
-    let overrides = template.evolved_overrides(
-        &state,
-        EvolvedStepOutput {
-            ground_temperature_k,
-            matric_potential_mm: &last_water.matric_potential_mm,
-            hydraulic_conductivity_mm_s: &last_water.hydraulic_conductivity_mm_s,
-            cosine_zenith: last_cosine_zenith,
-            energy: &last_energy,
-        },
-    )?;
-    write_restart(restart_in, &arguments.restart_out, &overrides)?;
-    Ok(RunSummary {
-        steps,
-        history_files,
-    })
 }
 
 /// 积雪分支：同一个窗口，内核换成 `standard_lct_snow_soil_step`，

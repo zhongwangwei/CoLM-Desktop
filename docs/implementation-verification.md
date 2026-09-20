@@ -2637,3 +2637,57 @@ scv = 0.047188   snowdp = 0.000455   fsno = 0.017568   sag = 0.001243
 
 **下一轮的目标因此是结构性的**：让 `standard_lct_soil_step` 在 `scv > 0` 时切到积雪分支，
 或者把两支合成一个每步判定的入口（上游 `CoLMMAIN` 就是这么做的）。
+
+## 无雪起步的运行现在能长雪了 —— 拆成两支入口是错的（2026 年，实测）
+
+上一节把下一个缺口记成"土柱不会造雪"。根因比"不会造雪"更简单也更根本：
+**本仓库把一步更新拆成了"无雪入口 / 有雪入口"两支，而上游没有这种拆分。**
+
+上游每步在能量与水量收支**之前**无条件调一次 `newsnow`（`CoLMMAIN.F90:976`，
+`[3] Initialize new snow nodes for snowfall / sleet` 一节）：
+
+```fortran
+snl_bef = snl
+CALL newsnow (patchtype,maxsnl,deltim,t_grnd,pg_rain,pg_snow,bifall, &
+              t_precip,zi_soisno(:0),...,snl,sag,scv,snowdp,fsno,wetwat)
+lb = snl + 1
+```
+
+雪只是打包列里的一个下标。所以修法是让通用入口接受 `snow.layer_count == 0`，
+`add_new_snow` 自己决定要不要建层，调用方不必"先看有没有雪、再挑入口"。
+
+三处改动：
+
+1. **内核**：`validate_snow_soil_step` 的 `snow_layers > 0` 去掉（`(-5..0)` → `(-5..=0)`）。
+2. **`newsnow` 的入参**：它要"雪层下面那一层的温度"，有雪时取雪列最后一层，
+   无雪时**没有雪槽可索引**（`snow_layer_slot(1)` 会断言失败）—— 那时应取第一个土层。
+3. **`snowwater` 跳过**：上游第 [1] 节在 `lb >= 1`（`snl == 0`）时不做雪层水运算。
+   但**雨要直接落到土上**：有雪时雨先经雪列、由底部排水转给土壤；无雪的
+   `gwat = pg_rain + sm - ...` 里 `pg_rain` 就是雨水本身。这里若给 0 等于把降雨吞掉。
+
+`colm-rs` 现在一个入口跑到底（按启动时雪列选装配断言，但运行只走通用入口）。
+
+### 实测：雪真的长出来了
+
+全对齐的 528 步窗口：
+
+| | Fortran | Rust（修之前） | Rust（修之后） |
+|---|---|---|---|
+| `scv` | 0.047188 | **0** | **0.015822** |
+| `snowdp` | 0.000455 | **0** | **0.000149** |
+| `fsno` | 0.017568 | **0** | **0** |
+| `sag` | 0.001243 | **0** | **0** |
+| `t_soisno` 雪槽 | 0 | **−999** | **0** |
+
+雪槽也跟着对齐了（原先写 −999，现在是 0，与 Fortran 一致）。
+
+### 剩下的：浅雪（不建层）的 `fsno` 与 `sag`
+
+`scv`/`snowdp` 只有 Fortran 的三分之一，而 `fsno`/`sag` 仍是 0。原因清楚：
+`add_new_snow` **只在建层时**设 `ground_snow_fraction`（`MOD_NewSnow` 那一支），
+而本算例的雪**始终没到建层的临界深度**（`state.depth_m >= 0.01`），所以
+Fortran 的 `fsno = 0.0176` 只能来自另一处 —— 上游的 `MOD_SnowFraction:snowfraction`
+负责给**没有雪层的浅雪**算 `fsno`，本仓库还没移植它。`sag` 同理（`snowage`）。
+
+雪既反照又隔热，`fsno` 缺失直接影响地表能量收支，所以这两项是下一轮的目标
+（`t_grnd` 现在仍差 +2.45 K）。
