@@ -285,6 +285,80 @@ fn validate(input: SoilThermalInput) -> Result<()> {
     Ok(())
 }
 
+/// Builds the per-layer `soil_hcap_cond` scalar inputs for one patch.
+///
+/// The static half of `SoilThermalInput` is `MOD_Vars_TimeInvariants`' soil state and
+/// lives in the constant restart; the dynamic half is the current column.  Only the
+/// volume fractions are derived here, with the source's own expressions
+/// (`MOD_GroundTemperature.F90`: `vf_water = wliq / (dz * denh2o)`,
+/// `vf_ice = wice / (dz * denice)`), so the density constants cannot drift between
+/// the driver and the physics.
+pub fn soil_thermal_inputs(
+    soil: &crate::SoilState,
+    patch: usize,
+    temperature_k: &[f64],
+    liquid_water_kg_m2: &[f64],
+    ice_water_kg_m2: &[f64],
+    layer_thickness_m: &[f64],
+) -> Result<Vec<SoilThermalInput>> {
+    ensure!(
+        patch < soil.patches,
+        "soil thermal input patch {patch} is outside {} patches",
+        soil.patches
+    );
+    for (name, values) in [
+        ("temperature_k", temperature_k),
+        ("liquid_water_kg_m2", liquid_water_kg_m2),
+        ("ice_water_kg_m2", ice_water_kg_m2),
+        ("layer_thickness_m", layer_thickness_m),
+    ] {
+        ensure!(
+            values.len() == soil.layers,
+            "soil thermal input {name} has {} entries, expected {}",
+            values.len(),
+            soil.layers
+        );
+    }
+    let field = |name: crate::SoilField, layer: usize| soil.get(name, layer, patch);
+    (0..soil.layers)
+        .map(|layer| {
+            let thickness_m = layer_thickness_m[layer];
+            ensure!(
+                thickness_m > 0.0,
+                "soil thermal input layer {layer} has no thickness"
+            );
+            Ok(SoilThermalInput {
+                gravel_volume_fraction_of_solids: field(crate::SoilField::VfGravels, layer),
+                organic_volume_fraction_of_solids: field(crate::SoilField::VfOm, layer),
+                sand_volume_fraction_of_solids: field(crate::SoilField::VfSand, layer),
+                pore_volume_fraction: field(crate::SoilField::Porosity, layer),
+                gravel_mass_fraction: field(crate::SoilField::WfGravels, layer),
+                sand_mass_fraction: field(crate::SoilField::WfSand, layer),
+                solid_conductivity_w_m_k: field(crate::SoilField::SolidThermalConductivity, layer),
+                dry_heat_capacity_j_m3_k: field(crate::SoilField::HeatCapacity, layer),
+                dry_conductivity_w_m_k: field(crate::SoilField::DryConductivity, layer),
+                saturated_unfrozen_conductivity_w_m_k: field(
+                    crate::SoilField::SaturatedUnfrozenConductivity,
+                    layer,
+                ),
+                saturated_frozen_conductivity_w_m_k: field(
+                    crate::SoilField::SaturatedFrozenConductivity,
+                    layer,
+                ),
+                balland_alpha: field(crate::SoilField::BaAlpha, layer),
+                balland_beta: field(crate::SoilField::BaBeta, layer),
+                temperature_k: temperature_k[layer],
+                liquid_volume_fraction: liquid_water_kg_m2[layer]
+                    / (thickness_m * WATER_DENSITY_KG_M3),
+                ice_volume_fraction: ice_water_kg_m2[layer] / (thickness_m * ICE_DENSITY_KG_M3),
+            })
+        })
+        .collect()
+}
+
+const WATER_DENSITY_KG_M3: f64 = f77(1000.0);
+const ICE_DENSITY_KG_M3: f64 = f77(917.0);
+
 #[cfg(test)]
 #[path = "thermal_properties_tests.rs"]
 mod thermal_properties_tests;

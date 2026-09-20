@@ -5,6 +5,8 @@
 //! serialization stays in `colm-init`; that keeps `colm-init` from becoming a
 //! second copy of `colm.x`.
 
+pub mod assembly;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};

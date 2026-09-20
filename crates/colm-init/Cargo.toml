@@ -16,5 +16,10 @@ colm-namelist = { path = "../colm-namelist" }
 colm-srfdata = { path = "../colm-srfdata" }
 netcdf = { workspace = true, features = ["static"] }
 
+[features]
+# 下游（例如 colm-runtime 的装配层测试）需要一个能写出两种 restart 的合成算例。
+# 只在测试构建里开启，不进随包发布的二进制。
+fixtures = []
+
 [lints]
 workspace = true

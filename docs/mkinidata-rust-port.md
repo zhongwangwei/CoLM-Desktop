@@ -178,18 +178,27 @@ them. Checked against the current tree:
 - `PointRuntime` has no consumer outside its own tests, and no Rust `colm`
   executable exists: `xtask`'s `stage-sidecar` builds `colm-cli`, `mksrfdata-rs` and
   `mkinidata-rs` only, so the third stage is still the Fortran `colm.x`.
-- The absent middle layer is the assembly from written restart/surface state into the
-  `StandardLct*Input` templates. `colm-init` reads initialization datasets
-  (`runtime.rs`), and `colm_init::RestartFile` now reads both written restart families
-  back — every variable with its on-disk axis order, verified by writing the full
-  synthetic fixtures (time and constant) and comparing the reader against each file
-  variable by variable. What is still missing is the mapping from those typed buffers
-  into a driver template, which is also why the runtime's LCT drivers have no
-  cross-crate test.
+- The middle layer was the assembly from written restart/surface state into the
+  `StandardLct*Input` templates. `colm_init::RestartFile` reads both written restart
+  families back — every variable with its on-disk axis order, verified by writing the
+  full synthetic fixtures (time and constant) and comparing the reader against each
+  file variable by variable.
+- The middle layer now exists for one branch. `colm_runtime::assembly` assembles a
+  written constant/time restart pair into a `StandardLctSoilInput` plus
+  `StandardLctSoilState` for the no-snow, non-split, non-urban, non-lake regular-soil
+  LCT branch — the one `standard_lct_soil_step` supports. Its sources follow upstream's
+  own split: time invariants from the constant restart
+  (`READ_TimeInvariants`), evolving and vegetation state from the time restart, and the
+  physical parameter tables no restart carries (PFT biochemistry, schemes, roughness,
+  observation height, `rootfr`) from an explicit `LandPhysicsParameters` with no
+  defaults. `colm-runtime` now has a cross-crate test that assembles from files and runs
+  one real `standard_lct_soil_step` from the resulting state.
+  Still missing: a driver for every other branch, the wiring of that template into
+  `PointRuntime`'s loop and a Rust `colm` executable.
 
-Cutover (`colm-cli run` selecting a Rust `colm`) depends on that layer; until it
-exists the Fortran binary stays the verified runtime, and `--preprocessors` continues
-to cover only the first two stages.
+Cutover (`colm-cli run` selecting a Rust `colm`) depends on those; until they exist the
+Fortran binary stays the verified runtime, and `--preprocessors` continues to cover only
+the first two stages.
 
 One prerequisite is now in place: the history gate table carries each variable's full
 schema — name, `long_name`, `units` and the layer dimensions in file order — extracted

@@ -160,3 +160,103 @@ fn spatial_soil_marks_only_ocean_classes_missing() {
     assert_eq!(state.get(SoilField::FieldCapacity, 0, 0), MISSING);
     assert_ne!(state.get(SoilField::FieldCapacity, 0, 1), MISSING);
 }
+
+/// 两个 patch、CoLM 的十层，每个 `(field, layer, patch)` 都取一个互不相同的值。
+///
+/// 直接用 `from_fields` 而不是 `derive_soil_parameters`：这里要考的正是
+/// 「装配层给出的层主序缓冲被按 `(layer, patch)` 正确取出」，派生公式会掩盖这一点。
+fn two_patch_soil() -> SoilState {
+    const LAYERS: usize = 10;
+    const PATCHES: usize = 2;
+    let mut values: [Vec<f64>; SoilField::COUNT] = std::array::from_fn(|_| vec![0.0; 20]);
+    for field in SoilField::ALL {
+        for layer in 0..LAYERS {
+            for patch in 0..PATCHES {
+                values[field as usize][layer * PATCHES + patch] =
+                    field as usize as f64 * 1000.0 + layer as f64 * 10.0 + patch as f64;
+            }
+        }
+    }
+    SoilState::from_fields(LAYERS, PATCHES, values).unwrap()
+}
+
+#[test]
+fn from_fields_and_get_agree_on_the_layer_major_index() {
+    let soil = two_patch_soil();
+    for field in SoilField::ALL {
+        for layer in 0..soil.layers {
+            for patch in 0..soil.patches {
+                assert_eq!(
+                    soil.get(field, layer, patch),
+                    field as usize as f64 * 1000.0 + layer as f64 * 10.0 + patch as f64,
+                    "{field:?} layer {layer} patch {patch}"
+                );
+            }
+        }
+        // 同一层里两个 patch 的值必须不同，否则 patch 索引写反也看不出来。
+        assert_ne!(soil.get(field, 0, 0), soil.get(field, 0, 1));
+    }
+}
+
+#[test]
+fn from_fields_rejects_a_buffer_of_the_wrong_length() {
+    let mut values: [Vec<f64>; SoilField::COUNT] = std::array::from_fn(|_| vec![0.0; 4]);
+    assert!(SoilState::from_fields(2, 2, values.clone()).is_ok());
+    values[SoilField::VfQuartz as usize] = vec![0.0; 3];
+    let error = SoilState::from_fields(2, 2, values).unwrap_err();
+    assert!(format!("{error:#}").contains("VfQuartz"), "{error:#}");
+}
+
+#[test]
+fn from_fields_rejects_an_empty_column() {
+    let values: [Vec<f64>; SoilField::COUNT] = std::array::from_fn(|_| Vec::new());
+    assert!(SoilState::from_fields(0, 1, values).is_err());
+}
+
+#[test]
+fn hydraulic_models_follow_the_selected_relation_and_the_patch() {
+    let soil = two_patch_soil();
+    let campbell = soil_hydraulic_models(&soil, 0, HydraulicModel::Campbell).unwrap();
+    assert_eq!(campbell.len(), soil.layers);
+    for (layer, model) in campbell.iter().enumerate() {
+        assert_eq!(
+            *model,
+            crate::SoilHydraulicModel::Campbell {
+                bsw: soil.get(SoilField::Bsw, layer, 0),
+            }
+        );
+    }
+    // patch 参数不能用常量 0：另一个 patch 必须读出它自己的那一列。
+    let other = soil_hydraulic_models(&soil, 1, HydraulicModel::Campbell).unwrap();
+    match (campbell[0], other[0]) {
+        (
+            crate::SoilHydraulicModel::Campbell { bsw: first },
+            crate::SoilHydraulicModel::Campbell { bsw: second },
+        ) => assert_ne!(first, second),
+        other => panic!("expected two Campbell models, got {other:?}"),
+    }
+}
+
+#[test]
+fn hydraulic_models_read_the_van_genuchten_arrays() {
+    let soil = two_patch_soil();
+    let models = soil_hydraulic_models(&soil, 1, HydraulicModel::VanGenuchten).unwrap();
+    for (layer, model) in models.iter().enumerate() {
+        assert_eq!(
+            *model,
+            crate::SoilHydraulicModel::VanGenuchten {
+                alpha_vgm: soil.get(SoilField::AlphaVgm, layer, 1),
+                n_vgm: soil.get(SoilField::NVgm, layer, 1),
+                l_vgm: soil.get(SoilField::LVgm, layer, 1),
+                sc_vgm: soil.get(SoilField::ScVgm, layer, 1),
+                fc_vgm: soil.get(SoilField::FcVgm, layer, 1),
+            }
+        );
+    }
+}
+
+#[test]
+fn hydraulic_models_reject_a_patch_outside_the_state() {
+    let soil = two_patch_soil();
+    assert!(soil_hydraulic_models(&soil, 2, HydraulicModel::Campbell).is_err());
+}

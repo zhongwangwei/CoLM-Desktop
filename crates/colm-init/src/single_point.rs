@@ -3302,20 +3302,8 @@ fn soil_hydraulic_models(
     soil: &crate::SoilState,
     model: HydraulicModel,
 ) -> Result<Vec<SoilHydraulicModel>> {
-    (0..soil.layers)
-        .map(|layer| match model {
-            HydraulicModel::Campbell => Ok(SoilHydraulicModel::Campbell {
-                bsw: soil.get(SoilField::Bsw, layer, 0),
-            }),
-            HydraulicModel::VanGenuchten => Ok(SoilHydraulicModel::VanGenuchten {
-                alpha_vgm: soil.get(SoilField::AlphaVgm, layer, 0),
-                n_vgm: soil.get(SoilField::NVgm, layer, 0),
-                l_vgm: soil.get(SoilField::LVgm, layer, 0),
-                sc_vgm: soil.get(SoilField::ScVgm, layer, 0),
-                fc_vgm: soil.get(SoilField::FcVgm, layer, 0),
-            }),
-        })
-        .collect()
+    // A single-point cold start owns exactly one patch, so patch 0 is the whole column.
+    crate::soil_hydraulic_models(soil, 0, model)
 }
 
 struct RadiationValues {

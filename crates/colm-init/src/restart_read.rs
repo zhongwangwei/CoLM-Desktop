@@ -180,6 +180,42 @@ impl RestartFile {
         let start = patch * layers;
         Ok(values[start..start + layers].to_vec())
     }
+
+    /// `(patch, 第二轴, 第一轴)` 变量的某一 patch，按内存里的 `[第一轴][第二轴]` 返回。
+    ///
+    /// 写出器把内存里的 `[first][second][patch]` 落成 `["patch", second, first]`
+    /// （见 `put_patch_last_3d`），所以这里按 `(patch * second + second) * first + first`
+    /// 取，返回顺序与写出前的内存顺序一致 —— 调用方不必知道盘上的反转。
+    pub fn patch_matrix(
+        &self,
+        name: &str,
+        patch: usize,
+        first: usize,
+        second: usize,
+    ) -> Result<Vec<f64>> {
+        let dims = self.variable_dimensions(name)?;
+        ensure!(
+            dims.len() == 3 && dims[0] == "patch",
+            "{name} should be a (patch, second, first) field, but it is {dims:?}"
+        );
+        let patches = self.dimension("patch")?;
+        ensure!(patch < patches, "{name}: patch {patch} is out of {patches}");
+        ensure!(
+            self.dimension(&dims[1])? == second && self.dimension(&dims[2])? == first,
+            "{name} is ({}, {}, {}), not (patch, {second}, {first})",
+            patches,
+            self.dimension(&dims[1])?,
+            self.dimension(&dims[2])?,
+        );
+        let values = self.floats(name)?;
+        let mut matrix = Vec::with_capacity(first * second);
+        for first_index in 0..first {
+            for second_index in 0..second {
+                matrix.push(values[(patch * second + second_index) * first + first_index]);
+            }
+        }
+        Ok(matrix)
+    }
 }
 
 /// 整数按类型读出来再加宽到 `i64`：netcdf 的 `get_values` 不做跨类型转换，

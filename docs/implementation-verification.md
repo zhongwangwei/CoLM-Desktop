@@ -1008,3 +1008,86 @@ tuning.rs）；缺测检查三份实现口径分裂（独立 bin / colm-cli 子�
 WebView 自动化、三平台 release 打包；依赖真实内核或外部 PLUMBER2 数据的三项
 测试保持 `ignored`。Windows 专属 job object 与安装包行为仍由 CI / release
 runner 验证；`vendor/CoLM202X` 没有自身 `.git`，无法与上游 commit 做字节级 diff。
+
+## 原生运行时的「中间层」落地：restart → LCT 驱动模板（2026 年，装配层）
+
+`colm-runtime` 之前有钟、有 forcing、有 `standard_lct_soil_step`，但没有任何东西
+把**写出的 restart** 装配成内核要的模板 —— 所以它的 LCT 驱动只在自身测试里被
+手拼出来的输入跑过，`docs/mkinidata-rust-port.md` 把这一层记为「缺失的中间层」。
+现在这一层存在了，但只覆盖**无雪、非 split、非城市、非湖、非 PHS 的规则土壤
+LCT 分支**，也就是 `standard_lct_soil_step` 已经移植的那一支。
+
+### 来源三分不是选择，是上游的定义
+
+`MOD_Vars_TimeInvariants.F90:READ_TimeInvariants` 从 `_restart_const_lc<year>.nc`
+读时间不变量（`patchtype`、`vf_quartz`/`csol`/`hksati` 那一整套土壤参数、`htop`/`hbot`、
+`ncd`/`ncw`/`bcw`、`debdrock`、`elvmean`/`slpratio`、`topoweti`/`fsatmax`/`fsatdcf`…），
+`MOD_Vars_TimeVariables.F90` 从时间 restart 读演化态与植被态。本仓库两个写出器
+的覆盖面已经够（时间 restart 里 `alb`/`ssun`/`ssha`/`ssoi`/`ssno`/`thermk`/`extkb`/
+`extkd` 正是 `ColdStartRadiation` 的全部字段，`tleaf`/`ldew*` 是 `LeafTemperatureState`，
+`t_soisno`/`wliq_soisno`/`wice_soisno`/`zwt`/`wa`/`wdsrf` 是状态与水位）。
+
+真正没有来源的是第三类：PFT 生化表（`LeafBiochemistry` 在全仓库只被测试构造过）、
+`LeafTemperatureOptions`、叶倾角、粗糙度、观测高度、产流/阻力方案选择。上游把它们
+放在 `MOD_Const_LC` 的**编译期表**与 namelist 里（例如 `rootfr` 由 `Init_LC_Const`
+按 `d50`/`beta` 现算，不入任何 restart）。因此 `colm-runtime::assembly` 把这一类
+做成 `LandPhysicsParameters` —— **不设默认值**：少给一个字段就是编译错误。这是刻意的，
+一份「看着合理」的生化参数会让整条链静静地跑错。
+
+### 装配层抓到的四个缺陷（都是实测，不是推理）
+
+1. **`air_density_kg_m3` 在整条 LCT 链里没有来源。** `GroundFluxInput`、
+   `SoilSurfaceResistanceInput`、`LeafTemperatureInput` 都要空气密度，而
+   `RuntimeForcing` 没有这个字段、`colm-core` 也没有对应内核。上游在
+   `MOD_Forcing.F90` 里算 `forc_rhoair = (pbot - 0.378·q·pbot/(0.622+0.378·q)) / (rgas·t)`
+   （并对密度用的温度钳在 326 K），再由 `CoLMMAIN` 传给每个 THERMAL 分支。
+   现在 `RuntimeForcing` 带上这个字段，在 `prepare_runtime_forcing` 里按同一公式
+   算出来，下采样路径按 `MOD_ForcingDownscaling` 用调整后的列重新算 —— 谁都不必
+   再各自推一遍，否则三条路径会漂移。
+2. **`SoilState` 是 `layer * patches + patch`，而 restart 里是 `(patch, soil)`。**
+   装配层第一版直接把文件缓冲当层主序用，测试立刻抓到 patch 1 读到了 patch 0 的
+   `vf_quartz`（10.0 vs 110.0）。这类错误在数值上极难看出来 —— 每个 patch 都拿到
+   一份"合理"的土壤参数，只是别人的。
+3. **`snw_rds` 不是 patch 级雪龄。** 逐雪层的粒径属于气溶胶那一节；patch 级的雪龄是
+   `sag`。把两者混起来读会让 `ColdStartRadiation.snow_age` 变成一个层维数组的第 0 项。
+4. **`rootfr` 必须求和为 1，而装配层现在显式核对这一点。** `MOD_Eroot` 把
+   `soil_water_stress` 定义成 `sum(rootfr · resistance)`，所以一份没归一的根系比例
+   会让胁迫大于 1，最终被叶温校验以一句笼统的「leaf-temperature inputs are invalid」
+   拦下（实测 5.13）。在装配处按名报错能直接指出病因。
+
+另外两条现在会**按名拒绝**而不是硬跑：`patchtype != 0` 的 patch（城市/湿地/湖走的是
+别的分支），以及 `fsno != 0` 的 patch（这个模板只描述无雪列，雪槽带值却被当成无雪
+驱动正是它该拦下的输入）。
+
+### 新落地的可复用件
+
+- `colm_core::SoilState::from_fields` —— 从 29 个层主序缓冲构造状态，长度不符即报错。
+  读数器与内核之间此前没有这个入口，装配层只能自己拼。
+- `colm_core::soil_hydraulic_models(soil, patch, model)` —— 原本是 `colm-init`
+  里一个写死 patch 0 的私有函数；现在多了一个显式 patch 参数并由 `colm-init`
+  继续复用，避免两份 Campbell/VG 映射漂移。
+- `colm_core::soil_thermal_inputs(...)` —— 把 `SoilState` 的静态半与当前列的
+  动态半合成逐层 `SoilThermalInput`，体积含水率按 `MOD_GroundTemperature.F90` 的
+  `vf_water = wliq/(dz·denh2o)`、`vf_ice = wice/(dz·denice)` 算。在此之前**没有任何
+  生产代码**构造过 `SoilThermalInput`（只有五处测试夹具）。
+- `colm_init::RestartFile::patch_matrix` —— `(patch, 第二轴, 第一轴)` 场按内存里的
+  `[第一轴][第二轴]` 取回，把写出器的转置反转回调用方那一侧。
+- `colm_init` 的 `fixtures` feature：一份两 patch 的合成 restart 对（常数 + 时间），
+  每个 `(field, layer, patch, band, rtyp)` 都取互不相同的值，所以轴序写反不会
+  侥幸通过；土层厚度取自共享 `colm_soil_grid`，土壤水按孔隙度取 50% 饱和 ——
+  随手给一个 10 kg/m² 会得到超过孔隙度的体积含水率，下游的应力与通量核对会拒收
+  这份"重启"（实测踩过）。它只在测试构建里编译。
+
+### 证据
+
+`cargo test -p colm-runtime --lib`：22 通过，其中一条是**从文件装配出模板后真的
+跑一步 `standard_lct_soil_step`**，并断言状态被推进、能量闭合残差 < 0.5 W/m²、
+液态水非负。其余覆盖：29 个土壤场逐场核对、`[band][rtyp]` 光学矩阵逐元素核对、
+patch 选择的产流差异、三个产流分支各自的常数重启来源、缺文件/缺变量/越界 patch/
+未归一 `root_fraction`/长度不符的按名拒绝。
+
+本机这次 file policy 是 `danger-full-access`，之前被沙箱拒掉的 8 个进程探测测试
+（`colm-kernel` 1 个、`colm-cli` `study::runner` 7 个）**全部通过**：
+`cargo test --workspace --lib --bins --exclude colm-cli` = 1188 通过 / 0 失败；
+`colm-cli --bin` = 215；GUI backend = 161；两个 workspace 的 `fmt --check` 与
+`clippy -D warnings` 均干净。

@@ -134,6 +134,35 @@ pub struct SoilState {
 }
 
 impl SoilState {
+    /// Builds a state from one layer-major buffer per [`SoilField`].
+    ///
+    /// The restart reader produces exactly these buffers, and it must be able to
+    /// hand them over without re-deriving each field: a mismatch here would show
+    /// up as a silently zeroed soil property rather than as a failed read.
+    pub fn from_fields(
+        layers: usize,
+        patches: usize,
+        values: [Vec<f64>; SoilField::COUNT],
+    ) -> Result<Self> {
+        ensure!(
+            layers > 0 && patches > 0,
+            "soil state needs at least one layer and one patch"
+        );
+        let expected = layers * patches;
+        for (field, buffer) in SoilField::ALL.iter().zip(values.iter()) {
+            ensure!(
+                buffer.len() == expected,
+                "soil state field {field:?} has {} entries, expected {expected}",
+                buffer.len()
+            );
+        }
+        Ok(Self {
+            layers,
+            patches,
+            values,
+        })
+    }
+
     /// Returns a layer-major field buffer suitable for the restart writer.
     pub fn field(&self, field: SoilField) -> &[f64] {
         &self.values[field as usize]
@@ -143,6 +172,40 @@ impl SoilState {
     pub fn get(&self, field: SoilField, layer: usize, patch: usize) -> f64 {
         self.values[field as usize][layer * self.patches + patch]
     }
+}
+
+/// Builds the per-layer hydraulic model used by the runtime kernels.
+///
+/// The namelist selects one relation for the whole column, so the branch is taken
+/// once here rather than per call site; the two variables it reads are written to
+/// the constant restart only for their own relation, which is why a wrong
+/// selection fails as a missing variable instead of a wrong number.  `patch` is
+/// explicit because a single-point cold start and one block of a spatial
+/// restart address the same buffers differently.
+pub fn soil_hydraulic_models(
+    soil: &SoilState,
+    patch: usize,
+    model: HydraulicModel,
+) -> Result<Vec<crate::SoilHydraulicModel>> {
+    ensure!(
+        patch < soil.patches,
+        "soil hydraulic model patch {patch} is outside {} patches",
+        soil.patches
+    );
+    (0..soil.layers)
+        .map(|layer| match model {
+            HydraulicModel::Campbell => Ok(crate::SoilHydraulicModel::Campbell {
+                bsw: soil.get(SoilField::Bsw, layer, patch),
+            }),
+            HydraulicModel::VanGenuchten => Ok(crate::SoilHydraulicModel::VanGenuchten {
+                alpha_vgm: soil.get(SoilField::AlphaVgm, layer, patch),
+                n_vgm: soil.get(SoilField::NVgm, layer, patch),
+                l_vgm: soil.get(SoilField::LVgm, layer, patch),
+                sc_vgm: soil.get(SoilField::ScVgm, layer, patch),
+                fc_vgm: soil.get(SoilField::FcVgm, layer, patch),
+            }),
+        })
+        .collect()
 }
 
 /// Lake depths and the corresponding ten layer thicknesses, both in metres.

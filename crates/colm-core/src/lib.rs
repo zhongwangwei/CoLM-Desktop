@@ -213,11 +213,12 @@ pub use standard_lct_step::{
 };
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,
-    derive_spatial_soil_parameters, normalize_soil_texture, BedrockState, HydraulicModel,
-    LakeState, SoilField, SoilGrid, SoilLayerInput, SoilState,
+    derive_spatial_soil_parameters, normalize_soil_texture, soil_hydraulic_models, BedrockState,
+    HydraulicModel, LakeState, SoilField, SoilGrid, SoilLayerInput, SoilState,
 };
 pub use thermal_properties::{
-    soil_thermal_properties, SoilThermalInput, SoilThermalProperties, ThermalConductivityScheme,
+    soil_thermal_inputs, soil_thermal_properties, SoilThermalInput, SoilThermalProperties,
+    ThermalConductivityScheme,
 };
 pub use thermal_water::{
     partition_no_split_thermal_water, partition_split_thermal_water, SplitThermalWaterFluxes,

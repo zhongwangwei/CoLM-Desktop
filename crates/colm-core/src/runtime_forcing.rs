@@ -49,6 +49,12 @@ pub struct RuntimeForcing {
     pub downward_longwave_w_m2: f64,
     pub shortwave: ShortwaveForcing,
     pub cosine_zenith: f64,
+    /// `forc_rhoair` from `MOD_Forcing`, the density every THERMAL branch carries.
+    ///
+    /// It belongs to the forcing hand-off rather than to a caller: `CoLMMAIN` reads
+    /// it from the same module that prepared the other forcings, and recomputing it
+    /// per branch is how the ground, leaf and soil-resistance paths would drift apart.
+    pub air_density_kg_m3: f64,
 }
 
 impl RuntimeForcing {
@@ -111,7 +117,30 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
         downward_longwave_w_m2: input.downward_longwave_w_m2,
         shortwave: split_broadband_shortwave(input.downward_shortwave_w_m2, cosine_zenith),
         cosine_zenith,
+        air_density_kg_m3: air_density_kg_m3(
+            input.surface_pressure_pa,
+            input.specific_humidity,
+            input.air_temperature_k,
+        ),
     })
+}
+
+/// `MOD_Forcing`'s `forc_rhoair`, including its own `forc_t > 326` guard.
+///
+/// The guard exists in the upstream reader because density is evaluated from an
+/// air temperature the reader is still allowed to clamp; applying it here keeps
+/// that clamp with the formula instead of leaking a corrected temperature into
+/// the rest of `RuntimeForcing`.
+pub(crate) fn air_density_kg_m3(
+    surface_pressure_pa: f64,
+    specific_humidity: f64,
+    air_temperature_k: f64,
+) -> f64 {
+    const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
+    let temperature_k = air_temperature_k.min(326.0);
+    (surface_pressure_pa
+        - 0.378 * specific_humidity * surface_pressure_pa / (0.622 + 0.378 * specific_humidity))
+        / (AIR_GAS_CONSTANT_J_KG_K * temperature_k)
 }
 
 fn validate(input: RuntimeForcingInput) -> Result<()> {

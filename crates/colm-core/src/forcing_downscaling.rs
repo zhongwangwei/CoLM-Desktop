@@ -235,6 +235,13 @@ pub fn apply_downscaled_runtime_forcing(
             forcing.cosine_zenith,
         ),
         cosine_zenith: forcing.cosine_zenith,
+        // `MOD_ForcingDownscaling` recomputes `forc_rho_c` from the adjusted column
+        // pressure, moisture and temperature rather than scaling the grid density.
+        air_density_kg_m3: crate::runtime_forcing::air_density_kg_m3(
+            downscaled.bottom_pressure_pa,
+            downscaled.specific_humidity,
+            downscaled.air_temperature_k,
+        ),
     }
 }
 

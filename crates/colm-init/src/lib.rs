@@ -74,6 +74,8 @@ pub mod static_state {
 pub mod soil_surface_resistance {
     pub use colm_core::soil_surface_resistance::*;
 }
+#[cfg(feature = "fixtures")]
+pub mod fixtures;
 pub mod restart_read;
 pub mod surface_data;
 pub mod time_restart;
@@ -173,7 +175,8 @@ pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
     CanopyStructureFields, ConstantRestartFiles, ConstantRestartInput, RestartDimensions,
     RestartPatchFields, RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields,
-    TerrainRadiation, TopmodelFields,
+    TerrainRadiation, TopmodelFields, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL,
+    SOIL_FIELDS_VAN_GENUCHTEN,
 };
 pub use restart_read::RestartFile;
 pub use runtime::{
@@ -208,8 +211,8 @@ pub use spatial_urban::{
 };
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,
-    derive_spatial_soil_parameters, normalize_soil_texture, BedrockState, HydraulicModel,
-    LakeState, SoilField, SoilGrid, SoilLayerInput, SoilState,
+    derive_spatial_soil_parameters, normalize_soil_texture, soil_hydraulic_models, BedrockState,
+    HydraulicModel, LakeState, SoilField, SoilGrid, SoilLayerInput, SoilState,
 };
 pub use surface_data::{
     read_single_point_eight_day_vegetation, read_single_point_hyperspectral_albedo,

@@ -149,6 +149,7 @@ dependencies = [
  "anyhow",
  "colm-core",
  "colm-forcing",
+ "colm-init",
  "colm-namelist",
 ]
 

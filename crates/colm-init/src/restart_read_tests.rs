@@ -124,3 +124,56 @@ fn a_file_that_cannot_be_opened_reports_its_path() {
     let error = RestartFile::open(&missing).unwrap_err().to_string();
     assert!(error.contains("cannot open restart"), "{error}");
 }
+
+/// `(patch, second, first)` 的 3d 场：内存序是 `[first][second][patch]`，
+/// 落盘后被反成 patch 在前。`patch_matrix` 必须把这一步反回来。
+#[test]
+fn a_three_dimensional_field_is_returned_in_memory_order() {
+    let root = temp_dir("patch-matrix");
+    let path = root.join("restart.nc");
+    let (patches, first, second) = (2, 2, 3);
+    // 内存序：index = (first * second + second) * patches + patch。
+    let memory: Vec<f64> = (0..first)
+        .flat_map(|f| {
+            (0..second).flat_map(move |s| {
+                (0..patches).map(move |p| (f * second + s) as f64 * 10.0 + p as f64)
+            })
+        })
+        .collect();
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("patch", patches).unwrap();
+    file.add_dimension("second", second).unwrap();
+    file.add_dimension("first", first).unwrap();
+    // 写出器落盘时的转置：`(patch * second + second) * first + first`。
+    let mut on_disk = Vec::with_capacity(memory.len());
+    for patch in 0..patches {
+        for second_index in 0..second {
+            for first_index in 0..first {
+                on_disk.push(memory[(first_index * second + second_index) * patches + patch]);
+            }
+        }
+    }
+    file.add_variable::<f64>("field", &["patch", "second", "first"])
+        .unwrap()
+        .put_values(&on_disk, (.., .., ..))
+        .unwrap();
+    file.close().unwrap();
+
+    let restart = RestartFile::open(&path).unwrap();
+    for patch in 0..patches {
+        let matrix = restart.patch_matrix("field", patch, first, second).unwrap();
+        for first_index in 0..first {
+            for second_index in 0..second {
+                assert_eq!(
+                    matrix[first_index * second + second_index],
+                    memory[(first_index * second + second_index) * patches + patch],
+                    "patch {patch} first {first_index} second {second_index}"
+                );
+            }
+        }
+    }
+    // 形状与 patch 越界都要点名报错。
+    assert!(restart.patch_matrix("field", 2, first, second).is_err());
+    assert!(restart.patch_matrix("field", 0, first, second + 1).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}

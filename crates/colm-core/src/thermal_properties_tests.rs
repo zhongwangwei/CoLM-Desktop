@@ -93,3 +93,125 @@ fn all_conductivity_schemes_match_current_fortran() {
     close(properties.heat_capacity_j_m3_k, 1.913_930_7e6);
     close(properties.conductivity_w_m_k, 1.634_909_679_436_191_3);
 }
+
+/// 两个 patch、两个层，每个 `(field, layer, patch)` 都不同，方便查出 patch 索引写反。
+fn two_patch_layered_soil(layers: usize) -> crate::SoilState {
+    let patches = 2;
+    let mut values: [Vec<f64>; crate::SoilField::COUNT] = std::array::from_fn(|_| Vec::new());
+    for field in crate::SoilField::ALL {
+        let mut buffer = Vec::with_capacity(layers * patches);
+        for layer in 0..layers {
+            for patch in 0..patches {
+                buffer.push(field as usize as f64 * 1000.0 + layer as f64 * 10.0 + patch as f64);
+            }
+        }
+        values[field as usize] = buffer;
+    }
+    crate::SoilState::from_fields(layers, patches, values).unwrap()
+}
+
+#[test]
+fn soil_thermal_inputs_take_the_static_fields_from_the_selected_patch() {
+    let layers = 3;
+    let soil = two_patch_layered_soil(layers);
+    let thickness = [0.1, 0.2, 0.3];
+    let temperature = [280.0, 281.0, 282.0];
+    let liquid = [4.0, 8.0, 12.0];
+    let ice = [0.917, 1.834, 2.751];
+    let inputs = soil_thermal_inputs(&soil, 1, &temperature, &liquid, &ice, &thickness).unwrap();
+    assert_eq!(inputs.len(), layers);
+    for layer in 0..layers {
+        let input = inputs[layer];
+        let patch = 1;
+        let expected = |field: crate::SoilField| {
+            field as usize as f64 * 1000.0 + layer as f64 * 10.0 + patch as f64
+        };
+        assert_eq!(
+            input.gravel_volume_fraction_of_solids,
+            expected(crate::SoilField::VfGravels)
+        );
+        assert_eq!(
+            input.organic_volume_fraction_of_solids,
+            expected(crate::SoilField::VfOm)
+        );
+        assert_eq!(
+            input.sand_volume_fraction_of_solids,
+            expected(crate::SoilField::VfSand)
+        );
+        assert_eq!(
+            input.pore_volume_fraction,
+            expected(crate::SoilField::Porosity)
+        );
+        assert_eq!(
+            input.gravel_mass_fraction,
+            expected(crate::SoilField::WfGravels)
+        );
+        assert_eq!(input.sand_mass_fraction, expected(crate::SoilField::WfSand));
+        assert_eq!(
+            input.solid_conductivity_w_m_k,
+            expected(crate::SoilField::SolidThermalConductivity)
+        );
+        assert_eq!(
+            input.dry_heat_capacity_j_m3_k,
+            expected(crate::SoilField::HeatCapacity)
+        );
+        assert_eq!(
+            input.dry_conductivity_w_m_k,
+            expected(crate::SoilField::DryConductivity)
+        );
+        assert_eq!(
+            input.saturated_unfrozen_conductivity_w_m_k,
+            expected(crate::SoilField::SaturatedUnfrozenConductivity)
+        );
+        assert_eq!(
+            input.saturated_frozen_conductivity_w_m_k,
+            expected(crate::SoilField::SaturatedFrozenConductivity)
+        );
+        assert_eq!(input.balland_alpha, expected(crate::SoilField::BaAlpha));
+        assert_eq!(input.balland_beta, expected(crate::SoilField::BaBeta));
+        assert_eq!(input.temperature_k, temperature[layer]);
+    }
+}
+
+#[test]
+fn soil_thermal_inputs_derive_the_volume_fractions_with_fortrans_densities() {
+    let layers = 2;
+    let soil = two_patch_layered_soil(layers);
+    let thickness = [0.05, 0.25];
+    let temperature = [270.0, 276.0];
+    let liquid = [5.0, 10.0];
+    let ice = [2.0, 4.0];
+    let inputs = soil_thermal_inputs(&soil, 0, &temperature, &liquid, &ice, &thickness).unwrap();
+    for layer in 0..layers {
+        assert_eq!(
+            inputs[layer].liquid_volume_fraction,
+            liquid[layer] / (thickness[layer] * 1000.0)
+        );
+        assert_eq!(
+            inputs[layer].ice_volume_fraction,
+            ice[layer] / (thickness[layer] * 917.0)
+        );
+    }
+    // 体积含水率必须落在孔隙度以内，否则这份输入会被 `soil_hcap_cond` 判为非法。
+    assert!(inputs[0].liquid_volume_fraction + inputs[0].ice_volume_fraction > 0.0);
+}
+
+#[test]
+fn soil_thermal_inputs_reject_a_wrong_shape_or_patch() {
+    let soil = two_patch_layered_soil(3);
+    let thickness = [0.1, 0.2, 0.3];
+    let values = [280.0, 281.0, 282.0];
+    assert!(soil_thermal_inputs(&soil, 2, &values, &values, &values, &thickness).is_err());
+    assert!(soil_thermal_inputs(&soil, 0, &values[..2], &values, &values, &thickness).is_err());
+    assert!(soil_thermal_inputs(&soil, 0, &values, &values, &values, &values[..2]).is_err());
+}
+
+#[test]
+fn soil_thermal_inputs_reject_a_zero_thickness_layer() {
+    let soil = two_patch_layered_soil(2);
+    let temperature = [280.0, 281.0];
+    let water = [1.0, 2.0];
+    let error =
+        soil_thermal_inputs(&soil, 0, &temperature, &water, &water, &[0.0, 0.2]).unwrap_err();
+    assert!(format!("{error:#}").contains("no thickness"), "{error:#}");
+}

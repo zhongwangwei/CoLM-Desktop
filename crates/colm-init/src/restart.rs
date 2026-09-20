@@ -592,7 +592,11 @@ pub fn write_restart_tuning(path: impl AsRef<Path>, tuning: RestartTuning) -> Re
     Ok(())
 }
 
-const SOIL_FIELDS_COMMON: [(SoilField, &str); 16] = [
+/// The sixteen always-written soil fields, in `MOD_Vars_TimeInvariants` order.
+///
+/// Exported because the writer and every reader must agree on the name of each
+/// field; a second hand-kept list is how one silently stops being restored.
+pub const SOIL_FIELDS_COMMON: [(SoilField, &str); 16] = [
     (SoilField::VfQuartz, "vf_quartz"),
     (SoilField::VfGravels, "vf_gravels"),
     (SoilField::VfOm, "vf_om"),
@@ -611,7 +615,8 @@ const SOIL_FIELDS_COMMON: [(SoilField, &str); 16] = [
     (SoilField::ThetaR, "theta_r"),
 ];
 
-const SOIL_FIELDS_VAN_GENUCHTEN: [(SoilField, &str); 5] = [
+/// The five van Genuchten arrays, written only when the namelist selects that relation.
+pub const SOIL_FIELDS_VAN_GENUCHTEN: [(SoilField, &str); 5] = [
     (SoilField::AlphaVgm, "alpha_vgm"),
     (SoilField::LVgm, "L_vgm"),
     (SoilField::NVgm, "n_vgm"),
@@ -619,7 +624,8 @@ const SOIL_FIELDS_VAN_GENUCHTEN: [(SoilField, &str); 5] = [
     (SoilField::FcVgm, "fc_vgm"),
 ];
 
-const SOIL_FIELDS_THERMAL: [(SoilField, &str); 8] = [
+/// The eight thermal-conductivity and `hksati` fields read by `soil_hcap_cond`.
+pub const SOIL_FIELDS_THERMAL: [(SoilField, &str); 8] = [
     (SoilField::HydraulicConductivity, "hksati"),
     (SoilField::HeatCapacity, "csol"),
     (SoilField::SolidThermalConductivity, "k_solids"),

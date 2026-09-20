@@ -1,0 +1,508 @@
+use super::*;
+use std::path::PathBuf;
+
+use colm_core::{
+    prepare_runtime_forcing, RuntimeForcingInput, StandardLctEnergyState, StandardLctSoilState,
+};
+use colm_init::fixtures::{
+    SyntheticRestart, BANDS, PATCHES, RADIATION_TYPES, SNOW_LAYERS, SOIL_LAYERS,
+};
+
+fn temp_dir(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "colm-runtime-assembly-{label}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
+    LandPhysicsParameters {
+        hydraulic_model: HydraulicModel::VanGenuchten,
+        // 上游 `rootfr` 必然求和为 1；`eroot` 的胁迫就是这个加权和。
+        root_fraction: vec![1.0 / SOIL_LAYERS as f64; SOIL_LAYERS],
+        timestep_seconds,
+        precipitation_scheme: PrecipitationPhaseScheme::AirTemperature,
+        surface_resistance_scheme: 1,
+        stress_scheme: 1,
+        surface_layer_scheme: SurfaceLayerScheme::Standard,
+        thermal_conductivity_scheme: ThermalConductivityScheme::Johansen,
+        observation_height_mode: ObservationHeightMode::Absolute,
+        stomata: StomataOptions {
+            use_medlyn: true,
+            use_wue: false,
+            medlyn_g1_override: None,
+            medlyn_g0_override: None,
+            wue_lambda_override: None,
+            ball_berry_slope_override: None,
+            ball_berry_intercept_override: None,
+        },
+        biochemistry: LeafBiochemistry {
+            quantum_efficiency: 0.05,
+            maximum_carboxylation_25c_mol_m2_s: 60e-6,
+            c3c4: 1,
+            low_temperature_slope: 0.2,
+            low_temperature_half_k: 288.16,
+            high_temperature_slope: 0.3,
+            high_temperature_half_k: 313.16,
+            respiration_temperature_slope: 1.3,
+            respiration_temperature_half_k: 328.16,
+            optimum_temperature_k: 298.16,
+            medlyn_g1: 4.0,
+            medlyn_g0: 0.01,
+            ball_berry_slope: 9.0,
+            ball_berry_intercept: 0.01,
+            canopy_scaling: [1.0; 3],
+        },
+        wue_lambda: 2.0,
+        soil_ice_impedance: 6.0,
+        impermeable_porosity: 0.05,
+        ponding_limit_mm: 5.0,
+        minimum_soil_potential_mm: -1.0e8,
+        maximum_dew_mm: 0.1,
+        maximum_transpiration_mm_s: 0.001,
+        surface_temperature_factor: 0.5,
+        crank_nicolson_factor: 0.5,
+        soil_roughness_m: 0.01,
+        snow_roughness_m: 0.0024,
+        wind_height_m: 30.0,
+        temperature_height_m: 30.0,
+        humidity_height_m: 30.0,
+        boundary_layer_height_m: 1000.0,
+        leaf_angle_distribution: -0.3,
+        inverse_sqrt_leaf_dimension_m_neg_half: 10.0,
+        ground_emissivity: 0.96,
+        vaporization_heat_j_kg: 2.5104e6,
+        oxygen_partial_pressure_pa: 21_200.0,
+        atmospheric_co2_pa: 40.0,
+        sprinkler_irrigation_kg_m2_s: 0.0,
+        runoff_scheme: StandardLctRunoffScheme::Topmodel,
+        topmodel_decay_tuning: 0.1,
+    }
+}
+
+fn binding() -> StandardLctStepBinding {
+    StandardLctStepBinding {
+        forcing: prepare_runtime_forcing(RuntimeForcingInput {
+            air_temperature_k: 290.0,
+            specific_humidity: 0.008,
+            surface_pressure_pa: 101_325.0,
+            precipitation_kg_m2_s: 1.0e-4,
+            eastward_wind_m_s: 3.0,
+            northward_or_scalar_wind_m_s: 1.0,
+            wind_is_vector: true,
+            downward_shortwave_w_m2: 450.0,
+            downward_longwave_w_m2: 350.0,
+            calendar_day: 172.5,
+            longitude_radians: 0.0,
+            latitude_radians: 0.5,
+        })
+        .unwrap(),
+        seconds_of_day: 43_200,
+        greenwich_time: false,
+        longitude_radians: 0.0,
+    }
+}
+
+/// 装配一次，返回合成算例与 patch 1 的模板。
+fn assemble(label: &str, patch: usize) -> (SyntheticRestart, StandardLctRestartTemplate) {
+    let root = temp_dir(label);
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let template = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        patch,
+        physics(1800.0),
+    )
+    .unwrap();
+    (fixture, template)
+}
+
+#[test]
+fn static_soil_fields_come_from_the_constant_restart() {
+    let (fixture, template) = assemble("statics", 1);
+    // 逐场核对：装配层读的是文件里的值，不是重算的。
+    for (field, _) in SOIL_FIELDS_COMMON
+        .iter()
+        .chain(SOIL_FIELDS_THERMAL.iter())
+        .chain(SOIL_FIELDS_VAN_GENUCHTEN.iter())
+    {
+        for layer in 0..SOIL_LAYERS {
+            assert_eq!(
+                template.soil.get(*field, layer, 1),
+                fixture.soil.get(*field, layer, 1),
+                "{field:?} layer {layer}"
+            );
+        }
+    }
+    // 土壤热参数：静态部分来自 SoilState，动态部分按上游的
+    // vf_water = wliq / (dz * denh2o) 从时间重启算出来。
+    for layer in 0..SOIL_LAYERS {
+        let thermal = template.soil_thermal_inputs[layer];
+        assert_eq!(
+            thermal.pore_volume_fraction,
+            fixture.soil.get(SoilField::Porosity, layer, 1)
+        );
+        assert_eq!(
+            thermal.balland_beta,
+            fixture.soil.get(SoilField::BaBeta, layer, 1)
+        );
+        let thickness = template.layer_thickness_m[layer];
+        assert_eq!(
+            thermal.temperature_k,
+            fixture.soil_column(&fixture.temperature_k, 1, layer)
+        );
+        assert_eq!(
+            thermal.liquid_volume_fraction,
+            fixture.soil_column(&fixture.liquid_water_kg_m2, 1, layer) / (thickness * 1000.0)
+        );
+        assert_eq!(
+            thermal.ice_volume_fraction,
+            fixture.soil_column(&fixture.ice_water_kg_m2, 1, layer) / (thickness * 917.0)
+        );
+    }
+    assert_eq!(template.canopy_top_height_m, fixture.canopy.patch_top_m[1]);
+}
+
+#[test]
+fn dynamic_state_and_canopy_optics_come_from_the_time_restart() {
+    let (fixture, template) = assemble("dynamics", 1);
+    for layer in 0..SOIL_LAYERS {
+        assert_eq!(
+            template.temperature_k[layer],
+            fixture.soil_column(&fixture.temperature_k, 1, layer)
+        );
+        assert_eq!(
+            template.water.liquid_water_kg_m2[layer],
+            fixture.soil_column(&fixture.liquid_water_kg_m2, 1, layer)
+        );
+        assert_eq!(
+            template.water.ice_water_kg_m2[layer],
+            fixture.soil_column(&fixture.ice_water_kg_m2, 1, layer)
+        );
+    }
+    assert_eq!(
+        template.water.water_table_depth_m,
+        fixture.water_table_depth_m[1]
+    );
+    assert_eq!(template.water.aquifer_water_mm, fixture.aquifer_water_mm[1]);
+    assert_eq!(template.water.surface_water_mm, fixture.surface_water_mm[1]);
+    assert_eq!(
+        template.leaf.leaf_temperature_k,
+        fixture.leaf_temperature_k[1]
+    );
+    assert_eq!(
+        template.leaf.canopy_water.total_mm,
+        fixture.canopy_water_mm[1]
+    );
+    assert_eq!(
+        template.leaf.canopy_water.rain_mm,
+        fixture.canopy_rain_mm[1]
+    );
+    assert_eq!(
+        template.leaf.canopy_water.snow_mm,
+        fixture.canopy_snow_mm[1]
+    );
+    assert_eq!(template.leaf_area_index, fixture.lai[1]);
+    assert_eq!(template.stem_area_index, fixture.sai[1]);
+    assert_eq!(template.radiation.snow_age, fixture.snow_age[1]);
+    assert_eq!(
+        template.radiation.thermal_gap_fraction,
+        fixture.thermal_gap_fraction[1]
+    );
+    assert_eq!(
+        template.radiation.direct_extinction,
+        fixture.direct_extinction[1]
+    );
+    assert_eq!(
+        template.radiation.diffuse_extinction,
+        fixture.diffuse_extinction[1]
+    );
+    // 盘上是 (patch, rtyp, band)，装配后必须是内存里的 [band][rtyp] —— 这一步错了
+    // 会把可见光与近红外换位，而两者数值都"合理"，只有逐元素核对才看得出来。
+    for band in 0..BANDS {
+        for radiation_type in 0..RADIATION_TYPES {
+            assert_eq!(
+                template.radiation.albedo[band][radiation_type],
+                fixture.radiation_value(&fixture.albedo, 1, band, radiation_type),
+                "albedo band {band} type {radiation_type}"
+            );
+            assert_eq!(
+                template.radiation.sunlit_absorption[band][radiation_type],
+                fixture.radiation_value(&fixture.sunlit_absorption, 1, band, radiation_type)
+            );
+            assert_eq!(
+                template.radiation.soil_absorption[band][radiation_type],
+                fixture.radiation_value(&fixture.soil_absorption, 1, band, radiation_type)
+            );
+        }
+    }
+    // 时间重启不写 broadband 的 transmission，本分支也不读它。
+    assert!(template.radiation.transmission.is_none());
+    assert!(template.leaf.plant_hydraulics.is_none());
+}
+
+#[test]
+fn runoff_and_patch_selection_follow_the_requested_patch() {
+    let root = temp_dir("runoff");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let files = RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let topmodel = assemble_standard_lct_template(&files, 1, physics(1800.0)).unwrap();
+    assert_eq!(
+        topmodel.runoff,
+        Water2014Runoff::Topmodel {
+            saturated_fraction_max: fixture.topmodel.saturated_fraction_max + 0.05,
+            saturated_fraction_decay_m_inv: fixture.topmodel.saturated_fraction_decay + 0.05,
+            decay_tuning: 0.1,
+            subsurface_method: TopmodelMethod::Exponential,
+        }
+    );
+    // patch 0 走另一支，值必须跟着 patch 变。
+    let first = assemble_standard_lct_template(&files, 0, physics(1800.0)).unwrap();
+    assert_eq!(
+        first.runoff,
+        Water2014Runoff::Topmodel {
+            saturated_fraction_max: fixture.topmodel.saturated_fraction_max,
+            saturated_fraction_decay_m_inv: fixture.topmodel.saturated_fraction_decay,
+            decay_tuning: 0.1,
+            subsurface_method: TopmodelMethod::Exponential,
+        }
+    );
+    assert_ne!(
+        first.temperature_k[0], topmodel.temperature_k[0],
+        "the two patches must not read the same column"
+    );
+}
+
+#[test]
+fn the_two_other_runoff_schemes_read_their_own_constant_restart_fields() {
+    let root = temp_dir("runoff-schemes");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let files = RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let mut parameters = physics(1800.0);
+    parameters.runoff_scheme = StandardLctRunoffScheme::XinAnJiang;
+    let xinanjiang = assemble_standard_lct_template(&files, 1, parameters.clone()).unwrap();
+    // 合成算例的 `elvstd` 是 `13 + patch`。
+    assert_eq!(
+        xinanjiang.runoff,
+        Water2014Runoff::XinAnJiang {
+            elevation_standard_deviation_m: 14.0,
+        }
+    );
+    parameters.runoff_scheme = StandardLctRunoffScheme::SimpleVic;
+    let vic = assemble_standard_lct_template(&files, 1, parameters).unwrap();
+    // `BVIC` 是 `0.9 + patch`。
+    assert_eq!(vic.runoff, Water2014Runoff::SimpleVic { bvic: 1.9 });
+}
+
+#[test]
+fn one_assembled_step_runs_the_ported_lct_chain_from_file_state() {
+    let (fixture, template) = assemble("one-step", 1);
+    let mut state: StandardLctSoilState = template.state();
+    assert_eq!(state.temperature_k, template.temperature_k);
+    assert_eq!(
+        state.energy.leaf.canopy_water.total_mm,
+        fixture.canopy_water_mm[1]
+    );
+
+    let before = state.temperature_k.clone();
+    let output = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
+        .expect("the assembled template must drive one real LCT step");
+    assert!(output.water.total_runoff_mm_s.is_finite());
+    assert!(output.energy.leaf.energy_balance_error_w_m2.abs() < 0.5);
+    assert!(state.temperature_k.iter().all(|value| value.is_finite()));
+    assert!(state
+        .water
+        .liquid_water_kg_m2
+        .iter()
+        .all(|value| *value >= 0.0));
+    assert_eq!(state.temperature_k.len(), SOIL_LAYERS);
+    // 一步真的推进了状态，而不是原样返回。
+    assert!(
+        state
+            .temperature_k
+            .iter()
+            .zip(&before)
+            .any(|(after, previous)| (after - previous).abs() > 1.0e-9),
+        "the step left the soil column unchanged"
+    );
+    // 每步字段由绑定刷新：换一个 forcing，输入里的风与秒偏移必须跟着变。
+    let mut other = binding();
+    other.seconds_of_day = 0;
+    other.forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        eastward_wind_m_s: 9.0,
+        ..input_of(other.forcing)
+    })
+    .unwrap();
+    let input = template.input(&other);
+    assert_eq!(input.energy.solar.seconds_of_day, 0);
+    assert_eq!(input.energy.interception.eastward_wind_m_s, 9.0);
+    assert_eq!(
+        input.energy.forcing.air_density_kg_m3,
+        other.forcing.air_density_kg_m3
+    );
+}
+
+#[test]
+fn the_repeated_assembly_is_deterministic_for_one_patch() {
+    let (_, first) = assemble("determinism", 1);
+    let (_, second) = assemble("determinism", 1);
+    assert_eq!(first.temperature_k, second.temperature_k);
+    assert_eq!(first.radiation.albedo, second.radiation.albedo);
+    assert_eq!(first.runoff, second.runoff);
+}
+
+#[test]
+fn a_missing_constant_restart_file_is_reported_with_its_path() {
+    let root = temp_dir("missing-constant");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: root.join("absent.nc"),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        physics(1800.0),
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("absent.nc"), "{message}");
+}
+
+#[test]
+fn a_time_restart_without_the_soil_column_is_refused_by_name() {
+    let root = temp_dir("missing-time-variable");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    // 拿常数重启当时间重启喂进去：它没有 `soilsnow` 维度，装配必须指名报错，
+    // 而不是把缺的那一列当零填进去跑完一步。
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.constant.block.clone(),
+        },
+        0,
+        physics(1800.0),
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("t_soisno"), "{message}");
+}
+
+#[test]
+fn a_constant_restart_without_the_patch_classification_is_refused_by_name() {
+    let root = temp_dir("missing-patchtype");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    // 反过来：时间重启里没有 `patchtype`，非土壤分支的判定就没有依据。
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.time.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        physics(1800.0),
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("patchtype"), "{message}");
+}
+
+#[test]
+fn a_non_soil_patch_is_refused_instead_of_driven_as_soil() {
+    let root = temp_dir("urban-patch");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            // 合成算例的 patchtype 是 [0, 0]；越界 patch 也会在这里被挡住。
+            time: fixture.time.block.clone(),
+        },
+        PATCHES,
+        physics(1800.0),
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("patch"), "{message}");
+}
+
+#[test]
+fn a_root_fraction_of_the_wrong_length_is_refused_before_the_step() {
+    let root = temp_dir("bad-root-fraction");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let mut parameters = physics(1800.0);
+    parameters.root_fraction.truncate(SOIL_LAYERS - 1);
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        parameters,
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("root_fraction"), "{message}");
+}
+
+/// 从已备好的 forcing 取回输入字段，只为在测试里换一个风。
+fn input_of(forcing: colm_core::RuntimeForcing) -> RuntimeForcingInput {
+    RuntimeForcingInput {
+        air_temperature_k: forcing.air_temperature_k,
+        specific_humidity: forcing.specific_humidity,
+        surface_pressure_pa: forcing.surface_pressure_pa,
+        precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s
+            + forcing.large_scale_precipitation_kg_m2_s,
+        eastward_wind_m_s: forcing.eastward_wind_m_s,
+        northward_or_scalar_wind_m_s: forcing.northward_wind_m_s,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 450.0,
+        downward_longwave_w_m2: forcing.downward_longwave_w_m2,
+        calendar_day: 172.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+    }
+}
+
+/// `StandardLctEnergyState` 只在 `state()` 里被构造一次，这里确认它带上了文件里的光学状态。
+#[test]
+fn the_state_carries_the_restart_radiation() {
+    let (fixture, template) = assemble("state-radiation", 0);
+    let state: StandardLctEnergyState = template.state().energy;
+    assert_eq!(state.radiation.albedo, template.radiation.albedo);
+    assert_eq!(state.leaf.canopy_water.total_mm, fixture.canopy_water_mm[0]);
+    // 雪槽的存在正是这套 fixture 想覆盖的形状：soilsnow = 土壤层 + 雪层。
+    assert_eq!(
+        fixture.temperature_k.len(),
+        (SNOW_LAYERS + SOIL_LAYERS) * PATCHES
+    );
+}
+
+#[test]
+fn a_root_fraction_that_does_not_sum_to_one_is_refused() {
+    let root = temp_dir("unnormalized-root-fraction");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let mut parameters = physics(1800.0);
+    // `eroot` 把胁迫定义成 sum(rootfr * resistance)，所以没归一的根系比例会让
+    // 胁迫大于 1；装配层要在这里指出病因，而不是等叶温校验报一句笼统的非法输入。
+    parameters.root_fraction = vec![0.5; SOIL_LAYERS];
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        parameters,
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("sum to one"), "{message}");
+}
