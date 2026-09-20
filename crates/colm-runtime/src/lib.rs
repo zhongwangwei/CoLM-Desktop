@@ -298,13 +298,18 @@ impl PointRuntime {
     {
         let (greenwich_time, longitude_degrees, co2_scenario) =
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        // 中途换分组时 `push` 会把上一个文件落盘并返回它的路径 —— 丢掉它会让
+        // `outcome.files` 少列文件（实测过：跨月运行只报了二月那一个）。
+        let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
             let output = standard_lct_soil_step(template.input(&binding), next)?;
-            session.push_lct(step.clock.end_time, template, next, &output)?;
+            if let Some(path) = session.push_lct(step.clock.end_time, template, next, &output)? {
+                files.push(path);
+            }
             on_step(step, &output)
         })?;
-        let files = session.finish()?;
+        files.extend(session.finish()?);
         ensure!(
             session.remaining() == 0,
             "the run ended with {} history record(s) still unwritten; the window and the \
@@ -329,14 +334,19 @@ impl PointRuntime {
     {
         let (greenwich_time, longitude_degrees, co2_scenario) =
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
             let output =
                 colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
-            session.push_lct_snow(step.clock.end_time, template, next, &output)?;
+            if let Some(path) =
+                session.push_lct_snow(step.clock.end_time, template, next, &output)?
+            {
+                files.push(path);
+            }
             on_step(step, &output)
         })?;
-        let files = session.finish()?;
+        files.extend(session.finish()?);
         ensure!(
             session.remaining() == 0,
             "the run ended with {} history record(s) still unwritten; the window and the \
@@ -719,10 +729,26 @@ mod tests {
         dataset: &str,
         end_sec: u32,
     ) {
+        write_case_span(path, forcing, forcing_dir, dataset, 1, 0, 1, 1, end_sec);
+    }
+
+    /// 起止都可跨月跨日 —— 跨分组边界的用例需要它。
+    #[allow(clippy::too_many_arguments)]
+    fn write_case_span(
+        path: &Path,
+        forcing: &Path,
+        forcing_dir: &str,
+        dataset: &str,
+        start_day: u32,
+        start_sec: u32,
+        end_month: u32,
+        end_day: u32,
+        end_sec: u32,
+    ) {
         std::fs::write(
             path,
             format!(
-                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec={end_sec}\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n DEF_HIST_FREQ='none'\n DEF_HIST_groupby='MONTH'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
+                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day={start_day}\n DEF_simulation_time%start_sec={start_sec}\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month={end_month}\n DEF_simulation_time%end_day={end_day}\n DEF_simulation_time%end_sec={end_sec}\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n DEF_HIST_FREQ='none'\n DEF_HIST_groupby='MONTH'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
                 forcing.display()
             ),
         )
@@ -1163,6 +1189,96 @@ mod tests {
             .unwrap();
         // 三条记录，标签与黄金文件的头三个值逐位相同。
         assert_eq!(times, vec![56_802_270, 56_802_330, 56_802_390]);
+        assert_eq!(session.remaining(), 0);
+    }
+
+    /// 跨分组边界：换月时把上一个文件落盘，再开新文件。
+    ///
+    /// 这是多文件路径唯一的证据 —— 单月窗口只走"最后一个分组收尾"，不走"中途换分组"。
+    #[test]
+    fn a_run_crossing_a_month_boundary_writes_two_history_files() {
+        let root = directory("history-months");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        // 1 月 31 日 22:00 → 2 月 1 日 02:00（四小时、八步），跨过月份边界。
+        write_case_span(
+            &case,
+            &forcing_namelist,
+            &source_dir,
+            "POINT",
+            31,
+            22 * 3600,
+            2,
+            1,
+            2 * 3600,
+        );
+        with_history(&case, "hourly", "MONTH");
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let template = assembled_template(&fixture);
+        let config = read_point_runtime_config(&case).unwrap();
+        assert_eq!(
+            config.start.julian_day, 31,
+            "22:00 on Jan 31 is julian day 31"
+        );
+        let mut session = config.history_session(root.join("out"), "CN-Cng").unwrap();
+        let mut runtime = PointRuntime::open(config).unwrap();
+        let mut state = template.state();
+        let outcome = runtime
+            .run_restart_standard_lct_with_history(&template, &mut state, &mut session, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outcome.steps, 8);
+        // 分组由**写入时刻**的日期决定，不是它覆盖的那个区间：写于 1 月 31 日 23:00 的
+        // 那条落在一月，写于 2 月 1 日 00:00 的那条已经落在二月。所以一月只有一条、
+        // 二月有三条 —— 边界正好在午夜。
+        let mut names = outcome
+            .files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["CN-Cng_hist_2008-01.nc", "CN-Cng_hist_2008-02.nc"]
+        );
+        let january = netcdf::open(
+            outcome
+                .files
+                .iter()
+                .find(|path| path.to_string_lossy().contains("2008-01"))
+                .unwrap(),
+        )
+        .unwrap();
+        let times = january
+            .variable("time")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap();
+        assert_eq!(times.len(), 1, "January keeps only the 23:00 write");
+        // 写于 23:00 的记录标签是 22:30。
+        let february_after_one = times[0];
+        assert_eq!(february_after_one % 60, 30);
+        let february = netcdf::open(
+            outcome
+                .files
+                .iter()
+                .find(|path| path.to_string_lossy().contains("2008-02"))
+                .unwrap(),
+        )
+        .unwrap();
+        let times = february
+            .variable("time")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap();
+        assert_eq!(times.len(), 3, "February takes 00:00, 01:00 and 02:00");
+        assert_eq!(times[1] - times[0], 60);
+        assert_eq!(times[2] - times[1], 60);
+        // 相邻两条跨月但连续：一月的最后一条比二月的第一条早一小时。
+        assert_eq!(times[0] - february_after_one, 60);
         assert_eq!(session.remaining(), 0);
     }
 
