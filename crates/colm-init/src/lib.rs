@@ -178,7 +178,7 @@ pub use restart::{
     TerrainRadiation, TopmodelFields, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL,
     SOIL_FIELDS_VAN_GENUCHTEN,
 };
-pub use restart_read::RestartFile;
+pub use restart_read::{RestartFile, RestartOverride, RestartValueType};
 pub use runtime::{
     read_single_point_cn_state, read_single_point_snow_depth, read_single_point_soil_profile,
     read_single_point_water_table, RuntimeCnState, RuntimeCnVegetationCarbon, RuntimeSoilProfile,

@@ -177,3 +177,109 @@ fn a_three_dimensional_field_is_returned_in_memory_order() {
     assert!(restart.patch_matrix("field", 0, first, second + 1).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// 续跑写出：结构原样搬过去，只换声明过的那几个变量；类型也必须还原。
+#[test]
+fn a_continuation_write_preserves_the_schema_and_applies_overrides() {
+    let root = temp_dir("continuation");
+    let source_path = root.join("time.nc");
+    let (patches, layers) = (2, 3);
+    let mut file = netcdf::create(&source_path).unwrap();
+    file.add_dimension("patch", patches).unwrap();
+    file.add_dimension("snow", layers).unwrap();
+    let temperature: Vec<f64> = (0..patches * layers).map(|i| 250.0 + i as f64).collect();
+    file.add_variable::<f64>("t_soisno", &["patch", "snow"])
+        .unwrap()
+        .put_values(&temperature, (.., ..))
+        .unwrap();
+    // `patchmask` 是 i8 —— 续跑绝不能把它写成 i64。
+    file.add_variable::<i8>("patchmask", &["patch"])
+        .unwrap()
+        .put_values(&[1_i8, 0], ..)
+        .unwrap();
+    file.add_variable::<f32>("fsno", &["patch"])
+        .unwrap()
+        .put_values(&[0.5_f32, 0.25], ..)
+        .unwrap();
+    file.close().unwrap();
+
+    let source = RestartFile::open(&source_path).unwrap();
+    let evolved: Vec<f64> = temperature.iter().map(|value| value + 10.0).collect();
+    let written = root.join("continuation.nc");
+    source
+        .write_with(
+            &written,
+            &[RestartOverride::new("t_soisno", evolved.clone())],
+        )
+        .unwrap();
+
+    // 类型与取值逐项还原。
+    let raw = netcdf::open(&written).unwrap();
+    let mask = raw.variable("patchmask").unwrap();
+    assert_eq!(
+        mask.vartype(),
+        netcdf::types::NcVariableType::Int(netcdf::types::IntType::I8),
+        "patchmask must stay i8"
+    );
+    assert_eq!(
+        raw.variable("fsno").unwrap().vartype(),
+        netcdf::types::NcVariableType::Float(netcdf::types::FloatType::F32)
+    );
+    drop(raw);
+
+    let restart = RestartFile::open(&written).unwrap();
+    assert_eq!(restart.floats("t_soisno").unwrap(), evolved.as_slice());
+    assert_eq!(restart.integers("patchmask").unwrap(), &[1, 0]);
+    assert_eq!(restart.dimension("snow").unwrap(), layers);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_continuation_write_refuses_a_bad_override() {
+    let root = temp_dir("continuation-refusal");
+    let source_path = root.join("time.nc");
+    let mut file = netcdf::create(&source_path).unwrap();
+    file.add_dimension("patch", 2).unwrap();
+    file.add_variable::<f64>("t_soisno", &["patch"])
+        .unwrap()
+        .put_values(&[250.0, 251.0], ..)
+        .unwrap();
+    file.add_variable::<i32>("patchclass", &["patch"])
+        .unwrap()
+        .put_values(&[1_i32, 2], ..)
+        .unwrap();
+    file.close().unwrap();
+    let source = RestartFile::open(&source_path).unwrap();
+    let written = root.join("continuation.nc");
+
+    // 形状不对。
+    let error = source
+        .write_with(&written, &[RestartOverride::new("t_soisno", vec![1.0])])
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("needs 2"), "{error:#}");
+    // 源里没这个名字 —— 不新造变量。
+    let error = source
+        .write_with(
+            &written,
+            &[RestartOverride::new("not_a_field", vec![1.0, 2.0])],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no such variable"),
+        "{error:#}"
+    );
+    // 整型变量不由续跑替换。
+    let error = source
+        .write_with(
+            &written,
+            &[RestartOverride::new("patchclass", vec![1.0, 2.0])],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("integer variables"),
+        "{error:#}"
+    );
+    // 失败的写出不该留下一个能被读的残缺文件。
+    assert!(RestartFile::open(&written).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -36,7 +36,8 @@ use colm_core::{
     TopmodelMethod, Water2014Runoff, Water2014SoilFluxes, Water2014SoilState,
 };
 use colm_init::{
-    colm_soil_grid, RestartFile, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL, SOIL_FIELDS_VAN_GENUCHTEN,
+    colm_soil_grid, RestartFile, RestartOverride, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL,
+    SOIL_FIELDS_VAN_GENUCHTEN,
 };
 
 /// CoLM 的宽带与辐射类型数；内核按模块各自复写这两个常量（仓库惯例），
@@ -152,6 +153,17 @@ pub struct StandardLctStepBinding {
     pub co2_volume_fraction: f64,
 }
 
+/// 原时间重启里续跑需要用到的整变量（所有 patch）。
+#[derive(Debug, Clone)]
+struct RestartColumns {
+    temperature_k: Vec<f64>,
+    liquid_water_kg_m2: Vec<f64>,
+    ice_water_kg_m2: Vec<f64>,
+    water_table_depth_m: Vec<f64>,
+    aquifer_water_mm: Vec<f64>,
+    surface_water_mm: Vec<f64>,
+}
+
 /// 雪 + 土拼成的模板列，长度随雪层数变。
 #[derive(Debug, Clone)]
 struct SnowSoilTemplate {
@@ -205,6 +217,8 @@ pub struct StandardLctRestartTemplate {
     /// 重启里的雪列。无雪分支下 `layer_count == 0`；留着是因为上游每步都要按它
     /// 判断走不走积雪路径，而雪分支的装配要直接用它。
     pub snow: RuntimeSnowColumn,
+    /// 原时间重启里续跑会用到的整变量缓冲，供 [`Self::evolved_overrides`] 以原值为底。
+    restart_columns: RestartColumns,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -319,6 +333,14 @@ fn assemble(
     // 先按上游的方式把雪列读出来。放在读土壤列之前，报错信息才指向真正的原因；
     // 否则会先撞上 `soil_column` 那句"雪槽必须为空"。
     let snow = restart_snow_column(&time, patch, patch_type, snow_layers, soil_layers)?;
+    let restart_columns = RestartColumns {
+        temperature_k: time.floats("t_soisno")?.to_vec(),
+        liquid_water_kg_m2: time.floats("wliq_soisno")?.to_vec(),
+        ice_water_kg_m2: time.floats("wice_soisno")?.to_vec(),
+        water_table_depth_m: time.floats("zwt")?.to_vec(),
+        aquifer_water_mm: time.floats("wa")?.to_vec(),
+        surface_water_mm: time.floats("wdsrf")?.to_vec(),
+    };
     ensure!(
         snow.layer_count == 0 || snow.depth_m > 0.0,
         "the restart carries {} snow layer(s) under no depth",
@@ -507,6 +529,7 @@ fn assemble(
         inverse_sqrt_leaf_dimension_m_neg_half,
         biochemistry,
         snow,
+        restart_columns,
         snow_soil,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
@@ -849,9 +872,72 @@ impl StandardLctRestartTemplate {
         }
     }
 
+    /// 把跑完的状态变成续跑写出的替换项。
+    ///
+    /// 只列**这次跑真的推进过**的量：三根土壤柱（`soilsnow` 的土段）与三个水位标量。
+    /// 续跑写出的语义是"以原文件为底、只换声明改过的变量"，所以别的字段（冠层水、
+    /// 光学、雪列、湖泊、气溶胶、`t_grnd`/`tleaf`）保持重启里的原值 —— 那些量本分支
+    /// 的状态里没有，硬凑一个近似值会把一次没有依据的推算写进文件。
+    ///
+    /// 写出的是**整变量**（所有 patch），所以模板留着原文件的缓冲：本 patch 的土段换成
+    /// 推进后的状态，其余 patch 原样保留。
+    pub fn evolved_overrides(&self, state: &StandardLctSoilState) -> Result<Vec<RestartOverride>> {
+        let layers = self.soil_layers();
+        ensure!(
+            state.temperature_k.len() == layers
+                && state.water.liquid_water_kg_m2.len() == layers
+                && state.water.ice_water_kg_m2.len() == layers,
+            "the evolved state's soil columns are not {layers} layers deep"
+        );
+        // 换的是**整变量**，所以从原文件的整缓冲出发，只覆盖本 patch 的土段；别的 patch
+        // 保持原值。按 patch 切片再拼回去会丢掉其它 patch 的值。
+        let width = self.snow_slots() + layers;
+        let mut temperature = self.restart_columns.temperature_k.clone();
+        let mut liquid = self.restart_columns.liquid_water_kg_m2.clone();
+        let mut ice = self.restart_columns.ice_water_kg_m2.clone();
+        for layer in 0..layers {
+            let index = self.patch * width + self.snow_slots() + layer;
+            ensure!(
+                index < temperature.len() && index < liquid.len() && index < ice.len(),
+                "the restart's soil columns are too short for patch {} layer {layer}",
+                self.patch
+            );
+            temperature[index] = state.temperature_k[layer];
+            liquid[index] = state.water.liquid_water_kg_m2[layer];
+            ice[index] = state.water.ice_water_kg_m2[layer];
+        }
+        let scalars = |source: &[f64]| -> Result<Vec<f64>> {
+            ensure!(
+                self.patch < source.len(),
+                "the restart has no patch {} for a scalar column",
+                self.patch
+            );
+            Ok(source.to_vec())
+        };
+        let mut water_table = scalars(&self.restart_columns.water_table_depth_m)?;
+        let mut aquifer = scalars(&self.restart_columns.aquifer_water_mm)?;
+        let mut surface = scalars(&self.restart_columns.surface_water_mm)?;
+        water_table[self.patch] = state.water.water_table_depth_m;
+        aquifer[self.patch] = state.water.aquifer_water_mm;
+        surface[self.patch] = state.water.surface_water_mm;
+        Ok(vec![
+            RestartOverride::new("t_soisno", temperature),
+            RestartOverride::new("wliq_soisno", liquid),
+            RestartOverride::new("wice_soisno", ice),
+            RestartOverride::new("zwt", water_table),
+            RestartOverride::new("wa", aquifer),
+            RestartOverride::new("wdsrf", surface),
+        ])
+    }
+
     /// 土壤层数。
     pub fn soil_layers(&self) -> usize {
         self.temperature_k.len()
+    }
+
+    /// 时间重启里雪段的槽位数（`soilsnow - soil`），与编译期的 `maxsnl` 一致。
+    pub fn snow_slots(&self) -> usize {
+        SNOW_SLOTS
     }
 }
 

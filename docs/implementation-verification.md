@@ -1391,3 +1391,33 @@ under a 0.1500 m column
 会让冻土阻抗几乎失效。现在注释指向正确的字段，并新增
 `LandPhysicsParameters::snow_irreducible_saturation`（`DEF_TUNING_SSI`，0.033）供
 `snowwater` 用。内核那侧的名字（`soil_ice_impedance`）本来就对，只有文档错了。
+
+## 续跑写出：restart 闭环打通（2026 年）
+
+`RestartFile::write_with` 是**续跑**用的写出路径：以一份已读入的重启为底，只替换调用方
+声明改过的变量，其余原样搬过去。它与初始化器那次"从零构造"的 `write_time_restart` 是
+两件事 —— 上游每 `DEF_WRST_FREQ` 步调的 `WRITE_TimeVariables` 就是前者：只把当时内存里的
+数组写出去，不重新决定变量集合。
+
+闭环测试（`an_evolved_state_writes_back_a_readable_continuation_restart`）：
+合成重启 → 装配 → 跑两步 → 写出 → 读回，断言推进过的六项（三根土柱 + `zwt`/`wa`/`wdsrf`）
+对上、本 patch 之外的 patch 保持原值、没推进的变量（`tleaf`/`fsno`）逐值不变，而且写出的
+文件还能被装配层重新读回来。
+
+三处值得记的实现取舍：
+
+1. **类型必须还原。** 读取器把取值一律加宽（`f32`→`f64`、`i8`/`i32`→`i64`），续跑若照加宽
+   后的类型写回，`patchmask` 会从 i8 变成 i64 —— 读的人（包括 Fortran 那侧）能自动转换，
+   但文件 schema 已经悄悄变了。所以读取器现在**额外记下盘上的原始类型**
+   （`RestartValueType`），写出时逐类型还原。`colm-init` 的测试直接断言 `patchmask` 写回后
+   仍是 i8、`fsno` 仍是 f32。
+2. **失败要清掉半成品。** 写到一半失败会留下一个**读得出来**的文件（维度齐全、部分变量有值），
+   下一次续跑会以为那是一次成功的写出 —— 比文件不存在更危险。现在任何失败都删掉目标文件，
+   测试里断言了这一点。
+3. **换的是整变量，不是某个 patch 的一段。** 第一版按 patch 切片再拼回去，结果把其它 patch
+   的值丢了（测试报 `len is 15 but the index is 20`）。现在从原文件的整缓冲出发，只覆盖本
+   patch 的土段。
+
+**只写状态真正拥有的量。** `t_grnd`/`tleaf`/冠层水不在 `StandardLctSoilState` 里，所以续跑
+**不碰**它们（保持重启原值），测试明确断言 `t_grnd` 逐值不变。凑一个"用表层土温当 `t_grnd`"
+的近似值等于把一次没有依据的推算写进文件 —— 那正是这个仓库一直在拒绝的事。

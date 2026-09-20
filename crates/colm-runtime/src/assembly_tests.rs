@@ -740,3 +740,88 @@ fn the_snow_entry_point_refuses_a_snow_free_restart() {
     .unwrap_err();
     assert!(format!("{error:#}").contains("snow-bearing"), "{error:#}");
 }
+
+/// 续跑闭环：装配 → 跑 → 写出 → 读回，推进过的量对上，别的量原样保留。
+#[test]
+fn an_evolved_state_writes_back_a_readable_continuation_restart() {
+    let root = temp_dir("continuation");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let files = crate::assembly::RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let template =
+        crate::assembly::assemble_standard_lct_template(&files, 1, physics(1800.0)).unwrap();
+    let mut state = template.state();
+    colm_core::standard_lct_soil_step(template.input(&binding()), &mut state).expect("one step");
+    let second = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
+        .expect("two steps");
+    assert!(second.energy.leaf.energy_balance_error_w_m2.abs() < 0.5);
+
+    // 以原时间重启为底写出，只换本分支推进过的量。
+    let source = colm_init::RestartFile::open(&fixture.time.block).unwrap();
+    let written = root.join("restart/continuation.nc");
+    let overrides = template.evolved_overrides(&state).unwrap();
+    assert_eq!(overrides.len(), 6);
+    source.write_with(&written, &overrides).unwrap();
+
+    let restart = colm_init::RestartFile::open(&written).unwrap();
+    // 推进过的土段逐层对上（盘上是 patch 在前、雪槽在前）。
+    let snow_slots = template.snow_slots();
+    let layers = template.soil_layers();
+    let column = restart
+        .layer_column("t_soisno", 1, snow_slots + layers)
+        .unwrap();
+    for layer in 0..layers {
+        assert_eq!(column[snow_slots + layer], state.temperature_k[layer]);
+    }
+    let liquid = restart
+        .layer_column("wliq_soisno", 1, snow_slots + layers)
+        .unwrap();
+    for layer in 0..layers {
+        assert_eq!(
+            liquid[snow_slots + layer],
+            state.water.liquid_water_kg_m2[layer]
+        );
+    }
+    // 水位标量只换本 patch。
+    assert_eq!(
+        restart.patch_scalars("zwt").unwrap()[1],
+        state.water.water_table_depth_m
+    );
+    assert_eq!(
+        restart.patch_scalars("wa").unwrap()[1],
+        state.water.aquifer_water_mm
+    );
+    // 没推进的 patch 0 保持原值，没推进的变量也保持原值 —— 续跑不是重写整个文件。
+    assert_eq!(
+        restart.patch_scalars("zwt").unwrap()[0],
+        fixture.water_table_depth_m[0]
+    );
+    assert_eq!(
+        restart.floats("tleaf").unwrap(),
+        source.floats("tleaf").unwrap()
+    );
+    // 整型变量的保真在 `colm-init` 的续跑测试里单独钉住（那份夹具带 `patchmask`）；
+    // 时间重启本身没有整型变量，这里再核一个没推进的浮点量。
+    assert_eq!(
+        restart.patch_scalars("fsno").unwrap(),
+        source.patch_scalars("fsno").unwrap()
+    );
+    // 未推进的 `t_grnd` 明确保持原值：状态里没有它，凑一个近似值等于凭空写数。
+    assert_eq!(
+        restart.patch_scalars("t_grnd").unwrap(),
+        source.patch_scalars("t_grnd").unwrap()
+    );
+    // 写出的文件本身还能被装配层读回来（雪槽仍是 0，所以走无雪入口）。
+    let reassembled = crate::assembly::assemble_standard_lct_template(
+        &crate::assembly::RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: written.clone(),
+        },
+        1,
+        physics(1800.0),
+    )
+    .unwrap();
+    assert_eq!(reassembled.temperature_k, state.temperature_k);
+}
