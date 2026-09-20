@@ -164,3 +164,25 @@ The shared spatial constant writer now excludes valid virtual WMO patches
 (`ipxstt=ipxend=-1`) from aggregation via `patchmask=false`, retaining geometry.
 Ordinary patches remain unmasked; disk regressions cover both. This is not full
 WMO surface-generation or time-state parity; those branches remain open.
+
+## Native `colm` runtime: the verified remaining gap
+
+The runtime kernels are largely ported; what is missing is everything that drives
+them. Checked against the current tree:
+
+- `colm-runtime` owns clock, POINT forcing lookup and terrain downscaling, and
+  `run_standard_lct` reaches only `standard_lct_soil_step` — the no-snow
+  regular-soil chain. The ported active-snow chain
+  (`standard_lct_snow_soil_step`) and the PFT/PC/urban/BGC branches have no runtime
+  driver at all.
+- `PointRuntime` has no consumer outside its own tests, and no Rust `colm`
+  executable exists: `xtask`'s `stage-sidecar` builds `colm-cli`, `mksrfdata-rs` and
+  `mkinidata-rs` only, so the third stage is still the Fortran `colm.x`.
+- The absent middle layer is the assembly from written restart/surface state into the
+  `StandardLct*Input` templates. `colm-init` reads initialization datasets
+  (`runtime.rs`) and writes restarts, but nothing maps a restart back into a driver
+  template — which is also why the runtime's LCT drivers have no cross-crate test.
+
+Cutover (`colm-cli run` selecting a Rust `colm`) depends on that layer; until it
+exists the Fortran binary stays the verified runtime, and `--preprocessors` continues
+to cover only the first two stages.
