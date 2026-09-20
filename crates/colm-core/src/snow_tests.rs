@@ -297,3 +297,137 @@ fn combining_exhausted_snow_resets_aggregate_state_like_fortran() {
     close(lake_surface.ice_water_kg_m2, 0.1);
     close(lake_surface.liquid_water_kg_m2, 0.3);
 }
+
+/// 重启里的雪段：层数按水量数，界面深度按上游递推。
+///
+/// 期望值手算自 `CoLMMAIN.F90:816-826`，不是在测试里重算一遍实现。
+#[test]
+fn a_restart_snow_column_counts_layers_from_water_content() {
+    // 只有最下面那一层有水：Fortran 层 `0`，槽位 4。
+    let mut liquid = [0.0; 5];
+    let mut ice = [0.0; 5];
+    let mut thickness = [0.0; 5];
+    thickness[4] = 0.05;
+    ice[4] = 20.0;
+    liquid[4] = 5.0;
+    let column = RuntimeSnowColumn::from_restart(
+        0,
+        RestartSnowSlots {
+            node_depth_m: &[-0.025, 0.0, 0.0, 0.0, 0.0],
+            thickness_m: &thickness,
+            temperature_k: &[0.0, 0.0, 0.0, 0.0, 268.0],
+            liquid_water_kg_m2: &liquid,
+            ice_water_kg_m2: &ice,
+            water_equivalent_kg_m2: 25.0,
+            depth_m: 0.05,
+            ground_snow_fraction: 0.9,
+            age: 0.5,
+        },
+    )
+    .unwrap();
+    assert_eq!(column.layer_count, -1);
+    assert_eq!(column.water_equivalent_kg_m2, 25.0);
+    assert_eq!(column.depth_m, 0.05);
+    assert_eq!(column.ground_snow_fraction, 0.9);
+    assert_eq!(column.age, 0.5);
+    // `snl = -1` 时唯一算出来的界面是 `zi(-1) = zi(0) - dz(0) = -0.05`。
+    assert_eq!(column.interface_depth_m[snow_interface_slot(0)], 0.0);
+    assert_eq!(column.interface_depth_m[snow_interface_slot(-1)], -0.05);
+    // `fiold = wice/(wliq+wice)`。
+    assert_eq!(column.previous_ice_fraction[4], 20.0 / 25.0);
+    // 没被数进去的槽位保持 0，不会把上一轮的残值带进来。
+    assert!(column.thickness_m[..4].iter().all(|value| *value == 0.0));
+}
+
+#[test]
+fn a_full_restart_snow_column_chains_the_interfaces() {
+    let thickness = [0.02, 0.05, 0.11, 0.10, 0.10];
+    let water = [1.0; 5];
+    let column = RuntimeSnowColumn::from_restart(
+        0,
+        RestartSnowSlots {
+            node_depth_m: &[-0.01, -0.045, -0.125, -0.175, -0.225],
+            thickness_m: &thickness,
+            temperature_k: &[268.0; 5],
+            liquid_water_kg_m2: &water,
+            ice_water_kg_m2: &water,
+            water_equivalent_kg_m2: 10.0,
+            depth_m: 0.38,
+            ground_snow_fraction: 1.0,
+            age: 1.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(column.layer_count, -5);
+    // `zi(0) = 0`，然后 `zi(-1) = -dz(0)`、`zi(-2) = zi(-1) - dz(-1)`…
+    // 按 `zi(0), zi(-1), …, zi(-5)` 排列。
+    let expected = [0.0, -0.10, -0.20, -0.31, -0.36, -0.38];
+    for interface in -5..=0 {
+        let slot = snow_interface_slot(interface);
+        let expected = expected[(-interface) as usize];
+        assert!(
+            (column.interface_depth_m[slot] - expected).abs() < 1.0e-15,
+            "zi({interface}): {} != {expected}",
+            column.interface_depth_m[slot]
+        );
+    }
+}
+
+#[test]
+fn a_restart_snow_column_with_a_gap_is_refused() {
+    // 中间空一层：`snl` 数出来会比实际占用的层数多，而内核按「最后 |snl| 个槽位」
+    // 组织数据 —— 这种列必须先报错，不能带着跑。
+    let mut ice = [0.0; 5];
+    ice[2] = 5.0;
+    ice[4] = 5.0;
+    let error = RuntimeSnowColumn::from_restart(
+        0,
+        RestartSnowSlots {
+            node_depth_m: &[0.0; 5],
+            thickness_m: &[0.0, 0.0, 0.1, 0.0, 0.1],
+            temperature_k: &[0.0, 0.0, 268.0, 0.0, 268.0],
+            liquid_water_kg_m2: &[0.0; 5],
+            ice_water_kg_m2: &ice,
+            water_equivalent_kg_m2: 10.0,
+            depth_m: 0.2,
+            ground_snow_fraction: 1.0,
+            age: 1.0,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("breaks the column"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn a_restart_snow_column_rejects_impossible_values() {
+    let snow = |liquid: [f64; 5], ice: [f64; 5], patch_type: i32| {
+        RuntimeSnowColumn::from_restart(
+            patch_type,
+            RestartSnowSlots {
+                node_depth_m: &[0.0; 5],
+                thickness_m: &[0.0, 0.0, 0.0, 0.0, 0.1],
+                temperature_k: &[0.0, 0.0, 0.0, 0.0, 268.0],
+                liquid_water_kg_m2: &liquid,
+                ice_water_kg_m2: &ice,
+                water_equivalent_kg_m2: 10.0,
+                depth_m: 0.1,
+                ground_snow_fraction: 1.0,
+                age: 1.0,
+            },
+        )
+    };
+    let mut negative = [0.0; 5];
+    negative[4] = -1.0;
+    assert!(snow([0.0; 5], negative, 0).is_err());
+    // 水体不可能带雪列。
+    let mut water = [0.0; 5];
+    water[4] = 5.0;
+    assert!(snow([0.0; 5], water, 4).is_err());
+    // 全空的雪列是合法的：`snl = 0`。
+    let empty = snow([0.0; 5], [0.0; 5], 0).unwrap();
+    assert_eq!(empty.layer_count, 0);
+    assert_eq!(empty.interface_depth_m[snow_interface_slot(0)], 0.0);
+}

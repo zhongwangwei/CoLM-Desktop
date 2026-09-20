@@ -62,6 +62,142 @@ impl RuntimeSnowColumn {
     }
 }
 
+/// 从时间重启读回的雪列，按 CoLM 的**槽位顺序**给出（Fortran 下标 `-4..0`）。
+///
+/// 上游把 `z_sno`/`dz_sno`/`t_soisno` 等的雪段整段写在 `snow` 维上，长度是
+/// `-maxsnl = 5`，顺序就是 Fortran 的 `-4, -3, -2, -1, 0`，与
+/// [`RuntimeSnowColumn`] 的下标一一对应，所以这里直接按序收。
+#[derive(Debug, Clone, Copy)]
+pub struct RestartSnowSlots<'a> {
+    pub node_depth_m: &'a [f64; MAX_SNOW_LAYERS],
+    pub thickness_m: &'a [f64; MAX_SNOW_LAYERS],
+    pub temperature_k: &'a [f64; MAX_SNOW_LAYERS],
+    pub liquid_water_kg_m2: &'a [f64; MAX_SNOW_LAYERS],
+    pub ice_water_kg_m2: &'a [f64; MAX_SNOW_LAYERS],
+    pub water_equivalent_kg_m2: f64,
+    pub depth_m: f64,
+    pub ground_snow_fraction: f64,
+    pub age: f64,
+}
+
+impl RuntimeSnowColumn {
+    /// 由重启里的雪段构造运行态雪列。
+    ///
+    /// **层数不在重启里**：上游 `CoLMMAIN.F90:816-818` 按水量现数 —— 从 `-4` 到 `0`，
+    /// 只要 `wliq + wice > 0` 就把 `snl` 减一；界面深度再由
+    /// `zi(j) = zi(j+1) - dz(j+1)`（`:820-826`）递推。两者都照做，不自作主张用雪深推。
+    ///
+    /// 由于 `standard_lct_snow_soil_step` 只认「最后 `|snl|` 个槽位是有雪层」，
+    /// 而上面的数法允许中间空一层（那样数出来的层数与实际占用不符），这里**显式拒绝**
+    /// 非连续的雪段：上游会带着一个对不上的列继续跑，我们宁可先报错。
+    pub fn from_restart(patch_type: i32, slots: RestartSnowSlots<'_>) -> Result<Self> {
+        let RestartSnowSlots {
+            node_depth_m,
+            thickness_m,
+            temperature_k,
+            liquid_water_kg_m2,
+            ice_water_kg_m2,
+            water_equivalent_kg_m2,
+            depth_m,
+            ground_snow_fraction,
+            age,
+        } = slots;
+        for (name, values) in [
+            ("water_equivalent_kg_m2", [water_equivalent_kg_m2]),
+            ("depth_m", [depth_m]),
+            ("ground_snow_fraction", [ground_snow_fraction]),
+            ("age", [age]),
+        ] {
+            ensure!(values[0].is_finite(), "restart snow {name} is not finite");
+        }
+        ensure!(
+            water_equivalent_kg_m2 >= 0.0 && depth_m >= 0.0,
+            "restart snow has a negative water equivalent or depth"
+        );
+        ensure!(
+            (0.0..=1.0).contains(&ground_snow_fraction),
+            "restart snow cover fraction {ground_snow_fraction} is outside [0, 1]"
+        );
+        for index in 0..MAX_SNOW_LAYERS {
+            for (name, value) in [
+                ("z_sno", node_depth_m[index]),
+                ("dz_sno", thickness_m[index]),
+                ("t_soisno", temperature_k[index]),
+                ("wliq_soisno", liquid_water_kg_m2[index]),
+                ("wice_soisno", ice_water_kg_m2[index]),
+            ] {
+                ensure!(
+                    value.is_finite(),
+                    "restart snow {name} slot {index} is not finite"
+                );
+            }
+            ensure!(
+                liquid_water_kg_m2[index] >= 0.0 && ice_water_kg_m2[index] >= 0.0,
+                "restart snow slot {index} has negative water"
+            );
+        }
+        // 上游的数法：`snl = 0; IF (wliq(j)+wice(j) > 0) snl = snl - 1`，`j = -4..0`。
+        let layer_count = (0..MAX_SNOW_LAYERS)
+            .filter(|index| liquid_water_kg_m2[*index] + ice_water_kg_m2[*index] > 0.0)
+            .count() as i32;
+        let layer_count = -layer_count;
+        // 有雪的槽位必须是最靠上的那几层，否则上面的计数与内核按「最后 |snl| 个槽位」
+        // 的组织方式不一致。
+        let used = MAX_SNOW_LAYERS - layer_count.unsigned_abs() as usize;
+        for (index, (liquid, ice)) in liquid_water_kg_m2
+            .iter()
+            .zip(ice_water_kg_m2.iter())
+            .enumerate()
+        {
+            let has_water = liquid + ice > 0.0;
+            ensure!(
+                has_water == (index >= used),
+                "restart snow slot {index} breaks the column: layers above the count must be                  empty and the counted ones must hold water"
+            );
+        }
+        ensure!(
+            layer_count == 0 || depth_m > 0.0,
+            "a restart with {layer_count} snow layers needs a positive depth"
+        );
+        if patch_type > 3 {
+            ensure!(
+                layer_count == 0,
+                "a water body patch (patchtype {patch_type}) cannot carry a snow column"
+            );
+        }
+
+        let mut column = Self::empty();
+        column.layer_count = layer_count;
+        column.water_equivalent_kg_m2 = water_equivalent_kg_m2;
+        column.depth_m = depth_m;
+        column.ground_snow_fraction = ground_snow_fraction;
+        column.age = age;
+        // 只有被数进去的槽位带值；其余保持 `empty()` 的 0，免得把上一轮的残值带进来。
+        //
+        // 槽位下标恰好等于数组下标：Fortran 的层 `-4..0` 对应 `RuntimeSnowColumn` 的
+        // 层槽位 `0..4`，而重启里的雪段就是按 `-4..0` 写的。
+        for index in used..MAX_SNOW_LAYERS {
+            column.node_depth_m[index] = node_depth_m[index];
+            column.thickness_m[index] = thickness_m[index];
+            column.temperature_k[index] = temperature_k[index];
+            column.liquid_water_kg_m2[index] = liquid_water_kg_m2[index];
+            column.ice_water_kg_m2[index] = ice_water_kg_m2[index];
+            let total = liquid_water_kg_m2[index] + ice_water_kg_m2[index];
+            column.previous_ice_fraction[index] = ice_water_kg_m2[index] / total;
+        }
+        // `zi(0) = 0; zi(j) = zi(j+1) - dz(j+1)`，`j = -1..snl`（`CoLMMAIN.F90:820-826`）。
+        // 界面槽位是 `j + 5`，层槽位是 `j + 4`，所以 `zi(j)` 用到的
+        // `dz(j+1)` 落在界面下标同号的层槽位上：`interface[i] = interface[i+1] - thickness[i]`。
+        // 循环从 `i = 4`（`j = -1`）走到 `i = snl + 5 = used`，**不含** `i = 5`（`zi(0)`）。
+        column.interface_depth_m[snow_interface_slot(0)] = 0.0;
+        for index in (used..MAX_SNOW_LAYERS).rev() {
+            column.interface_depth_m[index] =
+                column.interface_depth_m[index + 1] - column.thickness_m[index];
+        }
+        Ok(column)
+    }
+}
+
 /// Inputs to MOD_NewSnow.F90:newsnow that affect its snow state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NewSnowInput {
