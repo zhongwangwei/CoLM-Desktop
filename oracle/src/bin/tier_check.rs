@@ -8,20 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct Tolerances {
-    tier0: Tier,
-    tier1: Tier,
-    tier2: Tier,
-    tier3: Tier,
-}
-
-#[derive(Deserialize)]
-struct Tier {
-    variables: Vec<String>,
-}
+use oracle::tolerances::Tolerances;
 
 const TIER_DEPENDENCIES: &[(&str, &[&str])] = &[
     ("f_z0m", &["f_tleaf", "f_t_grnd"]),
@@ -38,24 +25,17 @@ fn main() -> Result<()> {
     if files.is_empty() {
         bail!("usage: tier-check <golden.nc> [...]");
     }
-    let text = std::fs::read_to_string("oracle/tolerances.toml")
-        .context("run from the repository root")?;
-    let t: Tolerances = toml::from_str(&text)?;
+    let t = Tolerances::load("oracle/tolerances.toml").context("run from the repository root")?;
 
-    let mut assigned: BTreeMap<String, &str> = BTreeMap::new();
-    let mut duplicates = Vec::new();
-    for (tier, list) in [
-        ("tier0", &t.tier0.variables),
-        ("tier1", &t.tier1.variables),
-        ("tier2", &t.tier2.variables),
-        ("tier3", &t.tier3.variables),
-    ] {
-        for v in list {
-            if let Some(prev) = assigned.insert(v.clone(), tier) {
-                duplicates.push(format!("{v} in both {prev} and {tier}"));
-            }
-        }
+    // 重复归属由 `Tolerances::parse` 直接拒绝，这里不再重复检查。
+    let mut assigned: BTreeMap<String, String> = BTreeMap::new();
+    for variable in t.variables() {
+        let (tier, _) = t
+            .rule_for(variable)
+            .expect("the variable came from the table");
+        assigned.insert(variable.to_string(), tier);
     }
+    let duplicates: Vec<String> = Vec::new();
 
     let mut present: BTreeSet<String> = BTreeSet::new();
     for f in &files {
@@ -118,7 +98,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn tier_dependency_inversions(assigned: &BTreeMap<String, &str>) -> Vec<String> {
+fn tier_dependency_inversions(assigned: &BTreeMap<String, String>) -> Vec<String> {
     TIER_DEPENDENCIES
         .iter()
         .flat_map(|(derived, inputs)| {
@@ -147,9 +127,9 @@ fn tier_rank(tier: &str) -> u8 {
 mod tests {
     use super::*;
 
-    fn map<'a>(xs: &'a [(&'a str, &'a str)]) -> BTreeMap<String, &'a str> {
+    fn map(xs: &[(&str, &str)]) -> BTreeMap<String, String> {
         xs.iter()
-            .map(|(name, tier)| ((*name).to_string(), *tier))
+            .map(|(name, tier)| ((*name).to_string(), (*tier).to_string()))
             .collect()
     }
 

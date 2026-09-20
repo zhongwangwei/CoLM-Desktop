@@ -5,3 +5,5 @@
 
 pub mod judge;
 pub mod sitedata;
+pub mod tier_compare;
+pub mod tolerances;
