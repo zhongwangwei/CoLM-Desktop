@@ -208,6 +208,26 @@ Cutover (`colm-cli run` selecting a Rust `colm`) depends on those; until they ex
 Fortran binary stays the verified runtime, and `--preprocessors` continues to cover only
 the first two stages.
 
+### What the next slices need
+
+`MOD_Const_LC.F90` is now generated (`xtask gen-landcover`), which leaves
+`MOD_Const_PFT.F90` as the last parameter table with no source in this repo — it is what
+`LandPhysicsParameters` still takes by hand (`LeafBiochemistry` in particular has never
+been constructed outside a test). It is *not* the same shape as the land-cover file, and
+reusing that generator as-is will not work:
+
+- its arrays are declared `(0:N_PFT+N_CFT-1)`, i.e. zero-based, while the land-cover arrays
+  are one-based and their length can be read off the literal;
+- several are plain module variables assigned in a subroutine rather than `parameter`
+  constants (`htop0_p`, `hbot0_p`), so values have to be found in assignments too;
+- eight leaf-optical properties exist twice, as `_pc` and `_default`, chosen by a
+  compile-time/PC branch rather than written once.
+
+Beyond that: a driver for the active-snow chain and the PFT/PC/urban/BGC branches, the
+history writer wired to per-step field values, a Rust `colm` executable that consumes
+`PointRuntime::run_restart_standard_lct` (nothing outside `colm-runtime` does yet), and the
+third-stage cutover itself.
+
 One prerequisite is now in place: the history gate table carries each variable's full
 schema — name, `long_name`, `units` and the layer dimensions in file order — extracted
 from the same write calls that produce the gate conditions and verified against the
