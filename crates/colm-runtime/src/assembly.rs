@@ -27,12 +27,12 @@ use std::path::PathBuf;
 
 use anyhow::{ensure, Context, Result};
 use colm_core::{
-    soil_hydraulic_models, soil_thermal_inputs, CanopyWater, ColdStartRadiation, HydraulicModel,
-    LeafBiochemistry, LeafTemperatureOptions, LeafTemperatureState, ObservationHeightMode,
-    PrecipitationPhaseScheme, SoilField, SoilHydraulicModel, SoilState, SoilThermalInput,
-    StandardLctSoilInput, StandardLctSoilState, StomataOptions, SurfaceLayerScheme,
-    ThermalConductivityScheme, TopmodelMethod, Water2014Runoff, Water2014SoilFluxes,
-    Water2014SoilState,
+    root_fraction, soil_hydraulic_models, soil_thermal_inputs, CanopyWater, ClassConstants,
+    ColdStartRadiation, HydraulicModel, LandCoverScheme, LeafBiochemistry, LeafTemperatureOptions,
+    LeafTemperatureState, ObservationHeightMode, PrecipitationPhaseScheme, RootFractionScheme,
+    SoilField, SoilHydraulicModel, SoilState, SoilThermalInput, StandardLctSoilInput,
+    StandardLctSoilState, StomataOptions, SurfaceLayerScheme, ThermalConductivityScheme,
+    TopmodelMethod, Water2014Runoff, Water2014SoilFluxes, Water2014SoilState,
 };
 use colm_init::{
     colm_soil_grid, RestartFile, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL, SOIL_FIELDS_VAN_GENUCHTEN,
@@ -61,8 +61,10 @@ pub struct RestartStateFiles {
 pub struct LandPhysicsParameters {
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
-    /// 每层的根系比例，`rootfr`。上游按土地覆盖类从 `d50`/`beta` 现算，尚未移植。
-    pub root_fraction: Vec<f64>,
+    /// 本算例编译的地类分类体系。
+    pub land_cover_scheme: LandCoverScheme,
+    /// `ROOTFR_SCHEME`：`rootfr` 取哪一套公式。
+    pub root_fraction_scheme: RootFractionScheme,
     pub timestep_seconds: f64,
     pub precipitation_scheme: PrecipitationPhaseScheme,
     /// `DEF_RSS_SCHEME`，1..=5。
@@ -96,10 +98,6 @@ pub struct LandPhysicsParameters {
     pub temperature_height_m: f64,
     pub humidity_height_m: f64,
     pub boundary_layer_height_m: f64,
-    /// 叶倾角分布参数 `xl`。
-    pub leaf_angle_distribution: f64,
-    /// `(leaf dimension)^(-1/2)`；叶片尺度来自 PFT 表。
-    pub inverse_sqrt_leaf_dimension_m_neg_half: f64,
     /// `DEF_EMIS`。
     pub ground_emissivity: f64,
     /// 汽化潜热；上游由地表温度现算，尚未移植。
@@ -169,6 +167,14 @@ pub struct StandardLctRestartTemplate {
     pub leaf_area_index: f64,
     pub stem_area_index: f64,
     pub snow_cover_fraction: f64,
+    /// 地类常量表给出、重启里没有的几项。
+    ///
+    /// `land_class` 是**上游的 1 基下标**（`patchclass + 1`），与
+    /// `ClassConstants::new` 同义；公开出来是为了让调用方能对着它查表。
+    pub land_class: usize,
+    pub root_fraction: Vec<f64>,
+    pub leaf_angle_distribution: f64,
+    pub inverse_sqrt_leaf_dimension_m_neg_half: f64,
     /// 非 PHS 分支下 `WATER_2014` 的每步根通量初值，全零且长度等于层数。
     root_flux_zeros: Vec<f64>,
 }
@@ -312,22 +318,55 @@ pub fn assemble_standard_lct_template(
         physics.timestep_seconds > 0.0,
         "the standard LCT template needs a positive time step"
     );
+    // 叶倾角、叶片尺度与逐层根系比例都来自地类常量表（`MOD_Const_LC.F90` 的
+    // `Init_LC_Const`），不由调用方手给：上游是按 `patchclass` 现算的，
+    // 手给一份就等于让算例带着一个与它对不上的地类跑。
+    //
+    // 上游的访问方式是 `array(patchclass(ipatch)+1)`：重启里的 `patchclass` 是
+    // 0 基类号，而数组是 1 基的。`ClassConstants` 收的就是那个 1 基下标。
+    let patch_class = integer_scalar(&constant, "patchclass", patch)?;
+    let classes = colm_core::land_cover_classes(physics.land_cover_scheme);
+    let fortran_class_index = usize::try_from(patch_class)
+        .ok()
+        .and_then(|class| class.checked_add(1))
+        .filter(|index| (1..=classes).contains(index))
+        .with_context(|| {
+            format!(
+                "patchclass {patch_class} is outside 0..{} for {:?}",
+                classes - 1,
+                physics.land_cover_scheme
+            )
+        })?;
+    let class = ClassConstants::new(physics.land_cover_scheme, fortran_class_index)?;
+    // 两份 patchtype 必须一致：一份来自地类表，一份来自重启。不一致说明这个 patch
+    // 的类别与它被写进重启时用的地类表不是同一套 —— 那会让下面每一项都不可信。
     ensure!(
-        physics.root_fraction.len() == soil_layers,
-        "root_fraction has {} entries, expected {soil_layers}",
-        physics.root_fraction.len()
+        i64::from(class.patch_type()) == patch_type,
+        "land class {fortran_class_index} is patchtype {} in MOD_Const_LC but {} in the \
+         constant restart; the restart and the compiled land-cover scheme disagree",
+        class.patch_type(),
+        patch_type
     );
+    let root_fraction = root_fraction(
+        physics.land_cover_scheme,
+        fortran_class_index as i32,
+        physics.root_fraction_scheme,
+        &interface_depth_m,
+    )?;
     // `eroot` 把 `soil_water_stress` 直接定义成 sum(rootfr * resistance)，而每一步
     // 都要求胁迫落在 [0, 1]；所以**求和不得超过 1**。这里只守上限，不要求等于 1：
     // 上游 `ROOTFR_SCHEME==1` 那一支是逐层差分、求和恰为 1，但指数支的末层取
     // `0.5*(exp(-a*zi_nl)+exp(-b*zi_nl))`，整个数组求和是 `1 - d_(nl-1) + d_nl`，
     // 实测比 1 小 0.3%~2%（见 `colm_core::land_cover` 的测试）。要求等于 1 会把一份
     // 合法的上游根系比例挡在门外。
-    let root_total: f64 = physics.root_fraction.iter().sum();
+    let root_total: f64 = root_fraction.iter().sum();
     ensure!(
         root_total <= 1.0 + 1.0e-9,
-        "root_fraction must not sum to more than one, but it sums to {root_total}"
+        "the land class produces a root_fraction summing to {root_total}, which would push the \
+         soil-water stress above one"
     );
+    let leaf_angle_distribution = class.leaf_angle_distribution();
+    let inverse_sqrt_leaf_dimension_m_neg_half = class.inverse_sqrt_leaf_dimension_m_neg_half();
     ensure!(
         leaf_area_index + stem_area_index > 0.0,
         "the standard LCT energy step needs a vegetated canopy"
@@ -355,6 +394,10 @@ pub fn assemble_standard_lct_template(
         leaf_area_index,
         stem_area_index,
         snow_cover_fraction,
+        land_class: fortran_class_index,
+        root_fraction,
+        leaf_angle_distribution,
+        inverse_sqrt_leaf_dimension_m_neg_half,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
     })
@@ -397,7 +440,7 @@ impl StandardLctRestartTemplate {
                     maximum_dew_mm: physics.maximum_dew_mm,
                     eastward_wind_m_s: forcing.eastward_wind_m_s,
                     northward_wind_m_s: forcing.northward_wind_m_s,
-                    leaf_angle_distribution: physics.leaf_angle_distribution,
+                    leaf_angle_distribution: self.leaf_angle_distribution,
                     leaf_area_index: self.leaf_area_index,
                     stem_area_index: self.stem_area_index,
                     // 内核覆盖：`prepare_energy` 用状态里的叶温。
@@ -428,7 +471,7 @@ impl StandardLctRestartTemplate {
                     residual_water: &self.residual_water,
                     saturated_soil_suction_mm: &self.suction_mm,
                     hydraulic_model: hydraulic,
-                    root_fraction: &physics.root_fraction,
+                    root_fraction: &self.root_fraction,
                     layer_thickness_m: &self.layer_thickness_m,
                     // 内核覆盖：`root_uptake_input` 用当前状态列。
                     temperature_k: &self.temperature_k,
@@ -487,7 +530,7 @@ impl StandardLctRestartTemplate {
                     leaf_area_index: self.leaf_area_index,
                     stem_area_index: self.stem_area_index,
                     canopy_top_height_m: self.canopy_top_height_m,
-                    inverse_sqrt_leaf_dimension_m_neg_half: physics
+                    inverse_sqrt_leaf_dimension_m_neg_half: self
                         .inverse_sqrt_leaf_dimension_m_neg_half,
                     biochemistry: physics.biochemistry,
                     // 内核覆盖：`leaf_input` 用本步的土壤水分胁迫与时间步。
@@ -625,7 +668,7 @@ impl StandardLctRestartTemplate {
                 saturated_hydraulic_conductivity_mm_s: &self.conductivity_mm_s,
                 clapp_hornberger_b: &self.clapp_hornberger_b,
                 saturated_potential_mm: &self.suction_mm,
-                root_fraction: &physics.root_fraction,
+                root_fraction: &self.root_fraction,
                 // 非 PHS 下每步根通量初值为零。
                 root_flux_mm_s: &self.root_flux_zeros,
             },

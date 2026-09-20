@@ -58,7 +58,7 @@ fn class_optics_match_the_land_cover_lookup() {
         let class = ClassConstants::new(scheme, fortran_index).unwrap();
         assert_eq!(
             class.leaf_optics(),
-            crate::leaf_optics_from_land_cover(scheme, fortran_index as i32).unwrap(),
+            crate::leaf_optics_from_land_cover_one_based(scheme, fortran_index as i32).unwrap(),
             "{scheme:?} class {fortran_index}"
         );
     }

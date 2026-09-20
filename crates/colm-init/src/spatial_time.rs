@@ -20,7 +20,7 @@ use crate::urban_restart::write_cold_urban_time_restart;
 use crate::{
     cold_start_urban_radiation, colm_soil_grid, derive_initial_soil_hydraulics, derive_lake_layers,
     derive_snow_cover, derive_spatial_soil_parameters, initialize_snow_layers,
-    leaf_optics_from_land_cover, orbital_calendar_day, orbital_cosine_zenith,
+    leaf_optics_from_land_cover_one_based, orbital_calendar_day, orbital_cosine_zenith,
     resolve_cold_start_soil, write_time_restart, CalendarTime, ColdStartSoilInput, HydraulicModel,
     InitialSoilProfile, LandCoverScheme, OzoneFields, PlantHydraulicFields, RestartDate,
     RestartTuning, SnowAerosolFields, SnowSoilRestartFields, SoilField, SoilHydraulicModel,
@@ -492,7 +492,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         let state = colm_core::cold_start_broadband_radiation_from_ground(
             kind[patch],
             ground,
-            leaf_optics_from_land_cover(config.land_cover, class)?,
+            leaf_optics_from_land_cover_one_based(config.land_cover, class)?,
             lai_now[patch],
             sai_now[patch],
             0.0,
@@ -514,7 +514,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 wall_albedo: urban_albedo(&data.wall_albedo, urban_count, urban),
                 impervious_albedo: urban_albedo(&data.impervious_albedo, urban_count, urban),
                 pervious_albedo: urban_albedo(&data.pervious_albedo, urban_count, urban),
-                leaf_optics: leaf_optics_from_land_cover(config.land_cover, class)?,
+                leaf_optics: leaf_optics_from_land_cover_one_based(config.land_cover, class)?,
                 vegetation_fraction: fveg[patch],
                 vegetation_center_height_m: data.state.roof_height_m[urban]
                     .min((data.state.tree_top_m[urban] + data.state.tree_bottom_m[urban]) / 2.0),

@@ -1136,13 +1136,19 @@ drift 立刻打回（本轮实际踩到两次）。两处要处理：数组加 `
 一个凭直觉写下的断言也被实测推翻：`d50 = 15 cm` 且 `beta` 为负时，根系比例在**第 4 层**
 达到峰值，不是表层最多。
 
-### 待核对：地类下标的两套约定
+### 已修正：地类下标的两套约定（参数重名，不是取值错）
 
 `leaf_optics_from_land_cover(scheme, land_class)` 要求 `land_class >= 1`（内部减一），
-而 `land_cover_soil_reflectance(scheme, land_class)` 要求 `land_class >= 0`。两者不一致。
-上游自己的访问方式是 `array(patchclass(ipatch) + 1)` —— `patchclass` 是 0 基的
-IGBP/USGS 类号，所以**正确的入参是 0 基类号**，1 基那个约定看起来是早期手抄留下的。
-现有测试（`radiation_tests.rs` 的 `leaf_optics_are_the_native_land_cover_constants`、
-`urban_radiation_tests.rs`、`spatial_pft.rs`）都按 1 基调用，改约定会同时动这些调用点，
-所以本轮**只记录不改**：要改必须先拿一个真实算例确认 `patchclass` 的取值来源，
-否则就是把一个通过测试的约定换成另一个同样没被独立验证的约定。
+而 `land_cover_soil_reflectance(scheme, land_class)` 要求 `land_class >= 0`。两个参数
+**同名而含义不同**，喂反了不会报错，只会拿到隔壁地类的参数。
+
+按上游源码核对后确认：两者各自的取值都没错，错的是名字。上游的访问方式是
+`array(patchclass(ipatch) + 1)` —— `patchclass` 是重启里的 0 基类号，数组是 1 基的。
+所以光学表那个函数收的确实是 1 基下标，土壤反照率那个收的确实是 0 基类号。
+
+处理：按仓库约定（保留 1 基索引的函数名带 `_one_based` 后缀）把前者改名为
+`leaf_optics_from_land_cover_one_based(scheme, fortran_class_index)`，24 处调用点一并
+更新；两个 doc 注释互相点名，写明"另一个收的是 0 基 `patchclass`"。
+`colm-runtime` 的装配层现在是**唯一的**真实调用者，它从常数重启读 `patchclass` 后
+显式 `+1`，并把「地类表算出的 patchtype」与「重启里写的 patchtype」对拍 ——
+对不上就报错，因为那意味着这份重启与编译进来的地类表不是同一套。

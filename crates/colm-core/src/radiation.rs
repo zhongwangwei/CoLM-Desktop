@@ -62,18 +62,22 @@ impl ColdStartGroundAlbedo {
 
 /// Looks up CoLM's native broadband leaf optical constants for one land class.
 ///
-/// This is the `rho`/`tau` assignment in `MOD_Const_LC.F90`; it deliberately
-/// keeps classes one-based, as does the Fortran land-cover contract.
+/// This is the `rho`/`tau` assignment in `MOD_Const_LC.F90`. 取 `fortran_class_index`，
+/// 即上游数组的 **1 基下标**：`chil(fortran_class_index)`。上游的访问方式是
+/// `chil(patchclass(ipatch)+1)`，其中 `patchclass` 是 0 基的 IGBP/USGS 类号。
+/// 函数名带 `_one_based` 是仓库约定（CLAUDE.md 代码风格一节）。
+///
+/// **不要**与 [`crate::land_cover_soil_reflectance`] 混淆：那个取 0 基的
+/// `patchclass`。两个参数以前都叫 `land_class`，实测很容易把 1 和 0 喂反 ——
+/// 喂反了不会报错，只会拿到隔壁地类的光学参数。
 ///
 /// 取值来自 `land_cover_generated.rs`（由 `xtask gen-landcover` 从上游源码生成），
-/// 那里是**唯一的**一份地类常量表。此前这里还手抄了一遍同样的 `rho`/`tau`，
-/// 两份表逐值相同，但没有任何东西拦得住它们漂开。
-///
-/// **下标约定**：`land_class` 是 Fortran 的 1 基下标，即 `chil(land_class)`。
-/// 上游自己的访问方式是 `chil(patchclass(ipatch)+1)` —— patchclass 是 0 基的
-/// IGBP/USGS 类号。本函数与 `land_cover_soil_reflectance`（0 基）**约定不同**，
-/// 见 `docs/implementation-verification.md` 里那条待核对的记录。
-pub fn leaf_optics_from_land_cover(scheme: LandCoverScheme, land_class: i32) -> Result<LeafOptics> {
+/// 那里是**唯一的**一份地类常量表。
+pub fn leaf_optics_from_land_cover_one_based(
+    scheme: LandCoverScheme,
+    fortran_class_index: i32,
+) -> Result<LeafOptics> {
+    let land_class = fortran_class_index;
     let index = usize::try_from(land_class)
         .map_err(|_| anyhow::anyhow!("land class {land_class} is negative"))?
         .checked_sub(1)

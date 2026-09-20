@@ -21,7 +21,7 @@ fn from_ground_helpers_preserve_existing_lct_and_pft_snow_cold_start() {
     )
     .unwrap();
 
-    let lct_optics = leaf_optics_from_land_cover(LandCoverScheme::Igbp, 8).unwrap();
+    let lct_optics = leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, 8).unwrap();
     let lct_existing = cold_start_broadband_radiation_with_snow(
         1,
         soil,
@@ -55,7 +55,7 @@ fn from_ground_helpers_preserve_existing_lct_and_pft_snow_cold_start() {
     .unwrap();
     assert_eq!(lct_from_ground, lct_existing);
 
-    let pft_optics = leaf_optics_from_land_cover(LandCoverScheme::Igbp, 13).unwrap();
+    let pft_optics = leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, 13).unwrap();
     let pft_existing = cold_start_pft_broadband_radiation_with_snow(
         1,
         soil,
@@ -134,7 +134,7 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
             },
             water,
             soil_grid.thickness_m[0],
-            leaf_optics_from_land_cover(LandCoverScheme::Igbp, class).unwrap(),
+            leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, class).unwrap(),
             lai,
             sai,
             0.0,
@@ -424,7 +424,7 @@ fn lct_two_stream_matches_all_original_pearl_river_outputs() {
         ),
     ] {
         let state = two_stream(
-            leaf_optics_from_land_cover(LandCoverScheme::Igbp, class).unwrap(),
+            leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, class).unwrap(),
             lai,
             sai,
             0.0,
@@ -462,7 +462,7 @@ fn lct_two_stream_matches_all_original_pearl_river_outputs() {
 #[test]
 fn leaf_optics_are_the_native_land_cover_constants() {
     assert_eq!(
-        leaf_optics_from_land_cover(LandCoverScheme::Igbp, 10).unwrap(),
+        leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, 10).unwrap(),
         LeafOptics {
             chil: -0.3,
             reflectance: [[0.105, 0.360], [0.580, 0.580]],
@@ -470,15 +470,15 @@ fn leaf_optics_are_the_native_land_cover_constants() {
         }
     );
     assert_eq!(
-        leaf_optics_from_land_cover(LandCoverScheme::Usgs, 12).unwrap(),
+        leaf_optics_from_land_cover_one_based(LandCoverScheme::Usgs, 12).unwrap(),
         LeafOptics {
             chil: 0.01,
             reflectance: [[0.070, 0.160], [0.350, 0.390]],
             transmittance: [[0.050, 0.001], [0.100, 0.001]],
         }
     );
-    assert!(leaf_optics_from_land_cover(LandCoverScheme::Igbp, 0).is_err());
-    assert!(leaf_optics_from_land_cover(LandCoverScheme::Usgs, 25).is_err());
+    assert!(leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, 0).is_err());
+    assert!(leaf_optics_from_land_cover_one_based(LandCoverScheme::Usgs, 25).is_err());
 }
 
 #[test]
@@ -745,7 +745,7 @@ fn cold_ice_thermal_gap_retains_allocated_missing_without_a_canopy_solver() {
             },
             0.0,
             0.1,
-            leaf_optics_from_land_cover(LandCoverScheme::Igbp, 15).unwrap(),
+            leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, 15).unwrap(),
             lai,
             0.0,
             0.0,

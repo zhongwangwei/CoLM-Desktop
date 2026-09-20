@@ -1,5 +1,5 @@
 use super::*;
-use crate::{leaf_optics_from_land_cover, LandCoverScheme};
+use crate::{leaf_optics_from_land_cover_one_based, LandCoverScheme};
 
 #[test]
 fn au_preston_cold_start_matches_fortran_urban_shortwave() {
@@ -77,7 +77,7 @@ fn au_preston_input() -> UrbanRadiationInput {
         wall_albedo: [[0.25; 2]; 2],
         impervious_albedo: [[0.14; 2]; 2],
         pervious_albedo: [[0.15; 2]; 2],
-        leaf_optics: leaf_optics_from_land_cover(LandCoverScheme::Igbp, 13).unwrap(),
+        leaf_optics: leaf_optics_from_land_cover_one_based(LandCoverScheme::Igbp, 13).unwrap(),
         vegetation_fraction: 0.224999994039536,
         vegetation_center_height_m: 3.34999990463257,
         lai: 3.16774039100746,

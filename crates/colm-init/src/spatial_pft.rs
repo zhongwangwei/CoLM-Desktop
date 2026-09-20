@@ -981,7 +981,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                     high_resolution_fractions[patch]
                         .as_ref()
                         .expect("spectral fractions are loaded"),
-                    crate::leaf_optics_from_land_cover(
+                    crate::leaf_optics_from_land_cover_one_based(
                         LandCoverScheme::Igbp,
                         patches.class[patch],
                     )?,

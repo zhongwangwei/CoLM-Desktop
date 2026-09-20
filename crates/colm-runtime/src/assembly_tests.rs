@@ -21,8 +21,8 @@ fn temp_dir(label: &str) -> PathBuf {
 fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
     LandPhysicsParameters {
         hydraulic_model: HydraulicModel::VanGenuchten,
-        // 上游 `rootfr` 必然求和为 1；`eroot` 的胁迫就是这个加权和。
-        root_fraction: vec![1.0 / SOIL_LAYERS as f64; SOIL_LAYERS],
+        land_cover_scheme: LandCoverScheme::Igbp,
+        root_fraction_scheme: RootFractionScheme::SchenkJackson,
         timestep_seconds,
         precipitation_scheme: PrecipitationPhaseScheme::AirTemperature,
         surface_resistance_scheme: 1,
@@ -71,8 +71,6 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         temperature_height_m: 30.0,
         humidity_height_m: 30.0,
         boundary_layer_height_m: 1000.0,
-        leaf_angle_distribution: -0.3,
-        inverse_sqrt_leaf_dimension_m_neg_half: 10.0,
         ground_emissivity: 0.96,
         vaporization_heat_j_kg: 2.5104e6,
         oxygen_partial_pressure_pa: 21_200.0,
@@ -435,22 +433,22 @@ fn a_non_soil_patch_is_refused_instead_of_driven_as_soil() {
 }
 
 #[test]
-fn a_root_fraction_of_the_wrong_length_is_refused_before_the_step() {
-    let root = temp_dir("bad-root-fraction");
+fn a_patch_class_outside_the_compiled_scheme_is_refused() {
+    let root = temp_dir("bad-patch-class");
     let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
-    let mut parameters = physics(1800.0);
-    parameters.root_fraction.truncate(SOIL_LAYERS - 1);
+    // 合成算例只有两个 patch，patchclass 是 [1, 2]；要求装配第 3 个 patch 时，
+    // `patchclass` 本身就越界 —— 必须点名报错，不能按 0 处理。
     let error = assemble_standard_lct_template(
         &RestartStateFiles {
             constant: fixture.constant.block.clone(),
             time: fixture.time.block.clone(),
         },
-        0,
-        parameters,
+        PATCHES,
+        physics(1800.0),
     )
     .unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("root_fraction"), "{message}");
+    assert!(message.contains("patch"), "{message}");
 }
 
 /// 从已备好的 forcing 取回输入字段，只为在测试里换一个风。
@@ -487,14 +485,13 @@ fn the_state_carries_the_restart_radiation() {
 }
 
 #[test]
-fn a_root_fraction_that_does_not_sum_to_one_is_refused() {
-    let root = temp_dir("unnormalized-root-fraction");
+fn the_land_class_and_the_restart_must_agree_on_the_patch_type() {
+    let root = temp_dir("patchtype-disagreement");
     let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    // 合成算例的 patchclass 是 [1, 2]（0 基），对应的 IGBP 类都是土壤。用 USGS 表去
+    // 解释同一份重启，类号含义就变了 —— 装配层必须发现 patchtype 对不上。
     let mut parameters = physics(1800.0);
-    // `eroot` 把胁迫定义成 sum(rootfr * resistance)，所以归一过头的根系比例会让
-    // 胁迫大于 1；装配层要在这里指出病因，而不是等叶温校验报一句笼统的非法输入。
-    // （上限而不是等式：上游指数支的求和本来就小于 1。）
-    parameters.root_fraction = vec![0.5; SOIL_LAYERS];
+    parameters.land_cover_scheme = LandCoverScheme::Usgs;
     let error = assemble_standard_lct_template(
         &RestartStateFiles {
             constant: fixture.constant.block.clone(),
@@ -505,5 +502,37 @@ fn a_root_fraction_that_does_not_sum_to_one_is_refused() {
     )
     .unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("more than one"), "{message}");
+    assert!(message.contains("patchtype"), "{message}");
+}
+
+#[test]
+fn the_land_cover_tables_supply_the_root_fraction_and_leaf_geometry() {
+    let (_, template) = assemble("land-cover", 1);
+    let class = colm_core::ClassConstants::new(
+        colm_core::LandCoverScheme::Igbp,
+        // 合成算例 patch 1 的 patchclass 是 2（0 基），上游数组是 1 基的。
+        3,
+    )
+    .unwrap();
+    assert_eq!(template.land_class, 3);
+    assert_eq!(
+        template.leaf_angle_distribution,
+        class.leaf_angle_distribution()
+    );
+    assert_eq!(
+        template.inverse_sqrt_leaf_dimension_m_neg_half,
+        class.inverse_sqrt_leaf_dimension_m_neg_half()
+    );
+    let expected = colm_core::root_fraction(
+        colm_core::LandCoverScheme::Igbp,
+        3,
+        colm_core::RootFractionScheme::SchenkJackson,
+        &colm_core::colm_soil_grid(SOIL_LAYERS)
+            .unwrap()
+            .interface_depth_m,
+    )
+    .unwrap();
+    assert_eq!(template.root_fraction, expected);
+    let total: f64 = template.root_fraction.iter().sum();
+    assert!(total <= 1.0 + 1.0e-9, "{total}");
 }

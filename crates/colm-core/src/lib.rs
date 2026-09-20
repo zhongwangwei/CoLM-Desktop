@@ -188,7 +188,7 @@ pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_from_ground,
     cold_start_broadband_radiation_with_snow, cold_start_ground_albedo,
     cold_start_pft_broadband_radiation_from_ground, cold_start_pft_broadband_radiation_with_snow,
-    leaf_optics_from_land_cover, ColdStartGroundAlbedo, ColdStartRadiation, LeafOptics,
+    leaf_optics_from_land_cover_one_based, ColdStartGroundAlbedo, ColdStartRadiation, LeafOptics,
 };
 pub use root_uptake::{root_uptake, RootUptakeInput, RootUptakeState};
 pub use runoff::{
