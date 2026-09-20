@@ -3850,3 +3850,95 @@ f_xy_q       3/264 差 ~1%（第 98-100 条）
 它们留在 tier0 才会持续提醒这三处差异；调松就等于把它们埋掉。
 `f_xy_rain`/`f_xy_snow` 仍未声明：那是雨雪**相态拆分**的结果（`MOD_RainSnowTemp`），
 属内核下游而非驱动场本身。
+
+## 累加器要按变量各算各的有效步数（2026 年，实测）
+
+补短波分带十七项时撞到一个**更底层**的保真缺口，它不属于任何单个变量。
+
+上游 `acc1d` 会**跳过 `spval`**：
+
+```fortran
+DO i = lbound(var,1), ubound(var,1)
+   IF (var(i) /= spval) THEN
+      IF (s(i) /= spval) THEN ; s(i) = s(i) + var(i)
+      ELSE                    ; s(i) = var(i)
+      ENDIF
+   ENDIF
+ENDDO
+```
+
+而除数**按变量分组各有一个计数器**：`nac`（每步 +1，`:2036`）、
+`nac_dt`（只数 `coszen > 0` 的步）、`nac_ln`（只数 `solvdln /= spval` 的步，`:2041`）。
+三个计数器分别喂给不同的 `write_history_variable_2d`。
+
+本仓库原来的 `HistoryAccumulator` 是"全部求和、除以一个全局步数"，
+而且把非有限值当成错误。对当时已实现的那批变量**看不出来**（它们每步都有值），
+但只要有一个量是"局部有效"的，它就会静默写出**被无效步稀释的值** ——
+每个数都有限、不报错，正好是这类 bug 最难发现的样子。
+
+改成：`MISSING` 不进和也不进计数，每个变量自带 `count`，除数用它自己那个；
+一步都不有效的变量**不建条目**，于是不被写出、缓冲区留给它填充值
+（与上游"累加器一直是 spval"同效），整列无效的分层量同规则。
+新增单测 `the_accumulator_skips_missing_samples_and_counts_only_valid_ones`
+钉住"两步里只有一步有效 → 写出来是那个值本身而不是它的一半"。
+
+### 顺带补上短波分带十七项
+
+`LCT_RADIATION_VARIABLES`：`sr` + 四个下行 `sol*d/sol*i` + 四个反射 `sr*d/sr*i`
++ 八个本地正午 `*ln`。定义在 `MOD_NetSolar.F90:279-315`：
+`solvd = forc_sols`、`solvi = forc_solsd`、`solnd = forc_soll`、`solni = forc_solld`
+（`d` = direct、`i` = indirect），`sr*` 是同波段乘反照率后的反射，`sr` 是四者之和，
+`*ln` **只在 `local_secs == 43200` 那一步有值**、其余 spval。
+
+对齐算例实测：
+
+```
+f_sr       F[0,116.78]  R[0,117.14]   maxdiff 3.66e-1
+f_solvd    F[0, 66.61]  R[0, 66.55]   maxdiff 1.04e-1
+f_solvi    F[0,140.63]  R[0,140.69]   maxdiff 1.04e-1
+f_solnd    F[0, 62.26]  R[0, 62.20]   maxdiff 9.72e-2
+f_solni    F[0,131.45]  R[0,131.51]   maxdiff 9.72e-2
+f_solvdln  F 11 条真值 / 253 spval    R 同样 11 条真值 / 253 spval
+```
+
+`*ln` 两边的**有效条数与位置完全一致**（11 条，逐 24 小时一条）——
+这是累加器那笔改动最直接的验收：换回"除以全局步数"就会变成 11 条真值被 2 除、
+其余 253 条变成 `spval + 真值` 的垃圾。
+
+### 分带的差是**比例**差，不是总量差
+
+`f_xy_solarin`（总量）只差 2 ulp，而四个分带各差 0.1~0.3%，且
+`f_solvd` 偏小、`f_solvi` 偏大**符号相反** —— 两波段的**和**仍然对得上。
+所以差在拆分公式而不是读入。拆分在 `crates/colm-core/src/runtime_forcing.rs:194`
+的 `split_broadband_shortwave`，逐行照 `MOD_Forcing.F90:965-985` 实现
+（`cloud = max(0.58, cloud)` 那个下限也在）。差因此只能来自它的入参 `sunang`：
+`difrat = 0.0604/(sunang-0.0223) + 0.0683` 在冬季低太阳角下对 `sunang` 极敏感
+（`d(difrat)/d(sunang) ≈ -3.7`），`sunang` 差 1e-4 就够产生这 0.1%。
+本仓库的 `orbital_cosine_zenith` 是 `MOD_OrbCoszen` 的逐位移植，
+**所以下一步要查的是喂给它的 `calendar_day`**：上游那里是
+`calday = calendarday(idate)`，而 `idate` 在 `MOD_Forcing` 里已经是
+`TICKTIME` 之后的**步末**时刻 —— 与 `CoLMMAIN` 自己那份 `coszen` 不是同一个时刻。
+
+## `f_xy_q` 的三条差：本仓库是精确的，差在上游（2026 年，实测）
+
+上一轮留的 `f_xy_q`（3/264 条、约 1%）查清了。把 264 条与强迫场原值逐条对齐：
+
+```
+记录 i  ↔  原始样本 (188+2(i-94), +1) 的算术平均
+i=97 : F = R = mean(194,195)      逐位
+i=98 : R = mean(196,197) 精确     F 不等于任何样本组合   ← 差 1.09e-5
+i=99 : R = mean(198,199) 精确     F 同上                 ← 差 7.66e-6
+i=100: R = mean(200,201) 精确     F 同上                 ← 差 1.69e-5
+i=101: F = R = mean(202,203)      逐位
+```
+
+**本仓库 264 条全部等于相邻两个 30 分钟样本的算术平均，一条不差**；
+上游只在 2008-01-05 02:00/03:00/04:00（地方时）这三条上偏离，
+而且那三个值**在强迫场文件里任何变量、任何时刻都找不到**（全表搜索无匹配，
+三个候选组合都试过：换样本对、加权、3~5 样本均值，最近的一个还差 1.4e-3 相对）。
+同一批记录上 `f_xy_t`/`f_xy_pbot`/`f_xy_frl` 都逐位相同，所以时间轴对齐没问题，
+偏差是 **`q` 独有**的。
+
+结论：**这条不再算本仓库的待办**。要追就是上游 `MOD_Forcing` 的读入/预读路径
+在那三步对 `forc_q` 做了什么，与移植无关。留在这里是因为它此前被当成
+"Rust 驱动链有 bug"，方向反了。

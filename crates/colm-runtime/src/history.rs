@@ -94,6 +94,22 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**短波分带**量，十七项。
+///
+/// 上游 `MOD_NetSolar.F90:279-315` 逐定义：
+/// `solvd = forc_sols`、`solvi = forc_solsd`、`solnd = forc_soll`、`solni = forc_solld`
+/// （`d` = direct、`i` = indirect/diffuse），`sr*` 是同一波段乘反照率后的**反射**，
+/// `sr = srvd+srvi+srnd+srni`。
+/// `*ln` 是"本地正午"版本：**只在 `local_secs == 43200` 那一步有值，其余是 `spval`**
+/// （`:299-313`）。所以它们必须走 [`HistoryAccumulator`] 的"跳过 `spval`"路径 ——
+/// 上游的除数是 `nac_ln`，只数 `solvdln /= spval` 的步（`:2041`）。
+/// 逐位实测：264 条里 11 条真值、253 条 spval，真值约等于同小时的 `f_solvd`（比值 1.02），
+/// 不是它的一半。
+pub const LCT_RADIATION_VARIABLES: [&str; 17] = [
+    "sr", "solvd", "solvi", "solnd", "solni", "srvd", "srvi", "srnd", "srni", "solvdln", "solviln",
+    "solndln", "solniln", "srvdln", "srviln", "srndln", "srniln",
+];
+
 /// 本层能填的**驱动场镜像**，七项。
 ///
 /// 上游把 `forc_*` 原样 `acc1d` 进 `a_xy_*` 再写出（`MOD_Vars_1DAccFluxes.F90`），
@@ -178,6 +194,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_SURFACE_VARIABLES);
     names.extend_from_slice(&LCT_STOMATAL_VARIABLES);
     names.extend_from_slice(&LCT_FORCING_VARIABLES);
+    names.extend_from_slice(&LCT_RADIATION_VARIABLES);
     buffer.declare(&names)
 }
 
@@ -214,27 +231,44 @@ struct HistoryAccumulator {
 
 #[derive(Debug)]
 enum Accumulated {
-    Scalar(f64),
-    Column(Vec<f64>),
+    Scalar { sum: f64, count: usize },
+    Column { sum: Vec<f64>, count: usize },
 }
 
 impl HistoryAccumulator {
-    /// 除以累加步数写进第 `record` 条。标量/列由**累加时**的形态决定，
-    /// 不在这里猜 —— 猜错会把一根土柱按标量写出去。
+    /// 按**每个变量自己的**有效步数取平均后写进第 `record` 条。标量/列由**累加时**
+    /// 的形态决定，不在这里猜 —— 猜错会把一根土柱按标量写出去。
+    ///
+    /// **除数不是全局步数是刻意的。** 上游 `acc1d` 会跳过 `spval`
+    /// （`MOD_Vars_1DAccFluxes.F90:2895` `IF (var(i) /= spval)`），而除数按变量分组
+    /// 各有一个计数器：`nac`（每步 +1）、`nac_dt`（只数白天）、
+    /// `nac_ln`（只数 `solvdln /= spval` 的步，`:2041`）。
+    /// 于是"局部有效"的量写出来是**它自己的平均**而不是被无效步稀释的值 ——
+    /// 逐位实测：`f_solvdln` 在 264 条里有 11 条是本地正午的真值、其余 253 条是 spval，
+    /// 而那 11 条的值约等于同一小时的 `f_solvd`（比值 1.02），不是它的一半。
     fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
         ensure!(
             self.steps > 0,
             "the history accumulator reached a write step without accumulating anything"
         );
-        let scale = 1.0 / self.steps as f64;
         for (name, accumulated) in &self.sums {
             match accumulated {
-                Accumulated::Scalar(sum) => {
+                Accumulated::Scalar { sum, count } => {
+                    // 整条记录里一次有效值都没有的变量沿用缓冲区的填充值，
+                    // 与上游"累加器一直是 spval、除以 0 个样本仍是 spval"同效。
+                    if *count == 0 {
+                        continue;
+                    }
+                    let scale = 1.0 / *count as f64;
                     buffer
                         .set_patch_scalar(name, record, sum * scale)
                         .with_context(|| format!("cannot write {name} into the history buffers"))?;
                 }
-                Accumulated::Column(sum) => {
+                Accumulated::Column { sum, count } => {
+                    if *count == 0 {
+                        continue;
+                    }
+                    let scale = 1.0 / *count as f64;
                     let mean = sum.iter().map(|value| value * scale).collect::<Vec<_>>();
                     buffer
                         .set_layered(name, record, &mean)
@@ -252,13 +286,24 @@ impl HistorySink for HistoryAccumulator {
             value.is_finite(),
             "the history value for {name} is not finite"
         );
+        // `spval` 步不计入：既不进和，也不进计数（上游 `acc1d` 的 `IF (var(i) /= spval)`）。
+        // 一步都不有效的变量因此**不会**在 `sums` 里建条目，也就不会被写出，
+        // 缓冲区留给它的是填充值 —— 与上游一致。
+        if value == colm_core::MISSING {
+            return Ok(());
+        }
         match self
             .sums
             .entry(name.to_owned())
-            .or_insert(Accumulated::Scalar(0.0))
+            .or_insert(Accumulated::Scalar { sum: 0.0, count: 0 })
         {
-            Accumulated::Scalar(sum) => *sum += value,
-            Accumulated::Column(_) => bail!("{name} was accumulated as a column, now as a scalar"),
+            Accumulated::Scalar { sum, count } => {
+                *sum += value;
+                *count += 1;
+            }
+            Accumulated::Column { .. } => {
+                bail!("{name} was accumulated as a column, now as a scalar")
+            }
         }
         Ok(())
     }
@@ -268,12 +313,20 @@ impl HistorySink for HistoryAccumulator {
             values.iter().all(|value| value.is_finite()),
             "the history value for {name} is not finite"
         );
+        // 分层量按**整列**是否有效来算（上游的计数器是每 patch 一个，
+        // `nac_ln(i)`，不是每层一个）。整列全无效就整列跳过。
+        if values.iter().all(|value| *value == colm_core::MISSING) {
+            return Ok(());
+        }
         let entry = self
             .sums
             .entry(name.to_owned())
-            .or_insert_with(|| Accumulated::Column(vec![0.0; values.len()]));
+            .or_insert_with(|| Accumulated::Column {
+                sum: vec![0.0; values.len()],
+                count: 0,
+            });
         match entry {
-            Accumulated::Column(sum) => {
+            Accumulated::Column { sum, count } => {
                 ensure!(
                     sum.len() == values.len(),
                     "{name} changed width between steps"
@@ -281,8 +334,11 @@ impl HistorySink for HistoryAccumulator {
                 for (sum, value) in sum.iter_mut().zip(values) {
                     *sum += value;
                 }
+                *count += 1;
             }
-            Accumulated::Scalar(_) => bail!("{name} was accumulated as a scalar, now as a column"),
+            Accumulated::Scalar { .. } => {
+                bail!("{name} was accumulated as a scalar, now as a column")
+            }
         }
         Ok(())
     }
@@ -578,6 +634,41 @@ pub fn set_lct_stomatal_diagnostics(
     Ok(())
 }
 
+/// 把一步的短波分带量写进第 `record` 条记录。
+///
+/// 十七项全部来自 `NetSolarFluxes`，不做换算；`*ln` 那一半在非本地正午时
+/// 本来就是 `MISSING`，交给累加器跳过。见 [`LCT_RADIATION_VARIABLES`]。
+pub fn set_lct_radiation_bands(
+    sink: &mut impl HistorySink,
+    record: usize,
+    energy: &colm_core::StandardLctEnergyOutput,
+) -> Result<()> {
+    let shortwave = &energy.shortwave;
+    let noon = &shortwave.local_noon;
+    for (name, value) in [
+        ("sr", shortwave.reflected_w_m2),
+        ("solvd", shortwave.direct_visible_w_m2),
+        ("solvi", shortwave.diffuse_visible_w_m2),
+        ("solnd", shortwave.direct_near_infrared_w_m2),
+        ("solni", shortwave.diffuse_near_infrared_w_m2),
+        ("srvd", shortwave.reflected_direct_visible_w_m2),
+        ("srvi", shortwave.reflected_diffuse_visible_w_m2),
+        ("srnd", shortwave.reflected_direct_near_infrared_w_m2),
+        ("srni", shortwave.reflected_diffuse_near_infrared_w_m2),
+        ("solvdln", noon.direct_visible_w_m2),
+        ("solviln", noon.diffuse_visible_w_m2),
+        ("solndln", noon.direct_near_infrared_w_m2),
+        ("solniln", noon.diffuse_near_infrared_w_m2),
+        ("srvdln", noon.reflected_direct_visible_w_m2),
+        ("srviln", noon.reflected_diffuse_visible_w_m2),
+        ("srndln", noon.reflected_direct_near_infrared_w_m2),
+        ("srniln", noon.reflected_diffuse_near_infrared_w_m2),
+    ] {
+        sink.scalar(name, record, value)?;
+    }
+    Ok(())
+}
+
 /// 把一步的驱动场镜像写进第 `record` 条记录。
 ///
 /// 七项都是**照抄**本步的 `forc_*`，上游也是 `acc1d` 原值后写出，没有任何换算 ——
@@ -859,6 +950,7 @@ impl HistorySession {
                 &template.physics,
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
+            set_lct_radiation_bands(accumulator, 0, &output.energy)?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
@@ -900,6 +992,7 @@ impl HistorySession {
                 &template.physics,
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
+            set_lct_radiation_bands(accumulator, 0, &output.energy)?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }

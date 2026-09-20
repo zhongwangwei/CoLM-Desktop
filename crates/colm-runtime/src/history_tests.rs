@@ -227,6 +227,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     )
     .unwrap();
     set_lct_forcing_mirrors(&mut buffer, 0, reference()).unwrap();
+    set_lct_radiation_bands(&mut buffer, 0, &output.energy).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -240,6 +241,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_SURFACE_VARIABLES.iter())
         .chain(LCT_STOMATAL_VARIABLES.iter())
         .chain(LCT_FORCING_VARIABLES.iter())
+        .chain(LCT_RADIATION_VARIABLES.iter())
     {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
@@ -432,6 +434,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_SURFACE_VARIABLES.iter())
         .chain(LCT_STOMATAL_VARIABLES.iter())
         .chain(LCT_FORCING_VARIABLES.iter())
+        .chain(LCT_RADIATION_VARIABLES.iter())
     {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();
@@ -779,5 +782,55 @@ fn the_session_writes_one_record_per_scheduled_hour() {
     assert_eq!(times[3], 0);
     // 变量也写出来了，且带着标签。
     assert!(file.variable("f_t_soisno").is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 累加器必须**跳过 `spval` 并只按有效步数取平均**。
+///
+/// 上游 `acc1d` 的 `IF (var(i) /= spval)`（`MOD_Vars_1DAccFluxes.F90:2895`）配合
+/// 每个变量组自己的计数器（`nac` / `nac_dt` / `nac_ln`，`:2036`/`:2041`）意味着：
+/// 一步里只有一部分步有效的量，写出来是**它自己的平均**，不是被无效步稀释的值。
+/// 本地正午那八个 `*ln` 就是这种量 —— 264 条里 11 条真值、253 条 spval，
+/// 真值约等于同小时的 `f_solvd`（比值 1.02）而不是它的一半。
+///
+/// 反例（全局步数当除数）会安静地写出**一半**的值：每个变量都"有限"，不报错。
+#[test]
+fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
+    let mut accumulator = HistoryAccumulator {
+        sums: std::collections::BTreeMap::new(),
+        steps: 0,
+    };
+    // 两个物理步：第一步"本地正午"有值，第二步不是。
+    accumulator.steps = 2;
+    accumulator
+        .scalar("solvdln", 0, 64.0)
+        .expect("a valid sample accumulates");
+    accumulator
+        .scalar("solvdln", 0, colm_core::MISSING)
+        .expect("a missing sample is skipped, not an error");
+    // 一个整条记录都无效的变量：不许建条目，于是不会被写出，缓冲区留给它填充值。
+    accumulator
+        .scalar("never_valid", 0, colm_core::MISSING)
+        .expect("an all-missing variable is skipped");
+
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    // 声明是为了让缓冲区的类型/维度定下来；`never_valid` 故意不声明。
+    buffer.declare(&["solvdln"]).unwrap();
+    accumulator.write_means(&mut buffer, 0).unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let root = temp_dir("accumulator-missing");
+    let path = root.join("history.nc");
+    buffer.write(&path).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let values = file
+        .variable("f_solvdln")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(
+        values,
+        vec![64.0],
+        "one valid sample in a two-step record must average to itself, not to half"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
