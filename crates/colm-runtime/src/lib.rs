@@ -400,6 +400,7 @@ impl PointRuntime {
             )? {
                 files.push(path);
             }
+            refresh_lai(step, template, next)?;
             on_step(step, &output)
         })?;
         files.extend(session.finish()?);
@@ -438,6 +439,7 @@ impl PointRuntime {
                 next,
                 surface_optics_step(step, previous_snow_water_equivalent_mm, &output),
             )?;
+            refresh_lai(step, template, next)?;
             on_step(step, &output)
         })
     }
@@ -598,6 +600,31 @@ fn lct_binding(
             month,
         )? * 1.0e-6,
     })
+}
+
+/// `LAI_readin` 那一步（`CoLM.F90:595-605`）。
+///
+/// **位置很讲究**：上游在 `CoLMDRIVER`（含末尾那一节）与 `hist_out` **之后**、
+/// `WRITE_TimeVariables` **之前**调它。所以这一步写出的 history 记的还是旧
+/// `tlai`/`tsai` 折算出的 `lai`/`sai`，而重启里的 `tlai`/`tsai` 已经是新一个月的
+/// —— 本仓库保持同一顺序，`refresh_monthly_leaf_area_index` 只改 `temporal_canopy`，
+/// 不动本步已经算好的 `canopy`。
+///
+/// 月份取**步末**（`CoLM.F90:484` 在 `TICKTIME` 之后算 `month`），所以先把
+/// `86400` 的写法退位。
+fn refresh_lai(
+    step: PointRuntimeStep,
+    template: &StandardLctRestartTemplate,
+    state: &mut StandardLctSnowSoilState,
+) -> Result<()> {
+    if !step.clock.update_lai {
+        return Ok(());
+    }
+    template.refresh_monthly_leaf_area_index(
+        colm_core::end_of_step_calendar_time(step.clock.end_time),
+        state,
+    )?;
+    Ok(())
 }
 
 /// 把一步的输出打包成「准备下一步表面光学」的输入。

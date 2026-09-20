@@ -32,7 +32,7 @@ use colm_core::{CalendarTime, LandCoverScheme};
 use colm_namelist::{parse, Document, Value};
 use colm_runtime::assembly::{
     assemble_standard_lct_snow_template, assemble_standard_lct_template, restart_has_snow_column,
-    EvolvedStepOutput, RestartStateFiles, StandardLctRestartTemplate,
+    EvolvedStepOutput, MonthlyLeafAreaIndex, RestartStateFiles, StandardLctRestartTemplate,
 };
 use colm_runtime::history::HistorySession;
 use colm_runtime::physics::land_physics_parameters;
@@ -114,13 +114,30 @@ fn run() -> Result<()> {
     // 模板类型；运行时只走通用入口（能长雪的那一支），所以这里按启动时的雪列选断言。
     let has_snow = restart_has_snow_column(&files, arguments.patch)
         .context("cannot tell whether the initial restart carries an active snow column")?;
-    let template = if has_snow {
+    let mut template = if has_snow {
         assemble_standard_lct_snow_template(&files, arguments.patch, physics)
             .context("cannot assemble the snow-bearing standard LCT template")?
     } else {
         assemble_standard_lct_template(&files, arguments.patch, physics)
             .context("cannot assemble the snow-free standard LCT template")?
     };
+    // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
+    // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
+    if logical_field(&document, "DEF_LAI_MONTHLY")? {
+        let path = layout.out().join(&name).join("landdata/srfdata.nc");
+        ensure!(
+            path.is_file(),
+            "{} is missing; run mksrfdata for this case before a DEF_LAI_MONTHLY run",
+            path.display()
+        );
+        template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read(
+            &path,
+            logical_field(&document, "USE_SITE_LAI")?,
+            logical_field(&document, "DEF_LAI_CHANGE_YEARLY")?,
+            i32::try_from(integer_field(&document, "DEF_LC_YEAR")?)
+                .context("DEF_LC_YEAR does not fit an i32")?,
+        )?);
+    }
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
@@ -296,6 +313,20 @@ fn read_document(path: &Path) -> Result<Document> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read case namelist {}", path.display()))?;
     parse(&text).with_context(|| format!("cannot parse case namelist {}", path.display()))
+}
+
+/// 取一个逻辑字段：算例里写了就用算例的，否则用 schema 的声明默认值。
+fn logical_field(document: &Document, field: &str) -> Result<bool> {
+    if let Some(value) = document.get(field) {
+        return match value {
+            Value::Bool(value) => Ok(*value),
+            other => bail!("{field} must be a logical, got {other:?}"),
+        };
+    }
+    match colm_schema::find(field).map(|field| &field.default) {
+        Some(colm_schema::Default::Logical(value)) => Ok(*value),
+        _ => bail!("{field} is missing from the case namelist and has no logical default"),
+    }
 }
 
 /// 取一个整数字段：算例里写了就用算例的，否则用 schema 的声明默认值。

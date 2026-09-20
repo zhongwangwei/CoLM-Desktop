@@ -128,13 +128,38 @@ fn clock_carries_colms_lai_update_flags_into_each_driver_step() {
         move || clock.next_step()
     })
     .collect();
+    // 两步都在 1 月内，所以**都不**该重读 LAI。原先第一步是 `true`，
+    // 因为 `update_lai` 用的是上一步算出来的那一位（初始化时恰好是 `true`），
+    // 于是每一位都晚一步生效 —— 跨月算例里表现为 5 月第一小时的叶面积取到
+    // 0.2/0.4 的平均值。
     assert_eq!(
         monthly
             .iter()
             .map(|step| (step.update_lai, step.update_albedo, step.update_sst))
             .collect::<Vec<_>>(),
-        vec![(true, true, false), (false, true, false)]
+        vec![(false, true, false), (false, true, false)]
     );
+
+    // 跨月那一支：12 月 31 日 23:00 → 1 月 1 日 01:00，两步的判据分别是
+    // 「都在 12 月」与「12 月 → 1 月」，所以第一位 false、第二位 true。
+    let crossing: Vec<_> = std::iter::from_fn({
+        let mut clock = RuntimeClock::new(
+            time(2008, 365, 82_800),
+            time(2009, 1, 3_600),
+            time(2008, 365, 82_800),
+            3_600.0,
+            1,
+        )
+        .unwrap();
+        move || clock.next_step()
+    })
+    .collect();
+    let crossing_flags: Vec<bool> = crossing.iter().map(|step| step.update_lai).collect();
+    // 只在真正跨月的那一步为真，且**第一步不为真** —— 原来的实现第一步恰好是
+    // `true`（初始化值），并且整体晚一步。
+    assert_eq!(crossing_flags.iter().filter(|flag| **flag).count(), 1);
+    assert!(!crossing_flags[0]);
+    assert!(!(*crossing_flags.last().unwrap()));
 
     let eight_day: Vec<_> = std::iter::from_fn({
         let mut clock = RuntimeClock::with_lai_update_schedule(
@@ -149,12 +174,14 @@ fn clock_carries_colms_lai_update_flags_into_each_driver_step() {
         move || clock.next_step()
     })
     .collect();
+    // 三步里只有第一步跨了八天桶。原来是 `[true, true, false]`：第一步那次是真的
+    // （窗口正好从桶边界起），第二次是上一位漏过来的，最后一位则丢掉了。
     assert_eq!(
         eight_day
             .iter()
             .map(|step| step.update_lai)
             .collect::<Vec<_>>(),
-        vec![true, true, false]
+        vec![true, false, false]
     );
 }
 

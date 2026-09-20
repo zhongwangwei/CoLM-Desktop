@@ -1253,8 +1253,14 @@ fn update_canopy_water(
     if !input.options.vegetation_snow {
         let components = state.canopy_water.rain_mm + state.canopy_water.snow_mm;
         if components > 1.0e-10 {
-            state.canopy_water.rain_mm *= state.canopy_water.total_mm / components;
-            state.canopy_water.snow_mm = state.canopy_water.total_mm - state.canopy_water.rain_mm;
+            // 按比例分回两个分量。**上界要夹到 `total_mm`**：不夹的话
+            // `rain_mm` 可能比 `total_mm` 大一点点（浮点结合律），于是
+            // `snow_mm = total - rain` 变成 −3e-18 —— 一个纯舍入的负水深，
+            // 实测跨月算例里它会把 `intercept_canopy` 的入参校验打掉。
+            let total = state.canopy_water.total_mm;
+            let rain = (state.canopy_water.rain_mm * total / components).clamp(0.0, total);
+            state.canopy_water.rain_mm = rain;
+            state.canopy_water.snow_mm = total - rain;
         } else if state.canopy_water.total_mm > 0.0 {
             if state.leaf_temperature_k > FREEZING_K {
                 state.canopy_water.rain_mm = state.canopy_water.total_mm;

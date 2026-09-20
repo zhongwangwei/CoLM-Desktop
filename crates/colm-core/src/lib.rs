@@ -206,7 +206,9 @@ pub use runoff::{
     StorageRunoffState, TopmodelMethod, TopmodelSubsurfaceInput, TopmodelSurfaceInput,
     TopmodelSurfaceState,
 };
-pub use runtime_clock::{LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeStep};
+pub use runtime_clock::{
+    end_of_step_calendar_time, LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeStep,
+};
 pub use runtime_forcing::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_fraction,
@@ -224,7 +226,7 @@ pub use standard_lct_step::{
     standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step, CanopyGeometry,
     StandardLctEnergyInput, StandardLctEnergyOutput, StandardLctEnergyState,
     StandardLctSnowSoilInput, StandardLctSnowSoilOutput, StandardLctSnowSoilState,
-    StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
+    StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState, TemporalCanopy,
 };
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,

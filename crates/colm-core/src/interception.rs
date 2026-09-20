@@ -340,45 +340,69 @@ fn drainage(
         .min(rain_rate * time_step_seconds - direct_rain_mm)
 }
 
+/// **逐项报名字**：一条合起来的 `ensure!` 只会说"state is invalid"，
+/// 而这一类失败通常只差一个字段（实测跨月运行里 `tlai` 从 0.2 跳到 1.8 之后
+/// 就撞上过它），不知道是哪一个就得靠二分。
 fn validate(input: CanopyInterceptionInput, water: &CanopyWater) -> Result<()> {
-    for value in [
+    let check = |name: &str, passed: bool, value: f64| -> Result<()> {
+        ensure!(passed, "canopy interception {name} is invalid: {value}");
+        Ok(())
+    };
+    check(
+        "time_step_seconds",
+        input.time_step_seconds.is_finite() && input.time_step_seconds > 0.0,
         input.time_step_seconds,
+    )?;
+    check(
+        "maximum_dew_mm",
+        input.maximum_dew_mm.is_finite() && input.maximum_dew_mm >= 0.0,
         input.maximum_dew_mm,
-        input.eastward_wind_m_s,
-        input.northward_wind_m_s,
-        input.leaf_angle_distribution,
+    )?;
+    check(
+        "leaf_area_index",
+        input.leaf_area_index.is_finite() && input.leaf_area_index >= 0.0,
         input.leaf_area_index,
+    )?;
+    check(
+        "stem_area_index",
+        input.stem_area_index.is_finite() && input.stem_area_index >= 0.0,
         input.stem_area_index,
+    )?;
+    check(
+        "leaf_angle_distribution",
+        input.leaf_angle_distribution.is_finite(),
+        input.leaf_angle_distribution,
+    )?;
+    check(
+        "leaf_temperature_k",
+        input.leaf_temperature_k.is_finite(),
         input.leaf_temperature_k,
-        input.convective_rain_kg_m2_s,
-        input.convective_snow_kg_m2_s,
-        input.large_scale_rain_kg_m2_s,
-        input.large_scale_snow_kg_m2_s,
-        input.sprinkler_irrigation_kg_m2_s,
-        water.total_mm,
-        water.rain_mm,
-        water.snow_mm,
+    )?;
+    check(
+        "eastward_wind_m_s",
+        input.eastward_wind_m_s.is_finite(),
+        input.eastward_wind_m_s,
+    )?;
+    check(
+        "northward_wind_m_s",
+        input.northward_wind_m_s.is_finite(),
+        input.northward_wind_m_s,
+    )?;
+    for (name, value) in [
+        ("convective_rain_kg_m2_s", input.convective_rain_kg_m2_s),
+        ("convective_snow_kg_m2_s", input.convective_snow_kg_m2_s),
+        ("large_scale_rain_kg_m2_s", input.large_scale_rain_kg_m2_s),
+        ("large_scale_snow_kg_m2_s", input.large_scale_snow_kg_m2_s),
+        (
+            "sprinkler_irrigation_kg_m2_s",
+            input.sprinkler_irrigation_kg_m2_s,
+        ),
+        ("canopy_water total_mm", water.total_mm),
+        ("canopy_water rain_mm", water.rain_mm),
+        ("canopy_water snow_mm", water.snow_mm),
     ] {
-        ensure!(
-            value.is_finite(),
-            "canopy interception values must be finite"
-        );
+        check(name, value.is_finite() && value >= 0.0, value)?;
     }
-    ensure!(
-        input.time_step_seconds > 0.0
-            && input.maximum_dew_mm >= 0.0
-            && input.leaf_area_index >= 0.0
-            && input.stem_area_index >= 0.0
-            && input.convective_rain_kg_m2_s >= 0.0
-            && input.convective_snow_kg_m2_s >= 0.0
-            && input.large_scale_rain_kg_m2_s >= 0.0
-            && input.large_scale_snow_kg_m2_s >= 0.0
-            && input.sprinkler_irrigation_kg_m2_s >= 0.0
-            && water.total_mm >= 0.0
-            && water.rain_mm >= 0.0
-            && water.snow_mm >= 0.0,
-        "canopy interception state is invalid"
-    );
     Ok(())
 }
 

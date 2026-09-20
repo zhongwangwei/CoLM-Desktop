@@ -399,6 +399,60 @@ struct SnowSoilTemplate {
     ice_water_kg_m2: Vec<f64>,
 }
 
+/// `LAI_readin` 的月度叶/茎面积指数（`DEF_LAI_MONTHLY = .true.`）。
+///
+/// 上游每月重读一次（`CoLM.F90:595-605`），而发生时机有个容易写错的地方：
+/// **它在 `CoLMDRIVER` 之后、`WRITE_TimeVariables` 之前** —— 所以写出重启的那一刻
+/// `tlai`/`tsai` 已经是**下一个月**的值，而 `lai`/`sai` 还是本步按**旧**值折算出来的。
+/// 本仓库照这个顺序做：先跑完步与 `prepare_surface_optics`，再覆盖 `temporal_canopy`。
+///
+/// 数据源与 `mkinidata` 同一份：`USE_SITE_LAI` 打开时取 `srfdata.nc` 的
+/// `LAI_monthly`/`SAI_monthly`（`MOD_LAIReadin.F90:87-88`），关闭时取
+/// `LAI/<年>/LAI_patches<月>.nc` —— 后一条本仓库还没有（landdata 下只有 `srfdata.nc`），
+/// 所以这里**只支持 `USE_SITE_LAI`**，其余情况显式报错而不是静默用旧值。
+#[derive(Debug, Clone)]
+pub struct MonthlyLeafAreaIndex {
+    vegetation: colm_init::SinglePointMonthlyVegetation,
+    /// `DEF_LAI_CHANGE_YEARLY`：为真按**当前年**取，否则按 `DEF_LC_YEAR`。
+    change_yearly: bool,
+    land_cover_year: i32,
+}
+
+impl MonthlyLeafAreaIndex {
+    pub fn read(
+        path: impl AsRef<std::path::Path>,
+        use_site_lai: bool,
+        change_yearly: bool,
+        land_cover_year: i32,
+    ) -> Result<Self> {
+        ensure!(
+            use_site_lai,
+            "DEF_LAI_MONTHLY with USE_SITE_LAI = .false. needs the LAI/<year>/LAI_patches<month>.nc \
+             files, which this port does not read yet; set USE_SITE_LAI = .true. or \
+             DEF_LAI_MONTHLY = .false."
+        );
+        Ok(Self {
+            vegetation: colm_init::read_single_point_monthly_vegetation(path)?,
+            change_yearly,
+            land_cover_year,
+        })
+    }
+
+    /// `LAI_readin(lai_year, month, ...)`：`lai_year` 按 `DEF_LAI_CHANGE_YEARLY` 选。
+    ///
+    /// `for_year` 最后两个参数是 `USE_SITE_LAI = .false.` 那一支的年界；
+    /// 构造时已经拒绝那一支，所以传 0（`lai_year_index` 只在另一支用它们）。
+    pub fn for_time(&self, time: colm_core::CalendarTime) -> Result<(f64, f64)> {
+        let (month, _) = colm_core::month_day(time)?;
+        let year = if self.change_yearly {
+            time.year
+        } else {
+            self.land_cover_year
+        };
+        self.vegetation.for_year(year, month, true, 0, 0)
+    }
+}
+
 /// 一个 patch 的静态与演化态，已从重启读出并按内核形状组织。
 ///
 /// 所有字段自有，`input()` 再借出去 —— 内核的 `StandardLctSoilInput` 全是切片，
@@ -443,6 +497,11 @@ pub struct StandardLctRestartTemplate {
     pub snow_cover_fraction: f64,
     /// 重启里的 `sigf`：第一步的 `sai = tsai*sigf` 用的就是它。
     pub snow_free_vegetation_fraction: f64,
+    /// `LAI_readin` 的月度叶面积（`DEF_LAI_MONTHLY` 打开时才有）。
+    ///
+    /// `None` 表示这个算例不按月重读（或者装配方没给 landdata 路径）——
+    /// 那时 `tlai`/`tsai` 整段保持装配期的值，与上游关闭 `DEF_LAI_MONTHLY` 时一致。
+    pub monthly_leaf_area_index: Option<MonthlyLeafAreaIndex>,
     /// 常数重启里的四个宽带裸土反照率（`soil_s_v_alb` 等）。
     ///
     /// **不能**用 `land_cover_soil_reflectance` 顶替：那是地类色表给的默认值，而
@@ -858,6 +917,8 @@ fn assemble(
         temporal_stem_area_index,
         snow_cover_fraction,
         snow_free_vegetation_fraction,
+        // 默认不按月重读；调用方用 [`Self::with_monthly_leaf_area_index`] 装上。
+        monthly_leaf_area_index: None,
         soil_reflectance,
         land_class,
         wue_lambda: class.wue_lambda(),
@@ -876,6 +937,35 @@ fn assemble(
 }
 
 impl StandardLctRestartTemplate {
+    /// 装上月度 LAI 重读（`DEF_LAI_MONTHLY = .true.`）。
+    ///
+    /// 做成 builder 而不是 `assemble_*` 的参数：装配函数只认重启与物理参数，
+    /// 而 landdata 路径要算例名与输出目录，那是 `colm-rs` 才知道的东西。
+    pub fn with_monthly_leaf_area_index(mut self, lai: MonthlyLeafAreaIndex) -> Self {
+        self.monthly_leaf_area_index = Some(lai);
+        self
+    }
+
+    /// `LAI_readin` 那一步：月份变了就把 `tlai`/`tsai` 换成新一个月的。
+    ///
+    /// 返回是否真的换了（调用方据此判断"这一步跨月了"）。上游的判据是
+    /// `month /= month_p`（步首月 ≠ 步末月），时钟的 `update_lai` 就是这一位。
+    pub fn refresh_monthly_leaf_area_index(
+        &self,
+        time: colm_core::CalendarTime,
+        state: &mut StandardLctSnowSoilState,
+    ) -> Result<bool> {
+        let Some(lai) = &self.monthly_leaf_area_index else {
+            return Ok(false);
+        };
+        let (tlai, tsai) = lai.for_time(time)?;
+        state.energy.temporal_canopy = colm_core::TemporalCanopy {
+            leaf_area_index: tlai,
+            stem_area_index: tsai,
+        };
+        Ok(true)
+    }
+
     /// 从装配结果取出可持久化的状态。
     ///
     /// 克隆而非借用：`StandardLctSoilState` 自有的那三个数组会被内核就地推进，
@@ -891,6 +981,12 @@ impl StandardLctRestartTemplate {
                     stem_area_index: self.stem_area_index,
                     // 重启里的 `sigf` 是上一次写出时的值；第一步的 `sai` 就是它乘出来的。
                     vegetation_free_fraction: self.snow_free_vegetation_fraction,
+                },
+                // `tlai`/`tsai` 是**原始**时间变量，每步末尾由 `prepare_surface_optics`
+                // 拿它们折算 `lai`/`sai`；`LAI_readin` 每月覆盖它。
+                temporal_canopy: colm_core::TemporalCanopy {
+                    leaf_area_index: self.temporal_leaf_area_index,
+                    stem_area_index: self.temporal_stem_area_index,
                 },
             },
             temperature_k: self.temperature_k.clone(),
@@ -1189,6 +1285,12 @@ impl StandardLctRestartTemplate {
                     // 重启里的 `sigf` 是上一次写出时的值；第一步的 `sai` 就是它乘出来的。
                     vegetation_free_fraction: self.snow_free_vegetation_fraction,
                 },
+                // `tlai`/`tsai` 是**原始**时间变量，每步末尾由 `prepare_surface_optics`
+                // 拿它们折算 `lai`/`sai`；`LAI_readin` 每月覆盖它。
+                temporal_canopy: colm_core::TemporalCanopy {
+                    leaf_area_index: self.temporal_leaf_area_index,
+                    stem_area_index: self.temporal_stem_area_index,
+                },
             },
             snow: self.snow.clone(),
             soil_temperature_k: self.temperature_k.clone(),
@@ -1221,8 +1323,8 @@ impl StandardLctRestartTemplate {
                 time_step_seconds: self.physics.timestep_seconds,
                 cosine_zenith: step.cosine_zenith,
                 ground_temperature_k: step.ground_temperature_k,
-                temporal_leaf_area_index: self.temporal_leaf_area_index,
-                temporal_stem_area_index: self.temporal_stem_area_index,
+                temporal_leaf_area_index: state.energy.temporal_canopy.leaf_area_index,
+                temporal_stem_area_index: state.energy.temporal_canopy.stem_area_index,
                 momentum_roughness_m: step.momentum_roughness_m,
                 soil_roughness_m: self.physics.soil_roughness_m,
                 snow_cover_exponent: self.physics.snow_cover_exponent,

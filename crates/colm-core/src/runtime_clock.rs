@@ -151,13 +151,18 @@ impl RuntimeClock {
         let end_time = tick(self.current, self.step_seconds);
         let next_forcing_time = begin_style(end_time);
         let next_elapsed = tick(self.elapsed, self.elapsed_step_seconds);
+        // **本步**的 LAI 标志，不是上一步的：上游比的是 `month /= month_p`，两边都是
+        // 这一步自己的（步首月 vs 步末月，`CoLM.F90:434` 与 `:484`）。原先写成
+        // `update_lai: self.update_lai` 再在下面重算，于是每一位都晚一步生效 ——
+        // 实测跨月算例里 5 月第一小时的记录是 0.2/0.4 的**平均 0.3**，而不是 0.4。
+        let update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_schedule);
         let step = RuntimeStep {
             index: self.index,
             forcing_time,
             end_time,
             is_spinup: self.is_spinup,
             spinup_cycle: self.spinup_cycle,
-            update_lai: self.update_lai,
+            update_lai,
             update_albedo: true,
             update_sst: false,
             write_restart: restart_due(
@@ -171,7 +176,7 @@ impl RuntimeClock {
         };
         self.current = step.end_time;
         self.elapsed = next_elapsed;
-        self.update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_schedule);
+        self.update_lai = update_lai;
         if self.is_spinup && !before(self.elapsed, self.spinup_until) {
             if self.spinup_cycle < self.spinup_repeats {
                 self.spinup_cycle += 1;
@@ -242,6 +247,15 @@ fn month(time: CalendarTime) -> u8 {
         day -= *days as u16;
     }
     unreachable!("RuntimeClock validates its Julian day")
+}
+
+/// 把"当日末尾"的写法（`seconds == 86_400`）归一成第二天 `00:00`。
+///
+/// 需要它是因为时钟交出来的 `end_time` 保留 `86400` 这个写法，而**按步末取月份**的
+/// 调用方（`LAI_readin` 的 `month` 就是 `CoLM.F90:484` 在 `TICKTIME` 之后算的）
+/// 会把 1 月 31 日 24:00 读成 1 月 —— 少一个月。
+pub fn end_of_step_calendar_time(time: CalendarTime) -> CalendarTime {
+    begin_style(time)
 }
 
 fn end_style(time: CalendarTime) -> Result<CalendarTime> {

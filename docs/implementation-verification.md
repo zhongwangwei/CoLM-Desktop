@@ -3363,3 +3363,56 @@ self.update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_sched
 实现要点：`tlai`/`tsai` 现在是**装配期的不可变字段**，而运行期需要它们可变；
 解法与 `lai`/`sai` 那次一样 —— 把它们放进运行态（或每步从运行态取），
 而不是继续留在模板里。`update_lai` 已经算好了，直接用。
+
+## 接上月度 LAI 重读（2026 年，实测）
+
+按上一节说的做了。改动四处：
+
+1. **`tlai`/`tsai` 从装配期常量变成运行态**：新增 `TemporalCanopy` 放进
+   `StandardLctEnergyState`，`prepare_surface_optics` 改从状态里取。
+   与既有的 `CanopyGeometry`（每步折算后的**有效**值）分开存 —— 用有效值再折算一次
+   就是重复相乘。
+2. **`MonthlyLeafAreaIndex`**（`assembly.rs`）：读 `srfdata.nc` 的
+   `LAI_monthly`/`SAI_monthly`（`USE_SITE_LAI` 那一支），`for_time` 复刻
+   `LAI_readin(lai_year, month, ...)` 的年份选择。`USE_SITE_LAI = .false.`
+   要的 `LAI/<年>/LAI_patches<月>.nc` 本仓库还没读，**显式报错**而不是静默用旧值。
+3. **`colm-rs` 装上它**：`DEF_LAI_MONTHLY` 打开时从 `<out>/<case>/landdata/srfdata.nc`
+   读，缺文件就报错。做成 builder（`with_monthly_leaf_area_index`）而不是装配参数，
+   因为 landdata 路径要算例名与输出目录。
+4. **顺序照上游**：`LAI_readin` 在 `CoLMDRIVER`（含末尾那一节）与 `hist_out`
+   **之后**、`WRITE_TimeVariables` **之前**，所以这一步 history 记的仍是旧
+   `tlai`/`tsai` 折算的 `lai`/`sai`，而重启里的 `tlai`/`tsai` 已是新一个月。
+   月份取**步末**（`CoLM.F90:484`），所以先把 `86400` 的写法退位
+   （新增 `colm_core::end_of_step_calendar_time`）。
+
+### 顺带修掉的两个真 bug
+
+**一、`update_lai` 晚一步生效。** `RuntimeClock::next_step` 先
+`update_lai: self.update_lai` 再在下面重算，于是每一步拿到的是**上一步**算出来的那一位
+（第一步还拿到初始化时的 `true`）。跨月算例里表现为 5 月第一小时的 `f_lai` 是
+0.2/0.4 的**平均 0.3**。改成先算本步的再构造。回归测试原来钉的正是错的行为
+（`[true, false]`、`[true, true, false]`），已一并改成正确的，并补了一个跨年跨月的用例。
+
+**二、冠层水的雪分量会出 −3e-18。** `update_canopy_water` 里
+`snow_mm = total_mm - rain_mm`，而 `rain_mm` 由比例分回时可能比 `total_mm` 大一点点
+（浮点结合律），于是雪分量是**负的舍入残差**。它把 `intercept_canopy` 的入参校验打掉，
+跨月算例到此直接失败。修法是把 `rain_mm` 夹到 `[0, total_mm]`。
+同时把那句合成的大 `ensure!` 拆成逐项报名字（实测只知道"state is invalid"要二分）。
+
+### 实测
+
+CN-Cng 对齐算例从 1 月 1 日跑到 7 月 5 日（**8976 步**、7 个 history 文件），
+Rust 全程跑通，`f_lai` 的月序列是 0.2 → 0.2 → 0.2 → 0.2 → 0.4 → 0.7 → **1.8**，
+与 `srfdata.nc` 的 `LAI_monthly` 逐月一致（`LAI_monthly` = 0.2,0.2,0.2,0.2,0.4,0.7,
+**1.8**,1.5,0.7,0.4,0.2,0.2）。修 `update_lai` 之前 7 月只到 0.7（6 月的值）。
+
+### 两个还没解决的
+
+* **Fortran 在 7 月自己崩了**：`colm-cli run --stage colm` 在第 8854 步
+  （2008-07-03 10:30）收到 `SIGILL`（`-ffpe-trap` 一类），7 月的 history 文件因此
+  只写了维度、没有数据。所以**暖季的蒸腾验证仍然缺参照** —— 障碍在参照那一侧，
+  不在本仓库。下一步要先弄清上游在这个配置下为什么会在夏天触发浮点异常。
+* **按月分组的边界差一条记录**：Fortran 的 4 月文件最后一条是 `56976450`
+  （5 月 1 日 00:00），5 月文件从 `56976510`（01:00）开始；Rust 把 00:00 那条算进了 5 月。
+  那一刻的累积区间是 4 月 30 日 23:00→5 月 1 日 00:00，归 4 月才是自然的。
+  这是 `colm-hist` 调度的分组选择问题，黄金算例（整段在 1 月内）测不到它。

@@ -50,6 +50,19 @@ pub struct StandardLctEnergyInput<'a> {
 /// `netsolar` 与叶温三层都读它们，所以必须跟着状态走，否则一个从无雪起步的算例
 /// 会整段用启动时刻的冠层几何。装配期给的那一对是**第一步**的值（上游也是从重启读）。
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TemporalCanopy {
+    /// `tlai`：`LAI_readin` 读进来的总叶面积（不含雪盖折算）。
+    pub leaf_area_index: f64,
+    /// `tsai`。
+    pub stem_area_index: f64,
+}
+
+/// 上游的 `lai`/`sai` 时间变量（`CoLMMAIN.F90:2097-2102`）。
+///
+/// 与 [`TemporalCanopy`] 的分工：那一个是 `LAI_readin` 每月重读进来的**原始**值，
+/// 这一个是每步末尾按雪盖折算后的**有效**值。用有效值再去折算一次就是重复相乘，
+/// 所以两者必须分开存。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CanopyGeometry {
     pub leaf_area_index: f64,
     pub stem_area_index: f64,
@@ -67,6 +80,8 @@ pub struct StandardLctEnergyState {
     pub leaf: LeafTemperatureState,
     /// `lai`/`sai`：见 [`CanopyGeometry`]。
     pub canopy: CanopyGeometry,
+    /// `tlai`/`tsai`：见 [`TemporalCanopy`]。`LAI_readin` 每月覆盖它。
+    pub temporal_canopy: TemporalCanopy,
 }
 
 /// 用状态里的冠层几何覆盖输入里的 `lai`/`sai`。

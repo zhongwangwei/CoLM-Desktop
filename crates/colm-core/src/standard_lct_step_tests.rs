@@ -346,6 +346,10 @@ fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
             stem_area_index: 0.5,
             vegetation_free_fraction: 1.0,
         },
+        temporal_canopy: TemporalCanopy {
+            leaf_area_index: 2.0,
+            stem_area_index: 0.5,
+        },
     }
 }
 
