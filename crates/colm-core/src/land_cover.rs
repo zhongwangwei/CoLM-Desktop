@@ -30,6 +30,18 @@ pub fn land_cover_classes(scheme: LandCoverScheme) -> usize {
     }
 }
 
+/// `WATERBODY`：`MOD_Vars_Global.F90:25,37` —— USGS 16、IGBP 17。
+///
+/// **必须显式给**，不能只靠 `fveg0 > 0`：两张 `FVEG0_*` 表**每一类都是 1.0**，
+/// 水体也不例外，所以"覆盖度为正"判不出水体。`MOD_LAIReadin.F90:128` 第一句就是
+/// `IF (m == 0 .or. m == WATERBODY) green = 0`。
+pub fn waterbody_class(scheme: LandCoverScheme) -> usize {
+    match scheme {
+        LandCoverScheme::Igbp => 17,
+        LandCoverScheme::Usgs => 16,
+    }
+}
+
 /// `DEF_RootReachScheme` / `ROOTFR_SCHEME`：上默认与备用的两套根系分布。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootFractionScheme {
@@ -135,6 +147,13 @@ impl ClassConstants {
     /// `sqrtdi`：叶片尺度的 `m**-0.5`。
     pub fn inverse_sqrt_leaf_dimension_m_neg_half(&self) -> f64 {
         self.value(|table| table.sqrtdi)
+    }
+
+    /// `fveg0`：该地类的最大植被覆盖度。
+    ///
+    /// `MOD_LAIReadin.F90:132-143` 用它判 `green`：`fveg0(m) > 0` 才是绿叶。
+    pub fn maximum_vegetation_fraction(&self) -> f64 {
+        self.value(|table| table.fveg0)
     }
 
     /// `chil`：叶倾角分布参数，即内核里的 `leaf_angle_distribution`。

@@ -525,6 +525,11 @@ pub struct StandardLctRestartTemplate {
     pub leaf_angle_distribution: f64,
     pub inverse_sqrt_leaf_dimension_m_neg_half: f64,
     pub biochemistry: LeafBiochemistry,
+    /// `green`：绿叶比例（`MOD_LAIReadin` 每步/每月重算）。
+    ///
+    /// 它由静态配置（地类号与 `fveg0`）定，所以装配期算一次就够；
+    /// history 的 `f_green` 直接取它。
+    pub vegetation_greenness: f64,
     /// 重启里的雪列。无雪分支下 `layer_count == 0`；留着是因为上游每步都要按它
     /// 判断走不走积雪路径，而雪分支的装配要直接用它。
     pub snow: RuntimeSnowColumn,
@@ -832,6 +837,16 @@ fn assemble(
             )
         })?;
     let class = ClassConstants::new(physics.land_cover_scheme, land_class)?;
+    // `MOD_LAIReadin.F90:128-145`（`USE_SITE_LAI` 那条）：水体与地类 0 是 0，
+    // 否则看 `fveg0`。地类 0 在上面的校验里已经被拒，所以只剩水体那一条。
+    let vegetation_greenness = if land_class
+        == colm_core::waterbody_class(physics.land_cover_scheme)
+        || class.maximum_vegetation_fraction() <= 0.0
+    {
+        0.0
+    } else {
+        1.0
+    };
     // 两份 patchtype 必须一致：一份来自地类表，一份来自重启。不一致说明这个 patch
     // 的类别与它被写进重启时用的地类表不是同一套 —— 那会让下面每一项都不可信。
     ensure!(
@@ -934,6 +949,7 @@ fn assemble(
         leaf_angle_distribution,
         inverse_sqrt_leaf_dimension_m_neg_half,
         biochemistry,
+        vegetation_greenness,
         snow,
         restart_columns,
         surface_diagnostics,

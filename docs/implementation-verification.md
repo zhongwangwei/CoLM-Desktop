@@ -4472,3 +4472,41 @@ f_ustar2  F[0.0987, 1.0224]  R[0.0996, 1.0225]  maxdiff 1.27e-3  (0.12%)
 **教训第二次生效：** 清单里写"缺某支 routine/某条通路"时，先去看
 `Shaofeng` 这类**日期标注**到底是新模块还是既有调用 ——
 这两轮（`alb` 的四维通路、10 m 的廓线 routine）都是把已有能力误记成缺失。
+
+## `green` 也不需要新表：规则在 `LAIReadin`，而 `fveg0` 本仓库早就有（2026 年，实测）
+
+`UNFILLED` 里写的是"`green` 由 `MOD_LAIEmpirical.F90:132-135` 的硬编码 `vegc` 表得出，
+本仓库还没搬"—— **又是一条把已有能力误记成缺失的条目**（第三轮了）。
+
+算例是 `USE_SITE_LAI = .true.`，走的是 `MOD_LAIReadin.F90`，不是 `MOD_LAIEmpirical`：
+
+```fortran
+IF (m == 0 .or. m == WATERBODY) THEN
+   green = 0.
+ELSE
+   fveg = fveg0(m)
+   IF (fveg0(m) > 0) THEN ...; green = 1.
+   ELSE tlai = 0.; tsai = 0.; green = 0.
+   ENDIF
+ENDIF
+```
+
+而 `fveg0` **就在本仓库的地类表里**（`land_cover_generated.rs` 的 `fveg0`，
+`ClassConstants` 加一个取值器即可）。地类 0 在装配期已被拒（"class 0 is ocean"），
+所以只剩水体那一条要判。
+
+### 关键细节：光看 `fveg0` 判不出水体
+
+两张 `FVEG0_*` 表**每一类都是 1.0 —— 水体也是 1.0**。所以"覆盖度为正即绿叶"
+这个看着等价的简化会把水体判成 1，而黄金算例的地类不是水体、`f_green ≡ 1`，
+**那个错在黄金回归里看不出来**。`WATERBODY` 是 `MOD_Vars_Global.F90:25,37`
+的编译期常量（USGS 16、IGBP 17），必须显式带过来
+（`colm_core::waterbody_class`）。单测
+`the_water_body_class_cannot_be_told_apart_by_vegetation_fraction`
+两头都钉：常量是 17/16，**且水体的 `fveg0` 确实是 1.0** ——
+后半句才是"为什么不能省"的证据。
+
+对齐算例实测：`f_green` 两边**逐位相同**（都是 1.0）。缺口 11 → **10**。
+
+`UNFILLED` 相应缩到两条，并顺手修掉上一轮遗留的一处过期描述
+（那一组里 `us10m`/`vs10m`/`fm10m`/`ustar2` 上一轮已经写完，条目却没删）。

@@ -176,3 +176,24 @@ fn the_exponential_scheme_does_not_conserve_the_total() {
         }
     }
 }
+
+/// 水体那一类**必须靠显式常量**判，光看 `fveg0` 判不出来。
+///
+/// `MOD_LAIReadin.F90:128-143` 的规则是
+/// `IF (m == 0 .or. m == WATERBODY) green = 0; ELSE IF (fveg0(m) > 0) green = 1`。
+/// 关键在于两张 `FVEG0_*` 表**每一类都是 1.0**，水体也不例外 ——
+/// 所以"覆盖度为正即绿叶"这条看着等价的简化会把水体判成 1，
+/// 而黄金算例的地类不是水体、`f_green ≡ 1`，那个错**看不出来**。
+#[test]
+fn the_water_body_class_cannot_be_told_apart_by_vegetation_fraction() {
+    assert_eq!(waterbody_class(LandCoverScheme::Igbp), 17);
+    assert_eq!(waterbody_class(LandCoverScheme::Usgs), 16);
+    for scheme in [LandCoverScheme::Igbp, LandCoverScheme::Usgs] {
+        let water = ClassConstants::new(scheme, waterbody_class(scheme)).unwrap();
+        assert_eq!(
+            water.maximum_vegetation_fraction(),
+            1.0,
+            "{scheme:?}: the table gives water full cover, so fveg0 alone is not enough"
+        );
+    }
+}

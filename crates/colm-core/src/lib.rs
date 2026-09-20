@@ -158,7 +158,8 @@ pub use lake::{
     LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
 };
 pub use land_cover::{
-    land_cover_classes, land_cover_tables, root_fraction, ClassConstants, RootFractionScheme,
+    land_cover_classes, land_cover_tables, root_fraction, waterbody_class, ClassConstants,
+    RootFractionScheme,
 };
 pub use leaf_temperature::{
     leaf_temperature, LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOptions,

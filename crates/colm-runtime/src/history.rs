@@ -203,7 +203,7 @@ const ICE_DENSITY_KG_M3: f64 = 917.0;
 /// `fveg = vegc(ivt)` 得出（`green = 0.; IF (fveg > 0.) green = 1.`），
 /// 而 `vegc` 是 `MOD_Const_LC` 的地类表列，本仓库还没把它搬进来 ——
 /// 在这个算例上它恒为 1（`fveg > 0`），但"恒为 1"不是实现依据。
-pub const LCT_CANOPY_VARIABLES: [&str; 3] = ["sigf", "laisun", "laisha"];
+pub const LCT_CANOPY_VARIABLES: [&str; 4] = ["sigf", "laisun", "laisha", "green"];
 
 /// 本层能填的**短波分带**量，十七项。
 ///
@@ -296,10 +296,9 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 3] = [
-    "`green`：上游由 `MOD_LAIEmpirical.F90:132-135` 从 `fveg = vegc(ivt)` 得出，而 `vegc` 是该模块内的硬编码表（IGBP 那支 17 项：15=Snow/Ice、17=Water 为 0，其余 1），本仓库还没搬；本算例地类 10 恒为 1，但\"恒为 1\"不是实现依据",
+pub const UNFILLED: [&str; 2] = [
     "`xerr`/`zerr`/`xy_rain`/`xy_snow`：四项都是普通 `acc1d` + `filter`/`nac`，值也在（水平衡残差、能量平衡残差、雨雪拆分），只差接线与各自残差的定义核对",
-    "`us10m`/`vs10m`/`fm10m`/`ustar2`（另一支 `Shaofeng, 2023` 廓线 routine）、`t_lake`/`lake_icefrac`/`lake_deficit`（湖泊分支）、`wetwat`/`wetwat_inst`/`wetzwt`（湿地分支）：整支 routine 或分支尚未驱动",
+    "`t_lake`/`lake_icefrac`/`lake_deficit`（湖泊分支）、`wetwat`/`wetwat_inst`/`wetzwt`（湿地分支）：六个量都只是 `acc1d`/`acc2d` + `filter`/`nac`，**规则不难，难在没有运行时驱动** —— 上游只在 `patchtype == 1`（湖）或`DEF_USE_WETLAND` 下设它们",
 ];
 /// 声明本层能填的全部变量：状态十三项 + 水文六项 + 能量四项 + 地表十三项。
 pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
@@ -936,9 +935,13 @@ pub fn set_lct_canopy_geometry(
     record: usize,
     state: &colm_core::StandardLctEnergyState,
     energy: &colm_core::StandardLctEnergyOutput,
+    template: &StandardLctRestartTemplate,
 ) -> Result<()> {
     for (name, value) in [
         ("sigf", state.canopy.vegetation_free_fraction),
+        // `green` 由静态配置定，装配期算好后存在模板上（见
+        // `StandardLctRestartTemplate::vegetation_greenness`）。
+        ("green", template.vegetation_greenness),
         ("laisun", energy.leaf.sunlit_leaf_area_index),
         ("laisha", energy.leaf.shaded_leaf_area_index),
     ] {
@@ -1268,7 +1271,7 @@ impl HistorySession {
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
-            set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy)?;
+            set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy, template)?;
             set_lct_derived_soil(
                 accumulator,
                 0,
@@ -1332,7 +1335,7 @@ impl HistorySession {
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
-            set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy)?;
+            set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy, template)?;
             set_lct_derived_soil(
                 accumulator,
                 0,
