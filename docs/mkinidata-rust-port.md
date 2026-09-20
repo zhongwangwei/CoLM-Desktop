@@ -225,8 +225,14 @@ reusing that generator as-is will not work:
 - eight leaf-optical properties exist twice, as `_pc` and `_default`, chosen by a
   compile-time/PC branch rather than written once.
 
-Beyond that: a driver for the active-snow chain and the PFT/PC/urban/BGC branches, the
-history writer wired to per-step field values, a Rust `colm` executable that consumes
+The active-snow chain now has its reader: `RuntimeSnowColumn::from_restart` derives the
+layer count, the interface depths and `fiold` the way `CoLMMAIN.F90:816-845` does, because
+the restart cannot state them. What it still needs is a snow-bearing test fixture, an
+assembly template that produces `StandardLctSnowSoilInput`, and the driver call — the same
+three steps the regular-soil branch went through.
+
+Beyond that: a driver for the PFT/PC/urban/BGC branches, the history writer wired to
+per-step field values, a Rust `colm` executable that consumes
 `PointRuntime::run_restart_standard_lct` (nothing outside `colm-runtime` does yet), and the
 third-stage cutover itself.
 
