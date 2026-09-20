@@ -1436,9 +1436,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(outcome.steps, 8);
-        // 分组由**写入时刻**的日期决定，不是它覆盖的那个区间：写于 1 月 31 日 23:00 的
-        // 那条落在一月，写于 2 月 1 日 00:00 的那条已经落在二月。所以一月只有一条、
-        // 二月有三条 —— 边界正好在午夜。
+        // 分组取的是上游 `hist_out` 里 `idate` 的 **end-style 日期**：月末 24:00 记作
+        // 当月最后一天的 `86400` 秒，所以写于 2 月 1 日 00:00 的那条仍属于**一月**。
+        // 一月两条（23:00、00:00），二月剩下三条。
         let mut names = outcome
             .files
             .iter()
@@ -1462,10 +1462,16 @@ mod tests {
             .unwrap()
             .get_values::<i32, _>(..)
             .unwrap();
-        assert_eq!(times.len(), 1, "January keeps only the 23:00 write");
+        assert_eq!(
+            times.len(),
+            2,
+            "January keeps the 23:00 and the 00:00 write"
+        );
         // 写于 23:00 的记录标签是 22:30。
-        let february_after_one = times[0];
-        assert_eq!(february_after_one % 60, 30);
+        assert_eq!(times[0] % 60, 30);
+        // 一月的最后一条就是 2 月 1 日 00:00 那条（标签 23:30）。
+        assert_eq!(times[1] - times[0], 60);
+        let january_last = times[1];
         let february = netcdf::open(
             outcome
                 .files
@@ -1479,11 +1485,10 @@ mod tests {
             .unwrap()
             .get_values::<i32, _>(..)
             .unwrap();
-        assert_eq!(times.len(), 3, "February takes 00:00, 01:00 and 02:00");
+        assert_eq!(times.len(), 2, "February takes the 01:00 and 02:00 writes");
         assert_eq!(times[1] - times[0], 60);
-        assert_eq!(times[2] - times[1], 60);
         // 相邻两条跨月但连续：一月的最后一条比二月的第一条早一小时。
-        assert_eq!(times[0] - february_after_one, 60);
+        assert_eq!(times[0] - january_last, 60);
         assert_eq!(session.remaining(), 0);
     }
 

@@ -73,11 +73,14 @@ fn daily_grouping_splits_one_file_per_day() {
         timestep_seconds: 1_800,
     };
     let groups = schedule(window, HistoryFrequency::Daily, HistoryGrouping::Day).unwrap();
-    // 写点在**区间末尾**（次日 00:00），文件名后缀取的是写点那一天，所以
-    // 不会出现 01-01 那个文件；标签再往前挪 12 小时 = 01-01 12:00。
+    // 写点虽然在**区间末尾**（次日 00:00），但分组取的是上游 `hist_out` 里
+    // `idate` 的 **end-style 日期** —— 月末/日末 24:00 记作那一天的 `86400` 秒，
+    // `julian2monthday(idate(1), idate(2), ...)` 因此把它算回**前一天**。
+    // 所以 01-02 00:00 那条进 `2008-01-01` 的文件（实测 Fortran 的 4 月文件
+    // 最后一条正是 5 月 1 日 00:00，而 `time` 标签仍是写点本身）。
     assert_eq!(
         groups.iter().map(|g| g.suffix.as_str()).collect::<Vec<_>>(),
-        vec!["2008-01-02", "2008-01-03"]
+        vec!["2008-01-01", "2008-01-02"]
     );
     for group in &groups {
         assert_eq!(group.labels_minutes.len(), 1);

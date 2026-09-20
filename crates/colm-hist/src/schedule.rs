@@ -161,8 +161,21 @@ pub fn schedule_records(
         let due =
             next == end || frequency == HistoryFrequency::Timestep || period_ends(next, frequency);
         if due {
-            let (year, julian_day, _) =
-                civil_from_seconds(next).expect("the window lies inside the supported calendar");
+            // 分组用的是**步末的 end-style 日期**，不是写入时刻本身。
+            //
+            // 上游 `hist_out` 里的 `idate` 是 `TICKTIME` 之后的写法：月末 24:00 记作
+            // "当月最后一天 86400 秒"，`julian2monthday(idate(1), idate(2), month, day)`
+            // 因此把 5 月 1 日 00:00 那条算进 **4 月**。实测 Fortran 的 4 月文件最后一条
+            // 正是 `56976450`（5 月 1 日 00:00），5 月文件从 `56976510`（01:00）开始。
+            //
+            // 而 `time` 标签用的是写入时刻本身（`next / 60`），两者**不同** ——
+            // 把标签也退一秒会让时间轴整体错位。
+            //
+            // 同一条也是重启目录名的依据，但那边走的是 `jdate`（`adj2begin` 之后），
+            // 所以重启名是 begin-style 的 `2008-037-00000`，与这里相反。
+            let suffix_tick = if next % 86_400 == 0 { next - 1 } else { next };
+            let (year, julian_day, _) = civil_from_seconds(suffix_tick)
+                .expect("the window lies inside the supported calendar");
             let suffix = grouping.file_suffix(year, julian_day);
             // 标签是写入时刻的分钟数（截断）再减去固定位移。
             let label = next / 60 - shift;
