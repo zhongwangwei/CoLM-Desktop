@@ -1520,3 +1520,27 @@ GUI 那条链不受影响：它不依赖 `colm-runtime`）。
 - 换分组前不落盘，`finish()` 才写出文件，文件里变量与标签都在。
 
 `cargo test -p colm-hist`：42 通过 —— `schedule` 的输出在重构前后不变。
+
+## 驱动方法带 history（2026 年）
+
+`PointRuntime::run_restart_standard_lct_with_history` 与 `..._snow_with_history` 把
+`HistorySession` 包进循环：同一个钟、同一份绑定、同一笔事务，多的只是每步结束后把
+**步后状态**与诊断写进 session。它返回 `HistoryRunOutcome { steps, files }`。
+
+**运行比窗口短时必须在落盘前报错。** `run_with_state` 返回后先 `finish()` 落盘、再检查
+`session.remaining() == 0` —— 顺序反了就没意义：一个没走完调度的运行会写出一个**满是零**的
+记录文件，而那读起来与真实数据没有区别。测试直接跑一步、调度开三小时，断言报错且信息里
+点名还有几条没写。
+
+顺带把"POINT 算例的 history 维度"提成公开的 `point_dimensions()`：那些长度由内核编译期
+常量决定（`nl_soil = 10`、`maxsnl = -5`、`nvegwcs = 4`…），不由算例文件携带。原先它在测试里，
+名字带 `test_` 前缀，对公开 API 来说是错的命名。
+
+### 证据
+
+新增两条运行时测试：
+
+- 真实三小时窗口（六步、HOURLY）→ `outcome.steps == 6`、一个文件
+  `CN-Cng_hist_2008-01.nc`，`time` 为 `[56802270, 568022330, 568022390]`
+  ——与黄金文件头三个值逐位相同，且 `session.remaining() == 0`；
+- 一步的运行 + 三小时的调度 → 报 `still unwritten`。

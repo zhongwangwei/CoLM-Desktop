@@ -66,6 +66,13 @@ pub struct PointDownscalingTemplate<'a> {
     pub config: ForcingDownscalingConfig,
 }
 
+/// 一次带 history 的运行的产出：走了多少步、写了哪些文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRunOutcome {
+    pub steps: usize,
+    pub files: Vec<PathBuf>,
+}
+
 /// One committed `read_forcing → downscale_forcings` runtime hand-off.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DownscaledPointRuntimeStep {
@@ -218,6 +225,73 @@ impl PointRuntime {
             let output = standard_lct_soil_step(template.input(&binding), next)?;
             on_step(step, &output)
         })
+    }
+
+    /// Runs the no-snow branch **and** writes history through the schedule.
+    ///
+    /// Same loop, same binding, same transaction as [`Self::run_restart_standard_lct`];
+    /// the only addition is that each step's post-step state and diagnostics go into
+    /// `session`. When the loop ends the session must have consumed its whole schedule —
+    /// a run that stops short would otherwise flush a file full of zero-valued records,
+    /// which reads exactly like real data.
+    pub fn run_restart_standard_lct_with_history<F>(
+        &mut self,
+        template: &StandardLctRestartTemplate,
+        state: &mut StandardLctSoilState,
+        session: &mut crate::history::HistorySession,
+        mut on_step: F,
+    ) -> Result<HistoryRunOutcome>
+    where
+        F: FnMut(PointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
+    {
+        let (greenwich_time, longitude_degrees, co2_scenario) =
+            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let steps = self.run_with_state(state, |step, next| {
+            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let output = standard_lct_soil_step(template.input(&binding), next)?;
+            session.push_lct(step.clock.end_time, template, next, &output)?;
+            on_step(step, &output)
+        })?;
+        let files = session.finish()?;
+        ensure!(
+            session.remaining() == 0,
+            "the run ended with {} history record(s) still unwritten; the window and the \
+             schedule disagree",
+            session.remaining()
+        );
+        Ok(HistoryRunOutcome { steps, files })
+    }
+
+    /// Runs the snow branch **and** writes history through the schedule.
+    ///
+    /// The snow sibling of [`Self::run_restart_standard_lct_with_history`].
+    pub fn run_restart_standard_lct_snow_with_history<F>(
+        &mut self,
+        template: &StandardLctRestartTemplate,
+        state: &mut StandardLctSnowSoilState,
+        session: &mut crate::history::HistorySession,
+        mut on_step: F,
+    ) -> Result<HistoryRunOutcome>
+    where
+        F: FnMut(PointRuntimeStep, &StandardLctSnowSoilOutput) -> Result<()>,
+    {
+        let (greenwich_time, longitude_degrees, co2_scenario) =
+            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let steps = self.run_with_state(state, |step, next| {
+            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let output =
+                colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
+            session.push_lct_snow(step.clock.end_time, template, next, &output)?;
+            on_step(step, &output)
+        })?;
+        let files = session.finish()?;
+        ensure!(
+            session.remaining() == 0,
+            "the run ended with {} history record(s) still unwritten; the window and the \
+             schedule disagree",
+            session.remaining()
+        );
+        Ok(HistoryRunOutcome { steps, files })
     }
 
     /// Runs an assembled snow-bearing restart template through the POINT window.
@@ -936,6 +1010,111 @@ mod tests {
             .iter()
             .all(|value| value.is_finite()));
         assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    /// 带 history 的运行：一次真实的三小时窗口，产出按调度分组的一个文件。
+    #[test]
+    fn a_run_with_history_writes_the_scheduled_records() {
+        let root = directory("history-run");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        // 00:00 → 03:00，1800 s 一步：六步，HOURLY 下三条记录。
+        write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 3 * 3600);
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let template = assembled_template(&fixture);
+        let mut session = crate::history::HistorySession::new(
+            crate::history::point_dimensions(),
+            colm_hist::history::HistorySite {
+                latitude_degrees: 23.0,
+                longitude_degrees: 113.0,
+            },
+            colm_hist::schedule::SimulationWindow {
+                start_year: 2008,
+                start_julian_day: 1,
+                start_seconds: 0,
+                end_year: 2008,
+                end_julian_day: 1,
+                end_seconds: 3 * 3600,
+                timestep_seconds: 1800,
+            },
+            colm_hist::schedule::HistoryFrequency::Hourly,
+            colm_hist::schedule::HistoryGrouping::Month,
+            root.join("out"),
+            "CN-Cng",
+        )
+        .unwrap();
+
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut state = template.state();
+        let outcome = runtime
+            .run_restart_standard_lct_with_history(&template, &mut state, &mut session, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outcome.steps, 6);
+        assert_eq!(outcome.files.len(), 1);
+        assert_eq!(
+            outcome.files[0].file_name().unwrap(),
+            "CN-Cng_hist_2008-01.nc"
+        );
+        let file = netcdf::open(&outcome.files[0]).unwrap();
+        let times = file
+            .variable("time")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap();
+        // 三条记录，标签与黄金文件的头三个值逐位相同。
+        assert_eq!(times, vec![56_802_270, 56_802_330, 56_802_390]);
+        assert_eq!(session.remaining(), 0);
+    }
+
+    /// 运行比窗口短时必须在落盘前报错 —— 否则会写出一个满是零的记录文件，而它读起来
+    /// 与真实数据没有区别。
+    #[test]
+    fn a_run_that_stops_short_of_the_schedule_is_refused() {
+        let root = directory("history-short");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 1800);
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let template = assembled_template(&fixture);
+        // 调度按三小时开，运行只走一步。
+        let mut session = crate::history::HistorySession::new(
+            crate::history::point_dimensions(),
+            colm_hist::history::HistorySite {
+                latitude_degrees: 23.0,
+                longitude_degrees: 113.0,
+            },
+            colm_hist::schedule::SimulationWindow {
+                start_year: 2008,
+                start_julian_day: 1,
+                start_seconds: 0,
+                end_year: 2008,
+                end_julian_day: 1,
+                end_seconds: 3 * 3600,
+                timestep_seconds: 1800,
+            },
+            colm_hist::schedule::HistoryFrequency::Hourly,
+            colm_hist::schedule::HistoryGrouping::Month,
+            root.join("out"),
+            "CN-Cng",
+        )
+        .unwrap();
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut state = template.state();
+        let error = runtime
+            .run_restart_standard_lct_with_history(&template, &mut state, &mut session, |_, _| {
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("still unwritten"),
+            "{error:#}"
+        );
     }
 
     /// `DEF_SSP` 决定 2022 年之后用哪张 CO2 表；缺省与上游一致是 `off`。

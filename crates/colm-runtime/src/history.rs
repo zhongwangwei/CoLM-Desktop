@@ -398,6 +398,23 @@ fn tick_of(time: CalendarTime) -> Result<i64> {
     )
 }
 
+/// 一个 POINT 算例的 history 维度：一个 patch、CoLM 编译期的层级长度。
+///
+/// 这些长度由内核的编译期常量决定（`nl_soil = 10`、`maxsnl = -5`、`nvegwcs = 4`…），
+/// 不由算例文件携带。
+pub fn point_dimensions() -> HistoryDimensions {
+    HistoryDimensions {
+        patch: 1,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    }
+}
+
 #[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
