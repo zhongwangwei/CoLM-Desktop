@@ -57,7 +57,17 @@ pub const LCT_SURFACE_BUDGET_VARIABLES: [&str; 8] = [
     "sabvsun", "sabvsha", "rnet", "olrg", "emis", "trad", "fgrnd", "lfevpa",
 ];
 
-pub const LCT_ENERGY_VARIABLES: [&str; 4] = ["fsena", "fevpa", "etr", "sabg"];
+/// 本层能填的**能量侧通量**。
+///
+/// `fsenl`/`fseng` 与 `fevpl`/`fevpg` 是 `fsena`/`fevpa` 的**叶/地面拆分**，
+/// 上游的拆法来自 `MOD_LeafTemperature`：
+/// `fevpl = etr + evplwet`（内核对得上：`leaf_evaporation = transpiration + wet_evaporation`，
+/// 所以名字里的 "evaporation+transpiration from leaves" 不是笔误），
+/// `fevpg = rhoair*cgw*(qg-qaf)`。两者单独写出来的理由是它们各自能差出几十 W/m²，
+/// 而和（`fevpa`）却可能几乎抵消 —— 实测正是如此（两边 `fevpa` 都是 0，`lfevpa` 差 29）。
+pub const LCT_ENERGY_VARIABLES: [&str; 8] = [
+    "fsena", "fevpa", "etr", "sabg", "fsenl", "fseng", "fevpl", "fevpg",
+];
 
 /// 本层能填的**地表诊断**量，十三个，全部来自叶温/地表层求解的直接输出。
 ///
@@ -155,6 +165,12 @@ pub fn set_lct_energy_fluxes(
         ("fevpa", output.energy.total_evaporation_kg_m2_s),
         ("etr", output.energy.leaf.transpiration_kg_m2_s),
         ("sabg", output.energy.shortwave.ground_absorbed_w_m2),
+        ("fsenl", output.energy.leaf.leaf_sensible_heat_w_m2),
+        ("fseng", output.energy.leaf.ground_sensible_heat_w_m2),
+        // `leaf_evaporation` 在核心里就是 `transpiration + wet_evaporation`，
+        // 与上游 `fevpl = etr + evplwet` 同一个量，**不要再加一次 `etr`**。
+        ("fevpl", output.energy.leaf.leaf_evaporation_kg_m2_s),
+        ("fevpg", output.energy.leaf.ground_evaporation_kg_m2_s),
     ] {
         ensure!(
             value.is_finite(),
